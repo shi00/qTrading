@@ -377,10 +377,12 @@ def classify_error(e: Exception, context: str = "general") -> dict:
                     "code": "initdb_failed",
                     "message_key": "db_err_embedded_initdb_failed",
                 }
-            if "disk full" in error_str or "exit=15" in error_str:
+            if "resource preflight failed" in error_str or "exit=15" in error_str:
+                # exit 15 是资源预检通用码（磁盘空间/目录权限/文件系统/网盘同步路径/
+                # 密码文件权限），不能一概提示「磁盘空间不足」。
                 return {
-                    "code": "disk_space",
-                    "message_key": "common_err_disk_space",
+                    "code": "preflight_failed",
+                    "message_key": "db_err_embedded_preflight_failed",
                 }
             if "password error" in error_str or "exit=16" in error_str:
                 return {

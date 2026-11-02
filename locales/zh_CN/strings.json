@@ -752,6 +752,7 @@
     "db_err_sidecar_sha256_mismatch": "Sidecar 文件校验失败 (SHA256 不匹配)",
     "db_err_embedded_start_failed": "嵌入式数据库启动失败，请查看日志获取详细信息",
     "db_err_embedded_initdb_failed": "数据库初始化失败 (initdb 失败，请检查磁盘空间与目录权限)",
+    "db_err_embedded_preflight_failed": "嵌入式数据库资源预检失败（磁盘空间、目录权限、文件系统、网盘同步路径或密码文件权限），请查看日志并按提示处理后重试",
     "db_err_embedded_already_running": "实例已在运行 (另一个实例正使用相同的数据目录)",
     "db_err_embedded_password_error": "嵌入式数据库密码错误",
     "db_err_embedded_crashed": "Sidecar 进程崩溃，请查看 sidecar.log 日志文件",

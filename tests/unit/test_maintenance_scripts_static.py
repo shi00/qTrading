@@ -130,19 +130,21 @@ def test_dump_and_restore_usage_mentions_file_argument() -> None:
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("cmd", _USERNAME_COMMANDS)
 def test_bat_forwards_username_arg_for_auth_commands(cmd: str) -> None:
-    """dump / restore / maintenance-shell 分支必须透传 ``%USERNAME_ARG%``。"""
+    """dump / restore / maintenance-shell 分支必须按条件透传加引号的 ``--username``。"""
     block = _bat_block(_read(BAT_PATH), cmd)
-    assert "%USERNAME_ARG%" in block, f"{cmd} 分支未透传 %USERNAME_ARG%（非 postgres 用户名无法认证）"
+    assert 'if not "%PG_USERNAME%"=="postgres"' in block, f"{cmd} 分支缺少非默认用户名条件"
+    assert '--username "%PG_USERNAME%"' in block, f"{cmd} 分支未以加引号的 --username 透传用户名"
 
 
 @pytest.mark.parametrize("cmd", _USERNAME_COMMANDS)
 def test_sh_forwards_username_arg_for_auth_commands(cmd: str) -> None:
-    """dump / restore / maintenance-shell 分支必须透传 ``$USERNAME_ARG``。"""
-    lines = [
-        line.strip() for line in _read(SH_PATH).splitlines() if line.strip().startswith(f'exec "$SIDECAR_BIN" {cmd} ')
-    ]
+    """dump / restore / maintenance-shell 分支必须经 run_sidecar 以加引号 argv 透传用户名。"""
+    text = _read(SH_PATH)
+    assert "$USERNAME_ARG" not in text, "不得用未加引号的字符串变量构造参数（word-splitting / glob）"
+    lines = [line.strip() for line in text.splitlines() if line.strip().startswith(f"run_sidecar {cmd} ")]
     assert len(lines) == 1, f"{cmd} 分支应恰有一次 sidecar 调用，实际 {len(lines)}"
-    assert "$USERNAME_ARG" in lines[0], f"{cmd} 分支未透传 $USERNAME_ARG（非 postgres 用户名无法认证）"
+    assert 'exec "$SIDECAR_BIN" "$@" --username "$PG_USERNAME"' in text
+    assert 'exec "$SIDECAR_BIN" "$@"' in text
 
 
 def test_bat_username_defaults_to_postgres_without_flag() -> None:
@@ -150,8 +152,10 @@ def test_bat_username_defaults_to_postgres_without_flag() -> None:
     text = _read(BAT_PATH)
     assert 'set "PG_USERNAME=%QTRADING_PG_USERNAME%"' in text
     assert 'if not defined PG_USERNAME set "PG_USERNAME=postgres"' in text
-    assert 'set "USERNAME_ARG="' in text
-    assert 'if /i not "%PG_USERNAME%"=="postgres" set "USERNAME_ARG=--username %PG_USERNAME%"' in text
+    assert "%USERNAME_ARG%" not in text, "不得用未加引号的字符串变量构造参数（cmd 元字符 / 空格拆分）"
+    assert 'if not "%PG_USERNAME%"=="postgres"' in text
+    assert 'findstr /r /x "[A-Za-z_][A-Za-z0-9_]*"' in text
+    assert 'findstr /r /x "[A-Za-z_]"' in text
 
 
 def test_sh_username_env_and_prefix_flag_priority() -> None:
@@ -160,9 +164,11 @@ def test_sh_username_env_and_prefix_flag_priority() -> None:
     assert f'PG_USERNAME="${{{_PG_USERNAME_ENV}:-postgres}}"' in text
     assert 'if [ -z "$PG_USERNAME" ]; then' in text
     assert 'if [ "$PG_USERNAME" != "postgres" ]; then' in text
-    assert 'USERNAME_ARG="--username $PG_USERNAME"' in text
+    assert '--username "$PG_USERNAME"' in text
     assert "        --username)" in text
     assert "        --username=*)" in text
+    assert "[A-Za-z_] | [A-Za-z_][A-Za-z0-9_]*)" not in text
+    assert "'' | *[!A-Za-z0-9_]* | [!A-Za-z_]*)" in text
 
 
 def test_readme_documents_username_env_for_both_platforms() -> None:
@@ -197,7 +203,10 @@ def _run_sh(script: Path, args: list[str], tmp_path: Path, username: str | None)
 
 
 @pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
-@pytest.mark.parametrize("username, expect_flag", [(None, False), ("postgres", False), ("admin", True)])
+@pytest.mark.parametrize(
+    "username, expect_flag",
+    [(None, False), ("postgres", False), ("admin", True), ("app_admin", True), ("a", True)],
+)
 @pytest.mark.parametrize("cmd", _USERNAME_COMMANDS)
 def test_sh_executed_username_forwarding(tmp_path: Path, cmd: str, username: str | None, expect_flag: bool) -> None:
     """执行型断言：默认/显式 postgres 不传 ``--username``，自定义用户名透传且取值正确。"""
@@ -220,6 +229,30 @@ def test_sh_executed_username_forwarding(tmp_path: Path, cmd: str, username: str
 
 
 @pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+@pytest.mark.parametrize(
+    "username",
+    ["admin extra", "a*", "a;drop", "admin --target-data-dir /tmp/evil", "1abc", "a-b", "x" * 64],
+)
+def test_sh_rejects_invalid_username_before_sidecar(tmp_path: Path, username: str) -> None:
+    """非法用户名必须被白名单拒绝，且不得调用 sidecar（防止 word-splitting / 参数注入）。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, ["dump", str(tmp_path / "backup.dump")], tmp_path, username)
+    assert proc.returncode != 0
+    assert proc.stdout == "", "非法用户名不得调用 sidecar"
+    assert "invalid username" in proc.stderr
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+def test_sh_rejects_empty_prefixed_username(tmp_path: Path) -> None:
+    """``--username=`` 空值必须在调用 sidecar 前拒绝。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, ["--username=", "dump", str(tmp_path / "backup.dump")], tmp_path, None)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+    assert "must not be empty" in proc.stderr
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
 def test_sh_prefix_flag_overrides_env(tmp_path: Path) -> None:
     """前置参数 ``--username`` 优先于 ``QTRADING_PG_USERNAME``。"""
     script = _stage_script_tree(tmp_path)
@@ -228,3 +261,13 @@ def test_sh_prefix_flag_overrides_env(tmp_path: Path) -> None:
     received = proc.stdout.splitlines()
     assert received[0] == "dump"
     assert received[received.index("--username") + 1] == "dba"
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+def test_sh_prefix_flag_value_is_single_argv(tmp_path: Path) -> None:
+    """前置 ``--username`` 值含空格时作为单个 argv 透传，不得拆分/注入额外参数。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, ["--username", "admin extra", "dump", str(tmp_path / "backup.dump")], tmp_path, None)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+    assert "invalid username" in proc.stderr

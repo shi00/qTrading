@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const SETUP_COMPLETE_MARKER: &str = ".setup-complete";
+/// 所有权标记（D16-F01）：解压完成、rename 之前写入目标目录。`.setup-complete`
+/// 写入前崩溃的半安装据此证明归属，下次启动可安全重做；无该标记的非空目录一律拒绝清理。
+pub const SETUP_OWNED_MARKER: &str = ".setup-owned";
+const SETUP_OWNED_MARKER_CONTENT: &str = "qtrading-pg-sidecar install ownership marker\n";
 /// 解压期防 initdb 哨兵文件内容（crate `is_initialized()` 只看 postgresql.conf 存在性，
 /// 见 postgresql_embedded 0.22 postgresql.rs `fn is_initialized`）。
 const EXTRACTION_GUARD: &str = "# qtrading-pg-sidecar extraction guard\n";
@@ -191,8 +195,148 @@ fn marker_valid(marker: &Path, install_dir: &Path) -> bool {
     })
 }
 
+/// 目录是否为本程序创建的安装目录（存在任一所有权 marker）。
+fn has_owned_marker(dir: &Path) -> bool {
+    dir.join(SETUP_COMPLETE_MARKER).exists() || dir.join(SETUP_OWNED_MARKER).exists()
+}
+
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
+fn is_empty_dir(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+/// 非空且无所有权标记的 install dir 拒绝清理（D16-F01）。
+///
+/// 仅删除空目录（`remove_dir`，非递归）或带 `.setup-complete` / `.setup-owned` 的目录；
+/// 符号链接/文件及普通非空目录一律拒绝，避免把用户目录当作半安装整体删除。
+fn prepare_install_dir(install_dir: &Path) -> Result<(), u8> {
+    let meta = match std::fs::symlink_metadata(install_dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            eprintln!(
+                "[sidecar] install dir 无法读取 {}: {e}",
+                install_dir.display()
+            );
+            return Err(exit_codes::SETUP_FAILED);
+        }
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        eprintln!(
+            "[sidecar] install dir {} 不是真实目录（符号链接/普通文件），拒绝清理；\
+             请改用独立 --install-dir",
+            install_dir.display()
+        );
+        return Err(exit_codes::SETUP_FAILED);
+    }
+    if is_empty_dir(install_dir) {
+        std::fs::remove_dir(install_dir).map_err(|e| {
+            eprintln!(
+                "[sidecar] empty install dir cleanup failed {}: {e}",
+                install_dir.display()
+            );
+            exit_codes::SETUP_FAILED
+        })?;
+        return Ok(());
+    }
+    if !has_owned_marker(install_dir) {
+        eprintln!(
+            "[sidecar] install dir {} 非空且缺少 {} / {} 所有权标记，拒绝删除\
+             （该目录可能不是本程序创建）。请确认 --install-dir，或手动清理后重试。",
+            install_dir.display(),
+            SETUP_COMPLETE_MARKER,
+            SETUP_OWNED_MARKER
+        );
+        return Err(exit_codes::SETUP_FAILED);
+    }
+    tracing::warn!(
+        "install dir 缺少有效 {} 或关键工具，重做 setup: {}",
+        SETUP_COMPLETE_MARKER,
+        install_dir.display()
+    );
+    std::fs::remove_dir_all(install_dir).map_err(|e| {
+        eprintln!("[sidecar] half install dir cleanup failed: {e}");
+        exit_codes::SETUP_FAILED
+    })
+}
+
+/// tmp 残留名必须严格是 `<install-name>.tmp-<数字 pid>`，避免误删同前缀的用户目录。
+fn is_stale_tmp_name(name: &str, install_name: &str) -> bool {
+    name.strip_prefix(install_name)
+        .and_then(|rest| rest.strip_prefix(".tmp-"))
+        .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// tmp 目录归属：根目录或直接子目录（crate 的 `<version>` 层）带所有权 marker。
+fn tmp_dir_is_owned(path: &Path) -> bool {
+    if has_owned_marker(path) {
+        return true;
+    }
+    let Ok(read) = std::fs::read_dir(path) else {
+        return false;
+    };
+    read.filter_map(|e| e.ok()).any(|entry| {
+        let child = entry.path();
+        is_real_dir(&child) && has_owned_marker(&child)
+    })
+}
+
+/// 清理历史解压残留：只清理名字严格匹配且可证明由本程序创建的目录，
+/// 不跟随符号链接；无法证明归属的目录保留（下次运行也不删除）。
+fn cleanup_stale_tmp_dirs(install_dir: &Path) {
+    let install_name = install_dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    if install_name.is_empty() {
+        return;
+    }
+    let Some(parent) = install_dir.parent() else {
+        return;
+    };
+    let Ok(read) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in read.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_stale_tmp_name(&name, &install_name) {
+            continue;
+        }
+        let path = entry.path();
+        if !is_real_dir(&path) {
+            tracing::warn!(
+                "保留非目录的 setup tmp 残留（可能是别名）：{}",
+                path.display()
+            );
+            continue;
+        }
+        if is_empty_dir(&path) {
+            let _ = std::fs::remove_dir(&path);
+        } else if tmp_dir_is_owned(&path) {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            tracing::warn!(
+                "保留无法证明归属的 setup tmp 目录（未删除）：{}",
+                path.display()
+            );
+        }
+    }
+}
+
 /// 确保 bundled binaries 可用（原子解压 + marker）。失败映射 exit 10。
+///
+/// 进入任何清理前先校验布局路径关系（D16-F01）；只清理可证明归属本程序的
+/// install/tmp 目录。
 pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result<(), u8> {
+    if let Err(conflict) = layout.validate() {
+        eprintln!("[sidecar] 路径配置冲突：{conflict}");
+        return Err(exit_codes::ARGUMENT_ERROR);
+    }
+
     let marker = layout.install_dir.join(SETUP_COMPLETE_MARKER);
     if marker.exists()
         && marker_valid(&marker, &layout.install_dir)
@@ -201,40 +345,28 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
         return Ok(());
     }
 
-    // 清理历史 tmp 目录（含其他 pid 残留）
+    // 清理历史 tmp 目录（含其他 pid 残留；仅限可证明归属本程序的目录）
+    cleanup_stale_tmp_dirs(&layout.install_dir);
+
+    // 无 marker / 工具不全的 install dir = 半截状态；仅当带所有权标记时整体重做
+    prepare_install_dir(&layout.install_dir)?;
+
     let install_name = layout
         .install_dir
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    if let Some(parent) = layout.install_dir.parent() {
-        if let Ok(read) = std::fs::read_dir(parent) {
-            for entry in read.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with(&format!("{install_name}.tmp-")) {
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
-            }
-        }
-    }
-
-    // 无 marker / 工具不全的 install dir = 半截状态，禁止继续，整体重做
-    if layout.install_dir.exists() {
-        tracing::warn!(
-            "install dir 缺少 {} 或关键工具，重做 setup: {}",
-            SETUP_COMPLETE_MARKER,
-            layout.install_dir.display()
-        );
-        std::fs::remove_dir_all(&layout.install_dir).map_err(|e| {
-            eprintln!("[sidecar] half install dir cleanup failed: {e}");
-            exit_codes::SETUP_FAILED
-        })?;
-    }
-
     let tmp = layout
         .install_dir
         .with_file_name(format!("{install_name}.tmp-{}", std::process::id()));
+    if std::fs::symlink_metadata(&tmp).is_ok() {
+        eprintln!(
+            "[sidecar] tmp 解压目录已存在且无法安全清理，拒绝覆盖：{}",
+            tmp.display()
+        );
+        return Err(exit_codes::SETUP_FAILED);
+    }
     progress("extracting postgresql binaries");
 
     // crate 只负责解压；用哨兵 postgresql.conf 让其 is_initialized() 短路，跳过其 initdb
@@ -279,6 +411,17 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
             "[sidecar] extraction incomplete, missing tools: {}",
             missing.join(", ")
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(exit_codes::SETUP_FAILED);
+    }
+
+    // rename 前写入所有权 marker：rename 后、`.setup-complete` 写入前崩溃时，
+    // 下次启动仍能证明该半安装属于本程序并安全重做（D16-F01）。
+    if let Err(e) = std::fs::write(
+        extracted.join(SETUP_OWNED_MARKER),
+        SETUP_OWNED_MARKER_CONTENT,
+    ) {
+        eprintln!("[sidecar] install ownership marker write failed: {e}");
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(exit_codes::SETUP_FAILED);
     }
@@ -625,6 +768,137 @@ mod tests {
         assert!(!marker_valid(&marker, &dir));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_install_dir_refuses_non_owned_nonempty() {
+        let root = unique_tmp("owned-refuse");
+        let install = root.join("install");
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        std::fs::write(install.join("keep.txt"), b"user data").unwrap();
+        std::fs::write(install.join("bin").join("initdb"), b"partial").unwrap();
+        let before = std::fs::read(install.join("keep.txt")).unwrap();
+
+        assert_eq!(
+            prepare_install_dir(&install),
+            Err(exit_codes::SETUP_FAILED),
+            "非空且无所有权 marker 的目录必须拒绝清理"
+        );
+        assert_eq!(
+            std::fs::read(install.join("keep.txt")).unwrap(),
+            before,
+            "拒绝后目录内容不得改变"
+        );
+        assert!(!install.join(SETUP_OWNED_MARKER).exists());
+        assert!(!install.join(SETUP_COMPLETE_MARKER).exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_install_dir_removes_empty_or_owned() {
+        let root = unique_tmp("owned-remove");
+
+        let empty = root.join("empty-install");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(prepare_install_dir(&empty), Ok(()));
+        assert!(!empty.exists(), "空目录应被移除以便原子 rename");
+
+        let owned = root.join("owned-install");
+        std::fs::create_dir_all(owned.join("bin")).unwrap();
+        std::fs::write(owned.join("bin").join("initdb"), b"partial").unwrap();
+        std::fs::write(owned.join(SETUP_OWNED_MARKER), b"owned\n").unwrap();
+        assert_eq!(prepare_install_dir(&owned), Ok(()));
+        assert!(!owned.exists(), "带 .setup-owned 的半安装应自动重做");
+
+        // `.setup-complete` 存在但内容/工具校验失败（版本升级/篡改）→ 仍属本程序，允许重做
+        let complete = root.join("complete-install");
+        std::fs::create_dir_all(&complete).unwrap();
+        std::fs::write(complete.join(SETUP_COMPLETE_MARKER), b"{not-json}").unwrap();
+        assert_eq!(prepare_install_dir(&complete), Ok(()));
+        assert!(!complete.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_install_dir_refuses_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_tmp("owned-symlink");
+        let target = root.join("user-dir");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"user data").unwrap();
+        let link = root.join("install-link");
+        symlink(&target, &link).unwrap();
+
+        assert_eq!(prepare_install_dir(&link), Err(exit_codes::SETUP_FAILED));
+        assert!(
+            target.join("keep.txt").exists(),
+            "符号链接目标目录内容不得被删除"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "链接本身也不应被清理"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stale_tmp_name_requires_numeric_suffix() {
+        assert!(is_stale_tmp_name("install.tmp-123", "install"));
+        assert!(is_stale_tmp_name("install.tmp-0", "install"));
+        for bad in [
+            "install.tmp-",
+            "install.tmp-12x",
+            "install.tmp-123.bak",
+            "installer.tmp-123",
+            "install.old-123",
+        ] {
+            assert!(!is_stale_tmp_name(bad, "install"), "{bad} 不应被清理");
+        }
+    }
+
+    #[test]
+    fn cleanup_stale_tmp_dirs_respects_ownership_and_names() {
+        let root = unique_tmp("tmp-cleanup");
+        let install = root.join("install");
+        std::fs::create_dir_all(&install).unwrap();
+
+        let owned = root.join("install.tmp-111");
+        std::fs::create_dir_all(owned.join("16.15.0")).unwrap();
+        std::fs::write(owned.join("16.15.0").join(SETUP_OWNED_MARKER), b"owned\n").unwrap();
+        std::fs::write(owned.join("junk"), b"x").unwrap();
+
+        let empty = root.join("install.tmp-222");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let foreign = root.join("install.tmp-333");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("keep.txt"), b"user data").unwrap();
+
+        let wrong_name = root.join("install.tmp-abc");
+        std::fs::create_dir_all(&wrong_name).unwrap();
+        std::fs::write(wrong_name.join("keep.txt"), b"user data").unwrap();
+
+        cleanup_stale_tmp_dirs(&install);
+
+        assert!(!owned.exists(), "带所有权 marker 的 tmp 应清理");
+        assert!(!empty.exists(), "空 tmp 目录应清理");
+        assert!(
+            foreign.join("keep.txt").exists(),
+            "无所有权 marker 的 tmp 目录不得删除"
+        );
+        assert!(
+            wrong_name.join("keep.txt").exists(),
+            "非数字 pid 后缀的目录不得删除"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

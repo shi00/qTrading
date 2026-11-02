@@ -350,7 +350,9 @@ class TestClassifyErrorDBContext:
             classify_error(EmbeddedPostgresStartError("initdb failed (exit=11)"), context="db")["code"]
             == "initdb_failed"
         )
-        assert classify_error(EmbeddedPostgresStartError("disk full (exit=15)"), context="db")["code"] == "disk_space"
+        preflight = classify_error(EmbeddedPostgresStartError("resource preflight failed (exit=15)"), context="db")
+        assert preflight["code"] == "preflight_failed"
+        assert preflight["message_key"] == "db_err_embedded_preflight_failed"
         assert (
             classify_error(EmbeddedPostgresStartError("password error (exit=16)"), context="db")["code"]
             == "password_error"
