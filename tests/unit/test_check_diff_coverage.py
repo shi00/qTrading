@@ -21,10 +21,12 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_diff_coverage import (  # noqa: E402 - sys.path 注入后导入
+    DiffCoverageInputError,
     _is_source_file,
     compute_diff_coverage,
     get_diff_added_lines,
     load_coverage,
+    main,
     parse_diff,
 )
 
@@ -203,6 +205,22 @@ class TestLoadCoverage:
         result = load_coverage(cov_file)
         assert result["app/foo.py"]["executed"] == {1, 2}
         assert result["app/foo.py"]["statements"] == {1, 2}
+
+    def test_missing_files_field_raises(self, tmp_path: Path):
+        """coverage.json 缺少合法的 files 字段 → fail-closed，不静默按空覆盖率通过。"""
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(json.dumps({"totals": {}}), encoding="utf-8")
+
+        with pytest.raises(DiffCoverageInputError, match="files"):
+            load_coverage(cov_file)
+
+    def test_non_object_coverage_raises(self, tmp_path: Path):
+        """coverage.json 顶层不是对象 → fail-closed。"""
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(json.dumps([]), encoding="utf-8")
+
+        with pytest.raises(DiffCoverageInputError, match="files"):
+            load_coverage(cov_file)
 
 
 # ============================================================================
@@ -473,10 +491,11 @@ class TestGetDiffAddedLinesNoDegradation:
         assert calls[-1][-1] == "HEAD"
         assert result == {"data/foo.py": [2]}
 
-    def test_merge_base_unavailable_non_degraded(self, monkeypatch):
-        """merge-base 不可用 → 返回空 dict（非两点退化），由 main() 按 advisory 处理。
+    def test_merge_base_unavailable_fails_closed(self, monkeypatch):
+        """merge-base 不可用 → 抛 DiffCoverageInputError（fail-closed），不得返回空 dict 静默通过。
 
-        这是响应浅克隆缺陷的核心：绝不把 base 侧并发改动计入本分支变更行。
+        这是响应浅克隆缺陷的核心：绝不把 base 侧并发改动计入本分支变更行，
+        也不把「无法确定 merge-base」伪装成「无源码变更」。
         """
         import check_diff_coverage as m
 
@@ -486,7 +505,21 @@ class TestGetDiffAddedLinesNoDegradation:
             raise AssertionError(f"merge-base 失败后不应再执行 diff 命令: {cmd}")
 
         monkeypatch.setattr(m.subprocess, "run", fake_run)
-        assert get_diff_added_lines("origin/main") == {}
+        with pytest.raises(DiffCoverageInputError, match="merge-base"):
+            get_diff_added_lines("origin/main")
+
+    def test_git_diff_failure_fails_closed(self, monkeypatch):
+        """git diff 非零退出 → 抛 DiffCoverageInputError，不得静默返回空 dict。"""
+        import check_diff_coverage as m
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1] == "merge-base":
+                return _FakeResult(0, "mb1111\n")
+            return _FakeResult(128, "", "fatal: bad revision")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        with pytest.raises(DiffCoverageInputError, match="git diff 失败"):
+            get_diff_added_lines("origin/main")
 
 
 # ============================================================================
@@ -531,3 +564,113 @@ class TestGetDiffAddedLinesNonUtf8:
             "+value = 1\n"
         )
         assert parse_diff(diff) == {"data/foo.py": [2, 3]}
+
+
+# ============================================================================
+# main: 无法确定覆盖率输入时 fail-closed（exit 2）
+# ============================================================================
+
+
+def _invoke_main(monkeypatch, *args: str) -> int:
+    """以给定 CLI 参数调用 main()，隔离真实 sys.argv。"""
+    monkeypatch.setattr(sys, "argv", ["check_diff_coverage.py", *args])
+    return main()
+
+
+class TestMainFailClosed:
+    """main: 覆盖率输入不可确定时必须返回 2，不得静默按通过处理。"""
+
+    def test_missing_coverage_file_returns_2(self, monkeypatch, tmp_path: Path):
+        """coverage 文件缺失且有源码变更 → exit 2。"""
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: {"app/foo.py": [1]})
+        missing = tmp_path / "coverage.json"
+        assert _invoke_main(monkeypatch, "--coverage-file", str(missing)) == 2
+
+    def test_coverage_path_is_directory_returns_2(self, monkeypatch, tmp_path: Path):
+        """coverage 路径是目录（不可读为文件）→ exit 2。"""
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: {"app/foo.py": [1]})
+        assert _invoke_main(monkeypatch, "--coverage-file", str(tmp_path)) == 2
+
+    def test_corrupt_coverage_json_returns_2(self, monkeypatch, tmp_path: Path):
+        """coverage 文件不是合法 JSON → exit 2，而不是抛出未捕获异常或放行。"""
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: {"app/foo.py": [1]})
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text("{not-json", encoding="utf-8")
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
+
+    def test_merge_base_unavailable_returns_2(self, monkeypatch):
+        """merge-base 不可用 → exit 2（不得被误判为「无源码变更」）。"""
+        import check_diff_coverage as m
+
+        def raise_input_error(base: str) -> dict[str, list[int]]:
+            raise DiffCoverageInputError("无法确定 merge-base")
+
+        monkeypatch.setattr(m, "get_diff_added_lines", raise_input_error)
+        assert _invoke_main(monkeypatch) == 2
+
+    def test_git_diff_failure_returns_2(self, monkeypatch):
+        """git diff 获取失败 → exit 2。"""
+        import check_diff_coverage as m
+
+        def raise_input_error(base: str) -> dict[str, list[int]]:
+            raise DiffCoverageInputError("git diff 失败")
+
+        monkeypatch.setattr(m, "get_diff_added_lines", raise_input_error)
+        assert _invoke_main(monkeypatch) == 2
+
+    def test_git_unavailable_returns_2(self, monkeypatch):
+        """git 命令无法执行（非 git 上下文/缺少 git）→ exit 2。"""
+        import check_diff_coverage as m
+
+        def raise_os_error(base: str) -> dict[str, list[int]]:
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(m, "get_diff_added_lines", raise_os_error)
+        assert _invoke_main(monkeypatch) == 2
+
+    def test_empty_coverage_data_returns_2(self, monkeypatch, tmp_path: Path):
+        """coverage 文件不含任何文件数据（无法确定覆盖率输入）→ exit 2。"""
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: {"app/foo.py": [1]})
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(json.dumps({"files": {}}), encoding="utf-8")
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
+
+    def test_no_source_changes_returns_0_without_coverage(self, monkeypatch, tmp_path: Path):
+        """无源码变更行时不需要 coverage 输入 → exit 0（保留原「跳过」语义）。"""
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: {})
+        missing = tmp_path / "coverage.json"
+        assert _invoke_main(monkeypatch, "--coverage-file", str(missing)) == 0
+
+    def test_normal_coverage_pass_returns_0(self, monkeypatch, tmp_path: Path):
+        """正常输入且覆盖率达标 → exit 0。"""
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: {"app/foo.py": [1]})
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(
+            json.dumps({"files": {"app/foo.py": {"executed_lines": [1], "missing_lines": []}}}),
+            encoding="utf-8",
+        )
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 0
+
+    def test_strict_below_threshold_returns_1(self, monkeypatch, tmp_path: Path):
+        """--strict 且覆盖率低于阈值 → exit 1（既有阈值语义不变）。"""
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: {"app/foo.py": [1, 2]})
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(
+            json.dumps({"files": {"app/foo.py": {"executed_lines": [1], "missing_lines": [2]}}}),
+            encoding="utf-8",
+        )
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict", "--threshold", "80") == 1

@@ -1,7 +1,7 @@
 """CI 健康度脚本：计算 PR 变更行的覆盖率（diff-coverage）。
 
 对 git diff 检出的新增/修改行计算覆盖率，输出未覆盖行列表。
-默认 advisory 模式（exit 0），加 --strict 才在低于阈值时 exit 1。
+输入可计算时默认 advisory 模式（exit 0），加 --strict 才在低于阈值时 exit 1。
 
 用法：
     python scripts/check_diff_coverage.py
@@ -10,8 +10,10 @@
     python scripts/check_diff_coverage.py --strict --threshold 80
 
 退出码：
-    0: advisory 模式（默认），或覆盖率达标
+    0: advisory 模式（默认）且覆盖率达标，或无源码变更行
     1: --strict 模式下覆盖率低于阈值
+    2: 无法确定覆盖率输入（coverage 文件缺失/不可读/非法、merge-base 不可用、
+       git diff 失败）——fail-closed，不得静默通过
 """
 
 import argparse
@@ -29,6 +31,10 @@ SOURCE_DIRS = frozenset(("core", "data", "services", "strategies", "utils", "ui"
 SOURCE_FILES = frozenset(("config.py", "main.py"))
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
+
+
+class DiffCoverageInputError(RuntimeError):
+    """无法确定 diff-coverage 输入（fail-closed 信号），由 main() 映射为 exit 2。"""
 
 
 def _is_source_file(path: str) -> bool:
@@ -96,8 +102,11 @@ def get_diff_added_lines(base: str) -> dict[str, list[int]]:
     merge_base = _resolve_merge_base(base)
     if not merge_base:
         # 无法找到共同祖先（浅克隆/无 merge-base）：三点语义不可用。
-        # 不静默退化为两点（会把 base 侧改动误算进来），直接视为无量纲失败由 main() 以 advisory 处理。
-        return {}
+        # 不静默退化为两点（会把 base 侧改动误算进来），且返回空 dict 会被误判为
+        # 「无源码变更」而放行，故此处 fail-closed。
+        raise DiffCoverageInputError(
+            f"无法确定 merge-base（base={base}，可能为浅克隆、无共同祖先或非 git 仓库），无法计算 diff-coverage"
+        )
     # diff 可能含非 UTF-8 字节（如 GB18030 编码的 HTML fixture 快照），
     # 按 UTF-8 宽松解码：非法字节以替换符兜底。本函数只取 +++/@@ 等 ASCII 结构行，
     # 内容行的替换符不影响行号解析，避免整步因 UnicodeDecodeError 失败。
@@ -109,7 +118,7 @@ def get_diff_added_lines(base: str) -> dict[str, list[int]]:
         cwd=ROOT,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"git diff 失败（base={base}）: {result.stderr.strip()}")
+        raise DiffCoverageInputError(f"git diff 失败（base={base}）: {result.stderr.strip()}")
     return parse_diff(result.stdout)
 
 
@@ -124,6 +133,8 @@ def load_coverage(coverage_file: Path) -> dict[str, dict[str, set[int]]]:
     """
     with open(coverage_file, encoding="utf-8") as f:
         cov = json.load(f)
+    if not isinstance(cov, dict) or not isinstance(cov.get("files"), dict):
+        raise DiffCoverageInputError(f"coverage 文件缺少合法的 files 字段（无法确定覆盖率输入）: {coverage_file}")
     result: dict[str, dict[str, set[int]]] = {}
     for fp, d in cov.get("files", {}).items():
         # 统一为 POSIX 风格路径（正斜杠），与 git diff 输出一致
@@ -177,21 +188,37 @@ def main():
     args = parser.parse_args()
 
     coverage_path = ROOT / args.coverage_file
-    if not coverage_path.exists():
-        print(f"⚠ coverage 文件不存在: {coverage_path}（advisory 模式，跳过）")
-        return 0
 
     try:
         diff_lines = get_diff_added_lines(args.base)
-    except RuntimeError as e:
-        print(f"⚠ {e}（advisory 模式，跳过）")
-        return 0
+    except DiffCoverageInputError as e:
+        print(f"✗ {e}（fail-closed，exit 2）")
+        return 2
+    except OSError as e:
+        print(f"✗ 无法执行 git 命令（base={args.base}）: {e}（fail-closed，exit 2）")
+        return 2
 
     if not diff_lines:
         print("✓ 无源码变更行，跳过 diff-coverage 检查")
         return 0
 
-    coverage = load_coverage(coverage_path)
+    if not coverage_path.is_file():
+        print(f"✗ coverage 文件不存在或不可读: {coverage_path}（fail-closed，exit 2）")
+        return 2
+
+    try:
+        coverage = load_coverage(coverage_path)
+    except DiffCoverageInputError as e:
+        print(f"✗ {e}（fail-closed，exit 2）")
+        return 2
+    except (OSError, ValueError) as e:
+        print(f"✗ coverage 文件不可读或不是合法 JSON: {coverage_path}: {e}（fail-closed，exit 2）")
+        return 2
+
+    if not coverage:
+        print(f"✗ coverage 文件不含任何覆盖率数据: {coverage_path}（fail-closed，exit 2）")
+        return 2
+
     covered, total, uncovered_by_file = compute_diff_coverage(diff_lines, coverage)
 
     pct = (covered / total * 100) if total > 0 else 100.0
