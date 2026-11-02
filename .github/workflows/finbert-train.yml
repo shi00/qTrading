@@ -595,9 +595,10 @@ jobs:
 
   # job2：发布 Release（FT-06 最小权限拆分）。仅此 job 授予 contents: write；
   # 不 checkout 仓库、不执行仓库脚本——只消费 job1 上传的发布 artifact：
-  # 下载 → sha256sum -c 本地复验 → gh release view（已存在即拒绝覆盖并失败，
-  # FT-05 版本不可变）/ create。Gate 失败时 job1 结果非 success → 本 job 跳过，
-  # 不会以未校验产物发布。
+  # 下载 → sha256sum -c 本地复验 → draft-first 发布（同 tag 已有正式 Release
+  # 即拒绝；已有 draft 复用并覆盖资产；否则创建 draft）→ 服务端资产集/digest
+  # 复验 → PATCH draft=false 发布。Gate 失败时 job1 结果非 success → 本 job
+  # 跳过，不会以未校验产物发布。
   publish-release:
     name: Publish Release
     runs-on: ubuntu-latest
@@ -629,31 +630,144 @@ jobs:
           cd release-assets
           sha256sum -c SHA256SUMS.txt
 
-      # Gate 已通过（job 级 if 保证），此处直接发布。
-      # 同 tag 重跑拒绝覆盖（FT-05）：model_version 为不可变发布标识，Release
-      # （tag）已存在时拒绝发布并失败——--clobber 部分更新（只换资产二进制、
-      # 不换 note）会使 lineage（note ↔ 资产 digest ↔ 运行参数）静默错位；
+      # Gate 已通过（job 级 if 保证），此处按 draft-first 流程发布：
+      # 同 tag 已有正式 Release → 拒绝（FT-05：model_version 不可变；已公开资产的
+      # 摘要可能已被外部引用，不得静默替换）；同 tag 已有 draft → 复用并覆盖同名
+      # 资产（draft 对外不可见，重跑恢复安全）；无 Release → 先创建 draft（对外
+      # 不可见）→ 上传资产 → 服务端资产集 / digest 复验 → PATCH draft=false 发布。
+      # 任一步失败时 Release 保持 draft，不会留下公开但资产不完整的正式 Release。
+      # tag 身份锁定：已有 tag 必须 peel 到本次运行的 GITHUB_SHA；--target 仅在
+      # tag 尚未创建（draft 发布时创建）时决定目标 commit，指向别处即 fail-closed。
       # 新结果必须提升 model_version 后以新 tag 发布（note 本就按版本生成）。
-      # 若首次发布中断（tag 已建而资产不完整），须人工删除该 Release 并留痕
-      # 后重跑（错误信息中有指引）。
       # tag `finbert-gguf-v*` 不以 v 开头，不匹配主 CI `v*.*.*` 过滤（见文件头注释）。
       - name: Publish release (finbert-gguf-v*)
         env:
           RELEASE_TAG: ${{ needs.train-export-gate.outputs.release_tag }}
         run: |
           set -euo pipefail
+          REPO="$GITHUB_REPOSITORY"
+          TAG="$RELEASE_TAG"
           ASSETS=(
             release-assets/finbert2-news-f16.gguf
             release-assets/head.npz
             release-assets/SHA256SUMS.txt
             release-assets/fingerprint.json
           )
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "::error::$RELEASE_TAG 已存在（同 model_version 已发布）——拒绝覆盖，请提升 model_version 后重跑；若系首次发布中断致资产不完整，请人工删除该 Release（留痕）后重跑" >&2
+
+          # 同 tag 的全部 Release 身份（分页；--jq 按页输出 id+draft，shell 逐条判定）：
+          # 任一条为正式 Release → 拒绝（防「旧正式版 + 新 draft 同名」时误选 draft
+          # 覆盖已公开资产）；全部为 draft 时复用首个 id。set -o pipefail 已开启：
+          # gh 查询失败会使赋值失败，不会把故障静默当作「无 Release」。
+          release_rows=$(gh api --paginate "repos/${REPO}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | \"\\(.id) \\(.draft)\"")
+          release_id=""
+          if [ -n "$release_rows" ]; then
+            while read -r rid rdraft; do
+              [ -n "$rid" ] || continue
+              if [ "$rdraft" != "true" ]; then
+                echo "::error::${TAG} 已存在正式 Release（同 model_version 已发布）——拒绝覆盖，请提升 model_version 后重跑；若确需替换，须人工删除该 Release（留痕）后重跑" >&2
+                exit 1
+              fi
+              if [ -z "$release_id" ]; then
+                release_id="$rid"
+              fi
+            done <<<"$release_rows"
+            echo "复用既有 draft Release ${TAG}（id=${release_id}）"
+          fi
+
+          # tag 身份锁定（fail-closed）：tag 不存在 = 尚未创建（draft 发布时按
+          # --target 创建）；tag 存在 = 必须解析到触发本次运行的 commit。
+          # annotated tag 的 ref 指向 tag 对象（type=tag），经 git/tags/{sha} 逐层
+          # peel 到 commit；解析失败 / 非 commit / sha 不符 → 拒绝发布。
+          ref_err=$(mktemp)
+          if ref_json=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" 2>"$ref_err"); then
+            obj_type=$(jq -r '.object.type' <<<"$ref_json")
+            obj_sha=$(jq -r '.object.sha' <<<"$ref_json")
+            depth=0
+            while [ "$obj_type" = "tag" ]; do
+              depth=$((depth + 1))
+              if [ "$depth" -gt 5 ]; then
+                echo "::error::tag ${TAG} 嵌套过深或无法 peel 到 commit，拒绝发布" >&2
+                exit 1
+              fi
+              tag_obj=$(gh api "repos/${REPO}/git/tags/${obj_sha}")
+              obj_type=$(jq -r '.object.type' <<<"$tag_obj")
+              obj_sha=$(jq -r '.object.sha' <<<"$tag_obj")
+            done
+            if [ "$obj_type" != "commit" ] || [ "$obj_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::tag ${TAG} 指向 ${obj_type} ${obj_sha}，本次运行提交为 ${GITHUB_SHA}——tag 身份不符，拒绝发布" >&2
+              exit 1
+            fi
+            echo "tag ${TAG} 已锁定到本次运行提交 ${GITHUB_SHA}"
+          else
+            if ! grep -q "HTTP 404" "$ref_err"; then
+              echo "::error::查询远端 tag ${TAG} 失败，无法确认 tag 身份，fail-closed" >&2
+              cat "$ref_err" >&2
+              exit 1
+            fi
+            echo "tag ${TAG} 尚不存在，将由 draft 发布时创建于 ${GITHUB_SHA}"
+          fi
+
+          if [ -z "$release_id" ]; then
+            # draft 对外不可见（仅写权限可见），失败时不会留下公开的正式 Release。
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --repo "$REPO" \
+              --title "finbert-gguf-v${{ needs.train-export-gate.outputs.model_version }}" \
+              --notes-file release-assets/release_note.md \
+              --draft \
+              --target "$GITHUB_SHA"
+            release_id=$(gh api --paginate "repos/${REPO}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${TAG}\") | .id" \
+              | awk '!seen && NF { print; seen = 1 }')
+            if [ -z "$release_id" ]; then
+              echo "::error::draft Release ${TAG} 创建后无法定位 id，fail-closed" >&2
+              exit 1
+            fi
+          else
+            # draft 非公开：覆盖同名资产安全（中断重跑恢复）；同时刷新 target 与
+            # note，防旧 draft 的 target_commitish / lineage 停留在上一次运行。
+            gh release upload "$TAG" "${ASSETS[@]}" --repo "$REPO" --clobber
+            gh api -X PATCH "repos/${REPO}/releases/${release_id}" \
+              -F body=@release-assets/release_note.md \
+              -f "target_commitish=${GITHUB_SHA}" >/dev/null
+          fi
+
+          # 发布前服务端复验（fail-closed）：draft 状态、tag 名、资产集（恰 4 个）
+          # 与服务端 digest 必须与本地字节一致；任一项不符则保持 draft、不发布。
+          release_json=$(gh api "repos/${REPO}/releases/${release_id}")
+          if [ "$(jq -r '.draft' <<<"$release_json")" != "true" ]; then
+            echo "::error::Release ${TAG} 在发布前不再是 draft，拒绝继续" >&2
             exit 1
           fi
-          gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "finbert-gguf-v${{ needs.train-export-gate.outputs.model_version }}" \
-            --notes-file release-assets/release_note.md \
-            --target "$GITHUB_SHA"
+          actual_tag=$(jq -r '.tag_name' <<<"$release_json")
+          if [ "$actual_tag" != "$TAG" ]; then
+            echo "::error::Release tag ${actual_tag} 与期望 ${TAG} 不符" >&2
+            exit 1
+          fi
+          expected_names=$(for asset in "${ASSETS[@]}"; do basename "$asset"; done | sort)
+          actual_names=$(jq -r '.assets[].name' <<<"$release_json" | sort)
+          if [ "$actual_names" != "$expected_names" ]; then
+            echo "::error::draft 资产集不符（期望 4 个资产）" >&2
+            diff <(printf '%s\n' "$expected_names") <(printf '%s\n' "$actual_names") || true
+            exit 1
+          fi
+          for asset in "${ASSETS[@]}"; do
+            name=$(basename "$asset")
+            remote_digest=$(jq -r --arg name "$name" \
+              '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json")
+            if [ -z "$remote_digest" ]; then
+              echo "::error::asset ${name} 缺少服务端 digest，无法校验完整性" >&2
+              exit 1
+            fi
+            local_digest="sha256:$(sha256sum "$asset" | awk '{print $1}')"
+            if [ "$remote_digest" != "$local_digest" ]; then
+              echo "::error::asset ${name} digest 不符: remote=${remote_digest} local=${local_digest}" >&2
+              exit 1
+            fi
+          done
+          echo "draft ${TAG} 服务端复验通过（4 个资产，tag / digest 全部一致）"
+
+          # 原子发布：-F 为类型化字段（布尔）；-f 会发送字符串 "false"（GitHub
+          # 视作真值，等于未按预期生效）。失败时 Release 仍是 draft，外部不可见。
+          gh api -X PATCH "repos/${REPO}/releases/${release_id}" -F draft=false >/dev/null
+          echo "Release ${TAG} 已发布"

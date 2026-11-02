@@ -7,10 +7,10 @@
   train-export-gate 结果为 success 时运行（Gate 失败 → 发布 job 跳过）；
 - 发布 job 只消费 job1 上传的发布 artifact（最小文件集），下载后先
   ``sha256sum -c`` 本地复验再发布，不 checkout、不执行仓库脚本；
-- 发布步骤版本不可变（FT-05）：Release tag 已存在时拒绝发布并失败
-  （exit 1 + 明确指引），不提供 ``--clobber`` 部分更新（只换资产二进制、
-  不换 note 会令 lineage 静默错位）；``gh release create`` 仅在 tag
-  不存在分支可达。
+- 发布步骤版本不可变（FT-05）与 draft-first（D18-R02）：同 tag 已有**正式**
+  Release 时拒绝发布并失败（exit 1 + 明确指引）；已有 draft 可复用并覆盖同名
+  资产（draft 对外不可见，安全幂等）；无 Release 先创建 draft，服务端资产集/
+  digest 复验通过后才以 PATCH draft=false 发布。
 
 依赖与环境基线（FT-08，P3）：
 - 训练依赖安装步骤全部精确 pin（``name==version``），禁止范围约束
@@ -261,39 +261,96 @@ def test_timeout_budgets_preserved(workflow: dict) -> None:
     assert jobs[JOB2_NAME]["timeout-minutes"] == 10
 
 
-def test_publish_step_rejects_existing_release_tag(workflow: dict) -> None:
-    # FT-05：同 tag 重跑拒绝覆盖——model_version 为不可变发布标识。
-    # Release（tag）已存在时必须显式失败（exit 1 + 指引提升 model_version），
-    # 防止 --clobber 部分更新令 lineage（note ↔ 资产 digest ↔ 运行参数）错位。
+def test_publish_step_rejects_existing_published_release(workflow: dict) -> None:
+    # FT-05 / D18-R02：同 tag 已有**正式** Release 时必须显式失败（exit 1 +
+    # 指引提升 model_version），不得改写已公开资产（摘要可能已被外部引用）。
+    # draft（未公开）不在拒绝范围：重跑复用并覆盖 draft 资产是安全幂等路径。
     job2 = workflow["jobs"][JOB2_NAME]
     publish = next(s for s in job2["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)")
     run = publish["run"]
-    # tag 已存在检测入口（gh release view 命中即拒绝）
-    assert "gh release view" in run
+    # Release 定位走分页列表（draft 无法经 /releases/tags 查询）
+    assert "--paginate" in run
+    assert "releases?per_page=100" in run
+    assert ".draft" in run
     # 拒绝语义：非零退出 + 明确错误指引（含中断恢复路径：人工删 Release 留痕）
     assert "exit 1" in run
     assert "拒绝覆盖" in run
     assert "提升 model_version" in run
-    # gh release create 仅在 tag 不存在分支可达：view 检查与拒绝退出
-    # 必须先于 create 出现（顺序即分支语义的静态表达）
-    assert run.index("gh release view") < run.index("gh release create")
-    assert run.index("exit 1") < run.index("gh release create")
+    # 正式 Release 的拒绝必须先于任何 create / upload / 发布 PATCH（分支语义
+    # 的静态表达：录制顺序即执行顺序）。
+    first_reject = run.index("拒绝覆盖")
+    assert first_reject < run.index("gh release create")
+    assert first_reject < run.index("gh release upload")
+    assert first_reject < run.index("-F draft=false")
 
 
-def test_publish_step_has_no_clobber_partial_update(workflow: dict) -> None:
-    # FT-05：不把 --clobber 部分更新（只换资产不换 note）当作重跑幂等——
-    # job2 不得残留 gh release upload / --clobber 上传路径。
-    # （yaml.safe_load 丢弃 YAML 注释后 dump，注释中的说明性 "--clobber"
-    # 提及不计入；job1 语料下载的 gh release download --clobber 为本地
-    # 临时目录覆盖下载，与 Release 资产发布无关，不在本断言范围。）
+def test_publish_step_only_clobbers_draft_assets(workflow: dict) -> None:
+    # D18-R02：draft 对外不可见，同 tag 重跑可安全覆盖同名资产（失败中断恢复）；
+    # 但 clobber 上传必须落在「既有 draft」分支——draft 判定与正式 Release 拒绝
+    # 都先于 upload，正式 Release 永远不会被资产覆盖。
     job2 = workflow["jobs"][JOB2_NAME]
-    job2_raw = yaml.safe_dump(job2, allow_unicode=True)
-    assert "--clobber" not in job2_raw
-    assert "gh release upload" not in job2_raw
-    for step in job2["steps"]:
-        run = step.get("run", "")
-        assert "gh release upload" not in run
-        assert "--clobber" not in run
+    publish = next(s for s in job2["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)")
+    run = publish["run"]
+    assert "gh release upload" in run
+    assert "--clobber" in run
+    assert run.index(".draft") < run.index("gh release upload")
+    assert run.index("拒绝覆盖") < run.index("gh release upload")
+
+
+def test_publish_step_creates_draft_first_with_target(workflow: dict) -> None:
+    # D18-R02：无 Release 时先建 draft（对外不可见）→ 上传/校验 → PATCH 发布；
+    # --target 固定 tag 创建目标，已有 tag 时其身份由上方 tag 锁定步骤保证。
+    job2 = workflow["jobs"][JOB2_NAME]
+    publish = next(s for s in job2["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)")
+    run = publish["run"]
+    assert "gh release create" in run
+    assert "--draft" in run
+    assert '--target "$GITHUB_SHA"' in run
+    assert 'if [ -z "$release_id" ]' in run
+    assert "复用既有 draft" in run
+    # 创建 draft 必须先于发布 PATCH（否则等于直接建正式 Release）
+    assert run.index("gh release create") < run.index("-F draft=false")
+
+
+def test_publish_step_locks_tag_identity_before_upload(workflow: dict) -> None:
+    # D18-R02：已有 tag 指向别处时 fail-closed——annotated tag 需经 git/tags
+    # 逐层 peel 到 commit，再与本次运行的 GITHUB_SHA 比较。
+    job2 = workflow["jobs"][JOB2_NAME]
+    publish = next(s for s in job2["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)")
+    run = publish["run"]
+    assert "git/ref/tags/${TAG}" in run
+    assert "git/tags/${obj_sha}" in run
+    assert ".object.type" in run
+    assert 'while [ "$obj_type" = "tag" ]' in run
+    assert '"$obj_sha" != "$GITHUB_SHA"' in run
+    # tag 不存在（HTTP 404 = draft 发布时才创建）可继续；其余查询错误 fail-closed
+    assert "HTTP 404" in run
+    # 身份锁定必须先于 create/upload
+    assert run.index("git/ref/tags/${TAG}") < run.index("gh release create")
+    assert run.index("git/ref/tags/${TAG}") < run.index("gh release upload")
+
+
+def test_publish_step_verifies_server_assets_before_publishing(workflow: dict) -> None:
+    # D18-R02：上传后、发布前按服务端资产集与 digest 复验；任一项不符保持 draft。
+    job2 = workflow["jobs"][JOB2_NAME]
+    publish = next(s for s in job2["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)")
+    run = publish["run"]
+    assert ".assets[].name" in run
+    assert ".digest" in run
+    assert "sha256sum" in run
+    assert "asset set mismatch" in run or "资产集不符" in run
+    assert "digest mismatch" in run or "digest 不符" in run
+    # 复验先于发布 PATCH
+    assert run.index(".digest") < run.index("-F draft=false")
+
+
+def test_publish_step_patch_uses_typed_boolean_fields(workflow: dict) -> None:
+    # D18-R02：gh api -f 发送字符串 "false"（GitHub 视为真值），必须用 -F。
+    job2 = workflow["jobs"][JOB2_NAME]
+    publish = next(s for s in job2["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)")
+    run = publish["run"]
+    assert "-F draft=false" in run
+    assert "-f draft=" not in run
 
 
 def _extract_pip_install_specs(run: str) -> list[str]:
