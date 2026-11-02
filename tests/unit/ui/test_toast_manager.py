@@ -280,6 +280,97 @@ class TestToastManagerStateless:
 
 
 # ============================================================================
+# 5.0 并发阶段闸门（仅测试用）：可观察锁包装 + 状态快照钩子
+# ============================================================================
+# 目的：不修改生产实现，用事件把 show/remove 的交错点钉死为
+# remove 读旧快照 → show 尝试写入 → remove 写回旧快照。
+# 所有等待均有上界；worker 异常经 future.result() 传回主线程。
+
+_STAGE_TIMEOUT = 5.0
+
+
+class _StageGate:
+    """记录 show/remove 的到达阶段与锁获取决策（仅测试用）。"""
+
+    def __init__(self) -> None:
+        self.remove_thread: threading.Thread | None = None
+        self.show_thread: threading.Thread | None = None
+        self.remove_snapshot_read = threading.Event()
+        self.show_lock_decision = threading.Event()
+        self.show_acquired_without_remove = False
+        self.show_wrote = threading.Event()
+        self.violation = False
+
+
+class _SnapshotProxy:
+    """转发真实 ToastManagerState，并在 toasts 读/写上挂阶段钩子（仅测试用）。"""
+
+    def __init__(self, real_state: Any, gate: _StageGate) -> None:
+        self._real = real_state
+        self._gate = gate
+
+    @property
+    def toasts(self) -> list[ToastData]:
+        snapshot = self._real.toasts
+        if threading.current_thread() is self._gate.remove_thread:
+            self._gate.remove_snapshot_read.set()
+            if not self._gate.show_lock_decision.wait(_STAGE_TIMEOUT):
+                raise AssertionError("show worker 未在超时内尝试获取 _mutation_lock")
+            if self._gate.show_acquired_without_remove:
+                self._gate.violation = True
+                if not self._gate.show_wrote.wait(_STAGE_TIMEOUT):
+                    raise AssertionError("show worker 在移除临界区内未于超时前完成写入")
+        return snapshot
+
+    @toasts.setter
+    def toasts(self, value: list[ToastData]) -> None:
+        self._real.toasts = value
+        if threading.current_thread() is self._gate.show_thread:
+            self._gate.show_wrote.set()
+
+
+class _ObservableMutationLock:
+    """包装真实 _mutation_lock，记录 show 侧是否在 remove 临界区内取得锁（仅测试用）。
+
+    不改变互斥语义：show 先非阻塞探测（仅用于判定 remove 是否持锁），探测失败
+    后仍按阻塞方式获取；remove 侧直接阻塞获取。
+    """
+
+    def __init__(self, inner: Any, gate: _StageGate) -> None:
+        self._inner = inner
+        self._gate = gate
+
+    def __enter__(self) -> "_ObservableMutationLock":
+        if threading.current_thread() is self._gate.show_thread:
+            acquired = self._inner.acquire(blocking=False)
+            self._gate.show_acquired_without_remove = acquired
+            self._gate.show_lock_decision.set()
+            if not acquired:
+                self._inner.acquire()
+        else:
+            self._inner.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self._inner.release()
+        return False
+
+
+def _run_remove_worker(gate: _StageGate, toast_id: int) -> None:
+    """remove worker：先登记线程身份，再走生产 `_remove_toast`。"""
+    gate.remove_thread = threading.current_thread()
+    tm_module._remove_toast(toast_id)
+
+
+def _run_show_worker(manager: ToastManager, gate: _StageGate) -> None:
+    """show worker：等 remove 读取旧快照后才尝试追加，确保交错由 remove 先发起。"""
+    gate.show_thread = threading.current_thread()
+    if not gate.remove_snapshot_read.wait(_STAGE_TIMEOUT):
+        raise AssertionError("remove worker 未在超时内读取快照")
+    manager.show("B")
+
+
+# ============================================================================
 # 5. show() 行为契约
 # ============================================================================
 
@@ -377,13 +468,13 @@ class TestShowBehavior:
         assert len(ids) == 3
         assert len(set(ids)) == 3  # 唯一
 
-    def test_show_and_remove_thread_safety_consistency(self):
-        """并发 show + remove 读改写不丢更新（show 与 _remove_toast 同锁保护）。
+    def test_concurrent_show_conserves_count_and_serial_remove(self):
+        """并发 show 保持数量/ID 守恒；remove 在线程池全部退出后串行执行。
 
-        回归：_remove_toast 原先无锁过滤列表，与并发 show 的读改写交错会
-        丢失移除期间新增的 toast（旧快照覆盖）。barrier 最大化交错概率；
-        并发 show 超过 MAX_TOAST_COUNT 按最旧裁剪，最终数量 = MAX（若锁
-        失效导致读改写丢更新，len 将小于 MAX 暴露丢失）。
+        范围说明：本用例只覆盖多线程 show 的数量/ID 守恒（barrier 同时起跑）
+        及线程池退出后的单线程 remove；不覆盖 show 与 remove 并发读改写的交错，
+        后者由 ``test_controlled_show_remove_interleaving_keeps_new_toast``
+        以受控顺序（非概率交错）覆盖。
         """
         page = self._make_page()
         manager = ToastManager(page)
@@ -396,12 +487,56 @@ class TestShowBehavior:
 
         state = get_global_state()
         assert len(state.toasts) == min(threads, ToastManager.MAX_TOAST_COUNT)
+        # 同锁下 id 自增 1..16，超限裁剪后保留最大的 MAX_TOAST_COUNT 个 id
+        retained_ids = sorted(t.id for t in state.toasts)
+        assert retained_ids == list(range(threads - ToastManager.MAX_TOAST_COUNT + 1, threads + 1))
 
         first_id = state.toasts[0].id
         tm_module._remove_toast(first_id)
         state = get_global_state()
         assert len(state.toasts) == min(threads, ToastManager.MAX_TOAST_COUNT) - 1
         assert all(t.id != first_id for t in state.toasts)
+
+    def test_controlled_show_remove_interleaving_keeps_new_toast(self, monkeypatch):
+        """受控交错：remove 读旧快照 [A] 与 show 追加 B 之间不得发生读改写覆盖。
+
+        初始队列 [A]（低于 MAX_TOAST_COUNT，避开裁剪），show worker 等 remove
+        读取快照后才尝试写入。共享 _mutation_lock 下 show 必须在 remove 的
+        读改写临界区外提交，最终队列只剩 [B]：A 被移除、B 不丢；若 remove
+        未持锁，show 会在其临界区内取得锁并留下 violation 证据。
+        """
+        page = self._make_page()
+        manager = ToastManager(page)
+        manager.show("A")
+        real_state = get_global_state()
+        assert [t.message for t in real_state.toasts] == ["A"]
+        removed_id = real_state.toasts[0].id
+
+        gate = _StageGate()
+        proxy = _SnapshotProxy(real_state, gate)
+        inner_lock = tm_module._mutation_lock
+
+        with monkeypatch.context() as patch_ctx:
+            patch_ctx.setattr(tm_module, "_mutation_lock", _ObservableMutationLock(inner_lock, gate))
+            patch_ctx.setattr(tm_module, "get_global_state", lambda: proxy)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                remove_future = pool.submit(_run_remove_worker, gate, removed_id)
+                show_future = pool.submit(_run_show_worker, manager, gate)
+                try:
+                    remove_future.result(timeout=_STAGE_TIMEOUT * 2)
+                    show_future.result(timeout=_STAGE_TIMEOUT * 2)
+                finally:
+                    # 任何分支失败都释放闸门，保证两个 worker 有界退出
+                    gate.remove_snapshot_read.set()
+                    gate.show_lock_decision.set()
+                    gate.show_wrote.set()
+                    pool.shutdown(wait=True)
+
+        state = get_global_state()
+        assert gate.show_acquired_without_remove is False, "show 不得在 remove 的读改写临界区内取得锁"
+        assert gate.violation is False, "show 不得在 remove 临界区内提交新快照"
+        assert [t.message for t in state.toasts] == ["B"]
+        assert all(t.id != removed_id for t in state.toasts)
 
 
 # ============================================================================
