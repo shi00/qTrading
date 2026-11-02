@@ -249,24 +249,113 @@ pub fn run(layout: &Layout) -> Result<(), PreflightFailure> {
 
 // ---- 平台文件系统类型探测 ----
 
+/// Windows 路径形态（仅按字符串识别，不依赖 WinAPI，便于跨平台单测）。
+///
+/// 用于在调用卷查询前先排除“路径本身即网络共享”的情形：UNC 路径无论卷名
+/// 回报为何，都不可能是本地日志式文件系统。
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowsPathShape {
+    /// `\\server\share\...` 或 `\\?\UNC\server\share\...`
+    NetworkShare,
+    /// `C:\...`、`c:/...` 或 `\\?\C:\...`
+    Drive { letter: char },
+    /// `\\.\...`（设备命名空间）
+    DeviceNamespace,
+    /// 盘符相对（`C:foo`）、根相对（`\foo`）、普通相对路径或 `\\?\Volume{...}` 等
+    Other,
+}
+
+/// 按字符串识别 Windows 路径形态；同时接受 `/` 与 `\` 分隔符。
+///
+/// 无法识别的形态返回 `Other`（调用方按 Unknown 处理并告警），不猜测卷归属。
+#[cfg(any(windows, test))]
+pub fn classify_windows_path_shape(raw: &str) -> WindowsPathShape {
+    let normalized = raw.replace('/', "\\");
+    let upper = normalized.to_ascii_uppercase();
+    if upper.starts_with("\\\\?\\UNC\\") {
+        return WindowsPathShape::NetworkShare;
+    }
+    if upper.starts_with("\\\\?\\") {
+        // `\\?\C:\...`：VerbatimDisk；`\\?\Volume{...}` 等其余形态归 Other。
+        let rest = &normalized[4..];
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return WindowsPathShape::Drive {
+                letter: (bytes[0] as char).to_ascii_uppercase(),
+            };
+        }
+        return WindowsPathShape::Other;
+    }
+    if upper.starts_with("\\\\.\\") {
+        return WindowsPathShape::DeviceNamespace;
+    }
+    if upper.starts_with("\\\\") {
+        return WindowsPathShape::NetworkShare;
+    }
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return WindowsPathShape::Drive {
+            letter: (bytes[0] as char).to_ascii_uppercase(),
+        };
+    }
+    WindowsPathShape::Other
+}
+
+/// GetDriveTypeW 返回值中本模块关心的常量（Microsoft GetDriveTypeW 文档：
+/// DRIVE_UNKNOWN=0、DRIVE_NO_ROOT_DIR=1、DRIVE_REMOVABLE=2、DRIVE_FIXED=3、
+/// DRIVE_REMOTE=4、DRIVE_CDROM=5、DRIVE_RAMDISK=6）。以数值承载，
+/// 避免为常量额外启用 windows-sys feature。
+#[cfg(any(windows, test))]
+const DRIVE_REMOVABLE: u32 = 2;
+#[cfg(any(windows, test))]
+const DRIVE_FIXED: u32 = 3;
+#[cfg(any(windows, test))]
+const DRIVE_REMOTE: u32 = 4;
+#[cfg(any(windows, test))]
+const DRIVE_CDROM: u32 = 5;
+#[cfg(any(windows, test))]
+const DRIVE_RAMDISK: u32 = 6;
+
+/// 卷名 → FsKind（大小写不敏感）。卷名无法识别时返回 `Unknown`，由调用方告警。
+#[cfg(any(windows, test))]
+fn volume_name_to_fs_kind(name: &str) -> FsKind {
+    let normalized = name.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "NTFS" => FsKind::Ntfs,
+        "REFS" => FsKind::ReFs,
+        "FAT32" | "FAT" | "VFAT" => FsKind::Fat32,
+        "EXFAT" => FsKind::ExFat,
+        other if other.contains("SMB") || other.contains("NFS") || other.contains("CSC") => {
+            FsKind::NetworkFs
+        }
+        other => FsKind::Unknown(other.to_string()),
+    }
+}
+
+/// 盘符路径的分类决策：先看 GetDriveTypeW，再看卷名。
+///
+/// 映射网络盘（`DRIVE_REMOTE`）的卷名通常回报为 NTFS，仅凭卷名会误判为本地盘，
+/// 因此驱动器类型优先。仅对已定义的本地类驱动器类型（可移动/固定/光驱/内存盘）
+/// 采信卷名；`DRIVE_UNKNOWN`/`DRIVE_NO_ROOT_DIR` 及未定义返回值一律归 Unknown。
+#[cfg(any(windows, test))]
+fn classify_windows_drive(drive_type: u32, volume_name: Result<&str, u32>) -> FsKind {
+    match drive_type {
+        DRIVE_REMOTE => FsKind::NetworkFs,
+        DRIVE_REMOVABLE | DRIVE_FIXED | DRIVE_CDROM | DRIVE_RAMDISK => match volume_name {
+            Ok(name) => volume_name_to_fs_kind(name),
+            Err(code) => FsKind::Unknown(format!("volume-info-query-failed-{code}")),
+        },
+        // DRIVE_UNKNOWN(0)/DRIVE_NO_ROOT_DIR(1) 及未定义返回值：不猜测卷归属。
+        other => FsKind::Unknown(format!("drive-type-{other}")),
+    }
+}
+
 #[cfg(windows)]
-pub fn detect_fs_kind(path: &Path) -> FsKind {
-    use std::os::windows::ffi::OsStrExt;
+fn query_volume_name(root: &str) -> Result<String, u32> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
 
-    // 取卷根（如 C:\）
-    let root: PathBuf = match path.components().next() {
-        Some(std::path::Component::Prefix(prefix)) => {
-            let s = prefix.as_os_str().to_string_lossy().to_string();
-            PathBuf::from(format!("{s}\\"))
-        }
-        _ => return FsKind::Unknown("no-volume-root".into()),
-    };
-    let root_wide: Vec<u16> = root
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let root_wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
     let mut fs_name = vec![0u16; 64];
     let ok = unsafe {
         GetVolumeInformationW(
@@ -281,26 +370,35 @@ pub fn detect_fs_kind(path: &Path) -> FsKind {
         )
     };
     if ok == 0 {
-        return FsKind::Unknown(format!(
-            "query-failed-{}",
-            std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-        ));
+        return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32);
     }
     let len = fs_name
         .iter()
         .position(|c| *c == 0)
         .unwrap_or(fs_name.len());
-    let name = String::from_utf16_lossy(&fs_name[..len]).to_ascii_uppercase();
-    match name.as_str() {
-        "NTFS" => FsKind::Ntfs,
-        "REFS" => FsKind::ReFs,
-        "FAT32" | "FAT" | "VFAT" => FsKind::Fat32,
-        "EXFAT" => FsKind::ExFat,
-        "CDFS" | "UDF" => FsKind::Unknown(name),
-        other if other.contains("SMB") || other.contains("NFS") || other.contains("CSC") => {
-            FsKind::NetworkFs
+    Ok(String::from_utf16_lossy(&fs_name[..len]))
+}
+
+#[cfg(windows)]
+pub fn detect_fs_kind(path: &Path) -> FsKind {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+    match classify_windows_path_shape(&path.as_os_str().to_string_lossy()) {
+        // UNC / `\\?\UNC\` 路径本身即网络共享，不依赖卷名回报。
+        WindowsPathShape::NetworkShare => FsKind::NetworkFs,
+        WindowsPathShape::DeviceNamespace => FsKind::Unknown("device-namespace".into()),
+        WindowsPathShape::Other => FsKind::Unknown("no-volume-root".into()),
+        WindowsPathShape::Drive { letter } => {
+            let root = format!("{letter}:\\");
+            let root_wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+            // GetDriveTypeW 是映射网络盘（卷名常回报 NTFS）的唯一可靠判据；
+            // junction/重解析点的实际归属仍未在本分支独立核验（见 D16-R03 验证矩阵）。
+            let drive_type = unsafe { GetDriveTypeW(root_wide.as_ptr()) };
+            classify_windows_drive(
+                drive_type,
+                query_volume_name(&root).as_deref().map_err(|e| *e),
+            )
         }
-        other => FsKind::Unknown(other.to_string()),
     }
 }
 
@@ -423,6 +521,90 @@ mod tests {
         );
         std::env::remove_var("QTRADING_PG_SIDECAR_FORCE_FS_KIND");
         assert_eq!(FsKind::from_env_override(), None);
+    }
+
+    /// D16-R03：UNC / VerbatimUNC 形态必须先于卷名查询识别为网络共享。
+    #[test]
+    fn windows_path_shape_classification() {
+        use WindowsPathShape::*;
+        for raw in [
+            r"\\server\share\pg\data",
+            "//server/share/pg/data",
+            r"\\?\UNC\server\share\pg",
+            r"\\?\unc\server\share",
+        ] {
+            assert_eq!(classify_windows_path_shape(raw), NetworkShare, "raw={raw}");
+        }
+        for raw in [
+            r"C:\Users\u\pg\data",
+            "c:/Users/u/pg/data",
+            r"\\?\C:\Users\u\pg",
+            r"\\?\c:\pg",
+        ] {
+            assert_eq!(
+                classify_windows_path_shape(raw),
+                Drive { letter: 'C' },
+                "raw={raw}"
+            );
+        }
+        assert_eq!(classify_windows_path_shape(r"\\.\C:\pg"), DeviceNamespace);
+        for raw in [
+            "C:relative",
+            r"\rooted",
+            "relative",
+            r"\\?\Volume{abc}\",
+            "",
+        ] {
+            assert_eq!(classify_windows_path_shape(raw), Other, "raw={raw}");
+        }
+    }
+
+    /// D16-R03：卷名映射与网络共享特征（大小写不敏感）。
+    #[test]
+    fn windows_volume_name_mapping() {
+        for (name, expect) in [
+            ("NTFS", FsKind::Ntfs),
+            ("ntfs", FsKind::Ntfs),
+            ("ReFS", FsKind::ReFs),
+            ("FAT32", FsKind::Fat32),
+            ("FAT", FsKind::Fat32),
+            ("VFAT", FsKind::Fat32),
+            ("exFAT", FsKind::ExFat),
+            ("SMB2", FsKind::NetworkFs),
+            ("NFS", FsKind::NetworkFs),
+            ("CSC", FsKind::NetworkFs),
+            ("CDFS", FsKind::Unknown("CDFS".into())),
+            ("UDF", FsKind::Unknown("UDF".into())),
+            ("weird", FsKind::Unknown("WEIRD".into())),
+        ] {
+            assert_eq!(volume_name_to_fs_kind(name), expect, "name={name}");
+        }
+    }
+
+    /// D16-R03：映射网络盘即便卷名回报 NTFS 也必须判为网络盘；未知驱动器类型不放行猜测。
+    #[test]
+    fn windows_drive_type_decision() {
+        assert_eq!(
+            classify_windows_drive(DRIVE_REMOTE, Ok("NTFS")),
+            FsKind::NetworkFs,
+            "映射网络盘的卷名不可作为本地盘判据"
+        );
+        assert_eq!(classify_windows_drive(3, Ok("NTFS")), FsKind::Ntfs);
+        assert_eq!(classify_windows_drive(3, Ok("exFAT")), FsKind::ExFat);
+        assert_eq!(
+            classify_windows_drive(3, Err(5)),
+            FsKind::Unknown("volume-info-query-failed-5".into())
+        );
+        // 0=DRIVE_UNKNOWN、1=DRIVE_NO_ROOT_DIR、99=未定义返回值
+        for drive_type in [0, 1, 99] {
+            assert!(
+                matches!(
+                    classify_windows_drive(drive_type, Ok("NTFS")),
+                    FsKind::Unknown(_)
+                ),
+                "drive_type={drive_type} 不得猜测为本地盘"
+            );
+        }
     }
 
     #[test]

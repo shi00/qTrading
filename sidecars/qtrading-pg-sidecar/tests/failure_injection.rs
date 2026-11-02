@@ -280,6 +280,32 @@ fn test_inject_27_fat32_filesystem_rejected() {
     );
 }
 
+/// D16-R03：无法识别的文件系统仍放行（避免误拒绝），但 doctor 必须给出可见 warning。
+#[test]
+fn test_unknown_filesystem_reported_by_doctor() {
+    let (_tmp, data_dir) = unique_data_dir("fi_unknown_fs");
+
+    let output = std::process::Command::new(sidecar_path())
+        .arg("doctor")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("QTRADING_PG_SIDECAR_FORCE_FS_KIND", "custom-unknown")
+        .output()
+        .expect("run doctor");
+    let doc: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).expect("doctor json");
+
+    assert_eq!(doc["fs_supported"], true, "Unknown 不应被拒绝: {doc}");
+    assert_eq!(doc["fs_kind"], "unknown(custom-unknown)");
+    let issues = doc["issues"].as_array().expect("issues array");
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["code"] == "fs_unverified" && i["severity"] == "warning"),
+        "doctor should report fs_unverified warning: {doc}"
+    );
+}
+
 /// #28 restore 中断残留 → doctor 列出 `data.restore-*` 残留目录（§17.6 #28 / §13.7.44 / §7.5）。
 ///
 /// 模拟方式：手动创建 `data.restore-<ts>` 兄弟目录（与 sidecar `restore()` 失败路径生成的
