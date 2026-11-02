@@ -16,7 +16,7 @@ Set-StrictMode -Version Latest
 $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 $UninstallerPath = Join-Path $AppInstallDir "unins000.exe"
-$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\postgres\16\data"
+$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\qTrading\postgres\16\data"
 
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }

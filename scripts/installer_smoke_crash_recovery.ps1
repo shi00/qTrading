@@ -15,8 +15,9 @@ Set-StrictMode -Version Latest
 # ---- 路径常量 ----
 $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
-# 用户数据根目录：嵌入 PG 数据（postgres\16\data）与 sidecar 日志（postgres-logs）
-$UserDataRoot = Join-Path $env:LOCALAPPDATA "qTrading"
+# 用户数据根目录（platformdirs 在 Windows 追加 author=appname，故为 qTrading\qTrading 两层）：
+# 嵌入 PG 数据（qTrading\qTrading\postgres\16\data）与 sidecar 日志（qTrading\qTrading\postgres-logs）
+$UserDataRoot = Join-Path $env:LOCALAPPDATA "qTrading\qTrading"
 # 主程序日志目录（utils/logger.py 的 LOG_DIR）
 $AppLogDir = Join-Path $env:LOCALAPPDATA "AStockScreener\logs"
 

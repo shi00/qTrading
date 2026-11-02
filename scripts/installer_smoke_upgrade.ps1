@@ -23,8 +23,8 @@ Set-StrictMode -Version Latest
 # ---- 路径常量 ----
 $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
-# PGDATA 路径以 resources/maintenance/README-maintenance.md 为准（platformdirs 默认）
-$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\postgres\16\data"
+# PGDATA 路径以 resources/maintenance/README-maintenance.md 为准（platformdirs 默认；Windows 追加 author=appname，故为两层）
+$PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\qTrading\postgres\16\data"
 
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }
