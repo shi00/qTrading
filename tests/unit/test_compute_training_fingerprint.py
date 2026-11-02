@@ -379,16 +379,35 @@ def test_download_corpus_sums_strict_when_absent(monkeypatch, fp_module, tmp_pat
         fp_module.download_corpus_sums("o/r", "corpus-v1", tmp_path / "corpus")
 
 
-def test_tag_exists_distinguishes_not_found_from_infra_error(monkeypatch, fp_module) -> None:
-    monkeypatch.setattr(fp_module, "_run_gh_raw", lambda args: _GhProc(0))
+def test_tag_exists_uses_git_ref_not_release(monkeypatch, fp_module) -> None:
+    # 版本不可变判断锚定 git tag 本身：纯 git tag（尚无 Release）也必须判 True，
+    # 否则 ``gh release view`` 的「release not found」会被误判为 tag 不存在。
+    calls: list[list[str]] = []
+
+    def fake_gh_raw(args):
+        calls.append(list(args))
+        return _GhProc(0, stdout='{"ref": "refs/tags/finbert-gguf-v0.1.0"}')
+
+    monkeypatch.setattr(fp_module, "_run_gh_raw", fake_gh_raw)
     assert fp_module.tag_exists("o/r", "finbert-gguf-v0.1.0") is True
-    monkeypatch.setattr(fp_module, "_run_gh_raw", lambda args: _GhProc(1, stderr="release not found"))
+    assert calls == [["api", "repos/o/r/git/ref/tags/finbert-gguf-v0.1.0"]]
+
+
+def test_tag_exists_distinguishes_404_from_infra_error(monkeypatch, fp_module) -> None:
+    # GitHub API 对不存在的 ref 返回 HTTP 404 → False；其余非零退出（网络/鉴权/5xx）
+    # 无法确认存在性 → fail-closed，不得当作「不存在」放行。
+    monkeypatch.setattr(fp_module, "_run_gh_raw", lambda args: _GhProc(1, stderr="gh: Not Found (HTTP 404)"))
     assert fp_module.tag_exists("o/r", "finbert-gguf-v0.9.9") is False
-    # 其余非零退出（网络/鉴权故障）不得误判为「不存在」→ fail-closed
-    monkeypatch.setattr(fp_module, "_run_gh_raw", lambda args: _GhProc(1, stderr="connection refused"))
+    monkeypatch.setattr(
+        fp_module, "_run_gh_raw", lambda args: _GhProc(1, stderr="gh: Internal Server Error (HTTP 500)")
+    )
     with pytest.raises(fp_module.FingerprintError, match="无法确认 tag 存在性") as excinfo:
         fp_module.tag_exists("o/r", "finbert-gguf-v0.1.0")
-    assert "connection refused" in str(excinfo.value)
+    assert "HTTP 500" in str(excinfo.value)
+    # 非 API 错误（如本地网络故障）同样 fail-closed
+    monkeypatch.setattr(fp_module, "_run_gh_raw", lambda args: _GhProc(1, stderr="connection refused"))
+    with pytest.raises(fp_module.FingerprintError, match="无法确认 tag 存在性"):
+        fp_module.tag_exists("o/r", "finbert-gguf-v0.1.0")
 
 
 # --------------------------------------------------------------------------- #

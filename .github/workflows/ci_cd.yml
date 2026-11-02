@@ -2341,23 +2341,49 @@ jobs:
           #     已被外部引用，静默替换会让既有下载/校验记录与页面资产不一致），需人工
           #     评估后显式删除；不采用「先 gh release delete 再重建」的破坏性做法；
           #   - 无 Release：稍后新建 draft。
-          # 同时确认远端 tag 存在，锁定本次 Release 的 tag 来源就是触发本次运行的 tag，
-          # 避免 target_commitish 默认值把 Release 建到别的 ref 上。
-          if ! gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq '.ref' >/dev/null; then
-            echo "::error::remote tag ${TAG} not found; refusing to create a release from a different ref."
+          # 同时锁定本次 Release 的 tag 来源就是触发本次运行的 tag：仅确认远端
+          # tag 存在不够（target_commitish 默认值可能把 Release 建到别的 ref），
+          # 必须把 tag 解析到 commit 并与 GITHUB_SHA 比较。annotated tag 的 ref
+          # 指向 tag 对象（type=tag），须经 git/tags/{sha} 逐层 peel 到 commit；
+          # 解析失败 / 不是 commit / sha 不符 → fail-closed。
+          if ! tag_json=$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" 2>/dev/null); then
+            echo "::error::remote tag ${TAG} not found or unreadable; refusing to create a release from a different ref."
+            exit 1
+          fi
+          obj_type=$(jq -r '.object.type' <<<"$tag_json")
+          obj_sha=$(jq -r '.object.sha' <<<"$tag_json")
+          depth=0
+          while [ "$obj_type" = "tag" ]; do
+            depth=$((depth + 1))
+            if [ "$depth" -gt 5 ]; then
+              echo "::error::tag ${TAG} cannot be peeled to a commit (too many nested tag objects); refusing to release."
+              exit 1
+            fi
+            tag_obj=$(gh api "repos/${GH_REPO}/git/tags/${obj_sha}")
+            obj_type=$(jq -r '.object.type' <<<"$tag_obj")
+            obj_sha=$(jq -r '.object.sha' <<<"$tag_obj")
+          done
+          if [ "$obj_type" != "commit" ] || [ "$obj_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::tag ${TAG} resolves to ${obj_type} ${obj_sha}, but this run was triggered by ${GITHUB_SHA}; refusing to release from a different ref."
             exit 1
           fi
           # draft 无法用 /releases/tags/{tag} 查询（未发布的 draft 其 tag ref 尚未创建，
           # 该端点固定返回 404），故按 tag_name 从 Releases 列表定位 id 后再按 id 判定状态。
-          release_id=$(gh api "repos/${GH_REPO}/releases?per_page=100" \
-            --jq "[.[] | select(.tag_name == \"${TAG}\")][0].id // empty")
-          if [ -n "$release_id" ]; then
-            if [ "$(gh api "repos/${GH_REPO}/releases/${release_id}" --jq '.draft')" != "true" ]; then
-              echo "::error::release ${TAG} is already published; refusing to overwrite a published release."
-              echo "::error::if replacement is truly intended, delete it manually first, then re-run."
-              exit 1
-            fi
-            echo "Existing draft release for ${TAG} found (id=${release_id}); it will be reused and its assets re-verified."
+          # --paginate：Release 总数超过 100 时仍须命中既有 draft（避免误建重复 Release）。
+          # 逐条检查同 tag 的全部 Release（而非只取首个）：任一条为正式 Release 即拒绝，
+          # 防「旧正式版 + 新 draft 同名」时误选 draft 覆盖已公开资产。
+          release_rows=$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | \"\\(.id) \\(.draft)\"")
+          if [ -n "$release_rows" ]; then
+            while read -r release_id draft; do
+              [ -n "$release_id" ] || continue
+              if [ "$draft" != "true" ]; then
+                echo "::error::release ${TAG} is already published; refusing to overwrite a published release."
+                echo "::error::if replacement is truly intended, delete it manually first, then re-run."
+                exit 1
+              fi
+            done <<<"$release_rows"
+            echo "Existing draft release for ${TAG} found; it will be reused and its assets re-verified."
           else
             echo "No release exists for ${TAG}; a new draft will be created."
           fi
@@ -2395,8 +2421,11 @@ jobs:
           # draft 不能用 /releases/tags/{tag} 查询（未发布的 draft 其 tag ref 尚未创建，
           # 该端点固定返回 404；run 41013466172 即因此失败：12 个资产已正确上传，
           # 却卡在按 tag 查询）。改为按 tag_name 从 Releases 列表定位 id，再按 id 读取。
-          release_id=$(gh api "repos/${GH_REPO}/releases?per_page=100" \
-            --jq "[.[] | select(.tag_name == \"${TAG}\")][0].id // empty")
+          # --paginate 保证 Release 超过 100 时仍能命中；--jq 按页输出匹配 id，
+          # awk 只取首个命中（列表按创建时间倒序）；gh 失败经 pipefail 显式传播。
+          release_id=$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" \
+            | awk '!seen && NF { print; seen = 1 }')
           if [ -z "$release_id" ]; then
             echo "::error::no release found for ${TAG}; refusing to continue."
             exit 1
@@ -2462,12 +2491,13 @@ jobs:
           # （draft 无法经 tags 端点查询），因此复用 verify 步骤解析出的 release_id。
           # 请求不含 body，generate_release_notes 生成的正文不会被改写。命令失败时
           # Release 仍是 draft，外部仍不会把它当作正式版本。
+          # -F 为类型化字段（布尔）；-f 会发送字符串 "false"（GitHub 视作真值）。
           if [ -z "${RELEASE_ID:-}" ]; then
             echo "::error::release id not available from verify step; cannot publish."
             exit 1
           fi
           gh api -X PATCH "repos/${GH_REPO}/releases/${RELEASE_ID}" \
-            -f draft=false -f make_latest=true >/dev/null
+            -F draft=false -F make_latest=true >/dev/null
 
   installer-smoke:
     # P3-CI-Installer-Smoke-Trigger + P3-CI-Installer-PowerShell-Syntax-Only 合并解决：
