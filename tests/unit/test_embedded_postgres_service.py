@@ -1513,64 +1513,64 @@ class TestEmbeddedPostgresServiceLog:
 
 
 class TestEmbeddedPasswordRead:
-    """F5（检视 06）：_read_embedded_password 的 DPAPI/明文/容错分支。"""
+    """F5（检视 06）：read_embedded_password 的 DPAPI/明文/容错分支。"""
 
     _PREFIX = "PGPW2:"
 
     def test_plaintext_file_reads_as_is(self, tmp_path: Path) -> None:
-        from data.persistence.embedded_postgres.service import _read_embedded_password
+        from data.persistence.embedded_postgres.service import read_embedded_password
 
         p = tmp_path / "password"
         p.write_text("PlainPwd-1_2.3~\n", encoding="utf-8")
-        assert _read_embedded_password(p, logging.getLogger("test")) == "PlainPwd-1_2.3~"
+        assert read_embedded_password(p, logging.getLogger("test")) == "PlainPwd-1_2.3~"
 
     def test_blank_file_reads_as_empty(self, tmp_path: Path) -> None:
-        from data.persistence.embedded_postgres.service import _read_embedded_password
+        from data.persistence.embedded_postgres.service import read_embedded_password
 
         p = tmp_path / "password"
         p.write_text("   ", encoding="utf-8")
-        assert _read_embedded_password(p, logging.getLogger("test")) == ""
+        assert read_embedded_password(p, logging.getLogger("test")) == ""
 
     def test_dpapi_prefix_on_non_windows_raises(self, monkeypatch, tmp_path: Path) -> None:
         from data.persistence.embedded_postgres.service import (
             EmbeddedPostgresStartError,
-            _read_embedded_password,
+            read_embedded_password,
         )
 
         monkeypatch.setattr("sys.platform", "linux")
         p = tmp_path / "password"
         p.write_text(f"{self._PREFIX}deadbeef", encoding="utf-8")
         with pytest.raises(EmbeddedPostgresStartError, match="on a non-Windows platform"):
-            _read_embedded_password(p, logging.getLogger("test"))
+            read_embedded_password(p, logging.getLogger("test"))
 
     def test_dpapi_malformed_hex_raises(self, monkeypatch, tmp_path: Path) -> None:
         from data.persistence.embedded_postgres.service import (
             EmbeddedPostgresStartError,
-            _read_embedded_password,
+            read_embedded_password,
         )
 
         monkeypatch.setattr("sys.platform", "win32")
         p = tmp_path / "password"
         p.write_text(f"{self._PREFIX}zz-not-hex", encoding="utf-8")
         with pytest.raises(EmbeddedPostgresStartError, match="DPAPI payload invalid"):
-            _read_embedded_password(p, logging.getLogger("test"))
+            read_embedded_password(p, logging.getLogger("test"))
 
     def test_dpapi_valid_hex_decodes_via_unprotect(self, monkeypatch, tmp_path: Path) -> None:
         from data.persistence.embedded_postgres import service as svc_module
-        from data.persistence.embedded_postgres.service import _read_embedded_password
+        from data.persistence.embedded_postgres.service import read_embedded_password
 
         monkeypatch.setattr("sys.platform", "win32")
         # blob = b'pwd\x01'.hex() = '70776401'
         monkeypatch.setattr(svc_module, "_unprotect_win32_blob", lambda _blob: b"pwd\x01")
         p = tmp_path / "password"
         p.write_text(f"{self._PREFIX}70776401", encoding="utf-8")
-        assert _read_embedded_password(p, logging.getLogger("test")) == "pwd\x01"
+        assert read_embedded_password(p, logging.getLogger("test")) == "pwd\x01"
 
     def test_dpapi_unprotect_oserror_raises(self, monkeypatch, tmp_path: Path, caplog) -> None:
         from data.persistence.embedded_postgres import service as svc_module
         from data.persistence.embedded_postgres.service import (
             EmbeddedPostgresStartError,
-            _read_embedded_password,
+            read_embedded_password,
         )
 
         monkeypatch.setattr("sys.platform", "win32")
@@ -1583,7 +1583,7 @@ class TestEmbeddedPasswordRead:
         p.write_text(f"{self._PREFIX}deadbeef", encoding="utf-8")
         with caplog.at_level(logging.ERROR, logger="qtrading.embedded_postgres"):
             with pytest.raises(EmbeddedPostgresStartError, match="DPAPI decrypt failed"):
-                _read_embedded_password(p, logging.getLogger("qtrading.embedded_postgres"))
+                read_embedded_password(p, logging.getLogger("qtrading.embedded_postgres"))
         assert "DPAPI" in caplog.text
 
 
