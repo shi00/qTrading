@@ -1,11 +1,14 @@
 name: Pre-commit Config CI
 
-# 仅修改 `.pre-commit-config.yaml` 的 PR 不触发主 CI（ci_cd.yml 的 pull_request.paths 不含该文件），
-# hook entry、独立环境依赖或文件选择规则的缺陷会延迟到 main push 才暴露。
-# 不把该文件加入主 CI 白名单：那会让单文件配置 PR 拉起整套主流水线（PG service、迁移往返、
+# 仅修改 `.pre-commit-config.yaml` 的 PR 仍会触发主 CI：`ci_cd.yml` 的 `pull_request` 不设 `paths`
+# 过滤（聚合门禁要求 workflow 必触发），但该文件不在 `scripts/classify_changed_paths.py` 的
+# `CODE_PATTERNS` 内，`Changes` job 判为 `code=false`，主 CI 只跑 `Changes` / `lint-fast` 轻量 job
+# （外加聚合门禁 `CI Gate`），不执行 pre-commit hooks；因此 hook entry、独立环境依赖或文件选择规则的
+# 缺陷仍会延迟到 main push 才暴露（push 事件一律按代码类处理，main push 会执行含 pre-commit 的重型 job）。
+# 不把该文件加入 `CODE_PATTERNS`：那会让单文件配置 PR 拉起整套主流水线（PG service、迁移往返、
 # 单测/集成、Windows E2E/embedded），而这些覆盖对配置改动零增量。
-# 本 workflow 只做 hook 侧的等价验证，不含 PG service / 迁移 / 测试，也不与主 CI 重复触发
-# （`.pre-commit-config.yaml` 不在 ci_cd.yml paths 内）。
+# 本 workflow 只做 hook 侧的等价验证，不含 PG service / 迁移 / 测试；纯配置 PR 下主 CI 不跑 hook，
+# 与本 workflow 不重复执行 hooks（配置与业务代码同时变更时两者各跑一次，属已知有限重复）。
 #
 # `pre-commit validate-config` 只校验 schema 与 files/exclude 正则合法性，entry 指向不存在的
 # 命令等缺陷只有在真正执行 hook 时才暴露，故必须在合并前跑 `pre-commit run --all-files`。

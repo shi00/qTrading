@@ -1,7 +1,7 @@
-# Dependabot 配置 — 仅覆盖 GitHub Actions 生态。
-# Python 依赖（pip）由 CI 中的 `scripts/run_pip_audit.py`（pip-audit，单源 PyPI）负责漏洞扫描，
-# 版本升级通过手动编辑 `pyproject.toml` 触发 pre-commit 再生成 requirements*.txt。
-# 详见 docs/guides/ci-cd.md「CI/CD 流水线与门禁」与 docs/guides/dependency-management.md「依赖管理」。
+# Dependabot 配置 — 仅覆盖 GitHub Actions 生态（Renovate 的 github-actions manager 已禁用）。
+# Python / JS 依赖升级由 Renovate 发起（配置见 `.github/renovate.json`）；Python 运行时版本升级在 Renovate 中被禁用。
+# CI 中的 `scripts/run_pip_audit.py`（pip-audit，单源 PyPI）只做依赖漏洞扫描，不发起版本升级。
+# 详见 docs/guides/ci-cd.md「其他 workflow」与 docs/guides/dependency-management.md「依赖管理」。
 version: 2
 updates:
   - package-ecosystem: "github-actions"
