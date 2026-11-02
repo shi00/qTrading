@@ -1125,6 +1125,15 @@ jobs:
             tests/e2e/test_screener_anchor_smoke.py::test_screener_anchor_click_strategy_dropdown_opens \
             -v --tb=short --timeout=600 --timeout-method=thread
 
+      # R9: 上传前脱敏可能含 DB 连接串（含密码）的文本工件。D18-R03 修复此 job
+      # 此前直传日志的缺口；matrix 同时含 ubuntu/windows，故用两平台均可用的 bash
+      # 调用跨平台 Python 脚本（复用 DataSanitizer），不用仅 Windows 习惯的 pwsh。
+      - name: Sanitize embedded test artifacts
+        if: always()
+        shell: bash
+        run: |
+          python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-*.xml'
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
