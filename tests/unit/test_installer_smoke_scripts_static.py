@@ -351,3 +351,146 @@ Assert-True ($null -eq $postgresAfter)
 """
     assert "$sentinelAfterRestart = Invoke-Psql" not in legacy
     assert legacy.index("Stop-Process -Id $proc.Id -Force") < legacy.index("Assert-True ($null -eq $postgresAfter)")
+
+
+# ---- D17-T02：升级 / 卸载必须验证已提交业务哨兵与 PG 根完整性 ----
+# 旧断言只检查「目录存在且文件数 > 0」：删除唯一业务哨兵但保留 PG_VERSION 仍会通过，
+# 既不能证明数据连续，也不能证明未被误删。升级须「写哨兵 → 升级 → 读回完全一致」；
+# 卸载须「写哨兵 → 卸载 → data/install/runtime 保留 → 重装后读回完全一致」。
+
+CONTINUITY_SCRIPTS = (
+    "installer_smoke_upgrade.ps1",
+    "installer_smoke_uninstall.ps1",
+)
+
+# 旧「非空即通过」判据：对 fileCount* 变量做 -gt 0 断言。
+_NONEMPTY_ONLY_ASSERTION = re.compile(r"\$fileCount(?:Before|After|AfterUninstall)?[^\n]*-gt\s+0")
+
+# 两脚本共用的真实认证路径与 PG 根证据判据。
+_AUTHENTICATED_PSQL_SNIPPETS = (
+    '$PgInstallDir = Join-Path (Split-Path -Parent $PgDataDir) "install"',
+    '$PgRuntimeDir = Join-Path (Split-Path -Parent $PgDataDir) "runtime"',
+    '$PgPasswordFile = Join-Path $PgRuntimeDir "password"',
+    '$PsqlExePath = Join-Path $PgInstallDir "bin\\psql.exe"',
+    '$PgVersionFile = Join-Path $PgDataDir "PG_VERSION"',
+    "PGPW2:",
+    "[System.Security.Cryptography.ProtectedData]::Unprotect",
+    "[System.Security.Cryptography.DataProtectionScope]::CurrentUser",
+    'throw "password file missing',
+    "$env:PGPASSWORD = $Password",
+    "Remove-Item Env:PGPASSWORD",
+    "postmaster.pid",
+    "$lines[3]",
+    '$PgUsername = "postgres"',
+    '$PgDatabase = "qtrading"',
+    "on conflict (id) do update set marker = excluded.marker",
+)
+
+
+@pytest.mark.parametrize("script_name", CONTINUITY_SCRIPTS)
+def test_data_continuity_scripts_drop_nonempty_only_criterion(script_name: str) -> None:
+    """负向：升级/卸载脚本不得再以「目录非空」作为数据保留的唯一判据。"""
+    text = _read(script_name)
+    assert _NONEMPTY_ONLY_ASSERTION.search(text) is None, (
+        f"{script_name} 仍以 `$fileCount* -gt 0` 作为数据保留判据；"
+        "必须改为断言已提交业务哨兵可读回、PG_VERSION/password/install 完整保留"
+    )
+    assert "$fileCountBefore" not in text
+    assert "$fileCountAfter" not in text
+
+
+def test_nonempty_only_pattern_is_effective() -> None:
+    """负向：检查器本身必须能识别旧判据，避免负向断言恒真。"""
+    legacy = """$fileCountAfter = (Get-ChildItem -Path $PgDataDir -Recurse | Measure-Object).Count
+Assert-True ($fileCountAfter -gt 0) "PGDATA dir still non-empty"
+"""
+    assert _NONEMPTY_ONLY_ASSERTION.search(legacy) is not None
+
+
+@pytest.mark.parametrize("script_name", CONTINUITY_SCRIPTS)
+def test_data_continuity_scripts_use_authenticated_psql(script_name: str) -> None:
+    """两脚本必须走真实认证路径（DPAPI 密码 + postmaster.pid 端口 + 安装目录 psql）。"""
+    text = _read(script_name)
+    for snippet in _AUTHENTICATED_PSQL_SNIPPETS:
+        assert snippet in text, f"{script_name} 缺少真实认证/证据片段：{snippet}"
+    # 严禁伪造密码文件或把密码写入命令行/日志。
+    assert "Write-Host $Password" not in text
+    assert "fake_sidecar_pwd" not in text
+    assert re.search(r"Set-Content[^\n]*(?:password|pwd)", text, re.IGNORECASE) is None
+
+
+def _sentinel_guards_marker_format(text: str) -> bool:
+    """哨兵 marker 必须经格式校验后再拼入 SQL，防止注入/引号问题。"""
+    return "-match '^d17-t02-[0-9a-f]{32}$'" in text and 'throw "sentinel marker format invalid"' in text
+
+
+def test_sentinel_marker_format_guard_rejects_injected_value() -> None:
+    """负向：含引号/分号的 marker 必须被格式校验拒绝（防止拼字符串注入）。"""
+    pattern = re.compile(r"^d17-t02-[0-9a-f]{32}$")
+    assert pattern.match("d17-t02-" + "a" * 32) is not None
+    assert pattern.match("d17-t02-" + "a" * 32 + "';drop table x") is None
+    assert pattern.match("d17-t02-'" + "a" * 32) is None
+
+
+def test_upgrade_script_round_trips_sentinel_across_upgrade() -> None:
+    """升级脚本必须：写已提交哨兵 → 记录 PG 根证据 → 升级 → 读回完全一致 + PG_VERSION 未变。"""
+    text = _read("installer_smoke_upgrade.ps1")
+
+    assert '$SentinelTable = "smoke_upgrade_sentinel"' in text
+    assert '[Guid]::NewGuid().ToString("N")' in text
+    assert _sentinel_guards_marker_format(text), (
+        "升级脚本的哨兵 marker 未做格式校验（GUID 外字符可能破坏 SQL 引号/注入）"
+    )
+    assert "Assert-True ($sentinelReadBefore -eq $sentinel)" in text
+    assert "Assert-True ($sentinelAfterUpgrade -eq $sentinel)" in text
+
+    # PG 根证据：升级前记录 PG_VERSION 内容、runtime\password、install psql；升级后逐项比对。
+    assert "$pgVersionBefore = (Get-Content -Path $PgVersionFile -Raw).Trim()" in text
+    assert "$pgVersionAfter = (Get-Content -Path $PgVersionFile -Raw).Trim()" in text
+    assert "Assert-True ($pgVersionAfter -eq $pgVersionBefore)" in text
+    assert "Assert-True (Test-Path $PgPasswordFile)" in text
+    assert "Assert-True (Test-Path $PsqlExePath)" in text
+
+    # 结构顺序：写哨兵 → 升级安装 → 读回；顺序颠倒（先读回后升级）即为恒真伪验证。
+    insert_idx = text.index("$sentinelInsertSql")
+    upgrade_idx = text.index("$upgradeInstallerProc = Start-Process -FilePath $InstallerPath")
+    readback_idx = text.index("$sentinelAfterUpgrade = Invoke-Psql")
+    assert insert_idx < upgrade_idx < readback_idx, "升级脚本必须按「写哨兵 → 升级安装 → 读回哨兵」顺序执行"
+
+
+def test_uninstall_script_preserves_pg_root_and_reinstall_reuses_data() -> None:
+    """卸载脚本必须：写哨兵 → 卸载 → data/PG_VERSION/runtime/install 保留 → 重装读回一致。"""
+    text = _read("installer_smoke_uninstall.ps1")
+
+    assert '$SentinelTable = "smoke_uninstall_sentinel"' in text
+    assert '[Guid]::NewGuid().ToString("N")' in text
+    assert _sentinel_guards_marker_format(text)
+    assert "Assert-True ($sentinelReadBefore -eq $sentinel)" in text
+    assert "Assert-True ($sentinelAfterReinstall -eq $sentinel)" in text
+
+    # 程序目录被移除（卸载完成），但 PG 根完整保留。
+    assert "Assert-True (-not (Test-Path $SidecarExePath))" in text
+    assert "$pgVersionBefore = (Get-Content -Path $PgVersionFile -Raw).Trim()" in text
+    assert "$pgVersionAfterUninstall = (Get-Content -Path $PgVersionFile -Raw).Trim()" in text
+    assert "Assert-True ($pgVersionAfterUninstall -eq $pgVersionBefore)" in text
+    assert "Assert-True (Test-Path $PgDataDir)" in text
+    assert "Assert-True (Test-Path $PgPasswordFile)" in text
+    assert "Assert-True (Test-Path $PsqlExePath)" in text
+
+    # 重装同变体：不得新增第二次对 $InstallerPath 的直接调用（复用变量保持单次原调用断言）。
+    assert "$ReinstallPath = $InstallerPath" in text
+    assert (
+        "$reinstallProc = Start-Process -FilePath $ReinstallPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait"
+        in text
+    )
+    assert "Assert-True ($reinstallProc.ExitCode -eq 0)" in text
+
+    # 结构顺序：写哨兵 → 卸载 → 保留断言 → 重装 → 读回。
+    insert_idx = text.index("$sentinelInsertSql")
+    uninstall_idx = text.index("Start-Process -FilePath $UninstallerPath")
+    preserved_idx = text.index("Assert-True ($pgVersionAfterUninstall -eq $pgVersionBefore)")
+    reinstall_idx = text.index("$reinstallProc = Start-Process -FilePath $ReinstallPath")
+    readback_idx = text.index("$sentinelAfterReinstall = Invoke-Psql")
+    assert insert_idx < uninstall_idx < preserved_idx < reinstall_idx < readback_idx, (
+        "卸载脚本必须按「写哨兵 → 卸载 → 保留断言 → 重装 → 读回」顺序执行"
+    )
