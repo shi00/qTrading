@@ -94,17 +94,6 @@ def metadata_db_engine(pg_params):
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
 
-    asyncio.run(_create_db())
-
-    # Create engine and tables
-    # D5.1: SQLAlchemy 2.1 起裸 postgresql:// 默认驱动为 psycopg3，同步路径显式 +psycopg2。
-    db_url = f"postgresql+psycopg2://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
-    engine = create_engine(db_url)
-    Base.metadata.create_all(engine)
-
-    yield engine, db_name
-
-    # Cleanup: drop database
     async def _drop_db():
         conn = await asyncpg.connect(
             host=params["host"],
@@ -116,8 +105,24 @@ def metadata_db_engine(pg_params):
         await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
         await conn.close()
 
-    engine.dispose()
-    asyncio.run(_drop_db())
+    engine = None
+    try:
+        asyncio.run(_create_db())
+
+        # Create engine and tables
+        # D5.1: SQLAlchemy 2.1 起裸 postgresql:// 默认驱动为 psycopg3，同步路径显式 +psycopg2。
+        db_url = (
+            f"postgresql+psycopg2://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
+        )
+        engine = create_engine(db_url)
+        Base.metadata.create_all(engine)
+
+        yield engine, db_name
+    finally:
+        # Cleanup must also run if setup fails before yield (R7).
+        if engine is not None:
+            engine.dispose()
+        asyncio.run(_drop_db())
 
 
 @pytest.fixture(scope="module")
@@ -137,24 +142,6 @@ def alembic_db_engine(pg_params):
         await conn.execute(f'CREATE DATABASE "{db_name}"')
         await conn.close()
 
-    asyncio.run(_create_db())
-
-    # Create engine and run Alembic migration
-    # URL-encode password to handle special characters like '@', ':', '/' etc.
-    # D5.1: 同步 engine 显式 +psycopg2（SQLAlchemy 2.1 默认 driver 改为 psycopg 3）。
-    encoded_pwd = quote_plus(params["password"]) if params.get("password") else ""
-    db_url = f"postgresql+psycopg2://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
-    engine = create_engine(db_url)
-
-    # 统一使用 override_db_url 覆盖 DB URL（P2-4）
-    from data.persistence.db_url_override import override_db_url
-
-    with override_db_url(db_url):
-        cfg = _make_alembic_cfg(db_url)
-        command.upgrade(cfg, "head")
-        yield engine, db_name
-
-    # Cleanup: drop database
     async def _drop_db():
         conn = await asyncpg.connect(
             host=params["host"],
@@ -166,8 +153,29 @@ def alembic_db_engine(pg_params):
         await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
         await conn.close()
 
-    engine.dispose()
-    asyncio.run(_drop_db())
+    engine = None
+    try:
+        asyncio.run(_create_db())
+
+        # Create engine and run Alembic migration
+        # URL-encode password to handle special characters like '@', ':', '/' etc.
+        # D5.1: 同步 engine 显式 +psycopg2（SQLAlchemy 2.1 默认 driver 改为 psycopg 3）。
+        encoded_pwd = quote_plus(params["password"]) if params.get("password") else ""
+        db_url = f"postgresql+psycopg2://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
+        engine = create_engine(db_url)
+
+        # 统一使用 override_db_url 覆盖 DB URL（P2-4）
+        from data.persistence.db_url_override import override_db_url
+
+        with override_db_url(db_url):
+            cfg = _make_alembic_cfg(db_url)
+            command.upgrade(cfg, "head")
+            yield engine, db_name
+    finally:
+        # Cleanup must also run if setup fails before yield (R7).
+        if engine is not None:
+            engine.dispose()
+        asyncio.run(_drop_db())
 
 
 class TestMetadataVsAlembicConsistency:
