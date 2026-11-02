@@ -384,6 +384,25 @@ class TestSingletonRegistryConsistency:
         )
 
 
+def _stub_doc_checks_except(monkeypatch: pytest.MonkeyPatch, *real_checks: str) -> None:
+    """把 main() 聚合的其余 check_* 替换为无错数据源，使用例仅依赖 tmp_path 夹具。
+
+    main() 是 CI 的退出码边界：任一项检查报错都必须返回非零。仅保留 ``real_checks``
+    指向的真实检查函数读取夹具，其余检查置空，避免用例被仓库真实文档状态漂移干扰。
+    """
+    import check_docs_consistency as docs_check
+
+    for name in dir(docs_check):
+        if not name.startswith("check_") or name in real_checks:
+            continue
+        if not callable(getattr(docs_check, name)):
+            continue
+        if name == "check_governance_id_glossary":
+            monkeypatch.setattr(docs_check, name, lambda: ([], []))
+        else:
+            monkeypatch.setattr(docs_check, name, lambda: [])
+
+
 class TestDocsConsistencyScript:
     """C5: scripts/check_docs_consistency.py 契约测试。
 
@@ -441,6 +460,52 @@ class TestDocsConsistencyScript:
         from check_docs_consistency import main
 
         assert main() == 0, "check_docs_consistency.py main() should return 0 when all checks pass"
+
+    def test_main_returns_one_on_version_mismatch(self, tmp_path, monkeypatch, capsys):
+        """检测到版本不一致时 main() 必须返回 1（CI 合并阻断依赖该退出码）。"""
+        import check_docs_consistency as docs_check
+
+        _stub_doc_checks_except(monkeypatch, "check_version_consistency")
+        stale_doc = tmp_path / "stale_version.md"
+        stale_doc.write_text("> **对应版本**：9.9.9\n", encoding="utf-8")
+        monkeypatch.setattr(docs_check, "CHECKED_DOCS", [stale_doc])
+
+        assert docs_check.main() == 1, "治理错误未被聚合为退出码 1，门禁将失效"
+
+        captured = capsys.readouterr()
+        assert "[FAIL]" in captured.err, f"错误摘要应写入 stderr, got: {captured.err!r}"
+        assert "9.9.9" in captured.err, f"应输出具体版本错误, got: {captured.err!r}"
+        assert "[PASS]" not in captured.out, f"失败路径不应输出 [PASS], got: {captured.out!r}"
+
+    def test_main_returns_one_on_link_errors(self, tmp_path, monkeypatch, capsys):
+        """锚点死链 + 相对链接死链均被检测时，main() 返回 1 且聚合全部错误。"""
+        import check_docs_consistency as docs_check
+
+        _stub_doc_checks_except(monkeypatch, "check_anchor_dead_links", "check_relative_dead_links")
+        broken_doc = tmp_path / "broken_links.md"
+        broken_doc.write_text(
+            "# 标题\n\n[同文件死锚点](#missing-heading)\n[相对死链](./missing_target.md)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(docs_check, "CHECKED_DOCS", [broken_doc])
+
+        assert docs_check.main() == 1, "链接死链未被聚合为退出码 1，门禁将失效"
+
+        captured = capsys.readouterr()
+        assert "锚点死链" in captured.err, f"应输出锚点死链错误, got: {captured.err!r}"
+        assert "相对链接死链" in captured.err, f"应聚合相对链接死链错误, got: {captured.err!r}"
+
+    def test_main_returns_zero_when_all_checks_pass(self, monkeypatch, capsys):
+        """全部检查无错时 main() 返回 0（成功路径与失败路径的退出码语义对称）。"""
+        import check_docs_consistency as docs_check
+
+        _stub_doc_checks_except(monkeypatch)
+
+        assert docs_check.main() == 0, "全部检查通过时 main() 应返回 0"
+
+        captured = capsys.readouterr()
+        assert "[PASS]" in captured.out, f"通过路径应输出 [PASS], got: {captured.out!r}"
+        assert "[FAIL]" not in captured.err, f"通过路径不应输出 [FAIL], got: {captured.err!r}"
 
     def test_count_local_hooks_matches_config(self):
         """_count_local_hooks 返回 .pre-commit-config.yaml 实际 hook 数量。"""
