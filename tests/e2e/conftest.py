@@ -1638,18 +1638,19 @@ async def _e2e_page_with_viewport(
 
     # PR-4 Task 4.6: Fail-fast canary — probe EIDS.NAV.SCREENER (5s timeout).
     # If nav anchor 不渲染，说明 app anchor 基础设施损坏（Semantics/anchored 未生效），
-    # 跳过整个文件并给出清晰错误信息，避免每个 nav 交互都等 45s Playwright 超时。
+    # 必须 fail-closed 让当前用例失败，避免锚点回归被 skip 掩盖成 CI 绿色。
+    # 环境不可用（如 sidecar binary 缺失）已由 real_sidecar_binary_e2e fixture 显式 skip。
     # 正常路径：nav anchor 在页面加载时已渲染，探测 <100ms，无附加延迟。
     try:
         ap = AnchorPage(fp.page, fp)
         await ap.expect_visible(EIDS.NAV.SCREENER, timeout_ms=5000)
     except Exception as canary_exc:
         await _teardown_page(fp, request, failed=True)
-        pytest.skip(
+        pytest.fail(
             f"E2E canary failed: EIDS.NAV.SCREENER not visible within 5s after page load. "
             f"App anchor infrastructure may be broken (Semantics/anchored not effective). "
-            f"Skipping all tests in this file. Error: {canary_exc}",
-            allow_module_level=False,
+            f"Failing this test instead of skipping. Error: {canary_exc}",
+            pytrace=False,
         )
 
     try:
