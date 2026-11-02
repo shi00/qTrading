@@ -80,9 +80,11 @@ _DYNAMIC_KEY_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
-# OSS-04：baseline 死键数上限（棘轮天花板）。清理死键递减后须手动下调；
-# 防止向 baseline 塞键 + count 同步 +1 静默放宽棘轮（对抗检视 D-2 加固）。
-_BASELINE_CEILING = 216
+# OSS-04：baseline 死键数上限（棘轮天花板），必须与 tests/i18n_dead_keys_baseline.json 的
+# count 严格一致（当前 214），由 test_no_new_unreferenced_i18n_keys 断言守护。
+# 新增死键不得上调本常量（否则棘轮失效）；清理死键递减后须在同一提交同步下调，
+# 防止「塞键 + count 同步递增」或天花板虚高静默放宽棘轮（对抗检视 D-2 加固）。
+_BASELINE_CEILING = 214
 
 
 class TestI18nKeysCompleteness(unittest.TestCase):
@@ -369,7 +371,8 @@ class TestI18nKeysCompleteness(unittest.TestCase):
            摘 baseline 键 + 减 count」四处修改（任一中间态提交都会被本组断言拦截）
         4. len(baseline keys) == count：baseline JSON 自洽，防 count 虚高静默放宽棘轮
         5. baseline 与 allowlist 互斥：动态活键不得登记进死键 baseline（语义分离）
-        6. count ≤ _BASELINE_CEILING：棘轮天花板，防「塞键 + count 同步递增」绕过棘轮
+        6. _BASELINE_CEILING == count 且 count ≤ _BASELINE_CEILING：棘轮天花板，防「塞键 +
+           count 同步递增」绕过棘轮；天花板虚高或清理死键后未同步下调同样 FAIL
         """
         project_root = Path(__file__).parent.parent.parent
         baseline_path = project_root / "tests" / "i18n_dead_keys_baseline.json"
@@ -394,6 +397,13 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             _BASELINE_CEILING,
             f"baseline count ({baseline_count}) 超过棘轮天花板 {_BASELINE_CEILING}；"
             f"死键只减不增，清理后须下调 _BASELINE_CEILING 而非上调",
+        )
+        # OSS-04 断言 f：天花板须与当前 baseline count 严格一致，防天花板虚高静默放宽棘轮
+        self.assertEqual(
+            _BASELINE_CEILING,
+            baseline_count,
+            f"i18n dead-key 棘轮天花板 (_BASELINE_CEILING={_BASELINE_CEILING}) 与当前 baseline "
+            f"count ({baseline_count}) 不一致；新增死键不得上调天花板，清理死键后须同步下调",
         )
         # OSS-04 断言 d：动态活键与死键登记互斥
         overlap = baseline_keys & _DYNAMIC_KEY_ALLOWLIST
