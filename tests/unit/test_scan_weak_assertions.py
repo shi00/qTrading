@@ -935,3 +935,149 @@ class TestWeakIsNotNone:
         )
         issues = scan_file(f)
         assert any(i.issue_type == "weak_is_not_none" for i in issues)
+
+
+class TestAsyncAndScopeAttribution:
+    """D15-F06：async 测试函数覆盖，以及断言归属到最近封闭函数。
+
+    Regression: 扫描器此前只收集 ``ast.FunctionDef``，async 测试的空测试体、
+    print、``is not None`` 终态均漏扫；``_find_parent_func`` 仅按 lineno
+    区间匹配，嵌套 helper 中的 print/断言会被误归到外层 test_ 函数。
+    """
+
+    def test_detects_empty_async_test_body(self, tmp_path):
+        f = _write_test_file(tmp_path, "test_x.py", "async def test_a():\n    pass\n")
+        issues = scan_file(f)
+        assert any(i.issue_type == "empty_test" for i in issues)
+
+    def test_detects_weak_print_in_async_test(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "async def test_a():\n    result = await func()\n    print(result)\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_print" for i in issues)
+
+    def test_detects_weak_is_not_none_in_async_test(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "async def test_a():\n    result = await func()\n    assert result is not None\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_is_not_none" for i in issues)
+
+    def test_detects_async_is_not_none_ratio(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "async def test_a():\n    assert a is not None\n    assert b is not None\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_is_not_none_ratio" for i in issues)
+
+    def test_async_call_count_with_content_assertion_not_flagged(self, tmp_path):
+        """async 测试内同函数有 call_args 内容断言时，不应报 weak_call_count。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "async def test_a():\n"
+            "    m = Mock()\n"
+            "    m(1)\n"
+            "    assert len(m.call_args_list) == 1\n"
+            "    assert m.call_args_list[0] == call(1)\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_call_count" for i in issues)
+
+    def test_nested_helper_print_not_attributed_to_outer_test(self, tmp_path):
+        """嵌套 helper 中的 print 不属于外层 test_ 函数，不应报 weak_print。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    def helper():\n        result = func()\n        print(result)\n    helper()\n",
+        )
+        issues = scan_file(f)
+        assert issues == []
+
+    def test_nested_async_helper_print_not_attributed_to_outer_test(self, tmp_path):
+        """嵌套 async helper 中的 print 同样不应归属外层 test_ 函数。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    async def helper():\n        print('debug')\n    helper()\n",
+        )
+        issues = scan_file(f)
+        assert issues == []
+
+    def test_nested_helper_assert_does_not_suppress_outer_terminal(self, tmp_path):
+        """helper 内的强断言不应干扰外层 assert is not None 的终态判定。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n"
+            "    result = func()\n"
+            "    assert result is not None\n"
+            "    def helper():\n"
+            "        assert helper_result == 1\n"
+            "    helper()\n",
+        )
+        issues = scan_file(f)
+        terminal = [i for i in issues if i.issue_type == "weak_is_not_none"]
+        assert len(terminal) == 1
+        assert terminal[0].line_no == 3
+
+    def test_nested_helper_is_not_none_not_attributed_to_outer_test(self, tmp_path):
+        """helper 内的 assert is not None 不属于外层 test_ 函数，不应被检出。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n"
+            "    def helper():\n"
+            "        value = build()\n"
+            "        assert value is not None\n"
+            "    helper()\n",
+        )
+        issues = scan_file(f)
+        assert issues == []
+
+    def test_decorated_async_test_detected(self, tmp_path):
+        """装饰器不应影响 async 测试函数体内断言的归属。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "@pytest.mark.asyncio\nasync def test_a():\n    result = await func()\n    print(result)\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_print" and i.line_no == 4 for i in issues)
+
+    def test_async_test_method_in_class_detected(self, tmp_path):
+        """类中的 async test_ 方法应被覆盖。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "class TestX:\n    async def test_a(self):\n        pass\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "empty_test" for i in issues)
+
+    def test_lambda_in_test_does_not_crash_or_misattribute(self, tmp_path):
+        """lambda 不构成断言归属边界，且不应干扰同一测试的强断言。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    fn = lambda: 1\n    assert fn() == 1\n",
+        )
+        issues = scan_file(f)
+        assert issues == []
+
+    def test_class_body_assert_not_attributed_to_outer_test(self, tmp_path):
+        """测试函数内定义的类，其类体断言不归属外层 test_ 函数。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    class Inner:\n        assert value is not None\n    assert flag == 1\n",
+        )
+        issues = scan_file(f)
+        assert issues == []
