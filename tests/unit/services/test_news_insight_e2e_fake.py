@@ -134,11 +134,22 @@ async def test_delayed_honors_delay_and_still_succeeds() -> None:
 
 
 async def test_delayed_cancel_propagates_cancelled_error() -> None:
-    """取消传播（R2）：delayed 场景的 asyncio.sleep 被取消时应抛 CancelledError。"""
+    """取消传播（R2）：delayed 场景进入 asyncio.sleep 后取消，CancelledError 应传播。"""
     svc = E2EFakeAIService(_env("delayed", "10000"))
-    task = asyncio.create_task(svc.analyze_news_risk(_request()))
+    started = asyncio.Event()
+
+    async def _run():
+        # 协程已开始执行后打点；从 set() 到 analyze_news_risk 内的 await asyncio.sleep
+        # 之间没有让步点，因此测试被唤醒时任务已真正停在 delayed 的休眠上，
+        # 而非停在「创建后尚未首次运行」的平凡取消路径。
+        started.set()
+        return await svc.analyze_news_risk(_request())
+
+    task = asyncio.create_task(_run())
+    await started.wait()
+    assert not task.done(), "取消前任务应仍停在 delayed 的 asyncio.sleep，未提前完成"
+    task.cancel()
     with pytest.raises(asyncio.CancelledError) as excinfo:
-        task.cancel()
         await task
     # R2 取消传播：异常必须为 CancelledError 且任务标记为已取消
     assert isinstance(excinfo.value, asyncio.CancelledError)
