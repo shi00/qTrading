@@ -5,7 +5,7 @@
 - fi_01_sidecar_exit_11_initdb_failed (#1): sidecar exit code 11 → initdb_failed 映射
 - fi_02_migration_failure (#2): sidecar 启动成功后 migration 失败 → RuntimeError 传播
 - fi_05_pgdata_lock_exit_50 (#5): sidecar exit code 50 → "qTrading already running" 映射
-- fi_06_disk_full_exit_15 (#6): sidecar exit code 15 → "disk full" 映射
+- fi_06_preflight_exit_15 (#6): sidecar exit code 15 → 资源预检失败通用映射
 - fi_07_sha256_mismatch (#7): .sha256 文件与实际 binary 不符 → Popen 前拒绝启动
 - fi_10_cancelled_error_cleanup (#10): asyncio.cancel() → _cleanup_failed_start 清理子进程
 - fi_11_timezone_mismatch (#11): Python tzname=UTC + sidecar JSON timezone=Asia/Shanghai → doctor() 仍成功
@@ -249,12 +249,12 @@ class TestFi05PgdataLockExit50:
 
 
 # =============================================================================
-# fi_06: sidecar exit code 15 → disk full（§17.6 #6）
+# fi_06: sidecar exit code 15 → resource preflight failed（§17.6 #6）
 # =============================================================================
-class TestFi06DiskFullExit15:
+class TestFi06PreflightExit15:
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_fi_06_disk_full_exit_15(self, tmp_path: Path) -> None:
-        """§17.6 #6: sidecar 返回 exit code 15 → 错误信息含 'disk full'。"""
+    async def test_fi_06_preflight_exit_15(self, tmp_path: Path) -> None:
+        """§17.6 #6: sidecar 返回 exit code 15 → 通用资源预检失败提示（不声称磁盘满）。"""
         from data.persistence.embedded_postgres import service as svc_module
         from data.persistence.embedded_postgres.service import (
             EmbeddedPostgresService,
@@ -268,7 +268,7 @@ class TestFi06DiskFullExit15:
                 return _FakePopen(*args, exit_code=15, stdout_line="", **kwargs)
 
             with patch.object(svc_module.subprocess, "Popen", popen_factory):
-                with pytest.raises(EmbeddedPostgresStartError, match="disk full"):
+                with pytest.raises(EmbeddedPostgresStartError, match="resource preflight failed"):
                     await service.start()
 
             assert len(_FakePopen.instances) == 1

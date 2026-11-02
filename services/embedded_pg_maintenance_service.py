@@ -14,7 +14,8 @@
   维护命令必须与 ``run --username`` 一致，否则角色认证/改密作用于错误角色；默认配置不传该参数，
   兼容不支持 ``--username`` 的旧 sidecar）。dump/restore/maintenance-shell 与 reset-password
   均由同一实现透传（M21 / M23）
-- exit code 20 (PG 未运行) 在 doctor 命令中容忍为成功（sidecar doctor 是只读诊断）
+- exit code 语义正本为 ``sidecars/qtrading-pg-sidecar/src/exit_codes.rs`` 与 how-to §9.6；
+  doctor 只返回 0/2，任何非 0 退出（含 20 STOP_FAILED）均按失败处理
 """
 
 from __future__ import annotations
@@ -124,16 +125,31 @@ class MaintenanceShellInfo:
 
 
 # exit code → (错误类型, 日志级别, 用户提示)
-# 对齐 sidecar exit_codes.rs 与 §13.2 错误分类映射表
+# 逐项对齐 sidecar ``exit_codes.rs`` 常量与 how-to §9.6；退出码编号 append-only。
+# 15 为多种资源预检失败的通用码（磁盘空间 / 目录权限 / 文件系统 / 网盘同步路径 /
+# 密码文件权限），不得固化为「磁盘空间不足」或编造剩余空间数值。
 _EXIT_CODE_MAP: dict[int, tuple[str, int, str]] = {
-    2: ("sidecar_argument_error", logging.ERROR, "维护命令参数非法（检查用户名/库名）"),
-    10: ("sidecar_arg_error", logging.ERROR, "维护命令参数错误"),
+    2: ("sidecar_argument_error", logging.ERROR, "维护命令参数错误（请检查用户名、库名、数据目录）"),
+    10: ("setup_failed", logging.ERROR, "内置 PostgreSQL 组件安装/解压失败，请重新安装 qTrading 后重试"),
     11: ("initdb_failed", logging.ERROR, "数据库初始化失败"),
     12: ("pg_start_failed", logging.ERROR, "数据库启动失败"),
-    15: ("disk_full", logging.WARNING, "磁盘空间不足，请清理后重试"),
-    20: ("pg_not_running", logging.INFO, ""),  # 幂等，doctor 容忍
-    40: ("pgdata_corrupt", logging.ERROR, "数据目录损坏，请使用恢复向导"),
+    13: ("health_check_failed", logging.ERROR, "数据库启动后健康检查失败"),
+    14: ("create_database_failed", logging.ERROR, "业务数据库创建失败"),
+    15: (
+        "preflight_failed",
+        logging.WARNING,
+        "资源预检失败（磁盘空间、目录权限、文件系统、网盘同步路径、密码文件权限），请按 sidecar 提示处理后重试",
+    ),
+    16: ("password_failed", logging.ERROR, "密码文件缺失/不可解密或认证不匹配，请按文档执行 reset-password 后重试"),
+    20: ("stop_failed", logging.ERROR, "停止 PostgreSQL 失败（进程仍存活），请查看 sidecar 日志后重试"),
+    30: ("dump_restore_failed", logging.ERROR, "备份/恢复执行失败，请检查备份文件与 sidecar 输出"),
+    40: (
+        "data_dir_abnormal",
+        logging.ERROR,
+        "数据目录状态异常（非空但未初始化、版本不匹配、文件损坏或缺失），请先运行 doctor 并按恢复文档处理",
+    ),
     50: ("lock_conflict", logging.WARNING, "请先关闭 qTrading 再执行维护操作"),
+    60: ("postgres_died", logging.ERROR, "PostgreSQL 进程意外退出（sidecar 不自动重启），请重启 qTrading"),
 }
 
 
@@ -181,15 +197,16 @@ class EmbeddedPgMaintenanceService:
         """运行 sidecar doctor 命令，返回诊断结果。
 
         Raises:
-            EmbeddedPgMaintenanceError: sidecar 非 0 退出（exit 20 除外）或 JSON 解析失败
+            EmbeddedPgMaintenanceError: sidecar 非 0 退出（doctor 契约仅 0/2）或 JSON 解析失败
             asyncio.CancelledError: R2 透传（由 ThreadPoolManager.run_async 传播）
         """
         # R16: argv 构建含动态版本解析（resolve_pg_major_version 运行阻塞子进程），
         # 经 to_thread 卸载避免阻塞事件循环。
         argv = await asyncio.to_thread(self._build_doctor_argv)
         exit_code, stdout, stderr = await self._run_sidecar(argv)
-        # exit 20 (PG 未运行) 容忍为成功：doctor 是只读诊断，PG 未运行时仍可输出 JSON
-        if exit_code != 0 and exit_code != 20:
+        # doctor 的退出码语义正本为 exit_codes.rs/how-to §9.6：诊断成功为 0（结论须解析
+        # JSON issues），参数错误/JSON 输出失败为 2；不存在「PG 未运行」的 20 成功语义。
+        if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "doctor")
         try:
             data = json.loads(stdout) if stdout.strip() else {}
@@ -526,25 +543,28 @@ class EmbeddedPgMaintenanceService:
     # ---- 错误分类 ----
 
     def _raise_for_exit_code(self, exit_code: int, stderr: str, command: str) -> None:
-        """根据 sidecar exit code 抛出分类错误（对齐 §13.2 错误分类映射表）。
+        """根据 sidecar exit code 抛出分类错误（对齐 exit_codes.rs / how-to §9.6）。
 
-        未知 exit code 按 ERROR 级别 + ``unknown_error`` 类型处理。
+        未知 exit code 按 ERROR 级别 + ``unknown_error`` 类型处理（仍为非零失败）。
+        异常消息保留原始 exit code 与脱敏后的 sidecar 原因，便于用户按真实原因处置。
         """
         error_type, log_level, user_hint = _EXIT_CODE_MAP.get(
             exit_code,
-            ("unknown_error", logging.ERROR, f"未知错误（exit={exit_code}）"),
+            ("unknown_error", logging.ERROR, f"未知错误（exit={exit_code}），请查看 sidecar 日志"),
         )
         # R9: stderr 来自 sidecar CLI 子进程，可能含 PG 数据目录路径、连接信息，
-        # 经 sanitize_error 脱敏后再记录
+        # 经 sanitize_error 脱敏后再记录/引用
+        sanitized_stderr = DataSanitizer.sanitize_error(stderr).strip()
         logger.log(
             log_level,
             "[embedded_pg_maintenance] %s command failed: exit=%s, type=%s, stderr=%s",
             command,
             exit_code,
             error_type,
-            DataSanitizer.sanitize_error(stderr),
+            sanitized_stderr,
         )
-        raise EmbeddedPgMaintenanceError(f"{command} failed: exit={exit_code}, type={error_type}; {user_hint}")
+        reason = f"; reason={sanitized_stderr}" if sanitized_stderr else ""
+        raise EmbeddedPgMaintenanceError(f"{command} failed: exit={exit_code}, type={error_type}; {user_hint}{reason}")
 
     def _validate_doctor_json(self, data: dict[str, Any]) -> DoctorResult:
         """校验 doctor JSON schema 版本并解析为 DoctorResult（R-A3）。
