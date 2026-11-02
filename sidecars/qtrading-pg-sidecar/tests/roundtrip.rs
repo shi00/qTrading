@@ -12,9 +12,48 @@ mod common;
 mod password;
 
 use common::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// D16-T01 往返验证数据契约：NULL / Unicode / 大值 / 外键 / 迁移版本标识。
+/// SQL 以常量承载（R4：禁止拼接 SQL）。
+const VERIFY_SETUP_SQL: &str = "\
+CREATE TABLE d16_parent (id integer PRIMARY KEY, label text NOT NULL);\
+CREATE TABLE d16_roundtrip_verify (\
+    id integer PRIMARY KEY,\
+    nullable_text text,\
+    unicode_text text NOT NULL,\
+    large_text text NOT NULL,\
+    parent_id integer REFERENCES d16_parent(id)\
+);\
+CREATE TABLE d16_schema_version (version text PRIMARY KEY);\
+INSERT INTO d16_parent (id, label) VALUES (1, '根节点'), (2, 'leaf');\
+INSERT INTO d16_roundtrip_verify (id, nullable_text, unicode_text, large_text, parent_id) VALUES\
+    (1, NULL, '中文🙂', repeat('數', 100000), 1),\
+    (2, '', 'üñïçødé', 'quoted ''value''', 2);\
+INSERT INTO d16_schema_version (version) VALUES ('D16-T01-v1');";
+
+/// 逐项读回：迁移版本、行数、NULL/空串、Unicode、大值长度与摘要、外键完整性、表集合。
+const VERIFY_CONTENT_QUERY: &str = "\
+SELECT 'version=' || version FROM d16_schema_version WHERE version <> 'post-dump-only';\
+SELECT 'parent_count=' || count(*) FROM d16_parent;\
+SELECT 'child_count=' || count(*) FROM d16_roundtrip_verify;\
+SELECT 'null_count=' || count(*) FROM d16_roundtrip_verify WHERE nullable_text IS NULL;\
+SELECT 'empty_count=' || count(*) FROM d16_roundtrip_verify WHERE nullable_text = '';\
+SELECT 'unicode=' || unicode_text FROM d16_roundtrip_verify WHERE id = 1;\
+SELECT 'large_len=' || length(large_text) FROM d16_roundtrip_verify WHERE id = 1;\
+SELECT 'large_md5=' || md5(large_text) FROM d16_roundtrip_verify WHERE id = 1;\
+SELECT 'fk_orphans=' || count(*) FROM d16_roundtrip_verify c \
+ LEFT JOIN d16_parent p ON c.parent_id = p.id \
+ WHERE c.parent_id IS NOT NULL AND p.id IS NULL;\
+SELECT 'd16_table_count=' || count(*) FROM information_schema.tables \
+ WHERE table_schema = 'public' AND table_name LIKE 'd16_%';";
+
+const POST_DUMP_MARKER_SQL: &str =
+    "INSERT INTO d16_schema_version (version) VALUES ('post-dump-only');";
+const POST_DUMP_MARKER_QUERY: &str =
+    "SELECT count(*) FROM d16_schema_version WHERE version = 'post-dump-only';";
 
 /// 1. setup/run/status/stop 完整生命周期 roundtrip（§17.2 场景 1）。
 ///
@@ -277,16 +316,35 @@ fn test_run_reset_password_run_custom_username() {
 }
 
 /// 6. dump/restore roundtrip（§17.2 场景 6）。
+///
+/// D16-T01：不仅验证 exit/目录存在，还先写入覆盖 NULL/Unicode/大值/外键/迁移版本标识的
+/// 合成数据，恢复后重新启动恢复库逐项读回比对；dump 之后再写一行，验证默认恢复只回到
+/// dump 时点、而 `.bak-*` 可作为独立回退恢复到中断前状态。
 #[test]
 fn test_dump_restore_roundtrip() {
     let (_tmp, data_dir) = unique_data_dir("roundtrip_6");
+    let base = data_dir.parent().unwrap().to_path_buf();
 
     // run → ready
     let mut child = spawn_run(&data_dir);
-    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    let ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    let port = ready_port(&ready).expect("port in ready JSON");
+
+    // 往返前写入合成数据，并记录源库逐项校验结果作为恢复后的比对基准。
+    psql_query(&base, port, VERIFY_SETUP_SQL);
+    let expected_content = psql_query(&base, port, VERIFY_CONTENT_QUERY);
+    assert!(
+        !expected_content.is_empty(),
+        "content verification query should return rows"
+    );
+    assert_eq!(
+        psql_query(&base, port, POST_DUMP_MARKER_QUERY).trim(),
+        "0",
+        "precondition: no post-dump row before dump"
+    );
 
     // dump（运行中实例直连）
-    let dump_path = data_dir.parent().unwrap().join("backup.dump");
+    let dump_path = base.join("backup.dump");
     let (dump_code, dump_stderr) = dump_sidecar_with_stderr(&data_dir, &dump_path);
     if dump_code != 0 {
         panic!(
@@ -295,9 +353,18 @@ fn test_dump_restore_roundtrip() {
     }
     assert!(dump_path.exists(), "dump file should exist");
 
+    // dump 之后继续写入：默认恢复必须丢弃该行，.bak 回退必须保留该行。
+    psql_query(&base, port, POST_DUMP_MARKER_SQL);
+    assert_eq!(
+        psql_query(&base, port, POST_DUMP_MARKER_QUERY).trim(),
+        "1",
+        "post-dump row should be visible in source before restore"
+    );
+
     // 优雅停止 sidecar（外部 stop 命令在 sidecar 运行时返回 50 锁冲突，§13.3）
     graceful_stop(&mut child);
-    let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
+    let exit = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(exit, 0, "sidecar should stop gracefully before restore");
 
     // restore → 原目录保留为 .bak-*，stdout 输出当前数据目录（§12.2 契约）
     let (restore_code, restore_stdout, restore_stderr) =
@@ -314,22 +381,145 @@ fn test_dump_restore_roundtrip() {
         "stdout 报告的目标目录应指向已恢复的数据目录: {reported}"
     );
 
-    // 验证 .bak-* 目录存在
-    let parent = data_dir.parent().unwrap();
-    let bak_dirs: Vec<_> = std::fs::read_dir(parent)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("data.bak-"))
-        .collect();
+    // 验证 .bak-* 目录存在且是独立可启动的 PGDATA
+    let baks = sibling_dirs(&base, "data.bak-");
+    assert_eq!(baks.len(), 1, "restore 应产生且仅产生一个 .bak 目录");
+    let bak = &baks[0];
     assert!(
-        !bak_dirs.is_empty(),
-        "should have .bak-* directory after restore"
+        bak.join("PG_VERSION").exists(),
+        "备份目录应是完整 PGDATA: {}",
+        bak.display()
     );
 
-    // 清理 restore 产生的 .bak 目录
-    for entry in bak_dirs {
-        let _ = std::fs::remove_dir_all(entry.path());
-    }
+    // 重新启动恢复库，逐项读回业务内容；dump 之后的写入不得混入。
+    let mut restored = spawn_run(&data_dir);
+    let restored_ready = wait_for_ready(&mut restored, READY_TIMEOUT);
+    let restored_port = ready_port(&restored_ready).expect("port in ready JSON");
+    assert_eq!(
+        psql_query(&base, restored_port, VERIFY_CONTENT_QUERY),
+        expected_content,
+        "恢复库内容应与 dump 时点逐项一致（NULL/Unicode/大值/外键/版本标识）"
+    );
+    assert_eq!(
+        psql_query(&base, restored_port, POST_DUMP_MARKER_QUERY).trim(),
+        "0",
+        "默认恢复不得包含 dump 之后的写入"
+    );
+    graceful_stop(&mut restored);
+    assert_eq!(
+        wait_for_exit(&mut restored, STOP_TIMEOUT),
+        0,
+        "restored sidecar should stop gracefully"
+    );
+
+    // .bak 独立回退：把备份原路换回后启动，内容应为 dump 之后（含 post-dump-only 行）的状态。
+    let restored_aside = base.join("data.restored-verify");
+    std::fs::rename(&data_dir, &restored_aside).expect("move restored data aside");
+    std::fs::rename(bak, &data_dir).expect("roll back .bak to data dir");
+    let mut rolled_back = spawn_run(&data_dir);
+    let rolled_ready = wait_for_ready(&mut rolled_back, READY_TIMEOUT);
+    let rolled_port = ready_port(&rolled_ready).expect("port in ready JSON");
+    assert_eq!(
+        psql_query(&base, rolled_port, VERIFY_CONTENT_QUERY),
+        expected_content,
+        ".bak 回退后的业务内容应与中断前一致"
+    );
+    assert_eq!(
+        psql_query(&base, rolled_port, POST_DUMP_MARKER_QUERY).trim(),
+        "1",
+        ".bak 回退应保留 dump 之后写入的行"
+    );
+    graceful_stop(&mut rolled_back);
+    assert_eq!(
+        wait_for_exit(&mut rolled_back, STOP_TIMEOUT),
+        0,
+        "rolled-back sidecar should stop gracefully"
+    );
+}
+
+/// 6c. D16-T01：两次 rename 之间被强杀 → 源目录已改名为 .bak、目标尚未接管。
+///
+/// 断言：源目录缺失、`.bak` 与 `data.restore-*` 同时存在、doctor 报告残留；
+/// 随后用 `.bak` 独立回退可恢复完整业务内容（含 dump 之后的写入），证明中断可恢复。
+#[test]
+fn test_restore_killed_between_renames_keeps_bak_recoverable() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_between_renames");
+    let base = data_dir.parent().unwrap().to_path_buf();
+
+    let mut child = spawn_run(&data_dir);
+    let ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    let port = ready_port(&ready).expect("port in ready JSON");
+    psql_query(&base, port, VERIFY_SETUP_SQL);
+    let expected_content = psql_query(&base, port, VERIFY_CONTENT_QUERY);
+    let dump_path = base.join("backup.dump");
+    let (dump_code, dump_stderr) = dump_sidecar_with_stderr(&data_dir, &dump_path);
+    assert_eq!(dump_code, 0, "dump failed: {dump_stderr}");
+    psql_query(&base, port, POST_DUMP_MARKER_SQL);
+    graceful_stop(&mut child);
+    assert_eq!(wait_for_exit(&mut child, STOP_TIMEOUT), 0);
+
+    // 在「data→bak 已完成、restore→data 未执行」的同步点强杀
+    let marker = base.join("restore-between-renames.marker");
+    let mut restore = std::process::Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--input")
+        .arg(&dump_path)
+        .env(
+            "QTRADING_PG_SIDECAR_INJECT_PAUSE_AT",
+            "restore_between_renames",
+        )
+        .env("QTRADING_PG_SIDECAR_INJECT_PAUSE_MARKER", &marker)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn restore with pause injection");
+    wait_for_pause_marker(&marker, Duration::from_secs(60), "restore_between_renames");
+    let _ = restore.kill();
+    let exit = wait_for_exit(&mut restore, Duration::from_secs(30));
+    assert_ne!(exit, 0, "被强杀的 restore 不应报告成功退出");
+
+    // 源/目标状态：源目录已移走，备份与新目录均在；无进程占用。
+    assert!(
+        !data_dir.exists(),
+        "两次 rename 之间中断时源数据目录应已移走"
+    );
+    let baks = sibling_dirs(&base, "data.bak-");
+    assert_eq!(baks.len(), 1, "应存在一个 .bak 目录");
+    assert!(baks[0].join("PG_VERSION").exists());
+    let residuals = sibling_dirs(&base, "data.restore-");
+    assert!(!residuals.is_empty(), "应保留 restore 中断目录");
+    assert!(residuals[0].join("PG_VERSION").exists());
+    let _residual_guard = RemoveDirsOnDrop(residuals.clone());
+
+    let doc = doctor_json(&data_dir);
+    let listed = doc["restore_residuals"]
+        .as_array()
+        .expect("restore_residuals array");
+    assert!(
+        listed
+            .iter()
+            .any(|p| p.as_str().unwrap_or_default().contains("data.restore-")),
+        "doctor 应列出中断残留: {doc}"
+    );
+
+    // .bak 独立回退：恢复中断前完整内容（含 dump 之后写入）。
+    std::fs::rename(&baks[0], &data_dir).expect("roll back .bak to data dir");
+    let mut rolled_back = spawn_run(&data_dir);
+    let rolled_ready = wait_for_ready(&mut rolled_back, READY_TIMEOUT);
+    let rolled_port = ready_port(&rolled_ready).expect("port in ready JSON");
+    assert_eq!(
+        psql_query(&base, rolled_port, VERIFY_CONTENT_QUERY),
+        expected_content,
+        ".bak 回退后业务内容应与中断前一致"
+    );
+    assert_eq!(
+        psql_query(&base, rolled_port, POST_DUMP_MARKER_QUERY).trim(),
+        "1",
+        ".bak 回退应保留 dump 之后写入的行"
+    );
+    cleanup_sidecar(&mut rolled_back, &data_dir);
 }
 
 /// 6b. M21：自定义超级用户名 restore roundtrip（`--username` 与实例配置一致）。
@@ -761,6 +951,86 @@ fn test_maintenance_shell_outputs_json_contract() {
 }
 
 // ---- 辅助函数 ----
+
+/// 用 bundled psql 在运行中的实例上执行常量 SQL，返回 `-A -t` 逐行输出。
+/// 密码只经 `PGPASSWORD` 环境变量传递，失败诊断不输出密码（R9/R10）。
+fn psql_query(base: &Path, port: u16, sql: &str) -> String {
+    let psql_name = if cfg!(windows) { "psql.exe" } else { "psql" };
+    let psql = base.join("install").join("bin").join(psql_name);
+    let password = password::read_password_file(&base.join("runtime").join("password"))
+        .expect("read password file");
+    let out = std::process::Command::new(&psql)
+        .args([
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-U",
+            "postgres",
+            "-d",
+            "qtrading",
+            "-c",
+            sql,
+        ])
+        .env("PGPASSWORD", &password)
+        .output()
+        .expect("run bundled psql");
+    assert!(
+        out.status.success(),
+        "psql failed (port {port}): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// 列出兄弟目录中名称以 `prefix` 开头的目录（用于定位 .bak-* / data.restore-*）。
+fn sibling_dirs(base: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(base)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", base.display()))
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_dir())
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// 等待注入同步点写出的 marker 文件；超时 panic 并指出阶段，避免静默挂起。
+fn wait_for_pause_marker(path: &Path, timeout: Duration, phase: &str) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            assert_eq!(
+                content.trim(),
+                phase,
+                "marker should record the injected phase"
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "injection marker not observed within {timeout:?}: {} (phase {phase})",
+        path.display()
+    );
+}
+
+/// RAII guard：作用域退出（含 panic）时删除残留目录，避免 CI 临时目录累积。
+struct RemoveDirsOnDrop(Vec<PathBuf>);
+
+impl Drop for RemoveDirsOnDrop {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
 
 /// 执行 `reset-password` 命令，返回 (exit code, stderr)。
 /// 失败时调用方应将 stderr 纳入 assert 诊断信息，便于 CI 排查（Windows 上临时实例
