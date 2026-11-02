@@ -397,7 +397,7 @@ class TestMarketCapWeightSizer:
         """D1-M2：signals 自带 total_mv 时优先用信号日快照，不用执行日行情（防前视）。"""
         from strategies.backtest.position_sizer import MarketCapWeightSizer
 
-        # 信号日快照市值
+        # 信号日（T）快照市值：A=100、B=200 → 期望权重 1/3、2/3
         signals = pl.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
@@ -405,11 +405,11 @@ class TestMarketCapWeightSizer:
                 "total_mv": [100, 200],
             }
         )
-        # 执行日（T+1）行情市值不同——若被误用则权重错误
+        # 执行日（T+1）行情市值反向且非等比例：误用行情侧会得到 A=0.8、B=0.2
         quotes = pl.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
-                "total_mv": [1000, 2000],
+                "total_mv": [400, 100],
             }
         )
         config = BacktestConfig(
@@ -420,11 +420,55 @@ class TestMarketCapWeightSizer:
         sizer = MarketCapWeightSizer()
         result = sizer.compute_weights(signals, quotes, config)
 
-        # 必须基于信号侧 100/300、200/300，而非行情侧
+        # 必须基于信号侧 100/300、200/300，而非行情侧 400/500、100/500（0.8/0.2）
         w1 = float(result.filter(pl.col("ts_code") == "000001.SZ").select("weight").item())
         w2 = float(result.filter(pl.col("ts_code") == "000002.SZ").select("weight").item())
-        assert abs(w1 - 100 / 300) < 1e-6
-        assert abs(w2 - 200 / 300) < 1e-6
+        assert abs(w1 - 1 / 3) < 1e-6
+        assert abs(w2 - 2 / 3) < 1e-6
+
+    def test_market_cap_weights_independent_of_exec_date_quotes(self):
+        """D1-M2：同一信号日快照配不同执行日行情，权重不随 T+1 市值漂移。"""
+        from strategies.backtest.position_sizer import MarketCapWeightSizer
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [2, 1],
+                "total_mv": [100, 200],
+            }
+        )
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        sizer = MarketCapWeightSizer()
+
+        # 两组执行日市值：一组与信号日反向，一组与信号日同向但比例不同
+        quotes_reversed = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "total_mv": [400, 100],
+            }
+        )
+        quotes_shifted = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "total_mv": [50, 500],
+            }
+        )
+
+        weights_by_quotes = []
+        for quotes in (quotes_reversed, quotes_shifted):
+            result = sizer.compute_weights(signals, quotes, config)
+            w1 = float(result.filter(pl.col("ts_code") == "000001.SZ").select("weight").item())
+            w2 = float(result.filter(pl.col("ts_code") == "000002.SZ").select("weight").item())
+            assert abs(w1 - 1 / 3) < 1e-6
+            assert abs(w2 - 2 / 3) < 1e-6
+            weights_by_quotes.append((w1, w2))
+
+        # 两组执行日行情得到的权重一致（差异仅来自浮点容差，不应随行情改变）
+        for w_reversed, w_shifted in zip(weights_by_quotes[0], weights_by_quotes[1], strict=True):
+            assert abs(w_reversed - w_shifted) < 1e-12
 
     def test_market_cap_missing_mv_keeps_signal(self):
         """D1-M2：信号缺失总市值时不丢股，以候选等权均值市值兜底。"""
