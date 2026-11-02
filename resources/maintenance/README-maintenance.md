@@ -64,9 +64,11 @@ cd "<安装目录>/resources/maintenance"
 
 脚本自动使用 platformdirs 默认路径作为 `--data-dir`：
 
-- **Windows**: `%LOCALAPPDATA%\qTrading\postgres\16\data`
+- **Windows**: `%LOCALAPPDATA%\qTrading\qTrading\postgres\16\data`
 - **Linux**: `~/.local/share/qTrading/postgres/16/data`（或 `$XDG_DATA_HOME/qTrading/postgres/16/data`）
 - **macOS**: `~/Library/Application Support/qTrading/postgres/16/data`
+
+> Windows 上 platformdirs 默认追加 author（= `appname`），因此路径为 `qTrading\qTrading` 两层；Linux/macOS 忽略 author，保持单层。
 
 如需操作其他数据目录，直接调用 sidecar binary 并显式传 `--data-dir`：
 
@@ -92,7 +94,7 @@ cd "<安装目录>/resources/maintenance"
 3. **维护锁前置**：`restore` / `stop` / `maintenance-shell` / `reset-password` 及离线 `dump` 均需维护锁，qTrading 或另一维护进程运行中会拒绝（exit 50）；先正常关闭 qTrading，存在活实例时再 `stop`
 4. **操作前备份**：任何破坏性操作前先 `dump` 备份当前数据目录（凭证已丢失时 `dump` 不可用，见「故障排查」exit 16 行；数据目录损坏时 `dump` 也可能失败）
 5. **备份文件安全**：`dump` 输出为未加密的 PostgreSQL custom format 文件，请勿放入云同步目录（OneDrive / iCloud / 网盘）或共享盘，也不要通过不受控渠道传输
-6. **日志位置**：默认 sidecar 日志在 `<app data>/postgres-logs/sidecar.log`，service 日志在同目录 `embedded-pg-service.log`
+6. **日志位置**：默认 sidecar 日志在 `<app data>/postgres-logs/sidecar.log`（Windows 的 `<app data>` 为 `%LOCALAPPDATA%\qTrading\qTrading`），service 日志在同目录 `embedded-pg-service.log`
 
 ## 故障排查
 
