@@ -68,22 +68,24 @@ async def test_system_tab_tier_api_panel_rendered(e2e_page):
     probe_button = I18n.get("sys_tier_probe_button")
 
     # 轮询检测 TierApiPanel 关键文本，最多 15s（滚动后 CanvasKit 异步渲染）
-    found_keys: list[str] = []
+    # 用集合记录命中项：轮询会跨轮重复命中同一文本，若用列表累加，会被同一
+    # 元素重复计数并误导 `len >= 2` 断言，必须按不同 key 去重。
+    found_keys: set[str] = set()
     for _ in range(30):
         if await e2e_page.has_text(panel_title):
-            found_keys.append("panel_title")
+            found_keys.add("panel_title")
         if await e2e_page.has_text(tier_label):
-            found_keys.append("tier_label")
+            found_keys.add("tier_label")
         if await e2e_page.has_text(probe_button):
-            found_keys.append("probe_button")
+            found_keys.add("probe_button")
         if len(found_keys) >= 2:
             break
         await e2e_page.page.wait_for_timeout(500)
 
     assert len(found_keys) >= 2, (
-        f"TierApiPanel 关键元素未渲染，仅检测到: {found_keys}。期望至少 2 项(panel_title/tier_label/probe_button)"
+        f"TierApiPanel 关键元素未渲染，仅检测到: {sorted(found_keys)}。期望至少 2 项(panel_title/tier_label/probe_button)"
     )
-    logger.info("TierApiPanel 关键元素渲染验证通过: %s", found_keys)
+    logger.info("TierApiPanel 关键元素渲染验证通过: %s", sorted(found_keys))
 
 
 # ============================================================================
