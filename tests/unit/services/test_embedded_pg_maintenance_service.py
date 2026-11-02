@@ -233,14 +233,14 @@ class TestEmbeddedPgMaintenanceServiceDoctor:
                 await maintenance_service.doctor()
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_doctor_sidecar_exit_40_pgdata_corrupt(self, maintenance_service) -> None:
-        """doctor exit=40 (PGDATA 损坏) 抛错并提示使用恢复向导。"""
+    async def test_doctor_sidecar_exit_40_data_dir_abnormal(self, maintenance_service) -> None:
+        """doctor exit=40 (DATA_DIR_ABNORMAL) 抛错并提示先运行 doctor/按恢复文档处理。"""
         from services.embedded_pg_maintenance_service import (
             EmbeddedPgMaintenanceError,
         )
 
         with _patch_run_async(40, "", "PGDATA corrupt"):
-            with pytest.raises(EmbeddedPgMaintenanceError, match="pgdata_corrupt"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="data_dir_abnormal"):
                 await maintenance_service.doctor()
 
     @pytest.mark.asyncio(loop_scope="function")
@@ -255,16 +255,35 @@ class TestEmbeddedPgMaintenanceServiceDoctor:
                 await maintenance_service.doctor()
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_doctor_sidecar_exit_20_tolerated_as_success(self, maintenance_service) -> None:
-        """doctor exit=20 (PG 未运行) 容忍为成功，继续解析 JSON。
+    async def test_doctor_sidecar_exit_20_stop_failed_raises(self, maintenance_service) -> None:
+        """doctor exit=20 (STOP_FAILED) 不得容忍为成功。
 
-        sidecar doctor 是只读诊断，PG 未运行时仍可输出 doctor JSON。
+        doctor 契约只返回 0/2；20 表示停止 PostgreSQL 失败，不是「PG 未运行」。
         """
-        with _patch_run_async(20, json.dumps(MOCK_DOCTOR_JSON)):
+        from services.embedded_pg_maintenance_service import (
+            EmbeddedPgMaintenanceError,
+        )
+
+        with _patch_run_async(20, json.dumps(MOCK_DOCTOR_JSON), "stop failed"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="stop_failed") as exc_info:
+                await maintenance_service.doctor()
+
+        assert "exit=20" in str(exc_info.value)
+        assert "未运行" not in str(exc_info.value)
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_exit_0_with_error_issue_returns_diagnostic_result(self, maintenance_service) -> None:
+        """doctor exit 0 + issues.severity=error 仍是诊断结果，不是健康证书、也不抛错。"""
+        mock_with_error = dict(MOCK_DOCTOR_JSON)
+        mock_with_error["issues"] = [
+            {"code": "nonempty_no_pg_version", "severity": "error", "message": "run 将返回 exit 40"}
+        ]
+
+        with _patch_run_async(0, json.dumps(mock_with_error)):
             result = await maintenance_service.doctor()
 
-        assert result.schema == "qtrading.embedded_postgres.doctor.v1"
-        assert result.initialized is True
+        assert result.issues == mock_with_error["issues"]
+        assert result.issues[0]["severity"] == "error"
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_doctor_unknown_exit_code_raises_unknown_error(self, maintenance_service) -> None:
@@ -276,6 +295,102 @@ class TestEmbeddedPgMaintenanceServiceDoctor:
         with _patch_run_async(99, "", "weird failure"):
             with pytest.raises(EmbeddedPgMaintenanceError, match="unknown_error"):
                 await maintenance_service.doctor()
+
+
+# =============================================================================
+# TestExitCodeMapping: exit_codes.rs 常量逐项对齐（参数化）
+# =============================================================================
+class TestExitCodeMapping:
+    """sidecar exit code → 错误类型/用户提示必须与 exit_codes.rs / how-to §9.6 对齐。"""
+
+    @pytest.mark.parametrize(
+        ("exit_code", "error_type", "hint_fragment"),
+        [
+            (2, "sidecar_argument_error", "参数错误"),
+            (10, "setup_failed", "安装/解压失败"),
+            (11, "initdb_failed", "数据库初始化失败"),
+            (12, "pg_start_failed", "数据库启动失败"),
+            (13, "health_check_failed", "健康检查失败"),
+            (14, "create_database_failed", "业务数据库创建失败"),
+            (15, "preflight_failed", "资源预检失败"),
+            (16, "password_failed", "reset-password"),
+            (20, "stop_failed", "停止 PostgreSQL 失败"),
+            (30, "dump_restore_failed", "备份/恢复执行失败"),
+            (40, "data_dir_abnormal", "数据目录状态异常"),
+            (50, "lock_conflict", "关闭 qTrading"),
+            (60, "postgres_died", "意外退出"),
+        ],
+    )
+    def test_known_exit_code_mapping(
+        self, maintenance_service, exit_code: int, error_type: str, hint_fragment: str
+    ) -> None:
+        """每个常量返回对应错误类型与提示，且保留原始 exit code。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with pytest.raises(EmbeddedPgMaintenanceError) as exc_info:
+            maintenance_service._raise_for_exit_code(exit_code, "sidecar reason", "dump")
+
+        message = str(exc_info.value)
+        assert f"type={error_type}" in message
+        assert f"exit={exit_code}" in message
+        assert hint_fragment in message
+        assert "reason=sidecar reason" in message
+
+    def test_user_hints_survive_log_sanitization(self, maintenance_service) -> None:
+        """用户提示经日志脱敏后不得被误判为路径而截断（如「用户名/库名/数据目录」）。"""
+        from services.embedded_pg_maintenance_service import (
+            _EXIT_CODE_MAP,
+            EmbeddedPgMaintenanceError,
+        )
+        from utils.sanitizers import DataSanitizer
+
+        for exit_code in _EXIT_CODE_MAP:
+            with pytest.raises(EmbeddedPgMaintenanceError) as exc_info:
+                maintenance_service._raise_for_exit_code(exit_code, "", "dump")
+            message = str(exc_info.value)
+            assert DataSanitizer.sanitize_error(message) == message, f"exit={exit_code} 的提示被脱敏截断"
+
+    def test_exit_10_is_setup_failed_not_argument_error(self, maintenance_service) -> None:
+        """10=SETUP_FAILED 不得说成参数错误。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with pytest.raises(EmbeddedPgMaintenanceError, match="setup_failed") as exc_info:
+            maintenance_service._raise_for_exit_code(10, "install dir incomplete", "dump")
+
+        assert "参数错误" not in str(exc_info.value)
+
+    def test_exit_15_preflight_does_not_claim_disk_full(self, maintenance_service) -> None:
+        """15=PREFLIGHT_FAILED 为多原因通用码，不得声称磁盘满或编造磁盘量。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with pytest.raises(EmbeddedPgMaintenanceError, match="preflight_failed") as exc_info:
+            maintenance_service._raise_for_exit_code(15, "password file 权限过宽 /fake/password", "run")
+
+        message = str(exc_info.value)
+        assert "资源预检失败" in message
+        assert "磁盘空间不足" not in message
+        assert "500" not in message
+        assert "password file 权限过宽" in message
+
+    def test_exit_20_stop_failed_not_pg_not_running(self, maintenance_service) -> None:
+        """20=STOP_FAILED 不得映射为 pg_not_running 或视为成功。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with pytest.raises(EmbeddedPgMaintenanceError, match="stop_failed") as exc_info:
+            maintenance_service._raise_for_exit_code(20, "kill fallback failed", "stop")
+
+        message = str(exc_info.value)
+        assert "pg_not_running" not in message
+        assert "未运行" not in message
+
+    def test_unknown_exit_code_stays_nonzero_failure(self, maintenance_service) -> None:
+        """未知码仍抛业务异常（unknown_error），不因未知而放行。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with pytest.raises(EmbeddedPgMaintenanceError, match="unknown_error") as exc_info:
+            maintenance_service._raise_for_exit_code(99, "weird failure", "restore")
+
+        assert "exit=99" in str(exc_info.value)
 
 
 # =============================================================================
@@ -299,15 +414,22 @@ class TestEmbeddedPgMaintenanceServiceDump:
         assert result.exit_code == 0
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_dump_sidecar_failure_raises_error(self, maintenance_service, tmp_path: Path) -> None:
-        """dump exit=15 (磁盘空间不足) 抛错并提示清理磁盘。"""
+    async def test_dump_sidecar_preflight_failure_not_claimed_as_disk_full(
+        self, maintenance_service, tmp_path: Path
+    ) -> None:
+        """dump exit=15 为资源预检通用码，不得声称磁盘空间不足或编造磁盘量。"""
         from services.embedded_pg_maintenance_service import (
             EmbeddedPgMaintenanceError,
         )
 
-        with _patch_run_async(15, "", "disk full"):
-            with pytest.raises(EmbeddedPgMaintenanceError, match="disk_full"):
+        with _patch_run_async(15, "", "目录不可写：/fake/data"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="preflight_failed") as exc_info:
                 await maintenance_service.dump(tmp_path / "backup.dump")
+
+        message = str(exc_info.value)
+        assert "目录不可写" in message  # 引用脱敏后的真实原因
+        assert "磁盘空间不足" not in message
+        assert "500" not in message
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_dump_sidecar_exit_50_lock_conflict(self, maintenance_service, tmp_path: Path) -> None:
@@ -358,7 +480,7 @@ class TestEmbeddedPgMaintenanceServiceRestore:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_restore_sidecar_failure_raises_error(self, maintenance_service, tmp_path: Path) -> None:
-        """restore exit=40 (PGDATA 损坏) 抛 pgdata_corrupt。"""
+        """restore exit=40 (DATA_DIR_ABNORMAL) 抛 data_dir_abnormal。"""
         from services.embedded_pg_maintenance_service import (
             EmbeddedPgMaintenanceError,
         )
@@ -367,7 +489,7 @@ class TestEmbeddedPgMaintenanceServiceRestore:
         input_path.write_bytes(b"fake")
 
         with _patch_run_async(40, "", "restore failed"):
-            with pytest.raises(EmbeddedPgMaintenanceError, match="pgdata_corrupt"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="data_dir_abnormal"):
                 await maintenance_service.restore(input_path)
 
 
@@ -793,12 +915,13 @@ class TestEmbeddedPgMaintenanceSanitization:
             _patch_run_async(40, "", stderr),
             caplog.at_level("ERROR", logger="qtrading.embedded_pg_maintenance"),
         ):
-            with pytest.raises(EmbeddedPgMaintenanceError, match="pgdata_corrupt"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="data_dir_abnormal") as exc_info:
                 await maintenance_service.doctor()
 
-        # 反向断言：原始路径字符串不出现在 caplog 记录中
+        # 反向断言：原始路径字符串不出现在 caplog 记录与异常消息中
         for record in caplog.records:
             assert sensitive_path not in record.getMessage()
+        assert sensitive_path not in str(exc_info.value)
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_doctor_json_parse_error_stdout_sanitized(self, maintenance_service) -> None:

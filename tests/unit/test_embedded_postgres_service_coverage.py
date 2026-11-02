@@ -853,12 +853,33 @@ class TestEmbeddedPostgresServiceCoverageGapFill:
 
         # None → 通用消息
         assert "exit=None" in service._format_sidecar_exit_error(None)
+        # 2 → argument error
+        assert "argument error (exit=2)" in service._format_sidecar_exit_error(2)
+        # 10 → setup failed（不得说成参数错误）
+        assert "setup failed (exit=10)" in service._format_sidecar_exit_error(10)
         # 11 → initdb failed
         assert "initdb failed (exit=11)" in service._format_sidecar_exit_error(11)
-        # 15 → disk full
-        assert "disk full (exit=15)" in service._format_sidecar_exit_error(15)
+        # 12 → postgres start failed
+        assert "postgres start failed (exit=12)" in service._format_sidecar_exit_error(12)
+        # 13 → health check failed
+        assert "health check failed (exit=13)" in service._format_sidecar_exit_error(13)
+        # 14 → create database failed
+        assert "create database failed (exit=14)" in service._format_sidecar_exit_error(14)
+        # 15 → resource preflight failed（不得固定为磁盘满/编造磁盘量）
+        preflight_msg = service._format_sidecar_exit_error(15)
+        assert "resource preflight failed (exit=15)" in preflight_msg
+        assert "disk full" not in preflight_msg
+        assert "500MB" not in preflight_msg
         # 16 → password error
         assert "password error (exit=16)" in service._format_sidecar_exit_error(16)
+        # 20 → stop failed（不是「PG 未运行」成功）
+        stop_msg = service._format_sidecar_exit_error(20)
+        assert "stop failed (exit=20)" in stop_msg
+        assert "not running" not in stop_msg
+        # 30 → dump/restore failed
+        assert "dump/restore failed (exit=30)" in service._format_sidecar_exit_error(30)
+        # 40 → data directory abnormal
+        assert "data directory abnormal (exit=40)" in service._format_sidecar_exit_error(40)
         # 50 → already running
         assert "already running (exit=50)" in service._format_sidecar_exit_error(50)
         # 60 → sidecar crashed

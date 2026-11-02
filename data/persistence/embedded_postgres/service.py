@@ -621,24 +621,60 @@ class EmbeddedPostgresService:
     def _format_sidecar_exit_error(self, exit_code: int | None) -> str:
         """§17.6: 将 sidecar exit code 映射到用户可理解的错误信息。
 
-        映射表（与 Rust sidecar main.rs ExitCode 常量对齐）：
+        映射表与 ``sidecars/qtrading-pg-sidecar/src/exit_codes.rs`` / how-to §9.6 对齐：
+        - 2 → argument_error
+        - 10 → setup_failed
         - 11 → initdb_failed
-        - 15 → disk_full
+        - 12 → start_failed
+        - 13 → health_check_failed
+        - 14 → create_database_failed
+        - 15 → preflight_failed（磁盘空间/目录权限/文件系统/网盘同步路径/密码文件权限）
         - 16 → password_error
+        - 20 → stop_failed（进程在分级停止后仍存活；PG 未运行时 stop 返回 0）
+        - 30 → dump_restore_failed
+        - 40 → data_dir_abnormal
         - 50 → already_running
         - 60 → sidecar_crashed
         """
         if exit_code is None:
             return "sidecar exited before ready line (exit=None; process still running but no output)"
+        if exit_code == 2:
+            return (
+                f"argument error (exit=2); sidecar command line invalid. "
+                f"Check the configured data directory/username and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 10:
+            return (
+                f"setup failed (exit=10); bundled PostgreSQL binaries are missing or incomplete. "
+                f"Reinstall qTrading and retry; data_dir={self._data_dir}"
+            )
         if exit_code == 11:
             return (
                 f"initdb failed (exit=11); PostgreSQL data directory initialization failed. "
                 f"Check disk space and permissions; data_dir={self._data_dir}"
             )
-        if exit_code == 15:
+        if exit_code == 12:
             return (
-                f"disk full (exit=15); PostgreSQL data directory disk space < 500MB. "
-                f"Free up disk space and restart qTrading; data_dir={self._data_dir}"
+                f"postgres start failed (exit=12); PostgreSQL instance could not start. "
+                f"Check the sidecar log and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 13:
+            return (
+                f"health check failed (exit=13); PostgreSQL did not become healthy after start. "
+                f"Check the sidecar log and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 14:
+            return (
+                f"create database failed (exit=14); the application database could not be created. "
+                f"Check the sidecar log and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 15:
+            # 15 是资源预检失败的通用码，原因可能是磁盘空间/目录权限/文件系统/网盘同步路径/
+            # 密码文件权限；不得固化为「磁盘空间不足」，也不编造剩余空间数值。
+            return (
+                f"resource preflight failed (exit=15); disk space, directory permissions, filesystem "
+                f"support, cloud-sync path, or password file permissions may be the cause. "
+                f"Check the sidecar log for the sanitized reason and retry; data_dir={self._data_dir}"
             )
         if exit_code == 16:
             # M24：自定义超级用户名实例须按需追加 --username，否则用户照提示执行会失败；
@@ -647,6 +683,22 @@ class EmbeddedPostgresService:
             if self._username != "postgres":
                 reset_cmd += f" --username {shlex.quote(self._username)}"
             return f"password error (exit=16); run '{reset_cmd}' to reset, then restart qTrading"
+        if exit_code == 20:
+            return (
+                "stop failed (exit=20); PostgreSQL is still alive after graded stop. "
+                f"Check the sidecar log and stop the existing instance; data_dir={self._data_dir}"
+            )
+        if exit_code == 30:
+            return (
+                "dump/restore failed (exit=30); backup or restore could not complete. "
+                f"Check the backup file and sidecar log; data_dir={self._data_dir}"
+            )
+        if exit_code == 40:
+            return (
+                "data directory abnormal (exit=40); non-empty without PG_VERSION, version mismatch, "
+                "or corrupt/missing critical files. Run doctor and follow the recovery guide; "
+                f"data_dir={self._data_dir}"
+            )
         if exit_code == 50:
             return (
                 "qTrading already running (exit=50); another qTrading instance may be using "
