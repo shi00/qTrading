@@ -9,6 +9,7 @@
 mod common;
 
 use common::*;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -535,6 +536,218 @@ fn read_stderr(child: &mut std::process::Child) -> String {
         let _ = child_stderr.read_to_string(&mut stderr);
     }
     stderr
+}
+
+// ---- D16-R01：临时实例停止失败必须硬失败（故障注入） ----
+
+/// 停止阶段故障注入开关（smart / fast / kill，逗号分隔或 all）。
+const INJECT_STOP_FAIL: &str = "QTRADING_PG_SIDECAR_INJECT_STOP_FAIL";
+
+/// 启动 cluster 后 kill sidecar：维护锁由 OS 释放，postgres 保持运行，
+/// 供 `stop` 命令走真实分层停止路径（不受 Drop 补偿影响）。
+fn start_running_cluster_then_crash(
+    test_name: &str,
+) -> (tempfile::TempDir, std::path::PathBuf, u32) {
+    let (tmp, data_dir) = unique_data_dir(test_name);
+    let mut child = spawn_run(&data_dir);
+    let ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    assert_eq!(ready["status"], "running");
+    let pg_pid = ready_pid(&ready).expect("pid in ready JSON");
+    let _ = child.kill();
+    let _ = child.wait();
+    std::thread::sleep(Duration::from_millis(300));
+    (tmp, data_dir, pg_pid)
+}
+
+/// 启动 → 优雅停止，得到已初始化且无运行实例的数据目录。
+fn init_cluster_and_stop(test_name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let (tmp, data_dir) = unique_data_dir(test_name);
+    let mut child = spawn_run(&data_dir);
+    let ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    assert_eq!(ready["status"], "running");
+    graceful_stop(&mut child);
+    let exit = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(exit, 0, "graceful stop should exit 0");
+    (tmp, data_dir)
+}
+
+/// 读取 postmaster.pid 的 PID（不存在/损坏 → None）。
+fn pid_from_file(data_dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(data_dir.join("postmaster.pid"))
+        .ok()?
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// 测试收尾：先走真实 stop，再对仍存活的残留 PID 强杀，避免临时目录/进程累积。
+fn cleanup_maybe_running_pg(data_dir: &Path) {
+    let _ = stop_sidecar(data_dir);
+    if let Some(pid) = pid_from_file(data_dir) {
+        if process_alive(pid) {
+            force_kill_process(pid);
+        }
+    }
+}
+
+/// D16-R01 #1：仅 smart 阶段失败 → 升级 fast 成功，行为与正常路径一致（exit 0）。
+#[test]
+fn test_inject_r01_stop_smart_failure_escalates_to_fast() {
+    let (_tmp, data_dir, pg_pid) = start_running_cluster_then_crash("fi_r01_smart");
+    let data = data_dir.to_str().unwrap();
+    let (exit, _stdout, stderr) = run_sidecar_env(
+        &["stop", "--data-dir", data],
+        &[(INJECT_STOP_FAIL, "smart")],
+    );
+    assert_eq!(exit, 0, "smart 注入失败应升级 fast 成功: {stderr}");
+    assert!(!process_alive(pg_pid), "postgres should be stopped");
+    let st = status_json(&data_dir);
+    assert_eq!(st["last_stop_mode"], "fast", "state: {st}");
+}
+
+/// D16-R01 #2：smart+fast 失败 → kill fallback 成功，记录 kill_fallback。
+#[test]
+fn test_inject_r01_stop_fast_failure_falls_back_to_kill() {
+    let (_tmp, data_dir, pg_pid) = start_running_cluster_then_crash("fi_r01_fast");
+    let data = data_dir.to_str().unwrap();
+    let (exit, _stdout, stderr) = run_sidecar_env(
+        &["stop", "--data-dir", data],
+        &[(INJECT_STOP_FAIL, "smart,fast")],
+    );
+    assert_eq!(exit, 0, "kill fallback 应停止 postgres: {stderr}");
+    assert!(!process_alive(pg_pid), "postgres should be stopped");
+    let st = status_json(&data_dir);
+    assert_eq!(st["last_stop_mode"], "kill_fallback", "state: {st}");
+    assert!(st["kill_fallback_count"].as_u64().unwrap_or(0) >= 1);
+}
+
+/// D16-R01 #3：smart+fast+kill 全部失败 → exit 20，真实 postgres 仍存活，
+/// postmaster.pid 保留供诊断（不发送任何信号、不回退到 Drop 补偿）。
+#[test]
+fn test_inject_r01_stop_all_failures_exit_20_preserves_pidfile() {
+    let (_tmp, data_dir, pg_pid) = start_running_cluster_then_crash("fi_r01_kill");
+    let data = data_dir.to_str().unwrap();
+    let (exit, _stdout, stderr) = run_sidecar_env(
+        &["stop", "--data-dir", data],
+        &[(INJECT_STOP_FAIL, "smart,fast,kill")],
+    );
+    assert_eq!(exit, 20, "stop 失败必须 exit 20: {stderr}");
+    assert!(
+        process_alive(pg_pid),
+        "kill 阶段注入失败时 postgres 不应被杀死"
+    );
+    assert!(
+        data_dir.join("postmaster.pid").exists(),
+        "失败时应保留 postmaster.pid 供诊断"
+    );
+    assert!(
+        stderr.contains("stop 失败"),
+        "stderr 应报告停止失败，got: {stderr}"
+    );
+
+    cleanup_maybe_running_pg(&data_dir);
+}
+
+/// D16-R01 #4：dump 成功后临时实例停止失败 → exit 20，但已完成的备份必须保留。
+#[test]
+fn test_inject_r01_dump_stop_failure_exit_20_preserves_backup() {
+    let (_tmp, data_dir) = init_cluster_and_stop("fi_r01_dump");
+    let backup = data_dir.parent().unwrap().join("r01.dump");
+    let data = data_dir.to_str().unwrap();
+    let backup_s = backup.to_str().unwrap();
+    let (exit, _stdout, stderr) = run_sidecar_env(
+        &["dump", "--data-dir", data, "--output", backup_s],
+        &[(INJECT_STOP_FAIL, "all")],
+    );
+    assert_eq!(exit, 20, "dump 停止失败必须 exit 20: {stderr}");
+    assert!(backup.exists(), "已完成的备份必须保留: {backup:?}");
+    assert!(
+        !backup.with_extension("dump.partial").exists(),
+        "备份应已原子改名，不残留 .partial"
+    );
+    assert!(
+        stderr.contains("临时实例停止失败"),
+        "stderr 应记录真实停止失败原因: {stderr}"
+    );
+
+    cleanup_maybe_running_pg(&data_dir);
+}
+
+/// D16-R01 #5：restore 完成后临时实例停止失败 → exit 20，禁止目录切换，
+/// 保留 `.restore-*` 目录（唯一恢复成果不得删除）。
+#[test]
+fn test_inject_r01_restore_stop_failure_blocks_swap_and_preserves_dir() {
+    let (_tmp, data_dir) = init_cluster_and_stop("fi_r01_restore");
+    let backup = data_dir.parent().unwrap().join("r01-restore.dump");
+    let code = dump_sidecar(&data_dir, &backup);
+    assert_eq!(code, 0, "baseline dump should succeed");
+
+    let data = data_dir.to_str().unwrap();
+    let backup_s = backup.to_str().unwrap();
+    let (exit, stdout, stderr) = run_sidecar_env(
+        &["restore", "--data-dir", data, "--input", backup_s],
+        &[(INJECT_STOP_FAIL, "all")],
+    );
+    assert_eq!(exit, 20, "restore 停止失败必须 exit 20: {stderr}");
+    assert!(
+        stdout.trim().is_empty(),
+        "失败时不得向 stdout 报告恢复目标: {stdout:?}"
+    );
+
+    let name = data_dir.file_name().unwrap().to_str().unwrap().to_string();
+    let parent = data_dir.parent().unwrap();
+    let restore_dirs: Vec<_> = std::fs::read_dir(parent)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&format!("{name}.restore-")))
+        .collect();
+    assert_eq!(
+        restore_dirs.len(),
+        1,
+        "必须保留且仅保留一个 .restore-* 目录: {restore_dirs:?}"
+    );
+    let backup_dirs: Vec<_> = std::fs::read_dir(parent)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&format!("{name}.bak-")))
+        .collect();
+    assert!(backup_dirs.is_empty(), "禁止切换目录: {backup_dirs:?}");
+    assert!(
+        data_dir.join("PG_VERSION").exists(),
+        "源 PGDATA 必须保持不变"
+    );
+
+    // 清理：restore 目录内可能仍有未被 Drop 停掉的 postgres
+    let restore_dir = parent.join(&restore_dirs[0]);
+    cleanup_maybe_running_pg(&restore_dir);
+    cleanup_maybe_running_pg(&data_dir);
+}
+
+/// D16-R01 #6：maintenance-shell 结束阶段停止失败 → exit 20，不打印「已停止」成功语义。
+#[test]
+fn test_inject_r01_maintenance_shell_stop_failure_exit_20() {
+    let (_tmp, data_dir) = init_cluster_and_stop("fi_r01_maint");
+    let data = data_dir.to_str().unwrap();
+    let (exit, stdout, stderr) = run_sidecar_env(
+        &["maintenance-shell", "--data-dir", data],
+        &[(INJECT_STOP_FAIL, "all")],
+    );
+    assert_eq!(exit, 20, "maintenance-shell 停止失败必须 exit 20: {stderr}");
+    assert!(stdout.contains("psql_path"), "连接信息应已输出: {stdout:?}");
+    assert!(
+        !stderr.contains("维护实例已停止"),
+        "不得打印成功语义: {stderr}"
+    );
+    assert!(
+        stderr.contains("不报告维护成功"),
+        "stderr 应说明未报告成功: {stderr}"
+    );
+
+    cleanup_maybe_running_pg(&data_dir);
 }
 
 // ---- 辅助函数（与 roundtrip.rs 同款，YAGNI 不抽到 common） ----

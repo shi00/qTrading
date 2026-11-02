@@ -557,11 +557,11 @@ struct TempInstance {
     /// 必须保留 ownership：PostgreSQL::drop 会调用 pg_ctl stop（crate 0.22 行为），
     /// 提前 drop 会立即停止 postgres，导致后续 psql 连接失败。
     ///
-    /// run.rs 的常驻实例不使用 std::mem::forget 阻止 drop：依赖 graded_stop 先于
-    /// PostgreSQL 变量 drop 完成（graded_stop 在 supervise 返回后立即调用，
-    /// postgresql 变量在 run 函数返回时才 drop）。panic 路径下 drop 可能触发
-    /// crate 内部 stop（非分级策略），但 panic 概率极低且残留 postgres 可由
-    /// 下次 `stop` 命令清理（§6.3 契约）。
+    /// 但 Drop **不能**作为停止成功的依据：crate 0.22 的 `impl Drop` 仅在
+    /// `postmaster.pid` 存在时执行一次 `pg_ctl stop -m fast`，且忽略退出结果、
+    /// 不等待/不校验进程是否真的退出（postgresql.rs `impl Drop` / `status()`）。
+    /// 因此 [`TempInstance::stop`] 显式 drop 后仍须复核真实存活状态，
+    /// 无法证明停止时必须向调用方返回硬失败。
     #[allow(dead_code)]
     pg: PostgreSQL,
     layout: Layout,
@@ -570,17 +570,43 @@ struct TempInstance {
     identity: Option<process_identity::ClusterIdentity>,
 }
 
+/// 临时实例启动失败：错误码 + 启动失败路径是否已证明实例停止。
+///
+/// `stop_failed` 为 true 时数据目录可能仍被 postgres 使用，调用方不得删除该目录
+/// （restore 场景必须保留恢复成果供人工恢复/诊断）。
+#[derive(Debug)]
+struct TempStartError {
+    code: u8,
+    stop_failed: bool,
+}
+
+impl TempStartError {
+    fn new(code: u8, stop_failed: bool) -> Self {
+        Self { code, stop_failed }
+    }
+}
+
 impl TempInstance {
-    async fn start(layout: Layout, username: &str, password: &str) -> Result<Self, u8> {
+    async fn start(layout: Layout, username: &str, password: &str) -> Result<Self, TempStartError> {
         let port = run::pick_free_port(LISTEN_LOCAL).map_err(|e| {
             eprintln!("[sidecar] 随机端口分配失败: {e}");
-            exit_codes::START_FAILED
+            TempStartError::new(exit_codes::START_FAILED, false)
         })?;
         let mut pg = run::build_postgresql(&layout, LISTEN_LOCAL, username, password, port);
-        pg.start().await.map_err(|e| {
+        if let Err(e) = pg.start().await {
             eprintln!("[sidecar] 临时实例启动失败: {e}");
-            exit_codes::START_FAILED
-        })?;
+            // 启动失败也可能已留下 postgres（如启动等待超时）：尽力停止并据实传播。
+            let (stopped, failure) = stop_failed_start_instance(&layout).await;
+            if !stopped {
+                let reason = failure.map_or_else(|| "unknown".to_string(), |f| f.to_string());
+                eprintln!(
+                    "[sidecar] 临时实例启动失败后未能停止（{reason}）；\
+                     数据目录可能仍被 postgres 使用：{}",
+                    layout.data_dir.display()
+                );
+            }
+            return Err(TempStartError::new(exit_codes::START_FAILED, !stopped));
+        }
 
         // pg.start() 返回时 postgres 可能仍在 init/recovery，需等 ready 再让调用方连入。
         // 主流程 run.rs 有 health_check 兜底；临时实例此处复用 psql 探测语义。
@@ -604,14 +630,16 @@ impl TempInstance {
                 }
                 Err(e) => {
                     eprintln!("[sidecar] 临时实例健康检查超时: {e}");
-                    let identity = capture_temp_identity(&layout);
-                    let _ = pgbin::graded_stop(
-                        &layout.install_dir,
-                        &layout.data_dir,
-                        identity.as_ref(),
-                    )
-                    .await;
-                    return Err(exit_codes::START_FAILED);
+                    let (stopped, failure) = stop_failed_start_instance(&layout).await;
+                    if !stopped {
+                        let reason =
+                            failure.map_or_else(|| "unknown".to_string(), |f| f.to_string());
+                        eprintln!(
+                            "[sidecar] 临时实例未能停止（{reason}）；数据目录可能仍被 postgres 使用：{}",
+                            layout.data_dir.display()
+                        );
+                    }
+                    return Err(TempStartError::new(exit_codes::START_FAILED, !stopped));
                 }
             }
         }
@@ -625,21 +653,55 @@ impl TempInstance {
         })
     }
 
-    async fn stop(self) {
-        let outcome = pgbin::graded_stop(
-            &self.layout.install_dir,
-            &self.layout.data_dir,
-            self.identity.as_ref(),
-        )
-        .await;
-        if !outcome.stopped {
-            let reason = outcome
-                .failure
-                .as_ref()
-                .map_or_else(|| "unknown".to_string(), std::string::ToString::to_string);
-            eprintln!("[sidecar] 警告：临时实例未能干净停止（{reason}）");
+    /// 停止临时实例并**证明**其确实退出。
+    ///
+    /// 返回值必须由调用方传播为硬失败：crate 0.22 的 `Drop` 只是 best-effort
+    /// （忽略 `pg_ctl stop` 退出结果），无法保证停止。这里显式 drop 句柄，
+    /// 并复核 Drop 前后的真实存活状态与耗时（退出预算：smart 25s → fast 5s →
+    /// kill grace 3s + 3s）。
+    async fn stop(self) -> Result<(), pgbin::StopFailure> {
+        let TempInstance {
+            pg,
+            layout,
+            identity,
+            ..
+        } = self;
+        let pid = identity.as_ref().map(|i| i.pid);
+        let started = std::time::Instant::now();
+        let alive_before = pid.is_some_and(pgbin::process_alive);
+
+        let outcome =
+            pgbin::graded_stop(&layout.install_dir, &layout.data_dir, identity.as_ref()).await;
+
+        // 显式释放句柄：crate 0.22 的 Drop 仅在 postmaster.pid 存在时执行一次
+        // `pg_ctl stop -m fast`，且忽略退出结果、不等待/不校验进程退出。它不能
+        // 作为停止成功依据；记录 Drop 后的真实状态供故障注入测试诊断。
+        drop(pg);
+        let alive_after = match identity.as_ref() {
+            Some(id) => process_identity::verify_cluster_identity(id).is_ok(),
+            None => pid.is_some_and(pgbin::process_alive),
+        };
+        let elapsed = started.elapsed();
+
+        if outcome.stopped && !alive_after {
+            return Ok(());
         }
-        // self.pg 在函数结束 drop；graded_stop 已停 postgres，crate status() 检测到非 Started，drop 不会再 stop
+
+        let mode = outcome.mode_str().unwrap_or("none");
+        let failure = outcome.failure.unwrap_or(pgbin::StopFailure::StillRunning);
+        let pid_str = pid.map_or_else(|| "unknown".to_string(), |p| p.to_string());
+        tracing::error!(
+            "temp instance stop not proven: failure={failure}, mode={mode}, pid={pid_str}, \
+             alive_before={alive_before}, alive_after_drop={alive_after}, elapsed_ms={}",
+            elapsed.as_millis()
+        );
+        eprintln!(
+            "[sidecar] 临时实例停止失败：{failure}（mode={mode}, pid={pid_str}, \
+             PG 存活：停止前={alive_before}, Drop 后={alive_after}, 耗时 {}ms）；\
+             停止结果不可证明，拒绝报告维护成功",
+            elapsed.as_millis()
+        );
+        Err(failure)
     }
 }
 
@@ -657,6 +719,28 @@ fn capture_temp_identity(layout: &Layout) -> Option<process_identity::ClusterIde
             None
         }
     }
+}
+
+/// 临时实例启动失败后的停止补偿：返回 (是否已证明停止, 未停止原因)。
+///
+/// 身份捕获失败时仍可区分两种情形：无 pid 文件 / PID 已不存在 → 已停止；
+/// PID 仍存活却无法证明归属 → 未停止（fail closed，绝不发送信号）。
+async fn stop_failed_start_instance(layout: &Layout) -> (bool, Option<pgbin::StopFailure>) {
+    let identity = capture_temp_identity(layout);
+    if identity.is_none() {
+        let no_live_pid = pgbin::read_postmaster_pid(&layout.data_dir)
+            .map(|info| !pgbin::process_alive(info.pid))
+            .unwrap_or(true);
+        let failure = if no_live_pid {
+            None
+        } else {
+            Some(pgbin::StopFailure::NoIdentity)
+        };
+        return (no_live_pid, failure);
+    }
+    let outcome =
+        pgbin::graded_stop(&layout.install_dir, &layout.data_dir, identity.as_ref()).await;
+    (outcome.stopped, outcome.failure)
 }
 
 // ---- dump ----
@@ -710,7 +794,9 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
                 let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
             }
             setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
-            let instance = TempInstance::start(layout.clone(), &args.username, &password).await?;
+            let instance = TempInstance::start(layout.clone(), &args.username, &password)
+                .await
+                .map_err(|e| e.code)?;
             let port = instance.port;
             let install_dir = instance.layout.install_dir.clone();
             let r = run_pg_dump(
@@ -722,8 +808,30 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
                 &partial,
             )
             .await;
-            instance.stop().await;
-            r
+            match (r, instance.stop().await) {
+                (Ok(()), Ok(())) => Ok(()),
+                // 备份文件已完整生成，但临时实例停止不可证明：先原子改名保留备份成果，
+                // 命令仍按停止失败硬返回（不得以 warning 掩盖停止失败）。
+                (Ok(()), Err(failure)) => {
+                    eprintln!(
+                        "[sidecar] 临时实例停止失败（{failure}）；备份内容已完整生成，\
+                         保留备份成果并改名为 {}，命令按停止失败返回",
+                        args.output.display()
+                    );
+                    if let Err(e) = std::fs::rename(&partial, &args.output) {
+                        eprintln!("[sidecar] 备份原子改名失败 {}: {e}", args.output.display());
+                    }
+                    Err(exit_codes::STOP_FAILED)
+                }
+                (Err(code), stop_result) => {
+                    if let Err(failure) = stop_result {
+                        eprintln!(
+                            "[sidecar] pg_dump 失败（exit {code}）且临时实例停止失败（{failure}）"
+                        );
+                    }
+                    Err(code)
+                }
+            }
         }
     };
 
@@ -738,7 +846,14 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
             Ok(())
         }
         Err(code) => {
-            let _ = std::fs::remove_file(&partial);
+            if code == exit_codes::STOP_FAILED {
+                // 停止失败时备份可能已完成（改名失败等）：不得删除唯一备份成果。
+                if partial.exists() {
+                    eprintln!("[sidecar] 备份保留于 {}", partial.display());
+                }
+            } else {
+                let _ = std::fs::remove_file(&partial);
+            }
             Err(code)
         }
     }
@@ -859,9 +974,17 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         &password,
     )
     .await;
-    if let Err(code) = outcome {
-        let _ = std::fs::remove_dir_all(&restore_dir);
-        return Err(code);
+    if let Err(err) = outcome {
+        if err.preserve_dir {
+            // 停止结果不可证明：目录可能仍被 postgres 使用，且可能是唯一恢复成果。
+            eprintln!(
+                "[sidecar] 未切换目录：恢复目录保留于 {}（临时实例停止不可证明，禁止删除/切换）",
+                restore_dir.display()
+            );
+        } else {
+            let _ = std::fs::remove_dir_all(&restore_dir);
+        }
+        return Err(err.code);
     }
 
     if do_swap {
@@ -924,8 +1047,17 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
     Ok(())
 }
 
+/// restore_into 失败信息：错误码 + 是否必须保留恢复目录。
+///
+/// 临时实例停止结果不可证明时，恢复目录可能仍被 postgres 使用；
+/// 此时禁止目录切换且**不得删除**该目录（可能是唯一恢复成果）。
+struct RestoreError {
+    code: u8,
+    preserve_dir: bool,
+}
+
 /// 在 restore_dir 上执行：initdb → 安全基线 → 临时实例 → create db → pg_restore → 健康检查。
-/// 任一步失败返回错误码，调用方负责清理 restore_dir。
+/// 任一步失败返回错误码，调用方负责清理 restore_dir（停止不可证明时除外）。
 async fn restore_into(
     layout: &Layout,
     restore_dir: &Path,
@@ -933,7 +1065,7 @@ async fn restore_into(
     database: &str,
     username: &str,
     password: &str,
-) -> Result<(), u8> {
+) -> Result<(), RestoreError> {
     let restore_layout = Layout::from_data_dir(
         restore_dir,
         Some(&layout.install_dir),
@@ -944,18 +1076,50 @@ async fn restore_into(
     // initdb 要求空目录；--target-data-dir 场景目录可能不存在，先建空壳
     std::fs::create_dir_all(restore_dir).map_err(|e| {
         eprintln!("[sidecar] 恢复目录创建失败 {}: {e}", restore_dir.display());
-        exit_codes::DUMP_RESTORE_FAILED
+        RestoreError {
+            code: exit_codes::DUMP_RESTORE_FAILED,
+            preserve_dir: false,
+        }
     })?;
-    setup::run_initdb(&restore_layout, username, password).await?;
+    setup::run_initdb(&restore_layout, username, password)
+        .await
+        .map_err(|code| RestoreError {
+            code,
+            preserve_dir: false,
+        })?;
     if let Err(e) = setup::write_security_baseline(restore_dir, LISTEN_LOCAL) {
         eprintln!("[sidecar] 安全基线写入失败: {e}");
-        return Err(exit_codes::DUMP_RESTORE_FAILED);
+        return Err(RestoreError {
+            code: exit_codes::DUMP_RESTORE_FAILED,
+            preserve_dir: false,
+        });
     }
 
-    let instance = TempInstance::start(restore_layout, username, password).await?;
+    let instance = TempInstance::start(restore_layout, username, password)
+        .await
+        .map_err(|e| RestoreError {
+            code: e.code,
+            preserve_dir: e.stop_failed,
+        })?;
     let result = restore_via_instance(&instance, input, database, username, password).await;
-    instance.stop().await;
-    result
+    let stop_result = instance.stop().await;
+    match (result, stop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        // 恢复本身成功但停止不可证明：返回 STOP_FAILED，禁止切换并保留恢复目录。
+        (Ok(()), Err(_)) => Err(RestoreError {
+            code: exit_codes::STOP_FAILED,
+            preserve_dir: true,
+        }),
+        // 恢复失败且停止不可证明：保留目录（不得删除仍有进程使用的数据目录）。
+        (Err(code), Err(_)) => Err(RestoreError {
+            code,
+            preserve_dir: true,
+        }),
+        (Err(code), Ok(())) => Err(RestoreError {
+            code,
+            preserve_dir: false,
+        }),
+    }
 }
 
 async fn restore_via_instance(
@@ -1078,12 +1242,16 @@ pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
     let username = args.username.as_str();
-    let instance = TempInstance::start(layout.clone(), username, &password).await?;
+    let instance = TempInstance::start(layout.clone(), username, &password)
+        .await
+        .map_err(|e| e.code)?;
     let info = maintenance_shell_json(&layout.install_dir, instance.port, username);
     if let Err(e) = protocol::print_json_line(&info) {
         // stdout 管道不可用：无法向调用方交付连接信息，停止临时实例后失败退出。
         eprintln!("[sidecar] maintenance-shell JSON 输出失败: {e}");
-        instance.stop().await;
+        if let Err(failure) = instance.stop().await {
+            eprintln!("[sidecar] 维护实例停止失败（{failure}）；数据目录可能仍被 postgres 使用");
+        }
         return Err(exit_codes::HEALTH_CHECK_FAILED);
     }
     let psql_path = pgbin::tool_path(&layout.install_dir, "psql");
@@ -1104,9 +1272,17 @@ pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8
     eprintln!("  完成后按 Enter 结束维护实例…");
 
     wait_for_enter().await;
-    instance.stop().await;
-    eprintln!("[sidecar] 维护实例已停止");
-    Ok(())
+    match instance.stop().await {
+        Ok(()) => {
+            eprintln!("[sidecar] 维护实例已停止");
+            Ok(())
+        }
+        Err(failure) => {
+            // 停止不可证明：不得打印「已停止」成功语义，按停止失败退出。
+            eprintln!("[sidecar] 维护实例停止失败（{failure}）；不报告维护成功");
+            Err(exit_codes::STOP_FAILED)
+        }
+    }
 }
 
 async fn wait_for_enter() {
@@ -1207,14 +1383,14 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     const DUMMY_PWD: &str = "reset-trust-bypass-not-verified";
     let instance = match TempInstance::start(layout.clone(), &args.username, DUMMY_PWD).await {
         Ok(instance) => instance,
-        Err(code) => {
+        Err(e) => {
             // 自定义用户名未与实例超级用户一致时，健康检查以该角色连接会一直失败（约 30s 后超时）。
             // 该错误码本身不区分原因，这里补一条与 --username 相关的可操作提示。
             eprintln!(
                 "[sidecar] 临时实例未能就绪：请确认 --username {} 与该数据目录的超级用户一致",
                 args.username
             );
-            return Err(code);
+            return Err(e.code);
         }
     };
     let port = instance.port;
@@ -1235,14 +1411,17 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     )
     .await;
 
-    // 无论 ALTER 成功与否都要停临时实例
-    instance.stop().await;
+    // 无论 ALTER 成功与否都要停临时实例；停止结果不可证明时记录并传播硬失败。
+    let stop_result = instance.stop().await;
 
     if let Err(e) = alter_result {
         eprintln!(
             "[sidecar] ALTER USER {} PASSWORD 失败（请确认 --username 与实例超级用户一致）: {e}",
             args.username
         );
+        if let Err(failure) = &stop_result {
+            eprintln!("[sidecar] 临时实例停止失败（{failure}）；数据目录可能仍被 postgres 使用");
+        }
         return Err(exit_codes::PASSWORD_FAILED);
     }
 
@@ -1264,6 +1443,16 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
 
     // 注册新密码为 secret（R9：防止后续日志/异常泄露）
     logging::register_secret(&new_pwd);
+
+    // ALTER 已生效且 password file 已更新，集群与配置保持一致；但临时实例停止不可证明
+    // 仍必须按硬失败返回，不得打印「密码已重置」的成功语义。
+    if let Err(failure) = stop_result {
+        eprintln!(
+            "[sidecar] 密码已在集群与 password file 中更新，但临时实例停止失败（{failure}）；\
+             不报告成功，请确认残留 postgres 后再重启 qTrading"
+        );
+        return Err(exit_codes::STOP_FAILED);
+    }
 
     eprintln!("[sidecar] 密码已重置，请重启 qTrading");
     Ok(())
@@ -2418,7 +2607,10 @@ mod tests {
         };
         let result = dump(args).await;
 
-        instance.stop().await;
+        instance
+            .stop()
+            .await
+            .expect("temp instance stop must be proven");
 
         assert!(result.is_ok(), "dump should succeed: {:?}", result.err());
         assert!(
@@ -2465,7 +2657,10 @@ mod tests {
             username: DEFAULT_USERNAME.to_string(),
         };
         let dump_result = dump(dump_args).await;
-        instance.stop().await;
+        instance
+            .stop()
+            .await
+            .expect("temp instance stop must be proven");
         assert!(dump_result.is_ok(), "dump should succeed first");
         assert!(dump_path.exists(), "dump file should exist");
 
@@ -2511,7 +2706,10 @@ mod tests {
         let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password)
             .await
             .expect("TempInstance start failed");
-        instance.stop().await;
+        instance
+            .stop()
+            .await
+            .expect("temp instance stop must be proven");
 
         // 调用 reset_password
         let args = reset_password_args(layout.data_dir.clone());
