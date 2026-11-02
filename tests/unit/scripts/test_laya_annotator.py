@@ -282,11 +282,39 @@ def test_evaluate_agreement_fails_below_threshold():
 
 
 def test_evaluate_gate_matches_records_by_source_id_ignoring_order():
-    predictions = [_pred("利空", source_id="0")]
-    gold = [_gold("利空", source_id="0")]
+    # 两条身份不同的记录，gold 顺序与 pred 相反：必须按 (source, source_id) 对齐；
+    # 若按位置 zip 配对，两个位置都会把标签配错，一致率会掉到 0。
+    predictions = [_pred("利好", source_id="0"), _pred("利空", source_id="1")]
+    gold = [_gold("利好", source_id="0"), _gold("利空", source_id="1")]
     gold.reverse()  # 乱序
     report = laya_annotator.evaluate_gate(predictions, gold, threshold=0.85)
+    assert report["matched"] == 2
+    assert report["gold_count"] == 2
+    assert report["coverage"] == pytest.approx(1.0)
     assert report["agreement"] == pytest.approx(1.0)
+    assert report["confusion"]["利好"]["利好"] == 1
+    assert report["confusion"]["利空"]["利空"] == 1
+
+
+def test_evaluate_gate_matches_composite_identity_not_source_id_alone():
+    # 同 source_id、不同 source 的两条记录且标签相反：仅用 source_id 作键会把两条
+    # 折叠成一条（后写覆盖），产生错配；必须用 (source, source_id) 复合身份。
+    predictions = [
+        _pred("利好", source="sina_7x24", source_id="dup"),
+        _pred("利空", source="sina_stock", source_id="dup"),
+    ]
+    gold = [
+        _gold("利好", source="sina_7x24", source_id="dup"),
+        _gold("利空", source="sina_stock", source_id="dup"),
+    ]
+    gold.reverse()  # 与 pred 反序
+    report = laya_annotator.evaluate_gate(predictions, gold, threshold=0.85)
+    assert report["matched"] == 2
+    assert report["gold_count"] == 2
+    assert report["coverage"] == pytest.approx(1.0)
+    assert report["agreement"] == pytest.approx(1.0)
+    assert report["confusion"]["利好"]["利好"] == 1
+    assert report["confusion"]["利空"]["利空"] == 1
 
 
 def test_evaluate_report_exposes_confusion_focus():
