@@ -1439,9 +1439,9 @@ async fn wait_for_enter() {
 /// 流程：validate_username → acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries →
 ///       stale pid 清理 → 临时改 pg_hba.conf 为 trust（仅 127.0.0.1，RAII guard 出错路径恢复）→
 ///       启动临时 postgres 实例（复用 dump 离线 TempInstance 路径）→
-///       psql 连接执行 `ALTER USER <username> PASSWORD '<new>'`（trust 模式无需密码）→
-///       停止实例 → 重写 pg_hba.conf（scram-sha-256，新密码生效）→ 写入新 password file →
-///       register_secret。
+///       psql 经 stdin 执行 `ALTER USER <username> PASSWORD '<new>'`（trust 模式无需密码，
+///       SQL 不进 argv）→ 停止实例 → 重写 pg_hba.conf（scram-sha-256，新密码生效）→
+///       写入新 password file。新密码在 psql 调用前即注册为 secret，错误输出显式脱敏。
 ///
 /// exit code：
 /// - 2 ARGUMENT_ERROR：用户名非法（白名单外的标识符，防 SQL 注入）
@@ -1487,6 +1487,9 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     }
 
     let new_pwd = password::generate_password();
+    // R9：先注册新密码为 secret，确保后续任何日志/错误输出（含 ALTER USER 失败）
+    // 在输出前都能被脱敏；注册时机早于凭据进入任何子进程或文件。
+    logging::register_secret(&new_pwd);
 
     // 临时改 pg_hba.conf 为 trust（仅 127.0.0.1）：绕过密码认证以执行 ALTER USER。
     // 出错路径由 HbaRestoreGuard RAII 恢复原 pg_hba.conf；成功路径在 write_security_baseline
@@ -1517,10 +1520,12 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     let port = instance.port;
     let install_dir = instance.layout.install_dir.clone();
 
-    // psql 连接执行 ALTER USER（trust 模式忽略 PGPASSWORD）。
+    // psql 经 stdin 执行 ALTER USER（trust 模式忽略 PGPASSWORD）：SQL 不进 argv，
+    // 避免新密码出现在子进程命令行（R9）。
     // args.username 已过 validate_username 白名单（[A-Za-z_][A-Za-z0-9_]*, ≤63），可安全拼接。
+    // 密码字符集仅 URL-unreserved（无 `$`），`$$...$$` dollar quoting 不会被密码破坏。
     let sql = format!("ALTER USER {} PASSWORD $${new_pwd}$$;", args.username);
-    let alter_result = pgbin::psql(
+    let alter_result = pgbin::psql_stdin(
         &install_dir,
         LISTEN_LOCAL,
         port,
@@ -1536,10 +1541,8 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     instance.stop().await;
 
     if let Err(e) = alter_result {
-        eprintln!(
-            "[sidecar] ALTER USER {} PASSWORD 失败（请确认 --username 与实例超级用户一致）: {e}",
-            args.username
-        );
+        // eprintln! 不经过 tracing sink，须显式 sanitize 后再输出。
+        eprintln!("{}", alter_password_error_message(&args.username, &e));
         return Err(exit_codes::PASSWORD_FAILED);
     }
 
@@ -1559,11 +1562,16 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
         return Err(exit_codes::PASSWORD_FAILED);
     }
 
-    // 注册新密码为 secret（R9：防止后续日志/异常泄露）
-    logging::register_secret(&new_pwd);
-
     eprintln!("[sidecar] 密码已重置，请重启 qTrading");
     Ok(())
+}
+
+/// ALTER USER 失败信息（输出前显式脱敏；单独抽出以便测试公开输出不含密码）。
+fn alter_password_error_message(username: &str, err: &pgbin::ToolError) -> String {
+    format!(
+        "[sidecar] ALTER USER {username} PASSWORD 失败（请确认 --username 与实例超级用户一致）: {}",
+        logging::sanitize(&err.to_string())
+    )
 }
 
 /// RAII guard：临时 trust pg_hba.conf 修改失败/出错路径下恢复原内容。
@@ -2209,6 +2217,23 @@ mod tests {
         let after = std::fs::read_to_string(&layout.password_file).unwrap();
         assert_eq!(after, original, "非法用户名不得改动密码文件");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 合成哨兵密码：ALTER USER 失败信息在公开输出前显式脱敏（R9）。
+    #[test]
+    fn alter_password_error_message_sanitizes_registered_secret() {
+        const SENTINEL: &str = "SynthSentinel-Pwd-0_1.~Za";
+        logging::register_secret(SENTINEL);
+        let err = pgbin::ToolError::Io(std::io::Error::other(format!(
+            "psql stderr echo: ALTER USER postgres PASSWORD $$...$$; {SENTINEL}"
+        )));
+        let msg = alter_password_error_message("postgres", &err);
+        assert!(!msg.contains(SENTINEL), "公开错误输出泄露哨兵密码");
+        assert!(msg.contains("***"), "注册 secret 应被脱敏为 ***");
+        assert!(
+            msg.contains("ALTER USER postgres PASSWORD"),
+            "保留可操作上下文"
+        );
     }
 
     #[test]
