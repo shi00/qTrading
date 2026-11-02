@@ -36,6 +36,21 @@ def _wire_http_get(mock_client, mock_response):
     return mock_response
 
 
+_US_MOVES_JSONP_TEXT = (
+    'IO({"data": ['
+    '{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, '
+    '{"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
+)
+_US_MOVES_EXPECTED = "NVDA: 2.45%, TSLA: -1.0%"
+
+
+def _us_moves_response() -> MagicMock:
+    """新浪美股 JSONP 响应 mock（供 get_us_major_moves 的 AsyncClient 路径断言解析结果）。"""
+    resp = MagicMock()
+    resp.text = _US_MOVES_JSONP_TEXT
+    return resp
+
+
 def _concept_jsonp_text(rows: list[tuple[str, str]]) -> str:
     """构造新浪 newFLJK.php 概念板块 JSONP 响应文本（B2 直连 HTTPS 后的解析输入）。
 
@@ -1096,49 +1111,55 @@ class TestNewsFetcherGetUsMajorMoves:
 class TestUsMajorMovesLookAheadGuard:
     @pytest.mark.asyncio
     async def test_historical_date_returns_empty(self):
-        import datetime
-
         past_date = datetime.date(2024, 1, 1)
         result = await NewsFetcher.get_us_major_moves(as_of=past_date)
         assert result == ""
 
     @pytest.mark.asyncio
-    async def test_none_as_of_fetches_normally(self):
-        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=None)
+    @patch("httpx.AsyncClient")
+    async def test_none_as_of_fetches_normally(self, mock_client):
+        """as_of=None → 走实时抓取分支，经生产实际依赖 httpx.AsyncClient 取数并解析。"""
+        _wire_http_get(mock_client, _us_moves_response())
+        base_time = datetime.datetime(2026, 1, 2, 10, 0, 0).replace(tzinfo=CST_TZ)
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
             result = await NewsFetcher.get_us_major_moves(as_of=None)
-            assert isinstance(result, (list, str))
+        assert result == _US_MOVES_EXPECTED
 
     @pytest.mark.asyncio
-    async def test_today_as_of_fetches_normally(self):
-        import datetime
-
-        today = datetime.date.today()
-        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=None)
-            result = await NewsFetcher.get_us_major_moves(as_of=today)
-            assert isinstance(result, (list, str))
+    @patch("httpx.AsyncClient")
+    async def test_today_as_of_fetches_normally(self, mock_client):
+        """as_of=当前 CST 日期 → 不短路，经 AsyncClient 返回解析后的美股行情。"""
+        base_time = datetime.datetime(2026, 1, 2, 10, 0, 0).replace(tzinfo=CST_TZ)
+        _wire_http_get(mock_client, _us_moves_response())
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
+            result = await NewsFetcher.get_us_major_moves(as_of=base_time.date())
+        assert result == _US_MOVES_EXPECTED
 
     @pytest.mark.asyncio
-    async def test_datetime_as_of_converted_to_date(self):
-        import datetime
-
-        today_dt = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(return_value=None)
+    @patch("httpx.AsyncClient")
+    async def test_datetime_as_of_converted_to_date(self, mock_client):
+        """as_of 为同一自然日的 datetime → 转 date 后仍走实时抓取分支。"""
+        today_dt = datetime.datetime(2026, 1, 2, 0, 15, 0).replace(tzinfo=CST_TZ)
+        base_time = datetime.datetime(2026, 1, 2, 10, 0, 0).replace(tzinfo=CST_TZ)
+        _wire_http_get(mock_client, _us_moves_response())
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
             result = await NewsFetcher.get_us_major_moves(as_of=today_dt)
-            assert isinstance(result, (list, str))
+        assert result == _US_MOVES_EXPECTED
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_cst_date_boundary_uses_china_timezone(self, mock_client):
+        """CST 凌晨（UTC 仍为前一日）时，当前日期判定必须用 CST 日期而非 UTC/系统本地日期。"""
+        base_time = datetime.datetime(2026, 1, 2, 0, 30, 0).replace(tzinfo=CST_TZ)
+        _wire_http_get(mock_client, _us_moves_response())
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
+            # UTC 日期（前一日）必须被 look-ahead 防护短路，不得拉取实时行情
+            assert await NewsFetcher.get_us_major_moves(as_of=datetime.date(2026, 1, 1)) == ""
+            # CST 日期即当前日期 → 正常获取
+            assert await NewsFetcher.get_us_major_moves(as_of=datetime.date(2026, 1, 2)) == _US_MOVES_EXPECTED
 
     @pytest.mark.asyncio
     async def test_historical_datetime_returns_empty(self):
-        import datetime
-
         past_dt = datetime.datetime(2024, 1, 1, 12, 0, 0)
         result = await NewsFetcher.get_us_major_moves(as_of=past_dt)
         assert result == ""
