@@ -11,6 +11,7 @@ _LOCAL_BASE_BRANCH = "main"
 _BASE_REMOTE = "origin"
 _REMOTE_BASE_BRANCH = f"{_BASE_REMOTE}/main"
 _REMOTE_REF_PREFIX = "refs/remotes/"
+_REMOTE_DISPLAY_PREFIX = "remotes/"
 
 
 class GitQueryError(RuntimeError):
@@ -80,12 +81,31 @@ def get_merged_local_branches(base_branch: str = "main") -> list[str]:
     return branches
 
 
+def _strip_remote_prefix(ref: str) -> str:
+    """去掉 ``refs/remotes/`` 或旧式 ``remotes/`` 前缀，返回 ``<remote>/<branch>``。"""
+    for prefix in (_REMOTE_REF_PREFIX, _REMOTE_DISPLAY_PREFIX):
+        if ref.startswith(prefix):
+            return ref[len(prefix) :]
+    return ref
+
+
+def _remote_branch_short_name(ref: str) -> str:
+    """把任意远端引用归一化为本地分支短名。
+
+    只剥离第一个路径段（远端名），保留分支名中的 ``/``（如 ``fix/deep/topic``），
+    因此不依赖特定远端名，也不误伤含斜杠的合法分支。
+    """
+    remote_and_branch = _strip_remote_prefix(ref)
+    _, separator, branch = remote_and_branch.partition("/")
+    return branch if separator and branch else remote_and_branch
+
+
 def _parse_remote_ref(ref: str, oid: str) -> RemoteBranchCandidate | None:
     if not ref.startswith(_REMOTE_REF_PREFIX):
         return None
     # `refs/remotes/origin/feature/x` -> remote=origin, branch=feature/x；
     # 只切第一个斜杠，避免含斜杠的分支名被截错。
-    remote, separator, branch = ref[len(_REMOTE_REF_PREFIX) :].partition("/")
+    remote, separator, branch = _strip_remote_prefix(ref).partition("/")
     if not separator or not branch or branch == "HEAD":
         return None
     return RemoteBranchCandidate(remote=remote, branch=branch, oid=oid)
@@ -149,31 +169,27 @@ def filter_branches(local_branches, remote_branches, worktree_branches):
 
     # 过滤远程分支
     for r_branch in remote_branches:
-        # 去掉 remotes/ 前缀
-        clean_r_branch = r_branch.replace("remotes/", "")
-
-        # 提取远程分支对应的本地分支名称，如 origin/fix/e2e -> fix/e2e
-        local_equiv = clean_r_branch
-        if clean_r_branch.startswith("origin/"):
-            local_equiv = clean_r_branch[len("origin/") :]
+        # 保留展示名（去掉 refs/remotes/ 或 remotes/ 前缀），供删除与日志使用。
+        display_name = _strip_remote_prefix(r_branch)
+        # 归一化为本地分支短名（剥离首个远端名，保留分支名中的 "/"），
+        # 使 main/master 与 worktree 保护对任意远端生效。
+        local_equiv = _remote_branch_short_name(r_branch)
 
         # 保护主分支
         if local_equiv in protected_names:
-            preserved_remote[clean_r_branch] = "主分支保护"
+            preserved_remote[display_name] = "主分支保护"
         # 保护被 worktree 本地占用的远程分支
         elif local_equiv in worktree_branches:
-            preserved_remote[clean_r_branch] = "当前工作树(Worktree)占用"
+            preserved_remote[display_name] = "当前工作树(Worktree)占用"
         else:
-            to_delete_remote.append(clean_r_branch)
+            to_delete_remote.append(display_name)
 
     return to_delete_local, to_delete_remote, preserved_local, preserved_remote
 
 
 def _remote_local_equiv(candidate: RemoteBranchCandidate) -> str:
     """远程候选对应的本地占用名，与 ``filter_branches`` 的保护口径保持一致。"""
-    if candidate.remote == "origin":
-        return candidate.branch
-    return candidate.display_name
+    return candidate.branch
 
 
 def get_remote_tip_oid(remote: str, branch: str) -> str | None:
