@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 def _parse_db_url(url: str) -> dict[str, str]:
     m = re.match(r"postgresql\+asyncpg://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", url)
     if not m:
-        pytest.skip(f"Cannot parse E2E_DATABASE_URL for DB success test: {url}")
+        # R9：skip reason 会进入 pytest 报告与 CI 日志，禁止回显原始 E2E_DATABASE_URL
+        # （其中可能含明文 userinfo/password）。仅说明变量名与期望格式，不回显输入值。
+        pytest.skip(
+            "Cannot parse E2E_DATABASE_URL for DB success test: expected "
+            "postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>; "
+            "raw value omitted to avoid leaking credentials"
+        )
 
     # [PITFALL FIX] 必须使用 unquote_plus 解码！
     # 在 CI 环境下，DATABASE_URL 中的 password (例如 GitHub Actions 的 secret)
