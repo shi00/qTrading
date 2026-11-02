@@ -21,6 +21,26 @@ class TestSingletonRegistry:
     def _inject_caplog(self, caplog):
         self.caplog = caplog
 
+    @pytest.fixture
+    def _dedicated_registry(self):
+        """Temporarily swap the global registry for a test-local one.
+
+        reset_all_singletons() iterates the module-level ``_registry`` list. Swapping
+        it keeps this test from touching real singleton instances/resources, and the
+        ``finally`` block restores the original object even if an assertion fails.
+        """
+        import utils.singleton_registry as singleton_registry
+
+        with singleton_registry._lock:
+            original_registry = singleton_registry._registry
+            dedicated_registry: list[type[object]] = []
+            singleton_registry._registry = dedicated_registry
+        try:
+            yield dedicated_registry
+        finally:
+            with singleton_registry._lock:
+                singleton_registry._registry = original_registry
+
     def test_register_singleton_decorator(self):
         """register_singleton should add class to registry"""
         from utils.singleton_registry import register_singleton, _registry, _lock
@@ -195,21 +215,48 @@ class TestSingletonRegistry:
         with _lock:
             _registry.remove(DummyWithClose)
 
-    def test_reset_handles_close_exception(self):
-        """A-P1-5: reset_all_singletons should handle close() exceptions gracefully"""
-        from utils.singleton_registry import register_singleton, _registry, _lock
+    def test_reset_handles_close_exception(self, _dedicated_registry):
+        """A-P1-5: reset_all_singletons should handle close() exceptions gracefully."""
+        import logging
 
-        @register_singleton
-        class DummyCrashyClose:
+        from utils.singleton_registry import reset_all_singletons
+
+        class FailingCloseSingleton:
             _instance = None
+            close_calls: list[str] = []
 
             def close(self):
+                type(self).close_calls.append("close")
                 raise RuntimeError("close failed")
 
-        DummyCrashyClose._instance = DummyCrashyClose()
+        class NextResetSingleton:
+            _instance = None
+            reset_calls: list[str] = []
 
-        with _lock:
-            _registry.remove(DummyCrashyClose)
+            @classmethod
+            def _reset_singleton(cls):
+                cls.reset_calls.append("reset")
+                cls._instance = None
+
+        FailingCloseSingleton._instance = FailingCloseSingleton()
+        _dedicated_registry.extend([FailingCloseSingleton, NextResetSingleton])
+
+        with self.caplog.at_level(logging.WARNING, logger="utils.singleton_registry"):
+            reset_all_singletons()
+
+        assert FailingCloseSingleton.close_calls == ["close"], "close() should be called exactly once"
+        assert FailingCloseSingleton._instance is None, "_instance must be cleared after close() raises"
+        assert NextResetSingleton.reset_calls == ["reset"], "reset must continue after close() raises"
+        assert NextResetSingleton._instance is None
+
+        warning_messages = [
+            record.getMessage()
+            for record in self.caplog.records
+            if record.name == "utils.singleton_registry" and record.levelno == logging.WARNING
+        ]
+        assert any("FailingCloseSingleton.close() failed" in message for message in warning_messages), (
+            f"Expected fallback close warning, got: {warning_messages}"
+        )
 
 
 class TestAtexitCleanupAll:
