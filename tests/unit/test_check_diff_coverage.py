@@ -674,3 +674,34 @@ class TestMainFailClosed:
             encoding="utf-8",
         )
         assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict", "--threshold", "80") == 1
+
+
+# ============================================================================
+# CI workflow: diff-coverage 步骤必须保留完整历史
+# ============================================================================
+
+
+class TestCiWorkflowDiffCoverage:
+    """CI diff-coverage 步骤必须使用完整历史。
+
+    回归：checkout ``fetch-depth: 0`` 后，步骤内再执行 ``git fetch --depth=1 origin main``
+    会把 origin/main 变成浅提交，``git merge-base`` 不可算，脚本 fail-closed exit 2，
+    导致所有 PR 的 Unit & Integration Tests 误失败（与分支内容无关）。
+    """
+
+    WORKFLOW = ROOT / ".github" / "workflows" / "ci_cd.yml"
+
+    def _step_block(self) -> str:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        assert "- name: Check diff coverage" in text, "CI 必须包含 diff-coverage 步骤"
+        return text.split("- name: Check diff coverage", 1)[1].split("\n      - name:", 1)[0]
+
+    def test_checkout_fetches_full_history(self) -> None:
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        assert "fetch-depth: 0" in text, "diff-coverage 依赖完整历史，checkout 必须 fetch-depth: 0"
+
+    def test_diff_coverage_step_does_not_shallow_fetch(self) -> None:
+        step = self._step_block()
+        assert "git fetch --depth=1" not in step, "浅取会破坏 merge-base，导致 diff-coverage fail-closed"
+        assert 'git fetch --no-tags origin "$BASE"' in step
+        assert "check_diff_coverage.py" in step

@@ -82,8 +82,8 @@ def parse_diff(diff_text: str) -> dict[str, list[int]]:
 def _resolve_merge_base(base: str) -> str:
     """解析 base 与 HEAD 的真实 merge-base 提交。
 
-    CI 在浅克隆下 `git fetch --depth=1 origin main` 会更新 origin/main 为浅提交，
-    `git diff base...HEAD` 的三点语法此时无法从无祖先的浅历史计算 merge-base，
+    若以浅克隆方式更新 base（如 `git fetch --depth=1 origin main`），origin/main 会
+    变成浅提交，`git diff base...HEAD` 的三点语法无法从无祖先的浅历史计算 merge-base，
     实际退化为两点 diff，把 main 侧并发改动一并计入本分支变更行（误报 diff-coverage）。
     故显式用 `git merge-base` 计算真实基点：成功返回该提交，失败（无共同祖先）返回空串。
     """
