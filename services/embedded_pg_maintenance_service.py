@@ -44,6 +44,11 @@ logger = logging.getLogger("qtrading.embedded_pg_maintenance")
 
 EXPECTED_DOCTOR_SCHEMA = "qtrading.embedded_postgres.doctor.v1"
 
+# D16-F08: Popen 以 ``errors="replace"`` 解码 sidecar 输出，非法 UTF-8 字节会变成 U+FFFD。
+# 机器协议 stdout（doctor/maintenance-shell JSON、restore 目标路径）出现该字符即原始字节已损坏，
+# 必须显式拒绝，不能把乱码路径当作成功结果或让 JSON 字符串字段失真。
+_INVALID_UTF8_REPLACEMENT = "\ufffd"
+
 # UIR-F16-002: 业务库名白名单（与 sidecar maint.rs validate_database_name 对齐）。
 # 库名会进入 sidecar 的 `CREATE DATABASE "<name>"` SQL 文本，只允许安全标识符：
 # [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
@@ -219,6 +224,7 @@ class EmbeddedPgMaintenanceService:
         # JSON issues），参数错误/JSON 输出失败为 2；不存在「PG 未运行」的 20 成功语义。
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "doctor")
+        stdout = self._reject_corrupted_stdout(stdout, "doctor")
         try:
             data = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError as exc:
@@ -269,7 +275,11 @@ class EmbeddedPgMaintenanceService:
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "restore")
         # 无 target_data_dir 时从 sidecar stdout 取（sidecar §12.2 原子切换输出新目录）
-        target = str(target_data_dir) if target_data_dir else stdout.strip()
+        if target_data_dir:
+            target = str(target_data_dir)
+        else:
+            # D16-F08: stdout 是机器协议（新数据目录路径），损坏的 UTF-8 不得作为成功目录返回。
+            target = self._reject_corrupted_stdout(stdout, "restore").strip()
         return RestoreResult(target_data_dir=target, exit_code=exit_code)
 
     @log_async_operation(
@@ -287,6 +297,7 @@ class EmbeddedPgMaintenanceService:
         exit_code, stdout, stderr = await self._run_sidecar(argv)
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "maintenance-shell")
+        stdout = self._reject_corrupted_stdout(stdout, "maintenance-shell")
         try:
             data = json.loads(stdout) if stdout.strip() else {}
         except json.JSONDecodeError as exc:
@@ -479,7 +490,18 @@ class EmbeddedPgMaintenanceService:
                     self._dump_task_reserved = True
                     reserved = True
             try:
-                proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                proc = subprocess.Popen(
+                    argv,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    # D16-F08: sidecar（Rust serde/eprintln）固定输出 UTF-8，显式指定解码编码，
+                    # 避免非 UTF-8 Windows locale（cp1252/cp936）按系统编码解码导致
+                    # UnicodeDecodeError 或中文路径乱码。诊断 stderr 用 replace 容错，
+                    # 机器协议 stdout 的损坏字节由 ``_reject_corrupted_stdout`` 显式拒绝。
+                    encoding="utf-8",
+                    errors="replace",
+                )
                 if reserved:
                     with self._lock:
                         # 预留位保证此处无第二个任务；登记句柄供 request_cancel() 终止。
@@ -561,6 +583,23 @@ class EmbeddedPgMaintenanceService:
             return instance._active_proc is not None or instance._dump_task_reserved  # type: ignore[attr-defined]  # [reason: 单例 __init__ 已声明 _active_proc/_dump_task_reserved，但未作为类级注解]
 
     # ---- 错误分类 ----
+
+    def _reject_corrupted_stdout(self, stdout: str, command: str) -> str:
+        """拒绝机器协议 stdout 中的非法 UTF-8 替换字符（D16-F08）。
+
+        Popen 使用 ``errors="replace"`` 保证诊断输出（stderr）不会因损坏字节中断，
+        但机器消费的 stdout（JSON / restore 目标路径）若含 U+FFFD，说明原始 UTF-8
+        字节不可靠：返回该值会把乱码路径当作恢复成功目录，或让 JSON 字符串字段失真。
+        JSON 语法损坏仍由调用方的 ``json.loads`` 拒绝。
+
+        Raises:
+            EmbeddedPgMaintenanceError: stdout 含非法 UTF-8 替换字符
+        """
+        if _INVALID_UTF8_REPLACEMENT in stdout:
+            raise EmbeddedPgMaintenanceError(
+                f"{command} stdout contains invalid UTF-8 bytes; refusing to use corrupted output"
+            )
+        return stdout
 
     def _raise_for_exit_code(self, exit_code: int, stderr: str, command: str) -> None:
         """根据 sidecar exit code 抛出分类错误（对齐 exit_codes.rs / how-to §9.6）。
