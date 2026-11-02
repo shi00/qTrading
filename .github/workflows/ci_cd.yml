@@ -466,7 +466,9 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.ref }}"
           BASE="${BASE:-main}"
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          # 禁止浅取：本 job 的 checkout 已 fetch-depth: 0，`--depth=1` 会让 origin/$BASE
+          # 失去祖先，`git merge-base` 不可算，check_diff_coverage.py 将以 fail-closed exit 2。
+          git fetch --no-tags origin "$BASE"
           python scripts/check_diff_coverage.py --base "origin/$BASE" --strict --threshold 80
 
       - name: Upload coverage to Codecov
