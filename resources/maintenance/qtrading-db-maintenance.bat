@@ -18,8 +18,8 @@ if not exist "%SIDECAR_EXE%" (
 )
 
 REM 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/16/data
-REM Windows: %LOCALAPPDATA%\qTrading\postgres\16\data
-set "DEFAULT_DATA_DIR=%LOCALAPPDATA%\qTrading\postgres\16\data"
+REM Windows 上 platformdirs 追加 author（= appname），默认根为 %LOCALAPPDATA%\qTrading\qTrading
+set "DEFAULT_DATA_DIR=%LOCALAPPDATA%\qTrading\qTrading\postgres\16\data"
 
 REM 超级用户名：与 sidecar --username 默认值一致（postgres）。
 REM 非 postgres 时向 dump / restore / maintenance-shell 显式透传 --username
