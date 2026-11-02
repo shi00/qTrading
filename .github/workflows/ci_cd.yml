@@ -478,6 +478,13 @@ jobs:
           fail_ci_if_error: true
           verbose: true
 
+      # R9: 上传 junit 前脱敏可能含 DB 连接串（含密码）的文本工件（D18-R03）。
+      - name: Sanitize test reports
+        if: always()
+        shell: bash
+        run: |
+          python scripts/sanitize_artifacts.py 'junit-*.xml'
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -748,18 +755,13 @@ jobs:
             --durations=30 --durations-min=1.0 \
             -o log_cli=true --log-cli-level=INFO --capture=no
 
+      # R9: 上传前脱敏所有文本工件（日志/junit/e2e-artifacts 文本）；目录递归由脚本
+      # 处理，e2e-artifacts 内的 PNG/zip 等二进制按扩展名白名单跳过。
       - name: Sanitize E2E artifacts
         if: always()
-        shell: pwsh
+        shell: bash
         run: |
-          # R9: 脱敏所有可能含 DB 连接串（含密码）的文本工件，覆盖 .log 和 junit XML
-          $pattern = '([a-zA-Z0-9\+\.-]+)://([^:@\s]+):[^@\s]+@'
-          $replacement = '$1://$2:***@'
-          foreach ($filePath in @("logs/e2e-flet-app.log", "junit-e2e.xml")) {
-            if (Test-Path $filePath) {
-              (Get-Content $filePath) -replace $pattern, $replacement | Set-Content $filePath -Encoding UTF8
-            }
-          }
+          python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-e2e.xml' e2e-artifacts
 
       - name: Upload E2E test reports
         if: always()
@@ -913,6 +915,13 @@ jobs:
             }
           }
           if ($hasError) { exit 1 }
+
+      # R9: 上传 junit 前脱敏可能含 DB 连接串（含密码）的文本工件（D18-R03）。
+      - name: Sanitize test reports
+        if: always()
+        shell: bash
+        run: |
+          python scripts/sanitize_artifacts.py 'junit-*.xml'
 
       - name: Upload test reports
         if: always()
@@ -1389,18 +1398,13 @@ jobs:
             --run-windows-skip \
             -n 1 -v --tb=long --junitxml=junit-skip-revalidation-${{ matrix.group }}.xml
 
+      # R9: 上传前脱敏所有文本工件（日志/junit/e2e-artifacts 文本）；目录递归由脚本
+      # 处理，e2e-artifacts 内的 PNG/zip 等二进制按扩展名白名单跳过。
       - name: Sanitize E2E artifacts
         if: always()
-        shell: pwsh
+        shell: bash
         run: |
-          # R9: 脱敏所有可能含 DB 连接串（含密码）的文本工件
-          $pattern = '([a-zA-Z0-9\+\.-]+)://([^:@\s]+):[^@\s]+@'
-          $replacement = '$1://$2:***@'
-          foreach ($filePath in @("logs/e2e-flet-app.log", "junit-skip-revalidation-${{ matrix.group }}.xml")) {
-            if (Test-Path $filePath) {
-              (Get-Content $filePath) -replace $pattern, $replacement | Set-Content $filePath -Encoding UTF8
-            }
-          }
+          python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-skip-revalidation-${{ matrix.group }}.xml' e2e-artifacts
 
       - name: Upload E2E test reports
         if: always()
@@ -1551,18 +1555,13 @@ jobs:
           echo "Collected sidecar logs:"
           ls -la sidecar-logs/ 2>/dev/null || echo "(no sidecar logs found)"
 
+      # R9: 上传前脱敏所有文本工件（日志/junit/e2e-artifacts 文本/sidecar-logs）；
+      # 目录递归由脚本处理，e2e-artifacts 内的 PNG/zip 等二进制按扩展名白名单跳过。
       - name: Sanitize E2E artifacts
         if: always()
-        shell: pwsh
+        shell: bash
         run: |
-          # R9: 脱敏所有可能含 DB 连接串（含密码）的文本工件
-          $pattern = '([a-zA-Z0-9\+\.-]+)://([^:@\s]+):[^@\s]+@'
-          $replacement = '$1://$2:***@'
-          foreach ($filePath in @("logs/e2e-flet-app.log", "junit-sidecar-smoke.xml")) {
-            if (Test-Path $filePath) {
-              (Get-Content $filePath) -replace $pattern, $replacement | Set-Content $filePath -Encoding UTF8
-            }
-          }
+          python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-sidecar-smoke.xml' e2e-artifacts sidecar-logs
 
       - name: Upload E2E test reports
         if: always()
