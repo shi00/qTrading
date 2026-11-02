@@ -15,6 +15,7 @@ Mock 策略：
 - TestEmbeddedPgMaintenanceServiceSingleton: 单例协议（2 个）
 - TestEmbeddedPgMaintenanceServiceArgv: argv 构造（UIR-F16-002 库名透传与拒绝、
   M21 用户名透传与白名单校验、M23 reset-password argv 与错误码）
+- TestSidecarUtf8Decoding: D16-F08 显式 UTF-8 解码与非 UTF-8 locale 回归
 """
 
 from __future__ import annotations
@@ -1065,6 +1066,152 @@ class TestRunSidecarCancelAllowed:
         # 注册路径的 finally 在超时异常后仍清空句柄（吸收对抗性检视 P2-4 测试缺口）
         assert maintenance_service._active_proc is None
         assert maintenance_service._dump_task_reserved is False
+
+
+# =============================================================================
+# TestSidecarUtf8Decoding: D16-F08 维护客户端按 UTF-8 显式解码
+# =============================================================================
+class TestSidecarUtf8Decoding:
+    """D16-F08: sidecar 输出固定 UTF-8，维护客户端不得按系统 locale 解码。
+
+    - Popen 必须显式 ``encoding="utf-8", errors="replace"``
+    - 非 UTF-8 locale（cp1252/cp936）下中文路径与诊断信息逐字一致
+    - 机器协议 stdout 的损坏字节（U+FFFD）显式拒绝，诊断 stderr 容错
+    """
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_popen_passes_explicit_utf8_replace(self, maintenance_service) -> None:
+        """Popen 显式指定 UTF-8 + replace，不依赖系统 locale。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.communicate = MagicMock(return_value=("", ""))
+        popen_mock = MagicMock(return_value=proc_mock)
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                popen_mock,
+            ),
+        ):
+            await maintenance_service._run_sidecar(["sidecar", "doctor"])
+
+        _args, kwargs = popen_mock.call_args
+        assert kwargs["text"] is True
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+
+    @pytest.mark.parametrize("locale_encoding", ["cp1252", "cp936"])
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_chinese_output_decoded_verbatim_under_non_utf8_locale(
+        self, maintenance_service, monkeypatch, locale_encoding: str
+    ) -> None:
+        """cp1252/cp936 系统 locale 下，UTF-8 中文路径与 stderr 不被误解码。
+
+        模拟方式：把 Popen 默认文本编码来源（``subprocess._text_encoding``）改为非 UTF-8；
+        真实子进程直接写 UTF-8 字节（不受子进程自身 locale 影响）。
+        """
+        import sys
+
+        stdout_text = "备份完成: D:/数据/备份.dump"
+        stderr_text = "备份完成"
+        script = (
+            "import sys;"
+            f"sys.stdout.buffer.write({stdout_text.encode('utf-8')!r});"
+            f"sys.stderr.buffer.write({stderr_text.encode('utf-8')!r})"
+        )
+
+        with (
+            patch("subprocess._text_encoding", return_value=locale_encoding),
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+        ):
+            exit_code, stdout, stderr = await maintenance_service._run_sidecar([sys.executable, "-c", script])
+
+        assert exit_code == 0
+        assert stdout == stdout_text
+        assert stderr == stderr_text
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_rejects_corrupted_stdout(self, maintenance_service) -> None:
+        """doctor JSON 字符串字段含 U+FFFD（非法 UTF-8）时显式拒绝，不当作有效诊断。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        corrupted = dict(MOCK_DOCTOR_JSON)
+        corrupted["data_dir"] = "D:/\ufffd/data"
+        with _patch_run_async(0, json.dumps(corrupted)):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
+                await maintenance_service.doctor()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_maintenance_shell_rejects_corrupted_stdout(self, maintenance_service) -> None:
+        """maintenance-shell JSON 含 U+FFFD 时显式拒绝，避免返回乱码 psql 路径。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        shell_json = {
+            "psql_path": "D:/\ufffd/psql.exe",
+            "connection_string_redacted": "postgresql://postgres:***@127.0.0.1:55433/qtrading",
+        }
+        with _patch_run_async(0, json.dumps(shell_json)):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
+                await maintenance_service.maintenance_shell()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_restore_rejects_corrupted_stdout_target_path(self, maintenance_service, tmp_path: Path) -> None:
+        """restore 从 stdout 取目标路径时，损坏的 UTF-8 不得作为成功目录返回。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        input_path = tmp_path / "backup.dump"
+        input_path.write_bytes(b"fake")
+
+        with _patch_run_async(0, "D:/\ufffd/restored"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
+                await maintenance_service.restore(input_path)
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_restore_explicit_target_ignores_corrupted_stdout(self, maintenance_service, tmp_path: Path) -> None:
+        """restore 显式指定 target_data_dir 时不消费 stdout，损坏字节不影响成功结果。"""
+        from services.embedded_pg_maintenance_service import RestoreResult
+
+        input_path = tmp_path / "backup.dump"
+        input_path.write_bytes(b"fake")
+        target = tmp_path / "new_data"
+
+        with _patch_run_async(0, "D:/\ufffd/ignored"):
+            result = await maintenance_service.restore(input_path, target)
+
+        assert isinstance(result, RestoreResult)
+        assert result.target_data_dir == str(target)
+        assert result.exit_code == 0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_dump_ignores_corrupted_stdout(self, maintenance_service, tmp_path: Path) -> None:
+        """dump 不消费 stdout，诊断噪声中的替换字符不得把成功备份误判为失败。"""
+        from services.embedded_pg_maintenance_service import DumpResult
+
+        output_path = tmp_path / "backup.dump"
+        output_path.write_bytes(b"fake dump content")
+
+        with _patch_run_async(0, "D:/\ufffd/noise"):
+            result = await maintenance_service.dump(output_path)
+
+        assert isinstance(result, DumpResult)
+        assert result.exit_code == 0
+        assert result.file_size == len(b"fake dump content")
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stderr_replacement_still_classified_by_exit_code(self, maintenance_service, tmp_path: Path) -> None:
+        """诊断 stderr 使用 replace：损坏字节不阻断退出码分类（exit 30 仍映射 dump_restore_failed）。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with _patch_run_async(30, "", "dump failed: \ufffd"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="dump_restore_failed"):
+                await maintenance_service.dump(tmp_path / "backup.dump")
 
 
 # =============================================================================
