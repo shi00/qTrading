@@ -23,7 +23,7 @@ from tests.unit.ui.component_renderer import (
     run_unmount_effects,
 )
 from ui.components.resizable_splitter import ResizableSplitter
-from ui.i18n import I18n
+from ui.i18n import I18n, I18nState
 
 pytestmark = pytest.mark.unit
 
@@ -382,13 +382,35 @@ class TestHoverHandlers:
 
 
 class TestUnmount:
-    """验证组件 unmount 不抛异常。"""
+    """验证 unmount 作用于已挂载的同一实例: 退订 + 更新调度停止 (test_gap 闭环)。"""
 
-    def test_unmount_safe(self, mock_i18n_state, mock_app_colors_state):
+    def test_same_instance_unmount_stops_locale_updates(self, mock_i18n_state, mock_app_colors_state):
+        """同一实例 创建→挂载→卸载: 挂载态 locale 变化触发调度, 卸载后不再调度且订阅已解除。
+
+        回归原缺陷: 旧用例挂载一个实例后丢弃, 却对另一个从未挂载的新实例执行 unmount,
+        真正的挂载实例从未被卸载, cleanup/退订异常不可观察。本用例全程持有同一 ``component``。
+        """
+        component = _make_splitter()
         with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            _, _ = _render(_make_splitter())
-        # 不应抛异常
-        run_unmount_effects(_make_splitter())
+            page, _ = _render(component)
+
+        # 正例: 该实例已订阅 locale 状态源, 状态变化通知到该实例并调度更新
+        assert _observable_listener_count(mock_i18n_state) == 1
+        page.session.scheduled_updates.clear()
+        mock_i18n_state.locale = "en_US"
+        assert component in page.session.scheduled_updates
+
+        # 卸载同一实例 (若其 cleanup/退订抛异常, 此处自然失败, 不被新空实例的 no-error 掩盖)
+        run_unmount_effects(component)
+
+        # 退订真实发生: 状态源不再保留该实例的监听回调, 实例订阅表已清空
+        assert _observable_listener_count(mock_i18n_state) == 0
+        assert component._state.observable_subscriptions == []
+
+        # 反例: 卸载后同一状态源再变化 → 该实例不再被调度
+        page.session.scheduled_updates.clear()
+        mock_i18n_state.locale = "zh_CN"
+        assert component not in page.session.scheduled_updates
 
 
 class TestCollapsibleToggle:
@@ -511,3 +533,13 @@ def _find_toggle_button(container: ft.Container) -> ft.IconButton | None:
 def component_in_updates(page, _divider=None) -> bool:
     """检查 page.session.scheduled_updates 是否非空（即 set_state 被调用）。"""
     return len(page.session.scheduled_updates) > 0
+
+
+def _observable_listener_count(state: I18nState) -> int:
+    """统计 observable 当前注册的监听回调数 (Flet 1.0.x 以 WeakSet 存储)。
+
+    测试用 fixture 注入的 I18nState 是每测新建的独立实例, 正常仅组件
+    ``use_state(get_observable_state)`` 一个订阅者, 故计数可直接判定退订是否生效。
+    """
+    storage = getattr(state, "_Observable__listeners_storage", None)
+    return len(storage) if storage is not None else 0
