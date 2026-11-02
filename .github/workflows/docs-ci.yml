@@ -37,7 +37,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # 禁用 setup-uv 自带缓存：其默认缓存键绑定 uv.lock（本仓库未跟踪该文件），且每个 PR
           # 引用各存一份 ~350 MB，挤占仓库 10 GB 上限。改由下方 actions/cache 显式缓存
