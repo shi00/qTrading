@@ -27,6 +27,10 @@ _SHIBOR_FALLBACK_LOOKBACK_DAYS = 365
 # M7.8: 循环体取消检查的时间间隔（秒），参考 data/sync/sw_industry.py 模式。
 _CANCEL_CHECK_INTERVAL_SECONDS = 2.0
 
+# D05-F04: 指数权重月度刷新阈值（天）。每个指数按自身最新落库日期独立计算，
+# 不再以全表 MAX(trade_date) 判定「全部目标已完成」。
+_INDEX_WEIGHT_REFRESH_INTERVAL_DAYS = 30
+
 
 def _parse_period(p: typing.Any):
     """Parse Tushare macro period format (YYYYMM) to standard date string.
@@ -589,43 +593,37 @@ class MacroSyncStrategy(ISyncStrategy):
     async def _sync_index_weights(self, result: typing.Any):
         try:
             market_dao = self.context.cache.market_dao
-            latest = await market_dao.get_latest_index_weight_date()
+            latest_by_index = await market_dao.get_latest_index_weight_dates(MAJOR_INDICES)
 
             today_date = await self._get_effective_trade_date()
-            should_update = False
 
-            if not latest:
-                should_update = True
-                from utils.config_handler import ConfigHandler
-
-                years = ConfigHandler.get_init_history_years()
-                rough_start_date = today_date - datetime.timedelta(days=int(250 * years * 2.0))
-                all_dates = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore[union-attr]
-                    start_date=rough_start_date,
-                    end_date=today_date,
-                )
-                start_date = (
-                    all_dates[-(250 * years)]
-                    if len(all_dates) >= (250 * years)
-                    else (all_dates[0] if all_dates else (today_date - datetime.timedelta(days=365 * years)))
-                )
-            else:
+            # D05-F04: 为每个 MAJOR_INDICES 目标独立计算续传窗口。
+            # 水位来自该指数自身已落库的最新 trade_date，故某指数失败时其窗口
+            # 不会被其他成功指数推进的全表 MAX 越过；重跑仍从失败窗口继续。
+            initial_start: datetime.date | None = None
+            pending: list[tuple[str, datetime.date]] = []
+            for idx_code in MAJOR_INDICES:
+                latest = latest_by_index.get(idx_code)
+                if not latest:
+                    if initial_start is None:
+                        initial_start = await self._index_weight_initial_start(today_date)
+                    pending.append((idx_code, initial_start))
+                    continue
                 last_dt = parse_date(latest)
                 last_date = last_dt.date() if hasattr(last_dt, "date") else last_dt
-                if (today_date - last_date).days > 30:
-                    should_update = True
-                    start_date = last_date + datetime.timedelta(days=1)
-                else:
-                    start_date = today_date
+                if (today_date - last_date).days <= _INDEX_WEIGHT_REFRESH_INTERVAL_DAYS:
+                    # 该指数未到月度刷新窗口（独立节流，不受其他指数影响）
+                    continue
+                pending.append((idx_code, last_date + datetime.timedelta(days=1)))
 
-            if not should_update:
+            if not pending:
                 logger.debug("[MacroSync] Index weights up to date (monthly).")
                 return
 
-            start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, "strftime") else str(start_date)
-            end_date = today_date.strftime("%Y%m%d")
+            end_str = today_date.strftime("%Y%m%d")
             logger.debug(
-                "[MacroSync] IndexWeight | Syncing %s indices...",
+                "[MacroSync] IndexWeight | Syncing %s/%s indices...",
+                len(pending),
                 len(MAJOR_INDICES),
             )
 
@@ -633,9 +631,11 @@ class MacroSyncStrategy(ISyncStrategy):
                 return
 
             iw_saved = 0
+            failed_indices: list[str] = []
+            permission_denied_indices: list[str] = []
             # M7.8: 转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
             last_cancel_check = time.monotonic()
-            for idx_code in MAJOR_INDICES:
+            for idx_code, start_date in pending:
                 now = time.monotonic()
                 if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
                     last_cancel_check = now
@@ -646,11 +646,12 @@ class MacroSyncStrategy(ISyncStrategy):
                         # index_weight 表实际最新日期，由 save_index_weights 的 upsert 幂等性保证可重入。
                         return
 
+                start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, "strftime") else str(start_date)
                 try:
                     df = await self.context.api.get_index_weight(
                         index_code=idx_code,
                         start_date=start_str,
-                        end_date=end_date,
+                        end_date=end_str,
                     )
 
                     if df is not None and not df.empty:
@@ -661,6 +662,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except TushareAPIPermissionError:
+                    permission_denied_indices.append(idx_code)
                     logger.warning(
                         "[MacroSync] IndexWeight | ⛔ Permission denied for %s",
                         idx_code,
@@ -679,13 +681,25 @@ class MacroSyncStrategy(ISyncStrategy):
                         raise
                     # S18 fix: 部分 index fetch 失败时标记 partial 并记录错误，
                     # 避免状态保持 success 误导监控。system 级别已 raise 不会到此。
+                    failed_indices.append(idx_code)
                     result.status = SyncStatus.PARTIAL.value
                     result.errors.append(f"index_code={idx_code}: {safe_error(e)}")
 
+            # D05-F04: 尾部总体状态如实反映本轮是否存在未完成目标；
+            # 失败指数的窗口未推进（无新行落库），下轮仍会重试。
+            # 权限拒绝与合法空分开：无任何数据落库且全部跳过源于权限时记 skipped_permission。
+            if failed_indices:
+                status = "partial"
+            elif len(permission_denied_indices) == len(pending):
+                # 全部目标均因权限跳过（且无失败）→ 如实记 skipped_permission
+                status = "skipped_permission"
+            else:
+                status = "success"
             await self.context.cache.sync_dao.update_sync_status(
                 "index_weight",
                 today_date,
                 iw_saved,
+                status=status,
             )
             logger.debug("[MacroSync] IndexWeight | Total: %s records", iw_saved)
 
@@ -733,3 +747,19 @@ class MacroSyncStrategy(ISyncStrategy):
             # 避免「有错误但 status=success」误导消费方（对齐循环内单指数失败分支）。
             if result.status not in ("failed", "cancelled"):
                 result.status = SyncStatus.PARTIAL.value
+
+    async def _index_weight_initial_start(self, today_date: datetime.date) -> datetime.date:
+        """无历史数据的指数从初始历史窗口建仓（D05-F04，沿用原全表逻辑）。"""
+        from utils.config_handler import ConfigHandler
+
+        years = ConfigHandler.get_init_history_years()
+        rough_start_date = today_date - datetime.timedelta(days=int(250 * years * 2.0))
+        all_dates = await self.context.processor.trade_calendar.get_trade_dates(  # type: ignore[union-attr]
+            start_date=rough_start_date,
+            end_date=today_date,
+        )
+        return (
+            all_dates[-(250 * years)]
+            if len(all_dates) >= (250 * years)
+            else (all_dates[0] if all_dates else (today_date - datetime.timedelta(days=365 * years)))
+        )
