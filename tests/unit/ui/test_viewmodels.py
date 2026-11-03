@@ -1515,6 +1515,8 @@ class TestScreenerViewModelResultOwnership:
             await task_b
 
         assert screener_vm._full_results is df_b
+        assert screener_vm.state.loading is False
+        assert screener_vm._loading_owner is None
         assert screener_vm.state.status_message.params["label"] == "#runidBBB"
         assert any(m.key == "warn_b" for m in screener_vm.state.warnings)
         assert all(m.key != "warn_a" for m in screener_vm.state.warnings)
@@ -1569,6 +1571,169 @@ class TestScreenerViewModelResultOwnership:
 
         assert screener_vm._full_results is new_df
         assert screener_vm.state.loading is False
+
+
+class TestScreenerViewModelLoadingOwnership:
+    """VMS-F03: loading 操作所有权 —— 旧代次不得写旧 rows/标签/警告，也不得清新操作 loading。"""
+
+    @staticmethod
+    def _paused_sort(entered: asyncio.Event, release: asyncio.Event, result_df: pd.DataFrame):
+        """返回首个 CPU 排序挂起在 barrier 的 ThreadPoolManager patch。"""
+
+        async def _run_async(task_type, fn, *args, **kwargs):
+            entered.set()
+            await release.wait()
+            return result_df
+
+        mock_tp = MagicMock()
+        mock_tp.run_async = _run_async
+        return patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager", return_value=mock_tp)
+
+    async def test_old_sort_keeps_new_history_loading_until_history_finishes(self, screener_vm):
+        """S 排序挂起 → B 历史加载接管 → 放行 S：B 加载期 loading 保持 True，完成后归 B。"""
+        screener_vm.switch_to_history()
+        df_a = pd.DataFrame({"ts_code": ["A.SZ"], "name": ["A"], "ai_score": [1.0]})
+        screener_vm._full_results = df_a
+        screener_vm._update_pagination()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        fut_b = asyncio.get_running_loop().create_future()
+        df_b = pd.DataFrame(
+            {
+                "ts_code": ["B.SZ"],
+                "name": ["B"],
+                "ai_score": [2.0],
+                "exec_warnings": ['[{"key": "warn_b"}]'],
+            },
+        )
+
+        with (
+            self._paused_sort(entered, release, pd.DataFrame(df_a)),
+            patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM,
+        ):
+            cm = MagicMock()
+            cm.screener_dao.get_history_records = MagicMock(return_value=fut_b)
+            MockCM.return_value = cm
+
+            sort_task = asyncio.create_task(screener_vm.sort_data("ai_score", ascending=True))
+            await entered.wait()
+
+            history_task = asyncio.create_task(
+                screener_vm.load_history_data("2026-05-16", run_id="runidBBB"),
+            )
+            await asyncio.sleep(0)
+            assert screener_vm.state.loading is True
+
+            release.set()
+            await sort_task
+            # 旧排序不写回旧 rows，也不清 B 的 loading
+            assert screener_vm.state.loading is True
+            assert screener_vm._full_results is df_a
+
+            fut_b.set_result(df_b)
+            await history_task
+
+        assert screener_vm.state.loading is False
+        assert screener_vm._full_results is df_b
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == ["B"]
+        assert screener_vm.state.status_message.params["label"] == "#runidBBB"
+        assert any(m.key == "warn_b" for m in screener_vm.state.warnings)
+        assert screener_vm._loading_owner is None
+
+    async def test_old_sort_discarded_after_mode_switch_and_new_history(self, screener_vm):
+        """S 挂起 → mode 切换推进 revision + B 历史加载 → 放行 S：S 不写旧数据、不清 B loading。"""
+        screener_vm._full_results = pd.DataFrame({"ts_code": ["R.SZ"], "name": ["R"], "ai_score": [9.0]})
+        screener_vm.switch_to_history()
+        screener_vm._full_results = pd.DataFrame({"ts_code": ["A.SZ"], "name": ["A"], "ai_score": [1.0]})
+        screener_vm._update_pagination()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        fut_b = asyncio.get_running_loop().create_future()
+        df_b = pd.DataFrame({"ts_code": ["B.SZ"], "name": ["B"], "ai_score": [2.0]})
+
+        with (
+            self._paused_sort(entered, release, pd.DataFrame({"ts_code": ["A.SZ"], "name": ["A"], "ai_score": [1.0]})),
+            patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM,
+        ):
+            cm = MagicMock()
+            cm.screener_dao.get_history_records = MagicMock(return_value=fut_b)
+            MockCM.return_value = cm
+
+            sort_task = asyncio.create_task(screener_vm.sort_data("ai_score", ascending=True))
+            await entered.wait()
+
+            screener_vm.switch_to_realtime()
+            screener_vm.switch_to_history()
+            history_task = asyncio.create_task(
+                screener_vm.load_history_data("2026-05-16", run_id="runidBBB"),
+            )
+            await asyncio.sleep(0)
+            assert screener_vm.state.loading is True
+
+            release.set()
+            await sort_task
+            # 数据集修订号已变 → 旧排序整体丢弃，且不得清 B loading
+            assert screener_vm.state.loading is True
+            assert screener_vm._full_results is None
+
+            fut_b.set_result(df_b)
+            await history_task
+
+        assert screener_vm.state.loading is False
+        assert screener_vm._full_results is df_b
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == ["B"]
+
+    async def test_old_sort_failure_keeps_successor_loading_and_old_rows(self, screener_vm):
+        """S 排序异常且 B 已接管：保留旧顺序，不写 sort_failed 状态，不清 B loading。"""
+        screener_vm.switch_to_history()
+        df_a = pd.DataFrame({"ts_code": ["A.SZ"], "name": ["A"], "ai_score": [1.0]})
+        screener_vm._full_results = df_a
+        screener_vm._update_pagination()
+        status_before = screener_vm.state.status_message
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        fut_b = asyncio.get_running_loop().create_future()
+        df_b = pd.DataFrame({"ts_code": ["B.SZ"], "name": ["B"], "ai_score": [2.0]})
+
+        async def _failing_sort(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("sort boom")
+
+        mock_tp = MagicMock()
+        mock_tp.run_async = _failing_sort
+
+        with (
+            patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager", return_value=mock_tp),
+            patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM,
+        ):
+            cm = MagicMock()
+            cm.screener_dao.get_history_records = MagicMock(return_value=fut_b)
+            MockCM.return_value = cm
+
+            sort_task = asyncio.create_task(screener_vm.sort_data("ai_score", ascending=True))
+            await entered.wait()
+
+            history_task = asyncio.create_task(
+                screener_vm.load_history_data("2026-05-16", run_id="runidBBB"),
+            )
+            await asyncio.sleep(0)
+            assert screener_vm.state.loading is True
+
+            release.set()
+            await sort_task
+            assert screener_vm.state.loading is True
+            assert screener_vm._full_results is df_a
+            assert screener_vm.state.status_message == status_before
+
+            fut_b.set_result(df_b)
+            await history_task
+
+        assert screener_vm.state.loading is False
+        assert screener_vm._full_results is df_b
 
 
 class TestScreenerViewModelExportResults:

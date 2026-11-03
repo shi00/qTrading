@@ -109,12 +109,16 @@ class HistoryModeMixin:
     _set_state: Callable[..., None]
     _update_pagination: Callable[..., None]
     cancel_retry: Callable[[], None]
-    # UIR-F09-002: 历史请求代次（仅由 load_history_data 发起时递增，用于判定「是否有更新的
-    # 历史请求在途」并据此决定 loading 归属）/ 数据集修订号（模式切换或 _full_results 被整体
-    # 替换时递增，用于判定历史响应 / 排序写回的数据集身份是否过期）/ 销毁标志（宿主 VM 共享）。
+    # UIR-F09-002: 历史请求代次（仅由 load_history_data 发起时递增，仅用于判定「是否有更新的
+    # 历史请求在途」即数据归属）/ 数据集修订号（模式切换或 _full_results 被整体替换时递增，
+    # 用于判定历史响应 / 排序写回的数据集身份是否过期）/ 销毁标志（宿主 VM 共享）。
     _history_request_seq: int
     _dataset_revision: int
     _disposed: bool
+    # VMS-F03: loading 操作所有权 token（与 _history_request_seq 职责分离；宿主 VM 共享）。
+    _begin_loading_operation: Callable[[], object]
+    _release_loading_operation: Callable[[object | None], dict[str, bool]]
+    _reset_loading_if_owner: Callable[[object | None], None]
 
     @cached_property
     def _cache(self) -> CacheManager:
@@ -326,9 +330,11 @@ class HistoryModeMixin:
         UIR-F09-002: 结果所有权 / 请求代次保护 —— 目标不变量「`(mode, dataset_owner,
         request_generation)` 一致才可提交可见数据」：
         1. 方法入口（任何 await 之前）同步递增 ``_history_request_seq``（仅标识「在途历史
-           请求」，用于 loading 归属）并捕获本次起始 mode 与 ``_dataset_revision``
+           请求」，用于数据归属）并捕获本次起始 mode 与 ``_dataset_revision``
            （数据集身份）；mode switch（``switch_to_history`` / ``switch_to_realtime``）推进
            ``_dataset_revision``，使在途响应的数据集身份过期；
+           同时获取独立的 loading owner token（VMS-F03），由 token 而非请求代次决定
+           loading 归属；
         2. DAO await 于锁外执行（慢查询不阻塞排序 / 流式 flush）；仅「校验 + 写回」临界区
            纳入 ``screener_vm_results_lock``（与 ``sort_data`` / ``_flush_ai_buffer`` 同锁，
            R11），并在锁内二次核对，消除等待锁期间的竞态；
@@ -337,51 +343,47 @@ class HistoryModeMixin:
            B 快 → A 迟到覆盖 B」与「历史迟到覆盖实时表」；
         4. 标签与成功数据**同帧提交**（`_update_pagination` 一次落 label + warnings + 切片），
            保证状态标签与可见数据一致。
-        CancelledError / Exception 仅在本次仍为最新请求时复位 loading；过期判定路径仅在
-        「无更新历史请求接管」时复位 loading（模式切换 / 数据集替换 / 销毁场景无更新请求，
-        需复位避免 loading 卡死；被更新请求取代时不得清其 loading）。CancelledError 照常传播 (R2)。
+        CancelledError / Exception / 过期判定路径均经 loading owner token 复位：仅当本次仍持有
+        token 时复位（被更新操作接管时不得清其 loading；模式切换 / 数据集替换 / 销毁场景无
+        更新操作接管，需复位避免 loading 卡死）。CancelledError 照常传播 (R2)。
         """
-        # 1. 代次 / 身份捕获（同步段，无 await，单线程事件循环内原子）
+        # 1. 代次 / 身份 / loading owner 捕获（同步段，无 await，单线程事件循环内原子）
         self._history_request_seq += 1
         request_seq = self._history_request_seq
         mode_at_start = self._state.mode
         revision_at_start = self._dataset_revision
+        loading_owner = self._begin_loading_operation()
         self._set_state(loading=True)
         try:
             cache = self._cache
             # 2. DAO await 于锁外执行
             df = await cache.screener_dao.get_history_records(trade_date, strategy_name, run_id)
         except asyncio.CancelledError:
-            # 仅当本次仍为当前请求时复位 loading，避免清掉更新请求的 loading (R2 传播取消)
-            if request_seq == self._history_request_seq:
-                self._set_state(loading=False)
+            # VMS-F03: 仅自己仍持有 loading 时复位，避免清掉更新操作的 loading (R2 传播取消)
+            self._reset_loading_if_owner(loading_owner)
             raise
         except Exception:
-            if request_seq == self._history_request_seq:
-                self._set_state(loading=False)
+            self._reset_loading_if_owner(loading_owner)
             raise
 
         # 3. 过期判定：有更新的历史请求在途 / 数据集身份已变 / VM 已销毁 → 丢弃，不改任何可见状态
         superseded = request_seq != self._history_request_seq
         dataset_changed = revision_at_start != self._dataset_revision
         if superseded or dataset_changed or self._disposed:
-            # 仅当无更新的历史请求接管 loading 时复位自身 loading（A 失败/过期不得清 B 的 loading）；
-            # 模式切换 / 数据集替换 / 销毁场景无更新历史请求，需复位避免 loading 卡死。
-            if not superseded:
-                self._set_state(loading=False)
+            # VMS-F03: 仅当 loading 仍归本次操作时复位；被更新操作接管时不得清其 loading。
+            self._reset_loading_if_owner(loading_owner)
             return
 
         lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
         async with lock:
             # 3b. 等待锁期间可能又发起新请求 / 切换模式 / 数据被整体替换 → 二次核对，过期即静默丢弃；
-            # 仅当仍为最新历史请求（无更新请求接管 loading）时复位自身 loading。
+            # loading 复位同样只作用于本次仍持有的 token。
             if (
                 request_seq != self._history_request_seq
                 or self._state.mode != mode_at_start
                 or revision_at_start != self._dataset_revision
             ):
-                if request_seq == self._history_request_seq:
-                    self._set_state(loading=False)
+                self._reset_loading_if_owner(loading_owner)
                 return
             if df is not None and not df.empty:
                 self._full_results = df
@@ -402,7 +404,6 @@ class HistoryModeMixin:
             # 「新标签 + 旧数据」不一致。UX-03: 历史记录无实时收窄上下文, 防御性清空态原因。
             self._update_pagination(
                 page_no=1,
-                loading=False,
                 sort_column=sort_column,
                 sort_ascending=False,
                 empty_message=None,
@@ -410,6 +411,7 @@ class HistoryModeMixin:
                 status_message=self._history_viewing_message(trade_date, strategy_name, run_id),
                 status_color="info",
                 status_action_key=None,
+                **self._release_loading_operation(loading_owner),
             )
 
     @staticmethod

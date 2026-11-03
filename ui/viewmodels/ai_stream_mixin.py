@@ -184,6 +184,10 @@ class AIStreamMixin:
     _background_tasks: set[asyncio.Task]
     _strategy_submitted: bool
     _active_task_id: str | None
+    # VMS-F03: 运行 loading 所有权 token（与排序/历史共享的 _loading_owner 配对使用）。
+    _run_loading_owner: object | None
+    _begin_loading_operation: Callable[[], object]
+    _release_loading_operation: Callable[[object | None], dict[str, bool]]
     _run_unique_key: str
     _last_ai_context: dict | None
     _last_strategy_key: str | None
@@ -709,6 +713,7 @@ class AIStreamMixin:
         *,
         warnings: tuple[Message, ...] = (),
         empty_message: Message | None = None,
+        loading_owner: object | None = None,
         **status_changes,
     ) -> None:
         """VMS-F01: 在同一结果锁内提交本次运行的最终权威结果。
@@ -720,9 +725,17 @@ class AIStreamMixin:
         ``_discarded_buffer``，排队中的 flush 见空缓冲直接返回。锁内仅执行同步
         ``_commit_realtime_results``（无 await），CancelledError 在等待锁阶段经
         ``async with`` 正常传播（R2）。
+
+        VMS-F03: ``loading_owner`` 传入时，loading=False 在**锁内、提交同一同步段**
+        依据当时 owner 判定，避免等待锁期间后发操作接管 loading 后被本次提交误清。
         """
         lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
         async with lock:
+            if loading_owner is not None:
+                status_changes = {
+                    **status_changes,
+                    **self._finish_run_loading(loading_owner),
+                }
             self._commit_realtime_results(
                 result_df,
                 warnings=warnings,
@@ -777,6 +790,12 @@ class AIStreamMixin:
             "exclude_st": bool(exclude_st),
             "params": dict(params) if params else {},
         }
+
+        # VMS-F03: 运行入口在同步段获取 loading owner token（先于提交/任何 await）。
+        # 运行结束（成功/异常/取消/排队期终态兜底）仅在仍持有该 token 时复位 loading，
+        # 避免旧运行清掉排序/历史等后发操作接管后的 loading。
+        run_loading_owner = self._begin_loading_operation()
+        self._run_loading_owner = run_loading_owner
 
         # Define the inner coroutine for the task manager
         async def _execute_screening(task_id: str, **kwargs):
@@ -983,7 +1002,7 @@ class AIStreamMixin:
 
                     if save_failed_reason is not None:
                         self._set_state(
-                            loading=False,
+                            **self._finish_run_loading(run_loading_owner),
                             status_message=Message(
                                 "screener_done_unsaved",
                                 {
@@ -998,7 +1017,7 @@ class AIStreamMixin:
                     elif not save_results:
                         # 未请求落库 ≠ 落库失败：用不含「已保存」的中立文案，不告警。
                         self._set_state(
-                            loading=False,
+                            **self._finish_run_loading(run_loading_owner),
                             status_message=Message("screener_done", {"count": len(result_df)}),
                             status_color="success",
                             status_action_key=None,
@@ -1012,7 +1031,7 @@ class AIStreamMixin:
                         # 分支为防御性兜底，正常链路不会命中)。
                         unsaved_key = _infer_unsaved_status_key(result_df)
                         self._set_state(
-                            loading=False,
+                            **self._finish_run_loading(run_loading_owner),
                             status_message=Message(
                                 unsaved_key or "screener_done",
                                 {"count": len(result_df)},
@@ -1028,7 +1047,7 @@ class AIStreamMixin:
                         # 此处不叠加 warning —— 整批 failed 占比 > 30% 另有
                         # _build_ai_failed_banner_message 横幅兜底。
                         self._set_state(
-                            loading=False,
+                            **self._finish_run_loading(run_loading_owner),
                             status_message=Message(
                                 "screener_done_saved",
                                 {"count": len(result_df), "saved": saved},
@@ -1063,7 +1082,7 @@ class AIStreamMixin:
                     pd.DataFrame(),
                     warnings=strategy_warnings,
                     empty_message=empty_message,
-                    loading=False,
+                    loading_owner=run_loading_owner,
                     status_message=Message("screener_no_results"),
                     status_color="warning",
                     status_action_key=None,
@@ -1072,7 +1091,7 @@ class AIStreamMixin:
 
             except asyncio.CancelledError:
                 self._set_state(
-                    loading=False,
+                    **self._finish_run_loading(run_loading_owner),
                     status_message=Message("screener_cancelled"),
                     status_color="warning",
                     status_action_key=None,
@@ -1085,7 +1104,7 @@ class AIStreamMixin:
                     exc_info=True,
                 )
                 self._set_state(
-                    loading=False,
+                    **self._finish_run_loading(run_loading_owner),
                     status_message=Message("screener_blocked", {"reason": DataSanitizer.sanitize_error(e)}),
                     status_color="warning",
                     # Task 5.2: 附 "前往同步" 跳转 action 供 View 渲染按钮
@@ -1099,7 +1118,7 @@ class AIStreamMixin:
                     exc_info=True,
                 )
                 self._set_state(
-                    loading=False,
+                    **self._finish_run_loading(run_loading_owner),
                     status_message=e.message,
                     status_color="warning",
                     status_action_key=None,
@@ -1113,7 +1132,7 @@ class AIStreamMixin:
                 )
                 # Show generic user-friendly message, avoid raw traceback on UI
                 self._set_state(
-                    loading=False,
+                    **self._finish_run_loading(run_loading_owner),
                     status_message=Message("screener_exec_error"),
                     status_color="error",
                     status_action_key=None,
@@ -1123,6 +1142,11 @@ class AIStreamMixin:
                 # F02: id-scoped 释放 — 仅当句柄仍指向本任务时清空。防「旧任务完成清空
                 # 新任务句柄」导致新运行失去页面取消入口；陈旧回调不再无条件覆盖。
                 self._release_run(task_id)
+                # VMS-F03: 兜底释放本运行 loading（各显式结束分支已优先释放；此处仅在
+                # 意外提前返回路径仍持有 token 时复位，绝不清后发操作接管的 loading）。
+                release = self._finish_run_loading(run_loading_owner)
+                if release:
+                    self._set_state(**release)
 
         # Reset Local UI State
         self._full_results = None
@@ -1166,7 +1190,7 @@ class AIStreamMixin:
                 exc_info=True,
             )
             self._set_state(
-                loading=False,
+                **self._finish_run_loading(run_loading_owner),
                 status_message=Message("screener_exec_error"),
                 status_color="error",
                 status_action_key=None,
@@ -1175,7 +1199,7 @@ class AIStreamMixin:
 
         if task_id is None:
             self._set_state(
-                loading=False,
+                **self._finish_run_loading(run_loading_owner),
                 status_message=Message("screener_task_rejected"),
                 status_color="warning",
                 status_action_key=None,
@@ -1192,6 +1216,16 @@ class AIStreamMixin:
         """
         if self._active_task_id == task_id:
             self._active_task_id = None
+
+    def _finish_run_loading(self, token: object | None) -> dict[str, bool]:
+        """VMS-F03: 运行结束路径释放 loading 所有权。
+
+        仅当 ``token`` 仍是当前运行 owner 时清空 ``_run_loading_owner`` 与其指向的
+        loading owner；被排序/历史等后发操作接管时返回空 dict，不写他人的 loading。
+        """
+        if token is not None and self._run_loading_owner is token:
+            self._run_loading_owner = None
+        return self._release_loading_operation(token)
 
     def cancel_strategy(self) -> None:
         """Task 3.2: 取消正在运行的选股策略任务 (本页取消).

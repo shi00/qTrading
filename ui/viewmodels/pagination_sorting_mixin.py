@@ -59,6 +59,11 @@ class PaginationSortingMixin:
     _set_state: Callable[..., None]
     # UIR-F09-002: 数据集修订号（_full_results 被整体替换时递增，宿主 VM 共享成员）。
     _dataset_revision: int
+    # VMS-F03: loading 操作所有权（宿主 VM 共享成员 / 跨 mixin 方法）。
+    _loading_owner: object | None
+    _begin_loading_operation: Callable[[], object]
+    _release_loading_operation: Callable[[object | None], dict[str, bool]]
+    _reset_loading_if_owner: Callable[[object | None], None]
 
     def _update_pagination(self, page_size: int | None = None, page_no: int | None = None, **changes) -> None:
         """Recompute pagination fields in state, then notify via _set_state.
@@ -218,31 +223,37 @@ class PaginationSortingMixin:
         的跨 await 写点必须互斥, 否则并发写回交错构成丢失更新 (旧数据排序写回覆盖
         流式批次/历史载入)。``_full_results`` 写回与 ``_update_pagination`` 之间无
         await (同步段不可分割), 排序中的翻页事件不会读到撕裂中间态。
-        CancelledError 经 ``async with`` 释放锁后正常传播 (R2)。
+
+        VMS-F03: 入口在任何 await 之前获取 loading owner token；结束路径仅在仍持有
+        token 时复位 loading。若 await 期间历史/运行等新操作接管 owner（或数据集修订号
+        已变），本次排序按旧代次丢弃，既不写回旧 rows，也不清他人的 loading。
+        CancelledError 经 ``async with`` 释放锁、复位自身 loading 后正常传播 (R2)。
         """
         if self._full_results is None or self._full_results.empty:
             return
-        lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
-        async with lock:
-            if ascending is not None:
-                sort_column = column_key
-                sort_ascending = ascending
-            elif self._state.sort_column == column_key:
-                sort_ascending = not self._state.sort_ascending
-                sort_column = column_key
-            else:
-                sort_column = column_key
-                sort_ascending = True
+        # VMS-F03: 同步段获取 owner（先于等待锁），保证先发起但排队等锁的排序不会被
+        # 后来操作误判为「最新 owner」；后来操作取得 token 后即可接管 loading。
+        loading_owner = self._begin_loading_operation()
+        self._set_state(loading=True)
+        try:
+            lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
+            async with lock:
+                if ascending is not None:
+                    sort_column = column_key
+                    sort_ascending = ascending
+                elif self._state.sort_column == column_key:
+                    sort_ascending = not self._state.sort_ascending
+                    sort_column = column_key
+                else:
+                    sort_column = column_key
+                    sort_ascending = True
 
-            self._set_state(loading=True)
+                # UIR-F09-002: 捕获（数据集引用 + 修订号）同一同步时刻的快照。修订号在
+                # await 期间被整体替换数据的写者（运行完成 / 模式切换绕过本锁）推进时，
+                # 本次排序结果基于陈旧数据集，须丢弃写回，避免覆盖新数据。
+                source_df = self._full_results
+                revision_at_start = self._dataset_revision
 
-            # UIR-F09-002: 捕获（数据集引用 + 修订号）同一同步时刻的快照。修订号在
-            # await 期间被整体替换数据的写者（运行完成 / 模式切换绕过本锁）推进时，
-            # 本次排序结果基于陈旧数据集，须丢弃写回，避免覆盖新数据。
-            source_df = self._full_results
-            revision_at_start = self._dataset_revision
-
-            try:
                 # Offload sorting to thread
                 sorted_df = await ThreadPoolManager().run_async(
                     TaskType.CPU,
@@ -252,10 +263,10 @@ class PaginationSortingMixin:
                     sort_ascending,
                 )
 
-                if revision_at_start != self._dataset_revision:
-                    # 数据集已在 await 期间被替换 → 本次写回过期，不改任何可见状态
-                    # （只复位本任务占用的 loading；不清更新请求的 loading）。
-                    self._set_state(loading=False)
+                # VMS-F03: 数据集已替换或 loading 已被更新操作接管 → 旧代次整体丢弃
+                # （不写回 rows / 标签 / 警告），仅在自己仍持有 token 时复位 loading。
+                if revision_at_start != self._dataset_revision or self._loading_owner is not loading_owner:
+                    self._reset_loading_if_owner(loading_owner)
                     return
 
                 self._full_results = sorted_df
@@ -265,15 +276,20 @@ class PaginationSortingMixin:
                     page_no=1,
                     sort_column=sort_column,
                     sort_ascending=sort_ascending,
-                    loading=False,
+                    **self._release_loading_operation(loading_owner),
                 )
 
-            except Exception as e:
-                logger.error("Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+        except asyncio.CancelledError:
+            self._reset_loading_if_owner(loading_owner)
+            raise
+        except Exception as e:
+            logger.error("Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            release = self._release_loading_operation(loading_owner)
+            if release:
                 self._set_state(
-                    loading=False,
                     status_message=Message("screener_sort_failed"),
                     status_color="error",
+                    **release,
                 )
 
     @staticmethod

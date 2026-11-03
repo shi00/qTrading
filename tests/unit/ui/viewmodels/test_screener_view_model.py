@@ -515,13 +515,104 @@ class TestRunOwnership:
     def test_terminal_notify_releases_when_coroutine_never_ran(self, vm):
         """协程体未执行 (排队期取消) 时，终态订阅兜底释放占用。"""
         vm._active_task_id = "t1"
-        vm._update_pagination(loading=True)
+        # VMS-F03: 运行入口先获取 loading owner；终态兜底仅释放仍属于本运行的 loading。
+        vm._run_loading_owner = vm._begin_loading_operation()
+        vm._set_state(loading=True)
 
         vm._on_tasks_updated([_terminal_task("t1", "CANCELLED")])
 
         assert vm._active_task_id is None
         assert vm.state.loading is False
         assert vm.state.status_message.key == "screener_cancelled"
+
+    @pytest.mark.asyncio
+    async def test_run_entry_acquires_loading_owner(self, vm):
+        """VMS-F03: 运行入口显式获取 loading owner，并与共享 _loading_owner 一致。"""
+        _configure_strategy(vm)
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = MagicMock(return_value="t1")
+            await vm.run_strategy("k", save_results=False)
+
+        assert vm._run_loading_owner is not None
+        assert vm._loading_owner is vm._run_loading_owner
+        assert vm.state.loading is True
+
+    def test_terminal_notify_keeps_newer_operation_loading(self, vm):
+        """VMS-F03: 旧运行终态兜底不得清排序/历史等后发操作接管的 loading。"""
+        vm._active_task_id = "t1"
+        vm._run_loading_owner = vm._begin_loading_operation()
+        vm._set_state(loading=True)
+
+        newer_owner = vm._begin_loading_operation()
+        vm._set_state(loading=True)
+
+        vm._on_tasks_updated([_terminal_task("t1", "CANCELLED")])
+
+        assert vm._active_task_id is None
+        assert vm._run_loading_owner is None
+        assert vm._loading_owner is newer_owner
+        assert vm.state.loading is True
+        assert vm.state.status_message.key == "screener_cancelled"
+
+    @pytest.mark.asyncio
+    async def test_run_completion_does_not_clear_newer_history_loading(self, vm):
+        """VMS-F03: 运行成功结束仅在仍持有 loading 时复位；B 历史加载接管后保持 True。"""
+        import datetime as dt
+        from unittest.mock import AsyncMock
+
+        from services.task_manager import TaskManager
+
+        run_entered = asyncio.Event()
+        release_run = asyncio.Event()
+
+        async def _slow_context(*args, **kwargs):
+            run_entered.set()
+            await release_run.wait()
+            return {
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": dt.date(2026, 7, 29),
+            }
+
+        vm.strategy_mgr.get_strategy.return_value = _StubStrategy(pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        vm.data_processor.get_strategy_data = AsyncMock(side_effect=_slow_context)
+        vm.review_mgr.save_results = AsyncMock(return_value=0)
+
+        fut_b = asyncio.get_running_loop().create_future()
+        df_b = pd.DataFrame({"ts_code": ["B.SZ"], "name": ["B"]})
+        holder, _sync_submit = _build_sync_submit_task_holder()
+
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+            patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM,
+        ):
+            cm = MagicMock()
+            cm.screener_dao.get_history_records = MagicMock(return_value=fut_b)
+            MockCM.return_value = cm
+
+            await vm.run_strategy("test_strategy", save_results=False)
+            await run_entered.wait()
+
+            history_task = asyncio.create_task(
+                vm.load_history_data("2026-05-16", run_id="runidBBB"),
+            )
+            await asyncio.sleep(0)
+            assert vm.state.loading is True
+
+            release_run.set()
+            assert holder.task is not None
+            await holder.task
+
+            assert vm.state.loading is True
+            assert vm._run_loading_owner is None
+
+            fut_b.set_result(df_b)
+            await history_task
+
+        # 运行结果已推进数据集修订号 → B 按数据归属丢弃，但仍只复位自身 loading。
+        assert vm.state.loading is False
+        assert vm._full_results is not df_b
+        assert list(vm._full_results["ts_code"]) == ["000001.SZ"]
 
     def test_terminal_notify_ignores_missing_id(self, vm):
         """快照中无该 ID (尚未 enqueue) 时不得误释放。"""

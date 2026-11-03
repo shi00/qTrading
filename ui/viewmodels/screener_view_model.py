@@ -112,6 +112,11 @@ class ScreenerViewModel(
         # sort_data 等在 await 期间的写回判定过期）。均为 VM 内存态（无 DB 迁移）。
         self._history_request_seq: int = 0
         self._dataset_revision: int = 0
+        # VMS-F03: loading 操作所有权 —— 排序 / 历史加载 / 运行入口在同步段获取 token，
+        # 结束路径仅在仍持有 token 时复位 loading。与 _history_request_seq（数据归属）分离，
+        # 避免旧代次清掉新操作的 loading。
+        self._loading_owner: object | None = None
+        self._run_loading_owner: object | None = None
         self._ai_buffer: list[dict] = []
         self._discarded_buffer: list[dict] = []  # U-3 fix: buffer for discarded items during HISTORY mode
         self._last_ai_update = 0.0
@@ -170,6 +175,34 @@ class ScreenerViewModel(
             # setter 以可变 dict 注入，破坏不可变快照契约。dict(mapping) 拷贝后只读包装。
             changes = {**changes, "strategy_params": MappingProxyType(dict(changes["strategy_params"]))}
         super()._set_state(**changes)
+
+    def _begin_loading_operation(self) -> object:
+        """VMS-F03: 获取 loading 操作所有权 token。
+
+        同步段调用（任何 await 之前），调用方随即写 ``loading=True``；后来的操作会
+        覆盖 owner，拥有「最后开始的操作拥有 loading」语义。
+        """
+        token = object()
+        self._loading_owner = token
+        return token
+
+    def _release_loading_operation(self, token: object | None) -> dict[str, bool]:
+        """VMS-F03: 结束路径释放 loading 所有权。
+
+        Returns:
+            - 若 ``token`` 仍是当前 owner：清空 owner 并返回 ``{"loading": False}``；
+            - 否则返回空 dict（旧代次不得清新操作的 loading）。
+        """
+        if token is not None and self._loading_owner is token:
+            self._loading_owner = None
+            return {"loading": False}
+        return {}
+
+    def _reset_loading_if_owner(self, token: object | None) -> None:
+        """VMS-F03: 仅当本操作仍拥有 loading 时复位，避免旧代次清除新操作 loading。"""
+        changes = self._release_loading_operation(token)
+        if changes:
+            self._set_state(**changes)
 
     def init(self):
         """Initialize resources"""
@@ -361,11 +394,14 @@ class ScreenerViewModel(
             status_name = getattr(getattr(owned, "status", None), "name", None) if owned is not None else None
             if status_name in ("COMPLETED", "FAILED", "CANCELLED"):
                 self._active_task_id = None
+                # VMS-F03: 仅释放本运行持有的 loading；若 loading 已被排序/历史等新操作
+                # 接管，release 为空 dict，只上报运行终态而不清他人的 loading。
+                release = self._finish_run_loading(self._run_loading_owner)
                 if self._state.loading:
                     cancelled = status_name == "CANCELLED"
                     self._set_state(
-                        loading=False,
                         status_message=Message("screener_cancelled" if cancelled else "screener_exec_error"),
                         status_color="warning" if cancelled else "error",
                         status_action_key=None,
+                        **release,
                     )
