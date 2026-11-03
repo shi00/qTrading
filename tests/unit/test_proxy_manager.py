@@ -3,8 +3,12 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import os
+import threading
 
+from collections.abc import Iterator, Mapping, MutableMapping
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from utils.proxy_manager import ProxyManager
@@ -13,6 +17,101 @@ import pytest
 
 
 pytestmark = pytest.mark.unit
+
+# RU-F01：与生产实现独立声明的六个代理键，测试自带清单以免实现改动掩盖漏测。
+_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")
+
+_IS_WINDOWS = os.name == "nt"
+
+# POSIX：os.environ 大小写敏感，六键可严格区分“存在/空串/不存在”三种状态。
+_ORIGINAL_ENV_POSIX: dict[str, str] = {
+    "NO_PROXY": "original-upper.domain",
+    "no_proxy": "",
+    "HTTP_PROXY": "http://orig-http:8080",
+    "https_proxy": "http://orig-https:8443",
+}
+# Windows：os.environ 大小写不敏感，同一逻辑键（NO_PROXY/no_proxy 等）折叠为一个
+# 真实条目，不得同时设置大小写重复键（后者会覆盖前者）。故用单一小写键集合表达
+# 同一份预期环境，断言时按逻辑键折叠后比较“存在性 + 值”。
+_ORIGINAL_ENV_WINDOWS: dict[str, str] = {
+    "no_proxy": "original-upper.domain",
+    "http_proxy": "http://orig-http:8080",
+    "https_proxy": "http://orig-https:8443",
+}
+# 合成原始环境 O（平台相关）；合成策略环境 M 由 _no_proxy_domains 推导。
+_ORIGINAL_ENV: dict[str, str] = _ORIGINAL_ENV_WINDOWS if _IS_WINDOWS else _ORIGINAL_ENV_POSIX
+_POLICY_DOMAIN = "policy.example"
+_POLICY_NO_PROXY = _POLICY_DOMAIN
+
+
+def _fold_proxy_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """把六个代理键按大小写不敏感语义折叠为小写逻辑键。
+
+    仅保留实际存在的键（空串也算存在），整体比较该映射即同时校验逻辑键的
+    存在性与值；Windows 下六键折叠为三个真实条目时不会退化为仅比较值。
+    """
+    folded: dict[str, str] = {}
+    for key in _PROXY_ENV_KEYS:
+        value = environ.get(key)
+        if value is not None:
+            folded[key.lower()] = value
+    return folded
+
+
+def _assert_proxy_env(expected: dict[str, str]) -> None:
+    """严格断言六个代理变量的存在性与值均恢复（平台感知）。"""
+    if _IS_WINDOWS:
+        # Windows：大小写不敏感，折叠为逻辑键后整体比较（键集合即存在性）。
+        actual = _fold_proxy_env(os.environ)
+        assert actual == expected, f"代理环境未严格恢复: {actual!r} != {expected!r}"
+        return
+    for key in _PROXY_ENV_KEYS:
+        if key in expected:
+            assert os.environ.get(key) == expected[key], f"{key} 值未严格恢复"
+        else:
+            assert key not in os.environ, f"{key} 应不存在（存在性未恢复）"
+
+
+class _CaseInsensitiveEnviron(MutableMapping[str, str]):
+    """以规范化键模拟 Windows os.environ 的大小写不敏感语义（Linux 可运行）。"""
+
+    def __init__(self, initial: Mapping[str, str] | None = None) -> None:
+        self._data: dict[str, str] = {}
+        if initial:
+            self.update(initial)
+
+    @staticmethod
+    def _normalize(key: str) -> str:
+        return key.upper()
+
+    def __getitem__(self, key: str) -> str:
+        return self._data[self._normalize(key)]
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._data[self._normalize(key)] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._data[self._normalize(key)]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+@pytest.fixture
+def synthetic_proxy_env(monkeypatch):
+    """仅用合成值覆盖六个代理键；不读取真实代理配置，结束由 monkeypatch 还原。"""
+
+    def _apply(values: dict[str, str]) -> None:
+        # 先清空六个键，避免 Windows 大小写不敏感下遗留同逻辑键的旧条目。
+        for key in _PROXY_ENV_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        for key, value in values.items():
+            monkeypatch.setenv(key, value)
+
+    return _apply
 
 
 @pytest.fixture(autouse=True)
@@ -404,6 +503,232 @@ class TestProxyManagerLitellmEnvContext:
                 assert "tushare.pro" in os.environ.get("NO_PROXY", "")
 
             assert os.environ["HTTP_PROXY"] == "http://proxy:3128"
+
+
+class TestProxyManagerLitellmEnvScope:
+    """RU-F01：跨 await 作用域的引用计数与唯一原始快照。
+
+    旧实现用 threading.RLock 包住 yield：同 loop 的两个任务可先后重入，
+    按 A 入→B 入→A 出→B 出 交错退出后会把策略值当作原值永久残留。
+    本组用例只用合成变量编排交错/取消/嵌套/跨线程，不读取真实代理配置。
+    """
+
+    def setup_method(self):
+        ProxyManager._reset_singleton()
+
+    @staticmethod
+    def _configure_policy() -> None:
+        ProxyManager._no_proxy_domains = {_POLICY_DOMAIN}
+        ProxyManager._initialized = True
+
+    async def test_interleaved_enter_enter_exit_exit_restores_original(self, synthetic_proxy_env):
+        synthetic_proxy_env(_ORIGINAL_ENV)
+        self._configure_policy()
+
+        a_entered = asyncio.Event()
+        b_entered = asyncio.Event()
+        a_exited = asyncio.Event()
+
+        async def task_a() -> None:
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+                a_entered.set()
+                await asyncio.wait_for(b_entered.wait(), timeout=5)
+            # A 先退出：A 的退出不得恢复（B 仍在作用域内）
+            a_exited.set()
+
+        async def task_b() -> None:
+            await asyncio.wait_for(a_entered.wait(), timeout=5)
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+                b_entered.set()
+                await asyncio.wait_for(a_exited.wait(), timeout=5)
+                # 交错点：A 已退出、B 仍活动，策略必须继续生效
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+
+        await asyncio.wait_for(asyncio.gather(task_a(), task_b()), timeout=10)
+        _assert_proxy_env(_ORIGINAL_ENV)
+
+    async def test_cancel_first_entrant_keeps_policy_until_last_exit(self, synthetic_proxy_env):
+        synthetic_proxy_env(_ORIGINAL_ENV)
+        self._configure_policy()
+
+        a_entered = asyncio.Event()
+        b_entered = asyncio.Event()
+        a_cancelled = asyncio.Event()
+        a_block = asyncio.Event()
+
+        async def task_a() -> None:
+            with ProxyManager.litellm_env_context():
+                a_entered.set()
+                await a_block.wait()
+
+        async def task_b() -> None:
+            await asyncio.wait_for(a_entered.wait(), timeout=5)
+            with ProxyManager.litellm_env_context():
+                b_entered.set()
+                await asyncio.wait_for(a_cancelled.wait(), timeout=5)
+                # A 被取消后 B 仍活动，策略不得被提前恢复
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+
+        task_a_obj = asyncio.create_task(task_a())
+        await asyncio.wait_for(a_entered.wait(), timeout=5)
+        task_b_obj = asyncio.create_task(task_b())
+        await asyncio.wait_for(b_entered.wait(), timeout=5)
+
+        task_a_obj.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_a_obj
+        assert task_a_obj.cancelled()
+        assert exc_info.type is asyncio.CancelledError
+        a_cancelled.set()
+
+        await asyncio.wait_for(task_b_obj, timeout=10)
+        _assert_proxy_env(_ORIGINAL_ENV)
+
+    async def test_cancel_second_entrant_then_first_exit_restores_original(self, synthetic_proxy_env):
+        synthetic_proxy_env(_ORIGINAL_ENV)
+        self._configure_policy()
+
+        a_entered = asyncio.Event()
+        b_entered = asyncio.Event()
+        b_cancelled = asyncio.Event()
+        b_block = asyncio.Event()
+
+        async def task_a() -> None:
+            with ProxyManager.litellm_env_context():
+                a_entered.set()
+                await asyncio.wait_for(b_cancelled.wait(), timeout=5)
+                # B 被取消后 A 仍是最后一个活动作用域
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+
+        async def task_b() -> None:
+            await asyncio.wait_for(a_entered.wait(), timeout=5)
+            with ProxyManager.litellm_env_context():
+                b_entered.set()
+                await b_block.wait()
+
+        task_a_obj = asyncio.create_task(task_a())
+        await asyncio.wait_for(a_entered.wait(), timeout=5)
+        task_b_obj = asyncio.create_task(task_b())
+        await asyncio.wait_for(b_entered.wait(), timeout=5)
+
+        task_b_obj.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_b_obj
+        assert task_b_obj.cancelled()
+        assert exc_info.type is asyncio.CancelledError
+        b_cancelled.set()
+
+        await asyncio.wait_for(task_a_obj, timeout=10)
+        _assert_proxy_env(_ORIGINAL_ENV)
+
+    def test_strictly_nested_scopes_restore_original(self, synthetic_proxy_env):
+        synthetic_proxy_env(_ORIGINAL_ENV)
+        self._configure_policy()
+
+        with ProxyManager.litellm_env_context():
+            assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+            # 内层退出后外层仍持有作用域
+            assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+
+        _assert_proxy_env(_ORIGINAL_ENV)
+
+    def test_cross_thread_and_two_event_loops_restore_original(self, synthetic_proxy_env):
+        synthetic_proxy_env(_ORIGINAL_ENV)
+        self._configure_policy()
+
+        a_entered = threading.Event()
+        b_entered = threading.Event()
+        a_exited = threading.Event()
+        errors: list[BaseException] = []
+
+        async def task_a() -> None:
+            with ProxyManager.litellm_env_context():
+                a_entered.set()
+                await asyncio.to_thread(b_entered.wait, 5)
+            a_exited.set()
+
+        async def task_b() -> None:
+            await asyncio.to_thread(a_entered.wait, 5)
+            with ProxyManager.litellm_env_context():
+                b_entered.set()
+                await asyncio.to_thread(a_exited.wait, 5)
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+
+        def _run(coro_factory) -> None:
+            try:
+                asyncio.run(coro_factory())
+            except BaseException as exc:  # noqa: BLE001  # 线程异常须回传主线程断言
+                errors.append(exc)
+
+        thread_a = threading.Thread(target=_run, args=(task_a,))
+        thread_b = threading.Thread(target=_run, args=(task_b,))
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(10)
+        thread_b.join(10)
+
+        assert not thread_a.is_alive()
+        assert not thread_b.is_alive()
+        assert errors == []
+        _assert_proxy_env(_ORIGINAL_ENV)
+
+    def test_reapply_during_active_scope_keeps_active_policy(self, synthetic_proxy_env):
+        """运行中 reapply 只刷新缓存：活动作用域保持首入策略，新策略从下一作用域生效。"""
+        synthetic_proxy_env(_ORIGINAL_ENV)
+        self._configure_policy()
+        # 模拟启动时已采集的真实原始快照，避免运行中 reapply 从活动环境反推“原始值”。
+        ProxyManager._original_no_proxy = {"original-upper.domain"}
+
+        with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+
+                mock_ch.get_no_proxy_domains.return_value = ["next.example"]
+                ProxyManager.reapply_proxy_policy()
+
+                # 活动作用域内固定快照语义：环境仍是首入策略 M
+                assert os.environ.get("NO_PROXY") == _POLICY_NO_PROXY
+                assert ProxyManager.get_no_proxy_domains() == {"original-upper.domain", "next.example"}
+
+            _assert_proxy_env(_ORIGINAL_ENV)
+
+            # 计数归零后重新进入，按新缓存策略写入
+            with ProxyManager.litellm_env_context():
+                assert os.environ.get("NO_PROXY") == "next.example,original-upper.domain"
+
+        _assert_proxy_env(_ORIGINAL_ENV)
+
+    def test_case_insensitive_env_snapshot_restores_exactly(self, monkeypatch):
+        """覆盖 Windows os.environ 大小写不敏感折叠语义（Linux 下用自定义映射模拟 nt）。
+
+        nt 把 NO_PROXY/no_proxy 等大小写变体折叠为一个真实条目。本用例以大小写
+        不敏感的 MutableMapping 替换 proxy_manager 模块内的 os，验证唯一快照与
+        最后退出者的恢复仍严格还原每个逻辑键的值与存在性（含“存在但空串”）。
+        """
+        fake_environ = _CaseInsensitiveEnviron(
+            {
+                "no_proxy": "original.domain",
+                "HTTP_PROXY": "http://orig-http:8080",
+                "https_proxy": "",  # 存在但空串：必须与“不存在”区分
+            }
+        )
+        monkeypatch.setattr("utils.proxy_manager.os", SimpleNamespace(environ=fake_environ))
+        self._configure_policy()
+
+        with ProxyManager.litellm_env_context():
+            assert fake_environ["NO_PROXY"] == _POLICY_NO_PROXY
+            assert fake_environ["no_proxy"] == _POLICY_NO_PROXY
+
+        # 折叠后整体等值：键集合校验存在性、值校验内容，空串条目不得丢失。
+        assert _fold_proxy_env(fake_environ) == {
+            "no_proxy": "original.domain",
+            "http_proxy": "http://orig-http:8080",
+            "https_proxy": "",
+        }
 
 
 class TestProxyManagerRegistersProxyCredentials:
