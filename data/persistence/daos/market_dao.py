@@ -332,6 +332,7 @@ class MarketDao(BaseDao):
         home_filter: bool = True,
         cursor_publish_time: typing.Any = None,
         cursor_id: int | None = None,
+        suppress_errors: bool = True,
     ):
         """读取首页快讯（稳定 ``(publish_time, id)`` 倒序 + 可选 keyset 游标）。
 
@@ -342,6 +343,10 @@ class MarketDao(BaseDao):
 
         ``cursor_publish_time`` 与 ``cursor_id`` 须成对传入；只传其一时退回
         offset 语义（兼容旧调用方）。
+
+        ``suppress_errors`` 默认 True，保持既有调用方（把读取故障折为空结果）的
+        兼容行为；首页消费方须显式传 False，让「查询失败」不得伪装成「无新闻」
+        （VMD-F02 / R21 精神）。
         """
         use_cursor = cursor_publish_time is not None and cursor_id is not None
         sql = "SELECT * FROM market_news WHERE 1=1"
@@ -372,7 +377,7 @@ class MarketDao(BaseDao):
             idx += 3
         sql += " ORDER BY publish_time DESC, id DESC LIMIT $" + str(idx) + " OFFSET $" + str(idx + 1)
         params.extend([limit, offset])
-        return await self._read_db(sql, params)
+        return await self._read_db(sql, params, suppress_errors=suppress_errors)
 
     async def get_telegraph_news_for_stocks(
         self,

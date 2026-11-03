@@ -140,6 +140,9 @@ def HomeView(
         try:
             await vm.load_market_data()
             await vm.refresh_news(news_generation)
+            # VMD-F02: refresh_news 取数失败时已在 state 发布可见错误（保留旧行）。
+            # 必须带入 end_load，否则 finally 以 None 收尾会把错误清掉（原缺陷）。
+            load_error = vm.state.load_error
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as exc:
