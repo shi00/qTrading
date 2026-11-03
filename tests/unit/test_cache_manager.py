@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from data.cache.cache_manager import CacheManager
 from data.cache.dao_registry import DaoRegistry
 from data.cache.engine_manager import EngineManager
+from data.persistence import engine_provider
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.financial_dao import FinancialDao
@@ -387,6 +388,46 @@ class TestCacheManagerClose:
             assert mgr._disposed is True
             mock_engine.dispose.assert_called_once_with()
             assert mgr.engine is None
+
+    @pytest.mark.asyncio
+    async def test_close_marks_disposed_before_awaiting_engine_dispose(self):
+        """R5/#M5-005 顺序保证：close() 必须先写 _disposed 与 provider 标记，再 await dispose。
+
+        以 dispose() 入口回读状态的自定义引擎替身取证：若两处标记先于 ``await
+        engine.dispose()`` 写入（阻塞新查询），probe 进入 dispose 时应观测到已标记；
+        顺序被调换（先 dispose 后标记）时本用例失败。dispose 期间的查询因此不会
+        落到仍在关闭的连接池。D12-R03 防回归。
+        """
+        engine_provider.reset_engine_provider()
+        mgr = _make_mgr()
+        observed: dict[str, object] = {}
+
+        probe_engine = MagicMock(spec=AsyncEngine)
+
+        def _capture_dispose_entry() -> None:
+            observed["cache_disposed"] = mgr._disposed
+            observed["provider_disposed"] = engine_provider.is_disposed(probe_engine)
+
+        probe_engine.dispose = AsyncMock(side_effect=_capture_dispose_entry)
+        mgr.engine = probe_engine
+        mgr._engine_manager.engine = probe_engine
+        engine_provider.set_engine(probe_engine)
+        with (
+            patch("utils.loop_local.get_loop_local") as mock_gll,
+            patch("utils.loop_local.del_loop_local"),
+            patch("data.persistence.daos.base_dao.BaseDao._get_maintenance_event") as mock_evt,
+        ):
+            mock_evt.return_value = MagicMock()
+            mock_evt.return_value.set = MagicMock()
+            mock_gll.return_value = MagicMock()
+            mock_gll.return_value.is_set = MagicMock(return_value=True)
+            mock_gll.return_value.set = MagicMock()
+            await mgr.close()
+
+        assert observed == {"cache_disposed": True, "provider_disposed": True}
+        probe_engine.dispose.assert_awaited_once_with()
+        assert mgr.engine is None
+        assert engine_provider.is_disposed(probe_engine) is True
 
     @pytest.mark.asyncio
     async def test_close_retries_dispose_when_engine_left_alive(self):
