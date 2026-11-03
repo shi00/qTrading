@@ -4,7 +4,7 @@
 档位覆盖判定（``get_tier_apis`` / ``is_api_covered_by_tier`` / ``get_tier_order`` /
 ``is_independent_purchase``）、capability 缓存读写（``is_api_available`` /
 ``mark_api_available`` / ``mark_api_unavailable`` / ``clear_capability_cache`` /
-``get_capability_cache`` / ``get_last_probe_time``）、AppState 持久化
+``get_capability_cache`` / ``get_last_probe_time`` / ``get_capability_generation``）、AppState 持久化
 （``persist_capabilities_to_app_state`` / ``load_capabilities_from_app_state`` /
 ``_persist_capability_safely``）、同步过滤（``get_effective_synced_tables``）与
 并行探测（``probe_api_capabilities`` / ``_handle_probe_call`` / ``_probe_one``）。
@@ -102,7 +102,13 @@ class CapabilityProbeService:
                     return None
             return value
 
-    def mark_api_unavailable(self, api_name: str, *, runtime: bool = False) -> None:
+    def mark_api_unavailable(
+        self,
+        api_name: str,
+        *,
+        runtime: bool = False,
+        generation: int | None = None,
+    ) -> bool:
         """Mark an API as unavailable for the current token.
 
         Args:
@@ -111,44 +117,87 @@ class CapabilityProbeService:
                 可能因关键字误判产生；仅保留 ``_RUNTIME_UNAVAILABLE_TTL`` 后惰性过期，
                 且不写入持久化 payload。False（默认）表示 probe 得出的权威负缓存，
                 长期有效直到 token 变更 / 重新 probe。
+            generation: 调用方入口处捕获的 token 代次快照。若与当前代次不一致，
+                说明请求属于已被替换的旧 token，本次结论不得写入新 token 的共享缓存。
+                None 表示不做归属校验（probe / UI 回写等当前上下文内的同步更新）。
+        Returns:
+            True 表示缓存已更新；False 表示因旧代次或权威负缓存保护而未更新。
         Note:
             若 ``runtime=True`` 但该 API 已是权威负缓存（无运行时时间戳的 False），
             则不降级、保留权威状态（避免 TTL 到期后丢失 probe 结论）。
         """
+        stale = False
+        applied = False
         with self._capability_cache_lock:
-            # 已是权威负缓存（probe 实测，无运行时时间戳）时，运行时信号不得将其降级：
-            # 否则该条目会被 get_capability_cache / 持久化过滤掉，且 TTL 到期后恢复为
-            # None，probe 得出的权威知识丢失、对应表被反复重试（review09-24/05 MINOR-02）。
-            is_durable_false = (
-                self._capability_cache.get(api_name) is False and api_name not in self._capability_runtime_marks
-            )
-            if runtime and is_durable_false:
-                applied = False
+            if generation is not None and generation != self._current_capability_generation():
+                stale = True
             else:
-                applied = True
-                self._capability_cache[api_name] = False
-                if runtime:
-                    self._capability_runtime_marks[api_name] = get_now()
+                # 已是权威负缓存（probe 实测，无运行时时间戳）时，运行时信号不得将其降级：
+                # 否则该条目会被 get_capability_cache / 持久化过滤掉，且 TTL 到期后恢复为
+                # None，probe 得出的权威知识丢失、对应表被反复重试（review09-24/05 MINOR-02）。
+                is_durable_false = (
+                    self._capability_cache.get(api_name) is False and api_name not in self._capability_runtime_marks
+                )
+                if runtime and is_durable_false:
+                    applied = False
                 else:
-                    # 权威负缓存：清除可能残留的运行时时间戳，避免被 TTL 误判过期
-                    self._capability_runtime_marks.pop(api_name, None)
+                    applied = True
+                    self._capability_cache[api_name] = False
+                    if runtime:
+                        self._capability_runtime_marks[api_name] = get_now()
+                    else:
+                        # 权威负缓存：清除可能残留的运行时时间戳，避免被 TTL 误判过期
+                        self._capability_runtime_marks.pop(api_name, None)
+        if stale:
+            logger.debug(
+                "[API] Stale capability update for '%s' ignored (token generation changed)",
+                api_name,
+            )
+            return False
         if not applied:
             logger.debug(
                 "[API] Capability '%s' already cached as durable UNAVAILABLE; runtime mark skipped",
                 api_name,
             )
-            return
+            return False
         logger.warning(
             "[API] Capability cached: '%s' marked as UNAVAILABLE for current token (runtime=%s)",
             api_name,
             runtime,
         )
+        return True
 
-    def mark_api_available(self, api_name: str) -> None:
-        """Mark an API as available for the current token."""
+    def mark_api_available(self, api_name: str, *, generation: int | None = None) -> bool:
+        """Mark an API as available for the current token.
+
+        Args:
+            generation: 调用方入口处捕获的 token 代次快照；不一致时丢弃旧 token 的成功结论。
+                None 表示不做归属校验（同步上下文内的更新）。
+        Returns:
+            True 表示缓存已更新；False 表示因旧代次而忽略。
+        """
+        applied = True
         with self._capability_cache_lock:
-            self._capability_cache[api_name] = True
-            self._capability_runtime_marks.pop(api_name, None)
+            if generation is not None and generation != self._current_capability_generation():
+                applied = False
+            else:
+                self._capability_cache[api_name] = True
+                self._capability_runtime_marks.pop(api_name, None)
+        if not applied:
+            logger.debug(
+                "[API] Stale capability update for '%s' ignored (token generation changed)",
+                api_name,
+            )
+        return applied
+
+    def get_capability_generation(self) -> int:
+        """返回当前 token 代次（token 每次替换时与缓存清空在同一锁内原子递增）。"""
+        with self._capability_cache_lock:
+            return self._current_capability_generation()
+
+    def _current_capability_generation(self) -> int:
+        """读取代次原始值（调用方须已持有 ``_capability_cache_lock``）。"""
+        return getattr(self.client, "_capability_generation", 0)
 
     def clear_capability_cache(self) -> None:
         """Clear all cached capabilities. Call after token change."""

@@ -430,6 +430,10 @@ class TushareClient:
 
             self._capability_cache: dict[str, bool | None] = {}
             self._capability_cache_lock = threading.Lock()
+            # token 代次：每次 _set_token_core 替换 token 时与缓存清空在同一锁内原子递增。
+            # 在飞请求在入口快照本代次，写回 capability 结论时校验归属，避免旧 token 的
+            # 延迟响应污染新 token 的共享缓存（NI-F03）。
+            self._capability_generation: int = 0
             # 运行时负缓存时间戳（api -> get_now()）：区分单次调用报错（可 TTL 过期、
             # 不持久化）与 probe 权威负缓存（review09-24/05 MINOR-02）。
             # 语义与读写见 CapabilityProbeService.mark_api_unavailable / is_api_available。
@@ -471,6 +475,8 @@ class TushareClient:
         if not hasattr(self, "_capability_runtime_marks"):
             # 兼容测试替身：仅设置了 _capability_cache 等旧属性，补齐运行时标记字典
             self._capability_runtime_marks = {}
+        if not hasattr(self, "_capability_generation"):
+            self._capability_generation = 0
         if not hasattr(self, "_rate_limiter_svc"):
             self._rate_limiter_svc = TushareRateLimiter(self)
             self._capability_probe = CapabilityProbeService(self)
@@ -579,10 +585,13 @@ class TushareClient:
 
         # 经 _capability_cache_lock 保护：与 is_api_available / mark_* 的读写在同一把锁下，
         # 避免 token 切换清缓存与并发读写竞争（两处缓存 + 运行时标记字典一并清空）。
+        # 代次与清空原子递增：在飞请求写回时发现代次不一致即丢弃，避免旧 token 的
+        # 延迟响应污染新 token 的共享缓存（NI-F03）。
         with self._capability_cache_lock:
             cache_size = len(self._capability_cache)
             self._capability_cache.clear()
             self._capability_runtime_marks.clear()
+            self._capability_generation += 1
 
         logger.info(
             "[API] Token updated: %s -> %s. Cache cleared (%d entries).",
@@ -690,7 +699,13 @@ class TushareClient:
         self._ensure_subservices()
         return self._capability_probe.is_api_available(api_name)
 
-    def mark_api_unavailable(self, api_name: str, *, runtime: bool = False) -> None:
+    def mark_api_unavailable(
+        self,
+        api_name: str,
+        *,
+        runtime: bool = False,
+        generation: int | None = None,
+    ) -> bool:
         """委托 CapabilityProbeService.mark_api_unavailable（保留显式签名）。
 
         Args:
@@ -698,14 +713,24 @@ class TushareClient:
             runtime: True 表示负缓存来自单次运行时调用报错（可 TTL 过期、不持久化）；
                 False（默认）为 probe 权威负缓存。详见
                 ``CapabilityProbeService.mark_api_unavailable``。
+            generation: 调用方入口快照的 token 代次；不一致时丢弃旧 token 的结论。
         """
         self._ensure_subservices()
-        return self._capability_probe.mark_api_unavailable(api_name, runtime=runtime)
+        return self._capability_probe.mark_api_unavailable(api_name, runtime=runtime, generation=generation)
 
-    def mark_api_available(self, api_name: str) -> None:
-        """委托 CapabilityProbeService.mark_api_available（保留显式签名）。"""
+    def mark_api_available(self, api_name: str, *, generation: int | None = None) -> bool:
+        """委托 CapabilityProbeService.mark_api_available（保留显式签名）。
+
+        Args:
+            generation: 调用方入口快照的 token 代次；不一致时丢弃旧 token 的成功结论。
+        """
         self._ensure_subservices()
-        return self._capability_probe.mark_api_available(api_name)
+        return self._capability_probe.mark_api_available(api_name, generation=generation)
+
+    def get_capability_generation(self) -> int:
+        """委托 CapabilityProbeService.get_capability_generation（保留显式签名）。"""
+        self._ensure_subservices()
+        return self._capability_probe.get_capability_generation()
 
     def clear_capability_cache(self) -> None:
         """委托 CapabilityProbeService.clear_capability_cache（保留显式签名）。"""

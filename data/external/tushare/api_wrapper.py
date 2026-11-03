@@ -110,10 +110,14 @@ class TushareApiWrapper:
                 "[tushare_api] api_name='%s' -> api_limiter active (%.0f/min)", api_name, api_limiter.rate * 60
             )
 
-        # 入口快照 token：用于 _token_invalid 写入时检测 set_token_async 是否在 await 期间
-        # 替换了 token。若已替换，旧协程不应将 _token_invalid 覆盖为 True（避免误熔断新 token）。
+        # 入口快照 token / token 代次：用于写入 _token_invalid 与 capability 缓存时检测
+        # set_token_async 是否在 await 期间替换了 token。若已替换，旧协程不应将
+        # _token_invalid 覆盖为 True，也不得把旧 token 的可用性结论写入新 token 的共享缓存
+        # （避免误熔断 / 新 token 缓存被旧请求污染，NI-F03）。
+        # 代次校验与缓存写入在 _capability_cache_lock 内原子完成（见 mark_api_*）。
         # getattr 防御性读取：测试替身经 object.__new__(TushareClient) 创建时可能未设置 self.token。
         entry_token = getattr(self.client, "token", None)
+        entry_generation = self.client.get_capability_generation()
 
         # 全局 token 熔断：token 已失效时快速失败，避免每个 API 独立重试刷屏。
         # _token_invalid 读取经 loop-local asyncio.Lock 保护（R11：禁止裸 asyncio.Lock 类属性）。
@@ -159,7 +163,8 @@ class TushareApiWrapper:
                 if result is not None and api_name in self.client._COLUMN_RENAMES:
                     result = result.rename(columns=self.client._COLUMN_RENAMES[api_name])
 
-                self.client.mark_api_available(api_name)
+                # 代次校验：旧 token 的成功响应不得覆盖新 token 的权威负缓存（NI-F03）。
+                self.client.mark_api_available(api_name, generation=entry_generation)
 
                 # 两段消费配套：两个桶分别 on_success（用 global_limiter 避免竞态）
                 if global_limiter:
@@ -215,15 +220,17 @@ class TushareApiWrapper:
                     # runtime=True：单次调用报错得出的负缓存可能是关键字误判（服务端临时
                     # 报错文案恰好含权限字样），标记为运行时负缓存，仅短期生效且不落库，
                     # 避免对应表静默长期退出完整性检查（review09-24/05 MINOR-02）。
-                    self.client.mark_api_unavailable(api_name, runtime=True)
+                    # 代次校验与写入同一状态更新边界：旧 token 的权限错误不得写入新 token
+                    # 的共享 capability 缓存（避免下一调用 fast-fail / effective 表被裁剪，NI-F03）。
+                    self.client.mark_api_unavailable(api_name, runtime=True, generation=entry_generation)
                     # 仅 token 认证失败触发全局熔断；per-API 权限错误（如积分不足）不熔断
                     # is_token_invalid 已在上方独立计算（覆盖纯 token 报错不含权限关键字的情况）
                     if is_token_invalid:
-                        # 经 loop-local asyncio.Lock 保护写入：检测 entry_token 是否仍为当前 token。
+                        # 经 loop-local asyncio.Lock 保护写入：检测 token 代次是否仍为调用入口代次。
                         # 若 set_token_async 在 await 期间替换了 token，旧协程不应将 _token_invalid
                         # 覆盖为 True（避免误熔断新 token，P3-Tushare-Token-Invalid-Race 修复）。
                         async with token_invalid_lock:
-                            if self.client.token != entry_token:
+                            if self.client.get_capability_generation() != entry_generation:
                                 logger.warning(
                                     "[tushare_api] TOKEN_INVALID (%s): token changed during call "
                                     "(old=%s, new=%s), skip stale breaker set",
@@ -240,7 +247,11 @@ class TushareApiWrapper:
                     # B4 修复：_reset_singleton 后旧协程持有的 self.client 仍指向旧实例，
                     # 新创建的 _persist_capability_safely task 会被添加到旧实例的 _bg_tasks，
                     # 新实例无法追踪。检查 self.client is type(self.client)._instance 跳过。
-                    if self.client is type(self.client)._instance:
+                    # NI-F03：旧 token 代次的请求不得为新 token 调度持久化。
+                    if (
+                        self.client is type(self.client)._instance
+                        and self.client.get_capability_generation() == entry_generation
+                    ):
                         try:
                             t = asyncio.create_task(self.client._persist_capability_safely())
                             self.client._bg_tasks.add(t)
