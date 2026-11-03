@@ -208,7 +208,7 @@ class StartupController:
         # app-004: set_onboarding_complete(False) 失败时 transition 到 INIT_FAILED，
         # 避免 state machine 停留 LOADING 导致用户看到无限 loading。
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
+            saved = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
         except Exception as e:
             log_classified(
                 logger,
@@ -221,6 +221,21 @@ class StartupController:
                 StartupState.INIT_FAILED,
                 error="reconfigure_failed",
                 detail=DataSanitizer.sanitize_error(e),
+            )
+            return
+        # D02-Q01: save_config 在「配置不可读 / 校验失败 / 原子写失败 / 锁超时」时
+        # 返回 False 而不抛异常；仅捕获异常会把持久化失败当成功，静默进入向导。
+        # 重置失败时保持 INIT_FAILED（旧配置与旧标志未被改动，仍可 Retry/Reconfigure/Skip），
+        # 不得进入 NEED_ONBOARDING 丢弃旧配置。
+        if saved is not True:
+            logger.warning(
+                "[Startup] set_onboarding_complete(False) returned %r; reconfigure aborted, keeping INIT_FAILED",
+                saved,
+            )
+            self._transition(
+                StartupState.INIT_FAILED,
+                error="reconfigure_failed",
+                detail="Failed to persist onboarding reset; configuration left unchanged.",
             )
             return
         self._transition(StartupState.NEED_ONBOARDING)
