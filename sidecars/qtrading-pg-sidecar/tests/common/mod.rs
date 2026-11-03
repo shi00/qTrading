@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use assert_cmd::cargo::cargo_bin;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::Duration;
@@ -83,6 +83,13 @@ pub fn wait_for_ready(child: &mut Child, timeout: Duration) -> serde_json::Value
         }
     });
     match rx.recv_timeout(timeout) {
+        Ok(line) if line.trim().is_empty() => {
+            // stdout 在 ready JSON 前 EOF：孩子已提前退出，补 stderr 便于定位启动失败原因。
+            let _ = child.kill();
+            let stderr = read_stderr_snapshot(child, Duration::from_secs(2));
+            let _ = child.wait();
+            panic!("sidecar exited before ready JSON (empty stdout line); stderr: {stderr}");
+        }
         Ok(line) => serde_json::from_str(line.trim()).unwrap_or_else(|e| {
             let _ = child.kill();
             panic!("ready JSON parse failed: {e}; line: {line:?}");
@@ -98,6 +105,22 @@ pub fn wait_for_ready(child: &mut Child, timeout: Duration) -> serde_json::Value
             panic!("sidecar did not produce ready JSON within {timeout:?}: {exit_info}");
         }
     }
+}
+
+/// 限时收集子进程 stderr（子进程已 kill）。postgres 孙进程可能仍持有管道，
+/// 故不能直接阻塞 read_to_string，超时即放弃。
+fn read_stderr_snapshot(child: &mut Child, timeout: Duration) -> String {
+    let Some(stderr) = child.stderr.take() else {
+        return String::new();
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut buf = String::new();
+        let _ = reader.read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+    rx.recv_timeout(timeout).unwrap_or_default()
 }
 
 /// 执行 `stop` 命令，返回 exit code。

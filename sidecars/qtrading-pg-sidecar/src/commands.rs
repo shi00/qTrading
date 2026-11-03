@@ -71,7 +71,8 @@ fn derive_status(
     }
 }
 
-pub fn status(data_dir: &Path) -> Result<(), u8> {
+/// 组装 status JSON（不写 stdout），供 CLI 输出与单测断言复用。
+fn build_status_json(data_dir: &Path) -> StatusJson {
     let layout = Layout::from_data_dir(data_dir, None, None, None);
     let (state_cond, st) = state_file_condition(&layout);
     let pm = pgbin::read_postmaster_pid(&layout.data_dir);
@@ -92,7 +93,7 @@ pub fn status(data_dir: &Path) -> Result<(), u8> {
         (st.as_ref().and_then(|s| s.port), None)
     };
 
-    let json = StatusJson {
+    StatusJson {
         schema: protocol::STATUS_SCHEMA,
         data_dir: layout.data_dir.to_string_lossy().replace('\\', "/"),
         status: status_str,
@@ -108,7 +109,11 @@ pub fn status(data_dir: &Path) -> Result<(), u8> {
         data_checksums: st.as_ref().and_then(|s| s.data_checksums),
         lock_held: MaintenanceLock::is_held(&layout.lock_file),
         state_file: state_cond,
-    };
+    }
+}
+
+pub fn status(data_dir: &Path) -> Result<(), u8> {
+    let json = build_status_json(data_dir);
     protocol::print_json_line(&json).map_err(|e| {
         eprintln!("[sidecar] status JSON 输出失败: {e}");
         exit_codes::ARGUMENT_ERROR
@@ -354,11 +359,56 @@ mod tests {
 
     #[test]
     fn status_json_schema_on_fresh_dir() {
-        // fresh 目录：not_initialized，无 state，无锁
+        // fresh 目录：not_initialized，无 state，无锁；所有运行态字段应为未知（None/false）。
         let dir = unique_tmp("status-fresh");
         let data_dir = dir.join("postgres/16/data");
-        // status 写 stdout 不便直接断言；改为验证其不报错返回
-        assert!(status(&data_dir).is_ok());
+        let json = build_status_json(&data_dir);
+        assert_eq!(json.schema, protocol::STATUS_SCHEMA);
+        assert_eq!(json.status, "not_initialized");
+        assert!(!json.postgres_alive);
+        assert!(!json.lock_held);
+        assert_eq!(json.state_file, "missing");
+        assert!(json.postgres_version.is_none());
+        assert!(json.port.is_none());
+        assert!(json.postgres_pid.is_none());
+        assert!(json.sidecar_pid.is_none());
+        assert!(json.started_at_utc.is_none());
+        assert!(json.last_stop_mode.is_none());
+        assert!(json.last_start_error.is_none());
+        assert!(json.data_checksums.is_none());
+        assert_eq!(json.kill_fallback_count, 0);
+        assert!(
+            json.data_dir.ends_with("postgres/16/data"),
+            "data_dir 应为规范化路径: {}",
+            json.data_dir
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_json_reports_corrupted_state_and_pid_residue_as_unknown_runtime() {
+        // state 损坏 + postmaster.pid 残留但进程已死 → 运行态字段必须保持未知，不得冒用旧值。
+        let dir = unique_tmp("status-corrupt");
+        let data_dir = dir.join("postgres/16/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
+        std::fs::create_dir_all(layout.state_file.parent().unwrap()).unwrap();
+        std::fs::write(&layout.state_file, "{bad json").unwrap();
+        std::fs::write(
+            data_dir.join("postmaster.pid"),
+            "4000000\n/x/data\n1784505600\n55432\n/tmp\n127.0.0.1\n",
+        )
+        .unwrap();
+
+        let json = build_status_json(&data_dir);
+        assert_eq!(json.state_file, "corrupted");
+        assert_eq!(json.status, "stopped");
+        assert!(!json.postgres_alive);
+        assert!(json.port.is_none(), "进程已死时端口应未知: {:?}", json.port);
+        assert!(json.postgres_pid.is_none());
+        assert!(json.postgres_version.is_none());
+        assert!(json.last_start_error.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

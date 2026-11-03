@@ -34,6 +34,10 @@ fn test_inject_03_sidecar_crash_restart() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    // Windows 进程树终止返回时内核可能仍在回收子进程句柄；立即重启会竞争
+    // PGDATA 文件/监听句柄，导致新 postmaster 启动超时（CI 偶发 #3 失败）。
+    #[cfg(windows)]
+    std::thread::sleep(Duration::from_millis(1000));
 
     // doctor 应检测 stale postmaster.pid（postgres 已死，pid 残留）
     let doc = doctor_json(&data_dir);
@@ -850,7 +854,11 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// 跨平台强制 kill 进程（SIGKILL on Unix, TerminateProcess on Windows）。
+/// 跨平台强制 kill 进程（SIGKILL on Unix, 进程树 Terminate on Windows）。
+///
+/// Windows 上仅 TerminateProcess postmaster 会留下仍持有 PGDATA 文件/监听句柄的
+/// postgres 子进程；紧接着重启（#3）时新 postmaster 可能启动超时。故优先
+/// `taskkill /T /F` 终止整棵进程树，失败再回退到单进程 TerminateProcess。
 fn force_kill_process(pid: u32) {
     #[cfg(unix)]
     {
@@ -861,6 +869,18 @@ fn force_kill_process(pid: u32) {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let tree_killed = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if tree_killed {
+            return;
+        }
+
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
             OpenProcess, TerminateProcess, PROCESS_TERMINATE,
