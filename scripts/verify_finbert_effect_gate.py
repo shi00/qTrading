@@ -268,8 +268,26 @@ def _run_gh(args: Sequence[str]) -> str:
 
 
 def list_release_tags(repo: str, *, limit: int = RELEASE_LIST_LIMIT) -> list[str]:
-    """列出仓库 Release tag（可能含语料等非模型 Release，由调用方过滤）。"""
-    raw = _run_gh(["release", "list", "--repo", repo, "--limit", str(limit), "--json", "tagName"])
+    """列出仓库已发布的正式 Release tag（可能含语料等非模型 Release，由调用方过滤）。
+
+    draft / pre-release 不是正式发布件，不能作为效果锚点，故查询显式排除两者
+    （语义对齐 docs/guides/how-to.md 获取正式版的方式）；gh 查询失败直接上抛，
+    由 ``resolve_anchor`` 回落 unreadable（fail-closed），不降级为「无基线」。
+    """
+    raw = _run_gh(
+        [
+            "release",
+            "list",
+            "--repo",
+            repo,
+            "--limit",
+            str(limit),
+            "--exclude-drafts",
+            "--exclude-pre-releases",
+            "--json",
+            "tagName",
+        ]
+    )
     data = json.loads(raw)
     tags = [str(item["tagName"]) for item in data]
     if len(tags) >= limit:

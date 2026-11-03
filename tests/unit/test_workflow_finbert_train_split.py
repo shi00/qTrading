@@ -62,6 +62,7 @@
 """
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -859,6 +860,115 @@ def test_resolve_anchor_missing_metrics_in_note_is_fail_closed(monkeypatch, effe
     anchor = module.resolve_anchor("owner/repo")
     assert anchor.state == "unreadable"
     assert anchor.tag == "finbert-gguf-v0.1.0"
+
+
+# --------------------------------------------------------------------------- #
+# D20-F09：效果锚只取正式版（draft / pre-release 不得作锚）
+# --------------------------------------------------------------------------- #
+def _effect_gate_fake_gh(releases: list[tuple[str, bool, bool]], notes: dict[str, str]):
+    """按 gh 语义模拟 ``release list`` + ``release view``（排除标志缺失时暴露 draft/pre）。"""
+
+    def fake_gh(args):
+        if args[:2] == ["release", "list"]:
+            tags: list[str] = []
+            for tag, is_draft, is_prerelease in releases:
+                if is_draft and "--exclude-drafts" in args:
+                    continue
+                if is_prerelease and "--exclude-pre-releases" in args:
+                    continue
+                tags.append(tag)
+            return json.dumps([{"tagName": tag} for tag in tags])
+        assert args[:2] == ["release", "view"]
+        return notes[args[2]]
+
+    return fake_gh
+
+
+def test_effect_gate_list_release_tags_excludes_drafts_and_prereleases(monkeypatch, effect_gate_module) -> None:
+    module = effect_gate_module
+    calls: list[list[str]] = []
+
+    def fake_gh(args):
+        calls.append(list(args))
+        return '[{"tagName": "finbert-gguf-v0.1.0"}]'
+
+    monkeypatch.setattr(module, "_run_gh", fake_gh)
+    module.list_release_tags("owner/repo")
+    assert calls == [
+        [
+            "release",
+            "list",
+            "--repo",
+            "owner/repo",
+            "--limit",
+            str(module.RELEASE_LIST_LIMIT),
+            "--exclude-drafts",
+            "--exclude-pre-releases",
+            "--json",
+            "tagName",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("draft_tag", "pre_tag"),
+    [
+        ("finbert-gguf-v1.10.0", None),
+        (None, "finbert-gguf-v1.9.0"),
+        ("finbert-gguf-v1.10.0", "finbert-gguf-v1.9.0"),
+    ],
+    ids=["higher-draft", "higher-prerelease", "both"],
+)
+def test_effect_gate_anchor_only_uses_lower_formal_release(
+    monkeypatch, effect_gate_module, draft_tag: str | None, pre_tag: str | None
+) -> None:
+    # 对抗面：更高 draft / pre-release 若未排除，会胜出成为效果锚点。
+    module = effect_gate_module
+    formal = "finbert-gguf-v0.2.0"
+    releases = [(tag, tag == draft_tag, tag == pre_tag) for tag in (draft_tag, pre_tag, formal) if tag is not None]
+    notes = {tag: "- **dev macro-F1**: 0.5 / **test macro-F1**: 0.6\n" for tag in (draft_tag, pre_tag, formal) if tag}
+    monkeypatch.setattr(module, "_run_gh", _effect_gate_fake_gh(releases, notes))
+    anchor = module.resolve_anchor("owner/repo")
+    assert anchor.state == "available"
+    assert anchor.tag == formal
+    assert anchor.dev_macro_f1 == 0.5
+    assert anchor.test_macro_f1 == 0.6
+
+
+def test_effect_gate_only_draft_is_no_baseline(monkeypatch, effect_gate_module) -> None:
+    module = effect_gate_module
+    monkeypatch.setattr(
+        module,
+        "_run_gh",
+        _effect_gate_fake_gh([("finbert-gguf-v1.10.0", True, False)], {}),
+    )
+    anchor = module.resolve_anchor("owner/repo")
+    assert anchor.state == "no_baseline"
+    assert anchor.tag is None
+
+
+def test_effect_gate_exactly_100_formal_releases_fail_closed(monkeypatch, effect_gate_module) -> None:
+    # 边界不放松：正式版列表恰为 100 条 → 无法保证 semver 最新；锚点查询失败
+    # 必须回落 unreadable（FAIL），不得伪装成 no_baseline 放行。
+    module = effect_gate_module
+    releases = [(f"finbert-gguf-v0.{index}.0", False, False) for index in range(module.RELEASE_LIST_LIMIT)]
+    monkeypatch.setattr(module, "_run_gh", _effect_gate_fake_gh(releases, {}))
+    with pytest.raises(module.EffectGateError, match="查询上限"):
+        module.list_release_tags("owner/repo")
+    anchor = module.resolve_anchor("owner/repo")
+    assert anchor.state == "unreadable"
+
+
+def test_effect_gate_release_list_network_error_fails_closed(monkeypatch, effect_gate_module) -> None:
+    # 查询错误不降级：resolve_anchor 必须回落 unreadable（FAIL），不得当首版放行。
+    module = effect_gate_module
+
+    def _boom(args):
+        raise module.EffectGateError("gh 调用失败（exit 1）: connection refused")
+
+    monkeypatch.setattr(module, "_run_gh", _boom)
+    anchor = module.resolve_anchor("owner/repo")
+    assert anchor.state == "unreadable"
 
 
 # --------------------------------------------------------------------------- #

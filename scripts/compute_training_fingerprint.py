@@ -331,12 +331,29 @@ def _run_gh_raw(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
 
 
 def list_release_tags(repo: str) -> list[str]:
-    """列出仓库全部 Release tag（可能含语料等非模型 Release，由调用方过滤）。
+    """列出仓库已发布的正式 Release tag（可能含语料等非模型 Release，由调用方过滤）。
+
+    draft / pre-release 不是正式发布件，不能作为指纹去重基线，故查询显式排除两者
+    （语义对齐 docs/guides/how-to.md 获取正式版的方式）；gh 查询失败直接上抛，
+    不降级为「无历史 Release」，避免把基础设施故障伪装成首版发布。
 
     ``gh`` 输出无法解析 / 结构非法时抛 ``FingerprintError``（fail-closed，exit 2）——
     不得让裸 ``JSONDecodeError`` 以 exit 1 逃逸，否则与「输入无变化」业务阻断码混淆。
     """
-    raw = _run_gh(["release", "list", "--repo", repo, "--limit", str(RELEASE_LIST_LIMIT), "--json", "tagName"])
+    raw = _run_gh(
+        [
+            "release",
+            "list",
+            "--repo",
+            repo,
+            "--limit",
+            str(RELEASE_LIST_LIMIT),
+            "--exclude-drafts",
+            "--exclude-pre-releases",
+            "--json",
+            "tagName",
+        ]
+    )
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
