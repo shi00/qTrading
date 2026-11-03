@@ -72,6 +72,7 @@
 | P3-Deps-PandasStubs-Lag | pandas 长期锁定 `<3.1`：pandas-stubs 最新 3.0.5.260914 未覆盖 pandas 3.1.0 类型面，升级会造成 stubs 与运行时版本错位 | P3 | ① pandas-stubs 发布 3.1.x（或覆盖 pandas 3.1 类型面的版本）时；② 或 pyright 在 pandas 3.1 上出现必须升级 stubs 才能消除的错误时 |
 | P3-Polars-Streaming-Order-Semantics | Polars 2.x 流式默认与严格化把错误从「显式异常」变为「结果不同」；行序仅在显式 `maintain_order` 处保证，当前靠各 lazy 管线末步显式 sort 兜底 | P3 | ① 新增 lazy 管线未在末步显式 sort，或新增依赖行序的断言/导出时；② 或 Polars 大版本升级再次调整流式/行序语义时；③ 或出现顺序相关的 Golden / 单测偶发不一致时 |
 | P3-Sidecar-macOS26-SDK-Constraint | theseus 的 PG 16.15.0 macOS 归档构建于 macOS 26.0 SDK、引用 `_strchrnul`，仅 macOS 26+ 可运行；sidecar release workflow 的 macOS job 依赖 `macos-26` runner | P3 | ① sidecar release workflow 触发且 macOS 构建/运行失败时；② 或需支持 macOS 26 以下版本时；③ 或 GitHub Actions `macos-26` 镜像变更时 |
+| P3-E2E-MockAssets-Provenance-Blocked | E2E 离线资产（`tests/e2e/mock_assets`，138 文件：116 woff2 / 8 js / 8 wasm / 6 symbols）缺来源 URL、engineRevision、Flet-Web 版本、包与资源摘要、许可证与 NOTICE、下载与变换方式，来源链 blocked | P3 | ① 新增/替换 mock_assets 资产时；② 或 Flet/CanvasKit 升级导致 engineRevision 变化时；③ 或合规审计启动时 |
 
 ## 技术债清单
 
@@ -416,6 +417,38 @@ PR #291 触发 Windows 单测 CI 超时调查发现：main 分支最近一次成
 **期望的最终解法**
 
 长期优化方案（任选其一或组合）：① 用 `pytest --durations=20` 识别 main 分支最慢的 20 个测试并优化（如 mock 重型 IO、减少 fixture 重复初始化）；② 将 `tests/unit/` 拆分为 2-3 个并行 job（如按 `tests/unit/data/`、`tests/unit/ui/`、`tests/unit/strategies/` 等目录拆分），缩短 wall clock；③ 将 `pyproject.toml` 中 `--dist=loadgroup` 切换为 `--dist=loadscope` 减少跨 worker fixture 重复初始化开销。验收标准：① main 分支 Windows 单测实际运行时间 ≤ 12 分钟（余量 ≥ 8 分钟 / \~40%）；② 拆分 job 后各 job wall clock ≤ 8 分钟；③ 现有测试全过且无新增 flaky。upgrade 触发条件：① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试）。
+
+### E2E 测试资产供应链
+
+#### P3-E2E-MockAssets-Provenance-Blocked：E2E 离线资产（`tests/e2e/mock_assets`，138 文件）来源、版本配套与许可证未闭合（blocked）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-E2E-MockAssets-Provenance-Blocked** | E2E 离线资产（`tests/e2e/mock_assets`，138 文件：116 woff2 / 8 js / 8 wasm / 6 symbols）缺来源 URL、engineRevision、Flet-Web 版本、包与资源摘要、许可证与 NOTICE、下载与变换方式，来源链 blocked | ① 新增/替换 mock_assets 资产时；② 或 Flet/CanvasKit 升级导致 engineRevision 变化时；③ 或合规审计启动时 |
+
+**状态：blocked**（阻断原因：联网/可信离线来源未获批准；本条目只登记事实与边界，不构成来源或合规结论）
+
+**Owner**：测试基础设施维护者（复核触发器：mock_assets 资产变更 / Flet 升级 / 合规审计启动）
+
+**产生背景与现状**
+
+D15-F09 检视发现：`tests/e2e/mock_assets/` 已提交 138 个二进制/前端资产。实测（2026-11-02，PowerShell `Get-ChildItem -Path tests/e2e/mock_assets -Recurse -File | Group-Object Extension`）：116 `.woff2` + 8 `.js` + 8 `.wasm` + 6 `.symbols`，总计 138；按目录为 `canvaskit/` 18（含 `chromium/`、`experimental_webparagraph/` 子目录及 `skwasm*` / `wimp*`）、`fonts/` 116、`rive/` 4（含 `wasm/`、`wasm_compatibility/` 子目录）。同目录按文件名扫描 `*LICEN*` / `*NOTICE*` / `*COPYING*` / `*.md` / `*.txt` / `*.json` 无命中，即目录内无本地 `LICENSE` / `NOTICE` / 来源 manifest。该资产位于 `tests/` 下，`AStockScreener.spec` 的 `datas` 未包含 `tests/`（`excludes` 亦含 `tests`），仅用于 E2E 离线化，不进入打包产物。
+
+缺失的六类字段（逐资产/逐批次均未建立）：
+1. 来源 URL：canvaskit/skwasm/wimp、Rive Native、Google Fonts 各资产的上游地址；
+2. `engineRevision`：URL 中的 Flutter Web Engine 版本段；获取口径见 [canvaskit-rendering-e2e-guide.md](../flet/canvaskit-rendering-e2e-guide.md) §1.1 与 [upgrade-checklist.md](../flet/upgrade-checklist.md) §3.4；
+3. Flet-Web 版本：承载 canvaskit/字体/渲染器资源的 `flet_web` 包版本（以 `pyproject.toml` 锁定的 `flet` 为准）；
+4. 包与资源摘要：`flet_web` 包摘要及每个资产的 SHA-256 等可核验摘要；
+5. 许可证与 NOTICE：Skia/CanvasKit、各字体族、Rive 运行时各自的上游许可文本与归属声明；
+6. 下载与变换方式：获取命令与重命名/裁剪/子目录保留等变换步骤，保证可复现。
+
+风险现状（拦截器与同步脚本的实际行为）：① `tests/e2e/conftest.py::_setup_canvaskit_intercept` 对 canvaskit/skwasm/wimp 按 basename 或 `chromium` / `experimental_webparagraph` 子目录路由，对 Rive 按 `wasm` / `wasm_compatibility` 子目录路由，字体仅按 URL 末尾 basename 路由；三者均未校验 URL 中的 `engineRevision`，也未校验本地内容摘要；② `tests/e2e/_font_urls.py::find_missing_fonts` 只校验本地 `*.woff2` 的 basename 集合是否覆盖 `main.dart.js` 解析出的文件名集合；③ `scripts/sync_e2e_fonts.py::_download_one` 对已存在且非空的文件直接跳过（仅 `--force` 重新下载），不记录下载来源、版本或摘要。故上游 revision 与本地文件不匹配时，拦截器仍可能静默以本地旧文件 fulfill。
+
+**边界声明**：不得把 `mock_assets` 下文件存在当来源审核，也不得据此声称资产已合规；文件存在、E2E 通过均不构成来源链闭合证据。
+
+**期望的最终解法**
+
+在批准的联网或可信离线来源下补齐六类字段并建立逐资产来源链：① 核对 8 个 JS 与 8 个 WASM 的配套关系（canvaskit 6 组 + Rive 2 组，`skwasm_heavy` / `skwasm` / `wimp` 与对应 `.symbols` 一并核对）；② 核对 116 个字体分片的上游许可与 NOTICE，字体 URL hash/版本与锁定的 `flet_web` 版本一致；③ 在拦截器与同步脚本中加入 revision/摘要校验：URL 中的 `engineRevision` 与本地记录不一致时必须明确失败（abort/报错），不得静默以本地旧文件替代；④ 产出仓库内可追踪的来源 manifest（含来源 URL、版本、摘要、许可证文件位置、下载/变换命令）。验收标准：① 六类字段对 138 个文件全部可追溯；② revision 不符场景有明确失败断言（单测或 E2E 用例）；③ 来源 manifest 与许可证/NOTICE 随资产同目录提交。解除条件：上述 ①~④ 完成且验收标准 ①~③ 全过后，方可将本条目由 blocked 改为可追踪/已闭合；在此之前保持 blocked。upgrade 触发条件：① 新增/替换 mock_assets 资产时；② 或 Flet/CanvasKit 升级导致 engineRevision 变化时；③ 或合规审计启动时。
 
 ### UI 表现层（MVVM/单例/可访问性）
 
