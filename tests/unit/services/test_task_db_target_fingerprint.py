@@ -310,7 +310,7 @@ class TestPersistenceContract:
         task = AppTask(factory_key=_FACTORY_KEY)
         task._coroutine_kwargs = {"probe": "x"}  # 测试直接固化单源字段
         serialized = TaskManager._serialize_retry_kwargs(task)
-        assert serialized is not None
+        assert isinstance(serialized, str)
         assert json.loads(serialized) == {"probe": "x"}
 
 
@@ -330,8 +330,9 @@ class TestEngineGenerationContract:
         engine_provider.mark_disposed(True)
 
         assert engine_provider.is_disposed(old_engine) is True
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             BaseDao(old_engine)._check_engine("probe")
+        assert "Engine disposed" in str(exc_info.value)
 
         engine_provider.set_engine(new_engine)
         assert engine_provider.is_disposed(new_engine) is False
@@ -340,5 +341,6 @@ class TestEngineGenerationContract:
 
         # 释放不可逆：即使新引擎已接管，旧引擎仍被永久拒绝（替代代际递增语义）
         assert engine_provider.is_disposed(old_engine) is True
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             BaseDao(old_engine)._check_engine("probe")
+        assert "Engine disposed" in str(exc_info.value)
