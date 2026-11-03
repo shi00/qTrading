@@ -31,7 +31,7 @@ from data.persistence.daos.sw_industry_dao import (
 )
 from data.persistence.daos.express_dao import ExpressDao
 from data.persistence.daos.watchlist_dao import WatchlistDao
-from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 
 pytestmark = pytest.mark.unit
 
@@ -91,6 +91,14 @@ def _make_mgr():
     # FR-UX-004, Task 4.2：watchlist DAO（_create_engine 经 sync_engines 类型发现同步 engine 引用）
     mgr.watchlist_dao = MagicMock(spec=WatchlistDao)
     return mgr
+
+
+def _wire_barrier_engine(mgr, engine):
+    """把 mgr / EngineManager / engine_provider 三处引擎引用对齐（生产路径由 _create_engine 同步）。"""
+    engine_provider.reset_engine_provider()
+    mgr.engine = engine
+    mgr._engine_manager.engine = engine
+    engine_provider.set_engine(engine)
 
 
 class TestCacheManagerCreateEngine:
@@ -2162,3 +2170,187 @@ class TestConcurrentInitDbForce:
 
             # Only the first call should execute the migrator; the rest see _schema_initialized=True
             assert call_count == 1
+
+
+class TestCacheManagerDisposeBarrier:
+    """T01：以 asyncio.Event 受控屏障验证 close/dispose 与查询、取消、重建的交错顺序。
+
+    所有时序均由事件编排决定，不使用 sleep 或时间窗口猜测；``asyncio.wait_for``
+    仅作为缺陷导致用例挂死时的兜底，超时本身不参与任何时序断言。
+    """
+
+    @pytest.mark.asyncio
+    async def test_query_rejected_when_close_marked_before_dispose_completes(self):
+        """close() 已写标记、dispose 尚未完成时，并发查询必须被拒绝。
+
+        屏障：engine.dispose() 进入即 set ``dispose_entered`` 并挂起，close()
+        因此停留在「标记已写、dispose 未完成」的窗口内；放行前断言守卫拒绝查询。
+        """
+        mgr = _make_mgr()
+        engine = MagicMock(spec=AsyncEngine)
+        dispose_entered = asyncio.Event()
+        release_dispose = asyncio.Event()
+
+        async def _blocking_dispose() -> None:
+            dispose_entered.set()
+            await release_dispose.wait()
+
+        engine.dispose = AsyncMock(side_effect=_blocking_dispose)
+        _wire_barrier_engine(mgr, engine)
+
+        close_task = asyncio.create_task(mgr.close())
+        try:
+            await asyncio.wait_for(dispose_entered.wait(), timeout=5)
+            assert mgr._disposed is True
+            assert engine_provider.is_disposed(engine) is True
+            # 窗口内 mgr 仍持有旧引擎引用，但守卫必须先行拒绝查询
+            assert mgr.engine is engine
+            with pytest.raises(EngineDisposedError, match="disposed"):
+                await mgr.check_table_has_data("stock_basic")
+            with pytest.raises(EngineDisposedError, match="Engine disposed"):
+                BaseDao(engine)._check_engine(context="probe")
+        finally:
+            release_dispose.set()
+            await close_task
+
+        assert mgr.engine is None
+        assert mgr._maintenance_event.is_set() is True
+        assert BaseDao._get_maintenance_event().is_set() is True
+
+    @pytest.mark.asyncio
+    async def test_query_preacquired_engine_is_rechecked_after_close_window(self):
+        """查询先取得引擎引用、再被维护屏障挡入 close 窗口时，唤醒后必须重新判活。
+
+        屏障：查询在维护事件 wait 上挂起（事件预先 clear），close() 在 dispose 内
+        挂起；放行 dispose 后维护事件 set，查询必须经 DAT-01 式复查拒绝旧引擎，
+        而不是携带过期引用继续执行。
+        """
+        mgr = _make_mgr()
+        engine = MagicMock(spec=AsyncEngine)
+        dispose_entered = asyncio.Event()
+        release_dispose = asyncio.Event()
+
+        async def _blocking_dispose() -> None:
+            dispose_entered.set()
+            await release_dispose.wait()
+
+        engine.dispose = AsyncMock(side_effect=_blocking_dispose)
+        _wire_barrier_engine(mgr, engine)
+
+        # 先清维护事件，确保查询必然停在 wait 上，而不是与 close 抢跑
+        mgr._maintenance_event.clear()
+        BaseDao._get_maintenance_event().clear()
+
+        captured: list[object] = []
+        captured_event = asyncio.Event()
+
+        async def _query() -> None:
+            captured.append(engine_provider.get_engine())
+            captured_event.set()
+            await BaseDao(engine)._wait_maintenance_guard(context="read")
+
+        query_task = asyncio.create_task(_query())
+        await asyncio.wait_for(captured_event.wait(), timeout=5)
+        close_task = asyncio.create_task(mgr.close())
+        try:
+            await asyncio.wait_for(dispose_entered.wait(), timeout=5)
+            assert captured == [engine]
+            assert mgr._disposed is True
+            assert engine_provider.is_disposed(captured[0]) is True
+            # close 已进入 dispose 窗口且维护事件尚未 set：查询仍在等待
+            assert query_task.done() is False
+        finally:
+            release_dispose.set()
+            results = await asyncio.gather(close_task, query_task, return_exceptions=True)
+
+        assert results[0] is None
+        assert isinstance(results[1], EngineDisposedError)
+        assert mgr._maintenance_event.is_set() is True
+        assert BaseDao._get_maintenance_event().is_set() is True
+
+    @pytest.mark.parametrize("dispose_stage", ["before_dispose", "after_dispose"])
+    @pytest.mark.asyncio
+    async def test_cancelled_waiter_propagates_and_maintenance_event_still_set(self, dispose_stage):
+        """等待任务在 dispose 完成前/后被取消，都必须结束且 CancelledError 向上传播。
+
+        屏障：``_engine_manager.dispose`` 被包装为在「完成前」或「完成后」挂起，
+        使 cancel 精确落在目标时序；取消后放行 close()，其 finally 必须 set 维护
+        事件，等待任务不得悬挂，R2 不被吞没。
+        """
+        mgr = _make_mgr()
+        engine = MagicMock(spec=AsyncEngine)
+        stage_reached = asyncio.Event()
+        release_stage = asyncio.Event()
+        real_dispose = mgr._engine_manager.dispose
+
+        async def _instrumented_dispose() -> None:
+            if dispose_stage == "before_dispose":
+                stage_reached.set()
+                await release_stage.wait()
+                await real_dispose()
+            else:
+                await real_dispose()
+                stage_reached.set()
+                await release_stage.wait()
+
+        _wire_barrier_engine(mgr, engine)
+        mgr._maintenance_event.clear()
+        BaseDao._get_maintenance_event().clear()
+        waiter_started = asyncio.Event()
+
+        async def _waiter() -> None:
+            waiter_started.set()
+            await BaseDao(engine)._wait_maintenance_guard(context="read")
+
+        waiter_task = asyncio.create_task(_waiter())
+        await asyncio.wait_for(waiter_started.wait(), timeout=5)
+
+        with patch.object(mgr._engine_manager, "dispose", new=_instrumented_dispose):
+            close_task = asyncio.create_task(mgr.close())
+            try:
+                await asyncio.wait_for(stage_reached.wait(), timeout=5)
+                assert waiter_task.done() is False
+                waiter_task.cancel()
+                waiter_results = await asyncio.gather(waiter_task, return_exceptions=True)
+                assert len(waiter_results) == 1
+                assert isinstance(waiter_results[0], asyncio.CancelledError)
+                assert waiter_task.done() is True
+                assert waiter_task.cancelled() is True
+            finally:
+                release_stage.set()
+                close_result = await close_task
+
+            assert close_result is None
+
+        assert mgr._disposed is True
+        assert mgr.engine is None
+        assert engine_provider.is_disposed(engine) is True
+        assert mgr._maintenance_event.is_set() is True
+        assert BaseDao._get_maintenance_event().is_set() is True
+
+    @patch("data.cache.engine_manager.create_async_engine")
+    @patch("data.cache.engine_manager.get_db_pool_config")
+    def test_create_engine_rebuilds_new_object_and_keeps_old_disposed(self, mock_get_config, mock_create):
+        """缓存切换/重建：新引擎对象复位标记，旧引擎永久留在 `_disposed_engines`。"""
+        mock_get_config.return_value = {}
+        mgr = _make_mgr()
+        old_engine = MagicMock(spec=AsyncEngine)
+        _wire_barrier_engine(mgr, old_engine)
+        mgr._disposed = True
+        engine_provider.mark_disposed(True)
+
+        new_engine = MagicMock(spec=AsyncEngine)
+        mock_create.return_value = new_engine
+        mgr._create_engine("postgresql+asyncpg://user:pass@localhost/testdb")
+
+        assert mgr._disposed is False
+        assert new_engine is not old_engine
+        assert mgr.engine is new_engine
+        assert mgr._engine_manager.engine is new_engine
+        assert engine_provider.get_engine() is new_engine
+        assert engine_provider.is_disposed(old_engine) is True
+        assert engine_provider.is_disposed(new_engine) is False
+        # 切换后查询走新引擎；旧引擎仍被守卫拒绝
+        BaseDao(new_engine)._check_engine(context="post-rebuild")
+        with pytest.raises(EngineDisposedError, match="Engine disposed"):
+            BaseDao(old_engine)._check_engine(context="stale")
