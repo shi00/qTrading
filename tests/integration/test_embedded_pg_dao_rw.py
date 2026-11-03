@@ -35,18 +35,31 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import typing
 from contextlib import ExitStack
 
 import pandas as pd
 import pytest
 import pytest_asyncio
 from alembic import command
-from sqlalchemy import text
+from sqlalchemy import exc as sa_exc
+from sqlalchemy import func, insert, select, text
 
+import data.persistence.daos.base_dao as base_dao_module
 from data.cache.cache_manager import CacheManager
+from data.persistence.app_state_service import get_app_state, set_app_state_max
 from data.persistence.db_url_override import override_db_url
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import Base
+from data.persistence.models import (
+    Base,
+    DailyQuotes,
+    MoneyflowDaily,
+    StockBasic,
+    SyncEmptyDay,
+    TradeCal,
+    get_model_columns,
+    get_model_pk_columns,
+)
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -111,11 +124,12 @@ async def embedded_pg_with_schema(real_embedded_pg: ConnectionInfo):
 async def clean_embedded_pg_tables(embedded_pg_with_schema: ConnectionInfo):
     """每个测试前后清理相关表数据，保证测试间隔离。
 
-    清理表：``daily_quotes``, ``stock_basic``（测试涉及的两张表）。
+    清理表：``daily_quotes``, ``stock_basic`` 及 D05-T02 事务/空日用例涉及的
+    ``trade_cal``, ``sync_empty_days``, ``moneyflow_daily``, ``app_state``。
     使用 ``DELETE FROM`` 而非 ``TRUNCATE``，避免在事务外触发隐式 commit。
     """
     cache = CacheManager()
-    tables = ["daily_quotes", "stock_basic"]
+    tables = ["daily_quotes", "stock_basic", "trade_cal", "sync_empty_days", "moneyflow_daily", "app_state"]
 
     async def _cleanup() -> None:
         assert cache.engine is not None, "CacheManager.engine 未初始化"
@@ -356,3 +370,160 @@ class TestEmbeddedPgDaoReadWrite:
         assert read_df is None or len(read_df) == 0, (
             f"事务回滚后表应为空，实际 {len(read_df) if read_df is not None else 0} 条"
         )
+
+
+def _empty_day_frame_with_bad_date() -> pd.DataFrame:
+    """5 行独立主键，第 3 行日期非法（coerce 后为 NULL）以便在第二块触发约束错误。"""
+    return pd.DataFrame(
+        [
+            {"table_name": "moneyflow_daily", "trade_date": datetime.date(2024, 1, 1)},
+            {"table_name": "moneyflow_daily", "trade_date": datetime.date(2024, 1, 2)},
+            {"table_name": "moneyflow_daily", "trade_date": "not-a-date"},
+            {"table_name": "moneyflow_daily", "trade_date": datetime.date(2024, 1, 4)},
+            {"table_name": "moneyflow_daily", "trade_date": datetime.date(2024, 1, 5)},
+        ]
+    )
+
+
+async def _count_rows(engine: typing.Any, table: typing.Any) -> int:
+    async with engine.connect() as conn:
+        result = await conn.execute(select(func.count()).select_from(table))
+        return int(result.scalar_one())
+
+
+class TestD05TransactionRecoveryContracts:
+    """D05-T02 真库证据：回滚 / 并发单调写 / 主键幂等 / 部分批写 / 旧空日纠正。
+
+    仅在本机存在 embedded PG sidecar 时执行；缺失时由 ``real_embedded_pg``
+    fixture 统一 ``pytest.skip``（不伪造通过）。
+    """
+
+    pytestmark = pytest.mark.usefixtures("clean_embedded_pg_tables")
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_shared_conn_upsert_failure_rolls_back_whole_transaction(
+        self,
+        embedded_pg_with_schema: ConnectionInfo,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """同连接多块写入中第二块失败：整个事务回滚，第一块也不得残留。"""
+        cache = CacheManager()
+        assert cache.engine is not None
+        dao = cache.sync_dao
+        monkeypatch.setattr(base_dao_module, "_UPSERT_CHUNK_SIZE", 2)
+
+        with pytest.raises(sa_exc.DBAPIError) as exc_info:
+            async with dao._guarded_begin() as conn:
+                await dao._save_upsert(
+                    _empty_day_frame_with_bad_date(),
+                    "sync_empty_days",
+                    get_model_columns(SyncEmptyDay),
+                    get_model_pk_columns(SyncEmptyDay),
+                    suppress_errors=True,
+                    conn=conn,
+                )
+
+        assert "null value" in str(exc_info.value).lower()
+        assert await _count_rows(cache.engine, SyncEmptyDay) == 0
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_unshared_long_batch_partially_commits_completed_chunks(
+        self,
+        embedded_pg_with_schema: ConnectionInfo,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """超阈值批量（每块独立事务）中第二块失败：第一块已提交，后续块不写。"""
+        cache = CacheManager()
+        assert cache.engine is not None
+        dao = cache.sync_dao
+        monkeypatch.setattr(base_dao_module, "_UPSERT_CHUNK_SIZE", 2)
+        monkeypatch.setattr(base_dao_module, "_LONG_TX_ROW_THRESHOLD", 2)
+
+        with pytest.raises(sa_exc.DBAPIError) as exc_info:
+            await dao._save_upsert(
+                _empty_day_frame_with_bad_date(),
+                "sync_empty_days",
+                get_model_columns(SyncEmptyDay),
+                get_model_pk_columns(SyncEmptyDay),
+            )
+
+        assert "null value" in str(exc_info.value).lower()
+        # 仅第一块（2 行）已提交，证明部分批写语义依赖 UPSERT 幂等重跑收敛
+        assert await _count_rows(cache.engine, SyncEmptyDay) == 2
+        async with cache.engine.connect() as conn:
+            result = await conn.execute(select(SyncEmptyDay.trade_date).order_by(SyncEmptyDay.trade_date))
+            assert list(result.scalars()) == [datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_set_app_state_max_concurrent_writes_keep_max_value(
+        self,
+        embedded_pg_with_schema: ConnectionInfo,
+    ) -> None:
+        """乱序并发写入后最终值仍为最大值；随后写较小值不降低高水位。"""
+        cache = CacheManager()
+        assert cache.engine is not None
+        key = "sync_attempted_upto:d05_t02_monotonic"
+        values = ["20240101", "20250601", "20240301", "20250901", "20231231", "20250501"]
+
+        await asyncio.gather(*(set_app_state_max(cache.engine, key, value) for value in values))
+
+        assert await get_app_state(cache.engine, key) == "20250901"
+        await set_app_state_max(cache.engine, key, "20240101")
+        assert await get_app_state(cache.engine, key) == "20250901"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_mark_empty_days_is_pk_idempotent(self, embedded_pg_with_schema: ConnectionInfo) -> None:
+        """重复登记同一 (table, date)：不产生重复行，返回实际落库行数。"""
+        cache = CacheManager()
+        assert cache.engine is not None
+        dao = cache.sync_dao
+        dates = [datetime.date(2024, 5, 6), datetime.date(2024, 5, 7)]
+
+        first = await dao.mark_empty_days("moneyflow_daily", dates)
+        second = await dao.mark_empty_days("moneyflow_daily", dates + [dates[0]])
+
+        assert first == 2, f"首次应落库 2 行，实际 {first}"
+        assert second == 2, f"重复登记应返回去重后 2 行，实际 {second}"
+        assert await _count_rows(cache.engine, SyncEmptyDay) == 2, "复合主键必须阻止重复行"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stale_empty_day_marker_does_not_mask_arriving_data(
+        self,
+        embedded_pg_with_schema: ConnectionInfo,
+    ) -> None:
+        """旧空日登记在真实数据到达后不再豁免，评分改按实际行数判定。"""
+        cache = CacheManager()
+        assert cache.engine is not None
+        trade_date = datetime.date(2024, 1, 2)
+
+        async with cache.engine.begin() as conn:
+            await conn.execute(
+                insert(StockBasic).values(
+                    ts_code="000001.SZ",
+                    symbol="000001",
+                    name="平安银行",
+                    list_date=datetime.date(2020, 1, 1),
+                    list_status="L",
+                )
+            )
+            await conn.execute(insert(TradeCal).values(cal_date=trade_date, exchange="SSE", is_open=1))
+            await conn.execute(insert(DailyQuotes).values(ts_code="000001.SZ", trade_date=trade_date, close=10.0))
+
+        await cache.sync_dao.mark_empty_days("moneyflow_daily", [trade_date])
+        before = await cache.quote_dao.get_bulk_sync_quality_scores(
+            trade_date, trade_date, tables=["daily_quotes", "moneyflow_daily"]
+        )
+        before_info = before[trade_date]["tables"]["moneyflow_daily"]
+        assert before_info["count"] == 0
+        assert before_info["exempt"] is True
+
+        # 数据到达后旧登记仍在，但 count > 0 必须走真实评分而非豁免
+        async with cache.engine.begin() as conn:
+            await conn.execute(insert(MoneyflowDaily).values(ts_code="000001.SZ", trade_date=trade_date))
+        after = await cache.quote_dao.get_bulk_sync_quality_scores(
+            trade_date, trade_date, tables=["daily_quotes", "moneyflow_daily"]
+        )
+        after_info = after[trade_date]["tables"]["moneyflow_daily"]
+        assert after_info["count"] == 1
+        assert after_info.get("exempt") is not True
+        assert after_info["passed"] is True
