@@ -359,10 +359,12 @@ class SchedulerService:
             )
 
     def _on_job_missed(self, event):
-        """Handle missed job events with clear logging + catch-up trigger (D6-1).
+        """Handle missed job events with clear logging + per-job recovery trigger (D6-1/D11-F04).
 
         misfire（超过 misfire_grace_time 仍未执行）意味着当天任务永久丢失。
-        业务 job 被跳过时安排 _catch_up_missed_updates 检查遗漏交易日并补偿。
+        D11-F04: 按 job 分派补跑原任务——概念同步/回填/夜间预测若一律只做行情补偿，
+        即使日更已完成也不会补跑原 job，misfire 被静默吞掉。未知 job 回落旧行为
+        （仅行情补偿），以兼容未来新增 job。
         """
         job_id = event.job_id
         run_time = event.scheduled_run_time
@@ -372,22 +374,64 @@ class SchedulerService:
             job_id,
             run_time,
         )
-        if job_id in ("daily_update", "nightly_prediction", "concept_sync_daily_refresh", "review_backfill"):
-            # _on_job_missed 为 APScheduler listener 回调；AsyncIOScheduler 的 listener
-            # 在事件循环线程执行，可直接获取 running loop 调度异步补偿协程。
+        # _on_job_missed 为 APScheduler listener 回调；AsyncIOScheduler 的 listener
+        # 在事件循环线程执行，可直接获取 running loop 调度异步补跑协程。
+        # 无运行 loop 时记录 debug 后返回，不得抛到 APScheduler 线程。
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
+            return
+
+        if job_id == "concept_sync_daily_refresh":
+            # 概念同步/回填/夜间预测沿用各自协程内部开关与幂等判定（不额外加全局开关），
+            # 故日更已完成（水位为今天）时依旧补跑，同日重复 misfire 由 unique_key 去重。
+            coro = self._run_concept_sync()
+        elif job_id == "review_backfill":
+            coro = self._run_review_backfill()
+        elif job_id == "nightly_prediction":
+            coro = self._run_nightly_prediction()
+        else:
+            if job_id != "daily_update":
+                logger.warning(
+                    "[Scheduler] Unknown job '%s' missed; falling back to market catch-up only",
+                    job_id,
+                )
+            # daily_update 与未知 job：行情补偿。
             # include_today=True（D6-1 Q21）：misfire 已过计划时刻+宽限（已收盘），
             # 若仅补到昨天则"当天永久跳过"依旧存在。
             # bypass_backoff=True（D7-1）：misfire 为每天每 job 至多一次的一次性事件，
             # 不受 30 秒看门狗退避约束，避免当天数据永久丢失。
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._catch_up_missed_updates(include_today=True, bypass_backoff=True))
-                # F1 (OSS 检视): 事件循环只持弱引用，create_task 返回值须保存强引用直至任务
-                # 完成，否则补偿任务可能在执行中途被 GC 静默丢弃（漏跑且无日志）。
-                self._catchup_tasks.add(task)
-                task.add_done_callback(self._catchup_tasks.discard)
-            except RuntimeError:
-                logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
+            coro = self._catch_up_missed_updates(include_today=True, bypass_backoff=True)
+
+        try:
+            task = loop.create_task(coro)
+        except RuntimeError:
+            # loop 已关闭等竞态：协程未被执行，必须 close 避免 "coroutine was never awaited"。
+            coro.close()
+            logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
+            return
+        # F1 (OSS 检视): 事件循环只持弱引用，create_task 返回值须保存强引用直至任务
+        # 完成，否则补跑任务可能在执行中途被 GC 静默丢弃（漏跑且无日志）。
+        self._catchup_tasks.add(task)
+        task.add_done_callback(self._on_misfire_task_done)
+
+    def _on_misfire_task_done(self, task: asyncio.Task) -> None:
+        """misfire 补跑任务完成回调：释放强引用并消费异常（R2/R9）。
+
+        若不取回异常，asyncio 只能在 GC 时打印 "Task exception was never retrieved"，
+        且异常信息未脱敏；此处显式取回并记录（失败原因是脱敏后的摘要）。
+        """
+        self._catchup_tasks.discard(task)
+        if task.cancelled():
+            # R2: 取消（含优雅停机）不视为失败，不吞没、不再抛出。
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "[Scheduler] Misfire recovery task failed: %s",
+                DataSanitizer.sanitize_error(exc, show_traceback=True),
+            )
 
     def _on_job_error(self, event):
         """Handle job error events, suppressing CancelledError during shutdown"""
