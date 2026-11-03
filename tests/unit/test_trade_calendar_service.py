@@ -391,6 +391,91 @@ class TestGetTradeDates:
         assert len(result) == 1
 
 
+_AS_OF_HISTORY = [
+    datetime.date(2026, 10, 8),
+    datetime.date(2026, 10, 9),
+    datetime.date(2026, 10, 12),
+    datetime.date(2026, 10, 13),
+    datetime.date(2026, 10, 14),
+    datetime.date(2026, 10, 15),
+    datetime.date(2026, 10, 16),
+    datetime.date(2026, 10, 19),
+    datetime.date(2026, 10, 20),
+    datetime.date(2026, 10, 21),
+    datetime.date(2026, 10, 22),
+    datetime.date(2026, 10, 23),
+    datetime.date(2026, 10, 26),
+    datetime.date(2026, 10, 27),
+    datetime.date(2026, 10, 28),
+    datetime.date(2026, 10, 29),
+    datetime.date(2026, 10, 30),
+    datetime.date(2026, 11, 2),
+]
+
+
+def _history_df() -> pd.DataFrame:
+    """足够历史交易日（18 条），但最大行日期 = as_of（2026-11-02）。"""
+    return pd.DataFrame({"cal_date": _AS_OF_HISTORY, "is_open": [1] * len(_AS_OF_HISTORY)})
+
+
+class TestGetTradeDatesCoverage:
+    """RS-F03：尾段覆盖校验必须优先于「总条数达标」早返。"""
+
+    @pytest.mark.asyncio
+    async def test_missing_tail_filled_from_offline(self):
+        """DB 够密但最大日=as_of → 只补尾段（API/离线），不得早返丢未来交易日。"""
+        svc = _make_service(cache_return=_history_df())
+        svc._api.get_trade_cal = AsyncMock(return_value=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(
+            return_value=["20261103", "20261104", "20261105", "20261106", "20261109"]
+        )
+        svc._offline.is_trading_day = MagicMock(return_value=True)
+
+        result = await svc.get_trade_dates("20261004", "20261112")
+
+        expected = sorted([*_AS_OF_HISTORY, *(datetime.date(2026, 11, d) for d in (3, 4, 5, 6, 9))])
+        assert result == expected
+        # 仅补缺失尾段，不重复拉取已覆盖历史（请求放大成本）
+        svc._api.get_trade_cal.assert_awaited_once_with(start_date="20261103", end_date="20261112")
+        svc._offline.get_trade_dates.assert_called_once_with(datetime.date(2026, 11, 3), datetime.date(2026, 11, 12))
+
+    @pytest.mark.asyncio
+    async def test_full_tail_coverage_skips_backfill_including_holiday_end(self):
+        """原始日历已覆盖到请求 end（end 本身可为休市日）→ 不触发补齐。"""
+        holiday_end = datetime.date(2026, 11, 7)  # 周六休市
+        db_df = pd.DataFrame(
+            {
+                "cal_date": [*_AS_OF_HISTORY, datetime.date(2026, 11, 6), holiday_end],
+                "is_open": [1] * len(_AS_OF_HISTORY) + [1, 0],
+            }
+        )
+        svc = _make_service(cache_return=db_df)
+        svc._offline = MagicMock()
+
+        result = await svc.get_trade_dates("20261004", "20261107")
+
+        assert result == sorted([*_AS_OF_HISTORY, datetime.date(2026, 11, 6)])
+        svc._api.get_trade_cal.assert_not_awaited()  # 未触发 API 补齐
+        svc._offline.get_trade_dates.assert_not_called()  # 未触发离线补齐
+        # 不得以「最后开市日 == end_date」作判据：最后开市日 11-06 != 休市 end 11-07
+        assert datetime.date(2026, 11, 7) not in result
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_tail_returns_partial_without_guessing(self):
+        """离线超出可信区间且 API 不可得 → 返回已覆盖部分，不猜测未来交易日。"""
+        svc = _make_service(cache_return=_history_df())
+        svc._api.get_trade_cal = AsyncMock(return_value=None)
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(return_value=None)
+
+        result = await svc.get_trade_dates("20261004", "20261112")
+
+        assert result == _AS_OF_HISTORY
+        assert datetime.date(2026, 11, 3) not in result
+
+
 class TestCountTradeDays:
     @pytest.mark.asyncio
     async def test_none_dates(self):
@@ -761,6 +846,10 @@ class TestGetTradeDatesBatch:
         """M13-F3: ranges 元素为 str 时归一化处理（与 get_trade_dates 同口径），键保持原始输入。"""
         df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
         svc = _make_service(cache_return=df)
+        # 本用例只验证批量范围归一化，固定离线不可用以隔离 RS-F03 尾段补齐。
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(return_value=None)
         result = await svc.get_trade_dates_batch([("20240610", "20240620")])
         assert result == {("20240610", "20240620"): [datetime.date(2024, 6, 14)]}
 
@@ -776,6 +865,10 @@ class TestGetTradeDatesBatch:
         """M13-F3: 合法与非法范围混用时，仅合法范围查询，非法范围独立返回 []。"""
         df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
         svc = _make_service(cache_return=df)
+        # 同上：隔离 RS-F03 尾段补齐，专注非法范围处理。
+        svc._offline = MagicMock()
+        svc._offline.get_trade_dates = MagicMock(return_value=[])
+        svc._offline.is_trading_day = MagicMock(return_value=None)
         result = await svc.get_trade_dates_batch([("20240610", "20240620"), (None, "20240630")])
         assert result[("20240610", "20240620")] == [datetime.date(2024, 6, 14)]
         assert result[(None, "20240630")] == []
