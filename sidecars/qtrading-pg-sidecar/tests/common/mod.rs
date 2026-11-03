@@ -111,6 +111,29 @@ pub fn stop_sidecar(data_dir: &Path) -> u8 {
     output.status.code().unwrap_or(255) as u8
 }
 
+/// 带环境变量执行 sidecar 子命令，返回 (exit_code, stdout, stderr)。
+///
+/// stdin 固定为 null（EOF）：maintenance-shell 的 `wait_for_enter` 依赖 stdin 结束，
+/// 避免测试在交互式终端下永久阻塞。故障注入通过独立子进程 env 隔离，不影响测试进程。
+pub fn run_sidecar_env(args: &[&str], env: &[(&str, &str)]) -> (u8, String, String) {
+    let mut cmd = std::process::Command::new(sidecar_path());
+    for arg in args {
+        cmd.arg(arg);
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let output = cmd
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run sidecar with env");
+    (
+        output.status.code().unwrap_or(255) as u8,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 /// 执行 `status` 命令，解析 JSON。
 pub fn status_json(data_dir: &Path) -> serde_json::Value {
     let output = std::process::Command::new(sidecar_path())

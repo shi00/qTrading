@@ -86,6 +86,39 @@ _DYNAMIC_KEY_ALLOWLIST: frozenset[str] = frozenset(
 # 防止「塞键 + count 同步递增」或天花板虚高静默放宽棘轮（对抗检视 D-2 加固）。
 _BASELINE_CEILING = 214
 
+# 负向用例注入的伪造 baseline 计数：问题事实为「215 超过天花板 214」。
+# 硬编码而非 _BASELINE_CEILING + 1，确保天花板被上调到 215 时该用例会失败（变异可检出）。
+_EXCESS_BASELINE_COUNT = 215
+
+
+def _load_baseline_with_ratchet(baseline_path: Path, ceiling: int) -> tuple[set[str], int]:
+    """读取 i18n 死键 baseline 并校验计数自洽性与棘轮天花板。
+
+    OSS-04 断言 c/e/f 的纯函数化入口：接收 baseline 路径与天花板，便于负向用例
+    用 tmp_path 注入伪造 baseline 验证天花板确实拦截，而不污染真实 baseline 文件。
+    """
+    with open(baseline_path, encoding="utf-8") as f:
+        baseline_data = json.load(f)
+    baseline_keys = set(baseline_data.get("keys", []))
+    baseline_count = baseline_data.get("count", len(baseline_keys))
+
+    # OSS-04 断言 c：baseline JSON 自洽（keys 与 count 漂移须先核对再改）
+    if len(baseline_keys) != baseline_count:
+        raise AssertionError("i18n_dead_keys_baseline.json 的 count 与 keys 数量不一致，请核对后同步")
+    # OSS-04 断言 e：棘轮天花板，防塞键 + count 同步递增绕过
+    if baseline_count > ceiling:
+        raise AssertionError(
+            f"baseline count ({baseline_count}) 超过棘轮天花板 {ceiling}；"
+            f"死键只减不增，清理后须下调 _BASELINE_CEILING 而非上调"
+        )
+    # OSS-04 断言 f：天花板须与当前 baseline count 严格一致，防天花板虚高静默放宽棘轮
+    if ceiling != baseline_count:
+        raise AssertionError(
+            f"i18n dead-key 棘轮天花板 (_BASELINE_CEILING={ceiling}) 与当前 baseline "
+            f"count ({baseline_count}) 不一致；新增死键不得上调天花板，清理死键后须同步下调"
+        )
+    return baseline_keys, baseline_count
+
 
 class TestI18nKeysCompleteness(unittest.TestCase):
     LOCALES_DIR = Path(__file__).parent.parent.parent / "locales"
@@ -378,33 +411,10 @@ class TestI18nKeysCompleteness(unittest.TestCase):
         baseline_path = project_root / "tests" / "i18n_dead_keys_baseline.json"
         self.assertTrue(baseline_path.exists(), f"Missing i18n dead keys baseline: {baseline_path}")
 
-        with open(baseline_path, encoding="utf-8") as f:
-            baseline_data = json.load(f)
-            baseline_keys = set(baseline_data.get("keys", []))
-            baseline_count = baseline_data.get("count", len(baseline_keys))
+        baseline_keys, baseline_count = _load_baseline_with_ratchet(baseline_path, _BASELINE_CEILING)
 
         zh_keys = self._load_keys("zh_CN")
 
-        # OSS-04 断言 c：baseline JSON 自洽（keys 与 count 漂移须先核对再改）
-        self.assertEqual(
-            len(baseline_keys),
-            baseline_count,
-            "i18n_dead_keys_baseline.json 的 count 与 keys 数量不一致，请核对后同步",
-        )
-        # OSS-04 断言 e：棘轮天花板，防塞键 + count 同步递增绕过
-        self.assertLessEqual(
-            baseline_count,
-            _BASELINE_CEILING,
-            f"baseline count ({baseline_count}) 超过棘轮天花板 {_BASELINE_CEILING}；"
-            f"死键只减不增，清理后须下调 _BASELINE_CEILING 而非上调",
-        )
-        # OSS-04 断言 f：天花板须与当前 baseline count 严格一致，防天花板虚高静默放宽棘轮
-        self.assertEqual(
-            _BASELINE_CEILING,
-            baseline_count,
-            f"i18n dead-key 棘轮天花板 (_BASELINE_CEILING={_BASELINE_CEILING}) 与当前 baseline "
-            f"count ({baseline_count}) 不一致；新增死键不得上调天花板，清理死键后须同步下调",
-        )
         # OSS-04 断言 d：动态活键与死键登记互斥
         overlap = baseline_keys & _DYNAMIC_KEY_ALLOWLIST
         self.assertFalse(
@@ -461,6 +471,29 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             f"Unreferenced i18n keys count ({len(unreferenced_keys)}) exceeded baseline ({baseline_count}). "
             f"Ratchet invariant violated: dead key count may only decrease.",
         )
+
+
+def test_baseline_ceiling_rejects_excess_dead_keys(tmp_path: Path) -> None:
+    """负向用例：伪造 baseline count=215 必须被棘轮天花板 214 拦截。
+
+    正向用例对真实 baseline（count == _BASELINE_CEILING == 214）只能证明「计数相等」，
+    无法区分天花板是否真的拦截；本用例向 tmp_path 注入超过天花板的伪造 baseline，
+    证明超出即失败，且失败信息含天花板与超限计数，不污染真实 baseline 文件。
+    """
+    fake_keys = [f"dead_key_{i}" for i in range(_EXCESS_BASELINE_COUNT)]
+    fake_baseline = tmp_path / "i18n_dead_keys_baseline.json"
+    fake_baseline.write_text(
+        json.dumps({"count": _EXCESS_BASELINE_COUNT, "keys": fake_keys}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError) as exc_info:
+        _load_baseline_with_ratchet(fake_baseline, _BASELINE_CEILING)
+
+    message = str(exc_info.value)
+    assert "超过棘轮天花板" in message
+    assert str(_EXCESS_BASELINE_COUNT) in message
+    assert str(_BASELINE_CEILING) in message
 
 
 if __name__ == "__main__":

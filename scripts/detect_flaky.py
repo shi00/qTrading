@@ -234,6 +234,10 @@ def main(argv: list[str] | None = None) -> int:
     for i in range(args.runs):
         print(f"运行 {i + 1}/{args.runs}...", flush=True)
         report_path = workdir / f"run_{i + 1}.json"
+        # 复用已存在的 --workdir 时，上一轮遗留的同名报告会让「文件存在」不再等价于
+        # 「本轮刚生成」：先删除目标文件，使后续存在性检查与 stdout 摘要只读取本轮结果。
+        # 只清理本次目标路径，不动 --workdir 下用户的其他文件。
+        report_path.unlink(missing_ok=True)
         returncode, _ = run_pytest_with_json_report(
             test_path=args.path,
             report_path=report_path,

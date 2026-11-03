@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from scan_weak_assertions import (  # noqa: E402 - sys.path 注入后导入
     WeakAssertion,
     check_baseline_kpi,
+    compute_new_issues,
     is_whitelisted,
     load_baseline,
     make_signature,
@@ -44,6 +45,17 @@ def _write_test_file(root: Path, rel: str, content: str) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return target
+
+
+def _baseline_weak_assert(rel_path: str, line_no: int = 2) -> WeakAssertion:
+    """构造 weak_assert baseline 条目（签名只取 rel_path / type / 归一化源行）。"""
+    return WeakAssertion(
+        rel_path=rel_path,
+        line_no=line_no,
+        issue_type="weak_assert",
+        detail="assert True / assert 1",
+        source_line="    assert True",
+    )
 
 
 # ============================================================================
@@ -291,6 +303,69 @@ class TestDiffMode:
         ]
         new_issues = _diff(tmp_path, baseline)
         assert new_issues == []
+
+    def test_duplicate_instance_of_baselined_signature_not_flagged(self, tmp_path):
+        """D15-F03 契约：baseline×1 / current×2（同文件不同测试同文本）→ 0 条新增。
+
+        增量门禁按签名集合语义（rel_path, issue_type, 归一化源行）做差，按签名种类
+        计数、不含 occurrence 与行号；同一签名新增重复实例不阻断（有意设计）。
+        同时断言 baseline 文件未被写回/扩张，避免用 baseline 增长掩盖新增。
+        """
+        _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    assert True\n\n\ndef test_b():\n    assert True\n",
+        )
+        baseline_path = tmp_path / "baseline.json"
+        save_baseline(baseline_path, [_baseline_weak_assert("test_x.py")])
+        before = baseline_path.read_text(encoding="utf-8")
+        baseline = load_baseline(baseline_path)
+
+        current = scan_directory(tmp_path)
+        assert len(current) == 2
+        assert [issue.line_no for issue in current] == [2, 6]
+        assert make_signature(current[0].rel_path, current[0].issue_type, current[0].source_line) == make_signature(
+            current[1].rel_path, current[1].issue_type, current[1].source_line
+        )
+
+        new_issues = compute_new_issues(current=current, baseline=baseline)
+        assert new_issues == []
+        # 纯比较：baseline 文件内容与条目数均不变（不以扩张 baseline 掩盖新增）
+        assert baseline_path.read_text(encoding="utf-8") == before
+        assert len(load_baseline(baseline_path)) == 1
+
+    def test_two_baseline_entries_two_instances_not_flagged(self, tmp_path):
+        """D15-F03 契约：baseline×2 / current×2 → 0 条新增（不按 occurrence 配额）。"""
+        _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    assert True\n\n\ndef test_b():\n    assert True\n",
+        )
+        baseline = [
+            _baseline_weak_assert("test_x.py", line_no=2),
+            _baseline_weak_assert("test_x.py", line_no=6),
+        ]
+        new_issues = _diff(tmp_path, baseline)
+        assert new_issues == []
+
+    def test_baseline_instances_shrink_not_flagged(self, tmp_path):
+        """D15-F03 契约：baseline×2 / current×1 → 0 条新增（baseline 减少不算新增）。"""
+        _write_test_file(tmp_path, "test_x.py", "def test_a():\n    assert True\n")
+        baseline = [
+            _baseline_weak_assert("test_x.py", line_no=2),
+            _baseline_weak_assert("test_x.py", line_no=6),
+        ]
+        new_issues = _diff(tmp_path, baseline)
+        assert new_issues == []
+
+    def test_same_text_in_different_file_still_matched_separately(self, tmp_path):
+        """rel_path 参与签名：不同文件的同文本弱断言分别匹配，不被集合语义错误去重。"""
+        _write_test_file(tmp_path, "test_a.py", "def test_a():\n    assert True\n")
+        _write_test_file(tmp_path, "test_b.py", "def test_b():\n    assert True\n")
+        baseline = [_baseline_weak_assert("test_a.py")]
+        new_issues = _diff(tmp_path, baseline)
+        assert len(new_issues) == 1
+        assert new_issues[0].rel_path == "test_b.py"
 
     def test_diff_ignores_whitelisted(self, tmp_path):
         _write_test_file(

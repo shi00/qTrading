@@ -1099,13 +1099,16 @@ class TestNewsFetcherGetStockNews:
 
 class TestNewsFetcherGetUsMajorMoves:
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_get_us_major_moves_returns_list_or_str(self, mock_tpm):
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=None)
-        result = await NewsFetcher.get_us_major_moves()
-        assert isinstance(result, (list, str))
+    @patch("httpx.AsyncClient")
+    async def test_get_us_major_moves_returns_list_or_str(self, mock_client):
+        """对外契约：实时抓取路径经 httpx.AsyncClient 取数，解析结果为 str 且内容确定。"""
+        _wire_http_get(mock_client, _us_moves_response())
+        base_time = datetime.datetime(2026, 1, 2, 10, 0, 0).replace(tzinfo=CST_TZ)
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
+            result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        assert result == _US_MOVES_EXPECTED
+        mock_client.return_value.get.assert_awaited_once()
 
 
 class TestUsMajorMovesLookAheadGuard:

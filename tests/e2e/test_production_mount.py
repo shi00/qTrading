@@ -41,6 +41,13 @@ use_state/VM 状态跨页保持、use_dialog overlay 跨页存活。本文件经
    其 value 反映「当前聚焦」的 TextField。full-mount 多视图常驻时切页后共享
    input 绑定到其他 TextField（value 清空），非聚焦目标读不到值；改为先物理
    聚焦目标输入框再读 value（``AnchorPage.expect_input_value``）。
+7. D15-F07（mock 生命周期与真实 Flet 调度等价证据不足）证据映射：本文件为
+   subprocess + Playwright 黑盒（测试进程无法访问 app 内部对象），无法计数
+   订阅者/cleanup 次数，故不在此新增重复/易 flaky 用例。行为级覆盖为场景①
+   （切页往返后 screener 状态保持 = 订阅存续的间接证据）与场景④（locale
+   Observable 通知驱动未访问页重渲染）；三项直接观测（订阅归属 / cleanup 次数 /
+   卸载后迟到通知不再更新）由 ``tests/integration/test_flet_test_page_probe.py``
+   的 D15-F07 用例在真实 Flet（锁定版本）session 调度器上完成。
 """
 
 import logging

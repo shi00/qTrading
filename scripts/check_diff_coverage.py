@@ -10,10 +10,11 @@
     python scripts/check_diff_coverage.py --strict --threshold 80
 
 退出码：
-    0: advisory 模式（默认）且覆盖率达标，或无源码变更行
+    0: advisory 模式（默认）且覆盖率达标，或无源码变更行，或变更行均为非可执行行
     1: --strict 模式下覆盖率低于阈值
     2: 无法确定覆盖率输入（coverage 文件缺失/不可读/非法、merge-base 不可用、
-       git diff 失败）——fail-closed，不得静默通过
+       git diff 失败），或 diff 含可执行变更行但所属文件未被 coverage 统计
+       （未收录且不匹配 [tool.coverage.run].omit）——fail-closed，不得静默通过
 """
 
 import argparse
@@ -21,6 +22,9 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
+from collections.abc import Sequence
+from fnmatch import fnmatch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -145,6 +149,70 @@ def load_coverage(coverage_file: Path) -> dict[str, dict[str, set[int]]]:
     return result
 
 
+def load_coverage_omit_patterns(pyproject_file: Path | None = None) -> tuple[str, ...]:
+    """读取 [tool.coverage.run].omit 的 glob 列表。
+
+    omit 文件不会出现在 coverage.json 中，其变更行需要与「未被测试统计」区分开：
+    否则无法判定可执行性的变更会被误判为「文件未被覆盖」而 fail-closed。
+    pyproject 缺失/不可解析时返回空元组（此时仅按源码内容兜底判定）。
+    """
+    path = pyproject_file or (ROOT / "pyproject.toml")
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return ()
+    run = data.get("tool", {}).get("coverage", {}).get("run", {})
+    omit = run.get("omit", []) if isinstance(run, dict) else []
+    if not isinstance(omit, list):
+        return ()
+    return tuple(str(pattern).replace("\\", "/") for pattern in omit if isinstance(pattern, str))
+
+
+def _is_omitted(path: str, omit_patterns: Sequence[str]) -> bool:
+    """判断文件是否匹配 coverage omit glob（如 main.py、scripts/*）。"""
+    return any(fnmatch(path, pattern) for pattern in omit_patterns)
+
+
+def find_unmeasured_files(
+    diff_lines: dict[str, list[int]],
+    coverage: dict[str, dict[str, set[int]]],
+    omit_patterns: Sequence[str] = (),
+) -> list[str]:
+    """返回 diff 有新增行、但未被 coverage 统计且不匹配 omit 的文件。
+
+    这些文件既不在 coverage.json 中，也非有意 omit，覆盖率数据无法说明其新增行
+    是否可执行——调用方必须按源码内容判定或 fail-closed，不得当作「无变更」放行。
+    """
+    return sorted(
+        filepath for filepath in diff_lines if filepath not in coverage and not _is_omitted(filepath, omit_patterns)
+    )
+
+
+def find_executable_added_lines(filepath: str, lines: list[int], root: Path | None = None) -> list[int]:
+    """按源码内容判定未被 coverage 统计文件中的新增行是否可执行。
+
+    coverage.py 的 statements 含 docstring 行、不含空行与纯注释；此处以同一口径近似：
+    去除首尾空白后为空或以 ``#`` 开头的行视为非可执行，其余视为可执行。据此区分
+    「仅注释/空行改动」（合法跳过）与「真实代码改动」（无法测量，须 fail-closed）。
+    文件不可读（缺失/编码异常）或行号越界时按可执行处理（fail-closed）。
+    """
+    base = root or ROOT
+    try:
+        content = (base / filepath).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return sorted(lines)
+    executable: list[int] = []
+    for line_no in lines:
+        if line_no < 1 or line_no > len(content):
+            executable.append(line_no)
+            continue
+        text = content[line_no - 1].strip()
+        if text and not text.startswith("#"):
+            executable.append(line_no)
+    return sorted(executable)
+
+
 def compute_diff_coverage(
     diff_lines: dict[str, list[int]],
     coverage: dict[str, dict[str, set[int]]],
@@ -221,7 +289,33 @@ def main():
 
     covered, total, uncovered_by_file = compute_diff_coverage(diff_lines, coverage)
 
-    pct = (covered / total * 100) if total > 0 else 100.0
+    # 分母为 0 的两种语义必须区分：仅非可执行行改动（合法跳过）vs 可执行变更
+    # 所属文件未被 coverage 统计（无法测量，fail-closed）。对后者按源码内容判定
+    # 新增行是否可执行，避免把「文件未收录」一律当作「无变更」而假通过。
+    omit_patterns = load_coverage_omit_patterns()
+    unmeasured_files = find_unmeasured_files(diff_lines, coverage, omit_patterns)
+    executable_unmeasured: dict[str, list[int]] = {}
+    for filepath in unmeasured_files:
+        executable_lines = find_executable_added_lines(filepath, diff_lines[filepath], root=ROOT)
+        if executable_lines:
+            executable_unmeasured[filepath] = executable_lines
+
+    if executable_unmeasured:
+        print("✗ diff 含可执行变更行，但以下文件未被 coverage 统计（未收录且不匹配 omit）：")
+        for filepath, lines in executable_unmeasured.items():
+            print(f"  {filepath}:")
+            for ln in lines:
+                print(f"    L{ln}")
+        print()
+        print("无法用覆盖率数据判定这些变更行是否被测试覆盖，fail-closed（exit 2）。")
+        print("请确认该文件已被测试导入并纳入 coverage，或在 pyproject.toml 的 omit 中显式声明。")
+        return 2
+
+    if total == 0:
+        print("✓ diff 仅含非可执行行（相关文件均由 coverage 统计或匹配 omit），跳过 diff-coverage 检查")
+        return 0
+
+    pct = covered / total * 100
 
     print(f"Diff-coverage 报告（base={args.base}）")
     print(f"  变更源码行: {total}")

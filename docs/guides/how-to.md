@@ -154,6 +154,7 @@ sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --output <备份文�
 
 输出 PostgreSQL custom format 备份文件，可用 `pg_restore` 工具恢复。
 
+**停止失败按硬失败处理（D16-R01）**：离线备份会启动临时实例；备份完成后若临时实例无法被**证明**已停止（分级停止 smart/fast/kill 全部失败，crate 的 Drop 只是 best-effort、不作为停止依据），命令返回 exit 20。此时已完成的备份仍会原子改名为 `--output` 指定路径保留（不删除唯一备份成果），但命令**不报告成功**——残留 postgres 可能仍占用数据目录，请先确认并停止残留进程后再依赖该备份。
 - **不覆盖旧备份**：最终输出文件已存在时 dump 拒绝执行（exit 30），请改用新的输出路径或自行移走旧文件。
 - **并发与临时文件**：同一输出路径的并发 dump 由输出级排他锁互斥（冲突方 exit 30；不同输出可并行）；在线 dump 不占 PGDATA 维护锁。临时文件使用本次任务唯一的 `<output>.<pid>-<时间戳>.partial`，成功后原子改名为最终文件；失败/中断只清理或遗留本任务临时文件，不会删除其他任务的临时文件。
 
@@ -179,9 +180,10 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 
 **活实例守卫（D16-F03）**：restore 获取维护锁后、任何 initdb/切换前会校验源 PGDATA 不存在仍在运行的实例（复用进程归属校验，含规范化路径、启动时刻与 OS 进程证据）。sidecar 崩溃/被 kill 后维护锁会被 OS 释放，但 postgres 可能仍活；此时 restore 返回 exit 50 并提示先执行 `stop --data-dir <数据目录>`，**不会自动杀进程、不会创建恢复目录或改动源目录**。默认模式切换前会再次校验，失败时已完成的 `.restore-*` 目录保留供人工处理。显式 `--target-data-dir` 模式同样要求源 PGDATA 无活实例。
 
-**失败边界**（恢复执行失败统一返回 exit 30；维护锁冲突 exit 50、密码不可用 exit 16 等前置失败除外，见 9.6 错误分类）：
+**失败边界**（恢复执行失败统一返回 exit 30；临时实例停止不可证明返回 exit 20 并保留恢复目录；维护锁冲突 exit 50、密码不可用 exit 16 等前置失败除外，见 9.6 错误分类）：
 
 - initdb / pg_restore / **健康检查**任一步失败：恢复用的临时目录（默认模式为 `.restore-*`，指定目标模式为 `<新目录>`）自动清理，原数据目录不受影响；
+- **临时实例停止失败（D16-R01）**：恢复数据写入完成但临时实例停止结果不可证明时，返回 exit 20，**禁止目录切换**，`.restore-*`（或指定 `--target-data-dir`）目录**保留**（可能仍被 postgres 使用，且是唯一恢复成果）；若恢复本身也失败，则返回原恢复失败码（如 exit 30），但同样保留该目录、不再自动清理；
 - 默认模式切换阶段：旧目录改名 `.bak-*` 失败 → 报错退出，原目录与临时恢复目录均原地保留，需手动处理；新目录切换为当前目录失败 → 自动回滚改名（若回滚失败，原数据仍保留于 `.bak-*` 目录，需手动处理）；
 - 恢复期间新旧数据并存（默认模式成功后 `.bak-*` 备份也会继续保留），请确保磁盘空间充足。
 
@@ -198,7 +200,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 1. **就绪后才输出连接信息**：随机分配端口启动临时实例，内部先以 psql `select 1` 探测就绪（探测窗口约 30 秒，失败 exit 12），探测通过后才向 stdout 输出上述单行 JSON，并向 stderr 打印提示——**输出出现时实例已可连接**；若 stdout 不可写（管道断裂等），sidecar 停止临时实例并以 exit 13 退出。
 2. **提示全部走 stderr**：包含脱敏连接串（`postgresql://postgres:***@127.0.0.1:<port>/qtrading`，端口为本次随机分配）、完整 psql 命令行、密码文件位置（密码不打印明文，密码文件保护方式见 9.8），以及「完成后按 Enter 结束」提示。
 3. **交互使用**：按提示中的 psql 命令行连接实例，或使用 stdout JSON 中的 `psql_path` 与 `connection_string_redacted`；存活期间可执行多条命令（可多次启动 psql 会话）。
-4. **结束（Enter / EOF）**：等待 stdin 出现换行（终端按 **Enter**）后结束；stdin 到达 **EOF**（管道写端关闭、重定向空输入等非交互场景）或读取错误时同样立即结束，避免永久挂起。随后临时实例被优雅停止——**sidecar 进程退出即实例已停止**；连接信息须在进程存活期间从 stdout 读取该行 JSON（进程退出后 stdout 已关闭，退出后再连接无效）。
+4. **结束（Enter / EOF）**：等待 stdin 出现换行（终端按 **Enter**）后结束；stdin 到达 **EOF**（管道写端关闭、重定向空输入等非交互场景）或读取错误时同样立即结束，避免永久挂起。随后临时实例被优雅停止——**sidecar 进程退出即实例已停止**；连接信息须在进程存活期间从 stdout 读取该行 JSON（进程退出后 stdout 已关闭，退出后再连接无效）。若分级停止无法**证明**实例已退出，sidecar 返回 exit 20 且**不打印「维护实例已停止」**（D16-R01）：此时不得视为维护成功，请先确认残留 postgres 后再重启应用。
 
 #### 9.6 错误分类
 
@@ -215,7 +217,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 14 | `CREATE_DATABASE_FAILED` | 业务库创建失败 | run |
 | 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
 | 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01）；显式恢复目标已有无关凭据、目标 runtime/密码文件不可用或写入失败亦返回此码 | run / dump / restore / maintenance-shell / reset-password |
-| 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
+| 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止 smart/fast/kill 后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；临时实例（dump 离线 / restore / maintenance-shell / reset-password）停止结果不可证明时按硬失败传播：不报告维护成功，restore 禁止切换并保留恢复目录，dump 保留已完成备份；PG 未运行时 stop 幂等成功返回 0 | stop / run / dump / restore / maintenance-shell / reset-password |
 | 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败、dump 输出已存在或另一任务占用同一输出等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
 | 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
@@ -285,6 +287,18 @@ restore（9.4）依赖两个输入：**可读的密码文件**（初始化新目
 4. **无任何恢复点**（既无备份文件，也无 `.bak-*` / `.restore-*` 目录）→ 数据不可恢复，只能移走损坏目录后全新初始化并重新同步数据。
 
 > 数据完好而仅凭证丢失时（前三类场景），无需先恢复数据：reset-password 不动业务数据，重置成功后即可正常使用并重新备份。
+
+#### 9.10 端到端连通性验证脚本
+
+`scripts/verify_embedded_pg_connect.py` 为 Phase 0 一次性 spike，在临时工作目录验证四客户端（asyncpg / psycopg2 / SQLAlchemy sync / SQLAlchemy async）、Alembic `upgrade head` 与 bundled `pg_dump`/`pg_restore` roundtrip：
+
+```bash
+python -m scripts.verify_embedded_pg_connect --sidecar <sidecar> --work-dir <临时目录>
+```
+
+- 密码文件按 Windows DPAPI（`PGPW2:`）/ Unix 明文格式解析后再构造连接 URL（复用运行时 `read_embedded_password`），密文不会被当作明文密码；
+- 非 Windows 平台若工作目录内已有 DPAPI 密文，脚本在启动 sidecar 前以格式/环境错误失败，且不修改该密码文件（避免 sidecar 按 Fresh data dir 覆盖凭据）；
+- sidecar stdout（ready JSON 机器协议）显式按 UTF-8 解码，出现 U+FFFD 时明确失败；结果行中的密码经 `DataSanitizer` 脱敏。
 
 ### 10. 运行 embedded 模式真实 sidecar 测试
 
