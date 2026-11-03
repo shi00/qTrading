@@ -324,6 +324,9 @@ ignore_imports = [
     # EX-0016 (D6-1/D6-2): scheduler_service 交易日历降级到离线日历（"R1: utils must not import business layers" 契约例外，
     # 启动补偿 + except 降级两处函数内 lazy import，见 docs/governance/exceptions.yml）
     "utils.scheduler_service -> data.domain_services.offline_calendar",
+    # EX-0022 (D02-R03): Step 3b 在 DataProcessor 未创建时兜底释放 CacheManager 异步 engine
+    # （早期错误页/onboarding 页可达），函数内 lazy import 见 _step3b_dispose_async_engine
+    "utils.shutdown -> data.cache.cache_manager",
 ]
 
 # qTrading embedded PostgreSQL sidecar 配置 (pg_plan §15.5 AI-12)

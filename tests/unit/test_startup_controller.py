@@ -494,6 +494,34 @@ class TestStartupReconfigure:
         cache_manager.close.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_reconfigure_close_failure_transitions_to_init_failed(self):
+        """D02-R03: CacheManager.close 抛异常时不得把状态机留在 LOADING（须 transition 到 INIT_FAILED）。"""
+        transitions = []
+        cache_manager = AsyncMock()
+        cache_manager.close = AsyncMock(side_effect=RuntimeError("engine dispose failed"))
+        controller = StartupController(
+            cache_manager=cache_manager,
+            on_state_change=lambda s, ctx: transitions.append((s, ctx)),
+        )
+        controller._state = StartupState.INIT_FAILED
+
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock()
+            await controller.reconfigure()
+
+        assert controller.state == StartupState.INIT_FAILED
+        assert transitions[-1][0] == StartupState.INIT_FAILED
+        assert transitions[-1][1].error == "reconfigure_failed"
+        assert transitions[-1][1].detail is not None
+        cache_manager.close.assert_awaited_once()
+        # 失败后不得重置 onboarding 标志/继续进入 NEED_ONBOARDING
+        assert StartupState.NEED_ONBOARDING not in [s for s, _ in transitions]
+        mock_tpm.return_value.run_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_reconfigure_reentry_guard_ignores_duplicate(self, controller):
         """M-UI-04 (M-APP-01 复核裁定扩展): Reconfigure 防重入.
 

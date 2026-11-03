@@ -510,24 +510,40 @@ class ShutdownCoordinator:
         from data.data_processor import DataProcessor  # lazy-import: 关机步骤按需加载
 
         processor = DataProcessor._instance
-        if processor is None:
-            logger.info("[Shutdown]   - DataProcessor not initialized, skipping engine disposal.")
-            return
-        cache = processor.cache
+        cache = processor.cache if processor is not None else None
+        if cache is None:
+            # D02-R03：启动早期错误页/onboarding 页期间 DataProcessor 可能尚未创建，
+            # 但 CacheManager 已建异步 engine；兜底直接释放，避免 Step 8 停 PG 前连接残留。
+            from data.cache.cache_manager import CacheManager  # lazy-import: 关机步骤按需加载
+
+            cache = CacheManager._instance
         if cache is None:
             logger.info("[Shutdown]   - CacheManager not initialized, skipping engine disposal.")
             return
-        try:
-            await cache.close()
-        except Exception as e:
-            # 保持原 DataProcessor.close 的错误隔离语义（仅记录，不阻断后续释放步骤）
-            logger.error(
-                "[Shutdown]   - Async DB engine disposal failed: %s",
-                DataSanitizer.sanitize_error(e),
-                exc_info=True,
-            )
-        else:
-            logger.info("[Shutdown]   - Async DB engine disposed.")
+        # D02-R03：CacheManager.close 支持 dispose 异常后重试（_disposed 已置位但 engine 仍在时
+        # 不会 early-return）；首次失败补试一次，仍失败则上报关键步骤失败，不静默吞掉泄漏。
+        for attempt in (1, 2):
+            try:
+                await cache.close()
+            except Exception as e:
+                if attempt == 2:
+                    logger.error(
+                        "[Shutdown]   - Async DB engine disposal failed after retry: %s",
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
+                    raise
+                logger.warning(
+                    "[Shutdown]   - Async DB engine disposal failed (attempt %d), retrying: %s",
+                    attempt,
+                    DataSanitizer.sanitize_error(e),
+                )
+            else:
+                if attempt == 2:
+                    logger.info("[Shutdown]   - Async DB engine disposed after retry.")
+                else:
+                    logger.info("[Shutdown]   - Async DB engine disposed.")
+                return
 
     async def _step4_clear_toast(self):
         logger.info("[Shutdown] Step 4: Clearing Toast Manager...")
