@@ -49,6 +49,21 @@ _MSG_MARKER = "__i18n_msg__"
 EXCLUSIVE_GROUP_MARKET_SYNC = "market_sync"
 
 
+@dataclass(frozen=True)
+class PersistPendingStatus:
+    """D11-S01: 持久化在途/待确认删除的只读快照（纯内存计数，非任务状态真相源）。
+
+    语义边界（不得当作「已落库成功」）：
+    - ``pending_writes``：已排队但尚未完成的写任务数；为 0 只表示排队写在途归零，
+      不等于 SQL 已成功落库（写失败同样会使计数归零）。
+    - ``pending_deletions``：本地已移除、但持久删除尚未确认（失败待重试）的 ID 数；
+      > 0 表示持久清理未完成。两计数恒 >= 0，无未知值语义。
+    """
+
+    pending_writes: int
+    pending_deletions: int
+
+
 def _serialize_msg_field(val: Message | str) -> str:
     """Serialize ``Message | str`` for DB storage (Task 3.1).
 
@@ -1422,8 +1437,26 @@ class TaskManager:
         _handle_drop("[TaskManager] No event loop available, coroutine dropped.")
         return False
 
+    def get_persistence_pending_snapshot(self) -> PersistPendingStatus:
+        """D11-S01: 返回持久化在途与待确认删除的只读快照（纯内存读取，R16 不阻塞 loop）。
+
+        ``pending_writes`` 为 0 只表示已排队写在途归零，**不等于 SQL 已成功落库**
+        （写库异常/丢弃同样会回落计数）；``pending_deletions`` > 0 表示本地已移除但
+        持久删除待重试。计数恒 >= 0，不引入「未知」之外的伪成功语义。
+        两次加锁分别读取，快照为近似一致（仅用于展示，不影响任务状态）。
+        """
+        with self._persist_counter_lock:
+            pending_writes = max(0, self._persist_pending_count)
+        with self._barrier_lock:
+            pending_deletions = max(0, len(self._pending_db_deletions))
+        return PersistPendingStatus(pending_writes=pending_writes, pending_deletions=pending_deletions)
+
     async def flush_persistence(self, timeout_s: float = 1.5):
-        """Wait until all queued persistence writes are completed."""
+        """Wait until all queued persistence writes are completed.
+
+        仅表示 tracked pending 写在途归零：``flush`` 返回后仍可能已发生写库失败，
+        「归零」不等于 SQL 已成功落库（D11-S01）。
+        """
         if not self._db_ready:
             return
 

@@ -36,9 +36,15 @@ class _FakeSvc:
         # D7-3/MINOR-01: 夜间预测前置条件以当日同步水位线为准。
         self._last_update_date: str | None = None
         self.marked_dates: list[str] = []
+        # D11-S01: 记录被接纳的 task_id（job 提交后回调）。
+        self.noted_tasks: list[tuple[str, str]] = []
 
     async def _mark_nightly_prediction_done_db(self, today_str: str) -> None:
         self.marked_dates.append(today_str)
+
+    def note_submitted_task(self, job_id: str, task_id: str | None) -> None:
+        if task_id:
+            self.noted_tasks.append((job_id, task_id))
 
 
 def _make_job(svc: _FakeSvc, runner=None):
@@ -241,6 +247,7 @@ class TestRunNightlyPrediction:
             mock_dp.return_value = mock_dp_instance
             mock_now.return_value.date.return_value = date(2024, 6, 15)
             mock_tm_instance = MagicMock()
+            mock_tm_instance.submit_task.return_value = "pred-task-1"
             mock_tm.return_value = mock_tm_instance
             await job(svc)
             # 强断言：提交任务的关键参数（unique_key 去重 + cancellable）
@@ -248,6 +255,8 @@ class TestRunNightlyPrediction:
             assert submit_kwargs.get("unique_key") == "nightly_prediction"
             assert submit_kwargs.get("cancellable") is False
             assert callable(submit_kwargs.get("coroutine_factory"))
+            # D11-S01: 被接纳的 task_id 回传给调度快照
+            assert svc.noted_tasks == [("nightly_prediction", "pred-task-1")]
 
     @pytest.mark.asyncio
     async def test_sync_incomplete_skips_submit(self):
