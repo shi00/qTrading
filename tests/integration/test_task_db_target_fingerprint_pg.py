@@ -204,8 +204,10 @@ async def test_task_history_schema_has_no_db_target_fingerprint(pg_targets: _PgT
     try:
         engine = cache.engine
         assert engine is not None
-        sync_engine = engine.sync_engine
-        columns = await asyncio.to_thread(lambda: sa.inspect(sync_engine).get_columns("task_history"))
+        # AsyncEngine 的 sync_engine 直接访问会要求 greenlet_spawn（MissingGreenlet），
+        # 必须经 run_sync 让 SQLAlchemy 在 greenlet 上下文内执行同步反射。
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(lambda sync_conn: sa.inspect(sync_conn).get_columns("task_history"))
         names = {col["name"].lower() for col in columns}
         forbidden = {"db_url", "database_url", "dsn", "db_target", "target_fingerprint", "engine_generation"}
         assert names & forbidden == set()
