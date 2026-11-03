@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from app.bootstrap import check_onboarding_needed, initialize_services
 from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
@@ -30,11 +31,16 @@ class StartupController:
         on_show_toast: Callable[[str, str], None] | None = None,
         on_exit: Callable[[], None] | None = None,
         embedded_pg_scenario: EmbeddedPgStartupScenario | None = None,
+        scheduling_coordinator: object | None = None,
     ):
         self._cache_manager = cache_manager
         self._on_state_change = on_state_change
         self._on_show_toast = on_show_toast
         self._on_exit = on_exit
+        # D02-F04：调度组合结果由本启动会话持有；coordinator 显式传入，
+        # 组装时原子绑定 Recorder 最终落账，失败重试复用同一代。
+        self._scheduling_coordinator = scheduling_coordinator
+        self._scheduling_services: dict[str, Any] | None = None
         self._state = StartupState.LOADING
         # UX 改进 spec §启动侧方案 A：保留 embedded_pg_scenario 到初始 context，
         # 供 StartupView 的 LOADING 状态显示差异化文案。_transition 会跨状态保留此字段。
@@ -91,6 +97,8 @@ class StartupController:
                 self._cache_manager,
                 show_toast_fn=self._on_show_toast,
                 services_initialized=self._services_initialized,
+                scheduling_coordinator=self._scheduling_coordinator,
+                scheduling_services=self._scheduling_services,
             )
             logger.info(
                 "[Startup] initialize_services() returned: success=%s, error=%s",
@@ -110,6 +118,9 @@ class StartupController:
 
         # Phase 2A.1 Task 2A.1.9：保存 auto_probe_task 以便 main.py 注册到 ShutdownCoordinator
         self._auto_probe_task = result.get("auto_probe_task")
+        # D02-F04：持有本会话的调度组合结果；失败重试时原样回传复用（组装前失败为 None）
+        if "scheduling_services" in result:
+            self._scheduling_services = result["scheduling_services"]
 
         if result["success"]:
             # review01-A9: per-session 置位初始化状态（替代 bootstrap 模块级 flag）

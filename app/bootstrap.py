@@ -6,7 +6,7 @@ import logging
 import os
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 from data.domain_services.market_data_service import MarketDataService
 from services.news_subscription_service import NewsSubscriptionService
@@ -43,17 +43,9 @@ _AUTO_PROBE_INTERVAL = timedelta(days=7)
 _embedded_pg_url_file_atexit_registered = False
 
 # S3（D9）：统一模型调度三服务组装结果（Recorder / Executor / Compatibility）。
-# per-session 组装覆盖（initialize_services 重入时重建），shutdown 回调经
-# register_scheduling_cleanup 挂到当期 coordinator。
+# per-session 组装；失败重试由 StartupController 显式回传同一代复用（不重装），
+# shutdown 回调经 bind_scheduling_cleanup 在组装完成的同一时点显式挂到当期 coordinator。
 _scheduling_services: dict[str, Any] | None = None
-# F40：register 早于 assemble 的时序兼容（含多 session 串行重入）——
-# application._run_session 在 controller.start() 前注册 coordinator，而 assemble 在
-# initialize_services 内才执行；register 一律记入 pending 列表，由其 register 之后
-# 的第一次 assemble（即本 session 自己的组装）消费并挂上该次组装的 Recorder。
-# 不再保留「已组装直接挂当期」分支：多 session 串行重入时该分支会把第二 session 的
-# coordinator 绑到上一代（已 close 的）Recorder，且第二 session 组装换新后无补挂——
-# 第二 session 关闭旧 A 而新 B 无人关闭（F40 缺陷根因）。
-_pending_scheduling_coordinators: list[Any] = []
 
 
 def _ai_usage_dao_provider() -> Any:
@@ -167,9 +159,6 @@ def assemble_scheduling_services() -> dict[str, Any]:
     from services.ai_service.scenario_dispatch import set_scheduling_services_provider
 
     set_scheduling_services_provider(lambda: _scheduling_services)
-    # F40：消费 register_scheduling_cleanup 记下的全部 pending coordinator，
-    # 逐个挂上本次组装的 Recorder（见模块级 _pending_scheduling_coordinators 注释）。
-    _drain_pending_scheduling_coordinators()
     return _scheduling_services
 
 
@@ -178,43 +167,26 @@ def get_scheduling_services() -> dict[str, Any] | None:
     return _scheduling_services
 
 
-def _drain_pending_scheduling_coordinators() -> None:
-    """把 pending coordinator 全部挂到当期组装结果（F40）。
+def bind_scheduling_cleanup(coordinator: Any, services: dict[str, Any] | None) -> None:
+    """把当期组装结果的 Recorder 最终落账显式绑定到会话 coordinator（S3 D8）。
 
-    NOTE(lazy): 深度交错窗口（session B 的 register 早于 session A 的 assemble，随后
-    B 也完成组装）下 A、B 两个 coordinator 都会挂上 A 代 Recorder，B 代 Recorder 由
-    进程退出兜底回收（UsageRecorder.aclose 幂等、无系统资源句柄，泄漏仅限内存）.
-    ceiling: 现实中该窗口要求两 session 的 register/assemble 深度交叉，串行与一般
-    并发时序下不可达. upgrade: 若多 session 并发启动成为产品形态，须把 coordinator
-    归属下沉到 per-session 上下文（如 StartupController 携带 coordinator 传入
-    initialize_services）后删除 pending 机制.
+    D02-F04：绑定与组装在同一时点完成，coordinator / 组合结果由调用方
+    （StartupController → initialize_services）显式传递，不再经模块级 pending
+    等待「下一次任意 assemble」消费——失败重试时复用由调用方持有的同一代，
+    避免新建无人绑定的 Recorder 代且其缓冲无人 flush。
+
+    仅对「本次全新组装」调用；传入既有组合结果（重试复用）时不重复绑定，
+    由持有它的启动会话保证首次组装时已绑定。
+
+    注册点为动态清理回调（F02：worker 收敛后、异步 engine dispose 前执行），
+    Recorder 缺失（异常兜底形态）时不挂载、不伪装注册成功。
     """
-    global _pending_scheduling_coordinators
-    if not _pending_scheduling_coordinators:
+    if coordinator is None:
         return
-    pending, _pending_scheduling_coordinators = _pending_scheduling_coordinators, []
-    recorder = (_scheduling_services or {}).get("recorder")
+    recorder = (services or {}).get("recorder")
     if recorder is None:
-        # recorder 缺失（异常兜底形态）不挂载、不伪装注册成功；
-        # 条目按已消费处理，避免后续 assemble 反复尝试挂同一缺失形态。
         return
-    for coordinator in pending:
-        coordinator.register_cleanup_callback(
-            "usage recorder final flush", recorder.aclose, critical=True, timeout_s=5.0
-        )
-
-
-def register_scheduling_cleanup(coordinator: Any) -> None:
-    """把 Recorder 收敛注册为动态停机步骤（S3 D8 / D02-F02：Step 3 后、Step 3b 前）。
-
-    F40 时序兼容：application._run_session 在 controller.start() 之前调用本函数，
-    而 assemble_scheduling_services 在 initialize_services（controller.start 内）才
-    执行——本函数一律记 pending，由 register 之后的第一次 assemble（即本 session
-    自己的组装）消费并挂上该次组装的 Recorder。已组装时不直接挂当期 Recorder：
-    多 session 串行重入时当期可能是上一代（即将被本 session 组装替换）的 Recorder，
-    直接挂会让第二 session 关闭旧代而新代无人关闭。
-    """
-    _pending_scheduling_coordinators.append(coordinator)
+    coordinator.register_cleanup_callback("usage recorder final flush", recorder.aclose, critical=True, timeout_s=5.0)
 
 
 class InitResult(TypedDict):
@@ -229,12 +201,18 @@ class InitResult(TypedDict):
     # review01-A8: 分阶段初始化完成情况，供调用方决定回滚粒度。
     # 字段: db_initialized / task_manager_initialized / services_started(list[str]|None)。
     partial_state: dict[str, bool] | None
+    # D02-F04: 本会话持有的调度组合结果（失败可重试时由调用方显式回传复用；
+    # 组装前失败为 None）。
+    scheduling_services: NotRequired[dict[str, Any] | None]
 
 
 async def initialize_services(
     cache_manager,
     show_toast_fn=None,
     services_initialized: bool = False,
+    *,
+    scheduling_coordinator: Any | None = None,
+    scheduling_services: dict[str, Any] | None = None,
 ) -> InitResult:
     from utils.correlation import ensure_correlation_id
 
@@ -259,6 +237,7 @@ async def initialize_services(
             "head_rev": None,
             "auto_probe_task": None,
             "partial_state": None,
+            "scheduling_services": scheduling_services,
         }
 
     try:
@@ -275,6 +254,7 @@ async def initialize_services(
             "head_rev": e.head_rev,
             "auto_probe_task": None,
             "partial_state": {"db_initialized": False},
+            "scheduling_services": None,
         }
     except Exception as e:
         log_classified(
@@ -294,6 +274,7 @@ async def initialize_services(
             "head_rev": None,
             "auto_probe_task": None,
             "partial_state": {"db_initialized": False},
+            "scheduling_services": None,
         }
 
     MetaDataManager.preload_aliases()
@@ -310,10 +291,17 @@ async def initialize_services(
             "head_rev": None,
             "auto_probe_task": None,
             "partial_state": {"db_initialized": False},
+            "scheduling_services": None,
         }
 
-    # S3（D9）：CacheManager 就绪后组装统一模型调度三服务（轻量、无 IO）
-    assemble_scheduling_services()
+    # S3（D9）：CacheManager 就绪后组装统一模型调度三服务（轻量、无 IO）。
+    # D02-F04：同一启动会话持有组合结果；失败重试由调用方回传同一代复用，
+    # 不重复组装换出无人绑定的新 Recorder。组装与停机回调绑定在同一时点完成，
+    # coordinator 作为显式参数传入（不再依赖模块级 pending）。传入既有组合结果时
+    # 已由其首次组装时绑定，此处不重复注册。
+    if scheduling_services is None:
+        scheduling_services = assemble_scheduling_services()
+        bind_scheduling_cleanup(scheduling_coordinator, scheduling_services)
 
     try:
         logger.info("[Bootstrap] Calling TaskManager.init_db()...")
@@ -337,6 +325,7 @@ async def initialize_services(
             "head_rev": None,
             "auto_probe_task": None,
             "partial_state": {"db_initialized": True, "task_manager_initialized": False},
+            "scheduling_services": scheduling_services,
         }
 
     import os
@@ -423,6 +412,7 @@ async def initialize_services(
         "head_rev": None,
         "auto_probe_task": auto_probe_task,
         "partial_state": {"db_initialized": True, "task_manager_initialized": True},
+        "scheduling_services": scheduling_services,
     }
 
 
