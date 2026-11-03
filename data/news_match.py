@@ -52,6 +52,11 @@ def _full_code_tokens(text: str) -> list[str]:
     return [t.upper() for t in _FULL_CODE_RE.findall(text or "")]
 
 
+def _full_code_spans(text: str) -> list[tuple[int, int]]:
+    """完整股票代码 token 在文本中占用的字符跨度 ``[start, end)``（按出现位置排序）。"""
+    return [(m.start(), m.end()) for m in _FULL_CODE_RE.finditer(text or "")]
+
+
 # A 股交易所后缀（沪/深/北）；缺后缀或未知后缀的候选不猜测交易所
 _EXCHANGES = frozenset({"SH", "SZ", "BJ"})
 
@@ -111,15 +116,20 @@ def _bare_code_tokens(text: str) -> set[str]:
         share(s)、lot(s)、ton(s)、kg；
       - 前缀货币符号/币种：``$`` / ``¥`` / ``￥`` / ``US$`` / ``HK$`` / 人民币 / 美元 / 港元；
       - 数字与单位之间允许空白、逗号、右括号/引号，并允许小数尾数（如 ``600519.00 元``）；
-      - 数字后直接接小数位（如 ``600519.00``）视为数值，即使后面没有单位。
+      - 数字后直接接小数位（如 ``600519.00``）视为数值，即使后面没有单位；
+      - 已被完整代码 token 占用的文本跨度（如 ``000001.SH`` 中的 ``000001``）不降格为裸码，
+        避免把异交易所的完整代码误关联到同 6 位其他交易所候选（RS-F01）。
 
     逐 token 判定：同一文本出现多处同值数字时，只要有一处不在计量语境即保留；
     ``600519股票`` / ``600519股权`` 等股票指代保持兼容；本函数不删除既有合法裸代码支持。
     """
     src = text or ""
+    full_spans = _full_code_spans(src)
     tokens: set[str] = set()
     for match in _BARE_CODE_RE.finditer(src):
         token = match.group()
+        if any(match.start() < span_end and span_start < match.end() for span_start, span_end in full_spans):
+            continue  # 该 span 属于完整代码 token，不再作为裸码证据
         if not _is_measurement_context(src, match.start(), token):
             tokens.add(token)
     return tokens
@@ -144,8 +154,9 @@ def match_news_to_stock(news_text: str | None, candidates: list[dict]) -> list[s
       1. 完整股票代码：``SH600519`` / ``600519.SH`` 等（大小写不敏感）；前缀形式
          须与候选 ts_code 的交易所一致，缺后缀/未知交易所的候选不猜测交易所；
       2. 裸 6 位：满足 ``(?<![0-9A-Za-z])\\d{6}(?![0-9A-Za-z])`` 且非日期段/连续数字，
-         且落在候选股 ts_code 池；紧邻金额/数量单位的数值不是代码证据（单位清单与
-         位置判定契约见 :func:`_bare_code_tokens` 文档串）；
+         且落在候选股 ts_code 池；紧邻金额/数量单位的数值不是代码证据，被完整代码
+         token 占用的跨度（如 ``000001.SH``）也不得降格为裸码（单位清单与位置判定契约
+         见 :func:`_bare_code_tokens` 文档串）；
       3. 公司全称（>= 4 汉字）直接出现在文本；
       4. 简称在候选池唯一且 >= 3 汉字才直接匹配（歧义简称不关联）。
     """
