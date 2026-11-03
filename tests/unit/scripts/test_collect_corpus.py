@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -89,6 +91,32 @@ def _store_doc(source_id: str, text: str, simhash: int | None, *, source_kind: s
 
 async def _no_sleep(_seconds: float) -> None:
     await asyncio.sleep(0)
+
+
+def _make_existing_db_without_index(tmp_path: Path) -> Path:
+    """构造有数据但缺性能索引的有效既有库（模拟历史 / 副本库）。"""
+    db = tmp_path / "corpus.db"
+    with CorpusStore(db) as store:
+        store.add_documents([_store_doc("1", "既有正文", 111)])
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("DROP INDEX idx_corpus_publish_time")
+        conn.commit()
+    finally:
+        conn.close()
+    return db
+
+
+def _db_snapshot(db: Path) -> tuple[tuple[tuple[str, str, str | None], ...], str]:
+    conn = sqlite3.connect(str(db))
+    try:
+        schema = tuple(
+            (str(row[0]), str(row[1]), row[2])
+            for row in conn.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        )
+    finally:
+        conn.close()
+    return schema, hashlib.sha256(db.read_bytes()).hexdigest()
 
 
 def _run_main(monkeypatch: pytest.MonkeyPatch, fake: _FakePlugin, tmp_path: Path, *extra: str) -> int:
@@ -243,17 +271,50 @@ def test_main_dedups_across_requests(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 def test_main_dry_run_does_not_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     fake = _FakePlugin([[_doc("1", "正文一")]])
     assert _run_main(monkeypatch, fake, tmp_path, "--dry-run") == 0
-    with CorpusStore(tmp_path / "corpus.db") as store:
-        assert store.count() == 0
+    # 目标库不存在时使用内存空基线，不得为 dry-run 创建输入库
+    assert not (tmp_path / "corpus.db").exists()
+
+
+def test_main_dry_run_reads_data_without_modifying_existing_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    db = _make_existing_db_without_index(tmp_path)
+    before = _db_snapshot(db)
+    fake = _FakePlugin([[_doc("2", "新正文")]])
+    assert _run_main(monkeypatch, fake, tmp_path, "--dry-run") == 0
+    assert fake.calls == 1
+    assert _db_snapshot(db) == before
+
+
+def test_main_normal_run_creates_db_and_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    assert _run_main(monkeypatch, _FakePlugin([[_doc("1", "正文一")]]), tmp_path) == 0
+    db = tmp_path / "corpus.db"
+    assert db.exists()
+    assert _run_main(monkeypatch, _FakePlugin([[_doc("1", "正文一")]]), tmp_path) == 0
+    with CorpusStore(db) as store:
+        assert store.count() == 1
 
 
 def test_main_stats_only_skips_collection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    db = _make_existing_db_without_index(tmp_path)
+    before = _db_snapshot(db)
+
     def _fail(_name: str) -> Any:
         pytest.fail("stats-only 不应解析新闻源")
 
+    def _no_client(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("stats-only 不应创建 HTTP 客户端")
+
     monkeypatch.setattr(collect_corpus, "get_plugin", _fail)
-    argv = ["--db", str(tmp_path / "corpus.db"), "--stats-only"]
-    assert collect_corpus.main(argv) == 0
+    monkeypatch.setattr(collect_corpus.httpx, "AsyncClient", _no_client)
+    assert collect_corpus.main(["--db", str(db), "--stats-only"]) == 0
+    assert _db_snapshot(db) == before
+
+
+def test_main_stats_only_missing_db_returns_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    missing = tmp_path / "missing.db"
+    assert collect_corpus.main(["--db", str(missing), "--stats-only"]) == 1
+    captured = capsys.readouterr()
+    assert "只读模式" in captured.err
+    assert [path.name for path in tmp_path.iterdir()] == []
 
 
 # --------------------------------------------------------------------------- #
