@@ -929,6 +929,16 @@ class TestProcessingLoop:
         assert saved["tags"] == "tag"
 
     @pytest.mark.asyncio
+    async def test_analysis_writeback_preserves_item_source(self, svc):
+        """NI-F02：分析回写路径沿用原 item 的 source，不覆盖为 CLS。"""
+        saved = await self._run_one_item(
+            svc,
+            {"content": "新浪快讯", "time": "2024-01-01 10:00:00", "source": "sina_7x24"},
+            None,
+        )
+        assert saved["source"] == "sina_7x24"
+
+    @pytest.mark.asyncio
     async def test_sentiment_scored_persists_code(self, svc):
         """N3-5 全链：打分利好 → normalize 透传 → 落库 sentiment="Positive"。"""
         saved = await self._run_one_item(svc, {"content": "紫金矿业发现金矿", "time": "2024-01-01"}, "Positive")
@@ -2468,6 +2478,135 @@ class TestFetchAndNotifyBatchWindow:
                 await svc._fetch_and_notify()
 
         assert svc._last_news_time == self.WATERMARK_T0
+
+
+class TestIncrementalSourcePreservation:
+    """NI-F02：增量首写保留原 item 的 source，仅缺失时默认 CLS。"""
+
+    WATERMARK_T0 = "2024-01-01 09:00:00"
+
+    @pytest.mark.asyncio
+    async def test_first_write_keeps_sina_source_without_consumer(self, svc):
+        """假 queue 不消费时，首次 save_market_news 的 source 已是 sina_7x24。"""
+        svc._last_news_time = self.WATERMARK_T0
+        item = {"content": "新浪快讯", "time": "2024-01-01 10:00:00", "source": "sina_7x24", "source_id": "zhibo-1"}
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        save_mock = AsyncMock()
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=[item]),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", save_mock),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+
+        assert save_mock.await_args is not None
+        saved = save_mock.await_args.args[0]
+        assert saved["source"] == "sina_7x24"
+        # 无消费者：条目仍留在队列中，证明首写不依赖 AI 回写补偿。
+        assert svc.processing_queue.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_source_defaults_to_cls(self, svc):
+        """item 无 source（CLS 主源）时首写仍为 CLS。"""
+        svc._last_news_time = self.WATERMARK_T0
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        save_mock = AsyncMock()
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=[{"content": "主源快讯", "time": "2024-01-01 10:00:00"}]),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", save_mock),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+
+        assert save_mock.await_args is not None
+        assert save_mock.await_args.args[0]["source"] == "CLS"
+
+    @pytest.mark.asyncio
+    async def test_initial_sync_keeps_source_and_defaults_cls(self, svc):
+        """初始同步路径同样透传 source；缺失时默认 CLS。"""
+        svc._last_news_time = None
+        news_items = [
+            {"content": "新浪快讯", "time": "2024-01-01 11:00:00", "source": "sina_7x24"},
+            {"content": "主源快讯", "time": "2024-01-01 10:00:00"},
+        ]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        saved_sources: list[str] = []
+
+        async def mock_save(payload, wait=False):
+            saved_sources.append(payload["source"])
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=news_items),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+        ):
+            await svc._fetch_and_notify()
+
+        assert saved_sources == ["CLS", "sina_7x24"]
+
+    @pytest.mark.asyncio
+    async def test_queue_overflow_first_write_keeps_source(self, svc):
+        """队列满触发 drop-oldest 时，已完成的首次落库来源不变。"""
+        svc._last_news_time = self.WATERMARK_T0
+        queue = asyncio.Queue(maxsize=1)
+        queue.put_nowait({"content": "旧条目", "time": "2024-01-01 09:30:00"})
+        svc.processing_queue = queue
+        item = {"content": "新浪快讯", "time": "2024-01-01 10:00:00", "source": "sina_7x24"}
+        save_mock = AsyncMock()
+
+        async def fake_wait_for(coro, timeout):
+            if hasattr(coro, "close"):
+                coro.close()
+            raise TimeoutError()
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=[item]),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", save_mock),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+            patch("services.news_subscription_service.asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            await svc._fetch_and_notify()
+
+        assert save_mock.await_args is not None
+        assert save_mock.await_args.args[0]["source"] == "sina_7x24"
+        assert queue.qsize() == 1
+        queued = queue.get_nowait()
+        assert queued["source"] == "sina_7x24"
+        queue.task_done()
+        assert svc._last_news_time == "2024-01-01 10:00:00"
 
 
 class TestMissingPublishTimeExclusion:
