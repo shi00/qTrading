@@ -37,8 +37,11 @@ def _assert_immutable_rows(rows: object) -> None:
     assert isinstance(rows, tuple)
     for method in ("append", "clear"):
         assert not hasattr(rows, method), f"行容器不应暴露原地修改方法 {method}"
-        with pytest.raises(AttributeError):
+        with pytest.raises(AttributeError) as exc_info:
             getattr(rows, method)
+        # 异常消息需指名缺失的方法，并表明行容器仍是不可变的 tuple
+        assert method in str(exc_info.value)
+        assert "tuple" in str(exc_info.value)
 
 
 class TestLoadAggregates:
