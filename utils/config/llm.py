@@ -11,6 +11,7 @@ import copy
 import os
 
 from utils import config_handler as cfg
+from utils.config import storage
 from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
@@ -429,38 +430,43 @@ def get_strategy_presets(strategy_key: str) -> dict[str, dict]:
 
 
 def save_strategy_preset(strategy_key: str, name: str, params: dict) -> bool:
-    """保存命名参数预设 (Task 4.1). 重名覆盖.
+    """保存命名参数预设 (Task 4.1). 重名覆盖（明确最后写者）。
+
+    D02-F06：在「文件锁 → RWLock」内基于磁盘现值合并单个名字，不把锁外旧缓存
+    构造的整份预设 dict 传给 ``save_config``（后者会整体替换该顶层键的嵌套内容，
+    丢失他进程已提交的预设）。不同名合并、同名覆盖；失败时磁盘与缓存均保持
+    已提交值。
 
     Returns:
         bool: 保存成功返回 True.
-
-    修改前深拷贝：保存失败（磁盘损坏 / 锁超时等）时缓存必须保持原值，
-    不得留下「内存已改、磁盘未改」的半提交状态。
     """
-    config = cfg.ConfigHandler.load_config()
     key = f"strategy_presets_{strategy_key}"
-    raw_presets = config.get(key, {})
-    presets = copy.deepcopy(raw_presets) if isinstance(raw_presets, dict) else {}
-    presets[name] = params
-    return cfg.ConfigHandler.save_config({key: presets})
+
+    def _merge(section: dict) -> bool:
+        section[name] = copy.deepcopy(params)
+        return True
+
+    return storage.update_config_key(key, _merge)
 
 
 def delete_strategy_preset(strategy_key: str, name: str) -> bool:
     """删除命名参数预设 (Task 4.1).
 
-    Returns:
-        bool: 删除成功 (预设存在) 返回 True, 不存在返回 False.
+    D02-F06：存在性在文件锁内基于磁盘判定，不依据锁外缓存——他进程已删除的
+    条目不会因本进程旧快照而被复活。
 
-    同 ``save_strategy_preset``：修改前深拷贝，保存失败时缓存不被污染。
+    Returns:
+        bool: 删除成功 (磁盘上预设存在且落盘成功) 返回 True, 不存在 / 写失败返回 False.
     """
-    config = cfg.ConfigHandler.load_config()
     key = f"strategy_presets_{strategy_key}"
-    raw_presets = config.get(key, {})
-    presets = copy.deepcopy(raw_presets) if isinstance(raw_presets, dict) else {}
-    if name not in presets:
-        return False
-    del presets[name]
-    return cfg.ConfigHandler.save_config({key: presets})
+
+    def _remove(section: dict) -> bool:
+        if name not in section:
+            return False
+        del section[name]
+        return True
+
+    return storage.update_config_key(key, _remove)
 
 
 def get_ai_max_candidates():
