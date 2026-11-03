@@ -11,6 +11,16 @@ from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
+# litellm_env_context 统一管理的六个代理环境变量（大小写形态均可能被 SDK 读取）。
+_PROXY_ENV_KEYS: tuple[str, ...] = (
+    "NO_PROXY",
+    "no_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+)
+
 
 class ProxyManager:
     """
@@ -33,8 +43,14 @@ class ProxyManager:
     _initialized: bool = False
     _original_no_proxy: set[str] | None = None
     _env_written: bool = False
-    _env_lock: threading.RLock = threading.RLock()
+    # 短临界区锁：只在 enter/exit 的同步段内持有，绝不跨 await/yield。
+    # 进程环境是全局的，RLock/Lock 的差别在跨 await 场景下没有意义——这里改用
+    # 不可重入 Lock，明确“只保护计数与快照的原子更新”，不假装能互斥协程。
+    _env_lock: threading.Lock = threading.Lock()
     _config_lock: threading.RLock = threading.RLock()  # Lock for config mutation (domains, initialized)
+    # 活动作用域引用计数与唯一原始快照（首个进入者采集，最后一个退出者恢复）。
+    _env_scope_depth: int = 0
+    _env_original: dict[str, str | None] | None = None
 
     @classmethod
     def _reset_singleton(cls):
@@ -44,6 +60,8 @@ class ProxyManager:
             cls._initialized = False
             cls._original_no_proxy = None
             cls._env_written = False
+            cls._env_scope_depth = 0
+            cls._env_original = None
 
     @staticmethod
     def apply_smart_proxy_policy():
@@ -293,11 +311,20 @@ class ProxyManager:
     @contextmanager
     def litellm_env_context() -> Generator[None]:
         """
-        Context manager that temporarily sets NO_PROXY in os.environ
+        Context manager that temporarily sets proxy env vars in os.environ
         for libraries that read proxy config from env (e.g. litellm).
 
-        Thread-safe: uses a class-level lock to prevent concurrent coroutines
-        or threads from overwriting each other's env snapshot.
+        Concurrency model (RU-F01):
+        - 进程环境是全局资源，且 ``with`` 内部会跨 ``await``。因此在 enter/exit
+          的**同步短临界区**内维护活动作用域计数与唯一原始快照：
+          首个进入者采集六个代理键的存在性/值并写入策略，最后一个退出者
+          按快照恢复（值相同也恢复存在性）；期间任何其他协程/线程进入只增加
+          引用计数，不重写环境。
+        - 不跨 ``await`` 持锁：锁只在 enter/exit 的同步段持有，事件循环不会被阻塞。
+        - 同进程不同事件循环/不同线程共享同一份计数与快照，因此不存在
+          “loop-local 锁各自为政”或线程身份重入导致的快照覆盖。
+        - 运行中 ``reapply_proxy_policy`` 的固定语义：仅刷新缓存策略，不修改
+          已生效的活动环境；新策略从下一个作用域（计数归零后重新进入）开始生效。
 
         Restores the original env vars on exit, avoiding process-wide pollution.
 
@@ -305,19 +332,26 @@ class ProxyManager:
             with ProxyManager.litellm_env_context():
                 result = await litellm.acompletion(...)
         """
+        # 策略计算在锁外完成（可能读取配置/磁盘），避免把慢操作放进临界区。
+        env_dict = ProxyManager.get_no_proxy_env_dict()
+
         with ProxyManager._env_lock:
-            env_dict = ProxyManager.get_no_proxy_env_dict()
-            saved: dict[str, str | None] = {}
-
-            for key in ("NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
-                saved[key] = os.environ.get(key)
-
-            try:
+            if ProxyManager._env_scope_depth == 0:
+                # 唯一原始快照：None 表示该键原本不存在（区别于存在但为空串）。
+                ProxyManager._env_original = {key: os.environ.get(key) for key in _PROXY_ENV_KEYS}
                 os.environ.update(env_dict)
-                yield
-            finally:
-                for key, original_value in saved.items():
-                    if original_value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = original_value
+            ProxyManager._env_scope_depth += 1
+
+        try:
+            yield
+        finally:
+            # finally 在 CancelledError 传播时同样执行；恢复段无 await，不会被二次取消打断。
+            with ProxyManager._env_lock:
+                ProxyManager._env_scope_depth = max(0, ProxyManager._env_scope_depth - 1)
+                if ProxyManager._env_scope_depth == 0 and ProxyManager._env_original is not None:
+                    for key, original_value in ProxyManager._env_original.items():
+                        if original_value is None:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = original_value
+                    ProxyManager._env_original = None
