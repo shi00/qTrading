@@ -2353,3 +2353,50 @@ class TestHistoricalSyncCancellationRound:
         assert ok is True
         assert strategy._cancelled is False
         ctx.api.get_daily_quotes.assert_awaited_once()
+
+
+class TestHistoricalIndexFailureCrossRound:
+    """D05-T01：指数取数失败不得登记空日；连续失败仍显式失败，恢复轮才补抓落库。"""
+
+    @pytest.mark.asyncio
+    async def test_index_failure_rounds_then_recovery_persists(self):
+        ctx = make_ctx()
+        state = {"fail": True}
+
+        async def index_daily(**kwargs):
+            if state["fail"]:
+                raise RuntimeError("simulated index network error")
+            return pd.DataFrame(
+                {
+                    "ts_code": [kwargs["ts_code"]],
+                    "trade_date": [kwargs["trade_date"]],
+                    "close": [3000.0],
+                }
+            )
+
+        ctx.api.get_index_daily = AsyncMock(side_effect=index_daily)
+        strategy = HistoricalSyncStrategy(ctx)
+        trade_date = datetime.date(2024, 6, 14)
+
+        # 连续两轮失败：每轮都必须如实记 failed_optional_tables，且不落库、不登记空日
+        for round_no in (1, 2):
+            sr = SyncResult()
+            assert await strategy.sync_daily_market_snapshot(trade_date, force=True, sync_result=sr) is True
+            assert sr.failed_optional_tables == ["index_daily"], f"round {round_no}"
+            ctx.cache.quote_dao.save_index_daily.assert_not_awaited()
+            recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+            assert "index_daily" not in recorded_tables, f"round {round_no}"
+
+        # 恢复轮：补抓成功并落库，状态回到 success，且仍不登记空日
+        state["fail"] = False
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+        sr = SyncResult()
+        assert await strategy.sync_daily_market_snapshot(trade_date, force=True, sync_result=sr) is True
+        assert sr.failed_optional_tables == []
+        ctx.cache.quote_dao.save_index_daily.assert_awaited_once()
+        saved_df = ctx.cache.quote_dao.save_index_daily.await_args.args[0]
+        assert not saved_df.empty
+        index_calls = [c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "index_daily"]
+        assert index_calls and index_calls[0].kwargs["status"] == "success"
+        recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+        assert "index_daily" not in recorded_tables

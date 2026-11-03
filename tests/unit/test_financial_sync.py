@@ -3140,3 +3140,52 @@ class TestFinancialCorporateActionRecovery:
 
         assert store.values["financial_full_sync_pending"] == full_pending
         assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {"20241021": {"fina_forecast"}}
+
+    @pytest.mark.asyncio
+    async def test_failed_old_day_recovers_alongside_new_day_without_refetching_resolved_tables(self):
+        """首轮旧日 forecast 失败；次轮出现新交易日时，旧失败表与新日全量表并存补抓，已成功表不重抓。"""
+        from data.sync.financial import _load_pending_corporate_targets
+
+        ctx, store, strategy, _ = self._setup_incremental()
+        forecast_failing = {"value": True}
+
+        async def forecast(ann_date=None, **kwargs):
+            if forecast_failing["value"]:
+                raise RuntimeError("simulated forecast network error")
+            return pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        ctx.api.get_forecast = AsyncMock(side_effect=forecast)
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result1 = await strategy.run()
+
+        assert result1.status == SyncStatus.PARTIAL.value
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {"20241021": {"fina_forecast"}}
+
+        forecast_failing["value"] = False
+        ctx.api.get_forecast.reset_mock()
+        ctx.api.get_dividend.reset_mock()
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 22, 16)),
+        ):
+            result2 = await strategy.run()
+
+        assert result2.status == SyncStatus.SUCCESS.value
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {}
+        # 旧失败日只补抓未解决的 forecast；新交易日按四表全量同步
+        assert {c.kwargs.get("ann_date") for c in ctx.api.get_forecast.await_args_list} == {"20241021", "20241022"}
+        assert {c.kwargs.get("ann_date") for c in ctx.api.get_dividend.await_args_list} == {"20241022"}
+        forecast_status = [
+            (c.args[0], c.args[1])
+            for c in ctx.cache.sync_dao.update_sync_status.await_args_list
+            if c.args[0] == "fina_forecast"
+        ]
+        assert ("fina_forecast", datetime.date(2024, 10, 21)) in forecast_status
+        assert ("fina_forecast", datetime.date(2024, 10, 22)) in forecast_status

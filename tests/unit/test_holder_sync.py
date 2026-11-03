@@ -2913,3 +2913,66 @@ class TestRunImplPartialStatus:
         # 取消产生的 -1 仍登记，但终态不得被 partial 覆盖
         assert result.errors == ["stk_holdernumber period=20240331"]
         strategy._sync_pledge_stat.assert_not_awaited()
+
+
+class TestHolderShareFloatCrossRound:
+    """D05-T01：share_float 失败轮不得落库/推进水位；连续失败仍 partial，恢复轮才落库。"""
+
+    def _make_strategy(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        ctx.cache.save_share_float = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=0)
+        strategy._sync_top10_holders = AsyncMock(return_value=0)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(0, None))
+        strategy._sync_pledge_detail = AsyncMock(return_value=(0, None))
+        strategy._sync_stk_holdertrade = AsyncMock(return_value=(0, None))
+        return ctx, strategy
+
+    @pytest.mark.asyncio
+    async def test_failed_rounds_keep_partial_then_recovery_persists(self):
+        ctx, strategy = self._make_strategy()
+        state = {"fail": True}
+
+        async def share_float(**kwargs):
+            if state["fail"]:
+                raise RuntimeError("simulated share_float api error")
+            return pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 1)],
+                    "float_date": [datetime.date(2024, 8, 15)],
+                    "float_share": [1000.0],
+                    "float_ratio": [5.2],
+                    "share_type": ["定向增发"],
+                }
+            )
+
+        ctx.api.get_share_float = AsyncMock(side_effect=share_float)
+
+        # 连续两轮失败：终态必须 partial，且不落库、不推进 share_float 水位
+        for round_no in (1, 2):
+            result = await strategy.run()
+            assert result.status == SyncStatus.PARTIAL.value, f"round {round_no}"
+            assert result.errors == ["share_float"], f"round {round_no}"
+            ctx.cache.save_share_float.assert_not_awaited()
+            advanced = [c.args[0] for c in ctx.cache.sync_dao.update_sync_status.await_args_list]
+            assert "share_float" not in advanced, f"round {round_no}"
+
+        # 恢复轮：真实落库并推进水位，终态 success
+        state["fail"] = False
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.errors == []
+        ctx.cache.save_share_float.assert_awaited_once()
+        saved_df = ctx.cache.save_share_float.await_args.args[0]
+        assert not saved_df.empty
+        share_calls = [c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "share_float"]
+        assert share_calls == [call("share_float", datetime.date(2024, 6, 14), 1)]
