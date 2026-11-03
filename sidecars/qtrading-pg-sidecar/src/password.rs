@@ -89,26 +89,54 @@ pub fn read_password_file(path: &Path) -> Option<String> {
 }
 
 /// 写入 password file；Unix 强制 0600（§7.4），Windows 用 DPAPI 加密（F5，检视 06）。
+///
+/// D16-F05：同目录临时文件写满并 fsync 后原子 rename，避免写入中断留下半截密码
+/// （恢复目标 runtime 的凭据写入必须要么不存在、要么完整可用）；rename 失败时
+/// 原文件保持不变，临时文件被清理。
 pub fn write_password_file(path: &Path, password: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    #[cfg(windows)]
+    let bytes = encode_password_file(password)?;
+    #[cfg(unix)]
+    let bytes = password.as_bytes().to_vec();
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let file_name = path.file_name().map_or_else(
+        || "password".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(".{file_name}.tmp-{}-{nanos}", std::process::id()));
+
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    use std::io::Write;
-    #[cfg(windows)]
-    let bytes = encode_password_file(password)?;
-    #[cfg(unix)]
-    let bytes = password.as_bytes().to_vec();
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    // OpenOptions::mode 只对新建文件生效：已存在的宽权限文件必须显式收紧，否则新密码仍可被他人读取。
+    let write_result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = options.open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // 临时文件已按 0600 创建，rename 保留权限；显式收紧仍用于防御平台差异。
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -341,6 +369,29 @@ mod tests {
         assert!(password_file_perms_ok(&path));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(!password_file_perms_ok(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F05：原子写入（临时文件 + rename）不残留临时文件，重写覆盖旧凭据。
+    #[test]
+    fn atomic_write_leaves_no_temporary_files() {
+        let dir = unique_tmp("atomic");
+        let path = dir.join("password");
+        write_password_file(&path, "FirstPwd-1_2.3~").unwrap();
+        write_password_file(&path, "SecondPwd-1_2.3~").unwrap();
+        let entries: Vec<std::ffi::OsString> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("password")],
+            "原子写入不得残留临时文件"
+        );
+        assert_eq!(
+            read_password_file(&path).as_deref(),
+            Some("SecondPwd-1_2.3~")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
