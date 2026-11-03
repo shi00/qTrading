@@ -17,7 +17,7 @@
 
 import asyncio
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
@@ -530,6 +530,103 @@ class TestPerformWindowShutdown:
         assert dialog.content is not None
         assert dialog.title.value == I18n.get("shutdown_in_progress_title")
         assert dialog.content.value == I18n.get("shutdown_in_progress_content")
+
+
+class TestPerformWindowShutdownStep8FailureIntegration:
+    """D02-F03: Step 8（停内置 PG）关键失败经真实 ShutdownCoordinator 传播到窗口关闭流程。
+
+    验证受控超时/异常下：do_cleanup 返回 False → perform_window_shutdown 返回 False、
+    force_exit(1)、且不标记优雅停机（watchdog 未取消，registry 退出兜底保留）。
+    """
+
+    @staticmethod
+    def _stub_all_steps_ok_except_step8(coord: Any) -> None:
+        async def ok_step():
+            return None
+
+        for method in (
+            "_step0_cancel_tasks",
+            "_step1_stop_services",
+            "_step2_flush_db_writes",
+            "_step3_stop_processor_workers",
+            "_step3b_dispose_async_engine",
+            "_step4_clear_toast",
+            "_step5_unload_ai_model",
+            "_step5b_stop_sentiment_scorer",
+            "_step6_shutdown_thread_pools",
+            "_step7_close_database_managers",
+        ):
+            setattr(coord, method, ok_step)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stop_exc", [TimeoutError("pg stop timeout"), RuntimeError("pg stop boom")])
+    async def test_step8_failure_returns_false_and_force_exits(self, stop_exc: Exception) -> None:
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from utils.shutdown import ShutdownCoordinator
+
+        page = _make_page()
+        exit_codes: list[int] = []
+        coordinator = ShutdownCoordinator(
+            service_stop_delay=0,
+            force_exit_callback=exit_codes.append,
+        )
+        self._stub_all_steps_ok_except_step8(coordinator)
+
+        mock_service = MagicMock()
+        mock_service.stop_sync = MagicMock(side_effect=stop_exc)
+
+        with (
+            patch.object(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service)),
+            patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark,
+            patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            result = await perform_window_shutdown(
+                coordinator,
+                page,
+                is_web_mode_fn=lambda: False,
+            )
+
+        assert result is False
+        assert coordinator.cleanup_success is False
+        assert exit_codes == [1]
+        mock_mark.assert_not_called()
+        # 失败路径对话框不关闭（进程即将被 force_exit 强制退出）
+        assert len(page.dialog_stack) == 1
+        # 测试收尾：确保 daemon watchdog 线程已停止，避免跨用例残留
+        coordinator.cancel_watchdog()
+
+    @pytest.mark.asyncio
+    async def test_step8_normal_stop_returns_true(self) -> None:
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from utils.shutdown import ShutdownCoordinator
+
+        page = _make_page()
+        exit_codes: list[int] = []
+        coordinator = ShutdownCoordinator(
+            service_stop_delay=0,
+            force_exit_callback=exit_codes.append,
+        )
+        self._stub_all_steps_ok_except_step8(coordinator)
+
+        mock_service = MagicMock()
+        mock_service.stop_sync = MagicMock(return_value=None)
+
+        with (
+            patch.object(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service)),
+            patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark,
+        ):
+            result = await perform_window_shutdown(
+                coordinator,
+                page,
+                is_web_mode_fn=lambda: False,
+            )
+
+        assert result is True
+        assert coordinator.cleanup_success is True
+        assert exit_codes == []
+        mock_mark.assert_called_once_with()
+        assert coordinator.watchdog_started is False
+        assert page.window.destroy_calls == 1
 
 
 # ============================================================================

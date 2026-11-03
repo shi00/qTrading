@@ -644,7 +644,9 @@ class ShutdownCoordinator:
         - H1: asyncio.to_thread 内的 stop_sync 无法响应取消（线程不可强制终止），
           使用 asyncio.wait_for(timeout=30.0) 兜底，超时后放弃等待线程（leaked
           thread 会在 proc.wait 完成后自然退出），避免 Step 8 阻塞整个 shutdown
-        - 失败不抛异常（critical=True 已记 ERROR），但记录日志
+        - D02-F03: 超时/异常经 DataSanitizer 脱敏记录后重新抛出，由 _run_async_step
+          聚合为 StepResult(ok=False, timed_out 真实)，避免关键失败被误判为成功；
+          其余清理步骤仍继续执行（_run_cleanup_steps 的错误隔离语义不变）
 
         R2 红线：CancelledError 是 BaseException 子类，不被 `except Exception` 捕获，
         自然传播至 _run_async_step → do_cleanup，配合优雅停机。
@@ -672,9 +674,13 @@ class ShutdownCoordinator:
                 "check wal_keep_size, max_wal_size, and active connections.",
                 _STEP8_PG_STOP_TIMEOUT_S,
             )
+            # D02-F03: 重新抛出，交由 _run_async_step 记录 timed_out=True 与关键失败状态
+            raise
         except Exception as e:
             logger.error(
                 "[Shutdown] Step 8 stop embedded postgres failed: %s",
                 DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
+            # D02-F03: 重新抛出，交由 _run_async_step 聚合为 ok=False（不吞没关键失败）
+            raise
