@@ -880,3 +880,54 @@ class TestDraftMigrationStrip:
             raw["model_management"]["migration_transition"]["transition_epoch"]
             == (_DRAINING_TRANSITION["transition_epoch"])
         )
+
+
+class TestCrossProcessStrategyPresets:
+    """D02-F06：策略预设保存/删除须在跨进程文件锁内基于磁盘 read-modify-write。
+
+    两个进程各自持有旧快照时，新增不同名预设不得整体覆盖；他进程已删除的条目
+    不得因本进程旧快照而复活。
+    """
+
+    def test_stale_cache_merges_other_process_entries(self, isolated_config):
+        """A 缓存 {"old"}，B 新增 B，A 再新增 A → 盘面 old/A/B 共存。"""
+        _write_raw_config(isolated_config, {"strategy_presets_oversold": {"old": {"pe": 1}}})
+        cfg_mod.ConfigHandler.load_config()  # A 的旧快照
+
+        worker = (
+            "from utils.config_handler import ConfigHandler\n"
+            "print('SAVED=' + str(ConfigHandler.save_strategy_preset('oversold', 'B', {'pe': 2})))\n"
+        )
+        proc = _run_worker(isolated_config, worker)
+        assert proc.returncode == 0, proc.stderr
+        assert "SAVED=True" in proc.stdout
+
+        assert cfg_mod.ConfigHandler.save_strategy_preset("oversold", "A", {"pe": 3}) is True
+        raw = _read_raw_config(isolated_config)
+        assert raw["strategy_presets_oversold"] == {
+            "old": {"pe": 1},
+            "B": {"pe": 2},
+            "A": {"pe": 3},
+        }
+
+    def test_stale_cache_does_not_resurrect_entry_deleted_by_other_process(self, isolated_config):
+        """A 的旧快照仍含 old，B 已删除 old → A 删除返回 False、新增不复活 old。"""
+        _write_raw_config(
+            isolated_config,
+            {"strategy_presets_oversold": {"old": {"pe": 1}, "keep": {"pe": 2}}},
+        )
+        cfg_mod.ConfigHandler.load_config()  # A 的旧快照仍含 old
+
+        worker = (
+            "from utils.config_handler import ConfigHandler\n"
+            "print('DELETED=' + str(ConfigHandler.delete_strategy_preset('oversold', 'old')))\n"
+        )
+        proc = _run_worker(isolated_config, worker)
+        assert proc.returncode == 0, proc.stderr
+        assert "DELETED=True" in proc.stdout
+
+        # 存在性在锁内基于磁盘判定：旧缓存命中也必须返回 False
+        assert cfg_mod.ConfigHandler.delete_strategy_preset("oversold", "old") is False
+        assert cfg_mod.ConfigHandler.save_strategy_preset("oversold", "A", {"pe": 3}) is True
+        raw = _read_raw_config(isolated_config)
+        assert raw["strategy_presets_oversold"] == {"keep": {"pe": 2}, "A": {"pe": 3}}
