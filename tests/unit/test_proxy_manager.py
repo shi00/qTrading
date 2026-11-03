@@ -7,6 +7,8 @@ import asyncio
 import os
 import threading
 
+from collections.abc import Iterator, Mapping, MutableMapping
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from utils.proxy_manager import ProxyManager
@@ -19,20 +21,50 @@ pytestmark = pytest.mark.unit
 # RU-F01：与生产实现独立声明的六个代理键，测试自带清单以免实现改动掩盖漏测。
 _PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")
 
-# 合成原始环境 O：刻意混合“存在/空串/不存在”三种状态，验证恢复的是存在性而非仅值。
-_ORIGINAL_ENV: dict[str, str] = {
+_IS_WINDOWS = os.name == "nt"
+
+# POSIX：os.environ 大小写敏感，六键可严格区分“存在/空串/不存在”三种状态。
+_ORIGINAL_ENV_POSIX: dict[str, str] = {
     "NO_PROXY": "original-upper.domain",
     "no_proxy": "",
     "HTTP_PROXY": "http://orig-http:8080",
     "https_proxy": "http://orig-https:8443",
 }
-# 合成策略环境 M（NO_PROXY 由 _no_proxy_domains 推导，代理 URL 沿用原始值）。
+# Windows：os.environ 大小写不敏感，同一逻辑键（NO_PROXY/no_proxy 等）折叠为一个
+# 真实条目，不得同时设置大小写重复键（后者会覆盖前者）。故用单一小写键集合表达
+# 同一份预期环境，断言时按逻辑键折叠后比较“存在性 + 值”。
+_ORIGINAL_ENV_WINDOWS: dict[str, str] = {
+    "no_proxy": "original-upper.domain",
+    "http_proxy": "http://orig-http:8080",
+    "https_proxy": "http://orig-https:8443",
+}
+# 合成原始环境 O（平台相关）；合成策略环境 M 由 _no_proxy_domains 推导。
+_ORIGINAL_ENV: dict[str, str] = _ORIGINAL_ENV_WINDOWS if _IS_WINDOWS else _ORIGINAL_ENV_POSIX
 _POLICY_DOMAIN = "policy.example"
 _POLICY_NO_PROXY = _POLICY_DOMAIN
 
 
+def _fold_proxy_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """把六个代理键按大小写不敏感语义折叠为小写逻辑键。
+
+    仅保留实际存在的键（空串也算存在），整体比较该映射即同时校验逻辑键的
+    存在性与值；Windows 下六键折叠为三个真实条目时不会退化为仅比较值。
+    """
+    folded: dict[str, str] = {}
+    for key in _PROXY_ENV_KEYS:
+        value = environ.get(key)
+        if value is not None:
+            folded[key.lower()] = value
+    return folded
+
+
 def _assert_proxy_env(expected: dict[str, str]) -> None:
-    """逐键断言六个代理变量的存在性与值均严格恢复。"""
+    """严格断言六个代理变量的存在性与值均恢复（平台感知）。"""
+    if _IS_WINDOWS:
+        # Windows：大小写不敏感，折叠为逻辑键后整体比较（键集合即存在性）。
+        actual = _fold_proxy_env(os.environ)
+        assert actual == expected, f"代理环境未严格恢复: {actual!r} != {expected!r}"
+        return
     for key in _PROXY_ENV_KEYS:
         if key in expected:
             assert os.environ.get(key) == expected[key], f"{key} 值未严格恢复"
@@ -40,16 +72,44 @@ def _assert_proxy_env(expected: dict[str, str]) -> None:
             assert key not in os.environ, f"{key} 应不存在（存在性未恢复）"
 
 
+class _CaseInsensitiveEnviron(MutableMapping[str, str]):
+    """以规范化键模拟 Windows os.environ 的大小写不敏感语义（Linux 可运行）。"""
+
+    def __init__(self, initial: Mapping[str, str] | None = None) -> None:
+        self._data: dict[str, str] = {}
+        if initial:
+            self.update(initial)
+
+    @staticmethod
+    def _normalize(key: str) -> str:
+        return key.upper()
+
+    def __getitem__(self, key: str) -> str:
+        return self._data[self._normalize(key)]
+
+    def __setitem__(self, key: str, value: str) -> None:
+        self._data[self._normalize(key)] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._data[self._normalize(key)]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 @pytest.fixture
 def synthetic_proxy_env(monkeypatch):
     """仅用合成值覆盖六个代理键；不读取真实代理配置，结束由 monkeypatch 还原。"""
 
     def _apply(values: dict[str, str]) -> None:
+        # 先清空六个键，避免 Windows 大小写不敏感下遗留同逻辑键的旧条目。
         for key in _PROXY_ENV_KEYS:
-            if key in values:
-                monkeypatch.setenv(key, values[key])
-            else:
-                monkeypatch.delenv(key, raising=False)
+            monkeypatch.delenv(key, raising=False)
+        for key, value in values.items():
+            monkeypatch.setenv(key, value)
 
     return _apply
 
@@ -517,8 +577,10 @@ class TestProxyManagerLitellmEnvScope:
         await asyncio.wait_for(b_entered.wait(), timeout=5)
 
         task_a_obj.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await task_a_obj
+        assert task_a_obj.cancelled()
+        assert exc_info.type is asyncio.CancelledError
         a_cancelled.set()
 
         await asyncio.wait_for(task_b_obj, timeout=10)
@@ -552,8 +614,10 @@ class TestProxyManagerLitellmEnvScope:
         await asyncio.wait_for(b_entered.wait(), timeout=5)
 
         task_b_obj.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await task_b_obj
+        assert task_b_obj.cancelled()
+        assert exc_info.type is asyncio.CancelledError
         b_cancelled.set()
 
         await asyncio.wait_for(task_a_obj, timeout=10)
@@ -637,6 +701,34 @@ class TestProxyManagerLitellmEnvScope:
                 assert os.environ.get("NO_PROXY") == "next.example,original-upper.domain"
 
         _assert_proxy_env(_ORIGINAL_ENV)
+
+    def test_case_insensitive_env_snapshot_restores_exactly(self, monkeypatch):
+        """覆盖 Windows os.environ 大小写不敏感折叠语义（Linux 下用自定义映射模拟 nt）。
+
+        nt 把 NO_PROXY/no_proxy 等大小写变体折叠为一个真实条目。本用例以大小写
+        不敏感的 MutableMapping 替换 proxy_manager 模块内的 os，验证唯一快照与
+        最后退出者的恢复仍严格还原每个逻辑键的值与存在性（含“存在但空串”）。
+        """
+        fake_environ = _CaseInsensitiveEnviron(
+            {
+                "no_proxy": "original.domain",
+                "HTTP_PROXY": "http://orig-http:8080",
+                "https_proxy": "",  # 存在但空串：必须与“不存在”区分
+            }
+        )
+        monkeypatch.setattr("utils.proxy_manager.os", SimpleNamespace(environ=fake_environ))
+        self._configure_policy()
+
+        with ProxyManager.litellm_env_context():
+            assert fake_environ["NO_PROXY"] == _POLICY_NO_PROXY
+            assert fake_environ["no_proxy"] == _POLICY_NO_PROXY
+
+        # 折叠后整体等值：键集合校验存在性、值校验内容，空串条目不得丢失。
+        assert _fold_proxy_env(fake_environ) == {
+            "no_proxy": "original.domain",
+            "http_proxy": "http://orig-http:8080",
+            "https_proxy": "",
+        }
 
 
 class TestProxyManagerRegistersProxyCredentials:
