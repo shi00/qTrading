@@ -2536,8 +2536,13 @@ class TestIncrementalSourcePreservation:
         ):
             await svc._fetch_and_notify()
 
-        assert save_mock.await_args is not None
-        assert save_mock.await_args.args[0]["source"] == "CLS"
+        save_calls = save_mock.await_args_list
+        assert len(save_calls) == 1
+        saved = save_calls[0].args[0]
+        assert saved["source"] == "CLS"
+        assert saved["content"] == "主源快讯"
+        assert saved["tags"] == ""
+        assert saved["publish_time"] == datetime.datetime(2024, 1, 1, 2, 0)
 
     @pytest.mark.asyncio
     async def test_initial_sync_keeps_source_and_defaults_cls(self, svc):
