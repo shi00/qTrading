@@ -1538,8 +1538,10 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             # D11-F03: 旧 fallback 结果无 is_complete → 视为无法判定，抛 TaskIncompleteError。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert svc._last_update_date != "20240614"
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_empty_dataframe(self):
@@ -1558,8 +1560,10 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             # D11-F03: 空 DataFrame 无 is_complete → 抛 TaskIncompleteError。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert svc._last_update_date != "20240614"
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_int_result(self):
@@ -1578,8 +1582,10 @@ class TestDailyUpdateLogicClosure:
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             # D11-F03: 整型旧结果无 is_complete → 抛 TaskIncompleteError。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert svc._last_update_date != "20240614"
 
 
 class TestConceptSyncLogicClosure:
@@ -2342,8 +2348,11 @@ class TestCatchupLogic:
         ):
             svc._mark_daily_update_done_db = AsyncMock()
             # D11-F03: 关键表失败 → 抛 TaskIncompleteError（映射 FAILED），水位不推进。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic("task1", [date(2024, 6, 11)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "daily_quotes" in exc_info.value.reason
             # 强断言：警告携带关键表失败清单，且不推进幂等键
             mock_warn.assert_called_once_with(
                 "[Scheduler] Catch-up NOT complete (critical=%s), NOT marking done",
@@ -2388,8 +2397,11 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning"),
         ):
             # D11-F03: 存在失败日 → 抛 TaskIncompleteError（映射 FAILED）。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic("task1", [date(2024, 6, 11), date(2024, 6, 12)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "failed_days=['20240611']" in exc_info.value.reason
             # 两天都尝试同步（首日失败后继续次日）
             assert mock_dp_instance.sync_daily_market_snapshot.await_count == 2
 
@@ -2419,11 +2431,14 @@ class TestCatchupLogic:
         ):
             svc._persist_run_date_db = AsyncMock()
             # D11-F03: 未完成 → 抛 TaskIncompleteError；水位仅推进到连续成功日。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic(
                     "task1",
                     [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
                 )
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "failed_days=['20240613']" in exc_info.value.reason
 
         # 只推进到第 1 日（20240612），绝不推进到末位（20240614）
         svc._persist_run_date_db.assert_awaited_once_with(
@@ -2463,8 +2478,11 @@ class TestCatchupLogic:
         ):
             svc._mark_daily_update_done_db = AsyncMock()
             # D11-F03: 首日失败 → 抛 TaskIncompleteError（映射 FAILED）。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic("task1", [date(2024, 6, 12), date(2024, 6, 13)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "failed_days=['20240612']" in exc_info.value.reason
 
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
@@ -2499,11 +2517,12 @@ class TestCatchupLogic:
         ):
             svc._mark_daily_update_done_db = AsyncMock()
             # D11-F03: 关键表失败日 → 抛 TaskIncompleteError（映射 FAILED），水位不推进。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic(
                     "task1",
                     [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
                 )
+            assert exc_info.value.description.key == "sched_catchup_partial"
 
         # 第 1 日关键表失败 → 不可作为连续成功日，水位不得推进（含不得推进到第 1 日）
         svc._mark_daily_update_done_db.assert_not_called()
@@ -2537,11 +2556,12 @@ class TestCatchupLogic:
         ):
             svc._mark_daily_update_done_db = AsyncMock()
             # D11-F03: 关键表不可就绪 → 抛 TaskIncompleteError（映射 FAILED），水位不前移。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic(
                     "task1",
                     [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
                 )
+            assert exc_info.value.description.key == "sched_catchup_partial"
 
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
@@ -2598,8 +2618,9 @@ class TestCatchupLogic:
         ):
             svc._mark_daily_update_done_db = AsyncMock()
             # D11-F03: 取消日 is_complete=False → 抛 TaskIncompleteError（映射 FAILED），水位不前移。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic("task1", [date(2024, 6, 12)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
 
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
@@ -2831,8 +2852,11 @@ class TestCatchupBackoff:
             patch("utils.scheduler_service.logger.warning"),
         ):
             # D11-F03: 未完成 → 抛 TaskIncompleteError（映射 FAILED）。
-            with pytest.raises(TaskIncompleteError):
+            with pytest.raises(TaskIncompleteError) as exc_info:
                 await svc._catchup_logic("task1", [date(2024, 6, 11)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "daily_quotes" in exc_info.value.reason
 
     @pytest.mark.asyncio
     async def test_incomplete_records_failure_and_schedules_retry(self):

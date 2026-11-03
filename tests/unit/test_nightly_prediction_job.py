@@ -399,8 +399,9 @@ class TestNightlyPredictionLogicClosure:
         runner = AsyncMock(return_value=result_df)
         mock_rm = MagicMock()
         mock_rm.save_results = AsyncMock(return_value=0)
-        with pytest.raises(TaskIncompleteError):
+        with pytest.raises(TaskIncompleteError) as exc_info:
             await self._execute_logic(svc, runner, mock_tm, mock_rm=mock_rm)
+        assert exc_info.value.reason == "persisted 0 records"
         assert mock_rm.save_results.call_count == 1
         assert svc.marked_dates == []
 
