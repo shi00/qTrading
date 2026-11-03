@@ -1031,12 +1031,19 @@ class NewsSubscriptionService:
                     )
 
                     clean_content = current_news_content.strip()
+                    # NI-F02：增量首写必须保留源适配器给出的 source（新浪 7x24 回退为
+                    # sina_7x24），仅缺失时沿用既有 CLS 缺省。首写先于入队，队列满时
+                    # _safe_queue_put 允许丢旧项，后续处理循环的回写补偿并非必达，
+                    # 故不得在此统一改写成 CLS（否则回退源条目被误标为主源）。
+                    item_source = item.get("source")
+                    if not isinstance(item_source, str) or not item_source.strip():
+                        item_source = "CLS"
                     normalized = CacheManager.normalize_news_item(
                         {
                             "content": clean_content,
                             "tags": "",
                             "publish_time": current_news_time,
-                            "source": "CLS",
+                            "source": item_source,
                         },
                     )
                     await self.cache.market_dao.save_market_news(normalized, wait=True)
