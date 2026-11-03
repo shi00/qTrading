@@ -2335,6 +2335,8 @@ class TestAutoUpdateGating:
         assert svc._last_update_date == "20240613"
         assert svc._catchup_consecutive_failures == 0
         assert svc._catchup_next_retry_at is None
+
+
 class TestLoadDbStateWatermarkMonotonic:
     """D11-F05: 启动加载水位与加载期间并发成功更新的单调合并（R22）。
 
@@ -2974,9 +2976,7 @@ class TestOnJobMissedDispatch:
         ):
             svc._on_job_missed(self._event("concept_sync_daily_refresh"))
         assert svc._catchup_tasks == set()
-        mock_debug.assert_called_once_with(
-            "[Scheduler] No running loop for catch-up on job missed, skipping"
-        )
+        mock_debug.assert_called_once_with("[Scheduler] No running loop for catch-up on job missed, skipping")
 
 
 class TestMisfireGraceTime:
