@@ -2577,8 +2577,9 @@ class TestTaskManagerPersistReservationSingleRelease:
                 mgr._loop = real_loop
 
             assert mgr._persist_pending_count == 1
-            with pytest.raises(TimeoutError):
+            with pytest.raises(TimeoutError) as exc_info:
                 await mgr.flush_persistence(timeout_s=0.05)
+            assert "1 pending write" in str(exc_info.value)
 
             release.set()
             await mgr.flush_persistence(timeout_s=1.0)
@@ -2608,8 +2609,9 @@ class TestTaskManagerPersistReservationSingleRelease:
                 mgr._loop = real_loop
 
             assert mgr._persist_pending_count == 1
-            with pytest.raises(TimeoutError):
+            with pytest.raises(TimeoutError) as exc_info:
                 await mgr.flush_persistence(timeout_s=0.05)
+            assert "1 pending write" in str(exc_info.value)
 
             release.set()
             await mgr.flush_persistence(timeout_s=1.0)
@@ -2640,8 +2642,9 @@ class TestTaskManagerPersistReservationSingleRelease:
                 mgr._loop = real_loop
 
             assert mgr._persist_pending_count == 1
-            with pytest.raises(TimeoutError):
+            with pytest.raises(TimeoutError) as exc_info:
                 await mgr.flush_persistence(timeout_s=0.05)
+            assert "1 pending write" in str(exc_info.value)
 
             release.set()
             await mgr.flush_persistence(timeout_s=1.0)
@@ -3974,24 +3977,24 @@ class TestRealInterleaving:
             patch.object(mgr, "_get_group_lock", return_value=observed),
         ):
             tid1 = mgr.submit_task("first", "test", _first, exclusive_group="G")
-            assert tid1 is not None
+            assert isinstance(tid1, str)
             await asyncio.wait_for(first_started.wait(), timeout=1.0)
             first = mgr.get_task(tid1)
-            assert first is not None
+            assert isinstance(first, AppTask)
             runner1 = first._asyncio_task
-            assert runner1 is not None
+            assert isinstance(runner1, asyncio.Task)
             assert sem._value == 1  # first 占 1/2 许可
             lock_entered.clear()
 
             tid2 = mgr.submit_task("second", "test", _second, cancellable=True, exclusive_group="G")
-            assert tid2 is not None
+            assert isinstance(tid2, str)
             await asyncio.wait_for(lock_entered.wait(), timeout=1.0)
             second = mgr.get_task(tid2)
-            assert second is not None
+            assert isinstance(second, AppTask)
             assert second.status == TaskStatus.QUEUED
             assert sem._value == 1  # 等待组锁期间不占并发许可
             runner2 = second._asyncio_task
-            assert runner2 is not None
+            assert isinstance(runner2, asyncio.Task)
 
             mgr.cancel_task(tid2)
             with pytest.raises(asyncio.CancelledError):
@@ -4014,12 +4017,12 @@ class TestRealInterleaving:
                 await third_release.wait()
 
             tid3 = mgr.submit_task("third", "test", _third, exclusive_group="G")
-            assert tid3 is not None
+            assert isinstance(tid3, str)
             await asyncio.wait_for(third_started.wait(), timeout=1.0)
             third = mgr.get_task(tid3)
-            assert third is not None
+            assert isinstance(third, AppTask)
             runner3 = third._asyncio_task
-            assert runner3 is not None
+            assert isinstance(runner3, asyncio.Task)
             third_release.set()
             await asyncio.wait_for(runner3, timeout=1.0)
             assert third.status == TaskStatus.COMPLETED
@@ -4107,36 +4110,36 @@ class TestRealInterleaving:
             patch.object(mgr, "_get_group_lock", side_effect=_group_lock),
         ):
             tid_g1 = mgr.submit_task("g1", "test", _make("g1", g1_started, g1_release), exclusive_group="G")
-            assert tid_g1 is not None
+            assert isinstance(tid_g1, str)
             await asyncio.wait_for(g1_started.wait(), timeout=1.0)
             g1 = mgr.get_task(tid_g1)
-            assert g1 is not None
+            assert isinstance(g1, AppTask)
             assert g1.status == TaskStatus.RUNNING
             runner_g1 = g1._asyncio_task
-            assert runner_g1 is not None
+            assert isinstance(runner_g1, asyncio.Task)
             assert sem._value == 1
             g_wait.clear()
 
             # 同组第二任务：阻塞在组锁上，不占第二个许可
             tid_g2 = mgr.submit_task("g2", "test", _make("g2", g2_started, g2_release), exclusive_group="G")
-            assert tid_g2 is not None
+            assert isinstance(tid_g2, str)
             await asyncio.wait_for(g_wait.wait(), timeout=1.0)
             g2 = mgr.get_task(tid_g2)
-            assert g2 is not None
+            assert isinstance(g2, AppTask)
             assert g2.status == TaskStatus.QUEUED
             assert sem._value == 1
             runner_g2 = g2._asyncio_task
-            assert runner_g2 is not None
+            assert isinstance(runner_g2, asyncio.Task)
 
             # 另一组任务可取得剩余许可，与 g1 同时执行
             tid_h = mgr.submit_task("h1", "test", _make("h1", h_started, h_release), exclusive_group="H")
-            assert tid_h is not None
+            assert isinstance(tid_h, str)
             await asyncio.wait_for(h_started.wait(), timeout=1.0)
             h1 = mgr.get_task(tid_h)
-            assert h1 is not None
+            assert isinstance(h1, AppTask)
             assert h1.status == TaskStatus.RUNNING
             runner_h = h1._asyncio_task
-            assert runner_h is not None
+            assert isinstance(runner_h, asyncio.Task)
             assert g1.status == TaskStatus.RUNNING  # g1 仍阻塞，跨组并发成立
             assert sem._value == 0
 
