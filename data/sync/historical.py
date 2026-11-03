@@ -977,6 +977,20 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 # 确保设置的基准指数必然被写入 index_daily，否则健康检查永远检不出来。
                 tasks = [self.context.api.get_index_daily(ts_code=c, trade_date=trade_date) for c in indices_to_sync()]
                 results = await gather_return_exceptions_propagating_cancel(*tasks)
+                # D05-F03：过滤 DataFrame 之前先遍历异常。系统级失败（EngineDisposedError、
+                # severity==system、非 Exception 的 BaseException）必须先按既有传播边界抛出，
+                # 不得被随后的权限跳过或普通失败遮蔽。
+                for r in results:
+                    if isinstance(r, EngineDisposedError):
+                        raise r
+                    if isinstance(r, BaseException) and not isinstance(r, Exception):
+                        raise r
+                    if (
+                        isinstance(r, Exception)
+                        and not isinstance(r, TushareAPIPermissionError)
+                        and classify_severity(r, context="general") == "system"
+                    ):
+                        raise r
                 # S9: 检测 TushareAPIPermissionError，标记 skipped_permission 避免下次重试
                 for r in results:
                     if isinstance(r, TushareAPIPermissionError):
@@ -985,6 +999,21 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             safe_error(r),
                         )
                         return ("index", None, "permission_denied")
+                # D05-F03：普通取数失败不得被丢弃成「合法空」。指数集合不完整时本次不落库，
+                # 返回明确的 FETCH_FAILED（进 failed_optional_tables，且不登记 empty day），
+                # 避免 save_if_ok 把空 DataFrame 判为 EMPTY 而豁免真实缺口（R21）。
+                failures = [r for r in results if isinstance(r, Exception)]
+                if failures:
+                    primary = failures[0]
+                    log_classified(
+                        logger,
+                        primary,
+                        "general",
+                        "[HistoricalSync] DaySync | ⚠️ Fetch indices failed (%s): %s for %s",
+                        trade_date,
+                        exc_info=True,
+                    )
+                    return ("index", None, primary)
                 valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
                 if valid:
                     return ("index", pd.concat(valid, ignore_index=True), None)

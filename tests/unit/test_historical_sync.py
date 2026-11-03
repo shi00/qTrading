@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, AsyncMock, PropertyMock, patch
 import pandas as pd
 
 from core.i18n import Message
+from data.constants import SYNC_RESULT_EMPTY, SYNC_RESULT_FETCH_FAILED
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.base import SyncResult, SyncStatus
@@ -953,11 +954,97 @@ class TestHistoricalSyncDailySnapshotExtended:
 
     @pytest.mark.asyncio
     async def test_fetch_indices_exception(self):
+        """D05-F03：全部指数请求普通失败必须显式记 fetch_failed，不得伪装成合法空。"""
         ctx = make_ctx()
         ctx.api.get_index_daily = AsyncMock(side_effect=Exception("index err"))
         strategy = HistoricalSyncStrategy(ctx)
-        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
         assert result is True
+        index_calls = [c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "index_daily"]
+        assert len(index_calls) == 1
+        assert index_calls[0].kwargs["status"] == "fetch_failed"
+        assert index_calls[0].kwargs["last_result_status"] == SYNC_RESULT_FETCH_FAILED
+        assert sr.failed_optional_tables == ["index_daily"]
+        recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+        assert "index_daily" not in recorded_tables
+
+    @pytest.mark.asyncio
+    async def test_fetch_indices_partial_failure_not_has_data(self):
+        """部分失败：指数集合不完整时本次不落库，记 fetch_failed 而非 HAS_DATA。"""
+        ctx = make_ctx()
+        call_count = 0
+
+        async def partial_failure(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return pd.DataFrame({"ts_code": ["000001.SH"], "trade_date": ["20240614"]})
+            raise RuntimeError("index boom")
+
+        ctx.api.get_index_daily = AsyncMock(side_effect=partial_failure)
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        ctx.cache.quote_dao.save_index_daily.assert_not_awaited()
+        index_calls = [c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "index_daily"]
+        assert len(index_calls) == 1
+        assert index_calls[0].kwargs["status"] == "fetch_failed"
+        assert index_calls[0].kwargs["last_result_status"] == SYNC_RESULT_FETCH_FAILED
+        assert sr.failed_optional_tables == ["index_daily"]
+        recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+        assert "index_daily" not in recorded_tables
+
+    @pytest.mark.asyncio
+    async def test_fetch_indices_all_empty_is_legal_empty(self):
+        """全部请求成功且返回空载荷 → 仍按合法空登记（EMPTY + mark_empty_days）。"""
+        ctx = make_ctx()  # 默认 get_index_daily 返回空 DataFrame
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        index_calls = [c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "index_daily"]
+        assert len(index_calls) == 1
+        assert index_calls[0].kwargs["status"] == "success"
+        assert index_calls[0].kwargs["last_result_status"] == SYNC_RESULT_EMPTY
+        assert sr.failed_optional_tables == []
+        recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+        assert "index_daily" in recorded_tables
+
+    @pytest.mark.asyncio
+    async def test_fetch_indices_engine_disposed_propagates(self):
+        """EngineDisposedError（R5）不得被普通失败分类吞没，必须向上传播。"""
+        ctx = make_ctx()
+        ctx.api.get_index_daily = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        strategy = HistoricalSyncStrategy(ctx)
+        with pytest.raises(EngineDisposedError):
+            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+
+    @pytest.mark.asyncio
+    async def test_fetch_indices_cancelled_error_propagates(self):
+        """R2：指数请求取消必须向上传播，不得被异常收集逻辑吞没。"""
+        ctx = make_ctx()
+        ctx.api.get_index_daily = AsyncMock(side_effect=asyncio.CancelledError)
+        strategy = HistoricalSyncStrategy(ctx)
+        with pytest.raises(asyncio.CancelledError):
+            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+
+    @pytest.mark.asyncio
+    async def test_fetch_indices_system_failure_propagates(self):
+        """系统级异常（severity == system）必须传播，不得降级为可选表失败。"""
+        ctx = make_ctx()
+        exc = MemoryError("simulated oom")
+        ctx.api.get_index_daily = AsyncMock(side_effect=exc)
+        strategy = HistoricalSyncStrategy(ctx)
+        with pytest.raises(MemoryError) as exc_info:
+            await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert exc_info.value is exc
+        ctx.cache.quote_dao.save_index_daily.assert_not_awaited()
+        index_status_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "index_daily"
+        ]
+        assert index_status_calls == []
 
     @pytest.mark.asyncio
     async def test_fetch_indices_no_valid(self):
