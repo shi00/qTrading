@@ -2099,6 +2099,124 @@ class TestCatchUpMissedUpdates:
         svc._catch_up_missed_updates.assert_awaited_once_with(include_today=False)
 
 
+class TestLoadDbStateWatermarkMonotonic:
+    """D11-F05: 启动加载水位与加载期间并发成功更新的单调合并（R22）。
+
+    用 asyncio.Event 卡住 loader 在「已读到 DB 值、尚未赋值」的 await 点，再由另一
+    协程推进 _mark_*_done_db，证明赋值规则按「加载开始时的本地成功更新代际」区分：
+    有本地成功 → max 合并不回退；无本地成功 → DB 为启动正本（不做一律 max）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_daily_success_during_load_merges_max(self):
+        """加载已读到 DB D29、未赋值时推进日更成功 D30 → 内存水位至少为 D30（不回退）。"""
+        svc = _make_svc()
+        mock_engine = MagicMock()
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._persist_run_date = MagicMock()
+        daily_read = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _fake_get_state(engine, key):
+            if key == "sched_last_daily_update":
+                return "20260929"
+            if key == "sched_last_nightly_prediction":
+                # daily 已返回 D29，loader 尚未执行赋值，卡在这里制造真实交错。
+                daily_read.set()
+                await release.wait()
+            return None
+
+        with (
+            patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=mock_engine)),
+            patch("data.persistence.app_state_service.get_app_state", AsyncMock(side_effect=_fake_get_state)),
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=False),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tpm.return_value.run_async = AsyncMock(return_value=None)
+            loader = asyncio.create_task(svc._load_db_state())
+            await asyncio.wait_for(daily_read.wait(), timeout=5)
+            assert svc._last_update_date is None  # 尚未赋值
+            await svc._mark_daily_update_done_db("20260930")
+            release.set()
+            await asyncio.wait_for(loader, timeout=5)
+
+        assert svc._last_update_date == "20260930"
+        assert svc._db_state_loaded is True
+        svc._catch_up_missed_updates.assert_awaited_once()
+        mock_max.assert_awaited_once_with(mock_engine, "sched_last_daily_update", "20260930")
+
+    @pytest.mark.asyncio
+    async def test_pred_success_during_load_merges_max(self):
+        """同形路径：加载已读到预测 DB D29、未赋值时推进夜间预测成功 D30 → 不低于 D30。"""
+        svc = _make_svc()
+        mock_engine = MagicMock()
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._persist_run_date = MagicMock()
+        pred_read = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _fake_get_state(engine, key):
+            if key == "sched_last_nightly_prediction":
+                return "20260929"
+            if key == "sched_last_concept_sync":
+                # pred 已返回 D29，loader 尚未执行赋值。
+                pred_read.set()
+                await release.wait()
+            return None
+
+        with (
+            patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=mock_engine)),
+            patch("data.persistence.app_state_service.get_app_state", AsyncMock(side_effect=_fake_get_state)),
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=False),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tpm.return_value.run_async = AsyncMock(return_value=None)
+            loader = asyncio.create_task(svc._load_db_state())
+            await asyncio.wait_for(pred_read.wait(), timeout=5)
+            assert svc._last_pred_date is None  # 尚未赋值
+            await svc._mark_nightly_prediction_done_db("20260930")
+            release.set()
+            await asyncio.wait_for(loader, timeout=5)
+
+        assert svc._last_pred_date == "20260930"
+        assert svc._db_state_loaded is True
+        mock_max.assert_awaited_once_with(mock_engine, "sched_last_nightly_prediction", "20260930")
+
+    @pytest.mark.asyncio
+    async def test_db_value_wins_over_stale_cache_without_success(self):
+        """反向用例：加载期间无成功更新时 DB 为启动正本——DB=D29、缓存 D31 → 必须取 D29。"""
+        svc = _make_svc()
+        mock_engine = MagicMock()
+        svc._last_update_date = "20260931"  # 错误/未来值的启动缓存（不可压过 DB）
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._persist_run_date = MagicMock()
+
+        async def _fake_get_state(engine, key):
+            if key == "sched_last_daily_update":
+                return "20260929"
+            return None
+
+        with (
+            patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=mock_engine)),
+            patch("data.persistence.app_state_service.get_app_state", AsyncMock(side_effect=_fake_get_state)),
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=False),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+        ):
+            await svc._load_db_state()
+
+        assert svc._last_update_date == "20260929"
+        assert svc._db_state_loaded is True
+        svc._catch_up_missed_updates.assert_awaited_once()
+        mock_max.assert_not_awaited()
+        mock_tpm.return_value.run_async.assert_not_called()
+
+
 class TestCatchupLogic:
     """D6-1: 补偿执行逻辑 — 逐日同步 + is_complete 判定幂等键。"""
 
