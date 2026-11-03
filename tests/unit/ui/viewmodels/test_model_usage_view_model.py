@@ -26,6 +26,7 @@ import asyncio
 import csv
 import datetime as dt
 import io
+from dataclasses import FrozenInstanceError
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -42,9 +43,13 @@ from ui.viewmodels.model_usage_view_model import (
     PRICING_STATUS_FREE,
     PRICING_STATUS_KNOWN,
     PRICING_STATUS_PARTIAL,
+    AttemptRow,
     BudgetSummary,
     ModelUsageState,
     ModelUsageViewModel,
+    MonthUsageRow,
+    RequestRow,
+    UnconfirmedReservationRow,
     UsageFilters,
     _write_csv_text,
     month_pricing_status,
@@ -104,7 +109,10 @@ async def test_load_populates_requests_total_and_budget():
     dao = _dao(rows=rows, total=60)
     vm = _vm(dao)
     await vm.load()
-    assert vm.state.requests == tuple(rows)
+    assert isinstance(vm.state.requests[0], RequestRow)
+    assert vm.state.requests[0].invocation_id == "inv-1"
+    assert vm.state.requests[0].terminal_status == "succeeded"
+    assert vm.state.requests[0].cost_status == "known"
     assert vm.state.total == 60
     assert vm.state.page == 0
     assert vm.state.budget_summary.known_cny == Decimal("0.05")
@@ -215,7 +223,12 @@ async def test_load_populates_unconfirmed_reservation_details():
     dao = _dao(unconfirmed=unconfirmed)
     vm = _vm(dao)
     await vm.load()
-    assert vm.state.unconfirmed_reservations == (unconfirmed[0],)
+    reservation = vm.state.unconfirmed_reservations[0]
+    assert isinstance(reservation, UnconfirmedReservationRow)
+    assert reservation.reservation_id == "res-1"
+    assert reservation.task_id == "sentiment"
+    assert reservation.amount_cny == "0.02"
+    assert reservation.billing_month == "2026-10"
     # 全局读取（不按当前月过滤）：跨月历史遗留在详情区可解除（§10.3）
     assert dao.read_unconfirmed_reservations.await_args.kwargs == {}
 
@@ -319,7 +332,7 @@ async def test_set_filter_clears_stale_requests_while_reload_in_flight():
 
     gate.set()
     await reload_task
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-new"]
     assert vm.state.total == 2
 
 
@@ -347,7 +360,7 @@ async def test_out_of_order_load_responses_keep_latest_request_result():
 
     new_gate.set()
     await new_task
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-new"]
     assert vm.state.total == 2
 
 
@@ -374,12 +387,12 @@ async def test_stale_load_failure_does_not_overwrite_newer_state():
     dao.read_request_page = _new_read
     await vm.set_filter(scenario_id="stock_analysis")  # 新请求立即完成
     assert vm.state.message is None
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-new"]
 
     old_gate.set()  # 旧请求失败响应后到
     await old_task
     assert vm.state.message is None  # 旧代次失败不覆盖
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-new"]
 
 
 @pytest.mark.asyncio
@@ -467,7 +480,9 @@ async def test_expand_loads_attempts_and_toggles():
     await vm.load()
     await vm.expand("inv-1")
     assert vm.state.expanded_id == "inv-1"
-    assert vm.state.attempts == ({"kind": "attempt", "status": "failed"},)
+    assert isinstance(vm.state.attempts[0], AttemptRow)
+    assert vm.state.attempts[0].kind == "attempt"
+    assert vm.state.attempts[0].status == "failed"
     dao.read_request_attempts.assert_awaited_once_with(invocation_id="inv-1")
     await vm.expand("inv-1")
     assert vm.state.expanded_id is None
@@ -572,7 +587,14 @@ async def test_enter_monthly_summary_fills_viewed_month_rows_and_budget():
     dao = _dao(month_rows=month_rows)
     vm = _vm(dao)
     await vm.enter_monthly_summary()
-    assert vm.state.monthly_rows == tuple(month_rows)
+    row = vm.state.monthly_rows[0]
+    assert isinstance(row, MonthUsageRow)
+    assert row.scenario_id == "stock_analysis"
+    assert row.trigger == "manual"
+    assert row.invocation_count == 3
+    assert row.attempt_count == 4
+    assert row.succeeded_count == 3
+    assert row.cost_cny == Decimal("0.12")
     assert vm.state.summary_budget is not None
     assert vm.state.summary_budget.known_cny == Decimal("0.05")
     assert vm.state.message is None
@@ -624,7 +646,12 @@ async def test_select_summary_month_history_not_replaced_by_current():
     await vm.select_summary_month("2025-12")
     assert vm.state.summary_month == "202512"
     assert vm.state.month_draft == "202512"
-    assert vm.state.monthly_rows == tuple(history_rows)
+    history = vm.state.monthly_rows[0]
+    assert isinstance(history, MonthUsageRow)
+    assert history.scenario_id == "news_annotation"
+    assert history.trigger == "scheduled"
+    assert history.invocation_count == 9
+    assert history.cost_cny == Decimal("0.50")
     assert vm.state.summary_budget is not None
     assert vm.state.summary_budget.known_cny == Decimal("0.50")  # 历史月摘要，非当前月 0.05
 
@@ -681,11 +708,11 @@ async def test_summary_generation_discards_stale_month_response():
     await asyncio.sleep(0)  # 旧月份（当前月）读取已发出并挂起
 
     await vm.select_summary_month("2025-12")  # 新月份立即完成
-    assert [r["scenario_id"] for r in vm.state.monthly_rows] == ["fresh"]
+    assert [r.scenario_id for r in vm.state.monthly_rows] == ["fresh"]
 
     gate.set()  # 旧月份响应后到
     await stale_task
-    assert [r["scenario_id"] for r in vm.state.monthly_rows] == ["fresh"]  # 旧代次被拒
+    assert [r.scenario_id for r in vm.state.monthly_rows] == ["fresh"]  # 旧代次被拒
 
 
 @pytest.mark.asyncio
@@ -878,6 +905,211 @@ def test_state_defaults_are_frozen_and_tuple():
     assert isinstance(state.filters, UsageFilters)
     assert isinstance(state.budget_summary, BudgetSummary)
     assert state.message is None
+
+
+@pytest.mark.asyncio
+async def test_published_request_and_reservation_rows_are_immutable_and_detached():
+    """发布后改原始 DAO 字典（含嵌套 metadata）不改变旧 state；新行不可原地改。"""
+    rows: list[dict[str, Any]] = [
+        {
+            "invocation_id": "inv-1",
+            "created_at": dt.datetime(2026, 10, 19, 1, 2, 3),
+            "scenario_id": "stock_analysis",
+            "trigger": "manual",
+            "is_test": True,
+            "task_summary": "task",
+            "total_duration_ms": 120,
+            "known_cost_cny": None,
+            "terminal_status": "succeeded",
+            "cost_status": "known",
+            "metadata": {"trace": {"steps": [1, 2]}},
+        }
+    ]
+    unconfirmed: list[dict[str, Any]] = [
+        {
+            "reservation_id": "res-1",
+            "task_id": "sentiment",
+            "amount_cny": "0.02",
+            "billing_month": "2026-10",
+            "metadata": {"alloc": {"keys": ["a"]}},
+        }
+    ]
+    dao = _dao(rows=rows, total=1, unconfirmed=unconfirmed)
+    vm = _vm(dao)
+    await vm.load()
+    old_state = vm.state
+    published = old_state.requests[0]
+    reservation = old_state.unconfirmed_reservations[0]
+    assert isinstance(published, RequestRow)
+    assert isinstance(reservation, UnconfirmedReservationRow)
+    assert published.known_cost_cny is None  # 未知费用保持 None（R21）
+    assert published.extra["metadata"]["trace"]["steps"] == (1, 2)  # 嵌套序列冻结为 tuple
+    assert reservation.amount_cny == "0.02"
+    assert reservation.extra["metadata"]["alloc"]["keys"] == ("a",)
+
+    # 发布后修改原始 DAO 字典（顶层 + 嵌套）不反向影响旧 state
+    rows[0]["invocation_id"] = "mutated"
+    rows[0]["known_cost_cny"] = Decimal("9.99")
+    rows[0]["metadata"]["trace"]["steps"].append(3)
+    unconfirmed[0]["reservation_id"] = "mutated"
+    unconfirmed[0]["metadata"]["alloc"]["keys"].append("b")
+    assert published.invocation_id == "inv-1"
+    assert published.known_cost_cny is None
+    assert published.extra["metadata"]["trace"]["steps"] == (1, 2)
+    assert reservation.reservation_id == "res-1"
+    assert reservation.extra["metadata"]["alloc"]["keys"] == ("a",)
+
+    # 再次加载只产生新快照，旧快照保持原行值
+    dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-2"}], 1))
+    await vm.load()
+    assert [r.invocation_id for r in old_state.requests] == ["inv-1"]
+    assert old_state.requests[0] is published
+    assert [r.reservation_id for r in old_state.unconfirmed_reservations] == ["res-1"]
+
+    # 新 state 行不可原地修改：字段与嵌套只读映射均拒绝写入
+    field_name = "invocation_id"
+    with pytest.raises(FrozenInstanceError) as exc_info:
+        setattr(published, field_name, "rewritten")
+    assert field_name in exc_info.value.args[0]
+    reservation_field = "reservation_id"
+    with pytest.raises(FrozenInstanceError) as exc_info:
+        setattr(reservation, reservation_field, "rewritten")
+    assert reservation_field in exc_info.value.args[0]
+    writable_extra: Any = published.extra
+    with pytest.raises(TypeError) as exc_info:
+        writable_extra["new_column"] = "x"
+    assert "does not support item assignment" in str(exc_info.value)
+    with pytest.raises(TypeError) as exc_info:
+        published.extra["metadata"]["trace"] = {}
+    assert "does not support item assignment" in str(exc_info.value)
+    with pytest.raises(TypeError) as exc_info:
+        published.extra["metadata"]["trace"]["steps"][0] = 9
+    assert "tuple" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_expanded_attempt_rows_are_immutable_and_old_snapshot_stable():
+    """展开后尝试行不可反写；改原始 DAO 字典不影响已发布行与旧快照。"""
+    attempts: list[dict[str, Any]] = [
+        {
+            "kind": "attempt",
+            "executed": True,
+            "task_id": "sentiment",
+            "candidate_index": 0,
+            "retry_index": 1,
+            "status": "failed",
+            "reason": "timeout",
+            "actual_model": "glm-4-air",
+            "cost_cny": None,
+            "metadata": {"detail": {"codes": ["timeout"]}},
+        }
+    ]
+    dao = _dao(attempts=attempts)
+    vm = _vm(dao)
+    await vm.load()
+    old_state = vm.state
+    await vm.expand("inv-1")
+    published = vm.state.attempts[0]
+    assert isinstance(published, AttemptRow)
+    assert published.kind == "attempt"  # 执行身份保留
+    assert published.task_id == "sentiment"
+    assert published.status == "failed"
+    assert published.cost_cny is None  # 未知费用保持 None（R21）
+    assert published.extra["metadata"]["detail"]["codes"] == ("timeout",)
+
+    attempts[0]["status"] = "succeeded"
+    attempts[0]["metadata"]["detail"]["codes"].append("network")
+    assert published.status == "failed"
+    assert published.extra["metadata"]["detail"]["codes"] == ("timeout",)
+    assert old_state.attempts == ()  # 旧快照不随新展开变化
+    field_name = "status"
+    with pytest.raises(FrozenInstanceError) as exc_info:
+        setattr(published, field_name, "succeeded")
+    assert field_name in exc_info.value.args[0]
+
+
+@pytest.mark.asyncio
+async def test_month_summary_rows_are_immutable_and_old_snapshot_stable():
+    """月汇总行不可反写；切换视图后旧快照保持原行值。"""
+    month_rows: list[dict[str, Any]] = [
+        {
+            "month": "202601",
+            "grouping_key": "stock_analysis",
+            "scenario_id": "stock_analysis",
+            "trigger": "manual",
+            "invocation_count": 3,
+            "attempt_count": 4,
+            "succeeded_count": 3,
+            "cost_cny": None,
+            "metadata": {"source": {"models": ["m1"]}},
+        }
+    ]
+    dao = _dao(month_rows=month_rows)
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()
+    old_state = vm.state
+    published = old_state.monthly_rows[0]
+    assert isinstance(published, MonthUsageRow)
+    assert published.cost_cny is None  # 未知费用保持 None（R21）
+    assert published.extra["metadata"]["source"]["models"] == ("m1",)
+
+    month_rows[0]["scenario_id"] = "mutated"
+    month_rows[0]["metadata"]["source"]["models"].append("m2")
+    assert published.scenario_id == "stock_analysis"
+    assert published.extra["metadata"]["source"]["models"] == ("m1",)
+    vm.exit_monthly_summary()
+    assert old_state.monthly_rows == (published,)  # 旧快照不变
+    field_name = "scenario_id"
+    with pytest.raises(FrozenInstanceError) as exc_info:
+        setattr(published, field_name, "rewritten")
+    assert field_name in exc_info.value.args[0]
+
+
+@pytest.mark.asyncio
+async def test_current_page_csv_fields_order_and_unknown_cost_unchanged():
+    """当前页 CSV 列与顺序保持既有契约；未知费用仍为空单元格（R21）。"""
+    created_at = dt.datetime(2026, 10, 19, 1, 2, 3)
+    rows: list[dict[str, Any]] = [
+        {
+            "invocation_id": "inv-1",
+            "created_at": created_at,
+            "scenario_id": "stock_analysis",
+            "trigger": "manual",
+            "is_test": True,
+            "terminal_status": "succeeded",
+            "cost_status": "known",
+            "task_summary": "task",
+            "total_duration_ms": 120,
+            "known_cost_cny": None,
+        }
+    ]
+    vm = _vm(_dao(rows=rows, total=1))
+    await vm.load()
+    parsed = list(csv.reader(io.StringIO(await vm.export_csv())))
+    assert parsed[0] == [
+        "invocation_id",
+        "created_at",
+        "scenario_id",
+        "trigger",
+        "origin",
+        "terminal_status",
+        "cost_status",
+        "task_summary",
+        "total_duration_ms",
+        "known_cost_cny",
+    ]
+    assert parsed[1] == [
+        "inv-1",
+        str(created_at),
+        "stock_analysis",
+        "manual",
+        ORIGIN_TEST,
+        "succeeded",
+        "known",
+        "task",
+        "120",
+        "",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1162,7 +1394,7 @@ async def test_stale_success_after_reader_barrier_keeps_newer_filter_results():
 
     await _commit_newer_filter(dao, vm)
     assert vm.state.filters.scenario_id == "stock_analysis"
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-B"]
     assert vm.state.total == 2
     assert vm.state.budget_summary.known_cny == Decimal("0.02")
     assert vm.state.budget_draft == "120"
@@ -1173,12 +1405,12 @@ async def test_stale_success_after_reader_barrier_keeps_newer_filter_results():
 
     # A 迟到成功：rows/total/budget 与 filters 均保持 B，不被旧代次覆盖
     assert vm.state.filters.scenario_id == "stock_analysis"
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-B"]
     assert vm.state.total == 2
     assert vm.state.budget_summary.known_cny == Decimal("0.02")
     assert vm.state.budget_summary.effective_reserved_cny == Decimal("0.30")
     assert vm.state.budget_summary.unconfirmed_reserved_cny == Decimal("0.40")
-    assert vm.state.unconfirmed_reservations == ({"reservation_id": "res-B"},)
+    assert [r.reservation_id for r in vm.state.unconfirmed_reservations] == ["res-B"]
     assert vm.state.budget_draft == "120"
     assert vm.state.monthly_limit_cny == Decimal("120")
     assert vm.state.monthly_limit_unknown is False
@@ -1211,7 +1443,7 @@ async def test_stale_reader_failure_after_barrier_does_not_overwrite_newer_state
     assert vm.state.monthly_limit_cny == Decimal("120")
     assert vm.state.budget_draft == "120"
     assert vm.state.message is None
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-B"]
     assert vm.state.budget_summary.known_cny == Decimal("0.02")
 
 
@@ -1234,7 +1466,7 @@ async def test_stale_reader_cancel_after_barrier_propagates_without_overwriting(
     assert isinstance(exc_info.value, asyncio.CancelledError)
 
     assert vm.state.filters.scenario_id == "stock_analysis"
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-B"]
     assert vm.state.total == 2
     assert vm.state.budget_summary.known_cny == Decimal("0.02")
     assert vm.state.budget_draft == "120"
@@ -1258,12 +1490,12 @@ async def test_stale_success_after_page_turn_keeps_fresh_page_data():
     dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-p1"}], 60))
     await vm.next_page()  # 新请求 B：page1
     assert vm.state.page == 1
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-p1"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-p1"]
 
     reader.release()
     await stale_task
 
     assert vm.state.page == 1
-    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-p1"]
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-p1"]
     assert vm.state.total == 60
     assert vm.state.budget_draft == "120"  # A 的 10 未覆盖 B
