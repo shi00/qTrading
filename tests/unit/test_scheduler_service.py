@@ -9,6 +9,7 @@ import pytest
 import pandas as pd
 from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
+from zoneinfo import ZoneInfo
 
 from core.i18n import I18n, Message
 from data.sync.base import SyncResult, SyncStatus
@@ -419,6 +420,52 @@ class TestSchedulerServiceScheduleJobs:
         svc._schedule_jobs()
         job = svc.scheduler.get_job("daily_update")
         assert job.id == "daily_update"
+
+
+class TestSchedulerServiceCronTimezone:
+    """D11-F02: 四个 CronTrigger 必须显式绑定 scheduler 时区（Asia/Shanghai）。
+
+    APScheduler 3.11.3 的 CronTrigger 在 timezone 缺省时回落到 ``get_localzone()``（主机
+    本地时区），而 ``BaseScheduler._create_trigger`` 对已是 BaseTrigger 的参数原样返回，
+    不会套用 ``AsyncIOScheduler(timezone="Asia/Shanghai")``。故非上海主机的墙钟会偏移。
+    本用例用不同 host 本地时区（UTC / Asia/Shanghai）替换 get_localzone 模拟主机环境，
+    断言四个 job 的 trigger 自带时区且下次触发的上海墙钟时刻不随主机变化。
+    """
+
+    _EXPECTED_HM: dict[str, tuple[int, int]] = {
+        "daily_update": (16, 30),
+        "concept_sync_daily_refresh": (10, 0),
+        "review_backfill": (17, 0),
+        "nightly_prediction": (20, 30),
+    }
+
+    @pytest.mark.parametrize("host_tz", ["UTC", "Asia/Shanghai"])
+    def test_cron_triggers_carry_scheduler_timezone(self, host_tz):
+        # 固定上海交易日 2026-09-22（周二）；固定 now 为当日 00:05，早于全部计划时刻。
+        fixed_shanghai_now = datetime(2026, 9, 22, 0, 5, tzinfo=ZoneInfo("Asia/Shanghai"))
+        now_in_host_tz = fixed_shanghai_now.astimezone(ZoneInfo(host_tz))
+
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("apscheduler.triggers.cron.get_localzone", return_value=ZoneInfo(host_tz)),
+        ):
+            mock_ch.get_setting.return_value = None
+            mock_ch.get_auto_update_time.return_value = "16:30"
+            mock_ch.get_concept_schedule_time.return_value = "10:00"
+            mock_ch.get_nightly_prediction_time.return_value = "20:30"
+            svc = SchedulerService()
+            svc._schedule_jobs()
+
+        for job_id, (hour, minute) in self._EXPECTED_HM.items():
+            job = svc.scheduler.get_job(job_id)
+            assert job is not None
+            # trigger 自带时区，且与 scheduler 时区一致（而非 host local tz）。
+            assert job.trigger.timezone == svc.scheduler.timezone
+            assert str(job.trigger.timezone) == "Asia/Shanghai"
+            expected = datetime(2026, 9, 22, hour, minute, tzinfo=ZoneInfo("Asia/Shanghai"))
+            next_fire = job.trigger.get_next_fire_time(None, now_in_host_tz)
+            assert next_fire == expected
+            assert next_fire.utcoffset() == timedelta(hours=8)
 
 
 class TestSchedulerServiceWatchConfigChanges:
@@ -1190,6 +1237,7 @@ class TestSchedulerStart:
         svc = SchedulerService()
         svc.register_job("nightly_prediction", _dummy_job)
         svc.scheduler = MagicMock()
+        svc.scheduler.timezone = ZoneInfo("Asia/Shanghai")
         svc.scheduler.running = False
         svc.start()
         svc.scheduler.start.assert_called_once()
@@ -1203,6 +1251,7 @@ class TestSchedulerStart:
         svc = SchedulerService()
         svc.register_job("nightly_prediction", _dummy_job)
         svc.scheduler = MagicMock()
+        svc.scheduler.timezone = ZoneInfo("Asia/Shanghai")
         svc.scheduler.running = False
         svc.scheduler.start.side_effect = Exception("start error")
         svc.start()

@@ -555,7 +555,13 @@ class SchedulerService:
         return hour, minute
 
     def _schedule_jobs(self):
-        """Register jobs with the scheduler"""
+        """Register jobs with the scheduler
+
+        D11-F02: 四个 CronTrigger 必须显式携带 ``self.scheduler.timezone``。APScheduler 3.11.3
+        的 CronTrigger 在未传 timezone 时回落到 ``get_localzone()``（主机本地时区），且
+        ``BaseScheduler._create_trigger`` 对已是 BaseTrigger 的参数原样返回、不会套用
+        ``AsyncIOScheduler(timezone="Asia/Shanghai")``——缺省即导致非上海主机墙钟偏移。
+        """
         # Only remove business jobs, NOT the config_watchdog
         # D7-6: 以 _SCHEDULED_JOB_IDS 为业务 job 全集唯一正本（避免与状态面板的 id 清单漂移）。
         for job_id in _SCHEDULED_JOB_IDS:
@@ -570,7 +576,7 @@ class SchedulerService:
 
         self.scheduler.add_job(
             self._run_daily_update,
-            CronTrigger(hour=hour, minute=minute),
+            CronTrigger(hour=hour, minute=minute, timezone=self.scheduler.timezone),
             id="daily_update",
             replace_existing=True,
         )
@@ -585,7 +591,7 @@ class SchedulerService:
 
         self.scheduler.add_job(
             self._run_nightly_prediction,
-            CronTrigger(hour=n_hour, minute=n_minute),
+            CronTrigger(hour=n_hour, minute=n_minute, timezone=self.scheduler.timezone),
             id="nightly_prediction",
             replace_existing=True,
         )
@@ -597,7 +603,7 @@ class SchedulerService:
 
         self.scheduler.add_job(
             self._run_concept_sync,
-            CronTrigger(hour=dh, minute=dm),
+            CronTrigger(hour=dh, minute=dm, timezone=self.scheduler.timezone),
             id="concept_sync_daily_refresh",
             replace_existing=True,
         )
@@ -611,7 +617,7 @@ class SchedulerService:
         # 晚于默认日跟新 16:30，确保当日行情已同步后再回填远期收益。
         self.scheduler.add_job(
             self._run_review_backfill,
-            CronTrigger(hour=17, minute=0),
+            CronTrigger(hour=17, minute=0, timezone=self.scheduler.timezone),
             id="review_backfill",
             replace_existing=True,
         )
