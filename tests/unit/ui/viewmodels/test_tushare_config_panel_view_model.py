@@ -634,6 +634,173 @@ class TestVerifyToken:
         assert vm.state.is_verifying is False
 
 
+# --- verify_token: SaveOutcome 四态穷举 (VMCONFIG-F04) ---
+
+
+class TestVerifyTokenSaveOutcome:
+    """F04：仅 SaveOutcome.SAVED 进入配置激活成功链，其余三态拒绝且不激活共享 client。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("save_outcome", "expected_result", "expected_status_type", "expected_message_key"),
+        [
+            (SaveOutcome.SAVED, True, "success", "tushare_verify_success"),
+            (SaveOutcome.FAILED, False, "error", "sys_snack_save_err"),
+            (SaveOutcome.FAILED_NO_SECURE_STORE, False, "error", "secrets_save_failed_no_store"),
+            (SaveOutcome.OVERRIDDEN_BY_ENV, False, "warning", "secrets_save_overridden"),
+        ],
+        ids=["saved", "failed", "failed-no-secure-store", "overridden-by-env"],
+    )
+    async def test_verify_token_exhausts_save_outcome(
+        self,
+        mock_config_handler,
+        mock_thread_pool,
+        save_outcome,
+        expected_result,
+        expected_status_type,
+        expected_message_key,
+    ):
+        """四态参数化：SAVED 正常激活；FAILED/NO_STORE/ENV 均返回 False 且不触达激活链。"""
+        mock_config_handler.save_token.return_value = save_outcome
+        mock_pro = _make_mock_pro_api()
+        mock_client = MagicMock()
+        mock_client.set_token_async = AsyncMock(return_value=False)
+        on_verify_success = MagicMock()
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api", return_value=mock_pro),
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+        ):
+            vm = _make_vm(mock_config_handler, on_verify_success=on_verify_success)
+            vm.update_token("valid_token")
+            result = await vm.verify_token()
+
+        # 显式 token 探活对四态均保留（先探活、后保存）
+        mock_pro.trade_cal.assert_called_once_with(exchange="SSE", start_date="20250101", end_date="20250101")
+        assert result is expected_result
+        assert vm.state.status_type == expected_status_type
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == expected_message_key
+        assert vm.state.is_verifying is False
+
+        if save_outcome is SaveOutcome.SAVED:
+            # SAVED：唯一进入 set_token_async + 成功回调的路径
+            mock_client.set_token_async.assert_awaited_once_with("valid_token")
+            on_verify_success.assert_called_once_with("valid_token")
+        else:
+            # 未持久化/未生效输入：不替换共享 client、不调用成功回调、不写成功提示
+            mock_client.set_token_async.assert_not_called()
+            mock_client.set_token.assert_not_called()
+            mock_client.probe_api_capabilities.assert_not_called()
+            on_verify_success.assert_not_called()
+            assert vm.state.status_message.key != "tushare_verify_success"
+
+        if save_outcome is SaveOutcome.OVERRIDDEN_BY_ENV:
+            # 覆盖提示保留，且携带用户可操作的 env var 名
+            assert vm.state.status_message.params["env_var"] == "TS_TOKEN"
+
+    @pytest.mark.asyncio
+    async def test_failed_outcome_returns_false_without_success_callback(self, mock_config_handler, mock_thread_pool):
+        """FAILED 专项回归：返回 False、错误提示为已有保存失败 Message、无成功 snack。"""
+        mock_config_handler.save_token.return_value = SaveOutcome.FAILED
+        mock_pro = _make_mock_pro_api()
+        mock_client = MagicMock()
+        mock_client.set_token_async = AsyncMock(return_value=False)
+        on_verify_success = MagicMock()
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api", return_value=mock_pro),
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+        ):
+            vm = _make_vm(mock_config_handler, on_verify_success=on_verify_success)
+            vm.update_token("valid_token")
+            result = await vm.verify_token()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "sys_snack_save_err"
+        mock_client.set_token_async.assert_not_called()
+        on_verify_success.assert_not_called()
+
+
+class TestVerifyTokenOnboardingIntegration:
+    """F04：向导把 verify_token 的返回值缓存为 token 步已验证，失败态不得误标。"""
+
+    @staticmethod
+    def _make_onboarding_vm(monkeypatch, validate_token):
+        from ui.viewmodels.onboarding_view_model import OnboardingViewModel
+
+        monkeypatch.setattr(
+            "ui.viewmodels.onboarding_view_model.ConfigHandler.get_init_history_years",
+            staticmethod(lambda: 3),
+        )
+        monkeypatch.setattr(
+            "ui.viewmodels.onboarding_view_model.ConfigHandler.get_auto_update_time",
+            staticmethod(lambda: "16:30"),
+        )
+        monkeypatch.setattr(
+            "ui.viewmodels.onboarding_view_model.ConfigHandler.is_risk_disclaimer_acknowledged",
+            staticmethod(lambda: False),
+        )
+        onboarding_vm = OnboardingViewModel()
+        onboarding_vm.bind(
+            fn_validate_database=AsyncMock(return_value=True),
+            fn_validate_token=validate_token,
+            fn_validate_model_scenario=AsyncMock(return_value=True),
+            fn_push_schedule_state=MagicMock(),
+            on_complete=AsyncMock(),
+        )
+        onboarding_vm.current_step = 2  # token 步
+        return onboarding_vm
+
+    @pytest.mark.asyncio
+    async def test_failed_outcome_does_not_mark_token_step_validated(
+        self, mock_config_handler, mock_thread_pool, monkeypatch
+    ):
+        mock_config_handler.save_token.return_value = SaveOutcome.FAILED
+        mock_pro = _make_mock_pro_api()
+        mock_client = MagicMock()
+        mock_client.set_token_async = AsyncMock(return_value=False)
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api", return_value=mock_pro),
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+        ):
+            vm = _make_vm(mock_config_handler)
+            vm.update_token("valid_token")
+            onboarding_vm = self._make_onboarding_vm(monkeypatch, vm.verify_token)
+            result = await onboarding_vm.validate_and_persist_current_step()
+
+        assert result is False
+        assert onboarding_vm.is_step_validated("token") is False
+        mock_client.set_token_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_saved_outcome_marks_token_step_validated(self, mock_config_handler, mock_thread_pool, monkeypatch):
+        """对照组：SAVED 时向导正常缓存 token 步已验证，证明绑定链路有效。"""
+        mock_pro = _make_mock_pro_api()
+        mock_client = MagicMock()
+        mock_client.set_token_async = AsyncMock(return_value=False)
+
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api", return_value=mock_pro),
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+        ):
+            vm = _make_vm(mock_config_handler)  # fixture 默认 save_token -> SAVED
+            vm.update_token("valid_token")
+            onboarding_vm = self._make_onboarding_vm(monkeypatch, vm.verify_token)
+            result = await onboarding_vm.validate_and_persist_current_step()
+
+        assert result is True
+        assert onboarding_vm.is_step_validated("token") is True
+        mock_client.set_token_async.assert_awaited_once_with("valid_token")
+
+
 # --- Status helpers ---
 
 

@@ -247,14 +247,24 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
                 ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token),
                 timeout=15,
             )
+            # 穷举 SaveOutcome 四态（见 utils/config/secrets.py）：仅 SAVED 允许进入配置
+            # 激活链（set_token_async + probe + 成功回调 + return True）。未持久化/未生效
+            # 的输入不得替换共享 client，也不得让调用方（向导验证缓存 / 成功 snack）误判
+            # 为已验证。
+            if save_outcome is SaveOutcome.FAILED_NO_SECURE_STORE:
+                # 未生成安全持久化的 token，继续激活/能力探测无意义，直接拒绝
+                self._show_error(Message("secrets_save_failed_no_store"))
+                logger.warning("[TushareConfigVM] No secure store available; token not persisted")
+                return False
             if save_outcome is SaveOutcome.OVERRIDDEN_BY_ENV:
+                # 环境变量优先：本次输入不会生效，保留覆盖提示且不写入共享 client
                 self._show_warning(Message("secrets_save_overridden", {"env_var": "TS_TOKEN"}))
                 logger.warning("[TushareConfigVM] TS_TOKEN env var overrides saved token; save not persisted")
-            elif save_outcome is SaveOutcome.FAILED_NO_SECURE_STORE:
-                self._show_error(Message("secrets_save_failed_no_store"))
-                self._set_loading_state(False)
-                self._set_state(is_verifying=False)
-                # 未生成安全持久化的 token，继续探活/能力探测无意义，直接返回
+                return False
+            if save_outcome is not SaveOutcome.SAVED:
+                # FAILED（含未来新增的失败态，保守拒绝）：token 未持久化，不激活
+                self._show_error(Message("sys_snack_save_err"))
+                logger.warning("[TushareConfigVM] Token save failed; not activating shared client")
                 return False
 
             # TushareClient 必须在 async 上下文（事件循环线程）实例化，经 _capture_loop 捕获
