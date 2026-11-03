@@ -301,6 +301,11 @@ class TaskManager:
             self._tombstones: OrderedDict[str, None] = OrderedDict()
             self._pending_db_deletions: set[str] = set()
             self._inflight_persist: dict[str, int] = {}
+            # D11-F06: 「已确认 DELETE」不等于「该 ID 的生产者已退出、排队写已归零」。
+            # 墓碑淘汰必须按 ID 确认生产者已退出且排队/在途写为 0，否则迟到 runner 的
+            # finally 持久化会在墓碑消失后以 INSERT 复活已删除行。
+            self._active_producers: set[str] = set()
+            self._queued_persist: dict[str, int] = {}
             self._barrier_lock = threading.Lock()
             self._semaphore_needs_reset: bool = False
 
@@ -899,6 +904,9 @@ class TaskManager:
         if task._cancel_event is None:
             task._cancel_event = threading.Event()
 
+        # D11-F06: 登记生产者；墓碑淘汰须等 finally 中最后一次持久化完成后才放行。
+        self._register_active_producer(task.id)
+
         try:
             # Rehydrate the coroutine inside the execution slot (group lock + semaphore)
             async with self._acquire_task_slot(task):
@@ -1007,6 +1015,8 @@ class TaskManager:
             # Release dedup key so same unique_key can be resubmitted (owner 校验，UIR-F12-001)
             self._release_active_key(task.unique_key, task.id)
             self._persist_task(task)
+            # D11-F06: 最后一次持久化完成后再注销生产者，墓碑方可进入淘汰候选。
+            self._unregister_active_producer(task.id)
             self._notify_subscribers()
             self._evict_on_complete(task.id)
             clear_correlation_id()
@@ -1166,19 +1176,48 @@ class TaskManager:
         在 ``_clear_finished_impl`` 中同步调用（loop 线程、无 await），因此从「内存移除」
         到「墓碑生效」之间不存在让新快照漏过的窗口。返回值包含历史遗留的未确认删除项，
         使 DELETE 失败后可在下一次清理重试（失败不当作持久清理成功）。
+
+        D11-F06: 淘汰条件收紧——仅当某墓碑「删除已确认（不在 _pending_db_deletions）、
+        生产者已退出、排队写与在途写均为 0」时才可淘汰。否则迟到 runner 的 finally 写会
+        在墓碑消失后 INSERT 复活已删除行。无满足条件的墓碑时保留超额（正确性优先），仅记
+        warning 说明容量暂时超限；待相关生产者退出/写归零后，后续清理会自然回收。
         """
         with self._barrier_lock:
+            # 先登记待删项再淘汰，避免本次新增的墓碑被当作「已确认删除」提前淘汰。
+            self._pending_db_deletions.update(task_ids)
             for tid in task_ids:
                 self._tombstones[tid] = None
                 self._tombstones.move_to_end(tid)
             if len(self._tombstones) > _MAX_DELETION_TOMBSTONES:
                 excess = len(self._tombstones) - _MAX_DELETION_TOMBSTONES
-                # 仅淘汰已确认删除的墓碑；未确认项必须保留，否则迟到写可绕过屏障重建行
-                removable = [tid for tid in self._tombstones if tid not in self._pending_db_deletions]
+                removable = [
+                    tid
+                    for tid in self._tombstones
+                    if tid not in self._pending_db_deletions
+                    and tid not in self._active_producers
+                    and self._queued_persist.get(tid, 0) == 0
+                    and self._inflight_persist.get(tid, 0) == 0
+                ]
                 for tid in removable[:excess]:
                     del self._tombstones[tid]
-            self._pending_db_deletions.update(task_ids)
+                if len(self._tombstones) > _MAX_DELETION_TOMBSTONES:
+                    logger.warning(
+                        "[TaskManager] Deletion tombstone capacity temporarily exceeded: %s > %s; "
+                        "unfinished producers/queued writes still hold their tombstones (not retained forever: "
+                        "later clears reclaim them once producers exit and writes drain).",
+                        len(self._tombstones),
+                        _MAX_DELETION_TOMBSTONES,
+                    )
             return sorted(self._pending_db_deletions)
+
+    def _register_active_producer(self, task_id: str) -> None:
+        """D11-F06: 登记正在执行的 runner；墓碑淘汰须等其 finally 最后一次写完成后才放行。"""
+        with self._barrier_lock:
+            self._active_producers.add(task_id)
+
+    def _unregister_active_producer(self, task_id: str) -> None:
+        with self._barrier_lock:
+            self._active_producers.discard(task_id)
 
     def _begin_inflight_persist(self, task_id: str) -> bool:
         """UIR-F12-002: 写库准入闸门；已立墓碑的 ID 拒绝旧快照（返回 False）。"""
@@ -1215,10 +1254,27 @@ class TaskManager:
             for tid in task_ids:
                 self._pending_db_deletions.discard(tid)
 
+    def _is_task_tracked_in_memory(self, task_id: str) -> bool:
+        """D11-F06: 该 ID 是否仍受内存跟踪（活动队列或已完成历史）。
+
+        清理先同步从 ``_tasks``/``_history`` 移除，再登记墓碑（墓碑有容量上限）。因此
+        「两处都不存在」等价于该任务已在本会话被撤销：任何迟到持久化都不得写库，否则
+        墓碑最终被淘汰后，INSERT 会复活已删除记录（DELETE 之后已无旧行可被 persist_seq
+        的 WHERE 守卫保护）。正常完成任务先进入 ``_finished_order``/``_history``，不会误判。
+        """
+        return task_id in self._tasks or any(h.id == task_id for h in self._history)
+
     def _persist_task(self, task: AppTask):
         """Fire-and-forget async write to DB. Snapshots values at call time
         to prevent race conditions with later state mutations."""
         if not self._db_ready:
+            return
+        if not self._is_task_tracked_in_memory(task.id):
+            # D11-F06: 迟到写兜底——任务已被撤销，即使墓碑已被容量淘汰也不得重建行。
+            logger.debug(
+                "[TaskManager] Persist skipped: task %s is no longer tracked in memory (revoked)",
+                task.id,
+            )
             return
         snapshot = (
             task.id,
@@ -1283,32 +1339,56 @@ class TaskManager:
             return clipped
 
     def _queue_persist_snapshot(self, snapshot: tuple):
-        """Schedule a tracked persistence write so shutdown can flush deterministically."""
+        """Schedule a tracked persistence write so shutdown can flush deterministically.
+
+        Reservation ownership (D11-F07): this method only reserves (+1). The single
+        owner that releases the reservation is either ``on_drop`` (rejected/launch
+        failure) or ``_tracked_persist``'s ``finally`` (successful schedule). The
+        caller must NOT compensate again based on the return value.
+
+        D11-F06: 同时按 ID 记录排队写（``_queued_persist``），与 reservation 在同一
+        唯一释放点递减，供墓碑淘汰判断「该 ID 已无待写快照」。
+        """
+        task_id = snapshot[0]
         with self._persist_counter_lock:
             self._persist_pending_count += 1
+        with self._barrier_lock:
+            self._queued_persist[task_id] = self._queued_persist.get(task_id, 0) + 1
 
-        def _decrement():
+        def _release():
             with self._persist_counter_lock:
                 self._persist_pending_count = max(0, self._persist_pending_count - 1)
+            with self._barrier_lock:
+                remaining = self._queued_persist.get(task_id, 0) - 1
+                if remaining > 0:
+                    self._queued_persist[task_id] = remaining
+                else:
+                    self._queued_persist.pop(task_id, None)
 
         async def _tracked_persist():
             try:
                 await self._persist_snapshot(snapshot)
             finally:
-                _decrement()
+                _release()
 
-        scheduled = self._schedule_coro(_tracked_persist(), on_drop=_decrement)
-        if not scheduled:
-            _decrement()
+        self._schedule_coro(_tracked_persist(), on_drop=_release)
 
     def _schedule_coro(self, coro, on_drop: Callable[[], None] | None = None):
         """Schedule a coroutine on the main event loop.  Thread-safe.
 
-        If the coroutine cannot be scheduled or fails to launch, on_drop (if provided)
-        is invoked to safely release any reserved counters or resources.
+        Returns ``True`` when the coroutine was handed to the loop (``_launch`` may
+        still drop it later) and ``False`` when it could not be scheduled at all.
+        The return value is informational only: callers must not use it to
+        compensate, because ``on_drop`` (if provided) is invoked at most once on
+        every drop path to safely release any reserved counters or resources.
         """
+        dropped = False
 
         def _handle_drop(msg: str):
+            nonlocal dropped
+            if dropped:
+                return
+            dropped = True
             coro.close()
             if on_drop is not None:
                 try:
@@ -1404,7 +1484,12 @@ class TaskManager:
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _persist_task_async(self, task: AppTask):
-        """Upsert task record (reads current state — use for await-based callers only)."""
+        """Upsert task record (reads current state — use for await-based callers only).
+
+        D11-F06: 本方法只用于停机路径（``cancel_all_running_async``），调用时任务仍在
+        ``_tasks`` 中，不属于「清理后迟到写」，故不做内存撤销判定；迟到写的兜底在
+        ``_persist_task`` 内。
+        """
         params = (
             task.id,
             _serialize_msg_field(task.name),
