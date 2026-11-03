@@ -173,10 +173,23 @@ async def test_cancel_before_popen_does_not_spawn(race_paths, monkeypatch) -> No
         assert release.wait(10), "test did not release blocked worker"
 
     monkeypatch.setattr(service, "_verify_sidecar_sha256", blocked_verify)
+
+    # CI 抖动修复：task.cancel() 只是把 CancelledError 排入事件循环，工作线程
+    # 可能在 ``attempt.request_cancel()`` 执行前就被 release 唤醒并继续 Popen。
+    # 用 spy 等待取消令牌确实置位后再放行工作线程，消除测试自身的时序竞态。
+    cancel_requested = threading.Event()
+    original_request_cancel = svc_module._StartAttempt.request_cancel
+
+    def _request_cancel_spy(attempt: object) -> None:
+        original_request_cancel(attempt)  # pyright: ignore[reportArgumentType]
+        cancel_requested.set()
+
+    monkeypatch.setattr(svc_module._StartAttempt, "request_cancel", _request_cancel_spy)
     try:
         task = asyncio.create_task(service.start())
         await _wait_thread_event(entered, description="verify hook entered")
         task.cancel()
+        await _wait_thread_event(cancel_requested, description="cancel token set")
         release.set()
         with pytest.raises(asyncio.CancelledError) as exc_info:
             await task
