@@ -398,11 +398,23 @@ fn test_restore_explicit_target_layout_is_self_contained() {
         "target runtime password file must be written: {}",
         target_password_path.display()
     );
-    assert_eq!(
-        password::read_password_file(&target_password_path).as_deref(),
-        Some(source_password_plain.as_str()),
+    // R9：用 assert! 避免断言失败时把明文密码写入测试输出。
+    assert!(
+        password::read_password_file(&target_password_path).as_deref()
+            == Some(source_password_plain.as_str()),
         "target runtime must carry the same password"
     );
+    // D16-T03：显式异地恢复写入的 Unix 凭据必须为 0600；Windows DPAPI 实机未在本环境验证。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&target_password_path)
+            .expect("stat target password file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "target runtime password file must be 0600");
+    }
     assert_eq!(
         std::fs::read(&source_password_path).expect("re-read source password"),
         source_password_bytes,

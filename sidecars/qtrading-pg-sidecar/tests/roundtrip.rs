@@ -62,12 +62,33 @@ const POST_DUMP_MARKER_QUERY: &str =
 fn test_setup_run_status_stop_roundtrip() {
     let (_tmp, data_dir) = unique_data_dir("roundtrip_1");
 
+    // D16-T03：预置上次中断遗留的明文 .pwinitdb（合成随机值，非真实凭据），
+    // 首次 run 必须整体覆盖并在 initdb 结束后删除。
+    let runtime = data_dir.parent().unwrap().join("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let pwinitdb = runtime.join("password.pwinitdb");
+    std::fs::write(&pwinitdb, password::generate_password()).unwrap();
+
     // run → ready JSON
     let mut child = spawn_run(&data_dir);
     let ready = wait_for_ready(&mut child, READY_TIMEOUT);
     assert_eq!(ready["status"], "running");
     assert_eq!(ready["database"], "qtrading");
     assert!(ready["port"].as_u64().unwrap_or(0) > 0);
+
+    // D16-T03：initdb 成功路径不得留下明文 pwfile；持久密码文件 Unix 为 0600。
+    assert!(!pwinitdb.exists(), "initdb 后不得残留明文 .pwinitdb");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let password_file = runtime.join("password");
+        let mode = std::fs::metadata(&password_file)
+            .expect("password file after first run")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "持久密码文件必须为 0600");
+    }
 
     // status → running
     let st = status_json(&data_dir);
@@ -352,6 +373,19 @@ fn test_dump_restore_roundtrip() {
         );
     }
     assert!(dump_path.exists(), "dump file should exist");
+
+    // D16-T03：备份由外部 pg_dump 创建，继承 sidecar 进程 umask。只记录模式摘要作为
+    // 运行证据（未加密备份的隐私边界复用既有 F19，不新增断言/缺陷）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dump_path)
+            .expect("stat dump output")
+            .permissions()
+            .mode()
+            & 0o777;
+        eprintln!("[evidence] dump output mode=0o{mode:o} umask 继承自 sidecar 进程");
+    }
 
     // dump 之后继续写入：默认恢复必须丢弃该行，.bak 回退必须保留该行。
     psql_query(&base, port, POST_DUMP_MARKER_SQL);

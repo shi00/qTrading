@@ -451,6 +451,72 @@ pub async fn ensure_binaries(layout: &Layout, progress: &dyn Fn(&str)) -> Result
     Ok(())
 }
 
+/// D16-T03：仅测试构建启用的 pwfile chmod/write 失败注入（不进入发布二进制）。
+///
+/// 线程本地状态避免并行测试串扰；root 无法通过权限位模拟这两条失败路径。
+#[cfg(test)]
+mod pwfile_fault {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Mode {
+        None,
+        Write,
+        // 仅 Unix 的 prepare_pwfile 0600 分支会构造 Chmod；Windows 无权限位，
+        // 若不加平台限定会在 `-D warnings` 下触发 dead_code。
+        #[cfg(unix)]
+        Chmod,
+    }
+
+    thread_local! {
+        static MODE: Cell<Mode> = const { Cell::new(Mode::None) };
+    }
+
+    pub fn set(mode: Mode) {
+        MODE.with(|m| m.set(mode));
+    }
+
+    pub fn current() -> Mode {
+        MODE.with(Cell::get)
+    }
+}
+
+/// 写入 initdb 临时 pwfile：Unix 强制 0600，任何写入/chmod 失败均清理残留并传播错误。
+///
+/// D16-T03：原实现忽略 `set_permissions` 与 `write_all` 的错误，失败时 initdb 可能
+/// 读到空/半截 pwfile；现改为 fail closed（调用方映射 INITDB_FAILED 并清理）。
+fn prepare_pwfile(pwfile: &Path, password: &str) -> std::io::Result<()> {
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(pwfile)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            #[cfg(test)]
+            if pwfile_fault::current() == pwfile_fault::Mode::Chmod {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected pwfile chmod failure (test-only)",
+                ));
+            }
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(test)]
+        if pwfile_fault::current() == pwfile_fault::Mode::Write {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "injected pwfile write failure (test-only)",
+            ));
+        }
+        file.write_all(password.as_bytes())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(pwfile);
+    }
+    result
+}
+
 /// 显式 initdb（§7.4）：--data-checksums + scram-sha-256 + UTF8。失败映射 exit 11。
 ///
 /// F5（检视 06）：persistent `password` 文件在 Windows 上以 DPAPI 加密（`PGPW2:` 前缀），
@@ -469,19 +535,10 @@ pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Resu
     if let Some(parent) = pwfile.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    {
-        let mut f = std::fs::File::create(&pwfile).map_err(|e| {
-            eprintln!("[sidecar] 临时 pwfile 写入失败 {}: {e}", pwfile.display());
-            exit_codes::INITDB_FAILED
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
-        }
-        use std::io::Write;
-        let _ = f.write_all(password.as_bytes());
-    }
+    prepare_pwfile(&pwfile, password).map_err(|e| {
+        eprintln!("[sidecar] 临时 pwfile 写入失败 {}: {e}", pwfile.display());
+        exit_codes::INITDB_FAILED
+    })?;
 
     let data = layout.data_dir.to_string_lossy().into_owned();
     let pwfile_str = pwfile.to_string_lossy().into_owned();
@@ -614,6 +671,140 @@ mod tests {
         std::fs::write(dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::write(dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(dir.join("postgresql.conf"), "# conf\n").unwrap();
+    }
+
+    /// D16-T03：pwfile 故障注入 guard（Drop 复位，避免并行/同线程串扰）。
+    struct PwfileFaultGuard;
+
+    impl PwfileFaultGuard {
+        fn set(mode: pwfile_fault::Mode) -> Self {
+            pwfile_fault::set(mode);
+            Self
+        }
+    }
+
+    impl Drop for PwfileFaultGuard {
+        fn drop(&mut self) {
+            pwfile_fault::set(pwfile_fault::Mode::None);
+        }
+    }
+
+    type PwfileMode = pwfile_fault::Mode;
+
+    #[cfg(unix)]
+    fn fake_initdb_install(dir: &Path, script: &str) -> Layout {
+        use std::os::unix::fs::PermissionsExt;
+        let layout = Layout::from_data_dir(&dir.join("data"), None, None, None);
+        let bin = layout.install_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let initdb = bin.join("initdb");
+        std::fs::write(&initdb, script).unwrap();
+        std::fs::set_permissions(&initdb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        layout
+    }
+
+    /// D16-T03：pwfile 在 initdb 使用期间为明文，但权限必须是 owner-only；上次中断
+    /// 残留的同名文件会被新密码覆盖（不得沿用旧内容）。
+    #[cfg(unix)]
+    #[test]
+    fn prepare_pwfile_is_owner_only_and_overwrites_residual() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_tmp("pwfile-owner-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pwfile = dir.join("password.pwinitdb");
+        std::fs::write(&pwfile, b"stale").unwrap();
+
+        let pwd = crate::password::generate_password();
+        prepare_pwfile(&pwfile, &pwd).unwrap();
+
+        let raw = std::fs::read_to_string(&pwfile).unwrap();
+        assert!(raw == pwd, "残留 pwfile 必须被新密码整体覆盖");
+        let mode = std::fs::metadata(&pwfile).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "initdb 临时 pwfile 必须为 0600");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：pwfile 写入失败必须传播错误并清理半截文件。
+    #[test]
+    fn prepare_pwfile_write_failure_cleans_residual() {
+        let dir = unique_tmp("pwfile-write-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pwfile = dir.join("password.pwinitdb");
+        std::fs::write(&pwfile, b"stale").unwrap();
+
+        let _guard = PwfileFaultGuard::set(PwfileMode::Write);
+        let err = prepare_pwfile(&pwfile, &crate::password::generate_password()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+        assert!(!pwfile.exists(), "写入失败后 pwfile 必须被清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：pwfile chmod 失败必须 fail closed，不得继续用可能全局可读的明文文件。
+    #[cfg(unix)]
+    #[test]
+    fn prepare_pwfile_chmod_failure_cleans_residual() {
+        let dir = unique_tmp("pwfile-chmod-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pwfile = dir.join("password.pwinitdb");
+
+        let _guard = PwfileFaultGuard::set(PwfileMode::Chmod);
+        let err = prepare_pwfile(&pwfile, &crate::password::generate_password()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!pwfile.exists(), "chmod 失败后 pwfile 必须被清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：initdb 成功后临时 pwfile 必须删除，不留下明文凭据。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_initdb_removes_pwfile_after_success() {
+        let dir = unique_tmp("initdb-success");
+        let layout = fake_initdb_install(&dir, "#!/bin/sh\nexit 0\n");
+        let pwfile = layout.password_file.with_extension("pwinitdb");
+
+        run_initdb(&layout, "postgres", &crate::password::generate_password())
+            .await
+            .unwrap();
+
+        assert!(!pwfile.exists(), "initdb 成功后明文 pwfile 必须被删除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：initdb 非零退出时临时 pwfile 同样必须删除（失败不留明文）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_initdb_removes_pwfile_after_failure() {
+        let dir = unique_tmp("initdb-failure");
+        let layout = fake_initdb_install(&dir, "#!/bin/sh\nexit 1\n");
+        let pwfile = layout.password_file.with_extension("pwinitdb");
+
+        assert_eq!(
+            run_initdb(&layout, "postgres", &crate::password::generate_password())
+                .await
+                .unwrap_err(),
+            exit_codes::INITDB_FAILED
+        );
+        assert!(!pwfile.exists(), "initdb 失败后明文 pwfile 必须被删除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：initdb 可执行文件缺失（exec 失败）时也不得遗留 pwfile。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_initdb_removes_pwfile_after_exec_error() {
+        let dir = unique_tmp("initdb-exec-error");
+        let layout = fake_initdb_install(&dir, "#!/bin/sh\nexit 0\n");
+        std::fs::remove_file(layout.install_dir.join("bin").join("initdb")).unwrap();
+        let pwfile = layout.password_file.with_extension("pwinitdb");
+
+        assert_eq!(
+            run_initdb(&layout, "postgres", &crate::password::generate_password())
+                .await
+                .unwrap_err(),
+            exit_codes::INITDB_FAILED
+        );
+        assert!(!pwfile.exists(), "exec 失败后明文 pwfile 必须被删除");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
