@@ -935,7 +935,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
 
         F31/F02：回执身份绑定登记时的草稿代与编辑版本——草稿已重置时仅确认磁盘结果
         并清旗标；同一草稿在等待期间被编辑时，确认 A 已提交但不清理 B 的 dirty /
-        不关闭编辑器。非属主（槽位被后继保存接管）分支不在此处改动（独立范围）。
+        不关闭编辑器。F03：等待期间槽位被后继保存 B 接管时，A 的回执只确认磁盘结果，
+        不得清除 B 的公开恢复旗标 / 消息 / save_state / dirty。
         """
         if not self._state.commit_unknown_pending or self._pending_operation_id is None:
             return False
@@ -966,9 +967,12 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         # 非属主时仅确认磁盘结果，不回写任何状态机字段
         still_owner = self._pending_operation_id == resolved_operation_id
         if outcome.status == "committed":
-            generation_current = (
-                still_owner and pending_generation is not None and pending_generation == self._draft_generation
-            )
+            if not still_owner:
+                # F03：槽位已属后继保存 B——A 的回执只确认磁盘结果，不清 B 的恢复旗标、
+                # 不覆盖 B 的消息、不改 B 的 save_state / dirty（B 仍按自身回执恢复）
+                await self._safe_refresh_snapshot()
+                return True
+            generation_current = pending_generation is not None and pending_generation == self._draft_generation
             content_current = generation_current and pending_edit_revision == self._draft_edit_revision
             self._release_pending_save_identity(resolved_operation_id)
             if content_current:
@@ -989,6 +993,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                     message=None,
                 )
             else:
+                # F03：同属主但草稿已换代（start_add / edit 重置）——仅清 A 自己的未知旗标；
+                # 新草稿的 save_state / dirty 归重置命令所有，不在此覆盖
                 self._set_state(commit_unknown_pending=False, message=Message("model_connection_saved"))
             # 状态先于 refresh 应用：refresh 期间取消 / 草稿重置不再悬挂恢复态
             await self._safe_refresh_snapshot()
