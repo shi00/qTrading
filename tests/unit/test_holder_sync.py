@@ -1534,6 +1534,7 @@ class TestRunImplFullSuccessPaths:
         strategy._sync_top10_holders = AsyncMock(return_value=20)
         strategy._sync_pledge_stat = AsyncMock(return_value=(5, datetime.date(2024, 6, 14)))
         strategy._sync_share_float = AsyncMock(return_value=(3, datetime.date(2024, 6, 14)))
+        strategy._sync_pledge_detail = AsyncMock(return_value=(0, None))
         strategy._sync_stk_holdertrade = AsyncMock(return_value=(2, datetime.date(2024, 6, 14)))
         result = await strategy._run_impl()
         assert result.status == "success"
@@ -1553,6 +1554,7 @@ class TestRunImplFullSuccessPaths:
         strategy._sync_top10_holders = AsyncMock(return_value=20)
         strategy._sync_pledge_stat = AsyncMock(return_value=(0, None))  # 跳过
         strategy._sync_share_float = AsyncMock(return_value=(0, None))  # 跳过
+        strategy._sync_pledge_detail = AsyncMock(return_value=(0, None))  # 跳过
         strategy._sync_stk_holdertrade = AsyncMock(return_value=(0, None))  # 跳过
         result = await strategy._run_impl()
         assert result.status == "success"
@@ -1590,6 +1592,9 @@ class TestRunImplTruncatedNoWatermark:
         assert "stk_holdernumber" not in advanced_tables
         assert "pledge_stat" not in advanced_tables
         assert result.added == 0
+        # D05-F05：截断（-1）不是成功，整体状态必须如实为 partial 并登记目标
+        assert result.status == SyncStatus.PARTIAL.value
+        assert result.errors == ["stk_holdernumber period=20240331", "pledge_stat"]
 
 
 class TestRunImplSystemSeverityReraises:
@@ -2771,3 +2776,140 @@ class TestSyncTop10HoldersPartialFailure:
         # 部分失败应传播到 _run_impl 的 result
         assert result.status == SyncStatus.PARTIAL.value
         assert any("FAIL.SZ" in err for err in result.errors)
+
+
+class TestRunImplPartialStatus:
+    """D05-F05：少量表失败（1~4 个 -1）不得回落默认 success。
+
+    中止阈值（_MAX_ERRORS=5）与最终判据分离：任一 -1 登记失败目标，errors>0
+    且无更严重终态即 partial；5 次仍提前中止；取消/失败终态不被覆盖。
+    """
+
+    def _make_strategy(self, quarter_ends=("20240331",)):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_recent_quarter_ends = MagicMock(return_value=list(quarter_ends))
+        strategy._sync_pledge_stat = AsyncMock(return_value=(5, datetime.date(2024, 6, 14)))
+        strategy._sync_share_float = AsyncMock(return_value=(3, datetime.date(2024, 6, 14)))
+        strategy._sync_pledge_detail = AsyncMock(return_value=(2, datetime.date(2024, 6, 14)))
+        strategy._sync_stk_holdertrade = AsyncMock(return_value=(1, datetime.date(2024, 6, 14)))
+        return strategy
+
+    @pytest.mark.asyncio
+    async def test_single_failure_reports_partial_with_target(self):
+        strategy = self._make_strategy()
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+
+        result = await strategy._run_impl()
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert result.errors == ["stk_holdernumber period=20240331"]
+        # 其余表继续被补齐（errors<5 不提前中止），并保留已同步计数
+        assert result.added == 31
+        advanced = [c.args[0] for c in strategy.context.cache.sync_dao.update_sync_status.await_args_list]
+        assert "pledge_stat" in advanced
+        assert "stk_holdernumber" not in advanced
+
+    @pytest.mark.asyncio
+    async def test_two_failures_report_partial_with_targets(self):
+        strategy = self._make_strategy()
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
+        strategy._sync_top10_holders = AsyncMock(return_value=-1)
+
+        result = await strategy._run_impl()
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert result.errors == [
+            "stk_holdernumber period=20240331",
+            "top10_holders period=20240331",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_four_failures_report_partial_without_aborting(self):
+        strategy = self._make_strategy(("20240331", "20231231"))
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
+        strategy._sync_top10_holders = AsyncMock(return_value=-1)
+
+        result = await strategy._run_impl()
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert result.errors == [
+            "stk_holdernumber period=20240331",
+            "top10_holders period=20240331",
+            "stk_holdernumber period=20231231",
+            "top10_holders period=20231231",
+        ]
+        # 4 < _MAX_ERRORS：后续 pledge/share/pledge_detail/holdertrade 仍执行
+        advanced = [c.args[0] for c in strategy.context.cache.sync_dao.update_sync_status.await_args_list]
+        assert {"pledge_stat", "share_float", "pledge_detail", "stk_holdertrade"} <= set(advanced)
+
+    @pytest.mark.asyncio
+    async def test_five_failures_still_abort_early(self):
+        strategy = self._make_strategy(("20240331", "20231231"))
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
+        strategy._sync_top10_holders = AsyncMock(return_value=-1)
+        strategy._sync_pledge_stat = AsyncMock(return_value=(-1, None))
+
+        result = await strategy._run_impl()
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert "Aborted after 5 errors" in result.errors
+        assert len(result.errors) == 6  # 5 个失败目标 + abort 标记
+        strategy._sync_share_float.assert_not_awaited()
+        strategy._sync_pledge_detail.assert_not_awaited()
+        strategy._sync_stk_holdertrade.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_zero_failures_stays_success_with_empty_errors(self):
+        strategy = self._make_strategy()
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+
+        result = await strategy._run_impl()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.errors == []
+        assert result.added == 10 + 20 + 5 + 3 + 2 + 1
+
+    @pytest.mark.asyncio
+    async def test_top10_internal_partial_does_not_fall_back_to_success(self):
+        strategy = self._make_strategy()
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=10)
+
+        async def _top10_partial(period, result):
+            result.status = SyncStatus.PARTIAL.value
+            return 20
+
+        strategy._sync_top10_holders = _top10_partial
+
+        result = await strategy._run_impl()
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert result.errors == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_takes_precedence_over_accumulated_errors(self):
+        strategy = self._make_strategy()
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)
+        strategy._sync_top10_holders = AsyncMock(return_value=20)
+        check_count = 0
+
+        def fake_check(result):
+            nonlocal check_count
+            check_count += 1
+            if check_count >= 2:
+                strategy._cancelled = True
+                result.status = SyncStatus.CANCELLED.value
+                return True
+            return False
+
+        strategy._check_cancelled = fake_check
+        result = await strategy._run_impl()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        # 取消产生的 -1 仍登记，但终态不得被 partial 覆盖
+        assert result.errors == ["stk_holdernumber period=20240331"]
+        strategy._sync_pledge_stat.assert_not_awaited()

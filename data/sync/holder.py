@@ -111,6 +111,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 count = await self._sync_stk_holdernumber(qe)
                 if count < 0:
                     errors += 1
+                    result.errors.append(f"stk_holdernumber period={qe}")
                 else:
                     result.added += count
                     if not self._cancelled:
@@ -127,6 +128,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 count = await self._sync_top10_holders(qe, result)
                 if count < 0:
                     errors += 1
+                    result.errors.append(f"top10_holders period={qe}")
                 else:
                     result.added += count
                     if not self._cancelled:
@@ -144,6 +146,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 count, actual_date = await self._sync_pledge_stat()
                 if count < 0:
                     errors += 1
+                    result.errors.append("pledge_stat")
                 elif count > 0:
                     result.added += count
                     await self.context.cache.sync_dao.update_sync_status(
@@ -156,6 +159,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 count, actual_date = await self._sync_share_float()
                 if count < 0:
                     errors += 1
+                    result.errors.append("share_float")
                 elif count > 0:
                     result.added += count
                     await self.context.cache.sync_dao.update_sync_status(
@@ -168,6 +172,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 count, actual_date = await self._sync_pledge_detail()
                 if count < 0:
                     errors += 1
+                    result.errors.append("pledge_detail")
                 elif count > 0:
                     result.added += count
                     await self.context.cache.sync_dao.update_sync_status(
@@ -180,6 +185,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 count, actual_date = await self._sync_stk_holdertrade()
                 if count < 0:
                     errors += 1
+                    result.errors.append("stk_holdertrade")
                 elif count > 0:
                     result.added += count
                     await self.context.cache.sync_dao.update_sync_status(
@@ -188,17 +194,31 @@ class HolderSyncStrategy(ISyncStrategy):
                         count,
                     )
 
-            if errors >= _MAX_ERRORS:
-                result.status = "partial"
-                result.errors.append(f"Aborted after {errors} errors")
-            elif self._cancelled:
-                result.status = "cancelled"
+            # D05-F05：中止阈值与最终判据分离。errors >= _MAX_ERRORS 仍提前中止，
+            # 但任一 -1（含分页截断、权限拒绝）都已登记失败目标；只要 errors>0
+            # 且无更严重终态，就必须如实上报 partial，不得回落默认 success。
+            # 优先级：failed/cancelled 不得被覆盖（取消优先于 error 累积）。
+            if result.status != "failed":
+                if self._cancelled or result.status == "cancelled":
+                    result.status = "cancelled"
+                elif errors >= _MAX_ERRORS:
+                    result.status = "partial"
+                    result.errors.append(f"Aborted after {errors} errors")
+                elif errors > 0 or result.status == "partial":
+                    result.status = "partial"
 
             if result.status == "cancelled":
                 logger.info(
                     "[HolderSync] Run | ⚠️ Cancelled. Synced=%s, Errors=%s",
                     result.added,
                     errors,
+                )
+            elif result.status == "partial":
+                logger.warning(
+                    "[HolderSync] Run | ⚠️ Partial. Synced=%s, Errors=%s, failed=%s",
+                    result.added,
+                    errors,
+                    result.errors,
                 )
             else:
                 logger.info(
