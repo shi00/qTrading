@@ -54,9 +54,11 @@ from ui.viewmodels.model_usage_view_model import (
     PRICING_STATUS_EMPTY,
     PRICING_STATUS_KNOWN,
     PRICING_STATUS_PARTIAL,
+    AttemptRow,
     BudgetSummary,
     ModelUsageState,
     ModelUsageViewModel,
+    MonthUsageRow,
     month_pricing_status,
 )
 from utils.sanitizers import DataSanitizer
@@ -620,17 +622,17 @@ def _build_release_controls(state: ModelUsageState, vm: ModelUsageViewModel) -> 
 
     无可解除对象（缺 reservation_id）时返回空列表——不渲染无目标按钮（R21 不伪装）。
     """
-    releasable = [res for res in state.unconfirmed_reservations if str(res.get("reservation_id") or "")]
+    releasable = [res for res in state.unconfirmed_reservations if res.reservation_id]
     if not releasable:
         return []
     controls: list[ft.Control] = [_hint_text("model_usage_release_hint")]
     for res in releasable:
-        reservation_id = str(res["reservation_id"])
+        reservation_id = res.reservation_id
         target = I18n.get(
             "model_usage_unconfirmed_item",
-            month=res.get("billing_month") or I18n.get("model_usage_unknown"),
-            task=res.get("task_id") or I18n.get("model_usage_unknown"),
-            amount=_fmt_decimal(_reservation_amount(res.get("amount_cny"))),
+            month=res.billing_month or I18n.get("model_usage_unknown"),
+            task=res.task_id or I18n.get("model_usage_unknown"),
+            amount=_fmt_decimal(_reservation_amount(res.amount_cny)),
         )
         controls.append(
             ft.Row(
@@ -745,19 +747,19 @@ def _month_cost_text(value: Any, pricing_status: str = PRICING_STATUS_KNOWN) -> 
     return amount
 
 
-def _month_row_text(row: dict[str, Any], summary: BudgetSummary | None = None) -> str:
+def _month_row_text(row: MonthUsageRow, summary: BudgetSummary | None = None) -> str:
     """月汇总场景行文本（F36）：场景 / 触发 / 请求 / 尝试 / 成功 / 已知费用。
 
     ``summary`` 为该查看月的计价完整性快照；缺省（无元数据）按行内金额原值展示。
     """
     return I18n.get(
         "model_usage_month_row",
-        scenario=str(row.get("scenario_id") or row.get("grouping_key") or I18n.get("model_usage_unknown")),
-        trigger=str(row.get("trigger") or "-"),
-        invocations=str(row.get("invocation_count") if row.get("invocation_count") is not None else "-"),
-        attempts=str(row.get("attempt_count") if row.get("attempt_count") is not None else "-"),
-        succeeded=str(row.get("succeeded_count") if row.get("succeeded_count") is not None else "-"),
-        cost=_month_cost_text(row.get("cost_cny"), month_pricing_status(summary)),
+        scenario=str(row.scenario_id or row.grouping_key or I18n.get("model_usage_unknown")),
+        trigger=str(row.trigger or "-"),
+        invocations=str(row.invocation_count if row.invocation_count is not None else "-"),
+        attempts=str(row.attempt_count if row.attempt_count is not None else "-"),
+        succeeded=str(row.succeeded_count if row.succeeded_count is not None else "-"),
+        cost=_month_cost_text(row.cost_cny, month_pricing_status(summary)),
     )
 
 
@@ -839,7 +841,7 @@ def _build_month_summary_section(state: ModelUsageState, vm: ModelUsageViewModel
     return ft.Column(controls, spacing=AppStyles.SPACING_SM)
 
 
-def _build_attempts(attempts: Sequence[dict[str, Any]]) -> list[ft.Control]:
+def _build_attempts(attempts: Sequence[AttemptRow]) -> list[ft.Control]:
     """展开尝试明细（§11.5）：候选序号 / 重试 / 状态 / 模型 / 失败·跳过原因 / 费用快照。
 
     跳过行（``executed=False``）文字标「未执行」、不展示虚构费用（§10.1 / R21）；
@@ -848,26 +850,26 @@ def _build_attempts(attempts: Sequence[dict[str, Any]]) -> list[ft.Control]:
     """
     controls: list[ft.Control] = []
     for a in attempts:
-        executed = bool(a.get("executed", True))
+        executed = a.executed
         if executed:
-            status_text = _enum_text(a.get("status"), _ATTEMPT_STATUS_KEYS, "model_usage_terminal_unknown")
+            status_text = _enum_text(a.status, _ATTEMPT_STATUS_KEYS, "model_usage_terminal_unknown")
         else:
             status_text = I18n.get("model_usage_attempt_not_executed")
         parts = [
             I18n.get(
                 "model_usage_attempt_line",
-                index=a.get("candidate_index", ""),
+                index=a.candidate_index if a.candidate_index is not None else "",
                 status=status_text,
-                model=a.get("actual_model") or a.get("configured_model") or "",
+                model=a.actual_model or a.configured_model or "",
             )
         ]
-        retry = a.get("retry_index")
+        retry = a.retry_index
         if retry:
             parts.append(I18n.get("model_usage_attempt_retry", retry=retry))
-        reason = a.get("reason")
+        reason = a.reason
         if reason:
             parts.append(I18n.get("model_usage_attempt_reason", reason=reason))
-        cost = a.get("cost_cny")
+        cost = a.cost_cny
         if executed and cost is not None and str(cost) != "":
             parts.append(I18n.get("model_usage_attempt_cost", cost=cost))
         controls.append(
@@ -885,7 +887,7 @@ def _build_request_rows(state: ModelUsageState, vm: ModelUsageViewModel) -> list
         return [_empty_text("model_usage_no_requests")]
     rows: list[ft.Control] = []
     for req in state.requests:
-        rid = str(req.get("invocation_id") or "")
+        rid = str(req.invocation_id or "")
         expanded = bool(rid) and state.expanded_id == rid
         detail: list[ft.Control] = []
         if expanded:
@@ -898,18 +900,18 @@ def _build_request_rows(state: ModelUsageState, vm: ModelUsageViewModel) -> list
                         ft.Row(
                             [
                                 ft.Text(
-                                    str(req.get("created_at") or ""),
+                                    str(req.created_at or ""),
                                     size=AppStyles.FONT_SIZE_CAPTION,
                                     color=AppColors.TEXT_SECONDARY,
                                 ),
                                 ft.Text(
-                                    str(req.get("scenario_id") or ""),
+                                    str(req.scenario_id or ""),
                                     size=AppStyles.FONT_SIZE_BODY_SM,
                                     color=AppColors.TEXT_PRIMARY,
                                 ),
                                 ft.Text(
                                     _enum_text(
-                                        req.get("terminal_status"),
+                                        req.terminal_status,
                                         _TERMINAL_FILTER_KEYS,
                                         "model_usage_terminal_unknown",
                                     ),
@@ -918,7 +920,7 @@ def _build_request_rows(state: ModelUsageState, vm: ModelUsageViewModel) -> list
                                 ),
                                 ft.Text(
                                     _enum_text(
-                                        req.get("cost_status"),
+                                        req.cost_status,
                                         _COST_FILTER_KEYS,
                                         "model_usage_cost_unknown",
                                     ),

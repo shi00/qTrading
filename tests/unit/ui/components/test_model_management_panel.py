@@ -69,9 +69,13 @@ from ui.viewmodels.model_usage_view_model import (
     EXPORT_SCOPE_ALL,
     EXPORT_SCOPE_PAGE,
     ORIGIN_TEST,
+    AttemptRow,
     BudgetSummary,
     ModelUsageState,
     ModelUsageViewModel,
+    MonthUsageRow,
+    RequestRow,
+    UnconfirmedReservationRow,
     UsageFilters,
 )
 
@@ -115,7 +119,7 @@ class TestBudgetSummaryReleaseButton:
     def test_button_shown_when_unconfirmed_positive_with_details(self):
         state = _state(
             amount=Decimal("0.02"),
-            reservations=({"reservation_id": "res-1", "task_id": "sentiment", "amount_cny": "0.02"},),
+            reservations=(UnconfirmedReservationRow(reservation_id="res-1", task_id="sentiment", amount_cny="0.02"),),
         )
         col = _build_budget_summary(state, MagicMock())
         rows = _release_rows(col)
@@ -134,8 +138,8 @@ class TestBudgetSummaryReleaseButton:
         state = _state(
             amount=Decimal("0.04"),
             reservations=(
-                {"reservation_id": "res-1", "task_id": "sentiment", "amount_cny": "0.02"},
-                {"reservation_id": "res-2", "task_id": "news", "amount_cny": "0.02"},
+                UnconfirmedReservationRow(reservation_id="res-1", task_id="sentiment", amount_cny="0.02"),
+                UnconfirmedReservationRow(reservation_id="res-2", task_id="news", amount_cny="0.02"),
             ),
         )
         col = _build_budget_summary(state, MagicMock())
@@ -146,19 +150,21 @@ class TestBudgetSummaryReleaseButton:
 
     def test_release_entry_not_gated_by_zero_amount(self):
         """B1：未确认金额为 0 但存在 held_unconfirmed 明细时仍渲染解除入口。"""
-        state = _state(amount=Decimal("0"), reservations=({"reservation_id": "res-1"},))
+        state = _state(amount=Decimal("0"), reservations=(UnconfirmedReservationRow(reservation_id="res-1"),))
         col = _build_budget_summary(state, MagicMock())
         assert len(_release_rows(col)) == 2
 
     def test_release_entry_not_gated_by_none_amount(self):
         """B1：未确认金额缺失（None）时仍渲染解除入口，不被数值遮蔽。"""
-        state = _state(amount=None, reservations=({"reservation_id": "res-1"},))
+        state = _state(amount=None, reservations=(UnconfirmedReservationRow(reservation_id="res-1"),))
         col = _build_budget_summary(state, MagicMock())
         assert len(_release_rows(col)) == 2
 
     def test_no_button_without_reservation_id(self):
         """无 reservation_id 的明细不渲染按钮（不伪装为可解除对象）。"""
-        state = _state(amount=Decimal("0.02"), reservations=({"task_id": "sentiment"},))
+        state = _state(
+            amount=Decimal("0.02"), reservations=(UnconfirmedReservationRow(reservation_id="", task_id="sentiment"),)
+        )
         col = _build_budget_summary(state, MagicMock())
         assert _release_rows(col) == []
 
@@ -169,12 +175,12 @@ class TestReleaseControls:
         state = _state(
             amount=Decimal("0.02"),
             reservations=(
-                {
-                    "reservation_id": "res-1",
-                    "billing_month": "2026-10",
-                    "task_id": "sentiment",
-                    "amount_cny": "0.02",
-                },
+                UnconfirmedReservationRow(
+                    reservation_id="res-1",
+                    billing_month="2026-10",
+                    task_id="sentiment",
+                    amount_cny="0.02",
+                ),
             ),
         )
         controls = _build_release_controls(state, MagicMock())
@@ -187,7 +193,7 @@ class TestReleaseControls:
         """缺失月份回退「未知」，不伪造成具体月份（R21）。"""
         state = _state(
             amount=None,
-            reservations=({"reservation_id": "res-1", "task_id": "sentiment"},),
+            reservations=(UnconfirmedReservationRow(reservation_id="res-1", task_id="sentiment"),),
         )
         controls = _build_release_controls(state, MagicMock())
         assert I18n.get("model_usage_unknown") in controls[1].controls[0].value  # type: ignore[attr-defined]
@@ -411,7 +417,7 @@ class TestUsageView:
             summary_month="202601",
             month_draft="202601",
             summary_budget=BudgetSummary(known_cny=Decimal("0.50")),
-            monthly_rows=({"scenario_id": "stock_analysis", "trigger": "manual"},),
+            monthly_rows=(MonthUsageRow(scenario_id="stock_analysis", trigger="manual"),),
         )
         view = _build_usage_view(state, vm, [], None, MagicMock())
         section = view.controls[0]
@@ -429,30 +435,30 @@ class TestUsageView:
 
     def test_month_row_text_formats_fields(self):
         """月汇总行文本：字段缺失显式「-」/「未知」，金额两位小数（R21）。"""
-        row = {
-            "scenario_id": "stock_analysis",
-            "trigger": "manual",
-            "invocation_count": 3,
-            "succeeded_count": 3,
-            "cost_cny": "0.5",
-        }
+        row = MonthUsageRow(
+            scenario_id="stock_analysis",
+            trigger="manual",
+            invocation_count=3,
+            succeeded_count=3,
+            cost_cny=Decimal("0.5"),
+        )
         text = panel_module._month_row_text(row)
         assert "stock_analysis" in text
         assert "3" in text
         assert "0.50" in text
-        assert I18n.get("model_usage_unknown") in panel_module._month_row_text({"scenario_id": None})
-        assert "-" in panel_module._month_row_text({"scenario_id": "s"})  # trigger 缺失
+        assert I18n.get("model_usage_unknown") in panel_module._month_row_text(MonthUsageRow())
+        assert "-" in panel_module._month_row_text(MonthUsageRow(scenario_id="s"))  # trigger 缺失
 
     def test_all_unpriced_month_row_shows_unknown_not_zero(self):
         """UIR-F19-002（R21）：全未计价月不得把未知渲染为「费用 0.00」。"""
-        row = {
-            "scenario_id": "stock_analysis",
-            "trigger": "manual",
-            "invocation_count": 2,
-            "attempt_count": 2,
-            "succeeded_count": 1,
-            "cost_cny": Decimal("0"),
-        }
+        row = MonthUsageRow(
+            scenario_id="stock_analysis",
+            trigger="manual",
+            invocation_count=2,
+            attempt_count=2,
+            succeeded_count=1,
+            cost_cny=Decimal("0"),
+        )
         summary = BudgetSummary(known_cny=Decimal("0"), unpriced_attempts=2, free_attempts=0)
         text = panel_module._month_row_text(row, summary)
         assert I18n.get("model_usage_cost_unknown") in text
@@ -460,7 +466,7 @@ class TestUsageView:
 
     def test_partially_priced_month_row_shows_known_plus_unknown(self):
         """UIR-F19-002：部分计价行显示已知金额并显式标注未计价，未知不并入已知。"""
-        row = {"scenario_id": "stock_analysis", "cost_cny": Decimal("0.50")}
+        row = MonthUsageRow(scenario_id="stock_analysis", cost_cny=Decimal("0.50"))
         summary = BudgetSummary(known_cny=Decimal("0.50"), unpriced_attempts=1, free_attempts=0)
         text = panel_module._month_row_text(row, summary)
         assert I18n.get("model_usage_month_cost_partial", known="0.50 CNY") in text
@@ -468,7 +474,7 @@ class TestUsageView:
 
     def test_fully_priced_free_month_row_shows_zero(self):
         """UIR-F19-002：已计价且合计为零（免费模型）是事实零，可显示 0.00。"""
-        row = {"scenario_id": "stock_analysis", "cost_cny": Decimal("0")}
+        row = MonthUsageRow(scenario_id="stock_analysis", cost_cny=Decimal("0"))
         summary = BudgetSummary(known_cny=Decimal("0"), unpriced_attempts=0, free_attempts=2)
         text = panel_module._month_row_text(row, summary)
         assert "0.00 CNY" in text
@@ -488,7 +494,7 @@ class TestUsageView:
             month_draft="202601",
             summary_budget=summary,
             monthly_summary_mode=True,
-            monthly_rows=({"scenario_id": "stock_analysis", "cost_cny": Decimal("0")},),
+            monthly_rows=(MonthUsageRow(scenario_id="stock_analysis", cost_cny=Decimal("0")),),
         )
         view = _build_usage_view(state, MagicMock(), [], None, MagicMock())
         section = cast(ft.Column, view.controls[0])
@@ -669,16 +675,16 @@ class TestAttemptsDetail:
     def test_skipped_row_labeled_not_executed_without_fabricated_cost(self):
         controls = _build_attempts(
             [
-                {
-                    "kind": "skipped",
-                    "executed": False,
-                    "candidate_index": 1,
-                    "status": "skipped",
-                    "reason": "budget_blocked",
-                    "cost_cny": None,
-                    "actual_model": None,
-                    "configured_model": "glm-4-air",
-                }
+                AttemptRow(
+                    kind="skipped",
+                    executed=False,
+                    candidate_index=1,
+                    status="skipped",
+                    reason="budget_blocked",
+                    cost_cny=None,
+                    actual_model=None,
+                    configured_model="glm-4-air",
+                )
             ]
         )
         line = controls[0].value
@@ -691,17 +697,17 @@ class TestAttemptsDetail:
     def test_executed_row_localizes_status_and_shows_retry_reason_cost(self):
         controls = _build_attempts(
             [
-                {
-                    "kind": "attempt",
-                    "executed": True,
-                    "candidate_index": 0,
-                    "retry_index": 1,
-                    "status": "failed",
-                    "reason": "timeout",
-                    "cost_cny": "0.03",
-                    "actual_model": "glm-4-air",
-                    "configured_model": None,
-                }
+                AttemptRow(
+                    kind="attempt",
+                    executed=True,
+                    candidate_index=0,
+                    retry_index=1,
+                    status="failed",
+                    reason="timeout",
+                    cost_cny=Decimal("0.03"),
+                    actual_model="glm-4-air",
+                    configured_model=None,
+                )
             ]
         )
         line = controls[0].value
@@ -712,7 +718,7 @@ class TestAttemptsDetail:
         assert I18n.get("model_usage_attempt_cost", cost="0.03") in line
 
     def test_dispatched_attempt_maps_to_running(self):
-        controls = _build_attempts([{"executed": True, "candidate_index": 0, "status": "dispatched"}])
+        controls = _build_attempts([AttemptRow(executed=True, candidate_index=0, status="dispatched")])
         assert I18n.get("model_usage_terminal_running") in controls[0].value
 
 
@@ -722,13 +728,13 @@ class TestRequestRowEnumLocalization:
     def test_terminal_and_cost_status_localized(self):
         state = _usage_state(
             requests=(
-                {
-                    "invocation_id": "inv-1",
-                    "created_at": "2026-10-19T00:00:00",
-                    "scenario_id": "news_risk",
-                    "terminal_status": "failed",
-                    "cost_status": "partial",
-                },
+                RequestRow(
+                    invocation_id="inv-1",
+                    created_at=dt.datetime(2026, 10, 19),
+                    scenario_id="news_risk",
+                    terminal_status="failed",
+                    cost_status="partial",
+                ),
             )
         )
         texts = _texts(_build_request_rows(state, MagicMock()))
@@ -740,7 +746,12 @@ class TestRequestRowEnumLocalization:
     def test_unknown_status_falls_back_to_explicit_unknown(self):
         state = _usage_state(
             requests=(
-                {"invocation_id": "inv-1", "scenario_id": "news_risk", "terminal_status": "bogus", "cost_status": ""},
+                RequestRow(
+                    invocation_id="inv-1",
+                    scenario_id="news_risk",
+                    terminal_status="bogus",
+                    cost_status="",
+                ),
             )
         )
         texts = _texts(_build_request_rows(state, MagicMock()))
@@ -752,12 +763,12 @@ class TestRequestRowEnumLocalization:
         """F19-003：取消落账超时 / 崩溃后收敛的 unknown 不得渲染为「运行中」。"""
         state = _usage_state(
             requests=(
-                {
-                    "invocation_id": "inv-1",
-                    "scenario_id": "news_risk",
-                    "terminal_status": "unknown",
-                    "cost_status": "unknown",
-                },
+                RequestRow(
+                    invocation_id="inv-1",
+                    scenario_id="news_risk",
+                    terminal_status="unknown",
+                    cost_status="unknown",
+                ),
             )
         )
         texts = _texts(_build_request_rows(state, MagicMock()))
@@ -1204,13 +1215,13 @@ class TestRequestRowsExpandedDetail:
         """展开行渲染 attempts 明细；空 attempts 显示显式「无尝试」提示。"""
         state = _usage_state(
             requests=(
-                {
-                    "invocation_id": "inv-1",
-                    "created_at": "2026-10-19 10:00:00",
-                    "scenario_id": "news_annotation",
-                    "terminal_status": "succeeded",
-                    "cost_status": "known",
-                },
+                RequestRow(
+                    invocation_id="inv-1",
+                    created_at=dt.datetime(2026, 10, 19, 10, 0, 0),
+                    scenario_id="news_annotation",
+                    terminal_status="succeeded",
+                    cost_status="known",
+                ),
             ),
             expanded_id="inv-1",
             attempts=(),

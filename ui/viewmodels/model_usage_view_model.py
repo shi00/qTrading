@@ -36,9 +36,10 @@ import csv
 import datetime as dt
 import io
 import re
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, fields, replace
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field, fields, replace
 from decimal import Decimal
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from core.i18n import Message
@@ -151,18 +152,169 @@ def _budget_summary_from_dao(summary: dict[str, Any]) -> BudgetSummary:
     )
 
 
+#: 行内未建模列共享的空只读映射（不可变默认值，避免可变默认参数）。
+_EMPTY_EXTRA: Mapping[str, Any] = MappingProxyType({})
+
+
+def _freeze_value(value: Any) -> Any:
+    """递归冻结 DAO 行中的嵌套容器（只读映射 / tuple / frozenset）。
+
+    顶层 tuple 只阻止行位置重绑；若行内仍是 DAO 的可变 ``dict`` / ``list``，外部
+    持有原 DAO 字典即可绕过 state 通知改写内容（docs/patterns/mvvm.md 禁止
+    ``tuple[dict]``）。本函数在 VM 转换边界一次深冻结，未建模列同样适用。
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_value(item) for item in value)
+    return value
+
+
+def _extra_columns(source: Mapping[str, Any], modelled: frozenset[str]) -> Mapping[str, Any]:
+    """未建模列以只读映射保留（不丢 DAO 字段；嵌套值同样冻结）。"""
+    return MappingProxyType({key: _freeze_value(value) for key, value in source.items() if key not in modelled})
+
+
+@dataclass(frozen=True, slots=True)
+class RequestRow:
+    """请求页行（展示 / CSV 所需字段；未建模列进入只读 ``extra``）。"""
+
+    invocation_id: str
+    created_at: dt.datetime | None = None
+    scenario_id: str | None = None
+    trigger: str | None = None
+    is_test: bool = False
+    task_summary: str | None = None
+    total_duration_ms: int | None = None
+    known_cost_cny: Decimal | None = None
+    terminal_status: str | None = None
+    cost_status: str | None = None
+    extra: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_EXTRA)
+
+
+@dataclass(frozen=True, slots=True)
+class AttemptRow:
+    """展开尝试行（``executed=False`` 表示未执行；保留跳过行身份与 None 费用）。"""
+
+    kind: str | None = None
+    executed: bool = True
+    task_id: str | None = None
+    connection_id: str | None = None
+    candidate_index: int | None = None
+    retry_index: int | None = None
+    status: str | None = None
+    reason: str | None = None
+    actual_model: str | None = None
+    configured_model: str | None = None
+    cost_cny: Decimal | None = None
+    extra: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_EXTRA)
+
+
+@dataclass(frozen=True, slots=True)
+class UnconfirmedReservationRow:
+    """未确认预留行（金额为 JSONB 文本，缺失保持 None，不伪零）。"""
+
+    reservation_id: str
+    task_id: str | None = None
+    amount_cny: str | None = None
+    billing_month: str | None = None
+    extra: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_EXTRA)
+
+
+@dataclass(frozen=True, slots=True)
+class MonthUsageRow:
+    """历史月汇总场景行（查看月读取结果，字段缺失保持 None）。"""
+
+    grouping_key: str | None = None
+    scenario_id: str | None = None
+    trigger: str | None = None
+    invocation_count: int | None = None
+    attempt_count: int | None = None
+    succeeded_count: int | None = None
+    cost_cny: Decimal | None = None
+    extra: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_EXTRA)
+
+
+_REQUEST_ROW_FIELDS: frozenset[str] = frozenset(f.name for f in fields(RequestRow)) - {"extra"}
+_ATTEMPT_ROW_FIELDS: frozenset[str] = frozenset(f.name for f in fields(AttemptRow)) - {"extra"}
+_RESERVATION_ROW_FIELDS: frozenset[str] = frozenset(f.name for f in fields(UnconfirmedReservationRow)) - {"extra"}
+_MONTH_ROW_FIELDS: frozenset[str] = frozenset(f.name for f in fields(MonthUsageRow)) - {"extra"}
+
+
+def _request_row_from_dao(row: Mapping[str, Any]) -> RequestRow:
+    """请求行 DAO dict → 冻结值（None 费用与请求身份原样保留）。"""
+    return RequestRow(
+        invocation_id=str(_freeze_value(row.get("invocation_id")) or ""),
+        created_at=_freeze_value(row.get("created_at")),
+        scenario_id=_freeze_value(row.get("scenario_id")),
+        trigger=_freeze_value(row.get("trigger")),
+        is_test=bool(row.get("is_test")),
+        task_summary=_freeze_value(row.get("task_summary")),
+        total_duration_ms=_freeze_value(row.get("total_duration_ms")),
+        known_cost_cny=_freeze_value(row.get("known_cost_cny")),
+        terminal_status=_freeze_value(row.get("terminal_status")),
+        cost_status=_freeze_value(row.get("cost_status")),
+        extra=_extra_columns(row, _REQUEST_ROW_FIELDS),
+    )
+
+
+def _attempt_row_from_dao(row: Mapping[str, Any]) -> AttemptRow:
+    """尝试行 DAO dict → 冻结值（跳过行 ``executed=False`` 与 None 费用保留）。"""
+    return AttemptRow(
+        kind=_freeze_value(row.get("kind")),
+        executed=bool(row.get("executed", True)),
+        task_id=_freeze_value(row.get("task_id")),
+        connection_id=_freeze_value(row.get("connection_id")),
+        candidate_index=_freeze_value(row.get("candidate_index")),
+        retry_index=_freeze_value(row.get("retry_index")),
+        status=_freeze_value(row.get("status")),
+        reason=_freeze_value(row.get("reason")),
+        actual_model=_freeze_value(row.get("actual_model")),
+        configured_model=_freeze_value(row.get("configured_model")),
+        cost_cny=_freeze_value(row.get("cost_cny")),
+        extra=_extra_columns(row, _ATTEMPT_ROW_FIELDS),
+    )
+
+
+def _reservation_row_from_dao(row: Mapping[str, Any]) -> UnconfirmedReservationRow:
+    """未确认预留行 DAO dict → 冻结值（身份与金额文本原样保留）。"""
+    return UnconfirmedReservationRow(
+        reservation_id=str(_freeze_value(row.get("reservation_id")) or ""),
+        task_id=_freeze_value(row.get("task_id")),
+        amount_cny=_freeze_value(row.get("amount_cny")),
+        billing_month=_freeze_value(row.get("billing_month")),
+        extra=_extra_columns(row, _RESERVATION_ROW_FIELDS),
+    )
+
+
+def _month_row_from_dao(row: Mapping[str, Any]) -> MonthUsageRow:
+    """月汇总行 DAO dict → 冻结值（费用 / 计数缺失保持 None）。"""
+    return MonthUsageRow(
+        grouping_key=_freeze_value(row.get("grouping_key")),
+        scenario_id=_freeze_value(row.get("scenario_id")),
+        trigger=_freeze_value(row.get("trigger")),
+        invocation_count=_freeze_value(row.get("invocation_count")),
+        attempt_count=_freeze_value(row.get("attempt_count")),
+        succeeded_count=_freeze_value(row.get("succeeded_count")),
+        cost_cny=_freeze_value(row.get("cost_cny")),
+        extra=_extra_columns(row, _MONTH_ROW_FIELDS),
+    )
+
+
 @dataclass(frozen=True)
 class ModelUsageState:
     """ModelUsageViewModel 的不可变 state snapshot。"""
 
-    requests: tuple[dict[str, Any], ...] = ()
+    requests: tuple[RequestRow, ...] = ()
     page: int = 0
     total: int = 0
     filters: UsageFilters = UsageFilters()
     expanded_id: str | None = None
-    attempts: tuple[dict[str, Any], ...] = ()
+    attempts: tuple[AttemptRow, ...] = ()
     budget_summary: BudgetSummary = BudgetSummary()
-    unconfirmed_reservations: tuple[dict[str, Any], ...] = ()
+    unconfirmed_reservations: tuple[UnconfirmedReservationRow, ...] = ()
     retention_exceeded: bool = False
     monthly_summary_mode: bool = False
     export_granularity: str = EXPORT_DETAIL
@@ -175,7 +327,7 @@ class ModelUsageState:
     # F36：历史月汇总（查看月与输入草稿分离；行 / 摘要均来自查看月读取结果）
     summary_month: str = ""
     month_draft: str = ""
-    monthly_rows: tuple[dict[str, Any], ...] = ()
+    monthly_rows: tuple[MonthUsageRow, ...] = ()
     summary_budget: BudgetSummary | None = None
     message: Message | None = None
 
@@ -194,7 +346,7 @@ def _write_csv_text(filepath: str, text: str) -> None:
         handle.write(text)
 
 
-def _build_detail_csv(rows: Iterable[dict[str, Any]]) -> str:
+def _build_detail_csv(rows: Iterable[RequestRow]) -> str:
     """明细 CSV（F37）：首列 ``invocation_id`` 保留请求身份；未知费用空值（R21）。
 
     行集由调用方声明（当前页或全部筛选结果），本函数不感知范围语义。
@@ -220,16 +372,16 @@ def _build_detail_csv(rows: Iterable[dict[str, Any]]) -> str:
     for row in rows:
         writer.writerow(
             [
-                _csv_cell(row.get("invocation_id")),
-                _csv_cell(row.get("created_at")),
-                _csv_cell(row.get("scenario_id")),
-                _csv_cell(row.get("trigger")),
-                ORIGIN_TEST if row.get("is_test") else ORIGIN_BUSINESS,
-                _csv_cell(row.get("terminal_status")),
-                _csv_cell(row.get("cost_status")),
-                _csv_cell(row.get("task_summary")),
-                _csv_cell(row.get("total_duration_ms")),
-                _csv_cell(row.get("known_cost_cny")),
+                _csv_cell(row.invocation_id),
+                _csv_cell(row.created_at),
+                _csv_cell(row.scenario_id),
+                _csv_cell(row.trigger),
+                ORIGIN_TEST if row.is_test else ORIGIN_BUSINESS,
+                _csv_cell(row.terminal_status),
+                _csv_cell(row.cost_status),
+                _csv_cell(row.task_summary),
+                _csv_cell(row.total_duration_ms),
+                _csv_cell(row.known_cost_cny),
             ]
         )
     return buf.getvalue()
@@ -414,10 +566,10 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             return  # 旧代次响应：拒绝写入，保留最新请求的结果
 
         self._set_state(
-            requests=tuple(rows),
+            requests=tuple(_request_row_from_dao(row) for row in rows),
             total=int(total),
             budget_summary=_budget_summary_from_dao(summary),
-            unconfirmed_reservations=tuple(unconfirmed),
+            unconfirmed_reservations=tuple(_reservation_row_from_dao(row) for row in unconfirmed),
             budget_draft=_format_limit_text(limit),
             monthly_limit_cny=limit,
             monthly_limit_unknown=limit_unknown,
@@ -504,7 +656,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             return
         if generation != self._expand_generation:
             return  # 旧代次展开响应：拒绝写入
-        self._set_state(expanded_id=request_id, attempts=tuple(attempts))
+        self._set_state(expanded_id=request_id, attempts=tuple(_attempt_row_from_dao(row) for row in attempts))
 
     # ------------------------------------------------------------------
     # 解除未确认预留
@@ -708,7 +860,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             return  # 旧代次响应：拒绝写入
         self._set_state(
             summary_budget=_budget_summary_from_dao(summary),
-            monthly_rows=tuple(rows),
+            monthly_rows=tuple(_month_row_from_dao(row) for row in rows),
             message=None,
         )
 
@@ -717,7 +869,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             return None
         return self._dao_provider()
 
-    async def _fetch_all_filtered_requests(self, filters: UsageFilters) -> tuple[dict[str, Any], ...]:
+    async def _fetch_all_filtered_requests(self, filters: UsageFilters) -> tuple[RequestRow, ...]:
         """稳定分页遍历当前筛选全集（F37，只消费 DAO 公开分页入口，不改 DAO）。
 
         页序固定从 0 起、按 ``PAGE_SIZE`` 前进，不受当前页 / 翻页影响；过滤条件
@@ -732,7 +884,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         if dao is None:
             self._set_state(message=Message("model_usage_dao_unavailable"))
             raise RuntimeError("export scope 'all' requires ai usage dao")
-        collected: list[dict[str, Any]] = []
+        collected: list[RequestRow] = []
         offset = 0
         while True:
             rows, total = await dao.read_request_page(
@@ -747,7 +899,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
                 limit=PAGE_SIZE,
                 offset=offset,
             )
-            collected.extend(rows)
+            collected.extend(_request_row_from_dao(row) for row in rows)
             offset += len(rows)
             if not rows or offset >= int(total):
                 break
