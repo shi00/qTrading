@@ -261,6 +261,55 @@ def test_sample_review_set_preserves_none_ts_code(tmp_path: Path):
     assert samples[0]["ts_code"] is None
 
 
+def test_sample_review_set_tops_up_when_source_has_fewer_docs(tmp_path: Path):
+    # 两源 1/100、n=40：首轮配额各 20，小源仅 1 条；必须从大源补足到 40（而非 21）
+    docs = [_doc("sina_7x24", "rare-0", "唯一快讯")] + [_doc("sina_stock", f"s{i}", f"个股{i}") for i in range(100)]
+    store = _make_store(tmp_path, docs)
+    with store:
+        samples = laya_annotator.sample_review_set(store, n=40, seed=42)
+    assert len(samples) == 40
+    assert {s["source"] for s in samples} == {"sina_7x24", "sina_stock"}
+    # 小源仅 1 条全部入选，其余 39 条由大源补足
+    assert sum(1 for s in samples if s["source"] == "sina_7x24") == 1
+    pairs = [(s["source"], s["source_id"]) for s in samples]
+    assert len(pairs) == len(set(pairs))
+
+
+def test_sample_review_set_n_just_below_total_returns_all(tmp_path: Path):
+    # 两源 1/100（共 101 条）、n=102：应返回全部 101 条，而非首轮配额之和 52
+    docs = [_doc("sina_7x24", "rare-0", "唯一快讯")] + [_doc("sina_stock", f"s{i}", f"个股{i}") for i in range(100)]
+    store = _make_store(tmp_path, docs)
+    with store:
+        samples = laya_annotator.sample_review_set(store, n=102, seed=42)
+    assert len(samples) == 101
+    pairs = {(s["source"], s["source_id"]) for s in samples}
+    assert pairs == {("sina_7x24", "rare-0")} | {("sina_stock", f"s{i}") for i in range(100)}
+
+
+def test_sample_review_set_top_up_reproducible_with_seed(tmp_path: Path):
+    # 存在补足阶段时同一 seed 仍须完全复现（大源补足顺序由同一 RNG 驱动）
+    docs = [_doc("sina_7x24", "rare-0", "唯一快讯")] + [_doc("sina_stock", f"s{i}", f"个股{i}") for i in range(100)]
+    store = _make_store(tmp_path, docs)
+    with store:
+        a = laya_annotator.sample_review_set(store, n=40, seed=7)
+        b = laya_annotator.sample_review_set(store, n=40, seed=7)
+    assert a == b
+
+
+@pytest.mark.parametrize("bad_n", [0, -3])
+def test_sample_review_set_rejects_non_positive_n(tmp_path: Path, bad_n: int):
+    # n<=0 是参数错误，必须显式拒绝，不得静默返回空列表
+    store = _make_store(tmp_path, [_doc("sina_7x24", "n0", "快讯")])
+    with store, pytest.raises(ValueError, match="正整数"):
+        laya_annotator.sample_review_set(store, n=bad_n, seed=1)
+
+
+def test_sample_review_set_rejects_non_positive_n_even_empty_corpus(tmp_path: Path):
+    store = _make_store(tmp_path, [])
+    with store, pytest.raises(ValueError, match="正整数"):
+        laya_annotator.sample_review_set(store, n=0, seed=1)
+
+
 # ------------------------------------------------- 5. 人工抽检 Gate 评估
 
 
@@ -497,3 +546,23 @@ def test_main_sample_empty_corpus_exit_code(tmp_path: Path, monkeypatch: pytest.
         ["sample", "--db", str(tmp_path / "empty.db"), "-n", "5", "--seed", "1", "--out", str(out)]
     )
     assert code == 1
+
+
+def test_main_sample_rejects_non_positive_n(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    # CLI 参数错误：argparse 以退出码 2 拒绝，不进入抽样、不静默返回空
+    with pytest.raises(SystemExit) as exc_info:
+        laya_annotator.main(
+            [
+                "sample",
+                "--db",
+                str(tmp_path / "corpus.db"),
+                "-n",
+                "0",
+                "--seed",
+                "1",
+                "--out",
+                str(tmp_path / "review.jsonl"),
+            ]
+        )
+    assert exc_info.value.code == 2
+    assert "正整数" in capsys.readouterr().err
