@@ -85,13 +85,16 @@ async def _run_review_backfill(svc: SchedulerService) -> None:
     async def _factory(task_id: str, **kwargs) -> str:
         return await _review_backfill_logic(svc, task_id, **kwargs)
 
-    TaskManager().submit_task(
+    task_id = TaskManager().submit_task(
         name=I18n.get("sched_task_review_backfill", date=today_str),
         task_type=I18n.get("task_type_data_sync"),
         coroutine_factory=_factory,
         cancellable=False,
         unique_key="review_backfill",
     )
+    # D11-S01: 仅在被接纳时记录最近 task_id；None 表示未提交，不伪装成成功。
+    if task_id is not None:
+        svc.note_submitted_task("review_backfill", task_id)
 
 
 def build_review_backfill_job() -> Callable[[SchedulerService], Awaitable[None]]:

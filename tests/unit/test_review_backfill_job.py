@@ -26,9 +26,15 @@ class _FakeSvc:
 
     def __init__(self) -> None:
         self.job: object = None
+        # D11-S01: 记录被接纳的 task_id（job 提交后回调）。
+        self.noted_tasks: list[tuple[str, str]] = []
 
     def register(self, job) -> None:
         self.job = job
+
+    def note_submitted_task(self, job_id: str, task_id: str | None) -> None:
+        if task_id:
+            self.noted_tasks.append((job_id, task_id))
 
 
 def _make_mock_rm(

@@ -563,6 +563,21 @@ def TaskCenterView(active: bool = True) -> ft.Container:
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
+    # --- D11-S01: 持久清理待重试提示 (仅 pending_deletions>0 时显示, 不阻塞 loop) ---
+    persist_cleanup_hint = ft.Row(
+        [
+            ft.Icon(ft.Icons.WARNING_AMBER_OUTLINED, size=AppStyles.FONT_SIZE_BODY, color=AppColors.WARNING),
+            ft.Text(
+                I18n.get("task_persist_cleanup_pending"),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.WARNING,
+            ),
+        ],
+        spacing=6,
+        tight=True,
+        visible=state.persist_cleanup_pending,
+    )
+
     # --- Empty state (UIX-14: 消除手工复制，统一复用 EmptyState) ---
     empty_view = EmptyState(
         icon=ft.Icons.INBOX_OUTLINED,
@@ -713,6 +728,7 @@ def TaskCenterView(active: bool = True) -> ft.Container:
             [
                 header,
                 ft.Divider(height=1, color=AppColors.DIVIDER),
+                persist_cleanup_hint,
                 scroll_area,
                 pagination_row,
             ],

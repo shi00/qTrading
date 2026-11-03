@@ -1394,6 +1394,8 @@ class TestDataSourceViewModelSchedulerStatus:
         assert snapshot_job.next_run_at is None
         assert snapshot_job.last_failure_reason is None
         assert snapshot_job.consecutive_failures is None
+        # D11-S01: 未提交任务时最近任务保持 None（不以空串伪装）
+        assert snapshot_job.last_task_id is None
 
     def test_lazy_constructs_scheduler_service_when_not_injected(self, mock_task_manager):
         """未注入时惰性构造注册单例, 构造期不触碰。"""

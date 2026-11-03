@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.i18n import Message
-from services.task_manager import AppTask, TaskStatus
+from services.task_manager import AppTask, PersistPendingStatus, TaskStatus
 from ui.viewmodels.task_center_view_model import TaskCenterViewModel
 
 pytestmark = pytest.mark.unit
@@ -34,6 +34,7 @@ def _build_mock_task_manager():
     m.unsubscribe = MagicMock()
     m.cancel_task = MagicMock()
     m.clear_finished = MagicMock()
+    m.get_persistence_pending_snapshot.return_value = PersistPendingStatus(0, 0)
     return m
 
 
@@ -75,6 +76,32 @@ class TestTaskCenterViewModelMissingBranches:
         assert row.status == TaskStatus.FAILED
         assert row.error == "task_incomplete"
         assert row.progress != 1.0
+
+    def test_pending_deletions_exposes_cleanup_pending_signal(self):
+        """D11-S01: pending_deletions>0 → persist_cleanup_pending=True 且计数只读暴露。"""
+        self.mock_tm.get_persistence_pending_snapshot.return_value = PersistPendingStatus(
+            pending_writes=2, pending_deletions=1
+        )
+        vm = TaskCenterViewModel()
+        assert vm.state.persist_pending_writes == 2
+        assert vm.state.persist_pending_deletions == 1
+        assert vm.state.persist_cleanup_pending is True
+
+    def test_no_pending_deletions_has_no_cleanup_signal(self):
+        """无待确认删除时不显示提示（不得伪装为「已持久清理成功」以外的异常）。"""
+        vm = TaskCenterViewModel()
+        assert vm.state.persist_pending_deletions == 0
+        assert vm.state.persist_cleanup_pending is False
+
+    def test_negative_counts_are_clamped_to_zero(self):
+        """越界负值不出现在 state：VM 侧将计数下限钳为 0（计数恒 >= 0）。"""
+        self.mock_tm.get_persistence_pending_snapshot.return_value = PersistPendingStatus(
+            pending_writes=-3, pending_deletions=-2
+        )
+        vm = TaskCenterViewModel()
+        assert vm.state.persist_pending_writes == 0
+        assert vm.state.persist_pending_deletions == 0
+        assert vm.state.persist_cleanup_pending is False
 
     def test_unsubscribe_when_callback_already_removed_is_noop(self):
         """_unsubscribe 二次调用：callback 已不在列表，走 91->exit no-op 分支。"""
