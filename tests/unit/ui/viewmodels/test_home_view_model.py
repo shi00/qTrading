@@ -7,8 +7,10 @@
 subscribe/dispose 由 test_home_view.py 通过 FakeHomeViewModel 覆盖。
 """
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from ui.viewmodels import Message
@@ -173,6 +175,192 @@ class TestDetectAiTagged:
 
         assert _detect_ai_tagged("", "CLS") is False
         assert _detect_ai_tagged("", "Tushare") is False
+
+
+class _FakeMarketNewsDao:
+    """隔离的 market_news DAO 替身: 稳定 id + keyset, 可控制失败/空页/取消."""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = list(rows)
+        self.fail = False
+        self.cancel = False
+        self.empty = False
+        self.calls: list[dict] = []
+
+    async def get_market_news(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        cursor_publish_time=None,
+        cursor_id=None,
+        suppress_errors: bool = True,
+    ) -> pd.DataFrame:
+        self.calls.append(
+            {
+                "offset": offset,
+                "cursor_publish_time": cursor_publish_time,
+                "cursor_id": cursor_id,
+                "suppress_errors": suppress_errors,
+            }
+        )
+        if self.cancel:
+            raise asyncio.CancelledError()
+        if self.fail:
+            raise RuntimeError("db down")
+        if self.empty:
+            return pd.DataFrame()
+        if cursor_publish_time is None:
+            return pd.DataFrame(self.rows[offset : offset + limit])
+        cursor_time = pd.to_datetime(cursor_publish_time).to_pydatetime()
+        out: list[dict] = []
+        for row in self.rows:
+            row_time = pd.to_datetime(row["publish_time"]).to_pydatetime()
+            if row_time < cursor_time or (row_time == cursor_time and row["id"] < cursor_id):
+                out.append(row)
+            if len(out) >= limit:
+                break
+        return pd.DataFrame(out)
+
+
+def _news_rows_n(n: int) -> list[dict]:
+    """构造 n 条按时间倒序、id 递减的新闻行（id=n..1）。"""
+    return [{"id": i, "publish_time": f"2026-10-27 10:{i:02d}:00", "content": f"news{i}"} for i in range(n, 0, -1)]
+
+
+class TestNewsFetchFailureProtocol:
+    """VMD-F02: 读取失败不得伪装成无新闻/末页, 且保留旧窗口并可重试."""
+
+    @pytest.fixture
+    def vm(self):
+        with patch("ui.viewmodels.home_view_model.DataProcessor"):
+            view_model = HomeViewModel()
+        view_model.processor = MagicMock()
+        view_model.processor.cache = MagicMock()
+        return view_model
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_preserves_window_and_publishes_error(self, vm):
+        dao = _FakeMarketNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+
+        first, has_more = await vm.refresh_news()
+        assert not first.empty
+        assert has_more is True
+        assert dao.calls[-1]["suppress_errors"] is False
+        rows_before = vm.state.news_rows
+        cursor_before = vm._news_cursor
+        assert len(rows_before) == 20
+
+        dao.fail = True
+        result, has_more_on_failure = await vm.refresh_news()
+
+        assert result is None
+        assert has_more_on_failure is True
+        assert vm.state.news_rows == rows_before
+        assert vm._news_cursor == cursor_before
+        assert vm.state.has_more_news is True
+        assert vm.state.has_news_data is True
+        assert vm.state.load_error is not None
+        assert vm.state.load_error.key == "home_load_failed_title"
+
+        dao.fail = False
+        recovered, has_more_after = await vm.refresh_news()
+        assert recovered is not None
+        assert not recovered.empty
+        assert has_more_after is True
+        assert len(vm.state.news_rows) == 20
+        assert vm.state.has_more_news is True
+        # 恢复成功后清除本次新闻读取发布的错误
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_legal_empty_dataframe_clears_rows_and_terminates_pagination(self, vm):
+        dao = _FakeMarketNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        assert len(vm.state.news_rows) == 20
+        assert vm.state.has_more_news is True
+
+        dao.empty = True
+        result, has_more = await vm.refresh_news()
+
+        assert result is not None
+        assert result.empty
+        assert has_more is False
+        assert vm.state.news_rows == ()
+        assert vm.state.has_news_data is False
+        assert vm.state.has_more_news is False
+        assert vm._news_cursor is None
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_refresh_is_not_treated_as_empty_page(self, vm):
+        dao = _FakeMarketNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        rows_before = vm.state.news_rows
+        cursor_before = vm._news_cursor
+
+        dao.cancel = True
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.refresh_news()
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+
+        assert vm.state.news_rows == rows_before
+        assert vm._news_cursor == cursor_before
+        assert vm.state.has_more_news is True
+        assert vm.state.has_news_data is True
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_pagination_failure_preserves_eligibility_and_retry_does_not_skip(self, vm):
+        dao = _FakeMarketNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        rows_before = vm.state.news_rows
+        cursor_before = vm._news_cursor
+
+        dao.fail = True
+        result, has_more = await vm.load_next_page()
+
+        assert result is None
+        assert has_more is True
+        assert vm.state.news_rows == rows_before
+        assert vm._news_cursor == cursor_before
+        assert vm.state.has_more_news is True
+        assert vm.state.is_loading_more is False
+        assert vm.state.load_error is not None
+
+        dao.fail = False
+        retried, retried_has_more = await vm.load_next_page()
+
+        assert retried is not None
+        assert not retried.empty
+        assert retried_has_more is False
+        assert len(vm.state.news_rows) == 21
+        assert vm.state.news_rows[-1].news_id == 1
+        # 重试从同一游标继续: 未跳项, 新请求仍使用严格失败语义
+        assert dao.calls[-1]["cursor_id"] == cursor_before[1]
+        assert dao.calls[-1]["suppress_errors"] is False
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_pagination_legal_empty_page_terminates_pagination(self, vm):
+        dao = _FakeMarketNewsDao(_news_rows_n(20))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        rows_before = vm.state.news_rows
+        assert vm.state.has_more_news is True
+
+        dao.empty = True
+        result, has_more = await vm.load_next_page()
+
+        assert result is not None
+        assert result.empty
+        assert has_more is False
+        assert vm.state.has_more_news is False
+        assert vm.state.news_rows == rows_before
+        assert vm.state.load_error is None
 
 
 class TestNewsRowAiTagged:

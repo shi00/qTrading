@@ -287,16 +287,18 @@ class TestHomeViewModelFetchNewsBatch:
         home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
         mock_processor.cache.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame({"c": ["x"]}))
         batch = await home_vm._fetch_news_batch(1)
-        mock_processor.cache.market_dao.get_market_news.assert_awaited_once_with(limit=home_vm.PAGE_SIZE, offset=20)
+        mock_processor.cache.market_dao.get_market_news.assert_awaited_once_with(
+            limit=home_vm.PAGE_SIZE, offset=20, suppress_errors=False
+        )
         assert batch is not None
 
     @pytest.mark.asyncio
-    async def test_error_returns_none(self, home_vm, mock_processor):
-        """异常路径: cache 抛异常 → 记录日志并返回 None (不吞没 CancelledError)."""
+    async def test_error_propagates(self, home_vm, mock_processor):
+        """VMD-F02: 异常路径记录日志并上抛 (不得折成 None/空页, 不吞没 CancelledError)."""
         home_vm.processor = mock_processor  # 模拟已构造 (B11 懒构造)
         mock_processor.cache.market_dao.get_market_news = AsyncMock(side_effect=RuntimeError("boom"))
-        batch = await home_vm._fetch_news_batch(0)
-        assert batch is None
+        with pytest.raises(RuntimeError, match="boom"):
+            await home_vm._fetch_news_batch(0)
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self, home_vm, mock_processor):

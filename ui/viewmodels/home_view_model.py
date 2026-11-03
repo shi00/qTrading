@@ -143,6 +143,9 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         # UIR-F04-004: 向后 keyset 游标 (publish_time, id)，由已成功写入的最旧 DB 行推进；
         # 失败/取消/代次失效均不推进，跨刷新由 refresh_news 重置。
         self._news_cursor: tuple[datetime, int] | None = None
+        # VMD-F02: 标记当前 load_error 是否由新闻取数失败发布。新闻读取成功后只清除
+        # 本标记拥有的错误，避免误清市场数据等其他加载错误（共享 load_error 通道）。
+        self._news_error_published = False
 
         # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
@@ -396,6 +399,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         self._view_load_generation += 1
         self._load_generation += 1
         # 新加载取代在途分页: 旧分页代次失效, 其 finally 不再清 is_loading_more
+        self._news_error_published = False
         self._set_state(is_loading=True, load_error=None, is_loading_more=False)
         return self._view_load_generation, self._load_generation
 
@@ -432,28 +436,43 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         await self._ensure_valid_stock_codes()
         if generation != self._load_generation:
             return None, False
-        batch = await self._fetch_news_batch(0)
+        try:
+            batch = await self._fetch_news_batch(0)
+        except asyncio.CancelledError:
+            raise  # R2: 取消必须传播, 不得当作失败或空页处理
+        except Exception:
+            # VMD-F02: 取数失败不写回任何新闻状态, 旧行/游标/has_more 全部保留;
+            # 仅当前代次发布可见、可重试的错误 Message（旧代次失败不得写过期错误）。
+            if generation != self._load_generation:
+                return None, False
+            self._publish_news_load_error()
+            return None, self._state.has_more_news
         if generation != self._load_generation:
             return None, False
 
-        has_more = self._state.has_more_news  # batch 为 None 时保持不变
-        if batch is not None:
-            if batch.empty:
-                # 空页 = 无新闻, 游标同步清空 (不残留指向旧窗口的边界)
-                self._news_cursor = None
-                self._set_state(news_rows=(), news_page=0, has_more_news=False, has_news_data=False)
-                has_more = False
-            else:
-                new_rows = _df_to_news_rows(batch)
-                has_more = len(batch) >= self.PAGE_SIZE
-                # UIR-F04-004: 跨刷新重置游标到新首页最旧行, 旧游标不得沿用
-                self._news_cursor = _news_cursor_from_batch(batch)
-                self._set_state(
-                    news_rows=new_rows,
-                    news_page=0,
-                    has_more_news=has_more,
-                    has_news_data=True,
-                )
+        has_more = self._state.has_more_news
+        if batch is None:
+            # VMD-F02: 未知结果不得伪装成「无新闻」, 保留旧窗口并发布可见错误。
+            self._publish_news_load_error()
+            return None, has_more
+        if batch.empty:
+            # VMD-F02: 只有成功且合法空页 (确实无新闻) 才清空行/游标/分页资格。
+            self._news_cursor = None
+            self._clear_news_load_error()
+            self._set_state(news_rows=(), news_page=0, has_more_news=False, has_news_data=False)
+            has_more = False
+        else:
+            new_rows = _df_to_news_rows(batch)
+            has_more = len(batch) >= self.PAGE_SIZE
+            # UIR-F04-004: 跨刷新重置游标到新首页最旧行, 旧游标不得沿用
+            self._news_cursor = _news_cursor_from_batch(batch)
+            self._clear_news_load_error()
+            self._set_state(
+                news_rows=new_rows,
+                news_page=0,
+                has_more_news=has_more,
+                has_news_data=True,
+            )
 
         return batch, has_more
 
@@ -482,7 +501,18 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         try:
             next_page = self._state.news_page + 1
-            new_batch = await self._fetch_news_batch(next_page, cursor)
+            try:
+                new_batch = await self._fetch_news_batch(next_page, cursor)
+            except asyncio.CancelledError:
+                raise  # R2: 取消必须传播, 不得当作失败或末页处理
+            except Exception:
+                # VMD-F02: 分页取数失败 -> 保留旧行/游标/has_more, 发布可见错误。
+                # 旧代次失败不得写过期错误, 也不得返回新状态的分页标志。
+                # _fetch_news_batch 已记录脱敏日志。
+                if current_gen != self._load_generation:
+                    return None, False
+                self._publish_news_load_error()
+                return None, self._state.has_more_news
 
             # Check if generation changed (e.g. Refresh clicked while loading)
             if current_gen != self._load_generation:
@@ -490,11 +520,13 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
                 return None, False
 
             if new_batch is None:
-                # 取数失败: 保持 has_more_news 原值, 分页不因单次故障被永久关闭
-                # (与 refresh_news 中 "batch 为 None 时保持不变" 的语义一致)。
+                # VMD-F02: 未知结果不得伪装成「已到末页」, 分页资格与游标保留。
+                self._publish_news_load_error()
                 return None, self._state.has_more_news
 
             if new_batch.empty:
+                # VMD-F02: 只有成功且合法空页才终止分页。
+                self._clear_news_load_error()
                 self._set_state(has_more_news=False)
                 return pd.DataFrame(), False
 
@@ -511,6 +543,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             else:
                 # 无 id 的旧数据/测试替身无法建立不变量, 保持原追加语义
                 fresh_rows = new_rows
+            self._clear_news_load_error()
             self._set_state(
                 news_rows=current_rows + fresh_rows,
                 news_page=next_page,
@@ -529,6 +562,10 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         UIR-F04-004: 传入 ``cursor=(publish_time, id)`` 时走向后 keyset 查询
         (offset=0)；无游标 (首页/旧数据无 id 列) 时保留 OFFSET 调用兼容。
+
+        VMD-F02: 显式 ``suppress_errors=False`` 使用 DAO 严格失败语义 —— 成功返回
+        DataFrame (可能合法为空)；失败抛异常，由调用方发布可见错误并保留旧窗口。
+        禁止把读取故障折成空页/None（R21）。``CancelledError`` 原样传播（R2）。
         """
         try:
             processor = await self._ensure_processor()
@@ -539,18 +576,31 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
                     offset=0,
                     cursor_publish_time=cursor_time,
                     cursor_id=cursor_id,
+                    suppress_errors=False,
                 )
             offset = page * self.PAGE_SIZE
             return await processor.cache.market_dao.get_market_news(
                 limit=self.PAGE_SIZE,
                 offset=offset,
+                suppress_errors=False,
             )
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error("[HomeVM] Error fetching news: %s", DataSanitizer.sanitize_error(e))
             logger.debug("[HomeVM] Error fetching news traceback", exc_info=True)
-            return None
+            raise
+
+    def _publish_news_load_error(self) -> None:
+        """发布可见、可重试的新闻读取错误（复用首页 ErrorState 通道）。"""
+        self._news_error_published = True
+        self._set_state(load_error=Message("home_load_failed_title"))
+
+    def _clear_news_load_error(self) -> None:
+        """仅清除本 VM 因新闻读取失败发布的错误，不误清其他加载错误。"""
+        if self._news_error_published:
+            self._news_error_published = False
+            self._set_state(load_error=None)
 
     def clear_state(self):
         """Reset state (e.g. on cache clear).
@@ -564,6 +614,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         self._view_load_generation += 1
         # UIR-F04-004: 游标同步清空, 避免旧分页边界残留
         self._news_cursor = None
+        self._news_error_published = False
         self._set_state(
             news_rows=(),
             news_page=0,

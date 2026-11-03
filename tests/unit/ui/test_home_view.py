@@ -752,6 +752,56 @@ class TestHomeViewRuntime:
         # 恢复以避免影响其他测试
         mock_home_vm.load_market_data = original_load
 
+    def test_load_data_propagates_vm_news_error_to_end_load(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """VMD-F02: VM 在 refresh_news 发布的新闻错误必须经 end_load 保留, 不得被清掉."""
+        from ui.viewmodels import Message
+        from ui.views.home_view import HomeView
+
+        news_error = Message("home_load_failed_title")
+        old_rows = ("old-news",)
+
+        async def refresh_with_error(generation: int | None = None) -> tuple[None, bool]:
+            # 真实 VM 失败协议: 发布可见错误, 保留旧行/游标/has_more, 正常返回
+            mock_home_vm._set_state(news_rows=old_rows, has_more_news=True, load_error=news_error)
+            return None, True
+
+        mock_home_vm.refresh_news = refresh_with_error
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        assert mock_home_vm.state.load_error is news_error
+        assert mock_home_vm.state.news_rows == old_rows
+        assert mock_home_vm.state.has_more_news is True
+        assert mock_home_vm.state.is_loading is False
+
+    def test_load_data_turns_refresh_exception_into_visible_error(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """VMD-F02: refresh_news 上抛异常时仍写回可见错误, 不以 load_error=None 收尾."""
+        from ui.views.home_view import HomeView
+
+        old_rows = ("old-news",)
+
+        async def refresh_raises(generation: int | None = None) -> tuple[None, bool]:
+            mock_home_vm._set_state(news_rows=old_rows, has_more_news=True)
+            raise RuntimeError("news db down")
+
+        mock_home_vm.refresh_news = refresh_raises
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        assert mock_home_vm.state.load_error is not None
+        assert mock_home_vm.state.load_error.key == "home_load_failed_title"
+        assert mock_home_vm.state.news_rows == old_rows
+        assert mock_home_vm.state.has_more_news is True
+        assert mock_home_vm.state.is_loading is False
+
 
 # ============================================================================
 # active prop 生命周期测试 (Phase 5.3): 验证 active=False 时不执行副作用

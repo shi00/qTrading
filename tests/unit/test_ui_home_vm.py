@@ -464,7 +464,7 @@ class TestHomeViewModelNewsData:
         started = asyncio.Event()
         call_count = 0
 
-        async def fake_get(limit, offset):
+        async def fake_get(limit, offset, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -494,12 +494,14 @@ class TestHomeViewModelNewsData:
 
     @pytest.mark.asyncio
     async def test_fetch_news_batch_error(self, vm):
-        """新闻获取错误"""
+        """VMD-F02: 新闻获取错误必须上抛, 不得折成空页/None。"""
         vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=Exception("Database Error"))
 
-        result = await vm._fetch_news_batch(0)
+        with pytest.raises(Exception, match="Database Error"):
+            await vm._fetch_news_batch(0)
 
-        assert result is None
+        call_kwargs = vm.processor.cache.market_dao.get_market_news.call_args.kwargs
+        assert call_kwargs["suppress_errors"] is False
 
 
 class TestHomeViewModelStateManagement:
@@ -843,13 +845,13 @@ class TestHomeViewModelPagination:
         vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=mock_news)
 
         await vm._fetch_news_batch(0)
-        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=0)
+        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=0, suppress_errors=False)
 
         await vm._fetch_news_batch(1)
-        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=20)
+        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=20, suppress_errors=False)
 
         await vm._fetch_news_batch(5)
-        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=100)
+        vm.processor.cache.market_dao.get_market_news.assert_called_with(limit=20, offset=100, suppress_errors=False)
 
 
 class TestHomeViewModelConcurrency:
@@ -922,7 +924,7 @@ class TestHomeViewModelLoadGeneration:
         started_a = asyncio.Event()
         call_count = 0
 
-        async def fake_get(limit, offset):
+        async def fake_get(limit, offset, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -951,7 +953,7 @@ class TestHomeViewModelLoadGeneration:
         gate_a = asyncio.Event()
         started_a = asyncio.Event()
 
-        async def fake_get(limit, offset):
+        async def fake_get(limit, offset, **kwargs):
             started_a.set()
             await gate_a.wait()
             return old_batch
@@ -971,19 +973,19 @@ class TestHomeViewModelLoadGeneration:
 
     @pytest.mark.asyncio
     async def test_stale_refresh_failure_keeps_new_success(self, vm):
-        """旧刷新 A 失败 (batch=None) 不得覆盖新刷新 B 的成功结果."""
+        """旧刷新 A 取数异常不得覆盖新刷新 B 的成功结果, 也不得发布过期错误."""
         new_batch = self._batch("new", 5)
         gate_a = asyncio.Event()
         started_a = asyncio.Event()
         call_count = 0
 
-        async def fake_get(limit, offset):
+        async def fake_get(limit, offset, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 started_a.set()
                 await gate_a.wait()
-                return None  # A 取数失败
+                raise RuntimeError("db down")  # A 取数失败
             return new_batch
 
         vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=fake_get)
@@ -995,6 +997,8 @@ class TestHomeViewModelLoadGeneration:
         await task_a
 
         assert [row.content for row in vm.state.news_rows] == [f"new{i}" for i in range(5)]
+        # 旧代次失败不得写入可见错误
+        assert vm.state.load_error is None
 
     @pytest.mark.asyncio
     async def test_stale_pagination_does_not_clear_new_pagination_loading(self, vm):
@@ -1006,7 +1010,7 @@ class TestHomeViewModelLoadGeneration:
         started_b = asyncio.Event()
         call_count = 0
 
-        async def fake_get(limit, offset):
+        async def fake_get(limit, offset, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:  # 首次刷新
@@ -1148,6 +1152,7 @@ class _FakeCursorNewsDao:
         offset: int = 0,
         cursor_publish_time=None,
         cursor_id=None,
+        suppress_errors: bool = True,
     ) -> pd.DataFrame:
         self.calls.append(
             {
@@ -1155,6 +1160,7 @@ class _FakeCursorNewsDao:
                 "offset": offset,
                 "cursor_publish_time": cursor_publish_time,
                 "cursor_id": cursor_id,
+                "suppress_errors": suppress_errors,
             }
         )
         if cursor_publish_time is None:
@@ -1279,12 +1285,19 @@ class TestHomeViewModelCursorPagination:
         assert has_more is True
         assert vm._news_cursor == cursor_before
         assert len(vm.state.news_rows) == 20
+        # VMD-F02: 失败发布可见错误, 且分页资格保持
+        assert vm.state.load_error is not None
+        assert vm.state.load_error.key == "home_load_failed_title"
+        assert vm.state.has_more_news is True
+        assert vm.state.is_loading_more is False
 
         # 恢复后重试: 必须从同一游标继续 (替换为未打桩的新 DAO 实例)
         vm.processor.cache.market_dao = _FakeCursorNewsDao(_news_rows_n(21))
         await vm.load_next_page()
         assert len(vm.state.news_rows) == 21
         assert vm.state.news_rows[-1].news_id == 1
+        # VMD-F02: 成功重试后清除新闻读取错误, 不残留错误态
+        assert vm.state.load_error is None
 
     @pytest.mark.asyncio
     async def test_cancelled_pagination_preserves_rows_and_cursor(self, vm):
@@ -1303,6 +1316,9 @@ class TestHomeViewModelCursorPagination:
         assert vm.state.news_rows == rows_before
         assert vm._news_cursor == cursor_before
         assert vm.state.is_loading_more is False
+        # R2/VMD-F02: 取消不得当作失败发布错误, 也不得当作末页关闭分页
+        assert vm.state.load_error is None
+        assert vm.state.has_more_news is True
 
     @pytest.mark.asyncio
     async def test_refresh_resets_cursor_to_new_boundary(self, vm):

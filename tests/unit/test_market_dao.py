@@ -182,6 +182,29 @@ class TestMarketDaoGetMarketNews:
         sql = call_args[0][0]
         assert "source_kind" not in sql
 
+    @pytest.mark.asyncio
+    async def test_default_suppress_errors_keeps_existing_callers_compatible(self):
+        """VMD-F02: 默认仍压错, 既有调用方行为不变。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        await dao.get_market_news(limit=10)
+        assert dao._read_db.call_args.kwargs.get("suppress_errors") is True
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_passes_false_and_propagates(self):
+        """VMD-F02: 首页消费方显式严格失败, DB 故障不得折成空 DF。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+
+        async def boom(*a, **k):
+            raise EngineDisposedError("engine disposed")
+
+        dao._read_db = AsyncMock(side_effect=boom)
+        with pytest.raises(EngineDisposedError) as exc_info:
+            await dao.get_market_news(limit=10, suppress_errors=False)
+        assert isinstance(exc_info.value, EngineDisposedError)
+        assert str(exc_info.value) == "engine disposed"
+        assert dao._read_db.call_args.kwargs.get("suppress_errors") is False
+
 
 class TestMarketDaoSaveDailyIndicators:
     @pytest.mark.asyncio
