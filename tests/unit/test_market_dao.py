@@ -199,8 +199,10 @@ class TestMarketDaoGetMarketNews:
             raise EngineDisposedError("engine disposed")
 
         dao._read_db = AsyncMock(side_effect=boom)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await dao.get_market_news(limit=10, suppress_errors=False)
+        assert isinstance(exc_info.value, EngineDisposedError)
+        assert str(exc_info.value) == "engine disposed"
         assert dao._read_db.call_args.kwargs.get("suppress_errors") is False
 
 

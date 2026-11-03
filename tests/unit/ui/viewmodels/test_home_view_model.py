@@ -302,8 +302,9 @@ class TestNewsFetchFailureProtocol:
         cursor_before = vm._news_cursor
 
         dao.cancel = True
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await vm.refresh_news()
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         assert vm.state.news_rows == rows_before
         assert vm._news_cursor == cursor_before
