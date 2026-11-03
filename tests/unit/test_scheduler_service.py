@@ -4,6 +4,7 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import inspect
 import pytest
 import pandas as pd
 from datetime import date, datetime, timedelta
@@ -623,6 +624,8 @@ class TestSchedulerServiceSingleton:
             svc.scheduler.shutdown = MagicMock()
             mock_loop = MagicMock()
             mock_loop.is_closed.return_value = False
+            # patch 前保存类上的原始 descriptor（property 对象本身），供退出后做 identity 比对。
+            original_running_descriptor = inspect.getattr_static(type(svc.scheduler), "running")
             # R7: running 是类级 property（只读），不得裸赋值到类属性；用 patch.object
             # 在用例结束后自动恢复，避免 PropertyMock 残留污染后续用例的真实调度行为。
             with (
@@ -631,7 +634,14 @@ class TestSchedulerServiceSingleton:
             ):
                 SchedulerService._reset_singleton()
             svc.scheduler.shutdown.assert_called_once_with(wait=False)
-            assert isinstance(type(svc.scheduler).running, property)
+            # 断言 1：with 退出后类上 descriptor 必须恢复为同一个原始 property 对象
+            # （identity 比对而非 isinstance），防止 patch 污染 AsyncIOScheduler 类属性却无人发现。
+            assert isinstance(original_running_descriptor, property)
+            assert inspect.getattr_static(type(svc.scheduler), "running") is original_running_descriptor
+            # 断言 2：重置后新建的 scheduler 实例必须是干净的未运行状态
+            # （PropertyMock 已随 with 退出撤销，不得把 True 泄漏给新实例）。
+            new_svc = SchedulerService()
+            assert new_svc.scheduler.running is False
 
     def test_reset_singleton_sets_instance_to_none(self):
         with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
