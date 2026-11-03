@@ -352,6 +352,9 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
 
         F35：发起时登记请求代次，响应（含失败降级）写入前校验——筛选 / 翻页触发的
         更新请求会使在途旧请求失效，旧代次响应一律丢弃，不覆盖新条件结果。
+        VMD-F01：预算限额读取（``budget_limit_reader``）是末段 await，成功或降级
+        完成后、最终写入 state 前须再次复核代次——否则旧请求停在此处期间被新请求
+        超越后仍会覆盖新请求的 rows / total / budget，而 filters 已属新请求。
         """
         self._load_generation += 1
         generation = self._load_generation
@@ -403,9 +406,12 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             except asyncio.CancelledError:
                 raise  # R2: 必须传播
             except Exception:
-                if generation != self._load_generation:
-                    return  # 旧代次：不得覆盖当前消息
                 limit_unknown = True
+
+        # VMD-F01：末段 await（预算限额读取）之后统一复核代次，覆盖成功与降级两种
+        # 完成路径——旧代次响应一律拒绝写入，保留最新请求的 rows / total / budget。
+        if generation != self._load_generation:
+            return  # 旧代次响应：拒绝写入，保留最新请求的结果
 
         self._set_state(
             requests=tuple(rows),
