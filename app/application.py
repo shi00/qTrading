@@ -133,13 +133,6 @@ async def _run_session(
     coordinator = ShutdownCoordinator(page)
     session.coordinator = coordinator
 
-    # S3（D8）：统一模型计量 Recorder 收敛注册为动态停机步骤（Step 5b 后执行）。
-    # 此刻调度三服务尚未组装（assemble 在 controller.start() 内的 initialize_services
-    # 中执行），bootstrap 记 pending coordinator 并在组装完成后自动补挂。
-    from app import bootstrap as bootstrap_module
-
-    bootstrap_module.register_scheduling_cleanup(coordinator)
-
     def _is_web_mode() -> bool:
         return os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
 
@@ -221,6 +214,9 @@ async def _run_session(
         on_show_toast=_on_show_toast,
         on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
         embedded_pg_scenario=scenario,
+        # D02-F04：调度组合结果与停机绑定由本会话显式持有；组装时原子挂
+        # Recorder 最终落账（F02：worker 收敛后、异步 engine dispose 前）。
+        scheduling_coordinator=coordinator,
     )
 
     logger.info("[Main] Before page.render(RootView)")

@@ -240,6 +240,88 @@ class TestStartupInitServices:
             assert ctrl2._services_initialized is True
 
 
+class TestStartupSchedulingBinding:
+    """D02-F04：启动会话持有调度组合结果，coordinator/组合结果显式传递。"""
+
+    @pytest.mark.asyncio
+    async def test_init_services_passes_coordinator_and_reuses_services_on_retry(self, state_recorder):
+        _, recorder = state_recorder
+        coordinator = MagicMock()
+        ctrl = StartupController(
+            cache_manager=AsyncMock(),
+            on_state_change=recorder,
+            scheduling_coordinator=coordinator,
+        )
+        services_a = {"recorder": MagicMock()}
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {
+                "success": False,
+                "error": "task_manager_init_failed",
+                "detail": "task manager init failed",
+                "scheduling_services": services_a,
+            }
+            await ctrl._init_services()
+
+            first_kwargs = mock_init.call_args.kwargs
+            assert first_kwargs["scheduling_coordinator"] is coordinator
+            assert first_kwargs["scheduling_services"] is None
+            assert ctrl._scheduling_services is services_a
+            assert ctrl.state == StartupState.INIT_FAILED
+
+            mock_init.reset_mock()
+            mock_init.return_value = {
+                "success": True,
+                "error": None,
+                "detail": None,
+                "scheduling_services": services_a,
+            }
+            await ctrl.retry()
+
+            second_kwargs = mock_init.call_args.kwargs
+            assert second_kwargs["scheduling_coordinator"] is coordinator
+            assert second_kwargs["scheduling_services"] is services_a
+            assert ctrl._scheduling_services is services_a
+            assert ctrl.state == StartupState.READY
+
+    @pytest.mark.asyncio
+    async def test_init_services_failure_before_assembly_keeps_services_none_then_binds_after_retry(
+        self, state_recorder
+    ):
+        """组装前失败（db_init_failed）不产生 Recorder；Retry 成功后才拿到组合结果。"""
+        _, recorder = state_recorder
+        coordinator = MagicMock()
+        ctrl = StartupController(
+            cache_manager=AsyncMock(),
+            on_state_change=recorder,
+            scheduling_coordinator=coordinator,
+        )
+        services_b = {"recorder": MagicMock()}
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {
+                "success": False,
+                "error": "db_init_failed",
+                "detail": "db down",
+                "scheduling_services": None,
+            }
+            await ctrl._init_services()
+            assert ctrl._scheduling_services is None
+            assert mock_init.call_args.kwargs["scheduling_services"] is None
+
+            mock_init.reset_mock()
+            mock_init.return_value = {
+                "success": True,
+                "error": None,
+                "detail": None,
+                "scheduling_services": services_b,
+            }
+            await ctrl.retry()
+            assert mock_init.call_args.kwargs["scheduling_services"] is None
+            assert ctrl._scheduling_services is services_b
+            assert ctrl.state == StartupState.READY
+
+
 class TestStartupRetry:
     @pytest.mark.asyncio
     async def test_retry_re_calls_init_services(self, controller):

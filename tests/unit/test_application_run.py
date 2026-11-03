@@ -113,7 +113,7 @@ class _FakeCoordinator:
         self.register_task_calls.append(task)
 
     def register_cleanup_callback(self, name, callback, *, critical=True, timeout_s=10.0):
-        """记录动态清理回调注册（S3 shutdown 步骤 5c 契约，见 utils/shutdown.py）。"""
+        """记录动态清理回调注册（S3/D02-F02 shutdown 步骤契约，见 utils/shutdown.py）。"""
         self.register_cleanup_calls.append((name, callback, critical, timeout_s))
 
 
@@ -240,6 +240,33 @@ async def test_run_auto_probe_task_registered(monkeypatch):
         probe_task.cancel()
         with suppress(asyncio.CancelledError):
             await probe_task
+
+
+@pytest.mark.asyncio
+async def test_startup_controller_receives_explicit_scheduling_coordinator(monkeypatch):
+    """D02-F04：session coordinator 作为显式参数传入 StartupController，
+    不再经 bootstrap 全局 pending 等待「下一次任意 assemble」消费。"""
+    _prepare_run_mocks(monkeypatch)
+
+    captured: dict = {}
+
+    def _factory(**kwargs):
+        captured.update(kwargs)
+        ctrl = MagicMock()
+        ctrl.auto_probe_task = None
+        ctrl.start = AsyncMock()
+        return ctrl
+
+    monkeypatch.setattr(app_main, "StartupController", _factory)
+
+    page = _DummyPage()
+    await app_main.run(page)
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert captured["scheduling_coordinator"] is coordinator
+    # 显式绑定：启动阶段不预注册任何 cleanup 回调（组装时才原子绑定）
+    assert coordinator.register_cleanup_calls == []
 
 
 @pytest.mark.asyncio
