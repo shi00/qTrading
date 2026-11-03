@@ -669,17 +669,21 @@ class AIStreamMixin:
 
         - ``mode == "REALTIME"``：结果作为可见表 ``_full_results`` 提交，经唯一 owner 单帧
           原子产出分页 / 警告 / 空态 / 运行状态（``_update_pagination`` 的 ``**changes``）；
-        - 否则（HISTORY）：不触碰可见表，改以 ``replace`` 更新
-          ``_realtime_snapshot.full_results``（保留快照其余字段：页码 / 排序 / 空态 / 警告），
-          使 ``switch_to_realtime`` 恢复时消费到最新运行结果；仅将运行状态（loading / status）
-          经 ``_set_state`` 上报，**不**注入历史表的 warnings / empty_message。
+        - 否则（HISTORY）：不触碰可见表，改以 ``replace`` **整体替换**快照的结果与诊断：
+          ``full_results`` + ``page_no=1`` + ``warnings`` + ``empty_message``（保留排序 /
+          流卡片 / 缓冲等其余快照字段）。结果行、执行警告与空态原因必须同源，否则
+          ``switch_to_realtime`` 会把旧诊断贴到新结果（本轮「无匹配」原因丢失 / 旧警告
+          残留，VMS-F02）；仅将运行状态（loading / status）经 ``_set_state`` 上报，
+          **不**注入历史表的 warnings / empty_message。
         - 两种模式均清空 ``_ai_buffer`` / ``_discarded_buffer``：result_df 为本次运行的权威
           结果（已含全部行），残留缓冲若在切回实时后再 flush 会与结果表重复追加（重复行）。
 
         Args:
             result_df: 本次运行的权威结果表（成功为结果、空态为空表）。
-            warnings: 随结果展示的业务警告（仅 REALTIME 生效）。
-            empty_message: 结果空态原因（仅 REALTIME 生效）。
+            warnings: 随结果展示的业务警告（REALTIME 注入可见表；HISTORY 随快照保存，
+                切回实时时恢复）。
+            empty_message: 结果空态原因（REALTIME 注入可见表；HISTORY 随快照保存，
+                切回实时时恢复）。
             **status_changes: 运行状态变更（如 loading / status_message / status_color /
                 status_action_key），两种模式均生效。
         """
@@ -697,7 +701,18 @@ class AIStreamMixin:
         else:
             snap = self._realtime_snapshot
             if snap is not None:
-                self._realtime_snapshot = replace(snap, full_results=result_df, ai_buffer=[])
+                # VMS-F02: 结果与诊断信息同源 —— 替换 full_results 时同步写入本轮
+                # warnings / empty_message，并把页码重置到 1（与 REALTIME 分支同一语义，
+                # 新数据集从第 1 页开始）；排序 / 流卡片 / 缓冲等其余快照字段保留。
+                # 仅更新快照，不触碰 HISTORY 可见表 / 标签 / 警告。
+                self._realtime_snapshot = replace(
+                    snap,
+                    full_results=result_df,
+                    ai_buffer=[],
+                    page_no=1,
+                    warnings=warnings,
+                    empty_message=empty_message,
+                )
             self._ai_buffer = []
             self._discarded_buffer = []
             if status_changes:

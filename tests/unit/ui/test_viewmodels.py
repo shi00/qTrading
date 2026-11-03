@@ -1021,6 +1021,187 @@ class TestScreenerViewModelRunStrategyExecution:
         assert self.vm._full_results is run_df
         assert len(self.vm._full_results) == 1
 
+    async def test_history_empty_result_snapshot_restores_nomatch_diagnostics(self):
+        """VMS-F02: HISTORY 完成空结果 → 快照同步保存本轮 warnings/empty_message，切回恢复。"""
+        from core.i18n import Message
+
+        strategy = self._make_strategy()
+        strategy.requires_fundamental_coverage = False
+        strategy.filter = AsyncMock(return_value=pd.DataFrame())
+        captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
+        self.mock_dp.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"a": range(100)}),
+                "trade_date": "2026-05-16",
+            }
+        )
+        self.mock_rm.save_results = AsyncMock()
+
+        # 实时态旧诊断：切 HISTORY 时写入快照
+        self.vm._full_results = pd.DataFrame({"ts_code": ["PRE.SZ"], "name": ["pre"]})
+        self.vm._update_pagination(
+            warnings=(Message("warn_old"),),
+            empty_message=Message("screener_nomatch", {"total": 5}),
+        )
+        self.vm.switch_to_history()
+
+        # 历史可见行 / 标签 / 警告
+        history_df = pd.DataFrame({"ts_code": ["H.SZ"], "name": ["history"]})
+        hist_msg = Message("screener_history_viewing", {"date": "2026-05-16"})
+        self.vm._full_results = history_df
+        self.vm._update_pagination(
+            page_no=1,
+            warnings=(hist_msg,),
+            status_message=hist_msg,
+            status_color="info",
+            empty_message=None,
+        )
+        assert self.vm.state.mode == "HISTORY"
+
+        # 后台运行在 HISTORY 完成（合成空结果：候选 100 → screener_nomatch(total=100)）
+        await captured_factory(task_id="task-123")
+
+        # 历史可见行 / 警告 / 空态不被本次实时结果污染
+        assert self.vm._full_results is history_df
+        assert [row.values["name"] for row in self.vm.state.current_page_rows] == ["history"]
+        assert self.vm.state.warnings == (hist_msg,)
+        assert self.vm.state.empty_message is None
+
+        # 快照与本次结果同源：空表 + 本轮空态原因 + 无警告 + 新数据集从第 1 页开始
+        snap = self.vm._realtime_snapshot
+        assert snap is not None
+        assert snap.full_results is not None
+        assert snap.full_results.empty
+        assert snap.page_no == 1
+        assert snap.warnings == ()
+        assert snap.empty_message is not None
+        assert snap.empty_message.key == "screener_nomatch"
+        assert snap.empty_message.params == {"total": 100}
+
+        self.vm.switch_to_realtime()
+
+        # 恢复空表与本轮「未找到匹配」原因，不显示默认无数据上下文
+        assert self.vm.state.mode == "REALTIME"
+        assert self.vm._full_results is snap.full_results
+        assert self.vm._full_results.empty
+        assert self.vm.state.current_page_rows == ()
+        assert self.vm.state.total_items == 0
+        assert self.vm.state.warnings == ()
+        assert self.vm.state.empty_message is not None
+        assert self.vm.state.empty_message.key == "screener_nomatch"
+        assert self.vm.state.empty_message.params == {"total": 100}
+
+    async def test_history_result_snapshot_restores_new_warnings(self):
+        """VMS-F02: 旧快照无警告 → HISTORY 完成带警告结果 → 切回显示本轮警告并保留排序资格。"""
+        from core.i18n import Message
+
+        strategy = self._make_strategy()
+        strategy.requires_fundamental_coverage = False
+        run_df = pd.DataFrame({"ts_code": ["RUN.SZ"], "name": ["run"]})
+        strategy.filter = AsyncMock(return_value=run_df)
+        dep_msg = Message("screener_dep_degraded")
+        captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
+        self.mock_dp.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"a": range(100)}),
+                "trade_date": "2026-05-16",
+                "warnings": [dep_msg],
+            }
+        )
+        self.mock_rm.save_results = AsyncMock()
+
+        # 旧实时态：已有结果/排序，无警告无空态
+        self.vm._full_results = pd.DataFrame({"ts_code": ["RT.SZ"], "name": ["rt"]})
+        self.vm._update_pagination(page_no=1, sort_column="name", sort_ascending=False)
+        self.vm.switch_to_history()
+        assert self.vm._realtime_snapshot is not None
+        assert self.vm._realtime_snapshot.warnings == ()
+        assert self.vm._realtime_snapshot.empty_message is None
+
+        # 历史可见警告
+        hist_msg = Message("screener_history_viewing", {"date": "2026-05-16"})
+        self.vm._full_results = pd.DataFrame({"ts_code": ["H.SZ"], "name": ["history"]})
+        self.vm._update_pagination(warnings=(hist_msg,), status_message=hist_msg, status_color="info")
+
+        await captured_factory(task_id="task-123")
+
+        # 历史可见警告不被本轮实时结果污染
+        assert self.vm.state.warnings == (hist_msg,)
+        snap = self.vm._realtime_snapshot
+        assert snap is not None
+        assert snap.full_results is run_df
+        assert snap.page_no == 1
+        assert snap.sort_column == "name"
+        assert snap.sort_ascending is False
+        assert snap.empty_message is None
+        assert dep_msg in snap.warnings
+        assert any(m.key == "screener_param_impact" for m in snap.warnings)
+
+        # 保存参数完整：权威结果表、trade_date、全局筛选配置与执行期 warnings
+        self.mock_rm.save_results.assert_awaited_once()
+        assert self.mock_rm.save_results.await_args.args[1] is run_df
+        save_kwargs = self.mock_rm.save_results.await_args.kwargs
+        assert save_kwargs["trade_date"] == "2026-05-16"
+        assert save_kwargs["params_snapshot"]["global_config"]["exclude_st"] is True
+        assert save_kwargs["exec_warnings"] == [dep_msg]
+
+        self.vm.switch_to_realtime()
+
+        # 恢复本轮警告；页码/排序资格与标签保持快照语义
+        assert self.vm._full_results is run_df
+        assert self.vm.state.warnings == snap.warnings
+        assert self.vm.state.empty_message is None
+        assert self.vm.state.page_no == 1
+        assert self.vm.state.sort_column == "name"
+        assert self.vm.state.sort_ascending is False
+        assert [row.values["name"] for row in self.vm.state.current_page_rows] == ["run"]
+
+    async def test_history_result_snapshot_clears_stale_warnings(self):
+        """VMS-F02: 旧快照有警告/空态 → HISTORY 完成无警告结果 → 切回清除旧诊断。"""
+        from core.i18n import Message
+
+        strategy = self._make_strategy()
+        strategy.requires_fundamental_coverage = False
+        run_df = pd.DataFrame({"ts_code": ["RUN.SZ"], "name": ["run"]})
+        strategy.filter = AsyncMock(return_value=run_df)
+        captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
+        self.mock_dp.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
+        )
+        self.mock_rm.save_results = AsyncMock()
+        stale_msg = Message("warn_stale")
+
+        self.vm._full_results = pd.DataFrame({"ts_code": ["RT.SZ"], "name": ["rt"]})
+        self.vm._update_pagination(
+            warnings=(stale_msg,),
+            empty_message=Message("screener_nomatch", {"total": 7}),
+        )
+        self.vm.switch_to_history()
+        assert self.vm._realtime_snapshot is not None
+        assert self.vm._realtime_snapshot.warnings == (stale_msg,)
+        assert self.vm._realtime_snapshot.empty_message is not None
+
+        self.vm._full_results = pd.DataFrame({"ts_code": ["H.SZ"], "name": ["history"]})
+        self.vm._update_pagination(warnings=(), empty_message=None)
+
+        await captured_factory(task_id="task-123")
+
+        snap = self.vm._realtime_snapshot
+        assert snap is not None
+        assert snap.full_results is run_df
+        assert snap.warnings == ()
+        assert snap.empty_message is None
+
+        self.vm.switch_to_realtime()
+
+        # 旧警告/旧空态不得贴到本轮正常结果上
+        assert self.vm._full_results is run_df
+        assert self.vm.state.warnings == ()
+        assert self.vm.state.empty_message is None
+
     async def test_execute_screening_sync_filter(self):
         strategy = self._make_strategy(is_async=False)
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
