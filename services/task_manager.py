@@ -1241,11 +1241,17 @@ class TaskManager:
             return clipped
 
     def _queue_persist_snapshot(self, snapshot: tuple):
-        """Schedule a tracked persistence write so shutdown can flush deterministically."""
+        """Schedule a tracked persistence write so shutdown can flush deterministically.
+
+        Reservation ownership (D11-F07): this method only reserves (+1). The single
+        owner that releases the reservation is either ``on_drop`` (rejected/launch
+        failure) or ``_tracked_persist``'s ``finally`` (successful schedule). The
+        caller must NOT compensate again based on the return value.
+        """
         with self._persist_counter_lock:
             self._persist_pending_count += 1
 
-        def _decrement():
+        def _release():
             with self._persist_counter_lock:
                 self._persist_pending_count = max(0, self._persist_pending_count - 1)
 
@@ -1253,20 +1259,26 @@ class TaskManager:
             try:
                 await self._persist_snapshot(snapshot)
             finally:
-                _decrement()
+                _release()
 
-        scheduled = self._schedule_coro(_tracked_persist(), on_drop=_decrement)
-        if not scheduled:
-            _decrement()
+        self._schedule_coro(_tracked_persist(), on_drop=_release)
 
     def _schedule_coro(self, coro, on_drop: Callable[[], None] | None = None):
         """Schedule a coroutine on the main event loop.  Thread-safe.
 
-        If the coroutine cannot be scheduled or fails to launch, on_drop (if provided)
-        is invoked to safely release any reserved counters or resources.
+        Returns ``True`` when the coroutine was handed to the loop (``_launch`` may
+        still drop it later) and ``False`` when it could not be scheduled at all.
+        The return value is informational only: callers must not use it to
+        compensate, because ``on_drop`` (if provided) is invoked at most once on
+        every drop path to safely release any reserved counters or resources.
         """
+        dropped = False
 
         def _handle_drop(msg: str):
+            nonlocal dropped
+            if dropped:
+                return
+            dropped = True
             coro.close()
             if on_drop is not None:
                 try:

@@ -2332,6 +2332,140 @@ class TestTaskManagerQueuePersistSnapshotTracked:
         assert mgr._persist_pending_count == 0
 
 
+async def _wait_persist_pending(mgr: TaskManager, expected: int, timeout_s: float = 1.0) -> None:
+    """确定性地等待 _persist_pending_count 到达期望值（不使用随机 sleep）。"""
+
+    async def _poll():
+        while mgr._persist_pending_count != expected:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(_poll(), timeout=timeout_s)
+
+
+class TestTaskManagerPersistReservationSingleRelease:
+    """D11-F07: 每笔持久化 reservation 只允许被释放一次，拒投不得误扣在途写。"""
+
+    _SNAPSHOT_A = ("id-a", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None)
+    _SNAPSHOT_B = ("id-b", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None)
+
+    @staticmethod
+    def _blocked_persist(started: asyncio.Event, release: asyncio.Event):
+        async def _persist(snapshot):
+            started.set()
+            await release.wait()
+
+        return _persist
+
+    async def test_no_loop_drop_keeps_other_inflight_reservation(self):
+        """无 loop 拒投 B 时，A 的在途 reservation 不得被二次扣减。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        real_loop = asyncio.get_running_loop()
+        mgr._loop = real_loop
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        with patch.object(mgr, "_persist_snapshot", self._blocked_persist(started, release)):
+            mgr._queue_persist_snapshot(self._SNAPSHOT_A)
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert mgr._persist_pending_count == 1
+
+            mgr._loop = None
+            try:
+                mgr._queue_persist_snapshot(self._SNAPSHOT_B)
+            finally:
+                mgr._loop = real_loop
+
+            assert mgr._persist_pending_count == 1
+            with pytest.raises(TimeoutError):
+                await mgr.flush_persistence(timeout_s=0.05)
+
+            release.set()
+            await mgr.flush_persistence(timeout_s=1.0)
+        assert mgr._persist_pending_count == 0
+
+    async def test_call_soon_threadsafe_runtime_error_keeps_inflight_reservation(self):
+        """call_soon_threadsafe 抛 RuntimeError 拒投 B 时只释放 B 自身。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        real_loop = asyncio.get_running_loop()
+        mgr._loop = real_loop
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        with patch.object(mgr, "_persist_snapshot", self._blocked_persist(started, release)):
+            mgr._queue_persist_snapshot(self._SNAPSHOT_A)
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert mgr._persist_pending_count == 1
+
+            closed_loop = MagicMock()
+            closed_loop.is_running.return_value = True
+            closed_loop.call_soon_threadsafe.side_effect = RuntimeError("closed")
+            mgr._loop = closed_loop
+            try:
+                mgr._queue_persist_snapshot(self._SNAPSHOT_B)
+            finally:
+                mgr._loop = real_loop
+
+            assert mgr._persist_pending_count == 1
+            with pytest.raises(TimeoutError):
+                await mgr.flush_persistence(timeout_s=0.05)
+
+            release.set()
+            await mgr.flush_persistence(timeout_s=1.0)
+        assert mgr._persist_pending_count == 0
+
+    async def test_launch_runtime_error_keeps_inflight_reservation(self):
+        """create_task 在 _launch 中抛 RuntimeError 时只释放 B，不误扣 A。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        real_loop = asyncio.get_running_loop()
+        mgr._loop = real_loop
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        with patch.object(mgr, "_persist_snapshot", self._blocked_persist(started, release)):
+            mgr._queue_persist_snapshot(self._SNAPSHOT_A)
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert mgr._persist_pending_count == 1
+
+            broken_loop = MagicMock()
+            broken_loop.is_running.return_value = True
+            broken_loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+            broken_loop.create_task.side_effect = RuntimeError("loop closed")
+            mgr._loop = broken_loop
+            try:
+                mgr._queue_persist_snapshot(self._SNAPSHOT_B)
+            finally:
+                mgr._loop = real_loop
+
+            assert mgr._persist_pending_count == 1
+            with pytest.raises(TimeoutError):
+                await mgr.flush_persistence(timeout_s=0.05)
+
+            release.set()
+            await mgr.flush_persistence(timeout_s=1.0)
+        assert mgr._persist_pending_count == 0
+
+    async def test_normal_completion_releases_only_own_reservation(self):
+        """正常完成路径由 _tracked_persist 的 finally 释放，且只释放自身一次。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = asyncio.get_running_loop()
+        mgr._persist_pending_count = 1  # 模拟另一笔仍在途的写
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        with patch.object(mgr, "_persist_snapshot", self._blocked_persist(started, release)):
+            mgr._queue_persist_snapshot(self._SNAPSHOT_A)
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert mgr._persist_pending_count == 2
+
+            release.set()
+            await _wait_persist_pending(mgr, 1)
+        assert mgr._persist_pending_count == 1
+
+
 class TestTaskManagerScheduleCoroErrorPaths:
     """覆盖 _schedule_coro 中 RuntimeError 分支。"""
 
