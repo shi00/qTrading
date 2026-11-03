@@ -63,6 +63,19 @@ class TestToFloat:
     def test_nan_returns_none(self):
         assert _to_float(float("nan")) is None
 
+    def test_infinite_returns_none(self):
+        assert _to_float(float("inf")) is None
+        assert _to_float(float("-inf")) is None
+
+    @pytest.mark.parametrize("raw", ["inf", "+inf", "-inf", "Infinity", "-Infinity", "infinity"])
+    def test_infinite_string_returns_none(self, raw):
+        assert _to_float(raw) is None
+
+    def test_zero_and_negative_preserved(self):
+        assert _to_float(0) == 0.0
+        assert _to_float(0.0) == 0.0
+        assert _to_float(-1.5) == -1.5
+
     def test_numeric_types(self):
         assert _to_float(12) == 12.0
         assert _to_float(12.5) == 12.5
@@ -146,6 +159,17 @@ class TestLoadWatchlistQuotes:
         assert result["000001.SZ"] == StockQuote(latest_close=12.34, pct_chg=1.5, ai_score=85.0)
         # 无行情/无 AI 的代码：字段为 None（R21 不得填 0）
         assert result["600000.SH"] == StockQuote(latest_close=None, pct_chg=None, ai_score=None)
+
+    @pytest.mark.asyncio
+    async def test_infinite_quotes_normalized_to_none(self, service, mock_cache):
+        mock_cache.get_latest_quotes_bulk.return_value = pd.DataFrame(
+            [{"ts_code": "000001.SZ", "close": float("inf"), "pct_chg": float("-inf")}]
+        )
+        mock_cache.get_latest_ai_reviews_bulk.return_value = pd.DataFrame(
+            [{"ts_code": "000001.SZ", "ai_score": float("inf")}]
+        )
+        result = await service.load_watchlist_quotes(["000001.SZ"])
+        assert result["000001.SZ"] == StockQuote(latest_close=None, pct_chg=None, ai_score=None)
 
     @pytest.mark.asyncio
     async def test_missing_ai_keeps_none(self, service, mock_cache):

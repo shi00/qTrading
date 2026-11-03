@@ -41,16 +41,16 @@ class StockQuote:
 
 
 def _to_float(val: typing.Any) -> float | None:
-    """归一为有限 float；``None`` / NaN / 非数值 / bool → ``None``（R21）。"""
+    """归一为有限 float；``None`` / NaN / ±inf / 非数值 / bool → ``None``（R21）。"""
     if val is None or isinstance(val, bool):
         return None
     if isinstance(val, float):
-        return None if math.isnan(val) else val
+        return val if math.isfinite(val) else None
     try:
         f = float(val)
     except (TypeError, ValueError):
         return None
-    return None if math.isnan(f) else f
+    return f if math.isfinite(f) else None
 
 
 def _normalize_cell(val: typing.Any) -> typing.Any:
