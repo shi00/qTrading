@@ -23,12 +23,14 @@ f16 产物四判据宽裕通过（见 scripts/export_finbert_gguf.py docstring�
 同时实测 ``Llama.embed()`` CLS 池化返回维度（须 = 768，验证非 RANK 越界读取）与
 单条耗时基线（预期 10 ~ 30 ms / 条，CPU + 标题长度）。
 
-**分词兜底（§7 / §8.3）**：llama.cpp 的 WordPiece 实现对「HF 基线词表 + 追加金融词」
-（``len(tokenizer) = 34932``）的贪心切分与 HF 不一致；一旦第 1 项不达标，本脚本自动
-切到兜底路径——用 HF ``tokenizers`` 生成 ids，经 ``llama_cpp.LlamaBatch.add_sequence`` +
-``llama_decode`` + ``llama_get_embeddings_seq`` 直接取 CLS 向量（此时 ``n_embd`` 读取长度
-是正确的），再重验第 2~4 项。生产打分子进程（N3-2）必须沿用该兜底路径，不得使用
-``Llama.embed(text)`` 的内部分词。
+**分词模式（§7 / §8.3，``--tokenizer-mode``）**：llama.cpp 的 WordPiece 实现对「HF 基线
+词表 + 追加金融词」（``len(tokenizer) = 34932``）的贪心切分与 HF 不一致。``auto``（默认）
+在直连不一致时自动切到兜底路径——用 HF ``tokenizers`` 生成 ids，经
+``llama_cpp.LlamaBatch.add_sequence`` + ``llama_decode`` + ``llama_get_embeddings_seq``
+直接取 CLS 向量（此时 ``n_embd`` 读取长度是正确的），再重验第 2~4 项；``fallback`` 显式
+使用该兜底路径；``direct`` 强制使用内置分词器，直连不一致即第 1 项判据 FAIL（不得自动
+兜底）。生产打分子进程（N3-2）必须沿用兜底路径，不得使用 ``Llama.embed(text)`` 的内部
+分词。
 
 **分类头对照（N3-1 产物 ``head.npz``）**：业务分类头已由 N3-1 产出（``head.npz``），
 产线 workflow 与正式发布均以 ``--head`` 指向该文件，第 3 / 4 项按训练好的头计算
@@ -346,6 +348,56 @@ def compare_token_ids(
     }
 
 
+def resolve_tokenizer_strategy(mode: str, direct: dict[str, Any]) -> dict[str, Any]:
+    """按 ``--tokenizer-mode`` 解析分词判定与取向量执行路径（纯函数，供单测覆盖）。
+
+    - ``auto``：直连一致走内置分词（两种 ids 相等）；不一致自动兜底到 HF ids；
+    - ``fallback``：显式使用 HF ids 直送（无论直连是否一致）；
+    - ``direct``：强制内置分词器；不一致时第 1 项判据 FAIL，禁止兜底。
+    """
+    if mode == "fallback":
+        return {
+            "input_mode": mode,
+            "effective_path": "fallback",
+            "fallback_used": True,
+            "tokenizer_consistent": True,
+            "detail": "fallback：显式使用 HF ids 经 llama_batch 直送，两侧输入 token 完全一致",
+        }
+    if mode == "direct":
+        if direct["match"]:
+            return {
+                "input_mode": mode,
+                "effective_path": "direct",
+                "fallback_used": False,
+                "tokenizer_consistent": True,
+                "detail": "direct：llama.cpp 内置分词器与 HF ids 完全一致",
+            }
+        return {
+            "input_mode": mode,
+            "effective_path": "direct-mismatch",
+            "fallback_used": False,
+            "tokenizer_consistent": False,
+            "detail": "direct：llama.cpp 内置分词器与 HF ids 不一致，禁止兜底，第 1 项判据 FAIL",
+        }
+    if mode == "auto":
+        if direct["match"]:
+            return {
+                "input_mode": mode,
+                "effective_path": "direct",
+                "fallback_used": False,
+                "tokenizer_consistent": True,
+                "detail": "auto：llama.cpp 内置分词器与 HF ids 完全一致",
+            }
+        return {
+            "input_mode": mode,
+            "effective_path": "fallback",
+            "fallback_used": True,
+            "tokenizer_consistent": True,
+            "detail": "auto：直连不一致，自动兜底；HF ids 经 llama_batch 直送，两侧输入 token 完全一致",
+        }
+    raise ValueError(f"未知 tokenizer_mode: {mode!r}")
+
+
 def summarize_latency(samples_ms: list[float]) -> dict[str, Any]:
     """单条耗时基线汇总（预期 10 ~ 30 ms，属观测基线、非硬门禁）。"""
     if not samples_ms:
@@ -477,16 +529,18 @@ def _gguf_tokenize_internal(llm: Any, texts: list[str]) -> list[list[int]]:
     return [[int(token_id) for token_id in llm.tokenize(text.encode("utf-8"))] for text in texts]
 
 
-def _gguf_cls_via_hf_ids(
+def _gguf_cls_via_ids(
     llm: Any,
     llama_cpp: Any,
     ids_list: list[list[int]],
     timing_sink: list[float] | None = None,
 ) -> np.ndarray:
-    """兜底路径（§8.3）：HF ids → llama_batch → llama_decode → CLS 向量。
+    """ids → llama_batch → llama_decode → CLS 向量（§8.3 低层取向量实现）。
 
-    直接复用 llama.cpp 的 ``LlamaBatch`` / ``LlamaContext`` 与
-    ``llama_get_embeddings_seq``（此时按 ``n_embd`` 读取是正确的）。
+    ``auto``/``fallback`` 的兜底路径传入 HF ids；``direct`` 完全匹配时内置分词 ids 与
+    HF ids 相等，不匹配时传入内置分词 ids（不兜底）。直接复用 llama.cpp 的
+    ``LlamaBatch`` / ``LlamaContext`` 与 ``llama_get_embeddings_seq``（此时按 ``n_embd``
+    读取是正确的）。
     """
     n_embd = int(llm.n_embd())
     n_batch = int(llm.n_batch)
@@ -522,7 +576,7 @@ def _verify_one_backend(
     *,
     gguf_path: Path,
     name: str,
-    hf_ids: list[list[int]],
+    token_ids: list[list[int]],
     pytorch_cls: np.ndarray,
     reference_head: tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray] | None],
     seed: int,
@@ -530,13 +584,13 @@ def _verify_one_backend(
     n_ctx: int,
     measure_latency: bool,
 ) -> dict[str, Any]:
-    """对单个 GGUF（f16 / Q8_0）执行兜底 CLS 取向量与四项数值对比。"""
+    """对单个 GGUF（f16 / Q8_0）按选定 ids 取 CLS 向量并做四项数值对比。"""
     _assert_gguf_file(gguf_path)
     llm, llama_cpp = _load_gguf(gguf_path, n_threads=n_threads, n_ctx=n_ctx)
     try:
         dim = int(llm.n_embd())
         timings: list[float] | None = [] if measure_latency else None
-        gguf_cls = _gguf_cls_via_hf_ids(llm, llama_cpp, hf_ids, timing_sink=timings)
+        gguf_cls = _gguf_cls_via_ids(llm, llama_cpp, token_ids, timing_sink=timings)
         cosines = row_cosine(pytorch_cls, gguf_cls)
         weight, bias, pre = reference_head
         probs_pt = apply_head(pytorch_cls, weight, bias, pre)
@@ -595,23 +649,21 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     _assert_gguf_file(probe_path)
     probe_llm, _probe_mod = _load_gguf(probe_path, n_threads=args.n_threads, n_ctx=args.n_ctx)
     try:
-        direct = compare_token_ids(hf_ids, _gguf_tokenize_internal(probe_llm, texts))
+        direct_ids = _gguf_tokenize_internal(probe_llm, texts)
+        direct = compare_token_ids(hf_ids, direct_ids)
     finally:
         probe_llm.close()
 
-    fallback_used = not direct["match"] or args.tokenizer_mode == "fallback"
-    tokenizer_detail = (
-        "HF ids 经 llama_batch 直送（§7/§8.3 兜底），两侧输入 token 完全一致"
-        if fallback_used
-        else "llama.cpp 内置分词器与 HF ids 完全一致"
-    )
+    strategy = resolve_tokenizer_strategy(args.tokenizer_mode, direct)
+    # direct 不匹配时同样不使用 HF ids 兜底：按内置分词 ids 计算，令第 1 项判据 FAIL。
+    token_ids = hf_ids if strategy["effective_path"] == "fallback" else direct_ids
 
     backends: dict[str, Any] = {}
     if f16_path is not None:
         backends["f16"] = _verify_one_backend(
             gguf_path=f16_path,
             name="f16",
-            hf_ids=hf_ids,
+            token_ids=token_ids,
             pytorch_cls=pytorch_cls,
             reference_head=reference_head,
             seed=args.seed,
@@ -623,7 +675,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         backends["q8_0"] = _verify_one_backend(
             gguf_path=q8_path,
             name="q8_0",
-            hf_ids=hf_ids,
+            token_ids=token_ids,
             pytorch_cls=pytorch_cls,
             reference_head=reference_head,
             seed=args.seed,
@@ -635,8 +687,8 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     f16 = backends.get("f16")
     q8 = backends.get("q8_0")
     criteria = evaluate_criteria(
-        tokenizer_consistent=fallback_used or direct["match"],
-        tokenizer_detail=tokenizer_detail,
+        tokenizer_consistent=strategy["tokenizer_consistent"],
+        tokenizer_detail=strategy["detail"],
         cos_f16=None if f16 is None else f16["cosine_min"],
         cos_q8=None if q8 is None else q8["cosine_min"],
         prob_diff_f16=None if f16 is None else f16["probability_max_abs_diff"],
@@ -666,11 +718,13 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "expected_dim": EMBEDDING_DIM,
         },
         "tokenizer": {
+            "input_mode": strategy["input_mode"],
+            "effective_path": strategy["effective_path"],
             "direct_match": direct["match"],
             "direct_match_rate": direct["match_rate"],
             "matched": direct["matched"],
             "total": direct["total"],
-            "fallback_used": fallback_used,
+            "fallback_used": strategy["fallback_used"],
             "mismatch_examples": direct["mismatch_examples"],
         },
         "backends": backends,
@@ -685,9 +739,10 @@ def _print_summary(report: dict[str, Any]) -> None:
     print("=" * 68)
     tokenizer = report["tokenizer"]
     print(
-        f"[分词] 直连一致: {tokenizer['direct_match']} "
+        f"[分词] 模式: {tokenizer['input_mode']} -> 执行路径: {tokenizer['effective_path']} "
+        f"直连一致: {tokenizer['direct_match']} "
         f"(rate={tokenizer['direct_match_rate']:.4f}, {tokenizer['matched']}/{tokenizer['total']}) "
-        f"-> 兜底路径: {tokenizer['fallback_used']}"
+        f"兜底路径: {tokenizer['fallback_used']}"
     )
     print(f"[嵌入] 维度: {report['embedding']['dim']} (期望 {report['embedding']['expected_dim']})")
     for name, backend in report["backends"].items():
@@ -739,7 +794,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--tokenizer-mode",
         choices=("auto", "direct", "fallback"),
         default="auto",
-        help="auto: 直连不一致时自动兜底；direct: 强制内置分词器；fallback: 强制 HF ids 直送",
+        help="auto: 直连不一致时自动兜底；direct: 强制内置分词器（不一致即 FAIL，不兜底）；fallback: 强制 HF ids 直送",
     )
     return parser.parse_args(argv)
 
