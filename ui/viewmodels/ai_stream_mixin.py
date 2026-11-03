@@ -17,7 +17,6 @@ import asyncio
 import inspect
 import logging
 import time
-import typing
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from functools import cached_property
@@ -181,6 +180,7 @@ class AIStreamMixin:
     _realtime_snapshot: RealtimeSnapshot | None
     _last_ai_update: float
     _flush_pending: bool
+    _disposed: bool
     _background_tasks: set[asyncio.Task]
     _strategy_submitted: bool
     _active_task_id: str | None
@@ -520,16 +520,35 @@ class AIStreamMixin:
                     self._flush_pending = False
                     logger.warning("[ScreenerVM] Cannot schedule flush: no running loop; sync flush skipped")
 
+    def _schedule_ai_flush(self) -> None:
+        """按需调度一次 buffer flush（幂等：已有在途 flush 时不重复创建）。
+
+        仅在有运行中事件循环时创建任务，复用 ``_background_tasks`` 跟踪生命周期；
+        供 mode 往返后基于最新数据重算（VMS-F01）。
+        """
+        if self._flush_pending:
+            return
+        loop = self._get_loop_or_none()
+        if loop is None or not loop.is_running():
+            return
+        self._flush_pending = True
+        task = loop.create_task(self._flush_ai_buffer())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
+
     async def _flush_ai_buffer(self):
         """Flush buffer to main DataFrame.
 
-        M-UI-05: 全数据临界区纳入 ``screener_vm_results_lock``（与 ``sort_data``/
-        ``load_history_data`` 同锁）。flush 对 ``_full_results`` 的「读 → concat →
-        写回 → 排序 → 写回」跨多个 await, 若不与排序互斥, 并发写回交错会以旧数据
-        覆盖本批 AI 结果行（丢失更新, UI 永久缺行）。锁内 await 线程池与
-        ``sort_data`` 同模式, 单锁无嵌套, 无死锁; CancelledError 经 ``async with``
-        释放锁后正常传播 (R2)。
+        M-UI-05 / VMS-F01: 全数据临界区纳入 ``screener_vm_results_lock``（与
+        ``sort_data`` / ``load_history_data`` / 最终权威结果提交同锁）。flush 对
+        ``_full_results`` 的读与「concat → 排序 → 列重排」跨多个 await，但只读取
+        开始时快照的 ``base_df``，全部结果保存在局部变量，worker 计算结束前不写共享
+        ``_full_results``；无 await 的提交点再核对 disposed / mode=REALTIME / 同一
+        ``_dataset_revision``，不合格批次按 mode 归属归还缓冲，绝不覆盖最终权威结果
+        或 HISTORY 可见表。锁内 await 线程池与 ``sort_data`` 同模式，单锁无嵌套，
+        无死锁；CancelledError 经 ``async with`` 释放锁后正常传播 (R2)。
         """
+        reschedule = False
         try:
             lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
             async with lock:
@@ -539,7 +558,6 @@ class AIStreamMixin:
                 if self._state.mode != "REALTIME":
                     self._discarded_buffer.extend(self._ai_buffer)
                     self._ai_buffer = []
-                    self._flush_pending = False
                     logger.debug(
                         "[ScreenerVM] Saved %s items to discarded_buffer during HISTORY mode",
                         len(self._discarded_buffer),
@@ -549,36 +567,37 @@ class AIStreamMixin:
                 # Swap buffer to process safely
                 current_batch = self._ai_buffer
                 self._ai_buffer = []
+                revision_at_start = self._dataset_revision
+                base_df = self._full_results
 
                 new_df = pd.DataFrame(current_batch)
 
-                # Offload Concatenation
-                if self._full_results is None or self._full_results.empty:
-                    self._full_results = new_df
+                # Offload Concatenation（结果仅存局部变量，不写共享表）
+                if base_df is None or base_df.empty:
+                    merged_df = new_df
                 else:
-                    # Append
-                    self._full_results = await ThreadPoolManager().run_async(
+                    merged_df = await ThreadPoolManager().run_async(
                         TaskType.CPU,
                         pd.concat,
-                        [self._full_results, new_df],
+                        [base_df, new_df],
                         ignore_index=True,
                     )
 
                 # Sort by Score (Best on top)
-                if "ai_score" in self._full_results.columns:
-                    self._full_results = await ThreadPoolManager().run_async(
+                if "ai_score" in merged_df.columns:
+                    merged_df = await ThreadPoolManager().run_async(
                         TaskType.CPU,
                         self._sort_helper,
-                        self._full_results,
+                        merged_df,
                         "ai_score",
                         False,
                     )
 
                     # Pin ai_score and ai_reason to the front (after name)
                     # Ensure ai_reason column exists (some AI results may only return score)
-                    if "ai_reason" not in typing.cast("pd.DataFrame", self._full_results).columns:
-                        typing.cast("pd.DataFrame", self._full_results)["ai_reason"] = ""
-                    cols = list(self._full_results.columns)  # type: ignore[untyped]
+                    if "ai_reason" not in merged_df.columns:
+                        merged_df["ai_reason"] = ""
+                    cols = list(merged_df.columns)
                     # Remove if exists
                     if "ai_score" in cols:
                         cols.remove("ai_score")
@@ -592,7 +611,26 @@ class AIStreamMixin:
                     cols.insert(insert_idx, "ai_score")
                     cols.insert(insert_idx + 1, "ai_reason")
 
-                    self._full_results = self._full_results[cols]  # type: ignore[untyped]
+                    merged_df = merged_df[cols]
+
+                # VMS-F01: 无 await 提交点 —— 再次核对数据集所有权。
+                # 本 flush 持锁跨越上述 await，最终权威提交（同锁）不可能插入；此时
+                # revision/mode 变化只可能来自同步 mode 切换（switch_to_history /
+                # switch_to_realtime 不取锁）。按当前 mode 归属归还 in-flight 批次：
+                # disposed 丢弃；HISTORY → discarded_buffer；已往返 REALTIME → 归还
+                # ai_buffer 并按最新数据重算。不得仅凭 revision 变化推断最终提交已发生。
+                if self._disposed:
+                    return
+                if revision_at_start != self._dataset_revision or self._state.mode != "REALTIME":
+                    if self._state.mode == "HISTORY":
+                        self._discarded_buffer.extend(current_batch)
+                    else:
+                        # 旧批次早于 await 期间新抵达的行，归还到缓冲前端保持时序
+                        self._ai_buffer = current_batch + self._ai_buffer
+                        reschedule = True
+                    return
+
+                self._full_results = merged_df
                 # C2b H1: 数据内容变更后经唯一 owner 原子产出分页元数据 + 当前页切片
                 self._update_pagination()
 
@@ -602,6 +640,8 @@ class AIStreamMixin:
             logger.error("Error flushing AI buffer: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         finally:
             self._flush_pending = False
+            if reschedule and self._ai_buffer:
+                self._schedule_ai_flush()
 
     # --- Strategy execution orchestration (TaskManager) ---
 
@@ -662,6 +702,33 @@ class AIStreamMixin:
             self._discarded_buffer = []
             if status_changes:
                 self._set_state(**status_changes)
+
+    async def _commit_realtime_results_in_lock(
+        self,
+        result_df: pd.DataFrame,
+        *,
+        warnings: tuple[Message, ...] = (),
+        empty_message: Message | None = None,
+        **status_changes,
+    ) -> None:
+        """VMS-F01: 在同一结果锁内提交本次运行的最终权威结果。
+
+        最终提交是权威全集，必须与 ``_flush_ai_buffer`` 的流式写点串行化（共用
+        ``screener_vm_results_lock``）：flush 已持锁并跨 concat/sort await 时，本提交
+        排队等待，flush 的旧批次先落盘也不影响本提交随后整体替换 ``_full_results``
+        （不会丢 C 或重复 A/B）；本提交先取得锁时清空 ``_ai_buffer`` /
+        ``_discarded_buffer``，排队中的 flush 见空缓冲直接返回。锁内仅执行同步
+        ``_commit_realtime_results``（无 await），CancelledError 在等待锁阶段经
+        ``async with`` 正常传播（R2）。
+        """
+        lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
+        async with lock:
+            self._commit_realtime_results(
+                result_df,
+                warnings=warnings,
+                empty_message=empty_message,
+                **status_changes,
+            )
 
     async def run_strategy(
         self,
@@ -865,7 +932,11 @@ class AIStreamMixin:
                     # 本轮有结果由表格承载, 空态原因仅空结果时设置 (下方分支)。
                     # UIR-F09-002: 经模式感知统一提交入口 —— HISTORY 下运行在后台完成时
                     # 只更新实时快照, 不覆盖历史表 (仅 REALTIME 才写可见表)。
-                    self._commit_realtime_results(result_df, warnings=strategy_warnings, empty_message=None)
+                    # VMS-F01: 最终权威提交与 _flush_ai_buffer 共用结果锁，避免在途
+                    # flush 的旧批次在提交后覆盖权威全集（丢 C / 重复 A/B）。
+                    await self._commit_realtime_results_in_lock(
+                        result_df, warnings=strategy_warnings, empty_message=None
+                    )
 
                     # Task 3.3: save_results 失败不再落入 screener_exec_error.
                     # 结果已提交（REALTIME 上屏 / HISTORY 入实时快照）照常可查看,
@@ -987,7 +1058,8 @@ class AIStreamMixin:
                 # 避免分两帧触发重复通知 (第 3 轮对抗检视)。
                 # UIR-F09-002: 经模式感知统一提交入口 —— HISTORY 下只更新实时快照为「空结果」,
                 # 不覆盖历史表; 运行状态 (loading/status) 两种模式皆上报。
-                self._commit_realtime_results(
+                # VMS-F01: 同锁提交，清空缓冲后排队 flush 见空直接返回。
+                await self._commit_realtime_results_in_lock(
                     pd.DataFrame(),
                     warnings=strategy_warnings,
                     empty_message=empty_message,

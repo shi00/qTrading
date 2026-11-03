@@ -1196,6 +1196,169 @@ class TestScreenerViewModelFlushAiBuffer:
         assert screener_vm._flush_pending is False
 
 
+class TestScreenerViewModelFlushDatasetOwnership:
+    """VMS-F01: 最终权威提交与在途 flush 的数据集所有权回归。"""
+
+    @staticmethod
+    def _patch_paused_thread_pool(entered: asyncio.Event, release: asyncio.Event):
+        """首个 CPU 任务挂起在 barrier，后续 CPU 任务直接同步执行。"""
+        state = {"paused": False}
+
+        async def _run_async(task_type, fn, *args, **kwargs):
+            if not state["paused"]:
+                state["paused"] = True
+                entered.set()
+                await release.wait()
+            return fn(*args, **kwargs)
+
+        mock_tp = MagicMock()
+        mock_tp.run_async = AsyncMock(side_effect=_run_async)
+        patcher = patch("ui.viewmodels.ai_stream_mixin.ThreadPoolManager", return_value=mock_tp)
+        return patcher
+
+    async def test_final_commit_not_overwritten_by_inflight_flush(self, screener_vm):
+        """在途 flush 已换出旧批次时，最终权威 F 仍完整上屏（C 不丢、A/B 不重复）。"""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        screener_vm._full_results = pd.DataFrame({"name": ["A"], "ai_score": [10.0]})
+        screener_vm._update_pagination()
+        screener_vm._ai_buffer = [{"name": "A", "ai_score": 10.0}]
+        screener_vm._flush_pending = True
+
+        with self._patch_paused_thread_pool(entered, release):
+            flush_task = asyncio.create_task(screener_vm._flush_ai_buffer())
+            await entered.wait()
+            # flush 已换出 [A]，此后 B 抵达缓冲；本次运行最终以权威 F=[A,B,C] 收尾。
+            screener_vm._ai_buffer.append({"name": "B", "ai_score": 20.0})
+            final_df = pd.DataFrame({"name": ["A", "B", "C"], "ai_score": [10.0, 20.0, 30.0]})
+            commit_task = asyncio.create_task(screener_vm._commit_realtime_results_in_lock(final_df, warnings=()))
+            # 与 flush 共用结果锁：最终提交必须排在已持锁的在途 flush 之后。
+            await asyncio.sleep(0)
+            assert not commit_task.done()
+
+            release.set()
+            await flush_task
+            await commit_task
+
+        assert screener_vm._full_results is final_df
+        assert set(screener_vm._full_results["name"]) == {"A", "B", "C"}
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == [
+            "A",
+            "B",
+            "C",
+        ]
+        assert screener_vm.state.total_items == 3
+        assert screener_vm._ai_buffer == []
+        assert screener_vm._discarded_buffer == []
+
+    async def test_history_commit_survives_inflight_flush_and_restores_authoritative_result(self, screener_vm):
+        """flush 挂起时切 HISTORY：历史可见表/标签/警告不被旧批次覆盖，切回实时恢复权威结果。"""
+        from core.i18n import Message
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        hist_msg = Message("screener_nomatch", {"total": 0})
+
+        snapshot_df = pd.DataFrame({"name": ["RT"], "ai_score": [10.0]})
+        screener_vm._full_results = snapshot_df
+        screener_vm._update_pagination()
+        screener_vm._ai_buffer = [{"name": "RT_LATE", "ai_score": 20.0}]
+        screener_vm._flush_pending = True
+
+        with self._patch_paused_thread_pool(entered, release):
+            flush_task = asyncio.create_task(screener_vm._flush_ai_buffer())
+            await entered.wait()
+
+            screener_vm.switch_to_history()
+            # 历史表的有效提交（生产路径 load_history_data 会排队等同一把锁）。
+            history_df = pd.DataFrame({"name": ["H"], "ai_score": [30.0]})
+            screener_vm._full_results = history_df
+            screener_vm._update_pagination(
+                page_no=1,
+                warnings=(hist_msg,),
+                status_message=hist_msg,
+                status_color="info",
+            )
+
+            # 运行在 HISTORY 中完成：权威结果写入实时快照（锁内排队，flush 释放后执行）。
+            final_df = pd.DataFrame({"name": ["F"], "ai_score": [40.0]})
+            commit_task = asyncio.create_task(screener_vm._commit_realtime_results_in_lock(final_df))
+            await asyncio.sleep(0)
+            assert not commit_task.done()
+
+            release.set()
+            await flush_task
+            await commit_task
+
+        assert screener_vm._full_results is history_df
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == ["H"]
+        assert screener_vm.state.warnings == (hist_msg,)
+        assert screener_vm.state.status_message == hist_msg
+        assert screener_vm.state.status_color == "info"
+        assert screener_vm._discarded_buffer == []
+
+        screener_vm.switch_to_realtime()
+
+        assert screener_vm._full_results is final_df
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == ["F"]
+        assert screener_vm._ai_buffer == []
+        assert screener_vm._discarded_buffer == []
+
+    async def test_mode_roundtrip_requeues_inflight_batch_without_duplicate(self, screener_vm):
+        """HISTORY→REALTIME 往返后，在途批次归还缓冲并按最新数据重算，无重复行。"""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        screener_vm._full_results = pd.DataFrame({"name": ["BASE"], "ai_score": [10.0]})
+        screener_vm._update_pagination()
+        screener_vm._ai_buffer = [{"name": "LATE", "ai_score": 20.0}]
+        screener_vm._flush_pending = True
+
+        with self._patch_paused_thread_pool(entered, release):
+            flush_task = asyncio.create_task(screener_vm._flush_ai_buffer())
+            await entered.wait()
+            screener_vm.switch_to_history()
+            screener_vm.switch_to_realtime()
+            release.set()
+            await flush_task
+            # 归还批次后应在 finally 中安排一次基于最新数据的重算。
+            for _ in range(10):
+                if not screener_vm._flush_pending and not screener_vm._ai_buffer:
+                    break
+                await asyncio.sleep(0)
+
+        assert screener_vm._full_results is not None
+        assert sorted(screener_vm._full_results["name"]) == ["BASE", "LATE"]
+        assert len(screener_vm._full_results) == 2
+        assert screener_vm._ai_buffer == []
+
+    async def test_sequential_flushes_keep_sorted_no_duplicates(self, screener_vm):
+        """无交错普通批次连续 flush：按 ai_score 降序，行不重复。"""
+        batches = [
+            {"name": "Low", "ai_score": 30.0},
+            {"name": "High", "ai_score": 90.0},
+            {"name": "Mid", "ai_score": 60.0},
+        ]
+
+        with patch("ui.viewmodels.ai_stream_mixin.ThreadPoolManager") as MockTP:
+            tp_instance = MagicMock()
+            tp_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *args, **kwargs: fn(*args, **kwargs))
+            MockTP.return_value = tp_instance
+            for batch in batches:
+                screener_vm._ai_buffer = [batch]
+                screener_vm._flush_pending = True
+                await screener_vm._flush_ai_buffer()
+
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == [
+            "High",
+            "Mid",
+            "Low",
+        ]
+        assert screener_vm.state.total_items == 3
+        assert screener_vm._ai_buffer == []
+
+
 class TestScreenerViewModelLoadHistoryTree:
     async def test_with_data(self, screener_vm):
         df = pd.DataFrame(
