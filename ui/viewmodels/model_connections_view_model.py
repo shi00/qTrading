@@ -16,6 +16,9 @@
 - 保存取消按提交阶段恢复（F31）：写前取消可证明未提交、恢复 idle 可重试；写后取消
   结果未知、登记 commit_unknown 回执身份可查；回执身份（operation_id + 发起时草稿
   generation）于首个 await 前登记，旧回执不作用于重置后的新草稿
+- 草稿编辑版本（F02）：普通字段编辑单调递增 ``_draft_edit_revision``，与草稿身份
+  generation 分离；保存回执仅在提交时的编辑版本仍为当前时才清理 dirty / 关闭编辑器，
+  等待期间的编辑保留为未保存草稿（仅刷新已提交快照）
 
 R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 """
@@ -289,6 +292,11 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._pending_operation_generation: int | None = None
         # F31：草稿代——start_add / edit 重置草稿时递增，旧保存回执不得作用于新草稿
         self._draft_generation: int = 0
+        # F02：草稿编辑版本——普通字段真实变化时单调递增（与草稿代分离），保存回执
+        # 据此判定等待期间是否产生了新的未保存草稿 B
+        self._draft_edit_revision: int = 0
+        # F02：回执身份绑定的编辑版本（登记时快照），供 committed 回执判定内容是否仍当前
+        self._pending_operation_edit_revision: int | None = None
         self._state = ModelConnectionsState()
         self._init_mixin_fields()
 
@@ -364,7 +372,11 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
     # ------------------------------------------------------------------
 
     def _update_draft(self, **changes: Any) -> None:
-        self._set_state(draft=replace(self._state.draft, **changes), dirty=True, validation_errors=())
+        # F02：仅真实字段变化递增编辑版本；无变化的重覆写不产生新版本
+        new_draft = replace(self._state.draft, **changes)
+        if new_draft != self._state.draft:
+            self._draft_edit_revision += 1
+        self._set_state(draft=new_draft, dirty=True, validation_errors=())
 
     def update_adapter_kind(self, adapter_kind: str) -> None:
         self._update_draft(adapter_kind=adapter_kind)
@@ -746,14 +758,18 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         if self._pending_operation_id == operation_id:
             self._pending_operation_id = None
             self._pending_operation_generation = None
+            self._pending_operation_edit_revision = None
 
-    def _claim_pending_save_identity(self, operation_id: str, generation: int) -> None:
-        """登记保存回执身份（F31）：槽位未被后继操作持有时才写入（后写者优先）。"""
+    def _claim_pending_save_identity(self, operation_id: str, generation: int, edit_revision: int) -> None:
+        """登记保存回执身份（F31/F02）：槽位未被后继操作持有时才写入（后写者优先）。"""
         if self._pending_operation_id in (None, operation_id):
             self._pending_operation_id = operation_id
             self._pending_operation_generation = generation
+            self._pending_operation_edit_revision = edit_revision
 
-    def _restore_save_after_cancel(self, committing: bool, operation_id: str, op_generation: int) -> None:
+    def _restore_save_after_cancel(
+        self, committing: bool, operation_id: str, op_generation: int, op_edit_revision: int
+    ) -> None:
         """取消后先恢复保存态与回执身份再传播取消（调用方随后必须 raise，R2）。
 
         - 写已发出（committing）：取消只中断等待方、不停止落盘线程，结果未知 →
@@ -762,7 +778,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         - 草稿已重置（generation 变化）：save_state 归重置命令所有，不回写。
         """
         if committing:
-            self._claim_pending_save_identity(operation_id, op_generation)
+            self._claim_pending_save_identity(operation_id, op_generation, op_edit_revision)
             if self._pending_operation_id != operation_id:
                 return  # 槽位已被后继保存持有，本操作的未知结果让位（后写者优先）
             if op_generation == self._draft_generation:
@@ -802,14 +818,17 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             return False
 
         operation_id = str(uuid.uuid4())
+        # F31/F02：首个 await 前同时捕获草稿身份代、编辑版本与草稿 A，作为回执判定基线
+        draft = self._state.draft
         op_generation = self._draft_generation
+        op_edit_revision = self._draft_edit_revision
         # F31：await 前登记操作身份（新保存取代旧槽位），取消后仍可按 id 查回执
         self._pending_operation_id = operation_id
         self._pending_operation_generation = op_generation
+        self._pending_operation_edit_revision = op_edit_revision
         self._set_state(save_state=SAVE_SAVING, validation_errors=(), commit_unknown_pending=False)
         committing = False
         try:
-            draft = self._state.draft
             credential_ref, credential_version = await self._resolve_credential(draft, operation_id)
             connection_payload = self._draft_to_connection_payload(draft, credential_ref, credential_version)
             connection_payload["connection_revision"] = self._next_connection_revision(connection_payload)
@@ -820,7 +839,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             committing = True  # F31：此后取消属「写已发出、结果未知」（与登记阶段间无暂停点）
             outcome = await self._service.save_draft(payload, self._state.config_revision, operation_id)
         except asyncio.CancelledError:
-            self._restore_save_after_cancel(committing, operation_id, op_generation)
+            self._restore_save_after_cancel(committing, operation_id, op_generation, op_edit_revision)
             raise  # R2
         except ModelConfigurationConflictError:
             self._release_pending_save_identity(operation_id)
@@ -839,7 +858,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                 self._set_state(save_state=SAVE_ERROR, message=Message("model_connection_save_failed"))
             return False
 
-        return await self._absorb_save_outcome(outcome, operation_id, connection_payload, op_generation)
+        return await self._absorb_save_outcome(
+            outcome, operation_id, connection_payload, op_generation, op_edit_revision
+        )
 
     async def _absorb_save_outcome(
         self,
@@ -847,12 +868,19 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         operation_id: str,
         payload: Mapping[str, Any],
         op_generation: int,
+        op_edit_revision: int,
     ) -> bool:
-        """吸收保存回执（F31：绑定发起时的草稿代，重置后的新草稿不被旧回执覆盖）。"""
+        """吸收保存回执（F31/F02：绑定发起时的草稿代与编辑版本）。
+
+        仅当草稿代与编辑版本均仍为提交时值，才认定「当前草稿已保存」（清理 dirty、
+        关闭编辑器）；等待期间产生草稿 B 时保留 B、dirty 与编辑器，只刷新已提交 A 的
+        快照，禁止把 B 标为已保存。
+        """
         generation_current = op_generation == self._draft_generation
+        content_current = generation_current and op_edit_revision == self._draft_edit_revision
         if outcome.status == "committed":
             self._release_pending_save_identity(operation_id)
-            if generation_current:
+            if content_current:
                 connection_id = str(payload.get("connection_id", ""))
                 # §11.3：保存新连接后进入详情；零引用反馈「配置场景 / 保留未分配」，不自动加入任务
                 if self._ref_counts.get(connection_id, 0) == 0:
@@ -868,12 +896,22 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                     validation_errors=(),
                     message=message,
                 )
+            elif generation_current:
+                # A 已提交但等待期间出现 B：保留 B / dirty / 编辑器，不显示「已保存」；
+                # 仅把过渡态恢复 idle 供用户继续保存 B（磁盘快照由下方 refresh 更新）
+                self._set_state(
+                    save_state=SAVE_IDLE,
+                    commit_unknown_pending=False,
+                    dirty=True,
+                    editor_open=True,
+                    message=None,
+                )
             # 磁盘可能已变化：刷新快照维持行 / CAS 基线新鲜；状态先于 refresh 应用，
             # refresh 期间的取消 / 草稿重置不再被旧回执的状态写入覆盖
             await self._safe_refresh_snapshot()
-            return generation_current
+            return content_current
         if outcome.status == "commit_unknown":
-            self._claim_pending_save_identity(operation_id, op_generation)
+            self._claim_pending_save_identity(operation_id, op_generation, op_edit_revision)
             if self._pending_operation_id == operation_id:
                 if generation_current:
                     self._set_state(
@@ -895,14 +933,16 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
     async def resolve_commit_unknown(self) -> bool:
         """回执恢复：按相同锁顺序重读磁盘确认提交结果（§5.1）。
 
-        F31：回执身份绑定登记时的草稿代——草稿已重置时仅确认磁盘结果并清旗标，
-        不改动新草稿（dirty / save_state / 编辑器状态）。
+        F31/F02：回执身份绑定登记时的草稿代与编辑版本——草稿已重置时仅确认磁盘结果
+        并清旗标；同一草稿在等待期间被编辑时，确认 A 已提交但不清理 B 的 dirty /
+        不关闭编辑器。非属主（槽位被后继保存接管）分支不在此处改动（独立范围）。
         """
         if not self._state.commit_unknown_pending or self._pending_operation_id is None:
             return False
         # F31：await 前捕获身份快照，避免在途期间被后继保存改写槽位后误用
         resolved_operation_id = self._pending_operation_id
         pending_generation = self._pending_operation_generation
+        pending_edit_revision = self._pending_operation_edit_revision
         self._track_inflight_cancellable()  # F40：回执恢复只读确认，可安全取消
         try:
             outcome = await self._service.resolve_save_outcome(resolved_operation_id)
@@ -929,13 +969,24 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             generation_current = (
                 still_owner and pending_generation is not None and pending_generation == self._draft_generation
             )
+            content_current = generation_current and pending_edit_revision == self._draft_edit_revision
             self._release_pending_save_identity(resolved_operation_id)
-            if generation_current:
+            if content_current:
                 self._set_state(
                     save_state=SAVE_COMMITTED,
                     commit_unknown_pending=False,
                     dirty=False,
                     message=Message("model_connection_saved"),
+                )
+            elif generation_current:
+                # 同一草稿的 A 已确认提交，但等待期间出现 B：保留 B / dirty / 编辑器，
+                # 仅结束未知态，不把 B 标为已保存（磁盘快照由下方 refresh 更新）
+                self._set_state(
+                    save_state=SAVE_IDLE,
+                    commit_unknown_pending=False,
+                    dirty=True,
+                    editor_open=True,
+                    message=None,
                 )
             else:
                 self._set_state(commit_unknown_pending=False, message=Message("model_connection_saved"))
@@ -1308,6 +1359,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             # F31：共享回执身份槽位同步登记草稿代，供 resolve 门控校验
             self._pending_operation_id = operation_id
             self._pending_operation_generation = self._draft_generation
+            self._pending_operation_edit_revision = self._draft_edit_revision
             self._set_state(
                 save_state=SAVE_COMMIT_UNKNOWN,
                 commit_unknown_pending=True,
@@ -1339,4 +1391,5 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         )
         self._pending_operation_id = None
         self._pending_operation_generation = None
+        self._pending_operation_edit_revision = None
         super().dispose()

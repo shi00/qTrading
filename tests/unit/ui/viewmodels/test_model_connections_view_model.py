@@ -13,6 +13,7 @@ Mock ``ModelConfigurationService``（DI 注入），不连真实 DB / keyring / 
 - test() 单次测试（专用测试上下文：一次性消费 consent + 直连适配器，F15）
 - dispose() 清敏感草稿
 - R2 CancelledError 显式传播
+- F02 保存回执按草稿编辑版本门控：等待期间编辑形成的 B 保留 dirty / 编辑器
 """
 
 import asyncio
@@ -617,6 +618,94 @@ class TestSaveCancellationIdentity:
         assert st.editor_open is True
         assert st.commit_unknown_pending is False
         assert vm._pending_operation_id is None  # noqa: SLF001
+
+
+class TestSaveEditRevision:
+    """F02：保存等待期间的普通字段编辑形成 B，A 的 committed 回执不得清理 B。"""
+
+    async def test_edits_during_save_keep_draft_and_editor(self, vm, filled_litellm_draft):
+        await vm.load()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def wait_then_commit(payload, expected_revision, operation_id):
+            started.set()
+            await release.wait()
+            return ConfigurationSaveOutcome(status="committed", current_revision=2, committed_revision=2)
+
+        vm._service.save_draft = AsyncMock(side_effect=wait_then_commit)  # noqa: SLF001
+        save_task = asyncio.create_task(vm.save())
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+
+        # 保存等待期间普通字段编辑形成草稿 B
+        vm.update_name("Edited During Save")
+        vm.update_api_base("https://api.example.com/v2")
+        vm.update_credential("draft-credential")
+        release.set()
+        ok = await save_task
+
+        assert ok is False
+        save_call = vm._service.save_draft.await_args  # noqa: SLF001
+        assert save_call is not None
+        payload, _revision, _operation_id = save_call.args
+        saved = payload["connections"][0]
+        # 服务实际提交的是草稿 A（编辑前的值），B 的凭据未参与本次提交
+        assert saved["name"] == "New Conn"
+        assert saved["api_base"] == "https://api.example.com/v1"
+        assert saved["credential_ref"] is None
+        vm._service.prepare_credential_version.assert_not_awaited()  # noqa: SLF001
+
+        st = vm.state
+        assert st.draft.name == "Edited During Save"
+        assert st.draft.api_base == "https://api.example.com/v2"
+        assert st.draft.credential_api_key == "draft-credential"
+        assert st.dirty is True
+        assert st.editor_open is True
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is False
+
+    async def test_no_edits_during_save_closes_editor_normally(self, vm, filled_litellm_draft):
+        await vm.load()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def wait_then_commit(payload, expected_revision, operation_id):
+            started.set()
+            await release.wait()
+            return ConfigurationSaveOutcome(status="committed", current_revision=2, committed_revision=2)
+
+        vm._service.save_draft = AsyncMock(side_effect=wait_then_commit)  # noqa: SLF001
+        save_task = asyncio.create_task(vm.save())
+        await asyncio.wait_for(started.wait(), timeout=5.0)
+        release.set()
+        ok = await save_task
+
+        assert ok is True
+        st = vm.state
+        assert st.save_state == "committed"
+        assert st.dirty is False
+        assert st.editor_open is False
+        assert st.commit_unknown_pending is False
+
+    async def test_resolve_committed_after_edit_keeps_dirty_and_editor(self, vm, filled_litellm_draft):
+        await vm.load()
+        vm._service.save_draft.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
+        await vm.save()
+        assert vm.state.commit_unknown_pending is True
+
+        vm.update_name("Edited After Unknown")
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        ok = await vm.resolve_commit_unknown()
+
+        assert ok is True
+        st = vm.state
+        assert st.commit_unknown_pending is False
+        assert st.save_state == "idle"
+        assert st.draft.name == "Edited After Unknown"
+        assert st.dirty is True
+        assert st.editor_open is True
 
 
 # --- Credential semantics ---
