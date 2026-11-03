@@ -333,6 +333,66 @@ class TestMarketDaoGetLatestIndexWeightDate:
         assert result is None
 
 
+class TestMarketDaoGetLatestIndexWeightDates:
+    """D05-F04: 按 index_code 的批量最新日期映射（替代全表 MAX 水位）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_per_index_latest(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "index_code": ["000001.SH", "000300.SH"],
+                    "max_date": [datetime.date(2024, 6, 13), datetime.date(2024, 5, 1)],
+                }
+            )
+        )
+        result = await dao.get_latest_index_weight_dates()
+        assert result == {
+            "000001.SH": datetime.date(2024, 6, 13),
+            "000300.SH": datetime.date(2024, 5, 1),
+        }
+        sql = dao._read_db.call_args[0][0]
+        assert "GROUP BY index_code" in sql
+
+    @pytest.mark.asyncio
+    async def test_filters_requested_index_codes(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "index_code": ["000001.SH", "399006.SZ"],
+                    "max_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 13)],
+                }
+            )
+        )
+        result = await dao.get_latest_index_weight_dates(["399006.SZ"])
+        assert result == {"399006.SZ": datetime.date(2024, 6, 13)}
+
+    @pytest.mark.asyncio
+    async def test_empty_and_none_results(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.get_latest_index_weight_dates() == {}
+
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.get_latest_index_weight_dates() == {}
+
+    @pytest.mark.asyncio
+    async def test_skips_null_max_date(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "index_code": ["000001.SH", "000300.SH"],
+                    "max_date": [None, datetime.date(2024, 6, 13)],
+                }
+            )
+        )
+        result = await dao.get_latest_index_weight_dates()
+        assert result == {"000300.SH": datetime.date(2024, 6, 13)}
+
+
 class TestMarketDaoSaveMoneyflowHsgt:
     @pytest.mark.asyncio
     async def test_none(self):

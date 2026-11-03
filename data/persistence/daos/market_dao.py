@@ -748,6 +748,34 @@ class MarketDao(BaseDao):
             return df.iloc[0]["max_date"]
         return None
 
+    async def get_latest_index_weight_dates(
+        self, index_codes: list[str] | None = None
+    ) -> dict[str, datetime.date | str]:
+        """按指数代码批量返回各自最新 trade_date（D05-F04）。
+
+        与 ``get_latest_index_weight_date`` 的全表 MAX 不同，本方法按 ``index_code``
+        分组取最大日期，供同步策略为每个指数独立计算续传窗口——某指数同步失败时
+        不会被其他指数推进的全表 MAX 越过。缺失记录的指数不出现在返回值中。
+
+        Args:
+            index_codes: 仅返回这些指数的映射；None 表示返回表中全部指数。
+
+        Returns:
+            ``{index_code: 最新 trade_date}``（日期原样返回，由调用方统一解析）。
+        """
+        df = await self._read_db("SELECT index_code, MAX(trade_date) as max_date FROM index_weight GROUP BY index_code")
+        if df is None or df.empty:
+            return {}
+        wanted = set(index_codes) if index_codes is not None else None
+        result: dict[str, datetime.date | str] = {}
+        for _, row in df.iterrows():
+            code = row["index_code"]
+            max_date = row.get("max_date")
+            if max_date is None or bool(pd.isna(max_date)) or (wanted is not None and code not in wanted):
+                continue
+            result[str(code)] = max_date
+        return result
+
     # --- Northbound Moneyflow ---
     async def save_moneyflow_hsgt(self, df: pd.DataFrame):
         """Save Northbound (HSGT) Moneyflow. Table: moneyflow_hsgt"""

@@ -18,6 +18,7 @@ from data.sync.macro import (
     _latest_quarter_before,
 )
 from data.sync.base import SyncContext, SyncResult, SyncStatus
+from data.constants import MAJOR_INDICES
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.domain_services.trade_calendar_service import TradeDateUnavailableError
 from data.external.tushare_client import TushareAPIPermissionError
@@ -559,7 +560,9 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-06-01")
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(
+            return_value={code: "2024-06-01" for code in MAJOR_INDICES}
+        )
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         strategy = MacroSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
@@ -573,7 +576,7 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=1)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
@@ -594,7 +597,7 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
@@ -618,7 +621,7 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
@@ -649,7 +652,7 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
@@ -705,7 +708,7 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.cancel_event = None
@@ -754,7 +757,7 @@ class TestMacroSyncSyncIndexWeights:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(side_effect=Exception("DB error"))
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(side_effect=Exception("DB error"))
         strategy = MacroSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         result = SyncResult()
@@ -927,7 +930,9 @@ class TestMacroSyncStrategySyncIndexWeights:
         today = datetime.date(2024, 6, 15)
         strategy._get_effective_trade_date = AsyncMock(return_value=today)
         mock_market_dao = MagicMock()
-        mock_market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-06-10")
+        mock_market_dao.get_latest_index_weight_dates = AsyncMock(
+            return_value={code: "2024-06-10" for code in MAJOR_INDICES}
+        )
         ctx.cache.market_dao = mock_market_dao
         result = SyncResult()
         await strategy._sync_index_weights(result)
@@ -982,7 +987,7 @@ class TestMacroSyncIndexWeightCounterIsolation:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
@@ -1075,7 +1080,7 @@ class TestMacroSyncEngineDisposedError:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(
             side_effect=EngineDisposedError("Engine disposed")
         )
         strategy = MacroSyncStrategy(ctx)
@@ -1167,7 +1172,7 @@ class TestMacroSyncTusharePermissionError:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(side_effect=TushareAPIPermissionError("index_weight", "Permission denied"))
@@ -1181,6 +1186,8 @@ class TestMacroSyncTusharePermissionError:
             result = SyncResult()
             await strategy._sync_index_weights(result)
             assert result.added == 0
+            # D05-F04: 全部权限拒绝且无数据落库 → 如实记 skipped_permission（不伪装成合法空）
+            assert ctx.cache.sync_dao.update_sync_status.call_args.kwargs["status"] == "skipped_permission"
 
     @pytest.mark.asyncio
     async def test_sync_index_weights_handles_outer_permission_error(self):
@@ -1188,7 +1195,7 @@ class TestMacroSyncTusharePermissionError:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(
             side_effect=TushareAPIPermissionError("index_weight", "Permission denied")
         )
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
@@ -1225,7 +1232,7 @@ class TestMacroSyncIndexWeightsIndividualError:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=5)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
 
@@ -1258,7 +1265,7 @@ class TestMacroSyncIndexWeightsIndividualError:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock()
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
 
@@ -1299,7 +1306,7 @@ class TestSyncIndexWeightsPartialFailure:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
 
@@ -1344,7 +1351,7 @@ class TestSyncIndexWeightsPartialFailure:
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=2)
         ctx.cache.sync_dao.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
@@ -1581,7 +1588,9 @@ class TestMacroSyncPartialFailure:
         strategy.dao.save_shibor_daily = AsyncMock(return_value=5)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-06-10")
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(
+            return_value={code: "2024-06-10" for code in MAJOR_INDICES}
+        )
         with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
             ctx.processor = MagicMock()
             ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
@@ -1654,7 +1663,9 @@ class TestMacroSubSyncOuterPartialStatus:
         ctx.cache.engine = MagicMock()
         ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=RuntimeError("db down"))
         ctx.cache.market_dao = MagicMock()
-        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-05-01")
+        ctx.cache.market_dao.get_latest_index_weight_dates = AsyncMock(
+            return_value={code: "2024-05-01" for code in MAJOR_INDICES}
+        )
         ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
         ctx.api = MagicMock()
         ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"con_code": ["000001.SZ"]}))
@@ -1923,17 +1934,17 @@ class TestMacroSyncCancellationPoints:
         """L712: 循环前触发取消 → return（get_index_weight 未调用）。"""
         strategy, cancel_event = self._make_strategy_with_cancel_event()
         strategy.context.cache.market_dao = MagicMock()
-        strategy.context.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value=None)
+        strategy.context.cache.market_dao.get_latest_index_weight_dates = AsyncMock(return_value={})
         strategy.context.cache.market_dao.save_index_weights = AsyncMock(return_value=1)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
 
         # 在 _get_effective_trade_date 返回后、循环前设置取消
-        # 通过 market_dao.get_latest_index_weight_date 的 side_effect 设置 cancel_event
+        # 通过 market_dao.get_latest_index_weight_dates 的 side_effect 设置 cancel_event
         async def _set_cancel_on_get_latest(*args, **kwargs):
             cancel_event.set()
-            return None
+            return {}
 
-        strategy.context.cache.market_dao.get_latest_index_weight_date = AsyncMock(
+        strategy.context.cache.market_dao.get_latest_index_weight_dates = AsyncMock(
             side_effect=_set_cancel_on_get_latest
         )
         strategy.context.api.get_index_weight = AsyncMock()
@@ -1944,3 +1955,219 @@ class TestMacroSyncCancellationPoints:
         assert result.status == "cancelled"
         # get_index_weight 不应被调用（取消在循环之前）
         strategy.context.api.get_index_weight.assert_not_called()
+
+
+class _PersistentIndexWeightDao:
+    """跨两轮共享持久状态的 market_dao 替身（D05-F04）。
+
+    以 ``{index_code: latest_date}`` 模拟 index_weight 表：``save_index_weights``
+    只推进成功写入行的指数水位，失败/权限拒绝/合法空的指数保持旧值（或无记录），
+    用于验证重跑不被其他成功指数推进的全表 MAX 节流。
+    """
+
+    def __init__(
+        self,
+        latest: dict[str, datetime.date] | None = None,
+        saved_date: datetime.date | None = None,
+    ):
+        self.latest = dict(latest or {})
+        self.saved_date = saved_date
+
+    async def get_latest_index_weight_dates(self, index_codes=None):
+        if index_codes:
+            return {code: self.latest[code] for code in index_codes if code in self.latest}
+        return dict(self.latest)
+
+    async def save_index_weights(self, df):
+        if self.saved_date is not None:
+            for code in df["index_code"].unique():
+                self.latest[str(code)] = self.saved_date
+        return len(df)
+
+
+class TestIndexWeightPerIndexResumeWindow:
+    """D05-F04 回归：指数权重按指数独立续传窗口（跨两轮持久状态）。"""
+
+    @staticmethod
+    def _make_fetcher(fail_codes=(), permission_codes=(), empty_codes=()):
+        calls: list[tuple[str, str]] = []
+
+        async def _fetch(*, index_code, start_date, end_date):
+            calls.append((index_code, start_date))
+            if index_code in fail_codes:
+                raise RuntimeError(f"fetch failed for {index_code}")
+            if index_code in permission_codes:
+                raise TushareAPIPermissionError("index_weight", "Permission denied")
+            if index_code in empty_codes:
+                return pd.DataFrame()
+            return pd.DataFrame({"index_code": [index_code]})
+
+        return _fetch, calls
+
+    @staticmethod
+    def _make_ctx(dao, fetcher, today):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.market_dao = dao
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(side_effect=fetcher)
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2023, 1, 1), today])
+        ctx.cancel_event = None
+        return ctx
+
+    @staticmethod
+    async def _run(ctx, today):
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=today)
+        result = SyncResult()
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            await strategy._sync_index_weights(result)
+        return result
+
+    @pytest.mark.asyncio
+    async def test_failed_index_retried_next_run_while_succeeded_indexes_skip(self):
+        """A 失败/B 成功后立即重跑：只重试 A，B 不重复拉取，窗口从 A 自身水位续传。"""
+        today = datetime.date(2024, 6, 14)
+        baseline = datetime.date(2024, 5, 1)
+        failed = MAJOR_INDICES[0]
+        dao = _PersistentIndexWeightDao({code: baseline for code in MAJOR_INDICES}, saved_date=today)
+
+        fetcher, _ = self._make_fetcher(fail_codes={failed})
+        ctx = self._make_ctx(dao, fetcher, today)
+        result = await self._run(ctx, today)
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert dao.latest[failed] == baseline
+        assert all(dao.latest[code] == today for code in MAJOR_INDICES[1:])
+        # 尾部总体状态如实 partial，不把全表 MAX 当全部目标完成
+        assert ctx.cache.sync_dao.update_sync_status.call_args.kwargs["status"] == "partial"
+
+        fetcher2, calls2 = self._make_fetcher()
+        ctx2 = self._make_ctx(dao, fetcher2, today)
+        result2 = await self._run(ctx2, today)
+
+        assert [code for code, _ in calls2] == [failed]
+        assert calls2[0][1] == "20240502"  # 从失败指数自身最新日期 + 1 续传
+        assert result2.added > 0
+        assert dao.latest[failed] == today
+
+    @pytest.mark.asyncio
+    async def test_failure_window_not_jumped_after_31_days(self):
+        """31 天后重跑：A 起点不越过失败窗口（非全局 MAX 2024-06-14 + 1）。"""
+        first_today = datetime.date(2024, 6, 14)
+        baseline = datetime.date(2024, 5, 1)
+        failed = MAJOR_INDICES[0]
+        dao = _PersistentIndexWeightDao({code: baseline for code in MAJOR_INDICES}, saved_date=first_today)
+
+        fetcher, _ = self._make_fetcher(fail_codes={failed})
+        await self._run(self._make_ctx(dao, fetcher, first_today), first_today)
+
+        later_today = datetime.date(2024, 7, 15)
+        dao.saved_date = later_today
+        fetcher2, calls2 = self._make_fetcher(fail_codes={failed})
+        await self._run(self._make_ctx(dao, fetcher2, later_today), later_today)
+
+        start_a = next(start for code, start in calls2 if code == failed)
+        assert start_a == "20240502"
+        start_b = next(start for code, start in calls2 if code == MAJOR_INDICES[1])
+        assert start_b == "20240615"  # B 从自身水位续传
+        assert start_a != start_b
+
+    @pytest.mark.asyncio
+    async def test_all_success_refreshes_monthly_and_skips_within_window(self):
+        """全部成功时仍每月刷新：窗口内不重复拉取，31 天后全部再次刷新。"""
+        today = datetime.date(2024, 6, 14)
+        baseline = datetime.date(2024, 5, 1)
+        dao = _PersistentIndexWeightDao({code: baseline for code in MAJOR_INDICES}, saved_date=today)
+
+        fetcher, calls = self._make_fetcher()
+        ctx = self._make_ctx(dao, fetcher, today)
+        result = await self._run(ctx, today)
+        assert len(calls) == len(MAJOR_INDICES)
+        assert {start for _, start in calls} == {"20240502"}
+        assert result.added == len(MAJOR_INDICES)
+        assert result.status == SyncStatus.SUCCESS.value
+        assert ctx.cache.sync_dao.update_sync_status.call_args.kwargs["status"] == "success"
+
+        # 同一次月度窗口内立即重跑 → 全部跳过，无状态写入
+        fetcher2, calls2 = self._make_fetcher()
+        ctx2 = self._make_ctx(dao, fetcher2, today)
+        result2 = await self._run(ctx2, today)
+        assert calls2 == []
+        assert result2.added == 0
+        ctx2.cache.sync_dao.update_sync_status.assert_not_called()
+
+        # 31 天后 → 全部指数再次月度刷新
+        later_today = datetime.date(2024, 7, 15)
+        dao.saved_date = later_today
+        fetcher3, calls3 = self._make_fetcher()
+        result3 = await self._run(self._make_ctx(dao, fetcher3, later_today), later_today)
+        assert len(calls3) == len(MAJOR_INDICES)
+        assert {start for _, start in calls3} == {"20240615"}
+        assert result3.added == len(MAJOR_INDICES)
+
+    @pytest.mark.asyncio
+    async def test_succeeded_index_does_not_refetch_initial_history(self):
+        """无历史数据时 A 失败/B 成功后重跑：B 不重复初始历史，A 仍从初始窗口重试。"""
+        today = datetime.date(2024, 6, 14)
+        failed = MAJOR_INDICES[0]
+        dao = _PersistentIndexWeightDao(saved_date=today)
+
+        fetcher, calls = self._make_fetcher(fail_codes={failed})
+        result = await self._run(self._make_ctx(dao, fetcher, today), today)
+        assert result.status == SyncStatus.PARTIAL.value
+        assert len(calls) == len(MAJOR_INDICES)
+        assert {start for _, start in calls} == {"20230101"}
+
+        fetcher2, calls2 = self._make_fetcher()
+        result2 = await self._run(self._make_ctx(dao, fetcher2, today), today)
+        assert [code for code, _ in calls2] == [failed]
+        assert calls2[0][1] == "20230101"
+        assert result2.added > 0
+
+    @pytest.mark.asyncio
+    async def test_permission_denied_and_legal_empty_are_not_failures(self, caplog):
+        """权限拒绝与合法空均不标记失败/partial，且不推进对应指数窗口。"""
+        import logging
+
+        today = datetime.date(2024, 6, 14)
+        permission_idx = MAJOR_INDICES[0]
+        empty_idx = MAJOR_INDICES[1]
+        dao = _PersistentIndexWeightDao(saved_date=today)
+
+        fetcher, calls = self._make_fetcher(
+            permission_codes={permission_idx},
+            empty_codes={empty_idx},
+        )
+        ctx = self._make_ctx(dao, fetcher, today)
+        with caplog.at_level(logging.WARNING, logger="data.sync.macro"):
+            result = await self._run(ctx, today)
+
+        assert len(calls) == len(MAJOR_INDICES)
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.errors == []
+        assert ctx.cache.sync_dao.update_sync_status.call_args.kwargs["status"] == "success"
+        # 权限拒绝与合法空都没有落库行 → 窗口不推进（下次仍会重试）
+        assert permission_idx not in dao.latest
+        assert empty_idx not in dao.latest
+        assert len(dao.latest) == len(MAJOR_INDICES) - 2
+        # 权限拒绝可见告警；合法空不应产生权限告警
+        assert any("Permission denied" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_all_legal_empty_reports_success(self):
+        """合法空（fetch 成功但无数据）应记 success，不与权限拒绝混同。"""
+        today = datetime.date(2024, 6, 14)
+        dao = _PersistentIndexWeightDao(saved_date=today)
+        fetcher, calls = self._make_fetcher(empty_codes=set(MAJOR_INDICES))
+        ctx = self._make_ctx(dao, fetcher, today)
+
+        result = await self._run(ctx, today)
+
+        assert len(calls) == len(MAJOR_INDICES)
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.errors == []
+        assert ctx.cache.sync_dao.update_sync_status.call_args.kwargs["status"] == "success"
