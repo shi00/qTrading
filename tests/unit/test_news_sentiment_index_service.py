@@ -21,8 +21,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
+from data.domain_services.trade_calendar_service import TradeCalendarService
 from services.news_sentiment_index_service import (
     DailySentimentPoint,
+    NewsCalendarWindowUncoveredError,
     NewsSentimentIndexService,
     aggregate_daily,
     assign_trade_day,
@@ -404,14 +406,17 @@ class TestNewsSentimentIndexService:
         mdao.get_telegraph_news_in_window.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_calendar_unavailable_returns_empty(self, service):
+    async def test_calendar_unavailable_raises_explicitly(self, service):
+        """RS-F03：日历不可用必须显式不可用，不得表示为「无新闻」/伪造 0。"""
         svc, mdao, calendar = service
         calendar.get_trade_dates = AsyncMock(return_value=[])
         mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([]))
         mdao.get_telegraph_news_in_window = AsyncMock(return_value=_mk_df([]))
         mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
-        assert await svc.get_stock_daily_index("600519.SH", None, days=7, as_of=_cst(2026, 10, 13, 10, 0)) == []
-        assert await svc.get_market_daily_index(days=7, as_of=_cst(2026, 10, 13, 10, 0)) == []
+        with pytest.raises(NewsCalendarWindowUncoveredError):
+            await svc.get_stock_daily_index("600519.SH", None, days=7, as_of=_cst(2026, 10, 13, 10, 0))
+        with pytest.raises(NewsCalendarWindowUncoveredError):
+            await svc.get_market_daily_index(days=7, as_of=_cst(2026, 10, 13, 10, 0))
         mdao.get_scored_stock_news.assert_not_called()
         mdao.get_telegraph_news_in_window.assert_not_awaited()
 
@@ -439,6 +444,103 @@ class TestNewsSentimentIndexService:
         target = next(p for p in points if p.trade_date == datetime.date(2026, 10, 12))
         assert target.sample_count == 0
         assert target.index is None
+
+
+# ---------------------------------------------------------------------------
+# RS-F03：日历尾段覆盖 × 新闻窗口联合验证
+# ---------------------------------------------------------------------------
+
+_AS_OF = _cst(2026, 11, 2, 16, 1)  # 周一收盘后：盘后新闻须归次一交易日
+_HISTORY_TO_AS_OF = [
+    datetime.date(2026, 10, 8),
+    datetime.date(2026, 10, 9),
+    datetime.date(2026, 10, 12),
+    datetime.date(2026, 10, 13),
+    datetime.date(2026, 10, 14),
+    datetime.date(2026, 10, 15),
+    datetime.date(2026, 10, 16),
+    datetime.date(2026, 10, 19),
+    datetime.date(2026, 10, 20),
+    datetime.date(2026, 10, 21),
+    datetime.date(2026, 10, 22),
+    datetime.date(2026, 10, 23),
+    datetime.date(2026, 10, 26),
+    datetime.date(2026, 10, 27),
+    datetime.date(2026, 10, 28),
+    datetime.date(2026, 10, 29),
+    datetime.date(2026, 10, 30),
+    datetime.date(2026, 11, 2),
+]
+_TAIL_DATES = [datetime.date(2026, 11, d) for d in range(3, 13)]
+
+
+def _history_df() -> pd.DataFrame:
+    return pd.DataFrame({"cal_date": _HISTORY_TO_AS_OF, "is_open": [1] * len(_HISTORY_TO_AS_OF)})
+
+
+def _tail_df() -> pd.DataFrame:
+    return pd.DataFrame({"cal_date": _TAIL_DATES, "is_open": [1 if d.weekday() < 5 else 0 for d in _TAIL_DATES]})
+
+
+def _calendar_service(cache: MagicMock, db_df: pd.DataFrame, api_df: pd.DataFrame | None) -> TradeCalendarService:
+    cache.stock_dao = MagicMock()
+    cache.stock_dao.get_trade_cal = AsyncMock(return_value=db_df)
+    cache.stock_dao.save_trade_cal = AsyncMock()
+    api = MagicMock()
+    api.get_trade_cal = AsyncMock(return_value=api_df)
+    return TradeCalendarService(cache, api)
+
+
+class TestCalendarTailCoverageIntegration:
+    @pytest.mark.asyncio
+    async def test_partial_db_tail_backfilled_post_close_news_enters_next_day(self):
+        """DB 最大日=as_of 当天 → 补尾段后，16:01 的新闻进入次日桶而非被丢弃。"""
+        cache = MagicMock()
+        calendar = _calendar_service(cache, _history_df(), _tail_df())
+        svc = NewsSentimentIndexService(cache=cache, trade_calendar=calendar)
+        mdao = cache.market_dao
+        mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([_db_row(_cst(2026, 11, 2, 16, 0), 0.8, 0.9)]))
+        mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
+
+        points = await svc.get_stock_daily_index("600519.SH", "贵州茅台", days=7, as_of=_AS_OF)
+
+        future = next(p for p in points if p.trade_date == datetime.date(2026, 11, 3))
+        assert future.sample_count == 1
+        assert future.index == pytest.approx(0.8)
+        publish_day = next(p for p in points if p.trade_date == datetime.date(2026, 11, 2))
+        assert publish_day.sample_count == 0  # 盘后新闻不强归当日
+        calendar._api.get_trade_cal.assert_awaited_once()  # 触发尾段补齐
+
+    @pytest.mark.asyncio
+    async def test_future_calendar_covered_skips_backfill_and_keeps_result(self):
+        """DB 原始日历已覆盖至 cal_end → 不触发补齐，盘后新闻仍进次日桶。"""
+        cache = MagicMock()
+        full_df = pd.concat([_history_df(), _tail_df()], ignore_index=True)
+        calendar = _calendar_service(cache, full_df, _tail_df())
+        svc = NewsSentimentIndexService(cache=cache, trade_calendar=calendar)
+        mdao = cache.market_dao
+        mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([_db_row(_cst(2026, 11, 2, 16, 0), 0.8, 0.9)]))
+        mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
+
+        points = await svc.get_stock_daily_index("600519.SH", "贵州茅台", days=7, as_of=_AS_OF)
+
+        assert next(p for p in points if p.trade_date == datetime.date(2026, 11, 3)).sample_count == 1
+        calendar._api.get_trade_cal.assert_not_awaited()  # 未来已覆盖 → 不补齐
+
+    @pytest.mark.asyncio
+    async def test_uncovered_next_trade_day_degrades_explicitly(self):
+        """日历止于 as_of 且无次一交易日 → 显式不可用，不查询新闻、不伪造 0 指数。"""
+        cache = MagicMock()
+        calendar = MagicMock()
+        calendar.get_trade_dates = AsyncMock(return_value=list(_HISTORY_TO_AS_OF))
+        svc = NewsSentimentIndexService(cache=cache, trade_calendar=calendar)
+        mdao = cache.market_dao
+        mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([_db_row(_cst(2026, 11, 2, 16, 0), 0.8, 0.9)]))
+        mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
+
+        with pytest.raises(NewsCalendarWindowUncoveredError):
+            await svc.get_stock_daily_index("600519.SH", "贵州茅台", days=7, as_of=_AS_OF)
+        mdao.get_scored_stock_news.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
