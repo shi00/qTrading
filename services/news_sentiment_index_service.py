@@ -62,6 +62,14 @@ _MARKET_LIMIT = 1000
 _FORWARD_CALENDAR_DAYS = 10
 
 
+class NewsCalendarWindowUncoveredError(RuntimeError):
+    """交易日历未覆盖新闻窗口可归属的下一交易日（RS-F03）。
+
+    调用方必须显式呈现「暂不可用 / 降级」，不得把「未覆盖」当作「无新闻」，
+    也不得为缺失交易日伪造 0 指数。
+    """
+
+
 @dataclass(frozen=True)
 class DailySentimentPoint:
     """单交易日情绪指数点（R21：index=None 表示当日无可用新闻，不是 0）。"""
@@ -311,7 +319,22 @@ class NewsSentimentIndexService:
         trade_days = list(await calendar.get_trade_dates(cal_start, cal_end))
         if not trade_days:
             logger.warning("[NewsSentimentIndex] Trade calendar unavailable; sentiment index skipped.")
-            return [], None, None
+            raise NewsCalendarWindowUncoveredError("交易日历不可用：无法确定新闻窗口的交易日归属")
+
+        # RS-F03：除「列表非空」外，还须确认日历覆盖到可归属的下一交易日。
+        # 盘后（>=15:00）或休市日的新闻需要次一交易日；缺失时显式不可用，
+        # 不能静默当作「暂无新闻」，也不得用 weekday 猜测或强归当日。
+        anchor_day = assign_trade_day(to_utc_for_db(now_cst), trade_days)
+        if anchor_day is None:
+            logger.warning(
+                "[NewsSentimentIndex] Trade calendar tail not covered: no assignable trade day "
+                "at/after %s (window %s..%s); sentiment index unavailable.",
+                now_cst,
+                cal_start,
+                cal_end,
+            )
+            raise NewsCalendarWindowUncoveredError("交易日历未覆盖新闻窗口尾端：无法确定可归属的下一交易日")
+
         start_utc = to_utc_for_db(datetime.datetime.combine(cal_start, datetime.time.min))
         end_utc = to_utc_for_db(now_cst)
         return trade_days, start_utc, end_utc

@@ -835,6 +835,13 @@ class TestDataProcessor(unittest.TestCase):
                 "sync_daily_market_snapshot",
                 new_callable=AsyncMock,
             ) as mock_sync,
+            # RS-F03：日历尾段补齐会按真实当前日期向离线源取数，须把有效交易日钉到 mock 日历内，
+            # 否则 days=5 会被放大成全量历史区间，断点续传断言失真。
+            patch.object(
+                self.processor.trade_calendar,
+                "get_latest_trade_date",
+                new=AsyncMock(return_value=datetime.date(2023, 1, 5)),
+            ),
             patch("data.sync.historical.get_app_state", new=AsyncMock(return_value=None)),
         ):
             await self.processor.sync_historical_data(days=days)
@@ -1350,6 +1357,9 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=batch_df)
 
         self.mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20251201")
+        # RS-F03：日历尾段补齐会按真实当前日期向离线源取数；钉住最近交易日 = fixed_now 当日，
+        # 保证新鲜度检查以 2025-12-01 为基准（与本用例 fixed_now 与 mock 日历一致）。
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2025, 12, 1))
         self.mock_cache.get_field_completeness = AsyncMock(
             return_value={
                 "roe": 0.1,

@@ -1565,6 +1565,7 @@ class TestDataProcessorInitializeSystem:
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock(return_value=3)
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=False)
+        dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
         dp.clear_cancel()
         with (
             patch("data.data_dictionary.validate_schema_definitions"),
@@ -1579,6 +1580,8 @@ class TestDataProcessorInitializeSystem:
             mock_ch.get_init_history_years.return_value = 1
             result = await dp.initialize_system()
             assert result is None
+            # RS-F02: Step 2 日历未持久化时必须在进入 Step 3 历史同步前中止
+            dp.strategies["historical"].run.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_full_mode(self):
