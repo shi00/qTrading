@@ -150,15 +150,12 @@ def parse_sha256sums(path: Path) -> dict[str, str]:
     return sums
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
-    """读取并校验 manifest 结构与 schema；不兼容 / 非法即抛 ``CorpusManifestError``。"""
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise CorpusManifestError(f"manifest 不是合法 JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise CorpusManifestError("manifest 顶层必须为 JSON 对象")
+def validate_manifest_structure(data: dict[str, Any]) -> dict[str, Any]:
+    """校验 manifest 结构（schema / tag / version / 三规范 split / 正行数 / digest）。
 
+    纯函数，由 ``load_manifest``（读取侧）与 ``build_manifest``（生成侧）共用：生成侧同样
+    过此校验，保证 build **不会产出自身 loader 拒绝的清单**（D20-F06）。
+    """
     schema = data.get("schema")
     if schema != MANIFEST_SCHEMA:
         raise CorpusManifestError(
@@ -193,11 +190,23 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
+def load_manifest(path: Path) -> dict[str, Any]:
+    """读取并校验 manifest 结构与 schema；不兼容 / 非法即抛 ``CorpusManifestError``。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CorpusManifestError(f"manifest 不是合法 JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CorpusManifestError("manifest 顶层必须为 JSON 对象")
+    return validate_manifest_structure(data)
+
+
 def build_manifest(corpus_dir: Path, corpus_tag: str, corpus_version: str) -> dict[str, Any]:
     """由语料目录实测生成 manifest（行数 + SHA256 + 版本）；若同目录存在 ``SHA256SUMS.txt`` 则交叉校验。
 
     ``corpus_version`` 为必填（manifest schema 要求非空版本字段）：语料版本是 lineage 的一部分，
-    禁止缺省导致「同 tag 不同语料」无法归因。
+    禁止缺省导致「同 tag 不同语料」无法归因。返回值经 ``validate_manifest_structure`` 校验，
+    生成失败时抛出（调用方须在写文件前调用本函数，避免覆盖既有 manifest）。
     """
     corpus_dir = Path(corpus_dir)
     if not isinstance(corpus_version, str) or not corpus_version.strip():
@@ -218,12 +227,16 @@ def build_manifest(corpus_dir: Path, corpus_tag: str, corpus_version: str) -> di
                     f"{name} 实测 SHA256 与 {CHECKSUMS_FILENAME} 不一致: {entry['sha256']} != {checksums[name]}"
                 )
 
-    return {
-        "schema": MANIFEST_SCHEMA,
-        "corpus_tag": corpus_tag,
-        "corpus_version": corpus_version,
-        "splits": splits,
-    }
+    # 生成侧与读取侧共用同一结构校验：build 不得产出自身 loader 拒绝的清单
+    # （空 tag / 任一 split 非空行数为 0 等非法边界在此拦截，早于 main 写文件）。
+    return validate_manifest_structure(
+        {
+            "schema": MANIFEST_SCHEMA,
+            "corpus_tag": corpus_tag,
+            "corpus_version": corpus_version,
+            "splits": splits,
+        }
+    )
 
 
 def _expected_from_manifest(
