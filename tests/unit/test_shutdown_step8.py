@@ -201,9 +201,10 @@ async def test_step8_abandons_thread_on_timeout(monkeypatch, caplog) -> None:
     coordinator = ShutdownCoordinator()
     with caplog.at_level(logging.WARNING, logger="utils.shutdown"):
         # 不应阻塞；超时必须上抛交由聚合层标记失败
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError) as exc_info:
             await coordinator._step8_stop_embedded_postgres()
 
+    assert isinstance(exc_info.value, TimeoutError)
     # 验证 WARNING 日志含 'abandoning thread'
     assert any("abandoning thread" in r.message for r in caplog.records), (
         f"期望 WARNING 日志含 'abandoning thread'，实际：{[r.message for r in caplog.records]}"
