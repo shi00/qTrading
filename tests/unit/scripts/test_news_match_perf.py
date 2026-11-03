@@ -22,10 +22,14 @@ def test_percentile_linear_interpolation() -> None:
 
 
 def test_percentile_rejects_invalid_input() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as empty_exc:
         percentile([], 0.5)
-    with pytest.raises(ValueError):
+    assert str(empty_exc.value) == "samples_ms 不能为空"
+
+    with pytest.raises(ValueError) as range_exc:
         percentile([1.0], 1.5)
+    assert str(range_exc.value).startswith("q 必须在 [0, 1] 内"), str(range_exc.value)
+    assert "1.5" in str(range_exc.value)
 
 
 def test_run_suite_tiny_is_structured_and_ordered() -> None:

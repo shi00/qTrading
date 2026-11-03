@@ -154,6 +154,7 @@ def _cpu_model() -> str:
                 if line.lower().startswith("model name"):
                     return line.split(":", 1)[1].strip()
     except OSError:
+        # /proc/cpuinfo 不可用（非 Linux 或受限容器），退化为 platform 信息
         pass
     return platform.processor() or platform.machine() or "unknown"
 
@@ -295,6 +296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="输出结构化 JSON（默认人类可读表格）")
     args = parser.parse_args(argv)
 
+    scales: tuple[int, ...] = ()
     try:
         scales = tuple(int(part.strip()) for part in args.scales.split(",") if part.strip())
     except ValueError as exc:
