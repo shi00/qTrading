@@ -677,7 +677,7 @@ class TestVerifyTokenSaveOutcome:
             result = await vm.verify_token()
 
         # 显式 token 探活对四态均保留（先探活、后保存）
-        mock_pro.trade_cal.assert_called_once()
+        mock_pro.trade_cal.assert_called_once_with(exchange="SSE", start_date="20250101", end_date="20250101")
         assert result is expected_result
         assert vm.state.status_type == expected_status_type
         assert vm.state.status_message is not None
