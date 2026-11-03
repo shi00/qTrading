@@ -880,7 +880,7 @@ class SchedulerService:
         is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_not_ready）
         之前就重抛，该日「失败了却没记账」，只看 is_complete 会把未记账的失败日当成功。
         """
-        from services.task_manager import TaskManager  # lazy-import: 启动性能
+        from services.task_manager import TaskManager, TaskIncompleteError  # lazy-import: 启动性能
         from data.data_processor import DataProcessor  # lazy-import: 启动性能
         from data.sync.base import SyncResult  # lazy-import: 启动性能
 
@@ -949,7 +949,9 @@ class SchedulerService:
         if failed_dates:
             reason = f"failed_days={[d.strftime('%Y%m%d') for d in failed_dates]} {reason}"
         self._record_catchup_failure(reason=reason)
-        return Message("sched_catchup_partial", {"days": total})
+        # D11-F03: 补偿未完成必须映射 FAILED（而非伪成功），使任务中心可区分并允许重试。
+        # 抛异常前已完成水位推进与失败退避记录，顺序与原逻辑一致。
+        raise TaskIncompleteError(Message("sched_catchup_partial", {"days": total}), reason=reason)
 
     async def _run_daily_update(self):
         """Execute the data update (16:30)"""
@@ -1024,6 +1026,9 @@ class SchedulerService:
 
         async def _daily_update_logic(task_id: str, **kwargs):
             tm = TaskManager()
+            from services.task_manager import (
+                TaskIncompleteError,
+            )  # lazy-import: R1 EX-0007（utils 仅编排期引用业务异常）
             from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
 
             processor = DataProcessor()
@@ -1038,10 +1043,19 @@ class SchedulerService:
             if is_complete:
                 await self._mark_daily_update_done_db(today_str)
             else:
+                failed_critical = list(getattr(result, "failed_critical_tables", []) or [])
                 logger.warning(
                     "[Scheduler] Daily update NOT complete (critical=%s, optional=%s), NOT marking done",
-                    getattr(result, "failed_critical_tables", []),
+                    failed_critical,
                     getattr(result, "failed_optional_tables", []),
+                )
+                # D11-F03: 不完整/None/无 is_complete 一律映射 FAILED，不返回成功文案。
+                raise TaskIncompleteError(
+                    Message(
+                        "sched_daily_incomplete",
+                        {"tables": ", ".join(map(str, failed_critical)) or "-"},
+                    ),
+                    reason=f"is_complete=False; failed_critical_tables={failed_critical}",
                 )
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
@@ -1117,6 +1131,10 @@ class SchedulerService:
 
         async def _concept_sync_logic(task_id: str, **kwargs):
             tm = TaskManager()
+            from services.task_manager import (
+                TaskIncompleteError,
+            )  # lazy-import: R1 EX-0007（utils 仅编排期引用业务异常）
+
             cancel_event = tm.get_cancel_event(task_id)
             from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
 
@@ -1156,7 +1174,11 @@ class SchedulerService:
                 f"status={status}; {summary}"
             )
             message_key = "sched_concept_sync_failed" if status == "failed" else "sched_concept_sync_partial"
-            return Message(message_key, {"sources": summary})
+            # D11-F03: 失败/部分完成映射 FAILED（水位已不推进），不返回成功文案。
+            raise TaskIncompleteError(
+                Message(message_key, {"sources": summary}),
+                reason=self._job_last_failure_reason["concept_sync_daily_refresh"],
+            )
 
         # D6-5: 检查返回值为 None 的两种情形（去重命中/无事件循环），日志在 TaskManager
         # 内已分别记录，此处仅从调度器视角告警，交由 D6-1 补偿机制兜底。

@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from core.i18n import Message
 from services.task_manager import AppTask, TaskStatus
 from ui.viewmodels.task_center_view_model import TaskCenterViewModel
 
@@ -58,6 +59,22 @@ class TestTaskCenterViewModelMissingBranches:
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch("ui.viewmodels.task_center_view_model.TaskManager", return_value=self.mock_tm))
             yield
+
+    def test_incomplete_task_row_maps_to_failed_not_success(self):
+        """D11-F03: 未完成任务的 TaskRow 状态为 FAILED（非 SUCCESS），保留可读错误键。"""
+        self.mock_tm.get_all_tasks.return_value = [
+            _make_task(
+                status=TaskStatus.FAILED,
+                error="task_incomplete",
+                progress=0.4,
+                description=Message("sched_catchup_partial", {"days": 2}),
+            )
+        ]
+        vm = TaskCenterViewModel()
+        row = vm._state.tasks[0]
+        assert row.status == TaskStatus.FAILED
+        assert row.error == "task_incomplete"
+        assert row.progress != 1.0
 
     def test_unsubscribe_when_callback_already_removed_is_noop(self):
         """_unsubscribe 二次调用：callback 已不在列表，走 91->exit no-op 分支。"""
