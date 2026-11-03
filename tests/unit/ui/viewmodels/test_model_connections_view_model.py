@@ -708,6 +708,114 @@ class TestSaveEditRevision:
         assert st.editor_open is True
 
 
+class TestResolveOwnership:
+    """F03：A 的回执恢复不得清除后继保存 B 的恢复态 / 消息 / save_state / dirty。"""
+
+    async def test_committed_receipt_does_not_clear_successor_unknown_state(self, vm, filled_litellm_draft):
+        await vm.load()
+        vm._service.save_draft.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
+        assert await vm.save() is False
+        a_operation_id = vm._service.save_draft.await_args.args[2]  # noqa: SLF001
+        assert vm.state.commit_unknown_pending is True
+
+        resolve_started = asyncio.Event()
+        release_a = asyncio.Event()
+
+        async def resolve_by_operation(operation_id: str):
+            if operation_id == a_operation_id:
+                resolve_started.set()
+                await release_a.wait()
+            return ConfigurationSaveOutcome(status="committed", current_revision=3)
+
+        vm._service.resolve_save_outcome = AsyncMock(side_effect=resolve_by_operation)  # noqa: SLF001
+        resolve_task = asyncio.create_task(vm.resolve_commit_unknown())
+        await asyncio.wait_for(resolve_started.wait(), timeout=5.0)
+
+        # 双屏障：A 的 resolve 已挂起，B 保存接管槽位并返回 unknown
+        vm._service.save_draft.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
+        assert await vm.save() is False
+        b_operation_id = vm._service.save_draft.await_args.args[2]  # noqa: SLF001
+        assert b_operation_id != a_operation_id
+        assert vm._pending_operation_id == b_operation_id  # noqa: SLF001
+        b_message = vm.state.message
+        assert b_message is not None
+        assert b_message.key == "model_connection_save_commit_unknown"
+        assert vm.state.commit_unknown_pending is True
+        assert vm.state.save_state == "commit_unknown"
+
+        # 放行 A 的 committed 回执：只确认 A 的磁盘结果，不得覆盖 B 的恢复态
+        release_a.set()
+        assert await resolve_task is True
+
+        st = vm.state
+        assert vm._pending_operation_id == b_operation_id  # noqa: SLF001
+        assert st.commit_unknown_pending is True
+        assert st.message == b_message
+        assert st.save_state == "commit_unknown"
+        assert st.dirty is True
+        assert st.editor_open is True
+        assert vm._service.resolve_save_outcome.await_args_list[0].args == (a_operation_id,)  # noqa: SLF001
+
+        # B 自身的恢复入口仍可用，且按 B 的回执确认
+        assert await vm.resolve_commit_unknown() is True
+        assert vm._service.resolve_save_outcome.await_args_list[-1].args == (b_operation_id,)  # noqa: SLF001
+        st = vm.state
+        assert st.save_state == "committed"
+        assert st.commit_unknown_pending is False
+        assert st.dirty is False
+        assert vm._pending_operation_id is None  # noqa: SLF001
+
+    async def test_committed_receipt_with_new_generation_clears_own_flag_only(self, vm, filled_litellm_draft):
+        """A 仍属主但草稿已换代：只清 A 自己的未知旗标，不清新草稿的 dirty。"""
+
+        async def reset_then_cancel(payload, expected_revision, operation_id):
+            vm.start_add()
+            raise asyncio.CancelledError
+
+        vm._service.save_draft = AsyncMock(side_effect=reset_then_cancel)  # noqa: SLF001
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.save()
+        assert exc_info.type is asyncio.CancelledError
+
+        save_call = vm._service.save_draft.await_args  # noqa: SLF001
+        assert save_call is not None
+        a_operation_id = save_call.args[2]
+        assert vm._pending_operation_id == a_operation_id  # noqa: SLF001
+        assert vm.state.commit_unknown_pending is True
+
+        vm.update_name("Draft B")  # 新草稿上的未保存编辑
+        assert vm.state.dirty is True
+
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+
+        st = vm.state
+        assert st.commit_unknown_pending is False
+        assert st.save_state == "idle"
+        assert st.dirty is True
+        assert st.editor_open is True
+        assert st.draft.name == "Draft B"
+        assert vm._pending_operation_id is None  # noqa: SLF001
+
+    async def test_resolve_still_unknown_keeps_a_ownership_and_message(self, vm, filled_litellm_draft):
+        vm._service.save_draft.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
+        assert await vm.save() is False
+        a_operation_id = vm._service.save_draft.await_args.args[2]  # noqa: SLF001
+
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
+        assert await vm.resolve_commit_unknown() is False
+
+        st = vm.state
+        assert st.commit_unknown_pending is True
+        assert st.save_state == "commit_unknown"
+        assert st.message is not None
+        assert st.message.key == "model_connection_save_commit_unknown"
+        assert st.dirty is True
+        assert vm._pending_operation_id == a_operation_id  # noqa: SLF001
+
+
 # --- Credential semantics ---
 
 
