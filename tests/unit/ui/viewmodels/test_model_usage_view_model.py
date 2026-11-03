@@ -968,18 +968,23 @@ async def test_published_request_and_reservation_rows_are_immutable_and_detached
 
     # 新 state 行不可原地修改：字段与嵌套只读映射均拒绝写入
     field_name = "invocation_id"
-    with pytest.raises(FrozenInstanceError):
+    with pytest.raises(FrozenInstanceError) as exc_info:
         setattr(published, field_name, "rewritten")
+    assert field_name in exc_info.value.args[0]
     reservation_field = "reservation_id"
-    with pytest.raises(FrozenInstanceError):
+    with pytest.raises(FrozenInstanceError) as exc_info:
         setattr(reservation, reservation_field, "rewritten")
+    assert reservation_field in exc_info.value.args[0]
     writable_extra: Any = published.extra
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError) as exc_info:
         writable_extra["new_column"] = "x"
-    with pytest.raises(TypeError):
+    assert "does not support item assignment" in str(exc_info.value)
+    with pytest.raises(TypeError) as exc_info:
         published.extra["metadata"]["trace"] = {}
-    with pytest.raises(TypeError):
+    assert "does not support item assignment" in str(exc_info.value)
+    with pytest.raises(TypeError) as exc_info:
         published.extra["metadata"]["trace"]["steps"][0] = 9
+    assert "tuple" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -1018,8 +1023,9 @@ async def test_expanded_attempt_rows_are_immutable_and_old_snapshot_stable():
     assert published.extra["metadata"]["detail"]["codes"] == ("timeout",)
     assert old_state.attempts == ()  # 旧快照不随新展开变化
     field_name = "status"
-    with pytest.raises(FrozenInstanceError):
+    with pytest.raises(FrozenInstanceError) as exc_info:
         setattr(published, field_name, "succeeded")
+    assert field_name in exc_info.value.args[0]
 
 
 @pytest.mark.asyncio
@@ -1054,8 +1060,9 @@ async def test_month_summary_rows_are_immutable_and_old_snapshot_stable():
     vm.exit_monthly_summary()
     assert old_state.monthly_rows == (published,)  # 旧快照不变
     field_name = "scenario_id"
-    with pytest.raises(FrozenInstanceError):
+    with pytest.raises(FrozenInstanceError) as exc_info:
         setattr(published, field_name, "rewritten")
+    assert field_name in exc_info.value.args[0]
 
 
 @pytest.mark.asyncio
@@ -1454,8 +1461,9 @@ async def test_stale_reader_cancel_after_barrier_propagates_without_overwriting(
     await _commit_newer_filter(dao, vm)
 
     reader.release()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as exc_info:
         await stale_task
+    assert isinstance(exc_info.value, asyncio.CancelledError)
 
     assert vm.state.filters.scenario_id == "stock_analysis"
     assert [r.invocation_id for r in vm.state.requests] == ["inv-B"]
