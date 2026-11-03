@@ -431,8 +431,8 @@ class TestGetLatestGlobalNews:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("httpx.AsyncClient")
-    async def test_success_with_missing_ctime(self, mock_get, mock_tpm):
-        """ctime 缺失时回退到 get_now()。"""
+    async def test_missing_ctime_is_skipped_with_warning(self, mock_get, mock_tpm, caplog):
+        """ctime 缺失 → 条目被排除并告警，不得伪造成当前事件（NI-F01）。"""
         mock_response = MagicMock()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
@@ -450,15 +450,16 @@ class TestGetLatestGlobalNews:
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_tpm.return_value = mock_manager
 
-        result = await NewsFetcher.get_latest_global_news(limit=5)
-        assert len(result) == 1
-        assert result[0]["title"] == "无时间戳"
+        with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert result == []
+        assert any("missing or invalid publish time" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("httpx.AsyncClient")
-    async def test_success_with_invalid_ctime(self, mock_get, mock_tpm):
-        """ctime 非法值时回退到 get_now()。"""
+    async def test_success_with_invalid_ctime(self, mock_get, mock_tpm, caplog):
+        """ctime 非法值时条目被排除并告警，不得回退 get_now()。"""
         mock_response = MagicMock()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
@@ -476,8 +477,38 @@ class TestGetLatestGlobalNews:
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_tpm.return_value = mock_manager
 
-        result = await NewsFetcher.get_latest_global_news(limit=5)
-        assert len(result) == 1
+        with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert result == []
+        assert any("missing or invalid publish time" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("httpx.AsyncClient")
+    async def test_mixed_items_only_valid_time_kept(self, mock_get, mock_tpm, caplog):
+        """混合批次：仅保留时间可用的条目，缺失时间条目不进入结果集。"""
+        mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "有效时间", "content": "A", "ctime": 1718330400},
+                    {"title": "缺失时间", "content": "B"},
+                ]
+            }
+        }
+        _wire_http_get(mock_get, mock_response)
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert [d["title"] for d in result] == ["有效时间"]
+        assert any("missing or invalid publish time" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
@@ -2013,14 +2044,28 @@ class TestSina7x24Fallback:
     @pytest.mark.asyncio
     @patch(_SINA_7X24_PARSE)
     @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
-    async def test_publish_time_none_falls_back_to_now(self, mock_fetch, mock_parse):
-        """publish_time 缺失 → 回退 get_now()（CST 文本口径与 CLS 同款）。"""
+    async def test_publish_time_none_is_skipped_with_warning(self, mock_fetch, mock_parse, caplog):
+        """publish_time 缺失 → 条目排除并告警，不得伪造成当前时间（NI-F01）。"""
         mock_fetch.return_value = {}
         mock_parse.return_value = (_s7x24_docs([("无时间戳", None)]), {})
-        now = datetime.datetime(2024, 6, 14, 10, 30, 0).replace(tzinfo=CST_TZ)
-        with patch("data.external.news_fetcher.get_now", return_value=now):
+        with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
             result = await nf_mod._fetch_sina_7x24_fallback(limit=5)
-        assert result[0]["time"] == "2024-06-14 10:30:00"
+        assert result == []
+        assert any("missing or invalid publish time" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_PARSE)
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
+    async def test_mixed_missing_time_only_valid_kept_and_source_id_passthrough(self, mock_fetch, mock_parse, caplog):
+        """混合批次：仅保留时间可用条目，并透传稳定 source_id（不参与当前 hash 身份）。"""
+        mock_fetch.return_value = {}
+        utc = datetime.datetime(2024, 6, 14, 2, 0, 0)
+        mock_parse.return_value = (_s7x24_docs([("坏时间", None), ("好时间", utc)]), {})
+        with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
+            result = await nf_mod._fetch_sina_7x24_fallback(limit=5)
+        assert [d["title"] for d in result] == ["好时间"]
+        assert result[0]["source_id"] == "zhibo-1"
+        assert any("missing or invalid publish time" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     @patch(_SINA_7X24_PARSE)
@@ -2303,7 +2348,7 @@ class TestClassifyErrorIntegration:
 
         with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
             result = await NewsFetcher.get_latest_global_news(limit=5)
-        assert len(result) == 1
+        assert result == []  # NI-F01：转换失败条目被排除，不再回退 get_now()
         code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "Timestamp" in r.getMessage()]
         assert code_records, "Expected [code=...] in Timestamp conversion log"
 

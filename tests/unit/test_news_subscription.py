@@ -222,8 +222,8 @@ class TestNewsSubscriptionServiceFetchAndNotify:
         with patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher:
             mock_fetcher.get_latest_global_news = AsyncMock(
                 return_value=[
-                    {"content": "news1", "time": "10:00"},
-                    {"content": "news2", "time": "10:01"},
+                    {"content": "news1", "time": "2024-06-15 10:00:00"},
+                    {"content": "news2", "time": "2024-06-15 10:01:00"},
                 ]
             )
             svc._notify_listeners = AsyncMock()
@@ -236,7 +236,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
     @patch("services.news_subscription_service.CacheManager")
     async def test_new_items_found(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old content"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
@@ -249,7 +249,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
             mock_ch.get_config.return_value = False
             mock_fetcher.get_latest_global_news = AsyncMock(
                 return_value=[
-                    {"content": "new news", "time": "10:05"},
+                    {"content": "new news", "time": "2024-06-15 10:05:00"},
                 ]
             )
             svc._notify_listeners = AsyncMock()
@@ -556,7 +556,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
     @patch("services.news_subscription_service.CacheManager")
     async def test_new_item_with_alerts_enabled(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
@@ -569,7 +569,9 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_config.return_value = True
-            mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[{"content": "new news", "time": "2024-06-15 10:05:00"}]
+            )
             svc._notify_listeners = AsyncMock()
             svc._safe_queue_put = AsyncMock()
             await svc._fetch_and_notify()
@@ -580,7 +582,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
     @patch("services.news_subscription_service.CacheManager")
     async def test_new_item_alert_timeout(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
@@ -603,7 +605,9 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
             ),
         ):
             mock_ch.get_config.return_value = True
-            mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[{"content": "new news", "time": "2024-06-15 10:05:00"}]
+            )
             svc._notify_listeners = AsyncMock()
             svc._safe_queue_put = AsyncMock()
             await svc._fetch_and_notify()
@@ -613,7 +617,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
     @patch("services.news_subscription_service.CacheManager")
     async def test_new_item_alert_error(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc._queue_put_lock = asyncio.Lock()
@@ -626,7 +630,9 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_config.return_value = True
-            mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[{"content": "new news", "time": "2024-06-15 10:05:00"}]
+            )
             svc._notify_listeners = AsyncMock()
             svc._safe_queue_put = AsyncMock()
             await svc._fetch_and_notify()
@@ -765,12 +771,12 @@ class TestNewsSubscriptionServiceInitialSync:
         with patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher:
             mock_fetcher.get_latest_global_news = AsyncMock(
                 return_value=[
-                    {"content": "news1", "time": "10:00"},
-                    {"content": "news2", "time": "10:01"},
+                    {"content": "news1", "time": "2024-06-15 10:00:00"},
+                    {"content": "news2", "time": "2024-06-15 10:01:00"},
                 ]
             )
             await svc._fetch_and_notify()
-            assert svc._last_news_time == "10:00"
+            assert svc._last_news_time == "2024-06-15 10:00:00"
             assert svc._last_news_content == "news1"
 
 
@@ -780,7 +786,7 @@ class TestNewsSubscriptionServiceFetchNoNews:
     @patch("services.news_subscription_service.CacheManager")
     async def test_fetch_returns_empty(self, mock_cache_cls, mock_ai_cls):
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         with patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher:
             mock_fetcher.get_latest_global_news = AsyncMock(return_value=[])
@@ -977,7 +983,7 @@ class TestNewsSubscriptionServiceStopAsync:
         svc._current_fetch_task = None
         svc._processing_task = None
         svc.processing_queue = None
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         await svc.stop_async()
         assert svc._last_news_time is None
@@ -1216,12 +1222,12 @@ class TestNewsSubscriptionStopStartRace:
 
         svc.stop()
         svc._running = True  # 模拟 start() 重启
-        svc._last_news_time = "10:00"  # 新会话已建立水位线
+        svc._last_news_time = "2024-06-15 10:00:00"  # 新会话已建立水位线
         svc._last_news_content = "new"
 
         await self._settle()
 
-        assert svc._last_news_time == "10:00"
+        assert svc._last_news_time == "2024-06-15 10:00:00"
         assert svc._last_news_content == "new"
 
     @pytest.mark.asyncio
@@ -1288,7 +1294,7 @@ class TestNewsSubscriptionServiceFetchAndNotifyExceptions:
         from data.persistence.daos.base_dao import EngineDisposedError
 
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         with patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher:
             mock_fetcher.get_latest_global_news = AsyncMock(side_effect=EngineDisposedError("disposed"))
@@ -1301,7 +1307,7 @@ class TestNewsSubscriptionServiceFetchAndNotifyExceptions:
     async def test_general_exception_during_fetch(self, mock_cache, mock_ai):
         svc = NewsSubscriptionService()
         svc._running = True
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         with patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher:
             mock_fetcher.get_latest_global_news = AsyncMock(side_effect=RuntimeError("network"))
@@ -1315,7 +1321,7 @@ class TestNewsSubscriptionServiceFetchAlertSyncListener:
     @patch("services.news_subscription_service.CacheManager")
     async def test_sync_alert_listener_called(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc.cache.market_dao.save_market_news = AsyncMock()
@@ -1331,7 +1337,9 @@ class TestNewsSubscriptionServiceFetchAlertSyncListener:
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_config.return_value = True
-            mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[{"content": "new news", "time": "2024-06-15 10:05:00"}]
+            )
             svc._notify_listeners = AsyncMock()
             svc._safe_queue_put = AsyncMock()
             await svc._fetch_and_notify()
@@ -1344,7 +1352,7 @@ class TestNewsSubscriptionServiceFetchNewItemsNotify:
     @patch("services.news_subscription_service.CacheManager")
     async def test_new_items_triggers_notify(self, mock_cache_cls, mock_ai):
         svc = NewsSubscriptionService()
-        svc._last_news_time = "10:00"
+        svc._last_news_time = "2024-06-15 10:00:00"
         svc._last_news_content = "old"
         svc.processing_queue = asyncio.Queue(maxsize=10)
         svc.cache.market_dao.save_market_news = AsyncMock()
@@ -1354,7 +1362,9 @@ class TestNewsSubscriptionServiceFetchNewItemsNotify:
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_config.return_value = False  # alerts disabled
-            mock_fetcher.get_latest_global_news = AsyncMock(return_value=[{"content": "new news", "time": "10:05"}])
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[{"content": "new news", "time": "2024-06-15 10:05:00"}]
+            )
             svc._notify_listeners = AsyncMock()
             svc._safe_queue_put = AsyncMock()
             await svc._fetch_and_notify()

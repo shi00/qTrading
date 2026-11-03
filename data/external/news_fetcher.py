@@ -299,9 +299,12 @@ async def _fetch_sina_7x24_fallback(limit: int | None = 20) -> list[dict]:
       ``@log_async_operation``），可被外层 ``asyncio.wait_for`` 取消；``CancelledError``
       不被 ``except Exception`` 捕获、直接传播（R2）。
     - 返回项契约与 CLS 主源一致：``{"title","title_code","content","time"}``，另带
-      ``"source": "sina_7x24"``（``CacheManager.normalize_news_item`` 尊重 item 内 source，
-      落库不误标 CLS）；``time`` 为 CST ``YYYY-MM-DD HH:MM:SS`` 文本（与 CLS time_str 同口径，
-      订阅服务按字符串比较水位线不受影响）。
+      ``"source": "sina_7x24"`` 与稳定 ``"source_id"``（``CacheManager.normalize_news_item``
+      尊重 item 内 source，落库不误标 CLS）；``time`` 为 CST ``YYYY-MM-DD HH:MM:SS`` 文本
+      （与 CLS time_str 同口径，订阅服务按字符串比较水位线不受影响）。
+    - **NI-F01**：``publish_time`` 缺失（解析失败）的条目被跳过并汇总告警，不得回退
+      ``get_now()``——时间参与新闻身份/水位，伪造当前时间会让同一正文每轮重复落库/告警。
+      全部条目不可用时返回空列表（不视为有效覆盖，也不触发额外的回退请求）。
     - 熔断沿用 CLS 模式（连续失败 3 次 → 冷却 60s → 半开探活），独立于 CLS 计数。
     - **模块级函数**：``get_latest_global_news`` 按名调用，单测可 patch 隔离。
     """
@@ -337,14 +340,17 @@ async def _fetch_sina_7x24_fallback(limit: int | None = 20) -> list[dict]:
             logger.info("[NewsFetcher] Sina 7x24 circuit breaker CLOSED (recovered).")
 
         news_list: list[dict] = []
+        invalid_time_count = 0
         for doc in docs:
             text = doc["text"]
-            # time：UTC naive → CST 文本（与 CLS time_str 同口径）；缺失回退 now（CLS 同款）
+            # time：UTC naive → CST 文本（与 CLS time_str 同口径）。
+            # NI-F01：缺失发布时间不得回退 now（会为同一正文每轮生成新身份并重复落库/告警），
+            # 该条目跳过并显式告警；source_id 透传以便未来稳定身份契约（当前不参与 hash）。
             pub = doc["publish_time"]
-            if pub is not None:
-                time_str = pub.replace(tzinfo=datetime.UTC).astimezone(CST_TZ).strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                time_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
+            if pub is None:
+                invalid_time_count += 1
+                continue
+            time_str = pub.replace(tzinfo=datetime.UTC).astimezone(CST_TZ).strftime("%Y-%m-%d %H:%M:%S")
             # 7x24 无独立标题：rich_text 同充 title/content（CLS 亦为 title 回退 content）
             news_list.append(
                 {
@@ -353,7 +359,16 @@ async def _fetch_sina_7x24_fallback(limit: int | None = 20) -> list[dict]:
                     "content": text,
                     "time": time_str,
                     "source": "sina_7x24",
+                    "source_id": str(doc.get("source_id") or ""),
                 }
+            )
+
+        if invalid_time_count:
+            logger.warning(
+                "[NewsFetcher] Sina 7x24 item(s) skipped: missing or invalid publish time "
+                "(source=sina_7x24, skipped=%d, usable=%d); excluded items are not emitted as events.",
+                invalid_time_count,
+                len(news_list),
             )
 
         # 按时间降序排列（与 CLS 主源一致）
@@ -645,6 +660,7 @@ class NewsFetcher:
                 return await _fetch_sina_7x24_fallback(limit)
 
             news_list = []
+            invalid_time_count = 0
 
             for item in roll_data[:limit] if limit is not None else roll_data:
                 if not isinstance(item, dict):
@@ -659,8 +675,11 @@ class NewsFetcher:
 
                 content_str = str(item.get("content") or "").strip()
 
-                # ctime 时间戳转换：自动检测毫秒/秒级
+                # ctime 时间戳转换：自动检测毫秒/秒级。
+                # NI-F01：缺失/非法时间不得伪造成当前事件（时间参与新闻身份与水位），
+                # 该条目跳过并显式告警，避免同一正文每轮重建身份重复落库/告警。
                 ctime = item.get("ctime")
+                time_str = ""
                 if ctime:
                     try:
                         ctime_val = float(ctime)
@@ -672,15 +691,23 @@ class NewsFetcher:
                     except Exception as conversion_err:
                         _log_with_severity(
                             conversion_err,
-                            "[NewsFetcher] Timestamp conversion fallback: %s",
+                            "[NewsFetcher] Timestamp conversion failed; item will be excluded: %s",
                             DataSanitizer.sanitize_error(conversion_err),
                         )
-                        time_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    time_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
+                if not time_str:
+                    invalid_time_count += 1
+                    continue
 
                 news_list.append(
                     {"title": title_str, "title_code": title_code, "content": content_str, "time": time_str}
+                )
+
+            if invalid_time_count:
+                logger.warning(
+                    "[NewsFetcher] CLS item(s) skipped: missing or invalid publish time "
+                    "(source=cls, skipped=%d, usable=%d); excluded items are not emitted as events.",
+                    invalid_time_count,
+                    len(news_list),
                 )
 
             # 按时间降序排列
