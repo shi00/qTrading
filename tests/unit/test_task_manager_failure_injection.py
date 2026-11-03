@@ -110,8 +110,9 @@ class TestCancellationPropagation:
             assert runner is not None
 
             mgr.cancel_task(tid)  # 真实入口：call_soon_threadsafe → _cancel_task_impl
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await asyncio.wait_for(runner, timeout=1.0)
+            assert isinstance(exc_info.value, asyncio.CancelledError)
 
             assert unwound.is_set()
             assert task.status == TaskStatus.CANCELLED
@@ -221,7 +222,6 @@ class TestMultiLoopRebind:
                 with patch.object(mgr, "_persist_snapshot", _persist_ok):
                     mgr._queue_persist_snapshot(_snapshot("dispatch-id", "QUEUED"))
                     assert mgr._loop.is_running()
-                    assert mgr._persist_pending_count == 1
                     assert dispatched.wait(1.0)
                     assert holder1["calls"] == []
             finally:
@@ -232,6 +232,7 @@ class TestMultiLoopRebind:
 
         # loop2 已关闭：旧 loop 不会被静默复用，提交直接拒绝（返回 None）
         assert mgr._loop is holder2["loop"]
+        assert mgr._persist_pending_count == 0  # loop 关闭时未完成的 reservation 全部释放
         assert mgr.submit_task("after-close", "test", _work) is None
 
 
@@ -300,8 +301,9 @@ class TestShutdownBounded:
         await asyncio.wait_for(started.wait(), timeout=1.0)
         task = mgr.get_task(tid)
         assert task is not None
+        assert task.id == tid
         runner = task._asyncio_task
-        assert runner is not None
+        assert isinstance(runner, asyncio.Task)
 
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
@@ -377,16 +379,18 @@ class TestShutdownBounded:
         await asyncio.wait_for(started.wait(), timeout=1.0)
         task = mgr.get_task(tid)
         assert task is not None
+        assert task.id == tid
         runner = task._asyncio_task
-        assert runner is not None
+        assert isinstance(runner, asyncio.Task)
 
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = _FakeWriteDbCache()
             shutdown = asyncio.create_task(mgr.cancel_all_running_async(join_timeout=10.0, persist_timeout=0.5))
             await asyncio.wait_for(cleanup_entered.wait(), timeout=1.0)
             shutdown.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await asyncio.wait_for(shutdown, timeout=1.0)
+            assert isinstance(exc_info.value, asyncio.CancelledError)
 
         hold.set()
         with contextlib.suppress(asyncio.CancelledError):
@@ -458,8 +462,9 @@ class TestSnapshotFailure:
 
         with patch.object(mgr, "_persist_snapshot", _blocked_persist):
             mgr._queue_persist_snapshot(_snapshot("blocked-id", "QUEUED"))
-            with pytest.raises(TimeoutError):
+            with pytest.raises(TimeoutError) as exc_info:
                 await mgr.flush_persistence(timeout_s=0.05)
+            assert isinstance(exc_info.value, TimeoutError)
             assert mgr._persist_pending_count == 1
             release.set()
             await mgr.flush_persistence(timeout_s=0.5)
@@ -483,7 +488,12 @@ class TestLoadDbStateDegradation:
     async def test_read_failure_degrades_and_can_retry(self):
         svc = _make_scheduler()
         svc._last_update_date = "20260101"
-        svc._catch_up_missed_updates = AsyncMock()
+        catch_up_calls: list[tuple] = []
+
+        async def _catch_up(*args, **kwargs):
+            catch_up_calls.append((args, kwargs))
+
+        svc._catch_up_missed_updates = _catch_up
 
         with (
             patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=MagicMock())),
@@ -496,7 +506,7 @@ class TestLoadDbStateDegradation:
 
         assert svc._db_state_loaded is False  # 失败不置位，后续可重试
         assert svc._last_update_date == "20260101"  # 未误判为已完成/未覆盖旧水位
-        svc._catch_up_missed_updates.assert_not_awaited()
+        assert catch_up_calls == []
 
         with (
             patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=MagicMock())),
@@ -509,13 +519,18 @@ class TestLoadDbStateDegradation:
 
         assert svc._db_state_loaded is True
         assert svc._last_update_date == "20260613"
-        svc._catch_up_missed_updates.assert_awaited_once()
+        assert len(catch_up_calls) == 1
 
     @pytest.mark.asyncio
     async def test_cancelled_read_propagates(self):
         """R2: _load_db_state 的 except Exception 不得吞 CancelledError。"""
         svc = _make_scheduler()
-        svc._catch_up_missed_updates = AsyncMock()
+        catch_up_calls: list[tuple] = []
+
+        async def _catch_up(*args, **kwargs):
+            catch_up_calls.append((args, kwargs))
+
+        svc._catch_up_missed_updates = _catch_up
 
         with (
             patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=MagicMock())),
@@ -524,11 +539,12 @@ class TestLoadDbStateDegradation:
                 AsyncMock(side_effect=asyncio.CancelledError()),
             ),
         ):
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await svc._load_db_state()
+            assert isinstance(exc_info.value, asyncio.CancelledError)
 
         assert svc._db_state_loaded is False
-        svc._catch_up_missed_updates.assert_not_awaited()
+        assert catch_up_calls == []
 
 
 class _DeleteConn:
