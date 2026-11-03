@@ -51,6 +51,38 @@ _FINANCIAL_DISCLOSURE_PENDING_KEY = "financial_disclosure_pending"
 # 无检查点（升级/新建）时选定的历史补抓窗口，避免沿用「最近尝试时间」直接跳过旧失败日。
 _LEGACY_DISCLOSURE_BACKFILL_DAYS = 30
 
+# D05-F01: 全量轮次的「未完成股票目标」持久状态。
+# 全量按股票处理并以 step4 marker 断点续传；失败股票不写 marker，但批次尾部仍写
+# financial_reports 的 last_sync_date（partial 亦作为「最近尝试时间」推进），导致下一轮
+# 普通 run 因 last_sync_date 存在转增量，失败股票的历史不再补齐。
+# 语义：全量开始处理前登记本轮目标集合；失败/取消/异常时保留；仅全量轮次完全成功
+# （无失败股票且未取消）后清空。`_run_impl` 在转增量前优先恢复该轮，复用 step4 marker
+# 只重抓未完成股票，不清空成功 marker，也不触碰增量 pending 集合。
+_FINANCIAL_FULL_SYNC_PENDING_KEY = "financial_full_sync_pending"
+
+
+def _load_full_sync_pending_stocks(raw) -> set[str]:
+    """Load the persisted full-sync unfinished stock targets.
+
+    Invalid/legacy payloads degrade to an empty set: without targets a stale marker
+    is indistinguishable from a never-started full round, so the ordinary sync keeps
+    its incremental behavior (fail-open; no completed disclosure day is skipped).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return set()
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("[FinancialSync] FullSync | Invalid pending target payload, ignoring.")
+        return set()
+    if not isinstance(payload, list):
+        return set()
+    return {code for code in payload if isinstance(code, str) and code}
+
+
+def _dump_full_sync_pending_stocks(stocks: set[str]) -> str:
+    return json.dumps(sorted(stocks), ensure_ascii=False)
+
 
 def _parse_disclosure_checkpoint(raw) -> datetime.date | None:
     """Parse the persisted contiguous-complete disclosure checkpoint (YYYYMMDD)."""
@@ -236,6 +268,22 @@ class FinancialSyncStrategy(ISyncStrategy):
                 if not status or not status.get("last_sync_date"):
                     should_full_sync = True
                     logger.debug("[FinancialSync] Strategy | Full Sync (first run)")
+                else:
+                    # D05-F01: 上一轮全量未完成（失败/取消/中断）时优先恢复全量。
+                    # 已有 last_sync_date 只说明「尝试过」，不代表全部股票已完成；
+                    # 继续走增量会让失败股票永远不再补齐。
+                    full_pending = _load_full_sync_pending_stocks(
+                        await get_app_state(
+                            getattr(self.context.cache, "engine", None),
+                            _FINANCIAL_FULL_SYNC_PENDING_KEY,
+                        )
+                    )
+                    if full_pending:
+                        should_full_sync = True
+                        logger.info(
+                            "[FinancialSync] Strategy | Full Sync (resuming unfinished full sync, %s stock(s))",
+                            len(full_pending),
+                        )
 
             if should_full_sync:
                 await self._run_full_sync(
@@ -358,6 +406,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         pending_stocks = sorted([s for s in all_stocks if s not in synced_stocks])
         skipped_count = total_stocks - len(pending_stocks)
+        engine = getattr(self.context.cache, "engine", None)
 
         # Update result stats
         result_accumulator.updated += skipped_count  # Technically skipped, but "done"
@@ -371,6 +420,8 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         if not pending_stocks:
             logger.debug("[FinancialSync] FullSync | All stocks already synced.")
+            # D05-F01: 没有待处理股票即本轮全量无未完成目标，清理可能残留的未完成态。
+            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]")
             if progress_callback:
                 progress_callback(
                     total_stocks,
@@ -381,6 +432,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                     ),
                 )
             return
+
+        # D05-F01: 开始处理前登记本轮全量目标。失败/取消/进程中断时该状态保留，
+        # 下一轮普通 run 据此回到全量断点续传（step4 marker 负责排除已完成股票）。
+        await set_app_state(
+            engine,
+            _FINANCIAL_FULL_SYNC_PENDING_KEY,
+            _dump_full_sync_pending_stocks(set(pending_stocks)),
+        )
 
         completed_count = skipped_count
 
@@ -610,6 +669,12 @@ class FinancialSyncStrategy(ISyncStrategy):
             result_accumulator.added,
             status=_full_status,
         )
+
+        # D05-F01: 未完成目标态只描述「股票层面未完成」：无失败股票且未取消才清理。
+        # 不能用 _full_status（aux/corporate actions 的 partial 与股票目标无关，若据此
+        # 保留会导致普通 run 反复全量）；失败/取消/异常保留，供后续普通 run 优先恢复。
+        if failed_stock_count == 0 and not self._shutdown_event.is_set():
+            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _run_incremental_sync(

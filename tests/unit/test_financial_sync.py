@@ -2748,3 +2748,179 @@ class TestFinancialDisclosureCheckpoint:
 
         assert store.values["financial_disclosure_checkpoint"] == "20241025"
         ctx.api.get_disclosure_date.assert_not_awaited()
+
+
+def _make_stateful_step4(ctx, initial: set[str] | None = None) -> set[str]:
+    """跨轮有状态的 step4 完成标记替身（mark 后下一轮 get 可见）。"""
+    completed = set(initial or ())
+    ctx.cache.sync_dao.get_completed_step4_stocks = AsyncMock(
+        side_effect=lambda sync_version=1, **kwargs: set(completed)
+    )
+    ctx.cache.sync_dao.mark_stock_step4_completed = AsyncMock(
+        side_effect=lambda ts_code, sync_version=1, conn=None: completed.add(ts_code)
+    )
+    return completed
+
+
+def _make_stateful_sync_status(ctx, initial: dict | None = None) -> dict:
+    """跨轮有状态的 sync_status 替身（financial_reports 写入后下一轮 get 可见）。"""
+    state = {"value": initial}
+    ctx.cache.sync_dao.get_sync_status = AsyncMock(side_effect=lambda table_name, *a, **k: state["value"])
+
+    async def _update(table_name, last_data_date, record_count, status="success", last_result_status=None, *a, **k):
+        if table_name == "financial_reports":
+            state["value"] = {"last_sync_date": last_data_date}
+
+    ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=_update)
+    return state
+
+
+class TestFinancialFullSyncRecovery:
+    """D05-F01: 全量失败/中断后普通重跑须恢复未完成股票，成功后下一轮才走增量。"""
+
+    _FULL_KEY = "financial_full_sync_pending"
+
+    def _setup(self, initial_completed: set[str] | None = None, initial_status: dict | None = None):
+        ctx = make_ctx()
+        _wire_per_stock_core_apis(ctx)
+        completed = _make_stateful_step4(ctx, initial=initial_completed)
+        status_state = _make_stateful_sync_status(ctx, initial=initial_status)
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "list_status": ["L", "L"]})
+        )
+        ctx.cache.get_incomplete_financial_stocks = AsyncMock(return_value=set())
+        return ctx, completed, status_state
+
+    @pytest.mark.asyncio
+    async def test_ordinary_rerun_recovers_failed_stock_then_incremental(self):
+        """首轮 B 失败 → 同日普通重跑只抓 B（A 不重复）→ 再失败仍 partial →
+        B 成功后全量未完成态清理 → 下一轮才走增量。"""
+        from data.sync.financial import _load_full_sync_pending_stocks
+
+        ctx, completed, status_state = self._setup()
+        b_fail = {"value": True}
+        saved_codes: list[str] = []
+
+        async def save(df, conn=None):
+            ts_code = df["ts_code"].iloc[0]
+            if ts_code == "000002.SZ" and b_fail["value"]:
+                raise TimeoutError("simulated B failure")
+            saved_codes.append(ts_code)
+            return len(df)
+
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=save)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241018"})
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 22, 16)),
+        ):
+            # 第一轮：首跑全量，B 失败
+            result1 = await strategy.run()
+            assert result1.status == SyncStatus.PARTIAL.value
+            assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == {"000001.SZ", "000002.SZ"}
+            income_round1 = {c.kwargs.get("ts_code") for c in ctx.api.get_income.await_args_list}
+            assert income_round1 == {"000001.SZ", "000002.SZ"}
+            assert "000001.SZ" in completed
+
+            # 第二轮：已有 last_sync_date，但因全量未完成态仍在，普通 run 恢复全量且只抓 B
+            ctx.api.get_income.reset_mock()
+            result2 = await strategy.run()
+            income_round2 = {c.kwargs.get("ts_code") for c in ctx.api.get_income.await_args_list}
+            assert income_round2 == {"000002.SZ"}
+            assert result2.status == SyncStatus.PARTIAL.value
+            assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == {"000002.SZ"}
+
+            # 第三轮：B 恢复 → 全量成功并清理未完成态
+            b_fail["value"] = False
+            ctx.api.get_income.reset_mock()
+            result3 = await strategy.run()
+            income_round3 = {c.kwargs.get("ts_code") for c in ctx.api.get_income.await_args_list}
+            assert income_round3 == {"000002.SZ"}
+            assert result3.status == SyncStatus.SUCCESS.value
+            assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == set()
+            assert "000002.SZ" in completed
+
+            # 第四轮：无未完成态 → 走增量（不再触发全量抓取）
+            ctx.api.get_income.reset_mock()
+            ctx.api.get_disclosure_date.reset_mock()
+            result4 = await strategy.run()
+
+        assert result4.status == SyncStatus.SUCCESS.value
+        ctx.api.get_disclosure_date.assert_awaited()
+        assert ctx.api.get_income.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_full_sync_keeps_targets_and_same_session_recovers(self):
+        """全量中途取消保留未完成目标；同会话下一轮即使已有 last_sync_date 也恢复全量。"""
+        from data.sync.financial import _load_full_sync_pending_stocks
+
+        ctx, completed, status_state = self._setup()
+        cancel_once = {"value": True}
+        per_stock = ctx.api.get_income.side_effect
+
+        async def income(**kwargs):
+            if kwargs["ts_code"] == "000002.SZ" and cancel_once["value"]:
+                raise asyncio.CancelledError()
+            return per_stock(**kwargs)
+
+        ctx.api.get_income = AsyncMock(side_effect=income)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241018"})
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 22, 16)),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await strategy.run()
+            assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) != set()
+
+            # 模拟中断前已写入 last_sync_date，隔离「未完成态」驱动的恢复路径
+            status_state["value"] = {"last_sync_date": datetime.datetime(2024, 10, 22)}
+            cancel_once["value"] = False
+            ctx.api.get_income.reset_mock()
+            result = await strategy.run()
+            calls = {c.kwargs.get("ts_code") for c in ctx.api.get_income.await_args_list}
+
+        assert "000002.SZ" in calls
+        assert result.status == SyncStatus.SUCCESS.value
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == set()
+        assert "000002.SZ" in completed
+
+    @pytest.mark.asyncio
+    async def test_full_recovery_does_not_drop_incremental_pending(self):
+        """全量恢复只处理全量未完成目标，不得吞掉既有增量 pending。"""
+        from data.sync.financial import (
+            _dump_full_sync_pending_stocks,
+            _dump_pending_disclosure_targets,
+            _load_full_sync_pending_stocks,
+            _load_pending_disclosure_targets,
+        )
+
+        ctx, completed, status_state = self._setup(
+            initial_completed={"000001.SZ"},
+            initial_status={"last_sync_date": datetime.datetime(2024, 10, 21)},
+        )
+        disclosure_pending = {"20241019": {("000001.SZ", "20240930")}}
+        store = _FakeAppStateStore(
+            {
+                self._FULL_KEY: _dump_full_sync_pending_stocks({"000002.SZ"}),
+                "financial_disclosure_pending": _dump_pending_disclosure_targets(disclosure_pending),
+                "financial_disclosure_checkpoint": "20241018",
+            }
+        )
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 22, 16)),
+        ):
+            result = await strategy.run()
+
+        calls = {c.kwargs.get("ts_code") for c in ctx.api.get_income.await_args_list}
+        assert calls == {"000002.SZ"}
+        assert result.status == SyncStatus.SUCCESS.value
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == set()
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == disclosure_pending
