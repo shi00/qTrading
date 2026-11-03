@@ -243,6 +243,33 @@ async def test_run_auto_probe_task_registered(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_startup_controller_receives_explicit_scheduling_coordinator(monkeypatch):
+    """D02-F04：session coordinator 作为显式参数传入 StartupController，
+    不再经 bootstrap 全局 pending 等待「下一次任意 assemble」消费。"""
+    _prepare_run_mocks(monkeypatch)
+
+    captured: dict = {}
+
+    def _factory(**kwargs):
+        captured.update(kwargs)
+        ctrl = MagicMock()
+        ctrl.auto_probe_task = None
+        ctrl.start = AsyncMock()
+        return ctrl
+
+    monkeypatch.setattr(app_main, "StartupController", _factory)
+
+    page = _DummyPage()
+    await app_main.run(page)
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert captured["scheduling_coordinator"] is coordinator
+    # 显式绑定：启动阶段不预注册任何 cleanup 回调（组装时才原子绑定）
+    assert coordinator.register_cleanup_calls == []
+
+
+@pytest.mark.asyncio
 async def test_state_transition_registers_late_auto_probe_task(monkeypatch):
     """onboarding/retry 路径创建的 auto_probe_task 也必须注册到 ShutdownCoordinator。
 

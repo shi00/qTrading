@@ -1204,7 +1204,6 @@ class TestSchedulingServicesAssembly:
         import app.bootstrap as bootstrap_module
 
         monkeypatch.setattr(bootstrap_module, "_scheduling_services", None)
-        monkeypatch.setattr(bootstrap_module, "_pending_scheduling_coordinators", [])
 
     def test_assemble_returns_three_services(self):
         """D9：组装返回 Recorder / Compatibility / Executor 三服务 + F15 适配器表。"""
@@ -1214,16 +1213,20 @@ class TestSchedulingServicesAssembly:
         assert set(services) == {"recorder", "compatibility", "executor", "adapters"}
         assert bootstrap_module.get_scheduling_services() is services
 
-    def test_register_before_assemble_pends_then_attaches_after(self):
-        """D8 时序：_run_session 在 controller.start() 前注册 → 记 pending；
-        initialize_services 内 assemble 完成后自动补挂，停机回调不静默丢失。"""
+    def test_get_scheduling_services_none_before_assemble(self):
+        """D02-F04：未组装时仍返回 None（不伪装可用，调用方走旧链）。"""
         import app.bootstrap as bootstrap_module
 
-        coordinator = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator)
-        coordinator.register_cleanup_callback.assert_not_called()
+        assert bootstrap_module.get_scheduling_services() is None
+
+    def test_bind_scheduling_cleanup_attaches_recorder(self):
+        """D02-F04：coordinator 显式绑定当期组装结果的 Recorder 收敛回调。"""
+        import app.bootstrap as bootstrap_module
 
         services = bootstrap_module.assemble_scheduling_services()
+        coordinator = MagicMock()
+        bootstrap_module.bind_scheduling_cleanup(coordinator, services)
+
         coordinator.register_cleanup_callback.assert_called_once_with(
             "usage recorder final flush",
             services["recorder"].aclose,
@@ -1231,96 +1234,147 @@ class TestSchedulingServicesAssembly:
             timeout_s=5.0,
         )
 
-    def test_multi_session_serial_rebind_attaches_new_recorder(self):
-        """F40 回归：session A 组装退出后 session B 串行重入，B 的 coordinator 必须
-        挂上 B 代新 Recorder，而非上一代（已 close 的）A 代 Recorder。"""
-        import app.bootstrap as bootstrap_module
-
-        coordinator_a = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator_a)
-        services_a = bootstrap_module.assemble_scheduling_services()
-        coordinator_a.register_cleanup_callback.assert_called_once_with(
-            "usage recorder final flush",
-            services_a["recorder"].aclose,
-            critical=True,
-            timeout_s=5.0,
-        )
-
-        # session B 重入：register 时三服务仍指向 A 代（尚未被 B 的 assemble 替换）
-        coordinator_b = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator_b)
-        coordinator_b.register_cleanup_callback.assert_not_called()
-
-        services_b = bootstrap_module.assemble_scheduling_services()
-        assert services_b is not services_a
-        coordinator_b.register_cleanup_callback.assert_called_once_with(
-            "usage recorder final flush",
-            services_b["recorder"].aclose,
-            critical=True,
-            timeout_s=5.0,
-        )
-
-    def test_register_without_assemble_never_attaches(self):
-        """F40：register 后没有发生 assemble（启动在组装前失败 / services_initialized
-        跳过），coordinator 不挂任何清理回调——此时 Recorder 也不存在，无泄漏。"""
+    def test_bind_scheduling_cleanup_noop_without_recorder(self):
+        """组装结果缺 recorder（异常兜底形态）时不挂载、不伪装注册成功。"""
         import app.bootstrap as bootstrap_module
 
         coordinator = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator)
+        bootstrap_module.bind_scheduling_cleanup(coordinator, {"recorder": None})
         coordinator.register_cleanup_callback.assert_not_called()
 
-    def test_interleaved_register_before_first_assemble_attaches_current(self):
-        """F40 交错窗口（NOTE(lazy) 记录形态）：B.register 早于 A.assemble 时，
-        A、B 均由 A 代 assemble 消费（挂 A 代 Recorder）；B 代 Recorder 由进程
-        退出兜底——本测试固化该已知残留行为，防止无意识回归。"""
+    def test_bind_scheduling_cleanup_noop_without_coordinator(self):
+        """无 coordinator（非应用会话路径，如测试直接组装）时不挂载、不报错。"""
+        import app.bootstrap as bootstrap_module
+
+        services = bootstrap_module.assemble_scheduling_services()
+        bootstrap_module.bind_scheduling_cleanup(None, services)
+
+    def test_two_sessions_bind_own_generations(self):
+        """F40 / D02-F04：两会话各自组装并显式绑定自己的 coordinator，
+        不再依赖全局 pending 消费，互不串代。"""
         import app.bootstrap as bootstrap_module
 
         coordinator_a = MagicMock()
-        coordinator_b = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator_a)
-        bootstrap_module.register_scheduling_cleanup(coordinator_b)
-
         services_a = bootstrap_module.assemble_scheduling_services()
-        # 精确断言：步骤名 / recorder 绑定身份 / critical 与超时参数；
-        # 绑定方法每次访问生成新对象，用 __self__ 比对 Recorder 实例身份
-        for coordinator in (coordinator_a, coordinator_b):
+        bootstrap_module.bind_scheduling_cleanup(coordinator_a, services_a)
+
+        coordinator_b = MagicMock()
+        services_b = bootstrap_module.assemble_scheduling_services()
+        bootstrap_module.bind_scheduling_cleanup(coordinator_b, services_b)
+        assert services_b is not services_a
+
+        for coordinator, services in ((coordinator_a, services_a), (coordinator_b, services_b)):
             assert coordinator.register_cleanup_callback.call_count == 1
             call = coordinator.register_cleanup_callback.call_args
             assert call.args[0] == "usage recorder final flush"
-            assert call.args[1].__self__ is services_a["recorder"]
+            assert call.args[1].__self__ is services["recorder"]
             assert call.kwargs.get("critical") is True
             assert call.kwargs.get("timeout_s") == 5.0
 
-        bootstrap_module.assemble_scheduling_services()
-        # B 代 assemble 时 pending 已空，B 不再重复挂载
-        assert coordinator_b.register_cleanup_callback.call_count == 1
-
-    def test_pending_list_cleared_after_drain_no_duplicate(self):
-        """pending 补挂一次后清空；assemble 重入不重复注册。"""
+    @pytest.mark.asyncio
+    async def test_retry_after_task_manager_failure_reuses_bound_generation(self):
+        """D02-F04 主缺陷：TaskManager.init_db 首次失败（组装已发生）后 Retry，
+        必须复用仍有效的 A 代而非换出无人绑定的 B 代；cleanup 只绑定一次。"""
         import app.bootstrap as bootstrap_module
 
-        coordinator = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator)
-        bootstrap_module.assemble_scheduling_services()
-        bootstrap_module.assemble_scheduling_services()
-        assert coordinator.register_cleanup_callback.call_count == 1
-        assert bootstrap_module._pending_scheduling_coordinators == []
+        mock_cm = MagicMock()
+        mock_cm.init_db = AsyncMock()
+        mock_cm.engine = MagicMock()
+        mock_cm.ai_usage_dao = None
 
-    def test_drain_noop_when_recorder_missing(self):
-        """组装结果缺 recorder（异常兜底形态）时不挂载、不伪装注册成功，
-        且 pending 条目按已消费处理（不残留反复尝试）。"""
+        mock_task_manager = MagicMock()
+        mock_task_manager.init_db = AsyncMock(
+            side_effect=[RuntimeError("task manager init failed"), RuntimeError("task manager init failed"), None]
+        )
+
+        coordinator = MagicMock()
+        with (
+            patch("app.bootstrap.MetaDataManager"),
+            patch("app.bootstrap.TaskManager", return_value=mock_task_manager),
+            patch("app.bootstrap.SchedulerService"),
+            patch("app.bootstrap.NewsSubscriptionService"),
+            patch("app.bootstrap.MarketDataService"),
+            patch("data.cache.cache_manager.CacheManager", return_value=mock_cm),
+            patch("utils.app_env.is_e2e_mode", return_value=True),
+        ):
+            first = await initialize_services(mock_cm, scheduling_coordinator=coordinator)
+            assert first["success"] is False
+            assert first["error"] == "task_manager_init_failed"
+            services_a = first.get("scheduling_services")
+            assert services_a is not None
+            assert coordinator.register_cleanup_callback.call_count == 1
+            assert coordinator.register_cleanup_callback.call_args.args[1].__self__ is services_a["recorder"]
+
+            second = await initialize_services(
+                mock_cm,
+                scheduling_coordinator=coordinator,
+                scheduling_services=services_a,
+            )
+            assert second["success"] is False
+            assert second.get("scheduling_services") is services_a
+            assert coordinator.register_cleanup_callback.call_count == 1
+
+            third = await initialize_services(
+                mock_cm,
+                scheduling_coordinator=coordinator,
+                scheduling_services=services_a,
+            )
+            assert third["success"] is True
+            assert third.get("scheduling_services") is services_a
+            # 复用同一代：不新建 Recorder、不重复挂清理回调（无孤儿代 B）
+            assert coordinator.register_cleanup_callback.call_count == 1
+            assert bootstrap_module.get_scheduling_services() is services_a
+
+    @pytest.mark.asyncio
+    async def test_retry_before_assembly_assembles_and_binds_once(self):
+        """D02-F04：首次在组装前失败（cache init_db 失败）Retry 成功后
+        才组装并显式绑定；失败时无 Recorder，无可挂/可关对象。"""
         import app.bootstrap as bootstrap_module
 
-        bootstrap_module._scheduling_services = {
-            "recorder": None,
-            "compatibility": MagicMock(),
-            "executor": MagicMock(),
-        }
+        mock_cm = MagicMock()
+        mock_cm.init_db = AsyncMock(side_effect=[RuntimeError("db down"), None, None])
+        mock_cm.engine = MagicMock()
+        mock_cm.ai_usage_dao = None
+
+        mock_task_manager = MagicMock()
+        mock_task_manager.init_db = AsyncMock()
+
         coordinator = MagicMock()
-        bootstrap_module._pending_scheduling_coordinators.append(coordinator)
-        bootstrap_module._drain_pending_scheduling_coordinators()
-        coordinator.register_cleanup_callback.assert_not_called()
-        assert bootstrap_module._pending_scheduling_coordinators == []
+        with (
+            patch("app.bootstrap.MetaDataManager"),
+            patch("app.bootstrap.TaskManager", return_value=mock_task_manager),
+            patch("app.bootstrap.SchedulerService"),
+            patch("app.bootstrap.NewsSubscriptionService"),
+            patch("app.bootstrap.MarketDataService"),
+            patch("data.cache.cache_manager.CacheManager", return_value=mock_cm),
+            patch("utils.app_env.is_e2e_mode", return_value=True),
+        ):
+            first = await initialize_services(mock_cm, scheduling_coordinator=coordinator)
+            assert first["success"] is False
+            assert first["error"] == "db_init_failed"
+            assert first.get("scheduling_services") is None
+            coordinator.register_cleanup_callback.assert_not_called()
+
+            second = await initialize_services(
+                mock_cm,
+                scheduling_coordinator=coordinator,
+                scheduling_services=first.get("scheduling_services"),
+            )
+            assert second["success"] is True
+            services_b = second.get("scheduling_services")
+            assert services_b is not None
+            assert coordinator.register_cleanup_callback.call_count == 1
+            assert coordinator.register_cleanup_callback.call_args.args[1].__self__ is services_b["recorder"]
+
+            # 重复 Retry 复用同一代：不累积回调、不产生孤儿 Recorder
+            third = await initialize_services(
+                mock_cm,
+                scheduling_coordinator=coordinator,
+                scheduling_services=services_b,
+            )
+            assert third["success"] is True
+            assert third.get("scheduling_services") is services_b
+            assert coordinator.register_cleanup_callback.call_count == 1
 
     @pytest.mark.asyncio
     async def test_initialize_services_recovers_expired_owners(self):
