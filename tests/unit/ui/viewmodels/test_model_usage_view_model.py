@@ -1084,3 +1084,186 @@ async def test_export_csv_monthly_summary_missing_budget_writes_empty_cells():
     cells = text.splitlines()[1].split(",")
     assert cells[0] == "202601"  # 查看月仍在（不为空月伪装数据）
     assert cells[1] == "" and cells[2] == "" and cells[3] == ""
+
+
+# ---------------------------------------------------------------------------
+# VMD-F01：末段预算读取（budget_limit_reader）完成后的请求代次复核
+# ---------------------------------------------------------------------------
+
+
+class _ReaderBarrier:
+    """受控 ``budget_limit_reader``：指定第 N 次调用在屏障处挂起，放行后返回/抛错。
+
+    其余调用立即返回 ``other_value``。用于构造「旧请求停在末段 await 期间被新请求
+    超越」的交错，验证迟到响应（成功 / 降级 / 取消）不覆盖新结果。
+    """
+
+    def __init__(
+        self,
+        *,
+        gate_on_call: int = 1,
+        gated_value: Decimal | None = None,
+        gated_error: BaseException | None = None,
+        other_value: Decimal | None = Decimal("120"),
+    ) -> None:
+        self._gate = asyncio.Event()
+        self._gate_on_call = gate_on_call
+        self._gated_value = gated_value
+        self._gated_error = gated_error
+        self._other_value = other_value
+        self.calls = 0
+
+    async def __call__(self) -> Decimal | None:
+        self.calls += 1
+        if self.calls == self._gate_on_call:
+            await self._gate.wait()
+            if self._gated_error is not None:
+                raise self._gated_error
+            return self._gated_value
+        return self._other_value
+
+    def release(self) -> None:
+        self._gate.set()
+
+
+_SUMMARY_A = {
+    "month": "202601",
+    "known_cny": Decimal("0.01"),
+    "effective_reserved_cny": Decimal("0.00"),
+    "unconfirmed_reserved_cny": Decimal("0.00"),
+}
+_SUMMARY_B = {
+    "month": "202601",
+    "known_cny": Decimal("0.02"),
+    "effective_reserved_cny": Decimal("0.30"),
+    "unconfirmed_reserved_cny": Decimal("0.40"),
+}
+
+
+async def _commit_newer_filter(dao: MagicMock, vm: ModelUsageViewModel) -> None:
+    """让新请求 B（筛选变化）完成提交，返回时 state 为 B 的 rows/total/预算。"""
+    dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-B"}], 2))
+    dao.read_budget_summary = AsyncMock(return_value=_SUMMARY_B)
+    dao.read_unconfirmed_reservations = AsyncMock(return_value=[{"reservation_id": "res-B"}])
+    await vm.set_filter(scenario_id="stock_analysis")
+
+
+@pytest.mark.asyncio
+async def test_stale_success_after_reader_barrier_keeps_newer_filter_results():
+    """VMD-F01 核心：A 停在末段 reader，B set_filter 提交后放行 A 成功，A 不得覆盖 B。"""
+    dao = _dao(rows=[{"invocation_id": "inv-A"}], total=1, summary=_SUMMARY_A)
+    reader = _ReaderBarrier(gated_value=Decimal("10"))
+    vm = _vm(dao, reader=reader)
+
+    stale_task = asyncio.create_task(vm.load())
+    await asyncio.sleep(0)  # A 已停在末段 reader
+    assert reader.calls == 1
+    assert vm.state.requests == ()  # 旧请求尚未提交
+
+    await _commit_newer_filter(dao, vm)
+    assert vm.state.filters.scenario_id == "stock_analysis"
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert vm.state.total == 2
+    assert vm.state.budget_summary.known_cny == Decimal("0.02")
+    assert vm.state.budget_draft == "120"
+    assert vm.state.message is None
+
+    reader.release()  # 放行 A 的迟到成功响应
+    await stale_task
+
+    # A 迟到成功：rows/total/budget 与 filters 均保持 B，不被旧代次覆盖
+    assert vm.state.filters.scenario_id == "stock_analysis"
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert vm.state.total == 2
+    assert vm.state.budget_summary.known_cny == Decimal("0.02")
+    assert vm.state.budget_summary.effective_reserved_cny == Decimal("0.30")
+    assert vm.state.budget_summary.unconfirmed_reserved_cny == Decimal("0.40")
+    assert vm.state.unconfirmed_reservations == ({"reservation_id": "res-B"},)
+    assert vm.state.budget_draft == "120"
+    assert vm.state.monthly_limit_cny == Decimal("120")
+    assert vm.state.monthly_limit_unknown is False
+    assert vm.state.message is None
+
+    csv_text = await vm.export_csv()  # 当前页导出只含 B
+    assert "inv-B" in csv_text
+    assert "inv-A" not in csv_text
+
+
+@pytest.mark.asyncio
+async def test_stale_reader_failure_after_barrier_does_not_overwrite_newer_state():
+    """VMD-F01：A 的 reader 迟到失败（unknown 降级）属旧代次，不覆盖 B 的已知限额与消息。"""
+    dao = _dao(rows=[{"invocation_id": "inv-A"}], total=1, summary=_SUMMARY_A)
+    reader = _ReaderBarrier(gated_error=RuntimeError("config boom"))
+    vm = _vm(dao, reader=reader)
+
+    stale_task = asyncio.create_task(vm.load())
+    await asyncio.sleep(0)
+    assert reader.calls == 1
+
+    await _commit_newer_filter(dao, vm)
+    assert vm.state.monthly_limit_unknown is False
+    assert vm.state.message is None
+
+    reader.release()
+    await stale_task
+
+    assert vm.state.monthly_limit_unknown is False  # 旧代次的 unknown 不落盘（R21 语义不被污染）
+    assert vm.state.monthly_limit_cny == Decimal("120")
+    assert vm.state.budget_draft == "120"
+    assert vm.state.message is None
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert vm.state.budget_summary.known_cny == Decimal("0.02")
+
+
+@pytest.mark.asyncio
+async def test_stale_reader_cancel_after_barrier_propagates_without_overwriting():
+    """VMD-F01 + R2：A 的 reader 迟到取消仍上抛，且不覆盖 B 的已提交结果。"""
+    dao = _dao(rows=[{"invocation_id": "inv-A"}], total=1, summary=_SUMMARY_A)
+    reader = _ReaderBarrier(gated_error=asyncio.CancelledError())
+    vm = _vm(dao, reader=reader)
+
+    stale_task = asyncio.create_task(vm.load())
+    await asyncio.sleep(0)
+    assert reader.calls == 1
+
+    await _commit_newer_filter(dao, vm)
+
+    reader.release()
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await stale_task
+    assert isinstance(exc_info.value, asyncio.CancelledError)
+
+    assert vm.state.filters.scenario_id == "stock_analysis"
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
+    assert vm.state.total == 2
+    assert vm.state.budget_summary.known_cny == Decimal("0.02")
+    assert vm.state.budget_draft == "120"
+    assert vm.state.message is None
+
+
+@pytest.mark.asyncio
+async def test_stale_success_after_page_turn_keeps_fresh_page_data():
+    """VMD-F01 翻页：旧页请求停在末段 reader，翻页新请求提交后，旧页迟到成功不清新数据。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    reader = _ReaderBarrier(gate_on_call=2, gated_value=Decimal("10"))
+    vm = _vm(dao, reader=reader)
+    await vm.load()  # gen1 首屏完成；reader 第 1 次调用立即返回
+    assert vm.state.page == 0
+    assert reader.calls == 1
+
+    stale_task = asyncio.create_task(vm.load())  # 旧页请求 A（仍 page0），停在末段 reader
+    await asyncio.sleep(0)
+    assert reader.calls == 2
+
+    dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-p1"}], 60))
+    await vm.next_page()  # 新请求 B：page1
+    assert vm.state.page == 1
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-p1"]
+
+    reader.release()
+    await stale_task
+
+    assert vm.state.page == 1
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-p1"]
+    assert vm.state.total == 60
+    assert vm.state.budget_draft == "120"  # A 的 10 未覆盖 B
