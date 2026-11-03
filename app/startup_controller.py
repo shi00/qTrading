@@ -198,7 +198,23 @@ class StartupController:
             )
             return
         self._transition(StartupState.LOADING)
-        await self._cache_manager.close()
+        # D02-R03: close 抛异常时不得让状态机停在 LOADING，转入 INIT_FAILED 供用户重试。
+        try:
+            await self._cache_manager.close()
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[Startup] CacheManager.close failed during reconfigure (%s): %s",
+                exc_info=True,
+            )
+            self._transition(
+                StartupState.INIT_FAILED,
+                error="reconfigure_failed",
+                detail=DataSanitizer.sanitize_error(e),
+            )
+            return
         # review01-A9: per-session 重置初始化状态（替代 bootstrap 模块级 flag），
         # 允许用户完成 onboarding 后重新执行 initialize_services。
         self._services_initialized = False

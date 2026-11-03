@@ -462,6 +462,77 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance.cache.close.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_step3b_falls_back_to_cache_manager_when_processor_absent(self):
+        """D02-R03：DataProcessor 未初始化（启动早期错误页/onboarding 页）时仍须释放已建异步引擎。"""
+        coord = ShutdownCoordinator()
+        cache = MagicMock()
+        cache.engine = MagicMock()  # 有 engine、无 processor 的可达状态
+        cache.close = AsyncMock()
+        with (
+            patch("data.data_processor.DataProcessor") as mock_dp,
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+        ):
+            mock_dp._instance = None
+            mock_cm._instance = cache
+            await coord._step3b_dispose_async_engine()
+
+        cache.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_step3b_transient_dispose_failure_is_retried(self):
+        """D02-R03：dispose 首次异常时可重试一次（CacheManager.close 支持异常后重试释放）。"""
+        coord = ShutdownCoordinator()
+        cache = MagicMock()
+        cache.close = AsyncMock(side_effect=[RuntimeError("dispose failed"), None])
+        with (
+            patch("data.data_processor.DataProcessor") as mock_dp,
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+        ):
+            mock_dp._instance = None
+            mock_cm._instance = cache
+            await coord._step3b_dispose_async_engine()
+
+        assert cache.close.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_step3b_persistent_dispose_failure_is_critical_but_continues(self):
+        """D02-R03：dispose 持续失败须上报为关键步骤失败，且不阻断后续释放步骤。"""
+        coord = ShutdownCoordinator()
+        cache = MagicMock()
+        cache.close = AsyncMock(side_effect=RuntimeError("dispose failed"))
+
+        async def _ok_step():
+            return None
+
+        for method_name in (
+            "_step0_cancel_tasks",
+            "_step1_stop_services",
+            "_step2_flush_db_writes",
+            "_step3_stop_processor_workers",
+            "_step4_clear_toast",
+            "_step5_unload_ai_model",
+            "_step5b_stop_sentiment_scorer",
+            "_step6_shutdown_thread_pools",
+            "_step7_close_database_managers",
+            "_step8_stop_embedded_postgres",
+        ):
+            setattr(coord, method_name, _ok_step)
+
+        with (
+            patch("data.data_processor.DataProcessor") as mock_dp,
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+        ):
+            mock_dp._instance = None
+            mock_cm._instance = cache
+            results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+
+        assert len(results) == len(_CLEANUP_STEPS)
+        step3b = next(r for r in results if r.name == "Step 3b")
+        assert step3b.ok is False
+        assert step3b.timed_out is False
+        assert all(r.ok for r in results if r.name != "Step 3b")
+
+    @pytest.mark.asyncio
     async def test_step4_clear_toast_no_page(self):
         coord = ShutdownCoordinator(page=None)
         await coord._step4_clear_toast()
