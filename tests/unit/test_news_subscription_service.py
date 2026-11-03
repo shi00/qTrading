@@ -2545,6 +2545,45 @@ class TestIncrementalSourcePreservation:
         assert saved["publish_time"] == datetime.datetime(2024, 1, 1, 2, 0)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_source", [123, None])
+    async def test_non_string_source_defaults_to_cls(self, svc, raw_source):
+        """item 的 source 为非字符串（数字/None）时，增量首写仍回退 CLS。"""
+        svc._last_news_time = self.WATERMARK_T0
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        save_mock = AsyncMock()
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(
+                    return_value=[
+                        {
+                            "content": "非字符串来源快讯",
+                            "time": "2024-01-01 10:00:00",
+                            "source": raw_source,
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", save_mock),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+
+        save_calls = save_mock.await_args_list
+        assert len(save_calls) == 1
+        saved = save_calls[0].args[0]
+        assert saved["source"] == "CLS"
+        assert saved["content"] == "非字符串来源快讯"
+        assert saved["tags"] == ""
+        assert saved["publish_time"] == datetime.datetime(2024, 1, 1, 2, 0)
+
+    @pytest.mark.asyncio
     async def test_initial_sync_keeps_source_and_defaults_cls(self, svc):
         """初始同步路径同样透传 source；缺失时默认 CLS。"""
         svc._last_news_time = None
