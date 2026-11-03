@@ -272,68 +272,6 @@ impl Drop for PartialGuard {
     }
 }
 
-/// D16-F03：restore 前确认源 PGDATA 没有仍在运行的实例。
-///
-/// 维护锁只排除协作进程（qTrading / 其他 sidecar）。sidecar 崩溃或被 kill 后锁由
-/// OS 释放，但 postgres 可能仍在运行；锁可获取 ≠ 源集群已停止。因此必须在任何
-/// setup/initdb/目录切换前读取源 `postmaster.pid` 并复用 F02 的归属校验：
-///
-/// - 无 pid 文件 / PID 已不存在（含僵尸）→ 视为已停止，允许继续（原目录损坏也可恢复）；
-/// - PID 仍存活且可证明属于本源 PGDATA → `LOCK_CONFLICT`，提示先 stop，不自动杀；
-/// - PID 仍存活但无法证明归属 → fail closed，同样 `LOCK_CONFLICT`（绝不发送信号）。
-///
-/// 损坏目录中不可解析的 pid 文件按「无活实例」处理：无法证明存在活进程时不应
-/// 阻止恢复；只有「PID 存活」这一事实与身份证据冲突时才拒绝。
-fn ensure_source_cluster_idle(layout: &Layout, phase: &str) -> Result<(), u8> {
-    let Some(info) = pgbin::read_postmaster_pid(&layout.data_dir) else {
-        return Ok(());
-    };
-    if !pgbin::process_alive(info.pid) {
-        tracing::warn!(
-            "stale postmaster.pid (pid {}) ignored before restore ({phase})",
-            info.pid
-        );
-        return Ok(());
-    }
-
-    let stop_hint = format!(
-        "请先执行 `qtrading-pg-sidecar stop --data-dir {}`，确认实例已停止后重试",
-        layout.data_dir.display()
-    );
-    match process_identity::capture_cluster_identity_from_info(
-        &layout.data_dir,
-        &layout.install_dir,
-        &info,
-    ) {
-        Ok(identity) => {
-            eprintln!(
-                "[sidecar] {phase}：源 PGDATA 仍有 PostgreSQL 实例在运行（pid {}，启动于 {}）。\
-                 restore 不会自动停止或切换正在使用的数据目录；{stop_hint}。",
-                identity.pid, identity.postmaster_started_at
-            );
-            Err(exit_codes::LOCK_CONFLICT)
-        }
-        // 存活探测与身份读取之间进程已退出（含僵尸）：按已停止处理，绝不发送信号。
-        Err(e) if e.is_not_running() => {
-            tracing::warn!(
-                "postgres pid {} exited during restore guard ({phase}): {e}",
-                info.pid
-            );
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!(
-                "[sidecar] {phase}：PID {} 在运行但无法证明其属于源 PGDATA {}（{e}）。\
-                 restore 按 fail closed 拒绝切换，不会向该 PID 发送信号；{stop_hint}，\
-                 或人工确认该进程归属后重试。",
-                info.pid,
-                layout.data_dir.display()
-            );
-            Err(exit_codes::LOCK_CONFLICT)
-        }
-    }
-}
-
 fn load_password(layout: &Layout) -> Result<String, u8> {
     match password::read_password_file(&layout.password_file) {
         Some(p) => {
@@ -2040,19 +1978,6 @@ mod tests {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(path).unwrap();
         Sha256::digest(bytes).to_vec()
-    }
-
-    /// 写真实格式的 postmaster.pid（PID / PGDATA / 启动时刻 / port / socket / listen）。
-    fn write_postmaster_pid(data_dir: &Path, pid: u32, started_at: i64) {
-        std::fs::create_dir_all(data_dir).unwrap();
-        std::fs::write(
-            data_dir.join("postmaster.pid"),
-            format!(
-                "{pid}\n{}\n{started_at}\n55432\n/tmp\n127.0.0.1\n",
-                data_dir.display()
-            ),
-        )
-        .unwrap();
     }
 
     /// reset-password 参数构造（默认用户名为 postgres，旧 CLI 语义）。
