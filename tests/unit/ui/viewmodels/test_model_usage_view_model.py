@@ -1103,7 +1103,7 @@ class _ReaderBarrier:
         *,
         gate_on_call: int = 1,
         gated_value: Decimal | None = None,
-        gated_error: Exception | None = None,
+        gated_error: BaseException | None = None,
         other_value: Decimal | None = Decimal("120"),
     ) -> None:
         self._gate = asyncio.Event()
