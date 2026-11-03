@@ -15,7 +15,9 @@ ViewModel（ModelConnectionsViewModel / ModelRoutesViewModel / ModelUsageViewMod
 
 设计要点：
 - frozen state snapshot (AIBrainSettingsState dataclass)
-- 三阶段保存状态机: idle → saving → success / error
+- 三阶段保存状态机: idle → saving → success / stale / error
+- 草稿编辑版本 (draft_revision) 单调递增；保存成功只确认发起时捕获的版本，
+  发起后又被编辑时完成态为 SAVE_STALE，不把当前草稿伪装成全部已保存
 - 同步阻塞 ConfigHandler 写入通过 ThreadPoolManager.run_async offload (R16)
 - R2: asyncio.CancelledError 显式 raise, 不被 except Exception 吞没
 - 重复提交检测：save_state="saving" 时拒绝新提交
@@ -46,6 +48,12 @@ SAVE_IDLE = "idle"
 SAVE_SAVING = "saving"
 SAVE_SUCCESS = "success"
 SAVE_ERROR = "error"
+# F05: 发起保存的版本已落盘，但保存完成后当前草稿又被编辑（仅部分反馈，
+# 不得以 SAVE_SUCCESS 对当前草稿报「全部已保存」）。
+SAVE_STALE = "stale"
+
+# F05: 保存完成时草稿版本已前移的 i18n key（VM 只产出 key，View 按 locale 渲染）。
+SAVED_STALE_MESSAGE_KEY = "settings_ai_saved_stale"
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,10 @@ class AIBrainSettingsState:
     ai_local_only_mode: bool = False
     # Phase 3.2 P1-1: 保存结果 i18n key (非空时 View 显示 WARNING snack)
     warning_message: str = ""
+    # F05: 本页草稿的单调编辑版本；任一本页输入变化后 +1。
+    draft_revision: int = 0
+    # F05: 最近一次成功保存所确认的草稿版本（draft_revision != saved_revision 即当前草稿有未保存修改）。
+    saved_revision: int = 0
 
 
 class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
@@ -68,7 +80,8 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
     - Immutable state snapshot (AIBrainSettingsState) via subscribe/_set_state
-    - 三阶段保存状态机: idle → saving → success / error
+    - 三阶段保存状态机: idle → saving → success / stale / error
+    - 草稿编辑版本 (draft_revision) 与最近确认版本 (saved_revision) 分离
     - 同步阻塞 ConfigHandler/ThreadPoolManager IO 通过 ThreadPoolManager.run_async offload (R16)
     - R2: CancelledError 显式 raise, 不被 except Exception 吞没
     - 重复提交检测：save_state="saving" 时拒绝新提交
@@ -96,20 +109,38 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     # --- Update commands (View 通过 set_* 更新本地 state) ---
 
+    def _apply_draft_edit(self, **changes: str | bool) -> None:
+        """应用本页草稿编辑：递增编辑版本并复位保存反馈。
+
+        - 仅字段值实际变化时递增 ``draft_revision``（同值重复 set 不制造脏状态）；
+        - 保存进行中保持 ``SAVE_SAVING``（保留在途反馈与重复提交检测），
+          完成时由 ``save_ai_settings`` 比对发起版本；
+        - 其余状态统一切回 ``SAVE_IDLE`` 并清空 ``warning_message``，
+          即任一本页编辑都会清除 SAVE_SUCCESS / SAVE_STALE / SAVE_ERROR 反馈。
+        """
+        current = self._state
+        changed = any(getattr(current, name) != value for name, value in changes.items())
+        self._set_state(
+            **changes,
+            draft_revision=current.draft_revision + 1 if changed else current.draft_revision,
+            save_state=SAVE_SAVING if current.save_state == SAVE_SAVING else SAVE_IDLE,
+            warning_message="",
+        )
+
     def set_max_candidates_value(self, value: str) -> None:
-        self._set_state(max_candidates_value=value)
+        self._apply_draft_edit(max_candidates_value=value)
 
     def set_min_turnover_value(self, value: str) -> None:
-        self._set_state(min_turnover_value=value)
+        self._apply_draft_edit(min_turnover_value=value)
 
     def set_ai_prompt_value(self, value: str) -> None:
-        self._set_state(ai_prompt_value=value)
+        self._apply_draft_edit(ai_prompt_value=value)
 
     def set_news_prompt_value(self, value: str) -> None:
-        self._set_state(news_prompt_value=value)
+        self._apply_draft_edit(news_prompt_value=value)
 
     def set_ai_local_only_mode(self, value: bool) -> None:
-        self._set_state(ai_local_only_mode=bool(value))
+        self._apply_draft_edit(ai_local_only_mode=bool(value))
 
     # --- 验证 (阶段 1) ---
 
@@ -145,8 +176,14 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
            （同步阻塞 IO 经 ThreadPoolManager IO 池执行, R16）
         3. **重载**: AIService().reload_config()
 
+        保存成功只确认**发起时捕获的草稿版本**：若发起后用户又编辑了本页
+        （local-only / 调优参数 / prompt），完成态为 ``SAVE_STALE`` 且保留
+        当前草稿的未保存状态，不会对当前草稿报「全部已保存」。
+
         Returns:
-            True 保存成功; False 保存失败 (验证错误 / IO 错误)。
+            True 发起版本的原子保存与重载成功（若完成后草稿再被编辑，
+            save_state=SAVE_STALE 表示发起版本已落盘、当前草稿仍待保存）;
+            False 保存失败 (验证错误 / IO 错误 / 重复提交)。
         Raises:
             asyncio.CancelledError: 取消时显式 raise (R2)。
         """
@@ -162,7 +199,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             return False
 
         # ========== 阶段 2: 持久化 ==========
-        self._set_state(save_state=SAVE_SAVING)
+        self._set_state(save_state=SAVE_SAVING, warning_message="")
+        # F05: 与读取草稿值同一同步段捕获发起版本（await 之前，set_* 无法插入）。
+        captured_revision = self._state.draft_revision
         try:
             max_cand = int(self._state.max_candidates_value.strip())
             min_turn = float(self._state.min_turnover_value.strip())
@@ -188,7 +227,20 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
             await AIService().reload_config()
 
-            self._set_state(save_state=SAVE_SUCCESS, warning_message="")
+            if self._state.draft_revision != captured_revision:
+                # 发起后草稿又被编辑：仅确认已落盘的发起版本，当前草稿仍待保存。
+                self._set_state(
+                    save_state=SAVE_STALE,
+                    saved_revision=captured_revision,
+                    warning_message=SAVED_STALE_MESSAGE_KEY,
+                )
+                return True
+
+            self._set_state(
+                save_state=SAVE_SUCCESS,
+                saved_revision=captured_revision,
+                warning_message="",
+            )
             return True
         except asyncio.CancelledError:
             raise  # R2: 必须传播

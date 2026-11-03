@@ -143,8 +143,6 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
     monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
 
     await service._run_daily_update()
-    assert holder["factory"] is not None
-
     factory = holder["factory"]
     # D11-F03: DataFrame fallback 无 is_complete → 结果无法判定，映射 FAILED 而非伪成功，
     # 同时证明实现未对 DataFrame 求布尔值（否则抛 ValueError 而非 TaskIncompleteError）。

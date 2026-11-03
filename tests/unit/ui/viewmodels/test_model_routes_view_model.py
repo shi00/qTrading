@@ -16,6 +16,7 @@ mock ``ModelConfigurationService``（非单例 DI），不触碰 ConfigHandler /
 
 from __future__ import annotations
 
+import asyncio
 from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock
 
@@ -137,6 +138,22 @@ def _committed_outcome(revision: int = 6) -> ConfigurationSaveOutcome:
         committed_revision=revision,
         last_config_commit={"operation_id": "op-1"},
     )
+
+
+class _ControlledSave:
+    """可控 save_draft：记录实收 payload 后暂停，由测试显式放行（F01 双屏障）。"""
+
+    def __init__(self, outcome: ConfigurationSaveOutcome | None = None) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.payloads: list[dict] = []
+        self._outcome = outcome or _committed_outcome()
+
+    async def __call__(self, payload: dict, expected_revision: int, operation_id: str) -> ConfigurationSaveOutcome:
+        self.payloads.append(payload)
+        self.started.set()
+        await self.release.wait()
+        return self._outcome
 
 
 def _make_vm(
@@ -372,6 +389,162 @@ class TestSave:
         assert vm.state.save_state == "commit_unknown"
         assert _route_candidates(vm, "news_annotation") == ("conn-a",)
         assert _committed_candidates(vm, "news_annotation") == ()
+
+
+# --- F01：保存回执不得吸收在途编辑（双屏障） ---
+
+
+class TestInFlightEditReceipt:
+    @pytest.mark.asyncio
+    async def test_in_flight_candidate_edit_keeps_baseline_a_and_dirty_b(self):
+        """A 提交挂起 → remove_candidate 形成 B → A 成功。
+
+        断言服务实收 payload 与 committed 均为 A、草稿 B 保留、dirty 相对 A 非零、
+        撤销事实保留；随后 rebase 读磁盘 A 时 B 仍保留。
+        """
+        snap = _snapshot(
+            config_revision=5,
+            routes=[
+                _route_mapping("news_annotation", ()),
+                _route_mapping("stock_analysis", ("conn-a",), timeout=180),
+                _route_mapping("news_risk", ()),
+            ],
+        )
+        vm, service = _make_vm(snap)
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        vm.add_candidate("conn-b")  # A = conn-a, conn-b（语义变化 → revision 2）
+        controlled = _ControlledSave()
+        service.save_draft = controlled
+
+        save_task = asyncio.create_task(vm.save_current_scenario())
+        await controlled.started.wait()
+        assert vm.state.save_state == "saving"
+        vm.remove_candidate("conn-b")  # 在途形成 B = conn-a
+        assert _route_candidates(vm, "stock_analysis") == ("conn-a",)
+        assert vm.state.undo_available is True
+
+        controlled.release.set()
+        await save_task
+
+        # 服务实收 payload 为 A（不是 B）
+        payload = controlled.payloads[0]
+        rows = {r["scenario_id"]: r for r in payload["scenario_routes"]}
+        assert rows["stock_analysis"]["candidates"] == ["conn-a", "conn-b"]
+        assert rows["stock_analysis"]["route_revision"] == 2
+        assert rows["news_annotation"]["candidates"] == []
+        # committed 基线为 A
+        committed = next(r for r in vm.state.committed_routes if r.scenario_id == "stock_analysis")
+        assert committed.candidates == ("conn-a", "conn-b")
+        assert committed.route_revision == 2
+        # 草稿 B 保留，撤销事实保留，dirty 相对新基线 A 非零
+        assert _route_candidates(vm, "stock_analysis") == ("conn-a",)
+        assert vm.state.undo_available is True
+        assert dict(vm.state.dirty_counts)["stock_analysis"] == 1
+        assert vm.state.save_state == "committed"
+        assert vm.state.commit_seq == 1
+
+        # rebase 读磁盘 A：B 仍保留、committed 仍为 A、dirty 不变
+        disk = _snapshot(
+            config_revision=6,
+            routes=[
+                _route_mapping("news_annotation", ()),
+                _route_mapping("stock_analysis", ("conn-a", "conn-b"), timeout=180, revision=2),
+                _route_mapping("news_risk", ()),
+            ],
+        )
+        service.get_snapshot = AsyncMock(return_value=disk)
+        assert await vm.rebase_snapshot() is True
+        assert _route_candidates(vm, "stock_analysis") == ("conn-a",)
+        assert _committed_candidates(vm, "stock_analysis") == ("conn-a", "conn-b")
+        assert dict(vm.state.dirty_counts)["stock_analysis"] == 1
+
+    @pytest.mark.asyncio
+    async def test_in_flight_enabled_toggle_keeps_draft_b_and_baseline_a(self):
+        """A 保存挂起 → set_route_enabled 形成 B：committed 吸收 A 的 enabled，B 保留。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        vm.set_route_enabled(True)  # A：enabled=True（语义变化 → revision 2）
+        controlled = _ControlledSave()
+        service.save_draft = controlled
+
+        save_task = asyncio.create_task(vm.save_current_scenario())
+        await controlled.started.wait()
+        vm.set_route_enabled(False)  # 在途形成 B：enabled=False
+        draft = vm.current_draft()
+        assert draft is not None
+        assert draft.enabled is False
+
+        controlled.release.set()
+        await save_task
+
+        rows = {r["scenario_id"]: r for r in controlled.payloads[0]["scenario_routes"]}
+        assert rows["news_annotation"]["enabled"] is True
+        assert rows["news_annotation"]["route_revision"] == 2
+        committed = next(r for r in vm.state.committed_routes if r.scenario_id == "news_annotation")
+        assert committed.enabled is True
+        assert committed.route_revision == 2
+        draft = vm.current_draft()
+        assert draft is not None
+        assert draft.enabled is False  # B 保留，不冒充已提交
+        assert dict(vm.state.dirty_counts)["news_annotation"] == 0  # enabled 不进 dirty 计数
+        assert vm.state.save_state == "committed"
+
+    @pytest.mark.asyncio
+    async def test_sequential_save_aligns_draft_and_clears_undo(self):
+        """无在途编辑的顺序保存：草稿对齐 A、dirty 清零、undo 清除。"""
+        snap = _snapshot(
+            config_revision=5,
+            routes=[
+                _route_mapping("news_annotation", ()),
+                _route_mapping("stock_analysis", ("conn-a", "conn-b", "conn-c"), timeout=180),
+                _route_mapping("news_risk", ()),
+            ],
+        )
+        vm, service = _make_vm(snap)
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        vm.move_down("conn-a")  # A = conn-b, conn-a, conn-c（语义变化 → revision 2）
+        assert vm.state.undo_available is True
+
+        await vm.save_current_scenario()
+
+        rows = {r["scenario_id"]: r for r in service.save_draft.await_args.args[0]["scenario_routes"]}
+        assert rows["stock_analysis"]["candidates"] == ["conn-b", "conn-a", "conn-c"]
+        assert rows["stock_analysis"]["route_revision"] == 2
+        assert _route_candidates(vm, "stock_analysis") == ("conn-b", "conn-a", "conn-c")
+        assert _committed_candidates(vm, "stock_analysis") == ("conn-b", "conn-a", "conn-c")
+        assert vm.state.routes == vm.state.committed_routes
+        assert all(count == 0 for _, count in vm.state.dirty_counts)
+        assert vm.state.undo_available is False
+        assert vm.state.save_state == "committed"
+
+    @pytest.mark.asyncio
+    async def test_in_flight_edit_of_other_scenario_keeps_current_alignment(self):
+        """保存 news 期间编辑其它场景草稿：当前场景仍按发起版本对齐，其它草稿保留。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        vm.add_candidate("conn-a")  # 当前场景 news_annotation 的 A
+        controlled = _ControlledSave()
+        service.save_draft = controlled
+
+        save_task = asyncio.create_task(vm.save_current_scenario())
+        await controlled.started.wait()
+        vm.select_scenario("stock_analysis")
+        vm.add_candidate("conn-b")  # 只编辑其它场景（不改变 news 的编辑版本）
+
+        controlled.release.set()
+        await save_task
+
+        rows = {r["scenario_id"]: r for r in controlled.payloads[0]["scenario_routes"]}
+        assert rows["news_annotation"]["candidates"] == ["conn-a"]
+        assert rows["stock_analysis"]["candidates"] == []  # 其它场景草稿未提交
+        assert _route_candidates(vm, "news_annotation") == ("conn-a",)
+        assert _committed_candidates(vm, "news_annotation") == ("conn-a",)
+        assert dict(vm.state.dirty_counts)["news_annotation"] == 0
+        assert _route_candidates(vm, "stock_analysis") == ("conn-b",)  # 其它草稿保留
+        assert dict(vm.state.dirty_counts)["stock_analysis"] == 1
+        assert vm.state.save_state == "committed"
 
 
 # --- F14：路由往返保真 / route_revision 语义 ---

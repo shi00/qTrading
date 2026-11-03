@@ -1054,6 +1054,7 @@
     "settings_status_verify_ok": "Verified ✓",
     "settings_status_verify_err": "Failed",
     "settings_snack_ai_saved": "AI config saved, verifying...",
+    "settings_ai_saved_stale": "Saved the configuration at save start; current draft still has unsaved changes",
     "settings_snack_ai_error": "Save error",
     "settings_snack_token_empty": "Token empty",
     "settings_snack_token_verified": "Verified ✓",

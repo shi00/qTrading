@@ -76,10 +76,17 @@ def _simhash_from_sqlite(value: int) -> int:
 
 
 class CorpusStore:
-    """本地 SQLite 语料库（非线程安全；单线程离线采集器使用）。"""
+    """本地 SQLite 语料库（非线程安全；单线程离线采集器使用）。
 
-    def __init__(self, db_path: str | Path) -> None:
+    ``read_only=True`` 时以 SQLite URI（``file:...?mode=ro``）打开**既有**库：
+    不创建父目录、不执行 DDL、不 commit，库不存在时抛 ``FileNotFoundError``；
+    供统计 / dry-run 等只读消费场景使用。
+    """
+
+    def __init__(self, db_path: str | Path, *, read_only: bool = False) -> None:
         self._db_path = Path(db_path)
+        self._in_memory = str(db_path) == ":memory:"
+        self._read_only = read_only
         self._conn: sqlite3.Connection | None = None
 
     @property
@@ -87,15 +94,26 @@ class CorpusStore:
         return self._db_path
 
     def open(self) -> None:
-        """建立连接（必要时创建父目录）并确保 schema 就绪。"""
+        """建立连接；可写模式确保父目录与 schema 就绪，只读模式仅打开既有库。"""
         if self._conn is not None:
             return
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        if self._read_only:
+            self._open_read_only()
+            return
+        if not self._in_memory:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(":memory:" if self._in_memory else str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_SCHEMA_DOCUMENTS)
         self._conn.execute(_SCHEMA_INDEX)
         self._conn.commit()
+
+    def _open_read_only(self) -> None:
+        if not self._db_path.exists():
+            raise FileNotFoundError(f"只读模式要求语料库文件已存在，但未找到: {self._db_path}")
+        uri = f"{self._db_path.resolve().as_uri()}?mode=ro"
+        self._conn = sqlite3.connect(uri, uri=True)
+        self._conn.row_factory = sqlite3.Row
 
     def close(self) -> None:
         if self._conn is not None:
@@ -119,6 +137,8 @@ class CorpusStore:
 
         每条文档需含 ``source`` / ``source_id`` / ``source_kind`` / ``text``；其余字段可缺省。
         """
+        if self._read_only:
+            raise RuntimeError("CorpusStore 以只读模式打开，禁止写入")
         conn = self._connection()
         collected_at = get_now().isoformat()
         rows: list[tuple[Any, ...]] = []

@@ -158,6 +158,16 @@ def predict_batch(
 # ------------------------------------------------- 3. 抽检集抽样
 
 
+def _review_record(doc: dict[str, Any]) -> dict[str, Any]:
+    """把语料库文档投影为待人工标注记录（保留 source 分层身份；ts_code 不伪造）。"""
+    return {
+        "source": str(doc["source"]),
+        "source_id": str(doc["source_id"]),
+        "text": str(doc["text"]),
+        "ts_code": doc.get("ts_code"),
+    }
+
+
 def sample_review_set(
     store: CorpusStore,
     *,
@@ -167,9 +177,15 @@ def sample_review_set(
     """从语料库**按源分层抽样** ``n`` 条待人工标注样本（可复现 seed）。
 
     每条为 ``{"source", "source_id", "text", "ts_code"}``（ts_code 可能为 None，R21
-    透传不伪造）。分层使人工抽检覆盖三源（规格 §4.1 构成建议）；``n`` 超过语料条数
-    时返回全部（不报错、不补齐）。
+    透传不伪造）。分层使人工抽检覆盖三源（规格 §4.1 构成建议）。
+
+    抽样分两阶段：先按源均分名额（余数按源名顺序 +1），某源条数不足配额时其空余
+    名额在第二阶段由同一 seed 的 RNG 从未选中且有剩余的源轮转补足，最终条数为
+    ``min(n, 语料总条数)``——既有余额又不是「小源拉低总量」。``n`` 超过语料条数时
+    返回全部。``n <= 0`` 抛 ``ValueError``（CLI 侧由 argparse 拒绝并以非零码退出）。
     """
+    if n <= 0:
+        raise ValueError(f"抽样条数 n 必须为正整数，收到 {n}")
     rng = random.Random(seed)
     docs = list(store.iter_documents())
     if not docs:
@@ -182,20 +198,31 @@ def sample_review_set(
     slots: dict[str, int] = {}
     for i, name in enumerate(names):
         slots[name] = n // len(names) + (1 if i < n % len(names) else 0)
+    target = min(n, len(docs))
     picked: list[dict[str, Any]] = []
+    leftovers: dict[str, list[dict[str, Any]]] = {}
     for name in names:
         pool = by_source[name]
         count = min(slots[name], len(pool))
-        chosen = rng.sample(pool, count) if count < len(pool) else pool
-        for doc in chosen:
-            picked.append(
-                {
-                    "source": str(doc["source"]),
-                    "source_id": str(doc["source_id"]),
-                    "text": str(doc["text"]),
-                    "ts_code": doc.get("ts_code"),
-                }
-            )
+        # 按下标分区，保证首轮选中与待补足集合互斥（不会重复选同一条）
+        positions = rng.sample(range(len(pool)), count) if count < len(pool) else list(range(len(pool)))
+        chosen = [pool[i] for i in positions]
+        picked.extend(_review_record(doc) for doc in chosen)
+        chosen_set = set(positions)
+        leftovers[name] = [pool[i] for i in range(len(pool)) if i not in chosen_set]
+    # 第二阶段：从未选中且有剩余的源轮转补足到 min(n, 总条数)，同一 rng 保证可复现
+    for name in names:
+        rng.shuffle(leftovers[name])
+    while len(picked) < target:
+        advanced = False
+        for name in names:
+            if len(picked) >= target:
+                break
+            if leftovers[name]:
+                picked.append(_review_record(leftovers[name].pop(0)))
+                advanced = True
+        if not advanced:  # 理论上不可达（target <= 总条数）；保留以防死循环
+            break
     return picked
 
 
@@ -378,13 +405,24 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     return 0 if report["passed"] else 2
 
 
+def _positive_int(value: str) -> int:
+    """argparse 类型：``sample -n`` 必须为正整数（n<=0 属参数错误，不静默返回空）。"""
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"不是整数: {value}") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"必须为正整数: {value}")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="本地 laya-multilingual 零样本标注器 + 人工抽检 Gate（N2-1）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_sample = sub.add_parser("sample", help="从语料库按源分层抽样待人工标注样本")
     p_sample.add_argument("--db", type=Path, default=Path("data/corpus/news_corpus.db"))
-    p_sample.add_argument("-n", type=int, default=DEFAULT_REVIEW_N)
+    p_sample.add_argument("-n", type=_positive_int, default=DEFAULT_REVIEW_N)
     p_sample.add_argument("--seed", type=int, default=None)
     p_sample.add_argument("--out", type=Path, required=True)
 

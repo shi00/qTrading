@@ -1021,6 +1021,187 @@ class TestScreenerViewModelRunStrategyExecution:
         assert self.vm._full_results is run_df
         assert len(self.vm._full_results) == 1
 
+    async def test_history_empty_result_snapshot_restores_nomatch_diagnostics(self):
+        """VMS-F02: HISTORY 完成空结果 → 快照同步保存本轮 warnings/empty_message，切回恢复。"""
+        from core.i18n import Message
+
+        strategy = self._make_strategy()
+        strategy.requires_fundamental_coverage = False
+        strategy.filter = AsyncMock(return_value=pd.DataFrame())
+        captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
+        self.mock_dp.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"a": range(100)}),
+                "trade_date": "2026-05-16",
+            }
+        )
+        self.mock_rm.save_results = AsyncMock()
+
+        # 实时态旧诊断：切 HISTORY 时写入快照
+        self.vm._full_results = pd.DataFrame({"ts_code": ["PRE.SZ"], "name": ["pre"]})
+        self.vm._update_pagination(
+            warnings=(Message("warn_old"),),
+            empty_message=Message("screener_nomatch", {"total": 5}),
+        )
+        self.vm.switch_to_history()
+
+        # 历史可见行 / 标签 / 警告
+        history_df = pd.DataFrame({"ts_code": ["H.SZ"], "name": ["history"]})
+        hist_msg = Message("screener_history_viewing", {"date": "2026-05-16"})
+        self.vm._full_results = history_df
+        self.vm._update_pagination(
+            page_no=1,
+            warnings=(hist_msg,),
+            status_message=hist_msg,
+            status_color="info",
+            empty_message=None,
+        )
+        assert self.vm.state.mode == "HISTORY"
+
+        # 后台运行在 HISTORY 完成（合成空结果：候选 100 → screener_nomatch(total=100)）
+        await captured_factory(task_id="task-123")
+
+        # 历史可见行 / 警告 / 空态不被本次实时结果污染
+        assert self.vm._full_results is history_df
+        assert [row.values["name"] for row in self.vm.state.current_page_rows] == ["history"]
+        assert self.vm.state.warnings == (hist_msg,)
+        assert self.vm.state.empty_message is None
+
+        # 快照与本次结果同源：空表 + 本轮空态原因 + 无警告 + 新数据集从第 1 页开始
+        snap = self.vm._realtime_snapshot
+        assert snap is not None
+        assert snap.full_results is not None
+        assert snap.full_results.empty
+        assert snap.page_no == 1
+        assert snap.warnings == ()
+        assert snap.empty_message is not None
+        assert snap.empty_message.key == "screener_nomatch"
+        assert snap.empty_message.params == {"total": 100}
+
+        self.vm.switch_to_realtime()
+
+        # 恢复空表与本轮「未找到匹配」原因，不显示默认无数据上下文
+        assert self.vm.state.mode == "REALTIME"
+        assert self.vm._full_results is snap.full_results
+        assert self.vm._full_results.empty
+        assert self.vm.state.current_page_rows == ()
+        assert self.vm.state.total_items == 0
+        assert self.vm.state.warnings == ()
+        assert self.vm.state.empty_message is not None
+        assert self.vm.state.empty_message.key == "screener_nomatch"
+        assert self.vm.state.empty_message.params == {"total": 100}
+
+    async def test_history_result_snapshot_restores_new_warnings(self):
+        """VMS-F02: 旧快照无警告 → HISTORY 完成带警告结果 → 切回显示本轮警告并保留排序资格。"""
+        from core.i18n import Message
+
+        strategy = self._make_strategy()
+        strategy.requires_fundamental_coverage = False
+        run_df = pd.DataFrame({"ts_code": ["RUN.SZ"], "name": ["run"]})
+        strategy.filter = AsyncMock(return_value=run_df)
+        dep_msg = Message("screener_dep_degraded")
+        captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
+        self.mock_dp.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"a": range(100)}),
+                "trade_date": "2026-05-16",
+                "warnings": [dep_msg],
+            }
+        )
+        self.mock_rm.save_results = AsyncMock()
+
+        # 旧实时态：已有结果/排序，无警告无空态
+        self.vm._full_results = pd.DataFrame({"ts_code": ["RT.SZ"], "name": ["rt"]})
+        self.vm._update_pagination(page_no=1, sort_column="name", sort_ascending=False)
+        self.vm.switch_to_history()
+        assert self.vm._realtime_snapshot is not None
+        assert self.vm._realtime_snapshot.warnings == ()
+        assert self.vm._realtime_snapshot.empty_message is None
+
+        # 历史可见警告
+        hist_msg = Message("screener_history_viewing", {"date": "2026-05-16"})
+        self.vm._full_results = pd.DataFrame({"ts_code": ["H.SZ"], "name": ["history"]})
+        self.vm._update_pagination(warnings=(hist_msg,), status_message=hist_msg, status_color="info")
+
+        await captured_factory(task_id="task-123")
+
+        # 历史可见警告不被本轮实时结果污染
+        assert self.vm.state.warnings == (hist_msg,)
+        snap = self.vm._realtime_snapshot
+        assert snap is not None
+        assert snap.full_results is run_df
+        assert snap.page_no == 1
+        assert snap.sort_column == "name"
+        assert snap.sort_ascending is False
+        assert snap.empty_message is None
+        assert dep_msg in snap.warnings
+        assert any(m.key == "screener_param_impact" for m in snap.warnings)
+
+        # 保存参数完整：权威结果表、trade_date、全局筛选配置与执行期 warnings
+        self.mock_rm.save_results.assert_awaited_once()
+        assert self.mock_rm.save_results.await_args.args[1] is run_df
+        save_kwargs = self.mock_rm.save_results.await_args.kwargs
+        assert save_kwargs["trade_date"] == "2026-05-16"
+        assert save_kwargs["params_snapshot"]["global_config"]["exclude_st"] is True
+        assert save_kwargs["exec_warnings"] == [dep_msg]
+
+        self.vm.switch_to_realtime()
+
+        # 恢复本轮警告；页码/排序资格与标签保持快照语义
+        assert self.vm._full_results is run_df
+        assert self.vm.state.warnings == snap.warnings
+        assert self.vm.state.empty_message is None
+        assert self.vm.state.page_no == 1
+        assert self.vm.state.sort_column == "name"
+        assert self.vm.state.sort_ascending is False
+        assert [row.values["name"] for row in self.vm.state.current_page_rows] == ["run"]
+
+    async def test_history_result_snapshot_clears_stale_warnings(self):
+        """VMS-F02: 旧快照有警告/空态 → HISTORY 完成无警告结果 → 切回清除旧诊断。"""
+        from core.i18n import Message
+
+        strategy = self._make_strategy()
+        strategy.requires_fundamental_coverage = False
+        run_df = pd.DataFrame({"ts_code": ["RUN.SZ"], "name": ["run"]})
+        strategy.filter = AsyncMock(return_value=run_df)
+        captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
+        self.mock_dp.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
+        )
+        self.mock_rm.save_results = AsyncMock()
+        stale_msg = Message("warn_stale")
+
+        self.vm._full_results = pd.DataFrame({"ts_code": ["RT.SZ"], "name": ["rt"]})
+        self.vm._update_pagination(
+            warnings=(stale_msg,),
+            empty_message=Message("screener_nomatch", {"total": 7}),
+        )
+        self.vm.switch_to_history()
+        assert self.vm._realtime_snapshot is not None
+        assert self.vm._realtime_snapshot.warnings == (stale_msg,)
+        assert self.vm._realtime_snapshot.empty_message is not None
+
+        self.vm._full_results = pd.DataFrame({"ts_code": ["H.SZ"], "name": ["history"]})
+        self.vm._update_pagination(warnings=(), empty_message=None)
+
+        await captured_factory(task_id="task-123")
+
+        snap = self.vm._realtime_snapshot
+        assert snap is not None
+        assert snap.full_results is run_df
+        assert snap.warnings == ()
+        assert snap.empty_message is None
+
+        self.vm.switch_to_realtime()
+
+        # 旧警告/旧空态不得贴到本轮正常结果上
+        assert self.vm._full_results is run_df
+        assert self.vm.state.warnings == ()
+        assert self.vm.state.empty_message is None
+
     async def test_execute_screening_sync_filter(self):
         strategy = self._make_strategy(is_async=False)
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
@@ -1194,6 +1375,169 @@ class TestScreenerViewModelFlushAiBuffer:
             await screener_vm._flush_ai_buffer()
 
         assert screener_vm._flush_pending is False
+
+
+class TestScreenerViewModelFlushDatasetOwnership:
+    """VMS-F01: 最终权威提交与在途 flush 的数据集所有权回归。"""
+
+    @staticmethod
+    def _patch_paused_thread_pool(entered: asyncio.Event, release: asyncio.Event):
+        """首个 CPU 任务挂起在 barrier，后续 CPU 任务直接同步执行。"""
+        state = {"paused": False}
+
+        async def _run_async(task_type, fn, *args, **kwargs):
+            if not state["paused"]:
+                state["paused"] = True
+                entered.set()
+                await release.wait()
+            return fn(*args, **kwargs)
+
+        mock_tp = MagicMock()
+        mock_tp.run_async = AsyncMock(side_effect=_run_async)
+        patcher = patch("ui.viewmodels.ai_stream_mixin.ThreadPoolManager", return_value=mock_tp)
+        return patcher
+
+    async def test_final_commit_not_overwritten_by_inflight_flush(self, screener_vm):
+        """在途 flush 已换出旧批次时，最终权威 F 仍完整上屏（C 不丢、A/B 不重复）。"""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        screener_vm._full_results = pd.DataFrame({"name": ["A"], "ai_score": [10.0]})
+        screener_vm._update_pagination()
+        screener_vm._ai_buffer = [{"name": "A", "ai_score": 10.0}]
+        screener_vm._flush_pending = True
+
+        with self._patch_paused_thread_pool(entered, release):
+            flush_task = asyncio.create_task(screener_vm._flush_ai_buffer())
+            await entered.wait()
+            # flush 已换出 [A]，此后 B 抵达缓冲；本次运行最终以权威 F=[A,B,C] 收尾。
+            screener_vm._ai_buffer.append({"name": "B", "ai_score": 20.0})
+            final_df = pd.DataFrame({"name": ["A", "B", "C"], "ai_score": [10.0, 20.0, 30.0]})
+            commit_task = asyncio.create_task(screener_vm._commit_realtime_results_in_lock(final_df, warnings=()))
+            # 与 flush 共用结果锁：最终提交必须排在已持锁的在途 flush 之后。
+            await asyncio.sleep(0)
+            assert not commit_task.done()
+
+            release.set()
+            await flush_task
+            await commit_task
+
+        assert screener_vm._full_results is final_df
+        assert set(screener_vm._full_results["name"]) == {"A", "B", "C"}
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == [
+            "A",
+            "B",
+            "C",
+        ]
+        assert screener_vm.state.total_items == 3
+        assert screener_vm._ai_buffer == []
+        assert screener_vm._discarded_buffer == []
+
+    async def test_history_commit_survives_inflight_flush_and_restores_authoritative_result(self, screener_vm):
+        """flush 挂起时切 HISTORY：历史可见表/标签/警告不被旧批次覆盖，切回实时恢复权威结果。"""
+        from core.i18n import Message
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        hist_msg = Message("screener_nomatch", {"total": 0})
+
+        snapshot_df = pd.DataFrame({"name": ["RT"], "ai_score": [10.0]})
+        screener_vm._full_results = snapshot_df
+        screener_vm._update_pagination()
+        screener_vm._ai_buffer = [{"name": "RT_LATE", "ai_score": 20.0}]
+        screener_vm._flush_pending = True
+
+        with self._patch_paused_thread_pool(entered, release):
+            flush_task = asyncio.create_task(screener_vm._flush_ai_buffer())
+            await entered.wait()
+
+            screener_vm.switch_to_history()
+            # 历史表的有效提交（生产路径 load_history_data 会排队等同一把锁）。
+            history_df = pd.DataFrame({"name": ["H"], "ai_score": [30.0]})
+            screener_vm._full_results = history_df
+            screener_vm._update_pagination(
+                page_no=1,
+                warnings=(hist_msg,),
+                status_message=hist_msg,
+                status_color="info",
+            )
+
+            # 运行在 HISTORY 中完成：权威结果写入实时快照（锁内排队，flush 释放后执行）。
+            final_df = pd.DataFrame({"name": ["F"], "ai_score": [40.0]})
+            commit_task = asyncio.create_task(screener_vm._commit_realtime_results_in_lock(final_df))
+            await asyncio.sleep(0)
+            assert not commit_task.done()
+
+            release.set()
+            await flush_task
+            await commit_task
+
+        assert screener_vm._full_results is history_df
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == ["H"]
+        assert screener_vm.state.warnings == (hist_msg,)
+        assert screener_vm.state.status_message == hist_msg
+        assert screener_vm.state.status_color == "info"
+        assert screener_vm._discarded_buffer == []
+
+        screener_vm.switch_to_realtime()
+
+        assert screener_vm._full_results is final_df
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == ["F"]
+        assert screener_vm._ai_buffer == []
+        assert screener_vm._discarded_buffer == []
+
+    async def test_mode_roundtrip_requeues_inflight_batch_without_duplicate(self, screener_vm):
+        """HISTORY→REALTIME 往返后，在途批次归还缓冲并按最新数据重算，无重复行。"""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        screener_vm._full_results = pd.DataFrame({"name": ["BASE"], "ai_score": [10.0]})
+        screener_vm._update_pagination()
+        screener_vm._ai_buffer = [{"name": "LATE", "ai_score": 20.0}]
+        screener_vm._flush_pending = True
+
+        with self._patch_paused_thread_pool(entered, release):
+            flush_task = asyncio.create_task(screener_vm._flush_ai_buffer())
+            await entered.wait()
+            screener_vm.switch_to_history()
+            screener_vm.switch_to_realtime()
+            release.set()
+            await flush_task
+            # 归还批次后应在 finally 中安排一次基于最新数据的重算。
+            for _ in range(10):
+                if not screener_vm._flush_pending and not screener_vm._ai_buffer:
+                    break
+                await asyncio.sleep(0)
+
+        assert screener_vm._full_results is not None
+        assert sorted(screener_vm._full_results["name"]) == ["BASE", "LATE"]
+        assert len(screener_vm._full_results) == 2
+        assert screener_vm._ai_buffer == []
+
+    async def test_sequential_flushes_keep_sorted_no_duplicates(self, screener_vm):
+        """无交错普通批次连续 flush：按 ai_score 降序，行不重复。"""
+        batches = [
+            {"name": "Low", "ai_score": 30.0},
+            {"name": "High", "ai_score": 90.0},
+            {"name": "Mid", "ai_score": 60.0},
+        ]
+
+        with patch("ui.viewmodels.ai_stream_mixin.ThreadPoolManager") as MockTP:
+            tp_instance = MagicMock()
+            tp_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *args, **kwargs: fn(*args, **kwargs))
+            MockTP.return_value = tp_instance
+            for batch in batches:
+                screener_vm._ai_buffer = [batch]
+                screener_vm._flush_pending = True
+                await screener_vm._flush_ai_buffer()
+
+        assert [row.values["name"] for row in screener_vm.state.current_page_rows] == [
+            "High",
+            "Mid",
+            "Low",
+        ]
+        assert screener_vm.state.total_items == 3
+        assert screener_vm._ai_buffer == []
 
 
 class TestScreenerViewModelLoadHistoryTree:
