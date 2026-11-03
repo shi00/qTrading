@@ -274,6 +274,53 @@ class TestBareCodeAmountContext:
         assert match_news_to_stock("公司宣布 600519 相关事项", self._candidates()) == ["600519.SH"]
 
 
+# ---------- 完整代码跨度 vs 裸码（RS-F01） ----------
+class TestBareCodeFullCodeSpanIsolation:
+    """完整代码 token 占用的文本跨度不得再降格为裸 6 位证据（防错交易所误关联）。"""
+
+    def _ping_an(self):
+        return [{"ts_code": "000001.SZ", "name": "平安银行"}]
+
+    def test_other_exchange_full_code_not_downgraded_to_bare(self):
+        """「上证指数000001.SH」不得因裸码降格关联到 000001.SZ。"""
+        assert match_news_to_stock("上证指数000001.SH走强", self._ping_an()) == []
+
+    def test_case_mixed_full_code_not_downgraded_to_bare(self):
+        """小写后缀 ``000001.sh`` 同样属于完整代码跨度，不降格为裸码。"""
+        assert match_news_to_stock("上证指数000001.sh走强", self._ping_an()) == []
+
+    def test_independent_bare_code_still_matched(self):
+        """同文另有独立裸 000001（不与完整代码跨度重叠）时仍正常命中。"""
+        text = "上证指数000001.SH走强，平安银行000001发布公告"
+        assert match_news_to_stock(text, self._ping_an()) == ["000001.SZ"]
+
+    def test_correct_full_code_forms_still_matched(self):
+        """正确交易所的 ``000001.SZ`` / ``SZ000001`` 仍按完整代码命中。"""
+        assert match_news_to_stock("000001.SZ 发布公告", self._ping_an()) == ["000001.SZ"]
+        assert match_news_to_stock("SZ000001 发布公告", self._ping_an()) == ["000001.SZ"]
+
+    def test_prefix_other_exchange_still_not_matched(self):
+        """前缀形式交易所不一致仍不命中（``SH000001`` 不关联 000001.SZ）。"""
+        assert match_news_to_stock("SH000001 发布公告", self._ping_an()) == []
+
+    def test_bj_full_code_span_not_downgraded(self):
+        """北交所完整代码跨度不降格：``830799.BJ`` 不关联到 830799.SZ 候选。"""
+        assert match_news_to_stock("北证830799.BJ走强", [{"ts_code": "830799.SZ", "name": "艾融软件"}]) == []
+        assert match_news_to_stock("830799.BJ发布公告", [{"ts_code": "830799.BJ", "name": "艾融软件"}]) == ["830799.BJ"]
+
+    def test_amount_date_exclusions_unchanged(self):
+        """金额/小数/日期排除逻辑回归不变（不受跨度排除影响）。"""
+        cands = [{"ts_code": "600519.SH", "name": "贵州茅台"}]
+        assert match_news_to_stock("公司拟募集600519元", cands) == []
+        assert match_news_to_stock("公司拟募集600519.00", cands) == []
+        assert match_news_to_stock("202403 数据发布", cands) == []
+
+    def test_full_code_and_same_value_amount_still_matched_once(self):
+        """完整代码与同值金额并存时仍按完整代码命中一次（金额处仍按计量语境排除）。"""
+        cands = [{"ts_code": "600519.SH", "name": "贵州茅台"}]
+        assert match_news_to_stock("600519.SH拟募集600519万元", cands) == ["600519.SH"]
+
+
 # ---------- 标题标准化 ----------
 class TestNormalizeTitle:
     def test_lowercase_and_collapse_whitespace(self):
