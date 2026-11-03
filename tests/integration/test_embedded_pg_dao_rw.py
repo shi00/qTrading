@@ -451,7 +451,7 @@ class TestD05TransactionRecoveryContracts:
         # 仅第一块（2 行）已提交，证明部分批写语义依赖 UPSERT 幂等重跑收敛
         assert await _count_rows(cache.engine, SyncEmptyDay) == 2
         async with cache.engine.connect() as conn:
-            result = await conn.execute(select(SyncEmptyDay.c.trade_date).order_by(SyncEmptyDay.c.trade_date))
+            result = await conn.execute(select(SyncEmptyDay.trade_date).order_by(SyncEmptyDay.trade_date))
             assert list(result.scalars()) == [datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)]
 
     @pytest.mark.asyncio(loop_scope="session")
