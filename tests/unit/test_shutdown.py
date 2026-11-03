@@ -500,8 +500,10 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance = MagicMock()
             mock_instance._worker_ready = False
             mock_instance._model_path = ""
+            mock_instance._worker_proc = None
             mock_lmm._instance = mock_instance
             await coord._step5_unload_ai_model()
+            mock_instance.unload_model.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_step5_unload_ai_with_llm(self):

@@ -161,6 +161,9 @@ async def test_ai_model_skipped_when_absent():
     LocalModelManager._instance = MagicMock()
     LocalModelManager._instance._worker_ready = False
     LocalModelManager._instance._model_path = ""
+    # D02-R01：MagicMock 未显式赋值的 _worker_proc 会返回真值 Mock，
+    # 需显式 None 才代表「无 worker」的真实状态，与 Step 5 三条件守卫口径一致。
+    LocalModelManager._instance._worker_proc = None
 
     try:
         coordinator = ShutdownCoordinator(page=None)
