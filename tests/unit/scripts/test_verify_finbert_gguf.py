@@ -137,28 +137,84 @@ def test_load_head_npz_linear_and_shape_guard(tmp_path: Path) -> None:
     assert pre is None
 
     bad = tmp_path / "bad.npz"
-    np.savez(bad, mode="linear", labels=np.array(["a", "b", "c"]), cw=np.zeros((3, 10)), cb=np.zeros(3))
+    np.savez(bad, mode="linear", labels=np.array(["利空", "中性", "利好"]), cw=np.zeros((3, 10)), cb=np.zeros(3))
     with pytest.raises(ValueError, match="head.npz 形状不符"):
         vfg.load_head_npz(bad)
 
 
+def _write_head(
+    path: Path,
+    *,
+    mode: str = "bert",
+    labels: tuple[str, ...] | None = ("利空", "中性", "利好"),
+    cw: np.ndarray | None = None,
+    cb: np.ndarray | None = None,
+    pw: np.ndarray | None = None,
+    pb: np.ndarray | None = None,
+) -> Path:
+    """写出一份 head.npz 失败/成功 fixture（不涉真实模型或网络）。"""
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "cw": np.zeros((3, vfg.EMBEDDING_DIM), dtype=np.float32) if cw is None else cw,
+        "cb": np.zeros(3, dtype=np.float32) if cb is None else cb,
+    }
+    if labels is not None:
+        payload["labels"] = np.array(labels)
+    if mode != "linear":
+        payload["pw"] = np.zeros((vfg.EMBEDDING_DIM, vfg.EMBEDDING_DIM), dtype=np.float32) if pw is None else pw
+        payload["pb"] = np.zeros(vfg.EMBEDDING_DIM, dtype=np.float32) if pb is None else pb
+    np.savez(path, **payload)
+    return path
+
+
 def test_load_head_npz_nonlinear_returns_pre(tmp_path: Path) -> None:
-    """非线性头载入返回 (pw, pb) 预处理对。"""
-    path = tmp_path / "head.npz"
-    np.savez(
-        path,
-        mode="mlp",
-        labels=np.array(["利空", "中性", "利好"]),
-        cw=np.zeros((3, 768)),
-        cb=np.zeros(3),
-        pw=np.zeros((768, 768)),
-        pb=np.zeros(768),
-    )
+    """bert 头载入返回 (pw, pb) 预处理对。"""
+    path = _write_head(tmp_path / "head.npz", mode="bert")
     weight, bias, pre = vfg.load_head_npz(path)
     assert weight.shape == (3, 768)
+    assert bias.shape == (3,)
     assert pre is not None
     assert pre[0].shape == (768, 768)
     assert pre[1].shape == (768,)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        # 仅改 labels 顺序：同 shape/同数值也必须拒绝（否则门禁 PASS 而运行时 ValueError）。
+        ({"labels": ("利好", "中性", "利空")}, "labels"),
+        ({"labels": ("利空", "中性")}, "labels"),
+        ({"labels": None}, "缺少必需字段"),
+        # mlp 不是运行时合同内的 mode（即使 pw/pb 形状正确）。
+        ({"mode": "mlp"}, "mode 非法"),
+        ({"pw": np.zeros((128, 128), dtype=np.float32)}, "形状不符: pw"),
+        ({"cw": np.full((3, 768), np.nan, dtype=np.float32)}, "cw 含非有限"),
+        ({"pb": np.full(768, np.inf, dtype=np.float32)}, "pb 含非有限"),
+    ],
+)
+def test_load_head_npz_rejects_inconsistent_contract(
+    tmp_path: Path,
+    kwargs: dict[str, Any],
+    match: str,
+) -> None:
+    """mode/labels/形状/有限性任一偏离运行时合同均拒绝加载。"""
+    path = _write_head(tmp_path / "bad.npz", **kwargs)
+    with pytest.raises(ValueError, match=match):
+        vfg.load_head_npz(path)
+
+
+def test_load_head_npz_rejects_pickle_payload(tmp_path: Path) -> None:
+    """allow_pickle=False：对象数组（pickle 载体）必须拒绝。"""
+    path = _write_head(
+        tmp_path / "pickled.npz",
+        labels=("利空", "中性", "利好"),
+    )
+    with np.load(path) as data:
+        payload = dict(data.items())
+    payload["labels"] = np.array(["利空", "中性", "利好"], dtype=object)
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="allow_pickle"):
+        vfg.load_head_npz(path)
 
 
 def test_head_scale_sensitivity_rows() -> None:
@@ -407,6 +463,27 @@ def test_run_gate_f16_only_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["criteria"]["cls_cosine_f16"]["ok"] is True
     assert report["criteria"]["cls_cosine_q8"]["skipped"] is True
     assert report["verdict"] == "PASS"
+
+
+def test_run_gate_only_labels_change_flips_to_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """同一 head 数值仅改 labels：健康件 PASS，反序件必须拒绝而非仍 PASS。"""
+    _patch_heavy(monkeypatch, direct_match=True)
+    weight, bias = vfg.build_reference_head()
+    common: dict[str, Any] = {"mode": "linear", "cw": weight, "cb": bias}
+    healthy = tmp_path / "healthy.npz"
+    np.savez(healthy, labels=np.array(["利空", "中性", "利好"]), **common)
+    reordered = tmp_path / "reordered.npz"
+    np.savez(reordered, labels=np.array(["利好", "中性", "利空"]), **common)
+
+    healthy_args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf", "--head", str(healthy)])
+    assert vfg.run_gate(healthy_args)["verdict"] == "PASS"
+
+    bad_args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf", "--head", str(reordered)])
+    with pytest.raises(ValueError, match="labels"):
+        vfg.run_gate(bad_args)
 
 
 def test_run_gate_rejects_missing_backends(monkeypatch: pytest.MonkeyPatch) -> None:

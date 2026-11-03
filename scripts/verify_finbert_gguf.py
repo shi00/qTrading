@@ -252,21 +252,45 @@ def apply_head(
 def load_head_npz(path: Path) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray] | None]:
     """载入 N3-1 产出的 ``head.npz``（格式正本见 ``reviews/新闻达标模型微调.md`` §8.2）。
 
-    返回 ``(weight, bias, pre)``：``linear`` 模式 ``pre=None``；非线性模式 ``pre=(pw, pb)``。
-    形状不符时拒绝加载（与 §8.2 的「不能静默降级」一致）。
+    返回 ``(weight, bias, pre)``：``linear`` 模式 ``pre=None``；``bert`` 模式 ``pre=(pw, pb)``。
+    校验合同与运行时消费者（``services/news_sentiment_scorer.load_head_npz``）一致：
+    ``mode`` 只接受 ``linear`` / ``bert``，``labels`` 必须恰为 ``LABELS``，各数组
+    dtype 为实数、形状与有限性合法；任一不符即拒绝加载（与 §8.2 的「不能静默降级」一致）。
     """
-    data = np.load(path)
-    mode = str(data["mode"])
-    weight = np.asarray(data["cw"], dtype=np.float32)
-    bias = np.asarray(data["cb"], dtype=np.float32)
-    if weight.shape != (NUM_CLASSES, EMBEDDING_DIM) or bias.shape != (NUM_CLASSES,):
-        raise ValueError(f"head.npz 形状不符: cw={weight.shape} cb={bias.shape}（期望 3×768 / 3）")
-    if mode == "linear":
-        return weight, bias, None
-    pre = (
-        np.asarray(data["pw"], dtype=np.float32),
-        np.asarray(data["pb"], dtype=np.float32),
-    )
+    with np.load(path, allow_pickle=False) as data:
+        missing = [key for key in ("mode", "labels", "cw", "cb") if key not in data.files]
+        if missing:
+            raise ValueError(f"head.npz 缺少必需字段: {missing}（期望 mode/labels/cw/cb）")
+        mode = str(data["mode"])
+        if mode not in ("linear", "bert"):
+            raise ValueError(f"head.npz mode 非法: {mode!r}（期望 linear / bert）")
+        labels = tuple(str(label) for label in data["labels"].tolist())
+        if labels != LABELS:
+            raise ValueError(f"head.npz labels 非法: {labels}（期望 {LABELS}；顺序漂移会翻转 score 符号）")
+
+        def _array(key: str, expected_shape: tuple[int, ...]) -> np.ndarray:
+            raw = np.asarray(data[key])
+            if not np.issubdtype(raw.dtype, np.number) or np.issubdtype(raw.dtype, np.complexfloating):
+                raise ValueError(f"head.npz {key} dtype 非法: {raw.dtype}（期望实数数值数组）")
+            if raw.shape != expected_shape:
+                raise ValueError(f"head.npz 形状不符: {key}={raw.shape}（期望 {expected_shape}）")
+            # 先转 float32 再判有限性：float64 大值转 float32 会溢出为 inf，与运行时一致须拒绝。
+            array = np.ascontiguousarray(raw, dtype=np.float32)
+            if not np.all(np.isfinite(array)):
+                raise ValueError(f"head.npz {key} 含非有限数值（NaN / Inf），拒绝加载")
+            return array
+
+        weight = _array("cw", (NUM_CLASSES, EMBEDDING_DIM))
+        bias = _array("cb", (NUM_CLASSES,))
+        pre: tuple[np.ndarray, np.ndarray] | None = None
+        if mode == "bert":
+            missing_pre = [key for key in ("pw", "pb") if key not in data.files]
+            if missing_pre:
+                raise ValueError(f"head.npz mode=bert 缺少字段: {missing_pre}（期望 pw/pb）")
+            pre = (
+                _array("pw", (EMBEDDING_DIM, EMBEDDING_DIM)),
+                _array("pb", (EMBEDDING_DIM,)),
+            )
     return weight, bias, pre
 
 
