@@ -51,6 +51,73 @@ _FINANCIAL_DISCLOSURE_PENDING_KEY = "financial_disclosure_pending"
 # 无检查点（升级/新建）时选定的历史补抓窗口，避免沿用「最近尝试时间」直接跳过旧失败日。
 _LEGACY_DISCLOSURE_BACKFILL_DAYS = 30
 
+# D05-F01: 全量轮次的「未完成股票目标」持久状态。
+# 全量按股票处理并以 step4 marker 断点续传；失败股票不写 marker，但批次尾部仍写
+# financial_reports 的 last_sync_date（partial 亦作为「最近尝试时间」推进），导致下一轮
+# 普通 run 因 last_sync_date 存在转增量，失败股票的历史不再补齐。
+# 语义：全量开始处理前登记本轮目标集合；失败/取消/异常时保留；仅全量轮次完全成功
+# （无失败股票且未取消）后清空。`_run_impl` 在转增量前优先恢复该轮，复用 step4 marker
+# 只重抓未完成股票，不清空成功 marker，也不触碰增量 pending 集合。
+_FINANCIAL_FULL_SYNC_PENDING_KEY = "financial_full_sync_pending"
+
+# D05-F02: 增量企业行动（fina_forecast / express / dividend / repurchase）的未解决目标。
+# 与披露检查点解耦：检查点只表示「披露日已解决」，不能被改写为「全部数据已完成」。
+# 持久化为 {YYYYMMDD: [表名, ...]}；普通失败/保存失败/取消未处理目标保留，成功、
+# 契约认可的合法空或明确无权限（skipped_permission）才解除，避免无限重试无权限接口。
+_FINANCIAL_CORPORATE_ACTION_PENDING_KEY = "financial_corporate_action_pending"
+
+
+def _load_pending_corporate_targets(raw) -> dict[str, set[str]]:
+    """Load unresolved corporate-action targets: {YYYYMMDD: {table_name, ...}}.
+
+    Invalid/legacy payloads degrade to an empty set (fail-open: the next window
+    re-attempts the date, so a failed table is not silently considered complete).
+    """
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("[FinancialSync] CorporateAction | Invalid pending payload, resetting to empty.")
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    pending: dict[str, set[str]] = {}
+    for day, entries in payload.items():
+        if not isinstance(day, str) or not isinstance(entries, list) or _parse_disclosure_day(day) is None:
+            continue
+        tables = {entry for entry in entries if isinstance(entry, str) and entry in FINANCIAL_BATCH_TABLES}
+        if tables:
+            pending[day] = tables
+    return pending
+
+
+def _dump_pending_corporate_targets(pending: dict[str, set[str]]) -> str:
+    return json.dumps({day: sorted(tables) for day, tables in sorted(pending.items())}, ensure_ascii=False)
+
+
+def _load_full_sync_pending_stocks(raw) -> set[str]:
+    """Load the persisted full-sync unfinished stock targets.
+
+    Invalid/legacy payloads degrade to an empty set: without targets a stale marker
+    is indistinguishable from a never-started full round, so the ordinary sync keeps
+    its incremental behavior (fail-open; no completed disclosure day is skipped).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return set()
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("[FinancialSync] FullSync | Invalid pending target payload, ignoring.")
+        return set()
+    if not isinstance(payload, list):
+        return set()
+    return {code for code in payload if isinstance(code, str) and code}
+
+
+def _dump_full_sync_pending_stocks(stocks: set[str]) -> str:
+    return json.dumps(sorted(stocks), ensure_ascii=False)
+
 
 def _parse_disclosure_checkpoint(raw) -> datetime.date | None:
     """Parse the persisted contiguous-complete disclosure checkpoint (YYYYMMDD)."""
@@ -236,6 +303,22 @@ class FinancialSyncStrategy(ISyncStrategy):
                 if not status or not status.get("last_sync_date"):
                     should_full_sync = True
                     logger.debug("[FinancialSync] Strategy | Full Sync (first run)")
+                else:
+                    # D05-F01: 上一轮全量未完成（失败/取消/中断）时优先恢复全量。
+                    # 已有 last_sync_date 只说明「尝试过」，不代表全部股票已完成；
+                    # 继续走增量会让失败股票永远不再补齐。
+                    full_pending = _load_full_sync_pending_stocks(
+                        await get_app_state(
+                            getattr(self.context.cache, "engine", None),
+                            _FINANCIAL_FULL_SYNC_PENDING_KEY,
+                        )
+                    )
+                    if full_pending:
+                        should_full_sync = True
+                        logger.info(
+                            "[FinancialSync] Strategy | Full Sync (resuming unfinished full sync, %s stock(s))",
+                            len(full_pending),
+                        )
 
             if should_full_sync:
                 await self._run_full_sync(
@@ -358,6 +441,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         pending_stocks = sorted([s for s in all_stocks if s not in synced_stocks])
         skipped_count = total_stocks - len(pending_stocks)
+        engine = getattr(self.context.cache, "engine", None)
 
         # Update result stats
         result_accumulator.updated += skipped_count  # Technically skipped, but "done"
@@ -371,6 +455,8 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         if not pending_stocks:
             logger.debug("[FinancialSync] FullSync | All stocks already synced.")
+            # D05-F01: 没有待处理股票即本轮全量无未完成目标，清理可能残留的未完成态。
+            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]")
             if progress_callback:
                 progress_callback(
                     total_stocks,
@@ -381,6 +467,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                     ),
                 )
             return
+
+        # D05-F01: 开始处理前登记本轮全量目标。失败/取消/进程中断时该状态保留，
+        # 下一轮普通 run 据此回到全量断点续传（step4 marker 负责排除已完成股票）。
+        await set_app_state(
+            engine,
+            _FINANCIAL_FULL_SYNC_PENDING_KEY,
+            _dump_full_sync_pending_stocks(set(pending_stocks)),
+        )
 
         completed_count = skipped_count
 
@@ -611,6 +705,12 @@ class FinancialSyncStrategy(ISyncStrategy):
             status=_full_status,
         )
 
+        # D05-F01: 未完成目标态只描述「股票层面未完成」：无失败股票且未取消才清理。
+        # 不能用 _full_status（aux/corporate actions 的 partial 与股票目标无关，若据此
+        # 保留会导致普通 run 反复全量）；失败/取消/异常保留，供后续普通 run 优先恢复。
+        if failed_stock_count == 0 and not self._shutdown_event.is_set():
+            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]")
+
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _run_incremental_sync(
         self,
@@ -637,6 +737,11 @@ class FinancialSyncStrategy(ISyncStrategy):
         status = await self.context.cache.sync_dao.get_sync_status("financial_reports")
         checkpoint = _parse_disclosure_checkpoint(await get_app_state(engine, _FINANCIAL_DISCLOSURE_CHECKPOINT_KEY))
         pending = _load_pending_disclosure_targets(await get_app_state(engine, _FINANCIAL_DISCLOSURE_PENDING_KEY))
+        # D05-F02: 企业行动 pending 与披露检查点独立；即使窗口为空也必须先恢复，
+        # 否则检查点越过失败日后旧失败表永远不再补抓。
+        corporate_pending = _load_pending_corporate_targets(
+            await get_app_state(engine, _FINANCIAL_CORPORATE_ACTION_PENDING_KEY)
+        )
 
         today_date = get_now().date()
         if checkpoint is not None:
@@ -666,7 +771,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         pending_days = {d for d in (_parse_disclosure_day(day) for day in pending) if d is not None}
         days_to_process = sorted(set(window_days) | pending_days)
-        if not days_to_process:
+        if not days_to_process and not corporate_pending:
             logger.debug("[FinancialSync] Incremental | Data already up-to-date")
             return
 
@@ -922,7 +1027,12 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         # --- Step 2: Batch Sync Corporate Actions (O(Time) Optimization) ---
         # Sync Forecasts, Dividends, etc. by date
-        await self._sync_corporate_actions_by_date(dates_to_sync, result_accumulator=result_accumulator)
+        await self._sync_corporate_actions_by_date(
+            dates_to_sync,
+            result_accumulator=result_accumulator,
+            pending_targets=corporate_pending,
+            record_remaining_on_cancel=True,
+        )
 
         # Update sync status for aux tables (after all stocks processed)
         today = get_now().date()
@@ -950,16 +1060,48 @@ class FinancialSyncStrategy(ISyncStrategy):
         dates: list[str],
         progress_callback=None,
         result_accumulator: SyncResult | None = None,
+        pending_targets: dict[str, set[str]] | None = None,
+        record_remaining_on_cancel: bool = False,
     ):
         """
         Batch sync corporate actions (Forecast, Dividend, etc.) by date.
         Uses O(Time) strategy instead of O(Stock).
         Iterates per-date to avoid creating thousands of tasks at once.
+
+        D05-F02: 每个 (日期, 表) 显式返回 success/empty/failed/save_failed/
+        skipped_permission；普通失败与保存失败不再被隐式 None 吞没，而是写入独立
+        (日期, 表) pending 集合并反映到 SyncResult。该集合与披露检查点解耦，检查点
+        只表示「披露日已解决」，不得被改写为「全部数据已完成」。
         """
-        if not dates:
+        engine = getattr(self.context.cache, "engine", None)
+        pending = (
+            pending_targets
+            if pending_targets is not None
+            else _load_pending_corporate_targets(await get_app_state(engine, _FINANCIAL_CORPORATE_ACTION_PENDING_KEY))
+        )
+        pending_map: dict[str, set[str]] = {day: set(tables) for day, tables in pending.items()}
+        dates_set = set(dates)
+        all_dates = sorted(dates_set | set(pending_map))
+        if not all_dates:
             return
 
-        total = len(dates)
+        pending_dirty = False
+        if record_remaining_on_cancel:
+            # 增量窗口先登记本轮全部 (日期, 表) 目标：取消/异常中断后剩余目标仍在
+            # pending 中，下一轮可从「无日期提前 return」之前恢复。
+            for day in dates_set:
+                if pending_map.get(day) != set(FINANCIAL_BATCH_TABLES):
+                    pending_map[day] = set(FINANCIAL_BATCH_TABLES)
+                    pending_dirty = True
+            if pending_dirty:
+                await set_app_state(
+                    engine,
+                    _FINANCIAL_CORPORATE_ACTION_PENDING_KEY,
+                    _dump_pending_corporate_targets(pending_map),
+                )
+                pending_dirty = False
+
+        total = len(all_dates)
         logger.debug(
             "[FinancialSync] BatchSync | Syncing corporate actions across %s days...",
             total,
@@ -969,7 +1111,28 @@ class FinancialSyncStrategy(ISyncStrategy):
         concurrency = max(1, ConfigHandler.get_sync_max_concurrent_heavy() // concurrency_factor)
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def sync_one_date_table(date_str, table_name, table_cfg):
+        save_map = {
+            "fina_forecast": self.context.cache.financial_dao.save_fina_forecast,
+            # Phase 3G §4.3.4：业绩快报（参考 forecast 模式）
+            "express": self.context.cache.express_dao.save_express,
+            "dividend": self.context.cache.financial_dao.save_dividend,
+            "repurchase": self.context.cache.financial_dao.save_repurchase,
+        }
+
+        def mark_partial(message: str) -> None:
+            if result_accumulator is None or result_accumulator.status in (
+                SyncStatus.FAILED.value,
+                SyncStatus.CANCELLED.value,
+            ):
+                return
+            result_accumulator.status = SyncStatus.PARTIAL.value
+            result_accumulator.errors.append(message)
+
+        async def sync_one_date_table(date_str, table_name, table_cfg) -> dict:
+            """Fetch/save one (date, table); returns an explicit outcome."""
+            outcome = {"date": date_str, "table": table_name, "status": "failed", "saved": 0}
+            stage = "fetch"
+            date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
             async with semaphore:
                 try:
                     api_method = getattr(self.context.api, table_cfg["api"])
@@ -977,16 +1140,9 @@ class FinancialSyncStrategy(ISyncStrategy):
 
                     row_count = 0
                     if df is not None and not df.empty:
-                        save_map = {
-                            "fina_forecast": self.context.cache.financial_dao.save_fina_forecast,
-                            # Phase 3G §4.3.4：业绩快报（参考 forecast 模式）
-                            "express": self.context.cache.express_dao.save_express,
-                            "dividend": self.context.cache.financial_dao.save_dividend,
-                            "repurchase": self.context.cache.financial_dao.save_repurchase,
-                        }
-
                         save_func = save_map.get(table_name)
                         if save_func:
+                            stage = "save"
                             row_count = await save_func(df)
                             row_count = row_count if row_count is not None else len(df)
                             logger.debug(
@@ -996,12 +1152,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 len(df),
                             )
 
-                    date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                     await self.context.cache.sync_dao.update_sync_status(
                         table_name,
                         date_obj,
                         row_count,
                     )
+                    outcome["saved"] = row_count
+                    # 取数成功且无数据 = 合法空（与失败严格区分）。
+                    outcome["status"] = "success" if df is not None and not df.empty else "empty"
 
                 except EngineDisposedError:
                     raise
@@ -1010,7 +1168,6 @@ class FinancialSyncStrategy(ISyncStrategy):
                         "[FinancialSync] BatchSync | ⛔ Permission Denied for %s",
                         table_name,
                     )
-                    date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                     await self.context.cache.sync_dao.update_sync_status(
                         table_name,
                         date_obj,
@@ -1018,6 +1175,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                         status="skipped_permission",
                         last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                     )
+                    # 明确无权限接口不进入 pending，避免无限重试。
+                    outcome["status"] = "skipped_permission"
                 except Exception as e:
                     severity = classify_severity(e, context="general")
                     log_classified(
@@ -1031,11 +1190,19 @@ class FinancialSyncStrategy(ISyncStrategy):
                     )
                     if severity == "system":
                         raise
+                    outcome["status"] = "save_failed" if stage == "save" else "failed"
+                    await self.context.cache.sync_dao.update_sync_status(
+                        table_name,
+                        date_obj,
+                        0,
+                        status=outcome["status"],
+                    )
+            return outcome
 
         # Iterate per-date (not all-at-once) to avoid task explosion
         # M7.6: corporate actions 循环转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
         last_cancel_check = time.monotonic()
-        for i, d in enumerate(dates):
+        for i, d in enumerate(all_dates):
             now = time.monotonic()
             if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
                 last_cancel_check = now
@@ -1045,25 +1212,47 @@ class FinancialSyncStrategy(ISyncStrategy):
                     )
                     break
 
-            # Each date: 3 tables in parallel
-            coros = [sync_one_date_table(d, tbl, cfg) for tbl, cfg in FINANCIAL_BATCH_TABLES.items()]
+            if d in dates_set:
+                tables = sorted(FINANCIAL_BATCH_TABLES)
+            else:
+                # pending-only 日期仅重试未解决表，已成功表不重复抓取。
+                tables = sorted(pending_map.get(d, set()))
+            if not tables:
+                pending_map.pop(d, None)
+                continue
+
+            coros = [sync_one_date_table(d, tbl, FINANCIAL_BATCH_TABLES[tbl]) for tbl in tables]
             gather_results = await gather_return_exceptions_propagating_cancel(*coros)
-            for gr in gather_results:
+            unresolved: set[str] = set()
+            for tbl, gr in zip(tables, gather_results, strict=False):
                 # R5: EngineDisposedError 必须优先传播，不作为普通 batch table 失败
                 if isinstance(gr, EngineDisposedError):
                     raise gr
                 if isinstance(gr, Exception):
                     logger.warning("[FinancialSync] Batch table sync failed for date %s: %s", d, gr, exc_info=True)
+                    unresolved.add(tbl)
                     # M-DATA-11/D1: 批次表失败必须反映到 SyncResult（增量 day_has_error
                     # 同模式），否则 corporate actions 失败后调用方仍看到 success 假终态。
-                    if result_accumulator is not None and result_accumulator.status not in (
-                        SyncStatus.FAILED.value,
-                        SyncStatus.CANCELLED.value,
-                    ):
-                        result_accumulator.status = SyncStatus.PARTIAL.value
-                        result_accumulator.errors.append(
-                            f"FinancialSync corporate actions failed on {d}: {safe_error(gr)}"
-                        )
+                    mark_partial(f"FinancialSync corporate actions failed on {d}/{tbl}: {safe_error(gr)}")
+                    continue
+                if gr["status"] in ("failed", "save_failed"):
+                    unresolved.add(tbl)
+                    mark_partial(f"FinancialSync corporate actions {gr['status']} on {d}/{tbl}")
+
+            if unresolved:
+                pending_map[d] = unresolved
+                pending_dirty = True
+            elif d in pending_map:
+                pending_map.pop(d, None)
+                pending_dirty = True
+
+            if pending_dirty:
+                await set_app_state(
+                    engine,
+                    _FINANCIAL_CORPORATE_ACTION_PENDING_KEY,
+                    _dump_pending_corporate_targets(pending_map),
+                )
+                pending_dirty = False
 
             # Report progress every 10 days
             if progress_callback and (i + 1) % 10 == 0:
