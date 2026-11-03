@@ -62,12 +62,16 @@ class HsgtRow:
     as_of: str | None = None
 
 
+# 未知涨跌幅哨兵：缺失 / None / 空串归一到该值，禁止伪装成 "0.00%"（R21）。
+UNKNOWN_PCT_CHANGE = "--"
+
+
 @dataclass(frozen=True)
 class HotConceptRow:
     """热门概念行数据."""
 
     name: str = "--"
-    change: str = "0.00%"
+    change: str = UNKNOWN_PCT_CHANGE
     color: str = ""
 
 
@@ -797,6 +801,20 @@ def _coerce_as_of(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _coerce_pct_change(value: Any) -> str:
+    """涨跌幅展示值规整（R21：未知用哨兵，不伪装平盘）.
+
+    上游 news_fetcher 仅对有限数值产出已格式化文本（如 ``"3.50%"`` / ``"0.00%"``）；
+    缺键 / None / 空串 / 非字符串脏值一律归 ``UNKNOWN_PCT_CHANGE``，显式
+    ``"0.00%"`` 属于真实平盘，原样保留。
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return stripped
+    return UNKNOWN_PCT_CHANGE
+
+
 def _market_data_to_state_fields(data: dict) -> dict[str, Any]:
     """dict → HomeState 字段 dict (供 _set_state 使用).
 
@@ -829,7 +847,7 @@ def _market_data_to_state_fields(data: dict) -> dict[str, Any]:
     market_hot_concepts = tuple(
         HotConceptRow(
             name=str(item.get("name", "--")),
-            change=str(item.get("change", "0.00%")),
+            change=_coerce_pct_change(item.get("change")),
             color=str(item.get("color", "")),
         )
         for item in hot_concepts

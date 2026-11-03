@@ -13,7 +13,13 @@ import pandas as pd
 import pytest
 
 from ui.viewmodels import Message
-from ui.viewmodels.home_view_model import HomeViewModel, MarketIndexRow, NewsRow
+from ui.viewmodels.home_view_model import (
+    HomeViewModel,
+    HotConceptRow,
+    MarketIndexRow,
+    NewsRow,
+    _market_data_to_state_fields,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -354,6 +360,48 @@ class TestHomeViewModelMarketData:
             # 成功分量 as_of 与页头一致 → 卡片无需再追加「数据截至」行
             assert vm.state.market_indices[0].as_of == "20260614"
             assert vm.state.market_hsgt.as_of is None
+
+
+class TestHotConceptChangeNormalization:
+    """R21: 热门概念未知涨跌幅必须用哨兵 '--', 不得伪装为 '0.00%' 平盘。"""
+
+    def test_row_default_is_unknown_sentinel(self):
+        assert HotConceptRow(name="x").change == "--"
+
+    def test_missing_change_uses_sentinel(self):
+        fields = _market_data_to_state_fields({"hot_concepts": [{"name": "AI"}]})
+
+        rows = fields["market_hot_concepts"]
+        assert rows[0].change == "--"
+        assert rows[0].change != "0.00%"
+
+    def test_explicit_none_or_empty_change_uses_sentinel(self):
+        fields = _market_data_to_state_fields(
+            {
+                "hot_concepts": [
+                    {"name": "AI", "change": None},
+                    {"name": "芯片", "change": ""},
+                    {"name": "新能源", "change": "   "},
+                ]
+            }
+        )
+
+        assert [row.change for row in fields["market_hot_concepts"]] == ["--", "--", "--"]
+
+    def test_explicit_zero_change_preserved(self):
+        """显式 '0.00%' 是真实平盘, 不是未知, 必须原样保留。"""
+        fields = _market_data_to_state_fields({"hot_concepts": [{"name": "银行", "change": "0.00%", "color": "grey"}]})
+
+        row = fields["market_hot_concepts"][0]
+        assert row.change == "0.00%"
+        assert row.color == "grey"
+
+    def test_formatted_finite_change_preserved(self):
+        fields = _market_data_to_state_fields({"hot_concepts": [{"name": "AI", "change": "+2.50%", "color": "red"}]})
+
+        row = fields["market_hot_concepts"][0]
+        assert row.change == "+2.50%"
+        assert row.color == "red"
 
 
 class TestHomeViewModelNewsData:

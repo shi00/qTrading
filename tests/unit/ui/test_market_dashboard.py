@@ -562,15 +562,41 @@ class TestBuildConceptCard:
         col = card.content
         assert col.controls[0].value == "--"
 
-    def test_missing_change_falls_back_to_default(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """item 无 change → 显示 '0.00%' (中性档仅 Text, 无图标)."""
+    def test_missing_change_uses_unknown_sentinel(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """item 无 change → 未知哨兵 '--'（中性档仅 Text, 无图标），不得伪装 0.00%。"""
         from ui.components.market_dashboard import _build_concept_card
+        from ui.theme import AppColors
 
         card = _build_concept_card(HotConceptRow(name="x"))
 
         col = card.content
         row = col.controls[1]
-        assert row.controls[0].value == "0.00%"
+        assert len(row.controls) == 1, "未知档不渲染趋势图标"
+        text = row.controls[0]
+        assert text.value == "--"
+        assert text.color == AppColors.TEXT_SECONDARY
+
+    def test_unknown_sentinel_differs_from_explicit_zero(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """显式 '0.00%' 是真实平盘，必须与未知哨兵 '--' 区分渲染。"""
+        from ui.components.market_dashboard import _build_concept_card
+
+        unknown = _build_concept_card(HotConceptRow(name="x"))
+        zero = _build_concept_card(HotConceptRow(name="x", change="0.00%", color="grey"))
+
+        assert unknown.content.controls[1].controls[0].value == "--"
+        assert zero.content.controls[1].controls[0].value == "0.00%"
+
+    def test_unknown_sentinel_ignores_stale_trend_color(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """哨兵 '--' 即使携带残留 color='red' 也不得渲染涨/跌图标与趋势色（R21）。"""
+        from ui.components.market_dashboard import _build_concept_card
+        from ui.theme import AppColors
+
+        card = _build_concept_card(HotConceptRow(name="x", change="--", color="red"))
+
+        row = card.content.controls[1]
+        assert len(row.controls) == 1, "未知档不渲染趋势图标"
+        assert row.controls[0].value == "--"
+        assert row.controls[0].color == AppColors.TEXT_SECONDARY
 
     def test_col_config_is_6_per_row_on_mobile(self, mock_i18n_state, mock_app_colors_state) -> None:
         """卡片 col 配置：xs=6, sm=4, md=3, lg=2。"""

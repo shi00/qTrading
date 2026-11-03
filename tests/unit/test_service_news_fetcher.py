@@ -433,7 +433,7 @@ class TestNewsFetcherEdgeCases(unittest.TestCase):
 
     @patch("httpx.AsyncClient")
     def test_concepts_with_nan_values(self, mock_client):
-        """NaN 涨跌幅处理"""
+        """NaN 涨跌幅行被排除，不得伪装成 0.00% 平盘。"""
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock(return_value=None)
         mock_resp.text = _concept_jsonp(("测试板块", "nan"))
@@ -441,8 +441,7 @@ class TestNewsFetcherEdgeCases(unittest.TestCase):
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
-            self.assertEqual(len(result), 1)
-            self.assertEqual(result[0]["change"], "0.00%")
+            self.assertEqual(result, [])
 
         asyncio.run(run_test())
 

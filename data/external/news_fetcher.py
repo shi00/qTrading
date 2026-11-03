@@ -1012,9 +1012,11 @@ class NewsFetcher:
                 try:
                     change_val = float(fields[5])
                 except (ValueError, TypeError):
-                    change_val = 0.0
-                if math.isnan(change_val):
-                    change_val = 0.0
+                    # 非法涨跌幅（N/A / 空串 / 非数字）不参与排名：不得先置 0 伪装成平盘（R21）
+                    continue
+                if not math.isfinite(change_val):
+                    # NaN / ±inf 不是合法涨跌幅，整行排除后再排序与 limit，避免伪零挤占排名
+                    continue
                 rows.append((name, change_val))
             return rows
 
