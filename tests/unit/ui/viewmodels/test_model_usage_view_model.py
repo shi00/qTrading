@@ -1229,8 +1229,9 @@ async def test_stale_reader_cancel_after_barrier_propagates_without_overwriting(
     await _commit_newer_filter(dao, vm)
 
     reader.release()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as exc_info:
         await stale_task
+    assert isinstance(exc_info.value, asyncio.CancelledError)
 
     assert vm.state.filters.scenario_id == "stock_analysis"
     assert [r["invocation_id"] for r in vm.state.requests] == ["inv-B"]
