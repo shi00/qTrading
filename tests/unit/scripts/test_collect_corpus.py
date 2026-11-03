@@ -75,6 +75,12 @@ class _RoutinePlugin(_FakePlugin):
     drop_routine = True
 
 
+class _SlowPlugin(_FakePlugin):
+    """限速下限更高的替身（验证按所选源取 max 下限）。"""
+
+    rate_limit_seconds = 3.0
+
+
 def _doc(source_id: str, text: str, *, source: str = "sina_7x24") -> dict[str, Any]:
     return {"source": source, "source_id": source_id, "text": text}
 
@@ -91,6 +97,10 @@ def _store_doc(source_id: str, text: str, simhash: int | None, *, source_kind: s
 
 async def _no_sleep(_seconds: float) -> None:
     await asyncio.sleep(0)
+
+
+def _no_client(*_args: Any, **_kwargs: Any) -> Any:
+    pytest.fail("非法 rate-limit 不应创建 HTTP 客户端")
 
 
 def _make_existing_db_without_index(tmp_path: Path) -> Path:
@@ -315,6 +325,82 @@ def test_main_stats_only_missing_db_returns_error(tmp_path: Path, capsys: pytest
     captured = capsys.readouterr()
     assert "只读模式" in captured.err
     assert [path.name for path in tmp_path.iterdir()] == []
+
+
+# --------------------------------------------------------------------------- #
+# CLI 限速校验：非法值在开库 / 建 client 前拒绝
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("rate", ["0", "-1", "nan", "inf", "-inf"])
+def test_main_rejects_illegal_rate_limit_before_io(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], rate: str
+):
+    fake = _FakePlugin([[_doc("1", "甲")], [_doc("2", "乙")]])
+    monkeypatch.setattr(collect_corpus, "get_plugin", lambda _name: fake)
+    monkeypatch.setattr(collect_corpus.httpx, "AsyncClient", _no_client)
+
+    with pytest.raises(SystemExit) as excinfo:
+        collect_corpus.main(
+            ["--db", str(tmp_path / "corpus.db"), "--sources", "fake", "--pages", "2", f"--rate-limit={rate}"]
+        )
+
+    assert excinfo.value.code == 2
+    assert fake.calls == 0
+    assert not (tmp_path / "corpus.db").exists()
+    assert "--rate-limit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("rate", [DEFAULT_RATE_LIMIT_SECONDS, 4.0])
+def test_main_rate_limit_at_or_above_floor_records_interval(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rate: float
+):
+    fake = _FakePlugin([[_doc("1", "甲")], [_doc("2", "乙")]])
+    sleeps: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        sleeps.append(seconds)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(collect_corpus, "get_plugin", lambda _name: fake)
+    monkeypatch.setattr(collect_corpus, "_rate_limit_sleep", _record)
+    argv = ["--db", str(tmp_path / "corpus.db"), "--sources", "fake", "--pages", "2", "--rate-limit", str(rate)]
+    assert collect_corpus.main(argv) == 0
+    assert sleeps == [rate]  # 两页一次间隔，且保留自定义的较慢值
+
+
+def test_main_rate_limit_uses_max_floor_of_selected_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    fast = _FakePlugin([[_doc("1", "甲")], [_doc("2", "乙")]])
+    slow = _SlowPlugin([[_doc("3", "丙")], [_doc("4", "丁")]])
+    mapping = {"fake": fast, "slow": slow}
+    monkeypatch.setattr(collect_corpus, "get_plugin", lambda name: mapping[name])
+
+    with pytest.raises(SystemExit) as excinfo:
+        collect_corpus.main(
+            ["--db", str(tmp_path / "corpus.db"), "--sources", "fake,slow", "--pages", "2", "--rate-limit=2.6"]
+        )
+
+    assert excinfo.value.code == 2
+    assert fast.calls == 0 and slow.calls == 0
+    assert not (tmp_path / "corpus.db").exists()
+    assert "3.0" in capsys.readouterr().err
+
+
+def test_main_rate_limit_above_max_floor_records_interval(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    fast = _FakePlugin([[_doc("1", "甲")], [_doc("2", "乙")]])
+    slow = _SlowPlugin([[_doc("3", "丙")], [_doc("4", "丁")]])
+    mapping = {"fake": fast, "slow": slow}
+    sleeps: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        sleeps.append(seconds)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(collect_corpus, "get_plugin", lambda name: mapping[name])
+    monkeypatch.setattr(collect_corpus, "_rate_limit_sleep", _record)
+    argv = ["--db", str(tmp_path / "corpus.db"), "--sources", "fake,slow", "--pages", "2", "--rate-limit", "3.0"]
+    assert collect_corpus.main(argv) == 0
+    assert sleeps == [3.0, 3.0]  # 每个源两页各一次间隔
 
 
 # --------------------------------------------------------------------------- #

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -173,6 +174,25 @@ def _load_symbols(args: argparse.Namespace) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _selected_plugins(raw_sources: str) -> list[SourcePlugin]:
+    """按逗号分隔的源名解析插件实例（校验与采集共用同一选源结果）。"""
+    return [get_plugin(name.strip()) for name in raw_sources.split(",") if name.strip()]
+
+
+def _validate_rate_limit(rate_limit: float, plugins: list[SourcePlugin]) -> None:
+    """校验 CLI 限速：必须有限、为正且不低于所选源最低间隔；不静默改写非法值。"""
+    if not math.isfinite(rate_limit):
+        raise argparse.ArgumentTypeError(f"--rate-limit 必须为有限数值，当前为 {rate_limit}")
+    if rate_limit <= 0:
+        raise argparse.ArgumentTypeError(f"--rate-limit 必须大于 0，当前为 {rate_limit}")
+    if plugins:
+        floor = max(plugin.rate_limit_seconds for plugin in plugins)
+        if rate_limit < floor:
+            raise argparse.ArgumentTypeError(
+                f"--rate-limit {rate_limit}s 低于所选新闻源最低间隔 {floor}s（规格 §3.3：每源 ≥2~3s/请求）"
+            )
+
+
 def _print_stats(store: CorpusStore) -> None:
     stats = store.stats()
     print(f"语料库 {store.db_path} 共 {stats['total']} 条")
@@ -186,7 +206,7 @@ def _use_memory_store(db_path: Path, *, dry_run: bool) -> bool:
     return dry_run and not db_path.exists()
 
 
-async def _run(args: argparse.Namespace) -> int:
+async def _run(args: argparse.Namespace, plugins: list[SourcePlugin]) -> int:
     db_path = Path(args.db)
     if args.stats_only:
         with CorpusStore(db_path, read_only=True) as store:
@@ -199,8 +219,7 @@ async def _run(args: argparse.Namespace) -> int:
     else:
         store = CorpusStore(db_path, read_only=args.dry_run)
     with store:
-        sources = [name.strip() for name in args.sources.split(",") if name.strip()]
-        plugins = [get_plugin(name) for name in sources]
+        sources = [plugin.name for plugin in plugins]
         params = CollectParams(
             pages=args.pages,
             page_size=args.page_size,
@@ -256,15 +275,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbols", default="", help="新浪个股 symbol 清单（逗号分隔，如 sh600519,sz000001）")
     parser.add_argument("--symbols-file", default=None, help="新浪个股 symbol 清单文件（每行一个）")
     parser.add_argument(
-        "--rate-limit", type=float, default=DEFAULT_RATE_LIMIT_SECONDS, help="每请求间隔秒数（规格 ≥2~3s）"
+        "--rate-limit",
+        type=float,
+        default=DEFAULT_RATE_LIMIT_SECONDS,
+        help="每请求间隔秒数（不得低于所选源最低值，规格 ≥2~3s）",
     )
     parser.add_argument("--failure-threshold", type=int, default=DEFAULT_FAILURE_THRESHOLD, help="单源连续失败熔断阈值")
     parser.add_argument("--cooldown", type=float, default=DEFAULT_COOLDOWN_SECONDS, help="熔断冷却秒数")
     parser.add_argument("--dry-run", action="store_true", help="只清洗/去重计数，不写入语料库")
     parser.add_argument("--stats-only", action="store_true", help="只打印语料库统计，不发网络请求")
     args = parser.parse_args(argv)
+    plugins: list[SourcePlugin] = []
+    if not args.stats_only:
+        # 开库 / 创建 HTTP client 之前校验限速，非法值直接以 argparse 参数错误退出（exit 2）。
+        plugins = _selected_plugins(args.sources)
+        try:
+            _validate_rate_limit(args.rate_limit, plugins)
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
     try:
-        return asyncio.run(_run(args))
+        return asyncio.run(_run(args, plugins))
     except (OSError, sqlite3.Error) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
