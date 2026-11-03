@@ -507,6 +507,44 @@ class TestDocsConsistencyScript:
         assert "[PASS]" in captured.out, f"通过路径应输出 [PASS], got: {captured.out!r}"
         assert "[FAIL]" not in captured.err, f"通过路径不应输出 [FAIL], got: {captured.err!r}"
 
+    def test_main_warning_only_returns_zero_and_prints_warning(self, tmp_path, monkeypatch, capsys):
+        """仅产生 WARNING（无 error）时 main() 返回 0 且把 warning 打印到 stdout（渐进部署不阻断契约）.
+
+        契约来源：main() 只把各 check_* 的 error 聚合进 ``all_errors`` 并以非空返回 1；
+        ``check_governance_id_glossary`` 返回的 warnings 仅以 GitHub Actions ``::warning::``
+        注解打印（GDR-09 / DS-02 渐进部署），不参与退出码。本用例保留真实
+        ``check_governance_id_glossary``（非 stub），用 tmp 夹具构造「仅 warning」输入，
+        同时断言退出码为 0 与 warning 确实被输出——缺任一条即说明 warning 被误判成失败
+        或 warning 被静默吞掉。
+        """
+        import check_docs_consistency as docs_check
+
+        _stub_doc_checks_except(monkeypatch, "check_governance_id_glossary")
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        glossary = gov_dir / "governance-ids.md"
+        glossary.write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        warning_doc = tmp_path / "docs" / "patterns" / "warning_only_doc.md"
+        warning_doc.parent.mkdir(parents=True)
+        unregistered = _unregistered_id_sample("P2")
+        warning_doc.write_text(f"本测试文档引用未登记 ID {unregistered}（仅触发 WARNING）。\n", encoding="utf-8")
+
+        monkeypatch.setattr(docs_check, "GOVERNANCE_IDS_PATH", glossary)
+        monkeypatch.setattr(docs_check, "ROOT", tmp_path)
+        monkeypatch.setattr(docs_check, "CHECKED_DOCS", [warning_doc])
+
+        assert docs_check.main() == 0, "warning-only 不应被误判为失败，退出码必须为 0"
+
+        captured = capsys.readouterr()
+        assert "::warning::" in captured.out, f"warning 注解应写入 stdout, got: {captured.out!r}"
+        assert unregistered in captured.out, f"warning 应包含具体未登记 ID, got: {captured.out!r}"
+        assert "未在 governance-ids.md 登记" in captured.out, f"warning 应说明未登记原因, got: {captured.out!r}"
+        assert "[PASS]" in captured.out, f"warning-only 应输出 [PASS], got: {captured.out!r}"
+        assert "[FAIL]" not in captured.err, f"warning-only 不应走失败路径, got: {captured.err!r}"
+
     def test_count_local_hooks_matches_config(self):
         """_count_local_hooks 返回 .pre-commit-config.yaml 实际 hook 数量。"""
         from check_docs_consistency import _count_local_hooks
