@@ -15,8 +15,11 @@
 3. 三类概率最大绝对差 < 0.02；
 4. 预测标签一致率 ≥ 99%。
 
-**发布产物为 f16（2026-10-14 方案 A）**：``--f16-gguf`` 为**必评判据主体**；
+**发布产物为 f16（2026-10-14 方案 A）**：``--f16-gguf`` 为**发布判据主体**；
 ``--q8-gguf`` 降级为可选对照件（默认不提供，提供时其判据按 Q8_0 阈值一并评估）。
+仅提供 ``--q8-gguf`` 时为**诊断模式**：诊断 ``verdict`` 可 PASS/FAIL，但报告
+``release.applicable=false`` / ``release.qualified=false`` / ``release.verdict=NOT_APPLICABLE``，
+不得作为发布合格结论。
 定因：Q8_0 层权重量化噪声经训练头放大后概率差 0.047 ~ 0.055 必然超出 0.02 阈值，
 f16 产物四判据宽裕通过（见 scripts/export_finbert_gguf.py docstring）。
 
@@ -59,7 +62,9 @@ Usage:
 
 （``--head`` 可省略：省略时使用确定性参考头；正式发布须提供训练好的 ``head.npz``。）
 
-退出码：门禁全部通过为 0，任一判据失败为 1。
+退出码：诊断 ``verdict`` 全部通过为 0，任一已评估判据失败为 1。退出码不区分
+「发布合格」与「仅诊断」：仅 q8 诊断模式 PASS 仍返回 0，但须以 ``release.qualified=false``
+与 ``release.verdict=NOT_APPLICABLE`` 判定其不构成发布合格。
 """
 
 from __future__ import annotations
@@ -86,6 +91,15 @@ PROBABILITY_MAX_ABS_DIFF = 0.02
 LABEL_AGREEMENT_MIN = 0.99
 
 LATENCY_EXPECTED_BAND_MS = (10.0, 30.0)
+
+# 发布合格判定仅取 f16 判据主体（q8 仅为对照，不参与发布合格结论）
+RELEASE_CRITERIA_F16 = (
+    "tokenizer_ids_consistent",
+    "embedding_dim_768",
+    "cls_cosine_f16",
+    "probability_max_abs_diff_f16",
+    "label_agreement_f16",
+)
 
 # 参考头增益灵敏度扫描点（仅用于披露第 3 项判据对头尺度的依赖，不参与主判定）
 SENSITIVITY_GAINS = (1.0, 2.0, 4.0, 6.0, 8.0)
@@ -480,6 +494,37 @@ def is_gate_passed(criteria: dict[str, dict[str, Any]]) -> bool:
     return all(item["ok"] is not False for item in criteria.values())
 
 
+def evaluate_release(
+    criteria: dict[str, dict[str, Any]],
+    *,
+    f16_gguf_provided: bool,
+) -> dict[str, Any]:
+    """按「诊断结论 / 发布合格」双口径给出发布评估（纯函数）。
+
+    发布判据主体仅为 f16：``qualified`` 由 ``RELEASE_CRITERIA_F16`` 全部通过决定，
+    q8 对照判据不参与。仅提供 q8（诊断模式）时发布结论为 ``NOT_APPLICABLE``、
+    ``qualified=False``，即使诊断 ``verdict`` 为 PASS 也不构成发布合格结论。
+    """
+    if not f16_gguf_provided:
+        return {
+            "subject": None,
+            "applicable": False,
+            "qualified": False,
+            "verdict": "NOT_APPLICABLE",
+            "note": "仅诊断：未提供 --f16-gguf（发布判据主体），本报告不构成发布合格结论。",
+        }
+    failed = [name for name in RELEASE_CRITERIA_F16 if criteria[name]["ok"] is not True]
+    qualified = not failed
+    return {
+        "subject": "f16",
+        "applicable": True,
+        "qualified": qualified,
+        "verdict": "PASS" if qualified else "FAIL",
+        "failed_criteria": failed,
+        "note": "发布判据主体 f16 已提供：qualified 由 f16 判据决定，q8 仅作对照。",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 重型链路（延迟导入 torch / transformers / llama_cpp）
 # --------------------------------------------------------------------------- #
@@ -698,6 +743,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         # 同一编码器的 f16 / q8 embedding_dim 一致；probe_path 非空保证 backends 非空
         embedding_dim=int(next(iter(backends.values()))["embedding_dim"]),
     )
+    release = evaluate_release(criteria, f16_gguf_provided=f16_path is not None)
 
     return {
         "schema": "finbert-gguf-verification.v1",
@@ -729,6 +775,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         },
         "backends": backends,
         "criteria": criteria,
+        "release": release,
         "verdict": "PASS" if is_gate_passed(criteria) else "FAIL",
     }
 
@@ -771,6 +818,10 @@ def _print_summary(report: dict[str, Any]) -> None:
         mark = "SKIP" if item["ok"] is None else ("PASS" if item["ok"] else "FAIL")
         print(f"  {mark}  {name}: value={item['value']} threshold={item['threshold']}")
     print("-" * 68)
+    release = report["release"]
+    print(f"发布口径: applicable={release['applicable']} qualified={release['qualified']} verdict={release['verdict']}")
+    if not release["applicable"]:
+        print("[警告] 仅诊断、非发布合格：未提供 --f16-gguf（发布判据主体），本报告不得作为发布通过依据。")
     print(f"VERDICT: {report['verdict']}")
     print("=" * 68)
 
@@ -778,9 +829,11 @@ def _print_summary(report: dict[str, Any]) -> None:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FinBERT2-base GGUF 一致性门禁（N0-3）")
     parser.add_argument("--reference-model", default="ai_models/FinBERT2-base", help="HF 参考模型目录（仅取编码器）")
-    parser.add_argument("--q8-gguf", default=None, help="可选 Q8_0 对照 GGUF（提供时按 Q8_0 阈值评估对照判据）")
+    parser.add_argument("--q8-gguf", default=None, help="可选 Q8_0 对照 GGUF（仅诊断对照，不参与发布合格判定）")
     parser.add_argument(
-        "--f16-gguf", default=os.environ.get("FINBERT_F16_GGUF"), help="发布用 f16 GGUF（发布判据主体）"
+        "--f16-gguf",
+        default=os.environ.get("FINBERT_F16_GGUF"),
+        help="发布用 f16 GGUF（发布判据主体；缺省时仅可做 q8 诊断，不构成发布合格）",
     )
     parser.add_argument("--report", default="ai_models/finbert2-news-f16.verify.json", help="报告输出路径")
     parser.add_argument("--head", default=None, help="训练好的分类头 head.npz（N3-1 产出；提供时取代确定性参考头）")
