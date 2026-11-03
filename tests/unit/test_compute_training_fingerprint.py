@@ -411,6 +411,119 @@ def test_tag_exists_distinguishes_404_from_infra_error(monkeypatch, fp_module) -
 
 
 # --------------------------------------------------------------------------- #
+# D20-F09：正式版过滤（draft / pre-release 不得作为去重锚）
+# --------------------------------------------------------------------------- #
+def _fake_release_listing(fp_module, releases: list[tuple[str, bool, bool]]):
+    """按 gh 语义模拟 ``release list``：仅当命令行带对应排除标志时滤掉 draft/pre。
+
+    ``releases`` 元素为 ``(tag, is_draft, is_prerelease)``；未带排除标志时原样返回，
+    使「删除标志」的回归会直接选到更高 draft/pre-release 并让断言失败。
+    """
+
+    def fake_gh(args):
+        tags: list[str] = []
+        for tag, is_draft, is_prerelease in releases:
+            if is_draft and "--exclude-drafts" in args:
+                continue
+            if is_prerelease and "--exclude-pre-releases" in args:
+                continue
+            tags.append(tag)
+        return json.dumps([{"tagName": tag} for tag in tags])
+
+    return fake_gh
+
+
+@pytest.mark.parametrize(
+    ("draft_tag", "pre_tag"),
+    [
+        ("finbert-gguf-v1.10.0", None),
+        (None, "finbert-gguf-v1.9.0"),
+        ("finbert-gguf-v1.10.0", "finbert-gguf-v1.9.0"),
+    ],
+    ids=["higher-draft", "higher-prerelease", "both"],
+)
+def test_list_release_tags_only_selects_lower_formal_release(
+    monkeypatch, fp_module, draft_tag: str | None, pre_tag: str | None
+) -> None:
+    # 对抗面：更高的 draft / pre-release 若未排除，会胜出成为指纹去重锚。
+    formal = "finbert-gguf-v0.2.0"
+    releases = [(tag, tag == draft_tag, tag == pre_tag) for tag in (draft_tag, pre_tag, formal) if tag is not None]
+    monkeypatch.setattr(fp_module, "_run_gh", _fake_release_listing(fp_module, releases))
+    tags = fp_module.list_release_tags("owner/repo")
+    assert tags == [formal]
+    assert fp_module.select_latest_release_tag(tags) == formal
+    assert fp_module.resolve_auto_version(tags) == "0.3.0"
+
+
+def _patch_gh_offline(monkeypatch, fp_module, *, sums: Path, existing: set[str] | None = None) -> None:
+    """仅替换下载 / tag 存在性，保留真实 ``list_release_tags`` + 注入的 gh 行为。"""
+    monkeypatch.setattr(fp_module, "download_corpus_sums", lambda repo, tag, dest: sums)
+    monkeypatch.setattr(fp_module, "download_baseline_fingerprint", lambda repo, tag, dest: None)
+    monkeypatch.setattr(fp_module, "tag_exists", lambda repo, tag: tag in (existing or set()))
+
+
+def test_route_only_draft_release_is_no_baseline(
+    monkeypatch, fp_module, fake_repo: Path, corpus_sums: Path, tmp_path: Path
+) -> None:
+    # 仅 draft（未发布）时正式 Release 列表为空 → NO_BASELINE 首版路径，
+    # 版本基线 0.0.0 → 0.1.0；不得把 draft 当作既有正式基线。
+    monkeypatch.setattr(
+        fp_module,
+        "_run_gh",
+        _fake_release_listing(fp_module, [("finbert-gguf-v1.10.0", True, False)]),
+    )
+    _patch_gh_offline(monkeypatch, fp_module, sums=corpus_sums)
+    decision = fp_module.run_route(
+        repo="o/r",
+        corpus_tag="corpus-v1",
+        model_version=None,
+        force_retrain=False,
+        repo_root=fake_repo,
+        output_path=tmp_path / "fp.json",
+    )
+    assert (decision.action, decision.decision) == ("proceed", "NO_BASELINE")
+    assert decision.model_version == "0.1.0"
+
+
+def test_route_exactly_100_formal_releases_fail_closed(
+    monkeypatch, fp_module, fake_repo: Path, corpus_sums: Path, tmp_path: Path
+) -> None:
+    # 边界不放松：正式版列表恰为 100 条时无法保证 semver 最新 → exit 2（不降级）。
+    releases = [(f"finbert-gguf-v0.{index}.0", False, False) for index in range(fp_module.RELEASE_LIST_LIMIT)]
+    monkeypatch.setattr(fp_module, "_run_gh", _fake_release_listing(fp_module, releases))
+    _patch_gh_offline(monkeypatch, fp_module, sums=corpus_sums)
+    with pytest.raises(fp_module.FingerprintError, match="查询上限"):
+        fp_module.run_route(
+            repo="o/r",
+            corpus_tag="corpus-v1",
+            model_version=None,
+            force_retrain=False,
+            repo_root=fake_repo,
+            output_path=tmp_path / "fp.json",
+        )
+
+
+def test_route_release_list_network_error_fails_closed_not_no_baseline(
+    monkeypatch, fp_module, fake_repo: Path, corpus_sums: Path, tmp_path: Path
+) -> None:
+    # 查询错误不降级：不得把「无法确认是否存在历史 Release」伪装成首版 NO_BASELINE。
+    def _boom(args):
+        raise fp_module.FingerprintError("gh 调用失败（exit 1）: gh release list: connection refused")
+
+    monkeypatch.setattr(fp_module, "_run_gh", _boom)
+    _patch_gh_offline(monkeypatch, fp_module, sums=corpus_sums)
+    with pytest.raises(fp_module.FingerprintError, match="gh 调用失败"):
+        fp_module.run_route(
+            repo="o/r",
+            corpus_tag="corpus-v1",
+            model_version=None,
+            force_retrain=False,
+            repo_root=fake_repo,
+            output_path=tmp_path / "fp.json",
+        )
+
+
+# --------------------------------------------------------------------------- #
 # run_route 编排（patch gh 依赖，验证四态 + 版本解析）
 # --------------------------------------------------------------------------- #
 def _patch_gh_layer(
