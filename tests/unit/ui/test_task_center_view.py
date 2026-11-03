@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 import pytest
 
-from services.task_manager import AppTask, TaskStatus
+from services.task_manager import AppTask, PersistPendingStatus, TaskStatus
 from ui.viewmodels.task_center_view_model import (
     TaskCenterState,
     TaskCenterViewModel,
@@ -51,6 +51,7 @@ def _build_mock_task_manager():
     m.unsubscribe = MagicMock()
     m.cancel_task = MagicMock()
     m.clear_finished = MagicMock()
+    m.get_persistence_pending_snapshot.return_value = PersistPendingStatus(0, 0)
     return m
 
 
@@ -871,6 +872,12 @@ class _FakeTaskCenterState:
     total_pages: int = 1
     total_count: int = 0
     running_count: int = 0
+    persist_pending_writes: int = 0
+    persist_pending_deletions: int = 0
+
+    @property
+    def persist_cleanup_pending(self) -> bool:
+        return self.persist_pending_deletions > 0
 
 
 class _FakeTaskCenterViewModel:

@@ -2013,6 +2013,55 @@ class TestTaskManagerFlushPersistenceTimeout:
             await mgr.flush_persistence(timeout_s=0.01)
 
 
+class TestGetPersistencePendingSnapshot:
+    """D11-S01: 持久确认信号快照（在途写 / 待确认删除），不得伪装为已落库成功。"""
+
+    @pytest.mark.asyncio
+    async def test_pending_writes_tracks_inflight_then_zero_after_flush(self):
+        """排队写被 Event 阻塞时 pending_writes=1；结束后归零。
+
+        归零只表示 tracked 写在途耗尽（flush 语义），**不代表 SQL 已成功落库**：
+        本用例的写协程被释放后正常返回，但即使写库抛错，计数同样会回落。
+        """
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _blocked_write(_params):
+            started.set()
+            await release.wait()
+
+        with patch.object(mgr, "_persist_snapshot", side_effect=_blocked_write):
+            mgr._queue_persist_snapshot(("t1",))
+            await asyncio.wait_for(started.wait(), timeout=0.5)
+            assert mgr.get_persistence_pending_snapshot().pending_writes == 1
+            release.set()
+            await mgr.flush_persistence(timeout_s=1.0)
+
+        snap = mgr.get_persistence_pending_snapshot()
+        assert snap.pending_writes == 0
+        assert snap.pending_deletions == 0
+
+    def test_pending_deletions_tracks_unconfirmed_clear_and_clears(self):
+        """本地移除后 DELETE 未确认时 pending_deletions>0；确认删除后回落 0。"""
+        mgr = TaskManager()
+        mgr._register_deletion_barrier(["t1", "t2"])
+        snap = mgr.get_persistence_pending_snapshot()
+        assert snap.pending_deletions == 2
+
+        mgr._mark_db_deleted(["t1"])
+        assert mgr.get_persistence_pending_snapshot().pending_deletions == 1
+
+        mgr._mark_db_deleted(["t2"])
+        snap = mgr.get_persistence_pending_snapshot()
+        assert snap.pending_deletions == 0
+        # 计数恒 >= 0，不存在越界负值
+        assert snap.pending_writes >= 0
+        assert snap.pending_deletions >= 0
+
+
 class TestUpdateProgressReturnStatus:
     def test_returns_true_when_running(self):
         mgr = TaskManager()

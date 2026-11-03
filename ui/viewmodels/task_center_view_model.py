@@ -52,6 +52,10 @@ class TaskCenterState:
     """TaskCenterView 的不可变 state snapshot。
 
     tasks 存全量（用于统计），View 根据 current_page 自行切片渲染。
+
+    D11-S01: ``persist_pending_writes`` / ``persist_pending_deletions`` 为 TaskManager
+    自有持久化计数快照（只读展示，不改变任务状态语义）；``persist_cleanup_pending``
+    为派生信号，仅在待确认删除 > 0 时为 True（不伪造「已持久清理成功」）。
     """
 
     tasks: tuple[TaskRow, ...] = ()
@@ -59,6 +63,13 @@ class TaskCenterState:
     total_pages: int = 1
     total_count: int = 0
     running_count: int = 0
+    persist_pending_writes: int = 0
+    persist_pending_deletions: int = 0
+
+    @property
+    def persist_cleanup_pending(self) -> bool:
+        """本地已移除但持久删除仍待重试（pending_deletions > 0）。"""
+        return self.persist_pending_deletions > 0
 
 
 class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
@@ -122,6 +133,10 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
         running = sum(1 for r in rows if r.status == TaskStatus.RUNNING)
         total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
         current_page = max(1, min(self._state.current_page, total_pages))
+        # D11-S01: 持久化计数为 TaskManager 自有状态的只读快照（纯内存，无 IO）。
+        pending = self._task_manager.get_persistence_pending_snapshot()
+        pending_writes = max(0, pending.pending_writes)
+        pending_deletions = max(0, pending.pending_deletions)
         # 经 _set_state 原子绑定（写 state + 捕获快照 + 分配序号），避免跨线程
         # 直写 + _notify() 的「高序号携带旧快照」窗口（CON-03 R2 P1）
         self._set_state(
@@ -130,6 +145,8 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
             running_count=running,
             total_pages=total_pages,
             current_page=current_page,
+            persist_pending_writes=pending_writes,
+            persist_pending_deletions=pending_deletions,
         )
 
     # --- Pagination commands ---

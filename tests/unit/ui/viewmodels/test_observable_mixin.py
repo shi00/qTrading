@@ -1153,11 +1153,12 @@ class TestVMIntegrationContracts:
         with (
             patch("ui.viewmodels.task_center_view_model.TaskManager") as MockTM,
         ):
-            from services.task_manager import AppTask, TaskStatus
+            from services.task_manager import AppTask, PersistPendingStatus, TaskStatus
             from ui.viewmodels.task_center_view_model import TaskCenterViewModel
 
             mock_tm = MockTM.return_value
             mock_tm.get_all_tasks.return_value = []
+            mock_tm.get_persistence_pending_snapshot.return_value = PersistPendingStatus(0, 0)
             vm = TaskCenterViewModel()
             # assert 初始 loop 为 None（同步模式）
             assert vm._main_loop is None

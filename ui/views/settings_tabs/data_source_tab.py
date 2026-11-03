@@ -787,6 +787,15 @@ def _build_scheduler_status_card(state: DataSourceState) -> ft.Control:
                                         ],
                                         col={"sm": 6, "md": 3},
                                     ),
+                                    ft.Column(
+                                        [
+                                            _sched_field(
+                                                "ds_sched_col_last_task",
+                                                _sched_optional_text(job.last_task_id),
+                                            )
+                                        ],
+                                        col={"sm": 6, "md": 3},
+                                    ),
                                 ],
                             ),
                         ],

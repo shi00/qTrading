@@ -63,6 +63,8 @@ class ScheduledJobStatus:
     - ``next_run_at``：APScheduler 计划的下次运行时刻（"%Y-%m-%d %H:%M:%S"）；未注册/未计划为 None。
     - ``consecutive_failures``：连续失败次数；仅 daily_update 有权威计数（与 D7-1 退避状态同源），
       其余 job 为 None（未记录），不得伪造成 0。
+    - ``last_task_id``：最近一次由该 job 提交的 TaskManager task_id；未提交为 None，
+      禁止用空串伪装。「已提交」仅表示任务被接纳，不代表业务完成。
     """
 
     job_id: str
@@ -70,6 +72,7 @@ class ScheduledJobStatus:
     last_failure_reason: str | None
     next_run_at: str | None
     consecutive_failures: int | None
+    last_task_id: str | None = None
 
 
 from utils.singleton_registry import register_singleton
@@ -172,6 +175,9 @@ class SchedulerService:
             # D7-6: 各 job 最近一次失败原因（进程内，重启即重置；写入前经 DataSanitizer 脱敏，R9），
             # 供数据源页调度状态面板展示"上次失败原因"。成功/水位推进时清除对应项。
             self._job_last_failure_reason: dict[str, str] = {}
+            # D11-S01: 各 job 最近一次被 TaskManager 接纳的 task_id（进程内，重启即重置）。
+            # submit_task 返回 None（未接纳/去重命中）时不记录——不把「未提交」伪装成成功。
+            self._job_last_task_id: dict[str, str] = {}
             # D7-3/MINOR-01: 看门狗补触发夜间预测的"当日已补触发"标记（进程内，重启即重置）。
             # 夜间预测"零落库/无候选"时刻意不标记 _last_pred_date（允许重试），若无此标记，
             # 30 秒看门狗会在数据就绪后反复补触发付费 AI 选股。每日至多补触发一次。
@@ -214,6 +220,16 @@ class SchedulerService:
         """
         self._registered_jobs[job_name] = job_fn
         logger.info("[Scheduler] Registered job '%s'", job_name)
+
+    def note_submitted_task(self, job_id: str, task_id: str | None) -> None:
+        """D11-S01: 记录某 job 最近一次被 TaskManager 接纳的 task_id（纯内存，无锁外状态）。
+
+        ``task_id`` 为 None（未接纳/去重命中）或空串时不记录，保持 None 语义（R21）；
+        「已接纳」只表示任务进入 TaskManager，不代表业务执行成功。
+        """
+        if not task_id:
+            return
+        self._job_last_task_id[job_id] = task_id
 
     @staticmethod
     def _persist_run_date(config_key: str, value: str | None):
@@ -1234,6 +1250,8 @@ class SchedulerService:
                 "[Scheduler] Daily update task not submitted (dedup hit or no event loop); "
                 "not marking done, catch-up will retry"
             )
+        else:
+            self.note_submitted_task("daily_update", task_id)
 
     async def _run_concept_sync(self):
         from utils.correlation import ensure_correlation_id
@@ -1312,6 +1330,8 @@ class SchedulerService:
         )
         if task_id is None:
             logger.warning("[Scheduler] Concept sync task not submitted (dedup hit or no event loop)")
+        else:
+            self.note_submitted_task("concept_sync_daily_refresh", task_id)
 
     async def _run_nightly_prediction(self):
         """Execute registered nightly prediction job (review01-A2-1 下沉).
@@ -1380,6 +1400,7 @@ class SchedulerService:
           ``_last_concept_sync_date``）；``review_backfill`` 不推进统一水位，恒为 None。
         - ``consecutive_failures`` 仅 daily_update 取 ``_catchup_consecutive_failures``
           （与 D7-1 退避状态同源，不新增计数）；其余 job 恒为 None。
+        - ``last_task_id`` 取 ``_job_last_task_id``（仅提交被接纳时写入）；未提交恒为 None。
 
         NOTE(lazy): 仅日更域有权威连续失败计数. ceiling: 非补偿路径（回填/概念/预测）的
         失败不累积计数，面板对其显示「—」. upgrade: 引入 per-job 失败计数并可在成功时清零时.
@@ -1397,6 +1418,7 @@ class SchedulerService:
                 last_failure_reason=self._job_last_failure_reason.get(job_id),
                 next_run_at=self._job_next_run_at(job_id),
                 consecutive_failures=self._catchup_consecutive_failures if job_id == "daily_update" else None,
+                last_task_id=self._job_last_task_id.get(job_id),
             )
             for job_id in _SCHEDULED_JOB_IDS
         )

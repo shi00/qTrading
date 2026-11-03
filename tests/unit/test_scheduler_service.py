@@ -894,6 +894,8 @@ class TestRunDailyUpdate:
             kwargs = mock_tm_instance.submit_task.call_args.kwargs
             assert kwargs["unique_key"] == "daily_sync"
             assert kwargs["exclusive_group"] == EXCLUSIVE_GROUP_MARKET_SYNC
+            # D11-S01: 提交被接纳 → 快照记录最近 task_id
+            assert svc.get_jobs_status_snapshot()[0].last_task_id == "task-abc"
 
     @pytest.mark.asyncio
     async def test_trading_day_submit_returns_none_warns(self):
@@ -920,6 +922,9 @@ class TestRunDailyUpdate:
             # 强断言：warning 出现且携带"not submitted"语义
             warning_calls = [c for c in mock_warn.call_args_list]
             assert any("Daily update task not submitted" in str(c.args[0]) for c in warning_calls)
+            # D11-S01: 未接纳不得记录（不把 None 伪装成已提交成功）
+            assert svc.get_jobs_status_snapshot()[0].last_task_id is None
+            assert "daily_update" not in svc._job_last_task_id
 
 
 class TestRunConceptSync:
@@ -955,9 +960,12 @@ class TestRunConceptSync:
             mock_now.return_value.strftime.return_value = "20240615"
             svc._last_concept_sync_date = None
             mock_tm_instance = MagicMock()
+            mock_tm_instance.submit_task.return_value = "task-concept"
             mock_tm.return_value = mock_tm_instance
             await svc._run_concept_sync()
             mock_tm_instance.submit_task.assert_called_once()
+            by_id = {s.job_id: s for s in svc.get_jobs_status_snapshot()}
+            assert by_id["concept_sync_daily_refresh"].last_task_id == "task-concept"
 
     @pytest.mark.asyncio
     async def test_submit_returns_none_warns(self):
@@ -979,6 +987,8 @@ class TestRunConceptSync:
             mock_tm_instance.submit_task.assert_called_once()
             warning_calls = [c for c in mock_warn.call_args_list]
             assert any("Concept sync task not submitted" in str(c.args[0]) for c in warning_calls)
+            # D11-S01: 未接纳保持 None
+            assert svc._job_last_task_id.get("concept_sync_daily_refresh") is None
 
 
 class TestSchedulerDispatchNightlyPrediction:
@@ -3470,6 +3480,8 @@ class TestGetJobsStatusSnapshot:
         for job_id in by_id:
             assert by_id[job_id].last_failure_reason is None
             assert by_id[job_id].next_run_at is None
+            # D11-S01: 未触发/未提交的 job 最近任务为 None，不得用空串伪装
+            assert by_id[job_id].last_task_id is None
 
         # daily_update 是唯一有权威计数的 job：初始为真实 0，而非「未记录」的 None
         assert by_id["daily_update"].consecutive_failures == 0
