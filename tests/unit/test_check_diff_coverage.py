@@ -5,6 +5,7 @@
 - load_coverage: coverage.json 加载，statements = executed ∪ missing
 - compute_diff_coverage: 排除非可执行行（空行/注释）、跳过被 omit 文件、路径规范化
 - _is_source_file: 源码目录/文件判定
+- 分母为 0 的语义区分：仅非可执行行（合法跳过）vs 可执行变更未被统计（fail-closed）
 """
 
 from __future__ import annotations
@@ -22,10 +23,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_diff_coverage import (  # noqa: E402 - sys.path 注入后导入
     DiffCoverageInputError,
+    _is_omitted,
     _is_source_file,
     compute_diff_coverage,
+    find_executable_added_lines,
+    find_unmeasured_files,
     get_diff_added_lines,
     load_coverage,
+    load_coverage_omit_patterns,
     main,
     parse_diff,
 )
@@ -359,6 +364,104 @@ class TestComputeDiffCoverage:
 
 
 # ============================================================================
+# load_coverage_omit_patterns / _is_omitted / find_unmeasured_files
+# ============================================================================
+
+
+class TestLoadCoverageOmitPatterns:
+    """load_coverage_omit_patterns: 读取 [tool.coverage.run].omit glob 列表。"""
+
+    def test_reads_omit_list(self, tmp_path: Path):
+        """正常 pyproject → 返回 omit 条目（反斜杠统一为正斜杠）。"""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            "[tool.coverage.run]\nomit = ['data/tiktoken_cache/*', 'main.py']\n",
+            encoding="utf-8",
+        )
+        assert load_coverage_omit_patterns(pyproject) == ("data/tiktoken_cache/*", "main.py")
+
+    def test_missing_pyproject_returns_empty(self, tmp_path: Path):
+        """pyproject 缺失 → 空元组（不阻塞，后续按源码内容兜底判定）。"""
+        assert load_coverage_omit_patterns(tmp_path / "missing.toml") == ()
+
+    def test_invalid_toml_returns_empty(self, tmp_path: Path):
+        """非法 TOML → 空元组，不抛异常。"""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("[tool.coverage.run\n", encoding="utf-8")
+        assert load_coverage_omit_patterns(pyproject) == ()
+
+    def test_real_repo_omit_contains_main_py(self):
+        """真实 pyproject 的 omit 必须包含 main.py（用于豁免入口文件的新增行）。"""
+        assert "main.py" in load_coverage_omit_patterns(ROOT / "pyproject.toml")
+
+
+class TestIsOmitted:
+    """_is_omitted: 文件是否匹配 coverage omit glob。"""
+
+    def test_exact_file_matches(self):
+        assert _is_omitted("main.py", ("main.py",)) is True
+
+    def test_glob_directory_matches(self):
+        assert _is_omitted("scripts/check_diff_coverage.py", ("scripts/*",)) is True
+
+    def test_unmatched_returns_false(self):
+        assert _is_omitted("app/bootstrap.py", ("main.py", "scripts/*")) is False
+
+
+class TestFindUnmeasuredFiles:
+    """find_unmeasured_files: 找出 diff 有新增行但未被 coverage 统计的文件。"""
+
+    def test_absent_file_listed(self):
+        """不在 coverage 中且非 omit → 列入未统计文件。"""
+        diff_lines = {"app/foo.py": [1, 2], "app/missing.py": [3]}
+        coverage = {"app/foo.py": {"executed": {1}, "statements": {1, 2}}}
+        assert find_unmeasured_files(diff_lines, coverage) == ["app/missing.py"]
+
+    def test_present_file_not_listed(self):
+        """coverage 中已收录 → 不算未统计（即使 statements 为空）。"""
+        diff_lines = {"app/foo.py": [1]}
+        coverage = {"app/foo.py": {"executed": set(), "statements": set()}}
+        assert find_unmeasured_files(diff_lines, coverage) == []
+
+    def test_omitted_file_not_listed(self):
+        """匹配 omit glob → 有意不计入覆盖率，不算未统计。"""
+        diff_lines = {"main.py": [5]}
+        assert find_unmeasured_files(diff_lines, {}, ("main.py",)) == []
+
+
+class TestFindExecutableAddedLines:
+    """find_executable_added_lines: 按源码内容判定新增行是否可执行。"""
+
+    def _write_source(self, tmp_path: Path, lines: list[str]) -> None:
+        source = tmp_path / "app" / "foo.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_filters_blank_and_comment_lines(self, tmp_path: Path):
+        """空行/纯注释视为非可执行，其余视为可执行（含 docstring 行）。"""
+        self._write_source(
+            tmp_path,
+            [
+                "# module comment",
+                "",
+                "def f():",
+                '    """docstring"""',
+                "    return 1",
+            ],
+        )
+        assert find_executable_added_lines("app/foo.py", [1, 2, 3, 4, 5], root=tmp_path) == [3, 4, 5]
+
+    def test_unreadable_file_treated_as_executable(self, tmp_path: Path):
+        """文件不可读（缺失）→ 全部按可执行处理（fail-closed）。"""
+        assert find_executable_added_lines("app/missing.py", [3, 4], root=tmp_path) == [3, 4]
+
+    def test_out_of_range_line_treated_as_executable(self, tmp_path: Path):
+        """行号越界（内容与 diff 不一致）→ 按可执行处理（fail-closed）。"""
+        self._write_source(tmp_path, ["# only comment"])
+        assert find_executable_added_lines("app/foo.py", [1, 99], root=tmp_path) == [99]
+
+
+# ============================================================================
 # 集成测试: parse_diff + load_coverage + compute_diff_coverage
 # ============================================================================
 
@@ -674,6 +777,108 @@ class TestMainFailClosed:
             encoding="utf-8",
         )
         assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict", "--threshold", "80") == 1
+
+
+class TestMainEmptyDenominator:
+    """main: total==0 的两种语义必须区分，不得一律按 100% 假通过。
+
+    A) diff 仅含非可执行行（文件已被 coverage 统计，或匹配 omit）→ exit 0
+    B) diff 含可执行变更行但文件未被 coverage 统计 → exit 2（fail-closed）
+    """
+
+    def _prepare(self, monkeypatch, tmp_path: Path, files: dict, diff_lines: dict[str, list[int]]) -> Path:
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "ROOT", tmp_path)
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: diff_lines)
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(json.dumps({"files": files}), encoding="utf-8")
+        return cov_file
+
+    def _write_source(self, tmp_path: Path, relpath: str, lines: list[str]) -> None:
+        source = tmp_path / relpath
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_a_measured_file_non_executable_only_returns_0(self, monkeypatch, tmp_path: Path):
+        """A: 文件已被 coverage 统计，diff 行均为注释/空行 → 合法跳过 exit 0。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/foo.py": {"executed_lines": [1], "missing_lines": []}},
+            {"app/foo.py": [2, 3]},
+        )
+        self._write_source(tmp_path, "app/foo.py", ["x = 1", "# comment", ""])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict") == 0
+
+    def test_a_omitted_file_returns_0(self, monkeypatch, tmp_path: Path):
+        """A: 文件匹配 coverage omit（刻意不计入）→ 不惩罚其新增行，exit 0。"""
+        (tmp_path / "pyproject.toml").write_text("[tool.coverage.run]\nomit = ['main.py']\n", encoding="utf-8")
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/foo.py": {"executed_lines": [1], "missing_lines": []}},
+            {"main.py": [2]},
+        )
+        # main.py 不存在：若 omit 豁免失效会按可执行行 fail-closed exit 2
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 0
+
+    def test_a_unmeasured_file_comment_only_returns_0(self, monkeypatch, tmp_path: Path):
+        """A: 文件未被统计，但新增行均为注释 → 合法跳过 exit 0（不误杀纯注释改动）。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/other.py": {"executed_lines": [1], "missing_lines": []}},
+            {"app/foo.py": [2]},
+        )
+        self._write_source(tmp_path, "app/foo.py", ["x = 1", "# comment only"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 0
+
+    def test_b_unmeasured_file_executable_returns_2(self, monkeypatch, tmp_path: Path):
+        """B: 文件未被 coverage 统计且新增行是代码 → exit 2（原缺陷的假通过场景）。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/other.py": {"executed_lines": [1], "missing_lines": []}},
+            {"app/foo.py": [2]},
+        )
+        self._write_source(tmp_path, "app/foo.py", ["x = 1", "y = 2"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
+
+    def test_b_unreadable_unmeasured_file_returns_2(self, monkeypatch, tmp_path: Path):
+        """B: 文件未收录且无法读取源码 → 无法判定可执行性，exit 2（fail-closed）。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/other.py": {"executed_lines": [1], "missing_lines": []}},
+            {"app/missing.py": [10]},
+        )
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
+
+    def test_b_with_nonzero_denominator_still_returns_2(self, monkeypatch, tmp_path: Path):
+        """B: 即使另有可统计文件（total>0），未统计文件的可执行变更仍须 fail-closed。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {
+                "app/covered.py": {"executed_lines": [1], "missing_lines": []},
+                "app/other.py": {"executed_lines": [1], "missing_lines": []},
+            },
+            {"app/covered.py": [1], "app/foo.py": [2]},
+        )
+        self._write_source(tmp_path, "app/foo.py", ["x = 1", "y = 2"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict") == 2
+
+    def test_b_fail_closed_even_in_advisory_mode(self, monkeypatch, tmp_path: Path):
+        """B: advisory 模式（未传 --strict）也必须 exit 2，不得仅在 strict 下拦截。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/other.py": {"executed_lines": [1], "missing_lines": []}},
+            {"app/foo.py": [2]},
+        )
+        self._write_source(tmp_path, "app/foo.py", ["x = 1", "y = 2"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
 
 
 # ============================================================================
