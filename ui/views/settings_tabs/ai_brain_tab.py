@@ -22,7 +22,7 @@
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 
 import flet as ft
@@ -46,7 +46,7 @@ from ui.viewmodels.ai_brain_settings_view_model import (
     SAVE_SUCCESS,
     AIBrainSettingsViewModel,
 )
-from ui.viewmodels.egress_audit_view_model import EgressAuditViewModel
+from ui.viewmodels.egress_audit_view_model import EgressAggRow, EgressAuditViewModel
 from ui.viewmodels.model_connections_view_model import (
     ModelConnectionsViewModel,
     UsageCostSummary,
@@ -681,7 +681,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     # --- SEC-03 第二步: 「数据出口」审计面板 (今日/本月按目的地聚合 + 会话指示) ---
-    def _build_egress_table(dest_rows: list) -> ft.DataTable | ft.Column:
+    def _build_egress_table(dest_rows: Sequence[EgressAggRow]) -> ft.DataTable | ft.Column:
         """构造今日/本月聚合表; 空 rows 时以空态文案替代表格。"""
         if not dest_rows:
             return ft.Column(
