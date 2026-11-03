@@ -918,6 +918,7 @@
     "settings_status_verify_ok": "验证成功 ✓",
     "settings_status_verify_err": "验证失败",
     "settings_snack_ai_saved": "AI 配置已保存并在验证中...",
+    "settings_ai_saved_stale": "发起时的配置已保存，但当前草稿仍有未保存修改",
     "settings_snack_ai_error": "保存出错",
     "settings_snack_token_empty": "Token 为空，Tushare 功能将不可用",
     "settings_snack_token_verified": "验证成功 ✓",
