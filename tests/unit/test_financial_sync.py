@@ -2924,3 +2924,219 @@ class TestFinancialFullSyncRecovery:
         assert result.status == SyncStatus.SUCCESS.value
         assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == set()
         assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == disclosure_pending
+
+
+class TestFinancialCorporateActionRecovery:
+    """D05-F02: 企业行动失败必须反映到 SyncResult，并以独立 (日期, 表) 目标跨轮恢复。"""
+
+    _CORPORATE_KEY = "financial_corporate_action_pending"
+
+    def _setup_incremental(self, checkpoint: str = "20241020"):
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 10, 18)})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": checkpoint})
+        strategy = FinancialSyncStrategy(ctx)
+        return ctx, store, strategy, FINANCIAL_BATCH_TABLES
+
+    @pytest.mark.asyncio
+    async def test_failure_marks_partial_and_retries_next_round_without_new_disclosure(self):
+        """普通 RuntimeError 不再被吞：首轮 partial+pending；次轮无新披露仍补抓失败表。"""
+        from data.sync.financial import _load_pending_corporate_targets
+
+        ctx, store, strategy, batch_tables = self._setup_incremental()
+        forecast_failing = {"value": True}
+
+        async def forecast(ann_date=None, **kwargs):
+            if forecast_failing["value"]:
+                raise RuntimeError("simulated forecast network error")
+            return pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        ctx.api.get_forecast = AsyncMock(side_effect=forecast)
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result1 = await strategy.run()
+
+        assert result1.status == SyncStatus.PARTIAL.value
+        pending = _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY))
+        assert pending == {"20241021": {"fina_forecast"}}
+        forecast_calls = [
+            c
+            for c in ctx.cache.sync_dao.update_sync_status.await_args_list
+            if c.args[0] == "fina_forecast" and c.args[1] == datetime.date(2024, 10, 21)
+        ]
+        assert any(c.kwargs.get("status") == "failed" for c in forecast_calls)
+        # 四表失败隔离：其余企业行动表仍成功，不因 forecast 失败而中断
+        ctx.api.get_dividend.assert_awaited()
+        ctx.api.get_express.assert_awaited()
+
+        forecast_failing["value"] = False
+        ctx.api.get_forecast.reset_mock()
+        ctx.api.get_dividend.reset_mock()
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result2 = await strategy.run()
+
+        assert result2.status == SyncStatus.SUCCESS.value
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {}
+        assert {c.kwargs.get("ann_date") for c in ctx.api.get_forecast.await_args_list} == {"20241021"}
+        # 已成功表不重复补抓，仅重试未解决 (日期, 表)
+        ctx.api.get_dividend.assert_not_awaited()
+        assert set(batch_tables) == {"fina_forecast", "express", "dividend", "repurchase"}
+
+    @pytest.mark.asyncio
+    async def test_save_failure_marks_save_failed_and_retries(self):
+        """保存异常同样待补，sync_status 记 save_failed，而非静默成功。"""
+        from data.sync.financial import _load_pending_corporate_targets
+
+        ctx, store, strategy, _ = self._setup_incremental()
+        ctx.cache.financial_dao.save_fina_forecast = AsyncMock(side_effect=RuntimeError("simulated save failure"))
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result1 = await strategy.run()
+
+        assert result1.status == SyncStatus.PARTIAL.value
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {"20241021": {"fina_forecast"}}
+        forecast_calls = [
+            c
+            for c in ctx.cache.sync_dao.update_sync_status.await_args_list
+            if c.args[0] == "fina_forecast" and c.args[1] == datetime.date(2024, 10, 21)
+        ]
+        assert any(c.kwargs.get("status") == "save_failed" for c in forecast_calls)
+
+        ctx.cache.financial_dao.save_fina_forecast = AsyncMock(return_value=1)
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result2 = await strategy.run()
+
+        assert result2.status == SyncStatus.SUCCESS.value
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {}
+
+    @pytest.mark.asyncio
+    async def test_legitimate_empty_is_not_failure(self):
+        """合法空（接口成功但无数据）不写 pending、不标记失败，状态为 success。"""
+        from data.sync.financial import _load_pending_corporate_targets
+
+        ctx, store, strategy, batch_tables = self._setup_incremental()
+        for cfg in batch_tables.values():
+            setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame()))
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {}
+        empty_calls = [
+            c
+            for c in ctx.cache.sync_dao.update_sync_status.await_args_list
+            if c.args[0] in batch_tables and c.args[1] == datetime.date(2024, 10, 21)
+        ]
+        assert len(empty_calls) == len(batch_tables)
+        assert all(c.args[2] == 0 and "status" not in c.kwargs for c in empty_calls)
+
+    @pytest.mark.asyncio
+    async def test_permission_denied_is_distinct_from_failure_and_not_retried(self):
+        """无权限接口记 skipped_permission，不进入 pending、不标记 partial。"""
+        from data.external.tushare_client import TushareAPIPermissionError
+        from data.sync.financial import _load_pending_corporate_targets
+
+        ctx, store, strategy, batch_tables = self._setup_incremental()
+        for cfg in batch_tables.values():
+            setattr(ctx.api, cfg["api"], AsyncMock(side_effect=TushareAPIPermissionError(cfg["api"], "no perm")))
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {}
+        permission_calls = [
+            c
+            for c in ctx.cache.sync_dao.update_sync_status.await_args_list
+            if c.args[0] in batch_tables and c.kwargs.get("status") == "skipped_permission"
+        ]
+        assert len(permission_calls) == len(batch_tables)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_keeps_remaining_corporate_targets(self):
+        """中途取消：已完成日期解除，未处理日期的四表目标保留并在下轮恢复。"""
+        from data.sync.financial import _load_pending_corporate_targets
+
+        ctx, store, _, batch_tables = self._setup_incremental()
+        strategy = FinancialSyncStrategy(ctx)
+
+        async def forecast(ann_date=None, **kwargs):
+            strategy._shutdown_event.set()
+            return pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        ctx.api.get_forecast = AsyncMock(side_effect=forecast)
+        clock = {"now": 0.0}
+
+        def fake_monotonic():
+            clock["now"] += 2.0
+            return clock["now"]
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.time.monotonic", side_effect=fake_monotonic),
+        ):
+            await strategy._sync_corporate_actions_by_date(
+                ["20241021", "20241022"],
+                pending_targets={},
+                record_remaining_on_cancel=True,
+            )
+
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {"20241022": set(batch_tables)}
+
+        strategy._shutdown_event.clear()
+        ctx.api.get_forecast.reset_mock()
+        ctx.api.get_dividend.reset_mock()
+        with _patch_app_state(store):
+            await strategy._sync_corporate_actions_by_date(
+                [],
+                pending_targets=_load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)),
+                record_remaining_on_cancel=True,
+            )
+
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {}
+        assert {c.kwargs.get("ann_date") for c in ctx.api.get_forecast.await_args_list} == {"20241022"}
+        ctx.api.get_dividend.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_corporate_pending_does_not_touch_full_sync_pending(self):
+        """D05-F01 兼容：企业行动 pending 不得覆盖/清理全量未完成状态。"""
+        from data.sync.financial import _load_pending_corporate_targets
+
+        ctx, store, _, _ = self._setup_incremental()
+        full_pending = '["000002.SZ"]'
+        store.values["financial_full_sync_pending"] = full_pending
+        ctx.api.get_forecast = AsyncMock(side_effect=RuntimeError("simulated failure"))
+        strategy = FinancialSyncStrategy(ctx)
+
+        with _patch_app_state(store):
+            await strategy._sync_corporate_actions_by_date(["20241021"], pending_targets={})
+
+        assert store.values["financial_full_sync_pending"] == full_pending
+        assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {"20241021": {"fina_forecast"}}
