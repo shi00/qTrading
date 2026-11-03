@@ -1225,7 +1225,7 @@ class TestSchedulingServicesAssembly:
 
         services = bootstrap_module.assemble_scheduling_services()
         coordinator.register_cleanup_callback.assert_called_once_with(
-            "Step 5c: usage recorder close",
+            "usage recorder final flush",
             services["recorder"].aclose,
             critical=True,
             timeout_s=5.0,
@@ -1240,7 +1240,7 @@ class TestSchedulingServicesAssembly:
         bootstrap_module.register_scheduling_cleanup(coordinator_a)
         services_a = bootstrap_module.assemble_scheduling_services()
         coordinator_a.register_cleanup_callback.assert_called_once_with(
-            "Step 5c: usage recorder close",
+            "usage recorder final flush",
             services_a["recorder"].aclose,
             critical=True,
             timeout_s=5.0,
@@ -1254,7 +1254,7 @@ class TestSchedulingServicesAssembly:
         services_b = bootstrap_module.assemble_scheduling_services()
         assert services_b is not services_a
         coordinator_b.register_cleanup_callback.assert_called_once_with(
-            "Step 5c: usage recorder close",
+            "usage recorder final flush",
             services_b["recorder"].aclose,
             critical=True,
             timeout_s=5.0,
@@ -1286,7 +1286,7 @@ class TestSchedulingServicesAssembly:
         for coordinator in (coordinator_a, coordinator_b):
             assert coordinator.register_cleanup_callback.call_count == 1
             call = coordinator.register_cleanup_callback.call_args
-            assert call.args[0] == "Step 5c: usage recorder close"
+            assert call.args[0] == "usage recorder final flush"
             assert call.args[1].__self__ is services_a["recorder"]
             assert call.kwargs.get("critical") is True
             assert call.kwargs.get("timeout_s") == 5.0

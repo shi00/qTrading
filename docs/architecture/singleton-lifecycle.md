@@ -71,7 +71,7 @@ def __init__(self, *, config=None, clock=None):
 
 1. **注册**：模块导入时 `@register_singleton` 将类追加到 `utils/singleton_registry.py::_registry`（重复注册幂等）。类必须实现 `_reset_singleton`，否则装饰器在导入期抛 `TypeError`（`tests.` 模块豁免）。
 2. **初始化**：首次实例化按上文模板的双检锁执行，`_initialized` 保证初始化逻辑只执行一次（`TushareClient` 例外：重复实例化且注入不同 token 时会重跑 token 切换）。
-3. **优雅停机（主路径）**：`ShutdownCoordinator.do_cleanup()` 按 `utils/shutdown.py::_CLEANUP_STEPS` 的 Step 0 → Step 8（含 Step 5b）释放资源：取消在途任务 → 停后台服务 → 刷盘 → 关 `DataProcessor`（含异步引擎）→ 清 Toast → 卸载 AI 模型 / 情绪子进程 → 关线程池 → 关共享同步引擎 → 停内置 PostgreSQL。持有资源的单例须接入对应步骤（复用既有静态步骤，或经 `register_cleanup_callback()` 新增动态步骤——后者在 Step 5b 后、Step 6 前按注册顺序执行；`_CLEANUP_STEPS` 有索引断言，勿随意插行）；停机步骤只读既有实例（`Cls._instance`，或 `get_instance()` 这类不构造新实例的访问器），禁止调用会创建资源的工厂/构造器，避免关机时重建资源。
+3. **优雅停机（主路径）**：`ShutdownCoordinator.do_cleanup()` 按 `utils/shutdown.py::_CLEANUP_STEPS` 的 Step 0 → Step 8（含 Step 3b、Step 5b）释放资源：取消在途任务 → 停后台服务 → 刷盘 → 停止 `DataProcessor` worker（Step 3）→ 动态清理回调（含 Recorder 最终落账，Step 3 后、Step 3b 前）→ 释放异步 DB engine（Step 3b）→ 清 Toast → 卸载 AI 模型 / 情绪子进程 → 关线程池 → 关共享同步引擎 → 停内置 PostgreSQL。持有资源的单例须接入对应步骤（复用既有静态步骤，或经 `register_cleanup_callback()` 新增动态步骤——后者在 Step 3 后、Step 3b 前按注册顺序执行；`_CLEANUP_STEPS` 有索引断言，勿随意插行）；停机步骤只读既有实例（`Cls._instance`，或 `get_instance()` 这类不构造新实例的访问器），禁止调用会创建资源的工厂/构造器，避免关机时重建资源。
 4. **成功标记**：全部关键步骤成功后才调用 `mark_graceful_shutdown_completed()`；失败、超时与外层取消路径均不标记。
 5. **atexit 兜底**：仅在未完成优雅停机时执行（`_atexit_fired` 保证至多一次），由 registry 的单一 atexit handler 按注册顺序的**逆序**调用各单例的 `_atexit_cleanup()`（未实现则跳过）；单个清理异常只告警，不阻断其余单例。
 6. **取消语义（R2）**：停机步骤与清理方法不得吞没 `asyncio.CancelledError`，必须向上抛出；registry 只捕获 `Exception`，`CancelledError` 属 `BaseException`，会自然穿透。

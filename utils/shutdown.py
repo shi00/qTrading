@@ -33,7 +33,11 @@ _CLEANUP_STEPS = [
     ("Step 0", "_step0_cancel_tasks", True, 6.0),
     ("Step 1", "_step1_stop_services", True, 5.0),
     ("Step 2", "_step2_flush_db_writes", True, 2.0),
-    ("Step 3", "_step3_close_processor", True, 3.0),
+    # D02-F02：停止/收敛 worker（Step 3）与 dispose 异步 engine（Step 3b）拆分，
+    # 使 Recorder 最终落账可在 engine 释放前完成（预算合计仍为原 Step 3 的 3.0s；
+    # stop 仅设置取消信号为同步操作，engine dispose 保留原步 2.0s 余量）。
+    ("Step 3", "_step3_stop_processor_workers", True, 1.0),
+    ("Step 3b", "_step3b_dispose_async_engine", True, 2.0),
     ("Step 4", "_step4_clear_toast", False, 1.0),
     ("Step 5", "_step5_unload_ai_model", True, 2.0),
     ("Step 5b", "_step5b_stop_sentiment_scorer", True, 2.0),
@@ -82,7 +86,8 @@ class ShutdownCoordinator:
         # Phase 2A.1 Task 2A.1.9：注册的 fire-and-forget 任务（如启动期 auto probe），
         # 关机时先于 TaskManager 任务取消，避免资源泄漏
         self._registered_tasks: set[asyncio.Task] = set()
-        # S3（D8）：动态清理回调注册点——在 Step 5b 后、Step 6 前穿插执行
+        # S3（D8）/D02-F02：动态清理回调注册点——在 Step 3（worker 收敛）后、
+        # Step 3b（异步 engine dispose）前穿插执行，保证账本最终落账先于 engine 释放
         self._dynamic_cleanup_callbacks: list[tuple[str, Callable[[], Any], bool, float]] = []
 
     def register_cleanup_callback(
@@ -93,10 +98,11 @@ class ShutdownCoordinator:
         critical: bool = True,
         timeout_s: float = 5.0,
     ) -> None:
-        """注册动态清理步骤（S3 D8）：在 Step 5b 之后、Step 6 之前穿插执行。
+        """注册动态清理步骤（S3 D8 / D02-F02）：在 Step 3 之后、Step 3b 之前穿插执行。
 
         callback 可为 sync 或 async callable；不动 _CLEANUP_STEPS 静态表
-        （避免破坏索引断言）。注册顺序即执行顺序（worker 收敛 → Recorder.aclose）。
+        （避免破坏索引断言）。注册顺序即执行顺序（worker 收敛 → Recorder.aclose），
+        确保 Recorder 最终落账发生在异步 DB engine dispose 之前。
         """
         self._dynamic_cleanup_callbacks.append((name, callback, critical, timeout_s))
 
@@ -279,8 +285,8 @@ class ShutdownCoordinator:
         cancelled = False
         for step_def in _CLEANUP_STEPS:
             name, method_name, critical, default_timeout = step_def[0], step_def[1], step_def[2], step_def[3]
-            # S3（D8）：动态清理回调在 Step 5b 后、Step 6 前穿插执行
-            if method_name == "_step6_shutdown_thread_pools" and self._dynamic_cleanup_callbacks:
+            # S3（D8）/D02-F02：动态清理回调在 Step 3 后、Step 3b（engine dispose）前穿插执行
+            if method_name == "_step3b_dispose_async_engine" and self._dynamic_cleanup_callbacks:
                 for dyn_name, dyn_callback, dyn_critical, dyn_timeout in self._dynamic_cleanup_callbacks:
                     start_dyn = time.perf_counter()
 
@@ -478,15 +484,50 @@ class ShutdownCoordinator:
             )
             raise RuntimeError(f"Task persistence flush timed out (internal 1.5s limit): {e}") from e
 
-    async def _step3_close_processor(self):
-        logger.info("[Shutdown] Step 3: Closing DataProcessor...")
+    async def _step3_stop_processor_workers(self):
+        """D02-F02：仅停止/收敛 DataProcessor worker，不在此阶段 dispose 异步 engine。"""
+        logger.info("[Shutdown] Step 3: Stopping DataProcessor workers...")
         from data.data_processor import DataProcessor  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if DataProcessor._instance is not None:
-            await DataProcessor._instance.close()
-            logger.info("[Shutdown]   - DataProcessor closed (includes DB engine disposal).")
+            try:
+                await DataProcessor._instance.stop()
+            except Exception as e:
+                # 保持原 DataProcessor.close 的错误隔离语义（仅记录，不阻断后续释放步骤）
+                logger.error(
+                    "[Shutdown]   - DataProcessor stop failed: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+            else:
+                logger.info("[Shutdown]   - DataProcessor workers stopped (engine disposal deferred to Step 3b).")
         else:
             logger.info("[Shutdown]   - DataProcessor not initialized, skipping.")
+
+    async def _step3b_dispose_async_engine(self):
+        """D02-F02：在 Recorder 最终落账后释放异步 DB engine（不经 DataProcessor.close 合并）。"""
+        logger.info("[Shutdown] Step 3b: Disposing async DB engine...")
+        from data.data_processor import DataProcessor  # lazy-import: 关机步骤按需加载
+
+        processor = DataProcessor._instance
+        if processor is None:
+            logger.info("[Shutdown]   - DataProcessor not initialized, skipping engine disposal.")
+            return
+        cache = processor.cache
+        if cache is None:
+            logger.info("[Shutdown]   - CacheManager not initialized, skipping engine disposal.")
+            return
+        try:
+            await cache.close()
+        except Exception as e:
+            # 保持原 DataProcessor.close 的错误隔离语义（仅记录，不阻断后续释放步骤）
+            logger.error(
+                "[Shutdown]   - Async DB engine disposal failed: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
+        else:
+            logger.info("[Shutdown]   - Async DB engine disposed.")
 
     async def _step4_clear_toast(self):
         logger.info("[Shutdown] Step 4: Clearing Toast Manager...")

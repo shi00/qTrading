@@ -113,7 +113,7 @@ class _FakeCoordinator:
         self.register_task_calls.append(task)
 
     def register_cleanup_callback(self, name, callback, *, critical=True, timeout_s=10.0):
-        """记录动态清理回调注册（S3 shutdown 步骤 5c 契约，见 utils/shutdown.py）。"""
+        """记录动态清理回调注册（S3/D02-F02 shutdown 步骤契约，见 utils/shutdown.py）。"""
         self.register_cleanup_calls.append((name, callback, critical, timeout_s))
 
 

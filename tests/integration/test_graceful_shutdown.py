@@ -20,7 +20,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.asyncio
 async def test_full_cleanup_all_steps(mock_singletons):
-    """Verify all 7 cleanup steps are executed in order with all singletons present."""
+    """Verify all cleanup steps are executed in order with all singletons present."""
     coordinator = ShutdownCoordinator(page=None, service_stop_delay=0)
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
@@ -30,7 +30,8 @@ async def test_full_cleanup_all_steps(mock_singletons):
     mock_singletons["scheduler"].stop.assert_called_once()
     mock_singletons["NewsSubscriptionService"]._instance.stop_async.assert_awaited_once()
     mock_singletons["MarketDataService"]._instance.stop_async.assert_awaited_once()
-    mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
+    mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
+    mock_singletons["DataProcessor"]._instance.cache.close.assert_awaited_once()
     mock_singletons["LocalModelManager"]._instance.unload_model.assert_called_once()
     mock_singletons["ThreadPoolManager"]._instance.shutdown.assert_called_once_with(wait=False)
 
@@ -49,7 +50,8 @@ async def test_cleanup_idempotent(mock_singletons):
         ok2 = await coordinator.do_cleanup()
 
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
-    mock_singletons["DataProcessor"]._instance.close.assert_awaited_once()
+    mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
+    mock_singletons["DataProcessor"]._instance.cache.close.assert_awaited_once()
     assert ok1 is True
     assert ok2 is True
     assert coordinator.cleanup_done is True
@@ -169,8 +171,8 @@ async def test_ai_model_skipped_when_absent():
 
 
 @pytest.mark.asyncio
-async def test_processor_close_called():
-    """Verify DataProcessor.close() is called (which internally handles DB engine disposal)."""
+async def test_processor_stop_and_engine_dispose_are_separate_steps():
+    """D02-F02：Step 3 仅停止 worker，Step 3b 才 dispose 异步 engine。"""
     from data.data_processor import DataProcessor
 
     orig = DataProcessor._instance
@@ -178,15 +180,18 @@ async def test_processor_close_called():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step3_close_processor()
-        DataProcessor._instance.close.assert_awaited_once()
+        await coordinator._step3_stop_processor_workers()
+        DataProcessor._instance.stop.assert_awaited_once()
+        DataProcessor._instance.cache.close.assert_not_awaited()
+        await coordinator._step3b_dispose_async_engine()
+        DataProcessor._instance.cache.close.assert_awaited_once()
     finally:
         DataProcessor._instance = orig
 
 
 @pytest.mark.asyncio
-async def test_processor_close_skipped_when_absent():
-    """Verify processor close step is skipped when no processor exists."""
+async def test_processor_stop_and_engine_dispose_skipped_when_absent():
+    """Verify processor stop/dispose steps are skipped when no processor exists."""
     from data.data_processor import DataProcessor
 
     orig = DataProcessor._instance
@@ -194,7 +199,8 @@ async def test_processor_close_skipped_when_absent():
 
     try:
         coordinator = ShutdownCoordinator(page=None)
-        await coordinator._step3_close_processor()
+        await coordinator._step3_stop_processor_workers()
+        await coordinator._step3b_dispose_async_engine()
     finally:
         DataProcessor._instance = orig
 
@@ -394,7 +400,8 @@ async def test_step5_timeout_marks_cleanup_failed(mock_singletons):
         patch.object(coordinator, "_step0_cancel_tasks", side_effect=_noop),
         patch.object(coordinator, "_step1_stop_services", side_effect=_noop),
         patch.object(coordinator, "_step2_flush_db_writes", side_effect=_noop),
-        patch.object(coordinator, "_step3_close_processor", side_effect=_noop),
+        patch.object(coordinator, "_step3_stop_processor_workers", side_effect=_noop),
+        patch.object(coordinator, "_step3b_dispose_async_engine", side_effect=_noop),
         patch.object(coordinator, "_step4_clear_toast", side_effect=_noop),
         patch.object(coordinator, "_step5_unload_ai_model", side_effect=_blocking_unload),
     ):

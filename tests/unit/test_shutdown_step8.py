@@ -1,7 +1,7 @@
 """ShutdownCoordinator Step 8 单元测试（Phase 2 §3.5 红灯翻绿）。
 
 测试分组（6 个）：
-- 结构验证：_CLEANUP_STEPS 索引 8 = Step 8 定义
+- 结构验证：_CLEANUP_STEPS 索引 10 = Step 8 定义
 - noop 路径：service 未注册 / 已注册但未初始化
 - 调用路径：asyncio.to_thread 包装 stop_sync 被调用
 - 失败路径：stop_sync raise → 记 ERROR，不抛异常
@@ -24,11 +24,11 @@ from utils.shutdown import ShutdownCoordinator, _CLEANUP_STEPS
 pytestmark = pytest.mark.unit
 
 
-def test_step8_in_cleanup_steps_at_index_9() -> None:
-    """_CLEANUP_STEPS[9] 应为 Step 8 定义（N3-3 插入 Step 5b 后 Step 8 位于 index 9）。"""
-    assert len(_CLEANUP_STEPS) >= 10, f"_CLEANUP_STEPS 应至少 10 项，实际 {len(_CLEANUP_STEPS)}"
-    assert _CLEANUP_STEPS[9] == ("Step 8", "_step8_stop_embedded_postgres", True, 35.0), (
-        f"_CLEANUP_STEPS[9] 实际：{_CLEANUP_STEPS[9]}"
+def test_step8_in_cleanup_steps_at_index_10() -> None:
+    """_CLEANUP_STEPS[10] 应为 Step 8 定义（D02-F02 拆分 Step 3/3b 后 Step 8 位于 index 10）。"""
+    assert len(_CLEANUP_STEPS) >= 11, f"_CLEANUP_STEPS 应至少 11 项，实际 {len(_CLEANUP_STEPS)}"
+    assert _CLEANUP_STEPS[10] == ("Step 8", "_step8_stop_embedded_postgres", True, 35.0), (
+        f"_CLEANUP_STEPS[10] 实际：{_CLEANUP_STEPS[10]}"
     )
 
 
@@ -145,7 +145,7 @@ def test_step8_timeout_not_limited_by_min_logic() -> None:
     验证 utils/shutdown.py:250 effective_timeout = min(default_timeout, step_timeout_s)
     当 step_timeout_s=35.0 时，Step 8 默认 35.0 不被 min 钳制为更小值。
     """
-    step8_def = _CLEANUP_STEPS[9]
+    step8_def = _CLEANUP_STEPS[10]
     default_timeout = step8_def[3]
     assert default_timeout == 35.0, f"Step 8 default_timeout 应为 35.0，实际：{default_timeout}"
 

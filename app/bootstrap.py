@@ -200,12 +200,12 @@ def _drain_pending_scheduling_coordinators() -> None:
         return
     for coordinator in pending:
         coordinator.register_cleanup_callback(
-            "Step 5c: usage recorder close", recorder.aclose, critical=True, timeout_s=5.0
+            "usage recorder final flush", recorder.aclose, critical=True, timeout_s=5.0
         )
 
 
 def register_scheduling_cleanup(coordinator: Any) -> None:
-    """把 Recorder 收敛注册为动态停机步骤（S3 D8：Step 5b 后、Step 6 前）。
+    """把 Recorder 收敛注册为动态停机步骤（S3 D8 / D02-F02：Step 3 后、Step 3b 前）。
 
     F40 时序兼容：application._run_session 在 controller.start() 之前调用本函数，
     而 assemble_scheduling_services 在 initialize_services（controller.start 内）才

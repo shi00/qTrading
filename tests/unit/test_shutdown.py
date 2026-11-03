@@ -60,17 +60,22 @@ class TestCleanupSteps:
     """验证 _CLEANUP_STEPS 步骤定义的结构、超时预算与顺序约束。"""
 
     def test_steps_defined(self):
-        assert len(_CLEANUP_STEPS) == 10
+        # D02-F02：processor worker 收敛（Step 3）与异步 engine dispose（Step 3b）拆分，
+        # 使 Recorder 最终落账可在两者之间执行；静态步骤由 10 项增至 11 项。
+        assert len(_CLEANUP_STEPS) == 11
         assert _CLEANUP_STEPS[0][0] == "Step 0"
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
         assert _CLEANUP_STEPS[0][2] is True
         assert _CLEANUP_STEPS[0][3] == 6.0
-        assert _CLEANUP_STEPS[4][2] is False
-        assert _CLEANUP_STEPS[4][3] == 1.0
+        assert _CLEANUP_STEPS[3] == ("Step 3", "_step3_stop_processor_workers", True, 1.0)
+        assert _CLEANUP_STEPS[4] == ("Step 3b", "_step3b_dispose_async_engine", True, 2.0)
+        # Step 4（清 Toast）非关键、预算 1.0s；拆分后索引由 4 后移至 5
+        assert _CLEANUP_STEPS[5][2] is False
+        assert _CLEANUP_STEPS[5][3] == 1.0
         # N3-3: Step 5b 紧跟 Step 5（新闻情绪打分子进程清理，预算 2.0s）
-        assert _CLEANUP_STEPS[6] == ("Step 5b", "_step5b_stop_sentiment_scorer", True, 2.0)
-        assert _CLEANUP_STEPS[7][0] == "Step 6"
-        assert _CLEANUP_STEPS[9][0] == "Step 8"
+        assert _CLEANUP_STEPS[7] == ("Step 5b", "_step5b_stop_sentiment_scorer", True, 2.0)
+        assert _CLEANUP_STEPS[8][0] == "Step 6"
+        assert _CLEANUP_STEPS[10][0] == "Step 8"
 
     def test_each_step_has_timeout(self):
         """ASYNC-004/005: Each cleanup step has its own timeout."""
@@ -418,21 +423,43 @@ class TestShutdownCoordinatorCleanupSteps:
             assert "Task persistence flush timed out (internal 1.5s limit)" in result.error
 
     @pytest.mark.asyncio
-    async def test_step3_close_processor_no_instance(self):
+    async def test_step3_stop_processor_no_instance(self):
         coord = ShutdownCoordinator()
         with patch("data.data_processor.DataProcessor") as mock_dp:
             mock_dp._instance = None
-            await coord._step3_close_processor()
+            await coord._step3_stop_processor_workers()
 
     @pytest.mark.asyncio
-    async def test_step3_close_processor_with_instance(self):
+    async def test_step3_stop_processor_only_stops_workers(self):
+        """Step 3 仅停止 worker，不在此阶段 dispose 异步 engine。"""
         coord = ShutdownCoordinator()
         with patch("data.data_processor.DataProcessor") as mock_dp:
             mock_instance = MagicMock()
-            mock_instance.close = AsyncMock()
+            mock_instance.stop = AsyncMock()
+            mock_instance.cache = MagicMock()
+            mock_instance.cache.close = AsyncMock()
             mock_dp._instance = mock_instance
-            await coord._step3_close_processor()
-            mock_instance.close.assert_called_once()
+            await coord._step3_stop_processor_workers()
+            mock_instance.stop.assert_awaited_once()
+            mock_instance.cache.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_step3b_dispose_async_engine_no_instance(self):
+        coord = ShutdownCoordinator()
+        with patch("data.data_processor.DataProcessor") as mock_dp:
+            mock_dp._instance = None
+            await coord._step3b_dispose_async_engine()
+
+    @pytest.mark.asyncio
+    async def test_step3b_dispose_async_engine_with_instance(self):
+        coord = ShutdownCoordinator()
+        with patch("data.data_processor.DataProcessor") as mock_dp:
+            mock_instance = MagicMock()
+            mock_instance.cache = MagicMock()
+            mock_instance.cache.close = AsyncMock()
+            mock_dp._instance = mock_instance
+            await coord._step3b_dispose_async_engine()
+            mock_instance.cache.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_step4_clear_toast_no_page(self):
@@ -1010,21 +1037,16 @@ class TestMainPyCleanupTimeouts:
 class TestShutdownStepOrdering:
     """验证 _CLEANUP_STEPS 中关键步骤的执行顺序约束 (防数据丢失)。"""
 
-    def test_flush_db_before_close_processor(self):
-        """flush_db_writes 必须在 close_processor 之前执行以防止数据丢失。"""
-        flush_idx = None
-        close_idx = None
+    def test_flush_db_before_stop_processor_before_engine_dispose(self):
+        """flush_db_writes → 停止 processor worker → dispose 异步 engine 的顺序约束。"""
+        indices: dict[str, int] = {}
         for i, (_name, method_name, _critical, _timeout) in enumerate(_CLEANUP_STEPS):
-            if method_name == "_step2_flush_db_writes":
-                flush_idx = i
-            if method_name == "_step3_close_processor":
-                close_idx = i
-        assert flush_idx is not None, "_step2_flush_db_writes not found in cleanup steps"
-        assert close_idx is not None, "_step3_close_processor not found in cleanup steps"
-        assert flush_idx < close_idx, (
-            f"Flush DB writes (step {flush_idx}) must execute before "
-            f"close processor (step {close_idx}) to prevent data loss"
-        )
+            indices[method_name] = i
+        assert "_step2_flush_db_writes" in indices
+        assert "_step3_stop_processor_workers" in indices
+        assert "_step3b_dispose_async_engine" in indices
+        assert indices["_step2_flush_db_writes"] < indices["_step3_stop_processor_workers"]
+        assert indices["_step3_stop_processor_workers"] < indices["_step3b_dispose_async_engine"]
 
     def test_cancel_tasks_is_first_step(self):
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
@@ -1035,8 +1057,153 @@ class TestShutdownStepOrdering:
     def test_step2_is_flush_db_writes(self):
         assert _CLEANUP_STEPS[2][1] == "_step2_flush_db_writes"
 
-    def test_step3_is_close_processor(self):
-        assert _CLEANUP_STEPS[3][1] == "_step3_close_processor"
+    def test_step3_stop_and_step3b_dispose_are_split(self):
+        assert _CLEANUP_STEPS[3][1] == "_step3_stop_processor_workers"
+        assert _CLEANUP_STEPS[4][1] == "_step3b_dispose_async_engine"
+
+
+class TestUsageRecorderShutdownOrder:
+    """D02-F02：关机事件顺序 = 生产停止 → Recorder 最终落账 → 异步 engine dispose → PG stop。"""
+
+    _STUB_METHODS = (
+        "_step0_cancel_tasks",
+        "_step1_stop_services",
+        "_step2_flush_db_writes",
+        "_step4_clear_toast",
+        "_step5_unload_ai_model",
+        "_step5b_stop_sentiment_scorer",
+        "_step6_shutdown_thread_pools",
+        "_step7_close_database_managers",
+        "_step8_stop_embedded_postgres",
+    )
+
+    @staticmethod
+    def _observation(attempt_id: str):
+        from core.model_management_types import NormalizedLLMUsage
+        from services.ai_service.usage_recorder import AttemptUsageObservation
+
+        return AttemptUsageObservation(
+            attempt_id=attempt_id,
+            invocation_id="inv-shutdown",
+            usage=NormalizedLLMUsage(
+                input_total_tokens=120,
+                uncached_input_tokens=100,
+                cache_read_tokens=20,
+                cache_write_tokens=None,
+                output_tokens=15,
+            ),
+            actual_model="glm-4-air",
+            metadata={"connection_id": "conn-shutdown", "month": "202611"},
+        )
+
+    @classmethod
+    def _terminal(cls, attempt_id: str):
+        from services.ai_service.usage_recorder import AttemptTerminalRecord
+
+        return AttemptTerminalRecord(
+            attempt_id=attempt_id,
+            invocation_id="inv-shutdown",
+            status="succeeded",
+            usage=cls._observation(attempt_id).usage,
+            error_code=None,
+            duration_ms=123.4,
+        )
+
+    @classmethod
+    def _stub_steps(cls, coord: ShutdownCoordinator, events: list[str]) -> None:
+        for method in cls._STUB_METHODS:
+
+            async def _step(_m=method):
+                events.append(_m)
+
+            setattr(coord, method, _step)
+
+    @pytest.mark.asyncio
+    async def test_recorder_flush_settles_before_engine_dispose_and_pg_stop(self):
+        """DAO 首次失败后恢复：pending 结算 + 已观察未终态两条均在 dispose 前落库，revision 不双计。"""
+        from services.ai_service.usage_recorder import UsageRecorder
+
+        events: list[str] = []
+        settle_calls: list[dict] = []
+        dao = MagicMock()
+
+        async def settle_attempt_usage(**kwargs):
+            settle_calls.append(kwargs)
+            events.append(f"settle:{kwargs['attempt_id']}")
+            if len(settle_calls) == 1:
+                raise RuntimeError("ledger temporarily unavailable")
+            return True
+
+        dao.settle_attempt_usage = settle_attempt_usage
+        dao.close_expired_usage_windows = AsyncMock(return_value=0)
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: 0.0, settle_timeout_s=0.5)
+
+        recorder.observe_usage(self._observation("att-pending"))
+        first = await recorder.submit_terminal(self._terminal("att-pending"))
+        assert first.persisted is False
+        assert "att-pending" in recorder._pending_settle
+        recorder.observe_usage(self._observation("att-unobserved"))
+        assert recorder.pending_observation_count() == 2
+
+        # 仅观察关机阶段事件顺序（首次失败属于测试前置）
+        events.clear()
+
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        self._stub_steps(coord, events)
+        processor = MagicMock()
+        processor.stop = AsyncMock(side_effect=lambda: events.append("stop-processor"))
+        processor.cache = MagicMock()
+        processor.cache.close = AsyncMock(side_effect=lambda: events.append("dispose-engine"))
+        coord.register_cleanup_callback("usage recorder final flush", recorder.aclose, critical=True, timeout_s=5.0)
+
+        with patch("data.data_processor.DataProcessor") as mock_dp:
+            mock_dp._instance = processor
+            results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+
+        assert len(results) == 12
+        assert events.index("stop-processor") < events.index("dispose-engine")
+        settle_indices = [i for i, event in enumerate(events) if event.startswith("settle:")]
+        assert len(settle_indices) == 2
+        # 生产停止（Step 0~2 + processor worker stop）→ Recorder 落账 → engine dispose → 同步 engine/PG
+        assert events.index("_step2_flush_db_writes") < events.index("stop-processor")
+        assert events.index("stop-processor") < min(settle_indices)
+        assert max(settle_indices) < events.index("dispose-engine")
+        assert events.index("dispose-engine") < events.index("_step7_close_database_managers")
+        assert events.index("dispose-engine") < events.index("_step8_stop_embedded_postgres")
+
+        shutdown_settles = settle_calls[1:]
+        assert {call["attempt_id"] for call in shutdown_settles} == {"att-pending", "att-unobserved"}
+        # revision 幂等：补交沿用同一水位，不因关机重放而双计
+        assert all(call["usage_revision"] == 1 for call in shutdown_settles)
+        assert recorder._pending_settle == {}
+        assert recorder.pending_observation_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_ledger_unavailable_does_not_claim_settled(self, caplog):
+        """真实账本不可用时 Recorder 如实告警丢弃事实，不伪装已落账（R21）。"""
+        from services.ai_service.usage_recorder import UsageRecorder
+
+        events: list[str] = []
+        recorder = UsageRecorder(dao_provider=lambda: None, clock=lambda: 0.0, settle_timeout_s=0.5)
+        recorder.observe_usage(self._observation("att-unavailable"))
+
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        self._stub_steps(coord, events)
+        processor = MagicMock()
+        processor.stop = AsyncMock()
+        processor.cache = MagicMock()
+        processor.cache.close = AsyncMock()
+        coord.register_cleanup_callback("usage recorder final flush", recorder.aclose, critical=True, timeout_s=5.0)
+
+        with patch("data.data_processor.DataProcessor") as mock_dp:
+            mock_dp._instance = processor
+            results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+
+        dyn_result = next(r for r in results if r.name == "usage recorder final flush")
+        # 回调不吞错：步骤本身完成，但日志必须如实记录未落账
+        assert dyn_result.ok is True
+        assert "dropped at shutdown attempt" in caplog.text
+        assert recorder._observations == {}
 
 
 class TestRegisterTask:
@@ -1151,7 +1318,8 @@ class TestRunCleanupStepsDeep:
         coord._step0_cancel_tasks = step0
         coord._step1_stop_services = step_ok
         coord._step2_flush_db_writes = step_ok
-        coord._step3_close_processor = step_ok
+        coord._step3_stop_processor_workers = step_ok
+        coord._step3b_dispose_async_engine = step_ok
         coord._step4_clear_toast = step_ok
         coord._step5_unload_ai_model = step_ok
         coord._step5b_stop_sentiment_scorer = step_ok
@@ -1160,8 +1328,8 @@ class TestRunCleanupStepsDeep:
         coord._step8_stop_embedded_postgres = step_ok
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        # 10 个步骤全部执行
-        assert len(results) == 10
+        # 11 个静态步骤全部执行
+        assert len(results) == 11
         # Step 0 失败但其余执行
         assert results[0].ok is False
         assert results[0].critical is True
@@ -1169,7 +1337,7 @@ class TestRunCleanupStepsDeep:
             assert r.ok is True
         # 所有步骤都被调用（critical failure 不中断流程）
         assert "step0" in call_log
-        assert call_log.count("step_ok") == 9
+        assert call_log.count("step_ok") == 10
 
     @pytest.mark.asyncio
     async def test_cancelled_step_propagates_after_loop(self):
@@ -1185,7 +1353,8 @@ class TestRunCleanupStepsDeep:
         coord._step0_cancel_tasks = step_cancelled
         coord._step1_stop_services = step_ok
         coord._step2_flush_db_writes = step_ok
-        coord._step3_close_processor = step_ok
+        coord._step3_stop_processor_workers = step_ok
+        coord._step3b_dispose_async_engine = step_ok
         coord._step4_clear_toast = step_ok
         coord._step5_unload_ai_model = step_ok
         coord._step6_shutdown_thread_pools = step_ok
@@ -1206,7 +1375,8 @@ class TestRunCleanupStepsDeep:
         coord._step0_cancel_tasks = step_ok
         coord._step1_stop_services = step_ok
         coord._step2_flush_db_writes = step_ok
-        coord._step3_close_processor = step_ok
+        coord._step3_stop_processor_workers = step_ok
+        coord._step3b_dispose_async_engine = step_ok
         coord._step4_clear_toast = step_ok
         coord._step5_unload_ai_model = step_ok
         coord._step5b_stop_sentiment_scorer = step_ok
@@ -1217,7 +1387,7 @@ class TestRunCleanupStepsDeep:
         # step_timeout_s=0.5 远小于各 step 的 default（1.0~35.0，Step 8=35.0）
         # M13: 更新注释 — Step 8 加入后 default 上限由 5.0 提升至 35.0
         results = await coord._run_cleanup_steps(step_timeout_s=0.5)
-        assert len(results) == 10
+        assert len(results) == 11
         # 全部成功（mock step 立即返回，不超时）
         for r in results:
             assert r.ok is True
@@ -1466,7 +1636,8 @@ class TestFullCleanupWithCriticalFailure:
             # 让 Step 2 (flush_db_writes) 失败
             coord._step2_flush_db_writes = fail_step
             # 其余步骤正常
-            coord._step3_close_processor = ok_step
+            coord._step3_stop_processor_workers = ok_step
+            coord._step3b_dispose_async_engine = ok_step
             coord._step5_unload_ai_model = ok_step
             coord._step6_shutdown_thread_pools = ok_step
 
@@ -1480,13 +1651,14 @@ class TestFullCleanupWithCriticalFailure:
 
 
 class TestDynamicCleanupCallbacks:
-    """S3（D8）：动态清理回调在 Step 5b 后、Step 6 前穿插执行。"""
+    """S3（D8）/D02-F02：动态清理回调在 Step 3 后、Step 3b（异步 engine dispose）前执行。"""
 
     _STEP_METHODS = (
         "_step0_cancel_tasks",
         "_step1_stop_services",
         "_step2_flush_db_writes",
-        "_step3_close_processor",
+        "_step3_stop_processor_workers",
+        "_step3b_dispose_async_engine",
         "_step4_clear_toast",
         "_step5_unload_ai_model",
         "_step5b_stop_sentiment_scorer",
@@ -1505,8 +1677,8 @@ class TestDynamicCleanupCallbacks:
             setattr(coord, method, _step)
 
     @pytest.mark.asyncio
-    async def test_dynamic_callback_runs_between_step5b_and_step6(self):
-        """动态回调必须穿插在 Step 5b（sentiment scorer 停止）之后、Step 6（线程池关闭）之前。"""
+    async def test_dynamic_callback_runs_after_stop_processor_before_engine_dispose(self):
+        """动态回调（Recorder 最终落账）必须穿插在 Step 3 停止 worker 之后、Step 3b dispose engine 之前。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         call_log: list[str] = []
         self._stub_steps(coord, call_log)
@@ -1514,13 +1686,13 @@ class TestDynamicCleanupCallbacks:
         async def recorder_close():
             call_log.append("dyn-recorder-close")
 
-        coord.register_cleanup_callback("Step 5c: usage recorder close", recorder_close, critical=True, timeout_s=5.0)
+        coord.register_cleanup_callback("usage recorder final flush", recorder_close, critical=True, timeout_s=5.0)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        # 10 个静态步骤 + 1 个动态回调
-        assert len(results) == 11
-        assert call_log.index("_step5b_stop_sentiment_scorer") < call_log.index("dyn-recorder-close")
-        assert call_log.index("dyn-recorder-close") < call_log.index("_step6_shutdown_thread_pools")
+        # 11 个静态步骤 + 1 个动态回调
+        assert len(results) == 12
+        assert call_log.index("_step3_stop_processor_workers") < call_log.index("dyn-recorder-close")
+        assert call_log.index("dyn-recorder-close") < call_log.index("_step3b_dispose_async_engine")
 
     @pytest.mark.asyncio
     async def test_dynamic_callbacks_execute_in_registration_order(self):
@@ -1551,20 +1723,20 @@ class TestDynamicCleanupCallbacks:
         coord.register_cleanup_callback("dyn-sync", lambda: call_log.append("dyn-sync"), critical=True, timeout_s=5.0)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        assert len(results) == 11
+        assert len(results) == 12
         assert "dyn-sync" in call_log
         sync_result = next(r for r in results if r.name == "dyn-sync")
         assert sync_result.ok is True
 
     @pytest.mark.asyncio
     async def test_no_dynamic_callbacks_keeps_static_step_count(self):
-        """未注册动态回调时 results 保持 10 个静态步骤（回归保护）。"""
+        """未注册动态回调时 results 保持 11 个静态步骤（回归保护）。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         call_log: list[str] = []
         self._stub_steps(coord, call_log)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        assert len(results) == 10
+        assert len(results) == 11
         assert coord._dynamic_cleanup_callbacks == []
 
     @pytest.mark.asyncio
@@ -1577,13 +1749,14 @@ class TestDynamicCleanupCallbacks:
         async def failing_close():
             raise RuntimeError("recorder close failed")
 
-        coord.register_cleanup_callback("Step 5c: usage recorder close", failing_close, critical=True, timeout_s=5.0)
+        coord.register_cleanup_callback("usage recorder final flush", failing_close, critical=True, timeout_s=5.0)
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        assert len(results) == 11
-        dyn_result = next(r for r in results if r.name == "Step 5c: usage recorder close")
+        assert len(results) == 12
+        dyn_result = next(r for r in results if r.name == "usage recorder final flush")
         assert dyn_result.ok is False
         assert dyn_result.critical is True
-        # Step 6~8 仍执行
+        # Step 3b dispose engine 与 Step 6~8 仍执行
+        assert "_step3b_dispose_async_engine" in call_log
         assert "_step6_shutdown_thread_pools" in call_log
         assert "_step8_stop_embedded_postgres" in call_log
