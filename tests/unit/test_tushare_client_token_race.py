@@ -317,9 +317,15 @@ class TestStaleRequestCapabilityPollution:
             await client.set_token_async("new_token_after_stale_request")
             await client.probe_api_capabilities()
             release_old_call.set()
-            with pytest.raises(TushareAPIPermissionError):
+            with pytest.raises(
+                TushareAPIPermissionError,
+                match=f"api={api_name}",
+            ) as exc_info:
                 await old_task
 
+        # 强断言：异常归属仍是旧 token 请求对应的 API，且携带原始权限错误信息
+        assert exc_info.value.api_name == api_name
+        assert "权限不足" in exc_info.value.message
         assert client.is_token_invalid is False
         # 新 token probe 的权威 True 未被旧请求的权限错误覆盖为 False
         assert client.is_api_available(api_name) is True
