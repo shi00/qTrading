@@ -35,6 +35,33 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 > **操作指引**：TaskManager 后台任务的完整触发与编排方式见 [docs/guides/how-to.md](../guides/how-to.md) 与 [data-sync.md](./data-sync.md) 的落地路径；新增异步任务须遵循 CLAUDE.md §3.1 R2（取消传播）。
 
+## 崩溃重试契约（D11-Q01 固化）
+
+> 本节把历史待确认问题 D11-Q01 固化为显式契约：**只描述现状，不扩大 schema、不改变行为**。符号均指 `services/task_manager.py` 中的实现。
+
+**持久化内容**（`_persist_task` / `_persist_task_async` → `_persist_snapshot`，DDL 见 `alembic/versions/0025_add_crash_retry_columns.py`、模型见 `data/persistence/models.py::TaskHistory`）：
+
+- `factory_key`：可重建工厂的注册键（经 `register_retryable_factory` 登记），重启后按键从注册表回填 `_coroutine_factory`；未命中注册表则保持不可重试；
+- `retry_kwargs`：`submit_task(**kwargs)` 的原始关键字参数经 `_serialize_retry_kwargs` 做 `json.dumps` 序列化，**仅支持 JSON 标量/容器**（字符串、数值、布尔、null、list、dict，tuple 退化为 list）。仅当 `factory_key` 非空才写入；不可序列化时写 NULL，重启后该任务不可重试（进程内仍可重试，因内存中保留 factory 与 kwargs）；
+- `unique_key`：原始去重键，重试时复用原键，使重试任务与其它提交路径共享同一去重占位（`retry_task`，LIFE-01）；
+- `status` / `progress` / `description`：任务状态与展示信息（`Message` 经 `_serialize_msg_field` 持久化）；另持久化 `name` / `task_type` / `error` / `result` 与时间戳，供历史面板展示。
+
+**不持久化内容**（无对应 DB 列，重启后不可恢复）：
+
+- `exclusive_group`：组归属仅进程内有效。`init_db` 回载的历史任务 `exclusive_group=None`，经 `retry_task` 重建的任务**不受原组约束**，业务须在提交侧自行去重/互斥；同一进程内重试（任务仍在内存）会由 `retry_task` 透传原组名，组语义保持到重启为止（见上文 D7-5 条目）。
+- `cancellable`：`AppTask` 默认 `False`，`init_db` 构造历史任务时不回填，故重启回载的任务恒为 `False`；同一进程内重试则透传原内存值。
+- 原配置快照（数据源/同步等运行期配置）与 DB 目标/引擎指纹：均不持久化。
+
+**重试语义**：
+
+- `retry_task` 用持久化的 `factory_key` 查回注册工厂，并以持久化的原 `retry_kwargs` + **当前配置 / 当前 DB 目标**重新执行；内置重建工厂见 `services/task_rebuild.py`，运行期读取当前单例（如 `DataProcessor`）。
+- 因此重启后配置或 DB 目标发生变化，会改变重试任务的实际行为与写入目标——这是**有意契约**（避免按陈旧配置重放而与当前用户设置不一致）。
+- 可重试状态仅 `FAILED` / `INTERRUPTED`（`_RETRYABLE_STATUSES`）；`COMPLETED` / `CANCELLED` 不可重试（`CANCELLED` 代表用户主动放弃意图）。`is_retryable` 还要求已回填可执行工厂，否则 UI 不展示重试入口。
+
+**变更门槛**：新增持久化字段（如组归属、`cancellable`、配置快照）必须同时提供 DB schema 迁移与产品决策，不得静默扩大本契约。
+
+**失败可观察性**：重试经 `submit_task` 创建**新的 task_id**，原历史行保留（状态/错误/进度不被覆盖），用户可在任务中心同时看到失败记录与重试任务；任务不存在、状态不可重试或无 factory 时 `retry_task` 返回 `None` 并记录警告，`unique_key` 仍被其它活动任务持有或无事件循环时则由 `submit_task` 返回 `None`（去重契约优先）。
+
 ## 完成判定（canonical 入口）
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」；TaskManager 逻辑改动后须 `redline-check`（R2/R11/R16）+ 相关单测。
