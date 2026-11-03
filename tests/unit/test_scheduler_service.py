@@ -1776,6 +1776,12 @@ class TestSafeShutdownSchedulerGenericError:
 class TestCatchUpMissedUpdates:
     """D6-1: 补偿机制 — 检查遗漏交易日并提交补偿任务。"""
 
+    @pytest.fixture(autouse=True)
+    def _enable_auto_update(self):
+        """D11-F01: 补偿入口现受自动更新开关约束；本类验证补偿逻辑本身，显式开启。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
+
     @pytest.mark.asyncio
     async def test_empty_baseline_empty_db_warns_and_returns(self):
         """REVIEW-06 TO-01: 基准为空（None/空串）+ daily_quotes 无数据 → 告警跳过且不提交（需先全量初始化）。"""
@@ -2113,8 +2119,175 @@ class TestCatchUpMissedUpdates:
         svc._catch_up_missed_updates.assert_awaited_once_with(include_today=False)
 
 
+class TestAutoUpdateGating:
+    """D11-F01: 自动行情补偿必须受 ConfigHandler.is_auto_update_enabled() 约束。
+
+    覆盖 loader（_load_db_state）/ 30s 看门狗（_watch_config_changes）/ misfire
+    （_on_job_missed）三处真实入口，以及「关闭前已排队、关闭后才开始执行」的竞态。
+    关闭自动更新时本就允许不补当天数据（用户重新开启后由下一轮补偿检查接手）；
+    手动同步不经 _catch_up_missed_updates，故不受该守卫影响。
+    """
+
+    @staticmethod
+    def _build_missed_setup():
+        """构造「已存在遗漏交易日（6/13 水位，今天 6/15）」的真实提交路径替身。"""
+        svc = _make_svc()
+        svc._last_update_date = "20240613"
+        all_dates = [date(2024, 6, 13), date(2024, 6, 14)]
+
+        async def _get_trade_dates(start_date=None, end_date=None):
+            s = start_date if start_date is not None else date.min
+            e = end_date if end_date is not None else date.max
+            return [d for d in all_dates if s <= d <= e]
+
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.get_trade_dates = AsyncMock(side_effect=_get_trade_dates)
+        mock_tm = MagicMock()
+        mock_tm.submit_task = MagicMock(return_value="tid")
+        mock_tm.get_all_tasks = MagicMock(return_value=[])
+        return svc, mock_dp, mock_tm
+
+    @pytest.mark.asyncio
+    async def test_load_db_state_disabled_does_not_submit(self):
+        """入口 1：启动 loader 完成后的补偿检查受开关约束，关闭时不提交。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=MagicMock())),
+            patch(
+                "data.persistence.app_state_service.get_app_state",
+                AsyncMock(side_effect=[None, None, None]),
+            ),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now") as mock_now,
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await svc._load_db_state()
+        assert svc._db_state_loaded is True
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.trade_calendar.get_trade_dates.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_watch_config_changes_disabled_does_not_submit(self):
+        """入口 2：30 秒看门狗复用为补偿周期，关闭时不提交。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        config = {
+            "time": "09:30",
+            "enabled": False,
+            "concept_time": "10:00",
+            "concept_enabled": False,
+            "nightly_time": "20:30",
+        }
+        svc._last_known_config = config.copy()
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 9, 0, 0)),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock(return_value=config)
+            await svc._watch_config_changes()
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.trade_calendar.get_trade_dates.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_on_job_missed_disabled_does_not_submit(self):
+        """入口 3：misfire（bypass_backoff=True）同样受开关约束，关闭时不提交。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        event = MagicMock()
+        event.job_id = "daily_update"
+        event.scheduled_run_time = "2024-06-15"
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now") as mock_now,
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            svc._on_job_missed(event)
+            for _ in range(5):
+                await asyncio.sleep(0)
+            if svc._catchup_tasks:
+                await asyncio.gather(*list(svc._catchup_tasks))
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.trade_calendar.get_trade_dates.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_disabled_returns_before_backoff_and_bootstrap(self):
+        """守卫置于退避/自举/日历查询之前：关闭时零 IO、不改变任何内部状态。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        svc._last_update_date = None  # 强制走自举分支，验证其不被触发
+        svc._catchup_consecutive_failures = 2
+        svc._catchup_next_retry_at = datetime(2024, 6, 15, 12, 0, 0)
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 11, 0, 0)),
+            patch("utils.scheduler_service.logger.debug") as mock_debug,
+        ):
+            await svc._catch_up_missed_updates(include_today=True, bypass_backoff=True)
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.cache.quote_dao.get_latest_trade_date.call_count == 0
+        assert svc._bootstrap_baseline_date is None
+        assert svc._catchup_consecutive_failures == 2
+        assert any("自动更新已关闭" in str(c.args[0]) for c in mock_debug.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_enabled_with_missed_dates_still_submits(self):
+        """回归保护：开关开启时，遗漏交易日仍照常提交（守卫不误杀自动补偿）。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now") as mock_now,
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await svc._catch_up_missed_updates()
+        mock_tm.submit_task.assert_called_once()
+        kwargs = mock_tm.submit_task.call_args.kwargs
+        assert kwargs["missed_dates"] == [date(2024, 6, 14)]
+        assert kwargs["unique_key"] == "daily_sync_catchup"
+
+    @pytest.mark.asyncio
+    async def test_queued_catchup_cancelled_when_disabled_before_start(self):
+        """关闭前已排队的补偿任务：获得组锁后二次判定使能 → 不执行业务 IO，抛 CancelledError（R2）。
+
+        R2: CancelledError 必须上抛（由 TaskManager 映射 CANCELLED，而非伪成功）。
+        R22: 不得推进水位、不得记录补偿失败。
+        """
+        svc = _make_svc()
+        svc._last_update_date = "20240613"
+        mock_dp = MagicMock()
+        mock_dp.sync_daily_market_snapshot = AsyncMock()
+        mock_tm = MagicMock()
+        mock_tm.update_progress = MagicMock(return_value=True)
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._catchup_logic("task1", [date(2024, 6, 11)])
+        assert mock_dp.sync_daily_market_snapshot.await_count == 0
+        assert mock_tm.update_progress.call_count == 0
+        assert svc._last_update_date == "20240613"
+        assert svc._catchup_consecutive_failures == 0
+        assert svc._catchup_next_retry_at is None
+
+
 class TestCatchupLogic:
     """D6-1: 补偿执行逻辑 — 逐日同步 + is_complete 判定幂等键。"""
+
+    @pytest.fixture(autouse=True)
+    def _enable_auto_update(self):
+        """D11-F01: _catchup_logic 执行前二次判定使能；本类验证补偿逻辑本身，显式开启。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
 
     @pytest.mark.asyncio
     async def test_complete_marks_done(self):
@@ -2476,6 +2649,12 @@ class TestCatchupBackoff:
 
     _FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0)
 
+    @pytest.fixture(autouse=True)
+    def _enable_auto_update(self):
+        """D11-F01: 补偿入口现受自动更新开关约束；本类验证退避语义，显式开启。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
+
     async def _run_incomplete_catchup(self, svc):
         """驱动一次 _catchup_logic 并返回未完成结果（关键表失败）。"""
         mock_dp_instance = MagicMock()
@@ -2483,6 +2662,8 @@ class TestCatchupBackoff:
         mock_tm_instance = MagicMock()
         mock_tm_instance.update_progress.return_value = True
         with (
+            # D11-F01: 该 helper 也被 TestGetJobsStatusSnapshot 复用，显式开启使能。
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
             patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
             patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
             patch("services.task_manager.TaskManager", return_value=mock_tm_instance),

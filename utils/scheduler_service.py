@@ -777,6 +777,18 @@ class SchedulerService:
         `check_data_exists` / `SyncResult.is_complete` 判定其完整性并据此推进水位——完整则夜间预测
         链路接通（D7-3/REVIEW-06 TO-01 不破），不完整则水位留空（MINOR-01 不复现）。
         """
+        # D11-F01: 自动行情补偿仅服务自动更新路径，必须与全局开关一致——关闭自动更新后，
+        # 启动 loader（_load_db_state）、30s 看门狗（_watch_config_changes）、misfire
+        # （_on_job_missed）三处均不得再提交 daily_sync_catchup（否则关闭后仍消耗数据源配额、
+        # 写行情表）。手动同步不经本方法，故不受此守卫影响。置于退避/自举/日历查询之前，
+        # 关闭时不产生任何 IO。
+        if not ConfigHandler.is_auto_update_enabled():
+            logger.debug(
+                "[Scheduler] 自动更新已关闭，跳过遗漏交易日补偿检查（include_today=%s, bypass_backoff=%s）",
+                include_today,
+                bypass_backoff,
+            )
+            return
         # D7-1/MAJOR-01: 退避窗口内跳过重复提交，打断"失败→30s 后重试"的固定频率风暴。
         # 此处可提前返回，亦省去退避期间的交易日历查询。
         if not bypass_backoff and self._catchup_backoff_active():
@@ -883,6 +895,18 @@ class SchedulerService:
         from services.task_manager import TaskManager, TaskIncompleteError  # lazy-import: 启动性能
         from data.data_processor import DataProcessor  # lazy-import: 启动性能
         from data.sync.base import SyncResult  # lazy-import: 启动性能
+
+        # D11-F01: 关闭前已排队的补偿任务，获得组锁/信号量后可能才开始执行——此时自动更新
+        # 可能已被关闭，必须在业务 IO 之前二次判定，避免仍调用 sync_daily_market_snapshot。
+        # 抛 CancelledError（R2：不吞没）而非伪成功：任务中心显示 CANCELLED，且此处不推进
+        # 水位、不记录补偿失败，关闭后不再回补属于预期行为（用户重新开启后由下一轮补偿检查接手）。
+        if not ConfigHandler.is_auto_update_enabled():
+            logger.info(
+                "[Scheduler] 自动更新已关闭，取消已排队的补偿任务（task=%s, days=%d）",
+                task_id,
+                len(missed_dates),
+            )
+            raise asyncio.CancelledError("catchup cancelled (auto-update disabled)")
 
         tm = TaskManager()
         processor = DataProcessor()
