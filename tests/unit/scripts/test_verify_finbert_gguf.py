@@ -248,6 +248,52 @@ def test_compare_token_ids_match_and_mismatch() -> None:
     assert len(diff["mismatch_examples"]) == 5
 
 
+def test_resolve_tokenizer_strategy_three_modes() -> None:
+    """三模式解析：auto 匹配直连/不匹配兜底，fallback 始终兜底，direct 不匹配 FAIL 不兜底。"""
+    matched = {"match": True}
+    mismatched = {"match": False}
+
+    auto_match = vfg.resolve_tokenizer_strategy("auto", matched)
+    assert (auto_match["effective_path"], auto_match["fallback_used"], auto_match["tokenizer_consistent"]) == (
+        "direct",
+        False,
+        True,
+    )
+    auto_mismatch = vfg.resolve_tokenizer_strategy("auto", mismatched)
+    assert (auto_mismatch["effective_path"], auto_mismatch["fallback_used"], auto_mismatch["tokenizer_consistent"]) == (
+        "fallback",
+        True,
+        True,
+    )
+
+    fallback = vfg.resolve_tokenizer_strategy("fallback", matched)
+    assert (fallback["effective_path"], fallback["fallback_used"], fallback["tokenizer_consistent"]) == (
+        "fallback",
+        True,
+        True,
+    )
+
+    direct_match = vfg.resolve_tokenizer_strategy("direct", matched)
+    assert (direct_match["effective_path"], direct_match["fallback_used"], direct_match["tokenizer_consistent"]) == (
+        "direct",
+        False,
+        True,
+    )
+    direct_mismatch = vfg.resolve_tokenizer_strategy("direct", mismatched)
+    assert (
+        direct_mismatch["effective_path"],
+        direct_mismatch["fallback_used"],
+        direct_mismatch["tokenizer_consistent"],
+    ) == (
+        "direct-mismatch",
+        False,
+        False,
+    )
+
+    with pytest.raises(ValueError, match="未知 tokenizer_mode"):
+        vfg.resolve_tokenizer_strategy("native", mismatched)
+
+
 def test_compare_token_ids_rejects_length_mismatch() -> None:
     """两侧样本数不一致须报错。"""
     with pytest.raises(ValueError, match="两侧样本数不一致"):
@@ -372,6 +418,38 @@ def test_is_gate_passed_ignores_skipped_only() -> None:
     assert vfg.is_gate_passed({"a": {"ok": True}, "b": {"ok": False}}) is False
 
 
+def test_evaluate_release_q8_only_is_not_applicable_even_if_diagnostic_passes() -> None:
+    """仅 q8（诊断模式）：诊断 verdict 可 PASS，但发布结论必须 NOT_APPLICABLE / 不合格。"""
+    criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_f16=None, prob_diff_f16=None, label_rate_f16=None))
+    assert vfg.is_gate_passed(criteria) is True
+    release = vfg.evaluate_release(criteria, f16_gguf_provided=False)
+    assert release["applicable"] is False
+    assert release["qualified"] is False
+    assert release["verdict"] == "NOT_APPLICABLE"
+    assert release["subject"] is None
+
+
+def test_evaluate_release_qualified_by_f16_ignoring_q8() -> None:
+    """提供 f16 时发布合格由 f16 判据决定；q8 失败只影响诊断 verdict，不影响发布合格。"""
+    criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_q8=0.1))
+    assert vfg.is_gate_passed(criteria) is False
+    release = vfg.evaluate_release(criteria, f16_gguf_provided=True)
+    assert release["applicable"] is True
+    assert release["subject"] == "f16"
+    assert release["qualified"] is True
+    assert release["verdict"] == "PASS"
+    assert release["failed_criteria"] == []
+
+
+def test_evaluate_release_f16_failure_is_not_qualified() -> None:
+    """f16 主体判据任一失败即发布不合格，并在 failed_criteria 中定位。"""
+    criteria = vfg.evaluate_criteria(**_criteria_kwargs(prob_diff_f16=0.05))
+    release = vfg.evaluate_release(criteria, f16_gguf_provided=True)
+    assert release["qualified"] is False
+    assert release["verdict"] == "FAIL"
+    assert release["failed_criteria"] == ["probability_max_abs_diff_f16"]
+
+
 # --------------------------------------------------------------------------- #
 # 端到端接线（monkeypatch 重型链路）
 # --------------------------------------------------------------------------- #
@@ -388,69 +466,175 @@ class _FakeLlama:
         self.closed = True
 
 
-def _patch_heavy(monkeypatch: pytest.MonkeyPatch, *, direct_match: bool, dim: int = 768) -> np.ndarray:
-    """拦掉所有重型依赖，返回被复用的 PyTorch CLS 矩阵。"""
+def _patch_heavy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    direct_match: bool,
+    dim: int = 768,
+    decode_ids: list[list[list[int]]] | None = None,
+) -> np.ndarray:
+    """拦掉所有重型依赖，返回被复用的 PyTorch CLS 矩阵；``decode_ids`` 可记录直送 ids。"""
     n = 6
     hf_ids = [[101, 500 + i, 102] for i in range(n)]
+    direct_ids = [list(x) for x in hf_ids] if direct_match else [[101, 7, 102] for _ in hf_ids]
     cls = np.random.default_rng(3).standard_normal((n, dim)).astype(np.float32)
+
+    def _decode(llm: Any, mod: Any, ids: list[list[int]], timing_sink: list[float] | None = None) -> np.ndarray:
+        if decode_ids is not None:
+            decode_ids.append([list(x) for x in ids])
+        return cls
 
     monkeypatch.setattr(vfg, "_assert_gguf_file", lambda path: None)
     monkeypatch.setattr(vfg, "_load_hf_reference", lambda reference_model: (object(), object()))
     monkeypatch.setattr(vfg, "_hf_input_ids", lambda tokenizer, texts, max_length: hf_ids)
     monkeypatch.setattr(vfg, "_pytorch_cls", lambda model, tokenizer, texts, max_length: cls)
     monkeypatch.setattr(vfg, "_load_gguf", lambda path, n_threads, n_ctx: (_FakeLlama(dim), object()))
-    monkeypatch.setattr(
-        vfg,
-        "_gguf_tokenize_internal",
-        lambda llm, texts: [list(x) for x in hf_ids] if direct_match else [[101, 7, 102] for _ in hf_ids],
-    )
-    monkeypatch.setattr(vfg, "_gguf_cls_via_hf_ids", lambda llm, mod, ids, timing_sink=None: cls)
+    monkeypatch.setattr(vfg, "_gguf_tokenize_internal", lambda llm, texts: direct_ids)
+    monkeypatch.setattr(vfg, "_gguf_cls_via_ids", _decode)
     return cls
 
 
 def test_run_gate_passes_with_direct_tokenizer_match(monkeypatch: pytest.MonkeyPatch) -> None:
     """直连分词一致时走直连路径，门禁 PASS。"""
-    _patch_heavy(monkeypatch, direct_match=True)
+    decode_ids: list[list[list[int]]] = []
+    _patch_heavy(monkeypatch, direct_match=True, decode_ids=decode_ids)
     args = vfg._parse_args(["--n-titles", "6", "--q8-gguf", "q8.gguf", "--f16-gguf", "f16.gguf"])
     report = vfg.run_gate(args)
+    assert report["tokenizer"]["input_mode"] == "auto"
+    assert report["tokenizer"]["effective_path"] == "direct"
     assert report["tokenizer"]["direct_match"] is True
     assert report["tokenizer"]["fallback_used"] is False
     assert report["embedding"]["dim"] == 768
     assert report["verdict"] == "PASS"
     assert report["criteria"]["tokenizer_ids_consistent"]["ok"] is True
+    assert report["release"]["applicable"] is True
+    assert report["release"]["qualified"] is True
+    assert report["release"]["verdict"] == "PASS"
+    # 匹配时两种 ids 相等；decode 两次（f16 + q8）均收到该 ids
+    assert decode_ids == [[[101, 500 + i, 102] for i in range(6)]] * 2
 
 
 def test_run_gate_engages_fallback_on_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """直连分词不一致时自动兜底，token 判据经兜底成立。"""
-    _patch_heavy(monkeypatch, direct_match=False)
+    """auto 模式下直连分词不一致时自动兜底，token 判据经兜底成立。"""
+    decode_ids: list[list[list[int]]] = []
+    _patch_heavy(monkeypatch, direct_match=False, decode_ids=decode_ids)
     args = vfg._parse_args(["--n-titles", "6", "--q8-gguf", "q8.gguf"])
     report = vfg.run_gate(args)
+    assert report["tokenizer"]["input_mode"] == "auto"
+    assert report["tokenizer"]["effective_path"] == "fallback"
     assert report["tokenizer"]["direct_match"] is False
     assert report["tokenizer"]["fallback_used"] is True
     assert report["criteria"]["tokenizer_ids_consistent"]["ok"] is True
     assert report["verdict"] == "PASS"
     assert report["criteria"]["cls_cosine_f16"]["skipped"] is True
+    # 仅 q8：诊断 PASS，但发布结论不可用（永不发布合格）
+    assert report["release"] == {
+        "subject": None,
+        "applicable": False,
+        "qualified": False,
+        "verdict": "NOT_APPLICABLE",
+        "note": "仅诊断：未提供 --f16-gguf（发布判据主体），本报告不构成发布合格结论。",
+    }
+    # 兜底时 decode 收到 HF ids（而非内置分词 ids）
+    assert decode_ids == [[[101, 500 + i, 102] for i in range(6)]]
 
 
-def test_main_writes_report_and_exit_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """main 落盘报告并按 verdict 返回退出码。"""
+def test_run_gate_direct_mode_mismatch_fails_and_does_not_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """direct 模式直连不一致必须 FAIL：token 判据 False、不自动兜底、不使用 HF ids。"""
+    decode_ids: list[list[list[int]]] = []
+    _patch_heavy(monkeypatch, direct_match=False, decode_ids=decode_ids)
+    args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf", "--tokenizer-mode", "direct"])
+    report = vfg.run_gate(args)
+    assert report["tokenizer"]["input_mode"] == "direct"
+    assert report["tokenizer"]["effective_path"] == "direct-mismatch"
+    assert report["tokenizer"]["direct_match"] is False
+    assert report["tokenizer"]["fallback_used"] is False
+    assert report["criteria"]["tokenizer_ids_consistent"]["ok"] is False
+    assert report["verdict"] == "FAIL"
+    # 不得兜底：decode 收到内置分词 ids，而非 HF ids
+    assert decode_ids == [[[101, 7, 102] for _ in range(6)]]
+
+
+def test_main_direct_mode_mismatch_returns_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """direct 模式不一致时 main 必须返回非零，报告如实记录 FAIL 路径。"""
+    _patch_heavy(monkeypatch, direct_match=False)
+    report_path = tmp_path / "direct-report.json"
+    code = vfg.main(
+        ["--n-titles", "6", "--f16-gguf", "f16.gguf", "--tokenizer-mode", "direct", "--report", str(report_path)]
+    )
+    assert code == 1
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["tokenizer"]["effective_path"] == "direct-mismatch"
+    assert payload["tokenizer"]["fallback_used"] is False
+    assert payload["criteria"]["tokenizer_ids_consistent"]["ok"] is False
+    assert payload["verdict"] == "FAIL"
+
+
+def test_run_gate_fallback_mode_forces_hf_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fallback 模式显式使用 HF ids 直送，即使直连不一致也可 PASS。"""
+    decode_ids: list[list[list[int]]] = []
+    _patch_heavy(monkeypatch, direct_match=False, decode_ids=decode_ids)
+    args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf", "--tokenizer-mode", "fallback"])
+    report = vfg.run_gate(args)
+    assert report["tokenizer"]["input_mode"] == "fallback"
+    assert report["tokenizer"]["effective_path"] == "fallback"
+    assert report["tokenizer"]["fallback_used"] is True
+    assert report["criteria"]["tokenizer_ids_consistent"]["ok"] is True
+    assert report["verdict"] == "PASS"
+    assert decode_ids == [[[101, 500 + i, 102] for i in range(6)]]
+
+
+@pytest.mark.parametrize("mode", ["auto", "direct", "fallback"])
+def test_run_gate_matching_tokenizer_passes_in_all_modes(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    """三种模式在直连完全匹配时均 PASS；报告执行路径与模式语义一致。"""
+    decode_ids: list[list[list[int]]] = []
+    _patch_heavy(monkeypatch, direct_match=True, decode_ids=decode_ids)
+    args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf", "--tokenizer-mode", mode])
+    report = vfg.run_gate(args)
+    tokenizer = report["tokenizer"]
+    assert tokenizer["input_mode"] == mode
+    assert tokenizer["direct_match"] is True
+    assert report["criteria"]["tokenizer_ids_consistent"]["ok"] is True
+    assert report["verdict"] == "PASS"
+    if mode == "fallback":
+        assert tokenizer["effective_path"] == "fallback"
+        assert tokenizer["fallback_used"] is True
+    else:
+        assert tokenizer["effective_path"] == "direct"
+        assert tokenizer["fallback_used"] is False
+
+
+def test_main_writes_report_and_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """main 落盘报告并按诊断 verdict 返回退出码；q8-only 必须显式标注非发布合格。"""
     _patch_heavy(monkeypatch, direct_match=True)
     report_path = tmp_path / "report.json"
     code = vfg.main(["--n-titles", "6", "--q8-gguf", "q8.gguf", "--report", str(report_path)])
     assert code == 0
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["verdict"] == "PASS"
+    assert payload["release"]["applicable"] is False
+    assert payload["release"]["qualified"] is False
+    assert payload["release"]["verdict"] == "NOT_APPLICABLE"
     assert payload["head"]["kind"] == "deterministic-reference"
     assert payload["inputs"]["corpus"].startswith("synthetic-deterministic")
+    assert "仅诊断、非发布合格" in capsys.readouterr().out
 
 
 def test_main_returns_nonzero_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """判据失败时 main 返回 1。"""
+    """判据失败时 main 返回 1；q8-only 失败同样不产生发布合格。"""
     cls = _patch_heavy(monkeypatch, direct_match=True)
     # 让 GGUF 侧与 PyTorch 侧完全正交，余弦极低
-    monkeypatch.setattr(vfg, "_gguf_cls_via_hf_ids", lambda llm, mod, ids, timing_sink=None: -cls)
-    code = vfg.main(["--n-titles", "6", "--q8-gguf", "q8.gguf", "--report", str(tmp_path / "r.json")])
+    monkeypatch.setattr(vfg, "_gguf_cls_via_ids", lambda llm, mod, ids, timing_sink=None: -cls)
+    report_path = tmp_path / "r.json"
+    code = vfg.main(["--n-titles", "6", "--q8-gguf", "q8.gguf", "--report", str(report_path)])
     assert code == 1
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["verdict"] == "FAIL"
+    assert payload["release"]["applicable"] is False
+    assert payload["release"]["qualified"] is False
+    assert payload["release"]["verdict"] == "NOT_APPLICABLE"
 
 
 def test_run_gate_f16_only_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -463,6 +647,31 @@ def test_run_gate_f16_only_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["criteria"]["cls_cosine_f16"]["ok"] is True
     assert report["criteria"]["cls_cosine_q8"]["skipped"] is True
     assert report["verdict"] == "PASS"
+    assert report["release"]["applicable"] is True
+    assert report["release"]["qualified"] is True
+    assert report["release"]["verdict"] == "PASS"
+
+
+def test_run_gate_q8_failure_does_not_disqualify_f16_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """f16 + q8 双后端：q8 对照失败使诊断 verdict FAIL，但发布合格仍由 f16 决定。"""
+    cls = _patch_heavy(monkeypatch, direct_match=True)
+    calls: list[int] = []
+
+    def _decode(llm: Any, mod: Any, ids: list[list[int]], timing_sink: list[float] | None = None) -> np.ndarray:
+        calls.append(1)
+        # 第 1 次为 f16（正常），第 2 次为 q8 对照（反号，余弦为 -1）
+        return cls if len(calls) == 1 else -cls
+
+    monkeypatch.setattr(vfg, "_gguf_cls_via_ids", _decode)
+    args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf", "--q8-gguf", "q8.gguf"])
+    report = vfg.run_gate(args)
+    assert report["criteria"]["cls_cosine_f16"]["ok"] is True
+    assert report["criteria"]["cls_cosine_q8"]["ok"] is False
+    assert report["verdict"] == "FAIL"
+    assert report["release"]["applicable"] is True
+    assert report["release"]["qualified"] is True
+    assert report["release"]["verdict"] == "PASS"
+    assert report["release"]["failed_criteria"] == []
 
 
 def test_run_gate_only_labels_change_flips_to_rejection(

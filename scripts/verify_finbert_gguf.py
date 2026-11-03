@@ -15,20 +15,25 @@
 3. 三类概率最大绝对差 < 0.02；
 4. 预测标签一致率 ≥ 99%。
 
-**发布产物为 f16（2026-10-14 方案 A）**：``--f16-gguf`` 为**必评判据主体**；
+**发布产物为 f16（2026-10-14 方案 A）**：``--f16-gguf`` 为**发布判据主体**；
 ``--q8-gguf`` 降级为可选对照件（默认不提供，提供时其判据按 Q8_0 阈值一并评估）。
+仅提供 ``--q8-gguf`` 时为**诊断模式**：诊断 ``verdict`` 可 PASS/FAIL，但报告
+``release.applicable=false`` / ``release.qualified=false`` / ``release.verdict=NOT_APPLICABLE``，
+不得作为发布合格结论。
 定因：Q8_0 层权重量化噪声经训练头放大后概率差 0.047 ~ 0.055 必然超出 0.02 阈值，
 f16 产物四判据宽裕通过（见 scripts/export_finbert_gguf.py docstring）。
 
 同时实测 ``Llama.embed()`` CLS 池化返回维度（须 = 768，验证非 RANK 越界读取）与
 单条耗时基线（预期 10 ~ 30 ms / 条，CPU + 标题长度）。
 
-**分词兜底（§7 / §8.3）**：llama.cpp 的 WordPiece 实现对「HF 基线词表 + 追加金融词」
-（``len(tokenizer) = 34932``）的贪心切分与 HF 不一致；一旦第 1 项不达标，本脚本自动
-切到兜底路径——用 HF ``tokenizers`` 生成 ids，经 ``llama_cpp.LlamaBatch.add_sequence`` +
-``llama_decode`` + ``llama_get_embeddings_seq`` 直接取 CLS 向量（此时 ``n_embd`` 读取长度
-是正确的），再重验第 2~4 项。生产打分子进程（N3-2）必须沿用该兜底路径，不得使用
-``Llama.embed(text)`` 的内部分词。
+**分词模式（§7 / §8.3，``--tokenizer-mode``）**：llama.cpp 的 WordPiece 实现对「HF 基线
+词表 + 追加金融词」（``len(tokenizer) = 34932``）的贪心切分与 HF 不一致。``auto``（默认）
+在直连不一致时自动切到兜底路径——用 HF ``tokenizers`` 生成 ids，经
+``llama_cpp.LlamaBatch.add_sequence`` + ``llama_decode`` + ``llama_get_embeddings_seq``
+直接取 CLS 向量（此时 ``n_embd`` 读取长度是正确的），再重验第 2~4 项；``fallback`` 显式
+使用该兜底路径；``direct`` 强制使用内置分词器，直连不一致即第 1 项判据 FAIL（不得自动
+兜底）。生产打分子进程（N3-2）必须沿用兜底路径，不得使用 ``Llama.embed(text)`` 的内部
+分词。
 
 **分类头对照（N3-1 产物 ``head.npz``）**：业务分类头已由 N3-1 产出（``head.npz``），
 产线 workflow 与正式发布均以 ``--head`` 指向该文件，第 3 / 4 项按训练好的头计算
@@ -57,7 +62,9 @@ Usage:
 
 （``--head`` 可省略：省略时使用确定性参考头；正式发布须提供训练好的 ``head.npz``。）
 
-退出码：门禁全部通过为 0，任一判据失败为 1。
+退出码：诊断 ``verdict`` 全部通过为 0，任一已评估判据失败为 1。退出码不区分
+「发布合格」与「仅诊断」：仅 q8 诊断模式 PASS 仍返回 0，但须以 ``release.qualified=false``
+与 ``release.verdict=NOT_APPLICABLE`` 判定其不构成发布合格。
 """
 
 from __future__ import annotations
@@ -84,6 +91,15 @@ PROBABILITY_MAX_ABS_DIFF = 0.02
 LABEL_AGREEMENT_MIN = 0.99
 
 LATENCY_EXPECTED_BAND_MS = (10.0, 30.0)
+
+# 发布合格判定仅取 f16 判据主体（q8 仅为对照，不参与发布合格结论）
+RELEASE_CRITERIA_F16 = (
+    "tokenizer_ids_consistent",
+    "embedding_dim_768",
+    "cls_cosine_f16",
+    "probability_max_abs_diff_f16",
+    "label_agreement_f16",
+)
 
 # 参考头增益灵敏度扫描点（仅用于披露第 3 项判据对头尺度的依赖，不参与主判定）
 SENSITIVITY_GAINS = (1.0, 2.0, 4.0, 6.0, 8.0)
@@ -346,6 +362,56 @@ def compare_token_ids(
     }
 
 
+def resolve_tokenizer_strategy(mode: str, direct: dict[str, Any]) -> dict[str, Any]:
+    """按 ``--tokenizer-mode`` 解析分词判定与取向量执行路径（纯函数，供单测覆盖）。
+
+    - ``auto``：直连一致走内置分词（两种 ids 相等）；不一致自动兜底到 HF ids；
+    - ``fallback``：显式使用 HF ids 直送（无论直连是否一致）；
+    - ``direct``：强制内置分词器；不一致时第 1 项判据 FAIL，禁止兜底。
+    """
+    if mode == "fallback":
+        return {
+            "input_mode": mode,
+            "effective_path": "fallback",
+            "fallback_used": True,
+            "tokenizer_consistent": True,
+            "detail": "fallback：显式使用 HF ids 经 llama_batch 直送，两侧输入 token 完全一致",
+        }
+    if mode == "direct":
+        if direct["match"]:
+            return {
+                "input_mode": mode,
+                "effective_path": "direct",
+                "fallback_used": False,
+                "tokenizer_consistent": True,
+                "detail": "direct：llama.cpp 内置分词器与 HF ids 完全一致",
+            }
+        return {
+            "input_mode": mode,
+            "effective_path": "direct-mismatch",
+            "fallback_used": False,
+            "tokenizer_consistent": False,
+            "detail": "direct：llama.cpp 内置分词器与 HF ids 不一致，禁止兜底，第 1 项判据 FAIL",
+        }
+    if mode == "auto":
+        if direct["match"]:
+            return {
+                "input_mode": mode,
+                "effective_path": "direct",
+                "fallback_used": False,
+                "tokenizer_consistent": True,
+                "detail": "auto：llama.cpp 内置分词器与 HF ids 完全一致",
+            }
+        return {
+            "input_mode": mode,
+            "effective_path": "fallback",
+            "fallback_used": True,
+            "tokenizer_consistent": True,
+            "detail": "auto：直连不一致，自动兜底；HF ids 经 llama_batch 直送，两侧输入 token 完全一致",
+        }
+    raise ValueError(f"未知 tokenizer_mode: {mode!r}")
+
+
 def summarize_latency(samples_ms: list[float]) -> dict[str, Any]:
     """单条耗时基线汇总（预期 10 ~ 30 ms，属观测基线、非硬门禁）。"""
     if not samples_ms:
@@ -428,6 +494,37 @@ def is_gate_passed(criteria: dict[str, dict[str, Any]]) -> bool:
     return all(item["ok"] is not False for item in criteria.values())
 
 
+def evaluate_release(
+    criteria: dict[str, dict[str, Any]],
+    *,
+    f16_gguf_provided: bool,
+) -> dict[str, Any]:
+    """按「诊断结论 / 发布合格」双口径给出发布评估（纯函数）。
+
+    发布判据主体仅为 f16：``qualified`` 由 ``RELEASE_CRITERIA_F16`` 全部通过决定，
+    q8 对照判据不参与。仅提供 q8（诊断模式）时发布结论为 ``NOT_APPLICABLE``、
+    ``qualified=False``，即使诊断 ``verdict`` 为 PASS 也不构成发布合格结论。
+    """
+    if not f16_gguf_provided:
+        return {
+            "subject": None,
+            "applicable": False,
+            "qualified": False,
+            "verdict": "NOT_APPLICABLE",
+            "note": "仅诊断：未提供 --f16-gguf（发布判据主体），本报告不构成发布合格结论。",
+        }
+    failed = [name for name in RELEASE_CRITERIA_F16 if criteria[name]["ok"] is not True]
+    qualified = not failed
+    return {
+        "subject": "f16",
+        "applicable": True,
+        "qualified": qualified,
+        "verdict": "PASS" if qualified else "FAIL",
+        "failed_criteria": failed,
+        "note": "发布判据主体 f16 已提供：qualified 由 f16 判据决定，q8 仅作对照。",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 重型链路（延迟导入 torch / transformers / llama_cpp）
 # --------------------------------------------------------------------------- #
@@ -477,16 +574,18 @@ def _gguf_tokenize_internal(llm: Any, texts: list[str]) -> list[list[int]]:
     return [[int(token_id) for token_id in llm.tokenize(text.encode("utf-8"))] for text in texts]
 
 
-def _gguf_cls_via_hf_ids(
+def _gguf_cls_via_ids(
     llm: Any,
     llama_cpp: Any,
     ids_list: list[list[int]],
     timing_sink: list[float] | None = None,
 ) -> np.ndarray:
-    """兜底路径（§8.3）：HF ids → llama_batch → llama_decode → CLS 向量。
+    """ids → llama_batch → llama_decode → CLS 向量（§8.3 低层取向量实现）。
 
-    直接复用 llama.cpp 的 ``LlamaBatch`` / ``LlamaContext`` 与
-    ``llama_get_embeddings_seq``（此时按 ``n_embd`` 读取是正确的）。
+    ``auto``/``fallback`` 的兜底路径传入 HF ids；``direct`` 完全匹配时内置分词 ids 与
+    HF ids 相等，不匹配时传入内置分词 ids（不兜底）。直接复用 llama.cpp 的
+    ``LlamaBatch`` / ``LlamaContext`` 与 ``llama_get_embeddings_seq``（此时按 ``n_embd``
+    读取是正确的）。
     """
     n_embd = int(llm.n_embd())
     n_batch = int(llm.n_batch)
@@ -522,7 +621,7 @@ def _verify_one_backend(
     *,
     gguf_path: Path,
     name: str,
-    hf_ids: list[list[int]],
+    token_ids: list[list[int]],
     pytorch_cls: np.ndarray,
     reference_head: tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray] | None],
     seed: int,
@@ -530,13 +629,13 @@ def _verify_one_backend(
     n_ctx: int,
     measure_latency: bool,
 ) -> dict[str, Any]:
-    """对单个 GGUF（f16 / Q8_0）执行兜底 CLS 取向量与四项数值对比。"""
+    """对单个 GGUF（f16 / Q8_0）按选定 ids 取 CLS 向量并做四项数值对比。"""
     _assert_gguf_file(gguf_path)
     llm, llama_cpp = _load_gguf(gguf_path, n_threads=n_threads, n_ctx=n_ctx)
     try:
         dim = int(llm.n_embd())
         timings: list[float] | None = [] if measure_latency else None
-        gguf_cls = _gguf_cls_via_hf_ids(llm, llama_cpp, hf_ids, timing_sink=timings)
+        gguf_cls = _gguf_cls_via_ids(llm, llama_cpp, token_ids, timing_sink=timings)
         cosines = row_cosine(pytorch_cls, gguf_cls)
         weight, bias, pre = reference_head
         probs_pt = apply_head(pytorch_cls, weight, bias, pre)
@@ -595,23 +694,21 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     _assert_gguf_file(probe_path)
     probe_llm, _probe_mod = _load_gguf(probe_path, n_threads=args.n_threads, n_ctx=args.n_ctx)
     try:
-        direct = compare_token_ids(hf_ids, _gguf_tokenize_internal(probe_llm, texts))
+        direct_ids = _gguf_tokenize_internal(probe_llm, texts)
+        direct = compare_token_ids(hf_ids, direct_ids)
     finally:
         probe_llm.close()
 
-    fallback_used = not direct["match"] or args.tokenizer_mode == "fallback"
-    tokenizer_detail = (
-        "HF ids 经 llama_batch 直送（§7/§8.3 兜底），两侧输入 token 完全一致"
-        if fallback_used
-        else "llama.cpp 内置分词器与 HF ids 完全一致"
-    )
+    strategy = resolve_tokenizer_strategy(args.tokenizer_mode, direct)
+    # direct 不匹配时同样不使用 HF ids 兜底：按内置分词 ids 计算，令第 1 项判据 FAIL。
+    token_ids = hf_ids if strategy["effective_path"] == "fallback" else direct_ids
 
     backends: dict[str, Any] = {}
     if f16_path is not None:
         backends["f16"] = _verify_one_backend(
             gguf_path=f16_path,
             name="f16",
-            hf_ids=hf_ids,
+            token_ids=token_ids,
             pytorch_cls=pytorch_cls,
             reference_head=reference_head,
             seed=args.seed,
@@ -623,7 +720,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         backends["q8_0"] = _verify_one_backend(
             gguf_path=q8_path,
             name="q8_0",
-            hf_ids=hf_ids,
+            token_ids=token_ids,
             pytorch_cls=pytorch_cls,
             reference_head=reference_head,
             seed=args.seed,
@@ -635,8 +732,8 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     f16 = backends.get("f16")
     q8 = backends.get("q8_0")
     criteria = evaluate_criteria(
-        tokenizer_consistent=fallback_used or direct["match"],
-        tokenizer_detail=tokenizer_detail,
+        tokenizer_consistent=strategy["tokenizer_consistent"],
+        tokenizer_detail=strategy["detail"],
         cos_f16=None if f16 is None else f16["cosine_min"],
         cos_q8=None if q8 is None else q8["cosine_min"],
         prob_diff_f16=None if f16 is None else f16["probability_max_abs_diff"],
@@ -646,6 +743,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         # 同一编码器的 f16 / q8 embedding_dim 一致；probe_path 非空保证 backends 非空
         embedding_dim=int(next(iter(backends.values()))["embedding_dim"]),
     )
+    release = evaluate_release(criteria, f16_gguf_provided=f16_path is not None)
 
     return {
         "schema": "finbert-gguf-verification.v1",
@@ -666,15 +764,18 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "expected_dim": EMBEDDING_DIM,
         },
         "tokenizer": {
+            "input_mode": strategy["input_mode"],
+            "effective_path": strategy["effective_path"],
             "direct_match": direct["match"],
             "direct_match_rate": direct["match_rate"],
             "matched": direct["matched"],
             "total": direct["total"],
-            "fallback_used": fallback_used,
+            "fallback_used": strategy["fallback_used"],
             "mismatch_examples": direct["mismatch_examples"],
         },
         "backends": backends,
         "criteria": criteria,
+        "release": release,
         "verdict": "PASS" if is_gate_passed(criteria) else "FAIL",
     }
 
@@ -685,9 +786,10 @@ def _print_summary(report: dict[str, Any]) -> None:
     print("=" * 68)
     tokenizer = report["tokenizer"]
     print(
-        f"[分词] 直连一致: {tokenizer['direct_match']} "
+        f"[分词] 模式: {tokenizer['input_mode']} -> 执行路径: {tokenizer['effective_path']} "
+        f"直连一致: {tokenizer['direct_match']} "
         f"(rate={tokenizer['direct_match_rate']:.4f}, {tokenizer['matched']}/{tokenizer['total']}) "
-        f"-> 兜底路径: {tokenizer['fallback_used']}"
+        f"兜底路径: {tokenizer['fallback_used']}"
     )
     print(f"[嵌入] 维度: {report['embedding']['dim']} (期望 {report['embedding']['expected_dim']})")
     for name, backend in report["backends"].items():
@@ -716,6 +818,10 @@ def _print_summary(report: dict[str, Any]) -> None:
         mark = "SKIP" if item["ok"] is None else ("PASS" if item["ok"] else "FAIL")
         print(f"  {mark}  {name}: value={item['value']} threshold={item['threshold']}")
     print("-" * 68)
+    release = report["release"]
+    print(f"发布口径: applicable={release['applicable']} qualified={release['qualified']} verdict={release['verdict']}")
+    if not release["applicable"]:
+        print("[警告] 仅诊断、非发布合格：未提供 --f16-gguf（发布判据主体），本报告不得作为发布通过依据。")
     print(f"VERDICT: {report['verdict']}")
     print("=" * 68)
 
@@ -723,9 +829,11 @@ def _print_summary(report: dict[str, Any]) -> None:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FinBERT2-base GGUF 一致性门禁（N0-3）")
     parser.add_argument("--reference-model", default="ai_models/FinBERT2-base", help="HF 参考模型目录（仅取编码器）")
-    parser.add_argument("--q8-gguf", default=None, help="可选 Q8_0 对照 GGUF（提供时按 Q8_0 阈值评估对照判据）")
+    parser.add_argument("--q8-gguf", default=None, help="可选 Q8_0 对照 GGUF（仅诊断对照，不参与发布合格判定）")
     parser.add_argument(
-        "--f16-gguf", default=os.environ.get("FINBERT_F16_GGUF"), help="发布用 f16 GGUF（发布判据主体）"
+        "--f16-gguf",
+        default=os.environ.get("FINBERT_F16_GGUF"),
+        help="发布用 f16 GGUF（发布判据主体；缺省时仅可做 q8 诊断，不构成发布合格）",
     )
     parser.add_argument("--report", default="ai_models/finbert2-news-f16.verify.json", help="报告输出路径")
     parser.add_argument("--head", default=None, help="训练好的分类头 head.npz（N3-1 产出；提供时取代确定性参考头）")
@@ -739,7 +847,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--tokenizer-mode",
         choices=("auto", "direct", "fallback"),
         default="auto",
-        help="auto: 直连不一致时自动兜底；direct: 强制内置分词器；fallback: 强制 HF ids 直送",
+        help="auto: 直连不一致时自动兜底；direct: 强制内置分词器（不一致即 FAIL，不兜底）；fallback: 强制 HF ids 直送",
     )
     return parser.parse_args(argv)
 
