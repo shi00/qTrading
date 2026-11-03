@@ -67,25 +67,31 @@ async def test_system_tab_tier_api_panel_rendered(e2e_page):
     tier_label = I18n.get("sys_label_point_tier")
     probe_button = I18n.get("sys_tier_probe_button")
 
-    # 轮询检测 TierApiPanel 关键文本，最多 15s（滚动后 CanvasKit 异步渲染）
-    # 用集合记录命中项：轮询会跨轮重复命中同一文本，若用列表累加，会被同一
-    # 元素重复计数并误导 `len >= 2` 断言，必须按不同 key 去重。
-    found_keys: set[str] = set()
+    # 轮询检测 TierApiPanel 关键文本，最多 15s（滚动后 CanvasKit 异步渲染）。
+    # 语义：同一轮内至少命中 2 个不同候选元素。轮询会跨轮重复命中同一文本：
+    # - 用列表跨轮累加，同一元素会被重复计数，误导 `len >= 2`；
+    # - 用集合跨轮累加，不同元素在时序上从未共存（如标题先出现、按钮后出现）
+    #   也会被误判为面板已渲染。
+    # 因此每轮新建命中集合，仅当单轮命中 >= 2 个不同 key 时才算通过。
+    same_round_hits: set[str] = set()
     for _ in range(30):
+        round_hits: set[str] = set()
         if await e2e_page.has_text(panel_title):
-            found_keys.add("panel_title")
+            round_hits.add("panel_title")
         if await e2e_page.has_text(tier_label):
-            found_keys.add("tier_label")
+            round_hits.add("tier_label")
         if await e2e_page.has_text(probe_button):
-            found_keys.add("probe_button")
-        if len(found_keys) >= 2:
+            round_hits.add("probe_button")
+        if len(round_hits) >= 2:
+            same_round_hits = round_hits
             break
         await e2e_page.page.wait_for_timeout(500)
 
-    assert len(found_keys) >= 2, (
-        f"TierApiPanel 关键元素未渲染，仅检测到: {sorted(found_keys)}。期望至少 2 项(panel_title/tier_label/probe_button)"
+    assert len(same_round_hits) >= 2, (
+        f"TierApiPanel 关键元素未在同一轮渲染，仅检测到: {sorted(same_round_hits)}。"
+        "期望同一轮内至少 2 项(panel_title/tier_label/probe_button)"
     )
-    logger.info("TierApiPanel 关键元素渲染验证通过: %s", sorted(found_keys))
+    logger.info("TierApiPanel 关键元素同轮渲染验证通过: %s", sorted(same_round_hits))
 
 
 # ============================================================================
