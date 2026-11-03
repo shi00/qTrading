@@ -84,6 +84,7 @@ class _FakeTaskHistoryStore:
                     row["status"] = params[0]
                     row["description"] = params[1]
         elif sql.startswith("INSERT INTO task_history"):
+            assert params is not None  # INSERT 快照必带参数；收窄类型供 pyright
             row = dict(zip(_TASK_HISTORY_COLUMNS, params, strict=True))
             existing = self.rows.get(row["id"])
             if existing is None or existing["persist_seq"] < row["persist_seq"]:
