@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import functools
 import hashlib
 import html
@@ -119,6 +120,23 @@ def _build_analysis_metadata(content: str, ai_result: dict, exec_meta: dict) -> 
     if error_text:
         metadata["error"] = error_text
     return metadata
+
+
+def _has_usable_publish_time(item: dict) -> bool:
+    """NI-F01：发布时间是否可用于新闻身份 / 水位（缺失或非法一律 False）。
+
+    ``get_latest_global_news`` 契约时间参与 ``(content_hash, publish_time)`` 唯一键与
+    时间水位（各源适配器负责输出可比较的时间文本）。缺失/不可解析时不得以当前时间
+    兜底（否则同一正文每轮生成新身份，重复落库、入队与告警）。
+    """
+    raw = item.get("time")
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        datetime.datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return False
+    return True
 
 
 class NewsUpdateType:
@@ -894,6 +912,19 @@ class NewsSubscriptionService:
                 fetch_limit = _NEWS_FETCH_BATCH_LIMIT
 
                 news_list = await NewsFetcher.get_latest_global_news(limit=fetch_limit)
+
+                # NI-F01：发布时间参与 hash 身份、时间水位与 DB 唯一键。缺失/非法条目
+                # 一律排除（不落库、不入队、不告警、不记已见、不推进水位），并显式告警，
+                # 防止同一正文每轮被伪造成新事件重复处理。
+                usable_news = [item for item in news_list if isinstance(item, dict) and _has_usable_publish_time(item)]
+                excluded_count = len(news_list) - len(usable_news)
+                if excluded_count:
+                    logger.warning(
+                        "[NewsService] Excluded %d news item(s) with missing or invalid publish time; "
+                        "excluded items are not persisted, queued, alerted, marked seen, or counted as coverage.",
+                        excluded_count,
+                    )
+                news_list = usable_news
 
                 def get_hash(item: dict):
                     content = item.get("content", "").strip()

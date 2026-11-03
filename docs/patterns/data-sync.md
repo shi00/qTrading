@@ -107,6 +107,8 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 > **陷阱**：`cn` 市场**混入指数 / 板块**——`sh000xxx`（上证指数系列）/ `sz399xxx`（深证指数系列）/ `bj899xxx`（北证 50）/ `si*`·`sih*`（新浪板块码）。这些可映射为合法指数 `ts_code`（指数与个股号段不冲突，如 `000001.SH` 为指数、`000001.SZ` 为平安银行），但语义上非个股，须经 `is_index_code()` 区分后由调用方决定是否保留。时间口径同 `news_fetcher._parse_news_time`：`create_time` 为北京时间文本，按 CST 归属后转 **UTC tz-naive** 存库。
 
+**运行期回退契约（NI-F01）**：`news_fetcher._fetch_sina_7x24_fallback` 与 CLS 主源在 `create_time` / `ctime` 缺失或转换失败时**跳过该条目并汇总 warning**，不得回退当前时间——时间参与 `(content_hash, publish_time)` 身份与时间水位，伪造成当前事件会让同一正文每轮重复落库/入队/告警。订阅服务层对缺失或非法 `time` 的条目同样排除，且不推进水位、不记为有效覆盖。
+
 ### 新浪个股新闻（`data/external/news_sources/sina_stock.py`）
 
 `GET https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/{sh600519}.phtml`（HTML，**GB18030 编码**，每页 40 条；分页参数 `Page`，如 `?Page=2`，实测 200 / 40 条）。

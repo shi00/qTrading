@@ -2470,6 +2470,114 @@ class TestFetchAndNotifyBatchWindow:
         assert svc._last_news_time == self.WATERMARK_T0
 
 
+class TestMissingPublishTimeExclusion:
+    """NI-F01：缺失/非法发布时间条目不得生成事件身份、落库、入队或告警。"""
+
+    @staticmethod
+    def _normalize(item, default_source=None):
+        return dict(item)
+
+    @pytest.mark.asyncio
+    async def test_two_rounds_same_item_missing_time_no_identity_or_side_effects(self, svc, caplog):
+        """同 ID/正文跨两轮缺失时间：不得首写、排队、分类入队或告警，水位不推进。"""
+        bad_item = {"content": "同一快讯", "source_id": "zhibo-1", "source": "sina_7x24"}
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        alerts: list[str] = []
+        svc.add_listener(alerts.append, is_alert=True)
+        save_mock = AsyncMock()
+        normalize_mock = MagicMock()
+        notify_mock = AsyncMock()
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=[bad_item]),
+            ),
+            patch("services.news_subscription_service.CacheManager.normalize_news_item", normalize_mock),
+            patch.object(svc.cache.market_dao, "save_market_news", save_mock),
+            patch.object(svc, "_notify_listeners", notify_mock),
+            patch.object(svc, "_safe_queue_put", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+            caplog.at_level(logging.WARNING, logger="services.news_subscription_service"),
+        ):
+            await svc._fetch_and_notify()
+            await svc._fetch_and_notify()
+
+        assert save_mock.await_count == 0
+        assert normalize_mock.call_count == 0
+        assert notify_mock.await_count == 0
+        assert svc.processing_queue.qsize() == 0
+        assert alerts == []
+        assert dict(svc._seen_hashes) == {}
+        assert svc._last_news_time is None
+        time_warnings = [r for r in caplog.records if "missing or invalid publish time" in r.getMessage()]
+        assert len(time_warnings) >= 2
+
+    @pytest.mark.asyncio
+    async def test_invalid_time_string_excluded(self, svc, caplog):
+        """非法时间字符串同样排除，不得作为有效覆盖。"""
+        svc._last_news_time = "2024-01-01 09:00:00"
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        save_mock = AsyncMock()
+        notify_mock = AsyncMock()
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=[{"content": "非法时间", "time": "not-a-time"}]),
+            ),
+            patch("services.news_subscription_service.CacheManager.normalize_news_item", MagicMock()),
+            patch.object(svc.cache.market_dao, "save_market_news", save_mock),
+            patch.object(svc, "_notify_listeners", notify_mock),
+            patch.object(svc, "_safe_queue_put", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+            caplog.at_level(logging.WARNING, logger="services.news_subscription_service"),
+        ):
+            await svc._fetch_and_notify()
+
+        assert save_mock.await_count == 0
+        assert notify_mock.await_count == 0
+        assert svc.processing_queue.qsize() == 0
+        assert svc._last_news_time == "2024-01-01 09:00:00"
+        assert any("missing or invalid publish time" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_same_content_different_dates_still_kept(self, svc):
+        """正常时间源：同文不同日期（及不同 source_id）仍保留为两个独立条目。"""
+        svc._last_news_time = "2024-01-01 09:00:00"
+        news_items = [
+            {"content": "同文", "time": "2024-01-02 10:00:00", "source_id": "sina-2"},
+            {"content": "同文", "time": "2024-01-01 10:00:00", "source_id": "sina-1"},
+        ]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        saved: list[str] = []
+        queued: list[str] = []
+
+        async def mock_save(item, wait=False):
+            saved.append(item.get("content", ""))
+
+        async def mock_put(item):
+            queued.append(item.get("content", ""))
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=news_items),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch.object(svc, "_safe_queue_put", mock_put),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+
+        assert saved == ["同文", "同文"]
+        assert queued == ["同文", "同文"]
+        assert svc._last_news_time == "2024-01-02 10:00:00"
+
+
 class TestProcessingQueueLoopLocal:
     """CON-07: processing_queue property resolves dynamically to current loop."""
 
