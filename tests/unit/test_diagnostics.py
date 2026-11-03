@@ -1,3 +1,5 @@
+import copy
+import logging
 import os
 import json
 import zipfile
@@ -584,3 +586,149 @@ async def test_diagnostics_export_masks_host_user_and_pwd_env_keys(tmp_path, mon
         finally:
             if os.path.exists(zip_path):
                 os.remove(zip_path)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_export_sanitizes_config_model_paths(tmp_path, caplog):
+    """RU-F02：config 分支须递归清洗模型/本地路径，且不得改写原始配置（R9）。
+
+    合法配置（model_management.connections[].adapter_options.dialog_model_path /
+    encoder_model_path）与非敏感键 model（GGUF 路径回退）会携带含 Windows/Unix
+    用户名与空格目录的绝对路径；sanitize_dict 只做敏感键与 PII 处理，不含路径
+    清洗，故必须在诊断序列化边界生成安全快照。
+    """
+    fake_user = "diaguser_ruf02"
+    win_dir = f"C:\\Users\\{fake_user}\\My Models"
+    unix_dir = f"/home/{fake_user}/models with space"
+
+    config_dict = {
+        "local_model_path": f"{win_dir}\\Qwen 7B.gguf",
+        "ts_token": "test_token_tushare_123456",
+        "model_management": {
+            "connections": [
+                {
+                    "connection_id": "conn-chat",
+                    "name": "本地对话",
+                    "adapter_kind": "gguf_chat",
+                    # model 为空时的路径回退形态
+                    "model": f"{win_dir}\\Qwen 7B.gguf",
+                    "adapter_options": {
+                        "dialog_model_path": f"{win_dir}\\Qwen 7B.gguf",
+                    },
+                },
+                {
+                    "connection_id": "conn-sentiment",
+                    "adapter_kind": "gguf_sentiment",
+                    # 业务模型名（非路径）须保留
+                    "model": "deepseek-chat",
+                    "adapter_options": {
+                        "encoder_model_path": f"{unix_dir}/bge-m3.gguf",
+                        "head_path": f"{unix_dir}/head.safetensors",
+                        "tokenizer_path": f"{unix_dir}/tokenizer.json",
+                        "timeout": 30,
+                    },
+                    "options": {"password": "nested_diag_password"},
+                },
+            ]
+        },
+    }
+    before = copy.deepcopy(config_dict)
+
+    _make_log_files(tmp_path)
+    with caplog.at_level(logging.INFO, logger="utils.diagnostics"):
+        with _patch_diagnostics_env(tmp_path, config_dict=config_dict):
+            zip_path = await SystemDiagnosticsCollector.export()
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    raw = zf.read("diagnostics_summary.json").decode("utf-8")
+                    config = json.loads(raw)["config"]
+                    connections = config["model_management"]["connections"]
+
+                    # 路径键整体输出 <PATH>（含空格目录不被正则截断）
+                    assert config["local_model_path"] == "<PATH>"
+                    assert connections[0]["adapter_options"]["dialog_model_path"] == "<PATH>"
+                    assert connections[0]["model"] == "<PATH>"
+                    assert connections[1]["adapter_options"]["encoder_model_path"] == "<PATH>"
+                    assert connections[1]["adapter_options"]["head_path"] == "<PATH>"
+                    assert connections[1]["adapter_options"]["tokenizer_path"] == "<PATH>"
+                    # 业务模型名与非字符串值保留
+                    assert connections[1]["model"] == "deepseek-chat"
+                    assert connections[1]["adapter_options"]["timeout"] == 30
+                    # 敏感键继续遮蔽（含嵌套 dict）
+                    assert config["ts_token"] != "test_token_tushare_123456"
+                    assert connections[1]["options"]["password"] != "nested_diag_password"
+
+                    # 整包 JSON 文本不含原始用户名/用户目录
+                    assert fake_user not in raw
+                    assert "/home/" not in raw
+                    assert "My Models" not in raw
+                    assert "models with space" not in raw
+            finally:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+
+    # 成功日志只含受控文件名，不含 USER_DATA_ROOT 绝对路径
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "diagnostics_" in messages
+    assert os.path.basename(zip_path) in messages
+    assert str(tmp_path) not in messages
+    assert fake_user not in messages
+
+    # 导出前后配置深比较完全相同（未覆盖 ConfigHandler 缓存/磁盘配置）
+    assert config_dict == before
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_export_config_snapshot_edge_shapes(tmp_path):
+    """RU-F02 对抗性边界：嵌套 list/dict、adapter_options 为 None、空路径、
+    非字符串值、UNC 路径与未知序列化值。
+
+    - 深层嵌套 list 内 dict 的敏感键仍遮蔽；
+    - adapter_options=None / 空字符串 / None 值 / 整数不崩溃且原样保留；
+    - UNC 路径回退的 model 输出 <PATH>；
+    - 未知类型（set）仍触发 fail-fast TypeError，不因快照递归被吞掉。
+    """
+    fake_user = "diaguser_edge"
+    config_dict = {
+        "model_management": {
+            "connections": [
+                {"adapter_options": None},
+                {"adapter_options": {"dialog_model_path": "", "head_path": None}},
+                {"adapter_options": {"dialog_model_path": f"\\\\fileserver\\Users\\{fake_user}\\model.gguf"}},
+                {"model": f"\\\\fileserver\\Users\\{fake_user}\\model.gguf", "adapter_options": {"n_ctx": 4096}},
+                # 嵌套 list 内的 dict：顶层 sanitize_dict 不会触达
+                {"extra": [{"api_key": "nestedlist_diag_secret", "value": 1.5}]},
+            ]
+        }
+    }
+
+    _make_log_files(tmp_path)
+    with _patch_diagnostics_env(tmp_path, config_dict=config_dict):
+        zip_path = await SystemDiagnosticsCollector.export()
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                raw = zf.read("diagnostics_summary.json").decode("utf-8")
+                config = json.loads(raw)["config"]
+                connections = config["model_management"]["connections"]
+
+                assert connections[0]["adapter_options"] is None
+                assert connections[1]["adapter_options"]["dialog_model_path"] == ""
+                assert connections[1]["adapter_options"]["head_path"] is None
+                assert connections[2]["adapter_options"]["dialog_model_path"] == "<PATH>"
+                assert connections[3]["model"] == "<PATH>"
+                assert connections[3]["adapter_options"]["n_ctx"] == 4096
+                assert connections[4]["extra"][0]["value"] == 1.5
+                assert connections[4]["extra"][0]["api_key"] != "nestedlist_diag_secret"
+                assert fake_user not in raw
+                assert "nestedlist_diag_secret" not in raw
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+
+    # 未知类型仍走 json_serial fail-fast
+    with _patch_diagnostics_env(
+        tmp_path,
+        health_return={"status": "green", "unsupported": {1, 2, 3}},
+    ):
+        with pytest.raises(TypeError, match="not serializable"):
+            await SystemDiagnosticsCollector.export()

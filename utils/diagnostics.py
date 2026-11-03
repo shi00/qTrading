@@ -31,9 +31,61 @@ logger = logging.getLogger(__name__)
 # 故统一按键名整体遮蔽。
 _PERSONAL_ENV_KEY_MARKERS = ("user", "logname", "appdata", "computername", "hostname", "home")
 
+# RU-F02：诊断配置导出边界的模型/本地路径键（小写精确匹配）。这些键是合法配置，
+# 值常为含用户名与空格目录的绝对路径，且键名本身非敏感键，sanitize_dict 不做
+# 路径清洗（R9 泄露向量）。命中键后整体输出 <PATH>，避免路径正则按空白截断后
+# 残留用户名片段。
+_CONFIG_PATH_KEYS = frozenset(
+    {
+        "local_model_path",
+        "dialog_model_path",
+        "encoder_model_path",
+        "head_path",
+        "tokenizer_path",
+    }
+)
+
+
+def _looks_like_absolute_path(value: str) -> bool:
+    """判断字符串是否呈绝对路径形态（Windows 盘符/UNC、Unix 根路径）。"""
+    if not value:
+        return False
+    if value.startswith(("/", "\\")):
+        return True
+    return len(value) >= 3 and value[0].isascii() and value[0].isalpha() and value[1] == ":" and value[2] in "\\/"
+
 
 class SystemDiagnosticsCollector:
     """系统级诊断数据收集器"""
+
+    @staticmethod
+    def _sanitize_config_snapshot(value: Any, *, key: str | None = None) -> Any:
+        """在诊断序列化边界递归生成配置安全快照，不修改原始配置。
+
+        - 每个 dict 节点经 ``DataSanitizer.sanitize_dict`` 遮蔽敏感键（含嵌套
+          list/dict 内未被顶层 sanitize_dict 覆盖的 dict）；
+        - 已知模型/本地路径键（见 ``_CONFIG_PATH_KEYS``）整体输出 ``<PATH>``，
+          含空格的路径不做正则切分，避免残留用户名片段；
+        - ``model`` 仅在呈绝对路径（GGUF 路径回退形态）时输出 ``<PATH>``，
+          业务模型名原样保留；
+        - 其余字符串叶子做路径脱敏；非字符串值与未知类型原样保留，交由
+          ``json_serial`` 维持既有的 fail-fast 行为。
+        """
+        if isinstance(value, dict):
+            sanitized = DataSanitizer.sanitize_dict(value)
+            return {
+                k: SystemDiagnosticsCollector._sanitize_config_snapshot(v, key=str(k)) for k, v in sanitized.items()
+            }
+        if isinstance(value, list):
+            return [SystemDiagnosticsCollector._sanitize_config_snapshot(item) for item in value]
+        if isinstance(value, str):
+            normalized_key = key.lower() if key is not None else ""
+            if normalized_key in _CONFIG_PATH_KEYS:
+                return "<PATH>" if value.strip() else value
+            if normalized_key == "model" and _looks_like_absolute_path(value):
+                return "<PATH>"
+            return DataSanitizer.sanitize_paths(value)
+        return value
 
     @staticmethod
     async def export() -> str:
@@ -136,9 +188,9 @@ class SystemDiagnosticsCollector:
                 ],
             }
 
-            # 4. 获取配置并脱敏
+            # 4. 获取配置并在序列化边界生成安全快照（不修改 ConfigHandler 缓存/磁盘配置）
             raw_config = ConfigHandler.load_config()
-            sanitized_config = DataSanitizer.sanitize_dict(raw_config)
+            sanitized_config = SystemDiagnosticsCollector._sanitize_config_snapshot(raw_config)
 
             # 5. 调用数据质量检查 (check_data_health)
             health_info = {}
@@ -231,7 +283,8 @@ class SystemDiagnosticsCollector:
                 json_serial,
             )
 
-            logger.info("[Diagnostics] Diagnostics package successfully exported to: %s", zip_path)
+            # R9：成功日志只输出受控文件名，不输出含 USER_DATA_ROOT 的绝对路径
+            logger.info("[Diagnostics] Diagnostics package successfully exported: %s", zip_filename)
             return zip_path
 
         finally:
