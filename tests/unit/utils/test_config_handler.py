@@ -2999,6 +2999,51 @@ class TestConfigHandlerStrategyPresets:
         assert self._read_presets(preset_config) == {"a": {"pe": 1}}
         assert ConfigHandler.load_config()["strategy_presets_value_strategy"] == committed
 
+    def test_save_preset_aborts_on_corrupt_disk(self, preset_config):
+        """磁盘 JSON 损坏 → fail-closed 拒写，保留损坏现场。"""
+        preset_config.write_text("{corrupt", encoding="utf-8")
+        before = preset_config.read_bytes()
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert preset_config.read_bytes() == before
+
+    def test_save_preset_aborts_on_security_corrupted_disk(self, preset_config):
+        """合法 JSON + 安全子域结构损坏 → 拒写，盘面不变。"""
+        preset_config.write_text(
+            json.dumps({"model_management": {"schema_version": 1, "config_revision": 2}}), encoding="utf-8"
+        )
+        before = preset_config.read_bytes()
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert preset_config.read_bytes() == before
+
+    def test_save_preset_validation_failure_returns_false(self, preset_config):
+        """合并结果 schema 校验失败 → 返回 False，盘面不变。"""
+        preset_config.write_text(json.dumps({"log_level": "TRACE"}), encoding="utf-8")
+        before = preset_config.read_bytes()
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert preset_config.read_bytes() == before
+
+    def test_save_preset_lock_timeout_returns_false(self, preset_config):
+        """文件锁等待超时 → 返回 False，零写。"""
+        from utils.config.storage import ConfigFileLockTimeoutError
+
+        with patch("utils.config.storage._config_file_lock", side_effect=ConfigFileLockTimeoutError("timeout")):
+            assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert not preset_config.exists()
+
+    def test_save_preset_unexpected_error_returns_false(self, preset_config):
+        """锁内意外异常 → 返回 False，不半提交。"""
+        with patch("utils.config.storage._read_disk_dict", side_effect=RuntimeError("boom")):
+            assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert not preset_config.exists()
+
+    def test_save_preset_without_file_uses_cache_base(self, preset_config):
+        """文件缺失但缓存存在时沿用缓存基底（与 save_config 一致），不丢缓存键。"""
+        cfg_mod.ConfigHandler._config_cache = {"log_level": "DEBUG"}
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is True
+        raw = json.loads(preset_config.read_text(encoding="utf-8"))
+        assert raw["log_level"] == "DEBUG"
+        assert raw["strategy_presets_value_strategy"] == {"x": {"pe": 1}}
+
     # --- delete_strategy_preset：锁内基于磁盘判定存在性 ---
 
     def test_delete_preset_exists_returns_true(self, preset_config):
