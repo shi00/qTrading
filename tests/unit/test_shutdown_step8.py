@@ -4,7 +4,8 @@
 - 结构验证：_CLEANUP_STEPS 索引 10 = Step 8 定义
 - noop 路径：service 未注册 / 已注册但未初始化
 - 调用路径：asyncio.to_thread 包装 stop_sync 被调用
-- 失败路径：stop_sync raise → 记 ERROR，不抛异常
+- 失败路径：D02-F03 — stop_sync 异常/超时 → 脱敏记录后重新抛出，
+  由 _run_async_step 聚合为 ok=False（timed_out 真实），不吞异常
 - 超时逻辑：effective_timeout = min(35.0, step_timeout_s=35.0) = 35.0
 
 Mock 策略：
@@ -113,7 +114,11 @@ async def test_step8_calls_stop_sync_via_to_thread(monkeypatch) -> None:
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_step8_logs_error_on_stop_failure(monkeypatch, caplog) -> None:
-    """mock service.stop_sync raise Exception → Step 8 记 ERROR，不抛异常。"""
+    """D02-F03: mock service.stop_sync raise Exception → Step 8 记 ERROR 并重新抛出。
+
+    原行为（只记 ERROR 后正常返回）会让 _run_async_step 误记 ok=True，
+    导致 cleanup_success=True 与错误的优雅停机标记；修复后异常必须上抛。
+    """
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
     mock_service = MagicMock()
@@ -130,10 +135,10 @@ async def test_step8_logs_error_on_stop_failure(monkeypatch, caplog) -> None:
 
     coordinator = ShutdownCoordinator()
     with caplog.at_level(logging.ERROR, logger="utils.shutdown"):
-        # 不应抛异常
-        await coordinator._step8_stop_embedded_postgres()
+        with pytest.raises(RuntimeError, match="fake stop failure"):
+            await coordinator._step8_stop_embedded_postgres()
 
-    # 验证 ERROR 日志含关键信息
+    # 验证 ERROR 日志含关键信息（记录仍需保留，便于排障）
     assert any("Step 8 stop embedded postgres failed" in r.message for r in caplog.records), (
         f"期望 ERROR 日志含 'Step 8 stop embedded postgres failed'，实际：{[r.message for r in caplog.records]}"
     )
@@ -164,10 +169,11 @@ def test_step8_timeout_not_limited_by_min_logic() -> None:
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_step8_abandons_thread_on_timeout(monkeypatch, caplog) -> None:
-    """H1: asyncio.wait_for 超时 → 记 WARNING 'abandoning thread'，不阻塞，不抛异常。
+    """H1/D02-F03: asyncio.wait_for 超时 → 记 WARNING 'abandoning thread' 并重新抛出。
 
     模拟 stop_sync 阻塞 60s（无法在测试中真实等待），通过 mock asyncio.wait_for
-    直接抛 asyncio.TimeoutError 验证超时分支。
+    直接抛 TimeoutError 验证超时分支。重新抛出后由 _run_async_step 聚合为
+    ok=False / timed_out=True，避免关键失败被误判为成功。
     """
     import asyncio
     import logging
@@ -194,17 +200,99 @@ async def test_step8_abandons_thread_on_timeout(monkeypatch, caplog) -> None:
 
     coordinator = ShutdownCoordinator()
     with caplog.at_level(logging.WARNING, logger="utils.shutdown"):
-        # 不应抛异常，不应阻塞
-        await coordinator._step8_stop_embedded_postgres()
+        # 不应阻塞；超时必须上抛交由聚合层标记失败
+        with pytest.raises(TimeoutError) as exc_info:
+            await coordinator._step8_stop_embedded_postgres()
 
+    assert isinstance(exc_info.value, TimeoutError)
     # 验证 WARNING 日志含 'abandoning thread'
     assert any("abandoning thread" in r.message for r in caplog.records), (
         f"期望 WARNING 日志含 'abandoning thread'，实际：{[r.message for r in caplog.records]}"
     )
-    # 验证 ERROR 日志未触发（超时不是错误）
+    # 内层步骤自身只记 WARNING（ERROR 由 _run_async_step 统一记录）
     assert not any(r.levelname == "ERROR" for r in caplog.records), (
-        f"超时不应触发 ERROR 日志，实际：{[(r.levelname, r.message) for r in caplog.records]}"
+        f"内层超时不应触发 ERROR 日志，实际：{[(r.levelname, r.message) for r in caplog.records]}"
     )
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_step8_timeout_result_via_run_async_step(monkeypatch) -> None:
+    """D02-F03: stop_sync 超时经 _run_async_step 聚合为 ok=False 且 timed_out=True。"""
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    mock_service = MagicMock()
+    mock_service.stop_sync = MagicMock(side_effect=TimeoutError("pg stop timeout"))
+    monkeypatch.setattr(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service))
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        func(*args, **kwargs)
+        return None
+
+    monkeypatch.setattr("utils.shutdown.asyncio.to_thread", _fake_to_thread)
+
+    coordinator = ShutdownCoordinator()
+    result = await coordinator._run_async_step(
+        name="Step 8",
+        step=coordinator._step8_stop_embedded_postgres,
+        step_timeout_s=35.0,
+        critical=True,
+    )
+    assert result.ok is False, f"超时后 Step 8 应失败，实际：{result}"
+    assert result.timed_out is True, f"timed_out 应如实为 True，实际：{result}"
+    assert result.error, "失败步骤应携带脱敏后的错误信息"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_step8_exception_result_via_run_async_step(monkeypatch) -> None:
+    """D02-F03: stop_sync 抛普通异常经 _run_async_step 聚合为 ok=False 且 timed_out=False。"""
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    mock_service = MagicMock()
+    mock_service.stop_sync = MagicMock(side_effect=RuntimeError("pg stop boom"))
+    monkeypatch.setattr(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service))
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        func(*args, **kwargs)
+        return None
+
+    monkeypatch.setattr("utils.shutdown.asyncio.to_thread", _fake_to_thread)
+
+    coordinator = ShutdownCoordinator()
+    result = await coordinator._run_async_step(
+        name="Step 8",
+        step=coordinator._step8_stop_embedded_postgres,
+        step_timeout_s=35.0,
+        critical=True,
+    )
+    assert result.ok is False, f"异常后 Step 8 应失败，实际：{result}"
+    assert result.timed_out is False, f"非超时失败不应标记 timed_out，实际：{result}"
+    assert result.error, "失败步骤应携带脱敏后的错误信息"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_step8_success_result_via_run_async_step(monkeypatch) -> None:
+    """D02-F03: 正常停止经 _run_async_step 聚合为 ok=True。"""
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    mock_service = MagicMock()
+    mock_service.stop_sync = MagicMock(return_value=None)
+    monkeypatch.setattr(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service))
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        func(*args, **kwargs)
+        return None
+
+    monkeypatch.setattr("utils.shutdown.asyncio.to_thread", _fake_to_thread)
+
+    coordinator = ShutdownCoordinator()
+    result = await coordinator._run_async_step(
+        name="Step 8",
+        step=coordinator._step8_stop_embedded_postgres,
+        step_timeout_s=35.0,
+        critical=True,
+    )
+    assert result.ok is True, f"正常停止应成功，实际：{result}"
+    assert result.timed_out is False
 
 
 @pytest.mark.asyncio(loop_scope="function")

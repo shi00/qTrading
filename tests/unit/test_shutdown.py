@@ -1650,6 +1650,123 @@ class TestFullCleanupWithCriticalFailure:
             assert len(failures) >= 1
 
 
+class TestStep8FailureAggregation:
+    """D02-F03: Step 8 受控超时/异常必须沿既有聚合路径标记为关键失败。
+
+    修复前 _step8_stop_embedded_postgres 仅记录日志后正常返回，导致
+    _run_async_step 记 ok=True → cleanup_success=True → 误标记优雅停机。
+    """
+
+    _STEP_METHODS = (
+        "_step0_cancel_tasks",
+        "_step1_stop_services",
+        "_step2_flush_db_writes",
+        "_step3_stop_processor_workers",
+        "_step3b_dispose_async_engine",
+        "_step4_clear_toast",
+        "_step5_unload_ai_model",
+        "_step5b_stop_sentiment_scorer",
+        "_step6_shutdown_thread_pools",
+        "_step7_close_database_managers",
+    )
+
+    @classmethod
+    def _stub_non_step8_steps(cls, coord: ShutdownCoordinator) -> None:
+        async def ok_step():
+            return None
+
+        for method in cls._STEP_METHODS:
+            setattr(coord, method, ok_step)
+
+    @staticmethod
+    def _stub_service(monkeypatch, stop_sync: MagicMock) -> None:
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        mock_service = MagicMock()
+        mock_service.stop_sync = stop_sync
+        monkeypatch.setattr(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service))
+
+    @pytest.mark.asyncio
+    async def test_step8_timeout_marks_cleanup_failure_and_skips_graceful_mark(self, monkeypatch):
+        """stop_sync 超时：Step 8 ok=False / timed_out=True，cleanup_success=False，不标记 graceful。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        self._stub_non_step8_steps(coord)
+        self._stub_service(monkeypatch, MagicMock(side_effect=TimeoutError("pg stop timeout")))
+
+        with patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark:
+            result = await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
+
+        assert result is False
+        assert coord.cleanup_success is False
+        assert coord.cleanup_done is True
+        step8 = next(r for r in coord.step_results if r.name == "Step 8")
+        assert step8.critical is True
+        assert step8.ok is False
+        assert step8.timed_out is True
+        mock_mark.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_step8_exception_marks_cleanup_failure_and_skips_graceful_mark(self, monkeypatch):
+        """stop_sync 抛异常：Step 8 ok=False / timed_out=False，cleanup_success=False，不标记 graceful。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        self._stub_non_step8_steps(coord)
+        self._stub_service(monkeypatch, MagicMock(side_effect=RuntimeError("pg stop boom")))
+
+        with patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark:
+            result = await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
+
+        assert result is False
+        assert coord.cleanup_success is False
+        assert coord.cleanup_done is True
+        step8 = next(r for r in coord.step_results if r.name == "Step 8")
+        assert step8.critical is True
+        assert step8.ok is False
+        assert step8.timed_out is False
+        mock_mark.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_step8_success_marks_graceful_and_returns_true(self, monkeypatch):
+        """正常停止：Step 8 ok=True，cleanup_success=True，并标记 graceful。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        self._stub_non_step8_steps(coord)
+        self._stub_service(monkeypatch, MagicMock(return_value=None))
+
+        with patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark:
+            result = await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
+
+        assert result is True
+        assert coord.cleanup_success is True
+        step8 = next(r for r in coord.step_results if r.name == "Step 8")
+        assert step8.ok is True
+        assert step8.timed_out is False
+        mock_mark.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_step8_cancelled_error_propagates_from_do_cleanup(self, monkeypatch):
+        """取消：CancelledError 从 do_cleanup 上抛（R2），cleanup_success=False，不标记 graceful。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        self._stub_non_step8_steps(coord)
+        mock_service = MagicMock()
+        mock_service.stop_sync = MagicMock(return_value=None)
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        monkeypatch.setattr(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service))
+
+        async def _fake_to_thread(func, *args, **kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr("utils.shutdown.asyncio.to_thread", _fake_to_thread)
+
+        with patch("utils.shutdown.mark_graceful_shutdown_completed", new_callable=MagicMock) as mock_mark:
+            with pytest.raises(asyncio.CancelledError):
+                await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
+
+        assert coord.cleanup_success is False
+        assert coord.cleanup_done is True
+        mock_mark.assert_not_called()
+
+
 class TestDynamicCleanupCallbacks:
     """S3（D8）/D02-F02：动态清理回调在 Step 3 后、Step 3b（异步 engine dispose）前执行。"""
 
