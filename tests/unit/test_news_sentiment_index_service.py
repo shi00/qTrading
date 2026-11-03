@@ -413,11 +413,18 @@ class TestNewsSentimentIndexService:
         mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([]))
         mdao.get_telegraph_news_in_window = AsyncMock(return_value=_mk_df([]))
         mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
-        with pytest.raises(NewsCalendarWindowUncoveredError):
+        with pytest.raises(NewsCalendarWindowUncoveredError) as stock_exc:
             await svc.get_stock_daily_index("600519.SH", None, days=7, as_of=_cst(2026, 10, 13, 10, 0))
-        with pytest.raises(NewsCalendarWindowUncoveredError):
+        # 显式不可用：异常类型与语义信息均须成立，且调用在聚合前中断（不伪造指数）。
+        assert isinstance(stock_exc.value, NewsCalendarWindowUncoveredError)
+        assert "交易日历不可用" in str(stock_exc.value)
+        with pytest.raises(NewsCalendarWindowUncoveredError) as market_exc:
             await svc.get_market_daily_index(days=7, as_of=_cst(2026, 10, 13, 10, 0))
+        assert isinstance(market_exc.value, NewsCalendarWindowUncoveredError)
+        assert "交易日历不可用" in str(market_exc.value)
+        # 个股级 DAO 未被调用、市场级快讯未被取数 → 未进入聚合，未产生伪造 0 指数。
         mdao.get_scored_stock_news.assert_not_called()
+        mdao.get_telegraph_news_for_stocks.assert_not_called()
         mdao.get_telegraph_news_in_window.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -538,9 +545,13 @@ class TestCalendarTailCoverageIntegration:
         mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([_db_row(_cst(2026, 11, 2, 16, 0), 0.8, 0.9)]))
         mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
 
-        with pytest.raises(NewsCalendarWindowUncoveredError):
+        with pytest.raises(NewsCalendarWindowUncoveredError) as exc_info:
             await svc.get_stock_daily_index("600519.SH", "贵州茅台", days=7, as_of=_AS_OF)
+        assert isinstance(exc_info.value, NewsCalendarWindowUncoveredError)
+        assert "尾端" in str(exc_info.value)
+        # 归属不可确定时在查询新闻前即中断：不查新闻、不聚合，避免伪造 0 指数。
         mdao.get_scored_stock_news.assert_not_awaited()
+        mdao.get_telegraph_news_for_stocks.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

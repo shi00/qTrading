@@ -202,13 +202,18 @@ class TestEnsureCalendarRange:
         )
 
     @pytest.mark.asyncio
-    async def test_persist_cancelled_error_propagates(self):
+    async def test_persist_cancelled_error_propagates(self, caplog):
         """R2: 持久化过程中的 CancelledError 必须向上传播，不得被 bool 处理吞没。"""
         df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
         svc = _make_service(api_return=df)
         svc._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=asyncio.CancelledError)
-        with pytest.raises(asyncio.CancelledError):
-            await svc.ensure_calendar_range("20240601", "20240630")
+        with caplog.at_level(logging.INFO, logger="data.domain_services.trade_calendar_service"):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await svc.ensure_calendar_range("20240601", "20240630")
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        # 取消在持久化边界即传播：未落入 BOOL 分支，故未打印 Bulk synced、也未返回 True。
+        svc._cache.stock_dao.save_trade_cal.assert_awaited_once()
+        assert not any("Bulk synced" in record.getMessage() for record in caplog.records)
 
     @pytest.mark.asyncio
     async def test_api_returns_empty(self):
