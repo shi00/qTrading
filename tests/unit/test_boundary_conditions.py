@@ -383,6 +383,8 @@ class TestSecurityManagerBoundaryConditions:
 
                 test_key = AESGCM.generate_key(bit_length=256)
                 SecurityManager._key = test_key
+                # D02-F01：缓存 key 需有对应密钥文件（清理方删除文件后缓存必须失效）。
+                SecurityManager._save_key(test_key)
 
                 plaintext = "test_secret_value_123"
                 encrypted = SecurityManager.encrypt_data(plaintext)
@@ -524,6 +526,8 @@ class TestSecurityManagerBoundaryConditions:
 
                 test_key = AESGCM.generate_key(bit_length=256)
                 SecurityManager._key = test_key
+                # D02-F01：缓存 key 需有对应密钥文件（清理方删除文件后缓存必须失效）。
+                SecurityManager._save_key(test_key)
 
                 plaintext = "test_nonce_check"
                 encrypted = SecurityManager.encrypt_data(plaintext)

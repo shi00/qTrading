@@ -17,7 +17,9 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from utils import config_handler as cfg
+from utils.config import storage as config_storage
 from utils.llm_providers import LLM_PROVIDERS
+from utils.security_utils import CredentialWriteLockTimeoutError
 
 
 class SaveOutcome(StrEnum):
@@ -199,8 +201,11 @@ def _store_secret(
                 exc_info=True,
             )
         try:
-            encrypted = cfg.SecurityManager.encrypt_data(value)
-            return SaveOutcome.SAVED if encrypt_to_config(encrypted) else SaveOutcome.FAILED
+            # D02-F01：加密与提交必须与 legacy 密钥清理共用同一临界区，否则
+            # 「已用旧 key 生成密文、清理后落盘」会产出无法解密的密文。
+            with cfg.SecurityManager.credential_write_lock():
+                encrypted = cfg.SecurityManager.encrypt_data(value)
+                return SaveOutcome.SAVED if encrypt_to_config(encrypted) else SaveOutcome.FAILED
         except cfg.SecurityError as se:
             cfg.logger.error(
                 "Cannot securely store %s: %s. Please use environment variable %s instead.",
@@ -361,11 +366,13 @@ def save_provider_credential(
                     cfg.DataSanitizer.sanitize_error(e),
                 )
                 try:
-                    encrypted_key = cfg.SecurityManager.encrypt_data(api_key)
-                    cred["api_key_encrypted"] = encrypted_key
-                    provider_credentials[provider] = cred
-                    ok = cfg.ConfigHandler.save_config({"llm_provider_credentials": provider_credentials})
-                    result = replace(result, api_key=SaveOutcome.SAVED if ok else SaveOutcome.FAILED)
+                    # D02-F01：与 legacy 密钥清理串行（加密 + 提交配置在同一临界区）。
+                    with cfg.SecurityManager.credential_write_lock():
+                        encrypted_key = cfg.SecurityManager.encrypt_data(api_key)
+                        cred["api_key_encrypted"] = encrypted_key
+                        provider_credentials[provider] = cred
+                        ok = cfg.ConfigHandler.save_config({"llm_provider_credentials": provider_credentials})
+                        result = replace(result, api_key=SaveOutcome.SAVED if ok else SaveOutcome.FAILED)
                 except cfg.SecurityError as se:
                     # 与 save_token/save_db_password 保持一致：SecurityError 携带完整
                     # 解决指引（keyring 安装 / 环境变量），必须传递到 UI 而非降级为通用错误。
@@ -495,39 +502,77 @@ def get_provider_credential(provider: str, *, fallback_to_global: bool) -> dict:
     }
 
 
+_TOP_LEVEL_CIPHERTEXT_FIELDS: tuple[str, ...] = ("ts_token", "db_password_encrypted", "ai_api_key")
+
+
+def _config_has_active_ciphertext(config: dict) -> bool:
+    """判定快照中是否仍有需要 legacy key 解密的 AES 密文字段。
+
+    只认实际写入磁盘的完整配置快照（由 :func:`storage.strict_config_snapshot`
+    提供），且按真实明文密文字段检查，不能以默认缓存（密文字段全空）替代。
+    """
+    for field in _TOP_LEVEL_CIPHERTEXT_FIELDS:
+        if config.get(field):
+            return True
+
+    provider_credentials = config.get("llm_provider_credentials") or {}
+    if isinstance(provider_credentials, dict):
+        for cred in provider_credentials.values():
+            if isinstance(cred, dict) and cred.get("api_key_encrypted"):
+                return True
+    return False
+
+
 def purge_legacy_key_if_safe() -> bool:
-    """F3（检视 06）：安全清理 legacy 明文密钥文件（``.secret.key`` 家族）。
+    """D02-F01：安全清理 legacy 明文密钥文件（``.secret.key`` 家族）。
 
-    前置判定：仅当配置中已无任何仍需该密钥解密的 AES 加密字段时，才调用
-    ``SecurityManager.purge_legacy_key_files()`` 删除文件；否则保留文件并返回
-    ``False``，避免导致既有加密值不可解密（数据丢失）。
+    删除是不可逆的凭证丢失风险，因此判定必须建立在"磁盘真实完整性"之上，且与
+    仍在用该 key 加密并提交的写者严格串行：
 
-    "仍需该密钥"判定：配置文件（经 load_config）中下列任一敏感字段非空，
-    即视为仍需密钥解密，不删除——
-    - ``ts_token`` / ``ai_api_key`` / ``db_password_encrypted``（顶层加密字段）
-    - ``llm_provider_credentials.*.api_key_encrypted``（各供应商加密字段）
+    1. 无 legacy 密钥文件 → no-op（不读配置、不删除）；
+    2. 新鲜读取使用 :func:`storage.strict_config_snapshot`：配置缺失 / 不可读 /
+       JSON 损坏 / Pydantic 校验失败 / 安全子域损坏一律抛 ``ConfigFreshReadError``，
+       本函数捕获后**保留文件**。不得用 ``load_config``——它失败时降级返回默认
+       配置（密文字段全空），会把"读取失败"误判成"无密文"；
+    3. 判定的读锁顺序为既有「文件锁 → RWLock」，且删除在锁内完成；
+    4. 与密文写者共用 ``SecurityManager.credential_write_lock``：写者持锁覆盖
+       "encrypt + save_config" 全程，本函数持锁覆盖"判定 + 删除"全程；锁忙/超时
+       即放弃删除（不可把单次锁内检查当作并发安全证明）。
+
+    判定字段：顶层 ``ts_token`` / ``db_password_encrypted`` / ``ai_api_key`` 与
+    ``llm_provider_credentials.*.api_key_encrypted``。本函数不做任何自动轮换，
+    无法证明安全时始终保留密钥文件。
 
     Returns:
-        True 若已删除 legacy 密钥文件；False 若无需删除或存在仍需密钥的加密字段。
+        True 仅当新鲜读取合法、无任何密文字段且删除成功；
+        其余情况（无文件 / 读取或校验失败 / 锁超时 / 仍有密文）均返回 False。
     """
     if not cfg.SecurityManager.has_legacy_key_files():
         return False
 
-    config = cfg.ConfigHandler.load_config()
-    if config.get("ts_token") or config.get("db_password_encrypted") or config.get("ai_api_key"):
-        cfg.logger.info("[Secrets] Legacy key files kept: config still references AES-encrypted fields")
+    try:
+        with cfg.SecurityManager.credential_write_lock():
+            with config_storage.strict_config_snapshot() as config:
+                if _config_has_active_ciphertext(config):
+                    cfg.logger.info("[Secrets] Legacy key files kept: config still references AES-encrypted fields")
+                    return False
+                removed = cfg.SecurityManager.purge_legacy_key_files()
+            if removed:
+                cfg.logger.info(
+                    "[Secrets] Removed legacy plaintext key files (.secret.key family) after credentials migrated"
+                )
+            return removed
+    except (
+        CredentialWriteLockTimeoutError,
+        config_storage.ConfigFreshReadError,
+        config_storage.ConfigFileLockTimeoutError,
+        OSError,
+    ) as e:
+        cfg.logger.warning(
+            "[Secrets] Legacy key files kept: cannot prove disk state is safe: %s",
+            cfg.DataSanitizer.sanitize_error(e),
+        )
         return False
-
-    provider_credentials = config.get("llm_provider_credentials", {}) or {}
-    for cred in provider_credentials.values():
-        if isinstance(cred, dict) and cred.get("api_key_encrypted"):
-            cfg.logger.info("[Secrets] Legacy key files kept: provider credential still AES-encrypted")
-            return False
-
-    removed = cfg.SecurityManager.purge_legacy_key_files()
-    if removed:
-        cfg.logger.info("[Secrets] Removed legacy plaintext key files (.secret.key family) after credentials migrated")
-    return removed
 
 
 def validate_failover_credentials() -> list[str]:

@@ -757,13 +757,16 @@ def compare_and_save_model_management(
         return ModelManagementSaveResult(status="not_committed")
 
 
-def read_model_management_fresh() -> dict:
-    """新鲜读取完整配置（§5.2）：磁盘为唯一事实源，绕过进程内缓存。
+@contextlib.contextmanager
+def strict_config_snapshot() -> Iterator[dict]:
+    """在「文件锁 → RWLock」内新鲜读取并校验完整配置，锁保持到 ``with`` 退出。
 
-    成功时刷新进程内缓存并返回深拷贝完整配置 dict（model_management 域由
-    调用方按 ``fresh["model_management"]`` 取用）。磁盘损坏 / 不可读 /
-    校验失败 / 已初始化安全子域结构损坏（F08）时抛 :class:`ConfigFreshReadError`，
-    禁止静默落默认。
+    与 ``load_config`` 的降级语义相反：磁盘缺失 / 不可读 / JSON 损坏 / 校验失败 /
+    已初始化安全子域损坏（F08）一律抛 :class:`ConfigFreshReadError`，禁止用
+    ``get_default_config()``（密文字段全空）冒充磁盘现状。调用方可在 ``with`` 块内
+    基于该快照做不可逆判定（如清理密钥文件），期间其他配置写者被文件锁挡在外面。
+
+    注意：块内不得调用会再次获取配置文件锁的配置写 API（文件锁不重入）。
     """
     _migrate_config_location()
     with _config_file_lock():
@@ -783,7 +786,19 @@ def read_model_management_fresh() -> dict:
                 raise ConfigFreshReadError(f"security subdomain corruption: {DataSanitizer.sanitize_error(e)}") from e
             fresh = validated.model_dump()
             cfg.ConfigHandler._config_cache = fresh
-            return copy.deepcopy(fresh)
+            yield copy.deepcopy(fresh)
+
+
+def read_model_management_fresh() -> dict:
+    """新鲜读取完整配置（§5.2）：磁盘为唯一事实源，绕过进程内缓存。
+
+    成功时刷新进程内缓存并返回深拷贝完整配置 dict（model_management 域由
+    调用方按 ``fresh["model_management"]`` 取用）。磁盘损坏 / 不可读 /
+    校验失败 / 已初始化安全子域结构损坏（F08）时抛 :class:`ConfigFreshReadError`，
+    禁止静默落默认。
+    """
+    with strict_config_snapshot() as fresh:
+        return fresh
 
 
 def _confirm_commit_after_replace(operation_id: str) -> ModelManagementSaveResult:

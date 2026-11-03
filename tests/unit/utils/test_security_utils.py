@@ -85,7 +85,11 @@ class TestSecurityManagerGetKey:
     def setup_method(self):
         SecurityManager._key = None
 
-    def test_cached_key_returned_immediately(self):
+    def test_cached_key_returned_immediately(self, tmp_path, monkeypatch):
+        """密钥文件仍在时缓存命中（D02-F01 后缓存需以文件存在为前置）。"""
+        monkeypatch.setattr(SecurityManager, "KEY_FILE", str(tmp_path / ".secret.key"))
+        monkeypatch.setattr(SecurityManager, "KEY_FILE_BAK", str(tmp_path / ".secret.key.bak"))
+        (tmp_path / ".secret.key").write_bytes(b"placeholder")
         SecurityManager._key = b"cached_key_32bytes_long_enough!!"
         result = SecurityManager.get_key()
         assert result == b"cached_key_32bytes_long_enough!!"
@@ -643,6 +647,52 @@ class TestPurgeLegacyKeyFiles:
         assert not paths["key"].exists()
         assert not paths["bak"].exists()
         assert not paths["marker"].exists()
+        assert SecurityManager._key is None
+
+
+class TestStaleLegacyKeyCache:
+    """D02-F01：legacy 密钥文件被其他进程清理后，本进程不得继续使用陈旧内存 key。
+
+    清理只在清理方进程内把 ``_key`` 置 None；其他常驻进程若继续用缓存 key 加密，
+    会产出失去密钥的密文（跨进程数据丢失）。因此 ``get_key`` 必须在密钥文件消失
+    时丢弃缓存并 fail-closed。
+    """
+
+    def setup_method(self):
+        SecurityManager._key = None
+
+    @staticmethod
+    def _redirect_key_paths(monkeypatch, tmp_path):
+        monkeypatch.setattr(SecurityManager, "KEY_FILE", str(tmp_path / ".secret.key"))
+        monkeypatch.setattr(SecurityManager, "KEY_FILE_BAK", str(tmp_path / ".secret.key.bak"))
+
+    def test_cached_key_kept_while_key_file_exists(self, tmp_path, monkeypatch):
+        """密钥文件仍在 → 返回缓存 key，不丢弃。"""
+        self._redirect_key_paths(monkeypatch, tmp_path)
+        (tmp_path / ".secret.key").write_bytes(b"placeholder")
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-cached-key")
+
+        assert SecurityManager.get_key() == b"synthetic-cached-key"
+        assert SecurityManager._key == b"synthetic-cached-key"
+
+    def test_cached_key_dropped_after_files_removed(self, tmp_path, monkeypatch):
+        """密钥文件（主/备）均被删除 → 丢弃缓存并抛 SecurityError（不静默重建）。"""
+        from utils.security_utils import SecurityError
+
+        self._redirect_key_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-cached-key")
+
+        with pytest.raises(SecurityError):
+            SecurityManager.get_key()
+        assert SecurityManager._key is None
+
+    def test_encrypt_refuses_stale_cached_key(self, tmp_path, monkeypatch):
+        """文件消失后的加密请求失败，而不是用陈旧 key 产出无法解密的密文。"""
+        self._redirect_key_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-cached-key")
+
+        with pytest.raises(EncryptionError):
+            SecurityManager.encrypt_data("synthetic-plaintext")
         assert SecurityManager._key is None
 
 

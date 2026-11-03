@@ -3348,129 +3348,175 @@ class TestAIExternalAcknowledgementMigration:
 
 
 class TestPurgeLegacyKeyIfSafe:
-    """F3（检视 06）：purge_legacy_key_if_safe 安全保障协调逻辑。
+    """D02-F01：启动期 legacy 密钥清理必须 fail-closed 且与凭据写者串行。
 
-    核心不变量：仅当配置中已无任何仍需该密钥解密的 AES 加密字段时，
-    才真正调用 SecurityManager.purge_legacy_key_files() 删除文件；
-    否则保留文件（避免既有加密值不可解密 → 数据丢失）。
+    不变量：
+    1. 无真实 legacy 密钥文件 → no-op（不读配置、不删除）；
+    2. 判定只用「不降级的新鲜磁盘完整性读取」：配置缺失 / 不可读 / JSON 损坏 /
+       校验失败一律不删除——``load_config`` 此时会返回默认值（密文字段全空），
+       不能把降级默认值当作"磁盘无密文"的证明；
+    3. 合法配置下仍按顶层 ``ts_token`` / ``db_password_encrypted`` / ``ai_api_key``
+       与 ``llm_provider_credentials.*.api_key_encrypted`` 判定；
+    4. 与「持旧 key 加密并提交」的写者共用 ``credential_write_lock``：锁被占用时
+       拒绝删除（二者严格串行，避免"新密文已提交、key 被删"）。
     """
 
-    def _patch_security(self, has_files: bool, purge_result: bool):
-        return (
-            patch.object(cfg_mod.SecurityManager, "has_legacy_key_files", return_value=has_files),
-            patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=purge_result),
-        )
+    @pytest.fixture()
+    def purge_env(self, tmp_path, monkeypatch):
+        """合成配置/密钥目录；绝不触碰真实用户数据目录、keyring 或 .env。"""
+        config_file = tmp_path / "user_settings.json"
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(config_file))
+        monkeypatch.setattr(cfg_mod, "_CONFIG_FILE_LEGACY", str(tmp_path / "legacy.json"))
+        monkeypatch.setenv("ASTOCK_CONFIG_FILE", str(config_file))
+        monkeypatch.setattr(cfg_mod.ConfigHandler, "_config_cache", None)
+        monkeypatch.setattr(cfg_mod.SecurityManager, "KEY_FILE", str(tmp_path / ".secret.key"))
+        monkeypatch.setattr(cfg_mod.SecurityManager, "KEY_FILE_BAK", str(tmp_path / ".secret.key.bak"))
+        monkeypatch.setattr("utils.security_utils._LEGACY_MARKER", str(tmp_path / ".secret.legacy"))
+        (tmp_path / ".secret.key").write_bytes(b"synthetic-legacy-key")
+        (tmp_path / ".secret.key.bak").write_bytes(b"synthetic-legacy-key-bak")
+        return config_file
 
-    def test_no_legacy_files_returns_false_no_load(self):
+    def test_no_legacy_files_is_noop(self, tmp_path, monkeypatch):
         """无 legacy 密钥文件 → 直接返回 False，且不读取配置、不调用删除。"""
         from utils.config.secrets import purge_legacy_key_if_safe
 
-        has_patch, purge_patch = self._patch_security(has_files=False, purge_result=False)
+        config_file = tmp_path / "user_settings.json"
+        config_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(config_file))
+        monkeypatch.setattr(cfg_mod.SecurityManager, "KEY_FILE", str(tmp_path / "missing.key"))
+        monkeypatch.setattr(cfg_mod.SecurityManager, "KEY_FILE_BAK", str(tmp_path / "missing.key.bak"))
         with (
-            has_patch,
-            purge_patch,
             patch.object(cfg_mod.ConfigHandler, "load_config", return_value={}) as mock_load,
+            patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge,
         ):
-            result = purge_legacy_key_if_safe()
-            assert result is False
-            mock_load.assert_not_called()
-            cfg_mod.SecurityManager.purge_legacy_key_files.assert_not_called()
+            assert purge_legacy_key_if_safe() is False
+        mock_load.assert_not_called()
+        purge.assert_not_called()
 
-    @pytest.mark.parametrize(
-        "config",
-        [
-            {"ts_token": "ENCRYPTED"},
-            {"db_password_encrypted": "ENCRYPTED"},
-            {"ai_api_key": "ENCRYPTED"},
-            {"ts_token": "", "db_password_encrypted": "ENCRYPTED"},
-        ],
-    )
-    def test_top_level_encrypted_field_keeps_files(self, config):
-        """任一顶层 AES 加密字段非空 → 判定"仍需密钥"，保留文件并返回 False。"""
+    def test_corrupt_json_with_ciphertext_never_purges(self, purge_env):
+        """① 磁盘含合成密文但 JSON 语法损坏 → 新鲜读取失败，不删除（原缺陷回归）。"""
         from utils.config.secrets import purge_legacy_key_if_safe
 
-        has_patch, purge_patch = self._patch_security(has_files=True, purge_result=True)
-        with (
-            has_patch,
-            purge_patch,
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=config),
-        ):
-            result = purge_legacy_key_if_safe()
-            assert result is False
-            cfg_mod.SecurityManager.purge_legacy_key_files.assert_not_called()
+        purge_env.write_text('{"ts_token": "SYNTHETIC_CIPHERTEXT",', encoding="utf-8")
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is False
+        purge.assert_not_called()
+        # 降级默认值不得写入缓存（否则后续判定继续被污染）
+        assert cfg_mod.ConfigHandler._config_cache is None
 
-    def test_provider_credential_encrypted_keeps_files(self):
-        """供应商 api_key_encrypted 非空 → 判定"仍需密钥"，保留文件并返回 False。"""
+    def test_unreadable_config_never_purges(self, purge_env, monkeypatch):
+        """② 配置文件读取被拒 → 新鲜读取失败，不删除。"""
+        from utils.config import storage as storage_mod
         from utils.config.secrets import purge_legacy_key_if_safe
 
-        config = {"llm_provider_credentials": {"qwen": {"api_key_encrypted": "ENCRYPTED", "base_url": "x"}}}
-        has_patch, purge_patch = self._patch_security(has_files=True, purge_result=True)
-        with (
-            has_patch,
-            purge_patch,
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=config),
-        ):
-            result = purge_legacy_key_if_safe()
-            assert result is False
-            cfg_mod.SecurityManager.purge_legacy_key_files.assert_not_called()
+        purge_env.write_text(json.dumps({"ts_token": "SYNTHETIC_CIPHERTEXT"}), encoding="utf-8")
 
-    def test_provider_credential_plain_ignored(self):
+        def _denied_open(*args, **kwargs):
+            raise PermissionError("synthetic permission denied")
+
+        monkeypatch.setattr(storage_mod, "_open_builtin", lambda: _denied_open)
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is False
+        purge.assert_not_called()
+
+    def test_missing_config_never_purges(self, purge_env):
+        """配置缺失同样不删除（无法证明磁盘无密文）。"""
+        from utils.config.secrets import purge_legacy_key_if_safe
+
+        assert not purge_env.exists()
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is False
+        purge.assert_not_called()
+
+    def test_valid_config_without_ciphertext_purges_once(self, purge_env):
+        """③ 合法且无密文 → 允许一次清理，返回删除结果。"""
+        from utils.config.secrets import purge_legacy_key_if_safe
+
+        purge_env.write_text(json.dumps({"llm_provider": "deepseek"}), encoding="utf-8")
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is True
+        purge.assert_called_once_with()
+
+    @pytest.mark.parametrize("field", ["ts_token", "db_password_encrypted", "ai_api_key"])
+    def test_top_level_ciphertext_keeps_files(self, purge_env, field):
+        """合法配置中任一顶层 AES 密文字段非空 → 保留文件并返回 False。"""
+        from utils.config.secrets import purge_legacy_key_if_safe
+
+        purge_env.write_text(json.dumps({field: "SYNTHETIC_CIPHERTEXT"}), encoding="utf-8")
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is False
+        purge.assert_not_called()
+
+    def test_provider_ciphertext_keeps_files(self, purge_env):
+        """供应商 api_key_encrypted 非空 → 保留文件并返回 False。"""
+        from utils.config.secrets import purge_legacy_key_if_safe
+
+        purge_env.write_text(
+            json.dumps({"llm_provider_credentials": {"qwen": {"api_key_encrypted": "SYNTHETIC_CIPHERTEXT"}}}),
+            encoding="utf-8",
+        )
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is False
+        purge.assert_not_called()
+
+    def test_provider_plain_fields_do_not_block(self, purge_env):
         """供应商仅存明文字段（api_key_encrypted 为空）→ 不阻断删除。"""
         from utils.config.secrets import purge_legacy_key_if_safe
 
-        config = {"llm_provider_credentials": {"qwen": {"base_url": "x"}}}
-        has_patch, purge_patch = self._patch_security(has_files=True, purge_result=True)
-        with (
-            has_patch,
-            purge_patch,
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=config),
-        ):
-            result = purge_legacy_key_if_safe()
-            assert result is True
-            cfg_mod.SecurityManager.purge_legacy_key_files.assert_called_once_with()
+        purge_env.write_text(
+            json.dumps({"llm_provider_credentials": {"qwen": {"base_url": "http://localhost"}}}),
+            encoding="utf-8",
+        )
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is True
+        purge.assert_called_once_with()
 
-    def test_empty_config_purges_files(self):
-        """配置无任何加密字段 → 调用删除并返回其返回值（True）。"""
+    def test_purge_false_propagates(self, purge_env):
+        """判定通过但未实际删除（purge 返回 False）→ 返回 False。"""
         from utils.config.secrets import purge_legacy_key_if_safe
 
-        has_patch, purge_patch = self._patch_security(has_files=True, purge_result=True)
-        with (
-            has_patch,
-            purge_patch,
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value={}),
-        ):
-            result = purge_legacy_key_if_safe()
-            assert result is True
-            cfg_mod.SecurityManager.purge_legacy_key_files.assert_called_once_with()
+        purge_env.write_text(json.dumps({"llm_provider": "deepseek"}), encoding="utf-8")
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=False) as purge:
+            assert purge_legacy_key_if_safe() is False
+        purge.assert_called_once_with()
 
-    def test_purge_returns_true_propagates(self):
-        """安全判定通过但实际未删除任何文件（purge 返回 False）→ 返回 False。"""
+    def test_writer_lock_held_refuses_purge(self, purge_env, monkeypatch):
+        """④ 另一写者持旧 key 正在加密/提交 → 清理拒绝（静态串行断言）。
+
+        写者与清理共用 ``SecurityManager.credential_write_lock``：此处由另一线程持有
+        该跨进程锁来模拟另一进程的加密+提交临界区，清理在锁超时后必须放弃删除。
+        """
+        import threading
+
+        from utils import security_utils as security_mod
         from utils.config.secrets import purge_legacy_key_if_safe
 
-        has_patch, purge_patch = self._patch_security(has_files=True, purge_result=False)
-        with (
-            has_patch,
-            purge_patch,
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value={}),
-        ):
-            result = purge_legacy_key_if_safe()
-            assert result is False
-            cfg_mod.SecurityManager.purge_legacy_key_files.assert_called_once_with()
+        purge_env.write_text(json.dumps({"llm_provider": "deepseek"}), encoding="utf-8")
+        monkeypatch.setattr(security_mod, "_CREDENTIAL_WRITE_LOCK_TIMEOUT_SECONDS", 0.2)
 
-    def test_missing_provider_credentials_is_not_blocking(self):
-        """llm_provider_credentials 缺失/None → 不作阻断来源，不抛异常。"""
-        from utils.config.secrets import purge_legacy_key_if_safe
+        started = threading.Event()
+        release = threading.Event()
 
-        config = {"llm_provider_credentials": None}
-        has_patch, purge_patch = self._patch_security(has_files=True, purge_result=True)
-        with (
-            has_patch,
-            purge_patch,
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=config),
-        ):
-            result = purge_legacy_key_if_safe()
-            assert result is True
-            cfg_mod.SecurityManager.purge_legacy_key_files.assert_called_once_with()
+        def _hold_writer_lock():
+            with cfg_mod.SecurityManager.credential_write_lock():
+                started.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=_hold_writer_lock, daemon=True)
+        thread.start()
+        try:
+            assert started.wait(5)
+            with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+                assert purge_legacy_key_if_safe() is False
+            purge.assert_not_called()
+        finally:
+            release.set()
+            thread.join(5)
+
+        # 锁释放后恢复可用：不是永久禁用，只是拒绝与写者重叠的清理
+        with patch.object(cfg_mod.SecurityManager, "purge_legacy_key_files", return_value=True) as purge:
+            assert purge_legacy_key_if_safe() is True
+        purge.assert_called_once_with()
 
 
 class TestSecretsKeyringAvailability:

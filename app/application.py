@@ -246,9 +246,10 @@ async def _run_session(
     onboarding_complete = ConfigHandler.is_onboarding_complete()
     logger.info("[Main] After ConfigHandler calls")
 
-    # F3（检视 06）：配置加载完毕后，若已无任何仍需 legacy 明文密钥解密的字段
-    # （凭证已迁移到 keyring / 环境变量），安全删除 .secret.key 家族文件。
-    # 判定失败（仍引用加密字段）则保留文件，避免既有加密值不可解密（数据丢失）。
+    # D02-F01：配置加载完毕后，仅在「新鲜磁盘完整性读取 + 凭据写锁串行」证明
+    # 已无任何仍需 legacy 明文密钥解密的字段（凭证已迁移到 keyring / 环境变量）时，
+    # 才删除 .secret.key 家族文件。读取/校验失败、锁忙或仍有密文字段一律保留文件，
+    # 避免一次可修复的配置损坏导致不可恢复的密钥与凭证丢失。
     try:
         _purge_legacy_key_if_safe()
     except Exception as e:
