@@ -3640,3 +3640,512 @@ class TestTaskManagerExclusiveGroup:
 
         assert first.status == TaskStatus.COMPLETED
         assert second.status == TaskStatus.COMPLETED
+
+
+class _ObservedSemaphore:
+    """包装真实 ``asyncio.Semaphore``：在进入 acquire 前先置位事件，提供精确卡点。"""
+
+    def __init__(self, sem: asyncio.Semaphore, entered: asyncio.Event) -> None:
+        self._sem = sem
+        self._entered = entered
+
+    async def __aenter__(self) -> None:
+        self._entered.set()
+        await self._sem.acquire()
+        return None
+
+    async def __aexit__(self, *_exc) -> bool:
+        self._sem.release()
+        return False
+
+
+class _ObservedLock:
+    """包装真实 ``asyncio.Lock``：在进入 acquire 前先置位事件，提供精确卡点。"""
+
+    def __init__(self, lock: asyncio.Lock, entered: asyncio.Event) -> None:
+        self._lock = lock
+        self._entered = entered
+
+    async def __aenter__(self) -> None:
+        self._entered.set()
+        await self._lock.acquire()
+        return None
+
+    async def __aexit__(self, *_exc) -> bool:
+        self._lock.release()
+        return False
+
+
+class TestRealInterleaving:
+    """D11-T01: 仅通过真实入口（submit_task → _task_runner → cancel_task → clear_finished）
+    制造交错，所有卡点由 ``asyncio.Event`` 精确控制，不依赖 sleep 猜测调度顺序，
+    也不直接改写 ``task.status`` 伪造状态（终态仅作断言）。"""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_a_late_finally_does_not_release_new_owner_key(self):
+        """1) A 取消后 B 以同 unique_key 提交：A 的迟到 finally 不释放 B 的占位、不改写 B 状态。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        a_started = asyncio.Event()
+        a_unwinding = asyncio.Event()
+        a_allow_finally = asyncio.Event()
+        b_started = asyncio.Event()
+        b_release = asyncio.Event()
+
+        async def _a_work(task_id: str):
+            a_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # 真实取消已注入；延迟 runner 的 finally，制造「A 收尾晚于 B 登记」的窗口
+                a_unwinding.set()
+                await a_allow_finally.wait()
+                raise
+
+        async def _b_work(task_id: str):
+            b_started.set()
+            await b_release.wait()
+
+        tid_a = mgr.submit_task("A", "test", _a_work, cancellable=True, unique_key="dup")
+        assert tid_a is not None
+        await asyncio.wait_for(a_started.wait(), timeout=1.0)
+        task_a = mgr.get_task(tid_a)
+        assert task_a is not None
+        runner_a = task_a._asyncio_task
+        assert runner_a is not None
+
+        mgr.cancel_task(tid_a)
+        await asyncio.wait_for(a_unwinding.wait(), timeout=1.0)
+        assert task_a.status == TaskStatus.CANCELLED
+        assert "dup" not in mgr._active_keys  # A 的占位已被 cancel 释放
+
+        tid_b = mgr.submit_task("B", "test", _b_work, cancellable=True, unique_key="dup")
+        assert tid_b is not None
+        await asyncio.wait_for(b_started.wait(), timeout=1.0)
+        task_b = mgr.get_task(tid_b)
+        assert task_b is not None
+        runner_b = task_b._asyncio_task
+        assert runner_b is not None
+        assert mgr._active_keys["dup"] == tid_b
+        assert task_b.status == TaskStatus.RUNNING
+
+        # 放行 A 的 finally：owner 校验必须让它放过 B 的占位
+        a_allow_finally.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(runner_a, timeout=1.0)
+
+        assert mgr._active_keys["dup"] == tid_b
+        assert task_b.status == TaskStatus.RUNNING
+        # B 仍持有占位期间，同键第三次提交仍被去重拒绝
+        assert mgr.submit_task("C", "test", _b_work, unique_key="dup") is None
+
+        b_release.set()
+        await asyncio.wait_for(runner_b, timeout=1.0)
+        assert task_b.status == TaskStatus.COMPLETED
+        assert "dup" not in mgr._active_keys
+
+    @pytest.mark.asyncio
+    async def test_normal_return_after_real_cancel_keeps_cancelled_t1_guard(self):
+        """2) 真实取消后用户协程正常返回：T1 守卫不得把 CANCELLED 覆盖为 COMPLETED。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+
+        async def _work(task_id: str):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # 模拟用户协程吞掉取消后正常返回（进入 T1 守卫分支）
+                return "late-ok"
+
+        tid = mgr.submit_task("T1", "test", _work, cancellable=True)
+        assert tid is not None
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task = mgr.get_task(tid)
+        assert task is not None
+        runner = task._asyncio_task
+        assert runner is not None
+
+        mgr.cancel_task(tid)
+        await asyncio.wait_for(runner, timeout=1.0)  # 用户协程正常返回，runner 不抛取消
+
+        assert task.status == TaskStatus.CANCELLED
+        assert task.result == "late-ok"
+        assert task.progress == 0.0
+        assert task.description == Message("task_cancelled_desc")
+
+    @pytest.mark.asyncio
+    async def test_error_raised_after_real_cancel_keeps_cancelled_t3_guard(self, caplog):
+        """3) 取消后用户协程抛普通异常：保持 CANCELLED，仅记录伴随错误，不落 FAILED。"""
+        caplog.set_level(logging.INFO, logger="services.task_manager")
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+
+        async def _work(task_id: str):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # 模拟用户代码在取消清理路径中抛出普通异常（进入 T3 守卫分支）
+                raise RuntimeError("accompanying-error") from None
+
+        tid = mgr.submit_task("T3", "test", _work, cancellable=True)
+        assert tid is not None
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task = mgr.get_task(tid)
+        assert task is not None
+        runner = task._asyncio_task
+        assert runner is not None
+
+        mgr.cancel_task(tid)
+        await asyncio.wait_for(runner, timeout=1.0)  # 异常被 runner 的 T3 守卫吸收
+
+        assert task.status == TaskStatus.CANCELLED
+        assert task.error == ""
+        assert task.description == Message("task_cancelled_desc")
+        assert any("Suppressed FAILED" in record.message for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_clear_racing_terminal_completion_deletes_and_rejects_late_snapshot(self):
+        """4) clear 与 RUNNING→COMPLETED 终态写交错：内存/历史移除、墓碑生效、
+        在途终态写先于 DELETE 落库、迟到快照被墓碑拒绝（依赖 F06/F07 语义）。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = asyncio.get_running_loop()
+        db = _BarrierFakeDb()
+        db.engine = _BarrierFakeEngine(db)
+        db.gate.set()  # 初始开放，允许排队/启动快照正常落库
+
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def _work(task_id: str):
+            started.set()
+            await finish.wait()
+            return "done"
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm._instance = db
+            mock_cm.return_value = db
+
+            tid = mgr.submit_task("race", "test", _work, cancellable=True)
+            assert tid is not None
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            task = mgr.get_task(tid)
+            assert task is not None
+            assert task.status == TaskStatus.RUNNING
+            await mgr.flush_persistence()
+
+            # 关闭写闸门：RUNNING→COMPLETED 的终态快照停在写库阶段（已通过准入闸门）
+            db.write_started.clear()
+            db.gate.clear()
+            finish.set()
+            await asyncio.wait_for(db.write_started.wait(), timeout=1.0)
+            assert task.status == TaskStatus.COMPLETED
+            assert mgr._inflight_persist.get(tid, 0) == 1
+
+            cleared = asyncio.Event()
+
+            def _watch(snapshot):
+                if tid not in mgr._tasks:
+                    cleared.set()
+
+            mgr.subscribe(_watch)
+            delete_tasks: list[asyncio.Task] = []
+
+            def _run_now(coro, on_drop=None):
+                delete_tasks.append(asyncio.create_task(coro))
+                return True
+
+            try:
+                with patch.object(mgr, "_schedule_coro", side_effect=_run_now):
+                    mgr.clear_finished()  # 真实入口：调度 _clear_finished_impl
+                    await asyncio.wait_for(cleared.wait(), timeout=1.0)
+            finally:
+                mgr.unsubscribe(_watch)
+
+            assert tid not in mgr._tasks
+            assert all(h.id != tid for h in mgr._history)
+            assert tid not in mgr._finished_order
+            assert tid in mgr._tombstones
+            assert tid in mgr._pending_db_deletions
+            assert mgr._has_inflight_persist([tid])  # DELETE 仍须等待在途终态写
+
+            db.gate.set()
+            await mgr.flush_persistence()
+            await asyncio.wait_for(asyncio.gather(*delete_tasks), timeout=1.0)
+            assert db.ops[-1] == ("delete", (tid,))
+            assert tid not in db.rows
+            assert tid not in mgr._pending_db_deletions
+            assert tid in mgr._tombstones  # 墓碑保留，继续拒绝迟到快照
+
+            # 迟到快照：内存入口因任务已撤销被跳过；直接写库被墓碑闸门拒绝
+            with patch.object(mgr, "_queue_persist_snapshot") as mock_queue:
+                mgr._persist_task(task)
+            mock_queue.assert_not_called()
+            await mgr._persist_snapshot(
+                (tid, "race", "test", "COMPLETED", 1.0, "", "", "done", None, None, None, None, None, None, 99)
+            )
+            assert tid not in db.rows
+
+    @pytest.mark.asyncio
+    async def test_queued_cancel_while_waiting_semaphore_does_not_hold_permit(self):
+        """5a) 等待信号量期间取消：状态 CANCELLED、不占许可，后续任务可正常执行。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()  # 测试持有唯一许可，任务必然排队
+        entered = asyncio.Event()
+        observed = _ObservedSemaphore(sem, entered)
+        executed = False
+
+        async def _work(task_id: str):
+            nonlocal executed
+            executed = True
+
+        with patch.object(mgr, "_get_semaphore", return_value=observed):
+            tid = mgr.submit_task("queued", "test", _work, cancellable=True)
+            assert tid is not None
+            await asyncio.wait_for(entered.wait(), timeout=1.0)
+            task = mgr.get_task(tid)
+            assert task is not None
+            assert task.status == TaskStatus.QUEUED
+            runner = task._asyncio_task
+            assert runner is not None
+            assert sem._value == 0  # 许可仍由测试持有
+
+            mgr.cancel_task(tid)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(runner, timeout=1.0)
+
+            assert task.status == TaskStatus.CANCELLED
+            assert task.started_at is None
+            assert executed is False
+            assert sem._value == 0  # 取消等待既未额外占用、也未归还未持有的许可
+
+            sem.release()
+            assert sem._value == 1
+
+            started_b = asyncio.Event()
+            release_b = asyncio.Event()
+
+            async def _work_b(task_id: str):
+                started_b.set()
+                await release_b.wait()
+
+            tid_b = mgr.submit_task("after", "test", _work_b)
+            assert tid_b is not None
+            await asyncio.wait_for(started_b.wait(), timeout=1.0)
+            task_b = mgr.get_task(tid_b)
+            assert task_b is not None
+            runner_b = task_b._asyncio_task
+            assert runner_b is not None
+            release_b.set()
+            await asyncio.wait_for(runner_b, timeout=1.0)
+            assert task_b.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_waiting_group_lock_does_not_hold_permit(self):
+        """5b) 等待组锁期间取消：状态 CANCELLED、不占并发许可，后续同组任务可执行。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(2)
+        lock_entered = asyncio.Event()
+        observed = _ObservedLock(mgr._get_group_lock("G"), lock_entered)
+        first_started = asyncio.Event()
+        first_release = asyncio.Event()
+        second_executed = False
+
+        async def _first(task_id: str):
+            first_started.set()
+            await first_release.wait()
+
+        async def _second(task_id: str):
+            nonlocal second_executed
+            second_executed = True
+
+        with (
+            patch.object(mgr, "_get_semaphore", return_value=sem),
+            patch.object(mgr, "_get_group_lock", return_value=observed),
+        ):
+            tid1 = mgr.submit_task("first", "test", _first, exclusive_group="G")
+            assert tid1 is not None
+            await asyncio.wait_for(first_started.wait(), timeout=1.0)
+            first = mgr.get_task(tid1)
+            assert first is not None
+            runner1 = first._asyncio_task
+            assert runner1 is not None
+            assert sem._value == 1  # first 占 1/2 许可
+            lock_entered.clear()
+
+            tid2 = mgr.submit_task("second", "test", _second, cancellable=True, exclusive_group="G")
+            assert tid2 is not None
+            await asyncio.wait_for(lock_entered.wait(), timeout=1.0)
+            second = mgr.get_task(tid2)
+            assert second is not None
+            assert second.status == TaskStatus.QUEUED
+            assert sem._value == 1  # 等待组锁期间不占并发许可
+            runner2 = second._asyncio_task
+            assert runner2 is not None
+
+            mgr.cancel_task(tid2)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(runner2, timeout=1.0)
+            assert second.status == TaskStatus.CANCELLED
+            assert second.started_at is None
+            assert second_executed is False
+            assert sem._value == 1
+
+            first_release.set()
+            await asyncio.wait_for(runner1, timeout=1.0)
+            assert first.status == TaskStatus.COMPLETED
+
+            # 组锁未被取消路径误释放或永久占用：后续同组任务可正常执行
+            third_started = asyncio.Event()
+            third_release = asyncio.Event()
+
+            async def _third(task_id: str):
+                third_started.set()
+                await third_release.wait()
+
+            tid3 = mgr.submit_task("third", "test", _third, exclusive_group="G")
+            assert tid3 is not None
+            await asyncio.wait_for(third_started.wait(), timeout=1.0)
+            third = mgr.get_task(tid3)
+            assert third is not None
+            runner3 = third._asyncio_task
+            assert runner3 is not None
+            third_release.set()
+            await asyncio.wait_for(runner3, timeout=1.0)
+            assert third.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_same_group_tasks_serialize_with_real_semaphore(self):
+        """6a) 多任务同组串行：真实 semaphore 放宽到 4，串行只能来自组锁。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(4)
+        started = [asyncio.Event() for _ in range(3)]
+        release = [asyncio.Event() for _ in range(3)]
+        active: list[int] = []
+        peak = 0
+
+        def _make(idx: int):
+            async def _work(task_id: str):
+                nonlocal peak
+                active.append(idx)
+                peak = max(peak, len(active))
+                started[idx].set()
+                await release[idx].wait()
+                active.remove(idx)
+
+            return _work
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            tids = [mgr.submit_task(f"S{i}", "test", _make(i), exclusive_group="G") for i in range(3)]
+            assert all(tid is not None for tid in tids)
+
+            runners: dict[int, asyncio.Task] = {}
+            for i in range(3):
+                await asyncio.wait_for(started[i].wait(), timeout=1.0)
+                task = mgr.get_task(tids[i])
+                assert task is not None
+                assert task.status == TaskStatus.RUNNING
+                runner = task._asyncio_task
+                assert runner is not None
+                runners[i] = runner
+                # 同组后续任务在释放当前任务前不得进入执行槽
+                assert all(not started[j].is_set() for j in range(i + 1, 3))
+                release[i].set()
+
+            await asyncio.wait_for(asyncio.gather(*(runners[i] for i in range(3))), timeout=1.0)
+
+        assert peak == 1
+        for tid in tids:
+            task = mgr.get_task(tid)
+            assert task is not None
+            assert task.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_cross_group_concurrency_and_group_waiter_does_not_hold_permit(self):
+        """6b) 跨组并发：组内等待者不占许可，另一组任务可同时执行；同组仍串行。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(2)
+        g_wait = asyncio.Event()
+        real_g = mgr._get_group_lock("G")
+        real_h = mgr._get_group_lock("H")
+
+        def _group_lock(group: str):
+            if group == "G":
+                return _ObservedLock(real_g, g_wait)
+            return real_h
+
+        g1_started = asyncio.Event()
+        g1_release = asyncio.Event()
+        g2_started = asyncio.Event()
+        g2_release = asyncio.Event()
+        h_started = asyncio.Event()
+        h_release = asyncio.Event()
+        entry_order: list[str] = []
+
+        def _make(name: str, started_ev: asyncio.Event, release_ev: asyncio.Event):
+            async def _work(task_id: str):
+                entry_order.append(name)
+                started_ev.set()
+                await release_ev.wait()
+
+            return _work
+
+        with (
+            patch.object(mgr, "_get_semaphore", return_value=sem),
+            patch.object(mgr, "_get_group_lock", side_effect=_group_lock),
+        ):
+            tid_g1 = mgr.submit_task("g1", "test", _make("g1", g1_started, g1_release), exclusive_group="G")
+            assert tid_g1 is not None
+            await asyncio.wait_for(g1_started.wait(), timeout=1.0)
+            g1 = mgr.get_task(tid_g1)
+            assert g1 is not None
+            assert g1.status == TaskStatus.RUNNING
+            runner_g1 = g1._asyncio_task
+            assert runner_g1 is not None
+            assert sem._value == 1
+            g_wait.clear()
+
+            # 同组第二任务：阻塞在组锁上，不占第二个许可
+            tid_g2 = mgr.submit_task("g2", "test", _make("g2", g2_started, g2_release), exclusive_group="G")
+            assert tid_g2 is not None
+            await asyncio.wait_for(g_wait.wait(), timeout=1.0)
+            g2 = mgr.get_task(tid_g2)
+            assert g2 is not None
+            assert g2.status == TaskStatus.QUEUED
+            assert sem._value == 1
+            runner_g2 = g2._asyncio_task
+            assert runner_g2 is not None
+
+            # 另一组任务可取得剩余许可，与 g1 同时执行
+            tid_h = mgr.submit_task("h1", "test", _make("h1", h_started, h_release), exclusive_group="H")
+            assert tid_h is not None
+            await asyncio.wait_for(h_started.wait(), timeout=1.0)
+            h1 = mgr.get_task(tid_h)
+            assert h1 is not None
+            assert h1.status == TaskStatus.RUNNING
+            runner_h = h1._asyncio_task
+            assert runner_h is not None
+            assert g1.status == TaskStatus.RUNNING  # g1 仍阻塞，跨组并发成立
+            assert sem._value == 0
+
+            g1_release.set()
+            await asyncio.wait_for(g2_started.wait(), timeout=1.0)
+            g2_release.set()
+            h_release.set()
+            await asyncio.wait_for(asyncio.gather(runner_g1, runner_g2, runner_h), timeout=1.0)
+
+        assert entry_order == ["g1", "h1", "g2"]
+        for task in (g1, g2, h1):
+            assert task.status == TaskStatus.COMPLETED
