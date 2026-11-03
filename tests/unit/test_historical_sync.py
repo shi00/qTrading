@@ -1034,10 +1034,17 @@ class TestHistoricalSyncDailySnapshotExtended:
     async def test_fetch_indices_system_failure_propagates(self):
         """系统级异常（severity == system）必须传播，不得降级为可选表失败。"""
         ctx = make_ctx()
-        ctx.api.get_index_daily = AsyncMock(side_effect=MemoryError("simulated oom"))
+        exc = MemoryError("simulated oom")
+        ctx.api.get_index_daily = AsyncMock(side_effect=exc)
         strategy = HistoricalSyncStrategy(ctx)
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert exc_info.value is exc
+        ctx.cache.quote_dao.save_index_daily.assert_not_awaited()
+        index_status_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "index_daily"
+        ]
+        assert index_status_calls == []
 
     @pytest.mark.asyncio
     async def test_fetch_indices_no_valid(self):
