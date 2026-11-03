@@ -5,6 +5,8 @@
 
 import asyncio
 import datetime
+import logging
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -173,6 +175,40 @@ class TestEnsureCalendarRange:
         svc = _make_service(api_return=df)
         result = await svc.ensure_calendar_range("20240601", "20240630")
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_persist_success_returns_true_and_logs_bulk_synced(self, caplog):
+        """保存成功后返回 True，且只在真正落库后打印 Bulk synced。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(api_return=df)
+        with caplog.at_level(logging.INFO, logger="data.domain_services.trade_calendar_service"):
+            result = await svc.ensure_calendar_range("20240601", "20240630")
+        assert result is True
+        svc._cache.stock_dao.save_trade_cal.assert_awaited_once_with(df)
+        assert any("Bulk synced" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_persist_failure_returns_false_without_bulk_synced_log(self, caplog):
+        """RS-F02: 保存失败时必须返回 False，且不得打印 Bulk synced（避免初始化中止分支被绕过）。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(api_return=df)
+        svc._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=RuntimeError("DB write failed"))
+        with caplog.at_level(logging.INFO, logger="data.domain_services.trade_calendar_service"):
+            result = await svc.ensure_calendar_range("20240601", "20240630")
+        assert result is False
+        assert not any("Bulk synced" in record.getMessage() for record in caplog.records)
+        assert any(
+            record.levelno >= logging.ERROR and "persistence failed" in record.getMessage() for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_persist_cancelled_error_propagates(self):
+        """R2: 持久化过程中的 CancelledError 必须向上传播，不得被 bool 处理吞没。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(api_return=df)
+        svc._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=asyncio.CancelledError)
+        with pytest.raises(asyncio.CancelledError):
+            await svc.ensure_calendar_range("20240601", "20240630")
 
     @pytest.mark.asyncio
     async def test_api_returns_empty(self):

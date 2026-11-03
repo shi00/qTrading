@@ -327,7 +327,17 @@ class TradeCalendarService:
             # M13-F1: start_obj/end_obj 已判非 None，_to_str 必返 str（YYYYMMDD）
             df = await self._api.get_trade_cal(start_date=self._to_str(start_obj), end_date=self._to_str(end_obj))
             if df is not None and not df.empty:
-                await self._ensure_data_persisted(df)
+                persisted = await self._ensure_data_persisted(df)
+                if not persisted:
+                    # RS-F02: 拉取成功但落库失败时不得宣称批量同步完成。失败原因已由
+                    # _ensure_data_persisted 经 log_classified 分类记录，此处记录未覆盖的后果。
+                    logger.error(
+                        "[TradeCalendarService] Bulk calendar fetched but persistence failed "
+                        "(%s to %s); calendar range not guaranteed",
+                        start_obj,
+                        end_obj,
+                    )
+                    return False
                 logger.info(
                     "[TradeCalendarService] Bulk synced %s calendar records (%s to %s)",
                     len(df),
