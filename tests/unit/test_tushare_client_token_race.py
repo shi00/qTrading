@@ -13,7 +13,7 @@
 
 import asyncio
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -262,3 +262,141 @@ class TestInitWithDifferentToken:
         assert new_client is client
         # token 已更新
         assert client.token == "new_token_in_sync"
+
+
+class TestStaleRequestCapabilityPollution:
+    """NI-F03：旧 token 的在飞请求不得污染新 token 的 capability 缓存。"""
+
+    API_NAME = "moneyflow_hsgt"
+
+    @staticmethod
+    def _prepare_client(client) -> None:
+        client.max_retries = 1
+        client._bg_tasks = set()
+        client._get_tushare_point_tier = lambda: "points_2000"
+        client.persist_capabilities_to_app_state = AsyncMock()
+
+    @staticmethod
+    async def _wait_until(event: asyncio.Event, attempts: int = 50) -> None:
+        """受控同步点：等待在飞请求进入阻塞点，避免依赖真实计时。"""
+        for _ in range(attempts):
+            if event.is_set():
+                return
+            await asyncio.sleep(0)
+        raise AssertionError("在飞请求未在预期步数内进入阻塞点")
+
+    @pytest.mark.asyncio
+    async def test_stale_permission_error_keeps_new_token_probe_result(self, tushare_client_mocks):
+        """旧 token 权限错误晚返回时不得写入新 token 缓存，也不得调度持久化。"""
+        client, _, _ = tushare_client_mocks
+        api_name = self.API_NAME
+        self._prepare_client(client)
+
+        old_call_started = asyncio.Event()
+        release_old_call = asyncio.Event()
+
+        async def controlled_wait_for(awaitable, timeout=None):
+            awaitable.cancel()
+            old_call_started.set()
+            await release_old_call.wait()
+            raise Exception("权限不足，积分不够")
+
+        mock_func = MagicMock()
+        mock_func.__name__ = api_name
+        persist_mock = AsyncMock()
+        client._persist_capability_safely = persist_mock
+
+        async def fake_probe_call(name, func, **params):
+            return None  # 新 token probe 成功 → 该 API 判定为可用
+
+        client._handle_probe_call = fake_probe_call
+
+        with patch("data.external.tushare.api_wrapper.asyncio.wait_for", side_effect=controlled_wait_for):
+            old_task = asyncio.create_task(client._handle_api_call(mock_func, trade_date="20240101"))
+            await self._wait_until(old_call_started)
+            await client.set_token_async("new_token_after_stale_request")
+            await client.probe_api_capabilities()
+            release_old_call.set()
+            with pytest.raises(
+                TushareAPIPermissionError,
+                match=f"api={api_name}",
+            ) as exc_info:
+                await old_task
+
+        # 强断言：异常归属仍是旧 token 请求对应的 API，且携带原始权限错误信息
+        assert exc_info.value.api_name == api_name
+        assert "权限不足" in exc_info.value.message
+        assert client.is_token_invalid is False
+        # 新 token probe 的权威 True 未被旧请求的权限错误覆盖为 False
+        assert client.is_api_available(api_name) is True
+        # 旧请求未留下运行时负缓存（否则新 token 会 TTL 内 fast-fail）
+        assert api_name not in client._capability_runtime_marks
+        # TABLE_TO_API_MAP 内 API 仍在有效同步表列表
+        assert api_name in client.get_effective_synced_tables([api_name])
+        # 旧 generation 结果不为新 token 调度持久化
+        persist_mock.assert_not_awaited()
+
+        # 新 token 再调同一 API 会实际执行新 func，而非命中缓存 fast-fail
+        loop = asyncio.get_running_loop()
+        new_func_calls: list[dict] = []
+
+        def new_func(**kwargs):
+            new_func_calls.append(kwargs)
+            return MagicMock()
+
+        new_func.__name__ = api_name
+
+        def immediate_executor(executor, func):
+            future = loop.create_future()
+            future.set_result(func())
+            return future
+
+        with patch.object(loop, "run_in_executor", new=immediate_executor):
+            result = await client._handle_api_call(new_func, trade_date="20240101")
+
+        assert len(new_func_calls) == 1
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_stale_success_does_not_override_new_authoritative_false(self, tushare_client_mocks):
+        """旧 token 成功响应晚返回时不得覆盖新 token probe 得出的权威 False。"""
+        client, _, _ = tushare_client_mocks
+        api_name = self.API_NAME
+        self._prepare_client(client)
+
+        old_call_started = asyncio.Event()
+        release_old_call = asyncio.Event()
+
+        async def controlled_wait_for(awaitable, timeout=None):
+            awaitable.cancel()
+            old_call_started.set()
+            await release_old_call.wait()
+            return MagicMock()
+
+        mock_func = MagicMock()
+        mock_func.__name__ = api_name
+        persist_mock = AsyncMock()
+        client._persist_capability_safely = persist_mock
+
+        async def fake_probe_call(name, func, **params):
+            if name == api_name:
+                raise TushareAPIPermissionError(name, "权限不足，积分不够")
+            return None
+
+        client._handle_probe_call = fake_probe_call
+
+        with patch("data.external.tushare.api_wrapper.asyncio.wait_for", side_effect=controlled_wait_for):
+            old_task = asyncio.create_task(client._handle_api_call(mock_func, trade_date="20240101"))
+            await self._wait_until(old_call_started)
+            await client.set_token_async("new_token_after_stale_success")
+            await client.probe_api_capabilities()
+            assert client.is_api_available(api_name) is False
+            release_old_call.set()
+            result = await old_task
+
+        assert result is not None
+        # 权威 False 保持：旧成功响应未把它改写为 True
+        assert client.is_api_available(api_name) is False
+        assert api_name not in client._capability_runtime_marks
+        assert client.get_capability_cache()[api_name] is False
+        persist_mock.assert_not_awaited()
