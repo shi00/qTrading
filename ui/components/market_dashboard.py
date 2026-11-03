@@ -20,7 +20,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS, Eid
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.home_view_model import HotConceptRow, HsgtRow, MarketIndexRow
+from ui.viewmodels.home_view_model import UNKNOWN_PCT_CHANGE, HotConceptRow, HsgtRow, MarketIndexRow
 
 # PR-4 Task 4.1 P2-2: KPI 卡片 i18n key → EID 映射 (LABEL kind, 走 textContent 通道)
 _KPI_EIDS: dict[str, Eid] = {
@@ -221,9 +221,14 @@ def _build_concept_card(item: HotConceptRow) -> ft.Container:
     MINOR-12: 涨跌幅分三档 — 红(涨)/绿(跌)/中性(平). 仅显式 red/green 判定涨跌
     (与上游 news_fetcher 产出的 "red"/"green"/"grey" 一致); 中性档 (如 "grey"、
     空串或未知色) 使用中性色且不渲染趋势图标, 避免 0 涨跌幅被误标为下跌.
+    未知哨兵 "--" 一律中性且无图标, 不沿用残留 color, 避免未知被误标涨跌 (R21).
     """
     color_str = (item.color or "").lower()
-    if "red" in color_str:
+    if item.change == UNKNOWN_PCT_CHANGE:
+        # 未知涨跌幅（哨兵）始终中性且无趋势图标，不得被残留 color 误标涨跌（R21）
+        trend_color = AppColors.TEXT_SECONDARY
+        trend_icon = None
+    elif "red" in color_str:
         trend_color = AppColors.UP_RED
         trend_icon = ft.Icons.TRENDING_UP
     elif "green" in color_str:

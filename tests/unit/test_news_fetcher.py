@@ -971,22 +971,8 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("httpx.AsyncClient")
-    async def test_nan_change_is_grey(self, mock_client):
-        """NaN 涨跌幅 → 0.00% / grey。"""
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock(return_value=None)
-        mock_resp.text = _concept_jsonp_text([("概念1", "nan")])
-        _wire_http_get(mock_client, mock_resp)
-
-        result = await NewsFetcher.get_hot_concepts(limit=1)
-        assert len(result) == 1
-        assert result[0]["change"] == "0.00%"
-        assert result[0]["color"] == "grey"
-
-    @pytest.mark.asyncio
-    @patch("httpx.AsyncClient")
     async def test_zero_change_is_grey(self, mock_client):
-        """0.0 涨跌幅 → grey。"""
+        """0.0 是合法涨跌幅 → 保留为 0.00% / grey（不得被 truthiness 丢弃）。"""
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock(return_value=None)
         mock_resp.text = _concept_jsonp_text([("概念1", "0.0")])
@@ -998,16 +984,78 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("httpx.AsyncClient")
-    async def test_invalid_change_value(self, mock_client):
-        """非法涨跌幅字符串 → 0.00%。"""
+    async def test_zero_change_preserved_in_ranking(self, mock_client):
+        """真实零值保留在有限数排名中，按降序位于正负值之间。"""
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock(return_value=None)
-        mock_resp.text = _concept_jsonp_text([("概念1", "invalid")])
+        mock_resp.text = _concept_jsonp_text([("上涨", "2.0"), ("平盘", "0.0"), ("下跌", "-1.0")])
         _wire_http_get(mock_client, mock_resp)
 
-        result = await NewsFetcher.get_hot_concepts(limit=1)
-        assert result[0]["change"] == "0.00%"
-        assert result[0]["color"] == "grey"
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert [r["name"] for r in result] == ["上涨", "平盘", "下跌"]
+        assert result[1]["change"] == "0.00%"
+        assert result[1]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_non_finite_changes_are_excluded(self, mock_client):
+        """NaN / ±inf 不是合法涨跌幅 → 整行排除，不得伪装为 0.00% / grey。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text(
+            [("NaN概念", "nan"), ("正无穷概念", "inf"), ("负无穷概念", "-inf"), ("有效概念", "2.5")]
+        )
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts(limit=8)
+        assert [r["name"] for r in result] == ["有效概念"]
+        assert result[0]["change"] == "2.50%"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_invalid_change_values_are_excluded(self, mock_client):
+        """N/A / 空串 / 非数字 → 跳过整行，不产出伪平盘。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text(
+            [("N/A概念", "N/A"), ("空串概念", ""), ("非法概念", "invalid"), ("有效概念", "-1.2")]
+        )
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts(limit=8)
+        assert [r["name"] for r in result] == ["有效概念"]
+        assert result[0]["change"] == "-1.20%"
+        assert result[0]["color"] == "green"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_invalid_rows_do_not_occupy_limit(self, mock_client):
+        """非法行先排除再 limit：不得挤占有效排名名额。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text(
+            [("NaN概念", "nan"), ("有效一", "3.0"), ("无穷概念", "inf"), ("有效二", "1.0")]
+        )
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts(limit=2)
+        assert [r["name"] for r in result] == ["有效一", "有效二"]
+        assert [r["change"] for r in result] == ["3.00%", "1.00%"]
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_all_invalid_changes_return_empty(self, mock_client):
+        """全部涨跌幅非法 → 空列表（empty 计数递增），而非伪零列表。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text(
+            [("NaN概念", "nan"), ("无穷概念", "inf"), ("N/A概念", "N/A"), ("空串概念", "")]
+        )
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts(limit=8)
+        assert result == []
+        assert _SINA_CONSECUTIVE_EMPTY["concept"] == 1
 
     @pytest.mark.asyncio
     @patch("httpx.AsyncClient")
