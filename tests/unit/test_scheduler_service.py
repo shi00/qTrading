@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from core.i18n import I18n, Message
 from data.sync.base import SyncResult, SyncStatus
 from data.sync.concept_sync import ConceptSyncResult
-from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskStatus
+from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskIncompleteError, TaskStatus
 from utils.scheduler_service import SchedulerService
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -279,15 +279,18 @@ class TestSchedulerServiceOnJobEvents:
 
     @pytest.mark.asyncio
     @patch("utils.scheduler_service.ConfigHandler")
-    async def test_on_job_missed_ignores_irrelevant_job(self, mock_ch):
-        """F1 配套: 不可补偿的 job（白名单外）不创建补偿任务。"""
+    async def test_on_job_missed_unknown_job_falls_back_to_catchup(self, mock_ch):
+        """D11-F04: 未知 job 回落旧行为（仅行情补偿），不吞掉 misfire 事件。"""
         mock_ch.get_setting.return_value = None
         svc = SchedulerService()
         event = MagicMock()
         event.job_id = "test_job"
         event.scheduled_run_time = "2026-09-22"
-        svc._on_job_missed(event)
-        assert len(svc._catchup_tasks) == 0
+        with patch.object(svc, "_catch_up_missed_updates", new=AsyncMock()) as mock_catchup:
+            svc._on_job_missed(event)
+            assert len(svc._catchup_tasks) == 1
+            await asyncio.gather(*list(svc._catchup_tasks))
+            mock_catchup.assert_awaited_once_with(include_today=True, bypass_backoff=True)
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_on_job_error_cancelled(self, mock_ch):
@@ -1423,8 +1426,11 @@ class TestDailyUpdateLogicClosure:
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
-            assert isinstance(result_msg, Message)
+            # D11-F03: 结果为 None（无法判定完整性）→ 抛 TaskIncompleteError（映射 FAILED），不伪成功。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
+            assert isinstance(exc_info.value.description, Message)
+            assert exc_info.value.description.key == "sched_daily_incomplete"
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_with_sync_result_days_rows(self):
@@ -1537,7 +1543,11 @@ class TestDailyUpdateLogicClosure:
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            await factory("test_task")
+            # D11-F03: 关键表失败 → 抛 TaskIncompleteError（映射 FAILED），水位不推进。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert exc_info.value.description.params == {"tables": "daily_quotes"}
             assert svc._last_update_date != "20240614"
 
     @pytest.mark.asyncio
@@ -1576,8 +1586,11 @@ class TestDailyUpdateLogicClosure:
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
-            assert isinstance(result_msg, Message)
+            # D11-F03: 旧 fallback 结果无 is_complete → 视为无法判定，抛 TaskIncompleteError。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert svc._last_update_date != "20240614"
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_empty_dataframe(self):
@@ -1595,8 +1608,11 @@ class TestDailyUpdateLogicClosure:
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
-            assert isinstance(result_msg, Message)
+            # D11-F03: 空 DataFrame 无 is_complete → 抛 TaskIncompleteError。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert svc._last_update_date != "20240614"
 
     @pytest.mark.asyncio
     async def test_daily_update_logic_int_result(self):
@@ -1614,8 +1630,11 @@ class TestDailyUpdateLogicClosure:
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_daily_update()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
-            assert isinstance(result_msg, Message)
+            # D11-F03: 整型旧结果无 is_complete → 抛 TaskIncompleteError。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert svc._last_update_date != "20240614"
 
 
 class TestConceptSyncLogicClosure:
@@ -1684,10 +1703,12 @@ class TestConceptSyncLogicClosure:
             svc._persist_run_date_db = AsyncMock()
             await svc._run_concept_sync()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
+            # D11-F03: 部分完成 → 抛 TaskIncompleteError（映射 FAILED），description 为具体原因。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
 
-            assert result_msg.key == "sched_concept_sync_partial"
-            assert result_msg.params["sources"] == "akshare=failed | limit_list=success"
+            assert exc_info.value.description.key == "sched_concept_sync_partial"
+            assert exc_info.value.description.params["sources"] == "akshare=failed | limit_list=success"
             assert svc._last_concept_sync_date is None
             svc._persist_run_date_db.assert_not_awaited()
             assert "concept_sync_daily_refresh" in svc._job_last_failure_reason
@@ -1722,9 +1743,11 @@ class TestConceptSyncLogicClosure:
             svc._persist_run_date_db = AsyncMock()
             await svc._run_concept_sync()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            result_msg = await factory("test_task")
+            # D11-F03: 全部失败 → 抛 TaskIncompleteError（映射 FAILED），水位不推进。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
 
-            assert result_msg.key == "sched_concept_sync_failed"
+            assert exc_info.value.description.key == "sched_concept_sync_failed"
             assert svc._last_concept_sync_date is None
             svc._persist_run_date_db.assert_not_awaited()
 
@@ -1810,6 +1833,12 @@ class TestSafeShutdownSchedulerGenericError:
 
 class TestCatchUpMissedUpdates:
     """D6-1: 补偿机制 — 检查遗漏交易日并提交补偿任务。"""
+
+    @pytest.fixture(autouse=True)
+    def _enable_auto_update(self):
+        """D11-F01: 补偿入口现受自动更新开关约束；本类验证补偿逻辑本身，显式开启。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
 
     @pytest.mark.asyncio
     async def test_empty_baseline_empty_db_warns_and_returns(self):
@@ -2148,6 +2177,166 @@ class TestCatchUpMissedUpdates:
         svc._catch_up_missed_updates.assert_awaited_once_with(include_today=False)
 
 
+class TestAutoUpdateGating:
+    """D11-F01: 自动行情补偿必须受 ConfigHandler.is_auto_update_enabled() 约束。
+
+    覆盖 loader（_load_db_state）/ 30s 看门狗（_watch_config_changes）/ misfire
+    （_on_job_missed）三处真实入口，以及「关闭前已排队、关闭后才开始执行」的竞态。
+    关闭自动更新时本就允许不补当天数据（用户重新开启后由下一轮补偿检查接手）；
+    手动同步不经 _catch_up_missed_updates，故不受该守卫影响。
+    """
+
+    @staticmethod
+    def _build_missed_setup():
+        """构造「已存在遗漏交易日（6/13 水位，今天 6/15）」的真实提交路径替身。"""
+        svc = _make_svc()
+        svc._last_update_date = "20240613"
+        all_dates = [date(2024, 6, 13), date(2024, 6, 14)]
+
+        async def _get_trade_dates(start_date=None, end_date=None):
+            s = start_date if start_date is not None else date.min
+            e = end_date if end_date is not None else date.max
+            return [d for d in all_dates if s <= d <= e]
+
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.get_trade_dates = AsyncMock(side_effect=_get_trade_dates)
+        mock_tm = MagicMock()
+        mock_tm.submit_task = MagicMock(return_value="tid")
+        mock_tm.get_all_tasks = MagicMock(return_value=[])
+        return svc, mock_dp, mock_tm
+
+    @pytest.mark.asyncio
+    async def test_load_db_state_disabled_does_not_submit(self):
+        """入口 1：启动 loader 完成后的补偿检查受开关约束，关闭时不提交。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=MagicMock())),
+            patch(
+                "data.persistence.app_state_service.get_app_state",
+                AsyncMock(side_effect=[None, None, None]),
+            ),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now") as mock_now,
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await svc._load_db_state()
+        assert svc._db_state_loaded is True
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.trade_calendar.get_trade_dates.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_watch_config_changes_disabled_does_not_submit(self):
+        """入口 2：30 秒看门狗复用为补偿周期，关闭时不提交。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        config = {
+            "time": "09:30",
+            "enabled": False,
+            "concept_time": "10:00",
+            "concept_enabled": False,
+            "nightly_time": "20:30",
+        }
+        svc._last_known_config = config.copy()
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 9, 0, 0)),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock(return_value=config)
+            await svc._watch_config_changes()
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.trade_calendar.get_trade_dates.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_on_job_missed_disabled_does_not_submit(self):
+        """入口 3：misfire（bypass_backoff=True）同样受开关约束，关闭时不提交。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        event = MagicMock()
+        event.job_id = "daily_update"
+        event.scheduled_run_time = "2024-06-15"
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now") as mock_now,
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            svc._on_job_missed(event)
+            for _ in range(5):
+                await asyncio.sleep(0)
+            if svc._catchup_tasks:
+                await asyncio.gather(*list(svc._catchup_tasks))
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.trade_calendar.get_trade_dates.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_disabled_returns_before_backoff_and_bootstrap(self):
+        """守卫置于退避/自举/日历查询之前：关闭时零 IO、不改变任何内部状态。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        svc._last_update_date = None  # 强制走自举分支，验证其不被触发
+        svc._catchup_consecutive_failures = 2
+        svc._catchup_next_retry_at = datetime(2024, 6, 15, 12, 0, 0)
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 11, 0, 0)),
+            patch("utils.scheduler_service.logger.debug") as mock_debug,
+        ):
+            await svc._catch_up_missed_updates(include_today=True, bypass_backoff=True)
+        assert mock_tm.submit_task.call_args_list == []
+        assert mock_dp.cache.quote_dao.get_latest_trade_date.call_count == 0
+        assert svc._bootstrap_baseline_date is None
+        assert svc._catchup_consecutive_failures == 2
+        assert any("自动更新已关闭" in str(c.args[0]) for c in mock_debug.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_enabled_with_missed_dates_still_submits(self):
+        """回归保护：开关开启时，遗漏交易日仍照常提交（守卫不误杀自动补偿）。"""
+        svc, mock_dp, mock_tm = self._build_missed_setup()
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now") as mock_now,
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await svc._catch_up_missed_updates()
+        kwargs = mock_tm.submit_task.call_args.kwargs
+        assert kwargs["missed_dates"] == [date(2024, 6, 14)]
+        assert kwargs["unique_key"] == "daily_sync_catchup"
+
+    @pytest.mark.asyncio
+    async def test_queued_catchup_cancelled_when_disabled_before_start(self):
+        """关闭前已排队的补偿任务：获得组锁后二次判定使能 → 不执行业务 IO，抛 CancelledError（R2）。
+
+        R2: CancelledError 必须上抛（由 TaskManager 映射 CANCELLED，而非伪成功）。
+        R22: 不得推进水位、不得记录补偿失败。
+        """
+        svc = _make_svc()
+        svc._last_update_date = "20240613"
+        mock_dp = MagicMock()
+        mock_dp.sync_daily_market_snapshot = AsyncMock()
+        mock_tm = MagicMock()
+        mock_tm.update_progress = MagicMock(return_value=True)
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._catchup_logic("task1", [date(2024, 6, 11)])
+        assert mock_dp.sync_daily_market_snapshot.await_count == 0
+        assert mock_tm.update_progress.call_count == 0
+        assert svc._last_update_date == "20240613"
+        assert svc._catchup_consecutive_failures == 0
+        assert svc._catchup_next_retry_at is None
+
+
 class TestLoadDbStateWatermarkMonotonic:
     """D11-F05: 启动加载水位与加载期间并发成功更新的单调合并（R22）。
 
@@ -2269,6 +2458,12 @@ class TestLoadDbStateWatermarkMonotonic:
 class TestCatchupLogic:
     """D6-1: 补偿执行逻辑 — 逐日同步 + is_complete 判定幂等键。"""
 
+    @pytest.fixture(autouse=True)
+    def _enable_auto_update(self):
+        """D11-F01: _catchup_logic 执行前二次判定使能；本类验证补偿逻辑本身，显式开启。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
+
     @pytest.mark.asyncio
     async def test_complete_marks_done(self):
         svc = _make_svc()
@@ -2318,7 +2513,12 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning") as mock_warn,
         ):
             svc._mark_daily_update_done_db = AsyncMock()
-            await svc._catchup_logic("task1", [date(2024, 6, 11)])
+            # D11-F03: 关键表失败 → 抛 TaskIncompleteError（映射 FAILED），水位不推进。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic("task1", [date(2024, 6, 11)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "daily_quotes" in exc_info.value.reason
             # 强断言：警告携带关键表失败清单，且不推进幂等键
             mock_warn.assert_called_once_with(
                 "[Scheduler] Catch-up NOT complete (critical=%s), NOT marking done",
@@ -2362,7 +2562,12 @@ class TestCatchupLogic:
             ),
             patch("utils.scheduler_service.logger.warning"),
         ):
-            await svc._catchup_logic("task1", [date(2024, 6, 11), date(2024, 6, 12)])
+            # D11-F03: 存在失败日 → 抛 TaskIncompleteError（映射 FAILED）。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic("task1", [date(2024, 6, 11), date(2024, 6, 12)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "failed_days=['20240611']" in exc_info.value.reason
             # 两天都尝试同步（首日失败后继续次日）
             assert mock_dp_instance.sync_daily_market_snapshot.await_count == 2
 
@@ -2391,10 +2596,15 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning"),
         ):
             svc._persist_run_date_db = AsyncMock()
-            await svc._catchup_logic(
-                "task1",
-                [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
-            )
+            # D11-F03: 未完成 → 抛 TaskIncompleteError；水位仅推进到连续成功日。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic(
+                    "task1",
+                    [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
+                )
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "failed_days=['20240613']" in exc_info.value.reason
 
         # 只推进到第 1 日（20240612），绝不推进到末位（20240614）
         svc._persist_run_date_db.assert_awaited_once_with(
@@ -2433,7 +2643,12 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning"),
         ):
             svc._mark_daily_update_done_db = AsyncMock()
-            await svc._catchup_logic("task1", [date(2024, 6, 12), date(2024, 6, 13)])
+            # D11-F03: 首日失败 → 抛 TaskIncompleteError（映射 FAILED）。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic("task1", [date(2024, 6, 12), date(2024, 6, 13)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "failed_days=['20240612']" in exc_info.value.reason
 
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
@@ -2467,10 +2682,13 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning"),
         ):
             svc._mark_daily_update_done_db = AsyncMock()
-            await svc._catchup_logic(
-                "task1",
-                [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
-            )
+            # D11-F03: 关键表失败日 → 抛 TaskIncompleteError（映射 FAILED），水位不推进。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic(
+                    "task1",
+                    [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
+                )
+            assert exc_info.value.description.key == "sched_catchup_partial"
 
         # 第 1 日关键表失败 → 不可作为连续成功日，水位不得推进（含不得推进到第 1 日）
         svc._mark_daily_update_done_db.assert_not_called()
@@ -2503,10 +2721,13 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning"),
         ):
             svc._mark_daily_update_done_db = AsyncMock()
-            await svc._catchup_logic(
-                "task1",
-                [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
-            )
+            # D11-F03: 关键表不可就绪 → 抛 TaskIncompleteError（映射 FAILED），水位不前移。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic(
+                    "task1",
+                    [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
+                )
+            assert exc_info.value.description.key == "sched_catchup_partial"
 
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
@@ -2562,7 +2783,10 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning"),
         ):
             svc._mark_daily_update_done_db = AsyncMock()
-            await svc._catchup_logic("task1", [date(2024, 6, 12)])
+            # D11-F03: 取消日 is_complete=False → 抛 TaskIncompleteError（映射 FAILED），水位不前移。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic("task1", [date(2024, 6, 12)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
 
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
@@ -2590,14 +2814,169 @@ class TestOnJobMissedCatchup:
         assert coro.cr_frame.f_locals.get("include_today") is True
         coro.close()  # 测试中不真正调度，close 释放协程避免 RuntimeWarning
 
-    def test_non_business_job_no_trigger(self):
+    def test_non_business_job_falls_back_to_catchup(self):
+        """D11-F04: 未知 job 回落旧行为（仅行情补偿），不再忽略。"""
         svc = _make_svc()
         event = MagicMock()
         event.job_id = "some_other_job"
         event.scheduled_run_time = "2024-01-01"
-        with patch("utils.scheduler_service.asyncio.get_running_loop") as mock_loop:
+        mock_loop = MagicMock()
+        mock_loop.create_task.return_value = MagicMock()
+        with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop):
             svc._on_job_missed(event)
-        mock_loop.assert_not_called()
+        coro = mock_loop.create_task.call_args.args[0]
+        assert coro.cr_code.co_name == "_catch_up_missed_updates"
+        assert coro.cr_frame.f_locals.get("include_today") is True
+        assert coro.cr_frame.f_locals.get("bypass_backoff") is True
+        coro.close()
+
+
+class TestOnJobMissedDispatch:
+    """D11-F04: misfire 按 job 分派补跑原任务。
+
+    此前四个 job 一律只做行情补偿，概念同步/回填/夜间预测在日更已完成时不会补跑，
+    misfire 被静默吞掉。本类验证分派、未知 job 回落、开关关闭与无 loop 路径。
+    """
+
+    @staticmethod
+    def _event(job_id: str) -> MagicMock:
+        event = MagicMock()
+        event.job_id = job_id
+        event.scheduled_run_time = "2026-09-22 16:30:00"
+        return event
+
+    @staticmethod
+    async def _drain(svc) -> None:
+        """等待当前所有 misfire 投递任务完成（不依赖随机 sleep）。"""
+        tasks = list(svc._catchup_tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    @staticmethod
+    def _patch_business(svc) -> dict[str, AsyncMock]:
+        mocks: dict[str, AsyncMock] = {}
+        for attr in ("_run_concept_sync", "_run_review_backfill", "_run_nightly_prediction"):
+            mock = AsyncMock()
+            setattr(svc, attr, mock)
+            mocks[attr] = mock
+        return mocks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("job_id", "attr"),
+        [
+            ("concept_sync_daily_refresh", "_run_concept_sync"),
+            ("review_backfill", "_run_review_backfill"),
+            ("nightly_prediction", "_run_nightly_prediction"),
+        ],
+    )
+    async def test_business_job_runs_corresponding_coroutine_once(self, job_id, attr):
+        """四个 job_id 各自只触发对应协程恰好一次（非 daily 的不走行情补偿）。"""
+        svc = _make_svc()
+        svc._catch_up_missed_updates = AsyncMock()
+        mocks = self._patch_business(svc)
+        svc._on_job_missed(self._event(job_id))
+        assert len(svc._catchup_tasks) == 1, "每次 misfire 只投递一个补跑任务"
+        await self._drain(svc)
+        for name, mock in mocks.items():
+            if name == attr:
+                mock.assert_awaited_once()
+            else:
+                mock.assert_not_awaited()
+        svc._catch_up_missed_updates.assert_not_awaited()
+        assert svc._catchup_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_daily_update_only_market_catchup(self):
+        """daily_update 保留行情补偿（include_today/bypass_backoff 语义不变）。"""
+        svc = _make_svc()
+        svc._catch_up_missed_updates = AsyncMock()
+        mocks = self._patch_business(svc)
+        svc._on_job_missed(self._event("daily_update"))
+        assert len(svc._catchup_tasks) == 1
+        await self._drain(svc)
+        svc._catch_up_missed_updates.assert_awaited_once_with(include_today=True, bypass_backoff=True)
+        for mock in mocks.values():
+            mock.assert_not_awaited()
+        assert svc._catchup_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_watermark_today_still_recovers_concept_review_nightly(self):
+        """日更水位已是今天时，概念/回填/夜间 misfire 仍各自补跑（不因日更完成提前返回）。"""
+        today_str = "20240615"
+        svc = _make_svc()
+        svc._last_update_date = today_str
+        mock_tm = MagicMock()
+        mock_tm.submit_task = MagicMock(return_value="tid")
+        svc._registered_jobs["review_backfill"] = AsyncMock()
+        svc._registered_jobs["nightly_prediction"] = AsyncMock()
+        with (
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 18, 0, 0)),
+            patch("utils.scheduler_service.ConfigHandler.is_concept_schedule_enabled", return_value=True),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            for job_id in ("concept_sync_daily_refresh", "review_backfill", "nightly_prediction"):
+                svc._on_job_missed(self._event(job_id))
+                await self._drain(svc)
+        kwargs = mock_tm.submit_task.call_args.kwargs
+        assert kwargs["unique_key"] == "concept_sync"
+        svc._registered_jobs["review_backfill"].assert_awaited_once_with(svc)
+        svc._registered_jobs["nightly_prediction"].assert_awaited_once_with(svc)
+
+    @pytest.mark.asyncio
+    async def test_concept_disabled_misfire_makes_no_business_call(self):
+        """概念自动开关关闭时，misfire 不提交任务、不推进水位（沿用内部开关判定）。"""
+        svc = _make_svc()
+        svc._last_concept_sync_date = None
+        mock_tm = MagicMock()
+        mock_tm.submit_task = MagicMock(return_value="tid")
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_concept_schedule_enabled", return_value=False),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            svc._on_job_missed(self._event("concept_sync_daily_refresh"))
+            await self._drain(svc)
+        mock_tm.submit_task.assert_not_called()
+        assert svc._last_concept_sync_date is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_job_logs_warning_and_market_catchup(self):
+        """未知 job_id 记录 warning 并回落旧行为（仅行情补偿）。"""
+        svc = _make_svc()
+        svc._catch_up_missed_updates = AsyncMock()
+        mocks = self._patch_business(svc)
+        with patch("utils.scheduler_service.logger.warning") as mock_warning:
+            svc._on_job_missed(self._event("future_job"))
+            await self._drain(svc)
+        svc._catch_up_missed_updates.assert_awaited_once_with(include_today=True, bypass_backoff=True)
+        for mock in mocks.values():
+            mock.assert_not_awaited()
+        assert any("Unknown job" in str(call.args[0]) for call in mock_warning.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_consecutive_misfires_enqueue_one_task_per_event(self):
+        """同 job 连续 misfire：调度侧每次事件恰好一个 task，不累积、不重复投递。"""
+        svc = _make_svc()
+        svc._run_concept_sync = AsyncMock()
+        svc._on_job_missed(self._event("concept_sync_daily_refresh"))
+        assert len(svc._catchup_tasks) == 1
+        await self._drain(svc)
+        svc._run_concept_sync.assert_awaited_once()
+        svc._on_job_missed(self._event("concept_sync_daily_refresh"))
+        assert len(svc._catchup_tasks) == 1
+        await self._drain(svc)
+        assert svc._run_concept_sync.await_count == 2
+
+    def test_no_running_loop_logs_debug_without_raising(self):
+        """无运行 loop 时记录 debug 并返回，不抛到 APScheduler 线程。"""
+        svc = _make_svc()
+        with (
+            patch("utils.scheduler_service.asyncio.get_running_loop", side_effect=RuntimeError("no loop")),
+            patch("utils.scheduler_service.logger.debug") as mock_debug,
+        ):
+            svc._on_job_missed(self._event("concept_sync_daily_refresh"))
+        assert svc._catchup_tasks == set()
+        mock_debug.assert_called_once_with("[Scheduler] No running loop for catch-up on job missed, skipping")
 
 
 class TestMisfireGraceTime:
@@ -2615,6 +2994,12 @@ class TestCatchupBackoff:
 
     _FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0)
 
+    @pytest.fixture(autouse=True)
+    def _enable_auto_update(self):
+        """D11-F01: 补偿入口现受自动更新开关约束；本类验证退避语义，显式开启。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
+
     async def _run_incomplete_catchup(self, svc):
         """驱动一次 _catchup_logic 并返回未完成结果（关键表失败）。"""
         mock_dp_instance = MagicMock()
@@ -2622,6 +3007,8 @@ class TestCatchupBackoff:
         mock_tm_instance = MagicMock()
         mock_tm_instance.update_progress.return_value = True
         with (
+            # D11-F01: 该 helper 也被 TestGetJobsStatusSnapshot 复用，显式开启使能。
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
             patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
             patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
             patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
@@ -2631,7 +3018,12 @@ class TestCatchupBackoff:
             ),
             patch("utils.scheduler_service.logger.warning"),
         ):
-            await svc._catchup_logic("task1", [date(2024, 6, 11)])
+            # D11-F03: 未完成 → 抛 TaskIncompleteError（映射 FAILED）。
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await svc._catchup_logic("task1", [date(2024, 6, 11)])
+            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.reason is not None
+            assert "daily_quotes" in exc_info.value.reason
 
     @pytest.mark.asyncio
     async def test_incomplete_records_failure_and_schedules_retry(self):

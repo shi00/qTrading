@@ -115,6 +115,29 @@ _RETRYABLE_STATUSES = (
 )
 
 
+class TaskIncompleteError(Exception):
+    """业务编排明确判定「未完成/部分完成/未知结果」时抛出的信号异常。
+
+    语义：协程正常返回不代表业务成功。当 factory 能明确判定本次执行未达成目标
+    （关键表失败、仅部分完成、结果未知）时，应抛出本异常而非返回成功文案。
+    ``_task_runner`` 将其映射为 ``FAILED``（不伪设 ``progress=1``），使任务中心
+    正确区分失败与完成，并保留 ``FAILED`` 的可重试能力。
+
+    Attributes:
+        description: 面向用户的具体原因（``Message`` 按 locale 渲染，``str`` 原样展示）。
+        reason: 可选脱敏诊断摘要，仅用于日志，不展示给用户。
+    """
+
+    def __init__(self, description: Message | str, reason: str | None = None) -> None:
+        self.description = description
+        self.reason = reason
+        super().__init__(reason if reason is not None else _describe_for_log(description))
+
+
+def _describe_for_log(description: Message | str) -> str:
+    return description if isinstance(description, str) else description.key
+
+
 @dataclass
 class AppTask:
     """Represents a long-running asynchronous operation in the application.
@@ -923,6 +946,25 @@ class TaskManager:
             task.description = Message("task_cancelled_desc")
             logger.info("[TaskManager] Cancelled processing for: [%s]", task.id)
             raise  # Important to re-raise CancelledError for proper asyncio teardown
+        except TaskIncompleteError as e:
+            # 业务明确判定未完成/部分完成/未知：映射 FAILED，绝不伪设 progress=1。
+            # 与 T3 守卫对称：已被取消的任务保持 CANCELLED，不覆盖为 FAILED。
+            if task.status == TaskStatus.CANCELLED:
+                task.description = Message("task_cancelled_desc")
+                logger.info(
+                    "[TaskManager] Suppressed FAILED (already CANCELLED): [%s] %s",
+                    task.id,
+                    DataSanitizer.sanitize_error(e),
+                )
+            else:
+                task.status = TaskStatus.FAILED
+                task.error = "task_incomplete"
+                task.description = e.description
+                logger.warning(
+                    "[TaskManager] Task %s incomplete: %s",
+                    task.id,
+                    DataSanitizer.sanitize_error(e),
+                )
         except Exception as e:
             # T3 fix: 守卫已被取消的状态，避免用户协程在 except CancelledError 内抛非取消异常时覆盖 CANCELLED。
             if task.status == TaskStatus.CANCELLED:

@@ -15,6 +15,7 @@ from services.task_manager import (
     EXCLUSIVE_GROUP_MARKET_SYNC,
     TERMINAL_STATUSES,
     AppTask,
+    TaskIncompleteError,
     TaskManager,
     TaskStatus,
 )
@@ -717,6 +718,97 @@ class TestTaskRunnerStateGuard:
         assert t.status == TaskStatus.CANCELLED
         # G1 增强: 验证 CancelledError 分支正确设置 description
         assert t.description == Message("task_cancelled_desc")
+
+
+class TestTaskIncompleteErrorMapping:
+    """D11-F03: 业务未完成/部分/未知经真实 submit→runner 后映射 FAILED（不伪成功）。"""
+
+    def _mgr(self):
+        mgr = TaskManager()
+        mgr._get_semaphore = MagicMock(
+            return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+        )
+        mgr._persist_task = MagicMock()
+        mgr._evict_on_complete = MagicMock()
+        return mgr
+
+    async def _submit_and_wait(self, mgr, factory):
+        """真实 submit_task → runner 全链路；以终态订阅事件驱动，不使用 sleep。"""
+        mgr._loop = asyncio.get_running_loop()
+        finished = asyncio.Event()
+
+        def _on_update(tasks):
+            if any(t.status in TERMINAL_STATUSES for t in tasks):
+                finished.set()
+
+        mgr.subscribe(_on_update)
+        try:
+            task_id = mgr.submit_task(
+                name="test",
+                task_type="System",
+                coroutine_factory=factory,
+                cancellable=True,
+            )
+            assert task_id is not None
+            await asyncio.wait_for(finished.wait(), timeout=5)
+            return mgr.get_task(task_id)
+        finally:
+            mgr.unsubscribe(_on_update)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "description",
+        [
+            Message("sched_catchup_partial", {"days": 2}),
+            Message("sched_concept_sync_failed", {"sources": "akshare=failed"}),
+            "unknown result",
+        ],
+    )
+    async def test_incomplete_maps_to_failed_without_fake_progress(self, description):
+        """关键失败/部分完成/未知结果三类均映射 FAILED，progress 不伪设为 1。"""
+        mgr = self._mgr()
+
+        async def _factory(task_id, **kwargs):
+            mgr.update_progress(task_id, 0.4, Message("sched_concept_sync_progress"))
+            raise TaskIncompleteError(description, reason="diagnostic detail")
+
+        task = await self._submit_and_wait(mgr, _factory)
+        assert task is not None
+        assert task.status == TaskStatus.FAILED
+        assert task.progress == 0.4  # 不被伪设为 1.0
+        assert task.description == description  # 面向用户的具体原因原样透传
+        assert task.error == "task_incomplete"
+        assert task.is_retryable is True
+
+    @pytest.mark.asyncio
+    async def test_incomplete_error_after_cancel_keeps_cancelled(self):
+        """取消竞态：已被取消后抛 TaskIncompleteError 不得覆盖 CANCELLED（与 T3 守卫对称）。"""
+        mgr = self._mgr()
+
+        async def _factory(task_id, **kwargs):
+            task = mgr.get_task(task_id)
+            assert task is not None
+            task.status = TaskStatus.CANCELLED
+            raise TaskIncompleteError(Message("sched_catchup_partial", {"days": 1}))
+
+        task = await self._submit_and_wait(mgr, _factory)
+        assert task is not None
+        assert task.status == TaskStatus.CANCELLED
+        assert task.description == Message("task_cancelled_desc")
+
+    @pytest.mark.asyncio
+    async def test_legal_success_still_completed(self):
+        """合法成功（含"合法空候选"）仍 COMPLETED、progress=1。"""
+        mgr = self._mgr()
+
+        async def _factory(task_id, **kwargs):
+            return Message("sched_pred_done_empty")
+
+        task = await self._submit_and_wait(mgr, _factory)
+        assert task is not None
+        assert task.status == TaskStatus.COMPLETED
+        assert task.progress == 1.0
+        assert task.description == Message("sched_pred_done_empty")
 
 
 class TestTaskManagerClearFinished:

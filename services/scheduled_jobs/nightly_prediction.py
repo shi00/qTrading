@@ -22,7 +22,7 @@ from data.data_processor import DataProcessor
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.persistence.daos.base_dao import DatabaseQueryError
 from data.persistence.review_manager import ReviewManager
-from services.task_manager import TaskManager
+from services.task_manager import TaskIncompleteError, TaskManager
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import log_classified
@@ -115,20 +115,30 @@ async def _prediction_logic(
             # D4-C1: 落库 0 条 = 本次预测未产生可复盘结果（预算超限/政策未确认/AI 全失败），
             # 与"无候选"同等处理：不标记完成，允许重试。此前按"df 非空"判定成功，
             # 导致宣称成功、实际零落库、当日不再重试，交易日在学习闭环中永久缺失。
+            # D11-F03: 明确映射 FAILED（而非返回成功文案），使用户可在任务中心重试。
             if context.get("_ai_budget_exceeded"):
                 logger.warning(
                     "[Scheduler] Nightly prediction persisted 0 records (AI cost budget exceeded), NOT marking done"
                 )
-                return I18n.get("ai_budget_exceeded")
+                raise TaskIncompleteError(
+                    I18n.get("ai_budget_exceeded"),
+                    reason="persisted 0 records (AI cost budget exceeded)",
+                )
             if context.get("_ai_unpriced_prompt"):
                 # B1（review-pr1073）：unpriced 保守拒绝须与"无候选"可区分，否则夜间任务
                 # 每日静默失败+刷同款日志；返回专门消息供 UI/日志诊断（仍不标记完成，允许重试）。
                 logger.warning(
                     "[Scheduler] Nightly prediction persisted 0 records (unpriced AI calls conservatively blocked), NOT marking done"
                 )
-                return I18n.get("sched_pred_done_unpriced_blocked")
+                raise TaskIncompleteError(
+                    I18n.get("sched_pred_done_unpriced_blocked"),
+                    reason="persisted 0 records (unpriced AI calls conservatively blocked)",
+                )
             logger.warning("[Scheduler] Nightly prediction persisted 0 records, NOT marking done")
-            return I18n.get("sched_pred_done_empty")
+            raise TaskIncompleteError(
+                I18n.get("sched_pred_done_empty"),
+                reason="persisted 0 records",
+            )
         await svc._mark_nightly_prediction_done_db(today_str)
         return I18n.get("sched_pred_done_found", count=saved)
 

@@ -406,10 +406,12 @@ class SchedulerService:
             )
 
     def _on_job_missed(self, event):
-        """Handle missed job events with clear logging + catch-up trigger (D6-1).
+        """Handle missed job events with clear logging + per-job recovery trigger (D6-1/D11-F04).
 
         misfire（超过 misfire_grace_time 仍未执行）意味着当天任务永久丢失。
-        业务 job 被跳过时安排 _catch_up_missed_updates 检查遗漏交易日并补偿。
+        D11-F04: 按 job 分派补跑原任务——概念同步/回填/夜间预测若一律只做行情补偿，
+        即使日更已完成也不会补跑原 job，misfire 被静默吞掉。未知 job 回落旧行为
+        （仅行情补偿），以兼容未来新增 job。
         """
         job_id = event.job_id
         run_time = event.scheduled_run_time
@@ -419,22 +421,64 @@ class SchedulerService:
             job_id,
             run_time,
         )
-        if job_id in ("daily_update", "nightly_prediction", "concept_sync_daily_refresh", "review_backfill"):
-            # _on_job_missed 为 APScheduler listener 回调；AsyncIOScheduler 的 listener
-            # 在事件循环线程执行，可直接获取 running loop 调度异步补偿协程。
+        # _on_job_missed 为 APScheduler listener 回调；AsyncIOScheduler 的 listener
+        # 在事件循环线程执行，可直接获取 running loop 调度异步补跑协程。
+        # 无运行 loop 时记录 debug 后返回，不得抛到 APScheduler 线程。
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
+            return
+
+        if job_id == "concept_sync_daily_refresh":
+            # 概念同步/回填/夜间预测沿用各自协程内部开关与幂等判定（不额外加全局开关），
+            # 故日更已完成（水位为今天）时依旧补跑，同日重复 misfire 由 unique_key 去重。
+            coro = self._run_concept_sync()
+        elif job_id == "review_backfill":
+            coro = self._run_review_backfill()
+        elif job_id == "nightly_prediction":
+            coro = self._run_nightly_prediction()
+        else:
+            if job_id != "daily_update":
+                logger.warning(
+                    "[Scheduler] Unknown job '%s' missed; falling back to market catch-up only",
+                    job_id,
+                )
+            # daily_update 与未知 job：行情补偿。
             # include_today=True（D6-1 Q21）：misfire 已过计划时刻+宽限（已收盘），
             # 若仅补到昨天则"当天永久跳过"依旧存在。
             # bypass_backoff=True（D7-1）：misfire 为每天每 job 至多一次的一次性事件，
             # 不受 30 秒看门狗退避约束，避免当天数据永久丢失。
-            try:
-                loop = asyncio.get_running_loop()
-                task = loop.create_task(self._catch_up_missed_updates(include_today=True, bypass_backoff=True))
-                # F1 (OSS 检视): 事件循环只持弱引用，create_task 返回值须保存强引用直至任务
-                # 完成，否则补偿任务可能在执行中途被 GC 静默丢弃（漏跑且无日志）。
-                self._catchup_tasks.add(task)
-                task.add_done_callback(self._catchup_tasks.discard)
-            except RuntimeError:
-                logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
+            coro = self._catch_up_missed_updates(include_today=True, bypass_backoff=True)
+
+        try:
+            task = loop.create_task(coro)
+        except RuntimeError:
+            # loop 已关闭等竞态：协程未被执行，必须 close 避免 "coroutine was never awaited"。
+            coro.close()
+            logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
+            return
+        # F1 (OSS 检视): 事件循环只持弱引用，create_task 返回值须保存强引用直至任务
+        # 完成，否则补跑任务可能在执行中途被 GC 静默丢弃（漏跑且无日志）。
+        self._catchup_tasks.add(task)
+        task.add_done_callback(self._on_misfire_task_done)
+
+    def _on_misfire_task_done(self, task: asyncio.Task) -> None:
+        """misfire 补跑任务完成回调：释放强引用并消费异常（R2/R9）。
+
+        若不取回异常，asyncio 只能在 GC 时打印 "Task exception was never retrieved"，
+        且异常信息未脱敏；此处显式取回并记录（失败原因是脱敏后的摘要）。
+        """
+        self._catchup_tasks.discard(task)
+        if task.cancelled():
+            # R2: 取消（含优雅停机）不视为失败，不吞没、不再抛出。
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "[Scheduler] Misfire recovery task failed: %s",
+                DataSanitizer.sanitize_error(exc, show_traceback=True),
+            )
 
     def _on_job_error(self, event):
         """Handle job error events, suppressing CancelledError during shutdown"""
@@ -830,6 +874,18 @@ class SchedulerService:
         `check_data_exists` / `SyncResult.is_complete` 判定其完整性并据此推进水位——完整则夜间预测
         链路接通（D7-3/REVIEW-06 TO-01 不破），不完整则水位留空（MINOR-01 不复现）。
         """
+        # D11-F01: 自动行情补偿仅服务自动更新路径，必须与全局开关一致——关闭自动更新后，
+        # 启动 loader（_load_db_state）、30s 看门狗（_watch_config_changes）、misfire
+        # （_on_job_missed）三处均不得再提交 daily_sync_catchup（否则关闭后仍消耗数据源配额、
+        # 写行情表）。手动同步不经本方法，故不受此守卫影响。置于退避/自举/日历查询之前，
+        # 关闭时不产生任何 IO。
+        if not ConfigHandler.is_auto_update_enabled():
+            logger.debug(
+                "[Scheduler] 自动更新已关闭，跳过遗漏交易日补偿检查（include_today=%s, bypass_backoff=%s）",
+                include_today,
+                bypass_backoff,
+            )
+            return
         # D7-1/MAJOR-01: 退避窗口内跳过重复提交，打断"失败→30s 后重试"的固定频率风暴。
         # 此处可提前返回，亦省去退避期间的交易日历查询。
         if not bypass_backoff and self._catchup_backoff_active():
@@ -933,9 +989,21 @@ class SchedulerService:
         is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_not_ready）
         之前就重抛，该日「失败了却没记账」，只看 is_complete 会把未记账的失败日当成功。
         """
-        from services.task_manager import TaskManager  # lazy-import: 启动性能
+        from services.task_manager import TaskManager, TaskIncompleteError  # lazy-import: 启动性能
         from data.data_processor import DataProcessor  # lazy-import: 启动性能
         from data.sync.base import SyncResult  # lazy-import: 启动性能
+
+        # D11-F01: 关闭前已排队的补偿任务，获得组锁/信号量后可能才开始执行——此时自动更新
+        # 可能已被关闭，必须在业务 IO 之前二次判定，避免仍调用 sync_daily_market_snapshot。
+        # 抛 CancelledError（R2：不吞没）而非伪成功：任务中心显示 CANCELLED，且此处不推进
+        # 水位、不记录补偿失败，关闭后不再回补属于预期行为（用户重新开启后由下一轮补偿检查接手）。
+        if not ConfigHandler.is_auto_update_enabled():
+            logger.info(
+                "[Scheduler] 自动更新已关闭，取消已排队的补偿任务（task=%s, days=%d）",
+                task_id,
+                len(missed_dates),
+            )
+            raise asyncio.CancelledError("catchup cancelled (auto-update disabled)")
 
         tm = TaskManager()
         processor = DataProcessor()
@@ -1002,7 +1070,9 @@ class SchedulerService:
         if failed_dates:
             reason = f"failed_days={[d.strftime('%Y%m%d') for d in failed_dates]} {reason}"
         self._record_catchup_failure(reason=reason)
-        return Message("sched_catchup_partial", {"days": total})
+        # D11-F03: 补偿未完成必须映射 FAILED（而非伪成功），使任务中心可区分并允许重试。
+        # 抛异常前已完成水位推进与失败退避记录，顺序与原逻辑一致。
+        raise TaskIncompleteError(Message("sched_catchup_partial", {"days": total}), reason=reason)
 
     async def _run_daily_update(self):
         """Execute the data update (16:30)"""
@@ -1077,6 +1147,9 @@ class SchedulerService:
 
         async def _daily_update_logic(task_id: str, **kwargs):
             tm = TaskManager()
+            from services.task_manager import (
+                TaskIncompleteError,
+            )  # lazy-import: R1 EX-0007（utils 仅编排期引用业务异常）
             from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
 
             processor = DataProcessor()
@@ -1091,10 +1164,19 @@ class SchedulerService:
             if is_complete:
                 await self._mark_daily_update_done_db(today_str)
             else:
+                failed_critical = list(getattr(result, "failed_critical_tables", []) or [])
                 logger.warning(
                     "[Scheduler] Daily update NOT complete (critical=%s, optional=%s), NOT marking done",
-                    getattr(result, "failed_critical_tables", []),
+                    failed_critical,
                     getattr(result, "failed_optional_tables", []),
+                )
+                # D11-F03: 不完整/None/无 is_complete 一律映射 FAILED，不返回成功文案。
+                raise TaskIncompleteError(
+                    Message(
+                        "sched_daily_incomplete",
+                        {"tables": ", ".join(map(str, failed_critical)) or "-"},
+                    ),
+                    reason=f"is_complete=False; failed_critical_tables={failed_critical}",
                 )
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
@@ -1170,6 +1252,10 @@ class SchedulerService:
 
         async def _concept_sync_logic(task_id: str, **kwargs):
             tm = TaskManager()
+            from services.task_manager import (
+                TaskIncompleteError,
+            )  # lazy-import: R1 EX-0007（utils 仅编排期引用业务异常）
+
             cancel_event = tm.get_cancel_event(task_id)
             from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
 
@@ -1209,7 +1295,11 @@ class SchedulerService:
                 f"status={status}; {summary}"
             )
             message_key = "sched_concept_sync_failed" if status == "failed" else "sched_concept_sync_partial"
-            return Message(message_key, {"sources": summary})
+            # D11-F03: 失败/部分完成映射 FAILED（水位已不推进），不返回成功文案。
+            raise TaskIncompleteError(
+                Message(message_key, {"sources": summary}),
+                reason=self._job_last_failure_reason["concept_sync_daily_refresh"],
+            )
 
         # D6-5: 检查返回值为 None 的两种情形（去重命中/无事件循环），日志在 TaskManager
         # 内已分别记录，此处仅从调度器视角告警，交由 D6-1 补偿机制兜底。

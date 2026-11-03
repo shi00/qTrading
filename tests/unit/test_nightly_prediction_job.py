@@ -11,6 +11,7 @@ AI 策略执行经 ``AISelectionRunner`` 注入（app 层），测试用替身 r
 """
 
 from datetime import date, datetime
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -19,6 +20,7 @@ import pytest
 from core.i18n import I18n, Message
 from data.persistence.daos.base_dao import DatabaseQueryError
 from services.scheduled_jobs.nightly_prediction import build_nightly_prediction_job
+from services.task_manager import AppTask, TaskIncompleteError, TaskManager, TaskStatus
 
 pytestmark = pytest.mark.unit
 
@@ -388,8 +390,8 @@ class TestNightlyPredictionLogicClosure:
 
     @pytest.mark.asyncio
     async def test_prediction_logic_saved_zero_does_not_mark_done(self):
-        """D4-C1: save_results 落库 0 条（预算超限/政策未确认/AI 全失败）→
-        与"无候选"同等处理：不标记完成，允许重试。"""
+        """D4-C1/D11-F03: save_results 落库 0 条（预算超限/政策未确认/AI 全失败）→
+        抛 TaskIncompleteError（映射 FAILED），不标记完成，允许重试。"""
         svc = _FakeSvc()
         mock_tm = MagicMock()
         # 非空 df 但全被 ai_status 过滤 → save_results 返回 0
@@ -397,7 +399,9 @@ class TestNightlyPredictionLogicClosure:
         runner = AsyncMock(return_value=result_df)
         mock_rm = MagicMock()
         mock_rm.save_results = AsyncMock(return_value=0)
-        await self._execute_logic(svc, runner, mock_tm, mock_rm=mock_rm)
+        with pytest.raises(TaskIncompleteError) as exc_info:
+            await self._execute_logic(svc, runner, mock_tm, mock_rm=mock_rm)
+        assert exc_info.value.reason == "persisted 0 records"
         assert mock_rm.save_results.call_count == 1
         assert svc.marked_dates == []
 
@@ -439,9 +443,10 @@ class TestNightlyPredictionLogicClosure:
             mock_now.return_value = datetime(2024, 6, 14, 20, 30)
             await job(svc)
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
-            msg = await factory("test_task")
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
 
-        assert msg == I18n.get("sched_pred_done_unpriced_blocked")
+        assert exc_info.value.description == I18n.get("sched_pred_done_unpriced_blocked")
         assert svc.marked_dates == []  # 不标记完成，允许重试
 
     @pytest.mark.asyncio
@@ -580,3 +585,46 @@ class TestNightlyPredictionLogicClosure:
             assert submit_kwargs.get("unique_key") == "nightly_prediction"
             assert submit_kwargs.get("cancellable") is False
             assert callable(submit_kwargs.get("coroutine_factory"))
+
+    @pytest.mark.asyncio
+    async def test_empty_candidates_via_real_runner_stays_completed(self):
+        """D11-F03: 合法空候选（result_df 为空）经真实 _task_runner 后仍 COMPLETED、progress=1。"""
+        svc = _FakeSvc()
+        svc._last_update_date = "20240614"
+        mock_tm = MagicMock()
+        runner = AsyncMock(return_value=pd.DataFrame())
+        job = build_nightly_prediction_job(runner)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager", return_value=mock_tm),
+            patch("services.scheduled_jobs.nightly_prediction.ReviewManager"),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+            mock_dp_instance.init_data = AsyncMock()
+            mock_dp_instance.prepare_market_data = AsyncMock()
+            mock_dp_instance.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value = datetime(2024, 6, 14, 20, 30)
+            await job(svc)
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+
+            mgr = TaskManager()
+            mgr._get_semaphore = MagicMock(
+                return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+            )
+            mgr._persist_task = MagicMock()
+            mgr._notify_subscribers = MagicMock()
+            mgr._evict_on_complete = MagicMock()
+            task = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=False)
+            task._cancel_event = threading.Event()
+            mgr._tasks[task.id] = task
+            task._coroutine_gen = lambda: factory("test_task")
+            await mgr._task_runner(task.id)
+
+        assert task.status == TaskStatus.COMPLETED
+        assert task.progress == 1.0
