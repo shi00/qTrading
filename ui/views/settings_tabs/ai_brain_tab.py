@@ -42,6 +42,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels.ai_brain_settings_view_model import (
     SAVE_ERROR,
     SAVE_SAVING,
+    SAVE_STALE,
     SAVE_SUCCESS,
     AIBrainSettingsViewModel,
 )
@@ -340,6 +341,9 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             current_state = ai_settings_vm.state
             if current_state.save_state == SAVE_ERROR:
                 show_snack_callback(I18n.get("settings_save_failed"), color=AppColors.ERROR)
+            elif current_state.save_state == SAVE_STALE:
+                # F05: 发起保存后草稿又被编辑 —— 明确提示当前草稿仍有未保存修改。
+                show_snack_callback(I18n.get(current_state.warning_message), color=AppColors.WARNING)
             elif current_state.save_state == SAVE_SUCCESS:
                 show_snack_callback(I18n.get("settings_snack_ai_saved"))
         except asyncio.CancelledError:
@@ -758,8 +762,25 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     # 状态指示器 (从 VM state 派生)
-    status_color = AppColors.SUCCESS if is_success else AppColors.ERROR if is_error else AppColors.TEXT_HINT
-    status_text = I18n.get("common_saved") if is_success else I18n.get("sys_snack_save_err") if is_error else ""
+    is_stale = ai_settings_state.save_state == SAVE_STALE
+    status_color = (
+        AppColors.SUCCESS
+        if is_success
+        else AppColors.WARNING
+        if is_stale
+        else AppColors.ERROR
+        if is_error
+        else AppColors.TEXT_HINT
+    )
+    status_text = (
+        I18n.get("common_saved")
+        if is_success
+        else I18n.get(ai_settings_state.warning_message)
+        if is_stale
+        else I18n.get("sys_snack_save_err")
+        if is_error
+        else ""
+    )
     status_row = (
         ft.Row(
             [
