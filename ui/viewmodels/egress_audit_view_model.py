@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.sanitizers import DataSanitizer
@@ -36,9 +36,9 @@ class EgressAggRow:
 class EgressAuditState:
     """EgressAuditViewModel 的不可变 state snapshot。"""
 
-    # 今日/本月按目的地聚合（面板表格行）；空 list 表示未加载或暂无记录
-    today_rows: list[EgressAggRow] = field(default_factory=list)
-    month_rows: list[EgressAggRow] = field(default_factory=list)
+    # 今日/本月按目的地聚合（面板表格行）；空 tuple 表示未加载或暂无记录
+    today_rows: tuple[EgressAggRow, ...] = ()
+    month_rows: tuple[EgressAggRow, ...] = ()
     # 本会话外发计数（状态栏指示器）
     session_count: int = 0
     # 是否已成功加载聚合（区分「未加载」与「已加载但无记录」）
@@ -72,8 +72,8 @@ class EgressAuditViewModel(ObservableViewModelMixin[EgressAuditState]):
                 DataSanitizer.sanitize_error(ex),  # R9: 扫描异常可能含用户目录路径
             )
             self._set_state(
-                today_rows=[],
-                month_rows=[],
+                today_rows=(),
+                month_rows=(),
                 session_count=0,
                 loaded=False,
             )
@@ -87,8 +87,8 @@ class EgressAuditViewModel(ObservableViewModelMixin[EgressAuditState]):
         )
 
 
-def _to_rows(agg: dict[str, tuple[int, int]]) -> list[EgressAggRow]:
-    """把 {destination: (count, bytes)} 映射为行列表（按次数降序，供 UI 排序展示）。"""
+def _to_rows(agg: dict[str, tuple[int, int]]) -> tuple[EgressAggRow, ...]:
+    """把 {destination: (count, bytes)} 映射为行元组（按次数降序，供 UI 排序展示）。"""
     rows = [
         EgressAggRow(
             destination=dest,
@@ -98,4 +98,4 @@ def _to_rows(agg: dict[str, tuple[int, int]]) -> list[EgressAggRow]:
         for dest, (count, total_bytes) in agg.items()
     ]
     rows.sort(key=lambda r: r.count, reverse=True)
-    return rows
+    return tuple(rows)
