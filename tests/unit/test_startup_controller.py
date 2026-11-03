@@ -38,7 +38,7 @@ def controller(state_recorder):
 def _mock_thread_pool():
     """Mock ThreadPoolManager.run_async to avoid real thread pool operations."""
     with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-        mock_tpm.return_value.run_async = AsyncMock()
+        mock_tpm.return_value.run_async = AsyncMock(return_value=True)
         yield mock_tpm
 
 
@@ -179,6 +179,26 @@ class TestStartupInitServices:
         ):
             mock_init.return_value = {"success": True, "error": None, "detail": None}
             mock_tpm.return_value.run_async = AsyncMock(side_effect=RuntimeError("disk full"))
+            await ctrl._init_services()
+
+        assert ctrl.state == StartupState.READY
+        assert transitions[-1][0] == StartupState.READY
+
+    @pytest.mark.asyncio
+    async def test_init_services_set_onboarding_complete_false_return_still_ready(self, controller):
+        """D02-Q01 不回归: set_onboarding_complete(True) 返回 False（未抛异常）时仍进入 READY.
+
+        成功启动路径的非阻断语义是已声明设计（服务已初始化，仅标志未持久化），
+        reconfigure 的失败中止修复不得改变该行为。
+        """
+        ctrl, transitions = controller
+        with (
+            patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+            mock_tpm.return_value.run_async = AsyncMock(return_value=False)
             await ctrl._init_services()
 
         assert ctrl.state == StartupState.READY
@@ -400,7 +420,7 @@ class TestStartupReconfigure:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
             patch("utils.config_handler.ConfigHandler"),
         ):
-            mock_tpm.return_value.run_async = AsyncMock()
+            mock_tpm.return_value.run_async = AsyncMock(return_value=True)
             await ctrl.reconfigure()
 
         ctrl._cache_manager.close.assert_awaited_once()
@@ -419,7 +439,7 @@ class TestStartupReconfigure:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
             patch("utils.config_handler.ConfigHandler"),
         ):
-            mock_tpm.return_value.run_async = AsyncMock()
+            mock_tpm.return_value.run_async = AsyncMock(return_value=True)
             await ctrl.reconfigure()
 
         assert ctrl._services_initialized is False
@@ -439,7 +459,7 @@ class TestStartupReconfigure:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
             patch("utils.config_handler.ConfigHandler"),
         ):
-            mock_tpm.return_value.run_async = AsyncMock()
+            mock_tpm.return_value.run_async = AsyncMock(return_value=True)
             await controller.reconfigure()
 
         assert StartupState.LOADING in transitions
@@ -487,7 +507,7 @@ class TestStartupReconfigure:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
             patch("utils.config_handler.ConfigHandler"),
         ):
-            mock_tpm.return_value.run_async = AsyncMock()
+            mock_tpm.return_value.run_async = AsyncMock(return_value=True)
             await ctrl.reconfigure()
             # 模拟双击窗口内的第二次点击（state 已非 INIT_FAILED）
             await ctrl.reconfigure()
@@ -515,7 +535,7 @@ class TestStartupReconfigure:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
             patch("utils.config_handler.ConfigHandler"),
         ):
-            mock_tpm.return_value.run_async = AsyncMock()
+            mock_tpm.return_value.run_async = AsyncMock(return_value=True)
             ctrl._cache_manager.close.side_effect = slow_close
             await asyncio.gather(ctrl.reconfigure(), ctrl.reconfigure())
 
@@ -533,11 +553,49 @@ class TestStartupReconfigure:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
             patch("utils.config_handler.ConfigHandler"),
         ):
-            mock_tpm.return_value.run_async = AsyncMock()
+            mock_tpm.return_value.run_async = AsyncMock(return_value=True)
             await ctrl.reconfigure()
 
         ctrl._cache_manager.close.assert_not_awaited()
         assert ctrl.state == StartupState.READY
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_set_onboarding_complete_false_return_aborts(self):
+        """D02-Q01: set_onboarding_complete(False) 返回 False（未抛异常）也必须中止.
+
+        真实 save_config 在「配置不可读 / 校验失败 / 原子写失败 / 锁超时」时返回
+        False 而非抛异常；仅捕获异常会让持久化失败被静默忽略并进入向导。
+        契约：reconfigure 重置 onboarding 标志失败时保持 INIT_FAILED 可重试状态，
+        不得进入 NEED_ONBOARDING。
+        """
+        transitions = []
+        cache_manager = AsyncMock()
+        controller = StartupController(
+            cache_manager=cache_manager,
+            on_state_change=lambda s, ctx: transitions.append((s, ctx)),
+        )
+        controller._state = StartupState.INIT_FAILED
+
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock(return_value=False)
+            await controller.reconfigure()
+
+        assert controller.state == StartupState.INIT_FAILED
+        assert StartupState.NEED_ONBOARDING not in [s for s, _ in transitions]
+        assert transitions[-1][0] == StartupState.INIT_FAILED
+        assert transitions[-1][1].error == "reconfigure_failed"
+        assert transitions[-1][1].detail is not None
+        # 失败后旧配置未被改动，且 INIT_FAILED 页仍可 Retry / Reconfigure / Skip
+        cache_manager.close.assert_awaited_once()
+
+        # 保持可用状态：INIT_FAILED 下 Retry 仍可重新初始化服务
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+            await controller.retry()
+        assert controller.state == StartupState.READY
 
 
 class TestStartupSkip:
