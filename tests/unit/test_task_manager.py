@@ -1095,6 +1095,7 @@ class TestTaskManagerPersistTask:
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
         t = AppTask(name="test")
+        mgr._tasks[t.id] = t  # D11-F06: 未在内存跟踪的任务被视为已撤销，不会持久化
 
         def fake_sched(coro, on_drop=None):
             if hasattr(coro, "close"):
@@ -1122,11 +1123,13 @@ class TestTaskManagerPersistSeq:
     def test_persist_task_allocates_increasing_seq(self):
         """连续 _persist_task 生成的快照 persist_seq 严格递增。"""
         mgr = self._runner()
+        tasks = [AppTask(name="a"), AppTask(name="b"), AppTask(name="c")]
+        for t in tasks:
+            mgr._tasks[t.id] = t  # D11-F06: 仅持久化仍在内存跟踪的任务
         captured: list[tuple] = []
         with patch.object(mgr, "_queue_persist_snapshot", side_effect=captured.append):
-            mgr._persist_task(AppTask(name="a"))
-            mgr._persist_task(AppTask(name="b"))
-            mgr._persist_task(AppTask(name="c"))
+            for t in tasks:
+                mgr._persist_task(t)
         seqs = [snap[-1] for snap in captured]
         assert seqs == [1, 2, 3]
         assert seqs == sorted(seqs)
@@ -1683,6 +1686,203 @@ class TestTaskManagerDeletionBarrier:
         assert result is True
         assert "t1" not in mgr._pending_db_deletions
         assert "t1" not in db.rows
+
+    @pytest.mark.asyncio
+    async def test_active_producer_holds_tombstone_and_late_write_cannot_resurrect(self, caplog):
+        """D11-F06: 生产者仍在运行时墓碑不得被容量淘汰；退出后的迟到写也不得 INSERT 复活。"""
+        caplog.set_level(logging.WARNING, logger="services.task_manager")
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = asyncio.get_running_loop()
+        db = _BarrierFakeDb()
+        db.engine = _BarrierFakeEngine(db)
+        db.gate.set()  # 本用例不阻塞写，写立即完成
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _work():
+            started.set()
+            await release.wait()
+            return "done"
+
+        task = AppTask(name="producer", cancellable=True)
+        task._coroutine_gen = _work
+        mgr._tasks = {task.id: task}
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm._instance = db
+            mock_cm.return_value = db
+            runner = asyncio.create_task(mgr._task_runner(task.id))
+            await started.wait()
+            assert task.id in mgr._active_producers
+            await mgr.flush_persistence()
+            assert mgr._queued_persist.get(task.id, 0) == 0
+            assert mgr._inflight_persist.get(task.id, 0) == 0
+
+            # 用户撤销 + 清理：runner 尚未退出，墓碑先于 DELETE 生效
+            task.status = TaskStatus.CANCELLED
+            delete_tasks: list[asyncio.Task] = []
+
+            def _run_now(coro, on_drop=None):
+                delete_tasks.append(asyncio.create_task(coro))
+                return True
+
+            with patch.object(mgr, "_schedule_coro", side_effect=_run_now):
+                mgr._clear_finished_impl()
+            assert task.id in mgr._tombstones
+            assert task.id not in mgr._tasks
+            await asyncio.gather(*delete_tasks)
+            assert task.id not in db.rows
+            assert task.id not in mgr._pending_db_deletions
+
+            # 填充容量并触发淘汰：A 是队列最前的墓碑，但生产者未退出 → 不得淘汰
+            others = [f"other-{i}" for i in range(1000)]
+            mgr._register_deletion_barrier(others)
+            mgr._mark_db_deleted(others)
+            mgr._register_deletion_barrier(["trigger-1", "trigger-2"])
+            mgr._mark_db_deleted(["trigger-1", "trigger-2"])
+            assert task.id in mgr._tombstones
+            assert any("capacity temporarily exceeded" in r.message for r in caplog.records)
+
+            # 释放生产者：finally 的最后一次持久化被「内存已撤销」判定拒绝
+            release.set()
+            await asyncio.wait_for(runner, timeout=1.0)
+
+        assert task.id not in mgr._active_producers
+        assert task.id not in mgr._queued_persist
+        assert task.id not in db.rows
+
+        # 墓碑最终被容量淘汰后，迟到写仍被拒绝（无墓碑也不复活）
+        filler = [f"filler-{i}" for i in range(1001)]
+        mgr._register_deletion_barrier(filler)
+        mgr._mark_db_deleted(filler)
+        assert task.id not in mgr._tombstones
+        with patch.object(mgr, "_queue_persist_snapshot") as mock_queue:
+            mgr._persist_task(task)
+        mock_queue.assert_not_called()
+        assert task.id not in db.rows
+
+        # 重启恢复：DB 中仍无该 ID
+        TaskManager._reset_singleton()
+        reloaded = TaskManager()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm2:
+            mock_cm2._instance = db
+            mock_cm2.return_value = db
+            await reloaded.init_db()
+        assert all(h.id != task.id for h in reloaded._history)
+
+    @pytest.mark.asyncio
+    async def test_failed_delete_tombstone_never_evicted(self, caplog):
+        """DELETE 失败保留 pending；未确认删除的墓碑在容量超限时也不得淘汰。"""
+        caplog.set_level(logging.WARNING, logger="services.task_manager")
+        mgr = TaskManager()
+        db = _BarrierFakeDb()
+        db.engine = _BarrierFakeEngine(db)
+        db.rows["t1"] = "COMPLETED"
+        db.fail_delete = True
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm.return_value = db
+            assert await mgr._clear_finished_db(["t1"]) is False
+
+        assert "t1" in mgr._pending_db_deletions
+        assert "t1" in mgr._tombstones
+
+        others = [f"other-{i}" for i in range(1000)]
+        mgr._register_deletion_barrier(others)
+        mgr._mark_db_deleted(others)
+        mgr._register_deletion_barrier(["t2"])
+        mgr._mark_db_deleted(["t2"])
+
+        assert "t1" in mgr._tombstones
+        assert any("capacity temporarily exceeded" in r.message for r in caplog.records)
+
+        # 恢复后确认删除，才允许进入淘汰候选
+        db.fail_delete = False
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm.return_value = db
+            assert await mgr._clear_finished_db(["t1"]) is True
+        assert "t1" not in mgr._pending_db_deletions
+        assert "t1" not in db.rows
+
+    @pytest.mark.asyncio
+    async def test_inflight_write_blocks_delete_until_timeout(self):
+        """在途写未归零时 _wait_inflight_persist 超时返回 False，DELETE 推迟且墓碑保留。"""
+        mgr = TaskManager()
+        db = _BarrierFakeDb()
+        db.engine = _BarrierFakeEngine(db)
+        db.rows["t1"] = "COMPLETED"
+
+        assert mgr._begin_inflight_persist("t1") is True
+        try:
+            with patch("services.task_manager._DELETION_BARRIER_WAIT_S", 0.01):
+                assert await mgr._wait_inflight_persist(["t1"]) is False
+                with (
+                    patch("data.cache.cache_manager.CacheManager") as mock_cm,
+                    _patch_task_history_ids(),
+                ):
+                    mock_cm.return_value = db
+                    assert await mgr._clear_finished_db(["t1"]) is False
+        finally:
+            mgr._end_inflight_persist("t1")
+
+        assert "t1" in mgr._pending_db_deletions
+        assert "t1" in mgr._tombstones
+        assert db.rows["t1"] == "COMPLETED"
+
+    def test_eviction_requires_queued_and_inflight_writes_drained(self):
+        """排队写/在途写未归零的墓碑同样不得淘汰。"""
+        mgr = TaskManager()
+        mgr._register_deletion_barrier(["q1"])
+        mgr._mark_db_deleted(["q1"])
+        mgr._queued_persist["q1"] = 1
+        mgr._register_deletion_barrier(["i1"])
+        mgr._mark_db_deleted(["i1"])
+        # 模拟「写已进入写库阶段后墓碑才登记」的在途写（准入闸门已过，故直接置计数）
+        with mgr._barrier_lock:
+            mgr._inflight_persist["i1"] = 1
+
+        try:
+            others = [f"other-{i}" for i in range(1000)]
+            mgr._register_deletion_barrier(others)
+            mgr._mark_db_deleted(others)
+            mgr._register_deletion_barrier([f"trigger-{i}" for i in range(4)])
+            mgr._mark_db_deleted([f"trigger-{i}" for i in range(4)])
+
+            assert "q1" in mgr._tombstones
+            assert "i1" in mgr._tombstones
+            assert len(mgr._tombstones) == 1000
+        finally:
+            mgr._queued_persist.pop("q1", None)
+            mgr._inflight_persist.pop("i1", None)
+
+    def test_late_persist_for_cleared_task_without_tombstone_is_skipped(self, caplog):
+        """无墓碑但内存已清除的迟到 _persist_task 直接跳过，不排队新写。"""
+        caplog.set_level(logging.DEBUG, logger="services.task_manager")
+        mgr = TaskManager()
+        mgr._db_ready = True
+        task = AppTask(name="ghost", status=TaskStatus.COMPLETED)
+
+        assert task.id not in mgr._tasks
+        assert task.id not in mgr._history
+        assert task.id not in mgr._tombstones
+
+        with patch.object(mgr, "_queue_persist_snapshot") as mock_queue:
+            mgr._persist_task(task)
+
+        mock_queue.assert_not_called()
+        assert mgr._queued_persist.get(task.id, 0) == 0
+        assert any("revoked" in r.message for r in caplog.records)
 
 
 class TestTaskManagerQueuePersistSnapshot:
