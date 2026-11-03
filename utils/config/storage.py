@@ -617,6 +617,81 @@ def save_config(config_data, replace=False):
         return False
 
 
+def update_config_key(key: str, mutate: Callable[[dict], bool]) -> bool:
+    """在「文件锁 → RWLock」内对单个顶层键执行 read-modify-write（D02-F06）。
+
+    与 ``save_config`` 的区别：调用方不在锁外构造整份嵌套 dict 作为覆盖值，
+    而是在锁内基于磁盘现值就地修改——避免两个进程各自持有旧快照时，其中一方
+    对该顶层键写入的整段嵌套内容覆盖掉另一方已提交的条目。
+
+    Args:
+        key: 顶层配置键（如 ``strategy_presets_<strategy_key>``）。
+        mutate: 锁内回调，收到该键磁盘现值的深拷贝（缺失或非 dict 时为空 dict），
+            就地修改；返回 True 表示需要落盘，False 表示无需变更（不写盘）。
+
+    Returns:
+        True 已提交（磁盘与缓存同步更新）；False 无变更 / 磁盘损坏 / 安全子域
+        损坏 / schema 校验失败 / 原子写失败 / 锁超时——此时磁盘与本进程缓存均
+        保持上次已提交值（不半提交）。
+
+    磁盘损坏与安全子域结构损坏沿用 ``save_config`` 的 fail-closed 拒写语义，
+    不以空基底或缓存基底覆盖损坏文件。
+    """
+    _migrate_config_location()
+    try:
+        with _config_file_lock():
+            with cfg.ConfigHandler._lock.gen_wlock():
+                data, err = _read_disk_dict()
+                if err is not None:
+                    cfg.logger.error(
+                        "[ConfigHandler] update_config_key: config file unreadable, aborting save: %s", err
+                    )
+                    return False
+                if data is not None:
+                    try:
+                        validate_security_subdomain_integrity(data.get("model_management"))
+                    except SecurityStateCorruptionError as e:
+                        cfg.logger.error(
+                            "[ConfigHandler] update_config_key: security subdomain corruption, aborting: %s",
+                            DataSanitizer.sanitize_error(e),
+                        )
+                        return False
+                    _normalize_ai_external_acknowledged(data)
+                    current_config = data
+                elif cfg.ConfigHandler._config_cache is not None:
+                    current_config = cfg.ConfigHandler._config_cache.copy()
+                else:
+                    current_config = {}
+
+                raw_section = current_config.get(key)
+                section = copy.deepcopy(raw_section) if isinstance(raw_section, dict) else {}
+                if not mutate(section):
+                    return False
+                current_config[key] = section
+
+                try:
+                    validated = AppConfig.model_validate(current_config)
+                    final_config = validated.model_dump()
+                except ValidationError as e:
+                    cfg.logger.error(
+                        "[ConfigHandler] update_config_key: invalid config data: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
+                    return False
+
+                if not cfg.ConfigHandler._save_json_atomically(final_config, cfg.CONFIG_FILE):
+                    return False
+                cfg.ConfigHandler._config_cache = final_config
+                return True
+    except ConfigFileLockTimeoutError as e:
+        cfg.logger.error("[ConfigHandler] update_config_key: file lock timeout: %s", DataSanitizer.sanitize_error(e))
+        return False
+    # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
+    except Exception as e:
+        cfg.logger.error("update_config_key failed: %s", DataSanitizer.sanitize_error(e))
+        return False
+
+
 def compare_and_save_model_management(
     expected_revision: int,
     payload: dict,

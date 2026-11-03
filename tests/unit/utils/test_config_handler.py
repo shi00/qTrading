@@ -2891,7 +2891,32 @@ class TestConfigHandlerStrategyPresets:
     覆盖 Plans.md 要求:
     ① 保存→切策略→载入→参数还原单测 (跨策略隔离)
     ② 重名覆盖与删除单测
+
+    D02-F06：保存/删除改为「文件锁 → RWLock」内的磁盘 read-modify-write，
+    不得基于锁外旧缓存构造整份预设 dict 再整体覆盖。
     """
+
+    @pytest.fixture()
+    def preset_config(self, tmp_path):
+        config_file = tmp_path / "user_settings.json"
+        with (
+            patch.object(cfg_mod, "CONFIG_FILE", str(config_file)),
+            patch.object(cfg_mod.ConfigHandler, "_config_cache", None),
+            # 声明外部覆盖：禁用 legacy 配置位置迁移（与 isolated_config 一致）。
+            patch.dict(os.environ, {"ASTOCK_CONFIG_FILE": str(config_file)}),
+        ):
+            yield config_file
+
+    @staticmethod
+    def _write_presets(config_file, presets, strategy_key="value_strategy"):
+        config_file.write_text(
+            json.dumps({f"strategy_presets_{strategy_key}": presets}, ensure_ascii=False), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _read_presets(config_file, strategy_key="value_strategy"):
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+        return raw.get(f"strategy_presets_{strategy_key}")
 
     # --- get_strategy_presets ---
 
@@ -2921,94 +2946,153 @@ class TestConfigHandlerStrategyPresets:
         presets = ConfigHandler.get_strategy_presets("value_strategy")
         assert presets == {}
 
-    # --- save_strategy_preset ---
+    # --- save_strategy_preset：文件锁内磁盘 read-modify-write ---
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
-    def test_save_preset_to_empty_config(self, mock_load, mock_save):
-        """保存预设到无预设的配置 → 调用 save_config 写入新预设"""
+    def test_save_preset_to_empty_config(self, preset_config):
+        """保存预设到无预设的配置 → 落盘新预设。"""
         result = ConfigHandler.save_strategy_preset("value_strategy", "保守型", {"pe": 15})
         assert result is True
-        saved = mock_save.call_args[0][0]
-        assert saved["strategy_presets_value_strategy"] == {"保守型": {"pe": 15}}
+        assert self._read_presets(preset_config) == {"保守型": {"pe": 15}}
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={"strategy_presets_value_strategy": {"existing": {"pe": 10}}},
-    )
-    def test_save_preset_appends_to_existing(self, mock_load, mock_save):
-        """已有预设时保存新预设 → 追加到现有 dict, 保留旧预设"""
+    def test_save_preset_appends_to_existing(self, preset_config):
+        """已有预设时保存新预设 → 不同名合并，保留旧预设。"""
+        self._write_presets(preset_config, {"existing": {"pe": 10}})
         result = ConfigHandler.save_strategy_preset("value_strategy", "激进型", {"pe": 5})
         assert result is True
-        saved = mock_save.call_args[0][0]
-        presets = saved["strategy_presets_value_strategy"]
-        assert presets["existing"] == {"pe": 10}  # 保留旧值
-        assert presets["激进型"] == {"pe": 5}  # 新增
+        assert self._read_presets(preset_config) == {"existing": {"pe": 10}, "激进型": {"pe": 5}}
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={"strategy_presets_value_strategy": "not_a_dict"},
-    )
-    def test_save_preset_resets_invalid_type(self, mock_load, mock_save):
-        """预设字段类型非法时保存 → 重置为空 dict 再写入新预设"""
+    def test_save_preset_resets_invalid_type(self, preset_config):
+        """预设字段类型非法时保存 → 重置为空 dict 再写入新预设（既有语义）。"""
+        self._write_presets(preset_config, "not_a_dict")
         result = ConfigHandler.save_strategy_preset("value_strategy", "new", {"pe": 10})
         assert result is True
-        saved = mock_save.call_args[0][0]
-        assert saved["strategy_presets_value_strategy"] == {"new": {"pe": 10}}
+        assert self._read_presets(preset_config) == {"new": {"pe": 10}}
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
-    def test_save_preset_propagates_save_config_failure(self, mock_load, mock_save):
-        """save_config 失败 → 返回 False"""
-        result = ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1})
-        assert result is False
+    def test_save_preset_same_name_last_writer_wins(self, preset_config):
+        """重名覆盖：明确最后写者，旧字段不残留。"""
+        self._write_presets(preset_config, {"my": {"pe": 15, "roe": 10}})
+        assert ConfigHandler.save_strategy_preset("value_strategy", "my", {"pe": 20}) is True
+        assert self._read_presets(preset_config)["my"] == {"pe": 20}
 
-    # --- delete_strategy_preset ---
+    def test_save_preset_stale_cache_merges_disk_entries(self, preset_config):
+        """D02-F06：锁外旧快照 + 他进程新增 → 不同名合并，不整体覆盖。
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={"strategy_presets_value_strategy": {"保守型": {"pe": 15}}},
-    )
-    def test_delete_preset_exists_returns_true(self, mock_load, mock_save):
-        """删除存在的预设 → 返回 True, 预设从 dict 移除"""
-        result = ConfigHandler.delete_strategy_preset("value_strategy", "保守型")
-        assert result is True
-        saved = mock_save.call_args[0][0]
-        assert "保守型" not in saved["strategy_presets_value_strategy"]
+        进程 A 先缓存 {"old"}；进程 B 在磁盘新增 B（此处直接写盘模拟独立进程，
+        不刷新 A 的缓存）；A 随后保存 A —— 三者在盘面共存。
+        """
+        self._write_presets(preset_config, {"old": {"pe": 1}})
+        ConfigHandler.load_config()  # A 的旧快照（缓存命中）
+        self._write_presets(preset_config, {"old": {"pe": 1}, "B": {"pe": 2}})  # B 的独立写入
+        assert ConfigHandler.save_strategy_preset("value_strategy", "A", {"pe": 3}) is True
+        assert self._read_presets(preset_config) == {
+            "old": {"pe": 1},
+            "B": {"pe": 2},
+            "A": {"pe": 3},
+        }
 
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={"strategy_presets_value_strategy": {"保守型": {"pe": 15}}},
-    )
-    def test_delete_preset_not_exists_returns_false(self, mock_load):
-        """删除不存在的预设 → 返回 False, 不调用 save_config"""
-        with patch.object(cfg_mod.ConfigHandler, "save_config") as mock_save:
-            result = ConfigHandler.delete_strategy_preset("value_strategy", "不存在")
-            assert result is False
+    def test_save_preset_write_failure_keeps_disk_and_cache(self, preset_config):
+        """写失败 → 磁盘与本进程缓存均保持已提交值（不得半提交）。"""
+        self._write_presets(preset_config, {"a": {"pe": 1}})
+        committed = ConfigHandler.load_config()["strategy_presets_value_strategy"]
+        with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=False):
+            assert ConfigHandler.save_strategy_preset("value_strategy", "b", {"pe": 2}) is False
+        assert self._read_presets(preset_config) == {"a": {"pe": 1}}
+        assert ConfigHandler.load_config()["strategy_presets_value_strategy"] == committed
+
+    def test_save_preset_aborts_on_corrupt_disk(self, preset_config):
+        """磁盘 JSON 损坏 → fail-closed 拒写，保留损坏现场。"""
+        preset_config.write_text("{corrupt", encoding="utf-8")
+        before = preset_config.read_bytes()
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert preset_config.read_bytes() == before
+
+    def test_save_preset_aborts_on_security_corrupted_disk(self, preset_config):
+        """合法 JSON + 安全子域结构损坏 → 拒写，盘面不变。"""
+        preset_config.write_text(
+            json.dumps({"model_management": {"schema_version": 1, "config_revision": 2}}), encoding="utf-8"
+        )
+        before = preset_config.read_bytes()
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert preset_config.read_bytes() == before
+
+    def test_save_preset_validation_failure_returns_false(self, preset_config):
+        """合并结果 schema 校验失败 → 返回 False，盘面不变。"""
+        preset_config.write_text(json.dumps({"log_level": "TRACE"}), encoding="utf-8")
+        before = preset_config.read_bytes()
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert preset_config.read_bytes() == before
+
+    def test_save_preset_lock_timeout_returns_false(self, preset_config):
+        """文件锁等待超时 → 返回 False，零写。"""
+        from utils.config.storage import ConfigFileLockTimeoutError
+
+        with patch("utils.config.storage._config_file_lock", side_effect=ConfigFileLockTimeoutError("timeout")):
+            assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert not preset_config.exists()
+
+    def test_save_preset_unexpected_error_returns_false(self, preset_config):
+        """锁内意外异常 → 返回 False，不半提交。"""
+        with patch("utils.config.storage._read_disk_dict", side_effect=RuntimeError("boom")):
+            assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is False
+        assert not preset_config.exists()
+
+    def test_save_preset_without_file_uses_cache_base(self, preset_config):
+        """文件缺失但缓存存在时沿用缓存基底（与 save_config 一致），不丢缓存键。"""
+        cfg_mod.ConfigHandler._config_cache = {"log_level": "DEBUG"}
+        assert ConfigHandler.save_strategy_preset("value_strategy", "x", {"pe": 1}) is True
+        raw = json.loads(preset_config.read_text(encoding="utf-8"))
+        assert raw["log_level"] == "DEBUG"
+        assert raw["strategy_presets_value_strategy"] == {"x": {"pe": 1}}
+
+    # --- delete_strategy_preset：锁内基于磁盘判定存在性 ---
+
+    def test_delete_preset_exists_returns_true(self, preset_config):
+        """删除存在的预设 → 返回 True, 预设从盘面移除"""
+        self._write_presets(preset_config, {"保守型": {"pe": 15}})
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "保守型") is True
+        assert self._read_presets(preset_config) == {}
+
+    def test_delete_preset_not_exists_returns_false(self, preset_config):
+        """删除不存在的预设 → 返回 False, 不写盘"""
+        self._write_presets(preset_config, {"保守型": {"pe": 15}})
+        with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically") as mock_save:
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "不存在") is False
             mock_save.assert_not_called()
+        assert self._read_presets(preset_config) == {"保守型": {"pe": 15}}
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
-    def test_delete_preset_empty_config_returns_false(self, mock_load):
-        """配置无预设时删除 → 返回 False"""
-        result = ConfigHandler.delete_strategy_preset("value_strategy", "任何")
-        assert result is False
+    def test_delete_preset_empty_config_returns_false(self, preset_config):
+        """配置无预设时删除 → 返回 False，且不创建配置文件"""
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "任何") is False
+        assert not preset_config.exists()
 
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={"strategy_presets_value_strategy": "not_a_dict"},
-    )
-    def test_delete_preset_invalid_type_returns_false(self, mock_load):
+    def test_delete_preset_invalid_type_returns_false(self, preset_config):
         """预设字段类型非法时删除 → 返回 False (防御性)"""
-        result = ConfigHandler.delete_strategy_preset("value_strategy", "任何")
-        assert result is False
+        self._write_presets(preset_config, "not_a_dict")
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "任何") is False
+
+    def test_delete_preset_stale_cache_does_not_resurrect(self, preset_config):
+        """D02-F06：A 的旧快照仍含 old，B 已删除 old → A 的操作不得复活 old。
+
+        存在性必须在文件锁内基于磁盘判定，不能依据锁外缓存。
+        """
+        self._write_presets(preset_config, {"old": {"pe": 1}, "keep": {"pe": 2}})
+        ConfigHandler.load_config()  # A 的旧快照仍含 old
+        self._write_presets(preset_config, {"keep": {"pe": 2}})  # B 已删除 old
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "old") is False
+        assert ConfigHandler.save_strategy_preset("value_strategy", "A", {"pe": 3}) is True
+        assert self._read_presets(preset_config) == {"keep": {"pe": 2}, "A": {"pe": 3}}
+
+    def test_delete_preset_write_failure_keeps_disk_and_cache(self, preset_config):
+        """删除写失败 → 磁盘与缓存保持已提交值（不得半提交）。"""
+        self._write_presets(preset_config, {"a": {"pe": 1}, "b": {"pe": 2}})
+        ConfigHandler.load_config()
+        with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=False):
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is False
+        assert self._read_presets(preset_config) == {"a": {"pe": 1}, "b": {"pe": 2}}
+        assert ConfigHandler.load_config()["strategy_presets_value_strategy"] == {
+            "a": {"pe": 1},
+            "b": {"pe": 2},
+        }
 
     # --- 缓存引用隔离（深拷贝回归） ---
 
@@ -3021,47 +3105,45 @@ class TestConfigHandlerStrategyPresets:
             presets["b"] = {"pe": 2}
         assert loaded["strategy_presets_value_strategy"] == {"a": {"pe": 1}}
 
-    def test_save_preset_failure_does_not_mutate_loaded_config(self):
-        """保存失败时不得原地污染缓存中的嵌套预设（半提交回归）。
-
-        回归：load_config 仅顶层浅拷贝，嵌套 dict 与配置缓存共享引用；此前
-        save_strategy_preset 直接修改该引用，save_config 失败后缓存残留未落盘的新预设。
-        """
-        loaded = {"strategy_presets_value_strategy": {"a": {"pe": 1}}}
-        with (
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=loaded),
-            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False),
-        ):
+    def test_save_preset_failure_does_not_mutate_loaded_config(self, preset_config):
+        """保存失败时不得原地污染缓存中的嵌套预设（半提交回归）。"""
+        self._write_presets(preset_config, {"a": {"pe": 1}})
+        committed = ConfigHandler.load_config()["strategy_presets_value_strategy"]
+        with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=False):
             assert ConfigHandler.save_strategy_preset("value_strategy", "b", {"pe": 2}) is False
-        assert loaded["strategy_presets_value_strategy"] == {"a": {"pe": 1}}
+        assert committed == {"a": {"pe": 1}}
+        assert ConfigHandler.load_config()["strategy_presets_value_strategy"] == {"a": {"pe": 1}}
 
-    def test_delete_preset_failure_does_not_mutate_loaded_config(self):
+    def test_delete_preset_failure_does_not_mutate_loaded_config(self, preset_config):
         """删除保存失败时缓存中的嵌套预设保持原值（半提交回归）。"""
-        loaded = {"strategy_presets_value_strategy": {"a": {"pe": 1}, "b": {"pe": 2}}}
-        with (
-            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=loaded),
-            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False),
-        ):
+        self._write_presets(preset_config, {"a": {"pe": 1}, "b": {"pe": 2}})
+        ConfigHandler.load_config()
+        with patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=False):
             assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is False
-        assert loaded["strategy_presets_value_strategy"] == {"a": {"pe": 1}, "b": {"pe": 2}}
+        assert ConfigHandler.load_config()["strategy_presets_value_strategy"] == {
+            "a": {"pe": 1},
+            "b": {"pe": 2},
+        }
 
     # --- ① 保存→切策略→载入→参数还原 (跨策略隔离) ---
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={
-            "strategy_presets_value_strategy": {"保守型": {"pe": 15, "roe": 10}},
-            "strategy_presets_growth_strategy": {"激进型": {"pe": 30, "rev_growth": 0.5}},
-        },
-    )
-    def test_cross_strategy_isolation(self, mock_load, mock_save):
+    def test_cross_strategy_isolation(self, preset_config):
         """① 跨策略隔离: 策略 A 的预设不影响策略 B
 
         保存 value 策略预设 → 切到 growth 策略 → 载入 growth 预设 → 参数还原
         验证两策略预设独立存储 (key 隔离: strategy_presets_{strategy_key})。
         """
+        preset_config.write_text(
+            json.dumps(
+                {
+                    "strategy_presets_value_strategy": {"保守型": {"pe": 15, "roe": 10}},
+                    "strategy_presets_growth_strategy": {"激进型": {"pe": 30, "rev_growth": 0.5}},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
         # 载入 value 策略预设
         value_presets = ConfigHandler.get_strategy_presets("value_strategy")
         assert value_presets == {"保守型": {"pe": 15, "roe": 10}}
@@ -3076,50 +3158,33 @@ class TestConfigHandlerStrategyPresets:
         assert "激进型" not in value_presets
 
         # 保存 value 策略新预设不影响 growth 策略预设
-        ConfigHandler.save_strategy_preset("value_strategy", "新方案", {"pe": 12})
-        saved = mock_save.call_args[0][0]
-        # 仅 value 策略的 presets 被更新
-        assert "新方案" in saved["strategy_presets_value_strategy"]
-        # growth 策略的 presets key 未被触及 (save_config 只收到 value 策略的更新)
-        assert "strategy_presets_growth_strategy" not in saved
+        assert ConfigHandler.save_strategy_preset("value_strategy", "新方案", {"pe": 12}) is True
+        raw = json.loads(preset_config.read_text(encoding="utf-8"))
+        assert "新方案" in raw["strategy_presets_value_strategy"]
+        assert raw["strategy_presets_growth_strategy"] == {"激进型": {"pe": 30, "rev_growth": 0.5}}
 
     # --- ② 重名覆盖与删除 ---
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={"strategy_presets_value_strategy": {"my": {"pe": 15, "roe": 10}}},
-    )
-    def test_overwrite_same_name_replaces_params(self, mock_load, mock_save):
+    def test_overwrite_same_name_replaces_params(self, preset_config):
         """② 重名覆盖: 保存同名预设 → 整体替换参数 dict (旧字段不残留)"""
+        self._write_presets(preset_config, {"my": {"pe": 15, "roe": 10}})
         result = ConfigHandler.save_strategy_preset("value_strategy", "my", {"pe": 20})
         assert result is True
-        saved = mock_save.call_args[0][0]
-        preset = saved["strategy_presets_value_strategy"]["my"]
+        preset = self._read_presets(preset_config)["my"]
         assert preset == {"pe": 20}  # 新值
         assert "roe" not in preset  # 旧字段被覆盖, 不残留
 
-    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(
-        cfg_mod.ConfigHandler,
-        "load_config",
-        return_value={"strategy_presets_value_strategy": {"my": {"pe": 15}}},
-    )
-    def test_overwrite_then_delete_flow(self, mock_load, mock_save):
+    def test_overwrite_then_delete_flow(self, preset_config):
         """② 重名覆盖 → 删除流程
 
         保存 "my" 预设 (pe=15) → 重名覆盖 (pe=20) → 删除 → 返回 True
         """
-        # 重名覆盖
-        result = ConfigHandler.save_strategy_preset("value_strategy", "my", {"pe": 20})
-        assert result is True
-        saved = mock_save.call_args[0][0]
-        assert saved["strategy_presets_value_strategy"]["my"] == {"pe": 20}
+        self._write_presets(preset_config, {"my": {"pe": 15}})
+        assert ConfigHandler.save_strategy_preset("value_strategy", "my", {"pe": 20}) is True
+        assert self._read_presets(preset_config)["my"] == {"pe": 20}
 
-        # 删除 (load_config 仍返回含 "my" 的 mock 配置)
-        result = ConfigHandler.delete_strategy_preset("value_strategy", "my")
-        assert result is True
+        assert ConfigHandler.delete_strategy_preset("value_strategy", "my") is True
+        assert self._read_presets(preset_config) == {}
 
 
 class TestConfigHandlerAIExternalAcknowledged:
