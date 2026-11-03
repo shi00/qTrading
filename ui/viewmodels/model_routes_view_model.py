@@ -320,6 +320,9 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         # 原始快照元数据（用于重建 CAS payload，不进 state）
         self._raw_connections: tuple[Mapping[str, Any], ...] = ()
         self._usage_policy: Mapping[str, Any] = {}
+        # F01：每场景草稿编辑版本（单调递增，不进入 state）。保存发起时冻结版本，
+        # 回执只在版本未变时对齐草稿，避免把保存等待期间产生的草稿 B 吸收为基线。
+        self._draft_versions: dict[str, int] = dict.fromkeys(SCENARIO_IDS, 0)
         self._state = ModelRoutesState()
         self._init_mixin_fields()
 
@@ -381,6 +384,7 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         self._wizard_option_id = None
         self._wizard_option_shadow = None
         transition = snapshot.migration_transition
+        self._bump_all_draft_versions()  # 整表重载：在途保存不得把旧内容回写为新草稿
         self._set_state(
             routes=drafts,
             committed_routes=drafts,
@@ -422,6 +426,7 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         self._raw_connections = snapshot.connections
         self._usage_policy = snapshot.usage_policy
         self._undo = None
+        self._bump_all_draft_versions()  # 基线前移：在途保存视为已产生新版本（保守保留草稿）
         changes: dict[str, Any] = {
             "routes": rebased,
             "committed_routes": new_committed,
@@ -528,6 +533,7 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
                     candidates[index - 1], candidates[index] = candidates[index], candidates[index - 1]
         new_route = replace(route, candidates=tuple(candidates))
         new_routes = _replace_route(self._state.routes, undo.scenario_id, new_route)
+        self._bump_draft_version(undo.scenario_id)
         self._set_state(
             routes=new_routes,
             dirty_counts=_compute_dirty_counts(new_routes, self._state.committed_routes),
@@ -552,6 +558,7 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             return
         new_route = replace(route, enabled=enabled)
         new_routes = _replace_route(self._state.routes, route.scenario_id, new_route)
+        self._bump_draft_version(route.scenario_id)
         self._set_state(
             routes=new_routes,
             dirty_counts=_compute_dirty_counts(new_routes, self._state.committed_routes),
@@ -566,6 +573,7 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             return
         new_route = replace(route, sentiment_mode=mode)
         new_routes = _replace_route(self._state.routes, route.scenario_id, new_route)
+        self._bump_draft_version(route.scenario_id)
         self._set_state(
             routes=new_routes,
             dirty_counts=_compute_dirty_counts(new_routes, self._state.committed_routes),
@@ -648,7 +656,12 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
     # ------------------------------------------------------------------
 
     async def save_current_scenario(self) -> None:
-        """CAS 提交当前场景草稿；其它场景以已提交值入 payload，不提交其未保存草稿。"""
+        """CAS 提交当前场景草稿；其它场景以已提交值入 payload，不提交其未保存草稿。
+
+        F01：发起即冻结本次保存形态（A）、payload 与场景草稿版本；``await`` 期间
+        ScenarioRouteEditor 的移除 / 排序 / 启用开关仍可编辑形成 B，回执成功时只能
+        以冻结的 A 更新 ``committed_routes``，并在版本未变时才对草稿对齐 / 清 dirty。
+        """
         if self._state.save_state == _SAVE_SAVING:
             return
         scenario_id = self._state.selected_scenario
@@ -656,12 +669,16 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         if route is None:
             return
 
+        # 冻结发起时快照：A 的保存形态、payload、CAS 期望 revision 与本场景编辑版本。
+        expected_revision = self._config_revision
+        save_route = self._save_route_for(scenario_id)
+        start_version = self._draft_version(scenario_id)
+        payload = self._build_payload_with_route(scenario_id, save_route)
+
         self._set_state(save_state=_SAVE_SAVING, message=Message("model_routes_saving"))
         operation_id = str(uuid.uuid4())
         try:
-            outcome = await self._service.save_draft(
-                self.build_payload(scenario_id), self._config_revision, operation_id
-            )
+            outcome = await self._service.save_draft(payload, expected_revision, operation_id)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except ModelConfigurationConflictError:
@@ -673,24 +690,32 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
 
         self._absorb_revision(outcome)
         if outcome.status == "committed":
-            # F14：回写含语义递增后的 route_revision —— 草稿与已提交基线同步回写，
-            # 保证后续「无语义变化的再次保存」不会把草稿里的旧 revision 写回磁盘
-            # （否则 revision 回退，后续递增与 CAS 语义失真）。
-            save_route = self._save_route_for(scenario_id)
+            # 基线只能由发起时冻结的 A 更新，禁止重读等待期间可能已变为 B 的当前草稿。
             committed = _replace_route(self._state.committed_routes, scenario_id, save_route)
-            routes = _replace_route(self._state.routes, scenario_id, save_route)
-            self._undo = None
-            self._set_state(
-                routes=routes,
-                committed_routes=committed,
-                dirty_counts=_compute_dirty_counts(routes, committed),
-                undo_available=False,
-                save_state=_SAVE_COMMITTED,
-                message=Message("model_routes_save_committed"),
-                # F30：提交完成序号递增，宿主 effect 检测后重基连接 VM（刷新其 _raw_routes，
-                # 防止下次连接保存以陈旧路由回退本次修订）
-                commit_seq=self._state.commit_seq + 1,
-            )
+            if self._draft_version(scenario_id) == start_version:
+                # 无在途编辑：草稿仍为 A，对齐回写（含递增后的 revision）并清 dirty / undo。
+                routes = _replace_route(self._state.routes, scenario_id, save_route)
+                self._undo = None
+                self._set_state(
+                    routes=routes,
+                    committed_routes=committed,
+                    dirty_counts=_compute_dirty_counts(routes, committed),
+                    undo_available=False,
+                    save_state=_SAVE_COMMITTED,
+                    message=Message("model_routes_save_committed"),
+                    # F30：提交完成序号递增，宿主 effect 检测后重基连接 VM（刷新其 _raw_routes，
+                    # 防止下次连接保存以陈旧路由回退本次修订）
+                    commit_seq=self._state.commit_seq + 1,
+                )
+            else:
+                # 在途编辑形成 B：保留 B 与撤销事实，仅前移基线并相对 A 重算 dirty。
+                self._set_state(
+                    committed_routes=committed,
+                    dirty_counts=_compute_dirty_counts(self._state.routes, committed),
+                    save_state=_SAVE_COMMITTED,
+                    message=Message("model_routes_save_committed"),
+                    commit_seq=self._state.commit_seq + 1,
+                )
         elif outcome.status == "commit_unknown":
             self._set_state(save_state=_SAVE_UNKNOWN, message=Message("model_routes_save_unknown"))
         else:  # not_committed：旧配置仍有效，保留草稿
@@ -770,6 +795,19 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
     # 内部
     # ------------------------------------------------------------------
 
+    def _bump_draft_version(self, scenario_id: str) -> None:
+        """递增场景草稿编辑版本（F01：保存回执据此识别在途编辑）。"""
+        self._draft_versions[scenario_id] = self._draft_versions.get(scenario_id, 0) + 1
+
+    def _draft_version(self, scenario_id: str) -> int:
+        """返回场景草稿编辑版本（仅本 VM 内单调比较）。"""
+        return self._draft_versions.get(scenario_id, 0)
+
+    def _bump_all_draft_versions(self) -> None:
+        """整表重载 / 重基后推进全部场景版本（在途保存不得回写旧内容）。"""
+        for scenario_id in SCENARIO_IDS:
+            self._bump_draft_version(scenario_id)
+
     def _apply_current(
         self,
         route: ScenarioRouteDraft,
@@ -779,6 +817,7 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
     ) -> None:
         new_route = replace(route, candidates=candidates)
         new_routes = _replace_route(self._state.routes, route.scenario_id, new_route)
+        self._bump_draft_version(route.scenario_id)
         changes: dict[str, Any] = {
             "routes": new_routes,
             "dirty_counts": _compute_dirty_counts(new_routes, self._state.committed_routes),
@@ -823,7 +862,12 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         由迁移专用命令独占、CAS 以磁盘现值回填（F07）。
         F14：其余场景经无损草稿模型序列化（独立情绪候选 / 执行参数保留），
         当前场景语义变化递增 route_revision。
+        F01：保存流程经 ``_build_payload_with_route`` 传入发起时冻结的 A。
         """
+        return self._build_payload_with_route(scenario_id, self._save_route_for(scenario_id))
+
+    def _build_payload_with_route(self, scenario_id: str, save_route: ScenarioRouteDraft) -> dict[str, Any]:
+        """以给定当前场景保存形态（A）构建 payload；保存发起与回执共用同一 A（F01）。"""
         committed = {r.scenario_id: r for r in self._state.committed_routes}
         routes: list[dict[str, Any]] = []
         for sid in SCENARIO_IDS:
@@ -831,8 +875,7 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             if route is None:
                 continue
             routes.append(_route_to_payload(route))
-        # 用当前场景草稿覆盖对应行（只提交当前场景；F14 语义递增 revision）
-        save_route = self._save_route_for(scenario_id)
+        # 用冻结的当前场景保存形态覆盖对应行（只提交当前场景；F14 语义递增 revision）
         routes = [  # 保持 SCENARIO_IDS 稳定顺序
             _route_to_payload(save_route) if r["scenario_id"] == scenario_id else r for r in routes
         ]
