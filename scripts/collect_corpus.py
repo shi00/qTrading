@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -180,12 +181,24 @@ def _print_stats(store: CorpusStore) -> None:
     print(f"  发布时间范围(UTC naive): {stats['publish_time_min']} ~ {stats['publish_time_max']}")
 
 
-async def _run(args: argparse.Namespace) -> int:
-    with CorpusStore(args.db) as store:
-        if args.stats_only:
-            _print_stats(store)
-            return 0
+def _use_memory_store(db_path: Path, *, dry_run: bool) -> bool:
+    """dry-run 且目标库不存在时使用内存空基线（不落目标库）。"""
+    return dry_run and not db_path.exists()
 
+
+async def _run(args: argparse.Namespace) -> int:
+    db_path = Path(args.db)
+    if args.stats_only:
+        with CorpusStore(db_path, read_only=True) as store:
+            _print_stats(store)
+        return 0
+
+    # dry-run 对有既有库只读打开；目标库不存在时用内存空基线，避免为只读消费创建输入库。
+    if _use_memory_store(db_path, dry_run=args.dry_run):
+        store = CorpusStore(":memory:")
+    else:
+        store = CorpusStore(db_path, read_only=args.dry_run)
+    with store:
         sources = [name.strip() for name in args.sources.split(",") if name.strip()]
         plugins = [get_plugin(name) for name in sources]
         params = CollectParams(
@@ -250,7 +263,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="只清洗/去重计数，不写入语料库")
     parser.add_argument("--stats-only", action="store_true", help="只打印语料库统计，不发网络请求")
     args = parser.parse_args(argv)
-    return asyncio.run(_run(args))
+    try:
+        return asyncio.run(_run(args))
+    except (OSError, sqlite3.Error) as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
