@@ -31,6 +31,43 @@ def test_list_release_tags_returns_parsed_tags(monkeypatch: pytest.MonkeyPatch) 
     assert ctf.list_release_tags("owner/repo") == ["corpus-v1", "finbert-gguf-v0.1.0"]
 
 
+def test_list_release_tags_excludes_drafts_and_prereleases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """查询必须排除 draft / pre-release（D20-F09）：未发布件不得作为去重锚。"""
+    calls: list[list[str]] = []
+
+    def fake_gh(args):
+        calls.append(list(args))
+        return _payload(["finbert-gguf-v0.1.0"])
+
+    monkeypatch.setattr(ctf, "_run_gh", fake_gh)
+    ctf.list_release_tags("owner/repo")
+    assert calls == [
+        [
+            "release",
+            "list",
+            "--repo",
+            "owner/repo",
+            "--limit",
+            str(ctf.RELEASE_LIST_LIMIT),
+            "--exclude-drafts",
+            "--exclude-pre-releases",
+            "--json",
+            "tagName",
+        ]
+    ]
+
+
+def test_list_release_tags_propagates_gh_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gh 查询失败不得降级为空列表（否则会被误判为首版发布）。"""
+
+    def _boom(args):
+        raise ctf.FingerprintError("gh 调用失败（exit 1）: gh release list: connection refused")
+
+    monkeypatch.setattr(ctf, "_run_gh", _boom)
+    with pytest.raises(ctf.FingerprintError, match="gh 调用失败"):
+        ctf.list_release_tags("owner/repo")
+
+
 def test_list_release_tags_rejects_non_json(monkeypatch: pytest.MonkeyPatch) -> None:
     """非 JSON 输出必须 fail-closed（FingerprintError → exit 2，而非裸 JSONDecodeError）。"""
     monkeypatch.setattr(ctf, "_run_gh", lambda args: "not json")

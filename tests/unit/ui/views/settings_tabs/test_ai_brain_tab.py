@@ -863,6 +863,36 @@ class TestDoSaveAISettingsSuccessPhase(_TriggerSaveMixin):
 
 
 # ============================================================================
+# _do_save_ai_settings: 保存中草稿被编辑 (F05 SAVE_STALE)
+# ============================================================================
+
+
+class TestDoSaveAISettingsStalePhase(_TriggerSaveMixin):
+    """F05: 发起保存后草稿被编辑 → 完成态以 WARNING snack 明确保留未保存。"""
+
+    def test_stale_state_shows_warning_snack(self, ai_brain_tab_env) -> None:
+        from dataclasses import replace
+
+        from ui.viewmodels.ai_brain_settings_view_model import SAVED_STALE_MESSAGE_KEY, SAVE_STALE
+
+        env = ai_brain_tab_env
+        vm = env["settings_vm"]
+        vm.save_ai_settings = AsyncMock()
+        vm._state = replace(
+            vm._state,
+            save_state=SAVE_STALE,
+            warning_message=SAVED_STALE_MESSAGE_KEY,
+        )
+        handler, args, _ = self._trigger_save(env)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with(
+            "i18n[settings_ai_saved_stale]",
+            color=AppColors.WARNING,
+        )
+
+
+# ============================================================================
 # _do_save_ai_settings: 异常路径测试
 # ============================================================================
 

@@ -188,6 +188,15 @@ class SchedulerService:
             # is_complete 为假）的数据出 AI 选股结论并落库（MINOR-01 在水位为空路径上的复现）。
             self._bootstrap_baseline_date: str | None = None
             self._db_state_loaded = False
+            # D11-F05: 各幂等水位键的进程内「本地成功更新代际」。三个 _mark_*_done_db 在成功
+            # 推进水位时递增；_load_db_state 在首个 await 前快照代际，赋值时若代际已变化，
+            # 说明加载期间该键已被日更/补偿成功推进（内存与 DB 水位均已前进），此时与内存
+            # 当前值做 max 单调合并，避免用启动时读到的旧 DB 值覆盖新水位导致重复补偿（R22）。
+            self._watermark_generation: dict[str, int] = {
+                _DB_KEY_DAILY_UPDATE: 0,
+                _DB_KEY_NIGHTLY_PREDICTION: 0,
+                _DB_KEY_CONCEPT_SYNC: 0,
+            }
             # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
             # SchedulerService 仅调度注册的 callable，不感知具体业务类。
             self._registered_jobs: dict[str, Callable[[object], Awaitable[object]]] = {}
@@ -239,6 +248,9 @@ class SchedulerService:
         await ThreadPoolManager().run_async(TaskType.IO, self._persist_run_date, config_key, value)
 
     async def _mark_daily_update_done_db(self, today_str: str):
+        # D11-F05: 先递增代际——与内存赋值同为同步段，_load_db_state 快照后可确定性判定
+        # 「加载期间是否有本地成功更新」。
+        self._watermark_generation[_DB_KEY_DAILY_UPDATE] += 1
         # REVIEW-06 TO-02: 内存侧同样单调（与 DB GREATEST 语义一致），防止并发下水位倒退。
         self._last_update_date = max(self._last_update_date or "", today_str)
         # D7-1/MAJOR-01: 水位推进即"数据已到最新"，补偿退避状态随之清零——避免旧的持续失败
@@ -247,6 +259,8 @@ class SchedulerService:
         await self._persist_run_date_db(_DB_KEY_DAILY_UPDATE, _CFG_LAST_DAILY_UPDATE, today_str)
 
     async def _mark_nightly_prediction_done_db(self, today_str: str):
+        # D11-F05: 同 _mark_daily_update_done_db，成功推进前递增代际。
+        self._watermark_generation[_DB_KEY_NIGHTLY_PREDICTION] += 1
         # REVIEW-06 TO-02: 内存侧单调（同 _mark_daily_update_done_db）。
         self._last_pred_date = max(self._last_pred_date or "", today_str)
         await self._persist_run_date_db(_DB_KEY_NIGHTLY_PREDICTION, _CFG_LAST_NIGHTLY_PREDICTION, today_str)
@@ -258,6 +272,8 @@ class SchedulerService:
         经 ``set_app_state_max`` 的 GREATEST 保护写；成功推进同时清除失败原因，
         避免状态面板残留旧失败（D7-6）。
         """
+        # D11-F05: 同 daily/nightly，成功推进前递增代际。
+        self._watermark_generation[_DB_KEY_CONCEPT_SYNC] += 1
         self._last_concept_sync_date = max(self._last_concept_sync_date or "", today_str)
         self._job_last_failure_reason.pop("concept_sync_daily_refresh", None)
         await self._persist_run_date_db(_DB_KEY_CONCEPT_SYNC, _CFG_LAST_CONCEPT_SYNC, today_str)
@@ -310,6 +326,24 @@ class SchedulerService:
                 exc_info=True,
             )
 
+    def _resolve_loaded_watermark(
+        self,
+        db_value: str,
+        current_value: str | None,
+        db_key: str,
+        generation_at_start: dict[str, int],
+    ) -> str:
+        """D11-F05: 决定启动加载读到 DB 水位后写入内存的值。
+
+        - 加载期间该键无本地成功更新（代际未变）：DB 为启动正本，直接覆盖（不用 max，
+          避免错误/未来时间的配置缓存压过 DB）；
+        - 加载期间该键已发生本地成功更新（代际前进）：内存值已是更新后的水位，
+          与 DB 值取 max 单调合并，不得回退（R22）。
+        """
+        if self._watermark_generation.get(db_key, 0) != generation_at_start.get(db_key, 0):
+            return max(current_value or "", db_value)
+        return db_value
+
     async def _load_db_state(self):
         """Load idempotency state from database (primary source of truth).
 
@@ -328,17 +362,30 @@ class SchedulerService:
             logger.debug("[Scheduler] DB not available, using ConfigHandler cache for idempotency state")
             return
 
+        # D11-F05: 首个 await 前快照各键本地成功更新代际；await 期间若有日更/补偿成功推进
+        # 水位（内存与 DB 均已前进），赋值时按 _resolve_loaded_watermark 做单调合并。
+        generation_at_start = dict(self._watermark_generation)
+
         try:
             db_daily = await get_app_state(engine, _DB_KEY_DAILY_UPDATE)
             db_pred = await get_app_state(engine, _DB_KEY_NIGHTLY_PREDICTION)
             db_concept_sync = await get_app_state(engine, _DB_KEY_CONCEPT_SYNC)
 
             if db_daily is not None:
-                self._last_update_date = db_daily
+                self._last_update_date = self._resolve_loaded_watermark(
+                    db_daily, self._last_update_date, _DB_KEY_DAILY_UPDATE, generation_at_start
+                )
             if db_pred is not None:
-                self._last_pred_date = db_pred
+                self._last_pred_date = self._resolve_loaded_watermark(
+                    db_pred, self._last_pred_date, _DB_KEY_NIGHTLY_PREDICTION, generation_at_start
+                )
             if db_concept_sync is not None:
-                self._last_concept_sync_date = db_concept_sync
+                self._last_concept_sync_date = self._resolve_loaded_watermark(
+                    db_concept_sync,
+                    self._last_concept_sync_date,
+                    _DB_KEY_CONCEPT_SYNC,
+                    generation_at_start,
+                )
 
             self._db_state_loaded = True
             logger.info(
@@ -555,7 +602,13 @@ class SchedulerService:
         return hour, minute
 
     def _schedule_jobs(self):
-        """Register jobs with the scheduler"""
+        """Register jobs with the scheduler
+
+        D11-F02: 四个 CronTrigger 必须显式携带 ``self.scheduler.timezone``。APScheduler 3.11.3
+        的 CronTrigger 在未传 timezone 时回落到 ``get_localzone()``（主机本地时区），且
+        ``BaseScheduler._create_trigger`` 对已是 BaseTrigger 的参数原样返回、不会套用
+        ``AsyncIOScheduler(timezone="Asia/Shanghai")``——缺省即导致非上海主机墙钟偏移。
+        """
         # Only remove business jobs, NOT the config_watchdog
         # D7-6: 以 _SCHEDULED_JOB_IDS 为业务 job 全集唯一正本（避免与状态面板的 id 清单漂移）。
         for job_id in _SCHEDULED_JOB_IDS:
@@ -570,7 +623,7 @@ class SchedulerService:
 
         self.scheduler.add_job(
             self._run_daily_update,
-            CronTrigger(hour=hour, minute=minute),
+            CronTrigger(hour=hour, minute=minute, timezone=self.scheduler.timezone),
             id="daily_update",
             replace_existing=True,
         )
@@ -585,7 +638,7 @@ class SchedulerService:
 
         self.scheduler.add_job(
             self._run_nightly_prediction,
-            CronTrigger(hour=n_hour, minute=n_minute),
+            CronTrigger(hour=n_hour, minute=n_minute, timezone=self.scheduler.timezone),
             id="nightly_prediction",
             replace_existing=True,
         )
@@ -597,7 +650,7 @@ class SchedulerService:
 
         self.scheduler.add_job(
             self._run_concept_sync,
-            CronTrigger(hour=dh, minute=dm),
+            CronTrigger(hour=dh, minute=dm, timezone=self.scheduler.timezone),
             id="concept_sync_daily_refresh",
             replace_existing=True,
         )
@@ -611,7 +664,7 @@ class SchedulerService:
         # 晚于默认日跟新 16:30，确保当日行情已同步后再回填远期收益。
         self.scheduler.add_job(
             self._run_review_backfill,
-            CronTrigger(hour=17, minute=0),
+            CronTrigger(hour=17, minute=0, timezone=self.scheduler.timezone),
             id="review_backfill",
             replace_existing=True,
         )

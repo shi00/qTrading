@@ -6,6 +6,8 @@
 - 三阶段保存状态机: idle → saving → success / error
 - 验证/保存/重载状态机 (validate → persist → reload AIService)
 - 重复提交检测 (save_state=saving 时拒绝)
+- F05 草稿编辑版本: 保存只确认发起版本；保存中编辑 → SAVE_STALE 保留未保存；
+  正常顺序保存后可再次编辑并清除 SAVE_SUCCESS
 - 同步阻塞操作走 ThreadPoolManager (R16)
 - R2 CancelledError 显式 raise
 - subscribe / dispose
@@ -18,6 +20,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ui.viewmodels.ai_brain_settings_view_model import (
+    SAVE_IDLE,
+    SAVE_SAVING,
+    SAVE_STALE,
+    SAVE_SUCCESS,
     AIBrainSettingsState,
     AIBrainSettingsViewModel,
 )
@@ -189,6 +195,107 @@ class TestSaveAiSettingsStateMachine:
                 assert sensitive_path not in str(sanitized_arg), (
                     f"R9 违规：原始路径出现在 logger format 参数中: {sanitized_arg}"
                 )
+
+
+# --- F05 草稿编辑版本 ↔ 保存完成绑定 ---
+
+
+class TestDraftRevisionSaveBinding:
+    """保存只确认发起版本；保存中编辑不得对当前草稿报全部已保存。"""
+
+    @pytest.mark.asyncio
+    async def test_edit_during_save_is_not_reported_as_fully_saved(self, mock_config_handler, mock_thread_pool):
+        """屏障暂停一次原子保存：捕获 False 后 setter(True)，旧保存完成时报 SAVE_STALE。"""
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _gated_run(task_type, func, *args, **kwargs):
+            started.set()
+            await release.wait()
+            return func(*args, **kwargs)
+
+        mock_thread_pool.run_async = AsyncMock(side_effect=_gated_run)
+
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            vm = _make_vm(mock_config_handler)
+
+            save_task = asyncio.create_task(vm.save_ai_settings())
+            await asyncio.wait_for(started.wait(), timeout=5)
+            assert vm.state.save_state == SAVE_SAVING
+            assert vm.state.ai_local_only_mode is False
+
+            # 保存发起后把 only-local 改为 True（当前草稿前移；已捕获并待落盘的仍是 False）
+            vm.set_ai_local_only_mode(True)
+            assert vm.state.save_state == SAVE_SAVING
+            assert vm.state.draft_revision == 1
+
+            release.set()
+            result = await asyncio.wait_for(save_task, timeout=5)
+
+            # 发起版本已落盘，但当前草稿（True）尚未保存
+            assert result is True
+            assert mock_config_handler.save_ai_tuning_and_prompts.call_args.args[2] is False
+            assert vm.state.ai_local_only_mode is True
+            assert vm.state.save_state == SAVE_STALE
+            assert vm.state.draft_revision == 1
+            assert vm.state.saved_revision == 0
+            assert vm.state.warning_message == "settings_ai_saved_stale"
+
+            # 随后显式保存当前 True 草稿，才显示全部已生效
+            result = await vm.save_ai_settings()
+            assert result is True
+            assert mock_config_handler.save_ai_tuning_and_prompts.call_args.args[2] is True
+            assert vm.state.ai_local_only_mode is True
+            assert vm.state.save_state == SAVE_SUCCESS
+            assert vm.state.draft_revision == 1
+            assert vm.state.saved_revision == 1
+            assert vm.state.warning_message == ""
+
+    @pytest.mark.asyncio
+    async def test_normal_save_then_edit_clears_success_feedback(self, mock_config_handler, mock_thread_pool):
+        """正常顺序保存 → success；保存后再编辑 → 回到 idle 且保留未保存版本。"""
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            vm = _make_vm(mock_config_handler)
+            result = await vm.save_ai_settings()
+
+        assert result is True
+        assert vm.state.save_state == SAVE_SUCCESS
+        assert vm.state.draft_revision == vm.state.saved_revision == 0
+
+        vm.set_max_candidates_value("31")
+        assert vm.state.save_state == SAVE_IDLE
+        assert vm.state.draft_revision == 1
+        assert vm.state.saved_revision == 0
+        assert vm.state.warning_message == ""
+
+    @pytest.mark.parametrize(
+        ("setter_name", "value"),
+        [
+            ("set_max_candidates_value", "31"),
+            ("set_min_turnover_value", "2.5"),
+            ("set_ai_prompt_value", "edited prompt"),
+            ("set_news_prompt_value", "edited news prompt"),
+            ("set_ai_local_only_mode", True),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_any_draft_edit_clears_save_feedback(self, mock_config_handler, mock_thread_pool, setter_name, value):
+        """任一本页 set_* 成功后清 SAVE_SUCCESS，并推进编辑版本。"""
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            vm = _make_vm(mock_config_handler)
+            result = await vm.save_ai_settings()
+            assert result is True
+            assert vm.state.save_state == SAVE_SUCCESS
+
+            getattr(vm, setter_name)(value)
+
+        assert vm.state.save_state == SAVE_IDLE
+        assert vm.state.draft_revision == 1
+        assert vm.state.saved_revision == 0
+        assert vm.state.warning_message == ""
 
 
 # --- ThreadPoolManager 调用契约 (R16) ---

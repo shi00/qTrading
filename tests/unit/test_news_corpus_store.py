@@ -5,6 +5,7 @@
 """
 
 import datetime
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -34,6 +35,32 @@ def _doc(source: str = "sina_7x24", source_id: str = "1", **overrides: object) -
     return doc
 
 
+def _make_existing_db_without_index(tmp_path: Path) -> Path:
+    """构造有数据但缺性能索引的有效既有库（模拟历史 / 副本库）。"""
+    db = tmp_path / "corpus.db"
+    with CorpusStore(db) as store:
+        store.add_documents([_doc(source_id="1"), _doc(source_id="2")])
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute("DROP INDEX idx_corpus_publish_time")
+        conn.commit()
+    finally:
+        conn.close()
+    return db
+
+
+def _schema_and_digest(db: Path) -> tuple[tuple[tuple[str, str, str | None], ...], str]:
+    conn = sqlite3.connect(str(db))
+    try:
+        schema = tuple(
+            (str(row[0]), str(row[1]), row[2])
+            for row in conn.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        )
+    finally:
+        conn.close()
+    return schema, hashlib.sha256(db.read_bytes()).hexdigest()
+
+
 def test_open_creates_schema_and_is_idempotent(tmp_path: Path):
     db = tmp_path / "corpus.db"
     with CorpusStore(db) as store:
@@ -42,6 +69,41 @@ def test_open_creates_schema_and_is_idempotent(tmp_path: Path):
     # 再次打开不应报错（IF NOT EXISTS）
     with CorpusStore(db) as store:
         assert store.count() == 0
+
+
+def test_read_only_open_keeps_schema_and_file_unchanged(tmp_path: Path):
+    db = _make_existing_db_without_index(tmp_path)
+    before = _schema_and_digest(db)
+    with CorpusStore(db, read_only=True) as store:
+        assert store.count() == 2
+        assert store.stats()["total"] == 2
+    assert _schema_and_digest(db) == before
+
+
+def test_read_only_open_missing_db_raises_and_creates_nothing(tmp_path: Path):
+    missing = tmp_path / "missing.db"
+    with pytest.raises(FileNotFoundError, match="只读模式"):
+        with CorpusStore(missing, read_only=True):
+            pass
+    assert [path.name for path in tmp_path.iterdir()] == []
+
+
+def test_read_only_open_handles_special_characters_in_path(tmp_path: Path):
+    db = _make_existing_db_without_index(tmp_path / "语料 库")
+    before = _schema_and_digest(db)
+    with CorpusStore(db, read_only=True) as store:
+        assert store.count() == 2
+    assert _schema_and_digest(db) == before
+
+
+def test_read_only_store_rejects_writes(tmp_path: Path):
+    db = _make_existing_db_without_index(tmp_path)
+    before = _schema_and_digest(db)
+    with CorpusStore(db, read_only=True) as store:
+        with pytest.raises(RuntimeError, match="只读模式"):
+            store.add_documents([_doc(source_id="3")])
+        assert store.count() == 2
+    assert _schema_and_digest(db) == before
 
 
 def test_add_documents_inserts_and_returns_count(tmp_path: Path):

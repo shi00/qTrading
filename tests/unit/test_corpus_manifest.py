@@ -157,14 +157,70 @@ def test_load_manifest_rejects_non_positive_rows(cm, tmp_path: Path) -> None:
 
 
 def test_build_manifest_round_trip_then_verify_passes(cm, tmp_path: Path) -> None:
+    # 三个 split 均有非空行：build 产物须能被 load / verify 直接接受（D20-F06 往返）。
     corpus = _write_corpus(tmp_path, {"split_train.jsonl": 3, "split_val.jsonl": 2, "split_test.jsonl": 1})
     manifest = cm.build_manifest(corpus, "corpus-v2", "2")
-    (corpus / "corpus_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    path = corpus / "corpus_manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert cm.load_manifest(path) == manifest
     report = cm.verify_corpus(corpus, "corpus-v2")
     assert report["verdict"] == "PASS"
     assert report["manifest_state"] == "manifest"
     assert report["total_rows"] == 6
     assert all(item["rows_ok"] and item["sha256_ok"] for item in report["splits"].values())
+
+
+def test_build_rejects_blank_split_and_keeps_existing_manifest(cm, tmp_path: Path) -> None:
+    # D20-F06：val 文件真实存在但仅含空白行 → 非空行数 0，build 须拒绝且不覆盖既有 manifest。
+    corpus = _write_corpus(tmp_path, {"split_train.jsonl": 2, "split_val.jsonl": 0, "split_test.jsonl": 1})
+    existing = corpus / "corpus_manifest.json"
+    existing.write_text('{"sentinel": "old"}', encoding="utf-8")
+    before = existing.read_bytes()
+
+    with pytest.raises(cm.CorpusManifestError, match="rows 必须为正整数"):
+        cm.build_manifest(corpus, "corpus-v2", "2")
+    assert (
+        cm.main(
+            [
+                "build",
+                "--corpus-dir",
+                str(corpus),
+                "--corpus-tag",
+                "corpus-v2",
+                "--corpus-version",
+                "2",
+            ]
+        )
+        == 1
+    )
+    assert existing.read_bytes() == before
+
+
+def test_build_rejects_empty_corpus_tag_and_keeps_existing_manifest(cm, tmp_path: Path) -> None:
+    # D20-F06：空 tag / 纯空白 tag 会被 loader 拒绝，build 须在写文件前同样拒绝。
+    corpus = _write_corpus(tmp_path, {"split_train.jsonl": 2, "split_val.jsonl": 2, "split_test.jsonl": 2})
+    existing = corpus / "corpus_manifest.json"
+    existing.write_text('{"sentinel": "old"}', encoding="utf-8")
+    before = existing.read_bytes()
+
+    for tag in ("", "   "):
+        with pytest.raises(cm.CorpusManifestError, match="corpus_tag 必须为非空字符串"):
+            cm.build_manifest(corpus, tag, "2")
+        assert (
+            cm.main(
+                [
+                    "build",
+                    "--corpus-dir",
+                    str(corpus),
+                    "--corpus-tag",
+                    tag,
+                    "--corpus-version",
+                    "2",
+                ]
+            )
+            == 1
+        )
+        assert existing.read_bytes() == before
 
 
 def test_build_manifest_cross_checks_sha256sums(cm, tmp_path: Path) -> None:
