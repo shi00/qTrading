@@ -9,6 +9,7 @@ import shutil
 import threading
 import typing
 
+import filelock
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from config import APP_ROOT, USER_DATA_ROOT
@@ -26,6 +27,14 @@ _MACHINE_SALT_FILE_LEGACY = os.path.join(APP_ROOT, ".secret.salt")
 _LEGACY_MARKER_LEGACY = os.path.join(APP_ROOT, ".secret.legacy")
 _KEY_FILE_LEGACY = os.path.join(APP_ROOT, ".secret.key")
 _KEY_FILE_BAK_LEGACY = os.path.join(APP_ROOT, ".secret.key.bak")
+
+# 跨进程凭据写锁等待上限（D02-F01）：覆盖「用 legacy key 加密 + 提交」与
+# 「判定并删除 legacy key」的临界区，等待有界，超时放弃本次写/清理。
+_CREDENTIAL_WRITE_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class CredentialWriteLockTimeoutError(RuntimeError):
+    """跨进程凭据写锁等待超时（可重试；调用方应保持现状，不得跳过锁继续写/删）。"""
 
 
 def _migrate_legacy_key_location() -> bool:
@@ -210,15 +219,50 @@ class SecurityManager:
         Prioritizes safety: tries to recover from backup if main key is corrupt.
         Fallback: derives key from machine fingerprint using PBKDF2.
         Thread-safe: protected by _key_lock to prevent concurrent key generation.
+
+        D02-F01：legacy 密钥文件被其他进程清理后，本进程缓存的旧 key 必须失效——
+        否则会继续产出只有已删除密钥才能解密的密文。文件消失时丢弃缓存并走
+        fail-closed 路径（``_get_key_inner`` 无文件时抛 SecurityError，不静默重建）。
         """
-        if cls._key is not None:
+        if cls._key is not None and cls.has_legacy_key_files():
             return cls._key
 
         with cls._key_lock:
             if cls._key is not None:
-                return cls._key
+                if cls.has_legacy_key_files():
+                    return cls._key
+                cls._key = None
 
             return cls._get_key_inner()
+
+    @classmethod
+    @contextlib.contextmanager
+    def credential_write_lock(cls):
+        """跨进程凭据写锁（D02-F01）。
+
+        覆盖两类互斥临界区：
+        - 密文写者：用 legacy key 加密并提交配置的完整过程（加密发生在配置写锁
+          之前，仅靠配置文件锁无法排除「已生成密文、待他进程删 key 后才落盘」）；
+        - 清理方：判定无密文并删除 legacy 密钥文件的过程。
+
+        锁文件与密钥文件同目录且不随清理删除；锁等待有界，超时抛
+        :class:`CredentialWriteLockTimeoutError`，调用方须放弃本次操作而非绕锁执行。
+        """
+        parent = os.path.dirname(cls.KEY_FILE)
+        if parent:
+            # 与 _save_key 一致：首次使用（用户数据目录尚未创建）也能建立锁文件。
+            os.makedirs(parent, exist_ok=True)
+        lock = filelock.FileLock(
+            f"{cls.KEY_FILE}.write.lock",
+            timeout=_CREDENTIAL_WRITE_LOCK_TIMEOUT_SECONDS,
+        )
+        try:
+            with lock:
+                yield lock
+        except filelock.Timeout as e:
+            raise CredentialWriteLockTimeoutError(
+                f"凭据写锁等待超时（{_CREDENTIAL_WRITE_LOCK_TIMEOUT_SECONDS}s）: {DataSanitizer.sanitize_error(e)}"
+            ) from e
 
     @classmethod
     def _get_key_inner(cls):

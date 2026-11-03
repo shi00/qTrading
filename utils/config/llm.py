@@ -89,9 +89,11 @@ def save_llm_config(provider: str, model: str, base_url: str, api_key: str | Non
                     "Keyring save failed: %s. Falling back to SecurityManager.", cfg.DataSanitizer.sanitize_error(e)
                 )
                 try:
-                    encrypted_key = cfg.SecurityManager.encrypt_data(api_key)
-                    if not cfg.ConfigHandler.save_config({"ai_api_key": encrypted_key}):
-                        return False
+                    # D02-F01：与 legacy 密钥清理串行（加密 + 提交配置在同一临界区）。
+                    with cfg.SecurityManager.credential_write_lock():
+                        encrypted_key = cfg.SecurityManager.encrypt_data(api_key)
+                        if not cfg.ConfigHandler.save_config({"ai_api_key": encrypted_key}):
+                            return False
                 except cfg.SecurityError as se:
                     cfg.logger.error(
                         "Cannot securely store ai_api_key: %s. Please use environment variable AI_API_KEY instead.",
