@@ -1118,9 +1118,18 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             report_step(5, 1, 3, Message("init_sync_holders"))
 
             holder_res = await self.strategies["holder"].run()
-            if holder_res.status == "failed":
+            # D05-F05：holder 少量表失败时策略上报 partial（errors 记录失败目标/期间）。
+            # 此前仅检查 failed，导致 partial/errors 缺口被忽略并在初始化末段假报完整成功。
+            if holder_res.status == SyncStatus.CANCELLED.value:
                 logger.warning(
-                    "[DataProcessor] Init | ⚠️ Holder sync failed: %s",
+                    "[DataProcessor] Init | ⏹️ Holder sync cancelled; init not reported as complete.",
+                )
+                return None
+            if holder_res.status in (SyncStatus.FAILED.value, SyncStatus.PARTIAL.value) or holder_res.errors:
+                degraded_steps.append("holder")
+                logger.warning(
+                    "[DataProcessor] Init | ⚠️ Holder sync not fully ready (status=%s, errors=%s); continuing, final status degraded.",
+                    holder_res.status,
                     holder_res.errors,
                 )
 

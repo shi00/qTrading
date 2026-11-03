@@ -1488,7 +1488,7 @@ class TestDataProcessorInitializeSystem:
         dp.sync_concepts = AsyncMock(return_value=3)
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         with (
@@ -1513,7 +1513,7 @@ class TestDataProcessorInitializeSystem:
         dp.sync_concepts = AsyncMock(return_value=3)
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         progress: list = []
@@ -1589,7 +1589,7 @@ class TestDataProcessorInitializeSystem:
         dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
         dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         with (
@@ -1661,7 +1661,7 @@ class TestDataProcessorInitializeSystem:
         dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="cancelled", errors=[]))
         dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         progress: list = []
@@ -1694,7 +1694,7 @@ class TestDataProcessorInitializeSystem:
         )
         dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         progress: list = []
@@ -1769,7 +1769,7 @@ class TestDataProcessorInitializeSystem:
         dp.sync_concepts = AsyncMock(return_value=3)
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         with (
@@ -1804,7 +1804,7 @@ class TestDataProcessorInitializeSystem:
         dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
         dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
 
         classify_df = pd.DataFrame(
@@ -1893,7 +1893,7 @@ class TestDataProcessorInitializeSystem:
         dp.sync_concepts = AsyncMock(return_value=3)
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         with (
@@ -1923,7 +1923,7 @@ class TestDataProcessorInitializeSystem:
         dp.sync_concepts = AsyncMock(return_value=3)
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.context.api.get_index_classify = AsyncMock(
             side_effect=TushareAPIPermissionError("index_classify", "no permission"),
@@ -1972,7 +1972,7 @@ class TestDataProcessorInitializeSystem:
             return_value=SyncResult(status="partial", errors=["member l3_code=850531.SI: timeout"]),
         )
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         progress: list = []
@@ -2025,7 +2025,7 @@ class TestDataProcessorInitializeSystem:
         dp.sync_concepts = AsyncMock(return_value=3)
         dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult())
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
         dp.clear_cancel()
         with (
@@ -2043,6 +2043,88 @@ class TestDataProcessorInitializeSystem:
         assert second == {"tier": 3}
         assert dp.strategies["sw_industry"].run.await_count == 2
         assert dp.strategies["name_change"].run.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_holder_partial_marks_init_degraded(self):
+        """D05-F05：holder partial（少量表失败）不得让初始化假报完整成功。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=SyncResult())
+        dp.strategies["holder"].run = AsyncMock(
+            return_value=SyncResult(
+                status="partial",
+                errors=["stk_holdernumber period=20240331"],
+            )
+        )
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                quick=True,
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+
+        assert result is None
+        assert not any(m.key == "init_step_complete" for _, _, m in progress)
+        dp.check_data_health.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_holder_errors_with_success_status_marks_init_degraded(self):
+        """D05-F05：即使 status 未显式 partial，errors 缺口也必须被消费。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=SyncResult())
+        dp.strategies["holder"].run = AsyncMock(
+            return_value=SyncResult(errors=["pledge_stat"]),
+        )
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(quick=True)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_holder_cancelled_marks_init_not_complete(self):
+        """D05-F05：holder 主动取消同样不得上报完整成功。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=SyncResult())
+        dp.strategies["holder"].run = AsyncMock(return_value=SyncResult(status="cancelled"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(quick=True)
+
+        assert result is None
 
     def test_base_dimension_strategies_bind_cache_registered_daos(self):
         """UIR-F14-002：DAO 取自 CacheManager 注册实例（引擎重建时 sync_engines 可同步），
