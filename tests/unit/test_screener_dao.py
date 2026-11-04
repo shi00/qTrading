@@ -1853,22 +1853,54 @@ class TestRv03AppendOnlySemantics:
         assert pk == ["trade_date", "strategy_name", "ts_code", "run_id"]
 
     @pytest.mark.asyncio
-    async def test_thread_pending_labels_not_reset(self):
-        """append-only：不再为覆盖语义显式重置既有行——review_status 仅对新行置 PENDING。"""
+    async def test_replay_does_not_reset_review_status(self):
+        """D03-F05: 同四键重放不得把已推进的复盘状态重置为 PENDING。
+
+        ``_save_upsert`` 的 UPDATE 集合 = 写入 columns - 冲突键 - created_at，
+        故 review_status 不在 columns 中即不会出现在 ON CONFLICT DO UPDATE，
+        重放保留既有进度；首次插入由模型 ``server_default='PENDING'`` 生成。
+        """
+        from data.constants import REVIEW_STATUS_UNTRADABLE
+        from data.persistence.models import ScreeningHistory
+
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=1)
-        records = [
-            {
-                "run_id": "run_c",
-                "strategy_name": "strat",
-                "ts_code": "000001.SZ",
-                "trade_date": "20240615",
-                "name": "C",
-            }
-        ]
-        await dao.save_screening_results(records)
-        df = dao._save_upsert.call_args.kwargs["df"]
-        assert (df["review_status"] == REVIEW_STATUS_PENDING).all()  # 新行置 PENDING 正常
+        for advanced in (
+            REVIEW_STATUS_T1_DONE,
+            REVIEW_STATUS_COMPLETED,
+            REVIEW_STATUS_UNTRADABLE,
+            REVIEW_STATUS_EXPIRED,
+        ):
+            records = [
+                {
+                    "run_id": "run_c",
+                    "strategy_name": "strat",
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240615",
+                    "name": "C",
+                    # 调用方即使带旧状态，也不得进入写入列而覆盖库内已推进状态
+                    "review_status": advanced,
+                }
+            ]
+            await dao.save_screening_results(records)
+            kwargs = dao._save_upsert.call_args.kwargs
+            assert "review_status" not in kwargs["columns"]
+            assert "review_status" not in kwargs["df"].columns
+            update_cols = [c for c in kwargs["columns"] if c not in set(kwargs["pk_columns"])]
+            assert "review_status" not in update_cols
+
+        # tuple 输入：仍按模型全列顺序对齐（含 review_status），但写入列同样排除它
+        from data.persistence.models import get_model_columns as _gmc
+
+        tuple_cols = _gmc(ScreeningHistory, exclude={"id", "updated_at", "created_at"})
+        tuple_row = tuple(REVIEW_STATUS_T1_DONE if c == "review_status" else None for c in tuple_cols)
+        await dao.save_screening_results([tuple_row])
+        kwargs = dao._save_upsert.call_args.kwargs
+        assert "review_status" not in kwargs["columns"]
+        assert "review_status" not in kwargs["df"].columns
+
+        # 首次插入仍为 PENDING：由模型 server_default 生成
+        assert ScreeningHistory.__table__.c.review_status.server_default.arg == REVIEW_STATUS_PENDING
 
 
 class TestExpireStalePending:
