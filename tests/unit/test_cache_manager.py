@@ -297,6 +297,57 @@ class TestCacheManagerInitDb:
                 await mgr.init_db(force=True)
 
     @pytest.mark.asyncio
+    async def test_init_db_postcondition_failure_keeps_schema_uninitialized(self):
+        """Post-upgrade verification failure must not mark the schema as initialized."""
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+        mock_lock = AsyncMock()
+        mock_lock.__aenter__ = AsyncMock(return_value=None)
+        mock_lock.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=RuntimeError("no schema version was recorded"))
+            with pytest.raises(RuntimeError, match="no schema version"):
+                await mgr.init_db(force=True)
+
+        assert mgr._schema_initialized is False
+
+    @pytest.mark.asyncio
+    async def test_init_db_retries_after_postcondition_failure(self):
+        """After a post-upgrade verification failure, init_db must be retryable."""
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+        mock_lock = AsyncMock()
+        mock_lock.__aenter__ = AsyncMock(return_value=None)
+        mock_lock.__aexit__ = AsyncMock(return_value=None)
+        with (
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=[RuntimeError("no schema version was recorded"), None])
+            with pytest.raises(RuntimeError, match="no schema version"):
+                await mgr.init_db()
+
+            assert mgr._schema_initialized is False
+
+            await mgr.init_db()
+
+        assert mgr._schema_initialized is True
+        assert mock_migrator.init_db.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_init_db_propagates_migration_needed(self):
         from data.persistence.db_migrator import DatabaseMigrationNeeded
 
