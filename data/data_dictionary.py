@@ -48,6 +48,8 @@ COMMON_COLUMNS = {
     "amount": "col_amount",
     "block_vwap": "col_block_vwap",
     "block_discount_pct": "col_block_discount_pct",
+    "block_amount_wan": "col_block_amount_wan",
+    "block_vol_wanshare": "col_block_vol_wanshare",
     "turnover_rate": "col_turnover_rate",
     "turnover_rate_f": "col_turnover_rate_f",
     "volume_ratio": "col_volume_ratio",

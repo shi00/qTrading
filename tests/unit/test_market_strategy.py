@@ -559,7 +559,7 @@ class TestBlockTradeStrategy:
         lf = pl.from_pandas(base_df).lazy()
         result = strategy._filter_logic(lf, {"block_trade": block_df, "params": {"block_amount_min": 1000}}).collect()
         assert result["ts_code"].to_list() == ["000001.SZ"]
-        assert result["amount"].to_list() == [2700.0]
+        assert result["block_amount_wan"].to_list() == [2700.0]
         # VWAP = Σamount/Σvol = 2700/300 = 9.0（量加权，非 amount 权重口径 (12×1200+7.5×1500)/2700=9.5）
         assert abs(result["block_vwap"].to_list()[0] - 9.0) < 1e-6
         # 折价率 = (9.0 - 10)/10 × 100 = -10%，恰达默认 10% 剔除线（>= -10 保留）

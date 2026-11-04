@@ -537,8 +537,8 @@ class TestBlockTradeStrategy(unittest.TestCase):
         result = self.strategy._filter_logic(lf, context).collect()
 
         row_000001 = result.filter(pl.col("ts_code") == "000001.SZ").row(0, named=True)
-        self.assertEqual(row_000001["amount"], 2300.0)
-        self.assertEqual(row_000001["vol"], 150)
+        self.assertEqual(row_000001["block_amount_wan"], 2300.0)
+        self.assertEqual(row_000001["block_vol_wanshare"], 150)
 
     def test_block_trade_empty_result(self):
         """无匹配结果"""

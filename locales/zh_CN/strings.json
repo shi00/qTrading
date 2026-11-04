@@ -1532,6 +1532,8 @@
     "col_price": "成交价",
     "col_block_vwap": "大宗VWAP",
     "col_block_discount_pct": "大宗折价率",
+    "col_block_amount_wan": "大宗成交额",
+    "col_block_vol_wanshare": "大宗成交量",
     "col_buyer": "买方营业部",
     "col_seller": "卖方营业部",
     "col_ratio": "持股比例",

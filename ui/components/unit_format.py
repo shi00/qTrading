@@ -5,6 +5,8 @@ Tushare 原始数据单位（真值，禁改）：
 - ``vol`` / ``volume``（成交量）：手
 - ``total_mv`` / ``circ_mv``（市值）：万元
 - ``n_income``（净利润）：元
+- ``block_amount_wan``（大宗成交额，block_trade 策略聚合列）：万元
+- ``block_vol_wanshare``（大宗成交量，block_trade 策略聚合列）：万股
 
 展示口径分两步（先归一到基准单位，再按 locale 量级换算）：
 1. 原始值 → 基准单位：货币类 → 元，数量类 → 手；
@@ -108,6 +110,11 @@ COLUMN_UNIT_SPECS: Mapping[str, ColumnUnitSpec] = MappingProxyType(
         "n_income": ColumnUnitSpec("cny", "cny", 1.0, 2, "unit_yi"),
         "vol": ColumnUnitSpec("lot", "lot", 1.0, 1, "unit_wanshou"),
         "volume": ColumnUnitSpec("lot", "lot", 1.0, 1, "unit_wanshou"),
+        # D06-R02: 大宗聚合列（block_trade 策略）显式登记真实单位，避免与同名日线列
+        # amount/vol 的「千元/手」口径混用。万股 → 手换算因子 100（1 手 = 100 股）；
+        # 万股 → 万手为 ×0.01，保留 2 位小数以保住来源精度。
+        "block_amount_wan": ColumnUnitSpec("wan_cny", "cny", 10_000.0, 2, "unit_yi"),
+        "block_vol_wanshare": ColumnUnitSpec("wanshare", "lot", 100.0, 2, "unit_wanshou"),
     }
 )
 

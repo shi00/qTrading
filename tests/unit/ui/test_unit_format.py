@@ -122,6 +122,36 @@ class TestMetadataCellDispatch:
         assert COLUMN_UNIT_SPECS["vol"].raw_unit == "lot"
 
 
+class TestBlockTradeUnits:
+    """D06-R02: 大宗聚合列的真实展示单位（万元/万股 → 亿/万手）。"""
+
+    def test_block_amount_wan_to_yi(self):
+        # 3500 万元 = 3.5e7 元 = 0.35 亿（旧实现按 base amount 千元口径显示约 0.04 亿）
+        assert format_metadata_cell("block_amount_wan", 3500) == "0.35亿"
+
+    def test_block_vol_wanshare_to_wanshou(self):
+        # 279 万股 = 27_900 手 = 2.79 万手（旧实现按 vol 手口径显示约 0.0 万手）
+        assert format_metadata_cell("block_vol_wanshare", 279) == "2.79万手"
+
+    def test_block_columns_header_units(self):
+        assert column_header_unit("block_amount_wan") == "亿"
+        assert column_header_unit("block_vol_wanshare") == "万手"
+        # base 同名段单位保持不变（日线口径）
+        assert column_header_unit("amount") == "亿"
+        assert column_header_unit("vol") == "万手"
+
+    def test_block_columns_reach_screener_cell_formatter(self):
+        from ui.views.screener_view import _format_cell_value
+
+        assert _format_cell_value("block_amount_wan", 3500) == "0.35亿"
+        assert _format_cell_value("block_vol_wanshare", 279) == "2.79万手"
+
+    def test_block_columns_missing_not_masqueraded(self):
+        # R21: 缺失 → "-"，不得伪装为 0
+        assert format_metadata_cell("block_amount_wan", None) == "-"
+        assert format_metadata_cell("block_vol_wanshare", float("nan")) == "-"
+
+
 class TestBoundaries:
     """边界：缺失 / NaN / 0 / 负数 / 极大值 / 非数值类型（R21 缺失不伪装）。"""
 
