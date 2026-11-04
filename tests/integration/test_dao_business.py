@@ -423,7 +423,7 @@ class TestScreenerDao:
     async def test_save_screening_results_null_protected_block_metrics(self, screener_dao, clean_db):
         """同键重放：显式 None 不得经 UPSERT 把已落库的大宗值覆盖为 NULL（null_protected）。"""
         base_record = {
-            "run_id": "RUN_BLOCK_NULL_PROTECTED",
+            "run_id": "RUN_BLOCK_NP",
             "trade_date": _RECENT_DATE,
             "strategy_name": "block_trade",
             "ts_code": "000001.SZ",
