@@ -1552,6 +1552,87 @@ class TestChunkedInWrite:
         )
 
 
+class TestWriteDbReturnContract:
+    """D03-S01: _write_db 返回执行成功标志，不是影响行数。
+
+    契约：语句执行成功返回 1（与 underlying rowcount 的 0/1/多行/未知无关）；
+    仅 suppress_errors=True 且无共享事务连接时，异常被吞并返回 -1（结果未知）；
+    其余情况异常传播。调用方不得把返回值当影响行数使用。
+    """
+
+    @pytest.mark.parametrize(
+        "rowcount",
+        [0, 1, 5, -1],
+        ids=["zero_rows", "one_row", "many_rows", "unknown_rowcount"],
+    )
+    @pytest.mark.asyncio
+    async def test_returns_success_flag_regardless_of_rowcount(self, rowcount):
+        """底层 rowcount 为 0/1/多行/未知(-1) 时，成功执行始终返回 1。"""
+        result = MagicMock()
+        result.rowcount = rowcount
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql = AsyncMock(return_value=result)
+        dao = BaseDao(MagicMock())
+
+        assert await dao._write_db("UPDATE t SET x = 1 WHERE id = $1", params=(1,), conn=mock_conn) == 1
+        mock_conn.exec_driver_sql.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_success_flag_without_shared_conn(self):
+        """无共享连接（engine.begin 分支）同样返回成功标志 1，即使 rowcount=0。"""
+        result = MagicMock()
+        result.rowcount = 0
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql = AsyncMock(return_value=result)
+        dao = BaseDao(_setup_mock_engine_begin(mock_conn))
+
+        assert await dao._write_db("DELETE FROM t WHERE id = $1", params=(1,)) == 1
+
+    @pytest.mark.asyncio
+    async def test_suppressed_error_returns_unknown_sentinel(self):
+        """suppress_errors=True 吞错时返回 -1（写入结果未知），与成功标志 1 区分。"""
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql.side_effect = Exception("write failed")
+        dao = BaseDao(_setup_mock_engine_begin(mock_conn))
+
+        assert await dao._write_db("UPDATE t SET x = 1", suppress_errors=True) == -1
+
+
+class TestChunkedInWriteReturnContract:
+    """D03-S01: chunked_in_write 求和各分块返回值，不自动等同影响行数。"""
+
+    @pytest.mark.asyncio
+    async def test_success_flag_chunks_sum_to_chunk_count(self):
+        """分块函数为 _write_db 时，合计等于成功分块数（每块返回 1），不是行数。"""
+        write_fn = AsyncMock(return_value=1)
+        values = ["A", "B", "C"]
+
+        total = await BaseDao.chunked_in_write(
+            write_fn,
+            "UPDATE t SET x = 1 WHERE id IN ({placeholders})",
+            values,
+            chunk_size=1,
+        )
+
+        assert total == 3
+        assert write_fn.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_zero_and_non_int_results_do_not_contribute(self):
+        """0 影响行数与未知（非 int）返回值均为 0 贡献，多行返回值正常累加。"""
+        write_fn = AsyncMock(side_effect=[0, None, 2])
+        values = ["A", "B", "C"]
+
+        total = await BaseDao.chunked_in_write(
+            write_fn,
+            "UPDATE t SET x = 1 WHERE id IN ({placeholders})",
+            values,
+            chunk_size=1,
+        )
+
+        assert total == 2
+
+
 class TestBaseDaoSaveUpsertExtended:
     @pytest.mark.asyncio
     async def test_upsert_success_with_conn(self):
