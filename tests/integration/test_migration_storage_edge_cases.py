@@ -64,7 +64,9 @@ async def alembic_db_engine(pg_params: dict) -> AsyncIterator[_MigrationDb]:
     db_name = f"d04f06_{uuid.uuid4().hex[:12]}"
     await _exec_ident_ddl(pg_params, "CREATE DATABASE %I", db_name)
     sync_url, async_url = build_db_urls(pg_params, db_name)
-    engine = create_test_engine(async_url)
+    # 本文件在 async engine 连接存活期间反复执行 Alembic DDL（schema 变更），
+    # 关闭 asyncpg prepared statement 缓存，避免命中 InvalidCachedStatementError。
+    engine = create_test_engine(async_url, connect_args={"statement_cache_size": 0})
     try:
         yield _MigrationDb(name=db_name, sync_url=sync_url, engine=engine)
     finally:
