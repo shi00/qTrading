@@ -574,7 +574,11 @@ class ShutdownCoordinator:
         )  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if LocalModelManager._instance is not None and (
-            LocalModelManager._instance._worker_ready or LocalModelManager._instance._model_path
+            LocalModelManager._instance._worker_ready
+            or LocalModelManager._instance._model_path
+            # D02-R01: 首次加载 spawn 后、ready/path 置位前被取消（Step 0/服务停止），
+            # 取消 await 不会终止子进程；须按 _worker_proc 同口径清理（与 Step 5b 一致）。
+            or LocalModelManager._instance._worker_proc is not None
         ):
             LocalModelManager._instance.unload_model(force=True)
             logger.info("[Shutdown]   - Llama.cpp model evicted (subprocess terminated).")

@@ -571,8 +571,10 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance = MagicMock()
             mock_instance._worker_ready = False
             mock_instance._model_path = ""
+            mock_instance._worker_proc = None
             mock_lmm._instance = mock_instance
             await coord._step5_unload_ai_model()
+            mock_instance.unload_model.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_step5_unload_ai_with_llm(self):
@@ -604,6 +606,59 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_nss._instance = mock_instance
             await coord._step5b_stop_sentiment_scorer()
             mock_instance.unload_model.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_step5_unloads_worker_spawned_before_ready_after_cancel(self):
+        """D02-R01：首次加载在 ready 前被取消——worker 已 spawn、ready/path 未置位。
+
+        取消 await 不会终止 multiprocessing 子进程；Step 5 守卫若只看
+        ready/path 会漏卸载（须与 Step 5b 的 _worker_proc 三条件同口径）。
+        """
+        from services.local_model_manager import LocalModelManager
+
+        mgr = LocalModelManager()
+        fake_proc = MagicMock(spec=multiprocessing.Process)
+        fake_proc.is_alive.return_value = True
+        ready_blocked = asyncio.Event()
+
+        async def _spawn_worker(*_args, **_kwargs):
+            # 模拟 _ensure_worker_impl：proc 已 start、队列已建，但 ready 尚未置位
+            mgr._worker_proc = fake_proc
+            mgr._request_queue = MagicMock()
+            mgr._result_queue = MagicMock()
+            return True
+
+        async def _block_on_ready(*_args, **_kwargs):
+            ready_blocked.set()
+            await asyncio.Event().wait()
+            return True
+
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            patch(
+                "services.local_model_manager.os.stat",
+                return_value=MagicMock(st_mtime=1.0, st_size=2),
+            ),
+            patch("services.local_model_manager.ConfigHandler") as mock_config,
+            patch("services.local_model_manager.ThreadPoolManager") as mock_pool,
+            patch.object(mgr, "_ensure_worker", new=_spawn_worker),
+            patch.object(mgr, "_await_worker_ready", new=_block_on_ready),
+        ):
+            mock_config.get_typed.return_value = ""
+            mock_pool.return_value.run_async = AsyncMock(return_value="sha")
+            load_task = asyncio.create_task(mgr.load_model("/tmp/model.gguf", config={"n_threads": 1}))
+            await asyncio.wait_for(ready_blocked.wait(), timeout=2.0)
+            load_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await load_task
+
+            assert mgr._worker_proc is fake_proc
+            assert mgr._worker_ready is False
+            assert mgr._model_path == ""
+
+            await ShutdownCoordinator()._step5_unload_ai_model()
+            fake_proc.terminate.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_step5b_calls_force_unload(self):
