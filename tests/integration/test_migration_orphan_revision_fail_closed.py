@@ -29,9 +29,12 @@ def pg_params():
     return get_pg_connection_params()
 
 
-async def _upgrade_isolated_db_to(engine: AsyncEngine, target_revision: str) -> None:
-    """Upgrade an isolated database to a specific revision (never head)."""
-    sync_url = str(engine.url).replace("+asyncpg", "+psycopg2")
+async def _upgrade_isolated_db_to(sync_url: str, target_revision: str) -> None:
+    """Upgrade an isolated database to a specific revision (never head).
+
+    ``sync_url`` must come from ``build_db_urls``: deriving it from
+    ``str(engine.url)`` masks the password (``***``) and breaks authentication.
+    """
     with override_db_url(sync_url):
         cfg = make_alembic_cfg(sync_url)
         await asyncio.to_thread(command.upgrade, cfg, target_revision)
@@ -57,15 +60,20 @@ class TestOrphanedRevisionFailClosed:
     """Unverifiable alembic_version states must stop startup without side effects."""
 
     @pytest_asyncio.fixture(loop_scope="function")
-    async def orphaned_test_engine(self, pg_params):
+    async def orphaned_test_db(self, pg_params):
+        """Yield ``(async_engine, sync_url)`` backed by an isolated database."""
         db_name = f"migrator_orphaned_{uuid.uuid4().hex[:8]}"
         params = pg_params
         await _create_isolated_db(params, db_name)
-        _, async_url = build_db_urls(params, db_name)
-        engine = create_test_engine(async_url)
-        yield engine
-        await engine.dispose()
-        await _drop_isolated_db(params, db_name)
+        engine: AsyncEngine | None = None
+        try:
+            sync_url, async_url = build_db_urls(params, db_name)
+            engine = create_test_engine(async_url)
+            yield engine, sync_url
+        finally:
+            if engine is not None:
+                await engine.dispose()
+            await _drop_isolated_db(params, db_name)
 
     @staticmethod
     async def _set_version_rows(engine: AsyncEngine, rows: list[str]) -> None:
@@ -81,85 +89,98 @@ class TestOrphanedRevisionFailClosed:
                     {"revision": revision},
                 )
 
-    async def test_orphaned_revision_fails_closed_and_preserves_cursor(self, orphaned_test_engine: AsyncEngine) -> None:
+    async def test_orphaned_revision_fails_closed_and_preserves_cursor(
+        self, orphaned_test_db: tuple[AsyncEngine, str]
+    ) -> None:
         """Head schema + unknown cursor: raise and keep both cursor and schema unchanged."""
-        await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+        engine, _sync_url = orphaned_test_db
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
         head_rev = await DatabaseMigrator._get_head_revision()
-        tables_before = await _fetch_table_names(orphaned_test_engine)
-        await self._set_version_rows(orphaned_test_engine, ["9999_orphaned"])
+        tables_before = await _fetch_table_names(engine)
+        await self._set_version_rows(engine, ["9999_orphaned"])
 
         with pytest.raises(OrphanedRevisionError) as exc_info:
-            await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+            await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         assert exc_info.value.current_rev == "9999_orphaned"
         assert exc_info.value.head_rev == head_rev
-        assert await _fetch_version_rows(orphaned_test_engine) == ["9999_orphaned"]
-        assert await _fetch_table_names(orphaned_test_engine) == tables_before
+        assert await _fetch_version_rows(engine) == ["9999_orphaned"]
+        assert await _fetch_table_names(engine) == tables_before
 
-    async def test_old_schema_with_unknown_cursor_fails_closed(self, orphaned_test_engine: AsyncEngine) -> None:
+    async def test_old_schema_with_unknown_cursor_fails_closed(self, orphaned_test_db: tuple[AsyncEngine, str]) -> None:
         """Old schema + unknown cursor: raise instead of stamping the old schema to head."""
-        await _upgrade_isolated_db_to(orphaned_test_engine, "0016")
+        engine, sync_url = orphaned_test_db
+        await _upgrade_isolated_db_to(sync_url, "0016")
         head_rev = await DatabaseMigrator._get_head_revision()
-        tables_before = await _fetch_table_names(orphaned_test_engine)
+        tables_before = await _fetch_table_names(engine)
         assert "news_risk_brief" not in tables_before, "0028+ tables must not exist at revision 0016"
-        await self._set_version_rows(orphaned_test_engine, ["9999_orphaned"])
+        await self._set_version_rows(engine, ["9999_orphaned"])
 
         with pytest.raises(OrphanedRevisionError) as exc_info:
-            await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+            await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         assert exc_info.value.current_rev == "9999_orphaned"
         assert exc_info.value.head_rev == head_rev
-        assert await _fetch_version_rows(orphaned_test_engine) == ["9999_orphaned"]
-        assert await _fetch_table_names(orphaned_test_engine) == tables_before
-        assert "news_risk_brief" not in await _fetch_table_names(orphaned_test_engine)
+        assert await _fetch_version_rows(engine) == ["9999_orphaned"]
+        assert await _fetch_table_names(engine) == tables_before
+        assert "news_risk_brief" not in await _fetch_table_names(engine)
 
-    async def test_orphan_fails_closed_when_auto_migrate_disabled(self, orphaned_test_engine: AsyncEngine) -> None:
+    async def test_orphan_fails_closed_when_auto_migrate_disabled(
+        self, orphaned_test_db: tuple[AsyncEngine, str]
+    ) -> None:
         """Orphan detection must raise before the auto_migrate flag is evaluated."""
-        await _upgrade_isolated_db_to(orphaned_test_engine, "0016")
-        await self._set_version_rows(orphaned_test_engine, ["9999_orphaned"])
+        engine, sync_url = orphaned_test_db
+        await _upgrade_isolated_db_to(sync_url, "0016")
+        await self._set_version_rows(engine, ["9999_orphaned"])
 
         with pytest.raises(OrphanedRevisionError) as exc_info:
-            await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=False)
+            await DatabaseMigrator.init_db(engine, auto_migrate=False)
 
         assert exc_info.value.current_rev == "9999_orphaned"
-        assert await _fetch_version_rows(orphaned_test_engine) == ["9999_orphaned"]
+        assert await _fetch_version_rows(engine) == ["9999_orphaned"]
 
-    async def test_multiple_version_rows_fail_closed(self, orphaned_test_engine: AsyncEngine) -> None:
+    async def test_multiple_version_rows_fail_closed(self, orphaned_test_db: tuple[AsyncEngine, str]) -> None:
         """Two rows, one unknown: raise and preserve all rows and schema."""
-        await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
-        tables_before = await _fetch_table_names(orphaned_test_engine)
-        await self._set_version_rows(orphaned_test_engine, ["9999_orphaned", "0043"])
+        engine, _sync_url = orphaned_test_db
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
+        tables_before = await _fetch_table_names(engine)
+        await self._set_version_rows(engine, ["9999_orphaned", "0043"])
 
         with pytest.raises(OrphanedRevisionError) as exc_info:
-            await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+            await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         assert set(exc_info.value.version_rows) == {"9999_orphaned", "0043"}
-        assert set(await _fetch_version_rows(orphaned_test_engine)) == {"9999_orphaned", "0043"}
-        assert await _fetch_table_names(orphaned_test_engine) == tables_before
+        assert set(await _fetch_version_rows(engine)) == {"9999_orphaned", "0043"}
+        assert await _fetch_table_names(engine) == tables_before
 
-    async def test_multiple_known_version_rows_fail_closed(self, orphaned_test_engine: AsyncEngine) -> None:
+    async def test_multiple_known_version_rows_fail_closed(self, orphaned_test_db: tuple[AsyncEngine, str]) -> None:
         """Two known rows are ambiguous in a single-head chain: raise without guessing."""
-        await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+        engine, _sync_url = orphaned_test_db
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
         head_rev = await DatabaseMigrator._get_head_revision()
-        await self._set_version_rows(orphaned_test_engine, ["0043", head_rev])
+        await self._set_version_rows(engine, ["0043", head_rev])
 
         with pytest.raises(OrphanedRevisionError) as exc_info:
-            await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+            await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
         assert "多行" in exc_info.value.reason
-        assert set(await _fetch_version_rows(orphaned_test_engine)) == {"0043", head_rev}
+        assert set(await _fetch_version_rows(engine)) == {"0043", head_rev}
 
-    async def test_assert_no_orphaned_revision_fresh_db_no_op(self, orphaned_test_engine: AsyncEngine) -> None:
+    async def test_assert_no_orphaned_revision_fresh_db_no_op(self, orphaned_test_db: tuple[AsyncEngine, str]) -> None:
         """Fresh database (no alembic_version) is a no-op."""
-        await DatabaseMigrator._assert_no_orphaned_revision(orphaned_test_engine)
-        current_rev = await DatabaseMigrator._get_current_revision(orphaned_test_engine)
+        engine, _sync_url = orphaned_test_db
+        await DatabaseMigrator._assert_no_orphaned_revision(engine)
+        current_rev = await DatabaseMigrator._get_current_revision(engine)
         assert current_rev is None
 
-    async def test_assert_no_orphaned_revision_valid_revision_no_op(self, orphaned_test_engine: AsyncEngine) -> None:
+    async def test_assert_no_orphaned_revision_valid_revision_no_op(
+        self, orphaned_test_db: tuple[AsyncEngine, str]
+    ) -> None:
         """A single known revision passes without writes."""
-        await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+        engine, _sync_url = orphaned_test_db
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
         head_rev = await DatabaseMigrator._get_head_revision()
 
-        await DatabaseMigrator._assert_no_orphaned_revision(orphaned_test_engine)
+        await DatabaseMigrator._assert_no_orphaned_revision(engine)
 
-        assert await _fetch_version_rows(orphaned_test_engine) == [head_rev]
+        assert await _fetch_version_rows(engine) == [head_rev]
