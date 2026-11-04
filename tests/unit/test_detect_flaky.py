@@ -289,6 +289,29 @@ class TestRunPytestWithJsonReport:
         # --reruns 1 透传
         assert "--reruns" in cmd
 
+    def test_omits_log_records_so_xdist_can_serialize_report(self, tmp_path: Path) -> None:
+        """回归：丢弃 log 记录，避免 xdist worker 序列化含 LogRecord 的 report 时崩溃.
+
+        litellm 会给 LogRecord 写入 object() 哨兵（不可被 execnet 序列化），
+        pytest-json-report 又会把原始 LogRecord 挂到 report 上，最终 worker 崩溃、
+        pytest 以退出码 3 结束，detect_flaky 无法判定。
+        """
+        report_path = tmp_path / "run_1.json"
+        mock_result = MagicMock(spec=subprocess.CompletedProcess)
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            run_pytest_with_json_report(
+                test_path="tests/unit/",
+                report_path=report_path,
+                parallel=1,
+                reruns=0,
+                lf_mode=False,
+            )
+
+        cmd = mock_run.call_args[0][0]
+        assert "--json-report-omit=log" in cmd
+
     def test_lf_mode_passes_lf_flag(self, tmp_path: Path) -> None:
         """正例：lf_mode=True 透传 --lf."""
         report_path = tmp_path / "run_1.json"
