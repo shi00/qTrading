@@ -707,6 +707,7 @@ class TestOversoldBuildSupportContextExtended(unittest.TestCase):
                     "low": 9.5 + i * 0.01,
                     "close": 10.0 + i * 0.01,
                     "vol": 1000.0 + i * 10,
+                    "adj_factor": 1.0,
                 }
             )
         history_df = pd.DataFrame(history_data)
@@ -729,6 +730,7 @@ class TestOversoldBuildSupportContextExtended(unittest.TestCase):
                     "low": 9.5,
                     "close": 10.0,
                     "vol": vol,
+                    "adj_factor": 1.0,
                 }
             )
         history_df = pd.DataFrame(history_data)
