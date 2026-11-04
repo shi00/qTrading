@@ -943,6 +943,80 @@ class TestReviewManagerGetLearningContext:
         assert "+6.0" in result
         assert "-5.0" in result
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_single_research_key_many_runs_insufficient(self, mock_cm, mock_tc):
+        """D03-F04 B：同键 30 次重跑统计口径仍为 1 个研究键，不达门槛且不注入尾部样本。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        # DAO 已对「最近运行」快照去重：同键 30 run → total=1、win_cnt=1
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(
+            return_value={
+                "total": 1,
+                "win_cnt": 1,
+                "loss_cnt": 0,
+                "alpha_mean": 0.5,
+                "alpha_median": 0.5,
+            }
+        )
+        mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=pd.DataFrame())
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        result, meta = await rm.get_learning_context_with_meta()
+        # 不足门槛：尾部样本查询根本不发起
+        mock_cache.screener_dao.get_learning_context.assert_not_called()
+        assert meta["sufficient"] is False
+        assert meta["total"] == 1
+        assert "样本量不足" in result
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_thirty_distinct_keys_reach_threshold(self, mock_cm, mock_tc):
+        """D03-F04：30 个**不同**研究键才达到 REVIEW_MIN_SAMPLE 门槛并注入尾部样本。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context_stats = AsyncMock(
+            return_value={
+                "total": 30,
+                "win_cnt": 18,
+                "loss_cnt": 12,
+                "alpha_mean": 0.3,
+                "alpha_median": 0.1,
+            }
+        )
+        sample_df = pd.DataFrame(
+            {
+                "id": [7],
+                "ts_code": ["000001.SZ"],
+                "name": ["Test"],
+                "industry": ["银行"],
+                "pe_ttm": [10.0],
+                "alpha": [2.0],
+                "t5_pct": [5.0],
+                "index_pct": [3.0],
+                "ai_score": [80],
+                "benchmark_code": ["000985.CSI"],
+            }
+        )
+        mock_cache.screener_dao.get_learning_context = AsyncMock(return_value=sample_df)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        result, meta = await rm.get_learning_context_with_meta()
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3, is_win=True, as_of=None, strategy_name=None
+        )
+        mock_cache.screener_dao.get_learning_context.assert_any_call(
+            limit=3, is_win=False, as_of=None, strategy_name=None
+        )
+        assert meta["sufficient"] is True
+        assert meta["total"] == 30
+        assert meta["sample_ids"] == [7, 7]
+        assert "正向样本" in result
+
 
 class TestReviewManagerSaveResults:
     @pytest.mark.asyncio

@@ -24,6 +24,11 @@ from data.constants import (
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
+def _snapshot_relation_sql(compiled_sql: str) -> str:
+    """提取 ``latest_learning`` 快照关系 SQL（排除外层 SELECT/FROM 前缀）。"""
+    return compiled_sql.split("FROM (SELECT", 1)[1].split(") AS latest_learning", 1)[0]
+
+
 class TestScreenerDaoGetScreeningHistory:
     @pytest.mark.asyncio
     async def test_with_strategy(self):
@@ -387,6 +392,50 @@ class TestScreenerDaoGetLearningContext:
         assert "screening_history.run_id DESC" not in sql
 
     @pytest.mark.asyncio
+    async def test_label_filter_applied_outside_latest_snapshot(self):
+        """D03-F04 A：WIN/LOSS 标签必须作用在「最近运行」快照**之外**。
+
+        反例：同键旧 run WIN、新 run LOSS（均已完成且有 AI）。若标签先于 DISTINCT ON 施加，
+        旧 WIN 会被单独取出而「复活」；正确口径是先取最近快照，再由标签决定归属桶。
+        """
+        from sqlalchemy.dialects import postgresql
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True)
+        sql = str(dao._read_db_select.call_args[0][0].compile(dialect=postgresql.dialect()))
+        snapshot_sql = _snapshot_relation_sql(sql)
+        _, sep, outer_sql = sql.partition(") AS latest_learning")
+        assert sep, "样本查询必须基于 latest_learning 快照关系"
+        # 快照内只有 SELECT 列表携带 prediction_result 列，不得出现标签比较谓词
+        assert "prediction_result =" not in snapshot_sql
+        # 标签过滤位于快照关系之外（旧/新 run 的标签在去重后才参与筛选）
+        assert "latest_learning.prediction_result = " in outer_sql
+
+    @pytest.mark.asyncio
+    async def test_win_and_loss_share_identical_snapshot_relation(self):
+        """D03-F04 A（反向等价）：WIN/LOSS 两次查询共用同一快照关系，标签仅在快照外分桶。
+
+        保证「旧 WIN/新 LOSS 只进入新 LOSS，反向同理」——同一研究键的最近快照不会因
+        查询标签不同而改变。
+        """
+        from sqlalchemy.dialects import postgresql
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+
+        await dao.get_learning_context(limit=3, is_win=True)
+        win_sql = str(dao._read_db_select.call_args[0][0].compile(dialect=postgresql.dialect()))
+        win_snapshot = _snapshot_relation_sql(win_sql)
+
+        await dao.get_learning_context(limit=3, is_win=False)
+        loss_sql = str(dao._read_db_select.call_args[0][0].compile(dialect=postgresql.dialect()))
+        loss_snapshot = _snapshot_relation_sql(loss_sql)
+
+        assert win_snapshot == loss_snapshot
+        assert "prediction_result =" not in win_snapshot
+
+    @pytest.mark.asyncio
     async def test_learning_context_stats_aggregates(self):
         """D4-M3: stats 聚合返回总数/win/loss/中位数。"""
         dao = ScreenerDao(MagicMock())
@@ -415,6 +464,73 @@ class TestScreenerDaoGetLearningContext:
         dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
         result = await dao.get_learning_context_stats()
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_stats_aggregates_latest_snapshot_relation(self):
+        """D03-F04 B：统计必须基于「最近运行」快照，同键多次重跑只算 1 个研究键。
+
+        反例：同一 (trade_date, strategy_name, ts_code) 有 30 次已完成 AI 重跑，独立研究键
+        仅 1 个。若直接聚合原始表，``total=30`` 会穿透 ``REVIEW_MIN_SAMPLE`` 门槛；正确口径
+        是在 DISTINCT ON 快照上 COUNT，``total=1``。
+        """
+        from sqlalchemy.dialects import postgresql
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context_stats()
+        sql = str(dao._read_db_select.call_args[0][0].compile(dialect=postgresql.dialect()))
+        snapshot_sql = _snapshot_relation_sql(sql)
+        assert ") AS latest_learning" in sql, "统计查询必须基于 latest_learning 快照关系"
+        # DISTINCT ON 三键 + id DESC 保证每个研究键只保留最近一次运行
+        assert (
+            "DISTINCT ON (screening_history.trade_date, screening_history.strategy_name, "
+            "screening_history.ts_code)" in snapshot_sql
+        )
+        assert "screening_history.id DESC" in snapshot_sql
+        # COUNT / 胜负 / 均值 / 中位数均取自快照列，而非原始表重复行
+        assert "count(*) AS total" in sql
+        assert "latest_learning.prediction_result = " in sql
+        assert "latest_learning.alpha" in sql
+
+    @pytest.mark.asyncio
+    async def test_stats_and_samples_share_scope_filters(self):
+        """D03-F04：stats 与样本共用同一范围与资格关系（含 as_of / strategy_name）。
+
+        未完成 run 或无 AI 评分记录的处理因此天然一致：两者都由同一快照关系的资格过滤
+        决定（最新未完成时回退到该键最近一个合格快照，ADR-0010 未规定整键剔除）。
+        """
+        import datetime
+
+        from sqlalchemy.dialects import postgresql
+
+        as_of_date = datetime.date(2024, 6, 1)
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+
+        await dao.get_learning_context(limit=3, is_win=True, as_of=as_of_date, strategy_name="strategy_x")
+        sample_stmt = dao._read_db_select.call_args[0][0]
+        sample_sql = str(sample_stmt.compile(dialect=postgresql.dialect()))
+        sample_params = sample_stmt.compile().params
+
+        await dao.get_learning_context_stats(as_of=as_of_date, strategy_name="strategy_x")
+        stats_stmt = dao._read_db_select.call_args[0][0]
+        stats_sql = str(stats_stmt.compile(dialect=postgresql.dialect()))
+        stats_params = stats_stmt.compile().params
+
+        # 两个查询的快照关系逐字一致（唯一差异是快照外是否叠加标签/聚合）
+        sample_snapshot = _snapshot_relation_sql(sample_sql)
+        stats_snapshot = _snapshot_relation_sql(stats_sql)
+        assert sample_snapshot == stats_snapshot
+        # 资格过滤（未完成/无 AI 分支）同源
+        assert "review_status = " in stats_snapshot
+        assert "screening_history.t5_pct IS NOT NULL" in stats_snapshot
+        assert "screening_history.ai_score IS NOT NULL" in stats_snapshot
+        # as_of 范围排除未来日期，strategy_name 范围一致
+        assert "screening_history.trade_date < " in stats_sql
+        assert stats_params["trade_date_1"] == as_of_date
+        assert stats_params["strategy_name_1"] == "strategy_x"
+        assert sample_params["trade_date_1"] == as_of_date
+        assert sample_params["strategy_name_1"] == "strategy_x"
 
 
 class TestScreenerDaoUpdatePredictionResult:
