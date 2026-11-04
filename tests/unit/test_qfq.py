@@ -182,10 +182,8 @@ class TestQFQ:
         series = pd.Series([1.0, None, 4.0])
         last_ratio = qfq_ratio_series(series, ref="last")
         first_ratio = qfq_ratio_series(series, ref="first")
-        assert last_ratio is not None
-        assert first_ratio is not None
-        assert last_ratio.tolist() == pytest.approx([0.25, 0.25, 1.0])
-        assert first_ratio.tolist() == pytest.approx([1.0, 1.0, 4.0])
+        assert list(last_ratio) == pytest.approx([0.25, 0.25, 1.0])
+        assert list(first_ratio) == pytest.approx([1.0, 1.0, 4.0])
 
     def test_qfq_ratio_series_pandas_leading_null_ref_first(self):
         """前导 NULL 经 bfill 后不得让整组退化为未知；ref='first' 基准取 bfill 首值。"""
