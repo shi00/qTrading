@@ -158,10 +158,12 @@ class TestOrmDaoAlignment:
     def test_screening_history_alignment(self):
         from data.persistence.models import get_model_columns as gmc_filtered
 
+        # D03-F05: review_status 由模型 server_default=PENDING 在首插时生成；排除出写入列，
+        # 使同四键重放不进入 ON CONFLICT DO UPDATE，保留已推进的复盘状态。
         self._assert_cols_aligned(
             ScreenerDao.save_screening_results,
             ScreeningHistory,
-            excluded={"id", "updated_at", "created_at"},
+            excluded={"id", "updated_at", "created_at", "review_status"},
             custom_gmc=gmc_filtered,
         )
 

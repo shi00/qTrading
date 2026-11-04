@@ -1103,9 +1103,17 @@ class ScreenerDao(BaseDao):
         if not records:
             return
 
-        # computed 列（t1_price, alpha, prediction_result 等）由 get_model_columns 自动排除；
-        # review_status 不在 exclude 中，下方显式设置为 PENDING。
+        # computed 列（t1_price, alpha, prediction_result 等）由 get_model_columns 自动排除。
+        # D03-F05: review_status 同样排除——首次插入由模型 server_default='PENDING' 生成；
+        # 同四键重放时它不在 _save_upsert 的 ON CONFLICT DO UPDATE 集合中，保留已推进的
+        # 复盘进度（T1_DONE/COMPLETED/UNTRADABLE/EXPIRED），不再被打回 PENDING。
         all_cols = get_model_columns(
+            ScreeningHistory,
+            exclude={"id", "updated_at", "created_at", "review_status"},
+        )
+        # tuple 输入沿用模型全列位置契约（含 review_status），再仅取写入列：
+        # 排除 review_status 后不得让历史调用方的 tuple 发生列错位。
+        tuple_cols = get_model_columns(
             ScreeningHistory,
             exclude={"id", "updated_at", "created_at"},
         )
@@ -1116,13 +1124,12 @@ class ScreenerDao(BaseDao):
             if isinstance(r, dict):
                 row = dict(r)
             else:
-                row = dict(zip(all_cols, r, strict=False))
+                row = dict(zip(tuple_cols, r, strict=False))
             thinking_text = row.pop("thinking", "")
             # RV-03: append-only 语义——新写入成为独立研究记录（唯一键含 run_id）。
-            # 与 LIFE-03 覆盖语义不同：不再显式重置 PENDING 覆盖既有行的复盘状态。
             # run_id 每次运行唯一，同一 (trade_date, strategy_name, ts_code, run_id)
             # 的重复写入（重试）经 4 键 upsert 幂等；不同 run 各自独立成行。
-            row["review_status"] = REVIEW_STATUS_PENDING
+            # D03-F05: review_status 不写入（见上），重放不得重置既有复盘状态。
             enriched_records.append(tuple(row.get(c) for c in all_cols))
             if thinking_text:
                 thinking_records.append(

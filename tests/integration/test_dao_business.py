@@ -571,6 +571,46 @@ class TestScreenerDao:
         assert history_updated["review_status"].iloc[0] == REVIEW_STATUS_T1_DONE
         assert history_updated["t1_price"].iloc[0] == 10.5
 
+    async def test_save_screening_results_replay_preserves_review_status(self, screener_dao, clean_db):
+        """D03-F05: 同四键重放保留已推进的复盘进度；新 run_id 仍独立新增 PENDING 行。"""
+        from data.constants import REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
+
+        base = {
+            "run_id": "RUN_REPLAY",
+            "trade_date": _RECENT_DATE,
+            "strategy_name": "oversold",
+            "ts_code": "000001.SZ",
+            "name": "平安银行",
+            "close": 10.0,
+            "ai_score": 85,
+        }
+        await screener_dao.save_screening_results([dict(base)])
+        history = await screener_dao.get_screening_history(strategy_name="oversold")
+        record_id = int(history["id"].iloc[0])
+        assert history["review_status"].iloc[0] == REVIEW_STATUS_PENDING
+
+        await screener_dao.update_prediction_result(record_id, 5.0, "WIN", t1_price=10.5)
+        advanced = await screener_dao.get_screening_history(strategy_name="oversold")
+        assert advanced["review_status"].iloc[0] == REVIEW_STATUS_T1_DONE
+
+        # 同四键重放：不得把 T1_DONE 打回 PENDING，也不得覆盖已回填的 computed 列
+        await screener_dao.save_screening_results([dict(base)])
+        replayed = await screener_dao.get_screening_history(strategy_name="oversold")
+        assert len(replayed) == 1
+        assert replayed["review_status"].iloc[0] == REVIEW_STATUS_T1_DONE
+        assert float(replayed["t1_price"].iloc[0]) == 10.5
+
+        # T1_DONE 且 T+5 未回填的记录重放后仍在 T+5 候选池
+        horizon = await screener_dao.get_unfilled_horizon_predictions()
+        assert [int(r["id"]) for r in horizon] == [record_id]
+
+        # 新 run_id 新增独立 PENDING 行，不覆盖旧 run
+        await screener_dao.save_screening_results([{**base, "run_id": "RUN_REPLAY_2"}])
+        final = await screener_dao.get_screening_history(strategy_name="oversold")
+        assert len(final) == 2
+        status_by_run = dict(zip(final["run_id"], final["review_status"], strict=True))
+        assert status_by_run == {"RUN_REPLAY": REVIEW_STATUS_T1_DONE, "RUN_REPLAY_2": REVIEW_STATUS_PENDING}
+
     async def test_update_prediction_result_sets_completed_with_t5_metrics(self, screener_dao, clean_db):
         """T+5 指标就绪后应落库并推进到 COMPLETED"""
         from data.constants import REVIEW_STATUS_COMPLETED
@@ -789,7 +829,7 @@ class TestScreenerDao:
         """验证动态列推导与 tuple 顺序一致，防止列错位"""
         from data.persistence.models import ScreeningHistory, get_model_columns
 
-        # computed 列由 get_model_columns 自动排除；review_status 在 save 时显式设置为 PENDING
+        # computed 列由 get_model_columns 自动排除；review_status 首次插入由 server_default 置 PENDING
         all_cols = get_model_columns(
             ScreeningHistory,
             exclude={"id", "updated_at", "created_at"},
