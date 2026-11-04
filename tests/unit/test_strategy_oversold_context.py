@@ -689,7 +689,8 @@ class TestBuildSupportContextQfqStatus(unittest.TestCase):
     def test_partial_null_factors_uses_filled_series(self):
         closes = [20.0] * 31 + [10.0] * 29
         vols = [1000.0] * 60
-        factors = [2.0] * 31 + [1.0] * 29
+        factors: list[float | None] = [2.0] * 31
+        factors.extend([1.0] * 29)
         factors[5] = None
         factors[40] = None
         history_df = self._history(closes, vols, factors)
