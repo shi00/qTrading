@@ -420,6 +420,30 @@ class TestScreenerDao:
         assert pd.isna(non_block_row["block_amount_wan"])
         assert pd.isna(non_block_row["block_vol_wanshare"])
 
+    async def test_save_screening_results_null_protected_block_metrics(self, screener_dao, clean_db):
+        """同键重放：显式 None 不得经 UPSERT 把已落库的大宗值覆盖为 NULL（null_protected）。"""
+        base_record = {
+            "run_id": "RUN_BLOCK_NP",
+            "trade_date": _RECENT_DATE,
+            "strategy_name": "block_trade",
+            "ts_code": "000001.SZ",
+        }
+        await screener_dao.save_screening_results(
+            [{**base_record, "block_amount_wan": 123.4567, "block_vol_wanshare": 45.6789}],
+        )
+        # 同键重放：两列显式为 None（非大宗策略/缺列路径的落库形态）
+        await screener_dao.save_screening_results(
+            [{**base_record, "block_amount_wan": None, "block_vol_wanshare": None}],
+        )
+
+        result = await screener_dao.get_history_records(
+            trade_date=_RECENT_DATE,
+            strategy_name="block_trade",
+        )
+        row = result.set_index("ts_code").loc["000001.SZ"]
+        assert float(row["block_amount_wan"]) == pytest.approx(123.4567)
+        assert float(row["block_vol_wanshare"]) == pytest.approx(45.6789)
+
     async def test_get_history_tree(self, screener_dao, clean_db):
         """获取历史树形数据"""
         records = [

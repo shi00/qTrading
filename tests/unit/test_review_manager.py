@@ -1150,6 +1150,32 @@ class TestReviewManagerSaveResults:
         assert records[0]["block_vol_wanshare"] is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("non_finite", [float("inf"), float("-inf")])
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_block_metrics_non_finite_persists_none(self, mock_cm, mock_tc, non_finite):
+        """大宗列为 ±inf（非有限值）→ None（R21 非有限值不伪装落库）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240615"],
+                "block_amount_wan": [non_finite],
+                "block_vol_wanshare": [non_finite],
+            }
+        )
+        await rm.save_results("block_trade", df, trade_date="20240615")
+
+        records = mock_cache.screener_dao.save_screening_results.call_args.args[0]
+        assert records[0]["block_amount_wan"] is None
+        assert records[0]["block_vol_wanshare"] is None
+
+    @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_save_with_no_trade_date_raises(self, mock_cm, mock_tc):
