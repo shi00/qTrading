@@ -351,6 +351,7 @@ class TestBuildSupportContext(unittest.TestCase):
                     "low": 9.5 + i * 0.1,
                     "close": 10.0 + i * 0.1,
                     "vol": 1000 + i * 100,
+                    "adj_factor": 1.0,
                 }
                 for i in range(1, 32)
             ]
@@ -362,6 +363,7 @@ class TestBuildSupportContext(unittest.TestCase):
                     "low": 9.5 + i * 0.1,
                     "close": 10.0 + i * 0.1,
                     "vol": 1000 + i * 100,
+                    "adj_factor": 1.0,
                 }
                 for i in range(1, 30)
             ]
@@ -373,6 +375,7 @@ class TestBuildSupportContext(unittest.TestCase):
                     "low": 9.5 + i * 0.1,
                     "close": 10.0 + i * 0.1,
                     "vol": 1000 + i * 100,
+                    "adj_factor": 1.0,
                 }
                 for i in range(1, 22)
             ]
@@ -545,10 +548,178 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result_text, _ = self.strategy._build_support_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_support_context(row, prefetched)
 
+        self.assertTrue(result_valid)
         self.assertIsInstance(result_text, str)
         self.assertNotIn("error", result_text.lower())
+
+
+class TestBuildSupportContextQfqStatus(unittest.TestCase):
+    """D06-R03: 支撑位上下文必须区分 qfq 三态，unknown 不得当恒等 1.0。
+
+    ``qfq_ratio_series`` 的 None 同时表示 unknown 与 identity，消费方必须先用
+    ``qfq_series_status`` 判定：unknown → is_valid=False（调用方跳过注入），
+    identity → 原始 close/vol 等价可用，adjusted → 按 ratio 缩放。
+    """
+
+    _METRIC_MARKERS = ("布林下轨", "VWAC", "最大放量柱", "价值区下沿")
+
+    def setUp(self):
+        self.strategy = OversoldStrategy()
+
+    @staticmethod
+    def _history(closes, vols, factors, start=datetime.date(2024, 1, 1)):
+        dates = [(start + datetime.timedelta(days=i)).strftime("%Y%m%d") for i in range(len(closes))]
+        return pd.DataFrame(
+            {
+                "trade_date": dates,
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "vol": vols,
+                "adj_factor": factors,
+            }
+        )
+
+    def _vwac_from_text(self, text):
+        import re
+
+        matches = re.findall(r"\(VWAC\):\s*(\d+\.\d+)", text)
+        self.assertEqual(len(matches), 1, f"应有且仅有一个 VWAC 数值，实际文本: {text}")
+        return float(matches[0])
+
+    def _assert_no_support_metrics(self, text):
+        for marker in self._METRIC_MARKERS:
+            self.assertNotIn(marker, text, f"unknown 状态不得注入伪复权支撑: {text}")
+
+    def test_all_null_factors_returns_invalid_without_metrics(self):
+        closes = [10.0 + i * 0.1 for i in range(30)]
+        history_df = self._history(closes, [1000.0] * 30, [None] * 30)
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": closes[-1]}
+        text, valid = self.strategy._build_support_context(row, prefetched)
+
+        self.assertFalse(valid)
+        self.assertIn("复权因子未知", text)
+        self._assert_no_support_metrics(text)
+
+    def test_zero_base_factor_returns_invalid(self):
+        closes = [10.0] * 30
+        history_df = self._history(closes, [1000.0] * 30, [1.0] * 29 + [0.0])
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": 10.0}
+        text, valid = self.strategy._build_support_context(row, prefetched)
+
+        self.assertFalse(valid)
+        self.assertIn("复权因子未知", text)
+        self._assert_no_support_metrics(text)
+
+    def test_identity_all_one_uses_raw_prices(self):
+        closes = [10.0 + i * 0.1 for i in range(30)]
+        vols = [1000.0 + i * 100 for i in range(30)]
+        history_df = self._history(closes, vols, [1.0] * 30)
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": closes[-1]}
+        text, valid = self.strategy._build_support_context(row, prefetched)
+
+        self.assertTrue(valid)
+        self.assertIn("VWAC", text)
+        expected_raw_vwac = sum(c * v for c, v in zip(closes, vols, strict=True)) / sum(vols)
+        self.assertAlmostEqual(self._vwac_from_text(text), expected_raw_vwac, places=1)
+
+    def test_adjusted_reversed_rows_uses_ratio_and_sorts(self):
+        old_closes, new_closes = 31, 29
+        closes = [20.0] * old_closes + [10.0] * new_closes
+        vols = [1000.0] * (old_closes + new_closes)
+        factors = [2.0] * old_closes + [1.0] * new_closes
+        history_df = self._history(closes, vols, factors).iloc[::-1]  # 乱序输入
+
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": 10.0}
+        text, valid = self.strategy._build_support_context(row, prefetched)
+
+        self.assertTrue(valid)
+        self.assertIn("VWAC", text)
+        qfq_vol_old, qfq_vol_new = 1000.0 / 2.0, 1000.0 / 1.0
+        total_vol = qfq_vol_old * old_closes + qfq_vol_new * new_closes
+        total_amount = 20.0 * 2.0 * qfq_vol_old * old_closes + 10.0 * 1.0 * qfq_vol_new * new_closes
+        self.assertAlmostEqual(self._vwac_from_text(text), total_amount / total_vol, places=1)
+
+    def test_missing_adj_factor_column_returns_invalid(self):
+        closes = [10.0 + i * 0.1 for i in range(30)]
+        history_df = self._history(closes, [1000.0] * 30, [1.0] * 30).drop(columns=["adj_factor"])
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": closes[-1]}
+        text, valid = self.strategy._build_support_context(row, prefetched)
+
+        # 列缺失 = 无复权证据，按 unknown 失败关闭（get_daily_quotes 契约固定返回该列）。
+        self.assertFalse(valid)
+        self.assertIn("复权因子缺失", text)
+        self._assert_no_support_metrics(text)
+
+    def test_non_finite_factors_return_invalid(self):
+        for bad_value in (float("inf"), float("-inf")):
+            for bad_pos in (0, 15, 29):
+                factors = [1.0] * 30
+                factors[bad_pos] = bad_value
+                history_df = self._history([10.0] * 30, [1000.0] * 30, factors)
+                prefetched = PreFetchedContext()
+                prefetched.history = {"000001.SZ": history_df}
+
+                row = {"ts_code": "000001.SZ", "close": 10.0}
+                text, valid = self.strategy._build_support_context(row, prefetched)
+
+                with self.subTest(bad_value=bad_value, bad_pos=bad_pos):
+                    self.assertFalse(valid)
+                    self.assertIn("复权因子未知", text)
+                    self._assert_no_support_metrics(text)
+
+    def test_partial_null_factors_uses_filled_series(self):
+        closes = [20.0] * 31 + [10.0] * 29
+        vols = [1000.0] * 60
+        factors: list[float | None] = [2.0] * 31
+        factors.extend([1.0] * 29)
+        factors[5] = None
+        factors[40] = None
+        history_df = self._history(closes, vols, factors)
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": history_df}
+
+        row = {"ts_code": "000001.SZ", "close": 10.0}
+        text, valid = self.strategy._build_support_context(row, prefetched)
+
+        self.assertTrue(valid)
+        self.assertIn("VWAC", text)
+
+    def test_multi_stock_status_isolated(self):
+        identity_closes = [10.0 + i * 0.1 for i in range(30)]
+        identity_df = self._history(identity_closes, [1000.0] * 30, [1.0] * 30).iloc[::-1]
+        unknown_df = self._history([10.0] * 30, [1000.0] * 30, [None] * 30).iloc[::-1]
+
+        prefetched = PreFetchedContext()
+        prefetched.history = {"000001.SZ": identity_df, "000002.SZ": unknown_df}
+
+        text_ok, valid_ok = self.strategy._build_support_context(
+            {"ts_code": "000001.SZ", "close": identity_closes[-1]}, prefetched
+        )
+        text_bad, valid_bad = self.strategy._build_support_context({"ts_code": "000002.SZ", "close": 10.0}, prefetched)
+
+        self.assertTrue(valid_ok)
+        self.assertIn("VWAC", text_ok)
+        self.assertFalse(valid_bad)
+        self._assert_no_support_metrics(text_bad)
 
 
 class TestRSIPercentile(unittest.TestCase):

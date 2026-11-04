@@ -151,6 +151,7 @@ async def test_oversold_runtime_strategy_context_keeps_all_core_blocks():
                 "low": 14.8 - day * 0.03,
                 "close": 15.0 - day * 0.03,
                 "vol": 1000 + day * 20,
+                "adj_factor": 1.0,
             }
             for day in range(1, 60)
         ]
@@ -162,6 +163,7 @@ async def test_oversold_runtime_strategy_context_keeps_all_core_blocks():
                 "low": 13.0 - day * 0.02,
                 "close": 13.2 - day * 0.02,
                 "vol": 2200 + day * 30,
+                "adj_factor": 1.0,
             }
             for day in range(1, 63)
         ]

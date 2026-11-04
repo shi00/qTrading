@@ -1,5 +1,6 @@
 import datetime
 import logging
+import math
 
 import pandas as pd
 import polars as pl
@@ -11,7 +12,7 @@ from strategies.base_strategy import BaseStrategy, register_strategy
 from strategies.utils import StrategyContext, filter_exclude_delisting, filter_exclude_st
 from core.i18n import I18n, Message
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.qfq import qfq_ratio_expr, qfq_ratio_series
+from utils.qfq import qfq_ratio_expr, qfq_ratio_series, qfq_series_status
 from utils.sanitizers import DataSanitizer
 from utils.technical_analysis import TechnicalAnalysis
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -714,6 +715,16 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         P1-18 fix: 使用复权后的价格和成交量进行计算，确保与 _math_filter 中的 RSI 计算口径一致。
         跨除权除息日时，原始 close 会有跳变，导致 VWAC 失真。
 
+        UIR-X01-105 / R21：``qfq_ratio_series`` 的 None 同时表示「未知」与「恒等」，
+        消费方必须先用 ``qfq_series_status`` 判定三态：
+        - ``unknown``（因子全空 / 基准为 0）→ 复权价不可计算，返回 is_valid=False，
+          调用方跳过注入；不得按 1.0 用原始价伪装成复权支撑。
+        - ``identity``（因子有效但整段相同）→ 与未复权等价，直接使用原始 close/vol。
+        - ``adjusted`` → 按原始 ``qfq_ratio_series`` 缩放。
+        列缺失视为 ``unknown``：``get_daily_quotes`` 契约固定返回 adj_factor 列
+        （quote_dao.py），缺列即无任何复权证据，按失败关闭处理而不是默认恒等。
+        非有限因子（inf/-inf/不可转数值）同样按 unknown 处理，避免把异常因子当有效缩放。
+
         Returns:
             (text, is_valid)：is_valid=False 表示数据不可用/无效，调用方应跳过注入。
         """
@@ -739,14 +750,38 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         qfq_close_col = "close"
         qfq_vol_col = "vol"
 
-        if "adj_factor" in history_df.columns:
-            qfq_ratio = qfq_ratio_series(history_df["adj_factor"])
-            if qfq_ratio is not None:
-                qfq_close_col = "qfq_close"
-                qfq_vol_col = "qfq_vol"
-                history_df = history_df.copy()
-                history_df["qfq_close"] = history_df["close"] * qfq_ratio
-                history_df["qfq_vol"] = history_df["vol"] / qfq_ratio.replace(0, 1.0)
+        if "adj_factor" not in history_df.columns:
+            logger.warning(
+                "[OversoldStrategy] Support context skipped: adj_factor column missing, qfq status unknown (ts_code=%s)",
+                ts_code,
+            )
+            return ("支撑位分析: 复权因子缺失，无法判定复权口径", False)
+
+        factor = pd.Series(pd.to_numeric(history_df["adj_factor"], errors="coerce"))
+        qfq_status = qfq_series_status(factor)
+        if qfq_status != "unknown" and not factor.dropna().map(math.isfinite).all():
+            # inf/-inf 会让 qfq_series_status 的比较误判为 identity/adjusted，局部收紧为 unknown；
+            # 不改变 utils/qfq.py 对其他消费者的既有语义。
+            qfq_status = "unknown"
+
+        if qfq_status == "unknown":
+            logger.warning(
+                "[OversoldStrategy] Support context skipped: qfq factor unknown (ts_code=%s)",
+                ts_code,
+            )
+            return ("支撑位分析: 复权因子未知，无法计算可信支撑", False)
+
+        if qfq_status == "adjusted":
+            qfq_ratio = qfq_ratio_series(factor)
+            if qfq_ratio is None:
+                # status == adjusted 时契约保证非 None；保留兜底以防 utils 语义变更。
+                return ("支撑位分析: 复权因子不可用", False)
+            qfq_close_col = "qfq_close"
+            qfq_vol_col = "qfq_vol"
+            history_df = history_df.copy()
+            history_df["qfq_close"] = history_df["close"] * qfq_ratio
+            history_df["qfq_vol"] = history_df["vol"] / qfq_ratio.replace(0, 1.0)
+        # identity：因子有效但整段相同，原始 close/vol 与复权口径等价，保持原始列。
 
         recent_60 = history_df.tail(60) if len(history_df) >= 60 else history_df
 
