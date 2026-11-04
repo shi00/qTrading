@@ -35,7 +35,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from sqlalchemy import inspect, text
-from sqlalchemy.exc import DataError, IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.db_migrator import DatabaseMigrator
@@ -121,7 +121,7 @@ async def _snapshot(engine: AsyncEngine, statement: str) -> list[tuple]:
 
 
 async def _assert_backup_preserved(engine: AsyncEngine, backup: dict[str, list[tuple]]) -> None:
-    """逻辑备份校验：升级/回退/再升级后各表行与关键值必须与迁移前快照一致。"""
+    """逻辑备份校验：键必须是可执行的 SQL 语句，值是该语句在迁移前的行快照。"""
     for statement, expected in backup.items():
         actual = await _snapshot(engine, statement)
         assert actual == expected, f"迁移前后数据快照不一致: {statement}"
@@ -378,15 +378,10 @@ async def test_screening_thinking_history_id_bigint_boundary(alembic_db_engine: 
     )
     assert await _count_rows(db.engine, "SELECT count(*) FROM screening_history") == 1
 
-    # 旧 schema 的 int32 列拒绝超界值；异常类型随驱动可能是 OverflowError/DataError，
-    # 因此用 exc_info 校验语义并断言失败后无残留行（回滚）。
-    with pytest.raises(Exception) as exc_info:
-        await _execute(
-            db.engine,
-            "INSERT INTO screening_thinking (history_id) VALUES (:history_id)",
-            {"history_id": large_id},
-        )
-    assert "range" in str(exc_info.value).lower() or "overflow" in str(exc_info.value).lower()
+    # 关键：使用常量 SQL 字面量而非绑定参数，避免 asyncpg 在客户端按 int4 提前拒绝，
+    # 从而真实验证旧 schema 由 PostgreSQL 服务端赋值 cast 触发 out-of-range 并回滚。
+    with pytest.raises(DBAPIError, match="out of range"):
+        await _execute(db.engine, "INSERT INTO screening_thinking (history_id) VALUES (2147483648)")
     assert await _count_rows(db.engine, "SELECT count(*) FROM screening_thinking") == 0
     assert await _count_rows(db.engine, "SELECT count(*) FROM screening_history") == 1
 
@@ -399,8 +394,15 @@ async def test_screening_thinking_history_id_bigint_boundary(alembic_db_engine: 
         {"history_id": large_id},
     )
     assert await _count_rows(db.engine, "SELECT count(*) FROM screening_thinking") == 1
+    assert (
+        await _scalar(
+            db.engine,
+            "SELECT history_id FROM screening_thinking",
+        )
+        == large_id
+    )
 
-    with pytest.raises(DataError, match="out of range"):
+    with pytest.raises(DBAPIError, match="out of range"):
         await _downgrade(db, "0017")
 
     # 失败关闭：窄化失败必须整体回滚，版本/列类型/数据与 0018 状态一致。
@@ -467,28 +469,25 @@ async def test_upgrade_downgrade_reupgrade_round_trip(alembic_db_engine: _Migrat
         },
     )
 
+    # 逻辑备份键必须是可执行 SQL 语句（曾被误当作 SQL 执行的表名导致 syntax error）。
+    watchlist_sql = "SELECT ts_code, note, added_trade_date, added_price FROM watchlist ORDER BY ts_code"
+    task_history_sql = "SELECT id, name, task_type, status FROM task_history ORDER BY id"
+    financial_reports_sql = (
+        "SELECT ts_code, end_date, ann_date, total_revenue FROM financial_reports ORDER BY ts_code, end_date, ann_date"
+    )
+    stock_name_history_sql = "SELECT ts_code, start_date, name FROM stock_name_history ORDER BY ts_code, start_date"
+    news_risk_brief_sql = (
+        "SELECT ts_code, input_hash, analysis_status FROM news_risk_brief ORDER BY ts_code, input_hash"
+    )
     backup = {
-        "watchlist": await _snapshot(
-            db.engine,
-            "SELECT ts_code, note, added_trade_date, added_price FROM watchlist ORDER BY ts_code",
-        ),
-        "task_history": await _snapshot(db.engine, "SELECT id, name, task_type, status FROM task_history ORDER BY id"),
-        "financial_reports": await _snapshot(
-            db.engine,
-            "SELECT ts_code, end_date, ann_date, total_revenue FROM financial_reports "
-            "ORDER BY ts_code, end_date, ann_date",
-        ),
-        "stock_name_history": await _snapshot(
-            db.engine,
-            "SELECT ts_code, start_date, name FROM stock_name_history ORDER BY ts_code, start_date",
-        ),
-        "news_risk_brief": await _snapshot(
-            db.engine,
-            "SELECT ts_code, input_hash, analysis_status FROM news_risk_brief ORDER BY ts_code, input_hash",
-        ),
+        watchlist_sql: await _snapshot(db.engine, watchlist_sql),
+        task_history_sql: await _snapshot(db.engine, task_history_sql),
+        financial_reports_sql: await _snapshot(db.engine, financial_reports_sql),
+        stock_name_history_sql: await _snapshot(db.engine, stock_name_history_sql),
+        news_risk_brief_sql: await _snapshot(db.engine, news_risk_brief_sql),
     }
-    for table, rows in backup.items():
-        assert rows, f"{table} 预置数据为空，快照校验将失去意义"
+    for statement, rows in backup.items():
+        assert rows, f"{statement} 预置数据为空，快照校验将失去意义"
 
     await DatabaseMigrator.init_db(db.engine, auto_migrate=True)
     assert await _current_version(db.engine) == await DatabaseMigrator._get_head_revision()
