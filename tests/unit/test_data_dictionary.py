@@ -117,6 +117,18 @@ class TestTableDefinitionsQualityConfig:
         assert qc.get("critical") is True
 
 
+class TestSyncConfigBusinessKeys:
+    """D03-P1：sync_config.keys 须覆盖 ORM 业务唯一键，否则字典元数据与真实唯一键不一致。"""
+
+    def test_fina_mainbz_keys_include_bz_item(self):
+        keys = TABLE_DEFINITIONS["fina_mainbz"]["sync_config"]["keys"]
+        assert keys == ["ts_code", "end_date", "bz_item"]
+
+    def test_dividend_keys_include_end_date(self):
+        keys = TABLE_DEFINITIONS["dividend"]["sync_config"]["keys"]
+        assert keys == ["ts_code", "end_date", "ann_date"]
+
+
 class TestTableDefinitions:
     def test_table_definitions_is_dict(self):
         assert isinstance(TABLE_DEFINITIONS, dict)
