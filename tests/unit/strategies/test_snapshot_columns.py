@@ -158,3 +158,33 @@ def test_snapshot_values_from_base(key: str, strategy_cls: type) -> None:
     assert row["pe_ttm"] == 6.5
     assert row["roe"] == 11.2
     assert row["industry_sw_l2"] == "银行"
+
+
+def test_block_trade_aggregates_do_not_shadow_base_amount_vol() -> None:
+    """D06-R02: 大宗聚合列必须独立命名，base 的 amount/vol 保留日线快照语义。
+
+    真实 Polars join 的 suffix 只作用于右表（base）同名冲突列，因此旧实现把
+    大宗 amount/vol 以原名输出、base 日线值改名为 amount_base/vol_base，导致
+    UI 按「amount=千元 / vol=手」渲染大宗值（3500 万元→0.04 亿、279 万股→0.0 万手）。
+    本测试按真实 collect 结果断言列名与数值来源：
+    - ``amount`` / ``vol`` 必须等于 base 日线快照（千元 / 手）；
+    - 大宗聚合值落在显式业务列 ``block_amount_wan`` / ``block_vol_wanshare``（万元 / 万股）；
+    - 不再产生 ``amount_base`` / ``vol_base`` 这类改名冲突列。
+    """
+    base_df = _make_base_df()
+    result = (
+        BlockTradeStrategy()
+        ._filter_logic(pl.from_pandas(base_df).lazy(), _make_context("block_trade", _make_right_df("block_trade")))
+        .collect()
+    )
+    row = result.filter(pl.col("ts_code") == "000001.SZ").to_dicts()[0]
+
+    # base 日线快照（千元 / 手）
+    assert row["amount"] == 6.0e8
+    assert row["vol"] == 500000.0
+    # 大宗聚合（万元 / 万股）：两笔 2000+1500 万元、160+119 万股
+    assert row["block_amount_wan"] == 3500.0
+    assert row["block_vol_wanshare"] == 279.0
+    assert abs(row["block_vwap"] - 3500.0 / 279.0) < 1e-9
+    assert "amount_base" not in result.columns
+    assert "vol_base" not in result.columns

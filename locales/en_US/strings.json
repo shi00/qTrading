@@ -278,6 +278,8 @@
     "col_price": "Price",
     "col_block_vwap": "Block VWAP",
     "col_block_discount_pct": "Block Discount%",
+    "col_block_amount_wan": "Block Trade Amount",
+    "col_block_vol_wanshare": "Block Trade Volume",
     "col_chg": "Change%",
     "col_pe": "PE",
     "col_turnover": "Turnover",

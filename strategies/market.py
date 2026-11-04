@@ -430,8 +430,10 @@ class BlockTradeStrategy(PolarsBaseStrategy):
         try:
             block_lf = pl.from_pandas(block).lazy()
             # D2-M5: 保留 base 全部基础快照列（screening_history 需要完整快照）。
-            # 聚合右表 amount/vol 是该策略业务列（大宗成交额/量），与 base 同名冲突，
-            # 以 suffix="_base" 重命名 base 冲突列，保留右表业务值原名供落库。
+            # D06-R02: 大宗聚合列显式命名 block_amount_wan（万元）/ block_vol_wanshare（万股），
+            # 不再占用 base 的 amount/vol 名——Polars join 的 suffix 只作用于右表（base），
+            # 旧写法会让输出 amount/vol 携带大宗值、base 日线值被改名为 amount_base/vol_base，
+            # 而 UI/持久化按「amount=千元 / vol=手」消费同名段，产生 10x/100x 单位错位。
             # R20：amount 为红线列，禁止裸数值比较；经统一入口换算（block 无单位元数据时回退声明单位 wan_cny）。
             amount_threshold = threshold_in_data_unit(
                 block, "amount", BLOCK_TRADE_AMOUNT_UNIT, target_amount, "wan_cny"
@@ -444,12 +446,12 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                 .group_by("ts_code")
                 .agg(
                     [
-                        pl.col("amount").sum(),
-                        pl.col("vol").sum(),
+                        pl.col("amount").sum().alias("block_amount_wan"),
+                        pl.col("vol").sum().alias("block_vol_wanshare"),
                         (pl.col("amount").sum() / pl.col("vol").sum()).alias("block_vwap"),
                     ],
                 )
-                .join(lf, on="ts_code", how="inner", suffix="_base")
+                .join(lf, on="ts_code", how="inner")
                 .with_columns(
                     ((pl.col("block_vwap") - pl.col("close")) / pl.col("close") * 100).alias("block_discount_pct")
                 )
@@ -459,8 +461,8 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                 )
                 # SC-04: 排序方向须与过滤方向一致——block_discount_pct 为带符号溢价率
                 # (溢价>0/折价<0)，降序即溢价/浅折价优先、深折价(负面信号)置末；null
-                # (close 缺失)默认排末尾，不伪造方向(R21)。同折价率按 amount 降序。
-                .sort(["block_discount_pct", "amount"], descending=[True, True])
+                # (close 缺失)默认排末尾，不伪造方向(R21)。同折价率按大宗成交额降序。
+                .sort(["block_discount_pct", "block_amount_wan"], descending=[True, True])
             )
         # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
         #   ceiling: 单次策略执行 Polars 算子异常，返回 lf.head(0) 降级.
