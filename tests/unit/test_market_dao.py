@@ -68,6 +68,29 @@ class TestMarketDaoSaveMarketNews:
         assert result == 1
 
     @pytest.mark.asyncio
+    async def test_date_shaped_content_bound_verbatim(self):
+        """D03-F03: content 为合法日期形文本时，最终绑定参数逐字保留原字符串（不转 date）。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        captured: dict = {}
+
+        class _Conn:
+            async def exec_driver_sql(self, sql, params):
+                captured["sql"] = sql
+                captured["params"] = params
+                return _FakeResult(1)
+
+        @asynccontextmanager
+        async def fake_begin():
+            yield _Conn()
+
+        dao.engine.begin = MagicMock(return_value=fake_begin())
+        content = "2026-04-29"
+        await dao.save_market_news({"content": content, "publish_time": "2026-04-29T08:30:00"})
+        bound = captured["params"]
+        assert bound[0] == content
+        assert isinstance(bound[0], str)
+
+    @pytest.mark.asyncio
     async def test_empty_content(self):
         dao = MarketDao(MagicMock(spec=AsyncEngine))
         dao._write_db = AsyncMock(return_value=1)

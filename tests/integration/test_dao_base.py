@@ -36,9 +36,9 @@ class TestBaseDaoConvertParam:
         assert result == "20240321"
 
     def test_convert_date_string_yyyy_mm_dd(self):
-        """YYYY-MM-DD 格式字符串转换为 date"""
+        """D03-F03: YYYY-MM-DD 形态文本原样透传（Date 列由 _to_db_date 显式归一）"""
         result = BaseDao._convert_param_for_asyncpg("2024-03-21")
-        assert result == datetime.date(2024, 3, 21)
+        assert result == "2024-03-21"
 
     def test_convert_invalid_date_string(self):
         """无效日期字符串保持不变"""
