@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import logging
 
 import pandas as pd
@@ -10,6 +11,59 @@ from data.sync.base import safe_error
 from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
+
+
+def _build_macro_economy_latest_stmt(as_of_date: datetime.date | None = None) -> sa.CompoundSelect:
+    """构造「最新月度行 + 最新 GDP 行」的单语句查询（D03-F01）。
+
+    macro_economy 将月度（m2/m1/m0/cpi/ppi）与季度 GDP 作为独立行存储。全局
+    ``publish_date desc limit(2)`` 在 GDP 之后出现 ≥2 条月度发布时会把 GDP 行
+    挤出窗口，导致 AI 宏观上下文静默缺失 GDP 段。
+
+    两个分支共用同一可见性条件（publish_date 非空、as_of 时 publish_date <=
+    as_of），各自按 publish_date、period 稳定倒序取 1 行，再用 UNION 合并，
+    保证同一快照、最多 2 行，且不改变既有返回列。分支以各自实际指标列非空
+    识别（合法 0 值不算缺失；月度只缺部分列也不会被整体剔除）。
+    """
+    t = MacroEconomy.__table__
+    cols = [
+        t.c.period,
+        t.c.publish_date,
+        t.c.m2,
+        t.c.m2_yoy,
+        t.c.m1,
+        t.c.m1_yoy,
+        t.c.m0,
+        t.c.m0_yoy,
+        t.c.cpi,
+        t.c.ppi,
+        # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
+        t.c.gdp,
+        t.c.gdp_yoy,
+        t.c.pi,
+        t.c.pi_yoy,
+        t.c.si,
+        t.c.si_yoy,
+        t.c.ti,
+        t.c.ti_yoy,
+    ]
+    monthly_cols = (t.c.m2, t.c.m2_yoy, t.c.m1, t.c.m1_yoy, t.c.m0, t.c.m0_yoy, t.c.cpi, t.c.ppi)
+    gdp_cols = (t.c.gdp, t.c.gdp_yoy, t.c.pi, t.c.pi_yoy, t.c.si, t.c.si_yoy, t.c.ti, t.c.ti_yoy)
+
+    # DAT-06: publish_date 与 ann_date 同构的可空 PIT 键，显式排除 NULL；
+    # as_of 时两分支共用同一 publish_date 上界，消除口径差。
+    common = t.c.publish_date.is_not(None)
+    if as_of_date is not None:
+        common = sa.and_(common, t.c.publish_date <= as_of_date)
+
+    def _latest(any_cols) -> sa.Select:
+        stmt = sa.select(*cols).where(common, sa.or_(*[c.is_not(None) for c in any_cols]))
+        return stmt.order_by(t.c.publish_date.desc(), t.c.period.desc()).limit(1)
+
+    monthly_stmt = _latest(monthly_cols)
+    gdp_stmt = _latest(gdp_cols)
+    # UNION（去重）而非 UNION ALL：极端情况下同一行同时命中两分支也最多计 1 行。
+    return sa.union(monthly_stmt.subquery().select(), gdp_stmt.subquery().select()).limit(2)
 
 
 class MacroDao(BaseDao):
@@ -155,44 +209,15 @@ class MacroDao(BaseDao):
 
         Note:
             Phase 2D §3.2.6：GDP 行与月度行 period 不同（季度末日 vs 月初），
-            二者作为独立行存储。返回最多 2 行（publish_date 倒序）：最新月度行
-            + 最新 GDP 行。调用方需用 ``pd.notna()`` 判断各字段是否可用。
+            二者作为独立行存储。返回最多 2 行：最新月度行 + 最新 GDP 行，各自
+            按 publish_date、period 倒序取 1 行（见 ``_build_macro_economy_latest_stmt``）。
+            调用方需用 ``pd.notna()`` 判断各字段是否可用。
         """
         try:
-            t = MacroEconomy.__table__
-            cols = [
-                t.c.period,
-                t.c.publish_date,
-                t.c.m2,
-                t.c.m2_yoy,
-                t.c.m1,
-                t.c.m1_yoy,
-                t.c.m0,
-                t.c.m0_yoy,
-                t.c.cpi,
-                t.c.ppi,
-                # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
-                t.c.gdp,
-                t.c.gdp_yoy,
-                t.c.pi,
-                t.c.pi_yoy,
-                t.c.si,
-                t.c.si_yoy,
-                t.c.ti,
-                t.c.ti_yoy,
-            ]
-            stmt = sa.select(*cols)
-            # DAT-06: publish_date 与 ann_date 同构的可空 PIT 键，两分支显式排除 NULL，
-            # 使「NULL 被剔除」成为明写规则，消除 as-of/非 as-of 口径差。
-            stmt = stmt.where(t.c.publish_date.is_not(None))
             # DAT-26: 同 get_shibor_latest——8 位 YYYYMMDD 串在 DAO 边界归一化为
             # date 对象，避免 asyncpg date codec 编码失败导致回放静默失效。
             as_of_date = self._to_db_date(as_of_date)
-            if as_of_date is not None:
-                stmt = stmt.where(t.c.publish_date <= as_of_date)
-            # 返回最多 2 行：月度行（m2/cpi/ppi）与 GDP 行（gdp_yoy/pi_yoy 等）
-            # period 不同（月度 YYYY-MM-01 vs 季度末日），作为独立行存储。
-            stmt = stmt.order_by(t.c.publish_date.desc()).limit(2)
+            stmt = _build_macro_economy_latest_stmt(as_of_date)
 
             df = await self._read_db_select(stmt)
             return df if df is not None else pd.DataFrame()

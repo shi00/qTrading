@@ -9,10 +9,12 @@ import datetime
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.daos.macro_dao import MacroDao
+from data.persistence.daos.macro_dao import MacroDao, _build_macro_economy_latest_stmt
+from data.persistence.models import MacroEconomy
 
 pytestmark = pytest.mark.unit
 
@@ -253,7 +255,9 @@ class TestMacroDaoAsOfDateNormalization:
         assert "publish_date <=" in sql_str
         assert "publish_date IS NOT NULL" in sql_str
         date_values = [v for v in stmt.compile().params.values() if isinstance(v, datetime.date)]
+        # 月度/ GDP 两分支共用同一归一化 bind 参数，SQL 两处 WHERE 复用同一日期
         assert date_values == [datetime.date(2024, 1, 15)]
+        assert sql_str.count("publish_date <=") == 2
 
     @pytest.mark.asyncio
     async def test_get_macro_economy_latest_accepts_date_object(self):
@@ -264,6 +268,7 @@ class TestMacroDaoAsOfDateNormalization:
         stmt = dao._read_db_select.call_args[0][0]
         date_values = [v for v in stmt.compile().params.values() if isinstance(v, datetime.date)]
         assert date_values == [datetime.date(2024, 1, 15)]
+        assert str(stmt).count("publish_date <=") == 2
 
 
 class TestMacroDaoErrorPropagation:
@@ -300,3 +305,140 @@ class TestMacroDaoErrorPropagation:
         dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
         with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_macro_economy_latest()
+
+
+class TestMacroDaoMixedFrequencySelection:
+    """D03-F01：月度行 + GDP 行混频选行必须是「各频率最新可见 1 行」。
+
+    既有实现按 publish_date 全表倒序 limit(2)，在 GDP 之后有 ≥2 条月度发布时
+    会把 GDP 行挤出窗口。此处用 SQLite 内存库执行 DAO 生成的真实 SQL，
+    覆盖 PIT 可见性、混频缺失、合法零值、稳定排序与 NULL publish_date。
+    """
+
+    @staticmethod
+    def _row(period, publish_date, **values):
+        row = {c.name: None for c in MacroEconomy.__table__.columns}
+        row.update(period=period, publish_date=publish_date)
+        row.update(values)
+        return row
+
+    @staticmethod
+    def _execute(rows, as_of_date=None):
+        engine = sa.create_engine("sqlite://")
+        MacroEconomy.__table__.create(engine)
+        with engine.begin() as conn:
+            conn.execute(MacroEconomy.__table__.insert(), rows)
+        with engine.connect() as conn:
+            return conn.execute(_build_macro_economy_latest_stmt(as_of_date)).mappings().all()
+
+    def test_returns_latest_monthly_and_latest_visible_gdp(self):
+        """验收：两条新月度 + 一条旧但可见 GDP → 返回最新月度与 GDP。"""
+        rows = [
+            self._row(
+                datetime.date(2024, 4, 30),
+                datetime.date(2024, 4, 20),
+                gdp=100.0,
+                gdp_yoy=5.2,
+                pi_yoy=3.1,
+                si_yoy=5.0,
+                ti_yoy=5.8,
+            ),
+            self._row(datetime.date(2024, 5, 1), datetime.date(2024, 5, 16), m2_yoy=8.5, cpi=0.2, ppi=-1.5),
+            self._row(datetime.date(2024, 6, 1), datetime.date(2024, 6, 16), m2_yoy=8.4, cpi=0.3, ppi=-1.4),
+        ]
+
+        result = self._execute(rows, datetime.date(2024, 6, 20))
+
+        assert len(result) == 2
+        by_period = {row["period"]: row for row in result}
+        assert set(by_period) == {datetime.date(2024, 4, 30), datetime.date(2024, 6, 1)}
+
+        gdp = by_period[datetime.date(2024, 4, 30)]
+        assert float(gdp["gdp_yoy"]) == pytest.approx(5.2)
+        assert float(gdp["pi_yoy"]) == pytest.approx(3.1)
+        # 值不得互填：GDP 行不带月度字段
+        assert gdp["m2_yoy"] is None
+        assert gdp["cpi"] is None
+        assert gdp["ppi"] is None
+
+        monthly = by_period[datetime.date(2024, 6, 1)]
+        assert float(monthly["m2_yoy"]) == pytest.approx(8.4)
+        assert float(monthly["cpi"]) == pytest.approx(0.3)
+        assert float(monthly["ppi"]) == pytest.approx(-1.4)
+        assert monthly["gdp_yoy"] is None
+        assert monthly["pi_yoy"] is None
+
+    def test_as_of_before_gdp_publish_excludes_gdp(self):
+        """as_of 早于 GDP 发布日 → 无 GDP（即使月度行同样不可见则整体为空）。"""
+        rows = [
+            self._row(datetime.date(2024, 4, 30), datetime.date(2024, 4, 20), gdp_yoy=5.2),
+            self._row(datetime.date(2024, 5, 1), datetime.date(2024, 5, 16), m2_yoy=8.5),
+        ]
+
+        assert len(self._execute(rows, datetime.date(2024, 4, 19))) == 0
+
+        # GDP 已发布但月度尚未发布：只返回 GDP 行，不得用月度值补 GDP
+        result = self._execute(rows, datetime.date(2024, 5, 1))
+        assert len(result) == 1
+        assert result[0]["period"] == datetime.date(2024, 4, 30)
+        assert float(result[0]["gdp_yoy"]) == pytest.approx(5.2)
+        assert result[0]["m2_yoy"] is None
+
+    def test_monthly_missing_returns_gdp_only(self):
+        rows = [self._row(datetime.date(2024, 4, 30), datetime.date(2024, 4, 20), gdp_yoy=5.2)]
+        result = self._execute(rows, datetime.date(2024, 6, 20))
+        assert len(result) == 1
+        assert result[0]["period"] == datetime.date(2024, 4, 30)
+        assert float(result[0]["gdp_yoy"]) == pytest.approx(5.2)
+        assert result[0]["m2_yoy"] is None
+
+    def test_gdp_missing_returns_latest_monthly_only(self):
+        rows = [
+            self._row(datetime.date(2024, 5, 1), datetime.date(2024, 5, 16), m2_yoy=8.5),
+            self._row(datetime.date(2024, 6, 1), datetime.date(2024, 6, 16), m2_yoy=8.4),
+        ]
+        result = self._execute(rows, datetime.date(2024, 6, 20))
+        assert len(result) == 1
+        assert result[0]["period"] == datetime.date(2024, 6, 1)
+        assert float(result[0]["m2_yoy"]) == pytest.approx(8.4)
+        assert result[0]["gdp_yoy"] is None
+
+    def test_same_publish_date_uses_period_desc_as_tiebreaker(self):
+        """同 publish_date 时两个分支均按 period 稳定降序取最新一行。"""
+        rows = [
+            self._row(datetime.date(2024, 5, 1), datetime.date(2024, 6, 16), m2_yoy=8.0),
+            self._row(datetime.date(2024, 6, 1), datetime.date(2024, 6, 16), m2_yoy=8.4),
+            self._row(datetime.date(2024, 3, 31), datetime.date(2024, 7, 20), gdp_yoy=5.0),
+            self._row(datetime.date(2024, 6, 30), datetime.date(2024, 7, 20), gdp_yoy=5.3),
+        ]
+        result = self._execute(rows, datetime.date(2024, 7, 31))
+        by_period = {row["period"]: row for row in result}
+        assert set(by_period) == {datetime.date(2024, 6, 1), datetime.date(2024, 6, 30)}
+        assert float(by_period[datetime.date(2024, 6, 1)]["m2_yoy"]) == pytest.approx(8.4)
+        assert float(by_period[datetime.date(2024, 6, 30)]["gdp_yoy"]) == pytest.approx(5.3)
+
+    def test_legal_zero_and_partial_monthly_columns_are_kept(self):
+        """合法零值不算缺失；月度缺某列（仅 cpi）不应被整体剔除。"""
+        rows = [
+            self._row(datetime.date(2024, 4, 30), datetime.date(2024, 4, 20), gdp_yoy=0.0),
+            self._row(datetime.date(2024, 6, 1), datetime.date(2024, 6, 16), cpi=0.2),
+        ]
+        result = self._execute(rows, datetime.date(2024, 6, 20))
+        assert len(result) == 2
+        by_period = {row["period"]: row for row in result}
+        assert float(by_period[datetime.date(2024, 4, 30)]["gdp_yoy"]) == pytest.approx(0.0)
+        assert float(by_period[datetime.date(2024, 6, 1)]["cpi"]) == pytest.approx(0.2)
+        # 不得用 0 或他行值补缺失字段
+        assert by_period[datetime.date(2024, 6, 1)]["m2_yoy"] is None
+        assert by_period[datetime.date(2024, 4, 30)]["cpi"] is None
+
+    def test_null_publish_date_rows_are_excluded(self):
+        """DAT-06：publish_date 为 NULL 的行不可见（保持既有 PIT 口径）。"""
+        rows = [
+            self._row(datetime.date(2024, 7, 1), None, m2_yoy=9.9),
+            self._row(datetime.date(2024, 6, 1), datetime.date(2024, 6, 16), m2_yoy=8.4),
+        ]
+        result = self._execute(rows, None)
+        assert len(result) == 1
+        assert result[0]["period"] == datetime.date(2024, 6, 1)
+        assert float(result[0]["m2_yoy"]) == pytest.approx(8.4)
