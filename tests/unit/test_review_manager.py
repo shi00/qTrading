@@ -1070,6 +1070,88 @@ class TestReviewManagerSaveResults:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_block_strategy_persists_block_metrics(self, mock_cm, mock_tc):
+        """大宗策略输出含 block_amount_wan/block_vol_wanshare → 两列按原值落库。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240615"],
+                "amount": [123456.0],
+                "vol": [7890.0],
+                "block_amount_wan": [123.4567],
+                "block_vol_wanshare": [45.6789],
+            }
+        )
+        await rm.save_results("block_trade", df, trade_date="20240615")
+
+        records = mock_cache.screener_dao.save_screening_results.call_args.args[0]
+        assert records[0]["block_amount_wan"] == pytest.approx(123.4567)
+        assert records[0]["block_vol_wanshare"] == pytest.approx(45.6789)
+        # 日线快照字段仍写日线值，不从大宗列反推
+        assert records[0]["amount"] == pytest.approx(123456.0)
+        assert records[0]["vol"] == pytest.approx(7890.0)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_non_block_strategy_persists_block_metrics_none(self, mock_cm, mock_tc):
+        """非大宗策略缺列 → 两列写 None（SQL NULL），不得从 amount/vol 伪造。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240615"],
+                "amount": [123456.0],
+                "vol": [7890.0],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+
+        records = mock_cache.screener_dao.save_screening_results.call_args.args[0]
+        assert records[0]["block_amount_wan"] is None
+        assert records[0]["block_vol_wanshare"] is None
+        assert records[0]["amount"] == pytest.approx(123456.0)
+        assert records[0]["vol"] == pytest.approx(7890.0)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_block_metrics_nan_persists_none(self, mock_cm, mock_tc):
+        """大宗列存在但值为 NaN → None（R21 缺失不伪装），不得写 0。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240615"],
+                "block_amount_wan": [float("nan")],
+                "block_vol_wanshare": [float("nan")],
+            }
+        )
+        await rm.save_results("block_trade", df, trade_date="20240615")
+
+        records = mock_cache.screener_dao.save_screening_results.call_args.args[0]
+        assert records[0]["block_amount_wan"] is None
+        assert records[0]["block_vol_wanshare"] is None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
     async def test_save_with_no_trade_date_raises(self, mock_cm, mock_tc):
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache

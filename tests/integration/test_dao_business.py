@@ -382,6 +382,44 @@ class TestScreenerDao:
         assert result["ts_code"].iloc[0] == "000001.SZ"
         assert result["ai_score"].iloc[0] == 85
 
+    async def test_save_screening_results_persists_block_metrics(self, screener_dao, clean_db):
+        """D06-R02：大宗行落库两列原值；非大宗行两列为 NULL（不从 amount/vol 反推）。"""
+        records = [
+            {
+                "run_id": "RUN_BLOCK",
+                "trade_date": _RECENT_DATE,
+                "strategy_name": "block_trade",
+                "ts_code": "000001.SZ",
+                "amount": 123456.0,
+                "vol": 7890.0,
+                "block_amount_wan": 123.4567,
+                "block_vol_wanshare": 45.6789,
+            },
+            {
+                "run_id": "RUN_BLOCK",
+                "trade_date": _RECENT_DATE,
+                "strategy_name": "block_trade",
+                "ts_code": "000002.SZ",
+                "amount": 654321.0,
+                "vol": 4321.0,
+            },
+        ]
+        await screener_dao.save_screening_results(records)
+
+        result = await screener_dao.get_history_records(trade_date=_RECENT_DATE, strategy_name="block_trade")
+        assert {"block_amount_wan", "block_vol_wanshare"} <= set(result.columns)
+        by_code = result.set_index("ts_code")
+        block_row = by_code.loc["000001.SZ"]
+        assert float(block_row["block_amount_wan"]) == pytest.approx(123.4567)
+        assert float(block_row["block_vol_wanshare"]) == pytest.approx(45.6789)
+        # amount/vol 仍为日线快照值，未被大宗列覆盖
+        assert float(block_row["amount"]) == pytest.approx(123456.0)
+        assert float(block_row["vol"]) == pytest.approx(7890.0)
+
+        non_block_row = by_code.loc["000002.SZ"]
+        assert pd.isna(non_block_row["block_amount_wan"])
+        assert pd.isna(non_block_row["block_vol_wanshare"])
+
     async def test_get_history_tree(self, screener_dao, clean_db):
         """获取历史树形数据"""
         records = [
@@ -865,6 +903,8 @@ class TestScreenerDao:
             "exec_warnings",
             "filter_attribution",
             "execution_metadata",
+            "block_amount_wan",
+            "block_vol_wanshare",
         ]
         assert all_cols == expected_order, f"Column order mismatch: {all_cols}"
 

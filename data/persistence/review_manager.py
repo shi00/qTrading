@@ -1892,6 +1892,10 @@ class ReviewManager:
                     "exec_warnings": exec_warnings_value,
                     "filter_attribution": _parse_filter_attribution(row.get(_ATTRIBUTION_COLUMN)),
                     "execution_metadata": execution_metadata,
+                    # D06-R02：大宗聚合快照按策略输出原值落库；非大宗策略缺列 → None
+                    # （不读 amount/vol 反推，R21）。amount/vol 仍写日线快照值。
+                    "block_amount_wan": _f(row, "block_amount_wan"),
+                    "block_vol_wanshare": _f(row, "block_vol_wanshare"),
                 }
             )
 
