@@ -21,7 +21,7 @@ from data.constants import (
     board_benchmark_for,
 )
 from data.external.tushare_client import TushareClient
-from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
 from data.persistence.review_manager import ReviewManager, _is_t1_untradable, deserialize_exec_warnings
 from utils.time_utils import to_date
 
@@ -3587,6 +3587,34 @@ class TestReviewManagerBackfill:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_quotes_read_is_strict(self, mock_cm, mock_tc):
+        """TP11-F02: T+5 回填的关键行情读取必须显式 fail-fast（suppress_errors=False）。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        await rm.backfill_horizon_returns()
+        assert mock_cache.quote_dao.get_daily_quotes.await_args.kwargs["suppress_errors"] is False
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_aborts_when_quotes_read_fails(self, mock_cm, mock_tc):
+        """TP11-F02: 行情页查询失败（DatabaseQueryError）必须中止回填，不得以缺码当无行情继续写库。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=DatabaseQueryError("page read failed"))
+        with pytest.raises(DatabaseQueryError, match="page read failed") as exc_info:
+            await rm.backfill_horizon_returns()
+        assert str(exc_info.value) == "page read failed"
+        rm._batch_backfill_t5.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
     async def test_backfill_fills_mature_record(self, mock_cm, mock_tc):
         rm, mock_cache = self._make_rm(mock_cm)
         mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
@@ -3965,6 +3993,58 @@ class TestReviewManagerT1Backfill:
         )
         count = await rm.backfill_t1_returns()
         assert count == 0
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_quotes_read_is_strict(self, mock_cm, mock_tc):
+        """TP11-F02: T+1 回填的关键行情读取必须显式 fail-fast（suppress_errors=False）。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(),
+        )
+        await rm.backfill_t1_returns()
+        assert mock_cache.quote_dao.get_daily_quotes.await_args.kwargs["suppress_errors"] is False
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_aborts_when_quotes_read_fails(self, mock_cm, mock_tc):
+        """TP11-F02: 行情页查询失败必须中止回填，不得把缺码当无行情 continue 后继续写库。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(),
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=DatabaseQueryError("page read failed"))
+        with pytest.raises(DatabaseQueryError, match="page read failed") as exc_info:
+            await rm.backfill_t1_returns()
+        assert str(exc_info.value) == "page read failed"
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [asyncio.CancelledError(), EngineDisposedError("engine disposed")],
+        ids=["cancelled", "engine_disposed"],
+    )
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_propagates_cancel_and_engine_disposed(self, mock_cm, mock_tc, exc):
+        """R2/R5: 取消与引擎释放异常必须原样传播，不得被转译或吞没。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(),
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=exc)
+        with pytest.raises(type(exc)) as exc_info:
+            await rm.backfill_t1_returns()
+        # 原样传播：必须是同一异常实例，且消息未被转译/包装。
+        assert exc_info.value is exc
+        assert str(exc_info.value) == str(exc)
         rm._batch_update_results.assert_not_called()
 
     @pytest.mark.asyncio
