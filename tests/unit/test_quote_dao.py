@@ -152,8 +152,12 @@ class TestQuoteDaoGetDailyQuotes:
             return pd.DataFrame({"ts_code": page_codes, "trade_date": ["20240610"] * len(page_codes)})
 
         dao._read_db = AsyncMock(side_effect=_page)
-        with pytest.raises(DatabaseQueryError):
+        with pytest.raises(DatabaseQueryError, match="Chunked read failed") as exc_info:
             await dao.get_daily_quotes(ts_code_list=codes, start_date="20240101", suppress_errors=False)
+        # 页失败必须作为异常上抛并被 _chunked_execute 记录原因，而非被吞成空页。
+        assert "partial results discarded" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, DatabaseQueryError)
+        assert str(exc_info.value.__cause__) == "page read failed"
 
     @pytest.mark.asyncio
     async def test_empty_code_list_returns_empty_without_query(self):

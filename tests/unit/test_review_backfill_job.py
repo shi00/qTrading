@@ -170,8 +170,9 @@ class TestBuildReviewBackfillJob:
             mock_rm.expire_stale_pending = AsyncMock(return_value=0)
             mock_rm._benchmark_diag = None
             mock_rm_cls.return_value = mock_rm
-            with pytest.raises(DatabaseQueryError):
+            with pytest.raises(DatabaseQueryError, match="page read failed") as exc_info:
                 await _submit_and_run(job, mock_tm_cls)
+        assert str(exc_info.value) == "page read failed"
         mock_rm.backfill_horizon_returns.assert_not_awaited()
         mock_rm.expire_stale_pending.assert_not_awaited()
 

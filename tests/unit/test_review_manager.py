@@ -3533,8 +3533,9 @@ class TestReviewManagerBackfill:
             return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=DatabaseQueryError("page read failed"))
-        with pytest.raises(DatabaseQueryError):
+        with pytest.raises(DatabaseQueryError, match="page read failed") as exc_info:
             await rm.backfill_horizon_returns()
+        assert str(exc_info.value) == "page read failed"
         rm._batch_backfill_t5.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3944,8 +3945,9 @@ class TestReviewManagerT1Backfill:
             pd.DataFrame(),
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=DatabaseQueryError("page read failed"))
-        with pytest.raises(DatabaseQueryError):
+        with pytest.raises(DatabaseQueryError, match="page read failed") as exc_info:
             await rm.backfill_t1_returns()
+        assert str(exc_info.value) == "page read failed"
         rm._batch_update_results.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3964,8 +3966,11 @@ class TestReviewManagerT1Backfill:
             pd.DataFrame(),
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=exc)
-        with pytest.raises(type(exc)):
+        with pytest.raises(type(exc)) as exc_info:
             await rm.backfill_t1_returns()
+        # 原样传播：必须是同一异常实例，且消息未被转译/包装。
+        assert exc_info.value is exc
+        assert str(exc_info.value) == str(exc)
         rm._batch_update_results.assert_not_called()
 
     @pytest.mark.asyncio
