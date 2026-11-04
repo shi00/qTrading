@@ -119,7 +119,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/sync_e2e_fonts.py` | E2E 缓存字体同步（资产准备） | 手动 | 不阻断 |
 | `scripts/safe_cleanup_branches.py` | 分支安全清理 | 手动 | 不阻断 |
 | `scripts/sanitize_artifacts.py` | 上传前对文本工件做 R9 凭证脱敏（复用 `DataSanitizer.sanitize_error`，glob 未匹配即跳过） | CI `embedded-tests` 日志上传前 | 阻断（脱敏失败则 step 失败） |
-| `scripts/migrate_strategy_name_to_i18n_key.py` | 历史 strategy_name 迁移为 i18n key（一次性 DB 迁移） | 手动 | 不阻断 |
+| `scripts/migrate_strategy_name_to_i18n_key.py` | 历史 strategy_name 迁移为 i18n key（一次性 DB 迁移；仅 revision ≥ 0033 可 `--execute`，默认 dry-run 预检 revision 与归一化冲突，写入包单事务） | 手动 | 不阻断 |
 | `scripts/verify_finbert_gguf.py` | FinBERT2-base GGUF（f16 发布主体；Q8_0 可选对照）与 PyTorch 参考编码器一致性门禁（N0-3；分词/CLS/概率/维度，需 finbert 环境） | 手动 / CI（`finbert-train.yml` Gate）/ 发布；Gate FAIL 阻断 Release | 不阻断 CI，阻断 Release |
 | `scripts/verify_finbert_effect_gate.py` | FinBERT 模型效果硬门槛（FT-02；需 gh 凭据）：新模型 dev/test macro-F1 须 ≥ 最近一次已发布 Release（tag `finbert-gguf-v*`）note 中同名字段 - 0.03；锚点运行期从 Release note 解析（不硬编码），锚点不可解析即 fail-closed | 手动 / CI（`finbert-train.yml` Effect gate）/ 发布；FAIL 阻断 Release | 不阻断 CI，阻断 Release |
 | `scripts/corpus_manifest.py` | FinBERT 训练语料 manifest 校验 / 生成（FT-07）：manifest（schema `finbert-corpus-manifest.v1`，含 corpus_tag/版本 + 三 split 非空行数/SHA256）为行数/digest 期望值唯一权威来源，替代原硬编码 8813/1102/1102；`build` 由语料实测生成 manifest，`verify` 校验文件与 manifest/`SHA256SUMS.txt` 交叉一致（防双事实源漂移）；legacy 语料（corpus-v1，无 manifest）经显式登记表 `LEGACY_CORPUS_REGISTRY` 兜底并在报告/Release note 声明「未做 manifest 校验」，未登记 tag 缺 manifest 即 fail-closed（不静默回退硬编码） | 手动（`build`，语料 Release 创建）/ CI（`finbert-train.yml`，`verify`）/ 维护 | 不阻断 CI，阻断 Release |
