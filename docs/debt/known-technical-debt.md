@@ -33,7 +33,7 @@
 | P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | ① `cargo llvm-cov` 覆盖率回归（run.rs 覆盖率下降或门禁失败）时；② 或 run.rs supervisor 可测路径被独立重构时 |
 | P2-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P2 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
-| P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption | `_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制） | P3 | 引入 Alembic 多分支（Multiple Heads）时 |
+| P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption | 孤儿/多行 `alembic_version` 已改为 fail-closed，拒绝自动 stamp（恢复脚本后再评估） | P3 | 恢复缺失迁移脚本后重新评估；或引入 Alembic 多分支（Multiple Heads）时 |
 | P3-M4-AppStateService-BroadExcept | `app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
 | P3-M6-NewsFetcher-Lazy-ProxyManager-Import | `news_fetcher.py:618/:785/:951` 三处函数内部 import ProxyManager（合理避免循环依赖，建议保留） | P3 | ① `proxy_manager.py` 循环依赖被解除时；② 或该文件再次出现函数内 import 的新实例时 |
 | P3-Windows-Unit-Test-Timeout-Tight | Windows 单测 step `timeout-minutes` 余量不足（main 成功 run 13 分 41 秒 / 原 15 分钟 = 91% 占用） | P3 | ① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试） |
@@ -374,19 +374,19 @@ D4.1/D4.2（Polars 1.44.2→2.1.0，2026-10）盘点结论：全仓 18 个生产
 
 ### 数据库迁移与循环依赖
 
-#### P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption：`_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制）
+#### P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption：孤儿/多行 `alembic_version` 已改为 fail-closed，恢复脚本后再评估
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption** | `_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制） | 引入 Alembic 多分支（Multiple Heads）时 |
+| **P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption** | 孤儿/多行 `alembic_version` 已改为 fail-closed，拒绝自动 stamp（恢复脚本后再评估） | 恢复缺失迁移脚本后重新评估；或引入 Alembic 多分支（Multiple Heads）时 |
 
 **产生背景与现状**
 
-M4 模块化检视发现：`data/persistence/db_migrator.py:156-160`（`_heal_orphaned_revision` 方法定义见 `:149-162`）的 docstring 明确「严格线性单链迁移策略」，「未来引入多分支需重新评估」。当前 44 个迁移（0001\~0044）均为单链（2026-10-31 核实：单 head 0044、单根、无多父），假设成立。未来若引入 Alembic 多分支（Multiple Heads），「直接拨回 head」逻辑可能导致 schema 漂移。属于已文档化的设计限制，本次 M4 仅补登记到债表以跨检视周期追溯。相关文件：`data/persistence/db_migrator.py:149-160`、`alembic/versions/0001~0044`。
+M4 模块化检视发现：`_heal_orphaned_revision` 曾假设严格线性单链迁移并直接把未知 revision stamp 到 head；线性顺序不能证明实际 schema 是 head 的超集（0038 曾删表），且调用发生在 `auto_migrate` 判定前。D04-F03 已按 fail-closed 策略改造：`_assert_no_orphaned_revision` 只读核验，未知 revision 或多行 `alembic_version` 时抛出 `OrphanedRevisionError` 并携带 current/head/已知 revision 概要与人工处置建议，绝不修改 `alembic_version` 或 schema；`init_db` 与 `CacheManager.init_db` 均不吞没该异常。相关文件：`data/persistence/db_migrator.py`（`OrphanedRevisionError` / `_assert_no_orphaned_revision` / `_get_version_rows`）、`tests/unit/test_db_migrator.py`、`tests/integration/test_data_db_migrator.py`、`alembic/versions/0001~0044`。
 
 **期望的最终解法**
 
-引入 Alembic 多分支时重新评估 `_heal_orphaned_revision` 逻辑：① 检测 Multiple Heads 并拒绝自动 heal；② 或实现多分支 merge 逻辑。验收标准：① 多分支场景下 `_heal_orphaned_revision` 不再「直接拨回 head」；② 新增多分支场景单测。upgrade 触发条件：引入 Alembic 多分支（Multiple Heads）时。
+恢复缺失的迁移脚本、使被记录的 revision 重新可加载后，重新评估是否仍需保留 fail-closed 分支的额外提示；若未来引入 Alembic 多分支（Multiple Heads），需重新设计多行/多 head 的判定与合并策略。验收标准：① 未知 revision 与多行场景均不再自动改写 `alembic_version`；② 单元与集成反例覆盖结构/游标无副作用；③ 人工处置路径（恢复脚本或核验后显式 `alembic stamp`）可用。upgrade 触发条件：恢复缺失迁移脚本后重新评估；或引入 Alembic 多分支（Multiple Heads）时。
 
 #### P3-M6-NewsFetcher-Lazy-ProxyManager-Import：`news_fetcher.py:618/:785/:951` 三处函数内部 import ProxyManager（合理避免循环依赖，建议保留）
 

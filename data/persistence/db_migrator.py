@@ -42,6 +42,55 @@ _CONNECTION_EXCEPTIONS: tuple[type[Exception], ...] = (
 # 其他 ProgrammingError（语法错误、权限不足等）必须上抛。
 _RELATION_NOT_FOUND_KEYWORDS = ("does not exist", "not found", "no such")
 
+# 异常消息中展示的已知 revision 数量上限，避免超长迁移链把消息撑爆。
+_MAX_KNOWN_REVISIONS_IN_MESSAGE = 10
+
+
+def _summarize_revisions(revisions: typing.Iterable[str]) -> str:
+    """Return a bounded, sorted summary of known revisions for error messages."""
+    ordered = sorted(revisions)
+    if not ordered:
+        return "<none>"
+    if len(ordered) <= _MAX_KNOWN_REVISIONS_IN_MESSAGE:
+        return ", ".join(ordered)
+    shown = ", ".join(ordered[:_MAX_KNOWN_REVISIONS_IN_MESSAGE])
+    omitted = len(ordered) - _MAX_KNOWN_REVISIONS_IN_MESSAGE
+    return f"{shown} …（共 {len(ordered)} 个，其余 {omitted} 个已省略）"
+
+
+class OrphanedRevisionError(RuntimeError):
+    """Raised when alembic_version cannot be verified against alembic/versions/.
+
+    Fail-closed: a recorded revision that is absent from the script directory
+    (or multiple version rows in a single-chain setup) does not prove what the
+    actual schema contains. Callers must not silently stamp the database; the
+    operator has to restore the missing script or verify the schema manually.
+    """
+
+    def __init__(
+        self,
+        current_rev: str | None,
+        head_rev: str,
+        known_revisions: typing.Iterable[str],
+        *,
+        reason: str,
+        version_rows: typing.Iterable[str] | None = None,
+    ):
+        self.current_rev = current_rev
+        self.head_rev = head_rev
+        self.known_revisions = tuple(sorted(known_revisions))
+        self.version_rows = tuple(version_rows) if version_rows is not None else ()
+        self.reason = reason
+        rows_desc = ", ".join(self.version_rows) if self.version_rows else (current_rev or "<none>")
+        super().__init__(
+            "数据库 alembic_version 状态无法核验，已拒绝自动修正（fail-closed）。"
+            f"原因：{reason}；current={current_rev or '<none>'}；head={head_rev or '<none>'}；"
+            f"version_rows=[{rows_desc}]；已知 revision 概要：{_summarize_revisions(self.known_revisions)}。"
+            "未修改 alembic_version，也未改动 schema。"
+            "人工处置建议：恢复缺失的迁移脚本（使 current revision 重新可加载）后重启；"
+            "或在人工核验实际 schema 与目标 head 一致后，显式执行 alembic stamp <head> 修正游标。"
+        )
+
 
 class DatabaseMigrationNeeded(Exception):
     """Raised when database needs migration but AUTO_MIGRATE is disabled."""
@@ -120,10 +169,10 @@ class DatabaseMigrator:
             logger.info("[DatabaseMigrator] Alembic upgrade completed for fresh database.")
             return
 
-        # Heal orphaned revision before checking head
-        await cls._heal_orphaned_revision(engine)
-        # Re-read current_rev after potential heal
-        current_rev = await cls._get_current_revision(engine)
+        # Fail closed before any head comparison: a recorded revision absent
+        # from alembic/versions/ cannot be repaired by stamping, and this must
+        # also apply when auto_migrate is disabled.
+        await cls._assert_no_orphaned_revision(engine, current_rev)
 
         # Existing database: check for pending migrations
         head_rev = await cls._get_head_revision()
@@ -147,59 +196,81 @@ class DatabaseMigrator:
 
     @classmethod
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def _heal_orphaned_revision(cls, engine: typing.Any) -> None:
-        """Detect and fix orphaned alembic revision.
+    async def _assert_no_orphaned_revision(cls, engine: typing.Any, current_rev: str | None = None) -> None:
+        """Fail closed when alembic_version cannot be verified against the script chain.
 
         When a migration script is deleted from alembic/versions/ but the
         database still records that revision in alembic_version, Alembic
-        will crash with 'Can't locate revision'. This method detects that
-        condition and stamps the database to the current head revision.
+        cannot locate the revision. Previously this method silently stamped
+        the database to head; linear order alone does not prove that the
+        stored schema is a subset/superset of head (e.g. revision 0038 drops
+        a table). This method is read-only and raises OrphanedRevisionError
+        instead, leaving both alembic_version and the schema untouched.
 
-        重要假设：本项目采用严格线性的单链迁移策略（0001 → 0002 → …），
-        因此被删除的孤立版本必然是当前 head 的后代，拨回 head 后数据库
-        schema 是 head 的超集，跳过升级是安全的。如果未来引入 Alembic
-        多分支（Multiple Heads），此方法的"直接拨回 head"逻辑需要重新
-        评估，以防 schema 漂移。
+        Multiple version rows are also rejected: the project uses a strict
+        single-head chain, so more than one row cannot identify a unique
+        current revision. Introducing multiple Alembic heads requires
+        revisiting this fail-closed rule.
         """
-        current_rev = await cls._get_current_revision(engine)
         if current_rev is None:
-            return  # Fresh database, nothing to heal
+            current_rev = await cls._get_current_revision(engine)
+        if current_rev is None:
+            return  # Fresh database, nothing to verify
 
         cfg = cls._get_alembic_config()
         script_dir = ScriptDirectory.from_config(cfg)
-        known_revisions = {rev.revision for rev in script_dir.walk_revisions()}
-
-        if current_rev in known_revisions:
-            return  # Revision is valid, no healing needed
-
+        known_revisions = sorted(rev.revision for rev in script_dir.walk_revisions())
+        known_set = set(known_revisions)
         head_rev = script_dir.get_current_head() or ""
-        logger.warning(
-            "[DatabaseMigrator] Orphaned revision detected: database is at '%s' "
-            "which does not exist in alembic/versions/. "
-            "Known revisions: %s. Auto-stamping to head '%s'.",
-            current_rev,
-            sorted(known_revisions),
-            head_rev,
-        )
 
-        # 采用精准的外科手术式更新，只修改出错的特定游标，避免在未来多分支场景下误删其他健康分支
-        async with engine.begin() as conn:
-            if head_rev:
-                await conn.execute(
-                    text("UPDATE alembic_version SET version_num = :head WHERE version_num = :current"),
-                    {"head": head_rev, "current": current_rev},
-                )
-            else:
-                await conn.execute(
-                    text("DELETE FROM alembic_version WHERE version_num = :current"),
-                    {"current": current_rev},
-                )
+        version_rows = await cls._get_version_rows(engine) or [current_rev]
+        unknown_rows = [rev for rev in version_rows if rev not in known_set]
+        if unknown_rows:
+            logger.error(
+                "[DatabaseMigrator] Orphaned revision detected (fail-closed): "
+                "version_rows=%s, head=%s. Refusing to modify alembic_version.",
+                version_rows,
+                head_rev,
+            )
+            raise OrphanedRevisionError(
+                current_rev,
+                head_rev,
+                known_revisions,
+                reason="alembic_version 记录了 alembic/versions/ 中不存在的 revision",
+                version_rows=version_rows,
+            )
 
-        logger.info(
-            "[DatabaseMigrator] Orphaned revision healed: '%s' -> '%s' (stamped).",
-            current_rev,
-            head_rev,
-        )
+        if len(version_rows) > 1:
+            logger.error(
+                "[DatabaseMigrator] Multiple alembic_version rows detected (fail-closed): %s. "
+                "Refusing to guess the current revision.",
+                version_rows,
+            )
+            raise OrphanedRevisionError(
+                current_rev,
+                head_rev,
+                known_revisions,
+                reason="alembic_version 存在多行，单链迁移无法确定唯一的当前版本",
+                version_rows=version_rows,
+            )
+
+    @classmethod
+    async def _get_version_rows(cls, engine: typing.Any) -> list[str] | None:
+        """Read every row in alembic_version; return None when the table is absent.
+
+        Used only by the read-only orphan check, so any database error
+        propagates instead of being reclassified as a fresh database.
+        """
+        async with engine.connect() as conn:
+
+            def _sync_get_rows(c: typing.Any) -> list[str] | None:
+                inspector = inspect(c)
+                if "alembic_version" not in inspector.get_table_names():
+                    return None
+                result = c.execute(text("SELECT version_num FROM alembic_version"))
+                return [row[0] for row in result.fetchall()]
+
+            return await conn.run_sync(_sync_get_rows)
 
     @classmethod
     def _get_sync_database_url(cls, engine: typing.Any) -> str:
