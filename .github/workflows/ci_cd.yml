@@ -1777,8 +1777,170 @@ jobs:
             echo "| sha256sums asset | ${sha256sums_asset_name} (${sha256sums_asset_digest}) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  build-llama-cuda-wheel:
+    name: Prebuild CUDA wheel (llama-cpp-python)
+    # 触发面 = tag 发布 / 手动 dispatch / 夜间 schedule：三者都是「可写默认分支缓存作用域」的可信触发器。
+    # PR / merge_group 下 build-windows 本身被跳过，本 job 若无条件执行会让每个 PR 白跑一次
+    # 45~60 分钟源码编译，故不纳入这两个事件。
+    # schedule 的作用是预热默认分支缓存：官方规则允许 workflow run 恢复「当前分支」或「默认分支」的缓存，
+    # 但不同 tag 之间不共享，因此若只在 tag run 内部预热，每次发布仍会是冷路径。
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: windows-2022
+    # 冷路径（缓存未命中）含 Toolkit 安装（实测约 7 分钟）与 6 档 arch 的 CUDA 编译（旧 arch 集合
+    # 实测 37 分钟，扩展 arch 后预计更久，该组合未实测）。本 job 不在 build-windows 的 needs 内，
+    # 超时/失败都不会阻断发布，故放宽到 120 分钟。
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    # 本 job 只是加速项、不承担门禁：既不进 needs 链，重型步骤也逐个 continue-on-error，
+    # 失败或超时都不会阻断 4 条发布腿。交付通道是缓存而非 artifact：本 job 与下游腿在时间上重叠，
+    # 冷路径下同 run 的 artifact 必然来不及产出（实测 build-windows 在 run 开始 8.4 分钟即启动，
+    # 而冷路径编译需 45~60 分钟），故本 job 只负责把 wheel 写进缓存供后续 run 命中，
+    # 下游腿自行 restore，未命中即回退内联源码编译（与改动前行为等价）。
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Resolve llama-cpp-python version
+        id: llama-version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 版本单源于 requirements.txt：避免"缓存键 / wheel 编译版本 / 依赖清单"三处双写后在
+          # 依赖升级时把旧版本 wheel 装进发布腿（--only-binary 会因此直接报错）。
+          $match = Select-String -Path requirements.txt -Pattern '^llama-cpp-python==([0-9][^#\s]*)$' | Select-Object -First 1
+          if (-not $match) {
+            Write-Error "requirements.txt 未固定 llama-cpp-python==<version>"
+            exit 1
+          }
+          $version = $match.Matches[0].Groups[1].Value.Trim()
+          Write-Host "llama-cpp-python version: $version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        # CUDA 构建产物会污染共享 uv 缓存（CPU 腿可能误取到 CUDA wheel，反之亦然），
+        # 故不启用 setup-uv 自带缓存，改用下方的显式 wheel 缓存。
+        with:
+          enable-cache: false
+
+      - name: Restore prebuilt CUDA wheel cache
+        id: restore-wheel
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: wheelhouse
+          # 键必须覆盖所有影响 wheel 字节的因素：llama-cpp-python 版本、CUDA 版本、Python 版本、
+          # CMAKE_ARGS（含 CUDA arch 列表）与 runner 镜像标签（win2022；镜像内 MSVC 补丁不在键内，
+          # 若某次补丁导致产物异常，只需递增末尾 rN 修订段即可强制重编）。
+          # 该键在 build-windows 的对应步骤中必须逐字一致（两处修改须同步）。
+          # 未命中即重编并写回同键：只影响耗时、不影响正确性。
+          key: llama-cuda-${{ steps.llama-version.outputs.version }}-cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
+
+      - name: Install CUDA Toolkit
+        if: steps.restore-wheel.outputs.cache-hit != 'true'
+        continue-on-error: true
+        # 安装方式、12.4 版本选择与子包清单的依据见 build-windows 同名步骤的长注释。
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d  # v0.2.36
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
+          use-github-cache: false
+
+      - name: Build CUDA wheel
+        id: build-wheel
+        if: steps.restore-wheel.outputs.cache-hit != 'true'
+        continue-on-error: true
+        # 单步超时由 continue-on-error 吸收，避免整 job 超时把 job 结论变成 cancelled。
+        timeout-minutes: 90
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # CUDA arch 列表 = 产品确认的 GPU 覆盖范围：Turing 75 / Ampere 80·86 / Ada 89 / Hopper 90，
+          # 另加 90-virtual（PTX 前向兼容，未来架构由驱动 JIT 兜底）。
+          # 剔除 50/61/70（Maxwell/Pascal/Volta）：无 Tensor Core、llama.cpp 收益极低，
+          # 且每个 arch 都会线性增加 nvcc 耗时。
+          $env:CMAKE_ARGS = "-DGGML_CUDA=on -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler -DCMAKE_CUDA_ARCHITECTURES=75-real;80-real;86-real;89-real;90-real;90-virtual"
+          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
+          if (Test-Path $cudaBin) { $env:Path = "$cudaBin;$env:Path" }
+          Write-Host "CMAKE_ARGS=$env:CMAKE_ARGS"
+          nvcc --version
+          New-Item -ItemType Directory -Force -Path wheelhouse | Out-Null
+          # pip wheel 只产出 wheel 不安装；构建隔离环境由 pip 自建（scikit-build-core / cmake / ninja 从 PyPI 现装）。
+          python -m pip wheel --no-deps --wheel-dir wheelhouse llama-cpp-python==${{ steps.llama-version.outputs.version }}
+          # 原生命令非零退出不会因 $ErrorActionPreference = "Stop" 抛出，必须显式检查；
+          # 提前失败可跳过后续 Verify 的空跑（它也依赖 wheelhouse 里有 wheel）。
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "pip wheel 构建失败（exit $LASTEXITCODE）"
+            exit 1
+          }
+          Get-ChildItem wheelhouse | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Verify wheel CUDA backend before caching
+        id: verify-wheel
+        # 构建失败时 wheelhouse 为空，跳过校验（否则只会把"没找到 wheel"再报一遍）。
+        if: steps.restore-wheel.outputs.cache-hit != 'true' && steps.build-wheel.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 与 build-windows 的 "Verify llama-cpp-python CUDA backend DLLs" 同语义；
+          # 提前在此校验，避免坏 wheel 写入缓存后连续击穿 4 条发布腿。
+          # 平台标签必须与 build-windows 的 Python 3.14 匹配，否则下游装上也是错的 ABI。
+          $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" | Select-Object -First 1
+          if (-not $wheel) {
+            Write-Error "wheelhouse 中未找到 cp314-win_amd64 的 wheel（构建失败或平台标签不符）"
+            exit 1
+          }
+          $sha = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
+          Write-Host "wheel: $($wheel.Name) ($($wheel.Length) bytes) sha256=$sha"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "CUDA wheel sha256: ``$sha`` ($($wheel.Name), $($wheel.Length) bytes)"
+          uv pip install --system --no-deps $wheel.FullName
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "预编译 wheel 安装失败（exit $LASTEXITCODE）"
+            exit 1
+          }
+          $pkgDir = python -c "import importlib.util; print(importlib.util.find_spec('llama_cpp').submodule_search_locations[0])"
+          $libDir = Join-Path $pkgDir "lib"
+          $llamaDll = Join-Path $libDir "llama.dll"
+          # llama.dll 是后端共用载体，缺失即说明 wheel 结构异常，必须拒绝缓存而非静默放行。
+          if (-not (Test-Path $llamaDll)) {
+            Write-Error "wheel 内缺少 llama_cpp/lib/llama.dll（$libDir）"
+            exit 1
+          }
+          $cudaDlls = @(Get-ChildItem $libDir -Filter "*cuda*.dll")
+          Write-Host "Found CUDA DLLs: $($cudaDlls.Name -join ',')"
+          $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($llamaDll))
+          $linked = $ascii.Contains("cudart64_12.dll") -or $ascii.Contains("cublas64_12.dll") -or $ascii.Contains("cublasLt64_12.dll")
+          if ($cudaDlls.Count -eq 0 -and -not $linked) {
+            Write-Error "no CUDA backend evidence in $libDir; refusing to cache a CPU-only wheel"
+            exit 1
+          }
+
+      - name: Save prebuilt CUDA wheel cache
+        # 仅在重新编译且校验通过后写回，坏 wheel 不得进入缓存。
+        # 命中本键的后续 run 由 build-windows 的 cuda 腿自行 restore（见该腿同名步骤）。
+        if: steps.restore-wheel.outputs.cache-hit != 'true' && steps.verify-wheel.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: wheelhouse
+          # 直接写字面键而不复用 restore 的 cache-primary-key 输出：restore 被 continue-on-error
+          # 掩盖异常时该输出可能为空，会导致 save 静默无效、本次编译白费。
+          key: llama-cuda-${{ steps.llama-version.outputs.version }}-cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
+
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
+    # build-llama-cuda-wheel 故意不进 needs：它是纯加速项，失败/超时都不得影响发布门禁
+    # （needs 对失败 job 的默认 skip 语义无法用 continue-on-error 可靠规避）。
+    # 两条 cuda 腿在 Install dependencies 前用 actions/cache/restore 自取 wheel（continue-on-error），
+    # 未命中（冷路径 / 预编译失败 / 夜间尚未预热）即回退内联源码编译，与改动前行为等价。
     needs: [resolve-sidecar-release, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     # 锁定 windows-2022（VS 2022）：windows-latest 已滚动迁移到 VS 2026（GitHub 2026-05 公告），
@@ -1835,7 +1997,39 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
+      - name: Resolve llama-cpp-python version
+        id: llama-version
+        if: matrix.backend == 'cuda'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 版本单源于 requirements.txt，与 build-llama-cuda-wheel 的同名步骤必须保持一致：
+          # 缓存键、预编译产物、依赖清单三处共用同一解析结果，避免依赖升级后装上旧版本 wheel。
+          $match = Select-String -Path requirements.txt -Pattern '^llama-cpp-python==([0-9][^#\s]*)$' | Select-Object -First 1
+          if (-not $match) {
+            Write-Error "requirements.txt 未固定 llama-cpp-python==<version>"
+            exit 1
+          }
+          $version = $match.Matches[0].Groups[1].Value.Trim()
+          Write-Host "llama-cpp-python version: $version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Restore prebuilt CUDA wheel (CUDA variants only)
+        # 缓存键与 build-llama-cuda-wheel 的 restore/save 步骤逐字一致；命中即跳过 ~37 分钟源码编译
+        # （nvcc 仍照常安装，原因见下方 Toolkit 步骤注释）。未命中时 wheelhouse 不存在，
+        # Install dependencies 自动回退内联源码编译。
+        if: matrix.backend == 'cuda'
+        id: prebuilt-wheel
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: wheelhouse
+          key: llama-cuda-${{ steps.llama-version.outputs.version }}-cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
+
       - name: Install CUDA Toolkit (CUDA variants only)
+        # 即使复用预编译 wheel 也保留 Toolkit 安装：PyInstaller 在打包期按 PATH 解析已收集二进制的
+        # 依赖，缺 CUDA bin 会让热/冷两条路径产出的 _internal DLL 集合不一致（是否真会少 DLL 待一次
+        # 热/冷产物比对确认）。未确认前不改变打包环境，只省源码编译时间。
         if: matrix.backend == 'cuda'
         # windows-2022 镜像自 20261025 起移除 WinGet（Package Management 仅剩 Chocolatey），
         # 原 `winget install Nvidia.CUDA` 步骤报 "The term 'winget' is not recognized"。
@@ -1885,12 +2079,44 @@ jobs:
           # 使 nvcc 编译 CUDA 后端；CPU 变体不设 CMAKE_ARGS，cmake 自动只编 CPU。
           # abetlen 预编译 wheel 已无法匹配 Python 3.14 + llama-cpp-python 0.3.36
           # （abl wheel 最高 cp312 + 0.3.4），故 v0.3.35 起切换到此源码编译路径。
+          # CUDA 变体优先复用缓存中的预编译 wheel（含固定 arch 列表），取不到才走下面的源码编译。
+          $prebuiltWheel = $null
           if ("${{ matrix.backend }}" -eq "cuda") {
+            # 快路径：build-llama-cuda-wheel 已用同一 CUDA 12.4.1 + 同一 arch 列表编好 wheel 并缓存，本腿只需安装。
+            # 平台标签必须与 setup-python 的 3.14 匹配，避免装上错误 ABI 的 wheel。
+            $candidate = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($candidate) {
+              Write-Host "Installing prebuilt CUDA wheel: $($candidate.Name)"
+              uv pip install --system --no-deps $candidate.FullName
+              # 原生命令非零退出不会因 $ErrorActionPreference = "Stop" 抛出，必须显式检查；
+              # 失败时清空候选并回退到源码编译，避免把发布直接打死。
+              if ($LASTEXITCODE -eq 0) {
+                $prebuiltWheel = $candidate
+              } else {
+                Write-Warning "预编译 wheel 安装失败（exit $LASTEXITCODE），回退到内联源码编译"
+              }
+            }
+          }
+          if ($prebuiltWheel) {
+            $pkgDir = python -c "import importlib.util; print(importlib.util.find_spec('llama_cpp').submodule_search_locations[0])"
+            $llamaDll = Join-Path (Join-Path $pkgDir "lib") "llama.dll"
+            if (Test-Path $llamaDll) {
+              $hashBefore = (Get-FileHash $llamaDll -Algorithm SHA256).Hash
+            } else {
+              # 缺 llama.dll 说明 wheel 结构异常：卸载后回退源码编译（"失败即回退"语义，
+              # 不得在此 exit 1 把整条发布打死；后续 Verify 步骤仍会独立校验最终安装结果）。
+              Write-Warning "预编译 wheel 安装后缺少 llama.dll（$llamaDll），回退到内联源码编译"
+              uv pip uninstall --system llama-cpp-python | Out-Null
+              $prebuiltWheel = $null
+            }
+          }
+          if (-not $prebuiltWheel -and "${{ matrix.backend }}" -eq "cuda") {
+            # 回退路径：prebuild job 失败或被跳过时保持原有源码编译行为。
             # CUDA 12.4 的 nvcc 官方白名单仍是 MSVC 193x，而 windows-2022 镜像只带 VS 2022 14.44（cl 19.44，
             # MSVC 1944），nvcc 的 host_config.h 在编译期硬性 #error 拒绝该版本，故显式放行
             # （NVIDIA 称 use at your own risk）。注意：此放行只越过 nvcc 的 host compiler 白名单，
             # MSVC STL 的 "expected CUDA 12.4 or newer"（STL1002）由上面的 CUDA 12.4 版本满足。
-            $env:CMAKE_ARGS = "-DGGML_CUDA=on -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler"
+            $env:CMAKE_ARGS = "-DGGML_CUDA=on -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler -DCMAKE_CUDA_ARCHITECTURES=75-real;80-real;86-real;89-real;90-real;90-virtual"
             # 安装步骤只把 CUDA 目录写进 GITHUB_PATH / 系统 PATH，当前 shell 可能未刷新；显式追加确保 cmake 找到 nvcc
             $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
             if (Test-Path $cudaBin) {
@@ -1904,9 +2130,39 @@ jobs:
             # 故为 CUDA 变体指向独立缓存目录，强制从 sdist 重新编译且不写回共享缓存。
             $env:UV_CACHE_DIR = "$env:UV_CACHE_DIR-cuda"
           }
-          uv pip install --system -r requirements.txt
+          if ($prebuiltWheel) {
+            # --only-binary 保证 requirements 安装不会把预装 CUDA wheel 换成 sdist 重建产物（版本已满足时 uv 本就跳过）。
+            uv pip install --system --only-binary llama-cpp-python -r requirements.txt
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "预装 wheel 下解析 requirements 失败（exit $LASTEXITCODE）：--only-binary 找不到匹配的二进制，依赖未装齐"
+              exit 1
+            }
+          } else {
+            uv pip install --system -r requirements.txt
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "安装 requirements.txt 失败（exit $LASTEXITCODE）"
+              exit 1
+            }
+          }
           uv pip install --system -r requirements-optional.txt
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "安装 requirements-optional.txt 失败（exit $LASTEXITCODE）"
+            exit 1
+          }
           uv pip install --system pyinstaller==6.19.0
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "安装 pyinstaller 失败（exit $LASTEXITCODE）"
+            exit 1
+          }
+          if ($prebuiltWheel) {
+            # 事后复核安装来源仍是预装 wheel（llama.dll 字节未变），防止静默回退到源码重建。
+            $hashAfter = (Get-FileHash $llamaDll -Algorithm SHA256).Hash
+            if ($hashBefore -ne $hashAfter) {
+              Write-Error "预装 CUDA wheel 在 requirements 安装后被重建（llama.dll sha256 $hashBefore -> $hashAfter），--only-binary 未生效"
+              exit 1
+            }
+            Write-Host "Prebuilt CUDA wheel preserved: llama.dll sha256 $hashAfter"
+          }
 
 
       - name: Verify llama-cpp-python CUDA backend DLLs (CUDA variants only)
