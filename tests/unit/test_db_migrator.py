@@ -260,6 +260,20 @@ class TestOrphanedRevisionErrorMessage:
         assert "其余 20 个已省略" in message
         assert "rev20" not in message
 
+    def test_message_handles_empty_head_and_known_revisions(self):
+        exc = OrphanedRevisionError(
+            "9999_orphaned",
+            "",
+            [],
+            reason="alembic/versions/ 中没有可识别的 revision",
+            version_rows=["9999_orphaned"],
+        )
+
+        message = str(exc)
+
+        assert "head=<none>" in message
+        assert "已知 revision 概要：<none>" in message
+
 
 class TestGetVersionRows:
     @pytest.mark.asyncio
