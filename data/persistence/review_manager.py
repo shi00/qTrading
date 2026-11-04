@@ -1803,9 +1803,11 @@ class ReviewManager:
             if pd.isnull(v):
                 return default
             try:
-                return float(v)
+                fv = float(v)
             except (ValueError, TypeError):
                 return default
+            # R21：±inf 等非有限值不得伪装成合法数值落库（NaN 已由上方 pd.isnull 拦截）。
+            return fv if math.isfinite(fv) else default
 
         def _s(row_data: typing.Any, key: typing.Any, default: typing.Any = ""):
             v = row_data.get(key, default)

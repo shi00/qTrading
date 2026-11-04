@@ -382,7 +382,7 @@ D4.1/D4.2（Polars 1.44.2→2.1.0，2026-10）盘点结论：全仓 18 个生产
 
 **产生背景与现状**
 
-M4 模块化检视发现：`_heal_orphaned_revision` 曾假设严格线性单链迁移并直接把未知 revision stamp 到 head；线性顺序不能证明实际 schema 是 head 的超集（0038 曾删表），且调用发生在 `auto_migrate` 判定前。D04-F03 已按 fail-closed 策略改造：`_assert_no_orphaned_revision` 只读核验，未知 revision 或多行 `alembic_version` 时抛出 `OrphanedRevisionError` 并携带 current/head/已知 revision 概要与人工处置建议，绝不修改 `alembic_version` 或 schema；`init_db` 与 `CacheManager.init_db` 均不吞没该异常。相关文件：`data/persistence/db_migrator.py`（`OrphanedRevisionError` / `_assert_no_orphaned_revision` / `_get_version_rows`）、`tests/unit/test_db_migrator.py`、`tests/integration/test_data_db_migrator.py`、`alembic/versions/0001~0044`。
+M4 模块化检视发现：`_heal_orphaned_revision` 曾假设严格线性单链迁移并直接把未知 revision stamp 到 head；线性顺序不能证明实际 schema 是 head 的超集（0038 曾删表），且调用发生在 `auto_migrate` 判定前。D04-F03 已按 fail-closed 策略改造：`_assert_no_orphaned_revision` 只读核验，未知 revision 或多行 `alembic_version` 时抛出 `OrphanedRevisionError` 并携带 current/head/已知 revision 概要与人工处置建议，绝不修改 `alembic_version` 或 schema；`init_db` 与 `CacheManager.init_db` 均不吞没该异常。相关文件：`data/persistence/db_migrator.py`（`OrphanedRevisionError` / `_assert_no_orphaned_revision` / `_get_version_rows`）、`tests/unit/test_db_migrator.py`、`tests/integration/test_data_db_migrator.py`、`alembic/versions/0001~0045`。
 
 **期望的最终解法**
 
