@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
-from data.persistence.daos.stock_dao import StockDao
+from data.persistence.daos.stock_dao import StockDao, _literal_like_prefix
 
 pytestmark = pytest.mark.unit
 
@@ -228,12 +228,12 @@ class TestClearAllLimitConcepts:
         assert result == 1
         dao._write_db.assert_called_once()
         sql_arg = dao._write_db.call_args.args[0]
-        assert "concept_id LIKE $1" in sql_arg
+        assert "concept_id LIKE $1 ESCAPE '\\'" in sql_arg
         assert "LIMIT_" not in sql_arg  # SQL 不应含字面量（R4 参数化）
         assert "DELETE FROM stock_concepts" in sql_arg
-        # 验证参数正确传入（R4 参数化）
+        # 验证参数正确传入（R4 参数化，下划线按字面转义）
         params_arg = dao._write_db.call_args.args[1]
-        assert params_arg == [f"{StockDao.LIMIT_CONCEPT_PREFIX}%"]
+        assert params_arg == [_literal_like_prefix(StockDao.LIMIT_CONCEPT_PREFIX)]
 
 
 class TestGetConceptsByPrefix:
@@ -257,12 +257,12 @@ class TestGetConceptsByPrefix:
         assert len(result) == 1
         assert result[0]["ts_code"] == "000001.SZ"
         assert result[0]["concept_id"] == "EM_C1"
-        # 验证 SQL 含参数化 LIKE $1（R4 合规）
+        # 验证 SQL 含参数化 LIKE $1 且显式 ESCAPE（R4 合规）
         sql_arg = dao._read_db.call_args.args[0]
-        assert "concept_id LIKE $1" in sql_arg
-        # 验证参数含 EM_%
+        assert "concept_id LIKE $1 ESCAPE '\\'" in sql_arg
+        # 验证参数为字面前缀模式（EM_ → EM\_%）
         params_arg = dao._read_db.call_args.args[1]
-        assert params_arg == ["EM_%"]
+        assert params_arg == [_literal_like_prefix("EM_")]
 
     @pytest.mark.asyncio
     async def test_get_concepts_by_prefix_with_ts_codes(self):
@@ -281,10 +281,10 @@ class TestGetConceptsByPrefix:
         assert isinstance(result, list)
         assert len(result) == 1
         sql_arg = dao._read_db.call_args.args[0]
-        assert "concept_id LIKE $1" in sql_arg
+        assert "concept_id LIKE $1 ESCAPE '\\'" in sql_arg
         assert "ts_code IN ($2,$3)" in sql_arg
         params_arg = dao._read_db.call_args.args[1]
-        assert params_arg == ["EM_%", "000001.SZ", "000002.SZ"]
+        assert params_arg == [_literal_like_prefix("EM_"), "000001.SZ", "000002.SZ"]
 
     @pytest.mark.asyncio
     async def test_get_concepts_by_prefix_empty_returns_empty_list(self):

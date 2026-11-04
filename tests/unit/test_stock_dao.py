@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import sqlalchemy as sa
 
-from data.persistence.daos.stock_dao import StockDao
+from data.persistence.daos.stock_dao import StockDao, _literal_like_prefix
 
 pytestmark = pytest.mark.unit
 
@@ -303,8 +303,8 @@ class TestGetConcepts:
         assert len(result["000001.SZ"]) == 2
         # review08-D3：全表分支必须带 NOT LIKE 过滤 LIMIT_ 前缀（R4 参数化）
         sql_arg = dao._read_db.call_args.args[0]
-        assert "concept_id NOT LIKE $1" in sql_arg
-        assert dao._read_db.call_args.args[1] == [f"{StockDao.LIMIT_CONCEPT_PREFIX}%"]
+        assert "concept_id NOT LIKE $1 ESCAPE '\\'" in sql_arg
+        assert dao._read_db.call_args.args[1] == [_literal_like_prefix(StockDao.LIMIT_CONCEPT_PREFIX)]
 
     @pytest.mark.asyncio
     async def test_filters_limit_concepts_sql(self):
@@ -325,8 +325,11 @@ class TestGetConcepts:
         assert "000001.SZ" in result
         # 单码分支 SQL 带 NOT LIKE $2
         sql_arg = dao._read_db.call_args.args[0]
-        assert "concept_id NOT LIKE $2" in sql_arg
-        assert dao._read_db.call_args.args[1] == ["000001.SZ", f"{StockDao.LIMIT_CONCEPT_PREFIX}%"]
+        assert "concept_id NOT LIKE $2 ESCAPE '\\'" in sql_arg
+        assert dao._read_db.call_args.args[1] == [
+            "000001.SZ",
+            _literal_like_prefix(StockDao.LIMIT_CONCEPT_PREFIX),
+        ]
 
     @pytest.mark.asyncio
     async def test_keeps_real_concepts(self):
@@ -419,11 +422,11 @@ class TestGetConcepts:
         await dao.get_concepts(ts_codes=codes)
         assert call_count == 3
         # 分块路径唯一依赖隐式 $n+1 编号：NOT LIKE 过滤参数必须排在 chunk 参数之后，
-        # 其占位符编号 = len(chunk)+1；每块参数 = ts_code chunk + "LIMIT_%"（R4 参数化）
+        # 其占位符编号 = len(chunk)+1；每块参数 = ts_code chunk + 字面前缀模式（R4 参数化）
         for sql, params in calls:
-            match = re.search(r"NOT LIKE \$(\d+)", sql)
-            assert match is not None, f"分块 SQL 缺少 NOT LIKE 过滤: {sql}"
-            assert params[-1] == "LIMIT_%"
+            match = re.search(r"NOT LIKE \$(\d+) ESCAPE '\\'", sql)
+            assert match is not None, f"分块 SQL 缺少 NOT LIKE 过滤或 ESCAPE: {sql}"
+            assert params[-1] == _literal_like_prefix(StockDao.LIMIT_CONCEPT_PREFIX)
             assert int(match.group(1)) == len(params)
             assert all(p.endswith(".SZ") for p in params[:-1])
 
@@ -478,6 +481,96 @@ class TestGetConceptCount:
             engine_provider.reset_engine_provider()
 
         mock_engine.connect.assert_not_called()
+
+
+def _like_matches(pattern: str, value: str) -> bool:
+    """把 PostgreSQL ``LIKE ... ESCAPE '\\'`` 模式翻译为等价正则，验证字面前缀语义。"""
+    regex: list[str] = []
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\":
+            i += 1
+            regex.append(re.escape(pattern[i]))
+        elif ch == "%":
+            regex.append(".*")
+        elif ch == "_":
+            regex.append(".")
+        else:
+            regex.append(re.escape(ch))
+        i += 1
+    return re.fullmatch("".join(regex), value) is not None
+
+
+class TestConceptPrefixLiteralMatching:
+    """D03-S02: 概念来源前缀 LIKE / NOT LIKE 统一为字面前缀匹配。
+
+    生产来源前缀受控（TS_ / EM_ / LIMIT_），但下游曾把 ``_`` 当单字符通配符。
+    本组用例锁定：模式构造转义 LIKE 元字符，SQL 谓词显式 ``ESCAPE '\'``，
+    且 LIMIT_1 命中 LIMIT_ 前缀、LIMITX1 不命中、TS_1 仅 TS_ 前缀命中。
+    """
+
+    def test_pattern_escapes_like_metacharacters(self):
+        assert _literal_like_prefix("LIMIT_") == "LIMIT\\_%"
+        assert _literal_like_prefix("TS_") == "TS\\_%"
+        # 空前缀保持既有语义（匹配全部）；反斜杠 / % 一并为字面量
+        assert _literal_like_prefix("") == "%"
+        assert _literal_like_prefix("A%B_C\\D") == "A\\%B\\_C\\\\D%"
+
+    def test_limit_prefix_matches_literal_only(self):
+        limit_pattern = _literal_like_prefix(StockDao.LIMIT_CONCEPT_PREFIX)
+        assert _like_matches(limit_pattern, "LIMIT_1")
+        assert _like_matches(limit_pattern, "LIMIT_C1")
+        assert not _like_matches(limit_pattern, "LIMITX1")
+        assert not _like_matches(limit_pattern, "XLIMIT_1")
+
+    def test_ts_prefix_isolated_from_limit_and_unrelated(self):
+        ts_pattern = _literal_like_prefix(StockDao.TS_CONCEPT_PREFIX)
+        assert _like_matches(ts_pattern, "TS_1")
+        assert not _like_matches(ts_pattern, "TSX1")
+        assert not _like_matches(ts_pattern, "LIMIT_1")
+
+    @pytest.mark.asyncio
+    async def test_clear_all_limit_concepts_uses_escape(self):
+        dao = _make_dao()
+        await dao.clear_all_limit_concepts()
+        sql_arg = dao._write_db.call_args.args[0]
+        params_arg = dao._write_db.call_args.args[1]
+        assert "concept_id LIKE $1 ESCAPE '\\'" in sql_arg
+        assert params_arg == [_literal_like_prefix(StockDao.LIMIT_CONCEPT_PREFIX)]
+
+    @pytest.mark.asyncio
+    async def test_get_concepts_by_prefix_uses_escape(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_concepts_by_prefix(StockDao.TS_CONCEPT_PREFIX)
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "concept_id LIKE $1 ESCAPE '\\'" in sql_arg
+        assert dao._read_db.call_args.args[1] == [_literal_like_prefix(StockDao.TS_CONCEPT_PREFIX)]
+
+    @pytest.mark.asyncio
+    async def test_get_concept_count_uses_escape(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": [1]}))
+        await dao.get_concept_count()
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "concept_id NOT LIKE $1 ESCAPE '\\'" in sql_arg
+        assert dao._read_db.call_args.args[1] == [_literal_like_prefix(StockDao.LIMIT_CONCEPT_PREFIX)]
+
+    @pytest.mark.asyncio
+    async def test_overwrite_concepts_delete_uses_escaped_ts_prefix(self):
+        dao = _make_dao()
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "concept_id": ["TS_1"], "concept_name": ["概念1"]})
+        mock_conn = AsyncMock()
+        dao.engine.begin = MagicMock()
+        dao.engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao.engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
+            mock_tpm.return_value.run_async = AsyncMock(return_value=[["val1"]])
+            await dao.overwrite_concepts(df)
+        delete_sql, delete_params = mock_conn.exec_driver_sql.call_args_list[0].args[:2]
+        assert "concept_id LIKE $1 ESCAPE '\\'" in delete_sql
+        assert delete_params == [_literal_like_prefix(StockDao.TS_CONCEPT_PREFIX)]
 
 
 class TestSearchStocks:

@@ -48,6 +48,19 @@ def stock_alive_condition(alias: str = "", as_of: str = "$1") -> str:
     )
 
 
+def _literal_like_prefix(prefix: str) -> str:
+    """把概念来源前缀转为仅按字面匹配的 LIKE 模式（末尾追加 ``%`` 作后缀通配）。
+
+    LIKE 元字符（``\\`` / ``%`` / ``_``）逐一转义，故 ``LIMIT_`` 只命中
+    ``LIMIT_…`` 而不命中 ``LIMITX1``；命中 SQL 必须同时带 ``ESCAPE '\\'``。
+    先转义反斜杠，再转义 ``%`` / ``_``，避免二次转义。
+
+    仅供本模块内概念前缀谓词复用（不做跨层抽象）；生产来源前缀为受控常量。
+    """
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "%"
+
+
 class StockDao(BaseDao):
     EM_CONCEPT_PREFIX = "EM_"
     LIMIT_CONCEPT_PREFIX = "LIMIT_"
@@ -334,7 +347,7 @@ class StockDao(BaseDao):
         sql_insert = "INSERT INTO stock_concepts (" + col_str + ") VALUES (" + placeholders + ")"
 
         # 仅删除 Tushare 自有行；下划线转义为字面量（ESCAPE '\'）
-        ts_like_pattern = self.TS_CONCEPT_PREFIX.replace("_", "\\_") + "%"
+        ts_like_pattern = _literal_like_prefix(self.TS_CONCEPT_PREFIX)
 
         try:
             async with self._guarded_begin() as conn:
@@ -368,15 +381,16 @@ class StockDao(BaseDao):
         """
         if ts_codes is None:
             rows = await self._read_db(
-                "SELECT ts_code, concept_name FROM stock_concepts WHERE concept_id NOT LIKE $1",
-                [f"{self.LIMIT_CONCEPT_PREFIX}%"],
+                "SELECT ts_code, concept_name FROM stock_concepts WHERE concept_id NOT LIKE $1 ESCAPE '\\'",
+                [_literal_like_prefix(self.LIMIT_CONCEPT_PREFIX)],
             )
         elif len(ts_codes) == 0:
             return {}
         elif len(ts_codes) == 1:
             rows = await self._read_db(
-                "SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code=$1 AND concept_id NOT LIKE $2",
-                [ts_codes[0], f"{self.LIMIT_CONCEPT_PREFIX}%"],
+                "SELECT ts_code, concept_name FROM stock_concepts "
+                "WHERE ts_code=$1 AND concept_id NOT LIKE $2 ESCAPE '\\'",
+                [ts_codes[0], _literal_like_prefix(self.LIMIT_CONCEPT_PREFIX)],
             )
         else:
             # callable 模板：占位符从 1 起编号，NOT LIKE 参数在 chunk 之后（编号 = n+1）
@@ -384,10 +398,10 @@ class StockDao(BaseDao):
                 self._read_db,
                 lambda placeholders, n: (
                     "SELECT ts_code, concept_name FROM stock_concepts "
-                    f"WHERE ts_code IN ({placeholders}) AND concept_id NOT LIKE ${n + 1}"
+                    f"WHERE ts_code IN ({placeholders}) AND concept_id NOT LIKE ${n + 1} ESCAPE '\\'"
                 ),
                 ts_codes,
-                params_fn=lambda chunk: [f"{self.LIMIT_CONCEPT_PREFIX}%"],
+                params_fn=lambda chunk: [_literal_like_prefix(self.LIMIT_CONCEPT_PREFIX)],
             )
 
         result = {}
@@ -410,8 +424,8 @@ class StockDao(BaseDao):
         """
         try:
             df = await self._read_db(
-                "SELECT COUNT(*) as cnt FROM stock_concepts WHERE concept_id NOT LIKE $1",
-                [f"{self.LIMIT_CONCEPT_PREFIX}%"],
+                "SELECT COUNT(*) as cnt FROM stock_concepts WHERE concept_id NOT LIKE $1 ESCAPE '\\'",
+                [_literal_like_prefix(self.LIMIT_CONCEPT_PREFIX)],
             )
             if df is not None and not df.empty:
                 return df["cnt"].iloc[0] or 0
@@ -508,8 +522,8 @@ class StockDao(BaseDao):
         """清空全部 LIMIT_ 前缀概念（review08-D3 重命名：原 clear_today_limit_concepts 无日期条件，
         实际清空全部 LIMIT_ 记录而非"当日"；stock_concepts 表无 trade_date 列，不可能按日清理）。"""
         return await self._write_db(
-            "DELETE FROM stock_concepts WHERE concept_id LIKE $1",
-            [f"{self.LIMIT_CONCEPT_PREFIX}%"],
+            "DELETE FROM stock_concepts WHERE concept_id LIKE $1 ESCAPE '\\'",
+            [_literal_like_prefix(self.LIMIT_CONCEPT_PREFIX)],
             conn=conn,
         )
 
@@ -555,8 +569,8 @@ class StockDao(BaseDao):
         按 concept_id 前缀查询概念，可选用 ts_codes 过滤。
         Returns: list of dict, e.g. [{"ts_code": "...", "concept_id": "...", "concept_name": "..."}]
         """
-        sql = "SELECT ts_code, concept_id, concept_name FROM stock_concepts WHERE concept_id LIKE $1"
-        params: list = [f"{prefix}%"]
+        sql = "SELECT ts_code, concept_id, concept_name FROM stock_concepts WHERE concept_id LIKE $1 ESCAPE '\\'"
+        params: list = [_literal_like_prefix(prefix)]
         if ts_codes:
             placeholders = ",".join([f"${i + 2}" for i in range(len(ts_codes))])
             sql += f" AND ts_code IN ({placeholders})"
