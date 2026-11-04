@@ -1,5 +1,5 @@
-# pyright: reportAttributeAccessIssue=false
-# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
+# pyright: reportAttributeAccessIssue=false, reportArgumentType=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问/参数类型（mock/stub/monkey-patch）。
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
@@ -11,7 +11,9 @@ import pandas as pd
 
 from data.mixins.health_mixin import HealthCheckMixin, _classify_table_tier, _compute_tier
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.quality_gate import QualityGateError
 from data.persistence.write_quality import WriteQuality
+from strategies.market import VolumeBreakoutStrategy
 from data.constants import (
     MAJOR_INDICES,
     SYNC_RESULT_EMPTY,
@@ -2288,6 +2290,8 @@ class TestCheckDataHealthCoerceGate:
                 result = await proc.check_data_health()
             assert result["status"] == "red"
             assert proc._quality_tier == 0
+            # F01: coerce 降级对应的表级等级同样为 CRITICAL，不得被新鲜度分类覆盖
+            assert proc._quality_tier_by_table["daily_quotes"] == 0
         finally:
             WriteQuality._reset_singleton()
 
@@ -2455,3 +2459,118 @@ class TestClassifyTableTier:
 
     def test_quote_lag_none_conservative_fresh(self):
         assert _classify_table_tier() == 3
+
+
+class TestTierByTableCoverageIsolation:
+    """D06-F01: 同轮 health 计算中，已判 CRITICAL 的表级等级不得被新鲜度分类覆盖。
+
+    同时证明逐表隔离：无关财务表故障不得阻断健康的报价策略，且断言经真实
+    ``require_quality`` 装饰器与 ``VolumeBreakoutStrategy`` 联通（非仅 helper 自证）。
+    """
+
+    _CRIT = ("daily_quotes", "financial_reports", "daily_indicators", "moneyflow_daily")
+
+    def _deep_proc(self, *, quote_ratio: float = 0.9, fin_ratio: float = 0.9) -> FakeProcessor:
+        WriteQuality._reset_singleton()
+        proc = FakeProcessor()
+        proc._health_cache = {"time": 0, "data": None}
+        proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
+        tables = {t: {"ratio": 0.9, "type": "stock"} for t in self._CRIT}
+        tables["daily_quotes"]["ratio"] = quote_ratio
+        tables["financial_reports"]["ratio"] = fin_ratio
+        proc.cache.check_comprehensive_health = AsyncMock(return_value={"tables": tables, "global_trade_days": 500})
+        proc.cache.get_concept_count = AsyncMock(return_value=100)
+        proc.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame({"table_name": ["financial_reports"], "last_data_date": ["20240610"]})
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+
+        async def fake_get_trade_dates(start_date=None, end_date=None):
+            return ["20240101", "20240614"]
+
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        return proc
+
+    @staticmethod
+    def _strategy_context(proc: FakeProcessor) -> dict:
+        return {
+            "screening_data": pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "name": ["A", "B"],
+                    "pct_chg": [3.0, 9.0],
+                    "turnover_rate": [5.0, 5.0],
+                }
+            ),
+            "data_processor": proc,
+            "params": {},
+        }
+
+    @pytest.mark.asyncio
+    async def test_critical_quote_table_blocks_real_strategy_gate(self):
+        """100/5000 覆盖 + 报价新鲜 → daily_quotes=0，策略体不执行并抛 QualityGateError。"""
+        proc = self._deep_proc(quote_ratio=0.02)
+        with patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await proc.check_data_health()
+        assert result["status"] == "red"
+        assert result["tier"] == 0
+        assert proc._quality_tier_by_table["daily_quotes"] == 0
+
+        strategy = VolumeBreakoutStrategy()
+        with patch.object(
+            strategy,
+            "check_dependencies",
+            return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
+        ):
+            with pytest.raises(QualityGateError) as exc_info:
+                await strategy.filter(self._strategy_context(proc))
+        # 断言门控拒绝的真实归因（daily_quotes 表级 CRITICAL vs 策略要求 SILVER），
+        # 避免只验证异常类型而无法区分其他 QualityGateError 来源。
+        gate_msg = str(exc_info.value)
+        assert "SILVER" in gate_msg
+        assert "CRITICAL" in gate_msg
+
+    @pytest.mark.asyncio
+    async def test_unrelated_financial_gap_keeps_quote_strategy_runnable(self):
+        """仅无关财务表不足 → global=0 但 daily_quotes 保持 GOLD，报价策略仍可运行。"""
+        proc = self._deep_proc(fin_ratio=0.05)
+        with patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await proc.check_data_health()
+        assert result["status"] == "red"
+        assert proc._quality_tier == 0
+        assert proc._quality_tier_by_table["financial_reports"] == 0
+        assert proc._quality_tier_by_table["daily_quotes"] == 3
+
+        strategy = VolumeBreakoutStrategy()
+        with patch.object(
+            strategy,
+            "check_dependencies",
+            return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
+        ):
+            out = await strategy.filter(self._strategy_context(proc))
+        assert not out.empty
+
+    @pytest.mark.asyncio
+    async def test_fast_path_stale_critical_not_overwritten(self):
+        """fast-path: 已判 stale 的 financial_reports 不得被后续新鲜度分类抬升。"""
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": list(self._CRIT),
+                "last_data_date": ["20240614", "20240601", "20240614", "20240614"],
+                "status": ["success"] * 4,
+                "last_result_status": ["success"] * 4,
+                "record_count": [5000, 100, 5000, 5000],
+            }
+        )
+        proc.cache.sync_dao.get_sync_status = AsyncMock(return_value=sync_df)
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.side_effect = lambda s, fmt="%Y%m%d": datetime.datetime.strptime(str(s), "%Y%m%d")
+                await proc._assign_basic_tier()
+        assert proc._quality_tier == 0
+        assert proc._quality_tier_by_table["financial_reports"] == 1
+        assert proc._quality_tier_by_table["daily_quotes"] == 3
+        assert proc._quality_tier_by_table["daily_indicators"] == 2

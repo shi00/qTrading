@@ -357,12 +357,15 @@ class HealthCheckMixin:
                         self._quality_tier_by_table[_t] = 1
                     else:
                         self._quality_tier_by_table[_t] = 2
-                self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=days_lag)
-                self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
-                    fin_lag_days=fin_lag_days,
-                    is_financial=True,
-                    avg_fundamental=None,
-                )
+                # F01: 新鲜度分类只补充普通表；已被判 empty/stale 的表不得被同轮重算覆盖。
+                if "daily_quotes" not in empty_critical and "daily_quotes" not in stale_critical:
+                    self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=days_lag)
+                if "financial_reports" not in empty_critical and "financial_reports" not in stale_critical:
+                    self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
+                        fin_lag_days=fin_lag_days,
+                        is_financial=True,
+                        avg_fundamental=None,
+                    )
 
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
@@ -676,15 +679,19 @@ class HealthCheckMixin:
             )
             # DS-03: 深扫时逐表登记等级。financial_reports 依据字段完整性可达 GOLD；
             # 缺失的 critical 表显式 CRITICAL，其余回退全局等级。
+            # F01: 新鲜度分类只补充普通表；已判 CRITICAL 的表级等级必须在同轮最后落表，
+            # 不得被后续分类覆盖（否则 global=0 时该表仍以新鲜度等级放行）。
             self._quality_tier_by_table = {}
+            if "daily_quotes" not in missing_critical:
+                self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=lag_days)
+            if "financial_reports" not in missing_critical:
+                self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
+                    fin_lag_days=fin_lag_days,
+                    is_financial=True,
+                    avg_fundamental=avg_fund,
+                )
             for _t in missing_critical:
                 self._quality_tier_by_table[_t] = 0
-            self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=lag_days)
-            self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
-                fin_lag_days=fin_lag_days,
-                is_financial=True,
-                avg_fundamental=avg_fund,
-            )
 
             # Calculate overall system coverage (using financial as main proxy)
             sys_coverage = fin_fresh_ratio * 100
