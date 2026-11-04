@@ -2015,8 +2015,8 @@ jobs:
           Compress-Archive -Path $wheel.FullName, $sums -DestinationPath $zip -Force
           # 必须用 --prerelease 创建：GitHub 会把「最新创建的非 draft / 非 prerelease」Release
           # 自动标为仓库 Latest，而 ci-wheels 只是构建缓存仓库，绝不能抢走正式版本的 latest 归属
-          # （release-windows 靠显式 --latest 才夺回）。prerelease 同时被训练指纹脚本的
-          # `gh release list --exclude-pre-releases` 排除，避免多一条无关 Release。
+          # （release-windows 靠显式 --latest 才夺回）。prerelease 同时会被训练指纹脚本的
+          # 正式版本列举逻辑（排除 pre-release）过滤，避免多一条无关 Release。
           # draft 必须拒绝：本 job 持有 contents: write 能看到 draft，但两条 cuda 腿只有 contents: read，
           # 取不到 draft 资产，会永远静默走冷路径。
           # --target 决定 tag 指向；tag 已存在时 GitHub 忽略该值，因此可安全重跑。
