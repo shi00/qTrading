@@ -26,6 +26,14 @@ permissions:
 
 env:
   CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
+  # CUDA wheel 缓存仓库：独立 tag `ci-wheels` 的 Release 资产（资产名 <key>.zip）。
+  # 相较 actions/cache：永久保存（不受每仓库 10 GB / 7 天未访问淘汰）、不受 tag 作用域限制
+  # （任意 tag / 分支 / dispatch 均可读）、不占 PR 缓存预算；代价是仓库多一个非版本 tag。
+  CI_WHEEL_BANK_TAG: ci-wheels
+  # wheel key 的可变部分（llama 版本由 requirements.txt 解析后拼接）。
+  # 覆盖 CUDA 版本 / Python 版本 / CMAKE_ARGS 的 arch 集合 / runner 镜像标签 win2022；
+  # 镜像内 MSVC 补丁变化不在键内，产物异常时递增末尾 rN 强制重编。
+  LLAMA_CUDA_WHEEL_KEY_SUFFIX: cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -1779,24 +1787,28 @@ jobs:
 
   build-llama-cuda-wheel:
     name: Prebuild CUDA wheel (llama-cpp-python)
-    # 触发面 = tag 发布 / 手动 dispatch / 夜间 schedule：三者都是「可写默认分支缓存作用域」的可信触发器。
-    # PR / merge_group 下 build-windows 本身被跳过，本 job 若无条件执行会让每个 PR 白跑一次
-    # 45~60 分钟源码编译，故不纳入这两个事件。
-    # schedule 的作用是预热默认分支缓存：官方规则允许 workflow run 恢复「当前分支」或「默认分支」的缓存，
-    # 但不同 tag 之间不共享，因此若只在 tag run 内部预热，每次发布仍会是冷路径。
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    # 触发面 = tag 发布 / main 上的手动 dispatch / 夜间 schedule：
+    # - dispatch 必须限定 refs/heads/main：dispatch 会执行「所选 ref 上」的 workflow 定义并照常授予
+    #   job 级 contents: write，若允许分支 dispatch，任何有 push 权限者都能改本 job 把自定义 wheel
+    #   写进 ci-wheels（下载侧的 sha256 只证明完整性、不证明来源），从而绕过评审进入发布包。
+    # - PR / merge_group 下 build-windows 本身被跳过，本 job 若执行会让每个 PR 白跑一次
+    #   45~60 分钟源码编译，故不纳入这两个事件。
+    # - schedule 的作用是预热/补建 wheel bank：命中时本 job 数分钟内结束，未命中才重编发布，
+    #   保证 tag 发布时 cuda 腿无需冷编译（Release 资产不受 ref 作用域限制，任意 tag 都可读）。
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event_name == 'schedule'
     runs-on: windows-2022
     # 冷路径（缓存未命中）含 Toolkit 安装（实测约 7 分钟）与 6 档 arch 的 CUDA 编译（旧 arch 集合
     # 实测 37 分钟，扩展 arch 后预计更久，该组合未实测）。本 job 不在 build-windows 的 needs 内，
     # 超时/失败都不会阻断发布，故放宽到 120 分钟。
     timeout-minutes: 120
+    # 写权限仅用于把 wheel 发布到 `ci-wheels` Release；触发面已排除 PR / merge_group，无可信输入。
     permissions:
-      contents: read
+      contents: write
     # 本 job 只是加速项、不承担门禁：既不进 needs 链，重型步骤也逐个 continue-on-error，
-    # 失败或超时都不会阻断 4 条发布腿。交付通道是缓存而非 artifact：本 job 与下游腿在时间上重叠，
+    # 失败或超时都不会阻断 4 条发布腿。交付通道是 Release 资产而非 artifact：本 job 与下游腿在时间上重叠，
     # 冷路径下同 run 的 artifact 必然来不及产出（实测 build-windows 在 run 开始 8.4 分钟即启动，
-    # 而冷路径编译需 45~60 分钟），故本 job 只负责把 wheel 写进缓存供后续 run 命中，
-    # 下游腿自行 restore，未命中即回退内联源码编译（与改动前行为等价）。
+    # 而冷路径编译需 45~60 分钟），故本 job 只负责把 wheel 发布到 `ci-wheels` Release 供后续 run 下载，
+    # 下游腿自行下载校验，未命中即回退内联源码编译（与改动前行为等价）。
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -1822,28 +1834,82 @@ jobs:
           Write-Host "llama-cpp-python version: $version"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
 
+      - name: Resolve wheel bank key
+        id: wheel-key
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 资产键 = llama 版本 + 编译环境后缀（env.LLAMA_CUDA_WHEEL_KEY_SUFFIX）。
+          # 与 build-windows 的 cuda 腿逐字一致；后缀单源于 workflow env，避免多处双写漂移。
+          $key = "llama-cuda-${{ steps.llama-version.outputs.version }}-$env:LLAMA_CUDA_WHEEL_KEY_SUFFIX"
+          Write-Host "wheel bank key: $key"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "key=$key"
+
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         # CUDA 构建产物会污染共享 uv 缓存（CPU 腿可能误取到 CUDA wheel，反之亦然），
-        # 故不启用 setup-uv 自带缓存，改用下方的显式 wheel 缓存。
+        # 故不启用 setup-uv 自带缓存，改用上方的显式 wheel bank（Release 资产）。
         with:
           enable-cache: false
 
-      - name: Restore prebuilt CUDA wheel cache
+      - name: Restore prebuilt CUDA wheel from release bank
         id: restore-wheel
+        # 缓存仓库 = 独立 tag `ci-wheels` 的 Release 资产（资产名 <key>.zip）。
+        # 相较 actions/cache：不受 10 GB / 7 天未访问淘汰、不受 tag 作用域限制，任意 ref 可读。
+        # 未命中（Release / 资产不存在，或下载 / 校验失败）即走冷路径重编，只影响耗时不影响正确性。
         continue-on-error: true
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: wheelhouse
-          # 键必须覆盖所有影响 wheel 字节的因素：llama-cpp-python 版本、CUDA 版本、Python 版本、
-          # CMAKE_ARGS（含 CUDA arch 列表）与 runner 镜像标签（win2022；镜像内 MSVC 补丁不在键内，
-          # 若某次补丁导致产物异常，只需递增末尾 rN 修订段即可强制重编）。
-          # 该键在 build-windows 的对应步骤中必须逐字一致（两处修改须同步）。
-          # 未命中即重编并写回同键：只影响耗时、不影响正确性。
-          key: llama-cuda-${{ steps.llama-version.outputs.version }}-cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $key = "${{ steps.wheel-key.outputs.key }}"
+          $bankDir = Join-Path $env:RUNNER_TEMP "wheel-bank"
+          $zip = Join-Path $bankDir "$key.zip"
+          $hit = $false
+          # 整个读取过程包在 try/finally：任一环节抛错都清空 wheelhouse，避免残留半解压的坏 wheel
+          # 被后续冷路径沿用（冷路径会重新写入同名 wheel，多文件时 Select-Object -First 1 结果不确定）。
+          try {
+            New-Item -ItemType Directory -Force -Path $bankDir | Out-Null
+            gh release download $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY `
+              --pattern "$key.zip" --dir $bankDir --skip-existing
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zip)) {
+              Write-Host "wheel bank 未命中：$key.zip 不存在或下载失败，走冷路径重编"
+            } else {
+              Remove-Item wheelhouse -Recurse -Force -ErrorAction SilentlyContinue
+              Expand-Archive -Path $zip -DestinationPath wheelhouse -Force
+              $sums = Join-Path wheelhouse "SHA256SUMS.txt"
+              $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              $m = if (Test-Path $sums) {
+                [regex]::Match((Get-Content $sums -Raw), "(?m)^([0-9a-fA-F]{64})\s+(\S+\.whl)\s*$")
+              }
+              # 逐项校验：缺 wheel / 缺清单 / 文件名不符 / 摘要不符，任一不过即视为未命中并清空。
+              $reason = $null
+              if (-not $wheel) { $reason = "缺 cp314-win_amd64 wheel" }
+              elseif (-not $m -or -not $m.Success) { $reason = "缺 SHA256SUMS.txt 或格式非法" }
+              elseif ($m.Groups[2].Value -ne $wheel.Name) { $reason = "SHA256SUMS 与 wheel 文件名不一致" }
+              elseif ($m.Groups[1].Value.ToLower() -ne (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()) {
+                $reason = "sha256 校验失败"
+              }
+              if ($reason) {
+                Write-Warning "wheel bank 资产不可用（$reason），放弃复用"
+              } else {
+                Write-Host "wheel bank 命中：$($wheel.Name) sha256=$($m.Groups[1].Value.ToLower())"
+                # 移除校验清单，wheelhouse 只留 wheel 本体（下游按目录内容判定是否复用）。
+                Remove-Item $sums -Force
+                $hit = $true
+              }
+            }
+          } catch {
+            Write-Warning "wheel bank 读取异常（$($_.Exception.Message)），回退冷路径"
+          } finally {
+            if (-not $hit) { Remove-Item wheelhouse -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "hit=$($hit.ToString().ToLower())"
 
       - name: Install CUDA Toolkit
-        if: steps.restore-wheel.outputs.cache-hit != 'true'
+        if: steps.restore-wheel.outputs.hit != 'true'
         continue-on-error: true
         # 安装方式、12.4 版本选择与子包清单的依据见 build-windows 同名步骤的长注释。
         uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d  # v0.2.36
@@ -1855,7 +1921,7 @@ jobs:
 
       - name: Build CUDA wheel
         id: build-wheel
-        if: steps.restore-wheel.outputs.cache-hit != 'true'
+        if: steps.restore-wheel.outputs.hit != 'true'
         continue-on-error: true
         # 单步超时由 continue-on-error 吸收，避免整 job 超时把 job 结论变成 cancelled。
         timeout-minutes: 90
@@ -1882,16 +1948,16 @@ jobs:
           }
           Get-ChildItem wheelhouse | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
 
-      - name: Verify wheel CUDA backend before caching
+      - name: Verify wheel CUDA backend before publishing
         id: verify-wheel
         # 构建失败时 wheelhouse 为空，跳过校验（否则只会把"没找到 wheel"再报一遍）。
-        if: steps.restore-wheel.outputs.cache-hit != 'true' && steps.build-wheel.outcome == 'success'
+        if: steps.restore-wheel.outputs.hit != 'true' && steps.build-wheel.outcome == 'success'
         continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           # 与 build-windows 的 "Verify llama-cpp-python CUDA backend DLLs" 同语义；
-          # 提前在此校验，避免坏 wheel 写入缓存后连续击穿 4 条发布腿。
+          # 提前在此校验，避免坏 wheel 写入 wheel bank 后连续击穿 4 条发布腿。
           # 平台标签必须与 build-windows 的 Python 3.14 匹配，否则下游装上也是错的 ABI。
           $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" | Select-Object -First 1
           if (-not $wheel) {
@@ -1909,7 +1975,7 @@ jobs:
           $pkgDir = python -c "import importlib.util; print(importlib.util.find_spec('llama_cpp').submodule_search_locations[0])"
           $libDir = Join-Path $pkgDir "lib"
           $llamaDll = Join-Path $libDir "llama.dll"
-          # llama.dll 是后端共用载体，缺失即说明 wheel 结构异常，必须拒绝缓存而非静默放行。
+          # llama.dll 是后端共用载体，缺失即说明 wheel 结构异常，必须拒绝发布而非静默放行。
           if (-not (Test-Path $llamaDll)) {
             Write-Error "wheel 内缺少 llama_cpp/lib/llama.dll（$libDir）"
             exit 1
@@ -1919,28 +1985,77 @@ jobs:
           $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($llamaDll))
           $linked = $ascii.Contains("cudart64_12.dll") -or $ascii.Contains("cublas64_12.dll") -or $ascii.Contains("cublasLt64_12.dll")
           if ($cudaDlls.Count -eq 0 -and -not $linked) {
-            Write-Error "no CUDA backend evidence in $libDir; refusing to cache a CPU-only wheel"
+            Write-Error "no CUDA backend evidence in $libDir; refusing to publish a CPU-only wheel"
             exit 1
           }
 
-      - name: Save prebuilt CUDA wheel cache
-        # 仅在重新编译且校验通过后写回，坏 wheel 不得进入缓存。
-        # 命中本键的后续 run 由 build-windows 的 cuda 腿自行 restore（见该腿同名步骤）。
-        if: steps.restore-wheel.outputs.cache-hit != 'true' && steps.verify-wheel.outcome == 'success'
+      - name: Publish CUDA wheel to release bank
+        # 仅在重新编译且校验通过后上传，坏 wheel 不得进入缓存仓库。
+        # --clobber 使重跑幂等；资产名 <key>.zip 决定下游按同一键精确匹配。
+        # Release 不存在时首次创建：tag `ci-wheels` 不匹配 push.tags `v*.*.*`，不会触发发版链。
+        if: steps.restore-wheel.outputs.hit != 'true' && steps.verify-wheel.outcome == 'success'
         continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: wheelhouse
-          # 直接写字面键而不复用 restore 的 cache-primary-key 输出：restore 被 continue-on-error
-          # 掩盖异常时该输出可能为空，会导致 save 静默无效、本次编译白费。
-          key: llama-cuda-${{ steps.llama-version.outputs.version }}-cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $key = "${{ steps.wheel-key.outputs.key }}"
+          $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" | Select-Object -First 1
+          if (-not $wheel) {
+            Write-Error "wheelhouse 中未找到 cp314-win_amd64 wheel"
+            exit 1
+          }
+          $sha = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
+          $sums = Join-Path wheelhouse "SHA256SUMS.txt"
+          Set-Content -Path $sums -Value "$sha  $($wheel.Name)" -Encoding ascii
+          $bankDir = Join-Path $env:RUNNER_TEMP "wheel-bank"
+          New-Item -ItemType Directory -Force -Path $bankDir | Out-Null
+          $zip = Join-Path $bankDir "$key.zip"
+          Compress-Archive -Path $wheel.FullName, $sums -DestinationPath $zip -Force
+          # 必须用 --prerelease 创建：GitHub 会把「最新创建的非 draft / 非 prerelease」Release
+          # 自动标为仓库 Latest，而 ci-wheels 只是构建缓存仓库，绝不能抢走正式版本的 latest 归属
+          # （release-windows 靠显式 --latest 才夺回）。prerelease 同时被训练指纹脚本的
+          # `gh release list --exclude-pre-releases` 排除，避免多一条无关 Release。
+          # draft 必须拒绝：本 job 持有 contents: write 能看到 draft，但两条 cuda 腿只有 contents: read，
+          # 取不到 draft 资产，会永远静默走冷路径。
+          # --target 决定 tag 指向；tag 已存在时 GitHub 忽略该值，因此可安全重跑。
+          $isDraft = gh release view $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq '.isDraft' 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $isDraft = ""
+            gh release create $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY `
+              --title "CI wheel bank (llama-cpp-python CUDA)" `
+              --notes "CI 预编译 llama-cpp-python CUDA wheel 的长期缓存仓库（prerelease，不参与 latest 归属）。资产名 <key>.zip 即缓存键，勿手工修改；需要强制重编时递增 workflow env 的 LLAMA_CUDA_WHEEL_KEY_SUFFIX；旧 -rN 资产可人工删除。" `
+              --prerelease `
+              --target $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) {
+              # 并发首次创建：另一 run 可能已抢先建好，复核一次后继续，避免整步丢弃本 run 的产物。
+              $isDraft = gh release view $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq '.isDraft' 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "创建 $env:CI_WHEEL_BANK_TAG Release 失败（exit $LASTEXITCODE）"
+                exit 1
+              }
+            }
+          }
+          if ("$isDraft" -eq "true") {
+            Write-Error "$env:CI_WHEEL_BANK_TAG Release 处于 draft 状态，contents: read 的 cuda 腿无法下载；请先 gh release edit $env:CI_WHEEL_BANK_TAG --draft=false"
+            exit 1
+          }
+          # --clobber 是 delete-then-recreate：瞬时故障下 bank 可能短暂为空，但只会让下载方回退冷编译，
+          # 不会把旧/坏产物留在原处，故该窄窗口无需额外重试。
+          gh release upload $env:CI_WHEEL_BANK_TAG $zip --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "上传 $key.zip 失败（exit $LASTEXITCODE）"
+            exit 1
+          }
+          Write-Host "已发布 $key.zip（sha256=$sha）"
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
     # build-llama-cuda-wheel 故意不进 needs：它是纯加速项，失败/超时都不得影响发布门禁
     # （needs 对失败 job 的默认 skip 语义无法用 continue-on-error 可靠规避）。
-    # 两条 cuda 腿在 Install dependencies 前用 actions/cache/restore 自取 wheel（continue-on-error），
-    # 未命中（冷路径 / 预编译失败 / 夜间尚未预热）即回退内联源码编译，与改动前行为等价。
+    # 两条 cuda 腿在 Install dependencies 前用 `gh release download` 自取 wheel（continue-on-error），
+    # 未命中（冷路径 / 预编译失败 / Release 尚未预热）即回退内联源码编译，与改动前行为等价。
     needs: [resolve-sidecar-release, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     # 锁定 windows-2022（VS 2022）：windows-latest 已滚动迁移到 VS 2026（GitHub 2026-05 公告），
@@ -2014,17 +2129,69 @@ jobs:
           Write-Host "llama-cpp-python version: $version"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
 
-      - name: Restore prebuilt CUDA wheel (CUDA variants only)
-        # 缓存键与 build-llama-cuda-wheel 的 restore/save 步骤逐字一致；命中即跳过 ~37 分钟源码编译
-        # （nvcc 仍照常安装，原因见下方 Toolkit 步骤注释）。未命中时 wheelhouse 不存在，
-        # Install dependencies 自动回退内联源码编译。
+      - name: Resolve wheel bank key (CUDA variants only)
+        id: wheel-key
         if: matrix.backend == 'cuda'
-        id: prebuilt-wheel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 与 build-llama-cuda-wheel 同一键；后缀单源于 workflow env。
+          $key = "llama-cuda-${{ steps.llama-version.outputs.version }}-$env:LLAMA_CUDA_WHEEL_KEY_SUFFIX"
+          Write-Host "wheel bank key: $key"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "key=$key"
+
+      - name: Restore prebuilt CUDA wheel from release bank (CUDA variants only)
+        # 与 build-llama-cuda-wheel 的 restore 步骤同语义（同一 Release 资产 <key>.zip）。
+        # 命中即跳过 ~37 分钟源码编译（nvcc 仍照常安装，原因见下方 Toolkit 步骤注释）。
+        # 未命中（含 Release / 资产不存在）时清空 wheelhouse，Install dependencies 自动回退内联源码编译。
+        if: matrix.backend == 'cuda'
         continue-on-error: true
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: wheelhouse
-          key: llama-cuda-${{ steps.llama-version.outputs.version }}-cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $key = "${{ steps.wheel-key.outputs.key }}"
+          $bankDir = Join-Path $env:RUNNER_TEMP "wheel-bank"
+          $zip = Join-Path $bankDir "$key.zip"
+          $hit = $false
+          # 与预编译 job 同构：任一步抛错都清空 wheelhouse，避免半解压的坏 wheel 被 Install
+          # dependencies 当作可复用快路径（那会让 uv 安装失败并直接拖垮该发布腿）。
+          try {
+            New-Item -ItemType Directory -Force -Path $bankDir | Out-Null
+            gh release download $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY `
+              --pattern "$key.zip" --dir $bankDir --skip-existing
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zip)) {
+              Write-Host "wheel bank 未命中：$key.zip 不存在或下载失败，回退内联源码编译"
+            } else {
+              Remove-Item wheelhouse -Recurse -Force -ErrorAction SilentlyContinue
+              Expand-Archive -Path $zip -DestinationPath wheelhouse -Force
+              $sums = Join-Path wheelhouse "SHA256SUMS.txt"
+              $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              $m = if (Test-Path $sums) {
+                [regex]::Match((Get-Content $sums -Raw), "(?m)^([0-9a-fA-F]{64})\s+(\S+\.whl)\s*$")
+              }
+              $reason = $null
+              if (-not $wheel) { $reason = "缺 cp314-win_amd64 wheel" }
+              elseif (-not $m -or -not $m.Success) { $reason = "缺 SHA256SUMS.txt 或格式非法" }
+              elseif ($m.Groups[2].Value -ne $wheel.Name) { $reason = "SHA256SUMS 与 wheel 文件名不一致" }
+              elseif ($m.Groups[1].Value.ToLower() -ne (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()) {
+                $reason = "sha256 校验失败"
+              }
+              if ($reason) {
+                Write-Warning "wheel bank 资产不可用（$reason），回退内联源码编译"
+              } else {
+                Write-Host "wheel bank 命中：$($wheel.Name) sha256=$($m.Groups[1].Value.ToLower())"
+                Remove-Item $sums -Force
+                $hit = $true
+              }
+            }
+          } catch {
+            Write-Warning "wheel bank 读取异常（$($_.Exception.Message)），回退内联源码编译"
+          } finally {
+            if (-not $hit) { Remove-Item wheelhouse -Recurse -Force -ErrorAction SilentlyContinue }
+          }
 
       - name: Install CUDA Toolkit (CUDA variants only)
         # 即使复用预编译 wheel 也保留 Toolkit 安装：PyInstaller 在打包期按 PATH 解析已收集二进制的
@@ -2079,10 +2246,10 @@ jobs:
           # 使 nvcc 编译 CUDA 后端；CPU 变体不设 CMAKE_ARGS，cmake 自动只编 CPU。
           # abetlen 预编译 wheel 已无法匹配 Python 3.14 + llama-cpp-python 0.3.36
           # （abl wheel 最高 cp312 + 0.3.4），故 v0.3.35 起切换到此源码编译路径。
-          # CUDA 变体优先复用缓存中的预编译 wheel（含固定 arch 列表），取不到才走下面的源码编译。
+          # CUDA 变体优先复用 wheel bank 中的预编译 wheel（含固定 arch 列表），取不到才走下面的源码编译。
           $prebuiltWheel = $null
           if ("${{ matrix.backend }}" -eq "cuda") {
-            # 快路径：build-llama-cuda-wheel 已用同一 CUDA 12.4.1 + 同一 arch 列表编好 wheel 并缓存，本腿只需安装。
+            # 快路径：build-llama-cuda-wheel 已用同一 CUDA 12.4.1 + 同一 arch 列表编好 wheel 并发布到 Release，本腿只需安装。
             # 平台标签必须与 setup-python 的 3.14 匹配，避免装上错误 ABI 的 wheel。
             $candidate = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($candidate) {
@@ -2102,6 +2269,19 @@ jobs:
             $llamaDll = Join-Path (Join-Path $pkgDir "lib") "llama.dll"
             if (Test-Path $llamaDll) {
               $hashBefore = (Get-FileHash $llamaDll -Algorithm SHA256).Hash
+              # 安装前再验一次 CUDA 后端证据（语义同 build-llama-cuda-wheel 的 "Verify wheel CUDA backend"）
+              # 与下方 "Verify llama-cpp-python CUDA backend DLLs" 一致：下载侧的 sha256 / 文件名校验只能
+              # 证明字节没被改动，不能证明这份字节确实是 CUDA 版。若 bank 里被误存了 CPU wheel，热路径会让
+              # 本腿在事后断言处失败并整腿报错；此处提前识别并按"失败即回退"处理，不阻断发布。
+              $libDir = Join-Path $pkgDir "lib"
+              $cudaDlls = @(Get-ChildItem $libDir -Filter "*cuda*.dll" -ErrorAction SilentlyContinue)
+              $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($llamaDll))
+              $linked = $ascii.Contains("cudart64_12.dll") -or $ascii.Contains("cublas64_12.dll") -or $ascii.Contains("cublasLt64_12.dll")
+              if ($cudaDlls.Count -eq 0 -and -not $linked) {
+                Write-Warning "预编译 wheel 缺 CUDA 后端证据（$libDir 无 *cuda*.dll 且 llama.dll 未链接 cudart/cublas），回退到内联源码编译"
+                uv pip uninstall --system llama-cpp-python | Out-Null
+                $prebuiltWheel = $null
+              }
             } else {
               # 缺 llama.dll 说明 wheel 结构异常：卸载后回退源码编译（"失败即回退"语义，
               # 不得在此 exit 1 把整条发布打死；后续 Verify 步骤仍会独立校验最终安装结果）。
