@@ -6,7 +6,8 @@
 - **锁序**：月锁先行（全部预算/结算/reservations 变更经同月锁键串行化）；锁内
   try_reserve / mark_dispatched / release_reservation 为「invocation → …」，
   settle_attempt_usage 为「attempt（FOR UPDATE）→ invocation（F22 预留转换）→
-  月汇总」，同类按主键序；
+  月汇总」，同类按主键序；recover_expired_owners 不持月锁（跨月批量恢复无法事先
+  枚举锁键），与 settle_attempt_usage 同序「attempt → invocation」，不得反序；
 - **owner 条件写入（F23 fencing）**：所有变更带 owner_session_id / owner_epoch /
   owner_lease_expires_at > (now() AT TIME ZONE 'UTC') 三条件，rowcount=0 即失权
   （时间列统一 naive UTC 墙钟，now() 经 AT TIME ZONE 'UTC' 归一，与 session 时区无关）；
@@ -961,10 +962,38 @@ class AIUsageDao(BaseDao):
         failed / succeeded），费用列保持 NULL（未知不填 0）；仅更新仍为
         dispatched 的行，重复恢复 / 与正常落账并发均幂等（迟到真实结算仍可经
         usage_revision 水位覆盖为真实终态）。
+
+        锁序（D03-R04）：先 ``UPDATE ai_attempt``（取 attempt 行锁）再
+        ``UPDATE ai_invocation``（重写 reservations jsonb）——与
+        ``settle_attempt_usage`` 的「attempt（FOR UPDATE）→ invocation」同序。
+        恢复不持归属月 advisory 锁（跨月批量恢复无法在更新前枚举全部锁键），
+        若反序先锁 invocation，会与并发迟到结算形成「恢复持 invocation 等
+        attempt、结算持 attempt 等 invocation」的锁环。attempt 语句的
+        ``FROM ai_invocation`` 仅作快照读取，不取 invocation 行锁。两语句同属
+        一个 READ COMMITTED 事务、第 2 句重新校验租约：极端并发下 owner 若在
+        两句之间被 ``claim_invocation`` 续期，attempt 已收敛为 unknown 而预留
+        保持 dispatched（有效租约继续占用预算，不释放；迟到结算仍可覆盖
+        attempt 真实终态），不产生超支。
         """
         self._check_engine(context="ai_usage.recover_expired_owners")
         now_value = now or datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         async with self._guarded_begin() as conn:
+            attempt_result = await conn.execute(
+                sa.text(
+                    """
+                    UPDATE ai_attempt AS a
+                    SET status = :status,
+                        error_code = :error_code,
+                        updated_at = (now() AT TIME ZONE 'UTC')
+                    FROM ai_invocation i
+                    WHERE i.invocation_id = a.invocation_id
+                      AND a.status = 'dispatched'
+                      AND i.owner_lease_expires_at <= :now
+                    """
+                ),
+                {"status": _RECOVERED_ATTEMPT_STATUS, "error_code": _RECOVERED_ATTEMPT_ERROR_CODE, "now": now_value},
+            )
+            converged_attempts = int(attempt_result.rowcount or 0)
             result = await conn.execute(
                 sa.text(
                     """
@@ -989,22 +1018,6 @@ class AIUsageDao(BaseDao):
                 ),
                 {"now": now_value},
             )
-            attempt_result = await conn.execute(
-                sa.text(
-                    """
-                    UPDATE ai_attempt AS a
-                    SET status = :status,
-                        error_code = :error_code,
-                        updated_at = (now() AT TIME ZONE 'UTC')
-                    FROM ai_invocation i
-                    WHERE i.invocation_id = a.invocation_id
-                      AND a.status = 'dispatched'
-                      AND i.owner_lease_expires_at <= :now
-                    """
-                ),
-                {"status": _RECOVERED_ATTEMPT_STATUS, "error_code": _RECOVERED_ATTEMPT_ERROR_CODE, "now": now_value},
-            )
-            converged_attempts = int(attempt_result.rowcount or 0)
             if converged_attempts:
                 logger.info(
                     "[ai_usage_dao] converged %s orphaned dispatched attempt(s) to status=%s",
