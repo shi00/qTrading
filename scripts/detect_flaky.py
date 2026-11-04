@@ -177,6 +177,10 @@ def run_pytest_with_json_report(
         str(report_path),
         "-q",
         "--tb=short",
+        # 只比对 outcome/longrepr，不需要日志：pytest-json-report 会把原始 LogRecord 挂到
+        # report 附加属性上（litellm 会给 record 写 object() 哨兵），xdist 序列化该 report
+        # 时 worker 崩溃并导致 pytest 退出码 3，因此显式丢弃 log 记录。
+        "--json-report-omit=log",
     ]
     if parallel > 1:
         cmd.extend(["-n", str(parallel)])
