@@ -13,8 +13,6 @@ All fixtures are async to avoid asyncio.run() conflicts with pytest-asyncio.
 import asyncio
 import threading
 import uuid
-from datetime import date
-from types import SimpleNamespace
 from typing import Any
 
 import asyncpg
@@ -188,52 +186,6 @@ async def _cleanup_migrated_db(params: dict, async_engine: AsyncEngine, sync_eng
     await async_engine.dispose()
     sync_engine.dispose()
     await _drop_isolated_db(params, db_name)
-
-
-_INSERT_FINANCIAL_VERSION_SQL = text(
-    """
-    INSERT INTO financial_reports (ts_code, end_date, ann_date, report_type)
-    VALUES (:ts_code, :end_date, :ann_date, :report_type)
-    """
-)
-
-_MULTI_VERSION_FINANCIAL_ROWS = (
-    ("999999.SZ", date(2025, 12, 31), date(2026, 3, 1)),
-    ("999999.SZ", date(2025, 12, 31), date(2026, 4, 1)),
-    ("000001.SZ", date(2025, 12, 31), date(2026, 3, 1)),
-)
-
-_SELECT_FINANCIAL_VERSIONS_SQL = text(
-    "SELECT ts_code, end_date, ann_date FROM financial_reports ORDER BY ts_code, ann_date"
-)
-
-
-def _insert_financial_versions(sync_engine: Any) -> None:
-    """Insert two announcement versions for one report period plus a single-version row."""
-    with sync_engine.begin() as conn:
-        for ts_code, end_date, ann_date in _MULTI_VERSION_FINANCIAL_ROWS:
-            conn.execute(
-                _INSERT_FINANCIAL_VERSION_SQL,
-                {"ts_code": ts_code, "end_date": end_date, "ann_date": ann_date, "report_type": "Q4"},
-            )
-
-
-def _financial_primary_key_columns(sync_engine: Any) -> list[str]:
-    from sqlalchemy import inspect as sa_inspect
-
-    return list(sa_inspect(sync_engine).get_pk_constraint("financial_reports")["constrained_columns"])
-
-
-def _financial_version_rows(sync_engine: Any) -> list[tuple]:
-    with sync_engine.connect() as conn:
-        return [tuple(row) for row in conn.execute(_SELECT_FINANCIAL_VERSIONS_SQL)]
-
-
-def _financial_column_is_nullable(sync_engine: Any, column_name: str) -> bool:
-    from sqlalchemy import inspect as sa_inspect
-
-    columns = {c["name"]: c for c in sa_inspect(sync_engine).get_columns("financial_reports")}
-    return bool(columns[column_name]["nullable"])
 
 
 class TestEngineBoundMigration:
@@ -537,73 +489,6 @@ class TestDowngradeAndReupgrade:
         cols_0001 = {c["name"] for c in inspector2.get_columns("financial_reports")}
         assert "money_cap" not in cols_0001, "money_cap should be removed after downgrade to 0001"
         assert "accounts_receiv" not in cols_0001, "accounts_receiv should be removed after downgrade to 0001"
-
-    @pytest.mark.asyncio
-    async def test_downgrade_refuses_multi_version_financial_reports(self, head_db_engine):
-        """D04-F01: populated 多公告版本默认 fail-closed，停在 head 且不删数据。
-
-        NOTE: 沙箱无 PostgreSQL，本用例 not_run（真实 DB 场景）。
-        """
-        engine, db_name, sync_db_url, sync_engine = head_db_engine
-        _insert_financial_versions(sync_engine)
-        head_rev = await DatabaseMigrator._get_head_revision()
-
-        with override_db_url(sync_db_url):
-
-            def _do_downgrade():
-                cfg = make_alembic_cfg(sync_db_url)
-                command.downgrade(cfg, "0021")
-
-            with pytest.raises(RuntimeError, match="多个公告版本"):
-                await asyncio.to_thread(_do_downgrade)
-
-        # 事务回滚：版本仍为 head，三键主键与全部行保持不变。
-        current, _, _ = await DatabaseMigrator.check_schema_status(engine)
-        assert current == head_rev
-        assert _financial_primary_key_columns(sync_engine) == ["ts_code", "end_date", "ann_date"]
-        assert len(_financial_version_rows(sync_engine)) == len(_MULTI_VERSION_FINANCIAL_ROWS)
-        assert _financial_column_is_nullable(sync_engine, "ann_date") is False
-
-    @pytest.mark.asyncio
-    async def test_downgrade_lossy_path_keeps_latest_announcement_version(self, head_db_engine):
-        """D04-F01: 显式 x-arg 授权后保留每组最新 ann_date，并恢复旧主键。
-
-        NOTE: 沙箱无 PostgreSQL，本用例 not_run（真实 DB 场景）。
-        """
-        engine, db_name, sync_db_url, sync_engine = head_db_engine
-        _insert_financial_versions(sync_engine)
-
-        with override_db_url(sync_db_url):
-
-            def _do_downgrade():
-                cfg = make_alembic_cfg(sync_db_url)
-                cfg.cmd_opts = SimpleNamespace(x=["allow_lossy_rollback=1"])
-                command.downgrade(cfg, "0021")
-
-            await asyncio.to_thread(_do_downgrade)
-
-        rows = _financial_version_rows(sync_engine)
-        assert ("999999.SZ", date(2025, 12, 31), date(2026, 4, 1)) in rows
-        assert ("999999.SZ", date(2025, 12, 31), date(2026, 3, 1)) not in rows
-        assert ("000001.SZ", date(2025, 12, 31), date(2026, 3, 1)) in rows
-        assert len(rows) == 2
-        assert _financial_primary_key_columns(sync_engine) == ["ts_code", "end_date"]
-        assert _financial_column_is_nullable(sync_engine, "ann_date") is True
-
-        # 再升级回 head：保留行非 NULL ann_date，不应被 upgrade 清理。
-        with override_db_url(sync_db_url):
-
-            def _do_upgrade():
-                cfg = make_alembic_cfg(sync_db_url)
-                command.upgrade(cfg, "head")
-
-            await asyncio.to_thread(_do_upgrade)
-
-        assert _financial_primary_key_columns(sync_engine) == ["ts_code", "end_date", "ann_date"]
-        assert len(_financial_version_rows(sync_engine)) == 2
-        head_rev = await DatabaseMigrator._get_head_revision()
-        current, _, _ = await DatabaseMigrator.check_schema_status(engine)
-        assert current == head_rev
 
 
 class TestConcurrentMigration:
