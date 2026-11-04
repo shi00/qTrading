@@ -186,19 +186,20 @@ class TestBaseDaoConvertParamForAsyncpg:
         result = BaseDao._convert_param_for_asyncpg("20240615")
         assert result == "20240615"
 
-    def test_yyyy_mm_dd_string(self):
-        result = BaseDao._convert_param_for_asyncpg("2024-06-15")
-        assert isinstance(result, datetime.date)
-        assert result == datetime.date(2024, 6, 15)
+    @pytest.mark.parametrize(
+        "value",
+        ["2026-04-29", "2026/04/29", "2026-04-29T08:30:00", "2024-06-15", "2024/06/15"],
+    )
+    def test_date_shaped_text_stays_str(self, value):
+        """D03-F03: 通用绑定层不得按外观把合法文本改写成 date（TEXT 列契约）。"""
+        assert BaseDao._convert_param_for_asyncpg(value) == value
 
-    def test_yyyy_slash_mm_slash_dd_string(self):
-        result = BaseDao._convert_param_for_asyncpg("2024/06/15")
-        assert isinstance(result, datetime.date)
-        assert result == datetime.date(2024, 6, 15)
-
-    def test_iso_datetime_string(self):
-        result = BaseDao._convert_param_for_asyncpg("2024-06-15T10:30:00")
-        assert isinstance(result, datetime.date)
+    def test_datetime_object_preserves_time(self):
+        """D03-F03: DateTime 入口传入 datetime 时原样透传，保留时分秒（不截断为 date）。"""
+        dt = datetime.datetime(2026, 4, 29, 8, 30, 15)
+        result = BaseDao._convert_param_for_asyncpg(dt)
+        assert result == dt
+        assert result.hour == 8 and result.minute == 30 and result.second == 15
 
     def test_non_date_string(self):
         result = BaseDao._convert_param_for_asyncpg("hello")

@@ -4,6 +4,7 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import datetime
 import re
 
 import pytest
@@ -243,6 +244,34 @@ class TestScreenerDaoGetPendingPredictions:
         assert "ai_score > 0" not in sql
         assert "review_status" in sql
         assert "$1" in sql or "$2" in sql
+
+    @pytest.mark.asyncio
+    async def test_date_threshold_iso_string_normalized_to_date(self):
+        """D03-F03: DATE 列入口传入 ISO 串 → DAO 边界归一为 datetime.date。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_pending_predictions("2026-04-29")
+        params = dao._read_db.call_args[0][1]
+        assert params[0] == datetime.date(2026, 4, 29)
+
+    @pytest.mark.asyncio
+    async def test_date_threshold_yyyymmdd_string_normalized_to_date(self):
+        """D03-F03: DATE 列入口传入 8 位 YYYYMMDD 串 → DAO 边界归一为 datetime.date。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_pending_predictions("20260429")
+        params = dao._read_db.call_args[0][1]
+        assert params[0] == datetime.date(2026, 4, 29)
+
+    @pytest.mark.asyncio
+    async def test_date_threshold_date_object_passthrough(self):
+        """D03-F03: 已是 date 对象的入参原样绑定。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        threshold = datetime.date(2026, 4, 29)
+        await dao.get_pending_predictions(threshold)
+        params = dao._read_db.call_args[0][1]
+        assert params[0] == threshold
 
 
 class TestScreenerDaoGetLearningContext:

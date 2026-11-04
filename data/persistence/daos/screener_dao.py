@@ -687,7 +687,7 @@ class ScreenerDao(BaseDao):
 
     # --- Review Manager Methods ---
 
-    async def get_pending_predictions(self, date_threshold: str):
+    async def get_pending_predictions(self, date_threshold: str | datetime.date):
         """Get predictions that have no result yet since the date_threshold.
 
         BIZ-01: 不再以 ``ai_score > 0`` 过滤——纯数学策略（enable_ai_analysis=False）
@@ -702,7 +702,12 @@ class ScreenerDao(BaseDao):
               AND (review_status IN ($2, $3) OR review_status IS NULL)
             ORDER BY trade_date DESC
         """
-        df = await self._read_db(sql, (date_threshold, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
+        # D03-F03: screening_history.trade_date 为 DATE 列，通用绑定层不再按外观猜测
+        # 日期，故在 DAO 边界显式归一（ISO / 8 位 YYYYMMDD 串 → datetime.date）。
+        df = await self._read_db(
+            sql,
+            (self._to_db_date(date_threshold), REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE),
+        )
         return df if df is not None else pd.DataFrame()
 
     async def expire_stale_pending(self, lookback_trade_days: int = 60) -> int:
