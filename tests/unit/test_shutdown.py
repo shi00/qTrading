@@ -587,7 +587,7 @@ class TestShutdownCoordinatorCleanupSteps:
             assert mgr._model_path == ""
 
             await ShutdownCoordinator()._step5_unload_ai_model()
-            fake_proc.terminate.assert_called_once()
+            fake_proc.terminate.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_step5b_calls_force_unload(self):
