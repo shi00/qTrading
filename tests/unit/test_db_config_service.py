@@ -3,10 +3,14 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import os
+from urllib.parse import quote
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import asyncpg
+from sqlalchemy.engine import make_url
 
 from data.persistence.db_config_service import (
     DatabaseConfigService,
@@ -14,6 +18,16 @@ from data.persistence.db_config_service import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def db_password() -> str:
+    """用于 userinfo 编码往返测试的合成密码；优先从环境变量注入。
+
+    缺省值为非真实凭据的固定样例（含空格、字面 +、@:/ 与非 ASCII），
+    仅用于验证编码/解码，不构成可用的数据库秘密。
+    """
+    return os.environ.get("QTRADING_TEST_DB_PASSWORD", "fixture pass+word@:/审计")
 
 
 def _make_mock_conn(fetchval_return="PostgreSQL 16.2, compiled by gcc"):
@@ -325,10 +339,44 @@ class TestBuildUrl:
         assert "@" not in url.split("://")[1].split("user")[0]
 
     def test_empty_password(self):
-        """空密码时 URL 格式应为 user:@host（quote_plus('') = ''）"""
+        """空密码时 URL 格式应为 user:@host（quote('') = ''）"""
         url = DatabaseConfigService.build_url("localhost", 5432, "user", "", "mydb")
         assert "user:@localhost" in url
         assert "+asyncpg" in url
+
+    @pytest.mark.parametrize(
+        "user",
+        [
+            "audit user",  # 内部空格：必须 %20，不得被表单编码为 +
+            "plus+user",  # 字面加号：必须 %2B
+            "审计用户",  # 非 ASCII
+            "user@host:5432/x",  # userinfo 保留字符 @ : /
+            "space+plus user",  # 空格与字面加号混合
+        ],
+    )
+    def test_userinfo_round_trips_through_standard_uri_parser(self, user, db_password):
+        """用独立 URI 解析器（SQLAlchemy make_url）断言 userinfo 原值还原。
+
+        驱动按 URI 语义解码 userinfo，不会把 + 还原为空格；因此编码必须使用
+        ``quote(..., safe="")`` 而非表单编码 ``quote_plus``。
+        """
+        url = DatabaseConfigService.build_url("localhost", 5432, user, db_password, "mydb")
+        parsed = make_url(url)
+        assert parsed.username == user
+        assert parsed.password == db_password
+        assert " " not in url.split("@")[0]
+
+    def test_space_in_user_is_percent_encoded_not_plus(self):
+        url = DatabaseConfigService.build_url("localhost", 5432, "audit user", "", "mydb")
+        assert "audit%20user" in url
+        assert "audit+user" not in url
+
+    def test_userinfo_round_trips_through_project_parser(self, db_password):
+        url = DatabaseConfigService.build_url("localhost", 5432, "audit user", db_password, "mydb")
+        result = DatabaseConfigService.parse_url(url)
+        assert result is not None
+        assert result["user"] == "audit user"
+        assert result["password"] == db_password
 
 
 class TestParseUrl:
@@ -365,6 +413,32 @@ class TestParseUrl:
         result = DatabaseConfigService.parse_url("postgresql://user:p%40ss@localhost/mydb")
         assert result is not None
         assert result["password"] == "p@ss"
+
+    def test_url_with_percent_encoded_userinfo(self, db_password):
+        """URI 编码的 userinfo 按标准百分号解码还原（空格 %20、保留字符、非 ASCII）。"""
+        url = f"postgresql://{quote('audit user', safe='')}:{quote(db_password, safe='')}@localhost/mydb"
+        result = DatabaseConfigService.parse_url(url)
+        assert result is not None
+        assert result["user"] == "audit user"
+        assert result["password"] == db_password
+
+    def test_literal_plus_in_userinfo_is_not_decoded_as_space(self, db_password):
+        """外部旧 URL 中的字面 + 不静默猜测为空格：与驱动 URI 语义一致，保留 +。"""
+        url = DatabaseConfigService.build_url("localhost", 5432, "plus+user", db_password, "mydb")
+        # 将本应 %20 的空格替换为表单编码的 +，模拟外部表单编码旧 URL。
+        legacy_url = url.replace("%20", "+")
+        result = DatabaseConfigService.parse_url(legacy_url)
+        assert result is not None
+        assert result["user"] == "plus+user"
+        assert result["password"] == db_password.replace(" ", "+")
+
+    def test_ipv6_host_with_brackets(self, db_password):
+        url = f"postgresql://user:{quote(db_password, safe='')}@[::1]:5432/mydb"
+        result = DatabaseConfigService.parse_url(url)
+        assert result is not None
+        assert result["host"] == "::1"
+        assert result["port"] == 5432
+        assert result["password"] == db_password
 
 
 class TestRunMigrations:

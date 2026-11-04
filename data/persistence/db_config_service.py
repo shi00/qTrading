@@ -10,7 +10,7 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import quote_plus, unquote_plus, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import asyncpg
 
@@ -413,9 +413,14 @@ class DatabaseConfigService:
 
         Returns:
             Connection URL string
+
+        Note:
+            userinfo 使用 URI 百分号编码（``quote(..., safe="")``），空格编码为
+            ``%20``。不得使用表单编码 ``quote_plus``：SQLAlchemy / asyncpg 等驱动
+            按 URI 语义解码 userinfo，不会把 ``+`` 还原为空格。
         """
-        encoded_user = quote_plus(user)
-        encoded_password = quote_plus(password)
+        encoded_user = quote(user, safe="")
+        encoded_password = quote(password, safe="")
 
         driver = "+asyncpg" if async_driver else ""
         return f"postgresql{driver}://{encoded_user}:{encoded_password}@{host}:{port}/{database}"
@@ -430,6 +435,10 @@ class DatabaseConfigService:
 
         Returns:
             Dictionary with connection components or None if parsing fails
+
+        Note:
+            userinfo 按 URI 语义做百分号解码（``unquote``），字面 ``+`` 保留为
+            ``+``，不静默猜测外部旧 URL 的表单编码语义。
         """
         try:
             parsed = urlparse(url)
@@ -438,8 +447,8 @@ class DatabaseConfigService:
                 return {
                     "host": parsed.hostname or cls.DEFAULT_HOST,
                     "port": parsed.port or cls.DEFAULT_PORT,
-                    "user": unquote_plus(parsed.username) if parsed.username else cls.DEFAULT_USER,
-                    "password": unquote_plus(parsed.password) if parsed.password else "",
+                    "user": unquote(parsed.username) if parsed.username else cls.DEFAULT_USER,
+                    "password": unquote(parsed.password) if parsed.password else "",
                     "database": parsed.path.lstrip("/") or cls.DEFAULT_DATABASE,
                 }
 
