@@ -47,6 +47,61 @@ REVIEW_STATS_WINDOW_DAYS = 180
 
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
+
+def _build_learning_snapshot(
+    t: sa.Table,
+    *,
+    as_of: datetime.date | None = None,
+    strategy_name: str | None = None,
+) -> sa.Subquery:
+    """D03-F04: 学习样本与总体统计共用的「最近研究快照」关系（唯一正本）。
+
+    append-only 下同 ``(trade_date, strategy_name, ts_code)`` 可有多 run。本关系先按
+    ADR-0010 的「取最近一次运行」口径去重（DISTINCT ON 三键 + ``id DESC``；id 单调递增
+    即最近一次运行），消费方再在**快照之外**叠加 WIN/LOSS 标签或聚合。标签过滤若放在
+    DISTINCT ON 之前，会让同键旧 WIN 在新 LOSS 运行后仍被单独取出（旧标签复活）。
+
+    资格过滤（COMPLETED + ``t5_pct`` + ``alpha`` + ``ai_score``）保留在快照关系内，与既有
+    few-shot 资格口径一致：最新 run 未完成或无 AI 评分时回退到该键**最近一个合格快照**。
+    ADR-0010 未规定「最新未完成即整键剔除」，故不额外创设该行为（样本与统计同口径）。
+
+    ``as_of`` / ``strategy_name`` 是去重键组成部分（trade_date、strategy_name），
+    放在 DISTINCT ON 之前与之后等价；两者收敛在此处，保证样本与统计共用同一范围。
+    """
+    stmt = sa.select(
+        t.c.id,
+        t.c.ts_code,
+        t.c.name,
+        t.c.industry,
+        t.c.pe_ttm,
+        t.c.alpha,
+        t.c.t5_pct,
+        t.c.index_pct,
+        t.c.ai_score,
+        t.c.benchmark_code,
+        t.c.trade_date,
+        t.c.strategy_name,
+        # 快照需携带标签列供统计按 WIN/LOSS 计数（样本查询在快照外过滤标签）。
+        t.c.prediction_result,
+    ).where(
+        t.c.alpha.isnot(None),
+        t.c.t5_pct.isnot(None),
+        t.c.review_status == REVIEW_STATUS_COMPLETED,
+        # BIZ-01: 学习样例仅含 AI 评分过的记录（纯数学策略记录同样满足
+        # prediction_result+alpha 过滤，但无 ai_score，须显式排除避免污染 few-shot）。
+        t.c.ai_score.isnot(None),
+    )
+    if strategy_name is not None:
+        stmt = stmt.where(t.c.strategy_name == strategy_name)
+    if as_of is not None:
+        stmt = stmt.where(t.c.trade_date < as_of)
+    return (
+        stmt.ext(distinct_on(t.c.trade_date, t.c.strategy_name, t.c.ts_code))
+        .order_by(t.c.trade_date, t.c.strategy_name, t.c.ts_code, t.c.id.desc())
+        .subquery("latest_learning")
+    )
+
+
 # review09-24-dim01-major01: 退市整理期识别的自然日窗口。退市整理期约 15 个交易日
 # （约 21 自然日），留节假日余量故取 30；值拼接进 SQL 的 INTERVAL，为受控模块常量、
 # 非用户输入，无注入面（与 REVIEW_STATS_WINDOW_DAYS 同模式）。
@@ -920,41 +975,20 @@ class ScreenerDao(BaseDao):
         ``index_pct``。**不再返回 ``ai_reason``**（T0 事前理由注入 few-shot 会造成自我强化，
         且 AI-03 自由文本注入通道随之关闭）。ORDER BY 次键由 ``t1_pct`` 改为 ``t5_pct``，
         与 alpha 同窗口，避免收益口径混排。
+
+        D03-F04：资格过滤与「最近一次运行」去重统一由 :func:`_build_learning_snapshot`
+        承载，**WIN/LOSS 标签过滤放在快照之外**。若标签先于去重施加，同键旧 WIN 会在新
+        LOSS 运行后仍被单独取出（旧标签复活），与总体统计口径分叉。
         """
         label = "WIN" if is_win else "LOSS"
         t = Base.metadata.tables["screening_history"]
         order_dir = sa.desc if is_win else sa.asc
-        # RV-03: append-only 下同日同股多 run 会重复取样——先按 (trade_date, strategy_name,
-        # ts_code) 去重取**最近一次运行**（DISTINCT ON ... ORDER BY id DESC，与统计口径一致），
-        # 再取极值样本，避免同名样本重复挤占 few-shot 多样性（对抗检视 Major-2 闭合）。
-        latest = (
-            sa.select(
-                t.c.id,
-                t.c.ts_code,
-                t.c.name,
-                t.c.industry,
-                t.c.pe_ttm,
-                t.c.alpha,
-                t.c.t5_pct,
-                t.c.index_pct,
-                t.c.ai_score,
-                t.c.benchmark_code,
-                t.c.trade_date,
-                t.c.strategy_name,
-            )
-            .where(
-                t.c.prediction_result == label,
-                t.c.alpha.isnot(None),
-                t.c.t5_pct.isnot(None),
-                t.c.review_status == REVIEW_STATUS_COMPLETED,
-                # BIZ-01: 学习样例仅含 AI 评分过的记录（纯数学策略记录同样满足
-                # prediction_result+alpha 过滤，但无 ai_score，须显式排除避免污染 few-shot）。
-                t.c.ai_score.isnot(None),
-            )
-            .ext(distinct_on(t.c.trade_date, t.c.strategy_name, t.c.ts_code))
-            .order_by(t.c.trade_date, t.c.strategy_name, t.c.ts_code, t.c.id.desc())
-            .subquery("latest_learning")
-        )
+        if as_of is not None and isinstance(as_of, datetime.datetime):
+            as_of = as_of.date()
+        # RV-03/D03-F04: append-only 下同日同股多 run 会重复取样——先按
+        # (trade_date, strategy_name, ts_code) 去重取**最近一次运行**，再按标签取极值样本，
+        # 避免同名样本重复挤占 few-shot 多样性，也避免旧标签在新运行后复活。
+        latest = _build_learning_snapshot(t, as_of=as_of, strategy_name=strategy_name)
         stmt = sa.select(
             latest.c.id,
             latest.c.ts_code,
@@ -966,13 +1000,7 @@ class ScreenerDao(BaseDao):
             latest.c.index_pct,
             latest.c.ai_score,
             latest.c.benchmark_code,
-        )
-        if strategy_name is not None:
-            stmt = stmt.where(latest.c.strategy_name == strategy_name)
-        if as_of is not None:
-            if isinstance(as_of, datetime.datetime):
-                as_of = as_of.date()
-            stmt = stmt.where(latest.c.trade_date < as_of)
+        ).where(latest.c.prediction_result == label)
         # D4-M3: 次键与 alpha 同为 T+5 窗口，避免「T+5 超额 + T+1 单日」口径混排。
         stmt = stmt.order_by(order_dir(latest.c.alpha), order_dir(latest.c.t5_pct)).limit(limit)
         df = await self._read_db_select(stmt)
@@ -988,31 +1016,23 @@ class ScreenerDao(BaseDao):
         极值样本（top WIN + top LOSS）不代表分布全貌；把样本总数、alpha 中位数与胜率
         一并注入 prompt，让模型知道 top 样本是尾部而非默认表现，避免高估自身识别
         极端机会的能力并难以校准置信度。
+
+        D03-F04：统计与 :meth:`get_learning_context` 共用 :func:`_build_learning_snapshot`
+        的「最近研究快照」关系与资格过滤，``total`` 计独立研究键而非重跑次数——否则同键
+        30 次重跑会让 ``total`` 虚高穿透 ``REVIEW_MIN_SAMPLE`` 门槛。
         """
         t = Base.metadata.tables["screening_history"]
-        # 仅统计已复盘、带 alpha 的 AI 样本；与 get_learning_context 的 BIZ-01 过滤口径一致。
-        stmt = (
-            sa.select(
-                sa.func.count().label("total"),
-                sa.func.count().filter(t.c.prediction_result == "WIN").label("win_cnt"),
-                sa.func.count().filter(t.c.prediction_result == "LOSS").label("loss_cnt"),
-                sa.func.avg(t.c.alpha).label("alpha_mean"),
-                sa.func.percentile_cont(0.5).within_group(t.c.alpha).label("alpha_median"),
-            )
-            .select_from(t)
-            .where(
-                t.c.alpha.isnot(None),
-                t.c.t5_pct.isnot(None),
-                t.c.review_status == REVIEW_STATUS_COMPLETED,
-                t.c.ai_score.isnot(None),
-            )
-        )
-        if strategy_name is not None:
-            stmt = stmt.where(t.c.strategy_name == strategy_name)
-        if as_of is not None:
-            if isinstance(as_of, datetime.datetime):
-                as_of = as_of.date()
-            stmt = stmt.where(t.c.trade_date < as_of)
+        if as_of is not None and isinstance(as_of, datetime.datetime):
+            as_of = as_of.date()
+        # 与样本查询同一关系：先按三键取最近一次运行，再对快照做 COUNT / 胜负 / 均值 / 中位数。
+        latest = _build_learning_snapshot(t, as_of=as_of, strategy_name=strategy_name)
+        stmt = sa.select(
+            sa.func.count().label("total"),
+            sa.func.count().filter(latest.c.prediction_result == "WIN").label("win_cnt"),
+            sa.func.count().filter(latest.c.prediction_result == "LOSS").label("loss_cnt"),
+            sa.func.avg(latest.c.alpha).label("alpha_mean"),
+            sa.func.percentile_cont(0.5).within_group(latest.c.alpha).label("alpha_median"),
+        ).select_from(latest)
         df = await self._read_db_select(stmt)
         if df is None or df.empty:
             return None
