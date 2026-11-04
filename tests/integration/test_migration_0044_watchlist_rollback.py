@@ -114,7 +114,10 @@ async def _migrated_db_fixture(
         cfg = make_alembic_cfg(sync_url)
         await asyncio.to_thread(command.upgrade, cfg, target_revision)
 
-    async_engine = create_test_engine(async_url)
+    # Alembic 通过独立同步引擎执行 DDL（downgrade 改列宽），会使本 async engine
+    # 连接上的 asyncpg prepared statement 计划缓存失效并抛 InvalidCachedStatementError。
+    # 关闭语句缓存后同一 engine 可在 DDL 前后安全复用（同 D04-F06 的处理方式）。
+    async_engine = create_test_engine(async_url, connect_args={"statement_cache_size": 0})
 
     return async_engine, db_name, sync_url, sync_engine
 
