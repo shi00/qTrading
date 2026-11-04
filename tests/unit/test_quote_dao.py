@@ -13,7 +13,7 @@ import pandas as pd
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
 from data.persistence.daos.quote_dao import (
     QuoteDao,
     _is_safe_identifier,
@@ -91,6 +91,69 @@ class TestQuoteDaoGetDailyQuotes:
         codes = [f"{i:06d}.SZ" for i in range(600)]
         result = await dao.get_daily_quotes(ts_code_list=codes)
         assert isinstance(result, pd.DataFrame) and "ts_code" in result.columns
+
+    @pytest.mark.asyncio
+    async def test_large_code_list_chunked_pages_cover_all_codes_with_date_prefix(self):
+        """TP11-F02: 600 代码跨 2 页（chunk_size=500），按实际请求代码逐页返回数据。
+
+        断言最终结果覆盖完整代码集合，且每页参数前缀均为 start_date——分块不得
+        因空页/参数错位丢失代码。
+        """
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        codes = [f"{i:06d}.SZ" for i in range(600)]
+
+        async def _page(_sql, params, **_kwargs):
+            start_date, *page_codes = params
+            assert start_date == datetime.date(2024, 1, 1)
+            return pd.DataFrame({"ts_code": page_codes, "trade_date": ["20240610"] * len(page_codes)})
+
+        dao._read_db = AsyncMock(side_effect=_page)
+        result = await dao.get_daily_quotes(ts_code_list=codes, start_date="20240101", suppress_errors=False)
+
+        assert len(dao._read_db.await_args_list) == 2
+        assert len(result) == 600
+        assert set(result["ts_code"]) == set(codes)
+
+    @pytest.mark.asyncio
+    async def test_chunked_page_failure_suppressed_returns_partial(self):
+        """真实 _read_db 压制语义：suppress_errors=True 时失败页返回空表，
+        chunked_in_query 丢弃空页 → 调用方只能拿到成功页（缺陷路径可复现）。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        codes = [f"{i:06d}.SZ" for i in range(600)]
+
+        async def _page(_sql, params, *, suppress_errors=True):
+            start_date, *page_codes = params
+            assert start_date == datetime.date(2024, 1, 1)
+            if "000500.SZ" in page_codes:  # 第二页失败
+                if suppress_errors:
+                    return pd.DataFrame()
+                raise DatabaseQueryError("page read failed")
+            return pd.DataFrame({"ts_code": page_codes, "trade_date": ["20240610"] * len(page_codes)})
+
+        dao._read_db = AsyncMock(side_effect=_page)
+        result = await dao.get_daily_quotes(ts_code_list=codes, start_date="20240101", suppress_errors=True)
+
+        # 失败页被静默丢弃，调用方无法区分「无行情」与「查询失败」
+        assert set(result["ts_code"]) == set(codes[:500])
+
+    @pytest.mark.asyncio
+    async def test_chunked_page_failure_strict_raises(self):
+        """suppress_errors=False：分块页失败必须抛 DatabaseQueryError，不得返回残缺数据。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        codes = [f"{i:06d}.SZ" for i in range(600)]
+
+        async def _page(_sql, params, *, suppress_errors=True):
+            start_date, *page_codes = params
+            assert start_date == datetime.date(2024, 1, 1)
+            if "000500.SZ" in page_codes:
+                if suppress_errors:
+                    return pd.DataFrame()
+                raise DatabaseQueryError("page read failed")
+            return pd.DataFrame({"ts_code": page_codes, "trade_date": ["20240610"] * len(page_codes)})
+
+        dao._read_db = AsyncMock(side_effect=_page)
+        with pytest.raises(DatabaseQueryError):
+            await dao.get_daily_quotes(ts_code_list=codes, start_date="20240101", suppress_errors=False)
 
     @pytest.mark.asyncio
     async def test_empty_code_list_returns_empty_without_query(self):

@@ -543,9 +543,14 @@ class ReviewManager:
         all_codes = sorted({c["ts_code"] for c in candidates})
         min_t0 = min(self._normalize_trade_date(c["trade_date"]) for c in candidates)
 
+        # TP11-F02: 关键行情读取必须显式 fail-fast。get_daily_quotes 默认
+        # suppress_errors=True 会覆盖 chunked_in_query 的严格默认，把页查询失败
+        # 吞成空表；缺码随后被当作「无行情」continue，回填照常完成并继续清理，
+        # 失败事实丢失。合法停牌/未成熟仍走缺行分支留 NULL。
         bulk_quotes = await self.cache.quote_dao.get_daily_quotes(
             ts_code_list=all_codes,
             start_date=min_t0,
+            suppress_errors=False,
         )
         if bulk_quotes is None or bulk_quotes.empty:
             logger.warning("[Review] Backfill: bulk quotes fetch returned empty.")
@@ -820,9 +825,14 @@ class ReviewManager:
         all_codes = sorted({c["ts_code"] for c in candidates})
         min_t0 = min(self._normalize_trade_date(c["trade_date"]) for c in candidates)
 
+        # TP11-F02: 关键行情读取必须显式 fail-fast。get_daily_quotes 默认
+        # suppress_errors=True 会覆盖 chunked_in_query 的严格默认，把页查询失败
+        # 吞成空表；缺码随后被当作「无行情」continue，回填照常完成并继续清理，
+        # 失败事实丢失。合法停牌/未成熟仍走缺行分支留 NULL。
         bulk_quotes = await self.cache.quote_dao.get_daily_quotes(
             ts_code_list=all_codes,
             start_date=min_t0,
+            suppress_errors=False,
         )
         if bulk_quotes is None or bulk_quotes.empty:
             logger.warning("[Review] T+1 backfill: bulk quotes fetch returned empty.")

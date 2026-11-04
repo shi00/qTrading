@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 
 from core.i18n import I18n
+from data.persistence.daos.base_dao import DatabaseQueryError
 from services.scheduled_jobs.review_backfill import build_review_backfill_job
 
 pytestmark = pytest.mark.unit
@@ -147,10 +148,32 @@ class TestBuildReviewBackfillJob:
             mock_rm = MagicMock()
             mock_rm.backfill_t1_returns = AsyncMock(return_value=0)
             mock_rm.backfill_horizon_returns = AsyncMock(side_effect=RuntimeError("boom"))
+            mock_rm.expire_stale_pending = AsyncMock(return_value=0)
             mock_rm._benchmark_diag = None
             mock_rm_cls.return_value = mock_rm
             with pytest.raises(RuntimeError, match="boom"):
                 await _submit_and_run(job, mock_tm_cls)
+        # 关键读失败后不得继续执行后续清理（失败事实必须上抛，不得伪装成功）。
+        mock_rm.expire_stale_pending.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_job_stops_after_t1_read_failure(self):
+        """TP11-F02: T+1 关键行情读失败后，T+5 回填与过期清扫均不得被 await。"""
+        job = build_review_backfill_job()
+        with (
+            patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls,
+            patch("services.scheduled_jobs.review_backfill.TaskManager") as mock_tm_cls,
+        ):
+            mock_rm = MagicMock()
+            mock_rm.backfill_t1_returns = AsyncMock(side_effect=DatabaseQueryError("page read failed"))
+            mock_rm.backfill_horizon_returns = AsyncMock(return_value=0)
+            mock_rm.expire_stale_pending = AsyncMock(return_value=0)
+            mock_rm._benchmark_diag = None
+            mock_rm_cls.return_value = mock_rm
+            with pytest.raises(DatabaseQueryError):
+                await _submit_and_run(job, mock_tm_cls)
+        mock_rm.backfill_horizon_returns.assert_not_awaited()
+        mock_rm.expire_stale_pending.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_result_includes_benchmark_diag(self):
