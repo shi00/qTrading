@@ -138,15 +138,23 @@ def test_downgrade_lossy_path_deletes_then_restores_old_primary_key(monkeypatch)
     bind.execute.side_effect = [_scalar_result(2), _rowcount_result(3)]
     _patch_online(monkeypatch, bind, {"allow_lossy_rollback": "1"})
     calls = _capture_ddl(monkeypatch)
-    mock_logger = MagicMock()
-    monkeypatch.setattr(mig, "logger", mock_logger)
+    log_messages: list[str] = []
+
+    class _RecordingLogger:
+        def info(self, message, *args):
+            log_messages.append(message % args)
+
+    monkeypatch.setattr(mig, "logger", _RecordingLogger())
 
     mig.downgrade()
 
     assert bind.execute.call_count == 2
     assert [name for name, _, _ in calls] == ["drop_constraint", "alter_column", "create_primary_key"]
-    assert mock_logger.info.called
-    assert "3" in [str(arg) for arg in mock_logger.info.call_args.args]
+    assert log_messages == [
+        "0022 downgrade 有损回退：2 个 (ts_code, end_date) 存在多公告版本，按 "
+        "ann_date DESC, updated_at DESC NULLS LAST, created_at DESC NULLS LAST 每组保留最新版本，"
+        "共删除 3 行。"
+    ]
 
 
 def test_downgrade_rejects_offline_mode(monkeypatch):
