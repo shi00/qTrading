@@ -2523,8 +2523,13 @@ class TestTierByTableCoverageIsolation:
             "check_dependencies",
             return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
         ):
-            with pytest.raises(QualityGateError):
+            with pytest.raises(QualityGateError) as exc_info:
                 await strategy.filter(self._strategy_context(proc))
+        # 断言门控拒绝的真实归因（daily_quotes 表级 CRITICAL vs 策略要求 SILVER），
+        # 避免只验证异常类型而无法区分其他 QualityGateError 来源。
+        gate_msg = str(exc_info.value)
+        assert "SILVER" in gate_msg
+        assert "CRITICAL" in gate_msg
 
     @pytest.mark.asyncio
     async def test_unrelated_financial_gap_keeps_quote_strategy_runnable(self):
