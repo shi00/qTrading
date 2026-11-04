@@ -733,13 +733,30 @@ class TestRecoverAndClose:
     @pytest.mark.asyncio
     async def test_recover_expired_owners_returns_rowcount(self):
         """启动前恢复（D9/D4）：过期租约的 dispatched 预留转 held_unconfirmed。"""
-        conn = _CaptureConn(results=[7, 3])
+        conn = _CaptureConn(results=[3, 7])
         dao = _dao(conn)
         n = await dao.recover_expired_owners(now=datetime.datetime(2026, 10, 16, 12, 0, 0))
-        assert n == 7  # 返回值语义不变：处理的 invocation 数
-        sql, params = conn.calls[0]
+        assert n == 7  # 返回值语义不变：处理的 invocation 数（第 2 条语句 rowcount）
+        sql, params = conn.calls[1]
         assert "held_unconfirmed" in sql
+        assert "UPDATE ai_invocation" in sql
         assert params["now"] == datetime.datetime(2026, 10, 16, 12, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_recover_expired_owners_locks_attempt_before_invocation(self):
+        """D03-R04 锁序：恢复与 settle 同序（attempt → invocation），不得反序。
+
+        settle_attempt_usage 在月锁内先 ``SELECT ... FOR UPDATE`` attempt，再经
+        ``_settle_reservation`` 更新 invocation；恢复若先锁 invocation 再等
+        attempt，二者并发即构成锁环。此处按语句执行顺序锁定契约。
+        """
+        conn = _CaptureConn(results=[2, 1])
+        dao = _dao(conn)
+        await dao.recover_expired_owners(now=datetime.datetime(2026, 10, 16, 12, 0, 0))
+        assert "UPDATE ai_attempt" in conn.calls[0][0]
+        assert "UPDATE ai_invocation" in conn.calls[1][0]
+        # 恢复不持归属月 advisory 锁（跨月批量恢复无法事先枚举锁键）
+        assert not any("pg_advisory_xact_lock" in sql for sql, _ in conn.calls)
 
     @pytest.mark.asyncio
     async def test_recover_expired_owners_converges_orphaned_dispatched_attempts(self):
@@ -748,10 +765,10 @@ class TestRecoverAndClose:
         R21：结果未知（可能已被上游消费）不得伪装 failed / succeeded；费用未知
         保持 NULL（SQL 不写 cost_cny，不填 0）。
         """
-        conn = _CaptureConn(results=[1, 4])
+        conn = _CaptureConn(results=[4, 1])
         dao = _dao(conn)
         await dao.recover_expired_owners(now=datetime.datetime(2026, 10, 16, 12, 0, 0))
-        attempt_sql, attempt_params = conn.calls[1]
+        attempt_sql, attempt_params = conn.calls[0]
         assert "UPDATE ai_attempt" in attempt_sql
         assert "SET status = :status" in attempt_sql
         assert "error_code = :error_code" in attempt_sql
