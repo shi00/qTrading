@@ -238,6 +238,16 @@ class DatabaseMigrator:
         Uses the URL from the already-checked engine instead of letting env.py
         resolve configuration again. This keeps schema status checks and Alembic
         writes bound to the same database.
+
+        Postcondition (fail-closed): after the upgrade, alembic_version must expose a
+        non-empty revision equal to the current head. A missing/empty revision raises
+        RuntimeError instead of only logging, because the resulting schema state cannot
+        be verified (partial migration or an uncommitted upgrade transaction). Callers
+        must not treat initialization as successful in that case.
+
+        Raises:
+            RuntimeError: The upgrade finished but the recorded revision is missing/empty
+                or does not match head.
         """
         sync_database_url = cls._get_sync_database_url(engine)
         logger.info("[DatabaseMigrator] Starting Alembic upgrade to head...")
@@ -271,16 +281,25 @@ class DatabaseMigrator:
         # RuntimeError 表示内部一致性检查失败，不需要经过 classify_error）
         new_rev = await cls._get_current_revision(engine)
         head_rev = await cls._get_head_revision()
-        if new_rev and new_rev != head_rev:
+        # Fail closed on a missing/empty revision: without a recorded version the
+        # post-upgrade state cannot be verified (the upgrade may be partially applied
+        # or its transaction may not have been committed). Do not let callers assume
+        # initialization succeeded.
+        if not new_rev:
+            raise RuntimeError(
+                "Migration completed but no schema version was recorded in alembic_version "
+                f"(expected head={head_rev or '<none>'}). "
+                "A partial migration may have occurred or the upgrade transaction may not "
+                "have been committed, so the schema state cannot be verified. "
+                "Verify the actual schema manually and retry."
+            )
+        if new_rev != head_rev:
             raise RuntimeError(
                 f"Migration completed but schema version mismatch: "
                 f"current={new_rev}, expected={head_rev}. "
                 f"Partial migration may have occurred."
             )
-        if new_rev:
-            logger.info("[DatabaseMigrator] Database schema updated. Current revision: %s", new_rev)
-        else:
-            logger.warning("[DatabaseMigrator] Schema version is None after migration, this is unexpected.")
+        logger.info("[DatabaseMigrator] Database schema updated. Current revision: %s", new_rev)
 
     @classmethod
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

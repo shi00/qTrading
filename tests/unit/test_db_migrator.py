@@ -493,8 +493,9 @@ class TestRunAlembicUpgradePostVerification:
                         await DatabaseMigrator._run_alembic_upgrade(mock_engine)
 
     @pytest.mark.asyncio
-    async def test_upgrade_warns_on_none_revision(self):
-        """If revision is None after upgrade, log a warning (not crash)."""
+    @pytest.mark.parametrize("missing_rev", [None, ""])
+    async def test_upgrade_fails_closed_on_missing_revision(self, missing_rev):
+        """A None/empty revision after upgrade must raise (fail-closed), not only warn."""
         mock_engine = MagicMock()
         mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
@@ -503,15 +504,18 @@ class TestRunAlembicUpgradePostVerification:
             mock_tp.return_value = mock_instance
             mock_instance.run_async = AsyncMock(return_value=None)
 
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=None)):
+            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=missing_rev)):
                 with patch.object(
                     DatabaseMigrator,
                     "_get_head_revision",
                     AsyncMock(return_value="0002"),
                 ):
-                    with patch("data.persistence.db_migrator.logger") as mock_logger:
+                    with pytest.raises(RuntimeError, match="no schema version") as exc_info:
                         await DatabaseMigrator._run_alembic_upgrade(mock_engine)
-                        mock_logger.warning.assert_called_once()
+
+        message = str(exc_info.value)
+        assert "expected head=0002" in message
+        assert "retry" in message
 
     @pytest.mark.asyncio
     async def test_upgrade_succeeds_when_version_matches_head(self):
