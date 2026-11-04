@@ -293,6 +293,11 @@ class ScreeningHistory(Base):
     # actual_model, usage_status, ai_status, config_revision}；NULL 表示旧链/未记录，
     # 不伪装。null_protected + none_as_null 同 exec_warnings 先例。
     execution_metadata = Column(JSONB(none_as_null=True), info={"null_protected": True})
+    # D06-R02：大宗交易聚合快照（block_amount_wan 万元 / block_vol_wanshare 万股）。
+    # 仅大宗策略结果携带该两列；非大宗策略缺列写 NULL（R21，不从 amount/vol 反推）。
+    # 追加在业务列末尾，保持既有 tuple 位置契约不被中间插入破坏。
+    block_amount_wan = Column(Numeric(20, 4))
+    block_vol_wanshare = Column(Numeric(20, 4))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (
