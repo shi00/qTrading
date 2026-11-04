@@ -177,6 +177,22 @@ class TestQFQ:
         result = qfq_ratio_series(series)
         assert result is None
 
+    def test_qfq_ratio_series_pandas_ref_first_vs_last_values(self):
+        """PIT 起点基准与末值基准必须产生不同量纲（部分空经 ffill 后参与缩放）。"""
+        series = pd.Series([1.0, None, 4.0])
+        last_ratio = qfq_ratio_series(series, ref="last")
+        first_ratio = qfq_ratio_series(series, ref="first")
+        assert list(last_ratio) == pytest.approx([0.25, 0.25, 1.0])
+        assert list(first_ratio) == pytest.approx([1.0, 1.0, 4.0])
+
+    def test_qfq_ratio_series_pandas_leading_null_ref_first(self):
+        """前导 NULL 经 bfill 后不得让整组退化为未知；ref='first' 基准取 bfill 首值。"""
+        series = pd.Series([None, 2.0, 1.0])
+        assert qfq_series_status(series, ref="first") == "adjusted"
+        ratio = qfq_ratio_series(series, ref="first")
+        assert ratio is not None
+        assert ratio.tolist() == pytest.approx([1.0, 1.0, 0.5])
+
 
 class TestQfqSeriesStatus:
     """pandas 侧三态判定：unknown 与 identity 必须可区分（qfq_ratio_series 的 None 二者兼表）。"""

@@ -81,6 +81,26 @@ class TestNormalizeDecimalColumns:
         result = normalize_decimal_columns(pd.DataFrame())
         assert result.empty
 
+    def test_legal_zero_decimal_preserved(self):
+        """业务合法 0 不得被改写（DAT-10/11）：Decimal 0 归一化为 0.0，而非 NaN/哨兵。"""
+        df = pd.DataFrame({"price": [Decimal("0"), Decimal("1.5"), Decimal("2.25")]})
+        result = normalize_decimal_columns(df)
+        assert result["price"].dtype == "float64"
+        assert result["price"].iloc[0] == 0.0
+        assert not result["price"].isna().any()
+
+    def test_mixed_decimal_none_float_not_partially_converted(self):
+        """Decimal/None/float 混合列 infer_dtype == 'mixed'，保持 object 且值不被改写。
+
+        该列不是「全 Decimal/None」，按 DAT-10/11 契约不做部分转换，避免把
+        float 元素与 Decimal 元素混成不一致的可空语义。
+        """
+        df = pd.DataFrame({"price": [Decimal("1.5"), None, 2.5]})
+        result = normalize_decimal_columns(df)
+        assert result["price"].dtype == object
+        assert result["price"].iloc[0] == Decimal("1.5")
+        assert result["price"].iloc[2] == 2.5
+
     def test_mixed_columns_only_decimal_converted(self):
         df = pd.DataFrame(
             {
