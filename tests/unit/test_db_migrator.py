@@ -10,6 +10,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from data.persistence.db_migrator import (
     DatabaseMigrator,
     DatabaseMigrationNeeded,
+    OrphanedRevisionError,
     _CONNECTION_EXCEPTIONS,
     _RELATION_NOT_FOUND_KEYWORDS,
 )
@@ -150,6 +151,161 @@ class TestInitDbFreshDatabase:
                 mock_upgrade.assert_awaited_once_with(mock_engine)
 
 
+class TestOrphanedRevisionFailClosed:
+    """Unknown/multiple alembic_version states must stop startup without writes."""
+
+    @pytest.mark.asyncio
+    async def test_orphaned_revision_raises_without_modifying_cursor(self):
+        mock_engine = MagicMock()
+        head_rev = await DatabaseMigrator._get_head_revision()
+
+        with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="9999_orphaned")):
+            with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=["9999_orphaned"])):
+                with pytest.raises(OrphanedRevisionError) as exc_info:
+                    await DatabaseMigrator._assert_no_orphaned_revision(mock_engine)
+
+        assert exc_info.value.current_rev == "9999_orphaned"
+        assert exc_info.value.head_rev == head_rev
+        assert exc_info.value.version_rows == ("9999_orphaned",)
+        assert "alembic stamp" in str(exc_info.value)
+        mock_engine.begin.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("auto_migrate", [True, False])
+    async def test_orphan_fails_closed_regardless_of_auto_migrate(self, auto_migrate):
+        mock_engine = MagicMock()
+
+        with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="9999_orphaned")):
+            with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=["9999_orphaned"])):
+                with patch.object(DatabaseMigrator, "_run_alembic_upgrade", AsyncMock(return_value=None)) as upgrade:
+                    with pytest.raises(OrphanedRevisionError) as exc_info:
+                        await DatabaseMigrator.init_db(mock_engine, auto_migrate=auto_migrate)
+
+        assert exc_info.value.current_rev == "9999_orphaned"
+        assert "fail-closed" in str(exc_info.value)
+        upgrade.assert_not_awaited()
+        mock_engine.begin.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_second_version_row_fails_closed(self):
+        mock_engine = MagicMock()
+        head_rev = await DatabaseMigrator._get_head_revision()
+
+        with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=head_rev)):
+            with patch.object(
+                DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=[head_rev, "9999_orphaned"])
+            ):
+                with pytest.raises(OrphanedRevisionError) as exc_info:
+                    await DatabaseMigrator._assert_no_orphaned_revision(mock_engine)
+
+        assert exc_info.value.current_rev == head_rev
+        assert exc_info.value.version_rows == (head_rev, "9999_orphaned")
+        mock_engine.begin.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multiple_known_version_rows_fail_closed(self):
+        mock_engine = MagicMock()
+        head_rev = await DatabaseMigrator._get_head_revision()
+
+        with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=head_rev)):
+            with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=[head_rev, "0001"])):
+                with pytest.raises(OrphanedRevisionError) as exc_info:
+                    await DatabaseMigrator._assert_no_orphaned_revision(mock_engine)
+
+        assert "多行" in exc_info.value.reason
+        assert exc_info.value.version_rows == (head_rev, "0001")
+        mock_engine.begin.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fresh_database_is_no_op(self):
+        mock_engine = MagicMock()
+
+        with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=None)):
+            await DatabaseMigrator._assert_no_orphaned_revision(mock_engine)
+
+        mock_engine.begin.assert_not_called()
+
+
+class TestOrphanedRevisionErrorMessage:
+    def test_message_contains_context_and_remediation(self):
+        known = [f"{i:04d}" for i in range(1, 45)]
+        exc = OrphanedRevisionError(
+            "9999_orphaned",
+            "0044",
+            known,
+            reason="alembic_version 记录了未知 revision",
+            version_rows=["9999_orphaned"],
+        )
+
+        message = str(exc)
+
+        assert exc.current_rev == "9999_orphaned"
+        assert exc.head_rev == "0044"
+        assert len(exc.known_revisions) == 44
+        assert exc.version_rows == ("9999_orphaned",)
+        assert "9999_orphaned" in message
+        assert "0044" in message
+        assert "fail-closed" in message
+        assert "已知 revision 概要" in message
+        assert "alembic stamp" in message
+        assert "未修改 alembic_version" in message
+
+    def test_known_revision_summary_is_bounded(self):
+        known = [f"rev{i}" for i in range(30)]
+        exc = OrphanedRevisionError("unknown", "head", known, reason="未知 revision", version_rows=["unknown"])
+
+        message = str(exc)
+
+        assert "共 30 个" in message
+        assert "其余 20 个已省略" in message
+        assert "rev20" not in message
+
+
+class TestGetVersionRows:
+    @pytest.mark.asyncio
+    async def test_returns_all_rows(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        sync_conn = MagicMock()
+        sync_conn.execute.return_value.fetchall.return_value = [("0001",), ("0002",)]
+
+        def _run_sync(fn):
+            return fn(sync_conn)
+
+        mock_conn.run_sync = AsyncMock(side_effect=_run_sync)
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.connect = MagicMock(return_value=mock_conn)
+
+        with patch("data.persistence.db_migrator.inspect") as mock_inspect:
+            mock_inspect.return_value.get_table_names.return_value = ["alembic_version"]
+
+            result = await DatabaseMigrator._get_version_rows(mock_engine)
+
+        assert result == ["0001", "0002"]
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_table_absent(self):
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        sync_conn = MagicMock()
+
+        def _run_sync(fn):
+            return fn(sync_conn)
+
+        mock_conn.run_sync = AsyncMock(side_effect=_run_sync)
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.connect = MagicMock(return_value=mock_conn)
+
+        with patch("data.persistence.db_migrator.inspect") as mock_inspect:
+            mock_inspect.return_value.get_table_names.return_value = ["stock_basic"]
+
+            result = await DatabaseMigrator._get_version_rows(mock_engine)
+
+        assert result is None
+
+
 class TestSyncDatabaseUrl:
     def test_converts_asyncpg_url_to_sync_url(self):
         mock_engine = MagicMock()
@@ -196,8 +352,9 @@ class TestInitDbExistingDatabase:
                 "_get_current_revision",
                 AsyncMock(return_value="0001"),
             ):
-                with patch("data.persistence.db_migrator.logger") as mock_logger:
-                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+                with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=["0001"])):
+                    with patch("data.persistence.db_migrator.logger") as mock_logger:
+                        await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
                     # Should log "up to date"
                     found = False
@@ -218,11 +375,12 @@ class TestInitDbExistingDatabase:
                 "_get_current_revision",
                 AsyncMock(return_value="0001"),
             ):
-                with pytest.raises(DatabaseMigrationNeeded) as exc_info:
-                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=False)
+                with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=["0001"])):
+                    with pytest.raises(DatabaseMigrationNeeded) as exc_info:
+                        await DatabaseMigrator.init_db(mock_engine, auto_migrate=False)
 
-                assert exc_info.value.current_rev == "0001"
-                assert exc_info.value.head_rev == "0002"
+                    assert exc_info.value.current_rev == "0001"
+                    assert exc_info.value.head_rev == "0002"
 
     @pytest.mark.asyncio
     async def test_existing_database_runs_alembic_upgrade(self):
@@ -235,12 +393,13 @@ class TestInitDbExistingDatabase:
                 "_get_current_revision",
                 AsyncMock(return_value="0001"),
             ):
-                with patch.object(
-                    DatabaseMigrator,
-                    "_run_alembic_upgrade",
-                    AsyncMock(return_value=None),
-                ):
-                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+                with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=["0001"])):
+                    with patch.object(
+                        DatabaseMigrator,
+                        "_run_alembic_upgrade",
+                        AsyncMock(return_value=None),
+                    ):
+                        await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
 
 class TestInitDbErrorHandling:
@@ -249,13 +408,14 @@ class TestInitDbErrorHandling:
         mock_engine = MagicMock()
 
         with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
-            with patch.object(
-                DatabaseMigrator,
-                "_get_head_revision",
-                AsyncMock(side_effect=Exception("failed")),
-            ):
-                with pytest.raises(Exception, match="failed"):
-                    await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+            with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=["0001"])):
+                with patch.object(
+                    DatabaseMigrator,
+                    "_get_head_revision",
+                    AsyncMock(side_effect=Exception("failed")),
+                ):
+                    with pytest.raises(Exception, match="failed"):
+                        await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
 
 class TestDatabaseMigratorGetRevision:
@@ -439,30 +599,31 @@ class TestRunAlembicUpgradeErrorClassification:
         mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
 
         with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
-            with patch.object(
-                DatabaseMigrator,
-                "_get_head_revision",
-                AsyncMock(return_value="0002"),
-            ):
-                with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
-                    mock_instance = MagicMock()
-                    mock_tp.return_value = mock_instance
-                    mock_instance.run_async = AsyncMock(side_effect=OSError("connection lost"))
+            with patch.object(DatabaseMigrator, "_get_version_rows", AsyncMock(return_value=["0001"])):
+                with patch.object(
+                    DatabaseMigrator,
+                    "_get_head_revision",
+                    AsyncMock(return_value="0002"),
+                ):
+                    with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
+                        mock_instance = MagicMock()
+                        mock_tp.return_value = mock_instance
+                        mock_instance.run_async = AsyncMock(side_effect=OSError("connection lost"))
 
-                    with patch(
-                        "data.persistence.db_migrator.log_classified",
-                        return_value={
-                            "code": "refused",
-                            "message_key": "db_err_refused",
-                        },
-                    ) as mock_log_classified:
-                        with pytest.raises(OSError, match="connection lost"):
-                            await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
+                        with patch(
+                            "data.persistence.db_migrator.log_classified",
+                            return_value={
+                                "code": "refused",
+                                "message_key": "db_err_refused",
+                            },
+                        ) as mock_log_classified:
+                            with pytest.raises(OSError, match="connection lost"):
+                                await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
-                        # Verify log_classified was called with db context and original error
-                        call_args = mock_log_classified.call_args.args
-                        assert call_args[2] == "db"
-                        assert isinstance(call_args[1], OSError)
+                            # Verify log_classified was called with db context and original error
+                            call_args = mock_log_classified.call_args.args
+                            assert call_args[2] == "db"
+                            assert isinstance(call_args[1], OSError)
 
 
 class TestRunAlembicUpgradePostVerification:
