@@ -366,12 +366,20 @@ class BaseDao:
         extra_params=None,
         conn: typing.Any = None,
         **write_db_kwargs,
-    ):
+    ) -> int:
         """
         Execute a write SQL with IN clause in chunks to avoid PostgreSQL parameter limit.
 
         Identical chunking logic to chunked_in_query but for write operations.
-        Returns the total number of affected rows (sum of write_db_fn return values).
+
+        Returns:
+            各分块 ``write_db_fn`` 返回值中 ``int`` 的求和（非 ``int`` 返回值按 0 跳过）。
+            当 ``write_db_fn`` 为 :meth:`_write_db`（成功时每块返回成功标志 1，
+            ``suppress_errors`` 吞错时返回 -1）时，该值是成功分块数，**不是影响行数**；
+            空 ``values`` 返回 0。任一分块抛出异常时整体抛出（不返回部分合计）。
+            若调用方确实需要影响行数，分块函数须自行读取 ``result.rowcount`` 并显式
+            区分「0 = 已执行但无行受影响 / -1 = 行数未知 / >=1 = 影响行数」；
+            本方法只透传并累加各分块返回值。
 
         Args:
             write_db_fn: async _write_db method (or equivalent)
@@ -559,8 +567,18 @@ class BaseDao:
         params: typing.Any = None,
         suppress_errors: bool = False,
         conn: typing.Any = None,
-    ):
-        """Execute a single SQL statement. For bulk operations, use _save_upsert."""
+    ) -> int:
+        """Execute a single SQL statement. For bulk operations, use _save_upsert.
+
+        Returns:
+            执行成功标志，不是影响行数：语句执行成功（含 0 行受影响）后固定返回 1，
+            不读取 ``result.rowcount``。仅当 ``suppress_errors=True``、无共享事务
+            连接且异常不属于引擎释放/停机类时，写库异常被吞并返回 -1（写入结果未知）；
+            默认 ``suppress_errors=False``、共享连接（``conn is not None``）或引擎
+            释放/停机类异常时，异常以 ``DatabaseQueryError`` / ``EngineDisposedError``
+            传播，不返回值。需要影响行数的调用方应直接执行语句并读取
+            ``result.rowcount``，不得把本方法的返回值当行数使用。
+        """
         self._check_engine(context="write")
 
         if params:
