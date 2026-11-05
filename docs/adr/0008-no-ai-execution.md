@@ -1,6 +1,6 @@
 # ADR-0008: 不给 AI 执行权，仅输出评分和文本
 
-> Status: Accepted
+> Status: Partial Superseded by ADR-0016（仅未来新增智能体模块的 E1—E5 有限例外；原禁止项继续有效）
 > Date: 2026-09-14
 > Owner: 架构维护者
 
