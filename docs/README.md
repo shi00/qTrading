@@ -6,6 +6,8 @@
 
 - [guides/](./guides/) — 流程类指南（Git workflow / 测试 / CI/CD / 依赖管理 / How-To / FinBERT 模型产线）
 - [architecture/](./architecture/) — 架构类深入（单例生命周期模板等，含 TushareClient 特殊说明）
+- [agent-contract.md](./architecture/agent-contract.md) — 智能体权限例外与允许操作矩阵（ADR-0016 已批准；运行期工具仍关闭）
+- [agent-scenario-ownership.md](./architecture/agent-scenario-ownership.md) — 智能体场景归属与调用方契约（W01-B 已批准；不改变当前运行路径）
 - [patterns/](./patterns/) — 模式类深入（DAO / 策略 / 数据同步 / MVVM 等，data-sync.md 含 Tushare Syncer 设计模式）
 - [flet/](./flet/) — Flet UI/UX 设计、声明式 API、无障碍、项目差异、MCP 核验、升级与 CanvasKit E2E 避坑入口
 - [debt/](./debt/) — 已知架构技术债（以 `known-technical-debt.md` 条目为准）
@@ -74,3 +76,4 @@ FinBERT 新闻情绪模型产线相关文档分散在多个章节，按主题索
 | ADR-0013 | 新闻情绪打分推理运行时选型终局（保持 GGUF，ORT / OpenVINO 双 PoC FAIL） | [0013-runtime-selection-final-gguf.md](./adr/0013-runtime-selection-final-gguf.md) |
 | ADR-0014 | 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度） | [0014-unified-model-scheduling.md](./adr/0014-unified-model-scheduling.md) |
 | ADR-0015 | FinBERT 产线指纹驱动发布（内容寻址去重，训练输入指纹对比） | [0015-fingerprint-driven-release.md](./adr/0015-fingerprint-driven-release.md) |
+| ADR-0016 | 智能体有限权限例外与允许操作矩阵 | [0016-agent-permission-exception.md](./adr/0016-agent-permission-exception.md) |

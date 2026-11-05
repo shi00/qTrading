@@ -709,6 +709,8 @@ except Exception as e:
 ### docs/architecture/ — 架构类深入
 
 - [singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) — 单例模式实现模板
+- [agent-contract.md](./docs/architecture/agent-contract.md) — 智能体权限例外与允许操作矩阵（ADR-0016 已批准；运行期工具仍关闭）
+- [agent-scenario-ownership.md](./docs/architecture/agent-scenario-ownership.md) — 智能体场景归属与调用方契约（W01-B 已批准；不改变当前运行路径）
 
 ### docs/patterns/ — 模式类深入
 
@@ -747,6 +749,7 @@ except Exception as e:
 - [0013-runtime-selection-final-gguf.md](./docs/adr/0013-runtime-selection-final-gguf.md) — 新闻情绪打分推理运行时选型终局（ORT / OpenVINO 双 PoC FAIL，保持 GGUF；修订 ADR-0012 训练依赖条款为仅限 finbert-train.yml job 内安装）
 - [0014-unified-model-scheduling.md](./docs/adr/0014-unified-model-scheduling.md) — 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度；部分替代 ADR-0011 Router 职责，已经用户批准，Status 为 Accepted）
 - [0015-fingerprint-driven-release.md](./docs/adr/0015-fingerprint-driven-release.md) — FinBERT 产线指纹驱动发布（内容寻址去重：装依赖前对训练输入算指纹与最新 Release 对比，输入无变化即拒绝重训）
+- [0016-agent-permission-exception.md](./docs/adr/0016-agent-permission-exception.md) — 智能体有限权限例外与允许操作矩阵（部分替代 ADR-0008 的 E1—E5 范围，原禁止项继续有效）
 
 ### docs/governance/ — 治理类机器可读文件
 
