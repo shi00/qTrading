@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -33,13 +34,20 @@ def _event_line(schema: str, event: str, *, code: str | None = None, message: st
 
 
 class _Lines:
-    """模拟 Popen 文本管道：逐行返回后 EOF。"""
+    """模拟 Popen 文本管道：逐行返回后 EOF。
 
-    def __init__(self, lines: list[str]) -> None:
+    ``eof_event`` 在返回 EOF 时置位，供测试等待「管道已被完全消费」；
+    仅等待事件条数会漏掉不产生事件的未知 schema 行，形成调度竞态。
+    """
+
+    def __init__(self, lines: list[str], eof_event: threading.Event | None = None) -> None:
         self._lines = list(lines)
+        self._eof_event = eof_event
 
     def readline(self) -> str:
         if not self._lines:
+            if self._eof_event is not None:
+                self._eof_event.set()
             return ""
         return self._lines.pop(0)
 
@@ -55,9 +63,15 @@ class _Closable:
 class _Proc:
     """只满足 reader/stop_sync 所需接口的最小进程桩。"""
 
-    def __init__(self, stdout_lines: list[str], stderr_lines: list[str]) -> None:
+    def __init__(
+        self,
+        stdout_lines: list[str],
+        stderr_lines: list[str],
+        *,
+        stdout_eof: threading.Event | None = None,
+    ) -> None:
         self.stdin = _Closable()
-        self.stdout = _Lines(stdout_lines)
+        self.stdout = _Lines(stdout_lines, stdout_eof)
         self.stderr = _Lines(stderr_lines)
 
     def poll(self) -> int | None:
@@ -203,16 +217,20 @@ class TestRotatingSink:
 
 class TestReaderFallbacks:
     def test_stdout_reader_decodes_and_archives(self, service: EmbeddedPostgresService) -> None:
+        stdout_eof = threading.Event()
         lines = [
             _event_line(_EVENT_WARNING_SCHEMA, "warning", code="disk_low", message="free < 100MB") + "\n",
             _event_line(_EVENT_EXIT_SCHEMA, "exit", code="60", message="postgres_died") + "\n",
             '{"schema": "qtrading.embedded_postgres.event.unknown.v1", "event": "unknown"}\n',
         ]
-        service._process = _Proc(lines, [])  # type: ignore[assignment]  # 进程桩仅需 reader 接口
+        # 进程桩仅需 reader 接口。
+        service._process = _Proc(lines, [], stdout_eof=stdout_eof)  # type: ignore[assignment]
         service._start_stdout_reader_thread()
-        assert _wait_for(lambda: len(service.recent_events()) == 2)
+        # 等待管道被完全消费（含不产生事件的未知 schema 行），而非仅事件条数，避免调度竞态。
+        assert stdout_eof.wait(timeout=1.0)
         content = (service._log_dir / "sidecar.stdout.log").read_text(encoding="utf-8")
         assert "unknown.v1" in content
+        assert len(service.recent_events()) == 2
         assert service.recent_events()[-1].message == "postgres_died"
 
     def test_stdout_reader_falls_back_when_log_unwritable(
