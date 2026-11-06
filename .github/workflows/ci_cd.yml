@@ -2833,11 +2833,16 @@ jobs:
           # 基线必须限定为应用版本 Release：同仓库还发布 sidecar-v* / finbert-gguf-v* /
           # corpus-* / ci-wheels 等独立资产 Release，直接取「最近一个 release」会命中它们，
           # 再拼成 v<tag> 下载必然 404（表现为与代码无关的升级 smoke 误报失败）.
+          # 读取方式与 resolve-sidecar 一致：分页 REST API + 显式 JSON 解析，
+          # 不解析 release 列表的人类表格输出（首列是 NAME 而非 TAG）；
+          # 按语义版本降序取最大者，不依赖 Release 创建顺序（后补发布旧版本不会回退）；
           # 同时排除当前 ref，避免同一 tag 重跑时「自己升自己」的空验证.
           $currentRef = "${{ github.ref_name }}"
-          $appTags = gh release list --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName' |
-            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
-          $baselineTag = $appTags | Where-Object { $_ -ne $currentRef } | Select-Object -First 1
+          $baselineTag = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+            Where-Object { $_ -ne $currentRef } |
+            Sort-Object { [version]($_.TrimStart('v')) } -Descending |
+            Select-Object -First 1
           if (-not $baselineTag) {
             Write-Error "No published application release (v<major>.<minor>.<patch>) available as upgrade baseline"
             exit 1
