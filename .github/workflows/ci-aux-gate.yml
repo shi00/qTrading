@@ -128,8 +128,12 @@ jobs:
     name: "Auxiliary check: qtrading-pg-sidecar"
     needs: detect
     if: needs.detect.outputs.sidecar == 'true'
+    # GitHub 在调用期校验每个 nested job 的权限不得超过调用方上限：sidecar.yml 的
+    # publish-release job 请求 contents: write，故调用方必须授予 write，否则整个 workflow
+    # 直接 startup_failure。写权限只可能被 publish-release 使用，而它仅在 tag push 运行、
+    # PR/merge_group 均被其 if 跳过；sidecar 顶层与其余 job 仍为 contents: read。
     permissions:
-      contents: read
+      contents: write
     uses: ./.github/workflows/sidecar.yml
 
   precommit-check:

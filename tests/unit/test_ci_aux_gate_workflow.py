@@ -102,6 +102,15 @@ class TestReusableWorkflowMigration:
         assert gate_jobs["sidecar-check"]["uses"] == "./.github/workflows/sidecar.yml"
         assert gate_jobs["precommit-check"]["uses"] == "./.github/workflows/precommit-config-ci.yml"
 
+    def test_sidecar_call_grant_meets_nested_release_permission(self, gate_jobs: dict) -> None:
+        # sidecar.yml 的 publish-release 请求 contents: write，调用方上限低于它会导致
+        # 整个 workflow startup_failure；write 仅被该 tag-only job 使用。
+        assert gate_jobs["sidecar-check"]["permissions"] == {"contents": "write"}
+        assert gate_jobs["precommit-check"]["permissions"] == {"contents": "read"}
+        sidecar = _load_yaml(SIDECAR_PATH)
+        assert sidecar["jobs"]["publish-release"]["permissions"] == {"contents": "write"}
+        assert sidecar["permissions"] == {"contents": "read"}
+
 
 class TestDetectJob:
     def test_outputs_drive_conditional_checks(self, gate_jobs: dict) -> None:
