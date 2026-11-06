@@ -1399,6 +1399,17 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
 
+    # §8.2 两枚固定总并发槽必须预建；领取/释放只锁行并递增 generation，
+    # 不动态插入新槽（避免并发窗口里出现第三枚槽）。
+    op.bulk_insert(
+        sa.table(
+            "agent_total_slots",
+            sa.column("slot_no", sa.SmallInteger),
+            sa.column("generation", sa.BigInteger),
+        ),
+        [{"slot_no": 1, "generation": 1}, {"slot_no": 2, "generation": 1}],
+    )
+
 
 def downgrade() -> None:
     """Downgrade schema."""
