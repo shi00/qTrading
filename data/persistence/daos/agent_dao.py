@@ -1779,6 +1779,131 @@ class AgentDao(BaseDao):
                 problem=None,
             )
 
+    async def lookup_source_operation(self, domain: str, operation_id: UUID) -> tuple[str, str] | None:
+        """查回来源命令的 kind 与规范输入 digest；不存在返回 None。"""
+        if not isinstance(operation_id, UUID):
+            raise AgentValidationError("invalid_type", "operation_id")
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentCommand.kind, AgentCommand.payload_digest).where(
+                        AgentCommand.id == operation_id,
+                        AgentCommand.domain == domain,
+                    )
+                )
+            ).first()
+            if row is None:
+                return None
+            return (row.kind, row.payload_digest)
+
+    async def save_source(self, domain: str, operation_id: UUID, input_digest: str, source: JsonDoc) -> MutationReceipt:
+        """登记来源：同 operation 同输入复用，异输入冲突；资源/版本/回执/事件同事务。"""
+        if not isinstance(operation_id, UUID):
+            raise AgentValidationError("invalid_type", "operation_id")
+        if (
+            not isinstance(input_digest, str)
+            or len(input_digest) != 64
+            or any(char not in "0123456789abcdef" for char in input_digest)
+        ):
+            raise AgentValidationError("invalid_digest", "input_digest")
+        validate_payload("source", source)
+        if json_doc(decode_json_doc(source)) != source:
+            raise AgentValidationError("non_canonical_json", "source")
+        payload = cast(dict[str, Any], decode_json_doc(source))
+        extraction = payload["extraction"]
+        if extraction == "failed":
+            raise AgentValidationError("source_unavailable", "source.extraction")
+        resource_id = uuid.uuid5(operation_id, "source")
+        origin = payload["origin"]
+        kind = "source_import" if origin == "file" else "source_register"
+        availability = "partial" if extraction == "partial" else "available"
+        content_digest = _digest(source)
+        content_ref = payload["content_ref"]
+        blob_path = content_ref["relative_path"] if isinstance(content_ref, dict) else None
+        async with self._guarded_begin() as conn:
+            existing = (await conn.execute(sa.select(AgentCommand).where(AgentCommand.id == operation_id))).first()
+            if existing is not None:
+                if existing.domain != domain or existing.kind != kind or existing.payload_digest != input_digest:
+                    return MutationReceipt(
+                        operation_id=operation_id,
+                        status="conflict",
+                        resource_id=None,
+                        revision=None,
+                        problem=_problem("identity_conflict", related_id=operation_id),
+                    )
+                stored = existing.receipt or {}
+                raw_revision = stored.get("revision")
+                return MutationReceipt(
+                    operation_id=operation_id,
+                    status=stored.get("status", "same_operation"),
+                    resource_id=_as_optional_uuid(stored.get("resource_id")),
+                    revision=int(raw_revision) if isinstance(raw_revision, int) else None,
+                    problem=None,
+                )
+            try:
+                await conn.execute(
+                    sa.insert(AgentCommand).values(
+                        id=operation_id,
+                        domain=domain,
+                        kind=kind,
+                        payload=payload,
+                        payload_digest=input_digest,
+                        expected_revision=None,
+                        handoff="acknowledged",
+                        receipt={
+                            "status": "committed",
+                            "resource_id": str(resource_id),
+                            "revision": 1,
+                        },
+                    )
+                )
+                await conn.execute(
+                    sa.insert(AgentResource).values(
+                        id=resource_id,
+                        domain=domain,
+                        kind="source",
+                        current_revision=1,
+                        use_revision=0,
+                        deleting=False,
+                    )
+                )
+                await conn.execute(
+                    sa.insert(AgentResourceVersion).values(
+                        resource_id=resource_id,
+                        revision=1,
+                        payload=payload,
+                        content_digest=content_digest,
+                        blob_path=blob_path,
+                        availability=availability,
+                    )
+                )
+            except IntegrityError as error:
+                raise AgentValidationError("identity_conflict", "operation_id") from error
+            await self.append_event(
+                event_key=f"source:{resource_id}:1",
+                domain=domain,
+                entity_id=resource_id,
+                entity_revision=1,
+                kind="resource.changed",
+                payload=json_doc(
+                    {
+                        "resource_id": str(resource_id),
+                        "revision": 1,
+                        "kind": "source",
+                        "availability": availability,
+                        "content_digest": content_digest,
+                    }
+                ),
+                conn=conn,
+            )
+            return MutationReceipt(
+                operation_id=operation_id,
+                status="committed",
+                resource_id=resource_id,
+                revision=1,
+                problem=None,
+            )
+
     async def claim_total_slot(self, domain: str, execution_id: UUID) -> JsonDoc:
         async with self._guarded_begin() as conn:
             execution = (

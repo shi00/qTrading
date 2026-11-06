@@ -9,8 +9,21 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import date
+from typing import Protocol
 
+from core.agent_types import JsonDoc
 from core.prompt_base import AGENT_PROMPT_ASSETS, STRATEGY_PROMPTS, get_base_prompt
+
+
+class SourceProvider(Protocol):
+    """业务只读资料提供方（§9.3.2）。
+
+    app 只按固定五个 provider_key 注入；提供方按对象/版本查回并自行验证 as_of，
+    返回严格的 PreparedSource。services 只消费本 Protocol，不 import 业务/UI 层。
+    """
+
+    async def read_source(self, source_object_key: str, expected_revision: str, as_of: date) -> JsonDoc: ...
 
 
 class PromptAssetError(ValueError):

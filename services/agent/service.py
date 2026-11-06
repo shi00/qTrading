@@ -7,9 +7,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Protocol
-from uuid import UUID
+import hashlib
+import os
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, cast
+from uuid import UUID, uuid5
+from zoneinfo import ZoneInfo
 
 from core.agent_types import (
     AgentOperationError,
@@ -33,15 +38,19 @@ from core.agent_types import (
     ResourceRef,
     SubmissionKey,
     SubmissionReceipt,
+    decode_json_doc,
     json_doc,
     request_digest,
+    validate_payload,
     validate_request,
 )
 from core.model_management_types import ConfigurationSaveOutcome
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.agent.permissions import ExecutionPermission
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 if TYPE_CHECKING:
+    from services.agent.capabilities import SourceProvider
     from services.model_configuration_service import ModelConfigurationService
 
 _READ_FAILED = "source_unavailable"
@@ -93,6 +102,14 @@ class AgentDaoProtocol(Protocol):
 
     async def apply_mutation(self, domain: str, mutation: Mutation) -> MutationReceipt: ...
 
+    async def lookup_source_operation(self, domain: str, operation_id: UUID) -> tuple[str, str] | None: ...
+
+    async def save_source(
+        self, domain: str, operation_id: UUID, input_digest: str, source: JsonDoc
+    ) -> MutationReceipt: ...
+
+    async def read_tool_call(self, effect_key: str) -> JsonDoc | None: ...
+
 
 def _problem(
     code: str,
@@ -117,6 +134,160 @@ def _invalid_request(error: AgentValidationError) -> AgentOperationError:
     return AgentOperationError(_problem("invalid_request", field_issues=((error.field_path, error.code),)))
 
 
+_MEDIA_BY_SUFFIX: dict[str, str] = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+_MEDIA_SUFFIX: dict[str, str] = {
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "application/json": ".json",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+}
+_TEXT_MEDIA_TYPES = frozenset({"text/plain", "text/markdown", "text/csv", "application/json"})
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_MAX_FILE_BYTES = 20 * 1024 * 1024
+
+
+def _empty_read_range(locator: str) -> dict[str, object]:
+    return {"pages": [], "sheets": [], "row_start": None, "row_end": None, "locator": locator}
+
+
+def _read_file_bytes(path: str) -> bytes:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    if os.path.getsize(path) > _MAX_FILE_BYTES:
+        raise ValueError("file_too_large")
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def _prepare_file_body(media_type: str, data: bytes) -> bytes:
+    """文本解码/JSON 规范化；二进制保持原字节。"""
+    if media_type not in _TEXT_MEDIA_TYPES:
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("invalid_text") from error
+    if media_type == "application/json":
+        decoded = decode_json_doc(text)
+        canonical = json_doc(decoded)
+        return canonical.encode("utf-8")
+    return text.encode("utf-8")
+
+
+def _write_blob(root: Path, relative: str, data: bytes) -> None:
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(data)
+    os.replace(temporary, target)
+
+
+def _source_input_digest(kind: str, value: object) -> str:
+    return hashlib.sha256(json_doc({"kind": kind, "input": value}).encode("utf-8")).hexdigest()
+
+
+def _file_media_type(path: str) -> str:
+    media_type = _MEDIA_BY_SUFFIX.get(Path(path).suffix.lower())
+    if media_type is None:
+        raise AgentOperationError(_problem("source_unavailable"))
+    return media_type
+
+
+def _parse_metadata(metadata: JsonDoc) -> dict[str, object]:
+    try:
+        validate_payload("source_metadata", metadata)
+        decoded = decode_json_doc(metadata)
+    except AgentValidationError as error:
+        raise _invalid_request(error) from error
+    if not isinstance(decoded, dict):
+        raise _invalid_request(AgentValidationError("invalid_type", "metadata"))
+    return decoded
+
+
+def _assert_pit(metadata: dict[str, object]) -> None:
+    as_of = date.fromisoformat(cast(str, metadata["as_of"]))
+    if as_of > datetime.now(UTC).date():
+        raise AgentOperationError(_problem("pit_ineligible", field_issues=(("as_of", "pit_ineligible"),)))
+    precision = metadata["time_precision"]
+    if precision == "date" and metadata["published_date"] is not None:
+        published = date.fromisoformat(cast(str, metadata["published_date"]))
+    elif precision == "datetime" and metadata["published_at"] is not None:
+        parsed = datetime.fromisoformat(cast(str, metadata["published_at"]).replace("Z", "+00:00"))
+        published = parsed.astimezone(_SHANGHAI).date()
+    else:
+        return
+    if published > as_of:
+        raise AgentOperationError(_problem("pit_ineligible", field_issues=(("published", "pit_ineligible"),)))
+
+
+def _build_source_payload(
+    *,
+    metadata: dict[str, object],
+    origin: str,
+    media_type: str,
+    relative_path: str,
+    content_digest: str,
+    read_range: dict[str, object],
+    extraction: str,
+    limitations: list[str],
+) -> JsonDoc:
+    source = json_doc(
+        {
+            "schema_version": 1,
+            "origin": origin,
+            "media_type": media_type,
+            "name": metadata["name"],
+            "content_ref": {
+                "kind": "managed_blob",
+                "relative_path": relative_path,
+                "digest": content_digest,
+            },
+            "published_at": metadata["published_at"],
+            "published_date": metadata["published_date"],
+            "time_precision": metadata["time_precision"],
+            "period": metadata["period"],
+            "effective_from": metadata["effective_from"],
+            "effective_to": metadata["effective_to"],
+            "as_of": metadata["as_of"],
+            "units": metadata["units"],
+            "read_range": read_range,
+            "extraction": extraction,
+            "limitations": limitations,
+            "correction_of": metadata["correction_of"],
+        }
+    )
+    validate_payload("source", source)
+    return source
+
+
+def _unknown_published_metadata(name: str, as_of: str) -> dict[str, object]:
+    """工具响应未给发布时间：保留 unknown，不按完成时间推定。"""
+    return {
+        "schema_version": 1,
+        "name": name,
+        "as_of": as_of,
+        "published_at": None,
+        "published_date": None,
+        "time_precision": "unknown",
+        "period": None,
+        "effective_from": None,
+        "effective_to": None,
+        "units": {},
+        "correction_of": None,
+    }
+
+
 class AgentService:
     """绑定当前可信 domain 的服务实例（§5.2）。"""
 
@@ -127,12 +298,239 @@ class AgentService:
         dao: AgentDaoProtocol,
         permission: ExecutionPermission | None = None,
         model_config_service: ModelConfigurationService | None = None,
+        source_providers: Mapping[str, SourceProvider] | None = None,
+        blob_root: Path | str | None = None,
     ) -> None:
         self._domain = domain
         self._dao = dao
         self._permission = permission or ExecutionPermission()
         # §9.7：授权只复用既有 ModelConfigurationService，不新建 grant 账本。
         self._model_config_service = model_config_service
+        self._source_providers = dict(source_providers or {})
+        self._blob_root = Path(blob_root) if blob_root is not None else None
+
+    async def import_source(self, operation_id: UUID, path: str, metadata: JsonDoc) -> MutationReceipt:
+        if not isinstance(operation_id, UUID):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("operation_id", "invalid_uuid"),)))
+        if not isinstance(path, str) or not path:
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("path", "invalid_type"),)))
+        parsed = _parse_metadata(metadata)
+        _assert_pit(parsed)
+        input_digest = _source_input_digest("import_source", {"path": path, "metadata": parsed})
+        replay = await self._call(lambda: self._dao.lookup_source_operation(self._domain, operation_id))
+        if replay is not None:
+            return await self._replay_source(replay, input_digest, operation_id)
+        media_type = _file_media_type(path)
+        data = await self._call(lambda: ThreadPoolManager().run_async(TaskType.IO, _read_file_bytes, path))
+        body = await self._call(
+            lambda: ThreadPoolManager().run_async(TaskType.IO, _prepare_file_body, media_type, data)
+        )
+        return await self._commit_source(
+            operation_id,
+            input_digest,
+            metadata=parsed,
+            origin="file",
+            media_type=media_type,
+            body=body,
+            read_range=_empty_read_range(Path(path).name),
+            extraction="complete",
+            limitations=[],
+        )
+
+    async def register_source(self, operation_id: UUID, registration: JsonDoc) -> MutationReceipt:
+        if not isinstance(operation_id, UUID):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("operation_id", "invalid_uuid"),)))
+        try:
+            validate_payload("source_registration", registration)
+            decoded = decode_json_doc(registration)
+        except AgentValidationError as error:
+            raise _invalid_request(error) from error
+        if not isinstance(decoded, dict):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("registration", "invalid_type"),)))
+        input_digest = _source_input_digest("register_source", decoded)
+        replay = await self._call(lambda: self._dao.lookup_source_operation(self._domain, operation_id))
+        if replay is not None:
+            return await self._replay_source(replay, input_digest, operation_id)
+        kind = decoded["kind"]
+        if kind == "business":
+            return await self._register_business(operation_id, input_digest, decoded)
+        if kind == "tool":
+            return await self._register_tool(operation_id, input_digest, decoded)
+        return await self._register_excerpt(operation_id, input_digest, decoded)
+
+    async def _register_business(
+        self, operation_id: UUID, input_digest: str, decoded: dict[str, object]
+    ) -> MutationReceipt:
+        as_of = date.fromisoformat(cast(str, decoded["as_of"]))
+        if as_of > datetime.now(UTC).date():
+            raise AgentOperationError(_problem("pit_ineligible", field_issues=(("as_of", "pit_ineligible"),)))
+        provider = self._source_providers.get(cast(str, decoded["provider_key"]))
+        if provider is None:
+            raise AgentOperationError(_problem("source_unavailable"))
+        try:
+            prepared_doc = await provider.read_source(
+                cast(str, decoded["source_object_key"]),
+                cast(str, decoded["source_revision"]),
+                as_of,
+            )
+        except asyncio.CancelledError:
+            raise
+        except AgentOperationError:
+            raise
+        except Exception as error:
+            raise AgentOperationError(_problem("source_unavailable")) from error
+        try:
+            validate_payload("prepared_source", prepared_doc)
+            prepared = decode_json_doc(prepared_doc)
+        except AgentValidationError as error:
+            raise _invalid_request(error) from error
+        if not isinstance(prepared, dict):
+            raise AgentOperationError(_problem("source_unavailable"))
+        metadata = prepared["metadata"]
+        if not isinstance(metadata, dict) or metadata.get("as_of") != decoded["as_of"]:
+            raise AgentOperationError(_problem("source_unavailable"))
+        _assert_pit(metadata)
+        text = prepared["text"]
+        media_type = prepared["media_type"]
+        if not isinstance(text, str) or not text.strip() or media_type not in _TEXT_MEDIA_TYPES:
+            raise AgentOperationError(_problem("source_unavailable"))
+        body = text.encode("utf-8")
+        if media_type == "application/json":
+            body = json_doc(decode_json_doc(text)).encode("utf-8")
+        read_range = prepared["read_range"]
+        if not isinstance(read_range, dict):
+            raise AgentOperationError(_problem("source_unavailable"))
+        return await self._commit_source(
+            operation_id,
+            input_digest,
+            metadata=metadata,
+            origin="business",
+            media_type=cast(str, media_type),
+            body=body,
+            read_range=cast(dict[str, object], read_range),
+            extraction=cast(str, prepared["extraction"]),
+            limitations=list(cast(list[str], prepared["limitations"])),
+        )
+
+    async def _register_tool(
+        self, operation_id: UUID, input_digest: str, decoded: dict[str, object]
+    ) -> MutationReceipt:
+        target = decoded["target"]
+        assert isinstance(target, dict)
+        try:
+            execution_id = UUID(cast(str, target["execution_id"]))
+            task_id = UUID(cast(str, target["task_id"]))
+            attempt_id = UUID(cast(str, target["attempt_id"]))
+        except (TypeError, ValueError) as error:
+            raise _invalid_request(AgentValidationError("invalid_uuid", "target")) from error
+        execution = await self._call(lambda: self._dao.read_execution(self._domain, execution_id))
+        matched = execution is not None and any(
+            task.task_id == task_id and task.attempt_id == attempt_id for task in execution.tasks
+        )
+        if not matched:
+            raise AgentOperationError(_problem("reference_conflict", related_id=execution_id))
+        effect_key = cast(str, decoded["effect_key"])
+        raw = await self._call(lambda: self._dao.read_tool_call(effect_key))
+        if raw is None:
+            raise AgentOperationError(_problem("source_unavailable"))
+        tool = decode_json_doc(raw)
+        if not isinstance(tool, dict):
+            raise AgentOperationError(_problem("source_unavailable"))
+        if (
+            tool.get("state") != "committed"
+            or tool.get("retired_at") is not None
+            or str(tool.get("execution_id")) != str(execution_id)
+            or str(tool.get("attempt_id")) != str(attempt_id)
+            or tool.get("response") is None
+        ):
+            raise AgentOperationError(_problem("source_unavailable"))
+        as_of = date.fromisoformat(cast(str, decoded["as_of"]))
+        if as_of > datetime.now(UTC).date():
+            raise AgentOperationError(_problem("pit_ineligible", field_issues=(("as_of", "pit_ineligible"),)))
+        tool_ref = tool.get("tool_ref")
+        name = "tool"
+        if isinstance(tool_ref, dict) and isinstance(tool_ref.get("name"), str):
+            name = cast(str, tool_ref["name"])
+        metadata = _unknown_published_metadata(name, cast(str, decoded["as_of"]))
+        body = json_doc(tool["response"]).encode("utf-8")
+        return await self._commit_source(
+            operation_id,
+            input_digest,
+            metadata=metadata,
+            origin="tool",
+            media_type="application/json",
+            body=body,
+            read_range=_empty_read_range(effect_key),
+            extraction="complete",
+            limitations=[],
+        )
+
+    async def _register_excerpt(
+        self,
+        operation_id: UUID,
+        input_digest: str,
+        decoded: dict[str, object],
+    ) -> MutationReceipt:
+        metadata = decoded["metadata"]
+        assert isinstance(metadata, dict)
+        _assert_pit(metadata)
+        text = decoded["text"]
+        if not isinstance(text, str) or not text.strip():
+            raise AgentOperationError(_problem("source_unavailable"))
+        return await self._commit_source(
+            operation_id,
+            input_digest,
+            metadata=metadata,
+            origin="user_excerpt",
+            media_type="text/plain",
+            body=text.encode("utf-8"),
+            read_range=_empty_read_range("user_excerpt"),
+            extraction="complete",
+            limitations=[],
+        )
+
+    async def _commit_source(
+        self,
+        operation_id: UUID,
+        input_digest: str,
+        *,
+        metadata: dict[str, object],
+        origin: str,
+        media_type: str,
+        body: bytes,
+        read_range: dict[str, object],
+        extraction: str,
+        limitations: list[str],
+    ) -> MutationReceipt:
+        root = self._blob_root
+        if root is None:
+            raise AgentOperationError(_problem("source_unavailable"))
+        resource_id = uuid5(operation_id, "source")
+        content_digest = hashlib.sha256(body).hexdigest()
+        relative = f"agent/sources/{resource_id}/{content_digest}{_MEDIA_SUFFIX.get(media_type, '')}"
+        await self._call(lambda: ThreadPoolManager().run_async(TaskType.IO, _write_blob, root, relative, body))
+        source = _build_source_payload(
+            metadata=metadata,
+            origin=origin,
+            media_type=media_type,
+            relative_path=relative,
+            content_digest=content_digest,
+            read_range=read_range,
+            extraction=extraction,
+            limitations=limitations,
+        )
+        return await self._call(lambda: self._dao.save_source(self._domain, operation_id, input_digest, source))
+
+    async def _replay_source(self, existing: tuple[str, str], input_digest: str, operation_id: UUID) -> MutationReceipt:
+        if existing[0] not in ("source_import", "source_register") or existing[1] != input_digest:
+            return MutationReceipt(
+                operation_id=operation_id,
+                status="conflict",
+                resource_id=None,
+                revision=None,
+                problem=_problem("identity_conflict", related_id=operation_id),
+            )
+        return await self._call(lambda: self._dao.lookup_mutation(self._domain, operation_id))
 
     # ------------------------------------------------------------------
     # 写入回执：参数先验证，再进 DAO；status 原样返回
