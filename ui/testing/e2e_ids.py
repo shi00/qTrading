@@ -434,6 +434,16 @@ class _TaskCenterIds:
         return (f"{_TaskCenterIds._TASK_ROW_PREFIX}.{task_id}", AnchorKind.LABEL)
 
 
+class _WatchlistIds:
+    """关注列表 anchor 命名空间 (FUP-013 手动重新加载入口)。
+
+    ``OutlinedButton`` 用 ``anchored()`` 包裹（INTERACTIVE，可点击），identifier
+    路径下以 `flt-semantics[flt-semantics-identifier="<EID>"]` 定位。
+    """
+
+    RELOAD_BUTTON: Eid = ("e2e.watchlist.reload_button", AnchorKind.INTERACTIVE)
+
+
 class EIDS:
     """E2E anchor ID 命名空间根。
 
@@ -452,3 +462,4 @@ class EIDS:
     NAV = _NavIds
     HOME = _HomeIds
     TASK_CENTER = _TaskCenterIds
+    WATCHLIST = _WatchlistIds
