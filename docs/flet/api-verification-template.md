@@ -47,6 +47,27 @@
 
 ## 历史核验记录
 
+### Flet 1.1.0 minor 升级核验 @ 1.1 系列 (2026-11-06)
+
+- **API**: 本项目实际使用的 V1 面（`use_effect(setup, dependencies, cleanup=)` / `use_state` / `use_ref` / `use_viewmodel` / `ft.Router` / `Dropdown.on_select` / `DialogControl` 子类 / `page.run_task`）+ E2E 资源契约（canvaskit / skwasm / wimp / webparagraph / rive）
+- **锁定版本**: Flet 1.1.0（六包同版本；`fastapi<0.145` 上界已解除，0.144.0 / 0.145.0 / 0.162.0 三组全量 E2E 均全绿）
+- **核验来源**:
+  - 目标 venv 静态取证: `use_effect` 签名保持 `(setup, dependencies=None, *, cleanup=None)`，内部新增 `_cleanup_task` 以等待异步 cleanup 完成（与项目 `ui/hooks.py` 显式 `cleanup=` 契约方向一致）；`use_state` / `use_ref` / `Router` / `Route` 未变
+  - 项目单元测试（1.1.0 实跑）: `tests/unit/ui/test_hooks.py` + `tests/unit/ui/test_toast_manager.py` **103 passed**；`tests/unit/test_e2e_asset_manifest.py` + `tests/unit/test_e2e_font_urls.py` **74 passed**
+  - effect 生命周期行为变化（私有 API 探针 `tests/unit/ui/test_flet_0_86_private_api_compat.py` 实跑发现，19 passed）: ① 同步 setup 的返回值改存 `hook._returned_cleanup`，不再被后续无关渲染清空（升级前会被清空）；② 卸载路径无条件 `hook.cancel_setup()`，在途 async setup 即使没有 `cleanup=` 也会被取消（升级前不会）。二者均为框架缺陷修复，项目仍统一使用显式 `cleanup=`，不依赖上述内部字段
+  - 静态检查: `pyright` **0 errors / 745 warnings**（1.0.5 基线 3 errors / 745 warnings，无新增 error）
+  - E2E 资源取证: engineRevision 由 `0cd610717bde95fd88343c64f81c11ba4e5c0010` 变为 `89c39edfdfae2949f6806e4a315c0c08522238b7` → canvaskit 必须重新同步；`canvaskit/experimental_webparagraph/` 更名为 `canvaskit/webparagraph/`；root 新增 `skwasm_heavy.*`；字体所需清单与 1.0.5 一致（`sync_e2e_fonts.py` 退出 0，下载 0）
+  - 全量 E2E（与 `ci_cd.yml` 同参数顺序执行，5 个矩阵组）: **59 passed / 2 skipped**，fastapi 0.144.0 / 0.145.0 / 0.162.0 三组环境结果一致。注：本机以 xdist 并行跑时向导冷启动（实测 28–30s）会超出 8s/45s 等待阈值产生假失败，且 worker 崩溃后 xdist 会话挂起，故并行轮次不作为判定依据；向导首等待已改 `TIMEOUTS.PAGE_OPEN`（既有冷启动竞态，非 1.1.0 回归，取证见 `.worktrees/_evidence-flet-110/fup-005-wizard-risk-ack.md`）
+- **项目结论**: 继续使用（`ui/hooks.py` 的显式 `cleanup=`、订阅后补快照、代次隔离**保留**，不因 1.1.0 内部修复而删除；删除需单独等价证明）
+- **需更新文件**:
+  - [x] `tests/e2e/mock_assets/manifest.json`（新增，含 engineRevision/摘要/来源）
+  - [x] `tests/e2e/_font_urls.py`（`webparagraph` 子目录）
+  - [x] `docs/flet/upgrade-checklist.md` §3.5
+  - [x] `pyproject.toml` + `.github/workflows/ci_cd.yml` ×4 / `flet-nightly.yml` ×1（解除 `fastapi<0.145` 上界，依据 0.144.0 / 0.145.0 / 0.162.0 三组全量 E2E 全绿）
+  - [x] `tests/e2e/pages.py`（`WizardPage.accept_risk_disclaimer` 首等待改 `TIMEOUTS.PAGE_OPEN`，修复既有冷启动竞态）
+  - [x] `tests/unit/ui/test_flet_0_86_private_api_compat.py`（两个 effect 生命周期探针按 1.1.0 新行为更新断言）+ `docs/flet/v1-api-constraints.md` §3、`docs/flet/project-differences.md` §4.3（机制描述同步）
+- **核验人**: 架构维护者
+
 ### Flet 1.0.4/1.0.5 patch 升级核验 @ 1.0 系列 (2026-10-29)
 
 - **API**: V1 声明式 API（`use_dialog` / `Dropdown.on_select` / `use_effect(cleanup=)` / `Router`/`Route` / `DialogControl` 子类族）+ flet_charts / flet_code_editor / flet-mcp（同版本锁定）+ E2E 离线资源与语义树契约

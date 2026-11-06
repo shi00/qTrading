@@ -1,0 +1,17 @@
+E2E mock 资产来源记录（NOTICE）
+=================================
+
+这些文件是从第三方产物复制的离线测试快照，**不是**本项目原创内容，也不随产品分发。
+
+同步方式：
+  canvaskit/  从同版本 flet-web wheel 的 flet_web/web/canvaskit 逐字节复制
+  rive/       从 @rive-app/flutter-native-wasm 已缓存副本逐字节复制
+  fonts/      由 scripts/sync_e2e_fonts.py 按 main.dart.js 所需分片从 fonts.gstatic.com 同步
+
+版本约束：
+  canvaskit 二进制与 Flutter engineRevision 绑定，engineRevision 变化即不兼容。
+  升级 flet 后必须重新同步本目录，并运行 `python -m tests.e2e._asset_manifest`
+  重新生成 manifest.json；manifest 中的 engine_revision 与 flet_web_version
+  会在 E2E 启动期与当前安装包比对，不一致时直接失败（不静默降级）。
+
+许可全文与来源 URL 见同目录 LICENSE；逐文件摘要见 manifest.json。

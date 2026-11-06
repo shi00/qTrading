@@ -118,7 +118,8 @@ class TestExtractFontFilename:
 class TestExtractCanvaskitRelpath:
     """Tests for extract_canvaskit_relpath().
 
-    支持 flet 0.86.3 引入的 chromium/experimental_webparagraph 子目录变体。
+    支持 flet 0.86.3 引入的 chromium/webparagraph 子目录变体
+    （1.1.0 起 experimental_webparagraph 更名为 webparagraph）。
     覆盖同源路径与 CDN 路径两种 URL 模式，并验证 path traversal 防御。
     """
 
@@ -130,10 +131,10 @@ class TestExtractCanvaskitRelpath:
         """同源路径 chromium 子目录：保留 ``chromium/<filename>`` 相对路径。"""
         assert extract_canvaskit_relpath("/canvaskit/chromium/canvaskit.js") == "chromium/canvaskit.js"
 
-    def test_extracts_experimental_webparagraph_subdir_from_same_origin(self) -> None:
-        """同源路径 experimental_webparagraph 子目录：保留子目录相对路径。"""
-        result = extract_canvaskit_relpath("/canvaskit/experimental_webparagraph/canvaskit.js")
-        assert result == "experimental_webparagraph/canvaskit.js"
+    def test_extracts_webparagraph_subdir_from_same_origin(self) -> None:
+        """同源路径 webparagraph 子目录：保留子目录相对路径。"""
+        result = extract_canvaskit_relpath("/canvaskit/webparagraph/canvaskit.js")
+        assert result == "webparagraph/canvaskit.js"
 
     def test_extracts_basename_from_cdn_path(self) -> None:
         """CDN 路径：``/flutter-canvaskit/<hash>/<filename>`` → ``<filename>``（跳过 hash 段）。"""

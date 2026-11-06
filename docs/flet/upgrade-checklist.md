@@ -25,15 +25,15 @@ Flet 版本升级时，按以下清单逐项验证。每项验证结果建议记
 
 该 pin 不在 `pyproject.toml` 显式依赖内，`check_docs_consistency.py` 等脚本不会扫描它，属于**版本一致性检查盲区**，只能靠本清单人工同步。
 
-同一盲区之二：`flet-web` 的 transitive dependency `fastapi` 亦为**无上界**声明（仅 `>=0.115`，未设上界），`uv pip install` 会解析到当时最新版。fastapi 0.145 起移除了 `FastAPI.__init__` 的 `openapi_prefix` 参数：当前锁定系列早期版本的 `flet_web` 仍在构造时传入该参数，启动即抛 `TypeError`，导致 E2E 全量 setup ERROR（PR 1402 run 39183228649 实例）。当前锁定版本的 `flet_web` 已改为 `root_path=root_path or openapi_prefix`，不再向 `FastAPI.__init__` 传该参数；本地冒烟实测 fastapi 0.145 / 0.162 下 `flet_web` app 可启动且首页返回 HTTP 200。但 **E2E 全链路尚未在 0.145+ 上验证**，故仍保留保守上界：5 处 `flet-web==` 预装命令**在同一安装事务内**追加 `"fastapi<0.145"`（fastapi 0.144 为已验证组合），`pyproject.toml` 亦声明同款上界，使 `pip install -r requirements.txt` 的安装基线在本地与 CI 一致。
+同一盲区之二：`flet-web` 的 transitive dependency `fastapi` 亦为**无上界**声明（仅 `>=0.115`，未设上界），`uv pip install` 会解析到当时最新版。fastapi 0.145 起移除了 `FastAPI.__init__` 的 `openapi_prefix` 参数：当前锁定系列早期版本的 `flet_web` 仍在构造时传入该参数，启动即抛 `TypeError`，导致 E2E 全量 setup ERROR（PR 1402 run 39183228649 实例）。当前锁定版本的 `flet_web` 已改为 `root_path=root_path or openapi_prefix`，不再向 `FastAPI.__init__` 传该参数。**该上界已于 2026-11-06 解除**：全量 E2E（与 CI 同参数顺序执行）在 fastapi 0.144 / 0.145 / 0.162 三组环境均 59 passed / 2 skipped，故 CI 不再追加约束、`pyproject.toml` 已删除 `fastapi<0.145`。
 
 - [ ] **同步 `flet-web==` pin**：CI 中所有 `uv pip install --system flet-web==` 的版本号与 `pyproject.toml` 锁定的 `flet` 主包一致
   - 检查命令：`grep -n "flet-web==" .github/workflows/ci_cd.yml`
   - 对照目标版本：`python -c "import flet; print(flet.__version__)"`（须与 `pyproject.toml` 中 `flet==X.Y.Z` 一致）
   - 若 ci_cd 的 pin 仍是旧版本号 → 逐处改为目标版本并提交
-- [ ] **同步 `fastapi` 上界约束**：CI 中每处 `uv pip install --system flet-web==` 命令同时追加 `"fastapi<0.145"`，且 `pyproject.toml` 声明同款上界（当前 `flet_web` 已不再传 `openapi_prefix`，fastapi 0.145 / 0.162 冒烟可用，但 E2E 全链路未在 0.145+ 验证 → 保守保留；fastapi 0.144 为已验证组合）
-  - 检查命令：`grep -n 'flet-web==\|fastapi<' .github/workflows/ci_cd.yml .github/workflows/flet-nightly.yml pyproject.toml`
-  - 解除条件：E2E 全链路在 fastapi 0.145+ 上全绿后，在升级 `flet-web` 的同一 PR 内同时移除 CI 5 处约束与 `pyproject.toml` 声明
+- [ ] **`fastapi` 上界已解除（2026-11-06）**：CI 5 处 `uv pip install --system flet-web==` 不再追加 `"fastapi<0.145"`，`pyproject.toml` 已删除同款上界；依据为 fastapi 0.144 / 0.145 / 0.162 三组全量 E2E 全绿
+  - 检查命令：`grep -n 'flet-web==\|fastapi<' .github/workflows/ci_cd.yml .github/workflows/flet-nightly.yml pyproject.toml`（应仅命中 `flet-web==`，无 `fastapi<`）
+  - 重新引入上界的条件：后续任一 fastapi 版本导致 `flet_web` 启动失败（E2E setup ERROR / TypeError），需在同 PR 内恢复约束并记录取证
 
 ## 2. 兼容性测试与文档检查
 
@@ -103,14 +103,16 @@ python scripts/sync_e2e_fonts.py --force
 
 ### 3.5 CanvasKit 子目录变体与新渲染器资源（Flet V1 系列）
 
-> 背景：当前锁定的 Flet V1 系列引入了 CanvasKit 子目录变体（`chromium/`、`experimental_webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
+> 背景：当前锁定的 Flet V1 系列引入了 CanvasKit 子目录变体（`chromium/`、`webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
 
 **升级 Flet 时需验证**：
 
-- [ ] **检查 `site-packages/flet_web/web/canvaskit/` 目录结构**：确认是否存在 `chromium/` / `experimental_webparagraph/` 子目录，以及 `skwasm*.js/wasm` / `wimp.js/wasm` 文件
+- [ ] **检查 `site-packages/flet_web/web/canvaskit/` 目录结构**：确认是否存在 `chromium/` / `webparagraph/` 子目录（1.1.0 起由 `experimental_webparagraph` 更名），以及 `skwasm*.js/wasm` / `wimp.js/wasm` 文件
   - 命令：`ls <site-packages>/flet_web/web/canvaskit/`
 - [ ] **同步新资源到 `tests/e2e/mock_assets/canvaskit/`**：保留子目录结构（如 `chromium/canvaskit.js`）
   - 复制命令：`cp -r <site-packages>/flet_web/web/canvaskit/* tests/e2e/mock_assets/canvaskit/`
+- [ ] **确认 `tests/e2e/mock_assets/**` 不参与 EOL 转换**：`.gitattributes` 必须包含 `tests/e2e/mock_assets/** -text`。manifest 记录的是逐字节 SHA-256，若按 `text=auto` 处理，同一提交在 Windows（CRLF）与 Linux（LF）检出的摘要必有一端失配，表现为 E2E/嵌入式用例集体 setup ERROR（PR #2060 实例）
+  - 校验：`git ls-files --eol tests/e2e/mock_assets/canvaskit/canvaskit.js` 应为 `i/lf w/lf attr/-text`；或运行 `pytest tests/unit/test_e2e_asset_manifest.py`（含 `.gitattributes` 守护用例）
 - [ ] **验证拦截器逻辑**：[tests/e2e/_font_urls.py](../../tests/e2e/_font_urls.py) 的 `extract_canvaskit_relpath()` 函数支持子目录变体路径解析（含 path traversal 防御）；[tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 通过关键字 `canvaskit` / `skwasm` / `wimp` 匹配并路由到本地文件
 - [ ] **若新版本引入其他渲染器**：在 `intercept_external` 的关键字列表中补充新渲染器名称
 

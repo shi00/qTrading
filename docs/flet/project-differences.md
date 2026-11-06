@@ -9,7 +9,7 @@
 
 > Owner: UI 维护者
 > 复核触发器: Flet 依赖版本变化（pyproject.toml）、关键 API 变化、架构红线/边界变化或 ADR 决策（见 [../adr/](../adr/)）
-> 最后验证日期: 2026-10-29
+> 最后验证日期: 2026-11-06
 
 ---
 
@@ -141,7 +141,7 @@ def cleanup() -> None:
 ft.use_effect(setup, dependencies=[], cleanup=cleanup)
 ```
 
-**机制（锁定版本）**：`use_effect` 每次渲染都会把 `hook.cleanup` 重写为传入的 `cleanup=` 参数，故 setup 返回值写法在重渲染后不可靠；显式 `cleanup=` 每次渲染传入同一函数引用，卸载时可靠执行。机制细节与 `dependencies` 三态语义见 [v1-api-constraints.md §3](./v1-api-constraints.md#3-use_state--use_effect-api)。
+**机制（锁定版本）**：`use_effect` 每次渲染都会把 `hook.cleanup` 重写为传入的 `cleanup=` 参数；显式 `cleanup=` 每次渲染传入同一函数引用，卸载时可靠执行。升级到 Flet 1.1 后，调度器已把 setup 返回值单独存入 `hook._returned_cleanup`（不再被后续渲染清空），两种写法均可靠——项目仍统一使用显式 `cleanup=`，以保持写法一致并明确给出「本次渲染所见值」的清理语义。机制细节与 `dependencies` 三态语义见 [v1-api-constraints.md §3](./v1-api-constraints.md#3-use_state--use_effect-api)。
 
 ### 4.4 `use_viewmodel` 双模式
 

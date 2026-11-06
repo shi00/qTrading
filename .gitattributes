@@ -8,3 +8,9 @@ requirements*.txt text eol=lf
 # Binary font/wasm resources (prevent CRLF→LF conversion corrupting binaries)
 *.woff2 binary
 *.wasm binary
+
+# E2E 离线渲染资源必须逐字节可复现：manifest.json 记录 SHA-256，由
+# tests/e2e/conftest.py 启动断言与 tests/unit/test_e2e_asset_manifest.py 校验。
+# *.js / *.symbols 若按 text=auto 在 Windows 检出时转为 CRLF，摘要即失配
+# （PR #2060 的 5 个 E2E job 即因此全部 setup ERROR）。
+tests/e2e/mock_assets/** -text
