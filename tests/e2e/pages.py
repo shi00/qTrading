@@ -906,7 +906,10 @@ class WizardPage:
         仅当未勾选时才点击，并在点击后确认状态已置位（抗 CanvasKit 高负载吞点击）。
         """
         eid = EIDS.WIZARD.RISK_ACK
-        await self.ap.scroll_into_view(eid, timeout_ms=timeout_ms)
+        # 本方法是欢迎步的首个交互：冷启动页面（canvas 首次编译 + 内置资源加载）
+        # 实测需 >20s 才渲染出语义节点，首等待必须用 PAGE_OPEN 而非 INTERACTION，
+        # 否则在页面尚未渲染时即超时（1.0.5 基线冷启动单跑同样可复现）。
+        await self.ap.scroll_into_view(eid, timeout_ms=TIMEOUTS.PAGE_OPEN)
         if await self.ap.is_checked(eid, timeout_ms=timeout_ms):
             return
         await retry_until_triggered(
