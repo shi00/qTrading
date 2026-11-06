@@ -47,7 +47,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, cast
@@ -60,6 +60,8 @@ from core.model_management_types import (
     ExecutionSnapshot,
     InferenceAdapter,
     InferenceRequest,
+    ModelStreamDelta,
+    ModelTurnResult,
     NormalizedLLMUsage,
     ResolvedConnection,
     ScenarioExecutionResult,
@@ -190,8 +192,14 @@ class ScenarioExecutor:
         request: InferenceRequest,
         snapshot: ExecutionSnapshot,
         validate_output: Callable[[AdapterResponse], Any],
+        on_delta: Callable[[ModelStreamDelta], Awaitable[None]] | None = None,
     ) -> ScenarioExecutionResult:
-        """按快照路由执行：候选遍历 + 失败切换，返回场景终态。"""
+        """按快照路由执行：候选遍历 + 失败切换，返回场景终态。
+
+        ``on_delta`` 为服务层可选流式观察回调（§7.1）：只透传给具备
+        ``invoke_stream`` 的适配器，不进入 core 请求；无消费者时仍返回完整
+        ``AdapterResponse``。
+        """
         loop = asyncio.get_running_loop()
         clock = self._clock or loop.time
         state = get_loop_local(_LOOP_STATE_KEY, _LoopState)
@@ -404,6 +412,7 @@ class ScenarioExecutor:
                     owner_lease_expires_at=owner_lease_expires_at,
                     pricing=pricing_by_id.get(connection.connection_id),
                     total_attempts=total_attempts,
+                    on_delta=on_delta,
                 )
             finally:
                 semaphore.release()
@@ -419,7 +428,12 @@ class ScenarioExecutor:
                     )
                 )
                 return self._terminal(
-                    request, "succeeded", outcome.outputs, [*decisions, *fallback_skipped], outcome.usages
+                    request,
+                    "succeeded",
+                    outcome.outputs,
+                    [*decisions, *fallback_skipped],
+                    outcome.usages,
+                    turns=outcome.turns,
                 )
 
             if outcome.halt_candidates:
@@ -470,6 +484,7 @@ class ScenarioExecutor:
         owner_lease_expires_at: Any,
         pricing: ConnectionPricing | None,
         total_attempts: int | None = None,
+        on_delta: Callable[[ModelStreamDelta], Awaitable[None]] | None = None,
     ) -> _CandidateOutcome:
         adapter = self._adapters.get(connection.adapter_kind)
         if adapter is None:
@@ -676,7 +691,20 @@ class ScenarioExecutor:
                 # 无法证明是否已被上游消费）
                 outbound_started = True
                 try:
-                    response = await adapter.invoke(request, effective_connection, request.deadline, attempt_context)
+                    stream_invoke = getattr(adapter, "invoke_stream", None)
+                    if request.turn is not None and on_delta is not None and callable(stream_invoke):
+                        stream_call = cast(Callable[..., Awaitable[AdapterResponse]], stream_invoke)
+                        response = await stream_call(
+                            request,
+                            effective_connection,
+                            request.deadline,
+                            attempt_context,
+                            on_delta=on_delta,
+                        )
+                    else:
+                        response = await adapter.invoke(
+                            request, effective_connection, request.deadline, attempt_context
+                        )
                 except Exception as e:
                     # F27：先分类后处置——终止判定（内容安全拒绝）先于重试判定，
                     # 禁止先重试再发现。
@@ -737,6 +765,69 @@ class ScenarioExecutor:
                 attempt_metadata = {**attempt_metadata, "actual_model": response.actual_model}
                 self._recorder.observe_usage(_observation_from(request, attempt_id, response, attempt_metadata))
 
+                usage_tuple = (response.usage,) if response.usage is not None else ()
+                turn = response.turn
+                if turn is not None:
+                    # §7.1：完整 turn 的终结语义与旧文本路径共用同一候选/重试/账本
+                    # 权威；中间 tool-only 轮不触发最终业务校验，拒绝不换候选。
+                    if turn.finish_reason == "refused":
+                        await self._submit_failed_terminal(
+                            request,
+                            attempt_id,
+                            _CONTENT_REFUSED_ERROR_CODE,
+                            reservation_id,
+                            metadata=attempt_metadata,
+                            ledger=ledger,
+                            duration_ms=_elapsed_ms(clock, attempt_started_at),
+                        )
+                        return _CandidateOutcome(
+                            status="failed",
+                            decision_hint="rejected",
+                            reason=_CONTENT_REFUSED_ERROR_CODE,
+                            outputs=(),
+                            usages=(),
+                            halt_candidates=True,
+                        )
+                    if turn.finish_reason in ("length", "error"):
+                        error_code = f"TURN_{turn.finish_reason.upper()}"
+                        await self._submit_failed_terminal(
+                            request,
+                            attempt_id,
+                            error_code,
+                            reservation_id,
+                            metadata=attempt_metadata,
+                            ledger=ledger,
+                            duration_ms=_elapsed_ms(clock, attempt_started_at),
+                        )
+                        return _CandidateOutcome(
+                            status="failed",
+                            reason=error_code,
+                            outputs=(),
+                            usages=(),
+                        )
+                    if turn.finish_reason == "tool_calls":
+                        await self._submit_terminal_logged(
+                            _terminal_record(
+                                request,
+                                attempt_id,
+                                usage=response.usage,
+                                actual_model=response.actual_model,
+                                status="succeeded",
+                                error_code=None,
+                                reservation_id=reservation_id,
+                                metadata=attempt_metadata,
+                                duration_ms=_elapsed_ms(clock, attempt_started_at),
+                            ),
+                            ledger,
+                        )
+                        return _CandidateOutcome(
+                            status="succeeded",
+                            reason="ok",
+                            outputs=(),
+                            usages=usage_tuple,
+                            turns=(turn,),
+                        )
+
                 try:
                     validated = validate_output(response)
                 except Exception as e:
@@ -759,7 +850,6 @@ class ScenarioExecutor:
                         usages=(),
                     )
 
-                usage_tuple = (response.usage,) if response.usage is not None else ()
                 await self._submit_terminal_logged(
                     _terminal_record(
                         request,
@@ -792,6 +882,7 @@ class ScenarioExecutor:
                         ),
                     ),
                     usages=usage_tuple,
+                    turns=(turn,) if turn is not None else (),
                 )
             except asyncio.CancelledError:
                 # F19：取消传播边界的受限清理——尽力收敛终态（cancelled 终态或在途
@@ -973,6 +1064,8 @@ class ScenarioExecutor:
         outputs: tuple[Mapping[str, Any], ...],
         decisions: list[CandidateDecision],
         usages: tuple[NormalizedLLMUsage, ...],
+        *,
+        turns: tuple[ModelTurnResult, ...] = (),
     ) -> ScenarioExecutionResult:
         return ScenarioExecutionResult(
             scenario_id=request.scenario_id,
@@ -981,6 +1074,7 @@ class ScenarioExecutor:
             outputs=outputs,
             candidate_decisions=tuple(decisions),
             actual_usage=usages,
+            turns=turns,
         )
 
 
@@ -1157,6 +1251,7 @@ class _CandidateOutcome:
     usages: tuple[NormalizedLLMUsage, ...]
     decision_hint: Literal["skipped", "rejected", "attempted", "switched", "succeeded", "failed"] = "switched"
     halt_candidates: bool = False
+    turns: tuple[ModelTurnResult, ...] = ()
 
 
 @dataclass(slots=True)

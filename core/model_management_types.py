@@ -13,8 +13,10 @@ stdlib，符合 CLAUDE.md §4.2「多层引用的基础设施提升到 core」�
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -138,6 +140,345 @@ class ExecutionSnapshot:
 
 
 # ---------------------------------------------------------------------------
+# 完整 turn / stream 协议（设计正本 §7.1，M01）
+# ---------------------------------------------------------------------------
+
+
+class ModelTurnProtocolError(ValueError):
+    """完整 turn/stream 协议失败（§7.1）：分片未闭合 / 工具配对非法 / 非法 JSON。
+
+    服务边界不把该异常当作可切换候选的质量失败——它是协议事实，调用方须停止
+    派发或交由既有错误分类处理。
+    """
+
+    def __init__(self, code: str, field_path: str) -> None:
+        super().__init__(f"{code}: {field_path}")
+        self.code = code
+        self.field_path = field_path
+
+
+FINISH_REASONS: Final[tuple[str, ...]] = ("final", "tool_calls", "refused", "length", "error")
+FinishReason = Literal["final", "tool_calls", "refused", "length", "error"]
+MESSAGE_ROLES: Final[tuple[str, ...]] = ("system", "user", "assistant", "tool")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    call_id: str
+    name: str
+    arguments_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    name: str
+    description: str
+    parameters_json: str
+    schema_revision: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelMessage:
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | None
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str | None = None
+    media_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ModelTurnRequest:
+    messages: tuple[ModelMessage, ...]
+    tools: tuple[ToolDefinition, ...]
+    output_contract: str
+    max_output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class ModelTurnResult:
+    message: ModelMessage
+    finish_reason: FinishReason
+
+
+@dataclass(frozen=True, slots=True)
+class ModelStreamDelta:
+    sequence: int
+    kind: Literal["text", "tool_call", "finish"]
+    call_index: int | None = None
+    call_id: str | None = None
+    name: str | None = None
+    text: str | None = None
+    arguments_fragment: str | None = None
+    finish_reason: FinishReason | None = None
+
+
+def _invalid(code: str, field_path: str) -> ModelTurnProtocolError:
+    return ModelTurnProtocolError(code, field_path)
+
+
+def _strict_arguments_object(arguments_json: object, field_path: str) -> dict[str, Any]:
+    """完整工具参数：必须是 JSON 对象，禁重复键 / 非有限数（§7.1）。"""
+    if not isinstance(arguments_json, str):
+        raise _invalid("invalid_arguments_json", field_path)
+
+    def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        seen: dict[str, object] = {}
+        for key, value in pairs:
+            if key in seen:
+                raise _invalid("duplicate_key", f"{field_path}.{key}")
+            seen[key] = value
+        return seen
+
+    def _constant(name: str) -> object:
+        raise _invalid("non_finite_number", f"{field_path}.{name}")
+
+    try:
+        parsed = json.loads(
+            arguments_json,
+            object_pairs_hook=_pairs,
+            parse_constant=_constant,
+            parse_float=Decimal,
+        )
+    except ModelTurnProtocolError:
+        raise
+    except (json.JSONDecodeError, ValueError, TypeError, InvalidOperation) as error:
+        raise _invalid("invalid_arguments_json", field_path) from error
+    if not isinstance(parsed, dict):
+        raise _invalid("arguments_not_object", field_path)
+    for key, value in parsed.items():
+        if isinstance(value, Decimal) and not value.is_finite():
+            raise _invalid("non_finite_number", f"{field_path}.{key}")
+    return parsed
+
+
+def _validate_media_refs(media_refs: object, field_path: str) -> None:
+    if not isinstance(media_refs, tuple):
+        raise _invalid("invalid_media_refs", field_path)
+    for index, ref in enumerate(media_refs):
+        if not isinstance(ref, str) or not ref:
+            raise _invalid("invalid_media_ref", f"{field_path}[{index}]")
+
+
+def validate_model_message(message: ModelMessage, field_path: str = "$.message") -> None:
+    """单条消息结构与工具调用/返回配对形状（§7.1）。"""
+    if not isinstance(message, ModelMessage):
+        raise _invalid("invalid_message", field_path)
+    if message.role not in MESSAGE_ROLES:
+        raise _invalid("invalid_role", f"{field_path}.role")
+    if message.content is not None and not isinstance(message.content, str):
+        raise _invalid("invalid_content", f"{field_path}.content")
+    _validate_media_refs(message.media_refs, f"{field_path}.media_refs")
+    if not isinstance(message.tool_calls, tuple):
+        raise _invalid("invalid_tool_calls", f"{field_path}.tool_calls")
+    for index, call in enumerate(message.tool_calls):
+        if not isinstance(call, ToolCall):
+            raise _invalid("invalid_tool_call", f"{field_path}.tool_calls[{index}]")
+        if not call.call_id or not isinstance(call.call_id, str):
+            raise _invalid("invalid_call_id", f"{field_path}.tool_calls[{index}].call_id")
+        if not call.name or not isinstance(call.name, str):
+            raise _invalid("invalid_tool_name", f"{field_path}.tool_calls[{index}].name")
+        _strict_arguments_object(call.arguments_json, f"{field_path}.tool_calls[{index}].arguments_json")
+
+    if message.role == "assistant":
+        if message.tool_call_id is not None:
+            raise _invalid("tool_call_id_on_assistant", f"{field_path}.tool_call_id")
+        if message.content is None and not message.tool_calls:
+            raise _invalid("empty_assistant_message", field_path)
+    elif message.role == "tool":
+        if message.tool_calls:
+            raise _invalid("tool_calls_on_tool_message", f"{field_path}.tool_calls")
+        if not message.tool_call_id:
+            raise _invalid("missing_tool_call_id", f"{field_path}.tool_call_id")
+        if message.content is None:
+            raise _invalid("empty_tool_content", f"{field_path}.content")
+    else:
+        if message.tool_calls:
+            raise _invalid("tool_calls_on_non_assistant", f"{field_path}.tool_calls")
+        if message.tool_call_id is not None:
+            raise _invalid("tool_call_id_on_non_tool", f"{field_path}.tool_call_id")
+        if message.content is None:
+            raise _invalid("empty_message_content", f"{field_path}.content")
+
+
+def validate_model_turn_request(turn: ModelTurnRequest) -> None:
+    """请求整体校验：消息配对、工具定义与输出契约（§7.1）。"""
+    if not isinstance(turn, ModelTurnRequest):
+        raise _invalid("invalid_turn_request", "$")
+    if not isinstance(turn.messages, tuple) or not turn.messages:
+        raise _invalid("empty_messages", "$.messages")
+    if not isinstance(turn.tools, tuple):
+        raise _invalid("invalid_tools", "$.tools")
+    if not isinstance(turn.output_contract, str) or not turn.output_contract:
+        raise _invalid("missing_output_contract", "$.output_contract")
+    if isinstance(turn.max_output_tokens, bool) or not isinstance(turn.max_output_tokens, int):
+        raise _invalid("invalid_max_output_tokens", "$.max_output_tokens")
+    if turn.max_output_tokens <= 0:
+        raise _invalid("non_positive_max_output_tokens", "$.max_output_tokens")
+
+    available_calls: set[str] = set()
+    returned_calls: set[str] = set()
+    for index, message in enumerate(turn.messages):
+        validate_model_message(message, f"$.messages[{index}]")
+        if message.role == "assistant":
+            for call in message.tool_calls:
+                if call.call_id in available_calls:
+                    raise _invalid("duplicate_call_id", f"$.messages[{index}].tool_calls")
+                available_calls.add(call.call_id)
+        elif message.role == "tool":
+            assert message.tool_call_id is not None
+            if message.tool_call_id not in available_calls:
+                raise _invalid("tool_result_without_call", f"$.messages[{index}].tool_call_id")
+            if message.tool_call_id in returned_calls:
+                raise _invalid("duplicate_tool_result", f"$.messages[{index}].tool_call_id")
+            returned_calls.add(message.tool_call_id)
+
+    names: set[str] = set()
+    for index, tool in enumerate(turn.tools):
+        if not isinstance(tool, ToolDefinition):
+            raise _invalid("invalid_tool_definition", f"$.tools[{index}]")
+        if not tool.name or not isinstance(tool.name, str):
+            raise _invalid("invalid_tool_name", f"$.tools[{index}].name")
+        if tool.name in names:
+            raise _invalid("duplicate_tool_name", f"$.tools[{index}].name")
+        names.add(tool.name)
+        if not isinstance(tool.description, str):
+            raise _invalid("invalid_tool_description", f"$.tools[{index}].description")
+        if not isinstance(tool.schema_revision, str) or not tool.schema_revision:
+            raise _invalid("missing_schema_revision", f"$.tools[{index}].schema_revision")
+        _strict_arguments_object(tool.parameters_json, f"$.tools[{index}].parameters_json")
+
+
+def validate_model_turn_result(result: ModelTurnResult) -> None:
+    """响应整体校验：assistant 消息 + finish_reason 形状（§7.1）。"""
+    if not isinstance(result, ModelTurnResult):
+        raise _invalid("invalid_turn_result", "$")
+    if result.finish_reason not in FINISH_REASONS:
+        raise _invalid("invalid_finish_reason", "$.finish_reason")
+    validate_model_message(result.message, "$.message")
+    if result.message.role != "assistant":
+        raise _invalid("result_message_not_assistant", "$.message.role")
+    if result.finish_reason == "final":
+        if result.message.content is None:
+            raise _invalid("final_without_content", "$.message.content")
+        if result.message.tool_calls:
+            raise _invalid("final_with_tool_calls", "$.message.tool_calls")
+    elif result.finish_reason == "tool_calls":
+        if not result.message.tool_calls:
+            raise _invalid("tool_calls_without_calls", "$.message.tool_calls")
+    else:
+        if result.message.tool_calls:
+            raise _invalid("terminal_turn_with_tool_calls", "$.message.tool_calls")
+
+
+def assemble_model_stream(deltas: Sequence[ModelStreamDelta]) -> ModelTurnResult:
+    """按 sequence 组装完整响应；未闭合分支/首个 finish 之后片段均为协议错误。
+
+    ``finish`` 只允许出现一次且必须是最后一个增量；工具分片按 ``call_index``
+    合并，结束后校验 ID / 名称 / 完整 JSON 参数。调用方只能在返回结果后派发
+    工具，未闭合流不得提前授权（§7.1）。
+    """
+    expected_sequence = 1
+    finish: ModelStreamDelta | None = None
+    text_parts: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+
+    for index, delta in enumerate(deltas):
+        if not isinstance(delta, ModelStreamDelta):
+            raise _invalid("invalid_stream_delta", f"$.deltas[{index}]")
+        if finish is not None:
+            raise _invalid("fragment_after_finish", f"$.deltas[{index}]")
+        if isinstance(delta.sequence, bool) or not isinstance(delta.sequence, int):
+            raise _invalid("invalid_sequence", f"$.deltas[{index}].sequence")
+        if delta.sequence != expected_sequence:
+            raise _invalid("sequence_gap", f"$.deltas[{index}].sequence")
+        expected_sequence += 1
+
+        if delta.kind == "text":
+            if not isinstance(delta.text, str) or not delta.text:
+                raise _invalid("invalid_text_delta", f"$.deltas[{index}].text")
+            if (
+                delta.call_index is not None
+                or delta.call_id is not None
+                or delta.name is not None
+                or delta.arguments_fragment is not None
+                or delta.finish_reason is not None
+            ):
+                raise _invalid("mixed_text_delta", f"$.deltas[{index}]")
+            text_parts.append(delta.text)
+        elif delta.kind == "tool_call":
+            if isinstance(delta.call_index, bool) or not isinstance(delta.call_index, int) or delta.call_index < 0:
+                raise _invalid("invalid_call_index", f"$.deltas[{index}].call_index")
+            if delta.text is not None or delta.finish_reason is not None:
+                raise _invalid("mixed_tool_delta", f"$.deltas[{index}]")
+            entry = calls.setdefault(delta.call_index, {"call_id": None, "name": None, "fragments": []})
+            if delta.call_id is not None:
+                if entry["call_id"] not in (None, delta.call_id):
+                    raise _invalid("call_id_mismatch", f"$.deltas[{index}].call_id")
+                entry["call_id"] = delta.call_id
+            if delta.name is not None:
+                if entry["name"] not in (None, delta.name):
+                    raise _invalid("tool_name_mismatch", f"$.deltas[{index}].name")
+                entry["name"] = delta.name
+            entry["fragments"].append(delta.arguments_fragment or "")
+        elif delta.kind == "finish":
+            if delta.finish_reason not in FINISH_REASONS:
+                raise _invalid("invalid_finish_reason", f"$.deltas[{index}].finish_reason")
+            if (
+                delta.call_index is not None
+                or delta.call_id is not None
+                or delta.name is not None
+                or delta.text is not None
+                or delta.arguments_fragment is not None
+            ):
+                raise _invalid("mixed_finish_delta", f"$.deltas[{index}]")
+            finish = delta
+        else:
+            raise _invalid("invalid_delta_kind", f"$.deltas[{index}].kind")
+
+    if finish is None or finish.finish_reason is None:
+        raise _invalid("stream_not_finished", "$.deltas")
+
+    tool_calls: list[ToolCall] = []
+    for call_index in sorted(calls):
+        entry = calls[call_index]
+        if not entry["call_id"] or not entry["name"]:
+            raise _invalid("incomplete_tool_call", f"$.tool_calls[{call_index}]")
+        arguments_json = "".join(entry["fragments"])
+        _strict_arguments_object(arguments_json, f"$.tool_calls[{call_index}].arguments_json")
+        tool_calls.append(ToolCall(call_id=entry["call_id"], name=entry["name"], arguments_json=arguments_json))
+
+    content = "".join(text_parts)
+    result = ModelTurnResult(
+        message=ModelMessage(
+            role="assistant",
+            content=content if content else None,
+            tool_calls=tuple(tool_calls),
+        ),
+        finish_reason=finish.finish_reason,
+    )
+    validate_model_turn_result(result)
+    return result
+
+
+class StreamingInferenceAdapter(Protocol):
+    """可选流式适配器协议（M01）：与 InferenceAdapter 同执行器、同账本。
+
+    ``on_delta`` 是服务层回调，不进入 core 请求；无消费者时调用方仍须返回
+    完整 ``AdapterResponse``。
+    """
+
+    async def invoke_stream(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        on_delta: Any,
+    ) -> AdapterResponse: ...
+
+
+# ---------------------------------------------------------------------------
 # 请求与连接解析（§6.1）
 # ---------------------------------------------------------------------------
 
@@ -152,6 +493,8 @@ class InferenceRequest:
     payload: Mapping[str, Any]
     deadline: float
     run_id: str | None = None
+    # §7.1 末尾兼容字段：旧文本请求不提供 turn（保持既有构造/消费不变）。
+    turn: ModelTurnRequest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +584,8 @@ class AdapterResponse:
     usage: NormalizedLLMUsage | None
     actual_model: str | None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    # §7.1 末尾兼容字段：旧文本响应不提供 turn（旧消费者无需流字段）。
+    turn: ModelTurnResult | None = None
 
 
 class InferenceAdapter(Protocol):
@@ -367,6 +712,8 @@ class ScenarioExecutionResult:
     outputs: tuple[Mapping[str, Any], ...]
     candidate_decisions: tuple[CandidateDecision, ...]
     actual_usage: tuple[NormalizedLLMUsage, ...]
+    # §7.1 turn 协议：完整响应按尝试顺序投影（旧文本路径为空）。
+    turns: tuple[ModelTurnResult, ...] = ()
 
 
 # ---------------------------------------------------------------------------

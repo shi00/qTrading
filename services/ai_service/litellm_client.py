@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -33,9 +33,17 @@ from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
+    FinishReason,
     InferenceRequest,
+    ModelMessage,
+    ModelStreamDelta,
+    ModelTurnResult,
     NormalizedLLMUsage,
     ResolvedConnection,
+    ToolCall,
+    assemble_model_stream,
+    validate_model_turn_request,
+    validate_model_turn_result,
 )
 from services.ai_service.pricing import estimate_cost
 from services.ai_service.token_budget import _estimate_tokens, _get_model_context_window
@@ -875,10 +883,97 @@ class LiteLLMClient:
             TimeoutError: dispatch 前 deadline 已耗尽。
             RuntimeError: litellm 不可用 / keyring 读取失败。
         """
+        request_params, audit_kwargs = await self._prepare_litellm_params(request, resolved_connection, stream=False)
+
+        import services.ai_service as _ai
+        from utils.proxy_manager import ProxyManager
+
+        # 记录范围覆盖 dispatch + 响应解释全段：任一环节失败都回写 failed，避免
+        # 「已出站但无审计」或「失败被记成 sent」。异常解释与结果记录都在同一
+        # try/except 内完成，保证每次尝试恰一条记录（无意图+结果双记）。
+        try:
+            with ProxyManager.litellm_env_context():
+                response = await _ai.acompletion(**request_params)
+
+            # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
+            # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
+            # 拒绝。此处将拒绝信号提炼为 AIContentRefusedError（策略终态，Executor 终止
+            # 整个候选遍历，禁止重试与换候选绕过）。
+            # 覆盖边界（R21 诚实声明）：识别 OpenAI 兼容 chat completions 响应模式的
+            # ``message.refusal`` 与 ``finish_reason == "content_filter"``（OpenAI / Azure
+            # 及 LiteLLM 归一化透传该模式的 provider；SDK 层内容策略异常
+            # ContentPolicyViolationError 由 Executor 异常分类承载）；Anthropic / Gemini
+            # 等原生拒绝块格式（如 Gemini promptFeedback.blockReason）未核验、不伪装
+            # 已覆盖。Retry-After 同理仅承诺数值形态（见 Executor _backoff）。
+            choice = response.choices[0]
+            message = choice.message  # type: ignore[union-attr]
+            content = message.content  # type: ignore[union-attr]
+            refusal = getattr(message, "refusal", None)
+            finish_reason = getattr(choice, "finish_reason", None)
+            if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
+                logger.warning(
+                    "[AIService] UnifiedChain | Content refused by provider policy "
+                    "(refusal=%s, finish_reason=%s) — raising terminal refusal for scenario '%s'",
+                    bool(refusal),
+                    finish_reason,
+                    request.scenario_id,
+                )
+                raise AIContentRefusedError(
+                    Message("llm_err_content_policy"),
+                    detail="Provider content policy refusal extracted from non-streaming response "
+                    "(message.refusal / finish_reason=content_filter).",
+                )
+            usage = normalize_litellm_usage(getattr(response, "usage", None))
+            turn_result = (
+                _turn_result_from_response_message(message, finish_reason) if request.turn is not None else None
+            )
+        except asyncio.CancelledError:
+            await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
+            raise  # R2: 必须传播
+        except Exception as exc:
+            # 内容拒绝经 AppError.to_error_info 直接给出 content_policy 分类码；
+            # 其余按 llm 语境分类（timeout / network / auth_failed / server_error ...）。
+            await _audit_egress_outcome(
+                status="failed",
+                error_category=classify_error(exc, context="llm").get("code"),
+                **audit_kwargs,
+            )
+            raise
+
+        await _audit_egress_outcome(status="sent", **audit_kwargs)
+        return AdapterResponse(
+            content=content,
+            usage=usage,
+            actual_model=getattr(response, "model", None),
+            metadata={},
+            turn=turn_result,
+        )
+
+    async def _prepare_litellm_params(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        *,
+        stream: bool,
+    ) -> tuple[dict, dict]:
+        """统一链单连接出站准备（§6.2 / §7.1）：零重试、同凭据、同预算裁剪。
+
+        完整 turn 请求在凭据解析与网络之前校验结构并拒绝不支持媒体，保持
+        「零出站拒绝」；旧文本请求路径不变。
+        """
         if resolved_connection.adapter_kind != "litellm_chat":
             raise ValueError(
                 f"invoke_single_connection requires adapter_kind='litellm_chat', got {resolved_connection.adapter_kind!r}"
             )
+
+        turn = request.turn
+        if turn is not None:
+            validate_model_turn_request(turn)
+            for message in turn.messages:
+                if message.media_refs:
+                    raise ValueError(
+                        "litellm_chat does not support media_refs in turn protocol; refusing outbound dispatch"
+                    )
 
         # SEC-01（R06-D3）：统一链云出口知情确认门控，置于凭据解析 / litellm 加载 /
         # 网络之前（零 keyring 读、零 import、零出站的最早 fail-closed 点）。异常与
@@ -902,7 +997,7 @@ class LiteLLMClient:
             raise RuntimeError("LiteLLM not installed, cloud LLM features disabled")
 
         loop = asyncio.get_running_loop()
-        remaining = deadline - loop.time()
+        remaining = request.deadline - loop.time()
         if remaining <= 0:
             raise TimeoutError("Deadline exhausted before cloud inference dispatch.")
 
@@ -951,15 +1046,18 @@ class LiteLLMClient:
         # 重核剩余预算，耗尽即拒绝（零出站零审计，与上方 dispatch 前快速失败一致）；
         # httpx 总超时按解析后剩余重新裁剪，禁止沿用解析前计算的 stale 预算
         # （慢凭据不得侵占出站时限，总时限 = 入口冻结 deadline 全程有效）。
-        remaining = deadline - loop.time()
+        remaining = request.deadline - loop.time()
         if remaining <= 0:
             raise TimeoutError("Deadline exhausted after credential resolution, refusing outbound dispatch.")
         timeout_val = min(adapter_timeout, remaining)
 
-        messages = [
-            {"role": "system", "content": str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT))},
-            {"role": "user", "content": str(payload.get("prompt", ""))},
-        ]
+        if turn is not None:
+            messages = [_turn_message_to_openai(message) for message in turn.messages]
+        else:
+            messages = [
+                {"role": "system", "content": str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT))},
+                {"role": "user", "content": str(payload.get("prompt", ""))},
+            ]
         request_params: dict = {
             "messages": messages,
             "model": litellm_model,
@@ -974,11 +1072,30 @@ class LiteLLMClient:
             request_params["api_key"] = api_key
         if "temperature" in payload:
             request_params["temperature"] = float(payload["temperature"])
-        if "max_tokens" in payload:
+        if turn is not None:
+            if turn.tools:
+                request_params["tools"] = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": json.loads(tool.parameters_json),
+                        },
+                    }
+                    for tool in turn.tools
+                ]
+                request_params["tool_choice"] = "auto"
+            request_params["max_tokens"] = turn.max_output_tokens
+        elif "max_tokens" in payload:
             request_params["max_tokens"] = int(payload["max_tokens"])
-        # S4（§8.1）：JSON mode 经 payload 透传（旧链 _chat_completion 同语义）
-        if payload.get("json_mode"):
+        # S4（§8.1）：JSON mode 经 payload 透传（旧链 _chat_completion 同语义）；
+        # turn 协议不使用 JSON mode（工具/最终回复由 finish_reason 表达）。
+        if turn is None and payload.get("json_mode"):
             request_params["response_format"] = {"type": "json_object"}
+        if stream:
+            request_params["stream"] = True
+            request_params["stream_options"] = {"include_usage": True}
 
         # SEC-03（R06-D2 / UIR-F23-003）：统一链云出口接既有 EgressAudit（审计状态栏
         # 消费同一账本，禁止平行账本）。每条记录 = 一次尝试的**最终结果**（意图与结果
@@ -996,51 +1113,92 @@ class LiteLLMClient:
             "payload_size_bytes": sum(len(m.get("content") or "") for m in messages),
             "destination_host": destination_host_from_url(resolved_connection.api_base),
         }
+        return request_params, audit_kwargs
 
+    async def invoke_stream(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        on_delta: Callable[[ModelStreamDelta], Awaitable[None]],
+    ) -> AdapterResponse:
+        """完整 turn 流式单连接推理（§7.1）：分片经 ``on_delta`` 观察，仍由同一
+        适配器返回完整 ``AdapterResponse``。
+
+        未闭合 / 次序错乱 / finish 后仍有分片的流在 ``assemble_model_stream``
+        处成为协议错误，工具调用不会被提前派发；内容拒绝仍提炼为策略终态。
+        """
+        if request.turn is None:
+            raise ValueError("invoke_stream requires request.turn; use invoke for text-only requests")
+
+        request_params, audit_kwargs = await self._prepare_litellm_params(request, resolved_connection, stream=True)
+
+        import services.ai_service as _ai
         from utils.proxy_manager import ProxyManager
 
-        # 记录范围覆盖 dispatch + 响应解释全段：任一环节失败都回写 failed，避免
-        # 「已出站但无审计」或「失败被记成 sent」。异常解释与结果记录都在同一
-        # try/except 内完成，保证每次尝试恰一条记录（无意图+结果双记）。
+        deltas: list[ModelStreamDelta] = []
+        sequence = 0
+        finish_seen = False
+        usage_obj: object | None = None
+        actual_model: str | None = None
+
+        async def _emit(delta: ModelStreamDelta) -> None:
+            deltas.append(delta)
+            await on_delta(delta)
+
         try:
             with ProxyManager.litellm_env_context():
-                response = await _ai.acompletion(**request_params)
-
-            # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
-            # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
-            # 拒绝。此处将拒绝信号提炼为 AIContentRefusedError（策略终态，Executor 终止
-            # 整个候选遍历，禁止重试与换候选绕过）。
-            # 覆盖边界（R21 诚实声明）：识别 OpenAI 兼容 chat completions 响应模式的
-            # ``message.refusal`` 与 ``finish_reason == "content_filter"``（OpenAI / Azure
-            # 及 LiteLLM 归一化透传该模式的 provider；SDK 层内容策略异常
-            # ContentPolicyViolationError 由 Executor 异常分类承载）；Anthropic / Gemini
-            # 等原生拒绝块格式（如 Gemini promptFeedback.blockReason）未核验、不伪装
-            # 已覆盖。Retry-After 同理仅承诺数值形态（见 Executor _backoff）。
-            choice = response.choices[0]
-            message = choice.message  # type: ignore[union-attr]
-            content = message.content  # type: ignore[union-attr]
-            refusal = getattr(message, "refusal", None)
-            finish_reason = getattr(choice, "finish_reason", None)
-            if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
-                logger.warning(
-                    "[AIService] UnifiedChain | Content refused by provider policy "
-                    "(refusal=%s, finish_reason=%s) — raising terminal refusal for scenario '%s'",
-                    bool(refusal),
-                    finish_reason,
-                    request.scenario_id,
-                )
-                raise AIContentRefusedError(
-                    Message("llm_err_content_policy"),
-                    detail="Provider content policy refusal extracted from non-streaming response "
-                    "(message.refusal / finish_reason=content_filter).",
-                )
-            usage = normalize_litellm_usage(getattr(response, "usage", None))
+                stream = await _ai.acompletion(**request_params)
+                async for chunk in stream:
+                    usage_obj = getattr(chunk, "usage", None) or usage_obj
+                    actual_model = getattr(chunk, "model", None) or actual_model
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = getattr(choice, "delta", None)
+                    refusal = getattr(delta, "refusal", None)
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
+                        raise AIContentRefusedError(
+                            Message("llm_err_content_policy"),
+                            detail="Provider content policy refusal extracted from streaming response "
+                            "(delta.refusal / finish_reason=content_filter).",
+                        )
+                    text = getattr(delta, "content", None)
+                    if isinstance(text, str) and text:
+                        sequence += 1
+                        await _emit(ModelStreamDelta(sequence=sequence, kind="text", text=text))
+                    for raw_call in getattr(delta, "tool_calls", None) or []:
+                        function = getattr(raw_call, "function", None)
+                        sequence += 1
+                        await _emit(
+                            ModelStreamDelta(
+                                sequence=sequence,
+                                kind="tool_call",
+                                call_index=getattr(raw_call, "index", None),
+                                call_id=getattr(raw_call, "id", None),
+                                name=getattr(function, "name", None),
+                                arguments_fragment=getattr(function, "arguments", None),
+                            )
+                        )
+                    if finish_reason is not None and not finish_seen:
+                        finish_seen = True
+                        sequence += 1
+                        await _emit(
+                            ModelStreamDelta(
+                                sequence=sequence,
+                                kind="finish",
+                                finish_reason=_map_finish_reason(finish_reason),
+                            )
+                        )
+            usage = normalize_litellm_usage(usage_obj)
         except asyncio.CancelledError:
             await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
             raise  # R2: 必须传播
         except Exception as exc:
-            # 内容拒绝经 AppError.to_error_info 直接给出 content_policy 分类码；
-            # 其余按 llm 语境分类（timeout / network / auth_failed / server_error ...）。
             await _audit_egress_outcome(
                 status="failed",
                 error_category=classify_error(exc, context="llm").get("code"),
@@ -1048,12 +1206,14 @@ class LiteLLMClient:
             )
             raise
 
+        turn_result = assemble_model_stream(deltas)
         await _audit_egress_outcome(status="sent", **audit_kwargs)
         return AdapterResponse(
-            content=content,
+            content=turn_result.message.content,
             usage=usage,
-            actual_model=getattr(response, "model", None),
+            actual_model=actual_model,
             metadata={},
+            turn=turn_result,
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
@@ -1717,3 +1877,59 @@ class LiteLLMClient:
                 "message": error_info["message_key"],
                 "error_code": error_info["code"],
             }
+
+
+# ---------------------------------------------------------------------------
+# 完整 turn 协议映射（§7.1，M01）
+# ---------------------------------------------------------------------------
+
+_FINISH_REASON_MAP: dict[str, FinishReason] = {
+    "stop": "final",
+    "tool_calls": "tool_calls",
+    "length": "length",
+    "content_filter": "refused",
+}
+
+
+def _map_finish_reason(raw: object) -> FinishReason:
+    if not isinstance(raw, str):
+        return "error"
+    return _FINISH_REASON_MAP.get(raw, "error")
+
+
+def _turn_message_to_openai(message: ModelMessage) -> dict[str, Any]:
+    """ModelMessage → OpenAI 兼容 chat message；不引入第二协议出口。"""
+    result: dict[str, Any] = {"role": message.role}
+    if message.content is not None:
+        result["content"] = message.content
+    if message.tool_calls:
+        result["tool_calls"] = [
+            {
+                "id": call.call_id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments_json},
+            }
+            for call in message.tool_calls
+        ]
+    if message.tool_call_id is not None:
+        result["tool_call_id"] = message.tool_call_id
+    return result
+
+
+def _turn_result_from_response_message(message: object, finish_reason: object) -> ModelTurnResult:
+    """非流式 chat completion → 完整 turn 结果（工具调用与 finish_reason 保真）。"""
+    content = getattr(message, "content", None)
+    calls = tuple(
+        ToolCall(
+            call_id=str(getattr(raw, "id", "")),
+            name=str(getattr(getattr(raw, "function", None), "name", "")),
+            arguments_json=str(getattr(getattr(raw, "function", None), "arguments", "") or ""),
+        )
+        for raw in (getattr(message, "tool_calls", None) or ())
+    )
+    result = ModelTurnResult(
+        message=ModelMessage(role="assistant", content=content, tool_calls=calls),
+        finish_reason=_map_finish_reason(finish_reason),
+    )
+    validate_model_turn_result(result)
+    return result

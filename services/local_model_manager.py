@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         AdapterResponse,
         AttemptContext,
         InferenceRequest,
+        ModelTurnRequest,
         ResolvedConnection,
     )
 
@@ -50,6 +51,37 @@ _DEFAULT_INVOKE_MAX_TOKENS = 256
 _DEFAULT_INVOKE_TEMPERATURE = 0.7
 _DEFAULT_INVOKE_SYSTEM_PROMPT = "You are a helpful assistant."
 _DEFAULT_INVOKE_TIMEOUT_S = 90.0
+
+
+def _resolve_local_turn_prompt(turn: ModelTurnRequest) -> tuple[str, str, int]:
+    """本地 GGUF chat 只承接无工具/无媒体的 system+user 文本轮（§7.1）。
+
+    工具调用、媒体引用、assistant/tool 历史均无法由单次文本推理保真表达，
+    在 worker 启停与推理之前拒绝（零出站）；不把 FinBERT 等专用模型当聊天模型。
+    """
+    from core.model_management_types import validate_model_turn_request
+
+    validate_model_turn_request(turn)
+    if turn.tools:
+        raise ValueError("local gguf chat does not support tool calling; refusing outbound dispatch")
+    system_parts: list[str] = []
+    user_parts: list[str] = []
+    for message in turn.messages:
+        if message.media_refs:
+            raise ValueError("local gguf chat does not support media refs; refusing outbound dispatch")
+        if message.role in ("assistant", "tool"):
+            raise ValueError(
+                "local gguf chat cannot faithfully represent assistant/tool history; refusing outbound dispatch"
+            )
+        if message.role == "system" and message.content:
+            system_parts.append(message.content)
+        elif message.role == "user" and message.content:
+            user_parts.append(message.content)
+    return (
+        "\n\n".join(system_parts) or _DEFAULT_INVOKE_SYSTEM_PROMPT,
+        "\n\n".join(user_parts),
+        turn.max_output_tokens,
+    )
 
 
 def _model_tag_of(model_path: str) -> str:
@@ -1244,6 +1276,14 @@ class LocalModelManager:
         if not _HAS_LLAMA_CPP:
             raise ImportError("llama-cpp-python not installed.")
 
+        turn = request.turn
+        system_prompt_override: str | None = None
+        prompt_override: str | None = None
+        max_tokens_override: int | None = None
+        if turn is not None:
+            # §7.1：不支持的工具/媒体能力在出站前拒绝（零 worker 启停、零推理）。
+            system_prompt_override, prompt_override, max_tokens_override = _resolve_local_turn_prompt(turn)
+
         model_path = resolved_connection.model
         # GGUF 魔数校验含文件 open+read（同步 IO），offload 线程池（R16，与
         # scorer _validate_input_files 同口径）。
@@ -1295,13 +1335,25 @@ class LocalModelManager:
                 raise TimeoutError("Deadline exhausted after local worker ready.")
 
             req_id = next(self._req_counter)
-            request_payload = (
-                str(payload.get("prompt", "")),
-                int(payload.get("max_tokens", _DEFAULT_INVOKE_MAX_TOKENS)),
-                float(payload.get("temperature", _DEFAULT_INVOKE_TEMPERATURE)),
-                str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT)),
-                req_id,
-            )
+            if turn is not None:
+                assert system_prompt_override is not None
+                assert prompt_override is not None
+                assert max_tokens_override is not None
+                request_payload = (
+                    prompt_override,
+                    max_tokens_override,
+                    float(payload.get("temperature", _DEFAULT_INVOKE_TEMPERATURE)),
+                    system_prompt_override,
+                    req_id,
+                )
+            else:
+                request_payload = (
+                    str(payload.get("prompt", "")),
+                    int(payload.get("max_tokens", _DEFAULT_INVOKE_MAX_TOKENS)),
+                    float(payload.get("temperature", _DEFAULT_INVOKE_TEMPERATURE)),
+                    str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT)),
+                    req_id,
+                )
             generation = self._worker_generation
             try:
                 output = await self._dispatch_and_collect(
@@ -1329,13 +1381,19 @@ class LocalModelManager:
             # lazy-import: AdapterResponse 仅 TYPE_CHECKING 导入（services.ai_service
             # 组合根反向依赖本模块，顶层运行时导入会成环）；成功路径运行时构造，
             # 判定用例（场景①）首次命中该路径时暴露 NameError，故函数内延迟导入。
-            from core.model_management_types import AdapterResponse
+            from core.model_management_types import AdapterResponse, ModelMessage, ModelTurnResult
 
+            turn_result = (
+                ModelTurnResult(message=ModelMessage(role="assistant", content=output), finish_reason="final")
+                if turn is not None
+                else None
+            )
             return AdapterResponse(
                 content=output,
                 usage=None,
                 actual_model=_model_tag_of(model_path),
                 metadata={},
+                turn=turn_result,
             )
 
     def unload_model(self, *, force: bool = False):
