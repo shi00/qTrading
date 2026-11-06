@@ -40,16 +40,6 @@ TARGET_TITLE = "chore: sync requirements*.txt"
 
 _TOKEN_RE = re.compile(r"'[^']*'|&&|\|\||==|!=|\(|\)|[A-Za-z_][A-Za-z0-9_.\-]*")
 
-_GITHUB_KEYS = (
-    "needs.requirements-drift.outputs.drift",
-    "needs.changes.outputs.code",
-    "github.event.pull_request.head.repo.full_name",
-    "github.event_name",
-    "github.actor",
-    "github.ref",
-    "github.repository",
-)
-
 
 class _ExpressionParser:
     """解析 GitHub Actions ``if`` 用到的布尔/比较子集（不依赖 eval）。"""
