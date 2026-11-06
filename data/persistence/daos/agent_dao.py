@@ -20,6 +20,7 @@ from uuid import UUID
 import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from core.agent_types import (
     AgentRequest,
@@ -68,6 +69,7 @@ from data.persistence.models import (
     AgentInput,
     AgentIntent,
     AgentMessage,
+    AgentModelTurn,
     AgentPath,
     AgentPlanReview,
     AgentResource,
@@ -75,6 +77,7 @@ from data.persistence.models import (
     AgentRetiredKey,
     AgentStreamHead,
     AgentTask,
+    AgentToolCall,
     AgentTotalSlot,
     AgentUse,
 )
@@ -494,6 +497,211 @@ def _request_from_doc(doc: JsonDoc) -> AgentRequest:
     )
     validate_request(request)
     return request
+
+
+_RECEIPT_STATES = ("prepared", "in_flight", "committed", "unknown", "failed")
+# 状态推进只允许单向；unknown/in_flight 不得退回 prepared（§7.3/§4.5-D）。
+_RECEIPT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "prepared": frozenset({"in_flight", "failed"}),
+    "in_flight": frozenset({"committed", "unknown", "failed"}),
+    "unknown": frozenset({"committed", "failed"}),
+    "committed": frozenset({"committed"}),
+    "failed": frozenset({"failed"}),
+}
+
+
+def _receipt_payload(payload: object, field_path: str) -> dict[str, Any]:
+    if isinstance(payload, str):
+        payload = decode_json_doc(payload)
+    if not isinstance(payload, dict):
+        raise AgentValidationError("invalid_type", field_path)
+    return payload
+
+
+def _receipt_state(payload: dict[str, Any], field_path: str) -> str:
+    state = payload.get("state")
+    if state not in _RECEIPT_STATES:
+        raise AgentValidationError("invalid_enum", f"{field_path}.state")
+    return cast(str, state)
+
+
+def _receipt_str(
+    payload: dict[str, Any], name: str, field_path: str, *, optional: bool = False, max_length: int = 256
+) -> str | None:
+    value = payload.get(name)
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value:
+        raise AgentValidationError("invalid_type", f"{field_path}.{name}")
+    if len(value) > max_length:
+        raise AgentValidationError("invalid_length", f"{field_path}.{name}")
+    return value
+
+
+def _receipt_uuid(payload: dict[str, Any], name: str, field_path: str) -> UUID:
+    value = payload.get(name)
+    try:
+        return _as_uuid(value)
+    except (TypeError, ValueError, AttributeError) as error:
+        raise AgentValidationError("invalid_type", f"{field_path}.{name}") from error
+
+
+def _receipt_positive_int(payload: dict[str, Any], name: str, field_path: str) -> int:
+    value = payload.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AgentValidationError("invalid_type", f"{field_path}.{name}")
+    return value
+
+
+def _receipt_digest(payload: dict[str, Any], name: str, field_path: str) -> str:
+    value = payload.get(name)
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise AgentValidationError("invalid_digest", f"{field_path}.{name}")
+    return value
+
+
+def _receipt_object(payload: dict[str, Any], name: str, field_path: str) -> dict[str, Any]:
+    value = payload.get(name)
+    if not isinstance(value, dict) or not value:
+        raise AgentValidationError("invalid_type", f"{field_path}.{name}")
+    return value
+
+
+def _receipt_committed_fields(
+    payload: dict[str, Any], field_path: str
+) -> tuple[dict[str, Any] | None, list[Any], str | None]:
+    """committed 必须携完整响应；结果摘要缺省按响应内容计算，绝不默认成功。"""
+    response = payload.get("response")
+    ledger_refs = payload.get("ledger_refs", [])
+    result_digest = payload.get("result_digest")
+    if not isinstance(response, dict):
+        raise AgentValidationError("invalid_type", f"{field_path}.response")
+    if not isinstance(ledger_refs, list):
+        raise AgentValidationError("invalid_type", f"{field_path}.ledger_refs")
+    if result_digest is None:
+        return response, ledger_refs, _digest(json_doc({"response": response}))
+    return response, ledger_refs, _receipt_digest(payload, "result_digest", field_path)
+
+
+def _assert_receipt_transition(previous: str, target: str) -> None:
+    if target not in _RECEIPT_TRANSITIONS[previous]:
+        raise AgentValidationError("state_conflict", "state")
+
+
+def _model_turn_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    state = _receipt_state(payload, "model_turn")
+    purpose = payload.get("purpose")
+    if purpose not in ("main", "leaf", "summary"):
+        raise AgentValidationError("invalid_enum", "model_turn.purpose")
+    response: dict[str, Any] | None = None
+    ledger_refs: list[Any] = []
+    result_digest: str | None = None
+    if state == "committed":
+        response, ledger_refs, result_digest = _receipt_committed_fields(payload, "model_turn")
+    else:
+        raw_response = payload.get("response")
+        if raw_response is not None and not isinstance(raw_response, dict):
+            raise AgentValidationError("invalid_type", "model_turn.response")
+        raw_ledger = payload.get("ledger_refs", [])
+        if not isinstance(raw_ledger, list):
+            raise AgentValidationError("invalid_type", "model_turn.ledger_refs")
+        ledger_refs = raw_ledger
+        if payload.get("result_digest") is not None:
+            result_digest = _receipt_digest(payload, "result_digest", "model_turn")
+    return {
+        "state": state,
+        "execution_id": _receipt_uuid(payload, "execution_id", "model_turn"),
+        "attempt_id": _receipt_uuid(payload, "attempt_id", "model_turn"),
+        "turn_number": _receipt_positive_int(payload, "turn_number", "model_turn"),
+        "native_owner_id": _receipt_str(payload, "native_owner_id", "model_turn"),
+        "native_task_id": _receipt_str(payload, "native_task_id", "model_turn", optional=True),
+        "native_run_id": _receipt_str(payload, "native_run_id", "model_turn"),
+        "native_event_ref": _receipt_str(payload, "native_event_ref", "model_turn", optional=True),
+        "request_position": _receipt_positive_int(payload, "request_position", "model_turn"),
+        "purpose": purpose,
+        "input_digest": _receipt_digest(payload, "input_digest", "model_turn"),
+        "response": response,
+        "ledger_refs": ledger_refs,
+        "result_digest": result_digest,
+    }
+
+
+def _tool_call_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    state = _receipt_state(payload, "tool_call")
+    response: dict[str, Any] | None = None
+    result_digest: str | None = None
+    if state == "committed":
+        response, _, result_digest = _receipt_committed_fields(payload, "tool_call")
+    else:
+        raw_response = payload.get("response")
+        if raw_response is not None and not isinstance(raw_response, dict):
+            raise AgentValidationError("invalid_type", "tool_call.response")
+        if payload.get("result_digest") is not None:
+            result_digest = _receipt_digest(payload, "result_digest", "tool_call")
+    return {
+        "state": state,
+        "execution_id": _receipt_uuid(payload, "execution_id", "tool_call"),
+        "attempt_id": _receipt_uuid(payload, "attempt_id", "tool_call"),
+        "native_owner_id": _receipt_str(payload, "native_owner_id", "tool_call"),
+        "native_task_id": _receipt_str(payload, "native_task_id", "tool_call", optional=True),
+        "native_run_id": _receipt_str(payload, "native_run_id", "tool_call"),
+        "native_event_ref": _receipt_str(payload, "native_event_ref", "tool_call", optional=True),
+        "tool_call_id": _receipt_str(payload, "tool_call_id", "tool_call"),
+        "tool_ref": _receipt_object(payload, "tool_ref", "tool_call"),
+        "input_digest": _receipt_digest(payload, "input_digest", "tool_call"),
+        "response": response,
+        "result_digest": result_digest,
+    }
+
+
+def _model_turn_doc(row: AgentModelTurn) -> JsonDoc:
+    retired = row.retired_at is not None
+    return json_doc(
+        {
+            "invocation_id": row.invocation_id,
+            "execution_id": row.execution_id,
+            "attempt_id": row.attempt_id,
+            "turn_number": row.turn_number,
+            "native_owner_id": row.native_owner_id,
+            "native_task_id": row.native_task_id,
+            "native_run_id": row.native_run_id,
+            "native_event_ref": row.native_event_ref,
+            "request_position": row.request_position,
+            "purpose": row.purpose,
+            "input_digest": row.input_digest,
+            "state": "retired" if retired else row.state,
+            "response": None if retired else row.response,
+            "ledger_refs": row.ledger_refs,
+            "result_digest": row.result_digest,
+            "retired_at": row.retired_at.isoformat() if retired else None,
+        }
+    )
+
+
+def _tool_call_doc(row: AgentToolCall) -> JsonDoc:
+    retired = row.retired_at is not None
+    return json_doc(
+        {
+            "effect_key": row.effect_key,
+            "execution_id": row.execution_id,
+            "attempt_id": row.attempt_id,
+            "native_owner_id": row.native_owner_id,
+            "native_task_id": row.native_task_id,
+            "native_run_id": row.native_run_id,
+            "native_event_ref": row.native_event_ref,
+            "tool_call_id": row.tool_call_id,
+            "tool_ref": row.tool_ref,
+            "input_digest": row.input_digest,
+            "state": "retired" if retired else row.state,
+            "response": None if retired else row.response,
+            "result_digest": row.result_digest,
+            "retired_at": row.retired_at.isoformat() if retired else None,
+        }
+    )
 
 
 class AgentDao(BaseDao):
@@ -2446,3 +2654,123 @@ class AgentDao(BaseDao):
                 ),
                 control=None,
             )
+
+    # ------------------------------------------------------------------
+    # D04：模型回合与工具效果回执（§7.3/§4.5-D）
+    # ------------------------------------------------------------------
+
+    async def save_model_turn(self, invocation_id: str, expected_state: str, payload: JsonDoc) -> None:
+        """以 CAS 保存模型回合回执；同 invocation 同输入只复用，异输入冲突。
+
+        ``expected_state`` 是前置状态，payload.state 是目标状态。首次落库只允许
+        prepared；in_flight/unknown 不得退回 prepared，committed 重放要求结果摘要一致。
+        """
+        if not isinstance(invocation_id, str) or not invocation_id or len(invocation_id) > 256:
+            raise AgentValidationError("invalid_type", "invocation_id")
+        if expected_state not in _RECEIPT_STATES:
+            raise AgentValidationError("invalid_enum", "expected_state")
+        fields = _model_turn_fields(_receipt_payload(payload, "model_turn"))
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(sa.select(AgentModelTurn).where(AgentModelTurn.invocation_id == invocation_id))
+            ).first()
+            if row is None:
+                if expected_state != "prepared" or fields["state"] != "prepared":
+                    raise AgentValidationError("state_conflict", "state")
+                clash = (
+                    await conn.execute(
+                        sa.select(AgentModelTurn.invocation_id).where(
+                            AgentModelTurn.native_owner_id == fields["native_owner_id"],
+                            AgentModelTurn.native_run_id == fields["native_run_id"],
+                            AgentModelTurn.purpose == fields["purpose"],
+                            AgentModelTurn.request_position == fields["request_position"],
+                        )
+                    )
+                ).first()
+                if clash is not None:
+                    raise AgentValidationError("identity_conflict", "request_position")
+                try:
+                    await conn.execute(sa.insert(AgentModelTurn).values(invocation_id=invocation_id, **fields))
+                except IntegrityError as error:
+                    raise AgentValidationError("identity_conflict", "request_position") from error
+                return
+            for name in (
+                "execution_id",
+                "attempt_id",
+                "turn_number",
+                "native_owner_id",
+                "native_task_id",
+                "native_run_id",
+                "purpose",
+                "request_position",
+                "input_digest",
+            ):
+                if getattr(row, name) != fields[name]:
+                    raise AgentValidationError("identity_conflict", name)
+            if row.retired_at is not None:
+                raise AgentValidationError("retired", "invocation_id")
+            _assert_receipt_transition(row.state, fields["state"])
+            if row.state == fields["state"]:
+                if fields["state"] == "committed" and row.result_digest != fields["result_digest"]:
+                    raise AgentValidationError("identity_conflict", "result_digest")
+                return
+            await conn.execute(
+                sa.update(AgentModelTurn).where(AgentModelTurn.invocation_id == invocation_id).values(**fields)
+            )
+
+    async def read_model_turn(self, invocation_id: str) -> JsonDoc | None:
+        """无记录返回 None；unknown 与 retired 分别由 state 明确表达，不默认成功。"""
+        if not isinstance(invocation_id, str) or not invocation_id:
+            raise AgentValidationError("invalid_type", "invocation_id")
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(sa.select(AgentModelTurn).where(AgentModelTurn.invocation_id == invocation_id))
+            ).first()
+            return None if row is None else _model_turn_doc(row)
+
+    async def save_tool_call(self, effect_key: str, expected_state: str, payload: JsonDoc) -> None:
+        """以 effect_key 保存工具效果回执；同 key 异输入拒绝，unknown 不得降为未执行。"""
+        if not isinstance(effect_key, str) or not effect_key or len(effect_key) > 256:
+            raise AgentValidationError("invalid_type", "effect_key")
+        if expected_state not in _RECEIPT_STATES:
+            raise AgentValidationError("invalid_enum", "expected_state")
+        fields = _tool_call_fields(_receipt_payload(payload, "tool_call"))
+        async with self._guarded_begin() as conn:
+            row = (await conn.execute(sa.select(AgentToolCall).where(AgentToolCall.effect_key == effect_key))).first()
+            if row is None:
+                if expected_state != "prepared" or fields["state"] != "prepared":
+                    raise AgentValidationError("state_conflict", "state")
+                try:
+                    await conn.execute(sa.insert(AgentToolCall).values(effect_key=effect_key, **fields))
+                except IntegrityError as error:
+                    raise AgentValidationError("identity_conflict", "effect_key") from error
+                return
+            for name in (
+                "execution_id",
+                "attempt_id",
+                "native_owner_id",
+                "native_task_id",
+                "native_run_id",
+                "tool_call_id",
+                "input_digest",
+            ):
+                if getattr(row, name) != fields[name]:
+                    raise AgentValidationError("identity_conflict", name)
+            if row.tool_ref != fields["tool_ref"]:
+                raise AgentValidationError("identity_conflict", "tool_ref")
+            if row.retired_at is not None:
+                raise AgentValidationError("retired", "effect_key")
+            _assert_receipt_transition(row.state, fields["state"])
+            if row.state == fields["state"]:
+                if fields["state"] == "committed" and row.result_digest != fields["result_digest"]:
+                    raise AgentValidationError("identity_conflict", "result_digest")
+                return
+            await conn.execute(sa.update(AgentToolCall).where(AgentToolCall.effect_key == effect_key).values(**fields))
+
+    async def read_tool_call(self, effect_key: str) -> JsonDoc | None:
+        """无记录返回 None；committed 响应可重放，unknown/retired 不返回默认成功。"""
+        if not isinstance(effect_key, str) or not effect_key:
+            raise AgentValidationError("invalid_type", "effect_key")
+        async with self._guarded_begin() as conn:
+            row = (await conn.execute(sa.select(AgentToolCall).where(AgentToolCall.effect_key == effect_key))).first()
+            return None if row is None else _tool_call_doc(row)
