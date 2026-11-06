@@ -2830,13 +2830,16 @@ jobs:
           Invoke-InstallerSmoke "scripts/installer_smoke_uninstall.ps1"
           # 升级路径：安装最近一个已发布版本 → 运行期写入已提交哨兵 → 覆盖安装候选版本
           # → 读回数据一致性（installer_smoke_upgrade.ps1 的判据，不以目录非空代表数据保留）.
-          # 基线需排除当前 ref：同一 tag 重跑时避免「自己升自己」的空验证.
+          # 基线必须限定为应用版本 Release：同仓库还发布 sidecar-v* / finbert-gguf-v* /
+          # corpus-* / ci-wheels 等独立资产 Release，直接取「最近一个 release」会命中它们，
+          # 再拼成 v<tag> 下载必然 404（表现为与代码无关的升级 smoke 误报失败）.
+          # 同时排除当前 ref，避免同一 tag 重跑时「自己升自己」的空验证.
           $currentRef = "${{ github.ref_name }}"
-          $baselineTag = gh release list --exclude-drafts --exclude-pre-releases --limit 20 --json tagName --jq '.[].tagName' |
-            Where-Object { $_ -ne $currentRef } |
-            Select-Object -First 1
+          $appTags = gh release list --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName' |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
+          $baselineTag = $appTags | Where-Object { $_ -ne $currentRef } | Select-Object -First 1
           if (-not $baselineTag) {
-            Write-Error "No published release available as upgrade baseline (excluding $currentRef)"
+            Write-Error "No published application release (v<major>.<minor>.<patch>) available as upgrade baseline"
             exit 1
           }
           $baselineVersion = $baselineTag.TrimStart('v')
