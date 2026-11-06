@@ -123,8 +123,17 @@ jobs:
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
           E2E_TIMEOUT_MULTIPLIER: "2.0"
+        # -o addopts="" -p no:xdist 串行执行（对齐 ci_cd.yml embedded-tests 的 E2E 步骤）：
+        # 清空 pyproject.toml 的 addopts="-n auto --dist=loadgroup" 并禁用 xdist，避免 3 个
+        # E2E 用例被分发到 3 个 worker 并发启动 3 个 Flet app + 嵌入式 PG sidecar。sidecar 的
+        # run::pick_free_port 与 E2E 的 _free_port 都是「探测后释放再绑定」，并发启动时命中
+        # 端口竞态（Linux errno 98）会让 app 进程在 sidecar 启动阶段退出
+        # （2026-11-05 run 42008447714：gw0/gw1/gw2 三个 app 全部 exit）。
         run: |
-          python -m pytest tests/unit/ui/test_anchor.py tests/e2e/test_screener_anchor_smoke.py -v --tb=short
+          python -m pytest \
+            -o addopts="" -p no:xdist -p no:randomly \
+            tests/unit/ui/test_anchor.py tests/e2e/test_screener_anchor_smoke.py \
+            -v --tb=short --timeout=600 --timeout-method=thread
 
       - name: Run anchor E2E (navigation)
         env:
@@ -134,8 +143,32 @@ jobs:
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
           E2E_TIMEOUT_MULTIPLIER: "2.0"
+        # 同上：串行执行，避免 2 个用例并发启动 2 个 Flet app + sidecar 命中同一端口竞态。
         run: |
-          python -m pytest tests/e2e/test_navigation.py -v --tb=short
+          python -m pytest \
+            -o addopts="" -p no:xdist -p no:randomly \
+            tests/e2e/test_navigation.py \
+            -v --tb=short --timeout=600 --timeout-method=thread
+
+      # 失败取证：app 子进程 stdout/stderr 只落在 logs/e2e-flet-app.log，job 日志里看不到
+      # 退出原因（run 42008447714 的 3 个 setup error 因此无根因证据）。上传前按 R9 脱敏，
+      # 与 ci_cd.yml embedded-tests 的工件处理保持一致。
+      - name: Sanitize E2E diagnostics
+        if: always()
+        shell: bash
+        run: |
+          python scripts/sanitize_artifacts.py logs/e2e-flet-app.log logs/main_trace.log
+
+      - name: Upload E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: flet-nightly-e2e-diagnostics
+          path: |
+            logs/e2e-flet-app.log
+            logs/main_trace.log
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Create issue on failure
         if: failure()
