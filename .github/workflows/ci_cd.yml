@@ -463,10 +463,14 @@ jobs:
           # --max-worker-restart=0 prevents xdist from masking the deadlock by restarting workers.
           # --capture=no ensures faulthandler.dump_traceback() output reaches GitHub Actions logs.
           # step-level timeout-minutes=10 fails fast if thread method can't interrupt (e.g., C extension deadlock).
+          # --cov-append 把集成阶段数据追加到单测的 .coverage 后，必须同时以同名 coverage.xml/coverage.json
+          # 重新生成最终报告：否则下游 per-file / diff coverage / Codecov / artifact 会消费单测阶段的陈旧报告，
+          # 与 append 后的真实覆盖率不一致（CI-F03）。同名覆盖写入保证下游无需改动消费路径。
           python -m pytest tests/integration/ -n auto --max-worker-restart=0 \
             --timeout=120 --timeout-method=thread \
             -v --tb=long --capture=no \
-            --cov --cov-report=term-missing --cov-append --junitxml=junit-integration.xml
+            --cov --cov-report=term-missing --cov-report=xml --cov-report=json \
+            --cov-append --junitxml=junit-integration.xml
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
