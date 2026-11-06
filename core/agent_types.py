@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, is_dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn, cast
 
 JsonDoc = str
 
@@ -462,7 +462,7 @@ class AgentOperationError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _fail(code: str, field_path: str) -> None:
+def _fail(code: str, field_path: str) -> NoReturn:
     raise AgentValidationError(code, field_path)
 
 
@@ -855,7 +855,11 @@ def _problem_value(value: object, field_path: str, *, read_problem: bool = False
     _keys(problem, {"code", "message_key", "params", "related_id"}, field_path)
     _text(problem, "code", field_path)
     _text(problem, "message_key", field_path)
-    params = _obj(problem["params"], f"{field_path}.params")
+    params = problem["params"]
+    if not isinstance(params, str):
+        _fail("invalid_type", f"{field_path}.params")
+    params_obj = _obj(decode_json_doc(params), f"{field_path}.params")
+    params = params_obj
     if read_problem:
         _keys(params, {"field_issues", "expected_revision", "actual_revision"}, f"{field_path}.params")
         issues = _array(params, "field_issues", f"{field_path}.params")
@@ -1778,7 +1782,12 @@ def _acyclic(node_map: dict[uuid.UUID, dict[str, object]], field_path: str) -> N
         if state[node_id] == 2:
             return
         state[node_id] = 1
-        for dep in node_map[node_id].get("_resolved_deps", []):
+        resolved = node_map[node_id].get("_resolved_deps")
+        if not isinstance(resolved, list):
+            _fail("invalid_graph", f"{field_path}.nodes")
+        for dep in resolved:
+            if not isinstance(dep, uuid.UUID):
+                _fail("invalid_graph", f"{field_path}.nodes")
             _visit(dep)
         state[node_id] = 2
 
@@ -2023,10 +2032,19 @@ def _claim_ids(value: object, field_path: str) -> list[str]:
     return ids
 
 
-def _common(content: dict[str, object], field_path: str) -> dict[str, object]:
+def _common(content: dict[str, object], field_path: str, *, allow: frozenset[str] = frozenset()) -> dict[str, object]:
     _keys(
         content,
-        {"schema_version", "as_of", "facts", "interpretations", "uncertainties", "limitations", "evidence"},
+        {
+            "schema_version",
+            "as_of",
+            "facts",
+            "interpretations",
+            "uncertainties",
+            "limitations",
+            "evidence",
+        }
+        | allow,
         field_path,
     )
     _int(content, "schema_version", field_path, minimum=1, maximum=1)
@@ -2063,12 +2081,24 @@ def _common(content: dict[str, object], field_path: str) -> dict[str, object]:
     return content
 
 
+def _evidence_key_set(content: dict[str, object]) -> set[tuple[object, object, object, object]]:
+    value = content.get("_evidence_keys")
+    if isinstance(value, set):
+        return cast("set[tuple[object, object, object, object]]", value)
+    return set()
+
+
 def _check_evidence_refs(
     refs: object, field_path: str, evidence_keys: set[tuple[object, object, object, object]]
 ) -> None:
     for index, item in enumerate(_obj_array(refs, field_path)):
         key = _evidence_key(item, f"{field_path}[{index}]")
-        pair = (key["claim_id"], key["resource_id"], key["revision"], key["locator"])
+        pair = (
+            key["claim_id"],
+            _uuid_value(key["resource_id"], f"{field_path}[{index}].resource_id"),
+            key["revision"],
+            key["locator"],
+        )
         if pair not in evidence_keys:
             _fail("reference_conflict", f"{field_path}[{index}]")
 
@@ -2168,11 +2198,11 @@ def _comparison_rows(content: dict[str, object], field_path: str) -> None:
             else:
                 _compare_decimal(ratio, computed, f"{path}.cash_profit_ratio")
             _check_evidence_refs(
-                formula_obj["evidence_refs"], f"{formula_path}.evidence_refs", content.get("_evidence_keys", set())
+                formula_obj["evidence_refs"], f"{formula_path}.evidence_refs", _evidence_key_set(content)
             )
         if seen_fields != {"net_margin", "cash_profit_ratio"}:
             _fail("missing_field", f"{path}.formulas")
-        _check_evidence_refs(item["evidence_refs"], f"{path}.evidence_refs", content.get("_evidence_keys", set()))
+        _check_evidence_refs(item["evidence_refs"], f"{path}.evidence_refs", _evidence_key_set(content))
         _text_array(item, "limitations", path)
 
 
@@ -2310,7 +2340,7 @@ def _news_body(content: dict[str, object], field_path: str) -> None:
         _enum(item["fact_or_opinion"], ("fact", "opinion", "unknown"), f"{path}.fact_or_opinion")
         _text_array(item, "affected_objects", path)
         _text(item, "description", path)
-        _check_evidence_refs(item["evidence_refs"], f"{path}.evidence_refs", content.get("_evidence_keys", set()))
+        _check_evidence_refs(item["evidence_refs"], f"{path}.evidence_refs", _evidence_key_set(content))
         _text_array(item, "limitations", path)
     for index, excluded in enumerate(_array(content, "excluded_sources", field_path)):
         path = f"{field_path}.excluded_sources[{index}]"
@@ -2399,7 +2429,7 @@ def _dated_update_body(content: dict[str, object], field_path: str) -> None:
         path = f"{field_path}.added_evidence[{index}]"
         evidence = _evidence(item, path)
         pair = (evidence["claim_id"], evidence["resource_id"], evidence["revision"], evidence["locator"])
-        if pair not in content.get("_evidence_keys", set()):
+        if pair not in _evidence_key_set(content):
             _fail("reference_conflict", path)
     changed = [
         _claim_change(item, f"{field_path}.changed_claims[{index}]")
@@ -2524,11 +2554,34 @@ def _stock_result(value: object, field_path: str) -> None:
     _nullable_text(result, "summary", field_path)
 
 
+_ARTIFACT_EXTRA_KEYS: dict[str, frozenset[str]] = {
+    "answer/1": frozenset({"answer"}),
+    "stock_analysis/1": frozenset({"stock_result"}),
+    "comparison/1": frozenset({"rows"}),
+    "candidates/1": frozenset({"pool_ref", "conditions", "coverage", "matched", "not_matched", "unverified"}),
+    "news_digest/1": frozenset({"events", "excluded_sources"}),
+    "review/1": frozenset({"challenged_claim", "original_artifact_ref", "checks", "verdict", "changes"}),
+    "dated_update/1": frozenset(
+        {"old_as_of", "new_as_of", "old_artifact_ref", "added_evidence", "changed_claims", "unchanged_claims"}
+    ),
+    "backtest_explanation/1": frozenset(
+        {
+            "backtest_refs",
+            "config_snapshots",
+            "comparability",
+            "trade_assumptions",
+            "data_warnings",
+            "attribution_limits",
+        }
+    ),
+}
+
+
 def validate_artifact(output_contract: str, doc: JsonDoc) -> None:
     if output_contract not in OUTPUT_CONTRACTS:
         _fail("unsupported_schema", "output_contract")
     content = decode_json_doc(doc)
-    content_obj = _common(_obj(content, "content"), "content")
+    content_obj = _common(_obj(content, "content"), "content", allow=_ARTIFACT_EXTRA_KEYS[output_contract])
     if output_contract != "answer/1" and content_obj["as_of"] is None:
         _fail("date_required", "content.as_of")
     if output_contract == "answer/1":
