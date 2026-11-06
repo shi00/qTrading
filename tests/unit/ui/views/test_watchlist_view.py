@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
@@ -1720,7 +1721,7 @@ class TestWatchlistViewReloadButton:
 
         assert page.run_task.call_count == 1
         scheduled = page.run_task.call_args.args[0]
-        assert asyncio.iscoroutinefunction(scheduled)
+        assert inspect.iscoroutinefunction(scheduled)
         assert getattr(scheduled, "__name__", "") == "_on_refresh"
         # 按钮不另行调用 VM：仅由被调度的刷新命令负责一次 load_watchlist
         assert ("load_watchlist", {}) not in mock_watchlist_vm.method_calls
@@ -1741,7 +1742,7 @@ class TestWatchlistViewReloadButton:
         indicator = next((c for c in _collect_all_controls(result) if isinstance(c, ft.RefreshIndicator)), None)
         assert indicator is not None
         assert indicator.tooltip == "watchlist_reload_tooltip"
-        assert asyncio.iscoroutinefunction(indicator.on_refresh)
+        assert inspect.iscoroutinefunction(indicator.on_refresh)
         # 手势内容必须可滚动，否则下拉手势无法触发
         assert isinstance(indicator.content, ft.Column)
         assert indicator.content.scroll == ft.ScrollMode.AUTO
