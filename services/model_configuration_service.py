@@ -36,12 +36,12 @@ from core.model_management_types import (
 )
 from data.persistence.models import AppState
 from utils import config_handler as cfg
-from utils.config_models import ModelManagementSaveResult
+from utils.config_models import EGRESS_PURPOSES, ModelManagementSaveResult
 from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
-_PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "synthetic_test")
+_PURPOSES = EGRESS_PURPOSES
 
 # legacy 封口月份格式（S6 D4）：与 LegacySealConfig.month 正则一致，服务侧先行校验给出精确错误
 _MONTH_SEAL_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -316,10 +316,18 @@ class ModelConfigurationService:
         scope_version: int,
         expected_revision: int,
         operation_id: str,
+        *,
+        data_scope_digest: str | None = None,
     ) -> ConfigurationSaveOutcome:
-        """目标级外发授权 grant（MM-01）：仅追加安全子域，普通草稿路径不可及。"""
+        """目标级外发授权 grant（MM-01）：仅追加安全子域，普通草稿路径不可及。
+
+        §9.7：``data_scope_digest`` 为研究用途的完整数据范围；旧公开 grant 不传
+        （None），只能匹配原公开范围，不因新增字段扩大私人附件/摘要/MCP 许可。
+        """
         if purpose not in _PURPOSES:
             raise ValueError(f"非法外发用途: {purpose}")
+        if data_scope_digest is not None and not re.fullmatch("[0-9a-f]{64}", data_scope_digest):
+            raise ValueError("data_scope_digest 必须是 64 位小写十六进制摘要")
 
         def _grant() -> ModelManagementSaveResult:
             fresh = cfg.ConfigHandler.read_model_management_fresh()
@@ -333,6 +341,7 @@ class ModelConfigurationService:
                     "target_fingerprint": target_fingerprint,
                     "purpose": purpose,
                     "scope_version": scope_version,
+                    "data_scope_digest": data_scope_digest,
                     "confirmed_at": _utc_now_iso(),
                     "revoked_at": None,
                 }
@@ -754,6 +763,7 @@ class ModelConfigurationService:
         attempt_id: str,
         *,
         requires_egress_grant: bool = True,
+        data_scope_digest: str | None = None,
     ) -> AttemptPermit:
         """逐次安全许可（MM-01/MM-02）：新鲜读取 security_state，撤销 / 缺失即拒绝。
 
@@ -795,13 +805,17 @@ class ModelConfigurationService:
                 if not target_fingerprint:
                     raise PermissionError(f"外发目标缺失（target_fingerprint 为空），拒绝发放许可: {connection_id}")
 
-                # 目标级 grant：同连接、同目标、同用途、当前 scope_version 且未撤销（MM-01）
+                # 目标级 grant：同连接、同目标、同用途、当前 scope_version 且未撤销（MM-01）。
+                # §9.7：请求声明完整数据范围时，grant 必须携带同一 digest；旧 grant 的
+                # data_scope_digest=None 只适用于原公开范围，不得扩大私人/研究范围。
                 matched = any(
                     g["connection_id"] == connection_id
                     and g["target_fingerprint"] == target_fingerprint
                     and g["purpose"] == purpose
                     and g["scope_version"] == scope_version
                     and g["revoked_at"] is None
+                    and (data_scope_digest is None or g.get("data_scope_digest") == data_scope_digest)
+                    and (data_scope_digest is not None or g.get("data_scope_digest") is None)
                     for g in security["grants"]
                 )
                 if not matched:

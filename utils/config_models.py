@@ -119,7 +119,7 @@ class ProviderCredential(BaseModel):
 # ==========================================================================
 
 SCENARIO_IDS = ("news_annotation", "stock_analysis", "news_risk")
-EGRESS_PURPOSES = (*SCENARIO_IDS, "synthetic_test")
+EGRESS_PURPOSES = (*SCENARIO_IDS, "synthetic_test", "agent_research")
 ADAPTER_KINDS = ("litellm_chat", "gguf_chat", "gguf_sentiment")
 BILLING_MODES = ("usage_only", "estimate_cost")
 PRICING_UNITS = ("llm_tokens", "encoder_input_tokens")
@@ -291,8 +291,11 @@ class EgressGrantConfig(BaseModel):
     grant_id: str = Field(min_length=1)
     connection_id: str = Field(min_length=1)
     target_fingerprint: str = Field(min_length=1)
-    purpose: Literal["news_annotation", "stock_analysis", "news_risk", "synthetic_test"]
+    purpose: Literal["news_annotation", "stock_analysis", "news_risk", "synthetic_test", "agent_research"]
     scope_version: int = Field(ge=1)
+    # §9.7：研究用途的完整数据范围 digest；旧公开 grant 缺省 None，只适用于其
+    # 原合法公开范围，不得据此扩大为私人附件/摘要/MCP 结果许可。
+    data_scope_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     confirmed_at: str
     revoked_at: str | None = None
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 from core.agent_types import (
@@ -37,8 +37,12 @@ from core.agent_types import (
     request_digest,
     validate_request,
 )
+from core.model_management_types import ConfigurationSaveOutcome
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.agent.permissions import ExecutionPermission
+
+if TYPE_CHECKING:
+    from services.model_configuration_service import ModelConfigurationService
 
 _READ_FAILED = "source_unavailable"
 
@@ -116,10 +120,19 @@ def _invalid_request(error: AgentValidationError) -> AgentOperationError:
 class AgentService:
     """绑定当前可信 domain 的服务实例（§5.2）。"""
 
-    def __init__(self, *, domain: str, dao: AgentDaoProtocol, permission: ExecutionPermission | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        domain: str,
+        dao: AgentDaoProtocol,
+        permission: ExecutionPermission | None = None,
+        model_config_service: ModelConfigurationService | None = None,
+    ) -> None:
         self._domain = domain
         self._dao = dao
         self._permission = permission or ExecutionPermission()
+        # §9.7：授权只复用既有 ModelConfigurationService，不新建 grant 账本。
+        self._model_config_service = model_config_service
 
     # ------------------------------------------------------------------
     # 写入回执：参数先验证，再进 DAO；status 原样返回
@@ -251,6 +264,44 @@ class AgentService:
         if not 1 <= limit <= 200:
             raise AgentOperationError(_problem("invalid_request", field_issues=(("limit", "invalid_value"),)))
         return await self._read(lambda: self._dao.list_queue(self._domain, cursor=cursor, limit=limit))
+
+    # ------------------------------------------------------------------
+    # 授权读 / 撤（§9.7）：复用既有 ModelConfigurationService，不建第二账本
+    # ------------------------------------------------------------------
+
+    def _model_config(self) -> ModelConfigurationService:
+        if self._model_config_service is None:
+            raise RuntimeError("AgentService 未注入 ModelConfigurationService，不能读取或撤销授权")
+        return self._model_config_service
+
+    async def read_authorizations(self) -> dict[str, Any]:
+        """新鲜读取安全 grant；读取失败原样传播，绝不降级为空授权列表。"""
+        snapshot = await self._model_config().get_snapshot()
+        return {
+            "config_revision": snapshot.config_revision,
+            "security_revision": snapshot.security_revision,
+            "scope_version": snapshot.security_scope_version,
+            "grants": [
+                {
+                    "grant_id": grant.get("grant_id"),
+                    "connection_id": grant.get("connection_id"),
+                    "target_fingerprint": grant.get("target_fingerprint"),
+                    "purpose": grant.get("purpose"),
+                    "scope_version": grant.get("scope_version"),
+                    "revoked_at": grant.get("revoked_at"),
+                    "data_scope_digest": grant.get("data_scope_digest"),
+                }
+                for grant in snapshot.security_grants
+            ],
+            # 决定-grant 关联由 N03 落地；此处不伪造已关联事实。
+            "agent_scopes": [],
+            "problem": None,
+        }
+
+    async def revoke_authorization(
+        self, grant_id: str, expected_revision: int, operation_id: str
+    ) -> ConfigurationSaveOutcome:
+        return await self._model_config().revoke_egress(grant_id, expected_revision, operation_id)
 
     async def close(self) -> None:
         return None
