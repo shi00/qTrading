@@ -8,15 +8,22 @@
 纯渲染函数（无 page 挂载），断言解耦 I18n 语言状态（期望值用同一 I18n.get 调用生成）。
 """
 
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import flet as ft
 import pytest
 
 from ui.i18n import I18n
+from ui.testing.anchor import _e2e_enabled
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors
-from ui.viewmodels.data_source_view_model import HealthResultRow
-from ui.views.settings_tabs.data_source_tab import _build_health_summary_content
+from ui.viewmodels.data_source_view_model import DataSourceState, HealthResultRow
+from ui.views.settings_tabs.data_source_tab import (
+    _build_health_summary_content,
+    _build_secondary_progress_bar,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -70,3 +77,44 @@ class TestHealthSummaryQualityRowE2E:
         values = [t for t, _ in _collect_texts(col)]
         expected = f"{I18n.get('ds_data_quality_tier')}: {I18n.get('ds_not_checked')}"
         assert expected in values
+
+
+@pytest.fixture(autouse=True)
+def _clear_anchor_cache():
+    """每个测试前后清理 anchored() 的 E2E 模式缓存。"""
+    _e2e_enabled.cache_clear()
+    yield
+    _e2e_enabled.cache_clear()
+
+
+class TestDataSourceProgressAnchor:
+    """FUP-014: 数据同步数值型进度条 anchor 契约。"""
+
+    def _state(self, **kwargs) -> DataSourceState:
+        defaults = dict(is_syncing=True, active_key="daily_sync", progress=0.42, progress_message=None)
+        defaults.update(kwargs)
+        return cast(DataSourceState, SimpleNamespace(**defaults))
+
+    def test_daily_sync_numeric_bar_anchored(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        control = _build_secondary_progress_bar(self._state(), visible=True)
+
+        assert isinstance(control, ft.Semantics)
+        assert control.identifier == EIDS.SETTINGS.DATA_SOURCE_PROGRESS[0]
+        assert isinstance(control.content, ft.ProgressBar)
+        assert control.content.value == pytest.approx(0.42)
+
+    def test_cache_clear_indeterminate_not_anchored(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        control = _build_secondary_progress_bar(self._state(active_key="cache_clear"), visible=True)
+
+        assert isinstance(control, ft.ProgressBar)
+        assert control.value is None
+
+    def test_hidden_numeric_bar_not_anchored(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        control = _build_secondary_progress_bar(self._state(), visible=False)
+
+        assert isinstance(control, ft.ProgressBar)
+        assert control.visible is False
+        assert control.value == pytest.approx(0.42)

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
@@ -1669,3 +1670,173 @@ class TestWatchlistViewMutationFeedback:
         last = mock_watchlist_vm.add_dialog_calls[-1]
         assert last["is_submitting"] is True
         assert last["open_state"] is True
+
+
+class TestWatchlistViewReloadButton:
+    """FUP-013: 标题栏「刷新列表」只重读已同步的本地关注数据（不重跑选股）。"""
+
+    @staticmethod
+    def _find_reload_button(root: Any) -> ft.OutlinedButton | None:
+        return next(
+            (
+                c
+                for c in _collect_all_controls(root)
+                if isinstance(c, ft.OutlinedButton) and c.content == "watchlist_reload"
+            ),
+            None,
+        )
+
+    def test_renders_reload_button(self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state):
+        """标题栏渲染刷新按钮，加载中以外可用，tooltip 说明刷新语义。"""
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        button = self._find_reload_button(result)
+        assert button is not None
+        assert button.disabled is False
+        assert button.tooltip == "watchlist_reload_tooltip"
+
+    def test_click_dispatches_same_command_when_no_indicator(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """空列表无 indicator → 按钮调度手势同一命令，且不在点击路径重复调用 VM。"""
+        from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        button = self._find_reload_button(result)
+        assert button is not None
+
+        mock_watchlist_vm.method_calls.clear()
+        page.run_task.reset_mock()
+        button.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: Flet on_click Union 含 0 参分支]
+
+        assert page.run_task.call_count == 1
+        scheduled = page.run_task.call_args.args[0]
+        assert inspect.iscoroutinefunction(scheduled)
+        assert getattr(scheduled, "__name__", "") == "_on_refresh"
+        # 按钮不另行调用 VM：仅由被调度的刷新命令负责一次 load_watchlist
+        assert ("load_watchlist", {}) not in mock_watchlist_vm.method_calls
+
+    def test_list_wrapped_by_refresh_indicator_and_button_calls_show(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """有数据时列表由 RefreshIndicator 包裹；按钮经 show() 复用同一刷新命令。"""
+        from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(_make_row(),), is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        indicator = next((c for c in _collect_all_controls(result) if isinstance(c, ft.RefreshIndicator)), None)
+        assert indicator is not None
+        assert indicator.tooltip == "watchlist_reload_tooltip"
+        assert inspect.iscoroutinefunction(indicator.on_refresh)
+        # 手势内容必须可滚动，否则下拉手势无法触发
+        assert isinstance(indicator.content, ft.Column)
+        assert indicator.content.scroll == ft.ScrollMode.AUTO
+
+        button = self._find_reload_button(result)
+        assert button is not None
+        page.run_task.reset_mock()
+        button.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: Flet on_click Union 含 0 参分支]
+
+        assert page.run_task.call_count == 1
+        scheduled = page.run_task.call_args.args[0]
+        assert getattr(scheduled, "__self__", None) is indicator
+
+    def test_disabled_and_guarded_while_loading(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """加载中按钮禁用，且回调守卫拒绝重复调度（避免并发覆盖同一代次）。"""
+        from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+
+        rows = (_make_row(),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=True)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        button = self._find_reload_button(result)
+        assert button is not None
+        assert button.disabled is True
+
+        page.run_task.reset_mock()
+        button.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: Flet on_click Union 含 0 参分支]
+        assert not page.run_task.called
+
+    def test_on_refresh_success_shows_local_reload_toast(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """成功返回 True 才反馈完成，文案限定「本地数据」（不承诺最新行情）。"""
+        from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(_make_row(),), is_loading=False)
+        mock_watchlist_vm.load_result = True
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        indicator = next(c for c in _collect_all_controls(result) if isinstance(c, ft.RefreshIndicator))
+
+        mock_watchlist_vm.method_calls.clear()
+        asyncio.run(indicator.on_refresh())  # type: ignore[call-issue]  # [reason: Flet on_refresh 事件回调类型为可选]
+
+        assert mock_watchlist_vm.method_calls.count(("load_watchlist", {})) == 1
+        page.toast.show.assert_called_once_with("watchlist_reload_done", "success")
+
+    def test_on_refresh_false_result_no_success_toast(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """False（已分类失败或旧代次被取代）不得统一报成功。"""
+        from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(_make_row(),), is_loading=False)
+        mock_watchlist_vm.load_result = False
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = MagicMock()
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        indicator = next(c for c in _collect_all_controls(result) if isinstance(c, ft.RefreshIndicator))
+
+        asyncio.run(indicator.on_refresh())  # type: ignore[call-issue]  # [reason: Flet on_refresh 事件回调类型为可选]
+
+        page.toast.show.assert_not_called()
+
+    def test_no_page_does_not_crash(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """page 不可用时不崩溃、不调度加载。"""
+        from flet.controls.context import _context_page
+
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component)
+        _context_page.set(None)
+        result = render_once(component)
+        button = self._find_reload_button(result)
+        assert button is not None
+        assert button.icon == ft.Icons.REFRESH
+        assert button.tooltip == "watchlist_reload_tooltip"
+
+        mock_watchlist_vm.method_calls.clear()
+        button.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: Flet on_click Union 含 0 参分支]
+        assert ("load_watchlist", {}) not in mock_watchlist_vm.method_calls

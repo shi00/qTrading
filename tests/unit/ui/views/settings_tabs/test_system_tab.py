@@ -1412,7 +1412,7 @@ class TestDoExportDiagnostics:
 
     @staticmethod
     def _async_return(value: Any):
-        async def _ret() -> Any:
+        async def _ret(*args: Any, **kwargs: Any) -> Any:
             return value
 
         return _ret
@@ -1425,7 +1425,46 @@ class TestDoExportDiagnostics:
             mock_collector.export = MagicMock(side_effect=self._async_return("/tmp/diag.zip"))
             asyncio.run(handler(*args))
 
-            mock_collector.export.assert_called_once_with()
+            # FakePage 无 get_package_info → 不注入 provider（字段标记 unavailable）
+            mock_collector.export.assert_called_once_with(package_info_provider=None)
+        env["show_snack"].assert_called_once_with("i18n[settings_diagnostics_success]", color=AppColors.SUCCESS)
+
+    def test_injects_package_info_provider_when_page_supports_it(self, system_tab_env) -> None:
+        """FUP-015 opt-06: page.get_package_info() 成功 → 以同步闭包注入 provider。"""
+        env = system_tab_env
+        env["page"].get_package_info = AsyncMock(
+            return_value=MagicMock(
+                app_name="AStockScreener",
+                package_name="com.example.astock",
+                version="1.1.0",
+                build_number="42",
+            )
+        )
+        handler, args, _ = self._trigger(env)
+        with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_collector:
+            mock_collector.export = MagicMock(side_effect=self._async_return("/tmp/diag.zip"))
+            asyncio.run(handler(*args))
+
+            provider = mock_collector.export.call_args.kwargs["package_info_provider"]
+            assert provider is not None
+            assert provider.__name__ == "_client_package_info"
+            assert provider() == {
+                "app_name": "AStockScreener",
+                "package_name": "com.example.astock",
+                "version": "1.1.0",
+                "build_number": "42",
+            }
+
+    def test_package_info_failure_degrades_to_no_provider(self, system_tab_env) -> None:
+        """get_package_info 抛异常 → 不中断导出，provider 降级为 None。"""
+        env = system_tab_env
+        env["page"].get_package_info = AsyncMock(side_effect=RuntimeError("ipc boom"))
+        handler, args, _ = self._trigger(env)
+        with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_collector:
+            mock_collector.export = MagicMock(side_effect=self._async_return("/tmp/diag.zip"))
+            asyncio.run(handler(*args))
+
+            mock_collector.export.assert_called_once_with(package_info_provider=None)
         env["show_snack"].assert_called_once_with("i18n[settings_diagnostics_success]", color=AppColors.SUCCESS)
 
     def test_exception_path(self, system_tab_env) -> None:
@@ -1434,7 +1473,7 @@ class TestDoExportDiagnostics:
         handler, args, _ = self._trigger(env)
         with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_collector:
 
-            async def _raise() -> None:
+            async def _raise(*args: Any, **kwargs: Any) -> None:
                 raise RuntimeError("diag failed")
 
             mock_collector.export = MagicMock(side_effect=_raise)

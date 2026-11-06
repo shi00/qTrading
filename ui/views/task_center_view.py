@@ -14,6 +14,7 @@
 import asyncio
 import datetime
 import logging
+import math
 from collections.abc import Callable
 
 import flet as ft
@@ -45,6 +46,19 @@ def _get_page() -> ft.Page | None:
         return ft.context.page
     except RuntimeError:
         return None
+
+
+def _clamp_unit_progress(value: float | None) -> float | None:
+    """把进度值归一到 0..1；非有限值返回 None（未知，不伪装成 0/1，R21）。"""
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return min(max(numeric, 0.0), 1.0)
 
 
 # --- Status display config ---
@@ -228,19 +242,23 @@ def _build_task_card(
 
     # --- Progress bar ---
     if row.status == TaskStatus.RUNNING:
-        pct = row.progress * 100
+        running_progress = _clamp_unit_progress(row.progress)
+        progress_control: ft.Control = ft.ProgressBar(
+            value=running_progress,
+            expand=True,
+            color=AppColors.INFO,
+            bgcolor=ft.Colors.with_opacity(0.12, AppColors.INFO),
+            bar_height=6,
+            border_radius=3,
+        )
+        if running_progress is not None:
+            progress_control = anchored(EIDS.TASK_CENTER.task_progress(row.id), progress_control)
+        pct_text = "--" if running_progress is None else f"{running_progress * 100:.1f}%"
         progress_row = ft.Row(
             [
-                ft.ProgressBar(
-                    value=row.progress,
-                    expand=True,
-                    color=AppColors.INFO,
-                    bgcolor=ft.Colors.with_opacity(0.12, AppColors.INFO),
-                    bar_height=6,
-                    border_radius=3,
-                ),
+                progress_control,
                 ft.Text(
-                    f"{pct:.1f}%",
+                    pct_text,
                     size=AppStyles.FONT_SIZE_BODY_SM,
                     weight=ft.FontWeight.W_600,
                     color=AppColors.INFO,
@@ -257,8 +275,9 @@ def _build_task_card(
         TaskStatus.CANCELLED,
         TaskStatus.INTERRUPTED,
     ):
-        val = 1.0 if row.status == TaskStatus.COMPLETED else row.progress
-        progress_row = ft.ProgressBar(
+        # 终态 COMPLETED 必须为 1.0；其余终态保留已完成比例（缺失/非有限值→None，R21）
+        val = 1.0 if row.status == TaskStatus.COMPLETED else _clamp_unit_progress(row.progress)
+        progress_control = ft.ProgressBar(
             value=val,
             expand=True,
             color=status_color,
@@ -266,6 +285,9 @@ def _build_task_card(
             bar_height=4,
             border_radius=2,
         )
+        if val is not None:
+            progress_control = anchored(EIDS.TASK_CENTER.task_progress(row.id), progress_control)
+        progress_row = progress_control
     else:
         # QUEUED — indeterminate thin bar
         progress_row = ft.ProgressBar(

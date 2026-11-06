@@ -5,6 +5,7 @@
 并读取最后 500 行日志全量脱敏后打包导出为 ZIP。
 """
 
+import asyncio
 import datetime
 import json
 import logging
@@ -14,7 +15,7 @@ import sys
 import zipfile
 import tempfile
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import config
@@ -44,6 +45,22 @@ _CONFIG_PATH_KEYS = frozenset(
         "tokenizer_path",
     }
 )
+
+# FUP-015 opt-06：客户端包信息白名单。客户端版本（Flet 客户端/应用包元数据）
+# 由调用方注入 provider 提供，只导出这些非敏感字段，其余字段一律丢弃，避免
+# 未来 Flet 新增字段（如签名/安装时间）意外进入诊断包。
+_CLIENT_PACKAGE_INFO_KEYS = ("app_name", "package_name", "version", "build_number")
+
+# 产品名（项目自身），与 pyproject.toml 的 name 保持一致；版本从包元数据读取。
+_PRODUCT_NAME = "AStockScreener"
+_PRODUCT_DISTRIBUTION = "astock-screener"
+
+
+def _json_safe_scalar(value: Any) -> str | int | float | bool | None:
+    """把白名单字段值收敛为 JSON 可序列化的标量，未知类型返回 None。"""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return None
 
 
 def _looks_like_absolute_path(value: str) -> bool:
@@ -88,9 +105,77 @@ class SystemDiagnosticsCollector:
         return value
 
     @staticmethod
-    async def export() -> str:
+    def _get_product_version() -> str:
+        """读取产品版本（项目自身），获取失败返回 ``"dev"``。
+
+        与 ``BacktestService._get_app_version`` 同口径：从已安装包元数据读取，
+        打包/开发环境缺失元数据时降级为 ``"dev"``，不中断诊断导出。
+        """
+        try:
+            from importlib.metadata import version
+
+            return version(_PRODUCT_DISTRIBUTION)
+        except Exception:
+            return "dev"
+
+    @classmethod
+    def _build_versions_snapshot(
+        cls,
+        package_info_provider: Callable[[], Mapping[str, Any] | None] | None,
+    ) -> dict[str, Any]:
+        """构造产品版本 + 客户端包信息快照（可 JSON 序列化、失败隔离）。
+
+        - ``product``：项目自身版本（``importlib.metadata``，失败降级 ``"dev"``）；
+        - ``client``：由调用方注入的 provider 返回的 Flet 客户端包信息，仅保留
+          ``_CLIENT_PACKAGE_INFO_KEYS`` 白名单字段；
+        - provider 缺失、抛异常、返回 ``None`` 或返回非 Mapping 时，``client``
+          标记为 ``{"status": "unavailable", "reason": ...}``，不影响诊断包其余内容。
+
+        ``utils`` 层不 import flet：provider 由 UI 调用方注入，收集器只消费 Mapping。
+        """
+        snapshot: dict[str, Any] = {
+            "product": {"name": _PRODUCT_NAME, "version": cls._get_product_version()},
+            "client": {"status": "unavailable", "reason": "not_provided"},
+        }
+        if package_info_provider is None:
+            return snapshot
+
+        try:
+            raw_info = package_info_provider()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播，配合优雅停机
+        except Exception as e:
+            logger.warning(
+                "[Diagnostics] Failed to collect client package info: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+            snapshot["client"] = {"status": "unavailable", "reason": "provider_error"}
+            return snapshot
+
+        if raw_info is None:
+            snapshot["client"] = {"status": "unavailable", "reason": "empty"}
+            return snapshot
+        if not isinstance(raw_info, Mapping):
+            snapshot["client"] = {"status": "unavailable", "reason": "invalid_shape"}
+            return snapshot
+
+        client_info: dict[str, Any] = {"status": "ok"}
+        for key in _CLIENT_PACKAGE_INFO_KEYS:
+            client_info[key] = _json_safe_scalar(raw_info.get(key))
+        snapshot["client"] = client_info
+        return snapshot
+
+    @staticmethod
+    async def export(
+        package_info_provider: Callable[[], Mapping[str, Any] | None] | None = None,
+    ) -> str:
         """
         搜集诊断指标、配置以及最新日志，脱敏后打包存储为 ZIP 压缩文件。
+
+        Args:
+            package_info_provider: 可选的客户端包信息提供者（同步返回 Mapping 或
+                None）。由调用方注入（如 UI 层先 ``await page.get_package_info()``
+                再以闭包形式传入），``utils`` 层不依赖 flet。
 
         Returns:
             str: 导出的 ZIP 压缩文件绝对路径。
@@ -230,6 +315,7 @@ class SystemDiagnosticsCollector:
             # 整合所有状态到一个 json 中
             diagnostics_summary = {
                 "system": system_info,
+                "versions": SystemDiagnosticsCollector._build_versions_snapshot(package_info_provider),
                 "thread_pool": thread_pool_info,
                 "tasks": task_info,
                 "config": sanitized_config,

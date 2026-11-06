@@ -1,3 +1,8 @@
+# NOTE(lazy): FUP-014 未为设置页数值型数据同步进度条 (EIDS.SETTINGS.DATA_SOURCE_PROGRESS)
+#   新增 E2E 断言.
+# ceiling: 数值进度仅在 full_daily_sync 运行期间短暂出现，真实同步依赖外部数据源且时序不稳定；
+#   Flet ProgressBar 是否稳定暴露 aria-valuenow 亦未验证，强行断言会 flaky.
+# upgrade: E2E 提供可控的同步任务桩并可稳定读取 aria-valuenow 后，补充数值范围断言.
 import logging
 
 import pytest

@@ -19,6 +19,7 @@ import logging
 import typing
 
 import flet as ft
+from flet.controls.material.refresh_indicator import RefreshIndicator
 
 from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.flet_type_helpers import safe_on_click
@@ -27,6 +28,8 @@ from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.watchlist_add_dialog import WatchlistAddDialog
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.sentiment_index_view_model import SentimentIndexViewModel
 from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistRow, WatchlistViewModel
@@ -228,6 +231,10 @@ def WatchlistView(
     # F01: 添加提交中状态 (禁用重复确认/输入变更; 失败保持对话框与草稿)
     add_submitting, set_add_submitting = ft.use_state(False)
 
+    # FUP-013: 当前渲染的 RefreshIndicator 引用（跨渲染持有，桌面端鼠标拖拽
+    # 不触发下拉手势，工具栏按钮经 show() 复用同一刷新命令）。
+    indicator_holder: typing.Any = ft.use_ref(None)
+
     # --- 加载关注列表 (active 时) ---
     async def _load_effect() -> None:
         if not active:
@@ -378,10 +385,47 @@ def WatchlistView(
         if page is not None:
             page.run_task(vm.load_watchlist)
 
+    async def _on_refresh() -> None:
+        """手动手势/工具栏按钮共用的刷新命令（FUP-013）。
+
+        只重读已同步的本地关注数据（``load_watchlist`` 查询列表与 ``daily_quotes``），
+        不触发选股重跑、不获取实时行情。``False`` 表示已分类失败或旧代次被取代，
+        不统一报成功；``CancelledError`` 由 VM 继续向上传播。
+        """
+        if state.is_loading:
+            return
+        ok = await vm.load_watchlist()
+        if not ok:
+            return
+        page = _get_page()
+        if page is not None:
+            _show_toast(page, I18n.get("watchlist_reload_done"), "success")
+
+    def _on_reload() -> None:
+        """工具栏「刷新列表」: 桌面端经已挂载 indicator 的 show() 复用刷新命令。
+
+        桌面/Web 的鼠标拖拽不会触发 RefreshIndicator 下拉（1.1.0 说明），按钮需
+        显式调用 ``show()``；列表为空时 indicator 未挂载，退回直接执行同一命令。
+        加载中禁止重复触发，避免并发请求互相覆盖同一代次结果。
+        """
+        if state.is_loading:
+            return
+        page = _get_page()
+        if page is None:
+            return
+        indicator = indicator_holder.current
+        if indicator is not None:
+            page.run_task(indicator.show)
+        else:
+            page.run_task(_on_refresh)
+
     # --- 渲染 ---
     # Task 11.2: 完全失败 (rows 空 + load_error 非空) → ErrorState 替换 body;
     # 部分失败 (rows 非空 + load_error 非空) → 保留 error_banner (不丢失已加载列表)
     has_complete_failure = state.load_error is not None and not state.watchlist_rows
+
+    # 每次渲染重建 indicator；非列表态（加载/失败/空）置空，按钮退回直接执行命令。
+    indicator_holder.current = None
 
     if state.is_loading:
         body = LoadingState()
@@ -404,12 +448,20 @@ def WatchlistView(
             message=I18n.get("watchlist_empty_message"),
         )
     else:
-        body = ft.Column(
-            [_build_watchlist_row(row, _on_remove, _on_view_stock) for row in state.watchlist_rows],
-            scroll=ft.ScrollMode.AUTO,
+        # FUP-013: 下拉手势仅在触屏生效；桌面/Web 由工具栏按钮经 show() 触发同一命令。
+        refresh_indicator = RefreshIndicator(
+            content=ft.Column(
+                [_build_watchlist_row(row, _on_remove, _on_view_stock) for row in state.watchlist_rows],
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
+                spacing=4,
+            ),
+            on_refresh=_on_refresh,
+            tooltip=I18n.get("watchlist_reload_tooltip"),
             expand=True,
-            spacing=4,
         )
+        indicator_holder.current = refresh_indicator
+        body = refresh_indicator
 
     # 部分失败时保留 error_banner (rows 非空 + load_error 非空)
     error_banner = None
@@ -467,6 +519,17 @@ def WatchlistView(
                             color=AppColors.TEXT_PRIMARY,
                         ),
                         ft.Container(expand=True),
+                        anchored(
+                            EIDS.WATCHLIST.RELOAD_BUTTON,
+                            ft.OutlinedButton(
+                                content=I18n.get("watchlist_reload"),
+                                icon=ft.Icons.REFRESH,
+                                disabled=state.is_loading,
+                                tooltip=I18n.get("watchlist_reload_tooltip"),
+                                on_click=safe_on_click(lambda _e: _on_reload()),
+                                style=AppStyles.outline_button(),
+                            ),
+                        ),
                         ft.OutlinedButton(
                             content=I18n.get("watchlist_add"),
                             icon=ft.Icons.ADD,

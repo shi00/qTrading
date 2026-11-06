@@ -1,3 +1,8 @@
+# NOTE(lazy): FUP-014 未为任务行数值型进度条 (EIDS.TASK_CENTER.task_progress) 新增 E2E 断言.
+# ceiling: E2E 中 RUNNING 任务存活时间短于轮询周期，且 Flet ProgressBar 语义节点是否稳定
+#   暴露 aria-valuenow 未验证，强行断言会 flaky；数值语义改由 anchor 单测覆盖.
+# upgrade: E2E 提供可暂停的 RUNNING 任务夹具，或实测 flt-semantics 稳定暴露 aria-valuenow
+#   后，补充「aria-valuenow 可解析且在 0..1」断言.
 import pytest
 
 from tests.e2e.labels import strategy_label

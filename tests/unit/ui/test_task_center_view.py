@@ -24,6 +24,8 @@ import flet as ft
 import pytest
 
 from services.task_manager import AppTask, PersistPendingStatus, TaskStatus
+from ui.testing.anchor import _e2e_enabled
+from ui.testing.e2e_ids import EIDS
 from ui.viewmodels.task_center_view_model import (
     TaskCenterState,
     TaskCenterViewModel,
@@ -32,6 +34,7 @@ from ui.viewmodels.task_center_view_model import (
 from ui.views.task_center_view import (
     PAGE_SIZE,
     _build_task_card,
+    _clamp_unit_progress,
     _format_duration,
     _format_time,
     _get_page,
@@ -845,6 +848,116 @@ class TestBuildTaskCard:
         row = self._make_row(status=TaskStatus.FAILED, error="disk full", is_retryable=True)
         card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock(), on_reopen_source=MagicMock())
         assert _find_textbutton_by_content(card, "task_failed_reopen_source") is None
+
+
+def _find_semantics_by_identifier(root: ft.Control, identifier: str) -> ft.Semantics | None:
+    """按 identifier 在控件树中查找首个 Semantics anchor。"""
+    for control in _find_all_controls_by_type(root, ft.Semantics):
+        if isinstance(control, ft.Semantics) and control.identifier == identifier:
+            return control
+    return None
+
+
+class TestTaskProgressAnchor:
+    """FUP-014: 任务行数值型进度条的 anchor 与边界契约。"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.mock_styles = mock_app_styles
+        _e2e_enabled.cache_clear()
+        with (
+            patch("ui.views.task_center_view.I18n", self.mock_i18n),
+            patch("ui.views.task_center_view.AppColors", self.mock_ac),
+            patch("ui.views.task_center_view.AppStyles", self.mock_styles),
+        ):
+            yield
+        _e2e_enabled.cache_clear()
+
+    def _make_row(self, status=TaskStatus.QUEUED, **kwargs):
+        defaults = dict(
+            id="task1",
+            name="Test Task",
+            task_type="System",
+            description="desc",
+            status=status,
+            progress=0.0,
+            cancellable=False,
+            created_at=datetime.datetime(2025, 1, 1, 12, 0, 0),
+            error="",
+        )
+        defaults.setdefault("is_retryable", status in (TaskStatus.FAILED, TaskStatus.INTERRUPTED))
+        defaults.update(kwargs)
+        return TaskRow(**defaults)
+
+    def test_running_progress_bar_anchored_with_value(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        row = self._make_row(status=TaskStatus.RUNNING, progress=0.42)
+        card = _build_task_card(row, on_cancel=MagicMock())
+
+        sem = _find_semantics_by_identifier(card, EIDS.TASK_CENTER.task_progress("task1")[0])
+        assert isinstance(sem, ft.Semantics)
+        assert isinstance(sem.content, ft.ProgressBar)
+        assert sem.content.value == pytest.approx(0.42)
+
+    def test_completed_progress_bar_anchored_with_full_value(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        row = self._make_row(status=TaskStatus.COMPLETED, progress=0.3)
+        card = _build_task_card(row, on_cancel=MagicMock())
+
+        sem = _find_semantics_by_identifier(card, EIDS.TASK_CENTER.task_progress("task1")[0])
+        assert isinstance(sem, ft.Semantics)
+        assert isinstance(sem.content, ft.ProgressBar)
+        assert sem.content.value == 1.0
+
+    def test_queued_indeterminate_bar_not_anchored(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        row = self._make_row(status=TaskStatus.QUEUED)
+        card = _build_task_card(row, on_cancel=MagicMock())
+
+        assert _find_semantics_by_identifier(card, EIDS.TASK_CENTER.task_progress("task1")[0]) is None
+        bar = _find_control_by_type(card, ft.ProgressBar)
+        assert isinstance(bar, ft.ProgressBar)
+        assert bar.value is None
+
+    @pytest.mark.parametrize(("raw", "expected"), [(1.8, 1.0), (-0.2, 0.0)])
+    def test_running_progress_clamped_to_unit_range(self, monkeypatch, raw, expected):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        row = self._make_row(status=TaskStatus.RUNNING, progress=raw)
+        card = _build_task_card(row, on_cancel=MagicMock())
+
+        sem = _find_semantics_by_identifier(card, EIDS.TASK_CENTER.task_progress("task1")[0])
+        assert isinstance(sem, ft.Semantics)
+        assert isinstance(sem.content, ft.ProgressBar)
+        assert sem.content.value == expected
+
+    def test_running_nan_progress_not_disguised_as_value(self, monkeypatch):
+        """非有限值→None（indeterminate），不锚定、不伪装成 0/1（R21）。"""
+        monkeypatch.setenv("E2E_TESTING", "true")
+        row = self._make_row(status=TaskStatus.RUNNING, progress=float("nan"))
+        card = _build_task_card(row, on_cancel=MagicMock())
+
+        assert _find_semantics_by_identifier(card, EIDS.TASK_CENTER.task_progress("task1")[0]) is None
+        bar = _find_control_by_type(card, ft.ProgressBar)
+        assert isinstance(bar, ft.ProgressBar)
+        assert bar.value is None
+        assert any(getattr(text, "value", None) == "--" for text in _find_all_controls_by_type(card, ft.Text))
+
+
+class TestClampUnitProgress:
+    """进度归一helper：0..1 clamp，非有限/None 保持未知。"""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(0.42, 0.42), (0.0, 0.0), (1.0, 1.0), (1.8, 1.0), (-0.2, 0.0), (None, None)],
+    )
+    def test_clamp(self, raw, expected):
+        assert _clamp_unit_progress(raw) == expected
+
+    @pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_returns_none(self, raw):
+        assert _clamp_unit_progress(raw) is None
 
 
 # ---------------------------------------------------------------------------

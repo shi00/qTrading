@@ -48,6 +48,8 @@ from ui.components.settings_widgets import (
 from ui.cache_cleared_state import notify_cache_cleared
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
+from ui.testing.anchor import anchored
+from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceState, DataSourceViewModel, HealthResultRow, TaskStatus
@@ -373,6 +375,25 @@ def _build_health_dashboard(
     )
 
 
+def _build_secondary_progress_bar(state: DataSourceState, visible: bool) -> ft.Control:
+    """构建数据同步次级进度条（FUP-014）。
+
+    仅数值型可见分支（daily_sync）挂 ``DATA_SOURCE_PROGRESS`` anchor；cache_clear
+    的 indeterminate（value=None）与不可见状态不挂同一 EID，避免 E2E 把「未知/
+    未开始」读成数值进度（R21）。
+    """
+    if visible and state.active_key != "cache_clear":
+        return anchored(
+            EIDS.SETTINGS.DATA_SOURCE_PROGRESS,
+            ft.ProgressBar(value=state.progress, expand=True),
+        )
+    return ft.ProgressBar(
+        value=None if state.active_key == "cache_clear" else state.progress,
+        visible=visible,
+        expand=True,
+    )
+
+
 def _build_action_console(
     state: DataSourceState,
     on_full_sync: Callable[[ft.ControlEvent], None],
@@ -398,11 +419,7 @@ def _build_action_console(
     else:
         secondary_progress_text_value = ""
 
-    secondary_progress_bar = ft.ProgressBar(
-        value=state.progress if state.active_key != "cache_clear" else None,
-        visible=secondary_progress_visible,
-        expand=True,
-    )
+    secondary_progress_bar = _build_secondary_progress_bar(state, secondary_progress_visible)
     secondary_progress_text = ft.Text(
         secondary_progress_text_value,
         size=AppStyles.FONT_SIZE_BODY_SM,
