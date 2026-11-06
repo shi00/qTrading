@@ -219,7 +219,7 @@ idna==3.20
     #   httpx2
     #   requests
     #   yarl
-import-linter==2.15
+import-linter==2.16
     # via astockscreener (pyproject.toml)
 importlib-metadata==8.9.0
     # via litellm
@@ -239,7 +239,7 @@ jinja2==3.1.6
     # via
     #   litellm
     #   llama-cpp-python
-jiter==0.18.0
+jiter==0.19.0
     # via openai
 jmespath==1.1.0
     # via
@@ -388,7 +388,7 @@ py-key-value-aio==0.4.6
     # via fastmcp-slim
 py-mini-racer==0.6.0 ; sys_platform == 'linux'
     # via akshare
-py-serializable==2.1.0
+py-serializable==2.2.0
     # via cyclonedx-python-lib
 pyarrow==26.0.1
     # via astockscreener (pyproject.toml)
@@ -585,7 +585,6 @@ typing-extensions==4.16.0
     #   fastapi
     #   fastmcp-slim
     #   huggingface-hub
-    #   import-linter
     #   llama-cpp-python
     #   mcp
     #   mcp-types
