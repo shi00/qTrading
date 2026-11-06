@@ -126,7 +126,10 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: rust-coverage-lcov
-          path: lcov.info
+          # cargo llvm-cov 的 --output-path 相对 defaults.run.working-directory；
+          # upload-artifact path 相对 GITHUB_WORKSPACE，需补 working-directory 前缀。
+          path: sidecars/qtrading-pg-sidecar/lcov.info
+          if-no-files-found: error
           retention-days: 14
 
   build-artifacts:
