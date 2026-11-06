@@ -44,14 +44,8 @@
 | P3-M12-StockDetailDialog-View-Holds-Page-DataProcessor | #M12-014 MVVM 边界：stock\_detail\_dialog.py View 直接持有 page/data\_processor 引用 | P3 | ① 该文件再次出现 View 越界持有 page/data\_processor 的新实例时；② 或 ui 层 MVVM 迁移完成（`ui/views` 与 `ui/components` 下无 View 直接持有 page/data\_processor）时 |
 | P3-M12-BacktestConfigPanel-No-VM | #M12-015 MVVM 边界：backtest\_config\_panel.py 13 个 use\_state 未建 VM | P3 | ① 该文件再次出现 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-Views-Import-Complexity-High | #M12-019 可维护性：screener\_view\.py (35 import) / data\_view\.py (24 import) 导入复杂度过高 | P3 | ① 任一 View 文件 import 数 > 40 时；② 或该文件因其他任务被修改且 import 数继续增长时 |
-| P3-M12-VirtualTable-ArrowSort-Indicator | #M12-020 可访问性：virtual\_table.py:291-292 ↑↓ 排序指示器 | P3 | ① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时 |
-| P3-M12-TushareConfigPanel-Referrer-Code-In-Url | #M12-021 隐私：tushare\_config\_panel_view\_model.py:37 URL 含 referrer code | P3 | ① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时 |
-| P3-M12-ViewModels-Repeated-Singleton-Calls | #M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例 | P3 | ① 该 VM 文件再次出现重复构造单例的新实例时；② 或 VM 性能审计中单例调用开销被量化超阈值时 |
 | P3-M12-Views-Get-DataProcessor-Cross-Layer | #M12-025 MVVM 边界：data\_source\_tab.py View 经 VM 获取 data\_processor 传子组件（data\_view.py 已解决） | P3 | ① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时 |
-| P3-M12-NewsFeed-Callback-Passes-ControlEvent | #M12-028 MVVM 边界：news\_feed.py:328/:359 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | P3 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
-| P3-M12-StockDetailDialog-BuildContent-No-Cover | #M12-031 测试覆盖：stock\_detail\_dialog.py:505 \_build\_content pragma: no cover | P3 | ① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时 |
 | P3-PR3-TextButton-Interactive-Unverified | PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证 | P3 | ① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时 |
-| P3-PR513-Script-SysPath-Inject | PR #513 检视：`scripts/` 下 15 个脚本（含 `verify_embedded_pg_connect.py`）顶部 `sys.path.insert` 注入仓库根后 import 仓库内包（scripts/ 层通行代码味道，已文档化） | P3 | ① `scripts/` 下新增脚本继续采用同类 `sys.path` 注入（同类脚本数 > 15）时；② 或脚本迁移为正式包入口（如 `[project.scripts]`）时 |
 | P3-PR513-VersionCache-No-Prod-Invalidation | PR #513 检视：`_version_cache` 生产期不主动失效（合理设计，供未来评估） | P3 | ① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时 |
 | P3-DataExplorer-SyncEngine-Unification | DataExplorer 同步引擎游离于统一连接管理（举一反三登记，本期不实施） | P3 | ① DataExplorer 再次出现连接错口/引擎缓存跨模式复用问题；② 或统一连接管理重构时 |
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
@@ -66,7 +60,6 @@
 | P3-REV06-Retry-CircuitBreaker | review06 F10：重试上限可配（默认 3）且已带退避/自适应降速，但缺跨调用连续失败短路计数，外部服务故障期仍可能多 API 独立重试放大压力 | P3 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
 | P2-REV06-PromptGuard-StructuredBoundary | review06 F12：prompt 注入防御已落地结构化边界（不可信声明 + 平级容器隔离 + 尖括号中和，SEC-001/D5-2），剩余缺口为选股分析输出侧跨数据交叉校验（新闻风险场景已有引用子串校验；ADR-0008 执行权边界为兜底补偿控制） | P2 | ① 出现注入成功绕过 prompt_guard 的实例时；② 或新增外部文本进入 LLM 上下文的链路时 |
 | P2-REV06-LLMOutput-SchemaValidation | review06 F13：LLM 输出影响选股排序，仅校验部分字段，缺完整输出 schema 校验（AI 免责声明已于 UX-09 落地） | P2 | ① LLM 坏输出未被校验拦截并流入排序/展示的事故时；② 或输出契约（core/prompt_base.py）字段扩展时；③ 或 AI 排序结果进入导出/分享链路时 |
-| P3-REV06-Restore-HeaderValidation | review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示 | P3 | ① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时 |
 | P2-REV06-Backup-Encryption | review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份 | P2 | ① 用户报告备份文件外泄或被第三方读取时；② 或备份功能被重构/导出链路扩展（如云同步）时 |
 | P3-REV08-Akshare-Fallback | review08 C1：Tushare 积分不足直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺 | P3 | ① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足（P2-REV06-External-SchemaValidation 关闭 + 候选接口联网可用性验证 + D3 结论）时；③ 或数据源接入架构调整时 |
 | P3-Deps-PandasStubs-Lag | pandas 长期锁定 `<3.1`：pandas-stubs 最新 3.0.5.260914 未覆盖 pandas 3.1.0 类型面，升级会造成 stubs 与运行时版本错位 | P3 | ① pandas-stubs 发布 3.1.x（或覆盖 pandas 3.1 类型面的版本）时；② 或 pyright 在 pandas 3.1 上出现必须升级 stubs 才能消除的错误时 |
@@ -222,20 +215,6 @@ review 02 检视发现 `_run_sidecar` 用 `subprocess.run(timeout=3600)` 不可�
 
 期望最终解法：① sidecar 为维护命令安装 SIGTERM/SIGINT 处理并传播到 `pg_dump` 子进程（`kill_on_drop` 仅覆盖优雅路径，需显式信号处理器）；② dump 中断时删除 `.partial` 或 doctor 提供清理动作；③ 评估 restore 可安全取消点；④ `run_async` 支持可中断变体。验收标准：① terminate 后 `pg_dump` 进程树被终止、无 `.partial` 继续增长；② sidecar dump 中断无 `.partial` 残留或 doctor 可清理；③ restore 取消有明确一致性边界；④ run\_async 中断语义有单测覆盖。upgrade 触发条件：① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时。
 
-#### P3-PR513-Script-SysPath-Inject：PR #513 检视：`scripts/` 下 15 个脚本（含 `verify_embedded_pg_connect.py`）顶部 `sys.path.insert` 注入仓库根后 import 仓库内包（scripts/ 层通行代码味道，已文档化）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-PR513-Script-SysPath-Inject** | PR #513 检视：`scripts/` 下 15 个脚本（含 `verify_embedded_pg_connect.py`）顶部 `sys.path.insert` 注入仓库根后 import 仓库内包（scripts/ 层通行代码味道，已文档化） | ① `scripts/` 下新增脚本继续采用同类 `sys.path` 注入（同类脚本数 > 15）时；② 或脚本迁移为正式包入口（如 `[project.scripts]`）时 |
-
-**产生背景与现状**
-
-PR #513 检视（第一轮）遗留观察级建议。`scripts/verify_embedded_pg_connect.py:26-32` 因脚本经 `python scripts/verify_embedded_pg_connect.py` 直接运行时 `sys.path[0]` 指向 `scripts/`，data 包不在可导入路径上，故用 `sys.path.insert(0, str(_REPO_ROOT))` 将仓库根注入 `sys.path` 后 `import data.persistence.embedded_postgres.version`。注入后 `data/__init__.py:22`、`data/persistence/__init__.py:16` 均用惰性 `__getattr__`，不触发重依赖，且非红线 `data/cache` 路径，可接受。**范围校准（2026-10-31 复核）**：同类注入并非孤例，`scripts/` 下共 15 个脚本采用同一形态（如 `check_theme_contrast.py:23`、`collect_cninfo.py:31`、`collect_corpus.py:34`、`collect_sina_7x24.py:32`、`corpus_manifest.py:76`），属 scripts/ 层通行约定而非单点代码味道；本条仍按单文件登记，统一治理需另行升级。相关文件：`scripts/verify_embedded_pg_connect.py:26-32`（及上述同类脚本）。
-
-**期望的最终解法**
-
-声明脚本为可安装入口（如 `pyproject.toml` 的 `[project.scripts]`）或以包内相对导入方式运行，消除 `sys.path` 注入。验收标准：① 移除 `sys.path.insert` 后 `python -m scripts.verify_embedded_pg_connect` 可运行（`scripts/` 无 `__init__.py`，依赖隐式命名空间包；2026-10-31 实测 `python -m scripts.verify_embedded_pg_connect --help` 通过）；② 现有使用方式（`python scripts/verify_embedded_pg_connect.py`）不回退。upgrade 触发条件：① `scripts/` 下新增脚本继续采用同类 `sys.path` 注入（同类脚本数 > 15）时；② 或脚本迁移为正式包入口（如 `[project.scripts]`）时。
-
 #### P3-PR513-VersionCache-No-Prod-Invalidation：PR #513 检视：`_version_cache` 生产期不主动失效（合理设计，供未来评估）
 
 | 级别 | 一句话 | upgrade 触发条件 |
@@ -297,20 +276,6 @@ N5-4 模型分发裁定「首次使用由用户下载/选择文件」路线（�
 **期望的最终解法**
 
 不主动修复（当前威胁模型下轻量校验 + 子进程隔离 + 来源自担为合理权衡）。若升级为内容级信任需求：① 分发渠道内置时改哈希白名单或签名校验；② 解析器 CVE 披露时升级依赖版本并在校验链加内容级约束。验收标准：校验链单测覆盖新增约束；[ai-service.md](../patterns/ai-service.md)「6.1 模型产物分发与归档」同步。upgrade 触发条件见上表。
-
-#### P3-M12-StockDetailDialog-BuildContent-No-Cover：#M12-031 测试覆盖：stock\_detail\_dialog.py:505 \_build\_content pragma: no cover
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-StockDetailDialog-BuildContent-No-Cover** | #M12-031 测试覆盖：stock\_detail\_dialog.py:505 \_build\_content pragma: no cover | ① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：`ui/components/stock_detail_dialog.py:505` `_build_content` 标记 `# pragma: no cover`。该函数是 UI 渲染逻辑，标记 no cover 意味着无测试覆盖。M12 未修复原因：修复需补充测试，但 UI 渲染测试较复杂。相关文件：`ui/components/stock_detail_dialog.py:505`。
-
-**期望的最终解法**
-
-补充 `_build_content` 测试覆盖。验收标准：① 移除 `# pragma: no cover`；② 现有 `test_stock_detail_dialog*.py` 全过。upgrade 触发条件：① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时。
 
 #### P3-PR3-TextButton-Interactive-Unverified：PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证
 
@@ -508,48 +473,6 @@ M12 ui 表现层模块检视发现：`ui/views/screener_view.py` 35 个 import�
 
 拆分 screener\_view\.py / data\_view\.py 职责到子组件或工具模块。验收标准：① 单文件 import 数 ≤ 15；② 现有测试全过。upgrade 触发条件：① 任一 View 文件 import 数 > 40 时；② 或该文件因其他任务被修改且 import 数继续增长时。
 
-#### P3-M12-VirtualTable-ArrowSort-Indicator：#M12-020 可访问性：virtual\_table.py:291-292 ↑↓ 排序指示器
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-VirtualTable-ArrowSort-Indicator** | #M12-020 可访问性：virtual\_table.py:291-292 ↑↓ 排序指示器 | ① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：`ui/components/virtual_table.py:291-292` 使用 ↑↓ 文本符号作为排序指示器。属性技术符号非 emoji，但依赖字体支持。M12 未修复原因：修复需替换为 `ft.Icon`，但需评估布局影响。相关文件：`ui/components/virtual_table.py:291-292`。
-
-**期望的最终解法**
-
-替换为 `ft.Icon(ft.Icons.ARROW_UPWARD)` / `ft.Icon(ft.Icons.ARROW_DOWNWARD)`。验收标准：① 排序指示器使用 ft.Icon；② 现有 `test_virtual_table*.py` 全过。upgrade 触发条件：① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时。
-
-#### P3-M12-TushareConfigPanel-Referrer-Code-In-Url：#M12-021 隐私：tushare\_config\_panel_view\_model.py:37 URL 含 referrer code
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-TushareConfigPanel-Referrer-Code-In-Url** | #M12-021 隐私：tushare\_config\_panel_view\_model.py:37 URL 含 referrer code | ① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：`ui/viewmodels/tushare_config_panel_view_model.py:37` `_TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"` 含 referrer code（reg=728426）。用户点击注册链接会带 referrer code，可能涉及推广分成。M12 未修复原因：移除 referrer code 需评估是否影响项目维护者收益，属业务决策。相关文件：`ui/viewmodels/tushare_config_panel_view_model.py:37`。
-
-**期望的最终解法**
-
-评估是否移除 referrer code。验收标准：① 若移除，URL 改为 `https://tushare.pro/register`；并在同一次变更中同步更新 `tests/unit/ui/viewmodels/test_tushare_config_panel_view_model.py` 里硬编码该注册 URL 的断言（否则该用例必然失败）；② 现有测试全过。
-
-#### P3-M12-ViewModels-Repeated-Singleton-Calls：#M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-ViewModels-Repeated-Singleton-Calls** | #M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例 | ① 该 VM 文件再次出现重复构造单例的新实例时；② 或 VM 性能审计中单例调用开销被量化超阈值时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：VM 中重复调用 `TushareClient()` / `TaskManager()` 等单例（每次调用都会进入各单例类自身实现的 `__new__`；`@register_singleton` 只负责登记以便统一重置，并不提供 `__new__`）。虽然单例模式保证只创建一个实例，但重复调用有轻微性能开销。M12 未修复原因：修复需在 VM `__init__` 中缓存单例引用，但需评估生命周期（VM dispose 时是否需要释放）。相关文件：`ui/viewmodels/` 下多个文件。
-
-**期望的最终解法**
-
-在 VM `__init__` 中缓存单例引用。验收标准：① VM 不重复调用单例；② 现有测试全过。upgrade 触发条件：① 该 VM 文件再次出现重复构造单例的新实例时；② 或 VM 性能审计中单例调用开销被量化超阈值时。
-
 #### P3-M12-Views-Get-DataProcessor-Cross-Layer：#M12-025 MVVM 边界：data\_source\_tab.py View 经 VM 获取 data\_processor 传子组件（data\_view.py 已解决）
 
 | 级别 | 一句话 | upgrade 触发条件 |
@@ -563,20 +486,6 @@ M12 ui 表现层模块检视发现：`ui/views/settings_tabs/data_source_tab.py:
 **期望的最终解法**
 
 引入子组件 VM，View 不直接获取 data\_processor。验收标准：① View 不直接获取 data\_processor；② 现有测试全过。upgrade 触发条件：① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时。
-
-#### P3-M12-NewsFeed-Callback-Passes-ControlEvent：#M12-028 MVVM 边界：news\_feed.py:328/:359 on\_load\_more\_click 传递 ControlEvent 而非业务数据
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-NewsFeed-Callback-Passes-ControlEvent** | #M12-028 MVVM 边界：news\_feed.py:328/:359 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：`ui/components/news_feed.py:328/359` `on_load_more_click` 传递 `ControlEvent` 而非业务数据（2026-10-31 复核：`_build_load_more_button` 形参 `:328`、`NewsFeed` 组件形参 `:359`）。严格 MVVM 边界下，回调应传递业务数据而非 Flet 控件事件。M12 未修复原因：修复需重构回调签名，跨多文件协调。相关文件：`ui/components/news_feed.py:328/359`。
-
-**期望的最终解法**
-
-重构回调签名为传递业务数据。验收标准：① 回调不传递 ControlEvent；② 现有 `test_news_feed*.py` 全过。upgrade 触发条件：① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时。
 
 ### 启动性能与连接管理
 
@@ -754,20 +663,6 @@ review06（安全与供应链，2026-08-24）发现：LLM 输出会参与选股�
 
 补齐 LLM 输出完整 schema 校验（AI 免责声明已于 UX-09 落地，无需重复）。upgrade 触发条件：① LLM 坏输出未被校验拦截并流入排序/展示的事故时；② 或输出契约（core/prompt_base.py）字段扩展时；③ 或 AI 排序结果进入导出/分享链路时。
 
-#### P3-REV06-Restore-HeaderValidation：review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-REV06-Restore-HeaderValidation** | review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示 | ① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时 |
-
-**产生背景与现状**
-
-review06（安全与供应链，2026-08-24）发现：备份恢复路径仅做文件存在性检查，恢复损坏/伪造的备份文件时错误暴露晚、缺少版本/元信息预览。
-
-**期望的最终解法**
-
-恢复前校验 pg_dump 文件 magic header（`PGDMP`）并在 UI 展示版本/元信息。upgrade 触发条件：① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时。
-
 #### P2-REV06-Backup-Encryption：review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份
 
 | 级别 | 一句话 | upgrade 触发条件 |
@@ -829,6 +724,16 @@ DATA-05（0022 迁移，2026-09-12）已将 `financial_reports` 主键从 `(ts_c
 **决策与缓解**
 
 v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万二级行业名，存量行已混入申万值。DAT-08③ 移除写时覆写后 `stock_basic.industry` 不再被污染，但**已入库存量**在下次全量同步前 `industry_tushare` 可能显示申万值。**决策**：不单独回刷（全量同步本身即自愈路径，Tushare 快照成本已计入同步配额；单独回刷需新增一次性 SQL/脚本，违背 YAGNI）。**缓解**：下次 `sync_stock_basic` 全量同步后 `industry_tushare` 自动恢复 Tushare 原始值；UI 详情页同时展示两列便于用户识别。相关文件：`data/data_processor.py`（`sync_stock_basic`）、`data/persistence/daos/stock_dao.py`（`save_stock_basic`）。
+
+#### P3-M12-TushareConfigPanel-Referrer-Code-In-Url：Tushare 注册链接保留推荐码：外发 URL 携带追踪参数，属维护者收益的产品决策（#M12-021）
+
+| 层级 | 问题描述 |
+|------|----------|
+| **P3-M12-TushareConfigPanel-Referrer-Code-In-Url** | Tushare 注册链接保留推荐码：外发 URL 携带追踪参数，属维护者收益的产品决策（#M12-021） |
+
+**决策与缓解**
+
+`ui/viewmodels/tushare_config_panel_view_model.py` 的 `_TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"` 在用户点击「去 Tushare 注册」时外发 URL 携带推荐码（`reg=728426`），用户可据此判断链接来源。**决策**：保留推荐码（维护者收益的产品决策，由用户确认「保留推荐码并转为已接受权衡」）。**缓解**：推荐码为 Tushare 官方注册参数，不含用户身份信息，不构成个人信息外泄；链接由用户主动点击触发，不在后台静默外发。**upgrade 触发条件**：① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时。相关文件：`ui/viewmodels/tushare_config_panel_view_model.py`、`tests/unit/ui/viewmodels/test_tushare_config_panel_view_model.py`。
 
 ## 引用关系
 
