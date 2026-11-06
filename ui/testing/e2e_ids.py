@@ -163,6 +163,9 @@ class _SettingsIds:
     LANGUAGE_DROPDOWN: Eid = ("e2e.settings.language_dropdown", AnchorKind.COMPLEX)
     THEME_DROPDOWN: Eid = ("e2e.settings.theme_dropdown", AnchorKind.COMPLEX)
     LOG_LEVEL_DROPDOWN: Eid = ("e2e.settings.log_level_dropdown", AnchorKind.COMPLEX)
+    # FUP-014: 数据同步数值型进度条 (LABEL, 纯展示, 无点击)。仅包裹 value 为
+    # 0..1 数值的 ProgressBar；cache_clear 的 indeterminate 分支不挂同一 EID。
+    DATA_SOURCE_PROGRESS: Eid = ("e2e.settings.data_source_progress", AnchorKind.LABEL)
 
     _TAB_PREFIX = "e2e.settings.tab"
 
@@ -423,6 +426,7 @@ class _TaskCenterIds:
     TASK_LIST: Eid = ("e2e.task_center.task_list", AnchorKind.LABEL)
 
     _TASK_ROW_PREFIX = "e2e.task_center.task_row"
+    _TASK_PROGRESS_PREFIX = "e2e.task_center.task_progress"
 
     @staticmethod
     def task_row(task_id: str) -> Eid:
@@ -432,6 +436,18 @@ class _TaskCenterIds:
         调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
         """
         return (f"{_TaskCenterIds._TASK_ROW_PREFIX}.{task_id}", AnchorKind.LABEL)
+
+    @staticmethod
+    def task_progress(task_id: str) -> Eid:
+        """生成任务行内数值型进度条 anchor (LABEL, 纯展示)。
+
+        仅用于 value 为 0..1 数值的 ``ft.ProgressBar``；QUEUED 等 indeterminate
+        分支（value=None）不挂该 anchor，避免把「未知」伪装成数值语义（R21）。
+
+        Precondition: task_id 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
+        """
+        return (f"{_TaskCenterIds._TASK_PROGRESS_PREFIX}.{task_id}", AnchorKind.LABEL)
 
 
 class _WatchlistIds:
