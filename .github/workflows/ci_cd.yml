@@ -633,7 +633,7 @@ jobs:
           # Constrain fastapi<0.145: flet-web 1.0.5 passes the removed `openapi_prefix` to
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
-          uv pip install --system flet-web==1.0.5 "fastapi<0.145"
+          uv pip install --system flet-web==1.1.0 "fastapi<0.145"
           # playwright 已随 requirements-optional.txt 由上面的 uv 安装；此处只需补 pytest-playwright，
           # 走 uv 缓存，避免每腿再用裸 pip 重复解析/下载 playwright。固定版本保证 5 腿一致；
           # 迁入 pyproject 会触发 requirements 全量重锁（索引漂移），单独 PR 处理。
@@ -1032,7 +1032,7 @@ jobs:
           # Constrain fastapi<0.145: flet-web 1.0.5 passes the removed `openapi_prefix` to
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
-          uv pip install --system flet-web==1.0.5 "fastapi<0.145"
+          uv pip install --system flet-web==1.1.0 "fastapi<0.145"
 
       - name: Install Rust toolchain (1.97.1)
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
@@ -1245,7 +1245,7 @@ jobs:
           # Constrain fastapi<0.145: flet-web 1.0.5 passes the removed `openapi_prefix` to
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
-          uv pip install --system flet-web==1.0.5 "fastapi<0.145"
+          uv pip install --system flet-web==1.1.0 "fastapi<0.145"
           uv pip install --system pytest-playwright==0.8.0
 
       - name: Free disk space
@@ -1470,7 +1470,7 @@ jobs:
           # Constrain fastapi<0.145: flet-web 1.0.5 passes the removed `openapi_prefix` to
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
-          uv pip install --system flet-web==1.0.5 "fastapi<0.145"
+          uv pip install --system flet-web==1.1.0 "fastapi<0.145"
           uv pip install --system pytest-playwright==0.8.0
 
       - name: Free disk space

@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "flet_web_version": "1.1.0",
+  "engine_revision": "89c39edfdfae2949f6806e4a315c0c08522238b7",
+  "generated_by": "python -m tests.e2e._asset_manifest",
+  "sources": [
+    {
+      "tree": "canvaskit",
+      "origin": "PyPI wheel flet-web 的 flet_web/web/canvaskit（同版预装）",
+      "transform": "逐字节复制，未修改；子目录集合随 engineRevision 变化"
+    },
+    {
+      "tree": "rive",
+      "origin": "@rive-app/flutter-native-wasm（运行时 CDN 已缓存副本）",
+      "transform": "逐字节复制，未修改"
+    }
+  ],
+  "licenses": {
+    "canvaskit": "Apache-2.0（Flutter engine / Skia）",
+    "rive": "MIT（@rive-app/flutter-native-wasm）"
+  },
+  "fonts": {
+    "path_glob": "fonts/*.woff2",
+    "digest_exempt_reason": "字体分片由 _font_urls.find_missing_fonts 按 main.dart.js 所需文件名完整性校验；分片内容随 Google Fonts 版本滚动，逐文件摘要会随 CDN 更新产生无意义噪声"
+  },
+  "assets": [
+    {
+      "path": "canvaskit/canvaskit.js",
+      "sha256": "bb559f6080c7d312ac2a912b4abec9f68ff3d3022d4a603c7796b9b31460642b",
+      "size": 86987
+    },
+    {
+      "path": "canvaskit/canvaskit.js.symbols",
+      "sha256": "384f80b392972c83fd4f262527e3d06215a297d33ed59732c726721e9d9311bd",
+      "size": 1356926
+    },
+    {
+      "path": "canvaskit/canvaskit.wasm",
+      "sha256": "fbed517a43e82452404446683f00f2e876d835aed84410695759e67b6bb01cd3",
+      "size": 7284602
+    },
+    {
+      "path": "canvaskit/chromium/canvaskit.js",
+      "sha256": "6018b12bd8ed37e6952eee72d59c1cf7ad707ccdb74a0a45190010f77edd9068",
+      "size": 86226
+    },
+    {
+      "path": "canvaskit/chromium/canvaskit.js.symbols",
+      "sha256": "31c86fac6042dd8b756150832c1d15495d0d07742e2718f75dbdde5a5a91455e",
+      "size": 1235870
+    },
+    {
+      "path": "canvaskit/chromium/canvaskit.wasm",
+      "sha256": "ae8ff1d858140f7b1300ced3fa89fb8c9dce0a400a0f4f1e11f6dcfb3315fdcf",
+      "size": 5428806
+    },
+    {
+      "path": "canvaskit/skwasm.js",
+      "sha256": "71d7d3e34bf71b52bdba3b588b103bba8148ba28de5754083e01b3398e7a6e1c",
+      "size": 63537
+    },
+    {
+      "path": "canvaskit/skwasm.js.symbols",
+      "sha256": "9137f1a3ae744dea575043abfc6e063a047e910e6dab1ee53e496c975d1c033e",
+      "size": 1540006
+    },
+    {
+      "path": "canvaskit/skwasm.wasm",
+      "sha256": "e540fd5e8303b7b68ec2718cb49e9c421f8ade3075b15e02a7059a62654df9a1",
+      "size": 3593715
+    },
+    {
+      "path": "canvaskit/skwasm_heavy.js",
+      "sha256": "cec554b46ddcf4c0e63d799e0556d546f42d2c3f69316fb4f67ed776f6104558",
+      "size": 63650
+    },
+    {
+      "path": "canvaskit/skwasm_heavy.js.symbols",
+      "sha256": "b6b79ed497e11d4cd13cc46724f9e289eacc744d2d185e31c72d595cdf62772b",
+      "size": 1672152
+    },
+    {
+      "path": "canvaskit/skwasm_heavy.wasm",
+      "sha256": "565f5cc1cca6ab120f11934b105f01fec4b58b480c82e0889dca93af8e6f8635",
+      "size": 5216217
+    },
+    {
+      "path": "canvaskit/webparagraph/canvaskit.js",
+      "sha256": "3110e3e4d9b7b5657d336f253aaca8acca5777cde9319fb69ac302d6ff5a8b23",
+      "size": 76114
+    },
+    {
+      "path": "canvaskit/webparagraph/canvaskit.js.symbols",
+      "sha256": "44d6c47919106235cf32252252490cdf798d907ee874ba343ab53dc94bc2a9dc",
+      "size": 963641
+    },
+    {
+      "path": "canvaskit/webparagraph/canvaskit.wasm",
+      "sha256": "0ce1b05082efdc8529550e8a01f6ff0593972d55525035010e26f5600aa9f254",
+      "size": 3729129
+    },
+    {
+      "path": "canvaskit/wimp.js",
+      "sha256": "8fd8a47480c6eb0a374d159912d0b3fb15661b41f5c113ecdd39c2f01f2bee46",
+      "size": 59127
+    },
+    {
+      "path": "canvaskit/wimp.js.symbols",
+      "sha256": "b4907ebd33131302a8cd99f7c55f52357bdfde04f421b605a616ba8764ae1de4",
+      "size": 1813030
+    },
+    {
+      "path": "canvaskit/wimp.wasm",
+      "sha256": "e924eaafd801d41e017d178f3fd5cf8a417f641fe35c9ed34a4e1d7582283e0c",
+      "size": 3581677
+    },
+    {
+      "path": "rive/wasm/rive_native.js",
+      "sha256": "4591b7b9ca0f26793dd401cea48e840038ddf79b4c2a04a811143ab237dfbb26",
+      "size": 219477
+    },
+    {
+      "path": "rive/wasm/rive_native.wasm",
+      "sha256": "22fa34a1a9f4d28b12489618f5daa93cefd03241303cc7ce2c726add2f5b9672",
+      "size": 2739767
+    },
+    {
+      "path": "rive/wasm_compatibility/rive_native.js",
+      "sha256": "52a9646fb2159d626f73d980f6f990359772bb278b0cb45c431bd0831d763843",
+      "size": 224775
+    },
+    {
+      "path": "rive/wasm_compatibility/rive_native.wasm",
+      "sha256": "a62f6b7e76501bd1ef3db7268c99483f05c635d22b77cbeff9597ae739d6cb44",
+      "size": 2622648
+    }
+  ]
+}

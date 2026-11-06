@@ -77,7 +77,8 @@ def extract_canvaskit_relpath(path: str) -> str | None:
     """从 URL path 中提取 canvaskit 资源相对路径（保留子目录结构）。
 
     被 ``tests/e2e/conftest.py`` route handler 复用，支持 flet 0.86.3 引入的
-    ``chromium`` / ``experimental_webparagraph`` 子目录变体。
+    ``chromium`` / ``webparagraph`` 子目录变体（1.1.0 起由
+    ``experimental_webparagraph`` 更名而来）。
 
     采用「末尾两段」策略：若 URL path 末尾第 2 段是子目录标记，则保留
     ``<subdir>/<filename>``，否则只保留 ``<filename>``。这样可统一处理
@@ -88,7 +89,7 @@ def extract_canvaskit_relpath(path: str) -> str | None:
 
         /<base>/canvaskit/<filename>                       → <filename>
         /<base>/canvaskit/chromium/<filename>              → chromium/<filename>
-        /<base>/canvaskit/experimental_webparagraph/<fn>   → experimental_webparagraph/<fn>
+        /<base>/canvaskit/webparagraph/<fn>               → webparagraph/<fn>
         /flutter-canvaskit/<hash>/<filename>               → <filename>
         /flutter-canvaskit/<hash>/chromium/<filename>      → chromium/<filename>
         /<base>/skwasm.js                                  → skwasm.js
@@ -101,7 +102,7 @@ def extract_canvaskit_relpath(path: str) -> str | None:
     Args:
         path: URL path（如 ``"/canvaskit/chromium/canvaskit.js"``）。
     """
-    subdir_markers = frozenset({"chromium", "experimental_webparagraph"})
+    subdir_markers = frozenset({"chromium", "webparagraph"})
     parts = PurePosixPath(path).parts
     if any(p in (".", "..") or "\\" in p for p in parts):
         return None

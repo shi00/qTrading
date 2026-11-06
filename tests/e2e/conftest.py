@@ -217,15 +217,18 @@ async def e2e_playwright():
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def e2e_browser(e2e_playwright):
-    # 启动期断言 canvaskit.wasm 本地存在（route handler 离线化依赖此文件）
+    # 启动期断言 mock 资产与 manifest 一致（引擎 revision / 文件存在 / 摘要）
     mock_root = Path(__file__).resolve().parent / "mock_assets"
-    wasm_path = mock_root / "canvaskit" / "canvaskit.wasm"
-    if not wasm_path.exists():
+    from tests.e2e._asset_manifest import verify_assets
+
+    asset_problems = verify_assets(mock_root)
+    if asset_problems:
+        preview = "；".join(asset_problems[:5])
+        # R9: 不在错误信息中泄露绝对路径（含用户名/工作区路径）
         raise RuntimeError(
-            f"canvaskit.wasm not found at {wasm_path}. "
-            "E2E 离线化依赖此文件，请从 flet_web 内置 canvaskit 目录复制："
-            "`cp <site-packages>/flet_web/web/canvaskit/canvaskit.wasm "
-            "tests/e2e/mock_assets/canvaskit/`（版本必须与 pyproject.toml 锁定的 flet 版本一致）"
+            f"E2E mock 资产与 manifest 不一致（共 {len(asset_problems)} 项，前 5 项: {preview}）。"
+            "canvaskit 版本由 Flutter engineRevision 决定；升级 flet 后必须重新同步 "
+            "tests/e2e/mock_assets/ 并运行 `python -m tests.e2e._asset_manifest` 重新生成清单。"
         )
     # 启动期断言字体缓存完整覆盖 main.dart.js 中所有需缓存字体分片
     # CanvasKit 按需加载，缓存缺失 → route handler abort → CJK 文本节点不生成 → E2E 超时

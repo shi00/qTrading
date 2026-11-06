@@ -1,0 +1,17 @@
+E2E mock 资产许可声明
+====================
+
+本目录下的离线资源副本仅用于本仓库 E2E 测试，不随产品分发。
+
+canvaskit/   —— Apache License 2.0（Flutter engine / Skia）
+                https://github.com/flutter/engine/blob/main/sky/packages/sky_engine/LICENSE
+                来源：PyPI wheel flet-web 的 flet_web/web/canvaskit（逐字节复制，未修改）
+
+rive/        —— MIT License（@rive-app/flutter-native-wasm）
+                https://github.com/rive-app/rive-flutter/blob/master/LICENSE
+                来源：运行时 CDN 已缓存副本（逐字节复制，未修改）
+
+fonts/       —— 各字体族按其原始许可（Noto Sans SC / Roboto / Noto Sans 均为 SIL Open Font License 1.1）
+                https://fonts.google.com/ 来源：fonts.gstatic.com 同步缓存
+
+逐文件 SHA-256、来源包版本与 engineRevision 见同目录 manifest.json。
