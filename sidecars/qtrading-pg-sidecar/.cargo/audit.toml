@@ -1,0 +1,7 @@
+[advisories]
+# RUSTSEC-2026-0441: pin-utils 0.1.0 标记为 unmaintained（无漏洞）。
+# 依赖链 pin-utils <- wasmtimer <- reqwest-retry <- postgresql_archive <- postgresql_embedded，
+# wasmtimer 仅用于 wasm 目标，四个发布目标（windows-x64 / linux-x64 / linux-arm64 / macos-arm64）
+# 均不编译该 crate；postgresql_embedded 现为最新版（0.22.0），无上游升级路径。
+# 复核触发：postgresql_embedded 升级、或开始构建 wasm 目标时移除本忽略。
+ignore = ["RUSTSEC-2026-0441"]
