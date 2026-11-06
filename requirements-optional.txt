@@ -211,7 +211,7 @@ numpy==2.5.4
     #   exchange-calendars
     #   llama-cpp-python
     #   pandas
-oauthlib==4.0.0
+oauthlib==4.0.1
     # via
     #   astockscreener (pyproject.toml)
     #   flet

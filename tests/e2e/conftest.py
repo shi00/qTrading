@@ -1276,9 +1276,17 @@ async def _trigger_sidecar_startup_via_browser(
             last_diag_log = time.monotonic()
         if not flet_app.is_alive():
             await context.close()
+            # 退出码与 app 日志尾部内联进异常消息：app 子进程日志只落盘，CI job 日志默认
+            # 看不到，仅提示「Check logs/...」会让 setup error 缺少根因证据
+            # （2026-11-05 run 42008447714 的 3 个 setup error 即此形态）。
+            # 本函数内同名符号由下方诊断分支的局部 import 绑定为局部变量，须先局部导入再用。
+            from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
+
+            log_tail = _read_log_tail(PROJECT_ROOT / "logs" / "e2e-flet-app.log", max_chars=4000)
             raise RuntimeError(
-                f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup. "
-                "Check logs/e2e-flet-app.log for details."
+                f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup "
+                f"with code {flet_app.proc.poll()}. Check logs/e2e-flet-app.log for details. "
+                f"Log tail:\n{log_tail}"
             )
         if url_file_appeared:
             error_text = I18n.get("error_db_init_failed")

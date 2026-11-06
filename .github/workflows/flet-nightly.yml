@@ -20,7 +20,12 @@ concurrency:
 jobs:
   flet-compatibility-check:
     name: Flet Nightly Compatibility Check
-    runs-on: ubuntu-latest
+    # 锁定 Ubuntu 24.04：ubuntu-latest 已迁至 26.04，该系统只提供 libxml2 2.15
+    # （soname libxml2.so.16），而 sidecar 下载的 PostgreSQL 二进制动态链接
+    # libxml2.so.2，initdb 直接失败（2026-11-05 run 42008447714 / 11-06 复现：
+    # `error while loading shared libraries: libxml2.so.2`）。与 sidecar.yml、
+    # ci_cd.yml embedded-tests 采用同一处理；升级 bundled PG 后需复测本约束。
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -136,6 +141,26 @@ jobs:
           E2E_TIMEOUT_MULTIPLIER: "2.0"
         run: |
           python -m pytest tests/e2e/test_navigation.py -v --tb=short
+
+      # 失败取证：app 子进程 stdout/stderr 只落在 logs/e2e-flet-app.log，job 日志里看不到
+      # 退出原因（run 42008447714 的 3 个 setup error 因此无根因证据）。上传前按 R9 脱敏，
+      # 与 ci_cd.yml embedded-tests 的工件处理保持一致。
+      - name: Sanitize E2E diagnostics
+        if: always()
+        shell: bash
+        run: |
+          python scripts/sanitize_artifacts.py logs/e2e-flet-app.log logs/main_trace.log
+
+      - name: Upload E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: flet-nightly-e2e-diagnostics
+          path: |
+            logs/e2e-flet-app.log
+            logs/main_trace.log
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Create issue on failure
         if: failure()
