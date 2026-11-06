@@ -733,7 +733,7 @@ v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万�
 
 **决策与缓解**
 
-`ui/viewmodels/tushare_config_panel_view_model.py` 的 `_TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"` 在用户点击「去 Tushare 注册」时外发 URL 携带推荐码（`reg=728426`），用户可据此判断链接来源。**决策**：保留推荐码（维护者收益的产品决策，由用户确认「保留推荐码并转为已接受权衡」）。**缓解**：推荐码为 Tushare 官方注册参数，不含用户身份信息，不构成个人信息外泄；链接由用户主动点击触发，不在后台静默外发。**upgrade 触发条件**：① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时。相关文件：`ui/viewmodels/tushare_config_panel_view_model.py`、`tests/unit/ui/viewmodels/test_tushare_config_panel_view_model.py`。
+`ui/viewmodels/tushare_config_panel_view_model.py` 的 `_TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"` 在用户点击「去 Tushare 注册」时外发 URL 携带推荐码（`reg=728426`），用户可据此判断链接来源。**决策**：保留推荐码（维护者收益的产品决策，按已接受权衡归档）。**缓解**：推荐码为 Tushare 官方注册参数，不含用户身份信息，不构成个人信息外泄；链接由用户主动点击触发，不在后台静默外发。**upgrade 触发条件**：① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时。相关文件：`ui/viewmodels/tushare_config_panel_view_model.py`、`tests/unit/ui/viewmodels/test_tushare_config_panel_view_model.py`。
 
 ## 引用关系
 
