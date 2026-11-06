@@ -8,6 +8,7 @@ data_scope_digest 必须写入原安全 schema 并被 authorize_attempt 严格�
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -199,7 +200,7 @@ async def test_agent_service_reads_grants_with_scope_digest(service) -> None:
     await _seed_connection(service)
     await _grant(service)
     agent = await _agent(service)
-    result = await agent.read_authorizations()
+    result = json.loads(await agent.read_authorizations())
     assert result["config_revision"] >= 1
     assert result["scope_version"] == 1
     assert result["grants"][0]["purpose"] == "agent_research"
@@ -221,7 +222,8 @@ async def test_agent_service_revokes_through_original_service(service) -> None:
     await _grant(service)
     grant_id = _grants()[0]["grant_id"]
     agent = await _agent(service)
-    outcome = await agent.revoke_authorization(grant_id, _revision(), "op-m03-agent-revoke")
+    operation_id = uuid.uuid4()
+    outcome = await agent.revoke_authorization(operation_id, grant_id, _revision())
     assert outcome.status == "committed"
     raw = json.loads(json.dumps(_grants()))
     assert raw[0]["revoked_at"] is not None

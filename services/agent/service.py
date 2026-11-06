@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from core.agent_types import (
@@ -274,34 +274,40 @@ class AgentService:
             raise RuntimeError("AgentService 未注入 ModelConfigurationService，不能读取或撤销授权")
         return self._model_config_service
 
-    async def read_authorizations(self) -> dict[str, Any]:
+    async def read_authorizations(self, execution_id: UUID | None = None) -> JsonDoc:
         """新鲜读取安全 grant；读取失败原样传播，绝不降级为空授权列表。"""
+        if execution_id is not None and not isinstance(execution_id, UUID):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("execution_id", "invalid_uuid"),)))
         snapshot = await self._model_config().get_snapshot()
-        return {
-            "config_revision": snapshot.config_revision,
-            "security_revision": snapshot.security_revision,
-            "scope_version": snapshot.security_scope_version,
-            "grants": [
-                {
-                    "grant_id": grant.get("grant_id"),
-                    "connection_id": grant.get("connection_id"),
-                    "target_fingerprint": grant.get("target_fingerprint"),
-                    "purpose": grant.get("purpose"),
-                    "scope_version": grant.get("scope_version"),
-                    "revoked_at": grant.get("revoked_at"),
-                    "data_scope_digest": grant.get("data_scope_digest"),
-                }
-                for grant in snapshot.security_grants
-            ],
-            # 决定-grant 关联由 N03 落地；此处不伪造已关联事实。
-            "agent_scopes": [],
-            "problem": None,
-        }
+        return json_doc(
+            {
+                "config_revision": snapshot.config_revision,
+                "security_revision": snapshot.security_revision,
+                "scope_version": snapshot.security_scope_version,
+                "grants": [
+                    {
+                        "grant_id": grant.get("grant_id"),
+                        "connection_id": grant.get("connection_id"),
+                        "target_fingerprint": grant.get("target_fingerprint"),
+                        "purpose": grant.get("purpose"),
+                        "scope_version": grant.get("scope_version"),
+                        "revoked_at": grant.get("revoked_at"),
+                        "data_scope_digest": grant.get("data_scope_digest"),
+                    }
+                    for grant in snapshot.security_grants
+                ],
+                # 决定-grant 关联由 N03 落地；此处不伪造已关联事实。
+                "agent_scopes": [],
+                "problem": None,
+            }
+        )
 
     async def revoke_authorization(
-        self, grant_id: str, expected_revision: int, operation_id: str
+        self, operation_id: UUID, grant_id: str, expected_config_revision: int
     ) -> ConfigurationSaveOutcome:
-        return await self._model_config().revoke_egress(grant_id, expected_revision, operation_id)
+        if not isinstance(operation_id, UUID):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("operation_id", "invalid_uuid"),)))
+        return await self._model_config().revoke_egress(grant_id, expected_config_revision, str(operation_id))
 
     async def close(self) -> None:
         return None
