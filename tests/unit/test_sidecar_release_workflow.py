@@ -172,12 +172,22 @@ def test_only_publisher_has_write_permissions(workflow: dict[str, Any]) -> None:
     assert winners == [PUBLISH_JOB], f"写权限只能授予 {PUBLISH_JOB}，实际: {winners}"
 
 
-def test_no_matrix_release_creation_and_no_clobber_anywhere() -> None:
+def test_no_matrix_release_creation_and_no_clobber_anywhere(workflow: dict[str, Any]) -> None:
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
-    # 副作用集中：不再有四腿各自创建 Release / 上传覆盖
+    # 副作用集中：不再有四腿各自创建 Release，也不使用 --clobber 改写既有资产。
     assert "gh release create" not in text
-    assert "gh release upload" not in text
     assert "--clobber" not in text
+    # gh release upload 只允许出现在单一 publisher 的上传步骤；四平台构建与其余 job
+    # 均为只读，不得执行发布写操作。
+    names = [s.get("name") for s in _job(workflow, PUBLISH_JOB)["steps"]]
+    assert names.count(UPLOAD_STEP) == 1
+    upload_run = _step(workflow, PUBLISH_JOB, UPLOAD_STEP)["run"]
+    invocations = [line.strip() for line in upload_run.splitlines() if line.strip().startswith("gh release upload")]
+    assert len(invocations) == 1, "只允许单一 gh release upload 上传调用"
+    for name in workflow["jobs"]:
+        if name == PUBLISH_JOB:
+            continue
+        assert "gh release upload" not in _dump(workflow["jobs"][name]), f"{name} 不得执行发布写操作"
 
 
 def test_publisher_downloads_all_four_platform_artifacts(workflow: dict[str, Any]) -> None:
@@ -249,10 +259,11 @@ def test_draft_is_created_unpublished_then_published_exactly_once(workflow: dict
     upload = _step(workflow, PUBLISH_JOB, UPLOAD_STEP)["run"]
     assert "-F draft=true" in upload
     assert "-F generate_release_notes=true" in upload
-    assert "releases/${RELEASE_ID}/assets" in upload
-    # 上传阶段使用二进制 body，且不通过覆盖开关改写既有资产
-    assert "Content-Type: application/octet-stream" in upload
-    assert "--input" in upload
+    # 上传端点必须来自 Release 对象的 upload_url（普通 API 的 assets 路径不能替代）。
+    assert ".upload_url" in upload
+    assert 'upload_url="${upload_url%%\\{*}"' in upload, "upload_url 必须剥离 URI template"
+    assert "gh release upload" in upload
+    assert "--clobber" not in upload
     assert "draft=false" not in upload
 
     remote_verify = _step(workflow, PUBLISH_JOB, REMOTE_VERIFY_STEP)["run"]
@@ -270,6 +281,27 @@ def test_draft_is_created_unpublished_then_published_exactly_once(workflow: dict
     assert "draft=false" not in yaml.safe_dump(_job(workflow, PUBLISH_JOB)["steps"][:4], allow_unicode=True), (
         "draft=false 只能出现在最后一步 publish"
     )
+
+
+def test_upload_step_fetches_and_validates_upload_url_in_both_paths(workflow: dict[str, Any]) -> None:
+    upload = _step(workflow, PUBLISH_JOB, UPLOAD_STEP)["run"]
+    # 新建 draft：创建响应本身即 Release 对象；复用 draft：再次 GET 该 Release。
+    assert "release_json=release-assets/draft.json" in upload
+    assert "release_json=release-assets/reused-draft.json" in upload
+    assert 'gh api "repos/${GH_REPO}/releases/${RELEASE_ID}" > "$release_json"' in upload
+    assert '"$(jq -r \'.draft // false\' "$release_json")" != "true"' in upload
+    # 两条分支汇合后统一读取 upload_url，并 fail-closed 校验。
+    assert 'upload_url=$(jq -r \'.upload_url // ""\' "$release_json")' in upload
+    assert "has no upload_url" in upload
+    assert "^https?://[^/]+/" in upload, "upload_url 必须是带主机的绝对 URL"
+    assert '"/repos/${GH_REPO}/releases/${RELEASE_ID}/assets"' in upload, "upload_url 必须指向本仓库本 Release"
+    assert 'api_base="${GITHUB_API_URL:-https://api.github.com}"' in upload, "不得硬编码单一域名"
+    assert 'api_base="${api_base%/}"' in upload
+    assert "refusing to use the API assets endpoint" in upload
+    # 回归防线：上传调用不得再直接使用相对 API assets 路径 / 二进制 body 参数。
+    assert "--input" not in upload
+    assert "gh api --method POST" in upload  # 仅保留创建 draft 的 POST
+    assert 'gh release upload "$TAG" "${files[@]}" --repo "$GH_REPO"' in upload
 
 
 def test_remote_verify_checks_exact_asset_set_and_server_digest(workflow: dict[str, Any]) -> None:

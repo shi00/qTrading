@@ -435,7 +435,10 @@ jobs:
         run: |
           set -euo pipefail
           # 原子发布第 3 步：只创建 draft（对外不可见、不能标记 latest）；失败最多留下
-          # draft。上传走 Release assets API，不使用任何覆盖开关改写既有资产。
+          # draft。上传必须走 Release 返回的 upload_url（资产上传主机与普通 API 主机不同，
+          # 直接向 repos/.../releases/{id}/assets 发 POST 无法完成上传），且不使用任何
+          # 覆盖开关改写既有资产。
+          release_json=release-assets/draft.json
           if [ -z "${RELEASE_ID:-}" ]; then
             gh api --method POST "repos/${GH_REPO}/releases" \
               -f "tag_name=${TAG}" \
@@ -453,8 +456,48 @@ jobs:
               exit 1
             fi
           else
+            # 复用 draft：重新取得 Release 对象，既复核 draft 状态也取得 upload_url。
+            release_json=release-assets/reused-draft.json
+            gh api "repos/${GH_REPO}/releases/${RELEASE_ID}" > "$release_json"
+            if [ "$(jq -r '.draft // false' "$release_json")" != "true" ]; then
+              echo "::error::release ${TAG} (id=${RELEASE_ID}) is not a draft; refusing to upload."
+              exit 1
+            fi
             echo "Reusing existing draft release id=${RELEASE_ID}."
           fi
+          if [ "$(jq -r '.tag_name // ""' "$release_json")" != "$TAG" ]; then
+            echo "::error::release ${TAG} (id=${RELEASE_ID}) tag_name does not match; refusing to upload."
+            exit 1
+          fi
+          # upload_url 必须来自 Release 对象本身（不得拿普通 API 的 assets 列表路径顶替）。
+          # 剥离 URI template（{?name,label} 等）后校验绝对 URL、Release id 与仓库路径；
+          # 域名不做硬编码，兼容 GitHub Enterprise 自定义主机。
+          upload_url=$(jq -r '.upload_url // ""' "$release_json")
+          if [ -z "$upload_url" ]; then
+            echo "::error::release ${TAG} has no upload_url; refusing to upload."
+            exit 1
+          fi
+          upload_url="${upload_url%%\{*}"
+          if [[ "$upload_url" =~ [[:space:]] ]]; then
+            echo "::error::release upload_url contains whitespace; refusing to upload."
+            exit 1
+          fi
+          if [[ ! "$upload_url" =~ ^https?://[^/]+/ ]]; then
+            echo "::error::release upload_url is not an absolute URL: ${upload_url}"
+            exit 1
+          fi
+          if [[ "$upload_url" != *"/repos/${GH_REPO}/releases/${RELEASE_ID}/assets" ]]; then
+            echo "::error::release upload_url does not target release ${RELEASE_ID} of ${GH_REPO}: ${upload_url}"
+            exit 1
+          fi
+          api_base="${GITHUB_API_URL:-https://api.github.com}"
+          api_base="${api_base%/}"
+          api_assets_url="${api_base}/repos/${GH_REPO}/releases/${RELEASE_ID}/assets"
+          if [ "$upload_url" = "$api_assets_url" ]; then
+            echo "::error::refusing to use the API assets endpoint as upload URL: ${upload_url}"
+            exit 1
+          fi
+          files=()
           while IFS='|' read -r os target artifact; do
             dir="release-assets/${artifact}"
             if [ ! -d "$dir" ]; then
@@ -462,13 +505,20 @@ jobs:
               exit 1
             fi
             for file in "$artifact" "sidecar-manifest-${os}.json" "sha256sums-${target}.txt"; do
-              gh api --method POST \
-                -H "Content-Type: application/octet-stream" \
-                --input "${dir}/${file}" \
-                -f "name=${file}" \
-                "repos/${GH_REPO}/releases/${RELEASE_ID}/assets" >/dev/null
+              if [ ! -s "${dir}/${file}" ]; then
+                echo "::error::missing or empty asset before upload: ${dir}/${file}"
+                exit 1
+              fi
+              files+=("${dir}/${file}")
             done
           done < release-assets/platforms.tsv
+          if [ "${#files[@]}" -ne 12 ]; then
+            echo "::error::expected 12 assets to upload, found ${#files[@]}."
+            exit 1
+          fi
+          # gh release upload 内部读取 release.upload_url（剥离 URI template）并向资产
+          # 上传主机发送二进制；未启用任何覆盖开关，同名资产已存在时失败而非覆盖。
+          gh release upload "$TAG" "${files[@]}" --repo "$GH_REPO" >/dev/null
           echo "Draft release ${TAG} (id=${RELEASE_ID}) uploaded with 12 assets; still unpublished."
 
       - name: Verify draft assets and SHA256 digests (gate before publish)

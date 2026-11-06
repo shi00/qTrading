@@ -61,8 +61,14 @@ def _patches(h: SidecarReleaseHarness) -> list[dict[str, object]]:
     return [call for call in h.calls if call["method"] == "PATCH"]
 
 
+def _upload_calls(h: SidecarReleaseHarness) -> list[dict[str, object]]:
+    """``gh release upload`` 调用（单一 CLI 上传入口）。"""
+    return [call for call in h.calls if call.get("subcommand") == "release upload"]
+
+
 def _uploads(h: SidecarReleaseHarness) -> list[dict[str, object]]:
-    return [call for call in h.calls if call["method"] == "POST" and "/assets" in str(call["path"])]
+    """gh 传输层实际发往 upload_url 的逐资产 HTTP 请求。"""
+    return h.upload_requests
 
 
 def _deletes(h: SidecarReleaseHarness) -> list[dict[str, object]]:
@@ -114,19 +120,24 @@ def test_existing_draft_is_reused_then_published_once(tmp_path) -> None:
     assert _creates(harness) == [], "复用 draft 时不得再次 POST /releases"
     deletes = _deletes(harness)
     assert len(deletes) == 2
-    uploads = _uploads(harness)
-    assert len(uploads) == 12
+    upload_calls = _upload_calls(harness)
+    assert len(upload_calls) == 1, "只允许单一 gh release upload 上传入口"
+    assert len(_uploads(harness)) == 12
     patches = _patches(harness)
     assert len(patches) == 1
     assert patches[0]["fields"] == {"draft": False, "make_latest": True}
     # 写顺序：先清理旧资产 → 再上传 12 项 → 最后唯一一次 PATCH
-    assert harness.calls.index(deletes[-1]) < harness.calls.index(uploads[0])
-    assert harness.calls.index(uploads[-1]) < harness.calls.index(patches[0])
+    assert harness.calls.index(deletes[-1]) < harness.calls.index(upload_calls[0])
+    assert harness.calls.index(upload_calls[0]) < harness.calls.index(patches[0])
 
     release = harness.world()["releases"][0]
     assert release["id"] == 77
     assert release["draft"] is False
     assert len(release["assets"]) == 12
+    requests = _uploads(harness)
+    assert len(requests) == 12
+    assert {request["host"] for request in requests} == {harness.upload_host}
+    assert all(request["path"] == "/repos/owner/qTrading/releases/77/assets" for request in requests)
 
 
 def test_no_release_creates_draft_first_and_publishes_once(tmp_path) -> None:
@@ -158,6 +169,78 @@ def test_no_release_creates_draft_first_and_publishes_once(tmp_path) -> None:
     assert names == set(harness.expected_asset_names())
     for asset in worlds[0]["assets"]:
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", asset["digest"])
+
+
+def test_uploads_target_release_upload_url_host_with_name_and_raw_body(tmp_path) -> None:
+    """新建 draft：12 项上传必须命中 release.upload_url 主机，带 name 查询与原始二进制。"""
+    harness = SidecarReleaseHarness(tmp_path, tag=TAG, commit_sha=COMMIT)
+
+    chain = harness.run_chain()
+
+    assert [result.exit_code for result in chain.executed] == [0, 0, 0, 0, 0]
+    release_id = harness.world()["releases"][0]["id"]
+    requests = _uploads(harness)
+    assert len(requests) == 12
+    assert [request["name"] for request in requests] == harness.expected_asset_names()
+    assert {request["host"] for request in requests} == {harness.upload_host}, "必须上传到 upload_url 主机"
+    assert all("api.github.com" not in str(request["host"]) for request in requests)
+    payloads = harness.expected_asset_payloads()
+    expected_path = f"/repos/owner/qTrading/releases/{release_id}/assets"
+    for request in requests:
+        name = str(request["name"])
+        assert request["path"] == expected_path
+        assert request["query"] == f"name={name}", "必须携带 name 查询参数且不含 URI template 残留"
+        assert request["body"] == payloads[name], "上传 body 必须是原始文件字节"
+        assert request["content_type"] == "application/octet-stream"
+        assert request["authorized"] is True, "资产上传必须携带认证头"
+
+
+def test_upload_url_without_uri_template_still_uploads(tmp_path) -> None:
+    """upload_url 不带 {?name,label} 时仍能上传（格式变化不应破坏发布）。"""
+    harness = SidecarReleaseHarness(tmp_path, tag=TAG, commit_sha=COMMIT, upload_url_template=False)
+
+    chain = harness.run_chain()
+
+    assert [result.exit_code for result in chain.executed] == [0, 0, 0, 0, 0]
+    requests = _uploads(harness)
+    assert len(requests) == 12
+    assert all(request["query"] == f"name={request['name']}" for request in requests)
+
+
+def test_missing_upload_url_fails_closed_before_upload(tmp_path) -> None:
+    """Release 未返回 upload_url：上传步骤 fail-closed，零上传、绝不发布。"""
+    draft = make_release(77, TAG, draft=True, upload_url="")
+    harness = SidecarReleaseHarness(tmp_path, tag=TAG, commit_sha=COMMIT, releases=[draft])
+
+    chain = harness.run_chain()
+
+    assert _executed(chain) == [LOCAL_VERIFY_STEP, STATE_STEP, UPLOAD_STEP]
+    assert chain.executed[-1].exit_code != 0
+    assert "has no upload_url" in _output(chain.executed[-1])
+    assert _uploads(harness) == []
+    assert _upload_calls(harness) == []
+    assert len(_patches(harness)) == 0
+    assert harness.world()["releases"][0]["draft"] is True
+
+
+def test_api_assets_endpoint_cannot_be_used_as_upload_url(tmp_path) -> None:
+    """upload_url 指向普通 API 的 assets 路径：必须拒绝，不能把该路径当上传 URL。"""
+    draft = make_release(
+        77,
+        TAG,
+        draft=True,
+        upload_url="https://api.github.com/repos/owner/qTrading/releases/77/assets",
+    )
+    harness = SidecarReleaseHarness(tmp_path, tag=TAG, commit_sha=COMMIT, releases=[draft])
+
+    chain = harness.run_chain()
+
+    assert _executed(chain) == [LOCAL_VERIFY_STEP, STATE_STEP, UPLOAD_STEP]
+    assert chain.executed[-1].exit_code != 0
+    assert "API assets endpoint as upload URL" in _output(chain.executed[-1])
+    assert _uploads(harness) == []
+    assert len(_patches(harness)) == 0
+    assert harness.world()["releases"][0]["draft"] is True
 
 
 @pytest.mark.parametrize(
@@ -271,6 +354,13 @@ def test_asset_upload_failure_leaves_draft_and_never_publishes(tmp_path) -> None
     release = harness.world()["releases"][0]
     assert release["draft"] is True
     assert len(release["assets"]) == 3, "失败前已上传的资产保留在 draft（首个平台 3 项）"
+    # 3 项成功 + 1 项注入 500：失败发生在 upload_url 传输层，随后中止。
+    assert [request["name"] for request in _uploads(harness)] == [
+        "qtrading-pg-sidecar-windows-x86_64.exe",
+        "sidecar-manifest-windows.json",
+        "sha256sums-x86_64-pc-windows-msvc.txt",
+        "qtrading-pg-sidecar-linux-x86_64",
+    ]
 
 
 def test_rerun_after_publish_is_refused_by_state_check(tmp_path) -> None:
@@ -279,7 +369,7 @@ def test_rerun_after_publish_is_refused_by_state_check(tmp_path) -> None:
     first = harness.run_chain()
     assert [result.exit_code for result in first.executed] == [0, 0, 0, 0, 0]
     baseline_writes = len(_writes(harness))
-    assert baseline_writes == 14  # 1 次创建 draft + 12 次上传 + 1 次发布
+    assert baseline_writes == 3  # 1 次创建 draft + 1 次 gh release upload + 1 次发布
 
     rerun = harness.run_chain([LOCAL_VERIFY_STEP, STATE_STEP])
 
