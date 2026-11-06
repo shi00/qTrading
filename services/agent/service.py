@@ -46,6 +46,15 @@ from core.agent_types import (
 )
 from core.model_management_types import ConfigurationSaveOutcome
 from data.persistence.daos.base_dao import EngineDisposedError
+from services.agent.capabilities import (
+    CapabilityError,
+    build_skill_payload,
+    inspect_skill_carrier_sync,
+    publish_skill_files,
+    read_skill_carrier_files,
+    selected_tool_entries,
+    tool_catalog_view,
+)
 from services.agent.permissions import ExecutionPermission
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -108,6 +117,34 @@ class AgentDaoProtocol(Protocol):
         self, domain: str, operation_id: UUID, input_digest: str, source: JsonDoc
     ) -> MutationReceipt: ...
 
+    async def lookup_skill_inspection(
+        self, domain: str, operation_id: UUID
+    ) -> tuple[str, dict[str, object], JsonDoc] | None: ...
+
+    async def save_skill_inspection(
+        self,
+        domain: str,
+        operation_id: UUID,
+        input_digest: str,
+        carrier: dict[str, object],
+        inspection: JsonDoc,
+    ) -> JsonDoc: ...
+
+    async def save_resource_mutation(
+        self,
+        domain: str,
+        mutation: Mutation,
+        *,
+        kind: str,
+        payload: JsonDoc,
+        uses: tuple[tuple[ResourceRef, str], ...],
+        blob_prefix: str | None,
+    ) -> MutationReceipt: ...
+
+    async def read_mcp_discovery(self, domain: str, ref: ResourceRef) -> dict[str, object] | None: ...
+
+    async def lookup_mcp_operation(self, domain: str, operation_id: UUID) -> dict[str, object] | None: ...
+
     async def read_tool_call(self, effect_key: str) -> JsonDoc | None: ...
 
 
@@ -132,6 +169,50 @@ def _problem(
 
 def _invalid_request(error: AgentValidationError) -> AgentOperationError:
     return AgentOperationError(_problem("invalid_request", field_issues=((error.field_path, error.code),)))
+
+
+def _problem_doc(
+    code: str,
+    *,
+    field_issues: tuple[tuple[str, str], ...] = (),
+    related_id: UUID | None = None,
+) -> dict[str, object]:
+    problem = _problem(code, field_issues=field_issues, related_id=related_id)
+    return {
+        "code": problem.code,
+        "message_key": problem.message_key,
+        "params": problem.params,
+        "related_id": str(problem.related_id) if problem.related_id is not None else None,
+    }
+
+
+def _config_uses(kind: str, payload: Mapping[str, object]) -> tuple[tuple[ResourceRef, str], ...]:
+    uses: list[tuple[ResourceRef, str]] = []
+    if kind == "role":
+        for field, owner in (("enabled_skills", "role_enabled"), ("default_skills", "role_default")):
+            values = payload.get(field)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if isinstance(item, dict):
+                    uses.append(
+                        (
+                            ResourceRef(UUID(str(item["resource_id"])), int(cast(int, item["revision"]))),
+                            owner,
+                        )
+                    )
+    elif kind == "skill":
+        values = payload.get("resource_refs")
+        if isinstance(values, list):
+            for item in values:
+                if isinstance(item, dict):
+                    uses.append(
+                        (
+                            ResourceRef(UUID(str(item["resource_id"])), int(cast(int, item["revision"]))),
+                            "skill_reference",
+                        )
+                    )
+    return tuple(uses)
 
 
 _MEDIA_BY_SUFFIX: dict[str, str] = {
@@ -533,6 +614,340 @@ class AgentService:
         return await self._call(lambda: self._dao.lookup_mutation(self._domain, operation_id))
 
     # ------------------------------------------------------------------
+    # S02：Skill 预检/导入、MCP 目录/有效工具（只读已保存发现结果）
+    # ------------------------------------------------------------------
+
+    async def inspect_skill(
+        self,
+        operation_id: UUID,
+        path: str,
+        kind: str,
+        replacing: ResourceRef | None = None,
+    ) -> JsonDoc:
+        """目录/ZIP 预检；同 operation 同载体复用预检回执，异载体冲突。"""
+        if not isinstance(operation_id, UUID):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("operation_id", "invalid_uuid"),)))
+        if not isinstance(path, str) or not path:
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("path", "invalid_type"),)))
+        if kind not in ("directory", "zip"):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("kind", "invalid_enum"),)))
+        if replacing is not None and not isinstance(replacing, ResourceRef):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("replacing", "invalid_type"),)))
+        inspection = await self._inspect_carrier(operation_id, path, kind, replacing)
+        carrier = json_doc(
+            {
+                "path": path,
+                "kind": kind,
+                "replacing": None
+                if replacing is None
+                else {"resource_id": str(replacing.resource_id), "revision": replacing.revision},
+            }
+        )
+        input_digest = hashlib.sha256(
+            json_doc({"carrier": decode_json_doc(carrier), "content_digest": inspection["content_digest"]}).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        existing = await self._read(lambda: self._dao.lookup_skill_inspection(self._domain, operation_id))
+        if existing is not None:
+            if existing[0] != input_digest:
+                raise AgentOperationError(
+                    _problem(
+                        "identity_conflict",
+                        field_issues=(("operation_id", "identity_conflict"),),
+                        related_id=operation_id,
+                    )
+                )
+            return existing[2]
+        return await self._call(
+            lambda: self._dao.save_skill_inspection(
+                self._domain,
+                operation_id,
+                input_digest,
+                cast(dict[str, object], decode_json_doc(carrier)),
+                json_doc(inspection),
+            )
+        )
+
+    async def read_mcp_tool_catalog(self, ref: ResourceRef) -> JsonDoc:
+        """只读已保存 discover 结果；未发现/过期明确不可用，空选择不是无限许可。"""
+        if not isinstance(ref, ResourceRef):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("ref", "invalid_type"),)))
+        payload = await self._read(lambda: self._dao.read_resource(self._domain, ref))
+        if payload is None:
+            raise AgentOperationError(_problem("not_found", related_id=ref.resource_id))
+        decoded = await self._decode_mcp_payload(payload)
+        selected = decoded.get("selected_tools")
+        selected_items = selected if isinstance(selected, list) else []
+        discovery = await self._read(lambda: self._dao.read_mcp_discovery(self._domain, ref))
+        if discovery is None:
+            tools: list[dict[str, object]] = []
+            observed_at = None
+            fresh = False
+            problem = _problem_doc("capability_unavailable")
+            stored_revision = decoded.get("discovery_revision")
+        else:
+            stored_revision = discovery.get("discovery_revision")
+            observed_at = discovery.get("observed_at")
+            discovered = discovery.get("tools")
+            tools_raw = discovered if isinstance(discovered, list) else []
+            fresh = stored_revision == decoded.get("discovery_revision")
+            problem = None if fresh else _problem_doc("capability_unavailable")
+            tools = tool_catalog_view(ref.resource_id, tools_raw, selected_items if fresh else [])
+        normalized = [
+            {"name": str(item.get("name", "")), "schema_digest": str(item.get("schema_digest", ""))}
+            for item in selected_items
+            if isinstance(item, dict)
+        ]
+        return json_doc(
+            {
+                "schema_version": 1,
+                "service": {"resource_id": str(ref.resource_id), "revision": ref.revision},
+                "observed_at": observed_at,
+                "fresh": fresh,
+                "discovery_revision": stored_revision,
+                "tools": tools,
+                "selected_tools": normalized,
+                "problem": problem,
+            }
+        )
+
+    async def read_mcp_status(self, ref: ResourceRef) -> JsonDoc:
+        """没有原生运行时可读事实时明确 unknown，不以缓存或空集冒充在线。"""
+        if not isinstance(ref, ResourceRef):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("ref", "invalid_type"),)))
+        payload = await self._read(lambda: self._dao.read_resource(self._domain, ref))
+        if payload is None:
+            raise AgentOperationError(_problem("not_found", related_id=ref.resource_id))
+        decoded = await self._decode_mcp_payload(payload)
+        return json_doc(
+            {
+                "schema_version": 1,
+                "ref": {"resource_id": str(ref.resource_id), "revision": ref.revision},
+                "observed_at": None,
+                "fresh": False,
+                "process": "unknown",
+                "connection": "unknown",
+                "authentication": "unverified",
+                "discovery_revision": decoded.get("discovery_revision"),
+                "active_operations": [],
+                "problem": _problem_doc("capability_unavailable"),
+            }
+        )
+
+    async def lookup_mcp_operation(self, operation_id: UUID) -> JsonDoc:
+        if not isinstance(operation_id, UUID):
+            raise AgentOperationError(_problem("invalid_request", field_issues=(("operation_id", "invalid_uuid"),)))
+        stored = await self._read(lambda: self._dao.lookup_mcp_operation(self._domain, operation_id))
+        if stored is None:
+            return json_doc(
+                {
+                    "schema_version": 1,
+                    "operation_id": str(operation_id),
+                    "ref": None,
+                    "action": None,
+                    "status": "unknown",
+                    "started_at": None,
+                    "finished_at": None,
+                    "result": None,
+                    "problem": _problem_doc("not_found", related_id=operation_id),
+                }
+            )
+        return json_doc(stored)
+
+    async def _inspect_carrier(
+        self, operation_id: UUID, path: str, kind: str, replacing: ResourceRef | None
+    ) -> dict[str, object]:
+        try:
+            return await self._call(
+                lambda: ThreadPoolManager().run_async(
+                    TaskType.IO, inspect_skill_carrier_sync, operation_id, path, kind, replacing
+                )
+            )
+        except CapabilityError as error:
+            raise AgentOperationError(_problem(error.code, field_issues=((error.field_path, error.code),))) from error
+
+    async def _decode_mcp_payload(self, payload: JsonDoc) -> dict[str, object]:
+        try:
+            validate_payload("mcp", payload)
+            decoded = decode_json_doc(payload)
+        except AgentValidationError as error:
+            raise AgentOperationError(
+                _problem("capability_unavailable", field_issues=((error.field_path, error.code),))
+            ) from error
+        if not isinstance(decoded, dict):
+            raise AgentOperationError(_problem("capability_unavailable"))
+        return decoded
+
+    async def _import_skill(self, mutation: Mutation) -> MutationReceipt:
+        try:
+            validate_payload("skill_import", mutation.payload)
+            decoded = decode_json_doc(mutation.payload)
+        except AgentValidationError as error:
+            raise _invalid_request(error) from error
+        if not isinstance(decoded, dict):
+            raise _invalid_request(AgentValidationError("invalid_type", "payload"))
+        inspection_id = UUID(str(decoded["inspection_id"]))
+        expected = decoded.get("expected_resource")
+        expected_ref = (
+            None
+            if expected is None
+            else ResourceRef(
+                UUID(str(cast(Mapping[str, object], expected)["resource_id"])),
+                int(str(cast(Mapping[str, object], expected)["revision"])),
+            )
+        )
+        if expected_ref is not None and mutation.resource_id not in (None, expected_ref.resource_id):
+            raise AgentOperationError(_problem("reference_conflict", related_id=expected_ref.resource_id))
+        if expected_ref is not None and mutation.expected_revision not in (None, expected_ref.revision):
+            raise AgentOperationError(_problem("reference_conflict", related_id=expected_ref.resource_id))
+        existing = await self._read(lambda: self._dao.lookup_skill_inspection(self._domain, inspection_id))
+        if existing is None:
+            raise AgentOperationError(_problem("stale_inspection", related_id=inspection_id))
+        _, carrier, stored = existing
+        stored_decoded = decode_json_doc(stored)
+        if not isinstance(stored_decoded, dict):
+            raise AgentOperationError(_problem("stale_inspection", related_id=inspection_id))
+        path = str(carrier.get("path", ""))
+        kind = str(carrier.get("kind", ""))
+        replacing = expected_ref if expected_ref is not None else self._carrier_replacing(carrier)
+        current = await self._inspect_carrier(inspection_id, path, kind, replacing)
+        requested = str(decoded["inspection_digest"])
+        if (
+            current["inspection_digest"] != requested
+            or stored_decoded.get("inspection_digest") != requested
+            or not current.get("can_import")
+        ):
+            raise AgentOperationError(
+                _problem(
+                    "identity_conflict",
+                    field_issues=(("inspection_digest", "identity_conflict"),),
+                    related_id=inspection_id,
+                )
+            )
+        root = self._blob_root
+        if root is None:
+            raise AgentOperationError(_problem("capability_unavailable"))
+        try:
+            files = await self._call(
+                lambda: ThreadPoolManager().run_async(TaskType.IO, read_skill_carrier_files, path, kind)
+            )
+            skill = build_skill_payload(current)
+        except CapabilityError as error:
+            raise AgentOperationError(_problem(error.code, field_issues=((error.field_path, error.code),))) from error
+        resource_id = (
+            expected_ref.resource_id
+            if expected_ref is not None
+            else (mutation.resource_id or uuid5(inspection_id, "skill"))
+        )
+        revision = expected_ref.revision + 1 if expected_ref is not None else 1
+        try:
+            relative = await self._call(
+                lambda: ThreadPoolManager().run_async(
+                    TaskType.IO, publish_skill_files, root, resource_id, revision, files
+                )
+            )
+        except CapabilityError as error:
+            raise AgentOperationError(_problem(error.code, field_issues=((error.field_path, error.code),))) from error
+        persisted = Mutation(
+            operation_id=mutation.operation_id,
+            kind="skill_import",
+            resource_id=resource_id,
+            expected_revision=expected_ref.revision if expected_ref is not None else None,
+            payload=mutation.payload,
+        )
+        return await self._call(
+            lambda: self._dao.save_resource_mutation(
+                self._domain,
+                persisted,
+                kind="skill",
+                payload=skill,
+                uses=(),
+                blob_prefix=relative,
+            )
+        )
+
+    def _carrier_replacing(self, carrier: dict[str, object]) -> ResourceRef | None:
+        value = carrier.get("replacing")
+        if not isinstance(value, dict):
+            return None
+        return ResourceRef(UUID(str(value["resource_id"])), int(cast(int, value["revision"])))
+
+    async def _save_mcp_tools(self, mutation: Mutation) -> MutationReceipt:
+        try:
+            validate_payload("mcp_tools", mutation.payload)
+            decoded = decode_json_doc(mutation.payload)
+        except AgentValidationError as error:
+            raise _invalid_request(error) from error
+        if not isinstance(decoded, dict):
+            raise _invalid_request(AgentValidationError("invalid_type", "payload"))
+        service_ref = cast(Mapping[str, object], decoded["service"])
+        ref = ResourceRef(UUID(str(service_ref["resource_id"])), int(cast(int, service_ref["revision"])))
+        if mutation.resource_id not in (None, ref.resource_id):
+            raise AgentOperationError(_problem("reference_conflict", related_id=ref.resource_id))
+        if mutation.expected_revision not in (None, ref.revision):
+            raise AgentOperationError(_problem("reference_conflict", related_id=ref.resource_id))
+        payload = await self._read(lambda: self._dao.read_resource(self._domain, ref))
+        if payload is None:
+            raise AgentOperationError(_problem("capability_unavailable", related_id=ref.resource_id))
+        service_payload = await self._decode_mcp_payload(payload)
+        requested_revision = str(decoded["discovery_revision"])
+        if service_payload.get("discovery_revision") != requested_revision:
+            raise AgentOperationError(_problem("capability_unavailable", related_id=ref.resource_id))
+        discovery = await self._read(lambda: self._dao.read_mcp_discovery(self._domain, ref))
+        if discovery is None or discovery.get("discovery_revision") != requested_revision:
+            raise AgentOperationError(_problem("capability_unavailable", related_id=ref.resource_id))
+        discovered = discovery.get("tools")
+        tools = discovered if isinstance(discovered, list) else []
+        try:
+            selected = selected_tool_entries(tools, decoded.get("selected_tools"), "selected_tools")
+        except CapabilityError as error:
+            raise AgentOperationError(
+                _problem(error.code, field_issues=((error.field_path, error.code),), related_id=ref.resource_id)
+            ) from error
+        new_payload = json_doc({**service_payload, "selected_tools": selected})
+        try:
+            validate_payload("mcp", new_payload)
+        except AgentValidationError as error:
+            raise _invalid_request(error) from error
+        persisted = Mutation(
+            operation_id=mutation.operation_id,
+            kind="mcp_tools",
+            resource_id=ref.resource_id,
+            expected_revision=ref.revision,
+            payload=mutation.payload,
+        )
+        return await self._call(
+            lambda: self._dao.save_resource_mutation(
+                self._domain,
+                persisted,
+                kind="mcp",
+                payload=new_payload,
+                uses=(),
+                blob_prefix=None,
+            )
+        )
+
+    async def _save_config_resource(self, mutation: Mutation) -> MutationReceipt:
+        try:
+            validate_payload(mutation.kind, mutation.payload)
+            decoded = decode_json_doc(mutation.payload)
+        except AgentValidationError as error:
+            raise _invalid_request(error) from error
+        if not isinstance(decoded, dict):
+            raise _invalid_request(AgentValidationError("invalid_type", "payload"))
+        return await self._call(
+            lambda: self._dao.save_resource_mutation(
+                self._domain,
+                mutation,
+                kind=mutation.kind,
+                payload=mutation.payload,
+                uses=_config_uses(mutation.kind, decoded),
+                blob_prefix=None,
+            )
+        )
+
+    # ------------------------------------------------------------------
     # 写入回执：参数先验证，再进 DAO；status 原样返回
     # ------------------------------------------------------------------
 
@@ -555,6 +970,12 @@ class AgentService:
         return await self._call(lambda: self._dao.save_command(self._domain, command))
 
     async def mutate(self, mutation: Mutation) -> MutationReceipt:
+        if mutation.kind == "skill_import":
+            return await self._import_skill(mutation)
+        if mutation.kind == "mcp_tools":
+            return await self._save_mcp_tools(mutation)
+        if mutation.kind in ("role", "skill", "mcp", "prompt"):
+            return await self._save_config_resource(mutation)
         return await self._call(lambda: self._dao.apply_mutation(self._domain, mutation))
 
     async def lookup_submission(self, key: SubmissionKey) -> SubmissionReceipt:
