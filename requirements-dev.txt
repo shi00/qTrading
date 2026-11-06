@@ -134,7 +134,7 @@ exchange-calendars==4.13.2
     # via pandas-market-calendars
 execnet==2.1.2
     # via pytest-xdist
-fastapi==0.144.0
+fastapi==0.162.0
     # via astockscreener (pyproject.toml)
 fastmcp==4.1.4
     # via

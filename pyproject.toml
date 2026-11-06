@@ -29,14 +29,11 @@ dependencies = [
     "flet-desktop==1.1.0",
     "flet-charts==1.1.0",
     "flet-code-editor==1.1.0",
-    # 临时上界（D6.2）：flet-web 由 Flet 运行期自动安装，仅声明 fastapi>=0.115.12（无上界），
-    # 不显式约束则每次安装解析到当时最新版。fastapi 0.145 移除了 FastAPI.__init__ 的
-    # openapi_prefix；当前锁定的 flet-web 已改为 root_path=root_path or openapi_prefix、
-    # 不再传该参数，本地实测 fastapi 0.145.0 / 0.162.0 下 flet_web app 可启动且首页 HTTP 200。
-    # 但本批次 E2E 全链路仅在 fastapi 0.144（CI 现行组合）上验证过，故保守保留上界；
-    # 解除条件：E2E 全链路在 0.145+ 上全绿后，在升级 flet-web 的同一 PR 内放宽/删除本行
-    # （核验清单见 docs/flet/upgrade-checklist.md §1.1）。
-    "fastapi<0.145",
+    # D6.2 已解除（2026-11-06）：flet-web 1.1.0 已不再传 openapi_prefix，全量 E2E 在
+    # fastapi 0.144 / 0.145 / 0.162 三组环境均全绿（59 passed / 2 skipped），故移除临时上界。
+    # 仍显式声明下界（取自 flet-web 的 fastapi>=0.115.12），使 requirements*.txt 继续锁定
+    # 具体版本、避免每次安装解析到当时最新版（核验记录见 docs/flet/upgrade-checklist.md §1.1）。
+    "fastapi>=0.115.12",
     "tushare==1.4.29",
     "akshare==1.20.2",
     "requests>=2.34.2",
