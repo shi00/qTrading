@@ -2,17 +2,35 @@
 
 覆盖：代码类路径命中、非代码类路径、空集合、CLI 输出格式。
 该脚本决定 CI Gate 是否要求重型 job，分类错误会导致门禁误放行或误阻塞，故逐类断言。
+
+另含 ``ci_cd.yml`` 的分类输入契约：GitHub 的重命名文件只在新路径上给出 ``filename``，
+旧路径在 ``previous_filename``；workflow 必须同时提取两列并按文件行计数，否则
+「代码 → 文档」的移动会被误判为非代码类（CI-F02）。
 """
 
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.classify_changed_paths import CODE_PATTERNS, classify, is_code_path, main
 
 pytestmark = [pytest.mark.unit, pytest.mark.meta]
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci_cd.yml"
+CLASSIFY_STEP_NAME = "Classify changed paths"
+
+
+def _api_pair_lines(entries: list[dict[str, str]]) -> str:
+    """模拟 workflow 的 jq 投影：``[filename, previous_filename // ""] | @tsv``。
+
+    测试 fixture 的路径不含 TAB / 换行，故无需复现 jq ``@tsv`` 的字段内转义。
+    """
+    return "".join(f"{entry['filename']}\t{entry.get('previous_filename', '')}\n" for entry in entries)
 
 
 class TestIsCodePath:
@@ -141,3 +159,135 @@ def test_finbert_workflow_pattern_is_exact_not_broad() -> None:
     assert ".github/workflows/*.yml" not in CODE_PATTERNS
     assert is_code_path(".github/workflows/sidecar.yml") is False
     assert is_code_path(".github/workflows/precommit-config-ci.yml") is False
+
+
+class TestRenamedClassification:
+    """CI-F02：重命名文件的 filename 与 previous_filename 必须取并集分类。"""
+
+    @pytest.mark.parametrize(
+        ("previous_filename", "filename", "expected"),
+        [
+            ("services/example.py", "docs/example.txt", "code=true"),
+            ("docs/example.txt", "services/example.py", "code=true"),
+            ("services/old.py", "services/new.py", "code=true"),
+            ("docs/old.md", "docs/new.md", "code=false"),
+        ],
+        ids=["code-to-doc", "doc-to-code", "code-to-code", "doc-to-doc"],
+    )
+    def test_renamed_direction(
+        self,
+        previous_filename: str,
+        filename: str,
+        expected: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """前三类凡任一列命中代码规则即 code=true；文档 → 文档仍可轻量运行。"""
+        entries = [{"status": "renamed", "filename": filename, "previous_filename": previous_filename}]
+        monkeypatch.setattr("sys.stdin", io.StringIO(_api_pair_lines(entries)))
+        assert main() == 0
+        assert capsys.readouterr().out.strip() == expected
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            ({"status": "renamed", "filename": "docs/only.md"}, "code=false"),
+            ({"status": "renamed", "filename": "docs/only.md", "previous_filename": ""}, "code=false"),
+            ({"status": "renamed", "filename": "main.py"}, "code=true"),
+        ],
+        ids=["missing-previous", "empty-previous", "missing-previous-code"],
+    )
+    def test_renamed_without_previous_filename_falls_back_to_filename(
+        self,
+        entry: dict[str, str],
+        expected: str,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """previous_filename 缺失或为空时旧列为空，仅按 filename 分类，不误报也不崩溃。"""
+        monkeypatch.setattr("sys.stdin", io.StringIO(_api_pair_lines([entry])))
+        assert main() == 0
+        assert capsys.readouterr().out.strip() == expected
+
+    def test_renamed_alongside_other_files(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """同一页多文件：重命名对与普通文档行共存时，任一代码路径即可判为代码类。"""
+        entries = [
+            {"status": "modified", "filename": "docs/a.md"},
+            {"status": "renamed", "filename": "docs/example.txt", "previous_filename": "services/example.py"},
+            {"status": "renamed", "filename": "docs/b.md", "previous_filename": "docs/b-old.md"},
+        ]
+        monkeypatch.setattr("sys.stdin", io.StringIO(_api_pair_lines(entries)))
+        assert main() == 0
+        assert capsys.readouterr().out.strip() == "code=true"
+
+    def test_paginated_pages_are_concatenated(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """分页边界：每页独立输出两列，拼接后旧路径仍参与分类。"""
+        page_one = [{"status": "modified", "filename": "docs/a.md"}]
+        page_two = [{"status": "renamed", "filename": "docs/moved.txt", "previous_filename": "core/errors.py"}]
+        monkeypatch.setattr("sys.stdin", io.StringIO(_api_pair_lines(page_one) + _api_pair_lines(page_two)))
+        assert main() == 0
+        assert capsys.readouterr().out.strip() == "code=true"
+
+    def test_delete_add_split_is_classified(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """GitHub 拆成 delete/add 时 removed 的 filename 仍是旧代码路径，应判为代码类。"""
+        entries = [
+            {"status": "removed", "filename": "services/example.py"},
+            {"status": "added", "filename": "docs/example.txt"},
+        ]
+        monkeypatch.setattr("sys.stdin", io.StringIO(_api_pair_lines(entries)))
+        assert main() == 0
+        assert capsys.readouterr().out.strip() == "code=true"
+
+    def test_pair_line_count_matches_file_count(self) -> None:
+        """每文件恰输出一行两列，重命名不会使行数翻倍（3000 上限判断依赖行数）。"""
+        entries = [
+            {"status": "modified", "filename": "docs/a.md"},
+            {"status": "renamed", "filename": "docs/b.md", "previous_filename": "services/b.py"},
+            {"status": "added", "filename": "docs/c.md"},
+        ]
+        assert len(_api_pair_lines(entries).splitlines()) == len(entries)
+
+
+@pytest.fixture(scope="module")
+def classify_step_run() -> str:
+    """加载 Changes job 中「Classify changed paths」步骤的 shell 脚本。"""
+    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["changes"]["steps"]
+    matches = [step for step in steps if step.get("name") == CLASSIFY_STEP_NAME]
+    assert len(matches) == 1, f"changes job 应恰有一个 `{CLASSIFY_STEP_NAME}` 步骤，实际: {len(matches)}"
+    return matches[0]["run"]
+
+
+class TestWorkflowClassificationContract:
+    """CI-F02：workflow 分类输入必须带 previous_filename，且不破坏计数/fail-closed 语义。"""
+
+    def test_jq_extracts_both_paths_with_pagination(self, classify_step_run: str) -> None:
+        """静态契约：jq 表达式同时包含 filename 与 previous_filename，且仍逐页应用。"""
+        assert "--paginate" in classify_step_run
+        assert "repos/$REPO/pulls/$PR_NUMBER/files" in classify_step_run
+        assert ".filename" in classify_step_run
+        assert ".previous_filename" in classify_step_run
+        assert "@tsv" in classify_step_run, "两列必须以 TAB 分隔输出，供分类脚本拆列"
+        assert "--jq '.[].filename'" not in classify_step_run, "不得退回只取新路径的旧表达式"
+
+    def test_file_count_is_derived_from_pair_lines(self, classify_step_run: str) -> None:
+        """计数必须作用于每文件一行两列的输出，拆分两列只发生在送入分类器时。"""
+        count_line = 'count="$(printf \'%s\\n\' "$files" | grep -c . || true)"'
+        classify_line = 'result="$(printf \'%s\\n\' "$files" | python scripts/classify_changed_paths.py)"'
+        assert count_line in classify_step_run
+        assert classify_line in classify_step_run
+        assert classify_step_run.index(count_line) < classify_step_run.index(classify_line)
+
+    def test_fail_closed_branches_are_preserved(self, classify_step_run: str) -> None:
+        """非 PR、fork PR、3000 上限三条早退分支仍按代码类处理（fail-closed）。"""
+        assert 'if [ "$EVENT_NAME" != "pull_request" ]' in classify_step_run
+        assert 'if [ "$IS_FORK" = "true" ]' in classify_step_run
+        assert 'if [ "$count" -ge 3000 ]' in classify_step_run
+        assert classify_step_run.count('echo "code=true" >> "$GITHUB_OUTPUT"') == 3
+        assert classify_step_run.count("exit 0") == 3

@@ -6,8 +6,14 @@ Pending 并阻塞合并），改为运行时分类：非代码类 PR 只跑轻�
 
 CI 内用法::
 
-    gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' \
-        | python scripts/ci/classify_changed_paths.py
+    gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" \
+        --jq '.[] | [.filename, (.previous_filename // "")] | @tsv' \
+        | python scripts/classify_changed_paths.py
+
+每行两列（``filename`` / ``previous_filename``，TAB 分隔）。GitHub 对重命名文件只在
+新路径上给出 ``filename``，旧路径在 ``previous_filename``；分类必须对两者取并集，否则
+「代码 → 文档」的移动会丢失代码侧路径而被判为非代码类。空列（未重命名或旧路径缺失）
+与空行均被忽略；纯换行分隔的路径输入仍然兼容。
 
 输出一行 ``code=true`` 或 ``code=false``，可直接追加到 ``$GITHUB_OUTPUT``。
 分类异常由调用方（workflow）按 fail-closed 处理，本脚本不吞异常。
@@ -59,7 +65,12 @@ def classify(paths: Iterable[str]) -> bool:
 
 
 def main() -> int:
-    paths = [line.strip() for line in sys.stdin if line.strip()]
+    """从 stdin 读取路径并输出分类结果。
+
+    stdin 每行可为单路径，也可为 TAB 分隔的双列（``filename`` / ``previous_filename``）；
+    两列都会参与分类，使重命名前后的任一代码路径都能命中代码类白名单。
+    """
+    paths = [path.strip() for line in sys.stdin for path in line.split("\t") if path.strip()]
     print(f"code={'true' if classify(paths) else 'false'}")
     return 0
 

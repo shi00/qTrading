@@ -109,7 +109,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/scan_weak_assertions.py` | CI 弱断言全量扫描 | CI weak assertions step | 阻断 |
 | `scripts/check_diff_coverage.py` | PR 变更行覆盖率（R19 diff-coverage） | CI `check_diff_coverage`（strict 80%） | 阻断 |
 | `scripts/check_per_file_coverage.py` | 单文件覆盖率（分层阈值 D37） | CI coverage step（`--report` 为 advisory） | 阻断（`--report` 不阻断） |
-| `scripts/classify_changed_paths.py` | PR 变更文件代码类分类（`Changes` job 据此决定重型 job 是否执行；规则与迁移前的 `pull_request.paths` 白名单一致，API 失败/fork PR 由 workflow 按 fail-closed 兜底） | CI `Changes` job | 阻断（分类结果决定 `CI Gate` 判定） |
+| `scripts/classify_changed_paths.py` | PR 变更文件代码类分类（`Changes` job 据此决定重型 job 是否执行；规则与迁移前的 `pull_request.paths` 白名单一致，重命名文件同时对 `filename` 与 `previous_filename` 分类，API 失败/fork PR 由 workflow 按 fail-closed 兜底） | CI `Changes` job | 阻断（分类结果决定 `CI Gate` 判定） |
 | `scripts/detect_flaky.py` | 重复运行 pytest 定位 flaky 测试 nodeid | CI（报告）+ 手动 | 不阻断 |
 | `scripts/generate_sidecar_manifest.py` | qtrading-pg-sidecar Release manifest 生成 | CI `sidecar.yml` | 阻断（release 时） |
 | `scripts/prototype_business_redlines.py` | R20/R21/R22 AST 可行性原型（人工评审辅助） | 手动 | 不阻断 |

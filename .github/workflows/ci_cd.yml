@@ -76,7 +76,11 @@ jobs:
             echo "- fork PR：无法可靠分类，按代码变更处理（fail-closed）" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')"
+          # 每个变更文件输出一行两列（filename<TAB>previous_filename）。GitHub 对重命名文件
+          # 只在新路径给出 filename、旧路径放在 previous_filename；两列都交给分类器取并集，
+          # 避免「代码 → 文档」的移动丢失代码侧路径。--paginate 下 jq 按页应用，输出行数仍等于
+          # 变更文件数，3000 上限判断语义不变。
+          files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[] | [.filename, (.previous_filename // "")] | @tsv')"
           count="$(printf '%s\n' "$files" | grep -c . || true)"
           if [ "$count" -ge 3000 ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
