@@ -1808,6 +1808,12 @@ jobs:
     # 写权限仅用于把 wheel 发布到 `ci-wheels` Release；触发面已排除 PR / merge_group，无可信输入。
     permissions:
       contents: write
+    # 结构化结果契约：由 job 末尾的 always() summary 步骤写入，用于在终态区分
+    # 缓存命中 / 成功构建并发布 / 构建超时 / 其他失败，并明确 published=false，
+    # 避免 90 分钟超时被 continue-on-error 吸收成绿色后无法取证。
+    outputs:
+      warmup_result: ${{ steps.warmup-summary.outputs.result }}
+      warmup_published: ${{ steps.warmup-summary.outputs.published }}
     # 本 job 只是加速项、不承担门禁：既不进 needs 链，重型步骤也逐个 continue-on-error，
     # 失败或超时都不会阻断 4 条发布腿。交付通道是 Release 资产而非 artifact：本 job 与下游腿在时间上重叠，
     # 冷路径下同 run 的 artifact 必然来不及产出（实测 build-windows 在 run 开始 8.4 分钟即启动，
@@ -1932,6 +1938,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          # 记录 UTC 起始时间到 GITHUB_ENV，供 job 末尾 summary 计算耗时并区分超时/普通失败；
+          # 仅新增观测点，不改变下方构建命令。
+          $startedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          Add-Content -Path $env:GITHUB_ENV -Value "CUDA_BUILD_STARTED_AT=$startedAt"
           # CUDA arch 列表 = 产品确认的 GPU 覆盖范围：Turing 75 / Ampere 80·86 / Ada 89 / Hopper 90，
           # 另加 90-virtual（PTX 前向兼容，未来架构由驱动 JIT 兜底）。
           # 剔除 50/61/70（Maxwell/Pascal/Volta）：无 Tensor Core、llama.cpp 收益极低，
@@ -1994,6 +2004,7 @@ jobs:
           }
 
       - name: Publish CUDA wheel to release bank
+        id: publish-wheel
         # 仅在重新编译且校验通过后上传，坏 wheel 不得进入缓存仓库。
         # --clobber 使重跑幂等；资产名 <key>.zip 决定下游按同一键精确匹配。
         # Release 不存在时首次创建：tag `ci-wheels` 不匹配 push.tags `v*.*.*`，不会触发发版链。
@@ -2053,6 +2064,94 @@ jobs:
             exit 1
           }
           Write-Host "已发布 $key.zip（sha256=$sha）"
+
+      - name: Summarize CUDA wheel warmup outcome
+        id: warmup-summary
+        # 必须是最后一步且 always()：无论缓存命中、构建超时、校验/发布失败还是 job 取消，
+        # 都要留下可取证的结构化结果；同时不得改变 job 结论（本步 continue-on-error）。
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          try {
+            $hit = "${{ steps.restore-wheel.outputs.hit }}"
+            $buildOutcome = "${{ steps.build-wheel.outcome }}"
+            $verifyOutcome = "${{ steps.verify-wheel.outcome }}"
+            $publishOutcome = "${{ steps.publish-wheel.outcome }}"
+            $startedAtRaw = $env:CUDA_BUILD_STARTED_AT
+
+            # Build 步骤 timeout-minutes: 90；触发单步超时被杀时 outcome 仍为 failure。
+            # 以 elapsed >= 89 分钟（1 分钟容差）区分 build_timeout 与普通 build_failed。
+            $timeoutThresholdMinutes = 89
+
+            $elapsedText = "n/a"
+            $elapsedMinutes = $null
+            if ($startedAtRaw) {
+              try {
+                $startedAt = [System.DateTimeOffset]::Parse($startedAtRaw, [System.Globalization.CultureInfo]::InvariantCulture)
+                $elapsedMinutes = [math]::Round(((Get-Date).ToUniversalTime() - $startedAt.UtcDateTime).TotalMinutes, 2)
+                # 固定小数点为 .，避免 runner 区域设置影响 summary 可读性与取证比对。
+                $elapsedText = $elapsedMinutes.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+              } catch {
+                $elapsedText = "unparsed"
+              }
+            }
+
+            $result = "unexpected"
+            if ($hit -eq "true") {
+              $result = "cache_hit"
+            } elseif ($buildOutcome -eq "cancelled" -or $verifyOutcome -eq "cancelled" -or $publishOutcome -eq "cancelled") {
+              $result = "cancelled"
+            } elseif ($buildOutcome -eq "failure") {
+              if ($null -ne $elapsedMinutes -and $elapsedMinutes -ge $timeoutThresholdMinutes) {
+                $result = "build_timeout"
+              } else {
+                $result = "build_failed"
+              }
+            } elseif ($buildOutcome -eq "success") {
+              if ($verifyOutcome -eq "failure") {
+                $result = "verify_failed"
+              } elseif ($verifyOutcome -eq "success") {
+                if ($publishOutcome -eq "success") {
+                  $result = "built_published"
+                } else {
+                  $result = "publish_failed"
+                }
+              }
+            }
+
+            # published=true 仅当本 run 实际重新构建、verify 成功且 publish 成功；
+            # cache_hit / timeout / 任一失败均为 false。
+            $published = if ($result -eq "built_published") { "true" } else { "false" }
+
+            # 先写 step outputs（job outputs 依赖它们），再做 Markdown 渲染，
+            # 避免 summary 渲染异常连带丢失结构化结果。
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "result=$result"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "published=$published"
+
+            $table = @(
+              "| Signal | Value |",
+              "|--------|-------|",
+              "| Cache hit | $hit |",
+              "| Build | $buildOutcome |",
+              "| Verify | $verifyOutcome |",
+              "| Publish | $publishOutcome |",
+              "| Elapsed (min) | $elapsedText |",
+              "| Result | ``$result`` |",
+              "| Published | $published |"
+            ) -join "`n"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### CUDA wheel warmup outcome`n`n$table"
+
+            if ($result -ne "cache_hit" -and $result -ne "built_published") {
+              Write-Host "::warning::CUDA wheel warmup result=$result (published=$published)"
+            } else {
+              Write-Host "CUDA wheel warmup result=$result (published=$published)"
+            }
+          } catch {
+            # summary 只是观测手段：自身异常仅告警，绝不让 job 变红。
+            Write-Host "::warning::CUDA wheel warmup summary failed: $($_.Exception.Message)"
+          }
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
