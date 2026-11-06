@@ -13,7 +13,7 @@ import binascii
 import hashlib
 import logging
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, cast
 from uuid import UUID
 
@@ -24,20 +24,32 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from core.agent_types import (
     AgentRequest,
     AgentValidationError,
+    ArtifactView,
     CommandReceipt,
     ContextBinding,
     ControlCommand,
+    ConversationView,
+    DecisionView,
+    DeliveryView,
+    ExecutionView,
+    HistoryHit,
+    HistoryQuery,
     JsonDoc,
+    MessageView,
+    MessageWindow,
     ModelChoice,
     Mutation,
     MutationReceipt,
     Page,
+    PlanView,
     Problem,
     QueueItemView,
     ResourceRef,
     RoleBinding,
     SubmissionKey,
     SubmissionReceipt,
+    Target,
+    TaskView,
     decode_json_doc,
     json_doc,
     request_digest,
@@ -46,14 +58,18 @@ from core.agent_types import (
 )
 from data.persistence.models import (
     AgentAdmissionHead,
+    AgentArtifact,
     AgentCommand,
     AgentConversation,
     AgentDecision,
+    AgentDelivery,
     AgentEvent,
     AgentExecution,
     AgentInput,
     AgentIntent,
+    AgentMessage,
     AgentPath,
+    AgentPlanReview,
     AgentResource,
     AgentResourceVersion,
     AgentRetiredKey,
@@ -183,6 +199,146 @@ def _decode_queue_cursor(domain: str, cursor: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise AgentValidationError("invalid_request", "cursor")
     return value
+
+
+def _b64(doc: JsonDoc) -> str:
+    return base64.urlsafe_b64encode(doc.encode("utf-8")).decode("ascii")
+
+
+def _unb64(cursor: str) -> object:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        return decode_json_doc(raw)
+    except (binascii.Error, ValueError, UnicodeDecodeError, AgentValidationError) as error:
+        raise AgentValidationError("invalid_request", "cursor") from error
+
+
+def _encode_message_cursor(
+    *,
+    domain: str,
+    conversation_id: UUID | None,
+    execution_id: UUID | None,
+    attempt_id: UUID | None,
+    direction: str,
+    boundary: tuple[datetime, UUID],
+    read_revision: int,
+    anchor: tuple[UUID, int] | None = None,
+) -> str:
+    return _b64(
+        json_doc(
+            {
+                "schema_version": 1,
+                "domain": domain,
+                "conversation_id": conversation_id,
+                "execution_id": execution_id,
+                "attempt_id": attempt_id,
+                "direction": direction,
+                "boundary": {"created_at": boundary[0], "message_id": boundary[1]},
+                "read_revision": read_revision,
+                "anchor": None if anchor is None else {"message_id": anchor[0], "revision": anchor[1]},
+            }
+        )
+    )
+
+
+def _decode_message_cursor(
+    cursor: str,
+    *,
+    domain: str,
+    conversation_id: UUID | None,
+    execution_id: UUID | None,
+    attempt_id: UUID | None,
+) -> tuple[str, tuple[datetime, UUID], int, tuple[UUID, int] | None]:
+    doc = _unb64(cursor)
+    if not isinstance(doc, dict) or doc.get("schema_version") != 1:
+        raise AgentValidationError("invalid_request", "cursor")
+    if (
+        doc.get("domain") != domain
+        or _as_optional_uuid(doc.get("conversation_id")) != conversation_id
+        or _as_optional_uuid(doc.get("execution_id")) != execution_id
+        or _as_optional_uuid(doc.get("attempt_id")) != attempt_id
+    ):
+        raise AgentValidationError("invalid_request", "cursor")
+    direction = doc.get("direction")
+    if direction not in ("older", "newer"):
+        raise AgentValidationError("invalid_request", "cursor")
+    boundary = doc.get("boundary")
+    read_revision = doc.get("read_revision")
+    if not isinstance(boundary, dict) or isinstance(read_revision, bool) or not isinstance(read_revision, int):
+        raise AgentValidationError("invalid_request", "cursor")
+    created_at = boundary.get("created_at")
+    try:
+        parsed_at = datetime.fromisoformat(str(created_at))
+    except ValueError as error:
+        raise AgentValidationError("invalid_request", "cursor") from error
+    boundary_key = (_as_uuid(boundary.get("message_id")), parsed_at)
+    anchor_doc = doc.get("anchor")
+    anchor: tuple[UUID, int] | None = None
+    if anchor_doc is not None:
+        if not isinstance(anchor_doc, dict):
+            raise AgentValidationError("invalid_request", "cursor")
+        anchor = (_as_uuid(anchor_doc.get("message_id")), int(cast(int, anchor_doc.get("revision"))))
+    return direction, (boundary_key[1], boundary_key[0]), read_revision, anchor
+
+
+def _encode_history_cursor(
+    *, domain: str, query_digest: str, boundary: tuple[datetime, UUID], read_revision: int
+) -> str:
+    return _b64(
+        json_doc(
+            {
+                "schema_version": 1,
+                "domain": domain,
+                "query_digest": query_digest,
+                "boundary": {"created_at": boundary[0], "message_id": boundary[1]},
+                "read_revision": read_revision,
+            }
+        )
+    )
+
+
+def _decode_history_cursor(cursor: str, *, domain: str, query_digest: str) -> tuple[tuple[datetime, UUID], int]:
+    doc = _unb64(cursor)
+    if not isinstance(doc, dict) or doc.get("schema_version") != 1:
+        raise AgentValidationError("invalid_request", "cursor")
+    if doc.get("domain") != domain or doc.get("query_digest") != query_digest:
+        raise AgentValidationError("invalid_request", "cursor")
+    boundary = doc.get("boundary")
+    read_revision = doc.get("read_revision")
+    if not isinstance(boundary, dict) or isinstance(read_revision, bool) or not isinstance(read_revision, int):
+        raise AgentValidationError("invalid_request", "cursor")
+    try:
+        parsed_at = datetime.fromisoformat(str(boundary.get("created_at")))
+    except ValueError as error:
+        raise AgentValidationError("invalid_request", "cursor") from error
+    return (parsed_at, _as_uuid(boundary.get("message_id"))), read_revision
+
+
+def _stored_problem(value: object) -> Problem | None:
+    if not isinstance(value, dict):
+        return None
+    params = value.get("params")
+    return Problem(
+        code=str(value.get("code", "unknown")),
+        message_key=str(value.get("message_key", "agent.unknown")),
+        params=json_doc(params if isinstance(params, (dict, list)) else {}),
+        related_id=_as_optional_uuid(value.get("related_id")),
+    )
+
+
+def _message_view(row: Any) -> MessageView:
+    refs = row.source_refs if isinstance(row.source_refs, list) else []
+    return MessageView(
+        message_id=row.id,
+        conversation_id=row.conversation_id,
+        execution_id=row.execution_id,
+        attempt_id=row.attempt_id,
+        role=cast(Any, row.role),
+        content=row.content or "",
+        revision=int(row.revision),
+        created_at=row.message_created_at,
+        sources=tuple(_ref_from(ref) for ref in refs),
+    )
 
 
 def _validate_answer(answer: object, schema: object) -> None:
@@ -1575,3 +1731,718 @@ class AgentDao(BaseDao):
             ]
             next_cursor = _encode_queue_cursor(domain, int(items[-1].admission_seq)) if len(fetched) > limit else None
             return Page(items=tuple(items), next_cursor=next_cursor, read_revision=int(read_revision))
+
+    # ------------------------------------------------------------------
+    # D03：只读历史、会话、成果与交付视图
+    # ------------------------------------------------------------------
+
+    async def _read_revision(self, conn: Any) -> int:
+        """只读边界 = 已提交公开事件 tail；不存在时视为 0。"""
+        value = (
+            await conn.execute(sa.select(AgentStreamHead.tail).where(AgentStreamHead.stream_key == PUBLIC_STREAM_KEY))
+        ).scalar_one_or_none()
+        return int(value or 0)
+
+    def _scope_conditions(
+        self,
+        domain: str,
+        *,
+        conversation_id: UUID | None,
+        execution_id: UUID | None,
+        attempt_id: UUID | None,
+        read_revision: int,
+    ) -> list[Any]:
+        conditions: list[Any] = [
+            AgentMessage.domain == domain,
+            AgentMessage.seq <= read_revision,
+            AgentMessage.deleted_at.is_(None),
+        ]
+        if conversation_id is not None:
+            conditions.append(AgentMessage.conversation_id == conversation_id)
+        if execution_id is not None:
+            conditions.append(AgentMessage.execution_id == execution_id)
+        if attempt_id is not None:
+            conditions.append(AgentMessage.attempt_id == attempt_id)
+        return conditions
+
+    def _visible_messages(self, conditions: list[Any]) -> Any:
+        """每个 message id 只取 read_revision 内最高 revision。"""
+        latest = (
+            sa.select(AgentMessage.id, sa.func.max(AgentMessage.revision).label("revision"))
+            .where(*conditions)
+            .group_by(AgentMessage.id)
+            .subquery()
+        )
+        return (
+            sa.select(AgentMessage)
+            .join(latest, sa.and_(AgentMessage.id == latest.c.id, AgentMessage.revision == latest.c.revision))
+            .where(AgentMessage.deleted_at.is_(None))
+        )
+
+    async def read_conversation(self, domain: str, conversation_id: UUID) -> ConversationView | None:
+        async with self._guarded_begin() as conn:
+            conversation = (
+                await conn.execute(
+                    sa.select(AgentConversation).where(
+                        AgentConversation.id == conversation_id,
+                        AgentConversation.domain == domain,
+                        AgentConversation.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            if conversation is None or conversation.current_path_id is None:
+                return None
+            pending = (
+                await conn.execute(
+                    sa.select(sa.func.count())
+                    .select_from(AgentDecision)
+                    .join(AgentExecution, AgentExecution.id == AgentDecision.execution_id)
+                    .join(AgentIntent, AgentIntent.id == AgentExecution.intent_id)
+                    .where(
+                        AgentIntent.domain == domain,
+                        AgentIntent.conversation_id == conversation_id,
+                        AgentDecision.status == "pending",
+                    )
+                )
+            ).scalar_one()
+            return ConversationView(
+                conversation_id=conversation.id,
+                title=conversation.title or "",
+                created_at=conversation.created_at,
+                updated_at=conversation.updated_at,
+                revision=int(conversation.revision),
+                pinned=bool(conversation.pinned),
+                archived=bool(conversation.archived),
+                path_id=conversation.current_path_id,
+                path_revision=int(conversation.current_path_revision or 1),
+                active_execution_id=conversation.active_execution_id,
+                pending_decision_count=int(pending),
+                source_ref=json_doc(conversation.source_ref) if conversation.source_ref is not None else None,
+            )
+
+    async def list_conversations(
+        self, domain: str, *, archived: bool | None, cursor: str | None, limit: int
+    ) -> Page[ConversationView]:
+        after = _decode_queue_cursor(domain, cursor) if cursor is not None else 0
+        async with self._guarded_begin() as conn:
+            read_revision = await self._read_revision(conn)
+            conditions: list[Any] = [
+                AgentConversation.domain == domain,
+                AgentConversation.deleted_at.is_(None),
+                AgentConversation.next_seq >= after,
+            ]
+            if archived is not None:
+                conditions.append(AgentConversation.archived.is_(archived))
+            rows = (
+                await conn.execute(
+                    sa.select(AgentConversation)
+                    .where(*conditions)
+                    .order_by(AgentConversation.next_seq.asc(), AgentConversation.id.asc())
+                    .limit(limit + 1)
+                )
+            ).all()
+            has_more = len(rows) > limit
+            window = list(rows[:limit])
+            items: list[ConversationView] = []
+            for row in window:
+                if row.current_path_id is None:  # pragma: no cover - 受理必然建路径
+                    continue
+                items.append(
+                    ConversationView(
+                        conversation_id=row.id,
+                        title=row.title or "",
+                        created_at=row.created_at,
+                        updated_at=row.updated_at,
+                        revision=int(row.revision),
+                        pinned=bool(row.pinned),
+                        archived=bool(row.archived),
+                        path_id=row.current_path_id,
+                        path_revision=int(row.current_path_revision or 1),
+                        active_execution_id=row.active_execution_id,
+                        pending_decision_count=None,
+                        source_ref=json_doc(row.source_ref) if row.source_ref is not None else None,
+                    )
+                )
+            next_cursor = _encode_queue_cursor(domain, int(window[-1].next_seq)) if has_more and window else None
+            return Page(items=tuple(items), next_cursor=next_cursor, read_revision=read_revision)
+
+    async def read_messages(
+        self,
+        domain: str,
+        *,
+        conversation_id: UUID | None,
+        execution_id: UUID | None,
+        attempt_id: UUID | None,
+        cursor: str | None,
+        limit: int,
+    ) -> MessageWindow | None:
+        async with self._guarded_begin() as conn:
+            read_revision = await self._read_revision(conn)
+            direction: str | None = None
+            boundary: tuple[datetime, UUID] | None = None
+            anchor: tuple[UUID, int] | None = None
+            if cursor is not None:
+                direction, boundary, read_revision, anchor = _decode_message_cursor(
+                    cursor,
+                    domain=domain,
+                    conversation_id=conversation_id,
+                    execution_id=execution_id,
+                    attempt_id=attempt_id,
+                )
+            conditions = self._scope_conditions(
+                domain,
+                conversation_id=conversation_id,
+                execution_id=execution_id,
+                attempt_id=attempt_id,
+                read_revision=read_revision,
+            )
+            query = self._visible_messages(conditions)
+            if boundary is not None:
+                if direction == "older":
+                    boundary_condition = sa.or_(
+                        AgentMessage.message_created_at < boundary[0],
+                        sa.and_(AgentMessage.message_created_at == boundary[0], AgentMessage.id < boundary[1]),
+                    )
+                    query = query.where(boundary_condition).order_by(
+                        AgentMessage.message_created_at.desc(), AgentMessage.id.desc()
+                    )
+                else:
+                    after_condition = sa.or_(
+                        AgentMessage.message_created_at > boundary[0],
+                        sa.and_(AgentMessage.message_created_at == boundary[0], AgentMessage.id > boundary[1]),
+                    )
+                    query = query.where(after_condition).order_by(
+                        AgentMessage.message_created_at.asc(), AgentMessage.id.asc()
+                    )
+            elif direction is None:
+                query = query.order_by(AgentMessage.message_created_at.desc(), AgentMessage.id.desc())
+            rows = (await conn.execute(query.limit(limit + 1))).all()
+            has_more = len(rows) > limit
+            visible = list(rows[:limit])
+            if direction == "newer":
+                items = [_message_view(row) for row in visible]
+            else:
+                items = [_message_view(row) for row in reversed(visible)]
+            older_cursor: str | None = None
+            newer_cursor: str | None = None
+            if items:
+                first_key = (items[0].created_at, items[0].message_id)
+                last_key = (items[-1].created_at, items[-1].message_id)
+                if direction == "newer":
+                    older_cursor = _encode_message_cursor(
+                        domain=domain,
+                        conversation_id=conversation_id,
+                        execution_id=execution_id,
+                        attempt_id=attempt_id,
+                        direction="older",
+                        boundary=first_key,
+                        read_revision=read_revision,
+                        anchor=anchor,
+                    )
+                    if has_more:
+                        newer_cursor = _encode_message_cursor(
+                            domain=domain,
+                            conversation_id=conversation_id,
+                            execution_id=execution_id,
+                            attempt_id=attempt_id,
+                            direction="newer",
+                            boundary=last_key,
+                            read_revision=read_revision,
+                            anchor=anchor,
+                        )
+                else:
+                    if has_more:
+                        older_cursor = _encode_message_cursor(
+                            domain=domain,
+                            conversation_id=conversation_id,
+                            execution_id=execution_id,
+                            attempt_id=attempt_id,
+                            direction="older",
+                            boundary=first_key,
+                            read_revision=read_revision,
+                            anchor=anchor,
+                        )
+                    if direction == "older":
+                        newer_cursor = _encode_message_cursor(
+                            domain=domain,
+                            conversation_id=conversation_id,
+                            execution_id=execution_id,
+                            attempt_id=attempt_id,
+                            direction="newer",
+                            boundary=last_key,
+                            read_revision=read_revision,
+                            anchor=anchor,
+                        )
+            return MessageWindow(
+                items=tuple(items),
+                conversation_id=conversation_id,
+                execution_id=execution_id,
+                attempt_id=attempt_id,
+                older_cursor=older_cursor,
+                newer_cursor=newer_cursor,
+                read_revision=read_revision,
+                anchor_message_id=None if anchor is None else anchor[0],
+                anchor_revision=None if anchor is None else anchor[1],
+            )
+
+    async def locate(self, domain: str, message_id: UUID, revision: int) -> MessageWindow | None:
+        """锚定准确 message revision，返回前后各 25 条的只读窗口（§5.7）。"""
+        async with self._guarded_begin() as conn:
+            read_revision = await self._read_revision(conn)
+            target = (
+                await conn.execute(
+                    sa.select(AgentMessage).where(
+                        AgentMessage.id == message_id,
+                        AgentMessage.revision == revision,
+                        AgentMessage.domain == domain,
+                        AgentMessage.seq <= read_revision,
+                        AgentMessage.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            if target is None:
+                return None
+            attempt_id = target.attempt_id
+            conditions = self._scope_conditions(
+                domain,
+                conversation_id=target.conversation_id,
+                execution_id=target.execution_id,
+                attempt_id=attempt_id,
+                read_revision=read_revision,
+            )
+            base = self._visible_messages(conditions)
+            target_key = (target.message_created_at, target.id)
+            older_rows = (
+                await conn.execute(
+                    base.where(
+                        sa.or_(
+                            AgentMessage.message_created_at < target_key[0],
+                            sa.and_(
+                                AgentMessage.message_created_at == target_key[0],
+                                AgentMessage.id < target_key[1],
+                            ),
+                        )
+                    )
+                    .order_by(AgentMessage.message_created_at.desc(), AgentMessage.id.desc())
+                    .limit(25)
+                )
+            ).all()
+            newer_rows = (
+                await conn.execute(
+                    base.where(
+                        sa.or_(
+                            AgentMessage.message_created_at > target_key[0],
+                            sa.and_(
+                                AgentMessage.message_created_at == target_key[0],
+                                AgentMessage.id > target_key[1],
+                            ),
+                        )
+                    )
+                    .order_by(AgentMessage.message_created_at.asc(), AgentMessage.id.asc())
+                    .limit(25)
+                )
+            ).all()
+            older = list(reversed(older_rows))
+            items = [_message_view(row) for row in older]
+            items.append(_message_view(target))
+            items.extend(_message_view(row) for row in newer_rows)
+            older_cursor = newer_cursor = None
+            if items:
+                older_cursor = _encode_message_cursor(
+                    domain=domain,
+                    conversation_id=target.conversation_id,
+                    execution_id=target.execution_id,
+                    attempt_id=attempt_id,
+                    direction="older",
+                    boundary=(items[0].created_at, items[0].message_id),
+                    read_revision=read_revision,
+                )
+                newer_cursor = _encode_message_cursor(
+                    domain=domain,
+                    conversation_id=target.conversation_id,
+                    execution_id=target.execution_id,
+                    attempt_id=attempt_id,
+                    direction="newer",
+                    boundary=(items[-1].created_at, items[-1].message_id),
+                    read_revision=read_revision,
+                )
+            return MessageWindow(
+                items=tuple(items),
+                conversation_id=target.conversation_id,
+                execution_id=target.execution_id,
+                attempt_id=attempt_id,
+                older_cursor=older_cursor,
+                newer_cursor=newer_cursor,
+                read_revision=read_revision,
+                anchor_message_id=message_id,
+                anchor_revision=revision,
+            )
+
+    async def search(self, domain: str, query: HistoryQuery, *, cursor: str | None, limit: int) -> Page[HistoryHit]:
+        query_digest = _digest(json_doc(query))
+        async with self._guarded_begin() as conn:
+            read_revision: int
+            boundary: tuple[datetime, UUID] | None = None
+            if cursor is not None:
+                boundary, read_revision = _decode_history_cursor(cursor, domain=domain, query_digest=query_digest)
+            else:
+                read_revision = await self._read_revision(conn)
+            conditions: list[Any] = [
+                AgentMessage.domain == domain,
+                AgentMessage.seq <= read_revision,
+                AgentMessage.deleted_at.is_(None),
+            ]
+            if query.conversation_id is not None:
+                conditions.append(AgentMessage.conversation_id == query.conversation_id)
+            if query.execution_id is not None:
+                conditions.append(AgentMessage.execution_id == query.execution_id)
+            if query.attempt_id is not None:
+                conditions.append(AgentMessage.attempt_id == query.attempt_id)
+            if query.message_role is not None:
+                conditions.append(AgentMessage.role == query.message_role)
+            if query.from_at is not None:
+                conditions.append(AgentMessage.message_created_at >= query.from_at)
+            if query.until_at is not None:
+                conditions.append(AgentMessage.message_created_at <= query.until_at)
+            latest = (
+                sa.select(AgentMessage.id, sa.func.max(AgentMessage.revision).label("revision"))
+                .where(*conditions)
+                .group_by(AgentMessage.id)
+                .subquery()
+            )
+            statement = (
+                sa.select(
+                    AgentMessage,
+                    AgentConversation.title.label("conversation_title"),
+                    AgentConversation.archived.label("conversation_archived"),
+                    AgentIntent.source_module.label("intent_source_module"),
+                    AgentTask.role_key.label("task_role_key"),
+                    AgentTask.id.label("hit_task_id"),
+                    AgentTask.parent_task_id.label("hit_parent_task_id"),
+                )
+                .join(latest, sa.and_(AgentMessage.id == latest.c.id, AgentMessage.revision == latest.c.revision))
+                .outerjoin(AgentConversation, AgentConversation.id == AgentMessage.conversation_id)
+                .outerjoin(AgentExecution, AgentExecution.id == AgentMessage.execution_id)
+                .outerjoin(AgentIntent, AgentIntent.id == AgentExecution.intent_id)
+                .outerjoin(AgentTask, AgentTask.id == AgentMessage.attempt_id)
+                .where(AgentMessage.deleted_at.is_(None))
+            )
+            text = query.text.strip()
+            if text:
+                pattern = "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                if query.fields == "content":
+                    statement = statement.where(AgentMessage.content.ilike(pattern, escape="\\"))
+                elif query.fields == "title":
+                    statement = statement.where(AgentConversation.title.ilike(pattern, escape="\\"))
+                else:
+                    statement = statement.where(
+                        sa.or_(
+                            AgentMessage.content.ilike(pattern, escape="\\"),
+                            AgentConversation.title.ilike(pattern, escape="\\"),
+                        )
+                    )
+            if not query.include_archived:
+                statement = statement.where(
+                    sa.or_(AgentConversation.id.is_(None), AgentConversation.archived.is_(False))
+                )
+            if query.source_module is not None:
+                statement = statement.where(AgentIntent.source_module == query.source_module)
+            if query.role_key is not None:
+                statement = statement.where(AgentTask.role_key == query.role_key)
+            if query.task_scope == "main":
+                statement = statement.where(AgentTask.parent_task_id.is_(None), AgentTask.id.is_not(None))
+            elif query.task_scope == "child":
+                statement = statement.where(AgentTask.parent_task_id.is_not(None))
+            if query.statuses:
+                statement = statement.where(
+                    sa.func.coalesce(AgentExecution.projection["status"].astext, "unknown").in_(query.statuses)
+                )
+            if boundary is not None:
+                statement = statement.where(
+                    sa.or_(
+                        AgentMessage.message_created_at < boundary[0],
+                        sa.and_(
+                            AgentMessage.message_created_at == boundary[0],
+                            AgentMessage.id < boundary[1],
+                        ),
+                    )
+                )
+            rows = (
+                await conn.execute(
+                    statement.order_by(AgentMessage.message_created_at.desc(), AgentMessage.id.desc()).limit(limit + 1)
+                )
+            ).all()
+            has_more = len(rows) > limit
+            window = list(rows[:limit])
+            hits: list[HistoryHit] = []
+            for row in window:
+                message = _message_view(row)
+                task_id = row.hit_task_id
+                if task_id is None:
+                    scope = "unassigned"
+                elif row.hit_parent_task_id is None:
+                    scope = "main"
+                else:
+                    scope = "child"
+                hits.append(
+                    HistoryHit(
+                        message=message,
+                        excerpt=(message.content or "")[:120],
+                        conversation_title=row.conversation_title,
+                        source_module=row.intent_source_module or "",
+                        role_key=row.task_role_key,
+                        task_scope=cast(Any, scope),
+                        task_id=task_id,
+                        return_ref=json_doc(
+                            {
+                                "message_id": message.message_id,
+                                "revision": message.revision,
+                                "conversation_id": message.conversation_id,
+                                "execution_id": message.execution_id,
+                                "attempt_id": message.attempt_id,
+                            }
+                        ),
+                    )
+                )
+            next_cursor = (
+                _encode_history_cursor(
+                    domain=domain,
+                    query_digest=query_digest,
+                    boundary=(window[-1].message_created_at, window[-1].id),
+                    read_revision=read_revision,
+                )
+                if has_more and window
+                else None
+            )
+            return Page(items=tuple(hits), next_cursor=next_cursor, read_revision=read_revision)
+
+    async def read_artifact(self, domain: str, artifact_id: UUID, revision: int) -> ArtifactView | None:
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentArtifact)
+                    .join(AgentExecution, AgentExecution.id == AgentArtifact.execution_id)
+                    .join(AgentIntent, AgentIntent.id == AgentExecution.intent_id)
+                    .where(
+                        AgentArtifact.id == artifact_id,
+                        AgentArtifact.revision == revision,
+                        AgentIntent.domain == domain,
+                        AgentArtifact.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            if row is None:
+                return None
+            return ArtifactView(
+                artifact_id=row.id,
+                revision=int(row.revision),
+                output_contract=row.output_contract,
+                content=json_doc(row.content) if row.content is not None else json_doc(None),
+                markdown=row.markdown or "",
+                content_digest=row.content_digest,
+                source_availability=json_doc(row.source_refs if row.source_refs is not None else []),
+            )
+
+    async def read_decision(self, domain: str, decision_id: UUID) -> DecisionView | None:
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentDecision)
+                    .join(AgentExecution, AgentExecution.id == AgentDecision.execution_id)
+                    .join(AgentIntent, AgentIntent.id == AgentExecution.intent_id)
+                    .where(AgentDecision.id == decision_id, AgentIntent.domain == domain)
+                )
+            ).first()
+            if row is None:
+                return None
+            answer_command = None
+            if row.answer_command_id is not None:
+                answer_command = (
+                    await conn.execute(sa.select(AgentCommand).where(AgentCommand.id == row.answer_command_id))
+                ).first()
+            receipt = answer_command.receipt if answer_command is not None and answer_command.receipt else {}
+            answer = receipt.get("answer") if isinstance(receipt, dict) else None
+            return DecisionView(
+                decision_id=row.id,
+                target=Target(row.execution_id, row.task_id, row.attempt_id),
+                revision=int(row.revision),
+                native_request_id=row.native_request_id,
+                continuation_ref=(
+                    cast(str | None, receipt.get("continuation_ref")) if isinstance(receipt, dict) else None
+                ),
+                question_key=row.question_key,
+                question_params=json_doc(row.question_params),
+                options=json_doc(row.options),
+                answer_schema=json_doc(row.answer_schema),
+                scope_digest=row.scope_digest,
+                expires_at=row.expires_at,
+                status=cast(Any, row.status),
+                answer_command_id=row.answer_command_id,
+                answer=json_doc(answer) if answer is not None else None,
+                answer_phase=cast(Any, row.answer_phase),
+                answer_problem=_stored_problem(row.answer_problem),
+            )
+
+    async def lookup_delivery(self, domain: str, operation_id: UUID) -> DeliveryView | None:
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentDelivery)
+                    .join(AgentCommand, AgentCommand.id == AgentDelivery.operation_id)
+                    .where(AgentDelivery.operation_id == operation_id, AgentCommand.domain == domain)
+                )
+            ).first()
+            if row is None:
+                return None
+            receipt = row.receipt if isinstance(row.receipt, dict) else {}
+            status = row.status
+            phase = row.phase
+            if status == "unknown" and row.cancel_requested:
+                status = "unknown"
+            return DeliveryView(
+                schema_version=1,
+                operation_id=row.operation_id,
+                revision=int(row.revision),
+                artifact_id=row.artifact_id,
+                artifact_revision=int(row.artifact_revision),
+                format=cast(Any, row.format),
+                destination=row.destination,
+                expected_target_digest=row.expected_target_digest,
+                confirm_overwrite=bool(receipt.get("confirm_overwrite", False)),
+                content_digest=row.content_digest,
+                source_availability=(
+                    json_doc(row.source_availability) if row.source_availability is not None else None
+                ),
+                delivery_digest=row.delivery_digest,
+                status=cast(Any, status),
+                phase=cast(Any, phase),
+                cancel_requested=bool(row.cancel_requested),
+                problem=_stored_problem(row.problem),
+            )
+
+    async def read_plan(self, domain: str, ref: ResourceRef) -> PlanView | None:
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentPlanReview)
+                    .join(AgentExecution, AgentExecution.id == AgentPlanReview.source_execution_id)
+                    .join(AgentIntent, AgentIntent.id == AgentExecution.intent_id)
+                    .where(
+                        AgentPlanReview.plan_resource_id == ref.resource_id,
+                        AgentPlanReview.plan_revision == ref.revision,
+                        AgentIntent.domain == domain,
+                    )
+                )
+            ).first()
+            if row is None:
+                return None
+            execution = (
+                await conn.execute(sa.select(AgentExecution).where(AgentExecution.id == row.source_execution_id))
+            ).first()
+            intent = (await conn.execute(sa.select(AgentIntent).where(AgentIntent.id == execution.intent_id))).first()
+            version = (
+                await conn.execute(
+                    sa.select(AgentResourceVersion).where(
+                        AgentResourceVersion.resource_id == ref.resource_id,
+                        AgentResourceVersion.revision == ref.revision,
+                    )
+                )
+            ).first()
+            return PlanView(
+                ref=ref,
+                conversation_id=intent.conversation_id if intent is not None else None,
+                planning_execution_id=row.source_execution_id,
+                source_input_revision=int(row.source_input_revision),
+                source_manifest_digest=row.source_manifest_digest,
+                review_revision=int(row.review_revision),
+                review_digest=row.review_digest,
+                review_status=cast(Any, row.review_status),
+                plan=json_doc(version.payload if version is not None else {}),
+                input_snapshot=json_doc(row.input_snapshot),
+                started_execution_ids=(),
+            )
+
+    async def read_resource(self, domain: str, ref: ResourceRef) -> JsonDoc | None:
+        async with self._guarded_begin() as conn:
+            resource = (
+                await conn.execute(
+                    sa.select(AgentResource).where(
+                        AgentResource.id == ref.resource_id,
+                        AgentResource.domain == domain,
+                        AgentResource.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            if resource is None or resource.deleting:
+                return None
+            version = (
+                await conn.execute(
+                    sa.select(AgentResourceVersion).where(
+                        AgentResourceVersion.resource_id == ref.resource_id,
+                        AgentResourceVersion.revision == ref.revision,
+                    )
+                )
+            ).first()
+            if version is None or version.availability in ("revoked", "deleted"):
+                return None
+            return json_doc(version.payload)
+
+    async def read_execution(self, domain: str, execution_id: UUID) -> ExecutionView | None:
+        async with self._guarded_begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentExecution)
+                    .join(AgentIntent, AgentIntent.id == AgentExecution.intent_id)
+                    .where(AgentExecution.id == execution_id, AgentIntent.domain == domain)
+                )
+            ).first()
+            if row is None:
+                return None
+            intent = (await conn.execute(sa.select(AgentIntent).where(AgentIntent.id == row.intent_id))).first()
+            projection = row.projection if isinstance(row.projection, dict) else {}
+            status = "retired" if row.retired_at is not None else str(projection.get("status", "unknown"))
+            task_rows = (
+                await conn.execute(
+                    sa.select(AgentTask).where(
+                        AgentTask.execution_id == execution_id,
+                        AgentTask.current_attempt_id.is_not(None),
+                    )
+                )
+            ).all()
+            tasks = tuple(
+                TaskView(
+                    task_id=task.id,
+                    parent_task_id=task.parent_task_id,
+                    attempt_id=task.current_attempt_id,
+                    role_key=task.role_key,
+                    status="dispatched",
+                    state_revision=0,
+                    depends_on=tuple(_as_uuid(item) for item in task.depends_on or []),
+                    problem=None,
+                    plan_node_id=task.plan_node_id,
+                    control=None,
+                )
+                for task in task_rows
+                if task.current_attempt_id is not None
+            )
+            return ExecutionView(
+                execution_id=row.id,
+                conversation_id=intent.conversation_id if intent is not None else None,
+                input_revision=int(row.input_revision),
+                plan_revision=int(row.plan_revision),
+                status=status,
+                fresh=bool(projection.get("fresh", True)),
+                observed_at=datetime.now(UTC),
+                tasks=tasks,
+                native_ref=row.native_run_id,
+                continuation_ref=json_doc(row.continuation_ref) if row.continuation_ref is not None else None,
+                usage=json_doc(projection.get("usage", {})),
+                problem=None,
+                source_module=intent.source_module if intent is not None else "",
+                plan_ref=(
+                    ResourceRef(row.plan_resource_id, int(row.plan_resource_revision))
+                    if row.plan_resource_id is not None and row.plan_resource_revision is not None
+                    else None
+                ),
+                control=None,
+            )
