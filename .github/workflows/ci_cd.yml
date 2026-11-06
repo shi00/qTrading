@@ -2797,35 +2797,51 @@ jobs:
             exit 1
           }
 
-      - name: Smoke Test - Installer Scripts (embedded variants, release tags only, P1-12)
-        # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%,
-        # 仅在 release tag 时执行避免常规 PR/push 污染 CI 环境.
+      - name: Smoke Test - Installer Scripts (embedded variants, release tag / manual dispatch, P1-12)
+        # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%, 因此只在本 job
+        # 既有的触发面内执行（release tag 或 workflow_dispatch 全量构建）; 常规 PR/push
+        # 不会进入 build-windows, 不存在污染 CI 环境的风险.
         # installer.iss PrivilegesRequired=lowest → user-level 安装, 无需管理员权限.
-        if: matrix.embedded == 'true' && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.embedded == 'true'
         shell: pwsh
+        env:
+          # installer_smoke_upgrade.ps1 经 gh CLI 下载「最近已发布版本」安装器作为升级基线.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $installerPath = "Output\AStockScreener-Setup-${{ matrix.variant }}.exe"
           if (-not (Test-Path $installerPath)) {
             Write-Error "Installer not found: $installerPath"
             exit 1
           }
-          Write-Host "Running installer smoke tests (crash_recovery + running_app, P1-12)..."
-          # 子脚本以 powershell 5.1 运行, 其非 0 退出不会抛异常; 必须显式校验
+          # 子脚本以 powershell 5.1 运行, 其非 0 退出不会抛异常; 必须逐个显式校验
           # $LASTEXITCODE, 否则前一个脚本失败会被后一个脚本的 0 退出码覆盖.
-          & powershell -File scripts/installer_smoke_crash_recovery.ps1 -InstallerPath $installerPath
-          $crashRecoveryExitCode = $LASTEXITCODE
-          if ($crashRecoveryExitCode -ne 0) {
-            Write-Error "installer_smoke_crash_recovery.ps1 failed with exit code $crashRecoveryExitCode"
-            exit $crashRecoveryExitCode
+          function Invoke-InstallerSmoke {
+            param([string]$ScriptPath, [string[]]$ExtraArgs = @())
+            & powershell -File $ScriptPath -InstallerPath $installerPath @ExtraArgs
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "$ScriptPath failed with exit code $LASTEXITCODE"
+              exit $LASTEXITCODE
+            }
+            Write-Host "✅ $ScriptPath passed"
           }
-          Write-Host "✅ installer_smoke_crash_recovery.ps1 passed"
-          & powershell -File scripts/installer_smoke_running_app.ps1 -InstallerPath $installerPath
-          $runningAppExitCode = $LASTEXITCODE
-          if ($runningAppExitCode -ne 0) {
-            Write-Error "installer_smoke_running_app.ps1 failed with exit code $runningAppExitCode"
-            exit $runningAppExitCode
+          Write-Host "Running installer smoke tests (crash_recovery / running_app / uninstall / upgrade, P1-12)..."
+          Invoke-InstallerSmoke "scripts/installer_smoke_crash_recovery.ps1"
+          Invoke-InstallerSmoke "scripts/installer_smoke_running_app.ps1"
+          Invoke-InstallerSmoke "scripts/installer_smoke_uninstall.ps1"
+          # 升级路径：安装最近一个已发布版本 → 运行期写入已提交哨兵 → 覆盖安装候选版本
+          # → 读回数据一致性（installer_smoke_upgrade.ps1 的判据，不以目录非空代表数据保留）.
+          # 基线需排除当前 ref：同一 tag 重跑时避免「自己升自己」的空验证.
+          $currentRef = "${{ github.ref_name }}"
+          $baselineTag = gh release list --exclude-drafts --exclude-pre-releases --limit 20 --json tagName --jq '.[].tagName' |
+            Where-Object { $_ -ne $currentRef } |
+            Select-Object -First 1
+          if (-not $baselineTag) {
+            Write-Error "No published release available as upgrade baseline (excluding $currentRef)"
+            exit 1
           }
-          Write-Host "✅ installer_smoke_running_app.ps1 passed"
+          $baselineVersion = $baselineTag.TrimStart('v')
+          Write-Host "Upgrade baseline: $baselineTag (version $baselineVersion)"
+          Invoke-InstallerSmoke "scripts/installer_smoke_upgrade.ps1" @("-OldVersion", $baselineVersion, "-OldVariant", "${{ matrix.variant }}")
 
       - name: Generate SHA256SUMS
         shell: pwsh
