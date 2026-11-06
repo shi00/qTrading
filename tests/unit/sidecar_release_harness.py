@@ -21,7 +21,10 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import urllib.parse
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -112,14 +115,65 @@ def make_release(
     *,
     draft: bool,
     assets: list[dict[str, Any]] | None = None,
+    upload_url: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    release: dict[str, Any] = {
         "id": release_id,
         "tag_name": tag,
         "name": tag,
         "draft": draft,
         "assets": list(assets or []),
     }
+    if upload_url is not None:
+        release["upload_url"] = upload_url
+    return release
+
+
+class _UploadHandler(BaseHTTPRequestHandler):
+    """接收 gh 资产传输层的真实 HTTP POST，并记录 host / query / 原始 body。"""
+
+    server: _UploadServer
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 要求的固定方法名
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+        name = query.get("name", [""])[0]
+        server = self.server
+        server.records.append(
+            {
+                "host": self.headers.get("Host", ""),
+                "path": parsed.path,
+                "query": parsed.query,
+                "name": name,
+                "body": body,
+                "content_type": self.headers.get("Content-Type", ""),
+                "authorized": self.headers.get("Authorization", "") != "",
+            }
+        )
+        if name in server.fail_names:
+            payload = b'{"message":"asset upload failed"}'
+            self.send_response(500)
+        else:
+            payload = json.dumps({"name": name}).encode()
+            self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - 基类签名
+        return
+
+
+class _UploadServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, fail_names: list[str] | None) -> None:
+        super().__init__(("127.0.0.1", 0), _UploadHandler)
+        self.records: list[dict[str, Any]] = []
+        self.fail_names = set(fail_names or [])
 
 
 class SidecarReleaseHarness:
@@ -139,12 +193,14 @@ class SidecarReleaseHarness:
         drop_asset_names: list[str] | None = None,
         corrupt_digests: dict[str, str] | None = None,
         fail_upload_names: list[str] | None = None,
+        upload_url_template: bool = True,
         timeout_seconds: int = 30,
     ) -> None:
         self.workdir = Path(workdir)
         self.tag = tag
         self.commit_sha = commit_sha
         self.repo = repo
+        self.upload_url_template = upload_url_template
         self.timeout_seconds = timeout_seconds
 
         self.bin_dir = self.workdir / "bin"
@@ -159,6 +215,13 @@ class SidecarReleaseHarness:
         self.calls_path.write_text("", encoding="utf-8")
         self._outputs: dict[str, dict[str, str]] = {}
         self._specs = load_publish_steps()
+
+        # 资产上传主机的本地替身：模拟 gh 传输层发往 release.upload_url 的原始 POST。
+        self._upload_server = _UploadServer(fail_upload_names)
+        self._upload_thread = threading.Thread(target=self._upload_server.serve_forever, daemon=True)
+        self._upload_thread.start()
+        self.upload_host = f"127.0.0.1:{self._upload_server.server_address[1]}"
+        self.upload_base = f"http://{self.upload_host}"
 
         self._build_world(
             releases=releases or [],
@@ -185,8 +248,13 @@ class SidecarReleaseHarness:
         fail_upload_names: list[str] | None,
     ) -> None:
         resolved_commit = tag_commit_sha or self.commit_sha
+        for release in releases:
+            release.setdefault("upload_url", self.upload_url_for(release["id"]))
         world: dict[str, Any] = {
             "tag": self.tag,
+            "repo": self.repo,
+            "upload_base": self.upload_base,
+            "upload_url_template": self.upload_url_template,
             "releases": releases,
             "failure": failure,
             "drop_asset_names": drop_asset_names or [],
@@ -253,6 +321,24 @@ class SidecarReleaseHarness:
             names.extend([artifact, f"sidecar-manifest-{os_name}.json", f"sha256sums-{target}.txt"])
         return names
 
+    def upload_url_for(self, release_id: int) -> str:
+        """Release 对象应返回的 upload_url（指向本地替身主机；可选 URI template）。"""
+        base = f"{self.upload_base}/repos/{self.repo}/releases/{release_id}/assets"
+        return f"{base}{{?name,label}}" if self.upload_url_template else base
+
+    @property
+    def upload_requests(self) -> list[dict[str, Any]]:
+        """gh 传输层实际发出的资产上传请求（host / name / 原始 body）。"""
+        return list(self._upload_server.records)
+
+    def expected_asset_payloads(self) -> dict[str, bytes]:
+        payloads: dict[str, bytes] = {}
+        for os_name, target, artifact in PLATFORMS:
+            directory = self.assets_dir / artifact
+            for name in (artifact, f"sidecar-manifest-{os_name}.json", f"sha256sums-{target}.txt"):
+                payloads[name] = (directory / name).read_bytes()
+        return payloads
+
     @property
     def steps(self) -> list[StepSpec]:
         return list(self._specs)
@@ -293,6 +379,7 @@ class SidecarReleaseHarness:
             "GITHUB_REF": f"refs/tags/{self.tag}",
             "GITHUB_REF_NAME": self.tag,
             "GITHUB_REPOSITORY": self.repo,
+            "GITHUB_API_URL": "https://api.github.com",
             "GITHUB_OUTPUT": str(output_path),
             "SIDECAR_FAKE_GH_WORLD": str(self.world_path),
             "SIDECAR_FAKE_GH_CALLS": str(self.calls_path),

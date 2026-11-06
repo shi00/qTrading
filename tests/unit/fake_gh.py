@@ -19,6 +19,9 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
 WORLD_ENV = "SIDECAR_FAKE_GH_WORLD"
@@ -200,7 +203,8 @@ def _dispatch(world: dict[str, Any], parsed: dict[str, Any]) -> int:
         if method == "GET":
             return _emit(release["assets"], jq_expression)
         if method == "POST":
-            return _upload_asset(world, release, fields, parsed["input_path"])
+            # 真实 GitHub 不提供该主机上的资产上传；上传必须走 release.upload_url。
+            return _fail("HTTP 404: release asset upload must use the release upload_url host")
         return _fail(f"HTTP 405: method {method} not allowed for assets")
 
     release_match = re.search(r"/releases/(?P<release_id>\d+)$", base)
@@ -229,6 +233,10 @@ def _dispatch(world: dict[str, Any], parsed: dict[str, Any]) -> int:
                 "draft": bool(fields.get("draft", False)),
                 "prerelease": bool(fields.get("prerelease", False)),
                 "assets": [],
+                "upload_url": (
+                    f"{world.get('upload_base', '')}/repos/{world.get('repo', '')}/releases/{release_id}/assets"
+                    + ("{?name,label}" if world.get("upload_url_template", True) else "")
+                ),
             }
             world.setdefault("releases", []).append(release)
             return _emit(release, jq_expression)
@@ -237,31 +245,92 @@ def _dispatch(world: dict[str, Any], parsed: dict[str, Any]) -> int:
     return _fail(f"HTTP 404: no fake route for {method} {base}")
 
 
-def _upload_asset(
+def _upload_binary_to_url(
     world: dict[str, Any],
     release: dict[str, Any],
-    fields: dict[str, Any],
-    input_path: str | None,
+    name: str,
+    input_path: str,
+    url: str,
+    jq_expression: str | None,
 ) -> int:
-    name = str(fields.get("name", ""))
-    if not input_path:
-        return _fail("asset upload requires --input")
-    if name in set(world.get("fail_upload_names", [])):
-        return _fail(f"HTTP 500: failed to upload asset {name}")
+    """模拟 gh 的资产传输层：向 Release upload_url 发送原始二进制并返回资产对象。
+
+    真实 gh 在内部读取 release.upload_url 并访问资产上传主机；本 stub 用本地
+    HTTP 服务替代该主机，使测试能断言实际主机、``name`` 查询参数与 body 字节。
+    """
     with open(input_path, "rb") as handle:
         payload = handle.read()
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "User-Agent": "fake-gh-test",
+    }
+    token = os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        return _fail(f"HTTP {error.code}: {error.reason}")
+    except urllib.error.URLError as error:
+        return _fail(f"upload transport error: {error.reason}")
+
     digest = f"sha256:{hashlib.sha256(payload).hexdigest()}"
     override = world.get("corrupt_digests", {}).get(name)
     if override:
         digest = override
     if name in set(world.get("drop_asset_names", [])):
-        # 模拟服务端未落库：返回成功但最终资产集合缺少该文件。
-        return _emit({"id": -1, "name": name, "digest": digest}, None)
+        # 模拟服务端未落库：请求成功但最终资产集合缺少该文件。
+        return _emit({"id": -1, "name": name, "digest": digest}, jq_expression)
     asset_id = int(world.get("_next_asset_id", 5000))
     world["_next_asset_id"] = asset_id + 1
     asset = {"id": asset_id, "name": name, "digest": digest}
     release["assets"].append(asset)
-    return _emit(asset, None)
+    return _emit(asset, jq_expression)
+
+
+def _release_upload(world: dict[str, Any], args: list[str], jq_expression: str | None) -> int:
+    """模拟 ``gh release upload <tag> <files>...``（含 draft 定位与 upload_url 传输）。"""
+    if "--clobber" in args:
+        return _fail("--clobber is forbidden in the sidecar publisher")
+    positional: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in {"--repo", "-R"}:
+            index += 2
+        elif arg.startswith("-"):
+            index += 1
+        else:
+            positional.append(arg)
+            index += 1
+    if len(positional) < 2:
+        return _fail("release upload requires a tag and at least one file")
+    tag, file_paths = positional[0], positional[1:]
+
+    releases = [release for release in world.get("releases", []) if release.get("tag_name") == tag]
+    drafts = [release for release in releases if release.get("draft")]
+    if drafts:
+        release = drafts[0]
+    elif releases:
+        return _fail(f"release {tag} is not a draft; refusing to upload")
+    else:
+        return _fail(f"release {tag} not found (HTTP 404)")
+
+    upload_url = str(release.get("upload_url") or "")
+    upload_url = upload_url.split("{", 1)[0]
+    if not urllib.parse.urlparse(upload_url).scheme:
+        return _fail(f"release {tag} has no usable upload_url")
+
+    for file_path in file_paths:
+        name = os.path.basename(file_path)
+        separator = "&" if "?" in upload_url else "?"
+        url = f"{upload_url}{separator}name={urllib.parse.quote(name, safe='')}"
+        status = _upload_binary_to_url(world, release, name, file_path, url, jq_expression)
+        if status != 0:
+            return status
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -276,7 +345,17 @@ def main(argv: list[str]) -> int:
     }
     world = _load_world()
     try:
-        if not argv or argv[0] != "api":
+        if not argv:
+            record["exit"] = _fail("unsupported fake gh invocation")
+            return record["exit"]
+        if argv[0] == "release" and len(argv) > 1 and argv[1] == "upload":
+            record["subcommand"] = "release upload"
+            record["method"] = "POST"
+            record["write"] = True
+            record["files"] = [arg for arg in argv[2:] if not arg.startswith("-")]
+            record["exit"] = _release_upload(world, argv[2:], None)
+            return record["exit"]
+        if argv[0] != "api":
             record["exit"] = _fail(f"unsupported fake gh invocation: {' '.join(argv)}")
             return record["exit"]
         parsed = _parse_api_args(argv[1:])
