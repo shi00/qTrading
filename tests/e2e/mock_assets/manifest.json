@@ -116,8 +116,8 @@
     },
     {
       "path": "rive/wasm/rive_native.js",
-      "sha256": "4591b7b9ca0f26793dd401cea48e840038ddf79b4c2a04a811143ab237dfbb26",
-      "size": 219477
+      "sha256": "441ae23914d1c81e7bd0929b9d3c40efe2d14702411c7fd22fa2322b47d49fa3",
+      "size": 219458
     },
     {
       "path": "rive/wasm/rive_native.wasm",
@@ -126,8 +126,8 @@
     },
     {
       "path": "rive/wasm_compatibility/rive_native.js",
-      "sha256": "52a9646fb2159d626f73d980f6f990359772bb278b0cb45c431bd0831d763843",
-      "size": 224775
+      "sha256": "83027b624c0961196892ea24a23feb615e7668a425067b915e31705a9ba2078e",
+      "size": 224756
     },
     {
       "path": "rive/wasm_compatibility/rive_native.wasm",

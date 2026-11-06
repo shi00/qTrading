@@ -111,6 +111,8 @@ python scripts/sync_e2e_fonts.py --force
   - 命令：`ls <site-packages>/flet_web/web/canvaskit/`
 - [ ] **同步新资源到 `tests/e2e/mock_assets/canvaskit/`**：保留子目录结构（如 `chromium/canvaskit.js`）
   - 复制命令：`cp -r <site-packages>/flet_web/web/canvaskit/* tests/e2e/mock_assets/canvaskit/`
+- [ ] **确认 `tests/e2e/mock_assets/**` 不参与 EOL 转换**：`.gitattributes` 必须包含 `tests/e2e/mock_assets/** -text`。manifest 记录的是逐字节 SHA-256，若按 `text=auto` 处理，同一提交在 Windows（CRLF）与 Linux（LF）检出的摘要必有一端失配，表现为 E2E/嵌入式用例集体 setup ERROR（PR #2060 实例）
+  - 校验：`git ls-files --eol tests/e2e/mock_assets/canvaskit/canvaskit.js` 应为 `i/lf w/lf attr/-text`；或运行 `pytest tests/unit/test_e2e_asset_manifest.py`（含 `.gitattributes` 守护用例）
 - [ ] **验证拦截器逻辑**：[tests/e2e/_font_urls.py](../../tests/e2e/_font_urls.py) 的 `extract_canvaskit_relpath()` 函数支持子目录变体路径解析（含 path traversal 防御）；[tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 通过关键字 `canvaskit` / `skwasm` / `wimp` 匹配并路由到本地文件
 - [ ] **若新版本引入其他渲染器**：在 `intercept_external` 的关键字列表中补充新渲染器名称
 

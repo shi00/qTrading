@@ -125,3 +125,19 @@ def test_build_manifest_ignores_unmanaged_trees(mock_root: Path) -> None:
         "rive/wasm/rive.wasm",
     ]
     assert "fonts" in data
+
+
+def test_gitattributes_keeps_mock_assets_byte_identical() -> None:
+    """mock_assets 必须禁止 EOL 转换。
+
+    manifest 记录的是逐字节 SHA-256；若这些文件按 ``text=auto`` 在 Windows 上
+    检出为 CRLF，摘要即失配（PR #2060 的 5 个 E2E job 曾因此全部 setup ERROR）。
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    lines = [
+        line.split("#", 1)[0].strip()
+        for line in (repo_root / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    ]
+    rules = [line for line in lines if line and line.split()[0].startswith("tests/e2e/mock_assets")]
+    assert rules, ".gitattributes 必须为 tests/e2e/mock_assets/** 声明 -text 规则"
+    assert any("-text" in rule or "binary" in rule for rule in rules), rules
