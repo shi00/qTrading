@@ -18,6 +18,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import Any
 
 import flet as ft
 
@@ -493,7 +494,39 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         try:
             from utils.diagnostics import SystemDiagnosticsCollector
 
-            zip_path = await SystemDiagnosticsCollector.export()
+            # FUP-015 opt-06: page.get_package_info() 为异步 IPC，先在事件处理器
+            # 内 await 再以同步闭包注入收集器（utils 层不依赖 flet）。获取失败
+            # 时降级为不注入 provider，诊断包标记 client 信息 unavailable。
+            package_info_provider: Callable[[], dict[str, str]] | None = None
+            page = _get_page()
+            get_package_info = getattr(page, "get_package_info", None) if page is not None else None
+            info: Any = None
+            if get_package_info is not None:
+                try:
+                    info = await get_package_info()
+                except asyncio.CancelledError:
+                    raise  # R2: 必须传播
+                except Exception as ex:
+                    logger.debug(
+                        "[SystemTab] Diagnostics | Failed to read package info: %s",
+                        DataSanitizer.sanitize_error(ex),
+                        exc_info=True,
+                    )
+            if info is not None:
+
+                def _client_package_info() -> dict[str, str]:
+                    return {
+                        "app_name": info.app_name,
+                        "package_name": info.package_name,
+                        "version": info.version,
+                        "build_number": info.build_number,
+                    }
+
+                package_info_provider = _client_package_info
+
+            zip_path = await SystemDiagnosticsCollector.export(
+                package_info_provider=package_info_provider,
+            )
             if show_snack_callback:
                 show_snack_callback(
                     I18n.get("settings_diagnostics_success").format(path=zip_path),

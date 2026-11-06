@@ -933,11 +933,13 @@ async def test_export_startup_diagnostics_success_toasts():
             "utils.diagnostics.SystemDiagnosticsCollector.export",
             new_callable=AsyncMock,
             return_value="/tmp/diag.zip",
-        ),
+        ) as mock_export,
         patch("ui.startup_views._get_page", return_value=MagicMock()),
         patch("ui.startup_views.toast_show") as mock_toast,
     ):
         await _export_startup_diagnostics()
+    # 启动期无 page 包信息入口 → 不注入 provider，字段语义保持 unavailable
+    mock_export.assert_awaited_once_with()
     args, kwargs = mock_toast.call_args
     assert kwargs["toast_type"] == "success"
     assert args[1] == I18n.get("settings_diagnostics_success").format(path="/tmp/diag.zip")

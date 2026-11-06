@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import logging
 import os
@@ -732,3 +733,121 @@ async def test_diagnostics_export_config_snapshot_edge_shapes(tmp_path):
     ):
         with pytest.raises(TypeError, match="not serializable"):
             await SystemDiagnosticsCollector.export()
+
+
+# --- FUP-015 opt-06: 客户端包信息（provider 注入）快照 ---
+
+
+async def _export_and_read_versions(tmp_path, provider) -> dict:
+    """导出诊断包并返回 ``versions`` 字段（产品版本与客户端包信息）。"""
+    _make_log_files(tmp_path)
+    with _patch_diagnostics_env(tmp_path):
+        zip_path = await SystemDiagnosticsCollector.export(package_info_provider=provider)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                summary = json.loads(zf.read("diagnostics_summary.json").decode("utf-8"))
+                return summary["versions"]
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_versions_client_and_product_separated(tmp_path):
+    """provider 正常返回时：客户端版本按白名单筛选，产品版本独立且来自包元数据。"""
+    fake_info = {
+        "app_name": "AStockScreener",
+        "package_name": "com.example.astock",
+        "version": "1.1.0",
+        "build_number": "42",
+        # 白名单外字段不得进入诊断包
+        "build_signature": "deadbeef",
+        "install_time": "2026-01-01T00:00:00",
+        "unexpected_secret": "should_not_appear",
+    }
+    with patch.object(SystemDiagnosticsCollector, "_get_product_version", return_value="9.9.9"):
+        versions = await _export_and_read_versions(tmp_path, lambda: fake_info)
+
+    assert versions["product"] == {"name": "AStockScreener", "version": "9.9.9"}
+    assert versions["client"] == {
+        "status": "ok",
+        "app_name": "AStockScreener",
+        "package_name": "com.example.astock",
+        "version": "1.1.0",
+        "build_number": "42",
+    }
+    # 产品版本与客户端版本分开存放
+    assert versions["product"]["version"] != versions["client"]["version"]
+    # 白名单外字段被丢弃
+    assert set(versions["client"]) == {
+        "status",
+        "app_name",
+        "package_name",
+        "version",
+        "build_number",
+    }
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_versions_provider_returns_none(tmp_path):
+    """provider 返回 None → client 标记 unavailable，导出不中断。"""
+    with patch.object(SystemDiagnosticsCollector, "_get_product_version", return_value="1.2.3"):
+        versions = await _export_and_read_versions(tmp_path, lambda: None)
+
+    assert versions["product"] == {"name": "AStockScreener", "version": "1.2.3"}
+    assert versions["client"] == {"status": "unavailable", "reason": "empty"}
+    assert "app_name" not in versions["client"]
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_versions_provider_raises_is_isolated_and_sanitized(tmp_path, caplog):
+    """provider 抛异常 → client 标记 unavailable，异常经 DataSanitizer 脱敏（R9）。"""
+    secret = "diagprovider_secret_token"
+    fake_profile = "C:\\Users\\diaguser_pkg"
+
+    def _boom() -> None:
+        raise RuntimeError(f"ipc failed token={secret} profile={fake_profile}")
+
+    with caplog.at_level(logging.WARNING, logger="utils.diagnostics"):
+        versions = await _export_and_read_versions(tmp_path, _boom)
+
+    assert versions["client"] == {"status": "unavailable", "reason": "provider_error"}
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages, "provider 异常应记录告警日志"
+    assert secret not in messages
+    assert fake_profile not in messages
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_versions_provider_invalid_shape(tmp_path):
+    """provider 返回非 Mapping → client 标记 unavailable（不猜测结构）。"""
+    versions = await _export_and_read_versions(tmp_path, lambda: ["not", "a", "mapping"])
+
+    assert versions["client"] == {"status": "unavailable", "reason": "invalid_shape"}
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_versions_without_provider(tmp_path):
+    """无 provider（启动期调用方）→ client 标记 not_provided，行为与现状一致。"""
+    versions = await _export_and_read_versions(tmp_path, None)
+
+    assert versions["client"] == {"status": "unavailable", "reason": "not_provided"}
+    assert versions["product"]["name"] == "AStockScreener"
+    assert isinstance(versions["product"]["version"], str)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_versions_provider_cancelled_error_propagates(tmp_path):
+    """R2: provider 抛 CancelledError 必须传播，不得降级吞没。"""
+    _make_log_files(tmp_path)
+
+    def _cancel() -> None:
+        raise asyncio.CancelledError()
+
+    with _patch_diagnostics_env(tmp_path):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await SystemDiagnosticsCollector.export(package_info_provider=_cancel)
+
+    # R2: 取消向上传播，且不得留下半成品导出包
+    assert exc_info.type is asyncio.CancelledError
+    assert not list(tmp_path.rglob("*.zip"))
