@@ -103,11 +103,11 @@ python scripts/sync_e2e_fonts.py --force
 
 ### 3.5 CanvasKit 子目录变体与新渲染器资源（Flet V1 系列）
 
-> 背景：当前锁定的 Flet V1 系列引入了 CanvasKit 子目录变体（`chromium/`、`experimental_webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
+> 背景：当前锁定的 Flet V1 系列引入了 CanvasKit 子目录变体（`chromium/`、`webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
 
 **升级 Flet 时需验证**：
 
-- [ ] **检查 `site-packages/flet_web/web/canvaskit/` 目录结构**：确认是否存在 `chromium/` / `experimental_webparagraph/` 子目录，以及 `skwasm*.js/wasm` / `wimp.js/wasm` 文件
+- [ ] **检查 `site-packages/flet_web/web/canvaskit/` 目录结构**：确认是否存在 `chromium/` / `webparagraph/` 子目录（1.1.0 起由 `experimental_webparagraph` 更名），以及 `skwasm*.js/wasm` / `wimp.js/wasm` 文件
   - 命令：`ls <site-packages>/flet_web/web/canvaskit/`
 - [ ] **同步新资源到 `tests/e2e/mock_assets/canvaskit/`**：保留子目录结构（如 `chromium/canvaskit.js`）
   - 复制命令：`cp -r <site-packages>/flet_web/web/canvaskit/* tests/e2e/mock_assets/canvaskit/`

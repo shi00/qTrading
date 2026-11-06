@@ -1,4 +1,4 @@
-"""E2E mock 资产 manifest 校验的单元测试（FUP-004 回归）。"""
+"""E2E mock 资产 manifest 校验的单元测试（Flet 1.1.0 升级资产基线回归）。"""
 
 from __future__ import annotations
 
