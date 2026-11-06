@@ -1,0 +1,210 @@
+name: CI Aux Gate
+
+# 独立补偿检查的稳定 PR / merge_group 门禁：
+# - 聚合 job `CI Aux Gate` 是可供 ruleset 注册的 required check：`pull_request` 不设 paths
+#   过滤，保证每次 PR 都出现；`merge_group` 同样声明，启用 merge queue 后合成提交也能拿到该 check。
+# - `detect` job 按变更路径决定是否执行的补偿检查；需要时通过 workflow_call 调用
+#   `sidecar.yml` / `precommit-config-ci.yml`，不需要时对应调用 job 明确 skipped。
+# - 聚合判定只放行「需要 → success」「不需要 → skipped」两种组合；其它（failure / cancelled /
+#   非预期 skipped / detect 失败）一律失败，避免「上游失败 → 下游跳过 → 门禁绿灯」。
+# - 本 workflow 不修改远端 ruleset：`CI Aux Gate` 需由授权维护者在 main 的
+#   `main-required-checks` 中注册为 required 后才成为强制检查。
+on:
+  pull_request:
+    branches: [ "main" ]
+    # 不使用 paths 过滤：required check 必须每次 PR 都出现。
+  merge_group:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  # merge_group 事件下 github.head_ref 为空，回落到 github.ref；队列 ref 含 PR 号与 SHA，天然唯一。
+  # 与 sidecar / precommit 的 concurrency group 前缀不同，避免相互取消。
+  group: ci-aux-gate-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # 变更探测：决定两个补偿检查是否执行。
+  # fork PR / API 失败 / 触达 3000 文件上限 / merge_group 取不到 diff / 未知事件一律两者 true
+  # （fail-closed），保证不会因探测失败而少跑检查。
+  detect:
+    name: Detect auxiliary changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      sidecar: ${{ steps.detect.outputs.sidecar }}
+      precommit: ${{ steps.detect.outputs.precommit }}
+
+    steps:
+      - name: Checkout merge group commits
+        # merge_group 需要 base / head 两个提交对象才能做 git diff；PR 事件走 API，不 checkout。
+        if: github.event_name == 'merge_group'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Detect affected auxiliary checks
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # GitHub 的默认 bash 带 -e；这里显式关闭，以便把 API / git 失败转为 fail-closed 的
+          # 「两者都跑」，而不是让探测 job 直接失败后进入聚合判定。
+          set +e
+          set -uo pipefail
+
+          sidecar=false
+          precommit=false
+
+          run_both() {
+            echo "sidecar=true" >> "$GITHUB_OUTPUT"
+            echo "precommit=true" >> "$GITHUB_OUTPUT"
+            echo "- $1" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          mark_from_file() {
+            local files="$1"
+            if grep -qE '(^sidecars/qtrading-pg-sidecar/|^\.github/workflows/sidecar\.yml$|^\.github/workflows/ci-aux-gate\.yml$)' "$files"; then
+              sidecar=true
+            fi
+            if grep -qE '(^\.pre-commit-config\.yaml$|^\.github/workflows/precommit-config-ci\.yml$|^\.github/workflows/ci-aux-gate\.yml$)' "$files"; then
+              precommit=true
+            fi
+          }
+
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              run_both "workflow_dispatch：无法反推 PR 变更，运行全部补偿检查（fail-closed）"
+              ;;
+            pull_request)
+              files="$(mktemp)"
+              if ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' > "$files"; then
+                rm -f "$files"
+                run_both "PR 变更文件 API 读取失败（fork / 权限 / 网络），运行全部补偿检查（fail-closed）"
+              fi
+              count="$(grep -c . "$files" || true)"
+              if [ "$count" -ge 3000 ]; then
+                rm -f "$files"
+                run_both "变更文件数 $count 达到 API 分页上限 3000，运行全部补偿检查（fail-closed）"
+              fi
+              mark_from_file "$files"
+              rm -f "$files"
+              ;;
+            merge_group)
+              if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+                run_both "merge_group 缺少 base/head SHA，运行全部补偿检查（fail-closed）"
+              fi
+              files="$(mktemp)"
+              if ! git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$files"; then
+                rm -f "$files"
+                run_both "merge_group git diff 失败，运行全部补偿检查（fail-closed）"
+              fi
+              mark_from_file "$files"
+              rm -f "$files"
+              ;;
+            *)
+              run_both "未知事件 $EVENT_NAME，运行全部补偿检查（fail-closed）"
+              ;;
+          esac
+
+          echo "sidecar=$sidecar" >> "$GITHUB_OUTPUT"
+          echo "precommit=$precommit" >> "$GITHUB_OUTPUT"
+          echo "- 事件 \`$EVENT_NAME\`：sidecar=$sidecar，precommit=$precommit" >> "$GITHUB_STEP_SUMMARY"
+
+  sidecar-check:
+    name: "Auxiliary check: qtrading-pg-sidecar"
+    needs: detect
+    if: needs.detect.outputs.sidecar == 'true'
+    # GitHub 在调用期校验每个 nested job 的权限不得超过调用方上限：sidecar.yml 的
+    # publish-release job 请求 contents: write，故调用方必须授予 write，否则整个 workflow
+    # 直接 startup_failure。写权限只可能被 publish-release 使用，而它仅在 tag push 运行、
+    # PR/merge_group 均被其 if 跳过；sidecar 顶层与其余 job 仍为 contents: read。
+    permissions:
+      contents: write
+    uses: ./.github/workflows/sidecar.yml
+
+  precommit-check:
+    name: "Auxiliary check: pre-commit config"
+    needs: detect
+    if: needs.detect.outputs.precommit == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/precommit-config-ci.yml
+
+  # 稳定聚合 check 名称：`CI Aux Gate`。显式校验 needs 结果，不用「skipped 即通过」的默认语义。
+  ci-aux-gate:
+    name: CI Aux Gate
+    needs: [detect, sidecar-check, precommit-check]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Evaluate auxiliary checks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DETECT: ${{ needs.detect.result }}
+          SIDECAR_REQUESTED: ${{ needs.detect.outputs.sidecar }}
+          SIDECAR_RESULT: ${{ needs.sidecar-check.result }}
+          PRECOMMIT_REQUESTED: ${{ needs.detect.outputs.precommit }}
+          PRECOMMIT_RESULT: ${{ needs.precommit-check.result }}
+        run: |
+          set -euo pipefail
+          fail=0
+          {
+            echo "## CI Aux Gate"
+            echo ""
+            echo "事件 \`${EVENT_NAME}\`，变更探测 \`${DETECT}\`"
+            echo ""
+            echo "| 检查 | 需要 | 结果 | 判定 |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$DETECT" != "success" ]; then
+            echo "| detect | - | ${DETECT:-missing} | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
+            fail=1
+          fi
+
+          check_aux() {
+            local name="$1" requested="$2" result="$3"
+            if [ "$requested" = "true" ] && [ "$result" = "success" ]; then
+              echo "| $name | yes | $result | ok |" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            if [ "$requested" = "false" ] && [ "$result" = "skipped" ]; then
+              echo "| $name | no | $result | ok（按改动跳过） |" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            echo "| $name | ${requested:-unknown} | ${result:-unknown} | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
+            return 1
+          }
+
+          # detect 失败时 outputs 为空，上面的 detect 行已判失败；此处不再对空值重复判定。
+          if [ "$DETECT" = "success" ]; then
+            check_aux "sidecar" "$SIDECAR_REQUESTED" "$SIDECAR_RESULT" || fail=1
+            check_aux "precommit" "$PRECOMMIT_REQUESTED" "$PRECOMMIT_RESULT" || fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**CI Aux Gate 不通过**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::CI Aux Gate 不通过：补偿检查缺失、失败或被非预期跳过（详见 step summary）"
+            exit 1
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**CI Aux Gate 通过**" >> "$GITHUB_STEP_SUMMARY"

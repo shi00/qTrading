@@ -116,7 +116,7 @@ class TestClassify:
         assert classify([".github/workflows/finbert-train.yml"]) is True
 
     def test_sidecar_workflow_only_collection_is_not_code(self) -> None:
-        """sidecar.yml 有独立 PR 补偿（sidecar.yml 自身工作流），不重复拉入重型 job。"""
+        """sidecar.yml 由独立补偿门禁 `CI Aux Gate` 在命中时调用，不重复拉入重型 job。"""
         assert classify([".github/workflows/sidecar.yml"]) is False
 
 

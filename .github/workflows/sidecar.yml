@@ -7,10 +7,11 @@ on:
       - 'sidecars/qtrading-pg-sidecar/**'
       - '.github/workflows/sidecar.yml'
     tags: ['sidecar-v*']
-  pull_request:
-    paths:
-      - 'sidecars/qtrading-pg-sidecar/**'
-      - '.github/workflows/sidecar.yml'
+  # PR 入口迁移到补偿门禁 `ci-aux-gate.yml`：由 gate 按变更路径经 workflow_call 调用本
+  # workflow，同一 PR 只执行一次（不再保留直接 pull_request 触发）。push / tag / dispatch /
+  # schedule 语义保持不变。被复用时 github 上下文沿用调用方（事件名仍为 pull_request 或
+  # merge_group），故下方 job 的 if 条件同时覆盖两者。
+  workflow_call:
   workflow_dispatch:
   schedule:
     # 每天凌晨 2:00 UTC（北京时间 10:00）flaky 检测
@@ -36,8 +37,11 @@ jobs:
     name: Lint & Test (${{ matrix.os }}/${{ matrix.target }})
     # tag 发布需要复用 build-artifacts 的四平台产物，故质量门禁必须在 tag 事件执行
     # （build-artifacts 以 needs 依赖本 job；任一平台失败/取消都会阻断后续发布）。
+    # pull_request 与 merge_group 均由补偿门禁 ci-aux-gate.yml 经 workflow_call 调用，
+    # 事件名沿用调用方，两者都必须执行质量门禁。
     if: >-
       github.event_name == 'pull_request' ||
+      github.event_name == 'merge_group' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       (github.event_name == 'push' &&
@@ -135,6 +139,8 @@ jobs:
   build-artifacts:
     name: Build release artifact (${{ matrix.os }}/${{ matrix.target }})
     # tag 事件复用四平台只读构建产物；发布写操作统一收敛到 publish-release。
+    # 不加入 merge_group：merge queue 的合成提交只做质量门禁，不产生/上传发布产物，
+    # 避免扩大发布语义（PR 仍构建产物以验证可构建性）。
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
