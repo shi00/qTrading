@@ -14,6 +14,7 @@ from data.data_dictionary import TABLE_DEFINITIONS, columns_of
 from data.persistence import engine_provider
 
 # DAOs（__init__ 显式实例化以满足 R13 静态检查；注册清单见 DaoRegistry）
+from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.daos.ai_usage_dao import AIUsageDao
 from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import (
@@ -149,6 +150,8 @@ class CacheManager:
             self.watchlist_dao = WatchlistDao(self.engine)
             # S3 统一模型计量（ADR-0014 §10）：AI 用量账本 DAO
             self.ai_usage_dao = AIUsageDao(self.engine)
+            # Agent 运行时应用表（设计正本 §8.2）：应用事务 DAO
+            self.agent_dao = AgentDao(self.engine)
 
             self._schema_initialized = False
 

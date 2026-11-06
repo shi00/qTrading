@@ -12,14 +12,17 @@ from sqlalchemy import (
     DateTime,
     Double,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.schema import MetaData
 
@@ -1183,3 +1186,926 @@ def get_model_columns(model_class: type, exclude: set[str] | None = None) -> lis
 
 def get_model_pk_columns(model_class: type) -> list[str]:
     return [c.name for c in model_class.__table__.primary_key.columns]
+
+
+# ---------------------------------------------------------------------------
+# Agent runtime application tables（设计正本 §8.2 / §8.2.1）
+#
+# 应用 public 表只保存产品事实：业务身份/版本、公开历史/成果、命令、
+# 原生 owner/task/run/generation 引用及治理回执，不镜像原生线程、ready 队列
+# 或执行栈。JSONB 统一 none_as_null=True，使 Python None 落成 SQL NULL
+# （而不是 JSON `null`），配合 §8.2.1 的双向 CHECK 区分「缺失」与「退役擦除」。
+# ---------------------------------------------------------------------------
+
+
+def _agent_created_at():
+    return Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
+
+
+def _agent_updated_at():
+    return Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
+
+
+class AgentAdmissionHead(Base):
+    __tablename__ = "agent_admission_head"
+
+    scope = Column(String(64), primary_key=True)
+    next_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("scope = 'total'", name="total_scope"),
+        CheckConstraint("next_seq >= 0", name="next_seq_non_negative"),
+    )
+
+
+class AgentTotalSlot(Base):
+    __tablename__ = "agent_total_slots"
+
+    slot_no = Column(SmallInteger, primary_key=True)
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    generation = Column(BigInteger, nullable=False, server_default=text("1"))
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("slot_no IN (1, 2)", name="slot_no_range"),
+        CheckConstraint("generation >= 1", name="generation_positive"),
+        CheckConstraint("(execution_id IS NULL) OR (claimed_at IS NOT NULL)", name="claim_pair"),
+        UniqueConstraint("execution_id", name="uq_agent_total_slots_execution_id"),
+    )
+
+
+class AgentConversation(Base):
+    __tablename__ = "agent_conversations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    domain = Column(String(128), nullable=False)
+    title = Column(String(200), nullable=True, info={"i18n": "col_title"})
+    pinned = Column(Boolean, nullable=False, server_default=text("false"))
+    archived = Column(Boolean, nullable=False, server_default=text("false"))
+    revision = Column(Integer, nullable=False, server_default=text("1"))
+    current_path_id = Column(UUID(as_uuid=True), nullable=True)
+    current_path_revision = Column(Integer, nullable=True)
+    # 环形指针：conversations → executions → intents → conversations。
+    active_execution_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "agent_executions.id",
+            name="fk_agent_conversations_active_execution_id_agent_executions",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    next_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    source_ref = Column(JSONB(none_as_null=True), nullable=True)
+    use_revision = Column(BigInteger, nullable=False, server_default=text("0"))
+    deleting = Column(Boolean, nullable=False, server_default=text("false"))
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("(deleted_at IS NOT NULL) OR (title IS NOT NULL)", name="title_required"),
+        CheckConstraint(
+            "(current_path_id IS NULL AND current_path_revision IS NULL)"
+            " OR (current_path_id IS NOT NULL AND current_path_revision IS NOT NULL)",
+            name="current_path_pair",
+        ),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        CheckConstraint("next_seq >= 0", name="next_seq_non_negative"),
+        CheckConstraint("use_revision >= 0", name="use_revision_non_negative"),
+        Index(
+            "ix_agent_conversations_domain_archived_pinned_updated_at_id",
+            "domain",
+            "archived",
+            "pinned",
+            "updated_at",
+            "id",
+        ),
+    )
+
+
+class AgentPath(Base):
+    __tablename__ = "agent_paths"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    revision = Column(Integer, primary_key=True)
+    conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_conversations.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    parent_path_id = Column(UUID(as_uuid=True), nullable=True)
+    parent_path_revision = Column(Integer, nullable=True)
+    anchor_message_id = Column(UUID(as_uuid=True), nullable=True)
+    anchor_message_revision = Column(Integer, nullable=True)
+    inherited_refs = Column(JSONB(none_as_null=True), nullable=False)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["parent_path_id", "parent_path_revision"],
+            ["agent_paths.id", "agent_paths.revision"],
+            name="fk_agent_paths_parent",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["anchor_message_id", "anchor_message_revision"],
+            ["agent_messages.id", "agent_messages.revision"],
+            name="fk_agent_paths_anchor_message",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        CheckConstraint(
+            "(parent_path_id IS NULL AND parent_path_revision IS NULL)"
+            " OR (parent_path_id IS NOT NULL AND parent_path_revision IS NOT NULL)",
+            name="parent_pair",
+        ),
+        CheckConstraint(
+            "(anchor_message_id IS NULL AND anchor_message_revision IS NULL)"
+            " OR (anchor_message_id IS NOT NULL AND anchor_message_revision IS NOT NULL)",
+            name="anchor_pair",
+        ),
+    )
+
+
+class AgentDraft(Base):
+    __tablename__ = "agent_drafts"
+
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_conversations.id", use_alter=True, ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    revision = Column(Integer, nullable=False)
+    payload = Column(JSONB(none_as_null=True), nullable=False)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (CheckConstraint("revision >= 1", name="revision_positive"),)
+
+
+class AgentIntent(Base):
+    __tablename__ = "agent_intents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    domain = Column(String(128), nullable=False)
+    source_module = Column(String(128), nullable=False)
+    request_key = Column(String(128), nullable=False)
+    initial_digest = Column(String(64), nullable=False)
+    conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_conversations.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    accepted_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    admission_seq = Column(BigInteger, nullable=False)
+    current_input_revision = Column(Integer, nullable=False, server_default=text("1"))
+    acceptance_state = Column(String(64), nullable=False, server_default=text("'queued'"))
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        UniqueConstraint("domain", "source_module", "request_key", name="uq_agent_intents_submission_key"),
+        UniqueConstraint("admission_seq", name="uq_agent_intents_admission_seq"),
+        CheckConstraint(
+            "acceptance_state IN ('queued', 'dispatched', 'withdrawn', 'retired')", name="acceptance_state"
+        ),
+        CheckConstraint("current_input_revision >= 1", name="current_input_revision_positive"),
+        CheckConstraint(
+            "(conversation_id IS NULL AND accepted_seq = 0) OR (conversation_id IS NOT NULL AND accepted_seq >= 1)",
+            name="accepted_seq_by_scope",
+        ),
+    )
+
+
+class AgentInput(Base):
+    __tablename__ = "agent_inputs"
+
+    intent_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_intents.id", use_alter=True, ondelete="RESTRICT"), primary_key=True
+    )
+    revision = Column(Integer, primary_key=True)
+    request = Column(JSONB(none_as_null=True), nullable=True)
+    input_digest = Column(String(64), nullable=False)
+    model_snapshot = Column(JSONB(none_as_null=True), nullable=True)
+    context_binding = Column(JSONB(none_as_null=True), nullable=True)
+    resolved_manifest = Column(JSONB(none_as_null=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    dispatch_command_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_commands.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = _agent_created_at()
+    updated_at = _agent_updated_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "(retired_at IS NULL AND request IS NOT NULL AND model_snapshot IS NOT NULL"
+            " AND context_binding IS NOT NULL)"
+            " OR (retired_at IS NOT NULL AND request IS NULL AND model_snapshot IS NULL"
+            " AND context_binding IS NULL AND resolved_manifest IS NULL AND resolved_at IS NULL)",
+            name="retired_payload",
+        ),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+
+class AgentExecution(Base):
+    __tablename__ = "agent_executions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    intent_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_intents.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    execution_number = Column(Integer, nullable=False)
+    retry_of = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    input_revision = Column(Integer, nullable=False)
+    plan_revision = Column(Integer, nullable=False, server_default=text("1"))
+    plan = Column(JSONB(none_as_null=True), nullable=True)
+    plan_resource_id = Column(UUID(as_uuid=True), nullable=True)
+    plan_resource_revision = Column(Integer, nullable=True)
+    native_owner_id = Column(String(256), nullable=True)
+    native_run_id = Column(String(256), nullable=True)
+    graph_digest = Column(String(64), nullable=True)
+    framework_version = Column(String(256), nullable=False)
+    continuation_ref = Column(JSONB(none_as_null=True), nullable=True)
+    projection = Column(JSONB(none_as_null=True), nullable=True)
+    fence = Column(BigInteger, nullable=False, server_default=text("0"))
+    stop_intent = Column(String(64), nullable=True)
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        UniqueConstraint("intent_id", "execution_number", name="uq_agent_executions_intent_number"),
+        ForeignKeyConstraint(
+            ["intent_id", "input_revision"],
+            ["agent_inputs.intent_id", "agent_inputs.revision"],
+            name="fk_agent_executions_intent_input",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["plan_resource_id", "plan_resource_revision"],
+            ["agent_resource_versions.resource_id", "agent_resource_versions.revision"],
+            name="fk_agent_executions_plan_resource",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(retired_at IS NULL AND plan IS NOT NULL AND projection IS NOT NULL)"
+            " OR (retired_at IS NOT NULL AND plan IS NULL AND projection IS NULL"
+            " AND continuation_ref IS NULL)",
+            name="retired_payload",
+        ),
+        CheckConstraint(
+            "(plan_resource_id IS NULL AND plan_resource_revision IS NULL)"
+            " OR (plan_resource_id IS NOT NULL AND plan_resource_revision IS NOT NULL)",
+            name="plan_resource_pair",
+        ),
+        CheckConstraint("execution_number >= 1", name="execution_number_positive"),
+        CheckConstraint("input_revision >= 1", name="input_revision_positive"),
+        CheckConstraint("plan_revision >= 1", name="plan_revision_positive"),
+        CheckConstraint("fence >= 0", name="fence_non_negative"),
+    )
+
+
+class AgentTask(Base):
+    __tablename__ = "agent_tasks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    plan_node_id = Column(UUID(as_uuid=True), nullable=True)
+    parent_task_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_tasks.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    role_key = Column(String(128), nullable=False)
+    plan_revision = Column(Integer, nullable=False)
+    native_task_id = Column(String(256), nullable=True)
+    # 环形指针：tasks ↔ attempts（attempts.task_id）。
+    current_attempt_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "agent_attempts.id",
+            name="fk_agent_tasks_current_attempt_id_agent_attempts",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    depends_on = Column(JSONB(none_as_null=True), nullable=False)
+    required = Column(Boolean, nullable=False, server_default=text("true"))
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        UniqueConstraint("execution_id", "plan_node_id", name="uq_agent_tasks_execution_plan_node"),
+        Index(
+            "uq_agent_tasks_execution_main",
+            "execution_id",
+            unique=True,
+            postgresql_where=text("plan_node_id IS NULL"),
+        ),
+        CheckConstraint("plan_revision >= 1", name="plan_revision_positive"),
+    )
+
+
+class AgentAttempt(Base):
+    __tablename__ = "agent_attempts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    task_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_tasks.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    attempt_number = Column(Integer, nullable=False)
+    native_run_id = Column(String(256), nullable=True)
+    native_generation = Column(BigInteger, nullable=True)
+    segment_index = Column(Integer, nullable=False)
+    native_run_refs = Column(JSONB(none_as_null=True), nullable=False)
+    input_manifest = Column(JSONB(none_as_null=True), nullable=True)
+    validity_digest = Column(String(64), nullable=False)
+    observation = Column(JSONB(none_as_null=True), nullable=True)
+    continuation_ref = Column(JSONB(none_as_null=True), nullable=True)
+    result_artifact_id = Column(UUID(as_uuid=True), nullable=True)
+    result_artifact_revision = Column(Integer, nullable=True)
+    retry_of = Column(
+        UUID(as_uuid=True), ForeignKey("agent_attempts.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "attempt_number", name="uq_agent_attempts_task_number"),
+        ForeignKeyConstraint(
+            ["result_artifact_id", "result_artifact_revision"],
+            ["agent_artifacts.id", "agent_artifacts.revision"],
+            name="fk_agent_attempts_result_artifact",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(retired_at IS NULL AND input_manifest IS NOT NULL AND observation IS NOT NULL)"
+            " OR (retired_at IS NOT NULL AND input_manifest IS NULL AND observation IS NULL"
+            " AND continuation_ref IS NULL)",
+            name="retired_payload",
+        ),
+        CheckConstraint(
+            "(result_artifact_id IS NULL AND result_artifact_revision IS NULL)"
+            " OR (result_artifact_id IS NOT NULL AND result_artifact_revision IS NOT NULL)",
+            name="result_artifact_pair",
+        ),
+        CheckConstraint("attempt_number >= 1", name="attempt_number_positive"),
+        CheckConstraint("segment_index >= 1", name="segment_index_positive"),
+        CheckConstraint("native_generation IS NULL OR native_generation >= 0", name="native_generation_non_negative"),
+    )
+
+
+class AgentModelTurn(Base):
+    __tablename__ = "agent_model_turns"
+
+    invocation_id = Column(String(256), primary_key=True)
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    attempt_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_attempts.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    turn_number = Column(Integer, nullable=False)
+    native_owner_id = Column(String(256), nullable=False)
+    native_task_id = Column(String(256), nullable=True)
+    native_run_id = Column(String(256), nullable=False)
+    native_event_ref = Column(String(256), nullable=True)
+    request_position = Column(Integer, nullable=False)
+    purpose = Column(String(64), nullable=False)
+    input_digest = Column(String(64), nullable=False)
+    state = Column(String(64), nullable=False)
+    response = Column(JSONB(none_as_null=True), nullable=True)
+    ledger_refs = Column(JSONB(none_as_null=True), nullable=False)
+    result_digest = Column(String(64), nullable=True)
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "native_owner_id", "native_run_id", "purpose", "request_position", name="uq_agent_model_turns_position"
+        ),
+        CheckConstraint("purpose IN ('main', 'leaf', 'summary')", name="purpose"),
+        CheckConstraint("state IN ('prepared', 'in_flight', 'committed', 'unknown', 'failed')", name="state"),
+        CheckConstraint(
+            "state <> 'committed' OR retired_at IS NOT NULL OR response IS NOT NULL",
+            name="committed_requires_response",
+        ),
+        CheckConstraint("turn_number >= 1", name="turn_number_positive"),
+        CheckConstraint("request_position >= 1", name="request_position_positive"),
+    )
+
+
+class AgentToolCall(Base):
+    __tablename__ = "agent_tool_calls"
+
+    effect_key = Column(String(256), primary_key=True)
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    attempt_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_attempts.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    native_owner_id = Column(String(256), nullable=False)
+    native_task_id = Column(String(256), nullable=True)
+    native_run_id = Column(String(256), nullable=False)
+    native_event_ref = Column(String(256), nullable=True)
+    tool_call_id = Column(String(256), nullable=False)
+    tool_ref = Column(JSONB(none_as_null=True), nullable=False)
+    input_digest = Column(String(64), nullable=False)
+    state = Column(String(64), nullable=False)
+    response = Column(JSONB(none_as_null=True), nullable=True)
+    result_digest = Column(String(64), nullable=True)
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("state IN ('prepared', 'in_flight', 'committed', 'unknown', 'failed')", name="state"),
+        CheckConstraint(
+            "state <> 'committed' OR retired_at IS NOT NULL OR response IS NOT NULL",
+            name="committed_requires_response",
+        ),
+    )
+
+
+class AgentCommand(Base):
+    __tablename__ = "agent_commands"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    domain = Column(String(128), nullable=False)
+    kind = Column(String(64), nullable=False)
+    target = Column(JSONB(none_as_null=True), nullable=True)
+    payload = Column(JSONB(none_as_null=True), nullable=True)
+    payload_digest = Column(String(64), nullable=False)
+    expected_input_revision = Column(Integer, nullable=True)
+    expected_plan_revision = Column(Integer, nullable=True)
+    expected_revision = Column(Integer, nullable=True)
+    handoff = Column(String(64), nullable=False, server_default=text("'prepared'"))
+    dispatch_owner = Column(UUID(as_uuid=True), nullable=True)
+    dispatch_started_at = Column(DateTime(timezone=True), nullable=True)
+    native_request_id = Column(String(256), nullable=True)
+    continuation_ref = Column(JSONB(none_as_null=True), nullable=True)
+    receipt = Column(JSONB(none_as_null=True), nullable=True)
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "handoff IN ('prepared', 'applying', 'acknowledged', 'unknown', 'invalidated')", name="handoff"
+        ),
+        CheckConstraint("retired_at IS NOT NULL OR payload IS NOT NULL", name="payload_required"),
+        CheckConstraint("dispatch_started_at IS NULL OR dispatch_owner IS NOT NULL", name="dispatch_owner_pair"),
+    )
+
+
+class AgentDecision(Base):
+    __tablename__ = "agent_decisions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    task_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_tasks.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    attempt_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_attempts.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    native_request_id = Column(String(256), nullable=False)
+    revision = Column(Integer, nullable=False)
+    created_event_seq = Column(BigInteger, nullable=False)
+    kind = Column(String(64), nullable=False)
+    question_key = Column(String(128), nullable=False)
+    question_params = Column(JSONB(none_as_null=True), nullable=False)
+    options = Column(JSONB(none_as_null=True), nullable=False)
+    scope = Column(JSONB(none_as_null=True), nullable=False)
+    scope_digest = Column(String(64), nullable=False)
+    grant_id = Column(String(256), nullable=True)
+    answer_schema = Column(JSONB(none_as_null=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(64), nullable=False)
+    answer_command_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_commands.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    answer_phase = Column(String(64), nullable=False)
+    answer_problem = Column(JSONB(none_as_null=True), nullable=True)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id", "native_request_id", "revision", name="uq_agent_decisions_execution_request_revision"
+        ),
+        UniqueConstraint("answer_command_id", name="uq_agent_decisions_answer_command_id"),
+        CheckConstraint("kind IN ('clarification', 'choice', 'tool_permission', 'egress')", name="kind"),
+        CheckConstraint("status IN ('pending', 'answered', 'rejected', 'expired', 'invalidated')", name="status"),
+        CheckConstraint(
+            "answer_phase IN ('unanswered', 'recorded', 'delivered', 'effective', 'unknown', 'invalidated')",
+            name="answer_phase",
+        ),
+        CheckConstraint(
+            "(answer_phase = 'unanswered' AND answer_command_id IS NULL"
+            " AND status IN ('pending', 'expired', 'invalidated')"
+            " AND ((status = 'pending' AND answer_problem IS NULL)"
+            " OR (status <> 'pending' AND answer_problem IS NOT NULL)))"
+            " OR (answer_phase = 'recorded' AND answer_command_id IS NOT NULL"
+            " AND status IN ('answered', 'rejected') AND answer_problem IS NULL)"
+            " OR (answer_phase IN ('delivered', 'effective') AND answer_command_id IS NOT NULL"
+            " AND status IN ('answered', 'rejected') AND answer_problem IS NULL)"
+            " OR (answer_phase = 'unknown' AND answer_command_id IS NOT NULL"
+            " AND status IN ('answered', 'rejected') AND answer_problem IS NOT NULL)"
+            " OR (answer_phase = 'invalidated' AND answer_command_id IS NOT NULL"
+            " AND status IN ('invalidated', 'expired') AND answer_problem IS NOT NULL)",
+            name="answer_phase_command_joint",
+        ),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+
+class AgentMessage(Base):
+    __tablename__ = "agent_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    revision = Column(Integer, primary_key=True)
+    domain = Column(String(128), nullable=False)
+    conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_conversations.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    attempt_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_attempts.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    role = Column(String(64), nullable=False)
+    content = Column(Text, nullable=True)
+    source_refs = Column(JSONB(none_as_null=True), nullable=False)
+    seq = Column(BigInteger, nullable=False)
+    message_created_at = Column(DateTime(timezone=True), nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "conversation_id IS NOT NULL OR execution_id IS NOT NULL OR attempt_id IS NOT NULL",
+            name="owner_present",
+        ),
+        CheckConstraint("deleted_at IS NOT NULL OR content IS NOT NULL", name="content_required"),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+
+class AgentResource(Base):
+    __tablename__ = "agent_resources"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    domain = Column(String(128), nullable=False)
+    kind = Column(String(64), nullable=False)
+    owner_conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_conversations.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    current_revision = Column(Integer, nullable=False, server_default=text("1"))
+    use_revision = Column(BigInteger, nullable=False, server_default=text("0"))
+    deleting = Column(Boolean, nullable=False, server_default=text("false"))
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('source', 'role', 'prompt', 'skill', 'mcp', 'plan', 'summary', 'artifact')", name="kind"
+        ),
+        CheckConstraint("current_revision >= 1", name="current_revision_positive"),
+        CheckConstraint("use_revision >= 0", name="use_revision_non_negative"),
+    )
+
+
+class AgentResourceVersion(Base):
+    __tablename__ = "agent_resource_versions"
+
+    resource_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_resources.id", use_alter=True, ondelete="RESTRICT"), primary_key=True
+    )
+    revision = Column(Integer, primary_key=True)
+    payload = Column(JSONB(none_as_null=True), nullable=True)
+    content_digest = Column(String(64), nullable=False)
+    blob_path = Column(Text, nullable=True)
+    availability = Column(String(64), nullable=False)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("availability IN ('available', 'partial', 'revoked', 'deleted')", name="availability"),
+        CheckConstraint(
+            "availability <> 'deleted' AND payload IS NOT NULL OR availability = 'deleted'",
+            name="payload_by_availability",
+        ),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+
+class AgentPlanReview(Base):
+    __tablename__ = "agent_plan_reviews"
+
+    plan_resource_id = Column(UUID(as_uuid=True), primary_key=True)
+    plan_revision = Column(Integer, primary_key=True)
+    review_revision = Column(Integer, nullable=False)
+    source_execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    source_input_revision = Column(Integer, nullable=False)
+    source_manifest_digest = Column(String(64), nullable=False)
+    input_snapshot = Column(JSONB(none_as_null=True), nullable=False)
+    review_digest = Column(String(64), nullable=False)
+    review_status = Column(String(64), nullable=False)
+    pending_revision_intent_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_intents.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["plan_resource_id", "plan_revision"],
+            ["agent_resource_versions.resource_id", "agent_resource_versions.revision"],
+            name="fk_agent_plan_reviews_resource_version",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "review_status IN ('ready', 'revision_pending', 'superseded', 'verifying')", name="review_status"
+        ),
+        CheckConstraint("review_revision >= 1", name="review_revision_positive"),
+        CheckConstraint("source_input_revision >= 1", name="source_input_revision_positive"),
+    )
+
+
+class AgentUse(Base):
+    __tablename__ = "agent_uses"
+
+    resource_id = Column(UUID(as_uuid=True), primary_key=True)
+    resource_revision = Column(Integer, primary_key=True)
+    owner_kind = Column(String(64), primary_key=True)
+    owner_id = Column(UUID(as_uuid=True), primary_key=True)
+    active = Column(Boolean, nullable=False, server_default=text("true"))
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["resource_id", "resource_revision"],
+            ["agent_resource_versions.resource_id", "agent_resource_versions.revision"],
+            name="fk_agent_uses_resource_version",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "owner_kind IN ('input', 'attempt', 'export', 'role_default', 'role_enabled', 'draft', 'checkpoint')",
+            name="owner_kind",
+        ),
+    )
+
+
+class AgentArtifact(Base):
+    __tablename__ = "agent_artifacts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    revision = Column(Integer, primary_key=True)
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    attempt_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_attempts.id", use_alter=True, ondelete="RESTRICT"), nullable=False
+    )
+    output_contract = Column(String(64), nullable=False)
+    content = Column(JSONB(none_as_null=True), nullable=True)
+    markdown = Column(Text, nullable=True)
+    source_refs = Column(JSONB(none_as_null=True), nullable=True)
+    limitations = Column(JSONB(none_as_null=True), nullable=True)
+    content_digest = Column(String(64), nullable=False)
+    supersedes_id = Column(UUID(as_uuid=True), nullable=True)
+    supersedes_revision = Column(Integer, nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["id", "revision"],
+            ["agent_resource_versions.resource_id", "agent_resource_versions.revision"],
+            name="fk_agent_artifacts_resource_version",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["supersedes_id", "supersedes_revision"],
+            ["agent_artifacts.id", "agent_artifacts.revision"],
+            name="fk_agent_artifacts_supersedes",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(deleted_at IS NULL AND content IS NOT NULL AND markdown IS NOT NULL"
+            " AND source_refs IS NOT NULL AND limitations IS NOT NULL)"
+            " OR (deleted_at IS NOT NULL AND content IS NULL AND markdown IS NULL"
+            " AND source_refs IS NULL AND limitations IS NULL)",
+            name="tombstone_payload",
+        ),
+        CheckConstraint(
+            "(supersedes_id IS NULL AND supersedes_revision IS NULL)"
+            " OR (supersedes_id IS NOT NULL AND supersedes_revision IS NOT NULL)",
+            name="supersedes_pair",
+        ),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+
+class AgentDelivery(Base):
+    __tablename__ = "agent_deliveries"
+
+    operation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_commands.id", use_alter=True, ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    artifact_id = Column(UUID(as_uuid=True), nullable=False)
+    artifact_revision = Column(Integer, nullable=False)
+    format = Column(String(64), nullable=False)
+    destination = Column(Text, nullable=False)
+    expected_target_digest = Column(String(64), nullable=True)
+    content_digest = Column(String(64), nullable=False)
+    source_availability = Column(JSONB(none_as_null=True), nullable=True)
+    staging_path = Column(Text, nullable=True)
+    delivery_digest = Column(String(64), nullable=True)
+    revision = Column(Integer, nullable=False)
+    phase = Column(String(64), nullable=False)
+    cancel_command_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_commands.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    cancel_requested = Column(Boolean, nullable=False, server_default=text("false"))
+    status = Column(String(64), nullable=False)
+    receipt = Column(JSONB(none_as_null=True), nullable=True)
+    problem = Column(JSONB(none_as_null=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["artifact_id", "artifact_revision"],
+            ["agent_artifacts.id", "agent_artifacts.revision"],
+            name="fk_agent_deliveries_artifact",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("format IN ('md', 'csv', 'xlsx')", name="format"),
+        CheckConstraint("phase IN ('preparing', 'writing', 'publishing', 'settled')", name="phase"),
+        CheckConstraint("status IN ('preparing', 'published', 'failed', 'cancelled', 'unknown')", name="status"),
+        CheckConstraint(
+            "(status = 'preparing' AND phase IN ('preparing', 'writing', 'publishing')"
+            " AND problem IS NULL"
+            " AND (phase = 'preparing' OR source_availability IS NOT NULL)"
+            " AND (phase <> 'publishing' OR delivery_digest IS NOT NULL))"
+            " OR (status = 'published' AND phase = 'settled' AND source_availability IS NOT NULL"
+            " AND delivery_digest IS NOT NULL AND problem IS NULL)"
+            " OR (status = 'failed' AND phase = 'settled' AND problem IS NOT NULL)"
+            " OR (status = 'cancelled' AND phase = 'settled')"
+            " OR (status = 'unknown' AND phase IN ('preparing', 'writing', 'publishing')"
+            " AND problem IS NOT NULL)",
+            name="delivery_snapshot_joint",
+        ),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        CheckConstraint("artifact_revision >= 1", name="artifact_revision_positive"),
+    )
+
+
+class AgentCleanup(Base):
+    __tablename__ = "agent_cleanups"
+
+    operation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_commands.id", use_alter=True, ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    target = Column(JSONB(none_as_null=True), nullable=False)
+    use_revision = Column(BigInteger, nullable=False)
+    impact = Column(JSONB(none_as_null=True), nullable=False)
+    revision = Column(Integer, nullable=False)
+    status = Column(String(64), nullable=False)
+    completed_items = Column(JSONB(none_as_null=True), nullable=False)
+    pending_items = Column(JSONB(none_as_null=True), nullable=False)
+    retained_copies = Column(JSONB(none_as_null=True), nullable=False)
+    problem = Column(JSONB(none_as_null=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("status IN ('preparing', 'completed', 'partial', 'unknown')", name="status"),
+        CheckConstraint("revision >= 1", name="revision_positive"),
+    )
+
+
+class AgentPresentationState(Base):
+    __tablename__ = "agent_presentation_state"
+
+    domain = Column(String(128), primary_key=True)
+    revision = Column(Integer, nullable=False)
+    deferred_through_seq = Column(BigInteger, nullable=False, server_default=text("0"))
+    reopened_decision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "agent_decisions.id",
+            name="fk_agent_presentation_state_reopened_decision",
+            use_alter=True,
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    storage_observation = Column(JSONB(none_as_null=True), nullable=True)
+    updated_at = _agent_updated_at()
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="revision_positive"),
+        CheckConstraint("deferred_through_seq >= 0", name="deferred_through_seq_non_negative"),
+    )
+
+
+class AgentLimit(Base):
+    __tablename__ = "agent_limits"
+
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), primary_key=True
+    )
+    kind = Column(String(64), primary_key=True)
+    attempt_key = Column(String(256), primary_key=True)
+    ordinal = Column(Integer, nullable=False)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        UniqueConstraint("execution_id", "kind", "ordinal", name="uq_agent_limits_execution_kind_ordinal"),
+        CheckConstraint("kind IN ('model', 'tool')", name="kind"),
+        CheckConstraint(
+            "(kind = 'model' AND ordinal BETWEEN 1 AND 100) OR (kind = 'tool' AND ordinal BETWEEN 1 AND 200)",
+            name="ordinal_boundary",
+        ),
+    )
+
+
+class AgentStreamHead(Base):
+    __tablename__ = "agent_stream_head"
+
+    stream_key = Column(String(128), primary_key=True)
+    tail = Column(BigInteger, nullable=False, server_default=text("0"))
+    created_at = _agent_created_at()
+    updated_at = _agent_updated_at()
+
+    __table_args__ = (CheckConstraint("tail >= 0", name="tail_non_negative"),)
+
+
+class AgentEvent(Base):
+    __tablename__ = "agent_events"
+
+    seq = Column(BigInteger, primary_key=True, autoincrement=False)
+    event_key = Column(String(256), nullable=False, unique=True)
+    domain = Column(String(128), nullable=False)
+    conversation_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_conversations.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    execution_id = Column(
+        UUID(as_uuid=True), ForeignKey("agent_executions.id", use_alter=True, ondelete="RESTRICT"), nullable=True
+    )
+    entity_id = Column(UUID(as_uuid=True), nullable=False)
+    entity_revision = Column(BigInteger, nullable=False)
+    kind = Column(String(64), nullable=False)
+    payload = Column(JSONB(none_as_null=True), nullable=False)
+    payload_digest = Column(String(64), nullable=False)
+    created_at = _agent_created_at()
+
+    __table_args__ = (
+        CheckConstraint("seq >= 1", name="seq_positive"),
+        CheckConstraint("entity_revision >= 1", name="entity_revision_positive"),
+    )
+
+
+class AgentRetiredKey(Base):
+    __tablename__ = "agent_retired_keys"
+
+    domain = Column(String(128), primary_key=True)
+    source_module = Column(String(128), primary_key=True)
+    request_key = Column(String(128), primary_key=True)
+    initial_digest = Column(String(64), nullable=False)
+    retired_at = Column(DateTime(timezone=True), nullable=False)
+    reason = Column(String(256), nullable=False, info={"i18n": "col_reason"})
+    created_at = _agent_created_at()
