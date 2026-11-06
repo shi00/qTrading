@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -34,6 +34,9 @@ BUILD_JOB = "build-artifacts"
 AUDIT_JOB = "audit"
 PUBLISH_JOB = "publish-release"
 TAG_PREFIX = "refs/tags/sidecar-v"
+
+LLVM_COV_STEP = "cargo llvm-cov (unit tests coverage, Linux only, enforced)"
+COVERAGE_UPLOAD_STEP = "Upload coverage report (Linux only)"
 
 DOWNLOAD_STEP = "Download all sidecar release artifacts"
 LOCAL_VERIFY_STEP = "Verify downloaded artifacts and tag commit"
@@ -281,3 +284,27 @@ def test_remote_verify_checks_exact_asset_set_and_server_digest(workflow: dict[s
     assert '.assets[] | [.name, (.digest // "")] | @tsv' in run
     assert "actual_count" in run or "expected_count" in run
     assert 'sha256sum "release-assets/${artifact}/${file}"' in run
+
+
+def test_coverage_report_path_joins_run_working_directory_to_upload_path(workflow: dict[str, Any]) -> None:
+    """CI-F06：cargo llvm-cov 报告写入 run 工作目录，upload-artifact 却按仓库根解析。
+
+    生成路径 = ``defaults.run.working-directory`` + ``--output-path``；消费路径 =
+    upload-artifact 的 ``path``（相对 GITHUB_WORKSPACE）。两者必须精确相等，否则
+    报告落在子目录而上传从仓库根读取，门禁会「成功」却缺少覆盖率证据。
+    """
+    working_directory = _job(workflow, LINT_JOB)["defaults"]["run"]["working-directory"]
+
+    coverage_run = _step(workflow, LINT_JOB, LLVM_COV_STEP)["run"]
+    output_match = re.search(r"--output-path(?:[= ])(\S+)", coverage_run)
+    assert output_match is not None, "cargo llvm-cov 必须显式指定 --output-path"
+    output_path = output_match.group(1)
+
+    upload = _step(workflow, LINT_JOB, COVERAGE_UPLOAD_STEP)
+    upload_paths = [p.strip() for p in upload["with"]["path"].strip().splitlines()]
+
+    # 断言精确路径而非子串：若回退为仓库根的 ``lcov.info``，此比较会失败
+    assert upload_paths == [str(PurePosixPath(working_directory) / output_path)]
+    assert upload["with"]["if-no-files-found"] == "error", "报告缺失必须使上传校验失败"
+    assert upload["with"]["name"] == "rust-coverage-lcov"
+    assert upload["with"]["retention-days"] == 14
