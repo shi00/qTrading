@@ -20,7 +20,12 @@ concurrency:
 jobs:
   flet-compatibility-check:
     name: Flet Nightly Compatibility Check
-    runs-on: ubuntu-latest
+    # 锁定 Ubuntu 24.04：ubuntu-latest 已迁至 26.04，该系统只提供 libxml2 2.15
+    # （soname libxml2.so.16），而 sidecar 下载的 PostgreSQL 二进制动态链接
+    # libxml2.so.2，initdb 直接失败（2026-11-05 run 42008447714 / 11-06 复现：
+    # `error while loading shared libraries: libxml2.so.2`）。与 sidecar.yml、
+    # ci_cd.yml embedded-tests 采用同一处理；升级 bundled PG 后需复测本约束。
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -123,17 +128,8 @@ jobs:
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
           E2E_TIMEOUT_MULTIPLIER: "2.0"
-        # -o addopts="" -p no:xdist 串行执行（对齐 ci_cd.yml embedded-tests 的 E2E 步骤）：
-        # 清空 pyproject.toml 的 addopts="-n auto --dist=loadgroup" 并禁用 xdist，避免 3 个
-        # E2E 用例被分发到 3 个 worker 并发启动 3 个 Flet app + 嵌入式 PG sidecar。sidecar 的
-        # run::pick_free_port 与 E2E 的 _free_port 都是「探测后释放再绑定」，并发启动时命中
-        # 端口竞态（Linux errno 98）会让 app 进程在 sidecar 启动阶段退出
-        # （2026-11-05 run 42008447714：gw0/gw1/gw2 三个 app 全部 exit）。
         run: |
-          python -m pytest \
-            -o addopts="" -p no:xdist -p no:randomly \
-            tests/unit/ui/test_anchor.py tests/e2e/test_screener_anchor_smoke.py \
-            -v --tb=short --timeout=600 --timeout-method=thread
+          python -m pytest tests/unit/ui/test_anchor.py tests/e2e/test_screener_anchor_smoke.py -v --tb=short
 
       - name: Run anchor E2E (navigation)
         env:
@@ -143,12 +139,8 @@ jobs:
           SIDECAR_BINARY_PATH: ${{ env.SIDECAR_BINARY_PATH }}
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
           E2E_TIMEOUT_MULTIPLIER: "2.0"
-        # 同上：串行执行，避免 2 个用例并发启动 2 个 Flet app + sidecar 命中同一端口竞态。
         run: |
-          python -m pytest \
-            -o addopts="" -p no:xdist -p no:randomly \
-            tests/e2e/test_navigation.py \
-            -v --tb=short --timeout=600 --timeout-method=thread
+          python -m pytest tests/e2e/test_navigation.py -v --tb=short
 
       # 失败取证：app 子进程 stdout/stderr 只落在 logs/e2e-flet-app.log，job 日志里看不到
       # 退出原因（run 42008447714 的 3 个 setup error 因此无根因证据）。上传前按 R9 脱敏，

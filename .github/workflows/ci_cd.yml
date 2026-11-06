@@ -961,8 +961,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 锁定 Ubuntu 24.04：ubuntu-latest 已迁至 26.04，该系统只提供 libxml2 2.15
+          # （soname libxml2.so.16），而 sidecar 下载的 PostgreSQL 二进制动态链接
+          # libxml2.so.2，initdb 直接失败。与 sidecar.yml 的 runner 锁定同源，
+          # 升级 bundled PG 后需复测本约束。
           - os: linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             binary_name: qtrading-pg-sidecar
             uv_cache_dir: /tmp/uv-cache
           - os: windows
