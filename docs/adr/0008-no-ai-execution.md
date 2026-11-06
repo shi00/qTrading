@@ -2,6 +2,7 @@
 
 > Status: Partial Superseded by ADR-0016（仅未来新增智能体模块的 E1—E5 有限例外；原禁止项继续有效）
 > Date: 2026-09-14
+> Amended: 2026-11-05 — Agent v1.4 §0.6 只读执行提案，待正式批准；批准前 release_permission=false
 > Owner: 架构维护者
 
 ## Context
@@ -21,6 +22,17 @@ AI 输出**仅用于评分和文本展示**，不赋予以下能力：
 
 所有 AI 交互必须通过 `utils/prompt_guard.py` 的净化函数（`validate_prompt` / `sanitize_prompt` / `neutralize_external_text`，无 `PromptGuard` 类）和 `DataSanitizer` 处理，确保外部文本净化与输出不包含可执行指令。新增 AI 功能时，需在设计文档中明确声明其输出仅用于展示，并通过测试验证无执行路径。
 
+**待正式批准的只读研究例外（Agent v1.4 §0.6）。** 在正式准入且用户明确授权的研究范围内，AI 输出仍用于研究展示；可由确定性应用许可桥向已注册、已验证只读工具派发。交易、资金、任意代码/SQL、核心配置及业务数据写入仍禁止。模型不拥有授权或文件管理权。允许范围仅限：
+
+1. 模型推理/摘要：同既有 ScenarioExecutor，真实目的地/凭据/用途/资料范围许可，每次出站核权，不开放提供方 SDK 第二出口。
+2. 业务只读查询：仅已选对象/资料和核验参数的注册 provider，经 BaseDao 引擎保护/PIT/单位/限额，无任意 SQL、整库扫描或业务写入。
+3. 外部 MCP 工具：仅明确选择且已核验真实只读行为的服务/工具/schema/参数范围；`readOnlyHint`、名称、模型或文档自述都不是只读证明，不能核验则不开放。
+4. 受管资料提取：用户所选本地载体，只读解析且有大小/解压/超时界限，不执行宏、脚本、外链或自动 OCR。
+5. 导出/清理：用户直接管理命令、预检/版本/路径/覆盖或删除确认，模型不能指定路径或触发写入。
+6. 委派/运行控制：仅应用验证过的单层图/准确任务和原生控制，叶无间接委派。
+
+默认必须关闭：批准与技术证据缺一项时 `release_permission=false`，执行入口返回 `runtime_not_admitted` 并零工具派发；批准事实由应用服务边界的显式可信配置独立留证，不能由模型输出、Prompt、Skill、MCP 声明或单次外发批准填入 Accepted。
+
 ## Consequences
 
 **正向**
@@ -33,6 +45,9 @@ AI 输出**仅用于评分和文本展示**，不赋予以下能力：
 
 **维护契约**
 - 代码审查需检查 AI 输出处理逻辑，确保无执行路径。
+- 执行入口必须经 `ExecutionPermission` 门禁：默认 `runtime_admitted=false`/`release_permission=false`，拒绝时零工具派发并返回明确 Problem。
+- 只读 provider 仅限应用显式 allowlist（stock/pool/strategy/backtest/news），不接受客户端注册任意函数、URL、SQL 或模块路径。
+- 批准事实只能来自可信应用配置/正式记录；任何模型/请求字段都不得自称已批准。
 - 本文档需随 AI 功能扩展同步更新此约束。
 
 ## Alternatives

@@ -38,6 +38,7 @@ from core.agent_types import (
     validate_request,
 )
 from data.persistence.daos.base_dao import EngineDisposedError
+from services.agent.permissions import ExecutionPermission
 
 _READ_FAILED = "source_unavailable"
 
@@ -115,9 +116,10 @@ def _invalid_request(error: AgentValidationError) -> AgentOperationError:
 class AgentService:
     """绑定当前可信 domain 的服务实例（§5.2）。"""
 
-    def __init__(self, *, domain: str, dao: AgentDaoProtocol) -> None:
+    def __init__(self, *, domain: str, dao: AgentDaoProtocol, permission: ExecutionPermission | None = None) -> None:
         self._domain = domain
         self._dao = dao
+        self._permission = permission or ExecutionPermission()
 
     # ------------------------------------------------------------------
     # 写入回执：参数先验证，再进 DAO；status 原样返回
@@ -132,6 +134,10 @@ class AgentService:
             validate_request(request)
         except AgentValidationError as error:
             raise _invalid_request(error) from error
+        if not self._permission.allows(request.mode):
+            raise AgentOperationError(
+                _problem("runtime_not_admitted", field_issues=(("mode", "runtime_not_admitted"),))
+            )
         return await self._call(lambda: self._dao.accept_request(self._domain, request, request_digest(request)))
 
     async def control(self, command: ControlCommand) -> CommandReceipt:
