@@ -61,7 +61,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | Dialog 管理 | `ft.use_dialog(dialog)` | 声明式组件内唯一契约；自动挂载/卸载到 page overlay（由 `use_state(open)` 控制显隐） |
 | ViewModel 消费 | `use_viewmodel(factory=...)` 或 `use_viewmodel(vm=...)` | 唯一桥接 hook；`factory` 与 `vm` 互斥，详见 [MVVM 表现层](../patterns/mvvm.md) 与 [ui/hooks.py](../../ui/hooks.py) |
 | Dropdown 事件 | `Dropdown(on_select=...)` | 声明式组件内事件契约（与 V0→V1 迁移表第 13 项一致） |
-| use_effect cleanup | `ft.use_effect(setup, dependencies=[...], cleanup=fn)` | cleanup 通过显式 `cleanup=` 参数传入（项目约定：不用 setup 返回值，统一用 `cleanup=` 参数）。锁定版本 `use_effect` 每次渲染重写 `hook.cleanup`，故 setup 返回 cleanup 不可靠（详见 [§3](#3-use_state--use_effect-api)） |
+| use_effect cleanup | `ft.use_effect(setup, dependencies=[...], cleanup=fn)` | cleanup 通过显式 `cleanup=` 参数传入（项目约定：不用 setup 返回值，统一用 `cleanup=` 参数）。锁定版本 `use_effect` 每次渲染重写 `hook.cleanup`；setup 返回值自 Flet 1.1 起单独存放、不被清空，但项目不依赖该行为（详见 [§3](#3-use_state--use_effect-api)） |
 | page 引用 | `ft.context.page` 或事件 `e.page` | 不直接赋值 `self.page = page`（`PageRefMixin` 已删除） |
 
 ## 兼容垫片使用规则
@@ -130,8 +130,8 @@ def MetricCard(label: str):
     - `None`（缺省）：**每次重渲染都重跑**；
     - `[]`（空列表）：仅挂载时运行一次，重渲染不重跑；
     - 非空列表：仅当列表内任一依赖变化时重跑。
-  - `setup` 为普通函数，项目约定不用返回值传递 cleanup，统一用显式 `cleanup=` 参数（与 [声明式组件内 API 契约](#声明式组件内-api-契约) 一致）。**锁定版本限制**：`use_effect` 每次渲染都会把 `hook.cleanup` 重写为传入的 `cleanup=` 参数；setup 的返回值仅在调度器执行 setup 时被暂存，之后任意（含无关）重渲染都会将其清空，故靠 setup 返回值传 cleanup 在重渲染后不可靠，必须用显式 `cleanup=`。
-  - cleanup 只在两个时机执行：**重跑前清理**（依赖变化导致 effect 重跑前）与**卸载清理**（组件卸载时），二者是不同调度路径。框架执行 cleanup 时会一并取消由该 effect 调度的**在途 async setup 协程任务**，但不对 setup 内部另起的后台任务给予取消保证；需要时须在显式 `cleanup=` 中自行处理。
+  - `setup` 为普通函数，项目约定不用返回值传递 cleanup，统一用显式 `cleanup=` 参数（与 [声明式组件内 API 契约](#声明式组件内-api-契约) 一致）。**锁定版本限制**：`use_effect` 每次渲染都会把 `hook.cleanup` 重写为传入的 `cleanup=` 参数；setup 返回值自 Flet 1.1 起由调度器单独存入 `hook._returned_cleanup`，不再被后续渲染清空（升级前会被清空，靠返回值传 cleanup 不可靠）。项目仍统一用显式 `cleanup=`，不依赖该行为。
+  - cleanup 只在两个时机执行：**重跑前清理**（依赖变化导致 effect 重跑前）与**卸载清理**（组件卸载时），二者是不同调度路径。框架在两条路径上都会取消由该 effect 调度的**在途 async setup 协程任务**（Flet 1.1 起不要求存在 cleanup），但不对 setup 内部另起的后台任务给予取消保证；需要时须在显式 `cleanup=` 中自行处理。
   - hooks 必须在 `@ft.component` 渲染上下文内调用，独立调用抛 `RuntimeError: No current renderer`。
 - `ft.component(fn)` 装饰器：把函数标记为组件，返回值即控件树根节点。
 

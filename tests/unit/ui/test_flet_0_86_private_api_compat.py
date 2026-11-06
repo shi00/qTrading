@@ -350,8 +350,8 @@ class TestRealEffectScheduling:
             await _stop_session(session, gate, *tasks)
 
     @pytest.mark.asyncio
-    async def test_missing_cleanup_leaves_inflight_async_setup_running_on_unmount(self) -> None:
-        """无 cleanup → 卸载不取消在途 async setup（复现 F09 未清理旧行为）。"""
+    async def test_missing_cleanup_still_cancels_inflight_async_setup_on_unmount(self) -> None:
+        """无 cleanup → 卸载仍取消在途 async setup（升级后行为，替代旧版未清理缺陷）。"""
         gate = asyncio.Event()
         log: list[str] = []
         session = await _new_session()
@@ -366,11 +366,9 @@ class TestRealEffectScheduling:
 
             component._state.mounted = False
             component._run_unmount_effects()
-            # 给调度器若干轮机会：无 cleanup 时不应有任何取消发生
-            for _ in range(3):
-                await asyncio.sleep(0)
+            await _wait_until(lambda: hook._setup_task.done())
 
-            assert hook._setup_task.done() is False
+            assert hook._setup_task.cancelled() is True
             assert "setup_done:1" not in log
         finally:
             await _stop_session(session, gate, *tasks)
@@ -467,12 +465,12 @@ class TestSyncSetupCleanupContrast:
     锁定版本源码决定两种写法的差异：
     - ``flet/components/hooks/use_effect.py`` 的 ``use_effect`` 每次渲染末尾执行
       ``hook.cleanup = cleanup``（以函数实参重写 hook 状态）；
-    - ``flet/messaging/session.py`` 的调度器仅在执行 **同步** setup 后，将其返回
-      的可调用对象暂存到 ``hook.cleanup``（``iscoroutinefunction`` 分支丢弃返回值）。
+    - ``flet/messaging/session.py`` 的调度器执行 **同步** setup 后，将其返回的可调用
+      对象存入独立字段 ``hook._returned_cleanup``（不再覆盖 ``hook.cleanup``）。
 
-    因此：显式 ``cleanup=`` 每次渲染被重写为同一函数引用，卸载时可靠执行；setup 返回值
-    在 mount 时被调度器暂存，任意后续（含无依赖变化、不触发 cleanup 重跑的 ``[]``）渲染
-    都会被 ``use_effect`` 的 ``hook.cleanup = cleanup``（None）清空，卸载时静默跳过。
+    因此：显式 ``cleanup=`` 每次渲染被重写为同一函数引用；setup 返回值被单独保存，
+    后续无关渲染不会清空它——两种写法在卸载时都会可靠执行 cleanup（升级前 setup
+    返回值会被下一次渲染清空，升级后该缺陷已修复）。
     """
 
     @pytest.mark.asyncio
@@ -502,8 +500,8 @@ class TestSyncSetupCleanupContrast:
             await _stop_session(session, gate)
 
     @pytest.mark.asyncio
-    async def test_setup_returned_cleanup_cleared_by_unrelated_rerender(self) -> None:
-        """setup 返回值：无关重渲染清空 hook.cleanup，卸载时静默跳过 cleanup。"""
+    async def test_setup_returned_cleanup_survives_unrelated_rerender(self) -> None:
+        """setup 返回值：无关重渲染不清空已暂存的 cleanup，卸载时执行。"""
         log: list[str] = []
         session = await _new_session()
         gate = asyncio.Event()
@@ -512,18 +510,17 @@ class TestSyncSetupCleanupContrast:
             render_once(component)
             component._run_mount_effects()
             hook = component._state.hooks[0]
-            await _wait_until(lambda: "setup" in log and callable(hook.cleanup))
+            await _wait_until(lambda: "setup" in log and callable(hook._returned_cleanup))
 
             component.kwargs = {"log": log, "unrelated": 2}
             render_once(component)
             component._run_render_effects()
             assert hook.cleanup is None
+            assert callable(hook._returned_cleanup)
 
             component._state.mounted = False
             component._run_unmount_effects()
-            for _ in range(3):
-                await asyncio.sleep(0)
-            assert "returned_cleanup" not in log
+            await _wait_until(lambda: "returned_cleanup" in log)
         finally:
             await _stop_session(session, gate)
 
