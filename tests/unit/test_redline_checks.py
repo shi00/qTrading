@@ -2295,6 +2295,64 @@ class TestNoComponentRenderSideEffects:
         errors = _check_no_render_side_effects_in_tree(tree, file_path)
         assert errors == []
 
+    def test_component_on_click_lambda_logger_allowed(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = (
+            "import flet as ft\n"
+            "import logging\n"
+            "logger = logging.getLogger(__name__)\n\n"
+            "@ft.component\n"
+            "def MyView():\n"
+            '    return ft.Button(on_click=lambda e: logger.info("clicked"))\n'
+        )
+        tree = ast.parse(code)
+        file_path = tmp_path / "my_view.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert errors == []
+
+    def test_component_on_click_lambda_print_allowed(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = (
+            "import flet as ft\n\n"
+            "@ft.component\n"
+            "def MyView():\n"
+            '    return ft.Button(on_click=lambda e: print("clicked"))\n'
+        )
+        tree = ast.parse(code)
+        file_path = tmp_path / "my_view.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert errors == []
+
+    def test_component_iife_lambda_print_flagged(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = "import flet as ft\n\n@ft.component\ndef MyView():\n    (lambda: print(\"x\"))()\n    return ft.Text('hello')\n"
+        tree = ast.parse(code)
+        file_path = tmp_path / "my_view.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert len(errors) == 1
+        assert "UI 渲染期副作用" in errors[0]
+        assert "print" in errors[0]
+
+    def test_component_lambda_default_print_flagged(self, tmp_path):
+        from scripts.check_redlines import _check_no_render_side_effects_in_tree
+
+        code = (
+            "import flet as ft\n\n"
+            "@ft.component\n"
+            "def MyView():\n"
+            '    cb = lambda e, x=print("y"): None\n'
+            "    return ft.Button(on_click=cb)\n"
+        )
+        tree = ast.parse(code)
+        file_path = tmp_path / "my_view.py"
+        errors = _check_no_render_side_effects_in_tree(tree, file_path)
+        assert len(errors) == 1
+        assert "UI 渲染期副作用" in errors[0]
+        assert "print" in errors[0]
+
     def test_non_component_top_level_logger_allowed(self, tmp_path):
         from scripts.check_redlines import _check_no_render_side_effects_in_tree
 
