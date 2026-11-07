@@ -1,4 +1,4 @@
-# installer_smoke_uninstall.ps1
+﻿# installer_smoke_uninstall.ps1
 # Phase 5 DoD §17.5 卸载验证（保留数据）smoke test 脚本
 # 用法: powershell -File scripts/installer_smoke_uninstall.ps1 -InstallerPath <path>
 # 验证: 卸载后程序目录移除，但 PG 根（data/PG_VERSION、runtime\password、install）完整保留；
