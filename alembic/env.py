@@ -130,10 +130,25 @@ async def run_async_migrations() -> None:
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    finally:
+        original_error = sys.exception()
+        try:
+            await connectable.dispose()
+        except Exception as dispose_error:
+            # 原始故障优先：dispose 失败不得覆盖 in-flight 异常。CancelledError 属
+            # BaseException，不被此处捕获，仍按 R2 继续向上传播。
+            if original_error is None:
+                raise
+            # R9: dispose 异常消息可能含连接串（含密码），须脱敏后再记录
+            from utils.sanitizers import DataSanitizer
 
-    await connectable.dispose()
+            logger.warning(
+                "Failed to dispose Alembic migration engine: %s",
+                DataSanitizer.sanitize_error(dispose_error),
+            )
 
 
 def run_migrations_online() -> None:
