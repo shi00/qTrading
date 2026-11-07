@@ -43,9 +43,12 @@ function Assert-True([bool]$cond, [string]$msg) {
 
 # ready 判据 = sidecar status JSON 的 status == running 且 postgres_alive == true
 # （与 run.rs 一致：ready 表示 PG 已启动；进程名存在只能作诊断提示，不能单独判定 ready）。
-function Wait-SidecarReady([int]$TimeoutSec = 60) {
+# 超时 180s：run 42357815491 实证冷启动（清空 PGDATA 后完整 initdb）在慢 runner 上
+# 超过 60s（上次成功已耗时 50s 逼近上限），60s 属边缘性超时，非产品缺陷。
+function Wait-SidecarReady([int]$TimeoutSec = 180) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $sidecarProcessSeen = $false
+    $lastRaw = $null
     while ((Get-Date) -lt $deadline) {
         if (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue) { $sidecarProcessSeen = $true }
         $status = $null
@@ -53,7 +56,8 @@ function Wait-SidecarReady([int]$TimeoutSec = 60) {
             try {
                 $raw = @(& $SidecarExePath status --data-dir $PgDataDir 2>$null)
                 if ($LASTEXITCODE -eq 0 -and $raw.Count -gt 0) {
-                    $status = (($raw -join "`n") | ConvertFrom-Json)
+                    $lastRaw = ($raw -join "`n")
+                    $status = ($lastRaw | ConvertFrom-Json)
                 }
             } catch {
                 $status = $null
@@ -68,6 +72,9 @@ function Wait-SidecarReady([int]$TimeoutSec = 60) {
         Write-Fail "sidecar process present but status JSON never reported running/postgres_alive within ${TimeoutSec}s"
     } else {
         Write-Fail "qtrading-pg-sidecar process never appeared within ${TimeoutSec}s"
+    }
+    if ($null -ne $lastRaw) {
+        Write-Fail "last sidecar status output: $lastRaw"
     }
     return $false
 }
@@ -240,11 +247,11 @@ try {
         Write-Host "[DIAG] app process exited early with code $($proc.ExitCode)"
         Write-Diagnostics "app process exited immediately after start (code $($proc.ExitCode))"
     }
-    $ready = Wait-SidecarReady -TimeoutSec 60
+    $ready = Wait-SidecarReady
     if (-not $ready) {
         # 主进程存活但 sidecar 未出现：dump 安装的 sidecar 文件与主程序/sidecar 日志便于定位
         # （主程序若在启动阶段抛 EmbeddedPostgresStartError 会停在 PreInitErrorView，不写 stdout）
-        Write-Diagnostics "sidecar not ready within 60s after app start"
+        Write-Diagnostics "sidecar not ready within timeout after app start"
     }
     Assert-True $ready "Sidecar ready (status JSON: running + postgres_alive)"
 
@@ -323,9 +330,9 @@ try {
     # STEP 10: 崩溃/退出后重启应用，等待真实 ready（status JSON: running + postgres_alive）
     Write-Step "10. Restart qTrading & wait for real sidecar ready"
     $proc2 = Start-Process -FilePath $AppExePath -PassThru
-    $ready2 = Wait-SidecarReady -TimeoutSec 60
+    $ready2 = Wait-SidecarReady
     if (-not $ready2) {
-        Write-Diagnostics "sidecar not ready within 60s after restart"
+        Write-Diagnostics "sidecar not ready within timeout after restart"
     }
     Assert-True $ready2 "Sidecar ready after restart (status JSON: running + postgres_alive)"
 
