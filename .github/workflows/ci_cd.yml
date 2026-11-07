@@ -497,14 +497,16 @@ jobs:
           verbose: true
 
       # R9: 上传 junit 前脱敏可能含 DB 连接串（含密码）的文本工件（D18-R03）。
+      # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
       - name: Sanitize test reports
+        id: sanitize_test_reports_linux
         if: always()
         shell: bash
         run: |
           python scripts/sanitize_artifacts.py 'junit-*.xml'
 
       - name: Upload test reports
-        if: always()
+        if: always() && steps.sanitize_test_reports_linux.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: test-reports-${{ runner.os }}-${{ matrix.python-version }}
@@ -772,14 +774,16 @@ jobs:
 
       # R9: 上传前脱敏所有文本工件（日志/junit/e2e-artifacts 文本）；目录递归由脚本
       # 处理，e2e-artifacts 内的 PNG/zip 等二进制按扩展名白名单跳过。
+      # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
       - name: Sanitize E2E artifacts
+        id: sanitize_e2e
         if: always()
         shell: bash
         run: |
           python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-e2e.xml' e2e-artifacts
 
       - name: Upload E2E test reports
-        if: always()
+        if: always() && steps.sanitize_e2e.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: test-reports-e2e-windows-${{ matrix.group }}
@@ -932,14 +936,16 @@ jobs:
           if ($hasError) { exit 1 }
 
       # R9: 上传 junit 前脱敏可能含 DB 连接串（含密码）的文本工件（D18-R03）。
+      # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
       - name: Sanitize test reports
+        id: sanitize_test_reports_windows
         if: always()
         shell: bash
         run: |
           python scripts/sanitize_artifacts.py 'junit-*.xml'
 
       - name: Upload test reports
-        if: always()
+        if: always() && steps.sanitize_test_reports_windows.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: test-reports-${{ runner.os }}
@@ -1153,14 +1159,16 @@ jobs:
       # R9: 上传前脱敏可能含 DB 连接串（含密码）的文本工件。D18-R03 修复此 job
       # 此前直传日志的缺口；matrix 同时含 ubuntu/windows，故用两平台均可用的 bash
       # 调用跨平台 Python 脚本（复用 DataSanitizer），不用仅 Windows 习惯的 pwsh。
+      # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
       - name: Sanitize embedded test artifacts
+        id: sanitize_embedded
         if: always()
         shell: bash
         run: |
           python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-*.xml'
 
       - name: Upload test reports
-        if: always()
+        if: always() && steps.sanitize_embedded.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: embedded-test-reports-${{ matrix.os }}
@@ -1413,14 +1421,16 @@ jobs:
 
       # R9: 上传前脱敏所有文本工件（日志/junit/e2e-artifacts 文本）；目录递归由脚本
       # 处理，e2e-artifacts 内的 PNG/zip 等二进制按扩展名白名单跳过。
+      # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
       - name: Sanitize E2E artifacts
+        id: sanitize_skip_revalidation
         if: always()
         shell: bash
         run: |
           python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-skip-revalidation-${{ matrix.group }}.xml' e2e-artifacts
 
       - name: Upload E2E test reports
-        if: always()
+        if: always() && steps.sanitize_skip_revalidation.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: windows-skip-revalidation-${{ matrix.group }}
@@ -1567,14 +1577,16 @@ jobs:
 
       # R9: 上传前脱敏所有文本工件（日志/junit/e2e-artifacts 文本/sidecar-logs）；
       # 目录递归由脚本处理，e2e-artifacts 内的 PNG/zip 等二进制按扩展名白名单跳过。
+      # 上传仅在本步骤成功时执行：脱敏失败/cancel 时不得回退上传未脱敏原始工件。
       - name: Sanitize E2E artifacts
+        id: sanitize_sidecar_smoke
         if: always()
         shell: bash
         run: |
           python scripts/sanitize_artifacts.py logs/e2e-flet-app.log 'junit-sidecar-smoke.xml' e2e-artifacts sidecar-logs
 
       - name: Upload E2E test reports
-        if: always()
+        if: always() && steps.sanitize_sidecar_smoke.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: e2e-sidecar-real-smoke-reports
