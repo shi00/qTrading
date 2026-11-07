@@ -2797,6 +2797,114 @@ jobs:
             exit 1
           }
 
+      - name: Collect Installer Metadata (G4 §201 evidence)
+        # G4 §201 要求记录安装包 SHA-256 / 版本 / 客户端摘要 / OS / GPU / 驱动 / DPI / locale。
+        # 本步骤只采集构建机可确定的事实；取不到的值写 null 并附 reason，
+        # 不填 0 / 空串等会被误读为「已核对」的占位值（R21）。
+        if: matrix.embedded == 'true'
+        shell: pwsh
+        run: |
+          $variant = "${{ matrix.variant }}"
+          $installerPath = "Output\AStockScreener-Setup-$variant.exe"
+          if (-not (Test-Path $installerPath)) {
+            Write-Error "Installer not found: $installerPath"
+            exit 1
+          }
+          $sha = (Get-FileHash -Algorithm SHA256 -Path $installerPath).Hash.ToLowerInvariant()
+          $sizeBytes = (Get-Item $installerPath).Length
+          $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+          $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+          $gpu = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1
+          $osCaption = $null
+          $osVersion = $null
+          $osBuild = $null
+          if ($os) {
+            $osCaption = $os.Caption
+            $osVersion = $os.Version
+            $osBuild = $os.BuildNumber
+          }
+          $cpuName = $null
+          if ($cpu) { $cpuName = $cpu.Name }
+          $gpuName = $null
+          $gpuDriver = $null
+          if ($gpu) {
+            $gpuName = $gpu.Name
+            $gpuDriver = $gpu.DriverVersion
+          }
+          # Flet 桌面客户端在首次运行时解压到 ~/.flet/client/<fingerprint>；
+          # 构建机若无缓存则明确记 unavailable，不推测版本或摘要。
+          $clientExe = Get-ChildItem -Path (Join-Path $env:USERPROFILE ".flet\client") -Filter "flet.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $clientDigest = $null
+          $clientPath = $null
+          $clientReason = "client not cached on build runner before first launch"
+          if ($clientExe) {
+            $clientDigest = (Get-FileHash -Algorithm SHA256 -Path $clientExe.FullName).Hash.ToLowerInvariant()
+            $clientPath = $clientExe.FullName
+            $clientReason = $null
+          }
+          $meta = [ordered]@{
+            variant = $variant
+            collector = "ci/build-windows"
+            collected_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            installer = [ordered]@{
+              file = (Split-Path -Leaf $installerPath)
+              sha256 = $sha
+              size_bytes = $sizeBytes
+            }
+            declared_version = [ordered]@{
+              source = "ISCC /DMyAppVersion"
+              value = "${{ github.ref_name }}"
+              note = "编译期传入值；workflow_dispatch 下为分支名而非语义版本"
+            }
+            environment = [ordered]@{
+              os_caption = $osCaption
+              os_version = $osVersion
+              os_build = $osBuild
+              cpu = $cpuName
+              gpu = $gpuName
+              gpu_driver = $gpuDriver
+              locale = (Get-Culture).Name
+              dpi = $null
+              dpi_reason = "build runner has no interactive desktop session"
+            }
+            flet_client = [ordered]@{
+              sha256 = $clientDigest
+              path = $clientPath
+              unavailable_reason = $clientReason
+            }
+          }
+          $jsonPath = "Output\installer-metadata-$variant.json"
+          $meta | ConvertTo-Json -Depth 6 | Set-Content -Path $jsonPath -Encoding UTF8
+          Write-Host "Metadata written: $jsonPath"
+          $clientText = "unavailable（$clientReason）"
+          if ($clientDigest) { $clientText = $clientDigest }
+          $summary = @"
+          ### Installer metadata ($variant)
+          | 项 | 值 |
+          |----|----|
+          | installer SHA-256 | $sha |
+          | declared AppVersion | ${{ github.ref_name }} |
+          | OS | $osCaption $osVersion (build $osBuild) |
+          | CPU | $cpuName |
+          | GPU / driver | $gpuName / $gpuDriver |
+          | DPI | unavailable（无交互桌面会话） |
+          | locale | $((Get-Culture).Name) |
+          | flet client SHA-256 | $clientText |
+          "@
+          if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          }
+
+      - name: Upload Installer Metadata (G4 §201 evidence)
+        # always()：smoke 失败时同样保留环境与制品证据，避免「失败即无记录」。
+        if: always() && matrix.embedded == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: installer-metadata-${{ matrix.variant }}
+          path: Output/installer-metadata-${{ matrix.variant }}.json
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Smoke Test - Installer Scripts (embedded variants, release tag / manual dispatch, P1-12)
         # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%, 因此只在本 job
         # 既有的触发面内执行（release tag 或 workflow_dispatch 全量构建）; 常规 PR/push
@@ -2849,7 +2957,7 @@ jobs:
           }
           $baselineVersion = $baselineTag.TrimStart('v')
           Write-Host "Upgrade baseline: $baselineTag (version $baselineVersion)"
-          Invoke-InstallerSmoke "scripts/installer_smoke_upgrade.ps1" @("-OldVersion", $baselineVersion, "-OldVariant", "${{ matrix.variant }}")
+          Invoke-InstallerSmoke "scripts/installer_smoke_upgrade.ps1" @("-OldVersion", $baselineVersion, "-OldVariant", "${{ matrix.variant }}", "-VerifyRollback")
 
       - name: Generate SHA256SUMS
         shell: pwsh

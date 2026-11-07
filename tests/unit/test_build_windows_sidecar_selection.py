@@ -225,3 +225,52 @@ def test_dispatch_build_documents_divergence_and_never_silent(build_job: dict[st
     # 摘要必须同时记录 sidecar 与构建两侧 commit，便于事后核对。
     assert "sidecar target commit | $($env:SIDECAR_TARGET_COMMIT)" in script
     assert "build commit | $buildCommit" in script
+
+
+# G4（reviews/flet upgrade 1.1.0.md §4）: 201 元数据采集 / 205 回滚腿的落点。
+METADATA_STEP = "Collect Installer Metadata (G4 §201 evidence)"
+METADATA_UPLOAD_STEP = "Upload Installer Metadata (G4 §201 evidence)"
+SMOKE_STEP = "Smoke Test - Installer Scripts (embedded variants, release tag / manual dispatch, P1-12)"
+UPGRADE_SMOKE_SCRIPT = PROJECT_ROOT / "scripts" / "installer_smoke_upgrade.ps1"
+
+
+def test_metadata_step_records_evidence_without_fabricating(build_job: dict[str, Any]) -> None:
+    """G4-201：构建机可确定的事实落 JSON + Step Summary，取不到的值留 null 并说明原因。"""
+    step = _step(build_job, METADATA_STEP)
+    script = step["run"]
+
+    assert step["if"] == "matrix.embedded == 'true'", "元数据采集未限定 embedded 变体"
+    assert "Get-FileHash -Algorithm SHA256" in script, "未记录安装包 SHA-256"
+    assert "Get-CimInstance Win32_OperatingSystem" in script, "未记录 OS 版本"
+    assert "Win32_Processor" in script, "未记录 CPU"
+    assert "Win32_VideoController" in script, "未记录 GPU / 驱动"
+    assert "Get-Culture" in script, "未记录 locale"
+    assert "installer-metadata-$variant.json" in script, "未落 JSON 证据文件"
+    assert "GITHUB_STEP_SUMMARY" in script, "未写入步骤摘要"
+    # R21：不可取得的值必须显式标注 unavailable，不得填 0/空串冒充已核对。
+    assert "dpi = $null" in script and "dpi_reason" in script, "DPI 不可得未显式标注"
+    assert "unavailable_reason" in script, "客户端摘要缺失未显式标注"
+
+
+def test_metadata_artifact_uploaded_even_on_failure(build_job: dict[str, Any]) -> None:
+    """元数据证据需作为 artifact 保留，且 smoke 失败时同样上传。"""
+    step = _step(build_job, METADATA_UPLOAD_STEP)
+
+    assert step["if"] == "always() && matrix.embedded == 'true'", "失败场景会丢失元数据证据"
+    assert step["with"]["name"] == "installer-metadata-${{ matrix.variant }}"
+    assert step["with"]["path"] == "Output/installer-metadata-${{ matrix.variant }}.json"
+    assert "cf430e030ddbb5b0abf93d22962f4752f3646cd9" in step["uses"], "upload-artifact 未按仓库约定 pin"
+
+
+def test_upgrade_smoke_runs_rollback_leg(build_job: dict[str, Any]) -> None:
+    """G4-205：CI 调用升级 smoke 时必须开启回滚腿（候选包 → 旧恢复包）。"""
+    script = _step(build_job, SMOKE_STEP)["run"]
+
+    assert '"-VerifyRollback"' in script, "CI 未开启回滚腿"
+
+    upgrade_script = UPGRADE_SMOKE_SCRIPT.read_text(encoding="utf-8")
+    assert "[switch]$VerifyRollback" in upgrade_script, "升级脚本缺少 -VerifyRollback 开关"
+    assert "if ($VerifyRollback)" in upgrade_script, "回滚腿未按开关门控"
+    assert "Get-InstalledAppVersion" in upgrade_script, "回滚后未读取已安装版本"
+    assert "$restoredVersionNormalized -eq $OldVersion" in upgrade_script, "未断言回滚到基线版本"
+    assert "Synthetic sentinel survived rollback unchanged" in upgrade_script, "回滚后未校验业务数据保留"

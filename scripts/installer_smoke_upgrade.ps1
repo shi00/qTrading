@@ -1,6 +1,6 @@
 # installer_smoke_upgrade.ps1
 # Phase 5 DoD §17.5 升级验证（保留数据）smoke test 脚本
-# 用法: powershell -File scripts/installer_smoke_upgrade.ps1 -InstallerPath <path> [-OldVersion 0.9.0] [-OldVariant embedded-cpu]
+# 用法: powershell -File scripts/installer_smoke_upgrade.ps1 -InstallerPath <path> [-OldVersion 0.9.0] [-OldVariant embedded-cpu] [-VerifyRollback]
 # 前置: 已发布 OldVersion 的 embedded variant GitHub Release，且本机已登录 gh CLI
 # OldVariant 对应 installer.iss 的 TargetVariant（现役 embedded-cpu / embedded-cuda；
 # 历史版本若为 embedded 则显式传 -OldVariant embedded）。
@@ -16,7 +16,12 @@ param(
     [string]$OldVersion = "0.9.0",
 
     [Parameter(Mandatory = $false)]
-    [string]$OldVariant = "embedded-cpu"
+    [string]$OldVariant = "embedded-cpu",
+
+    # G4 §205：回滚腿（候选包 → 旧恢复包）。默认关闭以保持既有本地用法不变；
+    # CI 显式开启以同时覆盖正向升级与恢复路径。
+    [Parameter(Mandatory = $false)]
+    [switch]$VerifyRollback
 )
 
 $ErrorActionPreference = "Stop"
@@ -149,11 +154,30 @@ function Stop-QtradingGraceful {
     }
 }
 
+# 读取已安装包声明的版本（Inno Setup 写入 HKCU 卸载项，PrivilegesRequired=lowest）。
+# 未找到条目时返回 $null（不伪造版本值），由调用方决定是断言还是记录为不可用。
+function Get-InstalledAppVersion {
+    $entry = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+        Where-Object { $_.DisplayName -eq "AStockScreener" } |
+        Select-Object -First 1
+    if ($null -eq $entry) {
+        return $null
+    }
+    # StrictMode 下访问不存在的属性会抛异常，先确认属性存在。
+    $versionProperty = $entry.PSObject.Properties['DisplayVersion']
+    if ($null -eq $versionProperty) {
+        return $null
+    }
+    return [string]$versionProperty.Value
+}
+
 # ---- 主流程 ----
 Write-Host "=== Phase 5 Upgrade Smoke Test ===" -ForegroundColor Yellow
 Write-Host "InstallerPath: $InstallerPath"
 Write-Host "OldVersion:    $OldVersion"
 Write-Host "OldVariant:    $OldVariant"
+Write-Host "VerifyRollback:$VerifyRollback"
 Write-Host "AppInstallDir: $AppInstallDir"
 Write-Host "PgDataDir:     $PgDataDir"
 
@@ -268,6 +292,41 @@ try {
     Assert-True ($sentinelAfterUpgrade -eq $sentinel) "Synthetic sentinel survived in-place upgrade unchanged"
 
     Stop-QtradingGraceful
+
+    # STEP 10: 回滚腿（G4 §205：候选包 → 旧恢复包）
+    # 仅证明「同一数据目录可从候选包回退到旧恢复包且业务数据不变」；
+    # 候选版本标识仅记录不判等（dispatch 构建可能将 AppVersion 写成分支名）。
+    if ($VerifyRollback) {
+        Write-Step "10. Rollback: restore baseline package over candidate"
+        $candidateVersion = Get-InstalledAppVersion
+        Write-Host "  Installed (candidate) version: $candidateVersion"
+        Stop-QtradingGraceful
+        Assert-True ($null -eq (Get-Process -Name "AStockScreener" -ErrorAction SilentlyContinue)) "App process exited before rollback"
+        Assert-True ($null -eq (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue)) "Sidecar process exited before rollback"
+
+        $rollbackProc = Start-Process -FilePath $oldInstaller -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+        Assert-True ($rollbackProc.ExitCode -eq 0) "Restore installer finished (exit code: $($rollbackProc.ExitCode))"
+        Assert-True (Test-Path $AppExePath) "Restored package installed: $AppExePath"
+
+        $restoredVersion = Get-InstalledAppVersion
+        Assert-True (-not [string]::IsNullOrEmpty($restoredVersion)) "Restored package declares a version"
+        # 发布构建以 github.ref_name（形如 v0.11.3）作为 ISCC /DMyAppVersion，故 DisplayVersion
+        # 带 v 前缀而 $OldVersion 已去前缀；比较前归一化，不修改断言目标版本。
+        $restoredVersionNormalized = $restoredVersion.TrimStart('v', 'V')
+        Assert-True ($restoredVersionNormalized -eq $OldVersion) "Restored version matches baseline ($restoredVersionNormalized vs $OldVersion)"
+        Assert-True (Test-Path $PgVersionFile) "PG_VERSION preserved after rollback: $PgVersionFile"
+
+        $proc3 = Start-Process -FilePath $AppExePath -PassThru
+        $ready3 = Wait-SidecarReady -TimeoutSec 60
+        Assert-True $ready3 "Sidecar ready (restored version, status JSON: running + postgres_alive)"
+
+        $pgPasswordRollback = Read-PgPassword -PasswordFile $PgPasswordFile
+        $portAfterRollback = Get-PostgresPort -DataDir $PgDataDir
+        $sentinelAfterRollback = Invoke-Psql -Password $pgPasswordRollback -Port $portAfterRollback -Sql "select marker from $SentinelTable where id = 1"
+        Assert-True ($sentinelAfterRollback -eq $sentinel) "Synthetic sentinel survived rollback unchanged"
+
+        Stop-QtradingGraceful
+    }
 
     Write-Host "`n=== UPGRADE SMOKE TEST PASSED ===" -ForegroundColor Green
     exit 0
