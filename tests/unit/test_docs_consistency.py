@@ -672,6 +672,69 @@ class TestNoteLazyFormatDetection:
         assert "ceiling:" in missing and "upgrade:" in missing, f"First block should miss both, got {missing}"
 
 
+class TestNoteLazyFormatRootLayout:
+    """NOTE(lazy) 目录排除的布局级契约（基于相对 ROOT 的路径段）。
+
+    根因回归：若用绝对路径 ``p.parts`` 判断 ``.worktrees`` 排除，开发根自身位于
+    ``.worktrees/<name>`` 时全部文件都被误判为 worktree 副本而整体跳过，门禁形同虚设。
+    """
+
+    _INVALID_NOTE = "# NOTE(lazy): 缺少三要素的示例.\n"
+
+    @classmethod
+    def _write_invalid_note(cls, py_file: Path) -> None:
+        py_file.parent.mkdir(parents=True, exist_ok=True)
+        py_file.write_text(cls._INVALID_NOTE, encoding="utf-8")
+
+    def test_plain_root_detects_violation(self, tmp_path, monkeypatch):
+        """普通根布局（相对路径不含 .worktrees）：违规笔记必须被检出。"""
+        from check_docs_consistency import check_note_lazy_format
+
+        self._write_invalid_note(tmp_path / "pkg" / "bad.py")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+
+        errors = check_note_lazy_format()
+        assert len(errors) == 1, f"普通根布局应检出 1 条违规, got: {errors}"
+        assert errors[0].startswith(f"{Path('pkg') / 'bad.py'}:1:"), f"错误应给出相对 ROOT 的路径, got: {errors[0]!r}"
+        assert "ceiling:" in errors[0] and "upgrade:" in errors[0], f"应报缺失要素, got: {errors[0]!r}"
+
+    def test_root_inside_worktree_detects_violation(self, tmp_path, monkeypatch):
+        """根目录自身路径段含 .worktrees（模拟 worktree 内运行）：违规笔记仍须被检出。"""
+        from check_docs_consistency import check_note_lazy_format
+
+        worktree_root = tmp_path / ".worktrees" / "feature-x"
+        self._write_invalid_note(worktree_root / "pkg" / "bad.py")
+        monkeypatch.setattr("check_docs_consistency.ROOT", worktree_root)
+
+        errors = check_note_lazy_format()
+        assert len(errors) == 1, f"worktree 内运行不得整体跳过扫描, got: {errors}"
+        assert errors[0].startswith(f"{Path('pkg') / 'bad.py'}:1:"), f"路径应相对 worktree 根, got: {errors[0]!r}"
+
+    def test_nested_worktree_copy_skipped(self, tmp_path, monkeypatch):
+        """根下真实 .worktrees 子目录副本：必须跳过，同一根内其他文件仍被检查。"""
+        from check_docs_consistency import check_note_lazy_format
+
+        self._write_invalid_note(tmp_path / "pkg" / "bad.py")
+        self._write_invalid_note(tmp_path / ".worktrees" / "copy" / "pkg" / "bad.py")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+
+        errors = check_note_lazy_format()
+        assert len(errors) == 1, f"仅根下非 worktree 副本应被检查, got: {errors}"
+        assert errors[0].startswith(f"{Path('pkg') / 'bad.py'}:1:"), f".worktrees 副本必须被排除, got: {errors[0]!r}"
+
+    def test_rule_test_file_excluded(self, tmp_path, monkeypatch):
+        """规则测试文件自身仍被排除（其演示文本不得成为违规），其他文件照常检查。"""
+        from check_docs_consistency import check_note_lazy_format
+
+        self._write_invalid_note(tmp_path / "tests" / "unit" / "test_docs_consistency.py")
+        self._write_invalid_note(tmp_path / "pkg" / "bad.py")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+
+        errors = check_note_lazy_format()
+        assert len(errors) == 1, f"规则测试文件应被排除, got: {errors}"
+        assert errors[0].startswith(f"{Path('pkg') / 'bad.py'}:1:"), f"仅非测试文件应被检查, got: {errors[0]!r}"
+
+
 class TestDocsConsistencyScriptExtensions:
     """C5 第二阶段扩展：Windows 编码修复 / man/ 受检 / Flet 版本漂移 / 相对链接死链。
 

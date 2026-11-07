@@ -673,7 +673,10 @@ def check_note_lazy_format() -> list[str]:
     test_consistency_path = ROOT / "tests" / "unit" / "test_docs_consistency.py"
 
     for p in ROOT.rglob("*.py"):
-        if any(part in _NOTE_LAZY_SKIP_DIRS for part in p.parts):
+        rel_path = p.relative_to(ROOT)
+        # 排除判断必须基于相对 ROOT 的路径段：开发根自身位于 .worktrees/<name> 时，
+        # 绝对路径的每一段都含 .worktrees，会把全部文件误判为 worktree 副本而整体跳过。
+        if any(part in _NOTE_LAZY_SKIP_DIRS for part in rel_path.parts):
             continue
         if p in (self_path, test_consistency_path):
             # 跳过脚本自身以及专门的规则测试脚本
@@ -683,7 +686,6 @@ def check_note_lazy_format() -> list[str]:
         except (OSError, UnicodeDecodeError):
             continue
         for line_idx, missing in _check_note_lazy_in_text(content):
-            rel_path = p.relative_to(ROOT)
             errors.append(f"{rel_path}:{line_idx + 1}: NOTE(lazy) 缺少三要素: {', '.join(missing)}")
     return errors
 
