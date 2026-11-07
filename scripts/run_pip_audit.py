@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 import typing
 from datetime import date, datetime
 from io import TextIOWrapper
@@ -28,6 +29,25 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
 from utils.time_utils import get_now  # noqa: E402 - sys.path 注入后导入
+
+# pip-audit 默认 socket 超时 15s；PyPI 偶发握手/读超时会把安全门禁误判为失败
+# （run 42335350136：requirements-dev.txt 报 ReadTimeoutError，前两个文件均通过）。
+_HTTP_TIMEOUT_SECONDS = 60
+_MAX_ATTEMPTS = 3
+_RETRY_BASE_DELAY_SECONDS = 10
+# 仅传输层故障可重试；命中漏洞时 stderr 不含这些标记，直接失败，避免把真实发现重试掉。
+_TRANSIENT_NETWORK_MARKERS = (
+    "TimeoutError",
+    "ReadTimeoutError",
+    "ConnectTimeoutError",
+    "ConnectionError",
+    "ConnectionResetError",
+    "NewConnectionError",
+    "SSLError",
+    "handshake operation timed out",
+    "RemoteDisconnected",
+    "Temporary failure in name resolution",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,6 +123,26 @@ def get_ignore_flags(allowlist: dict) -> list[str]:
     return flags
 
 
+def _is_transient_network_failure(stderr: str) -> bool:
+    return any(marker in stderr for marker in _TRANSIENT_NETWORK_MARKERS)
+
+
+def run_pip_audit_with_retry(cmd: list[str], req_file: str) -> int:
+    """执行 pip-audit，仅对传输层故障重试；漏洞命中与参数错误立即返回。"""
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        if result.returncode == 0:
+            return 0
+        if attempt == _MAX_ATTEMPTS or not _is_transient_network_failure(result.stderr):
+            return result.returncode
+        delay = _RETRY_BASE_DELAY_SECONDS * attempt
+        print(f"WARNING: pip-audit 传输层故障（{req_file}，第 {attempt} 次），{delay}s 后重试")
+        time.sleep(delay)
+    return 1
+
+
 def run_pip_audit(
     requirements_files: list[str],
     sources: list[str],
@@ -126,11 +166,12 @@ def run_pip_audit(
             cmd.extend(["-s", source])
         cmd.extend(["-r", req_file])
         cmd.append("--desc")
+        cmd.extend(["--timeout", str(_HTTP_TIMEOUT_SECONDS)])
         cmd.extend(ignore_flags)
 
         print(f"Running: {' '.join(cmd)}")
         try:
-            result = subprocess.run(cmd, capture_output=False)
+            returncode = run_pip_audit_with_retry(cmd, req_file)
         except FileNotFoundError:
             print("ERROR: pip-audit not found. Install with: pip install pip-audit")
             sys.exit(1)
@@ -138,8 +179,8 @@ def run_pip_audit(
             print(f"ERROR: Failed to run pip-audit: {e}")
             sys.exit(1)
 
-        if result.returncode != 0:
-            exit_code = result.returncode
+        if returncode != 0:
+            exit_code = returncode
 
     return exit_code
 
