@@ -554,7 +554,7 @@ class TestR4InTestsFunction:
 
 
 class TestR4InTestsExtendedPatterns:
-    """R4（tests/）扩展形态（ENGA-RED-02）：text(f"...") 与「SQL 先绑定变量再查询」。"""
+    """R4（tests/）扩展形态：text(f"...") 与「SQL 先绑定变量再查询」。"""
 
     @staticmethod
     def _scan(tmp_path, monkeypatch, filename: str, source: str) -> list[str]:
