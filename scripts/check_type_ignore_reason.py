@@ -97,7 +97,8 @@ def check_file(path: Path) -> tuple[list[str], list[str]]:
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    files = [Path(f) for f in sys.argv[1:] if f.endswith(".py")]
+    # pre-commit 的 types_or 含 python/pyi，stub（.pyi）同样受 R3 约束，不可在入口过滤掉
+    files = [Path(f) for f in sys.argv[1:] if f.endswith((".py", ".pyi"))]
     if not files:
         return 0
 
