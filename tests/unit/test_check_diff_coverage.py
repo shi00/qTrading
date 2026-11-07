@@ -141,6 +141,157 @@ index e0a3df45..696267e4 100644
         assert result == {"app/foo.py": [11, 13]}
 
 
+class TestParseDiffQuotedPaths:
+    """parse_diff: git C-quoted 路径（非 ASCII/空格/制表符）必须完整解码。
+
+    回归：旧实现仅识别 ``+++ b/`` 前缀，遇到 ``+++ "b/..."`` 走 ``elif line.startswith("+++ ")``
+    分支把 current_file 置 None，导致该文件的新增行被静默丢弃（漏报覆盖率）。
+    """
+
+    def test_octal_utf8_path_decoded(self):
+        """八进制转义按字节还原为 UTF-8 路径（中文文件名）。"""
+        diff = (
+            r'diff --git "a/ui/\344\270\255\346\226\207.py" "b/ui/\344\270\255\346\226\207.py"'
+            "\n"
+            r'--- "a/ui/\344\270\255\346\226\207.py"'
+            "\n"
+            r'+++ "b/ui/\344\270\255\346\226\207.py"'
+            "\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+x = 1\n"
+            "+y = 2\n"
+        )
+        assert parse_diff(diff) == {"ui/中文.py": [1, 2]}
+
+    def test_unquoted_non_ascii_path(self):
+        """core.quotePath=false 下的原样 UTF-8 路径（无引号）正常识别。"""
+        diff = "diff --git a/ui/中文.py b/ui/中文.py\n--- a/ui/中文.py\n+++ b/ui/中文.py\n@@ -0,0 +1,1 @@\n+x = 1\n"
+        assert parse_diff(diff) == {"ui/中文.py": [1]}
+
+    def test_space_path_unquoted_with_tab_terminator(self):
+        """含空格的路径会被 git 追加制表符分隔，解析时须剥离。"""
+        diff = "diff --git a/ui/my file.py b/ui/my file.py\n--- a/ui/my file.py\n+++ b/ui/my file.py\t\n@@ -0,0 +1,1 @@\n+x = 1\n"
+        assert parse_diff(diff) == {"ui/my file.py": [1]}
+
+    def test_space_path_quoted_with_tab_terminator(self):
+        """引号形式同样可能带末尾制表符分隔。"""
+        diff = 'diff --git "a/ui/my file.py" "b/ui/my file.py"\n--- "a/ui/my file.py"\n+++ "b/ui/my file.py"\t\n@@ -0,0 +1,1 @@\n+x = 1\n'
+        assert parse_diff(diff) == {"ui/my file.py": [1]}
+
+    def test_tab_in_filename_quoted(self):
+        """文件名中含真实制表符时 git 用 \\t 转义，解码后保留制表符。"""
+        diff = (
+            r'diff --git "a/ui/a\tb.py" "b/ui/a\tb.py"'
+            "\n"
+            r'--- "a/ui/a\tb.py"'
+            "\n"
+            r'+++ "b/ui/a\tb.py"'
+            "\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+x = 1\n"
+        )
+        assert parse_diff(diff) == {"ui/a\tb.py": [1]}
+
+    def test_non_utf8_bytes_degrade_to_replacement_char(self):
+        """非法 UTF-8 字节降级为替换符（可打印、不会匹配 coverage → 下游 fail-closed）。"""
+        diff = (
+            r'diff --git "a/ui/\377.py" "b/ui/\377.py"'
+            "\n"
+            r'--- "a/ui/\377.py"'
+            "\n"
+            r'+++ "b/ui/\377.py"'
+            "\n@@ -0,0 +1,1 @@\n+x = 1\n"
+        )
+        result = parse_diff(diff)
+        assert result == {"ui/\ufffd.py": [1]}
+        # 不得把 surrogate 泄漏到后续打印/文件系统调用（Windows 严格 UTF-8 下会崩溃）
+        assert "\udcff" not in next(iter(result))
+
+    def test_deleted_file_dev_null_ignored(self):
+        """删除文件（+++ /dev/null）不产生新增行，且不得报错。"""
+        diff = (
+            "diff --git a/app/gone.py b/app/gone.py\n"
+            "deleted file mode 100644\n"
+            "--- a/app/gone.py\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-x = 1\n"
+            "-y = 2\n"
+        )
+        assert parse_diff(diff) == {}
+
+    def test_rename_with_changes_uses_new_path(self):
+        """rename 带改动 → 新增行记在新路径下。"""
+        diff = (
+            "diff --git a/app/old.py b/app/new.py\n"
+            "similarity index 90%\n"
+            "rename from app/old.py\n"
+            "rename to app/new.py\n"
+            "--- a/app/old.py\n"
+            "+++ b/app/new.py\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+x = 1\n"
+        )
+        assert parse_diff(diff) == {"app/new.py": [1]}
+
+    def test_pure_rename_without_hunks(self):
+        """纯 rename（无 hunk/+++ 行）→ 无新增行，不得报错。"""
+        diff = (
+            "diff --git a/app/old.py b/app/new.py\n"
+            "similarity index 100%\n"
+            "rename from app/old.py\n"
+            "rename to app/new.py\n"
+        )
+        assert parse_diff(diff) == {}
+
+    def test_unterminated_quote_fails_closed(self):
+        """引号未闭合 → fail-closed，不得静默当作无变更。"""
+        diff = 'diff --git "a/app/foo.py b/app/foo.py\n--- "a/app/foo.py\n+++ "b/app/foo.py\n@@ -0,0 +1,1 @@\n+x = 1\n'
+        with pytest.raises(DiffCoverageInputError, match="引号未闭合"):
+            parse_diff(diff)
+
+    def test_invalid_octal_escape_fails_closed(self):
+        """非法八进制转义（非 0-7 字符）→ fail-closed。"""
+        diff = (
+            r'diff --git "a/app/\0x1.py" "b/app/\0x1.py"'
+            + "\n"
+            + r'+++ "b/app/\0x1.py"'
+            + "\n@@ -0,0 +1,1 @@\n+x = 1\n"
+        )
+        with pytest.raises(DiffCoverageInputError, match="八进制"):
+            parse_diff(diff)
+
+    def test_out_of_range_octal_fails_closed(self):
+        """八进制值超出单字节范围（\\777）→ fail-closed。"""
+        diff = (
+            r'diff --git "a/app/\777.py" "b/app/\777.py"'
+            + "\n"
+            + r'+++ "b/app/\777.py"'
+            + "\n@@ -0,0 +1,1 @@\n+x = 1\n"
+        )
+        with pytest.raises(DiffCoverageInputError, match="越界"):
+            parse_diff(diff)
+
+    def test_unknown_prefix_fails_closed(self):
+        """未知 +++ 路径格式（缺 b/ 前缀）→ fail-closed。"""
+        diff = "diff --git a/app/foo.py a/app/foo.py\n--- a/app/foo.py\n+++ c/app/foo.py\n@@ -0,0 +1,1 @@\n+x = 1\n"
+        with pytest.raises(DiffCoverageInputError, match="b/"):
+            parse_diff(diff)
+
+    def test_bare_triple_plus_without_space_fails_closed(self):
+        """hunk 外的裸 +++（无空格）不是合法文件头 → fail-closed。"""
+        diff = "diff --git a/app/foo.py b/app/foo.py\n--- a/app/foo.py\n+++b/app/foo.py\n@@ -0,0 +1,1 @@\n+x = 1\n"
+        with pytest.raises(DiffCoverageInputError, match=r"\+\+\+"):
+            parse_diff(diff)
+
+    def test_content_line_starting_with_double_plus_not_treated_as_header(self):
+        """hunk 内新增内容行 ``++ x``（diff 行为 ``+++ x``）不得被误判为文件头。"""
+        diff = (
+            "diff --git a/app/foo.py b/app/foo.py\n--- a/app/foo.py\n+++ b/app/foo.py\n@@ -0,0 +1,2 @@\n++ x\n+y = 1\n"
+        )
+        assert parse_diff(diff) == {"app/foo.py": [1, 2]}
+
+
 # ============================================================================
 # load_coverage: coverage.json 加载
 # ============================================================================
@@ -611,6 +762,23 @@ class TestGetDiffAddedLinesNoDegradation:
         with pytest.raises(DiffCoverageInputError, match="merge-base"):
             get_diff_added_lines("origin/main")
 
+    def test_diff_disables_git_quote_path(self, monkeypatch):
+        """diff 调用须固定 ``git -c core.quotePath=false diff``，避免非 ASCII 路径被八进制转义。"""
+        import check_diff_coverage as m
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[1] == "merge-base":
+                return _FakeResult(0, "mb1111\n")
+            return _FakeResult(0, "")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        get_diff_added_lines("origin/main")
+
+        assert calls[-1][:4] == ["git", "-c", "core.quotePath=false", "diff"]
+
     def test_git_diff_failure_fails_closed(self, monkeypatch):
         """git diff 非零退出 → 抛 DiffCoverageInputError，不得静默返回空 dict。"""
         import check_diff_coverage as m
@@ -765,6 +933,50 @@ class TestMainFailClosed:
             encoding="utf-8",
         )
         assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 0
+
+    def test_unknown_plus_path_format_returns_2(self, monkeypatch):
+        """+++ 路径格式未知 → exit 2（fail-closed），不得静默当作无源码变更。"""
+        import check_diff_coverage as m
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1] == "merge-base":
+                return _FakeResult(0, "mb1111\n")
+            return _FakeResult(
+                0, "diff --git a/app/foo.py a/app/foo.py\n--- a/app/foo.py\n+++ c/app/foo.py\n@@ -0,0 +1,1 @@\n+x = 1\n"
+            )
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        assert _invoke_main(monkeypatch) == 2
+
+    def test_strict_quoted_unicode_path_uncovered_returns_1(self, monkeypatch, tmp_path: Path):
+        """C-quoted 中文路径的新增行未覆盖 → --strict 返回 1（不得因路径丢弃而假通过）。"""
+        import check_diff_coverage as m
+
+        diff = (
+            r'diff --git "a/ui/\344\270\255\346\226\207.py" "b/ui/\344\270\255\346\226\207.py"'
+            "\n"
+            r'--- "a/ui/\344\270\255\346\226\207.py"'
+            "\n"
+            r'+++ "b/ui/\344\270\255\346\226\207.py"'
+            "\n"
+            "@@ -1,0 +1,2 @@\n"
+            "+x = 1\n"
+            "+y = 2\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1] == "merge-base":
+                return _FakeResult(0, "mb1111\n")
+            return _FakeResult(0, diff)
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        monkeypatch.setattr(m, "ROOT", tmp_path)
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(
+            json.dumps({"files": {"ui/中文.py": {"executed_lines": [1], "missing_lines": [2]}}}),
+            encoding="utf-8",
+        )
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict", "--threshold", "80") == 1
 
     def test_strict_below_threshold_returns_1(self, monkeypatch, tmp_path: Path):
         """--strict 且覆盖率低于阈值 → exit 1（既有阈值语义不变）。"""

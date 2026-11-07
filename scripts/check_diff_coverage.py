@@ -36,6 +36,21 @@ SOURCE_FILES = frozenset(("config.py", "main.py"))
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")
 
+# git 的 C 风格引号（core.quotePath 或路径含制表符/引号/反斜杠时启用）中转义序列
+# 对应的单字节值。八进制转义（\ooo）单独处理。
+_C_ESCAPE_BYTES = {
+    "a": 0x07,
+    "b": 0x08,
+    "f": 0x0C,
+    "n": 0x0A,
+    "r": 0x0D,
+    "t": 0x09,
+    "v": 0x0B,
+    "\\": 0x5C,
+    '"': 0x22,
+}
+_C_OCTAL_DIGITS = frozenset("01234567")
+
 
 class DiffCoverageInputError(RuntimeError):
     """无法确定 diff-coverage 输入（fail-closed 信号），由 main() 映射为 exit 2。"""
@@ -51,33 +66,110 @@ def _is_source_file(path: str) -> bool:
     return top in SOURCE_DIRS
 
 
+def _decode_c_quoted_path(quoted: str, raw_header: str) -> str:
+    """完整解码 git C 风格引号路径（含 ``\\ooo`` 八进制字节转义）。
+
+    八进制转义按**字节**累积（如 ``\\344\\270\\255`` 是 UTF-8 的「中」），
+    最终整体按 UTF-8 解码；非法 UTF-8 字节降级为替换符（U+FFFD）——该路径必然
+    无法匹配 coverage 中的真实条目，下游按「未被统计/不可读」fail-closed，且避免
+    surrogate 字符进入日志打印或文件系统操作触发未捕获异常。
+    未闭合引号、未知转义、越界八进制一律抛 DiffCoverageInputError（fail-closed）。
+    """
+    if len(quoted) < 2 or not quoted.endswith('"'):
+        raise DiffCoverageInputError(f"+++ 路径引号未闭合，无法解析 diff: {raw_header!r}")
+    body = quoted[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out.extend(ch.encode("utf-8"))
+            i += 1
+            continue
+        if i + 1 >= len(body):
+            raise DiffCoverageInputError(f"+++ 路径以孤立反斜杠结尾，无法解析 diff: {raw_header!r}")
+        esc = body[i + 1]
+        if esc in _C_ESCAPE_BYTES:
+            out.append(_C_ESCAPE_BYTES[esc])
+            i += 2
+            continue
+        if esc in _C_OCTAL_DIGITS:
+            digits = body[i + 1 : i + 4]
+            if len(digits) != 3 or any(d not in _C_OCTAL_DIGITS for d in digits):
+                raise DiffCoverageInputError(f"+++ 路径含非法八进制转义，无法解析 diff: {raw_header!r}")
+            value = int(digits, 8)
+            if value > 0xFF:
+                raise DiffCoverageInputError(f"+++ 路径八进制转义越界（{digits}），无法解析 diff: {raw_header!r}")
+            out.append(value)
+            i += 4
+            continue
+        raise DiffCoverageInputError(f"+++ 路径含未知转义 \\{esc}，无法解析 diff: {raw_header!r}")
+    return out.decode("utf-8", errors="replace")
+
+
+def _parse_new_path(rest: str, raw_header: str) -> str | None:
+    """解析 ``+++`` 行目标路径；``/dev/null``（删除）返回 None。
+
+    兼容两种合法形态：``b/path``（core.quotePath=false 下的原样路径）与
+    ``"b/path"``（含特殊字符时的 C 风格引号路径）。路径含空格时 git 会在末尾
+    追加一个制表符作分隔（GNU diff 兼容），此处剥离。
+    前缀非 ``b/`` 或引号/转义非法时抛 DiffCoverageInputError，不得静默清空。
+    """
+    # 删除文件：新侧为 /dev/null，无新增行
+    if rest in ("/dev/null", "/dev/null\t"):
+        return None
+    if rest.startswith('"'):
+        if not rest.endswith('"') and not rest.endswith('"\t'):
+            raise DiffCoverageInputError(f"+++ 路径引号未闭合，无法解析 diff: {raw_header!r}")
+        quoted = rest[:-1] if rest.endswith('"\t') else rest
+        path = _decode_c_quoted_path(quoted, raw_header)
+    else:
+        # 未加引号：末尾制表符是 git 为含空格路径追加的分隔符
+        path = rest[:-1] if rest.endswith("\t") else rest
+    if not path.startswith("b/"):
+        raise DiffCoverageInputError(f"+++ 路径缺少 b/ 前缀，无法解析 diff: {raw_header!r}")
+    return path[2:]
+
+
 def parse_diff(diff_text: str) -> dict[str, list[int]]:
     """解析 git diff 输出，提取源码文件的新增行号。
 
     返回 {filepath: [line_no, ...]}，仅包含源码目录下的 .py 文件。
+    ``+++`` 路径按 git 的 C 风格引号规则完整解码（含 UTF-8 八进制字节），
+    未知格式 fail-closed（抛 DiffCoverageInputError），不静默当作「无变更」。
     """
     added_lines: dict[str, list[int]] = {}
     current_file: str | None = None
     current_line = 0
+    in_hunk = False
 
     for line in diff_text.splitlines():
-        if line.startswith("+++ b/"):
-            path = line[6:]
-            current_file = path if _is_source_file(path) else None
-            if current_file:
-                added_lines.setdefault(current_file, [])
-        elif line.startswith("+++ "):
+        if line.startswith("diff --git "):
+            # 新文件块起始：重置状态，避免上一文件的路径/行号泄漏
             current_file = None
-        elif current_file and line.startswith("@@"):
-            match = _HUNK_RE.match(line)
-            current_line = int(match.group(1)) if match else 0
-        elif current_file and line.startswith("+"):
+            current_line = 0
+            in_hunk = False
+        elif line.startswith("+++") and not in_hunk:
+            # hunk 外的 +++ 只能是文件头；格式不认识就 fail-closed
+            if not line.startswith("+++ "):
+                raise DiffCoverageInputError(f"无法识别的 +++ 文件头: {line!r}")
+            path = _parse_new_path(line[4:], line)
+            current_file = path if path is not None and _is_source_file(path) else None
+            if current_file is not None:
+                added_lines.setdefault(current_file, [])
+            current_line = 0
+        elif line.startswith("@@"):
+            in_hunk = True
+            if current_file is not None:
+                match = _HUNK_RE.match(line)
+                current_line = int(match.group(1)) if match else 0
+        elif in_hunk and current_file is not None and line.startswith("+"):
             if current_line > 0:
                 added_lines[current_file].append(current_line)
             current_line += 1
-        elif current_file and line.startswith("-"):
+        elif in_hunk and current_file is not None and line.startswith("-"):
             pass  # 删除行不影响新文件行号
-        elif current_file and line.startswith(" "):
+        elif in_hunk and current_file is not None and line.startswith(" "):
             current_line += 1
 
     return {f: lines for f, lines in added_lines.items() if lines}
@@ -114,8 +206,11 @@ def get_diff_added_lines(base: str) -> dict[str, list[int]]:
     # diff 可能含非 UTF-8 字节（如 GB18030 编码的 HTML fixture 快照），
     # 按 UTF-8 宽松解码：非法字节以替换符兜底。本函数只取 +++/@@ 等 ASCII 结构行，
     # 内容行的替换符不影响行号解析，避免整步因 UnicodeDecodeError 失败。
+    # 固定 core.quotePath=false：非 ASCII 路径原样输出 UTF-8，避免被转成
+    # 八进制转义后与 coverage.json 中的真实路径不匹配。含制表符/引号/反斜杠的
+    # 路径仍会被 git 加引号，由 parse_diff 完整解码兼容。
     result = subprocess.run(
-        ["git", "diff", "--unified=0", "--no-color", merge_base, "HEAD"],
+        ["git", "-c", "core.quotePath=false", "diff", "--unified=0", "--no-color", merge_base, "HEAD"],
         capture_output=True,
         encoding="utf-8",
         errors="replace",
