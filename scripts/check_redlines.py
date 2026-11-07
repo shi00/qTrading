@@ -21,7 +21,8 @@
 - R21 缺失值伪装（报告模式，warning 不阻断）：扫描 services/strategies 下业务语义字段被填充 0 / 50
   （复用 scripts/prototype_business_redlines.py 的 MissingMaskingVisitor，单一实现避免双实现漂移）
 
-退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
+退出码：0 通过，1 失败（扫描输入不可读/不可解析/关键白名单缺失时同样返回 1，失败关闭）。
+供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
 R16 说明（review07-G20）：最小可行切面为"ViewModel __init__ 同步构造已注册单例"。单例首次构造可能执行
 重型初始化（B11：DataProcessor 阻塞 34s），VM 构造路径位于 Flet 渲染/事件线程，有阻塞主循环风险。
@@ -86,12 +87,19 @@ def _iter_py_files(root: Path, exclude_dirs: frozenset[str] | None = None) -> It
         yield p
 
 
-def _parse_module(path: Path) -> ast.Module | None:
-    """解析 .py 文件为 AST，失败返回 None。"""
+class ScanInputError(RuntimeError):
+    """扫描输入不可用：读取或解析失败时抛出，确保「检查未完成」不被当作「无问题」。"""
+
+
+def _parse_module(path: Path) -> ast.Module:
+    """解析 .py 文件为 AST；读取或语法失败抛 ScanInputError（fail-closed，禁止静默跳过）。
+
+    异常消息仅含文件路径与异常类型，不含源码内容（避免敏感信息泄露）。
+    """
     try:
         return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (SyntaxError, OSError, UnicodeDecodeError):
-        return None
+    except (SyntaxError, OSError, UnicodeDecodeError) as exc:
+        raise ScanInputError(f"无法读取或解析扫描输入 {path}: {type(exc).__name__}") from exc
 
 
 def _decorator_names(node: ast.ClassDef) -> set[str]:
@@ -170,8 +178,6 @@ def check_R4() -> list[str]:
             continue
         for p in _iter_py_files(target_dir):
             tree = _parse_module(p)
-            if tree is None:
-                continue
             errors.extend(_check_R4_in_tree(tree, p))
     return errors
 
@@ -241,8 +247,6 @@ def check_R4_literal_assignments() -> list[str]:
             continue
         for p in _iter_py_files(target_dir):
             tree = _parse_module(p)
-            if tree is None:
-                continue
             errors.extend(_check_R4_literal_assignments_in_tree(tree, p))
     return errors
 
@@ -313,8 +317,6 @@ def check_R4_fstring_sql() -> int:
             continue
         for p in _iter_py_files(target_dir):
             tree = _parse_module(p)
-            if tree is None:
-                continue
             warnings.extend(_check_R4_fstring_in_tree(tree, p))
             # OSS E2: 补齐 BinOp `+` 拼接形态（stock_dao 类，ruff S608 与自研检查的盲区）
             warnings.extend(_check_R4_string_concat_in_tree(tree, p))
@@ -381,8 +383,6 @@ def check_R4_text_fstring_sql() -> list[str]:
             continue
         for p in _iter_py_files(target_dir):
             tree = _parse_module(p)
-            if tree is None:
-                continue
             errors.extend(_check_R4_text_fstring_in_tree(tree, p))
     return errors
 
@@ -411,8 +411,6 @@ def check_R4_in_tests() -> list[str]:
         return errors
     for p in _iter_py_files(tests_dir, exclude_dirs=_TESTS_SCAN_SKIP_DIRS):
         tree = _parse_module(p)
-        if tree is None:
-            continue
         errors.extend(_check_R4_in_tree(tree, p))
     return errors
 
@@ -428,8 +426,6 @@ _R12_EXEMPT_TABLENAMES = frozenset({"alembic_version"})
 def _extract_tablenames_from_models(path: Path) -> set[str]:
     """从 models.py 中提取所有 __tablename__ = "xxx" 的字符串值。"""
     tree = _parse_module(path)
-    if tree is None:
-        return set()
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -445,8 +441,6 @@ def _extract_tablenames_from_models(path: Path) -> set[str]:
 def _extract_table_definition_keys(path: Path) -> set[str]:
     """从 data_dictionary.py 的 TABLE_DEFINITIONS = {...} 中提取所有 key 字符串字面量。"""
     tree = _parse_module(path)
-    if tree is None:
-        return set()
     keys: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
@@ -500,8 +494,6 @@ def _extract_dao_classes(daos_dir: Path) -> dict[str, Path]:
         if p.name == "base_dao.py":
             continue
         tree = _parse_module(p)
-        if tree is None:
-            continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef):
                 continue
@@ -517,8 +509,6 @@ def _extract_cache_manager_dao_instances(path: Path) -> set[str]:
     仅扫描 __init__ 方法体，避免误捕获 read_db/write_db 中的 BaseDao(self.engine) 调用。
     """
     tree = _parse_module(path)
-    if tree is None:
-        return set()
     instantiated: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef) or node.name != "CacheManager":
@@ -589,8 +579,6 @@ def check_R14() -> list[str]:
 
     for p in _iter_py_files(strategies_dir):
         tree = _parse_module(p)
-        if tree is None:
-            continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef):
                 continue
@@ -660,8 +648,6 @@ def check_R15() -> list[str]:
             continue
         for p in _iter_py_files(target_dir):
             tree = _parse_module(p)
-            if tree is None:
-                continue
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ClassDef):
                     continue
@@ -878,8 +864,6 @@ def check_R_no_bare_ft_colors_in_ui() -> list[str]:
 
     for p in scan_paths:
         tree = _parse_module(p)
-        if tree is None:
-            continue
         errs, warns = _check_R_no_bare_ft_colors_in_tree(tree, p)
         errors.extend(errs)
         warnings.extend(warns)
@@ -1013,8 +997,6 @@ def check_R_tushare_token_log() -> list[str]:
     if not target.exists():
         return errors
     tree = _parse_module(target)
-    if tree is None:
-        return errors
     errors.extend(_check_R_tushare_token_log_in_tree(tree, target))
     return errors
 
@@ -1031,11 +1013,10 @@ def _extract_watermark_key_prefixes(constants_path: Path) -> list[str]:
     """从 data/constants.py 的 WATERMARK_KEY_PREFIXES 元组字面量提取前缀清单。
 
     用 AST 解析而非 import data.constants，避免 check 脚本拉取 data 层完整依赖
-    （R4 扫描需独立于业务包运行）。解析失败返回空清单（不产生误报，仅丢失守护）。
+    （R4 扫描需独立于业务包运行）。文件不可读/语法错误由 ``_parse_module`` 抛
+    ``ScanInputError``；文件可读但常量缺失时返回空清单，由 ``check_R22`` 失败关闭。
     """
     tree = _parse_module(constants_path)
-    if tree is None:
-        return []
     for node in ast.walk(tree):
         # 兼容带显式类型注解的常量赋值（AST 为 AnnAssign）与普通赋值（Assign）
         targets: list[ast.expr] = []
@@ -1126,11 +1107,12 @@ def check_R22() -> list[str]:
     字符串字面量 key 判定，动态变量 key 无法静态分析，保持人工评审（诚实降级范围）。
     """
     prefixes = _extract_watermark_key_prefixes(ROOT / _R22_CONSTANTS_PATH)
+    if not prefixes:
+        # 前缀白名单缺失/为空时全部水位调用都不会被检查，必须失败关闭而非输出 PASS
+        raise ScanInputError(f"R22 无法验证：{_R22_CONSTANTS_PATH} 的 WATERMARK_KEY_PREFIXES 缺失或为空")
     errors: list[str] = []
     for p in _iter_py_files(ROOT, exclude_dirs=_SKIP_DIRS | frozenset({"ui", "app"})):
         tree = _parse_module(p)
-        if tree is None:
-            continue
         errors.extend(_check_R22_in_tree(tree, p, prefixes))
     return errors
 
@@ -1198,8 +1180,6 @@ def check_R_no_bare_font_size_in_ui() -> list[str]:
     errors: list[str] = []
     for p in _iter_ui_scan_files():
         tree = _parse_module(p)
-        if tree is None:
-            continue
         errors.extend(_check_R_no_bare_font_size_in_tree(tree, p))
     return errors
 
@@ -1313,8 +1293,6 @@ def check_R_lazy_import_whitelist() -> list[str]:
             continue
         for py_file in _iter_py_files(layer_dir):
             tree = _parse_module(py_file)
-            if tree is None:
-                continue
             _LazyImportWhitelistVisitor(layer, forbidden, py_file, errors).visit(tree)
     return errors
 
@@ -1417,8 +1395,6 @@ def check_R16_vm_init_singleton_construction() -> list[str]:
             continue
         for p in _iter_py_files(target_dir):
             tree = _parse_module(p)
-            if tree is None:
-                continue
             errors.extend(_check_R16_in_tree(tree, p))
     return errors
 
@@ -1494,8 +1470,6 @@ def check_no_component_render_side_effects() -> list[str]:
         return errors
     for p in _iter_py_files(target_dir):
         tree = _parse_module(p)
-        if tree is None:
-            continue
         errors.extend(_check_no_render_side_effects_in_tree(tree, p))
     return errors
 
@@ -1654,8 +1628,6 @@ def check_R20() -> int:
         return 0
     for p in _iter_py_files(target_dir):
         tree = _parse_module(p)
-        if tree is None:
-            continue
         warnings.extend(_check_R20_in_tree(tree, p))
     if warnings:
         print(
@@ -1734,8 +1706,6 @@ def check_R24() -> int:
         return 0
     for p in _iter_py_files(target_dir):
         tree = _parse_module(p)
-        if tree is None:
-            continue
         warnings.extend(_check_R24_in_tree(tree, p))
     if warnings:
         print(
@@ -1774,8 +1744,6 @@ def check_R21() -> int:
             continue
         for p in _iter_py_files(target_dir):
             tree = _parse_module(p)
-            if tree is None:
-                continue
             visitor = MissingMaskingVisitor()
             visitor.cur_file = p.relative_to(ROOT).as_posix()
             visitor.visit(tree)
@@ -1798,7 +1766,7 @@ def check_R21() -> int:
 # ============================================================================
 
 
-def main() -> int:
+def _run_checks() -> int:
     """运行全部红线检查，返回退出码。"""
     checks: list[tuple[str, list[str]]] = [
         ("R4 SQL 注入", check_R4()),
@@ -1839,6 +1807,15 @@ def main() -> int:
         )
     )
     return 0
+
+
+def main() -> int:
+    """CLI 入口：扫描输入不可用时失败关闭（exit 1），不以「未完成」冒充「无问题」。"""
+    try:
+        return _run_checks()
+    except ScanInputError as exc:
+        print(f"红线扫描未完成：{exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

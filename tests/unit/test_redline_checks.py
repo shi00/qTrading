@@ -28,6 +28,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _R24_SNAPSHOT_CLASSES,
     _R24_SNAPSHOT_FIELDS,
     _R24_SNAPSHOT_TABLES,
+    ScanInputError,
     _base_class_names,
     _check_R16_in_tree,
     _check_R20_in_tree,
@@ -49,6 +50,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _is_settings_tabs_dir,
     _is_singleton_class,
     _is_strategy_subclass,
+    _parse_module,
     check_R12,
     check_R13,
     check_R14,
@@ -1269,9 +1271,12 @@ class TestR22ExtractPrefixedKey:
         )
         assert _extract_watermark_key_prefixes(constants_py) == ["sync_attempted_upto"]
 
-    def test_extract_prefixes_from_missing_constants_returns_empty(self, tmp_path):
-        """constants 文件不存在或无该常量时返回空清单（不抛错）。"""
-        assert _extract_watermark_key_prefixes(tmp_path / "nope.py") == []
+    def test_extract_prefixes_from_missing_constants_raises(self, tmp_path):
+        """constants 文件不存在时抛 ScanInputError（失败关闭，而非静默返回空清单）。"""
+        with pytest.raises(ScanInputError) as excinfo:
+            _extract_watermark_key_prefixes(tmp_path / "nope.py")
+        assert "nope.py" in str(excinfo.value)
+        assert "FileNotFoundError" in str(excinfo.value)
 
 
 class TestR22IntegrationOnCurrentCodebase:
@@ -1508,6 +1513,89 @@ class TestRedlineIntegrationOnCurrentCodebase:
     def test_main_returns_zero(self):
         """脚本 main() 在当前代码库状态下应返回 0（全部通过）。"""
         assert main() == 0, "check_redlines.py main() should return 0 when all checks pass"
+
+
+# ============================================================================
+# 扫描输入失败关闭（ScanInputError / main 返回 1）
+# ============================================================================
+
+
+class TestScanInputFailClosed:
+    """扫描输入不可用时必须失败关闭：不得把「检查未完成」当作「无问题」输出 PASS。"""
+
+    def test_parse_module_bad_syntax_raises(self, tmp_path):
+        """语法错误文件抛 ScanInputError，消息含文件名与异常类型。"""
+        bad = tmp_path / "bad.py"
+        bad.write_text("def broken(:\n", encoding="utf-8")
+        with pytest.raises(ScanInputError) as excinfo:
+            _parse_module(bad)
+        assert "bad.py" in str(excinfo.value)
+        assert "SyntaxError" in str(excinfo.value)
+
+    def test_parse_module_empty_module_ok(self, tmp_path):
+        """合法空模块正常返回 ast.Module（不误判为失败）。"""
+        empty = tmp_path / "empty.py"
+        empty.write_text("", encoding="utf-8")
+        assert isinstance(_parse_module(empty), ast.Module)
+
+    def test_parse_module_invalid_utf8_raises(self, tmp_path):
+        """非法 UTF-8 编码文件抛 ScanInputError，异常类型为 UnicodeDecodeError。"""
+        bad = tmp_path / "bad_encoding.py"
+        bad.write_bytes(b"\xff\xfe\x00def f():\n    pass\n")
+        with pytest.raises(ScanInputError) as excinfo:
+            _parse_module(bad)
+        assert "UnicodeDecodeError" in str(excinfo.value)
+
+    def test_main_returns_1_when_key_files_missing(self, tmp_path, monkeypatch):
+        """关键文件（models.py / data_dictionary.py）缺失时 main 返回 1 且不打印 PASS。"""
+        import check_redlines as module
+
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            assert module.main() == 1
+        assert "红线扫描未完成" in err.getvalue()
+        assert "[PASS]" not in out.getvalue()
+
+    def test_main_returns_1_when_key_file_undecodable(self, tmp_path, monkeypatch):
+        """关键文件编码损坏时 main 返回 1 且不打印 PASS。"""
+        import check_redlines as module
+
+        models_dir = tmp_path / "data" / "persistence"
+        models_dir.mkdir(parents=True)
+        (models_dir / "models.py").write_bytes(b"\xff\xfe not utf-8\n")
+        (tmp_path / "data" / "data_dictionary.py").write_text("TABLE_DEFINITIONS = {}\n", encoding="utf-8")
+
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            assert module.main() == 1
+        assert "红线扫描未完成" in err.getvalue()
+        assert "UnicodeDecodeError" in err.getvalue()
+        assert "[PASS]" not in out.getvalue()
+
+    def test_check_R22_raises_when_watermark_prefixes_missing(self, tmp_path, monkeypatch):
+        """constants.py 存在但缺少 WATERMARK_KEY_PREFIXES 时 check_R22 抛 ScanInputError。"""
+        import check_redlines as module
+
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "constants.py").write_text("OTHER_CONST = 1\n", encoding="utf-8")
+        monkeypatch.setattr(module, "ROOT", tmp_path)
+        with pytest.raises(ScanInputError) as excinfo:
+            module.check_R22()
+        assert "WATERMARK_KEY_PREFIXES" in str(excinfo.value)
+
+    def test_main_returns_1_when_watermark_prefixes_empty(self, monkeypatch):
+        """WATERMARK_KEY_PREFIXES 缺失/为空时 main 返回 1 且不打印 PASS。"""
+        import check_redlines as module
+
+        monkeypatch.setattr(module, "_extract_watermark_key_prefixes", lambda _path: [])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            assert module.main() == 1
+        assert "红线扫描未完成" in err.getvalue()
+        assert "WATERMARK_KEY_PREFIXES" in err.getvalue()
+        assert "[PASS]" not in out.getvalue()
 
 
 # ============================================================================

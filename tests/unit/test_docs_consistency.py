@@ -2533,7 +2533,7 @@ class TestEnforcementReverseCoverage:
     """DS-11 反向不变量: check_redlines.py 实际执行的 check_* 必须全部在 redlines.yml 登记.
 
     测试覆盖:
-    - 纯函数 _extract_redline_check_calls 正反例（提取 main() 中 check_* 调用名）
+    - 纯函数 _extract_redline_check_calls 正反例（提取 main() / _run_checks() 中 check_* 调用名）
     - 集成测试 check_enforcement_reverse_coverage() 在当前项目配置下通过
     - 漂移检测: monkeypatch 替换 REDLINES_YAML_PATH 构造缺登记红线的反例
     """
@@ -2551,10 +2551,19 @@ class TestEnforcementReverseCoverage:
         assert _extract_redline_check_calls(source) == {"check_R4", "check_R12", "check_R4_fstring_sql"}
 
     def test_extract_ignores_non_main(self):
-        """未定义 main() 时返回空集合."""
+        """未定义入口函数时返回空集合."""
         from check_docs_consistency import _extract_redline_check_calls
 
         assert _extract_redline_check_calls("def other():\n    check_R4()\n") == set()
+
+    def test_extract_follows_run_checks_wrapper(self):
+        """main() 仅做失败关闭包装时，检查体位于 _run_checks() 仍应被提取."""
+        from check_docs_consistency import _extract_redline_check_calls
+
+        source = (
+            "def _run_checks() -> int:\n    check_R22()\n    return 0\n\ndef main() -> int:\n    return _run_checks()\n"
+        )
+        assert _extract_redline_check_calls(source) == {"check_R22"}
 
     def test_extract_ignores_non_check_calls(self):
         """非 check_ 前缀的调用不应被提取."""
