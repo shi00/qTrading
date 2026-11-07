@@ -13,18 +13,23 @@
 前置：先跑 ``pytest --cov --cov-report=json`` 生成 coverage.json。
 
 退出码:
-    0: 通过（advisory 模式下分层警告不阻断）
+    0: 通过（advisory 模式下分层警告不阻断）；或所有文件均无可执行语句（SKIP，不代表达标）
     1: 有文件低于默认阈值，或 enforce_layered=true 时低于分层阈值
-    2: coverage.json 未找到 / 配置错误
+    2: coverage.json 未找到 / 不可读取 / 结构非法 / 配置错误
 """
 
 import argparse
 import json
+import math
 import sys
 import tomllib
 from pathlib import Path, PurePath
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+class CoverageDataError(ValueError):
+    """coverage.json 结构非法（fail-closed：输入不可信时不得静默判 PASS）。"""
 
 
 def load_config() -> tuple[int, list[tuple[str, int]], bool]:
@@ -56,6 +61,56 @@ def match_threshold(file_path: str, default_threshold: int, layered: list[tuple[
         if prefix_clean and normalized.startswith(prefix_clean + "/"):
             return threshold, prefix
     return default_threshold, None
+
+
+def _validate_file_entry(file_path: object, entry: object) -> None:
+    """校验单个文件的 summary 结构，非法时抛 CoverageDataError。
+
+    num_statements / missing_lines 用 ``type(...) is int`` 而非 isinstance：
+    JSON 中 bool 是 int 子类，``True`` 不得被当作合法语句数。
+    """
+    if not isinstance(file_path, str):
+        raise CoverageDataError(f"files 键必须为字符串: {file_path!r}")
+    if not isinstance(entry, dict):
+        raise CoverageDataError(f"{file_path}: 文件条目必须为 JSON 对象")
+    summary = entry.get("summary")
+    if not isinstance(summary, dict):
+        raise CoverageDataError(f"{file_path}: summary 必须为 JSON 对象")
+
+    stmts = summary.get("num_statements")
+    if type(stmts) is not int or stmts < 0:
+        raise CoverageDataError(f"{file_path}: num_statements 必须为非负整数")
+
+    missing = summary.get("missing_lines")
+    if type(missing) is not int or not 0 <= missing <= stmts:
+        raise CoverageDataError(f"{file_path}: missing_lines 必须为 [0, {stmts}] 内整数")
+
+    pct = summary.get("percent_covered")
+    if isinstance(pct, bool) or not isinstance(pct, int | float) or not math.isfinite(pct) or not 0 <= pct <= 100:
+        raise CoverageDataError(f"{file_path}: percent_covered 必须为 [0, 100] 内有限数值")
+
+
+def _load_validated_files(cov_path: Path) -> dict[str, dict]:
+    """读取并校验 coverage.json，返回 files 映射；任何异常结构均抛 CoverageDataError。
+
+    缺 files / files 为空 / 条目结构损坏都视为输入不可信，由调用方以退出码 2 失败，
+    避免「无输入」被误判为「全部达标」（fail-closed）。
+    """
+    try:
+        with open(cov_path, encoding="utf-8") as f:
+            cov = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise CoverageDataError(f"无法读取 {cov_path}: {exc}") from exc
+
+    if not isinstance(cov, dict):
+        raise CoverageDataError("coverage.json 顶层必须为 JSON 对象")
+    files = cov.get("files")
+    if not isinstance(files, dict) or not files:
+        raise CoverageDataError("coverage.json 缺少非空 files 对象")
+
+    for file_path, entry in files.items():
+        _validate_file_entry(file_path, entry)
+    return files
 
 
 def _report_layered(files: dict, default_threshold: int, layered: list[tuple[str, int]]) -> None:
@@ -106,14 +161,18 @@ def main() -> int:
 
     default_threshold, layered, enforce_layered = load_config()
     cov_path = ROOT / "coverage.json"
-    if not cov_path.exists():
-        print("coverage.json not found. Run pytest with --cov --cov-report=json first.")
-        sys.exit(2)
 
-    with open(cov_path, encoding="utf-8") as f:
-        cov = json.load(f)
+    # 输入校验必须先于 --report 分支：两种模式都不得在损坏/空输入上静默返回 0
+    try:
+        files = _load_validated_files(cov_path)
+    except CoverageDataError as exc:
+        print(f"ERROR: {exc}")
+        return 2
 
-    files = cov.get("files", {})
+    # 所有文件均无可执行语句：既非达标也非失败，显式 SKIP（不得宣称覆盖达标）
+    if all(entry.get("summary", {}).get("num_statements", 0) == 0 for entry in files.values()):
+        print("SKIP: coverage.json 中所有文件 num_statements 均为 0，无可执行语句可统计，不构成覆盖通过结论。")
+        return 0
 
     # --report 模式：输出各分层前缀的达标率统计（不阻断），用于判断是否可开启 enforce_layered
     if args.report:
