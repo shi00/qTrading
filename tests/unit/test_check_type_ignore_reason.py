@@ -8,6 +8,7 @@
 - tests/ 非 attr-defined 带 human reason → 通过
 - 仅检查 COMMENT token：字符串/文档字符串中的示例文本不误报
 - 无法 tokenize 的文件 fail-closed 报错
+- main() 文件过滤覆盖 .pyi stub（pre-commit types_or 含 pyi）
 """
 
 import sys
@@ -38,6 +39,14 @@ def _check(content: str, *, test_file: bool = True) -> tuple[list[str], list[str
             p = Path(tmp) / "prod_x.py"
         p.write_text(content, encoding="utf-8")
         return check_file(p)
+
+
+def _run_main(monkeypatch, capsys, *paths: Path) -> tuple[int, str]:
+    """以给定文件参数运行 main()，返回 (退出码, stdout)。"""
+    monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", *(str(p) for p in paths)])
+    code = main()
+    out = capsys.readouterr().out
+    return code, out
 
 
 class TestCheckTypeIgnoreReason:
@@ -179,3 +188,49 @@ class TestCheckTypeIgnoreReason:
         assert warnings == []
         monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", str(p)])
         assert main() == 1
+
+
+class TestMainFileFilter:
+    """main() 入口过滤：pre-commit 的 types_or 含 pyi，stub 不得被静默跳过。"""
+
+    def test_pyi_only_bare_ignore_exits_1(self, tmp_path, monkeypatch, capsys):
+        """仅传裸 ignore 的 .pyi → exit 1（修复前被过滤为空参数直接 return 0）。"""
+        stub = tmp_path / "bad.pyi"
+        stub.write_text(f"x: int  {BARE_IGNORE}\n", encoding="utf-8")
+        code, out = _run_main(monkeypatch, capsys, stub)
+        assert code == 1
+        assert "bad.pyi" in out
+
+    def test_pyi_and_py_mixed_aggregates_both(self, tmp_path, monkeypatch, capsys):
+        """.pyi 与 .py 混合 → 两者错误均被汇总（argv 过滤不丢 stub，exit 1）。"""
+        stub = tmp_path / "bad_stub.pyi"
+        stub.write_text(f"x: int  {BARE_IGNORE}\n", encoding="utf-8")
+        mod = tmp_path / "bad_mod.py"
+        mod.write_text(f"y = 1  {BARE_IGNORE}\n", encoding="utf-8")
+        code, out = _run_main(monkeypatch, capsys, stub, mod)
+        assert code == 1
+        assert f"{stub}:1:" in out
+        assert f"{mod}:1:" in out
+        assert out.count("R3 模糊压制") == 2
+
+    def test_pyi_coded_ignore_passes(self, tmp_path, monkeypatch, capsys):
+        """stub 带 [attr-defined] → 通过。"""
+        stub = tmp_path / "ok.pyi"
+        stub.write_text("x: int  # type: ignore[attr-defined]\n", encoding="utf-8")
+        code, out = _run_main(monkeypatch, capsys, stub)
+        assert code == 0
+        assert out == ""
+
+    def test_non_python_file_argument_skipped(self, tmp_path, monkeypatch, capsys):
+        """非 Python 扩展名参数仍被跳过，不触发检查。"""
+        note = tmp_path / "notes.txt"
+        note.write_text(f"x  {BARE_IGNORE}\n", encoding="utf-8")
+        code, out = _run_main(monkeypatch, capsys, note)
+        assert code == 0
+        assert out == ""
+
+    def test_no_arguments_exits_0(self, monkeypatch, capsys):
+        """无参数 → exit 0。"""
+        code, out = _run_main(monkeypatch, capsys)
+        assert code == 0
+        assert out == ""
