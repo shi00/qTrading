@@ -1,0 +1,108 @@
+name: Restore prebuilt CUDA wheel from ci-wheels bank
+description: >-
+  Download <key>.zip from the ci-wheels Release bank with retries, verify SHA256SUMS,
+  and leave only the wheel in wheelhouse/ so the caller can detect a hit by directory content.
+  调用方须在 step 上提供 env: GH_TOKEN（contents: read 即可）。
+
+inputs:
+  key:
+    description: 'Wheel bank asset key（llama-cuda-<version>-<suffix>）'
+    required: true
+  bank-tag:
+    description: '承载 wheel bank 的 Release tag（workflow env CI_WHEEL_BANK_TAG）'
+    required: true
+  fallback-message:
+    description: '未命中时追加到日志的说明，用于指明调用方回退到哪条路径'
+    required: false
+    default: '回退内联源码编译'
+  attempts:
+    description: '下载尝试次数（含首次）：一次网络抖动不应把调用方推回 37~90 分钟源码编译'
+    required: false
+    default: '3'
+
+outputs:
+  hit:
+    description: 'true 表示已把校验通过的 wheel 放进 wheelhouse/'
+    value: ${{ steps.restore.outputs.hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify wheel
+      id: restore
+      shell: pwsh
+      # 输入经 env 注入而非直接插值进脚本（GitHub 的 script-injection 建议）：key 由 requirements.txt
+      # 版本号与 env 后缀拼接而成，虽只来自 main 上的可信提交，仍不把值拼进脚本文本。
+      env:
+        WHEEL_KEY: ${{ inputs.key }}
+        BANK_TAG: ${{ inputs.bank-tag }}
+        FALLBACK_MESSAGE: ${{ inputs.fallback-message }}
+        ATTEMPTS: ${{ inputs.attempts }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $key = $env:WHEEL_KEY
+        $bankTag = $env:BANK_TAG
+        $fallback = $env:FALLBACK_MESSAGE
+        $attempts = [int]$env:ATTEMPTS
+        $bankDir = Join-Path $env:RUNNER_TEMP "wheel-bank"
+        $zip = Join-Path $bankDir "$key.zip"
+        $hit = $false
+        # 整个读取过程包在 try/finally：任一环节抛错都清空 wheelhouse，避免残留半解压的坏 wheel
+        # 被后续冷路径沿用（冷路径会重新写入同名 wheel，多文件时 Select-Object -First 1 结果不确定）。
+        try {
+          New-Item -ItemType Directory -Force -Path $bankDir | Out-Null
+          $downloaded = $false
+          for ($i = 1; $i -le $attempts; $i++) {
+            # 每次重试前清掉可能残留的半截文件：若沿用 --skip-existing，损坏的半包会被跳过下载并
+            # 误判为「已下载」，重试对「下载到一半失败」完全无效。故改为先删后下。
+            Remove-Item $zip -Force -ErrorAction SilentlyContinue
+            gh release download $bankTag --repo $env:GITHUB_REPOSITORY `
+              --pattern "$key.zip" --dir $bankDir
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $zip)) {
+              $downloaded = $true
+              break
+            }
+            # 资产不存在时重试也无济于事，但重试成本（2s/4s 退避）远低于误判导致的整腿重编，
+            # 故不做「不存在」与「传输失败」的区分，统一退避重试。
+            if ($i -lt $attempts) {
+              $delay = [math]::Pow(2, $i)
+              Write-Warning "wheel bank 下载失败（第 $i/$attempts 次，exit $LASTEXITCODE），$delay 秒后重试"
+              Start-Sleep -Seconds $delay
+            }
+          }
+          if (-not $downloaded) {
+            # 用 warning 注解而非普通日志：tag 发布时 bank 未预热会退化为两条腿各自冷编译，
+            # 必须在 run 页面上可见，不能只依赖人工查日志。
+            Write-Host "::warning::wheel bank 未命中：$key.zip 不存在或下载失败（已尝试 $attempts 次），$fallback"
+          } else {
+            Remove-Item wheelhouse -Recurse -Force -ErrorAction SilentlyContinue
+            Expand-Archive -Path $zip -DestinationPath wheelhouse -Force
+            $sums = Join-Path wheelhouse "SHA256SUMS.txt"
+            $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            $m = if (Test-Path $sums) {
+              [regex]::Match((Get-Content $sums -Raw), "(?m)^([0-9a-fA-F]{64})\s+(\S+\.whl)\s*$")
+            }
+            # 逐项校验：缺 wheel / 缺清单 / 文件名不符 / 摘要不符，任一不过即视为未命中并清空。
+            $reason = $null
+            if (-not $wheel) { $reason = "缺 cp314-win_amd64 wheel" }
+            elseif (-not $m -or -not $m.Success) { $reason = "缺 SHA256SUMS.txt 或格式非法" }
+            elseif ($m.Groups[2].Value -ne $wheel.Name) { $reason = "SHA256SUMS 与 wheel 文件名不一致" }
+            elseif ($m.Groups[1].Value.ToLower() -ne (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()) {
+              $reason = "sha256 校验失败"
+            }
+            if ($reason) {
+              Write-Warning "wheel bank 资产不可用（$reason），$fallback"
+            } else {
+              Write-Host "wheel bank 命中：$($wheel.Name) sha256=$($m.Groups[1].Value.ToLower())"
+              # 移除校验清单，wheelhouse 只留 wheel 本体（下游按目录内容判定是否复用）。
+              Remove-Item $sums -Force
+              $hit = $true
+            }
+          }
+        } catch {
+          Write-Warning "wheel bank 读取异常（$($_.Exception.Message)），$fallback"
+        } finally {
+          if (-not $hit) { Remove-Item wheelhouse -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "hit=$($hit.ToString().ToLower())"
