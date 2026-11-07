@@ -2120,6 +2120,129 @@ class TestLazyImportWhitelist:
         assert len(errors) == 1
         assert "services" in errors[0]
 
+    def test_import_after_nested_function_flagged(self, tmp_path, monkeypatch):
+        """外层函数先定义内层函数，随后的禁止方向 import 仍属函数体内 → 报错。"""
+        content = (
+            "def outer():\n"
+            "    def inner():\n"
+            "        return 1\n"
+            "    from data.data_processor import DataProcessor\n"
+            "    return DataProcessor()\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "nested.py", content)
+        assert len(errors) == 1
+        assert "nested.py:4" in errors[0]
+
+    def test_async_import_after_nested_function_flagged(self, tmp_path, monkeypatch):
+        """异步外层函数定义内层函数后，后续禁止方向 import 仍属函数体内 → 报错。"""
+        content = (
+            "async def outer():\n"
+            "    async def inner():\n"
+            "        return 1\n"
+            "    from services.task_manager import TaskManager\n"
+            "    return TaskManager()\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "nested_async.py", content)
+        assert len(errors) == 1
+        assert "nested_async.py:4" in errors[0]
+
+    def test_import_after_nested_function_legal_direction_ok(self, tmp_path, monkeypatch):
+        """嵌套函数之后的合法方向 import → 不报。"""
+        content = (
+            "def outer():\n"
+            "    def inner():\n"
+            "        return 1\n"
+            "    from data.data_processor import DataProcessor\n"
+            "    return DataProcessor()\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "services", "legal_nested.py", content)
+        assert errors == []
+
+    def test_import_after_nested_function_with_marker_ok(self, tmp_path, monkeypatch):
+        """嵌套函数之后的禁止方向 import 带 lazy-import 注释 → 不报。"""
+        content = (
+            "def outer():\n"
+            "    def inner():\n"
+            "        return 1\n"
+            "    from data.data_processor import DataProcessor  # lazy-import: 打破循环\n"
+            "    return DataProcessor()\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "nested_marked.py", content)
+        assert errors == []
+
+    def test_type_checking_else_runtime_import_flagged(self, tmp_path, monkeypatch):
+        """if TYPE_CHECKING 的 else 分支属运行期代码 → 报错（仅 body 豁免）。"""
+        content = (
+            "from typing import TYPE_CHECKING\n"
+            "\n"
+            "def f() -> None:\n"
+            "    if TYPE_CHECKING:\n"
+            "        from strategies.ai_strategy import AISelectionStrategy\n"
+            "    else:\n"
+            "        from strategies.ai_strategy import AISelectionStrategy\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "services", "tc_else.py", content)
+        assert len(errors) == 1
+        assert "tc_else.py:7" in errors[0]
+
+    def test_import_after_type_checking_block_flagged(self, tmp_path, monkeypatch):
+        """TYPE_CHECKING 块内不报，块结束后的函数体内 import → 报错。"""
+        content = (
+            "from typing import TYPE_CHECKING\n"
+            "\n"
+            "def f() -> None:\n"
+            "    if TYPE_CHECKING:\n"
+            "        from strategies.ai_strategy import AISelectionStrategy\n"
+            "    from data.data_processor import DataProcessor\n"
+            "    return None\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "tc_then_import.py", content)
+        assert len(errors) == 1
+        assert "tc_then_import.py:6" in errors[0]
+
+    def test_module_level_import_after_nested_function_not_flagged(self, tmp_path, monkeypatch):
+        """嵌套函数结束后的模块级（函数外）import → 不报（非函数体内）。"""
+        content = (
+            "def outer():\n"
+            "    def inner():\n"
+            "        return 1\n"
+            "    return inner()\n"
+            "\n"
+            "from data.data_processor import DataProcessor\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "after_func.py", content)
+        assert errors == []
+
+    def test_type_checking_body_in_function_exempt(self, tmp_path, monkeypatch):
+        """函数体内 if TYPE_CHECKING 的 body import → 豁免（仅类型检查）。"""
+        content = (
+            "from typing import TYPE_CHECKING\n"
+            "\n"
+            "def f() -> None:\n"
+            "    if TYPE_CHECKING:\n"
+            "        from strategies.ai_strategy import AISelectionStrategy\n"
+            "    return None\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "services", "tc_body_in_func.py", content)
+        assert errors == []
+
+    def test_nested_type_checking_restores_outer_state(self, tmp_path, monkeypatch):
+        """嵌套 TYPE_CHECKING 结束后恢复外层状态：外层 body 仍豁免，外层结束后恢复检测。"""
+        content = (
+            "from typing import TYPE_CHECKING\n"
+            "\n"
+            "def f() -> None:\n"
+            "    if TYPE_CHECKING:\n"
+            "        if TYPE_CHECKING:\n"
+            "            from strategies.ai_strategy import AISelectionStrategy\n"
+            "        from data.data_processor import DataProcessor\n"
+            "    from services.task_manager import TaskManager\n"
+            "    return None\n"
+        )
+        errors = self._mk(tmp_path, monkeypatch, "utils", "tc_nested.py", content)
+        assert len(errors) == 1
+        assert "tc_nested.py:8" in errors[0]
+
 
 class TestNoComponentRenderSideEffects:
     """UIX-10: 声明式组件顶层渲染期副作用检查测试。"""
