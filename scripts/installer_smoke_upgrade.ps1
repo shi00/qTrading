@@ -55,9 +55,12 @@ function Assert-True([bool]$cond, [string]$msg) {
 
 # ready 判据 = sidecar status JSON 的 status == running 且 postgres_alive == true
 # （与 run.rs 一致：ready 表示 PG 已启动；进程名存在只能作诊断提示，不能单独判定 ready）。
-function Wait-SidecarReady([int]$TimeoutSec = 60) {
+# 超时 180s：run 42357815491 实证 STEP 1 清空 PGDATA 后旧版冷启动（完整 initdb）在慢 runner
+# 上超过 60s（上次成功已耗时 50s 逼近上限），60s 属边缘性超时，非产品缺陷。
+function Wait-SidecarReady([int]$TimeoutSec = 180) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $sidecarProcessSeen = $false
+    $lastRaw = $null
     while ((Get-Date) -lt $deadline) {
         if (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue) { $sidecarProcessSeen = $true }
         $status = $null
@@ -65,7 +68,8 @@ function Wait-SidecarReady([int]$TimeoutSec = 60) {
             try {
                 $raw = @(& $SidecarExePath status --data-dir $PgDataDir 2>$null)
                 if ($LASTEXITCODE -eq 0 -and $raw.Count -gt 0) {
-                    $status = (($raw -join "`n") | ConvertFrom-Json)
+                    $lastRaw = ($raw -join "`n")
+                    $status = ($lastRaw | ConvertFrom-Json)
                 }
             } catch {
                 $status = $null
@@ -80,6 +84,9 @@ function Wait-SidecarReady([int]$TimeoutSec = 60) {
         Write-Fail "sidecar process present but status JSON never reported running/postgres_alive within ${TimeoutSec}s"
     } else {
         Write-Fail "qtrading-pg-sidecar process never appeared within ${TimeoutSec}s"
+    }
+    if ($null -ne $lastRaw) {
+        Write-Fail "last sidecar status output: $lastRaw"
     }
     return $false
 }
@@ -274,7 +281,7 @@ try {
     # STEP 3: 启动旧版 qTrading，等待 sidecar ready
     Write-Step "3. Start old version & wait for sidecar ready"
     $proc = Start-Process -FilePath $AppExePath -PassThru
-    $ready = Wait-SidecarReady -TimeoutSec 60
+    $ready = Wait-SidecarReady
     Assert-True $ready "Sidecar ready (old version, status JSON: running + postgres_alive)"
 
     # STEP 4: 旧版运行期写入已提交的合成业务哨兵，并记录升级前 PG 根证据
@@ -329,7 +336,7 @@ try {
     # STEP 8: 启动新版本，等待真实 ready（status JSON: running + postgres_alive）
     Write-Step "8. Start new version & wait for real sidecar ready"
     $proc2 = Start-Process -FilePath $AppExePath -PassThru
-    $ready2 = Wait-SidecarReady -TimeoutSec 60
+    $ready2 = Wait-SidecarReady
     Assert-True $ready2 "Sidecar ready (new version, existing data, status JSON: running + postgres_alive)"
 
     # STEP 9: 读回哨兵并断言与升级前完全一致（已提交事务在原库中仍可见）
@@ -372,7 +379,7 @@ try {
         Assert-True (Test-Path $PgVersionFile) "PG_VERSION preserved after rollback: $PgVersionFile"
 
         $proc3 = Start-Process -FilePath $AppExePath -PassThru
-        $ready3 = Wait-SidecarReady -TimeoutSec 60
+        $ready3 = Wait-SidecarReady
         Assert-True $ready3 "Sidecar ready (restored version, status JSON: running + postgres_alive)"
 
         $pgPasswordRollback = Read-PgPassword -PasswordFile $PgPasswordFile
