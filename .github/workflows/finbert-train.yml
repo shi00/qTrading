@@ -258,8 +258,22 @@ jobs:
           CORPUS_TAG: ${{ steps.validate_inputs.outputs.corpus_tag }}
         run: |
           set -euo pipefail
-          gh release download "$CORPUS_TAG" --repo "$GITHUB_REPOSITORY" \
-            --dir data/corpus --clobber
+          # gh release download 命中 GitHub Releases API：偶发 5xx / 连接重置会直接红掉整条训练
+          # job。3 次退避重试（5s/10s），每次重试前清空目录，避免半截文件被 --clobber 跳过；
+          # 下载后仍由 sha256sum 与 corpus manifest 双重校验守住完整性，失败不静默。
+          for attempt in 1 2 3; do
+            rm -rf data/corpus
+            mkdir -p data/corpus
+            if gh release download "$CORPUS_TAG" --repo "$GITHUB_REPOSITORY" \
+              --dir data/corpus --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::corpus download failed after 3 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
           (cd data/corpus && sha256sum -c SHA256SUMS.txt)
           # F2 语料锚断言（ADR-0015）：实际下载的 SHA256SUMS.txt 必须与指纹锚一致——
           # 防 corpus Release 资产在「路由步骤下载」与「语料下载」之间被替换导致

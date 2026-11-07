@@ -92,6 +92,25 @@ def test_retries_run_only_after_previous_attempt_fails(
     assert last["if"] == (f"steps.{first['id']}.outcome == 'failure' && steps.{second['id']}.outcome == 'failure'")
 
 
+def test_retries_are_backed_off_between_attempts(
+    build_windows_job: dict[str, Any],
+) -> None:
+    steps = build_windows_job["steps"]
+    names = [step.get("name") for step in steps]
+    order = [
+        ATTEST_STEP_NAMES[0],
+        "Wait before attest retry 2/3",
+        ATTEST_STEP_NAMES[1],
+        "Wait before attest retry 3/3",
+        ATTEST_STEP_NAMES[2],
+    ]
+    indices = [names.index(name) for name in order]
+    assert indices == sorted(indices), f"退避步骤必须夹在重试之间，实际顺序 {order}"
+    # 紧邻重试会同时落在 Rekor 故障窗口内；30s/60s 递增退避与仓库既有下载重试范式一致。
+    assert "Start-Sleep -Seconds 30" in steps[indices[1]]["run"]
+    assert "Start-Sleep -Seconds 60" in steps[indices[3]]["run"]
+
+
 def test_retry_chain_precedes_artifact_upload(
     build_windows_job: dict[str, Any],
 ) -> None:
