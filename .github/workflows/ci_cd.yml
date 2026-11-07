@@ -2797,35 +2797,167 @@ jobs:
             exit 1
           }
 
-      - name: Smoke Test - Installer Scripts (embedded variants, release tags only, P1-12)
-        # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%,
-        # 仅在 release tag 时执行避免常规 PR/push 污染 CI 环境.
-        # installer.iss PrivilegesRequired=lowest → user-level 安装, 无需管理员权限.
-        if: matrix.embedded == 'true' && startsWith(github.ref, 'refs/tags/v')
+      - name: Collect Installer Metadata (G4 §201 evidence)
+        # G4 §201 要求记录安装包 SHA-256 / 版本 / 客户端摘要 / OS / GPU / 驱动 / DPI / locale。
+        # 本步骤只采集构建机可确定的事实；取不到的值写 null 并附 reason，
+        # 不填 0 / 空串等会被误读为「已核对」的占位值（R21）。
+        if: matrix.embedded == 'true'
         shell: pwsh
+        run: |
+          $variant = "${{ matrix.variant }}"
+          $installerPath = "Output\AStockScreener-Setup-$variant.exe"
+          if (-not (Test-Path $installerPath)) {
+            Write-Error "Installer not found: $installerPath"
+            exit 1
+          }
+          $sha = (Get-FileHash -Algorithm SHA256 -Path $installerPath).Hash.ToLowerInvariant()
+          $sizeBytes = (Get-Item $installerPath).Length
+          $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+          $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+          $gpu = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1
+          $osCaption = $null
+          $osVersion = $null
+          $osBuild = $null
+          if ($os) {
+            $osCaption = $os.Caption
+            $osVersion = $os.Version
+            $osBuild = $os.BuildNumber
+          }
+          $cpuName = $null
+          if ($cpu) { $cpuName = $cpu.Name }
+          $gpuName = $null
+          $gpuDriver = $null
+          if ($gpu) {
+            $gpuName = $gpu.Name
+            $gpuDriver = $gpu.DriverVersion
+          }
+          # Flet 桌面客户端在首次运行时解压到 ~/.flet/client/<fingerprint>；
+          # 构建机若无缓存则明确记 unavailable，不推测版本或摘要。
+          $clientExe = Get-ChildItem -Path (Join-Path $env:USERPROFILE ".flet\client") -Filter "flet.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $clientDigest = $null
+          $clientPath = $null
+          $clientReason = "client not cached on build runner before first launch"
+          if ($clientExe) {
+            $clientDigest = (Get-FileHash -Algorithm SHA256 -Path $clientExe.FullName).Hash.ToLowerInvariant()
+            $clientPath = $clientExe.FullName
+            $clientReason = $null
+          }
+          $meta = [ordered]@{
+            variant = $variant
+            collector = "ci/build-windows"
+            collected_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            installer = [ordered]@{
+              file = (Split-Path -Leaf $installerPath)
+              sha256 = $sha
+              size_bytes = $sizeBytes
+            }
+            declared_version = [ordered]@{
+              source = "ISCC /DMyAppVersion"
+              value = "${{ github.ref_name }}"
+              note = "编译期传入值；workflow_dispatch 下为分支名而非语义版本"
+            }
+            environment = [ordered]@{
+              os_caption = $osCaption
+              os_version = $osVersion
+              os_build = $osBuild
+              cpu = $cpuName
+              gpu = $gpuName
+              gpu_driver = $gpuDriver
+              locale = (Get-Culture).Name
+              dpi = $null
+              dpi_reason = "build runner has no interactive desktop session"
+            }
+            flet_client = [ordered]@{
+              sha256 = $clientDigest
+              path = $clientPath
+              unavailable_reason = $clientReason
+            }
+          }
+          $jsonPath = "Output\installer-metadata-$variant.json"
+          $meta | ConvertTo-Json -Depth 6 | Set-Content -Path $jsonPath -Encoding UTF8
+          Write-Host "Metadata written: $jsonPath"
+          $clientText = "unavailable（$clientReason）"
+          if ($clientDigest) { $clientText = $clientDigest }
+          $summary = @"
+          ### Installer metadata ($variant)
+          | 项 | 值 |
+          |----|----|
+          | installer SHA-256 | $sha |
+          | declared AppVersion | ${{ github.ref_name }} |
+          | OS | $osCaption $osVersion (build $osBuild) |
+          | CPU | $cpuName |
+          | GPU / driver | $gpuName / $gpuDriver |
+          | DPI | unavailable（无交互桌面会话） |
+          | locale | $((Get-Culture).Name) |
+          | flet client SHA-256 | $clientText |
+          "@
+          if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+          }
+
+      - name: Upload Installer Metadata (G4 §201 evidence)
+        # always()：smoke 失败时同样保留环境与制品证据，避免「失败即无记录」。
+        if: always() && matrix.embedded == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: installer-metadata-${{ matrix.variant }}
+          path: Output/installer-metadata-${{ matrix.variant }}.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Smoke Test - Installer Scripts (embedded variants, release tag / manual dispatch, P1-12)
+        # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%, 因此只在本 job
+        # 既有的触发面内执行（release tag 或 workflow_dispatch 全量构建）; 常规 PR/push
+        # 不会进入 build-windows, 不存在污染 CI 环境的风险.
+        # installer.iss PrivilegesRequired=lowest → user-level 安装, 无需管理员权限.
+        if: matrix.embedded == 'true'
+        shell: pwsh
+        env:
+          # installer_smoke_upgrade.ps1 经 gh CLI 下载「最近已发布版本」安装器作为升级基线.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $installerPath = "Output\AStockScreener-Setup-${{ matrix.variant }}.exe"
           if (-not (Test-Path $installerPath)) {
             Write-Error "Installer not found: $installerPath"
             exit 1
           }
-          Write-Host "Running installer smoke tests (crash_recovery + running_app, P1-12)..."
-          # 子脚本以 powershell 5.1 运行, 其非 0 退出不会抛异常; 必须显式校验
+          # 子脚本以 powershell 5.1 运行, 其非 0 退出不会抛异常; 必须逐个显式校验
           # $LASTEXITCODE, 否则前一个脚本失败会被后一个脚本的 0 退出码覆盖.
-          & powershell -File scripts/installer_smoke_crash_recovery.ps1 -InstallerPath $installerPath
-          $crashRecoveryExitCode = $LASTEXITCODE
-          if ($crashRecoveryExitCode -ne 0) {
-            Write-Error "installer_smoke_crash_recovery.ps1 failed with exit code $crashRecoveryExitCode"
-            exit $crashRecoveryExitCode
+          function Invoke-InstallerSmoke {
+            param([string]$ScriptPath, [string[]]$ExtraArgs = @())
+            & powershell -File $ScriptPath -InstallerPath $installerPath @ExtraArgs
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "$ScriptPath failed with exit code $LASTEXITCODE"
+              exit $LASTEXITCODE
+            }
+            Write-Host "✅ $ScriptPath passed"
           }
-          Write-Host "✅ installer_smoke_crash_recovery.ps1 passed"
-          & powershell -File scripts/installer_smoke_running_app.ps1 -InstallerPath $installerPath
-          $runningAppExitCode = $LASTEXITCODE
-          if ($runningAppExitCode -ne 0) {
-            Write-Error "installer_smoke_running_app.ps1 failed with exit code $runningAppExitCode"
-            exit $runningAppExitCode
+          Write-Host "Running installer smoke tests (crash_recovery / running_app / uninstall / upgrade, P1-12)..."
+          Invoke-InstallerSmoke "scripts/installer_smoke_crash_recovery.ps1"
+          Invoke-InstallerSmoke "scripts/installer_smoke_running_app.ps1"
+          Invoke-InstallerSmoke "scripts/installer_smoke_uninstall.ps1"
+          # 升级路径：安装最近一个已发布版本 → 运行期写入已提交哨兵 → 覆盖安装候选版本
+          # → 读回数据一致性（installer_smoke_upgrade.ps1 的判据，不以目录非空代表数据保留）.
+          # 基线必须限定为应用版本 Release：同仓库还发布 sidecar-v* / finbert-gguf-v* /
+          # corpus-* / ci-wheels 等独立资产 Release，直接取「最近一个 release」会命中它们，
+          # 再拼成 v<tag> 下载必然 404（表现为与代码无关的升级 smoke 误报失败）.
+          # 读取方式与 resolve-sidecar 一致：分页 REST API + 显式 JSON 解析，
+          # 不解析 release 列表的人类表格输出（首列是 NAME 而非 TAG）；
+          # 按语义版本降序取最大者，不依赖 Release 创建顺序（后补发布旧版本不会回退）；
+          # 同时排除当前 ref，避免同一 tag 重跑时「自己升自己」的空验证.
+          $currentRef = "${{ github.ref_name }}"
+          $baselineTag = gh api --paginate "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } |
+            Where-Object { $_ -ne $currentRef } |
+            Sort-Object { [version]($_.TrimStart('v')) } -Descending |
+            Select-Object -First 1
+          if (-not $baselineTag) {
+            Write-Error "No published application release (v<major>.<minor>.<patch>) available as upgrade baseline"
+            exit 1
           }
-          Write-Host "✅ installer_smoke_running_app.ps1 passed"
+          $baselineVersion = $baselineTag.TrimStart('v')
+          Write-Host "Upgrade baseline: $baselineTag (version $baselineVersion)"
+          Invoke-InstallerSmoke "scripts/installer_smoke_upgrade.ps1" @("-OldVersion", $baselineVersion, "-OldVariant", "${{ matrix.variant }}", "-VerifyRollback")
 
       - name: Generate SHA256SUMS
         shell: pwsh
