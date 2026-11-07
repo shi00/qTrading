@@ -1656,37 +1656,37 @@ def check_enforcement_mapping() -> list[str]:
 # check_ 函数名正则（识别 enforcement 文本中提及的 check_redlines.py 检查函数名）
 CHECK_CALL_NAME_PATTERN = re.compile(r"\b(check_[a-zA-Z0-9_]+)\b")
 
+# check_redlines.py 的检查入口函数：main() 为 ScanInputError 失败关闭包装，
+# 检查体保留在 _run_checks()，两者均需扫描以避免包装层造成孤儿登记误报。
+_REDLINE_CHECK_ENTRY_FUNCS = ("main", "_run_checks")
+
 
 def _extract_redline_check_calls(source: str) -> set[str]:
-    """AST 提取 check_redlines.py 的 main() 中所有 check_*() 调用名。
+    """AST 提取 check_redlines.py 入口函数（main / _run_checks）中所有 check_*() 调用名。
 
-    纯函数，便于单元测试。找到名为 main 的函数后，在其中遍历所有 Call 节点，
+    纯函数，便于单元测试。找到入口函数后，在其中遍历所有 Call 节点，
     收集 func 为 Name 且以 'check_' 开头的调用名。
     """
     tree = ast.parse(source)
-    main_func: ast.FunctionDef | None = None
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "main":
-            main_func = node
-            break
-    if main_func is None:
-        return set()
     names: set[str] = set()
-    for node in ast.walk(main_func):
-        if not isinstance(node, ast.Call):
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name not in _REDLINE_CHECK_ENTRY_FUNCS:
             continue
-        func = node.func
-        if isinstance(func, ast.Name) and func.id.startswith("check_"):
-            names.add(func.id)
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            if isinstance(func, ast.Name) and func.id.startswith("check_"):
+                names.add(func.id)
     return names
 
 
 def check_enforcement_reverse_coverage() -> list[str]:
     """检查项: check_redlines.py 实际执行的 check_* 是否全部在 redlines.yml 登记 (DS-11 反向不变量)。
 
-    用 AST 解析 scripts/check_redlines.py 的 main()，提取所有 check_*() 调用名，
-    断言每个都能在 redlines.yml 某条红线的 `checks:` 字段（或 enforcement 文本提及）中找到登记。
-    这把 ADR-0005 的单向 enforcement 映射（文档声称的机制是否真实存在）补成双向：
+    用 AST 解析 scripts/check_redlines.py 的入口函数（main / _run_checks），提取所有
+    check_*() 调用名，断言每个都能在 redlines.yml 某条红线的 `checks:` 字段（或 enforcement
+    文本提及）中找到登记。这把 ADR-0005 的单向 enforcement 映射（文档声称的机制是否真实存在）补成双向：
     给 check_redlines.py 新增检查而不登记，即触发一致性失败。
 
     登记来源（取并集，两者任一命中即视为已登记）：
@@ -1694,7 +1694,7 @@ def check_enforcement_reverse_coverage() -> list[str]:
     - 红线条目 `enforcement` 文本中的 check_* 函数名（R4/R16/R23 已内联提及）
 
     第二方向（GATE-03/GOV-11）：`checks:` 字段登记的 check_*（仅此集合，不含 enforcement 文本提取）
-    必须实际存在于 check_redlines.py 且被 main() 调用——yml 声称有守护但函数被删/未执行即孤儿登记报错。
+    必须实际存在于 check_redlines.py 且被 main() / _run_checks() 调用——yml 声称有守护但函数被删/未执行即孤儿登记报错。
 
     基于模块级路径常量 REDLINES_YAML_PATH / CHECK_REDLINES_SCRIPT_PATH 读取，便于测试 monkeypatch。
     解析失败时返回精确错误列表（不抛异常）。
@@ -1745,11 +1745,11 @@ def check_enforcement_reverse_coverage() -> list[str]:
             + ", ".join(missing)
             + "（需在某条红线的 checks: 字段补登记，DS-11 反向不变量）"
         )
-    # GATE-03/GOV-11 第二方向：yml checks 登记的 check_* 必须存在于脚本且被 main() 调用（无孤儿登记）
+    # GATE-03/GOV-11 第二方向：yml checks 登记的 check_* 必须存在于脚本且被 main()/_run_checks() 调用（无孤儿登记）
     orphan = sorted(checks_names - call_names)
     if orphan:
         errors.append(
-            "redlines.yml checks 登记但 check_redlines.py main() 未执行的检查: "
+            "redlines.yml checks 登记但 check_redlines.py main()/_run_checks() 未执行的检查: "
             + ", ".join(orphan)
             + "（需补齐实现；确属『计划中』的守护函数须显式声明，不得只登记不实现）"
         )
