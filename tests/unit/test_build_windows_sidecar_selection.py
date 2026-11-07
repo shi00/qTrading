@@ -12,6 +12,7 @@ job 集合不变；resolve 失败会让 build-windows 因 needs 未成功而跳�
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -271,7 +272,7 @@ def test_upgrade_smoke_runs_rollback_leg(build_job: dict[str, Any]) -> None:
     upgrade_script = UPGRADE_SMOKE_SCRIPT.read_text(encoding="utf-8")
     assert "[switch]$VerifyRollback" in upgrade_script, "升级脚本缺少 -VerifyRollback 开关"
     assert "if ($VerifyRollback)" in upgrade_script, "回滚腿未按开关门控"
-    assert "Get-InstalledAppVersion" in upgrade_script, "回滚后未读取已安装版本"
+    assert "Get-InstalledAppInfo" in upgrade_script, "回滚后未读取已安装版本"
     assert "$restoredVersionNormalized -eq $OldVersion" in upgrade_script, "未断言回滚到基线版本"
     assert "Synthetic sentinel survived rollback unchanged" in upgrade_script, "回滚后未校验业务数据保留"
 
@@ -306,3 +307,19 @@ def test_smoke_scripts_wait_for_app_database_before_sentinel() -> None:
         assert text.index("Wait-AppDatabaseReady -Password") < text.index("$sentinelCreateSql ="), (
             f"{name} 在等业务库之前就写入了哨兵"
         )
+
+
+def test_upgrade_smoke_looks_up_uninstall_key_by_installer_appid() -> None:
+    """回滚腿读已安装版本必须按 AppId 键定位，不能依赖 DisplayName 文案。
+
+    run 42340112867 用 DisplayName 精确匹配 "AStockScreener" 取不到 Inno 卸载项，
+    导致回滚腿误报；Inno 的键名是固定的 <AppId>_is1，AppId 以 installer.iss 为正本。
+    """
+    iss_text = (PROJECT_ROOT / "installer.iss").read_text(encoding="utf-8")
+    match = re.search(r"^AppId=\{\{([0-9A-Fa-f-]{36})\}", iss_text, re.MULTILINE)
+    assert match is not None, "installer.iss 缺少 AppId={{GUID}} 定义"
+    expected_key = f'"{{{match.group(1)}}}_is1"'
+
+    script = (PROJECT_ROOT / "scripts" / "installer_smoke_upgrade.ps1").read_text(encoding="utf-8-sig")
+    assert expected_key in script, f"installer_smoke_upgrade.ps1 未使用 {expected_key} 定位卸载项"
+    assert 'DisplayName -eq "AStockScreener"' not in script, "回滚腿不应再按 DisplayName 精确匹配"

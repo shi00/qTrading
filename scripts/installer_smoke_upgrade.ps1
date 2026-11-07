@@ -174,21 +174,50 @@ function Stop-QtradingGraceful {
 }
 
 # 读取已安装包声明的版本（Inno Setup 写入 HKCU 卸载项，PrivilegesRequired=lowest）。
-# 未找到条目时返回 $null（不伪造版本值），由调用方决定是断言还是记录为不可用。
-function Get-InstalledAppVersion {
-    $entry = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
-        ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
-        Where-Object { $_.DisplayName -eq "AStockScreener" } |
-        Select-Object -First 1
-    if ($null -eq $entry) {
-        return $null
+# Inno Setup 的卸载项键名固定为 <AppId>_is1（installer.iss 的 AppId，行内 {{ 是 Inno 转义）。
+# DisplayName 受 AppVerName 缺省规则影响、不保证等于 AppName（run 42340112867 因精确匹配
+# "AStockScreener" 取不到条目），故按 AppId 定位；取不到时返回 $null，不伪造版本。
+$UninstallKeyName = "{7E6D0B44-BD44-4E46-8B5C-3A5F2D237C1A}_is1"
+$UninstallRoots = @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+)
+
+function ConvertTo-AppInfo($props, [string]$keyPath) {
+    $names = $props.PSObject.Properties.Name
+    $displayName = if ($names -contains "DisplayName") { [string]$props.DisplayName } else { "" }
+    $version = if ($names -contains "DisplayVersion") { [string]$props.DisplayVersion } else { "" }
+    if ([string]::IsNullOrEmpty($version) -and $displayName -match "(\d+\.\d+\.\d+)") {
+        $version = $Matches[1]
     }
-    # StrictMode 下访问不存在的属性会抛异常，先确认属性存在。
-    $versionProperty = $entry.PSObject.Properties['DisplayVersion']
-    if ($null -eq $versionProperty) {
-        return $null
+    return [pscustomobject]@{
+        KeyPath     = $keyPath
+        DisplayName = $displayName
+        Version     = $version
     }
-    return [string]$versionProperty.Value
+}
+
+function Get-InstalledAppInfo {
+    # 首选：AppId 键（Inno 固定命名，与 DisplayName 文案无关）
+    foreach ($root in $UninstallRoots) {
+        $keyPath = Join-Path $root $UninstallKeyName
+        if (-not (Test-Path $keyPath)) { continue }
+        $props = Get-ItemProperty -Path $keyPath -ErrorAction SilentlyContinue
+        if ($null -ne $props) { return ConvertTo-AppInfo $props $keyPath }
+    }
+    # 兜底：键名规则变化时按 DisplayName 前缀取证，避免再次盲跑
+    foreach ($root in $UninstallRoots) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($entry in @(Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+            $props = Get-ItemProperty -Path $entry.PSPath -ErrorAction SilentlyContinue
+            if ($null -eq $props) { continue }
+            if (-not ($props.PSObject.Properties.Name -contains "DisplayName")) { continue }
+            if (([string]$props.DisplayName) -like "AStockScreener*") {
+                return ConvertTo-AppInfo $props $entry.PSPath
+            }
+        }
+    }
+    return $null
 }
 
 # ---- 主流程 ----
@@ -318,8 +347,12 @@ try {
     # 候选版本标识仅记录不判等（dispatch 构建可能将 AppVersion 写成分支名）。
     if ($VerifyRollback) {
         Write-Step "10. Rollback: restore baseline package over candidate"
-        $candidateVersion = Get-InstalledAppVersion
-        Write-Host "  Installed (candidate) version: $candidateVersion"
+        $candidateInfo = Get-InstalledAppInfo
+        if ($null -eq $candidateInfo) {
+            Write-Host "  Installed (candidate): uninstall entry not found ($UninstallKeyName)"
+        } else {
+            Write-Host "  Installed (candidate): $($candidateInfo.DisplayName) / version='$($candidateInfo.Version)'"
+        }
         Stop-QtradingGraceful
         Assert-True ($null -eq (Get-Process -Name "AStockScreener" -ErrorAction SilentlyContinue)) "App process exited before rollback"
         Assert-True ($null -eq (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue)) "Sidecar process exited before rollback"
@@ -328,7 +361,9 @@ try {
         Assert-True ($rollbackProc.ExitCode -eq 0) "Restore installer finished (exit code: $($rollbackProc.ExitCode))"
         Assert-True (Test-Path $AppExePath) "Restored package installed: $AppExePath"
 
-        $restoredVersion = Get-InstalledAppVersion
+        $restoredInfo = Get-InstalledAppInfo
+        Assert-True ($null -ne $restoredInfo) "Restored package registered in Add/Remove Programs ($UninstallKeyName)"
+        $restoredVersion = $restoredInfo.Version
         Assert-True (-not [string]::IsNullOrEmpty($restoredVersion)) "Restored package declares a version"
         # 发布构建以 github.ref_name（形如 v0.11.3）作为 ISCC /DMyAppVersion，故 DisplayVersion
         # 带 v 前缀而 $OldVersion 已去前缀；比较前归一化，不修改断言目标版本。
