@@ -299,6 +299,11 @@ def _is_e2e_test_path(config: pytest.Config, path: Path | None) -> bool:
     return True
 
 
+# E2E 全组测试共享的 session loop scope marker：两个 hook 复用同一实例，
+# 避免 loop_scope 值在两处构造时漂移（Mark 为不可变值对象，跨 item 共享安全）
+_E2E_SESSION_LOOP_MARKER = pytest.mark.asyncio(loop_scope="session")
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     """E2E 测试强制 session loop scope，避免 session fixture 被逐用例重建。
@@ -327,7 +332,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     # append=False 将 marker 插入 own_markers 列表开头，
     # 确保 pytest-asyncio 的 _resolve_asyncio_marker 返回带 loop_scope=session 的
     # marker，进而按 scope=session 参数化 _asyncio_loop_factory。
-    definition.add_marker(pytest.mark.asyncio(loop_scope="session"), append=False)
+    definition.add_marker(_E2E_SESSION_LOOP_MARKER, append=False)
 
 
 @pytest.hookimpl(trylast=True)
@@ -348,14 +353,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if unskipped > 0:
         logger.info("[E2E] --run-windows-skip: un-skipped %d Windows skipif items", unskipped)
 
-    asyncio_marker = pytest.mark.asyncio(loop_scope="session")
     for item in items:
         if not _is_e2e_test_path(config, item.path):
             continue
         # append=False 将 marker 插入到 own_markers 列表开头，
         # 确保 get_closest_marker("asyncio") 返回此 marker（带 loop_scope=session），
         # 而非 pytest-asyncio AUTO 模式添加的无 loop_scope marker。
-        item.add_marker(asyncio_marker, append=False)
+        # 注意：pytest-asyncio 的 item._loop_scope 是 functools.cached_property，
+        # 若任何插件在本 hook 之前访问它，function 会被固化进缓存并使本注入失效；
+        # 引入收集早期访问 _loop_scope 的插件时必须重新评估此方案。
+        item.add_marker(_E2E_SESSION_LOOP_MARKER, append=False)
 
 
 @pytest.fixture(autouse=True, scope="session")

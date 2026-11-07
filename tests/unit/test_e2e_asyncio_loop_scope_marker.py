@@ -2,10 +2,12 @@
 
 守护 ``tests/e2e/conftest.py`` 的双处 marker 注入：
 
-- ``pytest_generate_tests``（``tryfirst=True``）把 marker 写入 definition，
+- 模块级常量 ``_E2E_SESSION_LOOP_MARKER``（``pytest.mark.asyncio(loop_scope="session")``）
+  由两个 hook 共享，保证 loop_scope 值单一来源；
+- ``pytest_generate_tests``（``tryfirst=True``）把该常量写入 definition，
   使 pytest-asyncio 在参数化阶段按 ``loop_scope=session`` 参数化
   ``_asyncio_loop_factory``；
-- ``pytest_collection_modifyitems`` 把同一 marker 补到实际 item 上，
+- ``pytest_collection_modifyitems`` 把同一常量补到实际 item 上，
   使 item 的 ``_loop_scope`` 为 session（pytest 9 的 item 不继承 definition marker）。
 
 根因：pytest-asyncio 1.4 在 ``pytest_generate_tests`` 中按 marker 的
@@ -64,29 +66,48 @@ def _add_marker_calls(node: ast.FunctionDef) -> list[ast.Call]:
     ]
 
 
-def _has_session_asyncio_marker(node: ast.FunctionDef) -> bool:
+def _module_assign_value(name: str) -> ast.expr:
+    """返回模块顶层 ``name = <expr>`` 赋值的右侧表达式节点。"""
+    tree = ast.parse(CONFTEST_PATH.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if name in targets:
+            return node.value
+    raise AssertionError(f"tests/e2e/conftest.py 缺少模块级赋值 {name}")
+
+
+def _add_marker_uses_session_constant(node: ast.FunctionDef) -> bool:
     return any(
-        isinstance(child, ast.Call)
-        and isinstance(child.func, ast.Attribute)
-        and child.func.attr == "asyncio"
-        and any(
-            kw.arg == "loop_scope" and isinstance(kw.value, ast.Constant) and kw.value.value == "session"
-            for kw in child.keywords
-        )
-        for child in ast.walk(node)
+        call.args and isinstance(call.args[0], ast.Name) and call.args[0].id == "_E2E_SESSION_LOOP_MARKER"
+        for call in _add_marker_calls(node)
     )
+
+
+def test_session_loop_marker_constant_defined() -> None:
+    value = _module_assign_value("_E2E_SESSION_LOOP_MARKER")
+    assert isinstance(value, ast.Call)
+    func = value.func
+    assert isinstance(func, ast.Attribute) and func.attr == "asyncio", (
+        "_E2E_SESSION_LOOP_MARKER 必须由 pytest.mark.asyncio(...) 构造"
+    )
+    assert any(
+        kw.arg == "loop_scope" and isinstance(kw.value, ast.Constant) and kw.value.value == "session"
+        for kw in value.keywords
+    ), "_E2E_SESSION_LOOP_MARKER 必须带 loop_scope='session'"
 
 
 def test_definition_marker_injected_in_pytest_generate_tests_with_tryfirst() -> None:
     node = _function_node("pytest_generate_tests")
     assert _hookimpl_kwargs(node).get("tryfirst") is True
-    assert _has_session_asyncio_marker(node) and _add_marker_calls(node), (
-        "pytest_generate_tests 必须向 definition 注入 pytest.mark.asyncio(loop_scope='session')"
+    assert _add_marker_uses_session_constant(node), (
+        "pytest_generate_tests 必须向 definition 注入 _E2E_SESSION_LOOP_MARKER"
     )
 
 
 def test_item_marker_injected_in_pytest_collection_modifyitems() -> None:
     node = _function_node("pytest_collection_modifyitems")
-    assert _has_session_asyncio_marker(node) and _add_marker_calls(node), (
-        "pytest_collection_modifyitems 必须为 item 补注入 pytest.mark.asyncio(loop_scope='session')"
+    assert _add_marker_uses_session_constant(node), (
+        "pytest_collection_modifyitems 必须为 item 补注入 _E2E_SESSION_LOOP_MARKER"
     )

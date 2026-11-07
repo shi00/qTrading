@@ -71,7 +71,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.2.0",
-    "pytest-asyncio>=1.4.1",
+    "pytest-asyncio>=1.4.1,<2.0",  # <2.0: E2E conftest hook 依赖 1.4 的 _asyncio_loop_factory 参数化机制（PR #2085），大版本升级须人工复核
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "pytest-rerunfailures>=16.7",
