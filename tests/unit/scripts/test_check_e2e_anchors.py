@@ -306,6 +306,96 @@ class TestCheckUnusedEids:
 
 
 # ============================================================================
+# main: 定义文件不可用时失败关闭
+# ============================================================================
+
+
+def _isolate_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离 ROOT 到 tmp_path，并创建空 ui/ tests/ 目录。"""
+    import check_e2e_anchors
+
+    monkeypatch.setattr(check_e2e_anchors, "ROOT", tmp_path)
+    (tmp_path / "ui").mkdir(exist_ok=True)
+    (tmp_path / "tests").mkdir(exist_ok=True)
+
+
+class TestMainFailClosed:
+    """定义文件缺失/坏语法/命名空间无成员时 main 必须返回 1 且不打印 PASS。"""
+
+    def test_missing_definition_file_fails(self, tmp_path, monkeypatch, capsys):
+        """定义文件缺失时失败关闭。"""
+        _isolate_root(tmp_path, monkeypatch)
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "PASS" not in captured.out
+        assert "EIDS 定义文件不存在或不可读" in captured.err
+
+    def test_unparseable_definition_file_fails(self, tmp_path, monkeypatch, capsys):
+        """定义文件坏语法时失败关闭，且定义错误只输出一次。"""
+        _isolate_root(tmp_path, monkeypatch)
+        eids_file = tmp_path / "ui" / "testing" / "e2e_ids.py"
+        eids_file.parent.mkdir(parents=True)
+        eids_file.write_text("class !@#$\n", encoding="utf-8")
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "PASS" not in captured.out
+        assert "无法解析" in captured.err
+        assert captured.err.count("e2e_ids.py") == 1
+
+    def test_all_namespaces_empty_fails(self, tmp_path, monkeypatch, capsys):
+        """EIDS 类无可检查成员时失败关闭。"""
+        _isolate_root(tmp_path, monkeypatch)
+        eids_file = tmp_path / "ui" / "testing" / "e2e_ids.py"
+        eids_file.parent.mkdir(parents=True)
+        eids_file.write_text(
+            "class _EmptyIds:\n    pass\nclass EIDS:\n    EMPTY = _EmptyIds\n",
+            encoding="utf-8",
+        )
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "PASS" not in captured.out
+        assert "所有命名空间均无成员" in captured.err
+
+    def test_missing_eids_namespace_fails(self, tmp_path, monkeypatch, capsys):
+        """定义文件可解析但未解析出任何命名空间时失败关闭。"""
+        _isolate_root(tmp_path, monkeypatch)
+        eids_file = tmp_path / "ui" / "testing" / "e2e_ids.py"
+        eids_file.parent.mkdir(parents=True)
+        eids_file.write_text("class _FooIds:\n    BAR = 1\n", encoding="utf-8")
+        assert main() == 1
+        captured = capsys.readouterr()
+        assert "PASS" not in captured.out
+        assert "未解析出任何命名空间" in captured.err
+
+    def test_valid_definitions_and_refs_pass(self, tmp_path, monkeypatch, capsys):
+        """合法常量/方法引用及字符串/注释中的伪引用场景回归通过。"""
+        _isolate_root(tmp_path, monkeypatch)
+        eids_file = tmp_path / "ui" / "testing" / "e2e_ids.py"
+        eids_file.parent.mkdir(parents=True)
+        eids_file.write_text(
+            "class _ScreenerIds:\n"
+            "    RUN_BUTTON: int = 1\n"
+            "    @staticmethod\n"
+            "    def result_row(ts_code: str) -> int:\n"
+            "        return 1\n"
+            "class EIDS:\n"
+            "    SCREENER = _ScreenerIds\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "ui" / "view.py").write_text(
+            "x = EIDS.SCREENER.RUN_BUTTON\n"
+            "y = EIDS.SCREENER.result_row('000001.SZ')\n"
+            'msg = "EIDS.SCREENER.NONEXISTENT"\n'
+            "# EIDS.SCREENER.ALSO_MISSING\n",
+            encoding="utf-8",
+        )
+        assert main() == 0
+        captured = capsys.readouterr()
+        assert "PASS" in captured.out
+        assert captured.err == ""
+
+
+# ============================================================================
 # 契约测试：当前代码库应通过所有 EIDS 引用检查
 # ============================================================================
 

@@ -135,6 +135,25 @@ def _extract_eids_namespaces(eids_path: Path) -> dict[str, set[str]]:
     return result
 
 
+def _validate_eids_definitions(eids_path: Path) -> list[str]:
+    """校验 EIDS 定义文件可用，返回错误列表（空表示可用）。
+
+    两个检查函数以空列表表示「无可检查内容」，无法区分「定义文件不可用」与
+    「定义合法但无问题」；失败关闭判定集中在 ``main``，避免定义文件缺失、
+    无法解析或命名空间为空时被当作通过放行。
+    """
+    if not eids_path.is_file():
+        return [f"EIDS 定义文件不存在或不可读: {eids_path}"]
+    if _parse_module(eids_path) is None:
+        return [f"EIDS 定义文件无法解析（语法或编码错误）: {eids_path}"]
+    namespaces = _extract_eids_namespaces(eids_path)
+    if not namespaces:
+        return [f"EIDS 定义文件未解析出任何命名空间: {eids_path}"]
+    if not any(namespaces.values()):
+        return [f"EIDS 定义文件所有命名空间均无成员: {eids_path}"]
+    return []
+
+
 # ============================================================================
 # EIDS 引用侧：扫描 EIDS.X.Y 引用并校验
 # ============================================================================
@@ -286,7 +305,19 @@ def check_unused_eids(
 
 
 def main() -> int:
-    """运行 EIDS 引用检查与未引用死锚点检查，返回退出码。"""
+    """运行 EIDS 引用检查与未引用死锚点检查，返回退出码。
+
+    先校验定义文件可用性，不可用时直接失败关闭（返回 1），不进入后续检查，
+    避免两个检查函数返回的空结果被合并为 PASS。
+    """
+    eids_path = ROOT / "ui" / "testing" / "e2e_ids.py"
+    definition_errors = _validate_eids_definitions(eids_path)
+    if definition_errors:
+        print("[FAIL] E2E anchor 检查失败：EIDS 定义不可用", file=sys.stderr)
+        for err in definition_errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
     ref_errors = check_eids_refs()
     unused_errors = check_unused_eids()
     all_errors = ref_errors + unused_errors
