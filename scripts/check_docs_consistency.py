@@ -342,10 +342,37 @@ def github_anchor(heading_text: str) -> str:
     return s
 
 
+# fenced code block 起始/结束行：3 个及以上连续反引号或波浪号，允许前置空白
+_FENCE_LINE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+
+
 def extract_headings(content: str) -> set[str]:
-    """提取 markdown 文件所有标题对应的锚点集合。"""
+    """提取 markdown 文件所有标题对应的锚点集合。
+
+    fenced code block 内的行不计入标题，避免示例代码中的 `# xxx` 被当成真实锚点：
+    反引号与波浪号均可开启 fence；关闭 fence 须与开启字符一致且长度不小于开启长度；
+    未闭合的 fence 持续到文末。反引号 fence 的 info string 不得含反引号，
+    否则视为行内代码（如显示 ```` ``` ````）而非 fence 开启。
+    """
     anchors: set[str] = set()
+    fence_char: str | None = None
+    fence_len = 0
     for line in content.splitlines():
+        fence_match = _FENCE_LINE_RE.match(line)
+        if fence_char is not None:
+            if fence_match is not None:
+                fence = fence_match.group(1)
+                if fence[0] == fence_char and len(fence) >= fence_len and not fence_match.group(2).strip():
+                    fence_char = None
+                    fence_len = 0
+            continue
+        if fence_match is not None:
+            fence = fence_match.group(1)
+            # 反引号 fence 的 info string 含反引号时为行内代码，不开启 fence
+            if fence[0] == "~" or "`" not in fence_match.group(2):
+                fence_char = fence[0]
+                fence_len = len(fence)
+                continue
         m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
         if m:
             anchors.add(github_anchor(m.group(2)))

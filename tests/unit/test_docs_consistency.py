@@ -424,6 +424,55 @@ class TestDocsConsistencyScript:
         assert github_anchor("语言切换响应 (I18n Hot Reload)") == "语言切换响应-i18n-hot-reload"
         assert github_anchor("V1 声明式 UI 开发规范") == "v1-声明式-ui-开发规范"
 
+    def test_extract_headings_skips_backtick_fenced_example_headings(self):
+        """反引号 fence 内的示例标题不计入；fence 外的正文标题保留。"""
+        from check_docs_consistency import extract_headings
+
+        content = "# 真实标题\n\n```python\n# Phantom\n```\n\n## 正文小节\n"
+        assert extract_headings(content) == {"真实标题", "正文小节"}
+
+    def test_extract_headings_skips_tilde_fenced_example_headings(self):
+        """波浪号 fence 同样跳过示例标题。"""
+        from check_docs_consistency import extract_headings
+
+        content = "# 标题\n\n~~~markdown\n# Phantom\n~~~\n"
+        assert extract_headings(content) == {"标题"}
+
+    def test_extract_headings_fence_closer_requires_same_char_and_min_length(self):
+        """关闭 fence 须同字符且不短于开启长度；不匹配的行不关闭 fence。"""
+        from check_docs_consistency import extract_headings
+
+        # ```` 开启后，3 个反引号与波浪号均不能关闭；最后 4 个反引号关闭，其后标题保留
+        content = "````text\n# Phantom\n```\n~~~\n# 仍在代码块\n````\n# 真实标题\n"
+        assert extract_headings(content) == {"真实标题"}
+
+    def test_extract_headings_unclosed_fence_swallows_to_eof(self):
+        """未闭合 fence 持续到文末，其后标题均不计入。"""
+        from check_docs_consistency import extract_headings
+
+        content = "# 标题\n\n```python\n# Phantom\n## 也不计入\n"
+        assert extract_headings(content) == {"标题"}
+
+    def test_extract_headings_inline_code_with_backticks_not_fence(self):
+        """行内代码（info string 含反引号）不开启 fence，后续正文标题仍计入。"""
+        from check_docs_consistency import extract_headings
+
+        content = "# 标题\n\n```` ``` ````\n\n# 正文\n"
+        assert extract_headings(content) == {"标题", "正文"}
+
+    def test_anchor_to_fenced_example_heading_is_dead_while_body_heading_passes(self, tmp_path, monkeypatch):
+        """示例内标题不可作为锚点；正文同名标题存在时对应链接通过。"""
+        from check_docs_consistency import check_anchor_dead_links
+
+        content = "# 真实标题\n\n```text\n# 幻影标题\n```\n\n[正文](#真实标题)\n[示例](#幻影标题)\n"
+        doc = tmp_path / "fenced_anchor.md"
+        doc.write_text(content, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+
+        errors = check_anchor_dead_links()
+        assert len(errors) == 1, f"示例内标题不应放行锚点，仅应报告 1 条错误, got: {errors}"
+        assert "幻影标题" in errors[0]
+
     def test_check_anchor_dead_links_passes(self):
         """CLAUDE.md 与 CONTRIBUTING.md 不含死锚点。"""
         from check_docs_consistency import check_anchor_dead_links
