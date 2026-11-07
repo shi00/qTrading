@@ -150,11 +150,25 @@ def run_pip_audit(
 ) -> int:
     exit_code = 0
 
+    # 显式要求审计的输入集合必须完整：任一输入缺失都视为「审计未执行」并整体失败，
+    # 不允许以「部分文件审计通过」冒充安全门禁通过（fail-closed）。
+    if not requirements_files:
+        print("ERROR: No requirements files provided; security audit was not executed")
+        return 1
+    missing = [req_file for req_file in requirements_files if not Path(req_file).is_file()]
+    if missing:
+        for req_file in missing:
+            print(f"ERROR: Requirements file not found or not a regular file: {req_file}")
+        print("ERROR: Security audit was not executed; refusing to pass with incomplete inputs")
+        return 1
+
     for req_file in requirements_files:
         req_path = Path(req_file)
-        if not req_path.exists():
-            print(f"WARNING: Requirements file not found: {req_file}")
-            continue
+        # 预检与审计之间文件仍可能被删除/替换（TOCTOU），此处再次校验，缺失即失败。
+        if not req_path.is_file():
+            print(f"ERROR: Requirements file disappeared before audit: {req_file}")
+            print("ERROR: Security audit did not complete; failing instead of passing partially")
+            return 1
 
         print(f"\n{'=' * 60}")
         print(f"Auditing: {req_file}")
