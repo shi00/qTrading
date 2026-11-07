@@ -287,3 +287,22 @@ def test_installer_smoke_scripts_carry_utf8_bom() -> None:
     assert SMOKE_SCRIPTS, "未找到 scripts/installer_smoke_*.ps1"
     missing = [p.name for p in SMOKE_SCRIPTS if not p.read_bytes().startswith(b"\xef\xbb\xbf")]
     assert not missing, f"以下脚本缺少 UTF-8 BOM（powershell 5.1 会解析失败）: {missing}"
+
+
+# sidecar 的 status 由 postmaster 存活直接推导为 running（commands.rs derive_status），
+# 早于 run.rs 的 ensure_database；写哨兵前必须显式等待业务库出现，否则与建库竞态。
+SENTINEL_SMOKE_SCRIPTS = (
+    "installer_smoke_crash_recovery.ps1",
+    "installer_smoke_uninstall.ps1",
+    "installer_smoke_upgrade.ps1",
+)
+
+
+def test_smoke_scripts_wait_for_app_database_before_sentinel() -> None:
+    """sidecar ready 不代表业务库已建好：三处写哨兵的脚本必须先等库存在。"""
+    for name in SENTINEL_SMOKE_SCRIPTS:
+        text = (PROJECT_ROOT / "scripts" / name).read_text(encoding="utf-8-sig")
+        assert "function Wait-AppDatabaseReady" in text, f"{name} 缺少 Wait-AppDatabaseReady 定义"
+        assert text.index("Wait-AppDatabaseReady -Password") < text.index("$sentinelCreateSql ="), (
+            f"{name} 在等业务库之前就写入了哨兵"
+        )
