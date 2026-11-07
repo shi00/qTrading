@@ -1246,21 +1246,36 @@ class _LazyImportWhitelistVisitor(ast.NodeVisitor):
         self._in_type_checking = False
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        # 保存外层状态并在 finally 恢复：嵌套函数退出后，外层函数体内后续的 import
+        # 仍须按「函数体内」判定，否则会被误判为模块级而漏检。
+        previous_in_function = self._in_function
         self._in_function = True
-        self.generic_visit(node)
-        self._in_function = False
+        try:
+            self.generic_visit(node)
+        finally:
+            self._in_function = previous_in_function
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        previous_in_function = self._in_function
         self._in_function = True
-        self.generic_visit(node)
-        self._in_function = False
+        try:
+            self.generic_visit(node)
+        finally:
+            self._in_function = previous_in_function
 
     def visit_If(self, node: ast.If) -> None:
         if isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
-            # TYPE_CHECKING 块仅类型检查，非运行时依赖，豁免
+            # 仅 body 属于类型检查块（豁免）；else 分支是运行期代码，须按原状态遍历。
+            # 保存并恢复外层状态，避免嵌套 TYPE_CHECKING 结束后污染外层判定。
+            previous_in_type_checking = self._in_type_checking
             self._in_type_checking = True
-            self.generic_visit(node)
-            self._in_type_checking = False
+            try:
+                for stmt in node.body:
+                    self.visit(stmt)
+            finally:
+                self._in_type_checking = previous_in_type_checking
+            for stmt in node.orelse:
+                self.visit(stmt)
         else:
             self.generic_visit(node)
 
