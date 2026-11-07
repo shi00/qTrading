@@ -1,0 +1,386 @@
+name: CUDA Wheel Warmup
+
+# 独立 workflow 而非 ci_cd.yml 内的 job：冷路径构建预算已放宽到 210 分钟（实测 90 分钟不足），
+# 若留在主 CI 内，会与 push 到 main 的 run 共享 workflow 级并发组（同 ref `refs/heads/main`、
+# `cancel-in-progress: false`），使后续所有合并的整条 CI 排队等待最长数小时（队头阻塞）。
+# 独立文件 + 独立并发组 + 独立 paths 过滤同时解决三件事：
+# 1) 不再阻塞主 CI；2) tag 发布不再触发无效预热（tag 与本 job 并发启动，同 run 产物必然来不及取用）；
+# 3) 只有依赖清单 / 本 workflow / 共用 action / 键后缀所在的 ci_cd.yml 变更时才重新检查，
+#    已预热时命中即早退（约 1~2 分钟）。
+
+on:
+  schedule:
+    # 每天凌晨 2:00 UTC（北京时间 10:00），与主 CI 的 flaky 检测同刻但互不影响（独立并发组）
+    - cron: '0 2 * * *'
+  push:
+    branches: [ "main" ]
+    paths:
+      # llama 版本单源于 requirements.txt：依赖升级合并后立即补建，消除「只在夜间补建」的空窗
+      - requirements.txt
+      - .github/workflows/cuda-wheel-warmup.yml
+      # 键后缀 / bank tag 定义在 ci_cd.yml 的 workflow env 中，改动须重新核对产物
+      - .github/workflows/ci_cd.yml
+      # 下载/校验逻辑变更同样可能使既有资产不可用
+      - .github/actions/restore-cuda-wheel/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # 以下常量与 ci_cd.yml 的 workflow env 双写（跨 workflow 无法引用），
+  # 由 tests/unit/test_cuda_warmup_workflow.py 守护两侧逐字一致；任一侧修改都会失败。
+  CI_WHEEL_BANK_TAG: ci-wheels
+  LLAMA_CUDA_WHEEL_KEY_SUFFIX: cu12.4.1-py3.14-win2022-arch75-80-86-89-90-ptx90-r1
+  # CUDA wheel 冷构建的单步预算（分钟），单源于此：`Build CUDA wheel` 的 timeout-minutes 与
+  # summary 的超时判定共同引用（YAML 的 timeout-minutes 无法引用 env 上下文，故字面量+单测守护一致）。
+  # 2026-11-07 夜间 run 42353067654 实测：90 分钟预算在 nvcc 仍在编译时被杀，verify/publish 随之
+  # skipped，wheel bank 从未建立，两条 cuda 腿始终回退内联源码编译。
+  LLAMA_CUDA_BUILD_TIMEOUT_MIN: 210
+
+# 同一时刻只允许一个预热构建：避免并发 run 重编同一 key 互相 --clobber；
+# 排队者获得并发槽后先走 restore，命中即早退，不会重复付出编译成本。
+concurrency:
+  group: cuda-wheel-warmup
+  cancel-in-progress: false
+
+jobs:
+  build-llama-cuda-wheel:
+    name: Prebuild CUDA wheel (llama-cpp-python)
+    # dispatch 会执行「所选 ref 上」的 workflow 定义并照常授予 job 级 contents: write，
+    # 若允许分支 dispatch，任何有 push 权限者都能改本 job 把自定义 wheel 写进 ci-wheels
+    # （下载侧 sha256 只证明完整性、不证明来源），从而绕过评审进入发布包；
+    # schedule / push 的 ref 恒为 refs/heads/main，故该守卫只对 dispatch 生效。
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    # job 预算必须显著大于单步预算：job 计时从 job 起点开始，Build 之前的 Toolkit 安装实测可达
+    # 26 分钟，若 job = step + 30，则 Toolkit 稍慢时 job 级超时先触发——此时 `if: always()` 的
+    # summary 与守卫都不会执行，job 结论是 cancelled（灰）而非红色，恰好退回本次要消灭的
+    # 「超时无红色信号」状态。故留 90 分钟余量。
+    timeout-minutes: 300
+    # 写权限仅用于把 wheel 发布到 `ci-wheels` Release；触发面已排除 PR / merge_group，无可信输入。
+    permissions:
+      contents: write
+    # 结构化结果契约：由 job 末尾的 always() summary 步骤写入，用于在终态区分
+    # 缓存命中 / 成功构建并发布 / 构建超时 / 其他失败，并明确 published=false，
+    # 避免超时被 continue-on-error 吸收成绿色后无法取证。
+    outputs:
+      warmup_result: ${{ steps.warmup-summary.outputs.result }}
+      warmup_published: ${{ steps.warmup-summary.outputs.published }}
+    # 重型步骤逐个 continue-on-error：单个步骤失败不打断后续观测；终态由末尾守卫步骤统一裁决，
+    # 保证「银行仍为空」时 job 变红（见 Fail warmup when bank stays cold）。
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Resolve llama-cpp-python version
+        id: llama-version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 版本单源于 requirements.txt：避免"缓存键 / wheel 编译版本 / 依赖清单"三处双写后在
+          # 依赖升级时把旧版本 wheel 装进发布腿（--only-binary 会因此直接报错）。
+          $match = Select-String -Path requirements.txt -Pattern '^llama-cpp-python==([0-9][^#\s]*)$' | Select-Object -First 1
+          if (-not $match) {
+            Write-Error "requirements.txt 未固定 llama-cpp-python==<version>"
+            exit 1
+          }
+          $version = $match.Matches[0].Groups[1].Value.Trim()
+          Write-Host "llama-cpp-python version: $version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Resolve wheel bank key
+        id: wheel-key
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 资产键 = llama 版本 + 编译环境后缀（env.LLAMA_CUDA_WHEEL_KEY_SUFFIX）。
+          # 与 build-windows 的 cuda 腿逐字一致；后缀分别定义在两个 workflow 的 env 中（跨文件无法引用），
+          # 由单测守护两侧相等。
+          $key = "llama-cuda-${{ steps.llama-version.outputs.version }}-$env:LLAMA_CUDA_WHEEL_KEY_SUFFIX"
+          Write-Host "wheel bank key: $key"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "key=$key"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        # CUDA 构建产物会污染共享 uv 缓存（CPU 腿可能误取到 CUDA wheel，反之亦然），
+        # 故不启用 setup-uv 自带缓存，改用下方的显式 wheel bank（Release 资产）。
+        with:
+          enable-cache: false
+
+      - name: Restore prebuilt CUDA wheel from release bank
+        id: restore-wheel
+        # 缓存仓库 = 独立 tag `ci-wheels` 的 Release 资产（资产名 <key>.zip）。
+        # 相较 actions/cache：不受 10 GB / 7 天未访问淘汰、不受 tag 作用域限制，任意 ref 可读。
+        # 下载重试与 sha256 / 文件名校验单源于 .github/actions/restore-cuda-wheel（与两条 cuda 腿共用），
+        # 避免一处网络抖动或校验口径变更在三处副本间漂移。
+        # 未命中（Release / 资产不存在，或下载 / 校验失败）即走冷路径重编，只影响耗时不影响正确性。
+        continue-on-error: true
+        uses: ./.github/actions/restore-cuda-wheel
+        with:
+          key: ${{ steps.wheel-key.outputs.key }}
+          bank-tag: ${{ env.CI_WHEEL_BANK_TAG }}
+          fallback-message: 走冷路径重编
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install CUDA Toolkit
+        if: steps.restore-wheel.outputs.hit != 'true'
+        continue-on-error: true
+        # 安装方式、12.4 版本选择与子包清单的依据见 build-windows 同名步骤的长注释。
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d  # v0.2.36
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
+          use-github-cache: false
+
+      - name: Build CUDA wheel
+        id: build-wheel
+        if: steps.restore-wheel.outputs.hit != 'true'
+        continue-on-error: true
+        # 单步超时由 continue-on-error 吸收，避免整 job 超时把 job 结论变成 cancelled。
+        # 与 workflow env LLAMA_CUDA_BUILD_TIMEOUT_MIN 保持一致（timeout-minutes 无法引用 env 上下文），
+        # 二者由 tests/unit/test_cuda_warmup_workflow.py 守护；90 分钟实测会在编译未完成时被杀。
+        timeout-minutes: 210
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 记录 UTC 起始时间到 GITHUB_ENV，供 job 末尾 summary 计算耗时并区分超时/普通失败；
+          # 仅新增观测点，不改变下方构建命令。
+          $startedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          Add-Content -Path $env:GITHUB_ENV -Value "CUDA_BUILD_STARTED_AT=$startedAt"
+          # CUDA arch 列表 = 产品确认的 GPU 覆盖范围：Turing 75 / Ampere 80·86 / Ada 89 / Hopper 90，
+          # 另加 90-virtual（PTX 前向兼容，未来架构由驱动 JIT 兜底）。
+          # 剔除 50/61/70（Maxwell/Pascal/Volta）：无 Tensor Core、llama.cpp 收益极低，
+          # 且每个 arch 都会线性增加 nvcc 耗时。
+          $env:CMAKE_ARGS = "-DGGML_CUDA=on -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler -DCMAKE_CUDA_ARCHITECTURES=75-real;80-real;86-real;89-real;90-real;90-virtual"
+          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
+          if (Test-Path $cudaBin) { $env:Path = "$cudaBin;$env:Path" }
+          Write-Host "CMAKE_ARGS=$env:CMAKE_ARGS"
+          nvcc --version
+          New-Item -ItemType Directory -Force -Path wheelhouse | Out-Null
+          # pip wheel 只产出 wheel 不安装；构建隔离环境由 pip 自建（scikit-build-core / cmake / ninja 从 PyPI 现装）。
+          python -m pip wheel --no-deps --wheel-dir wheelhouse llama-cpp-python==${{ steps.llama-version.outputs.version }}
+          # 原生命令非零退出不会因 $ErrorActionPreference = "Stop" 抛出，必须显式检查；
+          # 提前失败可跳过后续 Verify 的空跑（它也依赖 wheelhouse 里有 wheel）。
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "pip wheel 构建失败（exit $LASTEXITCODE）"
+            exit 1
+          }
+          Get-ChildItem wheelhouse | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Verify wheel CUDA backend before publishing
+        id: verify-wheel
+        # 构建失败时 wheelhouse 为空，跳过校验（否则只会把"没找到 wheel"再报一遍）。
+        if: steps.restore-wheel.outputs.hit != 'true' && steps.build-wheel.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 与 build-windows 的 "Verify llama-cpp-python CUDA backend DLLs" 同语义；
+          # 提前在此校验，避免坏 wheel 写入 wheel bank 后连续击穿 4 条发布腿。
+          # 平台标签必须与 build-windows 的 Python 3.14 匹配，否则下游装上也是错的 ABI。
+          $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" | Select-Object -First 1
+          if (-not $wheel) {
+            Write-Error "wheelhouse 中未找到 cp314-win_amd64 的 wheel（构建失败或平台标签不符）"
+            exit 1
+          }
+          $sha = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
+          Write-Host "wheel: $($wheel.Name) ($($wheel.Length) bytes) sha256=$sha"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "CUDA wheel sha256: ``$sha`` ($($wheel.Name), $($wheel.Length) bytes)"
+          uv pip install --system --no-deps $wheel.FullName
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "预编译 wheel 安装失败（exit $LASTEXITCODE）"
+            exit 1
+          }
+          $pkgDir = python -c "import importlib.util; print(importlib.util.find_spec('llama_cpp').submodule_search_locations[0])"
+          $libDir = Join-Path $pkgDir "lib"
+          $llamaDll = Join-Path $libDir "llama.dll"
+          # llama.dll 是后端共用载体，缺失即说明 wheel 结构异常，必须拒绝发布而非静默放行。
+          if (-not (Test-Path $llamaDll)) {
+            Write-Error "wheel 内缺少 llama_cpp/lib/llama.dll（$libDir）"
+            exit 1
+          }
+          $cudaDlls = @(Get-ChildItem $libDir -Filter "*cuda*.dll")
+          Write-Host "Found CUDA DLLs: $($cudaDlls.Name -join ',')"
+          $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($llamaDll))
+          $linked = $ascii.Contains("cudart64_12.dll") -or $ascii.Contains("cublas64_12.dll") -or $ascii.Contains("cublasLt64_12.dll")
+          if ($cudaDlls.Count -eq 0 -and -not $linked) {
+            Write-Error "no CUDA backend evidence in $libDir; refusing to publish a CPU-only wheel"
+            exit 1
+          }
+
+      - name: Publish CUDA wheel to release bank
+        id: publish-wheel
+        # 仅在重新编译且校验通过后上传，坏 wheel 不得进入缓存仓库。
+        # --clobber 使重跑幂等；资产名 <key>.zip 决定下游按同一键精确匹配。
+        # Release 不存在时首次创建：tag `ci-wheels` 不匹配 push.tags `v*.*.*`，不会触发发版链。
+        if: steps.restore-wheel.outputs.hit != 'true' && steps.verify-wheel.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $key = "${{ steps.wheel-key.outputs.key }}"
+          $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" | Select-Object -First 1
+          if (-not $wheel) {
+            Write-Error "wheelhouse 中未找到 cp314-win_amd64 wheel"
+            exit 1
+          }
+          $sha = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
+          $sums = Join-Path wheelhouse "SHA256SUMS.txt"
+          Set-Content -Path $sums -Value "$sha  $($wheel.Name)" -Encoding ascii
+          $bankDir = Join-Path $env:RUNNER_TEMP "wheel-bank"
+          New-Item -ItemType Directory -Force -Path $bankDir | Out-Null
+          $zip = Join-Path $bankDir "$key.zip"
+          Compress-Archive -Path $wheel.FullName, $sums -DestinationPath $zip -Force
+          # 必须用 --prerelease 创建：GitHub 会把「最新创建的非 draft / 非 prerelease」Release
+          # 自动标为仓库 Latest，而 ci-wheels 只是构建缓存仓库，绝不能抢走正式版本的 latest 归属
+          # （release-windows 靠显式 --latest 才夺回）。prerelease 同时会被训练指纹脚本的
+          # 正式版本列举逻辑（排除 pre-release）过滤，避免多一条无关 Release。
+          # draft 必须拒绝：本 job 持有 contents: write 能看到 draft，但两条 cuda 腿只有 contents: read，
+          # 取不到 draft 资产，会永远静默走冷路径。
+          # --target 决定 tag 指向；tag 已存在时 GitHub 忽略该值，因此可安全重跑。
+          $isDraft = gh release view $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq '.isDraft' 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $isDraft = ""
+            gh release create $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY `
+              --title "CI wheel bank (llama-cpp-python CUDA)" `
+              --notes "CI 预编译 llama-cpp-python CUDA wheel 的长期缓存仓库（prerelease，不参与 latest 归属）。资产名 <key>.zip 即缓存键，勿手工修改；需要强制重编时递增 workflow env 的 LLAMA_CUDA_WHEEL_KEY_SUFFIX；旧 -rN 资产可人工删除。" `
+              --prerelease `
+              --target $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) {
+              # 并发首次创建：另一 run 可能已抢先建好，复核一次后继续，避免整步丢弃本 run 的产物。
+              $isDraft = gh release view $env:CI_WHEEL_BANK_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq '.isDraft' 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "创建 $env:CI_WHEEL_BANK_TAG Release 失败（exit $LASTEXITCODE）"
+                exit 1
+              }
+            }
+          }
+          if ("$isDraft" -eq "true") {
+            Write-Error "$env:CI_WHEEL_BANK_TAG Release 处于 draft 状态，contents: read 的 cuda 腿无法下载；请先 gh release edit $env:CI_WHEEL_BANK_TAG --draft=false"
+            exit 1
+          }
+          # --clobber 是 delete-then-recreate：瞬时故障下 bank 可能短暂为空，但只会让下载方回退冷编译，
+          # 不会把旧/坏产物留在原处，故该窄窗口无需额外重试。
+          gh release upload $env:CI_WHEEL_BANK_TAG $zip --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "上传 $key.zip 失败（exit $LASTEXITCODE）"
+            exit 1
+          }
+          Write-Host "已发布 $key.zip（sha256=$sha）"
+
+      - name: Summarize CUDA wheel warmup outcome
+        id: warmup-summary
+        # 必须 always()：无论缓存命中、构建超时、校验/发布失败还是 job 取消，都要留下可取证的结构化结果；
+        # 同时不得改变 job 结论（本步 continue-on-error）。守卫步骤依赖本步 outputs，故须先于守卫执行。
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          try {
+            $hit = "${{ steps.restore-wheel.outputs.hit }}"
+            $buildOutcome = "${{ steps.build-wheel.outcome }}"
+            $verifyOutcome = "${{ steps.verify-wheel.outcome }}"
+            $publishOutcome = "${{ steps.publish-wheel.outcome }}"
+            $startedAtRaw = $env:CUDA_BUILD_STARTED_AT
+
+            # 单步预算单源于 workflow env LLAMA_CUDA_BUILD_TIMEOUT_MIN（与 Build 步骤的 timeout-minutes
+            # 字面量一致，由单测守护）；触发单步超时被杀时 outcome 仍为 failure，留 1 分钟容差区分
+            # build_timeout 与普通 build_failed。
+            $timeoutThresholdMinutes = [int]$env:LLAMA_CUDA_BUILD_TIMEOUT_MIN - 1
+
+            $elapsedText = "n/a"
+            $elapsedMinutes = $null
+            if ($startedAtRaw) {
+              try {
+                $startedAt = [System.DateTimeOffset]::Parse($startedAtRaw, [System.Globalization.CultureInfo]::InvariantCulture)
+                $elapsedMinutes = [math]::Round(((Get-Date).ToUniversalTime() - $startedAt.UtcDateTime).TotalMinutes, 2)
+                # 固定小数点为 .，避免 runner 区域设置影响 summary 可读性与取证比对。
+                $elapsedText = $elapsedMinutes.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+              } catch {
+                $elapsedText = "unparsed"
+              }
+            }
+
+            $result = "unexpected"
+            if ($hit -eq "true") {
+              $result = "cache_hit"
+            } elseif ($buildOutcome -eq "cancelled" -or $verifyOutcome -eq "cancelled" -or $publishOutcome -eq "cancelled") {
+              $result = "cancelled"
+            } elseif ($buildOutcome -eq "failure") {
+              if ($null -ne $elapsedMinutes -and $elapsedMinutes -ge $timeoutThresholdMinutes) {
+                $result = "build_timeout"
+              } else {
+                $result = "build_failed"
+              }
+            } elseif ($buildOutcome -eq "success") {
+              if ($verifyOutcome -eq "failure") {
+                $result = "verify_failed"
+              } elseif ($verifyOutcome -eq "success") {
+                if ($publishOutcome -eq "success") {
+                  $result = "built_published"
+                } else {
+                  $result = "publish_failed"
+                }
+              }
+            }
+
+            # published=true 仅当本 run 实际重新构建、verify 成功且 publish 成功；
+            # cache_hit / timeout / 任一失败均为 false。
+            $published = if ($result -eq "built_published") { "true" } else { "false" }
+
+            # 先写 step outputs（job outputs 依赖它们），再做 Markdown 渲染，
+            # 避免 summary 渲染异常连带丢失结构化结果。
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "result=$result"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "published=$published"
+
+            $table = @(
+              "| Signal | Value |",
+              "|--------|-------|",
+              "| Cache hit | $hit |",
+              "| Build | $buildOutcome |",
+              "| Verify | $verifyOutcome |",
+              "| Publish | $publishOutcome |",
+              "| Elapsed (min) | $elapsedText |",
+              "| Result | ``$result`` |",
+              "| Published | $published |"
+            ) -join "`n"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### CUDA wheel warmup outcome`n`n$table"
+
+            if ($result -ne "cache_hit" -and $result -ne "built_published") {
+              Write-Host "::warning::CUDA wheel warmup result=$result (published=$published)"
+            } else {
+              Write-Host "CUDA wheel warmup result=$result (published=$published)"
+            }
+          } catch {
+            # summary 只是观测手段：自身异常仅告警，绝不让 job 变红。
+            Write-Host "::warning::CUDA wheel warmup summary failed: $($_.Exception.Message)"
+          }
+
+      - name: Fail warmup when bank stays cold
+        id: warmup-gate
+        # 本 workflow 的唯一职责就是把 wheel 存进 bank，故任何非「已就绪」终态都必须变红：
+        # 历史实现里所有重步骤都是 continue-on-error，job 恒绿——run 42353067654 在 90 分钟步超时被杀、
+        # bank 一直为空，却没有任何红色信号，两条 cuda 腿长期静默回退源码编译。
+        # 本 workflow 独立于 ci_cd.yml，不在任何 needs 链内，变红不阻断 PR 门禁与发布链。
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $result = "${{ steps.warmup-summary.outputs.result }}"
+          if ($result -eq "cache_hit" -or $result -eq "built_published") {
+            Write-Host "CUDA wheel bank 已就绪（result=$result）"
+            exit 0
+          }
+          Write-Host "::error::CUDA wheel bank 未就绪（result=$result）：本次未产出可复用 wheel，下游 cuda 腿将回退内联源码编译（37~90 分钟/腿）。"
+          exit 1
