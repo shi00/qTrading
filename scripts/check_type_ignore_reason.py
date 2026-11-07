@@ -14,6 +14,9 @@
 存量 ≤5 处或 2026-11-30 前转为 ERROR（见 docs/debt/known-technical-debt.md 登记）。
 裸 ignore 不在此渐进范围内（生产与 tests/ 均为 ERROR）。
 
+检查面：仅检查 tokenize 产出的 COMMENT token（字符串/文档字符串中的示例文本不计入）；
+文件无法被 tokenize 解析时 fail-closed 报错，不静默放行。
+
 用法（由 pre-commit 调用，文件名作为参数传入）::
 
     python scripts/check_type_ignore_reason.py <file1> <file2> ...
@@ -22,14 +25,17 @@
 tests/ 同判）。
 """
 
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 # 生产目录（R3 原规则强制 ERROR 的目录）
 _PROD_PREFIXES = ("core", "data", "services", "strategies", "utils", "ui", "app")
-# 裸 type: ignore（无 [error-code]）——违反 R3 原规则（生产与 tests/ 同判 ERROR）
-_BARE_RE = re.compile(r"# type:\s?ignore(\s+#|$)")
+# 裸 type: ignore（无 [error-code]）——违反 R3 原规则（生产与 tests/ 同判 ERROR）。
+# ignore 之后只允许纯行尾空白（含 tab），或接 `[ \t]+#` 开头的人话理由。
+_BARE_RE = re.compile(r"# type:\s?ignore(?:[ \t]*$|[ \t]+#)")
 # 带 error-code 的 type: ignore（[xxx]）
 _CODED_RE = re.compile(r"# type:\s?ignore\[([a-z\-]+)\]")
 # 带 human reason 的判定：error-code 之后同行有内容非仅结尾（含 `#` + 备注）
@@ -43,6 +49,14 @@ def _is_test_file(path: Path) -> bool:
     return any(p == _TESTS_PREFIX for p in parts) or str(path).replace("\\", "/").startswith("tests/")
 
 
+def _iter_comments(lines: list[str]) -> list[tuple[int, str]]:
+    """用 tokenize 提取注释 token，返回 (行号, 注释文本)；字符串/文档字符串不计入。"""
+    reader = io.StringIO("\n".join(lines)).readline
+    return [
+        (token.start[0], token.string) for token in tokenize.generate_tokens(reader) if token.type == tokenize.COMMENT
+    ]
+
+
 def check_file(path: Path) -> tuple[list[str], list[str]]:
     """检查单个文件，返回 (errors, warnings)。"""
     errors: list[str] = []
@@ -52,21 +66,27 @@ def check_file(path: Path) -> tuple[list[str], list[str]]:
     except (OSError, UnicodeDecodeError):
         return errors, warnings
 
+    try:
+        comments = _iter_comments(lines)
+    except (tokenize.TokenError, SyntaxError, UnicodeDecodeError) as exc:
+        # fail-closed：无法解析则无法确认是否存在裸 ignore，必须报错而非静默放行
+        errors.append(f"{path}: 无法完成 type: ignore 注释检查（tokenize 解析失败：{exc.__class__.__name__}）")
+        return errors, warnings
+
     is_test = _is_test_file(path)
-    for lineno, line in enumerate(lines, 1):
-        bare = _BARE_RE.search(line)
-        if bare and "# type:" in line:
+    for lineno, comment in comments:
+        if _BARE_RE.search(comment):
             # 裸 ignore（无 error-code）一律 ERROR：R3 为 INVARIANT，tests/ 不豁免
             errors.append(f"{path}:{lineno}: R3 模糊压制 — # type: ignore 必须带 [error-code]")
             continue
-        m = _CODED_RE.search(line)
+        m = _CODED_RE.search(comment)
         if m is None:
             continue
         code = m.group(1)
         if is_test and code == "attr-defined":
             # mock 替身场景：attr-defined 免于 human reason（工程决策，报告 G5 务实版）
             continue
-        if is_test and not _REASON_RE.search(line):
+        if is_test and not _REASON_RE.search(comment):
             warnings.append(
                 f"{path}:{lineno}: R3（tests/）— # type: ignore[{code}] 建议带 human reason"
                 "（`# type: ignore[code]  # <原因>`）；存量阶段为 WARNING，存量≤5 后转 ERROR"

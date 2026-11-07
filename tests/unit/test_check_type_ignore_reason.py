@@ -2,9 +2,12 @@
 
 验证：
 - 裸 # type: ignore（无 error-code）一律 error：生产代码与 tests/ 同判（R3 INVARIANT）
+- 裸 ignore 的行尾空白/tab 变体不得漏判（旧正则 `$` 前有空白即漏）
 - tests/ # type: ignore[attr-defined] → 豁免（无 human reason 不报）
 - tests/ 非 attr-defined 无 human reason → warning（渐进部署）
 - tests/ 非 attr-defined 带 human reason → 通过
+- 仅检查 COMMENT token：字符串/文档字符串中的示例文本不误报
+- 无法 tokenize 的文件 fail-closed 报错
 """
 
 import sys
@@ -17,7 +20,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.meta]
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from check_type_ignore_reason import check_file  # noqa: E402 - sys.path 注入后导入
+from check_type_ignore_reason import check_file, main  # noqa: E402 - sys.path 注入后导入
 
 # 测试输入经字符串拼接构造规范形态的裸 ignore，避免本文件源码文本被 R3 检查器自拦截（自指场景）
 BARE_IGNORE = "# type:" + " ignore"
@@ -96,3 +99,83 @@ class TestCheckTypeIgnoreReason:
         errors, warnings = _check("def test_x():\n    assert 1 == 1\n", test_file=True)
         assert errors == []
         assert warnings == []
+
+    def test_bare_ignore_two_trailing_spaces_exit_1(self, tmp_path, monkeypatch):
+        """`# type: ignore` 后两个空格（旧正则漏判）→ error 且 exit 1。"""
+        p = tmp_path / "prod_x.py"
+        p.write_text("x = 1  # type: ignore  \n", encoding="utf-8")
+        errors, warnings = check_file(p)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+        monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", str(p)])
+        assert main() == 1
+        assert ":1:" in errors[0]
+
+    def test_bare_ignore_trailing_tab_exit_1(self, tmp_path, monkeypatch):
+        """`# type: ignore` 后接 tab → error 且 exit 1。"""
+        p = tmp_path / "prod_x.py"
+        p.write_text("x = 1  # type: ignore\t\n", encoding="utf-8")
+        errors, warnings = check_file(p)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+        monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", str(p)])
+        assert main() == 1
+
+    def test_bare_ignore_multiple_trailing_spaces_exit_1(self, tmp_path, monkeypatch):
+        """`# type: ignore` 后接多个空白 → error 且 exit 1。"""
+        p = tmp_path / "prod_x.py"
+        p.write_text("x = 1  # type: ignore     \n", encoding="utf-8")
+        errors, warnings = check_file(p)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+        monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", str(p)])
+        assert main() == 1
+
+    def test_bare_ignore_with_inline_reason_exit_1(self, tmp_path, monkeypatch):
+        """`# type: ignore  # 原因`（裸压制加人话理由）→ 仍需 error-code，exit 1。"""
+        p = tmp_path / "prod_x.py"
+        p.write_text("x = 1  # type: ignore  # 原因\n", encoding="utf-8")
+        errors, warnings = check_file(p)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+        monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", str(p)])
+        assert main() == 1
+
+    def test_line_number_kept_from_comment_token(self):
+        """多行文件中的裸 ignore 按 COMMENT token 行号报错。"""
+        errors, _ = _check("a = 1\nb = 2\nc = 3  # type: ignore\n", test_file=False)
+        assert len(errors) == 1
+        assert ":3:" in errors[0]
+
+    def test_string_literal_example_not_reported(self):
+        """字符串/文档字符串中的 `# type: ignore` 示例文本不误报。"""
+        content = 'SAMPLE = "# type: ignore"\nDOC = """\n# type: ignore\n"""\ny = 1\n'
+        errors, warnings = _check(content, test_file=False)
+        assert errors == []
+        assert warnings == []
+
+    def test_tests_coded_without_reason_warns_exit_0(self, tmp_path, monkeypatch):
+        """tests/ 下 coded 无 reason → WARNING 且 exit 0。"""
+        p = tmp_path / "tests" / "test_x.py"
+        p.parent.mkdir(parents=True)
+        p.write_text("f(x)  # type: ignore[arg-type]\n", encoding="utf-8")
+        errors, warnings = check_file(p)
+        assert errors == []
+        assert len(warnings) == 1
+        monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", str(p)])
+        assert main() == 0
+
+    def test_untokenizable_file_is_error(self, tmp_path, monkeypatch):
+        """无法 tokenize 的文件 fail-closed：报错并 exit 1。"""
+        p = tmp_path / "prod_x.py"
+        p.write_text("def broken(:\n", encoding="utf-8")
+        errors, warnings = check_file(p)
+        assert len(errors) == 1
+        assert "无法完成 type: ignore 注释检查" in errors[0]
+        assert warnings == []
+        monkeypatch.setattr(sys, "argv", ["check_type_ignore_reason.py", str(p)])
+        assert main() == 1
