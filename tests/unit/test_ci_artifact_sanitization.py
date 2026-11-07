@@ -2,7 +2,9 @@
 
 守护目标：
 - 所有上传文本工件（`junit-*.xml` / `logs/e2e-flet-app.log` / `e2e-artifacts` /
-  `sidecar-logs`）的 job，其 upload 步骤之前必须有 `if: always()` 的脱敏步骤；
+  `sidecar-logs`）的 job，其 upload 步骤之前必须有带稳定 id、`if: always()` 的脱敏步骤；
+- upload 步骤条件必须同时包含 `always()` 与对应 `steps.<id>.outcome == 'success'`，
+  即脱敏失败/取消时不得回退上传未脱敏原始工件；
 - 三个 E2E 类 job 不再使用内联 pwsh 正则，统一调用跨平台
   `scripts/sanitize_artifacts.py`；脱敏步骤紧邻 upload 之前；
 - 上传工件的名称与保留策略不得被脱敏改动改变；
@@ -43,6 +45,16 @@ EXPECTED_SANITIZE_COMMANDS = {
     "e2e-sidecar-real-smoke": (
         f"python {SANITIZE_SCRIPT} {LOG_PATH} 'junit-sidecar-smoke.xml' e2e-artifacts sidecar-logs"
     ),
+}
+
+# 每个脱敏步骤的稳定 id（upload 条件通过 steps.<id>.outcome 引用）
+EXPECTED_SANITIZE_IDS = {
+    "ci-checks": "sanitize_test_reports_linux",
+    "ci-checks-windows": "sanitize_test_reports_windows",
+    "e2e-tests-windows": "sanitize_e2e",
+    "embedded-tests": "sanitize_embedded",
+    "windows-skip-revalidation": "sanitize_skip_revalidation",
+    "e2e-sidecar-real-smoke": "sanitize_sidecar_smoke",
 }
 
 # 上传工件名称/保留策略快照（脱敏改造不得改变这些值）
@@ -215,6 +227,30 @@ def test_each_artifact_upload_has_adjacent_always_sanitize_step(job_name: str) -
 
     assert sanitize_step.get("if") == "always()", f"{job_name} 脱敏步骤必须 if: always()"
     assert sanitize_step.get("shell") == "bash", f"{job_name} 脱敏步骤须使用两平台可用的 bash"
+    assert sanitize_step.get("id") == EXPECTED_SANITIZE_IDS[job_name], (
+        f"{job_name} 脱敏步骤必须有稳定 id，供 upload 条件引用"
+    )
+
+
+@pytest.mark.parametrize("job_name", sorted(EXPECTED_SANITIZE_COMMANDS))
+def test_upload_requires_sanitize_step_success(job_name: str) -> None:
+    """脱敏失败/取消时不得上传：仅紧邻顺序不足以保证工件已脱敏。"""
+    steps = _job_steps(job_name)
+    upload_indexes = _artifact_upload_indexes(steps)
+    assert upload_indexes, f"{job_name} 未发现上传文本工件的 upload 步骤"
+
+    step_id = EXPECTED_SANITIZE_IDS[job_name]
+    expected_gate = f"steps.{step_id}.outcome == 'success'"
+    for upload_index in upload_indexes:
+        condition = str(steps[upload_index].get("if", ""))
+        assert "always()" in condition, f"{job_name} upload 须保留 always() 以覆盖测试失败路径"
+        assert expected_gate in condition, f"{job_name} upload 必须仅在 {expected_gate} 时执行"
+
+
+@pytest.mark.parametrize("job_name", sorted(EXPECTED_SANITIZE_IDS))
+def test_step_ids_are_unique_within_job(job_name: str) -> None:
+    ids = [step.get("id") for step in _job_steps(job_name) if step.get("id")]
+    assert len(ids) == len(set(ids)), f"{job_name} 存在重复步骤 id，steps.<id> 引用将失效"
 
 
 @pytest.mark.parametrize("job_name", sorted(EXPECTED_SANITIZE_COMMANDS))
