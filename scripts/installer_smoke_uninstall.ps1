@@ -108,12 +108,12 @@ function Get-PostgresPort([string]$DataDir) {
 }
 
 # 真实认证路径执行 SQL：密码经 PGPASSWORD 进程环境传递（不进入命令行/日志），调用后清理。
-function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql) {
+function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql, [string]$Database = $PgDatabase) {
     if (-not (Test-Path $PsqlExePath)) { throw "psql not found: $PsqlExePath" }
     $previousPassword = $env:PGPASSWORD
     $env:PGPASSWORD = $Password
     try {
-        $output = @(& $PsqlExePath -h 127.0.0.1 -p $Port -U $PgUsername -d $PgDatabase -v ON_ERROR_STOP=1 -t -A -c $Sql 2>&1)
+        $output = @(& $PsqlExePath -h 127.0.0.1 -p $Port -U $PgUsername -d $Database -v ON_ERROR_STOP=1 -t -A -c $Sql 2>&1)
         if ($LASTEXITCODE -ne 0) {
             throw "psql failed (exit $LASTEXITCODE): $($output -join ' ')"
         }
@@ -125,6 +125,25 @@ function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql) {
             Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
         }
     }
+}
+
+# sidecar 的 `status` 在 postmaster 进程存活时即推导为 running（commands.rs derive_status），
+# 早于 run.rs 步骤 10 的 ensure_database。冒烟若只等 sidecar ready 就写哨兵，会与建库竞态
+# （run 42324064125 因此报 database "qtrading" does not exist）。故额外轮询业务库是否已存在。
+function Wait-AppDatabaseReady([string]$Password, [int]$TimeoutSec = 120) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $port = Get-PostgresPort -DataDir $PgDataDir
+            $exists = Invoke-Psql -Password $Password -Port $port -Database "postgres" `
+                -Sql "select 1 from pg_database where datname = '$PgDatabase'"
+            if ($exists -eq "1") { return $true }
+        } catch {
+            # 启动期连接可能被拒或 postmaster.pid 竞争：继续轮询，最终由调用方断言
+        }
+        Start-Sleep -Seconds 2
+    }
+    return $false
 }
 
 function Stop-QtradingGraceful {
@@ -192,6 +211,7 @@ try {
     }
     $pgPassword = Read-PgPassword -PasswordFile $PgPasswordFile
     $portBefore = Get-PostgresPort -DataDir $PgDataDir
+    Assert-True (Wait-AppDatabaseReady -Password $pgPassword) "Application database '$PgDatabase' created (sidecar ready precedes ensure_database)"
     $sentinelCreateSql = "create table if not exists $SentinelTable (id integer primary key, marker text not null)"
     $sentinelInsertSql = "insert into $SentinelTable (id, marker) values (1, '$sentinel') on conflict (id) do update set marker = excluded.marker"
     Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelCreateSql | Out-Null
