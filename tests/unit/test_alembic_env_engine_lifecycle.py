@@ -1,6 +1,6 @@
 """alembic/env.py run_async_migrations 引擎释放生命周期单测。
 
-LEAD-ENGINE-001：create_async_engine 之后的 connect / run_sync 抛错或被取消时，
+检视问题（M07 数据表结构与版本迁移，P2）：create_async_engine 之后的 connect / run_sync 抛错或被取消时，
 引擎必须在 finally 中 dispose；dispose 自身失败不得覆盖原始异常。
 
 alembic/env.py 是脚本式模块（导入即执行 get_database_url / 离线分支），
