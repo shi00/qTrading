@@ -2232,13 +2232,31 @@ jobs:
           $sha256sumsFileName = $env:SIDECAR_SHA256SUMS_ASSET
           $artifactName = $env:SIDECAR_BINARY_ASSET
           $expectedBinaryName = "qtrading-pg-sidecar.exe"
-          gh release download $tagName `
-            --repo $env:GITHUB_REPOSITORY `
-            --pattern $artifactName `
-            --pattern $sha256sumsFileName `
-            --dir $targetDir
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "gh release download failed (exit: $LASTEXITCODE)"
+          # gh release download 命中 GitHub Releases API，偶发 5xx / 连接重置会直接红掉整条
+          # embedded 构建（随后还有整包打包与签名）。与 restore-cuda-wheel 同一范式：3 次退避
+          # 重试（2s/4s），每次重试前清掉半截文件，避免损坏下载被后续 SHA256 校验误判为
+          # "供应链篡改"；最终仍失败才退出，由下方 SHA256 校验守住真实完整性。
+          $downloadOk = $false
+          for ($i = 1; $i -le 3; $i++) {
+            Remove-Item (Join-Path $targetDir $artifactName) -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $targetDir $sha256sumsFileName) -Force -ErrorAction SilentlyContinue
+            gh release download $tagName `
+              --repo $env:GITHUB_REPOSITORY `
+              --pattern $artifactName `
+              --pattern $sha256sumsFileName `
+              --dir $targetDir
+            if ($LASTEXITCODE -eq 0) {
+              $downloadOk = $true
+              break
+            }
+            if ($i -lt 3) {
+              $delay = [math]::Pow(2, $i)
+              Write-Warning "sidecar 下载失败（第 $i/3 次，exit $LASTEXITCODE），$delay 秒后重试"
+              Start-Sleep -Seconds $delay
+            }
+          }
+          if (-not $downloadOk) {
+            Write-Error "gh release download failed after 3 attempts"
             exit 1
           }
           $downloadedPath = Join-Path $targetDir $artifactName
@@ -2575,7 +2593,41 @@ jobs:
           # release-assets-${{ matrix.variant }} artifact，由 release-windows job 统一上传。
           upload-release-assets: false
 
+      # Rekor 透明日志（Sigstore 公共服务）偶发 HTTP 500：run 42376863695 的 embedded-cpu 变体
+      # 在 "error creating tlog entry - (500) unexpected result from transparency log" 上失败，
+      # 同 run 的 cpu 变体同一步骤成功，工作流配置与权限均无差异（Sigstore 状态页同期 downtime）。
+      # 单次外部抖动不应连坐整个变体与 CI Gate，故保留三次尝试；前两次失败只记录，
+      # 第三次仍失败才改变 job 结论，既不吞掉真实失败，也不让外部抖动误伤发布。
       - name: Attest Build Provenance
+        id: attest-provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        continue-on-error: true
+        with:
+          subject-path: Output/AStockScreener-Setup-${{ matrix.variant }}.exe
+
+      # 退避而非紧邻重试：Rekor 抖动通常持续数十秒，三次连发会同时落在故障窗口内。
+      # 30s/60s 与 restore-cuda-wheel（2s/4s，下载类）同理但取更长，因证明服务恢复更慢。
+      - name: Wait before attest retry 2/3
+        if: steps.attest-provenance.outcome == 'failure'
+        shell: pwsh
+        run: Start-Sleep -Seconds 30
+
+      - name: Attest Build Provenance (retry 2/3)
+        id: attest-provenance-retry1
+        if: steps.attest-provenance.outcome == 'failure'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        continue-on-error: true
+        with:
+          subject-path: Output/AStockScreener-Setup-${{ matrix.variant }}.exe
+
+      - name: Wait before attest retry 3/3
+        if: steps.attest-provenance.outcome == 'failure' && steps.attest-provenance-retry1.outcome == 'failure'
+        shell: pwsh
+        run: Start-Sleep -Seconds 60
+
+      - name: Attest Build Provenance (retry 3/3)
+        id: attest-provenance-retry2
+        if: steps.attest-provenance.outcome == 'failure' && steps.attest-provenance-retry1.outcome == 'failure'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: Output/AStockScreener-Setup-${{ matrix.variant }}.exe
