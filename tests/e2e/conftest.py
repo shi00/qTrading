@@ -287,19 +287,49 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     add_windows_skip_option(parser)
 
 
+def _is_e2e_test_path(config: pytest.Config, path: Path | None) -> bool:
+    """判断用例文件是否位于 ``tests/e2e/`` 目录下。"""
+    if path is None:
+        return False
+    e2e_root = (config.rootpath / "tests" / "e2e").resolve()
+    try:
+        Path(str(path)).resolve().relative_to(e2e_root)
+    except ValueError:
+        return False
+    return True
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """E2E 测试强制 session loop scope，避免 session fixture 被逐用例重建。
+
+    必须在 ``pytest_generate_tests``（而非 ``pytest_collection_modifyitems``）
+    注入 marker：pytest-asyncio 1.4 在其 ``tryfirst`` 的 ``pytest_generate_tests``
+    中按 marker 的 ``loop_scope`` 参数化 ``_asyncio_loop_factory``。marker 若在
+    收集完成后才注入，pytest-asyncio 只能按
+    ``asyncio_default_test_loop_scope=function`` 参数化，导致
+    ``seed_e2e_data`` 等 session-scope async fixture 每个用例都被销毁重建，
+    重复执行 ``TRUNCATE ... CASCADE`` 播种；播种与运行中的 Flet 应用并发写库时
+    形成 PostgreSQL 死锁（``DeadlockDetectedError``）。
+
+    另：``asyncio_default_test_loop_scope=function``（为 unit/integration 设置）
+    会让 E2E 测试在 function loop 上执行；``e2e_playwright``/``e2e_browser``
+    是 session-scope async fixtures，在 session loop 上创建 Playwright 资源，
+    function loop 上的 ``e2e_page`` 访问 session-loop-bound 的 browser 对象时
+    会因 session loop idle 而永久 hang。两者都要求 E2E 使用 session loop。
+    """
+    definition = metafunc.definition
+    if not _is_e2e_test_path(metafunc.config, definition.path):
+        return
+    # append=False 将 marker 插入 own_markers 列表开头，
+    # 确保 get_closest_marker("asyncio") 返回此 marker（带 loop_scope=session），
+    # 而非 pytest-asyncio AUTO 模式稍后追加的无 loop_scope marker。
+    definition.add_marker(pytest.mark.asyncio(loop_scope="session"), append=False)
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """E2E 测试强制 session loop scope，避免跨 loop 访问 session fixtures。
-
-    根因：``asyncio_default_test_loop_scope=function``（为 unit/integration 设置）
-    导致 E2E 测试在 function loop 上执行。但 ``e2e_playwright``/``e2e_browser``
-    是 session-scope async fixtures，在 session loop 上创建 Playwright 资源。
-    function loop 上的 ``e2e_page`` 访问 session-loop-bound 的 browser 对象时，
-    因 session loop idle 而永久 hang。
-
-    修复：强制 E2E 测试用 session loop，与 session-scope async fixtures 共享 loop。
-
-    Windows E2E skipif 复验：当 ``--run-windows-skip`` 设置时，临时移除 8 个 Windows
+    """Windows E2E skipif 复验：当 ``--run-windows-skip`` 设置时，临时移除 8 个 Windows
     skipif 用例的 skipif markers，使其在 Windows runner 上实际运行以复验 Flet 0.86.2
     下问题是否仍存在。详见 ``tests/e2e/_windows_skip.py``.
     """
@@ -307,18 +337,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     unskipped = strip_windows_skipif(config, items)
     if unskipped > 0:
         logger.info("[E2E] --run-windows-skip: un-skipped %d Windows skipif items", unskipped)
-
-    asyncio_marker = pytest.mark.asyncio(loop_scope="session")
-    e2e_root = (config.rootpath / "tests" / "e2e").resolve()
-    for item in items:
-        try:
-            Path(str(item.fspath)).resolve().relative_to(e2e_root)
-        except ValueError:
-            continue
-        # append=False 将 marker 插入到 own_markers 列表开头，
-        # 确保 get_closest_marker("asyncio") 返回此 marker（带 loop_scope=session），
-        # 而非 pytest-asyncio AUTO 模式添加的无 loop_scope marker。
-        item.add_marker(asyncio_marker, append=False)
 
 
 @pytest.fixture(autouse=True, scope="session")
