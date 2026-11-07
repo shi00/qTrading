@@ -553,6 +553,194 @@ class TestR4InTestsFunction:
         assert "R4" in errors[0]
 
 
+class TestR4InTestsExtendedPatterns:
+    """R4（tests/）扩展形态（ENGA-RED-02）：text(f"...") 与「SQL 先绑定变量再查询」。"""
+
+    @staticmethod
+    def _scan(tmp_path, monkeypatch, filename: str, source: str) -> list[str]:
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir(exist_ok=True)
+        (tests_dir / filename).write_text(source, encoding="utf-8")
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        return check_redlines.check_R4_in_tests()
+
+    def test_text_fstring_in_tests_detected(self, tmp_path, monkeypatch):
+        """tests/ 中真实 ``text(f"...")`` 拼 SQL 应被检测。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_bad_text.py",
+            'async def f():\n    await conn.execute(text(f"SELECT * FROM t WHERE id = {x}"))\n',
+        )
+        assert len(errors) == 1
+        assert "text(f...)" in errors[0]
+
+    def test_sql_name_binding_then_query_detected(self, tmp_path, monkeypatch):
+        """``sql = "…%s…"`` 后作为查询首参应被检测（绕过路径 3）。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_bad_binding.py",
+            'async def f():\n    sql = "SELECT * FROM t WHERE id = %s"\n    await conn.execute(sql, x)\n',
+        )
+        assert len(errors) == 1
+        assert "经变量传入" in errors[0]
+
+    def test_dollar_placeholder_binding_not_flagged(self, tmp_path, monkeypatch):
+        """``sql = "…$1…"`` 合法参数化写法不应被检测。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_ok_binding.py",
+            'async def f():\n    sql = "SELECT * FROM t WHERE id = $1"\n    await conn.execute(sql, x)\n',
+        )
+        assert errors == []
+
+    def test_sql_string_not_queried_not_flagged(self, tmp_path, monkeypatch):
+        """仅保存 SQL 字符串（未传入查询）的测试数据不应被误报。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_data_only.py",
+            'def test_x():\n    sql = "SELECT * FROM t WHERE id = %s"\n    assert "%s" in sql\n',
+        )
+        assert errors == []
+
+    def test_reassignment_after_control_flow_not_flagged(self, tmp_path, monkeypatch):
+        """分支内重新赋值后查询应保守不报（清空跨分支绑定，避免误判）。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_branch_binding.py",
+            "async def f(cond):\n"
+            '    sql = "SELECT * FROM t WHERE id = $1"\n'
+            "    if cond:\n"
+            '        sql = "SELECT * FROM t WHERE id = %s"\n'
+            "    await conn.execute(sql, x)\n",
+        )
+        assert errors == []
+
+    def test_noqa_exempts_binding_query(self, tmp_path, monkeypatch):
+        """查询行 ``# noqa: R4`` 应豁免变量绑定形态。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_noqa_binding.py",
+            "async def f():\n"
+            '    sql = "SELECT * FROM t WHERE id = %s"\n'
+            "    await conn.execute(sql, x)  # noqa: R4 - 测试替身\n",
+        )
+        assert errors == []
+
+    def test_direct_percent_call_still_detected(self, tmp_path, monkeypatch):
+        """既有直接 ``conn.execute("…%s…")`` 检测不回归。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_direct_regression.py",
+            'async def f():\n    await conn.execute("SELECT * FROM t WHERE id = %s", x)\n',
+        )
+        assert len(errors) == 1
+        assert "%s" in errors[0]
+
+    def test_binding_line_noqa_exempts(self, tmp_path, monkeypatch):
+        """``# noqa: R4`` 写在绑定行也应豁免。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_noqa_binding_line.py",
+            "async def f():\n"
+            '    sql = "SELECT * FROM t WHERE id = %s"  # noqa: R4 - 测试替身\n'
+            "    await conn.execute(sql, x)\n",
+        )
+        assert errors == []
+
+    def test_annassign_binding_detected(self, tmp_path, monkeypatch):
+        """带类型注解的 ``sql: str = "…%s…"`` 绑定同样应被检测。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_annassign.py",
+            'async def f():\n    sql: str = "SELECT * FROM t WHERE id = %s"\n    await conn.execute(sql, x)\n',
+        )
+        assert len(errors) == 1
+
+    def test_augassign_and_unpacking_clear_binding(self, tmp_path, monkeypatch):
+        """增量赋值/解包重绑定后应清除旧 SQL 绑定（保守不报）。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_rebind.py",
+            "async def f():\n"
+            '    sql = "SELECT * FROM t WHERE id = %s"\n'
+            '    sql, *rest = ("x", "y")\n'
+            '    sql += " AND 1=1"\n'
+            "    await conn.execute(sql, x)\n",
+        )
+        assert errors == []
+
+    def test_return_query_detected(self, tmp_path, monkeypatch):
+        """``return await conn.execute(sql)`` 形态也应被检测。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_return_query.py",
+            'async def f():\n    sql = "SELECT * FROM t WHERE id = %s"\n    return await conn.execute(sql, x)\n',
+        )
+        assert len(errors) == 1
+
+    def test_branch_internal_assignment_and_query_not_flagged(self, tmp_path, monkeypatch):
+        """分支内赋值后立即查询应保守不报（不深入控制流子块）。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_branch_internal.py",
+            "async def f(cond):\n"
+            "    if cond:\n"
+            '        sql = "SELECT * FROM t WHERE id = %s"\n'
+            "        await conn.execute(sql, x)\n",
+        )
+        assert errors == []
+
+    def test_control_flow_blocks_not_descended(self, tmp_path, monkeypatch):
+        """with/try/match 等控制流子块内的赋值与查询均保守跳过（避免跨分支伪造）。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_control_flow_blocks.py",
+            "async def f(kind):\n"
+            "    async with conn.transaction():\n"
+            '        sql = "SELECT * FROM t WHERE id = %s"\n'
+            "        await conn.execute(sql, x)\n"
+            "    try:\n"
+            '        sql = "SELECT * FROM t WHERE id = %s"\n'
+            "        await conn.execute(sql, x)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    match kind:\n"
+            '        case "a":\n'
+            '            sql = "SELECT * FROM t WHERE id = %s"\n'
+            "            await conn.execute(sql, x)\n",
+        )
+        assert errors == []
+
+    def test_nested_function_scope_not_leaked(self, tmp_path, monkeypatch):
+        """外层绑定不泄漏进嵌套函数（嵌套作用域独立分析，保守不报）。"""
+        errors = self._scan(
+            tmp_path,
+            monkeypatch,
+            "test_nested_scope.py",
+            "async def outer():\n"
+            '    sql = "SELECT * FROM t WHERE id = %s"\n'
+            "    async def inner():\n"
+            "        await conn.execute(sql, x)\n"
+            "    await inner()\n",
+        )
+        assert errors == []
+
+
 # ============================================================================
 # R12 纯函数测试
 # ============================================================================

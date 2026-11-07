@@ -390,20 +390,124 @@ def check_R4_text_fstring_sql() -> list[str]:
 # tests/ 目录扫描时跳过缓存与构建产物，但保留 tests 自身（复用 _SKIP_DIRS，移除 "tests" 以允许扫描）
 _TESTS_SCAN_SKIP_DIRS = _SKIP_DIRS - {"tests"}
 
+# R4（tests/）绕过路径 3：SQL 字面量先绑定变量，再作为 asyncpg 查询首参传入。
+# 静态分析边界（保守覆盖，不宣称完整数据流）：仅追踪同一函数直线块内的 Name 绑定；
+# 遇分支/循环/异常/with/match 或嵌套 def/class 立即清空绑定且不深入其内部（避免跨分支
+# 伪造数据流）；绑定被重新赋值时清除或覆盖。模块级常量、别名（sql2 = sql）、walrus 赋值不覆盖。
+_R4_CONTROL_FLOW_NODES = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.Try,
+    ast.With,
+    ast.AsyncWith,
+    ast.Match,
+)
+_R4_NESTED_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _iter_assignment_target_names(target: ast.expr) -> Iterator[str]:
+    """展开赋值目标中的 Name（支持链式赋值与元组解包），用于清除同名变量的旧绑定。"""
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            yield from _iter_assignment_target_names(elt)
+    elif isinstance(target, ast.Starred):
+        yield from _iter_assignment_target_names(target.value)
+
+
+def _check_R4_query_names_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检测「SQL 字面量先绑定变量，再作为 asyncpg 查询首参」的注入形态（绕过路径 3）。
+
+    仅当同一函数直线块内存在 ``<name> = "…%s…"`` 绑定、且后续查询首参为该 Name 时报错；
+    分支内赋值/查询等非直线块场景一律保守放过（遇控制流清空绑定且不深入其内部）。纯字符串
+    测试数据（未传入查询）、docstring/注释（AST 不进入）、``$1/$2`` 参数化写法均不报。
+    行尾 ``# noqa: R4`` 豁免（查询行或绑定行均可）。
+    """
+    errors: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        rel = source_path
+
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        bindings: dict[str, tuple[str, int]] = {}
+        for stmt in fn.body:
+            if isinstance(stmt, _R4_NESTED_SCOPE_NODES):
+                bindings.clear()  # 嵌套作用域由外层 ast.walk 独立处理
+                continue
+            if isinstance(stmt, _R4_CONTROL_FLOW_NODES):
+                bindings.clear()  # 不深入分支/循环，避免跨分支伪造数据流
+                continue
+
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    for name in _iter_assignment_target_names(target):
+                        bindings.pop(name, None)
+                        if (
+                            isinstance(stmt.value, ast.Constant)
+                            and isinstance(stmt.value.value, str)
+                            and "%s" in stmt.value.value
+                        ):
+                            bindings[name] = (stmt.value.value, stmt.lineno)
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                bindings.pop(stmt.target.id, None)
+                if (
+                    isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                    and "%s" in stmt.value.value
+                ):
+                    bindings[stmt.target.id] = (stmt.value.value, stmt.lineno)
+            elif isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
+                bindings.pop(stmt.target.id, None)
+
+            for call in ast.walk(stmt):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                    continue
+                if call.func.attr not in _ASYNCPG_QUERY_METHODS or not call.args:
+                    continue
+                first_arg = call.args[0]
+                if not isinstance(first_arg, ast.Name):
+                    continue
+                bound = bindings.get(first_arg.id)
+                if bound is None:
+                    continue
+                sql, bind_lineno = bound
+                if _line_has_noqa_marker(source_path, call.lineno, _R4_NOQA_MARKER) or _line_has_noqa_marker(
+                    source_path, bind_lineno, _R4_NOQA_MARKER
+                ):
+                    continue
+                errors.append(
+                    f"{rel}:{call.lineno}: R4 SQL 注入 — asyncpg 原生查询经变量传入含 %s 占位符的 SQL"
+                    f" (必须用 $1, $2, ...): {sql[:80]!r}"
+                )
+
+            if isinstance(stmt, (ast.Return, ast.Raise)):
+                bindings.clear()  # 返回/抛出后直线块结束，不再沿用既有绑定
+    return errors
+
 
 def check_R4_in_tests() -> list[str]:
-    """R4（tests/）：扫描 tests/ 目录下所有 .py 文件中的 asyncpg 原生查询 %s 占位符。
+    """R4（tests/）：扫描 tests/ 目录下所有 .py 文件中的 SQL 注入形态。
 
     P3-CheckRedlines-Tests-Dir: 扩展 R4 检查至 tests/ 目录。仅启用 R4（SQL 注入）检查，
     R12/R13/R14/R15 不适用于测试代码（测试中可自由定义 mock 类/单例/策略子类用于验证
     装饰器逻辑，不应被红线检查拦截）。tests/ 目录默认在 _SKIP_DIRS 中被其他检查跳过，
     本函数显式扫描 tests/ 目录。
 
+    覆盖三种形态（与生产域对齐）：① 直接传参 ``conn.<method>("...%s...")``；
+    ② ``text(f"...")`` / ``sa.text(f"...")`` f-string 拼 SQL（DAT-08）；
+    ③ SQL 字面量先绑定变量再作为查询首参（``sql = "…%s…"; conn.execute(sql)``）。
+
     反例识别：``@pytest.fixture`` 函数内的 ``"%s" % var`` 字符串格式化不被误报，因为
     R4 检查仅匹配 ``conn.<method>("...%s...")`` 形式的 asyncpg 原生调用（第一个参数是
     字符串字面量且包含 %s），``"%s" % var`` 是 BinOp 表达式，第一个参数不是 Constant，
     天然不匹配。测试文件中构造 R4 测试用例的字符串字面量（如 ``code = 'await conn.execute("...%s...")'``）
-    也不会被误报，因为 AST 不会进入字符串字面量内部解析。
+    也不会被误报，因为 AST 不会进入字符串字面量内部解析；仅保存未查询的 SQL 字符串同样不报。
     """
     errors: list[str] = []
     tests_dir = ROOT / "tests"
@@ -414,6 +518,8 @@ def check_R4_in_tests() -> list[str]:
         if tree is None:
             continue
         errors.extend(_check_R4_in_tree(tree, p))
+        errors.extend(_check_R4_text_fstring_in_tree(tree, p))
+        errors.extend(_check_R4_query_names_in_tree(tree, p))
     return errors
 
 
