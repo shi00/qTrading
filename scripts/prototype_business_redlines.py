@@ -167,15 +167,26 @@ class MissingMaskingVisitor(_BaseVisitor):
             if value is not None:
                 defect_id = "AI-02" if "confidence" in field else "AI-01"
                 self._record(node.lineno, "masking_assign", f"字段 {field} 被填充常量 {value!r}", defect_id)
+        # 继续下钻右侧表达式，否则 `result = df["score"].fillna(0)` 的调用形态会漏检。
+        self.generic_visit(node)
+
+    @classmethod
+    def _is_masking_const(cls, value: object) -> bool:
+        """判断是否为伪装常量 0/0.0/50/50.0。
+
+        bool 是 int 子类且 ``False == 0``、``True`` 落在取值集合内，须显式排除，
+        否则 ``fillna(False)`` 这类布尔列填充会被误报为缺失伪装。
+        """
+        return not isinstance(value, bool) and isinstance(value, int | float) and value in cls.MASKING_VALUES
 
     def _masking_const(self, value: ast.AST) -> object | None:
         """返回若是 0/0.0/50/50.0 直接字面量；三元 else 分支为缺失填充则返回该值。"""
-        if isinstance(value, ast.Constant) and value.value in self.MASKING_VALUES:
+        if isinstance(value, ast.Constant) and self._is_masking_const(value.value):
             return value.value
         if (
             isinstance(value, ast.IfExp)
             and isinstance(value.orelse, ast.Constant)
-            and value.orelse.value in self.MASKING_VALUES
+            and self._is_masking_const(value.orelse.value)
         ):
             return value.orelse.value
         return None
@@ -183,8 +194,10 @@ class MissingMaskingVisitor(_BaseVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         # fillna(0)/fill(0) 列为"需人工"低置信档
         if isinstance(node.func, ast.Attribute) and node.func.attr in {"fillna", "fill"}:
-            if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value in self.MASKING_VALUES:
+            if node.args and isinstance(node.args[0], ast.Constant) and self._is_masking_const(node.args[0].value):
                 self._record(node.lineno, "masking_fillna_lowconf", f"fillna/fill {node.args[0].value!r}", None)
+        # 无论是否命中都继续下钻，避免 `outer(inner.fillna(0))` 的内层调用漏检。
+        self.generic_visit(node)
 
 
 class WatermarkVisitor(_BaseVisitor):
