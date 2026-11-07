@@ -274,3 +274,16 @@ def test_upgrade_smoke_runs_rollback_leg(build_job: dict[str, Any]) -> None:
     assert "Get-InstalledAppVersion" in upgrade_script, "回滚后未读取已安装版本"
     assert "$restoredVersionNormalized -eq $OldVersion" in upgrade_script, "未断言回滚到基线版本"
     assert "Synthetic sentinel survived rollback unchanged" in upgrade_script, "回滚后未校验业务数据保留"
+
+
+# build-windows 的 smoke 步骤以 Windows PowerShell 5.1（`powershell -File`）运行子脚本：
+# 5.1 对无 BOM 的 UTF-8 按系统 ANSI 代码页解码，中文注释里的字节在 CP1252 下会变成
+# 智能引号（’ “ ”），被 PowerShell 当作字符串定界符，导致 "Missing closing '}'" 解析失败。
+SMOKE_SCRIPTS = sorted((PROJECT_ROOT / "scripts").glob("installer_smoke_*.ps1"))
+
+
+def test_installer_smoke_scripts_carry_utf8_bom() -> None:
+    """所有 installer smoke 脚本必须是带 BOM 的 UTF-8，否则 5.1 下解析失败。"""
+    assert SMOKE_SCRIPTS, "未找到 scripts/installer_smoke_*.ps1"
+    missing = [p.name for p in SMOKE_SCRIPTS if not p.read_bytes().startswith(b"\xef\xbb\xbf")]
+    assert not missing, f"以下脚本缺少 UTF-8 BOM（powershell 5.1 会解析失败）: {missing}"

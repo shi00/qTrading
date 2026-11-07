@@ -1,4 +1,4 @@
-# installer_smoke_running_app.ps1
+﻿# installer_smoke_running_app.ps1
 # Phase 5 DoD §17.6 失败注入 #32 + P1-11 验证脚本
 # 验证 installer.iss InitializeSetup 前置检测：
 #   1. qTrading 主进程运行中拒绝安装 (#32)
