@@ -1437,8 +1437,17 @@ def _iter_top_level_calls(stmt: ast.stmt) -> typing.Iterator[ast.Call]:
         curr = stack.pop()
         if isinstance(curr, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
+        if isinstance(curr, ast.Lambda):
+            # lambda 体是延迟执行的事件回调，不视为渲染期副作用；
+            # 但默认值在 lambda 创建时求值，必须继续扫描（含关键字默认值）。
+            stack.extend(curr.args.defaults)
+            stack.extend(d for d in curr.args.kw_defaults if d is not None)
+            continue
         if isinstance(curr, ast.Call):
             yield curr
+            # 立即调用的 lambda（IIFE，如 (lambda: print("x"))()）的函数体在渲染期同步执行，须扫描。
+            if isinstance(curr.func, ast.Lambda):
+                stack.append(curr.func.body)
         for child in ast.iter_child_nodes(curr):
             if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 stack.append(child)
