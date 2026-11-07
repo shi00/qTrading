@@ -23,6 +23,8 @@ pytestmark = [pytest.mark.unit, pytest.mark.meta]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci_cd.yml"
 CLASSIFY_STEP_NAME = "Classify changed paths"
+INSTALLER_JOB_ID = "installer-smoke"
+INSTALLER_STEP_NAME = "Detect installer changes"
 
 
 def _api_pair_lines(entries: list[dict[str, str]]) -> str:
@@ -291,3 +293,55 @@ class TestWorkflowClassificationContract:
         assert 'if [ "$count" -ge 3000 ]' in classify_step_run
         assert classify_step_run.count('echo "code=true" >> "$GITHUB_OUTPUT"') == 3
         assert classify_step_run.count("exit 0") == 3
+
+
+@pytest.fixture(scope="module")
+def installer_detect_step_run() -> str:
+    """加载 installer-smoke job 中「Detect installer changes」步骤的 shell 脚本。"""
+    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    steps = workflow["jobs"][INSTALLER_JOB_ID]["steps"]
+    matches = [step for step in steps if step.get("name") == INSTALLER_STEP_NAME]
+    assert len(matches) == 1, f"installer-smoke 应恰有一个 `{INSTALLER_STEP_NAME}` 步骤，实际: {len(matches)}"
+    return matches[0]["run"]
+
+
+class TestInstallerDetectWorkflowContract:
+    """把 installer 相关文件重命名/移出匹配路径时，ISCC smoke 不得因只取新路径而漏检。"""
+
+    def test_jq_extracts_both_paths_with_pagination(self, installer_detect_step_run: str) -> None:
+        """静态契约：jq 同时包含 filename 与 previous_filename，且仍逐页应用。"""
+        assert "--paginate" in installer_detect_step_run
+        assert "repos/${GH_REPO}/pulls/${PR_NUMBER}/files" in installer_detect_step_run
+        assert ".filename" in installer_detect_step_run
+        assert ".previous_filename" in installer_detect_step_run
+        assert "@tsv" in installer_detect_step_run, "两列必须以 TAB 分隔输出，供后续拆分"
+        assert "--jq '.[].filename'" not in installer_detect_step_run, "不得退回只取新路径的旧表达式"
+
+    def test_file_count_is_api_entry_lines_not_split_paths(self, installer_detect_step_run: str) -> None:
+        """3000 上限必须按真实 API 条目计数：一文件一行，重命名不使行数翻倍。"""
+        count_line = "FILE_COUNT=$(printf '%s\\n' \"$FILES\" | wc -l | tr -d '[:space:]')"
+        assert count_line in installer_detect_step_run
+        assert installer_detect_step_run.index(count_line) < installer_detect_step_run.index("PATHS=$(printf")
+        assert 'if [ "$FILE_COUNT" -ge 3000 ]' in installer_detect_step_run
+        assert (
+            'echo "::error::PR file list reached the GitHub API cap (3000); installer detection may be incomplete."'
+            in installer_detect_step_run
+        )
+
+    def test_grep_matches_both_columns_after_dedup(self, installer_detect_step_run: str) -> None:
+        """两列拆成路径并去重后交给 grep；grep 不再直接读取混合 TSV 的 FILES。"""
+        paths_line = (
+            "PATHS=$(printf '%s\\n' \"$FILES\" | awk -F '\\t' "
+            '\'NF && $1 != "" {print $1} $2 != "" {print $2}\' | sort -u)'
+        )
+        assert paths_line in installer_detect_step_run
+        install_pattern = "'^installer\\.iss$|^scripts/.*installer.*'"
+        assert installer_detect_step_run.count(install_pattern + ' <<< "$PATHS"') == 2
+        assert '<<< "$FILES"' not in installer_detect_step_run
+
+    def test_fail_closed_branches_are_preserved(self, installer_detect_step_run: str) -> None:
+        """token 缺失与 gh api 失败仍显式失败，不得回落为 skip=true。"""
+        assert 'if [ -z "${PR_NUMBER:-}" ]' in installer_detect_step_run
+        assert 'if [ -z "${GH_TOKEN:-}" ]' in installer_detect_step_run
+        assert "refusing to skip ISCC smoke" in installer_detect_step_run
+        assert installer_detect_step_run.count("exit 1") == 4
