@@ -3956,15 +3956,19 @@ def check_adr_supersede_chain() -> list[str]:
                 superseded_by[adr_id].update(_ADR_ID_INLINE.findall(dm.group(1)))
 
     # 双向校验：X 声明 supersedes Y ⇒ Y 必须声明 superseded by X；反之亦然。
+    # 映射键仅对成功读取的 ADR setdefault，故端点不在映射即未读取到（文件缺失或读取失败），
+    # 属于无效端点，须报错而非静默放行（否则声明指向不存在的 ADR 时检查恒通过）。
     for x, targets in supersedes.items():
         for y in targets:
             if y not in superseded_by:
+                errors.append(f"ADR-{x} 声明 Supersedes ADR-{y}，但目标 ADR-{y} 未读取到（端点无效）")
                 continue
             if x not in superseded_by[y]:
                 errors.append(f"ADR-{x} 声明 Supersedes ADR-{y}，但 ADR-{y} 未声明 Superseded by ADR-{x}（单向断链）")
     for y, sources in superseded_by.items():
         for x in sources:
             if x not in supersedes:
+                errors.append(f"ADR-{y} 声明被 ADR-{x} Supersede，但来源 ADR-{x} 未读取到（端点无效）")
                 continue
             if y not in supersedes[x]:
                 errors.append(f"ADR-{y} 声明被 ADR-{x} Supersede，但 ADR-{x} 未声明 Supersedes ADR-{y}（单向断链）")

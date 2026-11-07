@@ -6984,6 +6984,79 @@ class TestAdrSupersedeChain:
         errors = check_adr_supersede_chain()
         assert errors == [], f"缺失目录应静默, got: {errors}"
 
+    def test_adr_supersede_chain_dangling_target_reports(self, tmp_path, monkeypatch):
+        """只有 ADR-X 却正式声明 Supersedes ADR-Y（Y 未读取到）→ 报悬空端点而非静默放行。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(self._adr("ADR-0001", "Accepted", "Supersedes: ADR-0002"), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert any("ADR-0001" in e and "ADR-0002" in e and "目标 ADR" in e and "未读取到" in e for e in errors), (
+            f"悬空目标应报错, got: {errors}"
+        )
+
+    def test_adr_supersede_chain_dangling_source_reports(self, tmp_path, monkeypatch):
+        """只有 ADR-X 却声明被 ADR-Y supersede（来源 Y 未读取到）→ 报悬空端点。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(
+            self._adr("ADR-0001", "Partial Superseded by ADR-0002 (3c portion only)"), encoding="utf-8"
+        )
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert any("ADR-0001" in e and "ADR-0002" in e and "来源 ADR" in e and "未读取到" in e for e in errors), (
+            f"悬空来源应报错, got: {errors}"
+        )
+
+    def test_adr_supersede_chain_pass_multi_target(self, tmp_path, monkeypatch):
+        """一对多合法链（X 同时 supersede Y/Z 且均回指）不因端点存在性校验被误报。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(
+            self._adr("ADR-0001", "Accepted", "Partial Supersedes: ADR-0002（3c）; ADR-0003"), encoding="utf-8"
+        )
+        (tmp_path / "0002-y.md").write_text(
+            self._adr("ADR-0002", "Partial Superseded by ADR-0001 (3c portion only)"), encoding="utf-8"
+        )
+        (tmp_path / "0003-z.md").write_text(self._adr("ADR-0003", "Superseded by ADR-0001"), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert errors == [], f"一对多合法链应放行, got: {errors}"
+
+    def test_adr_supersede_chain_trailing_ref_not_dangling(self, tmp_path, monkeypatch):
+        """目标段后的解释性 ADR 引用不参与捕获，故不得产生额外悬空端点报错。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(
+            self._adr("ADR-0001", "Accepted", "Partial Supersedes: ADR-0002（3c）; 详见 ADR-0009"),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert len(errors) == 1, f"仅应因 ADR-0002 未读取到报一条错误, got: {errors}"
+        assert "ADR-0002" in errors[0]
+        assert "ADR-0009" not in errors[0], f"解释性引用不应被当作目标, got: {errors}"
+
+    def test_adr_supersede_chain_unreadable_target_reports(self, tmp_path, monkeypatch):
+        """目标 ADR 读取失败（OSError）与缺失同等视为无效端点 → 报错。"""
+        from check_docs_consistency import check_adr_supersede_chain
+
+        (tmp_path / "0001-x.md").write_text(self._adr("ADR-0001", "Accepted", "Supersedes: ADR-0002"), encoding="utf-8")
+        (tmp_path / "0002-y.md").write_text(self._adr("ADR-0002", "Superseded by ADR-0001"), encoding="utf-8")
+        original_read_text = Path.read_text
+
+        def _read_text(path: Path, *args, **kwargs) -> str:
+            if path.name == "0002-y.md":
+                raise OSError("模拟读取失败")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _read_text)
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path)
+        errors = check_adr_supersede_chain()
+        assert any("ADR-0001" in e and "ADR-0002" in e and "目标 ADR" in e and "未读取到" in e for e in errors), (
+            f"读取失败应视为无效端点并报错, got: {errors}"
+        )
+
 
 class TestPrecommitHookAndWorkflowEnum:
     """F-09：hook / workflow 枚举名称级门禁（数量门禁可被指针式写法绕过）。
