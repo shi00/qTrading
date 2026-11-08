@@ -5,7 +5,7 @@ VM 是独立类，内部 VM 模式由 use_viewmodel(factory=...) 实例化。
 
 覆盖:
 1. State frozen + 默认值
-2. start_backup() 调用 dump() 并更新 state (success/error/already-exists)
+2. start_backup() 调用 dump() 并更新 state (success/error/already-exists/取消后终态复位)
 3. start_restore_wizard() 设置 confirm_state=pending / 文件不存在处理
 4. confirm_restore() 设置 confirm_state=offline_guidance + 显示指引消息 (D36: 不调 svc.restore)
 5. dismiss_offline_guidance() 清空 restore_path + confirm_state=idle
@@ -15,6 +15,8 @@ VM 是独立类，内部 VM 模式由 use_viewmodel(factory=...) 实例化。
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -185,25 +187,136 @@ class TestStartBackup:
     @pytest.mark.asyncio
     async def test_start_backup_clears_stale_backup_path_on_start(self, vm, mock_maintenance_service):
         """备份开始时清空上次备份路径 (backup_path=None), 完成后写入新路径."""
-        import asyncio
-
         vm._set_state(backup_path="/tmp/stale.dump")
+        dump_started = asyncio.Event()
         release = asyncio.Event()
         captured_during_backup: list[str | None] = []
 
         async def slow_dump(_output_path: Path):
             captured_during_backup.append(vm.state.backup_path)
+            dump_started.set()
             await release.wait()
             return MagicMock(output_path="/tmp/new.dump", file_size=100, exit_code=0)
 
         mock_maintenance_service.dump = AsyncMock(side_effect=slow_dump)
         task = asyncio.create_task(vm.start_backup(Path("/tmp/new.dump")))
-        await asyncio.sleep(0)  # 让 start_backup 执行到 slow_dump 内部
+        await dump_started.wait()  # dump 在独立 task 中执行, 以事件等待其启动
         assert vm.state.is_backing_up is True
         assert captured_during_backup == [None]
         release.set()
         await task
         assert vm.state.backup_path == "/tmp/new.dump"
+
+    @pytest.mark.asyncio
+    async def test_start_backup_cancel_propagates_and_releases_busy_after_dump_finishes(
+        self, vm, mock_maintenance_service
+    ):
+        """取消只终止等待; dump 真正终结后才释放 is_backing_up 并落地成功态."""
+        dump_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_dump(_output_path: Path):
+            dump_started.set()
+            await release.wait()
+            return MagicMock(output_path="/tmp/done.dump", file_size=100, exit_code=0)
+
+        mock_maintenance_service.dump = AsyncMock(side_effect=slow_dump)
+        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False):
+            task = asyncio.create_task(vm.start_backup(Path("/tmp/backup.dump")))
+            await dump_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+            assert task.cancelled() is True
+            # dump 尚未终结: busy 必须保持, 不得放开并发
+            assert vm.state.is_backing_up is True
+            release.set()
+            for _ in range(50):
+                if not vm.state.is_backing_up:
+                    break
+                await asyncio.sleep(0)
+
+        assert vm.state.is_backing_up is False
+        assert vm.state.backup_path == "/tmp/done.dump"
+        assert vm.state.backup_success_message is not None
+        assert vm.state.backup_success_message.key == "backup_success"
+        assert vm.state.progress_message is None
+        assert vm.state.error_message is None
+
+    @pytest.mark.asyncio
+    async def test_start_backup_cancel_keeps_guard_until_dump_finishes(self, vm, mock_maintenance_service):
+        """取消后 dump 终结前, 重复点击守卫仍生效 (不并发 dump)."""
+        dump_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_dump(_output_path: Path):
+            dump_started.set()
+            await release.wait()
+            return MagicMock(output_path="/tmp/first.dump", file_size=100, exit_code=0)
+
+        mock_maintenance_service.dump = AsyncMock(side_effect=slow_dump)
+        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False):
+            task = asyncio.create_task(vm.start_backup(Path("/tmp/first.dump")))
+            await dump_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+            assert task.cancelled() is True
+            assert vm.state.is_backing_up is True
+
+            await vm.start_backup(Path("/tmp/second.dump"))
+            mock_maintenance_service.dump.assert_called_once_with(Path("/tmp/first.dump"))
+            assert vm.state.is_backing_up is True
+
+            release.set()
+            for _ in range(50):
+                if not vm.state.is_backing_up:
+                    break
+                await asyncio.sleep(0)
+
+        assert vm.state.is_backing_up is False
+
+    @pytest.mark.asyncio
+    async def test_start_backup_cancel_then_dump_failure_releases_busy(self, vm, mock_maintenance_service, caplog):
+        """取消后 dump 失败 → busy 释放 + backup_failed + 日志脱敏 (R9)."""
+        dump_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def failing_dump(_output_path: Path):
+            dump_started.set()
+            await release.wait()
+            raise RuntimeError("dump failed for C:\\Users\\secret\\backup.dump")
+
+        mock_maintenance_service.dump = AsyncMock(side_effect=failing_dump)
+        with (
+            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+            caplog.at_level(logging.ERROR, logger="ui.viewmodels.backup_restore_view_model"),
+        ):
+            task = asyncio.create_task(vm.start_backup(Path("/tmp/backup.dump")))
+            await dump_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+            assert task.cancelled() is True
+            assert vm.state.is_backing_up is True
+            release.set()
+            for _ in range(50):
+                if not vm.state.is_backing_up:
+                    break
+                await asyncio.sleep(0)
+
+        assert vm.state.is_backing_up is False
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "backup_failed"
+        assert vm.state.backup_success_message is None
+        assert vm.state.progress_message is None
+        messages = [r.getMessage() for r in caplog.records if r.name == "ui.viewmodels.backup_restore_view_model"]
+        assert messages, "取消后 dump 失败应记录日志"
+        assert all("C:\\Users\\secret" not in m for m in messages)
+        assert any("<PATH>" in m for m in messages)
 
 
 # --- start_restore_wizard ---
