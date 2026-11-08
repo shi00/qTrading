@@ -365,7 +365,11 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
     # ------------------------------------------------------------------
 
     async def load(self) -> None:
-        """读取已提交快照，构建每场景草稿与候选选择器选项。"""
+        """读取已提交快照，构建每场景草稿与候选选择器选项。
+
+        陈旧快照（``config_revision`` 低于本 VM 已前移的基线）不回退现态：双读取
+        屏障可能乱序返回，旧快照不得覆盖新基线（R22 单调性）。
+        """
         try:
             snapshot: ModelManagementSnapshot = await self._service.get_snapshot()
         except asyncio.CancelledError:
@@ -373,6 +377,8 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         except Exception:
             self._set_state(save_state=_SAVE_ERROR, message=Message("model_routes_load_failed"))
             return
+        if snapshot.config_revision < self._config_revision:
+            return  # 陈旧快照：保留现态，不把已前移的 CAS 基线回退
 
         drafts = _build_drafts(snapshot.scenario_routes)
         options = tuple(_option_from_mapping(c) for c in snapshot.connections)
@@ -408,10 +414,13 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
           不动（F31 回执语义与在途提交不受重基干扰）；
         - 撤销记录清除（重基后撤销语义失效，非丢草稿）；
         - 向导阶段内草稿注入（``_wizard_option_id``）在选项重建后重新叠加，注入项
-          不被快照刷新丢弃（见 ``_rebuild_options_with_wizard_overlay``）。
+          不被快照刷新丢弃（见 ``_rebuild_options_with_wizard_overlay``）；
+        - 陈旧快照（``config_revision`` 低于已前移基线）拒绝重基，不把 CAS 基线回退
+          （双读取屏障可能乱序返回；R22 单调性）。
 
         Returns:
-            ``True`` 表示重基成功；``False`` 表示读快照失败（不伪装成功，R21）。
+            ``True`` 表示重基成功；``False`` 表示读快照失败或快照已过期
+            （不伪装成功，R21）。
         """
         self._track_inflight_cancellable()  # F40：只读刷新，页面卸载可安全取消
         try:
@@ -420,6 +429,8 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             raise  # R2: 必须传播
         except Exception:
             return False
+        if snapshot.config_revision < self._config_revision:
+            return False  # 陈旧快照：保留现态，不回退已前移的基线
 
         new_committed = _build_drafts(snapshot.scenario_routes)
         rebased = _rebase_drafts(self._state.routes, self._state.committed_routes, new_committed)
@@ -689,6 +700,20 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             self._set_state(save_state=_SAVE_ERROR, message=Message("model_routes_save_failed"))
             return
 
+        receipt_revision = (
+            outcome.committed_revision if outcome.committed_revision is not None else outcome.current_revision
+        )
+        if outcome.status == "committed" and receipt_revision is not None and receipt_revision < self._config_revision:
+            # 迟到回执（MR-001）：等待期间基线已被更新（重基 / 新回执）前移，本次提交内容
+            # 已非最新基线——只结束 saving 并宣告已提交；不得以冻结的旧 A 覆盖 committed
+            # 行、不得回退 revision、不得动草稿。宿主 effect 经 commit_seq 触发重基。
+            self._set_state(
+                save_state=_SAVE_COMMITTED,
+                message=Message("model_routes_save_committed"),
+                commit_seq=self._state.commit_seq + 1,
+            )
+            return
+
         self._absorb_revision(outcome)
         if outcome.status == "committed":
             # 基线只能由发起时冻结的 A 更新，禁止重读等待期间可能已变为 B 的当前草稿。
@@ -865,10 +890,11 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         return self._overlay_option(snapshot_options, injected)
 
     def _absorb_revision(self, outcome: ConfigurationSaveOutcome) -> None:
+        """吸收回执 revision：只前移不回退（迟到回执不得回退已前移的 CAS 基线，R22）。"""
         new_revision = (
             outcome.committed_revision if outcome.committed_revision is not None else outcome.current_revision
         )
-        if new_revision is not None:
+        if new_revision is not None and new_revision > self._config_revision:
             self._config_revision = new_revision
 
     def _save_route_for(self, scenario_id: str) -> ScenarioRouteDraft:
