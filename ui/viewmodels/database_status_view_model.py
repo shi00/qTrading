@@ -17,6 +17,7 @@ View 渲染时 I18n.get(msg.key, **msg.params)。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import platform
 import subprocess
@@ -110,7 +111,9 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
         - log_dir 从 AppConfig 解析
         - doctor 已是 async，不需 ThreadPoolManager 包裹
         - 并发刷新按代际只采纳最新请求结果（旧请求晚返回不覆盖新状态）
-        - 异常时设 error state (R2: CancelledError 自动透传，except Exception 不捕获 BaseException)
+        - 任务取消时复位最新代次的 is_refreshing 并继续传播 CancelledError (R2)，
+          避免刷新按钮永久禁用；旧代次取消不清新代次标志
+        - 异常时设 error state (R2: CancelledError 显式分支处理，except Exception 不捕获 BaseException)
         """
         self._refresh_generation += 1
         generation = self._refresh_generation
@@ -144,6 +147,12 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
                 is_refreshing=False,
                 error_message=None,
             )
+        except asyncio.CancelledError:
+            # 取消不是业务失败：仅复位最新代次的刷新标志（旧代次由新代次拥有该标志），
+            # 且必须继续传播以配合优雅停机 (R2)。dispose 后 _set_state 由 disposed 守卫早返。
+            if generation == self._refresh_generation:
+                self._set_state(is_refreshing=False)
+            raise
         except Exception as exc:
             logger.error(
                 "[DatabaseStatusVM] refresh_status failed: %s",
