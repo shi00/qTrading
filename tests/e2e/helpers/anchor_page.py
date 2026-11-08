@@ -883,15 +883,37 @@ class AnchorPage:
     async def expect_visible(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, _ = eid
         # 四类 kind 共用精确选择器, 无 kind 分派 (P0-2 矩阵)
-        await self._locator_by_identifier(eid_str).first.wait_for(state="visible", timeout=self._tm(timeout_ms))
+        try:
+            await self._locator_by_identifier(eid_str).first.wait_for(state="visible", timeout=self._tm(timeout_ms))
+        except Exception as exc:
+            # 失步日志是常态噪声不作硬失败；仅在真实超时时注入诊断上下文
+            note = self._fp.desync_note()
+            if note:
+                raise RuntimeError(f"{eid_str} 等待可见超时（{self._tm(timeout_ms)}ms）。{note}") from exc
+            raise
 
     async def expect_hidden(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, _ = eid
-        await self._locator_by_identifier(eid_str).first.wait_for(state="hidden", timeout=self._tm(timeout_ms))
+        try:
+            await self._locator_by_identifier(eid_str).first.wait_for(state="hidden", timeout=self._tm(timeout_ms))
+        except Exception as exc:
+            # 失步日志是常态噪声不作硬失败；仅在真实超时时注入诊断上下文
+            note = self._fp.desync_note()
+            if note:
+                raise RuntimeError(f"{eid_str} 等待隐藏超时（{self._tm(timeout_ms)}ms）。{note}") from exc
+            raise
 
     async def count(self, eid: Eid) -> int:
         # 单一选择器计数, 无启发式的 strict mode violation 风险
         return await self._locator_by_identifier(eid[0]).count()
+
+    async def is_visible(self, eid: Eid) -> bool:
+        """当前时刻 anchor 节点是否可见（不等待）。
+
+        用于探测「意外弹出的覆盖层」：详情对话框的 ModalBarrier 会 BlockSemantics
+        屏蔽下层结果行 anchor（CI run 42488609156 core-a 实证）。
+        """
+        return await self._locator_by_identifier(eid[0]).first.is_visible()
 
     async def expect_in_viewport(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """断言 anchor 节点完整落入当前视口（未被上下边缘裁切）。
