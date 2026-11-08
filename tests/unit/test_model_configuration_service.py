@@ -27,6 +27,8 @@ from core.model_management_types import (
     ModelConfigurationConflictError,
     SyntheticTestConsent,
 )
+from data.persistence import engine_provider
+from data.persistence.daos.base_dao import EngineDisposedError
 from services.model_configuration_service import (
     ModelConfigurationService,
     _FrozenMapping,
@@ -1754,6 +1756,63 @@ class TestActivateFreshSetup:
                 await svc.activate_fresh_setup(mm["config_revision"], "op-f13d", "owner-x", when=dt.date(2026, 10, 23))
         raw = _read_raw(isolated_config)["model_management"]
         assert raw["migration_transition"] is None
+
+    @pytest.mark.asyncio
+    async def test_disposed_engine_fail_closed_before_connect(self, isolated_config):
+        """非 None 但已处置的引擎 → EngineDisposedError（R5），connect 不被调用且磁盘零写入。"""
+        engine = mock.Mock()
+        engine.connect = mock.AsyncMock()
+        svc = ModelConfigurationService()
+        cfg_mod.ConfigHandler.ensure_defaults()
+        mm = _load_mm()
+        engine_provider.set_engine(engine)
+        engine_provider.mark_disposed(True)
+        try:
+            with mock.patch("data.cache.cache_manager.CacheManager") as fake_cm:
+                fake_cm.return_value = mock.Mock(engine=engine)
+                with pytest.raises(EngineDisposedError, match="engine disposed"):
+                    await svc.activate_fresh_setup(
+                        mm["config_revision"], "op-f13d2", "owner-x", when=dt.date(2026, 10, 23)
+                    )
+        finally:
+            engine_provider.reset_engine_provider()
+        engine.connect.assert_not_awaited()
+        raw = _read_raw(isolated_config)["model_management"]
+        assert raw["migration_state"] == "pending"
+        assert raw["migration_transition"] is None
+
+    @pytest.mark.asyncio
+    async def test_alive_engine_reads_current_month_counts(self):
+        """未处置的非 None 引擎正常读取三计数（缺键按 0），连接必须关闭。"""
+        fetch_result = mock.Mock()
+        fetch_result.fetchall = mock.Mock(return_value=[("ai_cost:202610", "150"), ("ai_unpriced_calls:202610", "2")])
+        conn = mock.Mock()
+        conn.execute = mock.AsyncMock(return_value=fetch_result)
+        conn.close = mock.AsyncMock()
+        engine = mock.Mock()
+        engine.connect = mock.AsyncMock(return_value=conn)
+        svc = ModelConfigurationService()
+        engine_provider.set_engine(engine)
+        try:
+            with mock.patch("data.cache.cache_manager.CacheManager") as fake_cm:
+                fake_cm.return_value = mock.Mock(engine=engine)
+                counts = await svc._read_current_month_legacy_usage(dt.date(2026, 10, 23))
+        finally:
+            engine_provider.reset_engine_provider()
+        assert counts == (150, 2, 0)
+        engine.connect.assert_awaited_once()
+        conn.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_di_reader_path_bypasses_engine_guard(self):
+        """DI 读取器优先：不触达 CacheManager 与 disposed 守卫（行为不变）。"""
+        reader = mock.AsyncMock(return_value=(0, 0, 0))
+        svc = ModelConfigurationService(legacy_usage_reader=reader)
+        with mock.patch("data.cache.cache_manager.CacheManager") as fake_cm:
+            counts = await svc._read_current_month_legacy_usage(dt.date(2026, 10, 23))
+        assert counts == (0, 0, 0)
+        reader.assert_awaited_once_with(dt.date(2026, 10, 23))
+        fake_cm.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_nonzero_seal_baseline_rejected_after_seal(self, isolated_config):

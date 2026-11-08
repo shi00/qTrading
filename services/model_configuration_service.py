@@ -599,6 +599,8 @@ class ModelConfigurationService:
         Raises:
             MigrationTransitionError: engine 不可用（fail-closed，激活前置读取失败
                 不得伪装为「无 legacy 用量」）。
+            EngineDisposedError: engine 非 None 但已释放（R5：``CacheManager.close``
+                在标记 disposed 后、置空引用前存在窗口，必须拒绝而非降级为零用量）。
         """
         if self._legacy_usage_reader is not None:
             return await self._legacy_usage_reader(when)
@@ -606,10 +608,18 @@ class ModelConfigurationService:
         from data.cache.cache_manager import (
             CacheManager,
         )  # lazy-import: 同 _resolve_legacy_seal_dao，避免模块级依赖重链
+        from data.persistence import engine_provider
+        from data.persistence.daos.base_dao import (
+            EngineDisposedError,
+        )  # lazy-import: base_dao 传递依赖 numpy/pandas，仅本函数异常路径需要
 
         engine = CacheManager().engine
         if engine is None:
             raise MigrationTransitionError("legacy usage read failed: CacheManager engine not initialized")
+        # R5：close() 先 mark_disposed 再 await dispose、最后才置空 engine 引用，
+        # 该窗口内 engine 非 None 但已不可用——直接 connect 会落到已释放引擎上。
+        if engine_provider.is_disposed(engine):
+            raise EngineDisposedError("legacy usage read failed: CacheManager engine disposed")
         keys = (
             f"{_LEGACY_COST_KEY_PREFIX}:{when:%Y%m}",
             f"{_LEGACY_UNPRICED_CALLS_KEY_PREFIX}:{when:%Y%m}",
@@ -662,6 +672,10 @@ class ModelConfigurationService:
           禁止一键激活（须走排水流程）；
         - 封口回执基线非零（TOCTOU 双保险）→ 预检与封口间出现写入，中止且不回滚
           （保留 seal 行审计，由人工处置）。
+
+        Raises:
+            MigrationTransitionError: 预检不满足（含 engine 未初始化）。
+            EngineDisposedError: 预检读取时 engine 已释放（R5，不降级为零用量）。
 
         Args:
             expected_revision: 调用方持有的 config_revision（CAS 基准）。
