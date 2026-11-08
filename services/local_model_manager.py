@@ -711,7 +711,26 @@ class LocalModelManager:
             logger.error("Cannot load model: llama-cpp-python is not installed.")
             return False
 
-        if not _validate_model_file(model_path):
+        # GGUF 魔数校验含文件 open+read（同步 IO），offload 线程池（R16，与
+        # invoke_for_connection 同口径）；校验失败与线程池提交失败均按「文件不可用」
+        # 返回 False，保持原返回值语义。CancelledError 不在捕获元组内，照常传播（R2）。
+        try:
+            is_valid_model_file = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                _validate_model_file,
+                model_path,
+            )
+        except (ValueError, OSError, RuntimeError) as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[LocalModel] Model file validation failed (%s): %s",
+                exc_info=True,
+            )
+            return False
+
+        if not is_valid_model_file:
             logger.error("Invalid GGUF model file (missing, wrong type, or bad magic header): %s", model_path)
             return False
 
@@ -803,14 +822,17 @@ class LocalModelManager:
                     self._model_stat = current_stat
                     self._last_config = core_config
 
-                    # Persist SHA-256 for future integrity verification
+                    # 持久化 SHA-256 属同步文件 IO（save_config 内含文件锁 + 原子写），
+                    # offload 线程池（R16）；保存失败仅告警，不否定已加载模型。
                     if target_sha256:
                         try:
-                            ConfigHandler.save_config(
+                            await ThreadPoolManager().run_async(
+                                TaskType.IO,
+                                ConfigHandler.save_config,
                                 {
                                     "local_model_sha256": target_sha256,
                                     "local_model_sha256_path": model_path,
-                                }
+                                },
                             )
                         except (ValueError, OSError, RuntimeError) as e:
                             logger.warning(
