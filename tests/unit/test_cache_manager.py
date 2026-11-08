@@ -869,8 +869,49 @@ class TestCacheManagerCheckComprehensiveHealth:
             ),
         ):
             result = await mgr.check_comprehensive_health()
-            assert "macro_economy" in result["tables"]
-            assert result["tables"]["macro_economy"]["type"] == "global"
+
+        stats = result["tables"]["macro_economy"]
+        assert stats["type"] == "global"
+        assert stats["covered"] == 50
+        assert stats["ratio"] == 1.0
+        # R21：global 表不推断新鲜度，有数据时必须是「未知」(None)，不得伪报 1.0 满分
+        assert stats["fresh_ratio"] is None
+
+    @pytest.mark.asyncio
+    async def test_health_check_global_table_empty_reports_zero_freshness(self):
+        """空 global 表：无数据是已知状态，ratio 与 fresh_ratio 均明确为 0.0。"""
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_result = MagicMock()
+        mock_result.scalar = MagicMock(return_value=0)
+        mock_conn.execute = AsyncMock(return_value=mock_result)
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "macro_economy": {
+                        "type": "global",
+                        "quality_config": {"monitor": True},
+                        "sync_config": {},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+
+        stats = result["tables"]["macro_economy"]
+        assert stats["covered"] == 0
+        assert stats["ratio"] == 0.0
+        assert stats["fresh_ratio"] == 0.0
 
     @pytest.mark.asyncio
     async def test_health_check_table_error(self):
