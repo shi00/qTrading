@@ -19,6 +19,9 @@
 - 草稿编辑版本（F02）：普通字段编辑单调递增 ``_draft_edit_revision``，与草稿身份
   generation 分离；保存回执仅在提交时的编辑版本仍为当前时才清理 dirty / 关闭编辑器，
   等待期间的编辑保留为未保存草稿（仅刷新已提交快照）
+- 保存 CAS 基线：``config_revision`` 于首个 await 前捕获并贯穿 payload 与
+  ``save_draft`` 的 expected_revision；准备期间已提交修订漂移按冲突拒绝，禁止以新
+  基线提交旧草稿覆盖他人已提交配置
 
 R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 """
@@ -689,7 +692,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             }
         return {"mode": "usage_only", "pricing_unit": draft.billing_unit}
 
-    def _build_payload(self, connection_payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _build_payload(self, connection_payload: Mapping[str, Any], config_revision: int) -> dict[str, Any]:
         """重建完整 ``model_management`` CAS payload（§5.1）。
 
         ``save_draft`` 期望完整 model_management 域（connections / scenario_routes /
@@ -698,6 +701,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         已提交值；``security_state`` 由 ConfigHandler CAS 以磁盘现值保留（草稿不能
         改安全状态，§5.3）；迁移子域（migration_state / migration_transition）同样
         不入草稿 payload，由迁移专用命令独占、CAS 以磁盘现值回填（F07）。
+
+        ``config_revision`` 由调用方传入保存发起时捕获的 CAS 基线（与 ``save_draft``
+        的 expected_revision 同值），不读等待期可能已漂移的 state。
         """
         cid = str(connection_payload.get("connection_id", ""))
         connections = [dict(c) for c in self._raw_connections]
@@ -711,7 +717,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             connections.append(dict(connection_payload))
         return {
             "schema_version": 1,
-            "config_revision": self._state.config_revision,
+            "config_revision": config_revision,
             "connections": connections,
             "scenario_routes": [dict(r) for r in self._raw_routes],
             "usage_policy": dict(self._usage_policy),
@@ -804,6 +810,10 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         F31：operation_id 于首个 await 前登记为回执身份；取消按提交阶段区分——写前
         取消恢复 idle 可重试，写后取消进入 commit_unknown 可查回执；回执绑定发起时的
         草稿 generation，重置后的新草稿不被旧回执覆盖。
+
+        CAS 基线：``config_revision`` 与草稿 A 同在首个 await 前捕获，payload 与
+        ``save_draft`` 的 expected_revision 一律使用该捕获值；凭据准备返回后若已提交
+        修订已漂移，按冲突拒绝（不写盘、保留草稿），禁止以新基线提交旧草稿。
         """
         if self._state.save_state == SAVE_SAVING:
             return False
@@ -822,6 +832,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         draft = self._state.draft
         op_generation = self._draft_generation
         op_edit_revision = self._draft_edit_revision
+        # CAS 基线同样在首个 await 前捕获：等待期间若有其它保存提交并刷新了已提交
+        # 修订，旧草稿不得以新基线提交（否则静默覆盖对方已提交配置）
+        expected_revision = self._state.config_revision
         # F31：await 前登记操作身份（新保存取代旧槽位），取消后仍可按 id 查回执
         self._pending_operation_id = operation_id
         self._pending_operation_generation = op_generation
@@ -830,14 +843,18 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         committing = False
         try:
             credential_ref, credential_version = await self._resolve_credential(draft, operation_id)
+            if self._state.config_revision != expected_revision:
+                # 准备期间已提交修订漂移：按冲突处理（保留草稿、不写盘）。状态修订已随
+                # 刷新更新，用户重新发起保存即使用新基线；需刷新路由等元数据时先 rebase
+                raise ModelConfigurationConflictError(expected_revision, self._state.config_revision)
             connection_payload = self._draft_to_connection_payload(draft, credential_ref, credential_version)
             connection_payload["connection_revision"] = self._next_connection_revision(connection_payload)
-            payload = self._build_payload(connection_payload)
+            payload = self._build_payload(connection_payload, expected_revision)
             # F40：进入提交阶段——dispose 不再取消本任务（写可能经线程池最终落库，
             # 取消后宣称未提交即掩盖事实；CancelledError 传播不写任何状态，磁盘为 SSOT）。
             self._mark_inflight_committing()
             committing = True  # F31：此后取消属「写已发出、结果未知」（与登记阶段间无暂停点）
-            outcome = await self._service.save_draft(payload, self._state.config_revision, operation_id)
+            outcome = await self._service.save_draft(payload, expected_revision, operation_id)
         except asyncio.CancelledError:
             self._restore_save_after_cancel(committing, operation_id, op_generation, op_edit_revision)
             raise  # R2

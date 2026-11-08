@@ -14,6 +14,8 @@ Mock ``ModelConfigurationService``（DI 注入），不连真实 DB / keyring / 
 - dispose() 清敏感草稿
 - R2 CancelledError 显式传播
 - F02 保存回执按草稿编辑版本门控：等待期间编辑形成的 B 保留 dirty / 编辑器
+- 保存 CAS 基线：准备期间已提交修订漂移按冲突拒绝、重基后新保存使用新基线、
+  A/B 交错时旧草稿不覆盖 B 的已提交配置
 """
 
 import asyncio
@@ -406,6 +408,77 @@ class TestSave:
             await vm.save()
         assert exc_info.type is asyncio.CancelledError
         vm._service.save_draft.assert_awaited_once()  # noqa: SLF001
+
+
+class TestSaveCasBaseline:
+    """CAS 基线在首个 await 前捕获：准备期间漂移的旧草稿不得以新基线提交。"""
+
+    async def test_baseline_drift_during_prepare_rejects_stale_draft(self, vm, filled_litellm_draft):
+        await vm.load()
+        vm.update_credential("sk-test-123")
+
+        async def refresh_to_new_revision(operation_id, api_key):
+            vm._service.get_snapshot.return_value = _snapshot(revision=2)  # noqa: SLF001
+            await vm.rebase_snapshot()
+            return "keyring:new", "v-new"
+
+        vm._service.prepare_credential_version.side_effect = refresh_to_new_revision  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        vm._service.save_draft.assert_not_awaited()  # noqa: SLF001
+        st = vm.state
+        assert st.save_state == "conflict"
+        assert st.config_revision == 2
+        assert st.draft.name == "New Conn"
+        assert st.editor_open is True
+        assert st.commit_unknown_pending is False
+        assert vm._pending_operation_id is None  # noqa: SLF001
+
+    async def test_new_save_after_rebase_uses_new_baseline(self, vm, filled_litellm_draft):
+        await vm.load()
+        vm._service.get_snapshot.return_value = _snapshot(revision=7)  # noqa: SLF001
+        assert await vm.rebase_snapshot() is True
+
+        assert await vm.save() is True
+        payload, expected_revision, _op = vm._service.save_draft.await_args.args  # noqa: SLF001
+        assert expected_revision == 7
+        assert payload["config_revision"] == 7
+
+    async def test_other_save_during_prepare_is_not_overwritten(self):
+        """A 准备凭据期间 B 重新编辑并保存提交：A 不得覆盖 B 的已提交配置。"""
+        svc = _make_service(_snapshot(connections=(_conn(connection_id="c1", name="A Name"),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("A Name")
+        vm.update_credential("sk-test-123")
+        other_save: dict[str, object] = {}
+
+        async def prepare_while_other_saves(operation_id, api_key):
+            vm._service.prepare_credential_version.side_effect = None  # noqa: SLF001
+            vm.edit("c1")
+            vm.update_name("B Name")
+            vm._service.get_snapshot.return_value = _snapshot(  # noqa: SLF001
+                revision=2, connections=(_conn(connection_id="c1", name="B Name"),)
+            )
+            other_save["ok"] = await vm.save()
+            return "keyring:new", "v-new"
+
+        vm._service.prepare_credential_version.side_effect = prepare_while_other_saves  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        assert other_save["ok"] is True
+        # 仅 B 的那次保存到达服务层，且使用 B 发起时的基线
+        vm._service.save_draft.assert_awaited_once()  # noqa: SLF001
+        assert vm._service.save_draft.await_args.args[1] == 1  # noqa: SLF001
+        st = vm.state
+        # B 的已提交结果不被 A 的冲突回执覆盖
+        assert st.save_state == "committed"
+        assert st.draft.name == "B Name"
+        assert st.editor_open is False
+        assert vm._pending_operation_id is None  # noqa: SLF001
 
 
 class TestResolveCommitUnknown:
