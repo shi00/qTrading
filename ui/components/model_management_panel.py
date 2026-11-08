@@ -235,7 +235,12 @@ async def _export_csv_and_notify(
     负责桌面落盘（§11.2：写盘副作用归 VM，View 只做 FilePicker）；web 路径经
     ``save_file(src_bytes=...)`` 不落盘。文件名经 ``_export_filename`` 编码范围
     与查看月，导出结果可辨识口径。
+
+    文件名在 ``await`` 导出之前从 state 快照生成（MMP-F1）：VM 侧 CSV 口径同样
+    在构建前快照，二者必须一致——导出途中翻页 / 切范围 / 进月汇总不得让本轮
+    文件名与 CSV 内容口径脱节。
     """
+    filename = _export_filename(vm.state)
     try:
         csv_text = await vm.export_csv()
     except asyncio.CancelledError:
@@ -248,7 +253,6 @@ async def _export_csv_and_notify(
     if file_picker is None or page is None:
         return
     _sync_file_picker_service(page, file_picker, True)
-    filename = _export_filename(vm.state)
     try:
         if page.web:
             await file_picker.save_file(
