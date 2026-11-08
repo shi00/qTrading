@@ -305,7 +305,9 @@ async def test_screener_min_viewport_no_collapse(e2e_page_min_viewport):
 
     # 执行 → 结果表首行完整落入视口（结果行 + 分页信息）
     await screener.run()
-    await screener.expect_result("平安银行")
+    # ts_code 让 expect_result 以结果行 anchor 为判据：仅文本 attached 会被
+    # 意外弹出的详情对话框标题「平安银行」误命中（CI run 42488609156 core-a）
+    await screener.expect_result("平安银行", ts_code="000001.SZ")
     await screener.expect_row_in_viewport("000001.SZ")
 
     # MAJOR-06: 分页栏文案新增「共 {count} 条」, 总数随结果集变化, 故断言模板中

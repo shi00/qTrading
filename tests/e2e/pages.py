@@ -239,8 +239,21 @@ class ScreenerPage:
 
         await retry_until_triggered(_interact, _confirm)
 
-    async def expect_result(self, text: str, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
-        """等待选股结果文本出现。"""
+    async def expect_result(
+        self,
+        text: str,
+        timeout_ms: int = TIMEOUTS.SCREEN_RESULT,
+        ts_code: str | None = None,
+    ) -> None:
+        """等待选股结果出现。
+
+        ``ts_code`` 非空时先等待结果行 anchor（``EIDS.SCREENER.result_row``）可见，
+        再断言文本：``expect_text`` 只要求文本 attached，会被详情对话框标题等任意
+        同文本节点误命中（CI run 42488609156 core-a 实证：``expect_result("平安银行")``
+        命中的是意外弹出的对话框标题）。
+        """
+        if ts_code is not None:
+            await self.ap.expect_visible(EIDS.SCREENER.result_row(ts_code), timeout_ms=timeout_ms)
         await self.page.expect_text(text, timeout_ms=timeout_ms)
 
     async def expect_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
@@ -256,8 +269,27 @@ class ScreenerPage:
         await self.ap.scroll_into_view(EIDS.SCREENER.ADVANCED_SETTINGS, timeout_ms=timeout_ms)
         await self.ap.click(EIDS.SCREENER.ADVANCED_SETTINGS, timeout_ms=timeout_ms)
 
+    async def dismiss_detail_dialog_if_open(self, timeout_ms: int = TIMEOUTS.FAST) -> bool:
+        """关闭意外弹出的股票详情对话框，返回是否执行了关闭。
+
+        详情对话框的 ``ModalBarrier`` 会 ``BlockSemantics`` 屏蔽下层语义节点，结果行
+        anchor 随之从 DOM 消失，等待方只能空等至超时（CI run 42488609156 core-a
+        实证：运行完成的瞬间对话框自行弹出，trace 中无对应点击）。属 CanvasKit
+        客户端失步的兜底，不作为正常流程的必经步骤。
+        """
+        if not await self.ap.is_visible(EIDS.DETAIL_DIALOG.CLOSE_BUTTON):
+            return False
+        logger.warning("ScreenerPage: 检测到意外打开的股票详情对话框（疑似 CanvasKit 客户端失步），自动关闭")
+        await self.ap.click(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, timeout_ms=timeout_ms)
+        await self.ap.expect_hidden(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, timeout_ms=timeout_ms)
+        return True
+
     async def expect_row_in_viewport(self, ts_code: str, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
-        """断言指定结果行完整落入视口（MAJOR-07：小窗口下结果表首行不被裁切）。"""
+        """断言指定结果行完整落入视口（MAJOR-07：小窗口下结果表首行不被裁切）。
+
+        先关闭意外弹出的详情对话框，避免其语义屏障把结果行 anchor 屏蔽后空等超时。
+        """
+        await self.dismiss_detail_dialog_if_open()
         await self.ap.expect_in_viewport(EIDS.SCREENER.result_row(ts_code), timeout_ms=timeout_ms)
 
     async def click_column_header(self, col_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:

@@ -127,6 +127,9 @@ class _FakeFletPage:
     def __init__(self) -> None:
         self._timeout_multiplier = 1.0
 
+    def raise_if_client_desync(self) -> None:
+        """AnchorPage 等待前会调用；本 fake 不模拟客户端失步。"""
+
 
 def _make_ap() -> tuple[AnchorPage, _FakePage]:
     page = _FakePage()

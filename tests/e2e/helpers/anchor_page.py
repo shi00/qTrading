@@ -881,6 +881,8 @@ class AnchorPage:
         return await checkbox.get_attribute("aria-checked") == "true"
 
     async def expect_visible(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        # 客户端失步后语义树不可信，先快速失败而不是等满 timeout（见 FletPage）
+        self._fp.raise_if_client_desync()
         eid_str, _ = eid
         # 四类 kind 共用精确选择器, 无 kind 分派 (P0-2 矩阵)
         await self._locator_by_identifier(eid_str).first.wait_for(state="visible", timeout=self._tm(timeout_ms))
@@ -892,6 +894,14 @@ class AnchorPage:
     async def count(self, eid: Eid) -> int:
         # 单一选择器计数, 无启发式的 strict mode violation 风险
         return await self._locator_by_identifier(eid[0]).count()
+
+    async def is_visible(self, eid: Eid) -> bool:
+        """当前时刻 anchor 节点是否可见（不等待）。
+
+        用于探测「意外弹出的覆盖层」：详情对话框的 ModalBarrier 会 BlockSemantics
+        屏蔽下层结果行 anchor（CI run 42488609156 core-a 实证）。
+        """
+        return await self._locator_by_identifier(eid[0]).first.is_visible()
 
     async def expect_in_viewport(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """断言 anchor 节点完整落入当前视口（未被上下边缘裁切）。
