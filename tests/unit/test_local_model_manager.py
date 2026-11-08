@@ -31,6 +31,7 @@ from services.local_model_manager import (
     _probe_llama_cpp,
     _validate_model_file,
 )
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -603,7 +604,9 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
             ):
-                mock_tpm.return_value.run_async = AsyncMock(side_effect=Exception("load failed"))
+                # 首次 run_async 为文件校验（offload），第二次为 SHA-256 计算；
+                # 让 SHA-256 阶段抛错以复现「加载失败」路径。
+                mock_tpm.return_value.run_async = AsyncMock(side_effect=[True, Exception("load failed")])
                 result = await mgr.load_model("/path/to/model.gguf")
                 assert result is False
                 assert mgr._model_path == ""
@@ -683,6 +686,7 @@ class TestLocalModelManagerLoadModelWithLlama:
                 with (
                     patch("os.path.exists", return_value=True),
                     patch("services.local_model_manager._validate_model_file", return_value=True),
+                    patch.object(LocalModelManager, "calculate_file_sha256", return_value="abc123"),
                     # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                     patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                     patch.object(LocalModelManager, "_get_load_lock"),
@@ -693,7 +697,13 @@ class TestLocalModelManagerLoadModelWithLlama:
                 ):
                     mock_ch.get_typed.return_value = ""
                     mock_ch.save_config.side_effect = ValueError(f"persist failed: {leaked_secret}")
-                    mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+
+                    async def _dispatch(_task_type, func, *args, **kwargs):
+                        # 让 offload 调用真正执行目标函数，以验证 save_config 的异常
+                        # 经线程池 await 回到事件循环后仍被本地捕获并脱敏记录。
+                        return func(*args, **kwargs)
+
+                    mock_tpm.return_value.run_async = AsyncMock(side_effect=_dispatch)
                     with caplog.at_level(logging.WARNING):
                         result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
 
@@ -714,6 +724,127 @@ class TestLocalModelManagerLoadModelWithLlama:
         finally:
             # 清理注册的 secret，避免污染其他测试
             DataSanitizer._reset_known_secrets()
+
+
+class TestLocalModelManagerLoadModelIOOffload:
+    """R16: load_model 的文件校验与 SHA-256 持久化必须经线程池 offload。"""
+
+    @pytest.mark.asyncio
+    async def test_validate_model_file_runs_in_thread_pool(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("services.local_model_manager._validate_model_file", return_value=False) as mock_validate,
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+            ):
+                mock_tpm.return_value.run_async = AsyncMock(return_value=False)
+
+                result = await mgr.load_model("/path/to/model.gguf")
+
+                assert result is False
+                awaited = mock_tpm.return_value.run_async.await_args_list
+                assert len(awaited) == 1
+                assert awaited[0].args[0] is TaskType.IO
+                assert awaited[0].args[1] is mock_validate
+                assert awaited[0].args[2] == "/path/to/model.gguf"
+
+    @pytest.mark.asyncio
+    async def test_sha256_persist_runs_in_thread_pool(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
+                patch.object(LocalModelManager, "calculate_file_sha256", return_value="abc123"),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_typed.return_value = ""
+
+                async def _dispatch(_task_type, func, *args, **kwargs):
+                    return func(*args, **kwargs)
+
+                mock_tpm.return_value.run_async = AsyncMock(side_effect=_dispatch)
+
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+
+                assert result is True
+                persist_calls = [
+                    call
+                    for call in mock_tpm.return_value.run_async.await_args_list
+                    if call.args[1] is mock_ch.save_config
+                ]
+                assert len(persist_calls) == 1
+                assert persist_calls[0].args[0] is TaskType.IO
+                assert persist_calls[0].args[2] == {
+                    "local_model_sha256": "abc123",
+                    "local_model_sha256_path": "/path/to/model.gguf",
+                }
+
+    @pytest.mark.asyncio
+    async def test_validation_offload_error_returns_false(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with patch("services.local_model_manager.ThreadPoolManager") as mock_tpm:
+                mock_tpm.return_value.run_async = AsyncMock(side_effect=RuntimeError("pool unavailable"))
+
+                result = await mgr.load_model("/path/to/model.gguf")
+
+                assert result is False
+                assert mgr._model_path == ""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_validation_propagates(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with patch("services.local_model_manager.ThreadPoolManager") as mock_tpm:
+                mock_tpm.return_value.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+
+                with pytest.raises(asyncio.CancelledError) as exc_info:
+                    await mgr.load_model("/path/to/model.gguf")
+
+                assert isinstance(exc_info.value, asyncio.CancelledError)
+                assert mgr._model_path == ""
+                assert mgr._is_loading is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_during_persist_keeps_loaded_model_state(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("services.local_model_manager._validate_model_file", return_value=True),
+                patch.object(LocalModelManager, "calculate_file_sha256", return_value="abc123"),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_typed.return_value = ""
+
+                async def _dispatch(_task_type, func, *args, **kwargs):
+                    if func is mock_ch.save_config:
+                        raise asyncio.CancelledError()
+                    return func(*args, **kwargs)
+
+                mock_tpm.return_value.run_async = AsyncMock(side_effect=_dispatch)
+
+                with pytest.raises(asyncio.CancelledError) as exc_info:
+                    await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+
+                assert isinstance(exc_info.value, asyncio.CancelledError)
+                # 取消发生在模型已就绪后：加载结果不被回滚，但加载标志必须复位（R2）。
+                assert mgr._model_path == "/path/to/model.gguf"
+                assert mgr._model_sha256 == "abc123"
+                assert mgr._is_loading is False
 
 
 class TestLocalModelManagerRunInferenceWithModel:
@@ -2016,7 +2147,15 @@ class TestModelIntegritySha256:
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_typed.return_value = ""
-                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+
+                async def _dispatch(_task_type, func, *args, **kwargs):
+                    # 仅让 save_config 真正执行（其余 offload 调用返回固定 SHA-256），
+                    # 以验证持久化经线程池提交且参数完整。
+                    if func is mock_ch.save_config:
+                        return func(*args, **kwargs)
+                    return "abc123"
+
+                mock_tpm.return_value.run_async = AsyncMock(side_effect=_dispatch)
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is True
                 assert mgr._model_sha256 == "abc123"
@@ -3183,7 +3322,8 @@ class TestWorkerIdentityConsistency:
             ):
                 mock_ch.get_typed.return_value = ""
                 mock_ch.save_config = MagicMock()
-                mock_tpm.return_value.run_async = AsyncMock(return_value="")
+                # 首次 run_async 为文件校验（offload），第二次为 SHA-256 计算（返回空）。
+                mock_tpm.return_value.run_async = AsyncMock(side_effect=[True, ""])
                 assert await mgr.load_model(path, config=_CORE_CFG) is True
                 mock_ch.save_config.assert_not_called()
                 assert mgr._model_sha256 == ""

@@ -14,6 +14,8 @@ Mock ``ModelConfigurationService``（DI 注入），不连真实 DB / keyring / 
 - dispose() 清敏感草稿
 - R2 CancelledError 显式传播
 - F02 保存回执按草稿编辑版本门控：等待期间编辑形成的 B 保留 dirty / 编辑器
+- 保存 CAS 基线：准备期间已提交修订漂移按冲突拒绝、重基后新保存使用新基线、
+  A/B 交错时旧草稿不覆盖 B 的已提交配置
 """
 
 import asyncio
@@ -408,6 +410,77 @@ class TestSave:
         vm._service.save_draft.assert_awaited_once()  # noqa: SLF001
 
 
+class TestSaveCasBaseline:
+    """CAS 基线在首个 await 前捕获：准备期间漂移的旧草稿不得以新基线提交。"""
+
+    async def test_baseline_drift_during_prepare_rejects_stale_draft(self, vm, filled_litellm_draft):
+        await vm.load()
+        vm.update_credential("sk-test-123")
+
+        async def refresh_to_new_revision(operation_id, api_key):
+            vm._service.get_snapshot.return_value = _snapshot(revision=2)  # noqa: SLF001
+            await vm.rebase_snapshot()
+            return "keyring:new", "v-new"
+
+        vm._service.prepare_credential_version.side_effect = refresh_to_new_revision  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        vm._service.save_draft.assert_not_awaited()  # noqa: SLF001
+        st = vm.state
+        assert st.save_state == "conflict"
+        assert st.config_revision == 2
+        assert st.draft.name == "New Conn"
+        assert st.editor_open is True
+        assert st.commit_unknown_pending is False
+        assert vm._pending_operation_id is None  # noqa: SLF001
+
+    async def test_new_save_after_rebase_uses_new_baseline(self, vm, filled_litellm_draft):
+        await vm.load()
+        vm._service.get_snapshot.return_value = _snapshot(revision=7)  # noqa: SLF001
+        assert await vm.rebase_snapshot() is True
+
+        assert await vm.save() is True
+        payload, expected_revision, _op = vm._service.save_draft.await_args.args  # noqa: SLF001
+        assert expected_revision == 7
+        assert payload["config_revision"] == 7
+
+    async def test_other_save_during_prepare_is_not_overwritten(self):
+        """A 准备凭据期间 B 重新编辑并保存提交：A 不得覆盖 B 的已提交配置。"""
+        svc = _make_service(_snapshot(connections=(_conn(connection_id="c1", name="A Name"),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("A Name")
+        vm.update_credential("sk-test-123")
+        other_save: dict[str, object] = {}
+
+        async def prepare_while_other_saves(operation_id, api_key):
+            vm._service.prepare_credential_version.side_effect = None  # noqa: SLF001
+            vm.edit("c1")
+            vm.update_name("B Name")
+            vm._service.get_snapshot.return_value = _snapshot(  # noqa: SLF001
+                revision=2, connections=(_conn(connection_id="c1", name="B Name"),)
+            )
+            other_save["ok"] = await vm.save()
+            return "keyring:new", "v-new"
+
+        vm._service.prepare_credential_version.side_effect = prepare_while_other_saves  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        assert other_save["ok"] is True
+        # 仅 B 的那次保存到达服务层，且使用 B 发起时的基线
+        vm._service.save_draft.assert_awaited_once()  # noqa: SLF001
+        assert vm._service.save_draft.await_args.args[1] == 1  # noqa: SLF001
+        st = vm.state
+        # B 的已提交结果不被 A 的冲突回执覆盖
+        assert st.save_state == "committed"
+        assert st.draft.name == "B Name"
+        assert st.editor_open is False
+        assert vm._pending_operation_id is None  # noqa: SLF001
+
+
 class TestResolveCommitUnknown:
     async def test_resolve_recovers_to_committed(self, vm, filled_litellm_draft):
         vm._service.save_draft.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
@@ -424,6 +497,7 @@ class TestResolveCommitUnknown:
         assert st.commit_unknown_pending is False
         assert st.save_state == "committed"
         assert st.dirty is False
+        assert vm._pending_operation_kind is None  # noqa: SLF001
         vm._service.resolve_save_outcome.assert_awaited_once()  # noqa: SLF001
 
     async def test_resolve_still_unknown_keeps_pending(self, vm, filled_litellm_draft):
@@ -1163,6 +1237,58 @@ class TestEgress:
         ok = await vm.revoke_egress("g1")
         assert ok is True
         svc.revoke_egress.assert_awaited_once()
+
+
+class TestEgressCommitUnknownReceipt:
+    """MC-02：安全命令的未知回执恢复只清恢复旗标，不把未保存草稿标为已保存。"""
+
+    @pytest.mark.parametrize("command", ["grant", "revoke"])
+    async def test_committed_egress_receipt_keeps_dirty_draft(self, vm, filled_litellm_draft, command):
+        unknown = ConfigurationSaveOutcome(status="commit_unknown")
+        vm._service.grant_egress.return_value = unknown  # noqa: SLF001
+        vm._service.revoke_egress.return_value = unknown  # noqa: SLF001
+        before = vm.state.draft
+
+        if command == "grant":
+            assert await vm.grant_egress("c1", "target-fp", "stock_analysis") is False
+        else:
+            assert await vm.revoke_egress("g1") is False
+
+        st = vm.state
+        assert st.save_state == "commit_unknown"
+        assert st.commit_unknown_pending is True
+        assert vm._pending_operation_kind == "egress"  # noqa: SLF001
+
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+
+        st = vm.state
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is False
+        assert st.dirty is True
+        assert st.editor_open is True
+        assert st.draft == before
+        assert st.message is not None and st.message.key == "model_connection_egress_updated"
+        assert vm._pending_operation_id is None  # noqa: SLF001
+        assert vm._pending_operation_kind is None  # noqa: SLF001
+
+    async def test_committed_egress_receipt_without_draft_stays_idle(self, vm):
+        """无草稿修改时恢复同样不伪造已保存态（dirty / 编辑器保持原样）。"""
+        vm._service.grant_egress.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
+        assert await vm.grant_egress("c1", "target-fp", "stock_analysis") is False
+
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+
+        st = vm.state
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is False
+        assert st.dirty is False
+        assert st.editor_open is False
 
 
 # --- Egress queries（§4.3 授权摘要查询） ---
