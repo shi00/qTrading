@@ -297,6 +297,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._draft_edit_revision: int = 0
         # F02：回执身份绑定的编辑版本（登记时快照），供 committed 回执判定内容是否仍当前
         self._pending_operation_edit_revision: int | None = None
+        # 回执身份的操作种类：草稿保存与安全命令（授权 / 撤销）共用恢复槽位，仅凭
+        # id / 草稿代 / 编辑版本无法区分；回执恢复据此避免把安全命令的提交当成草稿已保存
+        self._pending_operation_kind: Literal["draft", "egress"] | None = None
         self._state = ModelConnectionsState()
         self._init_mixin_fields()
 
@@ -759,6 +762,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             self._pending_operation_id = None
             self._pending_operation_generation = None
             self._pending_operation_edit_revision = None
+            self._pending_operation_kind = None
 
     def _claim_pending_save_identity(self, operation_id: str, generation: int, edit_revision: int) -> None:
         """登记保存回执身份（F31/F02）：槽位未被后继操作持有时才写入（后写者优先）。"""
@@ -766,6 +770,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             self._pending_operation_id = operation_id
             self._pending_operation_generation = generation
             self._pending_operation_edit_revision = edit_revision
+            self._pending_operation_kind = "draft"
 
     def _restore_save_after_cancel(
         self, committing: bool, operation_id: str, op_generation: int, op_edit_revision: int
@@ -826,6 +831,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._pending_operation_id = operation_id
         self._pending_operation_generation = op_generation
         self._pending_operation_edit_revision = op_edit_revision
+        self._pending_operation_kind = "draft"
         self._set_state(save_state=SAVE_SAVING, validation_errors=(), commit_unknown_pending=False)
         committing = False
         try:
@@ -944,6 +950,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         resolved_operation_id = self._pending_operation_id
         pending_generation = self._pending_operation_generation
         pending_edit_revision = self._pending_operation_edit_revision
+        pending_kind = self._pending_operation_kind
         self._track_inflight_cancellable()  # F40：回执恢复只读确认，可安全取消
         try:
             outcome = await self._service.resolve_save_outcome(resolved_operation_id)
@@ -970,6 +977,17 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             if not still_owner:
                 # F03：槽位已属后继保存 B——A 的回执只确认磁盘结果，不清 B 的恢复旗标、
                 # 不覆盖 B 的消息、不改 B 的 save_state / dirty（B 仍按自身回执恢复）
+                await self._safe_refresh_snapshot()
+                return True
+            if pending_kind == "egress":
+                # 安全命令（授权 / 撤销）共用恢复槽位：其提交只证明授权状态已更新，
+                # 不代表草稿已提交——仅清恢复旗标并回到 idle，不触碰 draft / dirty / 编辑器
+                self._release_pending_save_identity(resolved_operation_id)
+                self._set_state(
+                    save_state=SAVE_IDLE,
+                    commit_unknown_pending=False,
+                    message=Message("model_connection_egress_updated"),
+                )
                 await self._safe_refresh_snapshot()
                 return True
             generation_current = pending_generation is not None and pending_generation == self._draft_generation
@@ -1362,10 +1380,12 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             self._set_state(message=Message("model_connection_egress_updated"))
             return True
         if outcome.status == "commit_unknown":
-            # F31：共享回执身份槽位同步登记草稿代，供 resolve 门控校验
+            # F31：共享回执身份槽位同步登记草稿代与操作种类（安全命令的提交不代表草稿已保存），
+            # 供 resolve 门控校验
             self._pending_operation_id = operation_id
             self._pending_operation_generation = self._draft_generation
             self._pending_operation_edit_revision = self._draft_edit_revision
+            self._pending_operation_kind = "egress"
             self._set_state(
                 save_state=SAVE_COMMIT_UNKNOWN,
                 commit_unknown_pending=True,
@@ -1398,4 +1418,5 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._pending_operation_id = None
         self._pending_operation_generation = None
         self._pending_operation_edit_revision = None
+        self._pending_operation_kind = None
         super().dispose()
