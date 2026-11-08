@@ -14,6 +14,7 @@ VM 是独立类，内部 VM 模式由 use_viewmodel(factory=...) 实例化。
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -257,6 +258,125 @@ class TestRefreshStatus:
         assert vm.state.status_type == "error"
         assert vm.state.error_message is not None
         assert vm.state.error_message.key == "db_status_refresh_failed"
+
+    @pytest.mark.asyncio
+    async def test_refresh_status_cancel_at_doctor_resets_flag(self, vm, mock_maintenance_service):
+        """取消发生在 doctor() await 处: CancelledError 传播且最新代次 is_refreshing 复位。"""
+        started = asyncio.Event()
+
+        async def blocking_doctor():
+            started.set()
+            await asyncio.Event().wait()
+
+        mock_maintenance_service.doctor = AsyncMock(side_effect=blocking_doctor)
+        task = asyncio.create_task(vm.refresh_status())
+        await started.wait()
+        assert vm.state.is_refreshing is True
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled() is True
+        assert vm.state.is_refreshing is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_status_cancel_at_load_config_resets_flag(self, mock_maintenance_service, mock_config_dict):
+        """取消发生在 load_config offload await 处: CancelledError 传播且 is_refreshing 复位。"""
+        started = asyncio.Event()
+
+        async def blocking_run_async(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+            return mock_config_dict  # pragma: no cover - 取消后不可达
+
+        with patch("ui.viewmodels.database_status_view_model.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = MagicMock()
+            mock_tpm_cls.return_value = mock_tpm
+            mock_tpm.run_async = AsyncMock(side_effect=blocking_run_async)
+            vm = DatabaseStatusViewModel(maintenance_service=mock_maintenance_service)
+            task = asyncio.create_task(vm.refresh_status())
+            await started.wait()
+            assert vm.state.is_refreshing is True
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+            assert task.cancelled() is True
+
+        assert vm.state.is_refreshing is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_stale_generation_keeps_new_refreshing_flag(
+        self, mock_maintenance_service, mock_doctor_result, mock_config_dict
+    ):
+        """旧代次取消只传播取消，不得清除新代次仍为真的 is_refreshing。"""
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        release_second = asyncio.Event()
+        calls = 0
+
+        async def fake_doctor():
+            nonlocal calls
+            index = calls
+            calls += 1
+            if index == 0:
+                first_started.set()
+                await asyncio.Event().wait()  # 等待被取消
+            second_started.set()
+            await release_second.wait()
+            return mock_doctor_result
+
+        mock_maintenance_service.doctor = AsyncMock(side_effect=fake_doctor)
+        with patch(
+            "ui.viewmodels.database_status_view_model.ConfigHandler.load_config",
+            return_value=mock_config_dict,
+        ):
+            vm = DatabaseStatusViewModel(maintenance_service=mock_maintenance_service)
+            first = asyncio.create_task(vm.refresh_status())
+            await first_started.wait()
+            second = asyncio.create_task(vm.refresh_status())
+            await second_started.wait()
+
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await first
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+            assert first.cancelled() is True
+            # 新代次仍在途：旧代次取消不得清标志
+            assert vm.state.is_refreshing is True
+
+            release_second.set()
+            await second
+
+        assert vm.state.is_refreshing is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_dispose_has_no_side_effect(self, vm, mock_maintenance_service):
+        """VM dispose 后取消: CancelledError 正常传播，_set_state 被 disposed 守卫拦截。"""
+        started = asyncio.Event()
+
+        async def blocking_doctor():
+            started.set()
+            await asyncio.Event().wait()
+
+        mock_maintenance_service.doctor = AsyncMock(side_effect=blocking_doctor)
+        task = asyncio.create_task(vm.refresh_status())
+        await started.wait()
+
+        vm.dispose()
+        state_after_dispose = vm.state
+        assert state_after_dispose.is_refreshing is True
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled() is True
+
+        # disposed 后 _set_state 直接早返：state 对象未被替换（无副作用、无异常）
+        assert vm.state is state_after_dispose
 
     @pytest.mark.asyncio
     async def test_refresh_status_resolves_default_log_dir(self, mock_maintenance_service, mock_doctor_result):
