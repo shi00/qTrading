@@ -1198,3 +1198,143 @@ class TestModeSwitchCommands:
         assert vm.state.status_type == "warning"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "settings_db_mode_busy"
+
+
+# --- DB-01: db_info 必须绑定产生它的连接配置快照 ---
+
+
+def _db_info_mock() -> MagicMock:
+    info = MagicMock()
+    info.version = "PostgreSQL 16.0"
+    info.size = "100 MB"
+    info.table_count = 42
+    return info
+
+
+def _connection_error_result() -> MagicMock:
+    result = MagicMock()
+    result.status = ConnectionStatus.CONNECTION_ERROR
+    result.message = "Connection failed"
+    return result
+
+
+class TestDbInfoConfigSnapshotBinding:
+    """DB-01：目标/凭据变化、验证失败或验证期间改目标后，不得残留旧库元信息。"""
+
+    @staticmethod
+    async def _show_db_info(vm: DatabaseConfigPanelViewModel) -> None:
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=_success_result())
+            mock_svc.get_database_info = AsyncMock(return_value=_db_info_mock())
+            assert await vm.test_connection() is True
+        assert vm.state.db_info is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method_name", "value"),
+        [
+            ("update_host", "other-host"),
+            ("update_port", "6543"),
+            ("update_user", "other-user"),
+            ("update_password", "other-pass"),
+            ("update_database", "other-db"),
+        ],
+    )
+    async def test_connection_identity_change_clears_db_info(
+        self, mock_config_handler, mock_thread_pool, method_name: str, value: str
+    ) -> None:
+        """连接身份字段任一变化即清空 db_info（含仅编辑密码）。"""
+        vm = _make_vm(mock_config_handler)
+        await self._show_db_info(vm)
+
+        getattr(vm, method_name)(value)
+
+        assert vm.state.db_info is None
+
+    @pytest.mark.asyncio
+    async def test_create_if_not_exists_change_keeps_db_info(self, mock_config_handler, mock_thread_pool) -> None:
+        """create_if_not_exists 不属于连接身份，变化时不应清空 db_info。"""
+        vm = _make_vm(mock_config_handler)
+        await self._show_db_info(vm)
+
+        vm.update_create_if_not_exists(False)
+
+        assert vm.state.db_info is not None
+        assert vm.state.db_info.key == "db_info_format"
+        assert vm.state.db_info.params == {"version": "PostgreSQL 16.0", "size": "100 MB", "tables": 42}
+
+    @pytest.mark.asyncio
+    async def test_target_change_then_failure_leaves_db_info_empty(self, mock_config_handler, mock_thread_pool) -> None:
+        """A 成功展示信息 → 改为 B → B 连接失败：db_info 为空。"""
+        vm = _make_vm(mock_config_handler)
+        await self._show_db_info(vm)
+        vm.update_database("missing_db")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=_connection_error_result())
+            assert await vm.test_connection() is False
+
+        assert vm.state.db_info is None
+
+    @pytest.mark.asyncio
+    async def test_failed_retest_of_same_target_clears_db_info(self, mock_config_handler, mock_thread_pool) -> None:
+        """同一目标重复测试失败时，旧信息同样作废（开始验证即清空）。"""
+        vm = _make_vm(mock_config_handler)
+        await self._show_db_info(vm)
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=_connection_error_result())
+            assert await vm.test_connection() is False
+
+        assert vm.state.db_info is None
+
+    @pytest.mark.asyncio
+    async def test_success_without_db_info_leaves_db_info_empty(self, mock_config_handler, mock_thread_pool) -> None:
+        """B 连接成功但 get_database_info 返回 None：db_info 为空。"""
+        vm = _make_vm(mock_config_handler)
+        await self._show_db_info(vm)
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=_success_result())
+            mock_svc.get_database_info = AsyncMock(return_value=None)
+            assert await vm.test_connection() is True
+
+        assert vm.state.db_info is None
+
+    @pytest.mark.asyncio
+    async def test_identity_changed_during_verification_discards_db_info(
+        self, mock_config_handler, mock_thread_pool
+    ) -> None:
+        """验证期间目标被修改：迟到的 A 元信息不得写成当前 B 的信息（乱序返回）。"""
+        vm = _make_vm(mock_config_handler)
+
+        async def _test_then_change_target(**_kwargs) -> MagicMock:
+            vm.update_host("changed-host")
+            return _success_result()
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=_test_then_change_target)
+            mock_svc.get_database_info = AsyncMock(return_value=_db_info_mock())
+            assert await vm.test_connection() is True
+
+        assert vm.state.db_info is None
+
+    @pytest.mark.asyncio
+    async def test_identity_restored_during_verification_keeps_db_info(
+        self, mock_config_handler, mock_thread_pool
+    ) -> None:
+        """A → B → A（ABA）：当前身份仍为 A，A 的元信息有效，允许提交。"""
+        vm = _make_vm(mock_config_handler)
+
+        async def _test_then_restore_target(**_kwargs) -> MagicMock:
+            vm.update_host("other-host")
+            vm.update_host("localhost")
+            return _success_result()
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=_test_then_restore_target)
+            mock_svc.get_database_info = AsyncMock(return_value=_db_info_mock())
+            assert await vm.test_connection() is True
+
+        assert vm.state.db_info is not None
+        assert vm.state.db_info.params["version"] == "PostgreSQL 16.0"
