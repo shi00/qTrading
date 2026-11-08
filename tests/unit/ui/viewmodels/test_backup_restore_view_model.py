@@ -419,11 +419,11 @@ class TestStartRestoreWizard:
         assert vm.state.error_message.key == "restore_invalid_format"
 
 
-# --- start_restore_wizard: 归档读取移出事件循环 (BR-02 / R16) ---
+# --- start_restore_wizard: 归档读取移出事件循环 (R16) ---
 
 
 class TestRestoreProbeOffload:
-    """BR-02: 类型探测 + 头校验经 IO 线程池执行，且按请求代次丢弃迟到结果。"""
+    """类型探测 + 头校验经 IO 线程池执行，且按请求代次丢弃迟到结果。"""
 
     @pytest.mark.asyncio
     async def test_probe_runs_in_io_pool_without_blocking_event_loop(self, vm):
