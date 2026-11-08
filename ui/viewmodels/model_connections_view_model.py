@@ -303,14 +303,14 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._draft_edit_revision: int = 0
         # F02：回执身份绑定的编辑版本（登记时快照），供 committed 回执判定内容是否仍当前
         self._pending_operation_edit_revision: int | None = None
-        # MC-03：单次测试的在途操作身份（私有，不进入 state / schema）。测试结果仅在
-        # 该身份仍是当前测试、且草稿代与编辑版本未漂移时才写入 state
-        self._active_test_operation_id: str | None = None
         # 回执身份的操作种类：草稿保存与安全命令（授权 / 撤销）共用恢复槽位，仅凭
         # id / 草稿代 / 编辑版本无法区分；回执恢复据此避免把安全命令的提交当成草稿已保存
         self._pending_operation_kind: Literal["draft", "egress"] | None = None
         self._state = ModelConnectionsState()
         self._init_mixin_fields()
+        # MC-03：单次测试的在途操作身份（私有，不进入 state / schema）。测试结果仅在
+        # 该身份仍是当前测试、且草稿代与编辑版本未漂移时才写入 state
+        self._active_test_operation_id: str | None = None
 
     # ------------------------------------------------------------------
     # 查询 / 选择命令
@@ -1489,10 +1489,10 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             commit_unknown_pending=False,
             test_state=TEST_IDLE,
         )
+        # MC-03：在途测试结果不得在卸载后写入 / 通知
+        self._active_test_operation_id = None
         self._pending_operation_id = None
         self._pending_operation_generation = None
         self._pending_operation_edit_revision = None
-        # MC-03：在途测试结果不得在卸载后写入 / 通知
-        self._active_test_operation_id = None
         self._pending_operation_kind = None
         super().dispose()
