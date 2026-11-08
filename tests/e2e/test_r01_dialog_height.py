@@ -44,10 +44,14 @@
   竞态不可稳定捕获，由 analyzing 态代表「弹窗处于部分加载时的可操作性」。
 """
 
+import asyncio
+import sys
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
 
-from tests.e2e.conftest import _e2e_page_with_viewport
+from tests.e2e.conftest import TEST_DATABASE_URL, _e2e_page_with_viewport, _parse_asyncpg_dsn
 from tests.e2e.pages import NewsRiskPage
 from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
@@ -105,8 +109,41 @@ async def _text_node_in_viewport(nrp: NewsRiskPage, text: str) -> bool:
     return box["y"] >= 0 and box["y"] + box["h"] <= vh
 
 
+async def _clear_persisted_brief(db_url_file: Path, ts_code: str) -> None:
+    """删除目标股票已持久化的解读快照，恢复「首次生成、缓存未命中」前提。
+
+    scenarios 组的 news_risk 与 r01 用例共享同一 session app 进程与 embedded DB；
+    news_risk_success_flow 先跑并已为 000001.SZ 落库成功快照。R01 再次 generate 时
+    ``NewsInsightService.analyze`` 命中 ``get_news_risk_brief`` 缓存直接返回 ready，
+    跳过 mock DELAY_MS=1500 的分析中阶段；该阶段仅渲染约 0.1s，``wait_analyzing``
+    的首轮可见性轮询会错过节点而超时。
+    """
+    db_url = TEST_DATABASE_URL
+    if db_url_file.exists():
+        db_url = db_url_file.read_text(encoding="utf-8").strip() or TEST_DATABASE_URL
+
+    async def _delete() -> None:
+        import asyncpg
+
+        conn = await asyncpg.connect(_parse_asyncpg_dsn(db_url))
+        try:
+            await conn.execute("DELETE FROM news_risk_brief WHERE ts_code = $1", ts_code)
+        finally:
+            await conn.close()
+
+    def _run_in_selector_loop() -> None:
+        # ProactorEventLoop 与 asyncpg 不兼容（Windows），同 conftest._seed_app_database。
+        loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_delete())
+        finally:
+            loop.close()
+
+    await asyncio.to_thread(_run_in_selector_loop)
+
+
 @pytest.mark.parametrize("r01_page", [VIEWPORT_1024X640], indirect=True)
-async def test_r01_dialog_1024x640_states_and_close(r01_page):
+async def test_r01_dialog_1024x640_states_and_close(r01_page, embedded_url_file_nr_success):
     """1024x640 基准：长内容滚动底部可达 + 加载态关闭按钮可达 + 物理点击关闭。"""
     nrp = NewsRiskPage(r01_page)
     ap = nrp.ap
@@ -119,6 +156,8 @@ async def test_r01_dialog_1024x640_states_and_close(r01_page):
     await ap.expect_in_viewport(EIDS.NEWS_RISK.GENERATE_BUTTON)
 
     # ② 加载态（analyzing，mock DELAY_MS=1500）：actions 区关闭按钮完整在视口
+    # 共享池中 news_risk 用例已为 000001.SZ 落库快照，先清空以免 generate 命中缓存秒回 ready
+    await _clear_persisted_brief(embedded_url_file_nr_success, "000001.SZ")
     await nrp.generate()
     await nrp.wait_analyzing()
     await ap.expect_in_viewport(close_btn)
