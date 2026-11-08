@@ -638,15 +638,16 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         self._set_state(available_connections=options)
 
     def unresolved_candidates(self, known_connection_ids: Iterable[str]) -> tuple[str, ...]:
-        """全部场景草稿候选中不在已知连接集合的 id（悬空校验，保序去重）。
+        """全部场景草稿候选（主候选 + 独立情绪候选）中不在已知连接集合的 id（悬空校验，保序去重）。
 
         覆盖全部场景（不区分 enabled）：禁用场景的悬空候选同样会在启用时阻断
-        执行，保存前一律拦截。
+        执行，保存前一律拦截；独立情绪候选随 ``task_routes.sentiment`` 一同序列化，
+        悬空引用在切换 dedicated 模式时不可解析，同等拦截。
         """
         known = {str(c) for c in known_connection_ids}
         unresolved: list[str] = []
         for route in self._state.routes:
-            for connection_id in route.candidates:
+            for connection_id in (*route.candidates, *route.sentiment_candidates):
                 if connection_id not in known and connection_id not in unresolved:
                     unresolved.append(connection_id)
         return tuple(unresolved)

@@ -808,6 +808,31 @@ class TestPayloadBuilders:
         assert stock["candidates"] == ["conn-a"]
 
     @pytest.mark.asyncio
+    async def test_all_routes_payload_keeps_sentiment_candidates_untouched(self):
+        """悬空校验扩展不改序列化：情绪候选保持原顺序，且不并入主候选。"""
+        vm, _ = _make_vm(
+            _snapshot(
+                routes=[
+                    _route_mapping(
+                        "news_annotation",
+                        ("chat-a",),
+                        sentiment_mode="dedicated",
+                        sentiment_candidates=("encoder-z", "encoder-a", "encoder-b"),
+                    ),
+                    _route_mapping("stock_analysis", (), timeout=180),
+                    _route_mapping("news_risk", (), timeout=90),
+                ]
+            )
+        )
+        await vm.load()
+
+        payload = vm.all_routes_payload()
+
+        news = next(r for r in payload if r["scenario_id"] == "news_annotation")
+        assert news["candidates"] == ["chat-a"]
+        assert news["task_routes"]["sentiment"]["candidates"] == ["encoder-z", "encoder-a", "encoder-b"]
+
+    @pytest.mark.asyncio
     async def test_build_payload_uses_draft_for_current_and_committed_for_others(self):
         vm, _ = _make_vm(_snapshot())
         await vm.load()
@@ -1208,6 +1233,70 @@ class TestUnresolvedCandidates:
         )
         await vm.load()
         assert vm.unresolved_candidates([]) == ("ghost-x",)
+
+    @pytest.mark.asyncio
+    async def test_includes_sentiment_candidates(self):
+        """独立情绪候选同样参与悬空校验（主候选在前、情绪候选在后，保序）。"""
+        vm, _ = _pending_vm(
+            snapshot=_snapshot(
+                migration_state="pending",
+                routes=[
+                    _route_mapping(
+                        "news_annotation",
+                        ("chat-a", "ghost-main"),
+                        sentiment_mode="dedicated",
+                        sentiment_candidates=("encoder-b", "ghost-encoder"),
+                    ),
+                    _route_mapping("stock_analysis", ()),
+                    _route_mapping("news_risk", ()),
+                ],
+            )
+        )
+        await vm.load()
+        assert vm.unresolved_candidates(["chat-a", "encoder-b"]) == ("ghost-main", "ghost-encoder")
+
+    @pytest.mark.asyncio
+    async def test_sentiment_candidates_dedupe_with_main_candidates(self):
+        """主候选与情绪候选同 id 只报一次；已知情绪候选不误报。"""
+        vm, _ = _pending_vm(
+            snapshot=_snapshot(
+                migration_state="pending",
+                routes=[
+                    _route_mapping(
+                        "news_annotation",
+                        ("ghost-1", "conn-a"),
+                        sentiment_mode="dedicated",
+                        sentiment_candidates=("ghost-1", "ghost-2", "conn-a"),
+                    ),
+                    _route_mapping("stock_analysis", ()),
+                    _route_mapping("news_risk", ()),
+                ],
+            )
+        )
+        await vm.load()
+        assert vm.unresolved_candidates(["conn-a"]) == ("ghost-1", "ghost-2")
+
+    @pytest.mark.asyncio
+    async def test_includes_disabled_scene_sentiment_candidates(self):
+        """禁用场景的悬空独立情绪候选同样检出（启用时同样阻断执行）。"""
+        vm, _ = _pending_vm(
+            snapshot=_snapshot(
+                migration_state="pending",
+                routes=[
+                    _route_mapping(
+                        "news_annotation",
+                        ("conn-a",),
+                        enabled=False,
+                        sentiment_mode="dedicated",
+                        sentiment_candidates=("ghost-encoder",),
+                    ),
+                    _route_mapping("stock_analysis", ()),
+                    _route_mapping("news_risk", ()),
+                ],
+            )
+        )
+        await vm.load()
+        assert vm.unresolved_candidates(["conn-a"]) == ("ghost-encoder",)
 
 
 class TestActivateFreshSetup:
