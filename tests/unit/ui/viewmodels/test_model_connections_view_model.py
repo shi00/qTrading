@@ -1251,7 +1251,7 @@ class TestSyntheticTest:
         assert vm.state.test_state == "failed"
 
     async def test_cancelled_error_propagates(self):
-        """R2：取消显式传播，不吞没。"""
+        """R2：取消显式传播，不吞没；MC-04：取消即终态，复位 idle 不残留 running。"""
         svc = _make_service()
         svc.begin_synthetic_test = AsyncMock(side_effect=asyncio.CancelledError())
         vm = _make_vm(svc, synthetic_adapters={"litellm_chat": _StubAdapter()})
@@ -1261,9 +1261,68 @@ class TestSyntheticTest:
 
         with pytest.raises(asyncio.CancelledError) as exc_info:
             await vm.test()
-        # 精确状态断言：取消发生在 begin（终态写入前），test_state 保持 running 不被改写
         assert isinstance(exc_info.value, asyncio.CancelledError)
+        # MC-04：取消不复位则入口守卫永久拦住同一草稿重试
+        assert vm.state.test_state == "idle"
+        assert vm.state.message is None
+
+    async def test_retry_after_cancel_succeeds(self):
+        """取消后同一草稿可再次测试并成功（复位 idle 而非残留 running）。"""
+        svc = _make_service()
+        adapter = _GatedAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        _fill_litellm(vm)
+        gate = adapter.add_gate()
+        task = asyncio.create_task(vm.test())
+        await asyncio.wait_for(gate[0].wait(), timeout=5)
         assert vm.state.test_state == "running"
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
+        assert vm.state.test_state == "idle"
+        assert vm.state.message is None
+
+        retry_gate = adapter.add_gate()
+        retry = asyncio.create_task(vm.test())
+        await asyncio.wait_for(retry_gate[0].wait(), timeout=5)
+        retry_gate[1].set()
+        assert await retry is True
+        assert vm.state.test_state == "success"
+
+    async def test_cancel_after_newer_test_takes_over_keeps_newer_state(self):
+        """A 被取消时身份已被测试 B 接管：不得把 B 的 running 复位为 idle。"""
+        svc = _make_service()
+        adapter = _GatedAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        _fill_litellm(vm, "gpt-4o", "https://a.example.com/v1")
+        gate_a = adapter.add_gate()
+        task_a = asyncio.create_task(vm.test())
+        await asyncio.wait_for(gate_a[0].wait(), timeout=5)
+
+        # A 挂起在适配器期间建立草稿 B 并启动 B 测试（B 接管 active 身份）
+        _fill_litellm(vm, "gpt-4o-mini", "https://b.example.com/v1")
+        gate_b = adapter.add_gate()
+        task_b = asyncio.create_task(vm.test())
+        await asyncio.wait_for(gate_b[0].wait(), timeout=5)
+        assert vm.state.test_state == "running"
+
+        task_a.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_a
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task_a.cancelled()
+        # B 的状态与消息不被 A 的取消改写
+        assert vm.state.test_state == "running"
+        message = vm.state.message
+        assert message is not None
+        assert message.key == "model_connection_test_running"
+
+        gate_b[1].set()
+        assert await task_b is True
+        assert vm.state.test_state == "success"
 
 
 # --- MC-03：单次测试结果绑定发起时的草稿身份 ---
