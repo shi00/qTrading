@@ -19,7 +19,7 @@ View 渲染时 I18n.get(msg.key, **msg.params)。
 - start_backup 是 async 命令, 调用 MaintenanceService.dump
   (dump 已是 async, 内部通过 ThreadPoolManager 提交 subprocess, 不需额外包裹)
 - start_backup 将 dump 放入独立 task 并以 ``asyncio.shield`` 等待: 调用方被取消时
-  只终止等待, dump 继续执行, busy 在 dump 真正终结时由其自身落地终态后释放 (BR-01)
+  只终止等待, dump 继续执行, busy 在 dump 真正终结时由其自身落地终态后释放
 - confirm_restore 是 async 命令但不调用 sidecar (仅设 state 显示指引)
 - 异常处理: dump 异常设 error_message; CancelledError 继续透传 (R2, 不被吞没)
 """
@@ -131,7 +131,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
     def __init__(self, maintenance_service: EmbeddedPgMaintenanceService | None = None) -> None:
         self._state = BackupRestoreState()
         self._maintenance_service = maintenance_service
-        # BR-01: 强引用在途 dump task（asyncio 文档要求保存 shield 传入的 task 引用，
+        # 强引用在途 dump task（asyncio 文档要求保存 shield 传入的 task 引用，
         # 避免任务因无引用被 GC 中断）；终态落地后清空。
         self._backup_task: asyncio.Task[None] | None = None
         self._init_mixin_fields()
@@ -153,7 +153,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         - 备份文件覆盖保护: ``output_path.exists()`` 时不执行 (避免误覆盖)
         - 调用前清空 error_message / backup_success_message / backup_path (旧路径残留)
         - dump 在独立 task 中执行并经 ``asyncio.shield`` 等待: 调用方被取消时只终止
-          等待, dump 继续; busy 仅在 dump 真正终结时释放 (BR-01),
+          等待, dump 继续; busy 仅在 dump 真正终结时释放,
           避免在途 dump 与下一次备份并发写同一文件
         - 异常时设 error_message; CancelledError 继续透传 (R2)
         """
@@ -179,7 +179,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         )
         task = asyncio.create_task(self._run_dump(output_path))
         self._backup_task = task
-        # BR-01: 取消只终止调用方等待，dump 继续执行并在真正终结时自行落地终态
+        # 取消只终止调用方等待，dump 继续执行并在真正终结时自行落地终态
         # （busy 由 _run_dump 释放，dump 未终结前不放开并发）。
         # R2: CancelledError 继续透传，不被吞没。
         await asyncio.shield(task)
@@ -187,7 +187,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
     async def _run_dump(self, output_path: Path) -> None:
         """执行 dump 并落地终态（独立 task：调用方被取消时仍继续，直到真正终结）.
 
-        BR-01: 终态在此写入 state，保证 ``is_backing_up`` 只在 dump 真正终结后释放；
+        终态在此写入 state，保证 ``is_backing_up`` 只在 dump 真正终结后释放；
         dump 仍在运行时不放开并发（两次 dump 写同一文件会损坏备份）。
         """
         try:

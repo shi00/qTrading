@@ -211,7 +211,7 @@ class TestStartBackup:
     async def test_start_backup_cancel_propagates_and_releases_busy_after_dump_finishes(
         self, vm, mock_maintenance_service
     ):
-        """BR-01: 取消只终止等待; dump 真正终结后才释放 is_backing_up 并落地成功态."""
+        """取消只终止等待; dump 真正终结后才释放 is_backing_up 并落地成功态."""
         dump_started = asyncio.Event()
         release = asyncio.Event()
 
@@ -246,7 +246,7 @@ class TestStartBackup:
 
     @pytest.mark.asyncio
     async def test_start_backup_cancel_keeps_guard_until_dump_finishes(self, vm, mock_maintenance_service):
-        """BR-01: 取消后 dump 终结前, 重复点击守卫仍生效 (不并发 dump)."""
+        """取消后 dump 终结前, 重复点击守卫仍生效 (不并发 dump)."""
         dump_started = asyncio.Event()
         release = asyncio.Event()
 
@@ -280,7 +280,7 @@ class TestStartBackup:
 
     @pytest.mark.asyncio
     async def test_start_backup_cancel_then_dump_failure_releases_busy(self, vm, mock_maintenance_service, caplog):
-        """BR-01: 取消后 dump 失败 → busy 释放 + backup_failed + 日志脱敏 (R9)."""
+        """取消后 dump 失败 → busy 释放 + backup_failed + 日志脱敏 (R9)."""
         dump_started = asyncio.Event()
         release = asyncio.Event()
 
