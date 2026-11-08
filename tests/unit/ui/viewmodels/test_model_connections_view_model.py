@@ -497,6 +497,7 @@ class TestResolveCommitUnknown:
         assert st.commit_unknown_pending is False
         assert st.save_state == "committed"
         assert st.dirty is False
+        assert vm._pending_operation_kind is None  # noqa: SLF001
         vm._service.resolve_save_outcome.assert_awaited_once()  # noqa: SLF001
 
     async def test_resolve_still_unknown_keeps_pending(self, vm, filled_litellm_draft):
@@ -1236,6 +1237,58 @@ class TestEgress:
         ok = await vm.revoke_egress("g1")
         assert ok is True
         svc.revoke_egress.assert_awaited_once()
+
+
+class TestEgressCommitUnknownReceipt:
+    """MC-02：安全命令的未知回执恢复只清恢复旗标，不把未保存草稿标为已保存。"""
+
+    @pytest.mark.parametrize("command", ["grant", "revoke"])
+    async def test_committed_egress_receipt_keeps_dirty_draft(self, vm, filled_litellm_draft, command):
+        unknown = ConfigurationSaveOutcome(status="commit_unknown")
+        vm._service.grant_egress.return_value = unknown  # noqa: SLF001
+        vm._service.revoke_egress.return_value = unknown  # noqa: SLF001
+        before = vm.state.draft
+
+        if command == "grant":
+            assert await vm.grant_egress("c1", "target-fp", "stock_analysis") is False
+        else:
+            assert await vm.revoke_egress("g1") is False
+
+        st = vm.state
+        assert st.save_state == "commit_unknown"
+        assert st.commit_unknown_pending is True
+        assert vm._pending_operation_kind == "egress"  # noqa: SLF001
+
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+
+        st = vm.state
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is False
+        assert st.dirty is True
+        assert st.editor_open is True
+        assert st.draft == before
+        assert st.message is not None and st.message.key == "model_connection_egress_updated"
+        assert vm._pending_operation_id is None  # noqa: SLF001
+        assert vm._pending_operation_kind is None  # noqa: SLF001
+
+    async def test_committed_egress_receipt_without_draft_stays_idle(self, vm):
+        """无草稿修改时恢复同样不伪造已保存态（dirty / 编辑器保持原样）。"""
+        vm._service.grant_egress.return_value = ConfigurationSaveOutcome(status="commit_unknown")  # noqa: SLF001
+        assert await vm.grant_egress("c1", "target-fp", "stock_analysis") is False
+
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+
+        st = vm.state
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is False
+        assert st.dirty is False
+        assert st.editor_open is False
 
 
 # --- Egress queries（§4.3 授权摘要查询） ---
