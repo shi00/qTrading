@@ -18,6 +18,7 @@ Task 7.1: 恢复入口改为 FilePicker 选文件; 未选文件时显示「查�
 (不再用默认时间戳路径触发 start_restore_wizard)。
 """
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -25,12 +26,13 @@ import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_click
 from ui.components.safe_wrap_row import SafeWrapRow
+from ui.components.toast_manager import show as show_toast
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
-from utils.sanitizers import DataSanitizer
+from utils.error_classifier import log_classified
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +95,26 @@ def _on_restore_wizard_click_factory(
                 allowed_extensions=["dump"],
                 dialog_title=I18n.get("backup_select_file"),
             )
+        except asyncio.CancelledError:
+            # R2: 取消必须向上传播, 不弹失败提示
+            raise
         except Exception as exc:
-            logger.error("[BackupRestorePanel] File pick failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
+            # 无障碍 §2.3: 外部 IO 失败必须给用户可见反馈, 不只写日志
+            log_classified(
+                logger,
+                exc,
+                msg="[BackupRestorePanel] File pick failed (%s): %s",
+                exc_info=True,
+            )
+            try:
+                page = ft.context.page
+            except RuntimeError:
+                page = None
+            show_toast(
+                page,
+                f"{I18n.get('backup_select_file')}: {I18n.get('common_op_fail')}",
+                "error",
+            )
             return
         if not result:
             # 未选文件: 显示「查看离线恢复指引」提示, 不调用 start_restore_wizard
@@ -102,10 +122,7 @@ def _on_restore_wizard_click_factory(
                 page = ft.context.page
             except RuntimeError:
                 page = None
-            if page is not None:
-                page.toast.show(  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
-                    I18n.get("backup_view_offline_guide"), "info"
-                )
+            show_toast(page, I18n.get("backup_view_offline_guide"), "info")
             return
         picked_path = result[0].path
         if not picked_path:
