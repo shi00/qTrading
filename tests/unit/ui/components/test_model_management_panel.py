@@ -65,6 +65,7 @@ from ui.viewmodels.model_connections_view_model import (
 )
 from ui.viewmodels.model_routes_view_model import ModelRoutesState, ModelRoutesViewModel
 from ui.viewmodels.model_usage_view_model import (
+    EXPORT_DETAIL,
     EXPORT_MONTHLY_SUMMARY,
     EXPORT_SCOPE_ALL,
     EXPORT_SCOPE_PAGE,
@@ -631,6 +632,58 @@ class TestExportCsvAndNotify:
         await _export_csv_and_notify(vm, picker, show_snack)
 
         show_snack.assert_called_once_with(I18n.get("model_usage_export_failed"), color=AppColors.ERROR)
+
+    @pytest.mark.parametrize("web", [False, True], ids=["desktop", "web"])
+    @pytest.mark.parametrize(
+        ("start_overrides", "switched_overrides", "expected_prefix"),
+        [
+            (
+                {"export_scope": EXPORT_SCOPE_PAGE, "page": 0},
+                {"export_scope": EXPORT_SCOPE_ALL, "page": 4},
+                "ai_usage_page1_",
+            ),
+            (
+                {
+                    "monthly_summary_mode": True,
+                    "export_granularity": EXPORT_MONTHLY_SUMMARY,
+                    "summary_month": "202512",
+                },
+                {"export_granularity": EXPORT_DETAIL, "export_scope": EXPORT_SCOPE_ALL, "page": 3},
+                "ai_usage_monthly_202512_",
+            ),
+        ],
+        ids=["detail_page_to_all", "monthly_to_detail_all"],
+    )
+    async def test_filename_snapshot_survives_mid_export_view_change(
+        self, web, start_overrides, switched_overrides, expected_prefix
+    ):
+        """MMP-F1：导出途中切范围 / 翻页 / 退月汇总不得改写本轮文件名与 CSV 口径。"""
+        vm = MagicMock()
+        vm.state = _usage_state(**start_overrides)
+        vm.write_csv = AsyncMock()
+
+        async def _export_while_view_changes() -> str:
+            vm.state = _usage_state(**switched_overrides)
+            return "csv-body"
+
+        vm.export_csv = AsyncMock(side_effect=_export_while_view_changes)
+        picker = MagicMock()
+        picker.save_file = AsyncMock(return_value="/tmp/out.csv")
+        page = _fake_page(web=web)
+        show_snack = MagicMock()
+
+        with patch.object(panel_module, "_get_page", return_value=page):
+            await _export_csv_and_notify(vm, picker, show_snack)
+
+        file_name = picker.save_file.await_args.kwargs["file_name"]
+        assert file_name.startswith(expected_prefix)
+        assert file_name.endswith(".csv")
+        if web:
+            assert picker.save_file.await_args.kwargs["src_bytes"] == "csv-body".encode("utf-8-sig")
+            vm.write_csv.assert_not_awaited()
+        else:
+            vm.write_csv.assert_awaited_once_with("/tmp/out.csv", "csv-body")
+        show_snack.assert_called_once_with(I18n.get("model_usage_export_ready"), color=AppColors.SUCCESS)
 
 
 def _texts(control: Any) -> list[str]:
