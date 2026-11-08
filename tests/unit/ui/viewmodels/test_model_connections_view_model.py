@@ -1027,6 +1027,79 @@ class _StubAdapter:
         return self.response
 
 
+class _GatedAdapter:
+    """可暂停的适配器替身：每次 invoke 按序消费一个闸门（进入置位 / 释放继续）。
+
+    ``errors`` 按调用序指定异常（None = 返回协议响应），用于构造「A 成功 / A 失败
+    迟到」的交错场景。
+    """
+
+    def __init__(self, errors: list[Exception | None] | None = None) -> None:
+        self._errors = list(errors or [])
+        self._gates: list[tuple[asyncio.Event, asyncio.Event]] = []
+        self.requests: list[InferenceRequest] = []
+
+    def add_gate(self) -> tuple[asyncio.Event, asyncio.Event]:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        self._gates.append((entered, release))
+        return entered, release
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        index = len(self.requests)
+        self.requests.append(request)
+        entered, release = self._gates[index]
+        entered.set()
+        await release.wait()
+        error = self._errors[index] if index < len(self._errors) else None
+        if error is not None:
+            raise error
+        return AdapterResponse(content="pong", usage=None, actual_model=None)
+
+
+class _LateResultAdapter:
+    """模拟远端请求不可中止：取消投递后仍在放行时返回响应（仅测试替身，非生产适配器）。"""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        self.entered.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            # 测试替身语义：远端请求已发出且不可撤回，放行后才返回（R2 约束生产代码，
+            # 此处故意模拟无法中止的远端，用于验证 VM 对卸载后迟到结果的丢弃）
+            await self.release.wait()
+        return AdapterResponse(content="pong", usage=None, actual_model=None)
+
+
+def _fill_litellm(
+    vm: ModelConnectionsViewModel,
+    model: str = "gpt-4o",
+    api_base: str = "https://api.example.com/v1",
+) -> ModelConnectionsViewModel:
+    vm.start_add()
+    vm.update_name("Probe")
+    vm.update_model(model)
+    vm.update_provider("openai")
+    vm.update_api_base(api_base)
+    return vm
+
+
 class TestSyntheticTest:
     async def test_unsaved_draft_runs_dedicated_test_path(self):
         """未保存草稿可测：一次性消费 consent 后直连适配器；不落业务授权 / 不保存。"""
@@ -1191,6 +1264,133 @@ class TestSyntheticTest:
         # 精确状态断言：取消发生在 begin（终态写入前），test_state 保持 running 不被改写
         assert isinstance(exc_info.value, asyncio.CancelledError)
         assert vm.state.test_state == "running"
+
+
+# --- MC-03：单次测试结果绑定发起时的草稿身份 ---
+
+
+class TestSyntheticTestIdentity:
+    """单次测试回执身份：操作 ID + 草稿代 + 编辑版本三重门控。"""
+
+    async def test_late_success_does_not_overwrite_newer_draft_test(self):
+        """A 迟到成功不得改写草稿 B 的 running 状态与消息；B 只接受自己的回执。"""
+        svc = _make_service()
+        adapter = _GatedAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        _fill_litellm(vm, "gpt-4o", "https://a.example.com/v1")
+        gate_a = adapter.add_gate()
+        task_a = asyncio.create_task(vm.test())
+        await asyncio.wait_for(gate_a[0].wait(), timeout=5)
+
+        # A 挂起在适配器期间建立草稿 B 并启动 B 测试
+        _fill_litellm(vm, "gpt-4o-mini", "https://b.example.com/v1")
+        gate_b = adapter.add_gate()
+        task_b = asyncio.create_task(vm.test())
+        await asyncio.wait_for(gate_b[0].wait(), timeout=5)
+        assert vm.state.test_state == "running"
+
+        gate_a[1].set()
+        assert await task_a is False
+        assert vm.state.test_state == "running"
+        message = vm.state.message
+        assert message is not None
+        assert message.key == "model_connection_test_running"
+
+        gate_b[1].set()
+        assert await task_b is True
+        assert vm.state.test_state == "success"
+        message = vm.state.message
+        assert message is not None
+        assert message.key == "model_connection_test_success"
+        # B 的回执只对应 B 自己的调用（A / B 各一次独立合成测试）
+        assert len(adapter.requests) == 2
+
+    async def test_late_failure_does_not_fail_newer_draft_test(self):
+        """A 迟到失败不得把草稿 B 的 running 改写为 failed。"""
+        svc = _make_service()
+        adapter = _GatedAdapter(errors=[RuntimeError("connection refused"), None])
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        _fill_litellm(vm, "gpt-4o", "https://a.example.com/v1")
+        gate_a = adapter.add_gate()
+        task_a = asyncio.create_task(vm.test())
+        await asyncio.wait_for(gate_a[0].wait(), timeout=5)
+
+        _fill_litellm(vm, "gpt-4o-mini", "https://b.example.com/v1")
+        gate_b = adapter.add_gate()
+        task_b = asyncio.create_task(vm.test())
+        await asyncio.wait_for(gate_b[0].wait(), timeout=5)
+
+        gate_a[1].set()
+        assert await task_a is False
+        assert vm.state.test_state == "running"
+        message = vm.state.message
+        assert message is not None
+        assert message.key == "model_connection_test_running"
+
+        gate_b[1].set()
+        assert await task_b is True
+        assert vm.state.test_state == "success"
+
+    async def test_field_edit_after_success_invalidates_result(self):
+        """成功后再改执行字段：未测试的新配置不得继续显示 success。"""
+        vm = _make_vm(_make_service(), synthetic_adapters={"litellm_chat": _StubAdapter()})
+        _fill_litellm(vm)
+        assert await vm.test() is True
+        assert vm.state.test_state == "success"
+
+        vm.update_api_base("https://other.example.com/v1")
+
+        assert vm.state.test_state == "idle"
+        assert vm.state.message is None
+
+    async def test_field_edit_after_failure_clears_result(self):
+        vm = _make_vm(
+            _make_service(),
+            synthetic_adapters={"litellm_chat": _StubAdapter(error=RuntimeError("boom"))},
+        )
+        _fill_litellm(vm)
+        assert await vm.test() is False
+        assert vm.state.test_state == "failed"
+
+        vm.update_model("gpt-4o-mini")
+
+        assert vm.state.test_state == "idle"
+        assert vm.state.message is None
+
+    async def test_same_value_rewrite_preserves_result(self):
+        """同值字段重写（输入框重复回填）不失效，保留当前测试结论。"""
+        vm = _make_vm(_make_service(), synthetic_adapters={"litellm_chat": _StubAdapter()})
+        _fill_litellm(vm)
+        assert await vm.test() is True
+
+        vm.update_model("gpt-4o")
+
+        assert vm.state.test_state == "success"
+        message = vm.state.message
+        assert message is not None
+        assert message.key == "model_connection_test_success"
+
+    async def test_disposed_late_result_is_not_published(self):
+        """页面卸载后远端迟到返回：不写 state、不通知订阅者。"""
+        svc = _make_service()
+        adapter = _LateResultAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        _fill_litellm(vm)
+        delivered: list[ModelConnectionsState] = []
+        vm.subscribe(delivered.append)
+
+        task = asyncio.create_task(vm.test())
+        await asyncio.wait_for(adapter.entered.wait(), timeout=5)
+        vm.dispose()
+        state_after_dispose = vm.state
+        delivered_before_release = len(delivered)
+
+        adapter.release.set()
+        assert await task is False
+
+        assert len(delivered) == delivered_before_release
+        assert vm.state == state_after_dispose
+        assert vm.state.test_state == "idle"
 
 
 # --- Egress commands ---
