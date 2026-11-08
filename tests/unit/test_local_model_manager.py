@@ -7,6 +7,7 @@ import asyncio
 import multiprocessing
 import os
 import queue
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from services.local_model_manager import (
     _DEFAULT_INVOKE_SYSTEM_PROMPT,
     _HAS_LLAMA_CPP,
     _SENTINEL,
+    _EnsureAttempt,
     _model_tag_of,
     _persistent_worker,
     _probe_llama_cpp,
@@ -2664,6 +2666,189 @@ class TestInvokeForConnection:
 _CORE_CFG = {"n_threads": 4, "n_batch": 1024, "n_ctx": 4096, "n_gpu_layers": 0, "flash_attn": True}
 
 
+class TestQuarantineLockSeparation:
+    """LMM-02 回归：隔离意图短锁与 worker 生命周期锁分离。
+
+    背景：``_quarantine_worker`` 曾在事件循环线程获取 ``_worker_lock``，而 IO
+    线程可能正持该锁执行数秒级 shutdown/join（``_ensure_worker`` 整体卸载到
+    线程池），取消处理器等锁会把事件循环与取消传播一起拖住。以下用例用闩锁把
+    IO 线程暂停在 ``_ensure_worker_impl`` 锁内，复现并守护该窗口。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_impl_holds_lifecycle_lock_does_not_block_loop(self):
+        """IO 线程持生命周期锁被闩锁暂停时，取消统一入口不得阻塞 loop 心跳；
+        放行后旧代清理完成且可重建，迟到清理不误杀新代。"""
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+        ):
+            mgr = LocalModelManager()
+            mgr._worker_ready = False
+            entered = threading.Event()
+            release = threading.Event()
+
+            def _latched_shutdown() -> None:
+                entered.set()
+                release.wait(timeout=5.0)
+
+            # 看门狗：实现若回退为「取消处理器等生命周期锁」，3s 后放行以免测试挂死
+            watchdog = threading.Timer(3.0, release.set)
+            watchdog.daemon = True
+            watchdog.start()
+
+            ticks = 0
+
+            async def _heartbeat() -> None:
+                nonlocal ticks
+                while True:
+                    ticks += 1
+                    await asyncio.sleep(0.01)
+
+            with (
+                patch.object(mgr, "_shutdown_worker_locked", side_effect=_latched_shutdown),
+                patch.object(mgr, "_shutdown_worker") as mock_shutdown,
+                patch("services.local_model_manager.multiprocessing.Process") as proc_cls,
+                patch("services.local_model_manager.multiprocessing.Queue") as queue_cls,
+            ):
+                proc_cls.return_value = MagicMock(spec=_RealProcess)
+                queue_cls.side_effect = lambda: MagicMock(spec=queue.Queue)
+                heartbeat = asyncio.create_task(_heartbeat())
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                task = asyncio.create_task(mgr.invoke_for_connection(_req("x", deadline), _conn(), deadline, _ctx()))
+                while not entered.is_set():
+                    await asyncio.sleep(0.01)
+
+                ticks_before = ticks
+                started = time.monotonic()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError) as exc_info:
+                    await task
+                elapsed = time.monotonic() - started
+                # 取消返回后 loop 仍可调度（心跳推进）；若处理器在 loop 线程等锁，
+                # elapsed 会被看门狗放行时间（3s）撑大。
+                await asyncio.sleep(0.05)
+                ticks_after = ticks
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+
+                # R2：取消原样传播；且取消处理器未等待生命周期锁（退出远快于看门狗）
+                assert type(exc_info.value) is asyncio.CancelledError
+                assert elapsed < 0.5, f"取消处理被生命周期锁阻塞 {elapsed:.2f}s"
+                assert ticks_after > ticks_before, "取消期间事件循环心跳停止（loop 被阻塞）"
+                assert mgr._worker_state == "quarantined"
+
+                # 放行：取消已登记 → impl 不再 spawn 孤儿 worker，旧代 shutdown 完成
+                release.set()
+                for _ in range(300):
+                    if mgr._worker_generation >= 1:
+                        break
+                    await asyncio.sleep(0.01)
+                assert mgr._worker_generation == 1
+                assert mgr._worker_proc is None
+                for _ in range(200):
+                    if not mgr._quarantined_generations:
+                        break
+                    await asyncio.sleep(0.01)
+                assert mgr._quarantined_generations == set()
+
+                # 可重建：放行后同模型能 spawn 出新代
+                assert await mgr._ensure_worker("/path/to/model.gguf", {}) is True
+                assert mgr._worker_generation == 2
+                assert mgr._worker_proc is not None
+
+                # 迟到清理不得误杀新代（generation 守卫）
+                await asyncio.sleep(0.2)
+                assert all(call.kwargs.get("generation") != 2 for call in mock_shutdown.call_args_list), (
+                    f"迟到清理误杀新代: {mock_shutdown.call_args_list}"
+                )
+                mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_impl_fast_path_rejects_quarantine_intent_even_if_state_reset(self):
+        """状态被 shutdown 覆写为 stopped 时，隔离意图集合仍须使快路径失效。"""
+        mgr = LocalModelManager()
+        mgr._worker_ready = True
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+        mgr._model_path = "/m.gguf"
+        mgr._model_stat = (0, 0)
+        mgr._last_config = {}
+        mgr._quarantined_generations.add(0)
+        mgr._worker_state = "stopped"
+
+        with (
+            patch.object(mgr, "_shutdown_worker_locked") as mock_locked,
+            patch("services.local_model_manager.multiprocessing.Process") as proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as queue_cls,
+        ):
+            proc_cls.return_value = MagicMock(spec=_RealProcess)
+            queue_cls.side_effect = lambda: MagicMock(spec=queue.Queue)
+            assert mgr._ensure_worker_impl("/m.gguf", {}) is True
+
+            mock_locked.assert_called_once_with()
+        assert mgr._worker_generation == 1  # 未走快路径 → 完整 respawn
+        assert mgr._quarantined_generations == set()  # 旧代意图随 shutdown 失效
+
+    def test_impl_skips_spawn_when_cancel_already_registered(self):
+        """取消已登记且 spawn 未提交 → 不再 spawn 无人等待的孤儿 worker。"""
+        mgr = LocalModelManager()
+        attempt = _EnsureAttempt()
+        attempt.cancelled = True
+        with (
+            patch("services.local_model_manager.multiprocessing.Process") as proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as queue_cls,
+        ):
+            assert mgr._ensure_worker_impl("/m.gguf", {}, attempt) is False
+            proc_cls.assert_not_called()
+            queue_cls.assert_not_called()
+        assert mgr._worker_generation == 1
+        assert mgr._worker_proc is None
+
+    def test_impl_collects_generation_spawned_during_cancel(self):
+        """取消在 spawn 提交期间到达 → 收编该代（意图集合 + quarantined），
+        不得用旧代号假称已清理。"""
+        mgr = LocalModelManager()
+        attempt = _EnsureAttempt()
+
+        with (
+            patch("services.local_model_manager.multiprocessing.Process") as proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as queue_cls,
+        ):
+            proc = MagicMock(spec=_RealProcess)
+            proc.pid = 4242
+            # 模拟取消处理器在 proc.start() 期间登记取消
+            proc.start.side_effect = lambda: setattr(attempt, "cancelled", True)
+            proc_cls.return_value = proc
+            queue_cls.side_effect = lambda: MagicMock(spec=queue.Queue)
+            assert mgr._ensure_worker_impl("/m.gguf", {}, attempt) is True
+
+        assert attempt.generation == 1
+        assert mgr._quarantined_generations == {1}
+        assert mgr._worker_state == "quarantined"
+
+    def test_drain_discards_stale_intent_without_killing_current(self):
+        """迟到清理遇到已前进的 generation → 只丢弃过期意图，不关闭当前代。"""
+        mgr = LocalModelManager()
+        mgr._worker_generation = 3
+        mgr._quarantined_generations.add(2)
+        with patch.object(mgr, "_shutdown_worker") as mock_shutdown:
+            assert mgr._drain_quarantined_workers() == 0
+            mock_shutdown.assert_not_called()
+        assert mgr._quarantined_generations == set()
+
+    def test_drain_removes_intent_only_after_successful_shutdown(self):
+        """当代意图清理成功后移除意图（失败路径由既有用例覆盖：保留意图自愈）。"""
+        mgr = LocalModelManager()
+        mgr._worker_generation = 1
+        mgr._quarantined_generations.add(1)
+        with patch.object(mgr, "_shutdown_worker") as mock_shutdown:
+            assert mgr._drain_quarantined_workers() == 0
+            mock_shutdown.assert_called_once_with(force=True, generation=1)
+        assert mgr._quarantined_generations == set()
+
+
 class TestWorkerIdentityConsistency:
     """F25 回归：worker 复用身份必须与当前 generation 实际加载产物一致。
 
@@ -2835,6 +3020,34 @@ class TestWorkerIdentityConsistency:
         mgr = LocalModelManager()
         mgr._worker_ready = True
         mgr._worker_state = "quarantined"
+        mgr._model_path = path
+        mgr._model_stat = (os.stat(path).st_mtime, os.stat(path).st_size)
+        mgr._last_config = _CORE_CFG
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            patch.object(LocalModelManager, "_get_load_lock"),
+            patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+            patch("services.local_model_manager.ConfigHandler") as mock_ch,
+            patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)) as mock_ensure,
+            patch.object(mgr, "_await_worker_ready", return_value=True),
+        ):
+            mock_ch.get_typed.return_value = ""
+            mock_tpm.return_value.run_async = AsyncMock(return_value="sha")
+            assert await mgr.load_model(path, config=_CORE_CFG) is True
+            mock_ensure.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_load_model_does_not_reuse_generation_with_quarantine_intent(self, tmp_path):
+        """状态被 shutdown 覆写为 stopped 时，隔离意图集合仍须让早退分支失效（LMM-02）。"""
+        path = self._write_model(tmp_path, "model.gguf", b"GGUF-intent")
+        mgr = LocalModelManager()
+        mgr._worker_ready = True
+        mgr._worker_state = "stopped"
+        mgr._quarantined_generations.add(mgr._worker_generation)
         mgr._model_path = path
         mgr._model_stat = (os.stat(path).st_mtime, os.stat(path).st_size)
         mgr._last_config = _CORE_CFG
