@@ -1108,6 +1108,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
 
         MC-03：结果（含失败）仅在操作身份仍为当前测试、且草稿代与编辑版本未漂移时
         写入 state；否则返回 False 且不触碰 state（旧测试不得覆盖新草稿 / 新测试）。
+        MC-04：取消同样按该身份门控复位 idle（终态不留 running），同一草稿可重试。
         """
         if self._state.test_state == TEST_RUNNING:
             return False
@@ -1194,7 +1195,12 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             )
             return succeeded
         except asyncio.CancelledError:
-            raise  # R2
+            # R2：取消必须传播。MC-04：取消也是本次测试的终态——身份仍归属本操作时
+            # 复位 idle 并清空消息，使同一草稿可再次测试（不标记失败、不伪造错误消息，
+            # R21）；身份已被后继测试 B 接管时不改写 B 的 running 状态
+            if result_is_current():
+                self._set_state(test_state=TEST_IDLE, message=None)
+            raise
         except Exception as ex:
             logger.error(
                 "[ModelConnectionsVM] synthetic test failed: %s",
