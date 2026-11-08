@@ -185,10 +185,12 @@ jobs:
           $ErrorActionPreference = "Stop"
           # 与 build-windows 的 "Verify llama-cpp-python CUDA backend DLLs" 同语义；
           # 提前在此校验，避免坏 wheel 写入 wheel bank 后连续击穿 4 条发布腿。
-          # 平台标签必须与 build-windows 的 Python 3.14 匹配，否则下游装上也是错的 ABI。
-          $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" | Select-Object -First 1
+          # llama-cpp-python 0.3.36 起上游 scikit-build-core 配置 wheel.py-api="py3"，
+          # 产出 py3-none-win_amd64 的 stable-ABI 标签（对 Python 3 全系兼容，含 build-windows 的 3.14），
+          # 故仅约束平台为 win_amd64，不再绑定 CPython ABI 标签（run 42390310882 实测 cp314 过滤器失配）。
+          $wheel = Get-ChildItem wheelhouse -Filter "*win_amd64*.whl" | Select-Object -First 1
           if (-not $wheel) {
-            Write-Error "wheelhouse 中未找到 cp314-win_amd64 的 wheel（构建失败或平台标签不符）"
+            Write-Error "wheelhouse 中未找到 win_amd64 平台的 wheel（构建失败或平台标签不符）"
             exit 1
           }
           $sha = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
@@ -229,9 +231,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $key = "${{ steps.wheel-key.outputs.key }}"
-          $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" | Select-Object -First 1
+          $wheel = Get-ChildItem wheelhouse -Filter "*win_amd64*.whl" | Select-Object -First 1
           if (-not $wheel) {
-            Write-Error "wheelhouse 中未找到 cp314-win_amd64 wheel"
+            Write-Error "wheelhouse 中未找到 win_amd64 平台的 wheel"
             exit 1
           }
           $sha = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()

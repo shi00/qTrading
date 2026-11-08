@@ -13,6 +13,11 @@
   让后续合并的整条 CI 排队（队头阻塞）。独立文件 + 独立并发组 + paths 过滤消除该影响。
 - 触发面为 schedule / push 到 main / main 上的 dispatch（tag 不触发——同 run 产物来不及取用）。
 - 预热与 ``build-windows`` 的两条 cuda 腿共用 ``.github/actions/restore-cuda-wheel``（下载重试 + 校验单源）。
+- wheelhouse 内 wheel 的识别口径（``-Filter "*win_amd64*.whl"``）散落于 warmup verify / publish、
+  ``ci_cd.yml`` cuda 腿快路径与 restore-cuda-wheel action 共 4 处，由本测试守护逐字一致——
+  llama-cpp-python 0.3.36 起上游 scikit-build-core 产出 ``py3-none-win_amd64`` stable-ABI 标签，
+  任何一处绑定 CPython ABI 标签（如 ``cp314``）都会让 verify / publish / 下游复用失配，
+  wheel bank 永远无法建立（run 42390310882 实测）。
 - 跨 workflow 无法引用 env，故 ``CI_WHEEL_BANK_TAG`` / ``LLAMA_CUDA_WHEEL_KEY_SUFFIX`` 双写于两侧，
   由本测试守护逐字一致。
 - 原 build / verify / publish 的 ``if`` / ``continue-on-error`` 与构建命令保持不变，summary 自身不改变 job 结论。
@@ -52,6 +57,9 @@ RESULT_ENUMS = (
     "unexpected",
 )
 SHARED_ENV_KEYS = ("CI_WHEEL_BANK_TAG", "LLAMA_CUDA_WHEEL_KEY_SUFFIX")
+# 四处 wheel 识别口径的守护基准：只约束平台标签（win_amd64），不绑定 CPython ABI 标签。
+# 0.3.36 起上游 scikit-build-core wheel.py-api="py3" 产出 py3-none-win_amd64 stable-ABI 标签。
+WHEEL_FILTER_PATTERN = 'Get-ChildItem wheelhouse -Filter "*win_amd64*.whl"'
 
 
 @pytest.fixture(scope="module")
@@ -309,3 +317,27 @@ def test_restore_steps_share_one_composite_action(workflow: dict[str, Any], ci_w
     ]
     assert len(build_windows_callers) == 1, "build-windows 应恰好有一个 restore 步骤引用共用 action"
     assert "run" not in build_windows_callers[0], "build-windows 的 restore 步骤不应再内联脚本"
+
+
+def test_wheel_identification_consistent_across_all_four_sites(
+    workflow: dict[str, Any], ci_workflow: dict[str, Any]
+) -> None:
+    """四处 wheel 识别口径必须逐字一致，且禁止重新绑定 CPython ABI 标签（如 cp314）。"""
+    verify_script = _normalized(_run(_step(workflow, "Verify wheel CUDA backend before publishing")))
+    publish_script = _normalized(_run(_step(workflow, "Publish CUDA wheel to release bank")))
+    action_script = _normalized(yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))["runs"]["steps"][0]["run"])
+    ci_install = [s for s in ci_workflow["jobs"]["build-windows"]["steps"] if s.get("name") == "Install dependencies"]
+    assert len(ci_install) == 1, "build-windows 应恰好有一个 Install dependencies 步骤"
+    ci_script = _normalized(ci_install[0]["run"])
+
+    for site, script in (
+        ("warmup verify", verify_script),
+        ("warmup publish", publish_script),
+        ("restore-cuda-wheel action", action_script),
+        ("ci_cd.yml cuda 腿快路径", ci_script),
+    ):
+        assert WHEEL_FILTER_PATTERN in script, f"{site} 的 wheel 识别口径与守护基准逐字不一致"
+        # 只禁过滤器字面量（"*cp314 开头的 ABI 绑定过滤模式），不禁注释中的说明性文字。
+        assert '"*cp314' not in script, (
+            f"{site} 的 wheel 过滤器仍绑定 cp314 ABI 标签（0.3.36 起产出 py3-none-win_amd64）"
+        )

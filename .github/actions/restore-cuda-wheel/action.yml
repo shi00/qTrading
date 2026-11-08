@@ -78,14 +78,14 @@ runs:
             Remove-Item wheelhouse -Recurse -Force -ErrorAction SilentlyContinue
             Expand-Archive -Path $zip -DestinationPath wheelhouse -Force
             $sums = Join-Path wheelhouse "SHA256SUMS.txt"
-            $wheel = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" -ErrorAction SilentlyContinue |
+            $wheel = Get-ChildItem wheelhouse -Filter "*win_amd64*.whl" -ErrorAction SilentlyContinue |
               Select-Object -First 1
             $m = if (Test-Path $sums) {
               [regex]::Match((Get-Content $sums -Raw), "(?m)^([0-9a-fA-F]{64})\s+(\S+\.whl)\s*$")
             }
             # 逐项校验：缺 wheel / 缺清单 / 文件名不符 / 摘要不符，任一不过即视为未命中并清空。
             $reason = $null
-            if (-not $wheel) { $reason = "缺 cp314-win_amd64 wheel" }
+            if (-not $wheel) { $reason = "缺 win_amd64 平台 wheel" }
             elseif (-not $m -or -not $m.Success) { $reason = "缺 SHA256SUMS.txt 或格式非法" }
             elseif ($m.Groups[2].Value -ne $wheel.Name) { $reason = "SHA256SUMS 与 wheel 文件名不一致" }
             elseif ($m.Groups[1].Value.ToLower() -ne (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()) {
