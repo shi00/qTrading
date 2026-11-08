@@ -43,6 +43,7 @@ from ui.components.model_management_panel import (
     _build_attempts,
     _build_budget_summary,
     _build_connection_row,
+    _build_connections_view,
     _build_release_controls,
     _build_request_rows,
     _build_usage_filters,
@@ -255,6 +256,44 @@ class TestUsageFilters:
         assert texts["c1"] == "Conn One"
         assert texts["c2"] == "c2"  # 名称缺失回退 id
 
+    def test_all_fields_have_non_empty_labels(self):
+        """无障碍基线 §2.1：日期起止与六类下拉均有非空持久 label。"""
+        controls = _filter_controls(_usage_state(), MagicMock())
+        labels = [getattr(ctrl, "label", None) for ctrl in controls]
+        assert all(isinstance(lbl, str) and lbl.strip() for lbl in labels)
+        # 多个「全部」选项须能按用途区分
+        assert len(set(labels)) == len(labels)
+        assert controls[0].label == I18n.get("model_usage_filter_start_hint")
+        assert controls[1].label == I18n.get("model_usage_filter_end_hint")
+        assert controls[2].label == I18n.get("model_usage_filter_scenario_label")
+        assert controls[3].label == I18n.get("model_usage_filter_task_label")
+        assert controls[4].label == I18n.get("model_usage_filter_connection_label")
+        assert controls[5].label == I18n.get("model_usage_filter_origin_label")
+        assert controls[6].label == I18n.get("model_usage_filter_terminal_label")
+        assert controls[7].label == I18n.get("model_usage_filter_cost_label")
+
+    def test_labels_do_not_change_filter_binding(self):
+        """补 label 不改变事件绑定：日期仍 on_change，下拉仍 on_select。"""
+        controls = _filter_controls(_usage_state(), MagicMock())
+        assert all(ctrl.on_change is not None for ctrl in controls[:2])
+        assert all(ctrl.on_select is not None for ctrl in controls[2:])
+
+
+class TestConnectionsViewLabels:
+    def test_search_and_status_filter_have_non_empty_labels(self):
+        """无障碍基线 §2.1：连接搜索框与状态筛选下拉均有非空持久 label。"""
+        vm = MagicMock()
+        vm.visible_connections.return_value = []
+        view = _build_connections_view(ModelConnectionsState(), vm, compact=False)
+        assert isinstance(view, ft.Column)
+        toolbar = view.controls[0]
+        assert isinstance(toolbar, ft.Row)
+        search, status_filter = toolbar.controls[0], toolbar.controls[1]
+        assert isinstance(search, ft.TextField)
+        assert search.label == I18n.get("model_management_search_hint")
+        assert isinstance(status_filter, ft.Dropdown)
+        assert status_filter.label == I18n.get("col_status")
+
 
 class TestFilterHandlers:
     def test_select_filter_all_maps_to_none(self, monkeypatch):
@@ -405,6 +444,7 @@ class TestUsageView:
         inputs = [c for c in _walk_controls(budget_col) if isinstance(c, ft.TextField)]
         assert len(inputs) == 1
         assert inputs[0].value == "100"
+        assert inputs[0].label == I18n.get("model_usage_budget_limit_label")
         # 月汇总模式控件不在明细模式渲染
         assert "usage_exit_monthly" not in keys
         assert "usage_month_query" not in keys
@@ -429,6 +469,7 @@ class TestUsageView:
         inputs = [c for c in _walk_controls(section) if isinstance(c, ft.TextField)]
         assert len(inputs) == 1
         assert inputs[0].value == "202601"
+        assert inputs[0].label == I18n.get("model_usage_month_pick_label")
         # 明细模式控件不在月汇总模式渲染（历史月不被当前月视图替代）
         assert "usage_export" not in keys
         assert "usage_budget_save" not in keys

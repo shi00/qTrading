@@ -516,6 +516,7 @@ def _build_connections_view(
                 anchored(
                     EIDS.MODEL.SEARCH_INPUT,
                     ft.TextField(
+                        label=I18n.get("model_management_search_hint"),
                         hint_text=I18n.get("model_management_search_hint"),
                         tooltip=I18n.get("model_management_search_hint"),
                         value=state.search_query,
@@ -529,6 +530,7 @@ def _build_connections_view(
                 anchored(
                     EIDS.MODEL.STATUS_FILTER,
                     ft.Dropdown(
+                        label=I18n.get("col_status"),
                         value=state.status_filter,
                         width=AppStyles.CONTROL_WIDTH_SM,
                         options=[ft.dropdown.Option(key=k, text=I18n.get(v)) for k, v in _STATUS_FILTER_KEYS.items()],
@@ -700,6 +702,7 @@ def _build_budget_edit_row(state: ModelUsageState, vm: ModelUsageViewModel) -> f
             anchored(
                 EIDS.MODEL.USE_BUDGET_INPUT,
                 ft.TextField(
+                    label=I18n.get("model_usage_budget_limit_label"),
                     value=state.budget_draft,
                     hint_text=I18n.get("model_usage_budget_limit_hint"),
                     tooltip=I18n.get("model_usage_budget_limit_hint"),
@@ -807,6 +810,7 @@ def _build_month_summary_section(state: ModelUsageState, vm: ModelUsageViewModel
                 anchored(
                     EIDS.MODEL.USE_MONTH_PICK,
                     ft.TextField(
+                        label=I18n.get("model_usage_month_pick_label"),
                         value=state.month_draft,
                         hint_text=I18n.get("model_usage_month_pick_hint"),
                         tooltip=I18n.get("model_usage_month_pick_hint"),
@@ -1036,6 +1040,7 @@ def _option_list(options: dict[str, str]) -> list[ft.dropdown.Option]:
 
 def _date_field(value: str, *, hint_key: str, on_change: Callable[[ft.ControlEvent], None]) -> ft.TextField:
     return ft.TextField(
+        label=I18n.get(hint_key),
         value=value,
         hint_text=I18n.get(hint_key),
         tooltip=I18n.get(hint_key),
@@ -1048,9 +1053,14 @@ def _date_field(value: str, *, hint_key: str, on_change: Callable[[ft.ControlEve
 
 
 def _filter_dropdown(
-    value: str | None, options: list[ft.dropdown.Option], on_select: Callable[[ft.ControlEvent], None]
+    value: str | None,
+    options: list[ft.dropdown.Option],
+    on_select: Callable[[ft.ControlEvent], None],
+    *,
+    label: str,
 ) -> ft.Dropdown:
     return ft.Dropdown(
+        label=label,
         value=value or _FILTER_ALL,
         width=AppStyles.CONTROL_WIDTH_SM,
         options=options,
@@ -1097,27 +1107,57 @@ def _build_usage_filters(
             ),
             anchored(
                 EIDS.MODEL.USE_SCENARIO_FILTER,
-                _filter_dropdown(f.scenario_id, scenario_options, _select_filter_handler(vm, "scenario_id")),
+                _filter_dropdown(
+                    f.scenario_id,
+                    scenario_options,
+                    _select_filter_handler(vm, "scenario_id"),
+                    label=I18n.get("model_usage_filter_scenario_label"),
+                ),
             ),
             anchored(
                 EIDS.MODEL.USE_TASK_FILTER,
-                _filter_dropdown(f.task_id, task_options, _select_filter_handler(vm, "task_id")),
+                _filter_dropdown(
+                    f.task_id,
+                    task_options,
+                    _select_filter_handler(vm, "task_id"),
+                    label=I18n.get("model_usage_filter_task_label"),
+                ),
             ),
             anchored(
                 EIDS.MODEL.USE_CONNECTION_FILTER,
-                _filter_dropdown(f.connection_id, connection_options, _select_filter_handler(vm, "connection_id")),
+                _filter_dropdown(
+                    f.connection_id,
+                    connection_options,
+                    _select_filter_handler(vm, "connection_id"),
+                    label=I18n.get("model_usage_filter_connection_label"),
+                ),
             ),
             anchored(
                 EIDS.MODEL.USE_ORIGIN_FILTER,
-                _filter_dropdown(f.origin, _option_list(_ORIGIN_FILTER_KEYS), _select_filter_handler(vm, "origin")),
+                _filter_dropdown(
+                    f.origin,
+                    _option_list(_ORIGIN_FILTER_KEYS),
+                    _select_filter_handler(vm, "origin"),
+                    label=I18n.get("model_usage_filter_origin_label"),
+                ),
             ),
             anchored(
                 EIDS.MODEL.USE_TERMINAL_FILTER,
-                _filter_dropdown(f.terminal_status, terminal_options, _select_filter_handler(vm, "terminal_status")),
+                _filter_dropdown(
+                    f.terminal_status,
+                    terminal_options,
+                    _select_filter_handler(vm, "terminal_status"),
+                    label=I18n.get("model_usage_filter_terminal_label"),
+                ),
             ),
             anchored(
                 EIDS.MODEL.USE_COST_FILTER,
-                _filter_dropdown(f.cost_status, cost_options, _select_filter_handler(vm, "cost_status")),
+                _filter_dropdown(
+                    f.cost_status,
+                    cost_options,
+                    _select_filter_handler(vm, "cost_status"),
+                    label=I18n.get("model_usage_filter_cost_label"),
+                ),
             ),
         ],
         spacing=AppStyles.SPACING_SM,
