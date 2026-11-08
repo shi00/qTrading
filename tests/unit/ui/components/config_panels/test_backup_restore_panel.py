@@ -15,11 +15,13 @@
 D36 决策下 UI 不直接执行 restore，无执行中状态与成功消息。
 """
 
+import asyncio
 import contextlib
 import inspect
+import threading
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import flet as ft
 import pytest
@@ -35,6 +37,7 @@ from tests.unit.ui.component_renderer import (
 from ui.components.config_panels import backup_restore_panel as panel_module
 from ui.components.config_panels.backup_restore_panel import BackupRestorePanel
 from ui.viewmodels.backup_restore_view_model import BackupRestoreState, RestoreArchiveInfo
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -49,6 +52,15 @@ def _set_context_page(page: Any) -> None:
 def _invoke_click(handler: Any) -> None:
     """调用 click handler (cast Any 绕过 Optional 调用检查)."""
     cast(Any, handler)(MagicMock())
+
+
+@contextlib.contextmanager
+def _patch_thread_pool(run_async: Any) -> Any:
+    """替身 ThreadPoolManager: 用给定 run_async 替换, 便于观察/阻塞路径准备."""
+    fake_manager = MagicMock()
+    fake_manager.run_async = run_async
+    with patch.object(panel_module, "ThreadPoolManager", return_value=fake_manager):
+        yield fake_manager
 
 
 def _read_source() -> str:
@@ -346,20 +358,208 @@ class TestGenerateDefaultBackupPath:
 class TestClickHandlers:
     """Click handler factory 测试 — 覆盖 page available / RuntimeError 分支."""
 
-    def test_on_backup_click_calls_start_backup(self) -> None:
-        """page 可用时调 page.run_task(vm.start_backup, path)."""
+    def test_on_backup_click_does_not_prepare_path_before_dispatch(self) -> None:
+        """BRP-F1: 点击处理不得在事件处理器内同步生成路径 (R16), 只调度协程.
+
+        旧实现在 ``page.run_task`` 实参求值阶段调用 ``_generate_default_backup_path``,
+        其中的 mkdir/resolve 会阻塞 UI 事件循环。
+        """
         vm = MagicMock()
         mock_page = MagicMock()
         _set_context_page(mock_page)
+        with patch.object(panel_module, "_generate_default_backup_path") as mock_generate:
+            try:
+                handler = panel_module._on_backup_click_factory(vm)
+                _invoke_click(handler)
+            finally:
+                _set_context_page(None)
+            mock_generate.assert_not_called()
+
+        assert mock_page.run_task.call_count == 1
+        scheduled = mock_page.run_task.call_args[0][0]
+        assert inspect.iscoroutinefunction(scheduled), "run_task 必须接收协程函数"
+        assert scheduled is not vm.start_backup
+
+    async def test_backup_task_offloads_path_preparation_to_io_pool(self) -> None:
+        """BRP-F1: 路径准备经 ThreadPoolManager IO 池执行, 再 await vm.start_backup(path)."""
+        vm = MagicMock()
+        vm.start_backup = AsyncMock()
+        expected_path = Path("/fake/qtrading-backup-20260101-000000.dump")
+        calls: list[tuple[Any, Any]] = []
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            calls.append((task_type, func))
+            return expected_path
+
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
         try:
-            handler = panel_module._on_backup_click_factory(vm)
-            _invoke_click(handler)
+            with _patch_thread_pool(_run_async):
+                handler = panel_module._on_backup_click_factory(vm)
+                _invoke_click(handler)
+                coro_func = mock_page.run_task.call_args[0][0]
+                await coro_func()
         finally:
             _set_context_page(None)
 
-        args = mock_page.run_task.call_args[0]
-        assert args[0] == vm.start_backup
-        assert isinstance(args[1], Path)
+        assert calls == [(TaskType.IO, panel_module._generate_default_backup_path)]
+        vm.start_backup.assert_awaited_once_with(expected_path)
+
+    async def test_event_loop_progresses_while_path_preparation_blocked(self) -> None:
+        """BRP-F1: 路径准备阻塞期间事件循环仍可推进 (心跳协程可执行)."""
+        vm = MagicMock()
+        vm.start_backup = AsyncMock()
+        entered = threading.Event()
+        release = threading.Event()
+        expected_path = Path("/fake/qtrading-backup-20260101-000000.dump")
+        ticks: list[int] = []
+
+        def _blocking_generate() -> Path:
+            entered.set()
+            release.wait(timeout=5)
+            return expected_path
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            # 替身: 把同步阻塞函数放到工作线程, 模拟真实 IO 池不占用事件循环
+            return await asyncio.to_thread(func, *args, **kwargs)
+
+        async def _heartbeat() -> None:
+            while not release.is_set():
+                ticks.append(1)
+                await asyncio.sleep(0.005)
+
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
+        heartbeat = asyncio.create_task(_heartbeat())
+        try:
+            with (
+                _patch_thread_pool(_run_async),
+                patch.object(panel_module, "_generate_default_backup_path", _blocking_generate),
+            ):
+                handler = panel_module._on_backup_click_factory(vm)
+                _invoke_click(handler)
+                coro_func = mock_page.run_task.call_args[0][0]
+                backup_task = asyncio.create_task(coro_func())
+                await asyncio.to_thread(entered.wait, 5)
+                await asyncio.sleep(0.02)
+                assert backup_task.done() is False, "路径准备未完成时 backup 任务不应已结束"
+                assert len(ticks) > 0, "路径准备阻塞期间事件循环应可推进"
+                release.set()
+                await backup_task
+        finally:
+            release.set()
+            await heartbeat
+            _set_context_page(None)
+
+        vm.start_backup.assert_awaited_once_with(expected_path)
+
+    async def test_backup_uses_cwd_fallback_path_when_backups_dir_uncreatable(self, tmp_path, monkeypatch) -> None:
+        """BRP-F1: mkdir 失败时沿用原有 cwd 回退契约, 且回退路径传入 vm.start_backup."""
+        import platformdirs
+
+        blocking_file = tmp_path / "blocking_file"
+        blocking_file.write_text("x")
+        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(blocking_file))
+
+        vm = MagicMock()
+        vm.start_backup = AsyncMock()
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
+
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
+        try:
+            with _patch_thread_pool(_run_async):
+                handler = panel_module._on_backup_click_factory(vm)
+                _invoke_click(handler)
+                coro_func = mock_page.run_task.call_args[0][0]
+                await coro_func()
+        finally:
+            _set_context_page(None)
+
+        assert vm.start_backup.await_count == 1
+        output_path = vm.start_backup.await_args.args[0]
+        assert isinstance(output_path, Path)
+        assert output_path.parent == Path.cwd().resolve()
+        assert output_path.name.startswith("qtrading-backup-")
+
+    async def test_cancelled_path_preparation_does_not_start_backup(self) -> None:
+        """BRP-F1: 路径准备被取消时不得启动备份 (CancelledError 继续透传, R2)."""
+        vm = MagicMock()
+        vm.start_backup = AsyncMock()
+        prepared = asyncio.Event()
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            prepared.set()
+            await asyncio.Event().wait()  # 永不完成, 模拟慢 IO
+
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
+        try:
+            with _patch_thread_pool(_run_async):
+                handler = panel_module._on_backup_click_factory(vm)
+                _invoke_click(handler)
+                coro_func = mock_page.run_task.call_args[0][0]
+                task = asyncio.create_task(coro_func())
+                await prepared.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion 取消传播由 L509 未启动备份断言补强
+                    await task
+                assert vm.start_backup.await_count == 0
+        finally:
+            _set_context_page(None)
+
+    async def test_double_click_starts_single_backup(self, tmp_path) -> None:
+        """BRP-F1: 双击并发只启动一次 dump (VM is_backing_up 守卫在异步路径下仍生效)."""
+        from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
+
+        expected_path = tmp_path / "qtrading-backup-20260101-000000.dump"
+        dump_result = MagicMock()
+        dump_result.output_path = str(expected_path)
+        dump_gate = asyncio.Event()
+        prep_gate = asyncio.Event()
+
+        async def _dump(output_path: Path) -> Any:
+            await dump_gate.wait()
+            return dump_result
+
+        service = MagicMock()
+        service.dump = AsyncMock(side_effect=_dump)
+        vm = BackupRestoreViewModel(maintenance_service=service)
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            await prep_gate.wait()
+            return func(*args, **kwargs)
+
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
+        try:
+            with (
+                _patch_thread_pool(_run_async),
+                patch.object(panel_module, "_generate_default_backup_path", return_value=expected_path),
+            ):
+                handler = panel_module._on_backup_click_factory(vm)
+                _invoke_click(handler)
+                _invoke_click(handler)
+                assert mock_page.run_task.call_count == 2
+                coro_func = mock_page.run_task.call_args_list[0][0][0]
+                task_a = asyncio.create_task(coro_func())
+                task_b = asyncio.create_task(coro_func())
+                await asyncio.sleep(0)
+                prep_gate.set()
+                while service.dump.await_count == 0:
+                    await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                dump_gate.set()
+                await asyncio.gather(task_a, task_b)
+        finally:
+            dump_gate.set()
+            _set_context_page(None)
+
+        assert service.dump.await_args_list == [call(expected_path)]
+        assert vm.state.is_backing_up is False
+        assert vm.state.backup_path == str(expected_path)
 
     def test_on_backup_click_silent_on_runtime_error(self) -> None:
         """page 不可用 (RuntimeError, _context_page 为 None) 时静默处理, 不调 vm.start_backup."""

@@ -32,6 +32,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -77,13 +78,23 @@ def _format_file_size(size_bytes: int) -> str:
 
 
 def _on_backup_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
-    """Create on_click handler for backup button — submits vm.start_backup."""
+    """Create on_click handler for backup button — prepares path off-loop, then submits vm.start_backup.
+
+    R16: ``_generate_default_backup_path`` 含 ``mkdir`` / ``resolve`` 同步磁盘 IO。
+    若在 ``page.run_task`` 的实参求值阶段调用，则路径准备发生在事件处理器内、调度之前，
+    磁盘或重定向用户目录延迟时会阻塞 UI 事件循环。因此路径准备移入协程并经
+    ``ThreadPoolManager`` 的 IO 池执行，完成后再 ``await vm.start_backup(path)``。
+    """
+
+    async def _backup() -> None:
+        output_path = await ThreadPoolManager().run_async(TaskType.IO, _generate_default_backup_path)
+        await vm.start_backup(output_path)
 
     def _on_backup_click(e: ft.ControlEvent) -> None:
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(vm.start_backup, _generate_default_backup_path())
+                page.run_task(_backup)
         except RuntimeError:
             logger.debug("[BackupRestorePanel] page not available for start_backup")
 
