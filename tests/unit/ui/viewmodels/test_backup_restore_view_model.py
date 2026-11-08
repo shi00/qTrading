@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,7 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ui.viewmodels import Message
-from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
+from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel, RestoreArchiveInfo
 
 pytestmark = pytest.mark.unit
 
@@ -416,6 +417,190 @@ class TestStartRestoreWizard:
         assert vm.state.restore_archive_info is None
         assert vm.state.error_message is not None
         assert vm.state.error_message.key == "restore_invalid_format"
+
+
+# --- start_restore_wizard: 归档读取移出事件循环 (BR-02 / R16) ---
+
+
+class TestRestoreProbeOffload:
+    """BR-02: 类型探测 + 头校验经 IO 线程池执行，且按请求代次丢弃迟到结果。"""
+
+    @pytest.mark.asyncio
+    async def test_probe_runs_in_io_pool_without_blocking_event_loop(self, vm):
+        """慢 IO 下事件循环持续可调度，且探测器运行在 IO_Worker 线程."""
+        worker_started = threading.Event()
+        release = threading.Event()
+        worker_finished = threading.Event()
+        thread_names: list[str] = []
+
+        def _slow_probe(_path: Path) -> RestoreArchiveInfo:
+            thread_names.append(threading.current_thread().name)
+            worker_started.set()
+            release.wait(timeout=5)
+            worker_finished.set()
+            return RestoreArchiveInfo(file_size=8, archive_version="1.15")
+
+        path = Path("/slow/backup.dump")
+        with patch("ui.viewmodels.backup_restore_view_model._probe_restore_archive", _slow_probe):
+            task = asyncio.create_task(vm.start_restore_wizard(path))
+            for _ in range(200):
+                if worker_started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert worker_started.is_set() is True
+            assert task.done() is False
+            # worker 阻塞期间事件循环仍可获得调度（同步实现会卡住本循环直到 release 超时）
+            ticks = 0
+            for _ in range(5):
+                await asyncio.sleep(0.005)
+                ticks += 1
+            assert ticks == 5
+            assert vm.state.confirm_state == "idle"
+            release.set()
+            await asyncio.wait_for(task, timeout=5)
+
+        assert worker_finished.is_set() is True
+        assert len(thread_names) == 1
+        assert thread_names[0].startswith("IO_Worker")
+        assert vm.state.confirm_state == "pending"
+        assert vm.state.restore_path == str(path)
+        assert vm.state.restore_archive_info == RestoreArchiveInfo(file_size=8, archive_version="1.15")
+        assert vm.state.error_message is None
+
+    @pytest.mark.asyncio
+    async def test_stale_probe_result_discarded_after_newer_selection(self, vm):
+        """先发起的慢探测晚返回时，不得覆盖后一次选择的结果."""
+        slow_started = threading.Event()
+        slow_release = threading.Event()
+        slow_finished = threading.Event()
+        slow_path = Path("/slow/old-backup.dump")
+        fast_path = Path("/fast/new-backup.dump")
+
+        def _probe_by_path(path: Path) -> RestoreArchiveInfo:
+            if path == slow_path:
+                slow_started.set()
+                slow_release.wait(timeout=5)
+                slow_finished.set()
+                return RestoreArchiveInfo(file_size=111, archive_version="1.15")
+            return RestoreArchiveInfo(file_size=222, archive_version="1.16")
+
+        with patch("ui.viewmodels.backup_restore_view_model._probe_restore_archive", _probe_by_path):
+            slow_task = asyncio.create_task(vm.start_restore_wizard(slow_path))
+            for _ in range(200):
+                if slow_started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert slow_started.is_set() is True
+
+            await asyncio.wait_for(vm.start_restore_wizard(fast_path), timeout=5)
+            assert vm.state.restore_path == str(fast_path)
+            assert vm.state.restore_archive_info == RestoreArchiveInfo(file_size=222, archive_version="1.16")
+
+            slow_release.set()
+            await asyncio.wait_for(slow_task, timeout=5)
+
+        assert slow_finished.is_set() is True
+        assert vm.state.confirm_state == "pending"
+        assert vm.state.restore_path == str(fast_path)
+        assert vm.state.restore_archive_info == RestoreArchiveInfo(file_size=222, archive_version="1.16")
+        assert vm.state.error_message is None
+
+    @pytest.mark.asyncio
+    async def test_stale_probe_error_discarded_after_newer_selection(self, vm):
+        """旧代次的迟到失败不得把新选择从 pending 打回 idle."""
+        slow_started = threading.Event()
+        slow_release = threading.Event()
+        slow_finished = threading.Event()
+        slow_path = Path("/slow/broken-backup.dump")
+        fast_path = Path("/fast/good-backup.dump")
+
+        def _probe_by_path(path: Path) -> RestoreArchiveInfo:
+            if path == slow_path:
+                slow_started.set()
+                slow_release.wait(timeout=5)
+                slow_finished.set()
+                raise PermissionError("denied")
+            return RestoreArchiveInfo(file_size=222, archive_version="1.16")
+
+        with patch("ui.viewmodels.backup_restore_view_model._probe_restore_archive", _probe_by_path):
+            slow_task = asyncio.create_task(vm.start_restore_wizard(slow_path))
+            for _ in range(200):
+                if slow_started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert slow_started.is_set() is True
+
+            await asyncio.wait_for(vm.start_restore_wizard(fast_path), timeout=5)
+            slow_release.set()
+            await asyncio.wait_for(slow_task, timeout=5)
+
+        assert slow_finished.is_set() is True
+        assert vm.state.confirm_state == "pending"
+        assert vm.state.restore_path == str(fast_path)
+        assert vm.state.error_message is None
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates_and_writes_no_late_state(self, vm):
+        """取消后 CancelledError 继续传播，worker 结束后不得写入迟到状态 (R2)."""
+        worker_started = threading.Event()
+        release = threading.Event()
+        worker_finished = threading.Event()
+
+        def _slow_probe(_path: Path) -> RestoreArchiveInfo:
+            worker_started.set()
+            release.wait(timeout=5)
+            worker_finished.set()
+            return RestoreArchiveInfo(file_size=8, archive_version="1.15")
+
+        with patch("ui.viewmodels.backup_restore_view_model._probe_restore_archive", _slow_probe):
+            task = asyncio.create_task(vm.start_restore_wizard(Path("/slow/backup.dump")))
+            for _ in range(200):
+                if worker_started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert worker_started.is_set() is True
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+            assert task.cancelled() is True
+            release.set()
+            assert worker_finished.wait(timeout=5) is True
+            await asyncio.sleep(0)
+
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
+        assert vm.state.error_message is None
+
+    @pytest.mark.asyncio
+    async def test_disposed_vm_discards_late_probe_result(self, vm):
+        """页面卸载 (dispose) 后，迟到的探测结果不得写入 state."""
+        worker_started = threading.Event()
+        release = threading.Event()
+        worker_finished = threading.Event()
+
+        def _slow_probe(_path: Path) -> RestoreArchiveInfo:
+            worker_started.set()
+            release.wait(timeout=5)
+            worker_finished.set()
+            return RestoreArchiveInfo(file_size=8, archive_version="1.15")
+
+        with patch("ui.viewmodels.backup_restore_view_model._probe_restore_archive", _slow_probe):
+            task = asyncio.create_task(vm.start_restore_wizard(Path("/slow/backup.dump")))
+            for _ in range(200):
+                if worker_started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert worker_started.is_set() is True
+            vm.dispose()
+            release.set()
+            await asyncio.wait_for(task, timeout=5)
+
+        assert worker_finished.is_set() is True
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
 
 
 # --- confirm_restore ---
