@@ -2035,8 +2035,10 @@ jobs:
           $prebuiltWheel = $null
           if ("${{ matrix.backend }}" -eq "cuda") {
             # 快路径：cuda-wheel-warmup.yml 已用同一 CUDA 12.4.1 + 同一 arch 列表编好 wheel 并发布到 Release，本腿只需安装。
-            # 平台标签必须与 setup-python 的 3.14 匹配，避免装上错误 ABI 的 wheel。
-            $candidate = Get-ChildItem wheelhouse -Filter "*cp314*win_amd64*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
+            # llama-cpp-python 0.3.36 起上游 scikit-build-core 产出 py3-none-win_amd64 的 stable-ABI 标签
+            # （对 Python 3 全系兼容），仅约束平台为 win_amd64，不再绑定 cp314 ABI 标签
+            # （run 42390310882 实测 cp314 过滤器失配导致 wheel bank 永远无法建立）。
+            $candidate = Get-ChildItem wheelhouse -Filter "*win_amd64*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($candidate) {
               Write-Host "Installing prebuilt CUDA wheel: $($candidate.Name)"
               uv pip install --system --no-deps $candidate.FullName
