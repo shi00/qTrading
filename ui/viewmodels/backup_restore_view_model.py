@@ -23,6 +23,9 @@ View 渲染时 I18n.get(msg.key, **msg.params)。
   (dump 已是 async, 内部通过 ThreadPoolManager 提交 subprocess, 不需额外包裹)
 - start_backup 将 dump 放入独立 task 并以 ``asyncio.shield`` 等待: 调用方被取消时
   只终止等待, dump 继续执行, busy 在 dump 真正终结时由其自身落地终态后释放
+- start_restore_wizard 的类型探测 (``is_file``) 与头校验 (``stat`` / ``open`` / ``read``)
+  合并为单个同步 worker, 经 IO 线程池执行 (R16: 网络盘/离线设备的 open 延迟不可控);
+  并发/重复选文件按请求代次只采纳最新一次请求的结果
 - confirm_restore 是 async 命令但不调用 sidecar (仅设 state 显示指引)
 - 异常处理: dump 异常设 error_message; CancelledError 继续透传 (R2, 不被吞没)
 """
@@ -88,6 +91,22 @@ def _read_archive_info(path: Path) -> RestoreArchiveInfo:
         raise _InvalidBackupError("restore_invalid_format")
     archive_version = f"{header[5]}.{header[6]}"
     return RestoreArchiveInfo(file_size=file_size, archive_version=archive_version)
+
+
+def _probe_restore_archive(path: Path) -> RestoreArchiveInfo:
+    """类型探测 + 头校验合一的同步 worker（经 IO 线程池执行，R16）.
+
+    ``Path.is_file()`` 对不存在/无权限的路径返回 False 而不抛错，故与 ``open`` 失败
+    统一按「不可作为备份文件」处理（``restore_failed``）。合并为单个 worker 是为了
+    把类型探测与头读取的两次文件系统访问放在同一线程池调用内，避免各占一次往返。
+
+    Raises:
+        _InvalidBackupError: 空/截断文件或 magic 不匹配 (message_key 区分原因)
+        OSError: 路径不是普通文件, 或 stat/open 失败 (权限/IO 等)
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"not a regular file: {path}")
+    return _read_archive_info(path)
 
 
 def _generate_default_backup_path() -> Path:
@@ -166,6 +185,9 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         # 强引用在途 dump task（asyncio 文档要求保存 shield 传入的 task 引用，
         # 避免任务因无引用被 GC 中断）；终态落地后清空。
         self._backup_task: asyncio.Task[None] | None = None
+        # 恢复文件探测代次：并发/乱序探测时只采纳最新一次请求的结果
+        # （避免用户重新选文件后，迟到的旧元信息/旧错误覆盖新状态）
+        self._restore_generation = 0
         self._init_mixin_fields()
 
     def _get_maintenance_service(self) -> EmbeddedPgMaintenanceService:
@@ -258,52 +280,57 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
     async def start_restore_wizard(self, input_path: Path) -> None:
         """恢复向导 Step 1: 校验备份文件头后设置 restore_path + confirm_state="pending".
 
-        - 路径必须是普通文件 (不存在/目录/读取失败时设 error_message, 不进入 pending)
+        - 类型探测 (``is_file``) 与头校验 (``stat`` / ``open`` / ``read``) 合并为单个
+          同步 worker, 经 IO 线程池执行 (R16: 网络盘/离线设备的 open 延迟不可控,
+          小读取量不构成事件循环内同步 IO 的豁免)
+        - 路径不是普通文件或读取失败 → error_message + confirm_state="idle"
         - 校验 pg_dump custom-format magic header ``PGDMP``:
           空/截断文件与非法格式分别给出明确错误, 均不进入 pending
         - 校验通过时记录文件大小 + archive 版本, 供 pending 态展示元信息
-        - 清空之前的 error_message
+        - 每次调用递增请求代次: 迟到返回的旧代次结果 (成功或失败) 一律丢弃,
+          避免用户重新选文件后旧元信息覆盖新状态
+        - 取消只终止等待 (worker 内的只读探测自然结束, 不写 state);
+          CancelledError 继续透传 (R2)
         """
-        if not input_path.is_file():  # noqa: ASYNC240  # restore 前一次性类型探测（头读取前，非交互热路径）
-            logger.warning(
-                "[BackupRestoreVM] restore path is not a file: %s",
-                DataSanitizer.sanitize_error(str(input_path)),  # R9: 路径可能含用户名等敏感信息
-            )
-            self._set_state(
-                error_message=Message("restore_failed"),
-                confirm_state="idle",
-                restore_path=None,
-                restore_archive_info=None,
-            )
-            return
+        self._restore_generation += 1
+        generation = self._restore_generation
+        error_message: Message | None = None
+        archive_info: RestoreArchiveInfo | None = None
         try:
-            archive_info = _read_archive_info(input_path)
+            archive_info = await ThreadPoolManager().run_async(TaskType.IO, _probe_restore_archive, input_path)
+        except asyncio.CancelledError:
+            # R2: 取消继续传播；不写 state（dispose 后 _set_state 另有 disposed 守卫）
+            raise
         except _InvalidBackupError as exc:
             logger.warning(
                 "[BackupRestoreVM] invalid backup file: %s (%s)",
                 DataSanitizer.sanitize_error(str(input_path)),  # R9: 路径可能含用户名等敏感信息
                 exc.message_key,
             )
-            self._set_state(
-                error_message=Message(exc.message_key),
-                confirm_state="idle",
-                restore_path=None,
-                restore_archive_info=None,
-            )
-            return
+            error_message = Message(exc.message_key)
         except OSError as exc:
             logger.warning(
                 "[BackupRestoreVM] backup file unreadable: %s (%s)",
                 DataSanitizer.sanitize_error(str(input_path)),  # R9: 路径可能含用户名等敏感信息
                 DataSanitizer.sanitize_error(exc),
             )
+            error_message = Message("restore_failed")
+        if generation != self._restore_generation:
+            logger.debug(
+                "[BackupRestoreVM] discard stale restore probe result (generation %d -> %d)",
+                generation,
+                self._restore_generation,
+            )
+            return
+        if error_message is not None:
             self._set_state(
-                error_message=Message("restore_failed"),
+                error_message=error_message,
                 confirm_state="idle",
                 restore_path=None,
                 restore_archive_info=None,
             )
             return
+        assert archive_info is not None  # 成功路径必已赋值（失败/取消路径已提前返回或上抛）
         self._set_state(
             restore_path=str(input_path),
             restore_archive_info=archive_info,
