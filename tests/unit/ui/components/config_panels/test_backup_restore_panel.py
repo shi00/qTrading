@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import flet as ft
 import pytest
 
-from core.i18n import Message
+from core.i18n import I18n, Message
 from tests.unit.ui.component_renderer import (
     FakePage,
     make_component,
@@ -389,18 +389,16 @@ class TestClickHandlers:
         _set_context_page(mock_page)
         try:
             handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
-            _invoke_click(handler)
-            coro_func = mock_page.run_task.call_args[0][0]
-            asyncio.run(coro_func())
+            with patch.object(panel_module, "show_toast") as mock_show_toast:
+                _invoke_click(handler)
+                coro_func = mock_page.run_task.call_args[0][0]
+                asyncio.run(coro_func())
         finally:
             _set_context_page(None)
 
         vm.start_restore_wizard.assert_not_called()
-        # 强断言: 验证 page.toast.show 参数 (msg_type=info + 非空 message)
-        toast_args = mock_page.toast.show.call_args
-        assert toast_args is not None, "toast should be called when no file selected"
-        assert toast_args.args[1] == "info"
-        assert isinstance(toast_args.args[0], str) and len(toast_args.args[0]) > 0
+        # 强断言: info toast, 文案为本地化的离线恢复指引
+        mock_show_toast.assert_called_once_with(mock_page, I18n.get("backup_view_offline_guide"), "info")
 
     def test_on_restore_wizard_click_silent_on_runtime_error(self) -> None:
         """page 不可用时静默处理 (ft.context.page 抛 RuntimeError)."""
@@ -414,8 +412,8 @@ class TestClickHandlers:
             _set_context_page(None)
         vm.start_restore_wizard.assert_not_called()
 
-    def test_on_restore_wizard_click_pick_files_exception_logs_error(self, caplog) -> None:
-        """FilePicker.pick_files 抛 Exception → 记录脱敏日志, 不调 start_restore_wizard (R9 脱敏分支)."""
+    def test_on_restore_wizard_click_pick_files_exception_shows_error_toast(self, caplog) -> None:
+        """FilePicker.pick_files 抛 Exception → 分级脱敏日志 + error toast, 不调 start_restore_wizard."""
         import asyncio
         import logging
 
@@ -427,16 +425,47 @@ class TestClickHandlers:
         _set_context_page(mock_page)
         try:
             handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
-            with caplog.at_level(logging.ERROR, logger="ui.components.config_panels.backup_restore_panel"):
-                _invoke_click(handler)
-                coro_func = mock_page.run_task.call_args[0][0]
-                asyncio.run(coro_func())
+            with patch.object(panel_module, "show_toast") as mock_show_toast:
+                with caplog.at_level(logging.ERROR, logger="ui.components.config_panels.backup_restore_panel"):
+                    _invoke_click(handler)
+                    coro_func = mock_page.run_task.call_args[0][0]
+                    asyncio.run(coro_func())
         finally:
             _set_context_page(None)
 
         vm.start_restore_wizard.assert_not_called()
+        # 强断言: 失败必须给用户可见反馈, 文案由两个 i18n key 组成, 不含原始异常/路径
+        mock_show_toast.assert_called_once_with(
+            mock_page,
+            f"{I18n.get('backup_select_file')}: {I18n.get('common_op_fail')}",
+            "error",
+        )
         error_messages = [r.message for r in caplog.records if r.levelno == logging.ERROR]
         assert any("File pick failed" in msg for msg in error_messages)
+
+    def test_on_restore_wizard_click_cancelled_propagates_without_toast(self) -> None:
+        """R2: pick_files 抛 CancelledError 必须继续传播, 且不弹失败 toast."""
+        import asyncio
+
+        vm = MagicMock()
+        vm.start_restore_wizard = AsyncMock()
+        mock_file_picker = MagicMock()
+        mock_file_picker.pick_files = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
+        try:
+            handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
+            with patch.object(panel_module, "show_toast") as mock_show_toast:
+                _invoke_click(handler)
+                coro_func = mock_page.run_task.call_args[0][0]
+                with pytest.raises(asyncio.CancelledError) as exc_info:
+                    asyncio.run(coro_func())
+                assert exc_info.type is asyncio.CancelledError
+                mock_show_toast.assert_not_called()
+        finally:
+            _set_context_page(None)
+
+        vm.start_restore_wizard.assert_not_called()
 
     def test_on_confirm_restore_click_calls_confirm_restore(self) -> None:
         """page 可用时调 page.run_task(vm.confirm_restore)."""
