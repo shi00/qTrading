@@ -468,6 +468,7 @@ def _build_candidate_picker(
             EIDS.MODEL.PICKER_SEARCH,
             ft.TextField(
                 key="picker_search",
+                label=I18n.get("model_routes_picker_search"),
                 value=search,
                 hint_text=I18n.get("model_routes_picker_search"),
                 tooltip=I18n.get("model_routes_picker_search"),

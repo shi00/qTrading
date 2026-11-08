@@ -61,6 +61,25 @@ def _model_tag_of(model_path: str) -> str:
     return Path(model_path).stem[:32]
 
 
+class _EnsureAttempt:
+    """一次 ``_ensure_worker`` 调用的归属凭据（LMM-02）。
+
+    ``_ensure_worker`` 被取消时，IO 线程可能仍在 ``_ensure_worker_impl`` 内持
+    生命周期锁执行 shutdown/spawn。凭据让取消处理器收编「本次调用实际 spawn 的
+    generation」：字段读写一律在 ``_quarantine_lock`` 内完成（短锁，不做长操作）。
+
+    - ``cancelled``：取消已在事件循环线程登记（impl 据此跳过尚未提交的 spawn，
+      或在 spawn 提交后把该代登记为隔离）。
+    - ``generation``：impl 实际 spawn 的 generation（未 spawn 时为 None）。
+    """
+
+    __slots__ = ("cancelled", "generation")
+
+    def __init__(self) -> None:
+        self.cancelled: bool = False
+        self.generation: int | None = None
+
+
 def _response_generation(result: tuple) -> int | None:
     """S2 响应协议的 generation 字段统一位于下标 2。
 
@@ -372,6 +391,11 @@ class LocalModelManager:
             self._result_queue: multiprocessing.Queue | None = None
             self._worker_ready: bool = False
             self._worker_lock: threading.Lock = threading.Lock()
+            # LMM-02：隔离意图短锁——只保护 _quarantined_generations / 状态与
+            # generation 的一致性读写，锁内禁止 join、队列 IO 或等待 _worker_lock
+            # （锁序只允许 _worker_lock → _quarantine_lock）。
+            self._quarantine_lock: threading.Lock = threading.Lock()
+            self._quarantined_generations: set[int] = set()
             self._verification_mode: bool = False
             self._verification_start_time: float = 0.0
             self._clock = clock or time.monotonic
@@ -466,8 +490,9 @@ class LocalModelManager:
         self._worker_proc = None
         self._request_queue = None
         self._result_queue = None
-        self._worker_ready = False
-        self._worker_state = "stopped"
+        with self._quarantine_lock:
+            self._worker_ready = False
+            self._worker_state = "stopped"
         self._inflight.clear()
 
     async def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
@@ -479,10 +504,38 @@ class LocalModelManager:
 
         F4-S-1: 整个函数体 offload 到线程池，因为 _shutdown_worker_locked 含
         process.join(timeout) 同步阻塞（最坏 ~12s），不能在事件循环线程执行 (R16)。
-        """
-        return await ThreadPoolManager().run_async(TaskType.IO, self._ensure_worker_impl, model_path, core_config)
 
-    def _ensure_worker_impl(self, model_path: str, core_config: dict) -> bool:
+        LMM-02: 取消到达时 IO 线程可能仍持生命周期锁跑 shutdown/spawn，故取消
+        处理器只登记隔离意图（短锁）后立即重抛（R2），绝不在此等待 _worker_lock；
+        实际 spawn 的 generation 经 ``_EnsureAttempt`` 收编，避免用旧代号假称已清理。
+        """
+        attempt = _EnsureAttempt()
+        try:
+            return await ThreadPoolManager().run_async(
+                TaskType.IO,
+                self._ensure_worker_impl,
+                model_path,
+                core_config,
+                attempt,
+            )
+        except asyncio.CancelledError:
+            with self._quarantine_lock:
+                attempt.cancelled = True
+                spawned = attempt.generation
+            self._quarantine_worker(spawned if spawned is not None else self._current_generation())
+            raise
+
+    def _current_generation(self) -> int:
+        """读取当前 worker generation（与 _quarantine_worker 一致的短锁口径）。"""
+        with self._quarantine_lock:
+            return self._worker_generation
+
+    def _is_current_worker_quarantined(self) -> bool:
+        """当前代号是否处于隔离态（状态或意图集合任一命中）。"""
+        with self._quarantine_lock:
+            return self._worker_state == "quarantined" or self._worker_generation in self._quarantined_generations
+
+    def _ensure_worker_impl(self, model_path: str, core_config: dict, attempt: _EnsureAttempt | None = None) -> bool:
         """_ensure_worker 的同步实现，在线程池中执行。"""
         # F25: 复用判定与产物指纹核对在锁内与 spawn 决策同源（stat 微秒级，可接受）。
         with self._worker_lock:
@@ -492,10 +545,19 @@ class LocalModelManager:
             except OSError:
                 current_stat = (0, 0)
 
+            # LMM-02: 隔离意图在短锁内与 generation/ready 原子核对——既看全局状态，
+            # 也看「本代是否已被取消处理器登记隔离」（状态可能被后续 shutdown
+            # 覆写为 stopped，意图集合才是权威）。
+            with self._quarantine_lock:
+                quarantined = (
+                    self._worker_state == "quarantined" or self._worker_generation in self._quarantined_generations
+                )
+                worker_ready = self._worker_ready
+
             if (
                 self._worker_proc is not None
                 and self._worker_proc.is_alive()
-                and self._worker_ready
+                and worker_ready
                 # F25: 身份判定 = 路径 + 产物 stat + 核心参数全一致（此前仅比路径，
                 # 同路径换产物/换参数会误复用；旧链 A→统一链 B→再 A 会错载 B）。
                 and self._model_path == model_path
@@ -503,15 +565,27 @@ class LocalModelManager:
                 and self._last_config == core_config
                 # quarantined：worker 状态未知（取消/超时后可能仍在推理），
                 # 快路径失效，走完整 shutdown+respawn 自愈（对抗轮 E-1）。
-                and self._worker_state != "quarantined"
+                and not quarantined
             ):
                 return True
 
             self._shutdown_worker_locked()
             # generation 每次 spawn 递增；旧响应经 _response_generation 过滤丢弃
             # （计数器 _req_counter 跨 generation 不重置，对抗轮 C）。
-            self._worker_generation += 1
-            generation = self._worker_generation
+            with self._quarantine_lock:
+                self._worker_generation += 1
+                generation = self._worker_generation
+                # 上一代刚在生命周期锁内 shutdown 完成，其隔离意图随之失效。
+                self._quarantined_generations = {g for g in self._quarantined_generations if g >= generation}
+                # LMM-02: 调用方已取消且本次 spawn 尚未提交 → 不再 spawn（避免留下
+                # 无人认领、无人等 ready 的孤儿 worker）；旧代 shutdown 已完成。
+                aborted = attempt is not None and attempt.cancelled
+            if aborted:
+                logger.info(
+                    "[LocalModel] Worker spawn aborted: caller cancelled before spawn. generation=%s",
+                    generation,
+                )
+                return False
             # F25: 暂存本 generation 的真实身份，ready 成功时提交（单一身份源）。
             self._pending_identity = (model_path, current_stat, dict(core_config))
 
@@ -525,6 +599,14 @@ class LocalModelManager:
             )
             proc.start()
             self._worker_proc = proc
+            if attempt is not None:
+                with self._quarantine_lock:
+                    attempt.generation = generation
+                    if attempt.cancelled:
+                        # 取消在 spawn 提交期间到达：收编该代（清理任务由取消
+                        # 处理器按当前代号调度），不得让未被等待的 worker 冒充健康。
+                        self._quarantined_generations.add(generation)
+                        self._worker_state = "quarantined"
             logger.info("[LocalModel] Persistent worker started. pid=%s generation=%s", proc.pid, generation)
             return True
 
@@ -631,8 +713,9 @@ class LocalModelManager:
 
         status, payload = result[0], result[1]
         if status == "ready":
-            self._worker_ready = True
-            self._worker_state = "idle"
+            with self._quarantine_lock:
+                self._worker_ready = True
+                self._worker_state = "idle"
             # F25: ready 成功即提交 spawn 时暂存的真实身份——legacy run_inference /
             # 统一 invoke_for_connection 的 respawn 从此也回写身份（此前仅 legacy
             # load_model 回写，A→B→A 会按 A 复用实际加载 B 的 worker）。
@@ -769,11 +852,12 @@ class LocalModelManager:
                 if (
                     self._worker_ready
                     # F25: 早退分支与 _ensure_worker_impl 快路径同口径——还须核实
-                    # proc 存活与非 quarantined，否则 worker 静默死亡/隔离后仍按
+                    # proc 存活与未被隔离，否则 worker 静默死亡/隔离后仍按
                     # 残留身份复用谎报「已加载」。
                     and self._worker_proc is not None
                     and self._worker_proc.is_alive()
-                    and self._worker_state != "quarantined"
+                    # LMM-02: 隔离意图与全局状态同口径（状态可能被 shutdown 覆写）。
+                    and not self._is_current_worker_quarantined()
                     and self._model_path == model_path
                     and self._model_stat == current_stat
                     and self._last_config == core_config
@@ -1007,7 +1091,8 @@ class LocalModelManager:
         """
         with self._worker_lock:
             self._inflight[req_id] = (invocation_id, attempt_id)
-            self._worker_state = "busy"
+            with self._quarantine_lock:
+                self._worker_state = "busy"
 
         loop = asyncio.get_running_loop()
         try:
@@ -1136,7 +1221,8 @@ class LocalModelManager:
                     return None
                 self._inflight.pop(req_id, None)
                 if not self._inflight:
-                    self._worker_state = "idle"
+                    with self._quarantine_lock:
+                        self._worker_state = "idle"
             if not isinstance(output, str):
                 raise RuntimeError(f"Malformed output payload: {type(output)}.")
             return output
@@ -1150,7 +1236,8 @@ class LocalModelManager:
                     with self._worker_lock:
                         self._inflight.pop(req_id, None)
                         if not self._inflight:
-                            self._worker_state = "idle"
+                            with self._quarantine_lock:
+                                self._worker_state = "idle"
                     # R9: payload 来自子进程，可能含 traceback，脱敏后入异常消息。
                     raise RuntimeError(f"Inference execution failed: {DataSanitizer.sanitize_error(payload)}")
                 logger.warning("[LocalModel] Discarding mismatched error response (rid=%s).", rid)
@@ -1163,7 +1250,8 @@ class LocalModelManager:
                 with self._worker_lock:
                     self._inflight.pop(req_id, None)
                     if not self._inflight:
-                        self._worker_state = "idle"
+                        with self._quarantine_lock:
+                            self._worker_state = "idle"
                 raise RuntimeError(f"Inference execution failed: {DataSanitizer.sanitize_error(payload)}")
             raise RuntimeError(f"Malformed error result (len={len(result)}).")
         if status == "shutdown":
@@ -1176,14 +1264,20 @@ class LocalModelManager:
         raise RuntimeError(f"Unknown result status from worker: {status!r}.")
 
     def _quarantine_worker(self, generation: int) -> None:
-        """标记 worker quarantined 并 spawn 异步清理任务（须在事件循环线程调用）。
+        """登记隔离意图并 spawn 异步清理任务（须在事件循环线程调用）。
 
         取消/超时后 worker 状态未知（启动加载/推理中均可能）→ 隔离 + 异步清理；
-        ``_ensure_worker_impl`` 快路径因 quarantined 失效，下次调用走完整
+        ``_ensure_worker_impl`` 快路径因隔离意图失效，下次调用走完整
         shutdown+respawn 自愈。
+
+        LMM-02: 只在短锁内登记意图并（当代）置 quarantined——**禁止**在此等待
+        ``_worker_lock``：IO 线程可能正持该锁执行数秒级 shutdown/join，取消处理器
+        在事件循环线程等锁会把取消传播本身一起拖住。长操作由清理任务在 IO 线程执行。
         """
-        with self._worker_lock:
-            self._worker_state = "quarantined"
+        with self._quarantine_lock:
+            self._quarantined_generations.add(generation)
+            if generation == self._worker_generation:
+                self._worker_state = "quarantined"
         self._spawn_cleanup_task(generation)
 
     def _spawn_cleanup_task(self, generation: int) -> None:
@@ -1210,18 +1304,14 @@ class LocalModelManager:
     async def _cleanup_worker_async(self, generation: int) -> None:
         """异步清理 quarantined worker（同步段 offload 到线程池，R16）。
 
-        generation 快照守卫经 ``_shutdown_worker(generation=...)`` 生效：执行时
-        若 ``_worker_generation`` 已前进（新 worker 已 spawn），幂等退出不误杀。
-        清理失败保持 quarantined（下次调用快路径失效，走完整重载链自愈）。
+        ``generation`` 仅作调度身份（``_spawn_cleanup_task`` 去重口径）；实际清理
+        以隔离意图集合为准——取消时 IO 线程可能尚未提交 spawn，取消处理器只能
+        登记当时代号，实际代由 ``_EnsureAttempt`` 收编进集合（LMM-02），故按
+        「当前代号是否在意图集合」逐代清理。清理失败保留意图（同代号仍在集合内），
+        下次调用快路径失效、完整重载自愈。``except Exception`` 不吞 CancelledError（R2）。
         """
         try:
-            # 有界终止 force 语义：terminate 1.5s + kill 0.5s（对抗轮 I-2）。
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                self._shutdown_worker,
-                force=True,
-                generation=generation,
-            )
+            remaining = await ThreadPoolManager().run_async(TaskType.IO, self._drain_quarantined_workers)
         except Exception as e:
             log_classified(
                 logger,
@@ -1230,6 +1320,54 @@ class LocalModelManager:
                 "[LocalModel] Cleanup of quarantined worker failed (%s): %s",
                 exc_info=True,
             )
+            return
+        if remaining:
+            logger.warning(
+                "[LocalModel] Quarantined worker cleanup incomplete (remaining intents=%s); will self-heal on next call.",
+                remaining,
+            )
+
+    def _drain_quarantined_workers(self) -> int:
+        """在 IO 线程清理隔离意图对应的 worker，返回仍残留的意图数（>0 即清理失败）。
+
+        - 意图代号 == 当前 generation：force 关闭该代（``generation`` 守卫保证不会
+          误杀后继 worker，对抗轮 B-2）；成功后移除意图，失败保留。
+        - 意图代号 < 当前 generation：该代已在后续 spawn 的 shutdown 中终止，意图失效。
+        - 循环仅在「清理期间又出现新的当代意图」时继续（取消发生于 shutdown 与
+          spawn 之间时，impl 会在 spawn 后收编实际代号），已尝试过的代号不重试。
+        """
+        attempted: set[int] = set()
+        while True:
+            with self._quarantine_lock:
+                pending = sorted(self._quarantined_generations)
+                current = self._worker_generation
+            for gen in pending:
+                if gen != current:
+                    with self._quarantine_lock:
+                        self._quarantined_generations.discard(gen)
+            for gen in pending:
+                if gen != current or gen in attempted:
+                    continue
+                attempted.add(gen)
+                try:
+                    # 有界终止 force 语义：terminate 1.5s + kill 0.5s（对抗轮 I-2）。
+                    self._shutdown_worker(force=True, generation=gen)
+                except Exception as e:
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[LocalModel] Cleanup of quarantined worker failed (%s): %s",
+                        exc_info=True,
+                    )
+                    continue
+                with self._quarantine_lock:
+                    self._quarantined_generations.discard(gen)
+            with self._quarantine_lock:
+                remaining = sorted(self._quarantined_generations)
+                current = self._worker_generation
+            if not any(gen == current and gen not in attempted for gen in remaining):
+                return len(remaining)
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def invoke_for_connection(
@@ -1301,11 +1439,13 @@ class LocalModelManager:
             except asyncio.CancelledError:
                 # 启动/ready 阶段取消：worker 子进程可能正在加载模型（状态未知）→
                 # 隔离 + 异步清理（取消隔离覆盖启动/ready/提交/推理全程，R2 传播）。
-                self._quarantine_worker(self._worker_generation)
+                # LMM-02: 代读取与登记同短锁口径；_ensure_worker 内部若已收编实际
+                # spawn 的代，同代登记在 _spawn_cleanup_task 幂等。
+                self._quarantine_worker(self._current_generation())
                 raise
             except TimeoutError:
                 # ready 预算耗尽：刚 spawn 的 worker 可能仍在加载 → 隔离 + 异步清理。
-                self._quarantine_worker(self._worker_generation)
+                self._quarantine_worker(self._current_generation())
                 raise
 
             payload = request.payload
@@ -1324,7 +1464,7 @@ class LocalModelManager:
                 str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT)),
                 req_id,
             )
-            generation = self._worker_generation
+            generation = self._current_generation()
             try:
                 output = await self._dispatch_and_collect(
                     req_id=req_id,

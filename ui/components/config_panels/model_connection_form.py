@@ -36,6 +36,7 @@ from ui.components.flet_type_helpers import (
     safe_on_change,
     safe_on_click,
 )
+from ui.components.toast_manager import show as show_toast
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
@@ -47,7 +48,7 @@ from ui.viewmodels.model_connections_view_model import (
     ADAPTER_LITELLM,
     ModelConnectionsViewModel,
 )
-from utils.sanitizers import DataSanitizer
+from utils.error_classifier import log_classified
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +95,14 @@ async def _select_file(
     file_picker: ft.FilePicker,
     update: Callable[[str], None],
     allowed_extensions: list[str] | None,
+    *,
+    page: ft.Page | None = None,
 ) -> None:
-    """打开文件选择器并把所选路径写回 VM 命令（async 原生原语，按其 await 模型执行）。"""
+    """打开文件选择器并把所选路径写回 VM 命令（async 原生原语，按其 await 模型执行）。
+
+    ``page`` 由点击入口显式传入（供失败 toast 使用）；直接调用时可为 None，
+    此时失败仅记录日志不崩溃。
+    """
     try:
         result = await file_picker.pick_files(
             allowed_extensions=allowed_extensions,
@@ -106,10 +113,18 @@ async def _select_file(
     except asyncio.CancelledError:
         raise  # R2
     except Exception as e:
-        logger.error(
-            "[ModelConnectionForm] File pick failed: %s",
-            DataSanitizer.sanitize_error(e),
+        # 无障碍 §2.3：外部 IO 失败必须给用户可见反馈，不能只写日志。
+        # log_classified 只记录错误码 + 脱敏异常（R9），toast 仅用 i18n 文案（不含原始异常）。
+        log_classified(
+            logger,
+            e,
+            msg="[ModelConnectionForm] File pick failed (%s): %s",
             exc_info=True,
+        )
+        show_toast(
+            page,
+            f"{I18n.get(KEY_BTN_SELECT_FILE)}: {I18n.get('common_op_fail')}",
+            "error",
         )
 
 
@@ -126,7 +141,7 @@ def _on_select_file_click_factory(
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(_select_file, file_picker, update, allowed_extensions)
+                page.run_task(_select_file, file_picker, update, allowed_extensions, page=page)
         except RuntimeError:
             logger.debug("[ModelConnectionForm] page not available for file pick")
 
