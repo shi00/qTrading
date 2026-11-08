@@ -7,12 +7,14 @@
 4. 渲染标题 / 备份按钮 / 恢复按钮
 5. 不渲染表单字段 (无 TextField)
 6. VM 生命周期 (mount/dispose)
-7. 纯函数 (_render_message / _generate_default_backup_path)
+7. 纯函数 (_render_message / _format_file_size)
 8. Click handler factory (page 可用 / RuntimeError 分支)
 9. 状态渲染分支 (pending/offline_guidance/cancelled/is_backing_up/各 message)
 
 注: is_restoring / restore_success_message / restore_step3_executing 相关测试已移除 (P1-7)，
 D36 决策下 UI 不直接执行 restore，无执行中状态与成功消息。
+默认备份路径生成 / IO 池执行 / 调用备份的覆盖已下沉到
+``tests/unit/ui/viewmodels/test_backup_restore_view_model.py``（VM 命令职责）。
 """
 
 import contextlib
@@ -34,7 +36,11 @@ from tests.unit.ui.component_renderer import (
 )
 from ui.components.config_panels import backup_restore_panel as panel_module
 from ui.components.config_panels.backup_restore_panel import BackupRestorePanel
-from ui.viewmodels.backup_restore_view_model import BackupRestoreState, RestoreArchiveInfo
+from ui.viewmodels.backup_restore_view_model import (
+    BackupRestoreState,
+    BackupRestoreViewModel,
+    RestoreArchiveInfo,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -279,65 +285,6 @@ class TestFormatFileSize:
         assert panel_module._format_file_size(2 * 1024 * 1024 * 1024) == "2.0 GB"
 
 
-class TestGenerateDefaultBackupPath:
-    """_generate_default_backup_path 纯函数测试 (P1-7: 绝对路径)."""
-
-    def test_returns_absolute_path_with_timestamp(self) -> None:
-        """返回绝对 Path, 格式 <backups>/qtrading-backup-YYYYMMDD-HHMMSS.dump (P1-7)."""
-        path = panel_module._generate_default_backup_path()
-        assert isinstance(path, Path)
-        assert path.is_absolute(), f"P1-7: path 应为绝对路径, 实际: {path}"
-        assert path.name.startswith("qtrading-backup-")
-        assert path.suffix == ".dump"
-
-    def test_name_contains_timestamp_pattern(self) -> None:
-        """文件名含时间戳 (8 位日期 + 6 位时间)."""
-        import re
-
-        path = panel_module._generate_default_backup_path()
-        # qtrading-backup-20260722-151430.dump
-        assert re.match(r"^qtrading-backup-\d{8}-\d{6}\.dump$", path.name), path.name
-
-    def test_parent_dir_is_backups_under_app_data(self) -> None:
-        """P1-7: 父目录为 <app data>/backups (platformdirs.user_data_dir)."""
-        import platformdirs
-
-        path = panel_module._generate_default_backup_path()
-        expected_parent = Path(platformdirs.user_data_dir("qTrading")) / "backups"
-        assert path.parent == expected_parent.resolve(), (
-            f"P1-7: 父目录应为 {expected_parent.resolve()}, 实际: {path.parent}"
-        )
-
-    def test_backups_dir_created_if_missing(self, tmp_path, monkeypatch) -> None:
-        """P1-7: backups 目录不存在时自动创建 (mkdir parents=True exist_ok=True)."""
-        import platformdirs
-
-        fake_app_data = tmp_path / "fake_app_data"
-        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(fake_app_data))
-        backups_dir = fake_app_data / "backups"
-        assert not backups_dir.exists()
-        path = panel_module._generate_default_backup_path()
-        assert backups_dir.exists(), f"P1-7: backups 目录应被创建, 实际不存在: {backups_dir}"
-        assert path.parent == backups_dir.resolve()
-
-    def test_falls_back_to_cwd_on_oserror(self, tmp_path, monkeypatch) -> None:
-        """P1-7: mkdir 失败 (OSError) 时 fall back 到 Path.cwd() 并记 warning."""
-        import platformdirs
-
-        # mock user_data_dir 返回一个无法创建的路径（指向一个已存在的文件）
-        blocking_file = tmp_path / "blocking_file"
-        blocking_file.write_text("x")
-        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(blocking_file))
-
-        path = panel_module._generate_default_backup_path()
-        assert path.is_absolute()
-        # fall back 到 cwd().resolve()
-        from pathlib import Path as _Path
-
-        assert path.parent == _Path.cwd().resolve()
-        assert path.name.startswith("qtrading-backup-")
-
-
 # ============================================================================
 # Click handler factory 测试
 # ============================================================================
@@ -346,9 +293,9 @@ class TestGenerateDefaultBackupPath:
 class TestClickHandlers:
     """Click handler factory 测试 — 覆盖 page available / RuntimeError 分支."""
 
-    def test_on_backup_click_calls_start_backup(self) -> None:
-        """page 可用时调 page.run_task(vm.start_backup, path)."""
-        vm = MagicMock()
+    def test_on_backup_click_schedules_vm_command(self) -> None:
+        """R16: 点击只调度 VM 命令 (路径生成 + IO 池下沉到 VM), 事件处理器不做同步 IO."""
+        vm = BackupRestoreViewModel()
         mock_page = MagicMock()
         _set_context_page(mock_page)
         try:
@@ -357,12 +304,35 @@ class TestClickHandlers:
         finally:
             _set_context_page(None)
 
-        args = mock_page.run_task.call_args[0]
-        assert args[0] == vm.start_backup
-        assert isinstance(args[1], Path)
+        mock_page.run_task.assert_called_once_with(vm.start_backup_with_default_path)
+        scheduled = mock_page.run_task.call_args[0][0]
+        assert inspect.iscoroutinefunction(scheduled), "run_task 必须接收协程函数"
+
+    def test_on_backup_click_has_no_sync_path_generation(self) -> None:
+        """R16: 组件模块不再持有路径生成逻辑 / 线程池引用 (已下沉到 ViewModel)."""
+        assert not hasattr(panel_module, "_generate_default_backup_path")
+        assert not hasattr(panel_module, "ThreadPoolManager")
+        assert not hasattr(panel_module, "TaskType")
+        assert not hasattr(panel_module, "platformdirs")
+
+    def test_double_click_schedules_vm_command_per_click(self) -> None:
+        """双击各自调度 VM 命令; 单次备份由 VM 的 is_backing_up 守卫保证."""
+        vm = MagicMock()
+        command = vm.start_backup_with_default_path
+        mock_page = MagicMock()
+        _set_context_page(mock_page)
+        try:
+            handler = panel_module._on_backup_click_factory(vm)
+            _invoke_click(handler)
+            _invoke_click(handler)
+        finally:
+            _set_context_page(None)
+
+        assert mock_page.run_task.call_count == 2
+        assert [c.args[0] for c in mock_page.run_task.call_args_list] == [command, command]
 
     def test_on_backup_click_silent_on_runtime_error(self) -> None:
-        """page 不可用 (RuntimeError, _context_page 为 None) 时静默处理, 不调 vm.start_backup."""
+        """page 不可用 (RuntimeError, _context_page 为 None) 时静默处理, 不调度 VM 命令."""
         vm = MagicMock()
         # _set_context_page(None) 让 ft.context.page property 抛 RuntimeError
         _set_context_page(None)
@@ -371,7 +341,7 @@ class TestClickHandlers:
             _invoke_click(handler)  # 不应抛异常
         finally:
             _set_context_page(None)
-        vm.start_backup.assert_not_called()
+        vm.start_backup_with_default_path.assert_not_called()
 
     def test_on_backup_click_silent_when_page_none(self) -> None:
         """page 为 None 时静默处理 (ft.context.page 抛 RuntimeError 由 except 捕获)."""
@@ -382,7 +352,7 @@ class TestClickHandlers:
             _invoke_click(handler)
         finally:
             _set_context_page(None)
-        vm.start_backup.assert_not_called()
+        vm.start_backup_with_default_path.assert_not_called()
 
     def test_on_restore_wizard_click_picks_file_and_restores(self) -> None:
         """Task 7.1: FilePicker 选到文件 → vm.start_restore_wizard(Path(picked))."""

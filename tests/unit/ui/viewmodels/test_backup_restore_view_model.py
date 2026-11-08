@@ -11,6 +11,8 @@ VM 是独立类，内部 VM 模式由 use_viewmodel(factory=...) 实例化。
 5. dismiss_offline_guidance() 清空 restore_path + confirm_state=idle
 6. cancel_restore() 清空 restore_path
 7. VM 只产出 Message (i18n key)，不调 I18n.get
+8. start_backup_with_default_path() 在 IO 池生成默认路径后委托 start_backup
+   (含 mkdir 失败回退 cwd / 阻塞期间事件循环可推进 / 取消不启动备份 / 双击单次 dump)
 """
 
 from __future__ import annotations
@@ -20,12 +22,14 @@ import logging
 import threading
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from ui.viewmodels import Message
+from ui.viewmodels import Message, backup_restore_view_model as vm_module
 from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel, RestoreArchiveInfo
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -318,6 +322,227 @@ class TestStartBackup:
         assert messages, "取消后 dump 失败应记录日志"
         assert all("C:\\Users\\secret" not in m for m in messages)
         assert any("<PATH>" in m for m in messages)
+
+
+# --- 默认备份路径 + start_backup_with_default_path ---
+
+
+def _thread_pool_patch(run_async_impl: Any) -> Any:
+    """替身 ThreadPoolManager: 固定 run_async 实现, 便于观察/阻塞路径准备."""
+    fake_manager = MagicMock()
+    fake_manager.run_async = run_async_impl
+    return patch("ui.viewmodels.backup_restore_view_model.ThreadPoolManager", return_value=fake_manager)
+
+
+class TestDefaultBackupPath:
+    """_generate_default_backup_path 纯函数测试 (P1-7: 绝对路径, 自组件模块下沉)."""
+
+    def test_returns_absolute_path_with_timestamp(self) -> None:
+        """返回绝对 Path, 格式 <backups>/qtrading-backup-YYYYMMDD-HHMMSS.dump (P1-7)."""
+        path = vm_module._generate_default_backup_path()
+        assert isinstance(path, Path)
+        assert path.is_absolute(), f"P1-7: path 应为绝对路径, 实际: {path}"
+        assert path.name.startswith("qtrading-backup-")
+        assert path.suffix == ".dump"
+
+    def test_name_contains_timestamp_pattern(self) -> None:
+        """文件名含时间戳 (8 位日期 + 6 位时间)."""
+        import re
+
+        path = vm_module._generate_default_backup_path()
+        assert re.match(r"^qtrading-backup-\d{8}-\d{6}\.dump$", path.name), path.name
+
+    def test_parent_dir_is_backups_under_app_data(self) -> None:
+        """P1-7: 父目录为 <app data>/backups (platformdirs.user_data_dir)."""
+        import platformdirs
+
+        path = vm_module._generate_default_backup_path()
+        expected_parent = Path(platformdirs.user_data_dir("qTrading")) / "backups"
+        assert path.parent == expected_parent.resolve(), (
+            f"P1-7: 父目录应为 {expected_parent.resolve()}, 实际: {path.parent}"
+        )
+
+    def test_backups_dir_created_if_missing(self, tmp_path, monkeypatch) -> None:
+        """P1-7: backups 目录不存在时自动创建 (mkdir parents=True exist_ok=True)."""
+        import platformdirs
+
+        fake_app_data = tmp_path / "fake_app_data"
+        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(fake_app_data))
+        backups_dir = fake_app_data / "backups"
+        assert not backups_dir.exists()
+        path = vm_module._generate_default_backup_path()
+        assert backups_dir.exists(), f"P1-7: backups 目录应被创建, 实际不存在: {backups_dir}"
+        assert path.parent == backups_dir.resolve()
+
+    def test_falls_back_to_cwd_on_oserror(self, tmp_path, monkeypatch) -> None:
+        """P1-7: mkdir 失败 (OSError) 时 fall back 到 Path.cwd() 并记 warning."""
+        import platformdirs
+
+        blocking_file = tmp_path / "blocking_file"
+        blocking_file.write_text("x")
+        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(blocking_file))
+
+        path = vm_module._generate_default_backup_path()
+        assert path.is_absolute()
+        assert path.parent == Path.cwd().resolve()
+        assert path.name.startswith("qtrading-backup-")
+
+
+class TestStartBackupWithDefaultPath:
+    """start_backup_with_default_path: IO 池生成默认路径 → 委托 start_backup (R16)."""
+
+    @pytest.mark.asyncio
+    async def test_prepares_path_in_io_pool_then_starts_backup(self, mock_maintenance_service) -> None:
+        """路径准备经 TaskType.IO 池执行, 完成后以该路径调用 start_backup."""
+        expected_path = Path("/fake/qtrading-backup-20260101-000000.dump")
+        calls: list[tuple[Any, Any]] = []
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            calls.append((task_type, func))
+            return expected_path
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        with (
+            _thread_pool_patch(_run_async),
+            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+        ):
+            await vm.start_backup_with_default_path()
+
+        assert calls == [(TaskType.IO, vm_module._generate_default_backup_path)]
+        mock_maintenance_service.dump.assert_awaited_once_with(expected_path)
+
+    @pytest.mark.asyncio
+    async def test_event_loop_progresses_while_path_preparation_blocked(self, mock_maintenance_service) -> None:
+        """路径准备阻塞期间事件循环仍可推进 (心跳协程可执行, 即未在主循环做同步 IO)."""
+        entered = threading.Event()
+        release = threading.Event()
+        expected_path = Path("/fake/qtrading-backup-20260101-000000.dump")
+        ticks: list[int] = []
+
+        def _blocking_generate() -> Path:
+            entered.set()
+            release.wait(timeout=5)
+            return expected_path
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            # 替身: 把同步阻塞函数放到工作线程, 模拟真实 IO 池不占用事件循环
+            return await asyncio.to_thread(func, *args, **kwargs)
+
+        async def _heartbeat() -> None:
+            while not release.is_set():
+                ticks.append(1)
+                await asyncio.sleep(0.005)
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        heartbeat = asyncio.create_task(_heartbeat())
+        try:
+            with (
+                _thread_pool_patch(_run_async),
+                patch.object(vm_module, "_generate_default_backup_path", _blocking_generate),
+                patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+            ):
+                task = asyncio.create_task(vm.start_backup_with_default_path())
+                await asyncio.to_thread(entered.wait, 5)
+                await asyncio.sleep(0.02)
+                assert task.done() is False, "路径准备未完成时备份任务不应已结束"
+                assert len(ticks) > 0, "路径准备阻塞期间事件循环应可推进"
+                release.set()
+                await task
+        finally:
+            release.set()
+            await heartbeat
+
+        mock_maintenance_service.dump.assert_awaited_once_with(expected_path)
+
+    @pytest.mark.asyncio
+    async def test_cwd_fallback_path_passed_to_start_backup(
+        self, mock_maintenance_service, tmp_path, monkeypatch
+    ) -> None:
+        """mkdir 失败时沿用 cwd 回退契约, 且回退路径传入 start_backup."""
+        import platformdirs
+
+        blocking_file = tmp_path / "blocking_file"
+        blocking_file.write_text("x")
+        monkeypatch.setattr(platformdirs, "user_data_dir", lambda _app: str(blocking_file))
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            return func(*args, **kwargs)
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        with (
+            _thread_pool_patch(_run_async),
+            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+        ):
+            await vm.start_backup_with_default_path()
+
+        mock_maintenance_service.dump.assert_awaited_once()
+        output_path = mock_maintenance_service.dump.await_args.args[0]
+        assert isinstance(output_path, Path)
+        assert output_path.parent == Path.cwd().resolve()
+        assert output_path.name.startswith("qtrading-backup-")
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_path_preparation_skips_backup(self, mock_maintenance_service) -> None:
+        """路径准备被取消时不启动备份, CancelledError 继续透传 (R2)."""
+        prepared = asyncio.Event()
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            prepared.set()
+            await asyncio.Event().wait()  # 永不完成, 模拟慢 IO
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        with _thread_pool_patch(_run_async):
+            task = asyncio.create_task(vm.start_backup_with_default_path())
+            await prepared.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled() is True
+        mock_maintenance_service.dump.assert_not_called()
+        assert vm.state.is_backing_up is False
+
+    @pytest.mark.asyncio
+    async def test_double_click_starts_single_dump(self, mock_maintenance_service, tmp_path) -> None:
+        """双击并发只启动一次 dump (VM is_backing_up 守卫在异步路径下仍生效)."""
+        expected_path = tmp_path / "qtrading-backup-20260101-000000.dump"
+        dump_result = MagicMock(output_path=str(expected_path), file_size=100, exit_code=0)
+        dump_gate = asyncio.Event()
+        prep_gate = asyncio.Event()
+
+        async def _dump(_output_path: Path) -> Any:
+            await dump_gate.wait()
+            return dump_result
+
+        mock_maintenance_service.dump = AsyncMock(side_effect=_dump)
+
+        async def _run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
+            await prep_gate.wait()
+            return func(*args, **kwargs)
+
+        vm = BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
+        try:
+            with (
+                _thread_pool_patch(_run_async),
+                patch.object(vm_module, "_generate_default_backup_path", return_value=expected_path),
+                patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+            ):
+                task_a = asyncio.create_task(vm.start_backup_with_default_path())
+                task_b = asyncio.create_task(vm.start_backup_with_default_path())
+                await asyncio.sleep(0)
+                prep_gate.set()
+                while mock_maintenance_service.dump.await_count == 0:
+                    await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                dump_gate.set()
+                await asyncio.gather(task_a, task_b)
+        finally:
+            dump_gate.set()
+
+        assert mock_maintenance_service.dump.await_args_list == [call(expected_path)]
+        assert vm.state.is_backing_up is False
+        assert vm.state.backup_path == str(expected_path)
 
 
 # --- start_restore_wizard ---
