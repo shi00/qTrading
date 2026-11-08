@@ -31,7 +31,7 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
-# DB-01：db_info 的产生依据——连接身份字段。create_if_not_exists 不是连接身份，不参与比较。
+# db_info 的产生依据——连接身份字段。create_if_not_exists 不是连接身份，不参与比较。
 _CONNECTION_IDENTITY_KEYS = ("host", "port", "user", "password", "database")
 
 
@@ -209,7 +209,7 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
     # --- Update commands ---
 
     def update_host(self, value: str) -> None:
-        # DB-01：连接身份变化即作废旧 db_info，避免展示与当前目标不一致的元信息。
+        # 连接身份变化即作废旧 db_info，避免展示与当前目标不一致的元信息。
         self._set_state(host=value, db_info=None)
         self._notify_on_change()
 
@@ -252,7 +252,7 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
 
     @staticmethod
     def _connection_identity(config: dict) -> dict:
-        """提取连接身份子集：判定 db_info 是否仍属于当前配置快照（DB-01）。"""
+        """提取连接身份子集：判定 db_info 是否仍属于当前配置快照。"""
         return {key: config[key] for key in _CONNECTION_IDENTITY_KEYS}
 
     def set_config(self, config: dict) -> None:
@@ -329,7 +329,7 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
                     password=config["password"],
                     database=config["database"],
                 )
-                # DB-01：只有当前配置仍是本次请求捕获的身份时才提交元信息。
+                # 只有当前配置仍是本次请求捕获的身份时才提交元信息。
                 # 验证期间目标被修改则丢弃；若改走后又恢复为同一身份（ABA），
                 # 当前配置与快照一致，元信息仍有效，允许提交。
                 if info and self._connection_identity(self.get_config()) == self._connection_identity(config):

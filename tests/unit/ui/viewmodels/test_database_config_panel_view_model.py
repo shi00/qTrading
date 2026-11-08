@@ -1200,7 +1200,7 @@ class TestModeSwitchCommands:
         assert vm.state.status_message.key == "settings_db_mode_busy"
 
 
-# --- DB-01: db_info 必须绑定产生它的连接配置快照 ---
+# --- db_info 必须绑定产生它的连接配置快照 ---
 
 
 def _db_info_mock() -> MagicMock:
@@ -1219,7 +1219,7 @@ def _connection_error_result() -> MagicMock:
 
 
 class TestDbInfoConfigSnapshotBinding:
-    """DB-01：目标/凭据变化、验证失败或验证期间改目标后，不得残留旧库元信息。"""
+    """目标/凭据变化、验证失败或验证期间改目标后，不得残留旧库元信息。"""
 
     @staticmethod
     async def _show_db_info(vm: DatabaseConfigPanelViewModel) -> None:
