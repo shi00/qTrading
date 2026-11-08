@@ -20,33 +20,40 @@ class FletPage:
         self._pw_context: tuple[Playwright, Browser, BrowserContext, Page, Any] | None = None
         self._timeout_multiplier = timeout_multiplier
         # Flet Web 客户端与服务端补丁失步（console: "client is out of sync with the
-        # server and needs a reload"）是终态：此后语义树不可信，Playwright 侧继续
-        # 等待只会把一次明确失步拖成 60s 超时（CI run 42488609156 core-a 实证）。
+        # server"）——CI 实证该消息在绿色流水线中也常态出现（语言切换/视图重建丢弃
+        # 旧控件时 Flet 即会打印），**不是**终态信号，不能据此快速失败（曾误杀
+        # test_settings_language_switch 等原本通过的用例，见 PR #2115 首轮 CI）。
+        # 仅采集记录，在等待超时时作为诊断上下文注入错误信息（见 desync_note）。
         self._client_desync_messages: list[str] = []
         page.on("console", self._on_console_desync)
 
     @property
     def has_client_desync(self) -> bool:
-        """是否已观测到 Flet 客户端与服务端补丁失步。"""
+        """是否已观测到 Flet 客户端与服务端补丁失步日志。"""
         return bool(self._client_desync_messages)
 
     def _on_console_desync(self, msg: Any) -> None:
-        """记录 Flet 客户端失步日志（终态，见 ``raise_if_client_desync``）。"""
+        """采集 Flet 客户端失步日志。
+
+        单用例可产生 20+ 条重复消息，仅首条记 warning，后续静默计数。
+        """
         text = getattr(msg, "text", "") or ""
         if "out of sync with the server" not in text:
             return
+        first_message = not self._client_desync_messages
         self._client_desync_messages.append(text)
-        logger.error("[E2E] Flet 客户端与服务端补丁失步（需 reload）：%s", text)
+        if first_message:
+            logger.warning("[E2E] Flet 客户端补丁失步日志出现（常态噪声，仅超时时作诊断）：%s", text)
 
-    def raise_if_client_desync(self) -> None:
-        """已观测到客户端失步时立即失败，避免把失步拖成等满超时。"""
+    def desync_note(self) -> str:
+        """失步诊断上下文（无失步返回空串），用于超时错误信息注入。"""
         if not self._client_desync_messages:
-            return
+            return ""
         first = self._client_desync_messages[0]
-        raise AssertionError(
-            f"Flet Web 客户端与服务端补丁失步（console: {first!r}，"
-            f"共 {len(self._client_desync_messages)} 条）。客户端语义树已不可信，"
-            "继续等待只会超时；应重新运行该用例。"
+        return (
+            f"〔诊断〕期间出现 {len(self._client_desync_messages)} 条 Flet 客户端补丁失步日志"
+            f"（首条: {first!r}），语义树可能不可信；该消息在视图重建时也常态出现，"
+            "须结合截图/trace 判断是否真实失步。"
         )
 
     def _tm(self, base_ms: int) -> int:
@@ -471,7 +478,6 @@ class FletPage:
             raise RuntimeError(f"Failed to click option '{option_text}' (key: '{opt_match_key}')")
 
     async def expect_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        self.raise_if_client_desync()
         scaled = self._tm(timeout_ms)
         loc_text = self.page.get_by_text(text, exact=False)
         # V1 M3：多个 label 被合并到 <flt-semantics role="group" aria-label="...label1\nlabel2...">
@@ -520,7 +526,7 @@ class FletPage:
             raise AssertionError(
                 f"expect_text: 文本 '{text}' 在 {scaled}ms 内未出现"
                 f"（含 {scaled}ms 轮询等待 + 1ms 触发报错）。"
-                f"实际已等待完整 {scaled}ms 后仍失败，非 timeout 参数问题。"
+                f"实际已等待完整 {scaled}ms 后仍失败，非 timeout 参数问题。{self.desync_note()}"
             ) from exc
 
     async def has_text(self, text: str) -> bool:

@@ -1,10 +1,14 @@
 """E2E 助手层 flake 加固单测（CI run 42488609156 core-a 回归）。
 
 覆盖三处防护：
-1. FletPage 检测控制台「client is out of sync with the server」后快速失败；
+1. FletPage 采集「client is out of sync with the server」日志并作超时诊断上下文（不作硬失败）；
 2. ScreenerPage 在视口断言前关闭意外弹出的详情对话框；
 3. ``expect_result(ts_code=...)`` 以结果行 anchor 而非任意文本作为判据。
 """
+
+# pyright: reportAttributeAccessIssue=false
+# 本文件含 MagicMock 替身的动态属性赋值（return_value/AsyncMock 注入），
+# pyright 无法验证替身属性类型，统一在本文件禁用该告警；行为由用例本身验证。
 
 from __future__ import annotations
 
@@ -56,7 +60,7 @@ def _make_screener(ap: _FakeAp) -> tuple[ScreenerPage, AsyncMock]:
 
 
 # ---------------------------------------------------------------------------
-# FletPage: 客户端失步快速失败
+# FletPage: 客户端失步诊断注入（不作硬失败，仅超时时附加上下文）
 # ---------------------------------------------------------------------------
 
 
@@ -67,8 +71,21 @@ def test_console_desync_message_detected() -> None:
     _console_handler(page)(SimpleNamespace(text=_DESYNC_TEXT))
 
     assert fp.has_client_desync is True
-    with pytest.raises(AssertionError, match="out of sync with the server"):
-        fp.raise_if_client_desync()
+    assert "out of sync" in fp.desync_note()
+    assert "2 条" not in fp.desync_note()
+
+
+def test_console_desync_duplicate_messages_logged_once() -> None:
+    """重复失步消息仅首条记 warning（计数保留），避免 CI 日志刷屏。"""
+    page = MagicMock()
+    fp = FletPage(page)
+    handler = _console_handler(page)
+
+    for _ in range(5):
+        handler(SimpleNamespace(text=_DESYNC_TEXT))
+
+    assert len(fp._client_desync_messages) == 5
+    assert "5 条" in fp.desync_note()
 
 
 def test_unrelated_console_message_ignored() -> None:
@@ -78,30 +95,62 @@ def test_unrelated_console_message_ignored() -> None:
     _console_handler(page)(SimpleNamespace(text="just a warning"))
 
     assert fp.has_client_desync is False
-    fp.raise_if_client_desync()  # 不抛
+    assert fp.desync_note() == ""
 
 
-async def test_expect_text_fails_fast_after_desync() -> None:
-    """失步后 expect_text 不再等满超时，直接抛带诊断信息的 AssertionError。"""
+async def test_expect_text_timeout_error_includes_desync_note() -> None:
+    """失步不作硬失败（绿色流水线亦常态出现）；仅在 expect_text 真实超时时注入诊断。"""
     page = MagicMock()
     fp = FletPage(page)
-    _console_handler(page)(SimpleNamespace(text=_DESYNC_TEXT))
+    handler = _console_handler(page)
+    handler(SimpleNamespace(text=_DESYNC_TEXT))
+    # 模拟等待与轮询全部未命中（MagicMock 动态属性，pyright 无法验证替身类型）
+    fp.page.get_by_text.return_value.count = AsyncMock(return_value=0)
+    locator = fp.page.locator.return_value
+    locator.or_.return_value.first.wait_for = AsyncMock(side_effect=TimeoutError("timeout"))
+    locator.count = AsyncMock(return_value=0)
+    fp.page.wait_for_timeout = AsyncMock()
+    fp._save_screenshot_only = MagicMock()
 
-    with pytest.raises(AssertionError, match="out of sync with the server"):
-        await fp.expect_text("平安银行", timeout_ms=60000)
+    with pytest.raises(AssertionError, match="out of sync"):
+        await fp.expect_text("平安银行", timeout_ms=100)
 
 
-async def test_anchor_page_expect_visible_fails_fast_after_desync() -> None:
-    """AnchorPage.expect_visible 同样在失步后快速失败（不触碰 Playwright 定位器）。"""
+async def test_anchor_page_expect_visible_timeout_includes_desync_note() -> None:
+    """AnchorPage.expect_visible 超时且存在失步日志时，错误信息含失步诊断。"""
 
     class _FpStub:
-        def raise_if_client_desync(self) -> None:
-            raise AssertionError("out of sync with the server")
+        def desync_note(self) -> str:
+            return "〔诊断〕出现失步日志"
 
-    ap = AnchorPage(MagicMock(), _FpStub(), timeout_multiplier=1.0)  # type: ignore[arg-type]  # stub 仅需该接口
+    fp_stub = _FpStub()
+    page = MagicMock()
+    locator = page.locator.return_value.first
+    locator.wait_for = AsyncMock(side_effect=TimeoutError("timeout"))
+    ap = AnchorPage(page, fp_stub, timeout_multiplier=1.0)  # type: ignore[arg-type]  # stub 仅需该接口
 
-    with pytest.raises(AssertionError, match="out of sync with the server"):
-        await ap.expect_visible(EIDS.SCREENER.RUN_BUTTON)
+    with pytest.raises(RuntimeError, match="失步日志"):
+        await ap.expect_visible(EIDS.SCREENER.RUN_BUTTON, timeout_ms=50)
+
+
+async def test_anchor_page_expect_visible_no_note_keeps_original_exc() -> None:
+    """无失步日志时，超时异常原样传播（不包装 RuntimeError）。"""
+
+    class _FpStub:
+        def desync_note(self) -> str:
+            return ""
+
+    fp_stub = _FpStub()
+    page = MagicMock()
+    locator = page.locator.return_value.first
+    locator.wait_for = AsyncMock(side_effect=TimeoutError("timeout"))
+    ap = AnchorPage(page, fp_stub, timeout_multiplier=1.0)  # type: ignore[arg-type]  # stub 仅需该接口
+
+    with pytest.raises(TimeoutError) as exc_info:
+        await ap.expect_visible(EIDS.SCREENER.RUN_BUTTON, timeout_ms=50)
+    # 强断言：异常类型未被包装为 RuntimeError，错误信息不含失步诊断
+    assert "失步" not in str(exc_info.value)
+    assert type(exc_info.value) is TimeoutError
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +163,7 @@ async def test_dismiss_detail_dialog_noop_when_closed() -> None:
     screener, _ = _make_screener(ap)
 
     assert await screener.dismiss_detail_dialog_if_open() is False
+    assert ap.is_visible.await_count == screener._DISMISS_PROBE_ATTEMPTS
     ap.click.assert_not_awaited()
     ap.expect_hidden.assert_not_awaited()
 
@@ -150,8 +200,9 @@ async def test_expect_result_waits_row_anchor_when_ts_code_given() -> None:
 
     await screener.expect_result("平安银行", ts_code="000001.SZ")
 
+    # 行 anchor 是主判据（SCREEN_RESULT 级等待），文本降为 FAST 短超时内容校验
     ap.expect_visible.assert_awaited_once_with(EIDS.SCREENER.result_row("000001.SZ"), timeout_ms=TIMEOUTS.SCREEN_RESULT)
-    expect_text.assert_awaited_once_with("平安银行", timeout_ms=TIMEOUTS.SCREEN_RESULT)
+    expect_text.assert_awaited_once_with("平安银行", timeout_ms=TIMEOUTS.FAST)
 
 
 async def test_expect_result_text_only_keeps_legacy_behavior() -> None:

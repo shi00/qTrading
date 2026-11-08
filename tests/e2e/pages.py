@@ -250,10 +250,13 @@ class ScreenerPage:
         ``ts_code`` 非空时先等待结果行 anchor（``EIDS.SCREENER.result_row``）可见，
         再断言文本：``expect_text`` 只要求文本 attached，会被详情对话框标题等任意
         同文本节点误命中（CI run 42488609156 core-a 实证：``expect_result("平安银行")``
-        命中的是意外弹出的对话框标题）。
+        命中的是意外弹出的对话框标题）。行 anchor 是主判据（承担 SCREEN_RESULT 级
+        等待），文本仅作内容校验（短超时 FAST），避免两段各等满超时的串行浪费。
         """
         if ts_code is not None:
             await self.ap.expect_visible(EIDS.SCREENER.result_row(ts_code), timeout_ms=timeout_ms)
+            await self.page.expect_text(text, timeout_ms=TIMEOUTS.FAST)
+            return
         await self.page.expect_text(text, timeout_ms=timeout_ms)
 
     async def expect_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
@@ -269,6 +272,11 @@ class ScreenerPage:
         await self.ap.scroll_into_view(EIDS.SCREENER.ADVANCED_SETTINGS, timeout_ms=timeout_ms)
         await self.ap.click(EIDS.SCREENER.ADVANCED_SETTINGS, timeout_ms=timeout_ms)
 
+    # dismiss 探测参数：即时 is_visible 在对话框渲染帧间隙会漏检，短轮询 3×300ms
+    # 覆盖渲染延迟，同时不给正常路径（对话框未开）增加可感知等待。
+    _DISMISS_PROBE_ATTEMPTS = 3
+    _DISMISS_PROBE_INTERVAL_MS = 300
+
     async def dismiss_detail_dialog_if_open(self, timeout_ms: int = TIMEOUTS.FAST) -> bool:
         """关闭意外弹出的股票详情对话框，返回是否执行了关闭。
 
@@ -276,8 +284,16 @@ class ScreenerPage:
         anchor 随之从 DOM 消失，等待方只能空等至超时（CI run 42488609156 core-a
         实证：运行完成的瞬间对话框自行弹出，trace 中无对应点击）。属 CanvasKit
         客户端失步的兜底，不作为正常流程的必经步骤。
+
+        语义边界：对话框自弹的根因是客户端失步（终态），故关闭后若失步已发生，
+        后续断言仍会经 ``raise_if_client_desync`` 失败——本方法的价值是留下
+        「对话框曾自弹」的诊断日志供取证，不承担恢复用例的职责。
         """
-        if not await self.ap.is_visible(EIDS.DETAIL_DIALOG.CLOSE_BUTTON):
+        for _ in range(self._DISMISS_PROBE_ATTEMPTS):
+            if await self.ap.is_visible(EIDS.DETAIL_DIALOG.CLOSE_BUTTON):
+                break
+            await asyncio.sleep(self._DISMISS_PROBE_INTERVAL_MS / 1000)
+        else:
             return False
         logger.warning("ScreenerPage: 检测到意外打开的股票详情对话框（疑似 CanvasKit 客户端失步），自动关闭")
         await self.ap.click(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, timeout_ms=timeout_ms)

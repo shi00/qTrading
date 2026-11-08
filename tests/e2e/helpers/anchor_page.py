@@ -881,15 +881,27 @@ class AnchorPage:
         return await checkbox.get_attribute("aria-checked") == "true"
 
     async def expect_visible(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        # 客户端失步后语义树不可信，先快速失败而不是等满 timeout（见 FletPage）
-        self._fp.raise_if_client_desync()
         eid_str, _ = eid
         # 四类 kind 共用精确选择器, 无 kind 分派 (P0-2 矩阵)
-        await self._locator_by_identifier(eid_str).first.wait_for(state="visible", timeout=self._tm(timeout_ms))
+        try:
+            await self._locator_by_identifier(eid_str).first.wait_for(state="visible", timeout=self._tm(timeout_ms))
+        except Exception as exc:
+            # 失步日志是常态噪声不作硬失败；仅在真实超时时注入诊断上下文
+            note = self._fp.desync_note()
+            if note:
+                raise RuntimeError(f"{eid_str} 等待可见超时（{self._tm(timeout_ms)}ms）。{note}") from exc
+            raise
 
     async def expect_hidden(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, _ = eid
-        await self._locator_by_identifier(eid_str).first.wait_for(state="hidden", timeout=self._tm(timeout_ms))
+        try:
+            await self._locator_by_identifier(eid_str).first.wait_for(state="hidden", timeout=self._tm(timeout_ms))
+        except Exception as exc:
+            # 失步日志是常态噪声不作硬失败；仅在真实超时时注入诊断上下文
+            note = self._fp.desync_note()
+            if note:
+                raise RuntimeError(f"{eid_str} 等待隐藏超时（{self._tm(timeout_ms)}ms）。{note}") from exc
+            raise
 
     async def count(self, eid: Eid) -> int:
         # 单一选择器计数, 无启发式的 strict mode violation 风险
