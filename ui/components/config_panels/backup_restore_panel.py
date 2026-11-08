@@ -1,7 +1,7 @@
 """BackupRestorePanel — 声明式数据库备份/恢复面板组件 (P3-11).
 
 显示备份/恢复操作 UI:
-- "手动备份" 按钮 → vm.start_backup(output_path)
+- "手动备份" 按钮 → vm.start_backup_with_default_path()
 - "恢复向导" 按钮 → FilePicker 选择备份文件 → vm.start_restore_wizard(input_path)
   → confirm_restore / dismiss_offline_guidance
 - 备份进度状态显示 (progress_message / error_message / success_message)
@@ -15,14 +15,13 @@ CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
 - View 不持有业务状态 (state 全部从 VM 读取)
 
 Task 7.1: 恢复入口改为 FilePicker 选文件; 未选文件时显示「查看离线恢复指引」提示
-(不再用 _generate_default_backup_path 生成必不存在的时间戳路径触发 start_restore_wizard)。
+(不再用默认时间戳路径触发 start_restore_wizard)。
 """
 
 import logging
 from pathlib import Path
 
 import flet as ft
-import platformdirs
 
 from ui.components.flet_type_helpers import safe_on_click
 from ui.components.safe_wrap_row import SafeWrapRow
@@ -32,31 +31,8 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
-
-
-def _generate_default_backup_path() -> Path:
-    """生成带时间戳的绝对默认备份路径 (P1-7).
-
-    返回 ``<app data>/backups/qtrading-backup-YYYYMMDD-HHMMSS.dump`` 绝对路径，
-    避免 CWD 不可预测导致备份文件丢失。备份目录不存在时尝试创建；
-    创建失败时 fall back 到 ``Path.cwd()`` 并记 warning（不阻塞用户操作）。
-    """
-    timestamp = get_now().strftime("%Y%m%d-%H%M%S")
-    backups_dir = Path(platformdirs.user_data_dir("qTrading")) / "backups"
-    try:
-        backups_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger.warning(
-            "[BackupRestorePanel] cannot create backups dir %s: %s; fall back to CWD",
-            DataSanitizer.sanitize_error(str(backups_dir)),
-            DataSanitizer.sanitize_error(e),
-        )
-        return Path.cwd().resolve() / f"qtrading-backup-{timestamp}.dump"
-    return backups_dir.resolve() / f"qtrading-backup-{timestamp}.dump"
 
 
 def _render_message(msg: Message | None) -> str:
@@ -78,23 +54,18 @@ def _format_file_size(size_bytes: int) -> str:
 
 
 def _on_backup_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
-    """Create on_click handler for backup button — prepares path off-loop, then submits vm.start_backup.
+    """Create on_click handler for backup button — dispatches the VM command only.
 
-    R16: ``_generate_default_backup_path`` 含 ``mkdir`` / ``resolve`` 同步磁盘 IO。
-    若在 ``page.run_task`` 的实参求值阶段调用，则路径准备发生在事件处理器内、调度之前，
-    磁盘或重定向用户目录延迟时会阻塞 UI 事件循环。因此路径准备移入协程并经
-    ``ThreadPoolManager`` 的 IO 池执行，完成后再 ``await vm.start_backup(path)``。
+    R16: 默认路径生成含 ``mkdir`` / ``resolve`` 同步磁盘 IO, 由 VM 命令
+    ``start_backup_with_default_path`` 经 ``ThreadPoolManager`` 的 IO 池执行;
+    事件处理器只调度协程, 不做任何同步 IO.
     """
-
-    async def _backup() -> None:
-        output_path = await ThreadPoolManager().run_async(TaskType.IO, _generate_default_backup_path)
-        await vm.start_backup(output_path)
 
     def _on_backup_click(e: ft.ControlEvent) -> None:
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(_backup)
+                page.run_task(vm.start_backup_with_default_path)
         except RuntimeError:
             logger.debug("[BackupRestorePanel] page not available for start_backup")
 

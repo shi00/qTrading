@@ -1,6 +1,7 @@
 """BackupRestoreViewModel — BackupRestorePanel 的 ViewModel (P3-11, CLAUDE.md §3.2 MVVM)。
 
 提供数据库备份/恢复命令:
+- "手动备份" (start_backup_with_default_path): 在 IO 池生成默认路径后委托 start_backup
 - "手动备份" (start_backup): 调用 ``EmbeddedPgMaintenanceService.dump(output_path)``
 - "恢复向导" (start_restore_wizard → confirm_restore): 引导离线恢复流程
   - Step 1 (start_restore_wizard): 校验 pg_dump custom-format 头 (``PGDMP``),
@@ -16,6 +17,8 @@ VM 不感知 locale: state 用 Message dataclass 产出 (key, params),
 View 渲染时 I18n.get(msg.key, **msg.params)。
 
 线程模型:
+- start_backup_with_default_path 是 async 命令: 默认路径生成含 ``mkdir`` / ``resolve``
+  同步磁盘 IO, 经 ``ThreadPoolManager`` 的 IO 池执行 (R16), 完成后再 await start_backup
 - start_backup 是 async 命令, 调用 MaintenanceService.dump
   (dump 已是 async, 内部通过 ThreadPoolManager 提交 subprocess, 不需额外包裹)
 - start_backup 将 dump 放入独立 task 并以 ``asyncio.shield`` 等待: 调用方被取消时
@@ -32,9 +35,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import platformdirs
+
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
+from utils.time_utils import get_now
 
 if TYPE_CHECKING:
     from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceService
@@ -83,6 +90,30 @@ def _read_archive_info(path: Path) -> RestoreArchiveInfo:
     return RestoreArchiveInfo(file_size=file_size, archive_version=archive_version)
 
 
+def _generate_default_backup_path() -> Path:
+    """生成带时间戳的绝对默认备份路径 (P1-7).
+
+    返回 ``<app data>/backups/qtrading-backup-YYYYMMDD-HHMMSS.dump`` 绝对路径，
+    避免 CWD 不可预测导致备份文件丢失。备份目录不存在时尝试创建；
+    创建失败时 fall back 到 ``Path.cwd()`` 并记 warning（不阻塞用户操作）。
+
+    含 ``mkdir`` / ``resolve`` 同步磁盘 IO，调用方必须经 ``ThreadPoolManager`` 的
+    IO 池执行（R16），不得在 UI 事件处理器内直接调用。
+    """
+    timestamp = get_now().strftime("%Y%m%d-%H%M%S")
+    backups_dir = Path(platformdirs.user_data_dir("qTrading")) / "backups"
+    try:
+        backups_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning(
+            "[BackupRestorePanel] cannot create backups dir %s: %s; fall back to CWD",
+            DataSanitizer.sanitize_error(str(backups_dir)),
+            DataSanitizer.sanitize_error(e),
+        )
+        return Path.cwd().resolve() / f"qtrading-backup-{timestamp}.dump"
+    return backups_dir.resolve() / f"qtrading-backup-{timestamp}.dump"
+
+
 @dataclass(frozen=True)
 class BackupRestoreState:
     """BackupRestorePanel 的不可变 state snapshot。
@@ -117,6 +148,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
       生命周期由 hook 管理 (dispose_on_unmount=True)
 
     命令:
+    - start_backup_with_default_path() (async): IO 池生成默认路径后委托 start_backup
     - start_backup(output_path) (async): 调用 dump() 更新 state
     - start_restore_wizard(input_path) (async): Step 1, 设置 restore_path + confirm_state="pending"
     - confirm_restore() (async): Step 2, confirm_state="offline_guidance" + 显示离线恢复指引消息
@@ -143,6 +175,17 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
 
             self._maintenance_service = EmbeddedPgMaintenanceService()
         return self._maintenance_service
+
+    async def start_backup_with_default_path(self) -> None:
+        """手动备份 (默认路径): IO 池生成默认路径后委托 ``start_backup``.
+
+        R16: ``_generate_default_backup_path`` 含 ``mkdir`` / ``resolve`` 同步磁盘 IO,
+        不得在 UI 事件处理器内执行; 此处经 ``ThreadPoolManager`` 的 IO 池执行,
+        完成后再 ``await self.start_backup(output_path)``.
+        R2: 路径准备阶段被取消时 ``CancelledError`` 继续透传, 不启动备份.
+        """
+        output_path = await ThreadPoolManager().run_async(TaskType.IO, _generate_default_backup_path)
+        await self.start_backup(output_path)
 
     async def start_backup(self, output_path: Path) -> None:
         """手动备份: 调用 ``dump(output_path)`` 更新 state.
