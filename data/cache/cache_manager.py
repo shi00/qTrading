@@ -632,7 +632,10 @@ class CacheManager:
                         _check_cancel()
                         cnt = r.scalar() or 0
                         ratio = 1.0 if cnt > 0 else 0.0
-                        fresh_ratio = ratio
+                        # R21：global 表（宏观/交易日历/北向资金等）发布频率各异，无统一
+                        # 新鲜度阈值，仅凭「存在历史数据」无法推断数据是否新鲜；有数据时
+                        # 以 None 表示「未知」，避免把未知伪装成 1.0 满分。无数据时明确为 0.0。
+                        fresh_ratio = None if cnt > 0 else 0.0
                     else:
                         # OSS-01：列集合从 ORM 派生（纯结构，不触发 I18n）
                         cols = columns_of(table)
@@ -763,7 +766,8 @@ class CacheManager:
                             cnt,
                             total_stocks,
                             ratio * 100,
-                            fresh_ratio * 100,
+                            # stock 分支的 fresh_ratio 恒为 float（global 分支才可能为 None）
+                            typing.cast(float, fresh_ratio) * 100,
                             d_str,
                             b_str,
                         )
