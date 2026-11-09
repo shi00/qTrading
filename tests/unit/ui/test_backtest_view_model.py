@@ -15,7 +15,7 @@ import pytest
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from services.backtest_service import BacktestService
-from services.task_manager import TaskManager
+from services.task_manager import AppTask, TaskManager, TaskStatus
 from strategies.backtest.config import BacktestConfig, DataWarning
 from strategies.backtest.engine import VectorBacktestEngine
 from ui.viewmodels import Message
@@ -2143,6 +2143,7 @@ class TestBacktestRunOwnership:
             return task_id
 
         mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+        mock_tm.get_task = MagicMock(return_value=MagicMock(status=TaskStatus.QUEUED))
 
         with self._patch_scope(mock_tm):
             await vm.run_backtest("test_strategy", self._config())
@@ -2186,6 +2187,7 @@ class TestBacktestRunOwnership:
             return task_id
 
         mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+        mock_tm.get_task = MagicMock(return_value=MagicMock(status=TaskStatus.QUEUED))
 
         with self._patch_scope(mock_tm):
             await vm.run_backtest("test_strategy", self._config())
@@ -2294,6 +2296,7 @@ class TestBacktestRunOwnership:
         vm = BacktestViewModel()
         mock_tm = MagicMock(spec=TaskManager)
         mock_tm.submit_task = MagicMock(return_value="task_queued")
+        mock_tm.get_task = MagicMock(return_value=MagicMock(status=TaskStatus.QUEUED))
 
         with self._patch_scope(mock_tm):
             await vm.run_backtest("test_strategy", self._config())
@@ -2367,7 +2370,7 @@ class TestBacktestRunOwnership:
 
     @pytest.mark.asyncio
     async def test_duplicate_late_terminal_callback_is_idempotent(self):
-        """同一 run 终结后再执行一次协程（重复终态）不得改写终态或复活运行态。"""
+        """重复执行同一闭包等价 TaskCenter 重试语义：终态保持一致，不复活运行态。"""
         vm = BacktestViewModel()
         mock_tm = MagicMock(spec=TaskManager)
         captured_factory: Callable[..., Awaitable[Any]] | None = None
@@ -2386,9 +2389,183 @@ class TestBacktestRunOwnership:
             await captured_factory(task_id="task_dup")
             assert vm.state.run_id == "run-dup"
 
-            # 重复执行同一协程（模拟重复终态回调）：归属已清空，不得再写任何状态
+            # 重复执行同一闭包（等价 TaskCenter 重试）：终态一致，is_running 不复活
             await captured_factory(task_id="task_dup")
 
         assert vm.state.run_id == "run-dup"
         assert vm.state.is_running is False
         assert vm._task_id is None
+
+    @pytest.mark.asyncio
+    async def test_external_cancel_queued_clears_running_state(self):
+        """TaskCenter 直接取消 QUEUED 任务（协程不启动）：订阅兜底复位运行态。"""
+        mock_tm = MagicMock(spec=TaskManager)
+        mock_tm.submit_task = MagicMock(return_value="task_ext")
+        cancelled = MagicMock()
+        cancelled.id = "task_ext"
+        cancelled.status = TaskStatus.CANCELLED
+
+        with self._patch_scope(mock_tm):
+            vm = BacktestViewModel()
+            await vm.run_backtest("test_strategy", self._config())
+            callback = mock_tm.subscribe.call_args.args[0]
+            assert vm.state.is_running is True
+            assert vm._task_id == "task_ext"
+
+            # 外部取消：VM 未调用 cancel_task，仅收到全局任务快照
+            callback(cast("list[AppTask]", [cancelled]))
+
+            assert vm.state.is_running is False
+            assert vm._task_id is None
+            assert vm.state.progress == 0.0
+            assert vm.state.progress_message is None
+            assert vm.state.status_message == Message("backtest_cancelled")
+            assert vm.state.status_color == "warning"
+            assert mock_tm.cancel_task.call_count == 0
+
+            # 新 run 启动后，旧任务的终态事件不得影响新 run 的运行态
+            mock_tm.submit_task = MagicMock(return_value="task_next")
+            await vm.run_backtest("test_strategy", self._config())
+            callback(cast("list[AppTask]", [cancelled]))
+            assert vm.state.is_running is True
+            assert vm._task_id == "task_next"
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_completion_keeps_success_result(self):
+        """取消与完成竞态：已完成不得显示取消，结果必须保留。"""
+        vm = BacktestViewModel()
+        mock_tm = MagicMock(spec=TaskManager)
+        captured: list[Callable[..., Awaitable[Any]]] = []
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            captured.append(coroutine_factory)
+            return "task_done"
+
+        mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+        vm.service.run_backtest = AsyncMock(return_value=self._result("run-done", 4.0))
+
+        with self._patch_scope(mock_tm):
+            await vm.run_backtest("test_strategy", self._config())
+            await captured[0](task_id="task_done")
+            assert vm.state.status_color == "success"
+            assert vm.state.run_id == "run-done"
+            assert vm._task_id is None
+
+            vm.cancel_backtest()
+
+        assert vm.state.status_color == "success"
+        assert vm.state.run_id == "run-done"
+        assert vm.state.metrics == (("sharpe_ratio", 4.0),)
+        assert vm.state.is_running is False
+        assert vm._task_id is None
+        mock_tm.cancel_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_running_defers_to_cancelled_callback(self):
+        """RUNNING 任务的取消不得乐观宣告取消，应由 CancelledError 终态回调决定。"""
+        vm = BacktestViewModel()
+        mock_tm = MagicMock(spec=TaskManager)
+        captured: list[Callable[..., Awaitable[Any]]] = []
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            captured.append(coroutine_factory)
+            return "task_run"
+
+        mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+        mock_tm.get_task = MagicMock(return_value=MagicMock(status=TaskStatus.RUNNING))
+        vm.service.run_backtest = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with self._patch_scope(mock_tm):
+            await vm.run_backtest("test_strategy", self._config())
+            assert vm.state.is_running is True
+
+            vm.cancel_backtest()
+            mock_tm.cancel_task.assert_called_once_with("task_run")
+            # 未乐观清态：仍等待协程的取消终态
+            assert vm.state.is_running is True
+            assert vm._task_id == "task_run"
+
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await captured[0](task_id="task_run")
+            assert isinstance(exc_info.value, asyncio.CancelledError)
+
+        assert vm.state.is_running is False
+        assert vm._task_id is None
+        assert vm.state.status_message == Message("backtest_cancelled")
+
+    @pytest.mark.asyncio
+    async def test_taskcenter_retry_result_visible_after_failure(self):
+        """TaskCenter 重试复用闭包但分配新 task_id：结果仍归属最后一次 VM 提交。"""
+        vm = BacktestViewModel()
+        mock_tm = MagicMock(spec=TaskManager)
+        captured: list[Callable[..., Awaitable[Any]]] = []
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            captured.append(coroutine_factory)
+            return "task_1"
+
+        mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+
+        with self._patch_scope(mock_tm):
+            vm.service.run_backtest = AsyncMock(side_effect=RuntimeError("boom"))
+            await vm.run_backtest("test_strategy", self._config())
+            assert vm._task_id == "task_1"
+            with pytest.raises(RuntimeError, match="boom"):
+                await captured[0](task_id="task_1")
+
+            assert vm._task_id is None
+            assert vm._last_run_id == "task_1"
+            assert vm.state.status_color == "error"
+
+            # TaskCenter 重试：新 task_id，复用同一 coroutine 闭包
+            vm.service.run_backtest = AsyncMock(return_value=self._result("run-retry", 5.0))
+            await captured[0](task_id="task_retry")
+
+        assert vm.state.run_id == "run-retry"
+        assert vm.state.metrics == (("sharpe_ratio", 5.0),)
+        assert vm.state.is_running is False
+        assert vm._task_id is None
+        assert vm._last_run_id == "task_1"
+
+    @pytest.mark.asyncio
+    async def test_new_submission_drops_old_retry_callback(self):
+        """一旦有新提交，_last_run_id 更新，旧运行（含其重试）的迟到回调仍被丢弃。"""
+        vm = BacktestViewModel()
+        mock_tm = MagicMock(spec=TaskManager)
+        submissions: list[tuple[str, Callable[..., Awaitable[Any]]]] = []
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            task_id = f"task_{len(submissions) + 1}"
+            submissions.append((task_id, coroutine_factory))
+            return task_id
+
+        mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+
+        with self._patch_scope(mock_tm):
+            vm.service.run_backtest = AsyncMock(side_effect=RuntimeError("boom"))
+            await vm.run_backtest("test_strategy", self._config())
+            with pytest.raises(RuntimeError, match="boom"):
+                await submissions[0][1](task_id="task_1")
+
+            # 新提交 new run（保持运行中，不执行其协程）
+            vm.service.run_backtest = AsyncMock(return_value=self._result("run-new", 1.0))
+            await vm.run_backtest("test_strategy", self._config())
+            assert vm._task_id == "task_2"
+            assert vm._last_run_id == "task_2"
+
+            # 旧 run 的 TaskCenter 重试迟到：新 task_id 也不得写入新 run 的 state
+            await submissions[0][1](task_id="task_retry_old")
+
+            assert vm.state.run_id is None
+            assert vm.state.is_running is True
+            assert vm._task_id == "task_2"
+
+    def test_dispose_unsubscribes_task_updates(self):
+        """dispose 必须注销全局任务订阅，避免 VM 泄漏与游离回调。"""
+        mock_tm = MagicMock(spec=TaskManager)
+        with self._patch_scope(mock_tm):
+            vm = BacktestViewModel()
+            _ = vm._task_manager  # 首次解析时注册订阅
+            callback = mock_tm.subscribe.call_args.args[0]
+            vm.dispose()
+        mock_tm.unsubscribe.assert_called_once_with(callback)
