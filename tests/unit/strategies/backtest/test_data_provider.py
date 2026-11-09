@@ -10,6 +10,7 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import logging
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1552,6 +1553,61 @@ class TestR9SanitizationGuard:
         error_msg = table_status["northbound_data"].get("error", "")
         assert self._SECRET_PASSWORD not in error_msg
         assert "***" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_range_preload_failure_sanitizes_log_and_warning(self, caplog) -> None:
+        """逐表范围预载异常携带凭证时，日志与降级警告复用同一脱敏文本（R9）。"""
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                }
+            )
+        )
+        cache.quote_dao.get_northbound_range = AsyncMock(side_effect=Exception(self._SECRET_URL))
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        with caplog.at_level(logging.WARNING, logger="strategies.backtest.data_provider"):
+            await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider._preloaded is not None
+        assert provider._preloaded["northbound_data"] is None
+        range_warnings = [
+            w for w in provider.range_preload_warnings if w.startswith("range_preload_failed:northbound_data")
+        ]
+        assert len(range_warnings) == 1
+        # 日志消息（普通 message 不经 _SanitizingFormatter 清洗）与降级警告均不得含明文凭证
+        assert "Range preload failed for northbound_data" in caplog.text
+        assert self._SECRET_PASSWORD not in caplog.text
+        assert self._SECRET_PASSWORD not in "".join(range_warnings)
+        assert "***" in caplog.text
+        assert "***" in range_warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_range_preload_cancelled_error_propagates_without_warning(self) -> None:
+        """逐表 CancelledError 直接向上抛出，且不写降级警告（R2；取消 ≠ 失败）。"""
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound_range = AsyncMock(side_effect=asyncio.CancelledError())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        with pytest.raises(asyncio.CancelledError):
+            await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider.range_preload_warnings == []
 
 
 class TestBacktestDelistingAsOfApproximation:

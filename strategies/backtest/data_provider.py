@@ -329,15 +329,17 @@ class BacktestDataProvider:
                 if isinstance(res, BaseException):
                     if isinstance(res, asyncio.CancelledError):
                         raise res
+                    # R9: 异常对象可能携带 Token / 连接串 / PII，日志（普通 message 不经
+                    # _SanitizingFormatter 清洗）与降级警告复用同一脱敏文本。
+                    sanitized_error = DataSanitizer.sanitize_error(str(res))
                     logger.warning(
                         "[BacktestDataProvider] Range preload failed for %s: %s. Fallback to daily query.",
                         key,
-                        res,
+                        sanitized_error,
                     )
                     # D3-M4: 降级必须可见（含护栏超限抛出的 ValueError）
-                    # res 为 gather return_exceptions 返回的 BaseException，统一转 str 后经 sanitize_error 脱敏（R9）
                     self._range_preload_warnings.append(
-                        f"range_preload_failed:{key}: {DataSanitizer.sanitize_error(str(res))}. Fallback to daily query."
+                        f"range_preload_failed:{key}: {sanitized_error}. Fallback to daily query."
                     )
                     self._preloaded[key] = None
                 elif res is not None and not res.empty:
