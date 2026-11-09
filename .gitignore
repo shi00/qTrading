@@ -173,6 +173,9 @@ PLAN-*.md
 /spec.md
 .pgtest/
 
+# 8. 验收证据（G4-202 截图含本机 GPU/路径等环境信息，按需附着到验收记录，不入库）
+/evidence/
+
 # 7.1 Work-in-progress design/solution drafts at repo root (not deliverables)
 /[0-9A-Za-z-]*方案*.md
 

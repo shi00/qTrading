@@ -126,6 +126,11 @@ PRICING_UNITS = ("llm_tokens", "encoder_input_tokens")
 CAPABILITY_SUPPORT_STATES = ("supported", "unsupported", "unknown")
 CAPABILITY_SOURCES = ("adapter_contract", "artifact", "validation", "user_declaration")
 
+# 主题名白名单必须与 ui/theme.py 的 ThemeName 一致：设置页可选四主题，若校验只放行
+# light|dark，选 navy/dracula 会因 save_config 校验失败而无法持久化，且包含这两个值的
+# 配置文件会让 load_config 整份回退默认值（连 onboarding_complete 一并丢失）。
+SUPPORTED_THEME_NAMES = ("dark", "light", "navy", "dracula")
+
 
 class CapabilityEvidenceConfig(BaseModel):
     """能力证据（§4.1）：不使用字符串数组冒充验证结果。"""
@@ -593,7 +598,7 @@ class AppConfig(BaseModel):
     tushare_timeout: int = Field(default=30, ge=5, le=300)
     tushare_point_tier: str = Field(default="points_5000", pattern=rf"^({'|'.join(TUSHARE_POINT_TIERS)})$")
 
-    theme_name: str = Field(default="dark", pattern="^(light|dark)$")
+    theme_name: str = Field(default="dark", pattern=rf"^({'|'.join(SUPPORTED_THEME_NAMES)})$")
     # spec.md §3 不变量 4：locale 默认 "zh_CN"（与 build_locale_configuration 期望格式一致，避免 ValueError 回退）
     locale: str = Field(default="zh_CN", pattern="^(zh|zh_CN|en|en_US)$")
 
