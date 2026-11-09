@@ -972,7 +972,7 @@ def BacktestResultPanel(
 
     Args:
         metrics/trades/nav_curve/ic_series/period_stats: BacktestState 渲染就绪字段
-            （D11 拆解，源自 BacktestResult；全部为空时显示空状态）
+            （D11 拆解，源自 BacktestResult；五个数据面全部为空/None 时显示空状态）
         run_id: 当前展示结果的稳定身份（BacktestResult.run_id）。身份变化即视为
             新结果/空结果，翻页重置到第 1 页；不得用条数相同推断同一次运行。
         nav_dates/benchmark_curve/ic_dates/strategy_name/benchmark_name:
@@ -994,7 +994,10 @@ def BacktestResultPanel(
 
     ft.use_effect(_reset_trades_page, dependencies=[run_id])
 
-    if not metrics and not trades and not nav_curve:
+    # BRR-F2: 空态判定须覆盖全部五个数据面——仅任一面存在（如只有 IC 序列或
+    # 只有周期统计）即视为有结果，渲染正常结果结构（缺失区块走各自空占位）；
+    # 仅当五面全部为空/None 时才渲染空态，避免隐藏有效结果（R21 不伪装缺失）。
+    if not any((metrics, trades, nav_curve, ic_series, period_stats)):
         content = _build_empty_content()
     else:
         content = _build_content(

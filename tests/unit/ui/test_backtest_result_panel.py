@@ -578,6 +578,106 @@ class TestBuildEmptyContent:
         assert len(content.controls) == 1
 
 
+class TestEmptyStateMatrix:
+    """BRR-F2: 空态判定须覆盖 metrics/trades/nav_curve/ic_series/period_stats 五面。
+
+    仅任一数据面存在时即视为有结果，渲染正常结果结构（缺失区块走各自空占位），
+    不得误判为空态而隐藏有效结果；五面全空/None 时才渲染空态。
+    """
+
+    @staticmethod
+    def _render(**kwargs: Any) -> list[object]:
+        component = make_component(BacktestResultPanel, **kwargs)
+        run_mount_effects(component)
+        return _walk_controls(render_once(component))
+
+    @staticmethod
+    def _has_empty_hint(controls: list[object]) -> bool:
+        return any(isinstance(c, ft.Text) and c.value == I18n.get("backtest_no_result") for c in controls)
+
+    @classmethod
+    def _assert_empty_state(cls, controls: list[object]) -> None:
+        assert not any(isinstance(c, ft.Tabs) for c in controls)
+        assert cls._has_empty_hint(controls)
+
+    @classmethod
+    def _assert_result_state(cls, controls: list[object]) -> None:
+        assert any(isinstance(c, ft.Tabs) for c in controls)
+        assert not cls._has_empty_hint(controls)
+
+    def test_all_five_empty_renders_empty_state(self, mock_i18n_state: object, mock_app_colors_state: object) -> None:
+        """五面全空（默认 props）→ 空态，且不渲染任何图表容器。"""
+        controls = self._render()
+        self._assert_empty_state(controls)
+        assert not any(isinstance(c, (fch.LineChart, fch.BarChart)) for c in controls)
+
+    def test_only_ic_series_renders_result_with_ic_chart(
+        self, mock_i18n_state: object, mock_app_colors_state: object
+    ) -> None:
+        """仅 IC 序列 → 非空态，IC 柱状图可见。"""
+        controls = self._render(ic_series=(0.02, -0.01))
+        self._assert_result_state(controls)
+        assert any(isinstance(c, fch.BarChart) for c in controls)
+
+    def test_only_period_stats_renders_result_with_monthly_table(
+        self, mock_i18n_state: object, mock_app_colors_state: object
+    ) -> None:
+        """仅周期统计 → 非空态，月度表（4 列）可见。"""
+        controls = self._render(period_stats=(("2024-01", 0.1, 0.05, 0.05),))
+        self._assert_result_state(controls)
+        monthly_tables = [c for c in controls if isinstance(c, ft.DataTable) and len(c.columns) == 4]
+        assert len(monthly_tables) == 1
+        assert len(monthly_tables[0].rows) == 1
+
+    def test_only_metrics_renders_result_state(self, mock_i18n_state: object, mock_app_colors_state: object) -> None:
+        """仅 metrics → 非空态（指标区渲染，缺键走 N/A 卡片）。"""
+        controls = self._render(metrics=(("total_return", 0.1),))
+        self._assert_result_state(controls)
+        assert any(isinstance(c, ft.Text) and c.value == I18n.get("backtest_metrics_title") for c in controls)
+
+    def test_only_trades_renders_result_with_trades_table(
+        self, mock_i18n_state: object, mock_app_colors_state: object
+    ) -> None:
+        """仅成交记录 → 非空态，成交明细表（6 列）可见。"""
+        controls = self._render(trades=_make_trades(1))
+        self._assert_result_state(controls)
+        trades_tables = [c for c in controls if isinstance(c, ft.DataTable) and len(c.columns) == 6]
+        assert len(trades_tables) == 1
+        assert len(trades_tables[0].rows) == 1
+
+    def test_only_nav_curve_renders_result_with_nav_chart(
+        self, mock_i18n_state: object, mock_app_colors_state: object
+    ) -> None:
+        """仅净值曲线 → 非空态，净值折线图可见。"""
+        controls = self._render(nav_curve=(100.0, 110.0))
+        self._assert_result_state(controls)
+        assert any(isinstance(c, fch.LineChart) for c in controls)
+
+    def test_mixed_ic_and_period_stats_renders_both(
+        self, mock_i18n_state: object, mock_app_colors_state: object
+    ) -> None:
+        """混合（IC + 周期统计）→ 非空态，两区块均可见。"""
+        controls = self._render(ic_series=(0.02,), period_stats=(("2024-01", 0.1, None, None),))
+        self._assert_result_state(controls)
+        assert any(isinstance(c, fch.BarChart) for c in controls)
+        assert any(isinstance(c, ft.DataTable) and len(c.columns) == 4 for c in controls)
+
+    def test_all_five_present_renders_full_result(self, mock_i18n_state: object, mock_app_colors_state: object) -> None:
+        """五面全有 → 非空态，净值图/成交表/IC 图/月度表均可见。"""
+        controls = self._render(
+            metrics=(("total_return", 0.1),),
+            trades=_make_trades(1),
+            nav_curve=(100.0, 110.0),
+            ic_series=(0.02,),
+            period_stats=(("2024-01", 0.1, 0.05, 0.05),),
+        )
+        self._assert_result_state(controls)
+        assert any(isinstance(c, fch.LineChart) for c in controls)
+        assert any(isinstance(c, fch.BarChart) for c in controls)
+        assert any(isinstance(c, ft.DataTable) and len(c.columns) == 6 for c in controls)
+        assert any(isinstance(c, ft.DataTable) and len(c.columns) == 4 for c in controls)
+
+
 class TestBuildNavChart:
     """_build_nav_chart 纯函数单测。"""
 
