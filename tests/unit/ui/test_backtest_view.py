@@ -106,3 +106,28 @@ class TestBacktestViewDeclarativeContract:
         assert "_on_vm_status" not in _source_text()
         assert "_on_vm_progress" not in _source_text()
         assert "_on_vm_result" not in _source_text()
+
+
+class TestRetryParamsSnapshotContract:
+    """UIV-BT-01: 重试必须消费 VM last_run 快照, 不得读取可变透传草稿。"""
+
+    @staticmethod
+    def _retry_block() -> str:
+        src = _source_text()
+        start = src.index("def _on_retry_backtest")
+        end = src.index("def _on_cancel_backtest", start)
+        return src[start:end]
+
+    def test_retry_does_not_read_prefilled_params_draft(self):
+        """retry 源码不得引用 _prefilled_params (可变草稿), 必须读 VM 快照。"""
+        block = self._retry_block()
+        assert "_prefilled_params.current" not in block, "重试不得从可变透传草稿取参数"
+        assert "last_run_summary" in block, "重试必须消费 VM 记录的上次提交快照"
+
+    def test_submit_records_params_snapshot(self):
+        """提交时须把 params 一并记入 VM last_run 快照。"""
+        src = _source_text()
+        assert "vm.record_last_run(" in src
+        call = src.split("vm.record_last_run(", 1)[1].split(")", 1)[0]
+        assert "backtest_config" in call
+        assert "_prefilled_params.current" in call, "首次提交须把 params 写入快照"
