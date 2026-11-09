@@ -6,13 +6,14 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import date
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import polars as pl
 import pytest
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
+from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, DataWarning
 from strategies.backtest.engine import VectorBacktestEngine
@@ -1495,6 +1496,72 @@ class TestBacktestViewModelRunBacktest:
         assert excess is None
         assert vm.state.credibility_level == "unreliable"
         assert Message("backtest_warn_data_quality", {"count": 1}) in vm.state.warnings
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("persist_arg", "expected_persist"),
+        [(None, True), (True, True), (False, False)],
+        ids=["default", "explicit_true", "explicit_false"],
+    )
+    async def test_run_backtest_forwards_persist_flag_to_service(self, persist_arg, expected_persist):
+        """BT-01: run_backtest 的 persist 必须原样透传给 service（默认 True）。
+
+        persist=False 属临时回测，不得落库，也不得凭空产生「未落库失败」告警。
+        """
+        result = self._result_with(run_id="run-persist")
+
+        class _SpyService:
+            """DI spy: 记录 service 调用参数，仅 persist=True 时模拟落库。"""
+
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+                self.persisted: list[str] = []
+
+            async def run_backtest(self, **kwargs: Any):
+                self.calls.append(kwargs)
+                if kwargs.get("persist", True):
+                    self.persisted.append(kwargs["strategy_key"])
+                return result
+
+        spy = _SpyService()
+        vm = BacktestViewModel(service=cast(BacktestService, spy))
+
+        captured_factory: Callable[..., Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_persist"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy", supports_ai=False)}
+            if persist_arg is None:
+                await vm.run_backtest("test_strategy", config)
+            else:
+                await vm.run_backtest("test_strategy", config, persist=persist_arg)
+
+            assert captured_factory is not None
+            await captured_factory(task_id="task_persist")
+
+        assert spy.calls[-1]["persist"] is expected_persist
+        assert spy.calls[-1]["strategy_key"] == "test_strategy"
+        assert spy.calls[-1]["config"] is config
+        if expected_persist:
+            assert spy.persisted == ["test_strategy"]
+        else:
+            assert spy.persisted == []
+            assert vm.state.credibility_level == "ok"
+            assert vm.state.warnings == ()
+            assert all(m.key != "backtest_warn_persist_failed" for m in vm.state.warnings)
+            assert vm.state.status_color == "success"
 
 
 class TestBacktestViewModelCoverageGaps:
