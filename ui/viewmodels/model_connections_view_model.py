@@ -22,6 +22,9 @@
 - 保存 CAS 基线：``config_revision`` 于首个 await 前捕获并贯穿 payload 与
   ``save_draft`` 的 expected_revision；准备期间已提交修订漂移按冲突拒绝，禁止以新
   基线提交旧草稿覆盖他人已提交配置
+- 单次测试回执身份（MC-03）：operation_id 于首个 await 前登记，成功 / 失败结果仅在
+  操作身份、草稿代与编辑版本均仍为发起时值时才写入 state；执行字段真实变化即让结果
+  失效回 idle（同值重写不失效），旧测试不得覆盖新草稿 / 新测试的状态与消息
 
 R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 """
@@ -305,6 +308,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._pending_operation_kind: Literal["draft", "egress"] | None = None
         self._state = ModelConnectionsState()
         self._init_mixin_fields()
+        # MC-03：单次测试的在途操作身份（私有，不进入 state / schema）。测试结果仅在
+        # 该身份仍是当前测试、且草稿代与编辑版本未漂移时才写入 state
+        self._active_test_operation_id: str | None = None
 
     # ------------------------------------------------------------------
     # 查询 / 选择命令
@@ -337,6 +343,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         """空状态一次点击添加：进入三步创建第一步，刷新草稿。"""
         # F31：草稿重置即换代，在途旧保存的回执不得作用于新草稿
         self._draft_generation += 1
+        # MC-03：草稿重置同样让在途旧测试结果失效
+        self._active_test_operation_id = None
         self._set_state(
             editor_open=True,
             editor_step=1,
@@ -357,6 +365,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             return
         # F31：草稿重置即换代，在途旧保存的回执不得作用于新草稿
         self._draft_generation += 1
+        # MC-03：草稿重置同样让在途旧测试结果失效
+        self._active_test_operation_id = None
         self._set_state(
             editor_open=True,
             editor_step=1,
@@ -380,9 +390,20 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
     def _update_draft(self, **changes: Any) -> None:
         # F02：仅真实字段变化递增编辑版本；无变化的重覆写不产生新版本
         new_draft = replace(self._state.draft, **changes)
-        if new_draft != self._state.draft:
-            self._draft_edit_revision += 1
-        self._set_state(draft=new_draft, dirty=True, validation_errors=())
+        if new_draft == self._state.draft:
+            self._set_state(draft=new_draft, dirty=True, validation_errors=())
+            return
+        self._draft_edit_revision += 1
+        # MC-03：执行字段真实变化即让在途 / 已完成的测试结果失效（旧结论不再对应当前
+        # 配置）；同值重写不失效，避免输入框重复回填清掉刚得到的测试结论
+        self._active_test_operation_id = None
+        self._set_state(
+            draft=new_draft,
+            dirty=True,
+            validation_errors=(),
+            test_state=TEST_IDLE,
+            message=None,
+        )
 
     def update_adapter_kind(self, adapter_kind: str) -> None:
         self._update_draft(adapter_kind=adapter_kind)
@@ -1102,6 +1123,10 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         草稿身份（含新填临时凭据），不经业务 Executor 授权通道（业务 grant 不落盘，
         业务调用不能借用）；合成请求为固定探针正文（无用户正文），校验走
         AdapterResponse 统一协议。
+
+        MC-03：结果（含失败）仅在操作身份仍为当前测试、且草稿代与编辑版本未漂移时
+        写入 state；否则返回 False 且不触碰 state（旧测试不得覆盖新草稿 / 新测试）。
+        MC-04：取消同样按该身份门控复位 idle（终态不留 running），同一草稿可重试。
         """
         if self._state.test_state == TEST_RUNNING:
             return False
@@ -1118,10 +1143,24 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             self._set_state(test_state=TEST_FAILED, message=Message("model_connection_test_unavailable"))
             return False
 
+        # MC-03：测试回执身份（与保存路径 F31/F02 同一原则）——operation_id 于首个
+        # await 前登记并复用（凭据租约 / 合成上下文 / 结果门控同一身份）；成功 / 失败
+        # 结果仅在操作仍是当前测试、且草稿代与编辑版本均未漂移时才写入 state
+        draft = self._state.draft
+        operation_id = str(uuid.uuid4())
+        op_generation = self._draft_generation
+        op_edit_revision = self._draft_edit_revision
+        self._active_test_operation_id = operation_id
         self._set_state(test_state=TEST_RUNNING, validation_errors=(), message=Message("model_connection_test_running"))
+
+        def result_is_current() -> bool:
+            return (
+                self._active_test_operation_id == operation_id
+                and self._draft_generation == op_generation
+                and self._draft_edit_revision == op_edit_revision
+            )
+
         try:
-            draft = self._state.draft
-            operation_id = str(uuid.uuid4())
             # 新填凭据参与测试（临时版本化 keyring 项——适配器唯一认可的凭据通道，
             # R10 认可存储；测试不提交配置，孤儿项与 save not_committed 租约同型）；
             # 留空保持已存凭据，显式清除则无凭据执行
@@ -1165,21 +1204,39 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             # 统一协议校验：单次测试消费 AdapterResponse 本体（无业务输出契约，
             # 不复现校验器返回类型与消费者读取字段的错位——F15）
             succeeded = isinstance(response, AdapterResponse)
+            if not result_is_current():
+                # 旧测试迟到：草稿 / 测试已换代，结果不再对应当前配置，不写 state
+                return False
             self._set_state(
                 test_state=TEST_SUCCESS if succeeded else TEST_FAILED,
                 message=Message("model_connection_test_success" if succeeded else "model_connection_test_failed"),
             )
             return succeeded
         except asyncio.CancelledError:
-            raise  # R2
+            # R2：取消必须传播。MC-04：取消也是本次测试的终态——身份仍归属本操作时
+            # 复位 idle 并清空消息，使同一草稿可再次测试（不标记失败、不伪造错误消息，
+            # R21）；身份已被后继测试 B 接管时不改写 B 的 running 状态
+            if result_is_current():
+                self._set_state(test_state=TEST_IDLE, message=None)
+            raise
         except Exception as ex:
             logger.error(
                 "[ModelConnectionsVM] synthetic test failed: %s",
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
+            if not result_is_current():
+                return False
             self._set_state(test_state=TEST_FAILED, message=Message("model_connection_test_failed"))
             return False
+        finally:
+            # 只释放自己的身份，不得清掉后继测试 B 的登记（B 已接管槽位）
+            self._release_active_test_identity(operation_id)
+
+    def _release_active_test_identity(self, operation_id: str) -> None:
+        """释放单次测试身份（MC-03）：仅当槽位仍归属本操作时清空。"""
+        if self._active_test_operation_id == operation_id:
+            self._active_test_operation_id = None
 
     @staticmethod
     def _deadline() -> float:
@@ -1432,6 +1489,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             commit_unknown_pending=False,
             test_state=TEST_IDLE,
         )
+        # MC-03：在途测试结果不得在卸载后写入 / 通知
+        self._active_test_operation_id = None
         self._pending_operation_id = None
         self._pending_operation_generation = None
         self._pending_operation_edit_revision = None
