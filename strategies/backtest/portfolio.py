@@ -594,21 +594,34 @@ class PortfolioSimulator:
                 _record_skip(ts_code, "suspended", 0)
                 continue
 
-            up_price = quote.select("limit_up_price").item() if "limit_up_price" in quote.columns else None
-            if up_price is not None and not self.config.allow_limit_up_buy:
-                if self._exec_nominal_price(quote) >= float(up_price) - 1e-6:
-                    _record_skip(ts_code, "up_limit", 0)
-                    continue
-
+            # 数据损坏防护：停牌检查后、涨停比较前先读取执行价。NULL 报价会让
+            # float(None) 抛 TypeError；NaN/±inf 能绕过 ``<= 0`` 校验，并在后续
+            # ``int(target / NaN / 100)`` 抛 ValueError，中断整次调仓。统一在此拦截为
+            # invalid_price 并继续，保证一只坏报价不拖垮其余标的。
             # D4-1: 差异化调仓买入同样统一使用 qfq 复权口径，避免除权交易日虚假损益。
             # UIR-F11-002: 复权价不是真实成交价——整手与费用按名义价/名义股数计算，
             # 再按 ratio 换算为复权单位记账，账面市值仍用 qfq 口径。
-            raw_entry_price = self._exec_nominal_price(quote)
-            qfq_entry_price = self._exec_price(quote)
-
-            if raw_entry_price <= 0 or qfq_entry_price <= 0:
+            try:
+                raw_entry_price = self._exec_nominal_price(quote)
+                qfq_entry_price = self._exec_price(quote)
+            except (TypeError, ValueError):
                 _record_skip(ts_code, "invalid_price", 0)
                 continue
+
+            if (
+                not math.isfinite(raw_entry_price)
+                or not math.isfinite(qfq_entry_price)
+                or raw_entry_price <= 0
+                or qfq_entry_price <= 0
+            ):
+                _record_skip(ts_code, "invalid_price", 0)
+                continue
+
+            up_price = quote.select("limit_up_price").item() if "limit_up_price" in quote.columns else None
+            if up_price is not None and not self.config.allow_limit_up_buy:
+                if raw_entry_price >= float(up_price) - 1e-6:
+                    _record_skip(ts_code, "up_limit", 0)
+                    continue
 
             target_value = delta_value
             ratio = self._qfq_ratio(quote)
@@ -788,15 +801,27 @@ class PortfolioSimulator:
             is_tradable = quote.select("is_tradable").item() if "is_tradable" in quote.columns else True
             if is_tradable is False:
                 continue
+            # 与主遍对齐：NULL/NaN/±inf/非正执行价不得进入补分配，否则
+            # ``int(... / raw_entry_price / 100)`` 会抛 TypeError/ValueError 中断整轮补分配。
+            # 补分配无用户可见明细，直接跳过。
+            try:
+                qfq_entry_price = self._exec_price(quote)
+                raw_entry_price = self._exec_nominal_price(quote)
+            except (TypeError, ValueError):
+                continue
+
+            if (
+                not math.isfinite(raw_entry_price)
+                or not math.isfinite(qfq_entry_price)
+                or raw_entry_price <= 0
+                or qfq_entry_price <= 0
+            ):
+                continue
+
             up_price = quote.select("limit_up_price").item() if "limit_up_price" in quote.columns else None
             if up_price is not None and not self.config.allow_limit_up_buy:
-                if self._exec_nominal_price(quote) >= float(up_price) - 1e-6:
+                if raw_entry_price >= float(up_price) - 1e-6:
                     continue
-
-            qfq_entry_price = self._exec_price(quote)
-            raw_entry_price = self._exec_nominal_price(quote)
-            if raw_entry_price <= 0 or qfq_entry_price <= 0:
-                continue
 
             # 缺口 = 目标金额 - 第一遍已投入；已满额标的跳过，避免二次超买。
             gap = buy_targets[ts_code] - spent_by_code.get(ts_code, 0.0)

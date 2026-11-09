@@ -1601,6 +1601,157 @@ class TestDiffRebalance:
         # engine 日志，此处以成交结构证明补分配已生效。
         assert any(r["ts_code"] == "000002.SZ" and r["reason"] == "insufficient_cash" for r in sim.skipped_list)
 
+    @staticmethod
+    def _quote_values(ts_code: str, raw: float | None, qfq: float | None) -> pl.DataFrame:
+        """构造允许注入 NULL/NaN/±inf/非正执行价的单行行情。"""
+        return pl.DataFrame(
+            {
+                "ts_code": [ts_code],
+                "trade_date": [date(2024, 1, 8)],
+                "raw_open": [raw],
+                "raw_close": [raw],
+                "qfq_open": [qfq],
+                "qfq_close": [qfq],
+                "is_tradable": [True],
+                "avg_daily_volume": [5_000_000.0],
+            }
+        )
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0, None])
+    @pytest.mark.parametrize("bad_field", ["raw", "qfq"])
+    def test_buy_to_target_invalid_exec_price_skips_bad_stock_only(self, bad_field: str, bad_value) -> None:
+        """PORTFOLIO-01: 买入执行价 NULL/NaN/±inf/非正时只跳过坏标的，好标的照常成交。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 200_000.0
+        exec_date = date(2024, 1, 8)
+        raw = bad_value if bad_field == "raw" else 10.0
+        qfq = bad_value if bad_field == "qfq" else 10.0
+        quotes_by_code = {
+            "000002.SZ": self._quote_values("000002.SZ", raw, qfq),
+            "000001.SZ": self._quote(exec_date, 10.0),
+        }
+        targets = {"000002.SZ": 10_000.0, "000001.SZ": 10_000.0}
+
+        sim._buy_to_target(
+            exec_date,
+            targets,
+            quotes_by_code,
+            budget=200_000.0,
+            signal_order=["000002.SZ", "000001.SZ"],
+        )
+
+        invalid = [r for r in sim.skipped_list if r["reason"] == "invalid_price"]
+        assert len(invalid) == 1
+        assert invalid[0]["ts_code"] == "000002.SZ"
+        assert "000002.SZ" not in sim.positions
+        assert "000001.SZ" in sim.positions
+        assert math.isfinite(sim.cash) and sim.cash >= 0.0
+
+    def test_buy_to_target_bad_stock_keeps_good_stock_valid_ratio(self) -> None:
+        """PORTFOLIO-01: 坏报价股票存在时，好股票的有效 qfq_ratio 仍按名义股数正常成交。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 200_000.0
+        exec_date = date(2024, 1, 8)
+        bad = self._quote_values("000002.SZ", float("nan"), float("nan"))
+        good = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [exec_date],
+                "raw_open": [10.0],
+                "raw_close": [10.0],
+                "qfq_open": [20.0],
+                "qfq_close": [20.0],
+                "qfq_ratio": [2.0],
+                "is_tradable": [True],
+                "avg_daily_volume": [5_000_000.0],
+            }
+        )
+        targets = {"000002.SZ": 10_000.0, "000001.SZ": 1_500.0}
+
+        sim._buy_to_target(
+            exec_date,
+            targets,
+            {"000002.SZ": bad, "000001.SZ": good},
+            budget=200_000.0,
+            signal_order=["000002.SZ", "000001.SZ"],
+        )
+
+        assert any(r["ts_code"] == "000002.SZ" and r["reason"] == "invalid_price" for r in sim.skipped_list)
+        buys = [t for t in sim.trades_list if t["ts_code"] == "000001.SZ" and t["action"] == "buy"]
+        assert len(buys) == 1
+        assert buys[0]["volume"] == 100  # 名义股数 100（raw=10，目标 1500 不足一手 → 100）
+        assert sim.positions["000001.SZ"]["volume"] == pytest.approx(50.0)  # ratio=2 → 50 复权单位
+        assert math.isfinite(sim.cash) and sim.cash >= 0.0
+
+    def test_buy_to_target_bad_stock_and_missing_ratio_both_skip_without_abort(self) -> None:
+        """PORTFOLIO-01: 坏报价记 invalid_price；缺 ratio 的好股票记 missing_qfq_ratio，均不中断。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 200_000.0
+        exec_date = date(2024, 1, 8)
+        bad = self._quote_values("000002.SZ", None, None)
+        good_missing_ratio = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [exec_date],
+                "raw_open": [10.0],
+                "raw_close": [10.0],
+                "qfq_open": [10.0],
+                "qfq_close": [10.0],
+                "qfq_ratio": [None],
+                "is_tradable": [True],
+            }
+        )
+        targets = {"000002.SZ": 10_000.0, "000001.SZ": 10_000.0}
+
+        sim._buy_to_target(
+            exec_date,
+            targets,
+            {"000002.SZ": bad, "000001.SZ": good_missing_ratio},
+            budget=200_000.0,
+            signal_order=["000002.SZ", "000001.SZ"],
+        )
+
+        reasons = {(r["ts_code"], r["reason"]) for r in sim.skipped_list}
+        assert ("000002.SZ", "invalid_price") in reasons
+        assert ("000001.SZ", "missing_qfq_ratio") in reasons
+        assert sim.positions == {}
+        assert sim.trades_list == []
+        assert math.isfinite(sim.cash) and sim.cash >= 0.0
+
+    def test_buy_to_target_reallocate_skips_invalid_price_and_still_fills(self) -> None:
+        """PORTFOLIO-01: 补分配遇 NaN 报价直接跳过（不重复记账、不抛异常），
+        释放预算仍能续投到好标的。"""
+        sim, _config = self._make_simulator(reallocate_unfilled=True)
+        sim.cash = 45_000.0
+        exec_date = date(2024, 1, 8)
+        targets = {"000001.SZ": 30_000.0, "000002.SZ": 50_000.0, "000003.SZ": 5_000.0}
+        quotes_by_code = {
+            "000001.SZ": self._quote(exec_date, 500.0),  # 一手 5 万 > 目标 3 万 → 释放预算
+            "000002.SZ": self._quote(exec_date, 10.0).with_columns(pl.lit("000002.SZ").alias("ts_code")),
+            "000003.SZ": self._quote_values("000003.SZ", float("nan"), float("nan")),
+        }
+        # 000003.SZ 排在补分配前列：补分配遍历到它时必须跳过而非抛 ValueError。
+        signal_order = ["000003.SZ", "000002.SZ", "000001.SZ"]
+
+        sim._buy_to_target(
+            exec_date,
+            targets,
+            quotes_by_code,
+            budget=85_000.0,
+            signal_order=signal_order,
+        )
+
+        # 坏股仅在主遍记录一次 invalid_price（补分配不重复记录）
+        invalid = [r for r in sim.skipped_list if r["reason"] == "invalid_price"]
+        assert len(invalid) == 1
+        assert invalid[0]["ts_code"] == "000003.SZ"
+        # 释放预算续投给好标的（主遍现金不足 → 补分配成交）
+        good_buys = [t for t in sim.trades_list if t["ts_code"] == "000002.SZ" and t["action"] == "buy"]
+        assert len(good_buys) == 1
+        assert good_buys[0]["net_amount"] <= 50_000.0 + 1e-6
+        assert "000003.SZ" not in sim.positions
+        assert math.isfinite(sim.cash) and sim.cash >= 0.0
+
     def test_buy_to_target_lot_indivisible_over_threshold_hints(self) -> None:
         """BT-05: lot_size_indivisible 笔数超过候选 10% 时追加可执行建议（调参方向）。"""
         sim, _config = self._make_simulator()
