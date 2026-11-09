@@ -272,11 +272,13 @@ def get_sidecar_cargo_version() -> str:
     return cfg["package"]["version"]
 
 
-def get_pyproject_sidecar_config() -> dict[str, str]:
+def get_pyproject_sidecar_config() -> object:
     """读取 pyproject.toml [tool.qtrading.sidecar] 配置节。
 
-    返回的 dict 至少包含 version / protocol_version / postgresql_version / crate_version。
-    缺失时抛 KeyError，由调用方捕获转为 errors。
+    返回配置节的原始值（合法形态为 TOML table，即 dict）。缺失时抛 KeyError，
+    由调用方捕获转为 errors；非 table / 必需字段缺失或空串的结构校验由
+    check_sidecar_version_consistency 的源码 schema 门（VV-02）负责，本 helper
+    不编造默认值（与 query_sidecar_version_json 返回 object 的契约一致）。
     """
     with open(PYPROJECT_PATH, "rb") as f:
         cfg = tomllib.load(f)
@@ -338,6 +340,11 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
     四方校验前先做 payload schema 门（VV-01）：version --json 输出必须是 dict，
     且四个版本字段均为非空字符串；缺失/空/错型逐字段记 error 并短路（缺失不等于
     相等，不完整/旧协议工件不得静默绕过版本证明，须重建 binary）。
+
+    三方校验前先做源码 schema 门（VV-02）：[tool.qtrading.sidecar] 必须是 table，
+    且 version / protocol_version / postgresql_version / crate_version 四个必需
+    字段均为非空字符串；缺失/空/错型逐字段记 error 并短路（.get(key, "") 的空串
+    会静默跳过对应校验），禁止自动猜测或编造默认版本。
     """
     errors: list[str] = []
 
@@ -359,6 +366,27 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
         pyproject_sidecar = get_pyproject_sidecar_config()
     except KeyError as exc:
         errors.append(f"pyproject.toml [tool.qtrading.sidecar] missing key: {exc}")
+        return errors
+
+    # VV-02 源码 schema 门：sidecar 配置节必须是 table，且四个版本字段均为非空
+    # 字符串（缺失/空串不等于相等；缺失时 .get(key, "") 会静默跳过对应校验，
+    # 故逐字段显式记 error 并短路，不编造默认值）。
+    if not isinstance(pyproject_sidecar, dict):
+        errors.append(
+            f"pyproject.toml [tool.qtrading.sidecar] must be a table (dict), "
+            f"got {type(pyproject_sidecar).__name__}: {pyproject_sidecar!r}"
+        )
+        return errors
+    source_schema_invalid = False
+    for field in ("version", "protocol_version", "postgresql_version", "crate_version"):
+        value = pyproject_sidecar.get(field)
+        if not isinstance(value, str) or not value:
+            errors.append(
+                f"pyproject.toml [tool.qtrading.sidecar] field '{field}' missing or not "
+                f"a non-empty string (got {value!r} of type {type(value).__name__})"
+            )
+            source_schema_invalid = True
+    if source_schema_invalid:
         return errors
 
     pyproject_ver = pyproject_sidecar.get("version", "")
@@ -390,8 +418,14 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
         errors.append(f"sidecar postgresql_version '{pyproject_pg_ver}' not in 16-19.x series (pg_plan §15.2)")
 
     # 9d: crate_version 与 Cargo.toml [dependencies] postgresql_embedded 版本对齐
+    # （VV-02：依赖缺失/简写导致不可解析时显式报错，不再静默跳过比对；
+    # 记 error 后继续后续校验，四方比较仍可与 pyproject 侧执行）
     cargo_crate_ver = _get_cargo_postgresql_embedded_version()
-    if cargo_crate_ver and pyproject_crate_ver and cargo_crate_ver != pyproject_crate_ver:
+    if not cargo_crate_ver:
+        errors.append(
+            f"Cargo.toml postgresql_embedded dependency version is missing or unparseable (path: {SIDECAR_CARGO_PATH})"
+        )
+    elif cargo_crate_ver != pyproject_crate_ver:
         errors.append(
             f"sidecar crate_version mismatch: Cargo.toml postgresql_embedded '{cargo_crate_ver}' != "
             f"pyproject.toml [tool.qtrading.sidecar] crate_version '{pyproject_crate_ver}'"
@@ -588,7 +622,8 @@ def main() -> None:
         try:
             sidecar_cargo_ver = get_sidecar_cargo_version()
             sidecar_protocol_ver = get_sidecar_protocol_version()
-            sidecar_pg_ver = get_pyproject_sidecar_config().get("postgresql_version", "")
+            sidecar_cfg = get_pyproject_sidecar_config()
+            sidecar_pg_ver = sidecar_cfg.get("postgresql_version", "") if isinstance(sidecar_cfg, dict) else ""
             print(
                 f"  sidecar:        Cargo.toml={sidecar_cargo_ver} / "
                 f"protocol={sidecar_protocol_ver} / pg={sidecar_pg_ver}"
