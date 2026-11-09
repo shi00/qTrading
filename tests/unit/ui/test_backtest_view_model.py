@@ -2315,6 +2315,52 @@ class TestBacktestRunOwnership:
         assert vm.state.status_color == "warning"
 
     @pytest.mark.asyncio
+    async def test_late_success_after_sync_cancel_does_not_revive_result(self):
+        """QUEUED 取消后不再重提：同一闭包迟到成功不得复活结果（_cancelled_run_id 兜底，R21）。"""
+        vm = BacktestViewModel()
+        mock_tm = MagicMock(spec=TaskManager)
+        captured: list[Callable[..., Awaitable[Any]]] = []
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            captured.append(coroutine_factory)
+            return "task_queued"
+
+        mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+        mock_tm.get_task = MagicMock(return_value=MagicMock(status=TaskStatus.QUEUED))
+
+        late_result = self._result("run-late", 9.9)
+        late_result.trades = pl.DataFrame(
+            {
+                "trade_date": ["2024-01-02"],
+                "ts_code": ["000001.SZ"],
+                "action": ["buy"],
+                "price": [10.0],
+                "volume": [100.0],
+                "realized_pnl": [0.0],
+            }
+        )
+        late_result.nav_curve = pl.DataFrame({"trade_date": [date(2024, 1, 2)], "nav": [1.0]})
+
+        with self._patch_scope(mock_tm):
+            await vm.run_backtest("test_strategy", self._config())
+            vm.cancel_backtest()
+            assert vm._cancelled_run_id == "task_queued"
+            assert vm.state.status_message == Message("backtest_cancelled")
+
+            # 不重新提交：同一 factory 闭包（同一 run_token）迟到成功回调
+            vm.service.run_backtest = AsyncMock(return_value=late_result)
+            await captured[0](task_id="task_queued")
+
+        assert vm.state.status_message == Message("backtest_cancelled")
+        assert vm.state.status_color == "warning"
+        assert vm.state.run_id is None
+        assert vm.state.metrics == ()
+        assert vm.state.trades == ()
+        assert vm.state.nav_curve == ()
+        assert vm.state.is_running is False
+        assert vm._task_id is None
+
+    @pytest.mark.asyncio
     async def test_submit_rejected_resets_running_state_and_task_id(self):
         """submit 返回 None（任务未登记）路径必须复位运行态，不得停留在「回测中」。"""
         vm = BacktestViewModel()
