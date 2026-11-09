@@ -12,16 +12,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
-from functools import cached_property
 from typing import Any, Literal
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
-from services.task_manager import TaskManager
+from services.task_manager import TERMINAL_STATUSES, AppTask, TaskManager, TaskStatus
 from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning, WarningCategory
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
@@ -456,6 +455,13 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self.service = service
 
         self._task_id: str | None = None
+        # BT-02: 最后一次 VM 提交的运行标识（终态后保留，用于 TaskCenter 重试结果归属）。
+        self._last_run_id: str | None = None
+        # BT-02: 已被 VM 同步宣告取消的运行标识（禁止其迟到回调复活结果，R21）。
+        self._cancelled_run_id: str | None = None
+        # BT-02: 全局任务订阅句柄 (manager, callback)，dispose 时精确注销。
+        self._task_subscription: tuple[TaskManager, Callable[[list[AppTask]], None]] | None = None
+        self._task_manager_ref: TaskManager | None = None
         # D2: 初始化时从 StrategyManager 装配可用策略 + 默认选中首个策略
         # (View 不再持 use_state 业务状态; 装配是内存读, 非 IO, 可同步在 __init__).
         _strategies = self._load_strategies()
@@ -467,18 +473,82 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self._background_tasks: set = set()
         self._init_mixin_fields()  # F3-08: 初始化 mixin 字段 (锁/loop/disposed flag)
 
-    @cached_property
+    @property
     def _task_manager(self) -> TaskManager:
         """缓存注册单例引用（M12-022），避免每实例重复进入 TaskManager.__new__。
 
         单例为进程级资源、生命周期由 singleton registry 管理（VM dispose 不释放），
         故每实例仅惰性获取一次即可（惰性而非 ``__init__`` 构造，保持既有测试 patch 时点语义）。
+
+        BT-02: 首次解析时一并注册全局任务订阅（外部取消/失败的终态兜底）。该时点
+        不晚于任何一次 ``submit_task``（``run_backtest`` 先取 manager 再提交），
+        因此既不破坏 M12-022「每实例仅构造一次」契约，也能观测到外部取消终态。
         """
-        return TaskManager()
+        manager = self._task_manager_ref
+        if manager is None:
+            manager = TaskManager()
+            self._task_manager_ref = manager
+            if not getattr(self, "_disposed", False):
+                callback = self._on_task_update
+                manager.subscribe(callback)
+                self._task_subscription = (manager, callback)
+        return manager
+
+    def _on_task_update(self, tasks: list[AppTask]) -> None:
+        """TaskManager 订阅入口：回调不得抛异常（R2 仅约束 asyncio.CancelledError）。"""
+        try:
+            self._handle_task_update(tasks)
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[BacktestVM] Task update handler failed (%s): %s",
+                exc_info=True,
+            )
+
+    def _handle_task_update(self, tasks: list[AppTask]) -> None:
+        """仅当当前 run 的任务进入终态时兜底复位运行态（不影响新 run）。"""
+        if self._disposed:
+            return
+        task_id = self._task_id
+        if task_id is None:
+            return
+        task = next((t for t in tasks if t.id == task_id), None)
+        if task is None or task.status not in TERMINAL_STATUSES:
+            return
+        if not self._is_active_run(task_id):
+            return
+        self._task_id = None
+        if task.status == TaskStatus.CANCELLED:
+            # 外部取消的运行不得被迟到成功回调复活（R21）；取消任务不可重试。
+            self._cancelled_run_id = task_id
+            self._set_state(
+                is_running=False,
+                progress=0.0,
+                progress_message=None,
+                status_message=Message("backtest_cancelled"),
+                status_color="warning",
+            )
+            return
+        # COMPLETED/FAILED/INTERRUPTED 但协程未回调（如 runner 早退）：只复位运行态，
+        # 不伪造成功结果（R21）。
+        self._set_state(
+            is_running=False,
+            progress=0.0,
+            progress_message=None,
+            status_message=Message("backtest_failed"),
+            status_color="error",
+        )
 
     def dispose(self):
-        """清理资源：先取消运行中任务（防孤儿），再调 super().dispose() 统一清理。"""
+        """清理资源：先注销全局订阅、取消运行中任务，再调 super().dispose() 统一清理。"""
         self._disposed = True  # F3-07: 业务短路（对齐 ScreenerVM），防 cancel_backtest 回调写状态
+        subscription = self._task_subscription
+        if subscription is not None:
+            manager, callback = subscription
+            manager.unsubscribe(callback)
+            self._task_subscription = None
         self.cancel_backtest()
         self._task_id = None
         for t in list(self._background_tasks):
@@ -576,6 +646,35 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         """
         self._set_state(last_run_summary=(strategy_key, config))
 
+    def _is_active_run(self, task_id: str) -> bool:
+        """BT-02: 是否为当前活跃执行（progress 与同步取消判定使用 task_id）。"""
+        return self._task_id is not None and self._task_id == task_id
+
+    def _owns_run(self, run_token: str) -> bool:
+        """BT-02: 判定回调是否归属本次运行（只读，不修改归属状态）。
+
+        - 活跃期：归属由 ``_task_id`` 判定（同一 run 的原始执行）。
+        - 空闲期：仅接受「最后一次 VM 提交」的 ``run_token``。TaskCenter 重试会复用原
+          coroutine factory 但分配新 task_id，因此回调需以提交时捕获的 run_token 归属；
+          一旦有新提交 ``_last_run_id`` 更新，旧回调被丢弃；被 VM 同步取消的运行不得复活
+          （``_cancelled_run_id``，R21）。
+        """
+        if self._task_id is not None:
+            return self._task_id == run_token
+        return run_token == self._last_run_id and run_token != self._cancelled_run_id
+
+    def _claim_run_terminal(self, run_token: str) -> bool:
+        """BT-02: 终态写入前的归属判定与归属清理。
+
+        Returns:
+            True 表示本次终态可写 state；活跃执行同时清空 ``_task_id``。
+        """
+        if not self._owns_run(run_token):
+            return False
+        if self._task_id == run_token:
+            self._task_id = None
+        return True
+
     def create_config(
         self,
         start_date: date,
@@ -630,6 +729,10 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             return
 
         self._task_id = None
+        # BT-02: 新提交即更新运行归属快照，旧的 last_run/cancelled 归属同时失效，
+        # 旧运行（含其 TaskCenter 重试）的迟到回调将被丢弃。
+        self._last_run_id = None
+        self._cancelled_run_id = None
         self._set_state(
             is_running=True,
             progress=0.0,
@@ -658,11 +761,18 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             delist_recovery_rate=0.3,
         )
 
+        # BT-02: 提交后回填本次运行的 token。TaskCenter 重试会复用同一 coroutine 闭包，
+        # 但分配新 task_id，回调仍以该 token 归属（见 _owns_run）。
+        run_token_ref: dict[str, str | None] = {"id": None}
+
         async def _execute_backtest(task_id: str, **kwargs):
+            run_token = run_token_ref["id"] or task_id
             try:
 
                 def _progress_callback(progress: float, message: Message):
-                    if not self.state.is_running:
+                    # BT-02: 归属判定先于写入 —— 取消后重提时，旧任务的迟到进度
+                    # 不得写入新任务的运行态（is_running 会被新任务置回 True）。
+                    if not self._is_active_run(task_id) or not self.state.is_running:
                         return
                     self._set_state(
                         progress=progress,
@@ -681,6 +791,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     persist=persist,
                     cancel_check=_cancel_check,
                 )
+
+                # BT-02: 归属判定 —— 旧任务（已取消/已被新运行取代）的迟到结果
+                # 不得写入当前 state（不做「前面已算完所以照写」的例外）。
+                if not self._owns_run(run_token):
+                    return None
 
                 # 透传净值横轴日期与 IC 横轴日期; 构造基准相对净值曲线 (同起点锚定)
                 nav_ns = result.nav_curve
@@ -712,7 +827,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     caveat_msgs.append(Message("backtest_caveat_delisting_asof_approximation"))
                 caveats = tuple(caveat_msgs)
 
-                # 成功终态: is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
+                # 成功终态: 复位运行归属 + is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
+                # BT-02: 先清 _task_id 再写 state，避免 _set_state 触发的订阅者
+                # 立即发起新回测时归属被旧 run 回写覆盖。
+                if not self._claim_run_terminal(run_token):
+                    return None
                 self._set_state(
                     metrics=tuple(result.metrics.items()),
                     trades=_to_trade_rows(result.trades),
@@ -755,23 +874,25 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
 
             except asyncio.CancelledError:
                 # F3-11: 取消路径显式终态（progress 清空避免 UI 残留文案）
-                self._set_state(
-                    is_running=False,
-                    progress=0.0,
-                    progress_message=None,
-                    status_message=Message("backtest_cancelled"),
-                    status_color="warning",
-                    nav_dates=(),
-                    benchmark_curve=(),
-                    ic_dates=(),
-                    strategy_name=None,
-                    benchmark_name=None,
-                    credibility_level="ok",
-                    warnings=(),
-                    skipped_order_count=0,
-                    failed_date_count=0,
-                    caveats=(),
-                )
+                # BT-02: 仅为当前 run 落终态；旧 run 的取消不得覆盖新 run（R21）。
+                if self._claim_run_terminal(run_token):
+                    self._set_state(
+                        is_running=False,
+                        progress=0.0,
+                        progress_message=None,
+                        status_message=Message("backtest_cancelled"),
+                        status_color="warning",
+                        nav_dates=(),
+                        benchmark_curve=(),
+                        ic_dates=(),
+                        strategy_name=None,
+                        benchmark_name=None,
+                        credibility_level="ok",
+                        warnings=(),
+                        skipped_order_count=0,
+                        failed_date_count=0,
+                        caveats=(),
+                    )
                 raise
             except Exception as e:
                 # F3-09: 分级日志收口到 log_classified
@@ -783,24 +904,26 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     exc_info=True,
                 )
                 # F3-11: 失败路径显式终态（progress 清空避免 UI 残留文案）
-                self._set_state(
-                    is_running=False,
-                    progress=0.0,
-                    progress_message=None,
-                    status_message=Message("backtest_failed"),
-                    status_color="error",
-                    error_detail=DataSanitizer.sanitize_error(e),
-                    nav_dates=(),
-                    benchmark_curve=(),
-                    ic_dates=(),
-                    strategy_name=None,
-                    benchmark_name=None,
-                    credibility_level="ok",
-                    warnings=(),
-                    skipped_order_count=0,
-                    failed_date_count=0,
-                    caveats=(),
-                )
+                # BT-02: 仅为当前 run 落终态；旧 run 的迟到异常不得改写新 run。
+                if self._claim_run_terminal(run_token):
+                    self._set_state(
+                        is_running=False,
+                        progress=0.0,
+                        progress_message=None,
+                        status_message=Message("backtest_failed"),
+                        status_color="error",
+                        error_detail=DataSanitizer.sanitize_error(e),
+                        nav_dates=(),
+                        benchmark_curve=(),
+                        ic_dates=(),
+                        strategy_name=None,
+                        benchmark_name=None,
+                        credibility_level="ok",
+                        warnings=(),
+                        skipped_order_count=0,
+                        failed_date_count=0,
+                        caveats=(),
+                    )
                 raise
 
         strategy_obj = get_strategy_registry().get(strategy_key)
@@ -821,17 +944,52 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         )
 
         self._task_id = task_id
+        if task_id is not None:
+            # BT-02: 记录本次提交的归属 token（供 TaskCenter 重试回调归属，见 _owns_run）。
+            run_token_ref["id"] = task_id
+            self._last_run_id = task_id
 
         if task_id is None:
+            # BT-02: submit 未登记任务（task_not_found）时必须复位运行态，
+            # 不得停留在「回测中」（协程不会启动，也就没有终态回调）。
             self._set_state(
                 is_running=False,
+                progress=0.0,
+                progress_message=None,
                 status_message=Message("backtest_task_rejected"),
                 status_color="warning",
             )
 
     def cancel_backtest(self) -> None:
-        if self._task_id:
-            self._task_manager.cancel_task(self._task_id)
+        """用户取消回测（BT-02：仅对 QUEUED 任务同步落取消终态）。
+
+        TaskManager 取消是 ``call_soon_threadsafe`` 排程的：若任务处于 QUEUED，
+        ``_register_and_run`` 会跳过协程启动，协程永不执行、无法走终态回调，因此
+        必须在命令返回时同步复位 ``is_running``/``_task_id``。
+
+        但 RUNNING 或已 COMPLETED 的任务不得乐观宣告取消：前者由 CancelledError
+        终态回调决定，后者应保留已完成的结果，避免「已显示取消但实际已算完」。
+        外部（TaskCenter）取消/失败由全局任务订阅兜底（见 _handle_task_update）。
+        """
+        task_id = self._task_id
+        if task_id is None:
+            return
+        task = self._task_manager.get_task(task_id)
+        self._task_manager.cancel_task(task_id)
+        if task is None or task.status != TaskStatus.QUEUED:
+            return
+        if not self._is_active_run(task_id):
+            return
+        self._task_id = None
+        # 该运行已被同步宣告取消：即使协程因竞态仍然跑完，也不得复活结果（R21）。
+        self._cancelled_run_id = task_id
+        self._set_state(
+            is_running=False,
+            progress=0.0,
+            progress_message=None,
+            status_message=Message("backtest_cancelled"),
+            status_color="warning",
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_historical_results(
