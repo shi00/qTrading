@@ -348,6 +348,21 @@ def _extract_skipped_reasons(result: BacktestResult) -> tuple[tuple[str, int], .
 
 
 @dataclass(frozen=True)
+class LastRunSnapshot:
+    """上次回测提交的不可变快照 (UIV-BT-01).
+
+    View 的 ``_prefilled_params`` 是可变透传草稿 (手工切策略会清空), 不能作为重试
+    参数来源。提交成功进入 VM 时把 strategy/config/params 一并冻结: params 以
+    ``tuple[tuple[str, Any], ...]`` 存储 (顶层不可变; 嵌套值仍按引用持有),
+    ``None`` 表示未携带参数, ``()`` 表示显式空参数, 二者语义不同 (R21)。
+    """
+
+    strategy_key: str
+    config: BacktestConfig
+    params: tuple[tuple[str, Any], ...] | None = None
+
+
+@dataclass(frozen=True)
 class BacktestState:
     """BacktestViewModel 的不可变状态快照 (L771 合规, 无 dual-track).
 
@@ -361,8 +376,8 @@ class BacktestState:
     # D2: 可用策略 (key, name_key) 序列 + 选中策略 key (VM 初始化时装配, 不感知 locale)
     available_strategies: tuple[tuple[str, str], ...] = ()
     selected_strategy_key: str | None = None
-    # D2: 上次回测提交 (strategy_key, config), 供 ErrorState on_retry 复用
-    last_run_summary: tuple[str, BacktestConfig] | None = None
+    # D2: 上次回测提交 (strategy_key, config, params 快照), 供 ErrorState on_retry 复用
+    last_run_summary: LastRunSnapshot | None = None
 
     is_running: bool = False
     progress: float = 0.0
@@ -569,12 +584,15 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             status_color="warning",
         )
 
-    def record_last_run(self, strategy_key: str, config: BacktestConfig) -> None:
-        """记录上次回测提交, 供 ErrorState on_retry 复用 (D2: last_run 下沉 VM).
+    def record_last_run(self, strategy_key: str, config: BacktestConfig, params: dict | None = None) -> None:
+        """记录上次回测提交 (含参数快照), 供 ErrorState on_retry 复用 (D2: last_run 下沉 VM).
 
-        由 View 提交回测时调用 (_on_run_backtest), 与既有一致 (提交即记录, retry 复用).
+        由 View 提交回测时调用 (_on_run_backtest), 与既有一致 (提交即记录, retry 复用)。
+        UIV-BT-01: params 必须在此冻结 —— View 的重试只消费该快照, 不再读取可变透传草稿,
+        避免 A 失败后切到 B 再重试时混用 A 的配置与 B/None 的参数。
         """
-        self._set_state(last_run_summary=(strategy_key, config))
+        params_snapshot = tuple(params.items()) if params is not None else None
+        self._set_state(last_run_summary=LastRunSnapshot(strategy_key, config, params_snapshot))
 
     def create_config(
         self,

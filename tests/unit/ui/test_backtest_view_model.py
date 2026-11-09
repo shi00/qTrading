@@ -20,6 +20,7 @@ from ui.viewmodels import Message
 from ui.viewmodels.backtest_view_model import (
     BacktestState,
     BacktestViewModel,
+    LastRunSnapshot,
     TradeRow,
     _build_benchmark_curve,
     _optional_ratio,
@@ -346,7 +347,45 @@ class TestBacktestViewModel:
         )
         vm.record_last_run("ma_cross", config)
 
-        assert vm.state.last_run_summary == ("ma_cross", config)
+        assert vm.state.last_run_summary == LastRunSnapshot("ma_cross", config, None)
+
+    def test_record_last_run_freezes_params_snapshot(self):
+        """UIV-BT-01: 提交时 params 以不可变元组快照入 state, 不受后续草稿修改影响。"""
+        vm = BacktestViewModel()
+        config = vm.create_config(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 12, 31),
+        )
+        draft = {"window": 20}
+        vm.record_last_run("ma_cross", config, draft)
+        draft["window"] = 99  # 事后修改 View 透传草稿
+
+        summary = vm.state.last_run_summary
+        assert summary is not None
+        assert summary.params == (("window", 20),)
+        assert isinstance(summary.params, tuple), "state 不得持有可变 dict"
+
+    def test_record_last_run_none_params_stays_none(self):
+        """UIV-BT-01: None params 保持 None (不得伪装成空 dict/默认值, R21)。"""
+        vm = BacktestViewModel()
+        config = vm.create_config(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 12, 31),
+        )
+        vm.record_last_run("ma_cross", config, None)
+
+        assert vm.state.last_run_summary == LastRunSnapshot(strategy_key="ma_cross", config=config, params=None)
+
+    def test_record_last_run_empty_params_preserved_as_empty(self):
+        """UIV-BT-01: 空 dict 与 None 语义不同, 空 dict 快照为空元组而非 None。"""
+        vm = BacktestViewModel()
+        config = vm.create_config(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 12, 31),
+        )
+        vm.record_last_run("ma_cross", config, {})
+
+        assert vm.state.last_run_summary == LastRunSnapshot(strategy_key="ma_cross", config=config, params=())
 
     def test_report_prefill_rejected_sets_warning_status(self):
         """F13: report_prefill_rejected() → 明确反馈 (warning 色 + 缺失策略 i18n 键)。"""

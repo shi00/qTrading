@@ -12,7 +12,7 @@
 - 移除命令式生命周期回调 / 手动 locale 刷新 / 窗口尺寸回调 / 重新实例化推送 / 手动重绘
 - BacktestConfigPanel/BacktestResultPanel 作为子组件函数直接调用，props 从 VM state 推送
 - page 访问改用 ``ft.context.page``（try/except 守卫）
-- 回测状态下沉 VM（D2）：可用策略/选中策略/上次提交经 VM state（available_strategies / selected_strategy_key / last_run_summary）+ commands（select_strategy / record_last_run）受控管理
+- 回测状态下沉 VM（D2）：可用策略/选中策略/上次提交（含提交时 params 快照）经 VM state（available_strategies / selected_strategy_key / last_run_summary）+ commands（select_strategy / record_last_run）受控管理
 - no_strategy_error 为纯 UI 校验态（use_state）
 """
 
@@ -304,27 +304,30 @@ def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.
             page = ft.context.page
             if page is not None:
                 # D2: last_run 下沉 VM (vm.record_last_run), retry 时从 state.last_run_summary 读取
+                # UIV-BT-01: params 一并写入快照, 重试不依赖可变透传草稿 (_prefilled_params)
                 # MINOR-08: 重入检查前置 — 上一次回测仍在运行时不得覆盖 last_run 配置
                 # （VM.run_backtest 的 is_running 守卫仍会拒绝重入并产出 already_running 告警）。
                 if not state.is_running:
-                    vm.record_last_run(state.selected_strategy_key, backtest_config)
+                    vm.record_last_run(state.selected_strategy_key, backtest_config, _prefilled_params.current)
                 page.run_task(vm.run_backtest, state.selected_strategy_key, backtest_config, _prefilled_params.current)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for run_task")
 
     def _on_retry_backtest() -> None:
-        """Task 11.3: ErrorState on_retry — 重新提交上次回测配置 (R16: page.run_task 调度).
+        """Task 11.3: ErrorState on_retry — 重新提交上次回测 (R16: page.run_task 调度).
 
-        透传 _prefilled_params.current 与首次提交保持一致 (Task 8.3).
-        D2: last_run 从 state.last_run_summary 读取 (已下沉 VM).
+        UIV-BT-01: 只消费 VM 的 last_run 快照 (strategy/config/params), 不再读取可变
+        透传草稿 ``_prefilled_params`` —— 手工切换策略会清空草稿, 用草稿会导致
+        「恢复 A 的配置却传 B/None 的参数」, 无法复现失败任务。
         """
-        if state.last_run_summary is None:
+        last_run = state.last_run_summary
+        if last_run is None:
             return
-        strategy, backtest_config = state.last_run_summary
+        retry_params = dict(last_run.params) if last_run.params is not None else None
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(vm.run_backtest, strategy, backtest_config, _prefilled_params.current)
+                page.run_task(vm.run_backtest, last_run.strategy_key, last_run.config, retry_params)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for retry")
 

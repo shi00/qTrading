@@ -19,6 +19,7 @@
 现有 tests/unit/ui/test_backtest_view.py 仅做契约守护, 本文件补充运行时测试, 不重复契约守护内容.
 """
 
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -69,6 +70,15 @@ class TestBacktestViewR16Compliance:
 # ============================================================================
 # 运行时测试基础设施: FakeBacktestViewModel + backtest_view_env fixture
 # ============================================================================
+
+
+@dataclass(frozen=True)
+class _FakeLastRun:
+    """镜像 VM ``LastRunSnapshot`` 契约 (UIV-BT-01: params 以不可变元组快照)."""
+
+    strategy_key: Any
+    config: Any
+    params: tuple[tuple[str, Any], ...] | None = None
 
 
 class _FakeBacktestViewModel:
@@ -164,9 +174,10 @@ class _FakeBacktestViewModel:
         """F13: command — 透传策略无效时明确反馈 (记录调用)."""
         self.report_prefill_rejected_mock()
 
-    def record_last_run(self, strategy_key: Any, config: Any) -> None:
-        """D2: command — 记录上次提交供 retry 复用."""
-        self._set_state(last_run_summary=(strategy_key, config))
+    def record_last_run(self, strategy_key: Any, config: Any, params: Any = None) -> None:
+        """D2: command — 记录上次提交 (含参数快照) 供 retry 复用."""
+        snapshot = tuple(params.items()) if params is not None else None
+        self._set_state(last_run_summary=_FakeLastRun(strategy_key, config, snapshot))
 
     def create_config(self, **kwargs: Any) -> Any:
         return self.create_config_mock(**kwargs)
@@ -566,9 +577,9 @@ class TestOnRunBacktest:
         fake_vm.create_config_mock.side_effect = ["cfg_first", "cfg_second"]
         on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
 
-        # 1. 首次提交 (非运行中) → 记录 last_run = ("ma_cross", "cfg_first")
+        # 1. 首次提交 (非运行中) → 记录 last_run = _FakeLastRun("ma_cross", "cfg_first")
         on_run_backtest(_make_config())
-        assert fake_vm.state.last_run_summary == ("ma_cross", "cfg_first")
+        assert fake_vm.state.last_run_summary == _FakeLastRun("ma_cross", "cfg_first")
 
         # 2. 置 is_running=True 并重渲染, 使 handler 闭包捕获最新 state
         fake_vm._set_state(is_running=True)
@@ -577,7 +588,9 @@ class TestOnRunBacktest:
 
         # 3. 重入提交 → record_last_run 不被调用, last_run 保持首次配置
         on_run_backtest(_make_config())
-        assert fake_vm.state.last_run_summary == ("ma_cross", "cfg_first"), "重入被拒时 last_run 配置不得被覆盖"
+        assert fake_vm.state.last_run_summary == _FakeLastRun("ma_cross", "cfg_first"), (
+            "重入被拒时 last_run 配置不得被覆盖"
+        )
 
     def test_non_running_run_updates_last_run(self, backtest_view_env) -> None:
         """MINOR-08 回归保护: 非运行中提交仍正常记录 last_run (守卫不误伤正常路径)."""
@@ -585,7 +598,7 @@ class TestOnRunBacktest:
         fake_vm = env["fake_vm"]
         on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
         on_run_backtest(_make_config())
-        assert fake_vm.state.last_run_summary == ("ma_cross", "fake_backtest_config")
+        assert fake_vm.state.last_run_summary == _FakeLastRun("ma_cross", "fake_backtest_config")
 
 
 # ============================================================================
@@ -1037,6 +1050,163 @@ class TestBacktestViewErrorState:
         on_retry()
         # page.run_task 不应被调用 (page 为 None)
         assert not page.run_task.called
+
+
+# ============================================================================
+# UIV-BT-01: ErrorState 重试必须复用「提交时」参数快照, 不得读取可变透传草稿
+# ============================================================================
+
+
+def _get_error_retry(env: dict) -> Any:
+    """从最近一次渲染的 ErrorState 参数中取出 on_retry 回调."""
+    right_content = env["mod"].ResizableSplitter.call_args.kwargs["right_content"]
+    return right_content.kwargs.get("on_retry")
+
+
+class TestRetryUsesSubmittedParamsSnapshot:
+    """UIV-BT-01: retry 只消费 VM 的 last_run 快照 (strategy/config/params).
+
+    旧实现从 ``_prefilled_params.current`` 取参数: A 失败后手工切到 B 会清空草稿,
+    重试恢复 A 的配置却传 None (或新 prefill 的参数), 无法复现失败任务。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_prefill_stash(self):
+        from ui.viewmodels.backtest_view_model import _pending_prefill
+
+        _pending_prefill.clear()
+        yield
+        _pending_prefill.clear()
+
+    def _run_and_fail(self, env: dict) -> None:
+        """提交一次回测并置为失败终态, 使 ErrorState 可渲染."""
+        from ui.viewmodels import Message
+
+        env["page"].run_task.reset_mock()
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+        env["fake_vm"]._set_state(
+            status_message=Message("backtest_failed", {}),
+            status_color="error",
+            metrics=(),
+            trades=(),
+        )
+        _rerender(env)
+
+    def test_retry_uses_original_params_after_manual_strategy_switch(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """A(prefill 参数)失败 → 手工切 B → 重试仍用 A 的 strategy/config/params."""
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("ma_cross", params={"window": 20})
+        _push_prefill_request(env, 2)
+        self._run_and_fail(env)
+        assert env["page"].run_task.call_args.args[1:4] == ("ma_cross", "fake_backtest_config", {"window": 20})
+
+        # 手工切到 B: _on_strategy_change 清空 A 的透传草稿
+        _invoke(_get_dropdowns(env)[0].on_select, _make_event("volume_breakout"))
+        _rerender(env)
+
+        on_retry = _get_error_retry(env)
+        assert on_retry is not None
+        env["page"].run_task.reset_mock()
+        on_retry()
+
+        args = env["page"].run_task.call_args.args
+        assert args[1] == "ma_cross", "重试必须复现原任务的策略, 不得混用当前选中 B"
+        assert args[2] == "fake_backtest_config"
+        assert args[3] == {"window": 20}, "重试必须复用提交时参数快照, 不得用切换后清空的草稿"
+
+    def test_retry_ignores_new_prefill_arriving_after_failure(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """失败后又有新 prefill → 重试仍复现原任务参数, 不静默改用新草稿."""
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("ma_cross", params={"window": 20})
+        _push_prefill_request(env, 2)
+        self._run_and_fail(env)
+
+        # 失败后新的跳转请求 (B + 新参数) 被应用到草稿
+        set_pending_prefill("volume_breakout", params={"window": 99})
+        _push_prefill_request(env, 3)
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+
+        on_retry = _get_error_retry(env)
+        assert on_retry is not None
+        env["page"].run_task.reset_mock()
+        on_retry()
+
+        args = env["page"].run_task.call_args.args
+        assert args[1] == "ma_cross"
+        assert args[3] == {"window": 20}, "重试不得静默改用失败后到达的新 prefill 参数"
+
+    def test_retry_without_params_keeps_none(self, backtest_view_env) -> None:
+        """未携带 prefill 参数时提交 → 失败重试仍传 None (不伪造空 dict/默认值)."""
+        env = backtest_view_env
+        self._run_and_fail(env)
+        assert env["page"].run_task.call_args.args[3] is None
+
+        on_retry = _get_error_retry(env)
+        assert on_retry is not None
+        env["page"].run_task.reset_mock()
+        on_retry()
+
+        assert env["page"].run_task.call_args.args[3] is None
+
+    def test_reentrant_submit_does_not_overwrite_params_snapshot(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """运行中重入提交被拒时, 已记录的 params 快照不得被覆盖."""
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"),),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("ma_cross", params={"window": 20})
+        _push_prefill_request(env, 2)
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+
+        env["fake_vm"]._set_state(is_running=True)
+        _rerender(env)
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+
+        snapshot = env["fake_vm"].state.last_run_summary
+        assert snapshot.params == (("window", 20),), "重入被拒时参数快照不得被覆盖"
+
+    def test_cancel_does_not_clear_params_snapshot(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """取消运行不得清空已记录的参数快照 (后续失败重试仍可复现)."""
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"),),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("ma_cross", params={"window": 20})
+        _push_prefill_request(env, 2)
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+
+        _invoke(_get_buttons(env)[0].on_click, _make_event())
+
+        env["fake_vm"].cancel_backtest_mock.assert_called_once()
+        assert env["fake_vm"].state.last_run_summary.params == (("window", 20),)
 
 
 # ============================================================================
