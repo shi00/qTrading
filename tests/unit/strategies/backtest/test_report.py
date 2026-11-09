@@ -11,6 +11,20 @@ from strategies.backtest.metrics import PROFIT_THRESHOLD
 from strategies.backtest.report import BacktestReport
 
 
+def _trades_with_pnl(pnls: list[float | None]) -> pl.DataFrame:
+    """构造仅保留 format_trade_summary 所需列的 trades 表（realized_pnl 可含 None）。"""
+    return pl.DataFrame(
+        {
+            "trade_date": [date(2024, 1, 2)] * len(pnls),
+            "ts_code": ["000001.SZ"] * len(pnls),
+            "action": ["sell"] * len(pnls),
+            "price": [10.0] * len(pnls),
+            "volume": [1000] * len(pnls),
+            "realized_pnl": pnls,
+        }
+    )
+
+
 @pytest.fixture(autouse=True)
 def reset_i18n():
     """Ensure I18n is initialized in zh_CN for each test.
@@ -299,6 +313,64 @@ class TestBacktestReport:
     def test_profit_threshold_shared_constant(self) -> None:
         """PROFIT_THRESHOLD 常量在 report 与 metrics 间共享，值为 0.0"""
         assert PROFIT_THRESHOLD == 0.0
+
+
+class TestFormatTradeSummaryExtremes:
+    """BR-01: max_win 只取盈利组、max_loss 只取亏损组；无对应样本渲染 N/A（R21）。
+
+    分组口径沿用 PROFIT_THRESHOLD（0 归 DRAW，既非盈利也非亏损），不得改变。
+    """
+
+    def test_all_profits_max_loss_renders_na(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([100.0, 200.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_winning_count')}: 2" in summary
+        assert f"{I18n.get('report_losing_count')}: 0" in summary
+        assert f"{I18n.get('report_max_win')}: 200.00" in summary
+        assert f"{I18n.get('report_max_loss')}: N/A" in summary
+
+    def test_all_losses_max_win_renders_na(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([-100.0, -50.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_winning_count')}: 0" in summary
+        assert f"{I18n.get('report_losing_count')}: 2" in summary
+        assert f"{I18n.get('report_max_win')}: N/A" in summary
+        assert f"{I18n.get('report_max_loss')}: -100.00" in summary
+
+    def test_only_draw_both_extremes_na_but_avg_zero(self, backtest_result: BacktestResult) -> None:
+        """仅 DRAW：两极值均 N/A（无对应分组样本），均值仍按真实 0 渲染 0.00。"""
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([0.0, 0.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_winning_count')}: 0" in summary
+        assert f"{I18n.get('report_losing_count')}: 0" in summary
+        assert f"{I18n.get('report_max_win')}: N/A" in summary
+        assert f"{I18n.get('report_max_loss')}: N/A" in summary
+        assert f"{I18n.get('report_avg_profit')}: 0.00" in summary
+
+    def test_no_valid_pnl_renders_na(self, backtest_result: BacktestResult) -> None:
+        """realized_pnl 全为 None：无有效 PNL，两极值均 N/A，交易总数如实保留。"""
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([None, None]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_total_trades_count')}: 2" in summary
+        assert f"{I18n.get('report_max_win')}: N/A" in summary
+        assert f"{I18n.get('report_max_loss')}: N/A" in summary
+
+    def test_mixed_sample_uses_grouped_extremes(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([-100.0, 0.0, 50.0, 200.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_winning_count')}: 2" in summary
+        assert f"{I18n.get('report_losing_count')}: 1" in summary
+        assert f"{I18n.get('report_max_win')}: 200.00" in summary
+        assert f"{I18n.get('report_max_loss')}: -100.00" in summary
+        assert "N/A" not in summary
+
+    def test_real_zero_not_rendered_as_extreme(self, backtest_result: BacktestResult) -> None:
+        """真实 0 属 DRAW，不得被当作极值 0.00；无盈利组时 max_win 必须是 N/A 而非 0.00。"""
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([0.0, -100.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_max_win')}: N/A" in summary
+        assert f"{I18n.get('report_max_win')}: 0.00" not in summary
+        assert f"{I18n.get('report_max_loss')}: -100.00" in summary
 
     def test_to_markdown(self, backtest_result: BacktestResult) -> None:
         report = BacktestReport()
