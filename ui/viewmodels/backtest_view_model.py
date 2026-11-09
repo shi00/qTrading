@@ -353,7 +353,7 @@ class LastRunSnapshot:
 
     View 的 ``_prefilled_params`` 是可变透传草稿 (手工切策略会清空), 不能作为重试
     参数来源。提交成功进入 VM 时把 strategy/config/params 一并冻结: params 以
-    ``tuple[tuple[str, Any], ...]`` 存储 (state 字段不得持有可变 dict/list),
+    ``tuple[tuple[str, Any], ...]`` 存储 (顶层不可变; 嵌套值仍按引用持有),
     ``None`` 表示未携带参数, ``()`` 表示显式空参数, 二者语义不同 (R21)。
     """
 

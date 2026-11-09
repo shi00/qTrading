@@ -374,9 +374,7 @@ class TestBacktestViewModel:
         )
         vm.record_last_run("ma_cross", config, None)
 
-        summary = vm.state.last_run_summary
-        assert summary is not None
-        assert summary.params is None
+        assert vm.state.last_run_summary == LastRunSnapshot(strategy_key="ma_cross", config=config, params=None)
 
     def test_record_last_run_empty_params_preserved_as_empty(self):
         """UIV-BT-01: 空 dict 与 None 语义不同, 空 dict 快照为空元组而非 None。"""
@@ -387,9 +385,7 @@ class TestBacktestViewModel:
         )
         vm.record_last_run("ma_cross", config, {})
 
-        summary = vm.state.last_run_summary
-        assert summary is not None
-        assert summary.params == ()
+        assert vm.state.last_run_summary == LastRunSnapshot(strategy_key="ma_cross", config=config, params=())
 
     def test_report_prefill_rejected_sets_warning_status(self):
         """F13: report_prefill_rejected() → 明确反馈 (warning 色 + 缺失策略 i18n 键)。"""
