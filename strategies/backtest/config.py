@@ -273,25 +273,31 @@ class BacktestConfig:
             errors.append("start_date must be before end_date")
         if self.initial_capital <= 0 or not math.isfinite(self.initial_capital):
             errors.append("initial_capital must be positive")
-        if self.commission_rate < 0 or self.commission_rate > 0.01:
+        if not math.isfinite(self.risk_free_rate):
+            errors.append("risk_free_rate must be finite")
+        if not math.isfinite(self.commission_rate) or self.commission_rate < 0 or self.commission_rate > 0.01:
             errors.append("commission_rate should be between 0 and 1%")
-        if self.commission_min < 0:
+        if not math.isfinite(self.commission_min) or self.commission_min < 0:
             errors.append("commission_min must be non-negative")
-        if self.stamp_duty_rate is not None and self.stamp_duty_rate < 0:
+        if self.stamp_duty_rate is not None and (not math.isfinite(self.stamp_duty_rate) or self.stamp_duty_rate < 0):
             errors.append("stamp_duty_rate must be non-negative")
-        if self.transfer_fee_rate < 0:
+        if not math.isfinite(self.transfer_fee_rate) or self.transfer_fee_rate < 0:
             errors.append("transfer_fee_rate must be non-negative")
-        if self.slippage_bps < 0:
+        if not math.isfinite(self.slippage_bps) or self.slippage_bps < 0:
             errors.append("slippage_bps must be non-negative")
-        if self.max_single_weight <= 0 or self.max_single_weight > 1:
+        if not math.isfinite(self.max_single_weight) or self.max_single_weight <= 0 or self.max_single_weight > 1:
             errors.append("max_single_weight must be in (0, 1]")
         if self.on_empty_signal not in ("liquidate", "hold"):
             errors.append("on_empty_signal must be one of 'liquidate' or 'hold'")
-        if not 0 < self.delist_recovery_rate <= 1:
+        if not math.isfinite(self.delist_recovery_rate) or not 0 < self.delist_recovery_rate <= 1:
             errors.append("delist_recovery_rate must be in (0, 1]")
-        if self.cash_reserve_pct < 0 or self.cash_reserve_pct >= 1:
+        if not math.isfinite(self.cash_reserve_pct) or self.cash_reserve_pct < 0 or self.cash_reserve_pct >= 1:
             errors.append("cash_reserve_pct must be in [0, 1)")
-        if self.min_rebalance_delta_pct < 0 or self.min_rebalance_delta_pct >= 1:
+        if (
+            not math.isfinite(self.min_rebalance_delta_pct)
+            or self.min_rebalance_delta_pct < 0
+            or self.min_rebalance_delta_pct >= 1
+        ):
             errors.append("min_rebalance_delta_pct must be in [0, 1)")
         if self.max_position_count <= 0:
             errors.append("max_position_count must be positive")

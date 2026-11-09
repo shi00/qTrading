@@ -1,9 +1,11 @@
 """BacktestConfig 默认值测试"""
 # pyright: reportArgumentType=false
 
+import math
 from datetime import date, datetime
 
 import polars as pl
+import pytest
 
 from strategies.backtest.config import (
     BacktestConfig,
@@ -215,6 +217,113 @@ class TestBacktestConfigValidation:
         )
         errors = config.validate()
         assert not any("delist_recovery_rate" in e for e in errors)
+
+
+# BC-01: 参与回测计算的 float 字段与其 validate() 错误消息一一对应。
+# NaN 参与大小比较恒为 False，正 inf 也能通过「非负」校验，故必须显式 finite 检查；
+# finite 检查并入现有范围分支，保证同一字段只产出一条可定位错误。
+_FLOAT_FIELD_ERRORS: list[tuple[str, str]] = [
+    ("initial_capital", "initial_capital must be positive"),
+    ("risk_free_rate", "risk_free_rate must be finite"),
+    ("commission_rate", "commission_rate should be between 0 and 1%"),
+    ("commission_min", "commission_min must be non-negative"),
+    ("stamp_duty_rate", "stamp_duty_rate must be non-negative"),
+    ("transfer_fee_rate", "transfer_fee_rate must be non-negative"),
+    ("slippage_bps", "slippage_bps must be non-negative"),
+    ("max_single_weight", "max_single_weight must be in (0, 1]"),
+    ("delist_recovery_rate", "delist_recovery_rate must be in (0, 1]"),
+    ("cash_reserve_pct", "cash_reserve_pct must be in [0, 1)"),
+    ("min_rebalance_delta_pct", "min_rebalance_delta_pct must be in [0, 1)"),
+]
+
+
+def _config_with_float(field: str, value: float) -> BacktestConfig:
+    return BacktestConfig(
+        start_date=date(2023, 1, 1),
+        end_date=date(2023, 12, 31),
+        **{field: value},
+    )
+
+
+class TestBacktestConfigFiniteValidation:
+    """BC-01: float 字段的非有限值必须被拦截，且不与范围错误重复上报。"""
+
+    @pytest.mark.parametrize(("field", "message"), _FLOAT_FIELD_ERRORS)
+    @pytest.mark.parametrize(
+        "bad",
+        [float("nan"), float("inf"), float("-inf")],
+        ids=["nan", "pos_inf", "neg_inf"],
+    )
+    def test_non_finite_rejected_with_exactly_one_error(self, field: str, message: str, bad: float) -> None:
+        assert _config_with_float(field, bad).validate() == [message]
+
+    @pytest.mark.parametrize(
+        ("field", "message"),
+        [
+            ("initial_capital", "initial_capital must be positive"),
+            ("max_single_weight", "max_single_weight must be in (0, 1]"),
+            ("delist_recovery_rate", "delist_recovery_rate must be in (0, 1]"),
+        ],
+    )
+    def test_zero_rejected_only_where_semantically_invalid(self, field: str, message: str) -> None:
+        assert _config_with_float(field, 0.0).validate() == [message]
+
+    def test_zero_accepted_for_non_negative_fields(self) -> None:
+        """合法 0 政策不变：零费率/零预留/零再平衡阈值仍应通过。"""
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            commission_rate=0.0,
+            commission_min=0.0,
+            stamp_duty_rate=0.0,
+            transfer_fee_rate=0.0,
+            slippage_bps=0.0,
+            cash_reserve_pct=0.0,
+            min_rebalance_delta_pct=0.0,
+        )
+        assert config.validate() == []
+
+    def test_risk_free_rate_zero_and_default_accepted(self) -> None:
+        """risk_free_rate 允许 0（无风险利率为零是合法输入），默认 0.02 亦通过。"""
+        assert _config_with_float("risk_free_rate", 0.0).validate() == []
+        assert _config_with_float("risk_free_rate", 0.02).validate() == []
+
+    def test_inclusive_bounds_accepted(self) -> None:
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            initial_capital=1.0,
+            commission_rate=0.01,
+            commission_min=0.0,
+            stamp_duty_rate=0.0,
+            transfer_fee_rate=0.0,
+            slippage_bps=0.0,
+            max_single_weight=1.0,
+            delist_recovery_rate=1.0,
+            cash_reserve_pct=0.0,
+            min_rebalance_delta_pct=0.0,
+        )
+        assert config.validate() == []
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("commission_rate", -1e-9, "commission_rate should be between 0 and 1%"),
+            ("commission_rate", math.nextafter(0.01, math.inf), "commission_rate should be between 0 and 1%"),
+            ("commission_min", -1e-9, "commission_min must be non-negative"),
+            ("stamp_duty_rate", -1e-9, "stamp_duty_rate must be non-negative"),
+            ("transfer_fee_rate", -1e-9, "transfer_fee_rate must be non-negative"),
+            ("slippage_bps", -1e-9, "slippage_bps must be non-negative"),
+            ("max_single_weight", math.nextafter(1.0, math.inf), "max_single_weight must be in (0, 1]"),
+            ("delist_recovery_rate", math.nextafter(1.0, math.inf), "delist_recovery_rate must be in (0, 1]"),
+            ("cash_reserve_pct", -1e-9, "cash_reserve_pct must be in [0, 1)"),
+            ("cash_reserve_pct", 1.0, "cash_reserve_pct must be in [0, 1)"),
+            ("min_rebalance_delta_pct", -1e-9, "min_rebalance_delta_pct must be in [0, 1)"),
+            ("min_rebalance_delta_pct", 1.0, "min_rebalance_delta_pct must be in [0, 1)"),
+        ],
+    )
+    def test_out_of_bounds_rejected_with_exactly_one_error(self, field: str, value: float, message: str) -> None:
+        assert _config_with_float(field, value).validate() == [message]
 
 
 def _make_result(**overrides) -> BacktestResult:
