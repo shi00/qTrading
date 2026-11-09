@@ -241,6 +241,10 @@ if (-not (Test-Path $InstallerPath)) {
     exit 1
 }
 
+# 旧版安装器本次下载唯一目录：在 try 前预置为 $null，供 finally 清理引用
+# （StrictMode Latest 下引用未定义变量会报错；STEP 2 目录创建之前失败时判空跳过清理）。
+$oldDownloadDir = $null
+
 try {
     # STEP 1: 清理环境（确保旧版本不存在）
     Write-Step "1. Cleanup existing installation"
@@ -262,17 +266,31 @@ try {
 
     # STEP 2: 下载并安装旧版本
     Write-Step "2. Download & install old version v$OldVersion"
-    $oldInstaller = "$env:TEMP\AStockScreener-Setup-$OldVariant-$OldVersion.exe"
+    # 下载落盘用本次唯一目录（Guid），不用全局 TEMP 固定文件名：固定名会复用历史残留
+    # （下载失败仍执行既有文件，网络/鉴权/资产匹配失败被误报为「指定旧版升级通过」），
+    # 且重复运行/同机并发互相覆盖；Guid 目录保证「缓存不得替代本次下载」结构上成立。
+    # NOTE(lazy): 旧版安装器下载仅校验返回码/落盘非空/唯一目录，未校验受信摘要与版本身份.
+    # ceiling: 资产名仅按变体精确匹配（AStockScreener-Setup-$OldVariant.exe），旧资产摘要格式
+    # 与版本元数据契约未核实，不得编造校验值. upgrade: Release 提供旧资产校验值或版本身份
+    # 契约明确后补齐摘要/版本身份校验.
+    $oldDownloadDir = Join-Path (Get-Location) ("installer-upgrade-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $oldDownloadDir | Out-Null
+    $oldInstaller = Join-Path $oldDownloadDir "AStockScreener-Setup-$OldVariant-$OldVersion.exe"
     Write-Host "  Downloading from GitHub Release v$OldVersion..."
     # 资产名由 installer.iss 的 OutputBaseFilename=AStockScreener-Setup-{#TargetVariant} 决定；
     # 单个 Release 同时含 embedded-cpu / embedded-cuda 资产，故须按变体精确匹配（glob 会命中多个，
     # gh 的 --output 只接受唯一资产），历史命名（embedded）通过 -OldVariant 显式指定。
+    # gh 退出码必须显式校验：Windows PowerShell 5.1（CI 以 powershell -File 运行本脚本）下
+    # 原生命令非零退出不因 ErrorActionPreference 变为终止异常；stderr 不经重定向吞掉，
+    # 失败原因直出控制台，返回码在此兜底，失败即 throw，绝不执行既有/残留文件。
     gh release download "v$OldVersion" --repo $env:GITHUB_REPOSITORY `
         --pattern "AStockScreener-Setup-$OldVariant.exe" `
-        --output $oldInstaller 2>&1 | Out-Null
-    if (-not (Test-Path $oldInstaller)) {
-        throw "Failed to download old version installer v$OldVersion"
-    }
+        --output $oldInstaller
+    Assert-True ($LASTEXITCODE -eq 0) "gh release download v$OldVersion finished (exit code: $LASTEXITCODE)"
+    # 下载返回码为 0 仍须校验落盘非空：零字节文件（写入中断/磁盘满）不得进入安装步骤。
+    $downloadedInstallerItem = Get-Item -LiteralPath $oldInstaller -ErrorAction SilentlyContinue
+    Assert-True ($null -ne $downloadedInstallerItem) "Old version installer downloaded: $oldInstaller"
+    Assert-True ($downloadedInstallerItem.Length -gt 0) "Old version installer non-empty ($($downloadedInstallerItem.Length) bytes)"
     # Inno Setup 安装器是 GUI 程序，`&` 调用立即返回、不等待解包完成；必须 -Wait 并校验退出码。
     $oldInstallerProc = Start-Process -FilePath $oldInstaller -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
     Assert-True ($oldInstallerProc.ExitCode -eq 0) "Old version installer finished (exit code: $($oldInstallerProc.ExitCode))"
@@ -400,4 +418,13 @@ catch {
     # 清理残留进程
     Stop-QtradingGraceful
     exit 1
+}
+finally {
+    # 下载目录清理必须放在整个主流程末尾（try/catch 之后）：STEP 10 回滚腿（-VerifyRollback）
+    # 复用同一 $oldInstaller，提前清理会破坏回滚；try/catch 内的 exit 亦先触发 finally
+    # （Windows PowerShell 5.1 实测），正常与失败路径均清理本次唯一目录。清理失败静默
+    # （SilentlyContinue）：仅剩进程被强杀等异常中断场景残留，属已接受边界，不影响下次运行。
+    if ($null -ne $oldDownloadDir -and (Test-Path -LiteralPath $oldDownloadDir)) {
+        Remove-Item -LiteralPath $oldDownloadDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

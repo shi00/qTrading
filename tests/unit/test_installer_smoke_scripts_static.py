@@ -1,6 +1,6 @@
 """installer / Windows 默认路径静态契约（Linux CI 无法执行 Windows 脚本，只读文本断言）。
 
-守护三类已修复缺陷：
+守护五类已修复缺陷：
 1. Inno Setup 安装器 / 卸载器是 GUI 程序，PowerShell 调用运算符 ``&`` 不等待其结束；
    必须以 ``Start-Process ... -Wait`` 调用（否则后续断言会读到半解包目录）；
 2. 升级脚本下载旧版安装包使用变体 glob——``installer.iss`` 的
@@ -16,6 +16,12 @@
    PG 仍在 initdb 或稍后认证失败时也会先返回 true。ready 必须以 sidecar
    ``status --data-dir`` 的 JSON（``status == "running"`` 且 ``postgres_alive == true``）
    为唯一判据；崩溃恢复脚本还须走真实认证路径写入合成业务哨兵，崩溃后重启并读回。
+5. 升级脚本下载旧版安装包曾以全局 TEMP 固定文件名落盘，且 ``2>&1 | Out-Null`` 吞掉
+   gh 返回码（Windows PowerShell 5.1 下原生命令非零退出不因 ``ErrorActionPreference``
+   变为终止异常），仅以 ``Test-Path`` 判成功——下载失败（网络/鉴权/资产匹配）时命中
+   历史残留文件仍继续安装，网络失败被误报为「指定旧版升级通过」。必须：本次唯一
+   目录（Guid）落盘 + 显式校验 ``$LASTEXITCODE`` + 落盘非空校验，失败不进入安装步骤，
+   并在整个主流程末尾（STEP 10 回滚腿之后）由 ``finally`` 清理下载目录。
 """
 
 from __future__ import annotations
@@ -703,3 +709,108 @@ def test_uninstall_script_preserves_pg_root_and_reinstall_reuses_data() -> None:
     assert insert_idx < uninstall_idx < preserved_idx < reinstall_idx < readback_idx, (
         "卸载脚本必须按「写哨兵 → 卸载 → 保留断言 → 重装 → 读回」顺序执行"
     )
+
+
+# ---- ENGA-UPGRADE-01：旧版安装器下载必须 fail-closed（返回码/非空/唯一落盘） ----
+
+# 旧缺陷实现特征：全局 TEMP 固定文件名（下载前不清除，历史残留被当作本次下载结果）。
+_LEGACY_TEMP_DOWNLOAD = re.compile(r"\$env:TEMP\\AStockScreener-Setup-\$OldVariant-\$OldVersion\.exe")
+
+# fail-closed 下载链的顺序标记：唯一目录 → gh 调用 → 返回码校验 → 落盘存在 → 落盘非空 → 才允许安装。
+_DOWNLOAD_FAIL_CLOSED_MARKERS = (
+    "$oldDownloadDir = Join-Path (Get-Location)",
+    "gh release download",
+    "Assert-True ($LASTEXITCODE -eq 0)",
+    "Assert-True ($null -ne $downloadedInstallerItem)",
+    "Assert-True ($downloadedInstallerItem.Length -gt 0)",
+    "Start-Process -FilePath $oldInstaller",
+)
+
+
+def _download_fails_closed(text: str) -> bool:
+    """下载链必须按唯一目录 → gh → 返回码 → 存在 → 非空 → 安装的顺序 fail-closed。"""
+    try:
+        positions = [text.index(marker) for marker in _DOWNLOAD_FAIL_CLOSED_MARKERS]
+    except ValueError:
+        return False
+    return positions == sorted(positions)
+
+
+def test_upgrade_download_fails_closed_on_gh_exit_code() -> None:
+    """gh 返回码/落盘存在/落盘非空必须在校验通过后才允许启动旧版安装器。
+
+    Windows PowerShell 5.1（CI 以 ``powershell -File`` 运行本脚本）下原生命令非零退出
+    不因 ``ErrorActionPreference = "Stop"`` 变为终止异常，必须显式校验 ``$LASTEXITCODE``。
+    """
+    text = _read("installer_smoke_upgrade.ps1")
+    assert _download_fails_closed(text), (
+        "升级脚本下载链未按「唯一目录 → gh → $LASTEXITCODE 校验 → 落盘存在 → 落盘非空 → 安装」"
+        "顺序 fail-closed；下载失败不得继续执行既有/残留安装器文件"
+    )
+
+
+def test_download_fails_closed_guard_rejects_legacy_temp_name() -> None:
+    """负向：旧实现（TEMP 固定名 + 返回码被管道吞掉 + 仅 Test-Path）必须被检查器识别，避免断言恒真。"""
+    legacy = (
+        '    $oldInstaller = "$env:TEMP\\AStockScreener-Setup-$OldVariant-$OldVersion.exe"\n'
+        '    gh release download "v$OldVersion" --repo $env:GITHUB_REPOSITORY `\n'
+        '        --pattern "AStockScreener-Setup-$OldVariant.exe" `\n'
+        "        --output $oldInstaller 2>&1 | Out-Null\n"
+        "    if (-not (Test-Path $oldInstaller)) {\n"
+        '        throw "Failed to download old version installer v$OldVersion"\n'
+        "    }\n"
+        "    $oldInstallerProc = Start-Process -FilePath $oldInstaller "
+        "-ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait\n"
+    )
+    assert _LEGACY_TEMP_DOWNLOAD.findall(legacy) == ["$env:TEMP\\AStockScreener-Setup-$OldVariant-$OldVersion.exe"]
+    assert not _download_fails_closed(legacy), "旧 TEMP 固定名实现不应通过 fail-closed 顺序检查"
+
+
+def test_upgrade_download_uses_unique_per_run_dir_and_cleans_up_after_rollback() -> None:
+    """下载落盘必须是本次运行唯一目录（Guid），且清理只在 finally、位于回滚腿之后。"""
+    text = _read("installer_smoke_upgrade.ps1")
+    assert "$oldDownloadDir = Join-Path (Get-Location)" in text
+    assert '("installer-upgrade-" + [Guid]::NewGuid().ToString("N"))' in text
+    assert _LEGACY_TEMP_DOWNLOAD.search(text) is None, (
+        "升级脚本不得再用全局 TEMP 固定文件名下载（历史残留会被当作本次下载结果，缓存替代下载使网络失败误报为升级通过）"
+    )
+    # StrictMode Latest 下 finally 引用未定义变量会报错：目录变量必须在 try 前预置 $null。
+    assert "$oldDownloadDir = $null" in text
+    # 清理不得发生在回滚腿之前（回滚腿复用同一 $oldInstaller），且只在 finally 出现一次。
+    assert text.count("Remove-Item -LiteralPath $oldDownloadDir") == 1
+    rollback_idx = text.index("$rollbackProc = Start-Process -FilePath $oldInstaller")
+    cleanup_idx = text.index("Remove-Item -LiteralPath $oldDownloadDir -Recurse -Force")
+    assert cleanup_idx > rollback_idx, "下载目录清理必须位于 STEP 10 回滚腿之后（finally 在 try/catch 末尾）"
+
+
+def test_upgrade_download_does_not_swallow_stderr() -> None:
+    """gh 调用不得用 ``2>&1 | Out-Null`` 吞掉 stderr（失败原因直出控制台，返回码兜底）。"""
+    text = _read("installer_smoke_upgrade.ps1")
+    gh_idx = text.index("gh release download")
+    exit_code_idx = text.index("Assert-True ($LASTEXITCODE -eq 0)", gh_idx)
+    window = text[gh_idx:exit_code_idx]
+    assert "2>&1" not in window and "Out-Null" not in window, (
+        "gh release download 调用不得以 `2>&1 | Out-Null` 吞掉 stderr；"
+        "失败原因应直出控制台，返回码由 $LASTEXITCODE 显式校验"
+    )
+    # 负向有效性：旧「--output $oldInstaller 2>&1 | Out-Null」写法必须被窗口检查识别。
+    legacy = (
+        'gh release download "v$OldVersion" --repo $env:GITHUB_REPOSITORY `\n'
+        '    --pattern "AStockScreener-Setup-$OldVariant.exe" `\n'
+        "    --output $oldInstaller 2>&1 | Out-Null\n"
+        '    if (-not (Test-Path $oldInstaller)) { throw "x" }\n'
+        '    Assert-True ($LASTEXITCODE -eq 0) "y"\n'
+    )
+    legacy_window = legacy[legacy.index("gh release download") : legacy.index("Assert-True ($LASTEXITCODE -eq 0)")]
+    assert "2>&1" in legacy_window and "Out-Null" in legacy_window
+
+
+def test_upgrade_download_notes_identity_verification_boundary() -> None:
+    """下载段必须以 NOTE(lazy) 标记「未校验受信摘要/版本身份」边界（三要素齐全）。
+
+    本片段仅落实下载返回码、落盘非空与唯一文件；不得在身份验证契约确认前编造校验值。
+    """
+    text = _read("installer_smoke_upgrade.ps1")
+    assert "NOTE(lazy): 旧版安装器下载仅校验返回码/落盘非空/唯一目录，未校验受信摘要与版本身份." in text
+    assert "ceiling: 资产名仅按变体精确匹配" in text
+    assert "upgrade: Release 提供旧资产校验值或版本身份" in text
