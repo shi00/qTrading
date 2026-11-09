@@ -678,6 +678,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                     config=config,
                     params=params,
                     progress_callback=_progress_callback,
+                    persist=persist,
                     cancel_check=_cancel_check,
                 )
 
