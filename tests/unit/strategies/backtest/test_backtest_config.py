@@ -589,3 +589,72 @@ class TestWarningCategory:
         assert d["quality_json"]["data_warnings"] == [
             "[suspend_data_absent] 2024-01-01-2024-01-31: 1 stocks affected. test"
         ]
+
+
+# BC-02: 未知类别的 fail-closed 语义（R21）—— 未知 [type] 前缀 / 空值 / 未识别
+# category 必须归入明确的 UNKNOWN_NOT_VERIFIED（data_usable=False），不得返回
+# None（既不是「已知告警」也不是「无告警」，会被消费方静默降级）。
+class TestWarningCategoryFailClosed:
+    def test_unknown_bracket_prefix_is_fail_closed_not_none(self) -> None:
+        """未知 [type]（含旧版本新增类别）不得返回 None 静默丢失类型。"""
+        assert WarningCategory.UNKNOWN_NOT_VERIFIED == WarningCategory.DATA_QUALITY
+        assert WarningCategory.category_of("[unknown] 未知类别") == WarningCategory.UNKNOWN_NOT_VERIFIED
+        assert WarningCategory.category_of("[future_type_v99] 旧版本新增类别") == WarningCategory.UNKNOWN_NOT_VERIFIED
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\n\t "], ids=["empty", "spaces", "whitespace"])
+    def test_empty_value_is_unknown_not_verified(self, raw: str) -> None:
+        assert WarningCategory.category_of(raw) == WarningCategory.UNKNOWN_NOT_VERIFIED
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["[]", "[unterminated", "[] trailing", "[ ]"],
+        ids=["empty_type", "unterminated", "empty_type_trailing", "blank_type"],
+    )
+    def test_malformed_bracket_is_unknown_not_verified(self, raw: str) -> None:
+        assert WarningCategory.category_of(raw) == WarningCategory.UNKNOWN_NOT_VERIFIED
+
+    def test_known_prefix_case_behavior_unchanged(self) -> None:
+        """已知前缀大小写行为不变：精确小写命中已知类别，大小写不符按未知 fail-closed。"""
+        assert WarningCategory.category_of("[suspend_data_absent] x") == "data_quality"
+        assert WarningCategory.category_of("[SUSPEND_DATA_ABSENT] x") == WarningCategory.UNKNOWN_NOT_VERIFIED
+        assert WarningCategory.category_of("[Suspend_Data_Absent] x") == WarningCategory.UNKNOWN_NOT_VERIFIED
+
+    def test_unknown_category_string_or_int_fails_closed(self) -> None:
+        """显式 category 为未知字符串 / 非字符串时按未核实处理，不保留非法值。"""
+        assert _dw("suspend_data_absent", category="not_a_category").category == WarningCategory.UNKNOWN_NOT_VERIFIED
+        assert _dw("suspend_data_absent", category="").category == WarningCategory.UNKNOWN_NOT_VERIFIED
+        assert _dw("suspend_data_absent", category=123).category == WarningCategory.UNKNOWN_NOT_VERIFIED  # type: ignore[arg-type]  # 对抗性用例：运行期非法类型
+
+    @pytest.mark.parametrize("warning_type", sorted(WarningCategory._TYPE_TO_CATEGORY))
+    def test_known_persist_restore_round_trip(self, warning_type: str) -> None:
+        """已知类别落库串（str(w)）恢复后 category 不变，不得在持久化边界丢失。"""
+        warning = _dw(warning_type)
+        assert WarningCategory.category_of(str(warning)) == warning.category
+
+    def test_unknown_type_persist_restore_round_trip_keeps_type(self) -> None:
+        """未知 warning_type 落库保留 [type] 前缀，恢复时 fail-closed 而非 None。"""
+        warning = _dw("future_unknown_type")
+        result = _make_result(data_warnings=(warning,)).to_persist_dict()
+        persisted = result["quality_json"]["data_warnings"]
+        assert persisted == [str(warning)]
+        assert persisted[0].startswith("[future_unknown_type]")
+        assert WarningCategory.category_of(persisted[0]) == WarningCategory.UNKNOWN_NOT_VERIFIED
+
+    def test_value_with_newline_and_brackets_not_silently_lost(self) -> None:
+        """error_message 含换行 / 中括号时，[type] 前缀仍决定类别，不得静默降级。"""
+        warning = DataWarning(
+            warning_type="suspend_data_absent",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            affected_stock_count=1,
+            error_message="line1\n[not_a_type] line2 ] tail",
+        )
+        assert WarningCategory.category_of(str(warning)) == "data_quality"
+        unknown = DataWarning(
+            warning_type="future_unknown_type",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            affected_stock_count=1,
+            error_message="line1\n[x] tail ]",
+        )
+        assert WarningCategory.category_of(str(unknown)) == WarningCategory.UNKNOWN_NOT_VERIFIED
