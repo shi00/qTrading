@@ -169,18 +169,32 @@ class BacktestMetrics:
         """最大回撤及其峰值/谷底索引（Polars 向量化，D5-m2）。
 
         经累计最大值 cum_max 求 drawdown = (cum_max - nav) / cum_max，用 arg_max
-        定位谷底 index，再回溯谷底前最近峰值（cum_max 前缀中最大值的 index），
-        避免逐元素 Python 循环。初值一致：空 nav 返回 (0, 0, 0)；单调递增（无
-        回撤）时 drawdown 全 0，arg_max 返回首元素 → (0, 0, 0)。首项为 0 时
-        0/0 产生 nan，fill_nan(0.0) 收敛（原 Python 版此处会除零崩溃）。
+        定位谷底 index，再回溯谷底前最近峰值，避免逐元素 Python 循环。初值一致：
+        空 nav 返回 (0, 0, 0)；单调递增（无回撤）时 drawdown 全 0，arg_max 返回
+        首元素 → (0, 0, 0)。首项为 0 时 0/0 产生 nan，fill_nan(0.0) 收敛（原
+        Python 版此处会除零崩溃）。
+
+        BM-01：峰值不能用 cum_max 前缀的 arg_max 定位——cum_max 会把低于峰值的日子
+        （含谷底自身）复制成同峰值，前缀 argmax 会选中被复印的平台首日甚至谷底当天，
+        把回撤区间拉长。改在谷底前（含谷底）的**真实 nav** 中取等于峰值
+        （cum_max[trough_idx]）的最后一个索引，即谷底前最近一次达到峰值的交易日。
+        回撤数值口径（(cum_max - nav) / cum_max 的最大值）不变。
         """
         if len(nav_curve) == 0:
             return 0.0, 0, 0
         cumulative_max = nav_curve.cum_max()
         drawdown = ((cumulative_max - nav_curve) / cumulative_max).fill_nan(0.0)
+        max_dd = float(cast(float, drawdown.max() or 0.0))
+        # 无回撤统一收敛为 (0, 0, 0)：全 0 净值（爆仓后 NAV 恒 0）整段 0/0 经 fill_nan
+        # 后会被 Polars 打上 SORTED_ASC 标记，arg_max 在并列 0 上可能返回末位，此短路
+        # 避免把「无回撤」误报为覆盖全序列的零幅度区间。
+        if max_dd <= 0:
+            return max_dd, 0, 0
         trough_idx = int(cast(float, drawdown.arg_max() or 0.0))
-        peak_idx = int(cast(float, cumulative_max[: trough_idx + 1].arg_max() or 0.0))
-        return float(cast(float, drawdown.max() or 0.0)), peak_idx, trough_idx
+        peak_value = cumulative_max[trough_idx]
+        peak_candidates = nav_curve[: trough_idx + 1].eq(peak_value).arg_true()
+        peak_idx = int(cast(int, peak_candidates[-1])) if len(peak_candidates) > 0 else trough_idx
+        return max_dd, peak_idx, trough_idx
 
     @staticmethod
     def calc_calmar_ratio(
