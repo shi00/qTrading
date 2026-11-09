@@ -90,6 +90,61 @@ class TestBacktestMetrics:
         assert peak_idx == 1
         assert trough_idx == 5
 
+    def test_calc_max_drawdown_plateau_peak_uses_last_peak_day(self) -> None:
+        """平台期：峰值须取谷底前最后一个真实峰值日，而非平台首日（BM-01）。
+
+        nav=[100,110,110,90] 时 cum_max=[100,110,110,110]，峰值日应为 index 2
+        （最近一次达到 110 的交易日），而非 arg_max 返回的首个最大值 index 1。
+        回撤数值口径不变：(110-90)/110。
+        """
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([100.0, 110.0, 110.0, 90.0]))
+        assert max_dd == pytest.approx(20.0 / 110.0, rel=1e-9)
+        assert peak_idx == 2
+        assert trough_idx == 3
+
+    def test_calc_max_drawdown_peak_after_recovery_to_prior_high(self) -> None:
+        """跌后再触前高：峰值取谷底前最近一次触顶日，区间不跨越前一轮回撤。
+
+        nav=[100,120,110,120,100]：最大回撤 20/120 的谷底为 index 4，最近峰值是
+        index 3（而非首轮高点 index 1），区间长度 1 而非 3。
+        """
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([100.0, 120.0, 110.0, 120.0, 100.0]))
+        assert max_dd == pytest.approx(20.0 / 120.0, rel=1e-9)
+        assert peak_idx == 3
+        assert trough_idx == 4
+
+    def test_calc_max_drawdown_single_unique_peak(self) -> None:
+        """唯一峰：谷底前只有一个峰值日时仍返回该日（回归既有语义）。"""
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([100.0, 110.0, 105.0, 95.0]))
+        assert max_dd == pytest.approx(15.0 / 110.0, rel=1e-9)
+        assert peak_idx == 1
+        assert trough_idx == 3
+
+    def test_calc_max_drawdown_repeated_peak_plateau(self) -> None:
+        """重复峰值且谷底紧随平台：峰值取平台最后一天（index 2），不回落到首日。"""
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([110.0, 110.0, 110.0, 90.0]))
+        assert max_dd == pytest.approx(20.0 / 110.0, rel=1e-9)
+        assert peak_idx == 2
+        assert trough_idx == 3
+
+    def test_calc_max_drawdown_trough_is_not_peak(self) -> None:
+        """谷底当天数值低于峰值，不能被 cum_max 复印成的同峰值误选为峰值日。"""
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([100.0, 90.0]))
+        assert max_dd == pytest.approx(0.1, rel=1e-9)
+        assert peak_idx == 0
+        assert trough_idx == 1
+
+    def test_calc_max_drawdown_all_zero_nav_converges_to_zero(self) -> None:
+        """全 0 净值（爆仓后 NAV 恒 0）整段 0/0 属无定义，收敛为 (0, 0, 0)。
+
+        该序列经 fill_nan 后会被 Polars 标记 SORTED_ASC，arg_max 在并列 0 上可能返回
+        末位；本用例锁定「无回撤」不因平台实现细节被误报为覆盖全序列的区间。
+        """
+        max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([0.0, 0.0, 0.0, 0.0]))
+        assert max_dd == 0.0
+        assert peak_idx == 0
+        assert trough_idx == 0
+
     def test_calc_max_drawdown_empty(self) -> None:
         max_dd, peak_idx, trough_idx = BacktestMetrics.calc_max_drawdown(pl.Series([]))
         assert max_dd == 0.0
