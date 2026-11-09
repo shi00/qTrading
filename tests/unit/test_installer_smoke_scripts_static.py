@@ -316,13 +316,74 @@ def test_running_app_keeps_stdin_open_until_same_pid_assertions() -> None:
 
 
 def test_running_app_keeps_step7_and_step8_same_pid_assertions() -> None:
-    """安装拒绝断言（非 0 退出码）与“同一 sidecar PID 仍存活”断言必须保留。"""
+    """STEP 7 fail-closed 拒绝收口（ENGA-RUNNING-01）与“同一 sidecar PID 仍存活”断言必须保留。"""
     text = _read(_RUNNING_APP)
     assert re.search(r'Write-Step "7\. Attempt install while sidecar running', text) is not None
-    assert "Assert-True ($installExitCode2 -ne 0)" in text
     assert "$sidecarAfter = Get-Process -Id $sidecarProc.Id" in text
     assert "Assert-True ($null -ne $sidecarAfter)" in text
     assert "Assert-True (-not $sidecarAfter.HasExited)" in text
+
+
+# ---- ENGA-RUNNING-01：拒绝假通过收口——非零退出码不能认证运行中拒绝原因 ----
+# 旧实现 `Assert-True ($installExitCode -ne 0)` 仅凭非零退出码判「运行中拒绝」通过：
+# 磁盘/权限等安装内部故障同样返回非零，而 installer.iss 的 InitializeSetup 静默分支
+# 只有 Result=False/Exit（无受控日志、无唯一退出码），拒绝原因无法认证。
+# fail-closed 两支收口：退出码 0 = 安装成功覆盖运行中的应用（确定失败）；
+# 非 0 = 拒绝原因不可认证，同样失败（有意不冒充「正常拒绝已验证」，ENGA-RUNNING-01）。
+
+_REJECTION_UNVERIFIED_MSG = (
+    "UNVERIFIED REJECTION: installer failed (exit code ${var}), but InitializeSetup refusal cause cannot be certified"
+)
+
+
+def _rejection_fail_closed(text: str, exit_var: str, scenario: str) -> bool:
+    """STEP 4/7 拒绝断言必须两支收口：退出码 0 → 确定失败；非 0 → 不可认证也失败。"""
+    zero_branch = re.search(
+        rf"if \(\${exit_var} -eq 0\) \{{[\s\S]{{0,300}}?throw \"ASSERTION FAILED: installer succeeded "
+        rf"while the {scenario} was running\"",
+        text,
+    )
+    unverified = _REJECTION_UNVERIFIED_MSG.format(var=exit_var) in text
+    return zero_branch is not None and unverified
+
+
+def test_running_app_rejection_assertions_are_fail_closed() -> None:
+    """STEP 4/7 不得以「非零退出码」判通过：0 → ASSERTION FAILED；非 0 → UNVERIFIED REJECTION。"""
+    text = _read(_RUNNING_APP)
+    assert _rejection_fail_closed(text, "installExitCode", "app"), (
+        "STEP 4 缺少 fail-closed 收口：须先断言退出码非 0（0 = 安装成功覆盖运行中的应用，确定失败），"
+        "非 0 时以 UNVERIFIED REJECTION 失败（拒绝原因不可认证，ENGA-RUNNING-01）"
+    )
+    assert _rejection_fail_closed(text, "installExitCode2", "sidecar"), (
+        "STEP 7 缺少与 STEP 4 同语义的 fail-closed 收口（ENGA-RUNNING-01）"
+    )
+    # 旧的「仅凭非零判通过」断言不得残留（两个 STEP 皆然）。
+    assert "Assert-True ($installExitCode -ne 0)" not in text
+    assert "Assert-True ($installExitCode2 -ne 0)" not in text
+    # 收口必须发生在各自 STEP 内：STEP 4 收口在 STEP 5 之前，STEP 7 收口在 STEP 8 之前。
+    step4_idx = text.index('Write-Step "4. Attempt install while qTrading running')
+    step5_idx = text.index('Write-Step "5. Verify qTrading still running')
+    step7_idx = text.index('Write-Step "7. Attempt install while sidecar running')
+    step8_idx = text.index('Write-Step "8. Verify sidecar still running')
+    zero4_idx = text.index("if ($installExitCode -eq 0)")
+    zero7_idx = text.index("if ($installExitCode2 -eq 0)")
+    assert step4_idx < zero4_idx < step5_idx, "STEP 4 收口必须位于 STEP 4 与 STEP 5 之间"
+    assert step7_idx < zero7_idx < step8_idx, "STEP 7 收口必须位于 STEP 7 与 STEP 8 之间"
+
+
+def test_rejection_fail_closed_helper_rejects_legacy_and_partial() -> None:
+    """负向：旧「仅凭非零判通过」与只改一半（缺 UNVERIFIED throw）的实现必须被判定不合规。"""
+    legacy = (
+        'Write-Host "  Installer exit code: $installExitCode"\n'
+        'Assert-True ($installExitCode -ne 0) "Installer rejected (exit code non-zero: $installExitCode)"\n'
+    )
+    assert _rejection_fail_closed(legacy, "installExitCode", "app") is False
+    partial_zero_branch_only = (
+        "if ($installExitCode -eq 0) {\n"
+        '    throw "ASSERTION FAILED: installer succeeded while the app was running"\n'
+        "}\n"
+    )
+    assert _rejection_fail_closed(partial_zero_branch_only, "installExitCode", "app") is False
 
 
 # ---- D17-T01：ready 必须是真实活性证据，崩溃恢复须读回已提交哨兵 ----
