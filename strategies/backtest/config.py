@@ -268,6 +268,8 @@ class BacktestConfig:
             errors.append("start_date must be before end_date")
         if self.initial_capital <= 0 or not math.isfinite(self.initial_capital):
             errors.append("initial_capital must be positive")
+        if not math.isfinite(self.risk_free_rate):
+            errors.append("risk_free_rate must be finite")
         if not math.isfinite(self.commission_rate) or self.commission_rate < 0 or self.commission_rate > 0.01:
             errors.append("commission_rate should be between 0 and 1%")
         if not math.isfinite(self.commission_min) or self.commission_min < 0:

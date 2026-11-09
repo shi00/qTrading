@@ -224,6 +224,7 @@ class TestBacktestConfigValidation:
 # finite 检查并入现有范围分支，保证同一字段只产出一条可定位错误。
 _FLOAT_FIELD_ERRORS: list[tuple[str, str]] = [
     ("initial_capital", "initial_capital must be positive"),
+    ("risk_free_rate", "risk_free_rate must be finite"),
     ("commission_rate", "commission_rate should be between 0 and 1%"),
     ("commission_min", "commission_min must be non-negative"),
     ("stamp_duty_rate", "stamp_duty_rate must be non-negative"),
@@ -281,6 +282,11 @@ class TestBacktestConfigFiniteValidation:
             min_rebalance_delta_pct=0.0,
         )
         assert config.validate() == []
+
+    def test_risk_free_rate_zero_and_default_accepted(self) -> None:
+        """risk_free_rate 允许 0（无风险利率为零是合法输入），默认 0.02 亦通过。"""
+        assert _config_with_float("risk_free_rate", 0.0).validate() == []
+        assert _config_with_float("risk_free_rate", 0.02).validate() == []
 
     def test_inclusive_bounds_accepted(self) -> None:
         config = BacktestConfig(
