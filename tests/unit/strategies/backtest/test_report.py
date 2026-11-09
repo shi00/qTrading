@@ -1,5 +1,8 @@
+from collections.abc import Mapping
 from datetime import date, datetime
 import dataclasses
+from decimal import Decimal
+from typing import cast
 
 import polars as pl
 import pytest
@@ -155,7 +158,10 @@ class TestBacktestReport:
         report = BacktestReport()
         summary = report.format_summary(empty_result)
         assert "empty_strategy" in summary
-        assert "0.00%" in summary
+        # BR-02: 缺键表示「指标未算出」，渲染 N/A，不伪装成真实 0（R21）
+        assert "0.00%" not in summary
+        for key in ("total_return", "max_drawdown", "total_trades"):
+            assert f"{I18n.get(f'report_{key}')}: N/A" in summary
 
     def test_format_summary_win_rate_none_renders_na(self, backtest_result: BacktestResult) -> None:
         """win_rate 为 None（无主动决策平仓）时渲染 N/A，与 profit_factor 一致（D4-6）。"""
@@ -313,6 +319,92 @@ class TestBacktestReport:
     def test_profit_threshold_shared_constant(self) -> None:
         """PROFIT_THRESHOLD 常量在 report 与 metrics 间共享，值为 0.0"""
         assert PROFIT_THRESHOLD == 0.0
+
+
+class TestFormatSummaryMissingMetrics:
+    """BR-02: summary 关键指标缺键/None/非有限值时渲染 N/A，不伪装成 0、不抛 TypeError。
+
+    服务层指标分步回填，可能出现「键存在但值为 None」，缺键时的旧默认值 0 会把
+    「未算出」伪装成真实 0（R21）；本轮把 total_return / max_drawdown / total_trades
+    统一走守卫，真实 0 仍如实渲染。
+    """
+
+    _GUARDED_KEYS = ("total_return", "max_drawdown", "total_trades")
+
+    @staticmethod
+    def _rendered_line(summary: str, key: str) -> str:
+        label = I18n.get(f"report_{key}")
+        return next(line for line in summary.splitlines() if line.startswith(f"{label}:"))
+
+    def _summary_with_metrics(self, result: BacktestResult, metrics: Mapping[str, object]) -> str:
+        merged = cast(dict[str, float | None], metrics)
+        return BacktestReport().format_summary(dataclasses.replace(result, metrics=merged))
+
+    def test_missing_keys_render_na(self, backtest_result: BacktestResult) -> None:
+        metrics = {k: v for k, v in backtest_result.metrics.items() if k not in self._GUARDED_KEYS}
+        summary = self._summary_with_metrics(backtest_result, metrics)
+        for key in self._GUARDED_KEYS:
+            assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+    def test_explicit_none_render_na(self, backtest_result: BacktestResult) -> None:
+        metrics = {**backtest_result.metrics, **dict.fromkeys(self._GUARDED_KEYS)}
+        summary = self._summary_with_metrics(backtest_result, metrics)
+        for key in self._GUARDED_KEYS:
+            assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("total_return", float("nan")),
+            ("max_drawdown", float("inf")),
+            ("max_drawdown", float("-inf")),
+            ("total_trades", float("nan")),
+        ],
+    )
+    def test_non_finite_renders_na(self, backtest_result: BacktestResult, key: str, value: float) -> None:
+        summary = self._summary_with_metrics(backtest_result, {**backtest_result.metrics, key: value})
+        assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+    def test_real_zero_still_renders_zero(self, backtest_result: BacktestResult) -> None:
+        summary = self._summary_with_metrics(
+            backtest_result,
+            {**backtest_result.metrics, "total_return": 0.0, "max_drawdown": 0.0, "total_trades": 0},
+        )
+        assert self._rendered_line(summary, "total_return") == f"{I18n.get('report_total_return')}: 0.00%"
+        assert self._rendered_line(summary, "max_drawdown") == f"{I18n.get('report_max_drawdown')}: 0.00%"
+        assert self._rendered_line(summary, "total_trades") == f"{I18n.get('report_total_trades')}: 0"
+
+    def test_normal_values_render(self, backtest_result: BacktestResult) -> None:
+        summary = self._summary_with_metrics(
+            backtest_result,
+            {**backtest_result.metrics, "total_return": 0.1234, "max_drawdown": -0.0567, "total_trades": 42},
+        )
+        assert self._rendered_line(summary, "total_return") == f"{I18n.get('report_total_return')}: 12.34%"
+        assert self._rendered_line(summary, "max_drawdown") == f"{I18n.get('report_max_drawdown')}: -5.67%"
+        assert self._rendered_line(summary, "total_trades") == f"{I18n.get('report_total_trades')}: 42"
+
+    def test_mixed_missing_does_not_raise(self, backtest_result: BacktestResult) -> None:
+        metrics = {k: v for k, v in backtest_result.metrics.items() if k != "max_drawdown"}
+        metrics["total_return"] = None
+        metrics["total_trades"] = float("nan")
+        summary = self._summary_with_metrics(backtest_result, metrics)
+        for key in self._GUARDED_KEYS:
+            assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("total_return", True),
+            ("max_drawdown", "0.05"),
+            ("total_return", Decimal("0.01")),
+            ("total_trades", True),
+            ("total_trades", 2.5),
+        ],
+    )
+    def test_non_metric_types_render_na(self, backtest_result: BacktestResult, key: str, value: object) -> None:
+        """bool（int 子类）、字符串数字、Decimal、非整数笔数均不得冒充有效指标。"""
+        summary = self._summary_with_metrics(backtest_result, {**backtest_result.metrics, key: value})
+        assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
 
 
 class TestFormatTradeSummaryExtremes:

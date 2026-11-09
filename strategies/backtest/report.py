@@ -11,6 +11,23 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 
+def _format_metric_or_na(value: object, fmt: str) -> str:
+    """摘要指标渲染：缺键 / None / 非数值 / NaN / inf 渲染 N/A，不伪装成 0（R21）。
+
+    ``fmt`` 取 ``.2%``（收益率）或 ``d``（交易笔数）。bool 虽是 int 子类但非指标值，
+    Decimal / 字符串数字等非 int/float 类型一律按「未测量」处理，避免静默降级或
+    ``TypeError`` 中断整段摘要；非整数的交易笔数（如 2.5）同样视为不可用。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "N/A"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "N/A"
+        if fmt == "d":
+            return f"{int(value)}" if value.is_integer() else "N/A"
+    return format(value, fmt)
+
+
 def _format_optional_pct(value: float | None, width: int) -> str:
     """月表百分比单元：None / NaN / inf 渲染 N/A，不伪装成 0.00%（R21）。
 
@@ -39,14 +56,14 @@ class BacktestReport:
             f"{I18n.get('report_backtest_range')}: {config.start_date} ~ {config.end_date}",
             f"{I18n.get('report_initial_capital')}: {config.initial_capital:,.2f}",
             "",
-            f"{I18n.get('report_total_return')}: {m.get('total_return', 0):.2%}",
+            f"{I18n.get('report_total_return')}: {_format_metric_or_na(m.get('total_return'), '.2%')}",
             f"{I18n.get('report_annualized_return')}: {m.get('annualized_return', 0):.2%}"
             if m.get("annualized_return") is not None
             else f"{I18n.get('report_annualized_return')}: N/A",
             f"{I18n.get('report_sharpe_ratio')}: {m.get('sharpe_ratio', 0):.4f}"
             if m.get("sharpe_ratio") is not None
             else f"{I18n.get('report_sharpe_ratio')}: N/A",
-            f"{I18n.get('report_max_drawdown')}: {m.get('max_drawdown', 0):.2%}",
+            f"{I18n.get('report_max_drawdown')}: {_format_metric_or_na(m.get('max_drawdown'), '.2%')}",
             f"{I18n.get('report_calmar_ratio')}: {m.get('calmar_ratio', 0):.4f}"
             if m.get("calmar_ratio") is not None
             else f"{I18n.get('report_calmar_ratio')}: N/A",
@@ -63,7 +80,7 @@ class BacktestReport:
             f"{I18n.get('report_profit_factor')}: {m.get('profit_factor', 0):.4f}"
             if m.get("profit_factor") is not None
             else f"{I18n.get('report_profit_factor')}: N/A",
-            f"{I18n.get('report_total_trades')}: {m.get('total_trades', 0)}",
+            f"{I18n.get('report_total_trades')}: {_format_metric_or_na(m.get('total_trades'), 'd')}",
             "",
             f"{I18n.get('report_duration')}: {result.duration_ms}ms",
         ]
