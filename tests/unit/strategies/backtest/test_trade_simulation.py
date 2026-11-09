@@ -1,5 +1,6 @@
 """交易模拟测试（涨跌停/停牌处理）"""
 
+import math
 from datetime import date
 from dataclasses import replace
 
@@ -1546,3 +1547,62 @@ class TestAdjustedUnitsContract:
         assert simulator.cash == pytest.approx(cash_after_buy + sell_cost.net_amount)
         # 剩余 100 名义股 = 50 复权单位（ratio=2）
         assert simulator.positions["000001.SZ"]["volume"] == pytest.approx(50.0)
+
+
+class TestBuyInvalidPriceParity:
+    """PORTFOLIO-01: 买入侧 NULL/NaN/±inf 执行价不得中断整次调仓。
+
+    修复前涨停比较先于价格校验调用 ``_exec_nominal_price``（NULL → TypeError），
+    且 NaN 能绕过 ``<= 0`` 校验后在 ``int(target / NaN / 100)`` 抛 ValueError，
+    使一只坏报价拖垮同批次其余标的的买入。
+    """
+
+    @staticmethod
+    def _make_engine() -> VectorBacktestEngine:
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            cash_reserve_pct=0.0,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
+        return engine
+
+    @pytest.mark.parametrize("bad_price", [float("nan"), float("inf"), float("-inf"), None])
+    def test_bad_quote_does_not_abort_multi_stock_rebalance(self, bad_price: float | None) -> None:
+        """一只坏报价 → invalid_price 跳过；另一只正常成交，现金有限非负。"""
+        engine = self._make_engine()
+        exec_date = date(2024, 1, 2)
+        signals = pl.DataFrame(
+            {
+                "execution_date": [exec_date, exec_date],
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [2, 1],
+            }
+        )
+        quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [exec_date, exec_date],
+                "raw_open": [10.0, bad_price],
+                "raw_close": [10.0, bad_price],
+                "qfq_open": [10.0, bad_price],
+                "qfq_close": [10.0, bad_price],
+                "is_tradable": [True, True],
+            }
+        )
+
+        trades, positions, skipped, _warnings, _ = engine._simulate_trades(signals, quotes, [exec_date])
+
+        buys = trades.filter(pl.col("action") == "buy")
+        assert len(buys) == 1
+        assert buys["ts_code"][0] == "000001.SZ"
+        invalid = skipped.filter(pl.col("reason") == "invalid_price")
+        assert len(invalid) == 1
+        assert invalid["ts_code"][0] == "000002.SZ"
+        last_cash = float(positions.row(-1, named=True)["cash"])
+        assert math.isfinite(last_cash)
+        assert last_cash >= 0.0
