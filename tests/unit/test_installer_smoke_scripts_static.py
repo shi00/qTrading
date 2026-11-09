@@ -455,6 +455,52 @@ Assert-True ($null -eq $postgresAfter)
     assert legacy.index("Stop-Process -Id $proc.Id -Force") < legacy.index("Assert-True ($null -eq $postgresAfter)")
 
 
+# ---- ENGA-CRASH-01：强杀注入必须真实发生，主进程自然退出不得计为崩溃恢复通过 ----
+# 旧实现 `if ($proc -and -not $proc.HasExited) { Stop-Process ... }` 在主进程已自行退出时
+# 静默跳过强杀：正常关闭的 sidecar/PG 恰好满足无残留断言、重启读回也成功，
+# 脚本仍报告「崩溃恢复通过」，把正常关闭的持久性误当作强杀故障注入证据。
+
+
+def _crash_injection_guarded(text: str) -> bool:
+    """强杀前必须显式断言 $proc 非空且未退出，并以 $crashInjected 标记在成功出口兜底断言。"""
+    return (
+        "Assert-True ($null -ne $proc)" in text
+        and "Assert-True (-not $proc.HasExited)" in text
+        and "$crashInjected = $false" in text
+        and "$crashInjected = $true" in text
+        and 'Assert-True $crashInjected "Force-kill injection completed"' in text
+    )
+
+
+def test_crash_recovery_force_kill_requires_alive_process() -> None:
+    """强杀前必须断言 $proc 非空且未退出；自然退出路径必须失败，不得静默跳过强杀。"""
+    text = _read("installer_smoke_crash_recovery.ps1")
+    assert _crash_injection_guarded(text), (
+        "崩溃恢复脚本缺少强杀注入护栏：须强杀前断言 $proc 非空且未退出，"
+        "并以 $crashInjected 标记在成功出口兜底断言（ENGA-CRASH-01）"
+    )
+    # 结构顺序：初始化标记 → 强杀 → 置真 → 成功出口兜底断言 → PASSED 输出。
+    init_idx = text.index("$crashInjected = $false")
+    crash_idx = text.index("Stop-Process -Id $proc.Id -Force")
+    set_true_idx = text.index("$crashInjected = $true")
+    final_assert_idx = text.index('Assert-True $crashInjected "Force-kill injection completed"')
+    passed_idx = text.index("=== CRASH RECOVERY SMOKE TEST PASSED ===")
+    assert init_idx < crash_idx < set_true_idx < final_assert_idx < passed_idx, (
+        "强杀注入标记必须按「初始化 → 强杀 → 置真 → 成功出口断言（PASSED 之前）」顺序执行"
+    )
+
+
+def test_crash_injection_guard_rejects_legacy_silent_skip() -> None:
+    """负向：旧实现（if 包裹强杀、无存活断言、无注入标记）必须被判定不合规。"""
+    legacy = """Write-Step "6. FAILURE INJECTION: Force kill main qTrading process (simulate crash)"
+if ($proc -and -not $proc.HasExited) {
+    Stop-Process -Id $proc.Id -Force
+    Write-Ok "Main process killed (PID: $($proc.Id))"
+}
+"""
+    assert _crash_injection_guarded(legacy) is False
+
+
 # ---- D17-T02：升级 / 卸载必须验证已提交业务哨兵与 PG 根完整性 ----
 # 旧断言只检查「目录存在且文件数 > 0」：删除唯一业务哨兵但保留 PG_VERSION 仍会通过，
 # 既不能证明数据连续，也不能证明未被误删。升级须「写哨兵 → 升级 → 读回完全一致」；
