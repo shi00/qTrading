@@ -17,6 +17,7 @@ from utils.config_models import (
     DEFAULT_AI_PROMPT,
     DEFAULT_NEWS_PROMPT,
     ModelConnectionConfig,
+    SUPPORTED_THEME_NAMES,
     SyncIntegrityConfig,
     UsagePolicyConfig,
     get_default_config,
@@ -116,6 +117,21 @@ class TestAppConfig:
         with pytest.raises(ValidationError) as exc_info:
             AppConfig(theme_name="blue")
         assert "theme_name" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
+            AppConfig(theme_name="solarized")
+        assert "theme_name" in str(exc_info.value)
+
+    def test_theme_name_accepts_all_supported_themes(self):
+        """设置页可选四主题，白名单必须全部放行。
+
+        历史上 ``theme_name`` 只放行 light|dark，选 navy/dracula 会因 save_config
+        校验失败而无法持久化；含这两个值的配置文件还会让 load_config 整份回退默认值
+        （连 onboarding_complete 一并丢失）。
+        """
+        assert SUPPORTED_THEME_NAMES == ("dark", "light", "navy", "dracula")
+        for theme in SUPPORTED_THEME_NAMES:
+            assert AppConfig.model_validate({"theme_name": theme}).theme_name == theme
+        assert AppConfig.model_validate({}).theme_name == "dark"
 
     def test_field_validation_locale(self):
         with pytest.raises(ValidationError) as exc_info:
