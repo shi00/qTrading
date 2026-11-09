@@ -31,7 +31,7 @@ def setup_test_files(
     sidecar_dir = tmp_path / "sidecars" / "qtrading-pg-sidecar"
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     (sidecar_dir / "Cargo.toml").write_text(
-        '[package]\nversion = "0.1.0"\n\n[dependencies]\npostgresql_embedded = "=0.21.0"\n',
+        '[package]\nversion = "0.1.0"\n\n[dependencies]\npostgresql_embedded = { version = "=0.21.0" }\n',
         encoding="utf-8",
     )
     sidecar_src = sidecar_dir / "src"
