@@ -343,6 +343,97 @@ class TestBuildMetricsSection:
         assert ic_ir_value.value == "N/A"
         assert ic_ir_value.color == AppColors.TEXT_SECONDARY
 
+    def test_missing_metric_keys_render_na(self) -> None:
+        """BRR-F1: trades/nav 非空但指标缺键 → N/A + 次要色，不得伪装 0（R21）。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({})
+
+        row1, row2, row3 = content.controls[1], content.controls[2], content.controls[3]
+        # 收益 / 回撤 / 交易数 / 现金拖累天数
+        for card in (row1.controls[0], row1.controls[3], row2.controls[3], row3.controls[2]):
+            value_text = card.content.content.controls[1]
+            assert value_text.value == "N/A"
+            assert value_text.color == AppColors.TEXT_SECONDARY
+
+    def test_explicit_none_metrics_render_na(self) -> None:
+        """BRR-F1: 指标键存在但值为 None（未测量）→ N/A + 次要色。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section(
+                {
+                    "total_return": None,
+                    "max_drawdown": None,
+                    "total_trades": None,
+                    "cash_drag_days": None,
+                }
+            )
+
+        row1, row2, row3 = content.controls[1], content.controls[2], content.controls[3]
+        for card in (row1.controls[0], row1.controls[3], row2.controls[3], row3.controls[2]):
+            value_text = card.content.content.controls[1]
+            assert value_text.value == "N/A"
+            assert value_text.color == AppColors.TEXT_SECONDARY
+
+    def test_real_zero_metrics_render_zero_not_na(self) -> None:
+        """BRR-F1: 真实 0 仍渲染 0.00%/0，与缺失（N/A）可区分。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section(
+                {
+                    "total_return": 0.0,
+                    "max_drawdown": 0.0,
+                    "total_trades": 0,
+                    "cash_drag_days": 0,
+                }
+            )
+
+        row1, row2, row3 = content.controls[1], content.controls[2], content.controls[3]
+        cards = (row1.controls[0], row1.controls[3], row2.controls[3], row3.controls[2])
+        values = [card.content.content.controls[1] for card in cards]
+        assert [v.value for v in values] == ["0.00%", "0.00%", "0", "0"]
+        assert [v.color for v in values] == [
+            AppColors.TEXT_PRIMARY,
+            AppColors.TEXT_PRIMARY,
+            AppColors.TEXT_PRIMARY,
+            AppColors.TEXT_PRIMARY,
+        ]
+
+    def test_present_metrics_unchanged(self) -> None:
+        """BRR-F1: 有值时格式与颜色保持既有行为。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section(
+                {
+                    "total_return": 0.15,
+                    "max_drawdown": 0.08,
+                    "total_trades": 7,
+                    "cash_drag_days": 3,
+                }
+            )
+
+        row1, row2, row3 = content.controls[1], content.controls[2], content.controls[3]
+        cards = (row1.controls[0], row1.controls[3], row2.controls[3], row3.controls[2])
+        values = [card.content.content.controls[1] for card in cards]
+        assert [v.value for v in values] == ["15.00%", "8.00%", "7", "3"]
+        assert [v.color for v in values] == [
+            AppColors.SUCCESS,
+            AppColors.WARNING,
+            AppColors.TEXT_PRIMARY,
+            AppColors.ERROR,
+        ]
+
+    def test_ic_cards_unaffected_by_missing_trade_metrics(self) -> None:
+        """BRR-F1: 成交/收益类指标缺失不影响 IC 分支（仍按原值渲染）。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({"ic_mean": 0.06, "ic_ir": 0.8})
+
+        row1, row2 = content.controls[1], content.controls[2]
+        assert row1.controls[0].content.content.controls[1].value == "N/A"
+        assert row2.controls[1].content.content.controls[1].value == "0.0600"
+        assert row2.controls[2].content.content.controls[1].value == "0.80"
+
 
 class TestIcSortLabel:
     """BT-01/MINOR-02: 按独立打分占比 real_score_ratio 切换 IC 卡片三态。
@@ -915,6 +1006,36 @@ class TestBacktestChartContext:
         assert I18n.get("backtest_chart_summary_data_note") in text.value
         # DAT-08②: 摘要末尾显式标注行业分类为当前快照（快照前视 tradeoff）
         assert I18n.get("backtest_chart_summary_industry_note") in text.value
+
+    def test_chart_summary_missing_metrics_omit_percent_lines(self) -> None:
+        """BRR-F1: 指标缺键 → 摘要不生成收益/回撤百分比行（不伪装 0.00%）。"""
+        text = _build_chart_summary("test_strategy", "000300.SH", ("2024-01-02", "2024-01-31"), (100.0, 110.0), {})
+        assert I18n.get("backtest_chart_summary_total_return", value="0.00%") not in text.value
+        assert I18n.get("backtest_chart_summary_max_dd", value="0.00%") not in text.value
+
+    def test_chart_summary_explicit_none_omits_percent_lines(self) -> None:
+        """BRR-F1: 指标值为 None（未测量）→ 摘要不生成百分比行。"""
+        text = _build_chart_summary(
+            "test_strategy",
+            "000300.SH",
+            ("2024-01-02", "2024-01-31"),
+            (100.0, 110.0),
+            {"total_return": None, "max_drawdown": None},
+        )
+        assert I18n.get("backtest_chart_summary_total_return", value="0.00%") not in text.value
+        assert I18n.get("backtest_chart_summary_max_dd", value="0.00%") not in text.value
+
+    def test_chart_summary_real_zero_still_renders_zero_percent(self) -> None:
+        """BRR-F1: 真实 0 仍在摘要中生成 0.00% 行。"""
+        text = _build_chart_summary(
+            "test_strategy",
+            "000300.SH",
+            ("2024-01-02", "2024-01-31"),
+            (100.0, 110.0),
+            {"total_return": 0.0, "max_drawdown": 0.0},
+        )
+        assert I18n.get("backtest_chart_summary_total_return", value="0.00%") in text.value
+        assert I18n.get("backtest_chart_summary_max_dd", value="0.00%") in text.value
 
     def test_chart_summary_translates_historical_strategy_name(self) -> None:
         """E1: 历史英文旧值经 translate_strategy_name 兜底翻译（不再原样透传）。"""

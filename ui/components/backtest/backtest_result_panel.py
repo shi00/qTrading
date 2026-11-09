@@ -115,6 +115,21 @@ def _get_color_for_drawdown(drawdown: float) -> str:
     return AppColors.ERROR
 
 
+def _optional_metric_card(
+    label: str,
+    value: float | None,
+    format_value: Callable[[float], str],
+    color_for: Callable[[float], str],
+    tooltip: str | None = None,
+) -> ft.Container:
+    """指标卡（R21）：缺键/None 显示 N/A 与次要色，真实 0 仍按值渲染。"""
+    if value is None:
+        text, color = "N/A", AppColors.TEXT_SECONDARY
+    else:
+        text, color = format_value(value), color_for(value)
+    return ft.Container(content=_metric_card(label, text, color, tooltip), col=_COL_QUARTER)
+
+
 def _profit_factor_card(metrics: dict) -> ft.Container:
     """盈亏比卡片：无亏损交易时指标无定义（None），显示 N/A（D4-5）。"""
     pf = metrics.get("profit_factor")
@@ -276,13 +291,11 @@ def _build_metrics_section(
     row1 = ft.ResponsiveRow(
         controls=safe_controls(
             [
-                ft.Container(
-                    content=_metric_card(
-                        I18n.get("backtest_metric_total_return"),
-                        f"{metrics.get('total_return', 0) * 100:.2f}%",
-                        _get_color_for_value(metrics.get("total_return", 0)),
-                    ),
-                    col=_COL_QUARTER,
+                _optional_metric_card(
+                    I18n.get("backtest_metric_total_return"),
+                    metrics.get("total_return"),
+                    lambda v: f"{v * 100:.2f}%",
+                    _get_color_for_value,
                 ),
                 ft.Container(
                     content=_metric_card(
@@ -307,13 +320,11 @@ def _build_metrics_section(
                     ),
                     col=_COL_QUARTER,
                 ),
-                ft.Container(
-                    content=_metric_card(
-                        I18n.get("backtest_metric_max_dd"),
-                        f"{metrics.get('max_drawdown', 0) * 100:.2f}%",
-                        _get_color_for_drawdown(metrics.get("max_drawdown", 0)),
-                    ),
-                    col=_COL_QUARTER,
+                _optional_metric_card(
+                    I18n.get("backtest_metric_max_dd"),
+                    metrics.get("max_drawdown"),
+                    lambda v: f"{v * 100:.2f}%",
+                    _get_color_for_drawdown,
                 ),
             ]
         ),
@@ -343,13 +354,11 @@ def _build_metrics_section(
                     ),
                     col=_COL_QUARTER,
                 ),
-                ft.Container(
-                    content=_metric_card(
-                        I18n.get("backtest_metric_total_trades"),
-                        f"{metrics.get('total_trades', 0)}",
-                        AppColors.TEXT_PRIMARY,
-                    ),
-                    col=_COL_QUARTER,
+                _optional_metric_card(
+                    I18n.get("backtest_metric_total_trades"),
+                    metrics.get("total_trades"),
+                    lambda v: f"{v}",
+                    lambda _v: AppColors.TEXT_PRIMARY,
                 ),
             ]
         ),
@@ -360,7 +369,6 @@ def _build_metrics_section(
     # BT-03: 第三行展示仓位运用效率指标（资金闲置可见性）
     avg_invested = metrics.get("avg_invested_pct")
     min_invested = metrics.get("min_invested_pct")
-    cash_drag_days = metrics.get("cash_drag_days", 0)
     row3 = ft.ResponsiveRow(
         controls=safe_controls(
             [
@@ -381,16 +389,12 @@ def _build_metrics_section(
                     ),
                     col=_COL_QUARTER,
                 ),
-                ft.Container(
-                    content=_metric_card(
-                        I18n.get("backtest_metric_cash_drag_days"),
-                        f"{int(cash_drag_days)}",
-                        AppColors.ERROR
-                        if (isinstance(cash_drag_days, (int, float)) and cash_drag_days > 0)
-                        else AppColors.TEXT_PRIMARY,
-                        tooltip=I18n.get("backtest_metric_cash_drag_tooltip"),
-                    ),
-                    col=_COL_QUARTER,
+                _optional_metric_card(
+                    I18n.get("backtest_metric_cash_drag_days"),
+                    metrics.get("cash_drag_days"),
+                    lambda v: f"{int(v)}",
+                    lambda v: AppColors.ERROR if v > 0 else AppColors.TEXT_PRIMARY,
+                    tooltip=I18n.get("backtest_metric_cash_drag_tooltip"),
                 ),
             ]
         ),
@@ -774,10 +778,12 @@ def _build_chart_summary(
     if nav_curve:
         lines.append(I18n.get("backtest_chart_summary_start_nav", nav=f"{nav_curve[0]:,.0f}"))
         lines.append(I18n.get("backtest_chart_summary_end_nav", nav=f"{nav_curve[-1]:,.0f}"))
-    if "total_return" in metrics:
-        lines.append(I18n.get("backtest_chart_summary_total_return", value=f"{metrics['total_return'] * 100:.2f}%"))
-    if "max_drawdown" in metrics:
-        lines.append(I18n.get("backtest_chart_summary_max_dd", value=f"{metrics['max_drawdown'] * 100:.2f}%"))
+    total_return = metrics.get("total_return")
+    if total_return is not None:
+        lines.append(I18n.get("backtest_chart_summary_total_return", value=f"{total_return * 100:.2f}%"))
+    max_drawdown = metrics.get("max_drawdown")
+    if max_drawdown is not None:
+        lines.append(I18n.get("backtest_chart_summary_max_dd", value=f"{max_drawdown * 100:.2f}%"))
 
     # DAT-07①: 回测报告显式标注"基本面数据为最新修订版，存在重述偏差"（accepted tradeoff，见 docs/debt/known-technical-debt.md）
     lines.append(I18n.get("backtest_chart_summary_data_note"))
