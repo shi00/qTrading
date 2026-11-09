@@ -292,10 +292,12 @@ def get_sidecar_protocol_version() -> str:
     return m.group(1)
 
 
-def query_sidecar_version_json(sidecar_binary: Path) -> dict[str, object]:
+def query_sidecar_version_json(sidecar_binary: Path) -> object:
     """调用 ``sidecar version --json`` 获取构建元数据。
 
-    返回 sidecar 输出的 JSON dict（schema qtrading.embedded_postgres.version.v1）。
+    返回 sidecar 输出经 ``json.loads`` 解析的任意 JSON 值（object）。合法工件应为
+    dict（schema qtrading.embedded_postgres.version.v1），但损坏/旧协议工件可能输出
+    其他形态，调用方须先做 payload 结构校验（VV-01），再提取版本字段。
     用于 --check-sidecar-binary 启用的四方校验。
     """
     if not sidecar_binary.exists():
@@ -332,6 +334,10 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
     - sidecar version --json 的 protocol_version 与上述一致
     - sidecar version --json 的 postgres_version 与上述一致
     - sidecar version --json 的 postgresql_embedded_version 与上述一致
+
+    四方校验前先做 payload schema 门（VV-01）：version --json 输出必须是 dict，
+    且四个版本字段均为非空字符串；缺失/空/错型逐字段记 error 并短路（缺失不等于
+    相等，不完整/旧协议工件不得静默绕过版本证明，须重建 binary）。
     """
     errors: list[str] = []
 
@@ -398,23 +404,46 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
         except (RuntimeError, FileNotFoundError) as exc:
             errors.append(f"--check-sidecar-binary failed: {exc}")
             return errors
-        binary_sidecar_ver = str(version_json.get("sidecar_version", ""))
-        binary_protocol_ver = str(version_json.get("protocol_version", ""))
-        binary_pg_ver = str(version_json.get("postgres_version", ""))
-        binary_crate_ver = str(version_json.get("postgresql_embedded_version", ""))
-        if binary_sidecar_ver and binary_sidecar_ver != cargo_ver:
+        # VV-01 payload schema 门：缺失/空/错型不等于相等，不完整或旧协议工件不得
+        # 静默绕过版本证明（须重建 binary，而非自动填当前版本）。
+        if not isinstance(version_json, dict):
+            payload_repr = repr(version_json)
+            if len(payload_repr) > 200:
+                payload_repr = payload_repr[:200] + "...(truncated)"
+            errors.append(
+                f"sidecar version --json returned non-dict JSON payload "
+                f"(expected version object, got {type(version_json).__name__}): {payload_repr}"
+            )
+            return errors
+        schema_invalid = False
+        for field in ("sidecar_version", "protocol_version", "postgres_version", "postgresql_embedded_version"):
+            value = version_json.get(field)
+            if not isinstance(value, str) or not value:
+                errors.append(
+                    f"sidecar version --json field '{field}' missing or not a non-empty string "
+                    f"(got {value!r} of type {type(value).__name__}); "
+                    "binary artifact incomplete or outdated, rebuild required"
+                )
+                schema_invalid = True
+        if schema_invalid:
+            return errors
+        binary_sidecar_ver = version_json["sidecar_version"]
+        binary_protocol_ver = version_json["protocol_version"]
+        binary_pg_ver = version_json["postgres_version"]
+        binary_crate_ver = version_json["postgresql_embedded_version"]
+        if binary_sidecar_ver != cargo_ver:
             errors.append(f"sidecar binary sidecar_version '{binary_sidecar_ver}' != Cargo.toml version '{cargo_ver}'")
-        if binary_protocol_ver and binary_protocol_ver != pyproject_protocol:
+        if binary_protocol_ver != pyproject_protocol:
             errors.append(
                 f"sidecar binary protocol_version '{binary_protocol_ver}' != "
                 f"pyproject.toml protocol_version '{pyproject_protocol}'"
             )
-        if binary_pg_ver and binary_pg_ver != pyproject_pg_ver:
+        if binary_pg_ver != pyproject_pg_ver:
             errors.append(
                 f"sidecar binary postgres_version '{binary_pg_ver}' != "
                 f"pyproject.toml postgresql_version '{pyproject_pg_ver}'"
             )
-        if binary_crate_ver and binary_crate_ver != pyproject_crate_ver:
+        if binary_crate_ver != pyproject_crate_ver:
             errors.append(
                 f"sidecar binary postgresql_embedded_version '{binary_crate_ver}' != "
                 f"pyproject.toml crate_version '{pyproject_crate_ver}'"
