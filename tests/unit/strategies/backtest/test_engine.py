@@ -2086,6 +2086,7 @@ class TestEnrichLimitStatus:
 
     @pytest.mark.asyncio
     async def test_limit_data_marks_limit_stocks(self):
+        """ENGINE-01：表非空但只覆盖部分标的 → 覆盖未核实告警（不是「已确认无限价」）。"""
         import pandas as pd
 
         engine = self._make_engine()
@@ -2118,7 +2119,112 @@ class TestEnrichLimitStatus:
         assert limit_down_list[0] == 9.0
         assert limit_up_list[1] is None
         assert limit_down_list[1] is None
+        assert warning is not None
+        assert warning.warning_type == "limit_coverage_unverified"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        assert warning.affected_stock_count == 1
+        assert "未核实" in warning.error_message
+        # R21 BT-03：落库 round-trip 后 category 仍为 data_quality（不得退化为无信息）。
+        assert WarningCategory.category_of(str(warning)) == WarningCategory.DATA_QUALITY
+
+    @pytest.mark.asyncio
+    async def test_full_limit_coverage_returns_no_warning(self):
+        """完整覆盖（每只标的每行均有涨跌停价）→ 不产生告警。"""
+        import pandas as pd
+
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        limit_pd = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "up_limit": [11.0, 22.0],
+                "down_limit": [9.0, 18.0],
+            }
+        )
+        engine.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=limit_pd)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
+
         assert warning is None
+        assert result["limit_up_price"].to_list() == [11.0, 22.0]
+        assert result["limit_down_price"].to_list() == [9.0, 18.0]
+
+    @pytest.mark.asyncio
+    async def test_limit_table_nonempty_but_no_matching_rows_warns_unverified(self):
+        """表非空但与行情键完全不匹配 → 全部行情行覆盖未核实（不是 limit_data_absent）。"""
+        import pandas as pd
+
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        limit_pd = pd.DataFrame(
+            {
+                "ts_code": ["000003.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "up_limit": [33.0],
+                "down_limit": [27.0],
+            }
+        )
+        engine.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=limit_pd)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
+
+        assert all(v is None for v in result["limit_up_price"].to_list())
+        assert all(v is None for v in result["limit_down_price"].to_list())
+        assert warning is not None
+        assert warning.warning_type == "limit_coverage_unverified"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        assert warning.affected_stock_count == 2
+
+    @pytest.mark.asyncio
+    async def test_partially_null_limit_field_warns_unverified(self):
+        """命中行但单个字段为空（源数据 NULL/NaN）→ 仍视为覆盖未核实。"""
+        import pandas as pd
+
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        limit_pd = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "up_limit": [11.0],
+                "down_limit": [None],
+            }
+        )
+        engine.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=limit_pd)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "close": [10.0],
+            }
+        )
+
+        result, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
+
+        assert result["limit_up_price"].to_list() == [11.0]
+        assert result["limit_down_price"].to_list()[0] is None
+        assert warning is not None
+        assert warning.warning_type == "limit_coverage_unverified"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        assert warning.affected_stock_count == 1
 
     @pytest.mark.asyncio
     async def test_exception_creates_warning(self):

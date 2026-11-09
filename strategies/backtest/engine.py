@@ -645,7 +645,31 @@ class VectorBacktestEngine:
             )
 
             quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
-            return quotes_df, None
+            # ENGINE-01 / R21：整表为空是「区间内确认无限价」（limit_data_absent），但表非空
+            # 却缺键或缺字段只是「覆盖未核实（未知）」——左连接后的 NULL 不得被静默当作
+            # 「已确认当日无限价」。存在缺失行时产出结果级告警；完整覆盖仍返回 None，
+            # 不改变撮合行为与返回结构。
+            unverified = quotes_df.filter(pl.col("limit_up_price").is_null() | pl.col("limit_down_price").is_null())
+            if unverified.is_empty():
+                return quotes_df, None
+
+            codes = sorted(unverified["ts_code"].unique().to_list())
+            sample = "、".join(codes[:5])
+            more = f" 等共 {len(codes)} 只" if len(codes) > 5 else ""
+            warning = DataWarning(
+                warning_type="limit_coverage_unverified",
+                category=WarningCategory.DATA_QUALITY,
+                start_date=start_date,
+                end_date=end_date,
+                affected_stock_count=len(codes),
+                error_message=(
+                    f"stk_limit 表在该区间覆盖不完整或数值缺失：{sample}{more} 的涨跌停价格为空，"
+                    "涨跌停撮合保护对这些行是否生效未核实（未知）。"
+                    "缺失字段无法参与涨停买入/跌停卖出判定，但这不代表已确认其当日未涨停/未跌停或成交可执行；"
+                    "请补齐 stk_limit 覆盖后重跑。"
+                ),
+            )
+            return quotes_df, warning
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出涨跌停价格补充异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             sanitized_msg = DataSanitizer.sanitize_error(e)

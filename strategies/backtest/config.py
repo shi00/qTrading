@@ -27,6 +27,9 @@ class DataWarning:
         "limit_enrich_failed",
         "suspend_data_absent",
         "limit_data_absent",
+        # ENGINE-01 / R21：stk_limit 表非空但只覆盖部分行情键（或字段为空）——
+        # 「覆盖未核实（未知）」不得与「已确认当日无限价」混为一谈。
+        "limit_coverage_unverified",
         "benchmark_data_absent",
         "benchmark_data_partial",
         "portfolio_wiped_out",
@@ -116,6 +119,8 @@ class WarningCategory:
         "limit_enrich_failed": "data_quality",
         "suspend_data_absent": "data_quality",
         "limit_data_absent": "data_quality",
+        # ENGINE-01 / R21：覆盖未核实（未知）→ data_quality（fail-closed，未知按不可信处理）。
+        "limit_coverage_unverified": "data_quality",
         "benchmark_data_absent": "data_quality",
         "benchmark_data_partial": "data_quality",
         "portfolio_wiped_out": "termination",
