@@ -365,7 +365,11 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
     # ------------------------------------------------------------------
 
     async def load(self) -> None:
-        """读取已提交快照，构建每场景草稿与候选选择器选项。"""
+        """读取已提交快照，构建每场景草稿与候选选择器选项。
+
+        陈旧快照（``config_revision`` 低于本 VM 已前移的基线）不回退现态：双读取
+        屏障可能乱序返回，旧快照不得覆盖新基线（R22 单调性）。
+        """
         try:
             snapshot: ModelManagementSnapshot = await self._service.get_snapshot()
         except asyncio.CancelledError:
@@ -373,6 +377,8 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         except Exception:
             self._set_state(save_state=_SAVE_ERROR, message=Message("model_routes_load_failed"))
             return
+        if snapshot.config_revision < self._config_revision:
+            return  # 陈旧快照：保留现态，不把已前移的 CAS 基线回退
 
         drafts = _build_drafts(snapshot.scenario_routes)
         options = tuple(_option_from_mapping(c) for c in snapshot.connections)
@@ -406,10 +412,15 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
           候选选择器选项，不覆盖用户正在编辑的分叉草稿（``_rebase_drafts``）；
         - 冲突 / 失败态就地恢复（conflict / error → idle），commit_unknown 与 saving
           不动（F31 回执语义与在途提交不受重基干扰）；
-        - 撤销记录清除（重基后撤销语义失效，非丢草稿）。
+        - 撤销记录清除（重基后撤销语义失效，非丢草稿）；
+        - 向导阶段内草稿注入（``_wizard_option_id``）在选项重建后重新叠加，注入项
+          不被快照刷新丢弃（见 ``_rebuild_options_with_wizard_overlay``）；
+        - 陈旧快照（``config_revision`` 低于已前移基线）拒绝重基，不把 CAS 基线回退
+          （双读取屏障可能乱序返回；R22 单调性）。
 
         Returns:
-            ``True`` 表示重基成功；``False`` 表示读快照失败（不伪装成功，R21）。
+            ``True`` 表示重基成功；``False`` 表示读快照失败或快照已过期
+            （不伪装成功，R21）。
         """
         self._track_inflight_cancellable()  # F40：只读刷新，页面卸载可安全取消
         try:
@@ -418,10 +429,12 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             raise  # R2: 必须传播
         except Exception:
             return False
+        if snapshot.config_revision < self._config_revision:
+            return False  # 陈旧快照：保留现态，不回退已前移的基线
 
         new_committed = _build_drafts(snapshot.scenario_routes)
         rebased = _rebase_drafts(self._state.routes, self._state.committed_routes, new_committed)
-        options = tuple(_option_from_mapping(c) for c in snapshot.connections)
+        options = self._rebuild_options_with_wizard_overlay(snapshot.connections)
         self._config_revision = snapshot.config_revision
         self._raw_connections = snapshot.connections
         self._usage_policy = snapshot.usage_policy
@@ -611,12 +624,10 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
 
         new_option = _option_from_mapping(dict(option))
         if prior_id is not None and new_option.connection_id == prior_id:
-            # 同一注入的形态刷新（草稿字段编辑）：shadow 语义不变
-            options = tuple(
-                new_option if o.connection_id == new_option.connection_id else o
-                for o in self._state.available_connections
-            )
-            self._set_state(available_connections=options)
+            # 同一注入的形态刷新（草稿字段编辑）：shadow 语义不变。注入项可能因
+            # 选项曾被整体重建而缺失，此时重新追加（防御；重基保留注入见
+            # _rebuild_options_with_wizard_overlay）
+            self._set_state(available_connections=self._overlay_option(self._state.available_connections, new_option))
             return
 
         options = self._state.available_connections
@@ -687,6 +698,20 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             return
         except Exception:
             self._set_state(save_state=_SAVE_ERROR, message=Message("model_routes_save_failed"))
+            return
+
+        receipt_revision = (
+            outcome.committed_revision if outcome.committed_revision is not None else outcome.current_revision
+        )
+        if outcome.status == "committed" and receipt_revision is not None and receipt_revision < self._config_revision:
+            # 迟到回执（MR-001）：等待期间基线已被更新（重基 / 新回执）前移，本次提交内容
+            # 已非最新基线——只结束 saving 并宣告已提交；不得以冻结的旧 A 覆盖 committed
+            # 行、不得回退 revision、不得动草稿。宿主 effect 经 commit_seq 触发重基。
+            self._set_state(
+                save_state=_SAVE_COMMITTED,
+                message=Message("model_routes_save_committed"),
+                commit_seq=self._state.commit_seq + 1,
+            )
             return
 
         self._absorb_revision(outcome)
@@ -827,11 +852,49 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             changes["undo_available"] = undo_available
         self._set_state(**changes)
 
+    @staticmethod
+    def _overlay_option(
+        options: tuple[ConnectionOption, ...], injected: ConnectionOption
+    ) -> tuple[ConnectionOption, ...]:
+        """把注入项叠加到选项列表：同 id 替换，否则追加（不产生重复 id）。"""
+        if any(o.connection_id == injected.connection_id for o in options):
+            return tuple(injected if o.connection_id == injected.connection_id else o for o in options)
+        return (*options, injected)
+
+    def _rebuild_options_with_wizard_overlay(
+        self, connections: tuple[Mapping[str, Any], ...]
+    ) -> tuple[ConnectionOption, ...]:
+        """由快照重建选项列表，并重新叠加向导阶段内草稿注入（MR-003）。
+
+        快照重建整体替换 ``available_connections``；若不重新叠加注入项，未提交的
+        草稿连接会被丢弃，而 ``_wizard_option_id`` 仍指向它，后续同 id 形态刷新
+        也无法追回（选择器不再提供当前草稿连接）。
+
+        - 注入项取自重建前的 ``available_connections``（其形态即当前草稿形态）；
+        - 同 id 快照项由注入项覆盖，快照缺失该 id 时追加到末尾（不重复）；
+        - ``_wizard_option_shadow`` 跟随新快照同 id 项，清除注入时恢复最新 revision
+          而非被替换前的旧快照项；新快照已无该 id 时置 None（清除即移除注入项）。
+        """
+        snapshot_options = tuple(_option_from_mapping(c) for c in connections)
+        if self._wizard_option_id is None:
+            return snapshot_options
+        injected = next(
+            (o for o in self._state.available_connections if o.connection_id == self._wizard_option_id),
+            None,
+        )
+        self._wizard_option_shadow = next(
+            (o for o in snapshot_options if o.connection_id == self._wizard_option_id), None
+        )
+        if injected is None:
+            return snapshot_options
+        return self._overlay_option(snapshot_options, injected)
+
     def _absorb_revision(self, outcome: ConfigurationSaveOutcome) -> None:
+        """吸收回执 revision：只前移不回退（迟到回执不得回退已前移的 CAS 基线，R22）。"""
         new_revision = (
             outcome.committed_revision if outcome.committed_revision is not None else outcome.current_revision
         )
-        if new_revision is not None:
+        if new_revision is not None and new_revision > self._config_revision:
             self._config_revision = new_revision
 
     def _save_route_for(self, scenario_id: str) -> ScenarioRouteDraft:

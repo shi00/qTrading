@@ -389,6 +389,40 @@ class TestCandidatePicker:
         root, _, _ = _render(vm)
         assert _maybe_find(root, "candidate_picker") is None
 
+    def test_search_field_has_persistent_label(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """无障碍基线 §2.1：搜索框有非空持久 label，不依赖 hint_text/tooltip 充当标签。"""
+        vm = _FakeRoutesVM(_picker_state())
+        root, _, _ = _render(vm)
+        field = _find(root, "picker_search")
+        assert isinstance(field, ft.TextField)
+        assert field.label == "model_routes_picker_search"
+        assert isinstance(field.label, str) and field.label.strip()
+        # 既有占位 / tooltip / 事件绑定保持不变。
+        assert field.hint_text == "model_routes_picker_search"
+        assert field.tooltip == "model_routes_picker_search"
+        assert callable(field.on_change)
+
+    def test_label_persists_and_filter_unchanged_after_typing(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """输入文本后 label 仍保留；按名称 / 连接 id 的筛选行为不变。"""
+        vm = _FakeRoutesVM(_picker_state())
+        root, component, _ = _render(vm)
+        field = _find(root, "picker_search")
+        field.value = "conn_c"
+        event = _make_event()
+        event.control = field
+        field.on_change(event)
+        with patch.object(editor_module, "I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, **kw: key
+            rerendered = render_once(component)
+        field_after = _find(rerendered, "picker_search")
+        assert field_after.value == "conn_c"
+        assert field_after.label == "model_routes_picker_search"
+        assert _maybe_find(rerendered, "picker_option_conn_c") is not None
+        assert _maybe_find(rerendered, "picker_option_conn_a") is None
+        assert _maybe_find(rerendered, "picker_option_conn_b") is None
+        # 筛选后取消按钮仍可用（补 label 不影响既有布局 / 事件）。
+        assert callable(_find(rerendered, "picker_close").on_click)
+
     def test_selected_option_disabled_and_incompatible_shown(self, mock_i18n_state, mock_app_colors_state) -> None:
         vm = _FakeRoutesVM(_picker_state())
         root, _, _ = _render(vm)

@@ -18,6 +18,7 @@
 import asyncio
 import contextlib
 import inspect
+import logging
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -529,21 +530,91 @@ class TestSelectFileHelper:
 
         update.assert_not_called()
 
-    def test_select_file_error_logs_and_no_raise(self) -> None:
+    def test_select_file_error_logs_and_shows_toast(self, caplog) -> None:
+        """pick_files 抛异常 → 分类脱敏日志 + 用户可见 error toast，且不清空已有路径。"""
         picker = MagicMock(spec=ft.FilePicker)
 
-        async def _raise() -> None:
+        async def _raise(**_kwargs: Any) -> None:
+            raise RuntimeError("picker unavailable")
+
+        picker.pick_files = MagicMock(side_effect=_raise)
+        update = MagicMock()
+        page = MagicMock()
+
+        with patch.object(form_module, "show_toast") as mock_show_toast:
+            with caplog.at_level(logging.ERROR, logger=form_module.__name__):
+                asyncio.run(_select_file(picker, update, ["gguf"], page=page))
+
+        mock_show_toast.assert_called_once_with(
+            page,
+            f"{form_module.I18n.get(form_module.KEY_BTN_SELECT_FILE)}: {form_module.I18n.get('common_op_fail')}",
+            "error",
+        )
+        update.assert_not_called()
+        error_messages = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("File pick failed" in msg for msg in error_messages)
+
+    def test_select_file_error_without_page_does_not_crash(self) -> None:
+        """无 page 上下文（直接调用）时失败不崩溃：page=None 交由 toast 层静默处理。"""
+        picker = MagicMock(spec=ft.FilePicker)
+
+        async def _raise(**_kwargs: Any) -> None:
             raise RuntimeError("picker unavailable")
 
         picker.pick_files = MagicMock(side_effect=_raise)
         update = MagicMock()
 
-        with patch.object(form_module, "logger") as mock_logger:
+        with patch.object(form_module, "show_toast") as mock_show_toast:
             asyncio.run(_select_file(picker, update, ["gguf"]))
 
-        assert mock_logger.error.call_count == 1
-        assert mock_logger.error.call_args.args[0] == "[ModelConnectionForm] File pick failed: %s"
+        assert mock_show_toast.call_args.args[0] is None
         update.assert_not_called()
+
+    def test_select_file_cancelled_propagates_without_toast(self) -> None:
+        """R2: CancelledError 必须继续传播，且不弹失败 toast、不更新路径。"""
+        picker = MagicMock(spec=ft.FilePicker)
+
+        async def _raise(**_kwargs: Any) -> None:
+            raise asyncio.CancelledError()
+
+        picker.pick_files = MagicMock(side_effect=_raise)
+        update = MagicMock()
+
+        with patch.object(form_module, "show_toast") as mock_show_toast:
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                asyncio.run(_select_file(picker, update, ["gguf"], page=MagicMock()))
+            assert exc_info.type is asyncio.CancelledError
+
+        mock_show_toast.assert_not_called()
+        update.assert_not_called()
+
+
+# ============================================================================
+# 选择文件按钮：调度 _select_file 且显式传入 page（失败 toast 依赖）
+# ============================================================================
+
+
+class TestSelectFileClick:
+    def test_click_schedules_select_file_with_page(self, mock_i18n_state, mock_app_colors_state) -> None:
+        state = ModelConnectionsState(draft=_draft(adapter_kind=ADAPTER_GGUF_CHAT))
+        vm, page, result, _ = _render_form(state, editor_step=1)
+        buttons = [
+            c
+            for c in _walk_controls(result)
+            if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.FOLDER_OPEN
+        ]
+        assert len(buttons) == 1
+
+        run_task = cast(MagicMock, cast(Any, page).run_task)
+        run_task.reset_mock()
+        _invoke(buttons[0].on_click, _make_event())
+
+        assert run_task.call_count == 1
+        call_args = run_task.call_args
+        assert call_args.args[0] is _select_file
+        assert isinstance(call_args.args[1], ft.FilePicker)
+        assert call_args.args[2:] == (vm.update_dialog_model_path, ["gguf"])
+        assert call_args.kwargs == {"page": page}
 
 
 # ============================================================================

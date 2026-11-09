@@ -224,6 +224,28 @@ class TestLoad:
         assert vm.state.save_state == "error"
         assert isinstance(vm.state.message, Message)
 
+    @pytest.mark.asyncio
+    async def test_load_rejects_stale_snapshot_and_keeps_state(self):
+        """陈旧快照不回退已前移基线（双读取屏障可能乱序返回）。"""
+        vm, service = _make_vm(_snapshot(config_revision=6))
+        await vm.load()
+        before = vm.state
+
+        stale = _snapshot(
+            config_revision=5,
+            routes=[
+                _route_mapping("news_annotation", ("conn-b",)),
+                _route_mapping("stock_analysis", ()),
+                _route_mapping("news_risk", ()),
+            ],
+        )
+        service.get_snapshot = AsyncMock(return_value=stale)
+        await vm.load()
+
+        assert vm.state is before  # 现态未被旧快照覆盖
+        assert vm.build_payload("news_annotation")["config_revision"] == 6
+        assert _committed_candidates(vm, "news_annotation") == ()
+
 
 # --- per-scenario drafts ---
 
@@ -1005,6 +1027,114 @@ class TestRebaseSnapshot:
         assert vm.state.available_connections[0].connection_revision == 4
 
 
+class TestStaleReceiptFreshness:
+    """MR-001：迟到保存回执与陈旧快照不得回退已前移的基线。"""
+
+    @pytest.mark.asyncio
+    async def test_stale_receipt_after_rebase_keeps_newer_baseline_and_draft(self):
+        """rev5 保存 A 挂起 → rebase 接受 rev7（内容不同）→ 放行回执 rev6。
+
+        迟到回执只结束 saving：不得回退 revision、不得以旧 A 覆盖 committed 行、
+        不得动在途草稿 B；commit_seq 只增一次。
+        """
+        vm, service = _make_vm(
+            _snapshot(
+                config_revision=5,
+                routes=[
+                    _route_mapping("news_annotation", ()),
+                    _route_mapping("stock_analysis", ("conn-a",), timeout=180),
+                    _route_mapping("news_risk", ()),
+                ],
+            )
+        )
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        vm.add_candidate("conn-b")  # A = conn-a, conn-b
+        controlled = _ControlledSave(_committed_outcome(6))  # 服务已提交 revision 6，回执迟到
+        service.save_draft = controlled
+
+        save_task = asyncio.create_task(vm.save_current_scenario())
+        await controlled.started.wait()
+        vm.remove_candidate("conn-a")  # 在途形成分叉草稿 B = conn-b
+
+        newer = _snapshot(
+            config_revision=7,
+            routes=[
+                _route_mapping("news_annotation", ()),
+                _route_mapping("stock_analysis", ("conn-c",), timeout=180, revision=3),
+                _route_mapping("news_risk", ()),
+            ],
+        )
+        service.get_snapshot = AsyncMock(return_value=newer)
+        assert await vm.rebase_snapshot() is True
+        assert _committed_candidates(vm, "stock_analysis") == ("conn-c",)
+
+        controlled.release.set()
+        await save_task
+
+        # 服务实收 payload 仍以发起时的 revision 5 为 CAS 基线（不因 rebase 改写历史请求）
+        assert controlled.payloads[0]["config_revision"] == 5
+        # 基线 / 原始元数据停在 7：迟到回执不回退 revision，也不以旧 A 覆盖 committed 行
+        assert vm.build_payload("stock_analysis")["config_revision"] == 7
+        assert _committed_candidates(vm, "stock_analysis") == ("conn-c",)
+        # 草稿 B 保留、dirty 相对 7 基线不变、commit_seq 只增一次
+        assert _route_candidates(vm, "stock_analysis") == ("conn-b",)
+        assert dict(vm.state.dirty_counts)["stock_analysis"] == 2
+        assert vm.state.save_state == "committed"
+        assert vm.state.message is not None and vm.state.message.key == "model_routes_save_committed"
+        assert vm.state.commit_seq == 1
+
+    @pytest.mark.asyncio
+    async def test_out_of_order_rebase_reads_keep_newest(self):
+        """双读取屏障乱序返回 7 → 6：旧快照拒绝重基并保留 7 现态。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+
+        newest = _snapshot(
+            config_revision=7,
+            routes=[
+                _route_mapping("news_annotation", ()),
+                _route_mapping("stock_analysis", ("conn-c",), timeout=180, revision=3),
+                _route_mapping("news_risk", ()),
+            ],
+        )
+        service.get_snapshot = AsyncMock(return_value=newest)
+        assert await vm.rebase_snapshot() is True
+        after_newest = vm.state
+
+        older = _snapshot(
+            config_revision=6,
+            routes=[
+                _route_mapping("news_annotation", ("conn-b",)),
+                _route_mapping("stock_analysis", ("conn-a",), timeout=180, revision=2),
+                _route_mapping("news_risk", ()),
+            ],
+        )
+        service.get_snapshot = AsyncMock(return_value=older)
+        assert await vm.rebase_snapshot() is False  # 乱序旧快照不伪装成功
+
+        assert vm.state is after_newest  # 现态未被旧快照覆盖
+        assert vm.build_payload("news_annotation")["config_revision"] == 7
+        assert _committed_candidates(vm, "news_annotation") == ()
+
+    @pytest.mark.asyncio
+    async def test_unknown_outcome_does_not_roll_back_revision(self):
+        """commit_unknown 回执的 current_revision 低于已前移基线时不回退 revision。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=7))
+        assert await vm.rebase_snapshot() is True
+        service.save_draft = AsyncMock(
+            return_value=ConfigurationSaveOutcome(status="commit_unknown", current_revision=6)
+        )
+
+        vm.add_candidate("conn-a")
+        await vm.save_current_scenario()
+
+        assert vm.state.save_state == "commit_unknown"
+        assert vm.build_payload("news_annotation")["config_revision"] == 7
+
+
 class TestCommitSeq:
     """F30：commit_seq 仅 committed 递增（宿主协调触发信号）。"""
 
@@ -1197,6 +1327,96 @@ class TestAttachInWizardOption:
         vm, _ = _pending_vm()
         await vm.load()
         vm.attach_in_wizard_option(_wizard_option())
+        await vm.load()
+        assert "conn-draft" not in _option_ids(vm)
+
+
+class TestRebaseKeepsWizardInjection:
+    """MR-003：重基重建选项后仍保留向导阶段内未提交草稿连接。"""
+
+    @pytest.mark.asyncio
+    async def test_rebase_keeps_new_draft_and_same_id_refresh_updates_name(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option("conn-draft", name="草稿名"))
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        assert await vm.rebase_snapshot() is True
+        assert _option_ids(vm).count("conn-draft") == 1
+
+        # 连续重基不产生重复注入项
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=7))
+        assert await vm.rebase_snapshot() is True
+        assert _option_ids(vm).count("conn-draft") == 1
+
+        # 同 id 形态刷新：沿用草稿最新形态（不因重基曾丢失而 no-op）
+        vm.attach_in_wizard_option(_wizard_option("conn-draft", name="新草稿名"))
+        assert _option_ids(vm).count("conn-draft") == 1
+        option = next(o for o in vm.state.available_connections if o.connection_id == "conn-draft")
+        assert option.name == "新草稿名"
+
+    @pytest.mark.asyncio
+    async def test_clear_after_rebase_removes_only_injection(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option("conn-draft"))
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        assert await vm.rebase_snapshot() is True
+
+        vm.attach_in_wizard_option(None)
+        assert _option_ids(vm) == ("conn-a", "conn-b")
+
+    @pytest.mark.asyncio
+    async def test_switch_injection_id_after_rebase(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option("conn-d1"))
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        assert await vm.rebase_snapshot() is True
+        vm.attach_in_wizard_option(_wizard_option("conn-d2"))
+
+        ids = _option_ids(vm)
+        assert "conn-d1" not in ids
+        assert ids.count("conn-d2") == 1
+
+    @pytest.mark.asyncio
+    async def test_clear_after_rebase_restores_latest_snapshot_revision(self):
+        """同 id 注入覆盖快照项：外部 revision 前移后重基，清除恢复最新快照项。"""
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option("conn-b", name="编辑中"))
+
+        service.get_snapshot = AsyncMock(
+            return_value=_snapshot(
+                config_revision=6,
+                connections=[
+                    _connection_mapping("conn-a", name="主连接", revision=3),
+                    _connection_mapping("conn-b", name="备用连接", revision=4),
+                ],
+            )
+        )
+        assert await vm.rebase_snapshot() is True
+        injected = next(o for o in vm.state.available_connections if o.connection_id == "conn-b")
+        assert injected.name == "编辑中"
+        assert _option_ids(vm).count("conn-b") == 1
+
+        vm.attach_in_wizard_option(None)
+        restored = next(o for o in vm.state.available_connections if o.connection_id == "conn-b")
+        assert restored.name == "备用连接"
+        assert restored.connection_revision == 4
+
+    @pytest.mark.asyncio
+    async def test_load_still_resets_injection_after_rebase(self):
+        """load 契约不变：整表重载清空注入追踪（不因重基保留而失效）。"""
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option("conn-draft"))
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        assert await vm.rebase_snapshot() is True
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=7))
         await vm.load()
         assert "conn-draft" not in _option_ids(vm)
 
