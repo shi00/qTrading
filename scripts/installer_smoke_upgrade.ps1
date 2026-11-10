@@ -38,6 +38,9 @@ $PgRuntimeDir = Join-Path (Split-Path -Parent $PgDataDir) "runtime"
 $PgPasswordFile = Join-Path $PgRuntimeDir "password"
 $PgVersionFile = Join-Path $PgDataDir "PG_VERSION"
 $PsqlExePath = Join-Path $PgInstallDir "bin\psql.exe"
+# sidecar 自述状态（paths.rs：state_file = runtime\state.json；run.rs 启动失败时写
+# status=failed 与 last_start_error），用于诊断「等库超时」的真实原因。
+$PgStateFile = Join-Path $PgRuntimeDir "state.json"
 # 与 sidecars/qtrading-pg-sidecar/src/cli.rs 的 DEFAULT_USERNAME / DEFAULT_DATABASE 一致
 $PgUsername = "postgres"
 $PgDatabase = "qtrading"
@@ -151,20 +154,50 @@ function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql, [string]$Datab
 # sidecar 的 `status` 在 postmaster 进程存活时即推导为 running（commands.rs derive_status），
 # 早于 run.rs 步骤 10 的 ensure_database。冒烟若只等 sidecar ready 就写哨兵，会与建库竞态
 # （run 42324064125 因此报 database "qtrading" does not exist）。故额外轮询业务库是否已存在。
+# 超时不再静默返回：run 42750440663 中两个 embedded 变体只得到同一句断言文案，无法区分
+# 「认证失败 / 连接被拒 / sidecar 建库失败后退出」，故必须带出末次错误与 sidecar 自述状态。
 function Wait-AppDatabaseReady([string]$Password, [int]$TimeoutSec = 120) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $attempts = 0
+    $lastError = $null
+    $port = $null
     while ((Get-Date) -lt $deadline) {
+        $attempts++
         try {
             $port = Get-PostgresPort -DataDir $PgDataDir
             $exists = Invoke-Psql -Password $Password -Port $port -Database "postgres" `
                 -Sql "select 1 from pg_database where datname = '$PgDatabase'"
             if ($exists -eq "1") { return $true }
+            $lastError = "postgres reachable (port $port) but pg_database has no '$PgDatabase' row"
         } catch {
-            # 启动期连接可能被拒或 postmaster.pid 竞争：继续轮询，最终由调用方断言
+            # 启动期连接可能被拒或 postmaster.pid 竞争：保留末次错误用于超时取证，继续轮询
+            $lastError = $_.Exception.Message
         }
         Start-Sleep -Seconds 2
     }
+    Write-Fail "application database '$PgDatabase' not ready within ${TimeoutSec}s ($attempts attempts, last port: $port)"
+    Write-Fail "last probe error: $lastError"
+    $appAlive = @(Get-Process -Name "AStockScreener" -ErrorAction SilentlyContinue).Count -gt 0
+    $sidecarAlive = @(Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue).Count -gt 0
+    Write-Fail "process alive: qTrading=$appAlive, qtrading-pg-sidecar=$sidecarAlive"
+    Write-Fail "sidecar state: $(Get-SidecarStateDigest)"
     return $false
+}
+
+# 读 sidecar 的 state.json（status / last_start_error / port / postgres_pid）做超时取证；
+# 文件缺失或解析失败同样如实报告，不得用空字符串让「无信息」冒充「无异常」。
+function Get-SidecarStateDigest {
+    if (-not (Test-Path $PgStateFile)) { return "state.json missing ($PgStateFile)" }
+    try {
+        $state = Get-Content -Path $PgStateFile -Raw | ConvertFrom-Json
+    } catch {
+        return "state.json unreadable: $($_.Exception.Message)"
+    }
+    $names = @($state.PSObject.Properties.Name)
+    $fields = foreach ($name in @("status", "last_start_error", "port", "postgres_pid")) {
+        if ($names -contains $name) { "$name=$($state.$name)" } else { "$name=<absent>" }
+    }
+    return ($fields -join ", ")
 }
 
 function Stop-QtradingGraceful {

@@ -734,6 +734,29 @@ def test_upgrade_script_round_trips_sentinel_across_upgrade() -> None:
     assert insert_idx < upgrade_idx < readback_idx, "升级脚本必须按「写哨兵 → 升级安装 → 读回哨兵」顺序执行"
 
 
+def test_wait_app_database_ready_dumps_diagnostics_on_timeout() -> None:
+    """负向：等库超时不得静默返回 $false（run 42750440663 两个变体无法定位根因）。
+
+    超时必须带出末次探测错误、进程存活与 sidecar state.json 的 last_start_error，
+    否则「密码认证失败 / 连接被拒 / 建库失败后 sidecar 退出」共用同一句断言文案。
+    """
+    text = _read("installer_smoke_upgrade.ps1")
+
+    assert '$PgStateFile = Join-Path $PgRuntimeDir "state.json"' in text
+    # catch 必须保留错误；空 catch 会让所有探测失败退化为同一句话。
+    assert re.search(r"\} catch \{\n(?:\s*#[^\n]*\n)*\s*\$lastError = \$_\.Exception\.Message", text) is not None, (
+        "Wait-AppDatabaseReady 的 catch 未保留 $lastError，超时后将丢失探测失败原因"
+    )
+    assert 'Write-Fail "last probe error: $lastError"' in text
+    assert "process alive: qTrading=$appAlive, qtrading-pg-sidecar=$sidecarAlive" in text
+    assert '"status", "last_start_error", "port", "postgres_pid"' in text
+    # state.json 缺失/不可解析须如实报告，不得用空串让「无信息」冒充「无异常」。
+    assert 'return "state.json missing ($PgStateFile)"' in text
+    assert 'return "state.json unreadable: $($_.Exception.Message)"' in text
+    # 取证不改变契约：超时仍返回 $false，由调用方 Assert-True fail-closed。
+    assert text.count("    return $false\n}") >= 1
+
+
 def test_uninstall_script_preserves_pg_root_and_reinstall_reuses_data() -> None:
     """卸载脚本必须：写哨兵 → 卸载 → data/PG_VERSION/runtime/install 保留 → 重装读回一致。"""
     text = _read("installer_smoke_uninstall.ps1")
