@@ -228,25 +228,34 @@ function Write-EnvironmentSnapshot {
     $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -in @("AStockScreener.exe", "qtrading-pg-sidecar.exe", "postgres.exe") })
     Write-Fail "process snapshot (count=$($procs.Count)):"
+    $sidecarCmd = $null
     foreach ($p in $procs) {
         $cmd = [string]$p.CommandLine
         if ([string]::IsNullOrEmpty($cmd)) { $cmd = "<unavailable>" }
         # 命令行可出现 --password-file 路径，但绝不允许出现明文密码（R9）。
         $cmd = [regex]::Replace($cmd, "(?i)--password\s+\S+", "--password <redacted>")
+        if ($p.Name -eq "qtrading-pg-sidecar.exe") { $sidecarCmd = $cmd }
         Write-Fail "  $($p.Name) pid=$($p.ProcessId) started=$($p.CreationDate.ToUniversalTime().ToString('o')) cmd=$cmd"
     }
 
-    $logPath = Join-Path $userRoot "postgres-logs\sidecar.log"
+    # 日志路径以 sidecar 实际 --log-file 参数为准：run 42781862047 中按固定路径推导少了一层
+    # （落到 postgres\postgres-logs），最关键的 initdb / 认证日志因此缺失；解析失败才回退约定路径。
+    $logPath = $null
+    if ($sidecarCmd -match "(?i)--log-file\s+(\S+)") { $logPath = $Matches[1].Trim('"') }
+    if ([string]::IsNullOrEmpty($logPath)) {
+        $logPath = Join-Path (Split-Path -Parent $userRoot) "postgres-logs\sidecar.log"
+    }
     if (Test-Path $logPath) {
-        Write-Fail "sidecar.log tail 40 ($logPath):"
-        Get-Content -Path $logPath -Tail 40 | ForEach-Object { Write-Fail "  | $_" }
+        Write-Fail "sidecar.log tail 60 ($logPath):"
+        Get-Content -Path $logPath -Tail 60 | ForEach-Object { Write-Fail "  | $_" }
     } else {
         Write-Fail "sidecar.log missing ($logPath)"
     }
 
     $pgBaseDir = Split-Path -Parent $PgDataDir
     foreach ($file in @($PgStateFile, (Join-Path $PgDataDir "postmaster.pid"), $PgPasswordFile,
-            (Join-Path $pgBaseDir "install\.setup-complete"))) {
+            (Join-Path $pgBaseDir "install\.setup-complete"), (Join-Path $PgDataDir "PG_VERSION"),
+            (Join-Path $PgDataDir "pg_hba.conf"))) {
         if (Test-Path $file) {
             $item = Get-Item -Path $file
             Write-Fail "file: $file mtime=$($item.LastWriteTimeUtc.ToString('o')) size=$($item.Length)"
@@ -266,6 +275,36 @@ function Write-EnvironmentSnapshot {
         }
     } else {
         Write-Fail "password file missing ($PgPasswordFile)"
+    }
+
+    # 集群是否本次新建：PG_VERSION 由 initdb 写入，其 mtime 是最直接判据（区分「复用旧集群」与「重新 initdb」）。
+    foreach ($probe in @($PgStateFile, (Join-Path $PgDataDir "PG_VERSION"),
+            (Join-Path $pgBaseDir "install\.setup-complete"))) {
+        if (Test-Path $probe) {
+            $content = (Get-Content -Path $probe -Raw) -replace "\s+", " "
+            Write-Fail "content [$probe]: $content"
+        }
+    }
+    $hbaPath = Join-Path $PgDataDir "pg_hba.conf"
+    if (Test-Path $hbaPath) {
+        Write-Fail "pg_hba auth lines ($hbaPath):"
+        Get-Content -Path $hbaPath | Where-Object { $_ -match "^\s*(host|local)\s" } |
+            ForEach-Object { Write-Fail "  | $_" }
+    }
+    if (Test-Path $PsqlExePath) {
+        Write-Fail "psql file version: $((Get-Item $PsqlExePath).VersionInfo.FileVersion) ($PsqlExePath)"
+    }
+    $postgresExe = Join-Path $PgInstallDir "bin\postgres.exe"
+    if (Test-Path $postgresExe) {
+        try {
+            Write-Fail "postgres --version: $((& $postgresExe --version 2>&1) -join ' ')"
+        } catch {
+            Write-Fail "postgres --version failed: $($_.Exception.Message)"
+        }
+    }
+    $appExe = Join-Path $AppInstallDir "AStockScreener.exe"
+    if (Test-Path $appExe) {
+        Write-Fail "app file version: $((Get-Item $appExe).VersionInfo.FileVersion) ($appExe)"
     }
 }
 

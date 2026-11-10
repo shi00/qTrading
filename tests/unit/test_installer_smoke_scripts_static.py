@@ -795,10 +795,18 @@ def test_wait_app_database_ready_snapshots_environment_on_timeout() -> None:
     # 命令行可出现 --password-file 路径，但不得泄露明文密码（R9）。
     assert '"--password <redacted>"' in text
     # sidecar 日志尾部给出旧版自述 running 的真实原因（initdb / 认证 / 端口）。
-    assert 'Join-Path $userRoot "postgres-logs\\sidecar.log"' in text
-    assert "Get-Content -Path $logPath -Tail 40" in text
+    # 路径必须取自进程实际 --log-file：run 42781862047 按固定路径推导少了一层，日志缺失。
+    assert "(?i)--log-file\\s+(\\S+)" in text
+    assert "Get-Content -Path $logPath -Tail 60" in text
     # 文件时间戳用于判定 state.json / postmaster.pid 是否来自上一步 smoke（陈旧假阳性）。
     assert "LastWriteTimeUtc" in text
+    # PG_VERSION 由 initdb 写入，其 mtime/内容用于判定集群是本次新建还是复用旧集群。
+    assert '"PG_VERSION"' in text
+    # pg_hba.conf 认证方式可解释「同密码不同客户端一个成功一个失败」。
+    assert "pg_hba auth lines" in text
+    # 客户端/服务端版本用于排除 PG 版本不匹配导致的认证差异。
+    assert "psql file version:" in text
+    assert "postgres --version:" in text
     # 密码只报形态与长度，不报内容。
     assert "password file format:" in text
     assert "password file decrypted length:" in text
