@@ -2239,11 +2239,19 @@ jobs:
             Write-Error "D18-R04: build commit/ref context missing; cannot bind the sidecar release to this build."
             exit 1
           }
-          # D18-R04: sidecar 发行版必须绑定到本次构建的源码 commit，避免测试构建当前 commit、
-          # 发布产物却打包另一 commit 的 sidecar。
-          # - tag 构建（refs/tags/v*，含 dispatch 到 tag）：要求精确相等，否则 fail-fast；
+          # D18-R04: sidecar 发行版必须与本次构建的源码同源，避免测试构建当前 commit、
+          # 发布产物却打包另一 commit 的 sidecar。tag 构建按两级判定（FAIL-CLOSED）：
+          #   ① commit 精确相等 → 放行（binding=exact）；
+          #   ② commit 不同但 sidecars/qtrading-pg-sidecar 子树 tree SHA 相等 → 放行
+          #      （sidecar 是独立 Rust 组件，子树相同即源码逐字节相同；若要求 commit 精确相等，
+          #       每次 app 发版都必须重打 sidecar tag 并重跑四平台 Rust 构建，而无 sidecar 变更
+          #       的发版会被无谓阻断，如 v0.11.5）；
+          #   ③ 子树不同 → fail-fast（打包会带上另一 commit 的 sidecar 源码所编二进制，
+          #      旧实现即因此把 2026-08 的 sidecar 打进了后续安装包）。
           # - workflow_dispatch 到分支（手动复验，release-windows 仅 tag 触发、不会发布）：
           #   允许差异，但必须经 warning 与 Step Summary 显式标注，不得静默忽略。
+          $sidecarSubtreePath = "sidecars/qtrading-pg-sidecar"
+          $sidecarSourceState = "commit-exact"
           if ($env:SIDECAR_BUILD_REF -like "refs/tags/v*") {
             # annotated tag 的 github.sha 语义依事件而定；统一用 tag 名解析 commit
             # （即 github.sha 指向的提交，且与 resolve-sidecar-release 的 commits/<ref> 语义一致）。
@@ -2252,11 +2260,26 @@ jobs:
               Write-Error "D18-R04: failed to resolve commit for build ref $env:SIDECAR_BUILD_REF; refusing to download."
               exit 1
             }
-            if ($buildCommit -ne $env:SIDECAR_TARGET_COMMIT) {
-              Write-Error "D18-R04: sidecar release $env:SIDECAR_RELEASE_TAG target commit $($env:SIDECAR_TARGET_COMMIT) != build commit $buildCommit; refusing to package a sidecar from another source commit."
-              exit 1
+            if ($buildCommit -eq $env:SIDECAR_TARGET_COMMIT) {
+              $bindingState = "exact"
+            } else {
+              $releaseSubtree = gh api ("repos/{0}/git/trees/{1}:{2}" -f $env:GITHUB_REPOSITORY, $env:SIDECAR_TARGET_COMMIT, $sidecarSubtreePath) --jq '.sha'
+              if ($LASTEXITCODE -ne 0 -or -not $releaseSubtree) {
+                Write-Error "D18-R04: failed to resolve sidecar source subtree ($sidecarSubtreePath) at sidecar release commit $($env:SIDECAR_TARGET_COMMIT); refusing to download."
+                exit 1
+              }
+              $buildSubtree = gh api ("repos/{0}/git/trees/{1}:{2}" -f $env:GITHUB_REPOSITORY, $buildCommit, $sidecarSubtreePath) --jq '.sha'
+              if ($LASTEXITCODE -ne 0 -or -not $buildSubtree) {
+                Write-Error "D18-R04: failed to resolve sidecar source subtree ($sidecarSubtreePath) at build commit $buildCommit; refusing to download."
+                exit 1
+              }
+              if ($releaseSubtree -ne $buildSubtree) {
+                Write-Error "D18-R04: sidecar release $env:SIDECAR_RELEASE_TAG target commit $($env:SIDECAR_TARGET_COMMIT) != build commit $buildCommit, and sidecar source subtree differs (release=$releaseSubtree build=$buildSubtree); refusing to package a sidecar built from different sidecar sources. Fix: push a new sidecar-v* tag at $buildCommit, wait for the sidecar release job, then re-run this job."
+                exit 1
+              }
+              $bindingState = "subtree-exact (commit differs; sidecar sources identical)"
+              $sidecarSourceState = "subtree $buildSubtree"
             }
-            $bindingState = "exact"
           } else {
             $buildCommit = $env:SIDECAR_BUILD_COMMIT
             if ($buildCommit -eq $env:SIDECAR_TARGET_COMMIT) {
@@ -2275,6 +2298,7 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| sidecar target commit | $($env:SIDECAR_TARGET_COMMIT) |"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| build ref | $env:SIDECAR_BUILD_REF |"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| build commit | $buildCommit |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| sidecar source binding | $sidecarSourceState |"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| binding | $bindingState |"
           Write-Host "Downloading sidecar binary from selected stable release: $env:SIDECAR_RELEASE_TAG (release id: $env:SIDECAR_RELEASE_ID, target commit: $env:SIDECAR_TARGET_COMMIT, binding: $bindingState)"
           $tagName = $env:SIDECAR_RELEASE_TAG

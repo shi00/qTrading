@@ -198,20 +198,37 @@ def test_download_step_env_carries_build_identity(build_job: dict[str, Any]) -> 
     assert env["SIDECAR_EVENT_NAME"] == "${{ github.event_name }}", "未携带触发事件名"
 
 
-def test_tag_build_requires_exact_sidecar_target_commit(build_job: dict[str, Any]) -> None:
-    """tag 构建必须精确绑定 sidecar target_commit，失败 fail-fast 且错误含两个 SHA。"""
+def test_tag_build_requires_sidecar_source_equivalence(build_job: dict[str, Any]) -> None:
+    """tag 构建必须证明 sidecar 与发版源码同源：commit 精确相等，或 sidecar 子树 tree SHA 相等。
+
+    sidecar 是同仓库内的独立 Rust 组件（``sidecars/qtrading-pg-sidecar``）。若只接受 commit
+    精确相等，则每次 app 发版都必须重打 sidecar tag 并重跑四平台 Rust 构建——无 sidecar 变更
+    的发版会被无谓阻断（v0.11.5 即如此）。子树 tree SHA 相等即源码逐字节相同，语义上不弱于
+    commit 相等；子树不同（如 2026-08 的 sidecar-v0.1.0 被打进后续安装包）必须 fail-fast。
+    """
     script = _step(build_job, DOWNLOAD_STEP)["run"]
 
     assert "if (-not $env:SIDECAR_TARGET_COMMIT)" in script, "缺少 target commit 空值 fail-closed"
-    assert '-like "refs/tags/v*"' in script, "未按 tag ref 判定精确绑定"
+    assert '-like "refs/tags/v*"' in script, "未按 tag ref 判定绑定"
     assert "commits/$($env:SIDECAR_BUILD_REF_NAME)" in script, (
         "tag 构建未按 tag 名解析 commit（annotated tag 的 github.sha 语义不可靠）"
     )
-    assert "if ($buildCommit -ne $env:SIDECAR_TARGET_COMMIT)" in script, "未校验 target commit 与构建 commit 相等"
+    # ① commit 精确相等直接放行。
+    assert "if ($buildCommit -eq $env:SIDECAR_TARGET_COMMIT)" in script, "未保留 commit 精确相等放行分支"
+    # ② commit 不同时按 sidecar 子树 tree SHA 比较。
+    assert '$sidecarSubtreePath = "sidecars/qtrading-pg-sidecar"' in script, "未固定 sidecar 子树路径"
+    assert "git/trees/{1}:{2}" in script, "未按 tree API 解析 sidecar 子树"
+    assert "if ($releaseSubtree -ne $buildSubtree)" in script, "子树不同未 fail-fast"
+    assert "release=$releaseSubtree build=$buildSubtree" in script, "错误信息未同时包含两侧子树 SHA"
     assert "target commit $($env:SIDECAR_TARGET_COMMIT) != build commit $buildCommit" in script, (
         "错误信息未同时包含 sidecar 与构建两个 SHA"
     )
-    assert "exit 1" in script, "绑定失败未 fail-fast"
+    assert "push a new sidecar-v* tag at $buildCommit" in script, "失败信息未给出补救路径（补发 sidecar tag）"
+    # 子树解析失败必须 fail-closed，不得把“查不到”当成“相同”（release / build 各一处）。
+    assert script.count("failed to resolve sidecar source subtree") == 2, "子树解析失败未分别 fail-closed"
+    assert "if ($releaseSubtree -ne $buildSubtree)" in script and "exit 1" in script, "绑定失败未 fail-fast"
+    # 步骤摘要必须记录同源判定依据。
+    assert "| sidecar source binding | $sidecarSourceState |" in script, "摘要未记录 sidecar 源码绑定依据"
 
 
 def test_dispatch_build_documents_divergence_and_never_silent(build_job: dict[str, Any]) -> None:
