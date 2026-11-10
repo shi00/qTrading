@@ -272,11 +272,13 @@ def get_sidecar_cargo_version() -> str:
     return cfg["package"]["version"]
 
 
-def get_pyproject_sidecar_config() -> dict[str, str]:
+def get_pyproject_sidecar_config() -> object:
     """读取 pyproject.toml [tool.qtrading.sidecar] 配置节。
 
-    返回的 dict 至少包含 version / protocol_version / postgresql_version / crate_version。
-    缺失时抛 KeyError，由调用方捕获转为 errors。
+    返回配置节的原始值（合法形态为 TOML table，即 dict）。缺失时抛 KeyError，
+    由调用方捕获转为 errors；非 table / 必需字段缺失或空串的结构校验由
+    check_sidecar_version_consistency 的源码 schema 门（VV-02）负责，本 helper
+    不编造默认值（与 query_sidecar_version_json 返回 object 的契约一致）。
     """
     with open(PYPROJECT_PATH, "rb") as f:
         cfg = tomllib.load(f)
@@ -292,10 +294,12 @@ def get_sidecar_protocol_version() -> str:
     return m.group(1)
 
 
-def query_sidecar_version_json(sidecar_binary: Path) -> dict[str, object]:
+def query_sidecar_version_json(sidecar_binary: Path) -> object:
     """调用 ``sidecar version --json`` 获取构建元数据。
 
-    返回 sidecar 输出的 JSON dict（schema qtrading.embedded_postgres.version.v1）。
+    返回 sidecar 输出经 ``json.loads`` 解析的任意 JSON 值（object）。合法工件应为
+    dict（schema qtrading.embedded_postgres.version.v1），但损坏/旧协议工件可能输出
+    其他形态，调用方须先做 payload 结构校验（VV-01），再提取版本字段。
     用于 --check-sidecar-binary 启用的四方校验。
     """
     if not sidecar_binary.exists():
@@ -332,6 +336,15 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
     - sidecar version --json 的 protocol_version 与上述一致
     - sidecar version --json 的 postgres_version 与上述一致
     - sidecar version --json 的 postgresql_embedded_version 与上述一致
+
+    四方校验前先做 payload schema 门（VV-01）：version --json 输出必须是 dict，
+    且四个版本字段均为非空字符串；缺失/空/错型逐字段记 error 并短路（缺失不等于
+    相等，不完整/旧协议工件不得静默绕过版本证明，须重建 binary）。
+
+    三方校验前先做源码 schema 门（VV-02）：[tool.qtrading.sidecar] 必须是 table，
+    且 version / protocol_version / postgresql_version / crate_version 四个必需
+    字段均为非空字符串；缺失/空/错型逐字段记 error 并短路（.get(key, "") 的空串
+    会静默跳过对应校验），禁止自动猜测或编造默认版本。
     """
     errors: list[str] = []
 
@@ -353,6 +366,27 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
         pyproject_sidecar = get_pyproject_sidecar_config()
     except KeyError as exc:
         errors.append(f"pyproject.toml [tool.qtrading.sidecar] missing key: {exc}")
+        return errors
+
+    # VV-02 源码 schema 门：sidecar 配置节必须是 table，且四个版本字段均为非空
+    # 字符串（缺失/空串不等于相等；缺失时 .get(key, "") 会静默跳过对应校验，
+    # 故逐字段显式记 error 并短路，不编造默认值）。
+    if not isinstance(pyproject_sidecar, dict):
+        errors.append(
+            f"pyproject.toml [tool.qtrading.sidecar] must be a table (dict), "
+            f"got {type(pyproject_sidecar).__name__}: {pyproject_sidecar!r}"
+        )
+        return errors
+    source_schema_invalid = False
+    for field in ("version", "protocol_version", "postgresql_version", "crate_version"):
+        value = pyproject_sidecar.get(field)
+        if not isinstance(value, str) or not value:
+            errors.append(
+                f"pyproject.toml [tool.qtrading.sidecar] field '{field}' missing or not "
+                f"a non-empty string (got {value!r} of type {type(value).__name__})"
+            )
+            source_schema_invalid = True
+    if source_schema_invalid:
         return errors
 
     pyproject_ver = pyproject_sidecar.get("version", "")
@@ -384,8 +418,14 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
         errors.append(f"sidecar postgresql_version '{pyproject_pg_ver}' not in 16-19.x series (pg_plan §15.2)")
 
     # 9d: crate_version 与 Cargo.toml [dependencies] postgresql_embedded 版本对齐
+    # （VV-02：依赖缺失/简写导致不可解析时显式报错，不再静默跳过比对；
+    # 记 error 后继续后续校验，四方比较仍可与 pyproject 侧执行）
     cargo_crate_ver = _get_cargo_postgresql_embedded_version()
-    if cargo_crate_ver and pyproject_crate_ver and cargo_crate_ver != pyproject_crate_ver:
+    if not cargo_crate_ver:
+        errors.append(
+            f"Cargo.toml postgresql_embedded dependency version is missing or unparseable (path: {SIDECAR_CARGO_PATH})"
+        )
+    elif cargo_crate_ver != pyproject_crate_ver:
         errors.append(
             f"sidecar crate_version mismatch: Cargo.toml postgresql_embedded '{cargo_crate_ver}' != "
             f"pyproject.toml [tool.qtrading.sidecar] crate_version '{pyproject_crate_ver}'"
@@ -398,23 +438,46 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
         except (RuntimeError, FileNotFoundError) as exc:
             errors.append(f"--check-sidecar-binary failed: {exc}")
             return errors
-        binary_sidecar_ver = str(version_json.get("sidecar_version", ""))
-        binary_protocol_ver = str(version_json.get("protocol_version", ""))
-        binary_pg_ver = str(version_json.get("postgres_version", ""))
-        binary_crate_ver = str(version_json.get("postgresql_embedded_version", ""))
-        if binary_sidecar_ver and binary_sidecar_ver != cargo_ver:
+        # VV-01 payload schema 门：缺失/空/错型不等于相等，不完整或旧协议工件不得
+        # 静默绕过版本证明（须重建 binary，而非自动填当前版本）。
+        if not isinstance(version_json, dict):
+            payload_repr = repr(version_json)
+            if len(payload_repr) > 200:
+                payload_repr = payload_repr[:200] + "...(truncated)"
+            errors.append(
+                f"sidecar version --json returned non-dict JSON payload "
+                f"(expected version object, got {type(version_json).__name__}): {payload_repr}"
+            )
+            return errors
+        schema_invalid = False
+        for field in ("sidecar_version", "protocol_version", "postgres_version", "postgresql_embedded_version"):
+            value = version_json.get(field)
+            if not isinstance(value, str) or not value:
+                errors.append(
+                    f"sidecar version --json field '{field}' missing or not a non-empty string "
+                    f"(got {value!r} of type {type(value).__name__}); "
+                    "binary artifact incomplete or outdated, rebuild required"
+                )
+                schema_invalid = True
+        if schema_invalid:
+            return errors
+        binary_sidecar_ver = version_json["sidecar_version"]
+        binary_protocol_ver = version_json["protocol_version"]
+        binary_pg_ver = version_json["postgres_version"]
+        binary_crate_ver = version_json["postgresql_embedded_version"]
+        if binary_sidecar_ver != cargo_ver:
             errors.append(f"sidecar binary sidecar_version '{binary_sidecar_ver}' != Cargo.toml version '{cargo_ver}'")
-        if binary_protocol_ver and binary_protocol_ver != pyproject_protocol:
+        if binary_protocol_ver != pyproject_protocol:
             errors.append(
                 f"sidecar binary protocol_version '{binary_protocol_ver}' != "
                 f"pyproject.toml protocol_version '{pyproject_protocol}'"
             )
-        if binary_pg_ver and binary_pg_ver != pyproject_pg_ver:
+        if binary_pg_ver != pyproject_pg_ver:
             errors.append(
                 f"sidecar binary postgres_version '{binary_pg_ver}' != "
                 f"pyproject.toml postgresql_version '{pyproject_pg_ver}'"
             )
-        if binary_crate_ver and binary_crate_ver != pyproject_crate_ver:
+        if binary_crate_ver != pyproject_crate_ver:
             errors.append(
                 f"sidecar binary postgresql_embedded_version '{binary_crate_ver}' != "
                 f"pyproject.toml crate_version '{pyproject_crate_ver}'"
@@ -559,7 +622,8 @@ def main() -> None:
         try:
             sidecar_cargo_ver = get_sidecar_cargo_version()
             sidecar_protocol_ver = get_sidecar_protocol_version()
-            sidecar_pg_ver = get_pyproject_sidecar_config().get("postgresql_version", "")
+            sidecar_cfg = get_pyproject_sidecar_config()
+            sidecar_pg_ver = sidecar_cfg.get("postgresql_version", "") if isinstance(sidecar_cfg, dict) else ""
             print(
                 f"  sidecar:        Cargo.toml={sidecar_cargo_ver} / "
                 f"protocol={sidecar_protocol_ver} / pg={sidecar_pg_ver}"
