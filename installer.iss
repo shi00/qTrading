@@ -85,6 +85,9 @@ begin
     // 否则 MsgBox 会挂起等待点击，Start-Process -Wait 永不返回（run 40988072135 即此现象）
     if not WizardSilent() then
       MsgBox('AStockScreener 正在运行，请先关闭后再升级。', mbError, MB_OK);
+    // 拒绝原因认证（RUNNING-01）：/LOG 下写入受控日志行，供安装包冒烟脚本区分
+    // 「运行中守卫拒绝」与磁盘/权限等安装内部故障（后者同样非零退出码）。
+    Log('qtrading.setup-guard.refused reason=running-app');
     Result := False;
     Exit;
   end;
@@ -96,6 +99,8 @@ begin
     // 同上：静默模式不弹框，只返回拒绝（非零退出码）
     if not WizardSilent() then
       MsgBox('qTrading 数据库服务正在运行，请先关闭 qTrading 后再升级。', mbError, MB_OK);
+    // 同上：受控日志行区分 sidecar 守卫拒绝（RUNNING-01）。
+    Log('qtrading.setup-guard.refused reason=running-sidecar');
     Result := False;
     Exit;
   end;
