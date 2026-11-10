@@ -156,16 +156,27 @@ function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql, [string]$Datab
 # （run 42324064125 因此报 database "qtrading" does not exist）。故额外轮询业务库是否已存在。
 # 超时不再静默返回：run 42750440663 中两个 embedded 变体只得到同一句断言文案，无法区分
 # 「认证失败 / 连接被拒 / sidecar 建库失败后退出」，故必须带出末次错误与 sidecar 自述状态。
-function Wait-AppDatabaseReady([string]$Password, [int]$TimeoutSec = 120) {
+# 密码必须在轮询内每次重读：run 42764622846 取证显示 sidecar 已 running 且无 last_start_error，
+# 但 psql 持续 `password authentication failed`——旧版 sidecar 在自述 running 之后才落盘自己
+# （重新生成）的密码，启动前缓存的密码已过期，被误判成「业务库未创建」。
+function Wait-AppDatabaseReady([string]$PasswordFile, [int]$TimeoutSec = 120) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $attempts = 0
     $lastError = $null
     $port = $null
+    $password = $null
+    $previousPassword = $null
     while ((Get-Date) -lt $deadline) {
         $attempts++
         try {
+            $password = Read-PgPassword -PasswordFile $PasswordFile
+            if ($null -ne $previousPassword -and $password -ne $previousPassword) {
+                # 只报「发生了轮换」，不打印密码本身（R9）。
+                Write-Ok "password file rotated during startup (attempt $attempts)"
+            }
+            $previousPassword = $password
             $port = Get-PostgresPort -DataDir $PgDataDir
-            $exists = Invoke-Psql -Password $Password -Port $port -Database "postgres" `
+            $exists = Invoke-Psql -Password $password -Port $port -Database "postgres" `
                 -Sql "select 1 from pg_database where datname = '$PgDatabase'"
             if ($exists -eq "1") { return $true }
             $lastError = "postgres reachable (port $port) but pg_database has no '$PgDatabase' row"
@@ -324,9 +335,10 @@ try {
     if (-not ($sentinel -match '^d17-t02-[0-9a-f]{32}$')) {
         throw "sentinel marker format invalid"
     }
-    $pgPassword = Read-PgPassword -PasswordFile $PgPasswordFile
     $portBefore = Get-PostgresPort -DataDir $PgDataDir
-    Assert-True (Wait-AppDatabaseReady -Password $pgPassword) "Application database '$PgDatabase' created (sidecar ready precedes ensure_database)"
+    Assert-True (Wait-AppDatabaseReady -PasswordFile $PgPasswordFile) "Application database '$PgDatabase' created (sidecar ready precedes ensure_database)"
+    # 轮询成功即证明读到的密码被服务端接受；重读一次供后续 psql 使用，避免沿用启动前旧值。
+    $pgPassword = Read-PgPassword -PasswordFile $PgPasswordFile
     $sentinelCreateSql = "create table if not exists $SentinelTable (id integer primary key, marker text not null)"
     $sentinelInsertSql = "insert into $SentinelTable (id, marker) values (1, '$sentinel') on conflict (id) do update set marker = excluded.marker"
     Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelCreateSql | Out-Null
