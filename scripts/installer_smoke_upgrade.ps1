@@ -192,6 +192,7 @@ function Wait-AppDatabaseReady([string]$PasswordFile, [int]$TimeoutSec = 120) {
     $sidecarAlive = @(Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue).Count -gt 0
     Write-Fail "process alive: qTrading=$appAlive, qtrading-pg-sidecar=$sidecarAlive"
     Write-Fail "sidecar state: $(Get-SidecarStateDigest)"
+    Write-EnvironmentSnapshot
     return $false
 }
 
@@ -209,6 +210,63 @@ function Get-SidecarStateDigest {
         if ($names -contains $name) { "$name=$($state.$name)" } else { "$name=<absent>" }
     }
     return ($fields -join ", ")
+}
+
+# 失败时刻的环境快照：进程命令行 / sidecar 日志尾部 / PG 根文件时间戳与凭据形态。
+# run 42770696954 中 state.json 自述 running 且无 last_start_error，psql 却持续
+# `password authentication failed`——两者不可能同时为真，仅记录 state 摘要无法定因，须区分：
+#   (a) state.json / postmaster.pid 来自上一步 smoke（陈旧，指向已停止的旧集群）；
+#   (b) 旧版实际使用了另一个 data dir / 密码文件（状态与探测目标错配）；
+#   (c) 遗留 postgres 仍占端口（Stop-QtradingGraceful 只杀 sidecar，不连带其子进程）。
+# 只输出路径、时间戳、命令行与密码文件形态（前缀/长度）；密码内容与解密结果不落日志（R9）。
+function Write-EnvironmentSnapshot {
+    $userRoot = Split-Path -Parent (Split-Path -Parent $PgDataDir)
+    Write-Fail "user root: $userRoot (exists=$(Test-Path $userRoot))"
+    $legacyRoot = Join-Path (Split-Path -Parent $userRoot) "postgres"
+    Write-Fail "legacy single-layer root: $legacyRoot (exists=$(Test-Path $legacyRoot))"
+
+    $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @("AStockScreener.exe", "qtrading-pg-sidecar.exe", "postgres.exe") })
+    Write-Fail "process snapshot (count=$($procs.Count)):"
+    foreach ($p in $procs) {
+        $cmd = [string]$p.CommandLine
+        if ([string]::IsNullOrEmpty($cmd)) { $cmd = "<unavailable>" }
+        # 命令行可出现 --password-file 路径，但绝不允许出现明文密码（R9）。
+        $cmd = [regex]::Replace($cmd, "(?i)--password\s+\S+", "--password <redacted>")
+        Write-Fail "  $($p.Name) pid=$($p.ProcessId) started=$($p.CreationDate.ToUniversalTime().ToString('o')) cmd=$cmd"
+    }
+
+    $logPath = Join-Path $userRoot "postgres-logs\sidecar.log"
+    if (Test-Path $logPath) {
+        Write-Fail "sidecar.log tail 40 ($logPath):"
+        Get-Content -Path $logPath -Tail 40 | ForEach-Object { Write-Fail "  | $_" }
+    } else {
+        Write-Fail "sidecar.log missing ($logPath)"
+    }
+
+    $pgBaseDir = Split-Path -Parent $PgDataDir
+    foreach ($file in @($PgStateFile, (Join-Path $PgDataDir "postmaster.pid"), $PgPasswordFile,
+            (Join-Path $pgBaseDir "install\.setup-complete"))) {
+        if (Test-Path $file) {
+            $item = Get-Item -Path $file
+            Write-Fail "file: $file mtime=$($item.LastWriteTimeUtc.ToString('o')) size=$($item.Length)"
+        } else {
+            Write-Fail "file: $file missing"
+        }
+    }
+
+    if (Test-Path $PgPasswordFile) {
+        $rawPassword = (Get-Content -Path $PgPasswordFile -Raw).Trim()
+        $format = if ($rawPassword.StartsWith("PGPW2:")) { "PGPW2(DPAPI)" } else { "plaintext" }
+        Write-Fail "password file format: $format"
+        try {
+            Write-Fail "password file decrypted length: $((Read-PgPassword -PasswordFile $PgPasswordFile).Length)"
+        } catch {
+            Write-Fail "password file decrypt failed: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Fail "password file missing ($PgPasswordFile)"
+    }
 }
 
 function Stop-QtradingGraceful {

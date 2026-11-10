@@ -780,6 +780,33 @@ def test_wait_app_database_ready_rereads_password_each_attempt() -> None:
     assert call_site < refresh < text.index("$sentinelCreateSql", call_site)
 
 
+def test_wait_app_database_ready_snapshots_environment_on_timeout() -> None:
+    """超时取证必须能区分「state 陈旧 / 遗留 postgres 占端口 / 旧版用了另一路径」。
+
+    run 42770696954：state.json 自述 running 且无 last_start_error，psql 却持续
+    `password authentication failed`——两者不可能同时为真，仅记录 state 摘要无法定因。
+    """
+    text = _read("installer_smoke_upgrade.ps1")
+
+    assert "function Write-EnvironmentSnapshot" in text
+    # 进程命令行是唯一能证明「探测目标 ≠ 旧版实际 data dir / 占端口者是谁」的证据。
+    assert "Get-CimInstance Win32_Process" in text
+    assert "AStockScreener.exe" in text and "qtrading-pg-sidecar.exe" in text and "postgres.exe" in text
+    # 命令行可出现 --password-file 路径，但不得泄露明文密码（R9）。
+    assert '"--password <redacted>"' in text
+    # sidecar 日志尾部给出旧版自述 running 的真实原因（initdb / 认证 / 端口）。
+    assert 'Join-Path $userRoot "postgres-logs\\sidecar.log"' in text
+    assert "Get-Content -Path $logPath -Tail 40" in text
+    # 文件时间戳用于判定 state.json / postmaster.pid 是否来自上一步 smoke（陈旧假阳性）。
+    assert "LastWriteTimeUtc" in text
+    # 密码只报形态与长度，不报内容。
+    assert "password file format:" in text
+    assert "password file decrypted length:" in text
+    assert "Write-Host $Password" not in text
+    # 取证必须发生在超时返回 $false 之前（fail-closed 契约不变）。
+    assert "Write-EnvironmentSnapshot\n    return $false" in text
+
+
 def test_uninstall_script_preserves_pg_root_and_reinstall_reuses_data() -> None:
     """卸载脚本必须：写哨兵 → 卸载 → data/PG_VERSION/runtime/install 保留 → 重装读回一致。"""
     text = _read("installer_smoke_uninstall.ps1")
