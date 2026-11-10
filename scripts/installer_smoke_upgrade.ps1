@@ -399,6 +399,18 @@ try {
     if (Test-Path $PgDataDir) {
         Remove-Item -Recurse -Force $PgDataDir -ErrorAction SilentlyContinue
     }
+    # runtime\password 必须一并重置（run 42790317629 根因）：同 job 前序 smoke
+    # （crash_recovery / running_app / uninstall）以候选版运行，其捆绑 sidecar
+    # （sidecar-v0.1.1+）写入 PGPW2(DPAPI) 密文；而升级基线旧版捆绑的 sidecar
+    # （sidecar-v0.1.0）不含 PGPW2 解码能力，面对「data 已清空 + PGPW2 密文残留」
+    # 会把整串密文当明文密码 initdb，旧 sidecar 自身健康检查用同一字面量故假绿 ready，
+    # 测试探针用 DPAPI 解密出的真密码则 28P01 连败。删除后旧版 fresh initdb 自生成
+    # 明文密码文件，与真实旧版用户状态一致（v0.1.0 时代用户的密码文件本就是明文，
+    # 新版 sidecar 读明文有 fallback，真实升级路径不受影响）；「密码文件跨升级保留」
+    # 语义仍由 STEP 7 断言（此时文件由旧版生成后验证保留）。
+    if (Test-Path $PgPasswordFile) {
+        Remove-Item -Force $PgPasswordFile -ErrorAction SilentlyContinue
+    }
     Write-Ok "Environment cleaned"
 
     # STEP 2: 下载并安装旧版本
@@ -426,7 +438,8 @@ try {
     Assert-True $ready "Sidecar ready (old version, status JSON: running + postgres_alive)"
 
     # STEP 4: 旧版运行期写入已提交的合成业务哨兵，并记录升级前 PG 根证据
-    # （真实认证路径：runtime\password（DPAPI）+ postmaster.pid 端口 + install\bin\psql.exe）
+    # （真实认证路径：runtime\password（旧版 sidecar 自生成，明文或 PGPW2 皆可经
+    # Read-PgPassword 读取）+ postmaster.pid 端口 + install\bin\psql.exe）
     Write-Step "4. Write committed sentinel & record PG root evidence (old version)"
     $sentinel = "d17-t02-" + [Guid]::NewGuid().ToString("N")
     if (-not ($sentinel -match '^d17-t02-[0-9a-f]{32}$')) {
