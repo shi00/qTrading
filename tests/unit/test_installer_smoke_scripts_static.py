@@ -757,6 +757,29 @@ def test_wait_app_database_ready_dumps_diagnostics_on_timeout() -> None:
     assert text.count("    return $false\n}") >= 1
 
 
+def test_wait_app_database_ready_rereads_password_each_attempt() -> None:
+    """轮询必须每次重读密码文件（run 42764622846：旧版 sidecar 在 running 之后才落盘新密码）。
+
+    启动前缓存密码会让 psql 持续 `password authentication failed`，被误判成「业务库未创建」。
+    """
+    text = _read("installer_smoke_upgrade.ps1")
+
+    assert "function Wait-AppDatabaseReady([string]$PasswordFile, [int]$TimeoutSec = 120)" in text
+    body_start = text.index("function Wait-AppDatabaseReady(")
+    body = text[body_start : text.index("\nfunction Get-SidecarStateDigest", body_start)]
+    # 密码读取必须在轮询循环内（与 port 探测同一次尝试），不能作为参数一次性传入。
+    assert "$password = Read-PgPassword -PasswordFile $PasswordFile" in body
+    assert "Invoke-Psql -Password $password" in body
+    # 轮换只报事件（attempt 序号），不打印密码本身（R9）。
+    assert 'Write-Ok "password file rotated during startup (attempt $attempts)"' in body
+
+    # 调用方不得再传缓存值，且成功后应重读一次供后续 psql 使用。
+    assert "Wait-AppDatabaseReady -Password $pgPassword" not in text
+    call_site = text.index("Wait-AppDatabaseReady -PasswordFile $PgPasswordFile")
+    refresh = text.index("$pgPassword = Read-PgPassword -PasswordFile $PgPasswordFile", call_site)
+    assert call_site < refresh < text.index("$sentinelCreateSql", call_site)
+
+
 def test_uninstall_script_preserves_pg_root_and_reinstall_reuses_data() -> None:
     """卸载脚本必须：写哨兵 → 卸载 → data/PG_VERSION/runtime/install 保留 → 重装读回一致。"""
     text = _read("installer_smoke_uninstall.ps1")
