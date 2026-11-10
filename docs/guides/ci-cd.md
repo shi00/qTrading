@@ -60,6 +60,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - **失败重跑与幂等**：同一 tag 重跑时，若已存在 draft 则复用并覆盖同名资产（`overwrite_files: true`），重新校验后再发布；若已存在正式 Release 则直接失败，不覆盖、不重发（已发布资产的摘要可能已被下载方或校验记录引用，静默替换会造成不一致），需人工评估后显式删除再重跑。不采用「先 `gh release delete` 再重建」：该做法会删除既有 Release 记录及其 URL，对已发布版本更等同于未经授权的破坏性操作。
 - **latest 归属**：publish 时显式 `--latest`，保证正式版本被标记为 latest；GitHub API 规定 draft 与 prerelease 不能标记 latest，故 latest 只在发布动作内生效。
 - **Release 正文**：由 `softprops/action-gh-release` 的 `generate_release_notes`（GitHub 自动变更摘要）生成；`CHANGELOG.md` 正文由 release-please 在 Release PR 中生成。两者不互相同步，属预期行为。正文在 draft 创建时生成，publish 步骤只改 `draft` / `make_latest`、请求不含 body，故不会重写正文。
+- **sidecar 同源绑定（D18-R04）**：`build-windows` 的 embedded 变体打包 `sidecar-v*` Release 的二进制，下载前校验其与本次发版源码同源——commit 精确相等，或 `sidecars/qtrading-pg-sidecar` 子树 tree SHA 相等（sidecar 是同仓库内的独立 Rust 组件，子树相等即源码逐字节相同）；子树不同即 fail-fast，避免安装包内置另一份 sidecar 源码所编的二进制（`sidecar-v0.1.0` 停留在 2026-08，导致 `v0.11.5` 构建被阻断即此形态）。补救方式是在**该发版 commit 上**推送新的 `sidecar-v<版本>` tag（`git tag sidecar-v<版本> <commit> && git push origin sidecar-v<版本>`），待 `sidecar.yml` 四平台发布完成后重跑失败的 `build-windows` job；`workflow_dispatch` 到分支的手动复验允许差异，但会以 warning + Step Summary 显式标注且不发布。
 - **切换后首个版本须验证**：合并下一个 Release PR → 推 tag → 确认新 Release 资产非空，且其后 release-please 仍能基于同名 tag 产出增量 changelog（条目不得重复或缺失）。
 - **历史空 Release 不自动补救**：`v0.10.0` / `v0.10.1` 等既有空 Release 保持原样，如需补资产另行人工评估。
 
