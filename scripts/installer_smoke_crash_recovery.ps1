@@ -282,12 +282,18 @@ try {
     }
 
     # STEP 6: 失败注入 - 强制 kill 主进程（不触发优雅停机）
+    # ENGA-CRASH-01 注入护栏：强杀必须真实发生才算崩溃注入。主进程若在哨兵提交后、
+    # 本步之前已自行退出，后续「无残留 + 重启读回」只能证明正常关闭的持久性，
+    # 不得计为崩溃恢复通过；故强杀前显式断言 $proc 非空且未退出，自然退出即失败退出。
     Write-Step "6. FAILURE INJECTION: Force kill main qTrading process (simulate crash)"
-    if ($proc -and -not $proc.HasExited) {
-        # 使用 Stop-Process -Force 模拟进程崩溃，不经过 qTrading 的 shutdown handler
-        Stop-Process -Id $proc.Id -Force
-        Write-Ok "Main process killed (PID: $($proc.Id))"
-    }
+    $crashInjected = $false
+    Assert-True ($null -ne $proc) "Main process object present before crash injection"
+    Assert-True (-not $proc.HasExited) "Main process alive before crash injection (no premature exit)"
+    # 使用 Stop-Process -Force 模拟进程崩溃，不经过 qTrading 的 shutdown handler；
+    # 强杀失败（Stop-Process 抛错）不捕获，直接传播到主 catch 以 exit 1 结束。
+    Stop-Process -Id $proc.Id -Force
+    $crashInjected = $true
+    Write-Ok "Main process killed (PID: $($proc.Id))"
 
     # STEP 7: 等待 sidecar 自行退出（父进程兜底机制：`--parent-pid` 每 500ms 轮询 + stdin EOF）
     # 注意：sidecar 的父进程检测循环在 postgres ready（打印 ready JSON）之后才启动；
@@ -343,6 +349,8 @@ try {
     Assert-True ($sentinelAfterRestart -eq $sentinel) "Synthetic sentinel survived crash & restart unchanged"
 
     Stop-QtradingGraceful
+    # ENGA-CRASH-01 兜底：只有真实完成强杀注入才允许报告通过（防置真语句被移除/跳过时假通过）
+    Assert-True $crashInjected "Force-kill injection completed"
     Write-Host "`n=== CRASH RECOVERY SMOKE TEST PASSED ===" -ForegroundColor Green
     Write-Host "Verified: committed sentinel survives crash+restart; parent crash -> sidecar exits (parent-loss watchdog), postgres shut down" -ForegroundColor Green
     exit 0

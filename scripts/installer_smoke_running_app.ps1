@@ -115,9 +115,16 @@ try {
 
     Write-Host "  Installer exit code: $installExitCode"
 
-    # /SILENT 模式下 InitializeSetup 返回 False 时 installer 退出码为 1 或 2（Inno Setup 行为）
-    # 退出码 0 = 安装成功（不允许），非 0 = 被拒绝（期望）
-    Assert-True ($installExitCode -ne 0) "Installer rejected (exit code non-zero: $installExitCode)"
+    # ENGA-RUNNING-01 fail-closed：非零退出码无法认证「拒绝原因是 InitializeSetup 运行中守卫」
+    # （installer.iss 静默分支只有 Result=False/Exit，无受控日志或唯一退出码），磁盘/权限等
+    # 安装内部故障同样返回非零——仅凭非零判通过会把无关失败伪装成运行中拒绝（假通过）。
+    if ($installExitCode -eq 0) {
+        Write-Fail "Installer succeeded while the app was running (exit code: $installExitCode)"
+        throw "ASSERTION FAILED: installer succeeded while the app was running"
+    }
+    # 非 0 但拒绝原因不可认证：有意 fail-closed，真正的运行中拒绝在认证契约落地前不算验收通过。
+    # NOTE(lazy): fail-closed 使 STEP 5~8 在认证契约落地前运行时不可达（脚本必然 exit 1）. ceiling: 运行中拒绝场景无法验收，release tag/manual dispatch 构建的 installer smoke 步骤将持续失败（PR 阶段不执行该脚本，不受影响）. upgrade: installer.iss 为 InitializeSetup 拒绝提供可认证证据（唯一退出码或 /LOG 受控日志声明）后，将两处 UNVERIFIED REJECTION 分支替换为认证通过断言，恢复 STEP 5~8 可达.
+    throw "UNVERIFIED REJECTION: installer failed (exit code $installExitCode), but InitializeSetup refusal cause cannot be certified"
 
     # STEP 5: 验证 qTrading 仍在运行（未被 installer 杀死）
     Write-Step "5. Verify qTrading still running (not killed by installer)"
@@ -203,7 +210,13 @@ try {
         $installExitCode2 = $reinstallProc2.ExitCode
 
         Write-Host "  Installer exit code: $installExitCode2"
-        Assert-True ($installExitCode2 -ne 0) "Installer rejected (exit code non-zero: $installExitCode2)"
+
+        # ENGA-RUNNING-01 fail-closed：与 STEP 4 同语义，拒绝原因不可认证即失败，不冒充通过。
+        if ($installExitCode2 -eq 0) {
+            Write-Fail "Installer succeeded while the sidecar was running (exit code: $installExitCode2)"
+            throw "ASSERTION FAILED: installer succeeded while the sidecar was running"
+        }
+        throw "UNVERIFIED REJECTION: installer failed (exit code $installExitCode2), but InitializeSetup refusal cause cannot be certified"
 
         # STEP 8: 验证 sidecar 仍在运行
         Write-Step "8. Verify sidecar still running (not killed by installer)"

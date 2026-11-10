@@ -316,13 +316,74 @@ def test_running_app_keeps_stdin_open_until_same_pid_assertions() -> None:
 
 
 def test_running_app_keeps_step7_and_step8_same_pid_assertions() -> None:
-    """安装拒绝断言（非 0 退出码）与“同一 sidecar PID 仍存活”断言必须保留。"""
+    """STEP 7 fail-closed 拒绝收口（ENGA-RUNNING-01）与“同一 sidecar PID 仍存活”断言必须保留。"""
     text = _read(_RUNNING_APP)
     assert re.search(r'Write-Step "7\. Attempt install while sidecar running', text) is not None
-    assert "Assert-True ($installExitCode2 -ne 0)" in text
     assert "$sidecarAfter = Get-Process -Id $sidecarProc.Id" in text
     assert "Assert-True ($null -ne $sidecarAfter)" in text
     assert "Assert-True (-not $sidecarAfter.HasExited)" in text
+
+
+# ---- ENGA-RUNNING-01：拒绝假通过收口——非零退出码不能认证运行中拒绝原因 ----
+# 旧实现 `Assert-True ($installExitCode -ne 0)` 仅凭非零退出码判「运行中拒绝」通过：
+# 磁盘/权限等安装内部故障同样返回非零，而 installer.iss 的 InitializeSetup 静默分支
+# 只有 Result=False/Exit（无受控日志、无唯一退出码），拒绝原因无法认证。
+# fail-closed 两支收口：退出码 0 = 安装成功覆盖运行中的应用（确定失败）；
+# 非 0 = 拒绝原因不可认证，同样失败（有意不冒充「正常拒绝已验证」，ENGA-RUNNING-01）。
+
+_REJECTION_UNVERIFIED_MSG = (
+    "UNVERIFIED REJECTION: installer failed (exit code ${var}), but InitializeSetup refusal cause cannot be certified"
+)
+
+
+def _rejection_fail_closed(text: str, exit_var: str, scenario: str) -> bool:
+    """STEP 4/7 拒绝断言必须两支收口：退出码 0 → 确定失败；非 0 → 不可认证也失败。"""
+    zero_branch = re.search(
+        rf"if \(\${exit_var} -eq 0\) \{{[\s\S]{{0,300}}?throw \"ASSERTION FAILED: installer succeeded "
+        rf"while the {scenario} was running\"",
+        text,
+    )
+    unverified = _REJECTION_UNVERIFIED_MSG.format(var=exit_var) in text
+    return zero_branch is not None and unverified
+
+
+def test_running_app_rejection_assertions_are_fail_closed() -> None:
+    """STEP 4/7 不得以「非零退出码」判通过：0 → ASSERTION FAILED；非 0 → UNVERIFIED REJECTION。"""
+    text = _read(_RUNNING_APP)
+    assert _rejection_fail_closed(text, "installExitCode", "app"), (
+        "STEP 4 缺少 fail-closed 收口：须先断言退出码非 0（0 = 安装成功覆盖运行中的应用，确定失败），"
+        "非 0 时以 UNVERIFIED REJECTION 失败（拒绝原因不可认证，ENGA-RUNNING-01）"
+    )
+    assert _rejection_fail_closed(text, "installExitCode2", "sidecar"), (
+        "STEP 7 缺少与 STEP 4 同语义的 fail-closed 收口（ENGA-RUNNING-01）"
+    )
+    # 旧的「仅凭非零判通过」断言不得残留（两个 STEP 皆然）。
+    assert "Assert-True ($installExitCode -ne 0)" not in text
+    assert "Assert-True ($installExitCode2 -ne 0)" not in text
+    # 收口必须发生在各自 STEP 内：STEP 4 收口在 STEP 5 之前，STEP 7 收口在 STEP 8 之前。
+    step4_idx = text.index('Write-Step "4. Attempt install while qTrading running')
+    step5_idx = text.index('Write-Step "5. Verify qTrading still running')
+    step7_idx = text.index('Write-Step "7. Attempt install while sidecar running')
+    step8_idx = text.index('Write-Step "8. Verify sidecar still running')
+    zero4_idx = text.index("if ($installExitCode -eq 0)")
+    zero7_idx = text.index("if ($installExitCode2 -eq 0)")
+    assert step4_idx < zero4_idx < step5_idx, "STEP 4 收口必须位于 STEP 4 与 STEP 5 之间"
+    assert step7_idx < zero7_idx < step8_idx, "STEP 7 收口必须位于 STEP 7 与 STEP 8 之间"
+
+
+def test_rejection_fail_closed_helper_rejects_legacy_and_partial() -> None:
+    """负向：旧「仅凭非零判通过」与只改一半（缺 UNVERIFIED throw）的实现必须被判定不合规。"""
+    legacy = (
+        'Write-Host "  Installer exit code: $installExitCode"\n'
+        'Assert-True ($installExitCode -ne 0) "Installer rejected (exit code non-zero: $installExitCode)"\n'
+    )
+    assert _rejection_fail_closed(legacy, "installExitCode", "app") is False
+    partial_zero_branch_only = (
+        "if ($installExitCode -eq 0) {\n"
+        '    throw "ASSERTION FAILED: installer succeeded while the app was running"\n'
+        "}\n"
+    )
+    assert _rejection_fail_closed(partial_zero_branch_only, "installExitCode", "app") is False
 
 
 # ---- D17-T01：ready 必须是真实活性证据，崩溃恢复须读回已提交哨兵 ----
@@ -453,6 +514,52 @@ Assert-True ($null -eq $postgresAfter)
 """
     assert "$sentinelAfterRestart = Invoke-Psql" not in legacy
     assert legacy.index("Stop-Process -Id $proc.Id -Force") < legacy.index("Assert-True ($null -eq $postgresAfter)")
+
+
+# ---- ENGA-CRASH-01：强杀注入必须真实发生，主进程自然退出不得计为崩溃恢复通过 ----
+# 旧实现 `if ($proc -and -not $proc.HasExited) { Stop-Process ... }` 在主进程已自行退出时
+# 静默跳过强杀：正常关闭的 sidecar/PG 恰好满足无残留断言、重启读回也成功，
+# 脚本仍报告「崩溃恢复通过」，把正常关闭的持久性误当作强杀故障注入证据。
+
+
+def _crash_injection_guarded(text: str) -> bool:
+    """强杀前必须显式断言 $proc 非空且未退出，并以 $crashInjected 标记在成功出口兜底断言。"""
+    return (
+        "Assert-True ($null -ne $proc)" in text
+        and "Assert-True (-not $proc.HasExited)" in text
+        and "$crashInjected = $false" in text
+        and "$crashInjected = $true" in text
+        and 'Assert-True $crashInjected "Force-kill injection completed"' in text
+    )
+
+
+def test_crash_recovery_force_kill_requires_alive_process() -> None:
+    """强杀前必须断言 $proc 非空且未退出；自然退出路径必须失败，不得静默跳过强杀。"""
+    text = _read("installer_smoke_crash_recovery.ps1")
+    assert _crash_injection_guarded(text), (
+        "崩溃恢复脚本缺少强杀注入护栏：须强杀前断言 $proc 非空且未退出，"
+        "并以 $crashInjected 标记在成功出口兜底断言（ENGA-CRASH-01）"
+    )
+    # 结构顺序：初始化标记 → 强杀 → 置真 → 成功出口兜底断言 → PASSED 输出。
+    init_idx = text.index("$crashInjected = $false")
+    crash_idx = text.index("Stop-Process -Id $proc.Id -Force")
+    set_true_idx = text.index("$crashInjected = $true")
+    final_assert_idx = text.index('Assert-True $crashInjected "Force-kill injection completed"')
+    passed_idx = text.index("=== CRASH RECOVERY SMOKE TEST PASSED ===")
+    assert init_idx < crash_idx < set_true_idx < final_assert_idx < passed_idx, (
+        "强杀注入标记必须按「初始化 → 强杀 → 置真 → 成功出口断言（PASSED 之前）」顺序执行"
+    )
+
+
+def test_crash_injection_guard_rejects_legacy_silent_skip() -> None:
+    """负向：旧实现（if 包裹强杀、无存活断言、无注入标记）必须被判定不合规。"""
+    legacy = """Write-Step "6. FAILURE INJECTION: Force kill main qTrading process (simulate crash)"
+if ($proc -and -not $proc.HasExited) {
+    Stop-Process -Id $proc.Id -Force
+    Write-Ok "Main process killed (PID: $($proc.Id))"
+}
+"""
+    assert _crash_injection_guarded(legacy) is False
 
 
 # ---- D17-T02：升级 / 卸载必须验证已提交业务哨兵与 PG 根完整性 ----
