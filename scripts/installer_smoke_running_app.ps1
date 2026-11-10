@@ -26,6 +26,11 @@ $SidecarReadyTimeoutSec = 120
 # 关闭 stdin 后优雅停止的有界等待（秒）
 $SidecarShutdownTimeoutSec = 60
 
+# ---- 拒绝原因认证（RUNNING-01）----
+# installer.iss InitializeSetup 拒绝时写 /LOG 受控日志行（Log() 仅在 /LOG 下生效）；
+# 静默拒绝的退出码与磁盘/权限等安装内部故障同为非零，必须靠该标记认证拒绝原因。
+$RefusalLogMarker = "qtrading.setup-guard.refused reason="
+
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }
 function Write-Ok([string]$msg)   { Write-Host "  [PASS] $msg" -ForegroundColor Green }
@@ -60,6 +65,34 @@ function Stop-SidecarGraceful([System.Diagnostics.Process]$proc) {
 function Stop-SidecarForced([System.Diagnostics.Process]$proc) {
     if ($null -eq $proc -or $proc.HasExited) { return }
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+}
+
+# 以 /LOG 受控日志行认证 InitializeSetup 的拒绝原因；日志缺失或标记不命中即 fail-closed。
+function Assert-RefusalCertified([string]$LogPath, [string]$Reason) {
+    $marker = "$RefusalLogMarker$Reason"
+    if (-not (Test-Path $LogPath)) {
+        throw "UNVERIFIED REJECTION: installer produced no /LOG evidence ($LogPath)"
+    }
+    try {
+        $logText = [string](Get-Content -Path $LogPath -Raw -ErrorAction Stop)
+    } catch {
+        throw "UNVERIFIED REJECTION: installer /LOG unreadable ($LogPath): $($_.Exception.Message)"
+    }
+    if ($logText -notmatch [regex]::Escape($marker)) {
+        # 带上实际命中的 reason，区分「认证机制失效」与「命中了另一个守卫」（如主进程残留）。
+        $found = @([regex]::Matches($logText, [regex]::Escape($RefusalLogMarker) + '\S+') |
+            ForEach-Object { $_.Value } | Select-Object -Unique)
+        $actual = if ($found.Count -gt 0) { $found -join ', ' } else { '<none>' }
+        throw "UNVERIFIED REJECTION: installer /LOG lacks refusal marker: $marker (found: $actual)"
+    }
+    Write-Ok "Refusal certified by /LOG marker: $marker"
+}
+
+# 每次拒绝尝试使用独立日志路径；/LOG 会覆盖同名文件，先删除以杜绝读到上一次残留。
+function New-RefusalLogPath([string]$Name) {
+    $path = Join-Path $env:TEMP "qtrading-smoke-refusal-$Name.log"
+    if (Test-Path $path) { Remove-Item -Path $path -Force }
+    return $path
 }
 
 # ---- 主流程 ----
@@ -110,21 +143,20 @@ try {
 
     # STEP 4: 在 qTrading 运行中尝试安装（应被拒绝）
     Write-Step "4. Attempt install while qTrading running (should be rejected)"
-    $reinstallProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    $appRefusalLog = New-RefusalLogPath "app"
+    $reinstallProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART', "/LOG=`"$appRefusalLog`"" -PassThru -Wait
     $installExitCode = $reinstallProc.ExitCode
 
     Write-Host "  Installer exit code: $installExitCode"
 
-    # ENGA-RUNNING-01 fail-closed：非零退出码无法认证「拒绝原因是 InitializeSetup 运行中守卫」
-    # （installer.iss 静默分支只有 Result=False/Exit，无受控日志或唯一退出码），磁盘/权限等
-    # 安装内部故障同样返回非零——仅凭非零判通过会把无关失败伪装成运行中拒绝（假通过）。
+    # RUNNING-01：退出码 0 = 安装成功覆盖运行中的应用（确定失败）；非 0 还须经 /LOG 认证
+    # 拒绝原因——磁盘/权限等安装内部故障同样非零，仅凭非零判通过会把无关失败伪装成
+    # 运行中拒绝（假通过）。
     if ($installExitCode -eq 0) {
         Write-Fail "Installer succeeded while the app was running (exit code: $installExitCode)"
         throw "ASSERTION FAILED: installer succeeded while the app was running"
     }
-    # 非 0 但拒绝原因不可认证：有意 fail-closed，真正的运行中拒绝在认证契约落地前不算验收通过。
-    # NOTE(lazy): fail-closed 使 STEP 5~8 在认证契约落地前运行时不可达（脚本必然 exit 1）. ceiling: 运行中拒绝场景无法验收，release tag/manual dispatch 构建的 installer smoke 步骤将持续失败（PR 阶段不执行该脚本，不受影响）. upgrade: installer.iss 为 InitializeSetup 拒绝提供可认证证据（唯一退出码或 /LOG 受控日志声明）后，将两处 UNVERIFIED REJECTION 分支替换为认证通过断言，恢复 STEP 5~8 可达.
-    throw "UNVERIFIED REJECTION: installer failed (exit code $installExitCode), but InitializeSetup refusal cause cannot be certified"
+    Assert-RefusalCertified $appRefusalLog "running-app"
 
     # STEP 5: 验证 qTrading 仍在运行（未被 installer 杀死）
     Write-Step "5. Verify qTrading still running (not killed by installer)"
@@ -206,17 +238,18 @@ try {
 
         # STEP 7: sidecar 运行中尝试安装（应被拒绝）
         Write-Step "7. Attempt install while sidecar running (should be rejected, P1-11)"
-        $reinstallProc2 = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+        $sidecarRefusalLog = New-RefusalLogPath "sidecar"
+        $reinstallProc2 = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART', "/LOG=`"$sidecarRefusalLog`"" -PassThru -Wait
         $installExitCode2 = $reinstallProc2.ExitCode
 
         Write-Host "  Installer exit code: $installExitCode2"
 
-        # ENGA-RUNNING-01 fail-closed：与 STEP 4 同语义，拒绝原因不可认证即失败，不冒充通过。
+        # RUNNING-01：与 STEP 4 同语义，非 0 且 /LOG 认证 reason=running-sidecar 才算拒绝成立。
         if ($installExitCode2 -eq 0) {
             Write-Fail "Installer succeeded while the sidecar was running (exit code: $installExitCode2)"
             throw "ASSERTION FAILED: installer succeeded while the sidecar was running"
         }
-        throw "UNVERIFIED REJECTION: installer failed (exit code $installExitCode2), but InitializeSetup refusal cause cannot be certified"
+        Assert-RefusalCertified $sidecarRefusalLog "running-sidecar"
 
         # STEP 8: 验证 sidecar 仍在运行
         Write-Step "8. Verify sidecar still running (not killed by installer)"

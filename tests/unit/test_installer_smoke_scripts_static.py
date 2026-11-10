@@ -1,6 +1,6 @@
 """installer / Windows 默认路径静态契约（Linux CI 无法执行 Windows 脚本，只读文本断言）。
 
-守护三类已修复缺陷：
+守护若干已修复缺陷：
 1. Inno Setup 安装器 / 卸载器是 GUI 程序，PowerShell 调用运算符 ``&`` 不等待其结束；
    必须以 ``Start-Process ... -Wait`` 调用（否则后续断言会读到半解包目录）；
 2. 升级脚本下载旧版安装包使用变体 glob——``installer.iss`` 的
@@ -16,6 +16,10 @@
    PG 仍在 initdb 或稍后认证失败时也会先返回 true。ready 必须以 sidecar
    ``status --data-dir`` 的 JSON（``status == "running"`` 且 ``postgres_alive == true``）
    为唯一判据；崩溃恢复脚本还须走真实认证路径写入合成业务哨兵，崩溃后重启并读回。
+5. 运行中拒绝冒烟不能仅凭安装器非零退出码判通过：installer.iss 的 InitializeSetup
+   静默拒绝与磁盘/权限等安装内部故障同为非零。installer.iss 现写 ``/LOG`` 受控日志行
+   ``qtrading.setup-guard.refused reason=<running-app|running-sidecar>``，smoke 脚本以
+   ``/LOG`` 收集并断言该标记，日志缺失/标记不命中即 UNVERIFIED REJECTION 失败（RUNNING-01）。
 """
 
 from __future__ import annotations
@@ -316,7 +320,7 @@ def test_running_app_keeps_stdin_open_until_same_pid_assertions() -> None:
 
 
 def test_running_app_keeps_step7_and_step8_same_pid_assertions() -> None:
-    """STEP 7 fail-closed 拒绝收口（ENGA-RUNNING-01）与“同一 sidecar PID 仍存活”断言必须保留。"""
+    """STEP 7 拒绝认证（RUNNING-01）与“同一 sidecar PID 仍存活”断言必须保留。"""
     text = _read(_RUNNING_APP)
     assert re.search(r'Write-Step "7\. Attempt install while sidecar running', text) is not None
     assert "$sidecarAfter = Get-Process -Id $sidecarProc.Id" in text
@@ -324,66 +328,129 @@ def test_running_app_keeps_step7_and_step8_same_pid_assertions() -> None:
     assert "Assert-True (-not $sidecarAfter.HasExited)" in text
 
 
-# ---- ENGA-RUNNING-01：拒绝假通过收口——非零退出码不能认证运行中拒绝原因 ----
+# ---- RUNNING-01：拒绝原因须经 /LOG 受控日志认证 ----
 # 旧实现 `Assert-True ($installExitCode -ne 0)` 仅凭非零退出码判「运行中拒绝」通过：
-# 磁盘/权限等安装内部故障同样返回非零，而 installer.iss 的 InitializeSetup 静默分支
-# 只有 Result=False/Exit（无受控日志、无唯一退出码），拒绝原因无法认证。
-# fail-closed 两支收口：退出码 0 = 安装成功覆盖运行中的应用（确定失败）；
-# 非 0 = 拒绝原因不可认证，同样失败（有意不冒充「正常拒绝已验证」，ENGA-RUNNING-01）。
+# 磁盘/权限等安装内部故障同样返回非零，无法区分拒绝原因（假通过）。
+# 现行契约：installer.iss 的 InitializeSetup 拒绝分支写 /LOG 受控日志行
+# `qtrading.setup-guard.refused reason=<running-app|running-sidecar>`（Log() 仅在 /LOG 下生效）；
+# 冒烟脚本以 /LOG 收集日志并断言标记，日志缺失或标记不命中即 UNVERIFIED REJECTION 失败。
 
-_REJECTION_UNVERIFIED_MSG = (
-    "UNVERIFIED REJECTION: installer failed (exit code ${var}), but InitializeSetup refusal cause cannot be certified"
-)
+_REFUSAL_MARKER = "qtrading.setup-guard.refused reason="
+_REFUSAL_CERT_FUNCTION = re.compile(r"(?ms)^function Assert-RefusalCertified\([^)]*\) \{.*?^\}")
 
 
-def _rejection_fail_closed(text: str, exit_var: str, scenario: str) -> bool:
-    """STEP 4/7 拒绝断言必须两支收口：退出码 0 → 确定失败；非 0 → 不可认证也失败。"""
+def test_installer_writes_distinct_refusal_reason_markers() -> None:
+    """installer.iss 两个守卫分支必须各自写入可区分原因的受控日志行。"""
+    text = (ROOT / "installer.iss").read_text(encoding="utf-8")
+    app_guard = text.index("IsProcessRunning('AStockScreener.exe')")
+    app_marker = text.index(f"Log('{_REFUSAL_MARKER}running-app')")
+    sidecar_guard = text.index("IsProcessRunning('qtrading-pg-sidecar.exe')")
+    sidecar_marker = text.index(f"Log('{_REFUSAL_MARKER}running-sidecar')")
+    assert app_guard < app_marker < sidecar_guard < sidecar_marker, (
+        f"installer.iss 必须在两个 InitializeSetup 守卫分支内分别写 Log('{_REFUSAL_MARKER}...')，且不得共用同一 reason"
+    )
+
+
+def _step_refusal_certified(text: str, step_prefix: str, exit_var: str, log_var: str, reason: str) -> bool:
+    """STEP 4/7 收口：0 → 确定失败；非 0 且 /LOG 命中对应 reason 才算拒绝成立。"""
+    marker = f'Write-Step "{step_prefix}'
+    if marker not in text:
+        return False
+    step_idx = text.index(marker)
+    next_step_idx = text.find("Write-Step", step_idx + len(marker))
+    body = text[step_idx : next_step_idx if next_step_idx != -1 else len(text)]
     zero_branch = re.search(
-        rf"if \(\${exit_var} -eq 0\) \{{[\s\S]{{0,300}}?throw \"ASSERTION FAILED: installer succeeded "
-        rf"while the {scenario} was running\"",
-        text,
+        rf"if \(\${exit_var} -eq 0\) \{{[\s\S]{{0,300}}?throw \"ASSERTION FAILED: installer succeeded while ",
+        body,
     )
-    unverified = _REJECTION_UNVERIFIED_MSG.format(var=exit_var) in text
-    return zero_branch is not None and unverified
+    return (
+        zero_branch is not None
+        and f'/LOG=`"${log_var}`"' in body
+        and f"${log_var} = New-RefusalLogPath" in text
+        and f'Assert-RefusalCertified ${log_var} "{reason}"' in body
+    )
 
 
-def test_running_app_rejection_assertions_are_fail_closed() -> None:
-    """STEP 4/7 不得以「非零退出码」判通过：0 → ASSERTION FAILED；非 0 → UNVERIFIED REJECTION。"""
+def test_running_app_rejection_requires_log_certification() -> None:
+    """STEP 4/7 不得仅凭非零退出码判通过：须以 /LOG 标记认证拒绝原因。"""
     text = _read(_RUNNING_APP)
-    assert _rejection_fail_closed(text, "installExitCode", "app"), (
-        "STEP 4 缺少 fail-closed 收口：须先断言退出码非 0（0 = 安装成功覆盖运行中的应用，确定失败），"
-        "非 0 时以 UNVERIFIED REJECTION 失败（拒绝原因不可认证，ENGA-RUNNING-01）"
+    assert _step_refusal_certified(text, "4. Attempt install", "installExitCode", "appRefusalLog", "running-app"), (
+        "STEP 4 未以 /LOG 受控日志行 reason=running-app 认证拒绝原因（RUNNING-01）"
     )
-    assert _rejection_fail_closed(text, "installExitCode2", "sidecar"), (
-        "STEP 7 缺少与 STEP 4 同语义的 fail-closed 收口（ENGA-RUNNING-01）"
-    )
+    assert _step_refusal_certified(
+        text, "7. Attempt install", "installExitCode2", "sidecarRefusalLog", "running-sidecar"
+    ), "STEP 7 未以 /LOG 受控日志行 reason=running-sidecar 认证拒绝原因（RUNNING-01）"
     # 旧的「仅凭非零判通过」断言不得残留（两个 STEP 皆然）。
     assert "Assert-True ($installExitCode -ne 0)" not in text
     assert "Assert-True ($installExitCode2 -ne 0)" not in text
-    # 收口必须发生在各自 STEP 内：STEP 4 收口在 STEP 5 之前，STEP 7 收口在 STEP 8 之前。
-    step4_idx = text.index('Write-Step "4. Attempt install while qTrading running')
-    step5_idx = text.index('Write-Step "5. Verify qTrading still running')
-    step7_idx = text.index('Write-Step "7. Attempt install while sidecar running')
-    step8_idx = text.index('Write-Step "8. Verify sidecar still running')
-    zero4_idx = text.index("if ($installExitCode -eq 0)")
-    zero7_idx = text.index("if ($installExitCode2 -eq 0)")
-    assert step4_idx < zero4_idx < step5_idx, "STEP 4 收口必须位于 STEP 4 与 STEP 5 之间"
-    assert step7_idx < zero7_idx < step8_idx, "STEP 7 收口必须位于 STEP 7 与 STEP 8 之间"
+    # 认证必须发生在各自 STEP 内：STEP 4 在 STEP 5 之前，STEP 7 在 STEP 8 之前。
+    assert (
+        text.index('Write-Step "4. Attempt install while qTrading running')
+        < text.index('Assert-RefusalCertified $appRefusalLog "running-app"')
+        < text.index('Write-Step "5. Verify qTrading still running')
+    ), "STEP 4 认证必须位于 STEP 4 与 STEP 5 之间"
+    assert (
+        text.index('Write-Step "7. Attempt install while sidecar running')
+        < text.index('Assert-RefusalCertified $sidecarRefusalLog "running-sidecar"')
+        < text.index('Write-Step "8. Verify sidecar still running')
+    ), "STEP 7 认证必须位于 STEP 7 与 STEP 8 之间"
 
 
-def test_rejection_fail_closed_helper_rejects_legacy_and_partial() -> None:
-    """负向：旧「仅凭非零判通过」与只改一半（缺 UNVERIFIED throw）的实现必须被判定不合规。"""
+def test_refusal_certification_helper_is_fail_closed() -> None:
+    """认证函数缺少日志或标记时必须抛 UNVERIFIED REJECTION（不得静默放行）。"""
+    text = _read(_RUNNING_APP)
+    match = _REFUSAL_CERT_FUNCTION.search(text)
+    assert match is not None, "缺少 Assert-RefusalCertified 认证函数"
+    body = match.group(0)
+    assert "Test-Path $LogPath" in body
+    assert "-notmatch [regex]::Escape($marker)" in body
+    assert 'throw "UNVERIFIED REJECTION:' in body
+    # 读日志失败也须以 UNVERIFIED REJECTION 收口，不得让原生 IO 异常顶替契约语义。
+    assert "installer /LOG unreadable" in body
+    # 失败信息须携带实际命中的 reason，用于区分「认证失效」与「命中另一个守卫」（如主程序残留）。
+    assert "[regex]::Matches($logText" in body
+    assert "(found: $actual)" in body
+    # 两步拒绝尝试各自独立日志文件，避免读到上一次残留。
+    assert 'New-RefusalLogPath "app"' in text
+    assert 'New-RefusalLogPath "sidecar"' in text
+
+
+def test_refusal_certification_helper_rejects_legacy_and_partial() -> None:
+    """负向：仅凭非零退出码、缺 /LOG、或 reason 不匹配的实现必须被判定不合规。"""
     legacy = (
-        'Write-Host "  Installer exit code: $installExitCode"\n'
-        'Assert-True ($installExitCode -ne 0) "Installer rejected (exit code non-zero: $installExitCode)"\n'
+        'Write-Step "4. Attempt install while qTrading running (should be rejected)"\n'
+        'Assert-True ($installExitCode -ne 0) "Installer rejected"\n'
     )
-    assert _rejection_fail_closed(legacy, "installExitCode", "app") is False
-    partial_zero_branch_only = (
+    assert (
+        _step_refusal_certified(legacy, "4. Attempt install", "installExitCode", "appRefusalLog", "running-app")
+        is False
+    )
+    zero_branch_only = (
+        'Write-Step "4. Attempt install while qTrading running (should be rejected)"\n'
         "if ($installExitCode -eq 0) {\n"
         '    throw "ASSERTION FAILED: installer succeeded while the app was running"\n'
         "}\n"
+        'Assert-RefusalCertified $appRefusalLog "running-app"\n'
     )
-    assert _rejection_fail_closed(partial_zero_branch_only, "installExitCode", "app") is False
+    assert (
+        _step_refusal_certified(
+            zero_branch_only, "4. Attempt install", "installExitCode", "appRefusalLog", "running-app"
+        )
+        is False
+    )
+    wrong_reason = (
+        'Write-Step "4. Attempt install while qTrading running (should be rejected)"\n'
+        '$appRefusalLog = New-RefusalLogPath "app"\n'
+        "-ArgumentList '/SILENT', '/NORESTART', \"/LOG=`\"$appRefusalLog`\"\"\n"
+        "if ($installExitCode -eq 0) {\n"
+        '    throw "ASSERTION FAILED: installer succeeded while the app was running"\n'
+        "}\n"
+        'Assert-RefusalCertified $appRefusalLog "running-sidecar"\n'
+    )
+    assert (
+        _step_refusal_certified(wrong_reason, "4. Attempt install", "installExitCode", "appRefusalLog", "running-app")
+        is False
+    )
 
 
 # ---- D17-T01：ready 必须是真实活性证据，崩溃恢复须读回已提交哨兵 ----
