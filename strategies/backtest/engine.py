@@ -60,8 +60,10 @@ def _range_preload_warning_meta(w: str) -> tuple[str, str]:
         return "range_preload_error", WarningCategory.PERFORMANCE_PATH
     if w.startswith("preload_range_too_wide:"):
         return "preload_range_too_wide", WarningCategory.PERFORMANCE_PATH
-    # 未知前缀防御：归为慢路径，不以错误结论升级级别。
-    return "range_preload_failed", WarningCategory.PERFORMANCE_PATH
+    # 未知前缀防御（RANGE-01 / R21 fail-closed）：无法判定为慢路径还是数据质量缺陷时，
+    # 按「覆盖未核实」归入 data_quality（unreliable），不得默认降级为 performance_path
+    # ——否则同一份未知告警经 _category_of_str 与本入口会得到不同可信度。
+    return "range_quality_coverage_unverified", WarningCategory.DATA_QUALITY
 
 
 def _compute_real_score_ratio(signals: pl.DataFrame, ic_dates: list[date]) -> float:
