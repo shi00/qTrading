@@ -16,11 +16,13 @@ Mock 策略：
 - TestEmbeddedPgMaintenanceServiceArgv: argv 构造（UIR-F16-002 库名透传与拒绝、
   M21 用户名透传与白名单校验、M23 reset-password argv 与错误码）
 - TestSidecarUtf8Decoding: D16-F08 显式 UTF-8 解码与非 UTF-8 locale 回归
+- TestRunSidecarCreationFlags: Windows 防弹控制台窗（Popen creationflags）
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -906,6 +908,43 @@ class TestRunSidecarTimeout:
                 await maintenance_service._run_sidecar(["sidecar", "doctor"])
 
         proc_mock.kill.assert_called_once_with()
+
+
+class TestRunSidecarCreationFlags:
+    """Windows 下 Popen 传 CREATE_NO_WINDOW，防止 GUI 主程序拉起 console 子系统 sidecar 弹控制台窗。"""
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_run_sidecar_popen_passes_creation_flags(self, maintenance_service) -> None:
+        from services import embedded_pg_maintenance_service as _svc
+
+        proc_mock = MagicMock()
+        proc_mock.communicate.return_value = ("", "")
+        proc_mock.returncode = 0
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ) as popen_mock,
+        ):
+            code, _stdout, _stderr = await maintenance_service._run_sidecar(["sidecar", "doctor"])
+
+        assert code == 0
+        kwargs = popen_mock.call_args.kwargs
+        assert kwargs.get("creationflags") == _svc._SIDECAR_CREATION_FLAGS
+
+    @pytest.mark.skipif(os.name != "nt", reason="CREATE_NO_WINDOW 语义仅 Windows")
+    def test_sidecar_creation_flags_on_windows(self) -> None:
+        """Windows 平台常量必须等于 subprocess.CREATE_NO_WINDOW。"""
+        import subprocess as _subprocess
+
+        from services import embedded_pg_maintenance_service as _svc
+
+        assert _svc._SIDECAR_CREATION_FLAGS == _subprocess.CREATE_NO_WINDOW
 
 
 # =============================================================================
