@@ -164,13 +164,11 @@ class TestRetryHint:
         expected = I18n.get("backtest_retry_last_run_hint", strategy_name=name)
         assert hint == expected
         assert name is not None
-        assert hint is not None
         assert name in hint
 
     def test_hint_falls_back_to_strategy_key_when_not_listed(self) -> None:
         hint = _build_retry_hint(self._last_run("removed_strategy"), (), "strategy_b")
-        assert hint is not None
-        assert "removed_strategy" in hint
+        assert hint == I18n.get("backtest_retry_last_run_hint", strategy_name="removed_strategy")
 
     def test_error_state_receives_retry_hint(self) -> None:
         """View→ErrorState 接线契约（本文件为契约守护，渲染行为由
