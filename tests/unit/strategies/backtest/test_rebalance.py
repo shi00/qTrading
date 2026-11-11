@@ -2065,3 +2065,104 @@ class TestRebalanceValuationExecPrice:
         a_sells = [t for t in sim.trades_list if t["action"] == "sell" and t["ts_code"] == "000001.SZ"]
         assert len(a_sells) == 1, f"A 应依 next_close 减持到目标：{a_sells}"
         assert a_sells[0]["volume"] == 100  # 部分减持 100 股（从 1000 减到目标市值 18000/20=900 股）
+
+
+class TestValuationPathInvalidPrice:
+    """PORTFOLIO-01：估值/记录路径的坏报价护栏（与买卖护栏同源）。
+
+    行情存在但 qfq_close/raw_close 为 NULL/NaN/±inf 时：
+    - 每日估值与调仓估值支路不得抛 TypeError 中断回测；
+    - _last_known_prices 不得被坏价污染（否则停牌估值/退市清算全线变 NaN）；
+    - 视同无有效行情，走「最后已知价估值」分支（estimated=True，fail-closed）。
+    """
+
+    def _make_sim(self, **kwargs) -> PortfolioSimulator:
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 31), **kwargs)
+        return PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig(slippage_bps=0.0)))
+
+    @staticmethod
+    def _pos() -> dict:
+        return {
+            "volume": 1000,
+            "cost_basis": 10000.0,
+            "entry_date": date(2024, 1, 1),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+
+    @staticmethod
+    def _quote(qfq_close: float | None, raw_close: float | None) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 8)],
+                "raw_open": [raw_close],
+                "raw_close": [raw_close],
+                "qfq_open": [qfq_close],
+                "qfq_close": [qfq_close],
+                "is_tradable": [True],
+                "avg_daily_volume": [5_000_000.0],
+            }
+        )
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf"), None])
+    def test_record_bad_close_estimates_from_last_known_price(self, bad_value) -> None:
+        """坏 qfq_close/raw_close：走最后已知价估值分支，不把坏价写入 _last_known_prices。"""
+        sim = self._make_sim()
+        sim.positions["000001.SZ"] = self._pos()
+        sim._last_known_prices["000001.SZ"] = 10.0
+
+        sim._record_daily_positions(date(2024, 1, 8), self._quote(bad_value, bad_value))
+
+        assert sim._last_known_prices["000001.SZ"] == 10.0
+        record = sim.positions_list[-1]
+        detail = record["positions"]["000001.SZ"]
+        assert detail["estimated"] is True
+        assert record["total_value"] == pytest.approx(sim.cash + 1000 * 10.0)
+
+    def test_record_nan_raw_close_with_valid_qfq_close_still_estimates(self) -> None:
+        """qfq_close 合法但 raw_close NaN：同样视同无有效行情，不抛 TypeError。"""
+        sim = self._make_sim()
+        sim.positions["000001.SZ"] = self._pos()
+        sim._last_known_prices["000001.SZ"] = 10.0
+
+        sim._record_daily_positions(date(2024, 1, 8), self._quote(10.0, float("nan")))
+
+        assert sim._last_known_prices["000001.SZ"] == 10.0
+        assert sim.positions_list[-1]["positions"]["000001.SZ"]["estimated"] is True
+
+    def test_record_valid_prices_still_records_exact_valuation(self) -> None:
+        """正常报价不被新护栏误伤：按当日 qfq_close 精确估值并更新最后已知价。"""
+        sim = self._make_sim()
+        sim.positions["000001.SZ"] = self._pos()
+
+        sim._record_daily_positions(date(2024, 1, 8), self._quote(11.0, 11.0))
+
+        assert sim._last_known_prices["000001.SZ"] == 11.0
+        record = sim.positions_list[-1]
+        detail = record["positions"]["000001.SZ"]
+        assert "estimated" not in detail
+        assert detail["market_value"] == pytest.approx(11_000.0)
+
+    def test_rebalance_estimation_falls_back_on_null_exec_price(self) -> None:
+        """调仓估值支路：执行价 NULL → 退回最后已知价，不抛 TypeError 中断调仓。"""
+        sim = self._make_sim(min_rebalance_delta_pct=0.001)
+        sim.cash = 7000.0
+        sim.positions["000001.SZ"] = self._pos()
+        sim._last_known_prices["000001.SZ"] = 10.0
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 8)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+
+        sim._rebalance_diff(date(2024, 1, 8), signals, self._quote(None, None))
+
+        # 估值兜底按最后已知价 10.0 → 触发增持尝试；买入护栏对 NULL 执行价记
+        # invalid_price 跳过，持仓保留、现金不动、无成交。
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert [t for t in sim.trades_list if t["action"] == "buy"] == []
+        assert "000001.SZ" in sim.positions
+        assert sim.cash == pytest.approx(7000.0)
