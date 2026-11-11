@@ -109,17 +109,18 @@ class BacktestReport:
         profits = [float(v) for v in pnl_col if v is not None]
         winning = [p for p in profits if p > PROFIT_THRESHOLD]
         losing = [p for p in profits if p < PROFIT_THRESHOLD]
-        avg_profit = sum(profits) / len(profits) if profits else 0.0
-        avg_win = sum(winning) / len(winning) if winning else 0.0
-        avg_loss = sum(losing) / len(losing) if losing else 0.0
-        # 极值只从对应分组取：无盈利/亏损样本时渲染 N/A，不拿另一类损益冒充（R21）
+        # 均值/极值只从对应分组取：无盈利/亏损样本时渲染 N/A，不以 0.00 冒充已测得
+        # （R21；与 max_win/max_loss 的 N/A 语义对齐）。
+        avg_profit_str = f"{sum(profits) / len(profits):,.2f}" if profits else "N/A"
+        avg_win_str = f"{sum(winning) / len(winning):,.2f}" if winning else "N/A"
+        avg_loss_str = f"{sum(losing) / len(losing):,.2f}" if losing else "N/A"
         max_win_str = f"{max(winning):,.2f}" if winning else "N/A"
         max_loss_str = f"{min(losing):,.2f}" if losing else "N/A"
         lines = [
             f"{I18n.get('report_total_trades_count')}: {len(result.trades)}",
             f"{I18n.get('report_winning_count')}: {len(winning)}  {I18n.get('report_losing_count')}: {len(losing)}",
-            f"{I18n.get('report_avg_profit')}: {avg_profit:,.2f}",
-            f"{I18n.get('report_avg_win')}: {avg_win:,.2f}  {I18n.get('report_avg_loss')}: {avg_loss:,.2f}",
+            f"{I18n.get('report_avg_profit')}: {avg_profit_str}",
+            f"{I18n.get('report_avg_win')}: {avg_win_str}  {I18n.get('report_avg_loss')}: {avg_loss_str}",
             f"{I18n.get('report_max_win')}: {max_win_str}  {I18n.get('report_max_loss')}: {max_loss_str}",
         ]
         return "\n".join(lines)
