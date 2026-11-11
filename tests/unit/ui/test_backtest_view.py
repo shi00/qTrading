@@ -11,13 +11,17 @@ View 组合（@ft.component + use_viewmodel）有状态，由集成测试覆盖�
 """
 
 import inspect
+from datetime import date
 from pathlib import Path
 
 import flet as ft
 import pytest
 
+from strategies.backtest.config import BacktestConfig
+from ui.i18n import I18n
+from ui.viewmodels.backtest_view_model import LastRunSnapshot
 from ui.views import backtest_view as backtest_view_module
-from ui.views.backtest_view import BacktestView
+from ui.views.backtest_view import BacktestView, _build_retry_hint
 
 pytestmark = pytest.mark.unit
 
@@ -131,3 +135,48 @@ class TestRetryParamsSnapshotContract:
         call = src.split("vm.record_last_run(", 1)[1].split(")", 1)[0]
         assert "backtest_config" in call
         assert "_prefilled_params.current" in call, "首次提交须把 params 写入快照"
+
+
+class TestRetryHint:
+    """下拉选择与重试对象不一致时，显式提示将重试哪一次运行。"""
+
+    @staticmethod
+    def _last_run(strategy_key: str = "strategy_a") -> LastRunSnapshot:
+        return LastRunSnapshot(
+            strategy_key,
+            BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 31)),
+            None,
+        )
+
+    def test_no_hint_without_last_run(self) -> None:
+        assert _build_retry_hint(None, (("strategy_a", "backtest_failed_title"),), "strategy_b") is None
+
+    def test_no_hint_when_selection_matches_last_run(self) -> None:
+        assert _build_retry_hint(self._last_run(), (("strategy_a", "backtest_failed_title"),), "strategy_a") is None
+
+    def test_hint_names_last_run_when_selection_differs(self) -> None:
+        hint = _build_retry_hint(
+            self._last_run("strategy_a"),
+            (("strategy_a", "backtest_failed_title"), ("strategy_b", "backtest_failed_message")),
+            "strategy_b",
+        )
+        name = I18n.get("backtest_failed_title")
+        expected = I18n.get("backtest_retry_last_run_hint", strategy_name=name)
+        assert hint == expected
+
+    def test_hint_falls_back_to_strategy_key_when_not_listed(self) -> None:
+        hint = _build_retry_hint(self._last_run("removed_strategy"), (), "strategy_b")
+        assert hint == I18n.get("backtest_retry_last_run_hint", strategy_name="removed_strategy")
+
+    def test_error_state_receives_retry_hint(self) -> None:
+        """View→ErrorState 接线契约（本文件为契约守护，渲染行为由
+        tests/unit/ui/components/test_state_views.py 的 TestErrorStateRender 行为级覆盖）。
+
+        契约要求：View 须调用 _build_retry_hint 并把结果经 retry_hint 传入 ErrorState，
+        且入参为上次运行快照 + 当前下拉三要素，缺一即视为接线断裂。
+        """
+        src = _source_text()
+        assert "retry_hint=_build_retry_hint(" in src
+        assert "state.last_run_summary" in src
+        assert "state.available_strategies" in src
+        assert "state.selected_strategy_key" in src

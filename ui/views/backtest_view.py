@@ -30,7 +30,12 @@ from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.backtest_view_model import BacktestState, BacktestViewModel, consume_pending_prefill
+from ui.viewmodels.backtest_view_model import (
+    BacktestState,
+    BacktestViewModel,
+    LastRunSnapshot,
+    consume_pending_prefill,
+)
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -49,6 +54,23 @@ def _resolve_status_color(status_color: str) -> str:
     """解析 VM 语义状态色到当期主题色 (F04: 渲染时读取 AppColors, 不固化导入期快照)."""
     name = _STATUS_COLOR_MAP.get(status_color, "TEXT_SECONDARY")
     return getattr(AppColors, name)
+
+
+def _build_retry_hint(
+    last_run: LastRunSnapshot | None,
+    available_strategies: tuple[tuple[str, str], ...],
+    selected_strategy_key: str | None,
+) -> str | None:
+    """UIV-BT-01: 重试对象与当前下拉选择不一致时显式说明「将重试哪一次运行」。
+
+    重试语义保持不变（始终复现 VM 记录的上一次提交），仅消除「下拉已切到 B、
+    重试却运行 A」的静默误解（R21：不把实际执行对象伪装成当前选择）。
+    """
+    if last_run is None or last_run.strategy_key == selected_strategy_key:
+        return None
+    name_key = dict(available_strategies).get(last_run.strategy_key)
+    strategy_name = I18n.get(name_key) if name_key else last_run.strategy_key
+    return I18n.get("backtest_retry_last_run_hint", strategy_name=strategy_name)
 
 
 # UX-01: 可信度等级 → 标题 i18n 全字面量 key (静态引用, 满足 i18n 键完整性静态扫描).
@@ -400,6 +422,11 @@ def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.
             detail=state.error_detail,
             on_retry=_on_retry_backtest,
             retry_text=I18n.get("common_retry"),
+            retry_hint=_build_retry_hint(
+                state.last_run_summary,
+                state.available_strategies,
+                state.selected_strategy_key,
+            ),
             cta_url=GITHUB_ISSUES_URL,  # Flet 1.0.x 客户端动作 OpenUrl (见 state_views.ErrorState)
             cta_text=I18n.get("error_state_contact_support"),
             cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
