@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,11 @@ _DATABASE_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 # sidecar CLI 的默认超级用户名（cli.rs DEFAULT_USERNAME）。仅在配置非该值时才透传
 # ``--username``，保证默认配置下与不支持该参数的旧 sidecar 兼容。
 SIDECAR_DEFAULT_USERNAME = "postgres"
+
+# Windows 下主程序为 GUI（windowed）进程，拉起 console 子系统的 sidecar CLI 时若不带
+# CREATE_NO_WINDOW 会弹出可见控制台窗口（备份/恢复/doctor 期间黑窗）；开发模式从终端
+# 运行时子进程继承终端控制台不弹窗，故仅打包安装版暴露。POSIX 平台传 0。
+_SIDECAR_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 class EmbeddedPgMaintenanceError(RuntimeError):
@@ -501,6 +507,7 @@ class EmbeddedPgMaintenanceService:
                     # 机器协议 stdout 的损坏字节由 ``_reject_corrupted_stdout`` 显式拒绝。
                     encoding="utf-8",
                     errors="replace",
+                    creationflags=_SIDECAR_CREATION_FLAGS,
                 )
                 if reserved:
                     with self._lock:

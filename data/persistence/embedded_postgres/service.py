@@ -48,6 +48,11 @@ class EmbeddedPostgresStartError(RuntimeError):
     """sidecar 启动失败（binary 缺失/ready 超时/JSON 无效/password_file 缺失等）。"""
 
 
+# Windows 下主程序为 GUI（windowed）进程，拉起 console 子系统的 sidecar 时若不带
+# CREATE_NO_WINDOW 会为其分配可见控制台窗口（安装版用户可见黑窗）；开发模式从终端
+# 运行时子进程继承终端控制台不弹窗，故仅打包安装版暴露。POSIX 平台传 0。
+_SIDECAR_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 _READY_SCHEMA = "qtrading.embedded_postgres.run.ready.v1"
 _EVENT_WARNING_SCHEMA = "qtrading.embedded_postgres.event.warning.v1"
 _EVENT_EXIT_SCHEMA = "qtrading.embedded_postgres.event.exit.v1"
@@ -614,6 +619,7 @@ class EmbeddedPostgresService:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                creationflags=_SIDECAR_CREATION_FLAGS,
             )
             self._process = proc
         except FileNotFoundError as exc:

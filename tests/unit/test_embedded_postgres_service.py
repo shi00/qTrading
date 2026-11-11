@@ -5,8 +5,8 @@ FAKE_READY JSON + 写 password 到 password_file + 等 stdin EOF 退出），通
 平台包装器（.bat/.sh）使其可执行。service.start() 真实 Popen 该脚本，
 验证 sidecar 协议解析端到端正确。
 
-测试分组（共 37 个）：
-- TestEmbeddedPostgresServiceStart: 1 TDD + 12 start 协议 = 13 个
+测试分组（共 39 个）：
+- TestEmbeddedPostgresServiceStart: 1 TDD + 14 start 协议 = 15 个
 - TestEmbeddedPostgresServiceStop: 1 TDD + 10 stop 行为 = 11 个
 - TestEmbeddedPostgresServiceSingleton: 2 TDD = 2 个
 - TestEmbeddedPostgresServiceFromConfig: 1 TDD = 1 个
@@ -350,6 +350,40 @@ class TestEmbeddedPostgresServiceStart:
                 assert captured_argv[pid_idx + 1] == str(os.getpid())
         finally:
             await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_popen_passes_creation_flags(self, fake_paths) -> None:
+        """Popen 必须传 creationflags=_SIDECAR_CREATION_FLAGS（Windows 防弹控制台窗）。"""
+        from data.persistence.embedded_postgres import service as svc_module
+
+        captured_kwargs: dict[str, object] = {}
+
+        def popen_factory(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            inst = _FakePopen(cmd, **kwargs)
+            inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+            runtime_dir = fake_paths["data_dir"].parent / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+            return inst
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                await service.start()
+        finally:
+            await service.stop()
+
+        assert captured_kwargs.get("creationflags") == svc_module._SIDECAR_CREATION_FLAGS
+
+    @pytest.mark.skipif(os.name != "nt", reason="CREATE_NO_WINDOW 语义仅 Windows")
+    def test_sidecar_creation_flags_on_windows(self) -> None:
+        """Windows 平台常量必须等于 subprocess.CREATE_NO_WINDOW（GUI 拉起 console 子系统 sidecar 防弹窗）。"""
+        import subprocess as _subprocess
+
+        from data.persistence.embedded_postgres import service as svc_module
+
+        assert svc_module._SIDECAR_CREATION_FLAGS == _subprocess.CREATE_NO_WINDOW
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_start_reads_first_stdout_line_as_json(self, fake_paths) -> None:
