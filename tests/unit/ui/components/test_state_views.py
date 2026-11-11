@@ -125,6 +125,47 @@ class TestErrorStateRender:
         assert isinstance(col.controls[0], ft.Icon)
         assert col.controls[0].color == AppColors.ERROR
 
+    def test_retry_hint_renders_above_retry_button(self, mock_i18n_state, mock_app_colors_state):
+        """retry_hint 非空时在重试按钮上方渲染提示文本 (UIV-BT-01 行为级覆盖)."""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        hint = "将重试上一次运行：策略 A"
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Load Failed",
+            message="Please retry",
+            on_retry=lambda: None,
+            retry_text="Retry",
+            retry_hint=hint,
+        )
+        container = render_once(c)
+        col = container.content
+        # 5 controls: icon + title + message + retry_hint + retry_button
+        assert len(col.controls) == 5
+        assert isinstance(col.controls[3], ft.Text)
+        assert col.controls[3].value == hint
+        assert isinstance(col.controls[4], ft.TextButton)
+
+    def test_retry_hint_none_keeps_four_controls(self, mock_i18n_state, mock_app_colors_state):
+        """retry_hint=None 时不渲染提示行，控件数不变 (回归守护)."""
+        from tests.unit.ui.component_renderer import make_component, render_once
+
+        c = make_component(
+            ErrorState,
+            icon=ft.Icons.ERROR_OUTLINE,
+            title="Load Failed",
+            message="Please retry",
+            on_retry=lambda: None,
+            retry_text="Retry",
+        )
+        container = render_once(c)
+        col = container.content
+        assert len(col.controls) == 4
+        assert all(
+            not (isinstance(ctrl, ft.Text) and ctrl.value == "将重试上一次运行：策略 A") for ctrl in col.controls
+        )
+
     def test_no_retry_renders_only_icon_title_message(self, mock_i18n_state, mock_app_colors_state):
         from tests.unit.ui.component_renderer import make_component, render_once
 

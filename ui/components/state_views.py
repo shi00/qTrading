@@ -104,6 +104,7 @@ def ErrorState(
     detail: str | None = None,
     on_retry: Callable[[], None] | None = None,
     retry_text: str | None = None,
+    retry_hint: str | None = None,
     on_cta: Callable[[], None] | None = None,
     cta_text: str | None = None,
     cta_icon: str | None = None,
@@ -119,6 +120,8 @@ def ErrorState(
             None 时不渲染详情展开按钮。
         on_retry: 重试回调 (可选); None 时不渲染重试按钮。
         retry_text: 重试按钮文案 (已翻译字符串); ``on_retry`` 非空时必填。
+        retry_hint: 重试对象提示 (已翻译字符串, 可选); 用于「重试的是上一次运行而非当前
+            下拉选择」等易误解场景, None 时不渲染。
         on_cta: 次操作回调 (可选, 如反馈问题/导航到设置页); None 时不渲染 CTA 按钮。
             ``on_cta`` 与 ``cta_url`` 互斥: 传入 ``cta_url`` 时优先用声明式客户端动作,
             忽略 ``on_cta``。
@@ -172,6 +175,15 @@ def ErrorState(
             ),
         )
     if on_retry is not None and retry_text:
+        if retry_hint:
+            column_controls.append(
+                ft.Text(
+                    retry_hint,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            )
         column_controls.append(
             ft.TextButton(
                 content=retry_text,

@@ -769,6 +769,7 @@
     "home_load_failed_message": "Market data or news loading failed, please retry",
     "backtest_failed_title": "Backtest Execution Failed",
     "backtest_failed_message": "Backtest execution error, please retry or report issue",
+    "backtest_retry_last_run_hint": "Will retry the last run: {strategy_name}",
     "home_no_market_data": "No market data available",
     "home_no_news_data": "No news available",
     "home_goto_data_source": "Go to Data Source Settings",

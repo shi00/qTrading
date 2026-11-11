@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.11.6](https://github.com/shi00/qTrading/compare/v0.11.5...v0.11.6) (2026-11-11)
+
+
+### Bug Fixes
+
+* **ci:** crash_recovery 冒烟 STEP 11 读回哨兵前增加 SQL 就绪等待 ([#2145](https://github.com/shi00/qTrading/issues/2145)) ([2d08543](https://github.com/shi00/qTrading/commit/2d0854342ced4f467fc0e2578412408fc3164bd6))
+* **ci:** sidecar 同源校验下沉到子树 tree SHA ([#2138](https://github.com/shi00/qTrading/issues/2138)) ([975b063](https://github.com/shi00/qTrading/commit/975b06392db1a4865802703516185cbbabb82869))
+* **ci:** upgrade 冒烟等库超时输出根因取证 ([#2140](https://github.com/shi00/qTrading/issues/2140)) ([dc58941](https://github.com/shi00/qTrading/commit/dc58941df15474b4f4dc674f5c62f01b2dd00341))
+* **ci:** upgrade 冒烟等库轮询内重读密码文件 ([#2141](https://github.com/shi00/qTrading/issues/2141)) ([2b07a42](https://github.com/shi00/qTrading/commit/2b07a4292b2f48fa601acf2cc9d7201f5bc69c65))
+* **ci:** 冒烟取证按 --log-file 取日志并补充 PG_VERSION/pg_hba 判据 ([#2143](https://github.com/shi00/qTrading/issues/2143)) ([dd067c5](https://github.com/shi00/qTrading/commit/dd067c5259dde1e05a5be6bb189d41dc1e811e25))
+* **ci:** 升级冒烟清理时重置 runtime\password，修复旧版 sidecar 将 PGPW2 密文当明文密码 initdb ([#2144](https://github.com/shi00/qTrading/issues/2144)) ([5be34d3](https://github.com/shi00/qTrading/commit/5be34d3d3cc55aba6c9b7d1b63bd88452a5a9f67))
+* **ci:** 升级冒烟超时输出进程命令行与 sidecar 日志取证 ([#2142](https://github.com/shi00/qTrading/issues/2142)) ([9a6838c](https://github.com/shi00/qTrading/commit/9a6838c90e59eade65137d8293ffab1aa5223826))
+* **packaging:** 运行中拒绝冒烟改以 /LOG 受控日志行认证拒绝原因（RUNNING-01） ([#2139](https://github.com/shi00/qTrading/issues/2139)) ([e3f5066](https://github.com/shi00/qTrading/commit/e3f506670c06a13a3ba298877b309e7e41699767))
+
 ## [0.11.5](https://github.com/shi00/qTrading/compare/v0.11.3...v0.11.5) (2026-11-10)
 
 > 说明：0.11.4 的 Release PR 已合并但未推送 tag，本节涵盖自 v0.11.3 以来的全部变更（含原 0.11.4 条目）。

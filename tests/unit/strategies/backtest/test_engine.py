@@ -2407,8 +2407,8 @@ class TestRangePreloadWarningMeta:
     """MAJOR-01 决策③：range_preload_warnings 字符串 → (warning_type, category) 映射。
 
     覆盖 _range_preload_warning_meta 全部分支：区间缺口→data_quality（unreliable）；
-    慢路径（preload_range_too_wide / range_preload_failed / range_preload_error）与
-    未知前缀兜底→performance_path（仅提示，不升级级别）。
+    慢路径（preload_range_too_wide / range_preload_failed / range_preload_error）→
+    performance_path（仅提示）；未知前缀→data_quality（fail-closed，未知按不可信处理）。
     """
 
     def test_range_quality_gaps_maps_to_data_quality(self):
@@ -2441,12 +2441,21 @@ class TestRangePreloadWarningMeta:
             assert wtype == expect_type
             assert category == "performance_path"
 
-    def test_unknown_prefix_falls_back_to_performance_path(self):
+    def test_unknown_prefix_falls_back_to_data_quality(self):
+        """R21: 未知前缀按「覆盖未核实」fail-closed，不默认降级为性能提示。"""
         from strategies.backtest.engine import _range_preload_warning_meta
 
         wtype, category = _range_preload_warning_meta("unforeseen_string")
-        assert wtype == "range_preload_failed"
-        assert category == "performance_path"
+        assert wtype == "range_quality_coverage_unverified"
+        assert category == "data_quality"
+
+    def test_unknown_prefix_with_bracket_type_is_not_slow_path(self):
+        """未知 [type] 前缀的告警不得被当作慢路径。"""
+        from strategies.backtest.engine import _range_preload_warning_meta
+
+        wtype, category = _range_preload_warning_meta("[unforeseen_type] 未知质量事件")
+        assert wtype == "range_quality_coverage_unverified"
+        assert category == "data_quality"
 
 
 class TestVectorizationEquivalence:

@@ -75,11 +75,14 @@ class DataWarning:
 
     def __post_init__(self) -> None:
         if self.category is None:
-            object.__setattr__(
-                self,
-                "category",
-                WarningCategory._TYPE_TO_CATEGORY.get(self.warning_type, WarningCategory.DATA_QUALITY),
-            )
+            resolved = WarningCategory._TYPE_TO_CATEGORY.get(self.warning_type, WarningCategory.UNKNOWN_NOT_VERIFIED)
+        elif isinstance(self.category, str) and self.category in WarningCategory._KNOWN_CATEGORIES:
+            resolved = self.category
+        else:
+            # BC-02 / R21：显式传入未知 category（空串 / 拼写错误 / 非字符串）时按
+            # 「未核实」fail-closed，禁止把非法值原样透传给消费方（查表报错或静默降级）。
+            resolved = WarningCategory.UNKNOWN_NOT_VERIFIED
+        object.__setattr__(self, "category", resolved)
 
     def __str__(self) -> str:
         return (
@@ -106,6 +109,18 @@ class WarningCategory:
     # 仅由 services 层以裸字符串追加（R1 禁止 services 运行时构造 DataWarning），
     # 故 DataWarning.category 的 Literal 不包含本值。
     SYSTEM = "system"
+
+    # BC-02 / R21 fail-closed：未知 [type] 前缀 / 空值 / 未识别 category 的归一语义。
+    # 复用既有 fail-closed 常量 data_quality（与 DataWarning.__post_init__ 对未知
+    # warning_type 的既有回退一致）：未知 ≠ 无告警，按不可信处理（data_usable=False，
+    # UI 判 unreliable）。不新增消费方未识别的 category 字符串，避免其查表 KeyError。
+    UNKNOWN_NOT_VERIFIED = DATA_QUALITY
+
+    # 合法的 category 取值（含仅经裸字符串出现的 system）；其余一律归入
+    # UNKNOWN_NOT_VERIFIED，避免非法值透传到消费方。
+    _KNOWN_CATEGORIES: ClassVar[frozenset[str]] = frozenset(
+        {DATA_QUALITY, TERMINATION, PERFORMANCE_PATH, ASOF_APPROXIMATION, SYSTEM}
+    )
 
     # 系统级告警的字符串前缀锚定（services 追加格式为 f"persist_failed: {sanitized}"）。
     # 必须锚定在字符串开头：payload 是任意异常文本，可能含 benchmark / suspension
@@ -162,14 +177,17 @@ class WarningCategory:
 
     @staticmethod
     def _category_of_str(text: str) -> str | None:
-        # 1) [type] 前缀命中已知 warning_type 全集 → 映射 category。
+        # 0) 空值（含纯空白）是「未核实」，不是「无告警」（BC-02 / R21 fail-closed）。
+        if not text.strip():
+            return WarningCategory.UNKNOWN_NOT_VERIFIED
+        # 1) [type] 前缀命中已知 warning_type 全集 → 映射 category；
+        #    未知 / 空 / 不闭合的 type 一律 fail-closed（不得返回 None 静默丢失类型）。
         if text.startswith("["):
             closing = text.find("]")
-            if closing > 1:
-                wtype = text[1:closing]
-                if wtype in WarningCategory._TYPE_TO_CATEGORY:
-                    return WarningCategory._TYPE_TO_CATEGORY[wtype]
-                return None
+            if closing <= 1:
+                return WarningCategory.UNKNOWN_NOT_VERIFIED
+            wtype = text[1:closing]
+            return WarningCategory._TYPE_TO_CATEGORY.get(wtype, WarningCategory.UNKNOWN_NOT_VERIFIED)
         # 2) 系统级前缀锚定（services 层追加的 "persist_failed: <sanitized>"）。
         # 必须先于子串白名单：payload 为任意异常文本，可能误命中 data_quality 关键词。
         if text.startswith(WarningCategory._SYSTEM_PREFIXES):
