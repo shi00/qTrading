@@ -1945,6 +1945,45 @@ class TestDiffRebalance:
             assert p["volume"] * p["qfq_entry_price"] <= 0.1 * total_assets + 1e-6
         assert total_invested < 0.5 * total_assets
 
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0, None])
+    def test_sell_position_invalid_price_skips_before_limit_down_compare(self, bad_value) -> None:
+        """PORTFOLIO-01: 卖出价 NULL/NaN/±inf/非正时先记 invalid_price 跳过，不得在跌停
+        比较处 float(None) 抛错中断回测，也不得以非法价成交。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote_values("000001.SZ", bad_value, bad_value).with_columns(pl.lit(11.0).alias("limit_down_price"))
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], q)
+
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert [t for t in sim.trades_list if t["action"] == "sell"] == []
+        assert math.isfinite(sim.cash)
+
+    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0, None])
+    def test_sell_position_to_value_invalid_price_skips_before_limit_down_compare(self, bad_value) -> None:
+        """PORTFOLIO-01: 减持路径同样先校验执行价，避免 float(None) 与 0/0 中断回测。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote_values("000001.SZ", bad_value, bad_value).with_columns(pl.lit(11.0).alias("limit_down_price"))
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", q, target_value=5000.0)
+
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert [t for t in sim.trades_list if t["action"] == "sell"] == []
+        assert math.isfinite(sim.cash)
+
+    def test_sell_position_valid_price_still_sells_despite_limit_down_field(self) -> None:
+        """PORTFOLIO-01: 调整守卫顺序后，正常报价（高于跌停价）仍照常卖出。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=10.0).with_columns(pl.lit(9.0).alias("limit_down_price"))
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], q)
+
+        sells = [t for t in sim.trades_list if t["action"] == "sell"]
+        assert len(sells) == 1
+        assert "000001.SZ" not in sim.positions
+        assert not any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+
 
 class TestRebalanceValuationExecPrice:
     """BT-01：_rebalance_diff 估值口径与 execution_price 对齐（防未来函数/系统性失真）。
