@@ -1984,6 +1984,23 @@ class TestDiffRebalance:
         assert "000001.SZ" not in sim.positions
         assert not any(r["reason"] == "invalid_price" for r in sim.skipped_list)
 
+    def test_sell_position_at_limit_down_price_is_blocked(self) -> None:
+        """卖出价 == 跌停价应触发 down_limit 拦截（守卫前移不得吞掉跌停判据）。
+
+        守卫前移后 exit_price 复用同一变量参与跌停比较，等于价落入 ``<= down + 1e-6``
+        容差内 → 记 down_limit 跳过、持仓保留、无成交。
+        """
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote_values("000001.SZ", 11.0, 11.0).with_columns(pl.lit(11.0).alias("limit_down_price"))
+
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], q)
+
+        assert any(r["reason"] == "down_limit" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert [t for t in sim.trades_list if t["action"] == "sell"] == []
+        assert math.isfinite(sim.cash)
+
 
 class TestRebalanceValuationExecPrice:
     """BT-01：_rebalance_diff 估值口径与 execution_price 对齐（防未来函数/系统性失真）。
