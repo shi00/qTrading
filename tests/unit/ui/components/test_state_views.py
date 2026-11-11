@@ -162,7 +162,9 @@ class TestErrorStateRender:
         container = render_once(c)
         col = container.content
         assert len(col.controls) == 4
-        assert all(not (isinstance(ctrl, ft.Text) and ctrl.value == "将重试上一次运行：策略 A") for ctrl in col.controls)
+        assert all(
+            not (isinstance(ctrl, ft.Text) and ctrl.value == "将重试上一次运行：策略 A") for ctrl in col.controls
+        )
 
     def test_no_retry_renders_only_icon_title_message(self, mock_i18n_state, mock_app_colors_state):
         from tests.unit.ui.component_renderer import make_component, render_once
