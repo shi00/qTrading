@@ -34,6 +34,11 @@ _litellm_pkg_path = Path(get_package_paths("litellm")[1])
 datas += [(str(f), "litellm") for f in _litellm_pkg_path.iterdir() if f.is_file() and f.suffix == ".json"]
 
 hiddenimports = [
+    # alembic/env.py 以数据文件形式打包、由 alembic 运行时动态加载，
+    # PyInstaller 静态分析无法发现其 `from logging.config import fileConfig`，
+    # 首次启动迁移阶段会报 No module named 'logging.config'（frozen 缺 stdlib 子模块）。
+    "logging.config",
+    "logging.handlers",
     "flet",
     "flet_desktop",
     "flet_charts",
