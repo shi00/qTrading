@@ -3,7 +3,7 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.11.6（产品版本，与 pyproject.toml 一致）<!-- x-release-please-version -->
+> **对应版本**：以 [pyproject.toml](./pyproject.toml) `[project].version` 为唯一正本（版本字面量收敛，见 ADR-0017）。
 > **语言约定**：始终使用简体中文回复（跨工具同见 [AGENTS.md](./AGENTS.md)）。
 > **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
 > **治理 ID 说明（GDR-09）**：正文括注的治理 ID（如 `P2-07` / `DOC-04` / `review01-A2` / `GDR-06`）为内部溯源标记，读者无需解析即可理解条款；如需溯源，见 [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) 对照表。
@@ -278,7 +278,7 @@
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
 | man/ 专题深度文档（database-account-separation / table-partitioning-strategy 为规划/设计文档、非现行实现；flet-best-practices 已退化为指向 docs/flet/ 的 stub） | [man/](./man/) 子文档 |
 | AGENTS.md 跨工具规则入口（最小安全集 + 指针 + 生成区块，见 ADR-0006） | [AGENTS.md](./AGENTS.md) |
-| AI 工具运行时配置（harness.toml：权限/沙箱白名单，非规则正本，产品版本经 verify-versions 守护） | [harness.toml](./harness.toml) |
+| AI 工具运行时配置（harness.toml：权限/沙箱白名单，非规则正本，不携带产品版本） | [harness.toml](./harness.toml) |
 | 治理 ID 对照表（P2/DOC/GDR/review 系列 ID → 一句话含义） | [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) |
 
 ---

@@ -19,32 +19,6 @@
         {"type": "perf", "section": "Performance", "hidden": false},
         {"type": "refactor", "section": "Refactoring", "hidden": false},
         {"type": "test", "section": "Tests", "hidden": false}
-      ],
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "installer.iss"
-        },
-        {
-          "type": "generic",
-          "path": "SECURITY.md"
-        },
-        {
-          "type": "generic",
-          "path": "CLAUDE.md"
-        },
-        {
-          "type": "generic",
-          "path": "AGENTS.md"
-        },
-        {
-          "type": "generic",
-          "path": "CONTRIBUTING.md"
-        },
-        {
-          "type": "generic",
-          "path": "harness.toml"
-        }
       ]
     }
   }

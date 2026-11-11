@@ -15,7 +15,6 @@ pytestmark = [pytest.mark.unit, pytest.mark.meta]
 def setup_test_files(
     tmp_path,
     pyproject_v="0.6.9",
-    installer_v="0.6.9",
     manifest_v="0.6.9",
     pkg_pyright="1.1.300",
     ci_pyright="1.1.300",
@@ -38,12 +37,6 @@ def setup_test_files(
     sidecar_src.mkdir(parents=True, exist_ok=True)
     (sidecar_src / "protocol.rs").write_text(
         'pub const PROTOCOL_VERSION: &str = "v1";\n',
-        encoding="utf-8",
-    )
-
-    installer = tmp_path / "installer.iss"
-    installer.write_text(
-        f'#define MyAppVersion "{installer_v}" ; x-release-please-version\n',
         encoding="utf-8",
     )
 
@@ -77,26 +70,11 @@ def setup_test_files(
     claude = tmp_path / "CLAUDE.md"
     claude.write_text("# CLAUDE.md\n", encoding="utf-8")
 
-    # AGENTS.md：对应版本与 pyproject_v 绑定，保证 check_agents_version (Check 10) 一致
-    agents = tmp_path / "AGENTS.md"
-    agents.write_text(
-        f"> **对应版本**：{pyproject_v}（产品版本，与 pyproject.toml 一致）\n",
-        encoding="utf-8",
-    )
-
-    # harness.toml：[project].version 与 pyproject_v 绑定，保证 check_harness_version (Check 11) 一致
-    harness = tmp_path / "harness.toml"
-    harness.write_text(
-        f'[project]\nname = "AStockScreener"\nversion = "{pyproject_v}"  # x-release-please-version\n',
-        encoding="utf-8",
-    )
-
     requirements_dev = tmp_path / "requirements-dev.txt"
     requirements_dev.write_text(f"pyright=={pkg_pyright}\n", encoding="utf-8")
 
     return (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -110,7 +88,6 @@ def setup_test_files(
 
 def _patch_all_paths(
     pyproject,
-    installer,
     pkg_json,
     ci_workflow,
     manifest,
@@ -125,7 +102,6 @@ def _patch_all_paths(
     sidecar_dir = pyproject.parent / "sidecars" / "qtrading-pg-sidecar"
     return [
         patch("verify_versions.PYPROJECT_PATH", pyproject),
-        patch("verify_versions.INSTALLER_PATH", installer),
         patch("verify_versions.PACKAGE_JSON_PATH", pkg_json),
         patch("verify_versions.CI_WORKFLOW_PATH", ci_workflow),
         patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
@@ -133,90 +109,15 @@ def _patch_all_paths(
         patch("verify_versions.CONTRIBUTING_PATH", contributing),
         patch("verify_versions.SECURITY_PATH", security),
         patch("verify_versions.CLAUDE_PATH", claude),
-        # AGENTS_PATH 由 pyproject.parent 推导，与 setup_test_files 创建的 AGENTS.md 一致
-        patch("verify_versions.AGENTS_PATH", pyproject.parent / "AGENTS.md"),
-        # HARNESS_PATH 由 pyproject.parent 推导，与 setup_test_files 创建的 harness.toml 一致
-        patch("verify_versions.HARNESS_PATH", pyproject.parent / "harness.toml"),
         patch("verify_versions.REQUIREMENTS_DEV_PATH", requirements_dev),
         patch("verify_versions.SIDECAR_CARGO_PATH", sidecar_dir / "Cargo.toml"),
         patch("verify_versions.SIDECAR_PROTOCOL_PATH", sidecar_dir / "src" / "protocol.rs"),
     ]
 
 
-def test_agents_version_matches(tmp_path):
-    """AGENTS.md 对应版本与 pyproject 一致 → 无错误."""
-    agents = tmp_path / "AGENTS.md"
-    agents.write_text("> **对应版本**：0.6.9（产品版本，与 pyproject.toml 一致）\n", encoding="utf-8")
-    with patch("verify_versions.AGENTS_PATH", agents):
-        errors = verify_versions.check_agents_version("0.6.9")
-    assert errors == []
-
-
-def test_agents_version_mismatch(tmp_path):
-    """AGENTS.md 对应版本与 pyproject 不一致 → 报错."""
-    agents = tmp_path / "AGENTS.md"
-    agents.write_text("> **对应版本**：0.6.8（产品版本，与 pyproject.toml 一致）\n", encoding="utf-8")
-    with patch("verify_versions.AGENTS_PATH", agents):
-        errors = verify_versions.check_agents_version("0.6.9")
-    assert any("0.6.8" in e and "0.6.9" in e for e in errors), f"应检出版本失配, got: {errors}"
-
-
-def test_agents_version_missing_header(tmp_path):
-    """AGENTS.md 缺「对应版本」字段 → 报错."""
-    agents = tmp_path / "AGENTS.md"
-    agents.write_text("# AGENTS.md\n", encoding="utf-8")
-    with patch("verify_versions.AGENTS_PATH", agents):
-        errors = verify_versions.check_agents_version("0.6.9")
-    assert any("missing '**对应版本**'" in e for e in errors), f"应检出缺字段, got: {errors}"
-
-
-def test_harness_version_matches(tmp_path):
-    """harness.toml [project].version 与 pyproject 一致 → 无错误."""
-    harness = tmp_path / "harness.toml"
-    harness.write_text('[project]\nname = "AStockScreener"\nversion = "0.6.9"\n', encoding="utf-8")
-    with patch("verify_versions.HARNESS_PATH", harness):
-        errors = verify_versions.check_harness_version("0.6.9")
-    assert errors == []
-
-
-def test_harness_version_mismatch(tmp_path):
-    """harness.toml [project].version 与 pyproject 不一致 → 报错."""
-    harness = tmp_path / "harness.toml"
-    harness.write_text('[project]\nname = "AStockScreener"\nversion = "0.6.8"\n', encoding="utf-8")
-    with patch("verify_versions.HARNESS_PATH", harness):
-        errors = verify_versions.check_harness_version("0.6.9")
-    assert any("0.6.8" in e and "0.6.9" in e for e in errors), f"应检出版本失配, got: {errors}"
-
-
-def test_harness_version_missing_field(tmp_path):
-    """harness.toml 缺 [project].version → 报错."""
-    harness = tmp_path / "harness.toml"
-    harness.write_text('[project]\nname = "AStockScreener"\n', encoding="utf-8")
-    with patch("verify_versions.HARNESS_PATH", harness):
-        errors = verify_versions.check_harness_version("0.6.9")
-    assert any("missing [project].version" in e for e in errors), f"应检出缺字段, got: {errors}"
-
-
-def test_harness_version_missing_file_fail_open(tmp_path):
-    """harness.toml 不存在 → fail-open（无错误），与 Check 10 一致."""
-    with patch("verify_versions.HARNESS_PATH", tmp_path / "absent-harness.toml"):
-        errors = verify_versions.check_harness_version("0.6.9")
-    assert errors == []
-
-
-def test_harness_version_invalid_toml(tmp_path):
-    """harness.toml 非法 TOML → 报错而非崩溃."""
-    harness = tmp_path / "harness.toml"
-    harness.write_text("this is not = valid = toml\n", encoding="utf-8")
-    with patch("verify_versions.HARNESS_PATH", harness):
-        errors = verify_versions.check_harness_version("0.6.9")
-    assert any("not valid TOML" in e for e in errors), f"应检出非法 TOML, got: {errors}"
-
-
 def test_verify_versions_fix(tmp_path):
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -225,12 +126,11 @@ def test_verify_versions_fix(tmp_path):
         security,
         claude,
         requirements_dev,
-    ) = setup_test_files(tmp_path, installer_v="0.6.8", manifest_v="0.6.8")
+    ) = setup_test_files(tmp_path, manifest_v="0.6.8")
 
     # Mock all paths and argv
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -250,24 +150,10 @@ def test_verify_versions_fix(tmp_path):
     # Must exit with code 1 after fixing files to alert Pre-commit
     assert exc_info.value.code == 1
 
-    # Verify installer.iss was updated
-    assert 'MyAppVersion "0.6.9"' in installer.read_text(encoding="utf-8")
-
     # Verify manifest was updated
     with open(manifest, encoding="utf-8") as f:
         data = json.load(f)
     assert data["."] == "0.6.9"
-
-
-def test_update_installer_version_failure(tmp_path):
-    installer = tmp_path / "installer.iss"
-    installer.write_text("some random content without MyAppVersion\n", encoding="utf-8")
-    with (
-        patch("verify_versions.INSTALLER_PATH", installer),
-        pytest.raises(RuntimeError) as exc_info,
-    ):
-        verify_versions.update_installer_version("0.6.9")
-    assert "Failed to update version" in str(exc_info.value)
 
 
 def test_update_release_manifest_version_failure(tmp_path):
@@ -279,17 +165,6 @@ def test_update_release_manifest_version_failure(tmp_path):
     ):
         verify_versions.update_release_manifest_version("0.6.9")
     assert "Invalid manifest structure" in str(exc_info.value)
-
-
-def test_get_installer_fallback_version_failure(tmp_path):
-    installer = tmp_path / "installer.iss"
-    installer.write_text("wrong file format", encoding="utf-8")
-    with (
-        patch("verify_versions.INSTALLER_PATH", installer),
-        pytest.raises(ValueError) as exc_info,
-    ):
-        verify_versions.get_installer_fallback_version()
-    assert "Could not find MyAppVersion" in str(exc_info.value)
 
 
 def test_get_ci_pyright_version_failure(tmp_path):
@@ -306,7 +181,6 @@ def test_get_ci_pyright_version_failure(tmp_path):
 def test_verify_versions_all_consistent(tmp_path):
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -318,7 +192,6 @@ def test_verify_versions_all_consistent(tmp_path):
     ) = setup_test_files(tmp_path)
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -342,14 +215,15 @@ def test_verify_versions_all_consistent(tmp_path):
         stack.enter_context(patch("sys.argv", ["verify_versions.py", "--fix"]))
         verify_versions.main()
 
-    # Verify files were not modified
-    assert 'MyAppVersion "0.6.9"' in installer.read_text(encoding="utf-8")
+    # Verify manifest was not modified
+    with open(manifest, encoding="utf-8") as f:
+        data = json.load(f)
+    assert data["."] == "0.6.9"
 
 
 def test_verify_versions_no_fix_mismatch(tmp_path):
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -358,10 +232,9 @@ def test_verify_versions_no_fix_mismatch(tmp_path):
         security,
         claude,
         requirements_dev,
-    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.8")
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", manifest_v="0.6.8")
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -378,50 +251,15 @@ def test_verify_versions_no_fix_mismatch(tmp_path):
         with pytest.raises(SystemExit) as exc_info:
             verify_versions.main()
     assert exc_info.value.code == 1
-    # Verify files were NOT fixed
-    assert 'MyAppVersion "0.6.8"' in installer.read_text(encoding="utf-8")
-
-
-def test_verify_versions_installer_mismatch_only(tmp_path):
-    (
-        pyproject,
-        installer,
-        pkg_json,
-        ci_workflow,
-        manifest,
-        readme,
-        contributing,
-        security,
-        claude,
-        requirements_dev,
-    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9")
-    patches = _patch_all_paths(
-        pyproject,
-        installer,
-        pkg_json,
-        ci_workflow,
-        manifest,
-        readme,
-        contributing,
-        security,
-        claude,
-        requirements_dev,
-    )
-    with ExitStack() as stack:
-        for p in patches:
-            stack.enter_context(p)
-        stack.enter_context(patch("sys.argv", ["verify_versions.py", "--fix"]))
-        with pytest.raises(SystemExit) as exc_info:
-            verify_versions.main()
-    assert exc_info.value.code == 1
-    # installer.iss is fixed
-    assert 'MyAppVersion "0.6.9"' in installer.read_text(encoding="utf-8")
+    # Verify manifest was NOT fixed
+    with open(manifest, encoding="utf-8") as f:
+        data = json.load(f)
+    assert data["."] == "0.6.8"
 
 
 def test_verify_versions_manifest_mismatch_only(tmp_path):
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -430,10 +268,9 @@ def test_verify_versions_manifest_mismatch_only(tmp_path):
         security,
         claude,
         requirements_dev,
-    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8")
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", manifest_v="0.6.8")
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -459,7 +296,6 @@ def test_verify_versions_manifest_mismatch_only(tmp_path):
 def test_verify_versions_pyright_mismatch(tmp_path):
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -471,7 +307,6 @@ def test_verify_versions_pyright_mismatch(tmp_path):
     ) = setup_test_files(tmp_path, pkg_pyright="1.1.300", ci_pyright="1.1.301")
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -491,10 +326,9 @@ def test_verify_versions_pyright_mismatch(tmp_path):
 
 
 def test_verify_versions_flet_mismatch(tmp_path):
-    """Check 8: flet 三包版本不一致应报错。"""
+    """Check 7: flet 四包版本不一致应报错。"""
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -511,7 +345,6 @@ def test_verify_versions_flet_mismatch(tmp_path):
     )
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -531,10 +364,9 @@ def test_verify_versions_flet_mismatch(tmp_path):
 
 
 def test_verify_versions_flet_missing(tmp_path):
-    """Check 8: flet 三包缺失应报错。"""
+    """Check 7: flet 四包缺失应报错。"""
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -551,7 +383,6 @@ def test_verify_versions_flet_missing(tmp_path):
     )
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -573,7 +404,6 @@ def test_verify_versions_flet_missing(tmp_path):
 def test_main_initial_read_failure(tmp_path):
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -582,12 +412,11 @@ def test_main_initial_read_failure(tmp_path):
         security,
         claude,
         requirements_dev,
-    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.9")
+    ) = setup_test_files(tmp_path)
     # Make one file missing to trigger OSError in main()
     missing_pyproject = tmp_path / "non_existent_pyproject.toml"
     patches = _patch_all_paths(
         missing_pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -606,50 +435,9 @@ def test_main_initial_read_failure(tmp_path):
     assert exc_info.value.code == 1
 
 
-def test_main_installer_fix_failure(tmp_path):
-    (
-        pyproject,
-        installer,
-        pkg_json,
-        ci_workflow,
-        manifest,
-        readme,
-        contributing,
-        security,
-        claude,
-        requirements_dev,
-    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9")
-    patches = _patch_all_paths(
-        pyproject,
-        installer,
-        pkg_json,
-        ci_workflow,
-        manifest,
-        readme,
-        contributing,
-        security,
-        claude,
-        requirements_dev,
-    )
-    with ExitStack() as stack:
-        for p in patches:
-            stack.enter_context(p)
-        stack.enter_context(
-            patch(
-                "verify_versions.update_installer_version",
-                side_effect=RuntimeError("Mocked update failure"),
-            )
-        )
-        stack.enter_context(patch("sys.argv", ["verify_versions.py", "--fix"]))
-        with pytest.raises(SystemExit) as exc_info:
-            verify_versions.main()
-    assert exc_info.value.code == 1
-
-
 def test_main_manifest_fix_failure(tmp_path):
     (
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -658,10 +446,9 @@ def test_main_manifest_fix_failure(tmp_path):
         security,
         claude,
         requirements_dev,
-    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8")
+    ) = setup_test_files(tmp_path, manifest_v="0.6.8")
     patches = _patch_all_paths(
         pyproject,
-        installer,
         pkg_json,
         ci_workflow,
         manifest,
@@ -861,7 +648,7 @@ def test_doctor_schema_missing_required_in_python(tmp_path):
 
     errors = check_doctor_schema.check_doctor_schema_consistency(rust_path=rust_file, python_path=python_file)
     joined = "\n".join(errors)
-    assert "missing in Python DoctorResult" in joined
+    assert "missing in Python" in joined
     assert "issues" in joined
 
 

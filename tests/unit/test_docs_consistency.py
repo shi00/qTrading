@@ -1,7 +1,7 @@
 """Tests for documentation consistency (J② + J⑤).
 
 Ensures real project files don't drift:
-- Version consistency: installer.iss / release-please-manifest / pyright versions match pyproject.toml
+- Version consistency: release-please-manifest / pyright versions match pyproject.toml
 - LLM provider count matches LLM_PROVIDERS
 - SECURITY supported version matches pyproject.toml
 - No stale repo URLs
@@ -30,7 +30,6 @@ SECURITY_PATH = ROOT / "SECURITY.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
-INSTALLER_PATH = ROOT / "installer.iss"
 PACKAGE_JSON_PATH = ROOT / "package.json"
 RELEASE_MANIFEST_PATH = ROOT / ".release-please-manifest.json"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci_cd.yml"
@@ -58,18 +57,7 @@ def _get_coverage_sources() -> list[str]:
 
 
 class TestVersionConsistency:
-    """Check 1-3: Real file version consistency (mirrors verify_versions.py)."""
-
-    def test_installer_version_matches_pyproject(self):
-        """installer.iss fallback version must match pyproject.toml version."""
-        content = _read(INSTALLER_PATH)
-        m = re.search(r'#define\s+MyAppVersion\s+"([^"]+)"', content)
-        assert m, f"Could not find MyAppVersion in {INSTALLER_PATH}"
-        installer_ver = m.group(1)
-        pyproject_ver = _get_pyproject_version()
-        assert installer_ver == pyproject_ver, (
-            f"installer.iss version '{installer_ver}' != pyproject.toml version '{pyproject_ver}'"
-        )
+    """Real file version consistency (mirrors verify_versions.py)."""
 
     def test_pyright_versions_match(self):
         """package.json pyright version must match CI pinned pyright version."""
@@ -480,23 +468,6 @@ class TestDocsConsistencyScript:
         errors = check_anchor_dead_links()
         assert errors == [], "Dead anchor links found:\n  " + "\n  ".join(errors)
 
-    def test_check_version_consistency_passes(self):
-        """CLAUDE.md 顶部版本与 pyproject.toml 一致。"""
-        from check_docs_consistency import check_version_consistency
-
-        errors = check_version_consistency()
-        assert errors == [], "Version mismatch:\n  " + "\n  ".join(errors)
-
-    def test_version_consistency_detects_declared_mismatch(self, tmp_path, monkeypatch):
-        """文档声明「对应版本」与 pyproject.toml 不一致时应报错（散文式自述版本漏检根因）。"""
-        from check_docs_consistency import check_version_consistency
-
-        doc = tmp_path / "stale_version.md"
-        doc.write_text("> **对应版本**：9.9.9\n", encoding="utf-8")
-        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
-        errors = check_version_consistency()
-        assert any("对应版本" in e and "9.9.9" in e for e in errors), f"应报版本不一致, got: {errors}"
-
     def test_check_precommit_hook_count_passes(self):
         """文档中 pre-commit hook 数量与 .pre-commit-config.yaml 一致。"""
         from check_docs_consistency import check_precommit_hook_count
@@ -510,20 +481,20 @@ class TestDocsConsistencyScript:
 
         assert main() == 0, "check_docs_consistency.py main() should return 0 when all checks pass"
 
-    def test_main_returns_one_on_version_mismatch(self, tmp_path, monkeypatch, capsys):
-        """检测到版本不一致时 main() 必须返回 1（CI 合并阻断依赖该退出码）。"""
+    def test_main_returns_one_on_doc_errors(self, tmp_path, monkeypatch, capsys):
+        """检测到治理错误时 main() 必须返回 1（CI 合并阻断依赖该退出码）。"""
         import check_docs_consistency as docs_check
 
-        _stub_doc_checks_except(monkeypatch, "check_version_consistency")
-        stale_doc = tmp_path / "stale_version.md"
-        stale_doc.write_text("> **对应版本**：9.9.9\n", encoding="utf-8")
+        _stub_doc_checks_except(monkeypatch, "check_precommit_hook_count")
+        stale_doc = tmp_path / "stale_hooks.md"
+        stale_doc.write_text("项目使用 999 个 pre-commit hook。\n", encoding="utf-8")
         monkeypatch.setattr(docs_check, "CHECKED_DOCS", [stale_doc])
 
         assert docs_check.main() == 1, "治理错误未被聚合为退出码 1，门禁将失效"
 
         captured = capsys.readouterr()
         assert "[FAIL]" in captured.err, f"错误摘要应写入 stderr, got: {captured.err!r}"
-        assert "9.9.9" in captured.err, f"应输出具体版本错误, got: {captured.err!r}"
+        assert "999" in captured.err, f"应输出具体错误, got: {captured.err!r}"
         assert "[PASS]" not in captured.out, f"失败路径不应输出 [PASS], got: {captured.out!r}"
 
     def test_main_returns_one_on_link_errors(self, tmp_path, monkeypatch, capsys):

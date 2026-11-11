@@ -1,5 +1,6 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.11.6" ; x-release-please-version
+; ADR-0017: 本地兜底默认值，仅为本地裸跑 ISCC 可编译；CI/发布构建始终经 /DMyAppVersion=<tag> 注入真实版本。
+#define MyAppVersion "0.0.0-local"
 #endif
 
 #ifndef TargetVariant
