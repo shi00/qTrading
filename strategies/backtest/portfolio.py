@@ -151,9 +151,10 @@ class PortfolioSimulator:
         current_values: dict[str, float] = {}
         for ts_code, pos in self.positions.items():
             quote = quotes_by_code.get(ts_code)
-            if quote is not None and not quote.is_empty():
-                px = self._exec_price(quote)
-            else:
+            # PORTFOLIO-01: 执行价 NULL/NaN/±inf → None，退回最后已知价/成本兜底，
+            # 不得在调仓估值支路抛 TypeError 中断回测（与买卖护栏同源）。
+            px = self._safe_exec_price(quote) if quote is not None and not quote.is_empty() else None
+            if px is None:
                 # 账面单位是复权单位，兜底价必须同口径（qfq），不能用名义入场价 entry_price
                 px = self._last_known_prices.get(
                     ts_code, float(pos.get("qfq_entry_price", pos.get("entry_price", 0.0)))
@@ -289,25 +290,15 @@ class PortfolioSimulator:
             )
             return
 
-        down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
-        if down_price is not None and not self.config.allow_limit_down_sell:
-            if self._exec_nominal_price(quote) <= float(down_price) + 1e-6:
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "sell",
-                        "reason": "down_limit",
-                        "intended_volume": self._reported_volume(pos, quote),
-                    }
-                )
-                return
-
-        # 数据损坏防护：卖出名义价 <= 0（或非有限值）时不得按此价格成交。
-        # 否则会把持仓以零价「变现」（净值被静默清零 + 现金被费用扣成负数），
-        # 与买入侧 invalid_price 护栏对齐（F3-06）。仅入 skipped 明细，不升级 data_warnings。
-        exit_price = self._exec_nominal_price(quote)
-        if exit_price <= 0 or not math.isfinite(exit_price):
+        # 数据损坏防护（PORTFOLIO-01）：先读取并校验名义卖出价，再参与跌停比较。
+        # 旧实现先做跌停比较、后做价格守卫，NULL 报价会在 float(None) 处抛 TypeError，
+        # 中断整次调仓（NaN/±inf 也会先进入比较）。与买入侧统一：非法价记
+        # invalid_price 并跳过该笔卖出（R21：不按未知价成交，也不让单只坏报价拖垮回测）。
+        try:
+            exit_price = self._exec_nominal_price(quote)
+        except (TypeError, ValueError):
+            exit_price = None
+        if exit_price is None or exit_price <= 0 or not math.isfinite(exit_price):
             self.skipped_list.append(
                 {
                     "trade_date": exec_date,
@@ -318,6 +309,20 @@ class PortfolioSimulator:
                 }
             )
             return
+
+        down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
+        if down_price is not None and not self.config.allow_limit_down_sell:
+            if exit_price <= float(down_price) + 1e-6:
+                self.skipped_list.append(
+                    {
+                        "trade_date": exec_date,
+                        "ts_code": ts_code,
+                        "direction": "sell",
+                        "reason": "down_limit",
+                        "intended_volume": self._reported_volume(pos, quote),
+                    }
+                )
+                return
 
         # UIR-F11-002: 账面 volume 是复权单位，成交与参与率必须换算为名义股数，
         # 成交价用名义价（raw），二者乘积与复权口径金额一致。
@@ -416,24 +421,14 @@ class PortfolioSimulator:
             )
             return
 
-        down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
-        if down_price is not None and not self.config.allow_limit_down_sell:
-            if self._exec_nominal_price(quote) <= float(down_price) + 1e-6:
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "sell",
-                        "reason": "down_limit",
-                        "intended_volume": self._reported_volume(pos, quote),
-                    }
-                )
-                return
-
-        # 数据损坏防护：名义卖出价 <= 0（或非有限值）时既不能成交，也不能继续做
-        # ``sell_value / exit_price``（0/0 会抛 ZeroDivisionError 中断整轮回测）。
-        exit_price = self._exec_nominal_price(quote)
-        if exit_price <= 0 or not math.isfinite(exit_price):
+        # 数据损坏防护（PORTFOLIO-01）：先读取并校验名义卖出价，再参与跌停比较。
+        # 否则 NULL 报价会在 float(None) 处抛 TypeError 中断整轮回测；非法价同时
+        # 不能进入 ``sell_value / exit_price``（0/0 会抛 ZeroDivisionError）。
+        try:
+            exit_price = self._exec_nominal_price(quote)
+        except (TypeError, ValueError):
+            exit_price = None
+        if exit_price is None or exit_price <= 0 or not math.isfinite(exit_price):
             self.skipped_list.append(
                 {
                     "trade_date": exec_date,
@@ -444,6 +439,20 @@ class PortfolioSimulator:
                 }
             )
             return
+
+        down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
+        if down_price is not None and not self.config.allow_limit_down_sell:
+            if exit_price <= float(down_price) + 1e-6:
+                self.skipped_list.append(
+                    {
+                        "trade_date": exec_date,
+                        "ts_code": ts_code,
+                        "direction": "sell",
+                        "reason": "down_limit",
+                        "intended_volume": self._reported_volume(pos, quote),
+                    }
+                )
+                return
 
         ratio = self._qfq_ratio(quote)
         nominal_total = self._nominal_shares(pos["volume"], ratio)
@@ -1004,8 +1013,14 @@ class PortfolioSimulator:
         )
         for ts_code, pos in self.positions.items():
             quote = quotes_by_code.get(ts_code)
-            if quote is not None and not quote.is_empty():
-                qfq_close = float(quote.select("qfq_close").item())
+            has_quote = quote is not None and not quote.is_empty()
+            # PORTFOLIO-01: 行情存在但 qfq_close/raw_close NULL/NaN/±inf → 视同无有效
+            # 行情，走「最后已知价估值」分支（fail-closed 计缺口告警）。既不得抛
+            # TypeError 中断回测，也不得把 NaN 写入 _last_known_prices 污染停牌估值
+            # 与退市清算（与买卖护栏同源，R21）。
+            qfq_close = self._safe_quote_price(quote, "qfq_close") if has_quote else None
+            raw_close = self._safe_quote_price(quote, "raw_close") if has_quote else None
+            if qfq_close is not None and raw_close is not None:
                 self._last_known_prices[ts_code] = qfq_close
                 # D1-C1: 恢复交易则复位连续估值天数计数（仅统计连续停牌段）
                 self._stale_estimate_days[ts_code] = 0
@@ -1013,7 +1028,6 @@ class PortfolioSimulator:
                 if ratio is not None:
                     pos["last_ratio"] = ratio
                 nominal_shares = self._nominal_shares(pos["volume"], ratio)
-                raw_close = float(quote.select("raw_close").item())
                 qfq_market_value = pos["volume"] * qfq_close
                 raw_market_value = nominal_shares * raw_close if nominal_shares is not None else None
                 total_value += qfq_market_value
@@ -1092,6 +1106,29 @@ class PortfolioSimulator:
             self.empty_signal_days,
         )
 
+    @staticmethod
+    def _safe_quote_price(quote: pl.DataFrame, column: str) -> float | None:
+        """PORTFOLIO-01: 读取单值价格列；缺列/NULL/非数值/NaN/±inf 统一返回 None。
+
+        与买卖护栏同源：坏报价不得让估值/调仓支路抛 TypeError 中断回测，也不得把
+        NaN 写入 _last_known_prices 污染停牌估值与退市清算（R21：未知不伪装成实测值）。
+        """
+        if column not in quote.columns:
+            return None
+        val = quote.select(column).item()
+        if val is None:
+            return None
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            return None
+        return num if math.isfinite(num) else None
+
+    def _safe_exec_price(self, quote: pl.DataFrame) -> float | None:
+        """``_exec_price`` 的安全版：执行价 NULL/NaN/±inf 返回 None，调用方兜底。"""
+        column = "qfq_close" if self.config.execution_price == "next_close" else "qfq_open"
+        return self._safe_quote_price(quote, column)
+
     def _exec_price(self, quote: pl.DataFrame) -> float:
         """按 execution_price 返回单个标的价格口径的复权价（qfq）。
 
@@ -1155,7 +1192,12 @@ class PortfolioSimulator:
         不以复权单位冒充名义股数（R21）。
         """
         if quote is not None and not quote.is_empty():
-            ratio = self._qfq_ratio(quote)
+            try:
+                ratio = self._qfq_ratio(quote)
+            except (TypeError, ValueError):
+                # PORTFOLIO-01: 坏报价（如 NULL 执行价）不得让「上报股数」这条审计
+                # 支路再次抛错中断回测；退回持仓最近记录的比例，仍不可得则报 None。
+                ratio = pos.get("last_ratio")
         else:
             ratio = pos.get("last_ratio")
         return self._nominal_shares(pos["volume"], ratio)
