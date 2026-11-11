@@ -533,3 +533,35 @@ class TestBacktestReportI18nParamInjection:
         md = report.to_markdown(backtest_result)
         assert backtest_result.run_id in md
         assert I18n.get("report_run_id") in md or "Run ID" in md or "运行ID" in md
+
+
+class TestFormatTradeSummaryEmptyGroupAverages:
+    """BR-01 / R21: 空分组均值渲染 N/A，不以 0.00 冒充「已测得」的平均盈亏。"""
+
+    def test_all_profits_avg_loss_renders_na(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([100.0, 200.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_avg_win')}: 150.00" in summary
+        assert f"{I18n.get('report_avg_loss')}: N/A" in summary
+        assert f"{I18n.get('report_avg_loss')}: 0.00" not in summary
+
+    def test_all_losses_avg_win_renders_na(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([-100.0, -50.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_avg_win')}: N/A" in summary
+        assert f"{I18n.get('report_avg_win')}: 0.00" not in summary
+        assert f"{I18n.get('report_avg_loss')}: -75.00" in summary
+
+    def test_no_valid_pnl_all_averages_na(self, backtest_result: BacktestResult) -> None:
+        """realized_pnl 全为 None：无任何有效样本，三组均值均 N/A。"""
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([None, None]))
+        summary = BacktestReport().format_trade_summary(result)
+        for label in ("report_avg_profit", "report_avg_win", "report_avg_loss"):
+            assert f"{I18n.get(label)}: N/A" in summary
+
+    def test_mixed_sample_averages_render_values(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(backtest_result, trades=_trades_with_pnl([-100.0, 0.0, 50.0, 200.0]))
+        summary = BacktestReport().format_trade_summary(result)
+        assert f"{I18n.get('report_avg_profit')}: 37.50" in summary
+        assert f"{I18n.get('report_avg_win')}: 125.00" in summary
+        assert f"{I18n.get('report_avg_loss')}: -100.00" in summary
