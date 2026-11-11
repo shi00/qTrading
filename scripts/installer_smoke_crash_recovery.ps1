@@ -183,6 +183,33 @@ function Wait-AppDatabaseReady([string]$Password, [int]$TimeoutSec = 120) {
     return $false
 }
 
+# status CLI 的 running 只表示 postmaster 进程存活（commands.rs derive_status），不验证
+# SQL 可连接性；postgres 启动尾段/WAL 恢复期连接会被拒「the database system is starting
+# up」（run 42830059831 实证 STEP 10 通过后 0.2s 内 psql 即失败）。app 真实路径不受影响
+# （postgresql_embedded start() 经 pg_ctl -w 等待就绪），仅 status 观测路径存在 false-ready
+# 窗口。故重启后读回哨兵前先轮询 SELECT 1 确认 SQL 可连接。
+function Wait-DatabaseSqlReady([string]$Password, [int]$TimeoutSec = 60) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $lastError = $null
+    $port = $null
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $port = Get-PostgresPort -DataDir $PgDataDir
+            Invoke-Psql -Password $Password -Port $port -Sql "select 1" | Out-Null
+            return $true
+        } catch {
+            # 启动尾段连接被拒或 postmaster.pid 竞争：记录末次错误继续轮询，超时后带出取证
+            $lastError = $_.Exception.Message
+        }
+        Start-Sleep -Seconds 2
+    }
+    Write-Fail "database not SQL-ready within ${TimeoutSec}s (last port: $port)"
+    if ($null -ne $lastError) {
+        Write-Fail "last probe error: $lastError"
+    }
+    return $false
+}
+
 function Stop-QtradingGraceful {
     $p = Get-Process -Name "AStockScreener" -ErrorAction SilentlyContinue
     if ($p) {
@@ -344,6 +371,8 @@ try {
 
     # STEP 11: 读回哨兵并断言与崩溃前完全一致（已提交事务在崩溃恢复后仍可见）
     Write-Step "11. Read back sentinel after restart & assert exact match"
+    # STEP 10 的 ready 只证明进程存活，先确认 SQL 可连接再读回哨兵（避免 false-ready 竞态）
+    Assert-True (Wait-DatabaseSqlReady -Password $pgPassword) "Database SQL-ready after restart (SELECT 1 accepted)"
     $portAfterRestart = Get-PostgresPort -DataDir $PgDataDir
     $sentinelAfterRestart = Invoke-Psql -Password $pgPassword -Port $portAfterRestart -Sql "select marker from $SentinelTable where id = 1"
     Assert-True ($sentinelAfterRestart -eq $sentinel) "Synthetic sentinel survived crash & restart unchanged"
@@ -359,6 +388,8 @@ catch {
     Write-Host "`n=== CRASH RECOVERY SMOKE TEST FAILED ===" -ForegroundColor Red
     Write-Host "Error: $_" -ForegroundColor Red
     Write-Host "Stack: $($_.ScriptStackTrace)" -ForegroundColor Red
+    # 失败即留证：sidecar 目录 + 主程序/PG 日志尾部，避免只有一句断言文案无法定位
+    Write-Diagnostics "crash smoke failed: $_"
     # 清理残留进程
     Stop-QtradingGraceful
     exit 1
