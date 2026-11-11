@@ -4,7 +4,7 @@
 
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载；仅对不自动加载 `CLAUDE.md` 的工具提供 [AGENTS.md](./AGENTS.md)（最小安全集 + 指针）跨工具入口。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
 >
-> **对应版本**：0.11.6（产品版本，与 pyproject.toml 一致，与 [CLAUDE.md](./CLAUDE.md) 保持一致）<!-- x-release-please-version -->
+> **对应版本**：以 [pyproject.toml](./pyproject.toml) `[project].version` 为唯一正本（版本字面量收敛，见 ADR-0017）。
 > **元数据**（P2-07 统一格式，与 CLAUDE.md 规则集版本一致）：
 > - owner: 架构维护者
 > - ruleset_version: 1.9.0（与 CLAUDE.md 同步，规则集版本变更时递增）
@@ -750,6 +750,7 @@ except Exception as e:
 - [0014-unified-model-scheduling.md](./docs/adr/0014-unified-model-scheduling.md) — 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度；部分替代 ADR-0011 Router 职责，已经用户批准，Status 为 Accepted）
 - [0015-fingerprint-driven-release.md](./docs/adr/0015-fingerprint-driven-release.md) — FinBERT 产线指纹驱动发布（内容寻址去重：装依赖前对训练输入算指纹与最新 Release 对比，输入无变化即拒绝重训）
 - [0016-agent-permission-exception.md](./docs/adr/0016-agent-permission-exception.md) — 智能体有限权限例外与允许操作矩阵（部分替代 ADR-0008 的 E1—E5 范围，原禁止项继续有效）
+- [0017-version-ssot.md](./docs/adr/0017-version-ssot.md) — 版本号单一正本收敛（产品版本唯一正本为 pyproject.toml；文档/工具配置版本字面量与对应门禁全部移除）
 
 ### docs/governance/ — 治理类机器可读文件
 

@@ -488,32 +488,6 @@ def check_relative_dead_links() -> list[str]:
     return errors
 
 
-def check_version_consistency() -> list[str]:
-    """检查项 2：所有声明「对应版本」字段的受检文档与 pyproject.toml 版本一致。
-
-    原只校验 CLAUDE.md；现遍历 CHECKED_DOCS 中凡含 ``**对应版本**：x.y.z`` 的文档
-    （CLAUDE.md / CONTRIBUTING.md / AGENTS.md 等）一并比对，防止散文式版本声明漂移。
-    CLAUDE.md 为项目正本，必须声明该字段。
-    """
-    errors: list[str] = []
-    with open(PYPROJECT_PATH, "rb") as f:
-        cfg = tomllib.load(f)
-    pyproject_ver = cfg["project"]["version"]
-
-    for doc in CHECKED_DOCS:
-        content = doc.read_text(encoding="utf-8")
-        m = re.search(r"\*\*对应版本\*\*[：:]\s*v?([0-9]+\.[0-9]+\.[0-9]+)", content)
-        if not m:
-            if doc == CLAUDE_PATH:
-                errors.append("CLAUDE.md: 未找到 '**对应版本**' 字段")
-            continue
-        declared = m.group(1)
-        if declared != pyproject_ver:
-            line_no = content[: m.start()].count("\n") + 1
-            errors.append(f"{doc.name}:{line_no}: 对应版本 {declared} != pyproject.toml 版本 {pyproject_ver}")
-    return errors
-
-
 def _count_local_hooks() -> int:
     """计数 .pre-commit-config.yaml 中 local repo 下的 hook 数量。
 
@@ -2517,9 +2491,10 @@ def _extract_changelog_top_date() -> date | None:
 def check_ruleset_metadata_consistency() -> list[str]:
     """检查项 12：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 规则集元数据一致性（DOC-01/DOC-13/DS-05）。
 
-    已由 _check_version_consistency（产品版本对应 pyproject.toml）覆盖「对应版本」，
-    本检查补齐 `ruleset_version` 与 `last_reviewed` 两个字段——它们**从未被任何检查读取**
-    （DOC-01 门禁空白的主因），修复后禁止再漂移。随后 DOC-13 将孤儿文件 AGENTS.md 一并纳入
+    「对应版本」声明已随版本字面量收敛移除（版本唯一正本为 pyproject.toml，
+    verify-versions 对应检查一并删除），本检查守护 `ruleset_version` 与 `last_reviewed`
+    两个字段——它们**从未被任何检查读取**（DOC-01 门禁空白的主因），修复后禁止再漂移。
+    随后 DOC-13 将孤儿文件 AGENTS.md 一并纳入
     ruleset_version 守护（AGENTS 作为跨工具入口，规则集版本必须与宪法同步）。
 
     断言：
@@ -4263,7 +4238,6 @@ def main() -> int:
     all_errors: list[str] = []
     all_errors.extend(check_anchor_dead_links())
     all_errors.extend(check_relative_dead_links())
-    all_errors.extend(check_version_consistency())
     all_errors.extend(check_precommit_hook_count())
     all_errors.extend(check_precommit_hook_names())
     all_errors.extend(check_workflow_enum())
