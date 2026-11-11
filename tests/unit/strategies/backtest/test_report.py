@@ -1,5 +1,8 @@
+from collections.abc import Mapping
 from datetime import date, datetime
 import dataclasses
+from decimal import Decimal
+from typing import cast
 
 import polars as pl
 import pytest
@@ -155,7 +158,10 @@ class TestBacktestReport:
         report = BacktestReport()
         summary = report.format_summary(empty_result)
         assert "empty_strategy" in summary
-        assert "0.00%" in summary
+        # 缺键表示「指标未算出」，渲染 N/A，不伪装成真实 0（R21）
+        assert "0.00%" not in summary
+        for key in ("total_return", "max_drawdown", "total_trades"):
+            assert f"{I18n.get(f'report_{key}')}: N/A" in summary
 
     def test_format_summary_win_rate_none_renders_na(self, backtest_result: BacktestResult) -> None:
         """win_rate 为 None（无主动决策平仓）时渲染 N/A，与 profit_factor 一致（D4-6）。"""
@@ -533,3 +539,68 @@ class TestBacktestReportI18nParamInjection:
         md = report.to_markdown(backtest_result)
         assert backtest_result.run_id in md
         assert I18n.get("report_run_id") in md or "Run ID" in md or "运行ID" in md
+
+
+class TestFormatSummaryMetricGuards:
+    """R21: summary 全部指标缺键/None/非有限值时渲染 N/A，不伪装成 0、不抛 TypeError。"""
+
+    _PCT_KEYS = ("total_return", "annualized_return", "max_drawdown", "win_rate")
+    _RATIO_KEYS = ("sharpe_ratio", "calmar_ratio", "ic_mean", "ic_ir", "profit_factor")
+    _ALL_KEYS = (*_PCT_KEYS, *_RATIO_KEYS, "total_trades")
+
+    @staticmethod
+    def _rendered_line(summary: str, key: str) -> str:
+        label = I18n.get(f"report_{key}")
+        return next(line for line in summary.splitlines() if line.startswith(f"{label}:"))
+
+    def _summary_with_metrics(self, result: BacktestResult, metrics: Mapping[str, object]) -> str:
+        merged = cast(dict[str, float], metrics)
+        return BacktestReport().format_summary(dataclasses.replace(result, metrics=merged))
+
+    def test_missing_keys_render_na(self, backtest_result: BacktestResult) -> None:
+        metrics = {k: v for k, v in backtest_result.metrics.items() if k not in self._ALL_KEYS}
+        summary = self._summary_with_metrics(backtest_result, metrics)
+        for key in self._ALL_KEYS:
+            assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+    def test_explicit_none_render_na(self, backtest_result: BacktestResult) -> None:
+        metrics = {**backtest_result.metrics, **dict.fromkeys(self._ALL_KEYS)}
+        summary = self._summary_with_metrics(backtest_result, metrics)
+        for key in self._ALL_KEYS:
+            assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+    @pytest.mark.parametrize("key", _ALL_KEYS)
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_renders_na(self, backtest_result: BacktestResult, key: str, value: float) -> None:
+        summary = self._summary_with_metrics(backtest_result, {**backtest_result.metrics, key: value})
+        assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+    def test_real_zero_still_renders_zero(self, backtest_result: BacktestResult) -> None:
+        summary = self._summary_with_metrics(
+            backtest_result,
+            {
+                **backtest_result.metrics,
+                **dict.fromkeys(self._PCT_KEYS, 0.0),
+                **dict.fromkeys(self._RATIO_KEYS, 0.0),
+                "total_trades": 0,
+            },
+        )
+        assert self._rendered_line(summary, "total_return") == f"{I18n.get('report_total_return')}: 0.00%"
+        assert self._rendered_line(summary, "sharpe_ratio") == f"{I18n.get('report_sharpe_ratio')}: 0.0000"
+        assert self._rendered_line(summary, "total_trades") == f"{I18n.get('report_total_trades')}: 0"
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("total_return", True),
+            ("max_drawdown", "0.05"),
+            ("sharpe_ratio", Decimal("0.01")),
+            ("total_trades", True),
+            ("total_trades", 2.5),
+        ],
+    )
+    def test_non_numeric_or_non_integer_count_renders_na(
+        self, backtest_result: BacktestResult, key: str, value: object
+    ) -> None:
+        summary = self._summary_with_metrics(backtest_result, {**backtest_result.metrics, key: value})
+        assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
