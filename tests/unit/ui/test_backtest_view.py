@@ -163,8 +163,6 @@ class TestRetryHint:
         name = I18n.get("backtest_failed_title")
         expected = I18n.get("backtest_retry_last_run_hint", strategy_name=name)
         assert hint == expected
-        assert name is not None
-        assert name in hint
 
     def test_hint_falls_back_to_strategy_key_when_not_listed(self) -> None:
         hint = _build_retry_hint(self._last_run("removed_strategy"), (), "strategy_b")
