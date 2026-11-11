@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.7](https://github.com/shi00/qTrading/compare/v0.11.6...v0.11.7) (2026-11-11)
+
+
+### Bug Fixes
+
+* **backtest:** 交易摘要空分组均值渲染 N/A 而非 0.00 ([#2148](https://github.com/shi00/qTrading/issues/2148)) ([9f2c8eb](https://github.com/shi00/qTrading/commit/9f2c8ebc83fbab833681cb400a88bae55d0cb35b))
+* **backtest:** 区间预载未知告警前缀 fail-closed 为 data_quality ([#2149](https://github.com/shi00/qTrading/issues/2149)) ([4205edb](https://github.com/shi00/qTrading/commit/4205edb72f50472ac9e17700b1d7eacf29958aa9))
+* **backtest:** 卖出执行价先校验后跌停比较，NULL/NaN 不再中断回测 ([#2147](https://github.com/shi00/qTrading/issues/2147)) ([d8bd4d7](https://github.com/shi00/qTrading/commit/d8bd4d7b1a8b3ef2663bbc2fa0bd7607ad3b7937))
+* **backtest:** 摘要全部指标缺键/NaN/非数值渲染 N/A ([#2150](https://github.com/shi00/qTrading/issues/2150)) ([d60df9d](https://github.com/shi00/qTrading/commit/d60df9df8d070cc50fba0e4dcf7bdb8fb0d84292))
+* **backtest:** 未知告警类别 fail-closed 归一（重放丢失修复） ([#2152](https://github.com/shi00/qTrading/issues/2152)) ([45a9378](https://github.com/shi00/qTrading/commit/45a937809c0f8ef31509952838a0c752059de17c))
+* **embedded-pg:** Windows 拉起 sidecar 传 CREATE_NO_WINDOW 防弹控制台黑窗 ([#2157](https://github.com/shi00/qTrading/issues/2157)) ([1ac774c](https://github.com/shi00/qTrading/commit/1ac774cadcf0367e5a52963a60a71bde55d1e30f))
+* **packaging:** 补录 logging.config hiddenimports 修复 frozen 迁移崩溃 ([#2156](https://github.com/shi00/qTrading/issues/2156)) ([b7d17b0](https://github.com/shi00/qTrading/commit/b7d17b032c95aad27127152aecc9f4ee445470e5))
+* **ui:** 回测 VM 运行归属判定与取消终态兜底（重放丢失修复） ([#2154](https://github.com/shi00/qTrading/issues/2154)) ([026d75a](https://github.com/shi00/qTrading/commit/026d75ab43e21192cd926306f85439bd2f6ba878))
+* **ui:** 回测空态判定覆盖 IC/周期统计等全部数据面 (BRR-F2) ([#2153](https://github.com/shi00/qTrading/issues/2153)) ([8ffe250](https://github.com/shi00/qTrading/commit/8ffe2501b953faca03f243d2c4ca5439d72080ac))
+* **ui:** 重试对象与下拉选择不一致时显式提示上次运行 ([#2151](https://github.com/shi00/qTrading/issues/2151)) ([41c1f06](https://github.com/shi00/qTrading/commit/41c1f06087805bd4a6fad16c4c3f103a99586c88))
+
+
+### Refactoring
+
+* **release:** 版本号单一正本收敛，发版修改点 8 文件降至 3 文件（ADR-0017） ([#2155](https://github.com/shi00/qTrading/issues/2155)) ([8a2becb](https://github.com/shi00/qTrading/commit/8a2becb4870155470bcba8eca9c4bafcead0247f))
+
 ## [0.11.6](https://github.com/shi00/qTrading/compare/v0.11.5...v0.11.6) (2026-11-11)
 
 
