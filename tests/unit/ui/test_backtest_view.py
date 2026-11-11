@@ -172,6 +172,14 @@ class TestRetryHint:
         assert "removed_strategy" in hint
 
     def test_error_state_receives_retry_hint(self) -> None:
-        """ErrorState 必须收到 retry_hint，否则用户仍看不到重试对象。"""
+        """View→ErrorState 接线契约（本文件为契约守护，渲染行为由
+        tests/unit/ui/components/test_state_views.py 的 TestErrorStateRender 行为级覆盖）。
+
+        契约要求：View 须调用 _build_retry_hint 并把结果经 retry_hint 传入 ErrorState，
+        且入参为上次运行快照 + 当前下拉三要素，缺一即视为接线断裂。
+        """
         src = _source_text()
         assert "retry_hint=_build_retry_hint(" in src
+        assert "state.last_run_summary" in src
+        assert "state.available_strategies" in src
+        assert "state.selected_strategy_key" in src
