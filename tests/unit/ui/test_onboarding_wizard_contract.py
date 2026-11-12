@@ -1765,3 +1765,64 @@ class TestWizardDataSyncNextDisabled:
     def test_next_enabled_when_sync_not_in_progress(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
         result = self._render_step4(mock_onboarding_vms, sync_in_progress=False)
         assert self._next_button(result).disabled is False
+
+
+# ============================================================================
+# UIV-ONB-01: Token 输入变更失效验证缓存（View 接线）
+# ============================================================================
+
+
+class TestWizardTokenCacheInvalidation:
+    """Token 步输入变更必须失效 token 验证缓存，避免返回后修改输入仍短路跳过重验。
+
+    根因（UIV-ONB-01）：TushareConfigPanelViewModel.update_token 经 _notify_on_change
+    通知消费方，wizard factory 未传 on_change 导致 OnboardingViewModel 的
+    _step_validated["token"] 恒为 True，validate_and_persist_current_step 短路。
+    与 database 步 on_change 同型机制对齐。
+    """
+
+    def _render_wizard_and_capture_on_change(self, mock_onboarding_vms, monkeypatch) -> list[Any]:
+        """渲染向导（默认 welcome 步），捕获 Tushare factory 传入的 on_change 回调。
+
+        factory 在组件体顶层无条件执行，任意步骤渲染均可捕获接线。
+        """
+        import ui.views.onboarding_wizard as wizard_mod
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        fake_tushare_vm = mock_onboarding_vms["tushare"]
+        captured: list[Any] = []
+
+        def _capturing_tushare_factory(*args: Any, **kwargs: Any) -> Any:
+            captured.append(kwargs.get("on_change"))
+            return fake_tushare_vm
+
+        monkeypatch.setattr(wizard_mod, "TushareConfigPanelViewModel", _capturing_tushare_factory)
+
+        component = make_component(OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        render_once(component)
+        return captured
+
+    def test_token_factory_binds_on_change_to_invalidate_cache(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+        monkeypatch,
+    ):
+        """Token factory 必须传 on_change，且调用后失效 token 验证缓存。"""
+        captured = self._render_wizard_and_capture_on_change(mock_onboarding_vms, monkeypatch)
+
+        assert len(captured) == 1
+        on_change = captured[0]
+        assert callable(on_change), "Tushare factory 应传入 on_change 回调"
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        assert fake_vm.invalidated_steps == []
+        on_change()
+        assert fake_vm.invalidated_steps == ["token"]
+
+    def test_token_factory_on_change_wiring_in_source(self):
+        """源码: Tushare factory 接线 on_change=lambda: onboarding_vm.invalidate_step("token")。"""
+        assert 'on_change=lambda: onboarding_vm.invalidate_step("token")' in _code_source()
