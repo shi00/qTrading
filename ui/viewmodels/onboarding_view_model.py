@@ -345,28 +345,38 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
 
         return _combined
 
-    def dispose(self):
+    def dispose(self) -> None:
         if self._state.sync_in_progress:
             logger.warning(
                 "[OnboardingVM] dispose() called while sync in progress; callbacks cleared, DataProcessor will self-complete"
             )
         # UIR-F02-002: 卸载后任何在途同步的迟到结果都不得再导航，递增令牌使其作废。
         self._sync_generation += 1
-        # 取消可能正在进行的本地模型验证 (sync classmethod, safe no-op if no active verification)
-        from services.local_model_manager import LocalModelManager
+        try:
+            # 取消可能正在进行的本地模型验证 (sync classmethod, safe no-op if no active verification)
+            # 取消失败时异常继续传播（R2 语义），但 finally 仍保证下方统一关闭协议执行。
+            from services.local_model_manager import LocalModelManager
 
-        LocalModelManager.cancel_verification_if_active()
-        self.fn_validate_database = None
-        self.fn_validate_token = None
-        self.fn_validate_model_scenario = None
-        self.fn_validate_cloud_ai = None
-        self.fn_validate_local_model = None
-        self.fn_push_schedule_state = None
-        self.on_complete = None
-        self._subscribers.clear()
-        self._step_validated.clear()
-        self._persisted_schedule = None
-        self._state = OnboardingState()
+            LocalModelManager.cancel_verification_if_active()
+        finally:
+            # 清业务回调与验证缓存；subscriber 列表 / pending 通知不再手工操作，
+            # 交由基类统一清理。
+            self.fn_validate_database = None
+            self.fn_validate_token = None
+            self.fn_validate_model_scenario = None
+            self.fn_validate_cloud_ai = None
+            self.fn_validate_local_model = None
+            self.fn_push_schedule_state = None
+            self.on_complete = None
+            self._step_validated.clear()
+            self._persisted_schedule = None
+            # 走基类三步原子关闭协议（shutdown_lock 翻转 disposed + 清 subscribers/
+            # pending + cancel pending handle + 取消 cancellable 在途任务），使卸载后迟到
+            # 的 _set_state 与已排队通知被统一 disposed 守卫拦截，旧 subscriber 不再被调用。
+            super().dispose()
+            # disposed 翻转后再重置 state：此后任何迟到 _set_state 均被守卫拦截，直接赋值
+            # 保证卸载后 state 恒为默认快照（与 system/data_source VM 既有范式一致）。
+            self._state = OnboardingState()
 
     # ------------------------------------------------------------------
     # Step Navigation

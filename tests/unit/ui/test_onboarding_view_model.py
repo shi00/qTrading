@@ -4,6 +4,7 @@ TDD RED phase: these tests define the expected ViewModel contract.
 """
 
 import asyncio
+import threading
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -1214,6 +1215,93 @@ class TestOnboardingVMSyncOwnership:
 
 
 # =====================================================================
+# Test: Dispose 协议（卸载必须走基类统一关闭协议）
+# =====================================================================
+
+
+class TestOnboardingVMDisposeProtocol:
+    """dispose 必须调用 super.dispose() 进入统一 notifier 关闭协议。
+
+    验证标准（M33 检视报告）：Given 同步/通知已挂起，When dispose 后释放它们，
+    Then disposed=True、state 保持默认、旧 subscriber 无调用，且不导航。
+    """
+
+    def test_dispose_sets_disposed_flag(self, bound_vm):
+        assert bound_vm.disposed is False
+        bound_vm.dispose()
+        assert bound_vm.disposed is True
+        assert bound_vm._disposed is True
+
+    def test_set_state_after_dispose_is_noop(self, vm):
+        """卸载后迟到的 _set_state 不得改写 state（disposed 守卫拦截）。"""
+        vm._set_state(current_step=2)
+        vm.dispose()
+        vm._set_state(current_step=5)
+        vm._set_state(sync_in_progress=True)
+        assert vm.state == OnboardingState()
+
+    async def test_late_sync_completion_after_dispose_keeps_default_state(self, bound_vm, mock_config_handler):
+        """同步挂起中卸载：迟到完成不得改写 state（进度/消息/步号均保持默认）且不落盘。"""
+        gate = _ControlledSync(1)
+        bound_vm._data_processor = gate
+        bound_vm.current_step = 4  # data_sync step
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        try:
+            await gate.started[0].wait()
+            bound_vm.dispose()
+
+            with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+                gate.release[0].set()
+                await task
+
+            assert bound_vm.disposed is True
+            assert bound_vm.state == OnboardingState()
+            assert bound_vm.current_step == 0
+            mock_config_handler.save_config.assert_not_called()
+        finally:
+            with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+                gate.release[0].set()
+                await task
+
+    async def test_queued_notification_after_dispose_does_not_invoke_subscriber(self, bound_vm):
+        """dispose 后释放已排队通知（dispose 前捕获的 subscriber 快照）不得调用旧 subscriber。"""
+        received: list = []
+        bound_vm.subscribe(lambda s: received.append(s))
+        subs_snapshot = list(bound_vm._subscribers)
+        state_snapshot = bound_vm.state
+        loop = asyncio.get_running_loop()
+
+        bound_vm.dispose()
+        assert bound_vm.disposed is True
+
+        # 模拟「dispose 前已排队、dispose 后才释放」的通知投递（同线程 fast-path）。
+        bound_vm._dispatch_notification_impl(subs_snapshot, state_snapshot, loop, threading.get_ident())
+        await asyncio.sleep(0)
+
+        assert received == []
+
+    def test_dispose_propagates_cancel_error_but_still_disposes(self, bound_vm):
+        """验证取消抛异常：异常继续传播，且 finally 保证基类收尾仍执行。"""
+        with patch("services.local_model_manager.LocalModelManager") as mock_lm:
+            mock_lm.cancel_verification_if_active.side_effect = RuntimeError("cancel failed")
+            with pytest.raises(RuntimeError, match="cancel failed"):
+                bound_vm.dispose()
+        assert bound_vm.disposed is True
+        assert bound_vm.fn_validate_database is None
+        assert bound_vm.on_complete is None
+        assert bound_vm.state == OnboardingState()
+
+    def test_dispose_is_idempotent(self, bound_vm):
+        """重复 dispose 不得异常、不得复活 state、disposed 保持 True。"""
+        bound_vm._set_state(current_step=3)
+        bound_vm.dispose()
+        bound_vm.dispose()
+        assert bound_vm.disposed is True
+        assert bound_vm.state == OnboardingState()
+        assert bound_vm.fn_validate_database is None
+
+
+# =====================================================================
 # Test: Service Delegation
 # =====================================================================
 
@@ -1306,12 +1394,19 @@ class TestOnboardingVMUnboundValidator:
         result = await vm.validate_and_persist_current_step()
         assert result is True
 
-    async def test_dispose_then_validate_blocks(self, bound_vm):
-        """After dispose(), injected validators are None → must block."""
+    async def test_dispose_then_commands_frozen(self, bound_vm):
+        """dispose 后 state 冻结——换步不生效，验证命令不产生任何状态变化。
+
+        原 P2 语义（dispose 清空 validator → database 步阻断）被 disposed 守卫强化：
+        state 恒为默认快照，任何步（含需 validator 的步）都不可达；未 dispose 时
+        unbound validator 的阻断语义仍由 test_unbound_database_validator_blocks 守护。
+        """
         bound_vm.dispose()
-        bound_vm.current_step = 1
-        result = await bound_vm.validate_and_persist_current_step()
-        assert result is False
+        bound_vm.current_step = 1  # disposed 守卫：换步不生效
+        assert bound_vm.current_step == 0
+        await bound_vm.validate_and_persist_current_step()
+        assert bound_vm.state == OnboardingState()
+        assert bound_vm.validation_in_progress is False
 
     async def test_welcome_step_passes_without_validator(self, vm):
         """Welcome step has no validator and should still pass."""
