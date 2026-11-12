@@ -70,18 +70,24 @@ from core.agent_types import (
     MarkAnswerDeliveredRequest,
     MessagePage,
     MessagePageItem,
+    Observation,
+    OperationSummary,
+    ReadMarkEntry,
     RecordEventRequest,
     ResearchEvent,
+    ResearchSnapshot,
     ReviseQueuedRequest,
     RevisionReceipt,
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
     SessionSummary,
+    SourceReadSummary,
     SourceRelationKind,
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
+    UsageSummary,
     decode_artifact_page_item,
     decode_data_consent_binding,
     decode_command_receipt,
@@ -89,8 +95,12 @@ from core.agent_types import (
     decode_execution_summary,
     decode_json_doc,
     decode_message_page_item,
+    decode_operation_summary,
+    decode_read_mark_entry,
     decode_research_event,
     decode_session_summary,
+    decode_snapshot_identity,
+    decode_source_read_summary,
     decode_submission_receipt,
     encode_command_receipt,
     encode_data_consent_binding,
@@ -117,6 +127,7 @@ from data.persistence.models import (
     AgentExecution,
     AgentMessage,
     AgentOperation,
+    AgentReadMark,
     AgentRound,
     AgentSession,
     AgentSourceLink,
@@ -2309,6 +2320,198 @@ class AgentDao(BaseDao):
                 identity_str,
             ) from exc
 
+    # ------------------------------------------------------------------
+    # §4.2/§4.3 首屏分页 helper（get_session_read / get_execution_snapshot 共用）
+    # ------------------------------------------------------------------
+
+    async def _load_message_page(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_id: str,
+        execution_id: str | None,
+        round_id: str | None,
+        cursor_seq: int | None,
+        limit: int,
+        identity_str: str,
+    ) -> MessagePage:
+        """消息首屏页：session_seq DESC keyset（游标 m:{seq}）。"""
+
+        stmt = (
+            sa.select(
+                AgentMessage.message_id,
+                AgentMessage.session_id,
+                AgentMessage.event_id,
+                AgentMessage.session_seq,
+                AgentMessage.event_kind,
+                AgentMessage.payload_kind,
+                AgentMessage.subject_id,
+                AgentMessage.subject_revision,
+                AgentMessage.occurred_at,
+                AgentMessage.committed_at,
+                AgentMessage.execution_id,
+                AgentMessage.round_id,
+                AgentMessage.node_id,
+                AgentMessage.execution_seq,
+                AgentMessage.input_revision,
+                AgentMessage.role,
+                AgentMessage.role_id,
+                AgentMessage.role_version,
+                AgentMessage.body_text,
+                AgentMessage.body_ref,
+                AgentMessage.payload,
+                AgentMessage.native_fact_ref,
+                AgentMessage.tool_call_id,
+            )
+            .where(
+                AgentMessage.user_scope == user_scope,
+                AgentMessage.session_id == session_id,
+            )
+            .order_by(AgentMessage.session_seq.desc())
+            .limit(limit + 1)
+        )
+        if execution_id is not None:
+            stmt = stmt.where(AgentMessage.execution_id == execution_id)
+        if round_id is not None:
+            stmt = stmt.where(AgentMessage.round_id == round_id)
+        if cursor_seq is not None:
+            stmt = stmt.where(AgentMessage.session_seq < cursor_seq)
+        rows = (await conn.execute(stmt)).all()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = tuple(self._message_item_from_row(row, identity_str) for row in rows)
+        return MessagePage(
+            items=items,
+            has_more=has_more,
+            next_cursor=f"m:{items[-1].session_seq}" if has_more else None,
+        )
+
+    async def _load_artifact_page(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_id: str,
+        execution_id: str | None,
+        round_id: str | None,
+        cursor_key: tuple[datetime, str, int] | None,
+        limit: int,
+        identity_str: str,
+    ) -> ArtifactPage:
+        """成果首屏页：可靠保存时点 DESC（published_at，NULL 以 created_at 承载），
+        同点 artifact_id/version DESC tie-break，keyset 游标 a:{ts}:{id}:{ver}。"""
+
+        sort_key = sa.func.coalesce(AgentArtifact.published_at, AgentArtifact.created_at)
+        stmt = sa.select(
+            AgentArtifact.artifact_id,
+            AgentArtifact.artifact_version,
+            AgentArtifact.session_id,
+            AgentArtifact.execution_id,
+            AgentArtifact.round_id,
+            AgentArtifact.artifact_kind,
+            AgentArtifact.input_revision,
+            AgentArtifact.actual_input_digest,
+            AgentArtifact.actual_model_ref,
+            AgentArtifact.result_digest,
+            AgentArtifact.source_available_state,
+            AgentArtifact.created_at,
+            AgentArtifact.updated_at,
+            AgentArtifact.revision,
+            AgentArtifact.summary,
+            AgentArtifact.body_text,
+            AgentArtifact.body_ref,
+            AgentArtifact.result_payload,
+            AgentArtifact.published_at,
+            AgentArtifact.cleaned_at,
+            sort_key.label("sort_moment"),
+        ).where(
+            AgentArtifact.user_scope == user_scope,
+            AgentArtifact.session_id == session_id,
+        )
+        if execution_id is not None:
+            stmt = stmt.where(AgentArtifact.execution_id == execution_id)
+        if round_id is not None:
+            stmt = stmt.where(AgentArtifact.round_id == round_id)
+        if cursor_key is not None:
+            cursor_moment, cursor_artifact_id, cursor_version = cursor_key
+            stmt = stmt.where(
+                sa.tuple_(
+                    sort_key,
+                    AgentArtifact.artifact_id,
+                    AgentArtifact.artifact_version,
+                )
+                < sa.tuple_(
+                    sa.bindparam("cursor_moment", cursor_moment),
+                    sa.bindparam("cursor_artifact_id", cursor_artifact_id),
+                    sa.bindparam("cursor_version", cursor_version),
+                )
+            )
+        stmt = stmt.order_by(
+            sort_key.desc(),
+            AgentArtifact.artifact_id.desc(),
+            AgentArtifact.artifact_version.desc(),
+        ).limit(limit + 1)
+        rows = (await conn.execute(stmt)).all()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = tuple(self._artifact_item_from_row(row, identity_str) for row in rows)
+        next_cursor: str | None = None
+        if has_more:
+            next_cursor = f"a:{_wire_time(rows[-1].sort_moment)}:{rows[-1].artifact_id}:{rows[-1].artifact_version}"
+        return ArtifactPage(items=items, has_more=has_more, next_cursor=next_cursor)
+
+    async def _load_decisions(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_id: str,
+        execution_id: str | None,
+        round_id: str | None,
+        identity_str: str,
+    ) -> tuple[DecisionSummary, ...]:
+        """待决定列表：首屏全量，批次序稳定输出；原回执经 answer_command_id 引用按需查询。"""
+
+        stmt = sa.select(AgentDecision).where(
+            AgentDecision.user_scope == user_scope,
+            AgentDecision.session_id == session_id,
+        )
+        if execution_id is not None:
+            stmt = stmt.where(AgentDecision.execution_id == execution_id)
+        if round_id is not None:
+            stmt = stmt.where(AgentDecision.round_id == round_id)
+        rows = (
+            await conn.execute(
+                stmt.order_by(AgentDecision.presentation_batch_seq.asc(), AgentDecision.decision_id.asc())
+            )
+        ).all()
+        return tuple(self._decision_summary_from_row(row, identity_str) for row in rows)
+
+    @staticmethod
+    def _parse_session_cursors(
+        message_cursor: str | None, artifact_cursor: str | None
+    ) -> tuple[int | None, tuple[datetime, str, int] | None]:
+        """游标解析为 keyset 键值（语法已由 validate_session_read_query 冻结）。
+
+        游标 ``a:{ts}:{id}:{ver}`` 中 ts 自身含冒号（YYYY-MM-DDTHH:MM:SS.ffffffZ，
+        恰 3 段），id 段冻结不含冒号，ver 为末段。
+        """
+
+        message_cursor_seq: int | None = None
+        if message_cursor is not None:
+            message_cursor_seq = int(message_cursor[2:])
+        artifact_cursor_key: tuple[datetime, str, int] | None = None
+        if artifact_cursor is not None:
+            parts = artifact_cursor[2:].split(":")
+            wire_ts, artifact_id_part, version_part = ":".join(parts[:3]), parts[3], parts[4]
+            artifact_cursor_key = (
+                datetime.strptime(wire_ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC),
+                artifact_id_part,
+                int(version_part),
+            )
+        return message_cursor_seq, artifact_cursor_key
+
     async def get_session_read(self, query: SessionReadQuery, *, user_scope: str) -> SessionRead:
         """会话首读（§4.2 read_session + §9.13）：一致读取截点下的五要素组装。
 
@@ -2340,21 +2543,9 @@ class AgentDao(BaseDao):
             ) from exc
         if query.round_id is not None and query.execution_id is None:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "round_id target requires execution_id", identity_str)
-        # 游标语法已由 validate_session_read_query 冻结（core 正则），此处解析为 keyset 键值。
-        message_cursor_seq: int | None = None
-        if query.message_cursor is not None:
-            message_cursor_seq = int(query.message_cursor[2:])
-        artifact_cursor_key: tuple[datetime, str, int] | None = None
-        if query.artifact_cursor is not None:
-            # 游标 a:{ts}:{id}:{ver}：ts 自身含冒号（YYYY-MM-DDTHH:MM:SS.ffffffZ，恰 3 段），
-            # id 段冻结不含冒号，ver 为末段；语法已由 validate_session_read_query 冻结。
-            parts = query.artifact_cursor[2:].split(":")
-            wire_ts, artifact_id_part, version_part = ":".join(parts[:3]), parts[3], parts[4]
-            artifact_cursor_key = (
-                datetime.strptime(wire_ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC),
-                artifact_id_part,
-                int(version_part),
-            )
+        message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(
+            query.message_cursor, query.artifact_cursor
+        )
 
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
@@ -2425,140 +2616,34 @@ class AgentDao(BaseDao):
                 executions = tuple(self._execution_summary_from_row(row, identity_str) for row in execution_rows)
 
                 # 消息首屏：session_seq DESC keyset（游标 m:{seq}）。
-                messages_stmt = (
-                    sa.select(
-                        AgentMessage.message_id,
-                        AgentMessage.session_id,
-                        AgentMessage.event_id,
-                        AgentMessage.session_seq,
-                        AgentMessage.event_kind,
-                        AgentMessage.payload_kind,
-                        AgentMessage.subject_id,
-                        AgentMessage.subject_revision,
-                        AgentMessage.occurred_at,
-                        AgentMessage.committed_at,
-                        AgentMessage.execution_id,
-                        AgentMessage.round_id,
-                        AgentMessage.node_id,
-                        AgentMessage.execution_seq,
-                        AgentMessage.input_revision,
-                        AgentMessage.role,
-                        AgentMessage.role_id,
-                        AgentMessage.role_version,
-                        AgentMessage.body_text,
-                        AgentMessage.body_ref,
-                        AgentMessage.payload,
-                        AgentMessage.native_fact_ref,
-                        AgentMessage.tool_call_id,
-                    )
-                    .where(
-                        AgentMessage.user_scope == user_scope,
-                        AgentMessage.session_id == query.session_id,
-                    )
-                    .order_by(AgentMessage.session_seq.desc())
-                    .limit(query.limit + 1)
+                messages = await self._load_message_page(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=query.session_id,
+                    execution_id=query.execution_id,
+                    round_id=query.round_id,
+                    cursor_seq=message_cursor_seq,
+                    limit=query.limit,
+                    identity_str=identity_str,
                 )
-                if query.execution_id is not None:
-                    messages_stmt = messages_stmt.where(AgentMessage.execution_id == query.execution_id)
-                if query.round_id is not None:
-                    messages_stmt = messages_stmt.where(AgentMessage.round_id == query.round_id)
-                if message_cursor_seq is not None:
-                    messages_stmt = messages_stmt.where(AgentMessage.session_seq < message_cursor_seq)
-                message_rows = (await conn.execute(messages_stmt)).all()
-                messages_has_more = len(message_rows) > query.limit
-                message_rows = message_rows[: query.limit]
-                message_items = tuple(self._message_item_from_row(row, identity_str) for row in message_rows)
-                messages = MessagePage(
-                    items=message_items,
-                    has_more=messages_has_more,
-                    next_cursor=f"m:{message_items[-1].session_seq}" if messages_has_more else None,
+                artifacts = await self._load_artifact_page(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=query.session_id,
+                    execution_id=query.execution_id,
+                    round_id=query.round_id,
+                    cursor_key=artifact_cursor_key,
+                    limit=query.limit,
+                    identity_str=identity_str,
                 )
-
-                # 成果首屏：可靠保存时点 DESC（published_at，NULL 以 created_at 承载），
-                # 同点 artifact_id/version DESC tie-break，keyset 游标 a:{ts}:{id}:{ver}。
-                artifact_sort_key = sa.func.coalesce(AgentArtifact.published_at, AgentArtifact.created_at)
-                artifacts_stmt = sa.select(
-                    AgentArtifact.artifact_id,
-                    AgentArtifact.artifact_version,
-                    AgentArtifact.session_id,
-                    AgentArtifact.execution_id,
-                    AgentArtifact.round_id,
-                    AgentArtifact.artifact_kind,
-                    AgentArtifact.input_revision,
-                    AgentArtifact.actual_input_digest,
-                    AgentArtifact.actual_model_ref,
-                    AgentArtifact.result_digest,
-                    AgentArtifact.source_available_state,
-                    AgentArtifact.created_at,
-                    AgentArtifact.updated_at,
-                    AgentArtifact.revision,
-                    AgentArtifact.summary,
-                    AgentArtifact.body_text,
-                    AgentArtifact.body_ref,
-                    AgentArtifact.result_payload,
-                    AgentArtifact.published_at,
-                    AgentArtifact.cleaned_at,
-                    artifact_sort_key.label("sort_moment"),
-                ).where(
-                    AgentArtifact.user_scope == user_scope,
-                    AgentArtifact.session_id == query.session_id,
+                decisions = await self._load_decisions(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=query.session_id,
+                    execution_id=query.execution_id,
+                    round_id=query.round_id,
+                    identity_str=identity_str,
                 )
-                if query.execution_id is not None:
-                    artifacts_stmt = artifacts_stmt.where(AgentArtifact.execution_id == query.execution_id)
-                if query.round_id is not None:
-                    artifacts_stmt = artifacts_stmt.where(AgentArtifact.round_id == query.round_id)
-                if artifact_cursor_key is not None:
-                    cursor_moment, cursor_artifact_id, cursor_version = artifact_cursor_key
-                    artifacts_stmt = artifacts_stmt.where(
-                        sa.tuple_(
-                            artifact_sort_key,
-                            AgentArtifact.artifact_id,
-                            AgentArtifact.artifact_version,
-                        )
-                        < sa.tuple_(
-                            sa.bindparam("cursor_moment", cursor_moment),
-                            sa.bindparam("cursor_artifact_id", cursor_artifact_id),
-                            sa.bindparam("cursor_version", cursor_version),
-                        )
-                    )
-                artifacts_stmt = artifacts_stmt.order_by(
-                    artifact_sort_key.desc(),
-                    AgentArtifact.artifact_id.desc(),
-                    AgentArtifact.artifact_version.desc(),
-                ).limit(query.limit + 1)
-                artifact_rows = (await conn.execute(artifacts_stmt)).all()
-                artifacts_has_more = len(artifact_rows) > query.limit
-                artifact_rows = artifact_rows[: query.limit]
-                artifact_items = tuple(self._artifact_item_from_row(row, identity_str) for row in artifact_rows)
-                artifact_cursor_out: str | None = None
-                if artifacts_has_more:
-                    last_sort_moment = artifact_rows[-1].sort_moment
-                    artifact_cursor_out = (
-                        f"a:{_wire_time(last_sort_moment)}:{artifact_rows[-1].artifact_id}:"
-                        f"{artifact_rows[-1].artifact_version}"
-                    )
-                artifacts = ArtifactPage(
-                    items=artifact_items, has_more=artifacts_has_more, next_cursor=artifact_cursor_out
-                )
-
-                # 待决定列表（§4.3 decisions）：首屏全量，批次序稳定输出；原回执经
-                # answer_command_id 引用按需查询，不复制完整回执正文。
-                decisions_stmt = sa.select(AgentDecision).where(
-                    AgentDecision.user_scope == user_scope,
-                    AgentDecision.session_id == query.session_id,
-                )
-                if query.execution_id is not None:
-                    decisions_stmt = decisions_stmt.where(AgentDecision.execution_id == query.execution_id)
-                if query.round_id is not None:
-                    decisions_stmt = decisions_stmt.where(AgentDecision.round_id == query.round_id)
-                decision_rows = (
-                    await conn.execute(
-                        decisions_stmt.order_by(
-                            AgentDecision.presentation_batch_seq.asc(), AgentDecision.decision_id.asc()
-                        )
-                    )
-                ).all()
-                decisions = tuple(self._decision_summary_from_row(row, identity_str) for row in decision_rows)
 
         return SessionRead(
             summary=summary,
@@ -2566,4 +2651,378 @@ class AgentDao(BaseDao):
             messages=messages,
             artifacts=artifacts,
             decisions=decisions,
+        )
+
+    def _operation_summary_from_row(self, row: Any, identity_str: str) -> OperationSummary:
+        try:
+            return decode_operation_summary(
+                {
+                    "operation_id": row.operation_id,
+                    "phase": row.phase,
+                    "effect_state": row.effect_state,
+                    "io_state": row.io_state,
+                    "owner_epoch": row.owner_epoch,
+                    "run_epoch": row.run_epoch,
+                    "active_ms": row.active_ms,
+                    "elapsed_ms": row.elapsed_ms,
+                    "session_id": row.session_id,
+                    "execution_id": row.execution_id,
+                    "round_id": row.round_id,
+                    "tool_call_id": row.tool_call_id,
+                    "grant_id": row.grant_id,
+                    "grant_revision": row.grant_revision,
+                    "result_ref": row.result_ref,
+                    "error_code": row.error_code,
+                    "error_category": row.error_category,
+                    "deadline_at": self._opt_wire_time(row.deadline_at),
+                    "dispatched_at": self._opt_wire_time(row.dispatched_at),
+                    "exited_at": self._opt_wire_time(row.exited_at),
+                    "verified_at": self._opt_wire_time(row.verified_at),
+                    "artifact_id": row.artifact_id,
+                    "artifact_version": row.artifact_version,
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted operation row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    def _source_read_summary_from_row(self, row: Any, identity_str: str) -> SourceReadSummary:
+        """agent_source_link join agent_asset_version 行 → SourceReadSummary。"""
+
+        try:
+            return decode_source_read_summary(
+                {
+                    "link_id": row.link_id,
+                    "source_id": row.source_id,
+                    "source_version": row.source_version,
+                    "source_kind": row.asset_kind,
+                    "display_name": row.display_name,
+                    "digest": row.digest,
+                    "read_state": row.read_state,
+                    "verification_state": row.verification_state,
+                    "consumer_kind": row.consumer_kind,
+                    "consumer_id": row.consumer_id,
+                    "consumer_version": row.consumer_version,
+                    "relation_kind": row.relation_kind,
+                    "disabled_inherited": row.disabled_inherited,
+                    "tombstoned": row.tombstoned,
+                    "available_at": self._opt_wire_time(row.available_at),
+                    "disabled_at": self._opt_wire_time(row.disabled_at),
+                    "locator_payload": json_doc(row.locator_payload) if row.locator_payload is not None else None,
+                    "claim_ref": row.claim_ref,
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted source link row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    def _read_mark_entry_from_row(self, row: Any, identity_str: str) -> ReadMarkEntry:
+        try:
+            return decode_read_mark_entry(
+                {
+                    "marker_id": row.marker_id,
+                    "marker_kind": row.marker_kind,
+                    "target_id": row.target_id,
+                    "last_seq": row.last_seq,
+                    "batch_seq": row.batch_seq,
+                    "postponed_through_seq": row.postponed_through_seq,
+                    "session_id": row.session_id,
+                    "read_targets": list(row.read_targets) if row.read_targets is not None else None,
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted read mark row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    async def get_execution_snapshot(
+        self,
+        execution_id: str,
+        *,
+        user_scope: str,
+        limit: int = 50,
+        round_id: str | None = None,
+        message_cursor: str | None = None,
+        artifact_cursor: str | None = None,
+    ) -> ResearchSnapshot:
+        """执行快照（§4.3 完整结构 + §9.13 一致读取截点）：VM 按准确执行身份按需加载。
+
+        - 受理校验：execution_id/user_scope 非空、limit 1..50、游标语法（复用
+          validate_session_read_query 冻结合同）；execution 不在用户域 → INPUT_INVALID；
+        - round 语义：round_id 指定则须属该 execution（错配 INPUT_INVALID）；
+          未指定时取 execution.current_round_id（queued 无 round → identity 全 None 组，
+          frozen_scope/actual_input None）；
+        - 单事务 REPEATABLE READ 截点：identity（round↔workflow 耦合）/revision/
+          双水位（execution.event_seq + session.event_seq）/execution 摘要 /一层
+          叶子 nodes（parent_execution_id）/消息成果分页（session 域内按 execution
+          [+round] 过滤）/source_reads（source_link join asset_version）/decisions/
+          operation_summaries/usage（cost_state 恒 unknown，R21 不填 0）/read_marks/
+          observation.reliable=True（一致截点读出，不冒认可靠）；
+        - limitations 恒空元组：本读取面未核定到条目 ≠「无限制」承诺（脱敏限制
+          记录随来源/清理任务接入后扩展，工程裁决留痕）。
+        """
+
+        self._check_engine()
+        identity_str = f"{user_scope}/{execution_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
+        if not isinstance(execution_id, str) or execution_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution_id must be non-empty text", identity_str)
+        try:
+            # 游标/limit 语法复用 SessionReadQuery 冻结合同（session_id 占位不影响校验）。
+            validate_session_read_query(
+                SessionReadQuery(
+                    session_id="probe",
+                    limit=limit,
+                    message_cursor=message_cursor,
+                    artifact_cursor=artifact_cursor,
+                )
+            )
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity_str
+            ) from exc
+        message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(message_cursor, artifact_cursor)
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="REPEATABLE READ")
+            async with conn.begin():
+                execution_row = (
+                    await conn.execute(
+                        sa.select(AgentExecution).where(
+                            AgentExecution.user_scope == user_scope,
+                            AgentExecution.execution_id == execution_id,
+                        )
+                    )
+                ).first()
+                if execution_row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, "execution not found in user scope", identity_str
+                    )
+                execution_summary = self._execution_summary_from_row(execution_row, identity_str)
+                session_id = execution_row.session_id
+
+                session_row = (
+                    await conn.execute(
+                        sa.select(AgentSession.event_seq).where(
+                            AgentSession.user_scope == user_scope,
+                            AgentSession.session_id == session_id,
+                        )
+                    )
+                ).first()
+                if session_row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN, "session of execution not found", identity_str
+                    )
+
+                effective_round_id = round_id if round_id is not None else execution_row.current_round_id
+                round_row = None
+                if effective_round_id is not None:
+                    round_row = (
+                        await conn.execute(
+                            sa.select(AgentRound).where(
+                                AgentRound.user_scope == user_scope,
+                                AgentRound.round_id == effective_round_id,
+                                AgentRound.execution_id == execution_id,
+                            )
+                        )
+                    ).first()
+                    if round_row is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID, "target round not in execution", identity_str
+                        )
+
+                try:
+                    if round_row is not None:
+                        identity = decode_snapshot_identity(
+                            {
+                                "user_scope": user_scope,
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "node_id": execution_row.node_id,
+                                "round_id": round_row.round_id,
+                                "input_revision": round_row.input_revision,
+                                "workflow_id": round_row.workflow_id,
+                                "run_epoch": round_row.run_epoch,
+                            }
+                        )
+                    else:
+                        identity = decode_snapshot_identity(
+                            {
+                                "user_scope": user_scope,
+                                "session_id": session_id,
+                                "execution_id": execution_id,
+                                "node_id": execution_row.node_id,
+                                "round_id": None,
+                                "input_revision": None,
+                                "workflow_id": None,
+                                "run_epoch": None,
+                            }
+                        )
+                except (AgentValidationError, ValueError) as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        f"persisted execution/round rows cannot form a reliable identity: {exc}",
+                        identity_str,
+                    ) from exc
+
+                # 一层叶子 nodes：parent_execution_id = 本执行。
+                node_rows = (
+                    await conn.execute(
+                        sa.select(AgentExecution)
+                        .where(
+                            AgentExecution.user_scope == user_scope,
+                            AgentExecution.parent_execution_id == execution_id,
+                        )
+                        .order_by(AgentExecution.created_at.asc(), AgentExecution.execution_id.asc())
+                    )
+                ).all()
+                nodes = tuple(self._execution_summary_from_row(row, identity_str) for row in node_rows)
+
+                round_filter = effective_round_id
+                messages_page = await self._load_message_page(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    round_id=round_filter,
+                    cursor_seq=message_cursor_seq,
+                    limit=limit,
+                    identity_str=identity_str,
+                )
+                artifacts_page = await self._load_artifact_page(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    round_id=round_filter,
+                    cursor_key=artifact_cursor_key,
+                    limit=limit,
+                    identity_str=identity_str,
+                )
+
+                # source_reads：本执行消费的来源边 join asset_version 元数据（§4.3）。
+                # Core 连接下统一显式列选择（实体选择行为不确定，见 C-03-1 教训）。
+                source_rows = (
+                    await conn.execute(
+                        sa.select(
+                            AgentSourceLink.link_id,
+                            AgentSourceLink.source_id,
+                            AgentSourceLink.source_version,
+                            AgentSourceLink.consumer_kind,
+                            AgentSourceLink.consumer_id,
+                            AgentSourceLink.consumer_version,
+                            AgentSourceLink.locator_payload,
+                            AgentSourceLink.claim_ref,
+                            AgentSourceLink.relation_kind,
+                            AgentSourceLink.disabled_inherited,
+                            AgentAssetVersion.asset_kind,
+                            AgentAssetVersion.display_name,
+                            AgentAssetVersion.digest,
+                            AgentAssetVersion.read_state,
+                            AgentAssetVersion.verification_state,
+                            AgentAssetVersion.available_at,
+                            AgentAssetVersion.disabled_at,
+                            AgentAssetVersion.tombstoned,
+                        )
+                        .join(
+                            AgentAssetVersion,
+                            sa.and_(
+                                AgentSourceLink.user_scope == AgentAssetVersion.user_scope,
+                                AgentSourceLink.source_id == AgentAssetVersion.asset_id,
+                                AgentSourceLink.source_version == AgentAssetVersion.asset_version,
+                            ),
+                        )
+                        .where(
+                            AgentSourceLink.user_scope == user_scope,
+                            AgentSourceLink.consumer_kind == "execution",
+                            AgentSourceLink.consumer_id == execution_id,
+                        )
+                        .order_by(AgentSourceLink.link_id.asc())
+                    )
+                ).all()
+                source_reads = tuple(self._source_read_summary_from_row(row, identity_str) for row in source_rows)
+
+                decisions = await self._load_decisions(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    round_id=round_filter,
+                    identity_str=identity_str,
+                )
+
+                operation_rows = (
+                    await conn.execute(
+                        sa.select(AgentOperation)
+                        .where(
+                            AgentOperation.user_scope == user_scope,
+                            AgentOperation.execution_id == execution_id,
+                        )
+                        .order_by(
+                            AgentOperation.created_at.asc(),
+                            AgentOperation.operation_id.asc(),
+                        )
+                    )
+                ).all()
+                operation_summaries = tuple(
+                    self._operation_summary_from_row(row, identity_str) for row in operation_rows
+                )
+
+                # read_marks：本会话域阅读水位（session marker + 无 session 全局 marker）。
+                read_mark_rows = (
+                    await conn.execute(
+                        sa.select(AgentReadMark)
+                        .where(
+                            AgentReadMark.user_scope == user_scope,
+                            sa.or_(
+                                AgentReadMark.session_id == session_id,
+                                AgentReadMark.session_id.is_(None),
+                            ),
+                        )
+                        .order_by(AgentReadMark.marker_id.asc())
+                    )
+                ).all()
+                read_marks = tuple(self._read_mark_entry_from_row(row, identity_str) for row in read_mark_rows)
+
+        return ResearchSnapshot(
+            identity=identity,
+            revision=execution_row.revision,
+            execution_watermark=execution_row.event_seq,
+            session_watermark=session_row.event_seq,
+            updated_at=_wire_time(execution_row.updated_at),
+            execution=execution_summary,
+            nodes=nodes,
+            frozen_scope=json_doc(round_row.frozen_manifest)
+            if round_row is not None and round_row.frozen_manifest is not None
+            else None,
+            actual_input=json_doc(round_row.actual_input)
+            if round_row is not None and round_row.actual_input is not None
+            else None,
+            messages_page=messages_page,
+            artifacts_page=artifacts_page,
+            source_reads=source_reads,
+            decisions=decisions,
+            operation_summaries=operation_summaries,
+            usage=UsageSummary(
+                model_attempt_count=execution_row.model_attempt_count,
+                tool_call_count=execution_row.tool_call_count,
+                active_ms=execution_row.active_ms,
+            ),
+            goal_coverage=execution_summary.goal_coverage,
+            limitations=(),
+            read_marks=read_marks,
+            observation=Observation(
+                reliable=True, last_verified_at=self._opt_wire_time(execution_row.last_verified_at)
+            ),
         )
