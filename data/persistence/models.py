@@ -2141,37 +2141,24 @@ class AgentSourceLink(Base):
             "consumer_kind IN ('draft', 'execution', 'round', 'message', 'artifact', 'asset')",
             name="consumer_kind",
         ),
+        # §9.10：单条组合 CHECK 验证本行类型/对应列 NULL 组合（目标存在性用复合 FK；
+        # 六个分支以 OR 组合，每行仅命中其 consumer_kind 分支）。
         CheckConstraint(
             "(consumer_kind = 'draft' AND session_id IS NOT NULL AND execution_id IS NULL "
-            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL)",
-            name="consumer_draft",
-        ),
-        CheckConstraint(
-            "(consumer_kind = 'execution' AND session_id IS NULL AND execution_id IS NOT NULL "
-            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL)",
-            name="consumer_execution",
-        ),
-        CheckConstraint(
-            "(consumer_kind = 'round' AND session_id IS NULL AND execution_id IS NULL "
-            "AND round_id IS NOT NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL)",
-            name="consumer_round",
-        ),
-        CheckConstraint(
-            "(consumer_kind = 'message' AND session_id IS NULL AND execution_id IS NULL "
-            "AND round_id IS NULL AND message_id IS NOT NULL AND artifact_id IS NULL AND derived_asset_id IS NULL)",
-            name="consumer_message",
-        ),
-        CheckConstraint(
-            "(consumer_kind = 'artifact' AND session_id IS NULL AND execution_id IS NULL "
+            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'execution' AND session_id IS NULL AND execution_id IS NOT NULL "
+            "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'round' AND session_id IS NULL AND execution_id IS NULL "
+            "AND round_id IS NOT NULL AND message_id IS NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'message' AND session_id IS NULL AND execution_id IS NULL "
+            "AND round_id IS NULL AND message_id IS NOT NULL AND artifact_id IS NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'artifact' AND session_id IS NULL AND execution_id IS NULL "
             "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NOT NULL "
-            "AND artifact_version IS NOT NULL AND derived_asset_id IS NULL)",
-            name="consumer_artifact",
-        ),
-        CheckConstraint(
-            "(consumer_kind = 'asset' AND session_id IS NULL AND execution_id IS NULL "
+            "AND artifact_version IS NOT NULL AND derived_asset_id IS NULL) "
+            "OR (consumer_kind = 'asset' AND session_id IS NULL AND execution_id IS NULL "
             "AND round_id IS NULL AND message_id IS NULL AND artifact_id IS NULL "
             "AND derived_asset_id IS NOT NULL AND derived_asset_version IS NOT NULL)",
-            name="consumer_asset",
+            name="consumer_null_combination",
         ),
         CheckConstraint("(artifact_id IS NULL) = (artifact_version IS NULL)", name="artifact_pair"),
         *_agent_common_checks(),

@@ -512,9 +512,11 @@ class TestFrozenEnumChecks:
         assert "ck_agent_body_payload_byte_length_exact" in checks
 
     def test_source_link_consumer_null_combination_checks(self) -> None:
-        checks = _check_names("agent_source_link")
+        # 单条组合 CHECK 的 OR 分支覆盖六类 consumer（§9.10：只验证本行类型/列 NULL 组合）。
+        checks = [str(c.sqltext) for c in _table("agent_source_link").constraints if isinstance(c, CheckConstraint)]
+        combined = next(text for text in checks if "consumer_kind = 'draft'" in text)
         for kind in ("draft", "execution", "round", "message", "artifact", "asset"):
-            assert f"ck_agent_source_link_consumer_{kind}" in checks
+            assert f"consumer_kind = '{kind}'" in combined
 
     def test_pending_freeze_columns_have_no_value_check(self) -> None:
         # 未冻结 wire 值的 TEXT 列不得臆造 CHECK（本文件 docstring 待冻结清单）。

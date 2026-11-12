@@ -1645,3 +1645,109 @@ def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
         "verified_at": require_utc_timestamp(receipt.verified_at, "$.verified_at"),
         "next_action": receipt.next_action,
     }
+
+
+# ---------------------------------------------------------------------------
+# §3.3.2 受理身份派生与受理输入（C-02-2）
+# ---------------------------------------------------------------------------
+
+
+#: 谱系边关系（§9.10 relation_kind；本轮工程冻结首批值——设计未逐枚举）。
+class SourceRelationKind(Enum):
+    """源-消费者谱系边语义：origin=源→其 originating message；accepted_input=源→受理输入版。"""
+
+    ORIGIN = "origin"
+    ACCEPTED_INPUT = "accepted_input"
+
+
+#: 可靠事件载荷结构标识（§4.4 payload_kind；本轮工程冻结首批值——设计未逐枚举）。
+class EventPayloadKind(Enum):
+    """public_message_saved 事件载荷 v1：message_id/role/版本/正文引用/来源边。"""
+
+    PUBLIC_MESSAGE = "public_message"
+
+
+@dataclass(frozen=True)
+class AcceptRequest:
+    """受理输入（SQ-01/§3.3.2/§3.4）：受理时点冻结（INV-04）。
+
+    ``text`` 为用户消息正文（非空，不 trim/改 Unicode）；``manifest_payload``
+    为 FrozenManifest 规范 JSON（intent_digest 由其规范字节派生，单一事实源）；
+    ``source_display_name`` 由服务层决定（i18n 文案），DAO 不猜显示名。
+    """
+
+    user_scope: str
+    session_id: str
+    source_module: str
+    business_request_id: str
+    client_command_id: str
+    #: 目标会话草稿预期版（§3.1：0=目标尚不存在）。
+    expected_revision: int
+    node_id: str
+    workflow_id: str
+    mode: Mode
+    purpose: Purpose
+    text: str
+    manifest_payload: CanonicalJson
+    source_display_name: str
+
+
+@dataclass(frozen=True)
+class AcceptIdentity:
+    """受理身份派生结果（§3.3.2 稳定身份规则，纯函数）。"""
+
+    command_record_id: str
+    message_id: str
+    source_id: str
+    source_version: str
+    source_digest: str
+    intent_digest: str
+
+
+def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
+    """按 §3.3.2 派生受理稳定身份并校验输入（不 trim/改 Unicode）。
+
+    - ``command_record_id = stable_id("command",[user_scope,exact_target_id,
+      client_command_id])``，exact_target_id 即目标 session_id；
+    - ``message_id = stable_id("user_message",[user_scope,session_id,
+      command_record_id])``，message_version="1"；
+    - ``source_id = stable_id("message_source",[user_scope,session_id,
+      message_id])``，source_version="1"；
+    - ``source_digest = sha256(text UTF-8)``，``intent_digest =
+      sha256(manifest_payload UTF-8)``（manifest 已是规范 JSON）。
+    """
+
+    user_scope = _require_str(request.user_scope, "$.user_scope")
+    session_id = _require_str(request.session_id, "$.session_id")
+    _require_str(request.source_module, "$.source_module")
+    _require_str(request.business_request_id, "$.business_request_id")
+    _require_str(request.client_command_id, "$.client_command_id")
+    if (
+        isinstance(request.expected_revision, bool)
+        or not isinstance(request.expected_revision, int)
+        or request.expected_revision < 0
+    ):
+        _fail("invalid_revision", "$.expected_revision")
+    _require_str(request.node_id, "$.node_id")
+    _require_str(request.workflow_id, "$.workflow_id")
+    if not isinstance(request.mode, Mode):
+        _fail("invalid_tag", "$.mode")
+    if not isinstance(request.purpose, Purpose):
+        _fail("invalid_tag", "$.purpose")
+    if not isinstance(request.text, str) or request.text == "":
+        _fail("invalid_value", "$.text")
+    if not isinstance(request.manifest_payload, str) or request.manifest_payload == "":
+        _fail("invalid_value", "$.manifest_payload")
+    _require_str(request.source_display_name, "$.source_display_name")
+
+    command_record_id = stable_id("command", [user_scope, session_id, request.client_command_id])
+    message_id = stable_id("user_message", [user_scope, session_id, command_record_id])
+    source_id = stable_id("message_source", [user_scope, session_id, message_id])
+    return AcceptIdentity(
+        command_record_id=command_record_id,
+        message_id=message_id,
+        source_id=source_id,
+        source_version="1",
+        source_digest=sha256_hex(request.text),
+        intent_digest=sha256_hex(request.manifest_payload),
+    )
