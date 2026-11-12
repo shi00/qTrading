@@ -10,6 +10,8 @@
   正常顺序保存后可再次编辑并清除 SAVE_SUCCESS
 - 同步阻塞操作走 ThreadPoolManager (R16)
 - R2 CancelledError 显式 raise
+- 取消生命周期 (UIB-AIBRAIN-01): 取消后占用收束为非 saving、无永久锁定、
+  saved_revision 不伪成功；写盘未终结前重复提交守卫持续生效
 - subscribe / dispose
 """
 
@@ -20,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ui.viewmodels.ai_brain_settings_view_model import (
+    SAVE_ERROR,
     SAVE_IDLE,
     SAVE_SAVING,
     SAVE_STALE,
@@ -160,6 +163,14 @@ class TestSaveAiSettingsStateMachine:
         vm = _make_vm(mock_config_handler)
         with pytest.raises(asyncio.CancelledError):
             await vm.save_ai_settings()
+        # UIB-AIBRAIN-01: 取消后占用必须被收束为非 saving（无永久锁定），
+        # 且不推进 saved_revision（不伪成功）。
+        for _ in range(100):
+            if vm.state.save_state != SAVE_SAVING:
+                break
+            await asyncio.sleep(0)
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.saved_revision == 0
 
     @pytest.mark.asyncio
     async def test_save_duplicate_submit_returns_false(self, mock_config_handler, mock_thread_pool):
@@ -195,6 +206,184 @@ class TestSaveAiSettingsStateMachine:
                 assert sensitive_path not in str(sanitized_arg), (
                     f"R9 违规：原始路径出现在 logger format 参数中: {sanitized_arg}"
                 )
+
+
+# --- UIB-AIBRAIN-01: 取消生命周期（占用收束 / 无永久锁定 / 不伪成功） ---
+
+
+class TestCancelledSaveLifecycle:
+    """外层保存等待被取消后：占用保持至写盘真正终结，再收束为非 saving。"""
+
+    @staticmethod
+    def _gated_run_factory(started: asyncio.Event, release: asyncio.Event):
+        async def _gated_run(task_type, func, *args, **kwargs):
+            started.set()
+            await release.wait()
+            return func(*args, **kwargs)
+
+        return _gated_run
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_persist_holds_occupancy_until_write_finishes(
+        self, mock_config_handler, mock_thread_pool
+    ):
+        """写中取消：占用保持（重复提交守卫生效），写盘终结后回调收束为非 saving。"""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        mock_thread_pool.run_async = AsyncMock(side_effect=self._gated_run_factory(started, release))
+
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            vm = _make_vm(mock_config_handler)
+
+            save_task = asyncio.create_task(vm.save_ai_settings())
+            await asyncio.wait_for(started.wait(), timeout=5)
+            assert vm.state.save_state == SAVE_SAVING
+
+            save_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await save_task
+
+            # 写盘未终结：占用保持，重复提交守卫持续生效（防并发第二次写）
+            assert vm.state.save_state == SAVE_SAVING
+            assert await vm.save_ai_settings() is False
+            mock_config_handler.save_ai_tuning_and_prompts.assert_not_called()
+
+            # 占用期间编辑草稿：保持 SAVING 且版本前移（既有语义）
+            vm.set_max_candidates_value("40")
+            assert vm.state.save_state == SAVE_SAVING
+            assert vm.state.draft_revision == 1
+
+            # 写盘终结 → 完成回调收束：非 saving 反馈 + 版本不推进（不伪成功）
+            release.set()
+            for _ in range(100):
+                if vm.state.save_state != SAVE_SAVING:
+                    break
+                await asyncio.sleep(0)
+            assert vm.state.save_state == SAVE_ERROR
+            assert vm.state.draft_revision == 1
+            assert vm.state.saved_revision == 0
+
+            # 占用释放后可再次保存（无永久锁定），且确认的是当前草稿版本
+            result = await vm.save_ai_settings()
+            assert result is True
+            assert vm.state.save_state == SAVE_SUCCESS
+            assert vm.state.draft_revision == vm.state.saved_revision == 1
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_reload_releases_occupancy_immediately(self, mock_config_handler, mock_thread_pool):
+        """已写后 reload 中取消：真实持久化已终结 → 占用即时释放，无永久锁定。"""
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock(side_effect=asyncio.CancelledError())
+            vm = _make_vm(mock_config_handler)
+            with pytest.raises(asyncio.CancelledError):
+                await vm.save_ai_settings()
+
+        # 同步收束（无需等回调）：写确已发生，但版本不推进（不伪成功）
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.saved_revision == 0
+        assert mock_config_handler.save_ai_tuning_and_prompts.call_count == 1
+
+        # 无永久锁定：再次保存成功
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            result = await vm.save_ai_settings()
+        assert result is True
+        assert vm.state.save_state == SAVE_SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_cancelled_save_persist_failure_still_recovered(self, mock_config_handler, mock_thread_pool):
+        """取消后写盘返回 False（写入失败）：回调收束非 saving，版本不推进。"""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        mock_thread_pool.run_async = AsyncMock(side_effect=self._gated_run_factory(started, release))
+        mock_config_handler.save_ai_tuning_and_prompts.return_value = False
+
+        vm = _make_vm(mock_config_handler)
+        save_task = asyncio.create_task(vm.save_ai_settings())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        save_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await save_task
+
+        release.set()
+        for _ in range(100):
+            if vm.state.save_state != SAVE_SAVING:
+                break
+            await asyncio.sleep(0)
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.saved_revision == 0
+
+        # 收束后可再次保存
+        mock_config_handler.save_ai_tuning_and_prompts.return_value = True
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            assert await vm.save_ai_settings() is True
+        assert vm.state.save_state == SAVE_SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_cancelled_save_persist_exception_recovered_and_sanitized(
+        self, mock_config_handler, mock_thread_pool
+    ):
+        """取消后写盘线程抛异常：回调消费异常、按严重度脱敏记日志 (R9)、收束非 saving。"""
+        sensitive_path = "C:\\Users\\secret\\api_key.txt"
+        started = asyncio.Event()
+        release = asyncio.Event()
+        mock_thread_pool.run_async = AsyncMock(side_effect=self._gated_run_factory(started, release))
+        mock_config_handler.save_ai_tuning_and_prompts.side_effect = OSError(f"disk error accessing {sensitive_path}")
+
+        vm = _make_vm(mock_config_handler)
+        save_task = asyncio.create_task(vm.save_ai_settings())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        save_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await save_task
+
+        with (
+            patch("ui.viewmodels.ai_brain_settings_view_model.logger") as mock_logger,
+        ):
+            release.set()
+            for _ in range(100):
+                if vm.state.save_state != SAVE_SAVING:
+                    break
+                await asyncio.sleep(0)
+
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.saved_revision == 0
+        # R9: 原始敏感路径不得原样进入 logger 参数（仅脱敏后的消息可出现）
+        log_calls = (
+            mock_logger.error.call_args_list + mock_logger.critical.call_args_list + mock_logger.warning.call_args_list
+        )
+        assert log_calls, "取消收束回调应记录日志"
+        for call in log_calls:
+            assert sensitive_path not in str(call.args), f"R9 违规：原始路径出现在 logger 参数中: {call.args}"
+
+        # 收束后可再次保存
+        mock_config_handler.save_ai_tuning_and_prompts.side_effect = None
+        mock_config_handler.save_ai_tuning_and_prompts.return_value = True
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            assert await vm.save_ai_settings() is True
+        assert vm.state.save_state == SAVE_SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_finalize_handles_aborted_persist_task(self, mock_config_handler):
+        """persist_task 自身被取消（loop 关闭收尾等场景）：回调仍收束非 saving。"""
+        from dataclasses import replace
+
+        vm = _make_vm(mock_config_handler)
+        vm._state = replace(vm._state, save_state=SAVE_SAVING)
+
+        async def _aborted() -> bool:
+            raise asyncio.CancelledError
+
+        aborted_task = asyncio.create_task(_aborted())
+        await asyncio.gather(aborted_task, return_exceptions=True)
+        assert aborted_task.cancelled()
+
+        vm._finalize_cancelled_save_persist(aborted_task, 0)
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.saved_revision == 0
 
 
 # --- F05 草稿编辑版本 ↔ 保存完成绑定 ---
