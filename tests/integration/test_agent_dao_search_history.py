@@ -147,6 +147,7 @@ async def _seed_message(
         node_id=node_id if node_id is not None else ("root" if execution_id else None),
         role=role,
         body_text=body_text,
+        search_text=body_text,
     )
     fact = await dao.record_event(request)
     return fact.session_seq

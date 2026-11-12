@@ -380,6 +380,7 @@ class AgentDao(BaseDao):
                     subject_revision=1,
                     role="user",
                     body_text=request.text,
+                    search_text=request.text,
                     payload={
                         "schema_version": 1,
                         "message_id": identity.message_id,
@@ -1319,6 +1320,7 @@ class AgentDao(BaseDao):
                     subject_revision=1,
                     role="user",
                     body_text=request.text,
+                    search_text=request.text,
                     payload={
                         "schema_version": 1,
                         "message_id": message_id,
@@ -3384,7 +3386,10 @@ class AgentDao(BaseDao):
                         AgentMessage.round_id == agent_filter.round_id,
                     )
                 if query.query_text:
-                    message_stmt = message_stmt.where(AgentMessage.body_text.like(f"%{query.query_text}%"))
+                    # 全文搜索（§4.2 L402/§9.6 search_text 投影）：ILIKE 子串（含尾词），
+                    # 通配符按字面量转义；简单 ILIKE 语义——tsvector/trgm 查询演化留痕
+                    escaped = query.query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    message_stmt = message_stmt.where(AgentMessage.search_text.ilike(f"%{escaped}%", escape="\\"))
                 if query.state_filter is not None:
                     message_stmt = message_stmt.where(
                         sa.exists().where(
@@ -3471,10 +3476,12 @@ class AgentDao(BaseDao):
                         AgentArtifact.round_id == agent_filter.round_id,
                     )
                 if query.query_text:
+                    # 成果无 search_text 投影列（§9.7）：摘要/内联正文 ILIKE（同一转义语义）
+                    escaped = query.query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                     artifact_stmt = artifact_stmt.where(
                         sa.or_(
-                            AgentArtifact.summary.like(f"%{query.query_text}%"),
-                            AgentArtifact.body_text.like(f"%{query.query_text}%"),
+                            AgentArtifact.summary.ilike(f"%{escaped}%", escape="\\"),
+                            AgentArtifact.body_text.ilike(f"%{escaped}%", escape="\\"),
                         )
                     )
                 if query.state_filter is not None:
