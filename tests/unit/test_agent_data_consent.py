@@ -696,7 +696,8 @@ class TestValidateDataAttemptAuthorization:
 
 class TestEvaluateDataAttempt:
     def test_matching_request_allowed(self) -> None:
-        assert evaluate_data_attempt(_decoded_binding(), _authorization(), _NOW) is None
+        binding = _decoded_binding({"expires_at": "2030-01-01T00:00:00.000000Z"})
+        assert evaluate_data_attempt(binding, _authorization(), _NOW) is None
 
     def test_pending_state_denied(self) -> None:
         binding = _decoded_binding({"state": "pending", "approver_ref": None, "valid_from": None})
@@ -739,8 +740,12 @@ class TestEvaluateDataAttempt:
         binding = _decoded_binding({"valid_from": "2027-01-01T00:00:00.000000Z"})
         assert evaluate_data_attempt(binding, _authorization(), _NOW) == "not_yet_valid"
 
-    def test_null_expiry_never_expires(self) -> None:
-        assert evaluate_data_attempt(_decoded_binding({"expires_at": None}), _authorization(), _NOW) is None
+    def test_null_expiry_denied(self) -> None:
+        # §9.8 L1539：expires_at=null 表示「期限未核定，不表示永久」——必须 deny，
+        # 不能自动补期限或放行（检视 B-1 回归锚）。
+        assert evaluate_data_attempt(_decoded_binding({"expires_at": None}), _authorization(), _NOW) == (
+            "expiry_unverified"
+        )
 
 
 class TestDataConsentClaimCodec:

@@ -54,6 +54,7 @@ from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.models import (
     AgentCommand,
     AgentDecision,
+    AgentExecution,
     AgentOperation,
     AgentSession,
 )
@@ -176,7 +177,7 @@ def _binding(
     consent_revision: int = 1,
     execution_id: str = "exec",
     round_id: str = "round",
-    expires_at: str | None = None,
+    expires_at: str | None = "2099-01-01T00:00:00.000000Z",
     valid_from: str = "2026-01-01T00:00:00.000000Z",
 ) -> DataConsentBinding:
     """合法 v1 绑定（本地免外发路径，AR-09 语义；state 矩阵由 core decode 核）。"""
@@ -792,3 +793,69 @@ class TestClaimDataConsent:
         with pytest.raises(AgentServiceError) as exc:
             await dao.claim_data_consent(_authorization(), _claim())
         assert _code_of(exc) == AgentErrorCode.POLICY_DENIED
+
+
+class TestAcceptIntentConcurrency:
+    """检视 M-1 回归锚：跨 session 并发受理同一 intent 的唯一索引竞态必须
+    归 INPUT_CONFLICT（§9.13 数据库失败明确分类；INV-01 一意图一受理身份），
+    不允许裸 IntegrityError 逃逸。"""
+
+    async def test_concurrent_same_intent_cross_session_conflicts(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                insert(AgentSession).values(user_scope=USER_SCOPE, session_id="s-race-1", title="race 1")
+            )
+            await conn.execute(
+                insert(AgentSession).values(user_scope=USER_SCOPE, session_id="s-race-2", title="race 2")
+            )
+
+        async def attempt(session_id: str) -> object:
+            try:
+                return await dao.accept_request(
+                    AcceptRequest(
+                        user_scope=USER_SCOPE,
+                        session_id=session_id,
+                        source_module="ui",
+                        business_request_id="req-race",
+                        client_command_id=f"client-{session_id}",
+                        expected_revision=0,
+                        node_id="root",
+                        workflow_id=f"wf-{session_id}",
+                        mode=Mode.EXECUTE,
+                        purpose=Purpose.END_OF_DAY_RESEARCH,
+                        text="并发受理同意图",
+                        manifest_payload=json_doc(
+                            {
+                                "schema_version": 1,
+                                "source_module": "ui",
+                                "business_request_id": "req-race",
+                                "mode": "execute",
+                                "purpose": "end_of_day_research",
+                                "text": "并发受理同意图",
+                            }
+                        ),
+                        source_display_name="用户消息",
+                    )
+                )
+            except AgentServiceError as exc:
+                return exc
+
+        results = await asyncio.gather(attempt("s-race-1"), attempt("s-race-2"))
+        outcomes = [r.code if isinstance(r, AgentServiceError) else "receipt" for r in results]
+        # 单胜者：一成功（或重放回执）+ 一 INPUT_CONFLICT；intent 恰好一条 execution。
+        assert "receipt" in outcomes
+        assert AgentErrorCode.INPUT_CONFLICT in outcomes
+        async with dao.engine.connect() as conn:
+            count = (
+                await conn.execute(
+                    sa.select(sa.func.count())
+                    .select_from(AgentExecution)
+                    .where(
+                        AgentExecution.user_scope == USER_SCOPE,
+                        AgentExecution.source_module == "ui",
+                        AgentExecution.business_request_id == "req-race",
+                    )
+                )
+            ).scalar_one()
+        assert count == 1

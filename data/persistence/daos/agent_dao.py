@@ -241,20 +241,30 @@ class AgentDao(BaseDao):
             occurred_wire = occurred_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
             # 5. execution（root；显示态 queued / 目标覆盖 unknown 初始值，§5.1）。
-            await conn.execute(
-                sa.insert(AgentExecution).values(
-                    user_scope=request.user_scope,
-                    execution_id=execution_id,
-                    session_id=request.session_id,
-                    execution_kind="root",
-                    source_module=request.source_module,
-                    business_request_id=request.business_request_id,
-                    node_id=request.node_id,
-                    display_state="queued",
-                    goal_coverage="unknown",
-                    intent_digest=identity.intent_digest,
+            # 并发窗口防护：intent 唯一部分索引（跨 session 并发受理同一意图，
+            # 各自持不同 session 行锁互不可见）——撞索引即并发首胜者已受理，
+            # 按 INV-01 归 INPUT_CONFLICT（败者重传走步骤 2 查回原回执）。
+            try:
+                await conn.execute(
+                    sa.insert(AgentExecution).values(
+                        user_scope=request.user_scope,
+                        execution_id=execution_id,
+                        session_id=request.session_id,
+                        execution_kind="root",
+                        source_module=request.source_module,
+                        business_request_id=request.business_request_id,
+                        node_id=request.node_id,
+                        display_state="queued",
+                        goal_coverage="unknown",
+                        intent_digest=identity.intent_digest,
+                    )
                 )
-            )
+            except IntegrityError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "same intent accepted concurrently under another execution",
+                    _identity_str(request),
+                ) from exc
 
             # 6. command（保存=committed，待投递=not_delivered，未消费，§9.8）。
             await conn.execute(

@@ -2181,9 +2181,11 @@ def evaluate_data_attempt(
         return "scope_mismatch"
     if binding.valid_from is not None and _parse_wire_moment(binding.valid_from, "$.valid_from") > now:
         return "not_yet_valid"
-    if binding.expires_at is not None and _parse_wire_moment(binding.expires_at, "$.expires_at") <= now:
-        return "expired"
-    return None
+    # §9.8 L1539：期限为 null 表示「期限未核定，不表示永久/不限期」——必须
+    # deny/unknown，不能自动补期限或放行（fail-closed）。
+    if binding.expires_at is None:
+        return "expiry_unverified"
+    return "expired" if _parse_wire_moment(binding.expires_at, "$.expires_at") <= now else None
 
 
 @dataclass(frozen=True)

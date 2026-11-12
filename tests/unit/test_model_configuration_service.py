@@ -1919,7 +1919,7 @@ def _r4_binding_payload(
     *,
     state: str = "approved",
     consent_revision: int = 1,
-    expires_at: str | None = None,
+    expires_at: str | None = "2030-01-01T00:00:00.000000Z",
     valid_from: str = "2026-01-01T00:00:00.000000Z",
 ) -> dict:
     return {
@@ -2222,6 +2222,15 @@ class TestR04AuthorizeDataAttempt:
         receipt = await svc.authorize_data_attempt(_r4_authorization())
         assert receipt.outcome is DataAttemptOutcome.DENY
         assert receipt.reason == "expired"
+
+    @pytest.mark.asyncio
+    async def test_null_expiry_denies(self, r4_service):
+        """§9.8 L1539：expires_at=null=期限未核定（非永久）→ deny，不自动放行。"""
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding(expires_at=None)
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "expiry_unverified"
 
     @pytest.mark.asyncio
     async def test_security_revision_stale_permit_denies(self, r4_service):
