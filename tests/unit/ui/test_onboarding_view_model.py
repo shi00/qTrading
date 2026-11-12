@@ -5,6 +5,7 @@ TDD RED phase: these tests define the expected ViewModel contract.
 
 import asyncio
 import threading
+from collections.abc import Callable
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -1212,6 +1213,241 @@ class TestOnboardingVMSyncOwnership:
         assert await bound_vm.next_step() is True
         assert bound_vm.current_step == 5
         bound_vm.on_complete.assert_not_awaited()
+
+
+# =====================================================================
+# Test: Sync run ownership — OB-02（旧运行迟到进度/结果/异常回写不得覆盖新运行状态）
+# =====================================================================
+
+
+class _StaleCallbackGate:
+    """OB-02 受控闸门：捕获 progress_callback，返回值/异常可配置。
+
+    与 _ControlledSync 不同：旧运行的 progress_callback 引用在释放后仍被保留，
+    可由测试在新运行飞行中手动触发（模拟 DataProcessor 持有旧回调迟到回调）。
+    """
+
+    def __init__(self, result: bool = True, error: BaseException | None = None) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.progress_callback: Callable[[int, int, object], None] | None = None
+        self.stop = AsyncMock()
+        self._result = result
+        self._error = error
+
+    def emit_progress(self, current: int, total: int, message: object) -> None:
+        """经捕获的 progress_callback 转发一次进度（回调未捕获前调用为 no-op）。"""
+        if self.progress_callback is not None:
+            self.progress_callback(current, total, message)
+
+    async def initialize_system(self, **kwargs) -> bool:
+        self.progress_callback = kwargs["progress_callback"]
+        self.started.set()
+        await self.release.wait()
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+class TestOnboardingVMSyncRunOwnership:
+    """OB-02: 同步进度/结果/异常回写先核 run_id 当前代次，导航仍核 epoch（UIR-F02-002）。
+
+    验证标准（M33 检视报告）：Given 两受控运行 A/B，When A 在 B 启动后回调进度/
+    返回成功，Then B 仍显示 B 进度，A 不得写 done；取消后同样保留 cancelled。
+    """
+
+    @staticmethod
+    def _install(bound_vm, gate) -> None:
+        bound_vm._data_processor = gate
+        bound_vm.current_step = 4  # data_sync step
+
+    @staticmethod
+    def _start_second_run(bound_vm):
+        """在 A 飞行中启动受控运行 B，返回 (gate_b, task_b)。"""
+        gate_b = _StaleCallbackGate()
+        bound_vm._data_processor = gate_b
+        task_b = asyncio.create_task(bound_vm.start_sync(quick=True))
+        return gate_b, task_b
+
+    async def test_stale_progress_callback_does_not_overwrite_new_run(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+
+        # A 迟到进度回调不得改写 B 的进度
+        gate_a.emit_progress(75, 100, "stale")
+        assert bound_vm.state.sync_progress == 0.0
+        # B 自己的进度正常更新
+        gate_b.emit_progress(50, 100, "fresh")
+        assert bound_vm.state.sync_progress == 0.5
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到成功：不得写 done/1.0，不得清 B 的忙碌标记，不得导航
+            assert bound_vm.state.sync_progress == 0.5
+            assert bound_vm.sync_in_progress is True
+            assert bound_vm.current_step == 4
+            mock_config_handler.save_config.assert_not_called()
+
+            gate_b.release.set()
+            await task_b
+
+        # B 正常完成仍到 schedule
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.sync_progress == 1.0
+        assert bound_vm.sync_in_progress is False
+
+    async def test_stale_success_does_not_write_done(self, bound_vm, snapshots, mock_config_handler):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到成功不得写 done（B 完成前快照中不存在 done）
+            assert all(
+                s.sync_progress_message is None or s.sync_progress_message.key != "wizard_status_done"
+                for s in snapshots
+            )
+
+            gate_b.release.set()
+            await task_b
+
+        # done 只属于 B 的正常完成
+        assert any(
+            s.sync_progress_message is not None and s.sync_progress_message.key == "wizard_status_done"
+            for s in snapshots
+        )
+        assert bound_vm.current_step == 5
+
+    async def test_stale_success_after_cancel_keeps_cancelled(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        await bound_vm.cancel_sync()
+        assert bound_vm.state.sync_progress_message is not None
+        assert bound_vm.state.sync_progress_message.key == "wizard_status_cancelled"
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+        # A 迟到成功不得用 done 覆盖取消提示
+        assert bound_vm.state.sync_progress_message is not None
+        assert bound_vm.state.sync_progress_message.key == "wizard_status_cancelled"
+        assert bound_vm.state.sync_progress == 0.0
+        assert bound_vm.sync_in_progress is False
+        assert bound_vm.current_step == 4
+        bound_vm.on_complete.assert_not_awaited()
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_stale_result_false_does_not_overwrite_new_run(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate(result=False)
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+        gate_b.emit_progress(50, 100, "fresh")
+        assert bound_vm.state.sync_progress == 0.5
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到失败(result=False)不得把 B 的进度清 0 或写 cancelled
+            assert bound_vm.state.sync_progress == 0.5
+            assert bound_vm.state.sync_progress_message is not None
+            assert bound_vm.state.sync_progress_message.key == "wizard_status_syncing"
+            assert bound_vm.sync_in_progress is True
+            assert bound_vm.current_step == 4
+
+            gate_b.release.set()
+            await task_b
+
+        assert bound_vm.current_step == 5
+        assert bound_vm.sync_in_progress is False
+
+    async def test_stale_exception_does_not_overwrite_new_run(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate(error=RuntimeError("stale boom"))
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+        gate_b.emit_progress(50, 100, "fresh")
+
+        with (
+            patch(
+                "ui.viewmodels.onboarding_view_model.classify_error",
+                return_value={"message_key": "common_err_unknown", "format_args": {}},
+            ),
+            patch(_SLEEP_PATCH, new_callable=AsyncMock),
+        ):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到异常不得写错误状态覆盖 B
+            assert bound_vm.state.sync_progress == 0.5
+            assert bound_vm.state.sync_progress_message is not None
+            assert bound_vm.state.sync_progress_message.key == "wizard_status_syncing"
+            assert bound_vm.sync_in_progress is True
+
+            gate_b.release.set()
+            await task_b
+
+        assert bound_vm.current_step == 5
+        assert bound_vm.sync_in_progress is False
+
+    async def test_progress_callback_after_dispose_does_not_mutate_state(self, bound_vm):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        bound_vm.dispose()
+        default_state = bound_vm.state
+
+        # dispose 后迟到的进度回调不得改写 state
+        gate_a.emit_progress(80, 100, "late")
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+        assert bound_vm.disposed is True
+        assert bound_vm.state == default_state == OnboardingState()
+
+    async def test_cancelled_error_propagates_from_start_sync(self, bound_vm):
+        """R2: 取消无条件传播，不得被 owner 判据吞掉；finally 仍按代次清理忙碌标记。"""
+        gate_a = _StaleCallbackGate(error=asyncio.CancelledError())
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_a.release.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_a
+
+        # R2: 取消无条件传播，不得被 owner 判据吞掉；finally 仍按代次清理忙碌标记
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert bound_vm.sync_in_progress is False
 
 
 # =====================================================================
