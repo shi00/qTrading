@@ -162,15 +162,40 @@ def _qfq_return_pct(
     return (tn_close / basis_close) - 1.0
 
 
+# DLP-RM-02: 比值/收益计算的单一「端点有效性」判据（可复用最小入口）。
+# 进入任何比值前统一校验：可转 float（捕获 None/不可转换/超范围）且有限（math.isfinite，
+# 排除 NaN/±Inf）且为正（> 0）。合法返回 float，非法一律 None。
+# 与个股侧 _qfq_return_pct 的有限正值守卫同口径，供指数端点及其后续复用。
+def _finite_positive_price(value: typing.Any) -> float | None:
+    """端点有效性判据：有限且为正的可转 float 值 → float，否则 None。
+
+    None/NaN/±Inf/0/负值/不可转换类型（含 int 溢出）均视为无效，由调用方按缺失处理，
+    避免把「拒绝的基准」伪装成合法收益（R21）。
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    return numeric
+
+
 # RV-01: 基准侧窗口累计收益（百分比）。个股侧 _qfq_return_pct 返回分数、调用方 ×100，
 # 此处直接返回百分比以便与 t5_pct 同为百分数相减算 alpha。指数点位已含分红除权调整、
 # 无 adj_factor（index_daily 无复权因子），无需复权，直接用窗口首尾收盘价比值。
-# 窗口两端任一 close 缺失/0 均视为窗口无意义，返回 None 由调用方跳过避免标签污染
-# （对抗检视 Blocking-1：仅守卫 t0 会让终点缺失时产生 None 除法 TypeError）。
+# DLP-RM-02: 窗口两端任一 close 缺失/0/负/非有限均视为窗口无意义，返回 None 由调用方
+# 跳过避免标签污染（NaN/Inf 会在比值中产生 NaN 或荒谬的超额收益，负端点产出有限但
+# 无意义的超额）；两端点均合法但比值仍溢出为 ±Inf 时，计算后再做 isfinite 校验兜底。
 def _index_window_return_pct(idx_close_t0: float, idx_close_tn: float) -> float | None:
-    if not idx_close_t0 or not idx_close_tn:
+    start = _finite_positive_price(idx_close_t0)
+    end = _finite_positive_price(idx_close_tn)
+    if start is None or end is None:
         return None
-    return (idx_close_tn / idx_close_t0 - 1.0) * 100.0
+    pct = (end / start - 1.0) * 100.0
+    if not math.isfinite(pct):
+        return None
+    return pct
 
 
 # MAJOR-02: 一字涨停可成交性判定容差。stk_limit 的 up_limit 与个股 open 均为名义价，
@@ -1688,8 +1713,10 @@ class ReviewManager:
         run_review 与 backfill_horizon_returns 共用，口径一致：先查缓存（本地库），
         缺失再降级 Tushare API；API 不可得 / 数据缺失返回 None，由调用方决定跳过。
         RV-01 起取 close（收盘点位）供窗口累计收益换算，RV-02 起同时取 open——
-        窗口起点为 T+1 开盘，open 或 close 任一侧缺失即整点 None（窗口无意义，
-        对抗检视：避免以 (None, close) 进窗口导致 TypeError）。
+        窗口起点为 T+1 开盘，open 或 close 任一侧无效即该来源不可用。
+        DLP-RM-04: 本地「有行但端点 NULL/非有限/非正」与「整帧无行」同属无可用点位，
+        必须继续尝试同日 API，不得提前 return None 短路兜底；本地与 API 两支统一经
+        ``_finite_positive_price`` 校验，只有两端点均有效才返回 (open, close)。
         """
         trade_date_str = trade_date.strftime("%Y%m%d")
         try:
@@ -1698,13 +1725,10 @@ class ReviewManager:
                 trade_date=trade_date,
             )
             if df_idx is not None and not df_idx.empty:
-                raw_open = df_idx.iloc[0].get("open")
-                raw_close = df_idx.iloc[0]["close"]
-                open_ok = raw_open is not None and pd.notna(raw_open) is True
-                close_ok = raw_close is not None and pd.notna(raw_close) is True
-                if open_ok and close_ok:
-                    return (float(raw_open), float(raw_close))
-                return None
+                open_px = _finite_positive_price(df_idx.iloc[0].get("open"))
+                close_px = _finite_positive_price(df_idx.iloc[0].get("close"))
+                if open_px is not None and close_px is not None:
+                    return (open_px, close_px)
             try:
                 df_idx_api = await self.api.get_index_daily(
                     ts_code=index_code,
@@ -1712,12 +1736,10 @@ class ReviewManager:
                     end_date=trade_date_str,
                 )
                 if df_idx_api is not None and not df_idx_api.empty:
-                    raw_open = df_idx_api.iloc[0].get("open")
-                    raw_close = df_idx_api.iloc[0]["close"]
-                    open_ok = raw_open is not None and pd.notna(raw_open) is True
-                    close_ok = raw_close is not None and pd.notna(raw_close) is True
-                    if open_ok and close_ok:
-                        return (float(raw_open), float(raw_close))
+                    open_px = _finite_positive_price(df_idx_api.iloc[0].get("open"))
+                    close_px = _finite_positive_price(df_idx_api.iloc[0].get("close"))
+                    if open_px is not None and close_px is not None:
+                        return (open_px, close_px)
                 return None
             except (ValueError, TypeError, KeyError):
                 return None
