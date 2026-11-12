@@ -394,6 +394,16 @@ def AppLayout() -> ft.Container:
     # --- Pure UI state ---
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
     nav_collapsed, set_nav_collapsed = ft.use_state(False)
+    # APP-F1: current_tab 跨渲染镜像 ref —— use_effect(dependencies=[]) 的长期订阅
+    # 闭包 (_on_navigate → _apply_navigate) 与防抖协程 (_do_tab_switch) 捕获的是
+    # 挂载时 state 快照, 同页判断读闭包 current_tab 会拿到 stale 值 (先切走再导航
+    # 回初始 tab 被误判 same-tab 吞掉)。经 use_ref 每渲染同步最新 tab, 长期闭包
+    # 只读 ref 不读 stale state (与 shortcut_dispatch_holder / navigate_page_holder
+    # 的跨 effect 引用惯例一致)。ref 统一存 int, 避免枚举/整型混比歧义。
+    current_tab_ref: Any = ft.use_ref(None)
+    # 每渲染同步 (hook 体内赋值, 与 nav_toggle_holder.current = collapse_btn 同款);
+    # 兜底覆盖 ref 初始化与其他潜在 state 写入路径, 保证 ref 与 state 渲染值一致。
+    current_tab_ref.current = int(current_tab)
     # UX-01 导航深链: settings 子页请求 (subtab_key, seq), seq 递增使重复深链可重触发
     settings_subtab_request: tuple[str, int] | None = None
     settings_subtab_request, set_settings_subtab_request = ft.use_state(settings_subtab_request)
@@ -411,10 +421,15 @@ def AppLayout() -> ft.Container:
             await asyncio.sleep(DEBOUNCE_MS / 1000)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
-        if new_tab != current_tab:
+        # APP-F1: 同页判断读 ref 最新值, 不读闭包捕获的 stale current_tab
+        # (订阅闭包/旧渲染闭包捕获的是挂载时快照, 先切走再切回会被误判 same-tab 吞掉)
+        if new_tab != current_tab_ref.current:
             tab_name = NavTabs(new_tab).name.lower()
             UILogger.log_action("AppLayout", "Navigate", f"tab={tab_name}")
             set_current_tab(NavTabs(new_tab))
+            # APP-F1: set 后立即同步 ref —— 重渲染调度存在延迟窗口, 窗口内并发
+            # 防抖 task 读 ref 须拿到最新值, 保证「快速连续点击最后一次生效」
+            current_tab_ref.current = new_tab
 
     def _on_nav_change(e: ft.ControlEvent) -> None:
         selected = get_control_attr(e.control, ft.NavigationRail, "selected_index")
@@ -509,8 +524,9 @@ def AppLayout() -> ft.Container:
 
         Note:
             本协程闭包捕获的是订阅时 (use_effect(dependencies=[]) 只执行一次)
-            的 state 快照 → current_tab 读取是 stale 的, 与修复前 _on_navigate
-            行为一致; state 写入保持函数式更新。
+            的 state 快照 → 同页判断禁止读闭包 current_tab (stale, 会把「先切走
+            再导航回初始 tab」误判 same-tab 吞掉), 须经 current_tab_ref 读最新
+            值 (APP-F1); state 写入保持函数式更新。
         """
         # F13: 每次 backtest 导航递增透传请求序号 (函数式更新, 防闭包 stale 快照)。
         # 置于 same-tab 早返回之前 —— 即使回测页已挂载或当前 tab 相同, 新序号仍触发
@@ -537,8 +553,10 @@ def AppLayout() -> ft.Container:
                 NavTabs(target_tab).name.lower(),
             )
             subtab = None
-        if target_tab == int(current_tab):
-            # stale 快照下几乎不命中; 命中时子页请求已先行 set, 深链不被吞
+        # APP-F1: 同页判断读 ref 最新值, 不读订阅闭包捕获的 stale current_tab ——
+        # 旧实现与挂载时 MARKET 快照比较, 先切走再导航回初始 tab 被误判 same-tab 吞掉
+        if target_tab == current_tab_ref.current:
+            # same-tab: 深链/透传请求已先行 set (见上), 不重复切页/日志
             return
         await _do_tab_switch(target_tab)
 
