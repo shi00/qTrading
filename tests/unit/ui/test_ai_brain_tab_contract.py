@@ -358,3 +358,29 @@ class TestValidatePromptOrWarn:
         show_snack.assert_called_once()
         msg = show_snack.call_args.args[0]
         assert "err length max=8000" in msg
+
+
+# ============================================================================
+# UIV-AI-02: local_only_switch 无障碍 label 契约 (无障碍基线 §2.1)
+# ============================================================================
+
+
+class TestLocalOnlySwitchLabelContract:
+    """UIV-AI-02: 仅本地模式开关 label 必须经 i18n key 承载（无障碍基线 §2.1）。
+
+    Switch.label 是锁定版本 Flet 中该控件可读名称的唯一承载；空 label 时
+    读屏无法识别开关用途，旁边 SettingRow title 不构成语义关联。
+    """
+
+    def test_switch_label_uses_i18n_key(self):
+        """DoD: Switch label 必须由 I18n.get("settings_ai_local_only_title") 驱动。"""
+        source = _raw_source()
+        assert 'label=I18n.get("settings_ai_local_only_title")' in source, (
+            "local_only_switch 的 label 须经 I18n.get(settings_ai_local_only_title) 驱动 "
+            "(SettingRow title_key 不构成 Switch 语义关联)"
+        )
+
+    def test_no_empty_switch_label(self):
+        """DoD: 禁止 label="" 的空开关 label（读屏不可识别）。"""
+        code = _code_source()
+        assert 'label=""' not in code, "禁止空 label 开关 (UIV-AI-02, 无障碍基线 §2.1)"

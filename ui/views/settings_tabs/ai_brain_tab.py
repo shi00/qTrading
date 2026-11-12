@@ -643,7 +643,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         ai_settings_vm.set_ai_local_only_mode(get_control_value(e.control, ft.Switch))
 
     local_only_switch = ft.Switch(
-        label="",
+        label=I18n.get("settings_ai_local_only_title"),
         value=ai_settings_state.ai_local_only_mode,
         on_change=safe_on_change(_on_local_only_toggle),
     )
