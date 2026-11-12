@@ -557,6 +557,29 @@ class TestSliderInputTextInput:
 
         callback.assert_called_once_with(10.0)
 
+    def test_text_input_non_divisible_step_never_emits_out_of_range(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """回归 C1：step 不整除区间时不得把越界网格点（1.2）上抛给父级。"""
+        callback = MagicMock()
+        component = make_component(
+            SliderInput,
+            value=0.0,
+            min_val=0,
+            max_val=1,
+            step=0.6,
+            on_change=callback,
+        )
+        run_mount_effects(component)
+        result = render_once(component)
+        text_field = _find_control(result, ft.TextField)
+
+        _invoke(text_field.on_blur, _make_event("1"))
+
+        callback.assert_called_once_with(1.0)
+        assert _find_control(_rerender(component), ft.TextField).value == "1"
+
     @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "infinity", "NaN"])
     def test_non_finite_text_input_restores_value(
         self,
@@ -628,7 +651,7 @@ class TestSliderInputControlledSync:
 
 
 class TestSnapToStepEdgeCases:
-    """_snap_to_step 边界分支补强（L32 step<=0 防御分支）。"""
+    """_snap_to_step 边界分支补强（L32 step<=0 防御分支 + 越界夹紧）。"""
 
     def test_step_zero_returns_clamped_value(self):
         """step<=0 → 返回 clamp 后的值（不做 snap）。"""
@@ -640,3 +663,68 @@ class TestSnapToStepEdgeCases:
         # clamp 仍然生效
         assert _snap_to_step(150, 0, 100, 0) == 100
         assert _snap_to_step(-10, 0, 100, 0) == 0
+
+    def test_non_divisible_step_snaps_max_endpoint_back_into_range(self):
+        """step 不整除区间：max 端点的最近网格点越界 → 端点优先，返回 max。
+
+        min=0, max=1, step=0.6：输入 1 → 网格点 2*0.6=1.2（越界），须返回 1。
+        """
+        assert _snap_to_step(1, 0, 1, 0.6) == 1
+        assert _snap_to_step(3, 2, 3, 0.6) == 3
+        # 略低于 max 但最近网格点仍越界（0.9 → round(1.5)=2 → 1.2）
+        assert _snap_to_step(0.9, 0, 1, 0.6) == 1
+
+    def test_non_divisible_step_negative_range(self):
+        """负数区间：越界网格点同样夹紧回 max 端点，区间内网格点保持不变。"""
+        assert _snap_to_step(0, -1, 0, 0.6) == 0
+        assert _snap_to_step(-10, -100, -10, 0.6) == -10
+        # 区间内正常 snap（-0.4 → (-0.4+1)/0.6=1 → -0.4）
+        assert _snap_to_step(-0.4, -1, 0, 0.6) == -0.4
+
+    def test_min_endpoint_returns_min(self):
+        """min 端点：低于 min 或恰为 min 均返回 min（不做负向偏移）。"""
+        assert _snap_to_step(2, 2, 3, 0.6) == 2
+        assert _snap_to_step(1, 2, 3, 0.6) == 2
+
+    def test_step_larger_than_range_stays_in_range(self):
+        """step 大于区间：最近网格点只有 min，结果仍须落在 [min, max]。"""
+        assert _snap_to_step(1, 0, 1, 5) == 0
+        assert _snap_to_step(0.5, 0, 1, 5) == 0
+
+    def test_endpoint_floating_point_noise(self):
+        """端点浮点噪声（0.1+0.2）→ round(...,10) 修正后等于精确端点。"""
+        assert _snap_to_step(0.1 + 0.2, 0, 0.3, 0.1) == 0.3
+        assert _snap_to_step(0.30000000000000004, 0, 0.3, 0.1) == 0.3
+
+    def test_snap_keeps_round_precision_for_small_step(self):
+        """小步长精度：0.035 网格点经 round(...,10) 返回精确 0.105，不被夹紧漂移。"""
+        assert _snap_to_step(0.1, 0, 1, 0.035) == 0.105
+        assert _snap_to_step(0.105, 0, 1, 0.035) == 0.105
+
+    @pytest.mark.parametrize(
+        ("value", "min_val", "max_val", "step"),
+        [
+            (1.0, 0, 1, 0.6),
+            (0.9999999, 0, 1, 0.3),
+            (-0.0001, 0, 1, 0.3),
+            (0.3, 0, 0.3, 0.1),
+            (1.2, 0, 1, 0.6),
+            (5.0, -5, 5, 0.7),
+            (-5.0, -5, 5, 0.7),
+            (100, 0, 10, 3),
+            (1, 0, 1, 5),
+            (0.035, 0, 0.1, 0.035),
+        ],
+    )
+    def test_result_always_within_range(
+        self,
+        value: float,
+        min_val: float,
+        max_val: float,
+        step: float,
+    ):
+        """不变量：任意输入下返回值恒在 [min_val, max_val] 且不超过 10 位小数。"""
+        result = _snap_to_step(value, min_val, max_val, step)
+
+        assert min_val <= result <= max_val
+        assert result == round(result, 10)
