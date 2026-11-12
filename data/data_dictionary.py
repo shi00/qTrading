@@ -532,6 +532,63 @@ TABLE_DEFINITIONS = {
         "alias": "tab_ai_usage_monthly",
         "desc": "统一模型月度用量汇总（S3：scenario/connection 两 scope 不相加，§10）",
     },
+    # Agent 运行时应用表（C-01，14 张；物理契约正本 = Agent 详细设计 §9.2—§9.11）
+    "agent_session": {
+        "alias": "tab_agent_session",
+        "desc": "研究会话主表（Agent §9.3：目录元数据/草稿CAS/聊天分支来源；正文清理后保tombstone身份）",
+    },
+    "agent_execution": {
+        "alias": "tab_agent_execution",
+        "desc": "研究执行（Agent §9.4：root/leaf/comparison_lane 三类身份；根意图键部分唯一；累计计数与可靠事件水位）",
+    },
+    "agent_asset_version": {
+        "alias": "tab_agent_asset_version",
+        "desc": "受管资产版本（Agent §9.10：source/skill/role/prompt 等冻结快照；tombstone 身份，非第二设置库）",
+    },
+    "agent_round": {
+        "alias": "tab_agent_round",
+        "desc": "研究轮次（Agent §9.5：每轮独立 workflow；冻结输入/计划版本；活跃轮部分唯一防双有效轮）",
+    },
+    "agent_message": {
+        "alias": "tab_agent_message",
+        "desc": "公开消息与可靠事件统一存储（Agent §9.6：会话/执行双序号去重；隐藏推理不入公开历史）",
+    },
+    "agent_artifact": {
+        "alias": "tab_agent_artifact",
+        "desc": "成果与计划版本（Agent §9.7：复合PK不原位覆盖；result_digest 活动期摘要/清理后 tombstone）",
+    },
+    "agent_command": {
+        "alias": "tab_agent_command",
+        "desc": "命令与草稿转移 fence（Agent §9.8：保存/投递/消费三态分列；受理幂等键唯一）",
+    },
+    "agent_decision": {
+        "alias": "tab_agent_decision",
+        "desc": "待处理决定与精确许可（Agent §9.8：工具 grant 与 data_consent v1 绑定，不建第二授权库）",
+    },
+    "agent_operation": {
+        "alias": "tab_agent_operation",
+        "desc": "操作事实（Agent §9.9：phase/effect/io 三独立维度；模型账本经 invocation 关联不重复写费用）",
+    },
+    "agent_body_payload": {
+        "alias": "tab_agent_body_payload",
+        "desc": "同库不可变正文单块 BYTEA（Agent §9.10.1：owner 三元组唯一；编码/长度/digest 写读核验）",
+    },
+    "agent_source_link": {
+        "alias": "tab_agent_source_link",
+        "desc": "来源-消费者谱系边（Agent §9.10：六类 consumer 的 NULL 组合 CHECK；禁用继承与派生闭包核边）",
+    },
+    "agent_resource_slot": {
+        "alias": "tab_agent_resource_slot",
+        "desc": "资源票据（Agent §9.11：全局 2总/4叶 + global_guard 预分配；未确认退出不放空）",
+    },
+    "agent_read_mark": {
+        "alias": "tab_agent_read_mark",
+        "desc": "阅读水位标记（Agent §9.11：last/batch/postponed 三单调水位，乱序取 max；精确已读目标集合）",
+    },
+    "agent_cleanup_job": {
+        "alias": "tab_agent_cleanup_job",
+        "desc": "清理任务（Agent §9.11：固定身份集合与 fence；核销计数与错误分类，不用 LIKE 前缀）",
+    },
 }
 
 
