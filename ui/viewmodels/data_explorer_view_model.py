@@ -6,6 +6,7 @@ import re
 import typing
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -58,11 +59,17 @@ class SqlErrorInfo:
 
     - ``message_key``/``format_args``: 由 get_error_message_key 产出, View 按当前 locale 翻译
     - ``raw_detail``: DB 原始错误(DataSanitizer 脱敏), View 折叠展示供排查
+    - ``format_args``: 构造时复制并只读包装, 防止消费方原地修改旧快照绕过 _set_state (L771)
     """
 
     message_key: str
     format_args: Mapping[str, str] = field(default_factory=dict)
     raw_detail: str | None = None
+
+    def __post_init__(self) -> None:
+        # frozen 仅冻结属性引用; format_args 若直接持有可变 dict, 消费方可原地修改旧快照。
+        # 复制后经 MappingProxyType 只读包装, 保留 Mapping 读取语义与 ** 展开兼容性。
+        object.__setattr__(self, "format_args", MappingProxyType(dict(self.format_args)))
 
 
 @dataclass(frozen=True)
