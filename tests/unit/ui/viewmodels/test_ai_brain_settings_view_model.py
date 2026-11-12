@@ -367,6 +367,51 @@ class TestCancelledSaveLifecycle:
         assert vm.state.save_state == SAVE_SUCCESS
 
     @pytest.mark.asyncio
+    async def test_cancelled_save_persist_non_system_exception_logs_sanitized_error(
+        self, mock_config_handler, mock_thread_pool
+    ):
+        """取消后写盘线程抛非 system 级异常：回调走 logger.error 分支且消息脱敏 (R9)。"""
+        sensitive_path = "C:\\Users\\secret\\api_key.txt"
+        started = asyncio.Event()
+        release = asyncio.Event()
+        mock_thread_pool.run_async = AsyncMock(side_effect=self._gated_run_factory(started, release))
+        # TimeoutError 消息含 "timeout" → classify_severity 归为非 system (recoverable)，
+        # 命中回调的非 system logger.error 分支（区别于 OSError 磁盘错误的 critical 分支）。
+        mock_config_handler.save_ai_tuning_and_prompts.side_effect = TimeoutError(
+            f"connection timeout accessing {sensitive_path}"
+        )
+
+        vm = _make_vm(mock_config_handler)
+        save_task = asyncio.create_task(vm.save_ai_settings())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        save_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await save_task
+
+        with patch("ui.viewmodels.ai_brain_settings_view_model.logger") as mock_logger:
+            release.set()
+            for _ in range(100):
+                if vm.state.save_state != SAVE_SAVING:
+                    break
+                await asyncio.sleep(0)
+
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.saved_revision == 0
+        # 非 system 级严重度必须走 logger.error（而非 critical），且消息已脱敏 (R9)
+        assert mock_logger.error.called, "非 system 级异常应记录 logger.error"
+        assert not mock_logger.critical.called, "非 system 级异常不应升级为 critical"
+        for call in mock_logger.error.call_args_list:
+            assert sensitive_path not in str(call.args), f"R9 违规：原始路径出现在 logger 参数中: {call.args}"
+
+        # 收束后可再次保存
+        mock_config_handler.save_ai_tuning_and_prompts.side_effect = None
+        mock_config_handler.save_ai_tuning_and_prompts.return_value = True
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            assert await vm.save_ai_settings() is True
+        assert vm.state.save_state == SAVE_SUCCESS
+
+    @pytest.mark.asyncio
     async def test_finalize_handles_aborted_persist_task(self, mock_config_handler):
         """persist_task 自身被取消（loop 关闭收尾等场景）：回调仍收束非 saving。"""
         from dataclasses import replace
@@ -384,6 +429,36 @@ class TestCancelledSaveLifecycle:
         vm._finalize_cancelled_save_persist(aborted_task, 0)
         assert vm.state.save_state == SAVE_ERROR
         assert vm.state.saved_revision == 0
+
+    @pytest.mark.asyncio
+    async def test_finalize_non_exception_base_error_sanitized(self, mock_config_handler):
+        """persist_task 抛非 Exception 的 BaseException：走 logger.error 分支且消息脱敏 (R9)。"""
+        from dataclasses import replace
+
+        sensitive_path = "C:\\Users\\secret\\api_key.txt"
+        vm = _make_vm(mock_config_handler)
+        vm._state = replace(vm._state, save_state=SAVE_SAVING)
+
+        # 非致命信号的自定义 BaseException（KeyboardInterrupt/SystemExit 会逃逸
+        # asyncio task 中断测试进程，不可用于此场景）。
+        class _PersistBaseError(BaseException):
+            pass
+
+        async def _base_err() -> bool:
+            raise _PersistBaseError(f"user interrupt while writing {sensitive_path}")
+
+        base_err_task = asyncio.create_task(_base_err())
+        await asyncio.gather(base_err_task, return_exceptions=True)
+        assert not base_err_task.cancelled()
+
+        with patch("ui.viewmodels.ai_brain_settings_view_model.logger") as mock_logger:
+            vm._finalize_cancelled_save_persist(base_err_task, 0)
+
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.saved_revision == 0
+        assert mock_logger.error.called, "非 Exception BaseException 应记录 logger.error"
+        for call in mock_logger.error.call_args_list:
+            assert sensitive_path not in str(call.args), f"R9 违规：原始路径出现在 logger 参数中: {call.args}"
 
 
 # --- F05 草稿编辑版本 ↔ 保存完成绑定 ---

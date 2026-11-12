@@ -338,9 +338,12 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                             exc_info=exc,
                         )
                 else:
+                    # R9: 非 Exception 的 BaseException 消息同样经脱敏后才进入日志
+                    # （sanitize_error 签名限 Exception | str，此处经 str() 传入）。
+                    sanitized_base = DataSanitizer.sanitize_error(str(exc))
                     logger.error(
                         "[AIBrainSettingsVM] cancelled save persist failed with non-exception base error: %s",
-                        str(exc),
+                        sanitized_base,
                         exc_info=exc,
                     )
             else:
