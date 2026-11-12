@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -67,6 +67,9 @@ from core.agent_types import (
     EventReadQuery,
     ExecutionSummary,
     GrantRevisionRequest,
+    HistoryHit,
+    HistoryPage,
+    HistoryQuery,
     MarkAnswerDeliveredRequest,
     MessagePage,
     MessagePageItem,
@@ -93,6 +96,7 @@ from core.agent_types import (
     decode_command_receipt,
     decode_decision_summary,
     decode_execution_summary,
+    decode_history_hit,
     decode_json_doc,
     decode_message_page_item,
     decode_operation_summary,
@@ -106,6 +110,9 @@ from core.agent_types import (
     encode_data_consent_binding,
     encode_data_consent_claim,
     encode_submission_receipt,
+    compute_history_query_digest,
+    parse_history_cursor,
+    validate_history_query,
     derive_accept_identity,
     derive_data_consent_command_identity,
     derive_data_consent_revoke_identity,
@@ -3025,4 +3032,520 @@ class AgentDao(BaseDao):
             observation=Observation(
                 reliable=True, last_verified_at=self._opt_wire_time(execution_row.last_verified_at)
             ),
+        )
+
+    # ------------------------------------------------------------------
+    # §4.2 R02 历史搜索（C-03-3b）
+    # ------------------------------------------------------------------
+
+    _HISTORY_SUMMARY_MAX_CHARS: Final = 200
+
+    async def _history_session_exists(self, conn: AsyncConnection, user_scope: str, session_id: str) -> None:
+        row = (
+            await conn.execute(
+                sa.select(sa.literal(1)).where(
+                    AgentSession.user_scope == user_scope,
+                    AgentSession.session_id == session_id,
+                )
+            )
+        ).first()
+        if row is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "session not found in user scope", f"{user_scope}/{session_id}"
+            )
+
+    async def _history_fingerprint(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        query: HistoryQuery,
+    ) -> str:
+        """覆盖域修订指纹（§4.2 L404/L442）：既有会话身份 + revision/事件水位。
+
+        scope 决定覆盖域成员：current_session/current_child 取主 session 行与
+        其全部 execution 成员（id/revision/event_seq）；all_saved 取用户域全部
+        session 成员（不含 execution 展开——目录级指纹，成员增删/水位变化即漂移）。
+        """
+
+        session_ids: list[str]
+        if query.scope == "all_saved":
+            rows = (
+                await conn.execute(sa.select(AgentSession.session_id).where(AgentSession.user_scope == user_scope))
+            ).all()
+            session_ids = [row.session_id for row in rows]
+            members_wire: list[dict[str, Any]] = [
+                {"session_id": sid, "revision": 0, "event_seq": 0} for sid in sorted(session_ids)
+            ]
+            # all_saved 成员按 session 粒度：取各行 revision/event_seq
+            detail_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentSession.session_id,
+                        AgentSession.revision,
+                        AgentSession.event_seq,
+                    ).where(AgentSession.user_scope == user_scope)
+                )
+            ).all()
+            members_wire = [
+                {"session_id": row.session_id, "revision": row.revision, "event_seq": row.event_seq}
+                for row in sorted(detail_rows, key=lambda r: r.session_id)
+            ]
+        else:
+            await self._history_session_exists(conn, user_scope, query.session_id or "")
+            srow = (
+                await conn.execute(
+                    sa.select(
+                        AgentSession.session_id,
+                        AgentSession.revision,
+                        AgentSession.event_seq,
+                    ).where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == query.session_id,
+                    )
+                )
+            ).first()
+            assert srow is not None
+            exec_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.execution_id,
+                        AgentExecution.revision,
+                        AgentExecution.event_seq,
+                    ).where(
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.session_id == query.session_id,
+                    )
+                )
+            ).all()
+            members_wire = [
+                {"session_id": srow.session_id, "revision": srow.revision, "event_seq": srow.event_seq},
+                *[
+                    {"execution_id": row.execution_id, "revision": row.revision, "event_seq": row.event_seq}
+                    for row in sorted(exec_rows, key=lambda r: r.execution_id)
+                ],
+            ]
+        return sha256_hex(json_doc({"scope": query.scope, "members": members_wire}))
+
+    def _history_hit_from_row(self, row: Any, identity_str: str) -> HistoryHit:
+        """消息/成果命中行 → HistoryHit（严格解码，坏行 fail-closed）。
+
+        UNION 后统一行：summary_source=消息 body_text / summary=成果 summary 列。
+        """
+
+        hit_kind = row.hit_kind
+        sort_moment = _wire_time(row.sort_moment)
+        if hit_kind == "message":
+            summary = row.summary_source or ""
+            wire = {
+                "hit_kind": "message",
+                "session_id": row.session_id,
+                "sort_moment": sort_moment,
+                "created_at": _wire_time(row.created_at),
+                "session_seq": row.session_seq,
+                "execution_id": row.execution_id,
+                "node_id": row.node_id,
+                "round_id": row.round_id,
+                "message_id": row.anchor_id,
+                "artifact_id": None,
+                "artifact_version": None,
+                "role": row.role,
+                "payload_kind": row.payload_kind,
+                "artifact_kind": None,
+                "summary_text": summary[: self._HISTORY_SUMMARY_MAX_CHARS],
+            }
+        else:
+            summary = row.summary or ""
+            wire = {
+                "hit_kind": "artifact",
+                "session_id": row.session_id,
+                "sort_moment": sort_moment,
+                "created_at": _wire_time(row.created_at),
+                "session_seq": None,
+                "execution_id": row.execution_id,
+                "node_id": None,
+                "round_id": row.round_id,
+                "message_id": None,
+                "artifact_id": row.anchor_id,
+                "artifact_version": row.artifact_version,
+                "role": None,
+                "payload_kind": None,
+                "artifact_kind": row.artifact_kind,
+                "summary_text": summary[: self._HISTORY_SUMMARY_MAX_CHARS],
+            }
+        try:
+            return decode_history_hit(wire, "$.hits")
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted history row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    @staticmethod
+    def _history_date_bounds(query: HistoryQuery) -> tuple[datetime, datetime] | None:
+        """date_from/date_to（含当天，UTC）→ [from, to+1d) 半开区间。"""
+
+        if query.date_from is None or query.date_to is None:
+            return None
+        day_from = datetime.strptime(query.date_from, "%Y-%m-%d").replace(tzinfo=UTC)
+        day_to = datetime.strptime(query.date_to, "%Y-%m-%d").replace(tzinfo=UTC) + timedelta(days=1)
+        return day_from, day_to
+
+    def _history_sort_column(self, time_basis: str) -> Any:
+        """time_basis → 排序键列（§4.2 L431；工程裁决：message basis 下 artifact
+        行以 created_at 承载排序——里程碑检视复核点）。"""
+
+        if time_basis == "created":
+            return "created_at"
+        if time_basis == "updated":
+            return "updated_at"
+        return "message_moment"
+
+    async def search_history(self, query: HistoryQuery, *, user_scope: str) -> HistoryPage:
+        """历史搜索（§4.2 R02 read_history + §9.13）：固定上界内规范扫描。
+
+        - 受理校验：validate_history_query（R02 三范围/值集/游标语法）→ INPUT_INVALID；
+        - 游标翻页：``h:{上界ts}:{排序键ts}:{锚ID}``——上界绑定翻页（续读复用首读
+          上界，不因数据增长漏复检）；锚行缺失视为覆盖域已被修订 → REVISION_CONFLICT
+          （R02，里程碑检视复核点：fingerprint 端到端比对由服务层承载）；
+        - 扫描：消息与成果 UNION 前分别过滤后统一排序（sort_moment + 锚 ID keyset，
+          newest_first DESC/oldest_first ASC）；query_text 占位 LIKE（C-03-4 全文
+          索引接入前）；type_filter main=会话级（execution_id IS NULL）/child=执行内；
+          state_filter 作用于 execution.display_state（值集未冻结，留痕）；date 窗口
+          作用于 time_basis 对应列；agent_filter execution_agent 按执行三元组限定
+          （role_identity 由消息 role_id 承载，成果不命中——里程碑检视复核点）；
+        - 摘要不复制完整正文：summary_text 截断 200 字符（正文经准确地址按需读取）；
+        - fingerprint：覆盖域成员/水位 CanonicalJson 后 sha256（每次读取即时计算）。
+        """
+
+        self._check_engine()
+        identity_str = f"{user_scope}/history"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
+        try:
+            validate_history_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity_str
+            ) from exc
+        query_digest = compute_history_query_digest(query)
+
+        cursor_bound: datetime | None = None
+        cursor_sort_moment: datetime | None = None
+        cursor_anchor: str | None = None
+        if query.cursor is not None:
+            upper_text, sort_text, anchor_id = parse_history_cursor(query.cursor)
+            cursor_bound = datetime.strptime(upper_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+            cursor_sort_moment = datetime.strptime(sort_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+            cursor_anchor = anchor_id
+        fixed_upper = cursor_bound if cursor_bound is not None else datetime.now(UTC)
+        upper_wire = _wire_time(fixed_upper)
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="REPEATABLE READ")
+            async with conn.begin():
+                # ---- 范围受理与覆盖域核对（R02 精确用户域）----
+                if query.scope == "current_session":
+                    await self._history_session_exists(conn, user_scope, query.session_id or "")
+                elif query.scope == "current_child":
+                    child_target = query.child_target
+                    assert child_target is not None  # validate_history_query R02 已核对（fail-closed）
+                    await self._history_session_exists(conn, user_scope, query.session_id or "")
+                    child_row = (
+                        await conn.execute(
+                            sa.select(
+                                AgentExecution.parent_execution_id,
+                                AgentExecution.node_id,
+                                AgentExecution.session_id,
+                            ).where(
+                                AgentExecution.user_scope == user_scope,
+                                AgentExecution.execution_id == child_target.execution_id,
+                            )
+                        )
+                    ).first()
+                    if child_row is None or child_row.session_id != query.session_id:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "child target execution not in session",
+                            identity_str,
+                        )
+                    if (
+                        child_row.parent_execution_id != child_target.parent_execution_id
+                        or child_row.node_id != child_target.node_id
+                    ):
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID, "child target ancestry mismatch", identity_str
+                        )
+                if query.round_selection.kind == "exact":
+                    round_row = (
+                        await conn.execute(
+                            sa.select(sa.literal(1)).where(
+                                AgentRound.user_scope == user_scope,
+                                AgentRound.execution_id == query.round_selection.execution_id,  # pyright: ignore[reportOptionalSubscript]
+                                AgentRound.round_id == query.round_selection.round_id,  # pyright: ignore[reportOptionalSubscript]
+                            )
+                        )
+                    ).first()
+                    if round_row is None:
+                        code = (
+                            AgentErrorCode.REVISION_CONFLICT
+                            if query.cursor is not None
+                            else AgentErrorCode.INPUT_INVALID
+                        )
+                        raise AgentServiceError(code, "exact round not found in user scope", identity_str)
+
+                # ---- 锚行核对（翻页）----
+                # 两表独立 EXISTS（CROSS JOIN 空 artifact 表会使 or_ 组合恒空）
+                if cursor_anchor is not None:
+                    message_anchor = (
+                        await conn.execute(
+                            sa.select(sa.literal(1)).where(
+                                AgentMessage.user_scope == user_scope,
+                                AgentMessage.message_id == cursor_anchor,
+                            )
+                        )
+                    ).first()
+                    artifact_anchor = (
+                        await conn.execute(
+                            sa.select(sa.literal(1)).where(
+                                AgentArtifact.user_scope == user_scope,
+                                AgentArtifact.artifact_id == cursor_anchor,
+                            )
+                        )
+                    ).first()
+                    if message_anchor is None and artifact_anchor is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.REVISION_CONFLICT,
+                            "history cursor anchor no longer exists; coverage was revised",
+                            identity_str,
+                        )
+
+                # ---- 消息分支 ----
+                message_moment = (
+                    AgentMessage.occurred_at
+                    if query.time_basis == "message"
+                    else (AgentMessage.updated_at if query.time_basis == "updated" else AgentMessage.created_at)
+                )
+                message_cols = [
+                    message_moment.label("sort_moment"),
+                    AgentMessage.created_at.label("created_at"),
+                    AgentMessage.session_id.label("session_id"),
+                    AgentMessage.session_seq.label("session_seq"),
+                    AgentMessage.execution_id.label("execution_id"),
+                    AgentMessage.node_id.label("node_id"),
+                    AgentMessage.round_id.label("round_id"),
+                    AgentMessage.message_id.label("anchor_id"),
+                    sa.literal("message").label("hit_kind"),
+                    AgentMessage.role.label("role"),
+                    AgentMessage.payload_kind.label("payload_kind"),
+                    sa.literal(None).label("artifact_kind"),
+                    sa.literal(None).label("artifact_version"),
+                    AgentMessage.body_text.label("summary_source"),
+                    sa.literal(None).label("summary"),
+                ]
+                message_stmt = sa.select(*message_cols).where(
+                    AgentMessage.user_scope == user_scope,
+                    message_moment <= fixed_upper,
+                )
+                if query.scope in ("current_session", "current_child"):
+                    message_stmt = message_stmt.where(AgentMessage.session_id == query.session_id)
+                if query.scope == "current_child":
+                    child_target_msg = query.child_target
+                    assert child_target_msg is not None  # validate_history_query R02 已核对（fail-closed）
+                    message_stmt = message_stmt.where(
+                        AgentMessage.execution_id == child_target_msg.execution_id,
+                        AgentMessage.node_id == child_target_msg.node_id,
+                    )
+                if query.round_selection.kind == "exact":
+                    message_stmt = message_stmt.where(
+                        AgentMessage.execution_id == query.round_selection.execution_id,
+                        AgentMessage.round_id == query.round_selection.round_id,
+                    )
+                if query.type_filter == "main":
+                    message_stmt = message_stmt.where(AgentMessage.execution_id.is_(None))
+                elif query.type_filter == "child":
+                    message_stmt = message_stmt.where(AgentMessage.execution_id.is_not(None))
+                if query.message_role_filter is not None:
+                    message_stmt = message_stmt.where(AgentMessage.role == query.message_role_filter)
+                agent_filter = query.agent_filter
+                if agent_filter is not None and agent_filter.kind == "role_identity":
+                    message_stmt = message_stmt.where(
+                        AgentMessage.role_id == agent_filter.role_id,
+                    )
+                    if agent_filter.version_selection == "exact":
+                        message_stmt = message_stmt.where(AgentMessage.role_version == agent_filter.role_version)
+                elif agent_filter is not None:
+                    message_stmt = message_stmt.where(
+                        AgentMessage.execution_id == agent_filter.execution_id,
+                        AgentMessage.node_id == agent_filter.node_id,
+                        AgentMessage.round_id == agent_filter.round_id,
+                    )
+                if query.query_text:
+                    message_stmt = message_stmt.where(AgentMessage.body_text.like(f"%{query.query_text}%"))
+                if query.state_filter is not None:
+                    message_stmt = message_stmt.where(
+                        sa.exists().where(
+                            sa.and_(
+                                AgentExecution.user_scope == user_scope,
+                                AgentExecution.execution_id == AgentMessage.execution_id,
+                                AgentExecution.display_state == query.state_filter,
+                            )
+                        )
+                    )
+                date_bounds = self._history_date_bounds(query)
+                if date_bounds is not None:
+                    day_from, day_to_excl = date_bounds
+                    message_stmt = message_stmt.where(message_moment >= day_from, message_moment < day_to_excl)
+                if cursor_sort_moment is not None and cursor_anchor is not None:
+                    if query.sort == "newest_first":
+                        message_stmt = message_stmt.where(
+                            sa.tuple_(message_moment, AgentMessage.message_id)
+                            < sa.tuple_(
+                                sa.bindparam("h_m_moment", cursor_sort_moment),
+                                sa.bindparam("h_m_anchor", cursor_anchor),
+                            )
+                        )
+                    else:
+                        message_stmt = message_stmt.where(
+                            sa.tuple_(message_moment, AgentMessage.message_id)
+                            > sa.tuple_(
+                                sa.bindparam("h_m_moment", cursor_sort_moment),
+                                sa.bindparam("h_m_anchor", cursor_anchor),
+                            )
+                        )
+
+                # ---- 成果分支 ----
+                artifact_moment = (
+                    AgentArtifact.created_at
+                    if query.time_basis == "message"
+                    else (AgentArtifact.updated_at if query.time_basis == "updated" else AgentArtifact.created_at)
+                )
+                artifact_cols = [
+                    artifact_moment.label("sort_moment"),
+                    AgentArtifact.created_at.label("created_at"),
+                    AgentArtifact.session_id.label("session_id"),
+                    sa.literal(None).label("session_seq"),
+                    AgentArtifact.execution_id.label("execution_id"),
+                    sa.literal(None).label("node_id"),
+                    AgentArtifact.round_id.label("round_id"),
+                    AgentArtifact.artifact_id.label("anchor_id"),
+                    sa.literal("artifact").label("hit_kind"),
+                    sa.literal(None).label("role"),
+                    sa.literal(None).label("payload_kind"),
+                    AgentArtifact.artifact_kind.label("artifact_kind"),
+                    AgentArtifact.artifact_version.label("artifact_version"),
+                    sa.literal(None).label("summary_source"),
+                    AgentArtifact.summary.label("summary"),
+                ]
+                artifact_stmt = sa.select(*artifact_cols).where(
+                    AgentArtifact.user_scope == user_scope,
+                    artifact_moment <= fixed_upper,
+                )
+                if query.scope in ("current_session", "current_child"):
+                    artifact_stmt = artifact_stmt.where(AgentArtifact.session_id == query.session_id)
+                if query.scope == "current_child":
+                    child_target_art = query.child_target
+                    assert child_target_art is not None  # validate_history_query R02 已核对（fail-closed）
+                    artifact_stmt = artifact_stmt.where(
+                        AgentArtifact.execution_id == child_target_art.execution_id,
+                    )
+                if query.round_selection.kind == "exact":
+                    artifact_stmt = artifact_stmt.where(
+                        AgentArtifact.execution_id == query.round_selection.execution_id,
+                        AgentArtifact.round_id == query.round_selection.round_id,
+                    )
+                if query.type_filter in ("main", "child"):
+                    wanted = query.type_filter == "main"
+                    artifact_stmt = artifact_stmt.where(
+                        AgentArtifact.execution_id.is_(None) if wanted else AgentArtifact.execution_id.is_not(None)
+                    )
+                if agent_filter is not None and agent_filter.kind == "role_identity":
+                    # role_identity 以消息 role_id 承载，成果不命中（里程碑检视复核点）
+                    artifact_stmt = artifact_stmt.where(sa.literal(False))
+                elif agent_filter is not None:
+                    artifact_stmt = artifact_stmt.where(
+                        AgentArtifact.execution_id == agent_filter.execution_id,
+                        AgentArtifact.round_id == agent_filter.round_id,
+                    )
+                if query.query_text:
+                    artifact_stmt = artifact_stmt.where(
+                        sa.or_(
+                            AgentArtifact.summary.like(f"%{query.query_text}%"),
+                            AgentArtifact.body_text.like(f"%{query.query_text}%"),
+                        )
+                    )
+                if query.state_filter is not None:
+                    artifact_stmt = artifact_stmt.where(
+                        sa.exists().where(
+                            sa.and_(
+                                AgentExecution.user_scope == user_scope,
+                                AgentExecution.execution_id == AgentArtifact.execution_id,
+                                AgentExecution.display_state == query.state_filter,
+                            )
+                        )
+                    )
+                date_bounds = self._history_date_bounds(query)
+                if date_bounds is not None:
+                    day_from, day_to_excl = date_bounds
+                    artifact_stmt = artifact_stmt.where(artifact_moment >= day_from, artifact_moment < day_to_excl)
+                if cursor_sort_moment is not None and cursor_anchor is not None:
+                    if query.sort == "newest_first":
+                        artifact_stmt = artifact_stmt.where(
+                            sa.tuple_(artifact_moment, AgentArtifact.artifact_id)
+                            < sa.tuple_(
+                                sa.bindparam("h_a_moment", cursor_sort_moment),
+                                sa.bindparam("h_a_anchor", cursor_anchor),
+                            )
+                        )
+                    else:
+                        artifact_stmt = artifact_stmt.where(
+                            sa.tuple_(artifact_moment, AgentArtifact.artifact_id)
+                            > sa.tuple_(
+                                sa.bindparam("h_a_moment", cursor_sort_moment),
+                                sa.bindparam("h_a_anchor", cursor_anchor),
+                            )
+                        )
+
+                # ---- 统一排序 ----
+                union_sub = sa.union_all(message_stmt.self_group(), artifact_stmt.self_group()).subquery()
+                sort_moment_col = union_sub.c.sort_moment
+                anchor_col = union_sub.c.anchor_id
+                direction = sort_moment_col.desc() if query.sort == "newest_first" else sort_moment_col.asc()
+                union_stmt = sa.select(
+                    union_sub.c.sort_moment,
+                    union_sub.c.created_at,
+                    union_sub.c.session_id,
+                    union_sub.c.session_seq,
+                    union_sub.c.execution_id,
+                    union_sub.c.node_id,
+                    union_sub.c.round_id,
+                    union_sub.c.anchor_id,
+                    union_sub.c.hit_kind,
+                    union_sub.c.role,
+                    union_sub.c.payload_kind,
+                    union_sub.c.artifact_kind,
+                    union_sub.c.artifact_version,
+                    union_sub.c.summary_source,
+                    union_sub.c.summary,
+                ).order_by(direction, anchor_col.desc() if query.sort == "newest_first" else anchor_col.asc())
+                union_rows = (await conn.execute(union_stmt.limit(query.limit + 1))).all()
+                has_more = len(union_rows) > query.limit
+                union_rows = union_rows[: query.limit]
+                hits = tuple(self._history_hit_from_row(row, identity_str) for row in union_rows)
+                fingerprint = await self._history_fingerprint(conn, user_scope=user_scope, query=query)
+
+        next_cursor: str | None = None
+        if has_more and union_rows:
+            last = union_rows[-1]
+            next_cursor = f"h:{upper_wire}:{_wire_time(last.sort_moment)}:{last.anchor_id}"
+        return HistoryPage(
+            query_digest=query_digest,
+            fixed_upper_bound=upper_wire,
+            revision_fingerprint=fingerprint,
+            hits=hits,
+            next_cursor=next_cursor,
+            read_moment=_utc_now_wire(),
         )
