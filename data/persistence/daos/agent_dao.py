@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +38,7 @@ from core.agent_types import (
     AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
+    AgentValidationError,
     AnswerReceipt,
     BindActualInputReceipt,
     BindActualInputRequest,
@@ -55,9 +57,15 @@ from core.agent_types import (
     DataConsentState,
     DeliveryFact,
     DeliveryState,
+    EventFact,
+    EventKind,
     EventPayloadKind,
+    EventPage,
+    EventReadQuery,
     GrantRevisionRequest,
     MarkAnswerDeliveredRequest,
+    RecordEventRequest,
+    ResearchEvent,
     ReviseQueuedRequest,
     RevisionReceipt,
     SaveAnswerRequest,
@@ -67,6 +75,8 @@ from core.agent_types import (
     ToolGrantState,
     decode_data_consent_binding,
     decode_command_receipt,
+    decode_json_doc,
+    decode_research_event,
     decode_submission_receipt,
     encode_command_receipt,
     encode_data_consent_binding,
@@ -75,6 +85,7 @@ from core.agent_types import (
     derive_accept_identity,
     derive_data_consent_command_identity,
     derive_data_consent_revoke_identity,
+    derive_event_identity,
     evaluate_data_attempt,
     json_doc,
     sha256_hex,
@@ -130,6 +141,34 @@ def _wire_to_dt(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+
+
+def _event_from_row(row: Any) -> Any:
+    """AgentMessage 行 → ResearchEvent 包络（严格结构层解码）。"""
+
+    return decode_research_event(
+        {
+            "schema_version": 1,
+            "event_id": row.event_id,
+            "user_scope": row.user_scope,
+            "session_id": row.session_id,
+            "execution_id": row.execution_id,
+            "node_id": row.node_id,
+            "round_id": row.round_id,
+            "input_revision": row.input_revision,
+            "session_seq": row.session_seq,
+            "execution_seq": row.execution_seq,
+            "occurred_at": _wire_time(row.occurred_at),
+            "committed_at": _wire_time(row.committed_at),
+            "event_kind": EventKind(row.event_kind).value,
+            "subject_id": row.subject_id,
+            "subject_revision": row.subject_revision,
+            "payload_kind": row.payload_kind,
+            "payload_canonical_json": json_doc(row.payload) if row.payload is not None else json_doc({}),
+            "native_fact_ref": row.native_fact_ref,
+        },
+        "$",
+    )
 
 
 class AgentDao(BaseDao):
@@ -1760,3 +1799,305 @@ class AgentDao(BaseDao):
                 )
             )
             return DataConsentClaimFact(claim=claim, replayed=False)
+
+    # ------------------------------------------------------------------
+    # C-03-1：可靠事件写入与读取（§4.4 包络 + §9.6 统一事件存储）
+    # ------------------------------------------------------------------
+
+    async def record_event(self, request: RecordEventRequest) -> EventFact:
+        """可靠事件登记事务（§4.4/§9.6）：session/execution 行锁下分配单调水位
+        并落 agent_message 行，**单个显式事务**。
+
+        - ``session_seq = session.event_seq + 1``（行锁内分配；写回 GREATEST
+          保持单调，R22）；执行事件另分配 ``execution_seq`` 并同步
+          ``execution.event_seq``；
+        - ``event_id`` 由 (execution/round/node/native_event_id) 规范组合派生；
+          同 (session_id, event_id) 同载荷 → 重放返回原事实（replayed=True），
+          异载荷 → ``INPUT_CONFLICT``（§9.6 去重身份语义）；
+        - 执行事件必须同时有 round/node（§9.6），round 须归属该 execution；
+        - ``body_text``/``body_ref`` 互斥（§9.6）；committed_at 取库时钟。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（会话/执行/轮缺失、身份不一致、
+                载荷非规范 JSON、正文互斥破坏）/ INPUT_CONFLICT（同事件身份异
+                载荷）/ PERSISTENCE_UNAVAILABLE（其余约束失败）。
+        """
+
+        self._check_engine()
+        identity_str = f"{request.user_scope}/{request.session_id}/{request.native_event_id}"
+        # 入口校验（身份派生 + 包络结构 + 行载荷一致性）。
+        if not isinstance(request.message_id, str) or request.message_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "message_id must be non-empty text", identity_str)
+        if request.execution_id is not None:
+            if request.round_id is None or request.node_id is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "execution event requires round and node identity",
+                    identity_str,
+                )
+        if request.body_text is not None and request.body_ref is not None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "body_text and body_ref are mutually exclusive",
+                identity_str,
+            )
+        try:
+            decode_json_doc(request.payload_canonical_json)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, exc.code, identity_str) from exc
+        event_id = derive_event_identity(
+            execution_id=request.execution_id,
+            round_id=request.round_id,
+            node_id=request.node_id,
+            native_event_id=request.native_event_id,
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. session 行锁（水位单调 + session_seq 分配串行化）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq)
+                    .where(
+                        AgentSession.user_scope == request.user_scope,
+                        AgentSession.session_id == request.session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session does not exist", identity_str)
+            execution_row = None
+            if request.execution_id is not None:
+                # 2. execution 行锁 + 轮归属核定（§9.6 node 与 round 所属 execution 核定）。
+                execution_row = (
+                    await conn.execute(
+                        sa.select(AgentExecution.event_seq)
+                        .where(
+                            AgentExecution.user_scope == request.user_scope,
+                            AgentExecution.execution_id == request.execution_id,
+                        )
+                        .with_for_update()
+                    )
+                ).first()
+                if execution_row is None:
+                    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution does not exist", identity_str)
+                round_row = (
+                    await conn.execute(
+                        sa.select(AgentRound.execution_id).where(
+                            AgentRound.user_scope == request.user_scope,
+                            AgentRound.round_id == request.round_id,
+                        )
+                    )
+                ).first()
+                if round_row is None or round_row.execution_id != request.execution_id:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "round does not belong to execution",
+                        identity_str,
+                    )
+            # 3. 水位分配（行锁内单调 +1）。
+            new_session_seq = session_row.event_seq + 1
+            new_execution_seq = execution_row.event_seq + 1 if execution_row is not None else None
+            occurred = _wire_to_dt(request.occurred_at)
+            if occurred is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "occurred_at must be UTC wire text", identity_str)
+            committed = datetime.now(UTC)
+            try:
+                # 唯一约束冲突分类需要回查原始行：用 SAVEPOINT 包裹插入，
+                # 冲突时仅回滚 savepoint，外层事务保持可用（§9.13 原子协议）。
+                async with conn.begin_nested():
+                    await conn.execute(
+                        sa.insert(AgentMessage).values(
+                            user_scope=request.user_scope,
+                            message_id=request.message_id,
+                            session_id=request.session_id,
+                            execution_id=request.execution_id,
+                            round_id=request.round_id,
+                            node_id=request.node_id,
+                            event_id=event_id,
+                            session_seq=new_session_seq,
+                            execution_seq=new_execution_seq,
+                            event_kind=request.event_kind.value,
+                            payload_kind=request.payload_kind,
+                            subject_id=request.subject_id,
+                            subject_revision=request.subject_revision,
+                            role=request.role.value if request.role is not None else None,
+                            role_id=request.role_id,
+                            role_version=request.role_version,
+                            body_text=request.body_text,
+                            body_ref=request.body_ref,
+                            payload=json.loads(request.payload_canonical_json)
+                            if request.payload_canonical_json != ""
+                            else None,
+                            input_revision=request.input_revision,
+                            occurred_at=occurred,
+                            committed_at=committed,
+                            native_fact_ref=request.native_fact_ref,
+                            tool_call_id=request.tool_call_id,
+                            search_text=request.search_text,
+                        )
+                    )
+            except IntegrityError as exc:
+                # 4. 去重身份冲突分类（§9.13）：按 SQLSTATE 分——23505 唯一索引
+                # （重放/冲突）；23503 FK（INPUT_INVALID）；其余 PERSISTENCE_UNAVAILABLE。
+                sqlstate = getattr(exc.orig, "sqlstate", None) or ""
+                if sqlstate != "23505":
+                    if sqlstate == "23503":
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "event references missing session/execution/round",
+                            identity_str,
+                        ) from exc
+                    raise AgentServiceError(
+                        AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                        "event persistence failed",
+                        identity_str,
+                    ) from exc
+                existing = (
+                    await conn.execute(
+                        sa.select(
+                            AgentMessage.message_id,
+                            AgentMessage.event_id,
+                            AgentMessage.session_seq,
+                            AgentMessage.execution_seq,
+                            AgentMessage.subject_id,
+                            AgentMessage.subject_revision,
+                            AgentMessage.payload_kind,
+                            AgentMessage.payload,
+                            AgentMessage.committed_at,
+                        ).where(
+                            AgentMessage.user_scope == request.user_scope,
+                            AgentMessage.session_id == request.session_id,
+                            AgentMessage.event_id == event_id,
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                        "event persistence conflict without recoverable original",
+                        identity_str,
+                    ) from exc
+                same_payload = (
+                    existing.subject_id == request.subject_id
+                    and existing.subject_revision == request.subject_revision
+                    and existing.payload_kind == request.payload_kind
+                    and json_doc(existing.payload) == json_doc(json.loads(request.payload_canonical_json))
+                )
+                if not same_payload:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "same event identity with different payload",
+                        identity_str,
+                    ) from exc
+                return EventFact(
+                    message_id=existing.message_id,
+                    event_id=existing.event_id,
+                    session_seq=existing.session_seq,
+                    execution_seq=existing.execution_seq,
+                    session_event_seq=session_row.event_seq,
+                    execution_event_seq=execution_row.event_seq if execution_row is not None else None,
+                    committed_at=_wire_time(existing.committed_at),
+                    replayed=True,
+                )
+            # 5. 水位写回（GREATEST 单调，R22；行锁下无竞态）。
+            await conn.execute(
+                sa.update(AgentSession)
+                .where(
+                    AgentSession.user_scope == request.user_scope,
+                    AgentSession.session_id == request.session_id,
+                )
+                .values(
+                    event_seq=sa.func.greatest(AgentSession.event_seq, new_session_seq),
+                    updated_at=committed,
+                )
+            )
+            if execution_row is not None and new_execution_seq is not None:
+                await conn.execute(
+                    sa.update(AgentExecution)
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                    )
+                    .values(
+                        event_seq=sa.func.greatest(AgentExecution.event_seq, new_execution_seq),
+                        updated_at=committed,
+                    )
+                )
+            return EventFact(
+                message_id=request.message_id,
+                event_id=event_id,
+                session_seq=new_session_seq,
+                execution_seq=new_execution_seq,
+                session_event_seq=new_session_seq,
+                execution_event_seq=new_execution_seq,
+                committed_at=_wire_time(committed),
+                replayed=False,
+            )
+
+    async def read_events(self, query: EventReadQuery) -> EventPage:
+        """可靠事件按序读取（§4.5 追平/补齐）：after_seq 起升序分页。
+
+        每行严格解码为 ResearchEvent 包络（坏载荷 fail-closed OPERATION_UNKNOWN，
+        R21）；role/body/search 等行级扩展字段不在包络内，由读取面任务承载。
+        """
+
+        self._check_engine()
+        identity_str = f"{query.user_scope}/{query.session_id}"
+        if not isinstance(query.user_scope, str) or query.user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
+        if not isinstance(query.session_id, str) or query.session_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session_id must be non-empty text", identity_str)
+        if isinstance(query.after_seq, bool) or not isinstance(query.after_seq, int) or query.after_seq < 0:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "after_seq must be >=0 int", identity_str)
+        if isinstance(query.limit, bool) or not isinstance(query.limit, int) or not 1 <= query.limit <= 500:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "limit must be within 1..500", identity_str)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentMessage.user_scope,
+                        AgentMessage.message_id,
+                        AgentMessage.session_id,
+                        AgentMessage.execution_id,
+                        AgentMessage.node_id,
+                        AgentMessage.round_id,
+                        AgentMessage.event_id,
+                        AgentMessage.session_seq,
+                        AgentMessage.execution_seq,
+                        AgentMessage.event_kind,
+                        AgentMessage.payload_kind,
+                        AgentMessage.subject_id,
+                        AgentMessage.subject_revision,
+                        AgentMessage.input_revision,
+                        AgentMessage.occurred_at,
+                        AgentMessage.committed_at,
+                        AgentMessage.native_fact_ref,
+                        AgentMessage.payload,
+                    )
+                    .where(
+                        AgentMessage.user_scope == query.user_scope,
+                        AgentMessage.session_id == query.session_id,
+                        AgentMessage.session_seq > query.after_seq,
+                    )
+                    .order_by(AgentMessage.session_seq.asc())
+                    .limit(query.limit + 1)
+                )
+            ).all()
+        has_more = len(rows) > query.limit
+        rows = rows[: query.limit]
+        events: list[ResearchEvent] = []
+        for row in rows:
+            try:
+                events.append(_event_from_row(row))
+            except (AgentValidationError, ValueError) as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"persisted event cannot be reliably decoded: {exc}",
+                    identity_str,
+                ) from exc
+        last_seq = events[-1].session_seq if events else query.after_seq
+        return EventPage(events=tuple(events), last_seq=last_seq, has_more=has_more)

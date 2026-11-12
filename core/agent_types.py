@@ -2355,3 +2355,327 @@ class DataConsentClaimFact:
 
     claim: DataConsentClaim
     replayed: bool
+
+
+# ---------------------------------------------------------------------------
+# §4.4 可靠事件统一包络（C-03-1）
+# ---------------------------------------------------------------------------
+
+
+class EventKind(Enum):
+    """可靠事件类型（§4.4 枚举表，唯一 wire 拼写；临时 TextDelta 不入本表）。"""
+
+    SESSION_CHANGED = "session_changed"
+    DRAFT_SAVED = "draft_saved"
+    EXECUTION_ACCEPTED = "execution_accepted"
+    INPUT_BOUND = "input_bound"
+    EXECUTION_CHANGED = "execution_changed"
+    NODE_CHANGED = "node_changed"
+    PUBLIC_MESSAGE_SAVED = "public_message_saved"
+    SOURCE_READ_SAVED = "source_read_saved"
+    SOURCE_DISABLED = "source_disabled"
+    TOOL_CALL_RECORDED = "tool_call_recorded"
+    TOOL_RESULT_SAVED = "tool_result_saved"
+    DECISION_REQUIRED = "decision_required"
+    COMMAND_CHANGED = "command_changed"
+    ARTIFACT_SAVED = "artifact_saved"
+    USAGE_CHANGED = "usage_changed"
+    READ_MARK_SAVED = "read_mark_saved"
+    CLEANUP_CHANGED = "cleanup_changed"
+
+
+class MessageRole(Enum):
+    """公开消息角色（§9.6 role 列：user/assistant/tool/public_status）。"""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+    PUBLIC_STATUS = "public_status"
+
+
+@dataclass(frozen=True)
+class ResearchEvent:
+    """可靠事件统一包络（§4.4，18 键 wire 工程冻结）。
+
+    - ``event_id`` 由准确 execution/round/node/原生事件 ID 规范组合生成
+      （§9.6：原公开事实去重身份，不跨 round 当全局 ID）；
+    - ``session_seq`` 为会话内单调水位（UNIQUE(session_id,session_seq)），
+      ``execution_seq`` 仅执行事件有（UNIQUE(execution_id,execution_seq)）；
+    - ``occurred_at``/``committed_at`` 原事实时刻与保存时刻分列；
+    - ``payload_canonical_json`` 为版本化事件载荷（payload_kind 指明结构；
+      各 kind 载荷 schema 随生产者事务分片冻结，包络层只校验规范 JSON）；
+    - 临时事件（TextDelta 等）没有可靠 session_seq，不得进入本包络。
+    """
+
+    schema_version: int
+    event_id: str
+    user_scope: str
+    session_id: str
+    execution_id: str | None
+    node_id: str | None
+    round_id: str | None
+    input_revision: int | None
+    session_seq: int
+    execution_seq: int | None
+    occurred_at: str
+    committed_at: str
+    event_kind: EventKind
+    subject_id: str
+    subject_revision: int
+    payload_kind: str
+    payload_canonical_json: CanonicalJson
+    native_fact_ref: str | None
+
+
+_RESEARCH_EVENT_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "event_id",
+        "user_scope",
+        "session_id",
+        "execution_id",
+        "node_id",
+        "round_id",
+        "input_revision",
+        "session_seq",
+        "execution_seq",
+        "occurred_at",
+        "committed_at",
+        "event_kind",
+        "subject_id",
+        "subject_revision",
+        "payload_kind",
+        "payload_canonical_json",
+        "native_fact_ref",
+    }
+)
+
+
+def derive_event_identity(
+    *,
+    execution_id: str | None,
+    round_id: str | None,
+    node_id: str | None,
+    native_event_id: str,
+) -> str:
+    """事件去重身份（§9.6）：execution/round/node/原生事件 ID 规范组合。
+
+    执行事件四段全非空（原生 ID 不跨 round 当全局 ID，组合保证同一原生事实
+    在准确轮内单身份）；纯 session 事件无执行身份，用 ``session_event`` 段型
+    组合（stable_id parts 拒空串，故执行/会话两种段型天然不碰撞）。
+    """
+
+    if not isinstance(native_event_id, str) or native_event_id == "":
+        _fail("invalid_identity", "$.native_event_id")
+    if execution_id is None:
+        return stable_id("event", ["session_event", native_event_id])
+    if not execution_id or not round_id or not node_id:
+        _fail("invalid_identity", "$.execution_id")
+    return stable_id("event", [execution_id, round_id, node_id, native_event_id])
+
+
+def validate_research_event(event: ResearchEvent) -> None:
+    """包络结构校验（执行事件身份一致性 + 水位基线，§9.6）。
+
+    - 执行事件（execution_id 非 None）必须同时有 round_id/node_id/execution_seq
+      （§9.6「执行事件必须同时有」）；
+    - ``execution_seq`` 与 ``execution_id`` 严格同存同缺（UNIQUE 语义）；
+    - 纯 session 事件不得携带执行身份（round/node/execution_seq 须 None）；
+    - session_seq ≥1、subject_revision ≥1（§3.1 单调水位起点 1）；
+    - payload 必须是可解析规范 JSON（结构 schema 随生产者冻结，包络层不猜）。
+    """
+
+    _require_str(event.event_id, "$.event_id")
+    _require_str(event.user_scope, "$.user_scope")
+    _require_str(event.session_id, "$.session_id")
+    _require_str(event.subject_id, "$.subject_id")
+    _require_str(event.payload_kind, "$.payload_kind")
+    if not isinstance(event.event_kind, EventKind):
+        _fail("invalid_type", "$.event_kind")
+    if isinstance(event.schema_version, bool) or event.schema_version != 1:
+        _fail("invalid_schema_version", "$.schema_version")
+    if isinstance(event.session_seq, bool) or not isinstance(event.session_seq, int) or event.session_seq < 1:
+        _fail("invalid_revision", "$.session_seq")
+    if (
+        isinstance(event.subject_revision, bool)
+        or not isinstance(event.subject_revision, int)
+        or event.subject_revision < 1
+    ):
+        _fail("invalid_revision", "$.subject_revision")
+    if event.input_revision is not None:
+        if (
+            isinstance(event.input_revision, bool)
+            or not isinstance(event.input_revision, int)
+            or event.input_revision < 1
+        ):
+            _fail("invalid_revision", "$.input_revision")
+    require_utc_timestamp(event.occurred_at, "$.occurred_at")
+    require_utc_timestamp(event.committed_at, "$.committed_at")
+    if event.execution_id is not None:
+        _require_str(event.execution_id, "$.execution_id")
+        if event.round_id is None or event.node_id is None or event.execution_seq is None:
+            _fail("identity_mismatch", "$.execution_id")
+        _require_str(event.round_id, "$.round_id")
+        _require_str(event.node_id, "$.node_id")
+        if isinstance(event.execution_seq, bool) or not isinstance(event.execution_seq, int) or event.execution_seq < 1:
+            _fail("invalid_revision", "$.execution_seq")
+    else:
+        if event.execution_seq is not None or event.round_id is not None or event.node_id is not None:
+            _fail("identity_mismatch", "$.execution_id")
+    # event_id 与 (execution/round/node/native_event_id) 组合派生一致性需原生
+    # 事件 ID（不在包络 wire 内），由调用方经 validate_event_identity 复核；
+    # 纯 session 事件组合为空段，包络层无独立重算路径。
+    # payload 必须可解析且为规范 JSON（decode_json_doc 拒重复键/NaN/非有限数）。
+    decode_json_doc(event.payload_canonical_json)
+    if event.native_fact_ref is not None:
+        _require_str(event.native_fact_ref, "$.native_fact_ref")
+
+
+def validate_event_identity(event: ResearchEvent, native_event_id: str) -> None:
+    """event_id 与 (execution/round/node/native_event_id) 组合派生一致性（§9.6）。"""
+
+    expected = derive_event_identity(
+        execution_id=event.execution_id,
+        round_id=event.round_id,
+        node_id=event.node_id,
+        native_event_id=native_event_id,
+    )
+    if event.event_id != expected:
+        _fail("identity_mismatch", "$.event_id")
+
+
+def encode_research_event(event: ResearchEvent) -> dict[str, Any]:
+    """ResearchEvent → wire dict（18 键全量）。"""
+
+    return cast(dict[str, Any], _to_jsonable(event, "$"))
+
+
+def decode_research_event(value: object, path: str) -> ResearchEvent:
+    """严格解码事件包络（全键必填禁额外键；JSONB 重排键重读保同身份）。
+
+    执行事件身份一致性需原生事件 ID（不在包络 wire 内），由调用方以
+    :func:`validate_event_identity` 复核；本解码只做结构层。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _RESEARCH_EVENT_KEYS, path)
+    schema_version = value["schema_version"]
+    if isinstance(schema_version, bool) or schema_version != 1:
+        _fail("invalid_schema_version", f"{path}.schema_version")
+    try:
+        event_kind = EventKind(value["event_kind"])
+    except ValueError:
+        _fail("invalid_event_kind", f"{path}.event_kind")
+    session_seq = value["session_seq"]
+    if isinstance(session_seq, bool) or not isinstance(session_seq, int) or session_seq < 1:
+        _fail("invalid_revision", f"{path}.session_seq")
+    subject_revision = value["subject_revision"]
+    if isinstance(subject_revision, bool) or not isinstance(subject_revision, int) or subject_revision < 1:
+        _fail("invalid_revision", f"{path}.subject_revision")
+    input_revision = value["input_revision"]
+    if input_revision is not None and (
+        isinstance(input_revision, bool) or not isinstance(input_revision, int) or input_revision < 1
+    ):
+        _fail("invalid_revision", f"{path}.input_revision")
+    execution_id = value["execution_id"]
+    execution_seq = value["execution_seq"]
+    if execution_id is not None:
+        if execution_seq is None:
+            _fail("identity_mismatch", f"{path}.execution_seq")
+    elif execution_seq is not None:
+        _fail("identity_mismatch", f"{path}.execution_seq")
+    execution_seq_v = None
+    if execution_seq is not None:
+        if isinstance(execution_seq, bool) or not isinstance(execution_seq, int) or execution_seq < 1:
+            _fail("invalid_revision", f"{path}.execution_seq")
+        execution_seq_v = execution_seq
+    native_fact_ref = value["native_fact_ref"]
+    if native_fact_ref is not None:
+        native_fact_ref = _require_str(native_fact_ref, f"{path}.native_fact_ref")
+    return ResearchEvent(
+        schema_version=1,
+        event_id=_require_str(value["event_id"], f"{path}.event_id"),
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        execution_id=None if execution_id is None else _require_str(execution_id, f"{path}.execution_id"),
+        node_id=None if value["node_id"] is None else _require_str(value["node_id"], f"{path}.node_id"),
+        round_id=None if value["round_id"] is None else _require_str(value["round_id"], f"{path}.round_id"),
+        input_revision=input_revision,
+        session_seq=session_seq,
+        execution_seq=execution_seq_v,
+        occurred_at=require_utc_timestamp(value["occurred_at"], f"{path}.occurred_at"),
+        committed_at=require_utc_timestamp(value["committed_at"], f"{path}.committed_at"),
+        event_kind=event_kind,
+        subject_id=_require_str(value["subject_id"], f"{path}.subject_id"),
+        subject_revision=subject_revision,
+        payload_kind=_require_str(value["payload_kind"], f"{path}.payload_kind"),
+        payload_canonical_json=_require_str(value["payload_canonical_json"], f"{path}.payload_canonical_json"),
+        native_fact_ref=native_fact_ref,
+    )
+
+
+@dataclass(frozen=True)
+class RecordEventRequest:
+    """可靠事件登记请求（C-03-1）：生产者事务侧事实 + 行载荷全量字段。
+
+    - ``message_id``：公开消息或事件稳定身份（调用方 stable_id 派生，PK）；
+    - ``body_text``/``body_ref`` 互斥（§9.6）；``search_text`` 仅可读公开文本；
+    - ``committed_at`` 由 DAO 事务取库时钟，不在请求内（保存时刻=提交事实）。
+    """
+
+    user_scope: str
+    session_id: str
+    message_id: str
+    native_event_id: str
+    event_kind: EventKind
+    subject_id: str
+    subject_revision: int
+    payload_kind: str
+    payload_canonical_json: CanonicalJson
+    occurred_at: str
+    execution_id: str | None = None
+    node_id: str | None = None
+    round_id: str | None = None
+    input_revision: int | None = None
+    role: MessageRole | None = None
+    role_id: str | None = None
+    role_version: str | None = None
+    body_text: str | None = None
+    body_ref: str | None = None
+    search_text: str | None = None
+    native_fact_ref: str | None = None
+    tool_call_id: str | None = None
+
+
+@dataclass(frozen=True)
+class EventFact:
+    """事件落定事实：水位为事务内分配后的新值（单调，R22）。"""
+
+    message_id: str
+    event_id: str
+    session_seq: int
+    execution_seq: int | None
+    session_event_seq: int
+    execution_event_seq: int | None
+    committed_at: str
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class EventReadQuery:
+    """可靠事件读取查询（§4.5 追平/补齐）：after_seq 起按序分页。"""
+
+    user_scope: str
+    session_id: str
+    after_seq: int
+    limit: int = 50
+
+
+@dataclass(frozen=True)
+class EventPage:
+    """事件页：``events`` 按 session_seq 升序；``has_more`` 指示继续追平。"""
+
+    events: tuple[ResearchEvent, ...]
+    last_seq: int
+    has_more: bool
