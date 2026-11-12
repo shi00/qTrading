@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import functools
 import json
 import logging
 import math
@@ -25,6 +26,7 @@ from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.loop_local import get_loop_local
 from utils.time_utils import get_now, parse_date, to_date
 from utils.prompt_guard import neutralize_external_text
 
@@ -33,6 +35,31 @@ logger = logging.getLogger(__name__)
 # CRITICAL-02：策略结果中承载结构化归因的列名（``strategies.attribution.ATTRIBUTION_COLUMN``
 # 的镜像常量）。R1 禁止 data 层 import strategies 层，故此处复制字面量，两侧修改须同步。
 _ATTRIBUTION_COLUMN = "_filter_attribution"
+
+
+def _serialize_review_cycle[**P, R](
+    func: typing.Callable[P, typing.Awaitable[R]],
+) -> typing.Callable[P, typing.Awaitable[R]]:
+    """按事件循环串行化复盘入口的「读候选 → 预取 → 计算 → 写库」整个周期（DLP-RM-01）。
+
+    ``run_review`` / ``backfill_horizon_returns`` / ``backfill_t1_returns`` 并发交错时，
+    A 读到旧快照后暂停、B 回填并定稿同一记录，A 恢复后仍以旧快照写
+    ``t5_pct=None / alpha=None / label=DRAW``，把已成熟记录回退（DAO 侧仅有
+    ``guard_t1``，无「不得回退成熟值」条件）。
+
+    锁经 ``get_loop_local`` 绑定当前事件循环（R11，不得作类属性跨循环复用），
+    仅在**单进程单事件循环**内互斥；不提供跨进程/跨事件循环的写入安全，亦不改变
+    DAO 幂等语义或公开签名。锁位于 ``@log_async_operation`` 内侧，排队等待会计入
+    该入口的耗时统计。
+    """
+
+    @functools.wraps(func)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        lock = get_loop_local("review_manager_cycle_lock", asyncio.Lock)
+        async with lock:
+            return await func(*args, **kwargs)
+
+    return wrapper
 
 
 def serialize_exec_warnings(warnings: Sequence[Message] | None) -> list[dict[str, typing.Any]] | None:
@@ -212,6 +239,7 @@ class ReviewManager:
         operation_name="t1_review",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
+    @_serialize_review_cycle
     async def run_review(self):
         """
         Main entry point: Review all pending predictions.
@@ -513,6 +541,7 @@ class ReviewManager:
         logger.info("[Review] Completed. Updated %s records.", len(updates))
 
     @log_async_operation(operation_name="t5_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
+    @_serialize_review_cycle
     async def backfill_horizon_returns(self, horizon: int = 5) -> int:
         """阶段 2：回填所有已满 5 个交易日、但 T+5 仍为 NULL 的复盘记录。
 
@@ -803,6 +832,7 @@ class ReviewManager:
         return total
 
     @log_async_operation(operation_name="t1_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
+    @_serialize_review_cycle
     async def backfill_t1_returns(self) -> int:
         """阶段 1b：回填所有缺 T+1 的 PENDING/NULL 复盘记录（BIZ-03）。
 

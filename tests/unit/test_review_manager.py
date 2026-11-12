@@ -16,6 +16,8 @@ from data.constants import (
     BOARD_BENCHMARK_CHINEXT,
     BOARD_BENCHMARK_STAR,
     DEFAULT_BENCHMARK_INDEX,
+    REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_PENDING,
     REVIEW_STATUS_T1_DONE,
     REVIEW_STATUS_UNTRADABLE,
     board_benchmark_for,
@@ -5381,3 +5383,332 @@ class TestReviewManagerMajor02Tradability:
         rm.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
         with pytest.raises(EngineDisposedError):
             await rm._prefetch_limit_up_cache(datetime.date(2024, 6, 10), datetime.date(2024, 6, 17))
+
+
+class _FakeCycleTxn:
+    """最小异步事务上下文：仅供 ReviewManager 的 engine.begin() 批写路径使用。"""
+
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeCycleEngine:
+    def begin(self):
+        return _FakeCycleTxn()
+
+
+class TestReviewCycleSerialization:
+    """DLP-RM-01: 三个复盘入口的「读候选 → 预取 → 计算 → 写库」整周期必须串行。
+
+    并发交错时（A 读旧快照后暂停，B 回填并定稿同一记录），A 恢复后仍以旧快照写
+    ``t5_pct=None / alpha=None / label=DRAW``，把已成熟记录回退。本组用例以内存行 +
+    忠实复刻 DAO WHERE 守卫的写路径验证：周期互斥、不回退、B 在 A 结束后重新读候选，
+    以及异常/取消释放锁与顺序调用三通路正常。
+    """
+
+    _OLD_QUOTES = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000001.SZ"],
+            "trade_date": ["20240615", "20240616"],
+            "close": [10.0, 10.5],
+            "open": [10.0, 10.0],
+            "pct_chg": [0.0, 5.0],
+        }
+    )
+    _FULL_QUOTES = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * 6,
+            "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+            "close": [10.0, 10.5, 10.6, 10.7, 10.8, 11.0],
+            "open": [10.0] * 6,
+            "pct_chg": [0.0, 5.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    _OLD_DATES = [datetime.date(2024, 6, 15), datetime.date(2024, 6, 16)]
+    _FULL_DATES = [datetime.date(2024, 6, day) for day in (15, 16, 17, 18, 19, 20)]
+
+    @staticmethod
+    def _new_store() -> dict[int, dict]:
+        return {
+            1: {
+                "id": 1,
+                "ts_code": "000001.SZ",
+                "trade_date": datetime.date(2024, 6, 15),
+                "review_status": REVIEW_STATUS_PENDING,
+                "t1_pct": None,
+                "t5_pct": None,
+                "alpha": None,
+                "prediction_result": None,
+                "index_pct": None,
+                "benchmark_code": None,
+            }
+        }
+
+    @staticmethod
+    def _apply_update(store: dict[int, dict], events: list[str]):
+        """复刻 update_prediction_result 的 SQL 语义（含 guard_t1，仅无「拒绝回退成熟值」条件）。"""
+
+        async def _update(
+            record_id,
+            pct,
+            label,
+            *,
+            t1_price=None,
+            t5_pct=None,
+            t5_price=None,
+            index_pct=None,
+            benchmark_code=None,
+            alpha=None,
+            review_status=None,
+            conn=None,
+            guard_t1=False,
+        ):
+            row = store[record_id]
+            if guard_t1 and row["t1_pct"] is not None:
+                return
+            events.append("write_update")
+            row["t1_pct"] = pct
+            row["t5_pct"] = t5_pct
+            row["alpha"] = alpha
+            row["prediction_result"] = label
+            row["t5_price"] = t5_price
+            row["t1_price"] = t1_price
+            row["index_pct"] = index_pct
+            if benchmark_code is not None:
+                row["benchmark_code"] = benchmark_code
+            row["review_status"] = (
+                review_status if review_status is not None else ("COMPLETED" if t5_pct is not None else "T1_DONE")
+            )
+
+        return _update
+
+    @staticmethod
+    def _apply_t5(store: dict[int, dict], events: list[str]):
+        """复刻 backfill_t5_prediction 的 WHERE t5_pct IS NULL 幂等语义。"""
+
+        async def _backfill(
+            record_id, t5_pct, t5_price, *, label=None, index_pct=None, benchmark_code=None, alpha=None, conn=None
+        ):
+            row = store[record_id]
+            if row["t5_pct"] is not None:
+                return
+            events.append("write_t5")
+            row["t5_pct"] = t5_pct
+            row["t5_price"] = t5_price
+            row["review_status"] = REVIEW_STATUS_COMPLETED if label is not None else REVIEW_STATUS_T1_DONE
+            if label is not None:
+                row["prediction_result"] = label
+            if index_pct is not None:
+                row["index_pct"] = index_pct
+            if benchmark_code is not None:
+                row["benchmark_code"] = benchmark_code
+            if alpha is not None:
+                row["alpha"] = alpha
+
+        return _backfill
+
+    def _make_rm(self, mock_cm, store: dict[int, dict], events: list[str], quotes_getter, dates, *, with_pending=True):
+        """构造注入内存行存储的 ReviewManager；写路径走真实 _batch_* 方法与假 DAO。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.engine = _FakeCycleEngine()
+        dao = MagicMock()
+        mock_cache.screener_dao = dao
+        dao.update_prediction_result = AsyncMock(side_effect=self._apply_update(store, events))
+        dao.backfill_t5_prediction = AsyncMock(side_effect=self._apply_t5(store, events))
+
+        async def _unfilled_t1(limit=2000):
+            events.append("read_t1")
+            return [
+                {"id": rid, "ts_code": r["ts_code"], "trade_date": r["trade_date"]}
+                for rid, r in store.items()
+                if r["review_status"] in (REVIEW_STATUS_PENDING, None) and r["t1_pct"] is None
+            ]
+
+        async def _unfilled_t5(limit=2000):
+            events.append("read_t5")
+            return [
+                {"id": rid, "ts_code": r["ts_code"], "trade_date": r["trade_date"]}
+                for rid, r in store.items()
+                if r["review_status"] == REVIEW_STATUS_T1_DONE and r["t5_pct"] is None
+            ]
+
+        async def _unlabeled(limit=2000):
+            return [
+                {"id": rid, "ts_code": r["ts_code"], "trade_date": r["trade_date"], "t5_pct": r["t5_pct"]}
+                for rid, r in store.items()
+                if r["review_status"] == REVIEW_STATUS_T1_DONE and r["t5_pct"] is not None and r["alpha"] is None
+            ]
+
+        dao.get_unfilled_t1_predictions = AsyncMock(side_effect=_unfilled_t1)
+        dao.get_unfilled_horizon_predictions = AsyncMock(side_effect=_unfilled_t5)
+        dao.get_unlabeled_predictions = AsyncMock(side_effect=_unlabeled)
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=quotes_getter)
+
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240615", "ai_score": 80, "ai_reason": "t"}]
+            )
+            if with_pending
+            else pd.DataFrame()
+        )
+        rm._market_trade_dates = AsyncMock(return_value=list(dates))
+        rm._resolve_benchmark = AsyncMock(return_value="000300.SH")
+        rm._prefetch_benchmark_caches = AsyncMock(return_value=({}, {}))
+        rm._prefetch_limit_up_cache = AsyncMock(return_value={})
+        rm._window_index_pct = AsyncMock(return_value=1.5)
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_concurrent_run_review_and_backfill_do_not_regress_matured_values(self, mock_cm, mock_tc):
+        """A 读旧行情后暂停、B 回填定稿、A 恢复写库：最终 T+5/alpha/COMPLETED 不得回退。
+
+        有锁时 B 必须等 A 周期结束才读候选（read_t5 在 A 的 write_update 之后），
+        A 的 staged DRAW 写入先落库，B 再以 T+5 超额定稿覆盖为 WIN/COMPLETED。
+        """
+        store = self._new_store()
+        events: list[str] = []
+        a_reached = asyncio.Event()
+        a_may_finish = asyncio.Event()
+
+        async def _a_quotes(**kwargs):
+            events.append("read_quotes_a")
+            a_reached.set()
+            await a_may_finish.wait()
+            return self._OLD_QUOTES
+
+        async def _b_quotes(**kwargs):
+            events.append("read_quotes_b")
+            return self._FULL_QUOTES
+
+        rm_a, _ = self._make_rm(mock_cm, store, events, _a_quotes, self._OLD_DATES)
+        rm_b, _ = self._make_rm(mock_cm, store, events, _b_quotes, self._FULL_DATES)
+
+        task_a = asyncio.create_task(rm_a.run_review())
+        await asyncio.wait_for(a_reached.wait(), timeout=2)
+
+        async def _b_cycle() -> None:
+            await rm_b.backfill_t1_returns()
+            await rm_b.backfill_horizon_returns()
+
+        task_b = asyncio.create_task(_b_cycle())
+        try:
+            for _ in range(10):
+                await asyncio.sleep(0)
+            # 排队：A 尚未结束，B 不得进入候选读取（无锁时会读到并写库）。
+            assert "read_t1" not in events
+            assert "read_t5" not in events
+
+            a_may_finish.set()
+            await asyncio.wait_for(task_a, timeout=2)
+            await asyncio.wait_for(task_b, timeout=2)
+        finally:
+            a_may_finish.set()
+            for task in (task_a, task_b):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(task_a, task_b, return_exceptions=True)
+
+        row = store[1]
+        assert row["t1_pct"] == pytest.approx(5.0)
+        assert row["t5_pct"] == pytest.approx(10.0)
+        assert row["alpha"] == pytest.approx(8.5)
+        assert row["prediction_result"] == "WIN"
+        assert row["review_status"] == REVIEW_STATUS_COMPLETED
+        # B 的 T+5 候选读取发生在 A 周期写库之后（重新读快照，而非复用旧快照）。
+        assert events.index("write_update") < events.index("read_t5")
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_cycle_lock_queues_second_instance(self, mock_cm, mock_tc):
+        """两个实例的同一周期入口不得交错：候选读取的最大并发为 1。"""
+        store = self._new_store()
+        events: list[str] = []
+        state = {"active": 0, "peak": 0}
+
+        rm_a, cache_a = self._make_rm(
+            mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES
+        )
+        rm_b, cache_b = self._make_rm(
+            mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES
+        )
+
+        async def _slow_read(limit=2000):
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            await asyncio.sleep(0.01)
+            state["active"] -= 1
+            return []
+
+        cache_a.screener_dao.get_unfilled_horizon_predictions = AsyncMock(side_effect=_slow_read)
+        cache_b.screener_dao.get_unfilled_horizon_predictions = AsyncMock(side_effect=_slow_read)
+
+        await asyncio.gather(rm_a.backfill_horizon_returns(), rm_b.backfill_horizon_returns())
+        assert state["peak"] == 1
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_cycle_lock_released_on_exception(self, mock_cm, mock_tc):
+        """周期内抛异常：锁必须释放，后续入口可立即执行（不挂起）。"""
+        store = self._new_store()
+        events: list[str] = []
+        rm_a, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+        rm_b, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+        rm_a._get_pending_predictions = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await rm_a.run_review()
+        assert await asyncio.wait_for(rm_b.backfill_horizon_returns(), timeout=1) == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_cycle_lock_released_on_cancellation(self, mock_cm, mock_tc):
+        """R2：取消必须原样传播，且持锁任务被取消后锁释放，后续入口可执行。"""
+        store = self._new_store()
+        events: list[str] = []
+        a_reached = asyncio.Event()
+
+        async def _hanging_quotes(**kwargs):
+            a_reached.set()
+            await asyncio.Event().wait()
+
+        rm_a, _ = self._make_rm(mock_cm, store, events, _hanging_quotes, self._OLD_DATES)
+        rm_b, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+
+        task = asyncio.create_task(rm_a.run_review())
+        await asyncio.wait_for(a_reached.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert exc_info.type is asyncio.CancelledError
+        assert task.cancelled()
+        assert await asyncio.wait_for(rm_b.backfill_horizon_returns(), timeout=1) == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_three_entries_work_sequentially(self, mock_cm, mock_tc):
+        """顺序调用三通路：run_review 定稿后两回填均为 0，最终值不回退。"""
+        store = self._new_store()
+        events: list[str] = []
+        rm, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+
+        await rm.run_review()
+        assert await rm.backfill_t1_returns() == 0
+        assert await rm.backfill_horizon_returns() == 0
+
+        row = store[1]
+        assert row["t5_pct"] == pytest.approx(10.0)
+        assert row["alpha"] == pytest.approx(8.5)
+        assert row["prediction_result"] == "WIN"
+        assert row["review_status"] == REVIEW_STATUS_COMPLETED
