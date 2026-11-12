@@ -1345,6 +1345,67 @@ class TestHostRebaseCoordination:
 
 
 # ============================================================================
+# UIV-AI-02: local_only_switch 无障碍 label (无障碍基线 §2.1 Label 关联)
+# ============================================================================
+
+
+def _find_local_only_switch(env: dict) -> ft.Switch:
+    """从渲染产物中查找 local_only_switch（页内唯一 ft.Switch）。"""
+    switches = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.Switch)]
+    assert len(switches) == 1, f"页内应恰有 1 个 ft.Switch, 实际 {len(switches)}"
+    return switches[0]
+
+
+class TestLocalOnlySwitchAccessibility:
+    """UIV-AI-02: 仅本地模式开关必须有可读 label（无障碍基线 §2.1）。
+
+    Switch.label 是锁定版本 Flet 中该控件可读名称的唯一承载（Switch 无
+    tooltip / semantics_label 属性）；label 为空时读屏无法识别开关用途。
+    """
+
+    def test_switch_label_driven_by_i18n_key(self, ai_brain_tab_env) -> None:
+        """开关 label 由 settings_ai_local_only_title i18n key 驱动且非空。"""
+        switch = _find_local_only_switch(ai_brain_tab_env)
+        assert isinstance(switch.label, str) and switch.label.strip() != "", (
+            "local_only_switch label 不得为空 (无障碍基线 §2.1)"
+        )
+        assert switch.label == "i18n[settings_ai_local_only_title]"
+
+    def test_switch_value_binds_vm_state(self, ai_brain_tab_env) -> None:
+        """开关 value 绑定 VM state（ai_local_only_mode），修复未改变既有绑定。
+
+        先置非默认值再重渲染，避免默认 False == False 的恒真弱断言。
+        """
+        env = ai_brain_tab_env
+        env["settings_vm"].set_ai_local_only_mode(True)
+        env["result"] = render_once(env["component"])
+        switch = _find_local_only_switch(env)
+        assert switch.value is True
+
+    def test_switch_on_change_updates_vm_state(self, ai_brain_tab_env) -> None:
+        """切换开关 → VM set_ai_local_only_mode 更新 + 重渲染后 value 跟随（事件链路回归）。"""
+        env = ai_brain_tab_env
+        switch = _find_local_only_switch(env)
+
+        _invoke(switch.on_change, _make_event(True))
+        assert env["settings_vm"]._state.ai_local_only_mode is True
+
+        _rerender(env)
+        switch = _find_local_only_switch(env)
+        assert switch.value is True
+        # label 不因 state 变化而丢失（声明式重渲染仍由 i18n key 驱动）
+        assert switch.label == "i18n[settings_ai_local_only_title]"
+
+    def test_switch_label_follows_locale_change(self, ai_brain_tab_env) -> None:
+        """locale 热切换 → 重渲染后 label 重新经 I18n.get 解析（不残留旧 locale 快照）。"""
+        env = ai_brain_tab_env
+        env["mock_i18n"].get.side_effect = lambda key, *a, **kw: f"en[{key}]"
+        env["result"] = render_once(env["component"])
+        switch = _find_local_only_switch(env)
+        assert switch.label == "en[settings_ai_local_only_title]"
+
+
+# ============================================================================
 # UIV-AI-01 (R21): 数据出口面板按 EgressAuditState.loaded 分流
 # 未核实状态不得伪装为确定的零计数 / 空态文案
 # ============================================================================
