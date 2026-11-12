@@ -40,6 +40,8 @@ from core.agent_types import (
     AgentServiceError,
     AgentValidationError,
     AnswerReceipt,
+    ArtifactPage,
+    ArtifactPageItem,
     BindActualInputReceipt,
     BindActualInputRequest,
     CommandReceipt,
@@ -55,6 +57,7 @@ from core.agent_types import (
     DataConsentCommand,
     DataConsentRevokeCommand,
     DataConsentState,
+    DecisionSummary,
     DeliveryFact,
     DeliveryState,
     EventFact,
@@ -62,21 +65,32 @@ from core.agent_types import (
     EventPayloadKind,
     EventPage,
     EventReadQuery,
+    ExecutionSummary,
     GrantRevisionRequest,
     MarkAnswerDeliveredRequest,
+    MessagePage,
+    MessagePageItem,
     RecordEventRequest,
     ResearchEvent,
     ReviseQueuedRequest,
     RevisionReceipt,
     SaveAnswerRequest,
+    SessionRead,
+    SessionReadQuery,
+    SessionSummary,
     SourceRelationKind,
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
+    decode_artifact_page_item,
     decode_data_consent_binding,
     decode_command_receipt,
+    decode_decision_summary,
+    decode_execution_summary,
     decode_json_doc,
+    decode_message_page_item,
     decode_research_event,
+    decode_session_summary,
     decode_submission_receipt,
     encode_command_receipt,
     encode_data_consent_binding,
@@ -92,9 +106,11 @@ from core.agent_types import (
     stable_id,
     validate_data_attempt_authorization,
     validate_data_consent_claim,
+    validate_session_read_query,
 )
 from data.persistence.daos.base_dao import BaseDao
 from data.persistence.models import (
+    AgentArtifact,
     AgentAssetVersion,
     AgentCommand,
     AgentDecision,
@@ -2101,3 +2117,453 @@ class AgentDao(BaseDao):
                 ) from exc
         last_seq = events[-1].session_seq if events else query.after_seq
         return EventPage(events=tuple(events), last_seq=last_seq, has_more=has_more)
+
+    # ------------------------------------------------------------------
+    # §4.2/§9.13 会话首读（C-03-2b）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _opt_wire_time(moment: datetime | None) -> str | None:
+        return None if moment is None else _wire_time(moment)
+
+    def _session_summary_from_row(self, row: Any) -> SessionSummary:
+        """agent_session 行 → SessionSummary（严格解码，坏行 fail-closed）。"""
+
+        try:
+            return decode_session_summary(
+                {
+                    "user_scope": row.user_scope,
+                    "session_id": row.session_id,
+                    "title": row.title,
+                    "title_user_set": row.title_user_set,
+                    "pinned": row.pinned,
+                    "archived": row.archived,
+                    "draft_revision": row.draft_revision,
+                    "event_seq": row.event_seq,
+                    "created_at": _wire_time(row.created_at),
+                    "updated_at": _wire_time(row.updated_at),
+                    "revision": row.revision,
+                    "draft_transfer_ref": row.draft_transfer_ref,
+                    "causal_head_ref": row.causal_head_ref,
+                    "source_module": row.source_module,
+                    "origin_ref": row.origin_ref,
+                    "parent_session_id": row.parent_session_id,
+                    "branch_metadata": json_doc(row.branch_metadata) if row.branch_metadata is not None else None,
+                    "cleaned_at": self._opt_wire_time(row.cleaned_at),
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted session row cannot be reliably decoded: {exc}",
+                f"{row.user_scope}/{row.session_id}",
+            ) from exc
+
+    def _execution_summary_from_row(self, row: Any, identity_str: str) -> ExecutionSummary:
+        try:
+            return decode_execution_summary(
+                {
+                    "user_scope": row.user_scope,
+                    "session_id": row.session_id,
+                    "execution_id": row.execution_id,
+                    "execution_kind": row.execution_kind,
+                    "node_id": row.node_id,
+                    "display_state": row.display_state,
+                    "goal_coverage": row.goal_coverage,
+                    "owner_epoch": row.owner_epoch,
+                    "dispatch_closed": row.dispatch_closed,
+                    "deletion_fenced": row.deletion_fenced,
+                    "model_attempt_count": row.model_attempt_count,
+                    "tool_call_count": row.tool_call_count,
+                    "active_ms": row.active_ms,
+                    "event_seq": row.event_seq,
+                    "created_at": _wire_time(row.created_at),
+                    "updated_at": _wire_time(row.updated_at),
+                    "revision": row.revision,
+                    "source_module": row.source_module,
+                    "business_request_id": row.business_request_id,
+                    "intent_digest": row.intent_digest,
+                    "parent_execution_id": row.parent_execution_id,
+                    "comparison_group_ref": row.comparison_group_ref,
+                    "comparison_lane_ref": row.comparison_lane_ref,
+                    "current_round_id": row.current_round_id,
+                    "last_verified_at": self._opt_wire_time(row.last_verified_at),
+                    "ended_at": self._opt_wire_time(row.ended_at),
+                    "unknown_refs": json_doc(row.unknown_refs) if row.unknown_refs is not None else None,
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted execution row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    def _message_item_from_row(self, row: Any, identity_str: str) -> MessagePageItem:
+        try:
+            return decode_message_page_item(
+                {
+                    "message_id": row.message_id,
+                    "session_id": row.session_id,
+                    "event_id": row.event_id,
+                    "session_seq": row.session_seq,
+                    "event_kind": row.event_kind,
+                    "payload_kind": row.payload_kind,
+                    "subject_id": row.subject_id,
+                    "subject_revision": row.subject_revision,
+                    "occurred_at": _wire_time(row.occurred_at),
+                    "committed_at": _wire_time(row.committed_at),
+                    "execution_id": row.execution_id,
+                    "round_id": row.round_id,
+                    "node_id": row.node_id,
+                    "execution_seq": row.execution_seq,
+                    "input_revision": row.input_revision,
+                    "role": row.role,
+                    "role_id": row.role_id,
+                    "role_version": row.role_version,
+                    "body_text": row.body_text,
+                    "body_ref": row.body_ref,
+                    "payload": json_doc(row.payload) if row.payload is not None else None,
+                    "native_fact_ref": row.native_fact_ref,
+                    "tool_call_id": row.tool_call_id,
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted message row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    def _artifact_item_from_row(self, row: Any, identity_str: str) -> ArtifactPageItem:
+        try:
+            return decode_artifact_page_item(
+                {
+                    "artifact_id": row.artifact_id,
+                    "artifact_version": row.artifact_version,
+                    "session_id": row.session_id,
+                    "execution_id": row.execution_id,
+                    "round_id": row.round_id,
+                    "artifact_kind": row.artifact_kind,
+                    "input_revision": row.input_revision,
+                    "actual_input_digest": row.actual_input_digest,
+                    "actual_model_ref": row.actual_model_ref,
+                    "result_digest": row.result_digest,
+                    "source_available_state": row.source_available_state,
+                    "created_at": _wire_time(row.created_at),
+                    "updated_at": _wire_time(row.updated_at),
+                    "revision": row.revision,
+                    "summary": row.summary,
+                    "body_text": row.body_text,
+                    "body_ref": row.body_ref,
+                    "result_payload": json_doc(row.result_payload) if row.result_payload is not None else None,
+                    "published_at": self._opt_wire_time(row.published_at),
+                    "cleaned_at": self._opt_wire_time(row.cleaned_at),
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted artifact row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    def _decision_summary_from_row(self, row: Any, identity_str: str) -> DecisionSummary:
+        try:
+            return decode_decision_summary(
+                {
+                    "decision_id": row.decision_id,
+                    "session_id": row.session_id,
+                    "execution_id": row.execution_id,
+                    "round_id": row.round_id,
+                    "node_id": row.node_id,
+                    "decision_kind": row.decision_kind,
+                    "presentation_batch_seq": row.presentation_batch_seq,
+                    "created_at": _wire_time(row.created_at),
+                    "updated_at": _wire_time(row.updated_at),
+                    "revision": row.revision,
+                    "tool_call_id": row.tool_call_id,
+                    "question_payload": json_doc(row.question_payload) if row.question_payload is not None else None,
+                    "answer_schema": json_doc(row.answer_schema) if row.answer_schema is not None else None,
+                    "parameter_digest": row.parameter_digest,
+                    "source_scope_digest": row.source_scope_digest,
+                    "service_ref": row.service_ref,
+                    "tool_ref": row.tool_ref,
+                    "tool_schema_version": row.tool_schema_version,
+                    "expires_at": self._opt_wire_time(row.expires_at),
+                    "answer_consumed_at": self._opt_wire_time(row.answer_consumed_at),
+                    "answer_command_id": row.answer_command_id,
+                    "grant_id": row.grant_id,
+                    "grant_revision": row.grant_revision,
+                    "grant_state": row.grant_state,
+                    "dispatch_operation_id": row.dispatch_operation_id,
+                    "data_consent_payload": (
+                        json_doc(row.data_consent_payload) if row.data_consent_payload is not None else None
+                    ),
+                }
+            )
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"persisted decision row cannot be reliably decoded: {exc}",
+                identity_str,
+            ) from exc
+
+    async def get_session_read(self, query: SessionReadQuery, *, user_scope: str) -> SessionRead:
+        """会话首读（§4.2 read_session + §9.13）：一致读取截点下的五要素组装。
+
+        - 受理校验：结构校验（validate_session_read_query）+ round_id 必须伴随
+          execution_id；session 不在用户域 → INPUT_INVALID；user_scope 为独立
+          关键字参数（SessionReadQuery 合同无 user_scope 键，wire 冻结 7 键）；
+        - draft_revision 提供时不符当前草稿修订 → REVISION_CONFLICT（乐观读取前提，
+          草稿正文不在此读取面返回）；
+        - 单事务 REPEATABLE READ 截点读五要素：summary 行投影 / executions 摘要 /
+          消息成果首屏分页 / 待决定列表；行级严格解码 fail-closed OPERATION_UNKNOWN（R21）；
+        - 分页：消息按 session_seq DESC keyset 游标 ``m:{seq}``；成果按可靠保存时点
+          DESC（published_at，NULL 时以 created_at 承载排序——工程裁决，未发布行
+          不静默截断）游标 ``a:{ts}:{id}:{ver}``；
+        - 目标 execution/round 可选过滤：execution 须属本 session、round 须属该
+          execution（精确用户域，§9.13），错配 INPUT_INVALID；指定时五要素聚焦该目标。
+        """
+
+        self._check_engine()
+        identity_str = f"{user_scope}/{query.session_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
+        if not isinstance(query.session_id, str) or query.session_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session_id must be non-empty text", identity_str)
+        try:
+            validate_session_read_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity_str
+            ) from exc
+        if query.round_id is not None and query.execution_id is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "round_id target requires execution_id", identity_str)
+        # 游标语法已由 validate_session_read_query 冻结（core 正则），此处解析为 keyset 键值。
+        message_cursor_seq: int | None = None
+        if query.message_cursor is not None:
+            message_cursor_seq = int(query.message_cursor[2:])
+        artifact_cursor_key: tuple[datetime, str, int] | None = None
+        if query.artifact_cursor is not None:
+            # 游标 a:{ts}:{id}:{ver}：ts 自身含冒号（YYYY-MM-DDTHH:MM:SS.ffffffZ，恰 3 段），
+            # id 段冻结不含冒号，ver 为末段；语法已由 validate_session_read_query 冻结。
+            parts = query.artifact_cursor[2:].split(":")
+            wire_ts, artifact_id_part, version_part = ":".join(parts[:3]), parts[3], parts[4]
+            artifact_cursor_key = (
+                datetime.strptime(wire_ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC),
+                artifact_id_part,
+                int(version_part),
+            )
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="REPEATABLE READ")
+            async with conn.begin():
+                summary_row = (
+                    await conn.execute(
+                        sa.select(AgentSession).where(
+                            AgentSession.user_scope == user_scope,
+                            AgentSession.session_id == query.session_id,
+                        )
+                    )
+                ).first()
+                if summary_row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, "session not found in user scope", identity_str
+                    )
+                summary = self._session_summary_from_row(summary_row)
+                if query.draft_revision is not None and query.draft_revision != summary.draft_revision:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "draft revision does not match current session draft",
+                        identity_str,
+                    )
+
+                if query.execution_id is not None:
+                    execution_exists = (
+                        await conn.execute(
+                            sa.select(sa.literal(1)).where(
+                                AgentExecution.user_scope == user_scope,
+                                AgentExecution.execution_id == query.execution_id,
+                                AgentExecution.session_id == query.session_id,
+                            )
+                        )
+                    ).first()
+                    if execution_exists is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID, "target execution not in session", identity_str
+                        )
+                    if query.round_id is not None:
+                        round_exists = (
+                            await conn.execute(
+                                sa.select(sa.literal(1)).where(
+                                    AgentRound.user_scope == user_scope,
+                                    AgentRound.round_id == query.round_id,
+                                    AgentRound.execution_id == query.execution_id,
+                                )
+                            )
+                        ).first()
+                        if round_exists is None:
+                            raise AgentServiceError(
+                                AgentErrorCode.INPUT_INVALID, "target round not in execution", identity_str
+                            )
+
+                # executions 摘要（目标过滤时聚焦该执行；created_at 稳定序）。
+                executions_stmt = sa.select(AgentExecution).where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.session_id == query.session_id,
+                )
+                if query.execution_id is not None:
+                    executions_stmt = executions_stmt.where(AgentExecution.execution_id == query.execution_id)
+                execution_rows = (
+                    await conn.execute(
+                        executions_stmt.order_by(AgentExecution.created_at.asc(), AgentExecution.execution_id.asc())
+                    )
+                ).all()
+                executions = tuple(self._execution_summary_from_row(row, identity_str) for row in execution_rows)
+
+                # 消息首屏：session_seq DESC keyset（游标 m:{seq}）。
+                messages_stmt = (
+                    sa.select(
+                        AgentMessage.message_id,
+                        AgentMessage.session_id,
+                        AgentMessage.event_id,
+                        AgentMessage.session_seq,
+                        AgentMessage.event_kind,
+                        AgentMessage.payload_kind,
+                        AgentMessage.subject_id,
+                        AgentMessage.subject_revision,
+                        AgentMessage.occurred_at,
+                        AgentMessage.committed_at,
+                        AgentMessage.execution_id,
+                        AgentMessage.round_id,
+                        AgentMessage.node_id,
+                        AgentMessage.execution_seq,
+                        AgentMessage.input_revision,
+                        AgentMessage.role,
+                        AgentMessage.role_id,
+                        AgentMessage.role_version,
+                        AgentMessage.body_text,
+                        AgentMessage.body_ref,
+                        AgentMessage.payload,
+                        AgentMessage.native_fact_ref,
+                        AgentMessage.tool_call_id,
+                    )
+                    .where(
+                        AgentMessage.user_scope == user_scope,
+                        AgentMessage.session_id == query.session_id,
+                    )
+                    .order_by(AgentMessage.session_seq.desc())
+                    .limit(query.limit + 1)
+                )
+                if query.execution_id is not None:
+                    messages_stmt = messages_stmt.where(AgentMessage.execution_id == query.execution_id)
+                if query.round_id is not None:
+                    messages_stmt = messages_stmt.where(AgentMessage.round_id == query.round_id)
+                if message_cursor_seq is not None:
+                    messages_stmt = messages_stmt.where(AgentMessage.session_seq < message_cursor_seq)
+                message_rows = (await conn.execute(messages_stmt)).all()
+                messages_has_more = len(message_rows) > query.limit
+                message_rows = message_rows[: query.limit]
+                message_items = tuple(self._message_item_from_row(row, identity_str) for row in message_rows)
+                messages = MessagePage(
+                    items=message_items,
+                    has_more=messages_has_more,
+                    next_cursor=f"m:{message_items[-1].session_seq}" if messages_has_more else None,
+                )
+
+                # 成果首屏：可靠保存时点 DESC（published_at，NULL 以 created_at 承载），
+                # 同点 artifact_id/version DESC tie-break，keyset 游标 a:{ts}:{id}:{ver}。
+                artifact_sort_key = sa.func.coalesce(AgentArtifact.published_at, AgentArtifact.created_at)
+                artifacts_stmt = sa.select(
+                    AgentArtifact.artifact_id,
+                    AgentArtifact.artifact_version,
+                    AgentArtifact.session_id,
+                    AgentArtifact.execution_id,
+                    AgentArtifact.round_id,
+                    AgentArtifact.artifact_kind,
+                    AgentArtifact.input_revision,
+                    AgentArtifact.actual_input_digest,
+                    AgentArtifact.actual_model_ref,
+                    AgentArtifact.result_digest,
+                    AgentArtifact.source_available_state,
+                    AgentArtifact.created_at,
+                    AgentArtifact.updated_at,
+                    AgentArtifact.revision,
+                    AgentArtifact.summary,
+                    AgentArtifact.body_text,
+                    AgentArtifact.body_ref,
+                    AgentArtifact.result_payload,
+                    AgentArtifact.published_at,
+                    AgentArtifact.cleaned_at,
+                    artifact_sort_key.label("sort_moment"),
+                ).where(
+                    AgentArtifact.user_scope == user_scope,
+                    AgentArtifact.session_id == query.session_id,
+                )
+                if query.execution_id is not None:
+                    artifacts_stmt = artifacts_stmt.where(AgentArtifact.execution_id == query.execution_id)
+                if query.round_id is not None:
+                    artifacts_stmt = artifacts_stmt.where(AgentArtifact.round_id == query.round_id)
+                if artifact_cursor_key is not None:
+                    cursor_moment, cursor_artifact_id, cursor_version = artifact_cursor_key
+                    artifacts_stmt = artifacts_stmt.where(
+                        sa.tuple_(
+                            artifact_sort_key,
+                            AgentArtifact.artifact_id,
+                            AgentArtifact.artifact_version,
+                        )
+                        < sa.tuple_(
+                            sa.bindparam("cursor_moment", cursor_moment),
+                            sa.bindparam("cursor_artifact_id", cursor_artifact_id),
+                            sa.bindparam("cursor_version", cursor_version),
+                        )
+                    )
+                artifacts_stmt = artifacts_stmt.order_by(
+                    artifact_sort_key.desc(),
+                    AgentArtifact.artifact_id.desc(),
+                    AgentArtifact.artifact_version.desc(),
+                ).limit(query.limit + 1)
+                artifact_rows = (await conn.execute(artifacts_stmt)).all()
+                artifacts_has_more = len(artifact_rows) > query.limit
+                artifact_rows = artifact_rows[: query.limit]
+                artifact_items = tuple(self._artifact_item_from_row(row, identity_str) for row in artifact_rows)
+                artifact_cursor_out: str | None = None
+                if artifacts_has_more:
+                    last_sort_moment = artifact_rows[-1].sort_moment
+                    artifact_cursor_out = (
+                        f"a:{_wire_time(last_sort_moment)}:{artifact_rows[-1].artifact_id}:"
+                        f"{artifact_rows[-1].artifact_version}"
+                    )
+                artifacts = ArtifactPage(
+                    items=artifact_items, has_more=artifacts_has_more, next_cursor=artifact_cursor_out
+                )
+
+                # 待决定列表（§4.3 decisions）：首屏全量，批次序稳定输出；原回执经
+                # answer_command_id 引用按需查询，不复制完整回执正文。
+                decisions_stmt = sa.select(AgentDecision).where(
+                    AgentDecision.user_scope == user_scope,
+                    AgentDecision.session_id == query.session_id,
+                )
+                if query.execution_id is not None:
+                    decisions_stmt = decisions_stmt.where(AgentDecision.execution_id == query.execution_id)
+                if query.round_id is not None:
+                    decisions_stmt = decisions_stmt.where(AgentDecision.round_id == query.round_id)
+                decision_rows = (
+                    await conn.execute(
+                        decisions_stmt.order_by(
+                            AgentDecision.presentation_batch_seq.asc(), AgentDecision.decision_id.asc()
+                        )
+                    )
+                ).all()
+                decisions = tuple(self._decision_summary_from_row(row, identity_str) for row in decision_rows)
+
+        return SessionRead(
+            summary=summary,
+            executions=executions,
+            messages=messages,
+            artifacts=artifacts,
+            decisions=decisions,
+        )
