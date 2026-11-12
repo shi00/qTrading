@@ -25,10 +25,13 @@ C-04（资源/计数/源禁用/fence/阅读批次）分片实现。
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
+from collections.abc import AsyncIterator
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -126,6 +129,9 @@ from core.agent_types import (
     validate_session_read_query,
 )
 from data.persistence.daos.base_dao import BaseDao
+
+#: observe 监听通道（§9.13「独立 LISTEN ≤1」；pg_notify payload ≤8000B）。
+_AGENT_EVENT_CHANNEL: Final = "agent_events"
 from data.persistence.models import (
     AgentArtifact,
     AgentAssetVersion,
@@ -2061,6 +2067,17 @@ class AgentDao(BaseDao):
                         updated_at=committed,
                     )
                 )
+            # 全文投影同事务落列后发出监听通知（§9.13「通知只唤醒读取，数据库事件才是事实」；
+            # observe 迭代器经 LISTEN 唤醒后仍以新事务读库为准）。payload ≤8000B 合同。
+            await conn.execute(
+                sa.text("SELECT pg_notify(:channel, :payload)").bindparams(
+                    sa.bindparam("channel", _AGENT_EVENT_CHANNEL),
+                    sa.bindparam(
+                        "payload",
+                        json_doc({"user_scope": request.user_scope, "session_id": request.session_id}),
+                    ),
+                )
+            )
             return EventFact(
                 message_id=request.message_id,
                 event_id=event_id,
@@ -3556,3 +3573,95 @@ class AgentDao(BaseDao):
             next_cursor=next_cursor,
             read_moment=_utc_now_wire(),
         )
+
+    # ------------------------------------------------------------------
+    # §4.2 observe / §9.13 监听协议（C-03-5）
+    # ------------------------------------------------------------------
+
+    async def observe_session_events(
+        self,
+        session_id: str,
+        *,
+        user_scope: str,
+        after_seq: int = 0,
+        poll_interval_s: float = 0.25,
+    ) -> AsyncIterator[ResearchEvent]:
+        """会话持久事件增量迭代器（§4.2 L389 observe_session + §4.2 L531-536 协议）。
+
+        协议顺序（不可颠倒）：
+
+        1. 先建立 PG LISTEN 并确认生效（独立 asyncpg 连接，autocommit 执行即注册）；
+        2. 再用新事务按 ``after_seq`` 补 backlog（list_events_after，升序严格解码）；
+        3. 之后持续读取：pg_notify 只唤醒读取，数据库事件才是事实——每轮以新
+           短事务读增量（``seq > last_seq``）；超时 ``poll_interval_s`` 同样触发
+           有界重查（重查节拍 + 读取合计满足「原可靠事件到 UI ≤1 秒」合同，
+           不把轮询间隔设为 1 秒）；
+        4. 同一 session_seq 只合并一次（``last_seq`` 单调推进）；缺口序号由消费方
+           按序号核对（迭代器按库中存在行升序产出，不跳号应用——L533）；
+        5. ``CancelledError`` 必须 raise（R2）；退订只关闭本 observer（LISTEN
+           连接关闭），不影响其他监听者。
+
+        受理校验（session 存在于用户域）在 LISTEN 生效后、backlog 前执行，
+        INPUT_INVALID 以异常终止迭代器（不返回空成功）。
+        """
+
+        self._check_engine()
+        identity_str = f"{user_scope}/{session_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
+        if not isinstance(session_id, str) or session_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session_id must be non-empty text", identity_str)
+        if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "after_seq must be >=0 int", identity_str)
+        if poll_interval_s <= 0 or poll_interval_s > 1.0:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "poll_interval_s must be in (0, 1.0]", identity_str)
+
+        # 独立 LISTEN 连接（asyncpg 直连；驱动去掉 SQLAlchemy 方言段）。
+        import asyncpg
+
+        listen_url = sa.engine.make_url(self.engine.url.render_as_string(hide_password=False)).set(
+            drivername="postgresql"
+        )
+        listen_conn: asyncpg.Connection = await asyncpg.connect(
+            host=listen_url.host,
+            port=listen_url.port,
+            user=listen_url.username,
+            password=listen_url.password,
+            database=listen_url.database,
+        )
+        notify_queue: asyncio.Queue[None] = asyncio.Queue(maxsize=16)
+
+        def _on_notify(_conn: asyncpg.Connection, _pid: int, _channel: str, _payload: str | None) -> None:
+            # 通知只唤醒读取（payload 内容不承载事实）；队列满时丢弃通知，退化为轮询兜底
+            with contextlib.suppress(asyncio.QueueFull):
+                notify_queue.put_nowait(None)
+
+        listen_conn.add_listener(_AGENT_EVENT_CHANNEL, _on_notify)
+        # LISTEN 注册即生效（asyncpg autocommit）；再执行一条语句确认会话可用（L532 确认生效）
+        await listen_conn.execute("SELECT 1")
+        last_seq = after_seq
+        try:
+            # 受理校验（用户域）：不返回空成功
+            async with self.engine.connect() as conn:
+                await self._history_session_exists(conn, user_scope, session_id)
+            while True:
+                # 新短事务追平（增量读取；list_events_after 每次调用独立事务）
+                page = await self.read_events(
+                    EventReadQuery(
+                        user_scope=user_scope,
+                        session_id=session_id,
+                        after_seq=last_seq,
+                        limit=50,
+                    )
+                )
+                for event in page.events:
+                    last_seq = event.session_seq
+                    yield event
+                # 等通知唤醒或超时有界重查（§4.2 L532）
+                try:
+                    await asyncio.wait_for(notify_queue.get(), timeout=poll_interval_s)
+                except TimeoutError:
+                    pass
+        finally:
+            listen_conn.remove_listener(_AGENT_EVENT_CHANNEL, _on_notify)
+            await listen_conn.close()
