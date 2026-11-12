@@ -41,7 +41,9 @@ from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
-_PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "synthetic_test")
+# §10.2：外发用途注册面新增 agent_research（旧 grant 不自动获得新用途，
+# 仅允许以该用途显式创建新 grant）；与 EGRESS_PURPOSES 对齐。
+_PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "agent_research", "synthetic_test")
 
 # legacy 封口月份格式（S6 D4）：与 LegacySealConfig.month 正则一致，服务侧先行校验给出精确错误
 _MONTH_SEAL_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
