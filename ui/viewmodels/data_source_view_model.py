@@ -28,7 +28,13 @@ from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
 from data.sync.errors import InitSyncError
-from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskManager, TaskStatus
+from services.task_manager import (
+    EXCLUSIVE_GROUP_MARKET_SYNC,
+    TERMINAL_STATUSES,
+    AppTask,
+    TaskManager,
+    TaskStatus,
+)
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
@@ -144,6 +150,9 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
         # Business state (internal mutable tracking, not for View)
         self._active_task_ids: dict[str, str] = {}
+        # M35-01: health 任务身份。health 不进 _active_task_ids（不占用同步 busy 语义），
+        # 但必须单独跟踪：排队取消时 TaskManager 跳过 factory，factory 的 finally 不会执行。
+        self._health_task_id: str | None = None
 
         # --- State snapshot + subscribers ---
         self._state: DataSourceState = DataSourceState()
@@ -208,12 +217,21 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             self._tm.cancel_task(task_id)
         self._active_task_ids.clear()
 
+    def _cancel_health_task(self) -> None:
+        """取消 health 任务并清自身身份（M35-01: health id 不在 _active_task_ids 中）。"""
+        task_id = self._health_task_id
+        if task_id is None:
+            return
+        self._health_task_id = None
+        self._tm.cancel_task(task_id)
+
     def dispose(self):
         """清理资源：先取消订阅 + 取消活跃任务（防孤儿），再清引用与状态。
 
         cancellable=False 任务（如 cache_clear）的 cancel_task 是 no-op（TaskManager 记 warning），
         任务将继续运行至完成——属设计意图（不可取消任务应原子完成）。
         """
+        self._cancel_health_task()
         self._unsubscribe_from_task_manager()
         self._cancel_all_active_tasks()
         super().dispose()
@@ -380,22 +398,26 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 if not self._tm.update_progress(task_id, 0.9, Message("task_progress_analyzing")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
-                self._emit_health_result(_health_dict_to_row(result))
+                # M35-01: 仅当前仍持有该任务身份时提交结果，旧检查晚到不得覆盖新任务
+                if self._health_task_id == task_id:
+                    self._emit_health_result(_health_dict_to_row(result))
 
                 return Message("task_result_health_done")
 
             except asyncio.CancelledError:
-                self._set_state(health_checking=False)
+                # M35-01: 只清自身身份（排队取消时 factory 不会执行，由 handle_task_update 兜底）
+                self._clear_health_task(task_id)
                 # health_cancelled: use a transient flag via state diff
                 # View detects health_checking False transition as "cancelled/finished"
                 raise
             except Exception as e:
                 logger.error("[DataSourceVM] Health check failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
                 error_info = classify_error(e, context="general")
-                self._emit_health_error(_error_info_to_message(error_info))
+                if self._health_task_id == task_id:
+                    self._emit_health_error(_error_info_to_message(error_info))
                 raise
             finally:
-                self._set_state(health_checking=False)
+                self._clear_health_task(task_id)
 
         task_id = self._tm.submit_task(
             name=Message("task_name_health_check"),
@@ -407,6 +429,18 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
         if task_id is None:
             self._set_state(health_checking=False)
+        else:
+            self._health_task_id = task_id
+
+    def _clear_health_task(self, task_id: str) -> None:
+        """清 health 任务身份并复位 health_checking（仅当 task_id 仍是当前 health 任务）。
+
+        M35-01: 旧检查晚到（已被取消并被新检查取代）不得清掉新任务的身份与状态。
+        """
+        if self._health_task_id != task_id:
+            return
+        self._health_task_id = None
+        self._set_state(health_checking=False)
 
     # --- Full Daily Sync ---
 
@@ -724,6 +758,12 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     def handle_task_update(self, current_tasks: list[AppTask]):
         """Handle TaskManager task state updates (called by View forwarding)."""
+        # M35-01: health 任务不在 _active_task_ids，须单独判定早退，否则 health-only 时永不处理
+        if not self._state.is_syncing and not self._active_task_ids and self._health_task_id is None:
+            return
+
+        self._handle_health_task_update(current_tasks)
+
         if not self._state.is_syncing and not self._active_task_ids:
             return
 
@@ -749,6 +789,21 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         if terminated:
             # D7-6: 任务终结后刷新调度状态面板（水位/失败原因可能因本次任务而变化）。
             self.refresh_scheduler_status()
+
+    def _handle_health_task_update(self, current_tasks: list[AppTask]) -> None:
+        """M35-01: health 任务终态兜底复位（只清自身标志，不碰同步 busy 态）。
+
+        排队取消时 TaskManager._register_and_run / _task_runner 跳过 factory，
+        factory 的 finally 不会执行；状态通知是唯一可靠的终态出口。
+        """
+        if self._health_task_id is None:
+            return
+        for t in current_tasks:
+            if t.id == self._health_task_id and t.status in TERMINAL_STATUSES:
+                self._health_task_id = None
+                if self._state.health_checking:
+                    self._set_state(health_checking=False)
+                return
 
     def recover_stale_state(self):
         """Recover from stale task state (e.g. after page remount)."""

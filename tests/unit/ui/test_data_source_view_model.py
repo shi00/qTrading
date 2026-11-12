@@ -140,6 +140,14 @@ def _assert_snack(bound_vm, snapshots, message_key, color_name):
     assert any(s.snack is not None for s in snapshots)
 
 
+def _make_update_task(task_id: str, status: TaskStatus) -> MagicMock:
+    """构造 TaskManager 订阅快照中的任务项 (仅 id/status 为 VM 所需字段)."""
+    task = MagicMock()
+    task.id = task_id
+    task.status = status
+    return task
+
+
 # --- Test Classes ---
 
 
@@ -297,6 +305,17 @@ class TestDataSourceViewModelDisposeCancelsTasks:
         mock_task_manager.cancel_task.assert_called_once_with("task_001")
         assert vm._active_task_ids == {}
 
+    async def test_dispose_cancels_health_task(self, bound_vm, mock_task_manager):
+        """M35-01: dispose 必须定位并取消 health 任务（其 id 不在 _active_task_ids 中）。"""
+        await bound_vm.check_health()
+        assert bound_vm._health_task_id == "task_123"
+
+        bound_vm.dispose()
+
+        mock_task_manager.cancel_task.assert_called_once_with("task_123")
+        assert bound_vm._health_task_id is None
+        assert bound_vm.state.health_checking is False
+
 
 class TestDataSourceViewModelCheckHealth:
     async def test_check_health_success(self, bound_vm, snapshots, mock_processor, mock_task_manager):
@@ -363,6 +382,135 @@ class TestDataSourceViewModelCheckHealth:
         await bound_vm.check_health()
         # rejected: health_checking set back to False
         assert snapshots[-1].health_checking is False
+        assert bound_vm._health_task_id is None
+
+
+class TestDataSourceViewModelHealthTaskLifetime:
+    """M35-01: health 任务身份跟踪。
+
+    排队取消时 TaskManager 跳过 factory（_register_and_run 对 CANCELLED 直接 return），
+    factory 的 finally 不会执行；VM 必须自行按 health task_id 复位 health_checking，
+    否则按钮永久锁死。旧检查晚到也不得清掉新任务状态。
+    """
+
+    async def test_health_queued_cancel_clears_checking_and_retryable(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager
+    ):
+        await bound_vm.check_health()
+        assert bound_vm._health_task_id == "task_123"
+        assert bound_vm.state.health_checking is True
+
+        # 执行槽占满 → 任务排队；任务中心取消 → factory 未运行，仅广播 CANCELLED
+        bound_vm.handle_task_update([_make_update_task("task_123", TaskStatus.CANCELLED)])
+
+        assert bound_vm.state.health_checking is False
+        assert bound_vm._health_task_id is None
+        assert bound_vm.state.is_syncing is False
+        assert bound_vm._active_task_ids == {}
+        mock_processor.check_data_health.assert_not_awaited()
+
+        # unique_key 已由 TaskManager 释放 → 取消后可重试
+        mock_task_manager.submit_task.return_value = "task_456"
+        await bound_vm.check_health()
+
+        assert mock_task_manager.submit_task.call_count == 2
+        assert bound_vm.state.health_checking is True
+        assert bound_vm._health_task_id == "task_456"
+
+    @pytest.mark.parametrize(
+        "status",
+        [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.INTERRUPTED],
+    )
+    async def test_health_terminal_update_clears_own_state(self, bound_vm, snapshots, mock_task_manager, status):
+        await bound_vm.check_health()
+
+        bound_vm.handle_task_update([_make_update_task("task_123", status)])
+
+        assert bound_vm.state.health_checking is False
+        assert bound_vm._health_task_id is None
+        assert bound_vm.state.is_syncing is False
+        assert bound_vm._active_task_ids == {}
+
+    async def test_health_cancel_keeps_sync_busy_state(self, bound_vm, mock_task_manager):
+        bound_vm._set_state(is_syncing=True, active_key="daily_sync")
+        bound_vm._active_task_ids = {"daily_sync": "task_daily"}
+        await bound_vm.check_health()
+
+        bound_vm.handle_task_update([_make_update_task("task_123", TaskStatus.CANCELLED)])
+
+        assert bound_vm.state.health_checking is False
+        assert bound_vm.state.is_syncing is True
+        assert bound_vm.state.active_key == "daily_sync"
+        assert bound_vm._active_task_ids == {"daily_sync": "task_daily"}
+
+    async def test_health_completion_clears_task_id(self, bound_vm, mock_processor, mock_task_manager):
+        await bound_vm.check_health()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        await factory(task_id="task_123")
+
+        assert bound_vm.state.health_checking is False
+        assert bound_vm._health_task_id is None
+        assert bound_vm.state.is_syncing is False
+
+    async def test_late_old_health_result_does_not_override_new_task(self, bound_vm, mock_processor, mock_task_manager):
+        await bound_vm.check_health()
+        old_factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        bound_vm.handle_task_update([_make_update_task("task_123", TaskStatus.CANCELLED)])
+
+        mock_task_manager.submit_task.return_value = "task_456"
+        await bound_vm.check_health()
+        new_factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        # 旧检查晚到成功：不得清掉新任务身份/状态，也不得覆盖健康结果
+        await old_factory(task_id="task_123")
+
+        assert bound_vm.state.health_checking is True
+        assert bound_vm._health_task_id == "task_456"
+        assert bound_vm.state.health_result is None
+
+        # 新检查完成正常收尾
+        await new_factory(task_id="task_456")
+
+        assert bound_vm.state.health_result is not None
+        assert bound_vm.state.health_checking is False
+        assert bound_vm._health_task_id is None
+
+    async def test_late_old_health_error_does_not_override_new_task(self, bound_vm, mock_processor, mock_task_manager):
+        await bound_vm.check_health()
+        old_factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        bound_vm.handle_task_update([_make_update_task("task_123", TaskStatus.CANCELLED)])
+
+        mock_task_manager.submit_task.return_value = "task_456"
+        await bound_vm.check_health()
+
+        mock_processor.check_data_health = AsyncMock(side_effect=RuntimeError("late failure"))
+        with pytest.raises(RuntimeError, match="late failure"):
+            await old_factory(task_id="task_123")
+
+        assert bound_vm.state.health_checking is True
+        assert bound_vm._health_task_id == "task_456"
+        assert bound_vm.state.health_error is None
+
+    async def test_late_old_health_cancelled_does_not_clear_newer_task(
+        self, bound_vm, mock_processor, mock_task_manager
+    ):
+        await bound_vm.check_health()
+        old_factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        cancelled = asyncio.CancelledError()
+        mock_processor.check_data_health = AsyncMock(side_effect=cancelled)
+        bound_vm.handle_task_update([_make_update_task("task_123", TaskStatus.CANCELLED)])
+
+        mock_task_manager.submit_task.return_value = "task_456"
+        await bound_vm.check_health()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await old_factory(task_id="task_123")
+
+        # R2: CancelledError 必须原样向上抛出（未被吞没/替换）
+        assert exc_info.value is cancelled
+        assert bound_vm.state.health_checking is True
+        assert bound_vm._health_task_id == "task_456"
 
 
 class TestDataSourceViewModelFullDailySync:
