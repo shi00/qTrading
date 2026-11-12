@@ -2679,3 +2679,1283 @@ class EventPage:
     events: tuple[ResearchEvent, ...]
     last_seq: int
     has_more: bool
+
+
+# ---------------------------------------------------------------------------
+# §4.2/§4.3 读取合同类型（C-03-2a：SessionReadQuery/SessionRead/ResearchSnapshot）
+# ---------------------------------------------------------------------------
+
+# 设计正本 §4.3 为字段→内容映射表（无逐键 wire 冻结表），本节工程裁决：
+# frozen dataclass + decode strict 全键必填禁额外键，encode 走 to_wire_dict 泛型；
+# 未冻结结构的 JSONB 以 CanonicalJson 文本承载（不臆造结构）；None 保真（R21）。
+# 值集常量与 data/persistence/models.py 的冻结 CHECK 同步（漂移守护见
+# tests/unit/test_agent_snapshot_types.py）。
+
+
+def _require_bool(value: object, path: str) -> bool:
+    if not isinstance(value, bool):
+        _fail("invalid_type", path)
+    return value
+
+
+def _require_text(value: object, path: str) -> str:
+    """自由文本列（title/summary 等）：须为 str，允许空串（DB 不约束非空）。"""
+
+    if not isinstance(value, str):
+        _fail("invalid_type", path)
+    return value
+
+
+def _opt_str(value: object, path: str) -> str | None:
+    return None if value is None else _require_str(value, path)
+
+
+def _opt_text(value: object, path: str) -> str | None:
+    return None if value is None else _require_text(value, path)
+
+
+def _opt_digest(value: object, path: str) -> str | None:
+    return None if value is None else _require_digest(value, path)
+
+
+def _opt_timestamp(value: object, path: str) -> str | None:
+    return None if value is None else _require_utc_timestamp(value, path)
+
+
+def _opt_int(value: object, path: str, *, minimum: int) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        _fail("invalid_range", path)
+    return value
+
+
+def _nonneg_int(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        _fail("invalid_range", path)
+    return value
+
+
+def _require_enum[E: Enum](value: object, enum_cls: type[E], path: str, code: str) -> E:
+    """枚举解码（沿 decode_research_event 惯例：非 str/未知值统一给稳定错误码）。"""
+
+    try:
+        return enum_cls(value)  # type: ignore[call-arg]  # Enum 按值查找，非法输入由 except 拦截
+    except (ValueError, TypeError, KeyError):
+        _fail(code, path)
+
+
+def _require_choice(value: object, allowed: AbstractSet[str], path: str, code: str) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        _fail(code, path)
+    return value
+
+
+def _opt_json_text(value: object, path: str) -> CanonicalJson | None:
+    """未冻结结构 JSONB 投影：CanonicalJson 文本承载，非规范 JSON 拒绝（fail-closed）。"""
+
+    if value is None:
+        return None
+    text = _require_str(value, path)
+    try:
+        decode_json_doc(text)
+    except AgentValidationError:
+        _fail("invalid_json", path)
+    return text
+
+
+#: 执行类别（§9.4 CHECK kind）。
+EXECUTION_KINDS: Final[frozenset[str]] = frozenset({"root", "leaf", "comparison_lane"})
+
+#: 展示状态 15 值（§9.4 CHECK display_state；排队/运行/依赖/人工等待/暂停/终止/unknown/终态）。
+DISPLAY_STATES: Final[frozenset[str]] = frozenset(
+    {
+        "queued",
+        "running",
+        "waiting_dependency",
+        "waiting_user",
+        "pausing",
+        "paused",
+        "ending",
+        "unknown",
+        "ended",
+        "failed",
+        "complete",
+        "partial",
+        "planned",
+        "withdrawn",
+        "closed_unknown",
+    }
+)
+
+#: 目标覆盖 4 值（§9.4/§9.5 CHECK goal_coverage）。
+GOAL_COVERAGES: Final[frozenset[str]] = frozenset({"full", "partial", "none", "unknown"})
+
+#: 成果类别 8 值（§9.7 CHECK kind）。
+ARTIFACT_KINDS: Final[frozenset[str]] = frozenset(
+    {"plan", "explanation", "comparison", "candidate", "news", "backtest", "period", "stock_final"}
+)
+
+#: 受管资产类别 8 值（§9.10 CHECK kind）。
+ASSET_KINDS: Final[frozenset[str]] = frozenset(
+    {"source", "skill", "role", "prompt", "mcp_schema", "plan", "comparison_manifest", "summary"}
+)
+
+#: 来源谱系消费方类别 6 值（§9.10 CHECK consumer_kind）。
+SOURCE_CONSUMER_KINDS: Final[frozenset[str]] = frozenset(
+    {"draft", "execution", "round", "message", "artifact", "asset"}
+)
+
+#: 操作阶段 6 值（§9.9 CHECK phase）。
+OPERATION_PHASES: Final[frozenset[str]] = frozenset(
+    {"prepared", "dispatch_claimed", "dispatched", "result_saved", "failed_confirmed", "unknown"}
+)
+
+#: 工具 grant 状态（C-02-3 工程冻结 wire 值，无 DB CHECK）。
+GRANT_STATES: Final[frozenset[str]] = frozenset({"granted", "claimed", "revoked"})
+
+#: 游标最小编码（工程裁决，§4.2 L402）：message ``m:<session_seq>``。
+_MESSAGE_CURSOR_RE: Final = re.compile(r"m:(?:0|[1-9][0-9]*)")
+#: artifact ``a:<published_at wire>:<artifact_id>:<version>``（artifact_id 无冒号）。
+_ARTIFACT_CURSOR_RE: Final = re.compile(r"a:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):([^:\s]+):([1-9][0-9]*)")
+
+
+def _opt_cursor(value: object, path: str) -> str | None:
+    """游标字面量：None 透传；非 str 拒绝（语法校验统一在 _validate 阶段给 invalid_cursor）。"""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        _fail("invalid_type", path)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class SessionReadQuery:
+    """会话首读查询（§4.2 SessionReadQuery 行；limit 为工程读取边界 1—50）。
+
+    准确选择不使用 latest 覆盖（无 latest 字段）；游标只做语法校验，绑定
+    user_scope/查询 digest/修订指纹失效属 HistoryQuery/HistoryPage（R02，C-03-3）。
+    """
+
+    session_id: str
+    limit: int = 50
+    execution_id: str | None = None
+    round_id: str | None = None
+    draft_revision: int | None = None
+    message_cursor: str | None = None
+    artifact_cursor: str | None = None
+
+
+_SESSION_READ_QUERY_KEYS: Final = frozenset(
+    {
+        "session_id",
+        "execution_id",
+        "round_id",
+        "draft_revision",
+        "message_cursor",
+        "artifact_cursor",
+        "limit",
+    }
+)
+
+
+def _validate_session_read_query(query: SessionReadQuery, path: str) -> None:
+    if isinstance(query.limit, bool) or not isinstance(query.limit, int):
+        _fail("invalid_type", f"{path}.limit")
+    if not 1 <= query.limit <= 50:
+        _fail("invalid_range", f"{path}.limit")
+    if query.draft_revision is not None and (
+        isinstance(query.draft_revision, bool) or not isinstance(query.draft_revision, int) or query.draft_revision < 1
+    ):
+        _fail("invalid_range", f"{path}.draft_revision")
+    if query.execution_id is not None:
+        _require_str(query.execution_id, f"{path}.execution_id")
+    if query.round_id is not None:
+        _require_str(query.round_id, f"{path}.round_id")
+    if query.message_cursor is not None:
+        if not isinstance(query.message_cursor, str):
+            _fail("invalid_type", f"{path}.message_cursor")
+        if _MESSAGE_CURSOR_RE.fullmatch(query.message_cursor) is None:
+            _fail("invalid_cursor", f"{path}.message_cursor")
+    if query.artifact_cursor is not None:
+        if not isinstance(query.artifact_cursor, str):
+            _fail("invalid_type", f"{path}.artifact_cursor")
+        if _ARTIFACT_CURSOR_RE.fullmatch(query.artifact_cursor) is None:
+            _fail("invalid_cursor", f"{path}.artifact_cursor")
+
+
+def validate_session_read_query(query: SessionReadQuery) -> None:
+    """SessionReadQuery 结构校验：limit 边界/草稿修订/游标语法（§4.2 L402）。"""
+
+    _validate_session_read_query(query, "$")
+
+
+def decode_session_read_query(value: object, path: str = "$.session_read_query") -> SessionReadQuery:
+    """严格解码会话首读查询（7 键全必填禁额外键；构造后即校验）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SESSION_READ_QUERY_KEYS, path)
+    limit = value["limit"]
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        _fail("invalid_type", f"{path}.limit")
+    draft_revision = _opt_int(value["draft_revision"], f"{path}.draft_revision", minimum=1)
+    query = SessionReadQuery(
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        limit=limit,
+        execution_id=_opt_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_opt_str(value["round_id"], f"{path}.round_id"),
+        draft_revision=draft_revision,
+        message_cursor=_opt_cursor(value["message_cursor"], f"{path}.message_cursor"),
+        artifact_cursor=_opt_cursor(value["artifact_cursor"], f"{path}.artifact_cursor"),
+    )
+    _validate_session_read_query(query, path)
+    return query
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    """agent_session 行投影（§4.2 SessionRead 元数据；草稿只携引用不载正文）。"""
+
+    user_scope: str
+    session_id: str
+    title: str
+    title_user_set: bool
+    pinned: bool
+    archived: bool
+    draft_revision: int
+    event_seq: int
+    created_at: str
+    updated_at: str
+    revision: int
+    draft_transfer_ref: str | None
+    causal_head_ref: str | None
+    source_module: str | None
+    origin_ref: str | None
+    parent_session_id: str | None
+    branch_metadata: CanonicalJson | None
+    cleaned_at: str | None
+
+
+_SESSION_SUMMARY_KEYS: Final = frozenset(
+    {
+        "user_scope",
+        "session_id",
+        "title",
+        "title_user_set",
+        "pinned",
+        "archived",
+        "draft_revision",
+        "event_seq",
+        "created_at",
+        "updated_at",
+        "revision",
+        "draft_transfer_ref",
+        "causal_head_ref",
+        "source_module",
+        "origin_ref",
+        "parent_session_id",
+        "branch_metadata",
+        "cleaned_at",
+    }
+)
+
+
+def decode_session_summary(value: object, path: str = "$.session_summary") -> SessionSummary:
+    """严格解码会话摘要（18 键全必填禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SESSION_SUMMARY_KEYS, path)
+    return SessionSummary(
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        title=_require_text(value["title"], f"{path}.title"),
+        title_user_set=_require_bool(value["title_user_set"], f"{path}.title_user_set"),
+        pinned=_require_bool(value["pinned"], f"{path}.pinned"),
+        archived=_require_bool(value["archived"], f"{path}.archived"),
+        draft_revision=cast(int, require_revision(value["draft_revision"], f"{path}.draft_revision")),
+        event_seq=_nonneg_int(value["event_seq"], f"{path}.event_seq"),
+        created_at=_require_utc_timestamp(value["created_at"], f"{path}.created_at"),
+        updated_at=_require_utc_timestamp(value["updated_at"], f"{path}.updated_at"),
+        revision=cast(int, require_revision(value["revision"], f"{path}.revision")),
+        draft_transfer_ref=_opt_str(value["draft_transfer_ref"], f"{path}.draft_transfer_ref"),
+        causal_head_ref=_opt_str(value["causal_head_ref"], f"{path}.causal_head_ref"),
+        source_module=_opt_str(value["source_module"], f"{path}.source_module"),
+        origin_ref=_opt_str(value["origin_ref"], f"{path}.origin_ref"),
+        parent_session_id=_opt_str(value["parent_session_id"], f"{path}.parent_session_id"),
+        branch_metadata=_opt_json_text(value["branch_metadata"], f"{path}.branch_metadata"),
+        cleaned_at=_opt_timestamp(value["cleaned_at"], f"{path}.cleaned_at"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionSummary:
+    """agent_execution 行投影（§4.3 execution/nodes 行：状态/覆盖/计数/水位分列）。"""
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    execution_kind: str
+    node_id: str
+    display_state: str
+    goal_coverage: str
+    owner_epoch: int
+    dispatch_closed: bool
+    deletion_fenced: bool
+    model_attempt_count: int
+    tool_call_count: int
+    active_ms: int
+    event_seq: int
+    created_at: str
+    updated_at: str
+    revision: int
+    source_module: str | None
+    business_request_id: str | None
+    intent_digest: str | None
+    parent_execution_id: str | None
+    comparison_group_ref: str | None
+    comparison_lane_ref: str | None
+    current_round_id: str | None
+    last_verified_at: str | None
+    ended_at: str | None
+    unknown_refs: CanonicalJson | None
+
+
+_EXECUTION_SUMMARY_KEYS: Final = frozenset(
+    {
+        "user_scope",
+        "session_id",
+        "execution_id",
+        "execution_kind",
+        "node_id",
+        "display_state",
+        "goal_coverage",
+        "owner_epoch",
+        "dispatch_closed",
+        "deletion_fenced",
+        "model_attempt_count",
+        "tool_call_count",
+        "active_ms",
+        "event_seq",
+        "created_at",
+        "updated_at",
+        "revision",
+        "source_module",
+        "business_request_id",
+        "intent_digest",
+        "parent_execution_id",
+        "comparison_group_ref",
+        "comparison_lane_ref",
+        "current_round_id",
+        "last_verified_at",
+        "ended_at",
+        "unknown_refs",
+    }
+)
+
+
+def decode_execution_summary(value: object, path: str = "$.execution_summary") -> ExecutionSummary:
+    """严格解码执行摘要（27 键全必填禁额外键；值集与 §9.4 CHECK 同步）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _EXECUTION_SUMMARY_KEYS, path)
+    return ExecutionSummary(
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        execution_kind=_require_choice(
+            value["execution_kind"], EXECUTION_KINDS, f"{path}.execution_kind", "invalid_execution_kind"
+        ),
+        node_id=_require_str(value["node_id"], f"{path}.node_id"),
+        display_state=_require_choice(
+            value["display_state"], DISPLAY_STATES, f"{path}.display_state", "invalid_display_state"
+        ),
+        goal_coverage=_require_choice(
+            value["goal_coverage"], GOAL_COVERAGES, f"{path}.goal_coverage", "invalid_goal_coverage"
+        ),
+        owner_epoch=_nonneg_int(value["owner_epoch"], f"{path}.owner_epoch"),
+        dispatch_closed=_require_bool(value["dispatch_closed"], f"{path}.dispatch_closed"),
+        deletion_fenced=_require_bool(value["deletion_fenced"], f"{path}.deletion_fenced"),
+        model_attempt_count=_nonneg_int(value["model_attempt_count"], f"{path}.model_attempt_count"),
+        tool_call_count=_nonneg_int(value["tool_call_count"], f"{path}.tool_call_count"),
+        active_ms=_nonneg_int(value["active_ms"], f"{path}.active_ms"),
+        event_seq=_nonneg_int(value["event_seq"], f"{path}.event_seq"),
+        created_at=_require_utc_timestamp(value["created_at"], f"{path}.created_at"),
+        updated_at=_require_utc_timestamp(value["updated_at"], f"{path}.updated_at"),
+        revision=cast(int, require_revision(value["revision"], f"{path}.revision")),
+        source_module=_opt_str(value["source_module"], f"{path}.source_module"),
+        business_request_id=_opt_str(value["business_request_id"], f"{path}.business_request_id"),
+        intent_digest=_opt_digest(value["intent_digest"], f"{path}.intent_digest"),
+        parent_execution_id=_opt_str(value["parent_execution_id"], f"{path}.parent_execution_id"),
+        comparison_group_ref=_opt_str(value["comparison_group_ref"], f"{path}.comparison_group_ref"),
+        comparison_lane_ref=_opt_str(value["comparison_lane_ref"], f"{path}.comparison_lane_ref"),
+        current_round_id=_opt_str(value["current_round_id"], f"{path}.current_round_id"),
+        last_verified_at=_opt_timestamp(value["last_verified_at"], f"{path}.last_verified_at"),
+        ended_at=_opt_timestamp(value["ended_at"], f"{path}.ended_at"),
+        unknown_refs=_opt_json_text(value["unknown_refs"], f"{path}.unknown_refs"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MessagePageItem:
+    """agent_message 首屏投影（§4.3 messages_page 行）：body_ref 行不载正文，正文按需读取。
+
+    行身份/事件身份/角色/正文或 chunk 引用/规范载荷文本；``body_text`` 与
+    ``body_ref`` 互斥（§9.6 CHECK body_exclusive）。
+    """
+
+    message_id: str
+    session_id: str
+    event_id: str
+    session_seq: int
+    event_kind: EventKind
+    payload_kind: str
+    subject_id: str
+    subject_revision: int
+    occurred_at: str
+    committed_at: str
+    execution_id: str | None
+    round_id: str | None
+    node_id: str | None
+    execution_seq: int | None
+    input_revision: int | None
+    role: MessageRole | None
+    role_id: str | None
+    role_version: str | None
+    body_text: str | None
+    body_ref: str | None
+    payload: CanonicalJson | None
+    native_fact_ref: str | None
+    tool_call_id: str | None
+
+
+_MESSAGE_PAGE_ITEM_KEYS: Final = frozenset(
+    {
+        "message_id",
+        "session_id",
+        "event_id",
+        "session_seq",
+        "event_kind",
+        "payload_kind",
+        "subject_id",
+        "subject_revision",
+        "occurred_at",
+        "committed_at",
+        "execution_id",
+        "round_id",
+        "node_id",
+        "execution_seq",
+        "input_revision",
+        "role",
+        "role_id",
+        "role_version",
+        "body_text",
+        "body_ref",
+        "payload",
+        "native_fact_ref",
+        "tool_call_id",
+    }
+)
+
+
+def decode_message_page_item(value: object, path: str = "$.message") -> MessagePageItem:
+    """严格解码消息首屏项（23 键全必填禁额外键；行归属与 §9.6 CHECK 镜像）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _MESSAGE_PAGE_ITEM_KEYS, path)
+    execution_id = _opt_str(value["execution_id"], f"{path}.execution_id")
+    round_id = _opt_str(value["round_id"], f"{path}.round_id")
+    execution_seq = _opt_int(value["execution_seq"], f"{path}.execution_seq", minimum=1)
+    if (execution_id is None) != (round_id is None):
+        _fail("identity_mismatch", f"{path}.round_id")
+    if execution_id is not None and execution_seq is None:
+        _fail("identity_mismatch", f"{path}.execution_seq")
+    if execution_id is None and execution_seq is not None:
+        _fail("identity_mismatch", f"{path}.execution_seq")
+    body_text = _opt_text(value["body_text"], f"{path}.body_text")
+    body_ref = _opt_str(value["body_ref"], f"{path}.body_ref")
+    if body_text is not None and body_ref is not None:
+        _fail("body_conflict", f"{path}.body_ref")
+    return MessagePageItem(
+        message_id=_require_str(value["message_id"], f"{path}.message_id"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        event_id=_require_str(value["event_id"], f"{path}.event_id"),
+        session_seq=cast(int, require_revision(value["session_seq"], f"{path}.session_seq")),
+        event_kind=_require_enum(value["event_kind"], EventKind, f"{path}.event_kind", "invalid_event_kind"),
+        payload_kind=_require_str(value["payload_kind"], f"{path}.payload_kind"),
+        subject_id=_require_str(value["subject_id"], f"{path}.subject_id"),
+        subject_revision=cast(int, require_revision(value["subject_revision"], f"{path}.subject_revision")),
+        occurred_at=_require_utc_timestamp(value["occurred_at"], f"{path}.occurred_at"),
+        committed_at=_require_utc_timestamp(value["committed_at"], f"{path}.committed_at"),
+        execution_id=execution_id,
+        round_id=round_id,
+        node_id=_opt_str(value["node_id"], f"{path}.node_id"),
+        execution_seq=execution_seq,
+        input_revision=_opt_int(value["input_revision"], f"{path}.input_revision", minimum=1),
+        role=_require_enum(value["role"], MessageRole, f"{path}.role", "invalid_role")
+        if value["role"] is not None
+        else None,
+        role_id=_opt_str(value["role_id"], f"{path}.role_id"),
+        role_version=_opt_str(value["role_version"], f"{path}.role_version"),
+        body_text=body_text,
+        body_ref=body_ref,
+        payload=_opt_json_text(value["payload"], f"{path}.payload"),
+        native_fact_ref=_opt_str(value["native_fact_ref"], f"{path}.native_fact_ref"),
+        tool_call_id=_opt_str(value["tool_call_id"], f"{path}.tool_call_id"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactPageItem:
+    """agent_artifact 首屏投影（§4.3 artifacts_page 行）：身份/版本/摘要/正文或 chunk 引用。
+
+    ``result_payload`` 结构未冻结，以 CanonicalJson 文本承载；完整成果正文经
+    read_artifact 按需读取（首屏不复制完整正文）。
+    """
+
+    artifact_id: str
+    artifact_version: int
+    session_id: str
+    execution_id: str
+    round_id: str
+    artifact_kind: str
+    input_revision: int
+    actual_input_digest: str
+    actual_model_ref: str
+    result_digest: str
+    source_available_state: str
+    created_at: str
+    updated_at: str
+    revision: int
+    summary: str | None
+    body_text: str | None
+    body_ref: str | None
+    result_payload: CanonicalJson | None
+    published_at: str | None
+    cleaned_at: str | None
+
+
+_ARTIFACT_PAGE_ITEM_KEYS: Final = frozenset(
+    {
+        "artifact_id",
+        "artifact_version",
+        "session_id",
+        "execution_id",
+        "round_id",
+        "artifact_kind",
+        "input_revision",
+        "actual_input_digest",
+        "actual_model_ref",
+        "result_digest",
+        "source_available_state",
+        "created_at",
+        "updated_at",
+        "revision",
+        "summary",
+        "body_text",
+        "body_ref",
+        "result_payload",
+        "published_at",
+        "cleaned_at",
+    }
+)
+
+
+def decode_artifact_page_item(value: object, path: str = "$.artifact") -> ArtifactPageItem:
+    """严格解码成果首屏项（20 键全必填禁额外键；值集与 §9.7 CHECK 同步）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _ARTIFACT_PAGE_ITEM_KEYS, path)
+    body_text = _opt_text(value["body_text"], f"{path}.body_text")
+    body_ref = _opt_str(value["body_ref"], f"{path}.body_ref")
+    if body_text is not None and body_ref is not None:
+        _fail("body_conflict", f"{path}.body_ref")
+    return ArtifactPageItem(
+        artifact_id=_require_str(value["artifact_id"], f"{path}.artifact_id"),
+        artifact_version=cast(int, require_revision(value["artifact_version"], f"{path}.artifact_version")),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        artifact_kind=_require_choice(
+            value["artifact_kind"], ARTIFACT_KINDS, f"{path}.artifact_kind", "invalid_artifact_kind"
+        ),
+        input_revision=cast(int, require_revision(value["input_revision"], f"{path}.input_revision")),
+        actual_input_digest=_require_digest(value["actual_input_digest"], f"{path}.actual_input_digest"),
+        actual_model_ref=_require_str(value["actual_model_ref"], f"{path}.actual_model_ref"),
+        result_digest=_require_digest(value["result_digest"], f"{path}.result_digest"),
+        source_available_state=_require_str(value["source_available_state"], f"{path}.source_available_state"),
+        created_at=_require_utc_timestamp(value["created_at"], f"{path}.created_at"),
+        updated_at=_require_utc_timestamp(value["updated_at"], f"{path}.updated_at"),
+        revision=cast(int, require_revision(value["revision"], f"{path}.revision")),
+        summary=_opt_text(value["summary"], f"{path}.summary"),
+        body_text=body_text,
+        body_ref=body_ref,
+        result_payload=_opt_json_text(value["result_payload"], f"{path}.result_payload"),
+        published_at=_opt_timestamp(value["published_at"], f"{path}.published_at"),
+        cleaned_at=_opt_timestamp(value["cleaned_at"], f"{path}.cleaned_at"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionSummary:
+    """agent_decision 行投影（§4.3 decisions 行）：载荷以 CanonicalJson 文本承载。
+
+    原回执经 ``answer_command_id`` 引用 + read_command 按需查询，快照不复制
+    完整回执正文（SessionRead「不复制完整正文」同原则）；保存成功不冒认批准生效。
+    """
+
+    decision_id: str
+    session_id: str
+    execution_id: str
+    round_id: str
+    node_id: str
+    decision_kind: str
+    presentation_batch_seq: int
+    created_at: str
+    updated_at: str
+    revision: int
+    tool_call_id: str | None
+    question_payload: CanonicalJson | None
+    answer_schema: CanonicalJson | None
+    parameter_digest: str | None
+    source_scope_digest: str | None
+    service_ref: str | None
+    tool_ref: str | None
+    tool_schema_version: str | None
+    expires_at: str | None
+    answer_consumed_at: str | None
+    answer_command_id: str | None
+    grant_id: str | None
+    grant_revision: int | None
+    grant_state: str | None
+    dispatch_operation_id: str | None
+    data_consent_payload: CanonicalJson | None
+
+
+_DECISION_SUMMARY_KEYS: Final = frozenset(
+    {
+        "decision_id",
+        "session_id",
+        "execution_id",
+        "round_id",
+        "node_id",
+        "decision_kind",
+        "presentation_batch_seq",
+        "created_at",
+        "updated_at",
+        "revision",
+        "tool_call_id",
+        "question_payload",
+        "answer_schema",
+        "parameter_digest",
+        "source_scope_digest",
+        "service_ref",
+        "tool_ref",
+        "tool_schema_version",
+        "expires_at",
+        "answer_consumed_at",
+        "answer_command_id",
+        "grant_id",
+        "grant_revision",
+        "grant_state",
+        "dispatch_operation_id",
+        "data_consent_payload",
+    }
+)
+
+
+def decode_decision_summary(value: object, path: str = "$.decision") -> DecisionSummary:
+    """严格解码决定摘要（26 键全必填禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DECISION_SUMMARY_KEYS, path)
+    return DecisionSummary(
+        decision_id=_require_str(value["decision_id"], f"{path}.decision_id"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        node_id=_require_str(value["node_id"], f"{path}.node_id"),
+        decision_kind=_require_str(value["decision_kind"], f"{path}.decision_kind"),
+        presentation_batch_seq=_nonneg_int(value["presentation_batch_seq"], f"{path}.presentation_batch_seq"),
+        created_at=_require_utc_timestamp(value["created_at"], f"{path}.created_at"),
+        updated_at=_require_utc_timestamp(value["updated_at"], f"{path}.updated_at"),
+        revision=cast(int, require_revision(value["revision"], f"{path}.revision")),
+        tool_call_id=_opt_str(value["tool_call_id"], f"{path}.tool_call_id"),
+        question_payload=_opt_json_text(value["question_payload"], f"{path}.question_payload"),
+        answer_schema=_opt_json_text(value["answer_schema"], f"{path}.answer_schema"),
+        parameter_digest=_opt_digest(value["parameter_digest"], f"{path}.parameter_digest"),
+        source_scope_digest=_opt_digest(value["source_scope_digest"], f"{path}.source_scope_digest"),
+        service_ref=_opt_str(value["service_ref"], f"{path}.service_ref"),
+        tool_ref=_opt_str(value["tool_ref"], f"{path}.tool_ref"),
+        tool_schema_version=_opt_str(value["tool_schema_version"], f"{path}.tool_schema_version"),
+        expires_at=_opt_timestamp(value["expires_at"], f"{path}.expires_at"),
+        answer_consumed_at=_opt_timestamp(value["answer_consumed_at"], f"{path}.answer_consumed_at"),
+        answer_command_id=_opt_str(value["answer_command_id"], f"{path}.answer_command_id"),
+        grant_id=_opt_str(value["grant_id"], f"{path}.grant_id"),
+        grant_revision=_opt_int(value["grant_revision"], f"{path}.grant_revision", minimum=0),
+        grant_state=_opt_choice_safe(value["grant_state"], f"{path}.grant_state"),
+        dispatch_operation_id=_opt_str(value["dispatch_operation_id"], f"{path}.dispatch_operation_id"),
+        data_consent_payload=_opt_json_text(value["data_consent_payload"], f"{path}.data_consent_payload"),
+    )
+
+
+def _opt_choice_safe(value: object, path: str) -> str | None:
+    return None if value is None else _require_choice(value, GRANT_STATES, path, "invalid_grant_state")
+
+
+@dataclass(frozen=True, slots=True)
+class MessagePage:
+    """消息首屏页（§4.2/§4.3 messages_page：分页上界 + 下一游标，不静默截断）。"""
+
+    items: tuple[MessagePageItem, ...]
+    has_more: bool
+    next_cursor: str | None
+
+
+_MESSAGE_PAGE_KEYS: Final = frozenset({"items", "has_more", "next_cursor"})
+
+
+def decode_message_page(value: object, path: str = "$.messages_page") -> MessagePage:
+    """严格解码消息页（3 键全必填；has_more=True 必须携下一游标）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _MESSAGE_PAGE_KEYS, path)
+    items_value = value["items"]
+    if not isinstance(items_value, list):
+        _fail("invalid_type", f"{path}.items")
+    items = tuple(decode_message_page_item(item, f"{path}.items[{index}]") for index, item in enumerate(items_value))
+    has_more = _require_bool(value["has_more"], f"{path}.has_more")
+    next_cursor = _opt_str(value["next_cursor"], f"{path}.next_cursor")
+    if has_more and next_cursor is None:
+        _fail("invalid_cursor", f"{path}.next_cursor")
+    return MessagePage(items=items, has_more=has_more, next_cursor=next_cursor)
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactPage:
+    """成果首屏页（§4.2/§4.3 artifacts_page：分页上界 + 下一游标，不静默截断）。"""
+
+    items: tuple[ArtifactPageItem, ...]
+    has_more: bool
+    next_cursor: str | None
+
+
+_ARTIFACT_PAGE_KEYS: Final = frozenset({"items", "has_more", "next_cursor"})
+
+
+def decode_artifact_page(value: object, path: str = "$.artifacts_page") -> ArtifactPage:
+    """严格解码成果页（3 键全必填；has_more=True 必须携下一游标）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _ARTIFACT_PAGE_KEYS, path)
+    items_value = value["items"]
+    if not isinstance(items_value, list):
+        _fail("invalid_type", f"{path}.items")
+    items = tuple(decode_artifact_page_item(item, f"{path}.items[{index}]") for index, item in enumerate(items_value))
+    has_more = _require_bool(value["has_more"], f"{path}.has_more")
+    next_cursor = _opt_str(value["next_cursor"], f"{path}.next_cursor")
+    if has_more and next_cursor is None:
+        _fail("invalid_cursor", f"{path}.next_cursor")
+    return ArtifactPage(items=items, has_more=has_more, next_cursor=next_cursor)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRead:
+    """会话首读结果（§4.2 read_session 五要素；不复制完整成果正文，VM 按需加载）。"""
+
+    summary: SessionSummary
+    executions: tuple[ExecutionSummary, ...]
+    messages: MessagePage
+    artifacts: ArtifactPage
+    decisions: tuple[DecisionSummary, ...]
+
+
+_SESSION_READ_KEYS: Final = frozenset({"summary", "executions", "messages", "artifacts", "decisions"})
+
+
+def decode_session_read(value: object, path: str = "$.session_read") -> SessionRead:
+    """严格解码会话首读结果（5 键全必填）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SESSION_READ_KEYS, path)
+    executions_value = value["executions"]
+    decisions_value = value["decisions"]
+    if not isinstance(executions_value, list):
+        _fail("invalid_type", f"{path}.executions")
+    if not isinstance(decisions_value, list):
+        _fail("invalid_type", f"{path}.decisions")
+    return SessionRead(
+        summary=decode_session_summary(value["summary"], f"{path}.summary"),
+        executions=tuple(
+            decode_execution_summary(item, f"{path}.executions[{index}]") for index, item in enumerate(executions_value)
+        ),
+        messages=decode_message_page(value["messages"], f"{path}.messages"),
+        artifacts=decode_artifact_page(value["artifacts"], f"{path}.artifacts"),
+        decisions=tuple(
+            decode_decision_summary(item, f"{path}.decisions[{index}]") for index, item in enumerate(decisions_value)
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotIdentity:
+    """快照身份（§4.3 identity 行）：用户域/会话/执行/当前轮与准确 native workflow 引用。
+
+    ``workflow_id``/``run_epoch`` 来自当前 round（§9.5）；排队执行无 round 时为
+    None，且 round 存在必携 input_revision（round 行 NOT NULL）。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    node_id: str
+    round_id: str | None
+    input_revision: int | None
+    workflow_id: str | None
+    run_epoch: int | None
+
+
+_SNAPSHOT_IDENTITY_KEYS: Final = frozenset(
+    {
+        "user_scope",
+        "session_id",
+        "execution_id",
+        "node_id",
+        "round_id",
+        "input_revision",
+        "workflow_id",
+        "run_epoch",
+    }
+)
+
+
+def decode_snapshot_identity(value: object, path: str = "$.identity") -> SnapshotIdentity:
+    """严格解码快照身份（8 键全必填；round/workflow 耦合校验）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SNAPSHOT_IDENTITY_KEYS, path)
+    round_id = _opt_str(value["round_id"], f"{path}.round_id")
+    input_revision = _opt_int(value["input_revision"], f"{path}.input_revision", minimum=1)
+    workflow_id = _opt_str(value["workflow_id"], f"{path}.workflow_id")
+    run_epoch = _opt_int(value["run_epoch"], f"{path}.run_epoch", minimum=1)
+    if (workflow_id is not None or run_epoch is not None) and round_id is None:
+        _fail("identity_mismatch", f"{path}.round_id")
+    if round_id is not None and input_revision is None:
+        _fail("identity_mismatch", f"{path}.input_revision")
+    return SnapshotIdentity(
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        node_id=_require_str(value["node_id"], f"{path}.node_id"),
+        round_id=round_id,
+        input_revision=input_revision,
+        workflow_id=workflow_id,
+        run_epoch=run_epoch,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceReadSummary:
+    """来源读取摘要（§4.3 source_reads 行）：source_link 行 + agent_asset_version join 元数据。"""
+
+    link_id: str
+    source_id: str
+    source_version: str
+    source_kind: str
+    display_name: str
+    digest: str
+    read_state: ReadState
+    verification_state: VerificationState
+    consumer_kind: str
+    consumer_id: str
+    consumer_version: str
+    relation_kind: str
+    disabled_inherited: bool
+    tombstoned: bool
+    available_at: str | None
+    disabled_at: str | None
+    locator_payload: CanonicalJson | None
+    claim_ref: str | None
+
+
+_SOURCE_READ_SUMMARY_KEYS: Final = frozenset(
+    {
+        "link_id",
+        "source_id",
+        "source_version",
+        "source_kind",
+        "display_name",
+        "digest",
+        "read_state",
+        "verification_state",
+        "consumer_kind",
+        "consumer_id",
+        "consumer_version",
+        "relation_kind",
+        "disabled_inherited",
+        "tombstoned",
+        "available_at",
+        "disabled_at",
+        "locator_payload",
+        "claim_ref",
+    }
+)
+
+
+def decode_source_read_summary(value: object, path: str = "$.source_read") -> SourceReadSummary:
+    """严格解码来源读取摘要（18 键全必填；值集与 §9.10 CHECK 同步）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SOURCE_READ_SUMMARY_KEYS, path)
+    return SourceReadSummary(
+        link_id=_require_str(value["link_id"], f"{path}.link_id"),
+        source_id=_require_str(value["source_id"], f"{path}.source_id"),
+        source_version=_require_str(value["source_version"], f"{path}.source_version"),
+        source_kind=_require_choice(value["source_kind"], ASSET_KINDS, f"{path}.source_kind", "invalid_source_kind"),
+        display_name=_require_str(value["display_name"], f"{path}.display_name"),
+        digest=_require_digest(value["digest"], f"{path}.digest"),
+        read_state=_require_enum(value["read_state"], ReadState, f"{path}.read_state", "invalid_read_state"),
+        verification_state=_require_enum(
+            value["verification_state"], VerificationState, f"{path}.verification_state", "invalid_verification_state"
+        ),
+        consumer_kind=_require_choice(
+            value["consumer_kind"], SOURCE_CONSUMER_KINDS, f"{path}.consumer_kind", "invalid_consumer_kind"
+        ),
+        consumer_id=_require_str(value["consumer_id"], f"{path}.consumer_id"),
+        consumer_version=_require_str(value["consumer_version"], f"{path}.consumer_version"),
+        relation_kind=_require_str(value["relation_kind"], f"{path}.relation_kind"),
+        disabled_inherited=_require_bool(value["disabled_inherited"], f"{path}.disabled_inherited"),
+        tombstoned=_require_bool(value["tombstoned"], f"{path}.tombstoned"),
+        available_at=_opt_timestamp(value["available_at"], f"{path}.available_at"),
+        disabled_at=_opt_timestamp(value["disabled_at"], f"{path}.disabled_at"),
+        locator_payload=_opt_json_text(value["locator_payload"], f"{path}.locator_payload"),
+        claim_ref=_opt_str(value["claim_ref"], f"{path}.claim_ref"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OperationSummary:
+    """工具/IO 操作摘要（§4.3 operation_summaries 行）：phase/effect/io 分列。
+
+    工具返回用 ``result_ref`` 引用（完整返回经 read_operation 按需读取）；
+    ``io_state``/``error_category`` 为未冻结 wire 值（C-01 留痕），strict str。
+    """
+
+    operation_id: str
+    phase: str
+    effect_state: EffectState
+    io_state: str
+    owner_epoch: int
+    run_epoch: int
+    active_ms: int
+    elapsed_ms: int
+    session_id: str | None
+    execution_id: str | None
+    round_id: str | None
+    tool_call_id: str | None
+    grant_id: str | None
+    grant_revision: int | None
+    result_ref: str | None
+    error_code: str | None
+    error_category: str | None
+    deadline_at: str | None
+    dispatched_at: str | None
+    exited_at: str | None
+    verified_at: str | None
+    artifact_id: str | None
+    artifact_version: int | None
+
+
+_OPERATION_SUMMARY_KEYS: Final = frozenset(
+    {
+        "operation_id",
+        "phase",
+        "effect_state",
+        "io_state",
+        "owner_epoch",
+        "run_epoch",
+        "active_ms",
+        "elapsed_ms",
+        "session_id",
+        "execution_id",
+        "round_id",
+        "tool_call_id",
+        "grant_id",
+        "grant_revision",
+        "result_ref",
+        "error_code",
+        "error_category",
+        "deadline_at",
+        "dispatched_at",
+        "exited_at",
+        "verified_at",
+        "artifact_id",
+        "artifact_version",
+    }
+)
+
+
+def decode_operation_summary(value: object, path: str = "$.operation_summary") -> OperationSummary:
+    """严格解码操作摘要（23 键全必填；值集与 §9.9 CHECK 同步）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _OPERATION_SUMMARY_KEYS, path)
+    artifact_id = _opt_str(value["artifact_id"], f"{path}.artifact_id")
+    artifact_version = _opt_int(value["artifact_version"], f"{path}.artifact_version", minimum=1)
+    if (artifact_id is None) != (artifact_version is None):
+        _fail("identity_mismatch", f"{path}.artifact_version")
+    return OperationSummary(
+        operation_id=_require_str(value["operation_id"], f"{path}.operation_id"),
+        phase=_require_choice(value["phase"], OPERATION_PHASES, f"{path}.phase", "invalid_phase"),
+        effect_state=_require_enum(value["effect_state"], EffectState, f"{path}.effect_state", "invalid_effect_state"),
+        io_state=_require_str(value["io_state"], f"{path}.io_state"),
+        owner_epoch=_nonneg_int(value["owner_epoch"], f"{path}.owner_epoch"),
+        run_epoch=_nonneg_int(value["run_epoch"], f"{path}.run_epoch"),
+        active_ms=_nonneg_int(value["active_ms"], f"{path}.active_ms"),
+        elapsed_ms=_nonneg_int(value["elapsed_ms"], f"{path}.elapsed_ms"),
+        session_id=_opt_str(value["session_id"], f"{path}.session_id"),
+        execution_id=_opt_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_opt_str(value["round_id"], f"{path}.round_id"),
+        tool_call_id=_opt_str(value["tool_call_id"], f"{path}.tool_call_id"),
+        grant_id=_opt_str(value["grant_id"], f"{path}.grant_id"),
+        grant_revision=_opt_int(value["grant_revision"], f"{path}.grant_revision", minimum=0),
+        result_ref=_opt_str(value["result_ref"], f"{path}.result_ref"),
+        error_code=_opt_str(value["error_code"], f"{path}.error_code"),
+        error_category=_opt_str(value["error_category"], f"{path}.error_category"),
+        deadline_at=_opt_timestamp(value["deadline_at"], f"{path}.deadline_at"),
+        dispatched_at=_opt_timestamp(value["dispatched_at"], f"{path}.dispatched_at"),
+        exited_at=_opt_timestamp(value["exited_at"], f"{path}.exited_at"),
+        verified_at=_opt_timestamp(value["verified_at"], f"{path}.verified_at"),
+        artifact_id=artifact_id,
+        artifact_version=artifact_version,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class UsageSummary:
+    """用量摘要（§4.3 usage 行）：实际 attempt/tool/active 累计；费用投影未接固定 unknown。
+
+    ``cost_state`` 恒为 ``unknown``（原账本 known/unpriced/reserved 随费用投影接入
+    扩展）；费用字段缺失保 unknown，不填 0 冒认免费（R21）。
+    """
+
+    model_attempt_count: int
+    tool_call_count: int
+    active_ms: int
+    cost_state: str = "unknown"
+
+
+_USAGE_SUMMARY_KEYS: Final = frozenset({"model_attempt_count", "tool_call_count", "active_ms", "cost_state"})
+
+
+def decode_usage_summary(value: object, path: str = "$.usage") -> UsageSummary:
+    """严格解码用量摘要（4 键全必填；cost_state 固定 unknown）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _USAGE_SUMMARY_KEYS, path)
+    cost_state = _require_str(value["cost_state"], f"{path}.cost_state")
+    if cost_state != "unknown":
+        _fail("invalid_cost_state", f"{path}.cost_state")
+    return UsageSummary(
+        model_attempt_count=_nonneg_int(value["model_attempt_count"], f"{path}.model_attempt_count"),
+        tool_call_count=_nonneg_int(value["tool_call_count"], f"{path}.tool_call_count"),
+        active_ms=_nonneg_int(value["active_ms"], f"{path}.active_ms"),
+        cost_state=cost_state,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReadMarkEntry:
+    """阅读水位标记投影（§4.3 read_marks 行：last/batch/postponed 三单调水位，R22）。"""
+
+    marker_id: str
+    marker_kind: str
+    target_id: str
+    last_seq: int
+    batch_seq: int
+    postponed_through_seq: int
+    session_id: str | None
+    read_targets: tuple[str, ...] | None
+
+
+_READ_MARK_ENTRY_KEYS: Final = frozenset(
+    {
+        "marker_id",
+        "marker_kind",
+        "target_id",
+        "last_seq",
+        "batch_seq",
+        "postponed_through_seq",
+        "session_id",
+        "read_targets",
+    }
+)
+
+
+def decode_read_mark_entry(value: object, path: str = "$.read_mark") -> ReadMarkEntry:
+    """严格解码阅读水位标记（8 键全必填；read_targets 为精确已读 ID 或 None）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _READ_MARK_ENTRY_KEYS, path)
+    read_targets_value = value["read_targets"]
+    read_targets: tuple[str, ...] | None
+    if read_targets_value is None:
+        read_targets = None
+    else:
+        if not isinstance(read_targets_value, list):
+            _fail("invalid_type", f"{path}.read_targets")
+        read_targets = tuple(
+            _require_str(item, f"{path}.read_targets[{index}]") for index, item in enumerate(read_targets_value)
+        )
+    return ReadMarkEntry(
+        marker_id=_require_str(value["marker_id"], f"{path}.marker_id"),
+        marker_kind=_require_str(value["marker_kind"], f"{path}.marker_kind"),
+        target_id=_require_str(value["target_id"], f"{path}.target_id"),
+        last_seq=_nonneg_int(value["last_seq"], f"{path}.last_seq"),
+        batch_seq=_nonneg_int(value["batch_seq"], f"{path}.batch_seq"),
+        postponed_through_seq=_nonneg_int(value["postponed_through_seq"], f"{path}.postponed_through_seq"),
+        session_id=_opt_str(value["session_id"], f"{path}.session_id"),
+        read_targets=read_targets,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Observation:
+    """观测状态（§4.3 observation 行）：当前查询是否可靠、最后核对时刻；unknown 不冒充可靠。"""
+
+    reliable: bool
+    last_verified_at: str | None
+
+
+_OBSERVATION_KEYS: Final = frozenset({"reliable", "last_verified_at"})
+
+
+def decode_observation(value: object, path: str = "$.observation") -> Observation:
+    """严格解码观测状态（2 键全必填）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _OBSERVATION_KEYS, path)
+    return Observation(
+        reliable=_require_bool(value["reliable"], f"{path}.reliable"),
+        last_verified_at=_opt_timestamp(value["last_verified_at"], f"{path}.last_verified_at"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchSnapshot:
+    """执行快照（§4.3 完整结构逐行映射）：
+
+    identity→:class:`SnapshotIdentity`；revision/双水位/updated_at→同一可靠读取
+    截点（水位是已提交事件，不是 SDK delta 计数）；execution/nodes→
+    :class:`ExecutionSummary`（一层叶子；dependencies 由 actual_input 前序引用
+    承载——agent_execution 无依赖边表，故无独立 dependencies 字段）；
+    frozen_scope/actual_input→round JSONB 规范化 CanonicalJson 文本（结构未冻结
+    不臆造）；messages_page/artifacts_page→分页上界；source_reads/decisions/
+    operation_summaries→行投影；usage→:class:`UsageSummary`（cost_state 固定
+    unknown，读取失败保 unknown 不填 0）；goal_coverage/limitations→覆盖值集与
+    脱敏限制记录（空元组=本次读取未核定到条目，不等于「无限制」承诺）；read_marks/
+    observation→阅读水位与可靠性。
+    """
+
+    identity: SnapshotIdentity
+    revision: int
+    execution_watermark: int
+    session_watermark: int
+    updated_at: str
+    execution: ExecutionSummary
+    nodes: tuple[ExecutionSummary, ...]
+    frozen_scope: CanonicalJson | None
+    actual_input: CanonicalJson | None
+    messages_page: MessagePage
+    artifacts_page: ArtifactPage
+    source_reads: tuple[SourceReadSummary, ...]
+    decisions: tuple[DecisionSummary, ...]
+    operation_summaries: tuple[OperationSummary, ...]
+    usage: UsageSummary
+    goal_coverage: str
+    limitations: tuple[RangeLimitation, ...]
+    read_marks: tuple[ReadMarkEntry, ...]
+    observation: Observation
+
+
+_RESEARCH_SNAPSHOT_KEYS: Final = frozenset(
+    {
+        "identity",
+        "revision",
+        "execution_watermark",
+        "session_watermark",
+        "updated_at",
+        "execution",
+        "nodes",
+        "frozen_scope",
+        "actual_input",
+        "messages_page",
+        "artifacts_page",
+        "source_reads",
+        "decisions",
+        "operation_summaries",
+        "usage",
+        "goal_coverage",
+        "limitations",
+        "read_marks",
+        "observation",
+    }
+)
+
+
+def _decode_tuple_of(
+    value: object,
+    path: str,
+    decode_item: Any,
+) -> tuple[Any, ...]:
+    if not isinstance(value, list):
+        _fail("invalid_type", path)
+    return tuple(decode_item(item, f"{path}[{index}]") for index, item in enumerate(value))
+
+
+def decode_research_snapshot(value: object, path: str = "$.snapshot") -> ResearchSnapshot:
+    """严格解码执行快照（19 键全必填禁额外键；嵌套递归 strict）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _RESEARCH_SNAPSHOT_KEYS, path)
+    return ResearchSnapshot(
+        identity=decode_snapshot_identity(value["identity"], f"{path}.identity"),
+        revision=cast(int, require_revision(value["revision"], f"{path}.revision")),
+        execution_watermark=_nonneg_int(value["execution_watermark"], f"{path}.execution_watermark"),
+        session_watermark=_nonneg_int(value["session_watermark"], f"{path}.session_watermark"),
+        updated_at=_require_utc_timestamp(value["updated_at"], f"{path}.updated_at"),
+        execution=decode_execution_summary(value["execution"], f"{path}.execution"),
+        nodes=_decode_tuple_of(value["nodes"], f"{path}.nodes", decode_execution_summary),
+        frozen_scope=_opt_json_text(value["frozen_scope"], f"{path}.frozen_scope"),
+        actual_input=_opt_json_text(value["actual_input"], f"{path}.actual_input"),
+        messages_page=decode_message_page(value["messages_page"], f"{path}.messages_page"),
+        artifacts_page=decode_artifact_page(value["artifacts_page"], f"{path}.artifacts_page"),
+        source_reads=_decode_tuple_of(value["source_reads"], f"{path}.source_reads", decode_source_read_summary),
+        decisions=_decode_tuple_of(value["decisions"], f"{path}.decisions", decode_decision_summary),
+        operation_summaries=_decode_tuple_of(
+            value["operation_summaries"], f"{path}.operation_summaries", decode_operation_summary
+        ),
+        usage=decode_usage_summary(value["usage"], f"{path}.usage"),
+        goal_coverage=_require_choice(
+            value["goal_coverage"], GOAL_COVERAGES, f"{path}.goal_coverage", "invalid_goal_coverage"
+        ),
+        limitations=_decode_tuple_of(value["limitations"], f"{path}.limitations", decode_range_limitation),
+        read_marks=_decode_tuple_of(value["read_marks"], f"{path}.read_marks", decode_read_mark_entry),
+        observation=decode_observation(value["observation"], f"{path}.observation"),
+    )
