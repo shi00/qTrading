@@ -198,6 +198,17 @@ class TestHealthReportDialog:
         assert issues_column.controls[0].value == "common_reason"
         assert len(issues_column.controls) == 3  # 1 header + 2 reasons
 
+    def test_issues_section_uses_status_tint_alpha(self):
+        """M30-UIB-THEME-03: 问题列表底纹必须用 STATUS_TINT_ALPHA (ERROR 正文须达 4.5)。"""
+        from ui.components.health_report_dialog import _build_health_content
+        from ui.theme import STATUS_TINT_ALPHA
+
+        report = self._make_report()
+        report["reasons"] = ["数据延迟"]
+        content = _build_health_content(report, 600, 600)
+        issues_section = content.content.controls[2]
+        assert issues_section.bgcolor == ft.Colors.with_opacity(STATUS_TINT_ALPHA, self.mock_ac.ERROR)
+
 
 # ---------------------------------------------------------------------------
 # 契约守护测试：HealthReportDialog 声明式组件禁止命令式模式

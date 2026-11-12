@@ -26,6 +26,7 @@ from check_theme_contrast import (  # noqa: E402 - sys.path 注入后导入
     _THRESHOLD_LARGE,
     _THRESHOLD_TEXT,
     _resolve_color,
+    blend_alpha_over,
     check_contrast,
     contrast_ratio,
     main,
@@ -152,15 +153,20 @@ class TestContrastPairsConfig:
         """必须配置至少 1 个色对。"""
         assert len(_CONTRAST_PAIRS) > 0
 
-    def test_pairs_have_4_field_structure(self):
-        """每个色对必须是 (fg, bg, threshold, purpose) 四元组 (F06 用途标注)。"""
+    def test_pairs_have_5_field_structure(self):
+        """每个色对必须是 (fg, bg, threshold, purpose, bg_tint) 五元组 (F06 用途标注 + 底纹背景)。"""
         for pair in _CONTRAST_PAIRS:
-            assert len(pair) == 4
-            fg, bg, threshold, purpose = pair
+            assert len(pair) == 5
+            fg, bg, threshold, purpose, bg_tint = pair
             assert isinstance(fg, str)
             assert isinstance(bg, str)
             assert isinstance(threshold, float)
             assert purpose in self._VALID_PURPOSES, f"未知用途标注 {purpose!r}"
+            if bg_tint is not None:
+                assert isinstance(bg_tint, tuple) and len(bg_tint) == 2, f"bg_tint 结构非法: {bg_tint!r}"
+                tint_token, alpha = bg_tint
+                assert isinstance(tint_token, str) and tint_token
+                assert isinstance(alpha, float) and 0.0 < alpha <= 1.0
 
     def test_text_pairs_use_4_5_threshold(self):
         """正文文本色对 (purpose=text) 阈值必须为 4.5 (F06)。"""
@@ -201,6 +207,94 @@ class TestContrastPairsConfig:
         pairs = {(p.fg, p.bg) for p in _CONTRAST_PAIRS}
         assert ("TABLE_CELL_TEXT", "TABLE_ROW_HOVER") in pairs
         assert ("TEXT_PRIMARY", "TABLE_ROW_HOVER") in pairs
+
+
+class TestErrorContrastPairs:
+    """M30-UIB-THEME-03: ERROR 正文 / ON_ERROR 反色 / ERROR 弱底纹三类色对必须入闸。"""
+
+    def test_error_text_pairs_use_4_5_on_panel_backgrounds(self):
+        """ERROR 真实用于 13/14px 正文, 必须在 SURFACE / CARD_BG 上按正文 4.5 验收。"""
+        panel_pairs = [p for p in _CONTRAST_PAIRS if p.fg == "ERROR" and p.bg_tint is None]
+        assert {"SURFACE", "CARD_BG"} <= {p.bg for p in panel_pairs}
+        for pair in panel_pairs:
+            assert pair.purpose == "text", f"ERROR/{pair.bg} 必须按正文用途验收"
+            assert pair.threshold == _THRESHOLD_TEXT, f"ERROR/{pair.bg} 阈值必须为 4.5"
+
+    def test_on_error_over_error_is_text_threshold(self):
+        """危险按钮/导航角标用 ON_ERROR 叠 ERROR 反色, 必须按正文 4.5 验收。"""
+        pairs = [p for p in _CONTRAST_PAIRS if p.fg == "ON_ERROR" and p.bg == "ERROR"]
+        assert len(pairs) == 1, "必须且只能配置一条 ON_ERROR/ERROR 反色色对"
+        pair = pairs[0]
+        assert pair.purpose == "text"
+        assert pair.threshold == _THRESHOLD_TEXT
+        assert pair.bg_tint is None
+
+    def test_error_tint_pair_uses_theme_alpha(self):
+        """ERROR 弱底纹背景必须由 ui.theme.STATUS_TINT_ALPHA 驱动 (单一正本)。"""
+        from ui.theme import STATUS_TINT_ALPHA
+
+        tinted = [p for p in _CONTRAST_PAIRS if p.bg_tint is not None]
+        assert len(tinted) == 1, "必须且只能配置一条弱底纹色对"
+        pair = tinted[0]
+        assert pair.fg == "ERROR"
+        assert pair.bg == "CARD_BG"
+        assert pair.bg_tint == ("ERROR", STATUS_TINT_ALPHA)
+        assert pair.threshold == _THRESHOLD_TEXT
+        assert pair.purpose == "text"
+
+
+class TestBlendAlphaOver:
+    """blend_alpha_over: token 以 alpha 叠在另一 token 上 → 混合色 (底纹背景建模)。"""
+
+    def test_alpha_zero_returns_base(self):
+        assert blend_alpha_over("#FF0000", "#00FF00", 0.0) == "#00FF00"
+
+    def test_alpha_one_returns_overlay(self):
+        assert blend_alpha_over("#FF0000", "#00FF00", 1.0) == "#FF0000"
+
+    def test_half_blend_is_midpoint(self):
+        assert blend_alpha_over("#000000", "#FFFFFF", 0.5) == "#808080"
+
+    @pytest.mark.parametrize("alpha", (-0.1, 1.1))
+    def test_rejects_out_of_range_alpha(self, alpha):
+        with pytest.raises(ValueError, match="alpha 必须在"):
+            blend_alpha_over("#000000", "#FFFFFF", alpha)
+
+    @pytest.mark.parametrize("hex_color", ("#GGGGGG", "#12"))
+    def test_rejects_invalid_hex(self, hex_color):
+        with pytest.raises(ValueError, match="invalid literal"):
+            blend_alpha_over(hex_color, "#FFFFFF", 0.5)
+
+
+class TestTintedBackgroundDetection:
+    """门禁必须真正用混合后的底纹色判定, 而非只解析 token 名义色。"""
+
+    def test_error_on_tint_below_threshold_is_detected(self, monkeypatch):
+        """探针: DARK 旧 ERROR #FF1744 叠 10% 底纹 over #1E1E1E = 4.058 < 4.5, 必须被检出。"""
+        import check_theme_contrast as ctc
+
+        from ui.theme import STATUS_TINT_ALPHA
+
+        pair = ctc.ContrastPair("PROBE_FG", "PROBE_BG", _THRESHOLD_TEXT, "text", ("PROBE_FG", STATUS_TINT_ALPHA))
+        monkeypatch.setattr(ctc, "_CONTRAST_PAIRS", [pair])
+        monkeypatch.setattr(ctc, "_resolve_color", lambda name, theme: "#FF1744" if name == "PROBE_FG" else "#1E1E1E")
+        errors = ctc.check_contrast()
+        assert len(errors) == 4, f"混合底纹后不达标必须判 4 主题均失败, 实际: {errors}"
+        assert all("PROBE_FG/PROBE_BG" in err for err in errors)
+        # 混合背景必须真实参与计算 (fg 与底纹同色时, 混合后应比名义纯色背景更亮)
+        blended = ctc.blend_alpha_over("#FF1744", "#1E1E1E", STATUS_TINT_ALPHA)
+        assert ctc.contrast_ratio("#FF1744", blended) < ctc.contrast_ratio("#FF1744", "#1E1E1E")
+
+    def test_unresolvable_tint_token_is_reported(self, monkeypatch):
+        """底纹 token 无法解析时必须报错而不是静默跳过。"""
+        import check_theme_contrast as ctc
+
+        pair = ctc.ContrastPair("PROBE_FG", "PROBE_BG", _THRESHOLD_TEXT, "text", ("GONE_TINT", 0.06))
+        monkeypatch.setattr(ctc, "_CONTRAST_PAIRS", [pair])
+        monkeypatch.setattr(ctc, "_resolve_color", lambda name, theme: "#000000" if name != "GONE_TINT" else None)
+        errors = ctc.check_contrast()
+        assert errors, "底纹 token 缺失必须报错"
+        assert all("PROBE_FG/PROBE_BG" in err for err in errors)
 
 
 class TestCheckContrastUnroundedComparison:
@@ -304,6 +398,10 @@ class TestLayer1FieldMap:
     def test_error_mapped_to_color_scheme(self):
         """ERROR 必须映射到 ColorScheme.error。"""
         assert _LAYER1_FIELD_MAP["ERROR"] == "error"
+
+    def test_on_error_mapped_to_color_scheme(self):
+        """ON_ERROR 必须映射到 ColorScheme.on_error (反色用途验收)。"""
+        assert _LAYER1_FIELD_MAP["ON_ERROR"] == "on_error"
 
 
 # ============================================================================
