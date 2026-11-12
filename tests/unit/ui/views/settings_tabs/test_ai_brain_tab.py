@@ -1342,3 +1342,118 @@ class TestHostRebaseCoordination:
         """R16：协调 effect 经 page.run_task 调度（不阻塞渲染循环）。"""
         env = ai_brain_tab_env
         assert env["page"].run_task.call_count >= 2  # 挂载即调度 load + rebase
+
+
+# ============================================================================
+# UIV-AI-01 (R21): 数据出口面板按 EgressAuditState.loaded 分流
+# 未核实状态不得伪装为确定的零计数 / 空态文案
+# ============================================================================
+
+
+class TestEgressPanelLoadedBranches:
+    """UIV-AI-01 (R21): 数据出口面板 loaded 分流。
+
+    loaded=False（初始未加载 / 读取失败——View 视角同态）不得呈现确定的零计数
+    或「暂无外发记录」空态文案，应显示「未检查」（ds_not_checked）；
+    loaded=True 才依据 rows / session_count 呈现真实空表、事实 0 次或聚合表。
+    """
+
+    @staticmethod
+    def _text_values(env: dict) -> list[str]:
+        values = [
+            getattr(ctrl, "value", None) for ctrl in _walk_all_controls(env["result"]) if isinstance(ctrl, ft.Text)
+        ]
+        return [v for v in values if isinstance(v, str)]
+
+    @staticmethod
+    def _set_egress_state(
+        env: dict,
+        *,
+        loaded: bool,
+        today_rows: tuple = (),
+        month_rows: tuple = (),
+        session_count: int = 0,
+    ) -> None:
+        state = env["fake_egress_vm"].state
+        state.loaded = loaded
+        state.today_rows = today_rows
+        state.month_rows = month_rows
+        state.session_count = session_count
+
+    def _rerender_with_egress_state(self, env: dict, **state_kwargs: Any) -> None:
+        # _FakeVM.state 为同一 NonCallableMagicMock 实例（set_state 等值跳过调度），
+        # 故改属性后直接 render_once 重执行组件函数读取新 state 快照。
+        self._set_egress_state(env, **state_kwargs)
+        env["fake_egress_vm"].notify_state()
+        env["result"] = render_once(env["component"])
+
+    def test_not_loaded_shows_not_checked_no_zero_count(self, ai_brain_tab_env) -> None:
+        """loaded=False（初始未加载 / 读取失败）→「未检查」×3；无空态文案、无确定计数。"""
+        env = ai_brain_tab_env
+        self._rerender_with_egress_state(env, loaded=False)
+
+        values = self._text_values(env)
+        assert values.count("i18n[ds_not_checked]") >= 3, "今日/本月表格区与会话计数行均应显示未检查"
+        assert "i18n[egress_empty]" not in values, "未核实时不得显示「暂无外发记录」空态文案"
+        assert "i18n[egress_session_indicator]" not in values, "未核实时不得显示确定的会话计数"
+
+    def test_loaded_empty_rows_shows_empty_state_and_real_count(self, ai_brain_tab_env) -> None:
+        """loaded=True + 空 rows + count=3 → 真实空态（egress_empty）+ 真实会话计数。"""
+        env = ai_brain_tab_env
+        self._rerender_with_egress_state(env, loaded=True, session_count=3)
+
+        values = self._text_values(env)
+        assert "i18n[egress_empty]" in values, "已加载且真实空表应显示空态文案"
+        assert "i18n[egress_session_indicator]" in values, "已加载时应显示真实会话计数"
+        assert "i18n[ds_not_checked]" not in values, "已加载后不应再显示未检查"
+
+    def test_loaded_zero_session_count_is_factual_zero(self, ai_brain_tab_env) -> None:
+        """loaded=True + 空 rows + count=0 → 事实零可如实呈现（R21 允许已核实的 0）。"""
+        env = ai_brain_tab_env
+        self._rerender_with_egress_state(env, loaded=True, session_count=0)
+
+        values = self._text_values(env)
+        assert "i18n[egress_empty]" in values
+        assert "i18n[egress_session_indicator]" in values
+
+    def test_loaded_with_rows_shows_aggregate_table(self, ai_brain_tab_env) -> None:
+        """loaded=True + 非空 rows → DataTable 聚合表（含目的地行文本）。"""
+        from ui.viewmodels.egress_audit_view_model import EgressAggRow
+
+        env = ai_brain_tab_env
+        self._rerender_with_egress_state(
+            env,
+            loaded=True,
+            today_rows=(EgressAggRow(destination="llm:model-a", count=2, payload_size_bytes=1024),),
+            session_count=2,
+        )
+
+        tables = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.DataTable)]
+        assert len(tables) >= 1, "已加载且非空 rows 应渲染聚合表"
+        assert "i18n[ds_not_checked]" not in self._text_values(env)
+
+    def test_reload_success_after_failure_shows_table(self, ai_brain_tab_env) -> None:
+        """失败后成功重试：loaded False→True → 聚合表替换「未检查」，会话计数恢复。"""
+        from ui.viewmodels.egress_audit_view_model import EgressAggRow
+
+        env = ai_brain_tab_env
+        self._rerender_with_egress_state(env, loaded=False)
+        assert "i18n[ds_not_checked]" in self._text_values(env)
+
+        self._rerender_with_egress_state(
+            env,
+            loaded=True,
+            today_rows=(EgressAggRow(destination="llm:model-b", count=1, payload_size_bytes=512),),
+            session_count=1,
+        )
+        values = self._text_values(env)
+        tables = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.DataTable)]
+        assert len(tables) >= 1
+        assert "i18n[ds_not_checked]" not in values
+        assert "i18n[egress_session_indicator]" in values
+
+    def test_source_branches_on_loaded(self) -> None:
+        """契约守护：源码按 egress_state.loaded 分流并消费 ds_not_checked。"""
+        source = _read_source()
+        assert "egress_state.loaded" in source, "egress 面板必须消费 state.loaded 分支"
+        assert 'I18n.get("ds_not_checked")' in source, "未核实态文案必须复用既有 i18n key"
