@@ -563,6 +563,10 @@ class ReviewManager:
         未满 5 个交易日 / 停牌缺行 / 复权计算失败的记录保持 NULL，次日重试；基准
         缺失时 A 类仍写数值（解耦），B 类留待重试。与 ``_qfq_return_pct`` 共享
         复权口径，避免预测当天与回填口径不一致。
+
+        Raises:
+            RuntimeError: 引擎不可用或批量与逐条降级均失败。返回条数仅在无失败时可信；
+                部分逐条成功可能已落库，调用方不得把异常当作“未发生写入”。
         """
         # T+5-only 守卫必须位于一切查询/IO 之前：bool 是 int 子类须先显式拒绝，
         # 再拒绝非 int（如 5.0/"5"）与任何非 5 的整数，否则 T+1 收益会写入 T+5 列。
@@ -856,6 +860,10 @@ class ReviewManager:
         写库经 ``_batch_update_results(guard_t1=True)`` 启用 T+1 幂等守卫
         （WHERE 带 ``t1_pct IS NULL``），避免与 run_review 同批并行时把已填的
         T+1 重复覆盖。
+
+        Raises:
+            RuntimeError: 引擎不可用或批量与逐条降级均失败。返回条数仅在无失败时可信；
+                部分逐条成功可能已落库，调用方不得把异常当作“未发生写入”。
         """
         candidates = await self.cache.screener_dao.get_unfilled_t1_predictions()
         if not candidates:
@@ -1004,8 +1012,8 @@ class ReviewManager:
         dao = self.cache.screener_dao
         engine = self.cache.engine
         if engine is None:
-            logger.error("[Review] Engine not available for T+5 backfill.")
-            return
+            # 引擎缺失属于调用方可分类失败，不得静默返回（否则公开方法会把计划条数当成功计数）。
+            raise RuntimeError("[Review] Engine not available for T+5 backfill; write result unknown.")
 
         try:
             async with engine.begin() as conn:
@@ -1020,39 +1028,48 @@ class ReviewManager:
                         alpha=u.get("alpha"),
                         conn=conn,
                     )
-        except EngineDisposedError:
-            # R5 一致性： disposed 引擎不可恢复，主路径必须上抛避免被吞没.
+        except (EngineDisposedError, asyncio.CancelledError):
+            # R2/R5：取消与 disposed 引擎原样传播，不降级、不聚合.
             raise
         except Exception as e:
             logger.error("[Review] Batch T+5 backfill failed, falling back to individual updates: %s", safe_error(e))
+            failed = 0
             for u in updates:
                 try:
-                    await dao.backfill_t5_prediction(
-                        u["record_id"],
-                        u["t5_pct"],
-                        u["t5_price"],
-                        label=u.get("label"),
-                        index_pct=u.get("index_pct"),
-                        benchmark_code=u.get("benchmark_code"),
-                        alpha=u.get("alpha"),
-                    )
-                except EngineDisposedError:
-                    # R5 一致性：fallback 路径同样必须上抛（与主路径对齐）.
+                    # 逐条事务仍传真实 conn：DAO 的无连接分支会吞掉普通错误，导致 fallback 假成功。
+                    async with engine.begin() as conn:
+                        await dao.backfill_t5_prediction(
+                            u["record_id"],
+                            u["t5_pct"],
+                            u["t5_price"],
+                            label=u.get("label"),
+                            index_pct=u.get("index_pct"),
+                            benchmark_code=u.get("benchmark_code"),
+                            alpha=u.get("alpha"),
+                            conn=conn,
+                        )
+                except (EngineDisposedError, asyncio.CancelledError):
+                    # R2/R5：fallback 路径同样必须原样上抛（与主路径对齐）.
                     raise
                 except Exception as inner_e:
+                    failed += 1
                     logger.error(
                         "[Review] Individual T+5 backfill also failed for record %s: %s",
                         u["record_id"],
                         safe_error(inner_e),
                     )
+            if failed:
+                raise RuntimeError(
+                    f"[Review] T+5 backfill failed for {failed} of {len(updates)} record(s) after per-record fallback"
+                ) from e
 
     async def _batch_finalize_labels(self, label_updates: list[dict]) -> None:
         """RV-04: 单事务批量补定稿标签（对齐 _batch_backfill_t5 的事务与逐条降级语义）。"""
         dao = self.cache.screener_dao
         engine = self.cache.engine
         if engine is None:
-            logger.error("[Review] Engine not available for label finalization.")
-            return
+            # 引擎缺失属于调用方可分类失败，不得静默返回（否则公开方法会把计划条数当成功计数）。
+            raise RuntimeError("[Review] Engine not available for label finalization; write result unknown.")
 
         try:
             async with engine.begin() as conn:
@@ -1065,32 +1082,42 @@ class ReviewManager:
                         alpha=u["alpha"],
                         conn=conn,
                     )
-        except EngineDisposedError:
-            # R5 一致性：disposed 引擎不可恢复，主路径必须上抛避免被吞没.
+        except (EngineDisposedError, asyncio.CancelledError):
+            # R2/R5：取消与 disposed 引擎原样传播，不降级、不聚合.
             raise
         except Exception as e:
             logger.error(
                 "[Review] Batch label finalization failed, falling back to individual updates: %s",
                 safe_error(e),
             )
+            failed = 0
             for u in label_updates:
                 try:
-                    await dao.finalize_prediction_label(
-                        u["record_id"],
-                        label=u["label"],
-                        index_pct=u["index_pct"],
-                        benchmark_code=u["benchmark_code"],
-                        alpha=u["alpha"],
-                    )
-                except EngineDisposedError:
-                    # R5 一致性：fallback 路径同样必须上抛（与主路径对齐）.
+                    # 逐条事务仍传真实 conn：DAO 的无连接分支会吞掉普通错误，导致 fallback 假成功。
+                    async with engine.begin() as conn:
+                        await dao.finalize_prediction_label(
+                            u["record_id"],
+                            label=u["label"],
+                            index_pct=u["index_pct"],
+                            benchmark_code=u["benchmark_code"],
+                            alpha=u["alpha"],
+                            conn=conn,
+                        )
+                except (EngineDisposedError, asyncio.CancelledError):
+                    # R2/R5：fallback 路径同样必须原样上抛（与主路径对齐）.
                     raise
                 except Exception as inner_e:
+                    failed += 1
                     logger.error(
                         "[Review] Individual label finalization also failed for record %s: %s",
                         u["record_id"],
                         safe_error(inner_e),
                     )
+            if failed:
+                raise RuntimeError(
+                    f"[Review] Label finalization failed for {failed} of {len(label_updates)} record(s) "
+                    "after per-record fallback"
+                ) from e
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_pending_predictions(self):
@@ -1336,8 +1363,8 @@ class ReviewManager:
         dao = self.cache.screener_dao
         engine = self.cache.engine
         if engine is None:
-            logger.error("[Review] Engine not available for batch update.")
-            return
+            # 引擎缺失属于调用方可分类失败，不得静默返回（否则调用方会把计划条数当成功计数）。
+            raise RuntimeError("[Review] Engine not available for batch update; write result unknown.")
 
         try:
             async with engine.begin() as conn:
@@ -1356,33 +1383,43 @@ class ReviewManager:
                         conn=conn,
                         guard_t1=guard_t1,
                     )
-        except EngineDisposedError:
-            # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
+        except (EngineDisposedError, asyncio.CancelledError):
+            # R2/R5：取消与 disposed 引擎原样传播，不降级、不聚合.
             raise
         except Exception as e:
             logger.error("[Review] Batch update failed, falling back to individual updates: %s", safe_error(e))
+            failed = 0
             for u in updates:
                 try:
-                    await self._update_result(
-                        u["record_id"],
-                        u["pct"],
-                        u["label"],
-                        index_pct=u["index_pct"],
-                        benchmark_code=u.get("benchmark_code"),
-                        t1_price=u["t1_price"],
-                        t5_pct=u["t5_pct"],
-                        t5_price=u["t5_price"],
-                        alpha=u["alpha"],
-                        review_status=u.get("review_status"),
-                        guard_t1=guard_t1,
-                    )
-                except EngineDisposedError:
-                    # R5 一致性： disposed 引擎不可恢复，fallback 路径同样必须上抛（与主路径对齐）.
+                    # 逐条事务仍传真实 conn：DAO 的无连接分支会吞掉普通错误，导致 fallback 假成功。
+                    async with engine.begin() as conn:
+                        await self._update_result(
+                            u["record_id"],
+                            u["pct"],
+                            u["label"],
+                            index_pct=u["index_pct"],
+                            benchmark_code=u.get("benchmark_code"),
+                            t1_price=u["t1_price"],
+                            t5_pct=u["t5_pct"],
+                            t5_price=u["t5_price"],
+                            alpha=u["alpha"],
+                            review_status=u.get("review_status"),
+                            guard_t1=guard_t1,
+                            conn=conn,
+                        )
+                except (EngineDisposedError, asyncio.CancelledError):
+                    # R2/R5：fallback 路径同样必须原样上抛（与主路径对齐）.
                     raise
                 except Exception as inner_e:
+                    failed += 1
                     logger.error(
                         "[Review] Individual update also failed for record %s: %s", u["record_id"], safe_error(inner_e)
                     )
+            if failed:
+                raise RuntimeError(
+                    f"[Review] Review result update failed for {failed} of {len(updates)} record(s) "
+                    "after per-record fallback"
+                ) from e
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _update_result(
@@ -1398,6 +1435,7 @@ class ReviewManager:
         alpha: typing.Any = None,
         review_status: typing.Any = None,
         guard_t1: bool = False,
+        conn: typing.Any = None,
     ):
         """Update DB with T+1/T+5 review metrics and review_status."""
         await self.cache.screener_dao.update_prediction_result(
@@ -1412,6 +1450,7 @@ class ReviewManager:
             alpha=alpha,
             review_status=review_status,
             guard_t1=guard_t1,
+            conn=conn,
         )
 
     @staticmethod
