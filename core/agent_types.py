@@ -24,8 +24,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Sequence, Set as AbstractSet
 from dataclasses import dataclass, is_dataclass
+from datetime import datetime as dt
+from datetime import UTC
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Final, NoReturn, cast
@@ -590,7 +592,7 @@ def selected_range_digest(selected_range: SelectedRange) -> str:
 # ---- §3.3.1 解码基元（全键必填、禁额外键、错误 tag/null/type/bool 拒绝） ----
 
 
-def _require_keys(obj: dict[str, object], required: set[str], path: str) -> None:
+def _require_keys(obj: dict[str, object], required: AbstractSet[str], path: str) -> None:
     missing = sorted(required - obj.keys())
     if missing:
         _fail(_ALL_KEYS_ERR_MISSING, f"{path}.{missing[0]}")
@@ -995,3 +997,353 @@ def decode_provenance_refs(value: object, path: str) -> tuple[ProvenanceRef, ...
             _fail("duplicate_edge", f"{path}[{index}]")
         refs.append(ref)
     return tuple(refs)
+
+
+# ---------------------------------------------------------------------------
+# §9.8 R04 v1 编码：资料许可（DataConsent）合同
+# ---------------------------------------------------------------------------
+
+
+class DataConsentState(Enum):
+    """资料许可状态（§9.8 唯一 wire 拼写）。"""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
+_UTC_TS_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z")
+
+#: DataConsentBinding 全部键（§9.8「v1外层类型与可空矩阵」：无可省略键/额外键）。
+_DATA_CONSENT_BINDING_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "schema_version",
+        "consent_id",
+        "consent_revision",
+        "state",
+        "approver_ref",
+        "user_scope",
+        "execution_id",
+        "round_id",
+        "valid_from",
+        "expires_at",
+        "requires_egress_grant",
+        "connection_authorization_ref",
+        "connection_revision",
+        "security_revision",
+        "credential_version",
+        "target_fingerprint",
+        "purpose",
+        "scope_version",
+        "source_selections",
+        "source_scope_digest",
+    }
+)
+
+#: connection_authorization_ref 封闭对象键（§9.8 v1 编码局部工程选择）。
+_CONNECTION_AUTH_REF_KEYS: Final[frozenset[str]] = frozenset(
+    {"connection_id", "target_fingerprint", "purpose", "scope_version", "verified_connection_grant_id"}
+)
+
+#: 数据同意源项键（§9.8：不是含斜线的键）。
+_DATA_CONSENT_SOURCE_ITEM_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "source_kind",
+        "source_id",
+        "source_version",
+        "source_digest",
+        "selected_range",
+        "locator",
+        "selected_range_digest",
+        "representation_version",
+        "representation_digest",
+        "provenance_refs",
+    }
+)
+
+
+def _require_utc_timestamp(value: object, path: str) -> str:
+    """非空时刻统一 UTC 微秒 ISO 文本（以 Z 结尾，§9.8）；拒绝其他时区/精度形态。"""
+
+    if not isinstance(value, str) or _UTC_TS_RE.fullmatch(value) is None:
+        _fail("invalid_timestamp", path)
+    try:
+        dt.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError:
+        _fail("invalid_timestamp", path)
+    return value
+
+
+def require_utc_timestamp(value: object, field_path: str) -> str:
+    """公开入口：DataConsent 时刻字段校验（owner/服务层复用同一 codec 语义）。"""
+
+    return _require_utc_timestamp(value, field_path)
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionAuthorizationRef:
+    """连接授权引用（封闭对象，§9.8）：fingerprint/purpose/scope_version 必须与
+    外层绑定一致；``verified_connection_grant_id`` 为原 owner 实际核到的连接
+    grant ID 或显式 null，不引用 decision.grant_id，也不从 AttemptPermit 臆取。"""
+
+    connection_id: str
+    target_fingerprint: str
+    purpose: str
+    scope_version: int
+    verified_connection_grant_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DataConsentSourceItem:
+    """数据同意源项（§9.8）：身份/定位/范围/谱系严格沿 §3.3.1 类型。"""
+
+    source_kind: SourceKind
+    source_id: str
+    source_version: str
+    source_digest: str
+    selected_range: SelectedRange
+    locator: SourceLocator
+    selected_range_digest: str
+    representation_version: str
+    representation_digest: str
+    provenance_refs: tuple[ProvenanceRef, ...]
+
+
+def decode_data_consent_source_item(value: object, path: str) -> DataConsentSourceItem:
+    """严格解码源项（10 键全必填禁额外键，§9.8）。
+
+    重算 ``selected_range_digest`` 并与载荷比对：不一致即拒绝（保存/决定重读/
+    每 attempt 核权均重算，不信调用方 digest）。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DATA_CONSENT_SOURCE_ITEM_KEYS, path)
+
+    origin = decode_source_version_ref(value["locator"]["origin_ref"], f"{path}.locator.origin_ref")
+    # 源项顶层身份与 locator.origin_ref 一致（同一受管源版，冗余字段不得分叉）
+    if (
+        value["source_kind"] != origin.source_kind.value
+        or value["source_id"] != origin.source_id
+        or value["source_version"] != origin.source_version
+        or value["source_digest"] != origin.source_digest
+    ):
+        _fail("identity_mismatch", path)
+
+    selected_range = decode_selected_range(value["selected_range"], f"{path}.selected_range")
+    digest = _require_digest(value["selected_range_digest"], f"{path}.selected_range_digest")
+    if digest != selected_range_digest(selected_range):
+        _fail("digest_mismatch", f"{path}.selected_range_digest")
+
+    return DataConsentSourceItem(
+        source_kind=origin.source_kind,
+        source_id=origin.source_id,
+        source_version=origin.source_version,
+        source_digest=origin.source_digest,
+        selected_range=selected_range,
+        locator=decode_source_locator(value["locator"], f"{path}.locator"),
+        selected_range_digest=digest,
+        representation_version=_require_str(value["representation_version"], f"{path}.representation_version"),
+        representation_digest=_require_digest(value["representation_digest"], f"{path}.representation_digest"),
+        provenance_refs=decode_provenance_refs(value["provenance_refs"], f"{path}.provenance_refs"),
+    )
+
+
+def data_consent_source_scope_digest(items: Sequence[DataConsentSourceItem]) -> str:
+    """``source_scope_digest``（§9.8）：源项先按各项 CanonicalJson 的 UTF-8 字节
+    排序，重复项拒绝（[A,A] 必须拒绝，不先去重后成功），再对
+    ``{"schema_version":1,"source_selections":规范源项数组}`` 取 SHA-256。"""
+
+    canonicals = sorted(json_doc(to_wire_dict(item)) for item in items)
+    if len(canonicals) != len(set(canonicals)):
+        _fail("duplicate_source_item", "$.source_selections")
+    payload = {"schema_version": 1, "source_selections": [json.loads(c) for c in canonicals]}
+    return sha256_hex(json_doc(payload).encode("utf-8"))
+
+
+@dataclass(frozen=True, slots=True)
+class DataConsentBinding:
+    """资料许可绑定（§9.8）：全部 20 键，无可省略键/额外键。
+
+    有效期仅准确轮/用途/目的地内且未过期/撤销，不因「稍后」延期、不跨轮迁移；
+    ``expires_at=null`` 表示期限未核定，**不表示永久/不限期**。冻结许可不含
+    正文、密钥或凭据。
+    """
+
+    schema_version: int
+    consent_id: str
+    consent_revision: int
+    state: DataConsentState
+    approver_ref: str | None
+    user_scope: str
+    execution_id: str
+    round_id: str
+    valid_from: str | None
+    expires_at: str | None
+    requires_egress_grant: bool
+    connection_authorization_ref: ConnectionAuthorizationRef
+    connection_revision: int
+    security_revision: int
+    credential_version: str | None
+    target_fingerprint: str
+    purpose: str
+    scope_version: int
+    source_selections: tuple[DataConsentSourceItem, ...]
+    source_scope_digest: str
+
+
+def _decode_connection_authorization_ref(value: object, path: str) -> ConnectionAuthorizationRef:
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _CONNECTION_AUTH_REF_KEYS, path)
+    grant_id = value["verified_connection_grant_id"]
+    if grant_id is not None and not isinstance(grant_id, str):
+        _fail("invalid_type", f"{path}.verified_connection_grant_id")
+    return ConnectionAuthorizationRef(
+        connection_id=_require_str(value["connection_id"], f"{path}.connection_id"),
+        target_fingerprint=_require_str(value["target_fingerprint"], f"{path}.target_fingerprint"),
+        purpose=_require_str(value["purpose"], f"{path}.purpose"),
+        scope_version=_require_p(value["scope_version"], f"{path}.scope_version"),
+        verified_connection_grant_id=grant_id,
+    )
+
+
+def decode_data_consent_binding(value: object, path: str) -> DataConsentBinding:
+    """严格解码 DataConsentBinding（§9.8 v1 编码 + 可空矩阵 + 状态矩阵）。
+
+    重算 ``source_scope_digest`` 并与载荷比对，不信调用方 digest；JSONB 重排键
+    后重读保同身份（CanonicalJson 键序无关）。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DATA_CONSENT_BINDING_KEYS, path)
+
+    schema_version = value["schema_version"]
+    # §9.8：schema_version 仅整数 1（拒 bool）
+    if isinstance(schema_version, bool) or schema_version != 1:
+        _fail("invalid_schema_version", f"{path}.schema_version")
+
+    if not isinstance(value["requires_egress_grant"], bool):
+        _fail("invalid_type", f"{path}.requires_egress_grant")
+
+    state_raw = value["state"]
+    if not isinstance(state_raw, str) or state_raw not in DataConsentState._value2member_map_:
+        _fail("invalid_state", f"{path}.state")
+    state = DataConsentState(state_raw)
+
+    approver = value["approver_ref"]
+    if approver is not None:
+        approver = _require_str(approver, f"{path}.approver_ref")
+    valid_from = value["valid_from"]
+    if valid_from is not None:
+        valid_from = _require_utc_timestamp(valid_from, f"{path}.valid_from")
+    expires_at = value["expires_at"]
+    if expires_at is not None:
+        expires_at = _require_utc_timestamp(expires_at, f"{path}.expires_at")
+
+    # 状态矩阵（§9.8 表）：pending 双 null；approved S+T；终态同空或同非空；
+    # expired 的 expires_at 必须非 null。仅固定编码形态，不新开迁移。
+    if state is DataConsentState.PENDING:
+        if approver is not None or valid_from is not None:
+            _fail("state_matrix", f"{path}.approver_ref")
+    elif state is DataConsentState.APPROVED:
+        if approver is None or valid_from is None:
+            _fail("state_matrix", f"{path}.approver_ref")
+    else:  # revoked / expired：终态同空或同非空
+        if (approver is None) != (valid_from is None):
+            _fail("state_matrix", f"{path}.approver_ref")
+        if state is DataConsentState.EXPIRED and expires_at is None:
+            _fail("state_matrix", f"{path}.expires_at")
+
+    if valid_from is not None and expires_at is not None and valid_from >= expires_at:
+        _fail("invalid_period", f"{path}.valid_from")
+
+    credential_version = value["credential_version"]
+    if credential_version is not None:
+        credential_version = _require_str(credential_version, f"{path}.credential_version")
+
+    connection_ref = _decode_connection_authorization_ref(
+        value["connection_authorization_ref"], f"{path}.connection_authorization_ref"
+    )
+    # 原 owner 计数器边界（§9.8）：security_revision 初始 0、下界 0；null /
+    # 负值 / bool 均拒绝 INPUT_INVALID（不套通用 N 可空语义）。
+    security_revision = value["security_revision"]
+    if isinstance(security_revision, bool) or not isinstance(security_revision, int) or security_revision < 0:
+        _fail("invalid_revision", f"{path}.security_revision")
+    # 内外一致性（§9.8）：重复的 target_fingerprint/purpose/scope_version 必须等于外层
+    if (
+        connection_ref.target_fingerprint != value["target_fingerprint"]
+        or connection_ref.purpose != value["purpose"]
+        or connection_ref.scope_version != value["scope_version"]
+    ):
+        _fail("identity_mismatch", f"{path}.connection_authorization_ref")
+
+    target_fingerprint = _require_str(value["target_fingerprint"], f"{path}.target_fingerprint")
+    purpose = _require_str(value["purpose"], f"{path}.purpose")
+    scope_version = _require_p(value["scope_version"], f"{path}.scope_version")
+
+    if not isinstance(value["source_selections"], list):
+        _fail("invalid_type", f"{path}.source_selections")
+    source_items = tuple(
+        decode_data_consent_source_item(item, f"{path}.source_selections[{index}]")
+        for index, item in enumerate(value["source_selections"])
+    )
+    recomputed = data_consent_source_scope_digest(source_items)
+    if _require_digest(value["source_scope_digest"], f"{path}.source_scope_digest") != recomputed:
+        _fail("digest_mismatch", f"{path}.source_scope_digest")
+
+    return DataConsentBinding(
+        schema_version=1,
+        consent_id=_require_str(value["consent_id"], f"{path}.consent_id"),
+        consent_revision=_require_p(value["consent_revision"], f"{path}.consent_revision"),
+        state=state,
+        approver_ref=approver,
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        valid_from=valid_from,
+        expires_at=expires_at,
+        requires_egress_grant=value["requires_egress_grant"],
+        connection_authorization_ref=connection_ref,
+        connection_revision=_require_p(value["connection_revision"], f"{path}.connection_revision"),
+        security_revision=security_revision,
+        credential_version=credential_version,
+        target_fingerprint=target_fingerprint,
+        purpose=purpose,
+        scope_version=scope_version,
+        source_selections=source_items,
+        source_scope_digest=recomputed,
+    )
+
+
+def encode_data_consent_binding(binding: DataConsentBinding) -> dict[str, Any]:
+    """DataConsentBinding → wire dict（20 键全量，CanonicalJson 语义承载）。"""
+
+    return cast(dict[str, Any], _to_jsonable(binding, "$"))
+
+
+def local_target_fingerprint(
+    user_scope: str,
+    connection_id: str,
+    connection_revision: int,
+    adapter_kind: str,
+) -> str:
+    """AR-09 本地目标映射（拟实现合同，§9.8）：``local-model-v1:`` ＋
+    ``sha256(CanonicalJson([1,"local-model",user_scope,connection_id,
+    connection_revision,adapter_kind]))``。
+
+    仅对已核实际设备内且具 Agent 聊天准入能力的 ``gguf_chat`` 计算；修订为
+    拒 bool 的正整数（0/负/布尔拒绝）；未知 kind / 非聊天 ``gguf_sentiment``
+    及云端路径拒绝（云端缺 api_base 由原 owner 拒绝，不在此伪造目标）。
+    """
+
+    _require_str(user_scope, "$.user_scope")
+    _require_str(connection_id, "$.connection_id")
+    if isinstance(connection_revision, bool) or not isinstance(connection_revision, int) or connection_revision < 1:
+        _fail("invalid_revision", "$.connection_revision")
+    if adapter_kind != "gguf_chat":
+        _fail("invalid_adapter_kind", "$.adapter_kind")
+    canonical = json_doc([1, "local-model", user_scope, connection_id, connection_revision, adapter_kind])
+    return f"local-model-v1:{sha256_hex(canonical.encode('utf-8'))}"
