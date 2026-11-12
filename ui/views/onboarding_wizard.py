@@ -884,9 +884,12 @@ def OnboardingWizard(
             on_change=lambda: onboarding_vm.invalidate_step("database"),
         )
     )
+    # UIV-ONB-01: Token 输入变更经 on_change 失效验证缓存，防止返回 Token 步
+    # 修改输入后仍短路跳过重验（与 database 步 on_change 同型）。
     _tushare_state, tushare_vm = use_viewmodel(
         factory=lambda: TushareConfigPanelViewModel(
             show_internal_loading=False,
+            on_change=lambda: onboarding_vm.invalidate_step("token"),
         )
     )
     # S5 §11.6: 模型阶段单一「模型与场景配置」步，宿主经共享的 ModelConfigurationService
