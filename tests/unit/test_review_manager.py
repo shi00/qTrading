@@ -3662,12 +3662,39 @@ class TestReviewManagerBackfill:
         return rm, mock_cache
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_horizon",
+        [0, -1, 1, 10, True, False, 5.0, "5", None],
+        ids=["zero", "negative", "one", "ten", "bool-true", "bool-false", "float", "str", "none"],
+    )
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_backfill_invalid_horizon_raises(self, mock_cm, mock_tc):
-        rm, _ = self._make_rm(mock_cm)
-        with pytest.raises(ValueError, match="horizon"):
-            await rm.backfill_horizon_returns(horizon=0)
+    async def test_backfill_rejects_non_t5_horizon_before_any_io(self, mock_cm, mock_tc, bad_horizon):
+        """DLP-RM-03: 只支持 T+5 口径——非法 horizon 必须在任何查询/IO 之前拒绝。
+
+        `backfill_horizon_returns` 的候选池、更新列（t5_pct/t5_price）与 DAO 均固定为
+        T+5。若接受其它 horizon（尤其 T+1），T+1 开盘→T+1 收盘收益会写入 t5_pct，
+        B 类还会用一日指数窗口定稿五日 alpha。故 0/负数/1/10/bool/非整数一律
+        ValueError，且不得触达任何取数或写库路径。
+        """
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        rm._batch_finalize_labels = AsyncMock()
+        rm._batch_update_results = AsyncMock()
+        rm._resolve_benchmark = AsyncMock()
+        with pytest.raises(ValueError, match=r"\[Review\] only the T\+5 backfill horizon is supported"):
+            await rm.backfill_horizon_returns(horizon=bad_horizon)
+        # 校验失败必须早于两类候选池取数、行情/基准 IO 与任何写入。
+        mock_cache.screener_dao.get_unfilled_horizon_predictions.assert_not_awaited()
+        mock_cache.screener_dao.get_unlabeled_predictions.assert_not_awaited()
+        mock_cache.quote_dao.get_daily_quotes.assert_not_awaited()
+        rm._resolve_benchmark.assert_not_awaited()
+        rm._batch_backfill_t5.assert_not_awaited()
+        rm._batch_finalize_labels.assert_not_awaited()
+        rm._batch_update_results.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -3721,9 +3748,10 @@ class TestReviewManagerBackfill:
         rm._batch_backfill_t5.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("horizon_kwargs", [{}, {"horizon": 5}], ids=["default", "explicit-5"])
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_backfill_fills_mature_record(self, mock_cm, mock_tc):
+    async def test_backfill_fills_mature_record(self, mock_cm, mock_tc, horizon_kwargs):
         rm, mock_cache = self._make_rm(mock_cm)
         mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
             return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
@@ -3738,12 +3766,13 @@ class TestReviewManagerBackfill:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        count = await rm.backfill_horizon_returns()
+        count = await rm.backfill_horizon_returns(**horizon_kwargs)
         assert count == 1
         rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
         updates = rm._batch_backfill_t5.call_args.args[0]
         assert len(updates) == 1
         assert updates[0]["record_id"] == 1
+        # T+1 开盘（10.0，20240611 行）→ T+5 收盘（9.8，20240617 行）
         assert updates[0]["t5_pct"] == round(((9.8 / 1.0) / (10.0 / 1.0) - 1.0) * 100.0, 4)
         assert updates[0]["t5_price"] == 9.8
         # D4-M4: T+5 回填同步定稿标签（alpha = t5_pct - index = -2.0 - 2.0 = -4.0 → LOSS）

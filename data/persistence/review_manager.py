@@ -514,7 +514,12 @@ class ReviewManager:
 
     @log_async_operation(operation_name="t5_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def backfill_horizon_returns(self, horizon: int = 5) -> int:
-        """阶段 2：回填所有已满 horizon 个交易日、但 T+{horizon} 仍为 NULL 的复盘记录。
+        """阶段 2：回填所有已满 5 个交易日、但 T+5 仍为 NULL 的复盘记录。
+
+        仅支持 T+5 口径：候选池、更新列（``t5_pct`` / ``t5_price``）与 DAO 均固定为
+        T+5。``horizon`` 仅保留以兼容既有 ``horizon=5`` 调用方；任何其它 horizon
+        （含 T+1）或非整数输入都在查询/IO 之前以 ``ValueError`` 拒绝，避免 T+1
+        开盘→T+1 收盘收益落入 ``t5_pct``、或 B 类以一日指数窗口定稿五日 alpha。
 
         D2-4：``run_review`` 只覆盖近 10 交易日的 pending 记录，一旦预测移出窗口，
         其 T+5 不再被任何机制回访。本方法每日调度一次即可自然覆盖全部历史，
@@ -523,12 +528,14 @@ class ReviewManager:
         只处理 ``review_status='T1_DONE'`` 的记录，分两类（RV-04）：A 类缺 ``t5_pct``
         数值（全量计算）；B 类数值已齐但标签未定稿（``alpha IS NULL``，基准缺失时
         数值-only 解耦写入的记录 + #1097 迁移重置的历史行）——仅补定稿标签。
-        未满 horizon / 停牌缺行 / 复权计算失败的记录保持 NULL，次日重试；基准
+        未满 5 个交易日 / 停牌缺行 / 复权计算失败的记录保持 NULL，次日重试；基准
         缺失时 A 类仍写数值（解耦），B 类留待重试。与 ``_qfq_return_pct`` 共享
         复权口径，避免预测当天与回填口径不一致。
         """
-        if horizon <= 0:
-            raise ValueError("[Review] backfill horizon must be positive")
+        # T+5-only 守卫必须位于一切查询/IO 之前：bool 是 int 子类须先显式拒绝，
+        # 再拒绝非 int（如 5.0/"5"）与任何非 5 的整数，否则 T+1 收益会写入 T+5 列。
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon != 5:
+            raise ValueError("[Review] only the T+5 backfill horizon is supported")
 
         # RV-04: A 类（缺 t5_pct 数值）与 B 类（数值已齐、标签未定稿：基准缺失时
         # 数值-only 解耦写入的记录 + #1097 迁移重置的历史行）分池取数、各自独立
