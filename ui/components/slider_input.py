@@ -29,14 +29,22 @@ logger = logging.getLogger(__name__)
 
 
 def _snap_to_step(value: float, min_val: float, max_val: float, step: float) -> float:
-    """将 value snap 到最近的 step 网格点，并 clamp 到 ``[min_val, max_val]``。"""
+    """将 value snap 到最近的 step 网格点，并 clamp 到 ``[min_val, max_val]``。
+
+    snap 之后再执行一次夹紧，端点优先于网格点：``step`` 不整除区间时，离端点
+    最近的网格点可能落在区间外（如 min=0, max=1, step=0.6 的输入 1 → 网格点
+    1.2），此时返回区间端点而非越界值。``step <= 0`` 时不做 snap，仅夹紧。
+    """
     clamped = max(min_val, min(max_val, value))
     if step <= 0:
         return clamped
     steps = round((clamped - min_val) / step)
     snapped = min_val + steps * step
     # 浮点修正：避免 0.1+0.2=0.30000000000000004
-    return round(snapped, 10)
+    snapped = round(snapped, 10)
+    # 端点优先于网格点：非整除区间的网格点可能越界，夹紧回区间后返回，
+    # 保证 on_change 上抛值恒在 [min_val, max_val]（公开契约）。
+    return max(min_val, min(max_val, snapped))
 
 
 def _default_fmt(value: float) -> str:
