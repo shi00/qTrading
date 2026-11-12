@@ -192,6 +192,16 @@ class TestContrastPairsConfig:
         assert "TABLE_ROW_EVEN" in bg_names
         assert "TABLE_HEADER_BG" in bg_names
 
+    def test_text_pairs_cover_hover_row_background(self):
+        """M30-C3: DataTable hover 行是真实消费背景，中性正文色必须验收。
+
+        - TABLE_CELL_TEXT: 未显式指定颜色的单元格（如数据出口审计表）取主题默认 data_text_style。
+        - TEXT_PRIMARY: 回测成交/月度表显式中性单元格。
+        """
+        pairs = {(p.fg, p.bg) for p in _CONTRAST_PAIRS}
+        assert ("TABLE_CELL_TEXT", "TABLE_ROW_HOVER") in pairs
+        assert ("TEXT_PRIMARY", "TABLE_ROW_HOVER") in pairs
+
 
 class TestCheckContrastUnroundedComparison:
     """F06: 门禁必须比较未舍入数值 (4.499 不得因显示 4.50 而通过)。"""

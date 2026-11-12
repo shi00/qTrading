@@ -44,10 +44,17 @@ _COL_QUARTER = typing.cast("ft.ResponsiveNumber", AppStyles.COL_QUARTER)
 
 
 def _get_color_for_value(value: float) -> str:
+    """涨跌色（A 股红涨绿跌）。
+
+    M30-C3: 原用 SUCCESS/ERROR（绿涨红跌）与 A 股语义相反而且不适配表格行底色——
+    ERROR 作 13/14px 正文在四主题 ODD/EVEN/HOVER 上多处 < 4.5（DARK HOVER 3.73、
+    DRACULA EVEN 2.91），SUCCESS 在 LIGHT HOVER 仅 4.19。改用 M30-C2 已按
+    ODD/EVEN/HOVER 全矩阵校准的 UP_RED/DOWN_GREEN，语义与对比度同时修正。
+    """
     if value > 0:
-        return AppColors.SUCCESS
+        return AppColors.UP_RED
     elif value < 0:
-        return AppColors.ERROR
+        return AppColors.DOWN_GREEN
     return AppColors.TEXT_PRIMARY
 
 
@@ -623,9 +630,11 @@ def _build_trades_table(
     rows = []
     for trade in trades[start:end]:
         action = trade.action
-        action_color = AppColors.SUCCESS if action == "buy" else AppColors.ERROR
+        # M30-C3: 买卖方向沿用 A 股行情软件红买绿卖惯例，与同表盈亏列同一套已达标涨跌色；
+        # 文本本身即 "buy"/"sell"，颜色仅辅助辨识（WCAG §1.4.1 信息不以颜色为唯一载体）。
+        action_color = AppColors.UP_RED if action == "buy" else AppColors.DOWN_GREEN
         pnl = trade.realized_pnl
-        pnl_color = AppColors.SUCCESS if pnl > 0 else AppColors.ERROR if pnl < 0 else AppColors.TEXT_PRIMARY
+        pnl_color = AppColors.UP_RED if pnl > 0 else AppColors.DOWN_GREEN if pnl < 0 else AppColors.TEXT_PRIMARY
 
         rows.append(
             ft.DataRow(
