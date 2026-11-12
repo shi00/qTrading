@@ -15,12 +15,35 @@ import json
 import socket
 import threading
 import time
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from types import MappingProxyType
 from unittest import mock
 
 import pytest
 
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    CommandRef,
+    CommandReceipt,
+    CommitState,
+    ConnectionAuthorizationRef,
+    ConsumptionState,
+    DataAttemptAuthorization,
+    DataAttemptOutcome,
+    DataAttemptReceipt,
+    DataConsentBinding,
+    DataConsentClaim,
+    DataConsentClaimFact,
+    DataConsentCommand,
+    DataConsentRevokeCommand,
+    DataConsentState,
+    DeliveryState,
+    decode_data_consent_binding,
+    local_target_fingerprint,
+    sha256_hex,
+)
 from core.model_management_types import (
     ConfigurationSaveOutcome,
     MigrationTransitionError,
@@ -1848,3 +1871,371 @@ class TestActivateFreshSetup:
         dao.seal_legacy_month.assert_not_awaited()
         raw = _read_raw(isolated_config)["model_management"]
         assert raw["migration_transition"] is None
+
+
+# ---------------------------------------------------------------------------
+# C-02-4b：R04 资料许可 owner 四方法（§10.2 L1773/L1774）
+# ---------------------------------------------------------------------------
+
+_R4_CONN = "33333333-3333-4333-8333-333333333333"
+_R4_USER_SCOPE = "synthetic-user"
+_R4_CONSENT_ID = "dec-consent-1"
+_R4_TARGET_FP = "local-model-v1:" + sha256_hex("synthetic-user|conn|gguf_chat")
+
+
+def _r4_source_item() -> dict:
+    src_digest = sha256_hex("abc")
+    return {
+        "locator": {
+            "locator_kind": "source_range",
+            "origin_ref": {
+                "source_digest": src_digest,
+                "source_id": "资料-A",
+                "source_kind": "attachment",
+                "source_version": "v1",
+            },
+            "selection": {"kind": "all"},
+        },
+        "provenance_refs": [],
+        "representation_digest": src_digest,
+        "representation_version": "utf8-v1",
+        "selected_range": {
+            "accepted_limited_version": None,
+            "limitations": [],
+            "read_ranges": [{"kind": "all"}],
+            "selection": {"kind": "all"},
+            "stats": {"chars": 3, "pages": None, "rows": None, "sheets": None, "source_bytes": 3},
+            "unread_ranges": [],
+        },
+        "selected_range_digest": "548d12d686601e50452f7cd140e44b26138e8c0f41dc52a68a32081cf8e34f31",
+        "source_digest": src_digest,
+        "source_id": "资料-A",
+        "source_kind": "attachment",
+        "source_version": "v1",
+    }
+
+
+def _r4_binding_payload(
+    *,
+    state: str = "approved",
+    consent_revision: int = 1,
+    expires_at: str | None = None,
+    valid_from: str = "2026-01-01T00:00:00.000000Z",
+) -> dict:
+    return {
+        "schema_version": 1,
+        "consent_id": _R4_CONSENT_ID,
+        "consent_revision": consent_revision,
+        "state": state,
+        "approver_ref": None if state == "pending" else "user:local-owner",
+        "user_scope": _R4_USER_SCOPE,
+        "execution_id": "exec-1",
+        "round_id": "round-1",
+        "valid_from": None if state == "pending" else valid_from,
+        "expires_at": expires_at,
+        "requires_egress_grant": False,
+        "connection_authorization_ref": {
+            "connection_id": _R4_CONN,
+            "target_fingerprint": _R4_TARGET_FP,
+            "purpose": "agent_research",
+            "scope_version": 1,
+            "verified_connection_grant_id": None,
+        },
+        "connection_revision": 2,
+        "security_revision": 0,
+        "credential_version": None,
+        "target_fingerprint": _R4_TARGET_FP,
+        "purpose": "agent_research",
+        "scope_version": 1,
+        "source_selections": [_r4_source_item()],
+        "source_scope_digest": "29aa96ad9f423ef236d5e2b8b06f566cbc69ac5385ef10d6dcd6e36dc44f83fa",
+    }
+
+
+def _r4_binding(**overrides) -> DataConsentBinding:
+    return decode_data_consent_binding(_r4_binding_payload(**overrides), "$")
+
+
+def _r4_command_ref(expected_revision: int, command_id: str = "consent-cmd-1") -> CommandRef:
+    return CommandRef(
+        user_scope=_R4_USER_SCOPE,
+        source_module="agent_workflows",
+        business_request_id="req-1",
+        command_id=command_id,
+        expected_revision=expected_revision,
+    )
+
+
+def _r4_save_command(binding: DataConsentBinding, expected_revision: int = 0) -> DataConsentCommand:
+    return DataConsentCommand(
+        command=_r4_command_ref(expected_revision),
+        consent_id=_R4_CONSENT_ID,
+        session_id="s-1",
+        execution_id="exec-1",
+        round_id="round-1",
+        node_id="root",
+        binding=binding,
+    )
+
+
+def _r4_authorization(**overrides) -> DataAttemptAuthorization:
+    from core.agent_types import decode_data_consent_source_item, data_consent_source_scope_digest
+
+    item = decode_data_consent_source_item(_r4_source_item(), "$")
+    values: dict = {
+        "user_scope": _R4_USER_SCOPE,
+        "operation_id": "op-1",
+        "attempt_id": "attempt-1",
+        "consent_id": _R4_CONSENT_ID,
+        "expected_consent_revision": 1,
+        "connection_id": _R4_CONN,
+        "connection_revision": 2,
+        "security_revision": 0,
+        "credential_version": None,
+        "purpose": "agent_research",
+        "target_fingerprint": _R4_TARGET_FP,
+        "scope_version": 1,
+        "source_selections": (item,),
+        "source_scope_digest": data_consent_source_scope_digest([item]),
+        "owner_epoch": 1,
+        "run_epoch": 1,
+    }
+    values.update(overrides)
+    return DataAttemptAuthorization(**values)
+
+
+class _FakeAgentDao:
+    """AgentDao 鸭子类型替身（服务层编排验证；事务语义由集成测试真实覆盖）。"""
+
+    def __init__(self) -> None:
+        self.bindings: dict[tuple[str, str], DataConsentBinding] = {}
+        self.save_calls: list[DataConsentCommand] = []
+        self.revoke_calls: list[DataConsentRevokeCommand] = []
+        self.claims: list[tuple[DataAttemptAuthorization, DataConsentClaim]] = []
+        self.claim_error: AgentServiceError | None = None
+
+    async def read_data_consent_decision(self, user_scope: str, consent_id: str) -> DataConsentBinding | None:
+        return self.bindings.get((user_scope, consent_id))
+
+    async def save_data_consent_decision(self, command: DataConsentCommand) -> DataConsentBinding:
+        self.save_calls.append(command)
+        self.bindings[(command.command.user_scope, command.consent_id)] = command.binding
+        return command.binding
+
+    async def revoke_data_consent_decision(self, command: DataConsentRevokeCommand) -> CommandReceipt:
+        self.revoke_calls.append(command)
+        return CommandReceipt(
+            command=command.command,
+            target_id=command.consent_id,
+            current_revision=command.command.expected_revision + 1,
+            commit_state=CommitState.COMMITTED,
+            delivery_state=DeliveryState.DELIVERED,
+            consumption_state=ConsumptionState.CONSUMED,
+            updated_at="2026-06-01T12:00:00.000000Z",
+            error_code=None,
+            next_action=None,
+        )
+
+    async def claim_data_consent(
+        self, authorization: DataAttemptAuthorization, claim: DataConsentClaim
+    ) -> DataConsentClaimFact:
+        if self.claim_error is not None:
+            raise self.claim_error
+        self.claims.append((authorization, claim))
+        return DataConsentClaimFact(claim=claim, replayed=False)
+
+
+@pytest.fixture()
+def r4_service(isolated_config):
+    """独立配置 + 真实连接（本地 gguf 路径）+ 注入 FakeAgentDao 的服务实例。"""
+    cfg_mod.ConfigHandler.ensure_defaults()
+    mm = _load_mm()
+    mm["connections"] = [_base_connection(_R4_CONN, "", adapter_kind="gguf_chat")]
+    _write_raw(isolated_config, {"model_management": mm})
+    fake = _FakeAgentDao()
+    return ModelConfigurationService(agent_dao=fake), fake
+
+
+class TestR04DataConsentOwnerStateMachine:
+    @pytest.mark.asyncio
+    async def test_save_create_pending(self, r4_service):
+        svc, fake = r4_service
+        binding = _r4_binding(state="pending")
+        result = await svc.save_data_consent(_r4_save_command(binding))
+        assert result.state is DataConsentState.PENDING
+        assert len(fake.save_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_save_create_approved(self, r4_service):
+        svc, fake = r4_service
+        result = await svc.save_data_consent(_r4_save_command(_r4_binding(state="approved")))
+        assert result.state is DataConsentState.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_save_create_revoked_denied(self, r4_service):
+        svc, _ = r4_service
+        binding = _r4_binding(state="revoked")
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.save_data_consent(_r4_save_command(binding))
+        assert exc.value.code == AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio
+    async def test_save_update_pending_to_approved(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding(state="pending")
+        result = await svc.save_data_consent(_r4_save_command(_r4_binding(consent_revision=2), expected_revision=1))
+        assert result.state is DataConsentState.APPROVED
+        assert fake.save_calls[0].command.expected_revision == 1
+
+    @pytest.mark.asyncio
+    async def test_save_update_non_pending_denied(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding(state="approved")
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.save_data_consent(_r4_save_command(_r4_binding(consent_revision=2), expected_revision=1))
+        assert exc.value.code == AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio
+    async def test_save_update_missing_decision_invalid(self, r4_service):
+        svc, _ = r4_service
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.save_data_consent(_r4_save_command(_r4_binding(consent_revision=2), expected_revision=1))
+        assert exc.value.code == AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_read_existing_and_missing(self, r4_service):
+        svc, fake = r4_service
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.read_data_consent(_R4_CONSENT_ID, user_scope=_R4_USER_SCOPE)
+        assert exc.value.code == AgentErrorCode.INPUT_INVALID
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding()
+        read = await svc.read_data_consent(_R4_CONSENT_ID, user_scope=_R4_USER_SCOPE)
+        assert read.state is DataConsentState.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_revoke_passthrough(self, r4_service):
+        svc, fake = r4_service
+        cmd = DataConsentRevokeCommand(command=_r4_command_ref(1, "revoke-cmd-1"), consent_id=_R4_CONSENT_ID)
+        receipt = await svc.revoke_data_consent(cmd)
+        assert receipt.target_id == _R4_CONSENT_ID
+        assert len(fake.revoke_calls) == 1
+
+
+class TestR04AuthorizeDataAttempt:
+    @pytest.mark.asyncio
+    async def test_allow_local_path_and_claim_recorded(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding()
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.ALLOW
+        assert receipt.reason is None
+        assert receipt.binding is not None
+        assert receipt.consent_revision == 1
+        assert len(fake.claims) == 1
+        authorization, claim = fake.claims[0]
+        assert claim.consent_revision == 1
+        assert claim.connection_authorization_ref.verified_connection_grant_id is None
+        assert claim.connection_authorization_ref.connection_id == _R4_CONN
+        assert claim.outcome is DataAttemptOutcome.ALLOW
+        assert authorization is not None
+
+    @pytest.mark.asyncio
+    async def test_consent_not_found_deny(self, r4_service):
+        svc, _ = r4_service
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "consent_not_found"
+        assert receipt.binding is None
+
+    @pytest.mark.asyncio
+    async def test_unreadable_binding_unknown(self, r4_service):
+        svc, fake = r4_service
+
+        async def boom(user_scope: str, consent_id: str) -> DataConsentBinding | None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "payload cannot be reliably decoded", "x")
+
+        fake.read_data_consent_decision = boom  # 注入不可靠重读路径
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.UNKNOWN
+        assert receipt.reason == "consent_unreadable"
+
+    @pytest.mark.asyncio
+    async def test_egress_without_grant_denies(self, isolated_config):
+        """云端路径（requires_egress_grant=True）无 grant → deny connection_denied。"""
+        cfg_mod.ConfigHandler.ensure_defaults()
+        mm = _load_mm()
+        mm["connections"] = [_base_connection(_R4_CONN, "https://api.example.com")]
+        _write_raw(isolated_config, {"model_management": mm})
+        fake = _FakeAgentDao()
+        svc = ModelConfigurationService(agent_dao=fake)
+        payload = _r4_binding_payload()
+        payload["requires_egress_grant"] = True
+        payload["target_fingerprint"] = "https://api.example.com:443"
+        payload["connection_authorization_ref"]["target_fingerprint"] = "https://api.example.com:443"
+        # 直接经 fake DAO 注入绑定（绕过 owner 状态机，聚焦核权判定）
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = decode_data_consent_binding(payload, "$")
+        request = dc_replace(_r4_authorization(), target_fingerprint="https://api.example.com:443")
+        receipt = await svc.authorize_data_attempt(request)
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "connection_denied"
+
+    @pytest.mark.asyncio
+    async def test_binding_state_revoked_denies(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding(state="revoked")
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "state_not_approved"
+
+    @pytest.mark.asyncio
+    async def test_digest_mismatch_raises(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding()
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.authorize_data_attempt(_r4_authorization(source_scope_digest="0" * 64))
+        assert exc.value.code == AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_claim_single_winner_deny(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding()
+        fake.claim_error = AgentServiceError(AgentErrorCode.POLICY_DENIED, "state_not_approved", "x")
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "state_not_approved"
+
+    @pytest.mark.asyncio
+    async def test_claim_operation_missing_propagates(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding()
+        fake.claim_error = AgentServiceError(AgentErrorCode.INPUT_INVALID, "operation does not exist", "x")
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.authorize_data_attempt(_r4_authorization())
+        assert exc.value.code == AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_expired_binding_denies(self, r4_service):
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding(
+            valid_from="2025-01-01T00:00:00.000000Z", expires_at="2026-01-01T00:00:00.000000Z"
+        )
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "expired"
+
+    @pytest.mark.asyncio
+    async def test_security_revision_stale_permit_denies(self, r4_service):
+        """请求声明 security_revision=1 与新鲜核权（permit=0）分叉 → deny。
+
+        绑定同为 security_revision=1（decode 校验下与绑定一致判定可通过），
+        若无新鲜 permit 交叉核，本用例将误放行——交叉核为唯一拦截点。
+        """
+        svc, fake = r4_service
+        # 绑定 security_revision=1：与请求声明一致，使新鲜 permit 交叉核成为唯一拦截点
+        payload = _r4_binding_payload()
+        payload["security_revision"] = 1
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = decode_data_consent_binding(payload, "$")
+        request = _r4_authorization(security_revision=1)
+        receipt = await svc.authorize_data_attempt(request)
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "security_revision_mismatch"
