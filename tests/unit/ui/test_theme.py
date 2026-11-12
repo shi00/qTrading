@@ -574,21 +574,32 @@ def _f06_ctc() -> types.ModuleType:
 
 
 class TestF06BusinessTextContrast:
-    """F06: SUCCESS/WARNING/INFO/UP_RED/DOWN_GREEN 用于 13/14px 正文, 必须达 WCAG 正常文字 4.5。
+    """F06: 业务状态/涨跌文字用于 13/14px 正文, 必须达 WCAG 正常文字 4.5。
 
-    背景取真实消费布局 = SURFACE 与 CARD_BG (面板/卡片/Toast/列表行/DataTable 默认行;
-    4 主题下两 token 同值, 仍显式分别验收以防未来分化)。virtual_table 的 ODD/EVEN
-    交替行单元格仅使用中性正文色, 业务色无 EVEN 行消费场景, 故不纳入背景集合。
+    背景取真实消费布局:
+    - SUCCESS/WARNING/INFO: 面板/卡片/Toast/列表行 → SURFACE 与 CARD_BG
+      (4 主题下两 token 同值, 仍显式分别验收以防未来分化)。
+    - UP_RED/DOWN_GREEN: 除面板背景外, virtual_table ``_build_cells`` 对涨跌列
+      (``_TREND_COLS``, 13px 正文) 取 AppColors.UP_RED/DOWN_GREEN, 行底色由
+      ``AppStyles.data_table_row`` 在 TABLE_ROW_ODD/EVEN/HOVER 间切换, 故三者均按
+      正文 4.5 验收 (历史注释曾误称业务色无 EVEN 行消费场景, 掩盖了该缺陷)。
     """
 
-    # 正文业务色 → 需覆盖的真实背景 token (含 INFO: Toast/任务中心/数据源进度文字)
-    _TEXT_COLORS = ("UP_RED", "DOWN_GREEN", "SUCCESS", "WARNING", "INFO")
-    _TEXT_BACKGROUNDS = ("SURFACE", "CARD_BG")
+    _PANEL_BACKGROUNDS = ("SURFACE", "CARD_BG")
+    _ROW_BACKGROUNDS = ("TABLE_ROW_ODD", "TABLE_ROW_EVEN", "TABLE_ROW_HOVER")
+    # 正文业务色 → 真实背景 token (含 INFO: Toast/任务中心/数据源进度文字)
+    _TEXT_CASES = (
+        ("SUCCESS", _PANEL_BACKGROUNDS),
+        ("WARNING", _PANEL_BACKGROUNDS),
+        ("INFO", _PANEL_BACKGROUNDS),
+        ("UP_RED", _PANEL_BACKGROUNDS + _ROW_BACKGROUNDS),
+        ("DOWN_GREEN", _PANEL_BACKGROUNDS + _ROW_BACKGROUNDS),
+    )
 
     @pytest.mark.parametrize("theme", (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA))
-    @pytest.mark.parametrize("color", _TEXT_COLORS)
-    def test_business_text_color_meets_4_5_on_real_backgrounds(self, theme: str, color: str):
-        """业务状态/涨跌正文色在 SURFACE 与 CARD_BG 上对比度 ≥ 4.5 (F06)。"""
+    @pytest.mark.parametrize(("color", "backgrounds"), _TEXT_CASES)
+    def test_business_text_color_meets_4_5_on_real_backgrounds(self, theme: str, color: str, backgrounds):
+        """业务状态/涨跌正文色在各自真实背景上对比度 ≥ 4.5 (F06)。"""
         ctc = _f06_ctc()
 
         def resolve_valid_hex(token: str) -> str:
@@ -603,7 +614,7 @@ class TestF06BusinessTextContrast:
             return value
 
         fg = resolve_valid_hex(color)
-        for bg_token in self._TEXT_BACKGROUNDS:
+        for bg_token in backgrounds:
             bg = resolve_valid_hex(bg_token)
             ratio = ctc.contrast_ratio(fg, bg)
             assert ratio >= 4.5, f"{theme} {color}({fg}) on {bg_token}({bg}) = {ratio:.3f} < 4.5 (F06)"
@@ -633,6 +644,21 @@ class TestF06BusinessTextContrast:
         assert ctc.contrast_ratio("#2979FF", "#1E1E1E") < 4.5
         assert CUSTOM_COLOR_PRESETS[ThemeName.DARK]["INFO"] != "#2979FF"
 
+    def test_dracula_old_up_down_were_below_4_5_on_alternating_rows_regression(self):
+        """回归: DRACULA 旧 UP_RED #FF5555 / DOWN_GREEN #4CAF50 在 EVEN/HOVER 行底色 < 4.5。
+
+        旧值在 ODD(#282A36) 上恰好达标, 却在 EVEN(#44475A)/HOVER(#3A3C4E) 行上跌破,
+        证明按真实交替行背景验收的必要性 (旧门禁只覆盖 SURFACE/CARD_BG)。
+        """
+        ctc = _f06_ctc()
+        drac = CUSTOM_COLOR_PRESETS[ThemeName.DRACULA]
+        for old_fg in ("#FF5555", "#4CAF50"):
+            assert ctc.contrast_ratio(old_fg, drac["TABLE_ROW_ODD"]) >= 4.5
+            assert ctc.contrast_ratio(old_fg, drac["TABLE_ROW_EVEN"]) < 4.5
+            assert ctc.contrast_ratio(old_fg, drac["TABLE_ROW_HOVER"]) < 4.5
+        assert drac["UP_RED"] != "#FF5555"
+        assert drac["DOWN_GREEN"] != "#4CAF50"
+
     def test_appcolors_defaults_sync_dark_preset(self):
         """AppColors 类属性默认值必须与 DARK preset 全量同步 (DARK 是 _reset_singleton 复位基线)。"""
         dark = CUSTOM_COLOR_PRESETS[ThemeName.DARK]
@@ -646,10 +672,10 @@ class TestF06BusinessTextContrast:
     @pytest.mark.parametrize(
         ("theme", "up", "down"),
         [
-            (ThemeName.DARK, "#FF5252", "#4CAF50"),
-            (ThemeName.LIGHT, "#C62828", "#2E7D32"),
-            (ThemeName.NAVY, "#F87171", "#22C55E"),
-            (ThemeName.DRACULA, "#FF5555", "#4CAF50"),
+            (ThemeName.DARK, "#FF5A5A", "#4CAF50"),
+            (ThemeName.LIGHT, "#C62828", "#2A722D"),
+            (ThemeName.NAVY, "#FB8A8A", "#22C55E"),
+            (ThemeName.DRACULA, "#FFAAAA", "#7CDF80"),
         ],
     )
     def test_rg_semantics_preserved(self, theme: str, up: str, down: str):
