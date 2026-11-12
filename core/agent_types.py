@@ -601,6 +601,19 @@ def _require_keys(obj: dict[str, object], required: AbstractSet[str], path: str)
         _fail(_ALL_KEYS_ERR_UNKNOWN, f"{path}.{extra[0]}")
 
 
+def _require_keys_with_optional(
+    obj: dict[str, object], required: AbstractSet[str], optional: AbstractSet[str], path: str
+) -> None:
+    """必填键全在、额外键仅限 optional（strict 意义下的可选键分支）。"""
+
+    missing = sorted(required - obj.keys())
+    if missing:
+        _fail(_ALL_KEYS_ERR_MISSING, f"{path}.{missing[0]}")
+    extra = sorted(obj.keys() - required - optional)
+    if extra:
+        _fail(_ALL_KEYS_ERR_UNKNOWN, f"{path}.{extra[0]}")
+
+
 def _require_str(value: object, path: str) -> str:
     return require_identity(value, path)
 
@@ -3958,4 +3971,506 @@ def decode_research_snapshot(value: object, path: str = "$.snapshot") -> Researc
         limitations=_decode_tuple_of(value["limitations"], f"{path}.limitations", decode_range_limitation),
         read_marks=_decode_tuple_of(value["read_marks"], f"{path}.read_marks", decode_read_mark_entry),
         observation=decode_observation(value["observation"], f"{path}.observation"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# §4.2 R02 历史查询合同（C-03-3a：HistoryQuery/HistoryHit/HistoryPage）
+# ---------------------------------------------------------------------------
+
+#: §4.2 L431/L406-408 规范化裁决（工程冻结，值集留痕）：
+#: - scope 三范围：all_saved（不带局部目标）/current_session（必带主 session_id）/
+#:   current_child（必带主 session_id + child_target）；
+#: - round_selection 必填：all_rounds 或 exact{execution_id, round_id}；
+#: - agent_filter 两 kind 不互换：role_identity{role_id, version_selection,
+#:   role_version?} / execution_agent{execution_id, node_id, round_id}；
+#: - type_filter 仅为 main/child；message_role_filter 仅为 user/assistant/tool/
+#:   public_status；state_filter 值集未冻结（strict str，留痕不臆造）；
+#: - time_basis=created/updated/message；sort=oldest_first/newest_first（方向独立
+#:   维度，工程冻结）；
+#: - 全部条件、空值含义、版本选择、规范关键词和准确祖先进入 query_digest；
+#: - HistoryPage 修订指纹为 sha256 摘要（覆盖域成员/水位经 DAO CanonicalJson
+#:   组装后哈希）；游标 h:{上界ts}:{排序键ts}:{锚ID}（上界绑定翻页）。
+
+HISTORY_SCOPES: Final[frozenset[str]] = frozenset({"all_saved", "current_session", "current_child"})
+ROUND_SELECTION_KINDS: Final[frozenset[str]] = frozenset({"all_rounds", "exact"})
+AGENT_FILTER_KINDS: Final[frozenset[str]] = frozenset({"role_identity", "execution_agent"})
+VERSION_SELECTIONS: Final[frozenset[str]] = frozenset({"all_versions", "exact"})
+TYPE_FILTERS: Final[frozenset[str]] = frozenset({"main", "child"})
+MESSAGE_ROLE_FILTERS: Final[frozenset[str]] = frozenset({"user", "assistant", "tool", "public_status"})
+HISTORY_TIME_BASES: Final[frozenset[str]] = frozenset({"created", "updated", "message"})
+HISTORY_SORTS: Final[frozenset[str]] = frozenset({"oldest_first", "newest_first"})
+HISTORY_HIT_KINDS: Final[frozenset[str]] = frozenset({"message", "artifact"})
+
+_DATE_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
+_HISTORY_CURSOR_RE: Final = re.compile(
+    r"h:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):([^:\s]+)"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryChildTarget:
+    """current_child 范围的准确叶目标（§4.2 L406）：execution_id 为准确叶。"""
+
+    parent_execution_id: str
+    execution_id: str
+    node_id: str
+
+
+_HISTORY_CHILD_TARGET_KEYS: Final = frozenset({"parent_execution_id", "execution_id", "node_id"})
+
+
+def decode_history_child_target(value: object, path: str = "$.child_target") -> HistoryChildTarget:
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _HISTORY_CHILD_TARGET_KEYS, path)
+    parent_execution_id = _require_str(value["parent_execution_id"], f"{path}.parent_execution_id")
+    execution_id = _require_str(value["execution_id"], f"{path}.execution_id")
+    if execution_id == parent_execution_id:
+        _fail("identity_mismatch", f"{path}.execution_id")
+    return HistoryChildTarget(
+        parent_execution_id=parent_execution_id,
+        execution_id=execution_id,
+        node_id=_require_str(value["node_id"], f"{path}.node_id"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryRoundSelection:
+    """轮次选择（§4.2 L406）：all_rounds 或 exact{execution_id, round_id}。"""
+
+    kind: str
+    execution_id: str | None = None
+    round_id: str | None = None
+
+
+def decode_history_round_selection(value: object, path: str = "$.round_selection") -> HistoryRoundSelection:
+    """轮次选择解码：all_rounds 无其余键、exact 必携双 ID（identity_mismatch）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    if not isinstance(value.get("kind"), str) or value["kind"] not in ROUND_SELECTION_KINDS:
+        _fail("invalid_round_selection_kind", f"{path}.kind")
+    if value["kind"] == "all_rounds":
+        _require_keys(value, frozenset({"kind"}), path)
+        return HistoryRoundSelection(kind="all_rounds")
+    _require_keys(value, frozenset({"kind", "execution_id", "round_id"}), path)
+    return HistoryRoundSelection(
+        kind="exact",
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryAgentFilter:
+    """历史 Agent 过滤（§4.2 L408）：两 kind 不以显示名/模型名/消息 role 互换。"""
+
+    kind: str
+    role_id: str | None = None
+    version_selection: str | None = None
+    role_version: str | None = None
+    execution_id: str | None = None
+    node_id: str | None = None
+    round_id: str | None = None
+
+
+def decode_history_agent_filter(value: object, path: str = "$.agent_filter") -> HistoryAgentFilter:
+    """Agent 过滤解码：kind 分支键集互斥（role_identity/execution_agent）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    if not isinstance(value.get("kind"), str) or value["kind"] not in AGENT_FILTER_KINDS:
+        _fail("invalid_agent_filter_kind", f"{path}.kind")
+    if value["kind"] == "role_identity":
+        _require_keys_with_optional(
+            value, frozenset({"kind", "role_id", "version_selection"}), frozenset({"role_version"}), path
+        )
+        role_id = _require_str(value["role_id"], f"{path}.role_id")
+        version_selection = _require_choice(
+            value["version_selection"], VERSION_SELECTIONS, f"{path}.version_selection", "invalid_version_selection"
+        )
+        role_version = _opt_str(value.get("role_version"), f"{path}.role_version")
+        if version_selection == "exact" and role_version is None:
+            _fail("identity_mismatch", f"{path}.role_version")
+        if version_selection == "all_versions" and role_version is not None:
+            _fail("identity_mismatch", f"{path}.role_version")
+        return HistoryAgentFilter(
+            kind="role_identity",
+            role_id=role_id,
+            version_selection=version_selection,
+            role_version=role_version,
+        )
+    _require_keys(value, frozenset({"kind", "execution_id", "node_id", "round_id"}), path)
+    return HistoryAgentFilter(
+        kind="execution_agent",
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        node_id=_require_str(value["node_id"], f"{path}.node_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryQuery:
+    """历史查询（§4.2 L431 全字段；R02 范围规则构造后即校验）。
+
+    ``query_text`` 必填（空串=无关键词过滤，空值含义入 digest）；``state_filter``
+    值集未冻结（strict str|None，留痕）。日期过滤为 UTC 日期文本（含当天）。
+    """
+
+    scope: str
+    round_selection: HistoryRoundSelection
+    query_text: str
+    time_basis: str
+    sort: str
+    limit: int = 50
+    session_id: str | None = None
+    child_target: HistoryChildTarget | None = None
+    agent_filter: HistoryAgentFilter | None = None
+    message_role_filter: str | None = None
+    type_filter: str | None = None
+    state_filter: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    cursor: str | None = None
+
+
+_HISTORY_QUERY_KEYS: Final = frozenset(
+    {
+        "scope",
+        "round_selection",
+        "query_text",
+        "time_basis",
+        "sort",
+        "limit",
+        "session_id",
+        "child_target",
+        "agent_filter",
+        "message_role_filter",
+        "type_filter",
+        "state_filter",
+        "date_from",
+        "date_to",
+        "cursor",
+    }
+)
+
+
+def validate_history_query(query: HistoryQuery) -> None:
+    """HistoryQuery 结构校验（R02 范围规则 + 值集 + 游标语法）。"""
+
+    if query.scope not in HISTORY_SCOPES:
+        _fail("invalid_scope", "$.scope")
+    if isinstance(query.limit, bool) or not isinstance(query.limit, int):
+        _fail("invalid_type", "$.limit")
+    if not 1 <= query.limit <= 50:
+        _fail("invalid_range", "$.limit")
+    if not isinstance(query.query_text, str):
+        _fail("invalid_type", "$.query_text")
+    if query.time_basis not in HISTORY_TIME_BASES:
+        _fail("invalid_time_basis", "$.time_basis")
+    if query.sort not in HISTORY_SORTS:
+        _fail("invalid_sort", "$.sort")
+    if query.session_id is not None:
+        _require_str(query.session_id, "$.session_id")
+    if query.message_role_filter is not None and query.message_role_filter not in MESSAGE_ROLE_FILTERS:
+        _fail("invalid_message_role_filter", "$.message_role_filter")
+    if query.type_filter is not None and query.type_filter not in TYPE_FILTERS:
+        _fail("invalid_type_filter", "$.type_filter")
+    if query.state_filter is not None and (not isinstance(query.state_filter, str) or query.state_filter == ""):
+        _fail("invalid_range", "$.state_filter")
+    for field in ("date_from", "date_to"):
+        value = getattr(query, field)
+        if value is not None and (not isinstance(value, str) or _DATE_RE.fullmatch(value) is None):
+            _fail("invalid_date", f"$.{field}")
+    if query.date_from is not None and query.date_to is not None and query.date_from > query.date_to:
+        _fail("invalid_range", "$.date_to")
+    if query.cursor is not None:
+        if not isinstance(query.cursor, str) or _HISTORY_CURSOR_RE.fullmatch(query.cursor) is None:
+            _fail("invalid_cursor", "$.cursor")
+    if query.round_selection.kind == "all_rounds":
+        decode_history_round_selection({"kind": "all_rounds"}, "$.round_selection")
+    else:
+        decode_history_round_selection(
+            {
+                "kind": "exact",
+                "execution_id": query.round_selection.execution_id,
+                "round_id": query.round_selection.round_id,
+            },
+            "$.round_selection",
+        )
+    if query.agent_filter is not None:
+        agent_filter = query.agent_filter
+        if agent_filter.kind == "role_identity":
+            decode_history_agent_filter(
+                {
+                    "kind": "role_identity",
+                    "role_id": agent_filter.role_id,
+                    "version_selection": agent_filter.version_selection,
+                    "role_version": agent_filter.role_version,
+                },
+                "$.agent_filter",
+            )
+        else:
+            decode_history_agent_filter(
+                {
+                    "kind": "execution_agent",
+                    "execution_id": agent_filter.execution_id,
+                    "node_id": agent_filter.node_id,
+                    "round_id": agent_filter.round_id,
+                },
+                "$.agent_filter",
+            )
+    # R02 范围规则（L406）
+    if query.scope == "all_saved":
+        if query.session_id is not None or query.child_target is not None:
+            _fail("identity_mismatch", "$.session_id")
+    elif query.scope == "current_session":
+        if query.session_id is None:
+            _fail("identity_mismatch", "$.session_id")
+        if query.child_target is not None:
+            _fail("identity_mismatch", "$.child_target")
+    else:  # current_child
+        if query.session_id is None or query.child_target is None:
+            _fail("identity_mismatch", "$.child_target")
+        if (
+            query.round_selection.kind == "exact"
+            and query.round_selection.execution_id != query.child_target.execution_id
+        ):
+            _fail("identity_mismatch", "$.round_selection")
+
+
+def decode_history_query(value: object, path: str = "$.history_query") -> HistoryQuery:
+    """严格解码历史查询（15 键全必填禁额外键；构造后即 R02 校验）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _HISTORY_QUERY_KEYS, path)
+    limit = value["limit"]
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        _fail("invalid_type", f"{path}.limit")
+    child_target_value = value["child_target"]
+    agent_filter_value = value["agent_filter"]
+    message_role_value = value["message_role_filter"]
+    type_filter_value = value["type_filter"]
+    query = HistoryQuery(
+        scope=_require_choice(value["scope"], HISTORY_SCOPES, f"{path}.scope", "invalid_scope"),
+        round_selection=decode_history_round_selection(value["round_selection"], f"{path}.round_selection"),
+        query_text=_require_text(value["query_text"], f"{path}.query_text"),
+        time_basis=_require_choice(value["time_basis"], HISTORY_TIME_BASES, f"{path}.time_basis", "invalid_time_basis"),
+        sort=_require_choice(value["sort"], HISTORY_SORTS, f"{path}.sort", "invalid_sort"),
+        limit=limit,
+        session_id=_opt_str(value["session_id"], f"{path}.session_id"),
+        child_target=(
+            decode_history_child_target(child_target_value, f"{path}.child_target")
+            if child_target_value is not None
+            else None
+        ),
+        agent_filter=(
+            decode_history_agent_filter(agent_filter_value, f"{path}.agent_filter")
+            if agent_filter_value is not None
+            else None
+        ),
+        message_role_filter=(
+            None
+            if message_role_value is None
+            else _require_choice(
+                message_role_value, MESSAGE_ROLE_FILTERS, f"{path}.message_role_filter", "invalid_message_role_filter"
+            )
+        ),
+        type_filter=(
+            None
+            if type_filter_value is None
+            else _require_choice(type_filter_value, TYPE_FILTERS, f"{path}.type_filter", "invalid_type_filter")
+        ),
+        state_filter=_opt_text(value["state_filter"], f"{path}.state_filter"),
+        date_from=_opt_str(value["date_from"], f"{path}.date_from"),
+        date_to=_opt_str(value["date_to"], f"{path}.date_to"),
+        cursor=_opt_cursor(value["cursor"], f"{path}.cursor"),
+    )
+    validate_history_query(query)
+    return query
+
+
+def normalize_history_query(query: HistoryQuery) -> CanonicalJson:
+    """规范化查询 wire（全部条件/空值含义入 digest，§4.2 L408）。
+
+    条件缺省一律显式 ``null``（空值含义不因省略键而歧义）；round_selection/
+    agent_filter 展开为全键 wire。游标与 limit 不入 digest（同一查询翻页共享摘要）。
+    """
+
+    selection: dict[str, Any] = {"kind": query.round_selection.kind}
+    if query.round_selection.kind == "exact":
+        selection["execution_id"] = query.round_selection.execution_id
+        selection["round_id"] = query.round_selection.round_id
+    agent_filter: dict[str, Any] | None = None
+    if query.agent_filter is not None:
+        agent_filter = {"kind": query.agent_filter.kind}
+        if query.agent_filter.kind == "role_identity":
+            agent_filter["role_id"] = query.agent_filter.role_id
+            agent_filter["version_selection"] = query.agent_filter.version_selection
+            agent_filter["role_version"] = query.agent_filter.role_version
+        else:
+            agent_filter["execution_id"] = query.agent_filter.execution_id
+            agent_filter["node_id"] = query.agent_filter.node_id
+            agent_filter["round_id"] = query.agent_filter.round_id
+    return json_doc(
+        {
+            "scope": query.scope,
+            "session_id": query.session_id,
+            "child_target": to_wire_dict(query.child_target) if query.child_target is not None else None,
+            "round_selection": selection,
+            "query_text": query.query_text,
+            "agent_filter": agent_filter,
+            "message_role_filter": query.message_role_filter,
+            "type_filter": query.type_filter,
+            "state_filter": query.state_filter,
+            "date_from": query.date_from,
+            "date_to": query.date_to,
+            "time_basis": query.time_basis,
+            "sort": query.sort,
+        }
+    )
+
+
+def compute_history_query_digest(query: HistoryQuery) -> str:
+    """``sha256(CanonicalJson(规范化查询))``：游标/翻页/指纹绑定该摘要（L408）。"""
+
+    return sha256_hex(normalize_history_query(query))
+
+
+def parse_history_cursor(cursor: str) -> tuple[str, str, str]:
+    """游标 ``h:{上界ts}:{排序键ts}:{锚ID}`` → (固定上界, 排序键, 锚 ID)。
+
+    语法已由 validate_history_query 冻结；供 DAO 组装 keyset 续读。
+    """
+
+    match = _HISTORY_CURSOR_RE.fullmatch(cursor)
+    if match is None:
+        _fail("invalid_cursor", "$.cursor")
+    return match.group(1), match.group(2), match.group(3)
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryHit:
+    """历史命中（§4.2 L442）：命中摘要 + session/execution/node/round/message
+    或 artifact 准确地址；``sort_moment`` 为排序键时刻（翻页 keyset 键值）。"""
+
+    hit_kind: str
+    session_id: str
+    sort_moment: str
+    created_at: str
+    session_seq: int | None
+    execution_id: str | None
+    node_id: str | None
+    round_id: str | None
+    message_id: str | None
+    artifact_id: str | None
+    artifact_version: int | None
+    role: str | None
+    payload_kind: str | None
+    artifact_kind: str | None
+    summary_text: str | None
+
+
+_HISTORY_HIT_KEYS: Final = frozenset(
+    {
+        "hit_kind",
+        "session_id",
+        "sort_moment",
+        "created_at",
+        "session_seq",
+        "execution_id",
+        "node_id",
+        "round_id",
+        "message_id",
+        "artifact_id",
+        "artifact_version",
+        "role",
+        "payload_kind",
+        "artifact_kind",
+        "summary_text",
+    }
+)
+
+
+def decode_history_hit(value: object, path: str = "$.hits") -> HistoryHit:
+    """严格解码历史命中（15 键全必填；message/artifact 地址组互斥归属）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _HISTORY_HIT_KEYS, path)
+    hit_kind = _require_choice(value["hit_kind"], HISTORY_HIT_KINDS, f"{path}.hit_kind", "invalid_hit_kind")
+    message_id = _opt_str(value["message_id"], f"{path}.message_id")
+    artifact_id = _opt_str(value["artifact_id"], f"{path}.artifact_id")
+    artifact_version = _opt_int(value["artifact_version"], f"{path}.artifact_version", minimum=1)
+    if hit_kind == "message":
+        if message_id is None or artifact_id is not None or artifact_version is not None:
+            _fail("identity_mismatch", f"{path}.message_id")
+        if _opt_int(value["session_seq"], f"{path}.session_seq", minimum=0) is None:
+            _fail("identity_mismatch", f"{path}.session_seq")
+    else:
+        if artifact_id is None or artifact_version is None or message_id is not None:
+            _fail("identity_mismatch", f"{path}.artifact_id")
+    return HistoryHit(
+        hit_kind=hit_kind,
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        sort_moment=_require_utc_timestamp(value["sort_moment"], f"{path}.sort_moment"),
+        created_at=_require_utc_timestamp(value["created_at"], f"{path}.created_at"),
+        session_seq=_opt_int(value["session_seq"], f"{path}.session_seq", minimum=0),
+        execution_id=_opt_str(value["execution_id"], f"{path}.execution_id"),
+        node_id=_opt_str(value["node_id"], f"{path}.node_id"),
+        round_id=_opt_str(value["round_id"], f"{path}.round_id"),
+        message_id=message_id,
+        artifact_id=artifact_id,
+        artifact_version=artifact_version,
+        role=_opt_str(value["role"], f"{path}.role"),
+        payload_kind=_opt_str(value["payload_kind"], f"{path}.payload_kind"),
+        artifact_kind=_opt_str(value["artifact_kind"], f"{path}.artifact_kind"),
+        summary_text=_opt_text(value["summary_text"], f"{path}.summary_text"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryPage:
+    """历史页（§4.2 L442）：规范摘要/固定上界/覆盖域修订指纹/命中/下一游标。
+
+    无命中（空 hits 且无游标）、游标失效（REVISION_CONFLICT）与查询失败（异常）
+    分开表达；``next_cursor`` 为 None 即末页（不另设 has_more，工程裁决留痕）。
+    """
+
+    query_digest: str
+    fixed_upper_bound: str
+    revision_fingerprint: str
+    hits: tuple[HistoryHit, ...]
+    next_cursor: str | None
+    read_moment: str
+
+
+_HISTORY_PAGE_KEYS: Final = frozenset(
+    {"query_digest", "fixed_upper_bound", "revision_fingerprint", "hits", "next_cursor", "read_moment"}
+)
+
+
+def decode_history_page(value: object, path: str = "$.history_page") -> HistoryPage:
+    """严格解码历史页（6 键全必填；指纹/摘要为 64 位摘要）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _HISTORY_PAGE_KEYS, path)
+    hits_value = value["hits"]
+    if not isinstance(hits_value, list):
+        _fail("invalid_type", f"{path}.hits")
+    hits = tuple(decode_history_hit(item, f"{path}.hits[{index}]") for index, item in enumerate(hits_value))
+    next_cursor = _opt_str(value["next_cursor"], f"{path}.next_cursor")
+    if next_cursor is not None and _HISTORY_CURSOR_RE.fullmatch(next_cursor) is None:
+        _fail("invalid_cursor", f"{path}.next_cursor")
+    return HistoryPage(
+        query_digest=_require_digest(value["query_digest"], f"{path}.query_digest"),
+        fixed_upper_bound=_require_utc_timestamp(value["fixed_upper_bound"], f"{path}.fixed_upper_bound"),
+        revision_fingerprint=_require_digest(value["revision_fingerprint"], f"{path}.revision_fingerprint"),
+        hits=hits,
+        next_cursor=next_cursor,
+        read_moment=_require_utc_timestamp(value["read_moment"], f"{path}.read_moment"),
     )
