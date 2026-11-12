@@ -230,14 +230,25 @@ def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
     )
 
 
-# Health status key → (icon, color) mapping
+# Health status key → (icon, AppColors 语义属性名) mapping
+# M35-05: 只存语义属性名, 渲染期经 _resolve_health_visuals 读取当期主题色,
+# 避免在模块导入时固化 Hex (主题切换后重渲染仍用旧值).
 _HEALTH_STATUS_VISUALS: dict[str, tuple[ft.IconData, str]] = {
-    "ds_health_ok": (ft.Icons.CHECK_CIRCLE, AppColors.SUCCESS),
-    "ds_health_lag": (ft.Icons.WARNING, AppColors.WARNING),
-    "ds_health_error": (ft.Icons.ERROR, AppColors.ERROR),
-    "ds_health_cancelled": (ft.Icons.CANCEL_OUTLINED, AppColors.WARNING),
-    "common_check_fail": (ft.Icons.ERROR, AppColors.ERROR),
+    "ds_health_ok": (ft.Icons.CHECK_CIRCLE, "SUCCESS"),
+    "ds_health_lag": (ft.Icons.WARNING, "WARNING"),
+    "ds_health_error": (ft.Icons.ERROR, "ERROR"),
+    "ds_health_cancelled": (ft.Icons.CANCEL_OUTLINED, "WARNING"),
+    "common_check_fail": (ft.Icons.ERROR, "ERROR"),
 }
+
+
+def _resolve_health_visuals(health_key: str) -> tuple[ft.IconData, str]:
+    """解析健康状态图标/颜色为当期主题色 (M35-05: 不固化导入期快照).
+
+    未知状态回退为警告语义, 不得伪装为「正常」(R21).
+    """
+    icon, color_name = _HEALTH_STATUS_VISUALS.get(health_key, (ft.Icons.HEALTH_AND_SAFETY, "WARNING"))
+    return icon, getattr(AppColors, color_name)
 
 
 # ============================================================================
@@ -260,9 +271,7 @@ def _build_health_dashboard(
     elif state.health_error is not None:
         health_key = "common_check_fail"
         metric_health_value = I18n.get(health_key)
-        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
-            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
-        )
+        metric_health_icon, metric_health_color = _resolve_health_visuals(health_key)
     elif state.health_result is not None:
         status = state.health_result.status
         if status == "yellow":
@@ -272,9 +281,7 @@ def _build_health_dashboard(
         else:
             health_key = "ds_health_ok"
         metric_health_value = I18n.get(health_key)
-        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
-            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
-        )
+        metric_health_icon, metric_health_color = _resolve_health_visuals(health_key)
     else:
         metric_health_value = I18n.get("ds_status_checking")
         metric_health_icon = ft.Icons.HEALTH_AND_SAFETY
