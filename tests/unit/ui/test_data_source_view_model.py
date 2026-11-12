@@ -497,15 +497,18 @@ class TestDataSourceViewModelHealthTaskLifetime:
     ):
         await bound_vm.check_health()
         old_factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        mock_processor.check_data_health = AsyncMock(side_effect=asyncio.CancelledError())
+        cancelled = asyncio.CancelledError()
+        mock_processor.check_data_health = AsyncMock(side_effect=cancelled)
         bound_vm.handle_task_update([_make_update_task("task_123", TaskStatus.CANCELLED)])
 
         mock_task_manager.submit_task.return_value = "task_456"
         await bound_vm.check_health()
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await old_factory(task_id="task_123")
 
+        # R2: CancelledError 必须原样向上抛出（未被吞没/替换）
+        assert exc_info.value is cancelled
         assert bound_vm.state.health_checking is True
         assert bound_vm._health_task_id == "task_456"
 
