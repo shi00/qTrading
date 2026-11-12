@@ -43,6 +43,7 @@ from ui.components.backtest.backtest_result_panel import (
     _invested_color,
     _invested_warning,
     _metric_card,
+    _pct_color,
     _profit_factor_card,
     _resolve_trades_page,
     _sample_tick_indices,
@@ -152,10 +153,12 @@ class TestColorHelpers:
     """颜色判断纯函数单测。"""
 
     def test_get_color_for_value_positive(self) -> None:
-        assert _get_color_for_value(0.1) == AppColors.SUCCESS
+        """M30-C3: 涨跌语义统一走 C2 校准的 UP_RED（A 股红涨），不用 SUCCESS。"""
+        assert _get_color_for_value(0.1) == AppColors.UP_RED
 
     def test_get_color_for_value_negative(self) -> None:
-        assert _get_color_for_value(-0.1) == AppColors.ERROR
+        """M30-C3: 跌用 DOWN_GREEN（A 股绿跌），不用 ERROR（非错误状态且正文对比度不达标）。"""
+        assert _get_color_for_value(-0.1) == AppColors.DOWN_GREEN
 
     def test_get_color_for_value_zero(self) -> None:
         assert _get_color_for_value(0.0) == AppColors.TEXT_PRIMARY
@@ -417,7 +420,8 @@ class TestBuildMetricsSection:
         values = [card.content.content.controls[1] for card in cards]
         assert [v.value for v in values] == ["15.00%", "8.00%", "7", "3"]
         assert [v.color for v in values] == [
-            AppColors.SUCCESS,
+            # M30-C3: 正收益走 A 股红涨语义（UP_RED）；回撤/现金拖累仍是状态语义色。
+            AppColors.UP_RED,
             AppColors.WARNING,
             AppColors.TEXT_PRIMARY,
             AppColors.ERROR,
@@ -1210,6 +1214,133 @@ class TestBuildMonthlyTable:
         assert [t.value for t in texts] == ["2024-01", "0.00%", "0.00%", "0.00%"]
         assert texts[1].color == AppColors.TEXT_PRIMARY
         assert texts[3].color == AppColors.TEXT_PRIMARY
+
+
+class TestPctColor:
+    """月表涨跌色：A 股红涨绿跌（复用 C2 校准的 UP_RED/DOWN_GREEN），缺失不伪装（R21）。"""
+
+    def test_positive_uses_up_red(self) -> None:
+        assert _pct_color(0.0123) == AppColors.UP_RED
+
+    def test_negative_uses_down_green(self) -> None:
+        assert _pct_color(-0.0123) == AppColors.DOWN_GREEN
+
+    def test_zero_uses_text_primary(self) -> None:
+        assert _pct_color(0.0) == AppColors.TEXT_PRIMARY
+
+    def test_none_uses_text_secondary(self) -> None:
+        """缺失（未测量）≠ 零收益：走中性次要色且不参与 >/< 比较。"""
+        assert _pct_color(None) == AppColors.TEXT_SECONDARY
+
+
+def _render_trades_table(trades: tuple[TradeRow, ...]) -> ft.DataTable:
+    with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+        mock_i18n.return_value = "mock_text"
+        container = _build_trades_table(trades, 0, MagicMock())
+    column = container.content
+    assert isinstance(column, ft.Column)
+    table = column.controls[0]
+    assert isinstance(table, ft.DataTable)
+    return table
+
+
+def _render_monthly_table(
+    period_stats: tuple[tuple[str, float | None, float | None, float | None], ...],
+) -> ft.DataTable:
+    with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+        mock_i18n.return_value = "mock_text"
+        container = _build_monthly_table(period_stats)
+    table = container.content
+    assert isinstance(table, ft.DataTable)
+    return table
+
+
+class TestTradesTableBusinessColors:
+    """成交表业务色：买卖方向 + 盈亏均用已达标涨跌色，不用 SUCCESS/ERROR。"""
+
+    def _trades(self) -> tuple[TradeRow, ...]:
+        return (
+            TradeRow(
+                trade_date="2024-01-02", ts_code="000001.SZ", action="buy", price=10.0, volume=100, realized_pnl=0.0
+            ),
+            TradeRow(
+                trade_date="2024-01-03", ts_code="000002.SZ", action="sell", price=11.0, volume=100, realized_pnl=120.0
+            ),
+            TradeRow(
+                trade_date="2024-01-04", ts_code="000003.SZ", action="sell", price=9.0, volume=100, realized_pnl=-80.0
+            ),
+        )
+
+    def test_action_column_uses_direction_colors(self) -> None:
+        """买入→UP_RED、卖出→DOWN_GREEN（A 股行情软件红买绿卖惯例）。"""
+        table = _render_trades_table(self._trades())
+        actions = [row.cells[2].content for row in table.rows]
+        assert [cell.color for cell in actions] == [
+            AppColors.UP_RED,
+            AppColors.DOWN_GREEN,
+            AppColors.DOWN_GREEN,
+        ]
+
+    def test_pnl_column_uses_trend_colors(self) -> None:
+        """盈亏：正→UP_RED、负→DOWN_GREEN、零→TEXT_PRIMARY。"""
+        table = _render_trades_table(self._trades())
+        pnls = [row.cells[5].content for row in table.rows]
+        assert [cell.color for cell in pnls] == [
+            AppColors.TEXT_PRIMARY,
+            AppColors.UP_RED,
+            AppColors.DOWN_GREEN,
+        ]
+
+    def test_business_cells_never_use_success_or_error(self) -> None:
+        """回归：ERROR 作 13px 正文在四主题行底色上不达标；SUCCESS 在 LIGHT hover 行不达标。"""
+        table = _render_trades_table(self._trades())
+        colors = {cell.content.color for row in table.rows for cell in row.cells}
+        assert AppColors.ERROR not in colors
+        assert AppColors.SUCCESS not in colors
+
+
+class TestMonthlyTableBusinessColors:
+    """月度表业务色：收益/超额走涨跌语义，基准列固定中性。"""
+
+    def test_return_and_excess_use_direction_colors(self) -> None:
+        table = _render_monthly_table((("2024-01", 0.1, 0.02, -0.03),))
+        texts = [cell.content for cell in table.rows[0].cells]
+        assert texts[1].color == AppColors.UP_RED
+        assert texts[2].color == AppColors.TEXT_PRIMARY
+        assert texts[3].color == AppColors.DOWN_GREEN
+
+    def test_missing_values_keep_neutral_colors(self) -> None:
+        """R21: 缺失仍渲染 N/A + 次要色，不得因换色变成 0.00% 或涨跌色。"""
+        table = _render_monthly_table((("2024-02", None, None, None),))
+        texts = [cell.content for cell in table.rows[0].cells]
+        assert [text.value for text in texts] == ["2024-02", "N/A", "N/A", "N/A"]
+        assert [text.color for text in texts[1:]] == [AppColors.TEXT_SECONDARY] * 3
+
+
+class TestTableBusinessColorContrast:
+    """两张表业务色 × 四主题 × ODD/EVEN/HOVER 行底色矩阵必须 ≥ 4.5（正文）。"""
+
+    @staticmethod
+    def _ctc() -> Any:
+        import importlib
+        import sys
+        from pathlib import Path as _Path
+
+        scripts_dir = _Path(__file__).resolve().parents[3] / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        return importlib.import_module("check_theme_contrast")
+
+    @pytest.mark.parametrize("theme", ("dark", "light", "navy", "dracula"))
+    @pytest.mark.parametrize("bg", ("TABLE_ROW_ODD", "TABLE_ROW_EVEN", "TABLE_ROW_HOVER"))
+    def test_trend_colors_on_row_backgrounds(self, theme: str, bg: str) -> None:
+        ctc = self._ctc()
+        for token in ("UP_RED", "DOWN_GREEN"):
+            fg = ctc._resolve_color(token, theme)
+            background = ctc._resolve_color(bg, theme)
+            assert fg is not None and background is not None
+            ratio = ctc.contrast_ratio(fg, background)
+            assert ratio >= 4.5, f"{theme} {token}({fg}) on {bg}({background}) = {ratio:.3f} < 4.5"
 
 
 class TestBacktestResultPanelContract:

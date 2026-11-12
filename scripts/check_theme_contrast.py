@@ -132,15 +132,23 @@ class ContrastPair(NamedTuple):
 #     行底色由 AppStyles.data_table_row 在 TABLE_ROW_ODD / TABLE_ROW_EVEN /
 #     TABLE_ROW_HOVER 之间切换，故涨跌色必须同时在这三种真实行底色上按正文 4.5 验收
 #     （原注释曾误称业务色无 EVEN 行消费场景，掩盖了该缺陷）。
-#   - SUCCESS/WARNING/INFO 在 virtual_table 单元格中无消费（单元格中性正文用
-#     TABLE_CELL_TEXT / TABLE_CELL_NUMERIC），故不配置三者 × 行底色色对。
+#   - 回测结果面板的成交明细 / 月度统计两张表（M30-C3）同样用 UP_RED/DOWN_GREEN 表达
+#     盈亏与收益涨跌（默认 13/14px 正文），行底色为 SURFACE（默认行）与 TABLE_ROW_HOVER
+#     （hover）；与 virtual_table 一致按 ODD/EVEN/HOVER 全矩阵保守验收。
+#   - DataTable 的 hover 行也承载中性正文：未显式指定颜色的单元格取主题默认
+#     TABLE_CELL_TEXT（如数据出口审计表），回测两张表的中性单元格显式取 TEXT_PRIMARY，
+#     故补齐二者 × TABLE_ROW_HOVER 色对。
+#   - SUCCESS/WARNING/INFO 在 virtual_table / 回测表格单元格中无消费（单元格中性正文用
+#     TABLE_CELL_TEXT / TABLE_CELL_NUMERIC）；ERROR 在回测面板仅用于 20px 粗体指标数值
+#     与图表图形（大字号 3.0 档），不再作为该面板 13/14px 正文出现。
 #
 #   已知覆盖边界（如实披露，不扩大为整应用 WCAG AA 认证）：
 #   - watchlist 列表行使用 Layer 1 派生色 SURFACE_VARIANT（surface_container_highest，
 #     运行时由 Flet/Flutter 派生，无法从主题表精确计算），不在本门禁可验收集合内。
-#   - ERROR 亦有正文场景（Toast 错误文字、交易明细 sell/负 pnl），但 Layer 1 error
-#     调整会联动 danger_button/on_error 等反色用途，超出 F06 范围，按图标档 3.0 验收，
-#     后续如需正文级验收须连同反色用途一并评估。
+#   - ERROR 在本面板之外仍有 13/14px 正文场景（如 Toast 错误文字），但 Layer 1 error
+#     调整会联动 danger_button / on_error 等反色用途，超出 F06 范围，按图标/大字号档
+#     3.0 验收；后续如需正文级验收须连同反色用途一并评估（M30-C3 已在回测面板内把
+#     交易明细 sell / 负 pnl 的正文消费迁移到 DOWN_GREEN）。
 _CONTRAST_PAIRS: list[ContrastPair] = [
     # --- 正文文本 (4.5) ---
     ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),
@@ -170,6 +178,9 @@ _CONTRAST_PAIRS: list[ContrastPair] = [
     ContrastPair("DOWN_GREEN", "TABLE_ROW_ODD", _THRESHOLD_TEXT, "text"),
     ContrastPair("DOWN_GREEN", "TABLE_ROW_EVEN", _THRESHOLD_TEXT, "text"),
     ContrastPair("DOWN_GREEN", "TABLE_ROW_HOVER", _THRESHOLD_TEXT, "text"),
+    # 中性正文在 hover 行底色上的真实消费（DataTable 默认单元格 / 回测表中性单元格）
+    ContrastPair("TABLE_CELL_TEXT", "TABLE_ROW_HOVER", _THRESHOLD_TEXT, "text"),
+    ContrastPair("TEXT_PRIMARY", "TABLE_ROW_HOVER", _THRESHOLD_TEXT, "text"),
     # --- 图标 / 错误态强调 (3.0；ERROR 亦有正文场景，见上方覆盖边界说明) ---
     ContrastPair("ERROR", "SURFACE", _THRESHOLD_LARGE, "icon"),
     # --- 禁用 / 装饰 (3.0，WCAG §1.4.3 禁用控件豁免，保留可读下限) ---
