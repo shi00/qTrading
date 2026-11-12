@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 # 覆盖率，按「已知不可信不伪装」降级为空（R21 变体）。
 _REVIEW_STATS_REQUIRED_COLUMNS = frozenset(
     {
+        "trade_date",
         "strategy_name",
         "benchmark_code",
         "daily_cnt",
