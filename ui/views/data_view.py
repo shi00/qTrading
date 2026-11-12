@@ -1312,10 +1312,16 @@ def DataExplorerView(active: bool = True) -> ft.Container:
     def _on_cache_seq_change() -> None:
         if cache_state.seq == last_seq.current:
             return
+        # M35-02: 失活期间不消耗序号。视图常驻但 inactive 时若先推进 last_seq,
+        # 重激活后 seq 相等会早退, 信号永久丢失且 tables_loaded 仍为 True,
+        # 表目录不会强制重建。延迟到激活后的 effect 合并为一次 mark_tables_stale。
+        if not active:
+            return
+        # 先消费序号再触发失效: mark_tables_stale 经 VM 通知触发重渲染, 若序号尚未
+        # 更新, effect 重跑会重复失效。
         last_seq.current = cache_state.seq
-        if active:
-            vm.mark_tables_stale()
-            logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
+        vm.mark_tables_stale()
+        logger.debug("[DataExplorerView] Cache cleared - tables marked stale")
 
     ft.use_effect(_on_cache_seq_change, dependencies=[cache_state.seq, active])
 

@@ -549,6 +549,11 @@ def _run_async_coro(coro: Any) -> None:
         asyncio.run(coro)
 
 
+def _method_call_count(vm: _FakeDataExplorerViewModel, method_name: str) -> int:
+    """统计 FakeVM 指定方法的调用次数。"""
+    return sum(1 for name, _ in vm.method_calls if name == method_name)
+
+
 def _make_fake_page() -> FakePage:
     """创建扩展的 FakePage, 支持 run_task/show_toast/pubsub。"""
     page = FakePage()
@@ -2105,6 +2110,147 @@ class TestDataExplorerViewCacheClearedObserver:
 
         calls = [c[0] for c in fake_vm.method_calls]
         assert "mark_tables_stale" not in calls
+
+    def test_inactive_cache_clear_invalidates_on_activation(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: inactive 期间收到的重置信号延迟到激活时失效一次。
+
+        回归缺陷: 旧实现失活时先推进 last_seq 再跳过 mark_tables_stale,
+        重激活后 seq 相等早退, 通知永久丢失且 tables_loaded 仍为 True。
+        """
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        notify_cache_cleared()
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0, "inactive 时不得失效"
+
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1, "激活后应失效且仅一次"
+
+    def test_multiple_inactive_notifications_coalesce_into_single_invalidation(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: inactive 期间多次通知合并为激活后的单次失效。"""
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        for _ in range(3):
+            notify_cache_cleared()
+            run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0
+
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1, "多次通知应合并为一次失效"
+
+    def test_activation_without_new_signal_does_not_invalidate(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: 无新信号时 active False→True 不误失效。"""
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0
+
+    def test_mount_after_signal_does_not_invalidate(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: 挂载前已发生的信号不属于本次挂载, 初 mount 不误失效。"""
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        notify_cache_cleared()
+        notify_cache_cleared()
+
+        component = make_component(DataExplorerView)
+        page = _make_fake_page()
+        _mount(component, page=page)
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0
+
+    def test_reactivation_invalidates_only_for_unconsumed_signal(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: 反复切换 active 时仅对未消费信号失效, 已消费信号不重放。"""
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=True)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        notify_cache_cleared()
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1
+
+        component.kwargs["active"] = False
+        run_render_effects(component)
+        component.kwargs["active"] = True
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1, "已消费信号不得随切换重放"
+
+        component.kwargs["active"] = False
+        run_render_effects(component)
+        notify_cache_cleared()
+        run_render_effects(component)
+        component.kwargs["active"] = True
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 2, "新信号应在重激活后失效一次"
 
     def test_cache_cleared_uses_observable_not_pubsub(
         self,
