@@ -398,7 +398,10 @@ class TestCancelledSaveLifecycle:
         assert vm.state.save_state == SAVE_ERROR
         assert vm.state.saved_revision == 0
         # 非 system 级严重度必须走 logger.error（而非 critical），且消息已脱敏 (R9)
-        assert mock_logger.error.called, "非 system 级异常应记录 logger.error"
+        error_templates = [str(call.args[0]) for call in mock_logger.error.call_args_list if call.args]
+        assert any("Error in cancelled save persist" in tpl for tpl in error_templates), (
+            f"非 system 级异常应走 logger.error 的 recoverable 模板, got: {error_templates}"
+        )
         assert not mock_logger.critical.called, "非 system 级异常不应升级为 critical"
         for call in mock_logger.error.call_args_list:
             assert sensitive_path not in str(call.args), f"R9 违规：原始路径出现在 logger 参数中: {call.args}"
@@ -456,7 +459,10 @@ class TestCancelledSaveLifecycle:
 
         assert vm.state.save_state == SAVE_ERROR
         assert vm.state.saved_revision == 0
-        assert mock_logger.error.called, "非 Exception BaseException 应记录 logger.error"
+        error_templates = [str(call.args[0]) for call in mock_logger.error.call_args_list if call.args]
+        assert any("non-exception base error" in tpl for tpl in error_templates), (
+            f"非 Exception BaseException 应走 logger.error 的 base-error 模板, got: {error_templates}"
+        )
         for call in mock_logger.error.call_args_list:
             assert sensitive_path not in str(call.args), f"R9 违规：原始路径出现在 logger 参数中: {call.args}"
 
