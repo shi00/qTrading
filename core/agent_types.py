@@ -1662,9 +1662,10 @@ class SourceRelationKind(Enum):
 
 #: 可靠事件载荷结构标识（§4.4 payload_kind；本轮工程冻结首批值——设计未逐枚举）。
 class EventPayloadKind(Enum):
-    """public_message_saved 事件载荷 v1：message_id/role/版本/正文引用/来源边。"""
+    """public_message_saved / input_bound 事件载荷 v1（§4.4/§9.6）。"""
 
     PUBLIC_MESSAGE = "public_message"
+    INPUT_BINDING = "input_binding"
 
 
 @dataclass(frozen=True)
@@ -1751,3 +1752,173 @@ def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
         source_digest=sha256_hex(request.text),
         intent_digest=sha256_hex(request.manifest_payload),
     )
+
+
+# ---------------------------------------------------------------------------
+# §9.13 DAO 事务输入/事实类型（C-02-3）
+# ---------------------------------------------------------------------------
+
+
+#: 精确工具许可状态（§9.8 grant_state；本轮工程冻结 wire 值 granted/claimed/
+#: revoked——设计未逐枚举，见 Plans.md §A7 C-02-3 裁决⑦）。
+class ToolGrantState(Enum):
+    """精确工具许可状态：撤销先胜零新派发；派发先胜保真实在途（§5.4 第 6 条）。"""
+
+    GRANTED = "granted"
+    CLAIMED = "claimed"
+    REVOKED = "revoked"
+
+
+@dataclass(frozen=True)
+class BindActualInputRequest:
+    """首派发实际输入绑定（§9.13 bind_actual_input；SQ-02 W 首步调用）。
+
+    ``frozen_manifest`` / ``actual_input`` 为 CanonicalJson，摘要由其规范字节
+    单一事实源派生（``sha256``）；``workflow_id`` 为幂等重放键（§9.5 UNIQUE）。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    node_id: str
+    workflow_id: str
+    workflow_code_version: str
+    run_epoch: int
+    frozen_manifest: CanonicalJson
+    actual_input: CanonicalJson
+
+
+@dataclass(frozen=True)
+class BindActualInputReceipt:
+    """实际输入绑定事实（§9.5/§9.6）：轮次、双摘要与可靠事件序号。"""
+
+    round_id: str
+    round_number: int
+    input_revision: int
+    frozen_digest: str
+    actual_digest: str
+    execution_seq: int
+    session_seq: int
+
+
+@dataclass(frozen=True)
+class SaveAnswerRequest:
+    """答复保存输入（SQ-03「answer(original command)」；§5.3 答复线性化点）。
+
+    ``expected_decision_revision`` 为决定行预期版（§9.2 通用 revision 列，
+    0 表示目标决定行按调用方契约不允许——答复目标必须已存在，DAO 校验 ≥1）；
+    ``answer_payload`` 为 CanonicalJson，answer digest 由规范字节派生。
+    """
+
+    user_scope: str
+    decision_id: str
+    client_command_id: str
+    expected_decision_revision: int
+    answer_payload: CanonicalJson
+
+
+@dataclass(frozen=True)
+class AnswerReceipt:
+    """答复保存事实（INV-06）：保存成功不等于已投递或已消费，三态分列。"""
+
+    decision_id: str
+    command_record_id: str
+    decision_revision: int
+    delivery_state: DeliveryState
+    consumption_state: ConsumptionState
+    answer_digest: str
+    verified_at: str
+
+
+@dataclass(frozen=True)
+class MarkAnswerDeliveredRequest:
+    """答复投递核定输入（§5.3：同 command_id 幂等原生 send 后核定）。"""
+
+    user_scope: str
+    command_record_id: str
+
+
+@dataclass(frozen=True)
+class DeliveryFact:
+    """投递核定事实（INV-06）：``verified_at`` 为原事实核定时刻。"""
+
+    command_record_id: str
+    delivery_state: DeliveryState
+    verified_at: str
+
+
+@dataclass(frozen=True)
+class ConsumeAnswerRequest:
+    """答复消费输入（§9.13 consume_answer：W 恢复先查原事实）。"""
+
+    user_scope: str
+    command_record_id: str
+
+
+@dataclass(frozen=True)
+class ConsumptionFact:
+    """消费事实（SQ-03/§9.13）：已消费返回原事实，同命令同输入幂等重放。"""
+
+    command_record_id: str
+    decision_id: str
+    consumption_state: ConsumptionState
+    consumed_at: str
+    answer_consumed_at: str
+
+
+@dataclass(frozen=True)
+class GrantRevisionRequest:
+    """精确许可 CAS 输入（§5.4 第 6 条：撤销和派发以同 revision 单胜者）。
+
+    claim_tool_dispatch / revoke_tool_grant 共用：``expected_grant_revision``
+    为调用方持柄的许可版（claim 预期 granted；revoke 预期 granted 或 claimed）。
+    """
+
+    user_scope: str
+    decision_id: str
+    expected_grant_revision: int
+
+
+@dataclass(frozen=True)
+class ToolGrantFact:
+    """许可 CAS 结果事实（§9.13）：胜者/重放返回当前事实，败者走 REVISION_CONFLICT。"""
+
+    decision_id: str
+    grant_id: str
+    grant_revision: int
+    grant_state: ToolGrantState
+
+
+@dataclass(frozen=True)
+class ReviseQueuedRequest:
+    """队列修订输入（§9.13 revise_queued / SQ-07 排队期修订）。
+
+    保 intent/execution/队列位；新输入版（input_revision）由既有命令版派生
+    （受理=1，首次修订=2）。``text`` 为修订消息正文（非空），``manifest_payload``
+    为新冻结 manifest 规范 JSON。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    client_command_id: str
+    expected_execution_revision: int
+    node_id: str
+    text: str
+    manifest_payload: CanonicalJson
+    source_display_name: str
+
+
+@dataclass(frozen=True)
+class RevisionReceipt:
+    """队列修订事实（§9.13）：M2/S2 新输入版与 revision CAS 结果。"""
+
+    execution_id: str
+    command_record_id: str
+    message_id: str
+    source_id: str
+    source_version: str
+    input_digest: str
+    input_revision: int
+    execution_revision: int
+    session_seq: int
