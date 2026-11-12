@@ -162,15 +162,40 @@ def _qfq_return_pct(
     return (tn_close / basis_close) - 1.0
 
 
+# DLP-RM-02: 比值/收益计算的单一「端点有效性」判据（可复用最小入口）。
+# 进入任何比值前统一校验：可转 float（捕获 None/不可转换/超范围）且有限（math.isfinite，
+# 排除 NaN/±Inf）且为正（> 0）。合法返回 float，非法一律 None。
+# 与个股侧 _qfq_return_pct 的有限正值守卫同口径，供指数端点及其后续复用。
+def _finite_positive_price(value: typing.Any) -> float | None:
+    """端点有效性判据：有限且为正的可转 float 值 → float，否则 None。
+
+    None/NaN/±Inf/0/负值/不可转换类型（含 int 溢出）均视为无效，由调用方按缺失处理，
+    避免把「拒绝的基准」伪装成合法收益（R21）。
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    return numeric
+
+
 # RV-01: 基准侧窗口累计收益（百分比）。个股侧 _qfq_return_pct 返回分数、调用方 ×100，
 # 此处直接返回百分比以便与 t5_pct 同为百分数相减算 alpha。指数点位已含分红除权调整、
 # 无 adj_factor（index_daily 无复权因子），无需复权，直接用窗口首尾收盘价比值。
-# 窗口两端任一 close 缺失/0 均视为窗口无意义，返回 None 由调用方跳过避免标签污染
-# （对抗检视 Blocking-1：仅守卫 t0 会让终点缺失时产生 None 除法 TypeError）。
+# DLP-RM-02: 窗口两端任一 close 缺失/0/负/非有限均视为窗口无意义，返回 None 由调用方
+# 跳过避免标签污染（NaN/Inf 会在比值中产生 NaN 或荒谬的超额收益，负端点产出有限但
+# 无意义的超额）；两端点均合法但比值仍溢出为 ±Inf 时，计算后再做 isfinite 校验兜底。
 def _index_window_return_pct(idx_close_t0: float, idx_close_tn: float) -> float | None:
-    if not idx_close_t0 or not idx_close_tn:
+    start = _finite_positive_price(idx_close_t0)
+    end = _finite_positive_price(idx_close_tn)
+    if start is None or end is None:
         return None
-    return (idx_close_tn / idx_close_t0 - 1.0) * 100.0
+    pct = (end / start - 1.0) * 100.0
+    if not math.isfinite(pct):
+        return None
+    return pct
 
 
 # MAJOR-02: 一字涨停可成交性判定容差。stk_limit 的 up_limit 与个股 open 均为名义价，
