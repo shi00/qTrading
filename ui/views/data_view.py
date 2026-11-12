@@ -28,6 +28,7 @@ import flet as ft
 import flet_code_editor as fce
 import pandas as pd
 
+from core.i18n import Message
 from ui.components.flet_type_helpers import (
     get_control_attr,
     get_control_value,
@@ -1041,8 +1042,10 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
 
     # --- 本地 UI 状态 ---
     sql_text, set_sql_text = ft.use_state("")
-    status_text, set_status_text = ft.use_state(I18n.get("data_sql_ready"))
-    status_color, set_status_color = ft.use_state(AppColors.TEXT_SECONDARY)
+    # M35-04: 状态存 locale 无关的 Message(key, params) 与颜色语义名，渲染时再按当前
+    # locale / AppColors token 解析，避免切语言/主题后沿用旧快照。
+    status_message, set_status_message = ft.use_state(Message("data_sql_ready"))
+    status_color_key, set_status_color_key = ft.use_state("TEXT_SECONDARY")
     # D6: SQL 错误原文折叠展示 (仅失败且有 raw_detail 时可见)
     detail_text, set_detail_text = ft.use_state("")
 
@@ -1053,8 +1056,8 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
         if not sql_text.strip():
             return
         UILogger.log_action("SQLConsoleTab", "Click", "btn_run_query")
-        set_status_text(I18n.get("data_status_executing"))
-        set_status_color(AppColors.INFO)
+        set_status_message(Message("data_status_executing"))
+        set_status_color_key("INFO")
         set_detail_text("")
         try:
             start_time = time.time()
@@ -1067,33 +1070,36 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
                 if row_count > 0:
                     MAX_ROWS_UI = 100
                     if row_count > MAX_ROWS_UI:
-                        set_status_text(
-                            I18n.get("data_sql_success_truncated").format(
-                                time=elapsed, limit=MAX_ROWS_UI, rows=row_count
+                        set_status_message(
+                            Message(
+                                "data_sql_success_truncated",
+                                {"time": elapsed, "limit": MAX_ROWS_UI, "rows": row_count},
                             )
                         )
                     else:
-                        set_status_text(I18n.get("data_sql_success").format(time=elapsed, rows=row_count))
-                    set_status_color(AppColors.SUCCESS)
+                        set_status_message(Message("data_sql_success", {"time": elapsed, "rows": row_count}))
+                    set_status_color_key("SUCCESS")
                 else:
                     # M-UI-16: 成功但 0 行 ≠ 执行错误 — 空结果与失败态区分,
                     # 复用 data_sql_error 会误导用户以为 SQL 写错。
-                    set_status_text(I18n.get("data_sql_success_empty").format(time=elapsed))
-                    set_status_color(AppColors.SUCCESS)
+                    set_status_message(Message("data_sql_success_empty", {"time": elapsed}))
+                    set_status_color_key("SUCCESS")
             else:
                 # D6: 渲染 VM 产出的 SqlErrorInfo(key, params) + 脱敏原文折叠展示
                 err = s.sql_error
                 if err is not None:
-                    set_status_text(I18n.get(err.message_key, **err.format_args))
+                    # M35-03: format_args 为不可变 MappingProxyType；Message.params 要求
+                    # dict[str, Any]，复制后再传入，避免不可变映射与未来类型契约冲突。
+                    set_status_message(Message(err.message_key, dict(err.format_args)))
                     set_detail_text(err.raw_detail or "")
                 else:
-                    set_status_text(I18n.get("data_sql_error"))
-                set_status_color(AppColors.ERROR)
+                    set_status_message(Message("data_sql_error"))
+                set_status_color_key("ERROR")
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as exc:
-            set_status_text(I18n.get("data_sys_error"))
-            set_status_color(AppColors.ERROR)
+            set_status_message(Message("data_sys_error"))
+            set_status_color_key("ERROR")
             logger.error("SQL Execution error: %s", DataSanitizer.sanitize_error(exc))
             logger.debug("SQL Execution error traceback", exc_info=True)
 
@@ -1242,7 +1248,11 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
                 padding=AppStyles.SPACING_SM,
             ),
             ft.Container(
-                content=ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),
+                content=ft.Text(
+                    I18n.get(status_message.key, **status_message.params),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=getattr(AppColors, status_color_key),
+                ),
                 padding=5,
                 bgcolor=AppColors.SURFACE_VARIANT,
             ),
