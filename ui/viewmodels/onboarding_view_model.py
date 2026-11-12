@@ -619,6 +619,13 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         run_id = self._sync_generation
         origin_step = self._state.current_step
         origin_epoch = self._nav_epoch
+
+        # OB-02: 本模块所有同步进度/结果/异常回写的统一所有权判据——旧运行在
+        # 取消 / 新一轮同步 / 卸载后的迟到回调与结果一律不得改写新运行的状态；
+        # 导航归属仍由 _complete_sync_success 另核 nav_epoch（UIR-F02-002）。
+        def owns_sync() -> bool:
+            return not self._disposed and run_id == self._sync_generation
+
         self._set_state(
             sync_in_progress=True,
             sync_progress=0.0,
@@ -628,6 +635,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         try:
 
             def progress_callback(current, total, message):
+                # OB-02: 旧运行的迟到进度回调不得覆盖新运行/取消后的进度状态。
+                if not owns_sync():
+                    return
                 # DataProcessor 传入的 message 为 Message(key+params) (D7 改造后)；
                 # onboarding 引导页刻意使用固定 key 展示，进度百分比仍实时更新，
                 # 不逐条翻译下游同步阶段文案。
@@ -640,33 +650,36 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             )
 
             if result:
-                self._set_state(
-                    sync_progress=1.0,
-                    sync_progress_message=Message("wizard_status_done"),
-                )
+                if owns_sync():
+                    self._set_state(
+                        sync_progress=1.0,
+                        sync_progress_message=Message("wizard_status_done"),
+                    )
                 await asyncio.sleep(1)
                 await self._complete_sync_success(run_id, origin_step, origin_epoch)
             else:
-                self._set_state(
-                    sync_progress=0.0,
-                    sync_progress_message=Message("wizard_status_cancelled"),
-                )
+                if owns_sync():
+                    self._set_state(
+                        sync_progress=0.0,
+                        sync_progress_message=Message("wizard_status_cancelled"),
+                    )
 
         except asyncio.CancelledError:
             logger.warning("[OnboardingVM] Sync cancelled during shutdown.")
             raise
         except Exception as e:
             error_info = classify_error(e, context="general")
-            self._set_state(
-                sync_progress=0.0,
-                sync_progress_message=Message(
-                    error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
-                ),
-            )
+            if owns_sync():
+                self._set_state(
+                    sync_progress=0.0,
+                    sync_progress_message=Message(
+                        error_info.get("message_key", "common_err_unknown"),
+                        error_info.get("format_args") or {},
+                    ),
+                )
         finally:
             # 旧运行不得清除新一轮同步的忙碌标记（否则新同步期间 UI 会重新放行前进）。
-            if run_id == self._sync_generation:
+            if owns_sync():
                 self._set_state(sync_in_progress=False)
 
     async def _complete_sync_success(self, run_id: int, origin_step: int, origin_epoch: int) -> None:
