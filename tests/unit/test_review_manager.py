@@ -22,7 +22,13 @@ from data.constants import (
 )
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
-from data.persistence.review_manager import ReviewManager, _is_t1_untradable, deserialize_exec_warnings
+from data.persistence.review_manager import (
+    ReviewManager,
+    _finite_positive_price,
+    _index_window_return_pct,
+    _is_t1_untradable,
+    deserialize_exec_warnings,
+)
 from utils.time_utils import to_date
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -5352,3 +5358,150 @@ class TestReviewManagerMajor02Tradability:
         rm.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
         with pytest.raises(EngineDisposedError):
             await rm._prefetch_limit_up_cache(datetime.date(2024, 6, 10), datetime.date(2024, 6, 17))
+
+
+class TestIndexWindowFinitePositiveGuard:
+    """DLP-RM-02: 指数窗口端点须为有限正值，否则窗口收益返回 None（R21 不伪造标签）。
+
+    覆盖端点 None/NaN/±Inf/0/负值/不可转换/比值溢出，以及 run_review / backfill 两条
+    消费路径：无效 index_pct → index_pct/alpha/label 留 NULL，数值收益仍暂存。
+    """
+
+    @pytest.mark.parametrize(
+        "bad_endpoint",
+        [None, float("nan"), float("inf"), float("-inf"), 0, 0.0, -1.0, -3000.0, "not-a-number", 10**400],
+        ids=[
+            "none",
+            "nan",
+            "pos-inf",
+            "neg-inf",
+            "int-zero",
+            "float-zero",
+            "negative",
+            "negative-point",
+            "non-numeric",
+            "int-overflow",
+        ],
+    )
+    def test_invalid_endpoint_returns_none(self, bad_endpoint):
+        """任一无效端点（起点或终点）→ 窗口收益 None（不在比值中产生 NaN/Inf/负超额）。"""
+        assert _index_window_return_pct(bad_endpoint, 3180.0) is None
+        assert _index_window_return_pct(3000.0, bad_endpoint) is None
+
+    def test_ratio_overflow_returns_none(self):
+        """两端点各自有限为正，但比值溢出为 +Inf → 计算后 isfinite 校验须返回 None。"""
+        assert _index_window_return_pct(1e-308, 1e308) is None
+
+    def test_flat_window_is_zero_pct(self):
+        """合法平盘（3000 → 3000）仍为 0%（不得因假值守卫把 0% 判成缺失）。"""
+        assert _index_window_return_pct(3000.0, 3000.0) == pytest.approx(0.0)
+
+    def test_valid_window_is_six_pct(self):
+        """单位保持百分点：3180/3000-1 = 6.0（不是 0.06）。"""
+        assert _index_window_return_pct(3000.0, 3180.0) == pytest.approx(6.0)
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (3000, 3000.0),
+            (True, 1.0),
+            (None, None),
+            (float("nan"), None),
+            (float("inf"), None),
+            (0.0, None),
+            (-1.0, None),
+        ],
+    )
+    def test_finite_positive_price_criterion(self, raw, expected):
+        """单一有效性判据入口（后续问题复用）：合法 → float，非法 → None。"""
+        assert _finite_positive_price(raw) == expected
+
+    @staticmethod
+    def _pending() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "id": [1],
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240610"],
+                "ai_score": [80],
+                "ai_reason": ["test"],
+            }
+        )
+
+    @staticmethod
+    def _quotes() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                "open": [10.0] * 6,
+                "close": [10.0, 11.5, 11.6, 11.7, 11.8, 12.0],
+                "adj_factor": [1.0] * 6,
+                "pct_chg": [1.0] * 6,
+            }
+        )
+
+    def _make_rm(self, mock_cm) -> ReviewManager:
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(return_value=self._pending())
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=self._quotes())
+        rm._resolve_index_quote = AsyncMock(return_value=(100.0, 100.0))
+        rm._prefetch_index_cache = AsyncMock(return_value={})
+        rm._batch_update_results = AsyncMock()
+        return rm
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_invalid_index_endpoint_stages_numeric_only(self, mock_cm, mock_tc):
+        """run_review：起点为 0 的无效端点 → index_pct/alpha/label 全 NULL，数值收益仍暂存。"""
+        rm = self._make_rm(mock_cm)
+        rm._prefetch_index_cache = AsyncMock(return_value={"20240611": (0.0, 3050.0), "20240617": (3160.0, 3180.0)})
+        await rm.run_review()
+        rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 哨兵；下方载荷逐字段强验证
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["index_pct"] is None
+        assert u["alpha"] is None
+        assert u["label"] is None  # 不定稿标签（R21：不伪装成 DRAW）
+        assert u["benchmark_code"] is None
+        assert u["pct"] == pytest.approx(round((11.5 / 10.0 - 1.0) * 100.0, 4))
+        assert u["t5_pct"] == pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
+        assert u["review_status"] == REVIEW_STATUS_T1_DONE
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_horizon_invalid_index_endpoint_keeps_numeric(self, mock_cm, mock_tc):
+        """backfill：+Inf 无效端点 → 数值-only 暂存 t5_pct，label/index_pct/alpha 留 NULL。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=self._quotes())
+        rm._resolve_index_quote = AsyncMock(return_value=(100.0, 100.0))
+        rm._prefetch_index_cache = AsyncMock(
+            return_value={"20240611": (float("inf"), 3050.0), "20240617": (3160.0, 3180.0)}
+        )
+        rm._batch_backfill_t5 = AsyncMock()
+        rm._batch_finalize_labels = AsyncMock()
+        rm._batch_update_results = AsyncMock()
+
+        count = await rm.backfill_horizon_returns()
+
+        assert count == 1
+        rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 哨兵；下方载荷逐字段强验证
+        (u,) = rm._batch_backfill_t5.call_args.args[0]
+        assert u["label"] is None
+        assert u["index_pct"] is None
+        assert u["alpha"] is None
+        assert u["benchmark_code"] is None
+        assert u["t5_pct"] == pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
+        assert u["t5_price"] == pytest.approx(12.0)
+        rm._batch_finalize_labels.assert_not_called()
