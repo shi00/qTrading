@@ -54,7 +54,10 @@ def _serialize_review_cycle[**P, R](
     """
 
     @functools.wraps(func)
-    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+    # wrapper 注解不用 P.args/P.kwargs/R：CodeQL 分析器不识别 PEP 695 类型参数作用域，
+    # 会把嵌套函数注解中的类型参数误报为「可能未初始化的局部变量」；Any 与 ParamSpec
+    # 调用兼容，外层签名仍以 P/R 承载精确类型。
+    async def wrapper(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
         lock = get_loop_local("review_manager_cycle_lock", asyncio.Lock)
         async with lock:
             return await func(*args, **kwargs)
