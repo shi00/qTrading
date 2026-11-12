@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, is_dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Final, NoReturn
+from typing import Any, Final, NoReturn, cast
 
 # ---------------------------------------------------------------------------
 # 类型别名与异常
@@ -211,6 +211,12 @@ def _to_jsonable(value: object, field_path: str) -> Any:
         return None  # pragma: no cover - _fail 总是抛出
     if isinstance(value, Enum):
         return _to_jsonable(value.value, field_path)
+    if isinstance(value, Selection):
+        # wire 合同：all 没有 ranges 键（§3.3.1）
+        wire: dict[str, Any] = {"kind": value.kind}
+        if value.kind == "limited":
+            wire["ranges"] = _to_jsonable(list(value.ranges), f"{field_path}.ranges")
+        return wire
     if isinstance(value, ExactNumber):
         return {
             "numeric_encoding": AGENT_NUMBER_ENCODING,
@@ -407,3 +413,585 @@ def stable_id(kind: str, parts: Sequence[str]) -> str:
         normalized.append(require_identity(part, f"$.parts[{index}]"))
     payload = json_doc([1, kind_text, *normalized])
     return f"{kind_text}_{sha256_hex(payload)}"
+
+
+# ---------------------------------------------------------------------------
+# §3.3.1 资料许可v1嵌套wire合同（唯一类型定义）
+# ---------------------------------------------------------------------------
+
+#: wire 端点类型：S=非空字符串、D=小写64位hex摘要、N=≥0整数、P=≥1整数，
+#: 均拒 bool；T=UTC 微秒文本（由消费方核验）。除明确列出的 null 外不可空。
+_ALL_KEYS_ERR_MISSING: Final = "missing_field"
+_ALL_KEYS_ERR_UNKNOWN: Final = "unknown_field"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceVersionRef:
+    """受管源版引用：四值源身份，用户域继承许可主体，不接路径/URL/显示名（§3.3.1）。"""
+
+    source_kind: SourceKind
+    source_id: str
+    source_version: str
+    source_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class AllAtom:
+    """ReadAtom 的 all 分型：仅可在 selection.kind=all 时独占对应数组（§3.3.1）。"""
+
+    kind: str = "all"
+
+
+@dataclass(frozen=True, slots=True)
+class PagesRange:
+    """PDF 页号范围，两端包含。"""
+
+    kind: str = "pages"
+    start: int = 1
+    end: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class SheetsRange:
+    """准确表名的非空无重复有序列表。"""
+
+    kind: str = "sheets"
+    names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RowsRange:
+    """解析记录/物理表行号范围，两端包含；XLSX 必须准确表名，CSV 为 null。"""
+
+    kind: str = "rows"
+    sheet: str | None = None
+    start: int = 1
+    end: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class FieldsRange:
+    """字段键范围；两行端点同时 null 表示所选源中该字段的全部行，否则同时非空。"""
+
+    kind: str = "fields"
+    sheet: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
+    keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ParagraphsRange:
+    """TXT/MD 解析器段号范围，两端包含，不以显示换行重新编号。"""
+
+    kind: str = "paragraphs"
+    start: int = 1
+    end: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class CodepointsRange:
+    """准确文本表示内 Unicode 码点号范围，两端包含，不按 UTF-16 单元或字节计号。"""
+
+    kind: str = "codepoints"
+    start: int = 1
+    end: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class JsonPointerRange:
+    """RFC6901 JSON Pointer：必须以 / 开头，只允许 ~0/~1 转义，禁前导零与 -。"""
+
+    kind: str = "json_pointer"
+    pointer: str = "/"
+
+
+#: RangeAtom 封闭联合：标签决定全部键，不接受其它分型的键（§3.3.1）。
+RangeAtom = PagesRange | SheetsRange | RowsRange | FieldsRange | ParagraphsRange | CodepointsRange | JsonPointerRange
+#: ReadAtom = RangeAtom 或 all。
+ReadAtom = RangeAtom | AllAtom
+
+
+@dataclass(frozen=True, slots=True)
+class Selection:
+    """选择：all 或 limited（limited 数组非空，禁止在其中使用 all）（§3.3.1）。"""
+
+    kind: str
+    ranges: tuple[RangeAtom, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceLocator:
+    """封闭定位对象：定位准确受管源版及范围，不是源字符串（§3.3.1）。"""
+
+    locator_kind: str
+    origin_ref: SourceVersionRef
+    selection: Selection
+
+
+@dataclass(frozen=True, slots=True)
+class RangeStats:
+    """范围统计：未知/不适用为 null，0 只指已知零，绝不据 null 放开上限（§3.3.1）。"""
+
+    source_bytes: int | None = None
+    pages: int | None = None
+    sheets: int | None = None
+    rows: int | None = None
+    chars: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RangeLimitation:
+    """限制记录：code 为稳定标识，message 为已脱敏说明；顺序为呈现顺序（§3.3.1）。"""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class SelectedRange:
+    """选定范围：读取/未读、统计、限制及准确接受记录（§3.3.1）。
+
+    ``accepted_limited_version`` 接受受限时等于本项 source_version；未接受为
+    null，不能由读取成功推导接受、许可或放宽每文件累计上限。
+    """
+
+    selection: Selection
+    read_ranges: tuple[ReadAtom, ...] = ()
+    unread_ranges: tuple[ReadAtom, ...] = ()
+    stats: RangeStats = RangeStats()
+    limitations: tuple[RangeLimitation, ...] = ()
+    accepted_limited_version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceRef:
+    """谱系边：source 必须等于 locator.origin_ref（§3.3.1）。"""
+
+    source: SourceVersionRef
+    locator: SourceLocator
+    selected_range_digest: str
+    representation_version: str
+    representation_digest: str
+
+
+def to_wire_dict(value: object) -> dict[str, Any]:
+    """frozen dataclass/tuple → wire JSON 对象（CanonicalJson 语义，§3.3.1）。"""
+
+    return cast(dict[str, Any], _to_jsonable(value, "$"))
+
+
+def selected_range_digest(selected_range: SelectedRange) -> str:
+    """``sha256(CanonicalJson(selected_range))``：覆盖读取/未读、统计、限制及接受记录。"""
+
+    return sha256_hex(json_doc(selected_range))
+
+
+# ---- §3.3.1 解码基元（全键必填、禁额外键、错误 tag/null/type/bool 拒绝） ----
+
+
+def _require_keys(obj: dict[str, object], required: set[str], path: str) -> None:
+    missing = sorted(required - obj.keys())
+    if missing:
+        _fail(_ALL_KEYS_ERR_MISSING, f"{path}.{missing[0]}")
+    extra = sorted(obj.keys() - required)
+    if extra:
+        _fail(_ALL_KEYS_ERR_UNKNOWN, f"{path}.{extra[0]}")
+
+
+def _require_str(value: object, path: str) -> str:
+    return require_identity(value, path)
+
+
+def _require_digest(value: object, path: str) -> str:
+    if not is_digest(value):
+        _fail("invalid_digest", path)
+    return cast(str, value)
+
+
+def _require_p(value: object, path: str) -> int:
+    """P 端点：≥1 整数，拒 bool。"""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        _fail("invalid_type", path)
+    if value < 1:
+        _fail("invalid_range", path)
+    return value
+
+
+def _require_n(value: object, path: str) -> int | None:
+    """N：≥0 整数或 null，拒 bool。"""
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        _fail("invalid_type", path)
+    if value < 0:
+        _fail("invalid_range", path)
+    return value
+
+
+def _require_str_list(value: object, path: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        _fail("invalid_type", path)
+    if not value and not allow_empty:
+        _fail("invalid_range", path)
+    items: list[str] = []
+    for index, item in enumerate(value):
+        items.append(_require_str(item, f"{path}[{index}]"))
+    if len(set(items)) != len(items):
+        _fail("invalid_range", path)
+    return tuple(items)
+
+
+def _validate_json_pointer(pointer: object, path: str) -> str:
+    """RFC6901 校验：以 / 开头、仅 ~0/~1 转义、数组索引无前导零、禁 -（§3.3.1）。"""
+
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        _fail("invalid_pointer", path)
+    for token in pointer.split("/")[1:]:
+        if token == "-":
+            _fail("invalid_pointer", path)
+        if token.isdigit() and len(token) > 1 and token[0] == "0":
+            _fail("invalid_pointer", path)
+        index = 0
+        while index < len(token):
+            if token[index] == "~":
+                if index + 1 >= len(token) or token[index + 1] not in "01":
+                    _fail("invalid_pointer", path)
+                index += 2
+            else:
+                index += 1
+    return pointer
+
+
+def decode_source_version_ref(value: object, path: str) -> SourceVersionRef:
+    """严格解码 SourceVersionRef wire 对象（§3.3.1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, {"source_kind", "source_id", "source_version", "source_digest"}, path)
+    kind_value = value["source_kind"]
+    if not isinstance(kind_value, str):
+        _fail("invalid_tag", f"{path}.source_kind")
+    try:
+        kind = SourceKind(kind_value)
+    except ValueError:
+        _fail("invalid_tag", f"{path}.source_kind")
+    return SourceVersionRef(
+        source_kind=kind,
+        source_id=_require_str(value["source_id"], f"{path}.source_id"),
+        source_version=_require_str(value["source_version"], f"{path}.source_version"),
+        source_digest=_require_digest(value["source_digest"], f"{path}.source_digest"),
+    )
+
+
+def decode_range_atom(value: object, path: str, *, allow_all: bool = False) -> ReadAtom:
+    """严格解码 RangeAtom/ReadAtom：标签决定全部键（§3.3.1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    kind = value.get("kind")
+    if not isinstance(kind, str):
+        _fail("invalid_tag", f"{path}.kind")
+
+    if kind == "all":
+        if not allow_all:
+            _fail("invalid_tag", f"{path}.kind")
+        _require_keys(value, {"kind"}, path)
+        return AllAtom()
+
+    if kind in ("pages", "paragraphs", "codepoints"):
+        _require_keys(value, {"kind", "start", "end"}, path)
+        start = _require_p(value["start"], f"{path}.start")
+        end = _require_p(value["end"], f"{path}.end")
+        if start > end:
+            _fail("invalid_range", path)
+        cls = {"pages": PagesRange, "paragraphs": ParagraphsRange, "codepoints": CodepointsRange}[kind]
+        return cls(start=start, end=end)  # pyright: ignore[reportReturnType]  # 同构分型由 kind 分派闭合
+
+    if kind == "sheets":
+        _require_keys(value, {"kind", "names"}, path)
+        return SheetsRange(names=_require_str_list(value["names"], f"{path}.names"))
+
+    if kind == "rows":
+        _require_keys(value, {"kind", "sheet", "start", "end"}, path)
+        sheet = value["sheet"]
+        if sheet is not None:
+            sheet = _require_str(sheet, f"{path}.sheet")
+        start = _require_p(value["start"], f"{path}.start")
+        end = _require_p(value["end"], f"{path}.end")
+        if start > end:
+            _fail("invalid_range", path)
+        return RowsRange(sheet=sheet, start=start, end=end)
+
+    if kind == "fields":
+        _require_keys(value, {"kind", "sheet", "row_start", "row_end", "keys"}, path)
+        sheet = value["sheet"]
+        if sheet is not None:
+            sheet = _require_str(sheet, f"{path}.sheet")
+        row_start = value["row_start"]
+        row_end = value["row_end"]
+        if (row_start is None) != (row_end is None):
+            _fail("invalid_range", f"{path}.row_start")
+        if row_start is not None:
+            row_start = _require_p(row_start, f"{path}.row_start")
+            row_end = _require_p(row_end, f"{path}.row_end")
+            if row_start > row_end:
+                _fail("invalid_range", path)
+        keys = _require_str_list(value["keys"], f"{path}.keys")
+        return FieldsRange(sheet=sheet, row_start=row_start, row_end=row_end, keys=keys)
+
+    if kind == "json_pointer":
+        _require_keys(value, {"kind", "pointer"}, path)
+        return JsonPointerRange(pointer=_validate_json_pointer(value["pointer"], f"{path}.pointer"))
+
+    _fail("invalid_tag", f"{path}.kind")
+
+
+def decode_selection(value: object, path: str) -> Selection:
+    """严格解码 Selection：all 或 limited（数组非空、单轴、禁 all 分型）（§3.3.1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    kind = value.get("kind")
+    if not isinstance(kind, str):
+        _fail("invalid_tag", f"{path}.kind")
+    if kind == "all":
+        _require_keys(value, {"kind"}, path)
+        return Selection(kind="all", ranges=())
+    if kind == "limited":
+        _require_keys(value, {"kind", "ranges"}, path)
+        raw_ranges = value["ranges"]
+        if not isinstance(raw_ranges, list) or not raw_ranges:
+            _fail("invalid_range", f"{path}.ranges")
+        atoms = tuple(decode_range_atom(item, f"{path}.ranges[{index}]") for index, item in enumerate(raw_ranges))
+        if len({type(atom) for atom in atoms}) > 1:
+            _fail("kind_mismatch", f"{path}.ranges")
+        return Selection(kind="limited", ranges=atoms)  # pyright: ignore[reportArgumentType]  # allow_all=False 排除 AllAtom
+    _fail("invalid_tag", f"{path}.kind")
+
+
+def decode_source_locator(value: object, path: str) -> SourceLocator:
+    """严格解码 SourceLocator（§3.3.1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, {"locator_kind", "origin_ref", "selection"}, path)
+    locator_kind = value["locator_kind"]
+    if locator_kind != "source_range":
+        _fail("invalid_tag", f"{path}.locator_kind")
+    return SourceLocator(
+        locator_kind=locator_kind,
+        origin_ref=decode_source_version_ref(value["origin_ref"], f"{path}.origin_ref"),
+        selection=decode_selection(value["selection"], f"{path}.selection"),
+    )
+
+
+def decode_range_stats(value: object, path: str) -> RangeStats:
+    """严格解码 RangeStats（§3.3.1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, {"source_bytes", "pages", "sheets", "rows", "chars"}, path)
+    return RangeStats(
+        source_bytes=_require_n(value["source_bytes"], f"{path}.source_bytes"),
+        pages=_require_n(value["pages"], f"{path}.pages"),
+        sheets=_require_n(value["sheets"], f"{path}.sheets"),
+        rows=_require_n(value["rows"], f"{path}.rows"),
+        chars=_require_n(value["chars"], f"{path}.chars"),
+    )
+
+
+def decode_range_limitation(value: object, path: str) -> RangeLimitation:
+    """严格解码 RangeLimitation（§3.3.1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, {"code", "message"}, path)
+    return RangeLimitation(
+        code=_require_str(value["code"], f"{path}.code"),
+        message=_require_str(value["message"], f"{path}.message"),
+    )
+
+
+def _pointer_tokens(pointer: str) -> tuple[str, ...]:
+    return tuple(pointer.split("/")[1:])
+
+
+def _is_prefix(prefix: JsonPointerRange, other: JsonPointerRange) -> bool:
+    a = _pointer_tokens(prefix.pointer)
+    b = _pointer_tokens(other.pointer)
+    return len(a) <= len(b) and b[: len(a)] == a
+
+
+def _atoms_overlap(a: ReadAtom, b: ReadAtom) -> bool:
+    """同轴两原子是否重叠（含 JSON 祖先/子树重叠与重复）（§3.3.1）。"""
+
+    if isinstance(a, AllAtom) or isinstance(b, AllAtom):
+        return True
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, (PagesRange, ParagraphsRange, CodepointsRange)):
+        b_numeric = cast(PagesRange | ParagraphsRange | CodepointsRange, b)
+        return a.start <= b_numeric.end and b_numeric.start <= a.end
+    if isinstance(a, SheetsRange):
+        b_sheets = cast(SheetsRange, b)
+        return bool(set(a.names) & set(b_sheets.names))
+    if isinstance(a, RowsRange):
+        b_rows = cast(RowsRange, b)
+        return a.sheet == b_rows.sheet and a.start <= b_rows.end and b_rows.start <= a.end
+    if isinstance(a, FieldsRange):
+        b_fields = cast(FieldsRange, b)
+        if a.sheet != b_fields.sheet or not (set(a.keys) & set(b_fields.keys)):
+            return False
+        if a.row_start is None or b_fields.row_start is None:
+            return True
+        # 行端点由 decode 成对校验（同时 null 或同时非空）
+        a_end = cast(int, a.row_end)
+        b_end = cast(int, b_fields.row_end)
+        return a.row_start <= b_end and b_fields.row_start <= a_end
+    if isinstance(a, JsonPointerRange):
+        return _is_prefix(a, cast(JsonPointerRange, b)) or _is_prefix(cast(JsonPointerRange, b), a)
+    return False  # pragma: no cover - 封闭联合已穷尽
+
+
+def _atom_in_selection(container: RangeAtom, item: ReadAtom) -> bool:
+    """读取原子是否被选择原子包含（同轴）（§3.3.1「属于selection」）。"""
+
+    if type(container) is not type(item):
+        return False
+    if isinstance(container, PagesRange) and isinstance(item, PagesRange):
+        return container.start <= item.start and item.end <= container.end
+    if isinstance(container, ParagraphsRange) and isinstance(item, ParagraphsRange):
+        return container.start <= item.start and item.end <= container.end
+    if isinstance(container, CodepointsRange) and isinstance(item, CodepointsRange):
+        return container.start <= item.start and item.end <= container.end
+    if isinstance(container, SheetsRange) and isinstance(item, SheetsRange):
+        return set(item.names) <= set(container.names)
+    if isinstance(container, RowsRange) and isinstance(item, RowsRange):
+        return container.sheet == item.sheet and container.start <= item.start and item.end <= container.end
+    if isinstance(container, FieldsRange) and isinstance(item, FieldsRange):
+        if container.sheet != item.sheet or not (set(item.keys) <= set(container.keys)):
+            return False
+        if container.row_start is None:
+            return True
+        if item.row_start is None or item.row_end is None or container.row_end is None:
+            return False
+        return container.row_start <= item.row_start and item.row_end <= container.row_end
+    if isinstance(container, JsonPointerRange) and isinstance(item, JsonPointerRange):
+        return _is_prefix(container, item)
+    return False  # pragma: no cover - 封闭联合已穷尽
+
+
+def decode_selected_range(value: object, path: str) -> SelectedRange:
+    """严格解码 SelectedRange：all/limited 归属、互斥、重叠校验（§3.3.1）。
+
+    - selection=all：read/unread 各数组只能为空或恰一个 all 分型；
+    - selection=limited：read/unread 只能列与选择同轴的准确 RangeAtom，
+      且逐一被选择包含；read 与 unread 联合互斥（重复/重叠拒绝）。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(
+        value,
+        {"selection", "read_ranges", "unread_ranges", "stats", "limitations", "accepted_limited_version"},
+        path,
+    )
+    selection = decode_selection(value["selection"], f"{path}.selection")
+    stats = decode_range_stats(value["stats"], f"{path}.stats")
+
+    accepted = value["accepted_limited_version"]
+    if accepted is not None:
+        accepted = _require_str(accepted, f"{path}.accepted_limited_version")
+
+    raw_limitations = value["limitations"]
+    if not isinstance(raw_limitations, list):
+        _fail("invalid_type", f"{path}.limitations")
+    limitations = tuple(
+        decode_range_limitation(item, f"{path}.limitations[{index}]") for index, item in enumerate(raw_limitations)
+    )
+
+    def _decode_atoms(key: str) -> tuple[ReadAtom, ...]:
+        raw = value[key]
+        if not isinstance(raw, list):
+            _fail("invalid_type", f"{path}.{key}")
+        if selection.kind == "all":
+            # all 独占数组指整源：数组只能为空或恰一个 all 分型（§3.3.1）
+            if len(raw) > 1:
+                _fail("invalid_tag", f"{path}.{key}")
+            if len(raw) == 1:
+                atom = decode_range_atom(raw[0], f"{path}.{key}[0]", allow_all=True)
+                if not isinstance(atom, AllAtom):
+                    _fail("invalid_tag", f"{path}.{key}")
+                return (atom,)
+            return ()
+        atoms = tuple(decode_range_atom(item, f"{path}.{key}[{index}]") for index, item in enumerate(raw))
+        for atom in atoms:
+            if isinstance(atom, AllAtom):
+                _fail("invalid_tag", f"{path}.{key}")
+            if not any(_atom_in_selection(sel, atom) for sel in selection.ranges):
+                _fail("not_in_selection", f"{path}.{key}")
+        return atoms
+
+    read_ranges = _decode_atoms("read_ranges")
+    unread_ranges = _decode_atoms("unread_ranges")
+
+    if selection.kind == "limited" and (read_ranges or unread_ranges):
+        selection_kind = type(selection.ranges[0])
+        for atom in (*read_ranges, *unread_ranges):
+            if not isinstance(atom, AllAtom) and not isinstance(atom, selection_kind):
+                _fail("kind_mismatch", path)
+
+    combined = (*read_ranges, *unread_ranges)
+    for i in range(len(combined)):
+        for j in range(i + 1, len(combined)):
+            if _atoms_overlap(combined[i], combined[j]):
+                _fail("overlap", f"{path}.read_ranges[{i}]")
+
+    return SelectedRange(
+        selection=selection,
+        read_ranges=read_ranges,
+        unread_ranges=unread_ranges,
+        stats=stats,
+        limitations=limitations,
+        accepted_limited_version=accepted,
+    )
+
+
+def decode_provenance_ref(value: object, path: str) -> ProvenanceRef:
+    """严格解码 ProvenanceRef：source 必须等于 locator.origin_ref（§3.3.1）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(
+        value,
+        {"source", "locator", "selected_range_digest", "representation_version", "representation_digest"},
+        path,
+    )
+    source = decode_source_version_ref(value["source"], f"{path}.source")
+    locator = decode_source_locator(value["locator"], f"{path}.locator")
+    if source != locator.origin_ref:
+        _fail("origin_mismatch", f"{path}.source")
+    return ProvenanceRef(
+        source=source,
+        locator=locator,
+        selected_range_digest=_require_digest(value["selected_range_digest"], f"{path}.selected_range_digest"),
+        representation_version=_require_str(value["representation_version"], f"{path}.representation_version"),
+        representation_digest=_require_digest(value["representation_digest"], f"{path}.representation_digest"),
+    )
+
+
+def decode_provenance_refs(value: object, path: str) -> tuple[ProvenanceRef, ...]:
+    """解码谱系边列表：保序；重复完全相同的边拒绝（§3.3.1）。"""
+
+    if not isinstance(value, list):
+        _fail("invalid_type", path)
+    refs: list[ProvenanceRef] = []
+    for index, item in enumerate(value):
+        ref = decode_provenance_ref(item, f"{path}[{index}]")
+        if ref in refs:
+            _fail("duplicate_edge", f"{path}[{index}]")
+        refs.append(ref)
+    return tuple(refs)
