@@ -26,9 +26,11 @@ C-04（资源/计数/源禁用/fence/阅读批次）分片实现。
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from core.agent_types import (
@@ -38,11 +40,19 @@ from core.agent_types import (
     AnswerReceipt,
     BindActualInputReceipt,
     BindActualInputRequest,
+    CommandReceipt,
     CommandRef,
     CommitState,
     ConsumeAnswerRequest,
     ConsumptionFact,
     ConsumptionState,
+    DataAttemptAuthorization,
+    DataConsentBinding,
+    DataConsentClaim,
+    DataConsentClaimFact,
+    DataConsentCommand,
+    DataConsentRevokeCommand,
+    DataConsentState,
     DeliveryFact,
     DeliveryState,
     EventPayloadKind,
@@ -55,11 +65,22 @@ from core.agent_types import (
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
+    decode_data_consent_binding,
+    decode_command_receipt,
     decode_submission_receipt,
+    encode_command_receipt,
+    encode_data_consent_binding,
+    encode_data_consent_claim,
     encode_submission_receipt,
     derive_accept_identity,
+    derive_data_consent_command_identity,
+    derive_data_consent_revoke_identity,
+    evaluate_data_attempt,
+    json_doc,
     sha256_hex,
     stable_id,
+    validate_data_attempt_authorization,
+    validate_data_consent_claim,
 )
 from data.persistence.daos.base_dao import BaseDao
 from data.persistence.models import (
@@ -68,6 +89,7 @@ from data.persistence.models import (
     AgentDecision,
     AgentExecution,
     AgentMessage,
+    AgentOperation,
     AgentRound,
     AgentSession,
     AgentSourceLink,
@@ -100,6 +122,14 @@ def _require_int_field(value: object, field: str, identity: str, minimum: int) -
 
 def _wire_time(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _wire_to_dt(value: str | None) -> datetime | None:
+    """UTC 微秒 Z 时刻文本 → 带时区 datetime（TIMESTAMPTZ 列写入；None 透传）。"""
+
+    if value is None:
+        return None
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
 
 
 class AgentDao(BaseDao):
@@ -1309,3 +1339,414 @@ class AgentDao(BaseDao):
                 execution_revision=request.expected_execution_revision + 1,
                 session_seq=session_seq,
             )
+
+    # ------------------------------------------------------------------
+    # C-02-4a：资料许可（R04 owner 持久事务，§9.8/§10.2）
+    # ------------------------------------------------------------------
+
+    async def save_data_consent_decision(self, command: DataConsentCommand) -> DataConsentBinding:
+        """资料许可保存事务（§10.2 R04）：decision(kind='data_consent') 建行/CAS
+        更新 + save 命令行（同事务 receipt_payload 存结果绑定），**单个显式事务**。
+
+        幂等与冲突（§10.2「同命令同载荷查原，异输入冲突」）：
+
+        - 同命令键（target=consent_id + client_command_id）同完整版本化输入
+          → 查回原结果绑定（receipt_payload），零新事实；
+        - 同命令键异输入 → ``INPUT_CONFLICT``；
+        - 建行（expected_consent_revision=0）遇既有决定行 → ``INPUT_CONFLICT``；
+        - 更新（expected≥1）决定行缺失 → ``INPUT_INVALID``，版本不符 →
+          ``REVISION_CONFLICT``。
+
+        绑定一致性（§9.8 重复字段同事务核一致）：建行 revision=1，更新后
+        revision=expected+1，均与 binding.consent_revision 相等（core 层已校验）；
+        decision.expires_at 与 binding.expires_at 同事务写入。锁序：decision →
+        command（§5.4 第 2 条）。命令行 delivery_state=not_delivered（不冒认投递，
+        INV-06；投递核定由决定面后续任务承接）。
+        """
+
+        self._check_engine()
+        identity = derive_data_consent_command_identity(command)
+        identity_str = f"{command.command.user_scope}/{command.consent_id}"
+        binding = command.binding
+        payload_wire = encode_data_consent_binding(binding)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. decision 行锁（存在时；建行竞态由 PK 唯一约束兜底）。
+            decision_row = (
+                await conn.execute(
+                    sa.select(AgentDecision.decision_id, AgentDecision.revision)
+                    .where(
+                        AgentDecision.user_scope == command.command.user_scope,
+                        AgentDecision.decision_id == command.consent_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            # 2. 命令键查重（同载荷查回原结果，异输入冲突）。
+            existing_command = (
+                await conn.execute(
+                    sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
+                        AgentCommand.user_scope == command.command.user_scope,
+                        AgentCommand.target_id == command.consent_id,
+                        AgentCommand.client_command_id == command.command.command_id,
+                    )
+                )
+            ).first()
+            if existing_command is not None:
+                if existing_command.input_digest == identity.input_digest:
+                    if existing_command.receipt_payload is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.OPERATION_UNKNOWN,
+                            "original data consent save receipt unavailable",
+                            identity_str,
+                        )
+                    return decode_data_consent_binding(existing_command.receipt_payload, "$")
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "same data consent command key with different input",
+                    identity_str,
+                )
+            occurred = datetime.now(UTC)
+            if command.command.expected_revision == 0:
+                # 3a. 建行：decision 必须不存在；consent_revision=1（core 已校验）。
+                if decision_row is not None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "data consent decision already exists",
+                        identity_str,
+                    )
+                presentation_batch_seq = (
+                    await conn.execute(
+                        sa.select(sa.func.coalesce(sa.func.max(AgentDecision.presentation_batch_seq), 0)).where(
+                            AgentDecision.user_scope == command.command.user_scope,
+                            AgentDecision.execution_id == command.execution_id,
+                        )
+                    )
+                ).scalar_one() + 1
+                try:
+                    await conn.execute(
+                        sa.insert(AgentDecision).values(
+                            user_scope=command.command.user_scope,
+                            decision_id=command.consent_id,
+                            session_id=command.session_id,
+                            execution_id=command.execution_id,
+                            round_id=command.round_id,
+                            node_id=command.node_id,
+                            decision_kind="data_consent",
+                            source_scope_digest=binding.source_scope_digest,
+                            expires_at=_wire_to_dt(binding.expires_at),
+                            presentation_batch_seq=presentation_batch_seq,
+                            data_consent_payload=payload_wire,
+                            updated_at=occurred,
+                        )
+                    )
+                except IntegrityError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "data consent decision created concurrently",
+                        identity_str,
+                    ) from exc
+            else:
+                # 3b. CAS 更新：revision=expected 单胜者；payload 与行版同事务一致。
+                if decision_row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "data consent decision does not exist",
+                        identity_str,
+                    )
+                cas_result = await conn.execute(
+                    sa.update(AgentDecision)
+                    .where(
+                        AgentDecision.user_scope == command.command.user_scope,
+                        AgentDecision.decision_id == command.consent_id,
+                        AgentDecision.revision == command.command.expected_revision,
+                    )
+                    .values(
+                        revision=binding.consent_revision,
+                        data_consent_payload=payload_wire,
+                        source_scope_digest=binding.source_scope_digest,
+                        expires_at=_wire_to_dt(binding.expires_at),
+                        updated_at=occurred,
+                    )
+                )
+                if cas_result.rowcount != 1:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "data consent revision changed",
+                        identity_str,
+                    )
+            # 4. save 命令行（target=consent_id；receipt_payload 存结果绑定供查回）。
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope=command.command.user_scope,
+                    command_record_id=identity.command_record_id,
+                    client_command_id=command.command.command_id,
+                    target_id=command.consent_id,
+                    command_kind="data_consent_save",
+                    session_id=command.session_id,
+                    execution_id=command.execution_id,
+                    round_id=command.round_id,
+                    expected_revision=command.command.expected_revision,
+                    input_revision=None,
+                    input_digest=identity.input_digest,
+                    request_payload=payload_wire,
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.NOT_DELIVERED.value,
+                    consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                    receipt_payload=payload_wire,
+                )
+            )
+            return binding
+
+    async def revoke_data_consent_decision(self, command: DataConsentRevokeCommand) -> CommandReceipt:
+        """资料许可撤销事务（§10.2 R04）：decision 行锁下 state→revoked CAS +
+        revoke 命令行（自足命令：保存/投递/消费同事务落定），**单个显式事务**。
+
+        幂等与冲突：同命令键同输入 → 查回原回执；异输入 → ``INPUT_CONFLICT``；
+        决定行缺失 → ``INPUT_INVALID``；版本不符 → ``REVISION_CONFLICT``；已终态
+        （revoked/expired）→ ``POLICY_DENIED``。撤销保原 approver_ref/valid_from/
+        expires_at（§9.8 状态矩阵：撤销不改写批准主体与期限，revision 单调 +1）。
+        """
+
+        self._check_engine()
+        identity = derive_data_consent_revoke_identity(command)
+        identity_str = f"{command.command.user_scope}/{command.consent_id}"
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. decision 行锁（§5.4 第 2 条：decision → command）。
+            decision_row = (
+                await conn.execute(
+                    sa.select(AgentDecision.revision, AgentDecision.data_consent_payload)
+                    .where(
+                        AgentDecision.user_scope == command.command.user_scope,
+                        AgentDecision.decision_id == command.consent_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if decision_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "data consent decision does not exist",
+                    identity_str,
+                )
+            # 2. 命令键查重（同命令同输入查回原回执；先于版本校验——撤销已生效
+            #    后 revision 已推进，重放不得被 REVISION_CONFLICT 拦截）。
+            existing_command = (
+                await conn.execute(
+                    sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
+                        AgentCommand.user_scope == command.command.user_scope,
+                        AgentCommand.target_id == command.consent_id,
+                        AgentCommand.client_command_id == command.command.command_id,
+                    )
+                )
+            ).first()
+            if existing_command is not None:
+                if existing_command.input_digest == identity.input_digest:
+                    if existing_command.receipt_payload is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.OPERATION_UNKNOWN,
+                            "original data consent revoke receipt unavailable",
+                            identity_str,
+                        )
+                    return decode_command_receipt(existing_command.receipt_payload, "$")
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "same data consent revoke key with different input",
+                    identity_str,
+                )
+            # 3. 版本与状态校验（终态不可再撤销）。
+            if decision_row.revision != command.command.expected_revision:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "data consent revision changed",
+                    identity_str,
+                )
+            if decision_row.data_consent_payload is None:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    "data consent payload cannot be reliably decoded",
+                    identity_str,
+                )
+            current = decode_data_consent_binding(decision_row.data_consent_payload, "$")
+            if current.state is not DataConsentState.PENDING and current.state is not DataConsentState.APPROVED:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "data consent already in terminal state",
+                    identity_str,
+                )
+            new_revision = command.command.expected_revision + 1
+            revoked_binding = replace(current, state=DataConsentState.REVOKED, consent_revision=new_revision)
+            revoked_wire = encode_data_consent_binding(revoked_binding)
+            # 重读核一致（§9.8 重复字段同事务核一致：编码形态必须可严格重读）。
+            decode_data_consent_binding(revoked_wire, "$")
+            occurred = datetime.now(UTC)
+            await conn.execute(
+                sa.update(AgentDecision)
+                .where(
+                    AgentDecision.user_scope == command.command.user_scope,
+                    AgentDecision.decision_id == command.consent_id,
+                    AgentDecision.revision == command.command.expected_revision,
+                )
+                .values(
+                    revision=new_revision,
+                    data_consent_payload=revoked_wire,
+                    updated_at=occurred,
+                )
+            )
+            receipt = CommandReceipt(
+                command=command.command,
+                target_id=command.consent_id,
+                current_revision=new_revision,
+                commit_state=CommitState.COMMITTED,
+                delivery_state=DeliveryState.DELIVERED,
+                consumption_state=ConsumptionState.CONSUMED,
+                updated_at=_wire_time(occurred),
+                error_code=None,
+                next_action=None,
+            )
+            # 4. revoke 命令行（自足 CAS 命令：效果即决定行更新，同事务三态落定）。
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope=command.command.user_scope,
+                    command_record_id=identity.command_record_id,
+                    client_command_id=command.command.command_id,
+                    target_id=command.consent_id,
+                    command_kind="data_consent_revoke",
+                    session_id=None,
+                    execution_id=None,
+                    round_id=None,
+                    expected_revision=command.command.expected_revision,
+                    input_revision=None,
+                    input_digest=identity.input_digest,
+                    request_payload=json.loads(json_doc({"consent_id": command.consent_id})),
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.DELIVERED.value,
+                    consumption_state=ConsumptionState.CONSUMED.value,
+                    consumed_at=occurred,
+                    verified_at=occurred,
+                    receipt_payload=encode_command_receipt(receipt),
+                )
+            )
+            return receipt
+
+    async def read_data_consent_decision(self, user_scope: str, consent_id: str) -> DataConsentBinding | None:
+        """读取资料许可绑定（决定行缺失 → None；payload 不可靠重读 → fail-closed
+        OPERATION_UNKNOWN，R21 不把坏数据伪装为无许可）。"""
+
+        self._check_engine()
+        identity_str = f"{user_scope}/{consent_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
+        if not isinstance(consent_id, str) or consent_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "consent_id must be non-empty text", identity_str)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentDecision.data_consent_payload).where(
+                        AgentDecision.user_scope == user_scope,
+                        AgentDecision.decision_id == consent_id,
+                    )
+                )
+            ).first()
+        if row is None or row.data_consent_payload is None:
+            return None
+        return decode_data_consent_binding(row.data_consent_payload, "$")
+
+    async def claim_data_consent(
+        self, authorization: DataAttemptAuthorization, claim: DataConsentClaim
+    ) -> DataConsentClaimFact:
+        """资料许可认领事务（§10.2/§5.4「来源共同 claim 和资料许可撤销单胜者」）：
+        decision 行锁下复核核权判定（撤销先胜 → POLICY_DENIED）+ operation 行锁下
+        追加 data_consent_claims，**单个显式事务**。
+
+        - 摘要新鲜重算（不信调用方 digest）+ claim 与请求一致性（core 校验）；
+        - 同 (operation_id, attempt_id) 同 claim → 重放返回原事实（W 崩溃恢复）；
+          异 claim → ``INPUT_CONFLICT``；
+        - 复核不过（撤销先胜 / revision 推进 / 期限届满）→ ``POLICY_DENIED``（脱敏
+          原因码）；claim 先胜保真实在途，后续 attempt 必须再核（§5.4 第 6 条）；
+        - operation 行缺失 → ``INPUT_INVALID``（调用方违反先备后派发契约）；
+        - 锁序：decision → operation（§5.4 仲裁排序）。
+        """
+
+        self._check_engine()
+        recomputed_digest = validate_data_attempt_authorization(authorization)
+        validate_data_consent_claim(claim, authorization, recomputed_digest=recomputed_digest)
+        identity_str = f"{authorization.user_scope}/{authorization.consent_id}"
+        claim_wire = encode_data_consent_claim(claim)
+        claim_canonical = json_doc(claim_wire)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. decision 行锁 + 严格重读（不可靠重读 fail-closed）。
+            decision_row = (
+                await conn.execute(
+                    sa.select(AgentDecision.data_consent_payload)
+                    .where(
+                        AgentDecision.user_scope == authorization.user_scope,
+                        AgentDecision.decision_id == authorization.consent_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if decision_row is None or decision_row.data_consent_payload is None:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    "data consent payload cannot be reliably decoded",
+                    identity_str,
+                )
+            binding = decode_data_consent_binding(decision_row.data_consent_payload, "$")
+            # 2. operation 行锁（claim 追加目标；缺失=先备后派发契约被违反）。
+            operation_row = (
+                await conn.execute(
+                    sa.select(AgentOperation.data_consent_claims)
+                    .where(
+                        AgentOperation.user_scope == authorization.user_scope,
+                        AgentOperation.operation_id == authorization.operation_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if operation_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "operation does not exist; prepare before dispatch",
+                    identity_str,
+                )
+            # 3. 同 attempt 重放查回（先于核权判定：已生效 claim 不被后续撤销改写）。
+            existing_claims: list[dict] = list(operation_row.data_consent_claims or [])
+            for existing in existing_claims:
+                if not isinstance(existing, dict):
+                    continue
+                if existing.get("attempt_id") == authorization.attempt_id:
+                    if json_doc(existing) == claim_canonical:
+                        return DataConsentClaimFact(claim=claim, replayed=True)
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "same attempt claim with different input",
+                        identity_str,
+                    )
+            # 4. 行锁下单胜者复核（撤销先胜零新 claim）。
+            now = datetime.now(UTC)
+            deny_reason = evaluate_data_attempt(binding, authorization, now, recomputed_digest=recomputed_digest)
+            if deny_reason is not None:
+                raise AgentServiceError(AgentErrorCode.POLICY_DENIED, deny_reason, identity_str)
+            # 5. 追加 claim（行锁下无丢失更新；operation revision 单调 +1）。
+            existing_claims.append(claim_wire)
+            await conn.execute(
+                sa.update(AgentOperation)
+                .where(
+                    AgentOperation.user_scope == authorization.user_scope,
+                    AgentOperation.operation_id == authorization.operation_id,
+                )
+                .values(
+                    data_consent_claims=existing_claims,
+                    revision=AgentOperation.revision + 1,
+                    updated_at=now,
+                )
+            )
+            return DataConsentClaimFact(claim=claim, replayed=False)

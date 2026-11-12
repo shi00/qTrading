@@ -1922,3 +1922,434 @@ class RevisionReceipt:
     input_revision: int
     execution_revision: int
     session_seq: int
+
+
+# ---------------------------------------------------------------------------
+# §9.8 R04 owner 命令/核权合同（C-02-4a）
+# ---------------------------------------------------------------------------
+
+
+class DataAttemptOutcome(Enum):
+    """资料核权结果（§10.2：allow/deny/unknown 三值分列；unknown 不当 allow）。"""
+
+    ALLOW = "allow"
+    DENY = "deny"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class DataConsentCommand:
+    """资料许可保存命令（§10.2 R04 拟扩展）：携 CommandRef、准确轮身份、完整绑定。
+
+    ``CommandRef.expected_revision`` 即 expected_consent_revision（§3.1：0=目标
+    尚不存在→建新决定行；≥1=以该版为 CAS 基准更新）。``consent_id`` 即决定行
+    decision_id（§9.8），由调用方以稳定身份派生（如 stable_id），owner 合同只
+    要求非空稳定身份。``binding`` 为完整 v1 绑定（20 键），其 user_scope/
+    execution_id/round_id 须与命令身份一致；建行时 consent_revision=1，更新时
+    =expected+1（§9.8 重复字段 consent_revision 与决定行 revision 同事务一致）。
+    """
+
+    command: CommandRef
+    consent_id: str
+    session_id: str
+    execution_id: str
+    round_id: str
+    node_id: str
+    binding: DataConsentBinding
+
+
+@dataclass(frozen=True)
+class DataConsentRevokeCommand:
+    """资料许可撤销命令（§10.2）：携原 consent_id、预期版及命令身份。
+
+    ``CommandRef.expected_revision`` 即预期 consent revision（≥1，撤销只针对
+    已存在决定行）；撤销立即阻止新许可（先胜零新出站），已终态（revoked/
+    expired）不可再撤销。
+    """
+
+    command: CommandRef
+    consent_id: str
+
+
+@dataclass(frozen=True)
+class DataConsentCommandIdentity:
+    """保存/撤销命令稳定身份与输入摘要（命令摘要覆盖完整版本化输入，§9.8）。"""
+
+    command_record_id: str
+    input_digest: str
+
+
+def _check_command_ref(ref: CommandRef) -> None:
+    """CommandRef 入口校验（§3.3.1 语法基线）。"""
+
+    _require_str(ref.user_scope, "$.command.user_scope")
+    _require_str(ref.source_module, "$.command.source_module")
+    _require_str(ref.business_request_id, "$.command.business_request_id")
+    _require_str(ref.command_id, "$.command.command_id")
+    if (
+        isinstance(ref.expected_revision, bool)
+        or not isinstance(ref.expected_revision, int)
+        or ref.expected_revision < 0
+    ):
+        _fail("invalid_revision", "$.command.expected_revision")
+
+
+def derive_data_consent_command_identity(command: DataConsentCommand) -> DataConsentCommandIdentity:
+    """校验保存命令并派生命令身份/输入摘要（§3.3.2 命令键 + §9.8 命令摘要）。"""
+
+    _check_command_ref(command.command)
+    _require_str(command.consent_id, "$.consent_id")
+    _require_str(command.session_id, "$.session_id")
+    _require_str(command.execution_id, "$.execution_id")
+    _require_str(command.round_id, "$.round_id")
+    _require_str(command.node_id, "$.node_id")
+    binding = command.binding
+    if not isinstance(binding, DataConsentBinding):
+        _fail("invalid_type", "$.binding")
+    if binding.user_scope != command.command.user_scope:
+        _fail("identity_mismatch", "$.binding.user_scope")
+    if binding.execution_id != command.execution_id or binding.round_id != command.round_id:
+        _fail("identity_mismatch", "$.binding.execution_id")
+    expected = command.command.expected_revision
+    if expected == 0:
+        if binding.consent_revision != 1:
+            _fail("invalid_revision", "$.binding.consent_revision")
+    elif binding.consent_revision != expected + 1:
+        _fail("invalid_revision", "$.binding.consent_revision")
+    command_record_id = stable_id(
+        "command", [command.command.user_scope, command.consent_id, command.command.command_id]
+    )
+    canonical = json_doc(
+        {
+            "schema_version": 1,
+            "action": "save",
+            "command_id": command.command.command_id,
+            "consent_id": command.consent_id,
+            "expected_consent_revision": expected,
+            "binding": encode_data_consent_binding(binding),
+        }
+    )
+    return DataConsentCommandIdentity(command_record_id=command_record_id, input_digest=sha256_hex(canonical))
+
+
+def derive_data_consent_revoke_identity(command: DataConsentRevokeCommand) -> DataConsentCommandIdentity:
+    """校验撤销命令并派生命令身份/输入摘要（预期版参与摘要，§9.8）。"""
+
+    _check_command_ref(command.command)
+    _require_str(command.consent_id, "$.consent_id")
+    if command.command.expected_revision < 1:
+        _fail("invalid_revision", "$.command.expected_revision")
+    command_record_id = stable_id(
+        "command", [command.command.user_scope, command.consent_id, command.command.command_id]
+    )
+    canonical = json_doc(
+        {
+            "schema_version": 1,
+            "action": "revoke",
+            "command_id": command.command.command_id,
+            "consent_id": command.consent_id,
+            "expected_consent_revision": command.command.expected_revision,
+        }
+    )
+    return DataConsentCommandIdentity(command_record_id=command_record_id, input_digest=sha256_hex(canonical))
+
+
+@dataclass(frozen=True)
+class DataAttemptAuthorization:
+    """资料核权请求（§10.2）：完整 source_selections 随请求携带，摘要由 owner
+    新鲜重算（不信调用方 digest）；实际连接/凭据安全修订须与绑定一致；
+    owner/run epoch 为 claim 归属代次（§9.9）。"""
+
+    user_scope: str
+    operation_id: str
+    attempt_id: str
+    consent_id: str
+    expected_consent_revision: int
+    connection_id: str
+    connection_revision: int
+    security_revision: int
+    credential_version: str | None
+    purpose: str
+    target_fingerprint: str
+    scope_version: int
+    source_selections: tuple[DataConsentSourceItem, ...]
+    source_scope_digest: str
+    owner_epoch: int
+    run_epoch: int
+
+
+def validate_data_attempt_authorization(request: DataAttemptAuthorization) -> str:
+    """校验核权请求并新鲜重算 source_scope_digest（§9.8：每 attempt 核权均重算）。
+
+    返回重算摘要；请求自带摘要与重算不一致即 INPUT_INVALID（调用方输入不自
+    洽），授权判定一律使用重算值，不信任请求摘要字段。
+    """
+
+    _require_str(request.user_scope, "$.user_scope")
+    _require_str(request.operation_id, "$.operation_id")
+    _require_str(request.attempt_id, "$.attempt_id")
+    _require_str(request.consent_id, "$.consent_id")
+    if (
+        isinstance(request.expected_consent_revision, bool)
+        or not isinstance(request.expected_consent_revision, int)
+        or request.expected_consent_revision < 1
+    ):
+        _fail("invalid_revision", "$.expected_consent_revision")
+    _require_str(request.connection_id, "$.connection_id")
+    if (
+        isinstance(request.connection_revision, bool)
+        or not isinstance(request.connection_revision, int)
+        or request.connection_revision < 1
+    ):
+        _fail("invalid_revision", "$.connection_revision")
+    if (
+        isinstance(request.security_revision, bool)
+        or not isinstance(request.security_revision, int)
+        or request.security_revision < 0
+    ):
+        _fail("invalid_revision", "$.security_revision")
+    if request.credential_version is not None:
+        _require_str(request.credential_version, "$.credential_version")
+    _require_str(request.purpose, "$.purpose")
+    _require_str(request.target_fingerprint, "$.target_fingerprint")
+    if (
+        isinstance(request.scope_version, bool)
+        or not isinstance(request.scope_version, int)
+        or request.scope_version < 1
+    ):
+        _fail("invalid_revision", "$.scope_version")
+    if not isinstance(request.source_selections, tuple):
+        _fail("invalid_type", "$.source_selections")
+    for index, item in enumerate(request.source_selections):
+        if not isinstance(item, DataConsentSourceItem):
+            _fail("invalid_type", f"$.source_selections[{index}]")
+    for epoch_field in ("owner_epoch", "run_epoch"):
+        value = getattr(request, epoch_field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            _fail("invalid_revision", f"$.{epoch_field}")
+    recomputed = data_consent_source_scope_digest(request.source_selections)
+    if _require_digest(request.source_scope_digest, "$.source_scope_digest") != recomputed:
+        _fail("digest_mismatch", "$.source_scope_digest")
+    return recomputed
+
+
+def _parse_wire_moment(value: str, field_path: str) -> dt:
+    """UTC 微秒 Z 时刻文本 → 带时区 datetime（period 判定用）。"""
+
+    return dt.strptime(require_utc_timestamp(value, field_path), "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+
+
+def evaluate_data_attempt(
+    binding: DataConsentBinding,
+    request: DataAttemptAuthorization,
+    now: dt,
+    *,
+    recomputed_digest: str | None = None,
+) -> str | None:
+    """资料核权判定（纯函数，§10.2「核 DataConsentBinding 准确集合/版/用途/目的地/寿命」）。
+
+    返回 None=允许；否则返回脱敏拒绝原因码（state/revision/purpose/target/
+    scope_version/连接复合引用/安全修订/凭据/摘要/生效与到期逐项分列）。
+    判定一律使用重算摘要（``recomputed_digest`` 缺省时内部重算）。
+    """
+
+    if binding.state is not DataConsentState.APPROVED:
+        return "state_not_approved"
+    if binding.consent_revision != request.expected_consent_revision:
+        return "revision_mismatch"
+    if binding.purpose != request.purpose:
+        return "purpose_mismatch"
+    if binding.target_fingerprint != request.target_fingerprint:
+        return "target_mismatch"
+    if binding.scope_version != request.scope_version:
+        return "scope_version_mismatch"
+    ref = binding.connection_authorization_ref
+    if ref.connection_id != request.connection_id:
+        return "connection_mismatch"
+    if binding.connection_revision != request.connection_revision:
+        return "connection_revision_mismatch"
+    if binding.security_revision != request.security_revision:
+        return "security_revision_mismatch"
+    if binding.credential_version != request.credential_version:
+        return "credential_mismatch"
+    digest = (
+        recomputed_digest
+        if recomputed_digest is not None
+        else data_consent_source_scope_digest(request.source_selections)
+    )
+    if binding.source_scope_digest != digest:
+        return "scope_mismatch"
+    if binding.valid_from is not None and _parse_wire_moment(binding.valid_from, "$.valid_from") > now:
+        return "not_yet_valid"
+    if binding.expires_at is not None and _parse_wire_moment(binding.expires_at, "$.expires_at") <= now:
+        return "expired"
+    return None
+
+
+@dataclass(frozen=True)
+class DataAttemptReceipt:
+    """资料核权回执（§10.2）：allow/deny/unknown 与原绑定/核权 revision 分列。
+
+    ``binding`` 为核权时读到的原绑定（不可靠重读时 None）；``reason`` 为脱敏
+    原因码（allow 时 None）；不把 unknown 当 allow（fail-closed）。
+    """
+
+    outcome: DataAttemptOutcome
+    operation_id: str
+    attempt_id: str
+    consent_id: str
+    consent_revision: int | None
+    binding: DataConsentBinding | None
+    reason: str | None
+    authorized_at: str
+
+
+@dataclass(frozen=True)
+class DataConsentClaim:
+    """operation.data_consent_claims 条目（§9.9，v1 wire 工程冻结）。
+
+    每 attempt 一条，含 consent 身份/实际连接许可复合引用/安全修订/凭据/摘要/
+    purpose/target/attempt 与 operation 身份/owner 与 run 代次/核权时间及结果；
+    不另存费用。``connection_authorization_ref.verified_connection_grant_id``
+    为实际核权核到的 grant ID 或显式 null——AttemptPermit 不返回 grant ID，
+    首版核权记 null，不冒认已核对象（§9.8）。
+    """
+
+    schema_version: int
+    consent_id: str
+    consent_revision: int
+    connection_authorization_ref: ConnectionAuthorizationRef
+    security_revision: int
+    credential_version: str | None
+    scope_version: int
+    source_scope_digest: str
+    purpose: str
+    target_fingerprint: str
+    attempt_id: str
+    operation_id: str
+    owner_epoch: int
+    run_epoch: int
+    authorized_at: str
+    outcome: DataAttemptOutcome
+
+
+_DATA_CONSENT_CLAIM_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "consent_id",
+        "consent_revision",
+        "connection_authorization_ref",
+        "security_revision",
+        "credential_version",
+        "scope_version",
+        "source_scope_digest",
+        "purpose",
+        "target_fingerprint",
+        "attempt_id",
+        "operation_id",
+        "owner_epoch",
+        "run_epoch",
+        "authorized_at",
+        "outcome",
+    }
+)
+
+
+def encode_data_consent_claim(claim: DataConsentClaim) -> dict[str, Any]:
+    """DataConsentClaim → wire dict（16 键全量，CanonicalJson 语义承载）。"""
+
+    return cast(dict[str, Any], _to_jsonable(claim, "$"))
+
+
+def decode_data_consent_claim(value: object, path: str) -> DataConsentClaim:
+    """严格解码 claim（全键必填禁额外键；JSONB 重排键重读保同身份）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DATA_CONSENT_CLAIM_KEYS, path)
+    schema_version = value["schema_version"]
+    if isinstance(schema_version, bool) or schema_version != 1:
+        _fail("invalid_schema_version", f"{path}.schema_version")
+    security_revision = value["security_revision"]
+    if isinstance(security_revision, bool) or not isinstance(security_revision, int) or security_revision < 0:
+        _fail("invalid_revision", f"{path}.security_revision")
+    owner_epoch = value["owner_epoch"]
+    if isinstance(owner_epoch, bool) or not isinstance(owner_epoch, int) or owner_epoch < 0:
+        _fail("invalid_revision", f"{path}.owner_epoch")
+    run_epoch = value["run_epoch"]
+    if isinstance(run_epoch, bool) or not isinstance(run_epoch, int) or run_epoch < 0:
+        _fail("invalid_revision", f"{path}.run_epoch")
+    credential_version = value["credential_version"]
+    if credential_version is not None:
+        credential_version = _require_str(credential_version, f"{path}.credential_version")
+    try:
+        outcome = DataAttemptOutcome(value["outcome"])
+    except ValueError:
+        _fail("invalid_outcome", f"{path}.outcome")
+    return DataConsentClaim(
+        schema_version=1,
+        consent_id=_require_str(value["consent_id"], f"{path}.consent_id"),
+        consent_revision=_require_p(value["consent_revision"], f"{path}.consent_revision"),
+        connection_authorization_ref=_decode_connection_authorization_ref(
+            value["connection_authorization_ref"], f"{path}.connection_authorization_ref"
+        ),
+        security_revision=security_revision,
+        credential_version=credential_version,
+        scope_version=_require_p(value["scope_version"], f"{path}.scope_version"),
+        source_scope_digest=_require_digest(value["source_scope_digest"], f"{path}.source_scope_digest"),
+        purpose=_require_str(value["purpose"], f"{path}.purpose"),
+        target_fingerprint=_require_str(value["target_fingerprint"], f"{path}.target_fingerprint"),
+        attempt_id=_require_str(value["attempt_id"], f"{path}.attempt_id"),
+        operation_id=_require_str(value["operation_id"], f"{path}.operation_id"),
+        owner_epoch=owner_epoch,
+        run_epoch=run_epoch,
+        authorized_at=require_utc_timestamp(value["authorized_at"], f"{path}.authorized_at"),
+        outcome=outcome,
+    )
+
+
+def validate_data_consent_claim(
+    claim: DataConsentClaim, authorization: DataAttemptAuthorization, *, recomputed_digest: str
+) -> None:
+    """claim 与核权请求一致性（写入前核，§9.9 claim 字段语义）。
+
+    claim 是该次核权事实的持久投影：身份/版本/连接复合引用/安全修订/凭据/摘要
+    任一与请求分叉即拒绝（identity_mismatch），不允许 claim 记录与实际核权
+    输入不一致的“批准”。
+    """
+
+    if claim.consent_id != authorization.consent_id:
+        _fail("identity_mismatch", "$.claim.consent_id")
+    if claim.consent_revision != authorization.expected_consent_revision:
+        _fail("identity_mismatch", "$.claim.consent_revision")
+    if claim.operation_id != authorization.operation_id or claim.attempt_id != authorization.attempt_id:
+        _fail("identity_mismatch", "$.claim.operation_id")
+    if (
+        claim.purpose != authorization.purpose
+        or claim.target_fingerprint != authorization.target_fingerprint
+        or claim.scope_version != authorization.scope_version
+    ):
+        _fail("identity_mismatch", "$.claim.purpose")
+    if claim.security_revision != authorization.security_revision:
+        _fail("identity_mismatch", "$.claim.security_revision")
+    if claim.credential_version != authorization.credential_version:
+        _fail("identity_mismatch", "$.claim.credential_version")
+    if claim.source_scope_digest != recomputed_digest:
+        _fail("identity_mismatch", "$.claim.source_scope_digest")
+    ref = claim.connection_authorization_ref
+    if (
+        ref.connection_id != authorization.connection_id
+        or ref.target_fingerprint != authorization.target_fingerprint
+        or ref.purpose != authorization.purpose
+        or ref.scope_version != authorization.scope_version
+    ):
+        _fail("identity_mismatch", "$.claim.connection_authorization_ref")
+
+
+@dataclass(frozen=True)
+class DataConsentClaimFact:
+    """claim 落定事实：``replayed``=同 (operation_id, attempt_id) 同 claim 重放
+    （W 崩溃恢复查回原事实，不重复追加）。"""
+
+    claim: DataConsentClaim
+    replayed: bool
