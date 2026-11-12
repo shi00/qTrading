@@ -681,8 +681,22 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     # --- SEC-03 第二步: 「数据出口」审计面板 (今日/本月按目的地聚合 + 会话指示) ---
-    def _build_egress_table(dest_rows: Sequence[EgressAggRow]) -> ft.DataTable | ft.Column:
+    # UIV-AI-01 (R21): loaded=False（初始未加载 / 读取失败）时审计状态未核实，
+    # 显示「未检查」提示而非空态文案与确定的零计数，避免用户把未核实状态误读为
+    # 「暂无外发」；仅 loaded=True 时才依据 rows 呈现真实空表或聚合表。
+    def _build_egress_table(dest_rows: Sequence[EgressAggRow], loaded: bool) -> ft.DataTable | ft.Column:
         """构造今日/本月聚合表; 空 rows 时以空态文案替代表格。"""
+        if not loaded:
+            return ft.Column(
+                [
+                    ft.Text(
+                        I18n.get("ds_not_checked"),
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.WARNING,
+                    ),
+                ],
+                spacing=4,
+            )
         if not dest_rows:
             return ft.Column(
                 [
@@ -718,7 +732,13 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
         )
 
-    egress_session_text = I18n.get("egress_session_indicator").format(count=egress_state.session_count)
+    # UIV-AI-01 (R21): 会话计数同按 loaded 分流——未核实时不呈现确定的零计数。
+    egress_loaded = egress_state.loaded
+    egress_session_text = (
+        I18n.get("ds_not_checked")
+        if not egress_loaded
+        else I18n.get("egress_session_indicator").format(count=egress_state.session_count)
+    )
     card_egress = DashboardCard(
         content=ft.Column(
             [
@@ -737,7 +757,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 ft.Text(
                     egress_session_text,
                     size=AppStyles.FONT_SIZE_BODY_SM,
-                    color=AppColors.TEXT_PRIMARY,
+                    color=AppColors.WARNING if not egress_loaded else AppColors.TEXT_PRIMARY,
                     weight=ft.FontWeight.BOLD,
                 ),
                 ft.Divider(height=20, color=AppColors.BORDER),
@@ -747,7 +767,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                 ),
-                _build_egress_table(egress_state.today_rows),
+                _build_egress_table(egress_state.today_rows, egress_loaded),
                 ft.Divider(height=20, color=AppColors.BORDER),
                 ft.Text(
                     I18n.get("egress_month_section"),
@@ -755,7 +775,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                 ),
-                _build_egress_table(egress_state.month_rows),
+                _build_egress_table(egress_state.month_rows, egress_loaded),
             ],
             spacing=8,
         ),
