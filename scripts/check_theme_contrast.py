@@ -126,10 +126,14 @@ class ContrastPair(NamedTuple):
 #   不属于 WCAG 大字号例外，必须按正文 4.5 验收；仅图标或禁用内容才用 3.0。
 #
 #   背景建模（消费盘点结论）：
-#   - 业务色正文的真实背景 = SURFACE / CARD_BG（面板/卡片/Toast/列表行/DataTable 默认行；
-#     4 主题下两 token 同值，仍显式分别验收以防未来分化）。
-#   - virtual_table 的 ODD/EVEN 交替行单元格仅使用中性正文色（TABLE_CELL_TEXT 等），
-#     业务色无 EVEN 行消费场景，故不为业务色配置 EVEN 行色对。
+#   - 业务状态/涨跌正文的真实背景 = SURFACE / CARD_BG（面板/卡片/Toast/列表行/DataTable
+#     默认行；4 主题下两 token 同值，仍显式分别验收以防未来分化）。
+#   - virtual_table 的涨跌单元格（_TREND_COLS，13px 正文）直接使用 UP_RED/DOWN_GREEN，
+#     行底色由 AppStyles.data_table_row 在 TABLE_ROW_ODD / TABLE_ROW_EVEN /
+#     TABLE_ROW_HOVER 之间切换，故涨跌色必须同时在这三种真实行底色上按正文 4.5 验收
+#     （原注释曾误称业务色无 EVEN 行消费场景，掩盖了该缺陷）。
+#   - SUCCESS/WARNING/INFO 在 virtual_table 单元格中无消费（单元格中性正文用
+#     TABLE_CELL_TEXT / TABLE_CELL_NUMERIC），故不配置三者 × 行底色色对。
 #
 #   已知覆盖边界（如实披露，不扩大为整应用 WCAG AA 认证）：
 #   - watchlist 列表行使用 Layer 1 派生色 SURFACE_VARIANT（surface_container_highest，
@@ -159,6 +163,13 @@ _CONTRAST_PAIRS: list[ContrastPair] = [
     ContrastPair("UP_RED", "CARD_BG", _THRESHOLD_TEXT, "text"),
     ContrastPair("DOWN_GREEN", "SURFACE", _THRESHOLD_TEXT, "text"),
     ContrastPair("DOWN_GREEN", "CARD_BG", _THRESHOLD_TEXT, "text"),
+    # 涨跌文字在 virtual_table 交替行 / hover 行底色上的真实消费（_build_cells 涨跌列）
+    ContrastPair("UP_RED", "TABLE_ROW_ODD", _THRESHOLD_TEXT, "text"),
+    ContrastPair("UP_RED", "TABLE_ROW_EVEN", _THRESHOLD_TEXT, "text"),
+    ContrastPair("UP_RED", "TABLE_ROW_HOVER", _THRESHOLD_TEXT, "text"),
+    ContrastPair("DOWN_GREEN", "TABLE_ROW_ODD", _THRESHOLD_TEXT, "text"),
+    ContrastPair("DOWN_GREEN", "TABLE_ROW_EVEN", _THRESHOLD_TEXT, "text"),
+    ContrastPair("DOWN_GREEN", "TABLE_ROW_HOVER", _THRESHOLD_TEXT, "text"),
     # --- 图标 / 错误态强调 (3.0；ERROR 亦有正文场景，见上方覆盖边界说明) ---
     ContrastPair("ERROR", "SURFACE", _THRESHOLD_LARGE, "icon"),
     # --- 禁用 / 装饰 (3.0，WCAG §1.4.3 禁用控件豁免，保留可读下限) ---
