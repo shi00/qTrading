@@ -503,6 +503,15 @@ class TestBuildCoverageDetailTable:
         count_container = row.content.controls[1]
         assert count_container.bgcolor is not None
 
+    def test_create_row_global_badge_uses_status_tint_alpha(self):
+        """M30-UIB-THEME-03: 覆盖徽标弱底纹必须用 STATUS_TINT_ALPHA (ERROR 正文叠底纹达 4.5)。"""
+        from ui.components.health_report_dialog import _create_coverage_row
+        from ui.theme import STATUS_TINT_ALPHA
+
+        row = _create_coverage_row("macro_economy", {"ratio": 0.0, "covered": 0, "type": "global"})
+        count_container = row.content.controls[1]
+        assert count_container.bgcolor == ft.Colors.with_opacity(STATUS_TINT_ALPHA, self.mock_ac.ERROR)
+
 
 class TestBuildScanContent:
     """_build_scan_content 模块级纯函数测试。"""

@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from ui.theme import (  # noqa: E402 - sys.path 注入后导入
     CUSTOM_COLOR_PRESETS,
+    STATUS_TINT_ALPHA,
     THEME_COLOR_SCHEMES,
     ThemeName,
 )
@@ -63,6 +64,20 @@ def contrast_ratio(hex_a: str, hex_b: str) -> float:
     return (light + 0.05) / (dark + 0.05)
 
 
+def blend_alpha_over(hex_overlay: str, hex_base: str, alpha: float) -> str:
+    """把 overlay 色以 alpha 叠在 base 色上, 返回混合后的不透明 hex (底纹背景建模)。
+
+    对应 Flet ``ft.Colors.with_opacity(alpha, color)`` 叠加在 parent bgcolor 上的效果,
+    用于验收「状态色正文叠在同色弱底纹上」的真实背景 (派生色无法直接从主题表读取)。
+    """
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha 必须在 [0, 1] 区间, 实际 {alpha!r}")
+    overlay = _hex_to_rgb(hex_overlay)
+    base = _hex_to_rgb(hex_base)
+    mixed = tuple(round(o * alpha + b * (1.0 - alpha)) for o, b in zip(overlay, base, strict=True))
+    return "#{:02X}{:02X}{:02X}".format(*mixed)
+
+
 # ============================================================================
 # 色对解析: Layer 1 (ColorScheme) → Layer 2 (CUSTOM_COLOR_PRESETS)
 # ============================================================================
@@ -75,6 +90,7 @@ _LAYER1_FIELD_MAP: dict[str, str] = {
     "TEXT_HINT": "on_surface_variant",
     "TEXT_DISABLED": "on_surface_variant",  # 复用 TEXT_HINT
     "ERROR": "error",
+    "ON_ERROR": "on_error",
     "TEXT_ON_PRIMARY": "on_primary",
 }
 
@@ -109,15 +125,20 @@ class ContrastPair(NamedTuple):
 
     ``purpose`` 标注该色对的真实用途，决定适用阈值（F06：按用途分级，不把所有颜色设同阈值）：
 
-    - ``text``     正文文本（含业务状态/涨跌文字，字号 13/14，非 WCAG 大字号例外）
+    - ``text``     正文文本（含业务状态/涨跌/错误文字与反色文字，字号 12~14，非 WCAG 大字号例外）
     - ``icon``     图标 / 图形 / 错误态强调
     - ``disabled`` 禁用或装饰性内容（WCAG §1.4.3 对禁用控件豁免，仍保留可读下限）
+
+    ``bg_tint`` 用于「底纹背景」：``(token, alpha)`` 表示背景 = ``bg`` 上叠加 ``token`` 色
+    （alpha 不透明度）后的混合色，对应 ``ft.Colors.with_opacity(alpha, token)`` 容器
+    （如 health_report_dialog 的错误弱底纹）。``None`` 表示 ``bg`` 即真实不透明背景。
     """
 
     fg: str
     bg: str
     threshold: float
     purpose: str
+    bg_tint: tuple[str, float] | None = None
 
 
 # 色对按「文本 / 图标 / 禁用」用途分级标注阈值（F06）：
@@ -139,16 +160,27 @@ class ContrastPair(NamedTuple):
 #     TABLE_CELL_TEXT（如数据出口审计表），回测两张表的中性单元格显式取 TEXT_PRIMARY，
 #     故补齐二者 × TABLE_ROW_HOVER 色对。
 #   - SUCCESS/WARNING/INFO 在 virtual_table / 回测表格单元格中无消费（单元格中性正文用
-#     TABLE_CELL_TEXT / TABLE_CELL_NUMERIC）；ERROR 在回测面板仅用于 20px 粗体指标数值
-#     与图表图形（大字号 3.0 档），不再作为该面板 13/14px 正文出现。
+#     TABLE_CELL_TEXT / TABLE_CELL_NUMERIC）。
+#   - M30-UIB-THEME-03: ERROR 是 13/14px 正文色（校验文字、健康报告问题列表、数据源/
+#     模型/启动失败提示等），不是「仅图标」色；同时承担两类衍生用途，三者一并验收：
+#       ① 正文: ERROR × SURFACE / CARD_BG (4.5)
+#       ② 反色: ON_ERROR × ERROR (danger_button / app_layout 导航角标, 4.5)
+#       ③ 弱底纹: ERROR 正文叠在同色 STATUS_TINT_ALPHA 底纹上 (4.5, 底纹背景按
+#          CARD_BG 混合建模, 对应 health_report_dialog 问题列表与覆盖徽标)
+#     回测结果面板的 ERROR 仅用于 20px 粗体指标数值与图表图形（大字号档），已被 4.5 覆盖。
+#
+#   DataTable 消费盘点（C3 已把回测成交/月度两表迁到 UP_RED/DOWN_GREEN）：
+#   ui/components/virtual_table.py 与回测两张表均无 AppColors.ERROR 单元格正文，
+#   故不新增 ERROR × TABLE_ROW_* 色对；若未来新增须补齐并要求 ON_ERROR 反色同步复核。
 #
 #   已知覆盖边界（如实披露，不扩大为整应用 WCAG AA 认证）：
-#   - watchlist 列表行使用 Layer 1 派生色 SURFACE_VARIANT（surface_container_highest，
-#     运行时由 Flet/Flutter 派生，无法从主题表精确计算），不在本门禁可验收集合内。
-#   - ERROR 在本面板之外仍有 13/14px 正文场景（如 Toast 错误文字），但 Layer 1 error
-#     调整会联动 danger_button / on_error 等反色用途，超出 F06 范围，按图标/大字号档
-#     3.0 验收；后续如需正文级验收须连同反色用途一并评估（M30-C3 已在回测面板内把
-#     交易明细 sell / 负 pnl 的正文消费迁移到 DOWN_GREEN）。
+#   - watchlist 列表行与 metric tile 使用 Layer 1 派生色 SURFACE_VARIANT
+#     （surface_container_highest，运行时由 Flet/Flutter 派生，无法从主题表精确计算），
+#     不在本门禁可验收集合内；底纹验收因此按 CARD_BG 建模（四主题下 CARD_BG == SURFACE）。
+#   - ColorScheme.error_container 当前在 UI 层无消费（仅主题表定义），不纳入验收；
+#     若将来启用 error_container 背景 + ERROR 文字，须补对应色对。
+#   - Toast/SnackBar 正文取 TEXT_PRIMARY（错误色仅用于图标与动作按钮文本），
+#     其错误图标用途由 ① 的正文级 4.5 覆盖（严于图标 3.0）。
 _CONTRAST_PAIRS: list[ContrastPair] = [
     # --- 正文文本 (4.5) ---
     ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),
@@ -181,11 +213,29 @@ _CONTRAST_PAIRS: list[ContrastPair] = [
     # 中性正文在 hover 行底色上的真实消费（DataTable 默认单元格 / 回测表中性单元格）
     ContrastPair("TABLE_CELL_TEXT", "TABLE_ROW_HOVER", _THRESHOLD_TEXT, "text"),
     ContrastPair("TEXT_PRIMARY", "TABLE_ROW_HOVER", _THRESHOLD_TEXT, "text"),
-    # --- 图标 / 错误态强调 (3.0；ERROR 亦有正文场景，见上方覆盖边界说明) ---
-    ContrastPair("ERROR", "SURFACE", _THRESHOLD_LARGE, "icon"),
+    # --- 错误色正文 (4.5；ERROR 真实用于 13/14px 校验/错误提示文字) ---
+    ContrastPair("ERROR", "SURFACE", _THRESHOLD_TEXT, "text"),
+    ContrastPair("ERROR", "CARD_BG", _THRESHOLD_TEXT, "text"),
+    # 错误弱底纹背景 (ERROR 正文叠在同色 STATUS_TINT_ALPHA 底纹上)
+    ContrastPair("ERROR", "CARD_BG", _THRESHOLD_TEXT, "text", ("ERROR", STATUS_TINT_ALPHA)),
+    # --- 反色 (4.5；danger_button / 导航角标: ON_ERROR 文字叠 ERROR 底) ---
+    ContrastPair("ON_ERROR", "ERROR", _THRESHOLD_TEXT, "text"),
     # --- 禁用 / 装饰 (3.0，WCAG §1.4.3 禁用控件豁免，保留可读下限) ---
     ContrastPair("TEXT_DISABLED", "SURFACE", _THRESHOLD_LARGE, "disabled"),
 ]
+
+
+def _resolve_pair_colors(pair: ContrastPair, theme: str) -> tuple[str | None, str | None]:
+    """解析色对的前景/背景 hex；底纹色对返回混合后的不透明背景色。"""
+    fg = _resolve_color(pair.fg, theme)
+    bg = _resolve_color(pair.bg, theme)
+    if pair.bg_tint is not None:
+        tint_token, alpha = pair.bg_tint
+        tint = _resolve_color(tint_token, theme)
+        if bg is None or tint is None:
+            return fg, None
+        bg = blend_alpha_over(tint, bg, alpha)
+    return fg, bg
 
 
 def check_contrast() -> list[str]:
@@ -194,8 +244,7 @@ def check_contrast() -> list[str]:
     themes = [ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA]
     for theme in themes:
         for pair in _CONTRAST_PAIRS:
-            fg = _resolve_color(pair.fg, theme)
-            bg = _resolve_color(pair.bg, theme)
+            fg, bg = _resolve_pair_colors(pair, theme)
             if fg is None or bg is None:
                 errors.append(
                     f"{theme}: 无法解析色对 {pair.fg}/{pair.bg} "

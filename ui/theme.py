@@ -36,6 +36,15 @@ class ThemeName:
     DRACULA = "dracula"
 
 
+# 状态色弱底纹不透明度单一正本 (M30-UIB-THEME-03)。
+# 语义: 状态色 (ERROR / WARNING / SUCCESS) 以该 alpha 混入面板底色, 形成弱提示底纹;
+# 状态色正文 (12~14px) 叠在该底纹上仍须满足 WCAG §1.4.3 正文 4.5。实测四主题最差值在
+# LIGHT (0.06→4.57, 0.065 临界 4.50, 0.07 已跌破), 故取 0.06 留余量; 原 0.1 时 LIGHT
+# 仅 4.28。消费点: health_report_dialog 问题列表与覆盖徽标; 门禁
+# scripts/check_theme_contrast.py 用同一常量复算混合色。
+STATUS_TINT_ALPHA = 0.06
+
+
 # ============================================================================
 # 类型定义
 # ============================================================================
@@ -217,7 +226,11 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#004D40",
         tertiary="#64B5F6",
         surface="#1E1E1E",
-        error="#FF1744",
+        # M30-UIB-THEME-03: ERROR 同时承担 13/14px 正文 (校验/健康报告错误文字) 与反色底
+        #   (危险按钮/导航角标)。原 #FF1744 正文仅 4.33、白字反色仅 3.85, 且「白字反色 ≥4.5」
+        #   要求 L(error)≤0.1833 而「ERROR 正文在 #1E1E1E ≥4.5」要求 L≥0.2334, 两区间无交集,
+        #   故 error 调为 #FF5252 (正文/反色均 5.22) 且 on_error 改为深色 #1E1E1E。
+        error="#FF5252",
         error_container="#93000A",
         on_primary="#FFFFFF",
         on_primary_container="#BBDEFB",
@@ -225,7 +238,8 @@ THEME_COLOR_SCHEMES = {
         on_secondary_container="#A7FFEB",
         on_surface="#FFFFFF",
         on_surface_variant="#B0B0B0",
-        on_error="#FFFFFF",
+        # M30-UIB-THEME-03: DARK 反色必须用深色 (理由见 error 字段注释)。
+        on_error="#1E1E1E",
         outline="#333333",
         outline_variant="#2C2C2C",
         inverse_primary="#0D47A1",
@@ -241,6 +255,8 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#B2DFDB",
         tertiary="#1976D2",
         surface="#FFFFFF",
+        # M30-UIB-THEME-03: #D32F2F 正文与白字反色均 4.98 达标, 保持; 10% 弱底纹仅 4.28,
+        #   故底纹统一降为 STATUS_TINT_ALPHA (0.06) 后达标 (4.57)。
         error="#D32F2F",
         error_container="#FFDAD6",
         on_primary="#FFFFFF",
@@ -265,6 +281,7 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#134E4A",
         tertiary="#7DD3FC",
         surface="#1E293B",
+        # M30-UIB-THEME-03: #F87171 正文 5.29 / 深色反色 6.45 / 弱底纹 4.91 均达标, 保持。
         error="#F87171",
         error_container="#7F1D1D",
         on_primary="#0F172A",
@@ -289,7 +306,9 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#44475A",
         tertiary="#8BE9FD",  # Cyan
         surface="#282A36",  # Background
-        error="#FF5555",  # Red
+        # M30-UIB-THEME-03: 旧 #FF5555 正文/反色仅 4.53 (压线)、叠弱底纹后 4.04 < 4.5,
+        #   调亮为 #FF6E6E (正文/反色 5.23, 弱底纹 4.81); on_error 保持深色 #282A36。
+        error="#FF6E6E",  # Red
         error_container="#44475A",
         on_primary="#282A36",
         on_primary_container="#BD93F9",

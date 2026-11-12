@@ -11,7 +11,7 @@ from core.i18n import Message
 from ui.components.flet_type_helpers import safe_controls, safe_on_dismiss
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.theme import AppColors, AppStyles
+from ui.theme import STATUS_TINT_ALPHA, AppColors, AppStyles
 from ui.viewmodels.health_scan_view_model import (
     HEALTH_CHECK_TABLES,
     HEALTH_DEPTH_WARNING_RATIO,
@@ -320,7 +320,9 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                             color=icon_color,
                             weight=ft.FontWeight.BOLD,
                         ),
-                        bgcolor=ft.Colors.with_opacity(0.1, icon_color),
+                        # M30-UIB-THEME-03: 状态色弱底纹统一取 STATUS_TINT_ALPHA,
+                        #   保证徽标内 ERROR/WARNING 色正文叠底纹后仍达 WCAG 正文 4.5。
+                        bgcolor=ft.Colors.with_opacity(STATUS_TINT_ALPHA, icon_color),
                         padding=ft.Padding.symmetric(horizontal=10, vertical=3),
                         border_radius=12,
                         expand=True,
@@ -490,7 +492,9 @@ def _build_health_content(report: dict, width: int, height: int) -> ft.Container
                 spacing=5,
             ),
             padding=10,
-            bgcolor=ft.Colors.with_opacity(0.1, AppColors.ERROR),
+            # M30-UIB-THEME-03: 原 0.1 底纹下 ERROR 正文在 LIGHT 仅 4.28 (<4.5);
+            #   统一降为 STATUS_TINT_ALPHA 后四主题均达标 (最低 4.57)。
+            bgcolor=ft.Colors.with_opacity(STATUS_TINT_ALPHA, AppColors.ERROR),
             border_radius=4,
             margin=ft.Margin.only(bottom=10),
         )

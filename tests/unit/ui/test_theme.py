@@ -697,3 +697,112 @@ class TestF06BusinessTextContrast:
         hex_color = CUSTOM_COLOR_PRESETS[theme]["INFO"]
         r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
         assert b > r and b > g, f"{theme} INFO({hex_color}) 必须蓝色占优"
+
+
+# ============================================================================
+# M30-UIB-THEME-03: ERROR 正文 / ON_ERROR 反色 / ERROR 弱底纹三类用途达 4.5
+# ============================================================================
+
+
+class TestErrorTextContrast:
+    """ERROR 在 4 主题下同时承担三类用途, 均必须达 WCAG 正文 4.5。
+
+    已确认消费点: 校验/错误提示文字 (BODY_SM/BODY)、错误图标、危险按钮反色
+    (``AppStyles.danger_button``)、导航角标 (``ui/app_layout.py``)、
+    ``health_report_dialog`` 问题列表 (叠 ERROR 弱底纹) 与覆盖徽标。
+    """
+
+    _THEMES = (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA)
+
+    @staticmethod
+    def _resolve(ctc: types.ModuleType, token: str, theme: str) -> str:
+        value = ctc._resolve_color(token, theme)
+        assert isinstance(value, str) and len(value) == 7 and value.startswith("#"), (
+            f"{theme}.{token} 解析结果非合法 hex 色值: {value!r}"
+        )
+        return value
+
+    @pytest.mark.parametrize("theme", _THEMES)
+    @pytest.mark.parametrize("bg_token", ("SURFACE", "CARD_BG"))
+    def test_error_text_meets_4_5(self, theme: str, bg_token: str):
+        """ERROR 作为 13/14px 正文: 面板/卡片背景上对比度 ≥ 4.5。"""
+        ctc = _f06_ctc()
+        fg = self._resolve(ctc, "ERROR", theme)
+        bg = self._resolve(ctc, bg_token, theme)
+        ratio = ctc.contrast_ratio(fg, bg)
+        assert ratio >= 4.5, f"{theme} ERROR({fg}) on {bg_token}({bg}) = {ratio:.3f} < 4.5"
+
+    @pytest.mark.parametrize("theme", _THEMES)
+    def test_on_error_over_error_meets_4_5(self, theme: str):
+        """危险按钮/角标反色: ON_ERROR 叠 ERROR 对比度 ≥ 4.5。"""
+        ctc = _f06_ctc()
+        fg = self._resolve(ctc, "ON_ERROR", theme)
+        bg = self._resolve(ctc, "ERROR", theme)
+        ratio = ctc.contrast_ratio(fg, bg)
+        assert ratio >= 4.5, f"{theme} ON_ERROR({fg}) on ERROR({bg}) = {ratio:.3f} < 4.5"
+
+    @pytest.mark.parametrize("theme", _THEMES)
+    def test_error_text_on_status_tint_meets_4_5(self, theme: str):
+        """ERROR 正文叠 STATUS_TINT_ALPHA 弱底纹 (health_report_dialog) 时 ≥ 4.5。"""
+        ctc = _f06_ctc()
+        from ui.theme import STATUS_TINT_ALPHA
+
+        fg = self._resolve(ctc, "ERROR", theme)
+        base = self._resolve(ctc, "CARD_BG", theme)
+        tint_bg = ctc.blend_alpha_over(fg, base, STATUS_TINT_ALPHA)
+        ratio = ctc.contrast_ratio(fg, tint_bg)
+        assert ratio >= 4.5, f"{theme} ERROR({fg}) on tint({tint_bg}) = {ratio:.3f} < 4.5"
+
+    @pytest.mark.parametrize(
+        ("theme", "error", "on_error"),
+        [
+            (ThemeName.DARK, "#FF5252", "#1E1E1E"),
+            (ThemeName.LIGHT, "#D32F2F", "#FFFFFF"),
+            (ThemeName.NAVY, "#F87171", "#0F172A"),
+            (ThemeName.DRACULA, "#FF6E6E", "#282A36"),
+        ],
+    )
+    def test_error_palette_values(self, theme: str, error: str, on_error: str):
+        """锁定 4 主题 ERROR / ON_ERROR 取值 (方案 A 定案, 变更须同步复算三类用途)。"""
+        scheme = THEME_COLOR_SCHEMES[theme]
+        assert str(scheme.error) == error
+        assert str(scheme.on_error) == on_error
+
+    def test_dark_on_error_must_be_dark(self):
+        """DARK: 白字反色与 ERROR 正文两约束无交集, on_error 必须是深色。"""
+        ctc = _f06_ctc()
+        scheme = THEME_COLOR_SCHEMES[ThemeName.DARK]
+        assert ctc.contrast_ratio("#FFFFFF", str(scheme.error)) < 4.5, "白字反色在 DARK 下不可能达标"
+        assert ctc.relative_luminance(str(scheme.on_error)) < ctc.relative_luminance(str(scheme.error))
+
+    @pytest.mark.parametrize("theme", _THEMES)
+    def test_error_semantics_red_dominant(self, theme: str):
+        """ERROR 必须保持红色占优 (调色不得改变错误语义色相)。"""
+        hex_color = str(THEME_COLOR_SCHEMES[theme].error)
+        r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+        assert r > g and r > b, f"{theme} ERROR({hex_color}) 必须红色占优"
+
+    def test_dark_old_error_was_below_4_5_regression(self):
+        """回归: DARK 旧 ERROR #FF1744 在 #1E1E1E 上仅 4.33 < 4.5 (证明调色必要)。"""
+        ctc = _f06_ctc()
+        assert ctc.contrast_ratio("#FF1744", "#1E1E1E") < 4.5
+        assert str(THEME_COLOR_SCHEMES[ThemeName.DARK].error) != "#FF1744"
+
+    def test_dracula_old_error_was_below_4_5_on_tint_regression(self):
+        """回归: DRACULA 旧 ERROR #FF5555 叠弱底纹后 < 4.5 (证明调色必要)。"""
+        ctc = _f06_ctc()
+        from ui.theme import STATUS_TINT_ALPHA
+
+        old = "#FF5555"
+        tint_bg = ctc.blend_alpha_over(old, "#282A36", STATUS_TINT_ALPHA)
+        assert ctc.contrast_ratio(old, tint_bg) < 4.5
+        assert str(THEME_COLOR_SCHEMES[ThemeName.DRACULA].error) != old
+
+    def test_light_error_at_10_percent_tint_would_fail(self):
+        """回归: LIGHT 在 10% 底纹上 4.28 < 4.5, 故 STATUS_TINT_ALPHA 必须低于 0.1。"""
+        ctc = _f06_ctc()
+        from ui.theme import STATUS_TINT_ALPHA
+
+        error = str(THEME_COLOR_SCHEMES[ThemeName.LIGHT].error)
+        assert ctc.contrast_ratio(error, ctc.blend_alpha_over(error, "#FFFFFF", 0.1)) < 4.5
+        assert STATUS_TINT_ALPHA < 0.1
