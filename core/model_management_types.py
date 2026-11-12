@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 from urllib.parse import urlsplit
 
+from core.agent_types import AgentValidationError, decode_json_doc
+
 # ---------------------------------------------------------------------------
 # 异常契约
 # ---------------------------------------------------------------------------
@@ -475,3 +477,268 @@ class SyntheticTestConsent:
     scope_version: int
     deadline: float
     purpose: Literal["synthetic_test"] = "synthetic_test"
+
+
+# ---------------------------------------------------------------------------
+# Agent 聊天 turn / stream 公共协议（设计正本 §10.1，B-01）
+# ---------------------------------------------------------------------------
+
+FINISH_REASONS: Final[tuple[str, ...]] = ("final", "tool_calls", "refused", "length", "error")
+FinishReason = Literal["final", "tool_calls", "refused", "length", "error"]
+CHAT_ROLES: Final[tuple[str, ...]] = ("system", "user", "assistant", "tool")
+#: 已选图片分型白名单：仅 PNG/JPEG（§10.1 ContentPart）。
+IMAGE_MIME_TYPES: Final[tuple[str, ...]] = ("image/png", "image/jpeg")
+#: 流事件封闭分型集合。
+STREAM_EVENT_KINDS: Final[tuple[str, ...]] = ("text", "tool_call_delta", "tool_call_closed", "finish")
+
+
+class ModelTurnProtocolError(ValueError):
+    """完整 turn/stream 协议失败（§10.1）：分片未闭合 / 工具配对非法 / 非法 JSON / 未知 part。
+
+    服务边界不把该异常当作可切换候选的质量失败——它是协议事实，调用方须停止
+    派发或交由既有错误分类处理；SDK 映射层的 Thinking/Compaction/未知协议
+    字段不得静默丢失，一律显式拒绝。
+    """
+
+    def __init__(self, code: str, field_path: str) -> None:
+        super().__init__(f"{code}: {field_path}")
+        self.code = code
+        self.field_path = field_path
+
+
+def _invalid(code: str, field_path: str) -> ModelTurnProtocolError:
+    return ModelTurnProtocolError(code, field_path)
+
+
+@dataclass(frozen=True, slots=True)
+class TextContentPart:
+    """文本分型：str 与 TextContent 均按文本处理（§10.1），不 trim。"""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageContentPart:
+    """已选 PNG/JPEG binary 引用分型：mime 白名单见 IMAGE_MIME_TYPES（§10.1）。"""
+
+    mime: str
+    binary_ref: str
+
+
+#: ContentPart 封闭联合：未知类型明确拒绝，Thinking 不进入公开（无该分型）。
+ContentPart = TextContentPart | ImageContentPart
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantToolCall:
+    """assistant 发起的工具调用：参数须为闭合 JSON 对象（§10.1）。"""
+
+    call_id: str
+    name: str
+    arguments_json: str
+
+    def ensure_valid(self) -> None:
+        if not self.call_id or not self.name:
+            raise _invalid("invalid_field", "$.assistant_tool_calls")
+        validate_closed_tool_arguments(self.arguments_json)
+
+
+def validate_closed_tool_arguments(arguments_json: object) -> dict[str, Any]:
+    """完整工具参数校验：闭合 JSON 对象，禁重复键 / 非有限数（§10.1）。
+
+    浮点按 Decimal 精确承载（复用 core.agent_types.decode_json_doc）；
+    分片未闭合（非法 JSON）即拒绝——工具参数闭合前不派发。
+    """
+
+    if not isinstance(arguments_json, str):
+        raise _invalid("invalid_arguments_json", "$")
+    try:
+        parsed = decode_json_doc(arguments_json)
+    except AgentValidationError as exc:
+        if exc.code in ("duplicate_key", "non_finite_number"):
+            raise _invalid(exc.code, "$") from exc
+        raise _invalid("invalid_arguments_json", "$") from exc
+    if not isinstance(parsed, dict):
+        raise _invalid("invalid_arguments_json", "$")
+    return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class ChatMessage:
+    """完整聊天消息：role、content_parts、assistant_tool_calls、tool_call_id、来源引用。
+
+    tool-only content=None 合法：assistant 消息 ``content_parts`` 为空且仅含
+    ``assistant_tool_calls``；tool 消息必须携带 ``tool_call_id`` 严格配对。
+    """
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content_parts: tuple[ContentPart, ...]
+    assistant_tool_calls: tuple[AssistantToolCall, ...] = ()
+    tool_call_id: str | None = None
+    metadata: Mapping[str, str] = field(default_factory=dict)
+
+    def ensure_valid(self) -> None:
+        validate_chat_message(self)
+
+
+def validate_chat_message(message: ChatMessage) -> None:
+    """消息级配对与分型校验（§10.1）；未知 part 类型在封闭联合外即拒绝。"""
+
+    if message.role not in CHAT_ROLES:
+        raise _invalid("invalid_field", "$.role")
+    if message.role != "assistant" and message.assistant_tool_calls:
+        raise _invalid("invalid_pairing", "$.assistant_tool_calls")
+    if message.role == "tool" and not message.tool_call_id:
+        raise _invalid("invalid_pairing", "$.tool_call_id")
+    if message.role != "tool" and message.tool_call_id is not None:
+        raise _invalid("invalid_pairing", "$.tool_call_id")
+    for index, part in enumerate(message.content_parts):
+        path = f"$.content_parts[{index}]"
+        if isinstance(part, TextContentPart):
+            if not part.text:
+                raise _invalid("invalid_part", path)
+        elif isinstance(part, ImageContentPart):
+            if part.mime not in IMAGE_MIME_TYPES or not part.binary_ref:
+                raise _invalid("invalid_part", path)
+        else:
+            raise _invalid("invalid_part", path)
+    for key in message.metadata:
+        if not key:
+            raise _invalid("invalid_field", "$.metadata")
+    for call in message.assistant_tool_calls:
+        call.ensure_valid()
+
+
+@dataclass(frozen=True, slots=True)
+class FunctionToolSpec:
+    """工具规范：完整 json_schema、准确 schema 版本、output_tool（结构 final）标记。
+
+    ``output_tool=True`` 表示结构化输出 final 工具，不是 MCP 权限工具（§10.1）；
+    schema 完整性程序校验由装白名单入口负责，本类型不代校验。
+    """
+
+    name: str
+    description: str
+    json_schema: Mapping[str, Any]
+    schema_version: str
+    output_tool: bool = False
+
+    def ensure_valid(self) -> None:
+        if not self.name or not self.description or not self.schema_version:
+            raise _invalid("invalid_field", "$")
+        if not isinstance(self.json_schema, Mapping):
+            raise _invalid("invalid_field", "$.json_schema")
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnRequest:
+    """完整聊天回合请求：原 model_call 身份、完整 messages/system/instructions/tools。
+
+    ``instructions`` 为 SystemPromptPart/instructions 保序序列；``output_tools``
+    为结构 final；``frozen_params`` 为受理冻结的采样参数；``deadline`` 为单调
+    时钟截止值（沿 InferenceRequest 语义）。
+    """
+
+    model_call_id: str
+    messages: tuple[ChatMessage, ...]
+    instructions: tuple[str, ...]
+    tools: tuple[FunctionToolSpec, ...]
+    output_schema: Mapping[str, Any] | None
+    frozen_params: Mapping[str, Any]
+    max_output_tokens: int | None
+    deadline: float
+    output_tools: tuple[FunctionToolSpec, ...] = ()
+
+    def ensure_valid(self) -> None:
+        if not self.model_call_id:
+            raise _invalid("invalid_field", "$.model_call_id")
+        if not self.messages:
+            raise _invalid("invalid_field", "$.messages")
+        for index, message in enumerate(self.messages):
+            try:
+                validate_chat_message(message)
+            except ModelTurnProtocolError as exc:
+                raise ModelTurnProtocolError(exc.code, f"$.messages[{index}]{exc.field_path[1:]}") from exc
+        for spec in (*self.tools, *self.output_tools):
+            spec.ensure_valid()
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnResponse:
+    """完整聊天回合响应：text/tool_calls/structured_output、finish/refusal、实际模型。
+
+    ``usage_observed`` 标记是否真实观测到用量；``usage`` 缺失保 None——
+    不能把 SDK 默认 usage=0 倒灌账本（§10.1）。``transport_state`` 与结束
+    状态分离：ok / failed / unknown（INV-07）。
+    """
+
+    text: str | None
+    finish_reason: FinishReason
+    actual_model: str | None
+    usage_observed: bool
+    usage: NormalizedLLMUsage | None
+    transport_state: Literal["ok", "failed", "unknown"] = "unknown"
+    tool_calls: tuple[AssistantToolCall, ...] = ()
+    structured_output: Mapping[str, Any] | None = None
+    refusal: str | None = None
+
+    def ensure_valid(self) -> None:
+        if self.finish_reason not in FINISH_REASONS:
+            raise _invalid("invalid_finish", "$.finish_reason")
+        if self.usage_observed and self.usage is None:
+            raise _invalid("invalid_field", "$.usage")
+        if self.finish_reason == "refused" and not self.refusal:
+            raise _invalid("invalid_field", "$.refusal")
+        if self.finish_reason == "tool_calls" and not self.tool_calls:
+            raise _invalid("invalid_field", "$.tool_calls")
+        if self.actual_model is not None and not self.actual_model:
+            raise _invalid("invalid_field", "$.actual_model")
+        for call in self.tool_calls:
+            call.ensure_valid()
+
+
+@dataclass(frozen=True, slots=True)
+class ChatStreamEvent:
+    """真实流事件：choice/tool index、稳定 call_id、text/tool delta、finish/usage。
+
+    ``tool_call_delta`` 仅承载累积分片（``closed_arguments_json`` 恒为 None）；
+    参数闭合以 ``tool_call_closed`` 事件承载并校验——工具参数闭合前不派发
+    （§10.1）。finish 事件的 ``usage`` 缺失保 None。
+    """
+
+    sequence: int
+    kind: Literal["text", "tool_call_delta", "tool_call_closed", "finish"]
+    call_index: int | None = None
+    call_id: str | None = None
+    name: str | None = None
+    text_delta: str | None = None
+    arguments_fragment: str | None = None
+    closed_arguments_json: str | None = None
+    finish_reason: FinishReason | None = None
+    usage: NormalizedLLMUsage | None = None
+
+    def ensure_valid(self) -> None:
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
+            raise _invalid("invalid_field", "$.sequence")
+        if self.kind == "text":
+            if not isinstance(self.text_delta, str):
+                raise _invalid("invalid_field", "$.text_delta")
+            return
+        if self.kind == "tool_call_delta":
+            if self.call_index is None or not self.call_id or not self.name:
+                raise _invalid("invalid_field", "$.call_id")
+            if not isinstance(self.arguments_fragment, str) or self.closed_arguments_json is not None:
+                raise _invalid("invalid_field", "$.arguments_fragment")
+            return
+        if self.kind == "tool_call_closed":
+            if self.call_index is None or not self.call_id or not self.name:
+                raise _invalid("invalid_field", "$.call_id")
+            if self.closed_arguments_json is None:
+                raise _invalid("invalid_field", "$.closed_arguments_json")
+            validate_closed_tool_arguments(self.closed_arguments_json)
+            return
+        if self.kind == "finish":
+            if self.finish_reason is None or self.finish_reason not in FINISH_REASONS:
+                raise _invalid("invalid_field", "$.finish_reason")
+            return
+        raise _invalid("invalid_field", "$.kind")
