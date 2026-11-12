@@ -1634,8 +1634,10 @@ class ReviewManager:
         run_review 与 backfill_horizon_returns 共用，口径一致：先查缓存（本地库），
         缺失再降级 Tushare API；API 不可得 / 数据缺失返回 None，由调用方决定跳过。
         RV-01 起取 close（收盘点位）供窗口累计收益换算，RV-02 起同时取 open——
-        窗口起点为 T+1 开盘，open 或 close 任一侧缺失即整点 None（窗口无意义，
-        对抗检视：避免以 (None, close) 进窗口导致 TypeError）。
+        窗口起点为 T+1 开盘，open 或 close 任一侧无效即该来源不可用。
+        DLP-RM-04: 本地「有行但端点 NULL/非有限/非正」与「整帧无行」同属无可用点位，
+        必须继续尝试同日 API，不得提前 return None 短路兜底；本地与 API 两支统一经
+        ``_finite_positive_price`` 校验，只有两端点均有效才返回 (open, close)。
         """
         trade_date_str = trade_date.strftime("%Y%m%d")
         try:
@@ -1644,13 +1646,10 @@ class ReviewManager:
                 trade_date=trade_date,
             )
             if df_idx is not None and not df_idx.empty:
-                raw_open = df_idx.iloc[0].get("open")
-                raw_close = df_idx.iloc[0]["close"]
-                open_ok = raw_open is not None and pd.notna(raw_open) is True
-                close_ok = raw_close is not None and pd.notna(raw_close) is True
-                if open_ok and close_ok:
-                    return (float(raw_open), float(raw_close))
-                return None
+                open_px = _finite_positive_price(df_idx.iloc[0].get("open"))
+                close_px = _finite_positive_price(df_idx.iloc[0].get("close"))
+                if open_px is not None and close_px is not None:
+                    return (open_px, close_px)
             try:
                 df_idx_api = await self.api.get_index_daily(
                     ts_code=index_code,
@@ -1658,12 +1657,10 @@ class ReviewManager:
                     end_date=trade_date_str,
                 )
                 if df_idx_api is not None and not df_idx_api.empty:
-                    raw_open = df_idx_api.iloc[0].get("open")
-                    raw_close = df_idx_api.iloc[0]["close"]
-                    open_ok = raw_open is not None and pd.notna(raw_open) is True
-                    close_ok = raw_close is not None and pd.notna(raw_close) is True
-                    if open_ok and close_ok:
-                        return (float(raw_open), float(raw_close))
+                    open_px = _finite_positive_price(df_idx_api.iloc[0].get("open"))
+                    close_px = _finite_positive_price(df_idx_api.iloc[0].get("close"))
+                    if open_px is not None and close_px is not None:
+                        return (open_px, close_px)
                 return None
             except (ValueError, TypeError, KeyError):
                 return None
