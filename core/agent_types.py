@@ -1347,3 +1347,301 @@ def local_target_fingerprint(
         _fail("invalid_adapter_kind", "$.adapter_kind")
     canonical = json_doc([1, "local-model", user_scope, connection_id, connection_revision, adapter_kind])
     return f"local-model-v1:{sha256_hex(canonical.encode('utf-8'))}"
+
+
+# ---------------------------------------------------------------------------
+# §4.1/§4.2 服务命令与回执合同（C-02-1）
+# ---------------------------------------------------------------------------
+
+
+#: 命令投递事实（§4.1「保存/投递/消费事实」；§5.1「待投递/已投递/unknown，字段分开」）。
+#: wire 拼写为本轮工程冻结（设计未逐枚举值），与 §3.1 CommitState 的
+#: not_committed/commit_unknown 命名风格一致；DB 值域 CHECK 待冻结确认后随
+#: 后续迁移补齐（见 C-01 检查点⑥）。
+class DeliveryState(Enum):
+    """命令投递三态：保存成功不等于已投递（INV-06）。"""
+
+    NOT_DELIVERED = "not_delivered"
+    DELIVERED = "delivered"
+    DELIVERY_UNKNOWN = "delivery_unknown"
+
+
+#: 命令消费事实（§5.1「消费/冲突/unknown，字段分开」；SQ-03「同命令已消费返回原事实」）。
+class ConsumptionState(Enum):
+    """命令消费三态：消费与投递分列；冲突不并入消费语义（INV-06/INV-07）。"""
+
+    NOT_CONSUMED = "not_consumed"
+    CONSUMED = "consumed"
+    CONSUMPTION_UNKNOWN = "consumption_unknown"
+
+
+class AgentErrorCode(Enum):
+    """固定错误码（HANDOFF §4.1，唯一 wire 拼写）。"""
+
+    INPUT_INVALID = "INPUT_INVALID"
+    INPUT_CONFLICT = "INPUT_CONFLICT"
+    REVISION_CONFLICT = "REVISION_CONFLICT"
+    CONFIG_UNAVAILABLE = "CONFIG_UNAVAILABLE"
+    CAPABILITY_UNVERIFIED = "CAPABILITY_UNVERIFIED"
+    POLICY_DENIED = "POLICY_DENIED"
+    BUDGET_BLOCKED = "BUDGET_BLOCKED"
+    PERSISTENCE_UNAVAILABLE = "PERSISTENCE_UNAVAILABLE"
+    OPERATION_UNKNOWN = "OPERATION_UNKNOWN"
+    SOURCE_DISABLED = "SOURCE_DISABLED"
+    NATIVE_VERSION_MISMATCH = "NATIVE_VERSION_MISMATCH"
+    CANCELLED = "CANCELLED"
+
+
+class AgentServiceError(Exception):
+    """类型化服务错误（§4.2）：消息已脱敏，identity 绑定原身份。
+
+    ``last_verified_at`` 为最后可靠事实时刻（UTC 微秒 Z 文本）或 None。
+    广泛 catch 后返回空页被禁止；读取失败必须抛本类型或返回合同内 unknown。
+    """
+
+    def __init__(
+        self,
+        code: AgentErrorCode,
+        sanitized_message: str,
+        identity: str,
+        last_verified_at: str | None = None,
+    ) -> None:
+        super().__init__(f"{code.value}: {sanitized_message}")
+        self.code = code
+        self.sanitized_message = sanitized_message
+        self.identity = identity
+        self.last_verified_at = last_verified_at
+
+
+@dataclass(frozen=True)
+class CommandRef:
+    """命令引用（§4.2）：调用方幂等键 + 预期版；target 由各命令类型承载。"""
+
+    user_scope: str
+    source_module: str
+    business_request_id: str
+    #: 调用方命令键（持久 PK 按 §3.3.2 = stable_id("command",[user_scope,
+    #: exact_target_id, client_command_id]) 派生，client_command_id 即本字段）。
+    command_id: str
+    #: 预期 revision（§3.1：目标尚不存在时允许 0）。
+    expected_revision: int
+
+
+_COMMAND_REF_KEYS: Final = frozenset(
+    {"user_scope", "source_module", "business_request_id", "command_id", "expected_revision"}
+)
+
+
+def decode_command_ref(value: object, path: str = "$.command_ref") -> CommandRef:
+    """严格解码 CommandRef（§3.3.1 语法基线：全键必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _COMMAND_REF_KEYS, path)
+    revision = value["expected_revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        _fail("invalid_revision", f"{path}.expected_revision")
+    return CommandRef(
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        source_module=_require_str(value["source_module"], f"{path}.source_module"),
+        business_request_id=_require_str(value["business_request_id"], f"{path}.business_request_id"),
+        command_id=_require_str(value["command_id"], f"{path}.command_id"),
+        expected_revision=revision,
+    )
+
+
+def encode_command_ref(ref: CommandRef) -> dict[str, Any]:
+    """CommandRef → wire dict（5 键全量）。"""
+
+    _require_str(ref.user_scope, "$.user_scope")
+    _require_str(ref.source_module, "$.source_module")
+    _require_str(ref.business_request_id, "$.business_request_id")
+    _require_str(ref.command_id, "$.command_id")
+    if (
+        isinstance(ref.expected_revision, bool)
+        or not isinstance(ref.expected_revision, int)
+        or ref.expected_revision < 0
+    ):
+        _fail("invalid_revision", "$.expected_revision")
+    return {
+        "user_scope": ref.user_scope,
+        "source_module": ref.source_module,
+        "business_request_id": ref.business_request_id,
+        "command_id": ref.command_id,
+        "expected_revision": ref.expected_revision,
+    }
+
+
+@dataclass(frozen=True)
+class CommandReceipt:
+    """命令回执（§4.1）：保存/投递/消费事实分列，不把保存成功显示成已生效。
+
+    ``error_code`` 非空时表示 conflict/unknown 细节；``next_action`` 为可核
+    下一步说明（如「查 read_command(command_ref)」），非空 str 或 None。
+    """
+
+    command: CommandRef
+    target_id: str
+    current_revision: int
+    commit_state: CommitState
+    delivery_state: DeliveryState
+    consumption_state: ConsumptionState
+    updated_at: str
+    error_code: AgentErrorCode | None
+    next_action: str | None
+
+
+_COMMAND_RECEIPT_KEYS: Final = frozenset(
+    {
+        "command",
+        "target_id",
+        "current_revision",
+        "commit_state",
+        "delivery_state",
+        "consumption_state",
+        "updated_at",
+        "error_code",
+        "next_action",
+    }
+)
+
+
+def decode_command_receipt(value: object, path: str = "$.command_receipt") -> CommandReceipt:
+    """严格解码 CommandReceipt（read_command 查回原事实，§4.2）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _COMMAND_RECEIPT_KEYS, path)
+    commit_raw = value["commit_state"]
+    delivery_raw = value["delivery_state"]
+    consumption_raw = value["consumption_state"]
+    try:
+        commit_state = CommitState(commit_raw)
+    except ValueError:
+        _fail("invalid_commit_state", f"{path}.commit_state")
+    try:
+        delivery_state = DeliveryState(delivery_raw)
+    except ValueError:
+        _fail("invalid_delivery_state", f"{path}.delivery_state")
+    try:
+        consumption_state = ConsumptionState(consumption_raw)
+    except ValueError:
+        _fail("invalid_consumption_state", f"{path}.consumption_state")
+    error_raw = value["error_code"]
+    if error_raw is None:
+        error_code = None
+    else:
+        try:
+            error_code = AgentErrorCode(error_raw)
+        except ValueError:
+            _fail("invalid_error_code", f"{path}.error_code")
+    next_raw = value["next_action"]
+    if next_raw is not None:
+        _require_str(next_raw, f"{path}.next_action")
+    revision_raw = value["current_revision"]
+    if isinstance(revision_raw, bool) or not isinstance(revision_raw, int) or revision_raw < 0:
+        _fail("invalid_revision", f"{path}.current_revision")
+    return CommandReceipt(
+        command=decode_command_ref(value["command"], f"{path}.command"),
+        target_id=_require_str(value["target_id"], f"{path}.target_id"),
+        current_revision=revision_raw,
+        commit_state=commit_state,
+        delivery_state=delivery_state,
+        consumption_state=consumption_state,
+        updated_at=require_utc_timestamp(value["updated_at"], f"{path}.updated_at"),
+        error_code=error_code,
+        next_action=next_raw,
+    )
+
+
+def encode_command_receipt(receipt: CommandReceipt) -> dict[str, Any]:
+    """CommandReceipt → wire dict（9 键全量）。"""
+
+    return {
+        "command": encode_command_ref(receipt.command),
+        "target_id": _require_str(receipt.target_id, "$.target_id"),
+        "current_revision": receipt.current_revision,
+        "commit_state": receipt.commit_state.value,
+        "delivery_state": receipt.delivery_state.value,
+        "consumption_state": receipt.consumption_state.value,
+        "updated_at": require_utc_timestamp(receipt.updated_at, "$.updated_at"),
+        "error_code": None if receipt.error_code is None else receipt.error_code.value,
+        "next_action": receipt.next_action,
+    }
+
+
+@dataclass(frozen=True)
+class SubmissionReceipt:
+    """受理回执（SQ-01/§3.3.2）：同命令重传返回原回执，不新建研究。
+
+    ``commit_state`` 为受理事务三态；冲突走 INPUT_CONFLICT 错误路径不构成本
+    回执。``intent_digest`` 为冻结 manifest 规范摘要，受理时点不变（INV-04）。
+    """
+
+    command: CommandRef
+    command_record_id: str
+    session_id: str
+    execution_id: str
+    workflow_id: str
+    intent_digest: str
+    commit_state: CommitState
+    verified_at: str
+    next_action: str | None
+
+
+_SUBMISSION_RECEIPT_KEYS: Final = frozenset(
+    {
+        "command",
+        "command_record_id",
+        "session_id",
+        "execution_id",
+        "workflow_id",
+        "intent_digest",
+        "commit_state",
+        "verified_at",
+        "next_action",
+    }
+)
+
+
+def decode_submission_receipt(value: object, path: str = "$.submission_receipt") -> SubmissionReceipt:
+    """严格解码 SubmissionReceipt（丢回执/重启后查原回执，§3.3.2）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SUBMISSION_RECEIPT_KEYS, path)
+    commit_raw = value["commit_state"]
+    try:
+        commit_state = CommitState(commit_raw)
+    except ValueError:
+        _fail("invalid_commit_state", f"{path}.commit_state")
+    next_raw = value["next_action"]
+    if next_raw is not None:
+        _require_str(next_raw, f"{path}.next_action")
+    return SubmissionReceipt(
+        command=decode_command_ref(value["command"], f"{path}.command"),
+        command_record_id=_require_str(value["command_record_id"], f"{path}.command_record_id"),
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        workflow_id=_require_str(value["workflow_id"], f"{path}.workflow_id"),
+        intent_digest=_require_digest(value["intent_digest"], f"{path}.intent_digest"),
+        commit_state=commit_state,
+        verified_at=require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
+        next_action=next_raw,
+    )
+
+
+def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
+    """SubmissionReceipt → wire dict（9 键全量）。"""
+
+    return {
+        "command": encode_command_ref(receipt.command),
+        "command_record_id": _require_str(receipt.command_record_id, "$.command_record_id"),
+        "session_id": _require_str(receipt.session_id, "$.session_id"),
+        "execution_id": _require_str(receipt.execution_id, "$.execution_id"),
+        "workflow_id": _require_str(receipt.workflow_id, "$.workflow_id"),
+        "intent_digest": _require_digest(receipt.intent_digest, "$.intent_digest"),
+        "commit_state": receipt.commit_state.value,
+        "verified_at": require_utc_timestamp(receipt.verified_at, "$.verified_at"),
+        "next_action": receipt.next_action,
+    }
