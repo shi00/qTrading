@@ -6092,3 +6092,213 @@ class TestIndexWindowFinitePositiveGuard:
         assert u["t5_pct"] == pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
         assert u["t5_price"] == pytest.approx(12.0)
         rm._batch_finalize_labels.assert_not_called()
+
+
+class TestResolveIndexQuoteDirtyLocalFallback:
+    """DLP-RM-04: 本地该日有行但端点 NULL/非法时，须继续尝试同日 API 兜底。
+
+    批量预取（_prefetch_index_cache）已正确不为缺点位日期写缓存 key；单条解析此前却因
+    「有行但端点不可用」早返 None，把 API 分支短路。修复后本地与 API 两支共用
+    _finite_positive_price：只有拿到有效 (open, close) 才返回，否则落入既有 API 调用。
+    """
+
+    _CODE = "000300.SH"
+    _DATE = datetime.date(2024, 6, 11)
+    _DATE_STR = "20240611"
+
+    @staticmethod
+    def _make_rm(mock_cm):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        mock_api = MagicMock()
+        rm.api = mock_api
+        return rm, mock_cache, mock_api
+
+    @staticmethod
+    def _row(open_value: object = 3160.0, close_value: object = 3180.0) -> pd.DataFrame:
+        return pd.DataFrame({"open": [open_value], "close": [close_value]})
+
+    @pytest.mark.parametrize(
+        ("open_value", "close_value"),
+        [
+            (None, 3180.0),
+            (3160.0, None),
+            (float("nan"), 3180.0),
+            (3160.0, float("nan")),
+            (float("inf"), 3180.0),
+            (3160.0, float("-inf")),
+            (-1.0, 3180.0),
+            (0.0, 3180.0),
+            (3160.0, 0.0),
+        ],
+        ids=[
+            "open-null",
+            "close-null",
+            "open-nan",
+            "close-nan",
+            "open-inf",
+            "close-neg-inf",
+            "open-negative",
+            "open-zero",
+            "close-zero",
+        ],
+    )
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_dirty_local_row_falls_back_to_api(self, mock_cm, mock_tc, open_value, close_value):
+        """本地脏行（端点 NULL/NaN/Inf/负/0）→ 继续调用同日 API 并返回 API 有效点位。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(open_value, close_value))
+        mock_api.get_index_daily = AsyncMock(return_value=self._row(3160.0, 3180.0))
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) == (3160.0, 3180.0)
+        mock_api.get_index_daily.assert_awaited_once_with(
+            ts_code=self._CODE,
+            start_date=self._DATE_STR,
+            end_date=self._DATE_STR,
+        )
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_valid_local_row_does_not_call_api(self, mock_cm, mock_tc):
+        """本地点位有效 → 直接返回本地值，保持本地优先、不触达 API。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(3160.0, 3180.0))
+        mock_api.get_index_daily = AsyncMock(return_value=self._row(3100.0, 3200.0))
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) == (3160.0, 3180.0)
+        mock_api.get_index_daily.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "api_result",
+        [
+            None,
+            pd.DataFrame(),
+            pd.DataFrame({"open": [0.0], "close": [3180.0]}),
+            pd.DataFrame({"open": [3160.0], "close": [float("nan")]}),
+        ],
+        ids=["api-none", "api-empty", "api-open-zero", "api-close-nan"],
+    )
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_local_and_api_unavailable_returns_none(self, mock_cm, mock_tc, api_result):
+        """本地脏行且 API 同无有效点位 → None（不返回本地脏值，不伪造点位）。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(return_value=api_result)
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) is None
+        mock_api.get_index_daily.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "api_exc",
+        [ValueError("bad data"), TypeError("bad type"), KeyError("close"), RuntimeError("api down")],
+        ids=["value-error", "type-error", "key-error", "runtime-error"],
+    )
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_dirty_local_row_api_error_returns_none(self, mock_cm, mock_tc, api_exc):
+        """本地脏行后 API 失败/异常 → None（既有 operational 降级语义不变）。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(side_effect=api_exc)
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) is None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_local_lookup_cancelled_propagates(self, mock_cm, mock_tc):
+        """本地查询取消 → CancelledError 上抛（R2），不得降级为 None。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_api.get_index_daily = AsyncMock(return_value=self._row())
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._resolve_index_quote(self._CODE, self._DATE)
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        mock_api.get_index_daily.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_api_lookup_cancelled_propagates(self, mock_cm, mock_tc):
+        """本地脏行后 API 取消 → CancelledError 上抛（R2），不得降级为 None。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._resolve_index_quote(self._CODE, self._DATE)
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_system_level_local_error_still_raises(self, mock_cm, mock_tc):
+        """真正 system 级 DB 故障（PermissionError）仍上抛，不得被当作脏缓存盲目绕过。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=PermissionError("permission denied"))
+        mock_api.get_index_daily = AsyncMock(return_value=self._row())
+
+        with pytest.raises(PermissionError) as exc_info:
+            await rm._resolve_index_quote(self._CODE, self._DATE)
+        assert str(exc_info.value) == "permission denied"
+        mock_api.get_index_daily.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_window_pct_dirty_local_records_missing_and_dedupes(self, mock_cm, mock_tc):
+        """本地脏行且 API 不可得 → 记入 index_missing；再次调用不重复探测同一日期。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(return_value=None)
+        caches: dict[str, dict[str, tuple[float, float]]] = {self._CODE: {}}
+        missing: dict[str, set[str]] = {self._CODE: set()}
+        start = datetime.date(2024, 6, 11)
+        end = datetime.date(2024, 6, 17)
+
+        assert await rm._window_index_pct(self._CODE, start, end, caches, missing) is None
+        assert missing[self._CODE] == {"20240611", "20240617"}
+        assert mock_cache.quote_dao.get_index_daily.await_count == 2
+
+        assert await rm._window_index_pct(self._CODE, start, end, caches, missing) is None
+        assert mock_cache.quote_dao.get_index_daily.await_count == 2  # 去重：不重复探测
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_window_pct_uses_api_quote_when_local_dirty(self, mock_cm, mock_tc):
+        """本地脏行但 API 有同日点位 → 窗口收益按 API 端点计算（备用链路真正生效）。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, None))
+
+        async def _api_quote(ts_code, start_date, end_date):
+            assert ts_code == self._CODE
+            assert start_date == end_date
+            if start_date == "20240611":
+                return self._row(3000.0, 3050.0)
+            return self._row(3160.0, 3180.0)
+
+        mock_api.get_index_daily = AsyncMock(side_effect=_api_quote)
+        caches: dict[str, dict[str, tuple[float, float]]] = {self._CODE: {}}
+        missing: dict[str, set[str]] = {self._CODE: set()}
+
+        result = await rm._window_index_pct(
+            self._CODE,
+            datetime.date(2024, 6, 11),
+            datetime.date(2024, 6, 17),
+            caches,
+            missing,
+        )
+
+        assert result == pytest.approx((3180.0 / 3000.0 - 1.0) * 100.0)
+        assert caches[self._CODE] == {"20240611": (3000.0, 3050.0), "20240617": (3160.0, 3180.0)}
+        assert missing[self._CODE] == set()
