@@ -10,6 +10,7 @@ import asyncio
 import functools
 import inspect
 from dataclasses import replace
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -505,20 +506,25 @@ class TestSqlErrorInfoImmutability:
         info = SqlErrorInfo("_raw_msg_", {"default": "boom"})
 
         mutable_view: Any = info.format_args
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as set_exc:
             mutable_view["default"] = "hacked"
-        with pytest.raises(TypeError):
-            del mutable_view["default"]
+        assert "does not support item assignment" in str(set_exc.value)
 
-        assert info.format_args.get("default") == "boom"
+        with pytest.raises(TypeError) as del_exc:
+            del mutable_view["default"]
+        assert "does not support item deletion" in str(del_exc.value)
+
+        assert dict(info.format_args) == {"default": "boom"}
 
     def test_default_format_args_is_read_only(self):
         info = SqlErrorInfo("common_err_unknown")
 
         mutable_view: Any = info.format_args
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc_info:
             mutable_view["k"] = "v"
+        assert "does not support item assignment" in str(exc_info.value)
 
+        assert isinstance(info.format_args, MappingProxyType)
         assert dict(info.format_args) == {}
 
     def test_format_args_supports_mapping_protocol_and_expansion(self):
@@ -534,27 +540,34 @@ class TestSqlErrorInfoImmutability:
         info = SqlErrorInfo("_raw_msg_", {"default": "boom"})
         cloned = replace(info, raw_detail="detail")
 
+        assert cloned.raw_detail == "detail"
+        assert isinstance(cloned.format_args, MappingProxyType)
         assert dict(cloned.format_args) == {"default": "boom"}
         mutable_view: Any = cloned.format_args
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc_info:
             mutable_view["default"] = "hacked"
+        assert "does not support item assignment" in str(exc_info.value)
 
     def test_not_hashable_so_never_used_as_set_or_dict_key(self):
         """含 mapping 字段的 frozen dataclass 不可哈希；本用例锁定无消费方误用 hash/set/dict key。"""
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc_info:
             hash(SqlErrorInfo("_raw_msg_", {"default": "boom"}))
+        assert "unhashable" in str(exc_info.value)
 
     async def test_execute_sql_raw_error_format_args_is_read_only_snapshot(self, vm, mock_db):
         mock_db.execute_sql.return_value = {"success": False, "data": None, "error": "Only SELECT allowed"}
         await vm.execute_sql("DROP TABLE stock_basic")
 
         err = vm.state.sql_error
-        assert err is not None
+        assert isinstance(err, SqlErrorInfo)
+        assert err.message_key == "_raw_msg_"
+        assert err.raw_detail == "Only SELECT allowed"
         assert dict(err.format_args) == {"default": "Only SELECT allowed"}
         mutable_view: Any = err.format_args
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc_info:
             mutable_view["default"] = "tampered"
-        assert err.format_args["default"] == "Only SELECT allowed"
+        assert "does not support item assignment" in str(exc_info.value)
+        assert dict(err.format_args) == {"default": "Only SELECT allowed"}
 
     async def test_old_snapshot_error_stays_immutable_after_new_execution(self, vm, mock_db):
         mock_db.execute_sql.return_value = {"success": False, "data": None, "error": "boom"}
@@ -564,21 +577,31 @@ class TestSqlErrorInfoImmutability:
         mock_db.execute_sql.return_value = {"success": True, "data": pd.DataFrame({"a": [1]}), "error": None}
         await vm.execute_sql("SELECT 1")
 
-        assert old_snapshot.sql_error is not None
-        mutable_view: Any = old_snapshot.sql_error.format_args
-        with pytest.raises(TypeError):
+        old_error = old_snapshot.sql_error
+        assert isinstance(old_error, SqlErrorInfo)
+        assert old_error.message_key == "_raw_msg_"
+        assert old_error.raw_detail == "boom"
+        assert dict(old_error.format_args) == {"default": "boom"}
+        mutable_view: Any = old_error.format_args
+        with pytest.raises(TypeError) as exc_info:
             mutable_view["default"] = "tampered"
-        assert old_snapshot.sql_error.format_args["default"] == "boom"
+        assert "does not support item assignment" in str(exc_info.value)
+        assert dict(old_error.format_args) == {"default": "boom"}
 
     async def test_exception_path_format_args_is_read_only(self, vm, mock_db):
         mock_db.execute_sql.side_effect = RuntimeError("Connection lost")
         await vm.execute_sql("SELECT 1")
 
         err = vm.state.sql_error
-        assert err is not None
+        assert isinstance(err, SqlErrorInfo)
+        assert err.message_key == "db_err_refused"
+        assert err.raw_detail == "Connection lost"
+        assert isinstance(err.format_args, MappingProxyType)
+        assert dict(err.format_args) == {}
         mutable_view: Any = err.format_args
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError) as exc_info:
             mutable_view["injected"] = "x"
+        assert "does not support item assignment" in str(exc_info.value)
 
 
 class TestStateManagement:
