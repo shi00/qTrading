@@ -204,13 +204,16 @@ def apply_head_and_score(features: np.ndarray, head: dict[str, Any]) -> list[dic
     mode=bert 先 ``tanh(features @ pw.T + pb)``，linear 直接进头；
     ``score = p[利好] - p[利空] ∈ [-1, 1]``，``confidence = max(p)``。
 
-    单行特征含非有限值 → 该行 ``None``（R21，不回填中性）。
+    单行特征含非有限值 → 该行 ``None``（R21，不回填中性）。有限性以**预激活前
+    的原始特征**为准：bert 的 ``tanh`` 会把 ±Inf 饱和为 ±1 并产出有限概率，
+    若只在最终概率上检查会漏判。
     """
     if features.ndim != 2 or features.shape[1] != _EMBEDDING_DIM:
         raise ValueError(f"特征形状不符: {features.shape}（期望 (N, {_EMBEDDING_DIM})）")
     if features.shape[0] == 0:
         return []
 
+    valid_features = np.isfinite(features).all(axis=1)
     pre = head["pre"]
     x = features if pre is None else np.tanh(features @ pre[0].T + pre[1])
     logits = x @ head["cw"].T + head["cb"]
@@ -220,8 +223,8 @@ def apply_head_and_score(features: np.ndarray, head: dict[str, Any]) -> list[dic
     bearish = labels.index("利空")
     bullish = labels.index("利好")
     results: list[dict[str, Any] | None] = []
-    for p in probs:
-        if not np.all(np.isfinite(p)):
+    for i, p in enumerate(probs):
+        if not valid_features[i] or not np.all(np.isfinite(p)):
             results.append(None)
             continue
         results.append(

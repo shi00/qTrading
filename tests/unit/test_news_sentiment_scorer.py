@@ -217,6 +217,52 @@ class TestApplyHeadAndScore:
         out = apply_head_and_score(feats, _head("linear"))
         assert out == [None]
 
+    @pytest.mark.parametrize("non_finite", [np.inf, -np.inf])
+    def test_bert_non_finite_feature_row_returns_none(self, non_finite):
+        # M27-05/R21：tanh 会把 ±Inf 饱和为 ±1 并产出有限概率，仅检查最终
+        # 概率会漏判——构造 pw 使该行修复前返回「合法」标签/置信度/score。
+        pw = np.zeros((_EMBEDDING_DIM, _EMBEDDING_DIM), dtype=np.float32)
+        pw[:, 0] = 1.0
+        head = _head("bert")
+        head["pre"] = (pw, np.zeros(_EMBEDDING_DIM, dtype=np.float32))
+        feats = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
+        feats[0, 0] = non_finite
+        assert apply_head_and_score(feats, head) == [None]
+
+    def test_bert_mixed_rows_keep_alignment(self):
+        # 非有限行 → None，正常行照常打分；结果等长且顺序保持不变
+        pw = np.zeros((_EMBEDDING_DIM, _EMBEDDING_DIM), dtype=np.float32)
+        pw[:, 0] = 1.0
+        head = _head("bert")
+        head["pre"] = (pw, np.zeros(_EMBEDDING_DIM, dtype=np.float32))
+        feats = np.zeros((4, _EMBEDDING_DIM), dtype=np.float32)
+        feats[1, 0] = np.inf
+        feats[2, 0] = np.nan
+        feats[3, 0] = -np.inf
+
+        out = apply_head_and_score(feats, head)
+        assert len(out) == 4
+        assert out[1] is None and out[2] is None and out[3] is None
+        assert out[0] is not None
+        assert out[0]["label"] in _LABELS_REQUIRED
+        assert 0.0 <= out[0]["confidence"] <= 1.0
+
+    def test_bert_finite_features_overflowing_pre_activation_still_scored(self):
+        # 有限性判据只看原始特征：有限输入即使 matmul 溢出为 ±Inf（tanh 饱和）
+        # 也不得误判为缺失（缺失仅由原始特征非有限决定，R21）
+        head = _head("bert")
+        head["pre"] = (
+            np.ones((_EMBEDDING_DIM, _EMBEDDING_DIM), dtype=np.float32),
+            np.zeros(_EMBEDDING_DIM, dtype=np.float32),
+        )
+        feats = np.full((1, _EMBEDDING_DIM), 1e38, dtype=np.float32)
+        with np.errstate(over="ignore"):
+            out = apply_head_and_score(feats, head)
+        assert len(out) == 1
+        assert out[0] is not None
+        assert out[0]["label"] in _LABELS_REQUIRED
+        assert 0.0 <= out[0]["confidence"] <= 1.0
+
     def test_empty_batch(self):
         out = apply_head_and_score(np.zeros((0, _EMBEDDING_DIM), dtype=np.float32), _head())
         assert out == []
