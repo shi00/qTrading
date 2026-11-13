@@ -5,6 +5,7 @@
 ## 目录结构
 
 - [guides/](./guides/) — 流程类指南（Git workflow / 测试 / CI/CD / 依赖管理 / How-To / FinBERT 模型产线）
+- [guides/documentation-maintenance.md](./guides/documentation-maintenance.md) — 文档长期编写、变更与维护流程唯一正本（ADR-0018；L01—L12 控制合同 / 六类变更协议 / E01—E12 演习合同）
 - [architecture/](./architecture/) — 架构类深入（单例生命周期模板等，含 TushareClient 特殊说明）
 - [agent-contract.md](./architecture/agent-contract.md) — 智能体权限例外与允许操作矩阵（ADR-0016 已批准；运行期工具仍关闭）
 - [agent-scenario-ownership.md](./architecture/agent-scenario-ownership.md) — 智能体场景归属与调用方契约（W01-B 已批准；不改变当前运行路径）

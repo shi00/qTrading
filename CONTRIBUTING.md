@@ -705,6 +705,7 @@ except Exception as e:
 - [dependency-management.md](./docs/guides/dependency-management.md) — 依赖管理 + PyInstaller 打包
 - [finbert-pipeline.md](./docs/guides/finbert-pipeline.md) — FinBERT 模型产线流水线机制（指纹路由 / 双 Gate / 发布闭环）
 - [how-to.md](./docs/guides/how-to.md) — 标准开发工作流 (How-To)
+- [documentation-maintenance.md](./docs/guides/documentation-maintenance.md) — 文档长期编写、变更与维护流程唯一正本（ADR-0018；L01—L12 控制合同 / 六类变更协议 / E01—E12 演习合同）
 
 ### docs/architecture/ — 架构类深入
 
