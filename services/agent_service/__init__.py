@@ -1,5 +1,12 @@
 """Agent 运行时（services 层，Agent 特性）。"""
 
+from services.agent_service.attachments import (
+    AttachmentExtractionRequest,
+    AttachmentExtractionResult,
+    AttachmentWorkerError,
+    SubprocessAttachmentWorker,
+    detect_attachment_kind,
+)
 from services.agent_service.recovery import (
     ManualRecoveryReceipt,
     StartupIsolationReceipt,
@@ -21,11 +28,16 @@ __all__ = [
     "AgentRuntime",
     "AgentRuntimeHandle",
     "AgentRuntimeSettings",
+    "AttachmentExtractionRequest",
+    "AttachmentExtractionResult",
+    "AttachmentWorkerError",
     "CloseReadinessReceipt",
     "ManualRecoveryReceipt",
     "StartupIsolationReceipt",
     "StartupOutcome",
+    "SubprocessAttachmentWorker",
     "assemble_agent_runtime",
+    "detect_attachment_kind",
     "launch_agent_runtime",
     "resume_selected_workflows",
     "run_startup_isolation",
