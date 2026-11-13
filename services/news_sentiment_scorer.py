@@ -85,6 +85,26 @@ class _WorkerError(RuntimeError):
     """请求级 worker 失败（区别于「丢弃不匹配响应」的继续轮询）。"""
 
 
+class _EnsureAttempt:
+    """一次 ``_ensure_worker_impl`` 调用的归属凭据（M27-06，与 LMM-02 同型）。
+
+    ``_ensure_ready`` 等待 ``run_async(_ensure_worker_impl)`` 时被取消，IO 线程
+    可能仍在生命周期锁内 shutdown/spawn。凭据让取消处理器收编「本次调用实际
+    spawn 的 generation」：字段读写一律在 ``_quarantine_lock`` 内完成（短锁，
+    不做长操作）。
+
+    - ``cancelled``：取消已在事件循环线程登记（impl 据此跳过尚未提交的 spawn，
+      或在 spawn 提交后把该代登记为隔离）。
+    - ``generation``：impl 实际 spawn 的 generation（未 spawn 时为 None）。
+    """
+
+    __slots__ = ("cancelled", "generation")
+
+    def __init__(self) -> None:
+        self.cancelled: bool = False
+        self.generation: int | None = None
+
+
 def _probe_module(module_name: str) -> bool:
     """探测可选依赖是否可用，仅解析模块元数据而不加载模块（PRF-04 模式）。
 
@@ -452,6 +472,11 @@ class NewsSentimentScorer:
             self._result_queue: multiprocessing.Queue | None = None
             self._worker_ready: bool = False
             self._worker_lock: threading.Lock = threading.Lock()
+            # M27-06：隔离意图短锁——只保护 _quarantined_generations / 状态与
+            # generation 的一致性读写，锁内禁止 join、队列 IO 或等待 _worker_lock
+            # （锁序只允许 _worker_lock → _quarantine_lock）。
+            self._quarantine_lock: threading.Lock = threading.Lock()
+            self._quarantined_generations: set[int] = set()
             self._req_counter = itertools.count()
             self._model_path: str = ""
             self._paths_stat: tuple = (0, 0)
@@ -646,8 +671,10 @@ class NewsSentimentScorer:
         self._worker_proc = None
         self._request_queue = None
         self._result_queue = None
-        self._worker_ready = False
-        self._worker_state = "stopped"
+        # 锁序：生命周期锁（持有中）→ 短锁；短锁内只写标量。
+        with self._quarantine_lock:
+            self._worker_ready = False
+            self._worker_state = "stopped"
 
     def unload_model(self, *, force: bool = False):
         """Terminate the scoring worker subprocess and reset load state (public API).
@@ -667,8 +694,19 @@ class NewsSentimentScorer:
         self._head = None
         logger.info("[NewsSentiment] Scoring model unloaded (worker terminated).")
 
-    def _ensure_worker_impl(self, model_path: str, tokenizer_path: str, core_config: dict) -> bool:
-        """同步实现，在线程池中执行（含 process.join 同步阻塞，R16）。"""
+    def _ensure_worker_impl(
+        self,
+        model_path: str,
+        tokenizer_path: str,
+        core_config: dict,
+        attempt: _EnsureAttempt | None = None,
+    ) -> bool:
+        """同步实现，在线程池中执行（含 process.join 同步阻塞，R16）。
+
+        M27-06：复用判定与 spawn 决策在生命周期锁内同源；隔离意图/ready 经短锁
+        原子读取（锁序只允许 ``_worker_lock → _quarantine_lock``）。``attempt``
+        收编本次调用实际 spawn 的 generation，供取消处理器调度清理。
+        """
         # 核心参数签名：n_threads / max_length 变更须重启 worker（模型已按旧参数
         # 构造，热改不生效；N3-6 设置页修改后经此路径生效）。
         signature = (
@@ -680,24 +718,44 @@ class NewsSentimentScorer:
             # 同路径但产物被替换（热更新）时必须 respawn，不得按旧指纹复用
             # （与 LMM F25「路径 + stat + 核心参数」同口径；stat 微秒级，可接受）。
             worker_stat = self._stat_of(model_path, tokenizer_path)
+            # M27-06：隔离意图在短锁内与 generation/ready 原子核对——既看全局状态，
+            # 也看「本代是否已被取消处理器登记隔离」（状态可能被后续 shutdown
+            # 覆写为 stopped，意图集合才是权威）。
+            with self._quarantine_lock:
+                quarantined = (
+                    self._worker_state == "quarantined" or self._worker_generation in self._quarantined_generations
+                )
+                worker_ready = self._worker_ready
             if (
                 self._worker_proc is not None
                 and self._worker_proc.is_alive()
-                and self._worker_ready
+                and worker_ready
                 and self._model_path == model_path
                 and self._worker_stat == worker_stat
                 and self._core_signature == signature
                 # quarantined：worker 状态未知（取消/超时后可能仍在推理），
                 # 快路径失效，走完整 shutdown+respawn 自愈（与 LMM 对抗轮 E-1 同型）。
-                and self._worker_state != "quarantined"
+                and not quarantined
             ):
                 return True
 
             self._shutdown_worker_locked()
             # generation 每次 spawn 递增；旧响应经 _response_generation 过滤丢弃
             # （计数器 _req_counter 跨 generation 不重置）。
-            self._worker_generation += 1
-            generation = self._worker_generation
+            with self._quarantine_lock:
+                self._worker_generation += 1
+                generation = self._worker_generation
+                # 上一代刚在生命周期锁内 shutdown 完成，其隔离意图随之失效。
+                self._quarantined_generations = {g for g in self._quarantined_generations if g >= generation}
+                # M27-06: 调用方已取消且本次 spawn 尚未提交 → 不再 spawn（避免留下
+                # 无人认领、无人等 ready 的孤儿 worker）；旧代 shutdown 已完成。
+                aborted = attempt is not None and attempt.cancelled
+            if aborted:
+                logger.info(
+                    "[NewsSentiment] Worker spawn aborted: caller cancelled before spawn. generation=%s",
+                    generation,
+                )
+                return False
             self._core_signature = signature
             # respawn 后立即记录本 generation 的产物指纹；ready 成功前快路径被
             # _worker_ready=False 拦截，立即写安全（与 _core_signature 同语义）。
@@ -713,6 +771,14 @@ class NewsSentimentScorer:
             )
             proc.start()
             self._worker_proc = proc
+            if attempt is not None:
+                with self._quarantine_lock:
+                    attempt.generation = generation
+                    if attempt.cancelled:
+                        # 取消在 spawn 提交期间到达：收编该代（清理任务由取消
+                        # 处理器按当前代号调度），不得让未被等待的 worker 冒充健康。
+                        self._quarantined_generations.add(generation)
+                        self._worker_state = "quarantined"
             logger.info("[NewsSentiment] Scoring worker started. pid=%s generation=%s", proc.pid, generation)
             return True
 
@@ -785,7 +851,8 @@ class NewsSentimentScorer:
                 pass
 
         if result is None:
-            self._worker_ready = False
+            with self._quarantine_lock:
+                self._worker_ready = False
             if worker_died:
                 exitcode = self._worker_proc.exitcode if self._worker_proc is not None else None
                 logger.error("[NewsSentiment] Scoring worker crashed before ready. exitcode=%s", exitcode)
@@ -796,20 +863,23 @@ class NewsSentimentScorer:
 
         if not (isinstance(result, tuple) and len(result) == 3):
             logger.error("[NewsSentiment] Malformed result while waiting for worker ready: %s", type(result))
-            self._worker_ready = False
+            with self._quarantine_lock:
+                self._worker_ready = False
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return False
 
         status, payload = result[0], result[1]
         if status == "ready":
-            self._worker_ready = True
-            self._worker_state = "idle"
+            with self._quarantine_lock:
+                self._worker_ready = True
+                self._worker_state = "idle"
             logger.info("[NewsSentiment] Scoring worker ready with model: %s", payload)
             return True
 
         # R9: payload 来自子进程，可能含 traceback（文件路径/系统信息），脱敏后记录。
         logger.error("[NewsSentiment] Scoring worker failed: %s", DataSanitizer.sanitize_error(payload))
-        self._worker_ready = False
+        with self._quarantine_lock:
+            self._worker_ready = False
         await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
         return False
 
@@ -853,9 +923,17 @@ class NewsSentimentScorer:
                 int(core_config.get("n_threads", _DEFAULT_N_THREADS)),
                 int(core_config.get("max_length", _DEFAULT_MAX_LENGTH)),
             )
+            # M27-06：头复用快路径同样以短锁判定隔离意图（状态或意图集合任一命中
+            # 即失效）——意图集合是权威，避免状态被 shutdown 覆写为 stopped 后
+            # 误复用状态未知的 worker。
+            with self._quarantine_lock:
+                quarantined = (
+                    self._worker_state == "quarantined" or self._worker_generation in self._quarantined_generations
+                )
+                worker_ready = self._worker_ready
             if (
-                self._worker_ready
-                and self._worker_state != "quarantined"
+                worker_ready
+                and not quarantined
                 and self._model_path == paths["model_path"]
                 and self._paths_stat == current_stat
                 and self._head is not None
@@ -864,23 +942,37 @@ class NewsSentimentScorer:
                 return self._head
 
             head = await ThreadPoolManager().run_async(TaskType.IO, load_head_npz, paths["head_path"])
-            started = await ThreadPoolManager().run_async(
-                TaskType.IO,
-                self._ensure_worker_impl,
-                paths["model_path"],
-                paths["tokenizer_path"],
-                core_config,
-            )
-            if not started:
-                logger.error("[NewsSentiment] Scoring worker failed to start.")
-                return None
-            # R06-D1: 仅 respawn 后等待 ready（_shutdown_worker_locked 置
-            # _worker_ready=False；复用路径复用判定已保证 _worker_ready=True）。
-            # 不变量：复用 ⟹ 已 ready ⟹ 跳过等待；重启 ⟹ 等 fresh ready
-            # （与 LMM run_inference / invoke_for_connection 的守卫同型）。
-            if not self._worker_ready:
-                if not await self._await_worker_ready(timeout=max(0.0, ready_timeout)):
+            attempt = _EnsureAttempt()
+            try:
+                started = await ThreadPoolManager().run_async(
+                    TaskType.IO,
+                    self._ensure_worker_impl,
+                    paths["model_path"],
+                    paths["tokenizer_path"],
+                    core_config,
+                    attempt,
+                )
+                if not started:
+                    logger.error("[NewsSentiment] Scoring worker failed to start.")
                     return None
+                # R06-D1: 仅 respawn 后等待 ready（_shutdown_worker_locked 置
+                # _worker_ready=False；复用路径复用判定已保证 _worker_ready=True）。
+                # 不变量：复用 ⟹ 已 ready ⟹ 跳过等待；重启 ⟹ 等 fresh ready
+                # （与 LMM run_inference / invoke_for_connection 的守卫同型）。
+                with self._quarantine_lock:
+                    worker_ready = self._worker_ready
+                if not worker_ready:
+                    if not await self._await_worker_ready(timeout=max(0.0, ready_timeout)):
+                        return None
+            except asyncio.CancelledError:
+                # M27-06：取消时 IO 线程可能仍持生命周期锁跑 shutdown/spawn——只在
+                # 短锁内登记取消意图并收编本次实际 spawn 的 generation，立即重抛
+                # （R2），绝不在此等待 _worker_lock。
+                with self._quarantine_lock:
+                    attempt.cancelled = True
+                    spawned = attempt.generation
+                self._quarantine_worker(spawned if spawned is not None else self._current_generation())
+                raise
 
             self._model_path = paths["model_path"]
             self._paths_stat = current_stat
@@ -931,7 +1023,7 @@ class NewsSentimentScorer:
             results: list[dict[str, Any] | None] = []
             for chunk in _chunked(texts, _SCORE_CHUNK_SIZE):
                 try:
-                    scored = await self._score_chunk(chunk, timeout_s=timeout_s, generation=self._worker_generation)
+                    scored = await self._score_chunk(chunk, timeout_s=timeout_s, generation=self._current_generation())
                 except TimeoutError:
                     return None
                 if scored is None:
@@ -970,7 +1062,9 @@ class NewsSentimentScorer:
 
         loop = asyncio.get_running_loop()
         start_time = loop.time()
-        with self._worker_lock:
+        # M27-06：状态标记只取短锁——事件循环线程绝不等待生命周期长锁
+        # （IO 线程可能正持锁执行数秒级 shutdown/join）。
+        with self._quarantine_lock:
             self._worker_state = "busy"
 
         # put 在队列缓冲满时会阻塞，offload 到执行器避免阻塞事件循环（R16）。
@@ -990,7 +1084,8 @@ class NewsSentimentScorer:
                 "[NewsSentiment] Failed to send request to worker (%s): %s",
                 exc_info=True,
             )
-            self._worker_ready = False
+            with self._quarantine_lock:
+                self._worker_ready = False
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return None
 
@@ -1010,7 +1105,8 @@ class NewsSentimentScorer:
         except _WorkerError as e:
             # 请求级失败（worker error / 意外 shutdown / 协议坏）：终止 worker，整体降级。
             logger.error("[NewsSentiment] Scoring request failed (req_id=%s): %s", req_id, e)
-            self._worker_ready = False
+            with self._quarantine_lock:
+                self._worker_ready = False
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return None
 
@@ -1020,12 +1116,13 @@ class NewsSentimentScorer:
                 "[NewsSentiment] Scoring worker crashed without matching response (req_id=%s). Terminating worker.",
                 req_id,
             )
-            self._worker_ready = False
+            with self._quarantine_lock:
+                self._worker_ready = False
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return None
 
         vectors, meta = polled
-        with self._worker_lock:
+        with self._quarantine_lock:
             self._worker_state = "idle"
         return vectors, meta
 
@@ -1153,15 +1250,26 @@ class NewsSentimentScorer:
     # ------------------------------------------------------------------ #
     # quarantined worker 异步清理（S2，与 LocalModelManager 同型）
     # ------------------------------------------------------------------ #
+    def _current_generation(self) -> int:
+        """读取当前 worker generation（与 ``_quarantine_worker`` 一致的短锁口径）。"""
+        with self._quarantine_lock:
+            return self._worker_generation
+
     def _quarantine_worker(self, generation: int) -> None:
-        """标记 worker quarantined 并 spawn 异步清理任务（须在事件循环线程调用）。
+        """登记隔离意图并 spawn 异步清理任务（须在事件循环线程调用）。
 
         取消/超时后 worker 状态未知（可能仍在推理）→ 隔离 + 异步清理；
-        ``_ensure_worker_impl`` 快路径因 quarantined 失效，下次调用走完整
-        shutdown+respawn 自愈。
+        ``_ensure_worker_impl`` 与 ``_ensure_ready`` 快路径因隔离失效，下次调用走
+        完整 shutdown+respawn 自愈。
+
+        M27-06: 只在短锁内登记意图并（当代）置 quarantined——**禁止**在此等待
+        ``_worker_lock``：IO 线程可能正持该锁执行数秒级 shutdown/join，取消处理器
+        在事件循环线程等锁会把取消传播本身一起拖住。长操作由清理任务在 IO 线程执行。
         """
-        with self._worker_lock:
-            self._worker_state = "quarantined"
+        with self._quarantine_lock:
+            self._quarantined_generations.add(generation)
+            if generation == self._worker_generation:
+                self._worker_state = "quarantined"
         self._spawn_cleanup_task(generation)
 
     def _spawn_cleanup_task(self, generation: int) -> None:
@@ -1188,18 +1296,14 @@ class NewsSentimentScorer:
     async def _cleanup_worker_async(self, generation: int) -> None:
         """异步清理 quarantined worker（同步段 offload 到线程池，R16）。
 
-        generation 快照守卫经 ``_shutdown_worker(generation=...)`` 生效：执行时
-        若 ``_worker_generation`` 已前进（新 worker 已 spawn），幂等退出不误杀。
-        清理失败保持 quarantined（下次调用快路径失效，走完整重载链自愈）。
+        ``generation`` 仅作调度身份（``_spawn_cleanup_task`` 去重口径）；实际清理
+        以隔离意图集合为准——取消时 IO 线程可能尚未提交 spawn，取消处理器只能
+        登记当时代号，实际代由 ``_EnsureAttempt`` 收编进集合（M27-06），故按
+        「当前代号是否在意图集合」逐代清理。清理失败保留意图（同代号仍在集合内），
+        下次调用快路径失效、完整重载自愈。``except Exception`` 不吞 CancelledError（R2）。
         """
         try:
-            # 有界终止 force 语义：terminate 1.5s + kill 0.5s。
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                self._shutdown_worker,
-                force=True,
-                generation=generation,
-            )
+            remaining = await ThreadPoolManager().run_async(TaskType.IO, self._drain_quarantined_workers)
         except Exception as e:
             log_classified(
                 logger,
@@ -1208,6 +1312,57 @@ class NewsSentimentScorer:
                 "[NewsSentiment] Cleanup of quarantined worker failed (%s): %s",
                 exc_info=True,
             )
+            return
+        if remaining:
+            logger.warning(
+                "[NewsSentiment] Quarantined worker cleanup incomplete (remaining intents=%s); will self-heal on next call.",
+                remaining,
+            )
+
+    def _drain_quarantined_workers(self) -> int:
+        """在 IO 线程清理隔离意图对应的 worker，返回仍残留的意图数（>0 即清理失败）。
+
+        - 意图代号 == 当前 generation：force 关闭该代（``generation`` 守卫保证不会
+          误杀后继 worker）；成功后移除意图，失败保留。
+        - 意图代号 < 当前 generation：该代已在后续 spawn 时于生命周期锁内 shutdown，
+          意图失效。
+        - 循环仅在「清理期间又出现新的当代意图」时继续（取消发生于 shutdown 与
+          spawn 之间时，impl 会在 spawn 后收编实际代号），已尝试过的代号不重试。
+        - 全程不在短锁内做 join/队列 IO；``_shutdown_worker`` 在释放短锁后调用
+          （锁序：生命周期锁 → 短锁）。
+        """
+        attempted: set[int] = set()
+        while True:
+            with self._quarantine_lock:
+                pending = sorted(self._quarantined_generations)
+                current = self._worker_generation
+            for gen in pending:
+                if gen != current:
+                    with self._quarantine_lock:
+                        self._quarantined_generations.discard(gen)
+            for gen in pending:
+                if gen != current or gen in attempted:
+                    continue
+                attempted.add(gen)
+                try:
+                    # 有界终止 force 语义：terminate 1.5s + kill 0.5s。
+                    self._shutdown_worker(force=True, generation=gen)
+                except Exception as e:
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[NewsSentiment] Cleanup of quarantined worker failed (%s): %s",
+                        exc_info=True,
+                    )
+                    continue
+                with self._quarantine_lock:
+                    self._quarantined_generations.discard(gen)
+            with self._quarantine_lock:
+                remaining = sorted(self._quarantined_generations)
+                current = self._worker_generation
+            if not any(gen == current and gen not in attempted for gen in remaining):
+                return len(remaining)
 
     # ------------------------------------------------------------------ #
     # S2 统一单连接入口（ADR-0014 §6.1）
@@ -1324,7 +1479,7 @@ class NewsSentimentScorer:
             except asyncio.CancelledError:
                 # 启动/ready 阶段取消：worker 子进程可能正在加载（状态未知）→
                 # 隔离 + 异步清理（取消隔离覆盖启动/ready/提交/推理全程，R2 传播）。
-                self._quarantine_worker(self._worker_generation)
+                self._quarantine_worker(self._current_generation())
                 raise
             if head is None:
                 if deadline - loop.time() <= 0:
@@ -1359,7 +1514,7 @@ class NewsSentimentScorer:
                     scored = await self._score_chunk(
                         chunk,
                         timeout_s=chunk_budget,
-                        generation=self._worker_generation,
+                        generation=self._current_generation(),
                     )
                 except TimeoutError:
                     outcome_status = "timeout" if not results else "partial"
