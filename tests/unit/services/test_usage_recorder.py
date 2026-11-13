@@ -17,6 +17,11 @@
 - aclose 全量 flush：保留条目原始重放 / 无终态观察合成 cancelled 补交 / 全窗口收口；
 - aclose flush 失败不抛且如实告警（R21），CancelledError 传播（R2）。
 
+覆盖（S-UREC-01 aclose 取消重试语义：``_closed`` = flush/关闭完成）：
+- 取消不置完成标记、不清缓冲（R2 传播），下次顺序 aclose 重试重放相同事实后清空
+  （未结算观察合成路径 + 原始失败队列路径，已结算条目不重复写账）；
+- 成功关闭后二次 aclose 幂等（无新增写账）；连续取消保留事实并每次明确告警。
+
 覆盖（F33 迟到修订窗口：修订单调推进 + 窗口身份持久化 + 确认关闭才移除）：
 - observe 修订接收（revision > 水位覆盖快照 + 推进水位），重复 / 乱序旧修订幂等忽略
   （R22：乱序写入最终值为最大值）；
@@ -26,6 +31,12 @@
   修复前 metadata 透传恒 None → DAO 关闭条件对 NULL 永不成立）；
 - 窗口扫描改 DAO 批量收口：确认关闭才移除内存扫描项（失败保留下轮重试），
   未到期项保留（截止已持久化，跨重启由下次启动批量收口按期关闭）。
+
+覆盖（S-UREC-02 修订水位生命周期回收）：
+- 成功 aclose 的最终清理块随其余缓冲一并清空 ``_revision_watermarks``
+  （多 attempt 修订推进后水位无残留）；取消路径水位保留不清（与事实缓冲
+  同生命周期）；回收后旧响应重建观察的重提交以 revision=1 落账、由 DAO
+  ``accounted_usage_revision`` 持久水位拒绝（Recorder 侧不残留内存条目）。
 """
 
 import asyncio
@@ -832,7 +843,8 @@ class TestPendingSettleQueueBounded:
 
 
 class TestAcloseFlushF20:
-    """F20：aclose 停机前全量 flush——失败不吞没（R21），取消传播（R2）。"""
+    """F20：aclose 停机前全量 flush——失败不吞没（R21），取消传播（R2）；
+    取消不置完成标记，下次顺序 aclose 重试（S-UREC-01）。"""
 
     @pytest.mark.asyncio
     async def test_aclose_flushes_retained_queue_with_original_record(self):
@@ -904,7 +916,9 @@ class TestAcloseFlushF20:
 
     @pytest.mark.asyncio
     async def test_aclose_cancelled_error_propagates(self):
-        """R2：停机 flush 被 cleanup 预算取消时 CancelledError 传播，不吞没。"""
+        """R2：停机 flush 被 cleanup 预算取消时 CancelledError 传播，不吞没；
+        取消不置完成标记、不清缓冲（S-UREC-01）——下次顺序 aclose 重试重放
+        相同事实后清空。"""
         dao = _dao_mock()
 
         async def _cancel(*args, **kwargs):
@@ -919,6 +933,97 @@ class TestAcloseFlushF20:
         # 条目留存内存不静默销毁（可经下次停机 flush 重试）
         assert excinfo.type is asyncio.CancelledError
         assert recorder.pending_observation_count() == 1
+        # S-UREC-01：取消不进入「关闭完成」状态（旧实现此处 _closed 已为 True，
+        # 二次 aclose 走幂等分支静默清缓冲丢弃未结算事实）
+        assert recorder._closed is False
+        # 第二次 aclose（账本恢复）：重试 flush 重放相同事实后清空并置完成标记
+        dao.settle_attempt_usage = AsyncMock(return_value=True)
+        await recorder.aclose()
+        assert dao.settle_attempt_usage.await_count == 1
+        kwargs = dao.settle_attempt_usage.await_args.kwargs
+        assert kwargs["attempt_id"] == "att-1"
+        assert kwargs["status"] == "cancelled"
+        assert recorder.pending_observation_count() == 0
+        assert recorder._closed is True
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancelled_then_retry_replays_retained_queue(self):
+        """S-UREC-01 原始失败队列路径：flush 取消传播不置完成标记——下次 aclose
+        重试仅重放未结算条目（已结算条目不重复写账，DAO revision 水位幂等兜底）。"""
+        dao = _dao_mock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        dao.settle_attempt_usage = AsyncMock(side_effect=_cancel)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        recorder.observe_usage(_observation("att-2"))
+        # F19-003：submit_terminal 被取消同样保留原始终态事实（CancelledError 传播）
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await recorder.submit_terminal(_terminal("att-1"))
+        assert excinfo.type is asyncio.CancelledError
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await recorder.submit_terminal(_terminal("att-2"))
+        assert excinfo.type is asyncio.CancelledError
+        # 第一次 aclose：att-1 重放成功、att-2 重放被取消 → 传播，att-2 保留
+        dao.settle_attempt_usage = AsyncMock(side_effect=[True, asyncio.CancelledError()])
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await recorder.aclose()
+        assert excinfo.type is asyncio.CancelledError
+        assert "att-1" not in recorder._pending_settle
+        assert "att-2" in recorder._pending_settle
+        assert recorder.pending_observation_count() == 1
+        assert recorder._closed is False
+        # 第二次 aclose（账本恢复）：仅重放 att-2 原始终态记录后清空
+        dao.settle_attempt_usage = AsyncMock(return_value=True)
+        await recorder.aclose()
+        assert dao.settle_attempt_usage.await_count == 1
+        replay = dao.settle_attempt_usage.await_args.kwargs
+        assert replay["attempt_id"] == "att-2"
+        assert replay["status"] == "succeeded"  # 原始终态重放，非合成 cancelled
+        assert len(recorder._pending_settle) == 0
+        assert recorder.pending_observation_count() == 0
+        assert recorder._closed is True
+
+    @pytest.mark.asyncio
+    async def test_aclose_consecutive_cancellations_retain_facts_and_warn(self, caplog):
+        """S-UREC-01：连续取消——事实保留 + 每次明确告警（R21 不伪装已结算），
+        完成标记不置位，每次取消的 aclose 均实际尝试结算而非跳过 flush。"""
+        dao = _dao_mock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        dao.settle_attempt_usage = AsyncMock(side_effect=_cancel)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(asyncio.CancelledError) as excinfo:
+                await recorder.aclose()
+            assert excinfo.type is asyncio.CancelledError
+            with pytest.raises(asyncio.CancelledError) as excinfo:
+                await recorder.aclose()
+            assert excinfo.type is asyncio.CancelledError
+        assert recorder.pending_observation_count() == 1
+        assert recorder._closed is False
+        assert caplog.text.count("aclose flush cancelled") == 2
+        assert dao.settle_attempt_usage.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_aclose_second_close_after_success_is_idempotent(self):
+        """S-UREC-01：成功关闭后二次 aclose 幂等——不新增写账、不重复收口窗口。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.aclose()
+        assert dao.settle_attempt_usage.await_count == 1
+        sweep_count = dao.close_expired_usage_windows.await_count
+        await recorder.aclose()
+        assert dao.settle_attempt_usage.await_count == 1
+        assert dao.close_expired_usage_windows.await_count == sweep_count
+        assert recorder.pending_observation_count() == 0
+        assert recorder._closed is True
 
 
 class TestRevisionAdvancement:
@@ -1014,6 +1119,78 @@ class TestRevisionAdvancement:
         assert expires is not None
         assert isinstance(expires, datetime.datetime)
         assert expires.tzinfo is None  # naive UTC，与 DAO 侧 now() AT TIME ZONE 'UTC' 同域
+
+
+class TestRevisionWatermarkReclaim:
+    """S-UREC-02：修订水位生命周期回收——成功 aclose 最终清理块全量清空；
+    取消路径保留（与事实缓冲同生命周期）；回收后旧响应重提交由 DAO 持久
+    accounted 水位拒绝（内存不残留、不双计）。运行期逐窗口回收不在本次范围。"""
+
+    @pytest.mark.asyncio
+    async def test_aclose_clears_watermarks_after_multiple_attempts_settled(self):
+        """多个不同 attempt 成功落账且修订推进水位后 aclose → 水位随其余缓冲清空。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=3))
+        recorder.observe_usage(_observation("att-2"))
+        recorder.observe_usage(_observation("att-3"))
+        for attempt_id in ("att-1", "att-2", "att-3"):
+            assert (await recorder.submit_terminal(_terminal(attempt_id))).persisted is True
+        assert recorder._revision_watermarks == {"att-1": 3, "att-2": 1, "att-3": 1}
+        await recorder.aclose()
+        assert recorder._revision_watermarks == {}
+        assert recorder.pending_observation_count() == 0
+        assert recorder._closed is True
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancelled_keeps_watermarks(self):
+        """取消路径水位保留：flush 被 CancelledError 打断时不清水位（清理块未到达），
+        完成标记不置位，下次顺序 aclose 重试后随成功清理一并回收。"""
+        dao = _dao_mock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        dao.settle_attempt_usage = AsyncMock(side_effect=_cancel)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=2))
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await recorder.aclose()
+        assert excinfo.type is asyncio.CancelledError
+        # 水位随事实缓冲保留（若误清则旧修订重放将失去内存单调防线）
+        assert recorder._revision_watermarks == {"att-1": 2}
+        assert recorder._closed is False
+        # 第二次 aclose（账本恢复）：重试 flush 后清理块回收水位
+        dao.settle_attempt_usage = AsyncMock(return_value=True)
+        await recorder.aclose()
+        assert recorder._revision_watermarks == {}
+        assert recorder._closed is True
+
+    @pytest.mark.asyncio
+    async def test_replay_after_reclaim_rejected_by_dao_watermark(self):
+        """回收后旧响应重提交：内存水位已清，observe 重建观察并以 revision=1
+        落账；防双计由 DAO accounted_usage_revision 持久水位拒绝（模拟返回 False）
+        → Recorder 收敛 OWNER_LEASE_LOST 并丢弃观察，内存不残留。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is True
+        await recorder.aclose()
+        assert recorder._revision_watermarks == {}
+        # 旧响应迟到重放：观察重建（内存水位已回收，无法在 Recorder 侧拦截）
+        recorder.observe_usage(_observation("att-1"))
+        assert recorder.pending_observation_count() == 1
+        # DAO 侧行已结算（accounted_revision >= 1）→ revision=1 不推进 → 返回 False
+        dao.settle_attempt_usage = AsyncMock(return_value=False)
+        outcome = await recorder.submit_terminal(_terminal("att-1"))
+        assert outcome == PersistenceOutcome(persisted=False, error_code="OWNER_LEASE_LOST")
+        submit_kwargs = dao.settle_attempt_usage.await_args.kwargs
+        assert submit_kwargs["usage_revision"] == 1
+        # 被拒后观察确认丢弃：内存不残留（水位/观察/窗口均不留旧响应条目）
+        assert recorder.pending_observation_count() == 0
+        assert "att-1" not in recorder._pending_settle
 
 
 class TestUsageWindowScanF33:
