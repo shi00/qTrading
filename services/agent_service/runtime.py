@@ -48,6 +48,17 @@ DBOS_MAX_EXECUTOR_THREADS = 4
 DBOS_SCHEMA = "dbos"
 AGENT_DS_SCHEMA = "agent_ds"
 PSYCGRP_APPLICATION_NAME = "qtrading_agent_runtime"
+# HANDOFF §8.1「同步 Engine 均为 Psycopg，设置有限 statement/idle-in-transaction
+# 超时」：注入自定义 system_database_engine 后 SDK 不再兜底（其
+# sys_db_idle_transaction_timeout_sec 明示不作用于注入引擎），须由本模块显式设置。
+# 契约未定具体值（低风险自行决定）：系统库事务均为短语句（upsert/claim），
+# statement 30s / idle-in-transaction 60s 上限远超正常路径且能防悬挂占死 4+2 池。
+RUNTIME_STATEMENT_TIMEOUT_MS = 30000
+RUNTIME_IDLE_TX_TIMEOUT_MS = 60000
+_ENGINE_SESSION_OPTIONS = (
+    f"-c statement_timeout={RUNTIME_STATEMENT_TIMEOUT_MS} "
+    f"-c idle_in_transaction_session_timeout={RUNTIME_IDLE_TX_TIMEOUT_MS}"
+)
 
 
 @dataclass(frozen=True)
@@ -68,7 +79,12 @@ class AgentRuntimeSettings:
 
 @dataclass
 class AgentRuntimeHandle:
-    """组装产物：持有全部宿主对象引用与关闭入口（未 launch）。"""
+    """组装产物：持有全部宿主对象引用与关闭入口（未 launch）。
+
+    注意：``close()`` 调用类级 ``DBOS.destroy()`` 销毁全局单例——进程内同时存在
+    多个 handle 时先 close 者会使其余 handle 失效（单实例契约，§8.3「唯一 Agent
+    实例」）；如需并存须先改用实例级销毁。
+    """
 
     runtime_engine: sa.Engine
     control_engine: sa.Engine
@@ -128,6 +144,8 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
                 "sharding": False,
                 "application_version": settings.application_version,
                 "executor_id": executor_id,
+                # 显式声明（§8.1 组装含此项；SDK 默认值相同，防隐式漂移）
+                "dbos_system_schema": DBOS_SCHEMA,
             }
         )
         datasource = SQLAlchemyDatasource.create(
@@ -141,6 +159,8 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
             dbos_system_schema=DBOS_SCHEMA,
             use_listen_notify=False,
             retry_connection_errors=False,
+            # 应用稳定名（HANDOFF §8.3 固定签名；§8.4 归属预检/取消按此过滤）
+            application_name=RUNTIME_DB_NAME,
         )
     except BaseException:
         _dispose_quietly(control_engine)
@@ -173,26 +193,39 @@ def _new_executor_id() -> str:
 
 
 def _create_runtime_engine(url: str) -> sa.Engine:
-    """runtime 引擎：pool 4 / overflow 0 / timeout 3 / hide_parameters（§8.1 第 6 条）。"""
+    """runtime 引擎：pool 4 / overflow 0 / timeout 3 / hide_parameters（§8.1 第 6 条）。
+
+    会话级 statement/idle-in-transaction 超时见 ``_ENGINE_SESSION_OPTIONS``（注入
+    引擎后 SDK 不兜底，HANDOFF §8.1）。
+    """
     return _create_engine(
         url,
         pool_size=RUNTIME_ENGINE_POOL_SIZE,
         max_overflow=0,
         pool_timeout=3,
         hide_parameters=True,
-        connect_args={"application_name": PSYCGRP_APPLICATION_NAME},
+        connect_args={
+            "application_name": PSYCGRP_APPLICATION_NAME,
+            "options": _ENGINE_SESSION_OPTIONS,
+        },
     )
 
 
 def _create_control_engine(url: str) -> sa.Engine:
-    """control 引擎：pool 2 / overflow 0 / hide_parameters（§8.1 第 7 条，禁额外监听）。"""
+    """control 引擎：pool 2 / overflow 0 / hide_parameters（§8.1 第 7 条，禁额外监听）。
+
+    会话级超时同 runtime 引擎（``_ENGINE_SESSION_OPTIONS``）。
+    """
     return _create_engine(
         url,
         pool_size=CONTROL_ENGINE_POOL_SIZE,
         max_overflow=0,
         pool_timeout=3,
         hide_parameters=True,
-        connect_args={"application_name": PSYCGRP_APPLICATION_NAME},
+        connect_args={
+            "application_name": PSYCGRP_APPLICATION_NAME,
+            "options": _ENGINE_SESSION_OPTIONS,
+        },
     )
 
 

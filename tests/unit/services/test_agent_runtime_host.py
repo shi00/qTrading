@@ -116,9 +116,14 @@ class TestAssemblyContract:
         assert runtime_kwargs["max_overflow"] == 0
         assert runtime_kwargs["pool_timeout"] == 3
         assert runtime_kwargs["hide_parameters"] is True
+        # 会话超时（检视 F1：注入引擎后 SDK 不兜底，HANDOFF §8.1 有限超时）
+        runtime_options = runtime_kwargs["connect_args"]["options"]
+        assert "statement_timeout=30000" in runtime_options
+        assert "idle_in_transaction_session_timeout=60000" in runtime_options
         control_kwargs = host.engines[2]
         assert control_kwargs["max_overflow"] == 0
         assert control_kwargs["hide_parameters"] is True
+        assert "statement_timeout=30000" in control_kwargs["connect_args"]["options"]
 
         assert host.dbos_config is not None
         config = host.dbos_config
@@ -130,6 +135,7 @@ class TestAssemblyContract:
         assert config["sharding"] is False
         assert config["application_version"] == "0.11.7"
         assert config["system_database_engine"] is handle.runtime_engine
+        assert config["dbos_system_schema"] == "dbos"
 
         assert host.datasource_kwargs["schema"] == "agent_ds"
         assert host.datasource_kwargs["engine"] is handle.runtime_engine
@@ -138,6 +144,8 @@ class TestAssemblyContract:
         assert host.client_kwargs["system_database_engine"] is handle.control_engine
         assert host.client_kwargs["use_listen_notify"] is False
         assert host.client_kwargs["retry_connection_errors"] is False
+        # 应用稳定名（检视 F2：HANDOFF §8.3 固定签名，§8.4 归属过滤依据）
+        assert host.client_kwargs["application_name"] == "qtrading-agent-runtime"
 
     def test_settings_default_executor_id_is_per_process(self, host: _RecordingHost) -> None:
         """executor_id 缺省为每进程唯一 epoch（HANDOFF §8.4 第 4 条）。"""
