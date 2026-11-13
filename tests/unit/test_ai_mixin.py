@@ -1190,6 +1190,58 @@ class TestRunAiAnalysis:
             assert len(result) <= 2
 
     @pytest.mark.asyncio
+    async def test_stop_screening_terminates_without_resumable_pause(self):
+        """DD-F34：停止选股终止关联未完成分析，且不落「可恢复暂停」状态。
+
+        语义：用户在批量中途停止 → 在途/后续候选不再派发模型调用；未处理候选
+        原样保留（不伪造 analyzed/score）；不写任何可续跑的暂停状态。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp(is_cancelled=False)
+        counter = {"checks": 0}
+
+        def _cancelled() -> bool:
+            counter["checks"] += 1
+            # 串行语义下：批入口(1) + 前两股的派发前/后检查(2..5) 放行，第三股起停止派发。
+            return counter["checks"] > 5
+
+        dp.is_cancelled = MagicMock(side_effect=_cancelled)
+        codes = [f"{i:06d}.SZ" for i in range(1, 46)]  # 3 个批（20/20/5），验证批间不续跑
+        candidates = pd.DataFrame({"ts_code": codes, "name": codes, "close": [10.0] * len(codes)})
+        context = {"data_processor": dp}
+        analyze_calls: list[str] = []
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            analyze_calls.append(stock_info.get("ts_code"))
+            return {"score": 80, "summary": "ok", "confidence": 0.6}
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=1),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker"),
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        # 仅停止前的两只股票真实派发；批内其余候选与后续批次零派发。
+        assert analyze_calls == ["000001.SZ", "000002.SZ"]
+        # 返回行只来自真实派发的两只股票，不冒认 analyzed / 不伪造评分。
+        assert len(result) == 2
+        assert set(result["ts_code"]) == {"000001.SZ", "000002.SZ"}
+        assert result["ai_score"].notna().all()
+        # 不落可恢复暂停状态（停止是终止，不是暂停）。
+        assert not any("resume" in key or "paused" in key for key in context)
+
+    @pytest.mark.asyncio
     async def test_with_candidates_cap(self):
         from core.i18n import Message
 
