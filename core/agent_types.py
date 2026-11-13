@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence, Set as AbstractSet
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, is_dataclass
 from datetime import datetime as dt
 from datetime import UTC
@@ -4729,3 +4729,228 @@ def validate_read_mark_command(command: ReadMarkCommand) -> None:
         _require_str(message_id, f"$.message_ids[{index}]")
     for index, ref in enumerate(command.artifact_refs):
         _require_str(ref, f"$.artifact_refs[{index}]")
+
+
+# ---------------------------------------------------------------------------
+# PlanSpec 提案（DD §8 F04 / SQ-04；HANDOFF §7.2，D-02）
+# ---------------------------------------------------------------------------
+#
+# 派发前程序校验（模型提案不授自身权限）：无环、自依赖、缺引用、重复、角色能力、
+# 最多 20 叶、一层。一层由扁平节点表结构保证（无嵌套子计划字段），decode 严格
+# 拒额外键；保存计划版（artifact result_kind=plan）与原生引用后才派发。
+
+#: 一层叶上限（HANDOFF §7.2「最多 20 叶」；超一拒绝、恰等合法）。
+MAX_PLAN_LEAVES: Final[int] = 20
+
+#: 计划提案结构版本（进入规范摘要前缀，版本演进不改写旧版身份）。
+PLAN_SPEC_VERSION: Final[int] = 1
+
+_PLAN_SPEC_KEYS: Final = frozenset({"nodes"})
+_PLAN_NODE_KEYS: Final = frozenset({"node_id", "target", "role_key", "depends_on", "capabilities", "source_refs"})
+
+
+@dataclass(frozen=True, slots=True)
+class PlanNodeSpec:
+    """一层叶节点提案：节点身份/目标/角色/依赖/能力/来源（`扁平等价一层`）。
+
+    ``target`` 为用户可见正文，原样保留（不 trim、不改 Unicode）。
+    """
+
+    node_id: str
+    target: str
+    role_key: str
+    depends_on: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
+    source_refs: tuple[SourceVersionRef, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PlanSpecProposal:
+    """模型提交的计划提案（派发前必须经 :func:`validate_plan_spec_proposal`）。
+
+    节点顺序属计划版身份（同一内容不同顺序是不同提案），摘要不排序。
+    """
+
+    nodes: tuple[PlanNodeSpec, ...]
+
+
+def _require_text_nonempty(value: object, path: str) -> str:
+    """用户可见正文：须非空 str；不 trim、不改 Unicode。"""
+
+    if not isinstance(value, str) or not value:
+        _fail("invalid_text", path)
+    return value
+
+
+def _decode_str_tuple(value: object, path: str) -> tuple[str, ...]:
+    """wire 字符串数组（允许空；重复项留给语义校验报专属错误码）。"""
+
+    if not isinstance(value, list):
+        _fail("invalid_type", path)
+    return tuple(_require_str(item, f"{path}[{index}]") for index, item in enumerate(value))
+
+
+def _require_plan_node_shapes(node: PlanNodeSpec, path: str) -> None:
+    """节点容器类型校验（冻结 dataclass 的不可变容器契约）。"""
+
+    for field_name in ("depends_on", "capabilities", "source_refs"):
+        if not isinstance(getattr(node, field_name), tuple):
+            _fail("invalid_type", f"{path}.{field_name}")
+
+
+def decode_plan_node_spec(value: object, path: str = "$.node") -> PlanNodeSpec:
+    """严格解码节点提案（六键必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _PLAN_NODE_KEYS, path)
+    raw_refs = value["source_refs"]
+    if not isinstance(raw_refs, list):
+        _fail("invalid_type", f"{path}.source_refs")
+    return PlanNodeSpec(
+        node_id=_require_str(value["node_id"], f"{path}.node_id"),
+        target=_require_text_nonempty(value["target"], f"{path}.target"),
+        role_key=_require_str(value["role_key"], f"{path}.role_key"),
+        depends_on=_decode_str_tuple(value["depends_on"], f"{path}.depends_on"),
+        capabilities=_decode_str_tuple(value["capabilities"], f"{path}.capabilities"),
+        source_refs=tuple(
+            decode_source_version_ref(ref, f"{path}.source_refs[{index}]") for index, ref in enumerate(raw_refs)
+        ),
+    )
+
+
+def decode_plan_spec_proposal(value: object, path: str = "$.plan_spec") -> PlanSpecProposal:
+    """严格解码计划提案（``nodes`` 必填、``plan_spec_version`` 可选且须为 1）。
+
+    模型提案 wire 只须 ``nodes``；规范化保存形态另带 ``plan_spec_version``，
+    两者都可解（往返语义一致）。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys_with_optional(value, _PLAN_SPEC_KEYS, {"plan_spec_version"}, path)
+    if "plan_spec_version" in value and value["plan_spec_version"] != PLAN_SPEC_VERSION:
+        _fail("unsupported_version", f"{path}.plan_spec_version")
+    raw_nodes = value["nodes"]
+    if not isinstance(raw_nodes, list):
+        _fail("invalid_type", f"{path}.nodes")
+    return PlanSpecProposal(
+        nodes=tuple(decode_plan_node_spec(item, f"{path}.nodes[{index}]") for index, item in enumerate(raw_nodes))
+    )
+
+
+def normalize_plan_spec_proposal(plan: PlanSpecProposal) -> CanonicalJson:
+    """规范化计划提案 wire（结构版本 + 全键显式；用于保存计划版与摘要）。"""
+
+    if not isinstance(plan, PlanSpecProposal):
+        _fail("invalid_type", "$.plan_spec")
+    return json_doc({"plan_spec_version": PLAN_SPEC_VERSION, "nodes": list(plan.nodes)})
+
+
+def plan_spec_digest(plan: PlanSpecProposal) -> str:
+    """计划版内容摘要（SHA-256，绑定结构版本；节点顺序入身份）。"""
+
+    if not isinstance(plan, PlanSpecProposal):
+        _fail("invalid_type", "$.plan_spec")
+    return sha256_hex(json_doc(["plan_spec", PLAN_SPEC_VERSION, list(plan.nodes)]))
+
+
+def validate_plan_spec_proposal(
+    plan: PlanSpecProposal,
+    *,
+    allowed_role_capabilities: Mapping[str, AbstractSet[str]],
+) -> None:
+    """计划提案程序校验（SQ-04：先核循环/自依赖/缺引用/角色/能力/20 叶）。
+
+    Args:
+        plan: 待校验提案。
+        allowed_role_capabilities: 本次角色 → 允许能力键集合（由角色/授权配置
+            提供）。角色缺失即拒绝；节点能力必须落在该角色集合内（模型提案不授
+            自身权限，DD-F03/F04）。
+
+    Raises:
+        AgentValidationError: ``empty_plan`` / ``too_many_leaves`` /
+            ``duplicate_node`` / ``self_dependency`` / ``missing_reference`` /
+            ``plan_cycle`` / ``duplicate_dependency`` / ``duplicate_capability`` /
+            ``duplicate_source_ref`` / ``unknown_role`` / ``capability_not_allowed``
+            及通用类型/身份错误码。
+    """
+
+    if not isinstance(plan, PlanSpecProposal):
+        _fail("invalid_type", "$.plan_spec")
+    nodes = plan.nodes
+    if not isinstance(nodes, tuple):
+        _fail("invalid_type", "$.nodes")
+    if not nodes:
+        # F03：无工具/分工时不制造空任务树（简单目标应直答）。
+        _fail("empty_plan", "$.nodes")
+    if len(nodes) > MAX_PLAN_LEAVES:
+        _fail("too_many_leaves", "$.nodes")
+
+    seen_index: dict[str, int] = {}
+    for index, node in enumerate(nodes):
+        path = f"$.nodes[{index}]"
+        if not isinstance(node, PlanNodeSpec):
+            _fail("invalid_type", path)
+        _require_plan_node_shapes(node, path)
+        _require_str(node.node_id, f"{path}.node_id")
+        _require_text_nonempty(node.target, f"{path}.target")
+        _require_str(node.role_key, f"{path}.role_key")
+        if node.node_id in seen_index:
+            _fail("duplicate_node", f"{path}.node_id")
+        seen_index[node.node_id] = index
+
+        allowed_caps = allowed_role_capabilities.get(node.role_key)
+        if allowed_caps is None:
+            # 角色能力交集核验：未知角色不派发（不默认放行）。
+            _fail("unknown_role", f"{path}.role_key")
+        if len(set(node.capabilities)) != len(node.capabilities):
+            _fail("duplicate_capability", f"{path}.capabilities")
+        for cap_index, capability in enumerate(node.capabilities):
+            _require_str(capability, f"{path}.capabilities[{cap_index}]")
+            if capability not in allowed_caps:
+                _fail("capability_not_allowed", f"{path}.capabilities[{cap_index}]")
+
+        if len(set(node.depends_on)) != len(node.depends_on):
+            _fail("duplicate_dependency", f"{path}.depends_on")
+        for dep_index, dependency in enumerate(node.depends_on):
+            _require_str(dependency, f"{path}.depends_on[{dep_index}]")
+            if dependency == node.node_id:
+                _fail("self_dependency", f"{path}.depends_on[{dep_index}]")
+
+        seen_refs: set[tuple[str, str, str]] = set()
+        for ref_index, ref in enumerate(node.source_refs):
+            ref_path = f"{path}.source_refs[{ref_index}]"
+            if not isinstance(ref, SourceVersionRef):
+                _fail("invalid_type", ref_path)
+            _require_str(ref.source_id, f"{ref_path}.source_id")
+            _require_str(ref.source_version, f"{ref_path}.source_version")
+            _require_digest(ref.source_digest, f"{ref_path}.source_digest")
+            ref_key = (ref.source_kind.value, ref.source_id, ref.source_version)
+            if ref_key in seen_refs:
+                _fail("duplicate_source_ref", ref_path)
+            seen_refs.add(ref_key)
+
+    # 缺引用：依赖目标必须在本计划内（一层叶，不跨计划引用）。
+    for index, node in enumerate(nodes):
+        for dep_index, dependency in enumerate(node.depends_on):
+            if dependency not in seen_index:
+                _fail("missing_reference", f"$.nodes[{index}].depends_on[{dep_index}]")
+
+    # 无环：Kahn 拓扑排序；未全部出队即有环（非法图零执行）。
+    in_degree = {node.node_id: len(node.depends_on) for node in nodes}
+    children: dict[str, list[str]] = {node.node_id: [] for node in nodes}
+    for node in nodes:
+        for dependency in node.depends_on:
+            children[dependency].append(node.node_id)
+    ready = [node_id for node_id, degree in in_degree.items() if degree == 0]
+    visited = 0
+    while ready:
+        node_id = ready.pop()
+        visited += 1
+        for child in children[node_id]:
+            in_degree[child] -= 1
+            if in_degree[child] == 0:
+                ready.append(child)
+    if visited != len(nodes):
+        _fail("plan_cycle", "$.nodes")
