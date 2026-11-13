@@ -29,11 +29,24 @@ from alembic import command
 from dbos import DBOSClient
 from sqlalchemy import text
 
-from core.agent_types import CLEANUP_TOMBSTONE, CLEANUP_TOMBSTONE_DIGEST
+from core.agent_types import (
+    CLEANUP_TOMBSTONE,
+    CLEANUP_TOMBSTONE_DIGEST,
+    CleanupJobRecord,
+    CleanupPhase,
+    CleanupPrecondition,
+)
 from data.persistence.agent_migrator import run_agent_runtime_migrations
 from data.persistence.agent_runtime_store import AgentRuntimeNativeStore
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.models import AgentAssetVersion, AgentSession
+from services.agent_service.cleanup import (
+    CleanupConfirmCommand,
+    CleanupService,
+    DaoCleanupJobStore,
+    preview_digest,
+)
+from services.agent_service.cleanup_execution import CleanupExecutionService
 from services.agent_service.cleanup_native import NativeCleanupExecutor
 from tests._helpers import create_test_engine, make_alembic_cfg
 from tests.integration.test_agent_runtime_migrator import (
@@ -106,6 +119,30 @@ async def _inline_runner(func, *args):
     """集成测试用同步执行端口（不依赖 UI 线程池，等价受管线程语义）。"""
 
     return await asyncio.to_thread(func, *args)
+
+
+def _precondition() -> CleanupPrecondition:
+    return CleanupPrecondition(
+        scope_settled=True,
+        writers_exited=True,
+        closure_known=True,
+        preview_valid=True,
+        new_reference_conflict=False,
+    )
+
+
+async def _reset_and_migrate_app_schema(url: str) -> None:
+    """布局用例前提：public schema 重建并迁移到 head（每个用例独立可重复）。"""
+
+    setup_engine = create_test_engine(url)
+    try:
+        async with setup_engine.begin() as conn:
+            for statement in _RESET_APP_SCHEMA:
+                await conn.execute(statement)
+    finally:
+        await setup_engine.dispose()
+    alembic_cfg = make_alembic_cfg(url)
+    await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="session")
@@ -208,15 +245,7 @@ async def test_tombstone_not_null_text_and_digest_with_outside_unchanged(real_em
     """应用域：NOT NULL 文本/摘要换 tombstone，可 NULL 私人内容清除，集合外不变。"""
 
     url = real_embedded_pg.url
-    setup_engine = create_test_engine(url)
-    try:
-        async with setup_engine.begin() as conn:
-            for statement in _RESET_APP_SCHEMA:
-                await conn.execute(statement)
-    finally:
-        await setup_engine.dispose()
-    alembic_cfg = make_alembic_cfg(url)
-    await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+    await _reset_and_migrate_app_schema(url)
 
     engine = create_test_engine(url)
     dao = AgentDao(engine)
@@ -331,3 +360,123 @@ async def test_tombstone_not_null_text_and_digest_with_outside_unchanged(real_em
     assert asset_in.cleaned_at is not None
     assert asset_out.display_name == "集合外名称"
     assert asset_out.digest == "b" * 64
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embedded_pg, runtime_sync_url: str) -> None:
+    """端到端：真 job 持久化 + 真九类删除 + 真 NOT NULL tombstone → verified。"""
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+    in_set, out_set = _new_workflow_ids()
+    _seed_native_rows(runtime_sync_url, [in_set, out_set])
+
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+    session_in = f"session-in-{uuid.uuid4().hex[:6]}"
+    asset_in = f"asset-in-{uuid.uuid4().hex[:6]}"
+    record = CleanupJobRecord(
+        user_scope=_USER_SCOPE,
+        cleanup_job_id=job_id,
+        owner_ref="session-owner",
+        preview_digest=preview_digest(("session-owner",), (in_set,)),
+        expected_revision=1,
+        exact_ids=(in_set,),
+        phase=CleanupPhase.PREPARED,
+        fence_committed=False,
+        session_ids=(session_in,),
+        asset_keys=((asset_in, "1"),),
+    )
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        assert await dao.save_cleanup_job(record) is True
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession),
+                [
+                    {
+                        "user_scope": _USER_SCOPE,
+                        "session_id": session_in,
+                        "title": "私人原句标题",
+                        "draft_payload": {"text": "私人草稿"},
+                        "origin_ref": "C:/private/session",
+                        "branch_metadata": None,
+                    }
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentAssetVersion),
+                [
+                    {
+                        "user_scope": _USER_SCOPE,
+                        "asset_id": asset_in,
+                        "asset_version": "1",
+                        "asset_kind": "summary",
+                        "display_name": "私人原句文件名.txt",
+                        "digest": "a" * 64,
+                        "origin_ref": "C:/private/asset",
+                        "metadata_payload": {"title": "私人原句"},
+                        "body_text": "私人原句正文",
+                        "read_state": "ready",
+                        "verification_state": "program_verified",
+                    }
+                ],
+            )
+
+        executor, runtime_engine = _executor(runtime_sync_url)
+        try:
+            store = DaoCleanupJobStore(dao)
+            orchestrator = CleanupExecutionService(jobs=CleanupService(store), store=store, dao=dao, executor=executor)
+            command = CleanupConfirmCommand(
+                user_scope=_USER_SCOPE,
+                cleanup_job_id=job_id,
+                command_id="cmd-e2e",
+                preview_digest=record.preview_digest,
+                expected_revision=record.expected_revision,
+                confirmed=True,
+            )
+            receipt = await orchestrator.confirm_and_execute(command, _precondition())
+        finally:
+            runtime_engine.dispose()
+
+        loaded = await dao.load_cleanup_job(_USER_SCOPE, job_id)
+        async with app_engine.connect() as conn:
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.title, AgentSession.draft_payload).where(
+                        AgentSession.session_id == session_in
+                    )
+                )
+            ).one()
+            asset_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.display_name,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.body_text,
+                        AgentAssetVersion.tombstoned,
+                    ).where(AgentAssetVersion.asset_id == asset_in)
+                )
+            ).one()
+        outside = await executor.preflight([out_set])
+    finally:
+        await app_engine.dispose()
+
+    assert receipt.phase is CleanupPhase.VERIFIED
+    assert receipt.replayed is False
+    assert len(receipt.verified_counts) == 9
+    assert set(receipt.verified_counts.values()) == {0}
+    assert receipt.tombstoned == {"agent_session": 1, "agent_asset_version": 1}
+    assert loaded is not None
+    assert loaded.phase is CleanupPhase.VERIFIED
+    assert loaded.fence_committed is True
+    assert loaded.exact_ids == (in_set,)
+    assert session_row.title == CLEANUP_TOMBSTONE
+    assert session_row.draft_payload is None
+    assert asset_row.display_name == CLEANUP_TOMBSTONE
+    assert asset_row.digest == CLEANUP_TOMBSTONE_DIGEST
+    assert asset_row.body_text is None
+    assert asset_row.tombstoned is True
+    assert outside.missing_ids == ()
+    assert set(outside.counts.values()) == {1}
