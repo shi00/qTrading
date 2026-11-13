@@ -344,12 +344,43 @@ def test_validate_sentiment_output_dual_protocol_routing():
     assert out.output == {"sentiment": "Negative"}
 
 
+def test_validate_sentiment_output_results_key_no_text_id_zero_raises():
+    """含 results 键即分流至 GGUF 校验器：顶层 sentiment 不构成兜底，text_id=0 缺失即抛错。"""
+    content = json.dumps(
+        {
+            "status": "success",
+            "sentiment": "Positive",
+            "results": [{"text_id": "1", "label": "利空", "score": -0.6, "confidence": 0.7}],
+        },
+        ensure_ascii=False,
+    )
+    with pytest.raises(ModelOutputValidationError) as excinfo:
+        _validate_sentiment_output(_adapter_response(content))
+    assert str(excinfo.value) == "sentiment output: text_id=0 result missing"
+
+
 def test_validate_gguf_output_non_dict_entry_raises():
-    """results 含非对象条目且无 text_id=0 兜底 → 抛错切候选（对抗性：fallback 也须是 dict）。"""
+    """results 含非对象条目且无 text_id=0 条目 → 抛错切候选（无任何兜底映射）。"""
     content = json.dumps({"status": "success", "results": [1, 2]})
     with pytest.raises(ModelOutputValidationError) as excinfo:
         _validate_gguf_sentiment_output(_adapter_response(content))
-    assert str(excinfo.value) == "sentiment output: result entry is not an object"
+    assert str(excinfo.value) == "sentiment output: text_id=0 result missing"
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        [{"text_id": "1", "label": "利空", "probabilities": [0.7, 0.2, 0.1], "score": -0.6, "confidence": 0.7}],
+        [{"label": "利好", "probabilities": [0.1, 0.2, 0.7], "score": 0.6, "confidence": 0.7}],
+        [{"text_id": 0, "label": "利好", "probabilities": [0.1, 0.2, 0.7], "score": 0.6, "confidence": 0.7}],
+    ],
+    ids=["other-text-id-only", "text-id-missing", "text-id-int-zero"],
+)
+def test_validate_gguf_output_without_text_id_zero_raises(results):
+    """本请求 text_id=0 条目缺失（其他 ID / 缺 ID / 类型不符）→ 抛错，不把其他条目当本新闻情绪。"""
+    with pytest.raises(ModelOutputValidationError) as excinfo:
+        _validate_gguf_sentiment_output(_adapter_response(json.dumps({"status": "success", "results": results})))
+    assert str(excinfo.value) == "sentiment output: text_id=0 result missing"
 
 
 def test_validate_gguf_output_selects_text_id_zero():
