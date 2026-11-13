@@ -78,6 +78,15 @@ repos:
         files: ^(pyproject\.toml|requirements-optional\.in)$
         pass_filenames: false
 
+      - id: pip-compile-docs
+        name: pip-compile requirements-docs.txt
+        entry: uv pip compile --group docs --universal --no-emit-index-url -o requirements-docs.txt
+        language: system
+        # 纯文档工具链依赖组（检视 5.3）：源为 pyproject [dependency-groups].docs，无独立 .in 文件；
+        # 输出再生成差异由 pre-commit「hook 修改文件即失败」机制拦截（与 core/dev/optional 同语义）。
+        files: ^(pyproject\.toml|requirements-docs\.txt)$
+        pass_filenames: false
+
       - id: verify-versions
         name: Verify and Fix Versions
         entry: python scripts/verify_versions.py --fix

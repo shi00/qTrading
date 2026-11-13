@@ -696,7 +696,8 @@ def check_note_lazy_format() -> list[str]:
     errors: list[str] = []
     self_path = Path(__file__).resolve()
     # 显式跳过专门测试 NOTE(lazy) 校验规则的测试文件，防止其单元测试用例中的演示文本被误判
-    test_consistency_path = ROOT / "tests" / "unit" / "test_docs_consistency.py"
+    # （D9 迁移：规则测试自 tests/unit/test_docs_consistency.py 迁至 tests/docs/test_consistency.py）
+    test_consistency_path = ROOT / "tests" / "docs" / "test_consistency.py"
 
     # D5（F17）：扫描根缺失显式失败，不得以空文件集合自然通过（失踪输入空转）
     if not ROOT.is_dir():

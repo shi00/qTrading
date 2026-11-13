@@ -65,7 +65,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - **历史空 Release 不自动补救**：`v0.10.0` / `v0.10.1` 等既有空 Release 保持原样，如需补资产另行人工评估。
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
-- 前端流水线：文档 CI (`docs-ci.yml`，对 PR 与 `merge_group` 事件运行、不设 paths 过滤，其 `Docs Consistency Check` 是 main 的 required check；缺少 `merge_group` 触发时，启用 merge queue 后队列永远拿不到该 check，而未命中 paths 时 PR 上的 check 会停在 Pending)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`，其 `pull_request` 触发已迁移到补偿门禁的 `workflow_call`，仅保留 push / tag / dispatch / schedule 语义)
+- 前端流水线：文档 CI (`docs-ci.yml`，对 PR 与 `merge_group` 事件运行、不设 paths 过滤（检视 §5.4：必要验证 job 每次事件均运行，纯 Markdown PR 天然覆盖），三 job 结构——`docs-static`（Python 3.13 只装 `requirements-docs.txt`，跑 `check_docs_consistency.py` 全量静态检查 + `tests/docs` 独立轻量套件）、`docs-application-contracts`（应用环境跑符号导入 / Flet API 字段合同 + 旧入口兼容转发）、聚合 job `Docs Consistency Check`（`if: always()` 显式汇总，失败/取消/skipped 均不通过）是 main 的 required check；缺少 `merge_group` 触发时，启用 merge queue 后队列永远拿不到该 check，而未命中 paths 时 PR 上的 check 会停在 Pending)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`，其 `pull_request` 触发已迁移到补偿门禁的 `workflow_call`，仅保留 push / tag / dispatch / schedule 语义)
 - 补偿检查门禁：`ci-aux-gate.yml` 的聚合 job `CI Aux Gate`，对 PR / `merge_group` 稳定出现（不使用 paths 过滤），按变更路径决定是否调用 `sidecar.yml` / `precommit-config-ci.yml`；`merge_group` 只做测试与审计、不产生发布产物。该 check 需由授权维护者在 ruleset `main-required-checks` 注册为 required，仓库内变更不修改远端 ruleset
 - 配置流水线：pre-commit 配置 PR 冒烟 (`precommit-config-ci.yml`，其 `pull_request` 触发已迁移到补偿门禁的 `workflow_call`，仅保留 `workflow_dispatch`)，由 gate 在 PR 修改 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)（或 `sidecar.yml` / `precommit-config-ci.yml` / `ci-aux-gate.yml` 自身）时执行 `pre-commit validate-config` + `pre-commit run --all-files`，不引入 PG service / 迁移 / 测试
 - 安全流水线：CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)
@@ -84,15 +84,15 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### Pre-commit Hooks
 
-本项目使用 pre-commit hooks，定义在 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)，本地 `repo: local` 提供以下 16 个 hook（提交前必须全部通过）：
+本项目使用 pre-commit hooks，定义在 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)，本地 `repo: local` 提供以下 17 个 hook（提交前必须全部通过）：
 
 - 代码质量：`ruff-check` · `ruff-format` · `type-ignore-reason` · `no-isolated-asyncio-testcase` · `no-temp-files`
 - 增量检查：`pyright-changed` · `weak-assertion-changed` · `e2e-anchor-check` · `theme-contrast-check` · `lint-imports`
-- 依赖与一致性：`pip-compile-core` · `pip-compile-dev` · `pip-compile-optional` · `verify-versions` · `docs-consistency` · `redline-check`
+- 依赖与一致性：`pip-compile-core` · `pip-compile-dev` · `pip-compile-optional` · `pip-compile-docs` · `verify-versions` · `docs-consistency` · `redline-check`
 
 > hook 数量与名称以 `.pre-commit-config.yaml` 为唯一正本，本清单由 `check_precommit_hook_names()` 门禁守护名称级一致（配置新增/删除 hook 时须同步本枚举）。
 
-> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不属于代码类变更（`Changes` job 分类为 `code=false`），仅改该文件的 PR 主 CI 只跑变更分类与快速 lint（均为轻量 job），不会拉起重型流水线，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；该 workflow 不再保留直接 `pull_request` 触发，改由 `ci-aux-gate.yml` 在变更命中时经 `workflow_call` 调用，保证同一 PR 只执行一次；不把该文件计入代码类变更，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 也会运行（`Docs Consistency Check` 为 required check），但只跑文档一致性脚本与契约测试，不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
+> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不属于代码类变更（`Changes` job 分类为 `code=false`），仅改该文件的 PR 主 CI 只跑变更分类与快速 lint（均为轻量 job），不会拉起重型流水线，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；该 workflow 不再保留直接 `pull_request` 触发，改由 `ci-aux-gate.yml` 在变更命中时经 `workflow_call` 调用，保证同一 PR 只执行一次；不把该文件计入代码类变更，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 也会运行（`Docs Consistency Check` 为 required check），其 docs-static job 在纯 docs 依赖环境跑文档静态检查与 `tests/docs` 套件、docs-application-contracts job 在应用环境跑文档契约测试，均不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
 
 ### 工程脚本清单
 
