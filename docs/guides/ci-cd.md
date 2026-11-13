@@ -140,6 +140,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/upgrade_golden_snapshot.py` | 依赖升级金标准快照（D0.2）：用完全离线的合成冻结快照（freeze_date=2025-12-31）重跑 5 个策略场景 + 1 次回测，比对/覆写 `tests/fixtures/upgrade_golden/expected`；`--check` 一致退出 0、差异退出 1、输入异常退出 2；`--update` 重建 expected；`--generate-inputs` 确定性重建 inputs | 手动（依赖全量升级前后各跑一次） | 不阻断 |
 | `scripts/g4_theme_screenshots.py` | G4-202 四主题截图判读采集（Flet 升级验收）：四主题 × Impeller/Skia 双后端；Win32 窗口定位、窄/宽屏缩放、最小化恢复、关闭确认弹窗；截图回退（PrintWindow → 屏幕抓取）、主色核验主题是否真正生效、与 G0 基线像素差分；退出码 0=采集完成/差分成功、1=主题未生效或空白截图、2=环境参数错误 | 手动（Flet 升级验收，候选构建实跑） | 不阻断 |
 | `scripts/docs_markdown.py` | 文档 Markdown 统一解析视图（检视 5.1 工作包 D3）：CommonMark + table/strikethrough 一次解析形成标题/锚点、标准与引用式链接、HTML ID、代码块/行号的不可变视图，供 `docs_generated.py`（D4）与 `check_docs_consistency.py`（D5）复用；测试见 `tests/docs/` 独立环境（docs 组） | 手动 / 被 D5 门禁调用（接线后随 `docs-consistency` 触发） | 不阻断 |
+| `scripts/docs_generated.py` | 受控生成器（检视 5.2/5.2.1 工作包 D4）：读 §4.1 作者源按封闭目标清单渲染派生块（缺块/重复/嵌套/越界/非法源显式拒绝），更新编排覆盖读快照→写入保护→核对→渲染→逐文件提交→更新后 all 检查全窗口；由 `check_docs_consistency.py --check/--update` 调用；测试见 `tests/docs/` 独立环境 | 手动 / 被 `check_docs_consistency.py --scope document` 生成输出检查调用（D6/D9 接线后随 `docs-consistency` 触发） | 不阻断 |
 
 ### 数据库迁移
 

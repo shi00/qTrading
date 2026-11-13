@@ -13,8 +13,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+if str(FIXTURES_DIR) not in sys.path:
+    sys.path.insert(0, str(FIXTURES_DIR))
 
 import pytest
 

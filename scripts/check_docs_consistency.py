@@ -86,6 +86,7 @@
 
 from __future__ import annotations
 
+import argparse
 import ast
 import json
 import re
@@ -93,10 +94,13 @@ import subprocess
 import sys
 import tomllib
 import typing
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from io import TextIOWrapper
 from pathlib import Path
+
+import docs_generated
 
 # Windows 默认 GBK 终端会因 emoji（✅/❌）输出触发 UnicodeEncodeError，强制 UTF-8 输出。
 # 在模块加载时配置，确保 main() 与单元测试导入时均生效（不依赖 -X utf8 启动参数）。
@@ -4233,82 +4237,222 @@ def check_evals_case_index_consistency() -> list[str]:
     return errors
 
 
-def main() -> int:
-    """运行全部检查，返回退出码。"""
-    all_errors: list[str] = []
-    all_errors.extend(check_anchor_dead_links())
-    all_errors.extend(check_relative_dead_links())
-    all_errors.extend(check_precommit_hook_count())
-    all_errors.extend(check_precommit_hook_names())
-    all_errors.extend(check_workflow_enum())
-    all_errors.extend(check_flet_version_drift())
-    all_errors.extend(check_note_lazy_format())
-    all_errors.extend(check_redlines_yaml_consistency())
-    # 7b：红线总数散文（R1~Rxx）守卫，紧随表格式一致性之后，守护散文式自述漏同步（DS 根因）
-    all_errors.extend(check_redline_range_consistency())
-    # 7c：import-linter 契约数量散文（「N 条契约」）守卫，与 7b 同族，守护 E4 重构后的数量漂移（H6-b）
-    all_errors.extend(check_contract_count_prose())
-    # 3c 紧随 3b 之后：3b 守护 yml schema 完整性，3c 守护 enforcement 与实际配置一致
-    # 3c 独立解析 yml，不依赖 3b 执行结果，顺序仅为可读性
-    all_errors.extend(check_enforcement_mapping())
-    # enforcement 反向覆盖（DS-11）：check_redlines.py 实际执行的 check_* 必须全部在 redlines.yml 登记
-    all_errors.extend(check_enforcement_reverse_coverage())
-    # 例外注册表一致性：紧随红线一致性之后，守护集中例外治理 (P1-01)
-    all_errors.extend(check_exceptions_yaml_consistency())
-    # 例外反向覆盖：技术债表中豁免 EXCEPTIONABLE 红线的条目必须已登记例外 (P1-04)
-    all_errors.extend(check_exceptions_reverse_coverage())
-    # 主题 → canonical 正本映射一致性：守护决策树机器可读镜像的路径有效性 (P2-12)
-    all_errors.extend(check_canonical_topics_consistency())
-    # Flet 入口完整性：紧随 Flet 版本漂移检查之后，守护 docs/flet/README.md 覆盖全部专题
-    all_errors.extend(check_flet_hub_completeness())
-    # AGENTS.md 生成区块与 redlines.yml 一致性：守护跨工具入口的最小安全集导出镜像 (DOC-08/DOC-13)
-    all_errors.extend(check_agents_md_sync())
-    # AGENTS.md 最小验证命令生成区块（M2）：跨工具入口补齐「改完代码跑什么验证」
-    all_errors.extend(check_agents_md_min_verify_commands())
-    # CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性：守护自动加载文档第一屏 (F-04)
-    all_errors.extend(check_claude_executive_sync())
-    # CLAUDE.md 人工评审红线可执行自查清单生成区块（H2）：把「尤须 AI 自查」变成可勾选判据
-    all_errors.extend(check_claude_self_check_sync())
+# ---------------------------------------------------------------------------
+# D4：scope 固定责任映射、生成输出检查与 --check/--update CLI（检视 §5.2）
+# ---------------------------------------------------------------------------
 
-    # 分支E 机制补全（DOC-01/04/05/07/09/11）：规则集元数据、决策树镜像、canonical 路由、
-    # docs 索引全覆盖、治理 id（EX-\d{4}）双向引用。补齐「字段存在」之外的「语义正确」守卫。
-    all_errors.extend(check_ruleset_metadata_consistency())
-    all_errors.extend(check_ruleset_changelog_version())
-    all_errors.extend(check_decision_tree_mapping())
-    all_errors.extend(check_canonical_routing())
-    all_errors.extend(check_canonical_completion_criteria())
-    all_errors.extend(check_canonical_docs_are_gated())
-    all_errors.extend(check_docs_index_completeness())
-    all_errors.extend(check_reviews_index_completeness())
-    all_errors.extend(check_adr_index_completeness())
-    all_errors.extend(check_scripts_index_completeness())
-    all_errors.extend(check_governance_id_references())
-    all_errors.extend(check_core_modules_completeness())
-    # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后。
-    # .py 扫描（scripts/ + tests/）的未登记 ID 暂为 WARNING，不阻断（DS-02 渐进部署）。
-    glossary_errors, glossary_warnings = check_governance_id_glossary()
-    all_errors.extend(glossary_errors)
-    if glossary_warnings:
+_SCOPE_LABELS = frozenset({"all", "document", "governance", "source"})
+
+# scope 固定责任映射（D4 初始分类，D5 迁移时逐项精调；顺序与旧 main() 线性调用一致）：
+# - document：正式文档结构、路径/锚点、目录索引与生成输出；
+# - governance：作者源（redlines/exceptions/canonical）、路由与配置映射；
+# - source：NOTE(lazy)/模块/单例/动态文案等源码契约。
+_SCOPE_CHECK_NAMES: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"document"}), "check_anchor_dead_links"),
+    (frozenset({"document"}), "check_relative_dead_links"),
+    (frozenset({"governance"}), "check_precommit_hook_count"),
+    (frozenset({"governance"}), "check_precommit_hook_names"),
+    (frozenset({"governance"}), "check_workflow_enum"),
+    (frozenset({"governance"}), "check_flet_version_drift"),
+    (frozenset({"source"}), "check_note_lazy_format"),
+    (frozenset({"governance"}), "check_redlines_yaml_consistency"),
+    (frozenset({"governance"}), "check_redline_range_consistency"),
+    (frozenset({"governance"}), "check_contract_count_prose"),
+    (frozenset({"governance"}), "check_enforcement_mapping"),
+    (frozenset({"governance"}), "check_enforcement_reverse_coverage"),
+    (frozenset({"governance"}), "check_exceptions_yaml_consistency"),
+    (frozenset({"governance"}), "check_exceptions_reverse_coverage"),
+    (frozenset({"governance"}), "check_canonical_topics_consistency"),
+    (frozenset({"document"}), "check_flet_hub_completeness"),
+    (frozenset({"document"}), "check_agents_md_sync"),
+    (frozenset({"document"}), "check_agents_md_min_verify_commands"),
+    (frozenset({"document"}), "check_claude_executive_sync"),
+    (frozenset({"document"}), "check_claude_self_check_sync"),
+    (frozenset({"governance"}), "check_ruleset_metadata_consistency"),
+    (frozenset({"governance"}), "check_ruleset_changelog_version"),
+    (frozenset({"governance"}), "check_decision_tree_mapping"),
+    (frozenset({"governance"}), "check_canonical_routing"),
+    (frozenset({"document"}), "check_canonical_completion_criteria"),
+    (frozenset({"document"}), "check_canonical_docs_are_gated"),
+    (frozenset({"document"}), "check_docs_index_completeness"),
+    (frozenset({"document"}), "check_reviews_index_completeness"),
+    (frozenset({"document"}), "check_adr_index_completeness"),
+    (frozenset({"document"}), "check_scripts_index_completeness"),
+    (frozenset({"governance"}), "check_governance_id_references"),
+    (frozenset({"source"}), "check_core_modules_completeness"),
+    (frozenset({"governance"}), "_glossary_check_with_warnings"),
+    (frozenset({"document"}), "check_guillemet_references"),
+    (frozenset({"source"}), "check_strategy_desc_dynamic_consistency"),
+    (frozenset({"governance"}), "check_flet_badge_version"),
+    (frozenset({"governance"}), "check_exception_count_prose"),
+    (frozenset({"source"}), "check_singleton_count_prose"),
+    (frozenset({"source"}), "check_non_registered_singleton_doc"),
+    (frozenset({"document"}), "check_adr_supersede_chain"),
+    (frozenset({"governance"}), "check_governance_id_dual_meaning"),
+    (frozenset({"document"}), "check_evals_case_index_consistency"),
+    (frozenset({"document"}), "check_docs_generated"),
+)
+
+
+def _glossary_check_with_warnings() -> list[str]:
+    """治理 ID 对照表检查的 warning 打印包装（保持旧 main() 的渐进部署输出行为）。"""
+    errors, warnings = check_governance_id_glossary()
+    if warnings:
         print("::warning::治理 ID 对照表（渐进部署，不阻断）存在未在 governance-ids.md 登记的治理 ID：")
-        for w in glossary_warnings[:40]:
+        for w in warnings[:40]:
             print(f"  - {w}")
-        if len(glossary_warnings) > 40:
-            print(f"  - ...另有 {len(glossary_warnings) - 40} 条未列出（存量清零后翻转为 ERROR）")
-    # 书名号式章节引用：补上锚点/相对链接门禁之外的最后一类跨文档引用（GDR-13）
-    all_errors.extend(check_guillemet_references())
-    # 策略静态描述与可调参数一致性（D2-M4）：硬编码数字阈值必须配套 _desc_dynamic 动态模板
-    all_errors.extend(check_strategy_desc_dynamic_consistency())
+        if len(warnings) > 40:
+            print(f"  - ...另有 {len(warnings) - 40} 条未列出（存量清零后翻转为 ERROR）")
+    return errors
 
-    # 散文式自述元信息守卫（文档复检 H1/L1/H3 根因治理，补「对比型/锚点型」之外的漏检单点）
-    all_errors.extend(check_flet_badge_version())  # H1：README UI 徽章 Flet 版本对齐
-    all_errors.extend(check_exception_count_prose())  # L1：「现存 N 条 R1 例外」数量守卫
-    # 盲1：注册单例散文数量守卫 + 盲2：ADR supersede 双向链守卫（文档复检指标盲区治理）
-    all_errors.extend(check_singleton_count_prose())  # 盲1：散文 N vs 表格行数
-    all_errors.extend(check_non_registered_singleton_doc())  # M1：非注册单例清单双向校验
-    all_errors.extend(check_adr_supersede_chain())  # 盲2：ADR supersede 双向链对称性
-    all_errors.extend(check_governance_id_dual_meaning())  # GOV-06：治理 ID 同名异义（双义已清零，翻转 ERROR）
-    # L7：evals 样例目录「当前 case 文件」列与实际 case 文件双向一致（新增 case 漏登记 README 即报错）
-    all_errors.extend(check_evals_case_index_consistency())
+
+def check_docs_generated() -> list[str]:
+    """生成输出一致性检查（D4 新增，document scope）。
+
+    遍历内置封闭注册表的激活条目：目标现块内容须等于作者源渲染结果；缺块/块结构
+    违规/作者源校验失败/路径越界均显式报错（fail-closed，不做静默跳过）。
+    """
+    errors: list[str] = []
+    for spec in docs_generated.BUILTIN_REGISTRY:
+        if not spec.active:
+            continue
+        label = f"{spec.target}#{spec.block_id}"
+        try:
+            target_path = docs_generated.resolve_within(ROOT, spec.target)
+            if not target_path.is_file():
+                errors.append(f"{label}: 登记目标文件不存在")
+                continue
+            text = target_path.read_text(encoding="utf-8")
+            blocks = docs_generated.scan_blocks(text, spec.block_format)
+            if spec.block_id not in blocks:
+                errors.append(f"{label}: 目标缺生成块标记（开始/结束成对注释缺失或形态不符）")
+                continue
+            rendered = docs_generated.render_block_lines(ROOT, spec)
+            if list(blocks[spec.block_id].content_lines) != rendered:
+                errors.append(f"{label}: 生成块与作者源渲染结果不一致（请改正本后同步生成区块，勿手工修改）")
+        except docs_generated.DocsGeneratedError as exc:
+            errors.append(f"{label}: {exc}")
+    return errors
+
+
+def build_scope_plan() -> list[tuple[frozenset[str], Callable[[], list[str]]]]:
+    """构建 scope 固定责任映射的检查计划（条目为 标签集 → 检查函数）。
+
+    检查函数经 globals() 按名动态解析：保持 tests/unit 以 monkeypatch 替换单个检查
+    函数后调用 main() 的既有兼容（计划不在导入期固化函数引用）。
+    """
+    return [(labels, globals()[name]) for labels, name in _SCOPE_CHECK_NAMES]
+
+
+def collect_scope_errors(plan: list[tuple[frozenset[str], Callable[[], list[str]]]], scope: str) -> list[str]:
+    """执行 scope 固定责任映射内的检查并聚合错误（scope 是固定责任，不是跳过失败的途径）。"""
+    errors: list[str] = []
+    for labels, check in plan:
+        if scope == "all" or scope in labels:
+            errors.extend(check())
+    return errors
+
+
+def _builtin_registry() -> tuple[docs_generated.BlockSpec, ...]:
+    """生产 --update 所用封闭内置注册表（生成目标是封闭清单，非扫描到标记就能写）。"""
+    return docs_generated.BUILTIN_REGISTRY
+
+
+def run_builtin_update() -> docs_generated.UpdateResult:
+    """生产 --update 入口：内置封闭注册表更新 + 更新后 all 检查（同一写入保护窗口）。"""
+    return docs_generated.run_update(
+        ROOT,
+        docs_generated.BUILTIN_REGISTRY,
+        post_check=lambda: collect_scope_errors(build_scope_plan(), "all"),
+    )
+
+
+def _report_update_result(result: docs_generated.UpdateResult) -> None:
+    """如实输出已写/未变/冲突/写失败/阻塞与更新后检查错误（§5.2.1-4）。
+
+    不谎称全批事务回滚：部分目标写失败或冲突时其余目标按各自核对结果提交，
+    输出必须让调用方分辨哪些目标已写、哪些未写。
+    """
+    if result.blocked:
+        print(f"[FAIL] 更新被阻塞（不基于旧快照继续、不自动重试）: {result.blocked}")
+        return
+    if result.written:
+        print("[更新] 已写入目标:")
+        for rel in result.written:
+            print(f"  - {rel}")
+    if result.unchanged:
+        print("[更新] 渲染零差异未写目标:")
+        for rel in result.unchanged:
+            print(f"  - {rel}")
+    if result.conflicts:
+        print("[FAIL] 检出并发冲突（原位未覆盖，用户新稿已保留）:")
+        for index, rel in enumerate(result.conflicts):
+            reason = result.conflict_reasons[index] if index < len(result.conflict_reasons) else "未提供原因"
+            print(f"  - {rel}: {reason}")
+    if result.failed:
+        print("[FAIL] 写入失败目标（不承诺跨文件事务，其余目标已各自提交）:")
+        for rel in result.failed:
+            print(f"  - {rel}")
+    if result.post_check_errors:
+        print("[FAIL] 更新后 all 检查失败:")
+        for err in result.post_check_errors:
+            print(f"  - {err}")
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """构建 CLI 解析器：--check/--scope/--update（检视 §5.2 固定接口）。"""
+    parser = argparse.ArgumentParser(
+        prog="check_docs_consistency",
+        description="文档一致性检查（--check --scope）与受控生成块更新（--update）。",
+    )
+    parser.add_argument("--check", action="store_true", help="运行一致性检查（无参数时等价 --check --scope all）")
+    parser.add_argument(
+        "--scope",
+        choices=sorted(_SCOPE_LABELS),
+        default=None,
+        help="固定责任范围：document=结构/路径/锚点/目录/生成输出；governance=作者源/例外/路由/配置映射；source=NOTE/模块/单例/动态文案源码契约",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="更新封闭注册表登记的生成块并自动运行 all 检查（不得与 --check/--scope 组合）",
+    )
+    return parser
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    plan: list[tuple[frozenset[str], Callable[[], list[str]]]] | None = None,
+    update_runner: Callable[[], docs_generated.UpdateResult] | None = None,
+) -> int:
+    """CLI 入口：无参数等价 --check --scope all；退出码 成功 0 / 失败 1 / 参数误用 2。
+
+    argv=None（既有调用方直接 main()）时不解析命令行、只读执行全部检查，保持旧签名兼容；
+    真实 CLI 经 __main__ 显式传入 sys.argv[1:]。
+    """
+    if argv is None:
+        args = argparse.Namespace(check=False, scope=None, update=False)
+    else:
+        parser = _build_arg_parser()
+        args = parser.parse_args(argv)
+    if args.update and (args.check or args.scope is not None):
+        parser = _build_arg_parser()
+        parser.error("--update 不得与 --check/--scope 组合（更新隐含更新后 all 检查）")
+    if args.update:
+        runner = update_runner if update_runner is not None else run_builtin_update
+        try:
+            result = runner()
+        except docs_generated.DocsGeneratedError as exc:
+            # 显式拒绝（缺源/缺块/越界/保护失败/目标未登记等）→ 如实报告并退出 1
+            print(f"[FAIL] 更新被拒绝: {exc}")
+            return 1
+        _report_update_result(result)
+        return 0 if result.ok else 1
+
+    scope = args.scope if args.scope is not None else "all"
+    effective_plan = plan if plan is not None else build_scope_plan()
+    all_errors = collect_scope_errors(effective_plan, scope)
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -4316,18 +4460,21 @@ def main() -> int:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
-    print(
-        "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
-        "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
-        "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
-        "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
-        "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
-        "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
-        "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
-        "注册单例散文数量守卫 / ADR supersede 双向链守卫 / "
-        "canonical section 章节存在性 / evals 样例目录索引一致性 / 非注册单例清单守卫）"
-    )
+    if scope == "all":
+        print(
+            "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
+            "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
+            "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
+            "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
+            "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
+            "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
+            "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
+            "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
+            "注册单例散文数量守卫 / ADR supersede 双向链守卫 / "
+            "canonical section 章节存在性 / evals 样例目录索引一致性 / 非注册单例清单守卫）"
+        )
+    else:
+        print(f"[PASS] 文档一致性检查通过（scope={scope}；仅执行该 scope 固定责任映射内检查）")
     return 0
 
 
@@ -4338,4 +4485,5 @@ if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):
         if hasattr(_stream, "reconfigure"):
             typing.cast(TextIOWrapper, _stream).reconfigure(encoding="utf-8", errors="replace")
-    sys.exit(main())
+    # 显式传入命令行参数：main(argv=None) 保持旧签名兼容（不解析 argv），CLI 路径在此解析。
+    sys.exit(main(sys.argv[1:]))
