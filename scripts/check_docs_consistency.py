@@ -1450,9 +1450,9 @@ _CONTINUE_ON_ERROR_TRUE_RE = re.compile(r"^continue-on-error:\s*true\s*$", re.IG
 # N5 执行证据排除形态（F21「测试选择/skip 有负例」）：
 # - `--collect-only` / `--co`：仅收集不执行；
 # - `|| true` / `|| :` / `; true`：吞失败命令（失败仍绿 ≠ 必要门真实运行）。
-_PYTEST_COLLECT_ONLY_RE = re.compile(r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?:\s|$).*?(?:--collect-only|--co(?:\s|$))")
+_PYTEST_COLLECT_ONLY_RE = re.compile(r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?=\s|$).*?(?:--collect-only|--co(?:\s|$))")
 _PYTEST_SWALLOWED_FAILURE_RE = re.compile(
-    r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?:\s|$).*(?:\|\|\s*(?:true|:)|;\s*true)"
+    r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?=\s|$).*(?:\|\|\s*(?:true|:)|;\s*true)"
 )
 
 
@@ -4442,6 +4442,27 @@ def _glossary_check_with_warnings() -> list[str]:
     return errors
 
 
+def _describe_line_diff(actual: list[str], expected: list[str], limit: int = 3) -> str:
+    """生成块不一致时的可核差异摘要（首个差异行号 + 前后内容，避免只看「不一致」无从定位）。
+
+    只输出前 ``limit`` 处差异且截断单行长度；行数差异单列，便于区分「多/少行」与「同行内容不同」。
+    """
+    parts: list[str] = []
+    if len(actual) != len(expected):
+        parts.append(f"（行数 现块 {len(actual)} / 渲染 {len(expected)}）")
+    shown = 0
+    for idx in range(max(len(actual), len(expected))):
+        got = actual[idx] if idx < len(actual) else "<缺失行>"
+        want = expected[idx] if idx < len(expected) else "<多余行>"
+        if got == want:
+            continue
+        parts.append(f" 第 {idx + 1} 行 现块={got[:160]!r} 渲染={want[:160]!r}")
+        shown += 1
+        if shown >= limit:
+            break
+    return "".join(parts)
+
+
 def check_docs_generated() -> list[str]:
     """生成输出一致性检查（D4 新增，document scope）。
 
@@ -4464,8 +4485,12 @@ def check_docs_generated() -> list[str]:
                 errors.append(f"{label}: 目标缺生成块标记（开始/结束成对注释缺失或形态不符）")
                 continue
             rendered = docs_generated.render_block_lines(ROOT, spec)
-            if list(blocks[spec.block_id].content_lines) != rendered:
-                errors.append(f"{label}: 生成块与作者源渲染结果不一致（请改正本后同步生成区块，勿手工修改）")
+            actual = list(blocks[spec.block_id].content_lines)
+            if actual != rendered:
+                errors.append(
+                    f"{label}: 生成块与作者源渲染结果不一致（请改正本后同步生成区块，勿手工修改）"
+                    + _describe_line_diff(actual, rendered)
+                )
         except docs_generated.DocsGeneratedError as exc:
             errors.append(f"{label}: {exc}")
     return errors

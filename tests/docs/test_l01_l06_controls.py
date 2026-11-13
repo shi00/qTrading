@@ -65,6 +65,9 @@ def test_l01_hand_edit_derived_block_fails_check_and_recovers(
     errors = cdc.check_docs_generated()
     assert errors, "修改派生不改源必须失败（L01：重复展示只能引用或生成）"
     assert all("limits" in e for e in errors), f"报错须归因被手改的块身份: {errors}"
+    assert any("第 " in e and "现块=" in e and "渲染=" in e for e in errors), (
+        f"不一致须给出可核差异行（F17 显式失败原因，不留「不一致」无从定位）: {errors}"
+    )
 
     restored = dg.run_update(root, registry)
     assert restored.ok and "targets/derived.md" in restored.written, "从作者源重新生成恢复"

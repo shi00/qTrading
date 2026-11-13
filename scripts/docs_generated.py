@@ -1043,7 +1043,11 @@ class WriteGuard:
             import fcntl  # 函数体内平台分支 import：Windows 无此模块
 
             fd = os.open(str(path), os.O_RDWR)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)  # 取锁失败即释放本次新开的句柄，不留泄漏（成功路径由 _release 统一关闭）
+                raise
             self._fds[path] = fd
             # 合同 §5.2.1-3：协作锁无法证明覆盖外部编辑器 → 拒绝原位更新，
             # 不把共享工作区默认为独占环境（先释放已取得句柄再拒绝）。

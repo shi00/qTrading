@@ -101,7 +101,9 @@ repos:
         name: Check docs consistency
         entry: python scripts/check_docs_consistency.py
         language: python
-        additional_dependencies: ["pyyaml>=6.0"]
+        # docs_markdown 统一解析视图（D3）依赖 markdown-it-py：hook 隔离环境必须自带该解析依赖，
+        # 否则 hook 触发即 ModuleNotFoundError（与 verify-versions hook 同因）。
+        additional_dependencies: ["pyyaml>=6.0", "markdown-it-py>=4.0.0"]
         # files 含 .py 以触发 NOTE(lazy) 三要素检查(任何 .py 变化都跑)；.ya?ml 覆盖治理正本 .yml 扩展名（GDR-02）。
         files: \.(md|toml|ya?ml|py)$
         pass_filenames: false

@@ -69,7 +69,7 @@ class Slugger(Protocol):
 
     def slug(self, value: str, maintain_case: bool = False) -> str:
         """生成唯一 slug；重复标题自动追加序号。"""
-        ...
+        raise NotImplementedError  # Protocol 结构化声明，运行期由具体后端实现
 
 
 try:  # 权威来源 pin github-slugger==0.0.3：可用则优先（未来修复版自动切回）
