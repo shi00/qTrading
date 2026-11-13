@@ -1802,6 +1802,66 @@ class TestRunAiAnalysisUsageSummary:
         assert "_ai_usage_summary" not in context
 
     @pytest.mark.asyncio
+    async def test_scenario_chain_result_not_double_charged(self):
+        """DD-F34 一账：新链结果（Recorder 已入账）不带 usage/cost，不得二次落账。
+
+        S4 统一场景链的 attempt/用量由 UsageRecorder 在出站前登记并结算；返回给
+        策略行的是模型输出 + 程序 execution_metadata，不含 ``usage``/``cost``。
+        若 ai_mixin 把「无 usage」当成「未计价调用」再经 ``_track_cost`` 落账，
+        同一次模型调用会记两笔。本用例固化「Recorder 已入账 → 0 二次落账」。
+        """
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.0, 15.0],
+            }
+        )
+        context = {"data_processor": dp}
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            return {
+                "score": 88,
+                "summary": "ok",
+                "confidence": 0.5,
+                # 新链程序字段：Recorder 已按该 invocation 记账
+                "execution_metadata": {
+                    "invocation_id": f"inv-{stock_info.get('ts_code')}",
+                    "usage_status": "reported",
+                    "ai_status": "succeeded",
+                },
+            }
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(return_value=""),
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cents = AsyncMock()
+            mock_tracker.add_unpriced = AsyncMock()
+            mock_tracker_cls.return_value = mock_tracker
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        assert len(result) == 2
+        # 结果仍正常落行，且不把「无 usage」伪装成「未计价消耗」
+        assert set(result["ai_status"]) == {"analyzed"}
+        assert "_ai_usage_summary" not in context
+        mock_tracker.add_cost_cents.assert_not_awaited()
+        mock_tracker.add_unpriced.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_budget_exhausted_soft_stops_no_llm_call(self):
         """月度预算已达上限: 不发起任何 LLM 调用, 返回 budget_exceeded 状态的候选并打软停标记。"""
         s = ConcreteStrategy()
