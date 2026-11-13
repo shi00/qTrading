@@ -303,3 +303,56 @@ class TestErrorCodeValidation:
         errors, warnings = _check("x = 1  # type: ignore[reportMissingImports]\n", test_file=False)
         assert errors == []
         assert warnings == []
+
+    def test_mypy_comma_separated_codes_pass(self):
+        """mypy 逗号分隔多错误码 `[misc,assignment]` 为合法形态 → 不误判（Lead 检视回归）。
+
+        回归锚：utils/error_classifier.py 既有 8 行 `# type: ignore[misc,assignment]`；
+        修复前整段 fullmatch 单码正则失败，被误判伪错误码 ERROR（pre-commit 全仓拦截）。
+        """
+        errors, warnings = _check("x = 1  # type: ignore[misc,assignment]\n", test_file=False)
+        assert errors == [], f"mypy 逗号分隔合法码不得误报, got: {errors}"
+        assert warnings == []
+
+    def test_comma_separated_with_one_pseudo_code_is_error(self):
+        """逗号分隔列表中任一条目非法（`[misc,Bad_Code]`）→ ERROR。"""
+        errors, warnings = _check("x = 1  # type: ignore[misc,Bad_Code]\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+
+    def test_comma_separated_with_spaces_pass(self):
+        """`[arg-type, union-attr]` 逗号后带空格 → 逐条 strip 后合法 → 通过。"""
+        errors, warnings = _check("f(x)  # type: ignore[arg-type, union-attr]\n", test_file=True)
+        assert errors == []
+        assert len(warnings) == 1  # tests/ 无 human reason → warning 路径不回退
+
+    def test_bracket_inline_reason_legacy_variant_passes(self):
+        """存量变体 `[code, reason: ...]`（理由在方括号内）→ 码+理由俱全，不判伪码不出警告。
+
+        回归锚：tests/unit/ui/ 约 10 处 `[reportCallIssue, reason: Flet stub ...]` 既有用法；
+        旧检查器 kebab-only 对 camelCase 首码不匹配而静默放行，新校验若不豁免会阻断全仓提交。
+        """
+        content = "btn.on_click(cb)  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]\n"
+        errors, warnings = _check(content, test_file=True)
+        assert errors == []
+        assert warnings == []
+
+    def test_bracket_inline_reason_mixed_with_pseudo_code_is_error(self):
+        """`[Bad_Code, reason: ok]`：伪码条目在 reason: 之前 → ERROR。
+
+        边界说明：reason: 之后的文本按「理由正文」吞并（理由可含逗号），其中混入的
+        伪码不可与理由区分、不检测（与旧检查器静默放行行为一致）；reason: 之前的
+        结构条目逐个校验。
+        """
+        errors, warnings = _check("x = 1  # type: ignore[Bad_Code, reason: ok]\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+
+    def test_pure_reason_entry_without_code_is_error(self):
+        """`[reason: only text]` 无任何错误码条目 → ERROR（理由不能替代 error-code）。"""
+        errors, warnings = _check("x = 1  # type: ignore[reason: 某个理由]\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []

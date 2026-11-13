@@ -51,6 +51,8 @@ _ANY_IGNORE_RE = re.compile(r"# type:\s?ignore(?![a-zA-Z])")
 # - camelCase（pyright 诊断规则名形态）：reportMissingImports / reportAttributeAccessIssue 等
 #   （仓库既有用法，kebab-only 校验会误杀全仓既有 ignore——C11/F16 回归锚定）。
 # 伪错误码（大写开头/下划线/数字/空括号）视同「未提供有效 error-code」→ R3 ERROR；
+# 逗号分隔多码为 mypy 合法形态（如两码逗号列表，utils/error_classifier.py 既有用法），
+# 逐个条目校验，任一条目非法即整行 ERROR；
 # 错误码全集合法性由 pyright/mypy 运行层报警，本检查只守护形态（不冒充，F21 语义）。
 _VALID_ERROR_CODE_RE = re.compile(r"[a-z][a-zA-Z\-]*")
 # 方括号错误码提取（允许 `ignore [code]` 的空格分隔——pyright 合法形态）
@@ -101,17 +103,35 @@ def check_file(path: Path) -> tuple[list[str], list[str]]:
                 errors.append(f"{path}:{lineno}: R3 模糊压制 — # type: ignore 必须带 [error-code]")
                 continue
             code = code_match.group(1)
-            if not _VALID_ERROR_CODE_RE.fullmatch(code):
-                # 伪错误码（大写/下划线/数字/空括号）= 未提供有效 error-code（R3 ERROR）
+            # 条目切分：`reason:` 条目吞并其后全部条目——理由文本可含逗号
+            # （如 `[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]`）。
+            _REASON_ENTRY_PREFIX = "reason:"
+            codes: list[str] = []
+            for raw in code.split(",") if code.strip() else []:
+                cs = raw.strip()
+                if codes and codes[-1].lower().startswith(_REASON_ENTRY_PREFIX):
+                    codes[-1] = f"{codes[-1]},{cs}"
+                else:
+                    codes.append(cs)
+            # 存量变体兼容（G5 务实版，Lead D5 检视登记）：`[code, reason: ...]` 把人类理由
+            # 写在方括号内（tests/unit/ui/ 约 10 处既有用法）。R3 防的是「无码无理由的模糊
+            # 压制」；该形态码与理由俱全，不构成模糊压制，判 ERROR 属格式洁癖且会阻断全仓
+            # 提交（旧检查器 _CODED_RE kebab-only 对 camelCase 首码不匹配而静默放行）。
+            # 条目以 `reason:` 开头者视为行内理由，不参与错误码形态校验（正本格式仍应为
+            # 方括号外理由；清理该变体须独立任务登记，不在检查器静默清理）。
+            inline_reason = any(c.lower().startswith(_REASON_ENTRY_PREFIX) for c in codes[1:])
+            structural = [c for c in codes if not c.lower().startswith(_REASON_ENTRY_PREFIX)]
+            if not structural or not all(_VALID_ERROR_CODE_RE.fullmatch(c) for c in structural):
+                # 伪错误码（大写/下划线/数字/空括号/逗号列表中任一结构条目非法）= 未提供有效 error-code（R3 ERROR）
                 errors.append(
-                    f"{path}:{lineno}: R3 模糊压制 — 伪错误码 `[{code}]` 须为合法形态（mypy kebab-case 或 pyright camelCase）"
+                    f"{path}:{lineno}: R3 模糊压制 — 伪错误码 `[{code}]` 须为合法形态（mypy kebab-case 或 pyright camelCase，逗号分隔逐条校验）"
                     "（视同未提供有效 [error-code]）"
                 )
                 continue
-            if is_test and code == "attr-defined":
+            if is_test and "attr-defined" in structural:
                 # mock 替身场景：attr-defined 免于 human reason（工程决策，报告 G5 务实版）
                 continue
-            if is_test and not _REASON_RE.search(rest[code_match.end() :]):
+            if is_test and not inline_reason and not _REASON_RE.search(rest[code_match.end() :]):
                 warnings.append(
                     f"{path}:{lineno}: R3（tests/）— # type: ignore[{code}] 建议带 human reason"
                     "（`# type: ignore[code]  # <原因>`）；存量阶段为 WARNING，存量≤5 后转 ERROR"
