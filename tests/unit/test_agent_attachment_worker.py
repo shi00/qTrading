@@ -413,7 +413,7 @@ class TestWorkerLifecycle:
 
     def test_pdf_dependency_missing_is_explicit(self) -> None:
         with pytest.raises(AttachmentParseError) as exc:
-            _parse(AttachmentKind.PDF, b"%PDF-1.4\n")
+            _parse(AttachmentKind.PDF, b"%PDF-" + b"1.4\n")
         assert exc.value.code == "parser_dependency_missing"
 
     def test_image_dependency_missing_or_structure_error_is_explicit(self) -> None:
