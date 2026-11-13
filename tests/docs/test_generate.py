@@ -288,3 +288,20 @@ def test_platform_import_guard() -> None:
     assert dg.PLATFORM_LOCK_BACKEND in ("win32-exclusive-open", "posix-advisory-unsupported")
     if sys.platform == "win32":
         assert dg.PLATFORM_LOCK_BACKEND == "win32-exclusive-open"
+
+
+def test_docs_index_candidates_order_is_platform_independent(tmp_path: Path) -> None:
+    """文件级目录候选集按 POSIX 相对路径排序：`README.md` 必须排在 `adr/` 之前。
+
+    平台回归：Path 自带排序在 Windows 大小写不敏感（readme 落在 adr 之后）、Linux 按
+    ASCII（README 在 adr 之前），同一作者源两平台渲染次序不同 → 生成块跨平台判不一致
+    （PR #2196 首轮 Docs Static Checks / Code Quality 即因此失败）。
+    """
+    docs = tmp_path / "docs"
+    (docs / "adr").mkdir(parents=True)
+    (docs / "README.md").write_text("# 索引\n", encoding="utf-8")
+    (docs / "adr" / "0001-x.md").write_text("# X\n", encoding="utf-8")
+
+    order = [p.relative_to(tmp_path).as_posix() for p in dg._docs_index_candidates(tmp_path)]
+
+    assert order == ["docs/README.md", "docs/adr/0001-x.md"]

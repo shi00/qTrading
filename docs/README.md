@@ -26,6 +26,7 @@
 <!-- generated:docs-readme-file-index -->
 | 文档 | 标题 / 角色 |
 |------|--------------|
+| [README.md](./README.md) | Project Documentation Index |
 | [adr/0001-record-architecture-decisions.md](./adr/0001-record-architecture-decisions.md) | ADR-0001: Record Architecture Decisions |
 | [adr/0002-document-layering.md](./adr/0002-document-layering.md) | ADR-0002: 文档架构分层决策 |
 | [adr/0003-overturn-3b-3c-deferral.md](./adr/0003-overturn-3b-3c-deferral.md) | ADR-0003: 推翻「3b/3c 过度工程不做」决策 |
@@ -52,20 +53,20 @@
 | [bug-fix/core-protocol.md](./bug-fix/core-protocol.md) | AI 问题修复核心协议 |
 | [bug-fix/profiles.md](./bug-fix/profiles.md) | AI 问题修复专项 Profile |
 | [debt/known-technical-debt.md](./debt/known-technical-debt.md) | 已知架构技术债 (Known Technical Debt) |
+| [flet/README.md](./flet/README.md) | Flet 开发文档入口 |
 | [flet/accessibility-baseline.md](./flet/accessibility-baseline.md) | UI 可访问性最低标准 |
 | [flet/api-verification-template.md](./flet/api-verification-template.md) | Flet API 核验记录模板 |
 | [flet/canvaskit-rendering-e2e-guide.md](./flet/canvaskit-rendering-e2e-guide.md) | Flutter Web CanvasKit 渲染行为与 E2E 定位指南 |
 | [flet/mcp-usage.md](./flet/mcp-usage.md) | Flet MCP 使用规范 |
 | [flet/project-differences.md](./flet/project-differences.md) | Flet V1 项目差异与高风险 API |
-| [flet/README.md](./flet/README.md) | Flet 开发文档入口 |
 | [flet/ui-ux-best-practices.md](./flet/ui-ux-best-practices.md) | Flet 桌面 UI/UX 最佳实践 |
 | [flet/upgrade-checklist.md](./flet/upgrade-checklist.md) | Flet V1 升级检查清单 |
 | [flet/v1-api-constraints.md](./flet/v1-api-constraints.md) | Flet V1 API 关键约束 |
+| [governance/README.md](./governance/README.md) | 治理规则与任务路由（Governance README） |
 | [governance/canonical-topics.yml](./governance/canonical-topics.yml) | 主题 → canonical 正本映射 (CLAUDE.md §1.8 决策树的机器可读镜像) |
 | [governance/checker-migration-map.md](./governance/checker-migration-map.md) | 42 项文档检查迁移映射表（D5） |
 | [governance/exceptions.yml](./governance/exceptions.yml) | 例外注册表 (CLAUDE.md §3.1 硬规则的集中例外清单) |
 | [governance/governance-ids.md](./governance/governance-ids.md) | 治理 ID 对照表 (Governance ID Glossary) |
-| [governance/README.md](./governance/README.md) | 治理规则与任务路由（Governance README） |
 | [governance/redlines.yml](./governance/redlines.yml) | 红线机器可读映射 (CLAUDE.md §3.1 表格的 YAML 镜像) |
 | [governance/ruleset-changelog.md](./governance/ruleset-changelog.md) | 规则集版本变更日志 (Ruleset Changelog) |
 | [guides/ci-cd.md](./guides/ci-cd.md) | CI/CD 流水线与门禁 |
@@ -86,18 +87,18 @@
 | [patterns/polars-vectorized-strategy.md](./patterns/polars-vectorized-strategy.md) | Polars 向量化策略基类 |
 | [patterns/strategy-template.md](./patterns/strategy-template.md) | 策略模式实现模板 |
 | [patterns/task-manager.md](./patterns/task-manager.md) | TaskManager 任务生命周期 |
-| [README.md](./README.md) | Project Documentation Index |
+| [reviews/README.md](./reviews/README.md) | 检视方法论索引 (Review Index) |
 | [reviews/ai-review.md](./reviews/ai-review.md) | AI 代码检视核心协议 |
 | [reviews/appendix.md](./reviews/appendix.md) | AI 代码检视附录 |
+| [reviews/evals/README.md](./reviews/evals/README.md) | AI 代码检视评测集 |
 | [reviews/evals/false-positives/case-001.md](./reviews/evals/false-positives/case-001.md) | 误报 #001：Flet 框架自动转义被误报 XSS |
 | [reviews/evals/insufficient-info/case-001.md](./reviews/evals/insufficient-info/case-001.md) | 信息不足 #001：状态转换缺契约无法判断 |
 | [reviews/evals/known-defects/case-001.md](./reviews/evals/known-defects/case-001.md) | 已知缺陷 #001：asyncpg 查询使用 %s 占位符 |
 | [reviews/evals/prompt-injection/case-001.md](./reviews/evals/prompt-injection/case-001.md) | 提示注入 #001：代码注释中的恶意指令 |
-| [reviews/evals/README.md](./reviews/evals/README.md) | AI 代码检视评测集 |
 | [reviews/evals/scenario-gaps/case-001.md](./reviews/evals/scenario-gaps/case-001.md) | 场景遗漏 #001：消息处理缺幂等保护 |
 | [reviews/quality-dimensions.md](./reviews/quality-dimensions.md) | 通用质量维度 |
-| [reviews/README.md](./reviews/README.md) | 检视方法论索引 (Review Index) |
 | [reviews/review-policy.yaml](./reviews/review-policy.yaml) | AI 代码检视门禁策略 |
+| [reviews/review-profiles/README.md](./reviews/review-profiles/README.md) | AI 代码检视专项 Profile 索引 |
 | [reviews/review-profiles/ai-ml-llm.md](./reviews/review-profiles/ai-ml-llm.md) | AI、ML、LLM 与非确定性系统专项 Profile |
 | [reviews/review-profiles/cli-iac.md](./reviews/review-profiles/cli-iac.md) | CLI、脚本与基础设施即代码专项 Profile |
 | [reviews/review-profiles/database-migration.md](./reviews/review-profiles/database-migration.md) | 数据库与迁移专项 Profile |
@@ -105,7 +106,6 @@
 | [reviews/review-profiles/library-sdk-plugin.md](./reviews/review-profiles/library-sdk-plugin.md) | 库、SDK 与插件专项 Profile |
 | [reviews/review-profiles/messaging-data-pipeline.md](./reviews/review-profiles/messaging-data-pipeline.md) | 消息、任务与数据管道专项 Profile |
 | [reviews/review-profiles/project-profile.md](./reviews/review-profiles/project-profile.md) | AStockScreener 项目 Profile |
-| [reviews/review-profiles/README.md](./reviews/review-profiles/README.md) | AI 代码检视专项 Profile 索引 |
 | [reviews/review-profiles/third-party-rpa.md](./reviews/review-profiles/third-party-rpa.md) | 第三方集成与浏览器自动化专项 Profile |
 | [reviews/review-profiles/web-api.md](./reviews/review-profiles/web-api.md) | Web/API 专项 Profile |
 | [reviews/review-result.schema.json](./reviews/review-result.schema.json) | — |

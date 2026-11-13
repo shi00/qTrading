@@ -668,10 +668,15 @@ def _docs_index_candidates(root: Path) -> list[Path]:
     docs_root = root / "docs"
     tracked = _git_tracked_docs(root, "docs")
     if tracked:
-        return sorted(
+        candidates = [
             root / rel for rel in tracked if (root / rel).suffix in _INDEX_COVERED_SUFFIXES and (root / rel).is_file()
-        )
-    return sorted(p for p in docs_root.rglob("*") if p.is_file() and p.suffix in _INDEX_COVERED_SUFFIXES)
+        ]
+    else:
+        candidates = [p for p in docs_root.rglob("*") if p.is_file() and p.suffix in _INDEX_COVERED_SUFFIXES]
+    # 排序键固定为 POSIX 相对路径字符串：Path 自带排序在 Windows 大小写不敏感、
+    # 在 Linux 按 ASCII，`README.md` 与 `adr/…` 的相对次序会跨平台漂移，导致同一
+    # 作者源在两平台渲染不同（CI 与本机不一致）。用显式键消除平台差异。
+    return sorted(candidates, key=lambda p: p.relative_to(root).as_posix())
 
 
 def _h1_title_from(text: str) -> str | None:
