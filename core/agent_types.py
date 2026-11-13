@@ -5929,3 +5929,105 @@ def resolve_skill_selection(
         if key in enabled_keys:
             chosen[key] = ref
     return tuple(chosen[key] for key in sorted(chosen))
+
+
+# ---------------------------------------------------------------------------
+# E-06 联合清理契约（§9.11 / §10.7 / SQ-10）——本轮承载静态可验证的准入与状态合同
+# ---------------------------------------------------------------------------
+
+#: 联合清理单批准确 ID 上限（§12 阈值表 200/201）。
+CLEANUP_MAX_BATCH_IDS: Final = 200
+
+#: 九类原生目标（表, 常量匹配键）；只按常量键参数化删除，禁止 LIKE/前缀/全表。
+CLEANUP_NATIVE_TARGETS: Final[tuple[tuple[str, str], ...]] = (
+    ("dbos.workflow_status", "workflow_uuid"),
+    ("dbos.workflow_input", "workflow_uuid"),
+    ("dbos.workflow_output", "workflow_uuid"),
+    ("dbos.operation_outputs", "workflow_uuid"),
+    ("dbos.workflow_events", "workflow_uuid"),
+    ("dbos.workflow_events_history", "workflow_uuid"),
+    ("dbos.streams", "workflow_uuid"),
+    ("dbos.notifications", "destination_uuid"),
+    ("agent_ds.datasource_outputs", "workflow_id"),
+)
+
+#: NOT NULL 文本列的固定 tombstone：绝不含原正文/标题/文件名。
+CLEANUP_TOMBSTONE: Final = "[已清理]"
+
+
+class CleanupPhase(Enum):
+    """清理作业阶段：准备 → （中断/失败）重试待处理 → 逐域查 0 后 verified。"""
+
+    PREPARED = "prepared"
+    RETRY_PENDING = "retry_pending"
+    VERIFIED = "verified"
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupPrecondition:
+    """统一清理准入谓词（Q02）：准备/确认/重试共用。"""
+
+    scope_settled: bool
+    writers_exited: bool
+    closure_known: bool
+    preview_valid: bool
+    new_reference_conflict: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupAdmission:
+    allowed: bool
+    reason: str | None
+
+
+def evaluate_cleanup_admission(precondition: CleanupPrecondition) -> CleanupAdmission:
+    """按固定顺序判定；未知不当通过，新引用按原 fence 仲裁。"""
+
+    if not precondition.scope_settled:
+        return CleanupAdmission(False, "scope_not_settled")
+    if not precondition.writers_exited:
+        return CleanupAdmission(False, "writers_still_running")
+    if not precondition.closure_known:
+        return CleanupAdmission(False, "closure_unknown")
+    if not precondition.preview_valid:
+        return CleanupAdmission(False, "preview_invalid")
+    if precondition.new_reference_conflict:
+        return CleanupAdmission(False, "new_reference_conflict")
+    return CleanupAdmission(True, None)
+
+
+def normalize_cleanup_ids(ids: Iterable[object]) -> tuple[str, ...]:
+    """非空/去重/排序；超过 200 明确拒绝并提示分批次确认，不递归扩集合。"""
+
+    normalized: set[str] = set()
+    for value in ids:
+        if not isinstance(value, str) or not value:
+            _fail("invalid_cleanup_id", "$.cleanup.ids")
+        normalized.add(value)
+    if len(normalized) > CLEANUP_MAX_BATCH_IDS:
+        _fail("cleanup_batch_limit_exceeded", "$.cleanup.ids")
+    return tuple(sorted(normalized))
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupState:
+    """清理作业状态：fence 提交后才允许删除；九域全部查 0 才 verified。"""
+
+    phase: CleanupPhase
+    fence_committed: bool
+    exact_ids: tuple[str, ...] = ()
+
+    def can_delete(self) -> bool:
+        return self.fence_committed and self.phase is not CleanupPhase.VERIFIED
+
+    def can_mark_verified(self, verified_counts: Mapping[str, int]) -> bool:
+        if not self.fence_committed:
+            return False
+        return all(verified_counts.get(table) == 0 for table, _key in CLEANUP_NATIVE_TARGETS)
+
+
+def tombstone_text(original: str | None) -> str:
+    """NOT NULL 文本字段清理后的固定占位；不保留任何原文。"""
+
+    del original
+    return CLEANUP_TOMBSTONE
