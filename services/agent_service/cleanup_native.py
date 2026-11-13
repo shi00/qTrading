@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from core.agent_types import (
+    CLEANUP_NATIVE_TARGETS,
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
@@ -60,6 +61,12 @@ class NativeCleanupResult:
     verified_counts: dict[str, int]
 
 
+def _zero_counts() -> dict[str, int]:
+    """九域可核零计数（空集合的显式verified 依据，非缺省缺失）。"""
+
+    return {table: 0 for table, _key in CLEANUP_NATIVE_TARGETS}
+
+
 async def _default_run_blocking[T](func: Callable[..., T], *args: object) -> T:
     """默认经受管 IO 线程池提交同步引擎工作（R16）。"""
 
@@ -83,11 +90,14 @@ class NativeCleanupExecutor:
         self._run_blocking = run_blocking or _default_run_blocking
 
     async def preflight(self, ids: Sequence[str]) -> NativePreflight:
-        """首次预检：九域计数 + 主键域缺失（禁止把缺失解释为空集合）。"""
+        """首次预检：九域计数 + 主键域缺失（禁止把缺失解释为空集合）。
+
+        空集合只在「未启动计划」准入下出现：九域计数按可核零返回（不改库）。
+        """
 
         normalized = self._normalize(ids)
         if not normalized:
-            return NativePreflight((), {}, ())
+            return NativePreflight((), _zero_counts(), ())
         counts, missing = await self._run_blocking(self._preflight_sync, list(normalized))
         return NativePreflight(normalized, counts, missing)
 
@@ -96,7 +106,7 @@ class NativeCleanupExecutor:
 
         normalized = self._normalize(ids)
         if not normalized:
-            return NativeCleanupResult((), {})
+            return NativeCleanupResult((), _zero_counts())
         counts = await self._run_blocking(self._delete_sync, list(normalized))
         return NativeCleanupResult(normalized, counts)
 

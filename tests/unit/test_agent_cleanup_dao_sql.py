@@ -129,7 +129,8 @@ class TestNativeCleanupExecutor:
         assert client.events == []
         assert store.events == []
         assert result.exact_ids == ()
-        assert result.verified_counts == {}
+        assert len(result.verified_counts) == 9
+        assert set(result.verified_counts.values()) == {0}
 
     @pytest.mark.asyncio
     async def test_preflight_returns_counts_and_missing(self) -> None:
