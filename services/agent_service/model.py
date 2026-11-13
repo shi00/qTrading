@@ -479,12 +479,13 @@ class _TurnChannel:
         get_task = asyncio.ensure_future(self._queue.get())
         closed_task = asyncio.ensure_future(self._closed_event.wait())
         try:
-            done, _ = await asyncio.wait({get_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({get_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in (get_task, closed_task):
                 if not task.done():
                     task.cancel()
-        if get_task in done and not get_task.cancelled():
+        # done() 而非 wait 返回集：取件可能已投递、完成步晚于 close 完成
+        if get_task.done() and not get_task.cancelled():
             return get_task.result()
         return _TURN_CLOSED
 

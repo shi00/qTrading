@@ -33,7 +33,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, NoReturn
 
-from dbos import DBOS, WorkflowSerializationFormat
+from dbos import DBOS, SetWorkflowID, WorkflowSerializationFormat
 
 from core.agent_types import (
     DISPLAY_STATES,
@@ -64,11 +64,26 @@ PAYLOAD_VERSION: Final[int] = 1
 #: 子 workflow 结果轮询间隔（仅影响观察节拍，不影响推进正确性）。
 CHILD_RESULT_POLL_INTERVAL_SEC: Final[float] = 0.1
 
+#: 单次观察子 workflow 的外层超时（HANDOFF §8.3：观察超时只停观察、不取消执行）。
+#: 取值覆盖单叶长任务（多轮模型调用 + 工具）并留余量；超时后由恢复机制重接观察，
+#: 不伪造叶终态（§8.2 未知不等于失败）。
+CHILD_OBSERVE_TIMEOUT_SEC: Final[float] = 900.0
+
+
+class ChildObservationTimeout(RuntimeError):
+    """观察子 workflow 超时（仅终止观察；子执行继续，恢复后重新接上）。"""
+
+    def __init__(self, node_id: str, timeout_sec: float) -> None:
+        super().__init__(f"leaf observation timed out: node={node_id} timeout={timeout_sec}s")
+        self.node_id = node_id
+        self.timeout_sec = timeout_sec
+
+
 _PAYLOAD_VERSION_KEY: Final = "payload_version"
-_RESEARCH_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "plan_digest", "nodes"})
+_RESEARCH_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "round_id", "plan_digest", "nodes"})
 #: 重试轮载荷在版本 1 上的兼容扩展键（缺省视为空：首轮无保留前置）。
 _RESEARCH_PAYLOAD_OPTIONAL_KEYS: Final = frozenset({"preserved_outcomes"})
-_LEAF_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "plan_digest", "node"})
+_LEAF_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "round_id", "plan_digest", "node"})
 _NODE_OUTCOME_KEYS: Final = frozenset({"node_id", "state", "error_code", "artifact_ref"})
 
 #: 叶状态语义分类（值域 = 冻结的 display_state 15 值，不自造词表）。
@@ -192,35 +207,68 @@ def decode_node_outcome(value: object, path: str = "$.node_outcome") -> NodeOutc
     )
 
 
-def build_leaf_payload(*, execution_id: str, plan_digest: str, node: PlanNodeSpec) -> dict[str, Any]:
+def build_leaf_payload(*, execution_id: str, round_id: str, plan_digest: str, node: PlanNodeSpec) -> dict[str, Any]:
     """构造叶 workflow 载荷（PORTABLE JSON 可序列化；封闭键）。"""
 
     return {
         _PAYLOAD_VERSION_KEY: PAYLOAD_VERSION,
         "execution_id": _require_str(execution_id, "$.execution_id"),
+        "round_id": _require_str(round_id, "$.round_id"),
         "plan_digest": _require_digest(plan_digest, "$.plan_digest"),
         "node": _node_to_wire(node),
     }
 
 
-def decode_leaf_payload(value: object, path: str = "$.leaf_payload") -> tuple[str, str, PlanNodeSpec]:
-    """严格解码叶载荷：``(execution_id, plan_digest, node)``。"""
+@dataclass(frozen=True, slots=True)
+class LeafExecutionContext:
+    """叶执行上下文（身份三元组 + 节点；执行器据此保存叶事实，不靠隐式全局）。
+
+    轮次进入上下文是重试轮隔离的前提：新轮新身份，不复用旧轮成果。
+    """
+
+    execution_id: str
+    round_id: str
+    plan_digest: str
+    node: PlanNodeSpec
+
+
+def decode_leaf_payload(value: object, path: str = "$.leaf_payload") -> LeafExecutionContext:
+    """严格解码叶载荷为 :class:`LeafExecutionContext`。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_exact_keys(value, _LEAF_PAYLOAD_KEYS, path)
     _require_payload_version(value, path)
-    return (
-        _require_str(value["execution_id"], f"{path}.execution_id"),
-        _require_digest(value["plan_digest"], f"{path}.plan_digest"),
-        decode_plan_node_spec(value["node"], f"{path}.node"),
+    return LeafExecutionContext(
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        plan_digest=_require_digest(value["plan_digest"], f"{path}.plan_digest"),
+        node=decode_plan_node_spec(value["node"], f"{path}.node"),
+    )
+
+
+def leaf_workflow_id(*, execution_id: str, round_id: str, node_id: str) -> str:
+    """叶 workflow 稳定身份（按计划身份而非调用顺序；B1 修复）。
+
+    HANDOFF §8.4：重放不得错配成果。DBOS 子 workflow 默认 ID 由父的调用序号
+    派生（``{parent_id}-{function_id}``），而就绪叶启动顺序取决于真实完成时序，
+    重放时序号与节点可能不再对应；故显式指定按 ``execution_id/round_id/node_id``
+    的稳定 ID，并以 ``return-existing`` 复用策略让恢复重新接上同一子执行。
+    """
+
+    return "agent_leaf:" + ":".join(
+        (
+            _require_str(execution_id, "$.execution_id"),
+            _require_str(round_id, "$.round_id"),
+            _require_str(node_id, "$.node_id"),
+        )
     )
 
 
 def decode_research_payload(
     value: object, path: str = "$.research_payload"
-) -> tuple[str, str, PlanSpecProposal, tuple[NodeOutcome, ...]]:
-    """严格解码父载荷：``(execution_id, plan_digest, plan, preserved_outcomes)``。
+) -> tuple[str, str, str, PlanSpecProposal, tuple[NodeOutcome, ...]]:
+    """严格解码父载荷：``(execution_id, round_id, plan_digest, plan, preserved)``。
 
     ``preserved_outcomes`` 为重试轮冻结的「仍适用成功前置」旧轮事实；首轮缺省
     为空（版本 1 内的兼容扩展键，不放开任意键）。
@@ -241,6 +289,7 @@ def decode_research_payload(
     )
     return (
         _require_str(value["execution_id"], f"{path}.execution_id"),
+        _require_str(value["round_id"], f"{path}.round_id"),
         _require_digest(value["plan_digest"], f"{path}.plan_digest"),
         decode_plan_spec_proposal({"nodes": raw_nodes}, f"{path}.plan_spec"),
         preserved,
@@ -329,14 +378,12 @@ class LeafDagScheduler:
         """登记重试轮保留的成功前置（只接受 ``complete`` 且不得在本轮范围内）。
 
         保留事实来自旧轮已保存成果（不重做、不复制许可与费用）；非成功前置
-        不能作为「适用成功前置」，冲突必须显式拒绝而非静默降级。
+        不能作为「适用成功前置」，冲突必须显式拒绝而非静默降级。判据与派发前
+        :func:`_validate_preserved` 同组（此处为纵深防御）。
         """
 
+        _validate_preserved(outcomes, scope_node_ids=set(self._nodes))
         for outcome in outcomes:
-            if outcome.state != "complete":
-                _fail("invalid_preserved_outcome", f"$.preserved_outcomes[{outcome.node_id}]")
-            if outcome.node_id in self._nodes:
-                _fail("preserved_node_in_retry_scope", f"$.preserved_outcomes[{outcome.node_id}]")
             self._preserved[outcome.node_id] = outcome
 
     def _dependency_satisfied(self, dependency: str) -> bool:
@@ -368,11 +415,18 @@ class LeafDagScheduler:
         self._started.add(node_id)
 
     def record(self, outcome: NodeOutcome) -> None:
-        """登记叶终态事实；非成功终态递归阻塞其下游。"""
+        """登记叶终态事实；非成功终态递归阻塞其下游。
+
+        终态单调（同类 F07「迟到 running 不覆终态」）：已登记成功/阻塞终态后
+        再记任何事实都属冲突（迟到/重复事实不得把收敛翻回未收敛）。
+        """
 
         self.node(outcome.node_id)
         if outcome.state not in _SUCCESS_STATES | _BLOCKING_STATES | _NON_TERMINAL_STATES:
             _fail("invalid_display_state", f"$.outcomes[{outcome.node_id}].state")
+        existing = self._outcomes.get(outcome.node_id)
+        if existing is not None and existing.state in _SUCCESS_STATES | _BLOCKING_STATES:
+            _fail("node_outcome_conflict", f"$.outcomes[{outcome.node_id}]")
         self._outcomes[outcome.node_id] = outcome
         if outcome.state in _BLOCKING_STATES:
             self._block_dependents(outcome.node_id, f"upstream_{outcome.state}:{outcome.node_id}")
@@ -427,12 +481,16 @@ class LeafDagScheduler:
         )
 
 
-LeafRunner = Callable[[PlanNodeSpec], Awaitable[NodeOutcome]]
+LeafRunner = Callable[[LeafExecutionContext], Awaitable[NodeOutcome]]
+"""叶执行器（装配期登记；接收身份上下文与节点，据此保存叶事实）。"""
+
+LeafNodeRunner = Callable[[PlanNodeSpec], Awaitable[NodeOutcome]]
+"""调度层节点级启动函数（父 workflow 负责把节点补成执行上下文）。"""
 
 
 async def drive_leaf_dag(
     plan: PlanSpecProposal,
-    start_leaf: LeafRunner,
+    start_leaf: LeafNodeRunner,
     *,
     preserved: tuple[NodeOutcome, ...] = (),
 ) -> PlanRunSummary:
@@ -511,9 +569,9 @@ class LeafRuntimeRegistry:
 async def execute_leaf_step(payload: dict[str, Any]) -> dict[str, Any]:
     """叶执行 step：解析封闭载荷 → 已登记执行器 → 终态事实 wire。"""
 
-    _execution_id, _plan_digest, node = decode_leaf_payload(payload)
-    outcome = await LeafRuntimeRegistry.require()(node)
-    if outcome.node_id != node.node_id:
+    context = decode_leaf_payload(payload)
+    outcome = await LeafRuntimeRegistry.require()(context)
+    if outcome.node_id != context.node.node_id:
         _fail("outcome_identity_mismatch", "$.node_outcome.node_id")
     return outcome.to_wire()
 
@@ -532,18 +590,53 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
 
     计划须在派发前已由服务层校验并保存（计划版 + 原生引用），本 workflow 只做
     严格解码与编排，不重复准入判定。
+
+    语义边界：
+    - 返回 ``converged=False`` 的汇总（暂停/等待/决定/未知）**不等于研究结束**，
+      父 workflow 结束只表示本推进批次结束；终态事实由服务层投影，不由本层升级。
+    - 叶事实在叶执行内部保存（应用侧），父观察被取消/失败不丢失已完成叶成果。
+    - 观察超时只停观察（§8.3），异常上抛由恢复机制重接；不伪造叶终态。
     """
 
-    execution_id, plan_digest, plan, preserved = decode_research_payload(payload)
+    execution_id, round_id, plan_digest, plan, preserved = decode_research_payload(payload)
 
-    async def start_leaf(node: PlanNodeSpec) -> NodeOutcome:
-        handle = await DBOS.start_workflow_async(
-            run_leaf_workflow,
-            build_leaf_payload(execution_id=execution_id, plan_digest=plan_digest, node=node),
+    async def start_leaf(context: LeafExecutionContext) -> NodeOutcome:
+        leaf_payload = build_leaf_payload(
+            execution_id=context.execution_id,
+            round_id=context.round_id,
+            plan_digest=context.plan_digest,
+            node=context.node,
         )
-        return decode_node_outcome(await handle.get_result(polling_interval_sec=CHILD_RESULT_POLL_INTERVAL_SEC))
+        with SetWorkflowID(
+            leaf_workflow_id(
+                execution_id=context.execution_id,
+                round_id=context.round_id,
+                node_id=context.node.node_id,
+            ),
+            workflow_id_reuse_policy="return-existing",
+        ):
+            handle = await DBOS.start_workflow_async(run_leaf_workflow, leaf_payload)
+        try:
+            wire = await asyncio.wait_for(
+                handle.get_result(polling_interval_sec=CHILD_RESULT_POLL_INTERVAL_SEC),
+                timeout=CHILD_OBSERVE_TIMEOUT_SEC,
+            )
+        except TimeoutError as exc:
+            # §8.3：外层观察超时只停观察、不取消子执行；不伪造终态。
+            raise ChildObservationTimeout(context.node.node_id, CHILD_OBSERVE_TIMEOUT_SEC) from exc
+        return decode_node_outcome(wire)
 
-    summary = await drive_leaf_dag(plan, start_leaf, preserved=preserved)
+    async def start_leaf_by_node(node: PlanNodeSpec) -> NodeOutcome:
+        return await start_leaf(
+            LeafExecutionContext(
+                execution_id=execution_id,
+                round_id=round_id,
+                plan_digest=plan_digest,
+                node=node,
+            )
+        )
+
+    summary = await drive_leaf_dag(plan, start_leaf_by_node, preserved=preserved)
     return summary.to_wire()
 
 
@@ -551,21 +644,41 @@ def build_research_payload(
     plan: PlanSpecProposal,
     *,
     execution_id: str,
+    round_id: str,
     plan_digest: str,
     preserved: tuple[NodeOutcome, ...] = (),
 ) -> dict[str, Any]:
     """构造父 workflow 载荷（与保存的计划版同源内容；PORTABLE JSON 可序列化）。
 
-    ``preserved`` 为重试轮冻结的旧轮成功前置事实（首轮为空）。
+    ``preserved`` 为重试轮冻结的旧轮成功前置事实（首轮为空）。空计划在派发前
+    拒绝（F03：不制造空任务树；DBOS 侧无法给出可回执的准入拒绝）。
     """
 
+    if not plan.nodes:
+        _fail("empty_plan", "$.nodes")
+    _validate_preserved(preserved, scope_node_ids={node.node_id for node in plan.nodes})
     return {
         _PAYLOAD_VERSION_KEY: PAYLOAD_VERSION,
         "execution_id": _require_str(execution_id, "$.execution_id"),
+        "round_id": _require_str(round_id, "$.round_id"),
         "plan_digest": _require_digest(plan_digest, "$.plan_digest"),
         "nodes": [_node_to_wire(node) for node in plan.nodes],
         "preserved_outcomes": [outcome.to_wire() for outcome in preserved],
     }
+
+
+def _validate_preserved(outcomes: tuple[NodeOutcome, ...], *, scope_node_ids: set[str]) -> None:
+    """派发前校验保留前置：必须是成功事实且不在本轮范围内。
+
+    与 :meth:`LeafDagScheduler.seed_preserved` 同组判据，但**前移到派发前**
+    （HANDOFF §7.2：保存后才派发；非法载荷不得以 workflow ERROR 形式暴露）。
+    """
+
+    for outcome in outcomes:
+        if outcome.state != "complete":
+            _fail("invalid_preserved_outcome", f"$.preserved_outcomes[{outcome.node_id}]")
+        if outcome.node_id in scope_node_ids:
+            _fail("preserved_node_in_retry_scope", f"$.preserved_outcomes[{outcome.node_id}]")
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +741,7 @@ def build_retry_payload(
     plan: PlanSpecProposal,
     *,
     execution_id: str,
+    round_id: str,
     plan_digest: str,
     targets: tuple[str, ...],
     preserved_outcomes: tuple[NodeOutcome, ...],
@@ -635,20 +749,24 @@ def build_retry_payload(
     """构造重试轮父载荷：``nodes`` 为范围内节点，``preserved_outcomes`` 为旧轮
     成功前置。
 
-    范围外前置必须由 ``preserved_outcomes`` 全部覆盖（仍适用成功结果）；缺失
-    显式拒绝（不静默不满足依赖）。
+    派发前校验（HANDOFF §7.2：保存后才派发）：保留前置须为成功事实且不得落在
+    本轮范围内；范围外前置必须由 ``preserved_outcomes`` 全部覆盖。均显式拒绝
+    （不以 workflow ERROR 暴露非法载荷、不静默不满足依赖）。
     """
 
     scope = compute_retry_scope(plan, targets=targets)
-    redo_nodes = tuple(node for node in plan.nodes if node.node_id in set(scope.redo))
+    redo_ids = set(scope.redo)
+    _validate_preserved(preserved_outcomes, scope_node_ids=redo_ids)
+    redo_nodes = tuple(node for node in plan.nodes if node.node_id in redo_ids)
     preserved_ids = {outcome.node_id for outcome in preserved_outcomes}
     for node in redo_nodes:
         for dependency in node.depends_on:
-            if dependency not in set(scope.redo) and dependency not in preserved_ids:
+            if dependency not in redo_ids and dependency not in preserved_ids:
                 _fail("missing_preserved_predecessor", f"$.nodes[{node.node_id}].depends_on")
     payload = build_research_payload(
         PlanSpecProposal(nodes=redo_nodes),
         execution_id=execution_id,
+        round_id=round_id,
         plan_digest=plan_digest,
         preserved=preserved_outcomes,
     )
@@ -661,7 +779,10 @@ __all__ = [
     "LEAF_WORKFLOW_NAME",
     "PAYLOAD_VERSION",
     "RESEARCH_WORKFLOW_NAME",
+    "ChildObservationTimeout",
     "LeafDagScheduler",
+    "LeafExecutionContext",
+    "LeafNodeRunner",
     "LeafRunner",
     "LeafRuntimeRegistry",
     "NodeOutcome",
@@ -676,6 +797,7 @@ __all__ = [
     "decode_research_payload",
     "drive_leaf_dag",
     "execute_leaf_step",
+    "leaf_workflow_id",
     "run_leaf_workflow",
     "run_research_workflow",
 ]

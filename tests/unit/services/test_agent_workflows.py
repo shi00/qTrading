@@ -20,16 +20,19 @@ import pytest
 from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal
 from services.agent_service.workflows import (
     LeafDagScheduler,
+    LeafExecutionContext,
     LeafRuntimeRegistry,
     NodeOutcome,
     PlanRunSummary,
     build_leaf_payload,
+    build_research_payload,
     build_retry_payload,
     compute_retry_scope,
     decode_leaf_payload,
     decode_node_outcome,
     decode_research_payload,
     drive_leaf_dag,
+    leaf_workflow_id,
 )
 
 pytestmark = pytest.mark.unit
@@ -338,23 +341,43 @@ def test_node_outcome_rejects_extra_key() -> None:
 
 
 def test_leaf_payload_roundtrip_and_strict_keys() -> None:
-    """叶载荷往返；额外键拒绝（封闭 wire）。"""
-    payload = build_leaf_payload(execution_id="exec-1", plan_digest="b" * 64, node=_node("a", ("b",)))
-    execution_id, plan_digest, node = decode_leaf_payload(payload)
-    assert (execution_id, plan_digest) == ("exec-1", "b" * 64)
-    assert node.node_id == "a"
-    assert node.depends_on == ("b",)
+    """叶载荷往返（含轮次身份）；额外键拒绝（封闭 wire）。"""
+    payload = build_leaf_payload(
+        execution_id="exec-1", round_id="round-1", plan_digest="b" * 64, node=_node("a", ("b",))
+    )
+    context = decode_leaf_payload(payload)
+    assert (context.execution_id, context.round_id, context.plan_digest) == ("exec-1", "round-1", "b" * 64)
+    assert context.node.node_id == "a"
+    assert context.node.depends_on == ("b",)
     with pytest.raises(AgentValidationError) as excinfo:
         decode_leaf_payload({**payload, "extra": 1})
     assert excinfo.value.code == "unknown_field"
 
 
+def test_leaf_workflow_id_is_identity_based_not_order_based() -> None:
+    """B1 回归：叶 workflow 身份按 execution/round/node 固定，与启动顺序无关。"""
+    first = leaf_workflow_id(execution_id="exec-1", round_id="round-1", node_id="c")
+    same = leaf_workflow_id(execution_id="exec-1", round_id="round-1", node_id="c")
+    other_node = leaf_workflow_id(execution_id="exec-1", round_id="round-1", node_id="d")
+    other_round = leaf_workflow_id(execution_id="exec-1", round_id="round-2", node_id="c")
+    assert first == same
+    assert first != other_node
+    assert first != other_round
+    assert first.startswith("agent_leaf:exec-1:round-1:")
+
+
 def test_research_payload_decode_nodes() -> None:
     """父载荷解码为已校验前保存的计划（nodes 严格解码；preserved 缺省为空）。"""
-    payload = {"payload_version": 1, "execution_id": "exec-1", "plan_digest": "c" * 64, "nodes": []}
-    # 空 nodes 结构合法（是否为空白由派发前 validate_plan_spec_proposal 拒绝）
-    execution_id, plan_digest, plan, preserved = decode_research_payload(payload)
-    assert (execution_id, plan_digest) == ("exec-1", "c" * 64)
+    payload = {
+        "payload_version": 1,
+        "execution_id": "exec-1",
+        "round_id": "round-1",
+        "plan_digest": "c" * 64,
+        "nodes": [],
+    }
+    # 空 nodes 结构合法（是否为空白由派发前 validate_plan_spec_proposal/载荷构造拒绝）
+    execution_id, round_id, plan_digest, plan, preserved = decode_research_payload(payload)
+    assert (execution_id, round_id, plan_digest) == ("exec-1", "round-1", "c" * 64)
     assert plan.nodes == ()
     assert preserved == ()
 
@@ -370,8 +393,8 @@ def test_leaf_registry_requires_install() -> None:
 def test_leaf_registry_install_and_reset() -> None:
     """登记后返回同一执行器；复位清空（测试隔离）。"""
 
-    async def runner(node: PlanNodeSpec) -> NodeOutcome:
-        return _outcome(node.node_id)
+    async def runner(context: LeafExecutionContext) -> NodeOutcome:
+        return _outcome(context.node.node_id)
 
     LeafRuntimeRegistry.install(runner)
     assert LeafRuntimeRegistry.require() is runner
@@ -461,14 +484,63 @@ def test_retry_payload_carries_scope_and_preserved() -> None:
     payload, scope = build_retry_payload(
         plan,
         execution_id="exec-2",
+        round_id="round-2",
         plan_digest="d" * 64,
         targets=("b",),
         preserved_outcomes=(_outcome("a", artifact_ref="artifact_a_1"),),
     )
     assert scope.redo == ("b", "c")
-    _execution_id, _digest, retry_plan, preserved = decode_research_payload(payload)
+    _execution_id, round_id, _digest, retry_plan, preserved = decode_research_payload(payload)
+    assert round_id == "round-2"
     assert tuple(node.node_id for node in retry_plan.nodes) == ("b", "c")
     assert preserved == (_outcome("a", artifact_ref="artifact_a_1"),)
+
+
+def test_retry_payload_rejects_invalid_preserved_before_dispatch() -> None:
+    """B2 回归：非法保留事实（非成功/落在范围内）在派发前拒绝，不留给 workflow ERROR。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    with pytest.raises(AgentValidationError) as failed_exc:
+        build_retry_payload(
+            plan,
+            execution_id="exec-2",
+            round_id="round-2",
+            plan_digest="d" * 64,
+            targets=("a",),
+            preserved_outcomes=(_outcome("a", "failed"),),
+        )
+    assert failed_exc.value.code == "invalid_preserved_outcome"
+    with pytest.raises(AgentValidationError) as scope_exc:
+        build_retry_payload(
+            plan,
+            execution_id="exec-2",
+            round_id="round-2",
+            plan_digest="d" * 64,
+            targets=("b",),
+            preserved_outcomes=(_outcome("b"),),
+        )
+    assert scope_exc.value.code == "preserved_node_in_retry_scope"
+
+
+def test_build_research_payload_rejects_empty_plan() -> None:
+    """空计划派发前拒绝（F03 不制造空任务树）。"""
+    with pytest.raises(AgentValidationError) as excinfo:
+        build_research_payload(
+            PlanSpecProposal(nodes=()),
+            execution_id="exec-1",
+            round_id="round-1",
+            plan_digest="e" * 64,
+        )
+    assert excinfo.value.code == "empty_plan"
+
+
+def test_record_rejects_conflicting_terminal_outcome() -> None:
+    """终态单调：已终态后再记任何事实均拒绝（迟到事实不翻回未收敛）。"""
+    scheduler = LeafDagScheduler(_plan(_node("a")))
+    scheduler.start("a")
+    scheduler.record(_outcome("a"))
+    with pytest.raises(AgentValidationError) as excinfo:
+        scheduler.record(_outcome("a", "running"))
+    assert excinfo.value.code == "node_outcome_conflict"
 
 
 def test_retry_payload_requires_preserved_predecessors() -> None:
@@ -478,6 +550,7 @@ def test_retry_payload_requires_preserved_predecessors() -> None:
         build_retry_payload(
             plan,
             execution_id="exec-2",
+            round_id="round-2",
             plan_digest="d" * 64,
             targets=("b",),
             preserved_outcomes=(),

@@ -166,6 +166,27 @@ def test_run_owner_executes_in_owner_loop(loops: tuple[_LoopThread, _LoopThread]
     assert seen["thread_id"] == owner.thread_id
 
 
+def test_run_owner_invokes_factory_inside_owner_loop(
+    loops: tuple[_LoopThread, _LoopThread],
+) -> None:
+    """§8.2「owner 回调才创建实际 IO 任务」：factory 本身在 owner 线程求值。"""
+    owner, foreign = loops
+    bridge = _make_bridge(owner.loop)
+    factory_threads: list[int] = []
+
+    class _Factory:
+        def __call__(self) -> Coroutine[Any, Any, str]:
+            factory_threads.append(threading.get_ident())
+
+            async def _work() -> str:
+                return "ok"
+
+            return _work()
+
+    assert foreign.submit(bridge.run_owner(_Factory())) == "ok"
+    assert factory_threads == [owner.thread_id]
+
+
 def test_run_owner_waiter_cancel_does_not_cancel_owner_io(
     loops: tuple[_LoopThread, _LoopThread],
 ) -> None:

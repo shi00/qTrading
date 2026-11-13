@@ -337,7 +337,14 @@ class OwnerLoopBridge:
         factory 在 owner 循环内被调用（owner 回调才创建实际 IO 任务）；本协程被
         取消时仅撤 waiter，owner 侧任务继续运行至完成。
         """
-        cf = asyncio.run_coroutine_threadsafe(self._managed(factory()), self._owner_loop)
+
+        # factory 必须在 owner 循环内调用（§8.2 段 1「owner 回调才创建实际 IO
+        # 任务」）：包装协程的 body 在 owner 循环执行，factory() 遂在 owner 线程
+        # 求值；若直接在此处调用 factory()，协程对象会在调用线程创建。
+        async def _bootstrap() -> _T:
+            return await self._managed(factory())
+
+        cf = asyncio.run_coroutine_threadsafe(_bootstrap(), self._owner_loop)
         return await asyncio.shield(self._wrap_concurrent(cf))
 
     async def observe_operation(self, operation_id: str) -> Any:
@@ -533,12 +540,13 @@ class OwnerStreamChannel[T]:
         put_task = asyncio.ensure_future(self._queue.put(item))
         closed_task = asyncio.ensure_future(self._closed_event.wait())
         try:
-            done, _ = await asyncio.wait({put_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({put_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in (put_task, closed_task):
                 if not task.done():
                     task.cancel()
-        if put_task in done and not put_task.cancelled():
+        # done() 而非 wait 返回集：put 可能在 wait 返回后、此处判定前完成投递
+        if put_task.done() and not put_task.cancelled():
             put_task.result()
             return _PUT_DONE
         return _WAIT_CLOSED
@@ -548,12 +556,13 @@ class OwnerStreamChannel[T]:
         get_task = asyncio.ensure_future(self._queue.get())
         closed_task = asyncio.ensure_future(self._closed_event.wait())
         try:
-            done, _ = await asyncio.wait({get_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({get_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in (get_task, closed_task):
                 if not task.done():
                     task.cancel()
-        if get_task in done and not get_task.cancelled():
+        # done() 而非 wait 返回集：取件可能已投递但完成步晚于 close 完成
+        if get_task.done() and not get_task.cancelled():
             return get_task.result()
         return _WAIT_CLOSED
 
