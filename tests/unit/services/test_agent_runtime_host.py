@@ -253,7 +253,7 @@ class _CloseFakes:
         self.closed = True
 
 
-def _runtime(fakes: _CloseFakes) -> Any:
+def _runtime(fakes: _CloseFakes, guard: Any = None) -> Any:
     return runtime_mod.AgentRuntime(
         handle=cast(Any, fakes),
         bridge=cast(Any, fakes),
@@ -261,6 +261,7 @@ def _runtime(fakes: _CloseFakes) -> Any:
         fact_sink=cast(Any, fakes),
         blocking_runner=_direct_runner,
         residual_io_probe=fakes.residual_io,
+        instance_guard=guard,
     )
 
 
@@ -391,3 +392,24 @@ class TestPrepareCloseLatch:
                 runtime_mod.CloseCommandIdentity(user_scope="", close_command_id="close-1")
             )
         assert "close command identity" in str(exc_info.value)
+
+    async def test_instance_guard_released_only_after_ready(self) -> None:
+        class _Guard:
+            def __init__(self) -> None:
+                self.releases = 0
+
+            def release(self) -> None:
+                self.releases += 1
+
+        guard = _Guard()
+        fakes = _CloseFakes()
+        receipt = await _runtime(fakes, guard).prepare_close(_command())
+        assert receipt.ready is True
+        assert guard.releases == 1
+
+        blocked_fakes = _CloseFakes()
+        blocked_fakes.dispatch_ok = False
+        blocked_guard = _Guard()
+        blocked = await _runtime(blocked_fakes, blocked_guard).prepare_close(_command())
+        assert blocked.ready is False
+        assert blocked_guard.releases == 0

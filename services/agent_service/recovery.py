@@ -26,6 +26,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Final, Protocol
 
+import sqlalchemy as sa
 from dbos import WorkflowStatus, WorkflowStatusString
 
 from core.agent_types import (
@@ -37,6 +38,14 @@ from core.agent_types import (
     StartupIsolationRecord,
     json_doc,
     stable_id,
+)
+from services.agent_service.runtime import (
+    RUNTIME_DB_NAME,
+    AgentRuntimeSettings,
+    InstanceGuard,
+    InstanceGuardEvidence,
+    assemble_agent_runtime,
+    launch_agent_runtime,
 )
 
 #: 启动隔离的「在途」原生状态（HANDOFF §8.4 第 3 条：PENDING/ENQUEUED/DELAYED）。
@@ -347,30 +356,15 @@ INSTANCE_LOCK_KEY: Final[int] = 0x7174726D
 BlockingRunner = Callable[[Callable[[], Any]], Awaitable[Any]]
 
 
-@dataclass(frozen=True)
-class InstanceGuardEvidence:
-    """唯一执行锁证据：``acquired`` 与 ``prior_writer_exited`` 都为真才可继续。"""
-
-    acquired: bool
-    prior_writer_exited: bool
-    detail: str
-
-
-class InstanceGuard(Protocol):
-    """启动唯一执行锁端口（应用单实例机制；拿锁成功即证明旧写者已退出）。"""
-
-    async def acquire(self) -> InstanceGuardEvidence: ...
-
-    def release(self) -> None: ...
-
-
 class AdvisoryLockInstanceGuard:
     """PG advisory lock 单实例执行锁（HANDOFF §8.4 第 1 条最小实现）。
 
     独立**单连接**引擎持有会话级 advisory lock：旧实例正常退出或崩溃时 PG
     自动释放锁，故 ``pg_try_advisory_lock`` 成功即同时证明「获得唯一执行权」
-    与「旧写者已退出/可安全接管」（不是用 CANCELLED 状态冒充退出，§8.6）。
-    该连接不占用运行时 4+2 连接预算（独立池 1）。
+    与「旧写者已退出/可安全接管」（不是用 CANCELLED 冒充退出，§8.6）。
+
+    连接预算（§8.1「4+1+2 及原应用池」）：本持久连接即其中 ``+1``（实例锁），
+    不新增第 8 条；连接仅在启动后常驻、关闭就绪后 release。
     """
 
     def __init__(self, system_database_url: str, *, blocking_runner: BlockingRunner | None = None) -> None:
@@ -384,10 +378,8 @@ class AdvisoryLockInstanceGuard:
             return InstanceGuardEvidence(acquired=True, prior_writer_exited=True, detail="already-held")
 
         def _try_lock() -> bool:
-            import sqlalchemy as sa
-
             self._engine = sa.create_engine(
-                self._system_database_url,
+                _sync_database_url(self._system_database_url),
                 pool_size=1,
                 max_overflow=0,
                 pool_timeout=3,
@@ -429,6 +421,15 @@ async def _default_blocking_runner(fn: Callable[[], Any]) -> Any:
     return await ThreadPoolManager().run_async(TaskType.IO, fn)
 
 
+def _sync_database_url(url: str) -> str:
+    """统一为同步 psycopg URL（实例锁连接；asyncpg 驱动仅测试注入时出现）。"""
+
+    parsed = sa.make_url(url)
+    if parsed.drivername.endswith("+asyncpg"):
+        parsed = parsed.set(drivername="postgresql+psycopg")
+    return parsed.render_as_string(hide_password=False)
+
+
 @dataclass(frozen=True)
 class StartupOutcome:
     """启动编排结果：``handle`` 仅在隔离``ready=True``并 launch 后非空。"""
@@ -467,13 +468,6 @@ async def start_agent_runtime(
     HANDOFF §10.6：受管线程，不堵 UI）。``CancelledError`` 继续传播，传播前
     释放已组装宿主与实例锁（R2：不吞取消、不留资源）。
     """
-
-    from services.agent_service.runtime import (
-        RUNTIME_DB_NAME,
-        AgentRuntimeSettings,
-        assemble_agent_runtime,
-        launch_agent_runtime,
-    )
 
     if not isinstance(settings, AgentRuntimeSettings):
         raise TypeError("settings must be AgentRuntimeSettings")

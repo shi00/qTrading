@@ -373,6 +373,10 @@ class TestRecoveryGrant:
             await _seed_execution(dao, execution_id="exec-h", session_id="s-1", display_state="unknown")
             await _seed_round(dao, round_id="round-h", execution_id="exec-h", workflow_id="agent_research:h")
             await _link_round(dao, execution_id="exec-h", round_id="round-h")
+            # I：暂停中（须走继续语义，不得直接 resume 绕过暂停原因）
+            await _seed_execution(dao, execution_id="exec-i", session_id="s-1", display_state="paused")
+            await _seed_round(dao, round_id="round-i", execution_id="exec-i", workflow_id="agent_research:i")
+            await _link_round(dao, execution_id="exec-i", round_id="round-i")
 
             fact = await dao.grant_recovery_epoch(
                 RecoveryGrantRequest(
@@ -386,6 +390,7 @@ class TestRecoveryGrant:
                         "exec-f",
                         "exec-g",
                         "exec-h",
+                        "exec-i",
                         "exec-missing",
                     ),
                     owner_epoch=9,
@@ -404,6 +409,7 @@ class TestRecoveryGrant:
                 "exec-f": "version_mismatch",
                 "exec-g": "operation_in_flight",
                 "exec-h": "state_unverified",
+                "exec-i": "state_unverified",
                 "exec-missing": "not_found",
             }
 
@@ -510,3 +516,48 @@ class TestRecoveryGrant:
             assert dict(replay.blocked)["exec-a"] == "epoch_not_advanced"
         finally:
             await dao.engine.dispose()  # type: ignore[union-attr]
+
+
+async def _direct_blocking(fn: Any) -> Any:
+    return fn()
+
+
+class TestAdvisoryLockInstanceGuard:
+    """真实 PG：互斥取得、释放后可接管（HANDOFF §8.4 第 1 条 / §8.6）。"""
+
+    async def test_mutual_exclusion_and_takeover_after_release(self, real_embedded_pg) -> None:
+        from services.agent_service.recovery import AdvisoryLockInstanceGuard
+
+        url = real_embedded_pg.url
+        first = AdvisoryLockInstanceGuard(url, blocking_runner=_direct_blocking)
+        second = AdvisoryLockInstanceGuard(url, blocking_runner=_direct_blocking)
+        try:
+            first_evidence = await first.acquire()
+            assert first_evidence.acquired is True
+            assert first_evidence.prior_writer_exited is True
+            # 同实例重复取锁幂等（不重复建连）
+            again = await first.acquire()
+            assert again.detail == "already-held"
+
+            blocked = await second.acquire()
+            assert blocked.acquired is False
+            assert blocked.prior_writer_exited is False
+            assert blocked.detail == "lock-held"
+
+            first.release()
+            taken = await second.acquire()
+            assert taken.acquired is True
+            assert taken.detail == "acquired"
+        finally:
+            first.release()
+            second.release()
+
+    async def test_released_lock_can_be_reacquired(self, real_embedded_pg) -> None:
+        from services.agent_service.recovery import AdvisoryLockInstanceGuard
+
+        guard = AdvisoryLockInstanceGuard(real_embedded_pg.url, blocking_runner=_direct_blocking)
+        assert (await guard.acquire()).acquired is True
+        guard.release()
+        reacquired = await guard.acquire()
+        assert reacquired.acquired is True
+        guard.release()

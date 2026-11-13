@@ -625,6 +625,23 @@ class CloseFactOutcome:
 
 
 @dataclass(frozen=True)
+class InstanceGuardEvidence:
+    """唯一执行锁证据：``acquired`` 与 ``prior_writer_exited`` 都为真才可继续。"""
+
+    acquired: bool
+    prior_writer_exited: bool
+    detail: str
+
+
+class InstanceGuard(Protocol):
+    """启动唯一执行锁端口（应用单实例机制；拿锁成功即证明旧写者已退出）。"""
+
+    async def acquire(self) -> InstanceGuardEvidence: ...
+
+    def release(self) -> None: ...
+
+
+@dataclass(frozen=True)
 class CloseReadinessReceipt:
     """关闭就绪回执（不可变）。
 
@@ -641,6 +658,7 @@ class CloseReadinessReceipt:
     inflight_task_count: int
     checked_at: str
     residual_io: tuple[str, ...] = ()
+    residual_io_probed: bool = False
 
 
 class DispatchGate(Protocol):
@@ -698,6 +716,7 @@ class AgentRuntime:
         fact_sink: CloseFactSink,
         blocking_runner: CloseBlockingRunner | None = None,
         residual_io_probe: Callable[[], tuple[str, ...]] | None = None,
+        instance_guard: InstanceGuard | None = None,
     ) -> None:
         self._handle = handle
         self._bridge = bridge
@@ -708,6 +727,8 @@ class AgentRuntime:
         #: 返回非空名称集即视为未收敛，门闩不 ready）。经桥登记的 owner 任务由
         #: ``inflight_task_count`` 覆盖；未登记的长期任务必须由调用方经此探针上报。
         self._residual_io_probe = residual_io_probe
+        #: 唯一执行锁：就绪关闭完成后释放，供同进程数据库切换/重启带内接管。
+        self._instance_guard = instance_guard
         self._receipt: CloseReadinessReceipt | None = None
 
     async def prepare_close(self, command: CloseCommandIdentity) -> CloseReadinessReceipt:
@@ -787,6 +808,9 @@ class AgentRuntime:
             command, reasons=[], unknown=outcome.unknown_associations, inflight=inflight, residual=residual
         )
         self._receipt = receipt
+        if self._instance_guard is not None:
+            # 就绪（DBOS/Client 已关、运行库引擎已释放）后才释放唯一执行锁
+            self._instance_guard.release()
         return receipt
 
     def _make_receipt(
@@ -806,6 +830,7 @@ class AgentRuntime:
             inflight_task_count=inflight,
             checked_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             residual_io=residual,
+            residual_io_probed=self._residual_io_probe is not None,
         )
 
 

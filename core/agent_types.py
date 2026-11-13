@@ -5063,5 +5063,7 @@ class RecoveryGrantFact:
 #: 未收口 operation 阶段（恢复前必须确认旧执行已退出；unknown 亦先核原 operation）。
 OPEN_OPERATION_PHASES: Final[frozenset[str]] = frozenset({"prepared", "dispatch_claimed", "dispatched", "unknown"})
 
-#: 恢复候选的「未核状态」（unknown/ending 不得静默恢复：可能仍有写者）。
-RECOVERY_UNVERIFIED_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"unknown", "ending"})
+#: 恢复候选的「未核状态」（unknown/ending/paused/pausing 不得静默恢复：
+#: unknown/ending 可能仍有写者；paused/pausing 须走「总继续/单叶继续」语义，
+#: 直接 resume 会绕过暂停原因清理）。
+RECOVERY_UNVERIFIED_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"unknown", "ending", "paused", "pausing"})
