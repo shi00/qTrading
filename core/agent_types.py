@@ -5954,6 +5954,10 @@ CLEANUP_NATIVE_TARGETS: Final[tuple[tuple[str, str], ...]] = (
 #: NOT NULL 文本列的固定 tombstone：绝不含原正文/标题/文件名。
 CLEANUP_TOMBSTONE: Final = "[已清理]"
 
+#: NOT NULL 摘要列的固定 tombstone 摘要（§10.7）：固定公开常量的 SHA-256，
+#: 不携带、也不能被低熵字典反推原正文摘要。
+CLEANUP_TOMBSTONE_DIGEST: Final = sha256_hex(CLEANUP_TOMBSTONE.encode("utf-8"))
+
 
 class CleanupPhase(Enum):
     """清理作业阶段：准备 → （中断/失败）重试待处理 → 逐域查 0 后 verified。"""

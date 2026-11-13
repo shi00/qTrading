@@ -56,7 +56,9 @@ from core.agent_types import (
     ConsumeAnswerRequest,
     ConsumptionFact,
     ConsumptionState,
-    CLEANUP_NATIVE_TARGETS,
+    CLEANUP_MAX_BATCH_IDS,
+    CLEANUP_TOMBSTONE,
+    CLEANUP_TOMBSTONE_DIGEST,
     DataAttemptAuthorization,
     DataConsentBinding,
     DataConsentClaim,
@@ -233,34 +235,10 @@ WHERE user_scope = :user_scope
 """
 
 
-# ---------------------------------------------------------------------------
-# E-06 联合清理（DD §10.7）：九类原生目标按常量键、准确 ID 参数化；禁 LIKE/前缀/全表。
-# 每条语句都是 text() 常量（R4），键列名不来自外部输入。
-# ---------------------------------------------------------------------------
-
-_CLEANUP_DELETE_SQL: Final[dict[str, str]] = {
-    "dbos.workflow_status": "DELETE FROM dbos.workflow_status WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_input": "DELETE FROM dbos.workflow_input WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_output": "DELETE FROM dbos.workflow_output WHERE workflow_uuid = ANY(:ids)",
-    "dbos.operation_outputs": "DELETE FROM dbos.operation_outputs WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_events": "DELETE FROM dbos.workflow_events WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_events_history": "DELETE FROM dbos.workflow_events_history WHERE workflow_uuid = ANY(:ids)",
-    "dbos.streams": "DELETE FROM dbos.streams WHERE workflow_uuid = ANY(:ids)",
-    "dbos.notifications": "DELETE FROM dbos.notifications WHERE destination_uuid = ANY(:ids)",
-    "agent_ds.datasource_outputs": "DELETE FROM agent_ds.datasource_outputs WHERE workflow_id = ANY(:ids)",
-}
-
-_CLEANUP_COUNT_SQL: Final[dict[str, str]] = {
-    "dbos.workflow_status": "SELECT COUNT(*) FROM dbos.workflow_status WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_input": "SELECT COUNT(*) FROM dbos.workflow_input WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_output": "SELECT COUNT(*) FROM dbos.workflow_output WHERE workflow_uuid = ANY(:ids)",
-    "dbos.operation_outputs": "SELECT COUNT(*) FROM dbos.operation_outputs WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_events": "SELECT COUNT(*) FROM dbos.workflow_events WHERE workflow_uuid = ANY(:ids)",
-    "dbos.workflow_events_history": "SELECT COUNT(*) FROM dbos.workflow_events_history WHERE workflow_uuid = ANY(:ids)",
-    "dbos.streams": "SELECT COUNT(*) FROM dbos.streams WHERE workflow_uuid = ANY(:ids)",
-    "dbos.notifications": "SELECT COUNT(*) FROM dbos.notifications WHERE destination_uuid = ANY(:ids)",
-    "agent_ds.datasource_outputs": "SELECT COUNT(*) FROM agent_ds.datasource_outputs WHERE workflow_id = ANY(:ids)",
-}
+# E-06 九类原生目标位于**运行库**（dbos / agent_ds，独立逻辑库），不属业务库；
+# 计数/Datasource 删除见 ``data.persistence.agent_runtime_store``，系统表删除走
+# DBOS 公开 API（``services.agent_service.cleanup_native``）。本 DAO 只承载应用域
+# 的 NOT NULL tombstone（§10.7 字段级最小留存）。
 
 
 def _budget_blocked(identity: str, reason: str) -> AgentServiceError:
@@ -5365,59 +5343,93 @@ class AgentDao(BaseDao):
             replayed=replayed,
         )
 
-    async def count_cleanup_native_rows(self, ids: Sequence[str]) -> dict[str, int]:
-        """E-06 预检：九类原生目标按准确 ID 计数（查不到=0，不等于已清）。
+    async def tombstone_cleanup_text(
+        self,
+        user_scope: str,
+        *,
+        session_ids: Sequence[str] = (),
+        asset_keys: Sequence[tuple[str, str]] = (),
+    ) -> dict[str, int]:
+        """E-06 应用域清理（DD §10.7 字段级最小留存）：NOT NULL 文本/摘要换固定
+        tombstone，可 NULL 的私人草稿/来源/元数据与正文引用清除；集合外不变。
 
-        只读；每个域单独参数化 COUNT，禁止 LIKE/前缀/递归扩集合（DD §10.7）。
+        单事务执行；两个域都为空时零写入（仅「未启动计划」允许空原生集合，应用域
+        是否可空由服务层准入判定）。返回各域命中行数。
         """
 
-        normalized = self._require_cleanup_ids(ids)
-        engine = self._require_cleanup_engine()
-        counts: dict[str, int] = {}
-        async with engine.connect() as conn:
-            for table, _key in CLEANUP_NATIVE_TARGETS:
-                stmt = sa.text(_CLEANUP_COUNT_SQL[table]).bindparams(sa.bindparam("ids", expanding=True))
-                result = await conn.execute(stmt, {"ids": list(normalized)})
-                counts[table] = int(result.scalar_one())
-        return counts
-
-    async def delete_cleanup_native_rows(self, ids: Sequence[str]) -> dict[str, int]:
-        """E-06 删除：单事务逐域按常量键删除，并返回删除后逐域剩余计数。
-
-        只处理显式核定的准确集合；调用方须先提交删除 fence（§10.7）。任一步
-        失败由事务整体回滚，作业转 ``retry_pending`` 并复用原集合。
-        """
-
-        normalized = self._require_cleanup_ids(ids)
-        engine = self._require_cleanup_engine()
-        remaining: dict[str, int] = {}
+        self._check_engine()
+        if not user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope is required", "cleanup")
+        sessions = self._normalize_cleanup_values(session_ids)
+        assets = self._normalize_asset_keys(asset_keys)
+        touched = {"agent_session": 0, "agent_asset_version": 0}
+        if not sessions and not assets:
+            return touched
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            for table, _key in CLEANUP_NATIVE_TARGETS:
-                await conn.execute(
-                    sa.text(_CLEANUP_DELETE_SQL[table]).bindparams(sa.bindparam("ids", expanding=True)),
-                    {"ids": list(normalized)},
+            if sessions:
+                session_result = await conn.execute(
+                    sa.update(AgentSession)
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id.in_(list(sessions)),
+                    )
+                    .values(
+                        title=CLEANUP_TOMBSTONE,
+                        draft_payload=None,
+                        origin_ref=None,
+                        branch_metadata=None,
+                        cleaned_at=sa.func.now(),
+                    )
                 )
-                result = await conn.execute(
-                    sa.text(_CLEANUP_COUNT_SQL[table]).bindparams(sa.bindparam("ids", expanding=True)),
-                    {"ids": list(normalized)},
+                touched["agent_session"] = int(session_result.rowcount or 0)
+            if assets:
+                asset_result = await conn.execute(
+                    sa.update(AgentAssetVersion)
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        sa.tuple_(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).in_(list(assets)),
+                    )
+                    .values(
+                        display_name=CLEANUP_TOMBSTONE,
+                        digest=CLEANUP_TOMBSTONE_DIGEST,
+                        origin_ref=None,
+                        metadata_payload=None,
+                        body_text=None,
+                        body_ref=None,
+                        cleaned_at=sa.func.now(),
+                        tombstoned=True,
+                    )
                 )
-                remaining[table] = int(result.scalar_one())
-        return remaining
+                touched["agent_asset_version"] = int(asset_result.rowcount or 0)
+        return touched
 
-    def _require_cleanup_ids(self, ids: Sequence[str]) -> tuple[str, ...]:
-        # 空集合仅允许「未启动计划」在服务层直接判定；DAO 不执行无目标删除。
+    @staticmethod
+    def _normalize_cleanup_values(values: Sequence[str]) -> tuple[str, ...]:
+        """非空/去重/排序 + 200 上限；空集合返回 ()，由调用方按准入语义判定。"""
+
         try:
-            normalized = normalize_cleanup_ids(ids)
+            return normalize_cleanup_ids(values)
         except AgentValidationError as exc:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, f"invalid cleanup ids: {exc.code}", "cleanup"
             ) from exc
-        if not normalized:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup ids must not be empty", "cleanup")
-        return normalized
 
-    def _require_cleanup_engine(self) -> AsyncEngine:
-        self._check_engine()
-        engine = self.engine
-        assert isinstance(engine, AsyncEngine)
-        return engine
+    @classmethod
+    def _normalize_asset_keys(cls, keys: Sequence[tuple[str, str]]) -> tuple[tuple[str, str], ...]:
+        """资产版本键非空/去重/排序 + 200 上限（资产版本是稳定身份，不与正文混算）。"""
+
+        normalized: set[tuple[str, str]] = set()
+        for key in keys:
+            if not isinstance(key, tuple) or len(key) != 2:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "asset keys must be pairs", "cleanup")
+            asset_id, asset_version = key
+            if not isinstance(asset_id, str) or not asset_id:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid asset id", "cleanup")
+            if not isinstance(asset_version, str) or not asset_version:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid asset version", "cleanup")
+            normalized.add((asset_id, asset_version))
+        if len(normalized) > CLEANUP_MAX_BATCH_IDS:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup batch limit exceeded", "cleanup")
+        return tuple(sorted(normalized))
