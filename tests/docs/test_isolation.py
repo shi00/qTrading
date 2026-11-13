@@ -74,8 +74,10 @@ def test_collected_files_have_no_business_imports() -> None:
         if hits:
             offenders[str(path.relative_to(DOCS_DIR))] = hits
     assert offenders == {}, f"纯文档测试文件不得导入业务模块: {offenders}"
-    # 允许集兜底核对：conftest 仅注入 docs_markdown（scripts 解析模块）
-    assert _top_level_imports(DOCS_DIR / "conftest.py") <= (sys.stdlib_module_names | {"pytest", "docs_markdown"})
+    # 允许集兜底核对：conftest 仅注入 docs_markdown / docs_generated（scripts 解析与生成模块）
+    assert _top_level_imports(DOCS_DIR / "conftest.py") <= (
+        sys.stdlib_module_names | {"pytest", "docs_markdown", "docs_generated"}
+    )
 
 
 def test_injected_business_sample_is_real_and_not_collected() -> None:
