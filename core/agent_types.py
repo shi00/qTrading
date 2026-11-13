@@ -5833,3 +5833,99 @@ def evaluate_read_only_audit(
     if current_implementation_fingerprint != audit.implementation_fingerprint:
         return MCPReadOnlyAdmission(False, "implementation_changed")
     return MCPReadOnlyAdmission(True, None)
+
+
+# ---------------------------------------------------------------------------
+# E-03 D02 Skill 预算与角色分配契约（§10.3 / DD §12 阈值表）
+# ---------------------------------------------------------------------------
+
+#: Skill 包四阈值（D02，设计 §12 阈值表冻结值）。
+SKILL_MAX_ARCHIVE_BYTES: Final = 16_777_216
+SKILL_MAX_EXPANDED_BYTES: Final = 64 * 1024 * 1024
+SKILL_MAX_OBJECTS: Final = 1024
+SKILL_MAX_PREFLIGHT_SECONDS: Final = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class SkillBudget:
+    """Skill 预检/展开预算：恰等通过、超一拒绝；不在展开后才检查。"""
+
+    max_archive_bytes: int = SKILL_MAX_ARCHIVE_BYTES
+    max_expanded_bytes: int = SKILL_MAX_EXPANDED_BYTES
+    max_objects: int = SKILL_MAX_OBJECTS
+    max_preflight_seconds: float = SKILL_MAX_PREFLIGHT_SECONDS
+
+    def enforce_archive_bytes(self, byte_length: int, path: str = "$.skill.archive_bytes") -> None:
+        _enforce_limit(byte_length, self.max_archive_bytes, "skill_archive_bytes_exceeded", path)
+
+    def enforce_expanded_bytes(self, byte_length: int, path: str = "$.skill.expanded_bytes") -> None:
+        _enforce_limit(byte_length, self.max_expanded_bytes, "skill_expanded_bytes_exceeded", path)
+
+    def enforce_objects(self, count: int, path: str = "$.skill.objects") -> None:
+        _enforce_limit(count, self.max_objects, "skill_objects_exceeded", path)
+
+    def enforce_elapsed(self, elapsed_s: float, path: str = "$.skill.elapsed_s") -> None:
+        if isinstance(elapsed_s, bool) or not isinstance(elapsed_s, (int, float)):
+            _fail("invalid_type", path)
+        if elapsed_s > self.max_preflight_seconds:
+            _fail("skill_time_exceeded", path)
+
+
+#: 首版 D02 默认预算（管理入口与 worker 共用同一实例语义）。
+DEFAULT_SKILL_BUDGET: Final = SkillBudget()
+
+
+@dataclass(frozen=True, slots=True)
+class SkillVersionRef:
+    """Skill 版本身份：skill_id + 版本（从 1 起）；显示名不参与身份。"""
+
+    skill_id: str
+    version: int
+
+    def stable_key(self) -> str:
+        return stable_id(
+            "skill_version",
+            (
+                require_identity(self.skill_id, "$.skill.skill_id"),
+                str(require_revision(self.version, "$.skill.version")),
+            ),
+        )
+
+
+def _skill_keys(refs: Iterable[SkillVersionRef]) -> set[tuple[str, int]]:
+    return {(ref.skill_id, ref.version) for ref in refs}
+
+
+def validate_skill_assignment(
+    *,
+    enabled: Sequence[SkillVersionRef],
+    defaults: Sequence[SkillVersionRef],
+) -> None:
+    """角色默认 Skill 必须是启用集合子集（默认⊆启用，不以默认隐式启用）。"""
+
+    if not _skill_keys(defaults).issubset(_skill_keys(enabled)):
+        _fail("skill_default_not_enabled", "$.agent.skills.defaults")
+
+
+def resolve_skill_selection(
+    *,
+    enabled: Iterable[SkillVersionRef],
+    defaults: Iterable[SkillVersionRef],
+    hand_picked: Iterable[SkillVersionRef],
+    is_child: bool,
+) -> tuple[SkillVersionRef, ...]:
+    """实际能力集合：主 = 默认 ∪ 手选，子 = 仅自身默认（不继承主手选）。
+
+    只在启用集合内取交集；空集合确实为空（不解释为「全部」）。
+    """
+
+    enabled_keys = _skill_keys(enabled)
+    candidates = list(defaults)
+    if not is_child:
+        candidates.extend(hand_picked)
+    chosen: dict[tuple[str, int], SkillVersionRef] = {}
+    for ref in candidates:
+        key = (ref.skill_id, ref.version)
+        if key in enabled_keys:
+            chosen[key] = ref
+    return tuple(chosen[key] for key in sorted(chosen))
