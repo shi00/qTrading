@@ -2887,7 +2887,7 @@ class TestPollIntervalNormalization:
     async def test_overflowing_int_interval_falls_back_to_default(self, svc, raw_interval):
         """超出 float 范围的超大整数（KV 直写脏数据）应回退默认 60s。
 
-        NSU-01 残余：``10**400`` 超出 float 可表示范围，``float()`` 抛
+        M27-07 残余：``10**400`` 超出 float 可表示范围，``float()`` 抛
         OverflowError，旧捕获面 (TypeError, ValueError) 漏接，_poll_loop 协程
         异常终止而 _running 仍为 True，轮询静默停滞。
         """
@@ -2910,7 +2910,7 @@ class TestPollIntervalNormalization:
     async def test_non_finite_interval_falls_back_to_default(self, svc, raw_interval):
         """NaN/±Inf/None（KV 直写脏数据）不得送入 asyncio.sleep：一律回退默认 60s。
 
-        M27-07（NSU-01）：float("nan")/float("inf") 能成功转换且 `<= 0` 为 False，
+        M27-07：float("nan")/float("inf") 能成功转换且 `<= 0` 为 False，
         旧判据会把 NaN/Inf 原样交给 asyncio.sleep——NaN 的计时器堆比较失序、Inf 的
         唤醒时刻永不到达，轮询静默停滞（_running 仍为 True，无告警）。
         """
