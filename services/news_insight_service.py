@@ -489,9 +489,8 @@ class NewsInsightService:
         # 4) 确定性去重（§8.4，仅同 source_kind 内）
         kept, _dropped = dedupe_documents(candidates)
 
-        # 5) 公告优先 + 时间降序截取 top-12（§9.1）
-        ordered = sorted(kept, key=lambda d: (0 if d.get("source_kind") == "announcement" else 1, _sort_pub(d)))
-        top = ordered[:_EVIDENCE_LIMIT]
+        # 5) 公告优先 + 同组内发布时间降序截取 top-12（§9.1）；未知发布时间在各组内末置
+        top = _order_evidence(kept)[:_EVIDENCE_LIMIT]
 
         evidence: list[EvidenceDocument] = [
             EvidenceDocument(
@@ -719,12 +718,39 @@ class NewsInsightService:
         return NewsInsightOutcome(result=result, reused=False)
 
 
-def _sort_pub(d: dict) -> datetime.datetime:
-    """按发布时间排序的键；无发布时间的文档排最后。"""
+def _publish_time_or_none(d: dict) -> datetime.datetime | None:
+    """取可比较的发布时间；未知时间返回 None（缺失 / NaT / 非 datetime 脏值）。
+
+    NaT 是 datetime 子类但自比较不等（同 ``_row_to_result`` 的 NaT 判定），
+    不拦截会参与排序并留在组中，故与 None 同视为未知。
+    """
     pub = d.get("publish_time")
-    if pub is None:
-        return datetime.datetime.max  # noqa: DTZ901  # 哨兵边界（None 置排序末尾），仅作排序键不参与时区运算
+    if not isinstance(pub, datetime.datetime) or pub != pub:
+        return None
     return pub
+
+
+def _order_evidence(docs: list[dict]) -> list[dict]:
+    """按 §9.1 排序证据：公告优先，组内发布时间降序，未知时间在各组内末置。
+
+    稳定排序：同发布时间保持输入（去重后）顺序，未知时间亦保持相对顺序。
+    """
+
+    def _newest_first(group: list[dict]) -> list[dict]:
+        timed: list[tuple[datetime.datetime, dict]] = []
+        untimed: list[dict] = []
+        for d in group:
+            pub = _publish_time_or_none(d)
+            if pub is None:
+                untimed.append(d)
+            else:
+                timed.append((pub, d))
+        timed.sort(key=lambda item: item[0], reverse=True)
+        return [d for _pub, d in timed] + untimed
+
+    announcements = [d for d in docs if d.get("source_kind") == "announcement"]
+    others = [d for d in docs if d.get("source_kind") != "announcement"]
+    return _newest_first(announcements) + _newest_first(others)
 
 
 def _fill_time_range(src_item: dict, src_docs: list[dict]) -> None:
