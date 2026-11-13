@@ -5,6 +5,7 @@ import hashlib
 import html
 import inspect
 import logging
+import math
 import re
 import threading
 import typing
@@ -515,14 +516,15 @@ class NewsSubscriptionService:
         """Main polling loop"""
 
         while self._running:
-            # Read config dynamically（M14-F1：失真配置归一化——非数值/≤0 回退默认，
-            # 防紧密循环风暴与 TypeError 致轮询协程静默死亡）
+            # Read config dynamically（M14-F1：失真配置归一化——非数值/NaN/±Inf/≤0
+            # 回退默认，防紧密循环风暴、sleep 永不唤醒致轮询停滞与 TypeError 致轮询
+            # 协程静默死亡）
             raw_interval = ConfigHandler.get_config("news_poll_interval", 60)
             try:
                 base_interval = float(raw_interval)  # type: ignore[arg-type]
             except (TypeError, ValueError):
                 base_interval = _NEWS_POLL_INTERVAL_DEFAULT_S
-            if base_interval <= 0:
+            if not math.isfinite(base_interval) or base_interval <= 0:
                 base_interval = _NEWS_POLL_INTERVAL_DEFAULT_S
 
             # 上一次 fetch 未结束则跳过本轮：抓取耗时可能超过轮询间隔（间隔下限 10s，

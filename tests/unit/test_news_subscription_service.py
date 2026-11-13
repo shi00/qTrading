@@ -2883,6 +2883,29 @@ class TestPollIntervalNormalization:
         assert slept[0] == 60.0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw_interval",
+        ["nan", "NaN", float("nan"), "inf", "Inf", float("inf"), "1e309", "-inf", float("-inf"), None],
+    )
+    async def test_non_finite_interval_falls_back_to_default(self, svc, raw_interval):
+        """NaN/±Inf/None（KV 直写脏数据）不得送入 asyncio.sleep：一律回退默认 60s。
+
+        M27-07（NSU-01）：float("nan")/float("inf") 能成功转换且 `<= 0` 为 False，
+        旧判据会把 NaN/Inf 原样交给 asyncio.sleep——NaN 的计时器堆比较失序、Inf 的
+        唤醒时刻永不到达，轮询静默停滞（_running 仍为 True，无告警）。
+        """
+        slept, fake_get_config, fake_sleep = self._make_hooks(svc, [raw_interval])
+        with (
+            patch("services.news_subscription_service.ConfigHandler.get_config", side_effect=fake_get_config),
+            patch("services.news_subscription_service.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(svc, "_fetch_and_notify", AsyncMock()),
+        ):
+            svc._running = True
+            await svc._poll_loop()
+        assert len(slept) == 1
+        assert slept[0] == 60.0
+
+    @pytest.mark.asyncio
     async def test_valid_numeric_interval_passthrough(self, svc):
         """正常数值配置应原样生效（int 30 → sleep 30.0），不受归一化影响。"""
         slept, fake_get_config, fake_sleep = self._make_hooks(svc, [30])
