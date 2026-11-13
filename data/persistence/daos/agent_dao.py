@@ -56,9 +56,13 @@ from core.agent_types import (
     ConsumeAnswerRequest,
     ConsumptionFact,
     ConsumptionState,
-    CLEANUP_MAX_BATCH_IDS,
     CLEANUP_TOMBSTONE,
     CLEANUP_TOMBSTONE_DIGEST,
+    CleanupJobRecord,
+    CleanupPhase,
+    decode_cleanup_identity_set,
+    encode_cleanup_identity_set,
+    normalize_cleanup_asset_keys,
     DataAttemptAuthorization,
     DataConsentBinding,
     DataConsentClaim,
@@ -250,6 +254,7 @@ def _budget_blocked(identity: str, reason: str) -> AgentServiceError:
 from data.persistence.models import (
     AgentArtifact,
     AgentAssetVersion,
+    AgentCleanupJob,
     AgentCommand,
     AgentDecision,
     AgentExecution,
@@ -5420,16 +5425,182 @@ class AgentDao(BaseDao):
     def _normalize_asset_keys(cls, keys: Sequence[tuple[str, str]]) -> tuple[tuple[str, str], ...]:
         """资产版本键非空/去重/排序 + 200 上限（资产版本是稳定身份，不与正文混算）。"""
 
-        normalized: set[tuple[str, str]] = set()
-        for key in keys:
-            if not isinstance(key, tuple) or len(key) != 2:
-                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "asset keys must be pairs", "cleanup")
-            asset_id, asset_version = key
-            if not isinstance(asset_id, str) or not asset_id:
-                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid asset id", "cleanup")
-            if not isinstance(asset_version, str) or not asset_version:
-                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid asset version", "cleanup")
-            normalized.add((asset_id, asset_version))
-        if len(normalized) > CLEANUP_MAX_BATCH_IDS:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup batch limit exceeded", "cleanup")
-        return tuple(sorted(normalized))
+        try:
+            return normalize_cleanup_asset_keys(keys)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"invalid cleanup asset keys: {exc.code}", "cleanup"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # E-06-3 清理作业持久化（§9.11/§10.7）：固定集合 + fence + 阶段推进。
+    # 集合一经写入不可改写；fence 只在原预览摘要/修订匹配时提交一次。
+    # ------------------------------------------------------------------
+
+    async def save_cleanup_job(
+        self, record: CleanupJobRecord, *, content_manifest: dict[str, object] | None = None
+    ) -> bool:
+        """创建清理作业；同身份重放返回 False，异输入抛 ``INPUT_CONFLICT``。
+
+        身份 = (user_scope, cleanup_job_id, owner_ref, preview_digest, 固定集合)。
+        """
+
+        self._check_engine()
+        engine = self._require_async_engine()
+        identity = encode_cleanup_identity_set(record)
+        statement = sa.insert(AgentCleanupJob).values(
+            user_scope=record.user_scope,
+            cleanup_job_id=record.cleanup_job_id,
+            owner_ref=record.owner_ref,
+            preview_digest=record.preview_digest,
+            expected_revision=record.expected_revision,
+            exact_identity_set=identity,
+            content_manifest=content_manifest,
+            phase=record.phase.value,
+            complete=False,
+            fence_committed=record.fence_committed,
+        )
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(statement)
+        except IntegrityError as exc:
+            existing = await self.load_cleanup_job(record.user_scope, record.cleanup_job_id)
+            self._require_same_cleanup_identity(existing, record, exc)
+            return False
+        return True
+
+    async def load_cleanup_job(self, user_scope: str, cleanup_job_id: str) -> CleanupJobRecord | None:
+        """读取作业事实；存储载形不可解释时显式失败（不返回伪造默认）。"""
+
+        self._check_engine()
+        engine = self._require_async_engine()
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentCleanupJob.user_scope,
+                        AgentCleanupJob.cleanup_job_id,
+                        AgentCleanupJob.owner_ref,
+                        AgentCleanupJob.preview_digest,
+                        AgentCleanupJob.expected_revision,
+                        AgentCleanupJob.exact_identity_set,
+                        AgentCleanupJob.phase,
+                        AgentCleanupJob.fence_committed,
+                    ).where(
+                        AgentCleanupJob.user_scope == user_scope,
+                        AgentCleanupJob.cleanup_job_id == cleanup_job_id,
+                    )
+                )
+            ).first()
+        return None if row is None else self._cleanup_record_from_row(row)
+
+    async def commit_cleanup_fence(self, record: CleanupJobRecord) -> None:
+        """提交删除 fence（只一次）；集合与摘要不匹配则拒绝，不静默改写。"""
+
+        self._check_engine()
+        engine = self._require_async_engine()
+        label = f"{record.user_scope}/{record.cleanup_job_id}"
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.update(AgentCleanupJob)
+                .where(
+                    AgentCleanupJob.user_scope == record.user_scope,
+                    AgentCleanupJob.cleanup_job_id == record.cleanup_job_id,
+                    AgentCleanupJob.preview_digest == record.preview_digest,
+                    AgentCleanupJob.expected_revision == record.expected_revision,
+                )
+                .values(fence_committed=True, phase=record.phase.value)
+            )
+            if int(result.rowcount or 0) == 0:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup fence target missing or drifted", label)
+
+    async def save_cleanup_phase(
+        self,
+        user_scope: str,
+        cleanup_job_id: str,
+        *,
+        phase: CleanupPhase,
+        verified_counts: dict[str, int] | None = None,
+        complete: bool = False,
+        error_category: str | None = None,
+        sqlstate: str | None = None,
+    ) -> None:
+        """推进阶段：``verified`` 要求 fence 已提交；不改写固定集合。"""
+
+        self._check_engine()
+        engine = self._require_async_engine()
+        label = f"{user_scope}/{cleanup_job_id}"
+        values: dict[str, Any] = {
+            "phase": phase.value,
+            "verified_counts": verified_counts,
+            "complete": complete,
+            "error_category": error_category,
+            "sqlstate": sqlstate,
+        }
+        if phase is CleanupPhase.VERIFIED:
+            values["verified_at"] = sa.func.now()
+        statement = (
+            sa.update(AgentCleanupJob)
+            .where(AgentCleanupJob.user_scope == user_scope, AgentCleanupJob.cleanup_job_id == cleanup_job_id)
+            .values(**values)
+        )
+        if phase is CleanupPhase.VERIFIED:
+            statement = statement.where(AgentCleanupJob.fence_committed.is_(True))
+        async with engine.begin() as conn:
+            result = await conn.execute(statement)
+            if int(result.rowcount or 0) == 0:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "cleanup job phase target missing or fence absent", label
+                )
+
+    def _require_async_engine(self) -> AsyncEngine:
+        engine = self.engine
+        if not isinstance(engine, AsyncEngine):
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE, "cleanup requires an async engine", "cleanup"
+            )
+        return engine
+
+    @staticmethod
+    def _require_same_cleanup_identity(
+        existing: CleanupJobRecord | None, record: CleanupJobRecord, cause: Exception
+    ) -> None:
+        label = f"{record.user_scope}/{record.cleanup_job_id}"
+        if (
+            existing is None
+            or existing.owner_ref != record.owner_ref
+            or existing.preview_digest != record.preview_digest
+            or encode_cleanup_identity_set(existing) != encode_cleanup_identity_set(record)
+        ):
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_CONFLICT, "cleanup job already exists with different identity", label
+            ) from cause
+
+    @staticmethod
+    def _cleanup_record_from_row(row: Any) -> CleanupJobRecord:
+        user_scope, cleanup_job_id, owner_ref, preview_digest, expected_revision, identity_set, phase, fence = row
+        label = f"{user_scope}/{cleanup_job_id}"
+        try:
+            identities = decode_cleanup_identity_set(identity_set)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE, f"cleanup identity set invalid: {exc.code}", label
+            ) from exc
+        try:
+            parsed_phase = CleanupPhase(phase)
+        except ValueError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE, f"cleanup phase invalid: {phase}", label
+            ) from exc
+        return CleanupJobRecord(
+            user_scope=str(user_scope),
+            cleanup_job_id=str(cleanup_job_id),
+            owner_ref=str(owner_ref),
+            preview_digest=str(preview_digest),
+            expected_revision=int(expected_revision),
+            exact_ids=identities.native_ids,
+            phase=parsed_phase,
+            fence_committed=bool(fence),
+            session_ids=identities.session_ids,
+            asset_keys=identities.asset_keys,
+        )

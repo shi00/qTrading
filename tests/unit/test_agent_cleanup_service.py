@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import pytest
 
-from core.agent_types import AgentErrorCode, AgentServiceError, CleanupPrecondition
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    CleanupJobRecord,
+    CleanupPhase,
+    CleanupPrecondition,
+)
 from services.agent_service.cleanup import (
     CleanupConfirmCommand,
-    CleanupJobRecord,
-    CleanupJobState,
     CleanupService,
     preview_digest,
 )
@@ -28,7 +32,7 @@ def _record(**overrides: object) -> CleanupJobRecord:
         "preview_digest": preview_digest(("session-1",), _IDS),
         "expected_revision": 4,
         "exact_ids": _IDS,
-        "phase": CleanupJobState.PREPARED,
+        "phase": CleanupPhase.PREPARED,
         "fence_committed": False,
     }
     values.update(overrides)
@@ -145,7 +149,7 @@ class TestFenceCommit:
         service = CleanupService(store)
         receipt = await service.confirm(_command(record), _precondition())
         assert receipt.replayed is False
-        assert receipt.phase is CleanupJobState.PREPARED
+        assert receipt.phase is CleanupPhase.PREPARED
         assert receipt.exact_ids == ("wf-a", "wf-b")
         assert [commit.fence_committed for commit in store.commits] == [True]
 
@@ -162,18 +166,18 @@ class TestFenceCommit:
 
     @pytest.mark.asyncio
     async def test_retry_pending_reuses_original_set(self) -> None:
-        record = _record(phase=CleanupJobState.RETRY_PENDING)
+        record = _record(phase=CleanupPhase.RETRY_PENDING)
         store = _Store(record)
         service = CleanupService(store)
         receipt = await service.confirm(_command(record), _precondition())
-        assert receipt.phase is CleanupJobState.RETRY_PENDING
+        assert receipt.phase is CleanupPhase.RETRY_PENDING
         # 复用原集合（规范化排序），不扩大范围。
         assert receipt.exact_ids == ("wf-a", "wf-b")
         assert set(receipt.exact_ids) == set(record.exact_ids)
 
     @pytest.mark.asyncio
     async def test_verified_job_reports_replay_without_new_fence(self) -> None:
-        record = _record(phase=CleanupJobState.VERIFIED, fence_committed=True)
+        record = _record(phase=CleanupPhase.VERIFIED, fence_committed=True)
         store = _Store(record)
         service = CleanupService(store)
         receipt = await service.confirm(_command(record), _precondition())

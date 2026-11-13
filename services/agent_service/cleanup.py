@@ -12,40 +12,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Protocol
 
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     CleanupAdmission,
+    CleanupJobRecord,
+    CleanupPhase,
     CleanupPrecondition,
     evaluate_cleanup_admission,
+    normalize_cleanup_asset_keys,
     normalize_cleanup_ids,
     sha256_hex,
 )
-
-
-class CleanupJobState(Enum):
-    """作业在存储中的阶段（与 :class:`CleanupPhase` 同名值）。"""
-
-    PREPARED = "prepared"
-    RETRY_PENDING = "retry_pending"
-    VERIFIED = "verified"
-
-
-@dataclass(frozen=True, slots=True)
-class CleanupJobRecord:
-    """作业事实：固定集合 + 原预览摘要 + 期望修订 + fence 状态。"""
-
-    user_scope: str
-    cleanup_job_id: str
-    owner_ref: str
-    preview_digest: str
-    expected_revision: int
-    exact_ids: tuple[str, ...]
-    phase: CleanupJobState
-    fence_committed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +45,7 @@ class CleanupReceipt:
     """确认回执：阶段 + 是否重放 + 固定集合（不含正文）。"""
 
     cleanup_job_id: str
-    phase: CleanupJobState
+    phase: CleanupPhase
     replayed: bool
     exact_ids: tuple[str, ...]
     admission: CleanupAdmission
@@ -111,7 +91,7 @@ class CleanupService:
             )
         if command.expected_revision != record.expected_revision:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup job revision is stale", label)
-        if record.phase is CleanupJobState.VERIFIED:
+        if record.phase is CleanupPhase.VERIFIED:
             return CleanupReceipt(
                 command.cleanup_job_id,
                 record.phase,
@@ -131,14 +111,37 @@ class CleanupService:
             preview_digest=record.preview_digest,
             expected_revision=record.expected_revision,
             exact_ids=normalize_cleanup_ids(record.exact_ids),
-            phase=record.phase if record.phase is CleanupJobState.RETRY_PENDING else CleanupJobState.PREPARED,
+            phase=record.phase if record.phase is CleanupPhase.RETRY_PENDING else CleanupPhase.PREPARED,
             fence_committed=True,
+            session_ids=normalize_cleanup_ids(record.session_ids),
+            asset_keys=normalize_cleanup_asset_keys(record.asset_keys),
         )
         await self._store.commit_fence(committed)
         return CleanupReceipt(
             command.cleanup_job_id,
-            CleanupJobState(committed.phase),
+            committed.phase,
             False,
             committed.exact_ids,
             admission,
         )
+
+
+class CleanupJobDaoPort(Protocol):
+    """``CleanupJobStorePort`` 的 DAO 侧最小面（生产接 ``AgentDao``）。"""
+
+    async def load_cleanup_job(self, user_scope: str, cleanup_job_id: str) -> CleanupJobRecord | None: ...
+
+    async def commit_cleanup_fence(self, record: CleanupJobRecord) -> None: ...
+
+
+class DaoCleanupJobStore:
+    """作业存储生产实现：直接委托 DAO 的清理作业事务（固定集合不可改写）。"""
+
+    def __init__(self, dao: CleanupJobDaoPort) -> None:
+        self._dao = dao
+
+    async def load(self, user_scope: str, cleanup_job_id: str) -> CleanupJobRecord | None:
+        return await self._dao.load_cleanup_job(user_scope, cleanup_job_id)
+
+    async def commit_fence(self, record: CleanupJobRecord) -> None:
+        await self._dao.commit_cleanup_fence(record)

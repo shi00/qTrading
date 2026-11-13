@@ -15,10 +15,15 @@ from core.agent_types import (
     CLEANUP_TOMBSTONE,
     AgentValidationError,
     CleanupAdmission,
+    CleanupIdentitySet,
+    CleanupJobRecord,
     CleanupPhase,
     CleanupPrecondition,
     CleanupState,
+    decode_cleanup_identity_set,
+    encode_cleanup_identity_set,
     evaluate_cleanup_admission,
+    normalize_cleanup_asset_keys,
     normalize_cleanup_ids,
     tombstone_text,
 )
@@ -131,3 +136,84 @@ class TestTombstone:
     def test_tombstone_is_stable_for_empty_and_none(self) -> None:
         assert tombstone_text("") == CLEANUP_TOMBSTONE
         assert tombstone_text(None) == CLEANUP_TOMBSTONE
+
+
+class TestCleanupIdentitySetCodec:
+    def _record(self, **overrides: object) -> CleanupJobRecord:
+        values: dict[str, object] = {
+            "user_scope": "owner-1",
+            "cleanup_job_id": "job-1",
+            "owner_ref": "session-1",
+            "preview_digest": "a" * 64,
+            "expected_revision": 3,
+            "exact_ids": ("wf-b", "wf-a"),
+            "phase": CleanupPhase.PREPARED,
+            "fence_committed": False,
+            "session_ids": ("session-2", "session-1"),
+            "asset_keys": (("asset-b", "2"), ("asset-a", "1")),
+        }
+        values.update(overrides)
+        return CleanupJobRecord(**values)  # type: ignore[arg-type]  # 测试受控覆盖
+
+    def test_asset_keys_are_deduped_sorted_and_limited(self) -> None:
+        assert normalize_cleanup_asset_keys([("b", "2"), ("a", "1"), ("b", "2")]) == (("a", "1"), ("b", "2"))
+        with pytest.raises(AgentValidationError) as exc:
+            normalize_cleanup_asset_keys([(f"asset-{index:03d}", "1") for index in range(CLEANUP_MAX_BATCH_IDS + 1)])
+        assert exc.value.code == "cleanup_batch_limit_exceeded"
+
+    @pytest.mark.parametrize("key", [("asset-1",), ("asset-1", ""), ("", "1"), "asset-1", ("asset-1", 1)])
+    def test_invalid_asset_key_rejected(self, key: object) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            normalize_cleanup_asset_keys([key])
+        assert exc.value.code == "invalid_cleanup_asset_key"
+
+    def test_encode_is_canonical_and_roundtrips(self) -> None:
+        encoded = encode_cleanup_identity_set(self._record())
+        assert encoded["native_ids"] == ["wf-a", "wf-b"]
+        assert encoded["session_ids"] == ["session-1", "session-2"]
+        assert encoded["asset_keys"] == [["asset-a", "1"], ["asset-b", "2"]]
+        decoded = decode_cleanup_identity_set(encoded)
+        assert decoded == CleanupIdentitySet(
+            native_ids=("wf-a", "wf-b"),
+            session_ids=("session-1", "session-2"),
+            asset_keys=(("asset-a", "1"), ("asset-b", "2")),
+        )
+        record = self._record()
+        assert (
+            decoded
+            == CleanupIdentitySet(
+                native_ids=normalize_cleanup_ids(record.exact_ids),
+                session_ids=normalize_cleanup_ids(record.session_ids),
+                asset_keys=normalize_cleanup_asset_keys(record.asset_keys),
+            )
+            == CleanupIdentitySet(
+                native_ids=("wf-a", "wf-b"),
+                session_ids=("session-1", "session-2"),
+                asset_keys=(("asset-a", "1"), ("asset-b", "2")),
+            )
+        )
+
+    def test_empty_domains_are_explicit_not_wildcards(self) -> None:
+        decoded = decode_cleanup_identity_set({"native_ids": [], "session_ids": [], "asset_keys": []})
+        assert decoded == CleanupIdentitySet()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"native_ids": ["a"], "session_ids": []},
+            {"native_ids": ["a"], "session_ids": [], "asset_keys": [], "extra": 1},
+            {"native_ids": "a", "session_ids": [], "asset_keys": []},
+            {"native_ids": [], "session_ids": [], "asset_keys": [["a"]]},
+            {"native_ids": [""], "session_ids": [], "asset_keys": []},
+        ],
+    )
+    def test_decode_rejects_malformed_payloads(self, payload: object) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            decode_cleanup_identity_set(payload)
+        assert exc.value.code in {
+            "missing_field",
+            "unknown_field",
+            "invalid_type",
+            "invalid_cleanup_id",
+            "invalid_cleanup_asset_key",
+        }

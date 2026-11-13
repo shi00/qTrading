@@ -6035,3 +6035,87 @@ def tombstone_text(original: str | None) -> str:
 
     del original
     return CLEANUP_TOMBSTONE
+
+
+def normalize_cleanup_asset_keys(keys: Iterable[object]) -> tuple[tuple[str, str], ...]:
+    """资产版本键 ``(asset_id, asset_version)``：非空/去重/排序 + 200 上限。
+
+    资产版本是稳定身份（不是正文），单独规范化以免与原生 ID 混算。
+    """
+
+    normalized: set[tuple[str, str]] = set()
+    for key in keys:
+        if not isinstance(key, (tuple, list)) or len(key) != 2:
+            _fail("invalid_cleanup_asset_key", "$.cleanup.asset_keys")
+        asset_id, asset_version = key
+        if not isinstance(asset_id, str) or not asset_id:
+            _fail("invalid_cleanup_asset_key", "$.cleanup.asset_keys")
+        if not isinstance(asset_version, str) or not asset_version:
+            _fail("invalid_cleanup_asset_key", "$.cleanup.asset_keys")
+        normalized.add((asset_id, asset_version))
+    if len(normalized) > CLEANUP_MAX_BATCH_IDS:
+        _fail("cleanup_batch_limit_exceeded", "$.cleanup.asset_keys")
+    return tuple(sorted(normalized))
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupIdentitySet:
+    """清理的不可变身份集合（§9.11）：原生 ID + 应用会话 + 资产版本键。
+
+    只承载**身份**，不承载正文、摘要或路径；集合一经 fence 冻结不得扩缩。
+    """
+
+    native_ids: tuple[str, ...] = ()
+    session_ids: tuple[str, ...] = ()
+    asset_keys: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupJobRecord:
+    """清理作业事实（§9.11/§10.7）：固定集合 + 原预览摘要 + 修订 + fence。"""
+
+    user_scope: str
+    cleanup_job_id: str
+    owner_ref: str
+    preview_digest: str
+    expected_revision: int
+    exact_ids: tuple[str, ...]
+    phase: CleanupPhase
+    fence_committed: bool
+    session_ids: tuple[str, ...] = ()
+    asset_keys: tuple[tuple[str, str], ...] = ()
+
+    def identities(self) -> CleanupIdentitySet:
+        return CleanupIdentitySet(self.exact_ids, self.session_ids, self.asset_keys)
+
+
+_CLEANUP_IDENTITY_SET_KEYS: Final = frozenset({"native_ids", "session_ids", "asset_keys"})
+
+
+def encode_cleanup_identity_set(record: CleanupJobRecord) -> dict[str, object]:
+    """规范 JSONB 载形：集合先规范化，键序固定，供持久化与摘要核对。"""
+
+    identities = record.identities()
+    return {
+        "native_ids": list(normalize_cleanup_ids(identities.native_ids)),
+        "session_ids": list(normalize_cleanup_ids(identities.session_ids)),
+        "asset_keys": [list(key) for key in normalize_cleanup_asset_keys(identities.asset_keys)],
+    }
+
+
+def decode_cleanup_identity_set(value: object, path: str = "$.cleanup.identity_set") -> CleanupIdentitySet:
+    """严格解码身份集合：全键/额外键/类型/上限逐项校验后规范化。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _CLEANUP_IDENTITY_SET_KEYS, path)
+    native_ids = value["native_ids"]
+    session_ids = value["session_ids"]
+    asset_keys = value["asset_keys"]
+    if not isinstance(native_ids, list) or not isinstance(session_ids, list) or not isinstance(asset_keys, list):
+        _fail("invalid_type", path)
+    return CleanupIdentitySet(
+        native_ids=normalize_cleanup_ids(native_ids),
+        session_ids=normalize_cleanup_ids(session_ids),
+        asset_keys=normalize_cleanup_asset_keys(asset_keys),
+    )
