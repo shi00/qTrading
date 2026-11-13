@@ -149,6 +149,29 @@ class TaskIncompleteError(Exception):
         super().__init__(reason if reason is not None else _describe_for_log(description))
 
 
+class TaskCancelledError(Exception):
+    """业务编排判定「协作取消」时抛出的信号异常（C14，ADR-0018 承接）。
+
+    与真实 ``asyncio.CancelledError`` 严格区分：本异常由 worker 在检测到协作取消
+    flag（如 DataProcessor ``is_cancelled()`` 置位、``SyncResult(status=cancelled)``
+    统计）后抛出，由 ``_task_runner`` 映射为 ``CANCELLED`` 终态——协作取消不得
+    正常返回后被算 ``COMPLETED``，也不得伪装为 ``FAILED`` 失败假象。真实
+    CancelledError 按原语义清理后 re-raise（R2 不吞没），不经本类型。
+
+    与 :class:`TaskIncompleteError` 同为异常协议（无业务类型 if-elif 枚举），
+    业务侧按语义自选其一；``CANCELLED`` 不在可重试集合（用户放弃意图）。
+
+    Attributes:
+        description: 面向用户的具体原因（``Message`` 按 locale 渲染，``str`` 原样展示）。
+        reason: 可选脱敏诊断摘要，仅用于日志，不展示给用户。
+    """
+
+    def __init__(self, description: Message | str, reason: str | None = None) -> None:
+        self.description = description
+        self.reason = reason
+        super().__init__(reason if reason is not None else _describe_for_log(description))
+
+
 def _describe_for_log(description: Message | str) -> str:
     return description if isinstance(description, str) else description.key
 
@@ -969,6 +992,19 @@ class TaskManager:
             task.description = Message("task_cancelled_desc")
             logger.info("[TaskManager] Cancelled processing for: [%s]", task.id)
             raise  # Important to re-raise CancelledError for proper asyncio teardown
+        except TaskCancelledError as e:
+            # C14（ADR-0018 承接）：业务编排判定的协作取消 → 映射取消终态。
+            # 协作取消不得正常返回后被算 COMPLETED（C14/AC12），也不得伪装为
+            # FAILED；与真实 CancelledError（上方分支，清理后 re-raise）严格区分。
+            # T3 守卫对称：已被 _cancel_task_impl 等置 CANCELLED 的任务不覆盖。
+            if task.status != TaskStatus.CANCELLED:
+                task.status = TaskStatus.CANCELLED
+            task.description = Message("task_cancelled_desc")
+            logger.info(
+                "[TaskManager] Task %s cooperatively cancelled: %s",
+                task.id,
+                DataSanitizer.sanitize_error(e),
+            )
         except TaskIncompleteError as e:
             # 业务明确判定未完成/部分完成/未知：映射 FAILED，绝不伪设 progress=1。
             # 与 T3 守卫对称：已被取消的任务保持 CANCELLED，不覆盖为 FAILED。

@@ -1037,28 +1037,49 @@ class SchedulerService:
         # 仍不影响完整性（由 sync_empty_days 登记）。
         failed_dates: list[datetime.date] = []
         contiguous_success_end: datetime.date | None = None
-        for i, d in enumerate(missed_dates):
-            if not tm.update_progress(
-                task_id, i / total, Message("sched_catchup_progress", {"date": d.strftime("%Y%m%d")})
-            ):
-                raise asyncio.CancelledError("catchup cancelled (update_progress returned False)")
-            try:
-                await processor.sync_daily_market_snapshot(trade_date=d, sync_result=sync_result)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                failed_dates.append(d)
-                log_classified(
-                    logger,
-                    e,
-                    "general",
-                    "[Scheduler] Catch-up failed for %s, continuing (%s): %s",
-                    d.strftime("%Y%m%d"),
-                    exc_info=True,
+        cancelled = False
+        try:
+            for i, d in enumerate(missed_dates):
+                if not tm.update_progress(
+                    task_id, i / total, Message("sched_catchup_progress", {"date": d.strftime("%Y%m%d")})
+                ):
+                    # C14：协作取消（任务已被取消，进度上报被拒）→ 抛真实取消异常
+                    # 配合优雅停机（R2 不吞没）；已连续成功批次的水位经 finally 收敛
+                    # （已提交进度不回退、不越洞推进），取消由 TaskManager 记 CANCELLED。
+                    cancelled = True
+                    raise asyncio.CancelledError("catchup cancelled (update_progress returned False)")
+                try:
+                    await processor.sync_daily_market_snapshot(trade_date=d, sync_result=sync_result)
+                except asyncio.CancelledError:
+                    # C14/R2：真实取消异常原样传播（不吞没）；已连续成功批次的水位
+                    # 经 finally 收敛——已提交进度不回退，未完成部分不越洞推进。
+                    cancelled = True
+                    raise
+                except Exception as e:
+                    failed_dates.append(d)
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[Scheduler] Catch-up failed for %s, continuing (%s): %s",
+                        d.strftime("%Y%m%d"),
+                        exc_info=True,
+                    )
+                    continue
+                if not failed_dates and sync_result.is_complete:
+                    contiguous_success_end = d
+        finally:
+            # C14：取消传播路径先收敛已连续成功批次的水位（合法 checkpoint 保留）——
+            # 仅推进到最后一个「无异常且关键表全部成功」的日子（不跨未完成/失败批次，
+            # R21/R22）；正常完成与失败路径的水位推进在下方统一处理，不双写。
+            # 水位单调由 _mark_daily_update_done_db 的内存 max() + DB GREATEST 保证（R22）。
+            if cancelled and contiguous_success_end is not None:
+                await self._mark_daily_update_done_db(contiguous_success_end.strftime("%Y%m%d"))
+                logger.warning(
+                    "[Scheduler] Catch-up cancelled after partial progress; watermark kept at %s "
+                    "(remaining days stay in catch-up range)",
+                    contiguous_success_end.strftime("%Y%m%d"),
                 )
-                continue
-            if not failed_dates and sync_result.is_complete:
-                contiguous_success_end = d
         # D1-2/MAJOR-05: 仅「全部日期成功且关键表全成功」才推进到最后一个遗漏交易日。
         if not failed_dates and sync_result.is_complete:
             latest = missed_dates[-1]

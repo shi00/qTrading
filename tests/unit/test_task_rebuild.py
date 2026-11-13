@@ -25,7 +25,13 @@ from core.i18n import Message
 from data import data_processor
 from data.sync.errors import InitSyncError
 from services import task_rebuild  # noqa: F401  # 触发模块自注册副作用
-from services.task_manager import TERMINAL_STATUSES, AppTask, TaskManager, TaskStatus
+from services.task_manager import (
+    TERMINAL_STATUSES,
+    AppTask,
+    TaskCancelledError,
+    TaskManager,
+    TaskStatus,
+)
 
 SAMPLE_KWARGS = {"quick": False, "days": 250}
 
@@ -35,9 +41,11 @@ def _install_fake_processor(monkeypatch: pytest.MonkeyPatch, initialize_impl):
 
     ``_rebuild_init_historical_sync`` 在函数体内 ``from data.data_processor import
     DataProcessor`` 惰性取类并构造，因此替换模块属性即可拦截其构造与初始化调用。
+    ``is_cancelled`` 默认返回 False（取消信号未置位），供取消映射用例覆写。
     """
     fake = MagicMock()
     fake.initialize_system = AsyncMock(side_effect=initialize_impl)
+    fake.is_cancelled = MagicMock(return_value=False)
     monkeypatch.setattr(data_processor, "DataProcessor", lambda: fake)
     return fake
 
@@ -415,3 +423,106 @@ async def test_restart_unregistered_factory_key_is_not_retryable(monkeypatch: py
     assert historical._coroutine_factory is None
     assert historical.is_retryable is False
     assert mgr.retry_task(old_id) is None
+
+
+# --- C14 取消边界（ADR-0018 承接）：协作取消映射取消终态，不得算 COMPLETED/FAILED ---
+
+
+async def test_rebuild_cooperative_cancel_raises_task_cancelled(monkeypatch: pytest.MonkeyPatch):
+    """C14：processor 取消信号置位且报告为 None → TaskCancelledError（取消终态）。
+
+    修复前：一律抛 InitSyncError → 任务被算 FAILED，用户主动取消显示为失败假象。
+    """
+
+    def initialize_impl(progress_callback=None, **kwargs):
+        return None
+
+    fake = _install_fake_processor(monkeypatch, initialize_impl)
+    fake.is_cancelled = MagicMock(return_value=True)  # 协作取消信号置位
+    monkeypatch.setattr(TaskManager, "update_progress", lambda self, *a, **k: True)
+
+    with pytest.raises(TaskCancelledError) as exc_info:
+        await task_rebuild._rebuild_init_historical_sync("task-1", **SAMPLE_KWARGS)
+
+    # 强断言：携带取消终态语义的 Message（任务中心渲染为取消描述）
+    assert exc_info.value.description.key == "task_cancelled_desc"
+
+
+async def test_rebuild_clean_cancel_flag_none_report_stays_init_sync_error(monkeypatch: pytest.MonkeyPatch):
+    """C14 对照：取消信号未置位的 None 报告（降级 / 部分完成）保持 InitSyncError。
+
+    降级路径仍映射 FAILED（可重试补齐），不与协作取消混同。
+    """
+
+    def initialize_impl(progress_callback=None, **kwargs):
+        return None
+
+    _install_fake_processor(monkeypatch, initialize_impl)  # is_cancelled 默认 False
+    monkeypatch.setattr(TaskManager, "update_progress", lambda self, *a, **k: True)
+
+    with pytest.raises(InitSyncError) as exc_info:
+        await task_rebuild._rebuild_init_historical_sync("task-1", **SAMPLE_KWARGS)
+
+    # 强断言：降级路径仍走通用失败文案（与取消文案严格区分）
+    assert exc_info.value.args[0].key == "ds_init_fail_generic"
+
+
+async def test_task_cancelled_error_maps_to_cancelled_terminal(monkeypatch: pytest.MonkeyPatch):
+    """C14 协议：worker 抛 TaskCancelledError → 任务终态 CANCELLED（≠ COMPLETED）。
+
+    TaskManager 用异常协议识别协作取消，不做业务类型 if-elif 枚举扩张。
+    """
+    store = _FakeTaskHistoryStore()
+    _install_fake_cache(monkeypatch, store)
+    mgr = TaskManager()
+    mgr._db_ready = True
+    mgr._loop = asyncio.get_running_loop()
+
+    async def _cancelled_factory(task_id, **kwargs):
+        raise TaskCancelledError(Message("task_cancelled_desc"))
+
+    task_id = mgr.submit_task(
+        name="c14_cancel",
+        task_type="Data",
+        coroutine_factory=_cancelled_factory,
+        cancellable=True,
+    )
+    assert task_id is not None
+    done, callback = _subscribe_terminal(mgr, task_id)
+    await asyncio.wait_for(done.wait(), timeout=_TIMEOUT_S)
+    mgr.unsubscribe(callback)
+    await mgr.flush_persistence()
+
+    task = mgr.get_task(task_id)
+    assert task is not None
+    assert task.status == TaskStatus.CANCELLED
+    assert task.status != TaskStatus.COMPLETED  # C14：取消不得被算完成
+    assert task.progress < 1.0  # 不伪设完整进度
+    assert task.is_retryable is False  # CANCELLED 不在可重试集合（用户放弃意图）
+    assert store.rows[task_id]["status"] == TaskStatus.CANCELLED.value
+
+
+async def test_restart_retry_cooperative_cancel_maps_to_cancelled_terminal(monkeypatch: pytest.MonkeyPatch):
+    """C14 全链：崩溃恢复重试期间用户协作取消 → 终态 CANCELLED，持久化一致。"""
+    async with _running_task_session(monkeypatch, SAMPLE_KWARGS) as (_mgr, _store, old_id, running_row, _captured):
+        pass
+
+    mgr, store = _restart_with_row(monkeypatch, running_row)
+    await mgr.init_db()
+
+    fake = _install_fake_processor(monkeypatch, lambda progress_callback=None, **kwargs: None)
+    fake.is_cancelled = MagicMock(return_value=True)
+
+    new_id = mgr.retry_task(old_id)
+    assert new_id is not None and new_id != old_id
+
+    done, callback = _subscribe_terminal(mgr, new_id)
+    await asyncio.wait_for(done.wait(), timeout=_TIMEOUT_S)
+    mgr.unsubscribe(callback)
+    await mgr.flush_persistence()
+
+    retried = mgr.get_task(new_id)
+    assert retried is not None
+    assert retried.status == TaskStatus.CANCELLED  # 取消 ≠ COMPLETED / FAILED
+    assert retried.progress < 1.0
+    assert store.rows[new_id]["status"] == TaskStatus.CANCELLED.value
