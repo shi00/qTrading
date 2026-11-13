@@ -5067,3 +5067,485 @@ OPEN_OPERATION_PHASES: Final[frozenset[str]] = frozenset({"prepared", "dispatch_
 #: unknown/ending 可能仍有写者；paused/pausing 须走「总继续/单叶继续」语义，
 #: 直接 resume 会绕过暂停原因清理）。
 RECOVERY_UNVERIFIED_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"unknown", "ending", "paused", "pausing"})
+
+
+# ---------------------------------------------------------------------------
+# §3.3 来源读取与事实（E-01）
+# ---------------------------------------------------------------------------
+
+#: FactValue 外层原始类型（§3.3 agent-number-v1；字符串形似数字仍是 string）。
+FACT_RAW_TYPES: Final[frozenset[str]] = frozenset({"json_integer", "json_decimal", "string", "bool", "null"})
+
+#: SourceRead 覆盖语义：完整/受限/未知（未知不得当完整）。
+SOURCE_COVERAGES: Final[frozenset[str]] = frozenset({"full", "limited", "unknown"})
+
+
+#: 附件类别（D06：TXT/MD/CSV/JSON/XLSX/文本 PDF；PNG/JPEG 仅核验兼容模型）。
+class AttachmentKind(Enum):
+    TXT = "txt"
+    MD = "md"
+    CSV = "csv"
+    JSON = "json"
+    XLSX = "xlsx"
+    PDF = "pdf"
+    PNG = "png"
+    JPEG = "jpeg"
+
+
+@dataclass(frozen=True, slots=True)
+class XlsxCellMeta:
+    """XLSX 单元格元数据（§10.4，schema_version=1，全部键必填）。
+
+    ``cache_present=true`` 只证明同源单元格确有缓存载荷，不证明正确或新鲜；
+    ``false`` 表示已核不存在；``null`` 表示未读/不能核定，须各保原因。
+    非公式单元格 ``formula_text=None``、``cache_present=False``、
+    ``cache_applicable=False`` 且原因为 ``not_applicable``。
+    """
+
+    sheet: str
+    cell: str
+    formula_text: str | None = None
+    cache_present: bool | None = None
+    cache_applicable: bool | None = None
+    cache_raw_type: str | None = None
+    cache_raw_value: CanonicalJson | None = None
+    cache_verification: VerificationState | None = None
+    cache_missing_reason: str | None = None
+    date_epoch: str | None = None
+    number_format: str | None = None
+    xml_value_lexeme: str | None = None
+    schema_version: str = "1"
+
+
+_XLSX_CELL_META_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "schema_version",
+        "sheet",
+        "cell",
+        "formula_text",
+        "cache_present",
+        "cache_applicable",
+        "cache_raw_type",
+        "cache_raw_value",
+        "cache_verification",
+        "cache_missing_reason",
+        "date_epoch",
+        "number_format",
+        "xml_value_lexeme",
+    }
+)
+
+
+def decode_xlsx_cell_meta(value: object, path: str = "$.xlsx_cell_meta") -> XlsxCellMeta:
+    """严格解码 XLSX 单元格元数据（13 键全必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _XLSX_CELL_META_KEYS, path)
+    if _require_str(value["schema_version"], f"{path}.schema_version") != "1":
+        _fail("invalid_version", f"{path}.schema_version")
+    return XlsxCellMeta(
+        sheet=_require_str(value["sheet"], f"{path}.sheet"),
+        cell=_require_str(value["cell"], f"{path}.cell"),
+        formula_text=_opt_str(value["formula_text"], f"{path}.formula_text"),
+        cache_present=_opt_bool(value["cache_present"], f"{path}.cache_present"),
+        cache_applicable=_opt_bool(value["cache_applicable"], f"{path}.cache_applicable"),
+        cache_raw_type=_opt_str(value["cache_raw_type"], f"{path}.cache_raw_type"),
+        cache_raw_value=_opt_json_text(value["cache_raw_value"], f"{path}.cache_raw_value"),
+        cache_verification=_opt_enum(
+            value["cache_verification"], VerificationState, f"{path}.cache_verification", "invalid_verification_state"
+        ),
+        cache_missing_reason=_opt_str(value["cache_missing_reason"], f"{path}.cache_missing_reason"),
+        date_epoch=_opt_str(value["date_epoch"], f"{path}.date_epoch"),
+        number_format=_opt_str(value["number_format"], f"{path}.number_format"),
+        xml_value_lexeme=_opt_str(value["xml_value_lexeme"], f"{path}.xml_value_lexeme"),
+        schema_version="1",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRef:
+    """来源元数据（§3.3）：准确内容定位，工作台不得按名称搜索相似文件代替原件。
+
+    ``available_at`` 为可得时点（UTC 微秒文本）；历史决策用途下晚于 cutoff 的
+    来源必须拒绝登记（PIT，R24）。``missing_reason`` 只描述已知缺失，不把未知
+    写成缺失或空成功。
+    """
+
+    user_scope: str
+    source_id: str
+    version: str
+    digest: str
+    source_kind: SourceKind
+    display_name: str
+    object_ref: str | None
+    locator: SourceLocator
+    available_at: str | None
+    period: str | None
+    unit_note: str | None
+    read_state: ReadState
+    missing_reason: str | None
+    provenance_refs: tuple[ProvenanceRef, ...]
+
+
+_SOURCE_REF_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "user_scope",
+        "source_id",
+        "version",
+        "digest",
+        "source_kind",
+        "display_name",
+        "object_ref",
+        "locator",
+        "available_at",
+        "period",
+        "unit_note",
+        "read_state",
+        "missing_reason",
+        "provenance_refs",
+    }
+)
+
+
+def encode_source_ref(ref: SourceRef) -> dict[str, Any]:
+    """SourceRef → wire 对象（14 键全在，null 不省略）。"""
+
+    return to_wire_dict(ref)
+
+
+def decode_source_ref(value: object, path: str = "$.source_ref") -> SourceRef:
+    """严格解码来源元数据（14 键全必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SOURCE_REF_KEYS, path)
+    return SourceRef(
+        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
+        source_id=_require_str(value["source_id"], f"{path}.source_id"),
+        version=_require_str(value["version"], f"{path}.version"),
+        digest=_require_digest(value["digest"], f"{path}.digest"),
+        source_kind=_require_enum(value["source_kind"], SourceKind, f"{path}.source_kind", "invalid_source_kind"),
+        display_name=_require_str(value["display_name"], f"{path}.display_name"),
+        object_ref=_opt_str(value["object_ref"], f"{path}.object_ref"),
+        locator=decode_source_locator(value["locator"], f"{path}.locator"),
+        available_at=_opt_timestamp(value["available_at"], f"{path}.available_at"),
+        period=_opt_str(value["period"], f"{path}.period"),
+        unit_note=_opt_str(value["unit_note"], f"{path}.unit_note"),
+        read_state=_require_enum(value["read_state"], ReadState, f"{path}.read_state", "invalid_read_state"),
+        missing_reason=_opt_str(value["missing_reason"], f"{path}.missing_reason"),
+        provenance_refs=decode_provenance_refs(value["provenance_refs"], f"{path}.provenance_refs"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FactValue:
+    """带类型事实值（§3.3/V04）：原始词法/单位/时点/核验与缺失原因一并保留。
+
+    ``raw_value`` 是 agent-number-v1 的规范 JSON 文本（JSONB 结构中的字符串值），
+    不能用显示舍入值或普通 float 往返。
+    """
+
+    field_key: str
+    object_ref: str
+    raw_type: str
+    raw_value: CanonicalJson
+    numeric_lexeme: str | None
+    numeric_encoding: str | None
+    source_unit: str | None
+    currency: str | None
+    display_unit: str | None
+    conversion_ref: str | None
+    period: str | None
+    basis: str | None
+    source_locator: SourceLocator
+    verification: VerificationState
+    missing_reason: str | None
+    xlsx_cell_meta: CanonicalJson | None
+
+
+_FACT_VALUE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "field_key",
+        "object_ref",
+        "raw_type",
+        "raw_value",
+        "numeric_lexeme",
+        "numeric_encoding",
+        "source_unit",
+        "currency",
+        "display_unit",
+        "conversion_ref",
+        "period",
+        "basis",
+        "source_locator",
+        "verification",
+        "missing_reason",
+        "xlsx_cell_meta",
+    }
+)
+
+
+def encode_fact_value(fact: FactValue) -> dict[str, Any]:
+    """FactValue → wire 对象（16 键全在，null 不省略）。"""
+
+    return to_wire_dict(fact)
+
+
+def decode_fact_value(value: object, path: str = "$.fact") -> FactValue:
+    """严格解码事实值（16 键全必填、禁额外键；raw_type 限封闭值域）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _FACT_VALUE_KEYS, path)
+    return FactValue(
+        field_key=_require_str(value["field_key"], f"{path}.field_key"),
+        object_ref=_require_str(value["object_ref"], f"{path}.object_ref"),
+        raw_type=_require_choice(value["raw_type"], FACT_RAW_TYPES, f"{path}.raw_type", "invalid_raw_type"),
+        raw_value=_require_json_text(value["raw_value"], f"{path}.raw_value"),
+        numeric_lexeme=_opt_str(value["numeric_lexeme"], f"{path}.numeric_lexeme"),
+        numeric_encoding=_opt_str(value["numeric_encoding"], f"{path}.numeric_encoding"),
+        source_unit=_opt_str(value["source_unit"], f"{path}.source_unit"),
+        currency=_opt_str(value["currency"], f"{path}.currency"),
+        display_unit=_opt_str(value["display_unit"], f"{path}.display_unit"),
+        conversion_ref=_opt_str(value["conversion_ref"], f"{path}.conversion_ref"),
+        period=_opt_str(value["period"], f"{path}.period"),
+        basis=_opt_str(value["basis"], f"{path}.basis"),
+        source_locator=decode_source_locator(value["source_locator"], f"{path}.source_locator"),
+        verification=_require_enum(
+            value["verification"], VerificationState, f"{path}.verification", "invalid_verification_state"
+        ),
+        missing_reason=_opt_str(value["missing_reason"], f"{path}.missing_reason"),
+        xlsx_cell_meta=_opt_json_text(value["xlsx_cell_meta"], f"{path}.xlsx_cell_meta"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRead:
+    """来源读取结果（§3.3/§4.2）：读取成功与事实核验成功是不同字段。
+
+    ``available=False`` 只说明当前原依据不可得，不把历史已保存内容改写为空；
+    ``coverage`` 未知时不得当完整。
+    """
+
+    source: SourceRef
+    selected_range: SelectedRange
+    read_state: ReadState
+    body_text: str | None
+    structured_blocks: tuple[CanonicalJson, ...]
+    facts: tuple[FactValue, ...]
+    coverage: str
+    verification: VerificationState
+    limitations: tuple[RangeLimitation, ...]
+    available: bool
+    missing_reason: str | None
+
+
+_SOURCE_READ_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "source",
+        "selected_range",
+        "read_state",
+        "body_text",
+        "structured_blocks",
+        "facts",
+        "coverage",
+        "verification",
+        "limitations",
+        "available",
+        "missing_reason",
+    }
+)
+
+
+def encode_source_read(read: SourceRead) -> dict[str, Any]:
+    """SourceRead → wire 对象（11 键全在）。"""
+
+    return to_wire_dict(read)
+
+
+def decode_source_read(value: object, path: str = "$.source_read") -> SourceRead:
+    """严格解码来源读取结果（11 键全必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SOURCE_READ_KEYS, path)
+    blocks = value["structured_blocks"]
+    if not isinstance(blocks, list):
+        _fail("invalid_type", f"{path}.structured_blocks")
+    facts = value["facts"]
+    if not isinstance(facts, list):
+        _fail("invalid_type", f"{path}.facts")
+    limitations = value["limitations"]
+    if not isinstance(limitations, list):
+        _fail("invalid_type", f"{path}.limitations")
+    return SourceRead(
+        source=decode_source_ref(value["source"], f"{path}.source"),
+        selected_range=decode_selected_range(value["selected_range"], f"{path}.selected_range"),
+        read_state=_require_enum(value["read_state"], ReadState, f"{path}.read_state", "invalid_read_state"),
+        body_text=_opt_text(value["body_text"], f"{path}.body_text"),
+        structured_blocks=tuple(
+            _require_json_text(item, f"{path}.structured_blocks[{index}]") for index, item in enumerate(blocks)
+        ),
+        facts=tuple(decode_fact_value(item, f"{path}.facts[{index}]") for index, item in enumerate(facts)),
+        coverage=_require_choice(value["coverage"], SOURCE_COVERAGES, f"{path}.coverage", "invalid_coverage"),
+        verification=_require_enum(
+            value["verification"], VerificationState, f"{path}.verification", "invalid_verification_state"
+        ),
+        limitations=tuple(
+            decode_range_limitation(item, f"{path}.limitations[{index}]") for index, item in enumerate(limitations)
+        ),
+        available=_require_bool(value["available"], f"{path}.available"),
+        missing_reason=_opt_str(value["missing_reason"], f"{path}.missing_reason"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceLink:
+    """依据边（§3.3）：链接存在不等于支持断言，``supports_claim`` 未知用 null。"""
+
+    claim_id: str
+    source_id: str
+    source_version: str
+    locator: SourceLocator
+    source_exists: bool
+    supports_claim: bool | None
+    verification: VerificationState
+    verified_at: str | None
+    limitations: tuple[RangeLimitation, ...]
+
+
+_EVIDENCE_LINK_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "claim_id",
+        "source_id",
+        "source_version",
+        "locator",
+        "source_exists",
+        "supports_claim",
+        "verification",
+        "verified_at",
+        "limitations",
+    }
+)
+
+
+def encode_evidence_link(link: EvidenceLink) -> dict[str, Any]:
+    """EvidenceLink → wire 对象（9 键全在）。"""
+
+    return to_wire_dict(link)
+
+
+def decode_evidence_link(value: object, path: str = "$.evidence_link") -> EvidenceLink:
+    """严格解码依据边（9 键全必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _EVIDENCE_LINK_KEYS, path)
+    limitations = value["limitations"]
+    if not isinstance(limitations, list):
+        _fail("invalid_type", f"{path}.limitations")
+    return EvidenceLink(
+        claim_id=_require_str(value["claim_id"], f"{path}.claim_id"),
+        source_id=_require_str(value["source_id"], f"{path}.source_id"),
+        source_version=_require_str(value["source_version"], f"{path}.source_version"),
+        locator=decode_source_locator(value["locator"], f"{path}.locator"),
+        source_exists=_require_bool(value["source_exists"], f"{path}.source_exists"),
+        supports_claim=_opt_bool(value["supports_claim"], f"{path}.supports_claim"),
+        verification=_require_enum(
+            value["verification"], VerificationState, f"{path}.verification", "invalid_verification_state"
+        ),
+        verified_at=_opt_timestamp(value["verified_at"], f"{path}.verified_at"),
+        limitations=tuple(
+            decode_range_limitation(item, f"{path}.limitations[{index}]") for index, item in enumerate(limitations)
+        ),
+    )
+
+
+# ---- 可选字段解码基元（null 仅合同允许处；bool 不得冒充整数） ----
+
+
+def _opt_bool(value: object, path: str) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        _fail("invalid_type", path)
+    return value
+
+
+def _opt_enum[E: Enum](value: object, enum_cls: type[E], path: str, code: str) -> E | None:
+    if value is None:
+        return None
+    return _require_enum(value, enum_cls, path, code)
+
+
+def _require_json_text(value: object, path: str) -> CanonicalJson:
+    """必填规范 JSON 文本（agent-number-v1/FactValue.raw_value 等）。"""
+
+    if value is None:
+        _fail("invalid_type", path)
+    text = _require_str(value, path)
+    try:
+        decode_json_doc(text)
+    except AgentValidationError:
+        _fail("invalid_json", path)
+    return text
+
+
+# ---- D06 附件预算（REQ D06 / DD §12.4 恰等与超一边界） ----
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentBudget:
+    """D06 附件限额（十进制字节；每文件独立累计，跨文件不合并字符额度）。
+
+    恰等通过、超一拒绝；``None``/未知统计不得据此放开上限（未知由调用方保持
+    ``read_state=unknown/partial`` 与 limitation，而不是跳过本类校验）。
+    """
+
+    max_files: int = 5
+    max_source_bytes: int = 20_000_000
+    max_pages: int = 100
+    max_sheets: int = 10
+    max_rows: int = 50_000
+    max_codepoints: int = 100_000
+    extract_timeout_s: float = 30.0
+
+    def enforce_file_count(self, count: int, path: str = "$.attachments.file_count") -> None:
+        _enforce_limit(count, self.max_files, "attachment_count_exceeded", path)
+
+    def enforce_source_bytes(self, byte_length: int, path: str = "$.attachments.source_bytes") -> None:
+        _enforce_limit(byte_length, self.max_source_bytes, "attachment_bytes_exceeded", path)
+
+    def enforce_pages(self, pages: int, path: str = "$.attachments.pages") -> None:
+        _enforce_limit(pages, self.max_pages, "attachment_pages_exceeded", path)
+
+    def enforce_sheets(self, sheets: int, path: str = "$.attachments.sheets") -> None:
+        _enforce_limit(sheets, self.max_sheets, "attachment_sheets_exceeded", path)
+
+    def enforce_rows(self, rows: int, path: str = "$.attachments.rows") -> None:
+        _enforce_limit(rows, self.max_rows, "attachment_rows_exceeded", path)
+
+    def enforce_codepoints(self, codepoints: int, path: str = "$.attachments.codepoints") -> None:
+        _enforce_limit(codepoints, self.max_codepoints, "attachment_codepoints_exceeded", path)
+
+    def enforce_elapsed(self, elapsed_s: float, path: str = "$.attachments.elapsed_s") -> None:
+        if isinstance(elapsed_s, bool) or not isinstance(elapsed_s, (int, float)):
+            _fail("invalid_type", path)
+        if elapsed_s > self.extract_timeout_s:
+            _fail("attachment_time_exceeded", path)
+
+
+#: 首版 D06 默认预算（UI 提前说明限额与 worker 共用）。
+DEFAULT_ATTACHMENT_BUDGET: Final = AttachmentBudget()
+
+
+def _enforce_limit(value: object, limit: int, code: str, path: str) -> None:
+    """整数限额校验：bool/非整数拒绝；恰等通过、超一拒绝。"""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        _fail("invalid_type", path)
+    if value < 0:
+        _fail("invalid_range", path)
+    if value > limit:
+        _fail(code, path)
