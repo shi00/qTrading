@@ -2883,6 +2883,26 @@ class TestPollIntervalNormalization:
         assert slept[0] == 60.0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_interval", [10**400, -(10**400)])
+    async def test_overflowing_int_interval_falls_back_to_default(self, svc, raw_interval):
+        """超出 float 范围的超大整数（KV 直写脏数据）应回退默认 60s。
+
+        NSU-01 残余：``10**400`` 超出 float 可表示范围，``float()`` 抛
+        OverflowError，旧捕获面 (TypeError, ValueError) 漏接，_poll_loop 协程
+        异常终止而 _running 仍为 True，轮询静默停滞。
+        """
+        slept, fake_get_config, fake_sleep = self._make_hooks(svc, [raw_interval])
+        with (
+            patch("services.news_subscription_service.ConfigHandler.get_config", side_effect=fake_get_config),
+            patch("services.news_subscription_service.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(svc, "_fetch_and_notify", AsyncMock()),
+        ):
+            svc._running = True
+            await svc._poll_loop()
+        assert len(slept) == 1
+        assert slept[0] == 60.0
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "raw_interval",
         ["nan", "NaN", float("nan"), "inf", "Inf", float("inf"), "1e309", "-inf", float("-inf"), None],

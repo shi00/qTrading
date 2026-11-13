@@ -38,7 +38,8 @@ _HOT_CONCEPT_TAG_TIMEOUT_S = 3.0  # 热概念打标监听器等待上限
 # M14-F1：轮询间隔失真回退默认值。写侧 KV 直写路径（save_config）绕过
 # AppConfig 的 ge=10 与 app_prefs 的 max(10) 钳制，0/负数会使 _poll_loop 的
 # asyncio.sleep 立即返回形成紧密循环（外部 API 请求风暴 + CPU 空转），非数值
-# 则抛 TypeError 使轮询协程静默死亡（fire-and-forget 无重启）。消费侧统一归一化。
+# 或超出 float 范围的超大整数则抛 TypeError/OverflowError 使轮询协程静默死亡
+# （fire-and-forget 无重启）。消费侧统一归一化。
 _NEWS_POLL_INTERVAL_DEFAULT_S: typing.Final[float] = 60.0
 
 # UIR-F04-001：常规轮询与初始同步共用同一有界窗口。只取最新 1 条会把两次轮询
@@ -517,12 +518,12 @@ class NewsSubscriptionService:
 
         while self._running:
             # Read config dynamically（M14-F1：失真配置归一化——非数值/NaN/±Inf/≤0
-            # 回退默认，防紧密循环风暴、sleep 永不唤醒致轮询停滞与 TypeError 致轮询
-            # 协程静默死亡）
+            # 回退默认，防紧密循环风暴、sleep 永不唤醒致轮询停滞与 TypeError/
+            # OverflowError（超大整数）致轮询协程静默死亡）
             raw_interval = ConfigHandler.get_config("news_poll_interval", 60)
             try:
                 base_interval = float(raw_interval)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 base_interval = _NEWS_POLL_INTERVAL_DEFAULT_S
             if not math.isfinite(base_interval) or base_interval <= 0:
                 base_interval = _NEWS_POLL_INTERVAL_DEFAULT_S
