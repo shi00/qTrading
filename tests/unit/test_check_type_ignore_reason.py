@@ -234,3 +234,72 @@ class TestMainFileFilter:
         code, out = _run_main(monkeypatch, capsys)
         assert code == 0
         assert out == ""
+
+
+class TestErrorCodeValidation:
+    """C11/F16 R3 回归：错误码存在性（格式）校验与检测边界。
+
+    检视 §2 F16 / §6.3 C11：R3 coverage 保持 partial，但检测边界须有回归——
+    - 伪错误码（大写/下划线/空括号，非 pyright kebab-case 形态）不得静默放行；
+    - `# type: ignore [code]`（空格分隔，pyright 合法形态）按带码处理；
+    - `# type: ignore <文本>`（ignore 后跟裸文本，无 error-code）= 裸压制 ERROR。
+    判据正本为 redlines.yml R3 的 self_check 字段；不签 full（复合边界由 pyright 运行层兜底）。
+    """
+
+    def test_pseudo_error_code_uppercase_is_error(self):
+        """`# type: ignore[Foo_Bar]` 大写/下划线伪错误码 → ERROR（不是合法 kebab 错误码）。"""
+        errors, warnings = _check("x = 1  # type: ignore[Foo_Bar]\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+
+    def test_empty_error_code_is_error(self):
+        """`# type: ignore[]` 空错误码 → ERROR（方括号存在但未提供有效错误码）。"""
+        errors, warnings = _check("x = 1  # type: ignore[]\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+
+    def test_space_separated_coded_ignore_treated_as_coded(self):
+        """`# type: ignore [attr-defined]`（空格分隔合法形态）→ 按带码处理，tests/ 豁免。"""
+        errors, warnings = _check("mock_obj.foo  # type: ignore [attr-defined]\n", test_file=True)
+        assert errors == []
+        assert warnings == []
+
+    def test_space_separated_coded_without_reason_warns(self):
+        """`# type: ignore [arg-type]`（空格分隔）tests/ 无 human reason → warning。"""
+        errors, warnings = _check("f(x)  # type: ignore [arg-type]\n", test_file=True)
+        assert errors == []
+        assert len(warnings) == 1
+
+    def test_bare_ignore_followed_by_plain_text_is_error(self):
+        """`# type: ignore  某文本`（ignore 后跟非 # 裸文本，无 error-code）→ ERROR。"""
+        errors, warnings = _check("x = 1  # type: ignore  临时这样\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+
+    def test_valid_kebab_code_still_passes(self):
+        """合法 kebab 错误码 `[import-untyped]` 不受格式校验影响（正例不回退）。"""
+        errors, warnings = _check("x = 1  # type: ignore[import-untyped]\n", test_file=False)
+        assert errors == []
+        assert warnings == []
+
+    def test_pyright_camel_case_code_passes(self):
+        """pyright 规则码 camelCase `[reportAttributeAccessIssue]` 为仓库既有合法形态 → 不误判伪错误码.
+
+        回归锚：pyright 的 type: ignore 使用其诊断规则名（camelCase，如
+        reportMissingImports / reportAttributeAccessIssue），与 mypy kebab-case 并存；
+        kebab-only 校验会误杀全仓既有 ignore（utils/config/secrets.py 等处实测）.
+        """
+        errors, warnings = _check(
+            "x = 1  # type: ignore[reportAttributeAccessIssue]  # 既有仓库形态\n",
+            test_file=False,
+        )
+        assert errors == [], f"pyright camelCase 合法码不得误报, got: {errors}"
+        assert warnings == []
+
+    def test_pyright_camel_case_code_import_missing_passes(self):
+        """`[reportMissingImports]` camelCase 形态同样合法（正例二）。"""
+        errors, warnings = _check("x = 1  # type: ignore[reportMissingImports]\n", test_file=False)
+        assert errors == []
+        assert warnings == []

@@ -25,6 +25,22 @@ pytestmark = [pytest.mark.unit, pytest.mark.meta]
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+
+@pytest.fixture(autouse=True)
+def _reset_doc_view_cache():
+    """D5：统一解析视图缓存与本文件 `pathlib.Path.read_text` mock 的隔离。
+
+    `_load_doc_view_cached` 以 (路径, mtime_ns, size) 为键；mock read_text 的测试
+    不改动 stat() 结果——mock 前不清理会命中真实内容视图（mock 失效），mock 期间
+    解析的假视图会驻留缓存、污染同 worker 后续真实读取。每个测试前后清空缓存。
+    """
+    from check_docs_consistency import _load_doc_view_cached
+
+    _load_doc_view_cached.cache_clear()
+    yield
+    _load_doc_view_cached.cache_clear()
+
+
 README_PATH = ROOT / "README.md"
 SECURITY_PATH = ROOT / "SECURITY.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
@@ -2872,6 +2888,10 @@ class TestStrategyDescDynamicConsistency:
             '{"strategy_foo_desc": "标准：阈值 > 3000万"}',
             encoding="utf-8",
         )
+        # en_US locale 为必需资产（D5/F17），夹具补齐以隔离「缺动态模板」这一目标变因
+        fake_en = tmp_path / "locales" / "en_US"
+        fake_en.mkdir(parents=True)
+        (fake_en / "strings.json").write_text('{"strategy_foo_desc": "threshold > 30m"}', encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
 
         errors = check_strategy_desc_dynamic_consistency()
@@ -2890,6 +2910,10 @@ class TestStrategyDescDynamicConsistency:
             '{"strategy_foo_desc": "标准：持股比例 > 设定值"}',
             encoding="utf-8",
         )
+        # en_US locale 为必需资产（D5/F17），夹具补齐以隔离「无数字字面量」这一目标变因
+        fake_en = tmp_path / "locales" / "en_US"
+        fake_en.mkdir(parents=True)
+        (fake_en / "strings.json").write_text('{"strategy_foo_desc": "ratio > threshold"}', encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
 
         errors = check_strategy_desc_dynamic_consistency()
@@ -3967,21 +3991,50 @@ class TestAgentsMinVerifyCommands:
         assert any("重复命令" in e for e in errors), f"应检出受控块重复命令, got: {errors}"
 
     def test_detects_unrecognized_line_in_block(self, tmp_path, monkeypatch):
-        """反例（F02）：受控块含第三条未知 bullet → 拒绝（防新增行被静默丢弃）."""
+        """反例（F02/F20 修法）：受控块**内**含第三条未知 bullet → 拒绝（防新增行被静默丢弃）.
+
+        检视 §6.2 修法：额外行必须插在结束标记前（受控块内部），使「仅目标违规改变」
+        即可让反例失败——旧夹具把额外行写在块外，反例变因不唯一.
+        """
         from check_docs_consistency import check_agents_md_min_verify_commands
 
         agents = tmp_path / "AGENTS.md"
         agents.write_text(self._agents_with_mirror(["（占位镜像）"]), encoding="utf-8")
-        contributing = tmp_path / "CONTRIBUTING.md"
-        contributing.write_text(
-            self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS) + "- **额外行**：`some cmd`\n",
-            encoding="utf-8",
+        content = self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
+        tampered = content.replace(
+            "<!-- /generated -->",
+            "- **额外行**：`some cmd`\n<!-- /generated -->",
+            1,
         )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(tampered, encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
         monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
 
         errors = check_agents_md_min_verify_commands()
         assert any("无法识别" in e for e in errors), f"应检出受控块未知行, got: {errors}"
+
+    def test_prose_outside_block_with_same_text_passes(self, tmp_path, monkeypatch):
+        """通过对照（F20）：同样文本出现在受控块外（普通正文）→ 不报「无法识别」.
+
+        证明反例变因唯一：块外普通正文不误伤，仅块内未知行触发失败.
+        """
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        content = self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
+        prose = content + "\n## 使用说明\n\n- **额外行**：`some cmd`\n\n（普通正文，不在受控块内）\n"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(prose, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert errors == [], f"块外同文本普通正文不得误报, got: {errors}"
 
     def test_detects_bullet_without_colon_separator(self, tmp_path, monkeypatch):
         """反例（F02）：受控块 bullet 缺「：」分隔 → 解析层 fail-closed 报错."""
@@ -4044,16 +4097,21 @@ class TestClaudeExecutiveSync:
         assert check_claude_executive_sync() == []
 
     def test_detects_claude_executive_drift(self, tmp_path, monkeypatch):
-        """篡改 CLAUDE.md 摘要生成区块 → check_claude_executive_sync() 报错."""
+        """篡改 CLAUDE.md 摘要生成区块 → check_claude_executive_sync() 报错.
+
+        检视 §6.2 F20 修法：tampered_lines 一次 join 得 tampered_content 直接写入，
+        不得对已 join 的字符串二次 join（旧夹具逐字符拼接使断言对象失真）.
+        """
         import check_docs_consistency as cdc
         from check_docs_consistency import _render_claude_executive_block
 
         lines = _render_claude_executive_block()
-        tampered = "\n".join([lines[0]] + [lines[1].replace("R1", "R99")] + lines[2:])
+        tampered_lines = [lines[0], lines[1].replace("R1", "R99"), *lines[2:]]
+        tampered_content = "\n".join(tampered_lines)
         tmp_claude = tmp_path / "CLAUDE.md"
         tmp_claude.write_text(
             "# CLAUDE.md\n\n## 本次会话必须遵守\n\n> 引述\n>\n"
-            "<!-- generated:claude-executive -->\n" + "\n".join(tampered) + "\n<!-- /generated -->\n\n## 正文\n",
+            "<!-- generated:claude-executive -->\n" + tampered_content + "\n<!-- /generated -->\n\n## 正文\n",
             encoding="utf-8",
         )
         monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
@@ -4061,6 +4119,28 @@ class TestClaudeExecutiveSync:
         errors = cdc.check_claude_executive_sync()
         assert len(errors) > 0, "应检出摘要生成区块漂移, got no errors"
         assert any("不一致" in e for e in errors), f"错误信息应含『不一致』, got: {errors}"
+
+    def test_executive_block_with_prose_outside_passes(self, tmp_path, monkeypatch):
+        """通过对照（F20）：生成区块正确、块外普通正文存在 → 通过.
+
+        证明「仅目标违规改变即可使反例失败」：块外正文不参与区块一致性比对.
+        """
+        import check_docs_consistency as cdc
+        from check_docs_consistency import _render_claude_executive_block
+
+        lines = _render_claude_executive_block()
+        tmp_claude = tmp_path / "CLAUDE.md"
+        tmp_claude.write_text(
+            "# CLAUDE.md\n\n## 本次会话必须遵守\n\n> 引述\n>\n"
+            "<!-- generated:claude-executive -->\n"
+            + "\n".join(lines)
+            + "\n<!-- /generated -->\n\n## 正文\n\n- **额外行**：`some cmd`\n\n普通正文段落。\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = cdc.check_claude_executive_sync()
+        assert errors == [], f"块外普通正文不得误伤，got: {errors}"
 
 
 class TestClaudeSelfCheckSync:
@@ -6715,8 +6795,8 @@ class TestProseMetaGuards:
         errors = check_exception_count_prose()
         assert any("15" in e and "16" in e for e in errors), f"声明 15 实计 16 应报错, got: {errors}"
 
-    def test_exception_count_prose_absent_yaml_silent(self, tmp_path, monkeypatch):
-        """exceptions.yml 解析失败 → 由 check_exceptions_yaml_consistency 报告，本守卫静默。"""
+    def test_exception_count_prose_absent_yaml_fails_loudly(self, tmp_path, monkeypatch):
+        """exceptions.yml 缺失 → 本守卫显式失败（D5/F17：必需源缺失不再静默空转）。"""
         from check_docs_consistency import check_exception_count_prose
 
         exc = tmp_path / "missing.yml"
@@ -6725,7 +6805,7 @@ class TestProseMetaGuards:
         monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", exc)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
         errors = check_exception_count_prose()
-        assert errors == [], f"缺失 yaml 应静默交由其他 check 报告, got: {errors}"
+        assert any("缺失或无法解析" in e for e in errors), f"缺失 yaml 应显式失败, got: {errors}"
 
     # --- H3 治理 ID 对义守卫 ---
 
@@ -6763,12 +6843,12 @@ class TestProseMetaGuards:
         assert any("P1-04" in w and "双义" in w for w in warnings), f"未披露对义应报警, got: {warnings}"
 
     def test_governance_id_missing_glossary_silent(self, tmp_path, monkeypatch):
-        """对照表缺失 → 由 check_governance_id_glossary 报告，本守卫静默。"""
+        """对照表缺失 → 本守卫显式失败（D5/F17：必需源缺失不再静默空转）。"""
         from check_docs_consistency import check_governance_id_dual_meaning
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", tmp_path / "missing.md")
         warnings = check_governance_id_dual_meaning()
-        assert warnings == [], f"缺失对照表应静默, got: {warnings}"
+        assert any("缺失或无法解析" in w for w in warnings), f"缺失对照表应显式失败, got: {warnings}"
 
 
 class TestContractCountProse:
@@ -7068,13 +7148,13 @@ class TestAdrSupersedeChain:
         errors = check_docs_consistency.check_adr_supersede_chain()
         assert errors == [], f"当前仓库 ADR supersede 链应全部双向印证, got: {errors}"
 
-    def test_adr_supersede_chain_missing_dir_silent(self, tmp_path, monkeypatch):
-        """ADR 目录缺失 → 由 check_adr_index_completeness 报告，本守卫静默。"""
+    def test_adr_supersede_chain_missing_dir_fails_loudly(self, tmp_path, monkeypatch):
+        """ADR 目录缺失 → 本守卫显式失败（D5/F17：必需源缺失不再静默空转）。"""
         from check_docs_consistency import check_adr_supersede_chain
 
         monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", tmp_path / "missing")
         errors = check_adr_supersede_chain()
-        assert errors == [], f"缺失目录应静默, got: {errors}"
+        assert any("目录不存在" in e for e in errors), f"缺失目录应显式失败, got: {errors}"
 
     def test_adr_supersede_chain_dangling_target_reports(self, tmp_path, monkeypatch):
         """只有 ADR-X 却正式声明 Supersedes ADR-Y（Y 未读取到）→ 报悬空端点而非静默放行。"""

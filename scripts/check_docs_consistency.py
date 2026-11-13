@@ -94,13 +94,16 @@ import subprocess
 import sys
 import tomllib
 import typing
+import urllib.parse
 from collections.abc import Callable
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
 from io import TextIOWrapper
 from pathlib import Path
 
 import docs_generated
+import docs_markdown
 
 # Windows 默认 GBK 终端会因 emoji（✅/❌）输出触发 UnicodeEncodeError，强制 UTF-8 输出。
 # 在模块加载时配置，确保 main() 与单元测试导入时均生效（不依赖 -X utf8 启动参数）。
@@ -332,163 +335,165 @@ _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "fl
 
 
 def github_anchor(heading_text: str) -> str:
-    """生成 GitHub 风格 markdown 锚点。
+    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown slugger 实现）。
 
-    规则：转小写 → 移除非 word/空格/连字符字符 → 每个空格独立转连字符（不折叠）。
-    与 GitHub 渲染器行为一致（CJK 保留，标点/emoji/括号移除，连续空格 → 连续连字符）。
+    检视 §5.1 解析边界迁移（D5）：锚点语义唯一来源为 docs_markdown.create_slugger()
+    （github-slugger 语义：小写化 → 剔除非字母数字/``-``/``_`` → 空白逐个转连字符 →
+    重复标题追加序号）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
+
     例如 "3.1 ❌ 绝对禁止" → 移除 "." 和 "❌" 后得 "31  绝对禁止" → "31--绝对禁止"。
     """
-    s = heading_text.lower()
-    # \w 含字母数字下划线与 Unicode 字母（CJK）；re.UNICODE 默认开启
-    s = re.sub(r"[^\w\s-]", "", s)
-    # GitHub 不折叠连续空格，每个空格独立替换为连字符
-    s = s.replace(" ", "-")
-    return s
+    return docs_markdown.CompatGithubSlugger().slug(heading_text)
 
 
-# fenced code block 起始/结束行：3 个及以上连续反引号或波浪号，允许前置空白
-_FENCE_LINE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+def parse_doc_view(content: str) -> docs_markdown.DocumentView:
+    """解析 Markdown 文本为统一不可变视图（检视 §5.1：一次解析，全检查复用）。
+
+    check_docs_consistency 不再全文正则再造 Markdown：标题/锚点、标准与引用式链接、
+    HTML ID、代码块/行号映射一律经 docs_markdown 解析视图承载。
+    """
+    return docs_markdown.parse_text(content)
+
+
+def _view_effective_lines(view: docs_markdown.DocumentView) -> list[tuple[int, str]]:
+    """非代码块正文行序列 [(1-based 行号, 原文行)]（行级治理结构扫描的共享底座）。
+
+    代码块区间（含围栏 ```/~~~ 与缩进代码块）来自解析视图 token 行号映射，
+    替代旧手写 ``` 单字符状态机（旧实现漏 ~~~ 围栏与缩进块）。
+    """
+    blocked: set[int] = set()
+    for block in view.code_blocks:
+        blocked.update(range(block.start_line, block.end_line + 1))
+    return [(no, line) for no, line in enumerate(view.source, 1) if no not in blocked]
+
+
+def _view_effective_text(view: docs_markdown.DocumentView) -> str:
+    """非代码块正文拼接文本（保留原始行结构，行号 = 视图行号）。"""
+    return "\n".join(line for _, line in _view_effective_lines(view))
+
+
+@lru_cache(maxsize=1024)
+def _load_doc_view_cached(path_str: str, mtime_ns: int, size: int) -> docs_markdown.DocumentView:
+    """路径+mtime+size 键控的视图缓存：main() 中同一文档被多个检查复用，避免重复解析。
+
+    D5 迁移后每份受检文档平均被 6+ 个检查各解析一次（锚点预载 / 死链 / 书名号 /
+    索引覆盖 / 散文数量守卫等），300 份受检文档全量运行时解析次数从 ~2000 次降至 ~300 次。
+    mtime_ns/size 入键保证文件内容变化后缓存自然失效（测试注入 tmp 文件同路径不同内容）。
+    """
+    del mtime_ns, size  # 仅作缓存键参与
+    return docs_markdown.load_document_view(Path(path_str))
+
+
+def _load_doc_view(path: Path) -> docs_markdown.DocumentView:
+    """读取并解析文档为统一视图（带缓存）；文件读取异常按直接传播边界原样上抛。"""
+    stat = path.stat()
+    return _load_doc_view_cached(str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def extract_headings(content: str) -> set[str]:
-    """提取 markdown 文件所有标题对应的锚点集合。
+    """提取 markdown 文件所有标题对应的锚点集合（兼容层，委托统一解析视图）。
 
-    fenced code block 内的行不计入标题，避免示例代码中的 `# xxx` 被当成真实锚点：
-    反引号与波浪号均可开启 fence；关闭 fence 须与开启字符一致且长度不小于开启长度；
-    未闭合的 fence 持续到文末。反引号 fence 的 info string 不得含反引号，
-    否则视为行内代码（如显示 ```` ``` ````）而非 fence 开启。
+    检视 §5.1 解析边界迁移（D5）：旧手写 fence 状态机 + 行级标题正则退役——
+    围栏（```/~~~，含更长围栏与匹配关闭）、缩进代码块、行内代码边界一律由
+    CommonMark token 判定；锚点 slug 经 docs_markdown slugger（github 语义）。
     """
-    anchors: set[str] = set()
-    fence_char: str | None = None
-    fence_len = 0
-    for line in content.splitlines():
-        fence_match = _FENCE_LINE_RE.match(line)
-        if fence_char is not None:
-            if fence_match is not None:
-                fence = fence_match.group(1)
-                if fence[0] == fence_char and len(fence) >= fence_len and not fence_match.group(2).strip():
-                    fence_char = None
-                    fence_len = 0
-            continue
-        if fence_match is not None:
-            fence = fence_match.group(1)
-            # 反引号 fence 的 info string 含反引号时为行内代码，不开启 fence
-            if fence[0] == "~" or "`" not in fence_match.group(2):
-                fence_char = fence[0]
-                fence_len = len(fence)
-                continue
-        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-        if m:
-            anchors.add(github_anchor(m.group(2)))
-    return anchors
+    return {heading.slug for heading in parse_doc_view(content).headings}
 
 
 def check_anchor_dead_links() -> list[str]:
-    """检查项 1：markdown 锚点死链。
+    """检查项 1：markdown 锚点死链（D5 迁移：经统一解析视图判定）。
 
     校验逻辑（spec §11.3 修复锚点逃逸）：
-    1. 同文件锚点（`#anchor`）：直接校验锚点存在性。
+    1. 同文件锚点（`#anchor`）：直接校验锚点存在性（标题 slug ∪ HTML id）。
     2. 跨文件链接（`./file.md#anchor`）：
        a. 先判断目标文件是否存在，不存在立即报错（不跳过）。
        b. 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）。
        c. 文件存在且在 CHECKED_DOCS 中：校验锚点存在性。
 
-    跳过 fenced code block（```...```）内的链接，避免代码示例被误判。
+    链接提取与代码块排除（两类围栏 + 缩进块 + 行内代码）由 docs_markdown 视图
+    token 判定（检视 §5.1 解析边界迁移，替代旧手写 ``` 状态机 + 行级链接正则）；
+    引用式链接（`[t][label]`，已解析成链者）同样纳入锚点校验。
     """
     errors: list[str] = []
-    # 预加载所有受检文件的标题集合
-    doc_headings: dict[Path, set[str]] = {}
+    # 预加载所有受检文件的锚点集合（标题 slug ∪ HTML id）
+    doc_anchors: dict[Path, frozenset[str]] = {}
     for doc in CHECKED_DOCS:
-        doc_headings[doc] = extract_headings(doc.read_text(encoding="utf-8"))
-
-    # 匹配 markdown 链接 [text](url)，url 含 #anchor
-    link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+        doc_anchors[doc] = _load_doc_view(doc).anchor_ids()
 
     for doc in CHECKED_DOCS:
-        content = doc.read_text(encoding="utf-8")
-        in_code_block = False
-        for line_no, line in enumerate(content.splitlines(), 1):
-            # 跟踪 fenced code block 状态
-            if line.lstrip().startswith("```"):
-                in_code_block = not in_code_block
+        view = _load_doc_view(doc)
+        for link in view.links:
+            url = link.target.strip()
+            # 忽略外部链接
+            if url.startswith(("http://", "https://", "mailto:")):
                 continue
-            if in_code_block:
+            # 只检查带锚点的链接
+            if "#" not in url:
                 continue
-            for m in link_pattern.finditer(line):
-                url = m.group(2).strip()
-                # 忽略外部链接
-                if url.startswith(("http://", "https://", "mailto:")):
-                    continue
-                # 只检查带锚点的链接
-                if "#" not in url:
-                    continue
-                anchor = url.split("#", 1)[1]
-                # 锚点为空（如 `[text](./file.md#)` ）跳过
-                if not anchor:
-                    continue
+            # 解析视图按 URL 规范对目标 percent-encode（中文锚点 → %XX 形态），
+            # 与标题 slug 比较前须解码（GitHub 渲染器同语义）
+            anchor = urllib.parse.unquote(url.split("#", 1)[1])
+            # 锚点为空（如 `[text](./file.md#)` ）跳过
+            if not anchor:
+                continue
 
-                # 提取目标文件路径部分（锚点前的部分）
-                target_path_part = url.split("#", 1)[0]
+            # 提取目标文件路径部分（锚点前的部分；路径段同样解码）
+            target_path_part = urllib.parse.unquote(url.split("#", 1)[0])
 
-                # 同文件锚点：直接校验锚点存在性
-                if not target_path_part:
-                    if anchor not in doc_headings.get(doc, set()):
-                        errors.append(
-                            f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)"
-                        )
-                    continue
+            # 同文件锚点：直接校验锚点存在性
+            if not target_path_part:
+                if anchor not in doc_anchors.get(doc, frozenset()):
+                    errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
+                continue
 
-                # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
-                target_path = (doc.parent / target_path_part).resolve()
-                if not target_path.exists():
-                    errors.append(f"{doc.name}:{line_no}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
-                    continue
+            # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
+            target_path = (doc.parent / target_path_part).resolve()
+            if not target_path.exists():
+                errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
+                continue
 
-                # 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）
-                if target_path not in CHECKED_DOCS:
-                    continue
+            # 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）
+            if target_path not in CHECKED_DOCS:
+                continue
 
-                # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
-                if anchor not in doc_headings.get(target_path, set()):
-                    errors.append(
-                        f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)"
-                    )
+            # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
+            if anchor not in doc_anchors.get(target_path, frozenset()):
+                errors.append(
+                    f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)"
+                )
     return errors
 
 
 def check_relative_dead_links() -> list[str]:
-    """检查项 6：相对链接死链（不含锚点的相对路径链接）。
+    """检查项 6：相对链接死链（不含锚点的相对路径链接；D5 迁移：经统一解析视图判定）。
 
-    扫描 CHECKED_DOCS 中所有 markdown 链接 [text](url)，若 url 是相对路径
-    （非 http/mailto，不含 # 锚点），从 source_doc 所在目录解析，若目标文件
-    不存在则报错。
+    扫描 CHECKED_DOCS 中所有 markdown 链接，若 url 是相对路径（非 http/mailto，
+    不含 # 锚点），从 source_doc 所在目录解析，若目标文件不存在则报错。
 
-    跳过 fenced code block（```...```）内的链接，避免代码示例被误判。
+    另检引用式死链（`[text][label]` label 未定义）：解析视图 unresolved_references
+    显式失败（F17：真死链不得漏检、不从全文取样例代替）；围栏/行内代码内的假链接
+    由 token 判定天然排除（检视 §6.4 不误报负例）。
     """
     errors: list[str] = []
-    link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
-
     for doc in CHECKED_DOCS:
-        content = doc.read_text(encoding="utf-8")
-        in_code_block = False
-        for line_no, line in enumerate(content.splitlines(), 1):
-            if line.lstrip().startswith("```"):
-                in_code_block = not in_code_block
+        view = _load_doc_view(doc)
+        for link in view.links:
+            url = link.target.strip()
+            # 忽略外部链接
+            if url.startswith(("http://", "https://", "mailto:")):
                 continue
-            if in_code_block:
+            # 只检查不含锚点的相对路径链接（带锚点的由 check_anchor_dead_links 处理）
+            if "#" in url:
                 continue
-            for m in link_pattern.finditer(line):
-                url = m.group(2).strip()
-                # 忽略外部链接
-                if url.startswith(("http://", "https://", "mailto:")):
-                    continue
-                # 只检查不含锚点的相对路径链接（带锚点的由 check_anchor_dead_links 处理）
-                if "#" in url:
-                    continue
-                # 从 source_doc 所在目录解析相对路径
-                target = (doc.parent / url).resolve()
-                if not target.exists():
-                    errors.append(f"{doc.name}:{line_no}: 相对链接死链 '{url}' (目标 '{target}' 不存在)")
+            # 从 source_doc 所在目录解析相对路径
+            target = (doc.parent / url).resolve()
+            if not target.exists():
+                errors.append(f"{doc.name}:{link.line}: 相对链接死链 '{url}' (目标 '{target}' 不存在)")
+        for ref in view.unresolved_references:
+            errors.append(
+                f"{doc.name}:{ref.line}: 引用式死链 '[{ref.text}][{ref.label}]' "
+                f"(引用定义 '{ref.label}' 在 {doc.name} 中不存在)"
+            )
     return errors
 
 
@@ -503,22 +508,25 @@ def _count_local_hooks() -> int:
 
 
 def check_precommit_hook_count() -> list[str]:
-    """检查项 3：文档中 pre-commit hook 数量与配置一致。"""
+    """检查项 3：文档中 pre-commit hook 数量与配置一致。
+
+    D5 迁移：散文扫描底座改为统一解析视图的非代码块正文行（检视 §5.1 解析边界），
+    替代旧全文 finditer（旧实现把命令示例代码块中的数量自述也当正文）。
+    """
     errors: list[str] = []
     actual_count = _count_local_hooks()
 
+    prose_re = re.compile(r"(\d+)\s*个\s*pre-commit\s*hook")
     for doc in CHECKED_DOCS:
-        content = doc.read_text(encoding="utf-8")
-        # 匹配"项目使用 N 个 pre-commit hook"或"使用 N 个 pre-commit hook"
-        for m in re.finditer(r"(\d+)\s*个\s*pre-commit\s*hook", content):
-            declared = int(m.group(1))
-            if declared != actual_count:
-                # 定位行号便于报错
-                line_no = content[: m.start()].count("\n") + 1
-                errors.append(
-                    f"{doc.name}:{line_no}: 声明 {declared} 个 pre-commit hook，"
-                    f"实际 .pre-commit-config.yaml 有 {actual_count} 个"
-                )
+        view = _load_doc_view(doc)
+        for line_no, line in _view_effective_lines(view):
+            for m in prose_re.finditer(line):
+                declared = int(m.group(1))
+                if declared != actual_count:
+                    errors.append(
+                        f"{doc.name}:{line_no}: 声明 {declared} 个 pre-commit hook，"
+                        f"实际 .pre-commit-config.yaml 有 {actual_count} 个"
+                    )
     return errors
 
 
@@ -566,8 +574,12 @@ def check_workflow_enum() -> list[str]:
 
     断言 .github/workflows/*.yml 每一文件 base（如 `docs-ci.yml`）都在 ci-cd.md 中出现，
     守护 docs-ci / flet-nightly / sidecar 等流水线因仅在文件系统中存在而未被文档登记
-    （CI 前端存在性漂移）。仅做「配置 ⊆ 文档」单向：ci-cd.md 还会引用 audit-allowlist.yml
-    等非 workflow 的 .yml，故不做幽灵方向。
+    （CI 前端存在性漂移）。
+
+    D5（F21 rename 新旧路径并集）：补登记幽灵方向——ci-cd.md 中登记为
+    `.github/workflows/<name>.yml` 形态的引用，实际文件必须存在；workflow rename 后
+    文档残留旧名即报幽灵，使「登记集合 == 实际路径集合」双向一致
+    （旧名与新名的引用闭包取并集后仍须各自可达，rename 必须同步清理旧引用）。
 
     逐文件按文件名断言（F-09 复核修正）：原实现的条件是「文档中存在任意 .yml 引用」，
     未使用循环变量 `wf`，只要 ci-cd.md 提及任一 `.yml` 即对全部 workflow 放行，实为空操作。
@@ -580,9 +592,18 @@ def check_workflow_enum() -> list[str]:
     if not CI_CD_PATH.exists():
         return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
     content = CI_CD_PATH.read_text(encoding="utf-8")
-    for wf in sorted(p.name for p in WORKFLOWS_DIR.glob("*.yml") if p.is_file()):
+    actual_names = {p.name for p in WORKFLOWS_DIR.glob("*.yml") if p.is_file()}
+    for wf in sorted(actual_names):
         if not re.search(rf"(?<![\w.-]){re.escape(wf)}(?![\w.-])", content):
             errors.append(f"workflow 枚举无遗漏: .github/workflows/{wf} 未在 ci-cd.md 登记（F-09）")
+    # 幽灵方向（D5）：文档登记的 workflows 目录引用必须实际存在（rename 后旧名残留即报）
+    workflow_ref_re = re.compile(r"\.github/workflows/([A-Za-z0-9_.-]+\.yml)")
+    for ref_name in sorted(set(workflow_ref_re.findall(content))):
+        if ref_name not in actual_names:
+            errors.append(
+                f"workflow 枚举幽灵: ci-cd.md 登记的 .github/workflows/{ref_name} 不存在"
+                "（workflow rename 后须同步清理旧路径引用，F-09/D5）"
+            )
     return errors
 
 
@@ -676,6 +697,10 @@ def check_note_lazy_format() -> list[str]:
     self_path = Path(__file__).resolve()
     # 显式跳过专门测试 NOTE(lazy) 校验规则的测试文件，防止其单元测试用例中的演示文本被误判
     test_consistency_path = ROOT / "tests" / "unit" / "test_docs_consistency.py"
+
+    # D5（F17）：扫描根缺失显式失败，不得以空文件集合自然通过（失踪输入空转）
+    if not ROOT.is_dir():
+        return [f"NOTE(lazy) 扫描根不存在，源码契约检查无法执行: {ROOT}"]
 
     for p in ROOT.rglob("*.py"):
         rel_path = p.relative_to(ROOT)
@@ -826,23 +851,26 @@ def check_exception_count_prose() -> list[str]:
     治理清单数量（如 governance-ids.md 的「现存 N 条 R1 例外」）此前为人工自述无守卫：
     新增 EX id 后若遗漏同步 N，会宣称「现存 N 条」却与实际不符。对齐 check_precommit_hook_count
     的散文数量守卫范式。受检范围限 CHECKED_DOCS（markdown），exceptions.yml 以实计为唯一正本。
+    D5（F17）：exceptions.yml 缺失/解析失败不再静默空转——必需源缺失显式失败
+    （check_exceptions_yaml_consistency 仍负责结构细节，两者可重复报错）。
     """
     errors: list[str] = []
     actual = _count_exceptions()
     if actual is None:
-        return errors  # exceptions.yml 缺失/解析失败由 check_exceptions_yaml_consistency 报告
+        return [f"exceptions.yml 缺失或无法解析，例外数量守卫无法执行: {EXCEPTIONS_YAML_PATH}"]
+    prose_re = re.compile(r"现存\s*(\d+)\s*条\s*R1\s*例外")
     for doc in CHECKED_DOCS:
         try:
-            content = doc.read_text(encoding="utf-8")
+            view = _load_doc_view(doc)
         except OSError:
             continue
-        for m in re.finditer(r"现存\s*(\d+)\s*条\s*R1\s*例外", content):
-            declared = int(m.group(1))
-            if declared != actual:
-                line_no = content[: m.start()].count("\n") + 1
-                errors.append(
-                    f"{doc.name}:{line_no}: 声明现存 {declared} 条 R1 例外，exceptions.yml 实际注册 {actual} 条"
-                )
+        for line_no, line in _view_effective_lines(view):
+            for m in prose_re.finditer(line):
+                declared = int(m.group(1))
+                if declared != actual:
+                    errors.append(
+                        f"{doc.name}:{line_no}: 声明现存 {declared} 条 R1 例外，exceptions.yml 实际注册 {actual} 条"
+                    )
     return errors
 
 
@@ -877,45 +905,36 @@ def check_flet_hub_completeness() -> list[str]:
         errors.append(f"Flet 入口文件不存在: {FLET_HUB_PATH}")
         return errors
 
-    readme_content = FLET_HUB_PATH.read_text(encoding="utf-8")
-
     # 枚举 docs/flet/*.md 实际文件（排除 README.md 自身）
     actual_files: set[str] = set()
     for flet_doc in FLET_DOCS_PATHS:
         if flet_doc.name == "README.md":
             continue
         actual_files.add(flet_doc.name)
-
     # 提取 README 中所有 markdown 链接的 url，筛选指向 docs/flet/ 目录内 .md 文件的链接
     # 链接 url 形态：./xxx.md / xxx.md / ./subdir/xxx.md 等（相对 FLET_HUB_PATH 所在目录）
+    # D5 迁移：链接提取经统一解析视图 token 判定，替代旧手写 ``` 状态机 + 行级正则。
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in readme_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    for link in _load_doc_view(FLET_HUB_PATH).links:
+        url = link.target.strip()
+        # 忽略外部链接
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        # 提取文件名部分（去掉锚点和查询参数）
+        url_path = url.split("#", 1)[0].split("?", 1)[0]
+        if not url_path:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            # 提取文件名部分（去掉锚点和查询参数）
-            url_path = url.split("#", 1)[0].split("?", 1)[0]
-            if not url_path:
-                continue
-            # 解析目标文件路径（相对 FLET_HUB_PATH 所在目录）
-            target_path = (FLET_HUB_PATH.parent / url_path).resolve()
-            # 只检查解析后仍在 FLET_DOCS_DIR 目录内的链接（排除 ../CLAUDE.md 等外部链接）
-            try:
-                target_path.relative_to(FLET_DOCS_DIR)
-            except ValueError:
-                # 目标在 docs/flet/ 目录外，跳过（不属于 Flet 专题文档）
-                continue
-            url_basename = target_path.name
-            if url_basename.endswith(".md") and url_basename != "README.md":
-                referenced_files.add(url_basename)
+        # 解析目标文件路径（相对 FLET_HUB_PATH 所在目录）
+        target_path = (FLET_HUB_PATH.parent / url_path).resolve()
+        # 只检查解析后仍在 FLET_DOCS_DIR 目录内的链接（排除 ../CLAUDE.md 等外部链接）
+        try:
+            target_path.relative_to(FLET_DOCS_DIR)
+        except ValueError:
+            # 目标在 docs/flet/ 目录外，跳过（不属于 Flet 专题文档）
+            continue
+        url_basename = target_path.name
+        if url_basename.endswith(".md") and url_basename != "README.md":
+            referenced_files.add(url_basename)
 
     # 检查 1：README 是否覆盖全部专题文件
     missing_in_readme = actual_files - referenced_files
@@ -1224,10 +1243,12 @@ def check_redline_range_consistency() -> list[str]:
 
         data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
     except (ImportError, OSError, yaml.YAMLError):
-        return errors  # yml 缺失/解析失败由 check_redlines_yaml_consistency 报告
+        # D5（F17）：必需源缺失/解析失败显式失败，不再静默空转
+        # （scope 固定责任下本检查自身必须可达，"由 3b 报告"不能作为跳过依据）
+        return [f"redlines.yml 缺失或无法解析，红线总数散文守卫无法执行: {REDLINES_YAML_PATH}"]
     redlines = data.get("redlines") if isinstance(data, dict) else None
     if not isinstance(redlines, list):
-        return errors
+        return [f"redlines.yml 结构非法（无 redlines 列表），红线总数散文守卫无法执行: {REDLINES_YAML_PATH}"]
     rmax = max(int(r["id"][1:]) for r in redlines if isinstance(r, dict) and str(r.get("id", "")).startswith("R"))
 
     for doc in CHECKED_DOCS:
@@ -1402,7 +1423,7 @@ def _check_precommit_hook(
 
 
 def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
-    """提取 GitHub Actions workflow 中的 run: 命令块。
+    """提取 GitHub Actions workflow 中的 run: 命令块（F21 兼容层：仅文本，不含触发器）。
 
     支持 4 种 YAML 风格：
     1. run: pytest（单行无引号）
@@ -1411,8 +1432,46 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
     4. run: >- + 多行折叠块（折叠去尾换行）
 
     用轻量缩进扫描而非完整 YAML 解析，避免 GitHub Actions 表达式带来的解析兼容成本。
+    F21：N5 执行证据判定须用 _extract_run_blocks_with_triggers（触发器感知），
+    本函数保留为旧调用方的文本形态兼容层。
     """
-    blocks: list[str] = []
+    return [block.text for block in _extract_run_blocks_with_triggers(workflow_content)]
+
+
+# 禁用触发器形态（F21：配置存在不冒充执行——禁用步骤/job 下的 run 块不构成执行证据）：
+# - `if: false` / `if: ${{ false }}` / `if: 'false'`（显式永假条件）；
+# - `continue-on-error: true`（失败不阻断 → 不构成「必要门真实运行」证据）。
+# 复合条件表达式（如 `if: ${{ github.event_name == 'dispatch' }}`）按可达处理，
+# 执行必达由真实 CI 运行层证明（粗配置检查只守护机制配置可达，范围见 N5 docstring）。
+_DISABLED_IF_RE = re.compile(r"^if:\s*(?:['\"]|\$\{\{)?\s*false\s*(?:['\"]]|\}\})?\s*$", re.IGNORECASE)
+_CONTINUE_ON_ERROR_TRUE_RE = re.compile(r"^continue-on-error:\s*true\s*$", re.IGNORECASE)
+
+# N5 执行证据排除形态（F21「测试选择/skip 有负例」）：
+# - `--collect-only` / `--co`：仅收集不执行；
+# - `|| true` / `|| :` / `; true`：吞失败命令（失败仍绿 ≠ 必要门真实运行）。
+_PYTEST_COLLECT_ONLY_RE = re.compile(r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?:\s|$).*?(?:--collect-only|--co(?:\s|$))")
+_PYTEST_SWALLOWED_FAILURE_RE = re.compile(
+    r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?:\s|$).*(?:\|\|\s*(?:true|:)|;\s*true)"
+)
+
+
+@dataclass(frozen=True)
+class _RunBlock:
+    """workflow run 块及其触发器可达性（F21：enabled=False 的块不冒充执行证据）。"""
+
+    text: str
+    enabled: bool
+
+
+def _extract_run_blocks_with_triggers(workflow_content: str) -> list[_RunBlock]:
+    """提取 workflow run: 块并感知其上游触发器（F21）。
+
+    触发器判定（缩进扫描近似）：自 run: 行向上回溯至 `jobs:` 边界，收集路径上全部
+    `if:` / `continue-on-error:` 键值行；任一 `if: false` 形态或 `continue-on-error: true`
+    即判定该 run 块禁用。复合条件按可达处理（无法可靠判定的不冒充「已禁用」，
+    执行必达由真实运行层承担——见模块 F21 范围声明）。
+    """
+    blocks: list[_RunBlock] = []
     lines = workflow_content.splitlines()
     i = 0
     while i < len(lines):
@@ -1425,6 +1484,22 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
             continue
         prefix_str, rest = m.group(1), m.group(2)
         run_indent = len(prefix_str)
+        # —— 触发器回溯（F21）：从 run: 行向上至 jobs: 边界收集 if:/continue-on-error: ——
+        enabled = True
+        for back in range(i - 1, -1, -1):
+            back_line = lines[back]
+            stripped = back_line.strip()
+            if not stripped:
+                continue
+            back_indent = len(back_line) - len(back_line.lstrip())
+            if back_indent < run_indent or (back_indent == run_indent and stripped.startswith("- ")):
+                # 剥离列表项前缀（`- if: false` 与 `if: false` 同义）
+                normalized = stripped[2:].strip() if stripped.startswith("- ") else stripped
+                if re.match(r"^jobs:\s*$", normalized):
+                    break
+                if _CONTINUE_ON_ERROR_TRUE_RE.match(normalized) or _DISABLED_IF_RE.match(normalized):
+                    enabled = False
+                    break
         if rest in ("|", "|-", "|+", ">", ">-", ">+"):
             # 块状字面量 / 折叠块：收集后续更深层缩进的行
             block_lines: list[str] = []
@@ -1441,15 +1516,32 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
                     i += 1
                 else:
                     break
-            blocks.append("\n".join(block_lines))
+            blocks.append(_RunBlock(text="\n".join(block_lines), enabled=enabled))
         elif rest:
             # 单行命令：rest 即命令
-            blocks.append(rest)
+            blocks.append(_RunBlock(text=rest, enabled=enabled))
             i += 1
         else:
             # run: 后为空（罕见），跳过
             i += 1
     return blocks
+
+
+def _run_block_is_pytest_evidence(block: _RunBlock) -> bool:
+    """run 块是否构成 N5 的 pytest 执行证据（F21：可达 + 非收集选择 + 未吞失败）。"""
+    if not block.enabled:
+        return False
+    for line in block.text.splitlines():
+        if not PYTEST_COMMAND_PATTERN.search(line):
+            continue
+        # 测试选择排除：--collect-only / --co 仅收集不执行
+        if _PYTEST_COLLECT_ONLY_RE.search(line):
+            continue
+        # 吞失败排除：|| true / || : / ; true 失败仍绿
+        if _PYTEST_SWALLOWED_FAILURE_RE.search(line):
+            continue
+        return True
+    return False
 
 
 def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironment) -> list[str]:
@@ -1522,15 +1614,21 @@ def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironm
                     f"{rid}: N4 enforcement 含 '安全扫描' 但未检测到 Gitleaks workflow 与 .gitleaks.toml 同时存在"
                 )
 
-        # N5: CI-test（在任一 workflow 的 run: 命令块中检测 pytest 命令）
+        # N5: CI-test（在任一 workflow 的 run: 命令块中检测 pytest 命令）。
+        # F21 范围声明：本不变量为**粗配置可达**检查——run 块须触发器可达（非 if:false /
+        # continue-on-error:true）、非 --collect-only 测试选择、未 `|| true` 吞失败；
+        # 复合条件表达式按可达处理，执行必达由真实 CI 运行层证明，粗配置检查不冒充执行。
         if ENFORCEMENT_KEYWORD_CI_TEST in keywords:
             pytest_ok = any(
-                PYTEST_COMMAND_PATTERN.search(block)
+                _run_block_is_pytest_evidence(block)
                 for content in env.workflow_contents
-                for block in _extract_workflow_run_blocks(content)
+                for block in _extract_run_blocks_with_triggers(content)
             )
             if not pytest_ok:
-                errors.append(f"{rid}: N5 enforcement 含 'CI-test' 但 workflow run: 命令块未检测到 pytest 命令")
+                errors.append(
+                    f"{rid}: N5 enforcement 含 'CI-test' 但 workflow 中无触发器可达的 pytest 执行命令"
+                    "（if:false / continue-on-error / --collect-only / || true 均不构成执行证据，F21）"
+                )
 
         # N6~N8: automation_coverage 与 human_review_required 一致性校验
         # 字段缺失时跳过（由 3b check_redlines_yaml_consistency() 守护字段完整性）
@@ -1895,19 +1993,20 @@ def check_exceptions_reverse_coverage() -> list[str]:
     """
     errors: list[str] = []
 
-    if not REDLINES_YAML_PATH.exists() or not EXCEPTIONS_YAML_PATH.exists() or not KNOWN_TECHNICAL_DEBT_PATH.exists():
-        # 依赖文件缺失由对应一致性检查（check_redlines_yaml_consistency /
-        # check_exceptions_yaml_consistency / check_note_lazy_format）fail-closed 守护，
-        # 本检查仅在其存在时执行，避免重复报错。
-        return errors
+    # D5（F17）：必需源缺失显式失败，不再静默空转（scope 固定责任下本检查自身必须可达）
+    missing_sources = [
+        str(path) for path in (REDLINES_YAML_PATH, EXCEPTIONS_YAML_PATH, KNOWN_TECHNICAL_DEBT_PATH) if not path.exists()
+    ]
+    if missing_sources:
+        return [f"反向覆盖检查必需源缺失: {', '.join(missing_sources)}"]
 
     import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
     try:
         redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
         exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
-        return errors  # YAML 解析错误由对应检查函数守护，此处静默由它报
+    except yaml.YAMLError as exc:
+        return [f"反向覆盖检查必需源解析失败: {exc}"]
 
     # 1. EXCEPTIONABLE 红线 id 集合
     exceptable_ids: set[str] = set()
@@ -3009,12 +3108,15 @@ def check_canonical_docs_are_gated() -> list[str]:
 
 
 def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
-    """判断 doc 是否被任一索引源的链接（文件级或目录级）覆盖。"""
+    """判断 doc 是否被任一索引源的链接（文件级或目录级）覆盖。
+
+    D5 迁移：链接提取经统一解析视图 token 判定（替代旧行级正则——旧实现未排除
+    代码块内的示例链接，存在误覆盖通道）。
+    """
     docs_root = DOCS_README_PATH.parent
     for src in index_sources:
-        content = src.read_text(encoding="utf-8")
-        for m in _MD_LINK_PATTERN.finditer(content):
-            url = m.group(2).strip()
+        for link in _load_doc_view(src).links:
+            url = link.target.strip()
             if url.startswith(("http://", "https://", "mailto:")):
                 continue
             target = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
@@ -3035,6 +3137,32 @@ def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
     return False
 
 
+def _docs_index_candidates(docs_root: Path) -> list[Path]:
+    """文档索引全覆盖候选集：仅 git 跟踪文件（检视开放问题 4，与 _collect_checked_docs 同源）。
+
+    Path.rglob 不识别 .gitignore——未跟踪/被忽略的本地产物目录（如 docs/plans/ 会话计划、
+    docs/audit 归档）会被误报「未被索引引用」，造成真实仓库门禁假失败。候选集单一来源
+    改为 git ls-files（H1 同源修法）；git 不可用时降级文件系统发现 + 静态排除清单
+    （_GITIGNORED_ARTIFACT_DIRS，与历史行为兼容）。
+    """
+    covered_suffixes = (".md", ".yml", ".yaml", ".json")
+    tracked = _git_tracked_files_under(docs_root)
+    if tracked:
+        # git 跟踪集非空：以 git 索引为唯一候选来源（gitignored/未跟踪产物天然排除）
+        return sorted(
+            ROOT / rel for rel in tracked if (ROOT / rel).suffix in covered_suffixes and (ROOT / rel).is_file()
+        )
+    # git 跟踪集为空（git 不可用 / 目录不在 ROOT / 仓库无跟踪文件）→ 降级文件系统发现
+    # + 静态排除（历史行为，含 _LOCAL_ARTIFACT_DIRS 别名）；git 环境异常时不得以空候选集
+    # 静默通过（F17）。
+    artifact_exclusions = (*_GITIGNORED_ARTIFACT_DIRS, *_LOCAL_ARTIFACT_DIRS)
+    return sorted(
+        p
+        for p in docs_root.rglob("*")
+        if p.is_file() and p.suffix in covered_suffixes and not any(p.is_relative_to(d) for d in artifact_exclusions)
+    )
+
+
 def check_docs_index_completeness() -> list[str]:
     """检查项 15：文档索引全覆盖（DOC-07 / DOC-11）。
 
@@ -3043,10 +3171,12 @@ def check_docs_index_completeness() -> list[str]:
     目录级引用（指向目录的链接）视为覆盖其下全部文件。
 
     这是 check_flet_hub_completeness() 向全 docs 目录的推广，同时闭合
-    DOC-07（reviews 检视报告不可发现）与 DOC-11（索引自称全覆盖实缺目录）。
+    DOC-07（reviews 检视报告不可发现）与 DOC-11（索自称全覆盖实缺目录）。
     DS-10：扫描范围由仅 `.md` 扩展为 `.md`/`.yml`/`.yaml`/`.json`，使
     docs/ 下非 markdown 治理文件（redlines.yml / canonical-topics.yml 等）
     同样纳入索引全覆盖门禁，避免新增治理文件成为不可发现的暗坑。
+    候选集仅取 git 跟踪文件（检视开放问题 4）：未跟踪/gitignored 产物目录
+    （docs/plans/ 等）不再触发「未被索引引用」假失败。
     """
     errors: list[str] = []
     if not DOCS_README_PATH.exists():
@@ -3054,16 +3184,9 @@ def check_docs_index_completeness() -> list[str]:
 
     docs_root = DOCS_README_PATH.parent
     index_sources = [CONTRIBUTING_PATH, DOCS_README_PATH]
-    covered_suffixes = (".md", ".yml", ".yaml", ".json")
-    candidates = sorted(p for p in docs_root.rglob("*") if p.is_file() and p.suffix in covered_suffixes)
+    candidates = _docs_index_candidates(docs_root)
     for doc in candidates:
         if doc == DOCS_README_PATH:
-            continue
-        # 真实 gitignored 本地产物 / 归档目录豁免：Path.rglob 不识别 .gitignore，未跟踪/被忽略产物
-        # 不属于「需进索引的治理活文档」，跳过避免误报「未进索引」（兼容 _LOCAL_ARTIFACT_DIRS 别名）。
-        if any(doc.is_relative_to(d) for d in _GITIGNORED_ARTIFACT_DIRS) or any(
-            doc.is_relative_to(d) for d in _LOCAL_ARTIFACT_DIRS
-        ):
             continue
         if _docs_doc_covered(doc, index_sources):
             continue
@@ -3094,42 +3217,33 @@ def check_reviews_index_completeness() -> list[str]:
     if not REVIEWS_README_PATH.exists():
         return [f"reviews 索引入口不存在: {REVIEWS_README_PATH}"]
 
-    readme_content = REVIEWS_README_PATH.read_text(encoding="utf-8")
-
     # 枚举 docs/reviews/ 顶层 .md（排除 README 自身）
     actual_files: set[str] = set()
     for path in REVIEWS_README_PATH.parent.glob("*.md"):
         if path.name == "README.md":
             continue
         actual_files.add(path.name)
-
     # 提取 README 中指向 docs/reviews/ 目录内 .md 文件的链接的文件名集合
+    # D5 迁移：链接提取经统一解析视图 token 判定，替代旧手写 ``` 状态机 + 行级正则。
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in readme_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    for link in _load_doc_view(REVIEWS_README_PATH).links:
+        url = link.target.strip()
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        url_path = url.split("#", 1)[0].split("?", 1)[0]
+        if not url_path:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            url_path = url.split("#", 1)[0].split("?", 1)[0]
-            if not url_path:
-                continue
-            target_path = (REVIEWS_README_PATH.parent / url_path).resolve()
-            try:
-                rel = target_path.relative_to(REVIEWS_DOCS_DIR)
-            except ValueError:
-                continue  # 目标在 docs/reviews/ 外，跳过（如 ../../CLAUDE.md、../debt/...）
-            if len(rel.parts) != 1:
-                # 仅统计顶层（`./xxx.md` 形式）引用；根 reviews/ 路径/子目录引用不纳入登记集
-                continue
-            url_basename = rel.name
-            if url_basename.endswith(".md") and url_basename != "README.md":
-                referenced_files.add(url_basename)
+        target_path = (REVIEWS_README_PATH.parent / url_path).resolve()
+        try:
+            rel = target_path.relative_to(REVIEWS_DOCS_DIR)
+        except ValueError:
+            continue  # 目标在 docs/reviews/ 外，跳过（如 ../../CLAUDE.md、../debt/...）
+        if len(rel.parts) != 1:
+            # 仅统计顶层（`./xxx.md` 形式）引用；根 reviews/ 路径/子目录引用不纳入登记集
+            continue
+        url_basename = rel.name
+        if url_basename.endswith(".md") and url_basename != "README.md":
+            referenced_files.add(url_basename)
 
     # 未登记的顶层文档（按前缀区分方法论文档与误落的检视报告）
     for fname in sorted(actual_files - referenced_files):
@@ -3173,8 +3287,6 @@ def check_adr_index_completeness() -> list[str]:
     if not CONTRIBUTING_PATH.exists():
         return [f"CONTRIBUTING.md 不存在: {CONTRIBUTING_PATH}"]
 
-    contributing_content = CONTRIBUTING_PATH.read_text(encoding="utf-8")
-
     # 枚举 docs/adr/ 下全部 *.md（排除 README 自身）
     actual_files: set[str] = set()
     for path in ADR_DOCS_DIR.glob("*.md"):
@@ -3183,28 +3295,22 @@ def check_adr_index_completeness() -> list[str]:
         actual_files.add(path.name)
 
     # 提取 CONTRIBUTING.md 中指向 docs/adr/*.md 文件的链接的文件名集合
+    # D5 迁移：链接提取经统一解析视图 token 判定，替代旧手写 ``` 状态机 + 行级正则。
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in contributing_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    for link in _load_doc_view(CONTRIBUTING_PATH).links:
+        url = link.target.strip()
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        url_path = url.split("#", 1)[0].split("?", 1)[0]
+        if not url_path:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            url_path = url.split("#", 1)[0].split("?", 1)[0]
-            if not url_path:
-                continue
-            target_path = (CONTRIBUTING_PATH.parent / url_path).resolve()
-            try:
-                rel = target_path.relative_to(ADR_DOCS_DIR)
-            except ValueError:
-                continue  # 目标在 docs/adr/ 外，跳过
-            if len(rel.parts) == 1 and rel.name.endswith(".md"):
-                referenced_files.add(rel.name)
+        target_path = (CONTRIBUTING_PATH.parent / url_path).resolve()
+        try:
+            rel = target_path.relative_to(ADR_DOCS_DIR)
+        except ValueError:
+            continue  # 目标在 docs/adr/ 外，跳过
+        if len(rel.parts) == 1 and rel.name.endswith(".md"):
+            referenced_files.add(rel.name)
 
     # 未登记的 ADR 文档
     for fname in sorted(actual_files - referenced_files):
@@ -3236,19 +3342,15 @@ def check_scripts_index_completeness() -> list[str]:
     if not CI_CD_PATH.exists():
         return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
 
-    content = CI_CD_PATH.read_text(encoding="utf-8")
     actual_files: set[str] = {p.name for p in SCRIPTS_DIR.glob("*.py") if p.is_file()}
 
+    # D5 迁移：逐行扫描底座改为统一解析视图的非代码块正文行（_view_effective_lines），
+    # 替代旧手写 ``` 状态机；`scripts/<name>.py` 引用为裸文本形态（非链接），仍按行正则提取。
+    effective_text = _view_effective_text(_load_doc_view(CI_CD_PATH))
+
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
-            continue
-        if in_code_block:
-            continue
-        for m in _SCRIPT_FILE_REF.finditer(line):
-            referenced_files.add(m.group(1))
+    for m in _SCRIPT_FILE_REF.finditer(effective_text):
+        referenced_files.add(m.group(1))
 
     # 未登记的工程脚本
     for fname in sorted(actual_files - referenced_files):
@@ -3788,7 +3890,8 @@ def check_governance_id_dual_meaning() -> list[str]:
     warnings: list[str] = []
     entries = _load_glossary_entries()
     if entries is None:
-        return warnings
+        # D5（F17）：对照表正本缺失/无法解析显式失败，不再静默空转
+        return [f"governance-ids.md 缺失或无法解析，治理 ID 对义守卫无法执行: {GOVERNANCE_IDS_PATH}"]
     for gov_id in sorted(entries):
         rows = entries[gov_id]
         if len(rows) < 2:
@@ -3937,8 +4040,9 @@ def check_adr_supersede_chain() -> list[str]:
     ADR-0002，构成单向断链。本守卫对 docs/adr/*.md 头元数据建立双向映射并校验对称性。
     """
     errors: list[str] = []
+    # D5（F17）：ADR 目录为必需源，缺失显式失败，不得静默空转
     if not ADR_DOCS_DIR.is_dir():
-        return errors  # 目录缺失由 check_adr_index_completeness 报告
+        return [f"ADR 目录不存在，supersede 双向链守卫无法执行: {ADR_DOCS_DIR}"]
 
     supersedes: dict[str, set[str]] = {}
     superseded_by: dict[str, set[str]] = {}
@@ -4050,14 +4154,22 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
 _GUILLEMET_REF_PATTERN = re.compile(r"(?<![\w./-])([\w./-]+\.md)\s*「([^」]+)」")
 
 
+def _strip_md_links_from_line(line: str) -> str:
+    """剔除单行内的 markdown 链接形态 ``[text](url)``（书名号扫描的行级文本准备）。
+
+    仅用于已知含链接的行（链接行号来自解析视图），fence/缩进块边界由视图承载；
+    本函数只做行内链接形态剔除，不承担 Markdown 结构解析。
+    """
+    return re.sub(r"\[[^\]]*\]\([^)]*\)", "", line)
+
+
 def _extract_heading_texts(content: str) -> set[str]:
-    """提取 markdown 全部标题的原文（保留序号/前缀，如「### 7. 新增回测配置」）。"""
-    headings: set[str] = set()
-    for line in content.splitlines():
-        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-        if m:
-            headings.add(m.group(2))
-    return headings
+    """提取 markdown 全部标题的原文（保留序号/前缀，如「### 7. 新增回测配置」）。
+
+    D5 迁移：委托统一解析视图 token 判定（替代旧行级正则——旧实现会把代码示例中的
+    `# 标题` 注释行误判为真实标题）。
+    """
+    return {heading.text for heading in parse_doc_view(content).headings}
 
 
 def _strip_english_suffix(heading: str) -> str:
@@ -4115,30 +4227,38 @@ def check_guillemet_references() -> list[str]:
     errors: list[str] = []
     for doc in CHECKED_DOCS:
         if not doc.exists():
+            # D5（F17）：受检文件缺失显式失败，不得静默 continue（失踪输入空转）
+            errors.append(f"书名号引用: 受检文档不存在（受检集与文件系统不一致）: {doc}")
             continue
-        content = doc.read_text(encoding="utf-8")
-        # 剔除 markdown 链接 `[text](url)`，链接内书名号由锚点门禁覆盖
-        text = re.sub(r"\[[^\]]*\]\([^)]*\)", "", content)
-        for m in _GUILLEMET_REF_PATTERN.finditer(text):
-            raw_path, section = m.group(1), m.group(2).strip()
-            target = ROOT / raw_path
-            candidates = [target] if target.exists() else _resolve_bare_doc_name(raw_path)
-            if not candidates:
-                errors.append(f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档 {raw_path} 不存在")
-                continue
-            if any(_has_guillemet_heading(candidate, section) for candidate in candidates):
-                continue
-            if len(candidates) == 1:
-                headings = _extract_heading_texts(candidates[0].read_text(encoding="utf-8"))
-                errors.append(
-                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
-                    f"（现有标题示例: {sorted(headings)[:6]}）"
-                )
-            else:
-                errors.append(
-                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，"
-                    f"docs/、man/、requirements/ 下存在 {len(candidates)} 个同名文档但均无该标题"
-                )
+        view = _load_doc_view(doc)
+        # 剔除 markdown 链接 `[text](url)`，链接内书名号由锚点门禁覆盖。
+        # D5 迁移：代码块边界来自统一解析视图（_view_effective_lines）；链接形态剔除
+        # 逐行做（行级文本准备，非结构解析）——inline token 的行号是段落起始行
+        # （多行段落 lazy continuation），按链接行号剔除会漏掉段落后续物理行。
+        for line_no, line in _view_effective_lines(view):
+            text = _strip_md_links_from_line(line)
+            for m in _GUILLEMET_REF_PATTERN.finditer(text):
+                raw_path, section = m.group(1), m.group(2).strip()
+                target = ROOT / raw_path
+                candidates = [target] if target.exists() else _resolve_bare_doc_name(raw_path)
+                if not candidates:
+                    errors.append(
+                        f"书名号引用: {doc.name}:{line_no} 引用 {raw_path}「{section}」，目标文档 {raw_path} 不存在"
+                    )
+                    continue
+                if any(_has_guillemet_heading(candidate, section) for candidate in candidates):
+                    continue
+                if len(candidates) == 1:
+                    headings = _extract_heading_texts(candidates[0].read_text(encoding="utf-8"))
+                    errors.append(
+                        f"书名号引用: {doc.name}:{line_no} 引用 {raw_path}「{section}」，目标文档无同名标题"
+                        f"（现有标题示例: {sorted(headings)[:6]}）"
+                    )
+                else:
+                    errors.append(
+                        f"书名号引用: {doc.name}:{line_no} 引用 {raw_path}「{section}」，"
+                        f"docs/、man/、requirements/ 下存在 {len(candidates)} 个同名文档但均无该标题"
+                    )
     return errors
 
 
@@ -4152,9 +4272,11 @@ def check_strategy_desc_dynamic_consistency() -> list[str]:
     """
     errors: list[str] = []
     number_re = re.compile(r"\d")
+    # D5（F17）：locale 资产为必需源，缺失显式失败，不得静默 continue（失踪输入空转）
     for locale_dir in ("zh_CN", "en_US"):
         path = ROOT / "locales" / locale_dir / "strings.json"
         if not path.exists():
+            errors.append(f"策略描述动态一致性: 必需 locale 资产缺失: {path}")
             continue
         try:
             strings = json.loads(path.read_text(encoding="utf-8"))
@@ -4295,7 +4417,14 @@ _SCOPE_CHECK_NAMES: tuple[tuple[frozenset[str], str], ...] = (
 
 
 def _glossary_check_with_warnings() -> list[str]:
-    """治理 ID 对照表检查的 warning 打印包装（保持旧 main() 的渐进部署输出行为）。"""
+    """治理 ID 对照表检查的 warning 打印包装（保持旧 main() 的渐进部署输出行为）。
+
+    F19 分层口径（与实际退出码一致）：
+    - WARNING（渐进部署项，如治理 ID 渐进部署 warning / R3 tests 存量）：以
+      ``::warning::`` 前缀输出，**不进** errors 聚合 → CLI 退出码 0（不阻断）；
+    - ERROR（真实违规）：进 errors 聚合 → main() 以退出码 1 失败；
+    - 真实仓库基线：all 检查退出码应为 0；基线非零即失败，不与 warning 互相背书。
+    """
     errors, warnings = check_governance_id_glossary()
     if warnings:
         print("::warning::治理 ID 对照表（渐进部署，不阻断）存在未在 governance-ids.md 登记的治理 ID：")

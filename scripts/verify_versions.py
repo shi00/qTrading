@@ -17,6 +17,9 @@ Checks:
 不再携带产品版本字面量，故无副本可校验。installer.iss 的本地兜底默认值改为 0.0.0-local，
 发布构建始终经 ``/DMyAppVersion`` 注入 tag 版本。）
 
+D5（检视 §5.1 职责表）：文档引用检查（Check 5 / Check 6）委托 docs_markdown 统一解析
+视图，不再维护第二套文档解析；产品/依赖/安全支持/Flet/sidecar 版本职责保留在本脚本。
+
 Usage: python scripts/verify_versions.py [--check-sidecar-binary <path>]
 """
 
@@ -28,6 +31,17 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 文档解析视图（D5：与 check_docs_consistency 共用唯一解析实现，检视 §5.1）。
+# 导入失败显式失败（不静默降级为第二套解析）——verify-versions hook 环境须含
+# markdown-it-py（pre-commit additional_dependencies 由 docs 组条目提供）。
+try:
+    import docs_markdown
+except ImportError as _exc:  # pragma: no cover - 环境缺依赖时显式失败
+    raise SystemExit(
+        f"verify_versions.py 需要文档解析依赖 docs_markdown（markdown-it-py）：{_exc}；"
+        "请安装 docs 依赖组（requirements-docs.txt）"
+    ) from _exc
 
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 REQUIREMENTS_DEV_PATH = ROOT / "requirements-dev.txt"
@@ -133,30 +147,46 @@ def check_security_supported_version(pyproject_ver: str) -> list[str]:
 
 
 def check_empty_markdown_links() -> list[str]:
-    """Check 5: No empty markdown links ]() in README.md."""
+    """Check 5: No empty markdown links ]() in README.md（D5：经共享解析视图判定）。
+
+    空链接 ``[text]()` ``在 CommonMark 下解析为 target 为空的 link token，
+    经 docs_markdown 视图 links 提取（代码块/行内代码内的示例文本天然排除，
+    替代旧行级子串扫描的第二套解析）。
+    """
     errors = []
     if not README_PATH.exists():
+        # D5/F22：README.md 为必需正文，缺失显式失败——不得静默跳过装通过（F17 失踪输入空转）。
+        errors.append(f"必需正文缺失: {README_PATH} 不存在，空链接检查无法执行（fail-closed）")
         return errors
-    content = README_PATH.read_text(encoding="utf-8")
-    for i, line in enumerate(content.splitlines(), 1):
-        if "]()" in line:
-            errors.append(f"README.md:{i} contains empty markdown link ']()'")
+    view = docs_markdown.load_document_view(README_PATH)
+    for link in view.links:
+        if link.target.strip() == "":
+            errors.append(f"README.md:{link.line} contains empty markdown link ']()'")
     return errors
 
 
 def check_claude_references() -> list[str]:
-    """Check 6: CLAUDE.md reference-style pointers target existing files."""
+    """Check 6: CLAUDE.md reference-style pointers target existing files（D5：经共享解析视图判定）。
+
+    反引号代码 span 经解析视图 code_spans 提取（替代旧行级正则的第二套解析）。
+    仅校验指向代码文件的引用；§/章节类引用跳过。
+    """
     errors = []
     if not CLAUDE_PATH.exists():
+        # D5/F22：CLAUDE.md 为必需正文，缺失显式失败——不得静默跳过装通过（F17 失踪输入空转）。
+        errors.append(f"必需正文缺失: {CLAUDE_PATH} 不存在，引用检查无法执行（fail-closed）")
         return errors
-    content = CLAUDE_PATH.read_text(encoding="utf-8")
-    # Match patterns like: 见 `xxx.py` or 见 `xxx/yyy.py`
-    refs = re.findall(r"见 `([^`]+)`", content)
-    for ref in refs:
+    view = docs_markdown.load_document_view(CLAUDE_PATH)
+    for span in view.code_spans:
+        ref = span.text
         # Skip non-file references (e.g., section references like §4.1)
         if ref.startswith("§") or not (
             ref.endswith(".py") or ref.endswith(".yml") or ref.endswith(".yaml") or ref.endswith(".json")
         ):
+            continue
+        # 命令形态（含空白，如 `python scripts/check_redlines.py`）不是路径引用，跳过；
+        # 路径引用为无空白的路径/文件名形态（与旧「见 `xxx.py`」语义等价的 token 判定）。
+        if not ref or any(ch.isspace() for ch in ref):
             continue
         # Try as full path from root first
         target = ROOT / ref

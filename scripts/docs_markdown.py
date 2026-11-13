@@ -36,6 +36,7 @@ from markdown_it.token import Token
 __all__ = [
     "SLUGGER_BACKEND",
     "CodeBlockInfo",
+    "CodeSpanInfo",
     "CompatGithubSlugger",
     "DocumentView",
     "HeadingInfo",
@@ -72,7 +73,7 @@ class Slugger(Protocol):
 
 
 try:  # 权威来源 pin github-slugger==0.0.3：可用则优先（未来修复版自动切回）
-    from github_slugger import GithubSlugger as _GithubSlugger
+    from github_slugger import GithubSlugger as _GithubSlugger  # type: ignore[reportMissingImports]  # 包在 Python 3.13 环境导入即崩（见 CompatGithubSlugger docstring），未安装时经 except 回退 compat 实现，pyright 环境未必安装该包
 
     SLUGGER_BACKEND = "github-slugger"
 except (ImportError, UnicodeEncodeError):
@@ -208,6 +209,18 @@ class ReferenceDefInfo:
 
 
 @dataclass(frozen=True)
+class CodeSpanInfo:
+    """行内代码 span：原文文本、所在行（1-based）。
+
+    行内代码内的假链接/伪标题由本视图承载（token 判定 code_inline，天然排除
+    链接与标题语义），供消费者做「代码示例文本不冒正文」的负例判定。
+    """
+
+    text: str
+    line: int
+
+
+@dataclass(frozen=True)
 class DocumentView:
     """一次解析形成的不可变文档视图（frozen dataclass，全部字段为 tuple）。"""
 
@@ -217,6 +230,7 @@ class DocumentView:
     unresolved_references: tuple[UnresolvedRef, ...]
     html_ids: tuple[HtmlIdInfo, ...]
     code_blocks: tuple[CodeBlockInfo, ...]
+    code_spans: tuple[CodeSpanInfo, ...]
     reference_definitions: tuple[ReferenceDefInfo, ...]
     raw_html_tokens: tuple[tuple[str, int], ...]  # (原 HTML 内容, 所在行)
 
@@ -338,6 +352,19 @@ def _collect_html(tokens: list[Token]) -> tuple[list[HtmlIdInfo], list[tuple[str
     return ids, raw
 
 
+def _collect_code_spans(tokens: list[Token]) -> tuple[CodeSpanInfo, ...]:
+    """行内代码 span（code_inline）：文本与所在行（1-based，段落起始行粒度）。"""
+    spans: list[CodeSpanInfo] = []
+    for token in tokens:
+        if token.type != "inline":
+            continue
+        line = _token_line(token)
+        for child in token.children or []:
+            if child.type == "code_inline":
+                spans.append(CodeSpanInfo(text=child.content, line=line))
+    return tuple(spans)
+
+
 def _collect_code_blocks(tokens: list[Token]) -> tuple[CodeBlockInfo, ...]:
     """代码块：围栏（fence，含 markup ```/~~~）与缩进块（code_block）。"""
     blocks: list[CodeBlockInfo] = []
@@ -415,6 +442,7 @@ def parse_text(text: str) -> DocumentView:
     headings = _collect_headings(tokens, slugger)
     html_ids, raw_html = _collect_html(tokens)
     code_blocks = _collect_code_blocks(tokens)
+    code_spans = _collect_code_spans(tokens)
     defined_labels = {
         str(label)
         for label in env.get("references", {})  # 键已为大写折叠形态
@@ -461,6 +489,7 @@ def parse_text(text: str) -> DocumentView:
         unresolved_references=unresolved,
         html_ids=tuple(html_ids),
         code_blocks=code_blocks,
+        code_spans=code_spans,
         reference_definitions=definitions,
         raw_html_tokens=tuple(raw_html),
     )
