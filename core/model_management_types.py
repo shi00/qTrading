@@ -774,3 +774,64 @@ class ChatInferenceAdapter(Protocol):
         response_format: Mapping[str, Any] | None = None,
         on_event: ChatStreamEventHandler | None = None,
     ) -> ChatTurnResponse: ...
+
+
+# ---------------------------------------------------------------------------
+# 完整聊天回合应用终态（HANDOFF §6.1 / DD §10.1，B-02-3）
+# ---------------------------------------------------------------------------
+
+
+#: 回合传输事实状态（INV-07，不把未知折叠为确定失败）：``ok`` = 协议 finish 与
+#: 流关闭确认且响应完整；``failed`` = 确认失败（零出站门控拒绝、协议断流等
+#: 确认错误）；``unknown`` = 外发已开始但效果无法证明（取消传播口径，F19）。
+ChatTurnTransportState = Literal["ok", "failed", "unknown"]
+
+
+#: 回合结算事实状态：``settled`` = 终态落账确认持久化；``deferred`` = 终态已
+#: 提交但持久化未确认（F20 重放队列承接，落账稍后推进）；``unknown`` = 收费
+#: 无法证明（外发后取消，预留 held_unconfirmed，F19）；``None`` = 无在途账目
+#: 事实（未建 attempt 的零出站失败，无结算维度）。
+ChatTurnSettlementState = Literal["settled", "deferred", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnOutcome:
+    """完整聊天回合的应用终态（``execute_chat_turn`` 唯一返回契约）。
+
+    - **transport 与 settlement 两维分离**（DD §10.1「transport、settlement、
+      unknown 分开」）：传输事实与结算事实互不折叠，各自可表达 unknown
+      （INV-07——不把未知伪装成确定终态，R21）。
+    - **已公开分片后失败**（§6.4-5）：``partial_text`` 非 None 表示调用方已收到
+      的真实分片原样保留、回合尾部内容未知以 ``response=None`` 承载——不换模型
+      拼接、不重试换 attempt（``attempt_id`` 绑定原 attempt）。
+    - **拒绝回合**（finish_reason=refused）：``status="failed"`` +
+      ``transport_state="ok"`` + 完整 ``response`` 承载——拒绝是完成的模型回合
+      （传输事实成立），拒绝事实不伪装、不换候选规避（DD §10.1），调用方经
+      ``response.refusal`` 读取原文。
+    - **身份关联**（HANDOFF：model_call_id → invocation_id → 实际 attempt 稳定
+      关联）：``attempt_id=None`` 表示零出站失败（未建任何 attempt）。
+    """
+
+    model_call_id: str
+    invocation_id: str
+    status: Literal["succeeded", "failed"]
+    transport_state: ChatTurnTransportState
+    settlement_state: ChatTurnSettlementState | None
+    attempt_id: str | None
+    response: ChatTurnResponse | None
+    partial_text: str | None
+    error_code: str | None
+
+    def ensure_valid(self) -> None:
+        if not self.model_call_id or not self.invocation_id:
+            raise _invalid("invalid_field", "$")
+        if self.status == "succeeded":
+            if self.response is None or self.transport_state != "ok" or self.error_code is not None:
+                raise _invalid("invalid_field", "$")
+            if self.partial_text is not None:
+                raise _invalid("invalid_field", "$.partial_text")
+            return
+        if self.response is not None and self.partial_text is not None:
+            # 拒绝回合（完整 response）与分片后失败（partial_text）互斥——两者
+            # 不得同时伪装「既完整又部分」的矛盾终态
+            raise _invalid("invalid_field", "$.response")
