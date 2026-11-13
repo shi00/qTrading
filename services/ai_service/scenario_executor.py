@@ -647,8 +647,7 @@ class ScenarioExecutor:
 
                 # 真正进入适配器执行前建立实际尝试记录（§6.2 步骤 4）。F18：每次真实
                 # 尝试独立 attempt 行（携带该次 retry_index）；同一次写账的持久化重放
-                # 沿用该次身份（幂等，不重建）。落账失败降级继续执行（执行已授权开始，
-                # 费用型此前已被预留/派发门拦截）。F16：owner 齐传启用 F23 身份强门；
+                # 沿用该次身份（幂等，不重建）。F16：owner 齐传启用 F23 身份强门；
                 # attempt_row 携带预留 ID。
                 begin_outcome = await self._recorder.begin_attempt(
                     attempt_id=attempt_id,
@@ -661,9 +660,34 @@ class ScenarioExecutor:
                     owner_epoch=owner_epoch,
                 )
                 if not begin_outcome.persisted:
+                    # 必需登记失败（DD SQ-02 / F27「必需记录失败 0 出站」）：账本不可用 /
+                    # 超时 / owner 失权均为 invocation 级事实，切换候选无济——本尝试零
+                    # 出站并明确失败；有活跃预留时提交 failed 终态经 F23 背书补记并转换
+                    # settled（不留悬挂占用）；usage_only（无预留）无账本副作用可收敛，
+                    # 维持零补记。与费用型预留 / 派发失败处置一致，中断整个候选遍历。
+                    reason = f"attempt registration unavailable: {begin_outcome.error_code}"
                     logger.warning(
-                        "[ScenarioExecutor] attempt row unavailable (%s), continuing in-memory execution",
+                        "[ScenarioExecutor] required attempt registration failed (%s), zero outbound (task=%s)",
                         begin_outcome.error_code,
+                        request.task_id,
+                    )
+                    if reservation_id is not None:
+                        await self._submit_failed_terminal(
+                            request,
+                            attempt_id,
+                            reason,
+                            reservation_id,
+                            metadata=attempt_metadata,
+                            ledger=ledger,
+                            duration_ms=_elapsed_ms(clock, attempt_started_at),
+                        )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
                     )
 
                 attempt_context = AttemptContext(

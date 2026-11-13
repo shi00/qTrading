@@ -22,6 +22,9 @@
 - F16 父请求与预算预留：invocation 先于候选遍历建立；逐候选 try_reserve →
   mark_dispatched → authorize → begin_attempt 顺序；费用型预留被拒 / 账本
   不可用零出站；usage_only 降级；预留 ID 贯穿 attempt_row / 终态。
+- 必需登记失败 0 出站（DD SQ-02/F27）：begin_attempt persisted=False →
+  adapter 零调用 + failed 终态（活跃预留 F23 背书收敛）+ halt 候选遍历，
+  usage_only 同样零出站（NULL 金额预留已登记时同样背书补记）。
 """
 
 import asyncio
@@ -795,16 +798,21 @@ class TestGuards:
         assert "budget dispatch forbidden" in decision.reason
 
     @pytest.mark.asyncio
-    async def test_usage_only_persistence_lost_still_dispatches(self):
-        """D5：usage_only（无预留金额）在 persisted=False 时允许进程内一次性派发。"""
+    async def test_usage_only_persistence_lost_zero_egress(self):
+        """必需登记失败 0 出站（DD SQ-02/F27，取代旧 D5 进程内降级派发）：
+        usage_only 在 begin_attempt persisted=False 时零出站明确失败，
+        出站无账本事实背书不得继续。"""
         adapter = _adapter_ok()
         recorder = _recorder_mock(persisted=False)
         executor = _executor(adapter, recorder, validate=_validator_ok)
         result = await executor.execute(
             _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
         )
-        adapter.invoke.assert_awaited_once()
-        assert result.status == "succeeded"
+        adapter.invoke.assert_not_awaited()
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "attempt registration unavailable" in decision.reason
 
     @pytest.mark.asyncio
     async def test_concurrency_limit_serializes_same_connection(self):
@@ -1166,6 +1174,60 @@ class TestInvocationAndReservation:
         recorder.mark_dispatched.assert_not_awaited()
         assert result.status == "failed"
         assert "budget reserve rejected: DB_UNAVAILABLE" in result.candidate_decisions[0].reason
+
+    @pytest.mark.asyncio
+    async def test_begin_attempt_registration_failure_fee_zero_egress_halts(self):
+        """必需登记失败（DD SQ-02/F27）：begin_attempt persisted=False → 费用型
+        零出站 + failed 终态（活跃预留 F23 背书收敛 settled）+ halt 候选遍历。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.begin_attempt = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_priced_conn(), _remote_conn("conn-b"))
+            ),
+            _validator_ok,
+        )
+        adapter.invoke.assert_not_awaited()
+        # 失败终态提交一次（活跃预留背书补记 + 转换 settled，不留悬挂占用）
+        recorder.submit_terminal.assert_awaited_once()
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "failed"
+        assert terminal.reservation_id is not None
+        # invocation 级事实：第二候选不再尝试（halt）
+        recorder.begin_attempt.assert_awaited_once()
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "attempt registration unavailable: DB_UNAVAILABLE" in decision.reason
+
+    @pytest.mark.asyncio
+    async def test_begin_attempt_registration_failure_usage_only_zero_egress(self):
+        """必需登记失败：usage_only 同样零出站——不得降级进程内继续执行；
+        NULL 金额预留已登记时经活跃预留 F23 背书补记失败终态收敛。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.begin_attempt = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_not_awaited()
+        # NULL 金额预留已登记 → 失败终态经活跃预留背书补记（F23）
+        recorder.submit_terminal.assert_awaited_once()
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "failed"
+        assert terminal.reservation_id is not None
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "attempt registration unavailable: DB_UNAVAILABLE" in decision.reason
 
     @pytest.mark.asyncio
     async def test_usage_only_degrades_when_reserve_unavailable(self):

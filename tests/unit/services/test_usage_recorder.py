@@ -297,7 +297,7 @@ class TestBeginAttempt:
     @pytest.mark.asyncio
     async def test_begin_attempt_inserts_attempt_row(self):
         dao = _dao_mock()
-        dao.insert_attempt = AsyncMock(return_value=None)
+        dao.insert_attempt = AsyncMock(return_value=True)
         recorder = UsageRecorder(dao_provider=lambda: dao)
         outcome = await recorder.begin_attempt(
             attempt_id="att-1",
@@ -309,8 +309,23 @@ class TestBeginAttempt:
         dao.insert_attempt.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_begin_attempt_owner_gate_rejected_surfaces_false(self):
+        """必需登记语义（DD SQ-02/F27）：owner 门拒绝（DAO False = 行未建立）如实
+        呈现 persisted=False + OWNER_LEASE_LOST——不硬编码成功掩盖登记失败。"""
+        dao = _dao_mock()
+        dao.insert_attempt = AsyncMock(return_value=False)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        outcome = await recorder.begin_attempt(
+            attempt_id="att-1",
+            invocation_id="inv-1",
+            configured_model="glm-4-air",
+        )
+        assert outcome == PersistenceOutcome(persisted=False, error_code="OWNER_LEASE_LOST")
+
+    @pytest.mark.asyncio
     async def test_begin_attempt_unavailable_degrades(self):
-        """attempt 行建立失败降级 persisted=False（执行已授权开始，不阻断）。"""
+        """必需登记语义：账本不可用 → persisted=False / DB_UNAVAILABLE，
+        调用方必须零出站（不得降级为进程内继续执行）。"""
         recorder = UsageRecorder(dao_provider=lambda: None)
         outcome = await recorder.begin_attempt(
             attempt_id="att-1",

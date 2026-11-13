@@ -377,23 +377,29 @@ class UsageRecorder:
         外部真实重试（新的实际调用）由调用方生成新 attempt 身份（F18），
         不共用。
         ``owner_session_id`` / ``owner_epoch`` 齐传启用 F23 owner 身份强门
-        （失权 owner 不得建立新的 attempt 事实）；失败降级 persisted=False
-        （执行已授权开始，落账尽力而为，不阻断推理）。
+        （失权 owner 不得建立新的 attempt 事实）。
+
+        必需登记语义（DD SQ-02 / F27「必需记录失败 0 出站」）：
+        ``persisted=True`` = 尝试行已建立（新建或幂等沿用，登记结果取 DAO
+        真实返回，不硬编码成功）；``persisted=False``（账本不可用 / 超时 /
+        owner 失权）= **不可登记**——调用方必须零出站并明确失败，不得降级
+        为进程内继续执行（出站无账本事实背书即违反必需登记契约）。
         """
 
         async def _run() -> bool:
             dao = self._dao_provider()
             if dao is None:
                 raise _DaoUnavailable()
-            await dao.insert_attempt(
-                attempt_id=attempt_id,
-                invocation_id=invocation_id,
-                configured_model=configured_model,
-                attempt_row=attempt_row,
-                owner_session_id=owner_session_id,
-                owner_epoch=owner_epoch,
+            return bool(
+                await dao.insert_attempt(
+                    attempt_id=attempt_id,
+                    invocation_id=invocation_id,
+                    configured_model=configured_model,
+                    attempt_row=attempt_row,
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                )
             )
-            return True
 
         return await self._guarded_outcome(_run, db_timeout_code=_DB_SETTLE_TIMEOUT)
 
