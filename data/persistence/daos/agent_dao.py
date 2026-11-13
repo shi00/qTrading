@@ -94,8 +94,15 @@ from core.agent_types import (
     SessionRead,
     SessionReadQuery,
     SessionSummary,
+    SourceClaimBinding,
+    SourceClaimFact,
+    SourceClaimRequest,
+    SourceConsumerRef,
+    SourceConsumersPage,
     SourceReadSummary,
     SourceRelationKind,
+    SourceStopCommand,
+    SourceStopReceipt,
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
@@ -177,6 +184,29 @@ WHERE s.slot_kind = 'leaf'
   AND x.user_scope = :user_scope
   AND x.execution_id IN (SELECT execution_id FROM down)
   AND (s.released_at IS NULL OR s.release_verified = false)
+"""
+
+
+#: 源禁用已知派生闭包标记：递归收集 consumer_kind='asset' 派生链（FK 保证已知
+#: 边完整），闭包内全部 source_link 标 disabled_inherited（§9.10；参数化，R4）。
+_SOURCE_DISABLE_CLOSURE_SQL: Final = """
+WITH RECURSIVE closure(source_id, source_version) AS (
+    SELECT CAST(:source_id AS text), CAST(:source_version AS text)
+    UNION
+    SELECT l.derived_asset_id, l.derived_asset_version
+    FROM agent_source_link l
+    JOIN closure c
+        ON l.user_scope = :user_scope
+        AND l.source_id = c.source_id
+        AND l.source_version = c.source_version
+    WHERE l.consumer_kind = 'asset'
+        AND l.derived_asset_id IS NOT NULL
+        AND l.derived_asset_version IS NOT NULL
+)
+UPDATE agent_source_link
+SET disabled_inherited = true
+WHERE user_scope = :user_scope
+    AND (source_id, source_version) IN (SELECT source_id, source_version FROM closure)
 """
 
 
@@ -4144,3 +4174,334 @@ class AgentDao(BaseDao):
                 tool_call_count=landed_calls,
                 active_ms=landed_ms,
             )
+
+    # ------------------------------------------------------------------
+    # C-04-3：源禁用/fence 与派发共同仲裁（§3.3.2/§5.4/§9.10）
+    # ------------------------------------------------------------------
+
+    async def stop_source_use(self, request: SourceStopCommand) -> SourceStopReceipt:
+        """停止使用来源事务（§3.3.2/§5.4/SQ-07）：source/version 行锁下落
+        disabled_revision/fence 与已知派生闭包，**单个显式事务**。
+
+        - 锁序：source/version 行锁（sorted 稳定 ID；不反向持源锁等待 execution 锁）；
+        - 禁用落定：``read_state='disabled'``、``disabled_at=now``、
+          ``disabled_revision=GREATEST(旧值, revision+1)``、行 revision 单调 +1
+          （零复活：阅读/复制/改名不解除禁用，无恢复路径）；
+        - 已知派生闭包：按 source/version 递归收集 consumer_kind='asset' 的派生
+          链（FK 保证已知边完整），闭包内全部 source_link ``disabled_inherited=true``
+          （禁用源及其已知派生；闭包未知不等于空关联——派发方按 claim 共同仲裁
+          新鲜重读阻断）；
+        - 幂等：已禁用重放返回原事实（already_disabled=True，零新事实）；
+        - 来源不存在 ``INPUT_INVALID``（严格读，不空成功）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/{request.source_id}@{request.source_version}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.source_id, "source_id", identity)
+        _require_text_field(request.source_version, "source_version", identity)
+        _require_text_field(request.command_id, "command_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. source/version 行锁（§5.4 来源仲裁锁序；禁用先胜零受影响新出站）。
+            asset_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.read_state,
+                        AgentAssetVersion.revision,
+                        AgentAssetVersion.disabled_revision,
+                        AgentAssetVersion.disabled_at,
+                    )
+                    .where(
+                        AgentAssetVersion.user_scope == request.user_scope,
+                        AgentAssetVersion.asset_id == request.source_id,
+                        AgentAssetVersion.asset_version == request.source_version,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if asset_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source version does not exist", identity)
+            if asset_row.disabled_revision > 0 or asset_row.read_state == "disabled":
+                return SourceStopReceipt(
+                    source_id=request.source_id,
+                    source_version=request.source_version,
+                    disabled_revision=asset_row.disabled_revision,
+                    already_disabled=True,
+                    disabled_at=_wire_time(asset_row.disabled_at)
+                    if asset_row.disabled_at is not None
+                    else _utc_now_wire(),
+                )
+            now = datetime.now(UTC)
+            new_revision = asset_row.revision + 1
+            disabled_revision = max(asset_row.disabled_revision, new_revision)
+            await conn.execute(
+                sa.update(AgentAssetVersion)
+                .where(
+                    AgentAssetVersion.user_scope == request.user_scope,
+                    AgentAssetVersion.asset_id == request.source_id,
+                    AgentAssetVersion.asset_version == request.source_version,
+                )
+                .values(
+                    read_state="disabled",
+                    disabled_at=now,
+                    disabled_revision=disabled_revision,
+                    revision=new_revision,
+                    updated_at=now,
+                )
+            )
+            # 2. 已知派生闭包：递归收集 consumer_kind='asset' 派生链后整体标记
+            #    disabled_inherited（§9.10「禁用源及其已知派生闭包时，按
+            #    source/version 排序核边」；参数化 SQL，R4）。
+            await conn.execute(
+                sa.text(_SOURCE_DISABLE_CLOSURE_SQL).bindparams(
+                    user_scope=request.user_scope,
+                    source_id=request.source_id,
+                    source_version=request.source_version,
+                )
+            )
+            return SourceStopReceipt(
+                source_id=request.source_id,
+                source_version=request.source_version,
+                disabled_revision=disabled_revision,
+                already_disabled=False,
+                disabled_at=_wire_time(now),
+            )
+
+    async def claim_source_versions(self, request: SourceClaimRequest) -> SourceClaimFact:
+        """源派发认领事务（§5.4 共同仲裁）：按稳定 ID 排序锁全部 source/version
+        并新鲜重读禁用状态，保存绑定 revision 的原 operation 认领，**单个显式事务**。
+
+        - 锁序：source/version（sorted）→ operation（§5.4「来源仲裁事务按稳定 ID
+          排序锁完整来源版本及派生闭包，再核引用边/正文与原 operation」）；
+        - 新鲜重读（预检查/旧快照不是派发权）：任一 source 行已禁用，或作为已知
+          派生闭包成员被 ``disabled_inherited`` 覆盖 → ``SOURCE_DISABLED``
+          （禁用先胜零受影响新出站）；
+        - 认领持久化：operation.data_consent_claims 追加 ``kind=source_revision``
+          条目绑定各源 disabled_revision（claim 先胜保原 operation 认领与在途）；
+        - 幂等：同 claim_ref 同输入返回原事实（replayed=True，claim 已生效不被
+          后续禁用改写）；同 claim_ref 异输入 ``INPUT_CONFLICT``；
+        - 重复 claim 只返回原事实，不生成第二操作。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / SOURCE_DISABLED。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/{request.claim_ref}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.claim_ref, "claim_ref", identity)
+        _require_text_field(request.operation_id, "operation_id", identity)
+        if not request.sources:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "sources must not be empty", identity)
+        for index, source in enumerate(request.sources):
+            _require_text_field(source.source_id, f"sources[{index}].source_id", identity)
+            _require_text_field(source.source_version, f"sources[{index}].source_version", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        # 锁序：稳定 ID 排序（source_id, source_version）后逐一持锁。
+        ordered = sorted(request.sources, key=lambda s: (s.source_id, s.source_version))
+        async with engine.begin() as conn:
+            bindings: list[SourceClaimBinding] = []
+            disabled_hits: list[str] = []
+            for source in ordered:
+                asset_row = (
+                    await conn.execute(
+                        sa.select(
+                            AgentAssetVersion.disabled_revision,
+                            AgentAssetVersion.read_state,
+                        )
+                        .where(
+                            AgentAssetVersion.user_scope == request.user_scope,
+                            AgentAssetVersion.asset_id == source.source_id,
+                            AgentAssetVersion.asset_version == source.source_version,
+                        )
+                        .with_for_update()
+                    )
+                ).first()
+                if asset_row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "source version does not exist",
+                        f"{identity}/{source.source_id}@{source.source_version}",
+                    )
+                inherited = (
+                    await conn.execute(
+                        sa.select(sa.func.count())
+                        .select_from(AgentSourceLink)
+                        .where(
+                            AgentSourceLink.user_scope == request.user_scope,
+                            AgentSourceLink.derived_asset_id == source.source_id,
+                            AgentSourceLink.derived_asset_version == source.source_version,
+                            AgentSourceLink.disabled_inherited.is_(True),
+                        )
+                    )
+                ).scalar_one()
+                if asset_row.disabled_revision > 0 or asset_row.read_state == "disabled" or inherited > 0:
+                    disabled_hits.append(f"{source.source_id}@{source.source_version}")
+                    continue
+                bindings.append(
+                    SourceClaimBinding(
+                        source_id=source.source_id,
+                        source_version=source.source_version,
+                        disabled_revision=asset_row.disabled_revision,
+                    )
+                )
+            # 2. operation 行锁（认领持久化目标；缺失=先备后派发契约被违反）。
+            operation_row = (
+                await conn.execute(
+                    sa.select(AgentOperation.data_consent_claims)
+                    .where(
+                        AgentOperation.user_scope == request.user_scope,
+                        AgentOperation.operation_id == request.operation_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if operation_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "operation does not exist; prepare before dispatch", identity
+                )
+            # 3. 幂等重放先于禁用判定（§5.4：claim 先提交则保该原 operation 认领，
+            #    重放不被后续禁用改写；比对按源身份集合，锚定 revision 取保存原值）。
+            existing_claims: list[dict] = list(operation_row.data_consent_claims or [])
+            requested_identity = {(s.source_id, s.source_version) for s in request.sources}
+            for existing in existing_claims:
+                if not isinstance(existing, dict):
+                    continue
+                if existing.get("claim_ref") != request.claim_ref:
+                    continue
+                saved_sources = existing.get("sources")
+                # 已保存认领条目结构异常 fail-closed：按冲突处理，不重算第二份认领。
+                if not isinstance(saved_sources, list):
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "saved claim entry malformed",
+                        identity,
+                    )
+                saved_identity = {(s["source_id"], s["source_version"]) for s in saved_sources if isinstance(s, dict)}
+                if saved_identity == requested_identity:
+                    saved_bindings = tuple(
+                        SourceClaimBinding(
+                            source_id=s["source_id"],
+                            source_version=s["source_version"],
+                            disabled_revision=int(s["disabled_revision"]),
+                        )
+                        for s in saved_sources
+                        if isinstance(s, dict)
+                    )
+                    return SourceClaimFact(claim_ref=request.claim_ref, bindings=saved_bindings, replayed=True)
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "same claim_ref with different source binding",
+                    identity,
+                )
+            if disabled_hits:
+                raise AgentServiceError(
+                    AgentErrorCode.SOURCE_DISABLED,
+                    "disabled source in fresh re-read: " + ",".join(sorted(disabled_hits)),
+                    identity,
+                )
+            # 4. 追加认领（行锁下无丢失更新；operation revision 单调 +1）。
+            claim_entry = {
+                "kind": "source_revision",
+                "claim_ref": request.claim_ref,
+                "operation_id": request.operation_id,
+                "sources": [
+                    {
+                        "source_id": b.source_id,
+                        "source_version": b.source_version,
+                        "disabled_revision": b.disabled_revision,
+                    }
+                    for b in bindings
+                ],
+            }
+            existing_claims.append(claim_entry)
+            await conn.execute(
+                sa.update(AgentOperation)
+                .where(
+                    AgentOperation.user_scope == request.user_scope,
+                    AgentOperation.operation_id == request.operation_id,
+                )
+                .values(
+                    data_consent_claims=existing_claims,
+                    revision=AgentOperation.revision + 1,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            return SourceClaimFact(claim_ref=request.claim_ref, bindings=tuple(bindings), replayed=False)
+
+    async def list_source_consumers(
+        self, *, user_scope: str, source_id: str, source_version: str
+    ) -> SourceConsumersPage:
+        """来源消费者谱系列举（§9.10/§9.13）：已知边全量返回（FK 保证边表即已知
+        闭包），只读不派发；「unknown 受影响阻断」由派发方按关联不明处理。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（来源不存在；严格读不空成功）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{source_id}@{source_version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(source_id, "source_id", identity)
+        _require_text_field(source_version, "source_version", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            exists = (
+                await conn.execute(
+                    sa.select(sa.func.count())
+                    .select_from(AgentAssetVersion)
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == source_id,
+                        AgentAssetVersion.asset_version == source_version,
+                    )
+                )
+            ).scalar_one()
+            if exists == 0:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source version does not exist", identity)
+            link_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentSourceLink.link_id,
+                        AgentSourceLink.source_id,
+                        AgentSourceLink.source_version,
+                        AgentSourceLink.consumer_kind,
+                        AgentSourceLink.consumer_id,
+                        AgentSourceLink.consumer_version,
+                        AgentSourceLink.relation_kind,
+                        AgentSourceLink.disabled_inherited,
+                    )
+                    .where(
+                        AgentSourceLink.user_scope == user_scope,
+                        AgentSourceLink.source_id == source_id,
+                        AgentSourceLink.source_version == source_version,
+                    )
+                    .order_by(AgentSourceLink.link_id)
+                )
+            ).all()
+        consumers = tuple(
+            SourceConsumerRef(
+                link_id=row.link_id,
+                source_id=row.source_id,
+                source_version=row.source_version,
+                consumer_kind=row.consumer_kind,
+                consumer_id=row.consumer_id,
+                consumer_version=row.consumer_version,
+                relation_kind=row.relation_kind,
+                disabled_inherited=row.disabled_inherited,
+            )
+            for row in link_rows
+        )
+        return SourceConsumersPage(
+            source_id=source_id,
+            source_version=source_version,
+            consumers=consumers,
+            read_moment=_utc_now_wire(),
+        )
