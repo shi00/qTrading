@@ -61,6 +61,7 @@ from core.agent_types import (
     CleanupJobRecord,
     CleanupPhase,
     decode_cleanup_identity_set,
+    encode_command_ref,
     encode_cleanup_identity_set,
     normalize_cleanup_asset_keys,
     DataAttemptAuthorization,
@@ -650,6 +651,80 @@ class AgentDao(BaseDao):
     # ------------------------------------------------------------------
     # C-02-3：首派发绑定 / 答复生命周期 / 精确许可 CAS / 队列修订
     # ------------------------------------------------------------------
+
+    async def read_command(self, ref: CommandRef, *, user_scope: str) -> CommandReceipt:
+        """查命令原事实（§4.2 ``read_command``）：只读保存/投递/消费，不生成新决定。
+
+        语义（§4.1/§5.1/INV-06）：
+
+        - ``ref.user_scope`` 必须等于调用上下文 ``user_scope``——不因知道命令键而
+          放行其他用户域（§4.1「由注入的可信调用上下文提供，不能相信 payload」）；
+        - 用户域内按调用方命令键查：0 行 → ``INPUT_INVALID``（不区分「不存在」与
+          「属于他人」）；同一键跨 target 复用产生多行 → ``INPUT_INVALID``（引用有
+          歧义，不静默择一）；
+        - 存储状态/错误码不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
+          R21：坏事实不得被读成确定的保存/投递/消费）；
+        - ``next_action`` 为 None：本方法只回报已存事实，下一步由调用方按命令类型
+          决定（不在读取面发明动作）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{ref.command_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
+        if ref.user_scope != user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref outside caller user scope", identity)
+        try:
+            encode_command_ref(ref)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.target_id,
+                        AgentCommand.revision,
+                        AgentCommand.commit_state,
+                        AgentCommand.delivery_state,
+                        AgentCommand.consumption_state,
+                        AgentCommand.updated_at,
+                        AgentCommand.error_code,
+                    ).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.client_command_id == ref.command_id,
+                    )
+                )
+            ).all()
+        if not rows:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command not found in user scope", identity)
+        if len(rows) > 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref is ambiguous across targets", identity)
+        row = rows[0]
+        try:
+            commit_state = CommitState(row.commit_state)
+            delivery_state = DeliveryState(row.delivery_state)
+            consumption_state = ConsumptionState(row.consumption_state)
+            error_code = AgentErrorCode(row.error_code) if row.error_code is not None else None
+        except ValueError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"unreadable command state: {type(exc).__name__}",
+                identity,
+            ) from exc
+        return CommandReceipt(
+            command=ref,
+            target_id=row.target_id,
+            current_revision=row.revision,
+            commit_state=commit_state,
+            delivery_state=delivery_state,
+            consumption_state=consumption_state,
+            updated_at=_wire_time(row.updated_at),
+            error_code=error_code,
+            next_action=None,
+        )
 
     async def bind_actual_input(self, request: BindActualInputRequest) -> BindActualInputReceipt:
         """首派发实际输入绑定（§9.13/SQ-02 W 首步）：建 agent_round +
