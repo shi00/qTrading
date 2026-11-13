@@ -11,6 +11,7 @@ from typing import Any, cast
 import pytest
 
 from core.agent_types import (
+    AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
     CommandReceipt,
@@ -20,9 +21,13 @@ from core.agent_types import (
     DeliveryState,
     EventPage,
     EventReadQuery,
+    Mode,
+    Purpose,
     ResearchSnapshot,
     SessionRead,
     SessionReadQuery,
+    SubmissionReceipt,
+    json_doc,
 )
 from data.persistence.daos.agent_dao import AgentDao
 from services.agent_service.service import AgentService
@@ -47,6 +52,38 @@ _RECEIPT = CommandReceipt(
     next_action=None,
 )
 
+_SUBMISSION_RECEIPT = SubmissionReceipt(
+    command=_REF,
+    command_record_id="cmd-1",
+    session_id="s1",
+    execution_id="execution-1",
+    workflow_id="wf-1",
+    intent_digest="a" * 64,
+    commit_state=CommitState.COMMITTED,
+    verified_at="2026-11-14T00:00:00.000000Z",
+    next_action="await workflow dispatch; query read_command for delivery facts",
+)
+
+
+def _request(**overrides: Any) -> AcceptRequest:
+    values: dict[str, Any] = {
+        "user_scope": "u1",
+        "session_id": "s1",
+        "source_module": "ui",
+        "business_request_id": "req-1",
+        "client_command_id": "client-1",
+        "expected_revision": 0,
+        "node_id": "root",
+        "workflow_id": "wf-1",
+        "mode": Mode.DISCUSS,
+        "purpose": Purpose.CONCEPT,
+        "text": "研究三家公司",
+        "manifest_payload": json_doc({"schema_version": 1, "text": "研究三家公司"}),
+        "source_display_name": "用户消息",
+    }
+    values.update(overrides)
+    return AcceptRequest(**values)
+
 
 class _FakeDao:
     def __init__(self) -> None:
@@ -56,6 +93,13 @@ class _FakeDao:
         self.snapshot = object()
         self.events = object()
         self.observed = object()
+        self.receipt = _SUBMISSION_RECEIPT
+
+    async def accept_request(self, request: AcceptRequest) -> SubmissionReceipt:
+        self.calls.append(("accept_request", (request,), {}))
+        if self.error is not None:
+            raise self.error
+        return self.receipt
 
     async def read_command(self, ref: CommandRef, *, user_scope: str) -> CommandReceipt:
         self.calls.append(("read_command", (ref,), {"user_scope": user_scope}))
@@ -130,6 +174,64 @@ class TestReadDelegation:
         iterator = _service(fake).observe_session("s1", user_scope="u1", after_seq=7)
         assert iterator is fake.observed
         assert fake.calls[0][2] == {"user_scope": "u1", "after_seq": 7, "poll_interval_s": 0.25}
+
+
+class TestSubmitAuthority:
+    """受理入口：可信命令引用与受理输入必须逐字段一致（INV-01）。"""
+
+    @pytest.mark.asyncio
+    async def test_matching_ref_delegates_and_returns_receipt(self) -> None:
+        fake = _FakeDao()
+        receipt = await _service(fake).submit(_request(), command=_REF)
+        assert receipt is _SUBMISSION_RECEIPT
+        assert [call[0] for call in fake.calls] == ["accept_request"]
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("user_scope", "u2"),
+            ("source_module", "api"),
+            ("business_request_id", "req-2"),
+            ("command_id", "client-2"),
+            ("expected_revision", 3),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_ref_mismatch_rejected_before_dao(self, field: str, value: Any) -> None:
+        fake = _FakeDao()
+        values = {
+            "user_scope": "u1",
+            "source_module": "ui",
+            "business_request_id": "req-1",
+            "command_id": "client-1",
+            "expected_revision": 0,
+        }
+        values[field] = value
+        command = CommandRef(**values)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).submit(_request(), command=command)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert field in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_request_rejected_as_input_invalid(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).submit(_request(text=""), command=_REF)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.text" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_submit_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.submit(_request(), command=_REF)
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
 
 
 class TestClosedService:

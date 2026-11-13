@@ -21,8 +21,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from core.agent_types import (
+    AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
+    AgentValidationError,
     CommandReceipt,
     CommandRef,
     EventPage,
@@ -31,6 +33,8 @@ from core.agent_types import (
     ResearchSnapshot,
     SessionRead,
     SessionReadQuery,
+    SubmissionReceipt,
+    derive_accept_identity,
 )
 from data.persistence.daos.agent_dao import AgentDao
 
@@ -103,6 +107,49 @@ class AgentService:
             after_seq=after_seq,
             poll_interval_s=poll_interval_s,
         )
+
+    # ------------------------------------------------------------------
+    # 写入面（受理）
+    # ------------------------------------------------------------------
+
+    async def submit(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionReceipt:
+        """受理入口（§4.1/§5.1/INV-01）：可信命令引用必须与受理输入逐字段一致。
+
+        本方法只提交**受理事务**并返回原回执：``commit_state`` 描述保存事实，
+        不代表已投递或已消费（INV-06）。原生 root workflow 派发由 Runtime 按回执
+        的 ``workflow_id``/``execution_id`` 执行（launcher 依赖 E-04 计划），回执
+        ``next_action`` 已给出「待派发后按 read_command 查投递事实」的下一步。
+
+        拒绝语义：命令引用与受理输入任一字段不一致 → ``INPUT_INVALID``（不以
+        调用方声称的幂等键覆盖真实身份）；受理输入本身不合法 → 由
+        ``derive_accept_identity`` 的校验转为 ``INPUT_INVALID``（类型错不吞）。
+        """
+
+        self._require_open("submit")
+        identity = f"{request.user_scope}/{request.session_id}"
+        try:
+            # 只借校验与稳定身份派生（§3.3.2）；持久 PK 仍由 DAO 事务内再派生一次。
+            derive_accept_identity(request)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        mismatches = [
+            name
+            for name, ref_value, request_value in (
+                ("user_scope", command.user_scope, request.user_scope),
+                ("source_module", command.source_module, request.source_module),
+                ("business_request_id", command.business_request_id, request.business_request_id),
+                ("command_id", command.command_id, request.client_command_id),
+                ("expected_revision", command.expected_revision, request.expected_revision),
+            )
+            if ref_value != request_value
+        ]
+        if mismatches:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"command ref does not match request: {','.join(mismatches)}",
+                identity,
+            )
+        return await self._dao.accept_request(request)
 
     # ------------------------------------------------------------------
     # 生命周期
