@@ -34,6 +34,7 @@ from typing import Any, Final
 from collections.abc import AsyncIterator
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql as sa_pg
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -82,6 +83,11 @@ from core.agent_types import (
     RecordEventRequest,
     ResearchEvent,
     ResearchSnapshot,
+    ResourceClaimRequest,
+    ResourceReleaseReceipt,
+    ResourceReleaseRequest,
+    ResourceSlotKind,
+    ResourceTicket,
     ReviseQueuedRequest,
     RevisionReceipt,
     SaveAnswerRequest,
@@ -93,6 +99,8 @@ from core.agent_types import (
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
+    UsageCounterFact,
+    UsageCounterUpdate,
     UsageSummary,
     decode_artifact_page_item,
     decode_data_consent_binding,
@@ -126,12 +134,58 @@ from core.agent_types import (
     stable_id,
     validate_data_attempt_authorization,
     validate_data_consent_claim,
+    validate_resource_claim_request,
     validate_session_read_query,
 )
 from data.persistence.daos.base_dao import BaseDao
 
 #: observe 监听通道（§9.13「独立 LISTEN ≤1」；pg_notify payload ≤8000B）。
 _AGENT_EVENT_CHANNEL: Final = "agent_events"
+
+#: 资源全局仲裁单例行 slot_id（§5.4 锁序第 1 条「全局资源 guard」；C-04 裁决：
+#: user_scope='' 哨兵行，claim 事务内 ON CONFLICT DO NOTHING 幂等预置）。
+_RESOURCE_GUARD_SLOT_ID: Final = "global_guard"
+
+#: 每总（同 root 树）活跃叶子计数：先向上递归定 root，再向下收集整树开放叶子。
+#: 开放谓词 = released_at IS NULL OR release_verified=false（unknown 在途不放空）。
+#: 参数化文本 SQL（R4：绑定参数，无拼接）。
+_RESOURCE_TREE_OPEN_LEAF_SQL: Final = """
+WITH RECURSIVE up(execution_id, parent_execution_id) AS (
+    SELECT e.execution_id, e.parent_execution_id
+    FROM agent_execution e
+    WHERE e.user_scope = :user_scope AND e.execution_id = :execution_id
+    UNION ALL
+    SELECT e.execution_id, e.parent_execution_id
+    FROM agent_execution e
+    JOIN up u ON e.user_scope = :user_scope AND e.execution_id = u.parent_execution_id
+),
+root AS (
+    SELECT execution_id FROM up WHERE parent_execution_id IS NULL LIMIT 1
+),
+down(execution_id) AS (
+    SELECT execution_id FROM root
+    UNION ALL
+    SELECT e.execution_id
+    FROM agent_execution e
+    JOIN down d ON e.user_scope = :user_scope AND e.parent_execution_id = d.execution_id
+)
+SELECT count(*)
+FROM agent_resource_slot s
+JOIN agent_execution x
+    ON x.user_scope = s.user_scope AND x.execution_id = s.execution_id
+WHERE s.slot_kind = 'leaf'
+  AND x.user_scope = :user_scope
+  AND x.execution_id IN (SELECT execution_id FROM down)
+  AND (s.released_at IS NULL OR s.release_verified = false)
+"""
+
+
+def _budget_blocked(identity: str, reason: str) -> AgentServiceError:
+    """资源限额拒绝（§5.5：说明具体受阻原因，不伪失败、不暗放宽）。"""
+
+    return AgentServiceError(AgentErrorCode.BUDGET_BLOCKED, reason, identity)
+
+
 from data.persistence.models import (
     AgentArtifact,
     AgentAssetVersion,
@@ -141,6 +195,7 @@ from data.persistence.models import (
     AgentMessage,
     AgentOperation,
     AgentReadMark,
+    AgentResourceSlot,
     AgentRound,
     AgentSession,
     AgentSourceLink,
@@ -3696,3 +3751,396 @@ class AgentDao(BaseDao):
             with contextlib.suppress(Exception):
                 await listen_conn.remove_listener(_AGENT_EVENT_CHANNEL, _on_notify)
             await listen_conn.close()
+
+    # ------------------------------------------------------------------
+    # C-04-2：资源票据与执行累计计数（§5.4 锁序第 1 条/§5.5/§9.11）
+    # ------------------------------------------------------------------
+
+    async def claim_resource(self, request: ResourceClaimRequest) -> ResourceTicket:
+        """资源票据认领事务（§5.4 锁序第 1 条/§5.5/§9.11）：global guard 行锁
+        下做最严限额核定并落准确票据，**单个显式事务**。
+
+        - 全局仲裁：预置单例 guard 行（user_scope=''、slot_kind=global_guard、
+          execution_id NULL）后 ``FOR UPDATE``，所有认领串行化（不靠数量缓存准入）；
+        - 最严限额（开放容量谓词 = ``released_at IS NULL OR release_verified=false``，
+          unknown 在途不放空）：**事务内检查每会话 1 总占位与每总（同 root 树）
+          3 活跃叶子**（§9.11「事务同时检查每会话1/每总3，不靠数量缓存准入」）；
+          全局 2 总/4 叶为预分配预算（运行宿主准入承载，D-01/C-05），每计划
+          20 叶为计划级验证（D-02 原生 DAG），均不在本票据事务重复检查；
+          超限 ``BUDGET_BLOCKED``（不伪失败）；
+        - 幂等重放：同 slot_id 同输入（kind/execution/node/round/owner_epoch）且
+          票据未确认释放 → 返回原票据零新事实；异输入 ``INPUT_CONFLICT``；
+          已确认释放（release_verified=true）的 slot_id 不得复用（零复活）；
+        - fence：目标 execution ``deletion_fenced`` → ``POLICY_DENIED``（引用 vs
+          清理单胜者，fence 后拒绝新引用）；
+        - kind 与执行类别核验：total 限 root/comparison_lane，leaf 限 leaf；
+          execution 缺失 ``INPUT_INVALID``。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / POLICY_DENIED /
+                BUDGET_BLOCKED。
+        """
+
+        self._check_engine()
+        validate_resource_claim_request(request)
+        identity = f"{request.user_scope}/{request.slot_id}"
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. 全局 guard：预置单例行并行锁（§5.4 第 1 条；ON CONFLICT DO
+            #    NOTHING 幂等预置，无目标子句对任意冲突生效；PG 方言 insert）。
+            guard_insert = sa_pg.insert(AgentResourceSlot).values(
+                user_scope="",
+                slot_id=_RESOURCE_GUARD_SLOT_ID,
+                slot_kind=ResourceSlotKind.GLOBAL_GUARD.value,
+                owner_epoch=0,
+                run_epoch=0,
+            )
+            await conn.execute(guard_insert.on_conflict_do_nothing())
+            guard_row = (
+                await conn.execute(
+                    sa.select(AgentResourceSlot.slot_id)
+                    .where(AgentResourceSlot.slot_id == _RESOURCE_GUARD_SLOT_ID)
+                    .with_for_update()
+                )
+            ).first()
+            if guard_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                    "global resource guard row unavailable",
+                    identity,
+                )
+
+            # 2. 目标 execution 行锁 + 严格读取（锁序：guard → execution/节点/票据）。
+            execution_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.execution_kind,
+                        AgentExecution.session_id,
+                        AgentExecution.parent_execution_id,
+                        AgentExecution.deletion_fenced,
+                    )
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if execution_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "target execution does not exist in user scope",
+                    identity,
+                )
+            if execution_row.deletion_fenced:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "target execution is deletion fenced; new references rejected",
+                    identity,
+                )
+            if request.slot_kind is ResourceSlotKind.TOTAL:
+                if execution_row.execution_kind not in ("root", "comparison_lane"):
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "total slot requires root or comparison_lane execution",
+                        identity,
+                    )
+            else:
+                if execution_row.execution_kind != "leaf":
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "leaf slot requires leaf execution",
+                        identity,
+                    )
+
+            # 3. 幂等重放/复用拒绝（同 slot_id 异输入冲突；已确认释放不复用）。
+            slot_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentResourceSlot.slot_kind,
+                        AgentResourceSlot.execution_id,
+                        AgentResourceSlot.node_id,
+                        AgentResourceSlot.round_id,
+                        AgentResourceSlot.owner_epoch,
+                        AgentResourceSlot.run_epoch,
+                        AgentResourceSlot.claimed_at,
+                        AgentResourceSlot.released_at,
+                        AgentResourceSlot.release_verified,
+                    )
+                    .where(
+                        AgentResourceSlot.user_scope == request.user_scope,
+                        AgentResourceSlot.slot_id == request.slot_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if slot_row is not None:
+                same_input = (
+                    slot_row.slot_kind == request.slot_kind.value
+                    and slot_row.execution_id == request.execution_id
+                    and slot_row.node_id == request.node_id
+                    and slot_row.round_id == request.round_id
+                    and slot_row.owner_epoch == request.owner_epoch
+                )
+                if not same_input:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "same slot_id with different ticket identity",
+                        identity,
+                    )
+                if slot_row.release_verified:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "slot_id already released and cannot be reused",
+                        identity,
+                    )
+                return ResourceTicket(
+                    slot_id=request.slot_id,
+                    slot_kind=request.slot_kind,
+                    execution_id=request.execution_id,
+                    node_id=request.node_id,
+                    round_id=request.round_id,
+                    owner_epoch=request.owner_epoch,
+                    run_epoch=slot_row.run_epoch,
+                    claimed_at=_wire_time(slot_row.claimed_at),
+                )
+
+            # 4. 最严限额核定（开放容量谓词：unknown 在途不放空；§9.11 事务内
+            #    只查每会话 1 总/每总 3 叶，全局与每计划预算由运行宿主/计划验证承载）。
+            open_predicate = sa.or_(
+                AgentResourceSlot.released_at.is_(None),
+                AgentResourceSlot.release_verified.is_(False),
+            )
+            if request.slot_kind is ResourceSlotKind.TOTAL:
+                # 每会话 1 总占位。
+                session_open_total = (
+                    await conn.execute(
+                        sa.select(sa.func.count())
+                        .select_from(AgentResourceSlot)
+                        .join(
+                            AgentExecution,
+                            sa.and_(
+                                AgentExecution.user_scope == AgentResourceSlot.user_scope,
+                                AgentExecution.execution_id == AgentResourceSlot.execution_id,
+                            ),
+                        )
+                        .where(
+                            AgentResourceSlot.slot_kind == ResourceSlotKind.TOTAL.value,
+                            AgentResourceSlot.user_scope == request.user_scope,
+                            AgentExecution.session_id == execution_row.session_id,
+                            open_predicate,
+                        )
+                    )
+                ).scalar_one()
+                if session_open_total >= 1:
+                    raise _budget_blocked(identity, "session total slot limit (1) reached")
+            else:
+                # 每总（同 root 树）3 实际活跃叶子（递归 CTE 定 root 后计整树）。
+                tree_open_leaf = (
+                    await conn.execute(
+                        sa.text(_RESOURCE_TREE_OPEN_LEAF_SQL).bindparams(
+                            user_scope=request.user_scope,
+                            execution_id=request.execution_id,
+                        )
+                    )
+                ).scalar_one()
+                if tree_open_leaf >= 3:
+                    raise _budget_blocked(identity, "per-root leaf slot limit (3) reached")
+
+            # 5. 落票据（guard 行锁下无竞争；owner_epoch 为调用方运行身份）。
+            now = datetime.now(UTC)
+            await conn.execute(
+                sa.insert(AgentResourceSlot).values(
+                    user_scope=request.user_scope,
+                    slot_id=request.slot_id,
+                    slot_kind=request.slot_kind.value,
+                    execution_id=request.execution_id,
+                    node_id=request.node_id,
+                    round_id=request.round_id,
+                    owner_epoch=request.owner_epoch,
+                    run_epoch=0,
+                    claimed_at=now,
+                    release_verified=False,
+                    operation_refs=request.operation_refs,
+                )
+            )
+            return ResourceTicket(
+                slot_id=request.slot_id,
+                slot_kind=request.slot_kind,
+                execution_id=request.execution_id,
+                node_id=request.node_id,
+                round_id=request.round_id,
+                owner_epoch=request.owner_epoch,
+                run_epoch=0,
+                claimed_at=_wire_time(now),
+            )
+
+    async def release_resource(self, request: ResourceReleaseRequest) -> ResourceReleaseReceipt:
+        """资源票据释放事务（§5.5：释放必须完整匹配，不用 TTL/租约/旧 owner）。
+
+        - 完整匹配：slot_kind≠guard、execution_id/node_id/owner_epoch 逐项相等，
+          任一不匹配 ``INPUT_CONFLICT``（旧票不释新票）；
+        - ``exit_verified=True``：真实退出确认，``release_verified=true`` 落定、
+          容量释放；``exit_verified=False``：退出尾段未知，记录 released_at 但
+          ``release_verified`` 保持 false、容量不放空（unknown 在途不放空），
+          须实际全退或用户保未知结案后以 verified 再确认；
+        - 幂等：已确认释放重放返回原回执零新事实；reserved（未确认）重放返回
+          released=False 回执；verified 升级（reserved→confirmed）为合法收尾。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/{request.slot_id}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.slot_id, "slot_id", identity)
+        _require_text_field(request.execution_id, "execution_id", identity)
+        _require_text_field(request.node_id, "node_id", identity)
+        _require_int_field(request.owner_epoch, "owner_epoch", identity, 1)
+        if not isinstance(request.exit_verified, bool):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "exit_verified must be bool", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            slot_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentResourceSlot.slot_kind,
+                        AgentResourceSlot.execution_id,
+                        AgentResourceSlot.node_id,
+                        AgentResourceSlot.owner_epoch,
+                        AgentResourceSlot.released_at,
+                        AgentResourceSlot.release_verified,
+                    )
+                    .where(
+                        AgentResourceSlot.user_scope == request.user_scope,
+                        AgentResourceSlot.slot_id == request.slot_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if slot_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "slot does not exist", identity)
+            if slot_row.slot_kind == ResourceSlotKind.GLOBAL_GUARD.value:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "guard row is not releasable", identity)
+            if (
+                slot_row.execution_id != request.execution_id
+                or slot_row.node_id != request.node_id
+                or slot_row.owner_epoch != request.owner_epoch
+            ):
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "release identity mismatch: tickets must be fully matched",
+                    identity,
+                )
+            if slot_row.release_verified:
+                return ResourceReleaseReceipt(
+                    slot_id=request.slot_id,
+                    released=True,
+                    release_verified=True,
+                    released_at=_wire_time(slot_row.released_at) if slot_row.released_at is not None else None,
+                    owner_epoch=request.owner_epoch,
+                )
+            now = datetime.now(UTC)
+            released_at = slot_row.released_at if slot_row.released_at is not None else now
+            await conn.execute(
+                sa.update(AgentResourceSlot)
+                .where(
+                    AgentResourceSlot.user_scope == request.user_scope,
+                    AgentResourceSlot.slot_id == request.slot_id,
+                )
+                .values(
+                    released_at=released_at,
+                    release_verified=request.exit_verified,
+                    revision=AgentResourceSlot.revision + 1,
+                    updated_at=now,
+                )
+            )
+            return ResourceReleaseReceipt(
+                slot_id=request.slot_id,
+                released=request.exit_verified,
+                release_verified=request.exit_verified,
+                released_at=_wire_time(released_at),
+                owner_epoch=request.owner_epoch,
+            )
+
+    async def record_usage_counters(self, request: UsageCounterUpdate) -> UsageCounterFact:
+        """执行累计计数 GREATEST 合并事务（§5.5/§9.4：持久累计跨轮/SDK run 不清零）。
+
+        三计数均为**绝对累计值**按列 GREATEST 合并（R22：乱序写入最终取最大值，
+        重复 checkpoint 幂等不双记）；``active_ms`` 为已核可靠下界，未关闭区间
+        尾段未知不记 0、不伪完整用时。全列无变化时零写回（revision 不动）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（execution 缺失或负计数）。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/{request.execution_id}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.execution_id, "execution_id", identity)
+        for name, value in (
+            ("model_attempt_count", request.model_attempt_count),
+            ("tool_call_count", request.tool_call_count),
+            ("active_ms", request.active_ms),
+        ):
+            _require_int_field(value, name, identity, 0)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            counter_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.model_attempt_count,
+                        AgentExecution.tool_call_count,
+                        AgentExecution.active_ms,
+                    )
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if counter_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "target execution does not exist in user scope",
+                    identity,
+                )
+            landed_attempts = max(counter_row.model_attempt_count, request.model_attempt_count)
+            landed_calls = max(counter_row.tool_call_count, request.tool_call_count)
+            landed_ms = max(counter_row.active_ms, request.active_ms)
+            if (
+                landed_attempts == counter_row.model_attempt_count
+                and landed_calls == counter_row.tool_call_count
+                and landed_ms == counter_row.active_ms
+            ):
+                return UsageCounterFact(
+                    execution_id=request.execution_id,
+                    model_attempt_count=landed_attempts,
+                    tool_call_count=landed_calls,
+                    active_ms=landed_ms,
+                )
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(
+                    AgentExecution.user_scope == request.user_scope,
+                    AgentExecution.execution_id == request.execution_id,
+                )
+                .values(
+                    model_attempt_count=landed_attempts,
+                    tool_call_count=landed_calls,
+                    active_ms=landed_ms,
+                    revision=AgentExecution.revision + 1,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            return UsageCounterFact(
+                execution_id=request.execution_id,
+                model_attempt_count=landed_attempts,
+                tool_call_count=landed_calls,
+                active_ms=landed_ms,
+            )
