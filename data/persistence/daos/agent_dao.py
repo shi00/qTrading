@@ -61,6 +61,7 @@ from core.agent_types import (
     DataConsentCommand,
     DataConsentRevokeCommand,
     DataConsentState,
+    DecisionBatchFact,
     DecisionSummary,
     DeliveryFact,
     DeliveryState,
@@ -79,7 +80,9 @@ from core.agent_types import (
     MessagePageItem,
     Observation,
     OperationSummary,
+    ReadMarkCommand,
     ReadMarkEntry,
+    ReadMarkReceipt,
     RecordEventRequest,
     ResearchEvent,
     ResearchSnapshot,
@@ -141,6 +144,7 @@ from core.agent_types import (
     stable_id,
     validate_data_attempt_authorization,
     validate_data_consent_claim,
+    validate_read_mark_command,
     validate_resource_claim_request,
     validate_session_read_query,
 )
@@ -4505,3 +4509,225 @@ class AgentDao(BaseDao):
             consumers=consumers,
             read_moment=_utc_now_wire(),
         )
+
+    # ------------------------------------------------------------------
+    # C-04-4：阅读水位与决策批次（§4.2 L436/§9.11/AC33/RR04）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_mark_id(user_scope: str, marker_kind: str, target_id: str) -> str:
+        return stable_id("read_mark", [user_scope, marker_kind, target_id])
+
+    async def save_read_mark_max(self, command: ReadMarkCommand) -> ReadMarkReceipt:
+        """已读标记事务（§4.2 L436/§9.11）：会话 marker 行锁下 GREATEST 水位与
+        精确已读身份并集合并，**单个显式事务**。
+
+        - ``marker_kind='session'``、target_id=session_id：last_seq 仅随
+          observed_through_seq（与 observation_scope_digest 成对）GREATEST 推进；
+          read_targets 为精确已读消息/成果身份并集（不含正文），不全局清零；
+        - merge 天然幂等（GREATEST + 并集）：本次无任何状态变化即视为重放
+          （replayed=True）；同项重复标记不产生新事实；
+        - 会话不存在 ``INPUT_INVALID``（严格读；FK 同样拦截）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID。
+        """
+
+        self._check_engine()
+        validate_read_mark_command(command)
+        identity = f"{command.user_scope}/{command.session_id}/{command.command_id}"
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. 目标会话存在性（用户域严格校验）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.session_id).where(
+                        AgentSession.user_scope == command.user_scope,
+                        AgentSession.session_id == command.session_id,
+                    )
+                )
+            ).first()
+            if session_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "target session does not exist in user scope",
+                    identity,
+                )
+            # 2. session marker 行锁（UNIQUE(user_scope,marker_kind,target_id)）。
+            marker_id = self._read_mark_id(command.user_scope, "session", command.session_id)
+            marker_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentReadMark.last_seq,
+                        AgentReadMark.read_targets,
+                    )
+                    .where(
+                        AgentReadMark.user_scope == command.user_scope,
+                        AgentReadMark.marker_id == marker_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            now = datetime.now(UTC)
+            landed_seq = max(
+                marker_row.last_seq if marker_row is not None else 0,
+                command.observed_through_seq if command.observed_through_seq is not None else 0,
+            )
+            existing_targets: dict = (
+                dict(marker_row.read_targets) if marker_row is not None and marker_row.read_targets else {}
+            )
+            merged_messages = sorted(set(existing_targets.get("message_ids", [])) | set(command.message_ids))
+            merged_artifacts = sorted(set(existing_targets.get("artifact_refs", [])) | set(command.artifact_refs))
+            changed = marker_row is None or (
+                landed_seq != marker_row.last_seq
+                or merged_messages != list(existing_targets.get("message_ids", []))
+                or merged_artifacts != list(existing_targets.get("artifact_refs", []))
+            )
+            if changed:
+                merged_targets = {"message_ids": merged_messages, "artifact_refs": merged_artifacts}
+                values: dict = {
+                    "last_seq": landed_seq,
+                    "read_targets": merged_targets,
+                    "updated_at": now,
+                    "revision": AgentReadMark.revision + 1,
+                }
+                if marker_row is None:
+                    await conn.execute(
+                        sa.insert(AgentReadMark).values(
+                            user_scope=command.user_scope,
+                            marker_id=marker_id,
+                            marker_kind="session",
+                            target_id=command.session_id,
+                            session_id=command.session_id,
+                            last_seq=landed_seq,
+                            read_targets=merged_targets,
+                        )
+                    )
+                else:
+                    await conn.execute(
+                        sa.update(AgentReadMark)
+                        .where(
+                            AgentReadMark.user_scope == command.user_scope,
+                            AgentReadMark.marker_id == marker_id,
+                        )
+                        .values(**values)
+                    )
+            return ReadMarkReceipt(
+                session_id=command.session_id,
+                command_id=command.command_id,
+                last_seq=landed_seq,
+                read_target_count=len(merged_messages) + len(merged_artifacts),
+                replayed=not changed,
+                marked_at=_wire_time(now),
+            )
+
+    async def begin_decision_batch(self, *, user_scope: str) -> DecisionBatchFact:
+        """待决定新批次登记（§9.11）：准确用户 global marker 行锁下 batch_seq+1。
+
+        仅在**真正产生新待决定批次**的决策创建事务内调用（同项状态变更不造新
+        批次，AC33）；marker_kind='global'、target_id=user_scope、session_id NULL
+        （全局决定批次标记）。调用方须自行保证语义（DAO 只提供单调计数）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID。
+        """
+
+        return await self._mutate_decision_batch(user_scope=user_scope, postpone_through=None)
+
+    async def postpone_decision_batch(self, *, user_scope: str, through_batch_seq: int) -> DecisionBatchFact:
+        """稍后处理（AC33/RR04）：global marker 行锁下 postponed_through_seq=
+        GREATEST(旧值, through_batch_seq)；乱序（小于现值）不回退不延期限，
+        仅暂缓已有批次；marker 行不存在 ``INPUT_INVALID``（无批次可暂缓）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID。
+        """
+
+        identity = f"{user_scope}/global"
+        _require_text_field(user_scope, "user_scope", identity)
+        if isinstance(through_batch_seq, bool) or not isinstance(through_batch_seq, int) or through_batch_seq < 0:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "through_batch_seq must be int >= 0", identity)
+        return await self._mutate_decision_batch(user_scope=user_scope, postpone_through=through_batch_seq)
+
+    async def _mutate_decision_batch(self, *, user_scope: str, postpone_through: int | None) -> DecisionBatchFact:
+        """global marker 行锁公共路径：postpone_through=None 为新批次递增，
+        否则为稍后水位 GREATEST 合并（R22）。"""
+
+        identity = f"{user_scope}/global"
+        _require_text_field(user_scope, "user_scope", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        marker_id = self._read_mark_id(user_scope, "global", user_scope)
+        async with engine.begin() as conn:
+            marker_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentReadMark.batch_seq,
+                        AgentReadMark.postponed_through_seq,
+                    )
+                    .where(
+                        AgentReadMark.user_scope == user_scope,
+                        AgentReadMark.marker_id == marker_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            now = datetime.now(UTC)
+            if postpone_through is None:
+                # 新批次：行锁下单调递增 batch_seq。
+                landed_batch = (marker_row.batch_seq if marker_row is not None else 0) + 1
+                if marker_row is None:
+                    await conn.execute(
+                        sa.insert(AgentReadMark).values(
+                            user_scope=user_scope,
+                            marker_id=marker_id,
+                            marker_kind="global",
+                            target_id=user_scope,
+                            session_id=None,
+                            batch_seq=landed_batch,
+                        )
+                    )
+                else:
+                    await conn.execute(
+                        sa.update(AgentReadMark)
+                        .where(
+                            AgentReadMark.user_scope == user_scope,
+                            AgentReadMark.marker_id == marker_id,
+                        )
+                        .values(
+                            batch_seq=landed_batch,
+                            revision=AgentReadMark.revision + 1,
+                            updated_at=now,
+                        )
+                    )
+                return DecisionBatchFact(
+                    batch_seq=landed_batch,
+                    postponed_through_seq=None,
+                    replayed=False,
+                    recorded_at=_wire_time(now),
+                )
+            # 稍后：仅暂缓已有批次（marker 行缺失=无批次，INPUT_INVALID）。
+            if marker_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "no decision batch exists to postpone", identity)
+            landed = max(marker_row.postponed_through_seq, postpone_through)
+            changed = landed != marker_row.postponed_through_seq
+            if changed:
+                await conn.execute(
+                    sa.update(AgentReadMark)
+                    .where(
+                        AgentReadMark.user_scope == user_scope,
+                        AgentReadMark.marker_id == marker_id,
+                    )
+                    .values(
+                        postponed_through_seq=landed,
+                        revision=AgentReadMark.revision + 1,
+                        updated_at=now,
+                    )
+                )
+            return DecisionBatchFact(
+                batch_seq=marker_row.batch_seq,
+                postponed_through_seq=landed,
+                replayed=not changed,
+                recorded_at=_wire_time(now),
+            )
