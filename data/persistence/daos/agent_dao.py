@@ -46,6 +46,8 @@ from core.agent_types import (
     AnswerReceipt,
     ArtifactPage,
     ArtifactPageItem,
+    ArtifactRead,
+    ArtifactReadQuery,
     BindActualInputReceipt,
     BindActualInputRequest,
     BusinessSourceRegistrationReceipt,
@@ -171,6 +173,7 @@ from core.agent_types import (
     encode_submission_receipt,
     compute_history_query_digest,
     parse_history_cursor,
+    validate_artifact_read_query,
     validate_history_query,
     derive_accept_identity,
     derive_data_consent_command_identity,
@@ -180,6 +183,7 @@ from core.agent_types import (
     json_doc,
     normalize_cleanup_ids,
     sha256_hex,
+    slice_body_page,
     stable_id,
     to_wire_dict,
     validate_data_attempt_authorization,
@@ -1006,9 +1010,122 @@ class AgentDao(BaseDao):
                 AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload is not valid utf-8", identity
             ) from exc
 
+    # ------------------------------------------------------------------
+    # F-02-2：成果精确读取（§4.2 read_artifact）
+    # ------------------------------------------------------------------
+
+    async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> ArtifactRead:
+        """读准确成果版本与（分块）完整正文（§4.2/§9.7/§9.10.1）。
+
+        - 行的 execution/round 必须与查询一致（不借 execution_id 放行他人/他轮）；
+          不存在/跨用户 → ``INPUT_INVALID``；
+        - 行内容严格解码（冻结值域），坏行 → ``OPERATION_UNKNOWN``；
+        - 正文取 ``body_text`` 或 ``body_ref`` 载荷（核 owner 三元组/编码/长度/
+          SHA-256），按码点分页并给下一游标，不静默截断；失效游标 → ``INPUT_INVALID``；
+        - 正文未保存与已清理分开报告，不用空正文冒充成果（R21）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{query.artifact_id}@{query.artifact_version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        try:
+            validated = validate_artifact_read_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentArtifact.artifact_id,
+                        AgentArtifact.artifact_version,
+                        AgentArtifact.session_id,
+                        AgentArtifact.execution_id,
+                        AgentArtifact.round_id,
+                        AgentArtifact.artifact_kind,
+                        AgentArtifact.input_revision,
+                        AgentArtifact.actual_input_digest,
+                        AgentArtifact.actual_model_ref,
+                        AgentArtifact.result_digest,
+                        AgentArtifact.source_available_state,
+                        AgentArtifact.created_at,
+                        AgentArtifact.updated_at,
+                        AgentArtifact.revision,
+                        AgentArtifact.summary,
+                        AgentArtifact.body_text,
+                        AgentArtifact.body_ref,
+                        AgentArtifact.result_payload,
+                        AgentArtifact.published_at,
+                        AgentArtifact.cleaned_at,
+                    ).where(
+                        AgentArtifact.user_scope == user_scope,
+                        AgentArtifact.artifact_id == validated.artifact_id,
+                        AgentArtifact.artifact_version == validated.artifact_version,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "artifact version not found in user scope", identity
+                )
+            item = self._artifact_item_from_row(row, identity)
+            if item.execution_id != validated.execution_id or item.round_id != validated.round_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "artifact does not belong to requested execution/round", identity
+                )
+            body_text: str | None = item.body_text
+            if body_text is None and row.body_ref is not None:
+                body_text = await self._read_body_text(
+                    conn,
+                    user_scope=user_scope,
+                    body_ref=row.body_ref,
+                    owner_kind="artifact",
+                    owner_id=item.artifact_id,
+                    owner_version=str(item.artifact_version),
+                    identity=identity,
+                )
+            body_available = body_text is not None
+            next_cursor: str | None = None
+            unavailable_reason: str | None = None
+            if body_text is not None:
+                try:
+                    body_text, next_cursor = slice_body_page(
+                        body_text, cursor=validated.body_cursor, prefix="b", limit=validated.limit
+                    )
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity
+                    ) from exc
+            else:
+                unavailable_reason = "body_cleaned" if item.cleaned_at is not None else "body_not_saved"
+            return ArtifactRead(
+                artifact_id=item.artifact_id,
+                artifact_version=item.artifact_version,
+                session_id=item.session_id,
+                execution_id=item.execution_id,
+                round_id=item.round_id,
+                artifact_kind=item.artifact_kind,
+                input_revision=item.input_revision,
+                actual_input_digest=item.actual_input_digest,
+                actual_model_ref=item.actual_model_ref,
+                result_digest=item.result_digest,
+                source_available_state=item.source_available_state,
+                summary=item.summary,
+                result_payload=item.result_payload,
+                published_at=item.published_at,
+                cleaned_at=item.cleaned_at,
+                updated_at=item.updated_at,
+                revision=item.revision,
+                body_text=body_text,
+                next_cursor=next_cursor,
+                body_available=body_available,
+                unavailable_reason=unavailable_reason,
+            )
+
     async def bind_actual_input(self, request: BindActualInputRequest) -> BindActualInputReceipt:
         """首派发实际输入绑定（§9.13/SQ-02 W 首步）：建 agent_round +
-        execution.current_round_id + input_bound 执行事件，**单个显式事务**。
 
         幂等（§9.5 workflow_id UNIQUE）：同 workflow_id 同双摘要 → 查回原事实
         零新行；同 workflow_id 异输入 → ``INPUT_CONFLICT``。同 execution 已有

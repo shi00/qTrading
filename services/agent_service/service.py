@@ -25,6 +25,8 @@ from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    ArtifactRead,
+    ArtifactReadQuery,
     CommandReceipt,
     CommandRef,
     EventPage,
@@ -101,6 +103,16 @@ class AgentService:
 
         self._require_open("read_source")
         return await self._dao.read_source(query, user_scope=user_scope)
+
+    async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> ArtifactRead:
+        """完整成果/历史/多模型单路（§4.2）：准确版本，正文按游标分块传输。
+
+        正文未保存与已清理分别给出明确原因（不空正文冒充成果）；身份不符为
+        ``INPUT_INVALID``，坏行/坏载荷为 ``OPERATION_UNKNOWN``/``PERSISTENCE_UNAVAILABLE``。
+        """
+
+        self._require_open("read_artifact")
+        return await self._dao.read_artifact(query, user_scope=user_scope)
 
     def observe_session(
         self,

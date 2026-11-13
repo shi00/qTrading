@@ -5456,6 +5456,203 @@ def encode_source_read_query(query: SourceReadQuery, path: str = "$.source_read_
     )
 
 
+#: 正文档一页可载码点数（``limit`` 每单位；默认 limit=50 → 100,000 码点，
+#: 与 D06 单件提取上界一致，默认一次取得完整表示；小 limit 用于分块传输）。
+_BODY_CODEPOINTS_PER_LIMIT: Final = 2000
+
+#: 列表/正文读取的工程上限（DD §4.2：``limit`` 取 1—50）。
+READ_LIMIT_MAX: Final = 50
+
+
+def parse_body_cursor(cursor: str, *, prefix: str, path: str = "$.body_cursor") -> int:
+    """解析正文游标 ``{prefix}:{start}``（1 基）为起始码点；只核语法，不核页边界。"""
+
+    expected = f"{prefix}:"
+    if not isinstance(cursor, str) or not cursor.startswith(expected):
+        _fail("invalid_cursor", path)
+    raw = cursor[len(expected) :]
+    if not raw.isdigit() or raw.startswith("0"):
+        _fail("invalid_cursor", path)
+    return int(raw)
+
+
+def slice_body_page(
+    body_text: str, *, cursor: str | None, prefix: str, limit: int, path: str = "$.body_cursor"
+) -> tuple[str, str | None]:
+    """按**码点**切一页正文并给出下一游标（传输分块，不是存储分块，§9.10.1）。
+
+    游标格式 ``{prefix}:{start}``（1 基，start 之前的码点已返回）；越界/错前缀
+    视为失效游标（``invalid_cursor``），由调用方转译为 ``INPUT_INVALID``。
+    """
+
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= READ_LIMIT_MAX:
+        _fail("invalid_range", path)
+    start = parse_body_cursor(cursor, prefix=prefix, path=path) if cursor is not None else 1
+    if start > len(body_text) + 1:
+        _fail("invalid_cursor", path)
+    begin = start - 1
+    end = min(len(body_text), begin + limit * _BODY_CODEPOINTS_PER_LIMIT)
+    next_cursor = f"{prefix}:{end + 1}" if end < len(body_text) else None
+    return body_text[begin:end], next_cursor
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReadQuery:
+    """成果读取查询（§4.2 ``read_artifact``）：准确版本 + 所属执行/轮次 + 正文游标。"""
+
+    artifact_id: str
+    artifact_version: int
+    execution_id: str
+    round_id: str
+    body_cursor: str | None = None
+    limit: int = READ_LIMIT_MAX
+
+
+def validate_artifact_read_query(query: ArtifactReadQuery) -> ArtifactReadQuery:
+    """校验成果读取查询（身份非空、版本 ≥1、limit 1—50、游标语法）。"""
+
+    if not isinstance(query, ArtifactReadQuery):
+        _fail("invalid_type", "$.artifact_read_query")
+    artifact_id = _require_str(query.artifact_id, "$.artifact_read_query.artifact_id")
+    artifact_version = _require_p(query.artifact_version, "$.artifact_read_query.artifact_version")
+    execution_id = _require_str(query.execution_id, "$.artifact_read_query.execution_id")
+    round_id = _require_str(query.round_id, "$.artifact_read_query.round_id")
+    limit = _require_p(query.limit, "$.artifact_read_query.limit")
+    if limit > READ_LIMIT_MAX:
+        _fail("invalid_range", "$.artifact_read_query.limit")
+    cursor = _opt_str(query.body_cursor, "$.artifact_read_query.body_cursor")
+    # 契约只校验游标语法；切页时按正文长度再核越界。
+    if cursor is not None:
+        parse_body_cursor(cursor, prefix="b", path="$.artifact_read_query.body_cursor")
+    return ArtifactReadQuery(
+        artifact_id=artifact_id,
+        artifact_version=artifact_version,
+        execution_id=execution_id,
+        round_id=round_id,
+        body_cursor=cursor,
+        limit=limit,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRead:
+    """准确成果版本与（分块）完整正文（§4.2 ``ArtifactRead``）。
+
+    ``body_available=False`` 时 ``unavailable_reason`` 说明是正文未保存还是已按
+    用户确认清理删除；``next_cursor`` 只在正文还有后续码点时给出。``result_payload``
+    保留结构/限制/证据等元数据，不复制整份正文（§9.7）。
+    """
+
+    artifact_id: str
+    artifact_version: int
+    session_id: str
+    execution_id: str
+    round_id: str
+    artifact_kind: str
+    input_revision: int
+    actual_input_digest: str
+    actual_model_ref: str
+    result_digest: str
+    source_available_state: str
+    summary: str | None
+    result_payload: CanonicalJson | None
+    published_at: str | None
+    cleaned_at: str | None
+    updated_at: str
+    revision: int
+    body_text: str | None
+    next_cursor: str | None
+    body_available: bool
+    unavailable_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class OperationReadQuery:
+    """操作读取查询（§4.2 ``read_operation``）：准确 operation 及可选归属/工具调用。"""
+
+    operation_id: str
+    execution_id: str | None = None
+    round_id: str | None = None
+    tool_call_id: str | None = None
+    body_cursor: str | None = None
+    limit: int = READ_LIMIT_MAX
+
+
+def validate_operation_read_query(query: OperationReadQuery) -> OperationReadQuery:
+    """校验操作读取查询（轮次必须挂在执行下；limit 1—50；游标语法）。"""
+
+    if not isinstance(query, OperationReadQuery):
+        _fail("invalid_type", "$.operation_read_query")
+    operation_id = _require_str(query.operation_id, "$.operation_read_query.operation_id")
+    execution_id = _opt_str(query.execution_id, "$.operation_read_query.execution_id")
+    round_id = _opt_str(query.round_id, "$.operation_read_query.round_id")
+    tool_call_id = _opt_str(query.tool_call_id, "$.operation_read_query.tool_call_id")
+    if round_id is not None and execution_id is None:
+        _fail("identity_mismatch", "$.operation_read_query.round_id")
+    limit = _require_p(query.limit, "$.operation_read_query.limit")
+    if limit > READ_LIMIT_MAX:
+        _fail("invalid_range", "$.operation_read_query.limit")
+    cursor = _opt_str(query.body_cursor, "$.operation_read_query.body_cursor")
+    if cursor is not None:
+        parse_body_cursor(cursor, prefix="o", path="$.operation_read_query.body_cursor")
+    return OperationReadQuery(
+        operation_id=operation_id,
+        execution_id=execution_id,
+        round_id=round_id,
+        tool_call_id=tool_call_id,
+        body_cursor=cursor,
+        limit=limit,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OperationRead:
+    """操作事实与（分块）已保存返回（§4.2 ``OperationRead``）：另含 effect/io 事实。
+
+    ``phase='unknown'`` 或 ``effect_state=unknown`` 原样返回并置
+    ``result_available=False``/``unavailable_reason='effect_unknown'``——不猜成功
+    或失败（§9.9）；``result_ref`` 指向同库正文时按游标分页。
+    """
+
+    operation_id: str
+    session_id: str | None
+    execution_id: str | None
+    round_id: str | None
+    tool_call_id: str | None
+    workflow_id: str | None
+    step_id: str | None
+    call_kind: str | None
+    ordinal: int | None
+    phase: str
+    effect_state: EffectState
+    io_state: str
+    owner_epoch: int
+    run_epoch: int
+    grant_id: str | None
+    grant_revision: int | None
+    parameter_digest: str | None
+    request_ref: str | None
+    result_ref: str | None
+    result_payload: CanonicalJson | None
+    worker_refs: CanonicalJson | None
+    deadline_at: str | None
+    dispatched_at: str | None
+    exited_at: str | None
+    verified_at: str | None
+    active_ms: int
+    elapsed_ms: int
+    error_code: str | None
+    error_category: str | None
+    artifact_id: str | None
+    artifact_version: int | None
+    updated_at: str
+    revision: int
+    result_text: str | None
+    next_cursor: str | None
+    result_available: bool
+    unavailable_reason: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceLink:
     """依据边（§3.3）：链接存在不等于支持断言，``supports_claim`` 未知用 null。"""
