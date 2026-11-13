@@ -366,6 +366,37 @@ def test_leaf_workflow_id_is_identity_based_not_order_based() -> None:
     assert first.startswith("agent_leaf:exec-1:round-1:")
 
 
+def test_leaf_workflow_id_segments_are_injective() -> None:
+    """B1/N1 回归：分隔符出现在身份段内时不产生碰撞（转义后单射）。"""
+    left = leaf_workflow_id(execution_id="a:b", round_id="c", node_id="d")
+    right = leaf_workflow_id(execution_id="a", round_id="b:c", node_id="d")
+    percent = leaf_workflow_id(execution_id="a%3Ab", round_id="c", node_id="d")
+    assert left != right
+    assert left != percent
+
+
+def test_drive_uses_injected_durable_wait() -> None:
+    """B1 重放面回归：父 workflow 以注入了判定检查点的等待实现推进（非裸 asyncio.wait）。"""
+    plan = _plan(_node("a"))
+    runner = _ControlledRunner()
+    wait_calls: list[int] = []
+
+    async def durable_wait(tasks: list[asyncio.Task[NodeOutcome]]) -> set[asyncio.Task[NodeOutcome]]:
+        wait_calls.append(len(tasks))
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        return done
+
+    async def scenario() -> PlanRunSummary:
+        task = asyncio.ensure_future(drive_leaf_dag(plan, runner, wait_first_completed=durable_wait))
+        await _wait_until(lambda: runner.started == ["a"])
+        runner.gate("a").set()
+        return await task
+
+    summary = asyncio.run(scenario())
+    assert wait_calls == [1]
+    assert summary.succeeded == ("a",)
+
+
 def test_research_payload_decode_nodes() -> None:
     """父载荷解码为已校验前保存的计划（nodes 严格解码；preserved 缺省为空）。"""
     payload = {
@@ -534,13 +565,29 @@ def test_build_research_payload_rejects_empty_plan() -> None:
 
 
 def test_record_rejects_conflicting_terminal_outcome() -> None:
-    """终态单调：已终态后再记任何事实均拒绝（迟到事实不翻回未收敛）。"""
+    """终态单调：已终态后再记不同事实被拒；同一事实重复登记幂等。"""
     scheduler = LeafDagScheduler(_plan(_node("a")))
     scheduler.start("a")
     scheduler.record(_outcome("a"))
+    scheduler.record(_outcome("a"))  # 幂等：同终态事实重复投递
     with pytest.raises(AgentValidationError) as excinfo:
         scheduler.record(_outcome("a", "running"))
     assert excinfo.value.code == "node_outcome_conflict"
+
+
+def test_validate_preserved_rejects_duplicates() -> None:
+    """重复保留事实（同 node_id 两条）派发前拒绝（不留给 workflow 冲突）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    with pytest.raises(AgentValidationError) as excinfo:
+        build_retry_payload(
+            plan,
+            execution_id="exec-2",
+            round_id="round-2",
+            plan_digest="d" * 64,
+            targets=("b",),
+            preserved_outcomes=(_outcome("a"), _outcome("a")),
+        )
+    assert excinfo.value.code == "duplicate_preserved_outcome"
 
 
 def test_retry_payload_requires_preserved_predecessors() -> None:
