@@ -13,7 +13,7 @@ stdlib，符合 CLAUDE.md §4.2「多层引用的基础设施提升到 core」�
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 from urllib.parse import urlsplit
@@ -742,3 +742,35 @@ class ChatStreamEvent:
                 raise _invalid("invalid_field", "$.finish_reason")
             return
         raise _invalid("invalid_field", "$.kind")
+
+
+# ---------------------------------------------------------------------------
+# 聊天回合适配器协议（HANDOFF §6.1）
+# ---------------------------------------------------------------------------
+
+
+#: 流事件回调（HANDOFF §6.1/§6.4）：可等待；有界通道背压经 await 语义透传。
+#: 允许返回 None 或 Awaitable，消费方以 isawaitable 判定后等待。
+ChatStreamEventHandler = Callable[[ChatStreamEvent], object]
+
+
+class ChatInferenceAdapter(Protocol):
+    """完整聊天回合适配器协议（HANDOFF §6.1）：云/本地聊天实现；FinBERT 等非聊天
+    适配器不接该协议。
+
+    与 :class:`InferenceAdapter`（单 prompt 推理）并列：组装方（app 组合根 /
+    测试替身）提供带 ``invoke_chat`` 方法的对象即可，结构化协议无需显式继承。
+    ``execute_chat_turn`` 消费本协议形状（B-02-3 接线）。
+    """
+
+    async def invoke_chat(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse: ...

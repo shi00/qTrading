@@ -24,7 +24,8 @@ import logging
 import os
 import sys
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from inspect import isawaitable
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
@@ -32,10 +33,20 @@ from core.errors import AIConfigError, AIContentRefusedError, AIPolicyNotAcknowl
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
+    AssistantToolCall,
     AttemptContext,
+    ChatMessage,
+    ChatStreamEvent,
+    ChatStreamEventHandler,
+    ChatTurnRequest,
+    ChatTurnResponse,
+    FinishReason,
     InferenceRequest,
+    ModelTurnProtocolError,
     NormalizedLLMUsage,
     ResolvedConnection,
+    TextContentPart,
+    validate_closed_tool_arguments,
 )
 from services.ai_service.pricing import estimate_cost
 from services.ai_service.token_budget import _estimate_tokens, _get_model_context_window
@@ -1057,6 +1068,325 @@ class LiteLLMClient:
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
+    async def invoke_chat_connection(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        tool_choice: str | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse:
+        """单连接完整聊天回合 SDK 出口（B-02-1，HANDOFF §6.1/§6.3/§6.4）。
+
+        与 :meth:`invoke_single_connection`（旧链单 prompt 出口）并列：接受完整
+        ``messages`` / ``tools`` / ``response_format`` / ``stream``，``num_retries=0``
+        且 per-call ``drop_params=False``（SDK 全局 ``drop_params=True`` 被本次调用
+        覆盖——聊天出站禁静默丢参数，§6.1）；**不做路由和业务 final 校验**（候选
+        策略与结算归 Executor / Recorder）。
+
+        - 门控与预算复用旧链同源语义：SEC-01 知情确认（零出站）、惰性加载、
+          deadline 单调预算（dispatch 前与凭据解析后双查，F29）、model 前缀
+          （azure / LLM_PROVIDERS）、凭据租约一致性（F06，零出站零 keyring 读）；
+        - 出口映射（§6.3）：``instructions`` 前置为 system 消息，``ChatMessage``
+          保序映射，tool-only ``content=None``；图片分型在桥层无二进制解析
+          （连接 image_input 能力表未落地）→ 显式拒绝零出站；
+          # NOTE(lazy): image 出口按 binary_ref 直映射。 ceiling: 当前设计正本未定义
+          # binary_ref 落桥形态，能力按连接 revision 证据映射（unknown 不置 True）。
+          # upgrade: 连接能力表 + 资产二进制解析落地（E-02）时按已核能力接 data URL 出站。
+        - 真流（§6.4）：真实 delta 逐事件经 ``on_event`` 可等待回调产出（不把完整
+          文本切块充真流）；按 choice/tool index 与稳定 call_id 聚合，参数闭合且
+          校验通过才派发 ``tool_call_closed``；缺结束标记（断流）不得因迭代耗尽
+          而成功（``ModelTurnProtocolError``）；finish 与 usage 分步确认
+          （``stream_options={"include_usage": True}``，usage 缺失保 None 不倒灌）；
+        - 拒绝信号（``message.refusal`` / ``finish_reason=content_filter`` / 流式
+          ``delta.refusal``）映射 ``finish_reason="refused"`` + ``refusal`` 文本
+          （F27 同源语义，以类型契约承载，拒绝不换候选规避由 Executor 承载）；
+        - ``asyncio.CancelledError`` 始终传播（R2），不包装。
+
+        Raises:
+            AIPolicyNotAcknowledgedError: SEC-01 外发知情确认未通过（零出站）。
+            ModelTurnProtocolError: 入站消息/工具协议非法、闭合参数非法 JSON、
+                图片分型不可解析、finish 缺失 / 未知、拒绝缺 refusal 文本。
+            ValueError: adapter_kind 非 litellm_chat / credential 租约失配（F06）/
+                frozen_params 键非法或占用保留键。
+            TimeoutError: dispatch 前 deadline 已耗尽（含凭据解析后复查）。
+            RuntimeError: litellm 不可用。
+        """
+        request.ensure_valid()
+        if resolved_connection.adapter_kind != "litellm_chat":
+            raise ValueError(
+                f"invoke_chat_connection requires adapter_kind='litellm_chat', got {resolved_connection.adapter_kind!r}"
+            )
+
+        # SEC-01（R06-D3）：与旧链出口同源门控，置于凭据解析 / litellm 加载 / 网络
+        # 之前（零 keyring 读、零 import、零出站的最早 fail-closed 点）。
+        if not is_egress_acknowledged():
+            logger.warning(
+                "[AIService] ChatTurn | Egress policy not acknowledged — refusing cloud chat turn "
+                "for model_call '%s' (no external requests initiated)",
+                request.model_call_id,
+            )
+            raise AIPolicyNotAcknowledgedError(
+                Message("ai_external_acknowledgment_prompt"),
+                detail="Unified chain cloud egress requires user acknowledgment (SEC-01); "
+                "no external request was initiated.",
+            )
+
+        import services.ai_service as _ai
+
+        if not _ai._ensure_litellm_loaded():
+            raise RuntimeError("LiteLLM not installed, cloud LLM features disabled")
+
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("Deadline exhausted before chat turn dispatch.")
+
+        # model 前缀拼接（与 invoke_single_connection 同源口径）。
+        # NOTE(lazy): 门控与前缀/凭据准备段与 invoke_single_connection 双份。
+        # ceiling: 两出口各自内联 ~45 行同语义准备段。
+        # upgrade: B-02-3 抽共享执行段（HANDOFF §6.1）时统一为私有 _prepare_dispatch。
+        model = resolved_connection.model
+        provider = resolved_connection.provider
+        if provider == "azure":
+            litellm_model = f"azure/{model}"
+            from utils.llm_providers import AZURE_DEFAULT_API_VERSION
+
+            api_version = resolved_connection.adapter_options.get("api_version", AZURE_DEFAULT_API_VERSION)
+        else:
+            from utils.llm_providers import LLM_PROVIDERS
+
+            prefix = LLM_PROVIDERS.get(provider, {}).get("litellm_prefix", "openai")
+            litellm_model = f"{prefix}/{model}"
+            api_version = None
+
+        # F06：解析租约一致性（语义与 invoke_single_connection 同源）——版本化凭据的
+        # ref 必须由 credential_version 派生，否则 fail-closed 拒绝出站。
+        if resolved_connection.credential_version is not None:
+            expected_ref = f"keyring:model-connection-{resolved_connection.credential_version}"
+            if resolved_connection.credential_ref != expected_ref:
+                raise ValueError(
+                    "Credential ref does not match versioned lease "
+                    f"(version={resolved_connection.credential_version}), refusing outbound dispatch"
+                )
+        api_key = await ThreadPoolManager().run_async(
+            TaskType.IO, resolve_credential, resolved_connection.credential_ref
+        )
+
+        # F29：凭据解析耗时不受 deadline 预算约束——出站前重核剩余预算。
+        adapter_timeout = float(
+            resolved_connection.adapter_options.get("timeout", DEFAULT_CLOUD_TIMEOUT) or DEFAULT_CLOUD_TIMEOUT
+        )
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("Deadline exhausted after credential resolution, refusing outbound dispatch.")
+        timeout_val = min(adapter_timeout, remaining)
+
+        # 出口映射（§6.3）：instructions 前置 system，messages 保序。
+        litellm_messages: list[dict] = [
+            {"role": "system", "content": instruction} for instruction in request.instructions
+        ]
+        for index, message in enumerate(request.messages):
+            litellm_messages.append(_chat_message_to_litellm(message, f"$.messages[{index}]"))
+
+        request_params: dict = {
+            "messages": litellm_messages,
+            "model": litellm_model,
+            "num_retries": 0,  # §6.1：单连接无 SDK 隐藏重试
+            "drop_params": False,  # §6.1：聊天出站禁静默丢参数（覆盖 SDK 全局 True）
+            "timeout": httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT),
+        }
+        if api_version is not None:
+            request_params["api_version"] = api_version
+        if resolved_connection.api_base:
+            request_params["api_base"] = resolved_connection.api_base
+        if api_key is not None:
+            request_params["api_key"] = api_key
+        chat_tools = _chat_tools_to_litellm((*request.tools, *request.output_tools))
+        if chat_tools:
+            request_params["tools"] = chat_tools
+        for key, value in request.frozen_params.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"ChatTurnRequest.frozen_params contains invalid key: {key!r}")
+            if key in _CHAT_RESERVED_PARAM_KEYS:
+                raise ValueError(f"ChatTurnRequest.frozen_params key collides with dispatch parameter: {key!r}")
+            request_params[key] = value
+        if request.max_output_tokens is not None:
+            request_params["max_tokens"] = int(request.max_output_tokens)
+        if response_format is not None:
+            request_params["response_format"] = dict(response_format)
+        if tool_choice is not None:
+            request_params["tool_choice"] = tool_choice
+        if stream:
+            request_params["stream"] = True
+            request_params["stream_options"] = {"include_usage": True}
+
+        # SEC-03：与旧链出口同源 EgressAudit（一次尝试一条最终结果记录）。
+        # 聊天回合不属于四类旧场景，category 用 "agent_chat"；不记录消息正文
+        # （防二次泄露），payload 体积按文本内容估算。
+        audit_kwargs: dict = {
+            "destination": f"llm:{litellm_model}",
+            "category": "agent_chat",
+            "item_count": len(litellm_messages),
+            "payload_size_bytes": _chat_payload_size_bytes(litellm_messages),
+            "destination_host": destination_host_from_url(resolved_connection.api_base),
+        }
+
+        from utils.proxy_manager import ProxyManager
+
+        try:
+            with ProxyManager.litellm_env_context():
+                if stream:
+                    chat_response = await self._consume_chat_stream(request_params, on_event)
+                else:
+                    chat_response = _interpret_chat_response(await _ai.acompletion(**request_params))
+        except asyncio.CancelledError:
+            await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
+            raise  # R2: 必须传播
+        except Exception as exc:
+            await _audit_egress_outcome(
+                status="failed",
+                error_category=classify_error(exc, context="llm").get("code"),
+                **audit_kwargs,
+            )
+            raise
+
+        await _audit_egress_outcome(status="sent", **audit_kwargs)
+        return chat_response
+
+    async def _consume_chat_stream(
+        self,
+        request_params: dict,
+        on_event: ChatStreamEventHandler | None,
+    ) -> ChatTurnResponse:
+        """消费真流 chunk（§6.4）：真实 delta 逐事件产出，finish/usage 分步确认。
+
+        聚合状态按 choice/tool index 与稳定 call_id 承载；``tool_call_closed`` 仅在
+        累积分片闭合且校验通过后产出；流耗尽而无结束标记即协议失败。本方法只在
+        ``invoke_chat_connection`` 的审计 try 块内被调用（取消/失败审计由其承载）。
+        """
+
+        import services.ai_service as _ai
+
+        sequence = 0
+        calls: dict[int, dict] = {}
+        text_parts: list[str] = []
+        refusal_parts: list[str] = []
+        finish_buffered: str | None = None
+        usage: NormalizedLLMUsage | None = None
+
+        async def _emit(event: ChatStreamEvent) -> None:
+            event.ensure_valid()
+            if on_event is not None:
+                outcome = on_event(event)
+                if isawaitable(outcome):
+                    await outcome
+
+        stream_response = await _ai.acompletion(**request_params)
+        async for chunk in stream_response:
+            usage_raw = getattr(chunk, "usage", None)
+            if usage_raw is not None:
+                usage = normalize_litellm_usage(usage_raw) or usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue  # usage 终块（choices 为空）仅承载 usage
+            choice = choices[0]  # 本链恒 n=1；多 choice 非聊天回合出口契约
+            delta = getattr(choice, "delta", None)
+            if delta is not None:
+                content = getattr(delta, "content", None)
+                if isinstance(content, str) and content:
+                    text_parts.append(content)
+                    sequence += 1
+                    await _emit(ChatStreamEvent(sequence=sequence, kind="text", text_delta=content))
+                refusal_delta = getattr(delta, "refusal", None)
+                if isinstance(refusal_delta, str) and refusal_delta:
+                    refusal_parts.append(refusal_delta)
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    index = int(tc.index)
+                    state = calls.setdefault(index, {"call_id": None, "name": "", "fragments": []})
+                    tc_id = getattr(tc, "id", None)
+                    if tc_id:
+                        state["call_id"] = tc_id
+                    function = getattr(tc, "function", None)
+                    name_part = getattr(function, "name", None) if function is not None else None
+                    if name_part:
+                        state["name"] += name_part
+                    fragment = getattr(function, "arguments", None) if function is not None else None
+                    if fragment:
+                        state["fragments"].append(fragment)
+                        # 稳定 call_id 聚合：id/name 已知才产出 delta 事件（leading
+                        # 分片缺 id 时静默累积，闭合处强制核验）
+                        if state["call_id"] and state["name"]:
+                            sequence += 1
+                            await _emit(
+                                ChatStreamEvent(
+                                    sequence=sequence,
+                                    kind="tool_call_delta",
+                                    call_index=index,
+                                    call_id=state["call_id"],
+                                    name=state["name"],
+                                    arguments_fragment=fragment,
+                                )
+                            )
+            finish_raw = getattr(choice, "finish_reason", None)
+            if finish_raw is not None and finish_buffered is None:
+                finish_buffered = finish_raw
+                # 闭合事件：按 index 序派发，参数闭合且校验通过才产出（§6.4-2）
+                for call_index in sorted(calls):
+                    state = calls[call_index]
+                    if not state["call_id"] or not state["name"]:
+                        raise ModelTurnProtocolError("invalid_field", f"$.stream.tool_calls[{call_index}]")
+                    closed_json = "".join(state["fragments"])
+                    validate_closed_tool_arguments(closed_json)
+                    sequence += 1
+                    await _emit(
+                        ChatStreamEvent(
+                            sequence=sequence,
+                            kind="tool_call_closed",
+                            call_index=call_index,
+                            call_id=state["call_id"],
+                            name=state["name"],
+                            closed_arguments_json=closed_json,
+                        )
+                    )
+
+        # 断流：缺结束标记不得因迭代耗尽而成功（§6.4-4）
+        if finish_buffered is None:
+            raise ModelTurnProtocolError("missing_finish", "$.stream")
+        finish_reason = _map_chat_finish_reason(finish_buffered)
+        refusal_text = "".join(refusal_parts)
+        if finish_reason == "refused" and not refusal_text:
+            refusal_text = "content_filter"  # provider 信号原文，ensure_valid 要求非空
+
+        tool_calls = tuple(
+            AssistantToolCall(
+                call_id=calls[index]["call_id"],
+                name=calls[index]["name"],
+                arguments_json="".join(calls[index]["fragments"]),
+            )
+            for index in sorted(calls)
+        )
+        sequence += 1
+        await _emit(ChatStreamEvent(sequence=sequence, kind="finish", finish_reason=finish_reason, usage=usage))
+
+        chat_response = ChatTurnResponse(
+            text="".join(text_parts) if text_parts else None,
+            finish_reason=finish_reason,
+            actual_model=getattr(stream_response, "model", None),
+            usage_observed=usage is not None,
+            usage=usage,
+            transport_state="ok",
+            tool_calls=tool_calls,
+            refusal=refusal_text or None,
+        )
+        chat_response.ensure_valid()
+        return chat_response
+
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def _chat_completion(
         self,
         messages: list,
@@ -1717,3 +2047,181 @@ class LiteLLMClient:
                 "message": error_info["message_key"],
                 "error_code": error_info["code"],
             }
+
+
+# ---------------------------------------------------------------------------
+# 聊天回合出口映射（B-02-1，HANDOFF §6.3）
+# ---------------------------------------------------------------------------
+
+#: frozen_params 禁止占用的派发保留键（冲突即配置损坏，显式拒绝零出站）。
+_CHAT_RESERVED_PARAM_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "model",
+        "messages",
+        "tools",
+        "num_retries",
+        "drop_params",
+        "timeout",
+        "stream",
+        "stream_options",
+        "api_key",
+        "api_base",
+        "api_version",
+        "response_format",
+        "tool_choice",
+    }
+)
+
+
+def _chat_message_to_litellm(message: ChatMessage, path_prefix: str) -> dict:
+    """ChatMessage → OpenAI chat completions 出口字典（§6.3 出口规则）。
+
+    - 保序：多 text 分型按原顺序映射（user 单 text 退化为纯 str 内容）；
+    - assistant tool-only ``content=None`` 有效；tool 严格携带 ``tool_call_id``；
+    - 图片分型在桥层无二进制解析（能力表未落地）→ 显式拒绝零出站，不静默丢弃。
+    """
+
+    text_parts: list[str] = []
+    segments: list[dict] = []
+    for index, part in enumerate(message.content_parts):
+        path = f"{path_prefix}.content_parts[{index}]"
+        if isinstance(part, TextContentPart):
+            text_parts.append(part.text)
+            segments.append({"type": "text", "text": part.text})
+        else:
+            raise ModelTurnProtocolError("image_not_resolvable", path)
+
+    if message.role == "system":
+        return {"role": "system", "content": "\n".join(text_parts)}
+    if message.role == "user":
+        if len(segments) == 1:
+            return {"role": "user", "content": segments[0]["text"]}
+        return {"role": "user", "content": segments}
+    if message.role == "assistant":
+        entry: dict = {"role": "assistant", "content": "\n".join(text_parts) if text_parts else None}
+        if message.assistant_tool_calls:
+            entry["tool_calls"] = [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments_json},
+                }
+                for call in message.assistant_tool_calls
+            ]
+        return entry
+    # tool：出口 content 必须为字符串（无分型时为空串，不伪装成业务内容）
+    return {"role": "tool", "tool_call_id": message.tool_call_id, "content": "\n".join(text_parts)}
+
+
+def _chat_tools_to_litellm(specs: Any) -> list[dict]:
+    """FunctionToolSpec → OpenAI function tool 出口字典（research 与 output 工具同形）。"""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": dict(spec.json_schema),
+            },
+        }
+        for spec in specs
+    ]
+
+
+def _chat_payload_size_bytes(litellm_messages: list[dict]) -> int:
+    """出站 payload 体积估算（审计用）：文本内容长度合计，不含工具参数。"""
+
+    total = 0
+    for message in litellm_messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            total += sum(len(segment.get("text", "")) for segment in content if isinstance(segment, dict))
+    return total
+
+
+def _map_chat_finish_reason(raw: str | None) -> FinishReason:
+    """provider finish_reason → 协议 FinishReason（未知值显式拒绝，不伪装 error）。"""
+
+    if raw == "stop":
+        return "final"
+    if raw in ("tool_calls", "function_call"):
+        return "tool_calls"
+    if raw == "length":
+        return "length"
+    if raw == "content_filter":
+        return "refused"
+    raise ModelTurnProtocolError("invalid_finish", "$.finish_reason")
+
+
+def _interpret_chat_response(response: Any) -> ChatTurnResponse:
+    """非流式响应 → ChatTurnResponse 组装（拒绝信号提炼，闭合参数校验）。"""
+
+    choice = response.choices[0]
+    message = choice.message
+    finish_raw = getattr(choice, "finish_reason", None)
+    refusal_raw = getattr(message, "refusal", None)
+    refusal_text = refusal_raw if isinstance(refusal_raw, str) and refusal_raw.strip() else None
+    if finish_raw == "content_filter" or refusal_text:
+        # F27 同源语义：拒绝信号（refusal 文本 / content_filter）优先于 finish 原值
+        finish_reason: FinishReason = "refused"
+        refusal_text = refusal_text or "content_filter"
+    else:
+        finish_reason = _map_chat_finish_reason(finish_raw)
+
+    tool_calls = tuple(
+        AssistantToolCall(call_id=tc.id, name=tc.function.name, arguments_json=tc.function.arguments)
+        for tc in (getattr(message, "tool_calls", None) or [])
+    )
+    for call in tool_calls:
+        call.ensure_valid()
+    usage = normalize_litellm_usage(getattr(response, "usage", None))
+
+    chat_response = ChatTurnResponse(
+        text=message.content if isinstance(message.content, str) else None,
+        finish_reason=finish_reason,
+        actual_model=getattr(response, "model", None),
+        usage_observed=usage is not None,
+        usage=usage,
+        transport_state="ok",
+        tool_calls=tool_calls,
+        refusal=refusal_text,
+    )
+    chat_response.ensure_valid()
+    return chat_response
+
+
+class LiteLLMChatAdapter:
+    """``litellm_chat`` 聊天回合适配器（B-02-1，HANDOFF §6.1）。
+
+    实现 :class:`core.model_management_types.ChatInferenceAdapter` 结构化协议
+    （无需显式继承）：``invoke_chat`` 薄委托 :meth:`LiteLLMClient.invoke_chat_connection`
+    单连接入口，参数原样透传；组装能力核验（FinBERT 等非聊天适配器不接该协议）
+    由组装方按 adapter_kind 装配承载。真流默认开启（§6.4）。
+    """
+
+    def __init__(self, client: LiteLLMClient) -> None:
+        self._client = client
+
+    async def invoke_chat(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse:
+        return await self._client.invoke_chat_connection(
+            request,
+            resolved_connection,
+            deadline,
+            attempt_context,
+            stream=stream,
+            response_format=response_format,
+            on_event=on_event,
+        )
