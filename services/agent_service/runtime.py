@@ -34,9 +34,10 @@ import asyncio
 import concurrent.futures
 import threading
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, Final, Literal, TypeVar, cast
+from datetime import UTC, datetime
+from typing import Any, Final, Literal, Protocol, TypeVar, cast
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, SQLAlchemyDatasource
@@ -380,6 +381,15 @@ class OwnerLoopBridge:
                 self._operations[operation_id] = entry
         return OperationHandle(operation_id=operation_id, state=entry.state)
 
+    def inflight_task_count(self) -> int:
+        """当前在途 owner 任务数（关闭门闩的「实际 IO 未收敛」判据）。
+
+        只统计桥登记的任务（``run_owner``/``start_operation`` 主体）；已完成任务
+        在 ``finally`` 中移除。须在 owner 循环上下文读取（与任务登记同线程）。
+        """
+
+        return len(self._tasks)
+
     # -- 内部 ---------------------------------------------------------------
 
     async def _managed(self, coro: Coroutine[Any, Any, _T]) -> _T:
@@ -567,13 +577,204 @@ class OwnerStreamChannel[T]:
         return _WAIT_CLOSED
 
 
+# ---------------------------------------------------------------------------
+# 关闭前置门闩（HANDOFF §8.5：prepare_close 在 watchdog/do_cleanup/destroy/
+# 换配置之前，返回带原关闭命令身份、ready、阻塞原因与 unknown 关联的回执）
+# ---------------------------------------------------------------------------
+
+#: 阻塞原因 wire 值（稳定；组合为 tuple，失败可核、不隐藏）。
+CLOSE_BLOCK_DISPATCH_NOT_CLOSED: Final = "dispatch_not_closed"
+CLOSE_BLOCK_IO_IN_FLIGHT: Final = "io_in_flight"
+CLOSE_BLOCK_FACTS_SAVE_FAILED: Final = "close_facts_save_failed"
+CLOSE_BLOCK_FACTS_NOT_SAVED: Final = "close_facts_not_saved"
+CLOSE_BLOCK_RUNTIME_CLOSE_FAILED: Final = "runtime_close_failed"
+
+
+@dataclass(frozen=True)
+class CloseCommandIdentity:
+    """关闭命令身份（原命令，重试沿此身份；不把「已请求关闭」当就绪）。"""
+
+    user_scope: str
+    close_command_id: str
+
+
+@dataclass(frozen=True)
+class CloseFactOutcome:
+    """结束/unknown 保存结果（``unknown_associations`` 为仍需保留的未知关联）。"""
+
+    saved: bool
+    unknown_associations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CloseReadinessReceipt:
+    """关闭就绪回执（不可变）。
+
+    ``ready=True`` 须同时满足：派发已关闭、桥登记的在途 owner 任务为 0、
+    结束/unknown 已可靠保存、DBOS/Client 已关闭且运行库 Engine 已释放。
+    ``ready=False`` 时本类不触碰 Recorder/业务 Engine/内置 PG（由调用方保持
+    旧配置与恢复能力，HANDOFF §8.5）。
+    """
+
+    command: CloseCommandIdentity
+    ready: bool
+    blocking_reasons: tuple[str, ...]
+    unknown_associations: tuple[str, ...]
+    inflight_task_count: int
+    checked_at: str
+
+
+class DispatchGate(Protocol):
+    """应用派发门闩（关闭新派发；幂等）。"""
+
+    def close_dispatch(self) -> bool:
+        """关闭派发；返回此刻是否已关闭（失败返回 False，不假装成功）。"""
+        ...
+
+    def dispatch_closed(self) -> bool:
+        """派发是否已关闭。"""
+        ...
+
+
+class CloseFactSink(Protocol):
+    """结束/unknown 持久化端口（服务层实现；门闩只核结果，不写业务事实）。"""
+
+    async def save_end_or_unknown(self, command: CloseCommandIdentity) -> CloseFactOutcome: ...
+
+
+#: 同步阻塞段执行器（默认受管线程池；测试注入直接执行）。
+CloseBlockingRunner = Callable[[Callable[[], None]], Awaitable[None]]
+
+
+def _thread_pool_runner() -> CloseBlockingRunner:
+    """默认受管线程执行器（HANDOFF §10.6：destroy/dispose 不堵 UI）。"""
+
+    from utils.thread_pool import TaskType, ThreadPoolManager
+
+    async def run(fn: Callable[[], None]) -> None:
+        await ThreadPoolManager().run_async(TaskType.IO, fn)
+
+    return run
+
+
+class AgentRuntime:
+    """Agent 运行时关闭编排（HANDOFF §8.5 前置门闩）。
+
+    由 app 层注入统一关闭编排，覆盖窗口关闭/断连/升级退出/正常退出/数据库
+    切换；必须在 ``start_watchdog``、``do_cleanup``、窗口 destroy 或旧配置替换
+    **之前**调用 ``prepare_close``。不得仅注册为 ShutdownCoordinator 普通动态
+    cleanup callback（协调器在 critical 回调失败后仍继续清理）。
+
+    关闭顺序（§8.5）：关派发 → 核 IO 退出 → 保存结束/unknown → DBOS/Client
+    关闭并释放运行库引擎 → 返回就绪回执。Recorder.aclose、业务引擎与内置 PG
+    由调用方在就绪后按原协调顺序关闭，本类不触碰。
+    """
+
+    def __init__(
+        self,
+        *,
+        handle: AgentRuntimeHandle,
+        bridge: OwnerLoopBridge,
+        dispatch_gate: DispatchGate,
+        fact_sink: CloseFactSink,
+        blocking_runner: CloseBlockingRunner | None = None,
+    ) -> None:
+        self._handle = handle
+        self._bridge = bridge
+        self._dispatch_gate = dispatch_gate
+        self._fact_sink = fact_sink
+        self._blocking_runner = blocking_runner or _thread_pool_runner()
+        self._receipt: CloseReadinessReceipt | None = None
+
+    async def prepare_close(self, command: CloseCommandIdentity) -> CloseReadinessReceipt:
+        """关闭前置门闩（幂等；``ready=True`` 后按原身份重试返回原回执）。
+
+        ``CancelledError`` 继续传播（R2）；普通异常转成阻塞原因并保持资源
+        可用（可重试），不进入清理/强退路径。
+        """
+
+        if not command.user_scope or not command.close_command_id:
+            raise ValueError("close command identity must be non-empty")
+        if self._receipt is not None and self._receipt.ready:
+            # 原关闭已完成：按原身份重试返回原回执（不重复 destroy、不换身份）
+            return self._receipt
+
+        reasons: list[str] = []
+        if not self._dispatch_gate.close_dispatch():
+            reasons.append(CLOSE_BLOCK_DISPATCH_NOT_CLOSED)
+        inflight = self._bridge.inflight_task_count()
+        if inflight:
+            reasons.append(CLOSE_BLOCK_IO_IN_FLIGHT)
+        if reasons:
+            return self._make_receipt(command, reasons=reasons, unknown=(), inflight=inflight)
+
+        try:
+            outcome = await self._fact_sink.save_end_or_unknown(command)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return self._make_receipt(command, reasons=[CLOSE_BLOCK_FACTS_SAVE_FAILED], unknown=(), inflight=inflight)
+        if not outcome.saved:
+            return self._make_receipt(
+                command,
+                reasons=[CLOSE_BLOCK_FACTS_NOT_SAVED],
+                unknown=outcome.unknown_associations,
+                inflight=inflight,
+            )
+
+        try:
+            await self._blocking_runner(self._handle.close)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return self._make_receipt(
+                command,
+                reasons=[CLOSE_BLOCK_RUNTIME_CLOSE_FAILED],
+                unknown=outcome.unknown_associations,
+                inflight=inflight,
+            )
+
+        receipt = self._make_receipt(command, reasons=[], unknown=outcome.unknown_associations, inflight=inflight)
+        self._receipt = receipt
+        return receipt
+
+    def _make_receipt(
+        self,
+        command: CloseCommandIdentity,
+        *,
+        reasons: list[str],
+        unknown: tuple[str, ...],
+        inflight: int,
+    ) -> CloseReadinessReceipt:
+        return CloseReadinessReceipt(
+            command=command,
+            ready=not reasons,
+            blocking_reasons=tuple(reasons),
+            unknown_associations=unknown,
+            inflight_task_count=inflight,
+            checked_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        )
+
+
 __all__ = [
     "AGENT_DS_SCHEMA",
+    "CLOSE_BLOCK_DISPATCH_NOT_CLOSED",
+    "CLOSE_BLOCK_FACTS_NOT_SAVED",
+    "CLOSE_BLOCK_FACTS_SAVE_FAILED",
+    "CLOSE_BLOCK_IO_IN_FLIGHT",
+    "CLOSE_BLOCK_RUNTIME_CLOSE_FAILED",
     "DBOS_SCHEMA",
+    "AgentRuntime",
     "AgentRuntimeHandle",
     "AgentRuntimeMigrationError",
     "AgentRuntimeSettings",
     "ChannelClosedError",
+    "CloseBlockingRunner",
+    "CloseCommandIdentity",
+    "CloseFactOutcome",
+    "CloseFactSink",
+    "CloseReadinessReceipt",
+    "DispatchGate",
     "OperationHandle",
     "OperationState",
     "OwnerLoopBridge",

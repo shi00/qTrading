@@ -18,7 +18,8 @@ owner-loop 桥（§8.2）与 launch 启动隔离（§8.4 needs-spike）不在本
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import Any, cast
 
 import pytest
 import sqlalchemy as sa
@@ -45,7 +46,9 @@ class _RecordingHost:
 
     def fake_create_engine(self, url: str, **kwargs: Any) -> object:
         self.calls.append(f"engine:{kwargs.get('pool_size')}")
-        self.engines[kwargs.get("pool_size")] = kwargs
+        pool_size = kwargs.get("pool_size")
+        assert isinstance(pool_size, int)
+        self.engines[pool_size] = kwargs
         return object()  # 不透明句柄，仅供身份比对
 
     def fake_client_init(self, **kwargs: Any) -> _FakeClient:
@@ -208,3 +211,144 @@ class TestAssemblyContract:
             "dispose:4",
             "dispose:2",
         ]
+
+
+class _CloseFakes:
+    """关闭门闩测试替身：派发门闩/桥/事实端口/宿主关闭均记录调用顺序。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.dispatch_ok = True
+        self.inflight = 0
+        self.saved = True
+        self.unknown: tuple[str, ...] = ("operation-unknown-1",)
+        self.sink_error: BaseException | None = None
+        self.close_error: BaseException | None = None
+
+    def close_dispatch(self) -> bool:
+        self.calls.append("dispatch_close")
+        return self.dispatch_ok
+
+    def dispatch_closed(self) -> bool:
+        return self.dispatch_ok
+
+    def inflight_task_count(self) -> int:
+        return self.inflight
+
+    async def save_end_or_unknown(self, command: Any) -> Any:
+        self.calls.append("save_facts")
+        if self.sink_error is not None:
+            raise self.sink_error
+        return runtime_mod.CloseFactOutcome(saved=self.saved, unknown_associations=self.unknown)
+
+    def close(self) -> None:
+        self.calls.append("handle_close")
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _runtime(fakes: _CloseFakes) -> Any:
+    return runtime_mod.AgentRuntime(
+        handle=cast(Any, fakes),  # 仅需 close()
+        bridge=cast(Any, fakes),  # 仅需 inflight_task_count()
+        dispatch_gate=cast(Any, fakes),
+        fact_sink=cast(Any, fakes),
+        blocking_runner=_direct_runner,
+    )
+
+
+async def _direct_runner(fn: Any) -> None:
+    fn()
+
+
+def _command() -> Any:
+    return runtime_mod.CloseCommandIdentity(user_scope="user-1", close_command_id="close-1")
+
+
+class TestPrepareCloseLatch:
+    """关闭前置门闩（HANDOFF §8.5）：未就绪不进入清理、顺序固定、幂等重试。"""
+
+    async def test_ready_after_all_gates_and_in_order(self) -> None:
+        fakes = _CloseFakes()
+        receipt = await _runtime(fakes).prepare_close(_command())
+        assert receipt.ready is True
+        assert receipt.blocking_reasons == ()
+        assert receipt.unknown_associations == ("operation-unknown-1",)
+        assert receipt.inflight_task_count == 0
+        assert receipt.command.close_command_id == "close-1"
+        assert fakes.calls == ["dispatch_close", "save_facts", "handle_close"]
+        assert receipt.checked_at.endswith("Z")
+
+    async def test_dispatch_not_closed_blocks_before_any_other_step(self) -> None:
+        fakes = _CloseFakes()
+        fakes.dispatch_ok = False
+        receipt = await _runtime(fakes).prepare_close(_command())
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_DISPATCH_NOT_CLOSED,)
+        assert fakes.calls == ["dispatch_close"]  # 不保存、不关闭
+        assert receipt.unknown_associations == ()
+
+    async def test_inflight_io_blocks_fact_save_and_close(self) -> None:
+        fakes = _CloseFakes()
+        fakes.inflight = 2
+        receipt = await _runtime(fakes).prepare_close(_command())
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_IO_IN_FLIGHT,)
+        assert receipt.inflight_task_count == 2
+        assert fakes.calls == ["dispatch_close"]
+
+    async def test_unsaved_facts_block_close_and_keep_unknown(self) -> None:
+        fakes = _CloseFakes()
+        fakes.saved = False
+        receipt = await _runtime(fakes).prepare_close(_command())
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_FACTS_NOT_SAVED,)
+        assert receipt.unknown_associations == ("operation-unknown-1",)
+        assert "handle_close" not in fakes.calls
+
+    async def test_sink_exception_is_retryable(self) -> None:
+        fakes = _CloseFakes()
+        fakes.sink_error = RuntimeError("db down")
+        runtime = _runtime(fakes)
+        first = await runtime.prepare_close(_command())
+        assert first.ready is False
+        assert first.blocking_reasons == (runtime_mod.CLOSE_BLOCK_FACTS_SAVE_FAILED,)
+        fakes.sink_error = None
+        second = await runtime.prepare_close(_command())
+        assert second.ready is True  # 失败后保留资源，可重试
+
+    async def test_close_exception_blocks_and_allows_retry(self) -> None:
+        fakes = _CloseFakes()
+        fakes.close_error = RuntimeError("destroy failed")
+        runtime = _runtime(fakes)
+        first = await runtime.prepare_close(_command())
+        assert first.ready is False
+        assert first.blocking_reasons == (runtime_mod.CLOSE_BLOCK_RUNTIME_CLOSE_FAILED,)
+        fakes.close_error = None
+        second = await runtime.prepare_close(_command())
+        assert second.ready is True
+
+    async def test_idempotent_retry_returns_original_receipt(self) -> None:
+        fakes = _CloseFakes()
+        runtime = _runtime(fakes)
+        first = await runtime.prepare_close(_command())
+        other = runtime_mod.CloseCommandIdentity(user_scope="user-1", close_command_id="close-2")
+        second = await runtime.prepare_close(other)
+        assert second is first  # 原身份回执，不重复 destroy
+        assert fakes.calls.count("handle_close") == 1
+        assert second.command.close_command_id == "close-1"
+
+    async def test_cancelled_error_propagates(self) -> None:
+        fakes = _CloseFakes()
+        fakes.sink_error = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await _runtime(fakes).prepare_close(_command())
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert "handle_close" not in fakes.calls
+
+    async def test_empty_command_identity_rejected(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            await _runtime(_CloseFakes()).prepare_close(
+                runtime_mod.CloseCommandIdentity(user_scope="", close_command_id="close-1")
+            )
+        assert "close command identity" in str(exc_info.value)
