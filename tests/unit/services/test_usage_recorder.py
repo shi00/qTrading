@@ -31,6 +31,12 @@
   修复前 metadata 透传恒 None → DAO 关闭条件对 NULL 永不成立）；
 - 窗口扫描改 DAO 批量收口：确认关闭才移除内存扫描项（失败保留下轮重试），
   未到期项保留（截止已持久化，跨重启由下次启动批量收口按期关闭）。
+
+覆盖（S-UREC-02 修订水位生命周期回收）：
+- 成功 aclose 的最终清理块随其余缓冲一并清空 ``_revision_watermarks``
+  （多 attempt 修订推进后水位无残留）；取消路径水位保留不清（与事实缓冲
+  同生命周期）；回收后旧响应重建观察的重提交以 revision=1 落账、由 DAO
+  ``accounted_usage_revision`` 持久水位拒绝（Recorder 侧不残留内存条目）。
 """
 
 import asyncio
@@ -1113,6 +1119,78 @@ class TestRevisionAdvancement:
         assert expires is not None
         assert isinstance(expires, datetime.datetime)
         assert expires.tzinfo is None  # naive UTC，与 DAO 侧 now() AT TIME ZONE 'UTC' 同域
+
+
+class TestRevisionWatermarkReclaim:
+    """S-UREC-02：修订水位生命周期回收——成功 aclose 最终清理块全量清空；
+    取消路径保留（与事实缓冲同生命周期）；回收后旧响应重提交由 DAO 持久
+    accounted 水位拒绝（内存不残留、不双计）。运行期逐窗口回收不在本次范围。"""
+
+    @pytest.mark.asyncio
+    async def test_aclose_clears_watermarks_after_multiple_attempts_settled(self):
+        """多个不同 attempt 成功落账且修订推进水位后 aclose → 水位随其余缓冲清空。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=3))
+        recorder.observe_usage(_observation("att-2"))
+        recorder.observe_usage(_observation("att-3"))
+        for attempt_id in ("att-1", "att-2", "att-3"):
+            assert (await recorder.submit_terminal(_terminal(attempt_id))).persisted is True
+        assert recorder._revision_watermarks == {"att-1": 3, "att-2": 1, "att-3": 1}
+        await recorder.aclose()
+        assert recorder._revision_watermarks == {}
+        assert recorder.pending_observation_count() == 0
+        assert recorder._closed is True
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancelled_keeps_watermarks(self):
+        """取消路径水位保留：flush 被 CancelledError 打断时不清水位（清理块未到达），
+        完成标记不置位，下次顺序 aclose 重试后随成功清理一并回收。"""
+        dao = _dao_mock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        dao.settle_attempt_usage = AsyncMock(side_effect=_cancel)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=2))
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await recorder.aclose()
+        assert excinfo.type is asyncio.CancelledError
+        # 水位随事实缓冲保留（若误清则旧修订重放将失去内存单调防线）
+        assert recorder._revision_watermarks == {"att-1": 2}
+        assert recorder._closed is False
+        # 第二次 aclose（账本恢复）：重试 flush 后清理块回收水位
+        dao.settle_attempt_usage = AsyncMock(return_value=True)
+        await recorder.aclose()
+        assert recorder._revision_watermarks == {}
+        assert recorder._closed is True
+
+    @pytest.mark.asyncio
+    async def test_replay_after_reclaim_rejected_by_dao_watermark(self):
+        """回收后旧响应重提交：内存水位已清，observe 重建观察并以 revision=1
+        落账；防双计由 DAO accounted_usage_revision 持久水位拒绝（模拟返回 False）
+        → Recorder 收敛 OWNER_LEASE_LOST 并丢弃观察，内存不残留。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is True
+        await recorder.aclose()
+        assert recorder._revision_watermarks == {}
+        # 旧响应迟到重放：观察重建（内存水位已回收，无法在 Recorder 侧拦截）
+        recorder.observe_usage(_observation("att-1"))
+        assert recorder.pending_observation_count() == 1
+        # DAO 侧行已结算（accounted_revision >= 1）→ revision=1 不推进 → 返回 False
+        dao.settle_attempt_usage = AsyncMock(return_value=False)
+        outcome = await recorder.submit_terminal(_terminal("att-1"))
+        assert outcome == PersistenceOutcome(persisted=False, error_code="OWNER_LEASE_LOST")
+        submit_kwargs = dao.settle_attempt_usage.await_args.kwargs
+        assert submit_kwargs["usage_revision"] == 1
+        # 被拒后观察确认丢弃：内存不残留（水位/观察/窗口均不留旧响应条目）
+        assert recorder.pending_observation_count() == 0
+        assert "att-1" not in recorder._pending_settle
 
 
 class TestUsageWindowScanF33:

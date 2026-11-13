@@ -172,6 +172,11 @@ class UsageRecorder:
         # attempt_id → 不可变用量快照（首次观察建档；修订观察经水位单调覆盖）
         self._observations: dict[str, AttemptUsageObservation] = {}
         # F33：attempt_id → 修订水位（R22 单调；结算 revision 依此推进，不再固定 1）
+        # NOTE(lazy): 运行期不做逐窗口水位回收（仅成功 aclose 时全量清空）.
+        # ceiling: 条目数 = 停机前历史 attempt 总量（每条目 str + int，千次尝试约 KB 级）.
+        # upgrade: 核实 DAO 已关闭窗口的修订拒绝契约（usage_window_closed_at 是否参与
+        # settle_attempt_usage 拒绝判定）后改为窗口确认关闭时逐项移除；或长期持有
+        # Recorder 的进程实测水位内存增长显著时.
         self._revision_watermarks: dict[str, int] = {}
         # attempt_id → 窗口到期墙钟时刻（惰性扫描用；F33 起与持久化截止同域）
         self._windows: dict[str, datetime.datetime] = {}
@@ -623,6 +628,10 @@ class UsageRecorder:
         传播不吞（R2），完成标记与缓冲清空均不发生——未落账事实保留在内存缓冲
         并明确告警，下次顺序 aclose 重试 flush（重放原始失败队列与未结算观察；
         重试失败仍保留并告警，R21 不伪装已结算、不宣称 DB 未确认数据已落账）。
+        S-UREC-02：成功关闭的最终清理块同步回收修订水位（``_revision_watermarks``）
+        ——已入账事实的防双计由 DAO 侧 ``accounted_usage_revision`` 持久水位兜底
+        （旧修订重放被拒绝），内存水位无长期保留价值，随其余缓冲一并清空；
+        运行期逐窗口回收不在本次范围（见 ``_revision_watermarks`` 处 NOTE(lazy)）。
         成功关闭后二次 aclose 幂等返回，不新增写账（尽力而为不变：flush 内失败
         仍如实告警后随最终清理释放，留痕见日志）。
 
@@ -644,6 +653,7 @@ class UsageRecorder:
         self._observations.clear()
         self._pending_settle.clear()
         self._windows.clear()
+        self._revision_watermarks.clear()
         self._closed = True
 
     async def _flush_before_close(self) -> None:
