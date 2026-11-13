@@ -36,14 +36,15 @@ from utils.time_utils import from_utc_to_cst, get_now
 # 在渲染时按当前 locale 翻译 (CLAUDE.md §3.2 i18n 状态驱动；data 层不感知 locale).
 NEWS_TITLE_CODE_TO_I18N_KEY: dict[str, str] = {"no_title": "news_no_title"}
 
-# A 股股票代码「强标记」正则 (UX-09 MINOR-03): 仅匹配带交易所前缀 (SH/SZ/BJ)
+# A 股股票代码「强标记」正则 (UX-09 MINOR-03 / M27-08): 仅匹配带交易所前缀 (SH/SZ/BJ)
 # 或被括号包裹的 6 位数字 (如 SZ000001 / （600519） / （SH600519）), 不匹配孤立 6 位数字——
 # 裸数字易把金额/数量 (如「募资 600000 万元」「成交 300750 手」) 当股票代码, 且这些数值
 # 本身可能恰好是合法代码, 故必须依赖强标记 + 有效代码集合双重校验 (见 _extract_stock_codes)。
-# 两个捕获组分别对应「前缀式」与「括号式」, 命中其一即取该组。
+# 保留交易所前缀捕获组 (M27-08): 「上证指数 SH000001」中 000001 是沪市指数,
+# 000001.SZ 才是平安银行; 丢掉交易所会伪造出「查看个股(000001)」错误链接。
 _STOCK_CODE_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:SH|SZ|BJ)(\d{6})(?!\d)"
-    r"|[（(]\s*(?:SH|SZ|BJ)?\s*(\d{6})\s*[）)]",
+    r"(?<![A-Za-z0-9])(?P<prefix>SH|SZ|BJ)(?P<prefixed_code>\d{6})(?!\d)"
+    r"|[（(]\s*(?:(?P<bracket_prefix>SH|SZ|BJ)\s*)?(?P<bracket_code>\d{6})\s*[）)]",
     re.IGNORECASE,
 )
 
@@ -94,22 +95,38 @@ def _translate_title_code(code: str) -> str:
     return I18n.get(i18n_key)
 
 
-def _extract_stock_codes(content: str, valid_codes: frozenset[str] | None = None) -> list[str]:
+def _extract_stock_codes(
+    content: str,
+    valid_codes: frozenset[str] | None = None,
+    *,
+    valid_stock_ts_codes: frozenset[str] | None = None,
+) -> list[str]:
     """从新闻内容提取被强标记指向的 A 股股票代码 (6 位, 按出现顺序去重).
 
-    UX-09 MINOR-03: 仅认可「带 SH/SZ/BJ 前缀」或「被括号包裹」的 6 位数字, 且必须落在
-    ``valid_codes`` (stock_basic 落库的有效代码集合) 内, 才视为股票引用 (双重校验)。
+    UX-09 MINOR-03: 仅认可「带 SH/SZ/BJ 前缀」或「被括号包裹」的 6 位数字。
     孤立 6 位数字不再匹配: 金额/数量 (如「募资 600000 万元」「成交 300750 手」) 与股票
     代码同形, 且这些数值本身可能恰好是合法代码, 仅靠正则或代码集合都无法区分, 故以
     强标记为准, 从源头杜绝误链接 (R21 精神: 宁可少链接也不伪造可信引用)。
 
+    M27-08: 带交易所前缀的引用保留交易所身份后再校验——
+    「上证指数 SH000001」的 ``000001.SH`` 是指数, 不能借裸 ``000001`` 冒充平安银行
+    (``000001.SZ``)。因此:
+
+    - 带前缀 (含括号内带前缀, 如 ``（SH600519）``) 的候选必须以 ``CODE.EXCHANGE``
+      落在 ``valid_stock_ts_codes`` (``stock_basic`` 完整股票身份集合) 内才展示;
+      未提供该集合时一律不展示 (宁少链接不伪造)。
+    - 括号内无交易所 (如 ``（600519）``) 维持既有 ``valid_codes`` (6 位 symbol) 校验。
+
     正文含多只股票时返回多个代码 (按出现顺序), 供渲染多个「查看个股」链接。
+    返回值为 6 位 symbol (不含交易所), 与深链 ``screener:<code>`` 协议一致。
 
     Args:
         content: 新闻正文。
-        valid_codes: 有效股票代码集合 (6 位 symbol, 源自 ``stock_basic``); 为空/None 时
-            一律返回空列表——DB 未就绪或加载失败时降级为不生成链接, 而非生成未经
-            校验的链接。
+        valid_codes: 有效 6 位股票代码集合 (源自 ``stock_basic``); 为空/None 时
+            括号内无交易所的候选一律不收录——DB 未就绪或加载失败时降级为不生成
+            链接, 而非生成未经校验的链接。
+        valid_stock_ts_codes: 有效完整股票身份集合 (``CODE.EXCHANGE``, 源自
+            ``stock_basic``); 为空/None 时带交易所前缀的候选一律不收录。
 
     Returns:
         校验通过且去重后的代码列表 (可能为空)。
@@ -117,13 +134,21 @@ def _extract_stock_codes(content: str, valid_codes: frozenset[str] | None = None
     if not content:
         return []
     valid = valid_codes or frozenset()
-    if not valid:
-        return []
+    valid_ts = valid_stock_ts_codes or frozenset()
     codes: list[str] = []
     seen: set[str] = set()
     for m in _STOCK_CODE_RE.finditer(content):
-        code = m.group(1) or m.group(2)
-        if code and code in valid and code not in seen:
+        code = m.group("prefixed_code") or m.group("bracket_code")
+        if not code:
+            continue
+        prefix = m.group("prefix") or m.group("bracket_prefix")
+        if prefix is not None:
+            # M27-08: 带交易所身份 → 必须命中完整股票身份集合, 不得回落裸 symbol 校验
+            if f"{code}.{prefix.upper()}" not in valid_ts:
+                continue
+        elif code not in valid:
+            continue
+        if code not in seen:
             seen.add(code)
             codes.append(code)
     return codes
@@ -203,14 +228,18 @@ def _build_news_item(
     on_view_stock: Callable[[str], None] | None = None,
     today: datetime.date | None = None,
     valid_stock_codes: frozenset[str] | None = None,
+    *,
+    valid_stock_ts_codes: frozenset[str] | None = None,
 ) -> ft.Container:
     """Build a single news item container (pure function).
 
     Receives a NewsRow + key, no state dependency.
     ``today`` 用于判定"今日/非今日"显示格式；缺省取 ``get_now().date()``
     （测试应显式注入固定日期，与生产取日期同源）。
-    ``valid_stock_codes`` 为有效股票代码集合 (stock_basic)，用于校验「查看个股」
-    链接候选 (UX-09 MINOR-03)；为空时不生成任何链接。
+    ``valid_stock_codes`` 为有效 6 位股票代码集合 (stock_basic)，用于校验括号内
+    无交易所的「查看个股」链接候选 (UX-09 MINOR-03)。
+    ``valid_stock_ts_codes`` 为完整股票身份集合 (``CODE.EXCHANGE``, stock_basic)，
+    用于校验带交易所前缀的候选 (M27-08)；为空时带前缀候选不生成链接。
     """
     if today is None:
         today = get_now().date()
@@ -262,7 +291,11 @@ def _build_news_item(
     )
 
     # 查看个股 link (仅当内容含经校验的股票引用且提供回调时显示; 可含多只)
-    stock_codes = _extract_stock_codes(content, valid_stock_codes)
+    stock_codes = _extract_stock_codes(
+        content,
+        valid_stock_codes,
+        valid_stock_ts_codes=valid_stock_ts_codes,
+    )
     content_controls: list[ft.Control] = [
         ft.Text(content, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_PRIMARY),
     ]
@@ -296,12 +329,15 @@ def _build_news_controls(
     today: datetime.date,
     on_view_stock: Callable[[str], None] | None = None,
     valid_stock_codes: frozenset[str] | None = None,
+    *,
+    valid_stock_ts_codes: frozenset[str] | None = None,
 ) -> list[ft.Control]:
     """构建新闻列表控件，换日时插入日期分隔条（纯函数，``today`` 注入便于测试）。
 
     按 ``news_rows`` 顺序遍历：某行日期与上一已渲染日期组不同时插入分隔条；
     同一日期多条目仅一条分隔条；日期缺失/无法解析的行不触发分组变化（R21）。
-    ``valid_stock_codes`` 透传给 ``_build_news_item`` 以校验「查看个股」链接候选。
+    ``valid_stock_codes`` / ``valid_stock_ts_codes`` 透传给 ``_build_news_item``
+    以校验「查看个股」链接候选。
     """
     controls: list[ft.Control] = []
     current_date: datetime.date | None = None
@@ -318,6 +354,7 @@ def _build_news_controls(
                 on_view_stock=on_view_stock,
                 today=today,
                 valid_stock_codes=valid_stock_codes,
+                valid_stock_ts_codes=valid_stock_ts_codes,
             )
         )
     return controls
@@ -364,6 +401,8 @@ def NewsFeed(
     on_view_stock: Callable[[str], None] | None = None,
     valid_stock_codes: frozenset[str] | None = None,
     is_loading_more: bool = False,
+    *,
+    valid_stock_ts_codes: frozenset[str] | None = None,
 ) -> ft.Container:
     """News feed component (declarative).
 
@@ -383,10 +422,14 @@ def NewsFeed(
         on_load_more_click: "加载更多"按钮点击回调 — **无参**业务命令 (不接收
                    Flet ControlEvent, 由消费方直接绑定 VM command, M12-028)
         on_view_stock: "查看个股"点击回调, 接收股票代码 (Task 8.1)
-        valid_stock_codes: 有效股票代码集合 (stock_basic, 经 ViewModel 获取),
-                   用于校验"查看个股"链接候选 (UX-09 MINOR-03); 为空时不生成链接
+        valid_stock_codes: 有效 6 位股票代码集合 (stock_basic, 经 ViewModel 获取),
+                   用于校验括号内无交易所的「查看个股」链接候选 (UX-09 MINOR-03)
         is_loading_more: "加载更多"请求进行中 — 按钮置灰禁用并显示加载中文案,
                    为用户提供忙碌反馈 (对齐 ScreenerView run_disabled 惯例)
+        valid_stock_ts_codes: 完整股票身份集合 (``CODE.EXCHANGE``, stock_basic),
+                   用于校验带交易所前缀的「查看个股」链接候选 (M27-08); 为空时
+                   带前缀候选不生成链接 (宁少链接不伪造)。宿主需后续传入该集合,
+                   未传入时仅括号内无交易所的引用仍按 ``valid_stock_codes`` 展示。
     """
     # Subscribe to i18n + theme changes (triggers auto-rerender)
     ft.use_state(get_observable_state)
@@ -429,6 +472,7 @@ def NewsFeed(
         today,
         on_view_stock=on_view_stock,
         valid_stock_codes=valid_stock_codes,
+        valid_stock_ts_codes=valid_stock_ts_codes,
     )
 
     # --- Load more button (is_loading_more 时置灰 + 加载中文案, 提供忙碌反馈) ---
