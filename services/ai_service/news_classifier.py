@@ -116,9 +116,9 @@ def _validate_gguf_sentiment_output(response: AdapterResponse) -> ValidatedBusin
 
     - 仅接受 ``status ∈ {"success", "partial"}``（其余终态 adapter 已转译为异常，
       到达即契约破坏，抛错切换候选）；
-    - 按 ``text_id="0"`` 取本请求（单文本）条目；条目缺失 / label 缺失或未知 →
-      :class:`ModelOutputValidationError`（Executor 切换候选；全候选耗尽 →
-      unavailable → 情绪缺失，R21 不伪装）；
+    - 严格按 ``text_id="0"`` 取本请求（单文本）条目，**不回退**到其他 text_id 或
+      缺 ID 条目；条目缺失 / label 缺失或未知 → :class:`ModelOutputValidationError`
+      （Executor 切换候选；全候选耗尽 → unavailable → 情绪缺失，R21 不伪装）；
     - score / confidence 经 :func:`_finite_float` 归一（坏值归 None，不因数值列
       坏而丢弃有效 label；合法中性/零分不误报缺失）；
     - ``sentiment_model`` 取 adapter 产出身份（actual_model = 模型文件 stem tag，
@@ -142,9 +142,9 @@ def _validate_gguf_sentiment_output(response: AdapterResponse) -> ValidatedBusin
     if not isinstance(results, list) or not results:
         raise ModelOutputValidationError("sentiment output: results missing or empty")
 
-    entry = next((r for r in results if isinstance(r, dict) and r.get("text_id") == "0"), results[0])
-    if not isinstance(entry, dict):
-        raise ModelOutputValidationError("sentiment output: result entry is not an object")
+    entry = next((r for r in results if isinstance(r, dict) and r.get("text_id") == "0"), None)
+    if entry is None:
+        raise ModelOutputValidationError("sentiment output: text_id=0 result missing")
 
     raw_label = entry.get("label")
     code = _GGUF_LABEL_TO_CODE.get(raw_label) if isinstance(raw_label, str) else None
