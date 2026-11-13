@@ -5401,6 +5401,62 @@ def decode_source_read(value: object, path: str = "$.source_read") -> SourceRead
 
 
 @dataclass(frozen=True, slots=True)
+class SourceReadQuery:
+    """来源读取查询（§4.2 ``read_source``）：准确源版/摘要/已选定位 + 上下文引用。
+
+    ``locator`` 是调用方已展示的准确范围；读取必须与已存来源元数据逐字段一致，
+    不按名称/摘要模糊匹配代替原件（§3.3）。上下文二选一：草稿修订，或执行（可
+    含轮次与输入修订引用）；同时给出或都缺失均为 ``INPUT_INVALID``。
+    """
+
+    source_id: str
+    version: str
+    digest: str
+    locator: SourceLocator
+    draft_revision: int | None = None
+    execution_id: str | None = None
+    round_id: str | None = None
+    input_revision: int | None = None
+
+
+def encode_source_read_query(query: SourceReadQuery, path: str = "$.source_read_query") -> dict[str, Any]:
+    """校验并返回规范 wire 对象（身份/上下文约束不满足抛 ``AgentValidationError``）。"""
+
+    if not isinstance(query, SourceReadQuery):
+        _fail("invalid_type", path)
+    source_id = _require_str(query.source_id, f"{path}.source_id")
+    version = _require_str(query.version, f"{path}.version")
+    digest = _require_digest(query.digest, f"{path}.digest")
+    locator = decode_source_locator(to_wire_dict(query.locator), f"{path}.locator")
+    draft_revision = _opt_int(query.draft_revision, f"{path}.draft_revision", minimum=1)
+    execution_id = _opt_str(query.execution_id, f"{path}.execution_id")
+    round_id = _opt_str(query.round_id, f"{path}.round_id")
+    input_revision = _opt_int(query.input_revision, f"{path}.input_revision", minimum=1)
+    if locator.origin_ref.source_id != source_id or locator.origin_ref.source_version != version:
+        _fail("identity_mismatch", f"{path}.locator")
+    if draft_revision is not None and execution_id is not None:
+        _fail("context_conflict", f"{path}.execution_id")
+    if draft_revision is None and execution_id is None:
+        _fail("context_missing", f"{path}.context")
+    if draft_revision is not None and (round_id is not None or input_revision is not None):
+        _fail("context_conflict", f"{path}.round_id")
+    if execution_id is not None and (round_id is None) != (input_revision is None):
+        _fail("context_incomplete", f"{path}.round_id")
+    return to_wire_dict(
+        SourceReadQuery(
+            source_id=source_id,
+            version=version,
+            digest=digest,
+            locator=locator,
+            draft_revision=draft_revision,
+            execution_id=execution_id,
+            round_id=round_id,
+            input_revision=input_revision,
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class EvidenceLink:
     """依据边（§3.3）：链接存在不等于支持断言，``supports_claim`` 未知用 null。"""
 

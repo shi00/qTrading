@@ -50,6 +50,7 @@ from core.agent_types import (
     BindActualInputRequest,
     BusinessSourceRegistrationReceipt,
     BusinessSourceRegistrationRequest,
+    CanonicalJson,
     CommandReceipt,
     CommandRef,
     CommitState,
@@ -83,6 +84,7 @@ from core.agent_types import (
     EventPage,
     EventReadQuery,
     ExecutionSummary,
+    FactValue,
     GrantRevisionRequest,
     HistoryHit,
     HistoryPage,
@@ -98,6 +100,7 @@ from core.agent_types import (
     ReadMarkEntry,
     ReadMarkReceipt,
     ReadState,
+    RangeLimitation,
     RecordEventRequest,
     RecoveryExecution,
     RecoveryGrantFact,
@@ -113,8 +116,10 @@ from core.agent_types import (
     RevisionReceipt,
     ROUND_STOP_REASON_USER_TERMINATION,
     RECOVERY_UNVERIFIED_DISPLAY_STATES,
+    SOURCE_COVERAGES,
     SOURCE_REGISTRATION_CONSUMER_KINDS,
     SaveAnswerRequest,
+    SelectedRange,
     SessionRead,
     SessionReadQuery,
     SessionSummary,
@@ -123,11 +128,14 @@ from core.agent_types import (
     SourceClaimRequest,
     SourceConsumerRef,
     SourceConsumersPage,
+    SourceRead,
+    SourceReadQuery,
     SourceReadSummary,
     SourceRelationKind,
     SourceStopCommand,
     SourceStopReceipt,
     SourceVersionRef,
+    SourceRef,
     StartupIsolationRecord,
     SubmissionReceipt,
     ToolGrantFact,
@@ -135,6 +143,7 @@ from core.agent_types import (
     UsageCounterFact,
     UsageCounterUpdate,
     UsageSummary,
+    VerificationState,
     decode_artifact_page_item,
     decode_data_consent_binding,
     decode_command_receipt,
@@ -144,15 +153,20 @@ from core.agent_types import (
     decode_json_doc,
     decode_message_page_item,
     decode_operation_summary,
+    decode_fact_value,
+    decode_range_limitation,
     decode_read_mark_entry,
     decode_research_event,
+    decode_selected_range,
     decode_session_summary,
     decode_snapshot_identity,
     decode_source_read_summary,
+    decode_source_ref,
     decode_submission_receipt,
     encode_command_receipt,
     encode_data_consent_binding,
     encode_data_consent_claim,
+    encode_source_read_query,
     encode_source_ref,
     encode_submission_receipt,
     compute_history_query_digest,
@@ -255,6 +269,7 @@ def _budget_blocked(identity: str, reason: str) -> AgentServiceError:
 from data.persistence.models import (
     AgentArtifact,
     AgentAssetVersion,
+    AgentBodyPayload,
     AgentCleanupJob,
     AgentCommand,
     AgentDecision,
@@ -725,6 +740,271 @@ class AgentDao(BaseDao):
             error_code=error_code,
             next_action=None,
         )
+
+    # ------------------------------------------------------------------
+    # F-02-1：来源精确读取（§4.2 read_source）
+    # ------------------------------------------------------------------
+
+    async def read_source(self, query: SourceReadQuery, *, user_scope: str) -> SourceRead:
+        """读**已准备**的来源选定表示（§4.2/§9.10）：只读，零解析、零扩大范围。
+
+        语义：
+
+        - 查询与已存版本三方对齐（source_id/version/digest/locator）：摘要或定位
+          不一致 → ``REVISION_CONFLICT``，绝不静默换成最新/相近版本（§3.3）；
+        - 已存元数据自相矛盾（坏 ``source_ref``/核验态不一致/坏 coverage/facts）→
+          ``OPERATION_UNKNOWN``（fail-closed，R21）；
+        - 正文取 ``body_text`` 或 ``body_ref`` 载荷，核 owner 三元组/编码/长度/
+          SHA-256 后重建；缺失或损坏 → ``PERSISTENCE_UNAVAILABLE``，不回退摘要
+          （§9.10.1）；
+        - 未准备表示返回行内 ``read_state`` 与明确原因（不伪造空成功）；禁用/
+          清理后 ``available=False``，已存原因优先。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{query.source_id}@{query.version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        try:
+            encode_source_read_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.asset_id,
+                        AgentAssetVersion.asset_version,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.metadata_payload,
+                        AgentAssetVersion.read_state,
+                        AgentAssetVersion.verification_state,
+                        AgentAssetVersion.body_text,
+                        AgentAssetVersion.body_ref,
+                        AgentAssetVersion.disabled_at,
+                        AgentAssetVersion.cleaned_at,
+                        AgentAssetVersion.tombstoned,
+                    ).where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == query.source_id,
+                        AgentAssetVersion.asset_version == query.version,
+                        AgentAssetVersion.asset_kind == "source",
+                    )
+                )
+            ).first()
+            if row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "source version not found in user scope", identity
+                )
+            if row.digest != query.digest:
+                raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "source digest mismatch", identity)
+            source_ref, verification, metadata = self._decode_source_asset_row(
+                row, user_scope=user_scope, identity=identity
+            )
+            if source_ref.locator != query.locator:
+                raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "source locator mismatch", identity)
+            try:
+                read_state = ReadState(row.read_state)
+            except ValueError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"unreadable source read_state: {type(exc).__name__}",
+                    identity,
+                ) from exc
+            body_text: str | None = row.body_text
+            if body_text is None and row.body_ref is not None:
+                body_text = await self._read_body_text(
+                    conn,
+                    user_scope=user_scope,
+                    body_ref=row.body_ref,
+                    owner_kind="asset",
+                    owner_id=query.source_id,
+                    owner_version=query.version,
+                    identity=identity,
+                )
+            missing_reason = source_ref.missing_reason
+            if body_text is None and missing_reason is None:
+                missing_reason = "representation_not_available"
+            return SourceRead(
+                source=source_ref,
+                selected_range=self._source_selected_range(metadata, source_ref, identity),
+                read_state=read_state,
+                body_text=body_text,
+                structured_blocks=self._source_blocks(metadata, identity),
+                facts=self._source_facts(metadata, identity),
+                coverage=self._source_coverage(metadata, identity),
+                verification=verification,
+                limitations=self._source_limitations(metadata, identity),
+                available=(
+                    not row.tombstoned
+                    and row.disabled_at is None
+                    and row.cleaned_at is None
+                    and read_state is not ReadState.UNAVAILABLE
+                ),
+                missing_reason=missing_reason,
+            )
+
+    def _decode_source_asset_row(
+        self, row: Any, *, user_scope: str, identity: str
+    ) -> tuple[SourceRef, VerificationState, dict[str, Any]]:
+        """严格解码来源资产行元数据；任何自相矛盾按 ``OPERATION_UNKNOWN`` 拒绝。"""
+
+        metadata = row.metadata_payload
+        if not isinstance(metadata, dict) or metadata.get("schema_version") != 1:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is unreadable", identity)
+        try:
+            source_ref = decode_source_ref(metadata.get("source_ref"), "$.metadata.source_ref")
+            verification = VerificationState(row.verification_state)
+            metadata_verification = VerificationState(metadata.get("verification"))
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, f"source metadata is invalid: {type(exc).__name__}", identity
+            ) from exc
+        if (
+            source_ref.user_scope != user_scope
+            or (source_ref.source_id, source_ref.version) != (row.asset_id, row.asset_version)
+            or source_ref.digest != row.digest
+            or metadata_verification is not verification
+        ):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is inconsistent", identity)
+        return source_ref, verification, metadata
+
+    @staticmethod
+    def _source_selected_range(metadata: dict[str, Any], source_ref: SourceRef, identity: str) -> SelectedRange:
+        """已存选定范围；未存时按已选 locator 派生（未读、统计未知，不填 0）。"""
+
+        value = metadata.get("selected_range")
+        if value is None:
+            return SelectedRange(selection=source_ref.locator.selection)
+        try:
+            return decode_selected_range(value, "$.metadata.selected_range")
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, f"source selected_range is invalid: {exc.code}", identity
+            ) from exc
+
+    @staticmethod
+    def _source_facts(metadata: dict[str, Any], identity: str) -> tuple[FactValue, ...]:
+        value = metadata.get("facts")
+        if value is None:
+            return ()
+        if not isinstance(value, list):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source facts are unreadable", identity)
+        try:
+            return tuple(decode_fact_value(item, f"$.metadata.facts[{index}]") for index, item in enumerate(value))
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, f"source facts are invalid: {exc.code}", identity
+            ) from exc
+
+    @staticmethod
+    def _source_blocks(metadata: dict[str, Any], identity: str) -> tuple[CanonicalJson, ...]:
+        value = metadata.get("structured_blocks")
+        if value is None:
+            return ()
+        if not isinstance(value, list):
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "source structured_blocks are unreadable", identity
+            )
+        blocks: list[str] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"source structured_blocks[{index}] is not canonical json text",
+                    identity,
+                )
+            try:
+                decode_json_doc(item)
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"source structured_blocks[{index}] is invalid: {exc.code}",
+                    identity,
+                ) from exc
+            blocks.append(item)
+        return tuple(blocks)
+
+    @staticmethod
+    def _source_coverage(metadata: dict[str, Any], identity: str) -> str:
+        """未记录覆盖度时返回 ``unknown``（不宣称完整，R21）。"""
+
+        value = metadata.get("coverage")
+        if value is None:
+            return "unknown"
+        if not isinstance(value, str) or value not in SOURCE_COVERAGES:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source coverage is invalid", identity)
+        return value
+
+    @staticmethod
+    def _source_limitations(metadata: dict[str, Any], identity: str) -> tuple[RangeLimitation, ...]:
+        value = metadata.get("limitations")
+        if value is None:
+            return ()
+        if not isinstance(value, list):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source limitations are unreadable", identity)
+        try:
+            return tuple(
+                decode_range_limitation(item, f"$.metadata.limitations[{index}]") for index, item in enumerate(value)
+            )
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, f"source limitations are invalid: {exc.code}", identity
+            ) from exc
+
+    @staticmethod
+    async def _read_body_text(
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        body_ref: str,
+        owner_kind: str,
+        owner_id: str,
+        owner_version: str,
+        identity: str,
+    ) -> str:
+        """重建单块正文（§9.10.1）：核 owner/编码/长度/SHA-256，失败报不可得。"""
+
+        row = (
+            await conn.execute(
+                sa.select(
+                    AgentBodyPayload.owner_kind,
+                    AgentBodyPayload.owner_id,
+                    AgentBodyPayload.owner_version,
+                    AgentBodyPayload.encoding,
+                    AgentBodyPayload.payload_bytes,
+                    AgentBodyPayload.byte_length,
+                    AgentBodyPayload.payload_digest,
+                ).where(
+                    AgentBodyPayload.user_scope == user_scope,
+                    AgentBodyPayload.body_ref == body_ref,
+                )
+            )
+        ).first()
+        if row is None:
+            raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload is missing", identity)
+        data = bytes(row.payload_bytes)
+        if (
+            row.owner_kind != owner_kind
+            or row.owner_id != owner_id
+            or row.owner_version != owner_version
+            or row.encoding != "utf-8"
+        ):
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload owner or encoding mismatch", identity
+            )
+        if row.byte_length != len(data) or sha256_hex(data) != row.payload_digest:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload length or digest mismatch", identity
+            )
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload is not valid utf-8", identity
+            ) from exc
 
     async def bind_actual_input(self, request: BindActualInputRequest) -> BindActualInputReceipt:
         """首派发实际输入绑定（§9.13/SQ-02 W 首步）：建 agent_round +

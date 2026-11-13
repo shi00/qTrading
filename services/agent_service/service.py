@@ -33,6 +33,8 @@ from core.agent_types import (
     ResearchSnapshot,
     SessionRead,
     SessionReadQuery,
+    SourceRead,
+    SourceReadQuery,
     SubmissionReceipt,
     derive_accept_identity,
 )
@@ -89,6 +91,16 @@ class AgentService:
 
         self._require_open("read_events")
         return await self._dao.read_events(query)
+
+    async def read_source(self, query: SourceReadQuery, *, user_scope: str) -> SourceRead:
+        """精确资料卡/依据详情（§4.2）：只读已准备好的选定表示。
+
+        未准备表示由 DAO 返回 ``read_state`` 与原因（不现场解析、不扩大范围）；
+        版本/摘要/定位不符为 ``REVISION_CONFLICT``，坏事实为 ``OPERATION_UNKNOWN``。
+        """
+
+        self._require_open("read_source")
+        return await self._dao.read_source(query, user_scope=user_scope)
 
     def observe_session(
         self,
