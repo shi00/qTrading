@@ -4475,3 +4475,257 @@ def decode_history_page(value: object, path: str = "$.history_page") -> HistoryP
         next_cursor=next_cursor,
         read_moment=_require_utc_timestamp(value["read_moment"], f"{path}.read_moment"),
     )
+
+
+# ======================================================================
+# C-04 资源票据/计数/源禁用/阅读批次合同（§5.4/§5.5/§9.11/§9.13/§4.2 L436）
+# ======================================================================
+
+
+class ResourceSlotKind(Enum):
+    """资源票据种类（§9.11）：global_guard 为全局仲裁行，不分配研究。"""
+
+    TOTAL = "total"
+    LEAF = "leaf"
+    GLOBAL_GUARD = "global_guard"
+
+
+@dataclass(frozen=True)
+class ResourceClaimRequest:
+    """资源票据认领请求（§5.5：票据至少 kind/slot_id/execution_id/node_id/owner_epoch）。
+
+    ``slot_id`` 由调用方按稳定身份派生（stable_id），同 slot_id 同输入为幂等重放，
+    异输入为 ``INPUT_CONFLICT``；已释出票据的 slot_id 不得复用（零复活）。
+    """
+
+    user_scope: str
+    slot_id: str
+    slot_kind: ResourceSlotKind
+    execution_id: str
+    node_id: str
+    round_id: str | None
+    owner_epoch: int
+    operation_refs: CanonicalJson | None
+
+
+@dataclass(frozen=True)
+class ResourceTicket:
+    """资源票据（§5.5）：认领成功或幂等重放返回的准确票据。"""
+
+    slot_id: str
+    slot_kind: ResourceSlotKind
+    execution_id: str
+    node_id: str
+    round_id: str | None
+    owner_epoch: int
+    run_epoch: int
+    claimed_at: str
+
+
+@dataclass(frozen=True)
+class ResourceReleaseRequest:
+    """资源票据释放请求（§5.5：释放必须完整匹配，不用 TTL/租约/旧 owner）。
+
+    ``exit_verified=False`` 表示退出尾段未知：票据保持占用（release_verified
+    不放空），须实际全退或用户保未知结案后以 ``exit_verified=True`` 再释放。
+    """
+
+    user_scope: str
+    slot_id: str
+    execution_id: str
+    node_id: str
+    owner_epoch: int
+    exit_verified: bool
+
+
+@dataclass(frozen=True)
+class ResourceReleaseReceipt:
+    """资源票据释放回执：``released=False`` 表示容量保留（未知在途不放空）。"""
+
+    slot_id: str
+    released: bool
+    release_verified: bool
+    released_at: str | None
+    owner_epoch: int
+
+
+@dataclass(frozen=True)
+class UsageCounterUpdate:
+    """执行累计计数更新（§5.5/§9.4）：绝对累计值 GREATEST 合并（R22）。
+
+    ``active_ms`` 为已核可靠下界；未关闭区间尾段未知不记 0、不伪完整用时。
+    """
+
+    user_scope: str
+    execution_id: str
+    model_attempt_count: int
+    tool_call_count: int
+    active_ms: int
+
+
+@dataclass(frozen=True)
+class UsageCounterFact:
+    """执行累计计数落定事实：三计数均为 GREATEST 合并后的落定值。"""
+
+    execution_id: str
+    model_attempt_count: int
+    tool_call_count: int
+    active_ms: int
+
+
+@dataclass(frozen=True)
+class SourceStopCommand:
+    """停止使用来源命令（§3.3.2/§5.4）：已解析的准确 SourceVersionRef。
+
+    ``command_id`` 为调用方 stop_using 命令键（幂等重放）；同键异输入
+    ``INPUT_CONFLICT``。禁用先胜零受影响新出站，claim 先胜保在途事实。
+    """
+
+    user_scope: str
+    source_id: str
+    source_version: str
+    command_id: str
+
+
+@dataclass(frozen=True)
+class SourceStopReceipt:
+    """停止使用来源回执：disabled_revision 为 GREATEST 落定值（零复活）。"""
+
+    source_id: str
+    source_version: str
+    disabled_revision: int
+    already_disabled: bool
+    disabled_at: str
+
+
+@dataclass(frozen=True)
+class SourceClaimRequest:
+    """源派发认领请求（§5.4 共同仲裁）：持锁事务内新鲜重读禁用状态。
+
+    ``claim_ref`` 为绑定 revision 的原 operation 认领身份（幂等重放键）；
+    sources 按规范排序在锁内核禁用/谱系，任一已禁用 → ``SOURCE_DISABLED``。
+    """
+
+    user_scope: str
+    claim_ref: str
+    operation_id: str
+    sources: tuple[SourceVersionRef, ...]
+
+
+@dataclass(frozen=True)
+class SourceClaimBinding:
+    """单源版本认领绑定：认领时新鲜重读到的 disabled_revision（claim 锚定值）。"""
+
+    source_id: str
+    source_version: str
+    disabled_revision: int
+
+
+@dataclass(frozen=True)
+class SourceClaimFact:
+    """源派发认领事实：``replayed=True`` 为同 claim_ref 重放返回原事实。"""
+
+    claim_ref: str
+    bindings: tuple[SourceClaimBinding, ...]
+    replayed: bool
+
+
+@dataclass(frozen=True)
+class SourceConsumerRef:
+    """来源消费者谱系项（§9.10）：已知衍生闭包的单条边投影。"""
+
+    link_id: str
+    source_id: str
+    source_version: str
+    consumer_kind: str
+    consumer_id: str
+    consumer_version: str
+    relation_kind: str
+    disabled_inherited: bool
+
+
+@dataclass(frozen=True)
+class SourceConsumersPage:
+    """来源消费者列举页：已知边全量返回（边表即已知闭包）；未知关联不在其内，
+    不将未知当空集（阻断判定由派发方按关联不明处理）。"""
+
+    source_id: str
+    source_version: str
+    consumers: tuple[SourceConsumerRef, ...]
+    read_moment: str
+
+
+@dataclass(frozen=True)
+class ReadMarkCommand:
+    """已读标记命令（§4.2 L436）：只有准确已读身份或经核连续已读水位。
+
+    ``observed_through_seq`` 与 ``observation_scope_digest`` 必须同给同缺；
+    不全局清零，乱序最终取 max（R22）。
+    """
+
+    user_scope: str
+    session_id: str
+    command_id: str
+    message_ids: tuple[str, ...]
+    artifact_refs: tuple[str, ...]
+    observed_through_seq: int | None
+    observation_scope_digest: str | None
+
+
+@dataclass(frozen=True)
+class ReadMarkReceipt:
+    """已读标记回执：last_seq/read_targets 为 GREATEST/并集合并后的落定值。"""
+
+    session_id: str
+    command_id: str
+    last_seq: int
+    read_target_count: int
+    replayed: bool
+    marked_at: str
+
+
+@dataclass(frozen=True)
+class DecisionBatchFact:
+    """待决定批次事实（§9.11/AC33）：新批次行锁下递增 batch_seq；稍后只推
+    postponed_through_seq=GREATEST，同项状态变更不造新批次。"""
+
+    batch_seq: int
+    postponed_through_seq: int | None
+    replayed: bool
+    recorded_at: str
+
+
+def validate_resource_claim_request(request: ResourceClaimRequest) -> None:
+    """资源认领请求结构校验（§5.5）：guard 不经本入口、slot_id 不与保留键冲突。"""
+
+    _require_str(request.user_scope, "$.user_scope")
+    if request.slot_kind is ResourceSlotKind.GLOBAL_GUARD:
+        _fail("guard_not_claimable", "$.slot_kind")
+    if request.slot_id == "global_guard":
+        _fail("reserved_slot_id", "$.slot_id")
+    _require_str(request.slot_id, "$.slot_id")
+    _require_str(request.execution_id, "$.execution_id")
+    _require_str(request.node_id, "$.node_id")
+    if request.round_id is not None:
+        _require_str(request.round_id, "$.round_id")
+    _require_p(request.owner_epoch, "$.owner_epoch")
+    if request.operation_refs is not None:
+        if not isinstance(request.operation_refs, dict):
+            _fail("invalid_type", "$.operation_refs")
+
+
+def validate_read_mark_command(command: ReadMarkCommand) -> None:
+    """已读标记命令校验（§4.2 L436）：水位与 scope digest 同给同缺。"""
+
+    _require_str(command.user_scope, "$.user_scope")
+    _require_str(command.session_id, "$.session_id")
+    _require_str(command.command_id, "$.command_id")
+    if (command.observed_through_seq is None) != (command.observation_scope_digest is None):
+        _fail("scope_pair_required", "$.observed_through_seq")
+    if command.observed_through_seq is not None:
+        _require_n(command.observed_through_seq, "$.observed_through_seq")
+        _require_digest(command.observation_scope_digest, "$.observation_scope_digest")
+    for index, message_id in enumerate(command.message_ids):
+        _require_str(message_id, f"$.message_ids[{index}]")
+    for index, ref in enumerate(command.artifact_refs):
+        _require_str(ref, f"$.artifact_refs[{index}]")
