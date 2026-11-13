@@ -31,6 +31,7 @@ from core.agent_types import (
     sha256_hex,
     validate_mcp_deadline,
 )
+from services.agent_service.mcp_budget import MCPBudgetGuard
 
 # ---------------------------------------------------------------------------
 # 传输配置（stdio 绝对可执行/不经 shell；HTTP 无内嵌凭据；SSE 需显式核准）
@@ -207,6 +208,8 @@ class SharedMCPConnectionManager:
         self._factory = factory
         self._probe = probe
         self._sessions: dict[str, MCPClientSessionPort] = {}
+        self._configs: dict[str, MCPServerConfig] = {}
+        self._guards: dict[str, MCPBudgetGuard] = {}
         self._in_flight: dict[str, set[str]] = {}
 
     # -- 配置 ---------------------------------------------------------------
@@ -280,6 +283,8 @@ class SharedMCPConnectionManager:
                 label,
             )
         self._sessions[key] = await self._factory.open(config)
+        self._configs[key] = config
+        self._guards[key] = MCPBudgetGuard(config.budget, identity=label)
 
     async def disconnect(self, identity: MCPServiceIdentity) -> None:
         """显式断开：有在途调用默认拒停（用户先暂停并核实际退出）。"""
@@ -290,16 +295,43 @@ class SharedMCPConnectionManager:
         session = self._sessions.pop(label, None)
         if session is not None:
             await session.aclose()
+        self._configs.pop(label, None)
+        self._guards.pop(label, None)
         self._in_flight.pop(label, None)
 
     def is_connected(self, identity: MCPServiceIdentity) -> bool:
         return _identity_text(identity) in self._sessions
+
+    def session(self, identity: MCPServiceIdentity) -> MCPClientSessionPort:
+        """已建立的共享会话；未启连即拒绝（不隐式建连）。"""
+
+        label = _identity_text(identity)
+        session = self._sessions.get(label)
+        if session is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
+        return session
+
+    def tool_deadline_s(self, identity: MCPServiceIdentity) -> int:
+        label = _identity_text(identity)
+        config = self._configs.get(label)
+        if config is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
+        return config.tool_deadline_s
+
+    def budget_guard(self, identity: MCPServiceIdentity) -> MCPBudgetGuard:
+        label = _identity_text(identity)
+        guard = self._guards.get(label)
+        if guard is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
+        return guard
 
     def mark_session_lost(self, identity: MCPServiceIdentity) -> None:
         """断线明示：移除会话，不自动重连/重启。"""
 
         label = _identity_text(identity)
         self._sessions.pop(label, None)
+        self._configs.pop(label, None)
+        self._guards.pop(label, None)
 
     # -- 在途归属 -----------------------------------------------------------
 
