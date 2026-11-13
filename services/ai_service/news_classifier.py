@@ -486,9 +486,11 @@ class NewsClassifier:
           "sentiment"]["candidates"]`` 构造独立 ExecutionSnapshot（dataclasses.replace
           子路由快照），Executor 按 scenario_id 命中该子路由候选，与主题候选互不干扰；
         - reuse_bundled_sentiment 显式降级（正本 L249/L250，方案 §2.1）：主题响应若
-          携带合法联合情绪（validator 捕获），仅当「专用链整体不可用」（非 invalid_output
-          耗尽）时复用（source="reuse_bundled"）；invalid_output 耗尽 → 保持缺失不回填
-          （R21）。dedicated 主题请求为纯主题 prompt，联合情绪仅在模型自愿输出时产生。
+          携带合法联合情绪（validator 捕获），仅当
+          ``task_routes.sentiment.reuse_bundled_sentiment`` 严格为 True（缺键默认 True）
+          且「专用链整体不可用」（非 invalid_output 耗尽）时复用（source="reuse_bundled"）；
+          invalid_output 耗尽或开关显式 False/畸形值 → 保持缺失不回填（R21）。dedicated
+          主题请求为纯主题 prompt，联合情绪仅在模型自愿输出时产生。
         """
         import services.ai_service as _ai
 
@@ -616,9 +618,15 @@ class NewsClassifier:
                     dispatch,
                     cast(ScenarioOutput, sentiment_result.outputs[0]).metadata,
                 )
-        elif self._sentiment_failure_kind(sentiment_error) == "unavailable" and bundled_sentiment in _SENTIMENT_ENUM:
+        elif (
+            sentiment_route.get("reuse_bundled_sentiment", True) is True
+            and self._sentiment_failure_kind(sentiment_error) == "unavailable"
+            and bundled_sentiment in _SENTIMENT_ENUM
+        ):
             # D3（检视修复）：专用链整体不可用 + 已有合法联合情绪 → 显式降级复用
             # （正本 L249「可保留其合法情绪用于显式降级」；方案 reuse_bundled_sentiment）。
+            # M27-01：受 task_routes.sentiment.reuse_bundled_sentiment 显式开关约束；
+            # 缺键保持默认 True（旧快照读兼容），非 bool 畸形值严格不放行。
             result["sentiment"] = bundled_sentiment
             result["sentiment_status"] = "success"
             result["sentiment_source"] = "reuse_bundled"

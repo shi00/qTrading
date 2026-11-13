@@ -678,6 +678,148 @@ async def test_dedicated_reuse_bundled_on_chain_unavailable(monkeypatch):
     assert result["sentiment_source"] == "reuse_bundled"
 
 
+@pytest.mark.parametrize("bundled_sentiment", ["Positive", None])
+async def test_dedicated_reuse_disabled_by_config(monkeypatch, bundled_sentiment):
+    """M27-01：显式 reuse_bundled_sentiment=False 禁止复用，即使联合情绪合法。"""
+    dispatch = _dispatch(mode="dedicated")
+    dispatch.task_routes["sentiment"]["reuse_bundled_sentiment"] = False
+    _patch_env(monkeypatch, dispatch)
+    classifier, _svc = _service()
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment=bundled_sentiment)),
+            _failed_result(),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert dispatch.executor.execute.await_count == 2
+    assert result["sentiment"] is None
+    assert result["sentiment_status"] == "unavailable"
+    assert result["sentiment_source"] == "dedicated:llm"
+
+
+async def test_dedicated_reuse_defaults_true_when_config_key_missing(monkeypatch):
+    """M27-01：旧快照缺键时保持默认 True（读兼容），既有降级复用不受影响。"""
+    dispatch = _dispatch(mode="dedicated")
+    dispatch.task_routes["sentiment"].pop("reuse_bundled_sentiment")
+    _patch_env(monkeypatch, dispatch)
+    classifier, _svc = _service()
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment="Positive")),
+            _failed_result(),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert result["sentiment"] == "Positive"
+    assert result["sentiment_status"] == "success"
+    assert result["sentiment_source"] == "reuse_bundled"
+
+
+@pytest.mark.parametrize("reuse_value", [0, 1, "true", None])
+async def test_dedicated_reuse_requires_strict_bool(monkeypatch, reuse_value):
+    """M27-01：非 bool 畸形值不得按 truthiness 放行（严格 is True）。"""
+    dispatch = _dispatch(mode="dedicated")
+    dispatch.task_routes["sentiment"]["reuse_bundled_sentiment"] = reuse_value
+    _patch_env(monkeypatch, dispatch)
+    classifier, _svc = _service()
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment="Positive")),
+            _failed_result(),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert result["sentiment"] is None
+    assert result["sentiment_status"] == "unavailable"
+    assert result["sentiment_source"] == "dedicated:llm"
+
+
+async def test_dedicated_reuse_disabled_does_not_override_sentiment_success(monkeypatch):
+    """M27-01：开关仅约束降级复用，不得影响专用情绪成功分支。"""
+    dispatch = _dispatch(mode="dedicated")
+    dispatch.task_routes["sentiment"]["reuse_bundled_sentiment"] = False
+    _patch_env(monkeypatch, dispatch)
+    classifier, _svc = _service()
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment=None)),
+            ScenarioExecutionResult(
+                scenario_id=_SCENARIO_ID,
+                invocation_id="inv-2",
+                status="succeeded",
+                outputs=(ScenarioOutput(output={"sentiment": "Negative"}),),
+                candidate_decisions=(),
+                actual_usage=(),
+            ),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert result["sentiment"] == "Negative"
+    assert result["sentiment_status"] == "success"
+    assert result["sentiment_source"] == "dedicated:llm"
+
+
+async def test_dedicated_reuse_disabled_invalid_output_no_reuse(monkeypatch):
+    """M27-01：开关为 False 且 invalid_output 耗尽 → 仍保持缺失不回填（R21）。"""
+    dispatch = _dispatch(mode="dedicated")
+    dispatch.task_routes["sentiment"]["reuse_bundled_sentiment"] = False
+    _patch_env(monkeypatch, dispatch)
+    classifier, _svc = _service()
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment="Positive")),
+            ScenarioExecutionResult(
+                scenario_id=_SCENARIO_ID,
+                invocation_id="inv-2",
+                status="failed",
+                outputs=(),
+                candidate_decisions=(
+                    CandidateDecision(
+                        task_id="sentiment",
+                        candidate_index=0,
+                        connection_id="conn-9",
+                        decision="switched",
+                        reason="output validation failed: ModelOutputValidationError",
+                    ),
+                ),
+                actual_usage=(),
+            ),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert result["sentiment"] is None
+    assert result["sentiment_status"] == "unavailable"
+    assert result["sentiment_source"] == "dedicated:llm"
+
+
+async def test_dedicated_reuse_disabled_topic_failure_no_reuse(monkeypatch):
+    """M27-01：主题失败时无联合情绪可复用，开关为 False 保持缺失。"""
+    dispatch = _dispatch(mode="dedicated")
+    dispatch.task_routes["sentiment"]["reuse_bundled_sentiment"] = False
+    _patch_env(monkeypatch, dispatch)
+    classifier, _svc = _service()
+    dispatch.executor.execute = AsyncMock(side_effect=[_failed_result(), _failed_result()])
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert dispatch.executor.execute.await_count == 2
+    assert result.get("category") == "unknown"
+    assert result["sentiment"] is None
+    assert result["sentiment_status"] == "unavailable"
+    assert result["sentiment_source"] == "dedicated:llm"
+
+
 async def test_dedicated_invalid_output_exhausted_no_reuse(monkeypatch):
     """D3：invalid_output 耗尽 → 保持缺失不回填（R21），即使主题响应有合法联合情绪。"""
     dispatch = _patch_env(monkeypatch, _dispatch(mode="dedicated"))
