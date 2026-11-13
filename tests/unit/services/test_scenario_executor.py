@@ -2272,3 +2272,181 @@ class TestReservationAmountEstimation:
         assert _estimate_reservation_amount(self._pricing(), {}, model="m") is None
         encoder = self._pricing(pricing_unit="encoder_input_tokens", encoder_price_per_m=Decimal("1.00"))
         assert _estimate_reservation_amount(encoder, {"prompt": "x"}, model="m") is None
+
+
+class TestC12TenacityRetryContract:
+    """C12（ADR-0018 承接 / ADR-0014 §1 重试路线）：同候选瞬态重试由 Tenacity
+    ``AsyncRetrying`` 承接，参数契约与原自管实现逐项等价（次数 / 指数退避 /
+    Retry-After 取大 / deadline clamp / 逐次授权计量）；内容拒绝不重试不换模型。
+    """
+
+    @staticmethod
+    def _err(retry_after: Any) -> TimeoutError:
+        err = TimeoutError("upstream timed out")
+        if retry_after is not None:
+            err.retry_after = retry_after
+        return err
+
+    @pytest.mark.asyncio
+    async def test_retry_path_uses_tenacity_async_retrying(self, monkeypatch):
+        """RED（C12）：重试路径经 AsyncRetrying 承接，构造契约锁定原语义。
+
+        - ``stop`` 次数 = 首次 + retry_attempts（默认 1 → 2）；
+        - ``reraise=True``：次数耗尽重抛原异常（外层转 failed，reason 不回归）；
+        - ``wait`` / ``retry`` 为注入的退避 / 瞬态判定策略。
+        """
+        import services.ai_service.scenario_executor as se_module
+
+        constructed: dict[str, Any] = {}
+        real_cls = getattr(se_module, "AsyncRetrying", None)
+        if real_cls is None:
+            pytest.fail("C12: scenario_executor 未从 tenacity 导入 AsyncRetrying（重试仍为自管实现）")
+
+        class _SpyAsyncRetrying(real_cls):
+            def __init__(self, *args: Any, **kwargs: Any):
+                constructed.update(kwargs)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(se_module, "AsyncRetrying", _SpyAsyncRetrying)
+        adapter = _adapter_fail_then_ok(failures=1)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        assert adapter._invoke_calls["n"] == 2  # 重试确实发生（spy 未改变行为）
+        assert constructed.get("reraise") is True
+        stop = constructed.get("stop")
+        assert stop is not None and stop.max_attempt_number == 2
+        assert callable(constructed.get("wait"))
+        assert callable(constructed.get("retry"))
+
+    @pytest.mark.asyncio
+    async def test_retry_wait_sequence_exponential_backoff(self):
+        """端到端退避序列不回归：2 次瞬态失败 → sleep [1.0, 2.0]（指数 + 封顶）。"""
+        adapter = _adapter_always_fail()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, retry_attempts=2, retry_max_attempts=2)
+        with patch("services.ai_service.scenario_executor.asyncio.sleep", new=AsyncMock()) as fake_sleep:
+            result = await executor.execute(
+                _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            )
+        assert result.status == "failed"
+        assert adapter.invoke.await_count == 3  # 首次 + 2 重试（上限形态）
+        assert [call.args[0] for call in fake_sleep.await_args_list] == [1.0, 2.0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("retry_after", "expected"),
+        [
+            pytest.param(5, 5.0, id="respect-retry-after"),
+            pytest.param(9999, 60.0, id="cap-malicious-value"),
+            pytest.param("2.5", 2.5, id="numeric-string"),
+        ],
+    )
+    async def test_retry_after_in_retry_path(self, retry_after: Any, expected: float):
+        """端到端 Retry-After 取大 + 上限保护（修复 429 等待失真的契约不回归）。"""
+        adapter = MagicMock()
+        calls = {"n": 0}
+
+        async def _invoke(*_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise self._err(retry_after)
+            return AdapterResponse(content="ok", usage=None, actual_model="glm-4-air", metadata={})
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        # 预算充足（120s）：隔离 Retry-After 上限保护语义，不受 deadline clamp 干扰
+        with patch("services.ai_service.scenario_executor.asyncio.sleep", new=AsyncMock()) as fake_sleep:
+            result = await executor.execute(
+                _request(deadline=asyncio.get_running_loop().time() + 120.0),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                _validator_ok,
+            )
+        assert result.status == "succeeded"
+        assert [call.args[0] for call in fake_sleep.await_args_list] == [expected]
+
+    @pytest.mark.asyncio
+    async def test_backoff_clamped_to_remaining_deadline_in_retry_path(self):
+        """端到端 deadline clamp：剩余预算 3s < Retry-After 60s → sleep 3.0。"""
+        adapter = MagicMock()
+        calls = {"n": 0}
+        fake_now = {"t": 0.0}
+
+        async def _invoke(*_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                fake_now["t"] = 999_997.0  # 首次失败后推进时钟：剩余 deadline 3s
+                raise self._err(60)
+            return AdapterResponse(content="ok", usage=None, actual_model="glm-4-air", metadata={})
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: fake_now["t"])
+        with patch("services.ai_service.scenario_executor.asyncio.sleep", new=AsyncMock()) as fake_sleep:
+            result = await executor.execute(
+                _request(deadline=1_000_000.0),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                _validator_ok,
+            )
+        assert result.status == "succeeded"
+        assert [call.args[0] for call in fake_sleep.await_args_list] == [3.0]
+
+    @pytest.mark.asyncio
+    async def test_deadline_exhausted_between_attempts_stops_retries(self):
+        """逐尝试 deadline 检查（C12 原语义）：第二次尝试前耗尽 → 恰好 1 次调用。"""
+        adapter = MagicMock()
+        calls = {"n": 0}
+        fake_now = {"t": 0.0}
+
+        async def _invoke(*_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                fake_now["t"] = 1_000_000.0  # 耗尽剩余 deadline
+                raise self._err(None)
+            return AdapterResponse(content="ok", usage=None, actual_model="glm-4-air", metadata={})
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: fake_now["t"])
+        with patch("services.ai_service.scenario_executor.asyncio.sleep", new=AsyncMock()):
+            result = await executor.execute(
+                _request(deadline=1_000_000.0),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                _validator_ok,
+            )
+        assert result.status == "failed"
+        assert calls["n"] == 1  # deadline 耗尽后不再启动新尝试（不越 deadline 出站）
+        recorder.submit_terminal.assert_awaited_once()  # 唯一失败尝试即时收敛
+
+    @pytest.mark.asyncio
+    async def test_content_refused_no_retry_no_model_switch(self):
+        """内容拒绝（C12/AC11）：不重试不换候选，策略终态 + halt（禁止规避）。"""
+        adapter = MagicMock()
+
+        async def _invoke(*_args, **_kwargs):
+            raise AIContentRefusedError(Message("llm_err_content_policy"), detail="provider refusal")
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        adapter.invoke.assert_awaited_once()  # 不重试
+        decisions = result.candidate_decisions
+        assert len(decisions) == 1  # 不换候选（halt 中断遍历）
+        assert decisions[0].decision == "rejected"
+        assert "CONTENT_REFUSED" in decisions[0].reason
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "failed"
+        assert terminal.error_code == "CONTENT_REFUSED"
