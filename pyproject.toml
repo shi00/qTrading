@@ -68,6 +68,7 @@ dependencies = [
     "tenacity>=9.2.1,<10",  # S2 统一模型管理（ADR-0014）：S3 ScenarioExecutor 单连接重试策略消费
     "dbos==3.4.0",  # Agent 运行栈（设计 §10.6）：DBOS 持久化执行运行库（双迁移宿主）；破坏性演进与内部迁移版本强耦合 → == 精确固定（版本守卫 dbos_migrations=125 精确相等）
     "psycopg[binary]==3.3.8",  # Agent 运行栈：DBOS SQLAlchemyDatasource/DBOSClient 的 psycopg3 驱动（与既有 psycopg2-binary 模块名不同可并存）；DBOS 内部强耦合 → == 精确固定（Q3 裁决）
+    "pydantic-ai-slim==2.66.0",  # Agent 模型桥（设计 §10.1/HANDOFF §6）：GatewayModel 固定框架；slim 发行不含未用可选集成；SDK 内部结构（StreamedResponse/_parts_manager）强耦合 → == 精确固定（Q3 裁决）
 ]
 
 [project.optional-dependencies]
