@@ -1,24 +1,26 @@
-"""Agent 运行时宿主组装（设计 §10.6 / HANDOFF §8.1-§8.3）。
+"""Agent 运行时宿主组装与 owner-loop 桥（设计 §10.6 / HANDOFF §8.1-§8.3）。
 
-职责（C-05）：在存储层迁移就绪后组装宿主对象并保证关闭顺序——
-1. 双迁移（``data.persistence.agent_migrator.run_agent_runtime_migrations``：迁移+
-   运行角色最小授权+版本守卫，独立迁移引擎 ≤2 连接，先于任何宿主对象；中间失败
-   不 launch/不建对象/保历史与原迁移状态）；
-2. ``runtime_engine``（pool 4 / overflow 0 / timeout 3 / hide_parameters，psycopg 同步）
-   与 ``control_engine``（pool 2，禁额外监听）；
-3. ``DBOS(config)``：注入 runtime_engine、``run_migrations=False``（launch 改为验证
-   模式）、``enable_otlp=False``、``max_executor_threads=4``、``use_listen_notify=True``、
-   ``sharding=False``、真实 ``application_version``、每进程唯一 ``executor_id``；
-4. ``SQLAlchemyDatasource.create(engine=runtime_engine, schema="agent_ds",
-   run_migrations=False)``（verify_migrations 模式）；
-5. ``DBOSClient(system_database_engine=control_engine, use_listen_notify=False,
-   retry_connection_errors=False)``（HANDOFF §8.3：禁监听、禁无限连接重试）。
+职责：
+1. 宿主组装（C-05）：在存储层迁移就绪后组装宿主对象并保证关闭顺序——
+   1. 双迁移（``data.persistence.agent_migrator.run_agent_runtime_migrations``：迁移+
+      运行角色最小授权+版本守卫，独立迁移引擎 ≤2 连接，先于任何宿主对象；中间失败
+      不 launch/不建对象/保历史与原迁移状态）；
+   2. ``runtime_engine``（pool 4 / overflow 0 / timeout 3 / hide_parameters，psycopg 同步）
+      与 ``control_engine``（pool 2，禁额外监听）；
+   3. ``DBOS(config)``：注入 runtime_engine、``run_migrations=False``（launch 改为验证
+      模式）、``enable_otlp=False``、``max_executor_threads=4``、``use_listen_notify=True``、
+      ``sharding=False``、真实 ``application_version``、每进程唯一 ``executor_id``；
+   4. ``SQLAlchemyDatasource.create(engine=runtime_engine, schema="agent_ds",
+      run_migrations=False)``（verify_migrations 模式）；
+   5. ``DBOSClient(system_database_engine=control_engine, use_listen_notify=False,
+      retry_connection_errors=False)``（HANDOFF §8.3：禁监听、禁无限连接重试）；
+2. owner-loop 桥（D-01，§8.2）：owner loop 句柄登记与跨线程提交
+   （``OwnerLoopBridge``）、稳定 operation 在途/完成登记、跨 loop 流通道。
 
 明确不做：
 - **不 launch**：默认 launch 会将所属 pending workflows 重新入队且无公开关闭开关
   （HANDOFF §8.4 needs-spike）；隔离方案真 PG/真进程实证通过后经
-  ``launch_agent_runtime``（listen_queues([]) 先于 launch）启动；
-- owner-loop 桥（§8.2：loop 句柄登记与跨线程提交）属 D-01，不在本片。
+  ``launch_agent_runtime``（listen_queues([]) 先于 launch）启动。
 
 关闭顺序（HANDOFF §8.3 destroy 契约）：``DBOS.destroy``（工作收敛）→
 ``DBOSClient.destroy`` → 双引擎 dispose；幂等。
@@ -28,9 +30,13 @@ SQL 合规（R4）：本模块不执行任何 SQL（迁移/授权均在 data 层
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import threading
 import uuid
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final, Literal, TypeVar, cast
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, SQLAlchemyDatasource
@@ -242,12 +248,326 @@ def _dispose_quietly(engine: sa.Engine) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# owner-loop 桥（HANDOFF §8.2 段 1-2 / DD §10.6）
+# ---------------------------------------------------------------------------
+
+_T = TypeVar("_T")
+
+OperationState = Literal["in_flight", "completed", "failed", "cancelled"]
+
+#: 流通道内部哨兵：仅表示「关闭唤醒」，不是队列项（``OwnerStreamChannel``）
+_WAIT_CLOSED: Final[object] = object()
+
+#: 流通道内部哨兵：表示「阻塞中的 put 已完成」（非队列项）
+_PUT_DONE: Final[object] = object()
+
+
+class UnknownOperationError(RuntimeError):
+    """按稳定 operation 身份观察时未登记（明确拒绝，不静默等待）。"""
+
+    def __init__(self, operation_id: str) -> None:
+        super().__init__(f"operation not registered: {operation_id}")
+        self.operation_id = operation_id
+
+
+class ChannelClosedError(RuntimeError):
+    """流通道已关闭后的生产（终止路径唤醒阻塞写者，§8.2 段 3）。"""
+
+
+@dataclass(frozen=True)
+class OperationHandle:
+    """operation 登记快照（state 为 start 时点事实，非实时投影）。"""
+
+    operation_id: str
+    state: OperationState
+
+
+@dataclass
+class _OperationEntry:
+    """operation 登记条目（进程内事实，不代替持久 operation 与 owner fence）。"""
+
+    operation_id: str
+    cf: concurrent.futures.Future[Any]
+    state: OperationState = "in_flight"
+
+
+class OwnerLoopBridge:
+    """owner-loop 桥（HANDOFF §8.2）。
+
+    循环归属（§8.2 段 1）：owner loop（应用主循环）持有 Executor/Recorder/DAO/
+    异步客户端等真实资源；DBOS loop 经本桥请求 owner 执行，不直接 await
+    owner-loop 对象。
+
+    提交与等候语义（§8.2 段 1）：
+
+    - ``run_coroutine_threadsafe`` 提交——owner 回调（loop 内 ``ensure_future``）
+      才创建实际 IO 任务；
+    - ``await asyncio.shield(asyncio.wrap_future(...))`` 等候——waiter 取消只撤
+      waiter（shield 实现仅解除回调，不取消 inner），owner 侧任务继续运行至
+      完成（"wait 取消原 IO 继续结算"）；
+    - 返回值纪律：factory 须返回跨线程可传的不可变事实（请求/事件/回执），不得
+      返回 Engine/客户端/锁/Queue；
+    - owner 内直接 await，本桥不使用阻塞 ``future.result()``。
+
+    强引用（shield 文档：事件循环仅弱引用任务）：桥持在途任务强引用集合
+    （``_tasks``），任务结束后移除。
+
+    稳定 operation（§8.2 段 2）：``start_operation`` 以稳定身份幂等登记在途/
+    完成任务，重复观察连接原任务；观察者取消只撤观察者；明确终止另走控制命令。
+    进程内登记不代替持久 operation 及 owner fence——重启不据内存缓存重发。
+    """
+
+    def __init__(self, owner_loop: asyncio.AbstractEventLoop) -> None:
+        self._owner_loop = owner_loop
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._operations: dict[str, _OperationEntry] = {}
+        self._registry_lock = threading.Lock()
+
+    @classmethod
+    def for_running_loop(cls) -> OwnerLoopBridge:
+        """在 owner 事件循环内登记实际 loop 句柄（§8.2「在 owner loop 记录」）。"""
+        return cls(asyncio.get_running_loop())
+
+    # -- 跨线程提交 --------------------------------------------------------
+
+    async def run_owner(self, factory: Callable[[], Coroutine[Any, Any, _T]]) -> _T:
+        """跨线程提交 owner 协程并等候完成（一次性提交，无登记）。
+
+        factory 在 owner 循环内被调用（owner 回调才创建实际 IO 任务）；本协程被
+        取消时仅撤 waiter，owner 侧任务继续运行至完成。
+        """
+        cf = asyncio.run_coroutine_threadsafe(self._managed(factory()), self._owner_loop)
+        return await asyncio.shield(self._wrap_concurrent(cf))
+
+    async def observe_operation(self, operation_id: str) -> Any:
+        """按稳定身份观察 operation（重复观察连接原任务；取消只撤观察者）。
+
+        结果类型编译期未知（观察方自行约束其不可变事实类型），故返回 ``Any``。
+
+        Raises:
+            UnknownOperationError: 该身份未登记。
+        """
+        with self._registry_lock:
+            entry = self._operations.get(operation_id)
+        if entry is None:
+            raise UnknownOperationError(operation_id)
+        return await asyncio.shield(self._wrap_concurrent(entry.cf))
+
+    def start_operation(
+        self,
+        operation_id: str,
+        factory: Callable[[], Coroutine[Any, Any, _T]],
+    ) -> OperationHandle:
+        """登记并启动稳定 operation（幂等）。
+
+        同身份已登记（在途/已完成/失败/取消）时返回原登记快照，不重复执行
+        factory（同键同规范输入查原事实）；观察经 ``observe_operation`` 连接
+        原任务。
+        """
+        with self._registry_lock:
+            entry = self._operations.get(operation_id)
+            if entry is None:
+                cf = asyncio.run_coroutine_threadsafe(self._run_operation(operation_id, factory), self._owner_loop)
+                entry = _OperationEntry(operation_id=operation_id, cf=cf)
+                self._operations[operation_id] = entry
+        return OperationHandle(operation_id=operation_id, state=entry.state)
+
+    # -- 内部 ---------------------------------------------------------------
+
+    async def _managed(self, coro: Coroutine[Any, Any, _T]) -> _T:
+        """run_owner 内层：登记在途任务强引用，结束移除。"""
+        task = asyncio.current_task()
+        assert task is not None
+        self._tasks.add(task)
+        try:
+            return await coro
+        finally:
+            self._tasks.discard(task)
+
+    async def _run_operation(
+        self,
+        operation_id: str,
+        factory: Callable[[], Coroutine[Any, Any, _T]],
+    ) -> _T:
+        """operation 主体（owner loop 内执行）：factory 结果/异常/取消如实结算。"""
+        task = asyncio.current_task()
+        assert task is not None
+        self._tasks.add(task)
+        try:
+            result = await factory()
+        except asyncio.CancelledError:
+            self._settle_operation(operation_id, "cancelled")
+            raise
+        except BaseException:
+            self._settle_operation(operation_id, "failed")
+            raise
+        else:
+            self._settle_operation(operation_id, "completed")
+            return result
+        finally:
+            self._tasks.discard(task)
+
+    def _settle_operation(self, operation_id: str, state: OperationState) -> None:
+        with self._registry_lock:
+            entry = self._operations.get(operation_id)
+            if entry is not None:
+                entry.state = state
+
+    @staticmethod
+    def _wrap_concurrent(cf: concurrent.futures.Future[Any]) -> asyncio.Future[Any]:
+        """concurrent future → 本循环 future（shield 的 inner 必须是 future 本身）。
+
+        持消费回调防 waiter 取消后「exception was never retrieved」噪声（shield
+        取消路径会解除自身回调）。
+        """
+        wrapped = asyncio.wrap_future(cf)
+        wrapped.add_done_callback(_consume_settled)
+        return wrapped
+
+
+def _consume_settled(fut: asyncio.Future[Any]) -> None:
+    """标记结算异常已被检索（结果/异常/取消三态均安全）。"""
+    if not fut.cancelled():
+        fut.exception()
+
+
+# ---------------------------------------------------------------------------
+# 跨 loop 流通道（HANDOFF §8.2 段 3）
+# ---------------------------------------------------------------------------
+
+
+class OwnerStreamChannel[T]:
+    """owner-loop 有界流通道（§8.2 段 3）。
+
+    - 通道（Queue/Event）在 owner loop 内创建并绑定；``put``/``get``/``close``
+      仅限 owner 循环调用（直接跨 loop 访问明确拒绝）；
+    - DBOS 消费者经 ``bridge_get`` 桥接 ``get``（不跨 loop 直接 await Queue）；
+    - 有界（maxsize>=1），满时真实阻塞生产；关闭唤醒阻塞读写；
+    - 终止顺序：``close``（唤醒）→ 取消并 join 生产者（调用者持有生产任务）；
+      join 后 CancelledError 继续传播（R2）。
+
+    通道为进程内对象；关闭后已入队项仍可取尽（取尽后返回 None），错误/结算
+    事实由上层以事件或异常承载（本原语不携带语义载荷）。
+    """
+
+    def __init__(self, bridge: OwnerLoopBridge, *, maxsize: int) -> None:
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError("OwnerStreamChannel must be created in the owner event loop") from exc
+        if maxsize < 1:
+            raise ValueError("maxsize must be >= 1 (bounded channel)")
+        self._bridge = bridge
+        self._queue: asyncio.Queue[T] = asyncio.Queue(maxsize=maxsize)
+        self._closed_event = asyncio.Event()
+        self._closed = False
+
+    # -- owner 循环侧 -------------------------------------------------------
+
+    async def put(self, item: T) -> None:
+        """投递事件（owner 循环内）：满时真实阻塞；关闭后明确拒绝。"""
+        self._check_owner_loop()
+        if self._closed:
+            raise ChannelClosedError("channel closed")
+        while True:
+            try:
+                self._queue.put_nowait(item)
+                return
+            except asyncio.QueueFull:
+                pass
+            if self._closed:
+                raise ChannelClosedError("channel closed while producer blocked")
+            outcome = await self._wait_put_or_close(item)
+            if outcome is _WAIT_CLOSED:
+                raise ChannelClosedError("channel closed while producer blocked")
+
+    async def get(self) -> T | None:
+        """取事件（owner 循环内）：先取尽已入队项，关闭且取尽后返回 None。"""
+        self._check_owner_loop()
+        while True:
+            try:
+                return self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            if self._closed:
+                return None
+            item = await self._wait_get_or_close()
+            if item is not _WAIT_CLOSED:
+                return cast(T, item)
+            # 关闭唤醒：回到顶部重查残留项，再按关闭返回
+
+    def close(self) -> None:
+        """关闭通道（owner 循环内调用）：唤醒阻塞读写；幂等。"""
+        self._check_owner_loop()
+        if self._closed:
+            return
+        self._closed = True
+        self._closed_event.set()
+
+    # -- 跨 loop 消费侧 -----------------------------------------------------
+
+    async def bridge_get(self) -> T | None:
+        """DBOS 消费者跨 loop 取事件（§8.2：经桥提交，不跨 loop await Queue）。
+
+        消费者取消只撤 waiter（shield 语义）；owner 侧取事件任务继续至取得
+        事件或关闭唤醒。waiter 已取消时取到的事件不回投（流已中止——终止路径
+        经 close + join 生产者收敛）。
+        """
+        return await self._bridge.run_owner(self.get)
+
+    # -- 内部 ---------------------------------------------------------------
+
+    def _check_owner_loop(self) -> None:
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError("owner-loop object accessed outside its event loop") from exc
+        if current is not self._loop:
+            raise RuntimeError("owner-loop object accessed from a foreign loop")
+
+    async def _wait_put_or_close(self, item: T) -> object:
+        """满时等待空位或关闭唤醒（先完成者生效；二者同时完成以投递优先）。"""
+        put_task = asyncio.ensure_future(self._queue.put(item))
+        closed_task = asyncio.ensure_future(self._closed_event.wait())
+        try:
+            done, _ = await asyncio.wait({put_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (put_task, closed_task):
+                if not task.done():
+                    task.cancel()
+        if put_task in done and not put_task.cancelled():
+            put_task.result()
+            return _PUT_DONE
+        return _WAIT_CLOSED
+
+    async def _wait_get_or_close(self) -> Any:
+        """空时等待事件或关闭唤醒（先完成者生效；二者同时完成以取件优先）。"""
+        get_task = asyncio.ensure_future(self._queue.get())
+        closed_task = asyncio.ensure_future(self._closed_event.wait())
+        try:
+            done, _ = await asyncio.wait({get_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (get_task, closed_task):
+                if not task.done():
+                    task.cancel()
+        if get_task in done and not get_task.cancelled():
+            return get_task.result()
+        return _WAIT_CLOSED
+
+
 __all__ = [
     "AGENT_DS_SCHEMA",
     "DBOS_SCHEMA",
     "AgentRuntimeHandle",
     "AgentRuntimeMigrationError",
     "AgentRuntimeSettings",
+    "ChannelClosedError",
+    "OperationHandle",
+    "OperationState",
+    "OwnerLoopBridge",
+    "OwnerStreamChannel",
+    "UnknownOperationError",
     "assemble_agent_runtime",
     "launch_agent_runtime",
 ]
