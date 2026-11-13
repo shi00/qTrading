@@ -65,16 +65,21 @@ charset-normalizer==3.5.2
     # via requests
 click==8.5.0
     # via
+    #   dbos
     #   huggingface-hub
     #   litellm
 colorama==0.4.6 ; sys_platform == 'win32'
     # via tqdm
+croniter==7.0.0
+    # via dbos
 cryptography==50.0.2
     # via
     #   astockscreener (pyproject.toml)
     #   secretstorage
 curl-cffi==0.17.0
     # via akshare
+dbos==3.4.0
+    # via astockscreener (pyproject.toml)
 decorator==5.3.1
     # via akshare
 diskcache==5.6.3
@@ -255,6 +260,12 @@ propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
+psycopg==3.3.8
+    # via
+    #   astockscreener (pyproject.toml)
+    #   dbos
+psycopg-binary==3.3.8 ; implementation_name != 'pypy'
+    # via psycopg
 psycopg2-binary==2.9.13
     # via astockscreener (pyproject.toml)
 py-mini-racer==0.6.0 ; sys_platform == 'linux'
@@ -283,6 +294,8 @@ pyluach==2.3.0
 python-dateutil==2.9.0.post0
     # via
     #   botocore
+    #   croniter
+    #   dbos
     #   pandas
 python-dotenv==1.2.4
     # via
@@ -292,7 +305,9 @@ python-dotenv==1.2.4
 pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via keyring
 pyyaml==6.0.3
-    # via huggingface-hub
+    # via
+    #   dbos
+    #   huggingface-hub
 readerwriterlock==1.0.10
     # via astockscreener (pyproject.toml)
 referencing==0.37.0
@@ -336,6 +351,7 @@ sqlalchemy==2.1.8
     # via
     #   astockscreener (pyproject.toml)
     #   alembic
+    #   dbos
 sqlparse==0.6.1
     # via astockscreener (pyproject.toml)
 starlette==1.10.0
@@ -389,6 +405,7 @@ tzdata==2026.6
     #   astockscreener (pyproject.toml)
     #   exchange-calendars
     #   pandas
+    #   psycopg
     #   tzlocal
 tzlocal==5.4.5
     # via apscheduler
