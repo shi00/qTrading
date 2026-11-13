@@ -102,6 +102,16 @@ sentiment = [
     "tokenizers>=0.23.3,<1",  # 新闻情绪打分（N3-2）：HF tokenizers 分词兜底（NOTE(lazy) 可选功能栈）
 ]
 
+[dependency-groups]
+# 纯文档工具链（检视 5.3）：独立 docs 组供 uv pip compile 生成 requirements-docs.txt，
+# pytest 不进入 pre-commit 解析 hook 的运行依赖。
+docs = [
+    "markdown-it-py==4.0.0",  # 文档统一 Markdown 解析（CommonMark + table/strikethrough）
+    "github-slugger==0.0.3",  # GitHub 风格标题锚点生成（重复标题加序号）
+    "pyyaml>=6.0",  # 治理 YAML 作者源解析
+    "pytest>=9.2.0",  # 纯文档测试运行器（tests/docs 独立环境）
+]
+
 [tool.ruff]
 line-length = 120
 indent-width = 4
