@@ -417,6 +417,30 @@ class TestClaimSourceVersions:
             await dao.claim_source_versions(_claim("claim-1", (_ref("src-1"),), operation_id="missing"))
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
 
+    async def test_claim_blocks_on_inbound_edge_lock(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视闭环 M-1 回归锚：claim 须先取源直接入边行锁（与 stop 闭包 UPDATE
+        冲突序列化）。外部连接持 link-2（src-1→d-1 派生边）行锁期间，claim(d-1)
+        必须被阻塞；锁释放后才能完成。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_graph(dao)
+        await _seed_operation(dao, "u1", "op-1")
+
+        blocker = create_test_engine(real_embedded_pg.url)
+        conn2 = await blocker.connect()
+        try:
+            await conn2.execute(text("SELECT link_id FROM agent_source_link WHERE link_id = 'link-2' FOR UPDATE"))
+            task = asyncio.create_task(dao.claim_source_versions(_claim("claim-m1", (_ref("d-1"),))))
+            await asyncio.sleep(1.0)
+            assert not task.done()  # 入边行锁未被释放，claim 必须阻塞（冲突序列化生效）
+            await conn2.rollback()  # 释放行锁
+            fact = await asyncio.wait_for(task, timeout=5.0)
+            assert fact.replayed is False
+            assert [b.source_id for b in fact.bindings] == ["d-1"]
+        finally:
+            await conn2.close()
+            await blocker.dispose()
+
     async def test_claim_unknown_source_invalid(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_graph(dao)

@@ -33,6 +33,7 @@ from core.agent_types import (
     ResourceClaimRequest,
     ResourceReleaseRequest,
     ResourceSlotKind,
+    ResourceTicket,
     UsageCounterUpdate,
     validate_resource_claim_request,
 )
@@ -419,6 +420,68 @@ class TestClaimResource:
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.claim_resource(_total_request(slot_id="slot-r"))
         _expect_error(excinfo, AgentErrorCode.INPUT_CONFLICT)
+
+    async def test_claim_cross_user_slot_id_collision_conflict(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视闭环 m-3 回归锚：跨用户域 slot_id 撞单列全局 PK 时转 INPUT_CONFLICT
+        （数据库失败明确分类，不裸 IntegrityError）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        await dao.claim_resource(_total_request(slot_id="shared-slot"))
+        await _seed_session(dao, "u2", "s2u")
+        await _seed_execution(dao, "u2", "s2u", "root-u2", "root", "root")
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(user_scope="u2", execution_id="root-u2", slot_id="shared-slot"))
+        _expect_error(excinfo, AgentErrorCode.INPUT_CONFLICT)
+
+    async def test_concurrent_session_total_claim_single_winner(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视闭环 m-6 并发冒烟：guard 行锁串行下同会话两并发 total 认领恰一胜
+        （每会话 1 总占位），败者 BUDGET_BLOCKED 不伪成功。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        await _seed_execution(dao, "u1", "s1", "lane-1", "comparison_lane", "lane")
+
+        results = await asyncio.gather(
+            dao.claim_resource(_total_request(execution_id="root-1", slot_id="slot-c1")),
+            dao.claim_resource(_total_request(execution_id="lane-1", slot_id="slot-c2")),
+            return_exceptions=True,
+        )
+        outcomes = sorted(
+            "ok"
+            if isinstance(r, ResourceTicket)
+            else ("budget" if isinstance(r, AgentServiceError) and r.code == AgentErrorCode.BUDGET_BLOCKED else "other")
+            for r in results
+        )
+        assert outcomes == ["budget", "ok"], f"expect exactly one winner, got {outcomes}"
+
+    async def test_concurrent_leaf_claim_respects_per_root_limit(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视闭环 m-6 并发冒烟：同 root 四并发 leaf 认领恰三胜（每总 3），败者
+        BUDGET_BLOCKED；guard 行锁保证计数无竞态。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-a", "root", "root")
+        for index in range(4):
+            await _seed_execution(
+                dao, "u1", "s1", f"root-a-leaf-{index}", "leaf", f"n-{index}", parent_execution_id="root-a"
+            )
+        results = await asyncio.gather(
+            *(
+                dao.claim_resource(_leaf_request(execution_id=f"root-a-leaf-{index}", slot_id=f"slot-l{index}"))
+                for index in range(4)
+            ),
+            return_exceptions=True,
+        )
+        outcomes = sorted(
+            "ok"
+            if isinstance(r, ResourceTicket)
+            else ("budget" if isinstance(r, AgentServiceError) and r.code == AgentErrorCode.BUDGET_BLOCKED else "other")
+            for r in results
+        )
+        assert outcomes == ["budget", "ok", "ok", "ok"], f"expect exactly three winners, got {outcomes}"
 
 
 # ------------------------------------------------------------------

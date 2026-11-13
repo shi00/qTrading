@@ -3983,22 +3983,31 @@ class AgentDao(BaseDao):
                     raise _budget_blocked(identity, "per-root leaf slot limit (3) reached")
 
             # 5. 落票据（guard 行锁下无竞争；owner_epoch 为调用方运行身份）。
+            #    跨用户域 slot_id 撞单列全局 PK 时转 INPUT_CONFLICT（检视闭环 m-3：
+            #    数据库失败明确分类，不裸 IntegrityError；accept_request 先例）。
             now = datetime.now(UTC)
-            await conn.execute(
-                sa.insert(AgentResourceSlot).values(
-                    user_scope=request.user_scope,
-                    slot_id=request.slot_id,
-                    slot_kind=request.slot_kind.value,
-                    execution_id=request.execution_id,
-                    node_id=request.node_id,
-                    round_id=request.round_id,
-                    owner_epoch=request.owner_epoch,
-                    run_epoch=0,
-                    claimed_at=now,
-                    release_verified=False,
-                    operation_refs=request.operation_refs,
+            try:
+                await conn.execute(
+                    sa.insert(AgentResourceSlot).values(
+                        user_scope=request.user_scope,
+                        slot_id=request.slot_id,
+                        slot_kind=request.slot_kind.value,
+                        execution_id=request.execution_id,
+                        node_id=request.node_id,
+                        round_id=request.round_id,
+                        owner_epoch=request.owner_epoch,
+                        run_epoch=0,
+                        claimed_at=now,
+                        release_verified=False,
+                        operation_refs=request.operation_refs,
+                    )
                 )
-            )
+            except IntegrityError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "slot_id already exists (cross-scope collision)",
+                    identity,
+                ) from exc
             return ResourceTicket(
                 slot_id=request.slot_id,
                 slot_kind=request.slot_kind,
@@ -4196,6 +4205,9 @@ class AgentDao(BaseDao):
           （禁用源及其已知派生；闭包未知不等于空关联——派发方按 claim 共同仲裁
           新鲜重读阻断）；
         - 幂等：已禁用重放返回原事实（already_disabled=True，零新事实）；
+          ``command_id`` 仅作非空校验与审计透传——命令键查重/同键异输入冲突由
+          服务层 stop_using command 事务（agent_command 唯一约束）承载（§3.3.2），
+          本 DAO 层幂等键为源身份（检视闭环 m-1 纠偏：原 docstring 误称本层核命令键）；
         - 来源不存在 ``INPUT_INVALID``（严格读，不空成功）。
 
         Raises:
@@ -4280,8 +4292,9 @@ class AgentDao(BaseDao):
         """源派发认领事务（§5.4 共同仲裁）：按稳定 ID 排序锁全部 source/version
         并新鲜重读禁用状态，保存绑定 revision 的原 operation 认领，**单个显式事务**。
 
-        - 锁序：source/version（sorted）→ operation（§5.4「来源仲裁事务按稳定 ID
-          排序锁完整来源版本及派生闭包，再核引用边/正文与原 operation」）；
+        - 锁序：source/version（sorted）→ 各源直接入边行（§5.4 L624/L627：与
+          stop 闭包 UPDATE 锁集相交形成冲突序列化，禁用先提交则后到 claim 不能
+          绕过——检视闭环 M-1）→ operation；
         - 新鲜重读（预检查/旧快照不是派发权）：任一 source 行已禁用，或作为已知
           派生闭包成员被 ``disabled_inherited`` 覆盖 → ``SOURCE_DISABLED``
           （禁用先胜零受影响新出站）；
@@ -4333,6 +4346,22 @@ class AgentDao(BaseDao):
                         "source version does not exist",
                         f"{identity}/{source.source_id}@{source.source_version}",
                     )
+                # 入边行锁（检视闭环 M-1，§5.4 L624/L627）：先对作为派生目标的
+                # 引用边 FOR UPDATE，再计禁用状态——stop 的闭包 UPDATE 须更新同
+                # 批边行，两者锁集相交形成冲突序列化；否则 claim 判定入边=0 后、
+                # 提交前 stop 提交，禁用先提交仍可被后到 claim 绕过。任意祖先
+                # stop 都会标记本源直接入边（闭包含全部链上边），故锁直接入边
+                # 即覆盖全部祖先禁用路径。
+                await conn.execute(
+                    sa.select(AgentSourceLink.link_id)
+                    .where(
+                        AgentSourceLink.user_scope == request.user_scope,
+                        AgentSourceLink.derived_asset_id == source.source_id,
+                        AgentSourceLink.derived_asset_version == source.source_version,
+                    )
+                    .order_by(AgentSourceLink.link_id)
+                    .with_for_update()
+                )
                 inherited = (
                     await conn.execute(
                         sa.select(sa.func.count())
@@ -4536,6 +4565,13 @@ class AgentDao(BaseDao):
         self._check_engine()
         validate_read_mark_command(command)
         identity = f"{command.user_scope}/{command.session_id}/{command.command_id}"
+        if not command.message_ids and not command.artifact_refs and command.observed_through_seq is None:
+            # 空标记不承载任何已读事实，落行即造零信息事实（检视闭环 m-4，INV-06）。
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "read mark command carries no exact identity or verified watermark",
+                identity,
+            )
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
@@ -4707,9 +4743,17 @@ class AgentDao(BaseDao):
                     replayed=False,
                     recorded_at=_wire_time(now),
                 )
-            # 稍后：仅暂缓已有批次（marker 行缺失=无批次，INPUT_INVALID）。
+            # 稍后：仅暂缓已有批次（marker 行缺失=无批次，INPUT_INVALID；
+            # through 超过现有 batch_seq=暂缓尚不存在的批次，同判 INPUT_INVALID——
+            # AC33「稍后仅现批次」，检视闭环 m-7）。
             if marker_row is None:
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "no decision batch exists to postpone", identity)
+            if postpone_through > marker_row.batch_seq:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "through_batch_seq exceeds existing decision batch",
+                    identity,
+                )
             landed = max(marker_row.postponed_through_seq, postpone_through)
             changed = landed != marker_row.postponed_through_seq
             if changed:

@@ -157,6 +157,25 @@ class TestSaveReadMark:
             await dao.save_read_mark_max(_mark(session_id="missing"))
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
 
+    async def test_empty_mark_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视闭环 m-4 回归锚：无精确身份亦无水位的空标记不落行（不造零信息事实）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_read_mark_max(_mark())
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            count = (
+                await conn.execute(
+                    text("SELECT count(*) FROM agent_read_mark WHERE user_scope = 'u1' AND marker_kind = 'session'")
+                )
+            ).scalar_one()
+            assert count == 0
+        await engine.dispose()
+
     async def test_scope_pair_rejected_before_db(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
@@ -215,6 +234,16 @@ class TestDecisionBatch:
         dao = await _setup(real_embedded_pg.url)
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.postpone_decision_batch(user_scope="u1", through_batch_seq=1)
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+    async def test_postpone_overshoot_invalid(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视闭环 m-7 回归锚：暂缓尚不存在的批次（through > batch_seq）拒绝，
+        不预置未来批次为已暂缓（AC33「稍后仅现批次」）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await dao.begin_decision_batch(user_scope="u1")  # batch 1
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.postpone_decision_batch(user_scope="u1", through_batch_seq=2)
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
 
     async def test_batch_and_session_marks_coexist(self, real_embedded_pg: ConnectionInfo) -> None:
