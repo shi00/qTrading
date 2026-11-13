@@ -557,7 +557,7 @@ hooks/            ← 本地 Git/工具钩子脚本
   | `tests/` 其他 `[error-code]` 无 human reason | WARNING，不阻断（建议 `# type: ignore[code]  # <原因>`；存量 ≤5 处或 2026-11-30 前转 ERROR，存量策略见 `scripts/check_type_ignore_reason.py` 文件头） |
   | `tests/` 其他 `[error-code]` 带 human reason | 通过 |
 
-  覆盖边界：触发面为 pre-commit `type-ignore-reason` hook（本地 staged 文件；CI 经 `pre-commit run --all-files` 全量触发，hook 清单见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)）；脚本按 `# type: ignore` 规范形态匹配（`type:` 与 `ignore` 间至多一个空白，不覆盖多空白变体）；入口仅处理 `.py`（hook 声明含 `.pyi`，但入口过滤后不检查，仓库当前亦无自有 `.pyi`）。
+  覆盖边界：触发面为 pre-commit `type-ignore-reason` hook（本地 staged 文件；CI 经 `pre-commit run --all-files` 全量触发，hook 清单见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)）；脚本仅检查 tokenize 产出的 COMMENT token（字符串/文档字符串中的示例文本不计入），按 `# type: ignore` 规范形态匹配（`type:` 与 `ignore` 间至多一个空白，不覆盖多空白变体）；入口处理 `.py` 与 `.pyi`（stub 同受 R3 约束，不可在入口过滤掉；hook `types_or` 声明含 python/pyi）。
 
 ## 日志规范
 

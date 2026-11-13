@@ -2,6 +2,8 @@
 
 > 用途：每次 Flet 版本升级或新增/变更 API 使用时，按本模板沉淀核验记录，作为升级证据。配合 [upgrade-checklist.md](./upgrade-checklist.md) 使用。
 >
+> 每条记录必须保存**观察时的精确版本（含补丁号）、核验日期与观察摘要**，使历史证据可复现；禁止以当前 `pyproject.toml` pin 补填历史观察版本。旧版本的核验记录**不免除**新目标版本的核验义务（目标版本变化须重新核验，见 [mcp-usage.md §2](./mcp-usage.md#2-何时使用-flet-mcp触发条件)）。
+>
 > 文档入口：[Flet 开发文档入口](./README.md)
 
 > Owner: UI 维护者
@@ -14,7 +16,7 @@
 | 字段 | 说明 |
 |------|------|
 | **API** | 受核验的 Flet API（如 `ft.use_dialog`、`ft.Dropdown.on_select`、`use_viewmodel(factory=)`） |
-| **锁定版本** | 核验时的 Flet 锁定版本（从 [`pyproject.toml`](../../pyproject.toml) 读取，不写补丁号漂移；写小版本+日期） |
+| **锁定版本** | 核验时**实际观察**的 Flet 精确版本（含补丁号，从核验环境实测读取，如 `pip list`）。本模板为 API 核验历史快照（按定义需记录具体补丁版本号），豁免 GDR-06 版本漂移检查；历史证据必须可复现，**禁止以当前 pin 补填** |
 | **核验来源** | 官方文档链接 / Flet issue / 项目运行期验证 / 项目单元测试 |
 | **项目结论** | 在项目中的契约判定（继续使用 / 调整契约 / 暂禁用 / 待评估） |
 | **需更新文件** | 核验结果波及的文件清单（`v1-api-constraints.md` / `project-differences.md` / `upgrade-checklist.md` / `ui/hooks.py` / `tests/unit/ui/*_contract.py` 等）。仅当新增、删除或改变专题职责时更新 [docs/flet/README.md](./README.md)。 |
@@ -28,10 +30,11 @@
 ### 核验记录模板
 
 ```markdown
-### <API 名> @ <锁定版本小版本> (<核验日期>)
+### <API 名> @ <精确观察版本（含补丁号）> (<核验日期>)
 
 - **API**: <API 签名/行为>
-- **锁定版本**: Flet <major.minor>（pyproject.toml 实际锁定见文件）
+- **锁定版本**: Flet <精确版本，含补丁号>（核验环境实测，如 `pip list`；禁止以当前 pyproject.toml pin 补填）
+- **观察摘要**: <一句话概括本版观察到的关键行为/差异，供后续版本比对>
 - **核验来源**:
   - 官方文档: <URL>
   - Flet issue / PR: <URL 或 N/A>
