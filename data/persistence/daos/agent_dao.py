@@ -31,7 +31,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql as sa_pg
@@ -56,6 +56,7 @@ from core.agent_types import (
     ConsumeAnswerRequest,
     ConsumptionFact,
     ConsumptionState,
+    CLEANUP_NATIVE_TARGETS,
     DataAttemptAuthorization,
     DataConsentBinding,
     DataConsentClaim,
@@ -156,6 +157,7 @@ from core.agent_types import (
     derive_event_identity,
     evaluate_data_attempt,
     json_doc,
+    normalize_cleanup_ids,
     sha256_hex,
     stable_id,
     to_wire_dict,
@@ -229,6 +231,36 @@ SET disabled_inherited = true
 WHERE user_scope = :user_scope
     AND (source_id, source_version) IN (SELECT source_id, source_version FROM closure)
 """
+
+
+# ---------------------------------------------------------------------------
+# E-06 联合清理（DD §10.7）：九类原生目标按常量键、准确 ID 参数化；禁 LIKE/前缀/全表。
+# 每条语句都是 text() 常量（R4），键列名不来自外部输入。
+# ---------------------------------------------------------------------------
+
+_CLEANUP_DELETE_SQL: Final[dict[str, str]] = {
+    "dbos.workflow_status": "DELETE FROM dbos.workflow_status WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_input": "DELETE FROM dbos.workflow_input WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_output": "DELETE FROM dbos.workflow_output WHERE workflow_uuid = ANY(:ids)",
+    "dbos.operation_outputs": "DELETE FROM dbos.operation_outputs WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_events": "DELETE FROM dbos.workflow_events WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_events_history": "DELETE FROM dbos.workflow_events_history WHERE workflow_uuid = ANY(:ids)",
+    "dbos.streams": "DELETE FROM dbos.streams WHERE workflow_uuid = ANY(:ids)",
+    "dbos.notifications": "DELETE FROM dbos.notifications WHERE destination_uuid = ANY(:ids)",
+    "agent_ds.datasource_outputs": "DELETE FROM agent_ds.datasource_outputs WHERE workflow_id = ANY(:ids)",
+}
+
+_CLEANUP_COUNT_SQL: Final[dict[str, str]] = {
+    "dbos.workflow_status": "SELECT COUNT(*) FROM dbos.workflow_status WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_input": "SELECT COUNT(*) FROM dbos.workflow_input WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_output": "SELECT COUNT(*) FROM dbos.workflow_output WHERE workflow_uuid = ANY(:ids)",
+    "dbos.operation_outputs": "SELECT COUNT(*) FROM dbos.operation_outputs WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_events": "SELECT COUNT(*) FROM dbos.workflow_events WHERE workflow_uuid = ANY(:ids)",
+    "dbos.workflow_events_history": "SELECT COUNT(*) FROM dbos.workflow_events_history WHERE workflow_uuid = ANY(:ids)",
+    "dbos.streams": "SELECT COUNT(*) FROM dbos.streams WHERE workflow_uuid = ANY(:ids)",
+    "dbos.notifications": "SELECT COUNT(*) FROM dbos.notifications WHERE destination_uuid = ANY(:ids)",
+    "agent_ds.datasource_outputs": "SELECT COUNT(*) FROM agent_ds.datasource_outputs WHERE workflow_id = ANY(:ids)",
+}
 
 
 def _budget_blocked(identity: str, reason: str) -> AgentServiceError:
@@ -5332,3 +5364,60 @@ class AgentDao(BaseDao):
             link_ids=tuple(link_ids),
             replayed=replayed,
         )
+
+    async def count_cleanup_native_rows(self, ids: Sequence[str]) -> dict[str, int]:
+        """E-06 预检：九类原生目标按准确 ID 计数（查不到=0，不等于已清）。
+
+        只读；每个域单独参数化 COUNT，禁止 LIKE/前缀/递归扩集合（DD §10.7）。
+        """
+
+        normalized = self._require_cleanup_ids(ids)
+        engine = self._require_cleanup_engine()
+        counts: dict[str, int] = {}
+        async with engine.connect() as conn:
+            for table, _key in CLEANUP_NATIVE_TARGETS:
+                stmt = sa.text(_CLEANUP_COUNT_SQL[table]).bindparams(sa.bindparam("ids", expanding=True))
+                result = await conn.execute(stmt, {"ids": list(normalized)})
+                counts[table] = int(result.scalar_one())
+        return counts
+
+    async def delete_cleanup_native_rows(self, ids: Sequence[str]) -> dict[str, int]:
+        """E-06 删除：单事务逐域按常量键删除，并返回删除后逐域剩余计数。
+
+        只处理显式核定的准确集合；调用方须先提交删除 fence（§10.7）。任一步
+        失败由事务整体回滚，作业转 ``retry_pending`` 并复用原集合。
+        """
+
+        normalized = self._require_cleanup_ids(ids)
+        engine = self._require_cleanup_engine()
+        remaining: dict[str, int] = {}
+        async with engine.begin() as conn:
+            for table, _key in CLEANUP_NATIVE_TARGETS:
+                await conn.execute(
+                    sa.text(_CLEANUP_DELETE_SQL[table]).bindparams(sa.bindparam("ids", expanding=True)),
+                    {"ids": list(normalized)},
+                )
+                result = await conn.execute(
+                    sa.text(_CLEANUP_COUNT_SQL[table]).bindparams(sa.bindparam("ids", expanding=True)),
+                    {"ids": list(normalized)},
+                )
+                remaining[table] = int(result.scalar_one())
+        return remaining
+
+    def _require_cleanup_ids(self, ids: Sequence[str]) -> tuple[str, ...]:
+        # 空集合仅允许「未启动计划」在服务层直接判定；DAO 不执行无目标删除。
+        try:
+            normalized = normalize_cleanup_ids(ids)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"invalid cleanup ids: {exc.code}", "cleanup"
+            ) from exc
+        if not normalized:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup ids must not be empty", "cleanup")
+        return normalized
+
+    def _require_cleanup_engine(self) -> AsyncEngine:
+        self._check_engine()
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        return engine
