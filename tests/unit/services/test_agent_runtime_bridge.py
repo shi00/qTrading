@@ -25,7 +25,9 @@ from typing import Any
 import pytest
 
 from services.agent_service.runtime import (
+    ChannelClosedError,
     OwnerLoopBridge,
+    OwnerStreamChannel,
     UnknownOperationError,
 )
 
@@ -389,3 +391,117 @@ def test_cancelled_operation_notifies_observers(
     owner.loop.call_soon_threadsafe(release.set)
     # 原 IO 已被取消：结果未产出（unknown/取消路径不伪造产出，R21）
     assert work.outcomes == []
+
+
+# ---------------------------------------------------------------------------
+# 跨 loop 流通道（§8.2 段 3）
+# ---------------------------------------------------------------------------
+
+
+async def _make_channel(bridge: OwnerLoopBridge, maxsize: int) -> OwnerStreamChannel[int]:
+    """在 owner 循环内创建通道（构造契约：owner loop 创建，§8.2）。"""
+    return OwnerStreamChannel(bridge, maxsize=maxsize)
+
+
+async def _put_item(channel: OwnerStreamChannel[int], item: int) -> None:
+    await channel.put(item)
+
+
+async def _close_channel(channel: OwnerStreamChannel[int]) -> None:
+    channel.close()
+
+
+def test_channel_requires_owner_loop_construction() -> None:
+    """非事件循环上下文构造通道明确拒绝（通道必须在 owner loop 创建，§8.2）。"""
+    with pytest.raises(RuntimeError) as excinfo:
+        OwnerStreamChannel(_make_bridge(_LoopThread("unused").loop), maxsize=1)
+    assert "must be created in the owner event loop" in str(excinfo.value)
+
+
+def test_channel_rejects_unbounded_maxsize(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """maxsize<1 明确拒绝（有界通道契约：满时真实阻塞依赖有限容量）。"""
+    owner, _foreign = loops
+    bridge = _make_bridge(owner.loop)
+    with pytest.raises(ValueError) as excinfo:
+        owner.submit(_make_channel(bridge, maxsize=0))
+    assert "maxsize" in str(excinfo.value)
+
+
+def test_channel_put_get_roundtrip_and_close(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """事件按序投递/取出；关闭取尽后返回 None（已入队项不丢）。"""
+    owner, foreign = loops
+    bridge = _make_bridge(owner.loop)
+    channel = owner.submit(_make_channel(bridge, maxsize=8))
+
+    async def produce() -> None:
+        await channel.put(1)
+        await channel.put(2)
+        channel.close()
+
+    async def consume() -> list[int | None]:
+        items = [await channel.bridge_get(), await channel.bridge_get()]
+        items.append(await channel.bridge_get())  # 关闭后 None
+        return items
+
+    owner.submit(produce())
+    assert foreign.submit(consume()) == [1, 2, None]
+
+
+def test_channel_bounded_put_blocks_until_consumed(
+    loops: tuple[_LoopThread, _LoopThread],
+) -> None:
+    """满时真实阻塞生产（SQ-02 背压语义）：消费腾出空间后 put 才完成。"""
+    owner, foreign = loops
+    bridge = _make_bridge(owner.loop)
+    channel = owner.submit(_make_channel(bridge, maxsize=1))
+
+    owner.submit(_put_item(channel, 1))  # 填满
+    blocked = owner.spawn(channel.put(2))
+    # 无消费：put 确定未完成（确定性断言，无竞态窗口）
+    assert not blocked.done()
+    assert foreign.submit(channel.bridge_get()) == 1  # 腾出空间
+    blocked.result(timeout=10)  # put 完成
+    assert foreign.submit(channel.bridge_get()) == 2
+
+
+def test_channel_close_wakes_blocked_reader(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """关闭唤醒阻塞读者：bridge_get 立即返回 None（终止唤醒契约）。"""
+    owner, foreign = loops
+    bridge = _make_bridge(owner.loop)
+    channel = owner.submit(_make_channel(bridge, maxsize=1))
+
+    reader = foreign.spawn(channel.bridge_get())
+    assert not reader.done()  # 空通道阻塞（确定性）
+    owner.submit(_close_channel(channel))
+    assert reader.result(timeout=10) is None
+
+
+def test_channel_close_wakes_blocked_writer(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """关闭唤醒阻塞写者：被阻塞的 put 以 ChannelClosedError 终止（终止唤醒契约）。"""
+    owner, _foreign = loops
+    bridge = _make_bridge(owner.loop)
+    channel = owner.submit(_make_channel(bridge, maxsize=1))
+
+    owner.submit(_put_item(channel, 1))
+    blocked = owner.spawn(channel.put(2))
+    assert not blocked.done()
+    owner.submit(_close_channel(channel))
+    with pytest.raises(ChannelClosedError) as excinfo:
+        blocked.result(timeout=10)
+    assert "closed while producer blocked" in str(excinfo.value)
+
+
+def test_channel_rejects_foreign_loop_direct_access(
+    loops: tuple[_LoopThread, _LoopThread],
+) -> None:
+    """put/get 仅限 owner 循环：外部 loop 直接访问明确拒绝（不跨 loop await Queue）。"""
+    owner, foreign = loops
+    bridge = _make_bridge(owner.loop)
+    channel = owner.submit(_make_channel(bridge, maxsize=1))
+
+    with pytest.raises(RuntimeError) as get_exc:
+        foreign.submit(channel.get())
+    assert "foreign loop" in str(get_exc.value)
+    with pytest.raises(RuntimeError) as put_exc:
+        foreign.submit(channel.put(1))
+    assert "foreign loop" in str(put_exc.value)

@@ -481,6 +481,8 @@ class OwnerStreamChannel[T]:
             outcome = await self._wait_put_or_close(item)
             if outcome is _WAIT_CLOSED:
                 raise ChannelClosedError("channel closed while producer blocked")
+            # _PUT_DONE：内层 put 任务已投递该项，直接返回（再 put_nowait 会重复投递）
+            return
 
     async def get(self) -> T | None:
         """取事件（owner 循环内）：先取尽已入队项，关闭且取尽后返回 None。"""
