@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence, Set as AbstractSet
+from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, is_dataclass
 from datetime import datetime as dt
 from datetime import UTC
@@ -5595,3 +5595,241 @@ class SourceRegistrationRequest:
     decision_cutoff: str | None
     selected: tuple[BusinessSourceItem, ...]
     unselected: tuple[BusinessSourceItem, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# E-02 共享 MCP 契约（§10.4 / HANDOFF §9）——本轮只承载静态可验证的准入合同；
+# SDK transport 内部插入点、预算数值与每 send 门仍为 needs-spike，代码不冒充已验证。
+# ---------------------------------------------------------------------------
+
+
+class MCPTransportKind(Enum):
+    """MCP 传输（唯一 wire 拼写）。SSE 仅在兼容契约对齐后由用户显式选择。"""
+
+    STDIO = "stdio"
+    STREAMABLE_HTTP = "streamable_http"
+    SSE = "sse"
+
+
+@dataclass(frozen=True, slots=True)
+class MCPServiceIdentity:
+    """共享连接的稳定 key：服务身份 + 配置版本；显示名不参与（HANDOFF §9）。"""
+
+    service_id: str
+    config_version: int
+
+    def stable_key(self) -> str:
+        """稳定键；每次调用都复核身份与版本合法（不缓存非法输入）。"""
+
+        service_id = require_identity(self.service_id, "$.mcp_service.service_id")
+        config_version = require_revision(self.config_version, "$.mcp_service.config_version")
+        return stable_id("mcp_service", (service_id, str(config_version)))
+
+
+_MCP_SERVICE_IDENTITY_KEYS: Final = frozenset({"service_id", "config_version"})
+
+
+def decode_mcp_service_identity(value: object, path: str = "$.mcp_service") -> MCPServiceIdentity:
+    """严格解码共享服务身份：全键必填、禁额外键、版本从 1 起。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _MCP_SERVICE_IDENTITY_KEYS, path)
+    service_id = value["service_id"]
+    if not isinstance(service_id, str):
+        _fail("invalid_type", f"{path}.service_id")
+    return MCPServiceIdentity(
+        service_id=_require_str(service_id, f"{path}.service_id"),
+        config_version=require_revision(value["config_version"], f"{path}.config_version"),
+    )
+
+
+#: 连接与单次工具各自独立的单一总 deadline（秒）；progress/分片不重置（HANDOFF §9）。
+MCP_DEFAULT_DEADLINE_S: Final = 30
+MCP_MIN_DEADLINE_S: Final = 1
+MCP_MAX_DEADLINE_S: Final = 120
+
+
+def validate_mcp_deadline(value: object, path: str = "$.mcp.deadline_s") -> int:
+    """deadline 校验：``None`` 取默认 30；仅整数 1—120 合法（bool/浮点/字符串拒绝）。"""
+
+    if value is None:
+        return MCP_DEFAULT_DEADLINE_S
+    if isinstance(value, bool) or not isinstance(value, int):
+        _fail("invalid_deadline", path)
+    if value < MCP_MIN_DEADLINE_S or value > MCP_MAX_DEADLINE_S:
+        _fail("invalid_deadline", path)
+    return value
+
+
+#: 前置接收/留存预算字段；每个字段对应 HANDOFF §9 的一个预算族
+#: （接收字节 / 解码表示 / 结构深度 / 目录累计数量 / 目录累计字节 /
+#: schema 累计 / 单结果 / 受管留存）。
+MCP_BUDGET_FIELDS: Final[tuple[str, ...]] = (
+    "receive_bytes",
+    "decoded_bytes",
+    "structure_depth",
+    "catalog_items",
+    "catalog_bytes",
+    "schema_bytes",
+    "single_result_bytes",
+    "retention_bytes",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MCPBudgetProfile:
+    """启连/发现/调用前必须冻结的接收预算；``None`` 表示未冻结（该传输不准入）。
+
+    设计明确不新增无依据产品数值：本类不提供任何默认上限，未冻结即拒绝准入。
+    """
+
+    receive_bytes: int | None = None
+    decoded_bytes: int | None = None
+    structure_depth: int | None = None
+    catalog_items: int | None = None
+    catalog_bytes: int | None = None
+    schema_bytes: int | None = None
+    single_result_bytes: int | None = None
+    retention_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in MCP_BUDGET_FIELDS:
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                _fail("invalid_budget", f"$.mcp.budget.{name}")
+
+    def unfrozen_fields(self) -> tuple[str, ...]:
+        """仍未冻结的预算字段（按固定声明顺序）。"""
+
+        return tuple(name for name in MCP_BUDGET_FIELDS if getattr(self, name) is None)
+
+    def is_admitted(self) -> bool:
+        """全部预算族冻结才允许启连/发现/调用；任一缺失即不准入。"""
+
+        return not self.unfrozen_fields()
+
+
+def resolve_tool_allowlist(
+    *,
+    service_tools: Iterable[str],
+    role_tools: Iterable[str],
+    request_tools: Iterable[str],
+    permission_tools: Iterable[str],
+) -> tuple[str, ...]:
+    """工具白名单 = 服务 ∩ 角色 ∩ 请求 ∩ 新鲜许可；空集合确实为空（真空）。
+
+    ``readOnlyHint`` 与工具是否被发现不参与本判定；返回值按名称排序以保证确定顺序。
+    """
+
+    scopes = []
+    for scope in (service_tools, role_tools, request_tools, permission_tools):
+        names = set()
+        for name in scope:
+            names.add(require_identity(name, "$.mcp.tool_name"))
+        scopes.append(names)
+    return tuple(sorted(scopes[0].intersection(*scopes[1:])))
+
+
+@dataclass(frozen=True, slots=True)
+class MCPReadOnlyAudit:
+    """只读审核记录：绑定实际实现指纹，schema 相同但载荷替换即失效（§10.4）。"""
+
+    service: MCPServiceIdentity
+    tool_scope: tuple[str, ...]
+    #: 本机实际实现（executable/入口/关键载荷/依赖版本）摘要；``None`` = 未核定。
+    implementation_fingerprint: str | None
+    evidence_source: str
+    reviewed_at: str
+    invalidation_conditions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MCPReadOnlyAdmission:
+    """只读准入结论：``reason`` 为稳定原因码，``None`` 仅当准入。"""
+
+    admitted: bool
+    reason: str | None
+
+
+_MCP_AUDIT_KEYS: Final = frozenset(
+    {
+        "service",
+        "tool_scope",
+        "implementation_fingerprint",
+        "evidence_source",
+        "reviewed_at",
+        "invalidation_conditions",
+    }
+)
+
+
+def _validate_mcp_read_only_audit(audit: MCPReadOnlyAudit) -> None:
+    audit.service.stable_key()
+    for name in audit.tool_scope:
+        require_identity(name, "$.mcp.audit.tool_scope")
+    if audit.implementation_fingerprint is not None:
+        _require_digest(audit.implementation_fingerprint, "$.mcp.audit.implementation_fingerprint")
+    _require_str(audit.evidence_source, "$.mcp.audit.evidence_source")
+    require_utc_timestamp(audit.reviewed_at, "$.mcp.audit.reviewed_at")
+    for condition in audit.invalidation_conditions:
+        require_identity(condition, "$.mcp.audit.invalidation_conditions")
+
+
+def encode_mcp_read_only_audit(audit: MCPReadOnlyAudit) -> dict[str, Any]:
+    """审核记录 → wire（全键；fingerprint 可为 null 表示未核定）。"""
+
+    _validate_mcp_read_only_audit(audit)
+    return {
+        "service": {
+            "service_id": audit.service.service_id,
+            "config_version": audit.service.config_version,
+        },
+        "tool_scope": list(audit.tool_scope),
+        "implementation_fingerprint": audit.implementation_fingerprint,
+        "evidence_source": audit.evidence_source,
+        "reviewed_at": audit.reviewed_at,
+        "invalidation_conditions": list(audit.invalidation_conditions),
+    }
+
+
+def decode_mcp_read_only_audit(value: object, path: str = "$.mcp.audit") -> MCPReadOnlyAudit:
+    """严格解码审核记录：全键必填、禁额外键（``read_only_hint`` 不是审核字段）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _MCP_AUDIT_KEYS, path)
+    fingerprint = value["implementation_fingerprint"]
+    if fingerprint is not None:
+        _require_digest(fingerprint, f"{path}.implementation_fingerprint")
+    audit = MCPReadOnlyAudit(
+        service=decode_mcp_service_identity(value["service"], f"{path}.service"),
+        tool_scope=_require_str_list(value["tool_scope"], f"{path}.tool_scope", allow_empty=True),
+        implementation_fingerprint=cast("str | None", fingerprint),
+        evidence_source=_require_str(value["evidence_source"], f"{path}.evidence_source"),
+        reviewed_at=require_utc_timestamp(value["reviewed_at"], f"{path}.reviewed_at"),
+        invalidation_conditions=_require_str_list(value["invalidation_conditions"], f"{path}.invalidation_conditions"),
+    )
+    _validate_mcp_read_only_audit(audit)
+    return audit
+
+
+def evaluate_read_only_audit(
+    audit: MCPReadOnlyAudit | None,
+    current_implementation_fingerprint: str | None,
+) -> MCPReadOnlyAdmission:
+    """只读准入：无审核、实现未核定或实现变化一律拒绝（未知不当通过）。"""
+
+    if audit is None:
+        return MCPReadOnlyAdmission(False, "audit_missing")
+    _validate_mcp_read_only_audit(audit)
+    if audit.implementation_fingerprint is None:
+        return MCPReadOnlyAdmission(False, "implementation_unverified")
+    if current_implementation_fingerprint is None:
+        return MCPReadOnlyAdmission(False, "implementation_unverified")
+    _require_digest(current_implementation_fingerprint, "$.mcp.current_implementation_fingerprint")
+    if current_implementation_fingerprint != audit.implementation_fingerprint:
+        return MCPReadOnlyAdmission(False, "implementation_changed")
+    return MCPReadOnlyAdmission(True, None)
