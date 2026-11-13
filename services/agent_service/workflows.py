@@ -66,6 +66,8 @@ CHILD_RESULT_POLL_INTERVAL_SEC: Final[float] = 0.1
 
 _PAYLOAD_VERSION_KEY: Final = "payload_version"
 _RESEARCH_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "plan_digest", "nodes"})
+#: 重试轮载荷在版本 1 上的兼容扩展键（缺省视为空：首轮无保留前置）。
+_RESEARCH_PAYLOAD_OPTIONAL_KEYS: Final = frozenset({"preserved_outcomes"})
 _LEAF_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "plan_digest", "node"})
 _NODE_OUTCOME_KEYS: Final = frozenset({"node_id", "state", "error_code", "artifact_ref"})
 
@@ -122,6 +124,19 @@ def _require_exact_keys(value: Mapping[str, object], required: frozenset[str], p
     if missing:
         _fail("missing_field", f"{path}.{missing[0]}")
     extra = sorted(value.keys() - required)
+    if extra:
+        _fail("unknown_field", f"{path}.{extra[0]}")
+
+
+def _require_keys_with_optional(
+    value: Mapping[str, object], required: frozenset[str], optional: frozenset[str], path: str
+) -> None:
+    """必填键全在、额外键仅限已声明可选键（兼容扩展不放开任意键）。"""
+
+    missing = sorted(required - value.keys())
+    if missing:
+        _fail("missing_field", f"{path}.{missing[0]}")
+    extra = sorted(value.keys() - required - optional)
     if extra:
         _fail("unknown_field", f"{path}.{extra[0]}")
 
@@ -202,20 +217,33 @@ def decode_leaf_payload(value: object, path: str = "$.leaf_payload") -> tuple[st
     )
 
 
-def decode_research_payload(value: object, path: str = "$.research_payload") -> tuple[str, str, PlanSpecProposal]:
-    """严格解码父载荷：``(execution_id, plan_digest, plan)``。"""
+def decode_research_payload(
+    value: object, path: str = "$.research_payload"
+) -> tuple[str, str, PlanSpecProposal, tuple[NodeOutcome, ...]]:
+    """严格解码父载荷：``(execution_id, plan_digest, plan, preserved_outcomes)``。
+
+    ``preserved_outcomes`` 为重试轮冻结的「仍适用成功前置」旧轮事实；首轮缺省
+    为空（版本 1 内的兼容扩展键，不放开任意键）。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
-    _require_exact_keys(value, _RESEARCH_PAYLOAD_KEYS, path)
+    _require_keys_with_optional(value, _RESEARCH_PAYLOAD_KEYS, _RESEARCH_PAYLOAD_OPTIONAL_KEYS, path)
     _require_payload_version(value, path)
     raw_nodes = value["nodes"]
     if not isinstance(raw_nodes, list):
         _fail("invalid_type", f"{path}.nodes")
+    raw_preserved = value.get("preserved_outcomes", [])
+    if not isinstance(raw_preserved, list):
+        _fail("invalid_type", f"{path}.preserved_outcomes")
+    preserved = tuple(
+        decode_node_outcome(item, f"{path}.preserved_outcomes[{index}]") for index, item in enumerate(raw_preserved)
+    )
     return (
         _require_str(value["execution_id"], f"{path}.execution_id"),
         _require_digest(value["plan_digest"], f"{path}.plan_digest"),
         decode_plan_spec_proposal({"nodes": raw_nodes}, f"{path}.plan_spec"),
+        preserved,
     )
 
 
@@ -286,6 +314,8 @@ class LeafDagScheduler:
         self._started: set[str] = set()
         self._outcomes: dict[str, NodeOutcome] = {}
         self._blocked: dict[str, str] = {}
+        #: 重试轮冻结的「仍适用成功前置」旧轮事实（计划外节点；不属本轮成果）。
+        self._preserved: dict[str, NodeOutcome] = {}
 
     def node(self, node_id: str) -> PlanNodeSpec:
         """按身份取节点（未知身份明确拒绝）。"""
@@ -295,6 +325,26 @@ class LeafDagScheduler:
             _fail("unknown_node", f"$.nodes[{node_id}]")
         return node
 
+    def seed_preserved(self, outcomes: tuple[NodeOutcome, ...]) -> None:
+        """登记重试轮保留的成功前置（只接受 ``complete`` 且不得在本轮范围内）。
+
+        保留事实来自旧轮已保存成果（不重做、不复制许可与费用）；非成功前置
+        不能作为「适用成功前置」，冲突必须显式拒绝而非静默降级。
+        """
+
+        for outcome in outcomes:
+            if outcome.state != "complete":
+                _fail("invalid_preserved_outcome", f"$.preserved_outcomes[{outcome.node_id}]")
+            if outcome.node_id in self._nodes:
+                _fail("preserved_node_in_retry_scope", f"$.preserved_outcomes[{outcome.node_id}]")
+            self._preserved[outcome.node_id] = outcome
+
+    def _dependency_satisfied(self, dependency: str) -> bool:
+        """前置满足：本轮已 ``complete``，或重试轮保留的 ``complete`` 旧事实。"""
+
+        outcome = self._outcomes.get(dependency) or self._preserved.get(dependency)
+        return outcome is not None and outcome.state in _SUCCESS_STATES
+
     def ready(self) -> tuple[str, ...]:
         """当前就绪叶：未启动、未阻塞且全部前置 ``complete``（按计划顺序）。"""
 
@@ -303,10 +353,7 @@ class LeafDagScheduler:
             if node_id in self._started or node_id in self._blocked:
                 continue
             node = self._nodes[node_id]
-            if all(
-                dependency in self._outcomes and self._outcomes[dependency].state in _SUCCESS_STATES
-                for dependency in node.depends_on
-            ):
+            if all(self._dependency_satisfied(dependency) for dependency in node.depends_on):
                 ready.append(node_id)
         return tuple(ready)
 
@@ -383,16 +430,23 @@ class LeafDagScheduler:
 LeafRunner = Callable[[PlanNodeSpec], Awaitable[NodeOutcome]]
 
 
-async def drive_leaf_dag(plan: PlanSpecProposal, start_leaf: LeafRunner) -> PlanRunSummary:
+async def drive_leaf_dag(
+    plan: PlanSpecProposal,
+    start_leaf: LeafRunner,
+    *,
+    preserved: tuple[NodeOutcome, ...] = (),
+) -> PlanRunSummary:
     """事件驱动推进一层叶 DAG，返回叶事实汇总。
 
-    每个完成事实到达后立即启动新就绪叶（不按固定批次 gather）。``start_leaf``
+    每个完成事实到达后立即启动新就绪叶（不按固定批次 gather）。``preserved``
+    为重试轮冻结的旧轮成功前置（计划外节点，不重做、不重计费用）。``start_leaf``
     须把「已判定的业务失败」作为 ``NodeOutcome(state="failed")`` 返回；未判定
     异常与 ``CancelledError`` 向上传播（不伪造 failed、不吞取消，R2/R21）。
     非终态结果（暂停/等待/未知）使本次推进在没有可运行叶时结束且不收敛。
     """
 
     scheduler = LeafDagScheduler(plan)
+    scheduler.seed_preserved(preserved)
     running: dict[str, asyncio.Task[NodeOutcome]] = {}
     try:
         while True:
@@ -480,7 +534,7 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     严格解码与编排，不重复准入判定。
     """
 
-    execution_id, plan_digest, plan = decode_research_payload(payload)
+    execution_id, plan_digest, plan, preserved = decode_research_payload(payload)
 
     async def start_leaf(node: PlanNodeSpec) -> NodeOutcome:
         handle = await DBOS.start_workflow_async(
@@ -489,19 +543,116 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         )
         return decode_node_outcome(await handle.get_result(polling_interval_sec=CHILD_RESULT_POLL_INTERVAL_SEC))
 
-    summary = await drive_leaf_dag(plan, start_leaf)
+    summary = await drive_leaf_dag(plan, start_leaf, preserved=preserved)
     return summary.to_wire()
 
 
-def build_research_payload(plan: PlanSpecProposal, *, execution_id: str, plan_digest: str) -> dict[str, Any]:
-    """构造父 workflow 载荷（与保存的计划版同源内容；PORTABLE JSON 可序列化）。"""
+def build_research_payload(
+    plan: PlanSpecProposal,
+    *,
+    execution_id: str,
+    plan_digest: str,
+    preserved: tuple[NodeOutcome, ...] = (),
+) -> dict[str, Any]:
+    """构造父 workflow 载荷（与保存的计划版同源内容；PORTABLE JSON 可序列化）。
+
+    ``preserved`` 为重试轮冻结的旧轮成功前置事实（首轮为空）。
+    """
 
     return {
         _PAYLOAD_VERSION_KEY: PAYLOAD_VERSION,
         "execution_id": _require_str(execution_id, "$.execution_id"),
         "plan_digest": _require_digest(plan_digest, "$.plan_digest"),
         "nodes": [_node_to_wire(node) for node in plan.nodes],
+        "preserved_outcomes": [outcome.to_wire() for outcome in preserved],
     }
+
+
+# ---------------------------------------------------------------------------
+# 失败重试范围（F04/F05：开新轮只重做目标及受影响下游，保旧成果与费用）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RetryScope:
+    """重试新轮范围：``redo`` 按计划顺序含目标及传递下游；``preserved`` 为不在
+    范围内、仍可复用的旧轮成功前置（或被保留的独立分支）。
+
+    独立兄弟不在 ``redo`` 内（失败仅阻相关后继）；范围外旧成果与费用保持原样。
+    """
+
+    redo: tuple[str, ...]
+    preserved: tuple[str, ...]
+
+
+def compute_retry_scope(plan: PlanSpecProposal, *, targets: tuple[str, ...]) -> RetryScope:
+    """计算重试范围：目标 → 传递下游（前置变更同理使下游失效）。
+
+    Args:
+        plan: 已校验的一层叶计划（原计划版，含全部节点）。
+        targets: 需重做的节点身份（失败叶或前置输入变更的叶）。
+
+    Raises:
+        AgentValidationError: 目标为空、未知目标或重复目标（``unknown_node`` /
+            ``invalid_targets``）。
+    """
+
+    if not targets:
+        _fail("invalid_targets", "$.targets")
+    if len(set(targets)) != len(targets):
+        _fail("invalid_targets", "$.targets")
+    order = tuple(node.node_id for node in plan.nodes)
+    nodes = {node.node_id: node for node in plan.nodes}
+    dependents: dict[str, list[str]] = {node_id: [] for node_id in order}
+    for node in plan.nodes:
+        for dependency in node.depends_on:
+            dependents[dependency].append(node.node_id)
+
+    affected: set[str] = set()
+    stack = list(targets)
+    while stack:
+        node_id = stack.pop()
+        if node_id not in nodes:
+            _fail("unknown_node", f"$.targets[{node_id}]")
+        if node_id in affected:
+            continue
+        affected.add(node_id)
+        stack.extend(dependents[node_id])
+
+    redo = tuple(node_id for node_id in order if node_id in affected)
+    preserved = tuple(node_id for node_id in order if node_id not in affected)
+    return RetryScope(redo=redo, preserved=preserved)
+
+
+def build_retry_payload(
+    plan: PlanSpecProposal,
+    *,
+    execution_id: str,
+    plan_digest: str,
+    targets: tuple[str, ...],
+    preserved_outcomes: tuple[NodeOutcome, ...],
+) -> tuple[dict[str, Any], RetryScope]:
+    """构造重试轮父载荷：``nodes`` 为范围内节点，``preserved_outcomes`` 为旧轮
+    成功前置。
+
+    范围外前置必须由 ``preserved_outcomes`` 全部覆盖（仍适用成功结果）；缺失
+    显式拒绝（不静默不满足依赖）。
+    """
+
+    scope = compute_retry_scope(plan, targets=targets)
+    redo_nodes = tuple(node for node in plan.nodes if node.node_id in set(scope.redo))
+    preserved_ids = {outcome.node_id for outcome in preserved_outcomes}
+    for node in redo_nodes:
+        for dependency in node.depends_on:
+            if dependency not in set(scope.redo) and dependency not in preserved_ids:
+                _fail("missing_preserved_predecessor", f"$.nodes[{node.node_id}].depends_on")
+    payload = build_research_payload(
+        PlanSpecProposal(nodes=redo_nodes),
+        execution_id=execution_id,
+        plan_digest=plan_digest,
+        preserved=preserved_outcomes,
+    )
+    return payload, scope
 
 
 __all__ = [
@@ -515,8 +666,11 @@ __all__ = [
     "LeafRuntimeRegistry",
     "NodeOutcome",
     "PlanRunSummary",
+    "RetryScope",
     "build_leaf_payload",
     "build_research_payload",
+    "build_retry_payload",
+    "compute_retry_scope",
     "decode_leaf_payload",
     "decode_node_outcome",
     "decode_research_payload",

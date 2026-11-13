@@ -24,6 +24,8 @@ from services.agent_service.workflows import (
     NodeOutcome,
     PlanRunSummary,
     build_leaf_payload,
+    build_retry_payload,
+    compute_retry_scope,
     decode_leaf_payload,
     decode_node_outcome,
     decode_research_payload,
@@ -348,12 +350,13 @@ def test_leaf_payload_roundtrip_and_strict_keys() -> None:
 
 
 def test_research_payload_decode_nodes() -> None:
-    """父载荷解码为已校验前保存的计划（nodes 严格解码）。"""
+    """父载荷解码为已校验前保存的计划（nodes 严格解码；preserved 缺省为空）。"""
     payload = {"payload_version": 1, "execution_id": "exec-1", "plan_digest": "c" * 64, "nodes": []}
     # 空 nodes 结构合法（是否为空白由派发前 validate_plan_spec_proposal 拒绝）
-    execution_id, plan_digest, plan = decode_research_payload(payload)
+    execution_id, plan_digest, plan, preserved = decode_research_payload(payload)
     assert (execution_id, plan_digest) == ("exec-1", "c" * 64)
     assert plan.nodes == ()
+    assert preserved == ()
 
 
 def test_leaf_registry_requires_install() -> None:
@@ -374,3 +377,109 @@ def test_leaf_registry_install_and_reset() -> None:
     assert LeafRuntimeRegistry.require() is runner
     LeafRuntimeRegistry._reset_singleton()
     assert LeafRuntimeRegistry._runner is None
+
+
+# ---------------------------------------------------------------------------
+# 失败重试新轮与下游重做范围（F04/F05）
+# ---------------------------------------------------------------------------
+
+
+def test_retry_scope_includes_target_and_downstream() -> None:
+    """A→B→C，重试 B：范围为 (B, C)，A 保留（不重做前置）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)), _node("c", ("b",)))
+    scope = compute_retry_scope(plan, targets=("b",))
+    assert scope.redo == ("b", "c")
+    assert scope.preserved == ("a",)
+
+
+def test_retry_scope_excludes_independent_branch() -> None:
+    """独立 B 不在范围（A 失败只连带 C）；B 保留旧成果与费用。"""
+    plan = _plan(_node("a"), _node("b"), _node("c", ("a", "b")))
+    scope = compute_retry_scope(plan, targets=("a",))
+    assert scope.redo == ("a", "c")
+    assert scope.preserved == ("b",)
+
+
+def test_retry_scope_unions_multiple_targets() -> None:
+    """多个目标取并集（含各自传递下游）。"""
+    plan = _plan(_node("a"), _node("b"), _node("c", ("a", "b")), _node("d", ("c",)))
+    scope = compute_retry_scope(plan, targets=("a", "b"))
+    assert scope.redo == ("a", "b", "c", "d")
+    assert scope.preserved == ()
+
+
+def test_retry_scope_rejects_unknown_or_empty_targets() -> None:
+    """未知目标与空目标明确拒绝（不静默空重做）。"""
+    plan = _plan(_node("a"))
+    with pytest.raises(AgentValidationError) as unknown_exc:
+        compute_retry_scope(plan, targets=("ghost",))
+    assert unknown_exc.value.code == "unknown_node"
+    with pytest.raises(AgentValidationError) as empty_exc:
+        compute_retry_scope(plan, targets=())
+    assert empty_exc.value.code == "invalid_targets"
+
+
+def test_preserved_outcome_must_be_complete() -> None:
+    """保留前置必须是成功事实（失败/未知不得作为「适用成功前置」）。"""
+    scheduler = LeafDagScheduler(_plan(_node("b", ("a",))))
+    with pytest.raises(AgentValidationError) as excinfo:
+        scheduler.seed_preserved((_outcome("a", "failed"),))
+    assert excinfo.value.code == "invalid_preserved_outcome"
+
+
+def test_preserved_outcome_must_be_outside_scope() -> None:
+    """本轮范围内节点不得同时作为保留前置（身份冲突显式拒绝）。"""
+    scheduler = LeafDagScheduler(_plan(_node("b", ("a",))))
+    with pytest.raises(AgentValidationError) as excinfo:
+        scheduler.seed_preserved((_outcome("b"),))
+    assert excinfo.value.code == "preserved_node_in_retry_scope"
+
+
+def test_retry_drive_consumes_preserved_prerequisite() -> None:
+    """重试轮：保留前置 A 已成功 → B 立即就绪，C 随后；不重做 A。"""
+    plan = _plan(_node("b", ("a",)), _node("c", ("b",)))
+    runner = _ControlledRunner()
+
+    async def scenario() -> PlanRunSummary:
+        task = asyncio.ensure_future(drive_leaf_dag(plan, runner, preserved=(_outcome("a"),)))
+        await _wait_until(lambda: runner.started == ["b"])
+        runner.gate("b").set()
+        await _wait_until(lambda: runner.started == ["b", "c"])
+        runner.gate("c").set()
+        return await task
+
+    summary = asyncio.run(scenario())
+    assert runner.started == ["b", "c"]
+    assert summary.succeeded == ("b", "c")
+    assert tuple(outcome.node_id for outcome in summary.outcomes) == ("b", "c")
+    assert summary.converged is True
+
+
+def test_retry_payload_carries_scope_and_preserved() -> None:
+    """重试载荷：nodes 为范围内节点，preserved_outcomes 携带旧轮成功前置。"""
+    plan = _plan(_node("a"), _node("b", ("a",)), _node("c", ("b",)))
+    payload, scope = build_retry_payload(
+        plan,
+        execution_id="exec-2",
+        plan_digest="d" * 64,
+        targets=("b",),
+        preserved_outcomes=(_outcome("a", artifact_ref="artifact_a_1"),),
+    )
+    assert scope.redo == ("b", "c")
+    _execution_id, _digest, retry_plan, preserved = decode_research_payload(payload)
+    assert tuple(node.node_id for node in retry_plan.nodes) == ("b", "c")
+    assert preserved == (_outcome("a", artifact_ref="artifact_a_1"),)
+
+
+def test_retry_payload_requires_preserved_predecessors() -> None:
+    """范围外前置未被保留事实覆盖时明确拒绝（不静默不满足依赖）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    with pytest.raises(AgentValidationError) as excinfo:
+        build_retry_payload(
+            plan,
+            execution_id="exec-2",
+            plan_digest="d" * 64,
+            targets=("b",),
+            preserved_outcomes=(),
+        )
+    assert excinfo.value.code == "missing_preserved_predecessor"
