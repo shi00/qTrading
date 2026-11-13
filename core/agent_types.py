@@ -5034,14 +5034,18 @@ class DispatchCloseFact:
 class RecoveryGrantRequest:
     """手动恢复准入代次授予请求（HANDOFF §8.4 第 5 条：只授精确选择集合）。
 
-    ``owner_epoch`` / ``run_epoch`` 必须严格大于现值（单调，R22）；用户终止
-    或不可恢复终态的候选明确拒绝并进入 ``blocked``，不静默跳过。
+    授予前逐项核定：不可恢复终态/未核状态拒绝、用户终止不复活、必须有活动轮、
+    轮代码版本须等于 ``application_version``（兼容矩阵门），旧执行不得仍有未
+    收口 operation（§8.5「unknown 先核原 operation」）；数据/权限在每次实际派发
+    边界重核（§8.4 末段），不在本机械门内重复。``owner_epoch`` / ``run_epoch``
+    必须严格大于现值（单调，R22）。
     """
 
     user_scope: str
     execution_ids: tuple[str, ...]
     owner_epoch: int
     run_epoch: int
+    application_version: str
 
 
 @dataclass(frozen=True)
@@ -5054,3 +5058,10 @@ class RecoveryGrantFact:
     granted_execution_ids: tuple[str, ...]
     workflow_ids: tuple[str, ...]
     blocked: tuple[tuple[str, str], ...]
+
+
+#: 未收口 operation 阶段（恢复前必须确认旧执行已退出；unknown 亦先核原 operation）。
+OPEN_OPERATION_PHASES: Final[frozenset[str]] = frozenset({"prepared", "dispatch_claimed", "dispatched", "unknown"})
+
+#: 恢复候选的「未核状态」（unknown/ending 不得静默恢复：可能仍有写者）。
+RECOVERY_UNVERIFIED_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"unknown", "ending"})

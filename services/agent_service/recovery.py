@@ -47,16 +47,6 @@ STARTUP_ACTIVE_STATUSES: Final[tuple[str, ...]] = (
 )
 
 #: 原生终态（取消复查只需确认不再处于在途状态）。
-STARTUP_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    status.value
-    for status in (
-        WorkflowStatusString.SUCCESS,
-        WorkflowStatusString.ERROR,
-        WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED,
-        WorkflowStatusString.CANCELLED,
-    )
-)
-
 #: 应用自有 workflow 名（D-02 发布名；隔离按名 + 应用版本过滤）。
 STARTUP_WORKFLOW_NAMES: Final[tuple[str, ...]] = ("agent_research", "agent_leaf")
 
@@ -109,6 +99,7 @@ class ManualRecoveryReceipt:
     resumed_workflow_ids: tuple[str, ...]
     blocked: tuple[tuple[str, str], ...]
     resume_failures: tuple[tuple[str, str], ...]
+    blocking_reasons: tuple[str, ...]
     ready: bool
 
 
@@ -302,15 +293,17 @@ async def resume_selected_workflows(
     execution_ids: Sequence[str],
     owner_epoch: int,
     run_epoch: int,
+    application_version: str,
     client: WorkflowControlClient,
     registry: RecoveryRegistry,
 ) -> ManualRecoveryReceipt:
     """手动恢复用户明确选择的精确集合（HANDOFF §8.4 第 5 条）。
 
-    先由 DAO 事务授予代次（不合格项进 ``blocked``，其 workflow 不返回），再逐个
+    先由 DAO 事务核定（不可恢复终态/未核状态/用户终止/无活动轮/版本不兼容/
+    未收口 operation/代次不前进 → ``blocked``，其 workflow 不返回），再逐个
     ``resume`` 返回的精确原生集合；未选集合（B）与用户终止轮次保持隔离。
-    单个 resume 失败如实进 ``resume_failures`` 并使 ``ready=False``，不以其余
-    成功项冒充完整恢复。
+    单个 resume 失败如实进 ``resume_failures`` 并使 ``ready=False``；全部候选被拒
+    （零授予）同样 ``ready=False``（不把「什么都没恢复」当恢复成功）。
     """
 
     grant = await registry.grant_recovery_epoch(
@@ -319,6 +312,7 @@ async def resume_selected_workflows(
             execution_ids=tuple(execution_ids),
             owner_epoch=owner_epoch,
             run_epoch=run_epoch,
+            application_version=application_version,
         )
     )
     resumed: list[str] = []
@@ -330,6 +324,9 @@ async def resume_selected_workflows(
             failures.append((workflow_id, type(exc).__name__))
         else:
             resumed.append(workflow_id)
+    blocking_reasons: list[str] = []
+    if not grant.granted_execution_ids:
+        blocking_reasons.append("no_granted_execution")
     return ManualRecoveryReceipt(
         user_scope=user_scope,
         owner_epoch=owner_epoch,
@@ -338,8 +335,98 @@ async def resume_selected_workflows(
         resumed_workflow_ids=tuple(resumed),
         blocked=grant.blocked,
         resume_failures=tuple(failures),
-        ready=not failures,
+        blocking_reasons=tuple(blocking_reasons),
+        ready=not failures and not blocking_reasons,
     )
+
+
+#: 单实例执行锁键（PG advisory lock；会话断开/进程崩溃自动释放）。
+INSTANCE_LOCK_KEY: Final[int] = 0x7174726D
+
+#: 同步阻塞段执行器（返回函数值；默认受管线程池）。
+BlockingRunner = Callable[[Callable[[], Any]], Awaitable[Any]]
+
+
+@dataclass(frozen=True)
+class InstanceGuardEvidence:
+    """唯一执行锁证据：``acquired`` 与 ``prior_writer_exited`` 都为真才可继续。"""
+
+    acquired: bool
+    prior_writer_exited: bool
+    detail: str
+
+
+class InstanceGuard(Protocol):
+    """启动唯一执行锁端口（应用单实例机制；拿锁成功即证明旧写者已退出）。"""
+
+    async def acquire(self) -> InstanceGuardEvidence: ...
+
+    def release(self) -> None: ...
+
+
+class AdvisoryLockInstanceGuard:
+    """PG advisory lock 单实例执行锁（HANDOFF §8.4 第 1 条最小实现）。
+
+    独立**单连接**引擎持有会话级 advisory lock：旧实例正常退出或崩溃时 PG
+    自动释放锁，故 ``pg_try_advisory_lock`` 成功即同时证明「获得唯一执行权」
+    与「旧写者已退出/可安全接管」（不是用 CANCELLED 状态冒充退出，§8.6）。
+    该连接不占用运行时 4+2 连接预算（独立池 1）。
+    """
+
+    def __init__(self, system_database_url: str, *, blocking_runner: BlockingRunner | None = None) -> None:
+        self._system_database_url = system_database_url
+        self._blocking_runner = blocking_runner or _default_blocking_runner
+        self._engine: Any = None
+        self._connection: Any = None
+
+    async def acquire(self) -> InstanceGuardEvidence:
+        if self._connection is not None:
+            return InstanceGuardEvidence(acquired=True, prior_writer_exited=True, detail="already-held")
+
+        def _try_lock() -> bool:
+            import sqlalchemy as sa
+
+            self._engine = sa.create_engine(
+                self._system_database_url,
+                pool_size=1,
+                max_overflow=0,
+                pool_timeout=3,
+                connect_args={"application_name": "qtrading_agent_instance_guard"},
+            )
+            self._connection = self._engine.connect()
+            return bool(
+                self._connection.execute(
+                    sa.text("SELECT pg_try_advisory_lock(:key)"), {"key": INSTANCE_LOCK_KEY}
+                ).scalar()
+            )
+
+        try:
+            acquired = bool(await self._blocking_runner(_try_lock))
+        except Exception as exc:  # 锁服务不可达：不得假设可安全接管
+            self.release()
+            return InstanceGuardEvidence(acquired=False, prior_writer_exited=False, detail=type(exc).__name__)
+        if not acquired:
+            self.release()
+            return InstanceGuardEvidence(acquired=False, prior_writer_exited=False, detail="lock-held")
+        return InstanceGuardEvidence(acquired=True, prior_writer_exited=True, detail="acquired")
+
+    def release(self) -> None:
+        connection, engine = self._connection, self._engine
+        self._connection = None
+        self._engine = None
+        for target in (connection, engine):
+            if target is None:
+                continue
+            try:
+                target.close() if target is connection else target.dispose()
+            except Exception:  # 释放兜底：不得掩盖启动/关闭主流程异常
+                pass
+
+
+async def _default_blocking_runner(fn: Callable[[], Any]) -> Any:
+    from utils.thread_pool import TaskType, ThreadPoolManager
+
+    return await ThreadPoolManager().run_async(TaskType.IO, fn)
 
 
 @dataclass(frozen=True)
@@ -349,6 +436,7 @@ class StartupOutcome:
     handle: Any
     isolation: StartupIsolationReceipt | None
     failure: str | None
+    instance_guard: Any = None
 
 
 async def start_agent_runtime(
@@ -361,16 +449,23 @@ async def start_agent_runtime(
     application_name: str | None = None,
     assemble_func: Callable[[Any], Any] | None = None,
     launch_func: Callable[[Any], None] | None = None,
+    instance_guard: InstanceGuard | None = None,
+    blocking_runner: BlockingRunner | None = None,
 ) -> StartupOutcome:
-    """启动编排接线（§8.4 第 1-4 条）：组装 → 启动隔离 → 就绪才 launch。
+    """启动编排接线（§8.4 第 1-4 条）：唯一执行锁 → 组装 → 启动隔离 → 就绪才 launch。
 
+    - **唯一执行锁缺失/旧写者未退出**：不组装、不隔离、不 launch（§8.4 第 1 条
+      「否则关闭持续写入协调器、停止新增…禁止新提交」）；PG advisory lock 拿锁
+      成功本身即证明旧实例已退出（§8.6：CANCELLED 不证明写者退出）；
     - 组装失败（含双迁移中间失败）：**不隔离、不 launch、不建/留宿主对象**，
       原历史与原迁移状态保持（§10.6）；
     - 隔离未就绪：关闭已组装宿主（释放 DBOS/Client/Engine）并返回回执，
       调用方可重试，不 launch；
     - 隔离就绪：``launch`` 一次（``listen_queues([])`` 由 launch 入口负责）。
 
-    ``CancelledError`` 继续传播，传播前释放已组装宿主（R2：不吞取消、不留资源）。
+    组装/launch/宿主关闭均经 ``blocking_runner``（默认 ThreadPoolManager.IO，
+    HANDOFF §10.6：受管线程，不堵 UI）。``CancelledError`` 继续传播，传播前
+    释放已组装宿主与实例锁（R2：不吞取消、不留资源）。
     """
 
     from services.agent_service.runtime import (
@@ -380,12 +475,31 @@ async def start_agent_runtime(
         launch_agent_runtime,
     )
 
-    assert isinstance(settings, AgentRuntimeSettings)
+    if not isinstance(settings, AgentRuntimeSettings):
+        raise TypeError("settings must be AgentRuntimeSettings")
     assemble = assemble_func or assemble_agent_runtime
     launch = launch_func or launch_agent_runtime
+    runner = blocking_runner or _default_blocking_runner
+    guard = instance_guard or AdvisoryLockInstanceGuard(settings.system_database_url, blocking_runner=runner)
+
+    evidence = await guard.acquire()
+    if not evidence.acquired or not evidence.prior_writer_exited:
+        guard.release()
+        return StartupOutcome(
+            handle=None, isolation=None, failure=f"instance_guard_blocked:{evidence.detail}", instance_guard=None
+        )
+
+    def _abort_handle(handle: Any) -> None:
+        try:
+            handle.close()
+        except Exception:  # 清理兜底：保留原始失败原因
+            pass
+        guard.release()
+
     try:
-        handle = assemble(settings)
+        handle = await runner(lambda: assemble(settings))
     except Exception as exc:  # 组装失败：不隔离、不 launch（0 派发）
+        guard.release()
         return StartupOutcome(handle=None, isolation=None, failure=f"assemble_failed:{type(exc).__name__}")
 
     try:
@@ -399,13 +513,21 @@ async def start_agent_runtime(
             app_version=settings.application_version,
         )
     except asyncio.CancelledError:
-        handle.close()
+        await runner(lambda: _abort_handle(handle))
         raise
     if not receipt.ready:
-        handle.close()
+        await runner(lambda: _abort_handle(handle))
         return StartupOutcome(handle=None, isolation=receipt, failure=None)
-    launch(handle)
-    return StartupOutcome(handle=handle, isolation=receipt, failure=None)
+
+    try:
+        await runner(lambda: launch(handle))
+    except asyncio.CancelledError:
+        await runner(lambda: _abort_handle(handle))
+        raise
+    except Exception as exc:
+        await runner(lambda: _abort_handle(handle))
+        return StartupOutcome(handle=None, isolation=receipt, failure=f"launch_failed:{type(exc).__name__}")
+    return StartupOutcome(handle=handle, isolation=receipt, failure=None, instance_guard=guard)
 
 
 # ---------------------------------------------------------------------------
@@ -551,10 +673,14 @@ StartupIsolationRunner = Callable[..., Awaitable[StartupIsolationReceipt]]
 
 __all__ = [
     "ABSENT_NATIVE_STATE",
+    "INSTANCE_LOCK_KEY",
     "ISOLATION_PAGE_SIZE",
     "STARTUP_ACTIVE_STATUSES",
-    "STARTUP_TERMINAL_STATUSES",
     "STARTUP_WORKFLOW_NAMES",
+    "AdvisoryLockInstanceGuard",
+    "BlockingRunner",
+    "InstanceGuard",
+    "InstanceGuardEvidence",
     "ManualRecoveryReceipt",
     "RecoveryRegistry",
     "StartupIsolationReceipt",

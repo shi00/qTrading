@@ -28,6 +28,7 @@ from core.agent_types import (
 from services.agent_service.recovery import (
     ABSENT_NATIVE_STATE,
     ISOLATION_PAGE_SIZE,
+    STARTUP_WORKFLOW_NAMES,
     resume_selected_workflows,
     run_startup_isolation,
 )
@@ -300,6 +301,7 @@ class TestManualRecovery:
             execution_ids=("exec-a", "exec-b"),
             owner_epoch=9,
             run_epoch=9,
+            application_version=_VERSION,
             client=client,
             registry=registry,
         )
@@ -307,6 +309,32 @@ class TestManualRecovery:
         assert client.resumed == ["agent_research:a"]
         assert receipt.blocked == (("exec-b", "user_termination"),)
         assert registry.grant_requests[0].execution_ids == ("exec-a", "exec-b")
+        assert registry.grant_requests[0].application_version == _VERSION
+
+    async def test_all_candidates_blocked_is_not_ready(self) -> None:
+        client = _FakeClient([])
+        registry = _FakeRegistry(
+            grant=RecoveryGrantFact(
+                user_scope="user-1",
+                owner_epoch=9,
+                run_epoch=9,
+                granted_execution_ids=(),
+                workflow_ids=(),
+                blocked=(("exec-b", "user_termination"),),
+            )
+        )
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-b",),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == ("no_granted_execution",)
+        assert client.resumed == []
 
     async def test_resume_failure_marks_not_ready(self) -> None:
         client = _FakeClient([])
@@ -326,6 +354,7 @@ class TestManualRecovery:
             execution_ids=("exec-a",),
             owner_epoch=9,
             run_epoch=9,
+            application_version=_VERSION,
             client=client,
             registry=registry,
         )
@@ -352,6 +381,7 @@ class TestManualRecovery:
                 execution_ids=("exec-a",),
                 owner_epoch=9,
                 run_epoch=9,
+                application_version=_VERSION,
                 client=client,
                 registry=registry,
             )
@@ -368,8 +398,29 @@ class _FakeHandle:
         self.closed += 1
 
 
+class _FakeGuard:
+    def __init__(self, *, acquired: bool = True, exited: bool = True) -> None:
+        self._acquired = acquired
+        self._exited = exited
+        self.released = 0
+        self.acquired_calls = 0
+
+    async def acquire(self) -> Any:
+        from services.agent_service.recovery import InstanceGuardEvidence
+
+        self.acquired_calls += 1
+        return InstanceGuardEvidence(acquired=self._acquired, prior_writer_exited=self._exited, detail="fake")
+
+    def release(self) -> None:
+        self.released += 1
+
+
+async def _direct_blocking(fn: Any) -> Any:
+    return fn()
+
+
 class TestStartupOrchestration:
-    """启动编排接线：组装失败不隔离不 launch；隔离未就绪关闭宿主；就绪才 launch。"""
+    """启动编排接线：唯一执行锁 → 组装 → 隔离 → 就绪才 launch。"""
 
     def _settings(self) -> Any:
         from services.agent_service.runtime import AgentRuntimeSettings
@@ -379,81 +430,112 @@ class TestStartupOrchestration:
             application_version=_VERSION,
         )
 
-    async def test_assemble_failure_stops_before_isolation(self) -> None:
+    async def _start(self, **overrides: Any) -> Any:
         from services.agent_service.recovery import start_agent_runtime
 
+        kwargs: dict[str, Any] = {
+            "user_scope": "user-1",
+            "isolation_id": "startup-1",
+            "registry": _FakeRegistry(),
+            "instance_guard": _FakeGuard(),
+            "blocking_runner": _direct_blocking,
+        }
+        kwargs.update(overrides)
+        return await start_agent_runtime(self._settings(), **kwargs)
+
+    async def test_guard_blocked_stops_before_assemble(self) -> None:
+        assemble_calls: list[Any] = []
+        guard = _FakeGuard(acquired=False)
+        outcome = await self._start(assemble_func=assemble_calls.append, instance_guard=guard)
+        assert outcome.handle is None
+        assert outcome.failure == "instance_guard_blocked:fake"
+        assert assemble_calls == []
+        assert guard.released == 1
+
+    async def test_guard_without_prior_exit_evidence_blocks(self) -> None:
+        outcome = await self._start(instance_guard=_FakeGuard(exited=False))
+        assert outcome.failure == "instance_guard_blocked:fake"
+
+    async def test_assemble_failure_stops_before_isolation(self) -> None:
         launch_calls: list[Any] = []
+        guard = _FakeGuard()
 
         def _assemble(_settings: Any) -> Any:
             raise RuntimeError("dual migration failed")
 
-        outcome = await start_agent_runtime(
-            self._settings(),
-            user_scope="user-1",
-            isolation_id="startup-1",
-            registry=_FakeRegistry(),
-            assemble_func=_assemble,
-            launch_func=launch_calls.append,
-        )
+        outcome = await self._start(assemble_func=_assemble, launch_func=launch_calls.append, instance_guard=guard)
         assert outcome.handle is None
         assert outcome.isolation is None
         assert outcome.failure == "assemble_failed:RuntimeError"
         assert launch_calls == []
+        assert guard.released == 1
 
     async def test_not_ready_isolation_closes_handle_without_launch(self) -> None:
-        from services.agent_service.recovery import start_agent_runtime
-
         client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
         client.list_error = RuntimeError("listing broken")
         handle = _FakeHandle(client)
         launch_calls: list[Any] = []
+        guard = _FakeGuard()
 
-        outcome = await start_agent_runtime(
-            self._settings(),
-            user_scope="user-1",
-            isolation_id="startup-1",
-            registry=_FakeRegistry(),
+        outcome = await self._start(
             assemble_func=lambda _settings: handle,
             launch_func=launch_calls.append,
+            instance_guard=guard,
         )
         assert outcome.handle is None
         assert outcome.isolation is not None and outcome.isolation.ready is False
         assert handle.closed == 1
         assert launch_calls == []
+        assert guard.released == 1
 
-    async def test_ready_isolation_launches_once(self) -> None:
-        from services.agent_service.recovery import start_agent_runtime
-
+    async def test_ready_isolation_launches_once_and_holds_guard(self) -> None:
         handle = _FakeHandle(_FakeClient([]))
         launch_calls: list[Any] = []
+        guard = _FakeGuard()
 
-        outcome = await start_agent_runtime(
-            self._settings(),
-            user_scope="user-1",
-            isolation_id="startup-1",
-            registry=_FakeRegistry(),
+        outcome = await self._start(
             assemble_func=lambda _settings: handle,
             launch_func=launch_calls.append,
+            instance_guard=guard,
         )
         assert outcome.handle is handle
         assert outcome.isolation is not None and outcome.isolation.ready is True
+        assert outcome.instance_guard is guard
         assert launch_calls == [handle]
+        assert guard.released == 0  # 成功后锁须持有到进程关闭
+
+    async def test_launch_failure_closes_handle_and_releases_guard(self) -> None:
+        handle = _FakeHandle(_FakeClient([]))
+        guard = _FakeGuard()
+
+        def _launch(_handle: Any) -> None:
+            raise RuntimeError("launch failed")
+
+        outcome = await self._start(assemble_func=lambda _settings: handle, launch_func=_launch, instance_guard=guard)
+        assert outcome.failure == "launch_failed:RuntimeError"
+        assert handle.closed == 1
+        assert guard.released == 1
 
     async def test_cancellation_closes_assembled_handle(self) -> None:
-        from services.agent_service.recovery import start_agent_runtime
-
         client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
         client.cancel_error = asyncio.CancelledError()
         handle = _FakeHandle(client)
+        guard = _FakeGuard()
 
         with pytest.raises(asyncio.CancelledError) as exc_info:
-            await start_agent_runtime(
-                self._settings(),
-                user_scope="user-1",
-                isolation_id="startup-1",
-                registry=_FakeRegistry(),
+            await self._start(
                 assemble_func=lambda _settings: handle,
                 launch_func=lambda _handle: None,
+                instance_guard=guard,
             )
         assert isinstance(exc_info.value, asyncio.CancelledError)
         assert handle.closed == 1
+        assert guard.released == 1
+
+
+def test_startup_workflow_names_match_published_constants() -> None:
+    """启动隔离列举名须与 D-02 发布 workflow 名一致（防硬编码漂移）。"""
+
+    from services.agent_service.workflows import LEAF_WORKFLOW_NAME, RESEARCH_WORKFLOW_NAME
+
+    assert set(STARTUP_WORKFLOW_NAMES) == {RESEARCH_WORKFLOW_NAME, LEAF_WORKFLOW_NAME}

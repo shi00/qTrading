@@ -32,7 +32,8 @@ from core.agent_types import (
     stable_id,
 )
 from data.persistence.daos.agent_dao import AgentDao
-from data.persistence.models import AgentCommand, AgentExecution, AgentRound, AgentSession
+from data.persistence.models import AgentCommand, AgentExecution, AgentOperation, AgentRound, AgentSession
+from services.agent_service.recovery import resume_selected_workflows
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -113,6 +114,7 @@ async def _seed_round(
     run_epoch: int = 1,
     stop_reason: str | None = None,
     active: bool = True,
+    workflow_code_version: str = "0.11.7",
 ) -> None:
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内构造前置轮次
         await conn.execute(
@@ -122,12 +124,41 @@ async def _seed_round(
                 execution_id=execution_id,
                 round_number=1,
                 workflow_id=workflow_id,
-                workflow_code_version="0.11.7",
+                workflow_code_version=workflow_code_version,
                 run_epoch=run_epoch,
                 input_revision=1,
                 plan_revision=1,
                 stop_reason=stop_reason,
                 active_round=active,
+            )
+        )
+
+
+async def _seed_operation(
+    dao: AgentDao,
+    *,
+    operation_id: str,
+    execution_id: str,
+    round_id: str,
+    phase: str = "dispatched",
+) -> None:
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内构造未收口 operation
+        await conn.execute(
+            insert(AgentOperation).values(
+                user_scope=_USER,
+                operation_id=operation_id,
+                session_id="s-1",
+                execution_id=execution_id,
+                round_id=round_id,
+                workflow_id=f"agent_research:{execution_id}",
+                step_id=f"step-{operation_id}",
+                call_kind="model",
+                ordinal=1,
+                owner_epoch=1,
+                run_epoch=1,
+                phase=phase,
+                effect_state="dispatched",
+                io_state="running",
             )
         )
 
@@ -323,13 +354,43 @@ class TestRecoveryGrant:
                 dao, round_id="round-e", execution_id="exec-e", workflow_id="agent_research:e", run_epoch=9
             )
             await _link_round(dao, execution_id="exec-e", round_id="round-e")
+            # F：版本不兼容（兼容矩阵门）
+            await _seed_execution(dao, execution_id="exec-f", session_id="s-1")
+            await _seed_round(
+                dao,
+                round_id="round-f",
+                execution_id="exec-f",
+                workflow_id="agent_research:f",
+                workflow_code_version="9.9.9",
+            )
+            await _link_round(dao, execution_id="exec-f", round_id="round-f")
+            # G：旧执行仍有未收口 operation
+            await _seed_execution(dao, execution_id="exec-g", session_id="s-1")
+            await _seed_round(dao, round_id="round-g", execution_id="exec-g", workflow_id="agent_research:g")
+            await _link_round(dao, execution_id="exec-g", round_id="round-g")
+            await _seed_operation(dao, operation_id="op-g", execution_id="exec-g", round_id="round-g")
+            # H：未核状态（unknown）
+            await _seed_execution(dao, execution_id="exec-h", session_id="s-1", display_state="unknown")
+            await _seed_round(dao, round_id="round-h", execution_id="exec-h", workflow_id="agent_research:h")
+            await _link_round(dao, execution_id="exec-h", round_id="round-h")
 
             fact = await dao.grant_recovery_epoch(
                 RecoveryGrantRequest(
                     user_scope=_USER,
-                    execution_ids=("exec-a", "exec-b", "exec-c", "exec-d", "exec-e", "exec-missing"),
+                    execution_ids=(
+                        "exec-a",
+                        "exec-b",
+                        "exec-c",
+                        "exec-d",
+                        "exec-e",
+                        "exec-f",
+                        "exec-g",
+                        "exec-h",
+                        "exec-missing",
+                    ),
                     owner_epoch=9,
                     run_epoch=9,
+                    application_version="0.11.7",
                 )
             )
             assert fact.granted_execution_ids == ("exec-a",)
@@ -340,6 +401,9 @@ class TestRecoveryGrant:
                 "exec-c": "already_terminal",
                 "exec-d": "no_active_round",
                 "exec-e": "epoch_not_advanced",
+                "exec-f": "version_mismatch",
+                "exec-g": "operation_in_flight",
+                "exec-h": "state_unverified",
                 "exec-missing": "not_found",
             }
 
@@ -363,13 +427,86 @@ class TestRecoveryGrant:
             await _seed_round(dao, round_id="round-a", execution_id="exec-a", workflow_id="agent_research:a")
             await _link_round(dao, execution_id="exec-a", round_id="round-a")
             first = await dao.grant_recovery_epoch(
-                RecoveryGrantRequest(user_scope=_USER, execution_ids=("exec-a",), owner_epoch=2, run_epoch=2)
+                RecoveryGrantRequest(
+                    user_scope=_USER,
+                    execution_ids=("exec-a",),
+                    owner_epoch=2,
+                    run_epoch=2,
+                    application_version="0.11.7",
+                )
             )
             assert first.granted_execution_ids == ("exec-a",)
             replay = await dao.grant_recovery_epoch(
-                RecoveryGrantRequest(user_scope=_USER, execution_ids=("exec-a",), owner_epoch=2, run_epoch=2)
+                RecoveryGrantRequest(
+                    user_scope=_USER,
+                    execution_ids=("exec-a",),
+                    owner_epoch=2,
+                    run_epoch=2,
+                    application_version="0.11.7",
+                )
             )
             assert replay.granted_execution_ids == ()
+            assert dict(replay.blocked)["exec-a"] == "epoch_not_advanced"
+        finally:
+            await dao.engine.dispose()  # type: ignore[union-attr]
+
+    async def test_grant_then_resume_exact_set_and_replay_no_double(self, real_embedded_pg) -> None:
+        """M4：真实 DAO 授予 + resume 精确集合；同代次重放不再 resume（不双记）。"""
+        dao = await _setup(real_embedded_pg.url)
+        resumed: list[str] = []
+
+        class _Client:
+            async def list_workflows_async(self, **kwargs: Any) -> list[Any]:  # pragma: no cover - 未使用
+                raise AssertionError("list not expected")
+
+            async def cancel_workflows_async(self, workflow_ids: list[str], **kwargs: Any) -> None:
+                raise AssertionError("cancel not expected")
+
+            async def resume_workflows_async(self, workflow_ids: list[str]) -> Any:
+                resumed.extend(workflow_ids)
+                return []
+
+        try:
+            await _seed_session(dao, "s-1")
+            await _seed_execution(dao, execution_id="exec-a", session_id="s-1")
+            await _seed_round(dao, round_id="round-a", execution_id="exec-a", workflow_id="agent_research:a")
+            await _link_round(dao, execution_id="exec-a", round_id="round-a")
+            # B：用户终止，不因同一批选择被复活
+            await _seed_execution(dao, execution_id="exec-b", session_id="s-1")
+            await _seed_round(
+                dao,
+                round_id="round-b",
+                execution_id="exec-b",
+                workflow_id="agent_research:b",
+                stop_reason="user_termination",
+            )
+            await _link_round(dao, execution_id="exec-b", round_id="round-b")
+
+            first = await resume_selected_workflows(
+                user_scope=_USER,
+                execution_ids=("exec-a", "exec-b"),
+                owner_epoch=3,
+                run_epoch=3,
+                application_version="0.11.7",
+                client=_Client(),
+                registry=dao,
+            )
+            assert first.ready is True
+            assert resumed == ["agent_research:a"]
+            assert dict(first.blocked)["exec-b"] == "user_termination"
+
+            replay = await resume_selected_workflows(
+                user_scope=_USER,
+                execution_ids=("exec-a", "exec-b"),
+                owner_epoch=3,
+                run_epoch=3,
+                application_version="0.11.7",
+                client=_Client(),
+                registry=dao,
+            )
+            assert replay.ready is False
+            assert replay.blocking_reasons == ("no_granted_execution",)
+            assert resumed == ["agent_research:a"]  # 重放未追加 resume（不双记）
             assert dict(replay.blocked)["exec-a"] == "epoch_not_advanced"
         finally:
             await dao.engine.dispose()  # type: ignore[union-attr]

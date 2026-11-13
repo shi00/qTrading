@@ -224,6 +224,8 @@ class _CloseFakes:
         self.unknown: tuple[str, ...] = ("operation-unknown-1",)
         self.sink_error: BaseException | None = None
         self.close_error: BaseException | None = None
+        self.residual: tuple[str, ...] = ()
+        self.closed = False
 
     def close_dispatch(self) -> bool:
         self.calls.append("dispatch_close")
@@ -235,6 +237,9 @@ class _CloseFakes:
     def inflight_task_count(self) -> int:
         return self.inflight
 
+    def residual_io(self) -> tuple[str, ...]:
+        return self.residual
+
     async def save_end_or_unknown(self, command: Any) -> Any:
         self.calls.append("save_facts")
         if self.sink_error is not None:
@@ -245,15 +250,17 @@ class _CloseFakes:
         self.calls.append("handle_close")
         if self.close_error is not None:
             raise self.close_error
+        self.closed = True
 
 
 def _runtime(fakes: _CloseFakes) -> Any:
     return runtime_mod.AgentRuntime(
-        handle=cast(Any, fakes),  # 仅需 close()
-        bridge=cast(Any, fakes),  # 仅需 inflight_task_count()
+        handle=cast(Any, fakes),
+        bridge=cast(Any, fakes),
         dispatch_gate=cast(Any, fakes),
         fact_sink=cast(Any, fakes),
         blocking_runner=_direct_runner,
+        residual_io_probe=fakes.residual_io,
     )
 
 
@@ -327,16 +334,48 @@ class TestPrepareCloseLatch:
         fakes.close_error = None
         second = await runtime.prepare_close(_command())
         assert second.ready is True
+        assert fakes.closed is True
+
+    async def test_partial_close_reports_incomplete_not_ready(self) -> None:
+        """资源未全部关闭（closed=False）不得报就绪（检视 B1/R21）。"""
+
+        class _PartialHandle(_CloseFakes):
+            def close(self) -> None:
+                self.calls.append("handle_close")
+                # 假装 destroy 静默半途失败：closed 保持 False
+
+        fakes = _PartialHandle()
+        receipt = await _runtime(fakes).prepare_close(_command())
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_RUNTIME_CLOSE_INCOMPLETE,)
+
+    async def test_residual_io_blocks_before_fact_save(self) -> None:
+        fakes = _CloseFakes()
+        fakes.residual = ("sdk_stream", "mcp_worker")
+        receipt = await _runtime(fakes).prepare_close(_command())
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == (f"{runtime_mod.CLOSE_BLOCK_RESIDUAL_IO}:sdk_stream,mcp_worker",)
+        assert receipt.residual_io == ("sdk_stream", "mcp_worker")
+        assert fakes.calls == ["dispatch_close"]
 
     async def test_idempotent_retry_returns_original_receipt(self) -> None:
         fakes = _CloseFakes()
         runtime = _runtime(fakes)
         first = await runtime.prepare_close(_command())
+        second = await runtime.prepare_close(_command())
+        assert second is first  # 原身份重试：不重复 destroy
+        assert fakes.calls.count("handle_close") == 1
+
+    async def test_different_close_identity_is_not_reported_ready(self) -> None:
+        fakes = _CloseFakes()
+        runtime = _runtime(fakes)
+        first = await runtime.prepare_close(_command())
+        assert first.ready is True
         other = runtime_mod.CloseCommandIdentity(user_scope="user-1", close_command_id="close-2")
         second = await runtime.prepare_close(other)
-        assert second is first  # 原身份回执，不重复 destroy
-        assert fakes.calls.count("handle_close") == 1
-        assert second.command.close_command_id == "close-1"
+        assert second.ready is False
+        assert second.blocking_reasons == (runtime_mod.CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH,)
+        assert second.command.close_command_id == "close-1"  # 返回原关闭命令身份
 
     async def test_cancelled_error_propagates(self) -> None:
         fakes = _CloseFakes()

@@ -81,6 +81,7 @@ from core.agent_types import (
     MessagePage,
     MessagePageItem,
     NON_RECOVERABLE_DISPLAY_STATES,
+    OPEN_OPERATION_PHASES,
     Observation,
     OperationSummary,
     ReadMarkCommand,
@@ -100,6 +101,7 @@ from core.agent_types import (
     ReviseQueuedRequest,
     RevisionReceipt,
     ROUND_STOP_REASON_USER_TERMINATION,
+    RECOVERY_UNVERIFIED_DISPLAY_STATES,
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
@@ -4993,6 +4995,7 @@ class AgentDao(BaseDao):
                 .where(
                     AgentCommand.user_scope == user_scope,
                     AgentCommand.command_record_id == isolation_command_id,
+                    AgentCommand.command_kind == "startup_isolation",
                 )
                 .values(
                     receipt_payload=json.loads(receipt_payload),
@@ -5010,18 +5013,21 @@ class AgentDao(BaseDao):
     async def grant_recovery_epoch(self, request: RecoveryGrantRequest) -> RecoveryGrantFact:
         """手动恢复准入代次授予（HANDOFF §8.4 第 5 条：仅精确选择集合）。
 
-        单事务行锁下逐项核：存在、非不可恢复终态、非用户终止、有当前有效轮、
+        单事务行锁下逐项核：存在、非不可恢复终态、非未核状态（unknown/ending）、
+        非用户终止、有活动当前轮、轮代码版本与 ``application_version`` 一致
+        （兼容矩阵）、旧执行无未收口 operation（§8.5 unknown 先核原 operation）、
         新 epoch 严格大于现值（单调，R22）；合格项写 ``owner_epoch`` 并重开
         ``dispatch_closed``，其有效轮写 ``run_epoch``。不合格项进入 ``blocked``
         （明确拒绝，不静默跳过），对应原生集合不返回，故不会被 resume。
 
         Raises:
-            AgentServiceError: INPUT_INVALID（入参非法/空集合/epoch 非正）。
+            AgentServiceError: INPUT_INVALID（入参非法/空集合/epoch 非正/版本空）。
         """
 
         self._check_engine()
         identity = f"{request.user_scope}/recovery"
         _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.application_version, "application_version", identity)
         execution_ids = tuple(sorted(set(request.execution_ids)))
         if not execution_ids:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution_ids must be non-empty", identity)
@@ -5045,6 +5051,8 @@ class AgentDao(BaseDao):
                         AgentRound.workflow_id,
                         AgentRound.run_epoch,
                         AgentRound.stop_reason,
+                        AgentRound.active_round,
+                        AgentRound.workflow_code_version,
                     )
                     .outerjoin(
                         AgentRound,
@@ -5061,6 +5069,17 @@ class AgentDao(BaseDao):
                     .with_for_update(of=AgentExecution)
                 )
             ).all()
+            open_operations = {
+                row.execution_id
+                for row in (
+                    await conn.execute(
+                        sa.select(AgentOperation.execution_id).where(
+                            AgentOperation.execution_id.in_(execution_ids),
+                            AgentOperation.phase.in_(sorted(OPEN_OPERATION_PHASES)),
+                        )
+                    )
+                ).all()
+            }
             by_id = {row.execution_id: row for row in rows}
             for execution_id in execution_ids:
                 row = by_id.get(execution_id)
@@ -5070,11 +5089,23 @@ class AgentDao(BaseDao):
                 if row.display_state in NON_RECOVERABLE_DISPLAY_STATES:
                     blocked.append((execution_id, "already_terminal"))
                     continue
+                if row.display_state in RECOVERY_UNVERIFIED_DISPLAY_STATES:
+                    blocked.append((execution_id, "state_unverified"))
+                    continue
                 if row.stop_reason == ROUND_STOP_REASON_USER_TERMINATION:
                     blocked.append((execution_id, "user_termination"))
                     continue
                 if row.round_id is None or row.workflow_id is None:
                     blocked.append((execution_id, "no_active_round"))
+                    continue
+                if not row.active_round:
+                    blocked.append((execution_id, "round_not_active"))
+                    continue
+                if row.workflow_code_version != request.application_version:
+                    blocked.append((execution_id, "version_mismatch"))
+                    continue
+                if execution_id in open_operations:
+                    blocked.append((execution_id, "operation_in_flight"))
                     continue
                 if request.owner_epoch <= row.owner_epoch:
                     blocked.append((execution_id, "epoch_not_advanced"))

@@ -100,22 +100,37 @@ class AgentRuntimeHandle:
     client: DBOSClient
     executor_id: str
     _launched: bool = False
-    _closed: bool = False
+    _dbos_closed: bool = False
+    _client_closed: bool = False
+    _engines_disposed: bool = False
 
     @property
     def launched(self) -> bool:
         """宿主是否已 launch（启动隔离 needs-spike 通过前经本入口恒 False）。"""
         return self._launched
 
+    @property
+    def closed(self) -> bool:
+        """三类资源是否全部关闭/释放（部分失败时为 False，供关闭门闩复核）。"""
+        return self._dbos_closed and self._client_closed and self._engines_disposed
+
     def close(self) -> None:
-        """按契约顺序关闭（幂等）：DBOS.destroy → Client.destroy → 双引擎 dispose。"""
-        if self._closed:
-            return
-        self._closed = True
-        DBOS.destroy()
-        self.client.destroy()
-        self.runtime_engine.dispose()
-        self.control_engine.dispose()
+        """按契约顺序关闭（按资源粒度幂等，失败可重试）。
+
+        逐项记录成功：DBOS.destroy → Client.destroy → 双引擎 dispose。任一抛错
+        时对应标记保持 False，``closed`` 为 False，调用方可重试（不得因一次失败
+        就永久视为已关闭——否则关闭门闩会把「未关」误报成就绪，R21）。
+        """
+        if not self._dbos_closed:
+            DBOS.destroy()
+            self._dbos_closed = True
+        if not self._client_closed:
+            self.client.destroy()
+            self._client_closed = True
+        if not self._engines_disposed:
+            self.runtime_engine.dispose()
+            self.control_engine.dispose()
+            self._engines_disposed = True
 
 
 def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle:
@@ -588,6 +603,9 @@ CLOSE_BLOCK_IO_IN_FLIGHT: Final = "io_in_flight"
 CLOSE_BLOCK_FACTS_SAVE_FAILED: Final = "close_facts_save_failed"
 CLOSE_BLOCK_FACTS_NOT_SAVED: Final = "close_facts_not_saved"
 CLOSE_BLOCK_RUNTIME_CLOSE_FAILED: Final = "runtime_close_failed"
+CLOSE_BLOCK_RUNTIME_CLOSE_INCOMPLETE: Final = "runtime_close_incomplete"
+CLOSE_BLOCK_RESIDUAL_IO: Final = "residual_io_unsettled"
+CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH: Final = "close_identity_mismatch"
 
 
 @dataclass(frozen=True)
@@ -622,6 +640,7 @@ class CloseReadinessReceipt:
     unknown_associations: tuple[str, ...]
     inflight_task_count: int
     checked_at: str
+    residual_io: tuple[str, ...] = ()
 
 
 class DispatchGate(Protocol):
@@ -678,12 +697,17 @@ class AgentRuntime:
         dispatch_gate: DispatchGate,
         fact_sink: CloseFactSink,
         blocking_runner: CloseBlockingRunner | None = None,
+        residual_io_probe: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
         self._handle = handle
         self._bridge = bridge
         self._dispatch_gate = dispatch_gate
         self._fact_sink = fact_sink
         self._blocking_runner = blocking_runner or _thread_pool_runner()
+        #: 残余 IO 探针（SDK 流/MCP worker/同步事务等未走桥登记的收敛证据；
+        #: 返回非空名称集即视为未收敛，门闩不 ready）。经桥登记的 owner 任务由
+        #: ``inflight_task_count`` 覆盖；未登记的长期任务必须由调用方经此探针上报。
+        self._residual_io_probe = residual_io_probe
         self._receipt: CloseReadinessReceipt | None = None
 
     async def prepare_close(self, command: CloseCommandIdentity) -> CloseReadinessReceipt:
@@ -696,8 +720,17 @@ class AgentRuntime:
         if not command.user_scope or not command.close_command_id:
             raise ValueError("close command identity must be non-empty")
         if self._receipt is not None and self._receipt.ready:
-            # 原关闭已完成：按原身份重试返回原回执（不重复 destroy、不换身份）
-            return self._receipt
+            if command.close_command_id == self._receipt.command.close_command_id:
+                # 原关闭已完成：按原身份重试返回原回执（不重复 destroy）
+                return self._receipt
+            # 不同身份不得复用旧回执冒充本次关闭（返回原身份与显式阻塞码）
+            return self._make_receipt(
+                self._receipt.command,
+                reasons=[CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH],
+                unknown=self._receipt.unknown_associations,
+                inflight=0,
+                residual=self._receipt.residual_io,
+            )
 
         reasons: list[str] = []
         if not self._dispatch_gate.close_dispatch():
@@ -705,21 +738,27 @@ class AgentRuntime:
         inflight = self._bridge.inflight_task_count()
         if inflight:
             reasons.append(CLOSE_BLOCK_IO_IN_FLIGHT)
+        residual = self._residual_io_probe() if self._residual_io_probe is not None else ()
+        if residual:
+            reasons.append(f"{CLOSE_BLOCK_RESIDUAL_IO}:{','.join(residual)}")
         if reasons:
-            return self._make_receipt(command, reasons=reasons, unknown=(), inflight=inflight)
+            return self._make_receipt(command, reasons=reasons, unknown=(), inflight=inflight, residual=residual)
 
         try:
             outcome = await self._fact_sink.save_end_or_unknown(command)
         except asyncio.CancelledError:
             raise
         except Exception:
-            return self._make_receipt(command, reasons=[CLOSE_BLOCK_FACTS_SAVE_FAILED], unknown=(), inflight=inflight)
+            return self._make_receipt(
+                command, reasons=[CLOSE_BLOCK_FACTS_SAVE_FAILED], unknown=(), inflight=inflight, residual=residual
+            )
         if not outcome.saved:
             return self._make_receipt(
                 command,
                 reasons=[CLOSE_BLOCK_FACTS_NOT_SAVED],
                 unknown=outcome.unknown_associations,
                 inflight=inflight,
+                residual=residual,
             )
 
         try:
@@ -732,9 +771,21 @@ class AgentRuntime:
                 reasons=[CLOSE_BLOCK_RUNTIME_CLOSE_FAILED],
                 unknown=outcome.unknown_associations,
                 inflight=inflight,
+                residual=residual,
+            )
+        if not self._handle.closed:
+            # 部分资源未关闭/未释放（如 destroy 中途失败）：不得报就绪（R21）
+            return self._make_receipt(
+                command,
+                reasons=[CLOSE_BLOCK_RUNTIME_CLOSE_INCOMPLETE],
+                unknown=outcome.unknown_associations,
+                inflight=inflight,
+                residual=residual,
             )
 
-        receipt = self._make_receipt(command, reasons=[], unknown=outcome.unknown_associations, inflight=inflight)
+        receipt = self._make_receipt(
+            command, reasons=[], unknown=outcome.unknown_associations, inflight=inflight, residual=residual
+        )
         self._receipt = receipt
         return receipt
 
@@ -745,6 +796,7 @@ class AgentRuntime:
         reasons: list[str],
         unknown: tuple[str, ...],
         inflight: int,
+        residual: tuple[str, ...] = (),
     ) -> CloseReadinessReceipt:
         return CloseReadinessReceipt(
             command=command,
@@ -753,6 +805,7 @@ class AgentRuntime:
             unknown_associations=unknown,
             inflight_task_count=inflight,
             checked_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            residual_io=residual,
         )
 
 
