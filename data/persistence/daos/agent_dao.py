@@ -48,6 +48,8 @@ from core.agent_types import (
     ArtifactPageItem,
     BindActualInputReceipt,
     BindActualInputRequest,
+    BusinessSourceRegistrationReceipt,
+    BusinessSourceRegistrationRequest,
     CommandReceipt,
     CommandRef,
     CommitState,
@@ -87,6 +89,7 @@ from core.agent_types import (
     ReadMarkCommand,
     ReadMarkEntry,
     ReadMarkReceipt,
+    ReadState,
     RecordEventRequest,
     RecoveryExecution,
     RecoveryGrantFact,
@@ -102,6 +105,7 @@ from core.agent_types import (
     RevisionReceipt,
     ROUND_STOP_REASON_USER_TERMINATION,
     RECOVERY_UNVERIFIED_DISPLAY_STATES,
+    SOURCE_REGISTRATION_CONSUMER_KINDS,
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
@@ -115,6 +119,7 @@ from core.agent_types import (
     SourceRelationKind,
     SourceStopCommand,
     SourceStopReceipt,
+    SourceVersionRef,
     StartupIsolationRecord,
     SubmissionReceipt,
     ToolGrantFact,
@@ -140,6 +145,7 @@ from core.agent_types import (
     encode_command_receipt,
     encode_data_consent_binding,
     encode_data_consent_claim,
+    encode_source_ref,
     encode_submission_receipt,
     compute_history_query_digest,
     parse_history_cursor,
@@ -152,6 +158,7 @@ from core.agent_types import (
     json_doc,
     sha256_hex,
     stable_id,
+    to_wire_dict,
     validate_data_attempt_authorization,
     validate_data_consent_claim,
     validate_read_mark_command,
@@ -262,6 +269,22 @@ def _require_text_field(value: object, field: str, identity: str) -> str:
     if not isinstance(value, str) or value == "":
         raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{field} must be non-empty text", identity)
     return value
+
+
+def _wire_timestamp_or_none(value: str | None, identity: str) -> datetime | None:
+    """wire UTC 文本 → 带时区 datetime；NULL 保持 NULL，非法/无时区拒绝。"""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "available_at must be UTC text or null", identity)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "available_at is not ISO-8601", identity) from exc
+    if parsed.tzinfo is None:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "available_at must carry a timezone", identity)
+    return parsed
 
 
 def _require_int_field(value: object, field: str, identity: str, minimum: int) -> int:
@@ -5149,4 +5172,163 @@ class AgentDao(BaseDao):
             granted_execution_ids=tuple(granted),
             workflow_ids=tuple(sorted(set(workflow_ids))),
             blocked=tuple(blocked),
+        )
+
+    async def register_business_sources(
+        self, request: BusinessSourceRegistrationRequest
+    ) -> BusinessSourceRegistrationReceipt:
+        """业务来源登记（§3.3/§9.10，E-01）：asset 版本 + 消费者入边**单事务**。
+
+        - 仅登记请求中的显式选择集合；未选来源不被本方法接触（D2 零使用）；
+        - 同 (source_id, version, consumer) 同规范输入幂等回原回执（replayed=True）；
+          摘要/元数据/定位不一致 → ``INPUT_CONFLICT``（不静默覆盖）；
+        - ``available_at`` 必须为带时区 UTC 文本或 NULL；时点策略（PIT）由服务层
+          在执行本事务前拒绝，DAO 只落已核事实；
+        - 来源正文不在此复制（asset 只保存元数据与引用）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / SOURCE_DISABLED。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/{request.consumer_kind}/{request.consumer_id}@{request.consumer_version}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.consumer_kind, "consumer_kind", identity)
+        _require_text_field(request.consumer_id, "consumer_id", identity)
+        _require_text_field(request.consumer_version, "consumer_version", identity)
+        if request.consumer_kind not in SOURCE_REGISTRATION_CONSUMER_KINDS:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "consumer_kind is not registrable", identity)
+        if not request.items:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "sources must not be empty", identity)
+        seen: set[tuple[str, str]] = set()
+        for index, item in enumerate(request.items):
+            source = item.source
+            item_identity = f"{identity}/items[{index}]"
+            _require_text_field(source.source_id, "source_id", item_identity)
+            _require_text_field(source.version, "version", item_identity)
+            _require_text_field(source.digest, "digest", item_identity)
+            if source.user_scope != request.user_scope:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source user_scope mismatch", item_identity)
+            if source.read_state is ReadState.DISABLED:
+                raise AgentServiceError(AgentErrorCode.SOURCE_DISABLED, "source version is disabled", item_identity)
+            key = (source.source_id, source.version)
+            if key in seen:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "duplicate source in request", item_identity)
+            seen.add(key)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        ordered = sorted(request.items, key=lambda item: (item.source.source_id, item.source.version))
+        registered: list[SourceVersionRef] = []
+        link_ids: list[str] = []
+        replayed = True
+        async with engine.begin() as conn:
+            for item in ordered:
+                source = item.source
+                asset_identity = f"{request.user_scope}/{source.source_id}@{source.version}"
+                payload = {
+                    "schema_version": 1,
+                    "source_ref": encode_source_ref(source),
+                    "verification": item.verification.value,
+                }
+                available_at = _wire_timestamp_or_none(source.available_at, asset_identity)
+                asset_row = (
+                    await conn.execute(
+                        sa.select(AgentAssetVersion.digest, AgentAssetVersion.metadata_payload)
+                        .where(
+                            AgentAssetVersion.user_scope == request.user_scope,
+                            AgentAssetVersion.asset_id == source.source_id,
+                            AgentAssetVersion.asset_version == source.version,
+                        )
+                        .with_for_update()
+                    )
+                ).first()
+                if asset_row is None:
+                    replayed = False
+                    await conn.execute(
+                        sa.insert(AgentAssetVersion).values(
+                            user_scope=request.user_scope,
+                            asset_id=source.source_id,
+                            asset_version=source.version,
+                            asset_kind="source",
+                            display_name=source.display_name,
+                            digest=source.digest,
+                            origin_ref=(
+                                f"{source.locator.origin_ref.source_kind.value}:"
+                                f"{source.locator.origin_ref.source_id}@{source.locator.origin_ref.source_version}"
+                            ),
+                            metadata_payload=payload,
+                            read_state=source.read_state.value,
+                            verification_state=item.verification.value,
+                            available_at=available_at,
+                        )
+                    )
+                elif asset_row.digest != source.digest or json_doc(dict(asset_row.metadata_payload or {})) != json_doc(
+                    payload
+                ):
+                    raise AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "source version differs", asset_identity)
+
+                link_id = stable_id(
+                    "source_link",
+                    [
+                        request.user_scope,
+                        source.source_id,
+                        source.version,
+                        request.consumer_kind,
+                        request.consumer_id,
+                        request.consumer_version,
+                    ],
+                )
+                locator_payload = to_wire_dict(source.locator)
+                existing_link = (
+                    await conn.execute(
+                        sa.select(
+                            AgentSourceLink.link_id,
+                            AgentSourceLink.locator_payload,
+                            AgentSourceLink.relation_kind,
+                        ).where(
+                            AgentSourceLink.source_id == source.source_id,
+                            AgentSourceLink.source_version == source.version,
+                            AgentSourceLink.consumer_kind == request.consumer_kind,
+                            AgentSourceLink.consumer_id == request.consumer_id,
+                            AgentSourceLink.consumer_version == request.consumer_version,
+                        )
+                    )
+                ).first()
+                if existing_link is None:
+                    replayed = False
+                    await conn.execute(
+                        sa.insert(AgentSourceLink).values(
+                            user_scope=request.user_scope,
+                            link_id=link_id,
+                            source_id=source.source_id,
+                            source_version=source.version,
+                            consumer_kind=request.consumer_kind,
+                            consumer_id=request.consumer_id,
+                            consumer_version=request.consumer_version,
+                            execution_id=request.consumer_id if request.consumer_kind == "execution" else None,
+                            round_id=request.consumer_id if request.consumer_kind == "round" else None,
+                            message_id=request.consumer_id if request.consumer_kind == "message" else None,
+                            locator_payload=locator_payload,
+                            relation_kind=SourceRelationKind.ACCEPTED_INPUT.value,
+                        )
+                    )
+                elif existing_link.link_id != link_id or json_doc(
+                    dict(existing_link.locator_payload or {})
+                ) != json_doc(locator_payload):
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT, "source locator differs for consumer", asset_identity
+                    )
+                registered.append(
+                    SourceVersionRef(
+                        source_kind=source.source_kind,
+                        source_id=source.source_id,
+                        source_version=source.version,
+                        source_digest=source.digest,
+                    )
+                )
+                link_ids.append(link_id)
+        return BusinessSourceRegistrationReceipt(
+            registered=tuple(registered),
+            link_ids=tuple(link_ids),
+            replayed=replayed,
         )

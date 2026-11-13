@@ -7,6 +7,7 @@ from services.agent_service.attachments import (
     SubprocessAttachmentWorker,
     detect_attachment_kind,
 )
+from services.agent_service.sources import BusinessSourceService
 from services.agent_service.recovery import (
     ManualRecoveryReceipt,
     StartupIsolationReceipt,
@@ -31,6 +32,7 @@ __all__ = [
     "AttachmentExtractionRequest",
     "AttachmentExtractionResult",
     "AttachmentWorkerError",
+    "BusinessSourceService",
     "CloseReadinessReceipt",
     "ManualRecoveryReceipt",
     "StartupIsolationReceipt",

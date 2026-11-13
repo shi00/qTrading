@@ -5549,3 +5549,49 @@ def _enforce_limit(value: object, limit: int, code: str, path: str) -> None:
         _fail("invalid_range", path)
     if value > limit:
         _fail(code, path)
+
+
+#: 业务来源登记的消费者类别（§9.10 consumer_kind 子集）。
+SOURCE_REGISTRATION_CONSUMER_KINDS: Final[frozenset[str]] = frozenset({"execution", "round", "message"})
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessSourceItem:
+    """一条业务来源（元数据 + 核验状态）：登记事实，不等同读取或支持断言。"""
+
+    source: SourceRef
+    verification: VerificationState
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessSourceRegistrationRequest:
+    """来源登记请求（同事务 asset + link；仅显式选择集合）。"""
+
+    user_scope: str
+    consumer_kind: str
+    consumer_id: str
+    consumer_version: str
+    items: tuple[BusinessSourceItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessSourceRegistrationReceipt:
+    """登记回执：已登记（或幂等复用）的来源版本与边身份。"""
+
+    registered: tuple[SourceVersionRef, ...]
+    link_ids: tuple[str, ...]
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRegistrationRequest:
+    """含用途/时点的登记请求（PIT 在服务层拒绝，DAOs 只落已核事实）。"""
+
+    user_scope: str
+    consumer_kind: str
+    consumer_id: str
+    consumer_version: str
+    purpose: Purpose
+    decision_cutoff: str | None
+    selected: tuple[BusinessSourceItem, ...]
+    unselected: tuple[BusinessSourceItem, ...] = ()
