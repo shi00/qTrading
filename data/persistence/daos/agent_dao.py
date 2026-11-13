@@ -65,6 +65,8 @@ from core.agent_types import (
     DecisionSummary,
     DeliveryFact,
     DeliveryState,
+    DispatchCloseFact,
+    DispatchCloseRequest,
     EventFact,
     EventKind,
     EventPayloadKind,
@@ -78,12 +80,16 @@ from core.agent_types import (
     MarkAnswerDeliveredRequest,
     MessagePage,
     MessagePageItem,
+    NON_RECOVERABLE_DISPLAY_STATES,
     Observation,
     OperationSummary,
     ReadMarkCommand,
     ReadMarkEntry,
     ReadMarkReceipt,
     RecordEventRequest,
+    RecoveryExecution,
+    RecoveryGrantFact,
+    RecoveryGrantRequest,
     ResearchEvent,
     ResearchSnapshot,
     ResourceClaimRequest,
@@ -93,6 +99,7 @@ from core.agent_types import (
     ResourceTicket,
     ReviseQueuedRequest,
     RevisionReceipt,
+    ROUND_STOP_REASON_USER_TERMINATION,
     SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
@@ -106,6 +113,7 @@ from core.agent_types import (
     SourceRelationKind,
     SourceStopCommand,
     SourceStopReceipt,
+    StartupIsolationRecord,
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
@@ -4775,3 +4783,339 @@ class AgentDao(BaseDao):
                 replayed=not changed,
                 recorded_at=_wire_time(now),
             )
+
+    # ------------------------------------------------------------------
+    # D-03：启动隔离/派发门控/手动恢复（HANDOFF §8.4，设计 §9.2/§9.5）
+    # ------------------------------------------------------------------
+
+    async def list_recovery_executions(self, user_scope: str) -> tuple[RecoveryExecution, ...]:
+        """恢复候选执行（非终态投影 + 当前有效轮原生引用，§9.2/§9.5）。
+
+        启动隔离与手动恢复共用本读取：叶执行的原生 workflow 身份不在此登记
+        （由原生列举按 ``agent_leaf`` 名称覆盖），调用方须把本集合与原生列举
+        取并集后再固定快照（HANDOFF §8.4 第 2 条）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（user_scope 非法）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/recovery"
+        _require_text_field(user_scope, "user_scope", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.execution_id,
+                        AgentExecution.session_id,
+                        AgentExecution.execution_kind,
+                        AgentExecution.display_state,
+                        AgentExecution.owner_epoch,
+                        AgentExecution.dispatch_closed,
+                        AgentExecution.ended_at,
+                        AgentRound.round_id,
+                        AgentRound.round_number,
+                        AgentRound.workflow_id,
+                        AgentRound.run_epoch,
+                        AgentRound.stop_reason,
+                    )
+                    .outerjoin(
+                        AgentRound,
+                        sa.and_(
+                            AgentRound.user_scope == AgentExecution.user_scope,
+                            AgentRound.round_id == AgentExecution.current_round_id,
+                        ),
+                    )
+                    .where(
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.display_state.not_in(sorted(NON_RECOVERABLE_DISPLAY_STATES)),
+                    )
+                    .order_by(AgentExecution.execution_id)
+                )
+            ).all()
+        return tuple(
+            RecoveryExecution(
+                execution_id=row.execution_id,
+                session_id=row.session_id,
+                execution_kind=row.execution_kind,
+                display_state=row.display_state,
+                owner_epoch=row.owner_epoch,
+                dispatch_closed=row.dispatch_closed,
+                ended_at=None if row.ended_at is None else _wire_time(row.ended_at),
+                round_id=row.round_id,
+                round_number=row.round_number,
+                workflow_id=row.workflow_id,
+                run_epoch=row.run_epoch,
+                stop_reason=row.stop_reason,
+            )
+            for row in rows
+        )
+
+    async def mark_dispatch_closed(self, request: DispatchCloseRequest) -> DispatchCloseFact:
+        """关闭应用派发门闩（§9.2 ``dispatch_closed``；启动隔离/手动恢复共用）。
+
+        以当前有效轮的 ``workflow_id`` 定位执行行并置 ``dispatch_closed=true``
+        （幂等：已关闭行不再写回）。门闩关闭**不等于已停止**，原生取消/退出核定
+        仍由隔离与关闭门闩负责。未匹配的 workflow ID 不计失败（原生有而应用
+        尚未登记，例如叶执行）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（user_scope 非法）。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/recovery"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        workflow_ids = tuple(sorted({value for value in request.workflow_ids if isinstance(value, str) and value}))
+        if not workflow_ids:
+            return DispatchCloseFact(user_scope=request.user_scope, closed_execution_ids=())
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            matched = (
+                await conn.execute(
+                    sa.select(AgentExecution.execution_id, AgentExecution.dispatch_closed)
+                    .join(
+                        AgentRound,
+                        sa.and_(
+                            AgentRound.user_scope == AgentExecution.user_scope,
+                            AgentRound.round_id == AgentExecution.current_round_id,
+                        ),
+                    )
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentRound.workflow_id.in_(workflow_ids),
+                    )
+                    .order_by(AgentExecution.execution_id)
+                    .with_for_update(of=AgentExecution)
+                )
+            ).all()
+            to_close = [row.execution_id for row in matched if not row.dispatch_closed]
+            if to_close:
+                await conn.execute(
+                    sa.update(AgentExecution)
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id.in_(to_close),
+                    )
+                    .values(
+                        dispatch_closed=True,
+                        revision=AgentExecution.revision + 1,
+                        updated_at=now,
+                    )
+                )
+        return DispatchCloseFact(
+            user_scope=request.user_scope,
+            closed_execution_ids=tuple(row.execution_id for row in matched),
+        )
+
+    async def save_startup_isolation(self, record: StartupIsolationRecord) -> str:
+        """保存启动隔离命令（HANDOFF §8.4 第 2 条：固定快照后、取消之前）。
+
+        命令身份 ``stable_id("command", [user_scope, target_id, client_command_id])``；
+        同身份同快照幂等返回原 ID，同身份异快照 ``INPUT_CONFLICT``（不覆盖原
+        事实）。命令行记录快照执行 ID 与原状态；取消/复核结果由
+        :meth:`finalize_startup_isolation` 回填。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT。
+        """
+
+        self._check_engine()
+        identity = f"{record.user_scope}/startup-isolation"
+        _require_text_field(record.user_scope, "user_scope", identity)
+        _require_text_field(record.client_command_id, "client_command_id", identity)
+        _require_text_field(record.target_id, "target_id", identity)
+        command_record_id = stable_id("command", [record.user_scope, record.target_id, record.client_command_id])
+        input_digest = sha256_hex(record.snapshot)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            existing = (
+                await conn.execute(
+                    sa.select(AgentCommand.input_digest).where(
+                        AgentCommand.user_scope == record.user_scope,
+                        AgentCommand.command_record_id == command_record_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                if existing.input_digest != input_digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "startup isolation command identity already used with a different snapshot",
+                        identity,
+                    )
+                return command_record_id
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope=record.user_scope,
+                    command_record_id=command_record_id,
+                    client_command_id=record.client_command_id,
+                    target_id=record.target_id,
+                    command_kind="startup_isolation",
+                    expected_revision=0,
+                    input_digest=input_digest,
+                    request_payload=json.loads(record.snapshot),
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.DELIVERED.value,
+                    consumption_state=ConsumptionState.CONSUMED.value,
+                    receipt_payload=json.loads(record.receipt_payload),
+                    verified_at=datetime.now(UTC),
+                )
+            )
+        return command_record_id
+
+    async def finalize_startup_isolation(
+        self,
+        *,
+        user_scope: str,
+        isolation_command_id: str,
+        receipt_payload: str,
+    ) -> None:
+        """回填启动隔离复核结果（取消/复查完成或阻塞原因；幂等覆盖本命令回执）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（命令行不存在）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/startup-isolation"
+        _require_text_field(isolation_command_id, "isolation_command_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.update(AgentCommand)
+                .where(
+                    AgentCommand.user_scope == user_scope,
+                    AgentCommand.command_record_id == isolation_command_id,
+                )
+                .values(
+                    receipt_payload=json.loads(receipt_payload),
+                    revision=AgentCommand.revision + 1,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            if result.rowcount == 0:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "startup isolation command not found in user scope",
+                    identity,
+                )
+
+    async def grant_recovery_epoch(self, request: RecoveryGrantRequest) -> RecoveryGrantFact:
+        """手动恢复准入代次授予（HANDOFF §8.4 第 5 条：仅精确选择集合）。
+
+        单事务行锁下逐项核：存在、非不可恢复终态、非用户终止、有当前有效轮、
+        新 epoch 严格大于现值（单调，R22）；合格项写 ``owner_epoch`` 并重开
+        ``dispatch_closed``，其有效轮写 ``run_epoch``。不合格项进入 ``blocked``
+        （明确拒绝，不静默跳过），对应原生集合不返回，故不会被 resume。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（入参非法/空集合/epoch 非正）。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/recovery"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        execution_ids = tuple(sorted(set(request.execution_ids)))
+        if not execution_ids:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution_ids must be non-empty", identity)
+        _require_int_field(request.owner_epoch, "owner_epoch", identity, 1)
+        _require_int_field(request.run_epoch, "run_epoch", identity, 1)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        blocked: list[tuple[str, str]] = []
+        granted: list[str] = []
+        workflow_ids: list[str] = []
+        round_ids: list[str] = []
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.execution_id,
+                        AgentExecution.display_state,
+                        AgentExecution.owner_epoch,
+                        AgentRound.round_id,
+                        AgentRound.workflow_id,
+                        AgentRound.run_epoch,
+                        AgentRound.stop_reason,
+                    )
+                    .outerjoin(
+                        AgentRound,
+                        sa.and_(
+                            AgentRound.user_scope == AgentExecution.user_scope,
+                            AgentRound.round_id == AgentExecution.current_round_id,
+                        ),
+                    )
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id.in_(execution_ids),
+                    )
+                    .order_by(AgentExecution.execution_id)
+                    .with_for_update(of=AgentExecution)
+                )
+            ).all()
+            by_id = {row.execution_id: row for row in rows}
+            for execution_id in execution_ids:
+                row = by_id.get(execution_id)
+                if row is None:
+                    blocked.append((execution_id, "not_found"))
+                    continue
+                if row.display_state in NON_RECOVERABLE_DISPLAY_STATES:
+                    blocked.append((execution_id, "already_terminal"))
+                    continue
+                if row.stop_reason == ROUND_STOP_REASON_USER_TERMINATION:
+                    blocked.append((execution_id, "user_termination"))
+                    continue
+                if row.round_id is None or row.workflow_id is None:
+                    blocked.append((execution_id, "no_active_round"))
+                    continue
+                if request.owner_epoch <= row.owner_epoch:
+                    blocked.append((execution_id, "epoch_not_advanced"))
+                    continue
+                if row.run_epoch is not None and request.run_epoch <= row.run_epoch:
+                    blocked.append((execution_id, "epoch_not_advanced"))
+                    continue
+                granted.append(execution_id)
+                workflow_ids.append(row.workflow_id)
+                round_ids.append(row.round_id)
+            if granted:
+                await conn.execute(
+                    sa.update(AgentExecution)
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id.in_(granted),
+                    )
+                    .values(
+                        owner_epoch=request.owner_epoch,
+                        dispatch_closed=False,
+                        revision=AgentExecution.revision + 1,
+                        updated_at=now,
+                    )
+                )
+                await conn.execute(
+                    sa.update(AgentRound)
+                    .where(
+                        AgentRound.user_scope == request.user_scope,
+                        AgentRound.round_id.in_(round_ids),
+                    )
+                    .values(
+                        run_epoch=request.run_epoch,
+                        revision=AgentRound.revision + 1,
+                        updated_at=now,
+                    )
+                )
+        return RecoveryGrantFact(
+            user_scope=request.user_scope,
+            owner_epoch=request.owner_epoch,
+            run_epoch=request.run_epoch,
+            granted_execution_ids=tuple(granted),
+            workflow_ids=tuple(sorted(set(workflow_ids))),
+            blocked=tuple(blocked),
+        )

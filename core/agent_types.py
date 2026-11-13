@@ -4954,3 +4954,103 @@ def validate_plan_spec_proposal(
                 ready.append(child)
     if visited != len(nodes):
         _fail("plan_cycle", "$.nodes")
+
+
+# ---------------------------------------------------------------------------
+# D-03：启动隔离、派发门控与手动恢复（HANDOFF §8.4 / 设计 §9.2/§9.5）
+# ---------------------------------------------------------------------------
+
+#: 轮次停止原因 wire 值（§9.5 `stop_reason`：启动隔离与用户终止必须可区分，
+#: 只有启动隔离可经核验手动恢复；用户终止不复活，HANDOFF §8.4 末段）。
+ROUND_STOP_REASON_STARTUP_ISOLATION: Final[str] = "startup_isolation"
+ROUND_STOP_REASON_USER_TERMINATION: Final[str] = "user_termination"
+
+#: 不可恢复的终态投影（这些状态不进入手动恢复，也不作为启动隔离候选的
+#: 「在途」语义；`partial` 为已定部分结果，同样不再续跑）。
+NON_RECOVERABLE_DISPLAY_STATES: Final[frozenset[str]] = frozenset(
+    {"ended", "failed", "complete", "partial", "withdrawn", "closed_unknown"}
+)
+
+
+@dataclass(frozen=True)
+class RecoveryExecution:
+    """恢复候选执行投影（§9.2/§9.5）：应用登记事实 + 当前有效轮的原生引用。
+
+    ``workflow_id`` / ``run_epoch`` / ``stop_reason`` 来自当前有效轮（无轮时
+    为 None）；``dispatch_closed`` 为应用派发门闩（不等于已停止）。叶执行的
+    原生叶 workflow 身份由原生列举覆盖（应用侧未逐叶登记 workflow_id）。
+    """
+
+    execution_id: str
+    session_id: str
+    execution_kind: str
+    display_state: str
+    owner_epoch: int
+    dispatch_closed: bool
+    ended_at: str | None
+    round_id: str | None
+    round_number: int | None
+    workflow_id: str | None
+    run_epoch: int | None
+    stop_reason: str | None
+
+
+@dataclass(frozen=True)
+class StartupIsolationRecord:
+    """启动隔离命令记录（HANDOFF §8.4 第 2 条：固定快照后先保存再取消）。
+
+    ``snapshot`` / ``receipt_payload`` 为 CanonicalJson：快照含被隔离 workflow
+    ID 与快照时点原生状态/归属登记事实；回执含就绪与否及阻塞原因。二者均不含
+    凭据或私人正文（R9）。
+    """
+
+    user_scope: str
+    client_command_id: str
+    target_id: str
+    snapshot: CanonicalJson
+    receipt_payload: CanonicalJson
+
+
+@dataclass(frozen=True)
+class DispatchCloseRequest:
+    """应用派发门闩关闭请求（§9.2 `dispatch_closed`：启动隔离/手动恢复共用）。
+
+    以 workflow 身份定位执行行；未匹配的 ID 不计失败（原生有而应用未登记）。
+    """
+
+    user_scope: str
+    workflow_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DispatchCloseFact:
+    """派发门闩关闭事实：``closed_execution_ids`` 为门闩已关闭（或本已关闭）的执行。"""
+
+    user_scope: str
+    closed_execution_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RecoveryGrantRequest:
+    """手动恢复准入代次授予请求（HANDOFF §8.4 第 5 条：只授精确选择集合）。
+
+    ``owner_epoch`` / ``run_epoch`` 必须严格大于现值（单调，R22）；用户终止
+    或不可恢复终态的候选明确拒绝并进入 ``blocked``，不静默跳过。
+    """
+
+    user_scope: str
+    execution_ids: tuple[str, ...]
+    owner_epoch: int
+    run_epoch: int
+
+
+@dataclass(frozen=True)
+class RecoveryGrantFact:
+    """恢复准入授予事实：``workflow_ids`` 为可 resume 的精确原生集合（不含被阻项）。"""
+
+    user_scope: str
+    owner_epoch: int
+    run_epoch: int
+    granted_execution_ids: tuple[str, ...]
+    workflow_ids: tuple[str, ...]
+    blocked: tuple[tuple[str, str], ...]
