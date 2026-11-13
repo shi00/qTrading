@@ -81,3 +81,4 @@
 - **一致性检查**：`python scripts/check_docs_consistency.py --check --scope all`（无参数等价；scope=document/governance/source 按变更映射裁剪）。
 - **生成块更新**：`python scripts/check_docs_consistency.py --update`（封闭注册表：AGENTS.md 最小安全集/最小验证命令、CLAUDE.md 顶部摘要/自查清单、docs/README.md 文件级目录/ADR 索引、本 README 规则参考/任务路由；更新后自动跑 all 检查）。
 - **治理 ID 溯源**：[governance-ids.md](./governance-ids.md)；**规则集变更记录**：[ruleset-changelog.md](./ruleset-changelog.md)；**检查迁移映射**：[checker-migration-map.md](./checker-migration-map.md)。
+- **例外移除条件季度复核**：逐条判断 `exceptions.yml` 中 `removal_trigger` 是否已满足（checker 只校验 `expires_at` 日期与字段完备性，不代替该语义判定），节律与处置见 [documentation-maintenance.md](../guides/documentation-maintenance.md) §9。

@@ -9,7 +9,8 @@
 - 显式失败形态二：必需文件读取异常向上传播（调用方 CLI 以非零退出）。
 两种形态都算显式失败；返回 [] 即为「失踪输入空转」违规。
 
-覆盖清单与 _SCOPE_CHECK_NAMES 一致（43 项 = 42 项原检查 + D4 新增 check_docs_generated）。
+覆盖清单与 _SCOPE_CHECK_NAMES 一致（44 项 = 42 项原检查 + D4 新增 check_docs_generated
++ L10 生产集成 check_exceptions_effectiveness）。
 """
 
 from __future__ import annotations
@@ -91,6 +92,7 @@ def _build_negatives(tmp_path: Path) -> dict[str, Callable[[pytest.MonkeyPatch],
         ),
         "check_exceptions_yaml_consistency": patch("EXCEPTIONS_YAML_PATH", _missing(tmp_path, "exceptions.yml")),
         "check_exceptions_reverse_coverage": patch("EXCEPTIONS_YAML_PATH", _missing(tmp_path, "exceptions.yml")),
+        "check_exceptions_effectiveness": patch("EXCEPTIONS_YAML_PATH", _missing(tmp_path, "exceptions.yml")),
         "check_canonical_topics_consistency": patch(
             "CANONICAL_TOPICS_YAML_PATH", _missing(tmp_path, "canonical-topics.yml")
         ),
@@ -125,7 +127,7 @@ def _assert_explicit_failure(check_name: str, fn: Callable[[], list[str]]) -> No
 
 
 def test_all_scope_checks_have_required_input_negative(tmp_path: Path):
-    """_SCOPE_CHECK_NAMES 的 43 项每一项都有缺失输入负例映射（承接表完整性）。"""
+    """_SCOPE_CHECK_NAMES 的 44 项每一项都有缺失输入负例映射（承接表完整性）。"""
     negatives = _build_negatives(tmp_path)
     scope_names = {name for _, name in cdc._SCOPE_CHECK_NAMES}
     missing = sorted(scope_names - set(negatives))

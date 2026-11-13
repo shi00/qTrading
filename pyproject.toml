@@ -107,7 +107,10 @@ sentiment = [
 # pytest 不进入 pre-commit 解析 hook 的运行依赖。
 docs = [
     "markdown-it-py==4.0.0",  # 文档统一 Markdown 解析（CommonMark + table/strikethrough）
-    "github-slugger==0.0.3",  # GitHub 风格标题锚点生成（重复标题加序号）
+    # 该版本在 Python ≥3.13 导入即崩溃（上游无修复版）：保留 pin 以遵守检视方案 §5.1 强制清单，
+    # 并作为上游修复后的升级锚点；运行时由 scripts/docs_markdown.py 的 CompatGithubSlugger 回退，
+    # SLUGGER_BACKEND 如实声明实际后端（不得移除本行）。
+    "github-slugger==0.0.3",  # GitHub 风格标题锚点生成（重复标题加序号；导入崩溃见上方说明）
     "pyyaml>=6.0",  # 治理 YAML 作者源解析
     "pytest>=9.2.0",  # 纯文档测试运行器（tests/docs 独立环境）
 ]

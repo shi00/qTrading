@@ -81,6 +81,7 @@
 - 3c enforcement 字段与实际 hook / CI job 映射检查（已实现：check_enforcement_mapping()，见 ADR-0005）。
 - Flet 入口完整性检查（已实现：check_flet_hub_completeness()）。
 - exceptions.yml 例外注册表一致性检查（已实现：check_exceptions_yaml_consistency()，P1-01）。
+- 例外有效期与移除条件有效性检查（已实现：check_exceptions_effectiveness()，L10 生产集成）。
 - canonical-topics.yml 主题映射一致性检查（已实现：check_canonical_topics_consistency()，P2-12）。
 """
 
@@ -2065,6 +2066,68 @@ def check_exceptions_reverse_coverage() -> list[str]:
                     f"的例外（{', '.join(registered[rid])[:80]}…）均未在 reason 中回指条目 {row_id}。"
                     f"请将条目 {row_id} 补记入对应例外的 reason，或在 exceptions.yml 新增该豁免。"
                 )
+
+    return errors
+
+
+def check_exceptions_effectiveness(*, today: date | None = None) -> list[str]:
+    """例外有效期与移除条件有效性检查（L10 生产集成：例外不得自动续效）。
+
+    逐条机判 docs/governance/exceptions.yml：
+    1. 声明 expires_at 者须为非空字符串且为合法 ISO 日期；过期（expires_at < 判定日）
+       即报错——须移除该例外或重新批准续期，不得自动续效；
+    2. 声明 removal_trigger 者须为非空白字符串。
+    expires_at 与 removal_trigger 两者皆缺由 check_exceptions_yaml_consistency() 的
+    二选一必填检查负责，本函数不重复报同一问题。
+
+    边界：removal_trigger 是否已实际满足属人工语义判定，机器不判定（checker 只校验
+    expires_at 日期合法性与字段完备性）；逐条人工判定节律与处置见
+    docs/guides/documentation-maintenance.md §9。判定日经关键字参数注入以便测试确定性。
+    """
+    errors: list[str] = []
+    judge_day = today if today is not None else date.today()
+
+    if not EXCEPTIONS_YAML_PATH.exists():
+        errors.append(f"exceptions.yml 不存在: {EXCEPTIONS_YAML_PATH}")
+        return errors
+
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        errors.append(f"exceptions.yml YAML 解析失败: {e}")
+        return errors
+
+    if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
+        errors.append("exceptions.yml 顶层应为 dict 且含 'exceptions' list（例外有效期检查无法执行）")
+        return errors
+
+    for idx, entry in enumerate(data["exceptions"], 1):
+        if not isinstance(entry, dict):
+            errors.append(f"exceptions[{idx}] 应为 dict, 实际 {type(entry).__name__}")
+            continue
+
+        if "expires_at" in entry:
+            expires_raw = entry.get("expires_at")
+            if not isinstance(expires_raw, str) or not expires_raw.strip():
+                errors.append(f"exceptions[{idx}] expires_at 应为非空字符串, 实际 {expires_raw!r}")
+            else:
+                try:
+                    expires_on = date.fromisoformat(expires_raw.strip())
+                except ValueError:
+                    errors.append(f"exceptions[{idx}] expires_at 非法日期: {expires_raw!r}（须为 YYYY-MM-DD）")
+                else:
+                    if expires_on < judge_day:
+                        errors.append(
+                            f"exceptions[{idx}] 例外已过期（expires_at={expires_raw} < 判定日 "
+                            f"{judge_day.isoformat()}）：须移除该例外或重新批准续期，不得自动续效"
+                        )
+
+        if "removal_trigger" in entry:
+            trigger_raw = entry.get("removal_trigger")
+            if not isinstance(trigger_raw, str) or not trigger_raw.strip():
+                errors.append(f"exceptions[{idx}] removal_trigger 应为非空白字符串, 实际 {trigger_raw!r}")
 
     return errors
 
@@ -4391,6 +4454,7 @@ _SCOPE_CHECK_NAMES: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"governance"}), "check_enforcement_reverse_coverage"),
     (frozenset({"governance"}), "check_exceptions_yaml_consistency"),
     (frozenset({"governance"}), "check_exceptions_reverse_coverage"),
+    (frozenset({"governance"}), "check_exceptions_effectiveness"),
     (frozenset({"governance"}), "check_canonical_topics_consistency"),
     (frozenset({"document"}), "check_flet_hub_completeness"),
     (frozenset({"document"}), "check_agents_md_sync"),
@@ -4625,7 +4689,7 @@ def main(
         print(
             "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
             "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
-            "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
+            "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / 例外有效期与移除条件有效性 / canonical-topics.yml 一致性 / "
             "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
             "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
             "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "

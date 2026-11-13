@@ -16,9 +16,9 @@ r"""D12：L07—L12 长期控制合同控制测试（documentation-maintenance �
 - L09：语义评审层与真实运行层的证据（结构绿不免语义或运行层）；
 - L10：removal_trigger 文本的满足判定由评审者显式传入，机器不判自由文本语义；
 - L12：远端 job 强制（required status check）与真实 CI 平台行为；
-- L10 正本缺口（如实登记）：生产 check_exceptions_yaml_consistency 仅校验
-  expires_at/removal_trigger 二选一必填，未集成到期/触发续效判断；本文件
-  _exception_still_in_effect 为 tests/docs 内参照实现，不冒充生产门禁。
+- L10 人工边界：生产 check_exceptions_effectiveness 只机判 expires_at 日期合法性/是否过期
+  与字段完备性；removal_trigger 是否满足仍由评审者人工语义判定（本文件
+  _exception_still_in_effect 为 tests/docs 内 AND 谓词参照实现，不冒充生产门禁）。
 """
 
 from __future__ import annotations
@@ -263,6 +263,58 @@ def test_l10_unverified_approval_not_valid() -> None:
     entry = {"removal_trigger": "替代方案已交付"}
     with pytest.raises(ValueError, match="未核"):
         _exception_still_in_effect(entry, _BASE_DATE, removal_trigger_met=None)
+
+
+# ---------------------------------------------------------------------------
+# L10 生产集成：check_exceptions_effectiveness（过期/非法日期/空白移除条件机判）
+# ---------------------------------------------------------------------------
+
+_L10_PRODUCTION_JUDGE_DAY = date(2026, 11, 13)
+
+
+def _write_exceptions_yaml(tmp_path: Path, entries: list[str]) -> Path:
+    path = tmp_path / "exceptions.yml"
+    path.write_text("exceptions:\n" + "".join(entries), encoding="utf-8")
+    return path
+
+
+def test_l10_production_check_accepts_future_expiry_and_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正例：未来 expires_at + removal_trigger → 生产检查无错误。"""
+    path = _write_exceptions_yaml(
+        tmp_path,
+        [
+            '  - id: EX-9001\n    expires_at: "2027-06-30"\n',
+            '  - id: EX-9002\n    removal_trigger: "替代方案交付后移除"\n',
+        ],
+    )
+    monkeypatch.setattr(cdc, "EXCEPTIONS_YAML_PATH", path)
+    assert cdc.check_exceptions_effectiveness(today=_L10_PRODUCTION_JUDGE_DAY) == []
+
+
+def test_l10_production_check_rejects_expired_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：expires_at 已过期 → 生产检查报「已过期」（不得自动续效）。"""
+    path = _write_exceptions_yaml(tmp_path, ['  - id: EX-9001\n    expires_at: "2026-11-12"\n'])
+    monkeypatch.setattr(cdc, "EXCEPTIONS_YAML_PATH", path)
+    errors = cdc.check_exceptions_effectiveness(today=_L10_PRODUCTION_JUDGE_DAY)
+    assert any("已过期" in e for e in errors), errors
+
+
+def test_l10_production_check_rejects_invalid_expiry_date(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：expires_at 非法日期 → 生产检查报「非法日期」（不得静默当有效）。"""
+    path = _write_exceptions_yaml(tmp_path, ['  - id: EX-9001\n    expires_at: "2026-13-01"\n'])
+    monkeypatch.setattr(cdc, "EXCEPTIONS_YAML_PATH", path)
+    errors = cdc.check_exceptions_effectiveness(today=_L10_PRODUCTION_JUDGE_DAY)
+    assert any("非法日期" in e for e in errors), errors
+
+
+def test_l10_production_check_rejects_blank_removal_trigger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：removal_trigger 为纯空白 → 生产检查报错（字段完备性）。"""
+    path = _write_exceptions_yaml(tmp_path, ['  - id: EX-9001\n    removal_trigger: "   "\n'])
+    monkeypatch.setattr(cdc, "EXCEPTIONS_YAML_PATH", path)
+    errors = cdc.check_exceptions_effectiveness(today=_L10_PRODUCTION_JUDGE_DAY)
+    assert errors, "纯空白 removal_trigger 必须失败"
 
 
 # ---------------------------------------------------------------------------
