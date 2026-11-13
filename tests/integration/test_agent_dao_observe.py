@@ -118,6 +118,29 @@ class TestObserveBacklog:
         events = await _collect(observer, 1)
         assert [e.session_seq for e in events] == [seqs[2]]
 
+    async def test_large_backlog_catchup_without_per_page_throttle(self, real_embedded_pg) -> None:
+        """追平阶段连续翻页读至 has_more=False，不逐页插入 poll 节拍（检视 M-1）。
+
+        120 条 backlog = 3 页（limit=50）；poll_interval_s 取上限 0.9s——若每页
+        强制等待一次节拍，第 120 条投递前至少 ≈1.8s；修复后追平背靠背读取，
+        整体耗时远低于该阈值（同时验证顺序与不重不漏）。
+        """
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        count = 120
+        seqs = []
+        for i in range(1, count + 1):
+            seqs.append(await _record(dao, "s-obs", f"bulk{i}"))
+
+        started = asyncio.get_running_loop().time()
+        observer = dao.observe_session_events("s-obs", user_scope=USER_SCOPE, after_seq=0, poll_interval_s=0.9)
+        events = await _collect(observer, count, timeout_s=2.0)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert [e.session_seq for e in events] == seqs
+        assert len({e.session_seq for e in events}) == count
+        assert elapsed < 1.5  # 逐页节拍的旧行为 ≈2.7s，追平直读应远低于此
+
     async def test_missing_session_invalid(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
         observer = dao.observe_session_events("no-such", user_scope=USER_SCOPE, after_seq=0)
@@ -140,15 +163,20 @@ class TestObserveLive:
         await _seed_session(dao)
         baseline = await _record(dao, "s-obs", "base")
 
-        observer = dao.observe_session_events("s-obs", user_scope=USER_SCOPE, after_seq=baseline)
+        # poll_interval_s 取上限 1.0s：若 LISTEN 未真正注册（asyncpg ≥0.29 协程
+        # 未 await 即静默退化），唤醒只能靠轮询超时 ≥1.0s；真 LISTEN 唤醒即时。
+        observer = dao.observe_session_events("s-obs", user_scope=USER_SCOPE, after_seq=baseline, poll_interval_s=1.0)
         # 先确认 backlog 已追平（首 anext 会等待第一事件；先写入一个后置事件再收集）
+        started = asyncio.get_running_loop().time()
         live_seq = await _record(dao, "s-obs", "live1")
-        event = await asyncio.wait_for(observer.__anext__(), timeout=SETTLE_S)
+        event = await asyncio.wait_for(observer.__anext__(), timeout=3.0)
         assert event.session_seq == live_seq
+        wake_elapsed = asyncio.get_running_loop().time() - started
+        assert wake_elapsed < 0.8  # LISTEN 唤醒即时；退化到 1.0s 轮询即超阈值
 
         # 第二个事件经 notify 唤醒（不依赖轮询超时也须到）
         second_seq = await _record(dao, "s-obs", "live2")
-        event2 = await asyncio.wait_for(observer.__anext__(), timeout=SETTLE_S)
+        event2 = await asyncio.wait_for(observer.__anext__(), timeout=3.0)
         assert event2.session_seq == second_seq
 
         await observer.aclose()  # type: ignore[attr-defined]  # 异步生成器 aclose 为标准库 API

@@ -2830,6 +2830,7 @@ GRANT_STATES: Final[frozenset[str]] = frozenset({"granted", "claimed", "revoked"
 #: 游标最小编码（工程裁决，§4.2 L402）：message ``m:<session_seq>``。
 _MESSAGE_CURSOR_RE: Final = re.compile(r"m:(?:0|[1-9][0-9]*)")
 #: artifact ``a:<published_at wire>:<artifact_id>:<version>``（artifact_id 无冒号）。
+# NOTE(lazy): 分页游标锚段 [^:\s]+ 禁冒号，含冒号的 artifact_id/message_id 无法编码进游标（该 ID 翻页失效，检视 m-5）. ceiling: 项目内 ID 均由 stable_id（kind_sha256 十六进制）等内部生成器产出，不含冒号. upgrade: 引入接受外部自定义 ID 的入口或人工构造含冒号 ID 的路径时，改为锚段转义编码（cursor 格式需同步升版）.
 _ARTIFACT_CURSOR_RE: Final = re.compile(r"a:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):([^:\s]+):([1-9][0-9]*)")
 
 

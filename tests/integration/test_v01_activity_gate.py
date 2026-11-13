@@ -2,7 +2,8 @@
 
 正本条件：至少 150 条命中、每次翻页前另一会话可靠追加事件、预先记录的
 有限操作预算内到第 3 页并定位末页；不停后台、不加载全史；记录失效信号→
-恢复位置及实际步数。
+恢复位置及实际步数。末页定位与步数均为强断言（检视复核修正：原
+``reached_end or cursor is not None`` 恒真弱断言已移除）。
 
 实现说明（里程碑检视留痕）：
 
@@ -119,7 +120,6 @@ class TestV01ActivityGate:
         hits_seen_a = 0
         fingerprints: list[str] = []
         cursor: str | None = None
-        reached_end_a = False
         while pages_a < 3:
             page = await dao.search_history(_query("all_saved", None, cursor), user_scope=USER_SCOPE)
             operations += 1
@@ -128,7 +128,6 @@ class TestV01ActivityGate:
             fingerprints.append(page.revision_fingerprint)
             cursor = page.next_cursor
             if cursor is None:
-                reached_end_a = True
                 break
             await _record(dao, SESSION_OTHER, f"other-{pages_a}")
             operations += 1
@@ -140,8 +139,22 @@ class TestV01ActivityGate:
         assert operations <= OPERATION_BUDGET
         # 失效信号可观察：另一会话追加改变用户域指纹（服务层据此触发重首读）
         assert len(set(fingerprints)) == len(fingerprints)
-        # 游标绑定固定上界：末页 next_cursor（若还有第 4 页）仍携首读上界
-        assert reached_end_a or cursor is not None
+
+        # ---- 阶段 A 续：预算内继续翻页定位末页（检视复核：末页定位强断言）----
+        # 固定上界内命中 = 160 主会话 + 1 另会话种子（翻页间追加的事件晚于上界，不入结果），
+        # 第 3 页后余 11 条 → 第 4 页末页 next_cursor=None
+        steps_to_end = 0
+        tail_hits = 0
+        while cursor is not None:
+            page = await dao.search_history(_query("all_saved", None, cursor), user_scope=USER_SCOPE)
+            operations += 1
+            steps_to_end += 1
+            tail_hits += len(page.hits)
+            fingerprints.append(page.revision_fingerprint)
+            cursor = page.next_cursor
+            assert steps_to_end <= OPERATION_BUDGET  # 预算护栏：末页定位也在预算内
+        assert cursor is None  # 末页已定位（游标耗尽）
+        assert hits_seen_a + tail_hits == 161  # 固定上界内全量命中：160 主 + 1 种子
 
         # ---- 阶段 B：current_session，另一会话追加不影响本会话指纹 ----
         pages_b = 0

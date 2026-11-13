@@ -2516,12 +2516,14 @@ class AgentDao(BaseDao):
 
     @staticmethod
     def _parse_session_cursors(
-        message_cursor: str | None, artifact_cursor: str | None
+        message_cursor: str | None, artifact_cursor: str | None, identity_str: str
     ) -> tuple[int | None, tuple[datetime, str, int] | None]:
         """游标解析为 keyset 键值（语法已由 validate_session_read_query 冻结）。
 
         游标 ``a:{ts}:{id}:{ver}`` 中 ts 自身含冒号（YYYY-MM-DDTHH:MM:SS.ffffffZ，
-        恰 3 段），id 段冻结不含冒号，ver 为末段。
+        恰 3 段），id 段冻结不含冒号，ver 为末段。语法冻结不核日期取值
+        （正则放过 9999-99-99 等），strptime 失败按 INPUT_INVALID 拒绝
+        （检视 m-1：裸 ValueError 不得逃逸受理边界）。
         """
 
         message_cursor_seq: int | None = None
@@ -2531,11 +2533,13 @@ class AgentDao(BaseDao):
         if artifact_cursor is not None:
             parts = artifact_cursor[2:].split(":")
             wire_ts, artifact_id_part, version_part = ":".join(parts[:3]), parts[3], parts[4]
-            artifact_cursor_key = (
-                datetime.strptime(wire_ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC),
-                artifact_id_part,
-                int(version_part),
-            )
+            try:
+                cursor_moment = datetime.strptime(wire_ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+            except ValueError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "artifact cursor contains invalid date value", identity_str
+                ) from exc
+            artifact_cursor_key = (cursor_moment, artifact_id_part, int(version_part))
         return message_cursor_seq, artifact_cursor_key
 
     async def get_session_read(self, query: SessionReadQuery, *, user_scope: str) -> SessionRead:
@@ -2570,7 +2574,7 @@ class AgentDao(BaseDao):
         if query.round_id is not None and query.execution_id is None:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "round_id target requires execution_id", identity_str)
         message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(
-            query.message_cursor, query.artifact_cursor
+            query.message_cursor, query.artifact_cursor, identity_str
         )
 
         engine = self.engine
@@ -2816,7 +2820,9 @@ class AgentDao(BaseDao):
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity_str
             ) from exc
-        message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(message_cursor, artifact_cursor)
+        message_cursor_seq, artifact_cursor_key = self._parse_session_cursors(
+            message_cursor, artifact_cursor, identity_str
+        )
 
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
@@ -3087,16 +3093,9 @@ class AgentDao(BaseDao):
         session 成员（不含 execution 展开——目录级指纹，成员增删/水位变化即漂移）。
         """
 
-        session_ids: list[str]
         if query.scope == "all_saved":
-            rows = (
-                await conn.execute(sa.select(AgentSession.session_id).where(AgentSession.user_scope == user_scope))
-            ).all()
-            session_ids = [row.session_id for row in rows]
-            members_wire: list[dict[str, Any]] = [
-                {"session_id": sid, "revision": 0, "event_seq": 0} for sid in sorted(session_ids)
-            ]
             # all_saved 成员按 session 粒度：取各行 revision/event_seq
+            # （目录级指纹，成员增删/水位变化即漂移）
             detail_rows = (
                 await conn.execute(
                     sa.select(
@@ -3201,25 +3200,31 @@ class AgentDao(BaseDao):
                 identity_str,
             ) from exc
 
-    @staticmethod
-    def _history_date_bounds(query: HistoryQuery) -> tuple[datetime, datetime] | None:
-        """date_from/date_to（含当天，UTC）→ [from, to+1d) 半开区间。"""
+    def _history_date_bounds(self, query: HistoryQuery, identity_str: str) -> tuple[datetime | None, datetime | None]:
+        """date_from/date_to（含当天，UTC）→ 半开区间界（单边允许）。
 
-        if query.date_from is None or query.date_to is None:
-            return None
-        day_from = datetime.strptime(query.date_from, "%Y-%m-%d").replace(tzinfo=UTC)
-        day_to = datetime.strptime(query.date_to, "%Y-%m-%d").replace(tzinfo=UTC) + timedelta(days=1)
-        return day_from, day_to
+        date_from → ``>= from`` 下界；date_to → ``< to+1d`` 上界；单边提供时
+        仅该侧生效，两侧都缺则 (None, None)（检视 M-2：此前一侧为 None 即整体
+        返回 None，日期条件被静默丢弃、结果集扩大）。正则语法冻结不核日期取值，
+        strptime 失败按 INPUT_INVALID 拒绝（检视 m-1）。
+        """
 
-    def _history_sort_column(self, time_basis: str) -> Any:
-        """time_basis → 排序键列（§4.2 L431；工程裁决：message basis 下 artifact
-        行以 created_at 承载排序——里程碑检视复核点）。"""
-
-        if time_basis == "created":
-            return "created_at"
-        if time_basis == "updated":
-            return "updated_at"
-        return "message_moment"
+        try:
+            day_from = (
+                datetime.strptime(query.date_from, "%Y-%m-%d").replace(tzinfo=UTC)
+                if query.date_from is not None
+                else None
+            )
+            day_to_excl = (
+                datetime.strptime(query.date_to, "%Y-%m-%d").replace(tzinfo=UTC) + timedelta(days=1)
+                if query.date_to is not None
+                else None
+            )
+        except ValueError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "date_from/date_to contain invalid date value", identity_str
+            ) from exc
+        return day_from, day_to_excl
 
     async def search_history(self, query: HistoryQuery, *, user_scope: str) -> HistoryPage:
         """历史搜索（§4.2 R02 read_history + §9.13）：固定上界内规范扫描。
@@ -3255,8 +3260,15 @@ class AgentDao(BaseDao):
         cursor_anchor: str | None = None
         if query.cursor is not None:
             upper_text, sort_text, anchor_id = parse_history_cursor(query.cursor)
-            cursor_bound = datetime.strptime(upper_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
-            cursor_sort_moment = datetime.strptime(sort_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+            try:
+                cursor_bound = datetime.strptime(upper_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+                cursor_sort_moment = datetime.strptime(sort_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+            except ValueError as exc:
+                # 游标语法正则不核日期取值（放过 9999-99-99 等），strptime 失败按
+                # INPUT_INVALID 拒绝（检视 m-1：裸 ValueError 不得逃逸受理边界）
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "history cursor contains invalid date value", identity_str
+                ) from exc
             cursor_anchor = anchor_id
         fixed_upper = cursor_bound if cursor_bound is not None else datetime.now(UTC)
         upper_wire = _wire_time(fixed_upper)
@@ -3417,10 +3429,11 @@ class AgentDao(BaseDao):
                             )
                         )
                     )
-                date_bounds = self._history_date_bounds(query)
-                if date_bounds is not None:
-                    day_from, day_to_excl = date_bounds
-                    message_stmt = message_stmt.where(message_moment >= day_from, message_moment < day_to_excl)
+                day_from, day_to_excl = self._history_date_bounds(query, identity_str)
+                if day_from is not None:
+                    message_stmt = message_stmt.where(message_moment >= day_from)
+                if day_to_excl is not None:
+                    message_stmt = message_stmt.where(message_moment < day_to_excl)
                 if cursor_sort_moment is not None and cursor_anchor is not None:
                     if query.sort == "newest_first":
                         message_stmt = message_stmt.where(
@@ -3511,10 +3524,11 @@ class AgentDao(BaseDao):
                             )
                         )
                     )
-                date_bounds = self._history_date_bounds(query)
-                if date_bounds is not None:
-                    day_from, day_to_excl = date_bounds
-                    artifact_stmt = artifact_stmt.where(artifact_moment >= day_from, artifact_moment < day_to_excl)
+                day_from, day_to_excl = self._history_date_bounds(query, identity_str)
+                if day_from is not None:
+                    artifact_stmt = artifact_stmt.where(artifact_moment >= day_from)
+                if day_to_excl is not None:
+                    artifact_stmt = artifact_stmt.where(artifact_moment < day_to_excl)
                 if cursor_sort_moment is not None and cursor_anchor is not None:
                     if query.sort == "newest_first":
                         artifact_stmt = artifact_stmt.where(
@@ -3636,32 +3650,49 @@ class AgentDao(BaseDao):
             with contextlib.suppress(asyncio.QueueFull):
                 notify_queue.put_nowait(None)
 
-        listen_conn.add_listener(_AGENT_EVENT_CHANNEL, _on_notify)
-        # LISTEN 注册即生效（asyncpg autocommit）；再执行一条语句确认会话可用（L532 确认生效）
-        await listen_conn.execute("SELECT 1")
+        # asyncpg ≥0.29 起 add_listener/remove_listener 为协程，必须 await
+        # （否则 LISTEN 从未注册、退订从未执行，监听静默退化为轮询——检视警告暴露）
+        await listen_conn.add_listener(_AGENT_EVENT_CHANNEL, _on_notify)
+        # 注册与确认阶段任一失败须关闭独立连接（检视 m-3：try/finally 前置窗口泄漏）；
+        # BaseException + raise 保证 CancelledError 传播（R2，不吞没）
+        try:
+            # LISTEN 注册即生效（asyncpg autocommit）；再执行一条语句确认会话可用（L532 确认生效）
+            await listen_conn.execute("SELECT 1")
+        except BaseException:
+            await listen_conn.close()
+            raise
         last_seq = after_seq
         try:
             # 受理校验（用户域）：不返回空成功
             async with self.engine.connect() as conn:
                 await self._history_session_exists(conn, user_scope, session_id)
             while True:
-                # 新短事务追平（增量读取；list_events_after 每次调用独立事务）
-                page = await self.read_events(
-                    EventReadQuery(
-                        user_scope=user_scope,
-                        session_id=session_id,
-                        after_seq=last_seq,
-                        limit=50,
+                # 新短事务追平（增量读取；list_events_after 每次调用独立事务）：
+                # backlog 未追平（has_more）时连续翻页读完再进入等待，不逐页插入
+                # 等待节拍（检视 M-1：§4.2 L532「先补 backlog 追平，之后持续读取」）
+                while True:
+                    page = await self.read_events(
+                        EventReadQuery(
+                            user_scope=user_scope,
+                            session_id=session_id,
+                            after_seq=last_seq,
+                            limit=50,
+                        )
                     )
-                )
-                for event in page.events:
-                    last_seq = event.session_seq
-                    yield event
+                    for event in page.events:
+                        last_seq = event.session_seq
+                        yield event
+                    if not page.has_more:
+                        break
                 # 等通知唤醒或超时有界重查（§4.2 L532）
                 try:
                     await asyncio.wait_for(notify_queue.get(), timeout=poll_interval_s)
                 except TimeoutError:
                     pass
         finally:
-            listen_conn.remove_listener(_AGENT_EVENT_CHANNEL, _on_notify)
+            # 退订只关闭本 observer（LISTEN 连接关闭），不影响其他监听者；
+            # remove_listener 为协程须 await；连接已失效时退订失败按普通异常
+            # 处理不掩盖原异常（Exception 不含 CancelledError，R2 不吞没）
+            with contextlib.suppress(Exception):
+                await listen_conn.remove_listener(_AGENT_EVENT_CHANNEL, _on_notify)
             await listen_conn.close()

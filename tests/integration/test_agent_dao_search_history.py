@@ -380,6 +380,83 @@ class TestFilters:
         assert [hit.message_id for hit in page.hits] == ["m-d1"]
 
 
+class TestDateBoundsAndStateFilter:
+    async def test_date_from_only_applies_lower_bound(self, real_embedded_pg) -> None:
+        """单边 date_from 仍须生效（检视 M-2：单侧 None 不丢弃过滤）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_message(dao, "s-a", "early", body_text="六月", occurred_at="2026-06-01T12:00:00.000000Z")
+        await _seed_message(dao, "s-a", "late", body_text="七月", occurred_at="2026-07-01T12:00:00.000000Z")
+        page = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", date_from="2026-06-15"),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit.message_id for hit in page.hits] == ["m-late"]
+
+    async def test_date_to_only_applies_upper_bound(self, real_embedded_pg) -> None:
+        """单边 date_to 仍须生效：含当天（to+1d 半开上界）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_message(dao, "s-a", "early", body_text="六月", occurred_at="2026-06-01T12:00:00.000000Z")
+        await _seed_message(dao, "s-a", "late", body_text="七月", occurred_at="2026-07-01T12:00:00.000000Z")
+        page = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", date_to="2026-06-01"),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit.message_id for hit in page.hits] == ["m-early"]
+
+    async def test_invalid_date_value_rejected_not_bare_error(self, real_embedded_pg) -> None:
+        """正则语法冻结不核取值：2026-13-40 过语法但 strptime 失败 → INPUT_INVALID（检视 m-1）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", date_from="2026-13-40"), user_scope=USER_SCOPE
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_invalid_cursor_date_value_rejected_not_bare_error(self, real_embedded_pg) -> None:
+        """历史游标非法日期取值 → INPUT_INVALID（裸 ValueError 不得逃逸，检视 m-1）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        bad_cursor = "h:9999-99-99T12:00:00.000000Z:9999-99-99T12:00:00.000000Z:anchor"
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", cursor=bad_cursor), user_scope=USER_SCOPE
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_state_filter_limits_to_execution_display_state(self, real_embedded_pg) -> None:
+        """state_filter 作用于 execution.display_state（零覆盖锚：检视复核点）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_execution(dao, "exec-b", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        await _seed_round(dao, "round-b", "exec-b")
+        await _seed_message(dao, "s-a", "qa", execution_id="exec-a", round_id="round-a", body_text="排队中")
+        await _seed_message(dao, "s-a", "rb", execution_id="exec-b", round_id="round-b", body_text="运行中")
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE agent_execution SET display_state = 'running' WHERE execution_id = :e"),
+                {"e": "exec-b"},
+            )
+        page = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", state_filter="running"), user_scope=USER_SCOPE
+        )
+        assert [hit.message_id for hit in page.hits] == ["m-rb"]
+        # 无匹配 state → 空页（不静默放宽）
+        empty = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", state_filter="no-such-state"), user_scope=USER_SCOPE
+        )
+        assert empty.hits == ()
+
+
 class TestPagingAndFingerprint:
     async def test_newest_first_cursor_continuation(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
