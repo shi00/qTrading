@@ -1583,7 +1583,9 @@ class TestQuarantineLockIsolation:
         ):
             mock_tpm.return_value.run_async = _sync_run_async
             assert await mgr._ensure_ready(paths, core_config=mgr._core_config()) is head
-        mgr._ensure_worker_impl.assert_called_once()
+        call = mgr._ensure_worker_impl.call_args
+        assert call.args[0:3] == (paths["model_path"], paths["tokenizer_path"], mgr._core_config())
+        assert isinstance(call.args[3], _EnsureAttempt)
 
     @pytest.mark.asyncio
     async def test_ensure_ready_cancel_quarantines_adopted_generation(self):
@@ -1608,9 +1610,10 @@ class TestQuarantineLockIsolation:
 
         with patch("services.news_sentiment_scorer.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = _run_async
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await mgr._ensure_ready(paths, core_config=mgr._core_config())
 
+        assert type(exc_info.value) is asyncio.CancelledError
         # 隔离意图按「实际 spawn 的代号」登记（意图集合是权威，不依赖状态字段）
         assert 1 in mgr._quarantined_generations
         assert mgr._cleanup_target_generation == 1
