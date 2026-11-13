@@ -174,7 +174,7 @@ def ScreenerView():
 要点：
 
 - View 只做两件事：读 `state` 渲染控件树、事件调 `vm.command()`
-- VM 不得出现在 View 的 `use_state`/`use_effect` 之外的任何地方；不持有 VM 引用做副作用
+- VM 仅经 `use_viewmodel` hook 桥接消费：禁止绕过 hook 手动实例化或管理 VM 生命周期、直接改 VM 私有业务态（`_state`/`_set_state`）、在渲染期执行副作用；事件处理器调用 hook 返回的公开 command（含 `await vm.xxx()`，见上方 `ScreenerView` 示例）合法
 - `use_viewmodel` hook 已实现（见 [ui/hooks.py](../../ui/hooks.py)），新 UI 必须通过本 hook 消费 ViewModel
 - 所有 ViewModel 必须满足 [`_ViewModelProtocol`](../../ui/hooks.py)（`state` / `subscribe` / `dispose` 三方法）；已知例外清单见 `ui/viewmodels/` 审查记录
 

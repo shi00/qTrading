@@ -80,7 +80,7 @@ Polars 2.x 的流式默认与语义严格化，把一部分问题从**抛异常*
 - `lf.group_by("industry").agg(...).collect()` 直接用于导出，未声明 `maintain_order=True`。
 - 单测用 `assert_frame_equal(result, expected)` 比较未显式 sort 的管线输出（该断言默认比较行序）。
 
-**正例**：`strategies/fundamental.py` / `strategies/market.py` 的 `_filter_logic` 筛选管线以 `.sort("dv_ttm", descending=True)` / `.sort("pct_chg", descending=True)` 收尾，新增策略沿用该形态。
+**正例**：末步排序在业务主键后追加唯一并列键，如 `.sort(["dv_ttm", "ts_code"], descending=[True, False])`、`.sort(["pct_chg", "ts_code"], descending=[True, False])`。`strategies/fundamental.py` / `strategies/market.py` 现存的 `.sort("dv_ttm", descending=True)` / `.sort("pct_chg", descending=True)` 单列收尾仅为**现状示意**（历史代码，未含并列键），**不是合规新模板**；新增策略不得沿用单列收尾形态。
 
 > 背景与升级触发条件见技术债 [P3-Polars-Streaming-Order-Semantics](../debt/known-technical-debt.md)；Polars 大版本升级前须按该条复核流式与行序语义。
 
