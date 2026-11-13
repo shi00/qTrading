@@ -31,8 +31,8 @@ jobs:
     name: Docs Static Checks
     runs-on: windows-latest
     timeout-minutes: 20
-    env:
-      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+    # 注意：UV_CACHE_DIR 不能放在 job 级 env——`runner` 上下文在 job 级 env 不可用，
+    # 会导致整个 workflow 校验失败（GitHub 以 startup failure 呈现）。改在 steps 级设置。
 
     steps:
       - name: Checkout Code
@@ -63,6 +63,8 @@ jobs:
             uv-windows-py3.13-docs-
 
       - name: Install docs dependency group
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
         run: uv pip install --system -r requirements-docs.txt
 
       - name: Run docs consistency script (全量静态检查)
