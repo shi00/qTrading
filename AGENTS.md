@@ -3,8 +3,8 @@
 > **对应版本**：以 [pyproject.toml](./pyproject.toml) `[project].version` 为唯一正本（版本字面量收敛，见 ADR-0017）。
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离，与 CLAUDE.md 一致）：
 > - owner: 架构维护者
-> - ruleset_version: 1.9.0（规则集版本，与 CLAUDE.md 同步，规则变更时递增）
-> - last_reviewed: 2026-09-24（与 CLAUDE.md 同步）
+> - ruleset_version: 1.10.0（规则集版本，与 CLAUDE.md 同步，规则变更时递增）
+> - last_reviewed: 2026-11-13（与 CLAUDE.md 同步）
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 跨工具红线最小安全集（导出镜像，非语义正本）
 > - supersedes: 无

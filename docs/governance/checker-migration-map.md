@@ -63,7 +63,7 @@
 | # | 检查函数 | 处置 | 输入（必需源） | 对应测试 | 执行入口 |
 |---|---------|------|---------------|---------|---------|
 | 38 | `check_note_lazy_format` | 保留 | `scripts/`、`core/`…全仓 `*.py` 的 `NOTE(lazy):` 标记 | `TestNoteLazyFormatDetection`、`TestNoteLazyFormatRootLayout` | source / docs-consistency hook + docs-ci |
-| 39 | `check_core_modules_completeness` | 保留 | `core/**` + `CLAUDE.md` §4.2 | `TestCoreModulesCompleteness` | source / docs-consistency hook + docs-ci |
+| 39 | `check_core_modules_completeness` | 保留 | `core/**` + `docs/architecture/overview.md` §4.2（D6 起；原 `CLAUDE.md` §4.2，架构正文正本迁移） | `TestCoreModulesCompleteness` | source / docs-consistency hook + docs-ci |
 | 40 | `check_strategy_desc_dynamic_consistency` | 保留（F17 locale 必需资产夹具修正） | `ui/locales/**` 双语 strings.json + 策略源码 | `TestStrategyDescDynamicConsistency` | source / docs-consistency hook + docs-ci |
 | 41 | `check_singleton_count_prose` | 保留 | `docs/architecture/singleton-lifecycle.md` | `TestSingletonCountProse` | source / docs-consistency hook + docs-ci |
 | 42 | `check_non_registered_singleton_doc` | 保留 | `docs/architecture/singleton-lifecycle.md` | `TestNonRegisteredSingletonDoc` | source / docs-consistency hook + docs-ci |

@@ -189,4 +189,5 @@ def test_builtin_update_runner_uses_closed_registry() -> None:
     registry = cdc._builtin_registry()
     assert registry is dg.BUILTIN_REGISTRY
     targets = {spec.target for spec in registry if spec.active}
-    assert targets == {"AGENTS.md", "CLAUDE.md"}
+    # D6：docs/README.md（文件级目录/ADR 索引）与 docs/governance/README.md（规则参考/任务路由）接入受控生成
+    assert targets == {"AGENTS.md", "CLAUDE.md", "docs/README.md", "docs/governance/README.md"}

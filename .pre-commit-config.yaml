@@ -82,6 +82,9 @@ repos:
         name: Verify and Fix Versions
         entry: python scripts/verify_versions.py --fix
         language: python
+        # verify_versions.py 经 docs_markdown 统一解析视图校验文档（D5），hook 隔离环境
+        # 须提供 docs 解析依赖组（脚本 docstring 正本要求；否则触发即 fail-closed）。
+        additional_dependencies: ["markdown-it-py>=4.0.0", "pyyaml>=6.0.3"]
         files: ^(pyproject\.toml|\.release-please-manifest\.json|README\.md|CONTRIBUTING\.md|SECURITY\.md|CLAUDE\.md)$
         pass_filenames: false
 

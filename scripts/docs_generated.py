@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import re
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -522,6 +524,23 @@ _CONTRIBUTING_SCHEMA = SourceSchema(
     author_block_id="min-verify-commands",
     author_payload="full",  # 传完整文本：既有正本解析器自行定位受控块（保持单一解析源）
 )
+# canonical-topics.yml 全部登记字段（任务路由视图的渲染输入白名单）
+_CANONICAL_TOPICS_SCHEMA = SourceSchema(
+    path="docs/governance/canonical-topics.yml",
+    fmt="yaml",
+    item_key="topics",
+    required_fields=frozenset({"id", "title", "canonical"}),
+    known_fields=frozenset({"id", "title", "canonical", "section", "workflow", "note"}),
+    identity_field="id",
+)
+# 文件级目录索引的标题作者源（fmt=text 经快照字节渲染）：同一更新窗口内这些文件同时是
+# 其它激活块的受保护目标/作者源——Windows 独占保护期间新开句柄读取被拒（共享冲突），
+# 若仍走磁盘直读会把标题渲染成占位符，与保护窗口外的 --check 渲染产生永久漂移；
+# 注册为 text 作者源后内容取自保护内核对过的快照字节，两侧渲染必然一致。
+_DOCS_README_TEXT_SCHEMA = SourceSchema(path="docs/README.md", fmt="text")
+_DOCS_GOVERNANCE_README_TEXT_SCHEMA = SourceSchema(path="docs/governance/README.md", fmt="text")
+_REDLINES_TEXT_SCHEMA = SourceSchema(path="docs/governance/redlines.yml", fmt="text")
+_CANONICAL_TOPICS_TEXT_SCHEMA = SourceSchema(path="docs/governance/canonical-topics.yml", fmt="text")
 
 
 def _require_description(entry: dict[str, object]) -> str:
@@ -605,6 +624,188 @@ def _render_agents_min_verify(validated: dict[str, object], root: Path) -> list[
     return cdc._render_agents_min_verify_lines(gate_commands, doc_commands)
 
 
+# ---------------------------------------------------------------------------
+# D6：docs/README.md 文件级目录/ADR 索引 与 docs/governance/README.md 规则参考/任务路由
+# （作者源 = 文件自身的标题/角色与治理 yml 正本，检视 §4.1；不引入手工清单）
+# ---------------------------------------------------------------------------
+
+_INDEX_COVERED_SUFFIXES = (".md", ".yml", ".yaml", ".json")
+_ADR_FILENAME_RE = re.compile(r"^(\d{4})-[A-Za-z0-9][A-Za-z0-9-]*\.md$")
+
+
+def _escape_cell(text: str) -> str:
+    """表格单元格内的竖线转义（markdown 表格列边界不被标题内容破坏）。"""
+    return text.replace("|", "\\|")
+
+
+def _git_tracked_docs(root: Path, subdir: str) -> list[str] | None:
+    """git 索引列出子目录下被跟踪文件（相对 posix 路径）；非 git 环境返回 None 降级。
+
+    cwd 取传入 root（真实仓库 / 测试临时 git 仓库通用）；``-z`` 关闭路径转义，
+    避免非 ASCII 文件名被转义为八进制序列。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", subdir],
+            cwd=root,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return [rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
+
+
+def _docs_index_candidates(root: Path) -> list[Path]:
+    """docs/README 文件级目录索引的作者源候选集：git 跟踪的 docs/** 治理文件。
+
+    git 索引非空时为唯一候选来源（gitignored/未跟踪产物天然排除）；git 不可用
+    （临时目录 / 归档环境）降级文件系统发现。注意：作者源为 docs 树本身，渲染读取
+    窗口不做逐文件独占保护（开销不成比例），并发编辑漂移由更新后 all 检查 fail-closed 检出。
+    """
+    docs_root = root / "docs"
+    tracked = _git_tracked_docs(root, "docs")
+    if tracked:
+        return sorted(
+            root / rel for rel in tracked if (root / rel).suffix in _INDEX_COVERED_SUFFIXES and (root / rel).is_file()
+        )
+    return sorted(p for p in docs_root.rglob("*") if p.is_file() and p.suffix in _INDEX_COVERED_SUFFIXES)
+
+
+def _h1_title_from(text: str) -> str | None:
+    """从 markdown 文本提取首个 ATX H1 标题（无 H1 返回 None，由调用方显式处置）。"""
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return None
+
+
+def _data_role_from(text: str) -> str:
+    """yml/yaml/json 的角色描述 = 首个 ``#`` 注释行（机器可读文件无 H1，取自述首行）。"""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and len(stripped) > 1:
+            return stripped.lstrip("#").strip()
+        if stripped:
+            break
+    return "—"
+
+
+def _md_h1_title(path: Path) -> str | None:
+    """文件级读取 H1（仅用于不在写入保护窗口内的文件；读取失败返回 None 不吞异常语义）。"""
+    try:
+        return _h1_title_from(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _data_file_role(path: Path) -> str:
+    """文件级读取角色描述（仅用于不在写入保护窗口内的文件）。"""
+    try:
+        return _data_role_from(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return "—"
+
+
+def _render_docs_readme_file_index(validated: dict[str, object], root: Path) -> list[str]:
+    """docs/README.md 文件级目录索引块（D6）：git 跟踪的 docs/** 治理文件逐行登记。
+
+    行格式 ``| [相对路径](./…) | 标题/角色 |``；md 取首个 H1，yml/yaml/json 取首个
+    注释行；缺 H1 的 markdown 以「（无 H1 标题）」显式占位——发现信息缺失可见，不静默省略。
+    登记为 text 作者源的文件（本更新窗口内的受保护目标/作者源）经快照字节渲染，
+    其余文件磁盘直读（并发编辑漂移由更新后 all 检查 fail-closed 检出）。
+    """
+    snapshot_texts: dict[str, str] = {k: v for k, v in validated.items() if isinstance(v, str)}
+    lines = ["| 文档 | 标题 / 角色 |", "|------|--------------|"]
+    for path in _docs_index_candidates(root):
+        rel = path.relative_to(root / "docs").as_posix()
+        snapshot = snapshot_texts.get(path.relative_to(root).as_posix())
+        if path.suffix == ".md":
+            title = (_h1_title_from(snapshot) if snapshot is not None else _md_h1_title(path)) or "（无 H1 标题）"
+        else:
+            title = _data_role_from(snapshot) if snapshot is not None else _data_file_role(path)
+        lines.append(f"| [{rel}](./{rel}) | {_escape_cell(title)} |")
+    if len(lines) == 2:
+        raise SourceFormatError("docs/README 文件级目录索引作者源为空（docs/ 下无治理文件候选）")
+    return lines
+
+
+def _render_docs_readme_adr_index(validated: dict[str, object], root: Path) -> list[str]:
+    """docs/README.md ADR 索引块（D6，承接检视开放问题 #5）：逐文件生成、编号自动补齐。
+
+    编号取自文件名 NNNN，标题取自文件 H1（剥离 ``ADR-NNNN:`` 前缀）；文件名形态
+    或 H1 缺失即显式拒绝（发现信息正本缺失不得静默渲染）。
+    """
+    adr_dir = root / "docs" / "adr"
+    if not adr_dir.is_dir():
+        raise SourceMissingError("作者源缺失: docs/adr/（ADR 索引渲染需要）")
+    lines = ["| 编号 | 标题（文件 H1 正本） | 文档 |", "|------|------|------|"]
+    count = 0
+    for path in sorted(adr_dir.glob("*.md")):
+        if path.name == "README.md":
+            continue
+        match = _ADR_FILENAME_RE.match(path.name)
+        if not match:
+            raise SourceFormatError(f"ADR 文件名不符合 NNNN-slug.md 形态: {path.name}")
+        title = _md_h1_title(path)
+        if title is None:
+            raise SourceFormatError(f"ADR {path.name} 缺 H1 标题（文件自己的标题为发现信息正本，不得缺失）")
+        title = re.sub(rf"^ADR-{match.group(1)}\s*[:：]\s*", "", title).strip() or title
+        lines.append(f"| ADR-{match.group(1)} | {_escape_cell(title)} | [{path.name}](./adr/{path.name}) |")
+        count += 1
+    if count == 0:
+        raise SourceFormatError("docs/adr/ 无 ADR 文件（ADR 索引渲染拒绝空清单）")
+    return lines
+
+
+def _render_governance_rules_view(validated: dict[str, object], root: Path) -> list[str]:
+    """docs/governance/README.md 适用规则视图块（D6）：redlines.yml 全量红线参考表。
+
+    仅登记 id/title/rule_type/automation_coverage 四列的引用视图（不复制判据正文，
+    语义正本仍是 redlines.yml 与 CLAUDE.md §3.1）；coverage 缺失以「—」显式占位。
+    """
+    redlines = validated[_REDLINES_SCHEMA.path]
+    assert isinstance(redlines, list)
+    lines = ["| 红线 | 标题 | 规则类型 | 自动化覆盖 |", "|------|------|---------|-----------|"]
+    for entry in redlines:
+        assert isinstance(entry, dict)
+        coverage = entry.get("automation_coverage")
+        coverage_text = _escape_cell(str(coverage)) if isinstance(coverage, str) and coverage.strip() else "—"
+        title = _escape_cell(str(entry.get("title", "")))
+        lines.append(f"| {entry['id']} | {title} | {entry.get('rule_type', '—')} | {coverage_text} |")
+    return lines
+
+
+def _render_governance_topics_view(validated: dict[str, object], root: Path) -> list[str]:
+    """docs/governance/README.md 任务路由视图块（D6）：canonical-topics.yml 全主题路由表。
+
+    按相同 canonical+section 合并展示（检视 §4.1「按相同 canonical/section 合并展示，
+    保全部 topic ID」）；canonical 链接为自 docs/governance/ 的相对路径，死链由
+    check_relative_dead_links 门禁守护。
+    """
+    topics = validated[_CANONICAL_TOPICS_SCHEMA.path]
+    assert isinstance(topics, list)
+    merged: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for topic in topics:
+        assert isinstance(topic, dict)
+        canonical = str(topic["canonical"]).removeprefix("./")
+        section = topic.get("section")
+        key = (canonical, str(section) if isinstance(section, str) and section.strip() else "")
+        merged.setdefault(key, []).append(topic)
+    lines = [
+        "| 主题 id | 任务类型（title） | canonical 正本 | 章节 |",
+        "|---------|------------------|----------------|------|",
+    ]
+    for (canonical, section), group in merged.items():
+        rel = posixpath.relpath(canonical, "docs/governance")
+        ids = ", ".join(str(topic["id"]) for topic in group)
+        titles = " / ".join(_escape_cell(str(topic["title"])) for topic in group)
+        lines.append(f"| {ids} | {titles} | [{canonical}]({rel}) | {section or '—'} |")
+    return lines
+
+
 # 封闭目标清单（模块常量注册表）：激活条目 = 具备真实作者源的真实块；
 # 槽位条目（active=False）= 尚无作者源接线的目标，登记占位但不启用渲染。
 BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
@@ -640,7 +841,7 @@ BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
         block_format="markdown",
         active=True,
     ),
-    # —— 以下为尚无作者源接线的目标槽位：只登记不启用渲染（D6/D9 切换时补作者源并激活）——
+    # —— 以下为尚无作者源接线的目标槽位：只登记不启用渲染（D9 切换时补作者源并激活）——
     BlockSpec(
         block_id="a11y-contrast-reference",
         target="docs/flet/accessibility-baseline.md",
@@ -657,13 +858,45 @@ BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
         block_format="yaml",
         active=False,
     ),
+    # —— D6 接线：docs/README.md 文件级目录索引 / ADR 索引（作者源 = docs 树与文件自身标题；
+    #      同一更新窗口内的受保护目标/作者源文件登记为 text 作者源经快照渲染，见上方 schema 注释）——
     BlockSpec(
         block_id="docs-readme-file-index",
         target="docs/README.md",
-        sources=(),
-        render=None,
+        sources=(
+            _DOCS_README_TEXT_SCHEMA,
+            _DOCS_GOVERNANCE_README_TEXT_SCHEMA,
+            _REDLINES_TEXT_SCHEMA,
+            _CANONICAL_TOPICS_TEXT_SCHEMA,
+        ),
+        render=_render_docs_readme_file_index,
         block_format="markdown",
-        active=False,
+        active=True,
+    ),
+    BlockSpec(
+        block_id="docs-readme-adr-index",
+        target="docs/README.md",
+        sources=(),
+        render=_render_docs_readme_adr_index,
+        block_format="markdown",
+        active=True,
+    ),
+    # —— D6 接线：docs/governance/README.md 规则参考 / 任务路由（作者源 = redlines.yml / canonical-topics.yml）——
+    BlockSpec(
+        block_id="governance-readme-rules",
+        target="docs/governance/README.md",
+        sources=(_REDLINES_SCHEMA,),
+        render=_render_governance_rules_view,
+        block_format="markdown",
+        active=True,
+    ),
+    BlockSpec(
+        block_id="governance-readme-topics",
+        target="docs/governance/README.md",
+        sources=(_CANONICAL_TOPICS_SCHEMA,),
+        render=_render_governance_topics_view,
+        block_format="markdown",
+        active=True,
     ),
 )
 
@@ -949,8 +1182,15 @@ def run_update(
     target_snaps = {rel: snapshot_file(root_path, rel) for rel in target_rels}
     source_snaps = {rel: snapshot_file(root_path, rel) for rel in source_rels}
 
-    # 3) 取得写入保护（覆盖全部作者源与目标；任一失败即整体拒绝，不自动重试）
-    guard_paths = [snap.resolved for snap in target_snaps.values()] + [snap.resolved for snap in source_snaps.values()]
+    # 3) 取得写入保护（覆盖全部作者源与目标；任一失败即整体拒绝，不自动重试）。
+    #    同一文件可兼为目标与作者源（如 docs/README.md 既是 file-index 目标又是其标题
+    #    作者源）：guard 按解析路径去重，避免对同一文件二次独占打开自 sharing-violation。
+    seen_paths: set[Path] = set()
+    guard_paths: list[Path] = []
+    for snap in (*target_snaps.values(), *source_snaps.values()):
+        if snap.resolved not in seen_paths:
+            seen_paths.add(snap.resolved)
+            guard_paths.append(snap.resolved)
     with WriteGuard(guard_paths) as guard:
         # 4) 保护内核对（hash/身份/解析路径任一变化即拒绝；经持有 fd 读取）
         for snap in (*target_snaps.values(), *source_snaps.values()):

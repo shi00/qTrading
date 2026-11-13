@@ -10,6 +10,7 @@
 
 | ruleset_version | 变更日期 | 变更摘要 |
 |-----------------|----------|---------|
+| 1.10.0 | 2026-11-13 | 文档体系检视 D6 入口切换：架构正文（CLAUDE.md §4 分层架构/依赖规则/core 隔离/单例模式）迁出为唯一正本 docs/architecture/overview.md，CLAUDE.md §4 改为最小摘要 + 指针（语义不减），GDR-11 消费者（check_core_modules_completeness）断言对象同步切换；docs/README.md 文件级目录索引/ADR 索引（含补齐存量缺失的 ADR-0017 行）与新增 docs/governance/README.md 规则参考/任务路由视图接入 docs_generated.py 受控生成（封闭注册表 +4 激活条目）；CLAUDE.md 头部/§2/§5 压缩精简（§1.8 决策树与 §3 红线不动）；CLAUDE/AGENTS/CONTRIBUTING 元数据同步，checker-migration-map.md 与 governance-ids.md 消费者登记同步 |
 | 1.9.0 | 2026-09-24 | 新增 R24「时点正确性」红线（报告模式）：任何进入策略或回测的数据取数时点不得晚于被决策交易日，使用「当前快照」类维度参与历史区间计算即违规；check_redlines.py 新增 check_R24（warning 不阻断），redlines.yml/CLAUDE.md §3.1 同步登记；新增 docs/patterns/backtest-correctness.md 为 backtest 主题 canonical 正本（时点正确性/幸存者偏差/复权口径/财报修订/结论可信度边界），DAT-07/DAT-08/BT-05 迁入其「已知限制」 |
 | 1.9.0 | 2026-09-24 | R21 报告模式落地（H2）：check_redlines.py 新增 check_R21（warning 输出 stderr 不阻断，复用原型 MissingMaskingVisitor），redlines.yml R21 登记 checks/enforcement、automation_coverage none→partial；redlines.yml 新增 self_check 字段（R5/R17/R21 可执行自查判据），CLAUDE.md §3.1 新增「人工评审红线可执行自查清单」生成区块（check_claude_self_check_sync 守护）；检视协议新增 ROUND3-05 无自动拦截红线独立会话复核 |
 | 1.8.0 | 2026-09-21 | R13 语义简化（OSS-03）：删除 _DAO_REGISTRY 显式注册清单，改为 CacheManager.__init__ 显式实例化 + sync_engines() 按类型发现（isinstance BaseDao）；CLAUDE.md/redlines.yml R13 描述与 enforcement 同步（补回 CI-test 静态契约维度），how-to.md/dao-pattern.md 登记步骤同步删除 |

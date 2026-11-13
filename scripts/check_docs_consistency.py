@@ -3497,15 +3497,19 @@ def check_governance_id_references() -> list[str]:
 
 
 def check_core_modules_completeness() -> list[str]:
-    """断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际 core/*.py 文件一致 (GDR-11)."""
+    """断言 docs/architecture/overview.md §4.2 声明的 core/ 模块列表与实际 core/*.py 文件一致 (GDR-11).
+
+    D6 迁移：架构正文正本自 CLAUDE.md §4.2 迁至 docs/architecture/overview.md（ADR-0018 §4.1），
+    本检查作为消费者同步切换断言对象；检查语义（双向一致性 + fail-closed）不变。
+    """
     errors: list[str] = []
-    claude_path = ROOT / "CLAUDE.md"
-    if not claude_path.exists():
-        return ["CLAUDE.md 不存在"]
-    claude_text = claude_path.read_text(encoding="utf-8")
-    m = re.search(r"core/`\s*是架构核心层.*?目前含\s*(.*?)[)）]", claude_text, re.DOTALL)
+    overview_path = ROOT / "docs" / "architecture" / "overview.md"
+    if not overview_path.exists():
+        return ["docs/architecture/overview.md 不存在（架构正文正本，GDR-11 断言对象）"]
+    overview_text = overview_path.read_text(encoding="utf-8")
+    m = re.search(r"core/`\s*是架构核心层.*?目前含\s*(.*?)[)）]", overview_text, re.DOTALL)
     if not m:
-        return ["CLAUDE.md §4.2 未找到 core/ 模块清单声明（如 '目前含 `...`'）"]
+        return ["docs/architecture/overview.md §4.2 未找到 core/ 模块清单声明（如 '目前含 `...`'）"]
     declared_str = m.group(1)
     declared_modules = set(re.findall(r"`([a-zA-Z0-9_]+)`", declared_str))
     core_dir = ROOT / "core"
@@ -3515,10 +3519,12 @@ def check_core_modules_completeness() -> list[str]:
     missing_in_doc = sorted(actual_modules - declared_modules)
     extra_in_doc = sorted(declared_modules - actual_modules)
     if missing_in_doc:
-        errors.append(f"CLAUDE.md §4.2 漏声明 core/ 实际模块: {missing_in_doc}，实际模块包括: {sorted(actual_modules)}")
+        errors.append(
+            f"docs/architecture/overview.md §4.2 漏声明 core/ 实际模块: {missing_in_doc}，实际模块包括: {sorted(actual_modules)}"
+        )
     if extra_in_doc:
         errors.append(
-            f"CLAUDE.md §4.2 声明了不存在的 core/ 模块: {extra_in_doc}，实际模块包括: {sorted(actual_modules)}"
+            f"docs/architecture/overview.md §4.2 声明了不存在的 core/ 模块: {extra_in_doc}，实际模块包括: {sorted(actual_modules)}"
         )
     return errors
 

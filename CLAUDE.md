@@ -1,13 +1,9 @@
 # CLAUDE.md — AStockScreener (QTrading) 项目宪法
 
-> 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
-> 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
->
-> **对应版本**：以 [pyproject.toml](./pyproject.toml) `[project].version` 为唯一正本（版本字面量收敛，见 ADR-0017）。
-> **语言约定**：始终使用简体中文回复（跨工具同见 [AGENTS.md](./AGENTS.md)）。
+> 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则；实现规范、代码模板、工作流步骤见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+> **对应版本**：以 [pyproject.toml](./pyproject.toml) `[project].version` 为唯一正本（版本字面量收敛，见 ADR-0017）。**语言约定**：始终使用简体中文回复（跨工具同见 [AGENTS.md](./AGENTS.md)）。
 > **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
-> **治理 ID 说明（GDR-09）**：正文括注的治理 ID（如 `P2-07` / `DOC-04` / `review01-A2` / `GDR-06`）为内部溯源标记，读者无需解析即可理解条款；如需溯源，见 [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) 对照表。
-> **规则集元数据**（owner / ruleset_version / last_reviewed / review_triggers / canonical_for / supersedes）为维护者信息，见文末「规则集元数据（维护者用）」，AI 完成任务无需加载。
+> **治理 ID 说明（GDR-09）**：正文括注的治理 ID（如 `P2-07` / `DOC-04` / `review01-A2` / `GDR-06`）为内部溯源标记，读者无需解析即可理解条款；如需溯源，见 [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) 对照表。规则集元数据（维护者信息）见文末「规则集元数据（维护者用）」，AI 完成任务无需加载。
 
 ---
 
@@ -117,15 +113,9 @@
 
 ## 2. 项目概览
 
-**AStockScreener** 是一个本地化智能 A 股量化选股桌面应用，基于 Python 3.13+，采用 Flet V1 + Polars + asyncio 单线程 UI 模型（完整技术栈见 CONTRIBUTING.md「项目完整技术栈」，依赖版本以 `pyproject.toml` 为准）。
+**AStockScreener** 是本地化智能 A 股量化选股桌面应用（Python 3.13+，Flet V1 + Polars + asyncio 单线程 UI 模型；完整技术栈见 CONTRIBUTING.md「项目完整技术栈」，依赖版本以 `pyproject.toml` 为准）。**数据流**：Tushare/Akshare → `data/sync` 落库 → 数据质量门控分级（`QualityTier`：CRITICAL / BRONZE / SILVER / GOLD）→ `strategies` 向量化筛选（Polars）→ AI 复评（LiteLLM）→ UI 展示 / 回测归因；任一环偏差都会让最终名单「看起来正常却系统性失真」。
 
-**数据流**：Tushare/Akshare → `data/sync` 落库 → 数据质量门控分级（`QualityTier`：CRITICAL / BRONZE / SILVER / GOLD）→ `strategies` 向量化筛选（Polars）→ AI 复评（LiteLLM）→ UI 展示 / 回测归因。任一环的偏差都会让最终名单「看起来正常却系统性失真」。
-
-**什么叫「正确的结果」**：选股与回测结论的可信度取决于四项，缺一即失真——
-1. **取数时点**：进入策略/回测的数据不得晚于被决策的交易日；用当前快照（行业分类、指数成分、票池、财报最新值）参与历史计算即前视偏差（R24「时点正确性」，报告模式；回测正确性 canonical 正本见 [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)）。
-2. **单位**：已知金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）禁止裸数值比较，须经 `threshold_in_data_unit()` 换算（R20）。
-3. **票池构造**：退市股是否在池内（幸存者偏差）与成分/行业归属的生效时点，决定回测是否可复现（同第 1 项）。
-4. **缺失值表示**：`score` / `ai_score` / `confidence` 等业务语义字段缺失必须用 `None`/哨兵，禁止填业务上合法的具体值（`0` 分、`50%` 置信度）——R21。
+**什么叫「正确的结果」**（可信度四项，缺一即失真）：① **取数时点**——进入策略/回测的数据不得晚于被决策的交易日，用当前快照（行业分类、指数成分、票池、财报最新值）参与历史计算即前视偏差（R24「时点正确性」，报告模式；回测正确性 canonical 正本见 [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)）；② **单位**——已知金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）禁止裸数值比较，须经 `threshold_in_data_unit()` 换算（R20）；③ **票池构造**——退市股是否在池内（幸存者偏差）与成分/行业归属的生效时点，决定回测是否可复现（同①）；④ **缺失值表示**——`score` / `ai_score` / `confidence` 等业务语义字段缺失必须用 `None`/哨兵，禁止填业务上合法的具体值（`0` 分、`50%` 置信度，R21）。
 
 **高风险领域**：UI 阻塞主循环（R16）、asyncio 取消传播（R2）、单例测试隔离（R7）、loop-local 同步原语（R11）、SQL 注入（R4）。
 
@@ -212,74 +202,25 @@
 
 ## 4. 架构原则
 
+> 架构正文（分层架构 / 依赖规则 / core 层隔离 / 单例模式全文）的唯一正本为 [docs/architecture/overview.md](./docs/architecture/overview.md)（ruleset 1.10.0 起，自本节迁入；import-linter 配置仍是实际执行配置）。本节仅保留与正本语义一致的最小摘要，供未加载正本时理解 AI 必须遵守什么。
+
 ### 4.1 分层架构
 
-分层自外向内为 `app/` (引导层) → `ui/` (表现层) → `strategies/` (策略层) → `services/` (应用服务) → `data/` (数据层) → `core/` (架构核心)，`utils/` 为横切关注点。完整目录树见 CONTRIBUTING.md「完整目录结构」。
-
-**依赖规则 (严格单向):**
-
-```text
-禁止导入方向（X 不得导入 Y）：
-  core       ✗→ data / services / strategies / ui / utils / app
-  data       ✗→ services / strategies / ui / app
-  services   ✗→ strategies / ui / app
-  strategies ✗→ ui / app
-  utils      ✗→ data / services / strategies / ui / app   （横切叶子：可被任意层引用，但不引用任何业务层）
-  ui         ✗→ app
-  app        →  可编排所有层，仅被 main.py 调用
-```
-
-**绝对禁止反向依赖：** `core` 导入 `data`/`services`/`strategies`/`ui`/`utils`/`app` 中的任何模块；`data` 导入 `ui`/`services`/`strategies`；`services` 导入 `ui`；`strategies` 导入 `ui`。
-
-**架构守护范围（P2-03）：**
-- **import-linter（pre-commit）** 守护 R1 表内方向。由 1 条 `layers` 契约（层序从高到低：`app → ui → strategies → services → data → core`）一次覆盖全部层级禁止方向：`core` 禁入 `data/services/strategies/ui/app`；`data` 禁入 `services/strategies/ui/app`；`services` 禁入 `strategies/ui/app`；`strategies` 禁入 `ui/app`；`ui` 禁入 `app`（`app` 为最高编排层、可依赖所有层、仅被 main.py 调用）。`utils` 无法纳入单向线性层序，故另由 2 条 `forbidden` 契约守护：`utils`（横切叶子）禁入 `data/services/strategies/ui/app`（"R1: utils must not import business layers"，含函数体内 import，见下）；`core` 禁入 `utils`（"R1: core must not import utils"）。合计 3 条契约。
-- **AST 静态测试（`tests/unit/test_architecture_boundaries.py`）** 已随 E4 退役——所有方向被上述 3 条 import-linter 契约覆盖（layers 契约含函数体内 import，语义不减）；文件仅保留例外注册表路径存在性校验（详见测试内 docstring）。<del>在 import-linter 基础上额外守护：`data/services/strategies` 禁入 `app`；`ui` 禁入 `app`；`utils` 禁入 `ui/strategies/services/app/data`（模块级 import 视角，与 "R1: utils must not import business layers" 互补）。</del>
-- **豁免范围**：`if TYPE_CHECKING:` 块内导入（仅类型检查，非运行时依赖）被 import-linter 豁免（`exclude_type_checking_imports = true`）；函数体内 lazy import **import-linter layers/forbidden 契约仍会分析**——涉及 `utils` 层的函数内跨层 import 须带 `# lazy-import: <原因>` 注释并经契约级 ignore_imports 白名单登记（见 `pyproject.toml` 中 "R1: utils must not import business layers" 契约注释）。
-- **例外唯一注册入口**：架构边界例外统一登记于 [docs/governance/exceptions.yml](./docs/governance/exceptions.yml)（rule_id=R1），测试仅从注册表读取，不各自维护。
-
-> **同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。
-
-> **循环依赖治理现状（review01-A6）**：两条 MAJOR 结构性循环已通过依赖注入消除，不再靠延迟 import 压制——
-> - `CacheManager ↔ BaseDao`：已由中立模块 `data/persistence/engine_provider.py` 切断（review03-C11），`BaseDao._check_engine` 经 `engine_provider.is_disposed()` 查询引擎状态，不再反向查询 `CacheManager._instance`。
-> - `utils → strategies → services → utils`：已由夜间预测编排下沉到 `services/scheduled_jobs/nightly_prediction.py` 消除（review01-A2），SchedulerService 经 `register_job` 依赖注入（app 层注入 `AISelectionRunner`），不再感知具体策略类。
-> 剩余 `ConfigHandler ↔ DatabaseConfigService` 为合法循环打破（函数内 lazy import 带 `# lazy-import:` 注释 + "R1: utils must not import business layers" 白名单登记）；`TaskManager → CacheManager` 实为合法单向依赖（services → data），非循环。
+分层自外向内为 `app/` (引导层) → `ui/` (表现层) → `strategies/` (策略层) → `services/` (应用服务) → `data/` (数据层) → `core/` (架构核心)，`utils/` 为横切关注点。**依赖规则严格单向、绝对禁止反向依赖**：`core` 不得导入任何其他层模块；`data` 不得导入 `services/strategies/ui/`；`services` 不得导入 `strategies/ui/`；`strategies` 不得导入 `ui/`；`utils` 为横切叶子、不得引用任何业务层；`app` 为最高编排层（仅被 main.py 调用）。完整禁止方向表与守护范围（import-linter 3 条契约，pre-commit 强制，对应 §3.1 R1）见正本 §4.1；架构边界例外唯一登记于 [docs/governance/exceptions.yml](./docs/governance/exceptions.yml)（rule_id=R1）。
 
 ### 4.2 core 层隔离原则
 
-`core/` 是架构核心层，只包含被所有层共享的基础设施 (目前含 `errors`、`i18n`、`model_management_types`、`prompt_base` 与 `startup_types`)，不得依赖 `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块（`utils/` 虽标注为"任意层可引用"，但 `core/` 作为最内层不可反向导入 `utils/`，否则形成循环依赖）；如果某个模块被多层引用且产生循环依赖，应考虑提升到 `core/`（`model_management_types` 即按此原则自 `services/ai_service/` 下沉，见 ADR-0014）；`ui/i18n.py` 是 UI 层对 `core.i18n` 的薄封装 (Flet 文本绑定)，不要直接修改 `core.i18n` 来满足 UI 需求。
+`core/` 是最内层架构核心，只含被所有层共享的基础设施，不得依赖 `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块；被多层引用且产生循环依赖的模块应提升到 `core/`。core/ 模块清单与 GDR-11 一致性门禁的断言对象见正本 §4.2。
 
 ### 4.3 单例模式
 
-使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含注册/非注册单例、非单例服务）见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)（完整注册清单的唯一正本，新增单例只更新该文件）。
+使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板与注册清单的唯一正本见 [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md)（新增单例只更新该文件）。
 
 ---
 
 ## 5. 按需查阅索引
 
-详细规范、模板、工作流步骤集中承载于 [CONTRIBUTING.md](./CONTRIBUTING.md)，按需查阅：
-
-| 主题 | CONTRIBUTING.md 锚点 |
-|------|---------------------|
-| Python 风格 / 类型标注 / 导入顺序 / 日志规范 | 「实现规范手册」各小节 |
-| 异步编程规范 / 数据库操作规范 / 错误处理标准模式 | 对应小节 |
-| V1 声明式 UI 开发规范 / i18n 状态驱动 / 响应式断点 | 对应小节 |
-| 策略模式 / Polars 向量化基类 / AI 策略混入 / DAO 模式 / 数据同步 / TaskManager | 对应小节 |
-| MVVM 表现层 (View / ViewModel / Component) / 配置管理 / 质量门控 / 性能监控 / 单例模式实现模板 | 对应小节 |
-| 测试规范 / CI/CD 流水线与门禁 | 对应小节 |
-| Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) |
-| 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
-| 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
-| 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
-| 回测/选股正确性（时点正确性 / 幸存者偏差 / 复权口径 / 财报修订 / 结论可信度边界） | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md) |
-| Flet UI 开发、设计、API、无障碍、项目差异、升级与 CanvasKit E2E 避坑 | [docs/flet/README.md](./docs/flet/README.md) |
-| Flet MCP 使用规范（AI 验证 Flet API 的操作指南，对应 §1.10 反幻觉红线） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
-| 测试规范 | [docs/guides/testing.md](./docs/guides/testing.md) |
-| AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals） | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
-| AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
-| man/ 专题深度文档（database-account-separation / table-partitioning-strategy 为规划/设计文档、非现行实现；flet-best-practices 已退化为指向 docs/flet/ 的 stub） | [man/](./man/) 子文档 |
-| AGENTS.md 跨工具规则入口（最小安全集 + 指针 + 生成区块，见 ADR-0006） | [AGENTS.md](./AGENTS.md) |
-| AI 工具运行时配置（harness.toml：权限/沙箱白名单，非规则正本，不携带产品版本） | [harness.toml](./harness.toml) |
-| 治理 ID 对照表（P2/DOC/GDR/review 系列 ID → 一句话含义） | [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) |
+全量正式文档索引见 [docs/README.md](./docs/README.md)（文件级目录/ADR 索引由 `scripts/docs_generated.py` 受控生成）；治理规则参考、任务路由与维护入口见 [docs/governance/README.md](./docs/governance/README.md)；实现规范、模板与工作流正本集中在 [CONTRIBUTING.md](./CONTRIBUTING.md)（「实现规范手册」/「常用开发与测试命令」）；Flet UI 入口见 [docs/flet/README.md](./docs/flet/README.md)；跨工具规则入口见 [AGENTS.md](./AGENTS.md)；AI 工具运行时配置见 [harness.toml](./harness.toml)（权限/沙箱白名单，非规则正本）。
 
 ---
 
@@ -287,8 +228,8 @@
 
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.9.0（规则集版本，规则变更时递增）
-> - last_reviewed: 2026-09-24
+> - ruleset_version: 1.10.0（规则集版本，规则变更时递增）
+> - last_reviewed: 2026-11-13
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
-> - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
+> - canonical_for: 红线（§3）、架构不变量（§4 摘要，正文正本见 docs/architecture/overview.md）、AI 行为准则
 > - supersedes: 无

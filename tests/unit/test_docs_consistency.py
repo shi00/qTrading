@@ -5751,7 +5751,11 @@ class TestAgentsDeclaration:
 
 
 class TestCoreModulesCompleteness:
-    """GDR-11: 校验 CLAUDE.md §4.2 声明的 core/ 模块与实际文件一致."""
+    """GDR-11: 校验 docs/architecture/overview.md §4.2 声明的 core/ 模块与实际文件一致.
+
+    D6 迁移：架构正文正本自 CLAUDE.md §4.2 迁至 docs/architecture/overview.md，
+    检查断言对象同步切换；本组负例即「切后同一违规仍失败」的等价证据。
+    """
 
     def test_core_modules_completeness_passes(self):
         from check_docs_consistency import check_core_modules_completeness
@@ -5762,35 +5766,14 @@ class TestCoreModulesCompleteness:
     def test_detects_missing_module(self, monkeypatch):
         from check_docs_consistency import ROOT, check_core_modules_completeness
 
-        real_text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        real_text = (ROOT / "docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
         # 故意把 startup_types 从声明中删掉
         tampered_text = real_text.replace("`startup_types`", "`old_startup`")
-
-        class FakePath:
-            def __init__(self, orig_path):
-                self._orig = orig_path
-
-            def __truediv__(self, other):
-                return self._orig / other
-
-            def exists(self):
-                return True
-
-            def is_dir(self):
-                return self._orig.is_dir()
-
-            def glob(self, pattern):
-                return self._orig.glob(pattern)
-
-            def read_text(self, encoding="utf-8"):
-                if self._orig.name == "CLAUDE.md":
-                    return tampered_text
-                return self._orig.read_text(encoding=encoding)
 
         # 针对 Path.read_text 打补丁
         monkeypatch.setattr(
             "pathlib.Path.read_text",
-            lambda self, encoding="utf-8": tampered_text if self.name == "CLAUDE.md" else real_text,
+            lambda self, encoding="utf-8": tampered_text if self.name == "overview.md" else real_text,
         )
         errors = check_core_modules_completeness()
         assert any("漏声明 core/ 实际模块" in e for e in errors)
