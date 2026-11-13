@@ -258,6 +258,8 @@ class TestApplyHeadAndScore:
             out = apply_head_and_score(feats, head)
         assert len(out) == 1
         assert out[0] is not None
+        assert out[0]["label"] in _LABELS_REQUIRED
+        assert 0.0 <= out[0]["confidence"] <= 1.0
 
     def test_empty_batch(self):
         out = apply_head_and_score(np.zeros((0, _EMBEDDING_DIM), dtype=np.float32), _head())
