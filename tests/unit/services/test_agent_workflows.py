@@ -19,7 +19,6 @@ import pytest
 
 from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal
 from services.agent_service.workflows import (
-    ChildObservationTimeout,
     LeafDagScheduler,
     LeafExecutionContext,
     LeafRuntimeRegistry,
@@ -433,8 +432,8 @@ def test_drive_issues_start_and_observe_in_parent_order() -> None:
     assert summary.succeeded == ("a", "b")
 
 
-def test_drive_observation_timeout_only_stops_observation() -> None:
-    """连续无进展观察达上限即停观察（不伪造叶终态，R21）。"""
+def test_drive_observation_budget_only_stops_observation() -> None:
+    """连续无进展观察达预算即停观察：父以 converged=False 结束、不伪造叶终态（§8.3/R21）。"""
     plan = _plan(_node("a"))
 
     async def start(node: PlanNodeSpec) -> str:
@@ -443,10 +442,10 @@ def test_drive_observation_timeout_only_stops_observation() -> None:
     async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
         return {}
 
-    with pytest.raises(ChildObservationTimeout) as excinfo:
-        asyncio.run(drive_leaf_dag(plan, start, observe, idle_observation_limit=3))
-    assert excinfo.value.node_id == "a"
-    assert excinfo.value.idle_observations == 3
+    summary = asyncio.run(drive_leaf_dag(plan, start, observe, idle_observation_limit=3))
+    assert summary.converged is False
+    assert summary.pending == ("a",)
+    assert summary.succeeded == ()
 
 
 def test_drive_rejects_outcome_for_unstarted_node() -> None:

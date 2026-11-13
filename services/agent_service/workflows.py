@@ -71,18 +71,12 @@ OBSERVE_POLL_INTERVAL_SEC: Final[float] = 0.2
 OBSERVE_SLICE_SEC: Final[float] = 2.0
 
 #: 连续无进展观察预算（HANDOFF §8.3：观察超时只停观察、不取消执行）。
-#: 取值覆盖单叶长任务（多轮模型调用 + 工具）并留余量；超时后由恢复机制重接观察，
-#: 不伪造叶终态（§8.2 未知不等于失败）。
+#: 取值覆盖单叶长任务（多轮模型调用 + 工具）并留余量；预算耗尽时结束本次推进
+#: 批次（``converged=False``）由恢复机制重接观察，不伪造叶终态（§8.2 未知不等于
+#: 失败）。以「连续无进展观察次数」计量：该计数只来自被记录的 step 结果，重放
+#: 可确定复现，不引入墙钟依赖（不把超时升级为 workflow ERROR，避免恢复在同点
+#: 反复失败）。
 CHILD_OBSERVE_TIMEOUT_SEC: Final[float] = 900.0
-
-
-class ChildObservationTimeout(RuntimeError):
-    """观察子 workflow 超时（仅终止观察；子执行继续，恢复后重新接上）。"""
-
-    def __init__(self, node_id: str, idle_observations: int) -> None:
-        super().__init__(f"leaf observation made no progress: node={node_id} idle_observations={idle_observations}")
-        self.node_id = node_id
-        self.idle_observations = idle_observations
 
 
 _PAYLOAD_VERSION_KEY: Final = "payload_version"
@@ -545,7 +539,9 @@ async def drive_leaf_dag(
         if not facts:
             idle_observations += 1
             if idle_observation_limit is not None and idle_observations >= idle_observation_limit:
-                raise ChildObservationTimeout(next(iter(running)), idle_observations)
+                # §8.3：预算耗尽只停观察，不取消子执行、不伪造终态；本次推进批次
+                # 以 converged=False 结束，由恢复机制重接观察。
+                break
             continue
         idle_observations = 0
         for node_id, outcome in facts.items():
@@ -870,7 +866,6 @@ __all__ = [
     "LEAF_WORKFLOW_NAME",
     "PAYLOAD_VERSION",
     "RESEARCH_WORKFLOW_NAME",
-    "ChildObservationTimeout",
     "LeafDagScheduler",
     "LeafExecutionContext",
     "LeafObserve",
