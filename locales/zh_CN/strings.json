@@ -315,6 +315,7 @@
     "param_block_amount_min": "大宗交易总额下限",
     "param_block_discount_max_pct": "大宗折价率上限(%)",
     "strategy_unit_unknown": "列 {column} 的数据单位 {data_unit} 或阈值单位 {value_unit} 未知，金额阈值比较已拒绝执行（避免误用假设单位）。",
+    "strategy_unit_evidence_missing": "列 {column} 的数量单位 {data_unit} 缺少已批准的上游换算证据，无法把阈值单位 {value_unit} 换算到数据单位（已拒绝，避免按假设换算）。",
     "ai_not_configured": "AI 服务未配置，仅展示数学筛选结果",
     "ai_local_only_capability_boundary": "仅本地模式：个股深度分析需调用云端 LLM，当前不可用；新闻分类等本地功能不受影响。",
     "ai_local_only_deep_analysis_unsupported": "仅本地模式下不支持个股深度分析（需云端 LLM）",

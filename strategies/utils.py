@@ -7,7 +7,7 @@ import pandas as pd
 
 from core.errors import StrategyParamError
 from core.i18n import Message
-from data.constants import get_column_unit
+from data.constants import DAILY_QUOTES_VOL_UNIT_SOURCE, get_column_unit, get_column_unit_source
 
 
 def safe_float(val, default=0.0):
@@ -36,14 +36,20 @@ def fmt_val(val, fmt_spec=".2f", suffix=""):
 
 # 金额单位换算基准（统一换算到人民币元）。取值与 data/constants.py 列单位元数据一致。
 _UNIT_SCALE_TO_YUAN = {"yuan": 1.0, "wan_cny": 1e4, "million_cny": 1e6, "yi_cny": 1e8}
+# 数量单位换算基准（统一换算到股）。E-01 仅准入上游证据已证实 lot=100 的列（当前为
+# Tushare daily vol）；无证据的数量列一律拒绝，不按假设换算（R20）。
+_UNIT_SCALE_TO_SHARE = {"share": 1.0, "lot": 100.0}
 
 
 def threshold_in_data_unit(df, column: str, declared_unit: str, value: float, value_unit: str) -> float:
-    """把 UI 阈值 value（单位 value_unit）换算到 df[column] 的实际单位，用于金额类 gating/过滤。
+    """把 UI 阈值 value（单位 value_unit）换算到 df[column] 的实际单位。
 
     - 实际单位优先读取 df 上挂载的列单位元数据（data.constants.attach_*_column_units）。
     - df 不带 attrs（如 _filter_logic 内的 polars LazyFrame）时回退到 declared_unit（已知契约）。
-    - 单位未知时抛 StrategyParamError：金额比较绝不允许按假设继续，由调用方拒绝 gating/过滤。
+    - 金额单位分支保持既有行为（未知即抛 StrategyParamError）。
+    - 数量单位分支仅准入数据字典/来源明确证实的 lot/share：列必须为 ``vol`` 且
+      上游证据与 ``DAILY_QUOTES_VOL_UNIT_SOURCE`` 全字段一致；证据缺失拒绝。
+    - 单位未知时抛 StrategyParamError：比较绝不允许按假设继续，由调用方拒绝 gating/过滤。
 
     例：value=50（亿，value_unit='yi_cny'），data 为 million_cny → 返回 50*1e8/1e6=5000（百万）。
     """
@@ -53,13 +59,21 @@ def threshold_in_data_unit(df, column: str, declared_unit: str, value: float, va
         # polars LazyFrame 无 .attrs，回退到 declared_unit（已知契约）。
         data_unit = get_column_unit(df, column, declared_unit)
 
-    if data_unit not in _UNIT_SCALE_TO_YUAN or value_unit not in _UNIT_SCALE_TO_YUAN:
-        raise StrategyParamError(
-            Message(
-                "strategy_unit_unknown", {"column": column, "data_unit": str(data_unit), "value_unit": str(value_unit)}
+    if data_unit in _UNIT_SCALE_TO_YUAN and value_unit in _UNIT_SCALE_TO_YUAN:
+        return value * _UNIT_SCALE_TO_YUAN[value_unit] / _UNIT_SCALE_TO_YUAN[data_unit]
+    if data_unit in _UNIT_SCALE_TO_SHARE and value_unit in _UNIT_SCALE_TO_SHARE:
+        evidence = get_column_unit_source(df, column) if isinstance(getattr(df, "attrs", None), dict) else None
+        if column != DAILY_QUOTES_VOL_UNIT_SOURCE["doc_field"] or evidence != DAILY_QUOTES_VOL_UNIT_SOURCE:
+            raise StrategyParamError(
+                Message(
+                    "strategy_unit_evidence_missing",
+                    {"column": column, "data_unit": str(data_unit), "value_unit": str(value_unit)},
+                )
             )
-        )
-    return value * _UNIT_SCALE_TO_YUAN[value_unit] / _UNIT_SCALE_TO_YUAN[data_unit]
+        return value * _UNIT_SCALE_TO_SHARE[value_unit] / _UNIT_SCALE_TO_SHARE[data_unit]
+    raise StrategyParamError(
+        Message("strategy_unit_unknown", {"column": column, "data_unit": str(data_unit), "value_unit": str(value_unit)})
+    )
 
 
 class StrategyContext(TypedDict, total=False):

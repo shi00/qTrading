@@ -342,6 +342,7 @@
     "param_block_amount_min": "Min Block Trade",
     "param_block_discount_max_pct": "Max Block Discount (%)",
     "strategy_unit_unknown": "Unknown data unit {data_unit} or value unit {value_unit} for column {column}; refused amount-threshold comparison to avoid assuming a unit.",
+    "strategy_unit_evidence_missing": "Quantity unit {data_unit} for column {column} has no approved upstream conversion evidence; refused to convert value unit {value_unit} to the data unit.",
     "ai_not_configured": "AI not configured — showing math-only results",
     "ai_local_only_capability_boundary": "Local-only mode: per-stock deep analysis requires a cloud LLM and is currently unavailable; local features such as news classification are unaffected.",
     "ai_local_only_deep_analysis_unsupported": "Per-stock deep analysis is unavailable in local-only mode (requires a cloud LLM)",
