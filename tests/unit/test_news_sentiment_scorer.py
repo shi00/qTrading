@@ -6,6 +6,7 @@
 import asyncio
 import multiprocessing
 import queue
+import threading
 from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +25,7 @@ from services.news_sentiment_scorer import (
     _SENTINEL,
     NewsSentimentScorer,
     _chunked,
+    _EnsureAttempt,
     _scoring_worker,
     _validate_score_request,
     apply_head_and_score,
@@ -1419,3 +1421,197 @@ class TestArtifactHotSwap:
             aw2.assert_not_called()
             assert mock_proc_cls.call_count == 1  # head-only 不 respawn
             assert mgr.model_tag is not None
+
+
+# --------------------------------------------------------------------------- #
+# M27-06 隔离意图短锁（事件循环线程不得等待生命周期长锁）
+# --------------------------------------------------------------------------- #
+class TestQuarantineLockIsolation:
+    """取消路径（``_quarantine_worker``）只取短锁登记意图；生命周期长锁只在
+    IO 线程持有，事件循环线程绝不等待它。"""
+
+    @pytest.mark.asyncio
+    async def test_quarantine_worker_never_waits_for_lifecycle_lock(self):
+        """IO 线程持 ``_worker_lock`` 执行数秒级清理时，取消路径必须立即返回。"""
+        mgr = _make_mgr()
+        mgr._shutdown_worker = MagicMock()
+        release = threading.Event()
+
+        def _hold_lifecycle_lock() -> None:
+            with mgr._worker_lock:
+                release.wait(5.0)
+
+        holder = threading.Thread(target=_hold_lifecycle_lock, daemon=True)
+        holder.start()
+        loop = asyncio.get_running_loop()
+        for _ in range(1000):
+            if mgr._worker_lock.locked():
+                break
+            await asyncio.sleep(0.001)
+        assert mgr._worker_lock.locked()
+
+        start = loop.time()
+        mgr._quarantine_worker(0)
+        elapsed = loop.time() - start
+
+        release.set()
+        holder.join(5.0)
+        assert elapsed < 0.5, f"_quarantine_worker 等待了生命周期锁: {elapsed:.2f}s"
+        assert mgr._worker_state == "quarantined"
+        assert 0 in mgr._quarantined_generations
+        mgr._cancel_cleanup_task()
+
+    def test_impl_reuse_blocked_by_quarantine_intent(self):
+        """意图集合是权威：即使状态已被 shutdown 覆写，同一代也不得复用。"""
+        mgr = _make_mgr()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+        mgr._worker_ready = True
+        mgr._model_path = "model.gguf"
+        mgr._core_signature = (_DEFAULT_N_THREADS, _DEFAULT_MAX_LENGTH)
+        mgr._worker_stat = mgr._stat_of("model.gguf", "tokenizer.json")
+        mgr._quarantined_generations.add(0)
+        mgr._worker_state = "stopped"  # 模拟 shutdown 覆写后的状态
+
+        with (
+            patch.object(mgr, "_shutdown_worker_locked") as sw,
+            patch("services.news_sentiment_scorer.multiprocessing.Process") as mock_proc_cls,
+            patch("services.news_sentiment_scorer.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_queue_cls.side_effect = [MagicMock(spec=_RealQueue), MagicMock(spec=_RealQueue)]
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            assert mgr._ensure_worker_impl("model.gguf", "tokenizer.json", {}) is True
+            sw.assert_called_once_with()
+            assert mgr._worker_generation == 1
+            assert mgr._quarantined_generations == set()  # 旧代意图随 shutdown 作废
+
+    def test_impl_aborts_spawn_when_cancelled_before_spawn(self):
+        """取消已在 spawn 提交前登记：只完成旧代 shutdown，不再 spawn 孤儿 worker。"""
+        mgr = _make_mgr()
+        attempt = _EnsureAttempt()
+        attempt.cancelled = True
+
+        with (
+            patch.object(mgr, "_shutdown_worker_locked"),
+            patch("services.news_sentiment_scorer.multiprocessing.Process") as mock_proc_cls,
+            patch("services.news_sentiment_scorer.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_queue_cls.side_effect = [MagicMock(spec=_RealQueue), MagicMock(spec=_RealQueue)]
+            assert mgr._ensure_worker_impl("model.gguf", "tokenizer.json", {}, attempt) is False
+            mock_proc_cls.assert_not_called()
+        assert attempt.generation is None
+        assert mgr._worker_generation == 1
+
+    def test_impl_adopts_spawned_generation_when_cancel_lands_during_spawn(self):
+        """取消在 spawn 提交期间到达：spawn 后代登记进意图集合，供清理任务认领。"""
+        mgr = _make_mgr()
+        attempt = _EnsureAttempt()
+
+        with (
+            patch.object(mgr, "_shutdown_worker_locked"),
+            patch("services.news_sentiment_scorer.multiprocessing.Process") as mock_proc_cls,
+            patch("services.news_sentiment_scorer.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_queue_cls.side_effect = [MagicMock(spec=_RealQueue), MagicMock(spec=_RealQueue)]
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc.start.side_effect = lambda: setattr(attempt, "cancelled", True)
+            mock_proc_cls.return_value = mock_proc
+
+            assert mgr._ensure_worker_impl("model.gguf", "tokenizer.json", {}, attempt) is True
+        assert attempt.generation == 1
+        assert mgr._quarantined_generations == {1}
+        assert mgr._worker_state == "quarantined"
+
+    def test_drain_current_generation_discards_intent_on_success(self):
+        mgr = _make_mgr()
+        mgr._worker_generation = 2
+        mgr._quarantined_generations = {2}
+        mgr._shutdown_worker = MagicMock()
+
+        assert mgr._drain_quarantined_workers() == 0
+        mgr._shutdown_worker.assert_called_once_with(force=True, generation=2)
+        assert mgr._quarantined_generations == set()
+
+    def test_drain_keeps_intent_when_cleanup_fails(self):
+        """清理失败保留隔离意图（下次调用快路径失效、完整重载自愈）。"""
+        mgr = _make_mgr()
+        mgr._worker_generation = 2
+        mgr._quarantined_generations = {2}
+        mgr._shutdown_worker = MagicMock(side_effect=RuntimeError("kill failed"))
+
+        assert mgr._drain_quarantined_workers() == 1
+        assert mgr._quarantined_generations == {2}
+
+    def test_drain_discards_stale_generation_without_shutdown(self):
+        """意图代号 < 当前代：该代已在后续 spawn 前于生命周期锁内 shutdown，不得误杀。"""
+        mgr = _make_mgr()
+        mgr._worker_generation = 3
+        mgr._quarantined_generations = {2}
+        mgr._shutdown_worker = MagicMock()
+
+        assert mgr._drain_quarantined_workers() == 0
+        mgr._shutdown_worker.assert_not_called()
+        assert mgr._quarantined_generations == set()
+
+    @pytest.mark.asyncio
+    async def test_ensure_ready_head_reuse_blocked_by_quarantine_intent(self):
+        """头复用快路径同样检查隔离意图（状态被覆写为 stopped 也不得复用）。"""
+        mgr = _make_mgr()
+        head = _head("linear")
+        paths = _hot_paths("model.gguf", "head.npz", "tokenizer.json")
+        stat = ((1.0, 1), (1.0, 1), (1.0, 1))
+        mgr._worker_generation = 1
+        mgr._worker_ready = True
+        mgr._worker_state = "stopped"
+        mgr._model_path = paths["model_path"]
+        mgr._paths_stat = stat
+        mgr._head = head
+        mgr._core_signature = (_DEFAULT_N_THREADS, _DEFAULT_MAX_LENGTH)
+        mgr._stat_of = lambda *args, **kwargs: stat
+        mgr._quarantined_generations.add(1)
+        mgr._validate_input_files = lambda paths: True
+        mgr._ensure_worker_impl = MagicMock(return_value=True)
+        mgr._await_worker_ready = AsyncMock(return_value=True)
+
+        with (
+            patch("services.news_sentiment_scorer.ThreadPoolManager") as mock_tpm,
+            patch("services.news_sentiment_scorer.load_head_npz", return_value=head),
+        ):
+            mock_tpm.return_value.run_async = _sync_run_async
+            assert await mgr._ensure_ready(paths, core_config=mgr._core_config()) is head
+        mgr._ensure_worker_impl.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ensure_ready_cancel_quarantines_adopted_generation(self):
+        """spawn 期间取消：按 ``_EnsureAttempt`` 收编的实际代号调度清理（非旧代号）。"""
+        mgr = _make_mgr()
+        head = _head("linear")
+        paths = _hot_paths("model.gguf", "head.npz", "tokenizer.json")
+        stat = ((1.0, 1), (1.0, 1), (1.0, 1))
+        mgr._stat_of = lambda *args, **kwargs: stat
+        mgr._worker_generation = 0
+        mgr._shutdown_worker = MagicMock()
+        mgr._validate_input_files = lambda paths: True
+
+        async def _run_async(task_type, fn, *args, **kwargs):
+            if fn is mgr._validate_input_files:
+                return True
+            if fn is load_head_npz:
+                return head
+            attempt = args[3]
+            attempt.generation = 1  # 模拟 IO 线程已 spawn 新代
+            raise asyncio.CancelledError()
+
+        with patch("services.news_sentiment_scorer.ThreadPoolManager") as mock_tpm:
+            mock_tpm.return_value.run_async = _run_async
+            with pytest.raises(asyncio.CancelledError):
+                await mgr._ensure_ready(paths, core_config=mgr._core_config())
+
+        # 隔离意图按「实际 spawn 的代号」登记（意图集合是权威，不依赖状态字段）
+        assert 1 in mgr._quarantined_generations
+        assert mgr._cleanup_target_generation == 1
+        mgr._cancel_cleanup_task()
