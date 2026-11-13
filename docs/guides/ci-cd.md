@@ -141,6 +141,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/g4_theme_screenshots.py` | G4-202 四主题截图判读采集（Flet 升级验收）：四主题 × Impeller/Skia 双后端；Win32 窗口定位、窄/宽屏缩放、最小化恢复、关闭确认弹窗；截图回退（PrintWindow → 屏幕抓取）、主色核验主题是否真正生效、与 G0 基线像素差分；退出码 0=采集完成/差分成功、1=主题未生效或空白截图、2=环境参数错误 | 手动（Flet 升级验收，候选构建实跑） | 不阻断 |
 | `scripts/docs_markdown.py` | 文档 Markdown 统一解析视图（检视 5.1 工作包 D3）：CommonMark + table/strikethrough 一次解析形成标题/锚点、标准与引用式链接、HTML ID、代码块/行号的不可变视图，供 `docs_generated.py`（D4）与 `check_docs_consistency.py`（D5）复用；测试见 `tests/docs/` 独立环境（docs 组） | 手动 / 被 D5 门禁调用（接线后随 `docs-consistency` 触发） | 不阻断 |
 | `scripts/docs_generated.py` | 受控生成器（检视 5.2/5.2.1 工作包 D4）：读 §4.1 作者源按封闭目标清单渲染派生块（缺块/重复/嵌套/越界/非法源显式拒绝），更新编排覆盖读快照→写入保护→核对→渲染→逐文件提交→更新后 all 检查全窗口；由 `check_docs_consistency.py --check/--update` 调用；测试见 `tests/docs/` 独立环境 | 手动 / 被 `check_docs_consistency.py --scope document` 生成输出检查调用（D6/D9 接线后随 `docs-consistency` 触发） | 不阻断 |
+| [docs/governance/checker-migration-map.md](../governance/checker-migration-map.md) | 42 项文档检查迁移映射表（工作包 D5）：旧函数名 → 处置（保留 / 共享解析替代 / 迁移出口）→ 输入 → 对应测试 → 执行入口的责任映射正本（底稿 JSON 未恢复，人工核对口径）；承接 `check_docs_consistency.py` 的 42 项责任映射维护 | 随 `check_docs_consistency.py` 检查清单调整时同步维护 | 不阻断 |
 
 ### 数据库迁移
 
