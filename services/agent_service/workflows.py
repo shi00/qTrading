@@ -29,11 +29,12 @@ workflow/step 名称一经发布即稳定标识，重命名等同新版本；载
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, NoReturn
 
-from dbos import DBOS, SetWorkflowID, WorkflowSerializationFormat
+from dbos import DBOS, SetWorkflowID, WorkflowSerializationFormat, WorkflowStatus, WorkflowStatusString
 
 from core.agent_types import (
     DISPLAY_STATES,
@@ -57,14 +58,19 @@ RESEARCH_WORKFLOW_NAME: Final[str] = "agent_research"
 LEAF_WORKFLOW_NAME: Final[str] = "agent_leaf"
 #: 叶执行 step 稳定名（唯一实际 IO 段，DBOS 按 step 持久化）。
 LEAF_EXECUTE_STEP_NAME: Final[str] = "agent_leaf_execute"
+#: 叶观察 step 稳定名（父 workflow 的完成集合判定检查点，B1 重放面）。
+LEAF_OBSERVE_STEP_NAME: Final[str] = "agent_leaf_observe"
 
 #: 载荷结构版本（进入封闭校验；跨版本恢复前须核对兼容矩阵 §8.4）。
 PAYLOAD_VERSION: Final[int] = 1
 
-#: 子 workflow 结果轮询间隔（仅影响观察节拍，不影响推进正确性）。
-CHILD_RESULT_POLL_INTERVAL_SEC: Final[float] = 0.1
+#: 观察 step 内部轮询间隔（仅影响单步耗时，不影响推进正确性）。
+OBSERVE_POLL_INTERVAL_SEC: Final[float] = 0.2
 
-#: 单次观察子 workflow 的外层超时（HANDOFF §8.3：观察超时只停观察、不取消执行）。
+#: 单次观察 step 的内部轮询上限（毫秒级检查点密度；重放按记录还原，不重跑）。
+OBSERVE_SLICE_SEC: Final[float] = 2.0
+
+#: 连续无进展观察预算（HANDOFF §8.3：观察超时只停观察、不取消执行）。
 #: 取值覆盖单叶长任务（多轮模型调用 + 工具）并留余量；超时后由恢复机制重接观察，
 #: 不伪造叶终态（§8.2 未知不等于失败）。
 CHILD_OBSERVE_TIMEOUT_SEC: Final[float] = 900.0
@@ -73,10 +79,10 @@ CHILD_OBSERVE_TIMEOUT_SEC: Final[float] = 900.0
 class ChildObservationTimeout(RuntimeError):
     """观察子 workflow 超时（仅终止观察；子执行继续，恢复后重新接上）。"""
 
-    def __init__(self, node_id: str, timeout_sec: float) -> None:
-        super().__init__(f"leaf observation timed out: node={node_id} timeout={timeout_sec}s")
+    def __init__(self, node_id: str, idle_observations: int) -> None:
+        super().__init__(f"leaf observation made no progress: node={node_id} idle_observations={idle_observations}")
         self.node_id = node_id
-        self.timeout_sec = timeout_sec
+        self.idle_observations = idle_observations
 
 
 _PAYLOAD_VERSION_KEY: Final = "payload_version"
@@ -250,11 +256,11 @@ def decode_leaf_payload(value: object, path: str = "$.leaf_payload") -> LeafExec
 def leaf_workflow_id(*, execution_id: str, round_id: str, node_id: str) -> str:
     """叶 workflow 稳定身份（按计划身份而非调用顺序；B1 修复之身份面）。
 
-    重放顺序稳定性由父 workflow 的 ``DBOS.asyncio_wait`` 判定检查点保证（见
-    :func:`drive_leaf_dag` 的 ``wait_first_completed``）；本函数提供与语义身份
-    绑定的显式 ID：恢复/观察按 ID 复接同一子执行，重试轮因 ``round_id`` 不同
-    不复用旧成果。各段按 ``%``／``:`` 转义后再拼接，保证拼接映射单射（不同
-    三元组不产生同一 ID）。
+    重放顺序稳定性由父 workflow 的确定性操作序列保证（启动/观察均由父协程按
+    计划顺序发出、完成集合经 ``agent_leaf_observe`` 记录还原，见
+    :func:`drive_leaf_dag`）；本函数提供与语义身份绑定的显式 ID：恢复/观察按
+    ID 复接同一子执行，重试轮因 ``round_id`` 不同不复用旧成果。各段按
+    ``%``／``:`` 转义后再拼接，保证拼接映射单射（不同三元组不产生同一 ID）。
     """
 
     def _escape(part: object) -> str:
@@ -485,29 +491,29 @@ class LeafDagScheduler:
 LeafRunner = Callable[[LeafExecutionContext], Awaitable[NodeOutcome]]
 """叶执行器（装配期登记；接收身份上下文与节点，据此保存叶事实）。"""
 
-LeafNodeRunner = Callable[[PlanNodeSpec], Awaitable[NodeOutcome]]
-"""调度层节点级启动函数（父 workflow 负责把节点补成执行上下文）。"""
+LeafStart = Callable[[PlanNodeSpec], Awaitable[str]]
+"""启动就绪叶，返回观察键（DBOS 内为子 workflow ID）。
 
+**必须由父 workflow 协程按计划顺序调用**（不得包进并发任务）：启动记录按
+父体内操作序号（``parent_fid``）匹配重放；并发启动会让序号随真实时序漂移，
+重放时复接到错误的子执行记录（B1）。
+"""
 
-FirstCompletedWait = Callable[[list[asyncio.Task[NodeOutcome]]], Awaitable[set[asyncio.Task[NodeOutcome]]]]
-"""「任一完成」等待实现：默认 :func:`asyncio.wait`；DBOS 内须传
-``DBOS.asyncio_wait``（其把完成/未完成判定记录为 step，重放时分派确定，从而
-子 workflow 启动顺序与身份映射稳定——B1 修复之重放面）。"""
+LeafObserve = Callable[[tuple[tuple[str, str], ...]], Awaitable[dict[str, NodeOutcome]]]
+"""观察已启动叶：输入 ``(node_id, 观察键)`` 序列，返回本轮新到达的终态事实。
 
-
-async def _asyncio_first_completed(
-    tasks: list[asyncio.Task[NodeOutcome]],
-) -> set[asyncio.Task[NodeOutcome]]:
-    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    return done
+DBOS 内由单个观察 step 承载（其结果被记录），重放时按记录还原完成集合与
+迭代次数，父体操作序号因此确定（B1）；无新事实时返回空字典。
+"""
 
 
 async def drive_leaf_dag(
     plan: PlanSpecProposal,
-    start_leaf: LeafNodeRunner,
+    start_leaf: LeafStart,
+    observe_leaves: LeafObserve,
     *,
     preserved: tuple[NodeOutcome, ...] = (),
-    wait_first_completed: FirstCompletedWait | None = None,
+    idle_observation_limit: int | None = None,
 ) -> PlanRunSummary:
     """事件驱动推进一层叶 DAG，返回叶事实汇总。
 
@@ -517,36 +523,39 @@ async def drive_leaf_dag(
     异常与 ``CancelledError`` 向上传播（不伪造 failed、不吞取消，R2/R21）。
     非终态结果（暂停/等待/未知）使本次推进在没有可运行叶时结束且不收敛。
 
-    ``wait_first_completed`` 为等待实现（默认普通 ``asyncio.wait``）；在 DBOS
-    workflow 内必须传 ``DBOS.asyncio_wait``——普通 ``asyncio.wait`` 的
-    FIRST_COMPLETED 结果依赖真实时序，重放时并行完成集合的迭代顺序不确定，
-    会导致叶启动顺序漂移、子 workflow 记录错配（B1）。
+    确定性（B1 重放面）：本循环只由**父协程顺序**发出启动/观察操作——不创建
+    并发任务，不以真实时序决定操作顺序；完成集合由 ``observe_leaves`` 的
+    检查点结果决定。故重放时父体操作序号逐项对齐，子 workflow 记录不会错配。
     """
 
-    wait_impl = wait_first_completed or _asyncio_first_completed
     scheduler = LeafDagScheduler(plan)
     scheduler.seed_preserved(preserved)
-    running: dict[str, asyncio.Task[NodeOutcome]] = {}
-    try:
-        while True:
-            for node_id in scheduler.ready():
-                scheduler.start(node_id)
-                running[node_id] = asyncio.ensure_future(start_leaf(scheduler.node(node_id)))
-            if not running:
-                break
-            done = await wait_impl(list(running.values()))
-            # 按启动顺序（插入序）处理完成集合：同一轮多完成时顺序也确定。
-            for node_id in [nid for nid, task in running.items() if task in done]:
-                task = running.pop(node_id)
-                outcome = task.result()
-                if outcome.node_id != node_id:
-                    # 错归属结果不得记到本节点（身份核验，DD §4.1）
-                    _fail("outcome_identity_mismatch", f"$.outcomes[{node_id}].node_id")
-                scheduler.record(outcome)
-    finally:
-        for task in running.values():
-            if not task.done():
-                task.cancel()
+    running: dict[str, str] = {}
+    idle_observations = 0
+    while True:
+        for node_id in scheduler.ready():
+            scheduler.start(node_id)
+            running[node_id] = await start_leaf(scheduler.node(node_id))
+        if scheduler.converged():
+            break
+        if not running:
+            # 无可运行叶且未收敛：剩余节点为非终态事实或不可达（不伪造结论）。
+            break
+        facts = await observe_leaves(tuple(running.items()))
+        if not facts:
+            idle_observations += 1
+            if idle_observation_limit is not None and idle_observations >= idle_observation_limit:
+                raise ChildObservationTimeout(next(iter(running)), idle_observations)
+            continue
+        idle_observations = 0
+        for node_id, outcome in facts.items():
+            if running.pop(node_id, None) is None:
+                # 未启动节点的完成事实：不得计入本轮成果（身份核验）
+                _fail("outcome_unknown_node", f"$.outcomes[{node_id}]")
+            if outcome.node_id != node_id:
+                # 错归属结果不得记到本节点（身份核验，DD §4.1）
+                _fail("outcome_identity_mismatch", f"$.outcomes[{node_id}].node_id")
+            scheduler.record(outcome)
     return scheduler.summary()
 
 
@@ -606,6 +615,62 @@ async def run_leaf_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     return await execute_leaf_step(payload)
 
 
+#: 叶 workflow 的失败状态（未判定异常/恢复耗尽）：只报通用失败码，不泄漏消息（R9）。
+_LEAF_FAILED_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        WorkflowStatusString.ERROR.value,
+        WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value,
+    }
+)
+
+
+def _terminal_outcome(node_id: str, *, state: str, output: object) -> NodeOutcome | None:
+    """把子 workflow 状态投影为叶终态事实；非终态返回 ``None``（不伪造结论）。
+
+    - ``SUCCESS``：返回值必须是本节点的封闭终态 wire（身份核验）；
+    - ``ERROR`` / 恢复耗尽：``failed``（通用错误码，明细留在 DBOS 状态，R9）；
+    - ``CANCELLED``：``ended``（外部终止，不当作成功或业务失败）；
+    - 其余（PENDING/ENQUEUED/DELAYED）：非终态，不参与收敛。
+    """
+
+    if state == WorkflowStatusString.SUCCESS.value:
+        outcome = decode_node_outcome(output, f"$.children[{node_id}].output")
+        if outcome.node_id != node_id:
+            _fail("outcome_identity_mismatch", f"$.children[{node_id}].output.node_id")
+        return outcome
+    if state in _LEAF_FAILED_STATUSES:
+        return NodeOutcome(node_id=node_id, state="failed", error_code="leaf_workflow_error")
+    if state == WorkflowStatusString.CANCELLED.value:
+        return NodeOutcome(node_id=node_id, state="ended", error_code="leaf_workflow_cancelled")
+    return None
+
+
+@DBOS.step(name=LEAF_OBSERVE_STEP_NAME)
+async def observe_leaf_children(children: list[dict[str, str]], slice_seconds: float) -> list[dict[str, Any]]:
+    """观察已启动叶：返回本轮新到达的终态事实 wire（无终态则空列表）。
+
+    作为**单个 step** 记录输出：父 workflow 重放时按记录还原完成集合与迭代
+    次数，父体操作序号逐项对齐（B1 重放面）。内部按 ``slice_seconds`` 轮询，
+    只影响检查点密度与观察延迟，不参与任何业务判定。
+    """
+
+    deadline = time.monotonic() + max(slice_seconds, 0.0)
+    while True:
+        facts: list[dict[str, Any]] = []
+        for child in children:
+            node_id = _require_str(child.get("node_id"), "$.children[].node_id")
+            workflow_id = _require_str(child.get("workflow_id"), "$.children[].workflow_id")
+            status: WorkflowStatus | None = await DBOS.get_workflow_status_async(workflow_id)
+            if status is None:
+                _fail("unknown_leaf_execution", f"$.children[{node_id}]")
+            outcome = _terminal_outcome(node_id, state=status.status, output=status.output)
+            if outcome is not None:
+                facts.append(outcome.to_wire())
+        if facts or time.monotonic() >= deadline:
+            return facts
+        await asyncio.sleep(OBSERVE_POLL_INTERVAL_SEC)
+
+
 @DBOS.workflow(name=RESEARCH_WORKFLOW_NAME, serialization_type=WorkflowSerializationFormat.PORTABLE)
 async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     """父研究 workflow：启动就绪叶、消费完成事实、汇总叶事实。
@@ -618,63 +683,45 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
       父 workflow 结束只表示本推进批次结束；终态事实由服务层投影，不由本层升级。
     - 叶事实在叶执行内部保存（应用侧），父观察被取消/失败不丢失已完成叶成果。
     - 观察超时只停观察（§8.3），异常上抛由恢复机制重接；不伪造叶终态。
-    - 重放顺序：就绪叶启动顺序经 ``DBOS.asyncio_wait`` 判定检查点还原，配合
-      按身份固定的叶 workflow ID（``leaf_workflow_id``），恢复不错配叶成果。
+    - 重放顺序（B1）：启动/观察操作全部由父协程按计划顺序发出，完成集合由
+      ``agent_leaf_observe`` step 的记录还原；子 workflow ID 按身份固定
+      （``leaf_workflow_id``）作为去重、观察复接与重试轮隔离。
     """
 
     execution_id, round_id, plan_digest, plan, preserved = decode_research_payload(payload)
+    idle_limit = max(1, round(CHILD_OBSERVE_TIMEOUT_SEC / OBSERVE_SLICE_SEC))
 
-    async def start_leaf(context: LeafExecutionContext) -> NodeOutcome:
+    async def start_leaf(node: PlanNodeSpec) -> str:
         leaf_payload = build_leaf_payload(
-            execution_id=context.execution_id,
-            round_id=context.round_id,
-            plan_digest=context.plan_digest,
-            node=context.node,
+            execution_id=execution_id,
+            round_id=round_id,
+            plan_digest=plan_digest,
+            node=node,
         )
         with SetWorkflowID(
-            leaf_workflow_id(
-                execution_id=context.execution_id,
-                round_id=context.round_id,
-                node_id=context.node.node_id,
-            ),
+            leaf_workflow_id(execution_id=execution_id, round_id=round_id, node_id=node.node_id),
             workflow_id_reuse_policy="return-existing",
         ):
             handle = await DBOS.start_workflow_async(run_leaf_workflow, leaf_payload)
-        try:
-            wire = await asyncio.wait_for(
-                handle.get_result(polling_interval_sec=CHILD_RESULT_POLL_INTERVAL_SEC),
-                timeout=CHILD_OBSERVE_TIMEOUT_SEC,
-            )
-        except TimeoutError as exc:
-            # §8.3：外层观察超时只停观察、不取消子执行；不伪造终态。
-            raise ChildObservationTimeout(context.node.node_id, CHILD_OBSERVE_TIMEOUT_SEC) from exc
-        return decode_node_outcome(wire)
+        return handle.get_workflow_id()
 
-    async def start_leaf_by_node(node: PlanNodeSpec) -> NodeOutcome:
-        return await start_leaf(
-            LeafExecutionContext(
-                execution_id=execution_id,
-                round_id=round_id,
-                plan_digest=plan_digest,
-                node=node,
-            )
+    async def observe_leaves(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        wires = await observe_leaf_children(
+            [{"node_id": node_id, "workflow_id": workflow_id} for node_id, workflow_id in children],
+            OBSERVE_SLICE_SEC,
         )
-
-    async def _durable_first_completed(
-        tasks: list[asyncio.Task[NodeOutcome]],
-    ) -> set[asyncio.Task[NodeOutcome]]:
-        """DBOS 判定检查点版等待：重放时完成集合按记录还原（B1 重放面）。"""
-
-        # DBOS 入参标注为 List[Awaitable[Any]]（list 不变），显式上转避免类型不兼容。
-        awaitables: list[Awaitable[Any]] = list(tasks)
-        done, _pending = await DBOS.asyncio_wait(awaitables, return_when="FIRST_COMPLETED")
-        return done
+        outcomes: dict[str, NodeOutcome] = {}
+        for wire in wires:
+            outcome = decode_node_outcome(wire)
+            outcomes[outcome.node_id] = outcome
+        return outcomes
 
     summary = await drive_leaf_dag(
         plan,
-        start_leaf_by_node,
+        start_leaf,
+        observe_leaves,
         preserved=preserved,
-        wait_first_completed=_durable_first_completed,
+        idle_observation_limit=idle_limit,
     )
     return summary.to_wire()
 
@@ -818,18 +865,18 @@ def build_retry_payload(
 
 
 __all__ = [
-    "CHILD_RESULT_POLL_INTERVAL_SEC",
     "LEAF_EXECUTE_STEP_NAME",
+    "LEAF_OBSERVE_STEP_NAME",
     "LEAF_WORKFLOW_NAME",
     "PAYLOAD_VERSION",
     "RESEARCH_WORKFLOW_NAME",
     "ChildObservationTimeout",
-    "FirstCompletedWait",
     "LeafDagScheduler",
     "LeafExecutionContext",
-    "LeafNodeRunner",
+    "LeafObserve",
     "LeafRunner",
     "LeafRuntimeRegistry",
+    "LeafStart",
     "NodeOutcome",
     "PlanRunSummary",
     "RetryScope",
@@ -843,6 +890,7 @@ __all__ = [
     "drive_leaf_dag",
     "execute_leaf_step",
     "leaf_workflow_id",
+    "observe_leaf_children",
     "run_leaf_workflow",
     "run_research_workflow",
 ]

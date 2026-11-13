@@ -19,11 +19,13 @@ import pytest
 
 from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal
 from services.agent_service.workflows import (
+    ChildObservationTimeout,
     LeafDagScheduler,
     LeafExecutionContext,
     LeafRuntimeRegistry,
     NodeOutcome,
     PlanRunSummary,
+    _terminal_outcome,
     build_leaf_payload,
     build_research_payload,
     build_retry_payload,
@@ -60,28 +62,49 @@ async def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> No
         await asyncio.sleep(0)
 
 
-class _ControlledRunner:
-    """受控叶执行器：每个节点等待自己的 gate 后返回预设状态。"""
+class _DagHarness:
+    """父协程顺序驱动的叶模拟（与生产一致：启动/观察由父顺序调用）。
+
+    ``start`` 只登记启动并模拟叶自身并发执行（叶是独立子 workflow，不是父体
+    并发操作）；``observe`` 返回已完成叶的终态事实，模拟 DBOS 观察 step。
+    """
 
     def __init__(self) -> None:
         self.started: list[str] = []
-        self.gates: dict[str, asyncio.Event] = {}
         self.states: dict[str, str] = {}
         self.active = 0
         self.max_concurrent = 0
+        self._gates: dict[str, asyncio.Event] = {}
+        self._tasks: dict[str, asyncio.Task[None]] = {}
 
     def gate(self, node_id: str) -> asyncio.Event:
-        return self.gates.setdefault(node_id, asyncio.Event())
+        return self._gates.setdefault(node_id, asyncio.Event())
 
-    async def __call__(self, node: PlanNodeSpec) -> NodeOutcome:
-        self.started.append(node.node_id)
+    async def start(self, node: PlanNodeSpec) -> str:
+        node_id = node.node_id
+        self.started.append(node_id)
         self.active += 1
         self.max_concurrent = max(self.max_concurrent, self.active)
-        try:
-            await self.gate(node.node_id).wait()
-            return _outcome(node.node_id, self.states.get(node.node_id, "complete"))
-        finally:
-            self.active -= 1
+
+        async def leaf() -> None:
+            try:
+                await self.gate(node_id).wait()
+            finally:
+                self.active -= 1
+
+        self._tasks[node_id] = asyncio.ensure_future(leaf())
+        return f"wf:{node_id}"
+
+    async def observe(self, children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        facts: dict[str, NodeOutcome] = {}
+        for node_id, key in children:
+            assert key == f"wf:{node_id}"
+            task = self._tasks[node_id]
+            if task.done():
+                facts[node_id] = _outcome(node_id, self.states.get(node_id, "complete"))
+        return facts
 
 
 # ---------------------------------------------------------------------------
@@ -206,23 +229,23 @@ def test_summary_does_not_claim_goal_coverage() -> None:
 def test_drive_starts_newly_ready_leaf_immediately() -> None:
     """B 完成即启动 D（依赖 B），不等待独立的 A（A/B→C，B→D）。"""
     plan = _plan(_node("a"), _node("b"), _node("c", ("a", "b")), _node("d", ("b",)))
-    runner = _ControlledRunner()
+    harness = _DagHarness()
 
     async def scenario() -> PlanRunSummary:
-        task = asyncio.ensure_future(drive_leaf_dag(plan, runner))
-        await _wait_until(lambda: runner.started == ["a", "b"])
-        runner.gate("b").set()
-        await _wait_until(lambda: "d" in runner.started)
+        task = asyncio.ensure_future(drive_leaf_dag(plan, harness.start, harness.observe))
+        await _wait_until(lambda: harness.started == ["a", "b"])
+        harness.gate("b").set()
+        await _wait_until(lambda: "d" in harness.started)
         # C 必须仍等待 A：不因 B 完成而提前
-        assert "c" not in runner.started
-        runner.gate("a").set()
-        await _wait_until(lambda: "c" in runner.started)
+        assert "c" not in harness.started
+        harness.gate("a").set()
+        await _wait_until(lambda: "c" in harness.started)
         for node_id in ("c", "d"):
-            runner.gate(node_id).set()
+            harness.gate(node_id).set()
         return await task
 
     summary = asyncio.run(scenario())
-    assert runner.started == ["a", "b", "d", "c"]
+    assert harness.started == ["a", "b", "d", "c"]
     assert summary.succeeded == ("a", "b", "c", "d")
     assert summary.converged is True
 
@@ -230,32 +253,32 @@ def test_drive_starts_newly_ready_leaf_immediately() -> None:
 def test_drive_runs_independent_leaves_concurrently() -> None:
     """独立叶并发执行（不串行排队）。"""
     plan = _plan(_node("a"), _node("b"))
-    runner = _ControlledRunner()
+    harness = _DagHarness()
 
     async def scenario() -> PlanRunSummary:
-        task = asyncio.ensure_future(drive_leaf_dag(plan, runner))
-        await _wait_until(lambda: len(runner.started) == 2)
-        runner.gate("a").set()
-        runner.gate("b").set()
+        task = asyncio.ensure_future(drive_leaf_dag(plan, harness.start, harness.observe))
+        await _wait_until(lambda: len(harness.started) == 2)
+        harness.gate("a").set()
+        harness.gate("b").set()
         return await task
 
     summary = asyncio.run(scenario())
-    assert runner.max_concurrent == 2
+    assert harness.max_concurrent == 2
     assert summary.succeeded == ("a", "b")
 
 
 def test_drive_failure_keeps_independent_branch_running() -> None:
     """A 失败不阻独立 B；C 被阻塞并以事实记录（不补答）。"""
     plan = _plan(_node("a"), _node("b"), _node("c", ("a",)))
-    runner = _ControlledRunner()
-    runner.states["a"] = "failed"
+    harness = _DagHarness()
+    harness.states["a"] = "failed"
 
     async def scenario() -> PlanRunSummary:
-        task = asyncio.ensure_future(drive_leaf_dag(plan, runner))
-        await _wait_until(lambda: len(runner.started) == 2)
-        runner.gate("a").set()
-        await _wait_until(lambda: runner.active == 1)
-        runner.gate("b").set()
+        task = asyncio.ensure_future(drive_leaf_dag(plan, harness.start, harness.observe))
+        await _wait_until(lambda: len(harness.started) == 2)
+        harness.gate("a").set()
+        await _wait_until(lambda: harness.active == 1)
+        harness.gate("b").set()
         return await task
 
     summary = asyncio.run(scenario())
@@ -269,17 +292,17 @@ def test_drive_failure_keeps_independent_branch_running() -> None:
 def test_drive_non_terminal_leaf_does_not_fabricate_completion() -> None:
     """叶暂停：驱动结束但不伪造成功/失败，父不收敛。"""
     plan = _plan(_node("a"), _node("b", ("a",)))
-    runner = _ControlledRunner()
-    runner.states["a"] = "waiting_user"
+    harness = _DagHarness()
+    harness.states["a"] = "waiting_user"
 
     async def scenario() -> PlanRunSummary:
-        task = asyncio.ensure_future(drive_leaf_dag(plan, runner))
-        await _wait_until(lambda: runner.started == ["a"])
-        runner.gate("a").set()
+        task = asyncio.ensure_future(drive_leaf_dag(plan, harness.start, harness.observe))
+        await _wait_until(lambda: harness.started == ["a"])
+        harness.gate("a").set()
         return await task
 
     summary = asyncio.run(scenario())
-    assert runner.started == ["a"]
+    assert harness.started == ["a"]
     assert summary.pending == ("a", "b")
     assert summary.converged is False
     assert summary.succeeded == ()
@@ -289,12 +312,15 @@ def test_drive_propagates_cancellation() -> None:
     """取消向上传播（R2：不吞 CancelledError、不转成 failed 事实）。"""
     plan = _plan(_node("a"))
 
-    async def cancelled(node: PlanNodeSpec) -> NodeOutcome:
+    async def cancelled(node: PlanNodeSpec) -> str:
         raise asyncio.CancelledError
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        return {}
 
     async def scenario() -> None:
         with pytest.raises(asyncio.CancelledError) as excinfo:
-            await drive_leaf_dag(plan, cancelled)
+            await drive_leaf_dag(plan, cancelled, observe)
         assert excinfo.type is asyncio.CancelledError
 
     asyncio.run(scenario())
@@ -304,12 +330,15 @@ def test_drive_propagates_unexpected_exception() -> None:
     """未判定异常向上传播（不伪造 failed：未知不等于失败）。"""
     plan = _plan(_node("a"))
 
-    async def broken(node: PlanNodeSpec) -> NodeOutcome:
+    async def broken(node: PlanNodeSpec) -> str:
         raise ValueError("infra boom")
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        return {}
 
     async def scenario() -> None:
         with pytest.raises(ValueError) as excinfo:
-            await drive_leaf_dag(plan, broken)
+            await drive_leaf_dag(plan, broken, observe)
         assert str(excinfo.value) == "infra boom"
 
     asyncio.run(scenario())
@@ -375,26 +404,96 @@ def test_leaf_workflow_id_segments_are_injective() -> None:
     assert left != percent
 
 
-def test_drive_uses_injected_durable_wait() -> None:
-    """B1 重放面回归：父 workflow 以注入了判定检查点的等待实现推进（非裸 asyncio.wait）。"""
-    plan = _plan(_node("a"))
-    runner = _ControlledRunner()
-    wait_calls: list[int] = []
+def test_drive_issues_start_and_observe_in_parent_order() -> None:
+    """B1 重放面回归：启动按计划顺序、观察按运行集合，均由父协程顺序发出。"""
+    plan = _plan(_node("a"), _node("b"))
+    harness = _DagHarness()
+    calls: list[tuple[str, tuple[str, ...]]] = []
 
-    async def durable_wait(tasks: list[asyncio.Task[NodeOutcome]]) -> set[asyncio.Task[NodeOutcome]]:
-        wait_calls.append(len(tasks))
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        return done
+    async def start(node: PlanNodeSpec) -> str:
+        calls.append(("start", (node.node_id,)))
+        return await harness.start(node)
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        calls.append(("observe", tuple(node_id for node_id, _ in children)))
+        return await harness.observe(children)
 
     async def scenario() -> PlanRunSummary:
-        task = asyncio.ensure_future(drive_leaf_dag(plan, runner, wait_first_completed=durable_wait))
-        await _wait_until(lambda: runner.started == ["a"])
-        runner.gate("a").set()
+        task = asyncio.ensure_future(drive_leaf_dag(plan, start, observe))
+        await _wait_until(lambda: harness.started == ["a", "b"])
+        harness.gate("a").set()
+        harness.gate("b").set()
         return await task
 
     summary = asyncio.run(scenario())
-    assert wait_calls == [1]
-    assert summary.succeeded == ("a",)
+    assert calls[0] == ("start", ("a",))
+    assert calls[1] == ("start", ("b",))
+    assert ("observe", ("a", "b")) in calls
+    # 观察之后不得再出现「父协程并发启动」：所有启动都发生在观察之前或事实之后
+    assert summary.succeeded == ("a", "b")
+
+
+def test_drive_observation_timeout_only_stops_observation() -> None:
+    """连续无进展观察达上限即停观察（不伪造叶终态，R21）。"""
+    plan = _plan(_node("a"))
+
+    async def start(node: PlanNodeSpec) -> str:
+        return "wf:a"
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        return {}
+
+    with pytest.raises(ChildObservationTimeout) as excinfo:
+        asyncio.run(drive_leaf_dag(plan, start, observe, idle_observation_limit=3))
+    assert excinfo.value.node_id == "a"
+    assert excinfo.value.idle_observations == 3
+
+
+def test_drive_rejects_outcome_for_unstarted_node() -> None:
+    """未启动节点的完成事实不得计入本轮成果（身份核验）。"""
+    plan = _plan(_node("a"))
+
+    async def start(node: PlanNodeSpec) -> str:
+        return "wf:a"
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        return {"ghost": _outcome("ghost")}
+
+    with pytest.raises(AgentValidationError) as excinfo:
+        asyncio.run(drive_leaf_dag(plan, start, observe))
+    assert excinfo.value.code == "outcome_unknown_node"
+
+
+def test_terminal_outcome_projects_success_wire() -> None:
+    """子 workflow 成功：返回值投影为叶终态事实（身份核验通过）。"""
+    outcome = _terminal_outcome("a", state="SUCCESS", output=_outcome("a", artifact_ref="art-1").to_wire())
+    assert outcome == _outcome("a", artifact_ref="art-1")
+
+
+def test_terminal_outcome_rejects_foreign_node() -> None:
+    """返回事实的节点身份与观察目标不一致即拒绝（不错记成果）。"""
+    with pytest.raises(AgentValidationError) as excinfo:
+        _terminal_outcome("a", state="SUCCESS", output=_outcome("b").to_wire())
+    assert excinfo.value.code == "outcome_identity_mismatch"
+
+
+@pytest.mark.parametrize("state", ["ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"])
+def test_terminal_outcome_maps_failure_statuses(state: str) -> None:
+    """未判定异常/恢复耗尽 → failed 通用错误码（明细留在 DBOS 状态，R9）。"""
+    outcome = _terminal_outcome("a", state=state, output=None)
+    assert outcome == NodeOutcome(node_id="a", state="failed", error_code="leaf_workflow_error")
+
+
+def test_terminal_outcome_maps_cancelled_to_ended() -> None:
+    """外部取消 → ended（不当作成功，也不伪装业务失败）。"""
+    outcome = _terminal_outcome("a", state="CANCELLED", output=None)
+    assert outcome == NodeOutcome(node_id="a", state="ended", error_code="leaf_workflow_cancelled")
+
+
+@pytest.mark.parametrize("state", ["PENDING", "ENQUEUED", "DELAYED"])
+def test_terminal_outcome_keeps_non_terminal_pending(state: str) -> None:
+    """非终态不产生事实（不伪造结论，父不因未知收敛）。"""
+    assert _terminal_outcome("a", state=state, output=None) is None
 
 
 def test_research_payload_decode_nodes() -> None:
@@ -492,18 +591,18 @@ def test_preserved_outcome_must_be_outside_scope() -> None:
 def test_retry_drive_consumes_preserved_prerequisite() -> None:
     """重试轮：保留前置 A 已成功 → B 立即就绪，C 随后；不重做 A。"""
     plan = _plan(_node("b", ("a",)), _node("c", ("b",)))
-    runner = _ControlledRunner()
+    harness = _DagHarness()
 
     async def scenario() -> PlanRunSummary:
-        task = asyncio.ensure_future(drive_leaf_dag(plan, runner, preserved=(_outcome("a"),)))
-        await _wait_until(lambda: runner.started == ["b"])
-        runner.gate("b").set()
-        await _wait_until(lambda: runner.started == ["b", "c"])
-        runner.gate("c").set()
+        task = asyncio.ensure_future(drive_leaf_dag(plan, harness.start, harness.observe, preserved=(_outcome("a"),)))
+        await _wait_until(lambda: harness.started == ["b"])
+        harness.gate("b").set()
+        await _wait_until(lambda: harness.started == ["b", "c"])
+        harness.gate("c").set()
         return await task
 
     summary = asyncio.run(scenario())
-    assert runner.started == ["b", "c"]
+    assert harness.started == ["b", "c"]
     assert summary.succeeded == ("b", "c")
     assert tuple(outcome.node_id for outcome in summary.outcomes) == ("b", "c")
     assert summary.converged is True
