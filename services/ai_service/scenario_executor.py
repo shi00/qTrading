@@ -565,7 +565,10 @@ class ScenarioExecutor:
                 # 中断整个候选遍历：halt_candidates = invocation 级事实（D5 费用型
                 # 预留被拒 / 派发绑定失权 / 内容拒绝 / 必需登记失败，切换候选无济，
                 # 不进冷却）；stop_traversal = §6.4-5 已公开分片后失败（保原
-                # attempt 不换候选，属连接侧事实沿常规失败路径进冷却）。
+                # attempt 不换候选，属连接侧事实沿常规失败路径进冷却——R-B02-2
+                # 行为与契约一致化：break 前登记连接冷却）。
+                if outcome.stop_traversal and not outcome.halt_candidates:
+                    state.cooldowns[cooldown_key] = clock() + self._cooldown_seconds
                 decisions.append(
                     CandidateDecision(
                         task_id=str(cand.get("task_id", "")),

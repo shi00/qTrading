@@ -502,6 +502,28 @@ class TestChatStreamFailureExposure:
         assert len(adapter.invoke_calls) == 3  # 候选0×2（默认1重试）+ 候选1×1
 
 
+class TestChatStopTraversalCooldown:
+    @pytest.mark.asyncio
+    async def test_stop_traversal_enters_connection_cooldown(self):
+        """§6.4-5 / R-B02-2：stop_traversal 属连接侧事实——中断遍历且沿常规失败
+        路径进冷却（文档契约 L1752-1753）；后续请求同连接候选 skipped 零派发。"""
+        events = (_text_event(1, "a"), _text_event(2, "b"))
+        adapter = _ScriptedChatAdapter([(events, TimeoutError("stream broken"), None)])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        snapshot = _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),))
+
+        first = await executor.execute_chat_turn(_chat_request(), snapshot, binding=_binding())
+        assert first.status == "failed"
+        assert "public fragments" in (first.error_code or "")
+
+        # 冷却已登记：第二次请求同连接候选被 skipped（零派发），失败原因透传
+        second = await executor.execute_chat_turn(_chat_request(), snapshot, binding=_binding())
+        assert second.status == "failed"
+        assert len(adapter.invoke_calls) == 1  # 第二次零派发
+        assert "cooldown until" in (second.error_code or "")
+
+
 class TestChatRefusal:
     @pytest.mark.asyncio
     async def test_refused_turn_halts_without_candidate_switch(self):

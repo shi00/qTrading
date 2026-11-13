@@ -56,12 +56,64 @@ from pydantic_ai.tools import ToolDefinition
 from services.agent_service.model import (
     BOUND_MODEL_ALIAS,
     GatewayModel,
+    _TurnChannel,
     build_chat_turn_request,
     map_finish_reason,
     map_usage,
 )
 
 pytestmark = pytest.mark.unit
+
+
+class TestTurnChannelCloseSemantics:
+    """R-B02-1 回归：close 同步非阻塞 + 关闭唤醒读者（§8.2 终止唤醒契约）。"""
+
+    @staticmethod
+    def _text_event(sequence: int) -> ChatStreamEvent:
+        return ChatStreamEvent(sequence=sequence, kind="text", text_delta="x")
+
+    @pytest.mark.asyncio
+    async def test_close_with_full_queue_does_not_hang(self):
+        """队列满时 close 不阻塞（旧实现在消费方停读时 await put(None) 永久挂死）。"""
+        channel = _TurnChannel()
+        for sequence in range(1, 257):
+            await channel.push(self._text_event(sequence))
+        channel.close()  # 同步非阻塞：旧实现此处 await put(None) 永久挂死
+        drained = 0
+        while (item := await asyncio.wait_for(channel.get(), timeout=1)) is not None:
+            assert item.kind == "text"
+            drained += 1
+        assert drained == 256
+
+    @pytest.mark.asyncio
+    async def test_close_wakes_blocked_reader_with_error_once(self):
+        """阻塞读者被 close 唤醒：一次性投递错误，随后干净结束。"""
+        channel = _TurnChannel()
+        error = RuntimeError("turn failed")
+        reader = asyncio.create_task(channel.get())
+        await asyncio.sleep(0.05)  # 读者已阻塞在空队列
+        channel.close(error=error)
+        with pytest.raises(RuntimeError) as excinfo:
+            await asyncio.wait_for(reader, timeout=1)
+        assert excinfo.value is error
+        # 错误一次性：后续 get 干净返回 None
+        assert await asyncio.wait_for(channel.get(), timeout=1) is None
+
+    @pytest.mark.asyncio
+    async def test_drains_events_before_error(self):
+        """先取尽已投递事件，再投递错误（终态事实保真，§6.4-4）。"""
+        channel = _TurnChannel()
+        event = self._text_event(1)
+        await channel.push(event)
+        error = RuntimeError("failed after fragments")
+        channel.close(error=error)
+        first = await asyncio.wait_for(channel.get(), timeout=1)
+        assert first is event
+        with pytest.raises(RuntimeError) as excinfo:
+            await asyncio.wait_for(channel.get(), timeout=1)
+        assert excinfo.value is error
+        assert await asyncio.wait_for(channel.get(), timeout=1) is None
+
 
 _USAGE = NormalizedLLMUsage(
     input_total_tokens=100,

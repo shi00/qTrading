@@ -93,6 +93,9 @@ _SKIPPED_RESPONSE_PART_KINDS: Final[tuple[str, ...]] = ("thinking",)
 #: 流事件工具分片的 vendor id 前缀（_parts_manager 按 vendor id 聚合增量）
 _TOOL_VENDOR_PREFIX: Final[str] = "tool"
 
+#: _TurnChannel 内部哨兵：仅表示「关闭唤醒」，不是队列项
+_TURN_CLOSED: Final[object] = object()
+
 
 class ChatTurnExecutor(Protocol):
     """Executor 最小结构协议（模型桥不感知 Executor 全貌，DI 可测）。"""
@@ -422,8 +425,11 @@ class _TurnChannel:
     """生产者（execute_chat_turn 任务）与消费者（SDK 流迭代）之间的有界通道。
 
     - ``push``：on_event 回调（生产侧 await 受阻即背压）；
-    - ``get``：消费侧逐事件取出；通道关闭（None 哨兵）后返回 None；生产侧
-      失败以异常投递（消费侧就地抛出）；
+    - ``get``：消费侧逐事件取出——先取尽已入队事件，通道关闭后投递错误
+      （一次性）或返回 None（哨兵语义经关闭事件承载，不占队列槽位）；
+    - ``close``：**同步非阻塞**——登记终态事实并唤醒阻塞读者（R-B02-1：旧实现
+      在队列满时 ``await put(None)`` 会在消费方停读时永久挂死关闭方）；关闭后
+      生产侧以取消唤醒（close_stream 路径）；
     - ``join``：join 生产任务——已投递错误静默回收，未投递错误就地抛出
       （CancelledError 始终传播，R2）。
 
@@ -434,6 +440,8 @@ class _TurnChannel:
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_CHANNEL_MAXSIZE)
+        self._closed = False
+        self._closed_event = asyncio.Event()
         self.producer: asyncio.Task[None] | None = None
         self._outcome: ChatTurnOutcome | None = None
         self._error: BaseException | None = None
@@ -442,19 +450,43 @@ class _TurnChannel:
     async def push(self, event: ChatStreamEvent) -> None:
         await self._queue.put(event)
 
-    async def close(self, *, outcome: ChatTurnOutcome | None = None, error: BaseException | None = None) -> None:
+    def close(self, *, outcome: ChatTurnOutcome | None = None, error: BaseException | None = None) -> None:
+        """登记终态并唤醒阻塞读者（同步非阻塞；幂等登记以最后调用为准）。"""
         self._outcome = outcome
         self._error = error
-        await self._queue.put(None)
+        self._closed = True
+        self._closed_event.set()
 
     async def get(self) -> ChatStreamEvent | None:
-        item = await self._queue.get()
-        if item is None:
-            if self._error is not None:
-                self._error_delivered = True
-                raise self._error
-            return None
-        return cast(ChatStreamEvent, item)
+        while True:
+            try:
+                return cast(ChatStreamEvent, self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                pass
+            if self._closed:
+                # 关闭且取尽：一次性投递错误，此后干净结束（§6.4-4 终态事实保真）
+                if self._error is not None and not self._error_delivered:
+                    self._error_delivered = True
+                    raise self._error
+                return None
+            item = await self._wait_get_or_close()
+            if item is not _TURN_CLOSED:
+                return cast(ChatStreamEvent, item)
+            # 关闭唤醒：回到顶部重查残留事件，再按关闭语义结束
+
+    async def _wait_get_or_close(self) -> Any:
+        """空时等待事件或关闭唤醒（先完成者生效；二者同时完成以取件优先）。"""
+        get_task = asyncio.ensure_future(self._queue.get())
+        closed_task = asyncio.ensure_future(self._closed_event.wait())
+        try:
+            done, _ = await asyncio.wait({get_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (get_task, closed_task):
+                if not task.done():
+                    task.cancel()
+        if get_task in done and not get_task.cancelled():
+            return get_task.result()
+        return _TURN_CLOSED
 
     @property
     def outcome(self) -> ChatTurnOutcome | None:
@@ -482,7 +514,11 @@ class GatewayStreamedResponse(StreamedResponse):
     channel: _TurnChannel
     model_call_id: str
     _timestamp: datetime = field(default_factory=lambda: datetime.now(UTC), init=False)
-    # 声明计量追踪（§6.3：费用缺失保 None——SDK 层按 unmeasured 标记，不倒灌账本）
+    # 声明计量追踪选择（SDK StreamedResponse._usage_received 契约：供应商可省略
+    # usage 的流以 False 默认声明此字段选择加入——流结束未上报任何 usage 时，
+    # SDK usage 属性追加 unmeasured_requests=1 标记，费用缺失不伪 0，§6.3/R21）。
+    # 检视 S-B02-7 曾判为死字段，经 SDK 源码核验为误判（models/__init__.py
+    # 「opts in by declaring this field with a False default」），保留不删。
     _usage_received: bool | None = field(default=False, init=False, repr=False, compare=False)
 
     @property
@@ -684,11 +720,11 @@ class GatewayModel(Model):
             outcome = await self._executor.execute_chat_turn(
                 request, self._snapshot, binding=self._binding, on_event=channel.push
             )
-        except BaseException as e:  # 通道投递后由 join 按 R2 分流
-            await channel.close(error=e)
+        except BaseException as e:  # 关闭唤醒读者后由 join 按 R2 分流
+            channel.close(error=e)
             raise
         else:
-            await channel.close(outcome=outcome)
+            channel.close(outcome=outcome)
 
     def _response_from_outcome(self, outcome: ChatTurnOutcome) -> ModelResponse:
         """ChatTurnOutcome → ModelResponse（拒绝保真、失败如实抛出）。"""
