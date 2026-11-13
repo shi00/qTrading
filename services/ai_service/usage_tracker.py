@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from core.model_management_types import LegacySealedError
 from data.persistence.models import AppState
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
 
 logger = logging.getLogger(__name__)
@@ -153,7 +154,8 @@ class AIUsageTracker:
                     return 0
                 return int(row[0])
         except Exception as e:
-            logger.debug("[AIUsageTracker] Failed to read key='%s': %s", key, e)
+            # R9 (UT-D1)：异常消息可能携带连接串凭据/敏感路径，先脱敏再入日志
+            logger.debug("[AIUsageTracker] Failed to read key='%s': %s", key, DataSanitizer.sanitize_error(e))
             return 0
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -195,7 +197,10 @@ class AIUsageTracker:
         except LegacySealedError:
             raise
         except Exception as e:
-            logger.warning("[AIUsageTracker] Failed to accumulate cost on key='%s': %s", key, e)
+            # R9 (UT-D1)：异常消息先经 DataSanitizer 脱敏再入日志（降级告警不携带明文凭据）
+            logger.warning(
+                "[AIUsageTracker] Failed to accumulate cost on key='%s': %s", key, DataSanitizer.sanitize_error(e)
+            )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_month_unpriced(self, when: date | None = None) -> tuple[int, int]:
@@ -218,7 +223,13 @@ class AIUsageTracker:
                     row = result.fetchone()
                     values[k] = int(row[0]) if row is not None and row[0] is not None else 0
         except Exception as e:
-            logger.debug("[AIUsageTracker] Failed to read unpriced keys '%s'/'%s': %s", calls_key, tokens_key, e)
+            # R9 (UT-D1)：异常消息先经 DataSanitizer 脱敏再入日志
+            logger.debug(
+                "[AIUsageTracker] Failed to read unpriced keys '%s'/'%s': %s",
+                calls_key,
+                tokens_key,
+                DataSanitizer.sanitize_error(e),
+            )
             return (0, 0)
         return (values.get(calls_key, 0), values.get(tokens_key, 0))
 
@@ -264,4 +275,5 @@ class AIUsageTracker:
         except LegacySealedError:
             raise
         except Exception as e:
-            logger.warning("[AIUsageTracker] Failed to accumulate unpriced on key: %s", e)
+            # R9 (UT-D1)：异常消息先经 DataSanitizer 脱敏再入日志（降级告警不携带明文凭据）
+            logger.warning("[AIUsageTracker] Failed to accumulate unpriced on key: %s", DataSanitizer.sanitize_error(e))
