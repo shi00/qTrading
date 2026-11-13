@@ -751,6 +751,7 @@ except Exception as e:
 - [0015-fingerprint-driven-release.md](./docs/adr/0015-fingerprint-driven-release.md) — FinBERT 产线指纹驱动发布（内容寻址去重：装依赖前对训练输入算指纹与最新 Release 对比，输入无变化即拒绝重训）
 - [0016-agent-permission-exception.md](./docs/adr/0016-agent-permission-exception.md) — 智能体有限权限例外与允许操作矩阵（部分替代 ADR-0008 的 E1—E5 范围，原禁止项继续有效）
 - [0017-version-ssot.md](./docs/adr/0017-version-ssot.md) — 版本号单一正本收敛（产品版本唯一正本为 pyproject.toml；文档/工具配置版本字面量与对应门禁全部移除）
+- [0018-documentation-single-source.md](./docs/adr/0018-documentation-single-source.md) — 文档体系单写入源与长期治理（承接检视 C01—C15 裁定；作者源表为 T6 切换目标，切换前现行 CLAUDE/AGENTS 权威声明与守卫保留）
 
 ### docs/governance/ — 治理类机器可读文件
 

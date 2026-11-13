@@ -77,3 +77,4 @@ FinBERT 新闻情绪模型产线相关文档分散在多个章节，按主题索
 | ADR-0014 | 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度） | [0014-unified-model-scheduling.md](./adr/0014-unified-model-scheduling.md) |
 | ADR-0015 | FinBERT 产线指纹驱动发布（内容寻址去重，训练输入指纹对比） | [0015-fingerprint-driven-release.md](./adr/0015-fingerprint-driven-release.md) |
 | ADR-0016 | 智能体有限权限例外与允许操作矩阵 | [0016-agent-permission-exception.md](./adr/0016-agent-permission-exception.md) |
+| ADR-0018 | 文档体系单写入源与长期治理（Documentation Single Source） | [0018-documentation-single-source.md](./adr/0018-documentation-single-source.md) |
