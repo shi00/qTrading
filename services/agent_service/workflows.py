@@ -567,24 +567,24 @@ class LeafRuntimeRegistry:
     未登记时 ``require`` 明确拒绝——不默认放行、不以占位执行器冒充真实叶执行。
     """
 
-    _runner: LeafRunner | None = None
+    _instance: LeafRunner | None = None
 
     @classmethod
     def install(cls, runner: LeafRunner) -> None:
         if not callable(runner):
             raise TypeError("leaf runner must be callable")
-        cls._runner = runner
+        cls._instance = runner
 
     @classmethod
     def require(cls) -> LeafRunner:
-        runner = cls._runner
+        runner = cls._instance
         if runner is None:
             raise RuntimeError("leaf runner not installed (assemble agent runtime first)")
         return runner
 
     @classmethod
     def _reset_singleton(cls) -> None:
-        cls._runner = None
+        cls._instance = None
 
 
 # ---------------------------------------------------------------------------

@@ -260,7 +260,8 @@ def _dispose_quietly(engine: sa.Engine) -> None:
     """组装半途失败时的兜底释放：dispose 异常不掩盖原始异常。"""
     try:
         engine.dispose()
-    except Exception:  # 兜底清理不得掩盖组装原始异常
+    # 兜底清理不得掩盖组装原始异常
+    except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
         pass
 
 
@@ -492,7 +493,7 @@ class OwnerStreamChannel[T]:
             raise ValueError("maxsize must be >= 1 (bounded channel)")
         self._bridge = bridge
         self._queue: asyncio.Queue[T] = asyncio.Queue(maxsize=maxsize)
-        self._closed_event = asyncio.Event()
+        self._closed_event = asyncio.Event()  # R11_ALLOWED: __init__ 强制 get_running_loop，实例只在 owner 循环内使用
         self._closed = False
 
     # -- owner 循环侧 -------------------------------------------------------

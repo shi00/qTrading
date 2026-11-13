@@ -128,6 +128,12 @@
     "volume_ratio": "col_volume_ratio"
   },
   "tables": {
+    "agent_artifact": {
+      "summary": "col_summary"
+    },
+    "agent_session": {
+      "title": "col_title"
+    },
     "alembic_version": {
       "version_num": "col_version_num"
     },

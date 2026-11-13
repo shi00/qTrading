@@ -411,7 +411,8 @@ class AdvisoryLockInstanceGuard:
                 continue
             try:
                 target.close() if target is connection else target.dispose()
-            except Exception:  # 释放兜底：不得掩盖启动/关闭主流程异常
+            # 释放兜底：不得掩盖启动/关闭主流程异常
+            except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
                 pass
 
 
@@ -486,7 +487,8 @@ async def start_agent_runtime(
     def _abort_handle(handle: Any) -> None:
         try:
             handle.close()
-        except Exception:  # 清理兜底：保留原始失败原因
+        # 清理兜底：保留原始失败原因
+        except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
             pass
         guard.release()
 

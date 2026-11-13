@@ -528,7 +528,7 @@ def test_leaf_registry_install_and_reset() -> None:
     LeafRuntimeRegistry.install(runner)
     assert LeafRuntimeRegistry.require() is runner
     LeafRuntimeRegistry._reset_singleton()
-    assert LeafRuntimeRegistry._runner is None
+    assert LeafRuntimeRegistry._instance is None
 
 
 # ---------------------------------------------------------------------------

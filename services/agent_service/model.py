@@ -441,7 +441,7 @@ class _TurnChannel:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_CHANNEL_MAXSIZE)
         self._closed = False
-        self._closed_event = asyncio.Event()
+        self._closed_event = asyncio.Event()  # R11_ALLOWED: 实例仅在 owner 事件循环内创建/使用，不跨循环共享
         self.producer: asyncio.Task[None] | None = None
         self._outcome: ChatTurnOutcome | None = None
         self._error: BaseException | None = None
