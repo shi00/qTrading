@@ -7,7 +7,7 @@ from services.agent_service.attachments import (
     SubprocessAttachmentWorker,
     detect_attachment_kind,
 )
-from services.agent_service.sources import BusinessSourceService
+from services.agent_service.business_sources import BusinessSnapshotRead, read_backtest_snapshot
 from services.agent_service.recovery import (
     ManualRecoveryReceipt,
     StartupIsolationReceipt,
@@ -24,6 +24,7 @@ from services.agent_service.runtime import (
     assemble_agent_runtime,
     launch_agent_runtime,
 )
+from services.agent_service.sources import BusinessSourceService
 
 __all__ = [
     "AgentRuntime",
@@ -32,6 +33,7 @@ __all__ = [
     "AttachmentExtractionRequest",
     "AttachmentExtractionResult",
     "AttachmentWorkerError",
+    "BusinessSnapshotRead",
     "BusinessSourceService",
     "CloseReadinessReceipt",
     "ManualRecoveryReceipt",
@@ -41,6 +43,7 @@ __all__ = [
     "assemble_agent_runtime",
     "detect_attachment_kind",
     "launch_agent_runtime",
+    "read_backtest_snapshot",
     "resume_selected_workflows",
     "run_startup_isolation",
     "start_agent_runtime",
