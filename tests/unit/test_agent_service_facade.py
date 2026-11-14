@@ -19,6 +19,9 @@ from core.agent_types import (
     CommitState,
     ConsumptionState,
     DeliveryState,
+    DraftPayload,
+    DraftReceipt,
+    DraftSaveCommand,
     EventPage,
     EventReadQuery,
     Mode,
@@ -65,6 +68,54 @@ _SUBMISSION_RECEIPT = SubmissionReceipt(
 )
 
 
+def _draft_payload(**overrides: Any) -> DraftPayload:
+    values: dict[str, Any] = {
+        "schema_version": 1,
+        "text": "草稿正文",
+        "mode": Mode.DISCUSS,
+        "model_selection": None,
+        "source_refs": (),
+        "skill_versions": (),
+        "mcp_selection": (),
+        "purpose": None,
+        "cutoff": None,
+        "send_target": None,
+        "object_context": None,
+        "role_prompt_selection": None,
+        "customized_fields": (),
+        "defaults_baseline_digest": None,
+    }
+    values.update(overrides)
+    return DraftPayload(**values)
+
+
+def _draft_command(
+    *, ref_revision: int = 3, expected: int = 3, payload: DraftPayload | None = None
+) -> DraftSaveCommand:
+    return DraftSaveCommand(
+        command=CommandRef(
+            user_scope="u1",
+            source_module="ui",
+            business_request_id="req-1",
+            command_id="client-1",
+            expected_revision=ref_revision,
+        ),
+        session_id="s1",
+        expected_draft_revision=expected,
+        payload=_draft_payload() if payload is None else payload,
+    )
+
+
+_DRAFT_RECEIPT = DraftReceipt(
+    session_id="s1",
+    command_record_id="cmd-1",
+    commit_state=CommitState.COMMITTED,
+    draft_revision=4,
+    verified_at="2026-11-14T00:00:00.000000Z",
+    error=None,
+)
+
+
 def _request(**overrides: Any) -> AcceptRequest:
     values: dict[str, Any] = {
         "user_scope": "u1",
@@ -100,6 +151,12 @@ class _FakeDao:
         if self.error is not None:
             raise self.error
         return self.receipt
+
+    async def save_draft(self, command: DraftSaveCommand) -> DraftReceipt:
+        self.calls.append(("save_draft", (command,), {}))
+        if self.error is not None:
+            raise self.error
+        return _DRAFT_RECEIPT
 
     async def read_command(self, ref: CommandRef, *, user_scope: str) -> CommandReceipt:
         self.calls.append(("read_command", (ref,), {"user_scope": user_scope}))
@@ -230,6 +287,46 @@ class TestSubmitAuthority:
         await service.aclose()
         with pytest.raises(AgentServiceError) as excinfo:
             await service.submit(_request(), command=_REF)
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+class TestDraftSaveAuthority:
+    """草稿保存入口：边界整份校验，失败不触达 DAO（F-03-1）。"""
+
+    @pytest.mark.asyncio
+    async def test_valid_command_delegates(self) -> None:
+        fake = _FakeDao()
+        assert await _service(fake).save_draft(_draft_command()) is _DRAFT_RECEIPT
+        assert [call[0] for call in fake.calls] == ["save_draft"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_payload_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        command = _draft_command(payload=_draft_payload(cutoff="2026-13-01"))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).save_draft(command)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.payload.cutoff" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_revision_mismatch_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        command = _draft_command(ref_revision=3, expected=4)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).save_draft(command)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.command.expected_revision" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_save_draft_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.save_draft(_draft_command())
         assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
         assert fake.calls == []
 

@@ -701,6 +701,19 @@ def decode_source_version_ref(value: object, path: str) -> SourceVersionRef:
     )
 
 
+def encode_source_version_ref(ref: SourceVersionRef) -> dict[str, Any]:
+    """SourceVersionRef → wire 四键（§3.3.1）；不含路径/URL/显示名。"""
+
+    if not isinstance(ref.source_kind, SourceKind):
+        _fail("invalid_tag", "$.source_kind")
+    return {
+        "source_kind": ref.source_kind.value,
+        "source_id": _require_str(ref.source_id, "$.source_id"),
+        "source_version": _require_str(ref.source_version, "$.source_version"),
+        "source_digest": _require_digest(ref.source_digest, "$.source_digest"),
+    }
+
+
 def decode_range_atom(value: object, path: str, *, allow_all: bool = False) -> ReadAtom:
     """严格解码 RangeAtom/ReadAtom：标签决定全部键（§3.3.1）。"""
 
@@ -5915,6 +5928,15 @@ def decode_mcp_service_identity(value: object, path: str = "$.mcp_service") -> M
     )
 
 
+def encode_mcp_service_identity(identity: MCPServiceIdentity) -> dict[str, Any]:
+    """MCPServiceIdentity → wire 两键（service_id/config_version）；显示名不参与。"""
+
+    return {
+        "service_id": require_identity(identity.service_id, "$.mcp_service.service_id"),
+        "config_version": require_revision(identity.config_version, "$.mcp_service.config_version"),
+    }
+
+
 #: 连接与单次工具各自独立的单一总 deadline（秒）；progress/分片不重置（HANDOFF §9）。
 MCP_DEFAULT_DEADLINE_S: Final = 30
 MCP_MIN_DEADLINE_S: Final = 1
@@ -6167,6 +6189,30 @@ def _skill_keys(refs: Iterable[SkillVersionRef]) -> set[tuple[str, int]]:
     return {(ref.skill_id, ref.version) for ref in refs}
 
 
+_SKILL_VERSION_REF_KEYS: Final = frozenset({"skill_id", "version"})
+
+
+def encode_skill_version_ref(ref: SkillVersionRef) -> dict[str, Any]:
+    """SkillVersionRef → wire 两键（skill_id/version）；显示名不参与身份。"""
+
+    return {
+        "skill_id": require_identity(ref.skill_id, "$.skill.skill_id"),
+        "version": require_revision(ref.version, "$.skill.version"),
+    }
+
+
+def decode_skill_version_ref(value: object, path: str = "$.skill_version_ref") -> SkillVersionRef:
+    """严格解码 SkillVersionRef：全键必填、禁额外键、版本从 1 起（bool 拒绝）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SKILL_VERSION_REF_KEYS, path)
+    return SkillVersionRef(
+        skill_id=require_identity(value["skill_id"], f"{path}.skill_id"),
+        version=require_revision(value["version"], f"{path}.version"),
+    )
+
+
 def validate_skill_assignment(
     *,
     enabled: Sequence[SkillVersionRef],
@@ -6389,4 +6435,434 @@ def decode_cleanup_identity_set(value: object, path: str = "$.cleanup.identity_s
         native_ids=normalize_cleanup_ids(native_ids),
         session_ids=normalize_cleanup_ids(session_ids),
         asset_keys=normalize_cleanup_asset_keys(asset_keys),
+    )
+
+
+# ---------------------------------------------------------------------------
+# F-03 草稿持久契约（§4.2 save_draft / §9.3 draft_revision+draft_payload）
+# ---------------------------------------------------------------------------
+
+
+#: 草稿载荷全键（§4.2 DraftSaveCommand 业务字段 + schema_version 信封）。
+DRAFT_PAYLOAD_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "text",
+        "mode",
+        "model_selection",
+        "source_refs",
+        "skill_versions",
+        "mcp_selection",
+        "purpose",
+        "cutoff",
+        "send_target",
+        "object_context",
+        "role_prompt_selection",
+        "customized_fields",
+        "defaults_baseline_digest",
+    }
+)
+
+#: 草稿载荷中**不得出现**的键（递归小写比对）：凭据与有效批准不随草稿持久化
+#: （§9.3「无凭据/有效批准/额外源副本」、R9/R10）。
+_DRAFT_FORBIDDEN_KEYS: Final = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "token",
+        "access_token",
+        "refresh_token",
+        "password",
+        "passwd",
+        "secret",
+        "client_secret",
+        "credential",
+        "credentials",
+        "authorization",
+        "cookie",
+        "approval",
+        "approvals",
+        "grant",
+        "grants",
+    }
+)
+
+_CUTOFF_RE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _reject_draft_forbidden_keys(value: object, path: str) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                _fail("invalid_json", path)
+            if key.lower() in _DRAFT_FORBIDDEN_KEYS:
+                _fail("draft_secret_field_forbidden", f"{path}.{key}")
+            _reject_draft_forbidden_keys(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_draft_forbidden_keys(item, f"{path}[{index}]")
+
+
+def _draft_fragment(value: object, path: str, *, require_source_module: bool = False) -> CanonicalJson:
+    """草稿内**不透明选择片段**的规范 JSON 校验（§4.2 未逐字段冻结的引用集合）。
+
+    设计只冻结信封键与「只存引用、不存凭据/批准」的语义；子结构由后续配置域
+    （模型/角色/Prompt/发送目标）拥有。这里执行：必须是 JSON 对象、经
+    :func:`json_doc` 拒绝 float/NaN/非 JSON 类型、递归禁凭据/批准键；
+    ``object_context`` 额外要求非空 ``source_module``（准确业务入口）。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    try:
+        doc = json_doc(value)
+    except AgentValidationError as exc:
+        # json_doc 以 "$" 为根：把片段路径译回调用方路径，错误定位仍准确。
+        suffix = exc.field_path[1:] if exc.field_path.startswith("$") else f".{exc.field_path}"
+        _fail(exc.code, f"{path}{suffix}")
+    _reject_draft_forbidden_keys(value, path)
+    if require_source_module:
+        source_module = value.get("source_module")
+        if not isinstance(source_module, str) or source_module == "":
+            _fail("missing_field", f"{path}.source_module")
+    return doc
+
+
+def _sorted_source_refs(refs: Iterable[SourceVersionRef]) -> tuple[SourceVersionRef, ...]:
+    items = tuple(refs)
+    encoded = [encode_source_version_ref(ref) for ref in items]
+    keys = [(item["source_kind"], item["source_id"], item["source_version"]) for item in encoded]
+    if len(set(keys)) != len(keys):
+        _fail("duplicate_source_ref", "$.payload.source_refs")
+    return tuple(sorted(items, key=lambda ref: (ref.source_kind.value, ref.source_id, ref.source_version)))
+
+
+def _sorted_skill_refs(refs: Iterable[SkillVersionRef]) -> tuple[SkillVersionRef, ...]:
+    items = tuple(refs)
+    encoded = [encode_skill_version_ref(ref) for ref in items]
+    keys = [(item["skill_id"], item["version"]) for item in encoded]
+    if len(set(keys)) != len(keys):
+        _fail("duplicate_skill_version", "$.payload.skill_versions")
+    return tuple(sorted(items, key=lambda ref: (ref.skill_id, ref.version)))
+
+
+def _sorted_mcp_selection(refs: Iterable[MCPServiceIdentity]) -> tuple[MCPServiceIdentity, ...]:
+    items = tuple(refs)
+    encoded = [encode_mcp_service_identity(ref) for ref in items]
+    keys = [(item["service_id"], item["config_version"]) for item in encoded]
+    if len(set(keys)) != len(keys):
+        _fail("duplicate_mcp_service", "$.payload.mcp_selection")
+    return tuple(sorted(items, key=lambda ref: (ref.service_id, ref.config_version)))
+
+
+def _validate_cutoff(value: object, path: str) -> str:
+    if not isinstance(value, str) or _CUTOFF_RE.fullmatch(value) is None:
+        _fail("invalid_cutoff", path)
+    try:
+        dt.fromisoformat(value)
+    except ValueError:
+        _fail("invalid_cutoff", path)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class DraftPayload:
+    """草稿当前内容（§9.3 ``draft_payload``）：正文 + 未发送选择，只存引用。
+
+    ``model_selection`` / ``send_target`` / ``object_context`` /
+    ``role_prompt_selection`` 为不透明规范 JSON 片段（设计未逐字段冻结其子结构，
+    由对应配置域拥有；见 :func:`_draft_fragment`）。``customized_fields`` 与
+    ``defaults_baseline_digest`` 成对区分「未触碰默认」与用户手选（§4.2 R03）：
+    非空自定义必须带基线摘要，空自定义不得带。
+    """
+
+    schema_version: int
+    text: str
+    mode: Mode
+    model_selection: CanonicalJson | None
+    source_refs: tuple[SourceVersionRef, ...]
+    skill_versions: tuple[SkillVersionRef, ...]
+    mcp_selection: tuple[MCPServiceIdentity, ...]
+    purpose: Purpose | None
+    cutoff: str | None
+    send_target: CanonicalJson | None
+    object_context: CanonicalJson | None
+    role_prompt_selection: CanonicalJson | None
+    customized_fields: tuple[str, ...]
+    defaults_baseline_digest: str | None
+
+
+def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
+    """DraftPayload → 规范 wire 对象（14 键全量，集合规范化排序去重）。"""
+
+    if isinstance(payload.schema_version, bool) or payload.schema_version != 1:
+        _fail("invalid_schema_version", "$.payload.schema_version")
+    if not isinstance(payload.text, str):
+        _fail("invalid_type", "$.payload.text")
+    if not isinstance(payload.mode, Mode):
+        _fail("invalid_tag", "$.payload.mode")
+    if payload.purpose is not None and not isinstance(payload.purpose, Purpose):
+        _fail("invalid_tag", "$.payload.purpose")
+    if payload.model_selection is not None:
+        _draft_fragment(decode_json_doc(payload.model_selection), "$.payload.model_selection")
+    if payload.send_target is not None:
+        _draft_fragment(decode_json_doc(payload.send_target), "$.payload.send_target")
+    if payload.object_context is not None:
+        _draft_fragment(
+            decode_json_doc(payload.object_context),
+            "$.payload.object_context",
+            require_source_module=True,
+        )
+    if payload.role_prompt_selection is not None:
+        _draft_fragment(decode_json_doc(payload.role_prompt_selection), "$.payload.role_prompt_selection")
+    customized = _require_str_list(list(payload.customized_fields), "$.payload.customized_fields", allow_empty=True)
+    customized = tuple(sorted(customized))
+    if customized:
+        if payload.defaults_baseline_digest is None:
+            _fail("missing_field", "$.payload.defaults_baseline_digest")
+        digest = _require_digest(payload.defaults_baseline_digest, "$.payload.defaults_baseline_digest")
+    else:
+        if payload.defaults_baseline_digest is not None:
+            _fail("invalid_value", "$.payload.defaults_baseline_digest")
+        digest = None
+    return {
+        "schema_version": 1,
+        "text": payload.text,
+        "mode": payload.mode.value,
+        "model_selection": None if payload.model_selection is None else decode_json_doc(payload.model_selection),
+        "source_refs": [encode_source_version_ref(ref) for ref in _sorted_source_refs(payload.source_refs)],
+        "skill_versions": [encode_skill_version_ref(ref) for ref in _sorted_skill_refs(payload.skill_versions)],
+        "mcp_selection": [encode_mcp_service_identity(ref) for ref in _sorted_mcp_selection(payload.mcp_selection)],
+        "purpose": None if payload.purpose is None else payload.purpose.value,
+        "cutoff": None if payload.cutoff is None else _validate_cutoff(payload.cutoff, "$.payload.cutoff"),
+        "send_target": None if payload.send_target is None else decode_json_doc(payload.send_target),
+        "object_context": None if payload.object_context is None else decode_json_doc(payload.object_context),
+        "role_prompt_selection": (
+            None if payload.role_prompt_selection is None else decode_json_doc(payload.role_prompt_selection)
+        ),
+        "customized_fields": list(customized),
+        "defaults_baseline_digest": digest,
+    }
+
+
+def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload:
+    """严格解码草稿载荷：全键必填、禁额外键、类型/标签/摘要逐项校验。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, DRAFT_PAYLOAD_KEYS, path)
+    if isinstance(value["schema_version"], bool) or value["schema_version"] != 1:
+        _fail("invalid_schema_version", f"{path}.schema_version")
+    text = value["text"]
+    if not isinstance(text, str):
+        _fail("invalid_type", f"{path}.text")
+    mode_raw = value["mode"]
+    if not isinstance(mode_raw, str):
+        _fail("invalid_tag", f"{path}.mode")
+    try:
+        mode = Mode(mode_raw)
+    except ValueError:
+        _fail("invalid_tag", f"{path}.mode")
+    purpose_raw = value["purpose"]
+    purpose: Purpose | None
+    if purpose_raw is None:
+        purpose = None
+    elif isinstance(purpose_raw, str):
+        try:
+            purpose = Purpose(purpose_raw)
+        except ValueError:
+            _fail("invalid_tag", f"{path}.purpose")
+    else:
+        _fail("invalid_tag", f"{path}.purpose")
+    source_refs_raw = value["source_refs"]
+    skill_versions_raw = value["skill_versions"]
+    mcp_selection_raw = value["mcp_selection"]
+    customized_raw = value["customized_fields"]
+    if not isinstance(source_refs_raw, list) or not isinstance(skill_versions_raw, list):
+        _fail("invalid_type", f"{path}.source_refs")
+    if not isinstance(mcp_selection_raw, list) or not isinstance(customized_raw, list):
+        _fail("invalid_type", f"{path}.mcp_selection")
+    customized = _require_str_list(customized_raw, f"{path}.customized_fields", allow_empty=True)
+    customized = tuple(sorted(customized))
+    baseline_raw = value["defaults_baseline_digest"]
+    if customized:
+        digest = _require_digest(baseline_raw, f"{path}.defaults_baseline_digest")
+    else:
+        if baseline_raw is not None:
+            _fail("invalid_value", f"{path}.defaults_baseline_digest")
+        digest = None
+    return DraftPayload(
+        schema_version=1,
+        text=text,
+        mode=mode,
+        model_selection=_opt_draft_fragment(value["model_selection"], f"{path}.model_selection"),
+        source_refs=_sorted_source_refs(
+            decode_source_version_ref(item, f"{path}.source_refs[{index}]")
+            for index, item in enumerate(source_refs_raw)
+        ),
+        skill_versions=_sorted_skill_refs(
+            decode_skill_version_ref(item, f"{path}.skill_versions[{index}]")
+            for index, item in enumerate(skill_versions_raw)
+        ),
+        mcp_selection=_sorted_mcp_selection(
+            decode_mcp_service_identity(item, f"{path}.mcp_selection[{index}]")
+            for index, item in enumerate(mcp_selection_raw)
+        ),
+        purpose=purpose,
+        cutoff=None if value["cutoff"] is None else _validate_cutoff(value["cutoff"], f"{path}.cutoff"),
+        send_target=_opt_draft_fragment(value["send_target"], f"{path}.send_target"),
+        object_context=_opt_draft_fragment(
+            value["object_context"], f"{path}.object_context", require_source_module=True
+        ),
+        role_prompt_selection=_opt_draft_fragment(value["role_prompt_selection"], f"{path}.role_prompt_selection"),
+        customized_fields=customized,
+        defaults_baseline_digest=digest,
+    )
+
+
+def _opt_draft_fragment(value: object, path: str, *, require_source_module: bool = False) -> CanonicalJson | None:
+    if value is None:
+        return None
+    return _draft_fragment(value, path, require_source_module=require_source_module)
+
+
+@dataclass(frozen=True, slots=True)
+class DraftSaveCommand:
+    """本地自动草稿保存（§4.2 ``save_draft``）：命令身份 + 目标会话 + 预期草稿版。
+
+    ``command.expected_revision`` 与 ``expected_draft_revision`` 必须相等（同一
+    事实的两种承载，不一致即拒绝）；``expected_draft_revision`` 从 1 起（会话行
+    存在即已有草稿版本；0 只用于由命令创建目标的情形）。
+    """
+
+    command: CommandRef
+    session_id: str
+    expected_draft_revision: int
+    payload: DraftPayload
+
+
+_DRAFT_SAVE_COMMAND_KEYS: Final = frozenset({"command", "session_id", "expected_draft_revision", "payload"})
+
+
+def encode_draft_save_command(command: DraftSaveCommand) -> dict[str, Any]:
+    """DraftSaveCommand → wire 对象（4 键；含命令引用与草稿载荷）。"""
+
+    expected = command.expected_draft_revision
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+        _fail("invalid_revision", "$.expected_draft_revision")
+    if command.command.expected_revision != expected:
+        _fail("invalid_revision", "$.command.expected_revision")
+    return {
+        "command": encode_command_ref(command.command),
+        "session_id": _require_str(command.session_id, "$.session_id"),
+        "expected_draft_revision": expected,
+        "payload": encode_draft_payload(command.payload),
+    }
+
+
+def decode_draft_save_command(value: object, path: str = "$.draft_save_command") -> DraftSaveCommand:
+    """严格解码 DraftSaveCommand（4 键全必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DRAFT_SAVE_COMMAND_KEYS, path)
+    expected = value["expected_draft_revision"]
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
+        _fail("invalid_revision", f"{path}.expected_draft_revision")
+    command = decode_command_ref(value["command"], f"{path}.command")
+    if command.expected_revision != expected:
+        _fail("invalid_revision", f"{path}.command.expected_revision")
+    return DraftSaveCommand(
+        command=command,
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        expected_draft_revision=expected,
+        payload=decode_draft_payload(value["payload"], f"{path}.payload"),
+    )
+
+
+def validate_draft_save_command(command: DraftSaveCommand) -> None:
+    """保存前整份校验（纯函数）；失败抛 :class:`AgentValidationError`。"""
+
+    encode_draft_save_command(command)
+
+
+@dataclass(frozen=True, slots=True)
+class DraftReceipt:
+    """草稿保存回执（§4.2 ``DraftReceipt``）：可靠 draft revision，不等于已发送。
+
+    ``error`` 只在冲突/未知时携带稳定错误码；成功保存为 None。
+    """
+
+    session_id: str
+    command_record_id: str
+    commit_state: CommitState
+    draft_revision: int
+    verified_at: str
+    error: AgentErrorCode | None
+
+
+_DRAFT_RECEIPT_KEYS: Final = frozenset(
+    {"session_id", "command_record_id", "commit_state", "draft_revision", "verified_at", "error"}
+)
+
+
+def encode_draft_receipt(receipt: DraftReceipt) -> dict[str, Any]:
+    """DraftReceipt → wire 6 键（规范 JSONB 回执载荷）。"""
+
+    if not isinstance(receipt.commit_state, CommitState):
+        _fail("invalid_commit_state", "$.commit_state")
+    return {
+        "session_id": _require_str(receipt.session_id, "$.session_id"),
+        "command_record_id": _require_str(receipt.command_record_id, "$.command_record_id"),
+        "commit_state": receipt.commit_state.value,
+        "draft_revision": require_revision(receipt.draft_revision, "$.draft_revision"),
+        "verified_at": _require_utc_timestamp(receipt.verified_at, "$.verified_at"),
+        "error": None if receipt.error is None else receipt.error.value,
+    }
+
+
+def decode_draft_receipt(value: object, path: str = "$.draft_receipt") -> DraftReceipt:
+    """严格解码 DraftReceipt（6 键；坏枚举/坏时刻 fail-closed）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DRAFT_RECEIPT_KEYS, path)
+    commit_raw = value["commit_state"]
+    if not isinstance(commit_raw, str):
+        _fail("invalid_commit_state", f"{path}.commit_state")
+    try:
+        commit_state = CommitState(commit_raw)
+    except ValueError:
+        _fail("invalid_commit_state", f"{path}.commit_state")
+    error_raw = value["error"]
+    error: AgentErrorCode | None
+    if error_raw is None:
+        error = None
+    elif isinstance(error_raw, str):
+        try:
+            error = AgentErrorCode(error_raw)
+        except ValueError:
+            _fail("invalid_error_code", f"{path}.error")
+    else:
+        _fail("invalid_error_code", f"{path}.error")
+    return DraftReceipt(
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        command_record_id=_require_str(value["command_record_id"], f"{path}.command_record_id"),
+        commit_state=commit_state,
+        draft_revision=cast(int, require_revision(value["draft_revision"], f"{path}.draft_revision")),
+        verified_at=_require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
+        error=error,
+    )
+
+
+def draft_save_input_digest(command: DraftSaveCommand) -> str:
+    """命令输入摘要：预期草稿版 + 规范载荷（同键同输入幂等、异输入冲突）。"""
+
+    return sha256_hex(
+        json_doc(
+            {
+                "expected_draft_revision": command.expected_draft_revision,
+                "payload": encode_draft_payload(command.payload),
+            }
+        )
     )

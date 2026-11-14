@@ -11,6 +11,7 @@
 - ``submit`` / ``control`` / ``answer`` / ``search`` / ``deliver_artifact`` 等写路径
   依赖原生 root workflow 派发（E-04 计划 + DBOS launch，当前受 Q5 阻塞），
   未就绪前不提供占位实现，避免把「未派发」伪装成「已受理」。
+- ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付。
 
 ``aclose`` 只标记服务关闭并拒绝后续读取；DAO/Engine 生命周期归应用组合根
 （DD §10.6：宿主关闭由 Runtime 前置门闩编排，服务不越权释放共享引擎）。
@@ -29,6 +30,8 @@ from core.agent_types import (
     ArtifactReadQuery,
     CommandReceipt,
     CommandRef,
+    DraftReceipt,
+    DraftSaveCommand,
     EventPage,
     EventReadQuery,
     OperationRead,
@@ -41,6 +44,7 @@ from core.agent_types import (
     SourceReadQuery,
     SubmissionReceipt,
     derive_accept_identity,
+    validate_draft_save_command,
 )
 from data.persistence.daos.agent_dao import AgentDao
 
@@ -186,6 +190,25 @@ class AgentService:
                 identity,
             )
         return await self._dao.accept_request(request)
+
+    async def save_draft(self, command: DraftSaveCommand) -> DraftReceipt:
+        """本地自动草稿保存（§4.2 ``save_draft``）：可靠 draft revision，不发送。
+
+        命令在边界处整份校验（全键/标签/集合/基线摘要/禁凭据），失败为
+        ``INPUT_INVALID``，不触达 DAO；CAS 冲突、同键异输入与重放语义由 DAO
+        事务裁决（``REVISION_CONFLICT`` / ``INPUT_CONFLICT`` / 查回原回执）。
+        """
+
+        self._require_open("save_draft")
+        try:
+            validate_draft_save_command(command)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                f"{command.command.user_scope}/{command.session_id}",
+            ) from exc
+        return await self._dao.save_draft(command)
 
     # ------------------------------------------------------------------
     # 生命周期

@@ -80,6 +80,8 @@ from core.agent_types import (
     DeliveryState,
     DispatchCloseFact,
     DispatchCloseRequest,
+    DraftReceipt,
+    DraftSaveCommand,
     EffectState,
     EventFact,
     EventKind,
@@ -169,6 +171,11 @@ from core.agent_types import (
     decode_source_read_summary,
     decode_source_ref,
     decode_submission_receipt,
+    decode_draft_receipt,
+    draft_save_input_digest,
+    encode_draft_payload,
+    encode_draft_receipt,
+    validate_draft_save_command,
     encode_command_receipt,
     encode_data_consent_binding,
     encode_data_consent_claim,
@@ -6393,3 +6400,150 @@ class AgentDao(BaseDao):
             session_ids=identities.session_ids,
             asset_keys=identities.asset_keys,
         )
+
+    # ------------------------------------------------------------------
+    # F-03-1：本地草稿可靠保存（§4.2 save_draft / §9.3 / §9.13）
+    # ------------------------------------------------------------------
+
+    async def save_draft(self, command: DraftSaveCommand) -> DraftReceipt:
+        """草稿 CAS 保存（§4.2 ``save_draft``）：会话行锁下**单个显式事务**。
+
+        语义：
+
+        - ``expected_draft_revision`` 必须等于会话当前 ``draft_revision``，否则
+          ``REVISION_CONFLICT``（零新事实：不改草稿、不写命令）；
+        - 同命令键（``user_scope`` + 目标 session + ``client_command_id``）同输入
+          （预期版 + 规范载荷摘要）→ 查回原回执，不重复推进版本；异输入 →
+          ``INPUT_CONFLICT``；
+        - 目标会话不存在或不在调用用户域 → ``INPUT_INVALID``（不静默建会话）；
+        - 会话行 ``revision`` 与 ``updated_at`` 同事务推进：目录排序/历史游标
+          指纹不因草稿变更静默漏页（§4.2 修订游标失效、§9.3）；
+        - 草稿载荷只含引用（凭据/有效批准由 codec 拒绝），清理语义归 E-06。
+
+        转移 fence（``draft_transfer_ref``）门闩随 F-03-3 ``transfer_draft`` 落地：
+        当前无写入方，未决转移状态不可达，故本方法不改该列。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT。
+        """
+
+        self._check_engine()
+        try:
+            validate_draft_save_command(command)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                f"{command.command.user_scope}/{command.session_id}/{command.command.command_id}",
+            ) from exc
+        user_scope = command.command.user_scope
+        identity = f"{user_scope}/{command.session_id}/{command.command.command_id}"
+        digest = draft_save_input_digest(command)
+        payload_object = encode_draft_payload(command.payload)
+        command_record_id = stable_id("command", [user_scope, command.session_id, command.command.command_id])
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. 会话行锁（草稿 CAS 与命令幂等的线性化点）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.draft_revision)
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == command.session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "target session does not exist in user scope",
+                    identity,
+                )
+
+            # 2. 命令键查重（同键同输入查回原回执；异输入冲突）。
+            existing = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.input_digest,
+                        AgentCommand.receipt_payload,
+                    ).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.target_id == command.session_id,
+                        AgentCommand.client_command_id == command.command.command_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                if existing.input_digest != digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "same draft command key with different input",
+                        identity,
+                    )
+                if existing.receipt_payload is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "original draft receipt unavailable",
+                        identity,
+                    )
+                try:
+                    return decode_draft_receipt(existing.receipt_payload)
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        f"stored draft receipt invalid: {exc.code}",
+                        identity,
+                    ) from exc
+
+            # 3. CAS：预期版必须等于当前草稿版。
+            if session_row.draft_revision != command.expected_draft_revision:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "draft revision does not match expected",
+                    identity,
+                )
+
+            now = datetime.now(UTC)
+            next_revision = int(session_row.draft_revision) + 1
+            await conn.execute(
+                sa.update(AgentSession)
+                .where(
+                    AgentSession.user_scope == user_scope,
+                    AgentSession.session_id == command.session_id,
+                )
+                .values(
+                    draft_payload=payload_object,
+                    draft_revision=next_revision,
+                    revision=AgentSession.revision + 1,
+                    updated_at=now,
+                )
+            )
+            receipt = DraftReceipt(
+                session_id=command.session_id,
+                command_record_id=command_record_id,
+                commit_state=CommitState.COMMITTED,
+                draft_revision=next_revision,
+                verified_at=_wire_time(now),
+                error=None,
+            )
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope=user_scope,
+                    command_record_id=command_record_id,
+                    client_command_id=command.command.command_id,
+                    target_id=command.session_id,
+                    command_kind="save_draft",
+                    session_id=command.session_id,
+                    expected_revision=command.expected_draft_revision,
+                    input_digest=digest,
+                    request_payload=payload_object,
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.NOT_DELIVERED.value,
+                    consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                    receipt_payload=encode_draft_receipt(receipt),
+                    verified_at=now,
+                )
+            )
+            return receipt
