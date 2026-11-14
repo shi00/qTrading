@@ -36,6 +36,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -191,9 +192,10 @@ _BLOCK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 # Markdown 成对注释：开始带唯一 id；结束兼容仓库既有无 id 形态与显式 id 形态
 _MD_START_RE = re.compile(r"^<!--\s+generated:([A-Za-z0-9_-]*)\s+-->\s*$")
 _MD_END_RE = re.compile(r"^<!--\s+/generated(?::([A-Za-z0-9_-]*))?\s+-->\s*$")
-# YAML 成对注释：开始/结束均须带 id（无既有形态包袱，自定即严格）
-_YAML_START_RE = re.compile(r"^#\s+generated:([A-Za-z0-9_-]*)\s*$")
-_YAML_END_RE = re.compile(r"^#\s+/generated:([A-Za-z0-9_-]*)\s*$")
+# YAML 成对注释：开始/结束均须带 id（无既有形态包袱，自定即严格）。
+# 允许前置缩进：受控块常位于映射内部（如 .pre-commit-config.yaml 的 hook 片段）。
+_YAML_START_RE = re.compile(r"^\s*#\s+generated:([A-Za-z0-9_-]*)\s*$")
+_YAML_END_RE = re.compile(r"^\s*#\s+/generated:([A-Za-z0-9_-]*)\s*$")
 
 _BLOCK_FORMATS = ("markdown", "yaml")
 
@@ -550,6 +552,27 @@ _DOCS_README_TEXT_SCHEMA = SourceSchema(path="docs/README.md", fmt="text")
 _DOCS_GOVERNANCE_README_TEXT_SCHEMA = SourceSchema(path="docs/governance/README.md", fmt="text")
 _REDLINES_TEXT_SCHEMA = SourceSchema(path="docs/governance/redlines.yml", fmt="text")
 _CANONICAL_TOPICS_TEXT_SCHEMA = SourceSchema(path="docs/governance/canonical-topics.yml", fmt="text")
+# D23：pre-commit hook 隔离环境的 docs 解析依赖作者源 = pyproject [dependency-groups].docs。
+# 该组同时供 uv 编译 requirements-docs.txt 与 tests/docs 使用；hook 片段只派生运行脚本所需的
+# 解析依赖，排除纯测试运行器（pytest 及其插件）。
+_PYPROJECT_DOCS_SCHEMA = SourceSchema(path="pyproject.toml", fmt="text")
+_PRECOMMIT_DOCS_DEPS_INDENT = "          "  # hook 映射内 additional_dependencies 序列项缩进
+_REQUIREMENT_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _normalize_requirement_name(name: str) -> str:
+    """PEP 503 规范化包名（排序与 pytest 识别均以此为准）。"""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _is_test_only_requirement(name: str) -> bool:
+    """pytest 及其插件是 tests/docs 运行器，不进入 hook 运行依赖。"""
+    return name == "pytest" or name.startswith("pytest-")
+
+
+def _yaml_double_quote(value: str) -> str:
+    """以 YAML 双引号标量输出（保留作者源版本范围写法原文）。"""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _require_description(entry: dict[str, object]) -> str:
@@ -846,6 +869,44 @@ def _render_agents_task_routes(validated: dict[str, object], root: Path) -> list
     return lines
 
 
+def _render_precommit_docs_deps(validated: dict[str, object], root: Path) -> list[str]:
+    """两个 docs hook 的 additional_dependencies 片段（D23）：由 pyproject docs 组派生。
+
+    单一作者源：pyproject.toml ``[dependency-groups].docs``（uv 亦以此编译锁清单）。
+    排除 pytest 及其插件；其余条目保留版本范围写法原文，按规范化包名稳定排序，
+    保证「只改 docs 组一次，两个 hook 同时产生同一差异」。缺组/非字符串条目/排除后
+    为空均显式拒绝，不静默生成空依赖列表。
+    """
+    text = validated[_PYPROJECT_DOCS_SCHEMA.path]
+    assert isinstance(text, str)  # fmt=text 由 load_validated_source 保证
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SourceFormatError(f"作者源 {_PYPROJECT_DOCS_SCHEMA.path} TOML 解析失败: {exc}") from exc
+    groups = data.get("dependency-groups")
+    if not isinstance(groups, dict):
+        raise SourceFormatError(f"作者源 {_PYPROJECT_DOCS_SCHEMA.path} 缺 [dependency-groups] 表")
+    docs = groups.get("docs")
+    if not isinstance(docs, list):
+        raise SourceFormatError(f"作者源 {_PYPROJECT_DOCS_SCHEMA.path} 缺 dependency-groups.docs 列表")
+    derived: list[tuple[str, str]] = []
+    for index, item in enumerate(docs):
+        if not isinstance(item, str) or not item.strip():
+            raise SourceFormatError(f"作者源 {_PYPROJECT_DOCS_SCHEMA.path} docs 组第 {index} 条不是非空字符串")
+        requirement = item.strip()
+        match = _REQUIREMENT_NAME_RE.match(requirement)
+        if match is None:
+            raise SourceFormatError(f"作者源 {_PYPROJECT_DOCS_SCHEMA.path} docs 组无法解析需求: {requirement!r}")
+        name = _normalize_requirement_name(match.group(1))
+        if _is_test_only_requirement(name):
+            continue
+        derived.append((name, requirement))
+    if not derived:
+        raise SourceFormatError(f"作者源 {_PYPROJECT_DOCS_SCHEMA.path} docs 组排除 pytest 后为空")
+    derived.sort()
+    return [f"{_PRECOMMIT_DOCS_DEPS_INDENT}- {_yaml_double_quote(requirement)}" for _, requirement in derived]
+
+
 # 封闭目标清单（模块常量注册表）：激活条目 = 具备真实作者源的真实块；
 # 槽位条目（active=False）= 尚无作者源接线的目标，登记占位但不启用渲染。
 BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
@@ -898,13 +959,24 @@ BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
         block_format="markdown",
         active=False,
     ),
+    # —— D23 接线：hook 隔离环境的 docs 解析依赖由 pyproject [dependency-groups].docs 派生
+    #    （排除 pytest 及其插件；锁清单仍由 uv 编译）。两个 hook 各自的 additional_dependencies
+    #    列表为受控生成块，同一作者源变化必须同时反映到两处。 ——
     BlockSpec(
-        block_id="precommit-docs-parser-deps",
+        block_id="precommit-docs-deps-verify-versions",
         target=".pre-commit-config.yaml",
-        sources=(),
-        render=None,
+        sources=(_PYPROJECT_DOCS_SCHEMA,),
+        render=_render_precommit_docs_deps,
         block_format="yaml",
-        active=False,
+        active=True,
+    ),
+    BlockSpec(
+        block_id="precommit-docs-deps-docs-consistency",
+        target=".pre-commit-config.yaml",
+        sources=(_PYPROJECT_DOCS_SCHEMA,),
+        render=_render_precommit_docs_deps,
+        block_format="yaml",
+        active=True,
     ),
     # —— D6 接线：docs/README.md 文件级目录索引 / ADR 索引（作者源 = docs 树与文件自身标题；
     #      同一更新窗口内的受保护目标/作者源文件登记为 text 作者源经快照渲染，见上方 schema 注释）——

@@ -101,6 +101,20 @@ def test_scan_yaml_blocks() -> None:
     assert blocks["y-block"].content_lines == ("- 行一",)
 
 
+def test_scan_yaml_blocks_indented() -> None:
+    """正例：缩进的 YAML 成对注释块（hook 映射内部的受控片段）同样被识别。"""
+    text = (
+        "hooks:\n"
+        "  - id: x\n"
+        "    additional_dependencies:\n"
+        "      # generated:inner-block\n"
+        '      - "dep>=1"\n'
+        "      # /generated:inner-block\n"
+    )
+    blocks = dg.scan_blocks(text, "yaml")
+    assert blocks["inner-block"].content_lines == ('      - "dep>=1"',)
+
+
 def test_yaml_block_missing_end_rejected(tmp_path: Path) -> None:
     """负例（端到端）：YAML 目标缺结束标记（块未闭合）→ run_update 显式拒绝。"""
     root = tmp_path
