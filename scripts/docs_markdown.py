@@ -17,6 +17,7 @@
 公共 API（预留供 docs_generated.py / check_docs_consistency.py 复用）：
     parse_text(text) -> DocumentView
     load_document_view(path) -> DocumentView
+    split_source_lines(text) -> tuple[str, ...]   # 与解析器一致的行切分
     create_slugger() -> Slugger        # GitHub 锚点语义
     SLUGGER_BACKEND                    # 当前锚点实现后端声明
 """
@@ -48,6 +49,7 @@ __all__ = [
     "create_slugger",
     "load_document_view",
     "parse_text",
+    "split_source_lines",
 ]
 
 # 解析模式固定：CommonMark + table/strikethrough（检视 §5.1），模块级单例，
@@ -534,9 +536,24 @@ def _collect_unresolved(tokens: list[Token], defined_labels: set[str]) -> tuple[
     return tuple(unresolved)
 
 
+def split_source_lines(text: str) -> tuple[str, ...]:
+    """按解析器行语义切分原文（仅 LF / CRLF / CR 计为行界）。
+
+    markdown-it 在 normalize 阶段把 ``\r\n`` / ``\r`` 归一为 ``\n``，块级 token.map
+    也仅以 ``\n`` 计行；``str.splitlines`` 还会在 U+2028 / U+2029 等 Unicode 行分隔符
+    处切分，使扫描行号与 token.map 错位（围栏内的生成标记被误认为现行块）。
+    此处保持 Unicode 正文原样，只按解析器行界切分，保证行号与 token.map 一一对应。
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # 行界只分隔已有行，不产生末尾幽灵行
+    return tuple(lines)
+
+
 def parse_text(text: str) -> DocumentView:
     """解析 Markdown 文本，形成不可变文档视图（缓存限本次调用）。"""
-    source_lines = tuple(text.splitlines())
+    source_lines = split_source_lines(text)
     env: dict = {}
     tokens = _PARSER.parse(text, env)
 

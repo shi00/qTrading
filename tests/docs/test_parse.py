@@ -137,6 +137,25 @@ def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:
     assert decode_info.value.encoding == "utf-8"
 
 
+def test_unicode_line_separator_is_not_a_line_break(view_factory) -> None:
+    """U+2028/U+2029 是正文而非行界：视图行号与 token.map 对齐，围栏内容准确。"""
+    text = "a\u2028b\u2029c\n\n```py\nx = 1\n```\n"
+    view = view_factory(text)
+    assert view.source[0] == "a\u2028b\u2029c", "Unicode 行分隔符必须留在行内，不得被拆行"
+    assert view.code_line_numbers() == frozenset({3, 4, 5})
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
+
+
+def test_crlf_lines_align_with_token_map(view_factory) -> None:
+    """CRLF 原文：视图行号与 token.map 对齐（行尾归一不改变行序）。"""
+    text = "# 标题\r\n\r\n```py\r\nx = 1\r\n```\r\n\r\n尾行\r\n"
+    view = view_factory(text)
+    assert view.headings and view.headings[0].line == 1
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
+
+
 def test_view_immutable_and_slugger_backend_honest() -> None:
     """视图不可变；slugger 后端声明与实际返回类型一致（不假装用了不可用的包）。"""
     view = dm.parse_text("# t\n")
