@@ -230,16 +230,16 @@ def test_only_outside_registry_rejected(tmp_path: Path) -> None:
         dg.run_update(root, gf.make_demo_registry(), only=("ghost.md",))
 
 
-def test_unregistered_target_with_markers_untouched(tmp_path: Path) -> None:
-    """负例：未登记目标即使含合法生成块标记，也不被任何路径扫描写入（封闭清单）。"""
+def test_unregistered_target_with_markers_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：未登记目标即使含合法生成块标记，也不被任何路径扫描或写入（封闭清单）。"""
     root = gf.build_demo_tree(tmp_path)
     stray = root / "stray.md"
     stray.write_text("<!-- generated:demo-block -->\n旧内容\n<!-- /generated -->\n", encoding="utf-8")
+    before = stray.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
     result = dg.run_update(root, gf.make_demo_registry())
-    assert result.ok, f"登记目标应正常更新: {result}"
-    assert stray.read_text(encoding="utf-8").startswith("<!-- generated:demo-block -->\n旧内容"), (
-        "未登记目标被触碰=扫描到标记就能写，违反封闭清单"
-    )
+    assert result.ok is False and result.written == (), "原位写被拒绝时不得把目标记为已写"
+    assert stray.read_bytes() == before, "未登记目标被触碰=扫描到标记就能写，违反封闭清单"
 
 
 # ---------------------------------------------------------------------------
@@ -247,47 +247,69 @@ def test_unregistered_target_with_markers_untouched(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_update_renders_block_and_preserves_prose(tmp_path: Path) -> None:
-    """正例：块内容被渲染替换；块外手写正文逐字节保留。"""
+def test_update_renders_block_and_preserves_prose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """正例：块内容被渲染替换、块外手写正文逐字节保留；原位写被拒绝时文件保持原样。"""
     root = gf.build_demo_tree(tmp_path)
-    result = dg.run_update(root, gf.make_demo_registry())
-    assert result.ok, f"更新应成功: {result}"
-    assert result.written == (gf.DEMO_TARGET_REL,)
-    text = (root / gf.DEMO_TARGET_REL).read_text(encoding="utf-8")
+    target = root / gf.DEMO_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_demo_registry()[0])
+    text = dg.replace_block(original, "markdown", "demo-block", rendered)
     assert "<!-- generated:demo-block -->" in text
     assert "- R1：演示红线一" in text
     assert "- R2：演示红线二" in text
     assert "块外手写正文必须原样保留。" in text
     assert text.startswith("# 演示目标\n\n<!-- generated:demo-block -->\n")
 
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False and result.written == (), "拒绝原位写时不得记为已写"
+    assert target.read_bytes() == before, "拒绝原位写不得改动目标（含块外手写正文）"
 
-def test_update_yaml_target(tmp_path: Path) -> None:
-    """正例：YAML 目标块按 `# generated:<id>` 成对注释渲染替换。"""
+
+def test_update_yaml_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """正例：YAML 目标块按 `# generated:<id>` 成对注释渲染替换；原位写被拒绝时保持原样。"""
     root = gf.build_yaml_tree(tmp_path)
-    result = dg.run_update(root, gf.make_yaml_registry())
-    assert result.ok, f"更新应成功: {result}"
-    text = (root / gf.YAML_TARGET_REL).read_text(encoding="utf-8")
+    target = root / gf.YAML_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_yaml_registry()[0])
+    text = dg.replace_block(original, "yaml", "demo-yaml-block", rendered)
     assert "# generated:demo-yaml-block" in text
     assert "# /generated:demo-yaml-block" in text
     assert "- R1：演示红线一" in text
 
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_yaml_registry())
+    assert result.ok is False and result.written == ()
+    assert target.read_bytes() == before
 
-def test_render_output_cannot_write_outside_block(tmp_path: Path) -> None:
-    """负例：渲染输出携带越界路径不成立——渲染只产出行内容，写入受封闭清单与路径校验约束。"""
+
+def test_render_output_cannot_write_outside_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：渲染输出只产出行内容，不伪造块边界；原位写被拒绝时目标保持原样。"""
     root = gf.build_demo_tree(tmp_path)
-    result = dg.run_update(root, gf.make_demo_registry())
-    assert result.ok
-    # 二次确认：块标记行之外不新增 generated 标记（渲染输出不得伪造块边界）
-    text = (root / gf.DEMO_TARGET_REL).read_text(encoding="utf-8")
+    target = root / gf.DEMO_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_demo_registry()[0])
+    text = dg.replace_block(original, "markdown", "demo-block", rendered)
+    # 块标记行之外不新增 generated 标记（渲染输出不得伪造块边界）
     assert text.count("<!-- generated:") == 1
     assert text.count("<!-- /generated") == 1
 
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False and result.written == ()
+    assert target.read_bytes() == before
+
 
 def test_platform_import_guard() -> None:
-    """机制自检：docs_generated 在当前平台可导入且声明其保护后端（不静默伪装）。"""
+    """机制自检：docs_generated 在当前平台可导入且声明其保护/原位写后端（不静默伪装）。"""
     assert dg.PLATFORM_LOCK_BACKEND in ("win32-exclusive-open", "posix-advisory-unsupported")
     if sys.platform == "win32":
         assert dg.PLATFORM_LOCK_BACKEND == "win32-exclusive-open"
+    # D28：无已验证「保护 + 崩溃原子提交」方案前，所有平台的值都必须是拒绝态
+    assert dg.INPLACE_WRITE_BACKEND == "refused-unverified-atomic-commit"
 
 
 def test_docs_index_candidates_order_is_platform_independent(tmp_path: Path) -> None:

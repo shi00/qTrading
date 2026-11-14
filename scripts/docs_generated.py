@@ -23,6 +23,12 @@
 写者；POSIX ``flock`` 为协作锁，无法证明覆盖外部编辑器，故**拒绝原位更新**（退出 1），
 不把共享工作区默认为独占环境。后端声明见 ``PLATFORM_LOCK_BACKEND``，不静默伪装。
 
+崩溃原子提交边界（D28）：``ftruncate`` + 单次 ``write`` 的原位写无法同时保证「写入
+保护」与「崩溃原子提交」——截断后失败、短写或进程中断都会把整份目标（含块外手写
+正文）留在截断/半写状态。在任何平台方案被验证同时满足两者之前，``WriteGuard.write_bytes``
+**在任何字节变更前显式拒绝**，不截断、不写入、不静默降级；后端声明见
+``INPLACE_WRITE_BACKEND``。跨文件不承诺事务不等于单文件允许半写。
+
 错误处理：本模块为纯静态工具，文件读取/写入属直接传播边界外的显式拒绝域——所有
 合同违规以 ``DocsGeneratedError`` 子类显式抛出（含 ``FileNotFoundError`` 的转译），
 由调用方（check_docs_consistency.py）负责聚合与退出码映射。
@@ -42,12 +48,14 @@ from pathlib import Path
 
 __all__ = [
     "BUILTIN_REGISTRY",
+    "INPLACE_WRITE_BACKEND",
     "PLATFORM_LOCK_BACKEND",
     "BlockSpan",
     "BlockSpec",
     "DocsGeneratedError",
     "DuplicateBlockError",
     "EndMismatchError",
+    "InPlaceWriteUnsupportedError",
     "InvalidBlockIdError",
     "InvalidSpecError",
     "MissingBlockError",
@@ -174,6 +182,10 @@ class ProtectionDeniedError(ProtectionError):
 
 class ProtectionUnsupportedError(ProtectionError):
     """当前平台无法证明写入保护覆盖外部写者（POSIX 协作锁）→ 拒绝原位更新。"""
+
+
+class InPlaceWriteUnsupportedError(ProtectionError):
+    """无平台方案同时保证写入保护与崩溃原子提交 → 拒绝原位写入（不截断、不半写）。"""
 
 
 class SnapshotDriftError(DocsGeneratedError):
@@ -1003,6 +1015,9 @@ def verify_snapshot(snapshot: _Snapshot, guard: WriteGuard | None = None) -> Non
 
 
 PLATFORM_LOCK_BACKEND = "win32-exclusive-open" if sys.platform == "win32" else "posix-advisory-unsupported"
+# 原位写入后端声明：当前无已验证平台方案同时满足「写入保护」与「崩溃原子提交」，
+# 所有平台一律拒绝原位写入（D28），不以短写循环冒充崩溃原子性。
+INPLACE_WRITE_BACKEND = "refused-unverified-atomic-commit"
 
 if sys.platform == "win32":
     import ctypes
@@ -1030,8 +1045,8 @@ class WriteGuard:
     Windows：经 CreateFileW 以 dwShareMode=0 独占打开（GENERIC_READ|GENERIC_WRITE，
     OPEN_EXISTING）——保护期间任何其他进程对这些文件的打开（读/写/截断/替换，含
     编辑器保存的整写与 MoveFileEx 替换两条路径）均失败（ERROR_SHARING_VIOLATION），
-    实际覆盖外部写者；读取/写入/文件身份查询全部经持有句柄进行（锁定/独占期间
-    新开句柄不可用，核对通道必须走持有 fd，实测字节锁阻止区域内读写）。
+    实际覆盖外部写者；读取与文件身份查询经持有句柄进行（独占期间新开句柄不可用，
+    核对通道必须走持有 fd）。写入被显式拒绝：无已验证方案同时保证保护与崩溃原子提交。
     POSIX：flock 为协作锁，无法证明覆盖外部编辑器，取得后即显式拒绝原位更新。
     """
 
@@ -1130,14 +1145,16 @@ class WriteGuard:
         return (stat.st_dev, stat.st_ino)
 
     def write_bytes(self, path: Path, data: bytes) -> None:
-        """经持有 fd 原位替换写入（保护窗口内不释放保护）。"""
-        # NOTE(lazy): 受保护目标用 ftruncate+write 原位写，不用「临时文件 + os.replace」原子替换.
-        # ceiling: 不承诺崩溃原子性（ftruncate 后、write 前崩溃会留下截断/半写文件）；换来独占句柄与目标身份不脱钩.
-        # upgrade: 引入不破坏句柄身份的崩溃一致原位写方案，或放弃独占句柄保护改为临时文件+替换；在此之前不得宣称写入中断可原子回滚（ADR-0018 DEV-02）.
-        fd = self._fd_of(path)
-        os.ftruncate(fd, len(data))
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, data)
+        """拒绝原位写入：无已验证平台方案同时保证写入保护与崩溃原子提交（D28）。
+
+        旧实现（``ftruncate`` 到新长度后单次 ``os.write``）在截断后异常、短写或进程
+        中断时会把整份目标（含块外手写正文）留在截断/半写状态；补 write 循环只修
+        短写，不修截断后崩溃。因此在任何字节变更前显式拒绝：不截断、不写入、
+        不静默降级（``INPLACE_WRITE_BACKEND`` 如实声明该限制）。
+        """
+        raise InPlaceWriteUnsupportedError(
+            f"无法同时保证写入保护与崩溃原子提交，拒绝原位写入 {path.name}（目标未被截断或写入）"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1314,6 +1331,11 @@ def run_update(
                 except SnapshotDriftError as exc:
                     conflicts.append(rel)
                     conflict_reasons.append(str(exc))
+                except InPlaceWriteUnsupportedError as exc:
+                    # 原位写被拒绝（无已验证的崩溃原子提交方案）：该目标未写，
+                    # 如实列入 failed 并继续其余目标（不承诺跨文件事务）。
+                    failed.append(rel)
+                    conflict_reasons.append(f"{rel}: {exc}")
                 except PermissionError as exc:
                     # 提交核对后但替换前，屏障注入的写入尝试被独占保护阻止：
                     # 检出冲突——该目标原位未覆盖，如实报告

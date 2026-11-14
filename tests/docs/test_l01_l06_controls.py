@@ -17,6 +17,10 @@ r"""D12：L01—L06 长期控制合同控制测试（documentation-maintenance �
 - L03：条件一致性、禁止例能否阻断、完成门按实际触域启用（语义评审层）；
 - L04：证据的目标/版本/范围适用性重评（语义评审层）；
 - L05：草案/历史角色判定——同名或日期新不能自行升效力。
+
+写入替身边界（D28）：生产 `WriteGuard.write_bytes` 已拒绝原位写；本文件凡断言「更新
+成功」的控制点，均以 `gf.AtomicReplaceWriteGuard`（临时文件 + fsync + os.replace）替换
+写入后端，仅验证生成逻辑；生产拒绝与短写/截断/中断负例由 test_concurrency 覆盖。
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import check_docs_consistency as cdc  # noqa: E402
 import docs_generated as dg  # noqa: E402
 import docs_markdown as dm  # noqa: E402
+from fixtures import generator_fixtures as gf  # noqa: E402
 
 pytestmark = pytest.mark.docs_pure
 
@@ -53,6 +58,7 @@ def test_l01_hand_edit_derived_block_fails_check_and_recovers(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
 
     result = dg.run_update(root, registry)
     assert result.ok and "targets/derived.md" in result.written, "基线生成必须成功"
@@ -76,8 +82,10 @@ def test_l01_hand_edit_derived_block_fails_check_and_recovers(
 
 def test_l01_second_render_zero_diff_after_regen(
     generated_block_repo: tuple[Path, tuple[dg.BlockSpec, ...]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """作者源单次更新可重建派生；连续两次生成第二次零差异（L01 再现性）。"""
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     root, registry = generated_block_repo
     first = dg.run_update(root, registry)
     assert first.ok and first.written == ("targets/derived.md",)

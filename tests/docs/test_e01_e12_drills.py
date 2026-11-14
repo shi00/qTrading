@@ -24,6 +24,12 @@ E09 远端部分只做本地只读静态核验（合成夹具参照实现 + 真�
 - E10 → cdc.check_exceptions_yaml_consistency + AND 续效谓词（L10 参照实现，单写复用）
 - E11 → cdc._check_enforcement_invariants（声称自动化无证据不装绿）+ warning 分层
 - E12 → docs_markdown 统一视图（允许例/禁止例/停止分支保全；代码例不冒正文）
+
+写入替身边界（D28）：生产 `WriteGuard.write_bytes` 已在任何字节变更前拒绝原位写（无
+已验证方案同时保证写入保护与崩溃原子提交）。本文件凡断言「更新成功」的演习，均以
+`gf.AtomicReplaceWriteGuard`（同目录临时文件 + fsync + os.replace）替换写入后端，仅证明
+生成逻辑（发现/单源传播/块外保真）；生产拒绝与短写/截断/中断负例由
+test_concurrency 的 D28 用例覆盖，不把替身当作生产写入能力已恢复的证据。
 """
 
 from __future__ import annotations
@@ -90,6 +96,7 @@ def test_e01_new_file_discovered_index_registered_then_recovered(
 ) -> None:
     """正例：新正式文件经独立发现进入文件级目录（run_update 渲染索引块）→ 检查绿；
     负例（单变因）：tracked 新文件漏目录登记 → 失败归因 → 登记后恢复。"""
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     readme = git_doc_repo / "docs" / "README.md"
     readme.write_text(
         "# 索引\n\n- [indexed](./indexed.md)\n\n<!-- generated:e01-file-index -->\n<!-- /generated -->\n",
@@ -161,6 +168,7 @@ def test_e02_author_source_single_edit_propagates_with_zero_diff(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
 
     source = root / "sources" / "limits.yml"
     source.write_text("limits:\n  - id: max_rows\n    value: 300\n", encoding="utf-8")
@@ -179,6 +187,7 @@ def test_e02_copy_edit_rejected_and_attribution_points_at_block(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
 
     target = root / "targets" / "derived.md"
@@ -201,6 +210,7 @@ def test_e02_consistent_copies_without_author_source_rejected(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
     consistent_copy = (root / "targets" / "derived.md").read_text(encoding="utf-8")
 
@@ -266,6 +276,7 @@ def test_e04_delete_required_source_fails_loudly_then_recovers(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok and cdc.check_docs_generated() == [], "基线绿"
     backup = (root / "sources" / "limits.yml").read_text(encoding="utf-8")
 
@@ -297,6 +308,7 @@ def test_e04_migrate_consumers_then_delete_source_passes(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
 
     assert dg.run_update(root, ()).ok, "消费者已迁（登记摘除）后空注册表更新必须成功"
@@ -429,7 +441,7 @@ def test_e07_duplicate_nested_and_out_of_bounds_rejected(tmp_path: Path) -> None
         dg.run_update(root, (out_of_bounds,))
 
 
-def test_e07_write_interruption_lists_written_and_unwritten(tmp_path: Path) -> None:
+def test_e07_write_interruption_lists_written_and_unwritten(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """负例：写入中断（屏障注入磁盘错误）→ 非零退出语义，已写/未写如实分列，不伪装整体成功。"""
     root = tmp_path
     (root / "sources").mkdir()
@@ -438,6 +450,7 @@ def test_e07_write_interruption_lists_written_and_unwritten(tmp_path: Path) -> N
     (root / "b.md").write_text(gf.DEMO_TARGET.replace("demo-block", "demo-block-b"), encoding="utf-8")
     spec_a = dataclasses.replace(gf.make_demo_registry()[0], target="a.md", block_id="demo-block-a")
     spec_b = dataclasses.replace(gf.make_demo_registry()[0], target="b.md", block_id="demo-block-b")
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
 
     def barrier(phase: str, target_rel: str | None) -> None:
         if phase == "before_replace" and target_rel == "a.md":
@@ -484,6 +497,7 @@ def test_e07_hand_edited_prose_outside_block_preserved(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
 
     target = root / "targets" / "derived.md"
@@ -529,8 +543,9 @@ def test_e08_live_example_selected(tmp_path: Path) -> None:
     assert not any("N5" in e for e in errors), f"活示例被选择时不得误报: {errors}"
 
 
-def test_e08_inactive_stub_slot_allowed(tmp_path: Path) -> None:
+def test_e08_inactive_stub_slot_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """正例：有意空 stub（active=False 槽位）→ 不参与渲染、不误阻更新（stub 不误阻）。"""
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     root = gf.build_demo_tree(tmp_path)
     stub = dataclasses.replace(
         gf.make_demo_registry()[0], block_id="stub-slot", target="stub.md", render=None, active=False
