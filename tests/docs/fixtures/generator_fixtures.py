@@ -118,6 +118,9 @@ def build_yaml_tree(tmp_path: Path) -> Path:
     return tmp_path
 
 
+_O_BINARY = getattr(os, "O_BINARY", 0)  # 与生产 WriteGuard 一致：Windows 上禁用 CRT 文本模式翻译
+
+
 class HeldFdWriteGuard(dg.WriteGuard):
     """测试替身：模拟「写入保护已取得」的持有句柄状态（不提供真实平台独占保护）。
 
@@ -126,7 +129,7 @@ class HeldFdWriteGuard(dg.WriteGuard):
     """
 
     def __enter__(self) -> HeldFdWriteGuard:
-        self._fds = {path: os.open(str(path), os.O_RDWR) for path in self._paths}
+        self._fds = {path: os.open(str(path), os.O_RDWR | _O_BINARY) for path in self._paths}
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -144,7 +147,7 @@ class AtomicReplaceWriteGuard(dg.WriteGuard):
     """
 
     def __enter__(self) -> AtomicReplaceWriteGuard:
-        self._fds = {path: os.open(str(path), os.O_RDWR) for path in self._paths}
+        self._fds = {path: os.open(str(path), os.O_RDWR | _O_BINARY) for path in self._paths}
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -157,7 +160,7 @@ class AtomicReplaceWriteGuard(dg.WriteGuard):
             os.close(held)
         tmp = path.with_name(f".{path.name}.d28-test.tmp")
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY, 0o644)
             try:
                 view = memoryview(data)
                 while view:

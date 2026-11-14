@@ -311,6 +311,7 @@ def test_source_value_shapes_valid_accepted(tmp_path: Path) -> None:
     """正例：合法身份/标题/非空集合正常通过校验并渲染（防误伤）。"""
     root = gf.build_demo_tree(tmp_path)
     items = dg.load_validated_source(root, gf.demo_source_schema())
+    assert isinstance(items, list)
     assert [item["id"] for item in items if isinstance(item, dict)] == ["R1", "R2"]
     assert gf.demo_render({gf.DEMO_SOURCE_REL: items}, root) == ["- R1：演示红线一", "- R2：演示红线二"]
 
