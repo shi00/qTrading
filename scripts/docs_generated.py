@@ -46,6 +46,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import docs_markdown
+
 __all__ = [
     "BUILTIN_REGISTRY",
     "INPLACE_WRITE_BACKEND",
@@ -224,13 +226,20 @@ class BlockSpan:
 
 
 def _scan_markdown(text: str) -> dict[str, BlockSpan]:
-    """Markdown 成对注释块扫描（栈式配对；嵌套/孤儿/重复/未闭合显式拒绝）。"""
+    """Markdown 成对注释块扫描（栈式配对；嵌套/孤儿/重复/未闭合显式拒绝）。
+
+    代码块（两类围栏 + 长围栏 + 缩进块）内的生成标记只是示例文本，不构成现行块：
+    行号边界统一经 docs_markdown 解析视图判定，避免围栏中的标记被当作可修改块。
+    """
+    code_lines = docs_markdown.parse_text(text).code_line_numbers()
     blocks: dict[str, BlockSpan] = {}
     open_id: str | None = None
     open_start = 0
     open_tag = ""
     content: list[str] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
+        if lineno in code_lines:
+            continue
         start_match = _MD_START_RE.match(raw)
         end_match = _MD_END_RE.match(raw)
         if open_id is None:

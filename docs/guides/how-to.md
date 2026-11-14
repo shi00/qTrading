@@ -74,7 +74,7 @@
 4. **表注册**：在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册新表（表名、同步配置、质量监控配置）。
 5. **DAO 实现**：在 `data/persistence/daos/` 下创建对应 DAO，继承 `BaseDao`，使用 `_save_upsert()` 批量写入。
 6. **质量门控**：`data/sync` 层作为同步入口不挂 `@require_quality`，质量门控由业务消费方（`strategies/`）按数据质量声明；质量评分评估机制详见文末 [data-sync.md 质量门控](../patterns/data-sync.md#质量门控c15) 链接。
-7. **取消传播**：syncer 分块循环中检查 `cancel_event.is_set()`，主动退出时 `raise asyncio.CancelledError`（R2 红线）。
+7. **取消传播**：syncer 分块循环中检查 `cancel_event.is_set()`；真实取消异常必须原样向上传播（R2 红线，禁止吞没）。协作取消可经 `SyncResult.status=cancelled` 正常返回（统计结果不丢），由提交方适配器转为 `TaskCancelledError` 映射 `CANCELLED` 终态，不得算完成或伪装失败。
 8. **错误处理**：`except asyncio.CancelledError: raise`；`TushareAPIPermissionError` 捕获后跳过对应 API；其他异常经 `classify_error()` 分类。
 9. **测试**：在 `tests/unit/test_historical_sync.py` / `test_financial_sync.py` 等对应测试文件中补充用例，使用 mock TushareClient 隔离外部 API（[测试编写模板](../guides/testing.md#测试编写模板)）。
 
@@ -391,7 +391,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 1. **单例 vs 非单例判定**：读 [singleton-lifecycle.md](../architecture/singleton-lifecycle.md)「注册单例」与「非单例服务」两张表。持有全局共享状态 / 需跨调用点共享 / 是资源生命周期所有者 → `@register_singleton` + `_reset_singleton`（R15）；否则按需实例化 + 构造器注入（如 `BacktestService`）。改单例注册必须同步更新 singleton-lifecycle.md 表格。
 2. **错误分类**：挂 `classify_error()` + `classify_severity()`（CONTRIBUTING「错误处理标准模式」）；`system` 级上抛、`recoverable`/`operational` 层内降级；涉及外部 IO 的方法挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)`。
 3. **编排边界**：外部动作/定时触发用 `TaskManager.submit_task()`（协程内同步阻塞仍经 `ThreadPoolManager.run_async()`，R16）；周期性定时用 `SchedulerService`。
-4. **取消与生命周期**：轮询/长生命周期任务的优雅停止按 [exceptions.yml](../governance/exceptions.yml) EX-0017 豁免语义（吞 `EngineDisposedError` 停止轮询为合理设计）；`asyncio.CancelledError` 必须 `raise`（R2）。
+4. **取消与生命周期**：轮询/长生命周期任务的优雅停止须先核对 [exceptions.yml](../governance/exceptions.yml) EX-0017 的**具体登记范围及全部有效条件**（`paths` + `validity_criteria`，AND 语义见 ADR-0018 C15）；**新增轮询服务不能自动继承**该例外，须另按 R5 规则判断（确需偏离时依治理流程登记）；`asyncio.CancelledError` 必须 `raise`（R2）。
 5. **单测**：按 CONTRIBUTING「变更类型 → 最小验证子集」配套（R19）；Service 单测模板见 [testing.md](./testing.md)。
 6. **接线**：启动编排/调度注册按第 3 步边界接入（`app/` 层注入或 `SchedulerService.register_job`）。
 

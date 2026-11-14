@@ -19,6 +19,8 @@
 
 ### ViewModel 形态契约
 
+以下是**独立 Demo VM** 的形态契约示意：`DemoRow` / `DemoState` / `DemoViewModel` 均为示例自包含符号，**不是**生产 ViewModel。生产实现与真实字段以 [`ui/viewmodels/screener_view_model.py`](../../ui/viewmodels/screener_view_model.py) 与 `ui/viewmodels/screener_types.py` 的 `ScreenerState` 为准（见下节「桥接 hook 契约」的真实 API 示例）。
+
 ```python
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,8 +29,8 @@ from ui.viewmodels import Message  # 正本 core.i18n.Message（ui.viewmodels �
 
 
 @dataclass(frozen=True)
-class Row:
-    """行数据 frozen dataclass；tuple[Row, ...] 保证 state 不可变。"""
+class DemoRow:
+    """行数据 frozen dataclass；tuple[DemoRow, ...] 保证 state 不可变。"""
 
     code: str
     name: str
@@ -36,21 +38,21 @@ class Row:
 
 
 @dataclass(frozen=True)
-class ScreenerState:
-    rows: tuple[Row, ...]  # 不可变；DataFrame 转 tuple[Row, ...]，禁止 tuple[dict, ...]
+class DemoState:
+    rows: tuple[DemoRow, ...]  # 不可变；DataFrame 转 tuple[DemoRow, ...]，禁止 tuple[dict, ...]
     status: Message  # 带 params 的 i18n 消息
     loading: bool
 
 
-class ScreenerViewModel:
+class DemoViewModel:
     @property
-    def state(self) -> ScreenerState:
-        return ScreenerState(rows=tuple(...), status=Message(...), loading=...)
+    def state(self) -> DemoState:
+        return DemoState(rows=tuple(...), status=Message(...), loading=...)
 
     async def run(self) -> None: ...  # command（异步）
     def select_strategy(self, key: str) -> None: ...  # command（同步）
 
-    def subscribe(self, callback: Callable[[ScreenerState], None]) -> Callable[[], None]:
+    def subscribe(self, callback: Callable[[DemoState], None]) -> Callable[[], None]:
         """订阅 state 变更；返回退订函数。hook 用此注册，_notify 调用时触发。"""
         ...
 
@@ -62,7 +64,7 @@ class ScreenerViewModel:
 ```
 
 - `state` 必须不可变（frozen dataclass / NamedTuple / tuple）；内部状态变更后返回新 snapshot
-- `state` 字段不得用 `dict` / `list` / `DataFrame` 等可变类型；行数据用 `tuple[Row, ...]`（Row 为 frozen dataclass），DataFrame 在 VM 内部转换为 Row tuple
+- `state` 字段不得用 `dict` / `list` / `DataFrame` 等可变类型；行数据用 `tuple[DemoRow, ...]`（`DemoRow` 为 frozen dataclass），DataFrame 在 VM 内部转换为行 tuple
 - i18n 消息用 `Message(key, params)`，View 渲染时 `I18n.get(msg.key, **msg.params)`；VM 只产出 key+params，不感知当前 locale
 - `commands` 即 VM 实例方法，稳定引用；异步 command 在 View 事件处理器 `await`
 - VM 通过 `subscribe(callback) -> unsub` 暴露可观察性；`_notify()` 调用所有注册 callback，传入新 state snapshot；VM 不持有 View 引用，订阅关系由 `use_viewmodel` hook 建立
@@ -80,19 +82,33 @@ from ui.viewmodels.screener_view_model import ScreenerViewModel
 
 @ft.component
 def ScreenerView():
-    # factory= 模式：hook 实例化 VM，卸载时退订 + dispose
-    state, vm = use_viewmodel(ScreenerViewModel)  # 首次渲染实例化 + 订阅 _notify
+    # factory= 模式：hook 实例化 VM（ScreenerViewModel 为无参构造），卸载时退订 + dispose
+    state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())  # 首次渲染实例化 + 订阅 _notify
 
     async def on_run(e):
-        await vm.run()  # command -> _notify -> state 更新 -> 自动重渲染
+        strategy_key = state.selected_strategy  # ScreenerState.selected_strategy: str | None
+        if not strategy_key:  # 未选策略（None / 空串）不发起运行，与生产 _on_run_click 一致
+            return
+        await vm.run_strategy(  # command -> _notify -> state 更新 -> 自动重渲染
+            strategy_key,
+            params=dict(vm.state.strategy_params),
+            exclude_st=state.exclude_st,
+        )
+
+    # ScreenerState.status_message: Message | None —— 未运行/无状态消息时为 None
+    status = (
+        I18n.get(state.status_message.key, **state.status_message.params) if state.status_message is not None else ""
+    )
 
     return ft.Column(
         [
-            ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
+            ft.Text(status),  # Message 渲染
             ft.Button(I18n.get("run"), on_click=on_run),
         ]
     )
 ```
+
+> 上例与生产 View 的调用点对齐（见 [`ui/views/screener_view.py`](../../ui/views/screener_view.py) 的 `ScreenerView` 与 `_on_run_click`）：`run_strategy(strategy_key, save_results=True, params=None, exclude_st=True)` 的 `strategy_key` 为必填，`status_message` 可空。生产视图经 `_render_status_message(msg: Message | None)` 渲染状态文本，并额外把 params 中 `*_key` 后缀值按当前 locale 翻译；示例省略该细节以保持最小。
 
 `use_viewmodel` 契约（已实现，见 [ui/hooks.py](../../ui/hooks.py)，签名 `use_viewmodel(factory=None, *, vm=None, dispose_on_unmount=True) -> (state, vm)`）：
 
@@ -108,7 +124,7 @@ def ScreenerView():
 - 首次渲染：`factory()` 实例化 VM（内部模式）或直接使用传入的 `vm`（外部模式），调 `vm.subscribe(set_state)` 注册（保存返回的 unsub），返回 `(vm.state, vm)`
 - `_notify` 触发：VM 遍历订阅者调 `callback(self.state)`，hook 注册的 callback 即 `set_state(new_state)`，触发组件重渲染
 - 卸载时：`use_effect` 的显式 `cleanup=` 参数调 `unsub()` 退订；内部模式且 `dispose_on_unmount=True` 时额外调 `vm.dispose()`
-- `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: ScreenerViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) DI 原则）
+- `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: DemoViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) DI 原则）
 
 ### 状态归属决策表
 

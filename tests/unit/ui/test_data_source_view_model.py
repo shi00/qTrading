@@ -15,8 +15,8 @@ import pytest
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-from data.sync.base import SyncResult
-from services.task_manager import TaskManager, TaskStatus
+from data.sync.base import SyncResult, SyncStatus
+from services.task_manager import TaskCancelledError, TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
 from utils.config.secrets import SaveOutcome
@@ -538,6 +538,25 @@ class TestDataSourceViewModelFullDailySync:
         with pytest.raises(asyncio.CancelledError) as exc_info:
             await factory(task_id="task_123")
         assert isinstance(exc_info.value, asyncio.CancelledError)
+
+        _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
+        assert bound_vm.state.is_syncing is False
+        assert bound_vm.state.active_key is None
+
+    async def test_daily_sync_result_cancelled_raises_cancel_signal(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager
+    ):
+        """D02/C14：结果整体标 cancelled 且失败表为空 → 抛取消信号（TaskManager 映射 CANCELLED），
+        不得按「失败表为空」发成功提示或返回完成消息。"""
+        mock_processor.run_daily_update = AsyncMock(
+            return_value=SyncResult(added=10, status=SyncStatus.CANCELLED.value)
+        )
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+
+        with pytest.raises(TaskCancelledError) as exc_info:
+            await factory(task_id="task_123")
+        assert exc_info.value.description.key == "task_cancelled_desc"
 
         _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
         assert bound_vm.state.is_syncing is False

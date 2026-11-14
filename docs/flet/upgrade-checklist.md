@@ -177,7 +177,7 @@ args = (
 - [ ] **坑点2：合成 click 事件失效**：`flt-semantics` 节点仍不响应 Playwright `locator.click()` 合成事件，必须用 `page.mouse.click(bbox_center)` 物理鼠标点击
   - 验证方法：运行 1-2 个关键 E2E 用例（如 `test_run_screener_strategy`）确认 click 交互正常
   - 若失败：CanvasKit 开始响应合成事件，可评估简化 `anchor_page.py.click` 为 `locator.click()`（但需全量 E2E 验证）
-- [ ] **坑点3：Dropdown actionability 不稳定**：选项面板 `flt-semantics` 节点的 Playwright actionability check 仍不稳定，需 `force=True` 物理点击
+- [ ] **坑点3：Dropdown actionability 不稳定**：选项面板 `flt-semantics` 节点的 Playwright actionability check 仍不稳定，需 `ElementHandle.click(force=True)` 跳过该检查——`force=True` 仅跳过 actionability 检查，点击本身仍是 Playwright 合成事件（**不是**物理点击；抛 `Element is not visible` 时回落 `page.mouse.click(bbox 中心)`）。术语正本见 [canvaskit-rendering-e2e-guide.md](./canvaskit-rendering-e2e-guide.md) §3「点击语义速查」
   - 验证方法：运行含 Dropdown 交互的 E2E 用例（如 `test_settings_language_switch` 中的语言下拉选项路径）
   - 若失败：CanvasKit 改进了 actionability 稳定性，可评估移除 `force=True`（但需 Dropdown 相关 E2E 全量验证）
 
