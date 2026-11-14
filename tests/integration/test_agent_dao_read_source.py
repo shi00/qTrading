@@ -385,6 +385,37 @@ class TestReadSourceRepresentation:
         assert read.missing_reason == "representation_not_available"
         await dao.engine.dispose()  # type: ignore[union-attr]
 
+    @pytest.mark.parametrize(
+        ("state", "row_state", "body_visible"),
+        [
+            (ReadState.UNKNOWN, "unknown", False),
+            (ReadState.UNAVAILABLE, "unavailable", True),
+        ],
+    )
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_unknown_and_unavailable_states_keep_body_semantics(
+        self,
+        real_embedded_pg: ConnectionInfo,
+        state: ReadState,
+        row_state: str,
+        body_visible: bool,
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, ref=_source_ref(read_state=state), read_state=row_state, body_text="已存正文")
+
+        read = await dao.read_source(_query(), user_scope="u1")
+
+        assert read.read_state is state
+        assert read.body_text == ("已存正文" if body_visible else None)
+        if body_visible:
+            assert read.available is False
+            assert read.missing_reason == "source_unavailable"
+        else:
+            assert read.available is True
+            assert read.missing_reason == "representation_not_available"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
     @pytest.mark.asyncio(loop_scope="session")
     async def test_disabled_and_cleaned_source_not_available(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
