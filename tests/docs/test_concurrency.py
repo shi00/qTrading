@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,6 +70,47 @@ def test_guard_write_refused_before_mutation(tmp_path: Path) -> None:
         with pytest.raises(dg.InPlaceWriteUnsupportedError, match="崩溃原子提交"):
             guard.write_bytes(target, "更长的替换内容".encode())
     assert target.read_bytes() == original, "拒绝原位写前发生字节变更=可能截断/半写目标"
+
+
+@pytest.mark.skipif(not WIN, reason="内核级独占打开保护仅在 Windows 提供")
+def test_guard_blocks_independent_process(tmp_path: Path) -> None:
+    """独立进程在保护持有期间打开目标必须失败，且原稿未被改写（跨进程证据，非线程内替身）。"""
+    target = tmp_path / "f.md"
+    target.write_text("原稿", encoding="utf-8")
+    child = (
+        "import sys\n"
+        "path = sys.argv[1]\n"
+        "try:\n"
+        "    open(path, 'w', encoding='utf-8').write('外部进程新稿')\n"
+        "except OSError as exc:\n"
+        "    print(type(exc).__name__, file=sys.stderr)\n"
+        "    raise SystemExit(3)\n"
+    )
+    with dg.WriteGuard([target]):
+        run = subprocess.run(
+            [sys.executable, "-c", child, str(target)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    assert run.returncode == 3, f"独立进程在保护期间仍能写入（returncode={run.returncode}）"
+    assert "PermissionError" in run.stderr
+    assert target.read_text(encoding="utf-8") == "原稿", "保护期间的独立进程写入了旧快照之外的内容"
+
+
+@pytest.mark.skipif(not WIN, reason="内核级独占打开保护仅在 Windows 提供")
+def test_guard_release_preserves_external_edit(tmp_path: Path) -> None:
+    """保护释放后外部编辑生效并在再次取得保护时保留，不被旧快照回滚。"""
+    target = tmp_path / "f.md"
+    target.write_text("v1", encoding="utf-8")
+    with dg.WriteGuard([target]):
+        pass
+    target.write_text("释放后用户编辑", encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == "释放后用户编辑"
+    with dg.WriteGuard([target]):
+        pass
+    assert target.read_text(encoding="utf-8") == "释放后用户编辑", "再次加锁/释放不得回滚释放期间的编辑"
 
 
 # ---------------------------------------------------------------------------
