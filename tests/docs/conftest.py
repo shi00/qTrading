@@ -29,6 +29,42 @@ pytestmark = pytest.mark.docs_pure
 
 
 # ---------------------------------------------------------------------------
+# D24 双收集拒绝：按实际 collection 结果判定，而非实现对象 identity 静态比较
+# ---------------------------------------------------------------------------
+def _collected_function(item: pytest.Item) -> object | None:
+    """取 item 的底层测试函数对象；unittest 绑定方法折叠到 ``__func__``。"""
+    obj = getattr(item, "obj", None)
+    return getattr(obj, "__func__", obj)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """同一测试函数被多个文件收集时显式拒绝。
+
+    新旧入口互为 re-export 时，pytest 会为同一函数对象生成两个节点名（不同文件），
+    identity 相同并不会自动去重。本钩子按实际收集到的 item 与其文件路径判定：
+    同一函数对象出现在两个及以上文件中（且至少一端位于 tests/docs）即拒绝，避免把
+    重复执行计为覆盖增长；同一文件内的参数化用例共享函数对象但路径相同，不误报。
+    """
+    del config
+    paths_by_function: dict[object, set[str]] = {}
+    for item in items:
+        function = _collected_function(item)
+        if function is None:
+            continue
+        paths_by_function.setdefault(function, set()).add(str(item.path))
+    docs_dir = Path(__file__).resolve().parent
+    duplicates = sorted(
+        " / ".join(sorted(paths))
+        for paths in paths_by_function.values()
+        if len(paths) > 1 and any(Path(path).is_relative_to(docs_dir) for path in paths)
+    )
+    if duplicates:
+        raise pytest.UsageError(
+            "检测到双收集：同一测试函数被多个文件收集，请分别运行业务套件与独立 docs 套件：\n" + "\n".join(duplicates)
+        )
+
+
+# ---------------------------------------------------------------------------
 # D12 生成保护控制测试共用夹具（L01 唯一作者源 / L07 生成保护边界）
 # ---------------------------------------------------------------------------
 
