@@ -375,6 +375,30 @@ def _view_effective_text(view: docs_markdown.DocumentView) -> str:
     return "\n".join(line for _, line in _view_effective_lines(view))
 
 
+def _view_prose_lines(view: docs_markdown.DocumentView) -> list[tuple[int, str]]:
+    """非代码块正文行，行内代码 span 按共享区间置空 [(1-based 行号, 文本)]。
+
+    D39：合法行内代码示例（如 `` `CONTRIBUTING.md「__missing__」` ``）不是规范引用，
+    不得参与书名号章节门禁。区间来自解析视图 ``code_span_ranges``（与围栏判定同一
+    解析事实），本函数只做字符区间掩蔽，不重建 Markdown 语法。
+    """
+    ranges_by_line: dict[int, list[docs_markdown.CodeSpanRange]] = {}
+    for span in view.code_span_ranges:
+        ranges_by_line.setdefault(span.line, []).append(span)
+    rows: list[tuple[int, str]] = []
+    for line_no, line in _view_effective_lines(view):
+        spans = ranges_by_line.get(line_no)
+        if spans:
+            chars = list(line)
+            for span in spans:
+                start = max(0, min(span.start, len(chars)))
+                end = max(start, min(span.end, len(chars)))
+                chars[start:end] = " " * (end - start)
+            line = "".join(chars)
+        rows.append((line_no, line))
+    return rows
+
+
 @lru_cache(maxsize=1024)
 def _load_doc_view_cached(path_str: str, mtime_ns: int, size: int) -> docs_markdown.DocumentView:
     """路径+mtime+size 键控的视图缓存：main() 中同一文档被多个检查复用，避免重复解析。
@@ -4331,6 +4355,8 @@ def check_guillemet_references() -> list[str]:
     匹配规则：目标标题等于章节名，或目标标题以「：」+ 章节名 结尾（容忍「第三部分：实现规范手册」
     这类「第 N 部分」前缀修饰）。markdown 链接 `[text「章节」](./path#anchor)` 内的书名号
     由锚点门禁 check_anchor_dead_links 覆盖，本检查跳过（避免重复报警与「链接文本 ≠ 标题」误报）。
+    行内代码（code span）与围栏/缩进代码块内的同名形态属于代码示例，经共享解析视图
+    排除（D39），真实正文缺节仍报错。
     目标解析：先按仓库根相对解析；裸文件名（无目录前缀）解析不到时回落到 docs/、man/、
     requirements/ 内同名候选，多候选时任一候选含同名标题即视为有效引用（H1）。
     """
@@ -4342,10 +4368,10 @@ def check_guillemet_references() -> list[str]:
             continue
         view = _load_doc_view(doc)
         # 剔除 markdown 链接 `[text](url)`，链接内书名号由锚点门禁覆盖。
-        # D5 迁移：代码块边界来自统一解析视图（_view_effective_lines）；链接形态剔除
-        # 逐行做（行级文本准备，非结构解析）——inline token 的行号是段落起始行
-        # （多行段落 lazy continuation），按链接行号剔除会漏掉段落后续物理行。
-        for line_no, line in _view_effective_lines(view):
+        # D5/D39 迁移：围栏边界与行内代码区间均来自统一解析视图（_view_prose_lines）；
+        # 链接形态剔除逐行做（行级文本准备，非结构解析）——inline token 的行号是
+        # 段落起始行（多行段落 lazy continuation），按链接行号剔除会漏掉段落后续物理行。
+        for line_no, line in _view_prose_lines(view):
             text = _strip_md_links_from_line(line)
             for m in _GUILLEMET_REF_PATTERN.finditer(text):
                 raw_path, section = m.group(1), m.group(2).strip()

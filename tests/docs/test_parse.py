@@ -149,3 +149,39 @@ def test_view_immutable_and_slugger_backend_honest() -> None:
         assert type(slugger).__module__.startswith("github_slugger"), type(slugger)
     else:
         assert isinstance(slugger, dm.CompatGithubSlugger), type(slugger)
+
+
+def test_code_span_ranges_map_to_physical_source(view_factory) -> None:
+    """组 7（D39）：行内代码区间按物理源行列映射（同段多 span、列表/表格、跨行）。
+
+    区间必须可直接切片原文（含定界反引号）：同段多个 span 互不吞并，表格单元格
+    与跨行 span 逐物理行切分；转义/未闭合反引号按 CommonMark 普通文字处理，不产生区间。
+    """
+    text = (
+        "正文 `a.md「x」` 与 `b.md「y」` 以及 C.md「z」\n"
+        "\n"
+        "- 列表 `l.md「p」`\n"
+        "  续行 `m.md「q」`\n"
+        "\n"
+        "| 列1 | 列2 |\n"
+        "| --- | --- |\n"
+        "| `f.md「u」` | 文本 `g.md「v」` |\n"
+        "\n"
+        "跨行 `CONTRIBUTING.md「__missing__\n"
+        "仍代码」` 结束\n"
+        "\n"
+        "转义 \\`e.md「w」\\` 与未闭合 `x.md「v」\n"
+    )
+    view = view_factory(text)
+    slices = [(r.line, view.source[r.line - 1][r.start : r.end]) for r in view.code_span_ranges]
+    assert slices == [
+        (1, "`a.md「x」`"),
+        (1, "`b.md「y」`"),
+        (3, "`l.md「p」`"),
+        (4, "`m.md「q」`"),
+        (8, "`f.md「u」`"),
+        (8, "`g.md「v」`"),
+        (10, "`CONTRIBUTING.md「__missing__"),
+        (11, "仍代码」`"),
+    ], slices
+    assert "C.md「z」" in view.source[0]

@@ -47,6 +47,7 @@ __all__ = [
     "SLUGGER_BACKEND_DEVIATION_DETAIL",
     "CodeBlockInfo",
     "CodeSpanInfo",
+    "CodeSpanRange",
     "CompatGithubSlugger",
     "DocumentView",
     "HeadingInfo",
@@ -336,6 +337,20 @@ class CodeSpanInfo:
 
 
 @dataclass(frozen=True)
+class CodeSpanRange:
+    """行内代码 span 在物理源行上的精确区间（1-based 行，0-based 半开字符列）。
+
+    与 ``CodeSpanInfo``（显示文本 + 段落起始行）不同，本结构给出可切片的区间，
+    供消费者按共享解析事实排除行内代码。列号以该行原文（``DocumentView.source``）
+    为基准，已对齐列表/引用块前缀与表格单元格的物理位置。
+    """
+
+    line: int
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
 class DocumentView:
     """一次解析形成的不可变文档视图（frozen dataclass，全部字段为 tuple）。"""
 
@@ -346,6 +361,7 @@ class DocumentView:
     html_ids: tuple[HtmlIdInfo, ...]
     code_blocks: tuple[CodeBlockInfo, ...]
     code_spans: tuple[CodeSpanInfo, ...]
+    code_span_ranges: tuple[CodeSpanRange, ...]
     reference_definitions: tuple[ReferenceDefInfo, ...]
     raw_html_tokens: tuple[tuple[str, int], ...]  # (原 HTML 内容, 所在行)
 
@@ -514,6 +530,82 @@ def _collect_code_spans(tokens: list[Token]) -> tuple[CodeSpanInfo, ...]:
     return tuple(spans)
 
 
+def _code_span_char_ranges(raw: str) -> list[tuple[int, int]]:
+    """原始 inline 源中行内代码 span 的字符区间（含定界反引号，半开）。
+
+    CommonMark 词法：n 个反引号开启、等长反引号串闭合；反斜杠转义的反引号不
+    开启 span；未闭合的反引号串按普通文字处理（不掩蔽）。与 ``_syntax_stream``
+    共用 ``_find_closing_backticks``，不引入第二次 Markdown 解析。
+    """
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    length = len(raw)
+    while index < length:
+        char = raw[index]
+        if char == "\\" and index + 1 < length:
+            index += 2
+            continue
+        if char != "`":
+            index += 1
+            continue
+        run_end = index
+        while run_end < length and raw[run_end] == "`":
+            run_end += 1
+        run = raw[index:run_end]
+        close = _find_closing_backticks(raw, run, run_end)
+        if close is None:
+            index = run_end
+            continue
+        end = close + len(run)
+        ranges.append((index, end))
+        index = end
+    return ranges
+
+
+def _collect_code_span_ranges(tokens: list[Token], source_lines: tuple[str, ...]) -> tuple[CodeSpanRange, ...]:
+    """行内代码 span 的物理源行区间（跨行 span 按物理行切分）。
+
+    inline token 的 content 是剥离列表/引用块前缀后的原始源，起始行由 token.map
+    给出；逐行在该物理源行内定位对应片段，得到可直接切片的列区间。表格一行含
+    多个 inline token（每单元格一个），按出现顺序推进该行的搜索游标。
+    """
+    ranges: list[CodeSpanRange] = []
+    cursors: dict[int, int] = {}
+    for token in tokens:
+        if token.type != "inline" or not token.map:
+            continue
+        raw = token.content or ""
+        char_spans = _code_span_char_ranges(raw)
+        base_line = token.map[0] + 1
+        segment_start = 0
+        for offset, segment in enumerate(raw.split("\n")):
+            segment_end = segment_start + len(segment)
+            line_no = base_line + offset
+            if line_no > len(source_lines) or not segment:
+                segment_start = segment_end + 1
+                continue
+            source_line = source_lines[line_no - 1]
+            cursor = cursors.get(line_no, 0)
+            found = source_line.find(segment, cursor)
+            if found < 0:
+                found = source_line.find(segment)
+            if found >= 0:
+                cursors[line_no] = found + len(segment)
+                for start, end in char_spans:
+                    left = max(start, segment_start)
+                    right = min(end, segment_end)
+                    if left < right:
+                        ranges.append(
+                            CodeSpanRange(
+                                line=line_no,
+                                start=found + (left - segment_start),
+                                end=found + (right - segment_start),
+                            )
+                        )
+            segment_start = segment_end + 1
+    return tuple(ranges)
+
+
 def _collect_code_blocks(tokens: list[Token]) -> tuple[CodeBlockInfo, ...]:
     """代码块：围栏（fence，含 markup ```/~~~）与缩进块（code_block）。"""
     blocks: list[CodeBlockInfo] = []
@@ -666,6 +758,7 @@ def parse_text(text: str) -> DocumentView:
     html_ids, raw_html, html_links = _collect_html(tokens)
     code_blocks = _collect_code_blocks(tokens)
     code_spans = _collect_code_spans(tokens)
+    code_span_ranges = _collect_code_span_ranges(tokens, source_lines)
     defined_labels = {
         str(label)
         for label in env.get("references", {})  # 键已为大写折叠形态
@@ -714,6 +807,7 @@ def parse_text(text: str) -> DocumentView:
         html_ids=tuple(html_ids),
         code_blocks=code_blocks,
         code_spans=code_spans,
+        code_span_ranges=code_span_ranges,
         reference_definitions=definitions,
         raw_html_tokens=tuple(raw_html),
     )
