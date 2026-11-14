@@ -31,6 +31,8 @@ from core.agent_types import (
     CommandRef,
     EventPage,
     EventReadQuery,
+    OperationRead,
+    OperationReadQuery,
     ResearchEvent,
     ResearchSnapshot,
     SessionRead,
@@ -113,6 +115,16 @@ class AgentService:
 
         self._require_open("read_artifact")
         return await self._dao.read_artifact(query, user_scope=user_scope)
+
+    async def read_operation(self, query: OperationReadQuery, *, user_scope: str) -> OperationRead:
+        """公开过程/完整工具返回（§4.2）：调用元数据与 effect/io 事实单列。
+
+        ``unknown`` 原样返回且不给结果（不猜成功/失败）；大结果按 ``result_ref``
+        正文游标分页；身份不符为 ``INPUT_INVALID``。
+        """
+
+        self._require_open("read_operation")
+        return await self._dao.read_operation(query, user_scope=user_scope)
 
     def observe_session(
         self,

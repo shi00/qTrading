@@ -80,6 +80,7 @@ from core.agent_types import (
     DeliveryState,
     DispatchCloseFact,
     DispatchCloseRequest,
+    EffectState,
     EventFact,
     EventKind,
     EventPayloadKind,
@@ -96,7 +97,10 @@ from core.agent_types import (
     MessagePageItem,
     NON_RECOVERABLE_DISPLAY_STATES,
     OPEN_OPERATION_PHASES,
+    OPERATION_PHASES,
     Observation,
+    OperationRead,
+    OperationReadQuery,
     OperationSummary,
     ReadMarkCommand,
     ReadMarkEntry,
@@ -175,6 +179,7 @@ from core.agent_types import (
     parse_history_cursor,
     validate_artifact_read_query,
     validate_history_query,
+    validate_operation_read_query,
     derive_accept_identity,
     derive_data_consent_command_identity,
     derive_data_consent_revoke_identity,
@@ -823,10 +828,8 @@ class AgentDao(BaseDao):
                     conn,
                     user_scope=user_scope,
                     body_ref=row.body_ref,
-                    owner_kind="asset",
-                    owner_id=query.source_id,
-                    owner_version=query.version,
                     identity=identity,
+                    owner=("asset", query.source_id, query.version),
                 )
             missing_reason = source_ref.missing_reason
             if body_text is None and missing_reason is None:
@@ -964,12 +967,14 @@ class AgentDao(BaseDao):
         *,
         user_scope: str,
         body_ref: str,
-        owner_kind: str,
-        owner_id: str,
-        owner_version: str,
         identity: str,
+        owner: tuple[str, str, str] | None = None,
     ) -> str:
-        """重建单块正文（§9.10.1）：核 owner/编码/长度/SHA-256，失败报不可得。"""
+        """重建单块正文（§9.10.1）：核 owner/编码/长度/SHA-256，失败报不可得。
+
+        ``owner=None`` 用于只按引用读取的大结果（工具返回等）：此时核载荷自身
+        owner 三元组与 FK 列自洽，不假定引用方类型。
+        """
 
         row = (
             await conn.execute(
@@ -977,6 +982,11 @@ class AgentDao(BaseDao):
                     AgentBodyPayload.owner_kind,
                     AgentBodyPayload.owner_id,
                     AgentBodyPayload.owner_version,
+                    AgentBodyPayload.message_id,
+                    AgentBodyPayload.artifact_id,
+                    AgentBodyPayload.artifact_version,
+                    AgentBodyPayload.asset_id,
+                    AgentBodyPayload.asset_version,
                     AgentBodyPayload.encoding,
                     AgentBodyPayload.payload_bytes,
                     AgentBodyPayload.byte_length,
@@ -990,15 +1000,29 @@ class AgentDao(BaseDao):
         if row is None:
             raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload is missing", identity)
         data = bytes(row.payload_bytes)
-        if (
-            row.owner_kind != owner_kind
-            or row.owner_id != owner_id
-            or row.owner_version != owner_version
-            or row.encoding != "utf-8"
-        ):
-            raise AgentServiceError(
-                AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload owner or encoding mismatch", identity
+        if owner is None:
+            consistent = (
+                (row.owner_kind == "message" and row.message_id == row.owner_id and row.owner_version == "1")
+                or (
+                    row.owner_kind == "artifact"
+                    and row.artifact_id == row.owner_id
+                    and row.artifact_version is not None
+                    and row.owner_version == str(row.artifact_version)
+                )
+                or (
+                    row.owner_kind == "asset"
+                    and row.asset_id == row.owner_id
+                    and row.asset_version == row.owner_version
+                )
             )
+            if not consistent:
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload owner is inconsistent", identity
+                )
+        elif row.owner_kind != owner[0] or row.owner_id != owner[1] or row.owner_version != owner[2]:
+            raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload owner mismatch", identity)
+        if row.encoding != "utf-8":
+            raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload encoding mismatch", identity)
         if row.byte_length != len(data) or sha256_hex(data) != row.payload_digest:
             raise AgentServiceError(
                 AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload length or digest mismatch", identity
@@ -1081,10 +1105,8 @@ class AgentDao(BaseDao):
                     conn,
                     user_scope=user_scope,
                     body_ref=row.body_ref,
-                    owner_kind="artifact",
-                    owner_id=item.artifact_id,
-                    owner_version=str(item.artifact_version),
                     identity=identity,
+                    owner=("artifact", item.artifact_id, str(item.artifact_version)),
                 )
             body_available = body_text is not None
             next_cursor: str | None = None
@@ -1121,6 +1143,168 @@ class AgentDao(BaseDao):
                 body_text=body_text,
                 next_cursor=next_cursor,
                 body_available=body_available,
+                unavailable_reason=unavailable_reason,
+            )
+
+    # ------------------------------------------------------------------
+    # F-02-3：操作精确读取（§4.2 read_operation）
+    # ------------------------------------------------------------------
+
+    async def read_operation(self, query: OperationReadQuery, *, user_scope: str) -> OperationRead:
+        """读调用元数据与已保存返回（§4.2/§9.9）：effect/io 事实单列，unknown 不猜。
+
+        - 不存在/跨用户 → ``INPUT_INVALID``；查询给出的执行/轮次/工具调用与行不符
+          亦拒绝（不借 operation_id 放行他人他轮事实）；
+        - 坏枚举/坏行 → ``OPERATION_UNKNOWN``；``phase='unknown'`` 或
+          ``effect_state='unknown'`` 原样返回并置 ``result_available=False``；
+        - 返回体优先取 ``result_ref`` 同库正文（核 owner 自洽/编码/长度/SHA-256，
+          按码点分页），否则取 ``result_payload`` 原子；``result_saved`` 却两者皆空
+          按坏行拒绝，不用空结果冒充成功。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{query.operation_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        try:
+            validated = validate_operation_read_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.session_id,
+                        AgentOperation.execution_id,
+                        AgentOperation.round_id,
+                        AgentOperation.tool_call_id,
+                        AgentOperation.workflow_id,
+                        AgentOperation.step_id,
+                        AgentOperation.call_kind,
+                        AgentOperation.ordinal,
+                        AgentOperation.phase,
+                        AgentOperation.effect_state,
+                        AgentOperation.io_state,
+                        AgentOperation.owner_epoch,
+                        AgentOperation.run_epoch,
+                        AgentOperation.grant_id,
+                        AgentOperation.grant_revision,
+                        AgentOperation.parameter_digest,
+                        AgentOperation.request_ref,
+                        AgentOperation.result_ref,
+                        AgentOperation.result_payload,
+                        AgentOperation.worker_refs,
+                        AgentOperation.deadline_at,
+                        AgentOperation.dispatched_at,
+                        AgentOperation.exited_at,
+                        AgentOperation.verified_at,
+                        AgentOperation.active_ms,
+                        AgentOperation.elapsed_ms,
+                        AgentOperation.error_code,
+                        AgentOperation.error_category,
+                        AgentOperation.artifact_id,
+                        AgentOperation.artifact_version,
+                        AgentOperation.updated_at,
+                        AgentOperation.revision,
+                    ).where(
+                        AgentOperation.user_scope == user_scope,
+                        AgentOperation.operation_id == validated.operation_id,
+                    )
+                )
+            ).first()
+            if row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "operation not found in user scope", identity)
+            if row.phase not in OPERATION_PHASES:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN, f"unreadable operation phase: {row.phase}", identity
+                )
+            try:
+                effect_state = EffectState(row.effect_state)
+            except ValueError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"unreadable operation effect_state: {type(exc).__name__}",
+                    identity,
+                ) from exc
+            if (
+                (validated.execution_id is not None and row.execution_id != validated.execution_id)
+                or (validated.round_id is not None and row.round_id != validated.round_id)
+                or (validated.tool_call_id is not None and row.tool_call_id != validated.tool_call_id)
+            ):
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "operation does not belong to requested scope", identity
+                )
+            result_text: str | None = None
+            next_cursor: str | None = None
+            unavailable_reason: str | None = None
+            if row.phase == "unknown" or row.effect_state == "unknown":
+                unavailable_reason = "effect_unknown"
+            elif row.result_ref is not None:
+                body_text = await self._read_body_text(
+                    conn, user_scope=user_scope, body_ref=row.result_ref, identity=identity
+                )
+                try:
+                    result_text, next_cursor = slice_body_page(
+                        body_text, cursor=validated.body_cursor, prefix="o", limit=validated.limit
+                    )
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity
+                    ) from exc
+            elif row.result_payload is not None:
+                try:
+                    result_text, next_cursor = slice_body_page(
+                        json_doc(row.result_payload), cursor=validated.body_cursor, prefix="o", limit=validated.limit
+                    )
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity
+                    ) from exc
+            elif row.phase == "result_saved":
+                raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "result_saved without saved return", identity)
+            elif row.phase == "failed_confirmed":
+                unavailable_reason = "failed_confirmed"
+            else:
+                unavailable_reason = "result_pending"
+            return OperationRead(
+                operation_id=validated.operation_id,
+                session_id=row.session_id,
+                execution_id=row.execution_id,
+                round_id=row.round_id,
+                tool_call_id=row.tool_call_id,
+                workflow_id=row.workflow_id,
+                step_id=row.step_id,
+                call_kind=row.call_kind,
+                ordinal=row.ordinal,
+                phase=row.phase,
+                effect_state=effect_state,
+                io_state=row.io_state,
+                owner_epoch=row.owner_epoch,
+                run_epoch=row.run_epoch,
+                grant_id=row.grant_id,
+                grant_revision=row.grant_revision,
+                parameter_digest=row.parameter_digest,
+                request_ref=row.request_ref,
+                result_ref=row.result_ref,
+                result_payload=json_doc(row.result_payload) if row.result_payload is not None else None,
+                worker_refs=json_doc(row.worker_refs) if row.worker_refs is not None else None,
+                deadline_at=self._opt_wire_time(row.deadline_at),
+                dispatched_at=self._opt_wire_time(row.dispatched_at),
+                exited_at=self._opt_wire_time(row.exited_at),
+                verified_at=self._opt_wire_time(row.verified_at),
+                active_ms=row.active_ms,
+                elapsed_ms=row.elapsed_ms,
+                error_code=row.error_code,
+                error_category=row.error_category,
+                artifact_id=row.artifact_id,
+                artifact_version=row.artifact_version,
+                updated_at=_wire_time(row.updated_at),
+                revision=row.revision,
+                result_text=result_text,
+                next_cursor=next_cursor,
+                result_available=result_text is not None,
                 unavailable_reason=unavailable_reason,
             )
 

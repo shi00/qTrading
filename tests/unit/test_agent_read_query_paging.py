@@ -129,6 +129,10 @@ class _RecordingDao:
         self.calls.append(("artifact", query.artifact_id, user_scope))
         return "artifact-sentinel"
 
+    async def read_operation(self, query: OperationReadQuery, *, user_scope: str) -> Any:
+        self.calls.append(("operation", query.operation_id, user_scope))
+        return "operation-sentinel"
+
 
 class TestAgentServiceReadArtifact:
     @pytest.mark.asyncio
@@ -146,4 +150,23 @@ class TestAgentServiceReadArtifact:
 
         with pytest.raises(AgentServiceError) as excinfo:
             await service.read_artifact(_artifact_query(), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+
+class TestAgentServiceReadOperation:
+    @pytest.mark.asyncio
+    async def test_read_operation_delegates(self) -> None:
+        dao = _RecordingDao()
+        service = AgentService(dao)  # type: ignore[arg-type]
+
+        assert await service.read_operation(_operation_query(), user_scope="u1") == "operation-sentinel"
+        assert dao.calls == [("operation", "op-1", "u1")]
+
+    @pytest.mark.asyncio
+    async def test_closed_service_rejects(self) -> None:
+        service = AgentService(_RecordingDao())  # type: ignore[arg-type]
+        await service.aclose()
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.read_operation(_operation_query(), user_scope="u1")
         assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
