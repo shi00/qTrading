@@ -128,6 +128,8 @@ from core.agent_types import (
     SOURCE_REGISTRATION_CONSUMER_KINDS,
     SaveAnswerRequest,
     SelectedRange,
+    SessionChangeCommand,
+    SessionAction,
     SessionRead,
     SessionReadQuery,
     SessionSummary,
@@ -175,7 +177,10 @@ from core.agent_types import (
     draft_save_input_digest,
     encode_draft_payload,
     encode_draft_receipt,
+    encode_session_change_command,
+    session_change_input_digest,
     validate_draft_save_command,
+    validate_session_change_command,
     encode_command_receipt,
     encode_data_consent_binding,
     encode_data_consent_claim,
@@ -6543,6 +6548,171 @@ class AgentDao(BaseDao):
                     delivery_state=DeliveryState.NOT_DELIVERED.value,
                     consumption_state=ConsumptionState.NOT_CONSUMED.value,
                     receipt_payload=encode_draft_receipt(receipt),
+                    verified_at=now,
+                )
+            )
+            return receipt
+
+    # ------------------------------------------------------------------
+    # F-03-2：会话元数据命令（§4.2 change_session / §9.3）
+    # ------------------------------------------------------------------
+
+    async def change_session(self, command: SessionChangeCommand) -> CommandReceipt:
+        """会话元数据 CAS 命令（§4.2 ``change_session``）：**单个显式事务**。
+
+        语义：
+
+        - ``create``：预期会话版 0；同 ``session_id`` 已存在 → ``INPUT_INVALID``
+          （目标已存在不静默复用，亦不覆盖标题）；成功后 ``current_revision=1``；
+        - ``rename`` / ``pin`` / ``archive`` / ``unarchive``：会话行锁下 CAS
+          （``expected_session_revision`` 必须等于行 ``revision``），成功
+          ``revision+1``；归档不改执行（§9.3「归档不终止执行」）；
+        - 同命令键同输入 → 查回原回执；异输入 → ``INPUT_CONFLICT``；
+        - 会话不存在/不在调用用户域 → ``INPUT_INVALID``；
+        - 动作本身不改草稿、不派发、不产生费用（元数据 CAS 与运行分离）。
+
+        ``revise`` / ``branch`` 涉及消息因果前缀与分支会话创建，随 F-03-2b 交付：
+        契约层显式 ``unsupported_action``，不放行半链。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
+                OPERATION_UNKNOWN。
+        """
+
+        self._check_engine()
+        user_scope = command.command.user_scope
+        identity = f"{user_scope}/{command.session_id}/{command.command.command_id}"
+        try:
+            validate_session_change_command(command)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        digest = session_change_input_digest(command)
+        command_record_id = stable_id("command", [user_scope, command.session_id, command.command.command_id])
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. 命令键查重（先于目标读写：create 重放同样按原回执返回）。
+            existing = (
+                await conn.execute(
+                    sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.target_id == command.session_id,
+                        AgentCommand.client_command_id == command.command.command_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                if existing.input_digest != digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT, "same session command key with different input", identity
+                    )
+                if existing.receipt_payload is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN, "original session command receipt unavailable", identity
+                    )
+                try:
+                    return decode_command_receipt(existing.receipt_payload)
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        f"stored session command receipt invalid: {exc.code}",
+                        identity,
+                    ) from exc
+
+            now = datetime.now(UTC)
+            if command.action is SessionAction.CREATE:
+                duplicate = (
+                    await conn.execute(
+                        sa.select(AgentSession.session_id).where(
+                            AgentSession.user_scope == user_scope,
+                            AgentSession.session_id == command.session_id,
+                        )
+                    )
+                ).first()
+                if duplicate is not None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, "session already exists in user scope", identity
+                    )
+                try:
+                    await conn.execute(
+                        sa.insert(AgentSession).values(
+                            user_scope=user_scope,
+                            session_id=command.session_id,
+                            title=command.title,
+                            source_module=command.command.source_module,
+                        )
+                    )
+                except IntegrityError as exc:
+                    # 并发创建同一会话：先提交者胜，败者不覆盖、不静默复用。
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT, "session created concurrently by another command", identity
+                    ) from exc
+                current_revision = 1
+            else:
+                row = (
+                    await conn.execute(
+                        sa.select(AgentSession.revision)
+                        .where(
+                            AgentSession.user_scope == user_scope,
+                            AgentSession.session_id == command.session_id,
+                        )
+                        .with_for_update()
+                    )
+                ).first()
+                if row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, "target session does not exist in user scope", identity
+                    )
+                if int(row.revision) != command.expected_session_revision:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT, "session revision does not match expected", identity
+                    )
+                current_revision = int(row.revision) + 1
+                values: dict[str, Any] = {"revision": current_revision, "updated_at": now}
+                if command.action is SessionAction.RENAME:
+                    values["title"] = command.title
+                    values["title_user_set"] = True
+                elif command.action is SessionAction.PIN:
+                    values["pinned"] = True
+                elif command.action is SessionAction.ARCHIVE:
+                    values["archived"] = True
+                elif command.action is SessionAction.UNARCHIVE:
+                    values["archived"] = False
+                await conn.execute(
+                    sa.update(AgentSession)
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == command.session_id,
+                    )
+                    .values(**values)
+                )
+
+            receipt = CommandReceipt(
+                command=command.command,
+                target_id=command.session_id,
+                current_revision=current_revision,
+                commit_state=CommitState.COMMITTED,
+                delivery_state=DeliveryState.NOT_DELIVERED,
+                consumption_state=ConsumptionState.NOT_CONSUMED,
+                updated_at=_wire_time(now),
+                error_code=None,
+                next_action=None,
+            )
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope=user_scope,
+                    command_record_id=command_record_id,
+                    client_command_id=command.command.command_id,
+                    target_id=command.session_id,
+                    command_kind="change_session",
+                    session_id=command.session_id,
+                    expected_revision=command.expected_session_revision,
+                    input_digest=digest,
+                    request_payload=encode_session_change_command(command),
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.NOT_DELIVERED.value,
+                    consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                    receipt_payload=encode_command_receipt(receipt),
                     verified_at=now,
                 )
             )

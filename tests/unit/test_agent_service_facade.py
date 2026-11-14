@@ -29,6 +29,8 @@ from core.agent_types import (
     ResearchSnapshot,
     SessionRead,
     SessionReadQuery,
+    SessionAction,
+    SessionChangeCommand,
     SubmissionReceipt,
     json_doc,
 )
@@ -116,6 +118,28 @@ _DRAFT_RECEIPT = DraftReceipt(
 )
 
 
+def _session_command(
+    *,
+    action: SessionAction = SessionAction.PIN,
+    expected: int = 1,
+    title: str | None = None,
+    ref_revision: int | None = None,
+) -> SessionChangeCommand:
+    return SessionChangeCommand(
+        command=CommandRef(
+            user_scope="u1",
+            source_module="ui",
+            business_request_id="req-1",
+            command_id="client-1",
+            expected_revision=expected if ref_revision is None else ref_revision,
+        ),
+        action=action,
+        session_id="s1",
+        expected_session_revision=expected,
+        title=title,
+    )
+
+
 def _request(**overrides: Any) -> AcceptRequest:
     values: dict[str, Any] = {
         "user_scope": "u1",
@@ -157,6 +181,12 @@ class _FakeDao:
         if self.error is not None:
             raise self.error
         return _DRAFT_RECEIPT
+
+    async def change_session(self, command: SessionChangeCommand) -> CommandReceipt:
+        self.calls.append(("change_session", (command,), {}))
+        if self.error is not None:
+            raise self.error
+        return _RECEIPT
 
     async def read_command(self, ref: CommandRef, *, user_scope: str) -> CommandReceipt:
         self.calls.append(("read_command", (ref,), {"user_scope": user_scope}))
@@ -327,6 +357,56 @@ class TestDraftSaveAuthority:
         await service.aclose()
         with pytest.raises(AgentServiceError) as excinfo:
             await service.save_draft(_draft_command())
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+class TestSessionChangeAuthority:
+    """会话元数据入口：边界校验动作自身字段，失败不触达 DAO（F-03-2）。"""
+
+    @pytest.mark.asyncio
+    async def test_valid_command_delegates(self) -> None:
+        fake = _FakeDao()
+        assert await _service(fake).change_session(_session_command()) is _RECEIPT
+        assert [call[0] for call in fake.calls] == ["change_session"]
+
+    @pytest.mark.asyncio
+    async def test_revise_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        command = _session_command(action=SessionAction.REVISE, expected=1)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).change_session(command)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "unsupported_action" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_create_without_title_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        command = _session_command(action=SessionAction.CREATE, expected=0, title=None)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).change_session(command)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.title" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_revision_mismatch_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        command = _session_command(expected=2, ref_revision=1)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).change_session(command)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.command.expected_revision" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_change_session_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.change_session(_session_command())
         assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
         assert fake.calls == []
 

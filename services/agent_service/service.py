@@ -11,7 +11,8 @@
 - ``submit`` / ``control`` / ``answer`` / ``search`` / ``deliver_artifact`` 等写路径
   依赖原生 root workflow 派发（E-04 计划 + DBOS launch，当前受 Q5 阻塞），
   未就绪前不提供占位实现，避免把「未派发」伪装成「已受理」。
-- ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付。
+- ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付；
+- ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）。
 
 ``aclose`` 只标记服务关闭并拒绝后续读取；DAO/Engine 生命周期归应用组合根
 （DD §10.6：宿主关闭由 Runtime 前置门闩编排，服务不越权释放共享引擎）。
@@ -40,11 +41,13 @@ from core.agent_types import (
     ResearchSnapshot,
     SessionRead,
     SessionReadQuery,
+    SessionChangeCommand,
     SourceRead,
     SourceReadQuery,
     SubmissionReceipt,
     derive_accept_identity,
     validate_draft_save_command,
+    validate_session_change_command,
 )
 from data.persistence.daos.agent_dao import AgentDao
 
@@ -209,6 +212,24 @@ class AgentService:
                 f"{command.command.user_scope}/{command.session_id}",
             ) from exc
         return await self._dao.save_draft(command)
+
+    async def change_session(self, command: SessionChangeCommand) -> CommandReceipt:
+        """会话元数据命令（§4.2 ``change_session``）：create/rename/pin/archive/unarchive。
+
+        边界整份校验（动作自身字段、预期版与命令引用一致）；``revise``/``branch``
+        涉及消息因果前缀与分支创建，随 F-03-2b 交付，当前显式拒绝而非静默忽略。
+        """
+
+        self._require_open("change_session")
+        try:
+            validate_session_change_command(command)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                f"{command.command.user_scope}/{command.session_id}",
+            ) from exc
+        return await self._dao.change_session(command)
 
     # ------------------------------------------------------------------
     # 生命周期

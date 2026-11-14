@@ -6866,3 +6866,145 @@ def draft_save_input_digest(command: DraftSaveCommand) -> str:
             }
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# F-03-2 会话元数据命令（§4.2 change_session / §9.3）
+# ---------------------------------------------------------------------------
+
+
+class SessionAction(Enum):
+    """会话命令动作（§4.2 L436 唯一 wire 拼写；各 action 只接受自身字段）。"""
+
+    CREATE = "create"
+    RENAME = "rename"
+    PIN = "pin"
+    ARCHIVE = "archive"
+    UNARCHIVE = "unarchive"
+    REVISE = "revise"
+    BRANCH = "branch"
+
+
+#: 本片已接地的动作（revise/branch 涉及消息因果与分支创建，随 F-03-2b 交付；
+#: 未落地前显式拒绝，不静默忽略、不做半链占位）。
+SUPPORTED_SESSION_ACTIONS: Final = frozenset(
+    {
+        SessionAction.CREATE,
+        SessionAction.RENAME,
+        SessionAction.PIN,
+        SessionAction.ARCHIVE,
+        SessionAction.UNARCHIVE,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionChangeCommand:
+    """会话元数据命令（§4.2 ``SessionChangeCommand``）：命令身份 + 预期会话版。
+
+    ``command.expected_revision`` 必须等于 ``expected_session_revision``；``create``
+    要求预期版 0（目标尚不存在），其余动作要求 ≥1。``title`` 仅 create/rename
+    必填且非空（DAO 不猜显示名），其余动作携带标题即拒绝。
+    """
+
+    command: CommandRef
+    action: SessionAction
+    session_id: str
+    expected_session_revision: int
+    title: str | None = None
+
+
+_SESSION_CHANGE_COMMAND_KEYS: Final = frozenset(
+    {"command", "action", "session_id", "expected_session_revision", "title"}
+)
+
+
+def encode_session_change_command(command: SessionChangeCommand) -> dict[str, Any]:
+    """SessionChangeCommand → wire 5 键（含命令引用与动作自身字段的空值约定）。"""
+
+    if not isinstance(command.action, SessionAction):
+        _fail("invalid_action", "$.action")
+    expected = command.expected_session_revision
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        _fail("invalid_revision", "$.expected_session_revision")
+    if command.command.expected_revision != expected:
+        _fail("invalid_revision", "$.command.expected_revision")
+    if command.action is SessionAction.CREATE and expected != 0:
+        _fail("invalid_revision", "$.expected_session_revision")
+    if command.action is not SessionAction.CREATE and expected < 1:
+        _fail("invalid_revision", "$.expected_session_revision")
+    title = command.title
+    if title is not None and (not isinstance(title, str) or title == ""):
+        _fail("invalid_value", "$.title")
+    if command.action in (SessionAction.CREATE, SessionAction.RENAME) and title is None:
+        _fail("missing_field", "$.title")
+    if command.action not in (SessionAction.CREATE, SessionAction.RENAME) and title is not None:
+        # 各 action 只接受自身字段：非 create/rename 携带标题即拒绝（不静默丢弃）。
+        _fail("invalid_value", "$.title")
+    if command.action not in SUPPORTED_SESSION_ACTIONS:
+        _fail("unsupported_action", "$.action")
+    return {
+        "command": encode_command_ref(command.command),
+        "action": command.action.value,
+        "session_id": _require_str(command.session_id, "$.session_id"),
+        "expected_session_revision": expected,
+        "title": title,
+    }
+
+
+def decode_session_change_command(value: object, path: str = "$.session_change_command") -> SessionChangeCommand:
+    """严格解码会话命令（5 键全必填、禁额外键、动作自身字段约束）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _SESSION_CHANGE_COMMAND_KEYS, path)
+    action_raw = value["action"]
+    if not isinstance(action_raw, str):
+        _fail("invalid_action", f"{path}.action")
+    try:
+        action = SessionAction(action_raw)
+    except ValueError:
+        _fail("invalid_action", f"{path}.action")
+    expected = value["expected_session_revision"]
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        _fail("invalid_revision", f"{path}.expected_session_revision")
+    command = decode_command_ref(value["command"], f"{path}.command")
+    if command.expected_revision != expected:
+        _fail("invalid_revision", f"{path}.command.expected_revision")
+    title = value["title"]
+    if title is not None and not isinstance(title, str):
+        _fail("invalid_type", f"{path}.title")
+    decoded = SessionChangeCommand(
+        command=command,
+        action=action,
+        session_id=_require_str(value["session_id"], f"{path}.session_id"),
+        expected_session_revision=expected,
+        title=title,
+    )
+    try:
+        encode_session_change_command(decoded)
+    except AgentValidationError as exc:
+        suffix = exc.field_path[1:] if exc.field_path.startswith("$") else f".{exc.field_path}"
+        _fail(exc.code, f"{path}{suffix}")
+    return decoded
+
+
+def validate_session_change_command(command: SessionChangeCommand) -> None:
+    """会话命令整份校验（纯函数）；失败抛 :class:`AgentValidationError`。"""
+
+    encode_session_change_command(command)
+
+
+def session_change_input_digest(command: SessionChangeCommand) -> str:
+    """命令输入摘要：动作 + 目标 + 预期版 + 标题（同键同输入幂等）。"""
+
+    return sha256_hex(
+        json_doc(
+            {
+                "action": command.action.value,
+                "session_id": command.session_id,
+                "expected_session_revision": command.expected_session_revision,
+                "title": command.title,
+            }
+        )
+    )
