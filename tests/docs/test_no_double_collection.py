@@ -41,7 +41,13 @@ pytestmark = pytest.mark.docs_pure
 
 def _collect(*paths: str) -> subprocess.CompletedProcess[str]:
     """按独立 docs 配置实跑 collection（禁插件自动加载 + 截断业务 conftest）。"""
-    env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    # 强制 UTF-8：Windows 子进程默认编码会把「双收集」写成 \\uXXXX 转义，导致诊断断言误判
+    env = dict(
+        os.environ,
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        PYTHONIOENCODING="utf-8",
+        PYTHONUTF8="1",
+    )
     return subprocess.run(
         [
             sys.executable,
