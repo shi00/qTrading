@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -191,3 +192,61 @@ def test_builtin_update_runner_uses_closed_registry() -> None:
     targets = {spec.target for spec in registry if spec.active}
     # D6：docs/README.md（文件级目录/ADR 索引）与 docs/governance/README.md（规则参考/任务路由）接入受控生成
     assert targets == {"AGENTS.md", "CLAUDE.md", "docs/README.md", "docs/governance/README.md"}
+
+
+# ---------------------------------------------------------------------------
+# D35：检查域错误收敛（前项坏输入不中断后续独立检查；程序缺陷仍上抛）
+# ---------------------------------------------------------------------------
+
+
+def test_redlines_empty_input_does_not_abort_later_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """坏输入（redlines: []）先校验结构转具名诊断，后续独立检查仍执行并一起聚合。"""
+    redlines = tmp_path / "redlines.yml"
+    redlines.write_text("redlines: []\n", encoding="utf-8")
+    monkeypatch.setattr(cdc, "REDLINES_YAML_PATH", redlines)
+    executed: list[str] = []
+
+    def later_check() -> list[str]:
+        executed.append("later")
+        return ["后项独立检查发现的错误"]
+
+    plan: list[tuple[frozenset[str], Callable[[], list[str]]]] = [
+        (frozenset({"governance"}), cdc.check_redline_range_consistency),
+        (frozenset({"governance"}), later_check),
+    ]
+    errors = cdc.collect_scope_errors(plan, "all")
+    assert executed == ["later"], "前项坏输入不得中断后续独立检查"
+    assert any("redlines 列表为空" in err for err in errors), f"缺具名诊断: {errors}"
+    assert "后项独立检查发现的错误" in errors
+
+
+def test_check_read_error_becomes_named_diagnostic_and_later_runs() -> None:
+    """约定的读取错误（OSError）转具名诊断（含检查名与异常类型），不中断后续检查。"""
+
+    def broken_check() -> list[str]:
+        raise OSError("必需文档不可读")
+
+    executed: list[str] = []
+
+    def later_check() -> list[str]:
+        executed.append("later")
+        return []
+
+    plan: list[tuple[frozenset[str], Callable[[], list[str]]]] = [
+        (frozenset({"document"}), broken_check),
+        (frozenset({"document"}), later_check),
+    ]
+    errors = cdc.collect_scope_errors(plan, "document")
+    assert executed == ["later"]
+    assert len(errors) == 1 and "broken_check" in errors[0] and "OSError" in errors[0]
+
+
+def test_check_programming_defect_still_propagates() -> None:
+    """程序缺陷（TypeError）不属于约定输入错误，必须上抛不得伪装成检查失败。"""
+
+    def defective_check() -> list[str]:
+        raise TypeError("代码缺陷")
+
+    plan: list[tuple[frozenset[str], Callable[[], list[str]]]] = [(frozenset({"document"}), defective_check)]
+    with pytest.raises(TypeError, match="代码缺陷"):
+        cdc.collect_scope_errors(plan, "document")
