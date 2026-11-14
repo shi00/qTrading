@@ -160,6 +160,12 @@ ADR_DOCS_DIR = ROOT / "docs" / "adr"
 SCRIPTS_DIR = ROOT / "scripts"
 CI_CD_PATH = ROOT / "docs" / "guides" / "ci-cd.md"
 
+
+def _load_yaml_file(path: Path) -> typing.Any:
+    """读取治理 YAML 作者源：共用安全 loader（重复 mapping 键报告字段路径与位置）。"""
+    return docs_generated.load_yaml(path.read_text(encoding="utf-8"), source=path.name)
+
+
 # 动态发现 docs/flet/*.md（含 README.md、ui-ux-best-practices.md、canvaskit-rendering-e2e-guide.md 等）
 # 新增 Flet 专题文档会自动纳入门禁，无需手动维护清单
 FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
@@ -837,7 +843,7 @@ def _count_exceptions() -> int | None:
     import yaml  # PyYAML 是 transitive 依赖，与 check_exceptions_yaml_consistency 一致延迟 import
 
     try:
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (OSError, yaml.YAMLError):
         return None
     if isinstance(data, dict):
@@ -1047,7 +1053,7 @@ def check_redlines_yaml_consistency() -> list[str]:
     """检查项 7：redlines.yml 与 CLAUDE.md §3.1 红线表一致性（ADR-0003 决策落地）。
 
     校验:
-    1. redlines.yml 可被 yaml.safe_load 解析, 顶层为 dict, 含 "redlines" key (list)
+    1. redlines.yml 可被安全 loader 解析（重复 mapping 键拒绝）, 顶层为 dict, 含 "redlines" key (list)
     2. 每条红线含 7 字段: id/title/description/enforcement/automation_coverage/human_review_required/rule_type
     3. id 格式为 R\\d+; 当前连续 (R1, R2, ..., R_N, 无缺号/重号/跳号)。
        注: 连续性是 append-only「不复用废弃编号」的机器可验证子集——它只能证明当前
@@ -1077,7 +1083,7 @@ def check_redlines_yaml_consistency() -> list[str]:
         return errors
 
     try:
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"redlines.yml YAML 解析失败: {e}")
         return errors
@@ -1141,7 +1147,7 @@ def check_redlines_yaml_consistency() -> list[str]:
     try:
         import yaml  # noqa: F811
 
-        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        exc_data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         exc_data = None
     if isinstance(exc_data, dict) and isinstance(exc_data.get("exceptions"), list):
@@ -1243,7 +1249,7 @@ def check_redline_range_consistency() -> list[str]:
     try:
         import yaml  # PyYAML 是 transitive 依赖，与 check_redlines_yaml_consistency 一致延迟 import
 
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except (ImportError, OSError, yaml.YAMLError):
         # D5（F17）：必需源缺失/解析失败显式失败，不再静默空转
         # （scope 固定责任下本检查自身必须可达，"由 3b 报告"不能作为跳过依据）
@@ -1708,7 +1714,7 @@ def check_enforcement_mapping() -> list[str]:
         return errors
 
     try:
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"redlines.yml YAML 解析失败: {e}")
         return errors
@@ -1797,7 +1803,7 @@ def check_enforcement_reverse_coverage() -> list[str]:
     try:
         import yaml  # noqa: F811
 
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except (yaml.YAMLError, OSError) as e:
         errors.append(f"redlines.yml 解析失败: {e}")
         return errors
@@ -1847,7 +1853,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
     """例外注册表一致性检查 (P1-01)。
 
     校验 docs/governance/exceptions.yml：
-    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "exceptions" key (list)。
+    1. 可被安全 loader 解析（重复 mapping 键拒绝）, 顶层为 dict, 含 "exceptions" key (list)。
     2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)。
     3. expires_at 与 removal_trigger 二选一必填。
     4. id 唯一且格式为 EX-XXXX。
@@ -1863,7 +1869,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"exceptions.yml YAML 解析失败: {e}")
         return errors
@@ -1879,7 +1885,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
 
     # 收集 redlines.yml 中已注册的 rule_id (用于校验 rule_id 存在性)
     try:
-        redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        redlines_data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError:
         redlines_data = None
     registered_rule_ids: set[str] = set()
@@ -2005,8 +2011,8 @@ def check_exceptions_reverse_coverage() -> list[str]:
     import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
     try:
-        redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
-        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        redlines_data = _load_yaml_file(REDLINES_YAML_PATH)
+        exc_data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except yaml.YAMLError as exc:
         return [f"反向覆盖检查必需源解析失败: {exc}"]
 
@@ -2094,7 +2100,7 @@ def check_exceptions_effectiveness(*, today: date | None = None) -> list[str]:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"exceptions.yml YAML 解析失败: {e}")
         return errors
@@ -2136,7 +2142,7 @@ def check_canonical_topics_consistency() -> list[str]:
     """主题 → canonical 正本映射一致性检查 (P2-12)。
 
     校验 docs/governance/canonical-topics.yml：
-    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "topics" key (非空 list)。
+    1. 可被安全 loader 解析（重复 mapping 键拒绝）, 顶层为 dict, 含 "topics" key (非空 list)。
     2. 每个主题必填 id/title/canonical, 且三者均为非空字符串（null/空串/纯空白拒绝）。
     3. id 唯一。
     4. canonical 路径在仓库中真实存在。
@@ -2153,7 +2159,7 @@ def check_canonical_topics_consistency() -> list[str]:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(CANONICAL_TOPICS_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"canonical-topics.yml YAML 解析失败: {e}")
         return errors
@@ -2243,9 +2249,7 @@ def _render_agents_invariant_lines() -> list[str]:
     CLAUDE.md 的工具也能拿到可执行的最小安全集（GOV-01）。INVARIANT 与 R18 条目在
     redlines.yml 均有 description 字段（缺字段即刻 KeyError 暴露，不做静默回退）。
     """
-    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 避免未安装时影响其他检查
-
-    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    data = _load_yaml_file(REDLINES_YAML_PATH)
     redlines = data["redlines"]
     lines: list[str] = []
     for entry in redlines:
@@ -2269,9 +2273,7 @@ def _render_claude_executive_block() -> list[str]:
     （工作区整洁）。修复手工摘要仅列 R5 可豁免而漏 R1（EXCEPTIONABLE，例外 16 条）导致的
     「第一屏」失真（F-04，机制推广 DOC-08）。
     """
-    import yaml  # 延迟 import: 与 _render_agents_invariant_lines 保持一致
-
-    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    data = _load_yaml_file(REDLINES_YAML_PATH)
     redlines = data["redlines"]
 
     def _join(rule_type: str, sep: str) -> str:
@@ -2351,16 +2353,22 @@ def check_agents_md_sync() -> list[str]:
     必须等于由 redlines.yml 渲染的结果（见 _render_agents_invariant_lines），从机制上消除多源漂移；
     同时校验区块前声明句披露组成规则（见 _check_agents_declaration）。
     """
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 仅用于解析失败报告
+
     errors: list[str] = []
     if not AGENTS_PATH.exists():
         return [f"AGENTS.md 不存在: {AGENTS_PATH}"]
     content = AGENTS_PATH.read_text(encoding="utf-8")
     start_tag = "<!-- generated:redlines-invariant -->"
+    try:
+        rendered = _render_agents_invariant_lines()
+    except yaml.YAMLError as exc:
+        return [f"redlines.yml YAML 解析失败: {exc}"]
     errors.extend(
         _generated_block_sync(
             content,
             start_tag,
-            _render_agents_invariant_lines(),
+            rendered,
             "AGENTS.md 生成区块与 redlines.yml 不一致（INVARIANT 红线 + R18）。"
             "请改正本 redlines.yml 后同步 AGENTS.md，勿手工修改生成区块。",
             f"AGENTS.md 缺少生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
@@ -2521,12 +2529,18 @@ def check_claude_executive_sync() -> list[str]:
     与 check_agents_md_sync 同机制：CLAUDE.md 的 `<!-- generated:claude-executive -->` 与
     `<!-- /generated -->` 之间内容须等于 redlines.yml 渲染结果（见 _render_claude_executive_block）。
     """
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 仅用于解析失败报告
+
     content = CLAUDE_PATH.read_text(encoding="utf-8")
     start_tag = "<!-- generated:claude-executive -->"
+    try:
+        rendered = _render_claude_executive_block()
+    except yaml.YAMLError as exc:
+        return [f"redlines.yml YAML 解析失败: {exc}"]
     return _generated_block_sync(
         content,
         start_tag,
-        _render_claude_executive_block(),
+        rendered,
         "CLAUDE.md 顶部摘要生成区块与 redlines.yml 不一致（INVARIANT + EXCEPTIONABLE + R18）。"
         "请改正本 redlines.yml 后同步生成区块，勿手工修改。",
         f"CLAUDE.md 缺少顶部摘要生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
@@ -2550,9 +2564,7 @@ def _render_claude_self_check_lines() -> list[str]:
     未声明 self_check 的红线不入清单（R18 有独立执行决策树），首行显式说明其去向，避免
     「清单不完整」的误读。字段缺失即刻跳过而非静默补空（缺字段由本检查的形态校验守护）。
     """
-    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 与 _render_agents_invariant_lines 一致
-
-    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    data = _load_yaml_file(REDLINES_YAML_PATH)
     lines: list[str] = []
     ids: list[str] = []
     for entry in data["redlines"]:
@@ -2579,7 +2591,7 @@ def _check_self_check_field_shape() -> list[str]:
     if not REDLINES_YAML_PATH.exists():
         return [f"redlines.yml 不存在: {REDLINES_YAML_PATH}"]
     try:
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError as e:
         return [f"redlines.yml YAML 解析失败: {e}"]
     if not isinstance(data, dict) or not isinstance(data.get("redlines"), list):
@@ -2846,7 +2858,7 @@ def _load_canonical_topics() -> list[dict] | None:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(CANONICAL_TOPICS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("topics"), list):
@@ -2919,7 +2931,7 @@ def _load_impact_routes(root: Path) -> dict[str, list[tuple[str, str, str | None
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = _load_yaml_file(path)
     except OSError as exc:
         raise RuntimeError(f"D36 影响分析缺少作者源 {path}: {exc}") from exc
     except yaml.YAMLError as exc:
@@ -3635,7 +3647,7 @@ def _load_exception_ids() -> list[str] | None:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
@@ -3648,7 +3660,7 @@ def _load_exception_r1_count() -> int:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         return -1
     if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
