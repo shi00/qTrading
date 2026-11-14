@@ -14,7 +14,7 @@
 | 新的界面 / 交互 | [4. 新增一个 UI 视图](#4-新增一个-ui-视图) |
 | 仅澄清 / 修订需求（无实现落点） | 更新 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 及其「变更历史」，止于需求正本 |
 
-新增 FR 时在实现处留 `FR-XX-00N` 注释，并在 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 对应条目回填实现位置（参照既有 FR 条目在代码中的注释先例）。
+新增 FR **进入实现交付时**在实现处留 `FR-XX-00N` 注释，并在 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 对应条目回填实现位置（参照既有 FR 条目在代码中的注释先例）；仅澄清/设计阶段按上表末行止于需求正本，不要求代码改动。
 
 ### 1. 新增一张数据表
 
