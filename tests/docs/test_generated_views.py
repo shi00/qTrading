@@ -365,19 +365,34 @@ def test_claude_redlines_render_tracks_yaml_author_source(tmp_path: Path) -> Non
     assert dg.render_block_lines(tmp_path, _builtin("claude-redlines-table")) == lines, "二次渲染必须零差异"
 
 
+def _seed_topic_paths(root: Path, yaml_text: str) -> None:
+    """按 canonical-topics.yml 的 canonical/workflow 字段落位占位文件。
+
+    作者源校验要求路径真实存在；临时根目录须先补齐被引用文件，否则渲染前即拒绝。
+    """
+    import yaml
+
+    for topic in yaml.safe_load(yaml_text)["topics"]:
+        for field in ("canonical", "workflow"):
+            rel = topic.get(field)
+            if isinstance(rel, str) and rel.strip():
+                _write(root, rel.strip(), "# stub\n")
+
+
 def test_claude_decision_tree_render_tracks_yaml_author_source(tmp_path: Path) -> None:
     """只改一次 canonical-topics.yml（新增 topic）即传播到 CLAUDE 决策树。"""
     source = tmp_path / "docs" / "governance" / "canonical-topics.yml"
     source.parent.mkdir(parents=True)
     original = (ROOT / "docs/governance/canonical-topics.yml").read_text(encoding="utf-8")
-    source.write_text(
+    text = (
         original
         + "\n  - id: demo-topic\n"
         + "    title: 演示新增任务\n"
         + "    canonical: docs/guides/how-to.md\n"
-        + "    section: 1. 演示章节\n",
-        encoding="utf-8",
+        + "    section: 1. 演示章节\n"
     )
+    source.write_text(text, encoding="utf-8")
+    _seed_topic_paths(tmp_path, text)
     lines = dg.render_block_lines(tmp_path, _builtin("claude-decision-tree"))
     assert any("演示新增任务" in line and "route: demo-topic" in line for line in lines)
     assert any("how-to.md「1. 演示章节」" in line for line in lines)
@@ -392,6 +407,7 @@ def test_claude_decision_tree_meta_entry_requires_note(tmp_path: Path) -> None:
         "topics:\n  - id: fallback\n    title: 未列出的任务类型\n    canonical: CLAUDE.md\n",
         encoding="utf-8",
     )
+    _write(tmp_path, "CLAUDE.md", "# CLAUDE\n")
     with pytest.raises(dg.SourceFieldError, match="note"):
         dg.render_block_lines(tmp_path, _builtin("claude-decision-tree"))
 
