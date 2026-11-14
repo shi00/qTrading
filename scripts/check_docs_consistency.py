@@ -4723,6 +4723,11 @@ def main(
     if args.update and (args.check or args.scope is not None):
         parser = _build_arg_parser()
         parser.error("--update 不得与 --check/--scope 组合（更新隐含更新后 all 检查）")
+    # D37：固定 slugger 依赖缺失/导入失败时显式诊断环境偏离（仅 stderr，不改变退出码与
+    # stdout 结果；兼容模式运行不等同固定后端验收）。
+    deviation = docs_markdown.slugger_backend_diagnostic()
+    if deviation is not None:
+        print(f"[WARN] {deviation}", file=sys.stderr)
     if args.update:
         runner = update_runner if update_runner is not None else run_builtin_update
         try:
