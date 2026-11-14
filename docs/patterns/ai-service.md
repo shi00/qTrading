@@ -79,9 +79,11 @@
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；AI 服务逻辑改动后须 `redline-check` + 相关单测 + `python scripts/check_docs_consistency.py`。
 
-- 缺失语义全链路用 `None`/哨兵，无 `0`/`50` 回填；
-- 成本/配额改动对齐 `pricing`（元→分）/`token_budget`（token）/`usage_tracker`（分）单位约定；
-- 输出经完整 schema/边界校验，模型输出按不可信输入处理（F13 缺口不扩散）；
-- 外发必经 `EgressAudit` 审计，日志经 `DataSanitizer` 脱敏，无明文密钥；
-- prompt 注入依赖明确分层（guard 只是第一层），新功能声明仅用于展示并经测试验证无执行路径；
-- 门禁：`redline-check`、`ruff`、相关单测通过。
+**按触域选择适用项**：以下义务仅在本次改动触及对应边界时适用，不为无关代码补改：
+
+- **改动情绪打分或缺失输出语义**：缺失语义全链路用 `None`/哨兵，无 `0`/`50` 回填；
+- **改动成本/配额**：对齐 `pricing`（元→分）/`token_budget`（token）/`usage_tracker`（分）单位约定；
+- **新增/修改模型输出域（输出消费边界）**：输出经完整 schema/边界校验，模型输出按不可信输入处理（F13 缺口不扩散）；既有输出校验缺口见 §3「已知缺口」，不要求无关改动一并修复；
+- **新增/修改外发调用点**：外发必经 `EgressAudit` 审计，日志经 `DataSanitizer` 脱敏，无明文密钥；
+- **新增 AI 功能或 prompt 输入面**：prompt 注入依赖明确分层（guard 只是第一层），新功能声明仅用于展示并经测试验证无执行路径；
+- **门禁**：触及的层对应 `redline-check`、`ruff`、相关单测通过。
