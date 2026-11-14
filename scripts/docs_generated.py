@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import posixpath
@@ -916,6 +917,120 @@ def _render_agents_task_routes(validated: dict[str, object], root: Path) -> list
     return lines
 
 
+# ---------------------------------------------------------------------------
+# 对比度受控派生（F15 / D38）：阈值与登记色对只存在于 check_theme_contrast.py，
+# 正文不保留第二份数值。AST 只解析常量字面量，不导入模块（docs 组环境不装 flet）。
+# ---------------------------------------------------------------------------
+
+_A11Y_CONTRAST_SCHEMA = SourceSchema(path="scripts/check_theme_contrast.py", fmt="text")
+
+
+def _literal_number(node: ast.AST) -> float | None:
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, SyntaxError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _literal_text(node: ast.AST) -> str | None:
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, SyntaxError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _parse_contrast_source(text: str) -> tuple[float, float, list[tuple[str, str, float, str]], list[str]]:
+    """解析 check_theme_contrast.py 的阈值 / _CONTRAST_PAIRS / 主题；缺件显式拒绝。"""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        raise SourceFormatError(f"作者源 {_A11Y_CONTRAST_SCHEMA.path} 无法解析: {exc}") from exc
+
+    thresholds: dict[str, float] = {}
+    pairs_node: ast.AST | None = None
+    themes: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if value is None:
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if target.id in ("_THRESHOLD_TEXT", "_THRESHOLD_LARGE"):
+                number = _literal_number(value)
+                if number is not None:
+                    thresholds[target.id] = number
+            elif target.id == "_CONTRAST_PAIRS":
+                pairs_node = value
+            elif target.id == "themes" and isinstance(value, ast.List):
+                for element in value.elts:
+                    if (
+                        isinstance(element, ast.Attribute)
+                        and isinstance(element.value, ast.Name)
+                        and element.value.id == "ThemeName"
+                    ):
+                        themes.append(element.attr.lower())
+
+    if "_THRESHOLD_TEXT" not in thresholds or "_THRESHOLD_LARGE" not in thresholds:
+        raise SourceFormatError(f"作者源 {_A11Y_CONTRAST_SCHEMA.path} 缺少对比度阈值常量")
+    if not isinstance(pairs_node, ast.List):
+        raise SourceFormatError(f"作者源 {_A11Y_CONTRAST_SCHEMA.path} 缺少 _CONTRAST_PAIRS 列表")
+    if not themes:
+        raise SourceFormatError(f"作者源 {_A11Y_CONTRAST_SCHEMA.path} 未找到校验主题列表")
+
+    pairs: list[tuple[str, str, float, str]] = []
+    for element in pairs_node.elts:
+        if not isinstance(element, ast.Call) or not isinstance(element.func, ast.Name):
+            raise SourceFormatError(f"作者源 {_A11Y_CONTRAST_SCHEMA.path} 的色对条目不是 ContrastPair(...) 调用")
+        if element.func.id != "ContrastPair" or len(element.args) != 4:
+            raise SourceFormatError(f"作者源 {_A11Y_CONTRAST_SCHEMA.path} 的色对条目参数不符合 ContrastPair 契约")
+        fg = _literal_text(element.args[0])
+        bg = _literal_text(element.args[1])
+        purpose = _literal_text(element.args[3])
+        threshold_node = element.args[2]
+        threshold = (
+            thresholds.get(threshold_node.id)
+            if isinstance(threshold_node, ast.Name)
+            else _literal_number(threshold_node)
+        )
+        if fg is None or bg is None or purpose is None or threshold is None:
+            raise SourceFormatError(f"作者源 {_A11Y_CONTRAST_SCHEMA.path} 的色对条目含无法解析的字段")
+        pairs.append((fg, bg, threshold, purpose))
+
+    return thresholds["_THRESHOLD_TEXT"], thresholds["_THRESHOLD_LARGE"], pairs, themes
+
+
+def _render_a11y_contrast_reference(validated: dict[str, object], root: Path) -> list[str]:
+    """无障碍 §2.6 对比度块：阈值、登记色对与主题由 check_theme_contrast.py 派生。"""
+    text = validated[_A11Y_CONTRAST_SCHEMA.path]
+    assert isinstance(text, str)
+    text_threshold, large_threshold, pairs, themes = _parse_contrast_source(text)
+    lines = [
+        f"- 正文文本阈值 ≥ **{text_threshold:.1f}**（脚本 `_THRESHOLD_TEXT`，用于 purpose=text 的登记色对）",
+        f"- 图标/图形/错误态强调与禁用/装饰阈值 ≥ **{large_threshold:.1f}**"
+        "（脚本 `_THRESHOLD_LARGE`，用于 purpose=icon/disabled）",
+        "",
+        "| 前景 | 背景 | 用途 | 阈值 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for fg, bg, threshold, purpose in pairs:
+        lines.append(f"| `{fg}` | `{bg}` | {purpose} | {threshold:.1f} |")
+    lines.append("")
+    lines.append(f"- 校验主题：{' / '.join(themes)}")
+    return lines
+
+
 def _escape_redline_table_cell(text: str) -> str:
     """红线表单元格转义：只转义未转义的竖线，避免与既有 ``\\|`` 二次转义。"""
     return re.sub(r"(?<!\\)\|", r"\\|", text)
@@ -1101,14 +1216,14 @@ BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
         block_format="markdown",
         active=True,
     ),
-    # —— 以下为尚无作者源接线的目标槽位：只登记不启用渲染（D9 切换时补作者源并激活）——
+    # —— 对比度受控派生（D38）：作者源 = check_theme_contrast.py 常量，正文不再复制数值 ——
     BlockSpec(
         block_id="a11y-contrast-reference",
         target="docs/flet/accessibility-baseline.md",
-        sources=(),
-        render=None,
+        sources=(_A11Y_CONTRAST_SCHEMA,),
+        render=_render_a11y_contrast_reference,
         block_format="markdown",
-        active=False,
+        active=True,
     ),
     # —— D23 接线：hook 隔离环境的 docs 解析依赖由 pyproject [dependency-groups].docs 派生
     #    （排除 pytest 及其插件；锁清单仍由 uv 编译）。两个 hook 各自的 additional_dependencies

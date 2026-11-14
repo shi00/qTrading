@@ -54,10 +54,45 @@
 
 ### 2.6 对比度
 
-- **阈值（数值引用自 [`scripts/check_theme_contrast.py`](../../scripts/check_theme_contrast.py) 既有常量，不另立数值正本）**：
-  - 正文文本 ≥ **4.5**（脚本 `_THRESHOLD_TEXT`）：业务状态/涨跌文字（SUCCESS/WARNING/INFO/UP_RED/DOWN_GREEN 等）实际用于 13/14px 正文（Toast、状态文字、行情单元格等），非 WCAG 大字号例外。
-  - 图标/图形/错误态强调与禁用/装饰内容 ≥ **3.0**（脚本 `_THRESHOLD_LARGE`；WCAG §1.4.3 对禁用控件豁免，保留可读下限）。
-- **覆盖边界（如实披露，不扩大为整应用 WCAG AA 认证）**：该脚本仅验收 `_CONTRAST_PAIRS` 登记的关键色对 × 4 主题（dark/light/navy/dracula），经 pre-commit `theme-contrast-check` hook 强制；其中 **ERROR 按图标档 3.0 验收**（其正文场景因与 danger_button/on_error 反色用途联动，超出脚本范围）；watchlist 列表行的 Layer 1 派生色（运行时由 Flet/Flutter 派生）不在可验收集合内。
+- **阈值与登记色对**：由 [`scripts/check_theme_contrast.py`](../../scripts/check_theme_contrast.py) 常量生成，正文不保留第二份数值（生成块勿手工修改）：
+
+<!-- generated:a11y-contrast-reference -->
+- 正文文本阈值 ≥ **4.5**（脚本 `_THRESHOLD_TEXT`，用于 purpose=text 的登记色对）
+- 图标/图形/错误态强调与禁用/装饰阈值 ≥ **3.0**（脚本 `_THRESHOLD_LARGE`，用于 purpose=icon/disabled）
+
+| 前景 | 背景 | 用途 | 阈值 |
+| --- | --- | --- | --- |
+| `TEXT_PRIMARY` | `SURFACE` | text | 4.5 |
+| `TEXT_SECONDARY` | `SURFACE` | text | 4.5 |
+| `TABLE_HEADER_TEXT` | `TABLE_HEADER_BG` | text | 4.5 |
+| `TABLE_HEADER_TEXT` | `TABLE_ROW_ODD` | text | 4.5 |
+| `TABLE_HEADER_TEXT` | `TABLE_ROW_EVEN` | text | 4.5 |
+| `TABLE_CELL_TEXT` | `TABLE_ROW_ODD` | text | 4.5 |
+| `TABLE_CELL_TEXT` | `TABLE_ROW_EVEN` | text | 4.5 |
+| `SUCCESS` | `SURFACE` | text | 4.5 |
+| `SUCCESS` | `CARD_BG` | text | 4.5 |
+| `WARNING` | `SURFACE` | text | 4.5 |
+| `WARNING` | `CARD_BG` | text | 4.5 |
+| `INFO` | `SURFACE` | text | 4.5 |
+| `INFO` | `CARD_BG` | text | 4.5 |
+| `UP_RED` | `SURFACE` | text | 4.5 |
+| `UP_RED` | `CARD_BG` | text | 4.5 |
+| `DOWN_GREEN` | `SURFACE` | text | 4.5 |
+| `DOWN_GREEN` | `CARD_BG` | text | 4.5 |
+| `UP_RED` | `TABLE_ROW_ODD` | text | 4.5 |
+| `UP_RED` | `TABLE_ROW_EVEN` | text | 4.5 |
+| `UP_RED` | `TABLE_ROW_HOVER` | text | 4.5 |
+| `DOWN_GREEN` | `TABLE_ROW_ODD` | text | 4.5 |
+| `DOWN_GREEN` | `TABLE_ROW_EVEN` | text | 4.5 |
+| `DOWN_GREEN` | `TABLE_ROW_HOVER` | text | 4.5 |
+| `ERROR` | `SURFACE` | icon | 3.0 |
+| `TEXT_DISABLED` | `SURFACE` | disabled | 3.0 |
+
+- 校验主题：dark / light / navy / dracula
+<!-- /generated -->
+
+- **正文档适用性**：正文阈值用于业务状态/涨跌文字（SUCCESS/WARNING/INFO/UP_RED/DOWN_GREEN 等），实际用于 13/14px 正文（Toast、状态文字、行情单元格等），非 WCAG 大字号例外。
+- **覆盖边界（如实披露，不扩大为整应用 WCAG AA 认证）**：该脚本仅验收上述登记色对 × 上述主题，经 pre-commit `theme-contrast-check` hook 强制；其中 **ERROR 按图标档验收**（其正文场景因与 danger_button/on_error 反色用途联动，超出脚本范围）；watchlist 列表行的 Layer 1 派生色（运行时由 Flet/Flutter 派生）不在可验收集合内。
 
 ## 3. 审查清单（PR 评审用）
 
@@ -69,7 +104,7 @@
 - [ ] 键盘路径完整（Tab / Enter / Esc）
 - [ ] 响应式布局不隐藏操作入口
 - [ ] 控件树顺序与视觉顺序一致
-- [ ] 涉及颜色/主题改动时，关键色对过 `theme-contrast-check`（正文 4.5 / 图标与禁用 3.0；覆盖边界见 §2.6）
+- [ ] 涉及颜色/主题改动时，关键色对过 `theme-contrast-check`（阈值与覆盖边界见 §2.6）
 
 ## 4. 例外清单
 

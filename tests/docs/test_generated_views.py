@@ -307,9 +307,98 @@ def test_builtin_registry_d6_entries_active_and_consistent() -> None:
         assert spec.active and spec.render is dg._render_precommit_docs_deps
         assert spec.target == ".pre-commit-config.yaml" and spec.block_format == "yaml"
         assert spec.sources == (dg._PYPROJECT_DOCS_SCHEMA,)
-    assert by_id["a11y-contrast-reference"].active is False
-    assert by_id["a11y-contrast-reference"].render is None
+    # D38：对比度块已接线真实作者源（check_theme_contrast.py），不再是空槽位
+    contrast = by_id["a11y-contrast-reference"]
+    assert contrast.active and contrast.render is not None
+    assert contrast.target == "docs/flet/accessibility-baseline.md"
+    assert contrast.sources == (dg._A11Y_CONTRAST_SCHEMA,)
     dg._validate_specs(dg.BUILTIN_REGISTRY)  # 注册表整体跨条目约束（目标格式一致/块 id 不重复）
+
+
+# ---------------------------------------------------------------------------
+# D38：对比度受控派生（阈值/色对唯一作者源 = check_theme_contrast.py）
+# ---------------------------------------------------------------------------
+
+
+def _contrast_source_text(pairs: str, *, text_threshold: str = "4.5") -> str:
+    return (
+        "_THRESHOLD_TEXT = " + text_threshold + "\n"
+        "_THRESHOLD_LARGE = 3.0\n"
+        "\n"
+        "class ContrastPair(NamedTuple):\n"
+        "    fg: str\n"
+        "    bg: str\n"
+        "    threshold: float\n"
+        "    purpose: str\n"
+        "\n"
+        "_CONTRAST_PAIRS: list[ContrastPair] = [\n" + pairs + "]\n"
+        "\n"
+        "def check_contrast():\n"
+        "    themes = [ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA]\n"
+        "    return themes\n"
+    )
+
+
+def test_a11y_contrast_block_derives_from_script_source(tmp_path: Path) -> None:
+    """渲染结果来自脚本常量：阈值、登记色对、主题都不在正文另存。"""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "check_theme_contrast.py").write_text(
+        _contrast_source_text(
+            '    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'
+            '    ContrastPair("ERROR", "SURFACE", _THRESHOLD_LARGE, "icon"),\n'
+        ),
+        encoding="utf-8",
+    )
+    text_threshold, large_threshold, pairs, themes = dg._parse_contrast_source(
+        (scripts / "check_theme_contrast.py").read_text(encoding="utf-8")
+    )
+    assert (text_threshold, large_threshold) == (4.5, 3.0)
+    assert pairs == [
+        ("TEXT_PRIMARY", "SURFACE", 4.5, "text"),
+        ("ERROR", "SURFACE", 3.0, "icon"),
+    ]
+    assert themes == ["dark", "light", "navy", "dracula"]
+
+
+def test_a11y_contrast_block_tracks_single_source_edit(tmp_path: Path) -> None:
+    """只改一次脚本阈值/色对，派生块变化可检出；二次渲染零差异（幂等）。"""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    source = scripts / "check_theme_contrast.py"
+    source.write_text(
+        _contrast_source_text('    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'),
+        encoding="utf-8",
+    )
+    spec = next(s for s in dg.BUILTIN_REGISTRY if s.block_id == "a11y-contrast-reference")
+    first = dg.render_block_lines(tmp_path, spec)
+    assert any("4.5" in line for line in first)
+    assert not any("WARNING" in line for line in first)
+
+    source.write_text(
+        _contrast_source_text(
+            '    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'
+            '    ContrastPair("WARNING", "CARD_BG", _THRESHOLD_TEXT, "text"),\n',
+            text_threshold="5.0",
+        ),
+        encoding="utf-8",
+    )
+    second = dg.render_block_lines(tmp_path, spec)
+    assert any("5.0" in line for line in second), "阈值单源修改必须传播到派生块"
+    assert any("`WARNING`" in line for line in second), "新增色对必须传播到派生块"
+    assert second == dg.render_block_lines(tmp_path, spec), "二次渲染必须零差异"
+
+
+def test_a11y_contrast_block_rejects_missing_source_constants(tmp_path: Path) -> None:
+    """脚本缺 _CONTRAST_PAIRS / 主题列表时显式拒绝，不伪造空块。"""
+    spec = next(s for s in dg.BUILTIN_REGISTRY if s.block_id == "a11y-contrast-reference")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "check_theme_contrast.py").write_text(
+        "_THRESHOLD_TEXT = 4.5\n_THRESHOLD_LARGE = 3.0\n", encoding="utf-8"
+    )
+    with pytest.raises(dg.SourceFormatError, match="_CONTRAST_PAIRS"):
+        dg.render_block_lines(tmp_path, spec)
 
 
 # ---------------------------------------------------------------------------
