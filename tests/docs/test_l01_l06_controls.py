@@ -26,8 +26,6 @@ r"""D12：L01—L06 长期控制合同控制测试（documentation-maintenance �
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -97,154 +95,80 @@ def test_l01_second_render_zero_diff_after_regen(
 # L02：漏消费者/身份变更——rename 新旧路径并集的临时影响清单
 # ---------------------------------------------------------------------------
 
-# 作者源前缀：治理正文与受控块作者源候选（L02 影响清单最小映射）。
-_AUTHOR_PATH_PREFIXES: tuple[str, ...] = ("docs/", "CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md")
-
-# 测试组映射规则（按前缀首命中）：输入 changed 路径 → 输出需跑的测试组。
-_TEST_GROUP_RULES: tuple[tuple[str, str], ...] = (
-    ("tests/docs/", "docs-suite"),
-    ("tests/unit/", "unit-suite"),
-    ("scripts/check_docs", "docs-gate"),
-    ("scripts/docs_", "docs-gate"),
-    ("docs/", "docs-suite"),
-)
-
-# 静态源码消费路径前缀（§9.5：改文档须核对读它的测试/脚本消费方）。
-_CONSUMER_PATH_PREFIXES: tuple[str, ...] = ("tests/", "scripts/")
-
-# topic 映射规则（按前缀首命中）：最小演示映射，非 canonical-topics.yml 全量注册表镜像。
-_TOPIC_PREFIX_RULES: tuple[tuple[str, str], ...] = (
-    ("docs/flet/", "flet"),
-    ("docs/governance/", "governance-docs"),
-    ("docs/adr/", "architecture-design"),
-    ("docs/", "documentation"),
-    ("CLAUDE.md", "governance-docs"),
-    ("AGENTS.md", "governance-docs"),
-    ("CONTRIBUTING.md", "governance-docs"),
-)
+# T12 / D36：影响分析调用生产入口（真实 canonical-topics.yml 路由 + 真实消费者文本），
+# 不再在测试内维护硬编码前缀映射。
+_IMPACT_RENAME_EXAMPLE = ("docs/patterns/mvvm-v2.md", "docs/patterns/mvvm.md")
 
 
-def _topic_id(path: str) -> str | None:
-    """按路径推导受影响 topic id（模式文档取文件名 stem，其余按前缀首命中）。"""
-    if path.startswith("docs/patterns/"):
-        return Path(path).stem
-    return next((topic for prefix, topic in _TOPIC_PREFIX_RULES if path.startswith(prefix)), None)
-
-
-@dataclass(frozen=True)
-class ImpactList:
-    """临时影响清单（§9.5：至少区分 author/consumer/old,new/topics/test_groups/unresolved）。"""
-
-    author_paths: tuple[str, ...]
-    consumer_paths: tuple[str, ...]
-    old_paths: tuple[str, ...]
-    new_paths: tuple[str, ...]
-    topics: tuple[str, ...]
-    test_groups: tuple[str, ...]
-    unresolved: tuple[str, ...]
-
-
-def build_impact_list(changes: Iterable[tuple[str, str | None]]) -> ImpactList:
-    """从变更对 (new_path, old_path | None) 构建临时影响清单（L02 最小纯函数）。
-
-    rename 以双列输入承载（与 scripts/classify_changed_paths.py 的
-    filename/previous_filename 并集语义同源）：旧/新路径**都**参与作者源、消费方与
-    topic 映射；未命中任何规则的路径显式落 unresolved，不静默丢弃（不完整影响清单
-    显式列未核）。只服务本次检查的临时计算，不建永久关系库/manifest 数据库。
-    """
-    author: set[str] = set()
-    consumer: set[str] = set()
-    old: set[str] = set()
-    new: set[str] = set()
-    topics: set[str] = set()
-    groups: set[str] = set()
-    unresolved: set[str] = set()
-    for new_path, old_path in changes:
-        new.add(new_path)
-        if old_path is not None:
-            old.add(old_path)
-        for path in (new_path, old_path):
-            if path is None:
-                continue
-            if path.startswith(_AUTHOR_PATH_PREFIXES):
-                author.add(path)
-            if path.startswith(_CONSUMER_PATH_PREFIXES):
-                consumer.add(path)
-            topic = _topic_id(path)
-            if topic is not None:
-                topics.add(topic)
-            hit = next((g for p, g in _TEST_GROUP_RULES if path.startswith(p)), None)
-            if hit is not None:
-                groups.add(hit)
-            elif not path.startswith(_AUTHOR_PATH_PREFIXES):
-                unresolved.add(path)
-    return ImpactList(
-        author_paths=tuple(sorted(author)),
-        consumer_paths=tuple(sorted(consumer)),
-        old_paths=tuple(sorted(old)),
-        new_paths=tuple(sorted(new)),
-        topics=tuple(sorted(topics)),
-        test_groups=tuple(sorted(groups)),
-        unresolved=tuple(sorted(unresolved)),
-    )
-
-
-def test_l02_rename_keeps_old_path_in_scope() -> None:
-    """rename 影响清单保留旧/新路径并集：旧路径仍是消费者迁移对象与测试组来源。"""
-    impact = build_impact_list([("docs/guides/new-name.md", "docs/guides/old-name.md")])
-    assert impact.old_paths == ("docs/guides/old-name.md",)
-    assert impact.new_paths == ("docs/guides/new-name.md",)
-    assert impact.author_paths == ("docs/guides/new-name.md", "docs/guides/old-name.md"), (
+def test_l02_rename_keeps_old_path_and_real_topic_identity() -> None:
+    """rename 影响清单保留旧/新路径，topic 身份由真实 canonical-topics.yml 决定。"""
+    impact = cdc.build_doc_impact([_IMPACT_RENAME_EXAMPLE])
+    assert impact.old_paths == ("docs/patterns/mvvm.md",)
+    assert impact.new_paths == ("docs/patterns/mvvm-v2.md",)
+    assert impact.author_paths == ("docs/patterns/mvvm-v2.md", "docs/patterns/mvvm.md"), (
         "rename 后旧路径必须保留在影响范围内（只查新路径不够）"
     )
+    assert impact.topics == ("viewmodel",), "真实 topic 身份由 canonical-topics.yml 绑定，不按文件名猜"
+    assert ("viewmodel", "docs/patterns/mvvm.md", None, "canonical") in impact.routes
+    assert "docs/patterns/mvvm-v2.md" in impact.unresolved, "未登记 canonical 的新路径必须显式列未核"
     assert impact.test_groups == ("docs-suite",)
-    assert impact.unresolved == ()
 
 
-def test_l02_old_path_alone_drives_test_group() -> None:
-    """负例证明：若实现只看新路径（rename 幽灵反模式），旧路径驱动的测试组会丢失。"""
-    impact = build_impact_list([("untracked-new.md", "docs/guides/old.md")])
-    assert impact.test_groups == ("docs-suite",), "旧路径必须独立参与测试组映射（新旧并集语义）"
-    assert "untracked-new.md" in impact.unresolved, "未映射的新路径须显式列未核"
+def test_l02_old_path_alone_keeps_topic_identity() -> None:
+    """负例证明：若实现只看新路径（rename 幽灵反模式），旧路径驱动的 topic 会丢失。"""
+    impact = cdc.build_doc_impact([("docs/patterns/untracked-new.md", "docs/patterns/mvvm.md")])
+    assert impact.topics == ("viewmodel",), "旧路径必须独立参与真实路由映射（新旧并集语义）"
+    assert "docs/patterns/untracked-new.md" in impact.unresolved, "未映射的新路径须显式列未核"
+
+
+def test_l02_consumer_scan_lists_real_references() -> None:
+    """消费者来自真实 tests/scripts/.github 文本引用，不是测试内硬编码前缀映射。"""
+    impact = cdc.build_doc_impact([_IMPACT_RENAME_EXAMPLE])
+    assert impact.consumer_paths, "必须列出仍引用变更路径的真实消费者"
+    assert all(p.startswith(("tests/", "scripts/", ".github/")) for p in impact.consumer_paths)
+    still_old = [
+        path
+        for path in impact.consumer_paths
+        if "docs/patterns/mvvm.md" in (ROOT / path).read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert still_old, "仍指向旧路径的未改消费者必须被列出（rename 迁移对象）"
 
 
 def test_l02_unresolved_listed_not_dropped() -> None:
     """不完整影响清单显式列未核：未知路径落 unresolved，不静默丢弃、不伪装已核。"""
-    impact = build_impact_list([("assets/logo.png", None)])
+    impact = cdc.build_doc_impact([("assets/logo.png", None)])
     assert impact.unresolved == ("assets/logo.png",)
     assert impact.author_paths == ()
+    assert impact.topics == ()
+    assert impact.consumer_paths == ()
     assert impact.test_groups == ()
 
 
-def test_l02_impact_list_is_pure_function() -> None:
-    """临时影响清单为纯函数：同输入同输出、无隐藏可变状态（不建第二套关系库）。"""
-    changes = [("docs/a.md", None), ("tests/docs/test_x.py", None), ("scripts/docs_markdown.py", None)]
-    first = build_impact_list(changes)
-    second = build_impact_list(changes)
-    assert first == second
+def test_l02_impact_is_deterministic() -> None:
+    """同一输入同一输出、无隐藏可变状态（不建第二套关系库）。"""
+    changes = [_IMPACT_RENAME_EXAMPLE, ("tests/docs/test_x.py", None), ("scripts/docs_markdown.py", None)]
+    first = cdc.build_doc_impact(changes)
+    assert first == cdc.build_doc_impact(changes)
     assert first.test_groups == ("docs-gate", "docs-suite")
 
 
-def test_l02_impact_list_distinguishes_six_categories() -> None:
-    """§9.5：影响清单至少区分 author/consumer/old,new/topics/test_groups/unresolved 六类。"""
-    impact = build_impact_list(
+def test_l02_impact_distinguishes_author_consumer_route_unknown() -> None:
+    """影响清单区分作者源、消费者、old/new、路由与未核项，不混为一类。"""
+    impact = cdc.build_doc_impact(
         [
-            ("docs/patterns/data-sync.md", "docs/patterns/data-sync-old.md"),
+            ("docs/patterns/mvvm-v2.md", "docs/patterns/mvvm.md"),
             ("tests/docs/test_data_sync.py", None),
             ("assets/logo.png", None),
         ]
     )
-    assert impact.author_paths == ("docs/patterns/data-sync-old.md", "docs/patterns/data-sync.md")
-    assert impact.consumer_paths == ("tests/docs/test_data_sync.py",), "静态源码消费方须单列"
-    assert impact.old_paths == ("docs/patterns/data-sync-old.md",)
-    assert impact.new_paths == (
-        "assets/logo.png",
-        "docs/patterns/data-sync.md",
-        "tests/docs/test_data_sync.py",
+    assert impact.author_paths == ("docs/patterns/mvvm-v2.md", "docs/patterns/mvvm.md")
+    assert impact.old_paths == ("docs/patterns/mvvm.md",)
+    assert "tests/docs/test_data_sync.py" not in impact.consumer_paths, (
+        "消费者须由真实文本引用产生，不按路径前缀机械归类"
     )
-    assert impact.topics == ("data-sync", "data-sync-old"), "受影响 topic 须单列（非只列路径）"
+    assert impact.topics == ("viewmodel",), "受影响 topic 须单列（非只列路径）"
     assert impact.test_groups == ("docs-suite",)
-    assert impact.unresolved == ("assets/logo.png",)
+    assert impact.unresolved == ("assets/logo.png", "docs/patterns/mvvm-v2.md")
 
 
 # ---------------------------------------------------------------------------
