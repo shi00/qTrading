@@ -51,8 +51,10 @@
 23. 例外清单数量守卫检查（文档复检 L1 根因）：扫描受检 markdown 中「现存 N 条 R1 例外」
    式数量自述，断言 N 与 exceptions.yml 实际注册 EX 条目数一致，避免清单数量陈旧快照。
 24. 治理 ID 对义守卫检查（文档复检 H3 根因）：检测 governance-ids.md 中同一 ID 被登记为多条
-   不同语义（同名异义）；行内已声明「双义登记/另义」的视为已披露而豁免，未披露的多义报 WARNING
-   （渐进部署，存量清零后翻转 ERROR），弥补仅查「是否登记」不查「是否对义」的守护盲区。
+   不同语义（同名异义）；先按归一化语义集合区分「同义重复」（无诊断）与真实多义，
+   再分离通道——未披露双义报 ERROR（阻断），行内已声明「双义登记/另义」的已披露双义报
+   WARNING（不阻断），对照表缺失/无法解析仍报 ERROR；弥补仅查「是否登记」不查「是否对义」
+   的守护盲区，并避免同义重复与 warning 误进错误通道（D33/F19）。
 25. 注册单例散文数量守卫检查（文档复检盲1）：解析 docs/architecture/singleton-lifecycle.md 中
    「注册单例（@register_singleton，N 个）」散文 N，与「注册单例」章节表格实际数据行数比对，
    守护单例清单数量随增删同步。
@@ -95,6 +97,7 @@ import subprocess
 import sys
 import tomllib
 import typing
+import unicodedata
 from collections.abc import Callable
 from functools import lru_cache
 from dataclasses import dataclass
@@ -3954,33 +3957,64 @@ def _load_glossary_ids() -> set[str] | None:
     return None if entries is None else set(entries)
 
 
-def check_governance_id_dual_meaning() -> list[str]:
-    """检查项 24：治理 ID 同名异义（对义）守卫（文档复检 H3 根因）。
+_DUAL_MEANING_DISCLOSURE_MARKERS = ("双义登记", "另义（同名异义")
+# 归一化丢弃的字符类别：空白/分隔（Z*）、控制与格式（C*，含零宽字符）、标点（P*）、
+# 符号（S*，含全角竖线 ｜ 等 NFKC 后仍属符号的字符）
+_SEMANTICS_DROPPED_CATEGORIES = ("Z", "C", "P", "S")
+
+
+def _normalize_glossary_semantics(semantic: str) -> str:
+    """归一化对照表语义文本，用于判定「同义重复」而非真实双义。
+
+    处理大小写、空白（含全角空格）、标点/符号与全半角差异：先 NFKC 归一（全角→半角、
+    兼容字符折叠），再 casefold，最后丢弃空白/控制/标点/符号类字符。仅做等价折叠，
+    不比较语义相似度——不同含义的文字在归一化后仍不相等。
+    """
+    folded = unicodedata.normalize("NFKC", semantic).casefold()
+    return "".join(ch for ch in folded if unicodedata.category(ch)[0] not in _SEMANTICS_DROPPED_CATEGORIES)
+
+
+def _is_disclosed_dual_meaning(rows: list[tuple[str, int]]) -> bool:
+    """判定同一 ID 的多行登记中是否已显式披露双义（任一行带披露标记即视为已披露）。"""
+    return any(marker in sem for sem, _ in rows for marker in _DUAL_MEANING_DISCLOSURE_MARKERS)
+
+
+def check_governance_id_dual_meaning() -> tuple[list[str], list[str]]:
+    """检查项 24：治理 ID 同名异义（对义）守卫（文档复检 H3 根因 / D33 / F19）。
 
     现有 check_governance_id_glossary 只查「是否登记」，查不出「同名异义」：同一 ID 在对照表
-    登记为两条不同语义时，引用方无从确定所指，且新会话会误读。检测规则：
-    - 同一 ID 在对照表出现 ≥2 行（语义不同）→ 视为潜在对义；
-    - 行内已声明「双义登记」或「另义（同名异义」子串 → 视为已披露而豁免（如 P1-04 双义登记）；
-    - 未披露的对义报 WARNING（渐进部署，与 .py 扫描 WARNING 分级一致，存量清零后翻转 ERROR）。
+    登记为多条不同语义时，引用方无从确定所指，且新会话会误读。检测规则（error/warning 分离）：
+    - 同一 ID 多行语义经归一化后集合只有 1 个元素 → 同义重复，非对义，无诊断；
+    - 归一化后确有 ≥2 种语义且未披露 → ERROR（未披露双义，进 errors 聚合，阻断）；
+    - 已披露双义（行内含「双义登记」或「另义（同名异义」）→ WARNING（仅提示，不阻断）；
+    - 对照表缺失/无法解析 → ERROR（必需输入缺失仍显式失败，D5/F17）。
     """
+    errors: list[str] = []
     warnings: list[str] = []
     entries = _load_glossary_entries()
     if entries is None:
         # D5（F17）：对照表正本缺失/无法解析显式失败，不再静默空转
-        return [f"governance-ids.md 缺失或无法解析，治理 ID 对义守卫无法执行: {GOVERNANCE_IDS_PATH}"]
+        return [f"governance-ids.md 缺失或无法解析，治理 ID 对义守卫无法执行: {GOVERNANCE_IDS_PATH}"], warnings
     for gov_id in sorted(entries):
         rows = entries[gov_id]
         if len(rows) < 2:
             continue
-        # 任一行已披露双义则豁免：批次2 登记 P1-04 时在语义首列标注「另义（同名异义双义登记）」
-        if any("双义登记" in sem or "另义（同名异义" in sem for sem, _ in rows):
-            continue
         meanings = [sem for sem, _ in rows]
-        warnings.append(
-            f"治理 ID 对义(WARNING): {gov_id} 在 governance-ids.md 有多条不同语义未声明双义登记"
-            f"（{'; '.join(meanings)}）；请在对应登记行标注「另义（同名异义双义登记）」或拆分 ID（渐进部署，存量清零后翻转为 ERROR）"
+        if len({_normalize_glossary_semantics(sem) for sem in meanings}) < 2:
+            # 同义重复（大小写/空白/标点/全半角差异）不是对义，避免误报
+            continue
+        if _is_disclosed_dual_meaning(rows):
+            # 已披露双义：提示性 WARNING，不进 errors 聚合（不置 CLI 退出码）
+            warnings.append(
+                f"治理 ID 已披露双义(WARNING): {gov_id} 在 governance-ids.md 登记多条语义且已声明双义登记"
+                f"（{'; '.join(meanings)}）；已披露，仅供参考，不阻断"
+            )
+            continue
+        errors.append(
+            f"治理 ID 对义(ERROR): {gov_id} 在 governance-ids.md 有多条不同语义未声明双义登记"
+            f"（{'; '.join(meanings)}）；请在对应登记行标注「另义（同名异义双义登记）」或拆分 ID"
         )
-    return warnings
+    return errors, warnings
 
 
 _REGISTERED_SINGLETON_PROSE = re.compile(r"注册单例（`@register_singleton`，(\d+) 个）")
@@ -4490,7 +4524,7 @@ _SCOPE_CHECK_NAMES: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"source"}), "check_singleton_count_prose"),
     (frozenset({"source"}), "check_non_registered_singleton_doc"),
     (frozenset({"document"}), "check_adr_supersede_chain"),
-    (frozenset({"governance"}), "check_governance_id_dual_meaning"),
+    (frozenset({"governance"}), "_governance_id_dual_meaning_with_warnings"),
     (frozenset({"document"}), "check_evals_case_index_consistency"),
     (frozenset({"document"}), "check_docs_generated"),
 )
@@ -4512,6 +4546,22 @@ def _glossary_check_with_warnings() -> list[str]:
             print(f"  - {w}")
         if len(warnings) > 40:
             print(f"  - ...另有 {len(warnings) - 40} 条未列出（存量清零后翻转为 ERROR）")
+    return errors
+
+
+def _governance_id_dual_meaning_with_warnings() -> list[str]:
+    """治理 ID 对义检查的 warning 打印包装（D33 / F19：分离 error/warning 出口）。
+
+    检查本体先按归一化语义集合区分同义重复与真实多义，再在包装层完成通道分离：
+    - 同义重复：检查本体无诊断，不进 errors；
+    - 未披露双义 / 对照表缺失：ERROR，进 errors 聚合 → main() 退出码 1；
+    - 已披露双义：仅 ``::warning::`` 输出，**不进** errors 聚合 → CLI 退出码 0（不阻断）。
+    """
+    errors, warnings = check_governance_id_dual_meaning()
+    if warnings:
+        print("::warning::治理 ID 对义（已披露双义，不阻断）：")
+        for w in warnings:
+            print(f"  - {w}")
     return errors
 
 
