@@ -157,7 +157,7 @@ class SourceFormatError(SourceError):
 
 
 class SourceFieldError(SourceError):
-    """作者源条目缺必填字段（含渲染函数的条件性必需字段）。"""
+    """作者源条目缺必填字段或必填字段值形态非法（null/空字符串/路径不存在）。"""
 
 
 class SourceUnknownFieldError(SourceError):
@@ -376,6 +376,9 @@ class SourceSchema:
     ``author_block_id``（作者源自身为受控块），``author_payload`` 决定传给渲染函数的
     内容："block"=受控块内容行（默认），"full"=完整文件文本（供复用既有的、自行
     定位受控块的正本解析器，如 CONTRIBUTING 最小验证命令解析器）。
+
+    ``non_empty_string_fields`` 声明须为非空字符串的字段（身份字段自动纳入）；
+    ``path_fields`` 声明须为非空字符串且在工作根内真实存在的路径字段。
     """
 
     path: str
@@ -383,6 +386,8 @@ class SourceSchema:
     item_key: str | None = None
     required_fields: frozenset[str] = frozenset()
     known_fields: frozenset[str] = frozenset()
+    non_empty_string_fields: frozenset[str] = frozenset()
+    path_fields: frozenset[str] = frozenset()
     identity_field: str | None = None
     section_field: str | None = None
     allowed_sections: frozenset[str] = frozenset()
@@ -400,20 +405,47 @@ class SourceSchema:
             raise InvalidSpecError(f"作者源 {self.path!r}: 未知格式 {self.fmt!r}")
 
 
-def _validate_source_items(schema: SourceSchema, items: list[object]) -> list[dict[str, object]]:
-    """逐条目校验必填/未知字段/身份重复/section 取值（任一违规显式拒绝）。"""
+def _validate_source_items(root: Path, schema: SourceSchema, items: list[object]) -> list[dict[str, object]]:
+    """逐条目校验必填/未知字段/值形态/身份重复/section 取值（任一违规显式拒绝）。
+
+    值形态在任何渲染与写入之前校验：身份与声明的字段须为非空字符串（``null``、
+    空串、纯空白、非字符串一律拒绝），路径字段须为非空字符串且真实存在；条目集合
+    为空同样拒绝（不得静默渲染空清单）。
+    """
+    if not items:
+        raise SourceFormatError(f"作者源 {schema.path} 的 {schema.item_key!r} 条目集合为空（不得静默当空集合）")
+    shape_fields = set(schema.non_empty_string_fields)
+    if schema.identity_field is not None:
+        shape_fields.add(schema.identity_field)
     seen: set[object] = set()
     validated: list[dict[str, object]] = []
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise SourceFormatError(f"作者源 {schema.path} 第 {index} 条不是映射: {type(item).__name__}")
-        where = f"作者源 {schema.path} 条目 {item.get(schema.identity_field, f'#{index}')!r}"
+        identity_hint = item.get(schema.identity_field) if schema.identity_field is not None else None
+        if not isinstance(identity_hint, str) or not identity_hint.strip():
+            identity_hint = f"#{index}"
+        where = f"作者源 {schema.path} 条目 {identity_hint!r}"
         missing = schema.required_fields - set(item)
         if missing:
             raise SourceFieldError(f"{where} 缺必填字段 {sorted(missing)}（不得静默取默认值）")
         unknown = set(item) - schema.known_fields
         if unknown:
             raise SourceUnknownFieldError(f"{where} 含未知字段 {sorted(unknown)}（schema 未登记即拒绝）")
+        for field in sorted(shape_fields):
+            if field in item:
+                value = item[field]
+                if not isinstance(value, str) or not value.strip():
+                    raise SourceFieldError(f"{where} 的 {field} 须为非空字符串, 实际 {value!r}")
+        for field in sorted(schema.path_fields):
+            value = item.get(field)
+            if field not in item or value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise SourceFieldError(f"{where} 的 {field} 须为非空字符串, 实际 {value!r}")
+            resolved = resolve_within(root, value)
+            if not resolved.exists():
+                raise SourceFieldError(f"{where} 的 {field} 路径不存在: {value}")
         if schema.section_field is not None and schema.allowed_sections:
             section = item.get(schema.section_field)
             if section not in schema.allowed_sections:
@@ -455,7 +487,7 @@ def load_validated_source(root: Path, schema: SourceSchema, *, text: str | None 
         items = data.get(schema.item_key)
         if not isinstance(items, list):
             raise SourceFormatError(f"作者源 {schema.path} 缺 {schema.item_key!r} 列表（不得静默当空集合）")
-        return _validate_source_items(schema, items)
+        return _validate_source_items(root, schema, items)
     if schema.fmt == "markdown-block":
         assert schema.author_block_id is not None  # __post_init__ 已保证
         blocks = scan_blocks(text, "markdown")
@@ -526,6 +558,7 @@ _REDLINES_SCHEMA = SourceSchema(
     item_key="redlines",
     required_fields=_REDLINE_REQUIRED_FIELDS,
     known_fields=_REDLINE_KNOWN_FIELDS,
+    non_empty_string_fields=frozenset({"title"}),
     identity_field="id",
     section_field="rule_type",
     allowed_sections=_RULE_TYPE_SECTIONS,
@@ -543,6 +576,8 @@ _CANONICAL_TOPICS_SCHEMA = SourceSchema(
     item_key="topics",
     required_fields=frozenset({"id", "title", "canonical"}),
     known_fields=frozenset({"id", "title", "canonical", "section", "workflow", "note"}),
+    non_empty_string_fields=frozenset({"title", "canonical"}),
+    path_fields=frozenset({"canonical", "workflow"}),
     identity_field="id",
 )
 # 文件级目录索引的标题作者源（fmt=text 经快照字节渲染）：同一更新窗口内这些文件同时是
