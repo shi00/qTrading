@@ -153,7 +153,10 @@ log_cli_level = "INFO"
 log_level = "DEBUG"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
-testpaths = ["tests"]
+# 默认业务收集排除纯 docs（D24）：tests/docs 由独立轻量套件运行
+# （`-c tests/docs/pytest.ini --confcutdir=tests/docs tests/docs`），避免新旧入口
+# 在同一收集会话中重复执行；混选由 tests/docs/conftest.py 的收集钩子显式拒绝。
+testpaths = ["tests/unit", "tests/integration", "tests/e2e"]
 filterwarnings = [
     "error::DeprecationWarning",
     "ignore::DeprecationWarning:pytest_asyncio.plugin",
