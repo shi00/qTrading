@@ -762,7 +762,7 @@ v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万�
 
 ## 引用关系
 
-- [CLAUDE.md §3.3](../../CLAUDE.md#33--已知技术债与架构限制-known-limitations): 已知技术债与架构限制索引（CLAUDE.md 仅保留摘要 + 指向本文的链接）
+- [CLAUDE.md §3.3](../../CLAUDE.md#33-%EF%B8%8F-已知技术债与架构限制-known-limitations): 已知技术债与架构限制索引（CLAUDE.md 仅保留摘要 + 指向本文的链接）
 
 - [CONTRIBUTING.md §排查典型问题](../../CONTRIBUTING.md#排查典型问题): 排查典型问题（与技术债互补）
 
