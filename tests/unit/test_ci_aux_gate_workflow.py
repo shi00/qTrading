@@ -379,7 +379,7 @@ class TestAggregateGate:
 
     def test_needs_all_auxiliary_results_and_always_runs(self, gate_jobs: dict) -> None:
         aggregate = gate_jobs["ci-aux-gate"]
-        assert aggregate["needs"] == ["detect", "sidecar-check", "precommit-check"]
+        assert aggregate["needs"] == ["detect", "ci-meta-contract", "sidecar-check", "precommit-check"]
         assert aggregate["if"] == "always()"
 
     def test_only_success_or_expected_skip_passes(self, gate_jobs: dict) -> None:
@@ -405,6 +405,26 @@ class TestAggregateGate:
         assert 'if [ "$requested" = "false" ] && [ "$result" = "skipped" ]' in aggregate_run
         assert "${result:-unknown}" in aggregate_run
         assert "return 1" in aggregate_run
+
+
+class TestMetaContractJob:
+    """D22：独立必达元检查必须无条件运行并被聚合判定强制。"""
+
+    def test_meta_contract_job_runs_the_script(self, gate_jobs: dict) -> None:
+        job = gate_jobs["ci-meta-contract"]
+        assert job["name"] == "Auxiliary check: CI meta contract"
+        # 不做路径过滤、不依赖 detect：每次事件都必须执行。
+        assert "if" not in job
+        runs = "\n".join(step["run"] for step in job["steps"] if "run" in step)
+        assert "python scripts/check_ci_meta_contract.py" in runs
+        assert job["permissions"] == {"contents": "read"}
+
+    def test_meta_result_is_mandatory_in_aggregate(self, gate_jobs: dict) -> None:
+        aggregate = gate_jobs["ci-aux-gate"]
+        assert "ci-meta-contract" in aggregate["needs"]
+        run_step = aggregate["steps"][-1]
+        assert run_step["env"]["META_RESULT"] == "${{ needs.ci-meta-contract.result }}"
+        assert '"$META_RESULT" != "success"' in run_step["run"]
 
 
 class TestDocs:

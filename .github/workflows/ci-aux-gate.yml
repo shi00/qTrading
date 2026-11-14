@@ -139,6 +139,33 @@ jobs:
           echo "precommit=$precommit" >> "$GITHUB_OUTPUT"
           echo "- 事件 \`$EVENT_NAME\`：sidecar=$sidecar，precommit=$precommit" >> "$GITHUB_STEP_SUMMARY"
 
+  # 独立必达元检查（检视 D22）：对真实 workflow 做静态 + 语义解析，验证
+  # docs-ci.yml 的 job 图、测试文件选择、执行条件与错误传播，并断言本 job 自身
+  # 已接入下面的聚合判定。不做路径过滤、不 depends detect：每次事件都运行，避免
+  # 「只改 workflow → 主分类器 code=false → 合同测试未被选中」时选择被改成 echo
+  # 仍保持绿色。
+  ci-meta-contract:
+    name: "Auxiliary check: CI meta contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Install PyYAML
+        run: python -m pip install --quiet 'pyyaml>=6'
+
+      - name: Run CI meta contract check
+        run: python scripts/check_ci_meta_contract.py
+
   sidecar-check:
     name: "Auxiliary check: qtrading-pg-sidecar"
     needs: detect
@@ -162,7 +189,7 @@ jobs:
   # 稳定聚合 check 名称：`CI Aux Gate`。显式校验 needs 结果，不用「skipped 即通过」的默认语义。
   ci-aux-gate:
     name: CI Aux Gate
-    needs: [detect, sidecar-check, precommit-check]
+    needs: [detect, ci-meta-contract, sidecar-check, precommit-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -174,6 +201,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           DETECT: ${{ needs.detect.result }}
+          META_RESULT: ${{ needs.ci-meta-contract.result }}
           SIDECAR_REQUESTED: ${{ needs.detect.outputs.sidecar }}
           SIDECAR_RESULT: ${{ needs.sidecar-check.result }}
           PRECOMMIT_REQUESTED: ${{ needs.detect.outputs.precommit }}
@@ -192,6 +220,12 @@ jobs:
 
           if [ "$DETECT" != "success" ]; then
             echo "| detect | - | ${DETECT:-missing} | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
+            fail=1
+          fi
+
+          # 元检查无条件必达：success 之外的任何结果（failure / cancelled / skipped）均判失败。
+          if [ "$META_RESULT" != "success" ]; then
+            echo "| ci-meta-contract | - | ${META_RESULT:-missing} | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
             fail=1
           fi
 
