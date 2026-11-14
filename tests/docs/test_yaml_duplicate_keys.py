@@ -78,8 +78,12 @@ def test_identical_duplicate_values_still_rejected() -> None:
     duplicate = "redlines:\n  - id: R1\n    title: 同\n    title: 同\n    rule_type: INVARIANT\n"
     single = "redlines:\n  - id: R1\n    title: 同\n    rule_type: INVARIANT\n"
     assert yaml.safe_load(duplicate) == yaml.safe_load(single)
-    with pytest.raises(dg.DuplicateMappingKeyError):
+    with pytest.raises(dg.DuplicateMappingKeyError) as excinfo:
         dg.load_yaml(duplicate, source="docs/governance/redlines.yml")
+    error = excinfo.value
+    assert error.key == "title"
+    assert error.path == "redlines[0].title"
+    assert (error.line, error.column) == (4, 5)
 
 
 def test_legal_yaml_passes_unchanged() -> None:
@@ -119,8 +123,9 @@ def test_generated_source_loader_keeps_identity_dedup(tmp_path: Path) -> None:
         "  - id: R1\n    title: T\n    rule_type: INVARIANT\n"
         "  - id: R1\n    title: T2\n    rule_type: INVARIANT\n"
     )
-    with pytest.raises(dg.SourceDuplicateIdentityError):
+    with pytest.raises(dg.SourceDuplicateIdentityError) as excinfo:
         dg.load_validated_source(tmp_path, _REDLINES_SCHEMA, text=text)
+    assert "身份重复: 'R1'" in str(excinfo.value)
 
 
 def test_governance_check_rejects_duplicate_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
