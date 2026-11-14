@@ -19,7 +19,13 @@
     load_document_view(path) -> DocumentView
     create_slugger() -> Slugger        # GitHub 锚点语义
     parse_link_target(raw) -> LinkTarget  # 共享 URL 分类与 path/query/fragment 分离
+    slugger_backend_diagnostic() -> str | None  # 环境偏离固定 slugger 依赖时的具名诊断
     SLUGGER_BACKEND                    # 当前锚点实现后端声明
+    SLUGGER_BACKEND_DEVIATION          # 偏离类别（None / missing-package / import-failure / unicode-error）
+
+环境偏离（D37）：固定依赖 github-slugger 不可用时本模块回退 CompatGithubSlugger 以保证解析
+继续运行，但该回退**不构成固定后端验收**。CLI 入口经 ``slugger_backend_diagnostic()`` 输出
+具名诊断（缺包 / 导入失败 / UnicodeEncodeError 分别具名），正常固定后端可用时不输出。
 """
 
 from __future__ import annotations
@@ -37,6 +43,8 @@ from markdown_it.token import Token
 
 __all__ = [
     "SLUGGER_BACKEND",
+    "SLUGGER_BACKEND_DEVIATION",
+    "SLUGGER_BACKEND_DEVIATION_DETAIL",
     "CodeBlockInfo",
     "CodeSpanInfo",
     "CompatGithubSlugger",
@@ -52,6 +60,7 @@ __all__ = [
     "load_document_view",
     "parse_link_target",
     "parse_text",
+    "slugger_backend_diagnostic",
 ]
 
 # 解析模式固定：CommonMark + table/strikethrough（检视 §5.1），模块级单例，
@@ -76,13 +85,59 @@ class Slugger(Protocol):
         raise NotImplementedError  # Protocol 结构化声明，运行期由具体后端实现
 
 
+_DEVIATION_DETAIL_LIMIT = 200
+
+
+def _format_import_error(exc: BaseException) -> str:
+    """偏离诊断的异常摘要（类型 + 消息，限长；不携带堆栈）。"""
+    detail = f"{type(exc).__name__}: {exc}"
+    return detail if len(detail) <= _DEVIATION_DETAIL_LIMIT else detail[:_DEVIATION_DETAIL_LIMIT] + "…"
+
+
 try:  # 权威来源 pin github-slugger==0.0.3：可用则优先（未来修复版自动切回）
     from github_slugger import GithubSlugger as _GithubSlugger  # type: ignore[reportMissingImports]  # 包在 Python 3.13 环境导入即崩（见 CompatGithubSlugger docstring），未安装时经 except 回退 compat 实现，pyright 环境未必安装该包
 
     SLUGGER_BACKEND = "github-slugger"
-except (ImportError, UnicodeEncodeError):
+    SLUGGER_BACKEND_DEVIATION: str | None = None
+    SLUGGER_BACKEND_DEVIATION_DETAIL = ""
+except (ImportError, UnicodeEncodeError) as _slugger_import_error:
+    # D37：保留回退以保证解析继续运行，但记录具名偏离类别，供 CLI 显式诊断
+    # （兼容模式运行不等同固定后端验收）。三类分别具名：
+    # missing-package=固定包本身未安装；import-failure=已安装但导入/依赖初始化失败；
+    # unicode-error=CPython ≥3.13 编译包内孤立代理转义 docstring 触发（上游 0.0.3 已知缺陷）。
     _GithubSlugger = None
     SLUGGER_BACKEND = "compat"
+    if isinstance(_slugger_import_error, UnicodeEncodeError):
+        SLUGGER_BACKEND_DEVIATION = "unicode-error"
+    elif isinstance(_slugger_import_error, ModuleNotFoundError) and _slugger_import_error.name == "github_slugger":
+        SLUGGER_BACKEND_DEVIATION = "missing-package"
+    else:
+        SLUGGER_BACKEND_DEVIATION = "import-failure"
+    SLUGGER_BACKEND_DEVIATION_DETAIL = _format_import_error(_slugger_import_error)
+
+
+_DEVIATION_LABELS = {
+    "missing-package": "未安装固定依赖 github-slugger",
+    "import-failure": "固定依赖 github-slugger 已安装但导入失败",
+    "unicode-error": "固定依赖 github-slugger 在 Python ≥3.13 导入触发 UnicodeEncodeError（上游 0.0.3 已知缺陷）",
+}
+
+
+def slugger_backend_diagnostic() -> str | None:
+    """环境偏离固定 slugger 依赖时的单行诊断；固定后端可用时返回 None。
+
+    仅供 CLI 输出（stderr），不进入机器可读结果；诊断存在与否只反映依赖/导入环境，
+    不证明 compat 与固定后端锚点语义等价，也不得作为固定后端可用性的验收证据。
+    """
+    if SLUGGER_BACKEND_DEVIATION is None:
+        return None
+    label = _DEVIATION_LABELS.get(SLUGGER_BACKEND_DEVIATION, "固定依赖 github-slugger 不可用")
+    detail = f"（{SLUGGER_BACKEND_DEVIATION_DETAIL}）" if SLUGGER_BACKEND_DEVIATION_DETAIL else ""
+    return (
+        f"文档锚点后端偏离固定依赖合同：{label}{detail}；"
+        f"已回退 CompatGithubSlugger（SLUGGER_BACKEND={SLUGGER_BACKEND}）。"
+        "兼容模式运行不等同固定后端验收：请安装 docs 组依赖后重跑，以固定后端验证锚点语义。"
+    )
 
 
 class CompatGithubSlugger:
