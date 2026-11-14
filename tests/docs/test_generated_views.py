@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import docs_generated as dg
+from fixtures import generator_fixtures as gf
 
 pytestmark = pytest.mark.docs_pure
 
@@ -60,28 +61,37 @@ def test_file_index_renders_titles_from_h1_and_comments(tmp_path: Path) -> None:
     assert "| [README.md](./README.md) | Project Documentation Index |" in rendered
 
 
-def test_file_index_uses_snapshot_text_for_protected_files(tmp_path: Path) -> None:
+def test_file_index_uses_snapshot_text_for_protected_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """快照通道回归：登记为 text 作者源的文件在更新窗口内经快照字节渲染。
 
     渲染只读 validated（保护窗口内目标被独占锁定，磁盘直读会 PermissionError）——
     这是独占保护窗口下更新与 --check 两侧渲染一致的根（Windows 共享冲突语义的回归）。
+    原位写被拒绝（D28），因此以渲染输入捕获证明快照通道，而非读取落盘结果。
     """
     root = tmp_path
-    _write(root, "docs/README.md", "# 磁盘标题\n<!-- generated:idx -->\n<!-- /generated -->\n")
+    original = "# 磁盘标题\n<!-- generated:idx -->\n<!-- /generated -->\n"
+    _write(root, "docs/README.md", original)
+    captured: dict[str, str] = {}
+
+    def render(validated: dict[str, object], root_path: Path) -> list[str]:
+        del root_path
+        text = str(validated["docs/README.md"])
+        captured["rows"] = str(len(text.splitlines()))
+        captured["first"] = text.splitlines()[0]
+        return [f"rows={captured['rows']}", f"first={captured['first']}"]
+
     spec = dg.BlockSpec(
         block_id="idx",
         target="docs/README.md",
         sources=(dg.SourceSchema(path="docs/README.md", fmt="text"),),
-        render=lambda validated, root_path: [
-            f"rows={len(str(validated['docs/README.md']).splitlines())}",
-            f"first={str(validated['docs/README.md']).splitlines()[0]}",
-        ],
+        render=render,
     )
+    before = (root / "docs/README.md").read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
     result = dg.run_update(root, (spec,))
-    assert result.ok, result
-    written = (root / "docs/README.md").read_text(encoding="utf-8")
-    assert "first=# 磁盘标题" in written  # 渲染输入 = 保护内核对过的快照字节
-    assert "rows=3" in written
+    assert result.ok is False and result.written == ()
+    assert (root / "docs/README.md").read_bytes() == before
+    assert captured == {"rows": "3", "first": "# 磁盘标题"}  # 渲染输入 = 保护内核对过的快照字节
 
 
 def test_file_index_empty_candidates_rejected(tmp_path: Path) -> None:
@@ -205,6 +215,9 @@ def test_rules_view_renders_redlines_table(tmp_path: Path) -> None:
 def test_topics_view_merges_by_canonical_and_section(tmp_path: Path) -> None:
     """正例：相同 canonical+section 合并一行并保全部 topic id；相对链接指向仓库根。"""
     root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
+    _write(root, "docs/guides/testing.md", "# Testing\n")
     _write(
         root,
         "docs/governance/canonical-topics.yml",
@@ -241,6 +254,8 @@ def test_topics_view_merges_by_canonical_and_section(tmp_path: Path) -> None:
 def test_topics_view_identity_duplicate_rejected(tmp_path: Path) -> None:
     """负例：topic id 重复 → 作者源校验显式拒绝（不静默合并），错误信息指认重复 id。"""
     root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
     _write(
         root,
         "docs/governance/canonical-topics.yml",
@@ -269,7 +284,7 @@ def test_topics_view_identity_duplicate_rejected(tmp_path: Path) -> None:
 
 
 def test_builtin_registry_d6_entries_active_and_consistent() -> None:
-    """D6 四个激活条目：目标/格式/渲染接线正确；未接线槽位保持 inactive 不伪造生成。"""
+    """D6 四个激活条目 + D23 两个 hook 依赖派生条目：接线正确；未接线槽位不伪造生成。"""
     by_id = {spec.block_id: spec for spec in dg.BUILTIN_REGISTRY}
     for block_id, target in (
         ("docs-readme-file-index", "docs/README.md"),
@@ -280,6 +295,107 @@ def test_builtin_registry_d6_entries_active_and_consistent() -> None:
         spec = by_id[block_id]
         assert spec.active and spec.render is not None
         assert spec.target == target and spec.block_format == "markdown"
-    for slot in ("a11y-contrast-reference", "precommit-docs-parser-deps"):
-        assert by_id[slot].active is False and by_id[slot].render is None
+    for block_id in _HOOK_DEP_BLOCKS:
+        spec = by_id[block_id]
+        assert spec.active and spec.render is dg._render_precommit_docs_deps
+        assert spec.target == ".pre-commit-config.yaml" and spec.block_format == "yaml"
+        assert spec.sources == (dg._PYPROJECT_DOCS_SCHEMA,)
+    assert by_id["a11y-contrast-reference"].active is False
+    assert by_id["a11y-contrast-reference"].render is None
     dg._validate_specs(dg.BUILTIN_REGISTRY)  # 注册表整体跨条目约束（目标格式一致/块 id 不重复）
+
+
+# ---------------------------------------------------------------------------
+# D23：hook docs 依赖派生（pyproject docs 组 → 两个 hook 片段）
+# ---------------------------------------------------------------------------
+
+_PYPROJECT_DOCS = """\
+[dependency-groups]
+docs = [
+    "markdown-it-py==4.0.0",
+    "github-slugger==0.0.3",
+    "pyyaml>=6.0",
+    "pytest>=9.2.0",
+]
+"""
+
+_HOOK_DEP_BLOCKS = ("precommit-docs-deps-verify-versions", "precommit-docs-deps-docs-consistency")
+
+
+def _precommit_target() -> str:
+    """含两个 hook 受控片段的 .pre-commit-config.yaml 最小目标文本。"""
+    return (
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: verify-versions\n"
+        "        additional_dependencies:\n"
+        "          # generated:precommit-docs-deps-verify-versions\n"
+        "          # /generated:precommit-docs-deps-verify-versions\n"
+        "      - id: docs-consistency\n"
+        "        additional_dependencies:\n"
+        "          # generated:precommit-docs-deps-docs-consistency\n"
+        "          # /generated:precommit-docs-deps-docs-consistency\n"
+    )
+
+
+def _hook_dep_specs() -> tuple[dg.BlockSpec, ...]:
+    return tuple(spec for spec in dg.BUILTIN_REGISTRY if spec.target == ".pre-commit-config.yaml")
+
+
+def _render_hook_deps(root: Path) -> dict[str, list[str]]:
+    return {spec.block_id: dg.render_block_lines(root, spec) for spec in _hook_dep_specs()}
+
+
+def test_precommit_docs_deps_derived_from_docs_group(tmp_path: Path) -> None:
+    """D23 正例：两个 hook 片段同源派生，保留版本范围写法、排序稳定、pytest 被排除。"""
+    _write(tmp_path, "pyproject.toml", _PYPROJECT_DOCS)
+    rendered = _render_hook_deps(tmp_path)
+    expected = [
+        '          - "github-slugger==0.0.3"',
+        '          - "markdown-it-py==4.0.0"',
+        '          - "pyyaml>=6.0"',
+    ]
+    for block_id in _HOOK_DEP_BLOCKS:
+        assert rendered[block_id] == expected
+        assert all("pytest" not in line for line in rendered[block_id])
+
+
+def test_docs_group_change_updates_both_hooks_and_is_idempotent(tmp_path: Path) -> None:
+    """D23 正例：只改 docs 组一次 → 两个 hook 片段同时变化；二次生成零差异。"""
+    _write(tmp_path, "pyproject.toml", _PYPROJECT_DOCS)
+    before = _render_hook_deps(tmp_path)
+    text = _precommit_target()
+    for block_id in _HOOK_DEP_BLOCKS:
+        text = dg.replace_block(text, "yaml", block_id, before[block_id])
+    once = text
+    for block_id in _HOOK_DEP_BLOCKS:
+        text = dg.replace_block(text, "yaml", block_id, before[block_id])
+    assert text == once, "同一作者源二次生成必须零差异"
+
+    _write(tmp_path, "pyproject.toml", _PYPROJECT_DOCS.replace("markdown-it-py==4.0.0", "markdown-it-py==4.1.0"))
+    after = _render_hook_deps(tmp_path)
+    for block_id in _HOOK_DEP_BLOCKS:
+        assert after[block_id] != before[block_id], "同一 docs 组变化必须同时反映到两个 hook"
+        assert any("markdown-it-py==4.1.0" in line for line in after[block_id])
+
+
+def test_precommit_docs_deps_missing_docs_group_rejected(tmp_path: Path) -> None:
+    """D23 负例：pyproject 缺 docs 组 → 显式拒绝（不静默生成空依赖）。"""
+    _write(tmp_path, "pyproject.toml", '[project]\nname = "x"\n')
+    with pytest.raises(dg.SourceFormatError, match="dependency-groups"):
+        dg.render_block_lines(tmp_path, _hook_dep_specs()[0])
+
+
+def test_precommit_docs_deps_only_pytest_rejected(tmp_path: Path) -> None:
+    """D23 负例：docs 组排除 pytest 后为空 → 显式拒绝。"""
+    _write(tmp_path, "pyproject.toml", '[dependency-groups]\ndocs = ["pytest>=9.2.0"]\n')
+    with pytest.raises(dg.SourceFormatError, match="排除 pytest 后为空"):
+        dg.render_block_lines(tmp_path, _hook_dep_specs()[0])
+
+
+def test_precommit_docs_deps_non_string_entry_rejected(tmp_path: Path) -> None:
+    """D23 负例：docs 组含非字符串条目 → 显式拒绝。"""
+    _write(tmp_path, "pyproject.toml", "[dependency-groups]\ndocs = [42]\n")
+    with pytest.raises(dg.SourceFormatError, match="第 0 条不是非空字符串"):
+        dg.render_block_lines(tmp_path, _hook_dep_specs()[0])
