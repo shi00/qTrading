@@ -336,15 +336,16 @@ _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "fl
 
 
 def github_anchor(heading_text: str) -> str:
-    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown slugger 实现）。
+    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown 唯一工厂）。
 
-    检视 §5.1 解析边界迁移（D5）：锚点语义唯一来源为 docs_markdown.create_slugger()
-    （github-slugger 语义：小写化 → 剔除非字母数字/``-``/``_`` → 空白逐个转连字符 →
-    重复标题追加序号）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
+    检视 §5.1 解析边界迁移（D5）+ Q10：锚点语义唯一来源为 ``create_slugger()``，
+    与共享解析视图同源；本函数不再自行固定 Compat 实现，避免消费者后端与解析视图分叉。
+    实际生效后端由 ``docs_markdown.SLUGGER_BACKEND`` 声明（github-slugger 可用则用包，
+    否则回退等价实现）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
 
     例如 "3.1 ❌ 绝对禁止" → 移除 "." 和 "❌" 后得 "31  绝对禁止" → "31--绝对禁止"。
     """
-    return docs_markdown.CompatGithubSlugger().slug(heading_text)
+    return docs_markdown.create_slugger().slug(heading_text)
 
 
 def parse_doc_view(content: str) -> docs_markdown.DocumentView:
@@ -391,6 +392,64 @@ def _load_doc_view(path: Path) -> docs_markdown.DocumentView:
     return _load_doc_view_cached(str(path), stat.st_mtime_ns, stat.st_size)
 
 
+# 检查器视为「外部链接、无需本地存在性校验」的协议（大小写不敏感，urlsplit 归一化）。
+_EXTERNAL_SCHEMES = frozenset({"http", "https", "mailto"})
+
+
+@dataclass(frozen=True)
+class _LinkTarget:
+    """链接 URL 的分解结果（scheme/netloc/path/query/fragment，本地 path 已解码）。"""
+
+    scheme: str
+    netloc: str
+    path: str
+    query: str
+    fragment: str
+
+    @property
+    def is_external(self) -> bool:
+        """外部协议链接：无需本地文件存在性校验。"""
+        return self.scheme in _EXTERNAL_SCHEMES
+
+    @property
+    def is_non_local(self) -> bool:
+        """非本地链接：外部协议或协议相对地址（`//host/path`）。
+
+        未知协议（如 `ftp:` / `tel:`）不算「非本地」而是「不支持」，由相对链接检查
+        显式报错——否则带 host 的未知协议会被静默跳过（Q09）。
+        """
+        return self.is_external or (not self.scheme and bool(self.netloc))
+
+
+def _split_link_target(url: str) -> _LinkTarget:
+    """统一 URL 分解入口（Q09）：分离 scheme/netloc/path/query/fragment，再解码本地 path。
+
+    解析视图（docs_markdown / markdown-it）按 URL 规范对目标 percent-encode：
+    `中文.md` → `%E4%B8%AD%E6%96%87.md`、`a b.md` → `a%20b.md`。直接拿编码串拼磁盘
+    路径会把编码当文件名而误报，故本地 path 必须解码。解码发生在组件分离之后：
+    - 先分离 query/fragment，`%23`/`%3F` 才不会被误当成锚点/查询分隔符；
+    - 只解码一次，`%2520` 保持为字面 `%20`（避免二次解码把用户显式编码还原成空格）；
+    - query 不参与磁盘路径。
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        # 畸形 URL（如非法 IPv6 主机）：按既有本地路径语义处理，不让检查器崩溃。
+        return _LinkTarget(scheme="", netloc="", path=url, query="", fragment="")
+    path = urllib.parse.unquote(parts.path)
+    if "\x00" in path:
+        # NUL 不是合法文件名字符，解码后会让 Path.resolve()/stat 抛 ValueError；
+        # 保留编码形态，令其按「不存在的本地路径」正常报错而非中断整个检查。
+        path = parts.path
+    return _LinkTarget(
+        scheme=parts.scheme,
+        netloc=parts.netloc,
+        path=path,
+        query=parts.query,
+        fragment=urllib.parse.unquote(parts.fragment),
+    )
+
+
 def extract_headings(content: str) -> set[str]:
     """提取 markdown 文件所有标题对应的锚点集合（兼容层，委托统一解析视图）。
 
@@ -425,30 +484,28 @@ def check_anchor_dead_links() -> list[str]:
         view = _load_doc_view(doc)
         for link in view.links:
             url = link.target.strip()
-            # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
+            target = _split_link_target(url)
+            # 外部链接与协议相对地址不校验本地文件
+            if target.is_non_local:
+                continue
+            # 未知协议由 check_relative_dead_links 统一报「不支持」，此处不重复
+            if target.scheme:
                 continue
             # 只检查带锚点的链接
-            if "#" not in url:
+            if not target.fragment:
                 continue
             # 解析视图按 URL 规范对目标 percent-encode（中文锚点 → %XX 形态），
-            # 与标题 slug 比较前须解码（GitHub 渲染器同语义）
-            anchor = urllib.parse.unquote(url.split("#", 1)[1])
-            # 锚点为空（如 `[text](./file.md#)` ）跳过
-            if not anchor:
-                continue
-
-            # 提取目标文件路径部分（锚点前的部分；路径段同样解码）
-            target_path_part = urllib.parse.unquote(url.split("#", 1)[0])
+            # 已在统一入口解码（GitHub 渲染器同语义）
+            anchor = target.fragment
 
             # 同文件锚点：直接校验锚点存在性
-            if not target_path_part:
+            if not target.path:
                 if anchor not in doc_anchors.get(doc, frozenset()):
                     errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
                 continue
 
             # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
-            target_path = (doc.parent / target_path_part).resolve()
+            target_path = (doc.parent / target.path).resolve()
             if not target_path.exists():
                 errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
                 continue
@@ -468,8 +525,10 @@ def check_anchor_dead_links() -> list[str]:
 def check_relative_dead_links() -> list[str]:
     """检查项 6：相对链接死链（不含锚点的相对路径链接；D5 迁移：经统一解析视图判定）。
 
-    扫描 CHECKED_DOCS 中所有 markdown 链接，若 url 是相对路径（非 http/mailto，
-    不含 # 锚点），从 source_doc 所在目录解析，若目标文件不存在则报错。
+    扫描 CHECKED_DOCS 中所有 markdown 链接，经统一 URL 入口分离
+    scheme/netloc/path/query/fragment 并解码本地 path 后，从 source_doc 所在目录解析，
+    目标文件不存在则报错。query 不参与磁盘路径（`./f.md?x=1` 校验 `f.md`）；
+    带锚点的链接由 check_anchor_dead_links 处理；未知协议显式报「不支持」而非误报死链。
 
     另检引用式死链（`[text][label]` label 未定义）：解析视图 unresolved_references
     显式失败（F17：真死链不得漏检、不从全文取样例代替）；围栏/行内代码内的假链接
@@ -480,16 +539,27 @@ def check_relative_dead_links() -> list[str]:
         view = _load_doc_view(doc)
         for link in view.links:
             url = link.target.strip()
-            # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
+            target = _split_link_target(url)
+            # 外部链接与协议相对地址不校验本地文件
+            if target.is_non_local:
+                continue
+            # 未知协议：明确不支持，不得拼成磁盘路径误报为死链
+            if target.scheme:
+                errors.append(
+                    f"{doc.name}:{link.line}: 不支持的链接协议 '{target.scheme}:' '{url}' "
+                    f"(仅支持 http/https/mailto 与本地相对路径)"
+                )
                 continue
             # 只检查不含锚点的相对路径链接（带锚点的由 check_anchor_dead_links 处理）
-            if "#" in url:
+            if target.fragment:
+                continue
+            # 纯 query 链接（`?x=1`）不指向文件，无可校验的本地路径
+            if not target.path:
                 continue
             # 从 source_doc 所在目录解析相对路径
-            target = (doc.parent / url).resolve()
-            if not target.exists():
-                errors.append(f"{doc.name}:{link.line}: 相对链接死链 '{url}' (目标 '{target}' 不存在)")
+            local_path = (doc.parent / target.path).resolve()
+            if not local_path.exists():
+                errors.append(f"{doc.name}:{link.line}: 相对链接死链 '{url}' (目标 '{local_path}' 不存在)")
         for ref in view.unresolved_references:
             errors.append(
                 f"{doc.name}:{ref.line}: 引用式死链 '[{ref.text}][{ref.label}]' "
@@ -2393,8 +2463,8 @@ def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str],
     首个「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
     「：」之前，不参与解析）。
     返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
-    块缺失/结束标记缺失/含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令
-    均显式报错，不静默跳过（fail-closed）。
+    块缺失/结束标记缺失/含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令/
+    块后同节重复命令声明均显式报错，不静默跳过（fail-closed）。
     """
     errors: list[str] = []
     start = content.find(_MIN_VERIFY_START_TAG)
@@ -2410,17 +2480,19 @@ def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str],
     end = content.find(_GENERATED_END_TAG, start + len(_MIN_VERIFY_START_TAG))
     if end == -1:
         return [], [], [f"CONTRIBUTING.md 最小验证命令受控块缺少结束标记（{_GENERATED_END_TAG}）"]
-    # F02 反例防护（增加命令）：受控块结束后、同一小节（至下一个「## 」标题或文末）内新出现的
-    # bullet 一律 fail-closed 报错，防止新增命令绕过受控块被静默丢弃；真实正本该区间为 bash 代码块
-    # 与散文（行首非「- 」），不会误报。
+    # F02 反例防护（重复命令声明）：命令声明只能出现在受控块内。受控块结束后、同一小节
+    # （至下一个「## 」标题或文末）内仅识别与受控块标签同前缀的 bullet（真正的命令声明），
+    # 防止新增命令绕过受控块被静默丢弃；普通说明列表项属于正文，不在此误判（Q08）。
     after_block = content[end + len(_GENERATED_END_TAG) :]
     next_heading = after_block.find("\n## ")
     section_after = after_block if next_heading == -1 else after_block[:next_heading]
-    stray_bullets = [line for line in section_after.splitlines() if line.startswith("- ")]
-    if stray_bullets:
+    duplicate_declarations = [
+        line for line in section_after.splitlines() if line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
+    ]
+    if duplicate_declarations:
         errors.append(
-            "CONTRIBUTING.md 最小验证命令受控块后同节内含无法识别的行"
-            "（新增命令必须写入受控块内，防止被静默丢弃，F02）: " + " / ".join(stray_bullets)
+            "CONTRIBUTING.md 最小验证命令受控块后同节内含重复命令声明"
+            "（命令声明只能写入受控块内，防止被静默丢弃，F02）: " + " / ".join(duplicate_declarations)
         )
     body_lines = [
         line for line in content[start + len(_MIN_VERIFY_START_TAG) : end].strip().splitlines() if line.strip()
