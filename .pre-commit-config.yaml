@@ -93,7 +93,13 @@ repos:
         language: python
         # verify_versions.py 经 docs_markdown 统一解析视图校验文档（D5），hook 隔离环境
         # 须提供 docs 解析依赖组（脚本 docstring 正本要求；否则触发即 fail-closed）。
-        additional_dependencies: ["markdown-it-py>=4.0.0", "pyyaml>=6.0.3"]
+        # 依赖列表由 pyproject [dependency-groups].docs 派生（D23），勿手工修改。
+        additional_dependencies:
+          # generated:precommit-docs-deps-verify-versions
+          - "github-slugger==0.0.3"
+          - "markdown-it-py==4.0.0"
+          - "pyyaml>=6.0"
+          # /generated:precommit-docs-deps-verify-versions
         files: ^(pyproject\.toml|\.release-please-manifest\.json|README\.md|CONTRIBUTING\.md|SECURITY\.md|CLAUDE\.md)$
         pass_filenames: false
 
@@ -103,7 +109,13 @@ repos:
         language: python
         # docs_markdown 统一解析视图（D3）依赖 markdown-it-py：hook 隔离环境必须自带该解析依赖，
         # 否则 hook 触发即 ModuleNotFoundError（与 verify-versions hook 同因）。
-        additional_dependencies: ["pyyaml>=6.0", "markdown-it-py>=4.0.0"]
+        # 依赖列表由 pyproject [dependency-groups].docs 派生（D23），勿手工修改。
+        additional_dependencies:
+          # generated:precommit-docs-deps-docs-consistency
+          - "github-slugger==0.0.3"
+          - "markdown-it-py==4.0.0"
+          - "pyyaml>=6.0"
+          # /generated:precommit-docs-deps-docs-consistency
         # files 含 .py 以触发 NOTE(lazy) 三要素检查(任何 .py 变化都跑)；.ya?ml 覆盖治理正本 .yml 扩展名（GDR-02）。
         files: \.(md|toml|ya?ml|py)$
         pass_filenames: false
