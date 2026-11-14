@@ -503,6 +503,104 @@ def test_update_post_check_programming_defect_propagates(tmp_path: Path, monkeyp
         dg.run_update(root, gf.make_demo_registry(), post_check=defective_post_check)
 
 
+# ---------------------------------------------------------------------------
+# D41：受控块替换只改块内字节，块外行尾逐字节保真
+# ---------------------------------------------------------------------------
+
+_START = "<!-- generated:b -->"
+_END = "<!-- /generated -->"
+
+
+def _block_parts(text: str, block_id: str = "b") -> tuple[str, str]:
+    """返回受控块之外的前缀/后缀原文（按各自原始行尾拼接，用于逐字节比较）。"""
+    span = dg.scan_blocks(text, "markdown")[block_id]
+    lines = text.splitlines(keepends=True)
+    return "".join(lines[: span.start_line - 1]), "".join(lines[span.end_line :])
+
+
+@pytest.mark.parametrize(
+    ("case", "head", "tail", "block_nl"),
+    [
+        ("all-lf", "# 头\n\n", "\n尾\n", "\n"),
+        ("all-crlf", "# 头\r\n\r\n", "\r\n尾\r\n", "\r\n"),
+        ("head-tail-lf-block-crlf", "# 头\n\n", "\n尾\n", "\r\n"),
+        ("head-tail-crlf-block-lf", "# 头\r\n\r\n", "\r\n尾\r\n", "\n"),
+    ],
+)
+def test_replace_block_preserves_outside_line_endings(case: str, head: str, tail: str, block_nl: str) -> None:
+    """LF / CRLF / 混合行尾：只替换块内字节，块外原文逐字节不变（D41）。"""
+    text = f"{head}{_START}{block_nl}- 旧{block_nl}{_END}{tail}"
+    new = ["- 新一", "- 新二"]
+    span = dg.scan_blocks(text, "markdown")["b"]
+    lines = text.splitlines(keepends=True)
+    start_idx, end_idx = span.start_line - 1, span.end_line - 1
+    expected = (
+        "".join(lines[:start_idx])
+        + _START
+        + block_nl
+        + "".join(f"{line}{block_nl}" for line in new)
+        + lines[end_idx]
+        + "".join(lines[end_idx + 1 :])
+    )
+
+    out = dg.replace_block(text, "markdown", "b", new)
+
+    assert _block_parts(out) == _block_parts(text), f"{case}: 块外字节被改写"
+    assert out == expected, f"{case}: 块内内容或行尾不符合预期"
+    assert dg.scan_blocks(out, "markdown")["b"].content_lines == tuple(new)
+    assert dg.replace_block(out, "markdown", "b", new) == out, f"{case}: 二次替换非零差异"
+
+
+def test_replace_block_preserves_missing_trailing_newline() -> None:
+    """无末尾换行：替换块内容后文件仍不以换行结尾，块前字节不变（D41）。"""
+    text = f"# 头\n\n{_START}\n- 旧\n{_END}"
+    new = ["- 新"]
+    prefix, suffix = _block_parts(text)
+    assert suffix == "", "夹具前提：块结束标记即文件末尾"
+
+    out = dg.replace_block(text, "markdown", "b", new)
+
+    assert _block_parts(out) == (prefix, suffix)
+    assert out == f"{prefix}{_START}\n- 新\n{_END}"
+    assert not out.endswith("\n")
+    assert dg.replace_block(out, "markdown", "b", new) == out
+
+
+def test_replace_block_boundaries() -> None:
+    """边界：块在文件首/尾、空块时块外字节仍完全保真，二次替换零差异（D41）。"""
+    cases = {
+        "file-start": f"{_START}\n- 旧\n{_END}\n尾\n",
+        "file-end": f"# 头\n{_START}\n- 旧\n{_END}",
+        "empty-block": f"# 头\n{_START}\n{_END}\n尾\n",
+    }
+    new = ["- 新"]
+    for case, text in cases.items():
+        prefix, suffix = _block_parts(text)
+        out = dg.replace_block(text, "markdown", "b", new)
+        assert _block_parts(out) == (prefix, suffix), f"{case}: 块外字节被改写"
+        assert dg.scan_blocks(out, "markdown")["b"].content_lines == tuple(new), case
+        assert dg.replace_block(out, "markdown", "b", new) == out, f"{case}: 二次替换非零差异"
+
+
+def test_update_preserves_mixed_line_endings_and_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """端到端：手写头/尾 LF、受控块 CRLF，更新后块外字节不变且二次运行零差异（D41）。"""
+    root = gf.build_demo_tree(tmp_path)
+    target = root / gf.DEMO_TARGET_REL
+    original = "# 演示目标\n\n<!-- generated:demo-block -->\r\n<!-- /generated -->\r\n\n块外手写正文必须原样保留。\n"
+    target.write_bytes(original.encode("utf-8"))
+    prefix, suffix = _block_parts(original, "demo-block")
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
+
+    result = dg.run_update(root, gf.make_demo_registry())
+
+    assert result.ok and result.written == (gf.DEMO_TARGET_REL,)
+    after = target.read_bytes().decode("utf-8")  # 不经通用换行转换读取，保留原始 CRLF
+    assert _block_parts(after, "demo-block") == (prefix, suffix), "块外手写正文的行尾被改写"
+    assert "- R1：演示红线一\r\n- R2：演示红线二\r\n" in after, "块内应沿用受控块自身的 CRLF"
+    second = dg.run_update(root, gf.make_demo_registry())
+    assert second.ok and second.written == () and second.unchanged == (gf.DEMO_TARGET_REL,)
+
+
 def test_platform_import_guard() -> None:
     """机制自检：docs_generated 在当前平台可导入且声明其保护/原位写后端（不静默伪装）。"""
     assert dg.PLATFORM_LOCK_BACKEND in ("win32-exclusive-open", "posix-advisory-unsupported")

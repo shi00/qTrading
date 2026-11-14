@@ -325,17 +325,18 @@ def scan_blocks(text: str, fmt: str) -> dict[str, BlockSpan]:
     raise InvalidSpecError(f"未知块格式: {fmt!r}（允许 {' / '.join(_BLOCK_FORMATS)}）")
 
 
-def _join_lines(text: str, lines: list[str]) -> str:
-    """按原文主流行尾重组文本并保留尾换行标志（CRLF/LF 不被规范化改写）。"""
-    newline = "\r\n" if "\r\n" in text else "\n"
-    out = newline.join(lines)
-    if text.endswith("\n"):
-        out += newline
-    return out
+def _line_terminator(line: str) -> str:
+    """返回单行的行尾序列（含 CRLF 两字符）；无行尾返回空串。"""
+    body = line.splitlines()
+    return line[len(body[0]) :] if body else ""
 
 
 def replace_block(text: str, fmt: str, block_id: str, new_lines: Sequence[str]) -> str:
-    """将目标文本中登记块的内容替换为渲染输出；块边界标记与块外正文原样保留。
+    """将目标文本中登记块的内容替换为渲染输出；块边界标记与块外正文逐字节保留。
+
+    按行区间拼接而非全文重组：块外各行保留其原始行尾（LF / CRLF / 混合 / 无末尾
+    换行），块内新行使用开始标记行的行尾，因此局部的行尾约定不会扩散到无关正文，
+    块外行尾变化也不会改变块内容渲染。内容行未变时原样返回，避免混合行尾被无谓规范化。
 
     同一文本多块替换时按起始行号**降序**应用，保证先应用的块不使后应用块的行号失效。
     """
@@ -343,10 +344,15 @@ def replace_block(text: str, fmt: str, block_id: str, new_lines: Sequence[str]) 
     if block_id not in blocks:
         raise MissingBlockError(f"文本中缺少生成块 {block_id!r}")
     span = blocks[block_id]
-    lines = text.splitlines()
-    replacement = [span.start_tag_line, *list(new_lines), span.end_tag_line]
-    rebuilt = [*lines[: span.start_line - 1], *replacement, *lines[span.end_line :]]
-    return _join_lines(text, rebuilt)
+    if tuple(new_lines) == span.content_lines:
+        return text
+    lines = text.splitlines(keepends=True)
+    start_idx = span.start_line - 1
+    end_idx = span.end_line - 1
+    # 块有结束标记即保证开始标记行之后还有行，故其行尾非空
+    newline = _line_terminator(lines[start_idx])
+    block = "".join(f"{line}{newline}" for line in new_lines)
+    return "".join(lines[:start_idx]) + lines[start_idx] + block + lines[end_idx] + "".join(lines[end_idx + 1 :])
 
 
 # ---------------------------------------------------------------------------
