@@ -23,6 +23,7 @@ r"""D12：L07—L12 长期控制合同控制测试（documentation-maintenance �
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -315,6 +316,67 @@ def test_l10_production_check_rejects_blank_removal_trigger(tmp_path: Path, monk
     monkeypatch.setattr(cdc, "EXCEPTIONS_YAML_PATH", path)
     errors = cdc.check_exceptions_effectiveness(today=_L10_PRODUCTION_JUDGE_DAY)
     assert errors, "纯空白 removal_trigger 必须失败"
+
+
+# ---------------------------------------------------------------------------
+# L10 范围边界：例外仅限原登记方法/流程——原登记可沿用 / 新增服务不可自动继承
+# ---------------------------------------------------------------------------
+
+
+def _load_exception(exception_id: str) -> dict[str, object]:
+    """只读正本 exceptions.yml 中的指定例外条目（不复制条目内容，避免第二作者源）。"""
+    import yaml
+
+    data = yaml.safe_load(cdc.EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+    for entry in data["exceptions"]:
+        if entry.get("id") == exception_id:
+            return entry
+    raise AssertionError(f"exceptions.yml 未登记 {exception_id}")
+
+
+def _registered_methods(entry: Mapping[str, object]) -> set[str]:
+    """从例外条目的 reason/validity_criteria 提取已登记方法符号（反引号内 `_name`）。"""
+    text = f"{entry.get('reason', '')} {entry.get('validity_criteria', '')}"
+    return set(re.findall(r"`(_[a-z][a-z0-9_]*)`", text))
+
+
+def _exemption_applies(entry: Mapping[str, object], *, path: str, method: str) -> bool:
+    """C15 范围判定：仅当 path 在 paths 且 method 为已登记方法时沿用，否则须另按规则判断。"""
+    raw_paths = entry.get("paths")
+    paths = raw_paths if isinstance(raw_paths, list) else []
+    if path not in paths:
+        return False
+    return method in _registered_methods(entry)
+
+
+def test_l10_registered_methods_keep_exemption() -> None:
+    """正例：EX-0017 原登记方法在登记路径上可沿用（不反向取消既有例外）。"""
+    entry = _load_exception("EX-0017")
+    assert entry["paths"] == ["services/news_subscription_service.py"]
+    assert _registered_methods(entry) == {"_safe_fetch_task", "_processing_loop", "_fetch_and_notify"}
+    for method in ("_safe_fetch_task", "_processing_loop", "_fetch_and_notify"):
+        assert _exemption_applies(entry, path="services/news_subscription_service.py", method=method), method
+
+
+def test_l10_new_service_and_new_method_cannot_inherit_exemption() -> None:
+    """负例：新增服务 / 同服务新增方法都不能自动继承 EX-0017，须另按 R5 判断。"""
+    entry = _load_exception("EX-0017")
+    assert not _exemption_applies(entry, path="services/new_polling_service.py", method="_processing_loop"), (
+        "新增服务路径不得自动继承既有例外"
+    )
+    assert not _exemption_applies(entry, path="services/news_subscription_service.py", method="_new_polling_loop"), (
+        "同服务新增方法不得自动继承既有例外"
+    )
+    assert "不扩展到新方法/新服务" in str(entry["validity_criteria"])
+
+
+def test_l10_docs_entry_requires_scope_check_and_forbids_auto_inheritance() -> None:
+    """入口文档须要求核对登记范围与全部有效条件，且明示新增服务不能自动继承。"""
+    for doc in ("docs/patterns/application-service.md", "docs/guides/how-to.md"):
+        text = (ROOT / doc).read_text(encoding="utf-8")
+        assert "具体登记范围及全部有效条件" in text, f"{doc} 缺「核对具体登记范围及全部有效条件」要求"
+        assert "不能自动继承" in text, f"{doc} 未禁止新增服务自动继承豁免"
+        assert "复用此豁免语义" not in text, f"{doc} 仍要求新增服务复用豁免语义"
 
 
 # ---------------------------------------------------------------------------
