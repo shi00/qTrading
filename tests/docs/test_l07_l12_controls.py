@@ -85,6 +85,24 @@ def test_l07_hand_edit_inside_block_rejected_outside_allowed(
     assert cdc.check_docs_generated() == [], "恢复后块内一致、块外保留"
 
 
+def test_l07_invalid_block_identity_reported_by_check(
+    generated_block_repo: tuple[Path, tuple[dg.BlockSpec, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D40：形似标记但身份非法 → check_docs_generated 具名报错（目标+行号可定位），不静默跳过。"""
+    root, registry = generated_block_repo
+    monkeypatch.setattr(cdc, "ROOT", root)
+    monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    target = root / "targets" / "derived.md"
+    target.write_text(
+        "# 派生目标\n\n<!-- generated:limits.bad -->\n<!-- /generated:limits.bad -->\n",
+        encoding="utf-8",
+    )
+    errors = cdc.check_docs_generated()
+    assert errors and all("targets/derived.md#limits" in e for e in errors), f"诊断须可定位目标: {errors}"
+    assert any("块 id 非法" in e and "limits.bad" in e for e in errors), f"须给出非法身份: {errors}"
+
+
 # ---------------------------------------------------------------------------
 # L08：文件发现独立/必需输入非空
 # ---------------------------------------------------------------------------

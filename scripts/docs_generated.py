@@ -198,14 +198,50 @@ class SnapshotDriftError(DocsGeneratedError):
 
 # 块 id 封闭语法：小写字母/数字开头，仅允许小写字母、数字与连字符
 _BLOCK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-# Markdown 成对注释：开始带唯一 id；结束兼容仓库既有无 id 形态与显式 id 形态
-_MD_START_RE = re.compile(r"^<!--\s+generated:([A-Za-z0-9_-]*)\s+-->\s*$")
-_MD_END_RE = re.compile(r"^<!--\s+/generated(?::([A-Za-z0-9_-]*))?\s+-->\s*$")
+# 标记形态：身份部分先用宽松字符集捕获，再按封闭语法校验——字符集外的身份
+# （如点号）因此不会被当成普通正文静默忽略，而是得到具名诊断（D40）。
+_MD_START_RE = re.compile(r"^<!--\s+generated:(\S*)\s+-->\s*$")
+_MD_END_RE = re.compile(r"^<!--\s+/generated(?::(\S*))?\s+-->\s*$")
 # YAML 成对注释：开始/结束均须带 id（无既有形态包袱，自定即严格）
-_YAML_START_RE = re.compile(r"^#\s+generated:([A-Za-z0-9_-]*)\s*$")
-_YAML_END_RE = re.compile(r"^#\s+/generated:([A-Za-z0-9_-]*)\s*$")
+_YAML_START_RE = re.compile(r"^#\s+generated:(\S*)\s*$")
+_YAML_END_RE = re.compile(r"^#\s+/generated:(\S*)\s*$")
+# 围栏代码块起始/结束行（CommonMark 允许 0—3 个前导空格；反引号围栏信息串不得含反引号）
+_MD_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 _BLOCK_FORMATS = ("markdown", "yaml")
+
+
+def _require_block_id(block_id: str, lineno: int, *, role: str = "块") -> None:
+    """块身份须匹配封闭语法；形似标记但身份非法即具名拒绝（不静默当普通正文）。"""
+    if not _BLOCK_ID_RE.match(block_id):
+        raise InvalidBlockIdError(f"第 {lineno} 行{role} id 非法: {block_id!r}（须匹配 [a-z0-9][a-z0-9-]*）")
+
+
+def _markdown_fenced_lines(text: str) -> set[int]:
+    """围栏代码块所占行号（含起止围栏本身）：其中的标记按代码示例处理，不参与块识别。"""
+    fenced: set[int] = set()
+    fence_char: str | None = None
+    fence_len = 0
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        match = _MD_FENCE_RE.match(raw)
+        if fence_char is None:
+            if match is None:
+                continue
+            sequence, info = match.group(1), match.group(2)
+            if sequence[0] == "`" and "`" in info:
+                continue  # 非围栏（CommonMark：反引号围栏的信息串不得含反引号）
+            fence_char, fence_len = sequence[0], len(sequence)
+            fenced.add(lineno)
+        else:
+            fenced.add(lineno)
+            if (
+                match is not None
+                and match.group(1)[0] == fence_char
+                and len(match.group(1)) >= fence_len
+                and not match.group(2).strip()
+            ):
+                fence_char, fence_len = None, 0
+    return fenced
 
 
 @dataclass(frozen=True)
@@ -224,32 +260,47 @@ class BlockSpan:
 
 
 def _scan_markdown(text: str) -> dict[str, BlockSpan]:
-    """Markdown 成对注释块扫描（栈式配对；嵌套/孤儿/重复/未闭合显式拒绝）。"""
+    """Markdown 成对注释块扫描（栈式配对；嵌套/孤儿/重复/未闭合/非法身份显式拒绝）。
+
+    围栏代码块内的标记按代码示例处理：既不参与块识别，也不产生非法身份诊断
+    （文档中的标记示例不得被误升为现行块）。
+    """
     blocks: dict[str, BlockSpan] = {}
+    fenced = _markdown_fenced_lines(text)
     open_id: str | None = None
     open_start = 0
     open_tag = ""
     content: list[str] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
+        if lineno in fenced:
+            if open_id is not None:
+                content.append(raw)  # 块内围栏代码原样保留在块内容中
+            continue
         start_match = _MD_START_RE.match(raw)
         end_match = _MD_END_RE.match(raw)
         if open_id is None:
             if start_match:
                 block_id = start_match.group(1)
-                if not _BLOCK_ID_RE.match(block_id):
-                    raise InvalidBlockIdError(f"第 {lineno} 行块 id 非法: {block_id!r}")
+                _require_block_id(block_id, lineno)
                 open_id, open_start, open_tag, content = block_id, lineno, raw, []
             elif end_match:
+                closed_id = end_match.group(1)
+                if closed_id is not None:
+                    _require_block_id(closed_id, lineno, role="结束标记")
                 raise OrphanEndError(f"第 {lineno} 行存在无开始标记的孤儿结束标记")
         else:
             if start_match:
+                block_id = start_match.group(1)
+                _require_block_id(block_id, lineno)
                 raise NestedBlockError(f"块 {open_id!r}（第 {open_start} 行起）内嵌套新的块开始标记（第 {lineno} 行）")
             if end_match:
                 closed_id = end_match.group(1)
-                if closed_id is not None and closed_id != open_id:
-                    raise EndMismatchError(
-                        f"块 {open_id!r}（第 {open_start} 行起）的结束标记身份不匹配: {closed_id!r}（第 {lineno} 行）"
-                    )
+                if closed_id is not None:
+                    _require_block_id(closed_id, lineno, role="结束标记")
+                    if closed_id != open_id:
+                        raise EndMismatchError(
+                            f"块 {open_id!r}（第 {open_start} 行起）的结束标记身份不匹配: {closed_id!r}（第 {lineno} 行）"
+                        )
                 if open_id in blocks:
                     raise DuplicateBlockError(
                         f"块身份重复: {open_id!r} 已在第 {blocks[open_id].start_line} 行出现，又在第 {open_start} 行出现"
@@ -283,15 +334,18 @@ def _scan_yaml(text: str) -> dict[str, BlockSpan]:
         if open_id is None:
             if start_match:
                 block_id = start_match.group(1)
-                if not _BLOCK_ID_RE.match(block_id):
-                    raise InvalidBlockIdError(f"第 {lineno} 行块 id 非法: {block_id!r}")
+                _require_block_id(block_id, lineno)
                 open_id, open_start, open_tag, content = block_id, lineno, raw, []
             elif end_match:
+                _require_block_id(end_match.group(1), lineno, role="结束标记")
                 raise OrphanEndError(f"第 {lineno} 行存在无开始标记的孤儿结束标记")
         else:
             if start_match:
+                block_id = start_match.group(1)
+                _require_block_id(block_id, lineno)
                 raise NestedBlockError(f"块 {open_id!r}（第 {open_start} 行起）内嵌套新的块开始标记（第 {lineno} 行）")
             if end_match:
+                _require_block_id(end_match.group(1), lineno, role="结束标记")
                 if end_match.group(1) != open_id:
                     raise EndMismatchError(
                         f"块 {open_id!r}（第 {open_start} 行起）的结束标记身份不匹配: {end_match.group(1)!r}（第 {lineno} 行）"
