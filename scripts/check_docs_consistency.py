@@ -96,7 +96,7 @@ import sys
 import tomllib
 import typing
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
@@ -2839,6 +2839,169 @@ def _load_canonical_topics() -> list[dict] | None:
     if not isinstance(data, dict) or not isinstance(data.get("topics"), list):
         return None
     return [t for t in data["topics"] if isinstance(t, dict)]
+
+
+# ---------------------------------------------------------------------------
+# D36：文档变更影响分析（T12 / LA03/04/16）
+# 读取真实作者源（canonical-topics.yml 的 canonical/workflow 路由）、消费者文本引用
+# 与 old/new 路径并集；未映射项显式进入 unresolved。只做一次临时计算，不建永久库。
+# ---------------------------------------------------------------------------
+
+_IMPACT_AUTHOR_PREFIXES: tuple[str, ...] = (
+    "docs/",
+    "requirements/",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "README.md",
+)
+_IMPACT_CONSUMER_PREFIXES: tuple[str, ...] = ("tests/", "scripts/", ".github/")
+_IMPACT_SCANNED_SUFFIXES: frozenset[str] = frozenset({".py", ".yml", ".yaml", ".md", ".json", ".toml", ".txt"})
+_IMPACT_SKIP_DIRS: frozenset[str] = frozenset(
+    {".git", ".worktrees", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".venv", "venv", ".uploads"}
+)
+# 责任测试组映射（维护合同 §5：影响清单须区分 test_groups；纯函数规则，不建关系库）
+_IMPACT_GROUP_RULES: tuple[tuple[str, str], ...] = (
+    ("tests/docs/", "docs-suite"),
+    ("tests/unit/", "unit-suite"),
+    ("scripts/check_docs", "docs-gate"),
+    ("scripts/docs_", "docs-gate"),
+    ("docs/", "docs-suite"),
+)
+
+
+@dataclass(frozen=True)
+class DocImpact:
+    """文档变更影响清单（结构化、可复核；不完整项显式落 unresolved）。"""
+
+    author_paths: tuple[str, ...]
+    consumer_paths: tuple[str, ...]
+    old_paths: tuple[str, ...]
+    new_paths: tuple[str, ...]
+    topics: tuple[str, ...]
+    # (topic_id, 路由路径, section | None, "canonical" | "workflow")
+    routes: tuple[tuple[str, str, str | None, str], ...]
+    test_groups: tuple[str, ...]
+    unresolved: tuple[str, ...]
+
+
+def _normalize_repo_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _is_impact_author_path(path: str) -> bool:
+    return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _IMPACT_AUTHOR_PREFIXES)
+
+
+def _is_impact_consumer_path(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in _IMPACT_CONSUMER_PREFIXES)
+
+
+def _load_impact_routes(root: Path) -> dict[str, list[tuple[str, str, str | None, str]]]:
+    """按 canonical/workflow 索引真实路由；作者源不可用时 fail-closed。"""
+    path = root / "docs" / "governance" / "canonical-topics.yml"
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError(f"D36 影响分析缺少作者源 {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"D36 影响分析作者源 {path} 解析失败: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("topics"), list):
+        raise RuntimeError(f"D36 影响分析作者源 {path} 顶层结构非法（须含 topics 列表）")
+
+    routes: dict[str, list[tuple[str, str, str | None, str]]] = {}
+    for topic in data["topics"]:
+        if not isinstance(topic, dict):
+            continue
+        topic_id = topic.get("id")
+        if not isinstance(topic_id, str) or not topic_id:
+            continue
+        section = topic.get("section") if isinstance(topic.get("section"), str) else None
+        for key, kind in (("canonical", "canonical"), ("workflow", "workflow")):
+            value = topic.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            route_path = _normalize_repo_path(value.strip())
+            routes.setdefault(route_path, []).append((topic_id, route_path, section, kind))
+    return routes
+
+
+def _iter_impact_consumer_files(root: Path) -> typing.Iterator[Path]:
+    """遍历真实消费者候选文件（tests/scripts/.github，跳过缓存与隔离目录）。"""
+    for prefix in _IMPACT_CONSUMER_PREFIXES:
+        base = root / prefix.rstrip("/")
+        if base.is_file():
+            yield base
+            continue
+        if not base.is_dir():
+            continue
+        for candidate in base.rglob("*"):
+            if not candidate.is_file() or candidate.suffix.lower() not in _IMPACT_SCANNED_SUFFIXES:
+                continue
+            rel_parts = candidate.relative_to(root).parts
+            if any(part in _IMPACT_SKIP_DIRS for part in rel_parts):
+                continue
+            yield candidate
+
+
+def build_doc_impact(changes: Iterable[tuple[str, str | None]], root: Path = ROOT) -> DocImpact:
+    """从 (new_path, old_path | None) 构建真实影响清单（D36 生产入口）。
+
+    旧/新路径都参与作者源、路由与消费者扫描；rename 不得丢失旧路径身份。
+    无路由映射的作者路径与非作者/非消费者路径显式进入 unresolved，不静默丢弃。
+    """
+    routes_by_path = _load_impact_routes(root)
+    author_paths: set[str] = set()
+    old_paths: set[str] = set()
+    new_paths: set[str] = set()
+    topics: set[str] = set()
+    routes: set[tuple[str, str, str | None, str]] = set()
+    test_groups: set[str] = set()
+    unresolved: set[str] = set()
+
+    for new_path, old_path in changes:
+        labeled = [(_normalize_repo_path(new_path), True)]
+        if old_path is not None:
+            labeled.append((_normalize_repo_path(old_path), False))
+        for path, is_new in labeled:
+            (new_paths if is_new else old_paths).add(path)
+            is_author = _is_impact_author_path(path)
+            if is_author:
+                author_paths.add(path)
+            matched = routes_by_path.get(path, [])
+            for entry in matched:
+                topics.add(entry[0])
+                routes.add(entry)
+            if not matched and (is_author or not _is_impact_consumer_path(path)):
+                unresolved.add(path)
+            test_groups.update(group for prefix, group in _IMPACT_GROUP_RULES if path.startswith(prefix))
+
+    consumer_paths: set[str] = set()
+    search_refs = tuple(sorted(p for p in (author_paths | old_paths | new_paths) if _is_impact_author_path(p)))
+    if search_refs:
+        for candidate in _iter_impact_consumer_files(root):
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if any(ref in text for ref in search_refs):
+                consumer_paths.add(candidate.relative_to(root).as_posix())
+
+    return DocImpact(
+        author_paths=tuple(sorted(author_paths)),
+        consumer_paths=tuple(sorted(consumer_paths)),
+        old_paths=tuple(sorted(old_paths)),
+        new_paths=tuple(sorted(new_paths)),
+        topics=tuple(sorted(topics)),
+        routes=tuple(sorted(routes)),
+        test_groups=tuple(sorted(test_groups)),
+        unresolved=tuple(sorted(unresolved)),
+    )
 
 
 class _DecisionTreeRow(typing.NamedTuple):
