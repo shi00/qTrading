@@ -2832,6 +2832,21 @@ class TestStrategyDescDynamicConsistency:
         errors = check_strategy_desc_dynamic_consistency()
         assert errors == [], f"无数字字面量的 desc 不应触发门禁, got: {errors}"
 
+    @pytest.mark.parametrize("payload", ["[]", '["strategy_foo_desc"]'])
+    def test_non_object_json_reports_named_diagnostic(self, tmp_path, monkeypatch, payload):
+        """合法 JSON 但顶层非对象 → 具名诊断，不抛未捕获 AttributeError（D35）。"""
+        from check_docs_consistency import check_strategy_desc_dynamic_consistency
+
+        for locale in ("zh_CN", "en_US"):
+            fake = tmp_path / "locales" / locale
+            fake.mkdir(parents=True)
+            (fake / "strings.json").write_text(payload, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+
+        errors = check_strategy_desc_dynamic_consistency()
+        assert len(errors) == 2
+        assert all("顶层应为 JSON 对象" in e and "list" in e for e in errors), errors
+
 
 class TestExceptionsYamlConsistency:
     """例外注册表一致性校验 (P1-01: 集中例外治理).

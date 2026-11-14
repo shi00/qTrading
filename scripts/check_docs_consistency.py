@@ -1251,7 +1251,22 @@ def check_redline_range_consistency() -> list[str]:
     redlines = data.get("redlines") if isinstance(data, dict) else None
     if not isinstance(redlines, list):
         return [f"redlines.yml 结构非法（无 redlines 列表），红线总数散文守卫无法执行: {REDLINES_YAML_PATH}"]
-    rmax = max(int(r["id"][1:]) for r in redlines if isinstance(r, dict) and str(r.get("id", "")).startswith("R"))
+    # 坏输入先校验结构（D35）：空列表/非法 id 若直接交给 max() 会抛 ValueError 中断整个
+    # 检查聚合（后续独立检查与统一打印一并丢失），此处逐项转为具名诊断。
+    parsed_nums: list[int] = []
+    invalid_ids: list[str] = []
+    for index, entry in enumerate(redlines):
+        raw_id = entry.get("id") if isinstance(entry, dict) else None
+        match = REDLINE_ID_PATTERN.match(str(raw_id)) if raw_id is not None else None
+        if match is None:
+            invalid_ids.append(f"[{index}]={raw_id!r}")
+            continue
+        parsed_nums.append(int(match.group(1)))
+    if invalid_ids:
+        return ["redlines.yml 存在无法解析的红线 id（" + ", ".join(invalid_ids) + "），红线总数散文守卫无法执行"]
+    if not parsed_nums:
+        return ["redlines.yml 的 redlines 列表为空，红线总数散文守卫无法执行"]
+    rmax = max(parsed_nums)
 
     for doc in CHECKED_DOCS:
         if ADR_DOCS_DIR in doc.parents:
@@ -4366,6 +4381,14 @@ def check_strategy_desc_dynamic_consistency() -> list[str]:
         except json.JSONDecodeError as e:
             errors.append(f"策略描述动态一致性: {locale_dir}/strings.json JSON 解析失败: {e}")
             continue
+        # 合法 JSON 但顶层不是对象（如列表）时，后续 .items() 会抛 AttributeError 中断
+        # 整个检查聚合（D35）：先校验输入结构，转为具名诊断后继续其余检查。
+        if not isinstance(strings, dict):
+            errors.append(
+                f"策略描述动态一致性: {locale_dir}/strings.json 顶层应为 JSON 对象（dict），"
+                f"实际 {type(strings).__name__}，无法执行本检查"
+            )
+            continue
         for key, value in strings.items():
             if not key.startswith("strategy_") or not key.endswith("_desc"):
                 continue
@@ -4582,12 +4605,30 @@ def build_scope_plan() -> list[tuple[frozenset[str], Callable[[], list[str]]]]:
     return [(labels, globals()[name]) for labels, name in _SCOPE_CHECK_NAMES]
 
 
+# 检查域「约定的输入/读取错误」（D35）：单个检查遇到坏输入或必需源不可读时，转为具名
+# 诊断并继续其余独立检查，不让一项的输入问题中断统一失败打印与其它检查。
+# 不收敛程序缺陷（TypeError / AttributeError / KeyError / AssertionError 等）与中断信号
+# （KeyboardInterrupt / SystemExit）：这些仍须上抛，避免把代码错误伪装成「检查失败」。
+_CHECK_INPUT_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    UnicodeDecodeError,
+    json.JSONDecodeError,
+    docs_generated.DocsGeneratedError,
+)
+
+
 def collect_scope_errors(plan: list[tuple[frozenset[str], Callable[[], list[str]]]], scope: str) -> list[str]:
     """执行 scope 固定责任映射内的检查并聚合错误（scope 是固定责任，不是跳过失败的途径）。"""
     errors: list[str] = []
     for labels, check in plan:
         if scope == "all" or scope in labels:
-            errors.extend(check())
+            try:
+                errors.extend(check())
+            except _CHECK_INPUT_ERRORS as exc:
+                name = getattr(check, "__name__", "<check>")
+                errors.append(
+                    f"{name}: 检查无法完成（输入/读取错误，其余独立检查继续执行）: {type(exc).__name__}: {exc}"
+                )
     return errors
 
 

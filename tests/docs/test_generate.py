@@ -443,6 +443,66 @@ def test_render_output_cannot_write_outside_block(tmp_path: Path, monkeypatch: p
     assert target.read_bytes() == before
 
 
+# ---------------------------------------------------------------------------
+# D35：写后回调失败仍保完整提交状态报告
+# ---------------------------------------------------------------------------
+
+
+class _PartiallyFailingAtomicGuard(gf.AtomicReplaceWriteGuard):
+    """测试替身：ok.md 原子替换成功，dead.md 写失败（模拟部分目标未写）。"""
+
+    def write_bytes(self, path: Path, data: bytes) -> None:
+        if Path(path).name == "dead.md":
+            raise OSError("模拟写失败")
+        super().write_bytes(path, data)
+
+
+def _two_target_registry() -> tuple[dg.BlockSpec, ...]:
+    return tuple(
+        dg.BlockSpec(
+            block_id=f"demo-{Path(rel).stem}",
+            target=rel,
+            sources=(gf.demo_source_schema(),),
+            render=gf.demo_render,
+        )
+        for rel in ("ok.md", "dead.md")
+    )
+
+
+def test_update_post_check_failure_keeps_written_failed_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """写后回调抛约定异常：仍返回完整 UpdateResult（已写/写失败/后检查错误）。"""
+    root = gf.build_demo_tree(tmp_path)
+    for rel in ("ok.md", "dead.md"):
+        (root / rel).write_text(
+            f"# {rel}\n\n<!-- generated:demo-{Path(rel).stem} -->\n<!-- /generated -->\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(dg, "WriteGuard", _PartiallyFailingAtomicGuard)
+
+    def bad_post_check() -> list[str]:
+        raise dg.SourceMissingError("更新后检查坏输入")
+
+    result = dg.run_update(root, _two_target_registry(), post_check=bad_post_check)
+    assert result.written == ("ok.md",)
+    assert result.failed == ("dead.md",)
+    assert len(result.post_check_errors) == 1
+    assert "更新后 all 检查执行失败" in result.post_check_errors[0]
+    assert "更新后检查坏输入" in result.post_check_errors[0]
+    assert result.ok is False
+
+
+def test_update_post_check_programming_defect_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """写后回调的程序缺陷（TypeError）必须上抛，不得伪装成后检查失败。"""
+    root = gf.build_demo_tree(tmp_path)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
+
+    def defective_post_check() -> list[str]:
+        raise TypeError("代码缺陷")
+
+    with pytest.raises(TypeError, match="代码缺陷"):
+        dg.run_update(root, gf.make_demo_registry(), post_check=defective_post_check)
+
+
 def test_platform_import_guard() -> None:
     """机制自检：docs_generated 在当前平台可导入且声明其保护/原位写后端（不静默伪装）。"""
     assert dg.PLATFORM_LOCK_BACKEND in ("win32-exclusive-open", "posix-advisory-unsupported")

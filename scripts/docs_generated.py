@@ -1199,6 +1199,16 @@ class WriteGuard:
 BarrierFn = Callable[[str, str | None], None]
 PostCheckFn = Callable[[], list[str]]
 
+# 写后回调「约定的检查域输入/读取错误」（D35）：目标已逐文件提交后，回调失败仍须返回
+# 完整 UpdateResult（已写 / 未写 / 写失败 / 后检查错误），不得因异常丢失提交状态报告。
+# 不收敛程序缺陷（TypeError / AttributeError / AssertionError 等）与中断信号
+# （KeyboardInterrupt / SystemExit）：这些仍须上抛，避免用「假成功」掩盖代码错误。
+_POST_CHECK_INPUT_ERRORS: tuple[type[BaseException], ...] = (
+    DocsGeneratedError,
+    OSError,
+    UnicodeDecodeError,
+)
+
 
 @dataclass(frozen=True)
 class UpdateResult:
@@ -1395,7 +1405,7 @@ def run_update(
     if post_check is not None:
         try:
             post_errors = list(post_check())
-        except (DocsGeneratedError, PermissionError, OSError) as exc:
+        except _POST_CHECK_INPUT_ERRORS as exc:
             post_errors = [f"更新后 all 检查执行失败（fail-closed）: {exc}"]
 
     return UpdateResult(
