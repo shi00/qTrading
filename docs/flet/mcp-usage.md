@@ -36,7 +36,7 @@ flet-mcp 是 Flet 0.86+ 官方提供的独立 PyPI 包（非 `flet` CLI 子命�
 
 **无需使用（含禁止误路由项）**：
 - **项目自建 hook 与本地 UI 封装**（如 [`ui/hooks.py`](../../ui/hooks.py) 的 `use_viewmodel`，非 `flet` 原生符号）：**禁止**向官方 `flet-mcp` 查询，更**禁止**将官方 `get_api` 返回的 `"not found"` 当作删除或替换项目 API 的依据；应改查本地实现与项目契约（见下方分流表）
-- 已在 `v1-api-constraints.md` V0→V1 迁移表中明确记录的 API（已核验）
+- 已在 [`v1-api-constraints.md`](./v1-api-constraints.md) V0→V1 迁移表中记录（**仅限迁移旧代码场景**）、且核验证据的**观察版本与当前目标版本（`pyproject.toml` 锁定版本）一致**、**适用范围（控件/平台/调用方式）匹配**的 API——仅此情形可免重复查询；证据无法追溯到匹配目标版本的记录时按未核验处理，**旧版本的观察证据不免除当前版本的核验义务**，目标版本/平台/适用范围变化时必须重新核验（见 [api-verification-template.md](./api-verification-template.md) 的精确版本记录要求）
 - 已在 `api-verification-template.md` 历史核验记录中沉淀、且记录的**观察版本与当前目标版本一致**且**适用范围（控件/平台/调用方式）匹配**的 API——仅此情形可免重复查询；**旧版本的观察证据不免除当前版本的核验义务**，目标版本不同或适用范围变化时必须重新核验（见 [api-verification-template.md](./api-verification-template.md) 的精确版本记录要求）
 - 纯业务逻辑代码（不涉及 Flet API 调用）
 
