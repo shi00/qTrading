@@ -1194,7 +1194,8 @@ class TestRunAiAnalysis:
         """DD-F34：停止选股终止关联未完成分析，且不落「可恢复暂停」状态。
 
         语义：用户在批量中途停止 → 在途/后续候选不再派发模型调用；未处理候选
-        原样保留（不伪造 analyzed/score）；不写任何可续跑的暂停状态。
+        **不出现在返回集**（不伪造 analyzed/score 行，也不补空行凑数）；不写任何
+        可续跑的暂停/进度状态（终止而非暂停，重跑须是新的一轮）。
         """
         s = ConcreteStrategy()
         dp = _make_mock_dp(is_cancelled=False)
@@ -1237,9 +1238,10 @@ class TestRunAiAnalysis:
         # 返回行只来自真实派发的两只股票，不冒认 analyzed / 不伪造评分。
         assert len(result) == 2
         assert set(result["ts_code"]) == {"000001.SZ", "000002.SZ"}
-        assert result["ai_score"].notna().all()
-        # 不落可恢复暂停状态（停止是终止，不是暂停）。
-        assert not any("resume" in key or "paused" in key for key in context)
+        assert set(result["ai_score"]) == {80}
+        assert set(result["ai_status"]) == {"analyzed"}
+        # 不落可恢复暂停/进度状态（停止是终止，不是暂停）。
+        assert not ({"resume_state", "resume_cursor", "paused_state", "pause_progress"} & set(context))
 
     @pytest.mark.asyncio
     async def test_with_candidates_cap(self):
@@ -1872,8 +1874,10 @@ class TestRunAiAnalysisUsageSummary:
             }
         )
         context = {"data_processor": dp}
+        analyze_calls: list[str] = []
 
         async def mock_analyze(stock_info, *args, **kwargs):
+            analyze_calls.append(stock_info.get("ts_code"))
             return {
                 "score": 88,
                 "summary": "ok",
@@ -1906,11 +1910,38 @@ class TestRunAiAnalysisUsageSummary:
 
             result = await s.run_ai_analysis(candidates, context)
 
-        assert len(result) == 2
-        # 结果仍正常落行，且不把「无 usage」伪装成「未计价消耗」
-        assert set(result["ai_status"]) == {"analyzed"}
-        assert "_ai_usage_summary" not in context
-        mock_tracker.add_cost_cents.assert_not_awaited()
+            # 结果仍正常落行，且不把「无 usage」伪装成「未计价消耗」
+            assert analyze_calls == ["000001.SZ", "000002.SZ"]
+            assert set(result["ai_status"]) == {"analyzed"}
+            assert set(result["ai_score"]) == {88}
+            # 新链行必须携带程序 execution_metadata（本用例前提：Recorder 已记账）。
+            assert all(
+                isinstance(meta, dict) and meta["usage_status"] == "reported" for meta in result["execution_metadata"]
+            )
+            assert "_ai_usage_summary" not in context
+            mock_tracker.add_cost_cents.assert_not_awaited()
+            mock_tracker.add_unpriced.assert_not_awaited()
+
+            # 对照：旧链响应（带 usage/cost、无 execution_metadata）必须真实落账一次，
+            # 证明上面的「零二次落账」不是记账路径整体失效。
+            mock_tracker.add_cost_cents.reset_mock()
+            mock_tracker.add_unpriced.reset_mock()
+
+            async def legacy_analyze(stock_info, *args, **kwargs):
+                return {
+                    "score": 70,
+                    "summary": "ok",
+                    "confidence": 0.5,
+                    "usage": {"total_tokens": 100},
+                    "cost": 0.02,
+                }
+
+            mock_ai_instance.analyze_stock = legacy_analyze
+            legacy_result = await s.run_ai_analysis(candidates, {"data_processor": dp})
+
+        assert len(legacy_result) == 2
+        # 0.02 元/股 × 2 股 = 0.04 元 → 批末差量落账 4 分（恰一次，不重复计费）。
+        mock_tracker.add_cost_cents.assert_awaited_once_with(4)
         mock_tracker.add_unpriced.assert_not_awaited()
 
     @pytest.mark.asyncio

@@ -54,6 +54,13 @@ def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
 
 
 def validate_ai_analysis_response(response: dict) -> dict:
+    """股票 final 输出归一化的**唯一入口**（DD-F34），可就地规范化后返回同一 dict。
+
+    调用约束：**只可对模型原始响应调用一次**。归一化非幂等——``confidence`` 的
+    ``0.5 → 50`` 换算无法在二次调用时区分「模型给的 0.5 比例」与「已归一化的 50
+    分置信度」（数值信息已丢失），二次调用会把 0.5 再次放大为 50.0。重试/重放路径
+    不得复用同一响应对象二次调用本函数；接链约束登记于 F-01-6。
+    """
     if not isinstance(response, dict):
         # R21：非 dict 响应无任何可解析字段，score 必须为 None（未知），不得以 0
         # 伪装成"明确否决"这一业务上合法的评分值。
