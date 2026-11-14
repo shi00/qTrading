@@ -65,7 +65,10 @@ def _collect(*paths: str) -> subprocess.CompletedProcess[str]:
         cwd=ROOT,
         env=env,
         capture_output=True,
-        text=True,
+        # 子进程按 PYTHONUTF8 输出 UTF-8；父端也必须显式按 UTF-8 解码，
+        # 否则 Windows 会用 cp1252 解码中文诊断并让 stderr 变为 None
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
         check=False,
     )
