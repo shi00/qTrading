@@ -4007,6 +4007,92 @@ class TestAgentsMinVerifyCommands:
         errors = check_agents_md_min_verify_commands()
         assert any("缺少「：」分隔" in e for e in errors), f"应检出 bullet 缺分隔, got: {errors}"
 
+    def test_fenced_samples_do_not_override_author_block(self, tmp_path, monkeypatch):
+        """Q07：前置/后置围栏样例中的同名块标记与命令不得冒充作者源.
+
+        旧实现以全文 find 定位块，会命中围栏样例；修法消费块扫描器的已验证区间，
+        围栏内标记只是示例文本，解析结果仍来自真实受控块。
+        """
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        sample = (
+            "```markdown\n"
+            "<!-- generated:min-verify-commands -->\n"
+            "- **变更相关门禁**：`evil command before`\n"
+            "- **仅 Markdown / 治理文档改动**：`evil doc before`\n"
+            "<!-- /generated -->\n"
+            "```\n\n"
+        )
+        after_sample = (
+            "\n```markdown\n"
+            "<!-- generated:min-verify-commands -->\n"
+            "- **变更相关门禁**：`evil command after`\n"
+            "- **仅 Markdown / 治理文档改动**：`evil doc after`\n"
+            "<!-- /generated -->\n"
+            "```\n"
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(
+            sample + self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS) + after_sample,
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert errors == [], f"围栏样例不得改变作者命令, got: {errors}"
+
+    def test_fenced_sample_without_real_block_is_rejected(self, tmp_path, monkeypatch):
+        """Q07：删除真实受控块但保留围栏样例 → 仍 fail-closed 拒绝（样例不冒作者源）."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(
+            "## 常用开发与测试命令\n\n"
+            "```markdown\n"
+            "<!-- generated:min-verify-commands -->\n"
+            f"- **变更相关门禁**：`{self.GATE_COMMANDS[0]}`\n"
+            f"- **仅 Markdown / 治理文档改动**：`{self.DOC_COMMANDS[0]}`\n"
+            "<!-- /generated -->\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("缺少最小验证命令受控块标记" in e for e in errors), f"应拒绝仅有围栏样例的正本, got: {errors}"
+
+    def test_stray_bullet_after_real_block_still_rejected(self, tmp_path, monkeypatch):
+        """Q07 回归：跳过围栏样例不得削弱 F02——块后同节真实新增 bullet 仍 fail-closed."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(
+            self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS) + "- 绕过受控块新增命令\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("受控块后同节内" in e for e in errors), f"块外新增 bullet 应拒绝, got: {errors}"
+
     def test_detects_missing_block_marker(self, tmp_path, monkeypatch):
         """AGENTS.md 缺生成区块标记 → 报错（不静默通过）."""
         from check_docs_consistency import check_agents_md_min_verify_commands

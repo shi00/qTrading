@@ -68,6 +68,23 @@ def test_file_index_renders_titles_from_h1_and_comments(tmp_path: Path) -> None:
     assert "| [README.md](./README.md) | Project Documentation Index |" in rendered
 
 
+def test_file_index_title_uses_shared_heading_view(tmp_path: Path) -> None:
+    """Q07：标题取共享解析视图的一级标题——Setext 合法，围栏内伪 H1 不冒充真实标题。"""
+    root = tmp_path
+    _write(root, "docs/README.md", "# Index\n<!-- generated:idx -->\n<!-- /generated -->\n")
+    _write(root, "docs/governance/redlines.yml", "# 红线正本\nredlines: []\n")
+    _write(
+        root,
+        "docs/setext.md",
+        "```markdown\n# 伪 H1\n```\n\n真实 Setext 标题\n================\n\n```markdown\n# 尾随伪 H1\n```\n",
+    )
+    _write(root, "docs/no-real-h1.md", "```markdown\n# 伪 H1\n```\n\n仅二级标题\n----\n")
+    rendered = dg.render_block_lines(root, _file_index_registry()[0])
+    assert "| [setext.md](./setext.md) | 真实 Setext 标题 |" in rendered
+    assert "| [no-real-h1.md](./no-real-h1.md) | （无 H1 标题） |" in rendered
+    assert "伪 H1" not in "\n".join(rendered), "围栏样例中的伪 H1 不得冒充文档标题"
+
+
 def test_file_index_uses_snapshot_text_for_protected_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """快照通道回归：登记为 text 作者源的文件在更新窗口内经快照字节渲染。
 

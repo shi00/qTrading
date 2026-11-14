@@ -386,8 +386,8 @@ class SourceSchema:
 
     fmt="yaml" 须提供 ``item_key``（顶层取列表的键）；fmt="markdown-block" 须提供
     ``author_block_id``（作者源自身为受控块），``author_payload`` 决定传给渲染函数的
-    内容："block"=受控块内容行（默认），"full"=完整文件文本（供复用既有的、自行
-    定位受控块的正本解析器，如 CONTRIBUTING 最小验证命令解析器）。
+    内容："block"=受控块内容行（默认，直接消费已验证块区间），"full"=完整文件文本
+    （必要时由渲染器自行解析）。
 
     ``non_empty_string_fields`` 声明须为非空字符串的字段（身份字段自动纳入）；
     ``path_fields`` 声明须为非空字符串且在工作根内真实存在的路径字段。
@@ -579,7 +579,7 @@ _CONTRIBUTING_SCHEMA = SourceSchema(
     path="CONTRIBUTING.md",
     fmt="markdown-block",
     author_block_id="min-verify-commands",
-    author_payload="full",  # 传完整文本：既有正本解析器自行定位受控块（保持单一解析源）
+    author_payload="block",  # 直接消费已验证块区间：渲染器不再从全文二次定位受控块（Q07）
 )
 # canonical-topics.yml 全部登记字段（任务路由视图的渲染输入白名单）
 _CANONICAL_TOPICS_SCHEMA = SourceSchema(
@@ -693,7 +693,7 @@ def _render_claude_self_check(validated: dict[str, object], root: Path) -> list[
 
 
 def _render_agents_min_verify(validated: dict[str, object], root: Path) -> list[str]:
-    """AGENTS.md 最小验证命令块：复用既有正本解析器（单一解析源，避免第二套解析漂移）。"""
+    """AGENTS.md 最小验证命令块：消费已验证受控块区间（单一解析源，不二次全文定位）。"""
     content = validated[_CONTRIBUTING_SCHEMA.path]
     assert isinstance(content, str)
     import check_docs_consistency as cdc  # 函数体内惰性 import：复用正本解析器且避免模块循环
@@ -760,10 +760,15 @@ def _docs_index_candidates(root: Path) -> list[Path]:
 
 
 def _h1_title_from(text: str) -> str | None:
-    """从 markdown 文本提取首个 ATX H1 标题（无 H1 返回 None，由调用方显式处置）。"""
-    for line in text.splitlines():
-        if line.startswith("# "):
-            return line[2:].strip()
+    """从 markdown 文本提取首个一级标题（ATX 与 Setext 统一由共享解析视图判定）。
+
+    经 docs_markdown 解析视图取标题：围栏/缩进代码块内的伪 H1 只是示例文本，
+    不冒充文档标题；Setext 一级标题（``====`` 下划线）与 ATX ``#`` 同等合法。
+    无一级标题返回 None，由调用方显式处置。
+    """
+    for heading in docs_markdown.parse_text(text).headings:
+        if heading.level == 1:
+            return heading.text
     return None
 
 
