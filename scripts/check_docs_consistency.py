@@ -883,8 +883,8 @@ def check_exception_count_prose() -> list[str]:
 # 且不引用不存在的专题文件。新增 docs/flet/*.md 未登记到 README 时 fail closed。
 # =============================================================================
 
-# markdown 链接正则：[text](url)，url 为相对路径（含 ./ 前缀或纯文件名）
-_MD_LINK_PATTERN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+# markdown 链接提取统一由 docs_markdown 解析视图承担（见 parse_doc_view），
+# 不在本模块保留行级链接正则（两类围栏/行内代码边界由 token 判定）。
 
 
 def check_flet_hub_completeness() -> list[str]:
@@ -2628,18 +2628,29 @@ def _extract_changelog_top_date() -> date | None:
     表头 `| ruleset_version | 变更日期 | 变更摘要 |`，首条数据行如
     `| 1.6.0 | 2026-09-14 | ... |`，日期为第 2 列（YYYY-MM-DD）。文件缺失、
     未找到数据行、或日期非法时返回 None（调用方 fail-closed 报错）。
-    顶行判定与 check_ruleset_changelog_version 一致（锚定「变更记录」标题后取首个数据行）。
+    顶行判定与 check_ruleset_changelog_version 一致（锚定真实「变更记录」标题后取首个数据行）。
+    标题与代码块边界经 docs_markdown 解析视图判定：围栏内的伪标题/伪表格不得冒充日志结构。
     """
     if not RULESET_CHANGELOG_PATH.exists():
         return None
-    lines = RULESET_CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
-    start = 0
-    for _i, line in enumerate(lines):
-        if line.strip() == "## 变更记录":
-            start = _i + 1
+    view = docs_markdown.load_document_view(RULESET_CHANGELOG_PATH)
+    heading_index: int | None = None
+    for idx, heading in enumerate(view.headings):
+        if heading.text.strip() == "变更记录" and heading.level == 2:
+            heading_index = idx
             break
-    for line in lines[start:]:
-        stripped = line.strip()
+    if heading_index is None:
+        return None
+    section_end = len(view.source) + 1
+    for nxt in view.headings[heading_index + 1 :]:
+        if nxt.level <= 2:
+            section_end = nxt.line
+            break
+    code_lines = view.code_line_numbers()
+    for lineno in range(view.headings[heading_index].end_line + 1, section_end):
+        if lineno in code_lines:
+            continue  # 代码块内的伪表格不算变更记录
+        stripped = view.source[lineno - 1].strip()
         if not stripped.startswith("|"):
             continue
         if re.fullmatch(r"\|[\s\-:]+\|", stripped):
@@ -2982,29 +2993,24 @@ def check_decision_tree_mapping() -> list[str]:
 def _canonical_routes_to_workflow(doc_content: str, doc_dir: Path, workflow_target: Path) -> bool:
     """canonical 文档中是否存在一条真实 markdown 链接，经相对解析后指向 workflow 目标文档。
 
-    纯文本/反引号提及、代码块内示例链接不算真路由：DOC-05 要求 canonical 入口文档完整承担
-    条件路由责任，必须以可点击的相对路径链接指向 workflow 文档。
+    纯文本/反引号提及、代码块/行内代码内示例链接不算真路由：DOC-05 要求 canonical 入口
+    文档完整承担条件路由责任，必须以可点击的相对路径链接指向 workflow 文档。
+    链接提取统一走 docs_markdown 解析视图（引用式与内联式同等处理，代码语境天然排除）。
     """
-    in_code_block = False
-    for line in doc_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    view = parse_doc_view(doc_content)
+    for link in view.links:
+        url = link.target.strip()
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        path_part = url.split("#", 1)[0].split("?", 1)[0]
+        if not path_part:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            path_part = url.split("#", 1)[0].split("?", 1)[0]
-            if not path_part:
-                continue
-            try:
-                target = (doc_dir / path_part).resolve()
-            except Exception:
-                continue
-            if target == workflow_target:
-                return True
+        try:
+            target = (doc_dir / path_part).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if target == workflow_target:
+            return True
     return False
 
 
@@ -3049,19 +3055,27 @@ def check_canonical_routing() -> list[str]:
 # 主题正本须承载『完成判定』，否则 AI 交付『做没做完』只能自行推断，交付质量随任务类型随机波动（F-03）。
 # 与 check_canonical_routing()（workflow 条件路由）同一思路，实现成本低。
 def _completion_section(content: str) -> str | None:
-    """「完成判定」章节的正文块：截取首个含「完成判定」标题之后、下一个同级或更高级标题之前的行。"""
-    lines = content.splitlines()
-    for i, line in enumerate(lines):
-        m = re.match(r"^(#{1,6})\s+(.+)$", line)
-        if m and "完成判定" in m.group(2):
-            level = len(m.group(1))
-            block: list[str] = []
-            for j in range(i + 1, len(lines)):
-                mm = re.match(r"^(#{1,6})\s+", lines[j])
-                if mm and len(mm.group(1)) <= level:
-                    break
-                block.append(lines[j])
-            return "\n".join(block)
+    """「完成判定」章节的正文块：首个含「完成判定」的真实标题之后、下一同级或更高级标题之前。
+
+    标题识别（含 Setext）与代码块边界统一由 docs_markdown 解析视图承担：围栏/缩进块内的
+    伪标题不参与匹配，代码示例行也不计入章节正文（避免示例冒认判据与最小验证命令）。
+    """
+    view = parse_doc_view(content)
+    code_lines = view.code_line_numbers()
+    for idx, heading in enumerate(view.headings):
+        if "完成判定" not in heading.text:
+            continue
+        end_line = len(view.source) + 1
+        for nxt in view.headings[idx + 1 :]:
+            if nxt.level <= heading.level:
+                end_line = nxt.line
+                break
+        block: list[str] = []
+        for line_idx in range(heading.end_line, end_line - 1):
+            if line_idx + 1 in code_lines:
+                continue
+            block.append(view.source[line_idx])
+        return "\n".join(block)
     return None
 
 
@@ -4379,8 +4393,8 @@ def check_strategy_desc_dynamic_consistency() -> list[str]:
 # 样例文件，README 自述「新增 case 必须同步改本 README」，但此前无门禁守护：追加 case-002.md
 # 而漏登记 README（或登记了不存在的文件）均无报警。本检查双向断言二者一致。
 EVALS_README_PATH = ROOT / "docs" / "reviews" / "evals" / "README.md"
-# 「样例目录」表内仅本表使用 `./<相对路径>` 形式的链接（其余链接均为 `../` 跨目录引用或纯文本）。
-_EVALS_README_LINK_PATTERN = re.compile(r"\]\(\./([^)]+)\)")
+# 「样例目录」表内仅本表使用 `./<相对路径>` 形式的链接（其余链接均为 `../` 跨目录引用或纯文本），
+# 链接提取统一由 docs_markdown 解析视图承担（内联式/引用式等价，代码块内示例不计数）。
 
 
 def check_evals_case_index_consistency() -> list[str]:
@@ -4399,15 +4413,18 @@ def check_evals_case_index_consistency() -> list[str]:
 
     evals_dir = EVALS_README_PATH.parent
     declared: dict[str, set[str]] = {}
-    for line in EVALS_README_PATH.read_text(encoding="utf-8").splitlines():
-        if not line.lstrip().startswith("|"):
+    view = docs_markdown.load_document_view(EVALS_README_PATH)
+    for link in view.links:
+        target = link.target.strip()
+        if not target.startswith("./"):
             continue
-        for m in _EVALS_README_LINK_PATTERN.finditer(line):
-            target = m.group(1)
-            if target.endswith("/"):
-                declared.setdefault(target.rstrip("/"), set())
-            elif "/" in target and target.endswith(".md"):
-                declared.setdefault(target.rsplit("/", 1)[0], set()).add(target)
+        target = target[2:]
+        if not target:
+            continue
+        if target.endswith("/"):
+            declared.setdefault(target.rstrip("/"), set())
+        elif "/" in target and target.endswith(".md"):
+            declared.setdefault(target.rsplit("/", 1)[0], set()).add(target)
 
     if not declared:
         errors.append(

@@ -1,7 +1,7 @@
 r"""D12：L01—L06 长期控制合同控制测试（documentation-maintenance 第 2 节）。
 
 控制合同正本：docs/guides/documentation-maintenance.md 第 2 节 L01—L12
-（承接 reviews/文档体系检视与改进.md 第 9.2 节）。本文件承载 L01—L06，
+（其外部来源制品见该指南头部「来源制品」说明）。本文件承载 L01—L06，
 每个控制点以「注入违规 → 检查失败 → 清除/恢复 → 恢复通过」闭环证明机制有效：
 
 - L01 双写事实：唯一作者源；修改派生不改源必须失败（check_docs_generated 一致性）；
