@@ -16,6 +16,13 @@ import pytest
 import docs_generated as dg
 from fixtures import generator_fixtures as gf
 
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import check_docs_consistency as cdc  # noqa: E402
+
 pytestmark = pytest.mark.docs_pure
 
 
@@ -303,6 +310,106 @@ def test_builtin_registry_d6_entries_active_and_consistent() -> None:
     assert by_id["a11y-contrast-reference"].active is False
     assert by_id["a11y-contrast-reference"].render is None
     dg._validate_specs(dg.BUILTIN_REGISTRY)  # 注册表整体跨条目约束（目标格式一致/块 id 不重复）
+
+
+# ---------------------------------------------------------------------------
+# D01：CLAUDE §1.8 决策树 / §3.1 红线表由 YAML 单一作者源生成
+# ---------------------------------------------------------------------------
+
+
+def _builtin(block_id: str) -> dg.BlockSpec:
+    return next(spec for spec in dg.BUILTIN_REGISTRY if spec.block_id == block_id)
+
+
+def test_claude_generated_views_match_author_sources() -> None:
+    """真实 CLAUDE.md 的两个生成块与 YAML 渲染结果逐行一致。"""
+    content = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    for block_id, tag in (
+        ("claude-decision-tree", "<!-- generated:claude-decision-tree -->"),
+        ("claude-redlines-table", "<!-- generated:claude-redlines-table -->"),
+    ):
+        expected = dg.render_block_lines(ROOT, _builtin(block_id))
+        errors = cdc._generated_block_sync(content, tag, expected, f"{block_id} 与作者源不一致", f"{block_id} 缺生成块")
+        assert errors == [], errors
+
+
+def test_claude_derived_copy_edit_fails() -> None:
+    """只改派生副本（CLAUDE 表）不改作者源必须被一致性检查判红（L01/D01）。"""
+    content = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    tag = "<!-- generated:claude-decision-tree -->"
+    expected = dg.render_block_lines(ROOT, _builtin("claude-decision-tree"))
+    assert cdc._generated_block_sync(content, tag, expected, "mismatch", "missing") == []
+    tampered = content.replace("<!-- route: strategy -->", "<!-- route: strategy --> 手改", 1)
+    assert tampered != content
+    assert cdc._generated_block_sync(tampered, tag, expected, "mismatch", "missing") == ["mismatch"]
+
+
+def test_claude_redlines_render_tracks_yaml_author_source(tmp_path: Path) -> None:
+    """只改一次 redlines.yml（新增红线）即传播到 CLAUDE 红线表，无需手改正文。"""
+    source = tmp_path / "docs" / "governance" / "redlines.yml"
+    source.parent.mkdir(parents=True)
+    original = (ROOT / "docs/governance/redlines.yml").read_text(encoding="utf-8")
+    source.write_text(
+        original
+        + "\n  - id: R25\n"
+        + "    title: 演示新增红线\n"
+        + "    description: 演示说明\n"
+        + "    enforcement: 仅人工评审\n"
+        + "    automation_coverage: none\n"
+        + "    human_review_required: true\n"
+        + "    rule_type: WORKFLOW\n",
+        encoding="utf-8",
+    )
+    lines = dg.render_block_lines(tmp_path, _builtin("claude-redlines-table"))
+    assert any("R25" in line and "演示新增红线" in line and "仅人工评审" in line for line in lines)
+    assert dg.render_block_lines(tmp_path, _builtin("claude-redlines-table")) == lines, "二次渲染必须零差异"
+
+
+def _seed_topic_paths(root: Path, yaml_text: str) -> None:
+    """按 canonical-topics.yml 的 canonical/workflow 字段落位占位文件。
+
+    作者源校验要求路径真实存在；临时根目录须先补齐被引用文件，否则渲染前即拒绝。
+    """
+    import yaml
+
+    for topic in yaml.safe_load(yaml_text)["topics"]:
+        for field in ("canonical", "workflow"):
+            rel = topic.get(field)
+            if isinstance(rel, str) and rel.strip():
+                _write(root, rel.strip(), "# stub\n")
+
+
+def test_claude_decision_tree_render_tracks_yaml_author_source(tmp_path: Path) -> None:
+    """只改一次 canonical-topics.yml（新增 topic）即传播到 CLAUDE 决策树。"""
+    source = tmp_path / "docs" / "governance" / "canonical-topics.yml"
+    source.parent.mkdir(parents=True)
+    original = (ROOT / "docs/governance/canonical-topics.yml").read_text(encoding="utf-8")
+    text = (
+        original
+        + "\n  - id: demo-topic\n"
+        + "    title: 演示新增任务\n"
+        + "    canonical: docs/guides/how-to.md\n"
+        + "    section: 1. 演示章节\n"
+    )
+    source.write_text(text, encoding="utf-8")
+    _seed_topic_paths(tmp_path, text)
+    lines = dg.render_block_lines(tmp_path, _builtin("claude-decision-tree"))
+    assert any("演示新增任务" in line and "route: demo-topic" in line for line in lines)
+    assert any("how-to.md「1. 演示章节」" in line for line in lines)
+    assert dg.render_block_lines(tmp_path, _builtin("claude-decision-tree")) == lines, "二次渲染必须零差异"
+
+
+def test_claude_decision_tree_meta_entry_requires_note(tmp_path: Path) -> None:
+    """元条目（fallback）缺 note 时显式拒绝，不生成半行或空入口。"""
+    source = tmp_path / "docs" / "governance" / "canonical-topics.yml"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "topics:\n  - id: fallback\n    title: 未列出的任务类型\n    canonical: CLAUDE.md\n",
+        encoding="utf-8",
+    )
+    _write(tmp_path, "CLAUDE.md", "# CLAUDE\n")
+    with pytest.raises(dg.SourceFieldError, match="note"):
+        dg.render_block_lines(tmp_path, _builtin("claude-decision-tree"))
 
 
 # ---------------------------------------------------------------------------

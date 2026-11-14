@@ -916,6 +916,93 @@ def _render_agents_task_routes(validated: dict[str, object], root: Path) -> list
     return lines
 
 
+def _escape_redline_table_cell(text: str) -> str:
+    """红线表单元格转义：只转义未转义的竖线，避免与既有 ``\\|`` 二次转义。"""
+    return re.sub(r"(?<!\\)\|", r"\\|", text)
+
+
+def _render_claude_redlines_table(validated: dict[str, object], root: Path) -> list[str]:
+    """CLAUDE.md §3.1 红线表（D01）：redlines.yml 单一作者源生成视图。
+
+    列 = # / 红线 / 说明 / 强制状态，与 check_redlines_yaml_consistency 的
+    `_parse_claude_redline_table` 解析契约一致；正文不再手写第二份判据。
+    """
+    redlines = validated[_REDLINES_SCHEMA.path]
+    assert isinstance(redlines, list)
+    lines = ["| # | 红线 | 说明 | 强制状态 |", "|---|------|------|---------|"]
+    for entry in redlines:
+        assert isinstance(entry, dict)
+        enforcement = entry.get("enforcement")
+        if not isinstance(enforcement, str) or not enforcement:
+            raise SourceFieldError(f"redlines.yml {entry.get('id', '?')!r} 缺非空 enforcement（渲染必需）")
+        title = _escape_redline_table_cell(str(entry.get("title", "")))
+        description = _escape_redline_table_cell(_require_description(entry))
+        lines.append(f"| {entry['id']} | **{title}** | {description} | {_escape_redline_table_cell(enforcement)} |")
+    return lines
+
+
+_DECISION_TREE_META_IDS = frozenset({"fallback"})
+
+
+def _render_claude_decision_tree(validated: dict[str, object], root: Path) -> list[str]:
+    """CLAUDE.md §1.8 决策树（D01）：canonical-topics.yml 单一作者源生成视图。
+
+    合并规则与旧兼容视图一致：同一 canonical 的多个 topic 合并为一行（锚点逗号分隔）；
+    仅当该 canonical 下存在多个**不同非空** section 时才按 section 拆行（如 how-to），
+    避免丢失章节区分。每个数据行保留 `<!-- route: id -->` 锚，供 DOC-04 逐行绑定校验。
+    """
+    topics = validated[_CANONICAL_TOPICS_SCHEMA.path]
+    assert isinstance(topics, list)
+
+    ordered: dict[str, list[dict[str, object]]] = {}
+    for topic in topics:
+        assert isinstance(topic, dict)
+        canonical = str(topic["canonical"]).removeprefix("./")
+        ordered.setdefault(canonical, []).append(topic)
+
+    # canonical → 有序 subgroup 列表；subgroup = (section | None, topics)
+    groups: list[tuple[str, list[tuple[str | None, list[dict[str, object]]]]]] = []
+    for canonical, members in ordered.items():
+        meta = [topic for topic in members if str(topic["id"]) in _DECISION_TREE_META_IDS]
+        normal = [topic for topic in members if str(topic["id"]) not in _DECISION_TREE_META_IDS]
+        sections = {
+            section.strip()
+            for topic in normal
+            if isinstance((section := topic.get("section")), str) and section.strip()
+        }
+        if len(sections) > 1:
+            buckets: dict[str | None, list[dict[str, object]]] = {}
+            for topic in normal:
+                section = topic.get("section")
+                key = section.strip() if isinstance(section, str) and section.strip() else None
+                buckets.setdefault(key, []).append(topic)
+            subgroups = list(buckets.items())  # 保持 yml 中首次出现顺序
+        else:
+            subgroups = [(next(iter(sections), None), normal)] if normal else []
+        if meta:
+            subgroups.append((None, meta))
+        groups.append((canonical, subgroups))
+
+    lines = ["| 任务类型 | 必读入口 |", "|---------|---------|"]
+    for canonical, subgroups in groups:
+        for section, members in subgroups:
+            ids = ",".join(str(topic["id"]) for topic in members)
+            titles = " / ".join(_escape_cell(str(topic.get("title", ""))) for topic in members)
+            if all(str(topic["id"]) in _DECISION_TREE_META_IDS for topic in members):
+                note = members[0].get("note")
+                if not isinstance(note, str) or not note:
+                    raise SourceFieldError(
+                        f"canonical-topics.yml {members[0].get('id', '?')!r} 元条目缺 note（渲染必需）"
+                    )
+                lines.append(f"| {titles} | {_escape_cell(note)} <!-- route: {ids} --> |")
+                continue
+            # 组内全为空 section 或全为同一 section 才展示章节；混合（如 ci-deps+release）保持旧视图不带章节
+            display_section = section if section and all(t.get("section") == section for t in members) else None
+            label = f"{canonical}「{display_section}」" if display_section else canonical
+            lines.append(f"| {titles} | [{_escape_cell(label)}](./{canonical}) <!-- route: {ids} --> |")
+    return lines
+
+
 def _render_precommit_docs_deps(validated: dict[str, object], root: Path) -> list[str]:
     """两个 docs hook 的 additional_dependencies 片段（D23）：由 pyproject docs 组派生。
 
@@ -978,6 +1065,23 @@ BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
         target="AGENTS.md",
         sources=(_CANONICAL_TOPICS_SCHEMA,),
         render=_render_agents_task_routes,
+        block_format="markdown",
+        active=True,
+    ),
+    # —— D01：CLAUDE §1.8 / §3.1 改由 YAML 单一作者源生成，旧手写表不再保留 ——
+    BlockSpec(
+        block_id="claude-decision-tree",
+        target="CLAUDE.md",
+        sources=(_CANONICAL_TOPICS_SCHEMA,),
+        render=_render_claude_decision_tree,
+        block_format="markdown",
+        active=True,
+    ),
+    BlockSpec(
+        block_id="claude-redlines-table",
+        target="CLAUDE.md",
+        sources=(_REDLINES_SCHEMA,),
+        render=_render_claude_redlines_table,
         block_format="markdown",
         active=True,
     ),

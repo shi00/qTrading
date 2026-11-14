@@ -1,4 +1,4 @@
-# 红线机器可读映射 (CLAUDE.md §3.1 表格的 YAML 镜像)
+# 红线判据正本（单一作者源；CLAUDE.md §3.1 表格由本文件生成）
 #
 # 来源决策: ADR-0003 (推翻「3b 过度工程不做」决策)
 # 格式决策: ADR-0004 (YAML vs JSON/TOML/Python file)
@@ -7,9 +7,9 @@
 #
 # 字段说明:
 #   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R24)
-#   title: 红线标题 (对应 CLAUDE.md §3.1 表格「红线」列)
-#   description: 红线说明 (对应 CLAUDE.md §3.1 表格「说明」列)
-#   enforcement: 强制状态 (对应 CLAUDE.md §3.1 表格「强制状态」列)
+#   title: 红线标题 (生成 CLAUDE.md §3.1 表格「红线」列)
+#   description: 红线说明 (生成 CLAUDE.md §3.1 表格「说明」列)
+#   enforcement: 强制状态 (生成 CLAUDE.md §3.1 表格「强制状态」列)
 #   automation_coverage: 自动化覆盖程度 (full | partial | none)
 #     full: 自动化检查完全覆盖该红线语义
 #     partial: 自动化检查仅覆盖部分场景，变更触及未覆盖语义时需人工复核
@@ -34,7 +34,9 @@
 #     声明时须为非空字符串列表（不得用空判据做形式合规）。
 #
 # 修改规则:
-#   - 新增 R20+ 时必须同步 CLAUDE.md §3.1 表格, 否则 check_redlines_yaml_consistency() 报错
+#   - 红线判据只改本文件；改后运行 `python scripts/check_docs_consistency.py --scope document --update`
+#     重新生成 CLAUDE.md §3.1，禁止再手改生成视图（只改派生副本必须被 --check 判红）
+#   - 新增 R20+ 时同样只改本文件，生成后由 check_redlines_yaml_consistency() 校验一致
 #   - 禁止删除或复用已废弃编号 (append-only)
 #   - 字段变更 (如新增字段) 需同步更新契约测试
 #   - EXCEPTIONABLE 规则被例外注册表引用时, 例外 rule_id 必须指向 EXCEPTIONABLE 规则

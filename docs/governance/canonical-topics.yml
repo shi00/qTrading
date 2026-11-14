@@ -1,19 +1,20 @@
-# 主题 → canonical 正本映射 (CLAUDE.md §1.8 决策树的机器可读镜像)
+# 任务路由判据正本（单一作者源；CLAUDE.md §1.8 决策树由本文件生成）
 #
 # 来源决策: P2-12 (AI 任务路由中转加载与上下文放大) + P2-17 (设计类任务缺少 ADR/契约路由)
 # 用途: 每类任务只列一个 canonical 入口，入口文档负责条件路由；
-#       CLAUDE.md §1.8 只保留高风险任务与最小入口，不复制二级必读清单。
+#       CLAUDE.md §1.8 生成视图只列任务 → 最小入口，不复制二级必读清单。
 #
 # 字段说明:
 #   id: 主题标识 (稳定, 供文档与脚本引用)
-#   title: 任务类型标题 (对应 CLAUDE.md §1.8 决策树「任务类型」列)
+#   title: 任务类型标题 (生成 CLAUDE.md §1.8 决策树「任务类型」列)
 #   canonical: 该主题的唯一正本入口 (条件路由由该文档负责)
 #   section: 可选, 正本内章节名 (canonical 为整文件时精确到章节, 机器可读精度不低于 §1.8)
 #   workflow: 可选, 工作流入口 (how-to 等)
 #   note: 可选, 补充说明 (如高风险任务、不可逆决策等)
 #
 # 修改规则:
-#   - 新增任务类型时同步更新 CLAUDE.md §1.8 决策树
+#   - 任务路由只改本文件；改后运行 `python scripts/check_docs_consistency.py --scope document --update`
+#     重新生成 CLAUDE.md §1.8 与 AGENTS.md 任务路由表，禁止再手改生成视图
 #   - canonical 必须是真实存在的文档路径
 #   - 每个主题只保留一个 canonical 入口, 不复制二级必读清单
 
