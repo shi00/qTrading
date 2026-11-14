@@ -8,7 +8,7 @@ import inspect
 import pytest
 import pandas as pd
 from datetime import date, datetime, timedelta
-from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
+from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock, ANY
 from zoneinfo import ZoneInfo
 
 from core.i18n import I18n, Message
@@ -2555,6 +2555,37 @@ class TestCatchupLogic:
                 await svc._catchup_logic("task1", [date(2024, 6, 11)])
 
     @pytest.mark.asyncio
+    async def test_cancel_watermark_db_failure_does_not_mask_cancelled(self):
+        """R2：取消路径 finally 中水位落盘抛 DB 异常时，不得顶替 CancelledError 传播。"""
+        svc = _make_svc()
+        calls = {"n": 0}
+
+        async def _sync(trade_date=None, sync_result=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise asyncio.CancelledError("simulated cancel on day 2")
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.log_classified") as mock_log,
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._mark_daily_update_done_db = AsyncMock(side_effect=RuntimeError("db down"))
+            # 水位落盘失败被记录后，原取消异常继续向外传播（不被 RuntimeError 顶替）。
+            with pytest.raises(asyncio.CancelledError):
+                await svc._catchup_logic("task1", [date(2024, 6, 12), date(2024, 6, 13)])
+
+        svc._mark_daily_update_done_db.assert_awaited_once_with("20240612")
+        mock_log.assert_called_once_with(ANY, ANY, "db", ANY, "20240612", exc_info=True)
+        assert isinstance(mock_log.call_args.args[1], RuntimeError), "须记录原始 DB 异常对象"
+
+    @pytest.mark.asyncio
     async def test_single_day_failure_continues(self):
         """D6-1 Q3 修订：单日同步失败不中断整批。"""
         svc = _make_svc()
@@ -3969,3 +4000,113 @@ class TestSchedulerEntryLevel:
                 "scheduler_last_daily_update",
                 self._TODAY,
             )
+
+
+class TestCatchupCancelWatermarkBoundary:
+    """C14 负例（§6.4 业务定向包）：第一批已提交且合法 checkpoint 已推进后，第二批
+    协作取消或真实取消异常时——已提交进度不回退、未完成部分不越洞推进完成水位、
+    不标整轮成功（真实异常仍传播，R2 不吞没）。
+
+    修复前缺陷：协作取消（update_progress 返回 False）与真实 CancelledError 均在
+    批次循环内直接 raise，循环后的连续成功水位推进被跳过——已成功批次进度回退，
+    下轮全量重做。
+    """
+
+    _D1 = date(2026, 1, 1)
+    _D2 = date(2026, 1, 2)
+    _D3 = date(2026, 1, 3)
+
+    def _setup(self, monkeypatch: pytest.MonkeyPatch, *, update_progress, sync_behavior):
+        """装配 _catchup_logic 的替身环境。
+
+        Args:
+            update_progress: callable(task_id, ratio, msg) -> bool（进度上报语义）。
+            sync_behavior: callable(date) -> SyncResult | BaseException（可编程行为）。
+        """
+        svc = _make_svc()
+        svc._mark_daily_update_done_db = AsyncMock()
+        svc._record_catchup_failure = MagicMock()
+
+        synced: list[date] = []
+        mock_dp = MagicMock()
+
+        async def _sync(trade_date=None, sync_result=None, **_kwargs):
+            assert trade_date is not None
+            synced.append(trade_date)
+            result = sync_behavior(trade_date)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        mock_dp.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+
+        mock_tm = MagicMock()
+        mock_tm.update_progress = MagicMock(side_effect=update_progress)
+        monkeypatch.setattr("services.task_manager.TaskManager", lambda: mock_tm)
+        monkeypatch.setattr("data.data_processor.DataProcessor", lambda: mock_dp)
+        monkeypatch.setattr(
+            "utils.scheduler_service.ConfigHandler.is_auto_update_enabled",
+            staticmethod(lambda: True),
+        )
+        return svc, synced
+
+    async def test_cooperative_cancel_advances_only_contiguous_watermark(self, monkeypatch):
+        """协作取消：d1 成功、d2 进度上报被拒（任务已取消）→ CancelledError 传播，
+        水位只推进到 d1（已提交进度不回退、不越洞到未完成批次）、不记补偿失败。"""
+        accepted = {"n": 0}
+
+        def _update_progress(_tid, _ratio, _msg):
+            accepted["n"] += 1
+            return accepted["n"] <= 1  # 仅 d1 的上报被接受，d2 起被拒（任务已取消）
+
+        def _sync_behavior(_d):
+            return SyncResult()  # 已尝试批次全部成功（is_complete=True）
+
+        svc, synced = self._setup(monkeypatch, update_progress=_update_progress, sync_behavior=_sync_behavior)
+
+        with pytest.raises(asyncio.CancelledError):
+            await svc._catchup_logic("task-1", [self._D1, self._D2, self._D3])
+
+        assert synced == [self._D1]  # d1 已提交；d2 协作取消后不再外发
+        # 已提交批次水位收敛到连续成功末端 d1（不回退、不越洞）
+        svc._mark_daily_update_done_db.assert_awaited_once_with(self._D1.strftime("%Y%m%d"))
+        svc._record_catchup_failure.assert_not_called()  # 真实取消不记录补偿失败退避
+
+    async def test_real_cancelled_error_propagates_and_keeps_contiguous_watermark(self, monkeypatch):
+        """真实取消异常（R2）：d2 同步抛 CancelledError → 原样传播，水位只到 d1。"""
+
+        def _sync_behavior(d):
+            if d == self._D2:
+                return asyncio.CancelledError("upstream cancelled")
+            return SyncResult()
+
+        svc, synced = self._setup(monkeypatch, update_progress=lambda *_a: True, sync_behavior=_sync_behavior)
+
+        with pytest.raises(asyncio.CancelledError):
+            await svc._catchup_logic("task-1", [self._D1, self._D2, self._D3])
+
+        assert synced == [self._D1, self._D2]  # d2 已尝试（真实取消发生在同步内）
+        svc._mark_daily_update_done_db.assert_awaited_once_with(self._D1.strftime("%Y%m%d"))
+        svc._record_catchup_failure.assert_not_called()
+
+    async def test_failure_path_watermark_not_across_failed_day_regression(self, monkeypatch):
+        """不越洞回归：d2 同步失败（非取消）→ 水位停在 d1，任务映射 TaskIncompleteError。"""
+
+        def _sync_behavior(d):
+            if d == self._D2:
+                return RuntimeError("api down")
+            return SyncResult()
+
+        svc, synced = self._setup(monkeypatch, update_progress=lambda *_a: True, sync_behavior=_sync_behavior)
+
+        with pytest.raises(TaskIncompleteError) as exc_info:
+            await svc._catchup_logic("task-1", [self._D1, self._D2, self._D3])
+
+        # 强断言：未完成原因逐字入账（失败日 + 关键表清单），不伪成功
+        assert exc_info.value.reason is not None
+        assert "failed_days=['20260102']" in exc_info.value.reason
+        assert "failed_critical_tables=[]" in exc_info.value.reason
+        assert synced == [self._D1, self._D2, self._D3]  # 失败日不中断整批（逐日记账）
+        svc._mark_daily_update_done_db.assert_awaited_once_with(self._D1.strftime("%Y%m%d"))
+        # 失败退避照常记录，且原因与 TaskIncompleteError 一致（强断言参数内容）
+        svc._record_catchup_failure.assert_called_once_with(reason=exc_info.value.reason)

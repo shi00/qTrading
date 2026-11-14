@@ -694,3 +694,29 @@ def test_doctor_schema_real_sources_consistent():
 
     errors = check_doctor_schema.check_doctor_schema_consistency()
     assert errors == []
+
+
+def test_check_repo_url_consistency_fail_closed_on_missing_doc(tmp_path):
+    """§5.1/F17：README/CONTRIBUTING/SECURITY 任一缺失必须报错，不得静默跳过。"""
+    readme = tmp_path / "README.md"
+    readme.write_text("# README\n", encoding="utf-8")
+    with (
+        patch("verify_versions.README_PATH", readme),
+        patch("verify_versions.CONTRIBUTING_PATH", tmp_path / "CONTRIBUTING.md"),
+        patch("verify_versions.SECURITY_PATH", tmp_path / "SECURITY.md"),
+    ):
+        errors = verify_versions.check_repo_url_consistency()
+
+    joined = "\n".join(errors)
+    assert "CONTRIBUTING.md" in joined
+    assert "SECURITY.md" in joined
+    assert "fail-closed" in joined
+
+
+def test_check_security_supported_version_fail_closed_on_missing_doc(tmp_path):
+    """§5.1/F17：SECURITY.md 缺失必须报错，不得静默返回空列表。"""
+    with patch("verify_versions.SECURITY_PATH", tmp_path / "SECURITY.md"):
+        errors = verify_versions.check_security_supported_version("0.6.9")
+
+    assert len(errors) == 1
+    assert "fail-closed" in errors[0]

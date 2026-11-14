@@ -16,10 +16,11 @@
 
 ### 2.1 Label 关联
 
-- **所有交互控件必须有可读 label**：按钮文本、输入框 label、Dropdown label 不为空。
-- **Icon-only 按钮**：必须设置 `tooltip` 属性，提供文字说明。
-- **表单字段**：`ft.TextField` 必须设置 `label=` 参数，禁止仅依赖 placeholder（placeholder 不被屏幕阅读器视为标签）。
+- **所有交互控件必须有可读语义名称（accessible name）**：按钮以可见文本承载名称；输入框以持久 label 承载名称；Dropdown label 不为空。语义名称是读屏朗读该控件的依据。
+- **Icon-only 按钮**：必须设置 `tooltip` 属性提供**语义名称**（即读屏朗读的名称），不允许空 tooltip 或仅靠视觉图形传达含义。
+- **表单字段**：`ft.TextField` 必须设置**持久** `label=` 参数（label 常驻显示、不随输入消失），禁止仅依赖 placeholder（placeholder 不被屏幕阅读器视为标签，且输入后不可见）。
 - **例外登记**：无法满足本条款的存量控件（如无 `label` 的数值输入框/Checkbox）统一登记于 §4 例外清单，不在此条款内豁免。
+- **结构命名与真实读屏证据分开**：本节名称要求由结构契约测试（如 `test_accessibility_contract.py` 的 TextField/Checkbox 扫描）守护，属**结构命名证据**；真实读屏（Narrator/NVDA）实测是另一层验证，二者不互替（现状见 §4 注）。
 
 ### 2.2 Dialog 可访问性
 
@@ -51,16 +52,24 @@
 - **响应式栅格**：视图栅格**推荐使用** [`ui/theme.py`](../../ui/theme.py) `AppStyles.COL_*` 预置配置（`COL_FULL`/`COL_HALF`/`COL_THIRD`/`COL_QUARTER`/`COL_TWO_THIRDS`），**新增布局优先使用 `COL_*`**；其断点键沿用 Flet `ResponsiveRow` 默认六档（xs/sm/md/lg/xl/xxl，最小宽度 0/576/768/992/1200/1400），但 `COL_*` 预置配置实际仅覆盖前四档（xs/sm/md/lg），xl/xxl 档需自行提供 `col` 值；桌面端窗口最小宽度 1024（`app/window_lifecycle.py`），布局设计以该宽度为下限。
   - **现状**：`ResponsiveRow` 构造 15 处/9 文件；其中 5 个构造内行内子控件 `col=` 使用 `AppStyles.COL_*` 预置配置共 13 处（`backtest_result_panel.py` 3 个构造内经 `_COL_QUARTER` 别名 11 处、`market_dashboard.py` 2 个构造内 2 处），其余 10 个构造未使用（统计基准：2026-10-31）；存量迁移跟踪见 UIX-13 结构性批次（响应式断点模型）。
 
+### 2.6 对比度
+
+- **阈值（数值引用自 [`scripts/check_theme_contrast.py`](../../scripts/check_theme_contrast.py) 既有常量，不另立数值正本）**：
+  - 正文文本 ≥ **4.5**（脚本 `_THRESHOLD_TEXT`）：业务状态/涨跌文字（SUCCESS/WARNING/INFO/UP_RED/DOWN_GREEN 等）实际用于 13/14px 正文（Toast、状态文字、行情单元格等），非 WCAG 大字号例外。
+  - 图标/图形/错误态强调与禁用/装饰内容 ≥ **3.0**（脚本 `_THRESHOLD_LARGE`；WCAG §1.4.3 对禁用控件豁免，保留可读下限）。
+- **覆盖边界（如实披露，不扩大为整应用 WCAG AA 认证）**：该脚本仅验收 `_CONTRAST_PAIRS` 登记的关键色对 × 4 主题（dark/light/navy/dracula），经 pre-commit `theme-contrast-check` hook 强制；其中 **ERROR 按图标档 3.0 验收**（其正文场景因与 danger_button/on_error 反色用途联动，超出脚本范围）；watchlist 列表行的 Layer 1 派生色（运行时由 Flet/Flutter 派生）不在可验收集合内。
+
 ## 3. 审查清单（PR 评审用）
 
 新增/修改 UI 控件时，评审者按以下清单核查：
 
-- [ ] 所有交互控件有 label 或 tooltip
+- [ ] 所有交互控件有可读语义名称：按钮可见文本；Icon-only 按钮 `tooltip` 语义名称（不允许空 tooltip）；`ft.TextField` 持久 `label=`（禁止仅 placeholder）；Dropdown label 非空（对应 §2.1）
 - [ ] Dialog 有 title + 操作按钮 + Esc 关闭路径
 - [ ] 错误状态有可读错误消息（非颜色变化）
 - [ ] 键盘路径完整（Tab / Enter / Esc）
 - [ ] 响应式布局不隐藏操作入口
 - [ ] 控件树顺序与视觉顺序一致
+- [ ] 涉及颜色/主题改动时，关键色对过 `theme-contrast-check`（正文 4.5 / 图标与禁用 3.0；覆盖边界见 §2.6）
 
 ## 4. 例外清单
 

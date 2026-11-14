@@ -78,10 +78,22 @@ repos:
         files: ^(pyproject\.toml|requirements-optional\.in)$
         pass_filenames: false
 
+      - id: pip-compile-docs
+        name: pip-compile requirements-docs.txt
+        entry: uv pip compile --group docs --universal --no-emit-index-url -o requirements-docs.txt
+        language: system
+        # 纯文档工具链依赖组（检视 5.3）：源为 pyproject [dependency-groups].docs，无独立 .in 文件；
+        # 输出再生成差异由 pre-commit「hook 修改文件即失败」机制拦截（与 core/dev/optional 同语义）。
+        files: ^(pyproject\.toml|requirements-docs\.txt)$
+        pass_filenames: false
+
       - id: verify-versions
         name: Verify and Fix Versions
         entry: python scripts/verify_versions.py --fix
         language: python
+        # verify_versions.py 经 docs_markdown 统一解析视图校验文档（D5），hook 隔离环境
+        # 须提供 docs 解析依赖组（脚本 docstring 正本要求；否则触发即 fail-closed）。
+        additional_dependencies: ["markdown-it-py>=4.0.0", "pyyaml>=6.0.3"]
         files: ^(pyproject\.toml|\.release-please-manifest\.json|README\.md|CONTRIBUTING\.md|SECURITY\.md|CLAUDE\.md)$
         pass_filenames: false
 
@@ -89,7 +101,9 @@ repos:
         name: Check docs consistency
         entry: python scripts/check_docs_consistency.py
         language: python
-        additional_dependencies: ["pyyaml>=6.0"]
+        # docs_markdown 统一解析视图（D3）依赖 markdown-it-py：hook 隔离环境必须自带该解析依赖，
+        # 否则 hook 触发即 ModuleNotFoundError（与 verify-versions hook 同因）。
+        additional_dependencies: ["pyyaml>=6.0", "markdown-it-py>=4.0.0"]
         # files 含 .py 以触发 NOTE(lazy) 三要素检查(任何 .py 变化都跑)；.ya?ml 覆盖治理正本 .yml 扩展名（GDR-02）。
         files: \.(md|toml|ya?ml|py)$
         pass_filenames: false

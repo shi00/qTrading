@@ -102,6 +102,19 @@ sentiment = [
     "tokenizers>=0.23.3,<1",  # 新闻情绪打分（N3-2）：HF tokenizers 分词兜底（NOTE(lazy) 可选功能栈）
 ]
 
+[dependency-groups]
+# 纯文档工具链（检视 5.3）：独立 docs 组供 uv pip compile 生成 requirements-docs.txt，
+# pytest 不进入 pre-commit 解析 hook 的运行依赖。
+docs = [
+    "markdown-it-py==4.0.0",  # 文档统一 Markdown 解析（CommonMark + table/strikethrough）
+    # 该版本在 Python ≥3.13 导入即崩溃（上游无修复版）：保留 pin 以遵守检视方案 §5.1 强制清单，
+    # 并作为上游修复后的升级锚点；运行时由 scripts/docs_markdown.py 的 CompatGithubSlugger 回退，
+    # SLUGGER_BACKEND 如实声明实际后端（不得移除本行）。
+    "github-slugger==0.0.3",  # GitHub 风格标题锚点生成（重复标题加序号；导入崩溃见上方说明）
+    "pyyaml>=6.0",  # 治理 YAML 作者源解析
+    "pytest>=9.2.0",  # 纯文档测试运行器（tests/docs 独立环境）
+]
+
 [tool.ruff]
 line-length = 120
 indent-width = 4
@@ -163,6 +176,7 @@ markers = [
     "no_db: Tests that do not require database (skip DB schema initialization in integration autouse fixture)",
     "embedded_real: Tests requiring real Rust sidecar binary + real embedded PostgreSQL (skip if sidecar binary missing)",
     "meta: Tests for scripts/* tooling (not business logic)",
+    "docs_pure: 纯文档测试（仅依赖 docs 组与标准库，不加载业务夹具/插件；tests/docs 与旧入口转发共用）",
     "xdist_group(name): serial group for pytest-xdist load-balanced runs",
     "timeout_e2e_smoke: E2E smoke tests with 60s per-test timeout",
     "timeout_e2e_standard: E2E standard tests with 180s per-test timeout",

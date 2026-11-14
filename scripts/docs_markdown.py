@@ -1,0 +1,501 @@
+"""docs_markdown.py — 文档 Markdown 统一解析视图（检视 §5.1，工作包 D3）。
+
+职责边界（检视 §5.1 职责表）：一次解析形成标题/锚点、标准与引用式链接、HTML ID、
+代码块/行号映射的不可变视图；缓存限本次调用。**不承担**：编辑文档、读秘密、联网、
+业务导入 —— 本模块仅依赖标准库与 docs 组（markdown-it-py / github-slugger），
+保证「只装 docs 组」的独立 hook 环境可运行（检视 §6.4 依赖/测试负例、AC15）。
+
+错误处理：本模块为纯静态解析，外部 IO 仅文件读取（load_document_view）。按项目
+错误处理标准，文件读取属直接传播边界，异常（FileNotFoundError / UnicodeDecodeError
+等）原样向上传播，由调用方（check_docs_consistency.py）负责 classify_error 分级。
+
+解析配置（检视 §5.1）：CommonMark + table/strikethrough；允许读取原文 HTML token
+（raw_html_tokens 供原验证者核验 fragment）；不启用 linkify / typographer / 宏 /
+远程 include，不新增插件栈。未知或解析器无法语义化的结构不静默采样：要么原样保留
+在 raw_html_tokens（「未核」通道），要么异常显式传播（显式失败）。
+
+公共 API（预留供 docs_generated.py / check_docs_consistency.py 复用）：
+    parse_text(text) -> DocumentView
+    load_document_view(path) -> DocumentView
+    create_slugger() -> Slugger        # GitHub 锚点语义
+    SLUGGER_BACKEND                    # 当前锚点实现后端声明
+"""
+
+from __future__ import annotations
+
+import re
+from collections import Counter
+from dataclasses import dataclass
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Protocol
+
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
+
+__all__ = [
+    "SLUGGER_BACKEND",
+    "CodeBlockInfo",
+    "CodeSpanInfo",
+    "CompatGithubSlugger",
+    "DocumentView",
+    "HeadingInfo",
+    "HtmlIdInfo",
+    "LinkInfo",
+    "ReferenceDefInfo",
+    "Slugger",
+    "UnresolvedRef",
+    "create_slugger",
+    "load_document_view",
+    "parse_text",
+]
+
+# 解析模式固定：CommonMark + table/strikethrough（检视 §5.1），模块级单例，
+# parse 无共享可变状态（env 由每次调用新建），解析结果不做跨调用缓存。
+_PARSER = MarkdownIt("commonmark").enable(["table", "strikethrough"])
+
+# 引用式链接残余形态（仅作用于解析器判定未成链的 text token 内）：
+# full 形态 `[text][label]` 与 collapsed 形态 `[text][]`，兼容图片引用 `![alt][label]`。
+_REFERENCE_RE = re.compile(r"!?\[([^\[\]]*)\]\[([^\[\]]*)\]")
+
+
+# ---------------------------------------------------------------------------
+# 锚点生成（github-slugger 语义）
+# ---------------------------------------------------------------------------
+
+
+class Slugger(Protocol):
+    """GitHub 风格锚点生成器协议（结构化兼容 github_slugger.GithubSlugger）。"""
+
+    def slug(self, value: str, maintain_case: bool = False) -> str:
+        """生成唯一 slug；重复标题自动追加序号。"""
+        raise NotImplementedError  # Protocol 结构化声明，运行期由具体后端实现
+
+
+try:  # 权威来源 pin github-slugger==0.0.3：可用则优先（未来修复版自动切回）
+    from github_slugger import GithubSlugger as _GithubSlugger  # type: ignore[reportMissingImports]  # 包在 Python 3.13 环境导入即崩（见 CompatGithubSlugger docstring），未安装时经 except 回退 compat 实现，pyright 环境未必安装该包
+
+    SLUGGER_BACKEND = "github-slugger"
+except (ImportError, UnicodeEncodeError):
+    _GithubSlugger = None
+    SLUGGER_BACKEND = "compat"
+
+
+class CompatGithubSlugger:
+    """github-slugger 的等价 GitHub slug 语义实现（Python 3.13 环境回退用）。
+
+    背景：github-slugger==0.0.3 的 replace.py docstring 含孤立代理转义（\\uD80A），
+    CPython 3.13 编译 docstring 时抛 UnicodeEncodeError，包在 requires-python>=3.13
+    环境导入即崩（PyPI 上 0.0.1-0.0.3 无修复版本），故以等价语义实现替代并显式声明
+    后端（SLUGGER_BACKEND），不静默冒充包实现。
+
+    语义主干与 github-slugger 一致：小写化；保留字母数字（任意语言，含 CJK）、
+    ``-``、``_``；空白转 ``-``；其余字符剔除；重复 slug 追加 ``-1``、``-2`` 序号。
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """遗忘全部历史 slug（与 github_slugger.GithubSlugger.reset 对齐）。"""
+        self._occurrences: dict[str, int] = {}
+
+    @staticmethod
+    def _base_slug(value: str, maintain_case: bool) -> str:
+        if not isinstance(value, str):
+            return ""
+        # 对齐 github-slugger：toLowerCase -> trim -> 剔除/替换（首尾空白不产生连字符）
+        text = value.strip()
+        if not maintain_case:
+            text = text.lower()
+        out: list[str] = []
+        for ch in text:
+            if ch.isalnum() or ch in "-_":
+                out.append(ch)
+            elif ch.isspace():
+                out.append("-")
+            # 其余字符剔除（GitHub 渲染时不进入锚点）
+        return "".join(out)
+
+    def slug(self, value: str, maintain_case: bool = False) -> str:
+        """生成唯一 slug；重复输入自动追加序号（与 GithubSlugger.slug 行为一致）。"""
+        original = self._base_slug(value, maintain_case)
+        result = original
+        count = self._occurrences.get(original, 0)
+        while result in self._occurrences:
+            count += 1
+            result = f"{original}-{count}"
+        self._occurrences[original] = count
+        self._occurrences[result] = 0
+        return result
+
+
+def create_slugger() -> Slugger:
+    """构造锚点生成器：github-slugger 可用则用包实现，否则回退等价实现。"""
+    if _GithubSlugger is not None:
+        return _GithubSlugger()
+    return CompatGithubSlugger()
+
+
+# ---------------------------------------------------------------------------
+# 不可变视图数据结构
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HeadingInfo:
+    """标题：可见文本、锚点 slug、级别（1-6）、起始行（1-based）。"""
+
+    text: str
+    slug: str
+    level: int
+    line: int
+
+
+@dataclass(frozen=True)
+class LinkInfo:
+    """已解析链接：可见文本、目标、形态、所在行（1-based）。
+
+    kind 为 "inline"（标准式 ``[t](u)``）或 "reference"（引用式 ``[t][label]``），
+    由两轮 parse 对照法精确判定（见 parse_text），无行级正则启发式。
+    """
+
+    text: str
+    target: str
+    kind: str
+    line: int
+
+
+@dataclass(frozen=True)
+class UnresolvedRef:
+    """引用式死链：未定义引用的 label / 可见文本 / 所在行 / 形态。"""
+
+    label: str
+    text: str
+    line: int
+    form: str  # "full" 或 "collapsed"
+
+
+@dataclass(frozen=True)
+class HtmlIdInfo:
+    """HTML 元素 id：标签名、来源 token 形态、所在行（1-based）。
+
+    与标题锚点分开存储（可区分）；anchor_ids() 提供二者并集。
+    """
+
+    id: str
+    tag: str
+    source: str  # "inline" 或 "block"
+    line: int
+
+
+@dataclass(frozen=True)
+class CodeBlockInfo:
+    """代码块：围栏记号（``` / ~~~，缩进块为空串）、info 串、1-based 闭区间行号。"""
+
+    fence: str
+    info: str
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True)
+class ReferenceDefInfo:
+    """引用定义：normalize 后 label（大写折叠）、目标 URL、所在行（1-based）。"""
+
+    label: str
+    href: str
+    line: int
+
+
+@dataclass(frozen=True)
+class CodeSpanInfo:
+    """行内代码 span：原文文本、所在行（1-based）。
+
+    行内代码内的假链接/伪标题由本视图承载（token 判定 code_inline，天然排除
+    链接与标题语义），供消费者做「代码示例文本不冒正文」的负例判定。
+    """
+
+    text: str
+    line: int
+
+
+@dataclass(frozen=True)
+class DocumentView:
+    """一次解析形成的不可变文档视图（frozen dataclass，全部字段为 tuple）。"""
+
+    source: tuple[str, ...]
+    headings: tuple[HeadingInfo, ...]
+    links: tuple[LinkInfo, ...]
+    unresolved_references: tuple[UnresolvedRef, ...]
+    html_ids: tuple[HtmlIdInfo, ...]
+    code_blocks: tuple[CodeBlockInfo, ...]
+    code_spans: tuple[CodeSpanInfo, ...]
+    reference_definitions: tuple[ReferenceDefInfo, ...]
+    raw_html_tokens: tuple[tuple[str, int], ...]  # (原 HTML 内容, 所在行)
+
+    def anchor_ids(self) -> frozenset[str]:
+        """全部可用锚点 = 标题 slug ∪ HTML id。"""
+        return frozenset({h.slug for h in self.headings}) | frozenset(i.id for i in self.html_ids)
+
+    def has_anchor(self, anchor: str) -> bool:
+        """锚点存在性显式判定：不存在返回 False（不伪造、不从全文取样代替）。"""
+        return anchor in self.anchor_ids()
+
+
+# ---------------------------------------------------------------------------
+# 解析实现
+# ---------------------------------------------------------------------------
+
+
+class _HtmlIdParser(HTMLParser):
+    """标准库 HTMLParser：收集标签 id 属性（不执行任何内嵌 HTML 语义）。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ids: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for key, value in attrs:
+            if key.lower() == "id" and value:
+                self.ids.append((tag, value))
+                break
+
+
+def _normalize_label(label: str) -> str:
+    """CommonMark 引用 label normalize：折叠空白 + 大小写折叠（对齐 env 键）。"""
+    return re.sub(r"\s+", " ", label).strip().upper()
+
+
+def _token_line(token: object) -> int:
+    """token.map 为 [start, end) 0-based 行区间，返回 1-based 起始行。"""
+    mapping = getattr(token, "map", None)
+    if not mapping:
+        return 0
+    return mapping[0] + 1
+
+
+def _iter_links(tokens: list[Token]) -> list[tuple[int, str, str]]:
+    """按出现顺序收集已解析链接 (line, text, href)；image 独立 token 不计入链接。"""
+    links: list[tuple[int, str, str]] = []
+    for token in tokens:
+        if token.type != "inline":
+            continue
+        children = token.children or []
+        index = 0
+        while index < len(children):
+            child = children[index]
+            if child.type == "link_open":
+                attrs = dict(child.attrs) if child.attrs else {}
+                href = str(attrs.get("href", ""))
+                parts: list[str] = []
+                cursor = index + 1
+                while cursor < len(children) and children[cursor].type != "link_close":
+                    if children[cursor].type in ("text", "code_inline"):
+                        parts.append(children[cursor].content)
+                    cursor += 1
+                links.append((_token_line(token), "".join(parts), href))
+                index = cursor + 1
+            else:
+                index += 1
+    return links
+
+
+def _collect_headings(tokens: list[Token], slugger: Slugger) -> tuple[HeadingInfo, ...]:
+    """标题：可见文本取 children 中 text/code_inline（跳过 HTML 等内联标记）。"""
+    headings: list[HeadingInfo] = []
+    pending_level: int | None = None
+    for token in tokens:
+        if token.type == "heading_open" and token.tag.startswith("h"):
+            pending_level = int(token.tag[1])
+        elif token.type == "inline" and pending_level is not None:
+            parts = [child.content for child in (token.children or []) if child.type in ("text", "code_inline")]
+            text = "".join(parts)
+            headings.append(
+                HeadingInfo(
+                    text=text,
+                    slug=slugger.slug(text),
+                    level=pending_level,
+                    line=_token_line(token),
+                )
+            )
+            pending_level = None
+    return tuple(headings)
+
+
+def _parse_html_ids(content: str, source: str, line: int) -> list[HtmlIdInfo]:
+    parser = _HtmlIdParser()
+    parser.feed(content)
+    parser.close()
+    return [HtmlIdInfo(id=value, tag=tag, source=source, line=line) for tag, value in parser.ids]
+
+
+def _collect_html(tokens: list[Token]) -> tuple[list[HtmlIdInfo], list[tuple[str, int]]]:
+    """从 html_block / html_inline token 原文提取 id，并保留未核 HTML 原样。
+
+    html_inline 位于 inline token 的 children 中，须下钻一层收集；
+    html_block 在顶层 token（注意 CommonMark type 6 块仅由空行结束）。
+    """
+    ids: list[HtmlIdInfo] = []
+    raw: list[tuple[str, int]] = []
+    for token in tokens:
+        if token.type == "html_block":
+            line = _token_line(token)
+            raw.append((token.content, line))
+            ids.extend(_parse_html_ids(token.content, "block", line))
+        elif token.type == "inline":
+            line = _token_line(token)
+            for child in token.children or []:
+                if child.type == "html_inline":
+                    raw.append((child.content, line))
+                    ids.extend(_parse_html_ids(child.content, "inline", line))
+    return ids, raw
+
+
+def _collect_code_spans(tokens: list[Token]) -> tuple[CodeSpanInfo, ...]:
+    """行内代码 span（code_inline）：文本与所在行（1-based，段落起始行粒度）。"""
+    spans: list[CodeSpanInfo] = []
+    for token in tokens:
+        if token.type != "inline":
+            continue
+        line = _token_line(token)
+        for child in token.children or []:
+            if child.type == "code_inline":
+                spans.append(CodeSpanInfo(text=child.content, line=line))
+    return tuple(spans)
+
+
+def _collect_code_blocks(tokens: list[Token]) -> tuple[CodeBlockInfo, ...]:
+    """代码块：围栏（fence，含 markup ```/~~~）与缩进块（code_block）。"""
+    blocks: list[CodeBlockInfo] = []
+    for token in tokens:
+        if token.type == "fence" and token.map:
+            mapping = token.map
+            blocks.append(
+                CodeBlockInfo(
+                    fence=token.markup,
+                    info=token.info.strip(),
+                    start_line=mapping[0] + 1,
+                    end_line=mapping[1],
+                )
+            )
+        elif token.type == "code_block" and token.map:
+            mapping = token.map
+            blocks.append(
+                CodeBlockInfo(
+                    fence="",
+                    info="",
+                    start_line=mapping[0] + 1,
+                    end_line=mapping[1],
+                )
+            )
+    return tuple(blocks)
+
+
+def _strip_definition_lines(source_lines: tuple[str, ...], env: dict) -> tuple[str, tuple[int, ...]]:
+    """按 env.references 的 map 行区间删除引用定义行，返回（新文本, 保留原行号）。"""
+    removed: set[int] = set()
+    for definition in env.get("references", {}).values():
+        span = definition.get("map")
+        if span:
+            removed.update(range(span[0], span[1]))
+    kept: list[int] = []
+    lines: list[str] = []
+    for index, line in enumerate(source_lines):
+        if index not in removed:
+            kept.append(index + 1)
+            lines.append(line)
+    return "\n".join(lines) + ("\n" if lines else ""), tuple(kept)
+
+
+def _collect_unresolved(tokens: list[Token], defined_labels: set[str]) -> tuple[UnresolvedRef, ...]:
+    """引用式死链：解析器判定未成链的 text token 中 full/collapsed 引用形态。
+
+    shortcut 形态 ``[label]`` 不检（CommonMark 语义为纯文本，检之会对普通方括号
+    文本误报）。行内代码/围栏内的假链接天然不会进入本路径（markdown-it 已将其
+    判定为 code_inline / fence，见检视 §6.4 不误报负例）。
+    """
+    unresolved: list[UnresolvedRef] = []
+    for token in tokens:
+        if token.type != "inline":
+            continue
+        line = _token_line(token)
+        for child in token.children or []:
+            if child.type != "text":
+                continue
+            for match in _REFERENCE_RE.finditer(child.content):
+                text_part, label_part = match.group(1), match.group(2)
+                form = "collapsed" if label_part == "" else "full"
+                label = text_part if form == "collapsed" else label_part
+                if _normalize_label(label) not in defined_labels:
+                    unresolved.append(UnresolvedRef(label=label, text=text_part, line=line, form=form))
+    return tuple(unresolved)
+
+
+def parse_text(text: str) -> DocumentView:
+    """解析 Markdown 文本，形成不可变文档视图（缓存限本次调用）。"""
+    source_lines = tuple(text.splitlines())
+    env: dict = {}
+    tokens = _PARSER.parse(text, env)
+
+    slugger = create_slugger()
+    headings = _collect_headings(tokens, slugger)
+    html_ids, raw_html = _collect_html(tokens)
+    code_blocks = _collect_code_blocks(tokens)
+    code_spans = _collect_code_spans(tokens)
+    defined_labels = {
+        str(label)
+        for label in env.get("references", {})  # 键已为大写折叠形态
+    }
+    unresolved = _collect_unresolved(tokens, defined_labels)
+
+    definitions = tuple(
+        ReferenceDefInfo(
+            label=str(label),
+            href=str(definition.get("href", "")),
+            line=int(definition["map"][0]) + 1,
+        )
+        for label, definition in sorted(env.get("references", {}).items())
+        if definition.get("map")
+    )
+
+    # kind 判定（两轮 parse 对照法，无行级正则启发式）：
+    # 第一轮收集全部已解析链接；第二轮删除引用定义行后重新 parse ——
+    # 依赖定义的引用式链接会退化为 text，而标准式内联链接不变。
+    # 二轮仍出现的链接为 inline，消失者为 reference（按多重出现计数对齐）。
+    round_one = _iter_links(tokens)
+    stripped, kept_lines = _strip_definition_lines(source_lines, env)
+    round_two_env: dict = {}
+    round_two = _PARSER.parse(stripped, round_two_env)
+    round_two_mapped = Counter(
+        (kept_lines[line - 1], link_text, link_href)
+        for line, link_text, link_href in _iter_links(round_two)
+        if 0 < line <= len(kept_lines)
+    )
+    counts = Counter(round_one)
+    links: list[LinkInfo] = []
+    for line, link_text, link_href in round_one:
+        kind = (
+            "inline"
+            if counts[(line, link_text, link_href)] <= round_two_mapped[(line, link_text, link_href)]
+            else "reference"
+        )
+        links.append(LinkInfo(text=link_text, target=link_href, kind=kind, line=line))
+
+    return DocumentView(
+        source=source_lines,
+        headings=headings,
+        links=tuple(links),
+        unresolved_references=unresolved,
+        html_ids=tuple(html_ids),
+        code_blocks=code_blocks,
+        code_spans=code_spans,
+        reference_definitions=definitions,
+        raw_html_tokens=tuple(raw_html),
+    )
+
+
+def load_document_view(path: str | Path) -> DocumentView:
+    """读取文档并解析为不可变视图；文件读取异常按直接传播边界原样上抛。"""
+    content = Path(path).read_text(encoding="utf-8")
+    return parse_text(content)

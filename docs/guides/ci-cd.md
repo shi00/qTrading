@@ -65,7 +65,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - **历史空 Release 不自动补救**：`v0.10.0` / `v0.10.1` 等既有空 Release 保持原样，如需补资产另行人工评估。
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
-- 前端流水线：文档 CI (`docs-ci.yml`，对 PR 与 `merge_group` 事件运行、不设 paths 过滤，其 `Docs Consistency Check` 是 main 的 required check；缺少 `merge_group` 触发时，启用 merge queue 后队列永远拿不到该 check，而未命中 paths 时 PR 上的 check 会停在 Pending)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`，其 `pull_request` 触发已迁移到补偿门禁的 `workflow_call`，仅保留 push / tag / dispatch / schedule 语义)
+- 前端流水线：文档 CI (`docs-ci.yml`，对 PR 与 `merge_group` 事件运行、不设 paths 过滤（检视 §5.4：必要验证 job 每次事件均运行，纯 Markdown PR 天然覆盖），三 job 结构——`docs-static`（Windows runner：原位更新保护依赖 Windows 独占句柄，POSIX 按合同拒绝原位更新，生成/更新类用例须在支持平台真实执行；Python 3.13 只装 `requirements-docs.txt`，跑 `check_docs_consistency.py` 全量静态检查 + `tests/docs` 独立轻量套件）、`docs-application-contracts`（应用环境跑符号导入 / Flet API 字段合同 + 旧入口兼容转发）、聚合 job `Docs Consistency Check`（`if: always()` 显式汇总，失败/取消/skipped 均不通过）是 main 的 required check；缺少 `merge_group` 触发时，启用 merge queue 后队列永远拿不到该 check，而未命中 paths 时 PR 上的 check 会停在 Pending)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`，其 `pull_request` 触发已迁移到补偿门禁的 `workflow_call`，仅保留 push / tag / dispatch / schedule 语义)
 - 补偿检查门禁：`ci-aux-gate.yml` 的聚合 job `CI Aux Gate`，对 PR / `merge_group` 稳定出现（不使用 paths 过滤），按变更路径决定是否调用 `sidecar.yml` / `precommit-config-ci.yml`；`merge_group` 只做测试与审计、不产生发布产物。该 check 需由授权维护者在 ruleset `main-required-checks` 注册为 required，仓库内变更不修改远端 ruleset
 - 配置流水线：pre-commit 配置 PR 冒烟 (`precommit-config-ci.yml`，其 `pull_request` 触发已迁移到补偿门禁的 `workflow_call`，仅保留 `workflow_dispatch`)，由 gate 在 PR 修改 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)（或 `sidecar.yml` / `precommit-config-ci.yml` / `ci-aux-gate.yml` 自身）时执行 `pre-commit validate-config` + `pre-commit run --all-files`，不引入 PG service / 迁移 / 测试
 - 安全流水线：CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)
@@ -84,15 +84,15 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### Pre-commit Hooks
 
-本项目使用 pre-commit hooks，定义在 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)，本地 `repo: local` 提供以下 16 个 hook（提交前必须全部通过）：
+本项目使用 pre-commit hooks，定义在 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)，本地 `repo: local` 提供以下 17 个 hook（提交前必须全部通过）：
 
 - 代码质量：`ruff-check` · `ruff-format` · `type-ignore-reason` · `no-isolated-asyncio-testcase` · `no-temp-files`
 - 增量检查：`pyright-changed` · `weak-assertion-changed` · `e2e-anchor-check` · `theme-contrast-check` · `lint-imports`
-- 依赖与一致性：`pip-compile-core` · `pip-compile-dev` · `pip-compile-optional` · `verify-versions` · `docs-consistency` · `redline-check`
+- 依赖与一致性：`pip-compile-core` · `pip-compile-dev` · `pip-compile-optional` · `pip-compile-docs` · `verify-versions` · `docs-consistency` · `redline-check`
 
 > hook 数量与名称以 `.pre-commit-config.yaml` 为唯一正本，本清单由 `check_precommit_hook_names()` 门禁守护名称级一致（配置新增/删除 hook 时须同步本枚举）。
 
-> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不属于代码类变更（`Changes` job 分类为 `code=false`），仅改该文件的 PR 主 CI 只跑变更分类与快速 lint（均为轻量 job），不会拉起重型流水线，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；该 workflow 不再保留直接 `pull_request` 触发，改由 `ci-aux-gate.yml` 在变更命中时经 `workflow_call` 调用，保证同一 PR 只执行一次；不把该文件计入代码类变更，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 也会运行（`Docs Consistency Check` 为 required check），但只跑文档一致性脚本与契约测试，不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
+> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不属于代码类变更（`Changes` job 分类为 `code=false`），仅改该文件的 PR 主 CI 只跑变更分类与快速 lint（均为轻量 job），不会拉起重型流水线，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；该 workflow 不再保留直接 `pull_request` 触发，改由 `ci-aux-gate.yml` 在变更命中时经 `workflow_call` 调用，保证同一 PR 只执行一次；不把该文件计入代码类变更，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 也会运行（`Docs Consistency Check` 为 required check），其 docs-static job 在纯 docs 依赖环境跑文档静态检查与 `tests/docs` 套件、docs-application-contracts job 在应用环境跑文档契约测试，均不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
 
 ### 工程脚本清单
 
@@ -139,6 +139,9 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/compute_training_fingerprint.py` | FinBERT 训练指纹计算与指纹驱动发布路由（ADR-0015 内容寻址去重；stdlib 运行，F3 复用链当前 stdlib-only）：对语料 sums + 产线脚本白名单（显式枚举，含自举）+ workflow 全文 + 基座 revision + llama.cpp commit 计算 canonical 指纹，与最新 `finbert-gguf-v*` Release 随附 `fingerprint.json` 对比，输入无变化即拒绝重训（省 1~3h）；`route` 于装依赖前 fail-fast，`verify-corpus-anchor` 作 F2 语料锚断言（实际下载的 SHA256SUMS.txt 与指纹锚一致）；退出码 0=放行/1=输入无变化/2=错误（fail-closed） | CI（`finbert-train.yml` 指纹路由 + 语料锚断言）/ 手动 | 阻断 Release（skip 拒绝重复训练 / fail-closed 阻断训练） |
 | `scripts/upgrade_golden_snapshot.py` | 依赖升级金标准快照（D0.2）：用完全离线的合成冻结快照（freeze_date=2025-12-31）重跑 5 个策略场景 + 1 次回测，比对/覆写 `tests/fixtures/upgrade_golden/expected`；`--check` 一致退出 0、差异退出 1、输入异常退出 2；`--update` 重建 expected；`--generate-inputs` 确定性重建 inputs | 手动（依赖全量升级前后各跑一次） | 不阻断 |
 | `scripts/g4_theme_screenshots.py` | G4-202 四主题截图判读采集（Flet 升级验收）：四主题 × Impeller/Skia 双后端；Win32 窗口定位、窄/宽屏缩放、最小化恢复、关闭确认弹窗；截图回退（PrintWindow → 屏幕抓取）、主色核验主题是否真正生效、与 G0 基线像素差分；退出码 0=采集完成/差分成功、1=主题未生效或空白截图、2=环境参数错误 | 手动（Flet 升级验收，候选构建实跑） | 不阻断 |
+| `scripts/docs_markdown.py` | 文档 Markdown 统一解析视图（检视 5.1 工作包 D3）：CommonMark + table/strikethrough 一次解析形成标题/锚点、标准与引用式链接、HTML ID、代码块/行号的不可变视图，供 `docs_generated.py`（D4）与 `check_docs_consistency.py`（D5）复用；测试见 `tests/docs/` 独立环境（docs 组） | 手动 / 被 D5 门禁调用（接线后随 `docs-consistency` 触发） | 不阻断 |
+| `scripts/docs_generated.py` | 受控生成器（检视 5.2/5.2.1 工作包 D4）：读 §4.1 作者源按封闭目标清单渲染派生块（缺块/重复/嵌套/越界/非法源显式拒绝），更新编排覆盖读快照→写入保护→核对→渲染→逐文件提交→更新后 all 检查全窗口；由 `check_docs_consistency.py --check/--update` 调用；测试见 `tests/docs/` 独立环境 | 手动 / 被 `check_docs_consistency.py --scope document` 生成输出检查调用（D6/D9 接线后随 `docs-consistency` 触发） | 不阻断 |
+| [docs/governance/checker-migration-map.md](../governance/checker-migration-map.md) | 42 项文档检查迁移映射表（工作包 D5）：旧函数名 → 处置（保留 / 共享解析替代 / 迁移出口）→ 输入 → 对应测试 → 执行入口的责任映射正本（底稿 JSON 未恢复，人工核对口径）；承接 `check_docs_consistency.py` 的 42 项责任映射维护 | 随 `check_docs_consistency.py` 检查清单调整时同步维护 | 不阻断 |
 
 ### 数据库迁移
 

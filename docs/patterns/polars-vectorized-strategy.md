@@ -25,8 +25,14 @@ class MyPolarsStrategy(PolarsBaseStrategy):
         super().__init__(name_key="strategy_my_polars", desc_key="strategy_my_polars_desc")
 
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
-        return lf.filter(pl.col("pct_chg") > 5.0)
+        return (
+            lf.filter(pl.col("pct_chg") > 5.0)
+            # 末步必须排序：主排序键 + ts_code 稳定并列键，保证同分结果可复现
+            .sort(["pct_chg", "ts_code"], descending=[True, False])
+        )
 ```
+
+> **反例（不合规）**：以 `filter` 收尾、或在排序主键后不补 `ts_code` 并列键，会使同值行顺序不确定、结果不可复现；旧策略中仅单列排序的现状只标为现状，不得作为新模板复制（F05）。
 
 > 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 继承 `BaseStrategy` + `AIStrategyMixin`）可使用 `@require_quality` 装饰器。
 
@@ -80,7 +86,7 @@ Polars 2.x 的流式默认与语义严格化，把一部分问题从**抛异常*
 - `lf.group_by("industry").agg(...).collect()` 直接用于导出，未声明 `maintain_order=True`。
 - 单测用 `assert_frame_equal(result, expected)` 比较未显式 sort 的管线输出（该断言默认比较行序）。
 
-**正例**：`strategies/fundamental.py` / `strategies/market.py` 的 `_filter_logic` 筛选管线以 `.sort("dv_ttm", descending=True)` / `.sort("pct_chg", descending=True)` 收尾，新增策略沿用该形态。
+**正例**：末步排序在业务主键后追加唯一并列键，如 `.sort(["dv_ttm", "ts_code"], descending=[True, False])`、`.sort(["pct_chg", "ts_code"], descending=[True, False])`。`strategies/fundamental.py` / `strategies/market.py` 现存的 `.sort("dv_ttm", descending=True)` / `.sort("pct_chg", descending=True)` 单列收尾仅为**现状示意**（历史代码，未含并列键），**不是合规新模板**；新增策略不得沿用单列收尾形态。
 
 > 背景与升级触发条件见技术债 [P3-Polars-Streaming-Order-Semantics](../debt/known-technical-debt.md)；Polars 大版本升级前须按该条复核流式与行序语义。
 

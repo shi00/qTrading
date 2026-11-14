@@ -430,7 +430,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 | 应用启动即崩 / 打不开 | PG 数据目录损坏或维护锁冲突 | 先跑离线诊断 `sidecars/qtrading-pg-sidecar doctor`（流程见本文档第 9 章），诊断结论看输出 JSON 的 `issues` 字段（doctor 退出码 0 不代表健康）；exit 40（数据目录异常）/ exit 50（维护锁冲突）是 `run`/`stop` 等命令的退出码 |
 | 进程无栈静默退出 | 未捕获异常或原生扩展崩溃 | 查 `logs/error.log` 与 `logs/latest.log`；仍无线索则按 12.1 导出诊断包 |
 | 界面卡死 | 主循环被同步 IO/CPU 阻塞 | 在 `app.log` 搜超 `PerfThreshold` 的告警；核对 UI 事件是否经 `ThreadPoolManager.run_async()` 提交（R16） |
-| 数据库连接断开后操作持续失败 | PG 进程整体不可用，连接池无法自愈 | 显式调用 `CacheManager.init_db()` 重建引擎（不作自动重连）；生命周期契约见 [data-sync.md](../patterns/data-sync.md) |
+| 数据库连接断开后操作持续失败 | PG 进程整体不可用，连接池无法自愈 | PG 恢复后重跑任务即经既有引擎 `pool_pre_ping`（默认开启）恢复连接，无需 `init_db()`；`init_db()` 仅做 schema 初始化且幂等，非空引擎不因 `init_db(force=True)` 重建引擎/连接池；需彻底重建时按顺序 `await CacheManager.close()` → `await CacheManager.init_db()`。不作后台自动重连；生命周期契约见 [data-sync.md](../patterns/data-sync.md) |
 
 ### 13. 获取新闻情绪模型产物（finbert-gguf-v* Release）
 
@@ -451,7 +451,7 @@ curl -L -o tokenizer.json \
   "https://huggingface.co/valuesimplex-ai-lab/FinBERT2-base/resolve/<revision>/tokenizer.json"
 ```
 
-下载完成后到 设置 → AI 大脑 → 新闻情绪卡片，为三个路径选择文件（或手输路径）保存即生效（保存时校验 GGUF 魔数、分类头结构与分词器文件）；模型来源与合规由用户承担。
+下载完成后到 设置 → AI 大脑 → 模型管理，新建/编辑连接并选择 `gguf_sentiment` 适配器（编码模型/分类头/分词器三路径，手输 + 文件选择器）：表单保存仅校验三路径非空，**保存成功不等于模型可用**；首次加载/打分时才校验 GGUF 魔数、分类头结构与分词器文件，校验不过整体返回 `None`（语义正本见 [ai-service.md](../patterns/ai-service.md)）；模型来源与合规由用户承担。
 
 ---
 

@@ -91,6 +91,17 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
 
 ## 3. E2E 测试定位与交互坑点及防护规程
 
+### 点击语义速查（术语统一，先读）
+
+本指南与 E2E 代码涉及四种不同的「点击」，语义不可混用：
+
+| 语义 | 形态 | 本质 | CanvasKit 下的适用性 |
+|------|------|------|---------------------|
+| **DOM dispatch / JS 直调** | `element.dispatchEvent(...)` / `el.click()` | 向 DOM 节点派发合成事件，完全绕过输入管线 | `<flt-semantics>` 节点不响应（坑点 2）；`document.elementFromPoint` 仅作探测，不作交互手段 |
+| **Playwright locator / ElementHandle 点击** | `locator.click()` / `handle.click(...)` | 经 actionability 检查后派发 Playwright 合成事件 | 语义节点上 actionability 常因 CanvasKit 帧重绘失败（坑点 3）；动态生成节点配合 `force=True` 可用，但有残留 rect 风险（坑点 9） |
+| **坐标物理鼠标** | `page.mouse.click(x, y)` | 真实输入管线（move + down/up），无 DOM actionability 检查 | identifier 锚点节点交互的主通道（坑点 2）；对视口外坐标静默丢弃（坑点 8 变体） |
+| **`force=True` 参数** | `click(force=True)` | **仅表示跳过部分 actionability 检查**（不等待 visible/stable、不校验命中目标），点击本身仍是 Playwright 合成事件 | 既**不等于** DOM 直调 `el.click()`，也**不是**物理鼠标点击；`AnchorPage.select_option` 中为 `ElementHandle.click(force=True)`，抛 `Element is not visible` 时回落物理鼠标（坑点 3） |
+
 ### 坑点 1（历史说明）：`textContent` 严格全匹配曾导致 LABEL 定位失败（PR 479 修复）
 > **已随 identifier 路径废弃**，保留作历史记录与迁移参照。
 - **根因（历史）**：早期 legacy 定位路径按 `textContent` 前缀匹配 EID。`LABEL` 锚点包裹
@@ -102,8 +113,8 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
   其匹配入口 `_find_option_element` 自带匹配优先级，不受本坑点影响。
 
 ### 坑点 2：Playwright DOM 合成 click 事件失效
-- **根因**：CanvasKit 的 `<flt-semantics>` 节点不响应 Playwright `locator.click()` 合成事件或 `element.dispatchEvent(...)`。
-- **规程**：一律获取节点 bounding box，使用真实物理鼠标坐标点击：
+- **根因**：CanvasKit 的 `<flt-semantics>` 节点不响应 Playwright `locator.click()` 合成事件或 `element.dispatchEvent(...)`（即「DOM dispatch / JS 直调」与「locator 合成点击」两类语义在语义节点上均失效，见「点击语义速查」）。
+- **规程**：identifier 锚点节点的交互一律获取节点 bounding box，使用真实物理鼠标坐标点击（「坐标物理鼠标」语义；不使用 DOM dispatch 或 locator 合成点击）：
   ```python
   box = await self._identifier_box(eid)  # identifier 节点自身 bbox（INPUT 下潜后代 input）
   await self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
@@ -117,7 +128,7 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
   1. **展开前清场**：若已有 `aria-expanded="true"`，先按 `Escape` 键收合。
   2. **展开校验**：点击 Dropdown 后，显式 poll `aria-expanded="true"`，未展开立即抛错，避免盲目等待 20s。
   3. **选项提取**：在 JavaScript DOM 侧按精确文本 / 别名格式（如 `key (alias)`） / 换行前缀提取 ElementHandle。
-  4. **强力物理点击**：使用 `option_element.click(force=True)` 绕开 actionability 检查。
+  4. **合成点击 + 跳过 actionability**：使用 `option_element.click(force=True)`——`force=True` 仅表示跳过部分 actionability 检查（选项面板动态生成，actionability 因 CanvasKit 帧重绘不稳定），点击本身仍是 Playwright 合成事件（`ElementHandle.click`），**不是 DOM 直调 `el.click()`，也不是坑点 2 的物理鼠标坐标点击**；抛 `Element is not visible` 时回落 `page.mouse.click(bbox 中心)` 物理点击（见 `tests/e2e/helpers/anchor_page.py` 的 C2 回落路径）。
 
 ### 坑点 4：Python 字符串转义在 `page.evaluate` 中破坏 JS 语法
 - **根因**：在 `page.evaluate("""... label + '\\n' ...""")` 中使用普通 Python 三引号字符串时，`\\n` 会被 Python 解释为实际换行符 `\n`。传递给 Chrome V8 后，JS 代码在单引号字符串内出现换行，抛出 `SyntaxError: Invalid or unexpected token`。

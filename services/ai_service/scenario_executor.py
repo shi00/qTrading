@@ -73,6 +73,7 @@ from services.ai_service.connection_pricing import (
     pricing_snapshot_metadata,
 )
 from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS, _estimate_tokens
+from tenacity import AsyncRetrying, RetryCallState, stop_after_attempt
 from utils.loop_local import get_loop_local
 from utils.error_classifier import classify_error
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -496,15 +497,53 @@ class ScenarioExecutor:
         # F27：尝试预算可由路由冻结快照的瞬态重试策略（transient_retries）驱动
         # （execute 计算传入）；None 回退构造默认。
         attempts = total_attempts if total_attempts is not None else self._retry_attempts + 1
-        for retry_index in range(attempts):
-            if request.deadline - clock() <= 0:
-                last_reason = "deadline exhausted"
-                break
 
+        # C12（ADR-0018 承接 / ADR-0014 §1 重试路线）：同候选瞬态重试由 Tenacity
+        # ``AsyncRetrying`` 声明式承接（pyproject 直接依赖 tenacity>=9.2.1,<10），
+        # 替换此前的手写 for 退避循环（自管偏离不追认）。参数契约与原实现逐项等价：
+        # - 次数：stop_after_attempt(attempts)（首次 + retry_attempts，路由取小不变）；
+        # - 退避：wait=_wait_backoff（_backoff_seconds 单一实现，与 Retry-After 取大、
+        #   clamp 剩余 deadline；Retry-After cap 不回归）；
+        # - deadline：_attempt_once 开头逐尝试检查（耗尽 raise 哨兵，不越 deadline 出站）；
+        # - 逐次授权计量：每次真实尝试的 reserve/dispatch/authorize/begin/terminal
+        #   链路与 retry_index 递增语义原样保留（闭包计数器 0 起步）；
+        # - 终止类：内容拒绝等非瞬态失败经 retry 策略判 False → 原样重抛（不重试、
+        #   不换候选绕过）；取消（R2）永不重试、清理后 re-raise。
+        attempt_counter = 0
+
+        def _should_retry_transient(retry_state: RetryCallState) -> bool:
+            raw = retry_state.outcome.exception() if retry_state.outcome is not None else None
+            if not isinstance(raw, Exception) or isinstance(raw, asyncio.CancelledError):
+                # R2：取消永不重试（tenacity 以非重试路径原样重抛，R2 传播保持）；
+                # 非 Exception 的 BaseException（KeyboardInterrupt 等）同样不重试
+                return False
+            return _classify_adapter_failure(raw) == "transient"
+
+        def _wait_backoff(retry_state: RetryCallState) -> float:
+            raw = retry_state.outcome.exception() if retry_state.outcome is not None else None
+            exc = raw if isinstance(raw, Exception) else Exception()
+            return _backoff_seconds(exc, retry_state.attempt_number - 1, now=clock(), deadline=request.deadline)
+
+        retryer = AsyncRetrying(
+            sleep=asyncio.sleep,
+            stop=stop_after_attempt(attempts),
+            wait=_wait_backoff,
+            retry=_should_retry_transient,
+            reraise=True,
+        )
+
+        async def _attempt_once() -> _CandidateOutcome:
+            nonlocal last_reason, attempt_counter
             # F18：每次真实尝试独立身份——独立 attempt / reservation 与递增
             # retry_index（外部重试 = 新的真实调用 = 新账目事实）；同一次写账的
             # 持久化重放沿用该次身份，由 DAO 幂等（ON CONFLICT DO NOTHING /
             # usage_revision 水位）承载，不在本层重试。
+            retry_index = attempt_counter
+            attempt_counter += 1
+            if request.deadline - clock() <= 0:
+                last_reason = "deadline exhausted"
+                raise _DeadlineExhaustedError()
+
             attempt_id = uuid.uuid4().hex
             reservation_token = uuid.uuid4().hex
             # F34：尝试起点计时（预留 / 派发 / 授权 / 执行全程计入尝试耗时），
@@ -642,7 +681,9 @@ class ScenarioExecutor:
                             ledger=ledger,
                             duration_ms=_elapsed_ms(clock, attempt_started_at),
                         )
-                    break
+                    # C12：原自管循环 break 语义等价——结束本候选，返回失败终态
+                    # （不重试；Tenacity 对成功返回值直接透传）
+                    return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
                 effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
 
                 # 真正进入适配器执行前建立实际尝试记录（§6.2 步骤 4）。F18：每次真实
@@ -720,13 +761,11 @@ class ScenarioExecutor:
                         ledger=ledger,
                         duration_ms=_elapsed_ms(clock, attempt_started_at),
                     )
-                    if failure_class == "transient" and retry_index < attempts - 1:
-                        await self._backoff(e, request, clock, retry_index=retry_index)
-                        continue
-                    # 瞬态重试预算耗尽，或不重试可切换类（认证 / 配额 / 未知等
-                    # should_retry=False 判据，F27 保守不重试、不可一律重试）：结束
-                    # 本候选，交外层按结果切换 / 收敛。
-                    break
+                    # C12：瞬态判定（_should_retry_transient）、退避（_wait_backoff）
+                    # 与次数预算（stop_after_attempt）交由 Tenacity 承接——失败事实已
+                    # 即时收敛，异常原样上抛：transient → 退避重试；非瞬态 / 次数耗尽
+                    # → 原样重抛，由外层转失败终态（reason 语义不回归）。
+                    raise
 
                 # D6：适配器返回后立即同步转移用量（幂等按 attempt_id）；
                 # security_revision 取许可线性化点的真实修订（F01：快照携带的
@@ -808,7 +847,19 @@ class ScenarioExecutor:
                 )
                 raise
 
-        return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
+        # C12：Tenacity 承接重试迭代——成功结果（含 halt / rejected 终态 outcome）
+        # 直接透传；非瞬态 / 次数耗尽 / deadline 耗尽原样重抛后在此转失败终态
+        # （reason 语义与原自管 break 逐字一致）；CancelledError 穿透（R2）。
+        try:
+            return await retryer(_attempt_once)
+        except asyncio.CancelledError:
+            # R2：清理已在 _attempt_once 的取消边界完成，此处仅放行传播
+            raise
+        except _DeadlineExhaustedError:
+            return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
+        except Exception as e:
+            last_reason = f"adapter error: {type(e).__name__}"
+            return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
 
     async def _submit_failed_terminal(
         self,
@@ -923,20 +974,10 @@ class ScenarioExecutor:
     async def _backoff(
         self, error: Exception, request: InferenceRequest, clock: Callable[[], float], *, retry_index: int = 0
     ) -> None:
-        """退避契约（F27/方案 D7）：基线 1s/2s 随 retry_index 指数递增（封顶 2s），
-        与服务端 Retry-After 取大——Retry-After 不再截断为退避封顶（修复 429 等待
-        失真），尊重至 ``_RETRY_AFTER_CAP_S`` 上限（防恶意 / 畸形大值），最后仍
-        clamp 至剩余 deadline。
-
-        Retry-After 仅承诺数值（秒）与纯数字字符串形态（经
-        :func:`_parse_retry_after_seconds`）；HTTP-date 等未核验格式不伪装支持（R21）。
-        """
-        base = min(_RETRY_BACKOFF_BASE_S * (2**retry_index), _RETRY_BACKOFF_MAX_S)
-        retry_after = _parse_retry_after_seconds(getattr(error, "retry_after", None))
-        if retry_after is not None:
-            base = max(base, min(retry_after, _RETRY_AFTER_CAP_S))
-        remaining = request.deadline - clock()
-        await asyncio.sleep(max(0.0, min(base, remaining)))
+        """退避睡眠（C12）：时长契约见 :func:`_backoff_seconds`（单一实现，Tenacity
+        wait 策略同源消费）；本方法保留为该契约的直调形态。"""
+        seconds = _backoff_seconds(error, retry_index, now=clock(), deadline=request.deadline)
+        await asyncio.sleep(seconds)
 
     # ------------------------------------------------------------------
     # 组装辅助
@@ -1076,6 +1117,32 @@ def _parse_retry_after_seconds(value: Any) -> float | None:
             return None
         return parsed if parsed > 0 else None
     return None
+
+
+class _DeadlineExhaustedError(Exception):
+    """C12 内部哨兵：逐尝试 deadline 检查耗尽（非瞬态，不重试）。
+
+    仅在 ``_run_candidate`` 的 Tenacity 重试边界内作为控制流信号——由 retry 策略
+    判为不可重试后原样重抛，外层转 failed 终态（reason=「deadline exhausted」，
+    与自管实现 break 语义逐字一致）。
+    """
+
+
+def _backoff_seconds(error: Exception, retry_index: int, *, now: float, deadline: float) -> float:
+    """退避契约（F27/方案 D7，C12 单一实现）：基线 1s/2s 随 retry_index 指数递增
+    （封顶 2s），与服务端 Retry-After 取大——Retry-After 不再截断为退避封顶（修复
+    429 等待失真），尊重至 ``_RETRY_AFTER_CAP_S`` 上限（防恶意 / 畸形大值），最后仍
+    clamp 至剩余 deadline。
+
+    Retry-After 仅承诺数值（秒）与纯数字字符串形态（经
+    :func:`_parse_retry_after_seconds`）；HTTP-date 等未核验格式不伪装支持（R21）。
+    """
+    base = min(_RETRY_BACKOFF_BASE_S * (2**retry_index), _RETRY_BACKOFF_MAX_S)
+    retry_after = _parse_retry_after_seconds(getattr(error, "retry_after", None))
+    if retry_after is not None:
+        base = max(base, min(retry_after, _RETRY_AFTER_CAP_S))
+    remaining = deadline - now
+    return max(0.0, min(base, remaining))
 
 
 def _route_transient_retries(route: Mapping[str, Any] | None) -> int | None:

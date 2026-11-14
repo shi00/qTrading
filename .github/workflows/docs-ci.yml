@@ -3,8 +3,9 @@ name: Docs Consistency CI
 on:
   pull_request:
     branches: [ "main" ]
-    # 不使用 paths 过滤：Docs Consistency Check 是 main 的 required status check，
-    # 若 paths 未命中则本 workflow 不触发，该 check 永久停在 Pending 并阻塞合并。
+    # 不使用 paths 过滤（检视 §5.4：两个必要验证 job 在每次事件均运行，不用路径分类跳过）：
+    # Docs Consistency Check 是 main 的 required status check，若 paths 未命中则本 workflow
+    # 不触发，该 check 永久停在 Pending 并阻塞合并；纯 Markdown PR 也由固定执行天然覆盖。
   # merge queue 启用后，merge_group 事件只运行显式声明该触发的 workflow；
   # 缺少本触发时，队列生成的合并提交永远拿不到 Docs Consistency Check。
   merge_group:
@@ -20,12 +21,18 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  docs-check:
-    name: Docs Consistency Check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      UV_CACHE_DIR: /tmp/uv-cache
+  # 纯文档静态检查（检视 §5.3 分层）：只安装 docs 组编译产物 requirements-docs.txt，
+  # 运行全量静态检查（check_docs_consistency.py）与 tests/docs 独立轻量套件
+  # （禁插件自动加载 + --confcutdir 截断业务 conftest，见 tests/docs/pytest.ini）。
+  # 平台选择：原位更新保护依赖 Windows 独占句柄（docs_generated.WriteGuard），POSIX
+  # 仅有协作锁按合同拒绝原位更新（§5.2.1-3），因此生成/更新类用例只能在 Windows 真实
+  # 执行；Linux 侧的只读检查路径由 ci_cd.yml 的 Code Quality job 覆盖。
+  docs-static:
+    name: Docs Static Checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    # 注意：UV_CACHE_DIR 不能放在 job 级 env——`runner` 上下文在 job 级 env 不可用，
+    # 会导致整个 workflow 校验失败（GitHub 以 startup failure 呈现）。改在 steps 级设置。
 
     steps:
       - name: Checkout Code
@@ -37,9 +44,7 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: |
-            requirements.txt
-            requirements-optional.txt
-            requirements-dev.txt
+            requirements-docs.txt
 
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
@@ -47,8 +52,58 @@ jobs:
           # 禁用 setup-uv 自带缓存：其默认缓存键绑定 uv.lock（本仓库未跟踪该文件），且每个 PR
           # 引用各存一份 ~350 MB，挤占仓库 10 GB 上限。改由下方 actions/cache 显式缓存
           # UV_CACHE_DIR（键不含 ref，main 与 PR 共用同一条目）。
-          # 注：此前注释所称「Linux 侧 uv pip install 仅数秒」与实测不符——run 41037287334 的
-          # Install dependencies 耗时 2m06s（每次重下 pyarrow/polars-runtime 等 ~300 MB wheel）。
+          enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/uv-cache
+          key: uv-windows-py3.13-docs-${{ hashFiles('requirements-docs.txt') }}
+          restore-keys: |
+            uv-windows-py3.13-docs-
+
+      - name: Install docs dependency group
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+        run: uv pip install --system -r requirements-docs.txt
+
+      - name: Run docs consistency script (全量静态检查)
+        run: python scripts/check_docs_consistency.py
+
+      - name: Run pure docs test suite (tests/docs, 禁插件自动加载)
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: python -m pytest -c tests/docs/pytest.ini --confcutdir=tests/docs tests/docs -q
+
+  # 应用文档契约（检视 §5.3 分层）：依赖应用符号导入 / Flet API 字段的合同测试保留在
+  # 应用环境（全量依赖 + 单例隔离）；旧节点名经 tests/unit/test_docs_consistency.py
+  # 兼容转发收集（同一 job 只选择迁移后的纯测试或旧转发之一——本 job 只收集旧入口，
+  # 纯文档实现由 docs-static 的 tests/docs 套件覆盖，双收集守卫见
+  # tests/docs/test_no_double_collection.py）。
+  docs-application-contracts:
+    name: Docs Application Contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
           enable-cache: false
 
       - name: Cache uv build cache
@@ -65,8 +120,56 @@ jobs:
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
 
-      - name: Run docs consistency script (docs-consistency hook 等价检查)
-        run: python scripts/check_docs_consistency.py
+      # 符号导入 / Flet API 字段合同（检视 §5.3 表格固定保留）+ 旧入口
+      # test_docs_consistency.py（留守应用合同 + 兼容转发）。
+      - name: Run docs application contract tests
+        run: python -m pytest tests/unit/test_docs_consistency.py tests/unit/test_docs_template_symbols.py tests/unit/test_docs_accessibility_baseline_api.py -q --tb=short
 
-      - name: Run docs consistency contract tests
-        run: python -m pytest tests/unit/test_docs_consistency.py -v --tb=short
+  # 聚合 job：required check 名称保持稳定（Docs Consistency Check）。
+  # if: always() 显式汇总：失败 / 取消 / skipped 均不通过，避免「上游失败 → 下游跳过 → 门禁绿灯」。
+  docs-check:
+    name: Docs Consistency Check
+    needs: [docs-static, docs-application-contracts]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Evaluate docs checks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          STATIC_RESULT: ${{ needs.docs-static.result }}
+          CONTRACTS_RESULT: ${{ needs.docs-application-contracts.result }}
+        run: |
+          set -euo pipefail
+          fail=0
+          {
+            echo "## Docs Consistency Check"
+            echo ""
+            echo "事件 \`${EVENT_NAME}\`"
+            echo ""
+            echo "| 验证 job | 结果 | 判定 |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for pair in "docs-static:${STATIC_RESULT}" "docs-application-contracts:${CONTRACTS_RESULT}"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            if [ "$result" = "success" ]; then
+              echo "| $name | $result | ok |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| $name | ${result:-missing} | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Docs Consistency Check 不通过**（失败 / 取消 / skipped 均不视为通过）" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Docs Consistency Check 不通过：必要验证 job 存在失败、取消或被跳过（详见 step summary）"
+            exit 1
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Docs Consistency Check 通过**" >> "$GITHUB_STEP_SUMMARY"

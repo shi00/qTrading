@@ -8,6 +8,7 @@
 > 注（2026-09-16 Errata）：红线编号自本 ADR（记录为 R1~R18）后已扩展至 R23（2026-10-25 核对已至 R24，见 Errata 第 6 条）；下方决策正文中的红线编号为当时快照，当前红线范围一律以 docs/governance/redlines.yml 机器可读正本为准。
 > 注（2026-09-24 Errata，已被 2026-10-23 Errata 取代）：检视**结论登记**曾允许每条发现附 ≤20 行关键证据片段（代码位置 + 最小复现），该片段属「结论登记」而非 SHALL NOT 所指的「报告正文」（长证据 / 大段代码）。
 > 注（2026-10-23 Errata）：检视**结论结构化登记机制**（docs/reviews/findings/，GOV-04）整体废弃——检视报告正文与结论均不入库，正文一律落根目录 reviews/（gitignored）；未关闭发现迁入 docs/debt/known-technical-debt.md 跟进，详见职责边界约束。
+> 注（2026-11-13）：文档长期编写、变更与维护流程的唯一正本为 [docs/guides/documentation-maintenance.md](../guides/documentation-maintenance.md)（ADR-0018 承接来源检视第 9 节交付；本 ADR 分层 Decision 保持不变）。
 
 ## Context
 

@@ -236,9 +236,13 @@ def test_market_trend_filter_selects_in_range():
 
 ## 完成判定（canonical 入口）
 
-- 新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法
-- 覆盖率达标（单文件 ≥ 80%、diff coverage ≥80% 与整体 ≥ 85% 均为 CI 强制；分层阈值为 advisory）
-- E2E 用例按要求串行/网络隔离（Windows skipif 等既有约定）依从
+> 完成门按本次变更**实际触域**分条件适用：只要求触及的域过门，不要求无关文件改动过门（R19 仅约束业务逻辑变更；纯测试 / 纯文档 / 纯配置改动不触发覆盖率义务）。
+
+- **新增/修改单测**：新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法；单例隔离、Mock 规范等「测试编写规则」依从
+- **新增/修改业务逻辑**（R19 触发时）：配套测试同步新增/更新，覆盖率达标（单文件 ≥ 80%、diff coverage ≥80% 与整体 ≥ 85% 均为 CI 强制；分层阈值为 advisory）
+- **新增/修改集成测试**：标记 `integration`，连接 `test_astock` 的 DB 隔离约定依从
+- **新增/修改 E2E 用例**：按要求串行/网络隔离（Windows skipif 等既有约定）依从
+- **测试门禁 / 工程脚本变更**：配套测试放入 `tests/unit/` 顶层（见「治理 / 文档门禁测试」）
 
 _最小验证命令：_ `ruff` + `pyright` + 对应 `tests/unit/`/`tests/integration/`；
         E2E → `python -m pytest tests/e2e/`；文档改动 → `python scripts/check_docs_consistency.py`。
