@@ -3923,9 +3923,10 @@ class TestAgentsMinVerifyCommands:
         assert any("无法识别" in e for e in errors), f"应检出受控块未知行, got: {errors}"
 
     def test_prose_outside_block_with_same_text_passes(self, tmp_path, monkeypatch):
-        """通过对照（F20）：同样文本出现在受控块外（普通正文）→ 不报「无法识别」.
+        """通过对照（D32）：同一 bullet 形态文本置于结束标记之后（同节、不新增标题）→ 不报「无法识别」.
 
-        证明反例变因唯一：块外普通正文不误伤，仅块内未知行触发失败.
+        证明反例变因唯一：块外同节普通正文不参与受控块解析，仅块内未知行触发失败；
+        不再靠追加「## 」标题缩短扫描区间来规避误报.
         """
         from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
 
@@ -3935,7 +3936,7 @@ class TestAgentsMinVerifyCommands:
             encoding="utf-8",
         )
         content = self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
-        prose = content + "\n## 使用说明\n\n- **额外行**：`some cmd`\n\n（普通正文，不在受控块内）\n"
+        prose = content + "\n- **额外行**：`some cmd`\n\n（普通正文，不在受控块内）\n"
         contributing = tmp_path / "CONTRIBUTING.md"
         contributing.write_text(prose, encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
@@ -3943,6 +3944,29 @@ class TestAgentsMinVerifyCommands:
 
         errors = check_agents_md_min_verify_commands()
         assert errors == [], f"块外同文本普通正文不得误报, got: {errors}"
+
+    def test_unknown_line_scope_limited_to_block(self, tmp_path, monkeypatch):
+        """负例（D32）：块外普通正文不报，块内额外非法行仍失败且错误信息只含块内行."""
+        from check_docs_consistency import check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(self._agents_with_mirror(["（占位镜像）"]), encoding="utf-8")
+        content = self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
+        tampered = content.replace(
+            "<!-- /generated -->",
+            "- **块内额外行**：`some cmd`\n<!-- /generated -->",
+            1,
+        )
+        contributing_text = tampered + "\n- **块外普通说明**：`prose only`\n"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(contributing_text, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("无法识别" in e for e in errors), f"块内非法行应失败, got: {errors}"
+        assert any("块内额外行" in e for e in errors), f"错误信息应指向块内非法行, got: {errors}"
+        assert all("块外普通说明" not in e for e in errors), f"错误信息不得含块外正文, got: {errors}"
 
     def test_detects_bullet_without_colon_separator(self, tmp_path, monkeypatch):
         """反例（F02）：受控块 bullet 缺「：」分隔 → 解析层 fail-closed 报错."""
