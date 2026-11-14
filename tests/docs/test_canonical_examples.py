@@ -13,14 +13,19 @@ D9（检视 5.3）：原静态 canonical 代码块检查自 tests/unit/test_docs
 man/flet-best-practices.md Phase 2.5 后改为薄 stub 无 python 代码块，本测试自然通过；
 canonical 示例契约迁移到 docs/flet/ 子文档（v1-api-constraints.md / project-differences.md）。
 
-仅检查 ```python 代码块内的内容，不检查表格或行内代码（V0→V1 迁移 API 表中合法引用这些 API）。
-如文档确实需要在代码块中展示禁止 API（如对比示例），可用注释 `# migration reference` 跳过。
+仅检查 `python` 围栏代码块内的内容，不检查表格或行内代码（V0→V1 迁移 API 表中合法引用这些 API）。
+代码块提取、围栏形态（``` / ~~~ / 长围栏）与行号一律经 docs_markdown 共享解析视图判定，
+不保留第二套行级正则。如文档确实需要在代码块中展示禁止 API（如对比示例），
+可用独立的 Python 注释行 `# migration reference` 跳过；普通字符串字面量不构成豁免。
+活文档必须保留至少一个未被豁免的示例；历史 stub（man/flet-best-practices.md）具名豁免。
 """
 
 import re
 from pathlib import Path
 
 import pytest
+
+import docs_markdown as dm
 
 pytestmark = pytest.mark.docs_pure
 
@@ -52,24 +57,44 @@ REAL_SCREENER_VM_API = (
     "state.status_message",
 )
 
-# 提取 ```python ... ``` 代码块（非贪婪匹配）
-PYTHON_BLOCK_RE = re.compile(r"```python\n(.*?)```", re.DOTALL)
-# 跳过含此注释的代码块（用于 V0→V1 迁移对比示例）
-MIGRATION_REFERENCE_MARKER = "migration reference"
+# 迁移反例只认明确的 Python 注释行（不是任意包含该词的字面量/字符串）
+MIGRATION_REFERENCE_COMMENT_RE = re.compile(r"^\s*#\s*migration reference\b")
+# 历史 stub：Phase 2.5 后无 python 示例，按具名路径豁免「活文档要求非空」
+HISTORICAL_STUB_PATHS = frozenset({MAN_FLET_BEST_PRACTICES_PATH})
 
 
 def _extract_python_blocks(text: str) -> list[str]:
-    """从 markdown 文本中提取所有 ```python ... ``` 代码块内容。"""
-    return PYTHON_BLOCK_RE.findall(text)
+    """从 markdown 文本提取全部 python 围栏代码块内容（共享解析视图判定）。
+
+    两类围栏（``` / ~~~）与长围栏统一由 markdown-it 的 fence token 识别；
+    围栏信息串首词为 ``python`` 即视为 python 代码块。
+    """
+    view = dm.parse_text(text)
+    return [view.code_block_text(block) for block in view.code_blocks if block.info.split()[:1] == ["python"]]
+
+
+def _is_migration_annotated(block: str) -> bool:
+    """仅当代码块含显式 Python 注释行 ``# migration reference`` 时豁免。"""
+    return any(MIGRATION_REFERENCE_COMMENT_RE.match(line) for line in block.splitlines())
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _filter_non_migration(blocks: list[str]) -> list[str]:
-    """过滤掉含 '# migration reference' 注释的代码块（迁移对比示例允许展示禁止 API）。"""
-    return [b for b in blocks if MIGRATION_REFERENCE_MARKER not in b]
+def _live_python_blocks(text: str, name: str, *, historical_stub: bool = False) -> list[str]:
+    """提取未被迁移注释豁免的 python 代码块；活文档非空是硬要求。
+
+    历史 stub 以具名路径显式豁免（允许 0 块）；其余文档既要有 python 代码块，
+    也要至少保留一个未被豁免的活示例，防止「移除全部活示例」静默通过。
+    """
+    blocks = _extract_python_blocks(text)
+    live = [block for block in blocks if not _is_migration_annotated(block)]
+    if historical_stub:
+        return live
+    assert blocks, f"{name}: 活文档必须包含 python 代码块（示例不得为空）"
+    assert live, f"{name}: 至少保留一个未被 `# migration reference` 注释豁免的活示例"
+    return live
 
 
 class TestContributingCanonicalExamples:
@@ -82,7 +107,7 @@ class TestContributingCanonicalExamples:
         表格/行内代码中提及 `I18n.subscribe` 仅作迁移参考，不在代码块内即不违反契约。
         """
         content = _read(CONTRIBUTING_PATH)
-        blocks = _filter_non_migration(_extract_python_blocks(content))
+        blocks = _live_python_blocks(content, CONTRIBUTING_PATH.name)
         violations: list[str] = []
         for i, block in enumerate(blocks, 1):
             if re.search(r"I18n\.subscribe\s*\(", block):
@@ -99,7 +124,7 @@ class TestContributingCanonicalExamples:
         仅作为 V0→V1 迁移入口在表格中参考，不应在 canonical 代码块中出现。
         """
         content = _read(CONTRIBUTING_PATH)
-        blocks = _filter_non_migration(_extract_python_blocks(content))
+        blocks = _live_python_blocks(content, CONTRIBUTING_PATH.name)
         violations: list[str] = []
         for i, block in enumerate(blocks, 1):
             for forbidden in (r"page\.show_dialog\s*\(", r"page\.pop_dialog\s*\("):
@@ -126,7 +151,11 @@ class TestManFletBestPracticesCanonicalExamples:
         若代码块含 Dropdown( 构造，则不应同时含 on_change= 关键字参数。
         """
         content = _read(MAN_FLET_BEST_PRACTICES_PATH)
-        blocks = _filter_non_migration(_extract_python_blocks(content))
+        blocks = _live_python_blocks(
+            content,
+            MAN_FLET_BEST_PRACTICES_PATH.name,
+            historical_stub=MAN_FLET_BEST_PRACTICES_PATH in HISTORICAL_STUB_PATHS,
+        )
         violations: list[str] = []
         for i, block in enumerate(blocks, 1):
             if re.search(r"ft\.Dropdown\s*\(", block) and re.search(r"\bon_change\s*=", block):
@@ -144,7 +173,11 @@ class TestManFletBestPracticesCanonicalExamples:
         page.pop_dialog( 由文末 §4.1 契约文字守护，不在代码块中出现。
         """
         content = _read(MAN_FLET_BEST_PRACTICES_PATH)
-        blocks = _filter_non_migration(_extract_python_blocks(content))
+        blocks = _live_python_blocks(
+            content,
+            MAN_FLET_BEST_PRACTICES_PATH.name,
+            historical_stub=MAN_FLET_BEST_PRACTICES_PATH in HISTORICAL_STUB_PATHS,
+        )
         violations: list[str] = []
         for i, block in enumerate(blocks, 1):
             if re.search(r"page\.show_dialog\s*\(", block):
@@ -170,7 +203,7 @@ class TestFletDocsCanonicalExamples:
         （见 docs/flet/project-differences.md §4.2 / v1-api-constraints.md §V0→V1 迁移 API 表第 13 项）。
         """
         content = _read(doc_path)
-        blocks = _filter_non_migration(_extract_python_blocks(content))
+        blocks = _live_python_blocks(content, doc_path.name)
         violations: list[str] = []
         for i, block in enumerate(blocks, 1):
             if re.search(r"ft\.Dropdown\s*\(", block) and re.search(r"\bon_change\s*=", block):
@@ -188,7 +221,7 @@ class TestFletDocsCanonicalExamples:
         （见 docs/flet/project-differences.md §4.1 / v1-api-constraints.md §声明式组件内 API 契约）。
         """
         content = _read(doc_path)
-        blocks = _filter_non_migration(_extract_python_blocks(content))
+        blocks = _live_python_blocks(content, doc_path.name)
         violations: list[str] = []
         for i, block in enumerate(blocks, 1):
             for forbidden in (r"page\.show_dialog\s*\(", r"page\.pop_dialog\s*\("):
@@ -208,7 +241,7 @@ class TestFletDocsCanonicalExamples:
         表格/行内代码中提及 I18n.subscribe 仅作迁移参考，不在代码块内即不违反契约。
         """
         content = _read(doc_path)
-        blocks = _filter_non_migration(_extract_python_blocks(content))
+        blocks = _live_python_blocks(content, doc_path.name)
         violations: list[str] = []
         for i, block in enumerate(blocks, 1):
             if re.search(r"I18n\.subscribe\s*\(", block):

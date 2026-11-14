@@ -144,12 +144,18 @@ def create_slugger() -> Slugger:
 
 @dataclass(frozen=True)
 class HeadingInfo:
-    """标题：可见文本、锚点 slug、级别（1-6）、起始行（1-based）。"""
+    """标题：可见文本、锚点 slug、级别（1-6）、起始行与标题块末行（1-based）。
+
+    ``line`` 为标题可见文本起始行；``end_line`` 为标题块最后一行（ATX 标题与
+    文本同行，Setext 标题含下划线行）。消费者据此切分章节正文，避免行级正则
+    再次解析 Markdown 标题。
+    """
 
     text: str
     slug: str
     level: int
     line: int
+    end_line: int = 0
 
 
 @dataclass(frozen=True)
@@ -242,6 +248,25 @@ class DocumentView:
         """锚点存在性显式判定：不存在返回 False（不伪造、不从全文取样代替）。"""
         return anchor in self.anchor_ids()
 
+    def code_line_numbers(self) -> frozenset[int]:
+        """代码块覆盖的全部行号（1-based，含围栏标记行与内容行，不含行内代码）。
+
+        供行级消费者（日志表/完成判定正文）排除代码示例，避免围栏内伪标题、
+        伪表格冒认正文结构。
+        """
+        lines: set[int] = set()
+        for block in self.code_blocks:
+            lines.update(range(block.start_line, block.end_line + 1))
+        return frozenset(lines)
+
+    def code_block_text(self, block: CodeBlockInfo) -> str:
+        """代码块内容文本（不含围栏标记行；缩进块原样保留内容行）。"""
+        if block.fence:
+            content = self.source[block.start_line : block.end_line - 1]
+        else:
+            content = self.source[block.start_line - 1 : block.end_line]
+        return "\n".join(content)
+
 
 # ---------------------------------------------------------------------------
 # 解析实现
@@ -305,9 +330,11 @@ def _collect_headings(tokens: list[Token], slugger: Slugger) -> tuple[HeadingInf
     """标题：可见文本取 children 中 text/code_inline（跳过 HTML 等内联标记）。"""
     headings: list[HeadingInfo] = []
     pending_level: int | None = None
+    pending_end = 0
     for token in tokens:
         if token.type == "heading_open" and token.tag.startswith("h"):
             pending_level = int(token.tag[1])
+            pending_end = token.map[1] if token.map else 0
         elif token.type == "inline" and pending_level is not None:
             parts = [child.content for child in (token.children or []) if child.type in ("text", "code_inline")]
             text = "".join(parts)
@@ -317,6 +344,7 @@ def _collect_headings(tokens: list[Token], slugger: Slugger) -> tuple[HeadingInf
                     slug=slugger.slug(text),
                     level=pending_level,
                     line=_token_line(token),
+                    end_line=pending_end,
                 )
             )
             pending_level = None
