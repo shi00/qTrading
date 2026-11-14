@@ -18,12 +18,14 @@
     parse_text(text) -> DocumentView
     load_document_view(path) -> DocumentView
     create_slugger() -> Slugger        # GitHub 锚点语义
+    parse_link_target(raw) -> LinkTarget  # 共享 URL 分类与 path/query/fragment 分离
     SLUGGER_BACKEND                    # 当前锚点实现后端声明
 """
 
 from __future__ import annotations
 
 import re
+import urllib.parse
 from collections import Counter
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -42,11 +44,13 @@ __all__ = [
     "HeadingInfo",
     "HtmlIdInfo",
     "LinkInfo",
+    "LinkTarget",
     "ReferenceDefInfo",
     "Slugger",
     "UnresolvedRef",
     "create_slugger",
     "load_document_view",
+    "parse_link_target",
     "parse_text",
 ]
 
@@ -163,13 +167,63 @@ class LinkInfo:
     """已解析链接：可见文本、目标、形态、所在行（1-based）。
 
     kind 为 "inline"（标准式 ``[t](u)``）或 "reference"（引用式 ``[t][label]``），
-    由两轮 parse 对照法精确判定（见 parse_text），无行级正则启发式。
+    由两轮 parse 对照法精确判定（见 parse_text），无行级正则启发式；HTML
+    ``<a href>`` 以 kind="html" 纳入同一链接视图，与 Markdown 链接共用检查。
     """
 
     text: str
     target: str
     kind: str
     line: int
+
+
+@dataclass(frozen=True)
+class LinkTarget:
+    """链接目标的 URL 分类结果：外部 / 本地路径 / query / 锚点（均已解码）。
+
+    - ``external``：带 scheme（http/https/mailto/ftp 等）或协议相对 ``//host``，
+      不参与本地文件/锚点检查。
+    - ``path``：本地相对/绝对路径的 percent-decode 结果；反斜杠统一为正斜杠
+      （Windows 路径分隔符在跨平台检查中同语义）。fragment-only 链接为空串。
+    - ``query``：``?`` 之后的原始 query（未解码，仅作存在性区分），无则 None。
+    - ``fragment``：``#`` 之后的 percent-decode 锚点，无则 None。
+    """
+
+    raw: str
+    external: bool
+    path: str
+    query: str | None
+    fragment: str | None
+
+    @property
+    def is_fragment_only(self) -> bool:
+        """仅同文件锚点（``#anchor``）：无本地路径、非外部。"""
+        return not self.external and not self.path and self.fragment is not None
+
+
+# URL scheme（RFC 3986）：出现在 path/query/fragment 拆分前的路径段中。
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+def parse_link_target(raw: str) -> LinkTarget:
+    """共享 URL 分类：先按原文拆分 fragment/query，再分别 percent-decode。
+
+    拆分顺序保证编码后的 ``%23`` / ``%3F`` 不会被误当成分隔符：先以**字面**
+    ``#`` 切出 fragment，再在 fragment 之前以**字面** ``?`` 切出 query，最后
+    仅对路径与锚点解码。外部 scheme 在解码前判定（``https://`` 等）。
+    """
+    text = raw.strip()
+    before_fragment, has_fragment, fragment_raw = text.partition("#")
+    path_raw, has_query, query_raw = before_fragment.partition("?")
+    external = path_raw.startswith("//") or bool(_SCHEME_RE.match(path_raw))
+    path = "" if external else urllib.parse.unquote(path_raw).replace("\\", "/")
+    return LinkTarget(
+        raw=text,
+        external=external,
+        path=path,
+        query=query_raw if has_query else None,
+        fragment=urllib.parse.unquote(fragment_raw) if has_fragment else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -274,17 +328,21 @@ class DocumentView:
 
 
 class _HtmlIdParser(HTMLParser):
-    """标准库 HTMLParser：收集标签 id 属性（不执行任何内嵌 HTML 语义）。"""
+    """标准库 HTMLParser：收集标签 id 属性与 ``<a href>`` 目标（不执行内嵌 HTML 语义）。"""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.ids: list[tuple[str, str]] = []
+        self.hrefs: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        for key, value in attrs:
-            if key.lower() == "id" and value:
-                self.ids.append((tag, value))
-                break
+        values = {key.lower(): value for key, value in attrs}
+        element_id = values.get("id")
+        if element_id:
+            self.ids.append((tag, element_id))
+        href = values.get("href")
+        if tag.lower() == "a" and href:
+            self.hrefs.append(href)
 
 
 def _normalize_label(label: str) -> str:
@@ -351,33 +409,41 @@ def _collect_headings(tokens: list[Token], slugger: Slugger) -> tuple[HeadingInf
     return tuple(headings)
 
 
-def _parse_html_ids(content: str, source: str, line: int) -> list[HtmlIdInfo]:
+def _parse_html(content: str, source: str, line: int) -> tuple[list[HtmlIdInfo], list[str]]:
     parser = _HtmlIdParser()
     parser.feed(content)
     parser.close()
-    return [HtmlIdInfo(id=value, tag=tag, source=source, line=line) for tag, value in parser.ids]
+    ids = [HtmlIdInfo(id=value, tag=tag, source=source, line=line) for tag, value in parser.ids]
+    return ids, parser.hrefs
 
 
-def _collect_html(tokens: list[Token]) -> tuple[list[HtmlIdInfo], list[tuple[str, int]]]:
-    """从 html_block / html_inline token 原文提取 id，并保留未核 HTML 原样。
+def _collect_html(tokens: list[Token]) -> tuple[list[HtmlIdInfo], list[tuple[str, int]], list[LinkInfo]]:
+    """从 html_block / html_inline token 原文提取 id、保留未核 HTML，并收集 ``<a href>``。
 
     html_inline 位于 inline token 的 children 中，须下钻一层收集；
     html_block 在顶层 token（注意 CommonMark type 6 块仅由空行结束）。
+    ``<a href>`` 以 kind="html" 加入链接视图，与 Markdown 链接走同一死链/锚点检查，
+    不再静默放过 HTML 目标。
     """
     ids: list[HtmlIdInfo] = []
     raw: list[tuple[str, int]] = []
+    links: list[LinkInfo] = []
     for token in tokens:
         if token.type == "html_block":
             line = _token_line(token)
             raw.append((token.content, line))
-            ids.extend(_parse_html_ids(token.content, "block", line))
+            parsed_ids, hrefs = _parse_html(token.content, "block", line)
+            ids.extend(parsed_ids)
+            links.extend(LinkInfo(text="", target=href, kind="html", line=line) for href in hrefs)
         elif token.type == "inline":
             line = _token_line(token)
             for child in token.children or []:
                 if child.type == "html_inline":
                     raw.append((child.content, line))
-                    ids.extend(_parse_html_ids(child.content, "inline", line))
-    return ids, raw
+                    parsed_ids, hrefs = _parse_html(child.content, "inline", line)
+                    ids.extend(parsed_ids)
+                    links.extend(LinkInfo(text="", target=href, kind="html", line=line) for href in hrefs)
+    return ids, raw, links
 
 
 def _collect_code_spans(tokens: list[Token]) -> tuple[CodeSpanInfo, ...]:
@@ -542,7 +608,7 @@ def parse_text(text: str) -> DocumentView:
 
     slugger = create_slugger()
     headings = _collect_headings(tokens, slugger)
-    html_ids, raw_html = _collect_html(tokens)
+    html_ids, raw_html, html_links = _collect_html(tokens)
     code_blocks = _collect_code_blocks(tokens)
     code_spans = _collect_code_spans(tokens)
     defined_labels = {
@@ -583,6 +649,7 @@ def parse_text(text: str) -> DocumentView:
             else "reference"
         )
         links.append(LinkInfo(text=link_text, target=link_href, kind=kind, line=line))
+    links.extend(html_links)
 
     return DocumentView(
         source=source_lines,
