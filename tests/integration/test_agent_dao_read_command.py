@@ -36,7 +36,7 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentSession
+from data.persistence.models import AgentCommand, AgentSession
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -105,13 +105,19 @@ def _request(
     )
 
 
-def _ref(user_scope: str = "u1", client_command_id: str = "client-1") -> CommandRef:
+def _ref(
+    user_scope: str = "u1",
+    client_command_id: str = "client-1",
+    source_module: str = "ui",
+    business_request_id: str = "req-1",
+    expected_revision: int = 0,
+) -> CommandRef:
     return CommandRef(
         user_scope=user_scope,
-        source_module="ui",
-        business_request_id="req-1",
+        source_module=source_module,
+        business_request_id=business_request_id,
         command_id=client_command_id,
-        expected_revision=0,
+        expected_revision=expected_revision,
     )
 
 
@@ -168,6 +174,86 @@ class TestReadCommandFacts:
             await dao.read_command(_ref(client_command_id="missing"), user_scope="u1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "not found in user scope" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_source_module_mismatch_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """回执必须与传入引用同源：同 command_id 但 source_module 不符 → 拒绝回显。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await dao.accept_request(_request())
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_command(_ref(source_module="other"), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "does not match stored command" in excinfo.value.sanitized_message
+        assert "source_module" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_business_request_id_mismatch_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await dao.accept_request(_request())
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_command(_ref(business_request_id="req-9"), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "does not match stored command" in excinfo.value.sanitized_message
+        assert "business_request_id" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_expected_revision_mismatch_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """预期版不符同样拒绝：不以「命令存在」掩盖调用方引用与存行不一致。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await dao.accept_request(_request())
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_command(_ref(expected_revision=5), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "does not match stored command" in excinfo.value.sanitized_message
+        assert "expected_revision" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_command_without_intent_key_verifies_only_expected_revision(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """无根意图键的存行（如链到叶执行）不比对来源/业务请求：无权威事实不猜拒。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                sa.insert(AgentCommand).values(
+                    user_scope="u1",
+                    command_record_id="cmd-leaf",
+                    client_command_id="client-leaf",
+                    target_id="s1",
+                    command_kind="answer",
+                    expected_revision=2,
+                    input_digest="0" * 64,
+                    commit_state=CommitState.COMMITTED.value,
+                    delivery_state=DeliveryState.NOT_DELIVERED.value,
+                    consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                )
+            )
+        ref = CommandRef(
+            user_scope="u1",
+            source_module="api",
+            business_request_id="other-request",
+            command_id="client-leaf",
+            expected_revision=2,
+        )
+
+        receipt = await dao.read_command(ref, user_scope="u1")
+
+        assert receipt.command == ref
+        assert receipt.current_revision == 1
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")

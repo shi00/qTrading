@@ -685,7 +685,10 @@ class AgentDao(BaseDao):
           放行其他用户域（§4.1「由注入的可信调用上下文提供，不能相信 payload」）；
         - 用户域内按调用方命令键查：0 行 → ``INPUT_INVALID``（不区分「不存在」与
           「属于他人」）；同一键跨 target 复用产生多行 → ``INPUT_INVALID``（引用有
-          歧义，不静默择一）；
+          歧义，不静默择一）；命中的存行须与引用同源：``expected_revision`` 比对
+          命令行列，``source_module`` / ``business_request_id`` 在存行链到根/比较路
+          execution（意图键非空）时比对 execution 意图键——叶 execution 不存意图键，
+          不做无依据比对。不符 → ``INPUT_INVALID``，回执不得回显与存行矛盾的引用；
         - 存储状态/错误码不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
           R21：坏事实不得被读成确定的保存/投递/消费）；
         - ``next_action`` 为 None：本方法只回报已存事实，下一步由调用方按命令类型
@@ -710,13 +713,27 @@ class AgentDao(BaseDao):
                 await conn.execute(
                     sa.select(
                         AgentCommand.target_id,
+                        AgentCommand.expected_revision,
                         AgentCommand.revision,
                         AgentCommand.commit_state,
                         AgentCommand.delivery_state,
                         AgentCommand.consumption_state,
                         AgentCommand.updated_at,
                         AgentCommand.error_code,
-                    ).where(
+                        # 根意图键（source_module/business_request_id）只存于 execution：
+                        # 根/比较路非空，叶为 NULL（§9.4）。
+                        AgentExecution.source_module.label("intent_source_module"),
+                        AgentExecution.business_request_id.label("intent_business_request_id"),
+                    )
+                    .select_from(AgentCommand)
+                    .outerjoin(
+                        AgentExecution,
+                        sa.and_(
+                            AgentExecution.user_scope == AgentCommand.user_scope,
+                            AgentExecution.execution_id == AgentCommand.execution_id,
+                        ),
+                    )
+                    .where(
                         AgentCommand.user_scope == user_scope,
                         AgentCommand.client_command_id == ref.command_id,
                     )
@@ -727,6 +744,23 @@ class AgentDao(BaseDao):
         if len(rows) > 1:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref is ambiguous across targets", identity)
         row = rows[0]
+        mismatches: list[str] = []
+        if ref.expected_revision != row.expected_revision:
+            mismatches.append("expected_revision")
+        if row.intent_source_module is not None:
+            # 存行链到根/比较路 execution 时，意图键是权威事实，必须与引用同源；
+            # 叶 execution 不存意图键，不做无依据的比对。
+            if ref.source_module != row.intent_source_module:
+                mismatches.append("source_module")
+            if ref.business_request_id != row.intent_business_request_id:
+                mismatches.append("business_request_id")
+        if mismatches:
+            # 回执必须与传入引用同源：只按 command_id 命中会造成「原命令/准确目标/预期版」自相矛盾。
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"command ref does not match stored command: {','.join(mismatches)}",
+                identity,
+            )
         try:
             commit_state = CommitState(row.commit_state)
             delivery_state = DeliveryState(row.delivery_state)
