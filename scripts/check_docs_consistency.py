@@ -336,15 +336,16 @@ _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "fl
 
 
 def github_anchor(heading_text: str) -> str:
-    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown slugger 实现）。
+    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown 唯一工厂）。
 
-    检视 §5.1 解析边界迁移（D5）：锚点语义唯一来源为 docs_markdown.create_slugger()
-    （github-slugger 语义：小写化 → 剔除非字母数字/``-``/``_`` → 空白逐个转连字符 →
-    重复标题追加序号）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
+    检视 §5.1 解析边界迁移（D5）+ Q10：锚点语义唯一来源为 ``create_slugger()``，
+    与共享解析视图同源；本函数不再自行固定 Compat 实现，避免消费者后端与解析视图分叉。
+    实际生效后端由 ``docs_markdown.SLUGGER_BACKEND`` 声明（github-slugger 可用则用包，
+    否则回退等价实现）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
 
     例如 "3.1 ❌ 绝对禁止" → 移除 "." 和 "❌" 后得 "31  绝对禁止" → "31--绝对禁止"。
     """
-    return docs_markdown.CompatGithubSlugger().slug(heading_text)
+    return docs_markdown.create_slugger().slug(heading_text)
 
 
 def parse_doc_view(content: str) -> docs_markdown.DocumentView:
