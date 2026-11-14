@@ -54,3 +54,74 @@ def test_warning_layering_declared_in_docstring():
     doc = cdc._glossary_check_with_warnings.__doc__ or ""
     assert "warning" in doc.lower(), "warning 包装缺少分级说明"
     assert "不阻断" in doc or "非零" in doc, "warning 包装须声明退出码分层口径"
+
+
+# ---------------------------------------------------------------------------
+# D33：治理 ID 对义检查的 error/warning 通道分离（真实入口四例）
+# ---------------------------------------------------------------------------
+
+SYNONYM_GLOSSARY = "| P2-07 | Metadata 统一格式 |\n| P2-07 | ｍｅｔａｄａｔａ　统一格式。 |\n"
+UNDISCLOSED_GLOSSARY = "| P2-07 | 元数据统一格式 |\n| P2-07 | 例外注册格式 |\n"
+DISCLOSED_GLOSSARY = "| P1-04 | 含义 A（另义（同名异义双义登记）） |\n| P1-04 | 含义 B |\n"
+
+
+def _stub_other_scope_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离无关检查，仅保留真实对义检查：走生产 _SCOPE_CHECK_NAMES / build_scope_plan / main。"""
+    for name in dir(cdc):
+        if not name.startswith("check_") or name == "check_governance_id_dual_meaning":
+            continue
+        if not callable(getattr(cdc, name)):
+            continue
+        if name == "check_governance_id_glossary":
+            monkeypatch.setattr(cdc, name, lambda: ([], []))
+        else:
+            monkeypatch.setattr(cdc, name, lambda: [])
+    monkeypatch.setattr(cdc, "_glossary_check_with_warnings", lambda: [])
+
+
+def _run_real_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, glossary_text: str) -> int:
+    """以真实治理源 + 生产 scope 计划（build_scope_plan）运行 main()，返回退出码。"""
+    glossary = tmp_path / "governance-ids.md"
+    glossary.write_text(glossary_text, encoding="utf-8")
+    monkeypatch.setattr(cdc, "GOVERNANCE_IDS_PATH", glossary)
+    _stub_other_scope_checks(monkeypatch)
+    return cdc.main(argv=["--check"], plan=cdc.build_scope_plan())
+
+
+def test_dual_meaning_synonym_duplicate_cli_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """同义重复：归一化语义相同 → CLI 退出 0，且不得出现对义诊断（D33 核心反例）。"""
+    code = _run_real_plan(monkeypatch, tmp_path, SYNONYM_GLOSSARY)
+    captured = capsys.readouterr()
+    assert code == 0, f"同义重复不得让 CLI 失败，got exit={code}, err={captured.err!r}"
+    assert "对义(" not in captured.out + captured.err, f"同义重复不应报对义, got: {captured.out!r}"
+    assert "::warning::" not in captured.out, f"同义重复不应产生 warning, got: {captured.out!r}"
+
+
+def test_dual_meaning_undisclosed_cli_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """未披露双义：ERROR 通道 → CLI 退出 1（不降级为 warning）。"""
+    code = _run_real_plan(monkeypatch, tmp_path, UNDISCLOSED_GLOSSARY)
+    captured = capsys.readouterr()
+    assert code == 1, "未披露双义必须非零退出"
+    assert "未声明双义登记" in captured.err, f"未披露双义应走错误通道, got: {captured.err!r}"
+
+
+def test_dual_meaning_disclosed_warning_only_cli_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """已披露双义（仅 warning）：``::warning::`` 输出且 CLI 退出 0（warning 不置退出码）。"""
+    code = _run_real_plan(monkeypatch, tmp_path, DISCLOSED_GLOSSARY)
+    captured = capsys.readouterr()
+    assert code == 0, f"仅 warning 不得导致 CLI 失败，got exit={code}, err={captured.err!r}"
+    assert "::warning::" in captured.out, f"已披露双义须以 ::warning:: 分级输出, got: {captured.out!r}"
+    assert "[FAIL]" not in captured.err, f"仅 warning 不应走失败路径, got: {captured.err!r}"
+
+
+def test_repo_glossary_baseline_has_no_dual_meaning_warning():
+    """仓库零-warning 基线：真实 governance-ids.md 的对义检查无 error 亦无 warning。"""
+    errors, warnings = cdc.check_governance_id_dual_meaning()
+    assert errors == [], f"仓库基线不应有对义 ERROR, got: {errors}"
+    assert warnings == [], f"仓库基线不应有对义 WARNING, got: {warnings}"

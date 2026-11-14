@@ -102,7 +102,9 @@ def _build_negatives(tmp_path: Path) -> dict[str, Callable[[pytest.MonkeyPatch],
         "check_decision_tree_mapping": patch("CLAUDE_PATH", _missing(tmp_path, "CLAUDE.md")),
         "check_governance_id_references": patch("EXCEPTIONS_YAML_PATH", _missing(tmp_path, "exceptions.yml")),
         "_glossary_check_with_warnings": patch("GOVERNANCE_IDS_PATH", _missing(tmp_path, "governance-ids.md")),
-        "check_governance_id_dual_meaning": patch("GOVERNANCE_IDS_PATH", _missing(tmp_path, "governance-ids.md")),
+        "_governance_id_dual_meaning_with_warnings": patch(
+            "GOVERNANCE_IDS_PATH", _missing(tmp_path, "governance-ids.md")
+        ),
         "check_flet_badge_version": patch("README_PATH", _missing(tmp_path, "README.md")),
         "check_exception_count_prose": patch("EXCEPTIONS_YAML_PATH", _missing(tmp_path, "exceptions.yml")),
         # —— source：NOTE / 模块 / 单例 / 动态文案源码契约 ——

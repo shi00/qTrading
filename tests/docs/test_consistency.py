@@ -313,7 +313,7 @@ def _stub_doc_checks_except(monkeypatch: pytest.MonkeyPatch, *real_checks: str) 
             continue
         if not callable(getattr(docs_check, name)):
             continue
-        if name == "check_governance_id_glossary":
+        if name in ("check_governance_id_glossary", "check_governance_id_dual_meaning"):
             monkeypatch.setattr(docs_check, name, lambda: ([], []))
         else:
             monkeypatch.setattr(docs_check, name, lambda: [])
@@ -6647,7 +6647,8 @@ class TestProseMetaGuards:
 
     - H1 `check_flet_badge_version`：README UI 徽章 Flet 版本与 pyproject 锁定主版本对齐。
     - L1 `check_exception_count_prose`：「现存 N 条 R1 例外」散文数量与 exceptions.yml 实计一致。
-    - H3 `check_governance_id_dual_meaning`：治理 ID 同名异义，未披露双义时报 WARNING。
+    - H3 `check_governance_id_dual_meaning`：治理 ID 同名异义——同义重复不报，未披露双义报
+      ERROR，已披露双义报 WARNING（D33/F19 error/warning 通道分离）。
     """
 
     # --- H1 Flet 徽章版本守卫 ---
@@ -6731,11 +6732,26 @@ class TestProseMetaGuards:
         glossary = tmp_path / "governance-ids.md"
         glossary.write_text("| GDR-06 | 治理文档不得硬编码 Flet 补丁版本号 |\n", encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
-        warnings = check_governance_id_dual_meaning()
-        assert warnings == [], f"单行语义不应报警, got: {warnings}"
+        errors, warnings = check_governance_id_dual_meaning()
+        assert errors == [] and warnings == [], f"单行语义不应报警, got: {errors}, {warnings}"
 
-    def test_governance_id_dual_meaning_disclosed_exempt(self, tmp_path, monkeypatch):
-        """同 ID 多行但已标注「另义（同名异义双义登记）」→ 已披露豁免。"""
+    def test_governance_id_dual_meaning_synonym_duplicate_pass(self, tmp_path, monkeypatch):
+        """同 ID 多行语义归一化后相同（仅空白/标点/全半角差异）→ 同义重复，不报对义（D33）。"""
+        from check_docs_consistency import check_governance_id_dual_meaning
+
+        glossary = tmp_path / "governance-ids.md"
+        glossary.write_text(
+            "| P2-07 | Metadata 统一格式 |\n"
+            "| P2-07 | metadata 统一格式。 |\n"
+            "| P2-07 | Ｍｅｔａｄａｔａ　统一格式｜ |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
+        errors, warnings = check_governance_id_dual_meaning()
+        assert errors == [] and warnings == [], f"同义重复不应报对义, got: {errors}, {warnings}"
+
+    def test_governance_id_dual_meaning_disclosed_is_warning(self, tmp_path, monkeypatch):
+        """同 ID 多行不同语义但已标注「另义（同名异义双义登记）」→ WARNING，不进 errors。"""
         from check_docs_consistency import check_governance_id_dual_meaning
 
         glossary = tmp_path / "governance-ids.md"
@@ -6744,26 +6760,29 @@ class TestProseMetaGuards:
             encoding="utf-8",
         )
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
-        warnings = check_governance_id_dual_meaning()
-        assert warnings == [], f"已披露双义应豁免, got: {warnings}"
+        errors, warnings = check_governance_id_dual_meaning()
+        assert errors == [], f"已披露双义不得进错误通道, got: {errors}"
+        assert any("P1-04" in w and "双义" in w for w in warnings), f"已披露双义应报 WARNING, got: {warnings}"
 
     def test_governance_id_dual_meaning_detects_concealed(self, tmp_path, monkeypatch):
-        """同 ID 多行不同语义且未声明双义 → WARNING 报警（渐进部署不阻断）。"""
+        """同 ID 多行不同语义且未声明双义 → ERROR（未披露双义不得降级为 warning）。"""
         from check_docs_consistency import check_governance_id_dual_meaning
 
         glossary = tmp_path / "governance-ids.md"
         glossary.write_text("| P1-04 | 含义 A |\n| P1-04 | 含义 B |\n", encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", glossary)
-        warnings = check_governance_id_dual_meaning()
-        assert any("P1-04" in w and "双义" in w for w in warnings), f"未披露对义应报警, got: {warnings}"
+        errors, warnings = check_governance_id_dual_meaning()
+        assert any("P1-04" in e and "双义" in e for e in errors), f"未披露对义应报 ERROR, got: {errors}"
+        assert warnings == [], f"未披露对义不得同时降为 warning, got: {warnings}"
 
-    def test_governance_id_missing_glossary_silent(self, tmp_path, monkeypatch):
-        """对照表缺失 → 本守卫显式失败（D5/F17：必需源缺失不再静默空转）。"""
+    def test_governance_id_missing_glossary_is_error(self, tmp_path, monkeypatch):
+        """对照表缺失 → ERROR（D5/F17：必需源缺失不得静默空转，也不得降为 warning）。"""
         from check_docs_consistency import check_governance_id_dual_meaning
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", tmp_path / "missing.md")
-        warnings = check_governance_id_dual_meaning()
-        assert any("缺失或无法解析" in w for w in warnings), f"缺失对照表应显式失败, got: {warnings}"
+        errors, warnings = check_governance_id_dual_meaning()
+        assert any("缺失或无法解析" in e for e in errors), f"缺失对照表应显式失败, got: {errors}"
+        assert warnings == [], f"缺失对照表不得降为 warning, got: {warnings}"
 
 
 class TestContractCountProse:
