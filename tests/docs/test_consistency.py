@@ -6529,6 +6529,60 @@ class TestGuillemetReferences:
         assert len(errors) == 1
         assert "不存在" in errors[0]
 
+    def test_skips_inline_code_example(self, tmp_path, monkeypatch):
+        """D39：行内代码中的书名号是同形示例，不是规范引用 → 通过。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "合法示例：`CONTRIBUTING.md「__missing__」`\n",
+            "## 错误处理标准模式\n",
+        )
+        assert check() == []
+
+    def test_skips_multiple_inline_code_spans_on_same_line(self, tmp_path, monkeypatch):
+        """D39：同一行多个 code span 各自屏蔽，行内代码引用不误报、正文残留仍可检出。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "示例 `a.md「x」` 与 `CONTRIBUTING.md「__missing__」` 均为例\n",
+            "## 错误处理标准模式\n",
+        )
+        assert check() == []
+
+    def test_skips_fenced_code_example(self, tmp_path, monkeypatch):
+        """D39：围栏代码块中的书名号仍按代码示例排除（与行内代码同一判定）。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "```text\nCONTRIBUTING.md「__missing__」\n```\n",
+            "## 错误处理标准模式\n",
+        )
+        assert check() == []
+
+    def test_detects_real_prose_dead_reference_next_to_inline_code(self, tmp_path, monkeypatch):
+        """D39：行内代码放行不得吞掉真实正文缺节，且错误定位到正文所在行。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "示例 `CONTRIBUTING.md「__missing__」`\n\n正文 CONTRIBUTING.md「另一个缺失」\n",
+            "## 错误处理标准模式\n",
+        )
+        errors = check()
+        assert len(errors) == 1, errors
+        assert "CLAUDE.md:3" in errors[0]
+        assert "另一个缺失" in errors[0]
+        assert "__missing__" not in errors[0]
+
+    def test_accepts_prose_reference_still_checked(self, tmp_path, monkeypatch):
+        """D39：正文合法书名号引用仍按目标标题校验并通过。"""
+        check = self._setup(
+            tmp_path,
+            monkeypatch,
+            "正文示例后见 CONTRIBUTING.md「错误处理标准模式」\n",
+            "## 错误处理标准模式\n",
+        )
+        assert check() == []
+
 
 class TestCheckedDocsExclusions:
     """H1: 本地会话计划文件与 gitignored 产物目录不进入受检集（CHECKED_DOCS）。"""
