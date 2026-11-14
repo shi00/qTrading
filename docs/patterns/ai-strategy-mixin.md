@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.1（strategies 分层）、§3.1 R9/R10（敏感信息与硬编码密钥红线）；实现模板见本节。
+> 宪法依据：CLAUDE.md §3.1 R9/R10（敏感信息与硬编码密钥红线）、[架构正文 §4.1](../architecture/overview.md#41-分层架构)（strategies 分层）；实现模板见本节。
 
 `strategies/ai_mixin.py` 的 `AIStrategyMixin` 类提供 AI 增强能力，混入到策略类中实现 LLM 驱动的智能选股：
 

@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.1（strategies 分层）、§3.1（R14 红线）、§3.2（强制要求）；实现模板见本节。
+> 宪法依据：CLAUDE.md §3.1（R14 红线）、§3.2（强制要求）、[架构正文 §4.1](../architecture/overview.md#41-分层架构)（strategies 分层）；实现模板见本节。
 
 ```python
 import pandas as pd
@@ -44,7 +44,7 @@ class MyStrategy(BaseStrategy):
 
 新增或修改策略任务，至少阅读：
 
-1. [CLAUDE.md](../../CLAUDE.md) §3.1 R14（未注册策略红线）与 §4.1（strategies 分层边界）
+1. [CLAUDE.md](../../CLAUDE.md) §3.1 R14（未注册策略红线）与[架构正文 §4.1](../architecture/overview.md#41-分层架构)（strategies 分层边界）
 2. [docs/guides/how-to.md](../guides/how-to.md)「3. 新增一个策略」（流程正本）
 3. 本文件上方的代码模板与 `strategies/base_strategy.py` 的 API 声明
 

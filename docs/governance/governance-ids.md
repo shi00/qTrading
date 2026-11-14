@@ -13,7 +13,7 @@
 | ID | 一句话含义 | 来源轮次 | 落地位置 | 状态 |
 |----|-----------|---------|---------|------|
 | P1-01 | 宪法绝对规则与已批准例外必须集中登记，例外唯一注册入口 | 文档体系检视 P1 系列 | [exceptions.yml](./exceptions.yml) | 使用中 |
-| P2-03 | 架构守护范围：import-linter 契约（layers + 补充 forbidden） + AST 静态测试互补 | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
+| P2-03 | 架构守护范围：import-linter 契约（layers + 补充 forbidden） + AST 静态测试互补 | 文档体系检视 P2 系列 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | P2-06 | 受检 markdown 递归发现 + 显式排除清单（_build_doc_excludes） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | P2-07 | 治理文档元数据统一格式（owner/ruleset_version/review_triggers/canonical_for） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) 元数据块 | 使用中 |
 | P2-11 | 红线规则类型划分（INVARIANT/DEFAULT/NEW_CODE/MIGRATION_TARGET/WORKFLOW/EXCEPTIONABLE） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
@@ -38,9 +38,9 @@
 | UX-07 | 全系统 UI/UX 专项审视轮次（报告为本地 gitignored 产物，不入库，仅保留 ID 供溯源） | UX 专项检视 | [docs/reviews/README.md](../reviews/README.md) 方法论索引 | 历史 |
 | GDR-06 | 治理文档不得硬编码 Flet 补丁版本号（SHALL NOT `x.y.z` 形式） | 文档体系检视（GDR 系列，2026-09-08） | [CLAUDE.md](../../CLAUDE.md) §3.2 | 使用中 |
 | GDR-09 | 治理 ID 对新会话不可解析 → 建立对照表 + 体系入口声明 | 文档体系检视（GDR 系列，2026-09-08） | [governance-ids.md](./governance-ids.md) / [CLAUDE.md](../../CLAUDE.md) 头部 | 使用中 |
-| review01-A2 | 夜间预测编排下沉到 services/scheduled_jobs（消除 utils→strategies→services 循环） | review01 架构分层与依赖治理 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
-| review01-A6 | 两条 MAJOR 结构性循环通过依赖注入消除，不再靠延迟 import 压制 | review01 架构分层与依赖治理 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
-| review03-C11 | CacheManager↔BaseDao 循环由中立模块 engine_provider.py 切断 | review03 数据层与持久化 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
+| review01-A2 | 夜间预测编排下沉到 services/scheduled_jobs（消除 utils→strategies→services 循环） | review01 架构分层与依赖治理 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
+| review01-A6 | 两条 MAJOR 结构性循环通过依赖注入消除，不再靠延迟 import 压制 | review01 架构分层与依赖治理 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
+| review03-C11 | CacheManager↔BaseDao 循环由中立模块 engine_provider.py 切断 | review03 数据层与持久化 | [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | review08-D1 | 新闻抓取两公开方法去重：抽取 _fetch_stock_news_core 共享内核，publish_time 统一为 UTC tz-naive（消除 8h 口径偏差） | review08 数据层与外部依赖 | [news_fetcher.py](../../data/external/news_fetcher.py) | 使用中 |
 | review08-M08 | 宏观 DAO PIT 查询（get_shibor_latest / get_macro_economy_latest）as_of_date 经 _to_db_date 归一化，修复 asyncpg date 编码失败与 AI 宏观上下文静默降级 | review08 数据层与外部依赖（M08 宏观类） | [macro_dao.py](../../data/persistence/daos/macro_dao.py) | 使用中 |
 | D6-1 | utils/scheduler_service → data.domain_services.offline_calendar 日历降级例外（EX-0016） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
@@ -125,7 +125,7 @@
 | BT-03 | R21 变体：可信度元数据在持久化边界丢失（`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃，UI 渲染为「无问题」） | review03 业务语义与可信度 | [CLAUDE.md](../../CLAUDE.md) R21 / [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | AI-01 | 缺失/失败被伪装成合法具体值：AI 调用失败/无结论不得伪装成「AI 否决」（`score=0`），不可计价调用不得伪装为「零成本」——催生 R21 | business-review-2026-09-11（业务检视） | [CLAUDE.md](../../CLAUDE.md) R21 / [strategies/ai_mixin.py](../../strategies/ai_mixin.py) | 使用中 |
 | AI-02 | 业务语义字段（`score` / `ai_score` / `confidence` 等）的缺失表示：必须用 `None`/哨兵，禁止填充业务上合法的具体值（检视报告 04 AI-02，缺陷根因见 R21） | 本地检视报告（gitignored） | [CONTRIBUTING.md](../../CONTRIBUTING.md)「业务语义字段的缺失表示」 | 使用中 |
-| E4 | OSS 检视：import-linter 6 条手工 forbidden 契约重构为 1 条 layers + 2 条 forbidden（AST 静态测试随之退役，例外注册表路径校验保留） | OSS 检视（E 系列） | [pyproject.toml](../../pyproject.toml) / [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
+| E4 | OSS 检视：import-linter 6 条手工 forbidden 契约重构为 1 条 layers + 2 条 forbidden（AST 静态测试随之退役，例外注册表路径校验保留） | OSS 检视（E 系列） | [pyproject.toml](../../pyproject.toml) / [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | DAT-07 | 回测不可复现（残余）：DATA-05 已保留财报多版本 + PIT，迁移前存量行仅单版本，早期重述覆盖使该段历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | DAT-08 | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（含存量污染 `industry_tushare`） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | BT-05 | 回测路径 `_BacktestQualityProxy` 硬编码 GOLD 绕过数据质量门控（第一步显式化，第二步待设计） | review03 业务语义与可信度 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |

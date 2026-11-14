@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.1（data 分层）、§3.1 R2（取消传播红线）；实现架构见本节。
+> 宪法依据：CLAUDE.md §3.1 R2（取消传播红线）、[架构正文 §4.1](../architecture/overview.md#41-分层架构)（data 分层）；实现架构见本节。
 
 `data/sync/` 下按数据类别组织同步策略：
 

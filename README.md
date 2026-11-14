@@ -70,7 +70,7 @@ Polars 引擎毫秒级全市场回测；内置夏普/回撤/Alpha-Beta/胜率等
 ```
 qTrading/
 ├── main.py         # 应用入口，服务编排与生命周期管理
-├── harness.toml    # Harness 工具协作配置（CLAUDE.md 为唯一权威，本文件不优先于红线/架构边界）
+├── harness.toml    # Harness 工具协作配置（规则权威按主题正本见 CLAUDE.md §1，本文件不优先于红线/架构边界）
 ├── package.json    # CI 类型检查工具 pyright 的 npm 声明（配合 package-lock.json 锁定版本）
 ├── core/           # 核心层：国际化、Prompt 基础模板
 ├── app/            # 引导层：启动初始化、服务编排
