@@ -96,7 +96,7 @@ import sys
 import tomllib
 import typing
 import urllib.parse
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
@@ -391,6 +391,43 @@ def _load_doc_view(path: Path) -> docs_markdown.DocumentView:
     return _load_doc_view_cached(str(path), stat.st_mtime_ns, stat.st_size)
 
 
+def _is_external_url(url: str) -> bool:
+    """外部/非本地 URL 判定：任意 scheme、协议相对 ``//host`` 均不按仓库路径解析。
+
+    Markdown 链接与 HTML href 共用：``http(s)`` / ``mailto`` / ``tel`` /
+    ``javascript`` / ``data`` 等一律跳过，避免把非本地目标当相对路径误报死链。
+    """
+    if url.startswith("//"):
+        return True
+    parts = urllib.parse.urlsplit(url)
+    return bool(parts.scheme or parts.netloc)
+
+
+def _iter_local_urls(view: docs_markdown.DocumentView) -> Iterator[tuple[int, str]]:
+    """统一本地 URL 来源：Markdown 链接 ∪ HTML href，按 (行号, URL) 去重。
+
+    HTML href 经 ``docs_markdown`` 静态解析（不执行 HTML），与同一行指向同一目标的
+    Markdown 链接不重复计入，避免同一死链重复报错。去重键对 URL 做 percent-decode：
+    Markdown 链接目标会被 markdown-it 编码（中文 → %XX），HTML href 保留原文，
+    不归一化会把同一目标误判为两条。
+    """
+    seen: set[tuple[int, str]] = set()
+    for link in view.links:
+        url = link.target.strip()
+        key = (link.line, urllib.parse.unquote(url))
+        if not url or key in seen:
+            continue
+        seen.add(key)
+        yield key
+    for href in view.html_hrefs:
+        url = href.href.strip()
+        key = (href.line, urllib.parse.unquote(url))
+        if not url or key in seen:
+            continue
+        seen.add(key)
+        yield key
+
+
 def extract_headings(content: str) -> set[str]:
     """提取 markdown 文件所有标题对应的锚点集合（兼容层，委托统一解析视图）。
 
@@ -413,7 +450,8 @@ def check_anchor_dead_links() -> list[str]:
 
     链接提取与代码块排除（两类围栏 + 缩进块 + 行内代码）由 docs_markdown 视图
     token 判定（检视 §5.1 解析边界迁移，替代旧手写 ``` 状态机 + 行级链接正则）；
-    引用式链接（`[t][label]`，已解析成链者）同样纳入锚点校验。
+    引用式链接（`[t][label]`，已解析成链者）同样纳入锚点校验。Q12：HTML ``href``
+    经 ``html_hrefs`` 一并纳入（只静态解析，不执行 HTML），与 Markdown 链接去重。
     """
     errors: list[str] = []
     # 预加载所有受检文件的锚点集合（标题 slug ∪ HTML id）
@@ -423,10 +461,9 @@ def check_anchor_dead_links() -> list[str]:
 
     for doc in CHECKED_DOCS:
         view = _load_doc_view(doc)
-        for link in view.links:
-            url = link.target.strip()
+        for line, url in _iter_local_urls(view):
             # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
+            if _is_external_url(url):
                 continue
             # 只检查带锚点的链接
             if "#" not in url:
@@ -444,13 +481,13 @@ def check_anchor_dead_links() -> list[str]:
             # 同文件锚点：直接校验锚点存在性
             if not target_path_part:
                 if anchor not in doc_anchors.get(doc, frozenset()):
-                    errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
+                    errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
                 continue
 
             # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
             target_path = (doc.parent / target_path_part).resolve()
             if not target_path.exists():
-                errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
+                errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
                 continue
 
             # 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）
@@ -459,9 +496,7 @@ def check_anchor_dead_links() -> list[str]:
 
             # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
             if anchor not in doc_anchors.get(target_path, frozenset()):
-                errors.append(
-                    f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)"
-                )
+                errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)")
     return errors
 
 
@@ -473,15 +508,15 @@ def check_relative_dead_links() -> list[str]:
 
     另检引用式死链（`[text][label]` label 未定义）：解析视图 unresolved_references
     显式失败（F17：真死链不得漏检、不从全文取样例代替）；围栏/行内代码内的假链接
-    由 token 判定天然排除（检视 §6.4 不误报负例）。
+    由 token 判定天然排除（检视 §6.4 不误报负例）。Q12：HTML ``href`` 经
+    ``html_hrefs`` 一并纳入（只静态解析，不执行 HTML），与 Markdown 链接去重。
     """
     errors: list[str] = []
     for doc in CHECKED_DOCS:
         view = _load_doc_view(doc)
-        for link in view.links:
-            url = link.target.strip()
+        for line, url in _iter_local_urls(view):
             # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
+            if _is_external_url(url):
                 continue
             # 只检查不含锚点的相对路径链接（带锚点的由 check_anchor_dead_links 处理）
             if "#" in url:
@@ -489,7 +524,7 @@ def check_relative_dead_links() -> list[str]:
             # 从 source_doc 所在目录解析相对路径
             target = (doc.parent / url).resolve()
             if not target.exists():
-                errors.append(f"{doc.name}:{link.line}: 相对链接死链 '{url}' (目标 '{target}' 不存在)")
+                errors.append(f"{doc.name}:{line}: 相对链接死链 '{url}' (目标 '{target}' 不存在)")
         for ref in view.unresolved_references:
             errors.append(
                 f"{doc.name}:{ref.line}: 引用式死链 '[{ref.text}][{ref.label}]' "
