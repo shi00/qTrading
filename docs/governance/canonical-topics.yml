@@ -13,7 +13,7 @@
 #   note: 可选, 补充说明 (如高风险任务、不可逆决策等)
 #
 # 修改规则:
-#   - 任务路由只改本文件；改后运行 `python scripts/check_docs_consistency.py --scope document --update`
+#   - 任务路由只改本文件；改后运行 `python scripts/check_docs_consistency.py --update`（更新隐含更新后 all 检查）
 #     重新生成 CLAUDE.md §1.8 与 AGENTS.md 任务路由表，禁止再手改生成视图
 #   - canonical 必须是真实存在的文档路径
 #   - 每个主题只保留一个 canonical 入口, 不复制二级必读清单
