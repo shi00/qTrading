@@ -255,25 +255,18 @@ def _is_excluded(path: Path, scope: str, excludes: tuple[_DocExclusion, ...]) ->
 
 
 def _git_tracked_md_files() -> list[Path] | None:
-    """经 git 索引列出受跟踪的 markdown（受检集单一来源，H1）。
+    """经 git 交付候选列出 markdown（受检集单一来源，H1 + Q15）。
 
-    未跟踪 / gitignored 文件不在索引中，自动被排除。非 git 环境（归档解压、IDE 映射目录、
+    交付候选 = git 索引内文件（已 staged 新增亦在索引内）∪ 调用方经
+    ``DOCS_DELIVERY_CANDIDATES`` 显式申报的暂存前正式页（见
+    ``docs_generated.git_delivery_files``）；未申报的 untracked / gitignored 文件
+    自动排除，不把全部 untracked 升为现行。非 git 环境（归档解压、IDE 映射目录、
     git 不可用）返回 None，由调用方降级为文件系统发现。
-    `-z` 关闭路径转义（quotepath），避免非 ASCII 文件名被转义为八进制序列。
     """
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", "*.md"],
-            cwd=ROOT,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        # git 可执行文件缺失或无法启动
+    files = docs_generated.git_delivery_files(ROOT, "*.md")
+    if files is None:
         return None
-    if result.returncode != 0:
-        return None
-    return [ROOT / rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
+    return [ROOT / rel for rel in files]
 
 
 def _git_tracked_files_under(directory: Path) -> list[str]:
@@ -3392,17 +3385,25 @@ def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
 
 
 def _docs_index_candidates(docs_root: Path) -> list[Path]:
-    """文档索引全覆盖候选集：仅 git 跟踪文件（检视开放问题 4，与 _collect_checked_docs 同源）。
+    """文档索引全覆盖候选集：git 交付候选（检视开放问题 4 + Q15，与 _collect_checked_docs 同源）。
 
     Path.rglob 不识别 .gitignore——未跟踪/被忽略的本地产物目录（如 docs/plans/ 会话计划、
     docs/audit 归档）会被误报「未被索引引用」，造成真实仓库门禁假失败。候选集单一来源
-    改为 git ls-files（H1 同源修法）；git 不可用时降级文件系统发现 + 静态排除清单
+    改为 git 交付候选（``docs_generated.git_delivery_files``：索引内文件含已 staged 新增，
+    加显式申报的暂存前正式页，ignored/未申报 untracked 排除），使尚未 ``git add`` 的新增
+    正式页在暂存前即可被发现；git 不可用时降级文件系统发现 + 静态排除清单
     （_GITIGNORED_ARTIFACT_DIRS，与历史行为兼容）。
     """
     covered_suffixes = (".md", ".yml", ".yaml", ".json")
-    tracked = _git_tracked_files_under(docs_root)
+    try:
+        rel_dir = docs_root.relative_to(ROOT).as_posix()
+    except ValueError:
+        # 目录不在 ROOT 内（测试注入临时仓库）→ 降级
+        tracked: list[str] | None = None
+    else:
+        tracked = docs_generated.git_delivery_files(ROOT, rel_dir)
     if tracked:
-        # git 跟踪集非空：以 git 索引为唯一候选来源（gitignored/未跟踪产物天然排除）
+        # git 交付候选非空：以 git 索引 + 显式交付候选为唯一候选来源（ignored/未申报产物天然排除）
         return sorted(
             ROOT / rel for rel in tracked if (ROOT / rel).suffix in covered_suffixes and (ROOT / rel).is_file()
         )
