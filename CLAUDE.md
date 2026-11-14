@@ -56,8 +56,9 @@
 
 ### 1.8 任务类型 → 必读文件 (决策树)
 
-完整路由表见 [docs/governance/canonical-topics.yml](./docs/governance/canonical-topics.yml)（P2-12 机器可读镜像）；此处只列最小入口，条件路由由各入口文档负责。
+任务路由判据正本为 [docs/governance/canonical-topics.yml](./docs/governance/canonical-topics.yml)（本节表格由该文件生成，勿手改）；此处只列最小入口，条件路由由各入口文档负责。
 
+<!-- generated:claude-decision-tree -->
 | 任务类型 | 必读入口 |
 |---------|---------|
 | 新增业务功能 / 需求澄清 | [requirements/USER_REQUIREMENTS.md](./requirements/USER_REQUIREMENTS.md) <!-- route: requirement --> |
@@ -68,27 +69,29 @@
 | 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md) <!-- route: data-sync --> |
 | 新增/修改应用服务 | [docs/patterns/application-service.md](./docs/patterns/application-service.md) <!-- route: application-service --> |
 | 修改任务生命周期 / TaskManager | [docs/patterns/task-manager.md](./docs/patterns/task-manager.md) <!-- route: task-manager --> |
-| 新增/修改 UI 视图 / 布局 / 组件 / i18n | [docs/flet/README.md](./docs/flet/README.md) <!-- route: ui-view,ui-layout,ui-component,i18n --> |
+| 新增/修改 UI 视图 / 修改 UI 布局/响应式 / 新增/修改 UI 组件 / 修改 i18n 文案 | [docs/flet/README.md](./docs/flet/README.md) <!-- route: ui-view,ui-layout,ui-component,i18n --> |
 | 新增/修改 ViewModel | [docs/patterns/mvvm.md](./docs/patterns/mvvm.md) <!-- route: viewmodel --> |
-| 新增/修改 AI 服务 / LLM 集成 | [docs/patterns/ai-service.md](./docs/patterns/ai-service.md) <!-- route: ai-service --> |
-| 修改异常处理 | [CONTRIBUTING.md「错误处理标准模式」](./CONTRIBUTING.md#错误处理标准模式) <!-- route: exception-handling --> |
+| 修改异常处理 | [CONTRIBUTING.md「错误处理标准模式」](./CONTRIBUTING.md) <!-- route: exception-handling --> |
 | 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) <!-- route: bug-fix --> |
 | AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) <!-- route: code-review --> |
+| 新增/修改 AI 服务 / LLM 集成 | [docs/patterns/ai-service.md](./docs/patterns/ai-service.md) <!-- route: ai-service --> |
 | 修改单例 / 资源生命周期 | [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) <!-- route: singleton --> |
-| 性能优化 / 阈值调整 / 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) <!-- route: performance,config --> |
-| 调整 CI / 依赖 / 版本发布 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) <!-- route: ci-deps,release --> |
-| 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md](./docs/guides/dependency-management.md) <!-- route: packaging --> |
-| 新增/修改回测 | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)（回测正确性正本；含回测配置流程与结论可信度边界路由） <!-- route: backtest --> |
-| 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) <!-- route: testing,e2e-testing --> |
-| Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) <!-- route: git --> |
-| 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md#9-内置-postgresql-离线维护) <!-- route: embedded-pg --> |
-| 运行期排障 / 维护类问题 | [docs/guides/how-to.md「12. 运行期排障」](./docs/guides/how-to.md#12-运行期排障) <!-- route: maintenance --> |
+| 性能优化 / 性能阈值调整 / 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) <!-- route: performance,config --> |
+| 调整 CI / 依赖升级 / 版本发布 / Release 管理 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) <!-- route: ci-deps,release --> |
+| 新增/修改回测 | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md) <!-- route: backtest --> |
+| 新增测试 / 新增/修改 E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) <!-- route: testing,e2e-testing --> |
+| Git 操作 / 分支 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) <!-- route: git --> |
+| 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md) <!-- route: embedded-pg --> |
+| 运行期排障 / 维护类问题 | [docs/guides/how-to.md「12. 运行期排障」](./docs/guides/how-to.md) <!-- route: maintenance --> |
 | 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md) <!-- route: architecture-design --> |
-| 修改治理文档 / 规则（CLAUDE / AGENTS / CONTRIBUTING / docs/**） | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md) <!-- route: governance-docs --> |
-| 未列出的任务类型（纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等） | 先读 §3 红线 + §4 架构边界；再按改动**实际触及的层**选最接近的 canonical 入口，并在回复中说明所选入口与理由 <!-- route: fallback --> |
+| 修改治理文档 / 规则 | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md) <!-- route: governance-docs --> |
+| 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md「PyInstaller 打包」](./docs/guides/dependency-management.md) <!-- route: packaging --> |
+| 未列出的任务类型 | 纯重构 / 日志可观测性 / 功能下线 / 模块删除等未列类型：先读 §3 红线 + §4 架构边界；再按改动实际触及的层选最接近的 canonical 入口，并在回复中说明所选入口与理由。DOC-04 方向 2 对该元条目豁免（见 check_docs_consistency.py）。 <!-- route: fallback --> |
+<!-- /generated -->
 
-> 行尾 `<!-- route: ... -->` 锚为本行承载的 canonical-topics.yml 稳定 topic id 列表（合并行逗号分隔），
-> 由 check_docs_consistency.py 逐行绑定校验（DOC-04）；新增/调整行须同步锚点与 yml，渲染不可见。
+> 行尾 `<!-- route: ... -->` 锚为本行承载的 canonical-topics.yml 稳定 topic id 列表，
+> 由 check_docs_consistency.py 逐行绑定校验（DOC-04）。修改任务路由只改 canonical-topics.yml，
+> 再运行生成；本节表格为生成视图，不得手改。
 
 > 红线（§3）与架构边界（§4）为通用约束，任何任务均须遵守；高风险任务经确认后再编码。另记两条硬规则：创建 PR/Issue 必须使用仓库模板（禁止手写简化 body）；内置 PostgreSQL 离线维护/数据恢复前须确认应用已完全退出。
 
@@ -126,32 +129,34 @@
 
 ### 3.1 ❌ 绝对禁止
 
+<!-- generated:claude-redlines-table -->
 | # | 红线 | 说明 | 强制状态 |
 |---|------|------|---------|
-| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/strategies/ui/`；`services/` 导入 `strategies/ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 3 条契约） |
-| R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) | CI-test（部分覆盖） |
-| R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[error-code]`（人类理由写在方括号外，格式 `# type: ignore[错误码]`  `# 原因`；pre-commit 强制拦截） | pre-commit |
-| R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符（必须用 `$1, $2, ...`）；亦禁止 SQL 字面量赋值、f-string 拼接 SQL、`text(f...)` f-string 形态及测试文件内同类写法（SQL 必须参数化，或经 `text()` 常量承载） | pre-commit（check_redlines.py） |
-| R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作（DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`；应用服务层轮询循环的优雅停止不在其内，此类既有偏离经 exceptions.yml 登记） | 仅人工评审 |
-| R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) | ruff |
-| R7 | **测试状态污染** | 单例未隔离 (单元测试由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 `tests/conftest.py` 的 `singleton_state` 上下文管理器) | CI-test（全量） |
-| R8 | **废弃 API** | 批量写入必须使用 `_save_upsert`；`_write_db` 不提供批量参数 | CI-test |
-| R9 | **敏感信息泄露** | 日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 `DataSanitizer` 脱敏) | 安全扫描 + pre-commit（check_redlines.py，静态脱敏检查） + 仅人工评审 |
-| R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | CI-test（gitleaks-action）+ 仅人工评审 |
-| R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | CI-test（全量） + 仅人工评审 |
-| R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | pre-commit（check_redlines.py） |
-| R13 | **未注册 DAO** | 新增 DAO 需在 `CacheManager.__init__` 中显式实例化（`self.<name>_dao = <ClassName>(self.engine)`，engine 同步由 `sync_engines()` 按类型发现驱动循环同步；已实例化的 DAO 其 engine 同步不可漏改，实例化本身仍需人工确保） | pre-commit（check_redlines.py）+ CI-test |
-| R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | pre-commit（check_redlines.py） |
-| R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | pre-commit（check_redlines.py） |
-| R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交)；`@ft.component` 渲染函数顶层不得执行 `logger/print` 副作用（UIX-10，须迁入 `use_effect` 或事件回调） | pre-commit（check_redlines.py） + 仅人工评审 |
-| R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
-| R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
-| R19 | **未配套测试的业务逻辑变更** | 新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 强制） | CI-test（check_diff_coverage + check_per_file_coverage） |
-| R20 | **单位未核对的量纲比较** | 策略/回测中对已知金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的裸数值比较，调用链上无显式单位换算即违规（必须经 `threshold_in_data_unit()` 统一入口换算后再比较） | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R20 报告模式升级期限」（2026-12-31） |
-| R21 | **缺失值伪装** | 业务语义字段（`score` / `ai_score` / `confidence` 等）缺失必须用 `None`/哨兵表示，禁止填充业务上合法的具体值（`0` 分、`50%` 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R21 报告模式升级期限」（2026-12-31） |
-| R22 | **水位线单调性** | checkpoint / 高水位语义的持久化状态（如 `set_app_state` 写入的断点续传水位），写入必须单调（优先 `*_max` 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值 | pre-commit（check_redlines.py）+ 仅人工评审 |
-| R23 | **裸 UI token** | UI 层裸 `ft.Colors` 色值引用与裸字号数值（如 `ft.Text(size=13)`）必须改用 ui/theme.py 定义的 token：颜色用 `AppColors`（如 `AppColors.UP_RED`），字号等用 `AppStyles`（`FONT_SIZE_*` 等） | pre-commit（check_redlines.py） |
+| R1 | **架构越界** | core/ 导入任何其他层模块；data/ 导入 services/strategies/ui/；services/ 导入 strategies/ui/；strategies/ 导入 ui/ | pre-commit（import-linter 3 条契约） |
+| R2 | **异常吞没** | 吞没 asyncio.CancelledError (必须 raise 以配合优雅停机) | CI-test（部分覆盖） |
+| R3 | **模糊压制** | 使用 # type: ignore 时不带 [error-code]（人类理由写在方括号外，格式 # type: ignore[错误码]  # 原因；pre-commit 强制拦截） | pre-commit |
+| R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 %s 占位符（必须用 $1, $2, ...）；亦禁止 SQL 字面量赋值、f-string 拼接 SQL、text(f...) f-string 形态及测试文件内同类写法（SQL 必须参数化，或经 text() 常量承载） | pre-commit（check_redlines.py） |
+| R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作（DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError；应用服务层轮询循环的优雅停止不在其内，此类既有偏离经 exceptions.yml 登记） | 仅人工评审 |
+| R6 | **过时类型注解** | 使用 Union[X, Y] / Optional[X] (必须使用 X \| Y / X \| None) | ruff |
+| R7 | **测试状态污染** | 单例未隔离 (单元测试由 tests/unit/conftest.py 的 _reset_all_singletons autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 tests/conftest.py 的 singleton_state 上下文管理器) | CI-test（全量） |
+| R8 | **废弃 API** | 批量写入必须使用 _save_upsert；_write_db 不提供批量参数 | CI-test |
+| R9 | **敏感信息泄露** | 日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 DataSanitizer 脱敏) | 安全扫描 + pre-commit（check_redlines.py，静态脱敏检查） + 仅人工评审 |
+| R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 keyring 或环境变量读取) | CI-test（gitleaks-action）+ 仅人工评审 |
+| R11 | **跨循环复用同步原语** | 直接将 asyncio.Event/Lock 作为类属性 (必须通过 get_loop_local() 获取以绑定当前循环) | CI-test（全量） + 仅人工评审 |
+| R12 | **未注册数据表** | 新增表只改 models.py 而不更新 data/data_dictionary.py 的 TABLE_DEFINITIONS | pre-commit（check_redlines.py） |
+| R13 | **未注册 DAO** | 新增 DAO 需在 CacheManager.__init__ 中显式实例化（self.<name>_dao = <ClassName>(self.engine)，engine 同步由 sync_engines() 按类型发现驱动循环同步；已实例化的 DAO 其 engine 同步不可漏改，实例化本身仍需人工确保） | pre-commit（check_redlines.py）+ CI-test |
+| R14 | **未注册策略** | 新增策略不使用 @register_strategy("key") 装饰器 | pre-commit（check_redlines.py） |
+| R15 | **未注册单例** | 新增单例不使用 @register_singleton 装饰器、不实现 _reset_singleton | pre-commit（check_redlines.py） |
+| R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 await ThreadPoolManager.run_async() 提交)；@ft.component 渲染函数顶层不得执行 logger/print 副作用（UIX-10，须迁入 use_effect 或事件回调） | pre-commit（check_redlines.py） + 仅人工评审 |
+| R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM name= 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
+| R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、.worktrees/ 内已有隔离） | 仅人工评审 |
+| R19 | **未配套测试的业务逻辑变更** | 新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 scripts/check_diff_coverage.py / scripts/check_per_file_coverage.py 强制） | CI-test（check_diff_coverage + check_per_file_coverage） |
+| R20 | **单位未核对的量纲比较** | 策略/回测中对已知金额、数量列（north_money / net_amount / amount / total_mv / circ_mv / vol）的裸数值比较，调用链上无显式单位换算即违规（必须经 threshold_in_data_unit() 统一入口换算后再比较） | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R20 报告模式升级期限」（2026-12-31） |
+| R21 | **缺失值伪装** | 业务语义字段（score / ai_score / confidence 等）缺失必须用 None/哨兵表示，禁止填充业务上合法的具体值（0 分、50% 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——data_warnings / failed_signal_dates / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R21 报告模式升级期限」（2026-12-31） |
+| R22 | **水位线单调性** | checkpoint / 高水位语义的持久化状态（如 set_app_state 写入的断点续传水位），写入必须单调（优先 *_max 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值 | pre-commit（check_redlines.py）+ 仅人工评审 |
+| R23 | **裸 UI token** | UI 层裸 ft.Colors 色值引用与裸字号数值（如 ft.Text(size=13)）必须改用 ui/theme.py 定义的 token：颜色用 AppColors（如 AppColors.UP_RED），字号等用 AppStyles（FONT_SIZE_* 等） | pre-commit（check_redlines.py） |
 | R24 | **时点正确性** | 任何进入策略或回测的数据，其取数时点不得晚于被决策的交易日；使用「当前快照」类维度（行业分类、指数成分、股票池、财报最新值）参与历史区间计算即违规，必须改用带生效日期的维度表，或显式声明为「当期近似」并在结果中标注 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R24 报告模式升级期限」（2026-12-31） |
+<!-- /generated -->
 
 > **红线自动化现状**：各红线的守护函数与覆盖维度见 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 的 `enforcement` / `checks` / `automation_coverage` 字段；无自动化的红线（标注 `仅人工评审`）**须逐条回答下方自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段，把「自查」从态度变为可勾选清单），**且无自动拦截（`automation_coverage: none` 或仅报告模式）且影响产品结论的红线（R20、R21、R24）须经独立会话复核**（见 [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) 的 ROUND3-05）；R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
 

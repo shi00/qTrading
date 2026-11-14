@@ -17,13 +17,13 @@
 | P2-06 | 受检 markdown 递归发现 + 显式排除清单（_build_doc_excludes） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | P2-07 | 治理文档元数据统一格式（owner/ruleset_version/review_triggers/canonical_for） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) 元数据块 | 使用中 |
 | P2-11 | 红线规则类型划分（INVARIANT/DEFAULT/NEW_CODE/MIGRATION_TARGET/WORKFLOW/EXCEPTIONABLE） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
-| P2-12 | 主题 → canonical 正本映射（任务决策树机器可读镜像） | 文档体系检视 P2 系列 | [canonical-topics.yml](./canonical-topics.yml) / [CLAUDE.md](../../CLAUDE.md) §1.8 | 使用中 |
+| P2-12 | 主题 → canonical 路由判据正本（CLAUDE.md §1.8 为生成视图） | 文档体系检视 P2 系列 | [canonical-topics.yml](./canonical-topics.yml) / [CLAUDE.md](../../CLAUDE.md) §1.8 | 使用中 |
 | P2-13 | R18 执行决策树（先识别对象再判定隔离） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
 | P2-16 | 跨平台命令策略（文档只描述命令目的，不绑定 shell） | 文档体系检视 P2 系列 | [CONTRIBUTING.md](../../CONTRIBUTING.md)「常用开发与测试命令」 | 使用中 |
 | P2-17 | 架构设计/公共契约任务路由（满足 ADR-0001 触发条件时新增 ADR） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §1.8 / [canonical-topics.yml](./canonical-topics.yml) | 使用中 |
 | P3-03 | AGENTS.md 定位为跨工具自动加载的规则入口 | 文档体系检视 P3 系列 | [AGENTS.md](../../AGENTS.md) | 使用中 |
 | DOC-01 | 规则集元数据一致性（ruleset_version / last_reviewed 三文档同步） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
-| DOC-04 | 决策树与其机器可读镜像双向一致（CLAUDE.md §1.8 ↔ canonical-topics.yml） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| DOC-04 | 决策树生成视图与判据正本一致（CLAUDE.md §1.8 ↔ canonical-topics.yml） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | DOC-05 | canonical 入口承担条件路由责任（声明 workflow 的入口必须含指向该 workflow 的链接） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | DOC-07 | 文档索引全覆盖 + 检视方法论文档登记 | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | DOC-08 | AGENTS.md 生成区块与 redlines.yml 渲染一致 | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) / [ADR-0006](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
@@ -188,6 +188,6 @@
 | RM-02 | 指数窗口端点有效性单一判据：窗口两端任一 close 缺失/NaN/±Inf/0/负/不可转换均视为窗口无意义返回 None，两端点均合法但比值溢出 ±Inf 亦兜底 None——NaN/Inf 会在比值中产生 NaN 或荒谬超额收益，负端点产出有限但无意义的超额，不得把「拒绝的基准」伪装成合法收益（R21）（缺陷清单原始编号 DLP-RM-02，登记/引用两侧提取形态为 RM-02；内部缺陷编号，无对应 GitHub Issue） | 内部缺陷清单（DLP 系列） | [review_manager.py](../../data/persistence/review_manager.py) `_finite_positive_price` / `_index_window_return_pct` / [test_review_manager.py](../../tests/unit/test_review_manager.py) `TestIndexWindowFinitePositiveGuard` | 使用中 |
 | RM-04 | 本地指数点位「该日有行但端点 NULL/非有限/非正」与「整帧无行」同属无可用点位，须继续尝试同日 API 兜底，不得把脏本地行当作有效基准静默产出错误 alpha（缺陷清单原始编号 DLP-RM-04，登记/引用两侧提取形态为 RM-04；内部缺陷编号，无对应 GitHub Issue） | 内部缺陷清单（DLP 系列） | [review_manager.py](../../data/persistence/review_manager.py) `_resolve_index_quote` / [test_review_manager.py](../../tests/unit/test_review_manager.py) `TestResolveIndexQuoteDirtyLocalFallback` | 使用中 |
 | DEV-01 | ADR-0018 实现偏离：更新后 all 检查在写入保护释放后执行（Windows 独占保护期间新句柄读取被拒）；写入窗口仍由独占保护覆盖，释放后并发编辑由检查内容比对 fail-closed | ADR-0018（本地检视报告 gitignored） | [0018-documentation-single-source.md](../adr/0018-documentation-single-source.md) | 使用中 |
-| DEV-02 | ADR-0018 实现偏离：受保护目标写入用 ftruncate + write 原位写，非「临时文件 + os.replace」原子替换（原子替换会更换文件身份使独占句柄脱钩）；不承诺崩溃原子性 | ADR-0018（本地检视报告 gitignored） | [0018-documentation-single-source.md](../adr/0018-documentation-single-source.md) | 使用中 |
+| DEV-02 | ADR-0018 实现偏离：无已验证平台方案同时满足写入保护与崩溃原子提交，原位写入被拒绝（`InPlaceWriteUnsupportedError`，任何字节变更前抛出）；不承诺崩溃原子性，不静默降级 | ADR-0018（本地检视报告 gitignored） | [0018-documentation-single-source.md](../adr/0018-documentation-single-source.md) | 使用中 |
 | UREC-01 | UsageRecorder.aclose 取消传播不置「关闭完成」标记：flush 被 CancelledError 打断时保留原始失败队列与未结算观察并明确告警（R21 不伪装已结算），下次顺序 aclose 重试 flush 重放保留事实，成功关闭后二次 aclose 幂等返回不新增写账（检视报告原始编号 S-UREC-01，登记/引用两侧提取形态为 UREC-01） | M26 检视报告 S 系列（本地检视报告 gitignored） | [usage_recorder.py](../../services/ai_service/usage_recorder.py) `aclose` / [test_usage_recorder.py](../../tests/unit/services/test_usage_recorder.py) `TestAcloseFlushF20` | 使用中 |
 | UREC-02 | UsageRecorder 成功关闭的最终清理块（无 await、不可被取消打断）随其余缓冲一并清空修订水位 `_revision_watermarks`——防双计由 DAO 侧 `accounted_usage_revision` 持久水位兜底，取消路径水位保留与事实缓冲同生命周期，运行期逐窗口回收不在范围（检视报告原始编号 S-UREC-02，登记/引用两侧提取形态为 UREC-02） | M26 检视报告 S 系列（本地检视报告 gitignored） | [usage_recorder.py](../../services/ai_service/usage_recorder.py) `aclose` / [test_usage_recorder.py](../../tests/unit/services/test_usage_recorder.py) `TestRevisionWatermarkReclaim` | 使用中 |

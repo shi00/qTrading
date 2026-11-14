@@ -2136,8 +2136,8 @@ def check_canonical_topics_consistency() -> list[str]:
     """主题 → canonical 正本映射一致性检查 (P2-12)。
 
     校验 docs/governance/canonical-topics.yml：
-    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "topics" key (list)。
-    2. 每个主题必填 id/title/canonical。
+    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "topics" key (非空 list)。
+    2. 每个主题必填 id/title/canonical, 且三者均为非空字符串（null/空串/纯空白拒绝）。
     3. id 唯一。
     4. canonical 路径在仓库中真实存在。
     5. workflow 路径（若存在）在仓库中真实存在。
@@ -2166,6 +2166,9 @@ def check_canonical_topics_consistency() -> list[str]:
     if not isinstance(topics, list):
         errors.append(f"'topics' 应为 list, 实际 {type(topics).__name__}")
         return errors
+    if not topics:
+        errors.append("'topics' 应为非空 list（不得静默当空集合）")
+        return errors
 
     seen_ids: set[str] = set()
     for idx, entry in enumerate(topics, 1):
@@ -2178,9 +2181,17 @@ def check_canonical_topics_consistency() -> list[str]:
         if missing:
             errors.append(f"topics[{idx}] 缺少必填字段: {sorted(missing)}")
 
+        # 必填值形态：id/title/canonical 须为非空字符串（null/空串/纯空白/非字符串均拒绝）
+        for field in ("id", "title", "canonical"):
+            if field not in entry:
+                continue
+            value = entry[field]
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"topics[{idx}] {field} 须为非空字符串, 实际 {value!r}")
+
         # id 唯一性
         topic_id = entry.get("id")
-        if isinstance(topic_id, str):
+        if isinstance(topic_id, str) and topic_id.strip():
             if topic_id in seen_ids:
                 errors.append(f"topics[{idx}] id 重复: {topic_id}")
             else:
@@ -2189,17 +2200,19 @@ def check_canonical_topics_consistency() -> list[str]:
         # canonical 路径存在性
         canonical = entry.get("canonical")
         canonical_path: Path | None = None
-        if isinstance(canonical, str):
+        if isinstance(canonical, str) and canonical.strip():
             canonical_path = ROOT / canonical
             if not canonical_path.exists():
                 errors.append(f"topics[{idx}] canonical 路径不存在: {canonical}")
-        elif canonical is not None:
+        elif canonical is not None and not isinstance(canonical, str):
             errors.append(f"topics[{idx}] canonical 应为 str, 实际 {type(canonical).__name__}")
 
         # workflow 路径存在性（可选）
         workflow = entry.get("workflow")
         if isinstance(workflow, str):
-            if not (ROOT / workflow).exists():
+            if not workflow.strip():
+                errors.append(f"topics[{idx}] workflow 须为非空字符串, 实际 {workflow!r}")
+            elif not (ROOT / workflow).exists():
                 errors.append(f"topics[{idx}] workflow 路径不存在: {workflow}")
         elif workflow is not None:
             errors.append(f"topics[{idx}] workflow 应为 str, 实际 {type(workflow).__name__}")
@@ -2807,7 +2820,7 @@ def check_ruleset_changelog_version() -> list[str]:
     return errors
 
 
-# --- DOC-04: 决策树与其机器可读镜像的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
+# --- DOC-04: 决策树生成视图与判据正本的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
 # CLAUDE.md §1.8「必读入口」列既可能以 markdown 链接 `[text](./docs/x.md)` 出现，
 # 也可能以裸路径文本出现（如 `docs/guides/how-to.md「7. 新增回测配置」`、`CONTRIBUTING.md「...」`）。
 # canonical-topics.yml 的 canonical 值统一为仓库相对路径（如 `docs/patterns/mvvm.md` / `CONTRIBUTING.md`）。
@@ -2900,9 +2913,9 @@ def _extract_decision_tree_targets(claude_content: str) -> set[str]:
 def check_decision_tree_mapping() -> list[str]:
     """检查项 13：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致（DOC-04）。
 
-    宪法 §1.8 是「本体」，canonical-topics.yml 是「机器可读镜像」。检查把正文任务身份
-    绑定到路由（F03）：每个数据行以 `<!-- route: ... -->` 锚声明承载的 yml topic id，
-    校验「行 → 锚 id → canonical」精确对应：
+    canonical-topics.yml 是「判据正本」，CLAUDE.md §1.8 是「生成视图」。检查把视图中
+    的任务身份绑定到路由（F03）：每个数据行以 `<!-- route: ... -->` 锚声明承载的 yml
+    topic id，校验「行 → 锚 id → canonical」精确对应：
     1. fail-closed：数据行缺锚即报错（防新增行绕过身份绑定）；
     2. 行锚引用的 topic id 必须在 yml 登记，且同一 id 不得绑定多行；
     3. 行入口路径必须已登记（方向 1），且与该行锚主题的 canonical 双向一致——

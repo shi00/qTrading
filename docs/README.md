@@ -63,11 +63,11 @@
 | [flet/upgrade-checklist.md](./flet/upgrade-checklist.md) | Flet V1 升级检查清单 |
 | [flet/v1-api-constraints.md](./flet/v1-api-constraints.md) | Flet V1 API 关键约束 |
 | [governance/README.md](./governance/README.md) | 治理规则与任务路由（Governance README） |
-| [governance/canonical-topics.yml](./governance/canonical-topics.yml) | 主题 → canonical 正本映射 (CLAUDE.md §1.8 决策树的机器可读镜像) |
+| [governance/canonical-topics.yml](./governance/canonical-topics.yml) | 任务路由判据正本（单一作者源；CLAUDE.md §1.8 决策树由本文件生成） |
 | [governance/checker-migration-map.md](./governance/checker-migration-map.md) | 42 项文档检查迁移映射表（D5） |
 | [governance/exceptions.yml](./governance/exceptions.yml) | 例外注册表 (CLAUDE.md §3.1 硬规则的集中例外清单) |
 | [governance/governance-ids.md](./governance/governance-ids.md) | 治理 ID 对照表 (Governance ID Glossary) |
-| [governance/redlines.yml](./governance/redlines.yml) | 红线机器可读映射 (CLAUDE.md §3.1 表格的 YAML 镜像) |
+| [governance/redlines.yml](./governance/redlines.yml) | 红线判据正本（单一作者源；CLAUDE.md §3.1 表格由本文件生成） |
 | [governance/ruleset-changelog.md](./governance/ruleset-changelog.md) | 规则集版本变更日志 (Ruleset Changelog) |
 | [guides/ci-cd.md](./guides/ci-cd.md) | CI/CD 流水线与门禁 |
 | [guides/dependency-management.md](./guides/dependency-management.md) | 依赖管理与 PyInstaller 打包 |

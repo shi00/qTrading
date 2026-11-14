@@ -19,8 +19,8 @@
 - **所有交互控件必须有可读语义名称（accessible name）**：按钮以可见文本承载名称；输入框以持久 label 承载名称；Dropdown label 不为空。语义名称是读屏朗读该控件的依据。
 - **Icon-only 按钮**：必须设置 `tooltip` 属性提供**语义名称**（即读屏朗读的名称），不允许空 tooltip 或仅靠视觉图形传达含义。
 - **表单字段**：`ft.TextField` 必须设置**持久** `label=` 参数（label 常驻显示、不随输入消失），禁止仅依赖 placeholder（placeholder 不被屏幕阅读器视为标签，且输入后不可见）。
-- **例外登记**：无法满足本条款的存量控件（如无 `label` 的数值输入框/Checkbox）统一登记于 §4 例外清单，不在此条款内豁免。
-- **结构命名与真实读屏证据分开**：本节名称要求由结构契约测试（如 `test_accessibility_contract.py` 的 TextField/Checkbox 扫描）守护，属**结构命名证据**；真实读屏（Narrator/NVDA）实测是另一层验证，二者不互替（现状见 §4 注）。
+- **例外登记**：无法满足本条款的存量控件（如无持久 `label=` 的滑块数值输入框 `ui/components/slider_input.py`）统一登记于 §4 例外清单，不在此条款内豁免。**`tooltip=` 只提供可访问名称，不能替代持久 `label=` 的条文要求**；Icon-only 按钮的 `tooltip` 仍是允许的语义名称方案（§2.1 上一条）。
+- **结构命名与真实读屏证据分开**：本节名称要求由结构契约测试（如 `test_accessibility_contract.py` 的 TextField/Checkbox 扫描）守护，属**结构命名证据**；该扫描把 `label=` / `tooltip=` / `semantics_label=` 任一视为「有可访问名称」，因此 tooltip-only TextField 能通过扫描，但**不等同于满足持久 `label=` 要求**（保留于 §4 例外）。真实读屏（Narrator/NVDA）实测是另一层验证，二者不互替（现状见 §4 注）。
 
 ### 2.2 Dialog 可访问性
 
@@ -113,9 +113,10 @@
 | 例外 | 对应条款 | 现状说明 | 修复方向 / 复查触发条件 |
 |------|---------|---------|------------------------|
 | 表格键盘遍历降级（`ui/components/virtual_table.py`） | §2.4 键盘路径 | Flet 无表格 focus/grid 键盘遍历（无 Focus 控件、DataTable 无 on_key、KeyboardListener 无 focus 遍历），键盘用户无方向键导航 | 复查触发：Flet 升级提供表格 focus/grid 能力，或 KeyboardListener 组合方案经 E2E 验证可行（与 `virtual_table.py` 的 `# NOTE(lazy:)` 语义一致） |
+| 滑块数值输入框（`ui/components/slider_input.py`） | §2.1 Label 关联（持久 label） | 仅设置 `tooltip=semantic_name` 提供可访问名称，**未设置持久 `label=`**；结构契约测试接受 `tooltip=`，故扫描不报红，但未满足本条款的持久视觉标签要求 | 修复方向：补持久 `label=`（或经批准的等价视觉标签方案）并同步结构测试；复查触发：组件下一次变更、可访问性 audit 或真实读屏实测前 |
 | 排序指示语义（`ui/components/virtual_table.py` 排序指示） | §2.1 Label 关联 | 已修复（债表 M12-020）：可见排序指示改用 `ft.Icon(ft.Icons.ARROW_UPWARD)` / `ft.Icon(ft.Icons.ARROW_DOWNWARD)`，不再依赖字体字形；读屏语义由 `Text.semantics_label` 的文字文案（`table_sort_asc` / `table_sort_desc`）承载，E2E 朗读锚点已迁移为语义文案断言 | 已落地/复核通过（由 `tests/unit/ui/test_virtual_table_body.py` 结构契约守护）；复查触发：排序指示再次变更或可访问性 audit 时 |
 
-> 已修复项（检视报告 F08，2026-10）：`slider_input.py` 数值 TextField / `watchlist_add_dialog.py` 搜索框 / `system_tab.py` no_proxy 输入框 / 已移除的 `llm_config_panel.py` 确认 Checkbox 曾在本表登记，现已分别补语义名称（`tooltip` / 持久 `label=` / `semantics_label=`）移出例外；`test_accessibility_contract.py` 的 TextField/Checkbox 扫描已常态化守护，无例外条目。真实读屏（Narrator/NVDA）实测尚未执行，控件名称语义以结构契约测试为准。
+> 已修复项（检视报告 F08，2026-10）：`watchlist_add_dialog.py` 搜索框与 `system_tab.py` no_proxy 输入框补持久 `label=`、已移除的 `llm_config_panel.py` 确认 Checkbox 补 `semantics_label=`，已移出例外。`slider_input.py` 数值 TextField 仅补 `tooltip=`，具备可访问名称但未满足 §2.1 持久 label 要求，仍按上表登记例外。`test_accessibility_contract.py` 的 TextField/Checkbox 扫描已常态化守护（其判据是「可访问名称」，不等于持久 label），无其他例外条目。真实读屏（Narrator/NVDA）实测尚未执行，控件名称语义以结构契约测试为准。
 
 ## 5. 引用关系
 

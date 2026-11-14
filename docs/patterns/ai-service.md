@@ -59,7 +59,7 @@
 - **正本**：[ADR-0012](../adr/0012-news-sentiment-inference-paradigm.md)（编码器 + CLS 池化 embedding + numpy 分类头，不用 RANK 模式）；设计细节原载本地未入库设计稿 `reviews/新闻达标模型微调.md` §8/§9.2（该文件未随仓库分发，当前工作区已不存在；缺失时以 ADR-0012 与本节为准）。
 - **实现位置**：`services/news_sentiment_scorer.py::NewsSentimentScorer`（注册单例）；编码器运行在**独立常驻子进程**（与 `LocalModelManager` 的对话子进程分离），分词必用 HF `tokenizers`（`Tokenizer.from_file`），**禁用 `Llama.embed(text)` 内部分词**（N0-4 实测与 HF 不一致）。
 - **仅展示边界**：打分输出（`label`/`confidence`/`score`/`probs`）仅用于新闻流着色与展示面板（ADR-0008），**选股/策略模块不得读取**（N3-7 展示边界测试守护）。
-- **缺失语义（R21）**：`score_texts` 服务不可用（未启用/未配置/加载失败/超时/worker 错误）整体返回 `None`，条目 NaN/Inf 返回 `None`，**不回填中性、不回填 0 分**；`head.npz` 形状/标签序/有限性校验不符时拒绝加载，不静默降级。
+- **缺失语义（R21，旧入口）**：`score_texts` 服务不可用（未启用/未配置/加载失败/超时/worker 错误）整体返回 `None`，条目 NaN/Inf 返回 `None`，**不回填中性、不回填 0 分**；`head.npz` 形状/标签序/有限性校验不符时拒绝加载，不静默降级。统一连接入口的对应语义见 §6.1（返回 `ScoringOutcome`，失败不以 `None` 表示）。
 - **配置键**：`news_sentiment_enabled`（默认 `False`）/ `news_sentiment_model_path` / `news_sentiment_head_path` / `news_sentiment_tokenizer_path` / `news_sentiment_n_threads` / `news_sentiment_max_length` / `news_sentiment_timeout_s`（设置页接入见 N3-6）。
 - **依赖**：`llama-cpp-python` / `tokenizers` 为可选依赖（`importlib` 延迟导入，缺失时打分降级 `None`，不影响 App 启动）；`head.npz` 与 GGUF 产物不进仓库。
 
@@ -69,17 +69,21 @@
   - **CI 产线产物**（`finbert-train.yml`，ADR-0013）发布于 GitHub Release `finbert-gguf-v<model_version>`：`finbert2-news-f16.gguf`（f16 编码器，发布产物；Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，定因见 `scripts/export_finbert_gguf.py` docstring）+ `head.npz`（分类头：`mode`/`labels`/`cw`/`cb`[/`pw`/`pb`]，格式正本 `load_head_npz`）+ `SHA256SUMS.txt`（前两者自校验凭证）；获取步骤见 [how-to.md「13. 获取新闻情绪模型产物」](../guides/how-to.md)。
   - **`tokenizer.json` 不随 Release 分发**：从 HF 基座仓库 `valuesimplex-ai-lab/FinBERT2-base`（固定 revision，见 Release note lineage 段）获取——微调不改变词表，基座分词器即最终分词器（N0-4：必须用此外部分词器文件，禁用 GGUF 内部分词）。
   - 本地离线重训产物仍归档 `ai_models/`（已被 `.gitignore` 忽略）。
-- **校验门禁**：CI 产线发布前自动运行 `scripts/verify_finbert_gguf.py --head`（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%；Gate 不过不发布），验证报告进 workflow artifact（schema `finbert-gguf-verification.v1`）；线下重训发布前手动运行同一脚本，报告留存 `ai_models/*.verify.json`（工程脚本清单见 `docs/guides/ci-cd.md`）。App 侧在首次加载/打分时做轻量校验（GGUF 魔数 + `head.npz` 结构 + 分词器存在性；`NewsSentimentScorer._validate_input_files` 与 `load_head_npz`，校验不过整体返回 `None`）；模型连接表单保存仅校验三路径非空（`ui/viewmodels/model_connections_view_model.py::_validate_draft`）。
-- **接入方式（首次使用由用户提供文件）**：设置页「AI 大脑 → 模型管理」新建/编辑连接时选择 `gguf_sentiment` 适配器，表单提供编码模型/分类头/分词器三路径（手输 + 文件选择器，`ui/components/config_panels/model_connection_form.py`）。**保存仅使配置生效**（`NewsSentimentScorer` 每次打分重读配置，stat 签名变化自动重载），不校验、也不保证模型可加载；魔数/头结构/分词器校验发生在**首次加载/打分**（见上一条「校验门禁」），保存成功不等于模型运行通过（F04）。产物不随 App 下载/打包。
+- **校验门禁**：CI 产线发布前自动运行 `scripts/verify_finbert_gguf.py --head`（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%；Gate 不过不发布），验证报告进 workflow artifact（schema `finbert-gguf-verification.v1`）；线下重训发布前手动运行同一脚本，报告留存 `ai_models/*.verify.json`（工程脚本清单见 `docs/guides/ci-cd.md`）。App 侧在首次加载/打分时做轻量校验（GGUF 魔数 + `head.npz` 结构 + 分词器存在性；`NewsSentimentScorer._validate_input_files` 与 `load_head_npz`）：旧入口 `score_texts` 校验不过整体返回 `None`，统一入口 `score_for_connection` 返回 `ScoringOutcome(status="unavailable")`；模型连接表单保存仅校验三路径非空（`ui/viewmodels/model_connections_view_model.py::_validate_draft`）。
+- **接入方式（首次使用由用户提供文件）**：设置页「AI 大脑 → 模型管理」新建/编辑连接时选择 `gguf_sentiment` 适配器，表单提供编码模型/分类头/分词器三路径（手输 + 文件选择器，`ui/components/config_panels/model_connection_form.py`）。**保存仅使配置生效**：不校验、也不保证模型可加载；魔数/头结构/分词器校验发生在**首次加载/打分**（见上一条「校验门禁」），保存成功不等于模型运行通过（F04）。产物不随 App 下载/打包。两个打分入口的配置来源与返回语义不同，不得混用：
+  - **旧入口 `NewsSentimentScorer.score_texts(texts)`**：每次调用读取全局配置（`_resolve_paths` / `_resolve_timeout`），分类头与产物 stat 签名变化时自动重载；服务不可用整体返回 `None`（见 §6「缺失语义」）。
+  - **统一连接入口 `NewsSentimentScorer.score_for_connection(texts, resolved_connection, deadline, attempt_context)`**：**不读全局配置**，三路径与 `n_threads` / `max_length` 取自 `resolved_connection.adapter_options`（配置快照由 S3 ScenarioExecutor 保证），返回 `ScoringOutcome`（`success` / `partial` / `timeout` / `unavailable` / `worker_error` / `invalid_output`），失败不以 `None` 表示；`services/ai_service/gguf_sentiment_adapter.py::invoke` 将 `timeout` 转译为 `TimeoutError`、`unavailable` / `worker_error` 转译为 `RuntimeError`、`invalid_output` 转译为 `ModelOutputValidationError`，`success` / `partial` 转译为 `AdapterResponse`，再由 S3 ScenarioExecutor 按失败表收敛。
 - **来源边界**：模型文件来源与合规由用户承担（`tokenizer.json` 直连 HF 基座；Release 产物已过 CI 一致性 Gate，App 侧仅做魔数/结构轻量校验即使用，不构成对文件内容的信任）（已登记 [known-technical-debt.md](../debt/known-technical-debt.md)）。
 
 ## 完成判定（canonical 入口）
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；AI 服务逻辑改动后须 `redline-check` + 相关单测 + `python scripts/check_docs_consistency.py`。
 
-- 缺失语义全链路用 `None`/哨兵，无 `0`/`50` 回填；
-- 成本/配额改动对齐 `pricing`（元→分）/`token_budget`（token）/`usage_tracker`（分）单位约定；
-- 输出经完整 schema/边界校验，模型输出按不可信输入处理（F13 缺口不扩散）；
-- 外发必经 `EgressAudit` 审计，日志经 `DataSanitizer` 脱敏，无明文密钥；
-- prompt 注入依赖明确分层（guard 只是第一层），新功能声明仅用于展示并经测试验证无执行路径；
-- 门禁：`redline-check`、`ruff`、相关单测通过。
+**按触域选择适用项**：以下义务仅在本次改动触及对应边界时适用，不为无关代码补改：
+
+- **改动情绪打分或缺失输出语义**：缺失语义全链路用 `None`/哨兵，无 `0`/`50` 回填；
+- **改动成本/配额**：对齐 `pricing`（元→分）/`token_budget`（token）/`usage_tracker`（分）单位约定；
+- **新增/修改模型输出域（输出消费边界）**：输出经完整 schema/边界校验，模型输出按不可信输入处理（F13 缺口不扩散）；既有输出校验缺口见 §3「已知缺口」，不要求无关改动一并修复；
+- **新增/修改外发调用点**：外发必经 `EgressAudit` 审计，日志经 `DataSanitizer` 脱敏，无明文密钥；
+- **新增 AI 功能或 prompt 输入面**：prompt 注入依赖明确分层（guard 只是第一层），新功能声明仅用于展示并经测试验证无执行路径；
+- **门禁**：触及的层对应 `redline-check`、`ruff`、相关单测通过。
