@@ -140,7 +140,7 @@ def MetricCard(label: str):
 - **i18n（canonical 模式）**：
   - **不手动订阅**：声明式组件内禁止调用 `I18n.subscribe()` / `I18n.unsubscribe()` / `refresh_locale`。locale 由 View 层独立状态源（通常在根组件由 `use_state` 持有，通过 props/context 下发）驱动重渲染。
   - **VM 不感知 locale**：ViewModel state 不含 locale 字段；VM 只产出 i18n key 与 params（封装为 `Message(key, params)`），View 渲染时按当前 locale 解析：`I18n.get(msg.key, **msg.params)`。
-  - **唯一 canonical 示例**见 [§5 ViewModel 消费](#5-viewmodel-消费mvvm-桥接) 中的 `ScreenerView`（`state.status` 为 `Message` 对象，View 渲染时调用 `I18n.get(state.status.key, **state.status.params)`）。
+  - **唯一 canonical 示例**见 [§5 ViewModel 消费](#5-viewmodel-消费mvvm-桥接) 中的 `ScreenerView`（`state.status_message` 为 `Message | None`，View 渲染时调用 `I18n.get(state.status_message.key, **state.status_message.params)`，None 时渲染空字符串）。
 - **响应式**：视图栅格经 `ResponsiveRow` + `AppStyles.COL_*` 预置配置统一消费（沿用 Flet 默认断点），客户端断点驱动布局。**不再**实现 `handle_resize` 鸭子分发。`page.on_resize` **默认不订阅**；仅需控件级实时尺寸的局部组件（如 `ui/views/settings_tabs/tier_api_panel.py` 按宽度动态计算列表高度）可在 `use_effect` 内挂载 `page.on_resize`，且必须在 `cleanup` 中恢复挂载前的原处理器（链式调用 prev，避免覆盖其他订阅者）。
 - **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数已在 Phase R.4.1 删除（声明式下不再需要）。
 
@@ -157,24 +157,39 @@ from ui.viewmodels.screener_view_model import ScreenerViewModel
 
 @ft.component
 def ScreenerView():
-    state, vm = use_viewmodel(ScreenerViewModel)  # state 不可变 snapshot；vm 即 commands
+    # ScreenerViewModel 为无参构造；state 不可变 snapshot，vm 即 commands
+    state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
 
     async def on_run(e):
-        await vm.run()  # command -> _notify -> state 更新 -> 自动重渲染
+        strategy_key = state.selected_strategy  # ScreenerState.selected_strategy: str | None
+        if not strategy_key:  # 未选策略（None / 空串）不发起运行，与生产 _on_run_click 一致
+            return
+        await vm.run_strategy(  # command -> _notify -> state 更新 -> 自动重渲染
+            strategy_key,
+            params=dict(vm.state.strategy_params),
+            exclude_st=state.exclude_st,
+        )
+
+    # ScreenerState.status_message: Message | None；None 表示当前无状态消息
+    status = (
+        I18n.get(state.status_message.key, **state.status_message.params) if state.status_message is not None else ""
+    )
 
     # View 只做两件事：读 state 渲染、事件调 commands
     return ft.Column(
         [
-            ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
+            ft.Text(status),  # Message 渲染
             ft.Button(I18n.get("run"), on_click=on_run),
         ]
     )
 ```
 
+> 示例与生产 View 对齐（[`ui/views/screener_view.py`](../../ui/views/screener_view.py) 的 `_on_run_click` 与 `_render_status_message`）：`run_strategy(strategy_key, save_results=True, params=None, exclude_st=True)`，`status_message` 可空；生产视图经 `_render_status_message(msg: Message | None)` 额外翻译 params 中的 `*_key` 后缀值。
+
 要点：
 
 - View 只做两件事：读 `state` 渲染控件树、事件调 `vm.command()`
-- VM 仅经 `use_viewmodel` hook 桥接消费：禁止绕过 hook 手动实例化或管理 VM 生命周期、直接改 VM 私有业务态（`_state`/`_set_state`）、在渲染期执行副作用；事件处理器调用 hook 返回的公开 command（含 `await vm.xxx()`，见上方 `ScreenerView` 示例）合法
+- VM 仅经 `use_viewmodel` hook 桥接消费：禁止绕过 hook 手动实例化或管理 VM 生命周期、直接改 VM 私有业务态（`_state`/`_set_state`）、在渲染期执行副作用；事件处理器调用 hook 返回的公开 command（含 `await vm.run_strategy(...)`，见上方 `ScreenerView` 示例）合法
 - `use_viewmodel` hook 已实现（见 [ui/hooks.py](../../ui/hooks.py)），新 UI 必须通过本 hook 消费 ViewModel
 - 所有 ViewModel 必须满足 [`_ViewModelProtocol`](../../ui/hooks.py)（`state` / `subscribe` / `dispose` 三方法）；已知例外清单见 `ui/viewmodels/` 审查记录
 
