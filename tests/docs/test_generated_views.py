@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import docs_generated as dg
+from fixtures import generator_fixtures as gf
 
 pytestmark = pytest.mark.docs_pure
 
@@ -60,28 +61,37 @@ def test_file_index_renders_titles_from_h1_and_comments(tmp_path: Path) -> None:
     assert "| [README.md](./README.md) | Project Documentation Index |" in rendered
 
 
-def test_file_index_uses_snapshot_text_for_protected_files(tmp_path: Path) -> None:
+def test_file_index_uses_snapshot_text_for_protected_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """快照通道回归：登记为 text 作者源的文件在更新窗口内经快照字节渲染。
 
     渲染只读 validated（保护窗口内目标被独占锁定，磁盘直读会 PermissionError）——
     这是独占保护窗口下更新与 --check 两侧渲染一致的根（Windows 共享冲突语义的回归）。
+    原位写被拒绝（D28），因此以渲染输入捕获证明快照通道，而非读取落盘结果。
     """
     root = tmp_path
-    _write(root, "docs/README.md", "# 磁盘标题\n<!-- generated:idx -->\n<!-- /generated -->\n")
+    original = "# 磁盘标题\n<!-- generated:idx -->\n<!-- /generated -->\n"
+    _write(root, "docs/README.md", original)
+    captured: dict[str, str] = {}
+
+    def render(validated: dict[str, object], root_path: Path) -> list[str]:
+        del root_path
+        text = str(validated["docs/README.md"])
+        captured["rows"] = str(len(text.splitlines()))
+        captured["first"] = text.splitlines()[0]
+        return [f"rows={captured['rows']}", f"first={captured['first']}"]
+
     spec = dg.BlockSpec(
         block_id="idx",
         target="docs/README.md",
         sources=(dg.SourceSchema(path="docs/README.md", fmt="text"),),
-        render=lambda validated, root_path: [
-            f"rows={len(str(validated['docs/README.md']).splitlines())}",
-            f"first={str(validated['docs/README.md']).splitlines()[0]}",
-        ],
+        render=render,
     )
+    before = (root / "docs/README.md").read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
     result = dg.run_update(root, (spec,))
-    assert result.ok, result
-    written = (root / "docs/README.md").read_text(encoding="utf-8")
-    assert "first=# 磁盘标题" in written  # 渲染输入 = 保护内核对过的快照字节
-    assert "rows=3" in written
+    assert result.ok is False and result.written == ()
+    assert (root / "docs/README.md").read_bytes() == before
+    assert captured == {"rows": "3", "first": "# 磁盘标题"}  # 渲染输入 = 保护内核对过的快照字节
 
 
 def test_file_index_empty_candidates_rejected(tmp_path: Path) -> None:
@@ -205,6 +215,9 @@ def test_rules_view_renders_redlines_table(tmp_path: Path) -> None:
 def test_topics_view_merges_by_canonical_and_section(tmp_path: Path) -> None:
     """正例：相同 canonical+section 合并一行并保全部 topic id；相对链接指向仓库根。"""
     root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
+    _write(root, "docs/guides/testing.md", "# Testing\n")
     _write(
         root,
         "docs/governance/canonical-topics.yml",
@@ -241,6 +254,8 @@ def test_topics_view_merges_by_canonical_and_section(tmp_path: Path) -> None:
 def test_topics_view_identity_duplicate_rejected(tmp_path: Path) -> None:
     """负例：topic id 重复 → 作者源校验显式拒绝（不静默合并），错误信息指认重复 id。"""
     root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
     _write(
         root,
         "docs/governance/canonical-topics.yml",

@@ -23,6 +23,12 @@
 写者；POSIX ``flock`` 为协作锁，无法证明覆盖外部编辑器，故**拒绝原位更新**（退出 1），
 不把共享工作区默认为独占环境。后端声明见 ``PLATFORM_LOCK_BACKEND``，不静默伪装。
 
+崩溃原子提交边界（D28）：``ftruncate`` + 单次 ``write`` 的原位写无法同时保证「写入
+保护」与「崩溃原子提交」——截断后失败、短写或进程中断都会把整份目标（含块外手写
+正文）留在截断/半写状态。在任何平台方案被验证同时满足两者之前，``WriteGuard.write_bytes``
+**在任何字节变更前显式拒绝**，不截断、不写入、不静默降级；后端声明见
+``INPLACE_WRITE_BACKEND``。跨文件不承诺事务不等于单文件允许半写。
+
 错误处理：本模块为纯静态工具，文件读取/写入属直接传播边界外的显式拒绝域——所有
 合同违规以 ``DocsGeneratedError`` 子类显式抛出（含 ``FileNotFoundError`` 的转译），
 由调用方（check_docs_consistency.py）负责聚合与退出码映射。
@@ -45,12 +51,14 @@ import docs_markdown
 
 __all__ = [
     "BUILTIN_REGISTRY",
+    "INPLACE_WRITE_BACKEND",
     "PLATFORM_LOCK_BACKEND",
     "BlockSpan",
     "BlockSpec",
     "DocsGeneratedError",
     "DuplicateBlockError",
     "EndMismatchError",
+    "InPlaceWriteUnsupportedError",
     "InvalidBlockIdError",
     "InvalidSpecError",
     "MissingBlockError",
@@ -152,7 +160,7 @@ class SourceFormatError(SourceError):
 
 
 class SourceFieldError(SourceError):
-    """作者源条目缺必填字段（含渲染函数的条件性必需字段）。"""
+    """作者源条目缺必填字段或必填字段值形态非法（null/空字符串/路径不存在）。"""
 
 
 class SourceUnknownFieldError(SourceError):
@@ -177,6 +185,10 @@ class ProtectionDeniedError(ProtectionError):
 
 class ProtectionUnsupportedError(ProtectionError):
     """当前平台无法证明写入保护覆盖外部写者（POSIX 协作锁）→ 拒绝原位更新。"""
+
+
+class InPlaceWriteUnsupportedError(ProtectionError):
+    """无平台方案同时保证写入保护与崩溃原子提交 → 拒绝原位写入（不截断、不半写）。"""
 
 
 class SnapshotDriftError(DocsGeneratedError):
@@ -375,6 +387,9 @@ class SourceSchema:
     ``author_block_id``（作者源自身为受控块），``author_payload`` 决定传给渲染函数的
     内容："block"=受控块内容行（默认），"full"=完整文件文本（供复用既有的、自行
     定位受控块的正本解析器，如 CONTRIBUTING 最小验证命令解析器）。
+
+    ``non_empty_string_fields`` 声明须为非空字符串的字段（身份字段自动纳入）；
+    ``path_fields`` 声明须为非空字符串且在工作根内真实存在的路径字段。
     """
 
     path: str
@@ -382,6 +397,8 @@ class SourceSchema:
     item_key: str | None = None
     required_fields: frozenset[str] = frozenset()
     known_fields: frozenset[str] = frozenset()
+    non_empty_string_fields: frozenset[str] = frozenset()
+    path_fields: frozenset[str] = frozenset()
     identity_field: str | None = None
     section_field: str | None = None
     allowed_sections: frozenset[str] = frozenset()
@@ -399,20 +416,47 @@ class SourceSchema:
             raise InvalidSpecError(f"作者源 {self.path!r}: 未知格式 {self.fmt!r}")
 
 
-def _validate_source_items(schema: SourceSchema, items: list[object]) -> list[dict[str, object]]:
-    """逐条目校验必填/未知字段/身份重复/section 取值（任一违规显式拒绝）。"""
+def _validate_source_items(root: Path, schema: SourceSchema, items: list[object]) -> list[dict[str, object]]:
+    """逐条目校验必填/未知字段/值形态/身份重复/section 取值（任一违规显式拒绝）。
+
+    值形态在任何渲染与写入之前校验：身份与声明的字段须为非空字符串（``null``、
+    空串、纯空白、非字符串一律拒绝），路径字段须为非空字符串且真实存在；条目集合
+    为空同样拒绝（不得静默渲染空清单）。
+    """
+    if not items:
+        raise SourceFormatError(f"作者源 {schema.path} 的 {schema.item_key!r} 条目集合为空（不得静默当空集合）")
+    shape_fields = set(schema.non_empty_string_fields)
+    if schema.identity_field is not None:
+        shape_fields.add(schema.identity_field)
     seen: set[object] = set()
     validated: list[dict[str, object]] = []
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             raise SourceFormatError(f"作者源 {schema.path} 第 {index} 条不是映射: {type(item).__name__}")
-        where = f"作者源 {schema.path} 条目 {item.get(schema.identity_field, f'#{index}')!r}"
+        identity_hint = item.get(schema.identity_field) if schema.identity_field is not None else None
+        if not isinstance(identity_hint, str) or not identity_hint.strip():
+            identity_hint = f"#{index}"
+        where = f"作者源 {schema.path} 条目 {identity_hint!r}"
         missing = schema.required_fields - set(item)
         if missing:
             raise SourceFieldError(f"{where} 缺必填字段 {sorted(missing)}（不得静默取默认值）")
         unknown = set(item) - schema.known_fields
         if unknown:
             raise SourceUnknownFieldError(f"{where} 含未知字段 {sorted(unknown)}（schema 未登记即拒绝）")
+        for field in sorted(shape_fields):
+            if field in item:
+                value = item[field]
+                if not isinstance(value, str) or not value.strip():
+                    raise SourceFieldError(f"{where} 的 {field} 须为非空字符串, 实际 {value!r}")
+        for field in sorted(schema.path_fields):
+            value = item.get(field)
+            if field not in item or value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise SourceFieldError(f"{where} 的 {field} 须为非空字符串, 实际 {value!r}")
+            resolved = resolve_within(root, value)
+            if not resolved.exists():
+                raise SourceFieldError(f"{where} 的 {field} 路径不存在: {value}")
         if schema.section_field is not None and schema.allowed_sections:
             section = item.get(schema.section_field)
             if section not in schema.allowed_sections:
@@ -454,7 +498,7 @@ def load_validated_source(root: Path, schema: SourceSchema, *, text: str | None 
         items = data.get(schema.item_key)
         if not isinstance(items, list):
             raise SourceFormatError(f"作者源 {schema.path} 缺 {schema.item_key!r} 列表（不得静默当空集合）")
-        return _validate_source_items(schema, items)
+        return _validate_source_items(root, schema, items)
     if schema.fmt == "markdown-block":
         assert schema.author_block_id is not None  # __post_init__ 已保证
         blocks = scan_blocks(text, "markdown")
@@ -525,6 +569,7 @@ _REDLINES_SCHEMA = SourceSchema(
     item_key="redlines",
     required_fields=_REDLINE_REQUIRED_FIELDS,
     known_fields=_REDLINE_KNOWN_FIELDS,
+    non_empty_string_fields=frozenset({"title"}),
     identity_field="id",
     section_field="rule_type",
     allowed_sections=_RULE_TYPE_SECTIONS,
@@ -542,6 +587,8 @@ _CANONICAL_TOPICS_SCHEMA = SourceSchema(
     item_key="topics",
     required_fields=frozenset({"id", "title", "canonical"}),
     known_fields=frozenset({"id", "title", "canonical", "section", "workflow", "note"}),
+    non_empty_string_fields=frozenset({"title", "canonical"}),
+    path_fields=frozenset({"canonical", "workflow"}),
     identity_field="id",
 )
 # 文件级目录索引的标题作者源（fmt=text 经快照字节渲染）：同一更新窗口内这些文件同时是
@@ -1084,6 +1131,9 @@ def verify_snapshot(snapshot: _Snapshot, guard: WriteGuard | None = None) -> Non
 
 
 PLATFORM_LOCK_BACKEND = "win32-exclusive-open" if sys.platform == "win32" else "posix-advisory-unsupported"
+# 原位写入后端声明：当前无已验证平台方案同时满足「写入保护」与「崩溃原子提交」，
+# 所有平台一律拒绝原位写入（D28），不以短写循环冒充崩溃原子性。
+INPLACE_WRITE_BACKEND = "refused-unverified-atomic-commit"
 
 if sys.platform == "win32":
     import ctypes
@@ -1111,8 +1161,8 @@ class WriteGuard:
     Windows：经 CreateFileW 以 dwShareMode=0 独占打开（GENERIC_READ|GENERIC_WRITE，
     OPEN_EXISTING）——保护期间任何其他进程对这些文件的打开（读/写/截断/替换，含
     编辑器保存的整写与 MoveFileEx 替换两条路径）均失败（ERROR_SHARING_VIOLATION），
-    实际覆盖外部写者；读取/写入/文件身份查询全部经持有句柄进行（锁定/独占期间
-    新开句柄不可用，核对通道必须走持有 fd，实测字节锁阻止区域内读写）。
+    实际覆盖外部写者；读取与文件身份查询经持有句柄进行（独占期间新开句柄不可用，
+    核对通道必须走持有 fd）。写入被显式拒绝：无已验证方案同时保证保护与崩溃原子提交。
     POSIX：flock 为协作锁，无法证明覆盖外部编辑器，取得后即显式拒绝原位更新。
     """
 
@@ -1211,14 +1261,16 @@ class WriteGuard:
         return (stat.st_dev, stat.st_ino)
 
     def write_bytes(self, path: Path, data: bytes) -> None:
-        """经持有 fd 原位替换写入（保护窗口内不释放保护）。"""
-        # NOTE(lazy): 受保护目标用 ftruncate+write 原位写，不用「临时文件 + os.replace」原子替换.
-        # ceiling: 不承诺崩溃原子性（ftruncate 后、write 前崩溃会留下截断/半写文件）；换来独占句柄与目标身份不脱钩.
-        # upgrade: 引入不破坏句柄身份的崩溃一致原位写方案，或放弃独占句柄保护改为临时文件+替换；在此之前不得宣称写入中断可原子回滚（ADR-0018 DEV-02）.
-        fd = self._fd_of(path)
-        os.ftruncate(fd, len(data))
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, data)
+        """拒绝原位写入：无已验证平台方案同时保证写入保护与崩溃原子提交（D28）。
+
+        旧实现（``ftruncate`` 到新长度后单次 ``os.write``）在截断后异常、短写或进程
+        中断时会把整份目标（含块外手写正文）留在截断/半写状态；补 write 循环只修
+        短写，不修截断后崩溃。因此在任何字节变更前显式拒绝：不截断、不写入、
+        不静默降级（``INPLACE_WRITE_BACKEND`` 如实声明该限制）。
+        """
+        raise InPlaceWriteUnsupportedError(
+            f"无法同时保证写入保护与崩溃原子提交，拒绝原位写入 {path.name}（目标未被截断或写入）"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1395,6 +1447,11 @@ def run_update(
                 except SnapshotDriftError as exc:
                     conflicts.append(rel)
                     conflict_reasons.append(str(exc))
+                except InPlaceWriteUnsupportedError as exc:
+                    # 原位写被拒绝（无已验证的崩溃原子提交方案）：该目标未写，
+                    # 如实列入 failed 并继续其余目标（不承诺跨文件事务）。
+                    failed.append(rel)
+                    conflict_reasons.append(f"{rel}: {exc}")
                 except PermissionError as exc:
                     # 提交核对后但替换前，屏障注入的写入尝试被独占保护阻止：
                     # 检出冲突——该目标原位未覆盖，如实报告
