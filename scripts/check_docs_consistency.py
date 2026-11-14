@@ -2381,8 +2381,10 @@ def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str],
     「变更相关门禁」（` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet
     首个「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
     「：」之前，不参与解析）。
+    行归属仅限成对块内（`_MIN_VERIFY_START_TAG` 与首个 `_GENERATED_END_TAG` 之间）：块外同节
+    普通正文（含形似 bullet 的散文）不属于受控块，不参与解析，也不计入未知行判断（D32）。
     返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
-    块缺失/结束标记缺失/含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令
+    块缺失/结束标记缺失/块内含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令
     均显式报错，不静默跳过（fail-closed）。
     """
     errors: list[str] = []
@@ -2399,18 +2401,6 @@ def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str],
     end = content.find(_GENERATED_END_TAG, start + len(_MIN_VERIFY_START_TAG))
     if end == -1:
         return [], [], [f"CONTRIBUTING.md 最小验证命令受控块缺少结束标记（{_GENERATED_END_TAG}）"]
-    # F02 反例防护（增加命令）：受控块结束后、同一小节（至下一个「## 」标题或文末）内新出现的
-    # bullet 一律 fail-closed 报错，防止新增命令绕过受控块被静默丢弃；真实正本该区间为 bash 代码块
-    # 与散文（行首非「- 」），不会误报。
-    after_block = content[end + len(_GENERATED_END_TAG) :]
-    next_heading = after_block.find("\n## ")
-    section_after = after_block if next_heading == -1 else after_block[:next_heading]
-    stray_bullets = [line for line in section_after.splitlines() if line.startswith("- ")]
-    if stray_bullets:
-        errors.append(
-            "CONTRIBUTING.md 最小验证命令受控块后同节内含无法识别的行"
-            "（新增命令必须写入受控块内，防止被静默丢弃，F02）: " + " / ".join(stray_bullets)
-        )
     body_lines = [
         line for line in content[start + len(_MIN_VERIFY_START_TAG) : end].strip().splitlines() if line.strip()
     ]
