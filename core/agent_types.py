@@ -1680,10 +1680,12 @@ def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
 
 #: 谱系边关系（§9.10 relation_kind；本轮工程冻结首批值——设计未逐枚举）。
 class SourceRelationKind(Enum):
-    """源-消费者谱系边语义：origin=源→其 originating message；accepted_input=源→受理输入版。"""
+    """源-消费者谱系边语义：origin=源→其 originating message；accepted_input=源→受理输入版；
+    draft_reference=源→当前会话草稿引用（F-03-4，随草稿保存替换为当前集合）。"""
 
     ORIGIN = "origin"
     ACCEPTED_INPUT = "accepted_input"
+    DRAFT_REFERENCE = "draft_reference"
 
 
 #: 可靠事件载荷结构标识（§4.4 payload_kind；本轮工程冻结首批值——设计未逐枚举）。

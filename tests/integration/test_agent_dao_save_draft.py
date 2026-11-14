@@ -43,7 +43,7 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentCommand, AgentSession
+from data.persistence.models import AgentAssetVersion, AgentCommand, AgentSession, AgentSourceLink
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -77,20 +77,31 @@ async def _seed_session(dao: AgentDao, user_scope: str = _USER, session_id: str 
         )
 
 
+async def _seed_asset(dao: AgentDao, asset_id: str = "src-1", version: str = "1", user_scope: str = _USER) -> None:
+    """受管源版本（草稿只可引用已登记版本，不自动建资产）。"""
+
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试夹具
+        await conn.execute(
+            insert(AgentAssetVersion).values(
+                user_scope=user_scope,
+                asset_id=asset_id,
+                asset_version=version,
+                asset_kind="source",
+                display_name=f"{asset_id}@{version}",
+                digest=_DIGEST,
+                read_state="ready",
+                verification_state="unverified",
+            )
+        )
+
+
 def _payload(**overrides: Any) -> DraftPayload:
     values: dict[str, Any] = {
         "schema_version": 1,
         "text": "研究三家公司",
         "mode": Mode.DISCUSS,
         "model_selection": json_doc({"scenario_id": "agent_research"}),
-        "source_refs": (
-            SourceVersionRef(
-                source_kind=SourceKind.USER_MESSAGE,
-                source_id="src-1",
-                source_version="1",
-                source_digest=_DIGEST,
-            ),
-        ),
+        "source_refs": (),
         "skill_versions": (),
         "mcp_selection": (),
         "purpose": Purpose.CONCEPT,
@@ -181,10 +192,38 @@ async def _command_rows(url: str) -> list[Any]:
         await engine.dispose()
 
 
+async def _draft_links(url: str) -> list[Any]:
+    engine = create_test_engine(url)
+    try:
+        async with engine.connect() as conn:
+            return (
+                (
+                    await conn.execute(
+                        select(
+                            AgentSourceLink.source_id,
+                            AgentSourceLink.source_version,
+                            AgentSourceLink.consumer_kind,
+                            AgentSourceLink.consumer_id,
+                            AgentSourceLink.consumer_version,
+                            AgentSourceLink.session_id,
+                            AgentSourceLink.relation_kind,
+                        )
+                        .where(AgentSourceLink.user_scope == _USER)
+                        .order_by(AgentSourceLink.source_id)
+                    )
+                )
+                .all()
+                .copy()
+            )
+    finally:
+        await engine.dispose()
+
+
 class TestSaveDraft:
     async def test_first_save_lands_draft_and_command_fact(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao)
+        await _seed_asset(dao)
         before = await _session_row(real_embedded_pg.url)
         assert before.draft_revision == 1 and before.draft_payload is None
 
@@ -326,3 +365,74 @@ class TestSaveDraft:
         row = await _session_row(real_embedded_pg.url)
         assert row.draft_revision == 1 and row.draft_payload is None
         assert await _command_rows(real_embedded_pg.url) == []
+
+
+class TestDraftSourceLinks:
+    """草稿来源谱系边（F-03-4）：只引用已受管版本、当前集合替换、未登记整体回滚。"""
+
+    def _payload_with(self, *asset_ids: str) -> DraftPayload:
+        return _payload(
+            source_refs=tuple(
+                SourceVersionRef(
+                    source_kind=SourceKind.USER_MESSAGE,
+                    source_id=asset_id,
+                    source_version="1",
+                    source_digest=_DIGEST,
+                )
+                for asset_id in asset_ids
+            )
+        )
+
+    async def test_links_written_for_current_draft_revision(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, "src-1")
+        await _seed_asset(dao, "src-2")
+        await dao.save_draft(_command(expected=1, command_id="cmd-1", payload=self._payload_with("src-1", "src-2")))
+
+        links = await _draft_links(real_embedded_pg.url)
+        assert [(row.source_id, row.consumer_version) for row in links] == [("src-1", "2"), ("src-2", "2")]
+        assert {row.consumer_kind for row in links} == {"draft"}
+        assert {row.consumer_id for row in links} == {"s1"}
+        assert {row.session_id for row in links} == {"s1"}
+        assert {row.relation_kind for row in links} == {"draft_reference"}
+
+    async def test_next_save_replaces_links_with_current_set(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, "src-1")
+        await _seed_asset(dao, "src-2")
+        await dao.save_draft(_command(expected=1, command_id="cmd-1", payload=self._payload_with("src-1")))
+        await dao.save_draft(_command(expected=2, command_id="cmd-2", payload=self._payload_with("src-2")))
+
+        links = await _draft_links(real_embedded_pg.url)
+        assert [(row.source_id, row.consumer_version) for row in links] == [("src-2", "3")]
+
+    async def test_empty_draft_clears_links(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, "src-1")
+        await dao.save_draft(_command(expected=1, command_id="cmd-1", payload=self._payload_with("src-1")))
+        await dao.save_draft(_command(expected=2, command_id="cmd-2"))
+        assert await _draft_links(real_embedded_pg.url) == []
+
+    async def test_unregistered_source_rejected_without_side_effects(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_draft(_command(expected=1, payload=self._payload_with("src-missing")))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+        row = await _session_row(real_embedded_pg.url)
+        assert row.draft_revision == 1 and row.draft_payload is None
+        assert await _command_rows(real_embedded_pg.url) == []
+        assert await _draft_links(real_embedded_pg.url) == []
+
+    async def test_other_user_scope_source_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, "src-1", user_scope="u2")
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_draft(_command(expected=1, payload=self._payload_with("src-1")))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+        assert await _draft_links(real_embedded_pg.url) == []

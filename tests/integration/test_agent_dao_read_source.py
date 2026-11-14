@@ -30,7 +30,11 @@ from sqlalchemy import text
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    CommandRef,
+    DraftPayload,
+    DraftSaveCommand,
     FactValue,
+    Mode,
     ReadState,
     Selection,
     SourceKind,
@@ -444,6 +448,62 @@ class TestReadSourceRepresentation:
 
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.read_source(_query(draft_revision=2), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "not registered" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_save_draft_registers_current_source_context(self, real_embedded_pg: ConnectionInfo) -> None:
+        """F-03-4 端到端：草稿保存同事务写来源边，读取按当前草稿修订放行。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, draft_revision=3)
+        await _seed_asset(dao, body_text="正文")
+
+        payload = DraftPayload(
+            schema_version=1,
+            text="引用附件",
+            mode=Mode.DISCUSS,
+            model_selection=None,
+            source_refs=(
+                SourceVersionRef(
+                    source_kind=SourceKind.ATTACHMENT,
+                    source_id="src-1",
+                    source_version="v1",
+                    source_digest=_DIGEST,
+                ),
+            ),
+            skill_versions=(),
+            mcp_selection=(),
+            purpose=None,
+            cutoff=None,
+            send_target=None,
+            object_context=None,
+            role_prompt_selection=None,
+            customized_fields=(),
+            defaults_baseline_digest=None,
+        )
+        receipt = await dao.save_draft(
+            DraftSaveCommand(
+                command=CommandRef(
+                    user_scope="u1",
+                    source_module="ui",
+                    business_request_id="req-draft",
+                    command_id="cmd-draft",
+                    expected_revision=3,
+                ),
+                session_id="s1",
+                expected_draft_revision=3,
+                payload=payload,
+            )
+        )
+        assert receipt.draft_revision == 4
+
+        read = await dao.read_source(_query(draft_revision=4), user_scope="u1")
+        assert read.body_text == "正文"
+        # 旧修订（3）不再被当前草稿引用：边已随保存替换，不能借旧版读取。
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(_query(draft_revision=3), user_scope="u1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "not registered" in excinfo.value.sanitized_message
         await dao.engine.dispose()  # type: ignore[union-attr]

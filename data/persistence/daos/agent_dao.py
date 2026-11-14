@@ -923,9 +923,9 @@ class AgentDao(BaseDao):
         未登记（或轮次/版本不符）→ ``INPUT_INVALID``：不因「同用户域有该来源版本」
         就放行未进入该请求的资料。
 
-        **已知缺口**：草稿来源登记写入方（``consumer_kind='draft'`` + session_id）
-        属 F-03 草稿保存交付；在那之前草稿上下文读取恒为未登记拒绝，不自行造写入
-        路径（spec 计划 B §B2 留痕）。
+        **写入方**：``consumer_kind='draft'`` + ``session_id`` 的谱系边由
+        :meth:`save_draft` 在同事务写入（F-03-4），每次保存替换为当前引用集合；
+        未保存过草稿的会话无草稿边，草稿上下文读取即未登记拒绝。
         """
 
         base = (
@@ -6423,7 +6423,9 @@ class AgentDao(BaseDao):
         - 目标会话不存在或不在调用用户域 → ``INPUT_INVALID``（不静默建会话）；
         - 会话行 ``revision`` 与 ``updated_at`` 同事务推进：目录排序/历史游标
           指纹不因草稿变更静默漏页（§4.2 修订游标失效、§9.3）；
-        - 草稿载荷只含引用（凭据/有效批准由 codec 拒绝），清理语义归 E-06。
+        - 草稿载荷只含引用（凭据/有效批准由 codec 拒绝），清理语义归 E-06；
+        - 载荷 ``source_refs`` 在同事务登记为本会话草稿谱系边（当前集合，F-03-4）；
+          引用未受管源版本 → ``INPUT_INVALID`` 整体回滚。
 
         转移 fence（``draft_transfer_ref``）门闩随 F-03-3 ``transfer_draft`` 落地：
         当前无写入方，未决转移状态不可达，故本方法不改该列。
@@ -6525,6 +6527,14 @@ class AgentDao(BaseDao):
                     updated_at=now,
                 )
             )
+            await self._sync_draft_source_links(
+                conn,
+                user_scope=user_scope,
+                session_id=command.session_id,
+                draft_revision=next_revision,
+                source_refs=command.payload.source_refs,
+                identity=identity,
+            )
             receipt = DraftReceipt(
                 session_id=command.session_id,
                 command_record_id=command_record_id,
@@ -6553,10 +6563,77 @@ class AgentDao(BaseDao):
             )
             return receipt
 
+    async def _sync_draft_source_links(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_id: str,
+        draft_revision: int,
+        source_refs: tuple[SourceVersionRef, ...],
+        identity: str,
+    ) -> None:
+        """草稿来源谱系边（F-03-4；§9.10）：随草稿保存替换为**当前集合**。
+
+        - 只登记引用：目标源版本必须已在同用户域受管资产表中存在，否则
+          ``INPUT_INVALID``（不因草稿携带就自动建资产/副本）；
+        - 先删本会话既有 ``consumer_kind='draft'`` 边再写当前集合，避免自动保存
+          无限累积历史边；``consumer_version`` 为本次草稿修订；
+        - 禁用源仍可被草稿引用（禁用拦截在发送/派发门，不在编辑门）。
+
+        调用方须在同一显式事务内调用（失败即整体回滚，不留下半套边）。
+        """
+
+        await conn.execute(
+            sa.delete(AgentSourceLink).where(
+                AgentSourceLink.user_scope == user_scope,
+                AgentSourceLink.session_id == session_id,
+                AgentSourceLink.consumer_kind == "draft",
+            )
+        )
+        for ref in source_refs:
+            asset = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.asset_id).where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == ref.source_id,
+                        AgentAssetVersion.asset_version == ref.source_version,
+                    )
+                )
+            ).first()
+            if asset is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "draft references a source version not registered in user scope",
+                    identity,
+                )
+            await conn.execute(
+                sa.insert(AgentSourceLink).values(
+                    user_scope=user_scope,
+                    link_id=stable_id(
+                        "source_link",
+                        [
+                            user_scope,
+                            ref.source_id,
+                            ref.source_version,
+                            "draft",
+                            session_id,
+                            str(draft_revision),
+                        ],
+                    ),
+                    source_id=ref.source_id,
+                    source_version=ref.source_version,
+                    consumer_kind="draft",
+                    consumer_id=session_id,
+                    consumer_version=str(draft_revision),
+                    session_id=session_id,
+                    relation_kind=SourceRelationKind.DRAFT_REFERENCE.value,
+                )
+            )
+
     # ------------------------------------------------------------------
     # F-03-2：会话元数据命令（§4.2 change_session / §9.3）
     # ------------------------------------------------------------------
-
     async def change_session(self, command: SessionChangeCommand) -> CommandReceipt:
         """会话元数据 CAS 命令（§4.2 ``change_session``）：**单个显式事务**。
 
