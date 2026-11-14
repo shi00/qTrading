@@ -18,10 +18,11 @@
    逐文件提交核对 + 替换 → 更新后 all 检查（同一保护边界内）→ 释放保护。
    检测到冲突时不覆盖原位、保留用户新稿、如实列出已写/未写；不承诺跨文件事务。
 
-写入保护的平台边界（§5.2.1-3）：Windows 经独占打开 + ``msvcrt.locking`` 内核级字节
-范围锁（任何进程对锁定字节的写入失败、替换因缺 FILE_SHARE_DELETE 被拒）实际覆盖外部
-写者；POSIX ``flock`` 为协作锁，无法证明覆盖外部编辑器，故**拒绝原位更新**（退出 1），
-不把共享工作区默认为独占环境。后端声明见 ``PLATFORM_LOCK_BACKEND``，不静默伪装。
+写入保护的平台边界（§5.2.1-3）：Windows 经 ``CreateFileW``（``dwShareMode=0``）独占
+打开，保护期间其他进程对这些文件的打开（读/写/截断/重命名替换）因 sharing violation
+失败，实际覆盖外部写者；保护内读取与文件身份查询经持有句柄进行。POSIX ``flock`` 为
+协作锁，无法证明覆盖外部编辑器，故**拒绝原位更新**（退出 1），不把共享工作区默认为
+独占环境。后端声明见 ``PLATFORM_LOCK_BACKEND``，不静默伪装。
 
 崩溃原子提交边界（D28）：``ftruncate`` + 单次 ``write`` 的原位写无法同时保证「写入
 保护」与「崩溃原子提交」——截断后失败、短写或进程中断都会把整份目标（含块外手写
@@ -1515,6 +1516,7 @@ class UpdateResult:
     blocked: str | None
     post_check_errors: tuple[str, ...]
     conflict_reasons: tuple[str, ...] = ()
+    failure_reasons: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -1633,6 +1635,7 @@ def run_update(
         conflicts: list[str] = []
         conflict_reasons: list[str] = []
         failed: list[str] = []
+        failure_reasons: list[str] = []
         if blocked_by_barrier is not None:
             conflicts.extend(target_rels)
             conflict_reasons.extend(blocked_by_barrier for _ in target_rels)
@@ -1670,7 +1673,7 @@ def run_update(
                     # 原位写被拒绝（无已验证的崩溃原子提交方案）：该目标未写，
                     # 如实列入 failed 并继续其余目标（不承诺跨文件事务）。
                     failed.append(rel)
-                    conflict_reasons.append(f"{rel}: {exc}")
+                    failure_reasons.append(f"{rel}: {exc}")
                 except PermissionError as exc:
                     # 提交核对后但替换前，屏障注入的写入尝试被独占保护阻止：
                     # 检出冲突——该目标原位未覆盖，如实报告
@@ -1678,7 +1681,7 @@ def run_update(
                     conflict_reasons.append(f"提交核对后写入尝试被写入保护阻止: {exc}")
                 except OSError as exc:
                     failed.append(rel)
-                    conflict_reasons.append(f"{rel}: 写失败 {exc}")
+                    failure_reasons.append(f"{rel}: 写失败 {exc}")
 
         # 10) with 退出时释放保护
 
@@ -1703,6 +1706,7 @@ def run_update(
         unchanged=tuple(unchanged),
         conflicts=tuple(conflicts),
         conflict_reasons=tuple(conflict_reasons),
+        failure_reasons=tuple(failure_reasons),
         failed=tuple(failed),
         blocked=None,
         post_check_errors=tuple(post_errors),
