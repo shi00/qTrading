@@ -451,7 +451,7 @@ curl -L -o tokenizer.json \
   "https://huggingface.co/valuesimplex-ai-lab/FinBERT2-base/resolve/<revision>/tokenizer.json"
 ```
 
-下载完成后到 设置 → AI 大脑 → 模型管理，新建/编辑连接并选择 `gguf_sentiment` 适配器（编码模型/分类头/分词器三路径，手输 + 文件选择器）：表单保存仅校验三路径非空，**保存成功不等于模型可用**；首次加载/打分时才校验 GGUF 魔数、分类头结构与分词器文件，校验不过整体返回 `None`（语义正本见 [ai-service.md](../patterns/ai-service.md)）；模型来源与合规由用户承担。
+下载完成后到 设置 → AI 大脑 → 模型管理，新建/编辑连接并选择 `gguf_sentiment` 适配器（编码模型/分类头/分词器三路径，手输 + 文件选择器）：表单保存仅校验三路径非空，**保存成功不等于模型可用**（保存只让配置生效，不触发模型校验）；首次加载/打分时才校验 GGUF 魔数、分类头结构与分词器文件——旧入口 `score_texts` 校验不过整体返回 `None`，统一连接入口 `score_for_connection` 返回 `ScoringOutcome(status="unavailable")` 并由 `gguf_sentiment_adapter` 转译为 `RuntimeError`（语义正本见 [ai-service.md](../patterns/ai-service.md)）；模型来源与合规由用户承担。
 
 ---
 
