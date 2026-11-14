@@ -8,7 +8,7 @@ import inspect
 import pytest
 import pandas as pd
 from datetime import date, datetime, timedelta
-from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
+from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock, ANY
 from zoneinfo import ZoneInfo
 
 from core.i18n import I18n, Message
@@ -2553,6 +2553,37 @@ class TestCatchupLogic:
         ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._catchup_logic("task1", [date(2024, 6, 11)])
+
+    @pytest.mark.asyncio
+    async def test_cancel_watermark_db_failure_does_not_mask_cancelled(self):
+        """R2：取消路径 finally 中水位落盘抛 DB 异常时，不得顶替 CancelledError 传播。"""
+        svc = _make_svc()
+        calls = {"n": 0}
+
+        async def _sync(trade_date=None, sync_result=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise asyncio.CancelledError("simulated cancel on day 2")
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.log_classified") as mock_log,
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._mark_daily_update_done_db = AsyncMock(side_effect=RuntimeError("db down"))
+            # 水位落盘失败被记录后，原取消异常继续向外传播（不被 RuntimeError 顶替）。
+            with pytest.raises(asyncio.CancelledError):
+                await svc._catchup_logic("task1", [date(2024, 6, 12), date(2024, 6, 13)])
+
+        svc._mark_daily_update_done_db.assert_awaited_once_with("20240612")
+        mock_log.assert_called_once_with(ANY, ANY, "db", ANY, "20240612", exc_info=True)
+        assert isinstance(mock_log.call_args.args[1], RuntimeError), "须记录原始 DB 异常对象"
 
     @pytest.mark.asyncio
     async def test_single_day_failure_continues(self):

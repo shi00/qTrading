@@ -448,8 +448,13 @@ def test_e07_write_interruption_lists_written_and_unwritten(tmp_path: Path) -> N
     assert result.failed == ("a.md",) and result.written == ("b.md",), "已写/未写必须如实分列"
 
 
-def test_e07_edit_in_protection_window_conflicts_and_keeps_user_draft(tmp_path: Path) -> None:
-    """核对后、替换前注入外部编辑 → 检出冲突、原位未覆盖、用户新稿窗口保留、无旧快照覆盖。"""
+def test_e07_edit_in_protection_window_conflicts_and_preserves_original(tmp_path: Path) -> None:
+    """核对后、替换前注入外部编辑 → 检出冲突、原位未覆盖、无旧快照覆盖。
+
+    平台差异（ADR-0018 DEV-01）：Windows 独占保护实际覆盖外部写者，屏障注入的写入
+    本身被拒绝，故 §9.11 E07「用户新稿窗口保留」的可观测形态是「原稿逐字节不变 +
+    冲突如实上报」，不存在「新稿已落盘再被保留」的中间态。
+    """
     root = gf.build_demo_tree(tmp_path)
     target = root / gf.DEMO_TARGET_REL
     before = target.read_text(encoding="utf-8")
@@ -461,9 +466,13 @@ def test_e07_edit_in_protection_window_conflicts_and_keeps_user_draft(tmp_path: 
     result = dg.run_update(root, gf.make_demo_registry(), barrier=barrier)
     assert result.ok is False, "窗口内外部编辑必须检出冲突"
     assert result.conflicts == (gf.DEMO_TARGET_REL,) and result.written == ()
-    assert "- R1：演示红线一" not in target.read_text(encoding="utf-8"), "旧快照产物不得落盘覆盖"
-    assert target.read_text(encoding="utf-8") == before or "用户新稿" in target.read_text(encoding="utf-8"), (
-        "原稿或用户新稿必居其一，不得被旧快照产物覆盖"
+    after = target.read_text(encoding="utf-8")
+    # Windows 独占保护实际覆盖外部写者：屏障注入的写入被拒绝（PermissionError），
+    # 故目标必须与核对前的原稿逐字节一致——既不被旧快照产物覆盖，也不出现部分产物。
+    assert after == before, "外部写入被独占保护阻止时，目标必须保持原样（不得被旧快照或部分产物覆盖）"
+    assert "用户新稿" not in after, "被保护阻止的外部写入不得以任何形式落盘"
+    assert any("写入保护阻止" in reason for reason in result.conflict_reasons), (
+        f"冲突原因须说明写入被独占保护阻止: {result.conflict_reasons}"
     )
 
 

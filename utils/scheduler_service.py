@@ -1074,12 +1074,27 @@ class SchedulerService:
             # R21/R22）；正常完成与失败路径的水位推进在下方统一处理，不双写。
             # 水位单调由 _mark_daily_update_done_db 的内存 max() + DB GREATEST 保证（R22）。
             if cancelled and contiguous_success_end is not None:
-                await self._mark_daily_update_done_db(contiguous_success_end.strftime("%Y%m%d"))
-                logger.warning(
-                    "[Scheduler] Catch-up cancelled after partial progress; watermark kept at %s "
-                    "(remaining days stay in catch-up range)",
-                    contiguous_success_end.strftime("%Y%m%d"),
-                )
+                watermark = contiguous_success_end.strftime("%Y%m%d")
+                try:
+                    await self._mark_daily_update_done_db(watermark)
+                except Exception as e:
+                    # R2：finally 内的水位落盘失败（DB 异常/引擎已释放）不得顶替原
+                    # CancelledError 向外传播，否则取消语义被吞为普通失败。记日志后
+                    # 让取消异常继续传播；水位退化为未推进，重跑按补数区间覆盖。
+                    log_classified(
+                        logger,
+                        e,
+                        "db",
+                        "[Scheduler] Failed to persist catch-up watermark %s on cancel (%s): %s",
+                        watermark,
+                        exc_info=True,
+                    )
+                else:
+                    logger.warning(
+                        "[Scheduler] Catch-up cancelled after partial progress; watermark kept at %s "
+                        "(remaining days stay in catch-up range)",
+                        watermark,
+                    )
         # D1-2/MAJOR-05: 仅「全部日期成功且关键表全成功」才推进到最后一个遗漏交易日。
         if not failed_dates and sync_result.is_complete:
             latest = missed_dates[-1]

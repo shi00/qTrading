@@ -811,6 +811,32 @@ def _render_governance_topics_view(validated: dict[str, object], root: Path) -> 
     return lines
 
 
+def _render_agents_task_routes(validated: dict[str, object], root: Path) -> list[str]:
+    """AGENTS.md 任务路由表（ADR-0018 §4.1）：canonical-topics.yml 全主题任务表。
+
+    与 governance 视图同源、同「canonical+section 合并展示、保全部 topic ID」规则；
+    链接按仓库根相对路径（AGENTS.md 位于根），死链由 check_relative_dead_links 守护。
+    """
+    topics = validated[_CANONICAL_TOPICS_SCHEMA.path]
+    assert isinstance(topics, list)
+    merged: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for topic in topics:
+        assert isinstance(topic, dict)
+        canonical = str(topic["canonical"]).removeprefix("./")
+        section = topic.get("section")
+        key = (canonical, str(section) if isinstance(section, str) and section.strip() else "")
+        merged.setdefault(key, []).append(topic)
+    lines = [
+        "| 任务类型（title） | 主题 id | canonical 正本 | 章节 |",
+        "|------------------|---------|----------------|------|",
+    ]
+    for (canonical, section), group in merged.items():
+        ids = ", ".join(str(topic["id"]) for topic in group)
+        titles = " / ".join(_escape_cell(str(topic["title"])) for topic in group)
+        lines.append(f"| {titles} | {ids} | [{canonical}]({canonical}) | {section or '—'} |")
+    return lines
+
+
 # 封闭目标清单（模块常量注册表）：激活条目 = 具备真实作者源的真实块；
 # 槽位条目（active=False）= 尚无作者源接线的目标，登记占位但不启用渲染。
 BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
@@ -827,6 +853,14 @@ BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
         target="AGENTS.md",
         sources=(_CONTRIBUTING_SCHEMA,),
         render=_render_agents_min_verify,
+        block_format="markdown",
+        active=True,
+    ),
+    BlockSpec(
+        block_id="agents-task-routes",
+        target="AGENTS.md",
+        sources=(_CANONICAL_TOPICS_SCHEMA,),
+        render=_render_agents_task_routes,
         block_format="markdown",
         active=True,
     ),
@@ -1097,6 +1131,9 @@ class WriteGuard:
 
     def write_bytes(self, path: Path, data: bytes) -> None:
         """经持有 fd 原位替换写入（保护窗口内不释放保护）。"""
+        # NOTE(lazy): 受保护目标用 ftruncate+write 原位写，不用「临时文件 + os.replace」原子替换.
+        # ceiling: 不承诺崩溃原子性（ftruncate 后、write 前崩溃会留下截断/半写文件）；换来独占句柄与目标身份不脱钩.
+        # upgrade: 引入不破坏句柄身份的崩溃一致原位写方案，或放弃独占句柄保护改为临时文件+替换；在此之前不得宣称写入中断可原子回滚（ADR-0018 DEV-02）.
         fd = self._fd_of(path)
         os.ftruncate(fd, len(data))
         os.lseek(fd, 0, os.SEEK_SET)
@@ -1294,6 +1331,9 @@ def run_update(
     # 窗口内执行必然失败。故移至保护释放后立即执行：写入窗口（快照→提交替换）仍由
     # 独占保护完整覆盖，不会"以事后检查补救已丢失的正文"；释放后至检查期间的并发
     # 编辑由检查自身的内容比对 fail-closed 检出（退出 1）。
+    # NOTE(lazy): all 检查在写入保护释放后立即执行，不在同一保护边界内.
+    # ceiling: §5.2.1-2「更新后 all 检查处于同一保护边界内」未完全满足；42 项检查全部新开句柄直读.
+    # upgrade: 保护机制支持共享读，或检查函数改为复用写者已持有 fd/共享解析视图时，必须移入保护窗口（ADR-0018 DEV-01）.
     post_errors: list[str] = []
     if post_check is not None:
         try:

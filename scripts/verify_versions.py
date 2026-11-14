@@ -124,6 +124,8 @@ def check_repo_url_consistency() -> list[str]:
     errors = []
     for doc_path in [README_PATH, CONTRIBUTING_PATH, SECURITY_PATH]:
         if not doc_path.exists():
+            # F17/§5.1：必需正文缺失须显式失败，不得静默跳过装通过（fail-closed）
+            errors.append(f"必需正文缺失: {doc_path} 不存在，仓库 URL 一致性检查无法执行（fail-closed）")
             continue
         content = doc_path.read_text(encoding="utf-8")
         if STALE_REPO_URL in content:
@@ -135,6 +137,8 @@ def check_security_supported_version(pyproject_ver: str) -> list[str]:
     """Check 4: SECURITY.md supported version matches pyproject major.minor."""
     errors = []
     if not SECURITY_PATH.exists():
+        # F17/§5.1：安全支持表所在正文缺失须显式失败，不得静默跳过装通过（fail-closed）
+        errors.append(f"必需正文缺失: {SECURITY_PATH} 不存在，安全支持版本检查无法执行（fail-closed）")
         return errors
     content = SECURITY_PATH.read_text(encoding="utf-8")
     major_minor = ".".join(pyproject_ver.split(".")[:2])

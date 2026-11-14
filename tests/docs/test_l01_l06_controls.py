@@ -101,14 +101,37 @@ _TEST_GROUP_RULES: tuple[tuple[str, str], ...] = (
     ("docs/", "docs-suite"),
 )
 
+# 静态源码消费路径前缀（§9.5：改文档须核对读它的测试/脚本消费方）。
+_CONSUMER_PATH_PREFIXES: tuple[str, ...] = ("tests/", "scripts/")
+
+# topic 映射规则（按前缀首命中）：最小演示映射，非 canonical-topics.yml 全量注册表镜像。
+_TOPIC_PREFIX_RULES: tuple[tuple[str, str], ...] = (
+    ("docs/flet/", "flet"),
+    ("docs/governance/", "governance-docs"),
+    ("docs/adr/", "architecture-design"),
+    ("docs/", "documentation"),
+    ("CLAUDE.md", "governance-docs"),
+    ("AGENTS.md", "governance-docs"),
+    ("CONTRIBUTING.md", "governance-docs"),
+)
+
+
+def _topic_id(path: str) -> str | None:
+    """按路径推导受影响 topic id（模式文档取文件名 stem，其余按前缀首命中）。"""
+    if path.startswith("docs/patterns/"):
+        return Path(path).stem
+    return next((topic for prefix, topic in _TOPIC_PREFIX_RULES if path.startswith(prefix)), None)
+
 
 @dataclass(frozen=True)
 class ImpactList:
-    """临时影响清单（来源第 9.5 节最小输出子集；每次检查临时计算，无持久化状态）。"""
+    """临时影响清单（§9.5：至少区分 author/consumer/old,new/topics/test_groups/unresolved）。"""
 
     author_paths: tuple[str, ...]
+    consumer_paths: tuple[str, ...]
     old_paths: tuple[str, ...]
     new_paths: tuple[str, ...]
+    topics: tuple[str, ...]
     test_groups: tuple[str, ...]
     unresolved: tuple[str, ...]
 
@@ -117,13 +140,15 @@ def build_impact_list(changes: Iterable[tuple[str, str | None]]) -> ImpactList:
     """从变更对 (new_path, old_path | None) 构建临时影响清单（L02 最小纯函数）。
 
     rename 以双列输入承载（与 scripts/classify_changed_paths.py 的
-    filename/previous_filename 并集语义同源）：旧/新路径**都**参与作者源与测试组
-    映射；未命中任何规则的路径显式落 unresolved，不静默丢弃（不完整影响清单显式列未核）。
-    只服务本次检查的临时计算，不建永久关系库/manifest 数据库。
+    filename/previous_filename 并集语义同源）：旧/新路径**都**参与作者源、消费方与
+    topic 映射；未命中任何规则的路径显式落 unresolved，不静默丢弃（不完整影响清单
+    显式列未核）。只服务本次检查的临时计算，不建永久关系库/manifest 数据库。
     """
     author: set[str] = set()
+    consumer: set[str] = set()
     old: set[str] = set()
     new: set[str] = set()
+    topics: set[str] = set()
     groups: set[str] = set()
     unresolved: set[str] = set()
     for new_path, old_path in changes:
@@ -135,6 +160,11 @@ def build_impact_list(changes: Iterable[tuple[str, str | None]]) -> ImpactList:
                 continue
             if path.startswith(_AUTHOR_PATH_PREFIXES):
                 author.add(path)
+            if path.startswith(_CONSUMER_PATH_PREFIXES):
+                consumer.add(path)
+            topic = _topic_id(path)
+            if topic is not None:
+                topics.add(topic)
             hit = next((g for p, g in _TEST_GROUP_RULES if path.startswith(p)), None)
             if hit is not None:
                 groups.add(hit)
@@ -142,8 +172,10 @@ def build_impact_list(changes: Iterable[tuple[str, str | None]]) -> ImpactList:
                 unresolved.add(path)
     return ImpactList(
         author_paths=tuple(sorted(author)),
+        consumer_paths=tuple(sorted(consumer)),
         old_paths=tuple(sorted(old)),
         new_paths=tuple(sorted(new)),
+        topics=tuple(sorted(topics)),
         test_groups=tuple(sorted(groups)),
         unresolved=tuple(sorted(unresolved)),
     )
@@ -183,6 +215,28 @@ def test_l02_impact_list_is_pure_function() -> None:
     second = build_impact_list(changes)
     assert first == second
     assert first.test_groups == ("docs-gate", "docs-suite")
+
+
+def test_l02_impact_list_distinguishes_six_categories() -> None:
+    """§9.5：影响清单至少区分 author/consumer/old,new/topics/test_groups/unresolved 六类。"""
+    impact = build_impact_list(
+        [
+            ("docs/patterns/data-sync.md", "docs/patterns/data-sync-old.md"),
+            ("tests/docs/test_data_sync.py", None),
+            ("assets/logo.png", None),
+        ]
+    )
+    assert impact.author_paths == ("docs/patterns/data-sync-old.md", "docs/patterns/data-sync.md")
+    assert impact.consumer_paths == ("tests/docs/test_data_sync.py",), "静态源码消费方须单列"
+    assert impact.old_paths == ("docs/patterns/data-sync-old.md",)
+    assert impact.new_paths == (
+        "assets/logo.png",
+        "docs/patterns/data-sync.md",
+        "tests/docs/test_data_sync.py",
+    )
+    assert impact.topics == ("data-sync", "data-sync-old"), "受影响 topic 须单列（非只列路径）"
+    assert impact.test_groups == ("docs-suite",)
+    assert impact.unresolved == ("assets/logo.png",)
 
 
 # ---------------------------------------------------------------------------

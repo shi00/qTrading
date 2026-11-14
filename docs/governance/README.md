@@ -12,7 +12,7 @@
 |------|------|---------|-----------|
 | R1 | 架构越界 | EXCEPTIONABLE | partial |
 | R2 | 异常吞没 | INVARIANT | partial |
-| R3 | 模糊压制 | INVARIANT | full |
+| R3 | 模糊压制 | INVARIANT | partial |
 | R4 | SQL 注入 | INVARIANT | partial |
 | R5 | 僵尸引擎操作 | EXCEPTIONABLE | none |
 | R6 | 过时类型注解 | NEW_CODE | full |

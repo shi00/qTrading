@@ -25,8 +25,14 @@ class MyPolarsStrategy(PolarsBaseStrategy):
         super().__init__(name_key="strategy_my_polars", desc_key="strategy_my_polars_desc")
 
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
-        return lf.filter(pl.col("pct_chg") > 5.0)
+        return (
+            lf.filter(pl.col("pct_chg") > 5.0)
+            # 末步必须排序：主排序键 + ts_code 稳定并列键，保证同分结果可复现
+            .sort(["pct_chg", "ts_code"], descending=[True, False])
+        )
 ```
+
+> **反例（不合规）**：以 `filter` 收尾、或在排序主键后不补 `ts_code` 并列键，会使同值行顺序不确定、结果不可复现；旧策略中仅单列排序的现状只标为现状，不得作为新模板复制（F05）。
 
 > 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 继承 `BaseStrategy` + `AIStrategyMixin`）可使用 `@require_quality` 装饰器。
 

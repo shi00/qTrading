@@ -161,62 +161,25 @@ ft.use_effect(setup, dependencies=[], cleanup=cleanup)
 
 **升级触发条件**：单页行数 ≥500 或构建耗时 > 50ms 时，评估切换回 `ListView(build_controls_on_demand=True)` 并解决 E2E 视口高度为 0 时的子控件不构建问题（可能需要 `page.on_resize` 等待布局稳定）。
 
-### 4.6 CanvasKit 不响应合成 DOM 事件，需用真实鼠标事件
+### 4.6 CanvasKit 点击需真实鼠标事件（语义细节见 E2E 指南）
 
-**背景**：PR #392 修复行点击未触发 `on_click` 回调时定位的根因。
+**现象**：Playwright `locator.click(force=True)` 对 Flet CanvasKit 渲染的控件不可靠——报告 SUCCESS 但 `on_click`/`on_tap` 回调未触发。
 
-**现象**：Playwright `click(force=True)`（合成 DOM `el.click()` 事件）对 Flet CanvasKit 渲染的控件不可靠 — `force=True` 报告 SUCCESS 但 `on_click`/`on_tap` 回调未触发。
+**根因**：Flutter CanvasKit 在 canvas 层面做 hit-testing；`force=True` 只表示**跳过部分 actionability 检查**，不等于浏览器合成 `el.click()` 事件。
 
-**根因**：Flutter CanvasKit 在 canvas 层面处理 hit-testing，不响应浏览器合成的 DOM 事件；只响应真实鼠标事件（`mousedown` + `mouseup`）。
+**当前规程**（正本）：点击方式选择、`force` 语义边界、坐标鼠标点击与 actionability 判定，统一以 [CanvasKit 渲染 E2E 指南 §3「点击语义速查」](./canvaskit-rendering-e2e-guide.md) 为准，本文不重复展开。
 
-**解决方案**：E2E 测试中优先使用 `page.mouse.click(cx, cy)`（真实鼠标事件）而非 `locator.click(force=True)`（合成 DOM 事件）。`cx, cy` 通过 `locator.bounding_box()` 中心坐标计算。
+**历史说明**：PR #392 曾以「合成 DOM 事件」概括该现象；该表述已被上述正本术语取代，不作为当前定位依据。
 
-```python
-# 推荐：真实鼠标事件触发 Flutter hit-testing
-box = await locator.bounding_box()
-cx = box["x"] + box["width"] / 2
-cy = box["y"] + box["height"] / 2
-await page.mouse.click(cx, cy)
+### 4.7 `Container.on_click` 与 `flt-tappable`（历史定位假设）
 
-# 降级：合成 DOM 事件（对 CanvasKit 不可靠）
-await locator.click(force=True)
-```
+**历史说明**：PR #392 曾在「`Container.on_click` 不生成 `flt-tappable`，需改用 `GestureDetector`」的前提下定位行点击。该 `flt-tappable` / `kind` 前提属于**历史定位假设**，不再是当前 E2E 定位契约。
 
-**降级策略**：真实鼠标事件失败时，再降级到 `force=True` 合成事件（对部分 Flet 控件如导航按钮仍有效）。
+**当前规程**：控件定位优先按 [CanvasKit 渲染 E2E 指南 §2 `Semantics.identifier` 精确定位](./canvaskit-rendering-e2e-guide.md) 与同指南「点击语义速查」执行；不得以 `flt-tappable` 必然存在为前提编写新定位。
 
-### 4.7 Container.on_click 不生成 flt-tappable，GestureDetector.on_tap 才生成
+**保留**：`GestureDetector` 包裹仍是可用的行点击实现选择，但其语义节点表现须按上述正本核对。
 
-**背景**：PR #392 修复行点击语义属性缺失时定位的根因。
-
-**现象**：`ft.Container(on_click=handler, ink=True)` 生成 `flt-semantics[role="button"]` 但不生成 `flt-tappable` 语义属性，导致 Playwright 无法通过 `flt-tappable` 选择器定位可点击元素。
-
-**根因**：Flet 的 `flt-tappable` 语义属性由 `GestureDetector` 生成，`Container.on_click` 内部虽用 `InkWell` 但不暴露 `flt-tappable`。
-
-**解决方案**：需要 E2E 点击的行容器用 `ft.GestureDetector(content=Container, on_tap=handler)` 包裹，而非直接用 `Container(on_click=handler)`。
-
-```python
-# 推荐：GestureDetector 生成 flt-tappable
-inner = ft.Container(
-    height=ROW_HEIGHT,
-    ink=True,
-    bgcolor=...,
-    content=ft.Row(cells, spacing=0),
-    on_hover=on_hover,  # hover 仍挂 Container
-)
-return ft.GestureDetector(
-    content=inner,
-    on_tap=on_row_click_handler if on_row_click is not None else None,
-)
-
-# 不推荐：Container.on_click 不生成 flt-tappable
-return ft.Container(
-    on_click=on_row_click_handler,
-    ink=True,
-    ...
-)
-```
-
-**E2E 行点击定位**（见 `tests/e2e/pages.py::click_row`）：`click_row` 经 `tests/e2e/helpers/anchor_page.py::AnchorPage.click` 按 anchor 的 `AnchorKind` 分派、定位 `bbox` 中心，并一律用 `page.mouse.click`（真实鼠标事件）触发；行 anchor `result_row` 为 `AnchorKind.COMPLEX`（GestureDetector 合并节点，标签落 textContent）。`locator.click(force=True)`（合成 DOM 事件）对 CanvasKit 不可靠，仅保留给 actionability 不稳定的 Dropdown 选项等场景。
+**E2E 行点击定位**（见 `tests/e2e/pages.py::click_row`）：`click_row` 经 `tests/e2e/helpers/anchor_page.py::AnchorPage.click` 按 anchor 的 `AnchorKind` 分派、定位 `bbox` 中心，并一律用 `page.mouse.click`（真实鼠标事件）触发；行 anchor `result_row` 为 `AnchorKind.COMPLEX`（GestureDetector 合并节点，标签落 textContent）。`locator.click(force=True)`（仅跳过部分 actionability 检查，不等于合成 `el.click()`）对 CanvasKit 不可靠，仅保留给 actionability 不稳定的 Dropdown 选项等场景。
 
 ### 4.8 Flet 布局嵌套中 expand=True 的传递性陷阱
 

@@ -70,9 +70,13 @@
 
 ## 完成判定（canonical 入口）
 
-- 性能阈值/配置项改动已同步 `data/constants.py` 单位事实源与本文档描述（含 R20 量纲比较指针）
-- 新增配置项已评估质量门控影响，未绕开 `@require_quality` 等既有门控
-- 性能监控装饰器与线程池任务类型判据（CON-16）已对照
+> 完成门按**实际触域**启用，不要求无关改动为过门而修改本文件其他章节（F10）。
+
+- **安全 CAS / 模型管理配置域**（`model_management` / `migration_transition`）：按本文件「配置管理」契约逐项自检（锁顺序、CAS 回执、安全子域保护、新鲜读取、三态转译）；**普通配置项不适用**。
+- **普通配置项**（非安全子域、无 CAS 语义）：确认走 `save_config` / `ensure_defaults` 既有路径，不要求改 CAS 或安全命令。
+- **量纲相关常量**（金额 / 数量列单位映射）：仅当新增或修改 `total_mv` / `circ_mv` / `north_money` / `net_amount` / `amount` / `vol` 等列的单位声明时，才需同步 `data/constants.py` 单位事实源与本文档 R20 指针；纯开关 / 阈值 / 超时配置**不涉及**单位事实源。
+- **质量门控**：仅当改动影响质量等级、`required_quality_tier` 或连续窗口声明时，才核 `@require_quality` 未被绕开。
+- **性能监控与线程池**：仅当新增或修改外部 IO、长耗时操作或并发提交路径时，才对照 `@log_async_operation` / `@track_performance` 与线程池任务类型判据（CON-16）。
 
 _最小验证命令：_ 改动 `data/`/`strategies/` → ruff + pyright + `tests/unit/` 对应用例；
         文档改动 → `python scripts/check_docs_consistency.py`。

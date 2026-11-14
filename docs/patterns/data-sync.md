@@ -155,9 +155,12 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 ## 完成判定（canonical 入口）
 
-- 同步任务遵循 Tushare Syncer 设计模式，数据流向符合本文件「数据流向」
-- 限流与重试（C5）、质量门控（C15）、错误处理（C16）、取消传播（C18）均已落实
-- 数据库连接走统一生命周期契约（review03-C13），未重复开关连接
+> 完成门按**实际触域**启用，不要求无关改动为过门而修改本文件其他章节（F10）。
+
+- **Tushare 同步**（`data/sync/` 内经 `TushareClient` 拉取的 syncer）：遵循 Tushare Syncer 设计模式，数据流向符合本文件「数据流向」；限流与重试（C5）、质量门控（C15）、错误处理（C16）、取消传播（C18）均已落实。
+- **在线资讯同步**（`data/external/news_fetcher.py` 等 async-native 拉取）：按时间口径 / 去重身份 / 熔断 / 回退契约自检（见「新闻源采集」与 NI-F01），**不要求**套用 Tushare Syncer 设计模式。
+- **离线语料采集**（`data/external/news_sources/` + `scripts/collect_corpus.py`）：按每源限速、去重键、单源熔断、通用清洗、`CorpusStore` 幂等落库自检；**不要求** Tushare 设计模式或质量门控（离线不消费业务数据）。
+- **数据库连接生命周期**（review03-C13）：仅当改动触及 DAO / 引擎创建释放或同步落库路径时适用——确认未重复开关连接、遵守 R5 守卫；纯文档或纯解析器改动不适用。
 
 _最小验证命令：_ 改动 `data/` → ruff + pyright + `tests/unit/` 对应用例；涉 DB 查询再运行 `tests/integration/`（需 DB）。
         文档改动 → `python scripts/check_docs_consistency.py`。
