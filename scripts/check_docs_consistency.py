@@ -17,7 +17,9 @@
 9. Flet 入口完整性检查：校验 docs/flet/README.md 覆盖全部 docs/flet/*.md 专题文档，
    且不引用不存在的专题文件。
 10. exceptions.yml 例外注册表一致性检查（P1-01）：校验 docs/governance/exceptions.yml 必填字段、
-   id 唯一性、rule_id 存在性、paths 存在性与 expires_at/removal_trigger 二选一。
+   字段类型与非空、未知字段、id 唯一性与格式、rule_id 存在性、paths 非空且为仓库内真实路径
+   （不指向仓库根，空范围不构成全局豁免）与 expires_at/removal_trigger 二选一。
+   owner/approved_by 仅校验身份字段非空，批准真实性仍由人工核验。
 11. canonical-topics.yml 主题映射一致性检查（P2-12）：校验 docs/governance/canonical-topics.yml
    必填字段、id 唯一性、canonical/workflow 路径在仓库中真实存在。
 12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version 相等、
@@ -1841,6 +1843,17 @@ EXCEPTION_REQUIRED_FIELDS: frozenset[str] = frozenset(
 )
 # expires_at 与 removal_trigger 二选一必填
 EXCEPTION_EXPIRY_FIELDS: frozenset[str] = frozenset({"expires_at", "removal_trigger"})
+# 字段全集封闭：未登记字段一律拒绝（拼写错误的字段名不得充当豁免依据）
+EXCEPTION_ALLOWED_FIELDS: frozenset[str] = EXCEPTION_REQUIRED_FIELDS | EXCEPTION_EXPIRY_FIELDS
+# 自由文本字段须为非空白字符串；owner/approved_by 只校验身份字段非空，批准真实性仍人工核验
+EXCEPTION_TEXT_FIELDS: tuple[str, ...] = (
+    "reason",
+    "owner",
+    "approved_by",
+    "verification",
+    "validity_criteria",
+)
+EXCEPTION_ID_PATTERN = re.compile(r"^EX-\d{4}$")
 
 
 def check_exceptions_yaml_consistency() -> list[str]:
@@ -1848,11 +1861,15 @@ def check_exceptions_yaml_consistency() -> list[str]:
 
     校验 docs/governance/exceptions.yml：
     1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "exceptions" key (list)。
-    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)。
-    3. expires_at 与 removal_trigger 二选一必填。
-    4. id 唯一且格式为 EX-XXXX。
-    5. rule_id 必须存在于 docs/governance/redlines.yml。
-    6. paths 必须为 list 且每个路径在仓库中真实存在。
+    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)，
+       且字段值严格校验：文本字段为非空字符串；id 须为 EX-XXXX；rule_id 须为非空字符串；
+       paths 须为非空 list，每项为仓库相对、真实存在且不指向仓库根的路径（空范围不构成全局豁免）。
+    3. 字段全集封闭：出现未登记字段即报错。
+    4. expires_at 与 removal_trigger 二选一必填（日期合法性与到期判断由
+       check_exceptions_effectiveness() 负责，本函数不重复）。
+    5. id 唯一且格式为 EX-XXXX。
+    6. rule_id 必须存在于 docs/governance/redlines.yml。
+    7. owner/approved_by 仅校验身份字段非空；批准真实性仍由人工核验，本函数不自动化。
     """
     errors: list[str] = []
 
@@ -1889,10 +1906,16 @@ def check_exceptions_yaml_consistency() -> list[str]:
         }
 
     seen_ids: set[str] = set()
+    root_resolved = ROOT.resolve()
     for idx, entry in enumerate(exceptions, 1):
         if not isinstance(entry, dict):
             errors.append(f"exceptions[{idx}] 应为 dict, 实际 {type(entry).__name__}")
             continue
+
+        # 未知字段：拼错的字段名不得充当豁免依据
+        unknown_fields = sorted(set(entry.keys()) - EXCEPTION_ALLOWED_FIELDS)
+        if unknown_fields:
+            errors.append(f"exceptions[{idx}] 含未知字段: {unknown_fields}")
 
         # 必填字段
         missing = EXCEPTION_REQUIRED_FIELDS - entry.keys()
@@ -1902,32 +1925,57 @@ def check_exceptions_yaml_consistency() -> list[str]:
         if not (EXCEPTION_EXPIRY_FIELDS & entry.keys()):
             errors.append(f"exceptions[{idx}] 缺少 expires_at 或 removal_trigger (二选一必填)")
 
+        # 自由文本字段：类型与非空（空串/纯空白/null/非字符串均拒绝；
+        # owner/approved_by 只核身份字段非空，批准真实性仍由人工核验）
+        for field in EXCEPTION_TEXT_FIELDS:
+            if field in entry:
+                value = entry[field]
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"exceptions[{idx}] {field} 应为非空字符串, 实际 {value!r}")
+
         # id 唯一性与格式
-        exc_id = entry.get("id")
-        if exc_id is not None:
-            if not isinstance(exc_id, str) or not exc_id.startswith("EX-"):
+        if "id" in entry:
+            exc_id = entry["id"]
+            if not isinstance(exc_id, str) or not EXCEPTION_ID_PATTERN.match(exc_id):
                 errors.append(f"exceptions[{idx}] id 格式应为 EX-XXXX, 实际 {exc_id!r}")
             elif exc_id in seen_ids:
                 errors.append(f"exceptions[{idx}] id 重复: {exc_id}")
             else:
                 seen_ids.add(exc_id)
 
-        # rule_id 存在性
-        rule_id = entry.get("rule_id")
-        if rule_id is not None and registered_rule_ids and rule_id not in registered_rule_ids:
-            errors.append(f"exceptions[{idx}] rule_id '{rule_id}' 不存在于 redlines.yml")
+        # rule_id 形态与存在性
+        if "rule_id" in entry:
+            rule_id = entry["rule_id"]
+            if not isinstance(rule_id, str) or not rule_id.strip():
+                errors.append(f"exceptions[{idx}] rule_id 应为非空字符串, 实际 {rule_id!r}")
+            elif registered_rule_ids and rule_id not in registered_rule_ids:
+                errors.append(f"exceptions[{idx}] rule_id '{rule_id}' 不存在于 redlines.yml")
 
-        # paths 存在性
-        paths = entry.get("paths")
-        if isinstance(paths, list):
-            for p in paths:
-                if not isinstance(p, str):
-                    errors.append(f"exceptions[{idx}] paths 元素应为 str, 实际 {type(p).__name__}")
-                    continue
-                if not (ROOT / p).exists():
-                    errors.append(f"exceptions[{idx}] 路径不存在: {p}")
-        elif paths is not None:
-            errors.append(f"exceptions[{idx}] paths 应为 list, 实际 {type(paths).__name__}")
+        # paths 范围：非空 list、仓库相对、仓库内真实存在且不指向仓库根
+        # （空范围不得解释为全局豁免）
+        if "paths" in entry:
+            paths = entry["paths"]
+            if not isinstance(paths, list) or not paths:
+                errors.append(f"exceptions[{idx}] paths 应为非空 list, 实际 {paths!r}")
+            else:
+                for p in paths:
+                    if not isinstance(p, str) or not p.strip():
+                        errors.append(f"exceptions[{idx}] paths 元素应为非空字符串, 实际 {p!r}")
+                        continue
+                    if Path(p).is_absolute():
+                        errors.append(f"exceptions[{idx}] paths 须为仓库相对路径: {p!r}")
+                        continue
+                    try:
+                        resolved = (ROOT / p).resolve()
+                    except (OSError, RuntimeError, ValueError):
+                        errors.append(f"exceptions[{idx}] paths 元素不是合法路径: {p!r}")
+                        continue
+                    if not resolved.is_relative_to(root_resolved):
+                        errors.append(f"exceptions[{idx}] paths 不得指向仓库之外: {p!r}")
+                    elif resolved == root_resolved:
+                        errors.append(f"exceptions[{idx}] paths 不得指向仓库根（空范围不构成全局豁免）: {p!r}")
+                    elif not resolved.exists():
+                        errors.append(f"exceptions[{idx}] 路径不存在: {p}")
 
     # GATE-02: R1 例外条目数 == pyproject.toml "R1: utils must not import business layers" 契约 ignore_imports 条数（GDR-01 条数唯一事实源，
     # 防 exceptions.yml 自己文件里的头注释漂移）。
