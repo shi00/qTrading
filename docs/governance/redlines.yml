@@ -34,7 +34,7 @@
 #     声明时须为非空字符串列表（不得用空判据做形式合规）。
 #
 # 修改规则:
-#   - 红线判据只改本文件；改后运行 `python scripts/check_docs_consistency.py --scope document --update`
+#   - 红线判据只改本文件；改后运行 `python scripts/check_docs_consistency.py --update`（更新隐含更新后 all 检查）
 #     重新生成 CLAUDE.md §3.1，禁止再手改生成视图（只改派生副本必须被 --check 判红）
 #   - 新增 R20+ 时同样只改本文件，生成后由 check_redlines_yaml_consistency() 校验一致
 #   - 禁止删除或复用已废弃编号 (append-only)

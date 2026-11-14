@@ -52,6 +52,22 @@ class TestGithubAnchorSluggerParity:
         assert github_anchor("示例") == dm.create_slugger().slug("示例")
 
 
+class TestGithubAnchorUsesSharedFactory:
+    """Q10：github_anchor 必须经唯一工厂 create_slugger()，不得固定 Compat 实现。"""
+
+    def test_delegates_to_create_slugger(self, monkeypatch):
+        calls: list[tuple[str, bool]] = []
+
+        class _Recorder:
+            def slug(self, value: str, maintain_case: bool = False) -> str:
+                calls.append((value, maintain_case))
+                return "sentinel-slug"
+
+        monkeypatch.setattr(dm, "create_slugger", lambda: _Recorder())
+        assert github_anchor("任意标题") == "sentinel-slug"
+        assert calls == [("任意标题", False)]
+
+
 class TestExtractHeadingsDelegatesToView:
     """extract_headings 委托统一解析视图：围栏/缩进块/行内代码边界。"""
 

@@ -336,15 +336,16 @@ _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "fl
 
 
 def github_anchor(heading_text: str) -> str:
-    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown slugger 实现）。
+    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown 唯一工厂）。
 
-    检视 §5.1 解析边界迁移（D5）：锚点语义唯一来源为 docs_markdown.create_slugger()
-    （github-slugger 语义：小写化 → 剔除非字母数字/``-``/``_`` → 空白逐个转连字符 →
-    重复标题追加序号）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
+    检视 §5.1 解析边界迁移（D5）+ Q10：锚点语义唯一来源为 ``create_slugger()``，
+    与共享解析视图同源；本函数不再自行固定 Compat 实现，避免消费者后端与解析视图分叉。
+    实际生效后端由 ``docs_markdown.SLUGGER_BACKEND`` 声明（github-slugger 可用则用包，
+    否则回退等价实现）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
 
     例如 "3.1 ❌ 绝对禁止" → 移除 "." 和 "❌" 后得 "31  绝对禁止" → "31--绝对禁止"。
     """
-    return docs_markdown.CompatGithubSlugger().slug(heading_text)
+    return docs_markdown.create_slugger().slug(heading_text)
 
 
 def parse_doc_view(content: str) -> docs_markdown.DocumentView:
@@ -2393,8 +2394,9 @@ def _min_verify_block_text(content: str) -> tuple[str, list[str]]:
 
     直接消费 ``docs_generated.scan_blocks()`` 的块契约：围栏/缩进代码块内的同名标记
     只是示例文本，不构成现行块；不再用全文 ``find`` 定位，避免被前置/后置样例诱导。
-    同时保留 F02 反例防护：受控块结束后、同一小节（至下一个二级标题或文末）内
-    新增的 bullet 一律 fail-closed 报错，防止新增命令绕过受控块被静默丢弃。
+    同时保留 F02 反例防护（Q08 收窄）：受控块结束后、同一小节（至下一个二级标题或
+    文末）内仅识别与受控块标签同前缀的 bullet（真正的命令声明），防止新增命令绕过
+    受控块被静默丢弃；普通说明列表项属于正文，不误判。代码块内的样例文本一并排除。
     返回 (块内容文本, errors)：失败时文本为空且 errors 非空。
     """
     try:
@@ -2407,22 +2409,24 @@ def _min_verify_block_text(content: str) -> tuple[str, list[str]]:
             f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
             "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
         ]
-    # 块结束后同节内容：边界由共享解析视图给出（围栏内的伪标题/伪 bullet 只是示例
-    # 文本，不构成章节或新增命令），不重新在全文搜索标记。
+    # 块结束后同节内容：边界与代码块行由共享解析视图给出（围栏内的伪标题/伪命令声明
+    # 只是示例文本），不重新在全文搜索标记。
     view = docs_markdown.parse_text(content)
     code_lines = view.code_line_numbers()
     next_h2 = next((h.line for h in view.headings if h.level == 2 and h.line > span.end_line), None)
     lines = content.splitlines()
     scan_end = next_h2 - 1 if next_h2 is not None else len(lines)
-    stray_bullets = [
+    duplicate_declarations = [
         line
         for lineno, line in enumerate(lines, start=1)
-        if span.end_line < lineno <= scan_end and lineno not in code_lines and line.startswith("- ")
+        if span.end_line < lineno <= scan_end
+        and lineno not in code_lines
+        and line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
     ]
-    if stray_bullets:
+    if duplicate_declarations:
         return "", [
-            "CONTRIBUTING.md 最小验证命令受控块后同节内含无法识别的行"
-            "（新增命令必须写入受控块内，防止被静默丢弃，F02）: " + " / ".join(stray_bullets)
+            "CONTRIBUTING.md 最小验证命令受控块后同节内含重复命令声明"
+            "（命令声明只能写入受控块内，防止被静默丢弃，F02）: " + " / ".join(duplicate_declarations)
         ]
     return "\n".join(span.content_lines) + ("\n" if span.content_lines else ""), []
 

@@ -3966,9 +3966,9 @@ class TestAgentsMinVerifyCommands:
         assert any("无法识别" in e for e in errors), f"应检出受控块未知行, got: {errors}"
 
     def test_prose_outside_block_with_same_text_passes(self, tmp_path, monkeypatch):
-        """通过对照（F20）：同样文本出现在受控块外（普通正文）→ 不报「无法识别」.
+        """通过对照（F20/Q08）：同样文本出现在受控块外（同一小节普通说明）→ 不报「无法识别」.
 
-        证明反例变因唯一：块外普通正文不误伤，仅块内未知行触发失败.
+        证明反例变因唯一：同节普通说明列表不得被泛禁；只有块内未知行才触发失败.
         """
         from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
 
@@ -3978,14 +3978,54 @@ class TestAgentsMinVerifyCommands:
             encoding="utf-8",
         )
         content = self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
-        prose = content + "\n## 使用说明\n\n- **额外行**：`some cmd`\n\n（普通正文，不在受控块内）\n"
+        prose = content + "\n- **额外行**：`some cmd`\n\n（同一小节的普通说明，不在受控块内）\n"
         contributing = tmp_path / "CONTRIBUTING.md"
         contributing.write_text(prose, encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
         monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
 
         errors = check_agents_md_min_verify_commands()
-        assert errors == [], f"块外同文本普通正文不得误报, got: {errors}"
+        assert errors == [], f"同节块外普通说明不得误报, got: {errors}"
+
+    def test_same_bullet_outside_block_passes_but_inside_block_rejected(self, tmp_path, monkeypatch):
+        """对照（Q08）：同一目标行只改变块内/块外位置——块外同节通过，块内第三条未知命令拒绝."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        base = self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
+        extra = "- **额外行**：`some cmd`\n"
+
+        outside = tmp_path / "CONTRIBUTING_outside.md"
+        outside.write_text(base + "\n" + extra, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", outside)
+        assert check_agents_md_min_verify_commands() == [], "块外同节普通说明应通过"
+
+        inside = tmp_path / "CONTRIBUTING_inside.md"
+        inside.write_text(base.replace("<!-- /generated -->", extra + "<!-- /generated -->", 1), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", inside)
+        errors = check_agents_md_min_verify_commands()
+        assert any("无法识别" in e for e in errors), f"块内第三条未知命令应拒绝, got: {errors}"
+
+    def test_duplicate_command_declaration_outside_block_rejected(self, tmp_path, monkeypatch):
+        """反例（F02/Q08）：受控块外同节重复「变更相关门禁」命令声明 → 拒绝."""
+        from check_docs_consistency import check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(self._agents_with_mirror(["（占位镜像）"]), encoding="utf-8")
+        content = self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
+        duplicated = content + "\n- **变更相关门禁**：`ruff check .`\n"
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(duplicated, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("重复命令声明" in e for e in errors), f"应检出块外重复命令声明, got: {errors}"
 
     def test_detects_bullet_without_colon_separator(self, tmp_path, monkeypatch):
         """反例（F02）：受控块 bullet 缺「：」分隔 → 解析层 fail-closed 报错."""
@@ -4073,8 +4113,8 @@ class TestAgentsMinVerifyCommands:
         errors = check_agents_md_min_verify_commands()
         assert any("缺少最小验证命令受控块标记" in e for e in errors), f"应拒绝仅有围栏样例的正本, got: {errors}"
 
-    def test_stray_bullet_after_real_block_still_rejected(self, tmp_path, monkeypatch):
-        """Q07 回归：跳过围栏样例不得削弱 F02——块后同节真实新增 bullet 仍 fail-closed."""
+    def test_stray_declaration_after_real_block_still_rejected(self, tmp_path, monkeypatch):
+        """Q07 回归：跳过围栏样例不得削弱 F02/Q08——块后同节真实重复命令声明仍 fail-closed."""
         from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
 
         agents = tmp_path / "AGENTS.md"
@@ -4084,14 +4124,15 @@ class TestAgentsMinVerifyCommands:
         )
         contributing = tmp_path / "CONTRIBUTING.md"
         contributing.write_text(
-            self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS) + "- 绕过受控块新增命令\n",
+            self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS)
+            + "- **变更相关门禁**：`evil command outside block`\n",
             encoding="utf-8",
         )
         monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
         monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
 
         errors = check_agents_md_min_verify_commands()
-        assert any("受控块后同节内" in e for e in errors), f"块外新增 bullet 应拒绝, got: {errors}"
+        assert any("重复命令声明" in e for e in errors), f"块外重复命令声明应拒绝, got: {errors}"
 
     def test_detects_missing_block_marker(self, tmp_path, monkeypatch):
         """AGENTS.md 缺生成区块标记 → 报错（不静默通过）."""
