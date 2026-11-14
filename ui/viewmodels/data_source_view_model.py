@@ -27,11 +27,13 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
+from data.sync.base import SyncStatus
 from data.sync.errors import InitSyncError
 from services.task_manager import (
     EXCLUSIVE_GROUP_MARKET_SYNC,
     TERMINAL_STATUSES,
     AppTask,
+    TaskCancelledError,
     TaskManager,
     TaskStatus,
 )
@@ -467,6 +469,11 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             try:
                 dp = await self._ensure_processor()
                 result = await dp.run_daily_update(progress_callback=_progress)
+                # C14/D02：协作结果取消（同步层以 SyncResult.status=cancelled 正常返回）必须先于
+                # 「失败表为空即成功」的完整性判定——取消不得冒成功提示、不得算 COMPLETED，也
+                # 不得伪装 FAILED。提交适配器抛取消信号，由 TaskManager 映射 CANCELLED 终态。
+                if getattr(result, "status", None) == SyncStatus.CANCELLED.value:
+                    raise TaskCancelledError(Message("task_cancelled_desc"))
                 # Task 8.2: 同步结果可见化 — 消费 SyncResult.skipped 与 skipped_permission 汇总
                 if result is not None and getattr(result, "skipped", 0) > 0:
                     self._emit_snack(
@@ -525,6 +532,14 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # (经 _cancel_task_impl 内同步 _notify_subscribers) 先于本 except 块恢复
                 # is_syncing=False, 守卫会导致取消 snack 永远被跳过 (集成测试
                 # test_cancel_active_task_cancels_and_recovers 实证)
+                self._emit_snack(
+                    Message("settings_msg_sync_cancelled"),
+                    "warning",
+                )
+                raise
+            except TaskCancelledError:
+                # C14/D02：协作结果取消 → 同真实取消的取消提示（不冒成功/失败提示），
+                # 异常交由 TaskManager 映射 CANCELLED 终态。
                 self._emit_snack(
                     Message("settings_msg_sync_cancelled"),
                     "warning",

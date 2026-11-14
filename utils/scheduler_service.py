@@ -1005,9 +1005,9 @@ class SchedulerService:
         is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_not_ready）
         之前就重抛，该日「失败了却没记账」，只看 is_complete 会把未记账的失败日当成功。
         """
-        from services.task_manager import TaskManager, TaskIncompleteError  # lazy-import: 启动性能
+        from services.task_manager import TaskCancelledError, TaskIncompleteError, TaskManager  # lazy-import: 启动性能
         from data.data_processor import DataProcessor  # lazy-import: 启动性能
-        from data.sync.base import SyncResult  # lazy-import: 启动性能
+        from data.sync.base import SyncResult, SyncStatus  # lazy-import: 启动性能
 
         # D11-F01: 关闭前已排队的补偿任务，获得组锁/信号量后可能才开始执行——此时自动更新
         # 可能已被关闭，必须在业务 IO 之前二次判定，避免仍调用 sync_daily_market_snapshot。
@@ -1066,6 +1066,18 @@ class SchedulerService:
                         exc_info=True,
                     )
                     continue
+                if getattr(sync_result, "status", None) == SyncStatus.CANCELLED.value:
+                    # C14/D02：共享结果被同步层标记 cancelled（historical.py 的合法「标记取消并
+                    # 正常返回」分支）→ 立即停止，不再启动后续日期（不跨 d2），复用取消收敛
+                    # 路径保留已连续成功批次的水位；不得走到整批末尾按「无失败日」误推进水位，
+                    # 也不得记普通失败退避（取消 ≠ 失败）。
+                    cancelled = True
+                    logger.warning(
+                        "[Scheduler] Catch-up aborted at %s (sync result marked cancelled); "
+                        "remaining days stay in catch-up range",
+                        d.strftime("%Y%m%d"),
+                    )
+                    break
                 if not failed_dates and sync_result.is_complete:
                     contiguous_success_end = d
         finally:
@@ -1095,6 +1107,11 @@ class SchedulerService:
                         "(remaining days stay in catch-up range)",
                         watermark,
                     )
+        if cancelled:
+            # C14/D02：协作结果取消 → 抛取消信号，由 TaskManager 映射 CANCELLED 终态
+            # （≠ FAILED）；主循环已停止，不再执行剩余日期。已连续成功批次的水位已在
+            # finally 收敛（R22 单调，不越洞），取消不计普通失败退避。
+            raise TaskCancelledError(Message("task_cancelled_desc"))
         # D1-2/MAJOR-05: 仅「全部日期成功且关键表全成功」才推进到最后一个遗漏交易日。
         if not failed_dates and sync_result.is_complete:
             latest = missed_dates[-1]
@@ -1200,9 +1217,11 @@ class SchedulerService:
         async def _daily_update_logic(task_id: str, **kwargs):
             tm = TaskManager()
             from services.task_manager import (
+                TaskCancelledError,
                 TaskIncompleteError,
             )  # lazy-import: R1 EX-0007（utils 仅编排期引用业务异常）
             from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
+            from data.sync.base import SyncStatus  # lazy-import: 启动性能——仅判定取消终态
 
             processor = DataProcessor()
 
@@ -1210,6 +1229,11 @@ class SchedulerService:
                 tm.update_progress(task_id, current / total if total else 0, msg)
 
             result = await processor.run_daily_update(progress_callback=_progress)
+            # C14/D02：协作结果取消（SyncResult.status=cancelled）先于完整性判定——取消不得
+            # 映射 FAILED（用户取消 ≠ 失败假象），不推进水位；抛取消信号由 TaskManager 记
+            # CANCELLED 终态（≠ COMPLETED）。
+            if getattr(result, "status", None) == SyncStatus.CANCELLED.value:
+                raise TaskCancelledError(Message("task_cancelled_desc"))
             # D1-2: 幂等键以 SyncResult.is_complete 为准（关键表全部成功），而非 not errors/无 is_complete。
             # is_complete 缺省 False（保守）：即便收到无法判定的结果也不写入幂等键，宁可下次重跑。
             is_complete = getattr(result, "is_complete", False)
