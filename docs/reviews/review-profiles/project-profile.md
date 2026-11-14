@@ -8,7 +8,7 @@
 
 ## 红线索引（R1~R24）
 
-检视时须对照正本逐条核对 R1~R24 的违反；全部 R1~R24 的编号、标题与定义以 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 为唯一正本（机器可读镜像见 [docs/governance/redlines.yml](../../governance/redlines.yml)）。本 profile **不复述**红线定义（避免与正本措辞分化），只补充正本未承载的增量：无完整自动门禁红线的人工追查步骤（见下节）。
+检视时须对照正本逐条核对 R1~R24 的违反；红线判据正本为 [docs/governance/redlines.yml](../../governance/redlines.yml)，[CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 是由该文件生成的视图。本 profile **不复述**红线定义（避免与正本措辞分化），只补充正本未承载的增量：无完整自动门禁红线的人工追查步骤（见下节）。
 
 ## 必检维度（本项目）
 

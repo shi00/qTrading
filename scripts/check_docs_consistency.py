@@ -2807,7 +2807,7 @@ def check_ruleset_changelog_version() -> list[str]:
     return errors
 
 
-# --- DOC-04: 决策树与其机器可读镜像的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
+# --- DOC-04: 决策树生成视图与判据正本的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
 # CLAUDE.md §1.8「必读入口」列既可能以 markdown 链接 `[text](./docs/x.md)` 出现，
 # 也可能以裸路径文本出现（如 `docs/guides/how-to.md「7. 新增回测配置」`、`CONTRIBUTING.md「...」`）。
 # canonical-topics.yml 的 canonical 值统一为仓库相对路径（如 `docs/patterns/mvvm.md` / `CONTRIBUTING.md`）。
@@ -2900,9 +2900,9 @@ def _extract_decision_tree_targets(claude_content: str) -> set[str]:
 def check_decision_tree_mapping() -> list[str]:
     """检查项 13：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致（DOC-04）。
 
-    宪法 §1.8 是「本体」，canonical-topics.yml 是「机器可读镜像」。检查把正文任务身份
-    绑定到路由（F03）：每个数据行以 `<!-- route: ... -->` 锚声明承载的 yml topic id，
-    校验「行 → 锚 id → canonical」精确对应：
+    canonical-topics.yml 是「判据正本」，CLAUDE.md §1.8 是「生成视图」。检查把视图中
+    的任务身份绑定到路由（F03）：每个数据行以 `<!-- route: ... -->` 锚声明承载的 yml
+    topic id，校验「行 → 锚 id → canonical」精确对应：
     1. fail-closed：数据行缺锚即报错（防新增行绕过身份绑定）；
     2. 行锚引用的 topic id 必须在 yml 登记，且同一 id 不得绑定多行；
     3. 行入口路径必须已登记（方向 1），且与该行锚主题的 canonical 双向一致——
