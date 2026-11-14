@@ -2,9 +2,12 @@
 
 真 embedded PG 上验证来源读取：
 
+- 只读**已登记到请求上下文**（草稿 revision / 执行输入版）的来源版本；同用户域
+  但未进入该上下文的版本 → ``INPUT_INVALID``（不因同域可读就放行）；
 - 仅读取**已经准备好的选定表示**：``body_text`` 或 ``body_ref`` 载荷（核 owner/
   编码/长度/SHA-256 后重建），不现场解析、不扩大范围（§4.2 line 421）；
-- 未准备返回 ``unread`` 与明确原因，不伪完整；禁用/清理后 ``available=False``；
+- 未准备返回 ``unread`` 与明确原因，不伪完整；禁用/清理后 ``available=False``
+  且不返回正文、原因不得为空；
 - 查询摘要/定位与已存版本不一致 → ``REVISION_CONFLICT``（不静默换版）；
 - 其他用户域/不存在 → ``INPUT_INVALID``；行内自相矛盾 → ``OPERATION_UNKNOWN``；
 - 载荷缺失/损坏 → ``PERSISTENCE_UNAVAILABLE``（不回退最新或摘要）。
@@ -42,7 +45,14 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentAssetVersion, AgentBodyPayload
+from data.persistence.models import (
+    AgentAssetVersion,
+    AgentBodyPayload,
+    AgentExecution,
+    AgentRound,
+    AgentSession,
+    AgentSourceLink,
+)
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -117,6 +127,8 @@ def _query(
     locator: SourceLocator | None = None,
     draft_revision: int | None = 3,
     execution_id: str | None = None,
+    round_id: str | None = None,
+    input_revision: int | None = None,
 ) -> SourceReadQuery:
     return SourceReadQuery(
         source_id="src-1",
@@ -125,7 +137,49 @@ def _query(
         locator=locator or _locator(),
         draft_revision=draft_revision,
         execution_id=execution_id,
+        round_id=round_id,
+        input_revision=input_revision,
     )
+
+
+async def _seed_session(dao: AgentDao) -> None:
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+        await conn.execute(sa.insert(AgentSession).values(user_scope="u1", session_id="s1", title="来源会话"))
+
+
+async def _seed_execution(dao: AgentDao, *, execution_id: str = "exec-1", round_id: str = "round-1") -> None:
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+        await conn.execute(
+            sa.insert(AgentExecution).values(
+                user_scope="u1",
+                execution_id=execution_id,
+                session_id="s1",
+                execution_kind="root",
+                node_id="root",
+                display_state="queued",
+                goal_coverage="unknown",
+                source_module="ui",
+                business_request_id=f"req-{execution_id}",
+                intent_digest="a" * 64,
+            )
+        )
+        await conn.execute(
+            sa.insert(AgentRound).values(
+                user_scope="u1",
+                round_id=round_id,
+                execution_id=execution_id,
+                round_number=1,
+                workflow_id=f"wf-{round_id}",
+                workflow_code_version="wcv-1",
+                run_epoch=1,
+                input_revision=1,
+                plan_revision=1,
+                goal_coverage="unknown",
+                final_saved=False,
+                convergence_confirmed=False,
+                active_round=True,
+            )
+        )
 
 
 async def _seed_asset(
@@ -142,6 +196,7 @@ async def _seed_asset(
     verification_in_metadata: str = "program_verified",
     tombstoned: bool = False,
     cleaned: bool = False,
+    link_kind: str | None = "draft",
 ) -> None:
     ref = ref or _source_ref()
     payload: dict[str, object] = {
@@ -193,12 +248,31 @@ async def _seed_asset(
                 cleaned_at=datetime(2026, 11, 2, tzinfo=UTC) if cleaned else None,
             )
         )
+        if link_kind is not None:
+            # 同事务插入谱系边（source FK 即刻校验）：草稿上下文默认 consumer d1@3。
+            consumer_id = "draft-1" if link_kind == "draft" else "exec-1"
+            consumer_version = "3" if link_kind == "draft" else "1"
+            await conn.execute(
+                sa.insert(AgentSourceLink).values(
+                    user_scope=ref.user_scope,
+                    link_id=f"link-{link_kind}-{consumer_id}",
+                    source_id=ref.source_id,
+                    source_version=ref.version,
+                    consumer_kind=link_kind,
+                    consumer_id=consumer_id,
+                    consumer_version=consumer_version,
+                    session_id="s1" if link_kind == "draft" else None,
+                    execution_id="exec-1" if link_kind == "execution" else None,
+                    relation_kind="origin",
+                )
+            )
 
 
 class TestReadSourceRepresentation:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_reads_inline_body_text_exactly(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, body_text="第一行\r\n第二行")
 
         read = await dao.read_source(_query(), user_scope="u1")
@@ -220,6 +294,7 @@ class TestReadSourceRepresentation:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_reads_body_ref_payload_with_verified_identity(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, body_ref="body-1", payload_text="载荷正文")
 
         read = await dao.read_source(_query(), user_scope="u1")
@@ -230,6 +305,7 @@ class TestReadSourceRepresentation:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_reads_prepared_range_facts_and_coverage(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         fact = FactValue(
             field_key="revenue",
             object_ref="src-1:v1",
@@ -281,9 +357,10 @@ class TestReadSourceRepresentation:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_unread_source_reports_reason_not_empty_success(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, ref=_source_ref(read_state=ReadState.UNREAD), read_state="unread")
 
-        read = await dao.read_source(_query(execution_id="exec-1", draft_revision=None), user_scope="u1")
+        read = await dao.read_source(_query(), user_scope="u1")
 
         assert read.read_state is ReadState.UNREAD
         assert read.body_text is None
@@ -292,8 +369,22 @@ class TestReadSourceRepresentation:
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_body_is_gated_by_read_state(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, ref=_source_ref(read_state=ReadState.UNREAD), read_state="unread", body_text="未读正文")
+
+        read = await dao.read_source(_query(), user_scope="u1")
+
+        assert read.read_state is ReadState.UNREAD
+        assert read.body_text is None
+        assert read.missing_reason == "representation_not_available"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_disabled_and_cleaned_source_not_available(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(
             dao,
             ref=_source_ref(read_state=ReadState.DISABLED, missing_reason="用户禁用"),
@@ -307,14 +398,83 @@ class TestReadSourceRepresentation:
 
         assert read.available is False
         assert read.missing_reason == "用户禁用"
-        assert read.body_text == "已存正文"
+        assert read.body_text is None
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_execution_context_requires_registered_link(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_execution(dao)
+        await _seed_asset(dao, body_text="正文", link_kind="execution")
+
+        read = await dao.read_source(
+            _query(draft_revision=None, execution_id="exec-1", round_id="round-1", input_revision=1), user_scope="u1"
+        )
+
+        assert read.body_text == "正文"
         await dao.engine.dispose()  # type: ignore[union-attr]
 
 
 class TestReadSourceIdentityAndFailures:
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_source_not_registered_to_context_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, body_text="正文", link_kind=None)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(_query(), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "not registered" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_execution_without_link_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, body_text="正文")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(_query(draft_revision=None, execution_id="exec-1"), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_round_of_other_execution_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_execution(dao)
+        await _seed_execution(dao, execution_id="exec-2", round_id="round-x")
+        await _seed_asset(dao, body_text="正文", link_kind="execution")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(
+                _query(draft_revision=None, execution_id="exec-1", round_id="round-x", input_revision=1),
+                user_scope="u1",
+            )
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_input_revision_mismatch_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_execution(dao)
+        await _seed_asset(dao, body_text="正文", link_kind="execution")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(
+                _query(draft_revision=None, execution_id="exec-1", round_id="round-1", input_revision=2),
+                user_scope="u1",
+            )
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_digest_mismatch_is_revision_conflict(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, body_text="正文")
 
         with pytest.raises(AgentServiceError) as excinfo:
@@ -325,6 +485,7 @@ class TestReadSourceIdentityAndFailures:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_locator_mismatch_is_revision_conflict(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, body_text="正文")
 
         with pytest.raises(AgentServiceError) as excinfo:
@@ -335,6 +496,7 @@ class TestReadSourceIdentityAndFailures:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_other_user_scope_not_found(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, body_text="正文")
 
         with pytest.raises(AgentServiceError) as excinfo:
@@ -355,6 +517,7 @@ class TestReadSourceIdentityAndFailures:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_inconsistent_metadata_is_unknown(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, body_text="正文", verification_in_metadata="human_verified")
 
         with pytest.raises(AgentServiceError) as excinfo:
@@ -365,6 +528,7 @@ class TestReadSourceIdentityAndFailures:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_broken_source_ref_is_unknown(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
         await _seed_asset(dao, body_text="正文", metadata_extra={"source_ref": {"broken": True}})
 
         with pytest.raises(AgentServiceError) as excinfo:
@@ -376,6 +540,7 @@ class TestReadSourceIdentityAndFailures:
     async def test_corrupt_body_payload_digest_or_owner_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
         for tamper in ("digest", "owner"):
             dao = await _setup(real_embedded_pg.url)
+            await _seed_session(dao)
             await _seed_asset(dao, body_ref="body-1", payload_text="正文", payload_tamper=tamper)
 
             with pytest.raises(AgentServiceError) as excinfo:

@@ -822,17 +822,28 @@ class AgentDao(BaseDao):
                     f"unreadable source read_state: {type(exc).__name__}",
                     identity,
                 ) from exc
-            body_text: str | None = row.body_text
-            if body_text is None and row.body_ref is not None:
-                body_text = await self._read_body_text(
-                    conn,
-                    user_scope=user_scope,
-                    body_ref=row.body_ref,
-                    identity=identity,
-                    owner=("asset", query.source_id, query.version),
-                )
+            await self._assert_source_registered(conn, query=query, user_scope=user_scope, identity=identity)
+            body_text: str | None = None
+            if read_state in (ReadState.READY, ReadState.PARTIAL):
+                body_text = row.body_text
+                if body_text is None and row.body_ref is not None:
+                    body_text = await self._read_body_text(
+                        conn,
+                        user_scope=user_scope,
+                        body_ref=row.body_ref,
+                        identity=identity,
+                        owner=("asset", query.source_id, query.version),
+                    )
             missing_reason = source_ref.missing_reason
-            if body_text is None and missing_reason is None:
+            available = (
+                not row.tombstoned
+                and row.disabled_at is None
+                and row.cleaned_at is None
+                and read_state is not ReadState.UNAVAILABLE
+            )
+            if not available and missing_reason is None:
+                missing_reason = "source_unavailable"
+            elif body_text is None and missing_reason is None:
                 missing_reason = "representation_not_available"
             return SourceRead(
                 source=source_ref,
@@ -844,13 +855,64 @@ class AgentDao(BaseDao):
                 coverage=self._source_coverage(metadata, identity),
                 verification=verification,
                 limitations=self._source_limitations(metadata, identity),
-                available=(
-                    not row.tombstoned
-                    and row.disabled_at is None
-                    and row.cleaned_at is None
-                    and read_state is not ReadState.UNAVAILABLE
-                ),
+                available=available,
                 missing_reason=missing_reason,
+            )
+
+    @staticmethod
+    async def _assert_source_registered(
+        conn: AsyncConnection, *, query: SourceReadQuery, user_scope: str, identity: str
+    ) -> None:
+        """核对来源已登记到请求上下文（§4.2：草稿 revision 或已受理执行输入版）。
+
+        - 草稿上下文：须存在 ``consumer_kind='draft'`` 且 ``consumer_version`` 为
+          该修订的谱系边；
+        - 执行上下文：须存在 ``consumer_kind='execution'`` 且 ``execution_id``
+          一致的谱系边；给出 ``round_id`` 时再核该轮次属于此执行且
+          ``input_revision`` 与轮次一致。
+
+        未登记（或轮次/版本不符）→ ``INPUT_INVALID``：不因「同用户域有该来源版本」
+        就放行未进入该请求的资料（正本未逐列冻结草稿/执行 consumer_version 语义，
+        此处按 consumer_kind+版本/轮次核定，实施记录见 spec 计划 B）。
+        """
+
+        base = (
+            AgentSourceLink.user_scope == user_scope,
+            AgentSourceLink.source_id == query.source_id,
+            AgentSourceLink.source_version == query.version,
+        )
+        if query.draft_revision is not None:
+            conditions = (*base, AgentSourceLink.consumer_kind == "draft")
+            conditions += (AgentSourceLink.consumer_version == str(query.draft_revision),)
+        else:
+            conditions = (*base, AgentSourceLink.consumer_kind == "execution")
+            conditions += (
+                AgentSourceLink.execution_id == query.execution_id,
+                AgentSourceLink.consumer_id == query.execution_id,
+            )
+            if query.round_id is not None:
+                round_row = (
+                    await conn.execute(
+                        sa.select(AgentRound.round_id, AgentRound.execution_id, AgentRound.input_revision).where(
+                            AgentRound.user_scope == user_scope,
+                            AgentRound.round_id == query.round_id,
+                        )
+                    )
+                ).first()
+                if round_row is None or round_row.execution_id != query.execution_id:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "round does not belong to requested execution",
+                        identity,
+                    )
+                if query.input_revision is not None and round_row.input_revision != query.input_revision:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, "input_revision does not match requested round", identity
+                    )
+        link = (await conn.execute(sa.select(AgentSourceLink.link_id).where(*conditions).limit(1))).first()
+        if link is None:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, "source is not registered to requested context", identity
             )
 
     def _decode_source_asset_row(
@@ -859,7 +921,13 @@ class AgentDao(BaseDao):
         """严格解码来源资产行元数据；任何自相矛盾按 ``OPERATION_UNKNOWN`` 拒绝。"""
 
         metadata = row.metadata_payload
-        if not isinstance(metadata, dict) or metadata.get("schema_version") != 1:
+        schema_version = metadata.get("schema_version") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version != 1
+        ):
             raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is unreadable", identity)
         try:
             source_ref = decode_source_ref(metadata.get("source_ref"), "$.metadata.source_ref")
@@ -873,6 +941,8 @@ class AgentDao(BaseDao):
             source_ref.user_scope != user_scope
             or (source_ref.source_id, source_ref.version) != (row.asset_id, row.asset_version)
             or source_ref.digest != row.digest
+            or source_ref.locator.origin_ref.source_digest != row.digest
+            or source_ref.read_state.value != row.read_state
             or metadata_verification is not verification
         ):
             raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is inconsistent", identity)
@@ -1114,7 +1184,11 @@ class AgentDao(BaseDao):
             if body_text is not None:
                 try:
                     body_text, next_cursor = slice_body_page(
-                        body_text, cursor=validated.body_cursor, prefix="b", limit=validated.limit
+                        body_text,
+                        cursor=validated.body_cursor,
+                        prefix="b",
+                        identity=f"{item.artifact_id}:{item.artifact_version}",
+                        limit=validated.limit,
                     )
                 except AgentValidationError as exc:
                     raise AgentServiceError(
@@ -1247,21 +1321,24 @@ class AgentDao(BaseDao):
                 )
                 try:
                     result_text, next_cursor = slice_body_page(
-                        body_text, cursor=validated.body_cursor, prefix="o", limit=validated.limit
+                        body_text,
+                        cursor=validated.body_cursor,
+                        prefix="o",
+                        identity=validated.operation_id,
+                        limit=validated.limit,
                     )
                 except AgentValidationError as exc:
                     raise AgentServiceError(
                         AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity
                     ) from exc
             elif row.result_payload is not None:
-                try:
-                    result_text, next_cursor = slice_body_page(
-                        json_doc(row.result_payload), cursor=validated.body_cursor, prefix="o", limit=validated.limit
-                    )
-                except AgentValidationError as exc:
+                if validated.body_cursor is not None:
                     raise AgentServiceError(
-                        AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity
-                    ) from exc
+                        AgentErrorCode.INPUT_INVALID,
+                        "cursor is not applicable to atomic result payload",
+                        identity,
+                    )
+                result_text = json_doc(row.result_payload)
             elif row.phase == "result_saved":
                 raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "result_saved without saved return", identity)
             elif row.phase == "failed_confirmed":

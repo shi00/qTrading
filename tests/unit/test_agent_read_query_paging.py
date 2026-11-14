@@ -60,13 +60,19 @@ class TestArtifactReadQuery:
 
     def test_cursor_prefix_is_frozen(self) -> None:
         with pytest.raises(AgentValidationError) as excinfo:
-            validate_artifact_read_query(_artifact_query(body_cursor="o:3"))
+            validate_artifact_read_query(_artifact_query(body_cursor="o:art-1:1:3"))
 
         assert excinfo.value.code == "invalid_cursor"
 
     def test_cursor_must_be_one_based(self) -> None:
         with pytest.raises(AgentValidationError) as excinfo:
-            validate_artifact_read_query(_artifact_query(body_cursor="b:0"))
+            validate_artifact_read_query(_artifact_query(body_cursor="b:art-1:1:0"))
+
+        assert excinfo.value.code == "invalid_cursor"
+
+    def test_cursor_is_bound_to_artifact_identity(self) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            validate_artifact_read_query(_artifact_query(body_cursor="b:art-2:1:3"))
 
         assert excinfo.value.code == "invalid_cursor"
 
@@ -85,10 +91,20 @@ class TestOperationReadQuery:
         assert validated.tool_call_id == "call-1"
         assert validated.limit == READ_LIMIT_MAX
 
+    def test_cursor_is_bound_to_operation_identity(self) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            validate_operation_read_query(_operation_query(body_cursor="o:op-2:3"))
+
+        assert excinfo.value.code == "invalid_cursor"
+
 
 class TestSliceBodyPage:
+    _IDENTITY = "art-1:1"
+
     def test_default_limit_returns_whole_short_body(self) -> None:
-        chunk, next_cursor = slice_body_page("短正文", cursor=None, prefix="b", limit=READ_LIMIT_MAX)
+        chunk, next_cursor = slice_body_page(
+            "短正文", cursor=None, prefix="b", identity=self._IDENTITY, limit=READ_LIMIT_MAX
+        )
 
         assert chunk == "短正文"
         assert next_cursor is None
@@ -96,27 +112,33 @@ class TestSliceBodyPage:
     def test_pages_by_codepoints(self) -> None:
         body = "字" * 5000
 
-        first, cursor = slice_body_page(body, cursor=None, prefix="b", limit=1)
+        first, cursor = slice_body_page(body, cursor=None, prefix="b", identity=self._IDENTITY, limit=1)
         assert len(first) == 2000
-        assert cursor == "b:2001"
+        assert cursor == "b:art-1:1:2001"
 
-        second, cursor = slice_body_page(body, cursor=cursor, prefix="b", limit=1)
+        second, cursor = slice_body_page(body, cursor=cursor, prefix="b", identity=self._IDENTITY, limit=1)
         assert (first + second) == body[:4000]
-        assert cursor == "b:4001"
+        assert cursor == "b:art-1:1:4001"
 
-        third, cursor = slice_body_page(body, cursor=cursor, prefix="b", limit=2)
+        third, cursor = slice_body_page(body, cursor=cursor, prefix="b", identity=self._IDENTITY, limit=2)
         assert third == body[4000:]
         assert cursor is None
 
     def test_cursor_exactly_past_end_is_empty_page(self) -> None:
-        chunk, next_cursor = slice_body_page("abc", cursor="b:4", prefix="b", limit=1)
+        chunk, next_cursor = slice_body_page("abc", cursor="b:art-1:1:4", prefix="b", identity=self._IDENTITY, limit=1)
 
         assert chunk == ""
         assert next_cursor is None
 
     def test_cursor_beyond_end_is_invalid(self) -> None:
         with pytest.raises(AgentValidationError) as excinfo:
-            slice_body_page("abc", cursor="b:5", prefix="b", limit=1)
+            slice_body_page("abc", cursor="b:art-1:1:5", prefix="b", identity=self._IDENTITY, limit=1)
+
+        assert excinfo.value.code == "invalid_cursor"
+
+    def test_foreign_identity_cursor_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            slice_body_page("abcdef", cursor="b:art-9:1:2", prefix="b", identity=self._IDENTITY, limit=1)
 
         assert excinfo.value.code == "invalid_cursor"
 

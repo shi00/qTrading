@@ -5464,35 +5464,48 @@ _BODY_CODEPOINTS_PER_LIMIT: Final = 2000
 READ_LIMIT_MAX: Final = 50
 
 
-def parse_body_cursor(cursor: str, *, prefix: str, path: str = "$.body_cursor") -> int:
-    """解析正文游标 ``{prefix}:{start}``（1 基）为起始码点；只核语法，不核页边界。"""
+def parse_body_cursor(cursor: str, *, prefix: str, identity: str, path: str = "$.body_cursor") -> int:
+    """解析正文游标 ``{prefix}:{identity}:{start}``（1 基）为起始码点。
 
-    expected = f"{prefix}:"
-    if not isinstance(cursor, str) or not cursor.startswith(expected):
+    游标绑定对象身份（成果 ``id:version`` / operation id）与查询上下文；跨对象、
+    跨用户域或错前缀复用 → ``invalid_cursor``（§4.2「游标绑定准确身份」）。只核
+    语法与身份，不核页边界。
+    """
+
+    marker = f"{prefix}:{identity}:"
+    if not isinstance(cursor, str) or not cursor.startswith(marker):
         _fail("invalid_cursor", path)
-    raw = cursor[len(expected) :]
+    raw = cursor[len(marker) :]
     if not raw.isdigit() or raw.startswith("0"):
         _fail("invalid_cursor", path)
     return int(raw)
 
 
 def slice_body_page(
-    body_text: str, *, cursor: str | None, prefix: str, limit: int, path: str = "$.body_cursor"
+    body_text: str,
+    *,
+    cursor: str | None,
+    prefix: str,
+    identity: str,
+    limit: int,
+    path: str = "$.body_cursor",
 ) -> tuple[str, str | None]:
     """按**码点**切一页正文并给出下一游标（传输分块，不是存储分块，§9.10.1）。
 
-    游标格式 ``{prefix}:{start}``（1 基，start 之前的码点已返回）；越界/错前缀
-    视为失效游标（``invalid_cursor``），由调用方转译为 ``INPUT_INVALID``。
+    游标格式 ``{prefix}:{identity}:{start}``（1 基，start 之前的码点已返回）。
+    ``start == len+1`` 表示已读完（返回空页、无下一游标，合法）；``start > len+1``
+    或身份/前缀不符视为失效游标（``invalid_cursor``），由调用方转译为
+    ``INPUT_INVALID``。
     """
 
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= READ_LIMIT_MAX:
         _fail("invalid_range", path)
-    start = parse_body_cursor(cursor, prefix=prefix, path=path) if cursor is not None else 1
+    start = parse_body_cursor(cursor, prefix=prefix, identity=identity, path=path) if cursor is not None else 1
     if start > len(body_text) + 1:
         _fail("invalid_cursor", path)
     begin = start - 1
     end = min(len(body_text), begin + limit * _BODY_CODEPOINTS_PER_LIMIT)
-    next_cursor = f"{prefix}:{end + 1}" if end < len(body_text) else None
+    next_cursor = f"{prefix}:{identity}:{end + 1}" if end < len(body_text) else None
     return body_text[begin:end], next_cursor
 
 
@@ -5521,9 +5534,14 @@ def validate_artifact_read_query(query: ArtifactReadQuery) -> ArtifactReadQuery:
     if limit > READ_LIMIT_MAX:
         _fail("invalid_range", "$.artifact_read_query.limit")
     cursor = _opt_str(query.body_cursor, "$.artifact_read_query.body_cursor")
-    # 契约只校验游标语法；切页时按正文长度再核越界。
+    # 契约只校验游标语法/身份；切页时按正文长度再核越界。
     if cursor is not None:
-        parse_body_cursor(cursor, prefix="b", path="$.artifact_read_query.body_cursor")
+        parse_body_cursor(
+            cursor,
+            prefix="b",
+            identity=f"{artifact_id}:{artifact_version}",
+            path="$.artifact_read_query.body_cursor",
+        )
     return ArtifactReadQuery(
         artifact_id=artifact_id,
         artifact_version=artifact_version,
@@ -5594,7 +5612,7 @@ def validate_operation_read_query(query: OperationReadQuery) -> OperationReadQue
         _fail("invalid_range", "$.operation_read_query.limit")
     cursor = _opt_str(query.body_cursor, "$.operation_read_query.body_cursor")
     if cursor is not None:
-        parse_body_cursor(cursor, prefix="o", path="$.operation_read_query.body_cursor")
+        parse_body_cursor(cursor, prefix="o", identity=operation_id, path="$.operation_read_query.body_cursor")
     return OperationReadQuery(
         operation_id=operation_id,
         execution_id=execution_id,

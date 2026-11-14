@@ -145,6 +145,7 @@ async def _seed_operation(
     result_payload: dict[str, object] | None = None,
     result_ref: str | None = None,
     tool_call_id: str | None = "call-1",
+    ordinal: int = 1,
     error_code: str | None = None,
 ) -> None:
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]
@@ -158,7 +159,7 @@ async def _seed_operation(
                 workflow_id="wf-1",
                 step_id="step-1",
                 call_kind="tool",
-                ordinal=1,
+                ordinal=ordinal,
                 tool_call_id=tool_call_id,
                 owner_epoch=1,
                 run_epoch=1,
@@ -216,7 +217,7 @@ class TestReadOperationFacts:
 
         first = await dao.read_operation(_query(limit=1), user_scope=_USER)
         assert first.result_text is not None and len(first.result_text) == 2000
-        assert first.next_cursor == "o:2001"
+        assert first.next_cursor == "o:op-1:2001"
 
         second = await dao.read_operation(_query(limit=1, body_cursor=first.next_cursor), user_scope=_USER)
         assert second.result_text == body[2000:]
@@ -289,6 +290,47 @@ class TestReadOperationFailures:
 
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.read_operation(_query(operation_id="missing"), user_scope=_USER)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_payload_path_rejects_body_cursor(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_operation(dao, result_payload={"rows": [1, 2]})
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_operation(_query(body_cursor="o:op-1:2"), user_scope=_USER)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "atomic" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_cursor_from_other_operation_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        body = "回" * 3000
+        await _seed_result_body(dao, "body-op", body)
+        await _seed_operation(dao, result_ref="body-op")
+        await _seed_operation(dao, operation_id="op-2", result_ref="body-op", tool_call_id="call-2", ordinal=2)
+
+        first = await dao.read_operation(_query(limit=1), user_scope=_USER)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_operation(
+                _query(operation_id="op-2", limit=1, body_cursor=first.next_cursor), user_scope=_USER
+            )
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "invalid_cursor" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_other_user_scope_not_found(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_operation(dao, result_payload={"ok": True})
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_operation(_query(), user_scope="u-other")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         await dao.engine.dispose()  # type: ignore[union-attr]
 

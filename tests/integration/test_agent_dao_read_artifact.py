@@ -201,11 +201,11 @@ class TestReadArtifactContent:
 
         first = await dao.read_artifact(_query(limit=1), user_scope=_USER)
         assert first.body_text is not None and len(first.body_text) == 2000
-        assert first.next_cursor == "b:2001"
+        assert first.next_cursor == "b:art-1:1:2001"
 
         second = await dao.read_artifact(_query(limit=1, body_cursor=first.next_cursor), user_scope=_USER)
         assert second.body_text is not None and len(second.body_text) == 2000
-        assert second.next_cursor == "b:4001"
+        assert second.next_cursor == "b:art-1:1:4001"
 
         third = await dao.read_artifact(_query(limit=1, body_cursor=second.next_cursor), user_scope=_USER)
         assert third.body_text == body[4000:]
@@ -285,9 +285,37 @@ class TestReadArtifactFailures:
         await _seed_artifact(dao, body_text="短正文")
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_artifact(_query(body_cursor="b:99"), user_scope=_USER)
+            await dao.read_artifact(_query(body_cursor="b:art-1:1:99"), user_scope=_USER)
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "invalid_cursor" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_cursor_from_other_artifact_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        body = "字" * 5000
+        await _seed_artifact(dao, body_text=body)
+        await _seed_artifact(dao, artifact_id="art-2", body_text=body, artifact_kind="explanation")
+
+        first = await dao.read_artifact(_query(limit=1), user_scope=_USER)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_artifact(
+                _query(artifact_id="art-2", limit=1, body_cursor=first.next_cursor), user_scope=_USER
+            )
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "invalid_cursor" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_other_user_scope_not_found(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_artifact(dao)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_artifact(_query(), user_scope="u-other")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
