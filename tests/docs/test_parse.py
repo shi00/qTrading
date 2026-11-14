@@ -33,6 +33,13 @@ HTML_ID_DOC = '## 落款\n正文 <a id="api-ref">说明</a> 续\n\n<div id="box"
 # 组 4 样例：两类围栏 + 行内代码中的假链接（全部在代码语境，不应判为链接）
 FENCED_DOC = "```py\n[a][nope]\n```\n\n~~~py\n[x](y)\n~~~\n\n行内 `[x](y)` 与 `[a][nope]` 均为代码语境\n"
 
+# 组 6 样例（D30）：转义方括号是普通文字，不得从反转义后的显示文本倒猜引用语法
+ESCAPED_REF_DOC = (
+    "正文 \\[ok\\]\\[undefined\\] 继续，含不完整转义 \\[ok][undefined]。\n\n"
+    "行内代码 `\\[ok\\]\\[undefined\\]` 与围栏：\n\n"
+    "```text\n[ok][undefined]\n```\n"
+)
+
 
 def test_reference_dead_link_detected(view_factory) -> None:
     """组 1：未定义引用（full / collapsed）必须检出；已定义引用不算死链。"""
@@ -86,6 +93,27 @@ def test_fences_and_inline_code_no_false_link(view_factory) -> None:
     assert view.links == (), view.links
     blocks = [(b.fence, b.info, b.start_line, b.end_line) for b in view.code_blocks]
     assert blocks == [("```", "py", 1, 3), ("~~~", "py", 5, 7)], blocks
+
+
+def test_escaped_reference_like_text_not_reported(view_factory) -> None:
+    """组 6（D30）：转义方括号、行内代码/围栏中的同形文本都不是引用死链。"""
+    view = view_factory(ESCAPED_REF_DOC)
+    assert view.unresolved_references == (), view.unresolved_references
+    assert view.links == (), "转义方括号不得被解析为链接"
+
+
+def test_formatted_unresolved_reference_is_plain_text(view_factory) -> None:
+    """组 6（D30）：格式化文本的未定义引用形态是 CommonMark 普通文字，不得扩大正则误报。"""
+    view = view_factory("[**x**][undefined]\n")
+    assert view.unresolved_references == (), view.unresolved_references
+    assert view.links == ()
+
+
+def test_escaped_reference_does_not_suppress_real_dead_link(view_factory) -> None:
+    """组 6（D30）：转义文字放行后，同 label 的真实未定义引用仍须检出。"""
+    view = view_factory("\\[ok\\]\\[nope\\]\n\n[dead][nope]\n")
+    refs = [(ref.text, ref.label, ref.line) for ref in view.unresolved_references]
+    assert refs == [("dead", "nope", 3)], refs
 
 
 def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:

@@ -436,18 +436,87 @@ def _strip_definition_lines(source_lines: tuple[str, ...], env: dict) -> tuple[s
     return "\n".join(lines) + ("\n" if lines else ""), tuple(kept)
 
 
+# 语法角色占位符：转义方括号 / 反引号与行内代码在「原始源语法流」中以 NUL 表示，
+# 保证其不再参与引用形态匹配（NUL 不可能是文档正文的方括号字符）。
+_INERT_SYNTAX = "\x00"
+
+
+def _find_closing_backticks(raw: str, run: str, start: int) -> int | None:
+    """定位与 ``run`` 等长的闭合反引号串（排除更长反引号串的一部分）。"""
+    index = raw.find(run, start)
+    while index != -1:
+        after = index + len(run)
+        before_ok = index == 0 or raw[index - 1] != "`"
+        after_ok = after >= len(raw) or raw[after] != "`"
+        if before_ok and after_ok:
+            return index
+        index = raw.find(run, index + 1)
+    return None
+
+
+def _syntax_stream(raw: str) -> str:
+    """按原始 inline 源（未反转义）重建引用语法判定流。
+
+    text token 的 ``content`` 已丢失转义来源（``\\[ok\\]`` 与 ``[ok]`` 同形），
+    因此不能从显示文本倒猜语法。这里只做词法级还原：反斜杠转义按其字面字符
+    还原，但转义方括号 / 反引号与行内代码以 ``_INERT_SYNTAX`` 占位，使其不再
+    构成引用形态；不做第二次 Markdown 解析。
+    """
+    out: list[str] = []
+    index = 0
+    length = len(raw)
+    while index < length:
+        char = raw[index]
+        if char == "\\" and index + 1 < length:
+            escaped = raw[index + 1]
+            out.append(_INERT_SYNTAX if escaped in "[]`\\" else escaped)
+            index += 2
+            continue
+        if char == "`":
+            run_end = index
+            while run_end < length and raw[run_end] == "`":
+                run_end += 1
+            run = raw[index:run_end]
+            close = _find_closing_backticks(raw, run, run_end)
+            if close is not None:
+                out.append(_INERT_SYNTAX)
+                index = close + len(run)
+                continue
+            out.append(run)
+            index = run_end
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _source_reference_forms(raw: str) -> Counter[tuple[str, str]]:
+    """原始 inline 源中真实语法角色的 full/collapsed 引用形态计数（含 text/label 原文）。"""
+    forms: Counter[tuple[str, str]] = Counter()
+    for match in _REFERENCE_RE.finditer(_syntax_stream(raw)):
+        forms[(match.group(1), match.group(2))] += 1
+    return forms
+
+
 def _collect_unresolved(tokens: list[Token], defined_labels: set[str]) -> tuple[UnresolvedRef, ...]:
     """引用式死链：解析器判定未成链的 text token 中 full/collapsed 引用形态。
 
     shortcut 形态 ``[label]`` 不检（CommonMark 语义为纯文本，检之会对普通方括号
     文本误报）。行内代码/围栏内的假链接天然不会进入本路径（markdown-it 已将其
     判定为 code_inline / fence，见检视 §6.4 不误报负例）。
+
+    D30：显示文本已反转义，无法区分 ``\\[ok\\]\\[undefined\\]``（转义文字）与真实
+    未定义引用。因此候选仅在「原始 inline 源语法流」中同形出现时才成立：
+    转义方括号、行内代码被占位，不会贡献语法形态；格式化文本（如
+    ``[**x**][undefined]``）仍因强调拆成多个 text token 而不产生候选，避免扩大
+    正则去拒绝 CommonMark 视为普通文字的输入。
     """
     unresolved: list[UnresolvedRef] = []
     for token in tokens:
         if token.type != "inline":
             continue
         line = _token_line(token)
+        source_forms = _source_reference_forms(token.content or "")
         for child in token.children or []:
             if child.type != "text":
                 continue
@@ -455,6 +524,11 @@ def _collect_unresolved(tokens: list[Token], defined_labels: set[str]) -> tuple[
                 text_part, label_part = match.group(1), match.group(2)
                 form = "collapsed" if label_part == "" else "full"
                 label = text_part if form == "collapsed" else label_part
+                key = (text_part, label_part)
+                if source_forms[key] <= 0:
+                    # 显示文本候选来自转义 / 行内代码语境，非真实引用语法
+                    continue
+                source_forms[key] -= 1
                 if _normalize_label(label) not in defined_labels:
                     unresolved.append(UnresolvedRef(label=label, text=text_part, line=line, form=form))
     return tuple(unresolved)
