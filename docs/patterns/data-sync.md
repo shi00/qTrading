@@ -56,7 +56,9 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 - `SyncContext.cancel_event` 作为依赖注入容器传递到 syncer，syncer 在分块循环中检查 `cancel_event.is_set()` 主动退出。
 
   > **NOTE（R11 防类推）**：任务**取消**信号在 `SyncContext` 内以 `cancel_event` 注入，属 `SyncContext` 的 per-run 实例属性、非类属性；而 [task-manager.md](./task-manager.md) 的 `TaskManager` 任务取消用的是 **`threading.Event`**（见 `services/task_manager.py::_cancel_event`，事件驱动跨线程），非 `asyncio.Event`。两处同为"取消协程"，但产物类型不同。切勿因跨文档类推，把 `asyncio.Event`/`threading.Event` 直接写成 `@register_singleton` 类属性或模块级属性（触发 R11「跨循环复用同步原语」，须经 `get_loop_local()` 获取绑定当前循环）。
-- syncer 主动退出时必须 `raise asyncio.CancelledError`（或让其向上传播），由 `TaskManager` 统一处理任务状态转换。
+- 取消分两条通道，不得混用或相互冒充：
+  - **真实取消异常**（框架 `cancel()` / 停机）：syncer 分块循环中让 `asyncio.CancelledError` 原样向上传播（R2，禁止吞没），由 `TaskManager` 统一处理任务状态转换；
+  - **协作结果取消**（如 `historical.py` 的 `_abort_not_ready` 把 `SyncResult.status` 置 `cancelled` 后正常返回）：属合法的统计返回，syncer **不得**为此伪造 `CancelledError`；由提交方适配器（UI 日更 / 调度日更 / 补偿循环）检查 `status`（或 `is_complete`）后抛 `TaskCancelledError`，交 `TaskManager` 映射 `CANCELLED` 终态——不得算 `COMPLETED`，也不得伪装 `FAILED`（且不推进水位、不记普通失败退避）。
 - `ThreadPoolManager.run_async()` 包装的同步阻塞段也需响应取消（通过 `cancel_event` 协作式取消，非强制 kill）。
 
 ### 数据库连接生命周期（review03-C13 契约）
@@ -88,7 +90,7 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 |------|---------|--------|
 | 某日质量分低于阈值 | 源端当日数据缺失，或相对基准法判定数据不完整 | 用 `QuoteDAO.get_sync_quality_score()` 复核该日评分（实时计算、不落库）；低分日期不做持久化标记，重跑同步窗口时由 `data/sync/historical.py::_completed_dates`（全部 DENSE 表已有该日数据才跳过）自动覆盖补数（见「质量门控（C15）」） |
 | 同步后某表仍缺数据 / 数据不完整 | 表未在 `TABLE_DEFINITIONS` 注册，或分块写入未覆盖全量 | 核对 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册项；确认 syncer 分块循环与 `_save_upsert()` 的覆盖范围 |
-| 续传 / 同步中途中断且不再恢复 | `cancel_event` 被置位未清理，或取消异常被吞没 | 确认 syncer 分块循环检查 `cancel_event.is_set()`，主动退出必须 `raise asyncio.CancelledError`（R2，见「取消传播（C18）」） |
+| 续传 / 同步中途中断且不再恢复 | `cancel_event` 被置位未清理，或取消异常被吞没 | 确认 syncer 分块循环检查 `cancel_event.is_set()`；真实取消异常必须原样传播（R2）；协作结果取消须以 `SyncResult.status=cancelled` 正常返回并由提交方适配器映射 `TaskCancelledError`，不得被误算完成或失败（见「取消传播（C18）」） |
 | 续传/同步中 DAO 操作抛 `EngineDisposedError`、`RuntimeError`（Engine not initialized）或连接异常 | ① 抛 `EngineDisposedError` 或 `RuntimeError`：引擎已被 `CacheManager.close()` 释放（如停机/重配期间，R5 守卫生效或 `engine` 已置 `None`），或飞行中连接被中途断开（`interrupted`）；② 抛连接异常/`DatabaseQueryError`：PG 服务进程暂不可达，连接池 `pool_pre_ping` 在服务恢复前无法自愈 | ① 若引擎已 `close()` 释放（`self.engine is None`），须待停机/重配流程结束后调用 `await CacheManager.init_db()` 创建新引擎（禁止在已释放旧引擎上绕过 R5 继续操作）；② 若属 PG 进程崩溃/重启，先确认 PG 服务恢复，重跑同步即可经 `pool_pre_ping=True` 恢复连接，或显式执行 `await CacheManager.close()` → `await CacheManager.init_db()` 彻底重建引擎（见「数据库连接生命周期（review03-C13 契约）」） |
 
 ---

@@ -18,6 +18,7 @@ from services.task_manager import (
     EXCLUSIVE_GROUP_MARKET_SYNC,
     TERMINAL_STATUSES,
     AppTask,
+    TaskCancelledError,
     TaskIncompleteError,
     TaskManager,
     TaskStatus,
@@ -2812,8 +2813,9 @@ class TestCatchupLogic:
 
     @pytest.mark.asyncio
     async def test_cancelled_day_does_not_advance_watermark(self):
-        """UIR-F14-001 Given 单日同步因取消/停机中止（status=cancelled），When 补偿结束，
-        Then is_complete=False，水位不前移（取消不记成功）。"""
+        """D02/C14 Given 单日同步因取消/停机中止（status=cancelled）且正常返回，
+        Then 映射取消信号（TaskCancelledError → CANCELLED 终态），水位不前移（取消不记成功），
+        且不记普通补偿失败退避（取消 ≠ 失败）。"""
         svc = _make_svc()
 
         async def _sync(trade_date=None, sync_result=None):
@@ -2831,14 +2833,56 @@ class TestCatchupLogic:
             patch("utils.scheduler_service.logger.warning"),
         ):
             svc._mark_daily_update_done_db = AsyncMock()
-            # D11-F03: 取消日 is_complete=False → 抛 TaskIncompleteError（映射 FAILED），水位不前移。
-            with pytest.raises(TaskIncompleteError) as exc_info:
+            with pytest.raises(TaskCancelledError) as exc_info:
                 await svc._catchup_logic("task1", [date(2024, 6, 12)])
-            assert exc_info.value.description.key == "sched_catchup_partial"
+            assert exc_info.value.description.key == "task_cancelled_desc"
 
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
-        assert svc._catchup_consecutive_failures == 1
+        assert svc._catchup_consecutive_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_result_cancelled_on_day2_stops_batch_and_keeps_day1_watermark(self):
+        """D02/C14 Given d1 完整成功、d2 同步层以 status=cancelled 正常返回（无异常），
+        Then 立即停止（不启动 d3），保留 d1 连续成功水位，抛取消信号（而非
+        TaskIncompleteError/FAILED），且不记普通失败退避。"""
+        svc = _make_svc()
+
+        async def _sync(trade_date=None, sync_result=None):
+            if trade_date == date(2024, 6, 13):
+                sync_result.status = SyncStatus.CANCELLED.value
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 12, 0, 0)),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._persist_run_date_db = AsyncMock()
+            with pytest.raises(TaskCancelledError) as exc_info:
+                await svc._catchup_logic(
+                    "task1",
+                    [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
+                )
+
+        assert exc_info.value.description.key == "task_cancelled_desc"
+        # 不跨 d2：d3 不启动
+        assert mock_dp_instance.sync_daily_market_snapshot.await_count == 2
+        # d1 连续成功水位保留
+        svc._persist_run_date_db.assert_awaited_once_with(
+            "sched_last_daily_update",
+            "scheduler_last_daily_update",
+            "20240612",
+        )
+        assert svc._last_update_date == "20240612"
+        # 取消 ≠ 失败：不记补偿失败退避
+        assert svc._catchup_consecutive_failures == 0
+        assert svc._catchup_next_retry_at is None
 
 
 class TestOnJobMissedCatchup:
@@ -3816,6 +3860,50 @@ class TestSchedulerEntryLevel:
         # 补偿完整成功后水位推进到最后一个遗漏交易日
         assert svc._last_update_date == "20240614"
 
+    @pytest.mark.asyncio
+    async def test_loader_catchup_result_cancelled_maps_to_cancelled_and_keeps_watermark(self):
+        """D02/C14：补偿 d2 以 status=cancelled 正常返回（无异常）→ 任务 CANCELLED 终态
+        （≠ FAILED/COMPLETED），d3 不启动，d1 连续成功水位保留，不记普通失败退避。"""
+        svc = self._svc()
+        svc._persist_run_date_db = AsyncMock()
+        mgr = self._task_manager()
+        dp = self._processor([date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)])
+        synced: list[date] = []
+
+        async def _sync(trade_date=None, sync_result=None):
+            synced.append(trade_date)
+            if trade_date == date(2024, 6, 13):
+                sync_result.status = SyncStatus.CANCELLED.value
+
+        dp.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        with (
+            patch("services.task_manager.ConfigHandler.get_max_concurrent_tasks", return_value=5),
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+            patch("data.cache.cache_manager.CacheManager._instance", MagicMock(engine=MagicMock())),
+            patch(
+                "data.persistence.app_state_service.get_app_state",
+                AsyncMock(side_effect=["20240611", None, None]),
+            ),
+            patch("data.data_processor.DataProcessor", return_value=dp),
+            self._TaskObserver(mgr) as obs,
+        ):
+            await svc._load_db_state()
+            task = await obs.wait_terminal("daily_sync_catchup")
+
+        assert task.status == TaskStatus.CANCELLED
+        assert isinstance(task.description, Message)
+        assert task.description.key == "task_cancelled_desc"
+        # 不跨 d2：d3 不启动
+        assert synced == [date(2024, 6, 12), date(2024, 6, 13)]
+        assert svc._last_update_date == "20240612"
+        assert svc._catchup_consecutive_failures == 0
+        svc._persist_run_date_db.assert_any_await(
+            "sched_last_daily_update",
+            "scheduler_last_daily_update",
+            "20240612",
+        )
+
     # ---- c) 看门狗入口（单轮） ----
     @pytest.mark.asyncio
     async def test_watchdog_single_round_gates_compensation_by_switch(self):
@@ -4000,6 +4088,33 @@ class TestSchedulerEntryLevel:
                 "scheduler_last_daily_update",
                 self._TODAY,
             )
+
+    @pytest.mark.asyncio
+    async def test_daily_update_cancelled_result_maps_to_cancelled_terminal(self):
+        """D02/C14：日更结果整体标 cancelled 且正常返回 → 真实 runner 映射 CANCELLED 终态
+        （既不 COMPLETED 也不 FAILED），不推进水位、不落盘。"""
+        svc = self._svc()
+        svc._persist_run_date_db = AsyncMock()
+        mgr = self._task_manager()
+        dp = self._processor([date(2024, 6, 14)], daily_result=SyncResult(status=SyncStatus.CANCELLED.value))
+        with (
+            patch("services.task_manager.ConfigHandler.get_max_concurrent_tasks", return_value=5),
+            patch("data.data_processor.DataProcessor", return_value=dp),
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+            self._TaskObserver(mgr) as obs,
+        ):
+            mock_ch.get_setting.return_value = None
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            task = await obs.wait_terminal("daily_sync")
+
+        assert task.status == TaskStatus.CANCELLED
+        assert isinstance(task.description, Message)
+        assert task.description.key == "task_cancelled_desc"
+        assert task.progress != 1.0  # 不得伪设完成进度
+        assert svc._last_update_date is None  # 水位不推进
+        svc._persist_run_date_db.assert_not_awaited()
 
 
 class TestCatchupCancelWatermarkBoundary:
