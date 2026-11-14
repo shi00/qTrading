@@ -408,8 +408,8 @@ _CONTROL_EVIDENCE: dict[str, tuple[tuple[str, str], ...]] = {
         ("test_l01_l06_controls.py", "test_l01_second_render_zero_diff_after_regen"),
     ),
     "L02": (
-        ("test_l01_l06_controls.py", "test_l02_rename_keeps_old_path_in_scope"),
-        ("test_l01_l06_controls.py", "test_l02_old_path_alone_drives_test_group"),
+        ("test_l01_l06_controls.py", "test_l02_rename_keeps_old_path_and_real_topic_identity"),
+        ("test_l01_l06_controls.py", "test_l02_old_path_alone_keeps_topic_identity"),
         ("test_enforcement_triggers.py", "test_ghost_registered_workflow_reported"),
     ),
     "L03": (
