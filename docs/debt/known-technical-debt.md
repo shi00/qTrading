@@ -19,7 +19,7 @@
 
 > **upgrade 触发条件可判定约定**：触发条件必须含**可观测信号**（再次出现同类缺陷 / 量化阈值 / 依赖或版本事件 / 明确期限）。「等 X 重构时」类机会型描述**不得单独**作为触发条件，须附一条客观信号；确无客观信号的条目移入「已接受的权衡」章节。
 
-> **结案条件与归属约定**：① 债目按归属（业务级全局 / 局部（单文件或单组件）/ locale（i18n））**逐状态定义结案条件**——局部条目的验收与 upgrade 只约束其登记的文件/组件，**不得解读为全局要求**（如某条目的「13 个 use_state 迁移」仅指其登记文件，不构成 ui 层 use_state 归零/全迁 VM 的全局义务）；② 同一条债目含多个相互独立子项时（如「风险提示交付」与「加密能力」），各子项**分别记录状态、分别结案**，任一子项交付不等于整条债目关闭，残余子项保持显式未完成；③ 修复实现优先复用仓库**现成类型**（如 `ui/viewmodels/model_connections_view_model.py` 的 `ModelConnectionDraft`），不得为结案新造无调用方的草稿类，现成类型与目标终态分开记录；④ 已登记 R5 例外的条目，**标题标注当前例外状态**（EX-0017 / EX-0018，见 [exceptions.yml](../governance/exceptions.yml)），例外失效或移除即回到未结案状态。
+> **结案条件与归属约定**：① 债目按归属（业务级全局 / 局部（单文件或单组件）/ locale（i18n））**逐状态定义结案条件**——局部条目的验收与 upgrade 只约束其登记的文件/组件，**不得解读为全局要求**（如某条目的「10 个业务态 use_state 迁移」仅指其登记文件，不构成 ui 层 use_state 归零/全迁 VM 的全局义务）；② 同一条债目含多个相互独立子项时（如「风险提示交付」与「加密能力」），各子项**分别记录状态、分别结案**，任一子项交付不等于整条债目关闭，残余子项保持显式未完成；③ 修复实现优先复用仓库**现成类型**（如 `ui/viewmodels/model_connections_view_model.py` 的 `ModelConnectionDraft`），不得为结案新造无调用方的草稿类，现成类型与目标终态分开记录；④ 已登记 R5 例外的条目，**标题标注当前例外状态**（EX-0017 / EX-0018，见 [exceptions.yml](../governance/exceptions.yml)），例外失效或移除即回到未结案状态。
 
 > **结论可信度边界类条目不占本索引**：`DAT-07` / `DAT-08`（回测不可复现 / 回测前视 / 存量污染）为「无计划升级（文档化决策）」的已接受权衡，产品含义已迁入 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」，决策记录见本文件「已接受的权衡」章节；回测路径 `BT-05` 亦在该正本「已知限制」登记（其代码欠债条目仍在本索引，见 `P2-BT05-QualityGate-Bypass`）。
 
@@ -44,7 +44,7 @@
 | P3-CON04-Subprocess-Cancel | review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体 | P3 | ① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时 |
 | P3-M11-StartupViews-HomeViewModel-Static-Call | #M11-002 MVVM 边界：startup\_views.py View 直接调用 HomeViewModel 静态方法 | P3 | ① 启动流程或 news alert 监听机制被独立重构时；② 或 ui 层再次出现 View 直调 VM 静态方法的新实例时 |
 | P3-M12-StockDetailDialog-View-Holds-Page-DataProcessor | #M12-014 MVVM 边界：stock\_detail\_dialog.py View 直接持有 page/data\_processor 引用 | P3 | ① 该文件再次出现 View 越界持有 page/data\_processor 的新实例时；② 或 ui 层 MVVM 迁移完成（`ui/views` 与 `ui/components` 下无 View 直接持有 page/data\_processor）时 |
-| P3-M12-BacktestConfigPanel-No-VM | #M12-015 MVVM 边界：backtest\_config\_panel.py 13 个 use\_state 未建 VM | P3 | ① 该文件再次出现 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时 |
+| P3-M12-BacktestConfigPanel-No-VM | #M12-015 MVVM 边界：backtest\_config\_panel.py 10 个业务态 use\_state 未建 VM（共 13 个，另 1 locale 订阅 + 2 局部 UI 显隐不迁移） | P3 | ① 该文件再次出现业务态 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时；③ 或该组件新增 IO/持久化/校验编排等业务职责时 |
 | P3-M12-Views-Import-Complexity-High | #M12-019 可维护性：screener\_view\.py (35 import) / data\_view\.py (24 import) 导入复杂度过高 | P3 | ① 任一 View 文件 import 数 > 40 时；② 或该文件因其他任务被修改且 import 数继续增长时 |
 | P3-M12-Views-Get-DataProcessor-Cross-Layer | #M12-025 MVVM 边界：data\_source\_tab.py View 经 VM 获取 data\_processor 传子组件（data\_view.py 已解决） | P3 | ① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-PR3-TextButton-Interactive-Unverified | PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证 | P3 | ① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时 |
@@ -447,19 +447,37 @@ M12 ui 表现层模块检视发现：`ui/components/stock_detail_dialog.py` View
 
 引入 StockDetailViewModel，View 通过 VM 消费 page/data\_processor。验收标准：① View 不直接持有 page/data\_processor；② 现有 `test_stock_detail_dialog*.py` 全过。upgrade 触发条件：① 该文件再次出现 View 越界持有 page/data\_processor 的新实例时；② 或 ui 层 MVVM 迁移完成（`ui/views` 与 `ui/components` 下无 View 直接持有 page/data\_processor）时。
 
-#### P3-M12-BacktestConfigPanel-No-VM：#M12-015 MVVM 边界：backtest\_config\_panel.py 13 个 use\_state 未建 VM
+#### P3-M12-BacktestConfigPanel-No-VM：#M12-015 MVVM 边界：backtest\_config\_panel.py 10 个业务态 use\_state 未建 VM（共 13 个，另 3 个不迁移）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M12-BacktestConfigPanel-No-VM** | #M12-015 MVVM 边界：backtest\_config\_panel.py 13 个 use\_state 未建 VM | ① 该文件再次出现 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时 |
+| **P3-M12-BacktestConfigPanel-No-VM** | #M12-015 MVVM 边界：backtest\_config\_panel.py 10 个业务态 use\_state 未建 VM（13 个 `use_state` 中 1 个 locale 订阅 + 2 个局部 UI 显隐不迁移） | ① 该文件再次出现业务态 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时；③ 或该组件新增 IO/持久化/校验编排等业务职责、不再是纯表单收集时 |
 
 **产生背景与现状**
 
-M12 ui 表现层模块检视发现：`ui/components/backtest/backtest_config_panel.py` 使用 13 个 `ft.use_state` 调用点管理状态（其中 12 个 UI 状态、1 个 i18n 订阅；2026-10-31 复核），未建立 ViewModel。严格 MVVM 边界下，状态应由 VM 管理。该文件 docstring 声明按责任分层原则不建 VM（YAGNI），本条保留为 MVVM 边界偏差记录。M12 未修复原因：修复需引入 BacktestConfigViewModel + 迁移 13 个 use\_state，跨多文件协调。相关文件：`ui/components/backtest/backtest_config_panel.py`。
+M12 ui 表现层模块检视发现：`ui/components/backtest/backtest_config_panel.py` 的 `BacktestConfigPanel` 使用 13 个 `ft.use_state` 调用点管理状态（2026-11-14 复核），未建立 ViewModel。严格 MVVM 边界下，状态应由 VM 管理；但 13 个调用点并非全是业务态，须逐状态划归（12 个 UI 状态中 10 个为回测配置业务态、2 个为 DatePicker 显隐的局部 UI 态，另 1 个为 i18n 订阅）。locale 与局部 UI 态属合法 View 局部状态，不迁 VM。该组件当前为纯表单收集（无 IO/持久化/业务编排），docstring 声明按责任分层原则不建 VM（YAGNI）；本条记录归属划分与结案条件，**不要求现在重构组件**。相关文件：`ui/components/backtest/backtest_config_panel.py`。
+
+逐状态归属（状态名 → 归属 → 处理/结案条件）：
+
+| 状态（`use_state`） | 归属 | 处理 / 结案条件 |
+|---------------------|------|-----------------|
+| `start_date` / `set_start_date` | 业务态（回测起始日期，经 `_get_config_from_state` 进入 config） | 建 `BacktestConfigViewModel` 后迁入 VM state 即结案；本条未结前保留 |
+| `end_date` / `set_end_date` | 业务态（回测结束日期，同上） | 同上 |
+| `initial_capital` / `set_initial_capital` | 业务态（初始资金输入，同上） | 同上 |
+| `rebalance_freq` / `set_rebalance_freq` | 业务态（调仓频率，同上） | 同上 |
+| `on_empty_signal` / `set_on_empty_signal` | 业务态（空信号处理方式，同上） | 同上 |
+| `max_positions` / `set_max_positions` | 业务态（最大持仓数，同上） | 同上 |
+| `commission` / `set_commission` | 业务态（佣金费率，同上） | 同上 |
+| `stamp_duty_auto` / `set_stamp_duty_auto` | 业务态（印花税自动分段开关，同上） | 同上 |
+| `stamp_duty_rate` / `set_stamp_duty_rate` | 业务态（印花税率，同上） | 同上 |
+| `slippage` / `set_slippage` | 业务态（滑点，同上） | 同上 |
+| `ft.use_state(get_observable_state)`（i18n 订阅） | locale | **不迁移**：ViewModel 禁止感知 locale（CLAUDE.md §3.2），locale 由独立状态源驱动、View 渲染期订阅；不计入本条结案判定。结案条件：该订阅保持在 View 层即可 |
+| `show_start_picker` / `set_show_start_picker` | 局部 UI（`ft.use_dialog` 驱动起始日期 DatePicker 显隐） | **不迁移**：纯视图呈现状态、无业务语义；不计入本条结案判定。结案条件：保持由 View 管理即可 |
+| `show_end_picker` / `set_show_end_picker` | 局部 UI（`ft.use_dialog` 驱动结束日期 DatePicker 显隐） | **不迁移**：同上 |
 
 **期望的最终解法**
 
-引入 BacktestConfigViewModel，迁移 **backtest_config_panel.py 的** 13 个 use\_state 到 VM state。**结案范围仅限该文件（局部归属）**。验收标准：① 该文件的 13 个 use\_state 迁移到 VM——本条为局部债目，**不构成 ui 层 use_state 归零/全迁 VM 的全局要求**，其它文件的 use_state 是否建 VM 按各自债目与新代码 MVVM 规范单独判定；② 现有 `test_backtest_config_panel*.py` 全过。upgrade 触发条件：① 该文件再次出现 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时。
+引入 BacktestConfigViewModel，仅迁移上表 10 个业务态到 VM state（表单值 → config 的转换可保留 `_get_config_from_state` 纯函数或下沉为 VM command）。**结案范围仅限该文件的 10 个业务态（局部归属）**，不要求 locale 订阅与 DatePicker 显隐迁移，不构成 ui 层 use_state 归零/全迁 VM 的全局要求；其它文件的 use_state 是否建 VM 按各自债目与新代码 MVVM 规范单独判定。验收标准：① `BacktestConfigPanel` 内不再存在承载回测配置的业务态 `use_state`（上表 10 项均已归属 VM state）；② `ft.use_state(get_observable_state)` 与 2 个 DatePicker 显隐状态仍保留在 View，且不因保留而判本条未结；③ 现有 `test_backtest_config_panel*.py` 全过。upgrade 触发条件：① 该文件再次出现业务态（非 locale、非局部 UI 显隐）`use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时；③ 或该组件新增 IO/持久化/校验编排等业务职责、不再是纯表单收集时。
 
 #### P3-M12-Views-Import-Complexity-High：#M12-019 可维护性：screener\_view\.py (35 import) / data\_view\.py (24 import) 导入复杂度过高
 
