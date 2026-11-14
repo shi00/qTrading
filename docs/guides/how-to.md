@@ -391,7 +391,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 1. **单例 vs 非单例判定**：读 [singleton-lifecycle.md](../architecture/singleton-lifecycle.md)「注册单例」与「非单例服务」两张表。持有全局共享状态 / 需跨调用点共享 / 是资源生命周期所有者 → `@register_singleton` + `_reset_singleton`（R15）；否则按需实例化 + 构造器注入（如 `BacktestService`）。改单例注册必须同步更新 singleton-lifecycle.md 表格。
 2. **错误分类**：挂 `classify_error()` + `classify_severity()`（CONTRIBUTING「错误处理标准模式」）；`system` 级上抛、`recoverable`/`operational` 层内降级；涉及外部 IO 的方法挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)`。
 3. **编排边界**：外部动作/定时触发用 `TaskManager.submit_task()`（协程内同步阻塞仍经 `ThreadPoolManager.run_async()`，R16）；周期性定时用 `SchedulerService`。
-4. **取消与生命周期**：轮询/长生命周期任务的优雅停止按 [exceptions.yml](../governance/exceptions.yml) EX-0017 豁免语义（吞 `EngineDisposedError` 停止轮询为合理设计）；`asyncio.CancelledError` 必须 `raise`（R2）。
+4. **取消与生命周期**：轮询/长生命周期任务的优雅停止须先核对 [exceptions.yml](../governance/exceptions.yml) EX-0017 的**具体登记范围及全部有效条件**（`paths` + `validity_criteria`，AND 语义见 ADR-0018 C15）；**新增轮询服务不能自动继承**该例外，须另按 R5 规则判断（确需偏离时依治理流程登记）；`asyncio.CancelledError` 必须 `raise`（R2）。
 5. **单测**：按 CONTRIBUTING「变更类型 → 最小验证子集」配套（R19）；Service 单测模板见 [testing.md](./testing.md)。
 6. **接线**：启动编排/调度注册按第 3 步边界接入（`app/` 层注入或 `SchedulerService.register_job`）。
 
