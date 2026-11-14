@@ -16,6 +16,10 @@ pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
+_SCRIPTS_DIR = ROOT / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 _DOCS_TESTS_DIR = ROOT / "tests" / "docs"
 if str(_DOCS_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_DOCS_TESTS_DIR))

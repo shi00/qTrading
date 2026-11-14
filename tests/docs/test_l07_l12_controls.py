@@ -19,6 +19,10 @@ r"""D12：L07—L12 长期控制合同控制测试（documentation-maintenance �
 - L10 人工边界：生产 check_exceptions_effectiveness 只机判 expires_at 日期合法性/是否过期
   与字段完备性；removal_trigger 是否满足仍由评审者人工语义判定（本文件
   _exception_still_in_effect 为 tests/docs 内 AND 谓词参照实现，不冒充生产门禁）。
+
+写入替身边界（D28）：生产 `WriteGuard.write_bytes` 已拒绝原位写；本文件凡断言「更新
+成功」的控制点，均以 `gf.AtomicReplaceWriteGuard`（临时文件 + fsync + os.replace）替换
+写入后端，仅验证生成逻辑；生产拒绝与短写/截断/中断负例由 test_concurrency 覆盖。
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import check_docs_consistency as cdc  # noqa: E402
 import docs_generated as dg  # noqa: E402
+from fixtures import generator_fixtures as gf  # noqa: E402
 
 pytestmark = pytest.mark.docs_pure
 
@@ -56,6 +61,7 @@ def test_l07_hand_edit_inside_block_rejected_outside_allowed(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
     assert cdc.check_docs_generated() == [], "基线一致"
 

@@ -101,6 +101,20 @@ def test_scan_yaml_blocks() -> None:
     assert blocks["y-block"].content_lines == ("- 行一",)
 
 
+def test_scan_yaml_blocks_indented() -> None:
+    """正例：缩进的 YAML 成对注释块（hook 映射内部的受控片段）同样被识别。"""
+    text = (
+        "hooks:\n"
+        "  - id: x\n"
+        "    additional_dependencies:\n"
+        "      # generated:inner-block\n"
+        '      - "dep>=1"\n'
+        "      # /generated:inner-block\n"
+    )
+    blocks = dg.scan_blocks(text, "yaml")
+    assert blocks["inner-block"].content_lines == ('      - "dep>=1"',)
+
+
 def test_yaml_block_missing_end_rejected(tmp_path: Path) -> None:
     """负例（端到端）：YAML 目标缺结束标记（块未闭合）→ run_update 显式拒绝。"""
     root = tmp_path
@@ -176,6 +190,147 @@ def test_source_yaml_not_dict_rejected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# D34：必填值形态校验（null/空串/空集合/路径不存在）必须在渲染与写入之前失败
+# ---------------------------------------------------------------------------
+
+
+def _spy_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, source_text: str
+) -> tuple[Path, tuple[dg.BlockSpec, ...], list[int], list[Path]]:
+    """构造「渲染调用 + 写入调用」双计数夹具（写入阶段被触达即违规）。"""
+    root = gf.build_demo_tree(tmp_path, source_text=source_text)
+    calls: list[int] = []
+    writes: list[Path] = []
+
+    def counting_render(validated: dict[str, object], root: Path) -> list[str]:
+        calls.append(1)
+        return []
+
+    def recording_write(self: dg.WriteGuard, path: Path, data: bytes) -> None:
+        writes.append(Path(path))
+        raise AssertionError("非法作者源不得触达写入阶段")
+
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    monkeypatch.setattr(gf.HeldFdWriteGuard, "write_bytes", recording_write)
+    return root, gf.make_demo_registry(render=counting_render), calls, writes
+
+
+@pytest.mark.parametrize("bad_title", ["null", "''", "'   '", "123"])
+def test_source_invalid_title_rejected_before_render_and_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_title: str
+) -> None:
+    """负例：title 为 null/空串/纯空白/非字符串 → 渲染与写入阶段均不得被触达。"""
+    broken = gf.VALID_SOURCE_YAML.replace("title: 演示红线一", f"title: {bad_title}")
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text=broken)
+    with pytest.raises(dg.SourceFieldError, match="title 须为非空字符串"):
+        dg.run_update(root, registry)
+    assert calls == [], "值形态校验失败时渲染函数被调用=非法值进入了渲染阶段"
+    assert writes == [], "值形态校验失败时写入被调用=非法值进入了写入阶段"
+
+
+@pytest.mark.parametrize("bad_id", ["null", "''", "'   '", "123"])
+def test_source_invalid_identity_rejected_before_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_id: str
+) -> None:
+    """负例：身份字段为 null/空串/纯空白/非字符串 → 渲染前拒绝。"""
+    broken = gf.VALID_SOURCE_YAML.replace("  - id: R1", f"  - id: {bad_id}", 1)
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text=broken)
+    with pytest.raises(dg.SourceFieldError, match="id 须为非空字符串"):
+        dg.run_update(root, registry)
+    assert calls == []
+    assert writes == []
+
+
+def test_source_empty_item_collection_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：作者源条目集合为空（空 topics/redlines）→ 渲染前显式拒绝。"""
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text="redlines: []\n")
+    with pytest.raises(dg.SourceFormatError, match="条目集合为空"):
+        dg.run_update(root, registry)
+    assert calls == []
+    assert writes == []
+
+
+def test_source_null_item_collection_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：作者源条目集合为 null（仅键无值）→ 渲染前显式拒绝。"""
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text="redlines:\n")
+    with pytest.raises(dg.SourceFormatError, match="缺 'redlines' 列表"):
+        dg.run_update(root, registry)
+    assert calls == []
+    assert writes == []
+
+
+def _canonical_schema() -> dg.SourceSchema:
+    """canonical 主题作者源 schema（路径字段与必填值形态按真实内置 schema 声明）。"""
+    return dg.SourceSchema(
+        path=gf.DEMO_SOURCE_REL,
+        fmt="yaml",
+        item_key="topics",
+        required_fields=frozenset({"id", "title", "canonical"}),
+        known_fields=frozenset({"id", "title", "canonical", "section", "workflow", "note"}),
+        non_empty_string_fields=frozenset({"title", "canonical"}),
+        path_fields=frozenset({"canonical"}),
+        identity_field="id",
+    )
+
+
+def _build_canonical_tree(root: Path, canonical_value: str) -> None:
+    """落盘 canonical 主题作者源与目标块（canonical 值由用例注入）。"""
+    (root / "sources").mkdir()
+    (root / gf.DEMO_SOURCE_REL).write_text(
+        f"topics:\n  - id: strategy\n    title: 新增/修改策略\n    canonical: {canonical_value}\n",
+        encoding="utf-8",
+    )
+    (root / gf.DEMO_TARGET_REL).write_text(gf.DEMO_TARGET, encoding="utf-8")
+
+
+@pytest.mark.parametrize("canonical_value", ["null", "''", "'   '", "docs/nonexistent.md"])
+def test_source_canonical_value_shape_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, canonical_value: str
+) -> None:
+    """负例：canonical 为 null/空串/纯空白/不存在的路径 → 渲染前拒绝。"""
+    root = tmp_path
+    _build_canonical_tree(root, canonical_value)
+    calls: list[int] = []
+
+    def counting_render(validated: dict[str, object], root: Path) -> list[str]:
+        calls.append(1)
+        return []
+
+    registry = (
+        dg.BlockSpec(
+            block_id="demo-block",
+            target=gf.DEMO_TARGET_REL,
+            sources=(_canonical_schema(),),
+            render=counting_render,
+        ),
+    )
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    with pytest.raises(dg.SourceFieldError, match="canonical"):
+        dg.run_update(root, registry)
+    assert calls == [], "canonical 值形态非法时渲染函数被调用=非法值进入了渲染阶段"
+
+
+def test_source_canonical_path_exists_accepted(tmp_path: Path) -> None:
+    """正例：canonical 指向真实存在的路径 → 校验通过并可供渲染。"""
+    root = tmp_path
+    (root / "docs" / "patterns").mkdir(parents=True)
+    (root / "docs" / "patterns" / "strategy-template.md").write_text("# 策略\n", encoding="utf-8")
+    _build_canonical_tree(root, "docs/patterns/strategy-template.md")
+    items = dg.load_validated_source(root, _canonical_schema())
+    assert isinstance(items, list)
+    assert items[0]["canonical"] == "docs/patterns/strategy-template.md"
+
+
+def test_source_value_shapes_valid_accepted(tmp_path: Path) -> None:
+    """正例：合法身份/标题/非空集合正常通过校验并渲染（防误伤）。"""
+    root = gf.build_demo_tree(tmp_path)
+    items = dg.load_validated_source(root, gf.demo_source_schema())
+    assert isinstance(items, list)
+    assert [item["id"] for item in items if isinstance(item, dict)] == ["R1", "R2"]
+    assert gf.demo_render({gf.DEMO_SOURCE_REL: items}, root) == ["- R1：演示红线一", "- R2：演示红线二"]
+
+
+# ---------------------------------------------------------------------------
 # 路径安全：越界与符号链接
 # ---------------------------------------------------------------------------
 
@@ -230,16 +385,16 @@ def test_only_outside_registry_rejected(tmp_path: Path) -> None:
         dg.run_update(root, gf.make_demo_registry(), only=("ghost.md",))
 
 
-def test_unregistered_target_with_markers_untouched(tmp_path: Path) -> None:
-    """负例：未登记目标即使含合法生成块标记，也不被任何路径扫描写入（封闭清单）。"""
+def test_unregistered_target_with_markers_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：未登记目标即使含合法生成块标记，也不被任何路径扫描或写入（封闭清单）。"""
     root = gf.build_demo_tree(tmp_path)
     stray = root / "stray.md"
     stray.write_text("<!-- generated:demo-block -->\n旧内容\n<!-- /generated -->\n", encoding="utf-8")
+    before = stray.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
     result = dg.run_update(root, gf.make_demo_registry())
-    assert result.ok, f"登记目标应正常更新: {result}"
-    assert stray.read_text(encoding="utf-8").startswith("<!-- generated:demo-block -->\n旧内容"), (
-        "未登记目标被触碰=扫描到标记就能写，违反封闭清单"
-    )
+    assert result.ok is False and result.written == (), "原位写被拒绝时不得把目标记为已写"
+    assert stray.read_bytes() == before, "未登记目标被触碰=扫描到标记就能写，违反封闭清单"
 
 
 # ---------------------------------------------------------------------------
@@ -247,47 +402,69 @@ def test_unregistered_target_with_markers_untouched(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_update_renders_block_and_preserves_prose(tmp_path: Path) -> None:
-    """正例：块内容被渲染替换；块外手写正文逐字节保留。"""
+def test_update_renders_block_and_preserves_prose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """正例：块内容被渲染替换、块外手写正文逐字节保留；原位写被拒绝时文件保持原样。"""
     root = gf.build_demo_tree(tmp_path)
-    result = dg.run_update(root, gf.make_demo_registry())
-    assert result.ok, f"更新应成功: {result}"
-    assert result.written == (gf.DEMO_TARGET_REL,)
-    text = (root / gf.DEMO_TARGET_REL).read_text(encoding="utf-8")
+    target = root / gf.DEMO_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_demo_registry()[0])
+    text = dg.replace_block(original, "markdown", "demo-block", rendered)
     assert "<!-- generated:demo-block -->" in text
     assert "- R1：演示红线一" in text
     assert "- R2：演示红线二" in text
     assert "块外手写正文必须原样保留。" in text
     assert text.startswith("# 演示目标\n\n<!-- generated:demo-block -->\n")
 
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False and result.written == (), "拒绝原位写时不得记为已写"
+    assert target.read_bytes() == before, "拒绝原位写不得改动目标（含块外手写正文）"
 
-def test_update_yaml_target(tmp_path: Path) -> None:
-    """正例：YAML 目标块按 `# generated:<id>` 成对注释渲染替换。"""
+
+def test_update_yaml_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """正例：YAML 目标块按 `# generated:<id>` 成对注释渲染替换；原位写被拒绝时保持原样。"""
     root = gf.build_yaml_tree(tmp_path)
-    result = dg.run_update(root, gf.make_yaml_registry())
-    assert result.ok, f"更新应成功: {result}"
-    text = (root / gf.YAML_TARGET_REL).read_text(encoding="utf-8")
+    target = root / gf.YAML_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_yaml_registry()[0])
+    text = dg.replace_block(original, "yaml", "demo-yaml-block", rendered)
     assert "# generated:demo-yaml-block" in text
     assert "# /generated:demo-yaml-block" in text
     assert "- R1：演示红线一" in text
 
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_yaml_registry())
+    assert result.ok is False and result.written == ()
+    assert target.read_bytes() == before
 
-def test_render_output_cannot_write_outside_block(tmp_path: Path) -> None:
-    """负例：渲染输出携带越界路径不成立——渲染只产出行内容，写入受封闭清单与路径校验约束。"""
+
+def test_render_output_cannot_write_outside_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：渲染输出只产出行内容，不伪造块边界；原位写被拒绝时目标保持原样。"""
     root = gf.build_demo_tree(tmp_path)
-    result = dg.run_update(root, gf.make_demo_registry())
-    assert result.ok
-    # 二次确认：块标记行之外不新增 generated 标记（渲染输出不得伪造块边界）
-    text = (root / gf.DEMO_TARGET_REL).read_text(encoding="utf-8")
+    target = root / gf.DEMO_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_demo_registry()[0])
+    text = dg.replace_block(original, "markdown", "demo-block", rendered)
+    # 块标记行之外不新增 generated 标记（渲染输出不得伪造块边界）
     assert text.count("<!-- generated:") == 1
     assert text.count("<!-- /generated") == 1
 
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False and result.written == ()
+    assert target.read_bytes() == before
+
 
 def test_platform_import_guard() -> None:
-    """机制自检：docs_generated 在当前平台可导入且声明其保护后端（不静默伪装）。"""
+    """机制自检：docs_generated 在当前平台可导入且声明其保护/原位写后端（不静默伪装）。"""
     assert dg.PLATFORM_LOCK_BACKEND in ("win32-exclusive-open", "posix-advisory-unsupported")
     if sys.platform == "win32":
         assert dg.PLATFORM_LOCK_BACKEND == "win32-exclusive-open"
+    # D28：无已验证「保护 + 崩溃原子提交」方案前，所有平台的值都必须是拒绝态
+    assert dg.INPLACE_WRITE_BACKEND == "refused-unverified-atomic-commit"
 
 
 def test_docs_index_candidates_order_is_platform_independent(tmp_path: Path) -> None:

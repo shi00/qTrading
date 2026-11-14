@@ -24,11 +24,19 @@ E09 远端部分只做本地只读静态核验（合成夹具参照实现 + 真�
 - E10 → cdc.check_exceptions_yaml_consistency + AND 续效谓词（L10 参照实现，单写复用）
 - E11 → cdc._check_enforcement_invariants（声称自动化无证据不装绿）+ warning 分层
 - E12 → docs_markdown 统一视图（允许例/禁止例/停止分支保全；代码例不冒正文）
+
+写入替身边界（D28）：生产 `WriteGuard.write_bytes` 已在任何字节变更前拒绝原位写（无
+已验证方案同时保证写入保护与崩溃原子提交）。本文件凡断言「更新成功」的演习，均以
+`gf.AtomicReplaceWriteGuard`（同目录临时文件 + fsync + os.replace）替换写入后端，仅证明
+生成逻辑（发现/单源传播/块外保真）；生产拒绝与短写/截断/中断负例由
+test_concurrency 的 D28 用例覆盖，不把替身当作生产写入能力已恢复的证据。
 """
 
 from __future__ import annotations
 
 import dataclasses
+import os
+import shutil
 import subprocess
 import sys
 from datetime import date
@@ -90,6 +98,7 @@ def test_e01_new_file_discovered_index_registered_then_recovered(
 ) -> None:
     """正例：新正式文件经独立发现进入文件级目录（run_update 渲染索引块）→ 检查绿；
     负例（单变因）：tracked 新文件漏目录登记 → 失败归因 → 登记后恢复。"""
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     readme = git_doc_repo / "docs" / "README.md"
     readme.write_text(
         "# 索引\n\n- [indexed](./indexed.md)\n\n<!-- generated:e01-file-index -->\n<!-- /generated -->\n",
@@ -161,6 +170,7 @@ def test_e02_author_source_single_edit_propagates_with_zero_diff(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
 
     source = root / "sources" / "limits.yml"
     source.write_text("limits:\n  - id: max_rows\n    value: 300\n", encoding="utf-8")
@@ -179,6 +189,7 @@ def test_e02_copy_edit_rejected_and_attribution_points_at_block(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
 
     target = root / "targets" / "derived.md"
@@ -201,6 +212,7 @@ def test_e02_consistent_copies_without_author_source_rejected(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
     consistent_copy = (root / "targets" / "derived.md").read_text(encoding="utf-8")
 
@@ -266,6 +278,7 @@ def test_e04_delete_required_source_fails_loudly_then_recovers(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok and cdc.check_docs_generated() == [], "基线绿"
     backup = (root / "sources" / "limits.yml").read_text(encoding="utf-8")
 
@@ -297,6 +310,7 @@ def test_e04_migrate_consumers_then_delete_source_passes(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
 
     assert dg.run_update(root, ()).ok, "消费者已迁（登记摘除）后空注册表更新必须成功"
@@ -429,7 +443,7 @@ def test_e07_duplicate_nested_and_out_of_bounds_rejected(tmp_path: Path) -> None
         dg.run_update(root, (out_of_bounds,))
 
 
-def test_e07_write_interruption_lists_written_and_unwritten(tmp_path: Path) -> None:
+def test_e07_write_interruption_lists_written_and_unwritten(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """负例：写入中断（屏障注入磁盘错误）→ 非零退出语义，已写/未写如实分列，不伪装整体成功。"""
     root = tmp_path
     (root / "sources").mkdir()
@@ -438,6 +452,7 @@ def test_e07_write_interruption_lists_written_and_unwritten(tmp_path: Path) -> N
     (root / "b.md").write_text(gf.DEMO_TARGET.replace("demo-block", "demo-block-b"), encoding="utf-8")
     spec_a = dataclasses.replace(gf.make_demo_registry()[0], target="a.md", block_id="demo-block-a")
     spec_b = dataclasses.replace(gf.make_demo_registry()[0], target="b.md", block_id="demo-block-b")
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
 
     def barrier(phase: str, target_rel: str | None) -> None:
         if phase == "before_replace" and target_rel == "a.md":
@@ -484,6 +499,7 @@ def test_e07_hand_edited_prose_outside_block_preserved(
     root, registry = generated_block_repo
     monkeypatch.setattr(cdc, "ROOT", root)
     monkeypatch.setattr(dg, "BUILTIN_REGISTRY", registry)
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     assert dg.run_update(root, registry).ok
 
     target = root / "targets" / "derived.md"
@@ -529,8 +545,9 @@ def test_e08_live_example_selected(tmp_path: Path) -> None:
     assert not any("N5" in e for e in errors), f"活示例被选择时不得误报: {errors}"
 
 
-def test_e08_inactive_stub_slot_allowed(tmp_path: Path) -> None:
+def test_e08_inactive_stub_slot_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """正例：有意空 stub（active=False 槽位）→ 不参与渲染、不误阻更新（stub 不误阻）。"""
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
     root = gf.build_demo_tree(tmp_path)
     stub = dataclasses.replace(
         gf.make_demo_registry()[0], block_id="stub-slot", target="stub.md", render=None, active=False
@@ -611,6 +628,195 @@ def test_e09_real_workflow_aggregation_fail_closed_readonly() -> None:
     assert required_gates <= needs, f"发行聚合 needs 必须覆盖全部 CI 门 job: 缺 {sorted(required_gates - needs)}"
     if_expr = build.get("if") or ""
     assert "always()" not in if_expr, "聚合 job if 不得引入 always()（失败/取消也继续 = 装绿路径）"
+
+
+# --- E09 真实聚合脚本执行矩阵 ---------------------------------------------
+# 直接提取 docs-ci / ci-aux-gate 聚合 job 的 run 脚本并以 bash 执行，
+# 覆盖成功 / 失败 / 取消 / 非许可 skip，而不是只跑 tests/docs 内的参照实现。
+
+_DOCS_AGGREGATE = (".github/workflows/docs-ci.yml", "docs-check")
+_AUX_AGGREGATE = (".github/workflows/ci-aux-gate.yml", "ci-aux-gate")
+
+
+def _aggregate_job_and_script(workflow_rel: str, job_id: str) -> tuple[dict, str]:
+    workflow = yaml.safe_load((ROOT / workflow_rel).read_text(encoding="utf-8"))
+    job = workflow["jobs"][job_id]
+    step = next(s for s in job["steps"] if "Evaluate" in s.get("name", ""))
+    return job, step["run"]
+
+
+def _run_aggregate_script(script: str, variables: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("未找到 bash，无法在本地执行 workflow 聚合脚本（静态合同仍由相邻用例核验）")
+    env = {**os.environ, **variables, "GITHUB_STEP_SUMMARY": "summary.md"}
+    return subprocess.run(
+        [bash, "-c", script],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+
+
+_DOCS_MATRIX = [
+    ("both-success", {"STATIC_RESULT": "success", "CONTRACTS_RESULT": "success"}, True),
+    ("static-failure", {"STATIC_RESULT": "failure", "CONTRACTS_RESULT": "success"}, False),
+    ("static-cancelled", {"STATIC_RESULT": "cancelled", "CONTRACTS_RESULT": "success"}, False),
+    ("static-skipped", {"STATIC_RESULT": "skipped", "CONTRACTS_RESULT": "success"}, False),
+    ("contracts-skipped", {"STATIC_RESULT": "success", "CONTRACTS_RESULT": "skipped"}, False),
+    ("static-result-missing", {"STATIC_RESULT": "", "CONTRACTS_RESULT": "success"}, False),
+]
+
+_AUX_MATRIX = [
+    (
+        "skip-by-change",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "true",
+            "PRECOMMIT_RESULT": "success",
+        },
+        True,
+    ),
+    (
+        "meta-failure",
+        {
+            "DETECT": "success",
+            "META_RESULT": "failure",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "meta-unpermitted-skip",
+        {
+            "DETECT": "success",
+            "META_RESULT": "skipped",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-failure",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "true",
+            "SIDECAR_RESULT": "failure",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-cancelled",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "true",
+            "SIDECAR_RESULT": "cancelled",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-unpermitted-skip",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "true",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-ran-without-request",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "success",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "detect-failure",
+        {
+            "DETECT": "failure",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "",
+            "SIDECAR_RESULT": "",
+            "PRECOMMIT_REQUESTED": "",
+            "PRECOMMIT_RESULT": "",
+        },
+        False,
+    ),
+    (
+        "detect-missing",
+        {
+            "DETECT": "",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "",
+            "SIDECAR_RESULT": "",
+            "PRECOMMIT_REQUESTED": "",
+            "PRECOMMIT_RESULT": "",
+        },
+        False,
+    ),
+]
+
+
+def test_e09_aggregate_jobs_are_declared_always() -> None:
+    """docs/aux 聚合 job 必须显式 always()：上游失败/取消时仍执行，else 会被跳过而不认证。"""
+    for workflow_rel, job_id in (_DOCS_AGGREGATE, _AUX_AGGREGATE):
+        job, _script = _aggregate_job_and_script(workflow_rel, job_id)
+        assert "always()" in (job.get("if") or ""), f"{workflow_rel} 的 {job_id} 必须以 if: always() 汇总"
+
+
+@pytest.mark.parametrize("case_name,results,expected_ok", _DOCS_MATRIX)
+def test_e09_docs_aggregation_matrix_runs_real_script(
+    tmp_path: Path, case_name: str, results: dict[str, str], expected_ok: bool
+) -> None:
+    """docs 聚合脚本真实执行：仅两个必要 job 均成功才通过。"""
+    _job, script = _aggregate_job_and_script(*_DOCS_AGGREGATE)
+    run = _run_aggregate_script(script, {"EVENT_NAME": "pull_request", **results}, tmp_path)
+    if expected_ok:
+        assert run.returncode == 0, f"{case_name} 应聚合通过:\n{run.stdout}\n{run.stderr}"
+    else:
+        assert run.returncode != 0, f"{case_name} 不得聚合通过（失败/取消/非许可 skip）:\n{run.stdout}"
+        assert "不通过" in run.stdout + run.stderr
+
+
+@pytest.mark.parametrize("case_name,results,expected_ok", _AUX_MATRIX)
+def test_e09_aux_aggregation_matrix_runs_real_script(
+    tmp_path: Path, case_name: str, results: dict[str, str], expected_ok: bool
+) -> None:
+    """aux 聚合脚本真实执行：请求且成功，或未请求且按改动 skipped 才通过。"""
+    _job, script = _aggregate_job_and_script(*_AUX_AGGREGATE)
+    run = _run_aggregate_script(script, {"EVENT_NAME": "pull_request", **results}, tmp_path)
+    if expected_ok:
+        assert run.returncode == 0, f"{case_name} 应聚合通过:\n{run.stdout}\n{run.stderr}"
+    else:
+        assert run.returncode != 0, f"{case_name} 不得聚合通过（失败/取消/非许可 skip）:\n{run.stdout}"
+        assert "不通过" in run.stdout + run.stderr
 
 
 # ---------------------------------------------------------------------------

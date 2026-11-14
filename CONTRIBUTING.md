@@ -210,13 +210,16 @@ python -m ruff check . --fix
 python -m ruff format .
 python -m pyright
 
-# 运行测试
+# 运行测试（默认 testpaths 已排除 tests/docs 纯文档套件）
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
 python -m pytest tests/integration/ -n auto -v --tb=short
 python -m pytest tests/e2e/ -v --tb=short
 
-# 覆盖率
-python -m pytest tests/ --cov --cov-report=term-missing --cov-report=json
+# 纯文档独立套件（禁插件自动加载 + 截断业务 conftest，与 docs-ci 的 docs-static 一致）
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -c tests/docs/pytest.ini --confcutdir=tests/docs tests/docs -q
+
+# 覆盖率（业务套件；不要选整个 tests/，否则会连同 tests/docs 混选并被双收集守卫拒绝）
+python -m pytest tests/unit tests/integration tests/e2e --cov --cov-report=term-missing --cov-report=json
 python scripts/check_per_file_coverage.py
 
 # 数据库与安全

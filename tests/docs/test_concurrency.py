@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -58,13 +60,57 @@ def test_guard_posix_rejects_unsupported(tmp_path: Path) -> None:
             pass
 
 
-def test_guard_write_via_held_fd(tmp_path: Path) -> None:
-    """保护持有期间经持有 fd 原位写入（替换通道），字节正确落盘。"""
+def test_guard_write_refused_before_mutation(tmp_path: Path) -> None:
+    """取得保护后写入仍被拒绝：不截断、不写入，原正文逐字节保留（D28）。"""
     target = tmp_path / "f.md"
-    target.write_text("旧内容", encoding="utf-8")
-    with dg.WriteGuard([target]) as guard:
-        guard.write_bytes(target, "新内容".encode())
-    assert target.read_text(encoding="utf-8") == "新内容"
+    original = "旧内容\n块外手写正文\n".encode()
+    target.write_bytes(original)
+    guard = gf.HeldFdWriteGuard([target])
+    with guard:
+        with pytest.raises(dg.InPlaceWriteUnsupportedError, match="崩溃原子提交"):
+            guard.write_bytes(target, "更长的替换内容".encode())
+    assert target.read_bytes() == original, "拒绝原位写前发生字节变更=可能截断/半写目标"
+
+
+@pytest.mark.skipif(not WIN, reason="内核级独占打开保护仅在 Windows 提供")
+def test_guard_blocks_independent_process(tmp_path: Path) -> None:
+    """独立进程在保护持有期间打开目标必须失败，且原稿未被改写（跨进程证据，非线程内替身）。"""
+    target = tmp_path / "f.md"
+    target.write_text("原稿", encoding="utf-8")
+    child = (
+        "import sys\n"
+        "path = sys.argv[1]\n"
+        "try:\n"
+        "    open(path, 'w', encoding='utf-8').write('外部进程新稿')\n"
+        "except OSError as exc:\n"
+        "    print(type(exc).__name__, file=sys.stderr)\n"
+        "    raise SystemExit(3)\n"
+    )
+    with dg.WriteGuard([target]):
+        run = subprocess.run(
+            [sys.executable, "-c", child, str(target)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    assert run.returncode == 3, f"独立进程在保护期间仍能写入（returncode={run.returncode}）"
+    assert "PermissionError" in run.stderr
+    assert target.read_text(encoding="utf-8") == "原稿", "保护期间的独立进程写入了旧快照之外的内容"
+
+
+@pytest.mark.skipif(not WIN, reason="内核级独占打开保护仅在 Windows 提供")
+def test_guard_release_preserves_external_edit(tmp_path: Path) -> None:
+    """保护释放后外部编辑生效并在再次取得保护时保留，不被旧快照回滚。"""
+    target = tmp_path / "f.md"
+    target.write_text("v1", encoding="utf-8")
+    with dg.WriteGuard([target]):
+        pass
+    target.write_text("释放后用户编辑", encoding="utf-8")
+    assert target.read_text(encoding="utf-8") == "释放后用户编辑"
+    with dg.WriteGuard([target]):
+        pass
+    assert target.read_text(encoding="utf-8") == "释放后用户编辑", "再次加锁/释放不得回滚释放期间的编辑"
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +212,8 @@ def test_barrier_author_source_edit_detected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_write_failure_lists_written_and_unwritten(tmp_path: Path) -> None:
-    """目标 A 写失败、目标 B 写成功 → failed/written 如实列出，继续处理其余目标。"""
+def test_write_refusal_lists_every_unwritten_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """原位写被拒绝时逐目标列出未写，已写恒为空，且继续处理其余目标（不承诺跨文件事务）。"""
     root = tmp_path
     (root / "sources").mkdir()
     (root / gf.DEMO_SOURCE_REL).write_text(gf.VALID_SOURCE_YAML, encoding="utf-8")
@@ -181,36 +227,96 @@ def test_write_failure_lists_written_and_unwritten(tmp_path: Path) -> None:
 
     spec_a = dataclasses.replace(gf.make_demo_registry()[0], target="a.md", block_id="demo-block-a")
     spec_b = dataclasses.replace(gf.make_demo_registry()[0], target="b.md", block_id="demo-block-b")
+    before_a = (root / "a.md").read_bytes()
+    before_b = (root / "b.md").read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+
+    result = dg.run_update(root, (spec_a, spec_b))
+    assert result.ok is False
+    assert result.written == (), "原位写被拒绝时不得有目标被记为已写"
+    assert result.failed == ("a.md", "b.md"), "未写目标必须逐个如实列出（继续处理其余目标）"
+    assert (root / "a.md").read_bytes() == before_a
+    assert (root / "b.md").read_bytes() == before_b
+
+
+# ---------------------------------------------------------------------------
+# D28 负例：短写 / 截断后异常 / 提交中断 → 原正文完整、未写如实报告
+# ---------------------------------------------------------------------------
+
+
+def test_short_write_never_attempted_and_original_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """短写负例：底层 os.write 从未被调用（拒绝发生在任何字节变更前），原正文完整。"""
+    root = gf.build_demo_tree(tmp_path)
+    target = root / gf.DEMO_TARGET_REL
+    before = target.read_bytes()
+    write_attempts: list[int] = []
+    monkeypatch.setattr(os, "write", lambda fd, data: write_attempts.append(len(data)) or 0)
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False
+    assert result.written == ()
+    assert result.failed == (gf.DEMO_TARGET_REL,)
+    assert write_attempts == [], "原位写被拒绝后仍调用 os.write=可能短写并留下半写内容"
+    assert target.read_bytes() == before
+
+
+def test_truncate_then_error_never_reached_and_original_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """截断后异常负例：不调用 ftruncate（无截断窗口），原正文完整、未写如实报告。"""
+
+    def _forbidden_ftruncate(fd: int, size: int) -> None:
+        raise AssertionError("拒绝原位写不得先截断目标（截断后异常会丢失整份正文）")
+
+    root = gf.build_demo_tree(tmp_path)
+    target = root / gf.DEMO_TARGET_REL
+    before = target.read_bytes()
+    monkeypatch.setattr(os, "ftruncate", _forbidden_ftruncate)
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False
+    assert result.written == ()
+    assert result.failed == (gf.DEMO_TARGET_REL,)
+    assert target.read_bytes() == before
+
+
+def test_commit_interruption_reports_unwritten_and_preserves_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """提交中断负例：提交前注入中断 → 原正文完整、written 为空、failed 准确、非 ok（CLI 退出 1）。"""
+    root = gf.build_demo_tree(tmp_path)
+    target = root / gf.DEMO_TARGET_REL
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
 
     def barrier(phase: str, target_rel: str | None) -> None:
-        # 提交核对后、替换前对 a.md 注入写失败（模拟磁盘满/句柄失效；非 PermissionError 语义）
-        if phase == "before_replace" and target_rel == "a.md":
-            raise OSError("注入的写失败（disk full）")
+        if phase == "before_replace":
+            raise OSError("注入的提交中断")
 
-    result = dg.run_update(root, (spec_a, spec_b), barrier=barrier)
+    result = dg.run_update(root, gf.make_demo_registry(), barrier=barrier)
     assert result.ok is False
-    assert result.failed == ("a.md",)
-    assert result.written == ("b.md",)
-    assert "- R1：演示红线一" not in (root / "a.md").read_text(encoding="utf-8"), "写失败目标不应有内容写入"
-    assert "- R1：演示红线一" in (root / "b.md").read_text(encoding="utf-8"), "写失败不得中断其余目标提交"
+    assert result.written == ()
+    assert result.failed == (gf.DEMO_TARGET_REL,)
+    assert target.read_bytes() == before, "提交中断后原正文被改动"
 
 
-# ---------------------------------------------------------------------------
-# 幂等：二次 --update 零差异
-# ---------------------------------------------------------------------------
+def test_refused_write_maps_to_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """拒绝原位写的结果经 CLI 映射为非零退出（退出码合同：写入失败 1）。"""
+    import check_docs_consistency as cdc
 
-
-def test_second_update_zero_diff(tmp_path: Path) -> None:
-    """首次更新写入后，二次更新内容零差异（unchanged、不再写入）。"""
     root = gf.build_demo_tree(tmp_path)
-    first = dg.run_update(root, gf.make_demo_registry())
-    assert first.ok and first.written == (gf.DEMO_TARGET_REL,)
-    before = (root / gf.DEMO_TARGET_REL).read_bytes()
-    second = dg.run_update(root, gf.make_demo_registry())
-    assert second.ok, f"二次更新应成功: {second}"
-    assert second.written == (), "内容一致时不得重复写入"
-    assert second.unchanged == (gf.DEMO_TARGET_REL,)
-    assert (root / gf.DEMO_TARGET_REL).read_bytes() == before, "二次更新产生差异=非幂等渲染"
+    target = root / gf.DEMO_TARGET_REL
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+
+    assert cdc.main(["--update"], update_runner=lambda: result) == 1
+    assert capsys.readouterr().out != "", "退出非零时必须如实输出未写/失败明细"
+    assert target.read_bytes() == before
 
 
 def test_render_is_deterministic(tmp_path: Path) -> None:
