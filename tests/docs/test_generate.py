@@ -53,6 +53,14 @@ def test_missing_block_via_update_rejected(tmp_path: Path) -> None:
         dg.run_update(root, gf.make_demo_registry())
 
 
+def test_invalid_block_id_via_update_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例（端到端，D40）：目标含非法块身份 → run_update 具名拒绝（诊断可定位行号）。"""
+    monkeypatch.setattr(dg, "WriteGuard", gf.AtomicReplaceWriteGuard)
+    root = gf.build_demo_tree(tmp_path, target_text="<!-- generated:demo.block -->\n<!-- /generated -->\n")
+    with pytest.raises(dg.InvalidBlockIdError, match="第 1 行块 id 非法: 'demo.block'"):
+        dg.run_update(root, gf.make_demo_registry())
+
+
 def test_duplicate_block_rejected() -> None:
     """负例：同一块身份出现两次 → 显式拒绝（不静默取第一处）。"""
     text = "<!-- generated:dup -->\nA\n<!-- /generated -->\n<!-- generated:dup -->\nB\n<!-- /generated -->\n"
@@ -87,6 +95,63 @@ def test_end_tag_id_mismatch_rejected() -> None:
     text = "<!-- generated:alpha -->\n<!-- /generated:beta -->\n"
     with pytest.raises(dg.EndMismatchError, match="结束标记身份不匹配: 'beta'"):
         dg.scan_blocks(text, "markdown")
+
+
+def test_invalid_block_id_outside_charset_rejected() -> None:
+    """负例（D40）：正则字符集外的身份（点号等）不得被当成普通正文静默忽略。"""
+    for bad_id in ("bad.id", "bad.id/sub", "bad~id", "v1.0"):
+        with pytest.raises(dg.InvalidBlockIdError, match="块 id 非法"):
+            dg.scan_blocks(f"<!-- generated:{bad_id} -->\n内容\n<!-- /generated -->\n", "markdown")
+        with pytest.raises(dg.InvalidBlockIdError, match="块 id 非法"):
+            dg.scan_blocks(f"# generated:{bad_id}\n内容\n# /generated:{bad_id}\n", "yaml")
+
+
+def test_invalid_end_block_id_rejected() -> None:
+    """负例（D40）：结束标记身份非法（点号/空身份）同样具名拒绝，不静默配对。"""
+    for text in (
+        "<!-- generated:alpha -->\n<!-- /generated:bad.id -->\n",
+        "<!-- generated:alpha -->\n<!-- /generated: -->\n",
+        "<!-- /generated:bad.id -->\n",
+    ):
+        with pytest.raises(dg.InvalidBlockIdError, match="id 非法"):
+            dg.scan_blocks(text, "markdown")
+
+
+def test_empty_block_id_rejected() -> None:
+    """负例（D40）：空身份开始标记显式拒绝（不是无块普通正文）。"""
+    with pytest.raises(dg.InvalidBlockIdError, match="块 id 非法: ''"):
+        dg.scan_blocks("<!-- generated: -->\n<!-- /generated -->\n", "markdown")
+
+
+def test_mixed_valid_and_invalid_block_id_rejected() -> None:
+    """负例（D40）：合法 good 之后的非法 bad.id 不得被忽略（不能只返回 good）。"""
+    text = "<!-- generated:good -->\nA\n<!-- /generated -->\n<!-- generated:bad.id -->\nB\n<!-- /generated:bad.id -->\n"
+    with pytest.raises(dg.InvalidBlockIdError, match="'bad.id'"):
+        dg.scan_blocks(text, "markdown")
+
+
+def test_legal_block_ids_still_recognized() -> None:
+    """正例：合法身份（小写字母/数字/连字符）与显式结束身份识别行为不变。"""
+    text = "<!-- generated:a1-b2 -->\nA\n<!-- /generated:a1-b2 -->\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert set(blocks) == {"a1-b2"}
+    assert blocks["a1-b2"].content_lines == ("A",)
+
+
+def test_fenced_code_example_not_promoted() -> None:
+    """代码示例按角色处理：围栏内标记既不识别为现行块，也不产生非法身份诊断。"""
+    text = (
+        "```md\n<!-- generated:demo -->\n<!-- /generated -->\n<!-- generated:bad.id -->\n```\n"
+        "<!-- generated:real -->\nR\n<!-- /generated -->\n"
+    )
+    blocks = dg.scan_blocks(text, "markdown")
+    assert set(blocks) == {"real"}
+
+
+def test_inline_code_example_not_promoted() -> None:
+    """代码示例按角色处理：行内代码中的标记示例不误升为现行块、不误诊断。"""
+    text = "说明：`<!-- generated:bad.id -->` 与 `<!-- generated:demo -->` 仅为示例。\n"
+    assert dg.scan_blocks(text, "markdown") == {}
 
 
 # ---------------------------------------------------------------------------
