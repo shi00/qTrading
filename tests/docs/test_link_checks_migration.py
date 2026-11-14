@@ -183,17 +183,26 @@ class TestHtmlHrefDeadLinks:
         assert cdc.check_anchor_dead_links() == []
         assert cdc.check_relative_dead_links() == []
 
-    def test_non_local_scheme_html_href_ignored(self, doc_repo, monkeypatch):
+    def test_external_and_protocol_relative_html_href_ignored(self, doc_repo, monkeypatch):
         doc = doc_repo / "a.md"
         doc.write_text(
-            '<a href="javascript:void(0)">js</a>\n\n'
-            '<a href="tel:10086">tel</a>\n\n'
+            '<a href="https://example.com/x.md">https</a>\n\n'
+            '<a href="mailto:x@example.com">mail</a>\n\n'
             '<a href="//example.com/x.md">协议相对</a>\n',
             encoding="utf-8",
         )
         _register(monkeypatch, doc)
         assert cdc.check_anchor_dead_links() == []
         assert cdc.check_relative_dead_links() == []
+
+    def test_unknown_scheme_html_href_reports_unsupported(self, doc_repo, monkeypatch):
+        # 与 Q09 统一语义一致：未知协议显式报「不支持」，不静默跳过、不误报本地死链
+        doc = doc_repo / "a.md"
+        doc.write_text('<a href="tel:10086">tel</a>\n', encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert errors and any("不支持的链接协议" in e for e in errors), errors
+        assert cdc.check_anchor_dead_links() == []
 
     def test_markdown_and_html_same_line_deduped(self, doc_repo, monkeypatch):
         # Markdown 目标被 markdown-it percent-encode，HTML href 保留原文，去重须归一化
@@ -202,3 +211,86 @@ class TestHtmlHrefDeadLinks:
         _register(monkeypatch, doc)
         errors = cdc.check_relative_dead_links()
         assert len(errors) == 1, errors
+
+
+class TestUrlDecomposition:
+    """Q09：URL 统一分解后解码本地 path——编码/中文/空格/query/fragment 不误报。"""
+
+    def test_chinese_space_and_preencoded_paths_pass(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        (doc_repo / "中文文档.md").write_text("# 中文标题\n", encoding="utf-8")
+        (doc_repo / "real file.md").write_text("# 空格\n", encoding="utf-8")
+        doc.write_text(
+            "[中文](./中文文档.md)\n\n[空格](<./real file.md>)\n\n[预编码](./real%20file.md)\n",
+            encoding="utf-8",
+        )
+        _register(monkeypatch, doc)
+        assert cdc.check_relative_dead_links() == [], "中文/空格/预编码路径解码后应存在"
+
+    def test_query_string_not_part_of_local_path(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        (doc_repo / "real.md").write_text("# 真实\n", encoding="utf-8")
+        doc.write_text("[查询](./real.md?raw=1)\n\n[纯查询](?tab=readme)\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        assert cdc.check_relative_dead_links() == [], "query 不得拼入磁盘路径"
+
+    def test_anchor_check_strips_query_before_resolving(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        target = doc_repo / "中文文档.md"
+        target.write_text("# 中文标题\n", encoding="utf-8")
+        doc.write_text("[跨文件](./中文文档.md?raw=1#中文标题)\n", encoding="utf-8")
+        _register(monkeypatch, doc, target)
+        assert cdc.check_anchor_dead_links() == [], "带锚点分支同样需剥离 query 并解码路径"
+
+    def test_encoded_hash_in_filename_not_treated_as_fragment(self, doc_repo, monkeypatch):
+        # 先分离 fragment 再解码：`%23` 是文件名中的字面 `#`，不是锚点分隔符
+        doc = doc_repo / "a.md"
+        (doc_repo / "a#b.md").write_text("# 目标\n", encoding="utf-8")
+        doc.write_text("[哈希](./a%23b.md)\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        assert cdc.check_relative_dead_links() == []
+
+    def test_single_decode_no_double_decode(self, doc_repo, monkeypatch):
+        # `%2520` 只解码一次为字面 `%20`；二次解码会错误命中 `a b.md`
+        doc = doc_repo / "a.md"
+        doc.write_text("[双编码](./a%2520b.md)\n", encoding="utf-8")
+        (doc_repo / "a%20b.md").write_text("# 字面\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        assert cdc.check_relative_dead_links() == []
+        (doc_repo / "a%20b.md").unlink()
+        (doc_repo / "a b.md").write_text("# 空格\n", encoding="utf-8")
+        assert cdc.check_relative_dead_links(), "不得二次解码 `%2520` 为空格"
+
+    def test_nul_encoded_path_reports_missing_without_crash(self, doc_repo, monkeypatch):
+        # `%00` 解码后不是合法路径；检查器须报缺失而不是让 resolve() 抛 ValueError
+        doc = doc_repo / "a.md"
+        doc.write_text("[NUL](./a%00b.md)\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert errors and any("a%00b.md" in e for e in errors)
+
+    def test_missing_target_still_fails_after_decomposition(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        doc.write_text("[缺件](./missing.md?raw=1)\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert errors and any("missing.md" in e for e in errors)
+
+    def test_unknown_scheme_reported_as_unsupported(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        doc.write_text(
+            "[FTP](ftp://example.com/x.md)\n\n[电话](tel:+8613800000000)\n\n[FTP锚](ftp://example.com/x.md#frag)\n",
+            encoding="utf-8",
+        )
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert len(errors) == 3, errors
+        assert all("不支持的链接协议" in e for e in errors)
+        assert not any("目标" in e for e in errors), "未知协议不得误报为本地死链"
+        assert cdc.check_anchor_dead_links() == [], "未知协议不重复报，也不进入锚点分支"
+
+    def test_scheme_relative_external_link_ignored(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        doc.write_text("[外站](//example.com/x.md)\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        assert cdc.check_relative_dead_links() == []
