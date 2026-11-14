@@ -53,6 +53,7 @@ def demo_source_schema(**overrides: object) -> dg.SourceSchema:
         item_key="redlines",
         required_fields=frozenset({"id", "title", "rule_type"}),
         known_fields=frozenset({"id", "title", "rule_type", "description"}),
+        non_empty_string_fields=frozenset({"title"}),
         identity_field="id",
         section_field="rule_type",
         allowed_sections=frozenset({"INVARIANT", "WORKFLOW"}),

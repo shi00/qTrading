@@ -3424,6 +3424,49 @@ class TestCanonicalTopicsYamlConsistency:
         errors = check_canonical_topics_consistency()
         assert any("workflow 路径不存在" in e for e in errors), f"应报 workflow 路径不存在, got: {errors}"
 
+    def test_detects_empty_topics(self, tmp_path, monkeypatch):
+        """topics 为空列表时应报错（不得静默当空集合）(D34)."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text("topics: []\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("非空 list" in e for e in errors), f"应报 topics 为空, got: {errors}"
+
+    @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("id", "null"),
+            ("id", "''"),
+            ("id", "'   '"),
+            ("title", "null"),
+            ("title", "''"),
+            ("title", "'   '"),
+            ("canonical", "null"),
+            ("canonical", "''"),
+            ("canonical", "'   '"),
+        ],
+    )
+    def test_detects_required_field_invalid_value_shape(self, tmp_path, monkeypatch, field, raw_value):
+        """id/title/canonical 为 null/空串/纯空白时应报值形态错误 (D34)."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        values = {
+            "id": "strategy",
+            "title": "A",
+            "canonical": "docs/patterns/strategy-template.md",
+        }
+        values[field] = raw_value
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            f"topics:\n  - id: {values['id']}\n    title: {values['title']}\n    canonical: {values['canonical']}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any(f"{field} 须为非空字符串" in e for e in errors), f"应报 {field} 值形态错误, got: {errors}"
+
     def test_detects_missing_section_heading(self, tmp_path, monkeypatch):
         """section 指向的章节在 canonical 文档内不存在时应报错 (M4)."""
         from check_docs_consistency import check_canonical_topics_consistency

@@ -215,6 +215,9 @@ def test_rules_view_renders_redlines_table(tmp_path: Path) -> None:
 def test_topics_view_merges_by_canonical_and_section(tmp_path: Path) -> None:
     """正例：相同 canonical+section 合并一行并保全部 topic id；相对链接指向仓库根。"""
     root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
+    _write(root, "docs/guides/testing.md", "# Testing\n")
     _write(
         root,
         "docs/governance/canonical-topics.yml",
@@ -251,6 +254,8 @@ def test_topics_view_merges_by_canonical_and_section(tmp_path: Path) -> None:
 def test_topics_view_identity_duplicate_rejected(tmp_path: Path) -> None:
     """负例：topic id 重复 → 作者源校验显式拒绝（不静默合并），错误信息指认重复 id。"""
     root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
     _write(
         root,
         "docs/governance/canonical-topics.yml",

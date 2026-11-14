@@ -2136,8 +2136,8 @@ def check_canonical_topics_consistency() -> list[str]:
     """主题 → canonical 正本映射一致性检查 (P2-12)。
 
     校验 docs/governance/canonical-topics.yml：
-    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "topics" key (list)。
-    2. 每个主题必填 id/title/canonical。
+    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "topics" key (非空 list)。
+    2. 每个主题必填 id/title/canonical, 且三者均为非空字符串（null/空串/纯空白拒绝）。
     3. id 唯一。
     4. canonical 路径在仓库中真实存在。
     5. workflow 路径（若存在）在仓库中真实存在。
@@ -2166,6 +2166,9 @@ def check_canonical_topics_consistency() -> list[str]:
     if not isinstance(topics, list):
         errors.append(f"'topics' 应为 list, 实际 {type(topics).__name__}")
         return errors
+    if not topics:
+        errors.append("'topics' 应为非空 list（不得静默当空集合）")
+        return errors
 
     seen_ids: set[str] = set()
     for idx, entry in enumerate(topics, 1):
@@ -2178,9 +2181,17 @@ def check_canonical_topics_consistency() -> list[str]:
         if missing:
             errors.append(f"topics[{idx}] 缺少必填字段: {sorted(missing)}")
 
+        # 必填值形态：id/title/canonical 须为非空字符串（null/空串/纯空白/非字符串均拒绝）
+        for field in ("id", "title", "canonical"):
+            if field not in entry:
+                continue
+            value = entry[field]
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"topics[{idx}] {field} 须为非空字符串, 实际 {value!r}")
+
         # id 唯一性
         topic_id = entry.get("id")
-        if isinstance(topic_id, str):
+        if isinstance(topic_id, str) and topic_id.strip():
             if topic_id in seen_ids:
                 errors.append(f"topics[{idx}] id 重复: {topic_id}")
             else:
@@ -2189,17 +2200,19 @@ def check_canonical_topics_consistency() -> list[str]:
         # canonical 路径存在性
         canonical = entry.get("canonical")
         canonical_path: Path | None = None
-        if isinstance(canonical, str):
+        if isinstance(canonical, str) and canonical.strip():
             canonical_path = ROOT / canonical
             if not canonical_path.exists():
                 errors.append(f"topics[{idx}] canonical 路径不存在: {canonical}")
-        elif canonical is not None:
+        elif canonical is not None and not isinstance(canonical, str):
             errors.append(f"topics[{idx}] canonical 应为 str, 实际 {type(canonical).__name__}")
 
         # workflow 路径存在性（可选）
         workflow = entry.get("workflow")
         if isinstance(workflow, str):
-            if not (ROOT / workflow).exists():
+            if not workflow.strip():
+                errors.append(f"topics[{idx}] workflow 须为非空字符串, 实际 {workflow!r}")
+            elif not (ROOT / workflow).exists():
                 errors.append(f"topics[{idx}] workflow 路径不存在: {workflow}")
         elif workflow is not None:
             errors.append(f"topics[{idx}] workflow 应为 str, 实际 {type(workflow).__name__}")
