@@ -235,6 +235,8 @@ def _scan_markdown(text: str) -> dict[str, BlockSpan]:
     行号边界统一经 docs_markdown 解析视图判定，行切分同用解析器行语义
     （仅 LF / CRLF / CR 计行，U+2028 / U+2029 等 Unicode 行分隔符留在行内），
     避免 scan 行号与 token.map 错位后围栏中的标记被当作可修改块。
+    代码语境只排除**块边界判定**：有效块内部的行（含围栏与缩进代码行）完整计入
+    ``content_lines``，否则块内围栏内容不参与一致性比较，手改代码不会被判为漂移。
     """
     code_lines = docs_markdown.parse_text(text).code_line_numbers()
     blocks: dict[str, BlockSpan] = {}
@@ -244,6 +246,8 @@ def _scan_markdown(text: str) -> dict[str, BlockSpan]:
     content: list[str] = []
     for lineno, raw in enumerate(docs_markdown.split_source_lines(text), start=1):
         if lineno in code_lines:
+            if open_id is not None:
+                content.append(raw)
             continue
         start_match = _MD_START_RE.match(raw)
         end_match = _MD_END_RE.match(raw)
