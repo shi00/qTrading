@@ -90,6 +90,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -2868,8 +2869,37 @@ _IMPACT_AUTHOR_PREFIXES: tuple[str, ...] = (
     "CONTRIBUTING.md",
     "README.md",
 )
+# 消费者发现范围（L02：调用方/摘要/随包说明均查，不能仅凭目录名把活消费者排除）：
+# - 调用方/门禁消费：tests/、scripts/、.github/
+# - 正文/随包说明：docs/、man/、requirements/、resources/ 的 markdown（相对链接经共享解析视图）
+# - 源码静态消费：生产源码中的路径引用
+# - 随包清单：PyInstaller spec 与安装器脚本
 _IMPACT_CONSUMER_PREFIXES: tuple[str, ...] = ("tests/", "scripts/", ".github/")
-_IMPACT_SCANNED_SUFFIXES: frozenset[str] = frozenset({".py", ".yml", ".yaml", ".md", ".json", ".toml", ".txt"})
+_IMPACT_DOC_PREFIXES: tuple[str, ...] = ("docs/", "man/", "requirements/", "resources/")
+_IMPACT_SOURCE_PREFIXES: tuple[str, ...] = (
+    "app/",
+    "core/",
+    "data/",
+    "services/",
+    "strategies/",
+    "ui/",
+    "utils/",
+    "alembic/",
+    "hooks/",
+    "sidecars/",
+    "main.py",
+    "config.py",
+)
+_IMPACT_PACKAGED_PREFIXES: tuple[str, ...] = ("installer.iss", "AStockScreener.spec")
+_IMPACT_SCAN_PREFIXES: tuple[str, ...] = (
+    *_IMPACT_CONSUMER_PREFIXES,
+    *_IMPACT_DOC_PREFIXES,
+    *_IMPACT_SOURCE_PREFIXES,
+    *_IMPACT_PACKAGED_PREFIXES,
+)
+_IMPACT_SCANNED_SUFFIXES: frozenset[str] = frozenset(
+    {".py", ".yml", ".yaml", ".md", ".json", ".toml", ".txt", ".sh", ".bat", ".iss", ".spec"}
+)
 _IMPACT_SKIP_DIRS: frozenset[str] = frozenset(
     {".git", ".worktrees", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".venv", "venv", ".uploads"}
 )
@@ -2944,29 +2974,72 @@ def _load_impact_routes(root: Path) -> dict[str, list[tuple[str, str, str | None
     return routes
 
 
-def _iter_impact_consumer_files(root: Path) -> typing.Iterator[Path]:
-    """遍历真实消费者候选文件（tests/scripts/.github，跳过缓存与隔离目录）。"""
-    for prefix in _IMPACT_CONSUMER_PREFIXES:
+def _iter_impact_scan_files(root: Path) -> typing.Iterator[Path]:
+    """遍历影响分析候选消费文件（调用方/正文/源码/随包，跳过缓存与隔离目录）。
+
+    根级 markdown（CLAUDE.md / CONTRIBUTING.md 等）一并纳入正文消费范围；
+    去重后每份文件只读取一次，避免同一路径被多个前缀重复扫描。
+    """
+    seen: set[Path] = set()
+    for prefix in _IMPACT_SCAN_PREFIXES:
         base = root / prefix.rstrip("/")
         if base.is_file():
-            yield base
+            candidates: typing.Iterable[Path] = (base,)
+        elif base.is_dir():
+            candidates = base.rglob("*")
+        else:
             continue
-        if not base.is_dir():
-            continue
-        for candidate in base.rglob("*"):
-            if not candidate.is_file() or candidate.suffix.lower() not in _IMPACT_SCANNED_SUFFIXES:
+        for candidate in candidates:
+            if candidate in seen or not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in _IMPACT_SCANNED_SUFFIXES:
                 continue
             rel_parts = candidate.relative_to(root).parts
             if any(part in _IMPACT_SKIP_DIRS for part in rel_parts):
                 continue
+            seen.add(candidate)
             yield candidate
+    for candidate in sorted(root.glob("*.md")):
+        if candidate.is_file() and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
+def _read_impact_text(path: Path) -> str | None:
+    """读取候选消费文件文本；读取失败返回 None，由调用方显式列入 unresolved。"""
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+
+def _resolve_impact_link(source_rel: str, target: str) -> str | None:
+    """把 markdown 链接目标解析为仓库相对路径（相对链接以来源文件所在目录为基准）。
+
+    外部链接、纯锚点、绝对路径与越出仓库根的目标返回 None（不参与影响图）；
+    锚点/查询串剥离后再解析，URL 编码路径按渲染语义解码。
+    """
+    url = target.strip()
+    if not url or url.startswith(("http://", "https://", "mailto:", "#", "/")):
+        return None
+    path_part = urllib.parse.unquote(url.split("#", 1)[0].split("?", 1)[0].strip())
+    if not path_part:
+        return None
+    joined = posixpath.normpath(posixpath.join(posixpath.dirname(source_rel), path_part.replace("\\", "/")))
+    if joined == ".." or joined.startswith("../"):
+        return None
+    return joined
 
 
 def build_doc_impact(changes: Iterable[tuple[str, str | None]], root: Path = ROOT) -> DocImpact:
     """从 (new_path, old_path | None) 构建真实影响清单（D36 生产入口）。
 
     旧/新路径都参与作者源、路由与消费者扫描；rename 不得丢失旧路径身份。
-    无路由映射的作者路径与非作者/非消费者路径显式进入 unresolved，不静默丢弃。
+    消费者范围覆盖调用方（tests/scripts/.github）、正文相对链接与路径文本
+    （docs/man/requirements/resources 及根级 markdown）、源码静态引用与随包清单；
+    markdown 链接统一经既有解析视图解析，不另造正则解析器。读取失败的候选文件
+    显式进入 unresolved，不以其它检查全绿代替影响图完备性；自然语言语义关联
+    不要求自动穷尽。无路由映射的作者路径与非作者/非消费者路径同样进入 unresolved。
     """
     routes_by_path = _load_impact_routes(root)
     author_paths: set[str] = set()
@@ -2995,15 +3068,29 @@ def build_doc_impact(changes: Iterable[tuple[str, str | None]], root: Path = ROO
             test_groups.update(group for prefix, group in _IMPACT_GROUP_RULES if path.startswith(prefix))
 
     consumer_paths: set[str] = set()
+    # old/new 路径并集：rename 后旧路径的正文链接与源码引用仍须被看见
     search_refs = tuple(sorted(p for p in (author_paths | old_paths | new_paths) if _is_impact_author_path(p)))
+    search_ref_set = set(search_refs)
     if search_refs:
-        for candidate in _iter_impact_consumer_files(root):
-            try:
-                text = candidate.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+        for candidate in _iter_impact_scan_files(root):
+            source_rel = candidate.relative_to(root).as_posix()
+            text = _read_impact_text(candidate)
+            if text is None:
+                unresolved.add(source_rel)
                 continue
-            if any(ref in text for ref in search_refs):
-                consumer_paths.add(candidate.relative_to(root).as_posix())
+            matched = any(ref in text and ref != source_rel for ref in search_refs)
+            if not matched and candidate.suffix.lower() == ".md":
+                for link in parse_doc_view(text).links:
+                    resolved = _resolve_impact_link(source_rel, link.target)
+                    if resolved is not None and resolved in search_ref_set and resolved != source_rel:
+                        matched = True
+                        break
+            if matched:
+                consumer_paths.add(source_rel)
+
+    # 测试组从实际消费者汇总（发现应用测试时不能仍只推荐 docs-suite）
+    for path in consumer_paths:
+        test_groups.update(group for prefix, group in _IMPACT_GROUP_RULES if path.startswith(prefix))
 
     return DocImpact(
         author_paths=tuple(sorted(author_paths)),
