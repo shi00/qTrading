@@ -95,7 +95,6 @@ import subprocess
 import sys
 import tomllib
 import typing
-import urllib.parse
 from collections.abc import Callable
 from functools import lru_cache
 from dataclasses import dataclass
@@ -413,7 +412,10 @@ def check_anchor_dead_links() -> list[str]:
 
     链接提取与代码块排除（两类围栏 + 缩进块 + 行内代码）由 docs_markdown 视图
     token 判定（检视 §5.1 解析边界迁移，替代旧手写 ``` 状态机 + 行级链接正则）；
-    引用式链接（`[t][label]`，已解析成链者）同样纳入锚点校验。
+    引用式链接（`[t][label]`，已解析成链者）与 Markdown 内 HTML ``<a href>``
+    同样纳入锚点校验。URL 分类与 path/query/fragment 分离统一委托
+    docs_markdown.parse_link_target（D31：编码路径先拆分后解码，query 不参与
+    文件解析，编码后的 ``%23`` / ``%3F`` 不被误当分隔符）。
     """
     errors: list[str] = []
     # 预加载所有受检文件的锚点集合（标题 slug ∪ HTML id）
@@ -425,30 +427,24 @@ def check_anchor_dead_links() -> list[str]:
         view = _load_doc_view(doc)
         for link in view.links:
             url = link.target.strip()
-            # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
+            target = docs_markdown.parse_link_target(url)
+            # 外部链接（http/https/mailto/其他 scheme/协议相对）不参与本地锚点检查
+            if target.external:
                 continue
-            # 只检查带锚点的链接
-            if "#" not in url:
+            # 无 fragment 的本地路径由相对链接死链检查处理
+            if target.fragment is None:
                 continue
-            # 解析视图按 URL 规范对目标 percent-encode（中文锚点 → %XX 形态），
-            # 与标题 slug 比较前须解码（GitHub 渲染器同语义）
-            anchor = urllib.parse.unquote(url.split("#", 1)[1])
-            # 锚点为空（如 `[text](./file.md#)` ）跳过
-            if not anchor:
-                continue
-
-            # 提取目标文件路径部分（锚点前的部分；路径段同样解码）
-            target_path_part = urllib.parse.unquote(url.split("#", 1)[0])
+            # 空锚点（如 `[text](./file.md#)`）只校验目标文件存在性
+            anchor = target.fragment or None
 
             # 同文件锚点：直接校验锚点存在性
-            if not target_path_part:
-                if anchor not in doc_anchors.get(doc, frozenset()):
+            if not target.path:
+                if anchor is not None and anchor not in doc_anchors.get(doc, frozenset()):
                     errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
                 continue
 
             # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
-            target_path = (doc.parent / target_path_part).resolve()
+            target_path = (doc.parent / target.path).resolve()
             if not target_path.exists():
                 errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
                 continue
@@ -458,7 +454,7 @@ def check_anchor_dead_links() -> list[str]:
                 continue
 
             # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
-            if anchor not in doc_anchors.get(target_path, frozenset()):
+            if anchor is not None and anchor not in doc_anchors.get(target_path, frozenset()):
                 errors.append(
                     f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)"
                 )
@@ -468,8 +464,10 @@ def check_anchor_dead_links() -> list[str]:
 def check_relative_dead_links() -> list[str]:
     """检查项 6：相对链接死链（不含锚点的相对路径链接；D5 迁移：经统一解析视图判定）。
 
-    扫描 CHECKED_DOCS 中所有 markdown 链接，若 url 是相对路径（非 http/mailto，
-    不含 # 锚点），从 source_doc 所在目录解析，若目标文件不存在则报错。
+    扫描 CHECKED_DOCS 中所有链接（含 Markdown 内 HTML ``<a href>``），经
+    docs_markdown.parse_link_target 分类后，仅对本地路径且无 fragment 的链接做
+    文件存在性检查：`?query` 不参与文件解析，路径 percent-decode 后再 resolve
+    （D31：`./README%2Emd`、`./README.md?raw=1` 均按真实目标校验）。
 
     另检引用式死链（`[text][label]` label 未定义）：解析视图 unresolved_references
     显式失败（F17：真死链不得漏检、不从全文取样例代替）；围栏/行内代码内的假链接
@@ -480,16 +478,20 @@ def check_relative_dead_links() -> list[str]:
         view = _load_doc_view(doc)
         for link in view.links:
             url = link.target.strip()
-            # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
+            target = docs_markdown.parse_link_target(url)
+            # 外部链接不参与本地文件检查
+            if target.external:
                 continue
-            # 只检查不含锚点的相对路径链接（带锚点的由 check_anchor_dead_links 处理）
-            if "#" in url:
+            # 带 fragment 的链接由 check_anchor_dead_links 处理（含路径存在性）
+            if target.fragment is not None:
                 continue
-            # 从 source_doc 所在目录解析相对路径
-            target = (doc.parent / url).resolve()
-            if not target.exists():
-                errors.append(f"{doc.name}:{link.line}: 相对链接死链 '{url}' (目标 '{target}' 不存在)")
+            # 空目标 / 纯 query 无可解析本地路径
+            if not target.path:
+                continue
+            # 从 source_doc 所在目录解析相对路径（已解码、统一正斜杠）
+            resolved = (doc.parent / target.path).resolve()
+            if not resolved.exists():
+                errors.append(f"{doc.name}:{link.line}: 相对链接死链 '{url}' (目标 '{resolved}' 不存在)")
         for ref in view.unresolved_references:
             errors.append(
                 f"{doc.name}:{ref.line}: 引用式死链 '[{ref.text}][{ref.label}]' "

@@ -138,3 +138,92 @@ class TestRelativeDeadLinksAfterMigration:
         doc.write_text("示例：\\[ok\\]\\[undefined\\]\n", encoding="utf-8")
         _register(monkeypatch, doc)
         assert cdc.check_relative_dead_links() == [], "转义文字不得误报引用死链"
+
+
+class TestUrlClassificationD31:
+    """D31：URL 分类/path-query-fragment 分离/解码，以及 HTML href 进入链接视图。"""
+
+    def _target(self, doc_repo: Path) -> Path:
+        target = doc_repo / "README.md"
+        target.write_text("# 真标题\n\n## 小节\n", encoding="utf-8")
+        return target
+
+    def test_encoded_filename_passes(self, doc_repo, monkeypatch):
+        target = self._target(doc_repo)
+        doc = doc_repo / "a.md"
+        doc.write_text("[x](./README%2Emd)\n", encoding="utf-8")
+        _register(monkeypatch, doc, target)
+        assert cdc.check_relative_dead_links() == [], "percent-decode 后的真实文件不得误报"
+
+    def test_query_string_not_part_of_filename(self, doc_repo, monkeypatch):
+        target = self._target(doc_repo)
+        doc = doc_repo / "a.md"
+        doc.write_text("[x](./README.md?raw=1)\n", encoding="utf-8")
+        _register(monkeypatch, doc, target)
+        assert cdc.check_relative_dead_links() == [], "query 不应参与文件存在性判断"
+
+    def test_encoded_path_with_query_and_anchor_passes(self, doc_repo, monkeypatch):
+        target = self._target(doc_repo)
+        doc = doc_repo / "a.md"
+        doc.write_text("[x](./README%2Emd?raw=1#小节)\n", encoding="utf-8")
+        _register(monkeypatch, doc, target)
+        assert cdc.check_relative_dead_links() == []
+        assert cdc.check_anchor_dead_links() == []
+
+    def test_encoded_hash_and_question_are_literal_in_filename(self, doc_repo, monkeypatch):
+        # 拆分先于解码：%23 / %3F 解码后是文件名的一部分，不得被当成分隔符
+        target = doc_repo / "odd#name?.md"
+        target.write_text("# 目标\n", encoding="utf-8")
+        doc = doc_repo / "a.md"
+        doc.write_text("[x](./odd%23name%3F.md)\n", encoding="utf-8")
+        _register(monkeypatch, doc, target)
+        assert cdc.check_relative_dead_links() == []
+
+    def test_html_href_missing_target_fails(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        doc.write_text('<a href="never-exists.md#missing">x</a>\n', encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_anchor_dead_links()
+        assert errors and any("never-exists.md" in e for e in errors), "HTML href 缺目标不得静默放过"
+
+    def test_html_href_missing_anchor_fails(self, doc_repo, monkeypatch):
+        target = self._target(doc_repo)
+        doc = doc_repo / "a.md"
+        doc.write_text('<a href="README.md#missing">x</a>\n', encoding="utf-8")
+        _register(monkeypatch, doc, target)
+        errors = cdc.check_anchor_dead_links()
+        assert errors and any("missing" in e for e in errors), "HTML href 缺锚点必须失败"
+
+    def test_html_href_existing_target_and_anchor_passes(self, doc_repo, monkeypatch):
+        target = self._target(doc_repo)
+        doc = doc_repo / "a.md"
+        doc.write_text('<a href="README.md#小节">x</a>\n', encoding="utf-8")
+        _register(monkeypatch, doc, target)
+        assert cdc.check_anchor_dead_links() == []
+
+    def test_html_block_href_missing_target_fails(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        doc.write_text('<div>\n<a href="never-exists.md">x</a>\n</div>\n', encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert errors and any("never-exists.md" in e for e in errors)
+
+    def test_markdown_equivalent_scenario_fails(self, doc_repo, monkeypatch):
+        # Markdown 同场景对照：与 HTML href 走同一检查
+        doc = doc_repo / "a.md"
+        doc.write_text("[x](never-exists.md#missing)\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_anchor_dead_links()
+        assert errors and any("never-exists.md" in e for e in errors)
+
+    def test_parse_link_target_classification(self):
+        external = cdc.docs_markdown.parse_link_target("https://example.com/a.md?x=1#frag")
+        assert external.external
+        mail = cdc.docs_markdown.parse_link_target("mailto:a@b.com?subject=x")
+        assert mail.external
+        local = cdc.docs_markdown.parse_link_target("./odd%23name%3F.md?a=1#小节")
+        assert (local.external, local.path, local.query, local.fragment) == (False, "./odd#name?.md", "a=1", "小节")
+        same_file = cdc.docs_markdown.parse_link_target("#小节")
+        assert same_file.is_fragment_only
+        windows = cdc.docs_markdown.parse_link_target("./sub\\file.md")
+        assert windows.path == "./sub/file.md", "Windows 路径分隔符统一为正斜杠"
