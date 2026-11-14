@@ -24,4 +24,5 @@ from test_canonical_examples import (  # type: ignore[import-not-found]  # tests
     TestContributingCanonicalExamples,
     TestFletDocsCanonicalExamples,
     TestManFletBestPracticesCanonicalExamples,
+    TestMvvmBridgeCanonicalExample,
 )

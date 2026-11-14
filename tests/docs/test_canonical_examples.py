@@ -8,6 +8,7 @@ D9（检视 5.3）：原静态 canonical 代码块检查自 tests/unit/test_docs
 - CONTRIBUTING.md python 代码块内不出现 `I18n.subscribe()` / `page.show_dialog(` / `page.pop_dialog(`
 - docs/flet/ 子文档（v1-api-constraints / project-differences）python 代码块内 Dropdown 使用 `on_select` 而非 `on_change`
 - docs/flet/ 子文档 python 代码块内不出现 `page.show_dialog(` / `page.pop_dialog(`
+- 导入真实 `ScreenerViewModel` 的 MVVM 桥接示例使用生产 API（`run_strategy` / `status_message` 等），不出现臆造的 `vm.run()` / `state.status`
 
 man/flet-best-practices.md Phase 2.5 后改为薄 stub 无 python 代码块，本测试自然通过；
 canonical 示例契约迁移到 docs/flet/ 子文档（v1-api-constraints.md / project-differences.md）。
@@ -34,6 +35,22 @@ FLET_DOCS_WITH_PYTHON_BLOCKS: list[Path] = [
     FLET_V1_API_CONSTRAINTS_PATH,
     FLET_PROJECT_DIFFERENCES_PATH,
 ]
+
+# D06：导入真实 ScreenerViewModel 的 MVVM 桥接示例所在文档（生产 API 正本见
+# ui/viewmodels/ai_stream_mixin.py 的 run_strategy 与 ui/viewmodels/screener_types.py 的 ScreenerState）。
+MVVM_BRIDGE_DOCS: list[Path] = [
+    ROOT / "docs" / "patterns" / "mvvm.md",
+    FLET_V1_API_CONSTRAINTS_PATH,
+]
+REAL_SCREENER_VM_IMPORT = "from ui.viewmodels.screener_view_model import ScreenerViewModel"
+# 桥接示例必须出现的真实生产 API 片段（命令名 / 状态字段 / 命令参数来源）。
+REAL_SCREENER_VM_API = (
+    "vm.run_strategy(",
+    "state.selected_strategy",
+    "vm.state.strategy_params",
+    "state.exclude_st",
+    "state.status_message",
+)
 
 # 提取 ```python ... ``` 代码块（非贪婪匹配）
 PYTHON_BLOCK_RE = re.compile(r"```python\n(.*?)```", re.DOTALL)
@@ -200,3 +217,27 @@ class TestFletDocsCanonicalExamples:
             f"{doc_path.name} python code blocks must not contain I18n.subscribe() "
             "(declarative components forbid manual locale subscription). Violations:\n" + "\n---\n".join(violations)
         )
+
+
+class TestMvvmBridgeCanonicalExample:
+    """D06：导入真实 ScreenerViewModel 的桥接示例必须使用生产 API，不得臆造命令/字段。
+
+    生产正本：``ui/viewmodels/ai_stream_mixin.py`` 的 ``run_strategy(strategy_key, save_results=True,
+    params=None, exclude_st=True)``；``ui/viewmodels/screener_types.py`` 的 ``ScreenerState``
+    （``selected_strategy`` / ``strategy_params`` / ``exclude_st`` / ``status_message``）。
+    本用例为纯文本契约：防止文档示例再次漂移为不存在的 ``vm.run()`` / ``state.status``。
+    """
+
+    @pytest.mark.parametrize("doc_path", MVVM_BRIDGE_DOCS, ids=lambda p: p.name)
+    def test_bridge_example_uses_real_screener_api(self, doc_path: Path):
+        blocks = [b for b in _extract_python_blocks(_read(doc_path)) if REAL_SCREENER_VM_IMPORT in b]
+        assert blocks, f"{doc_path.name} 必须保留导入真实 ScreenerViewModel 的桥接示例"
+        for i, block in enumerate(blocks, 1):
+            assert not re.search(r"\bvm\.run\s*\(", block), (
+                f"{doc_path.name} code block #{i} 调用不存在的 vm.run()；真实命令为 run_strategy"
+            )
+            assert not re.search(r"\bstate\.status\b", block), (
+                f"{doc_path.name} code block #{i} 读取不存在的 state.status；真实字段为 status_message"
+            )
+            missing = [api for api in REAL_SCREENER_VM_API if api not in block]
+            assert not missing, f"{doc_path.name} code block #{i} 缺少真实生产 API: {missing}"
