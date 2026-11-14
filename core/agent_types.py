@@ -5467,9 +5467,9 @@ READ_LIMIT_MAX: Final = 50
 def parse_body_cursor(cursor: str, *, prefix: str, identity: str, path: str = "$.body_cursor") -> int:
     """解析正文游标 ``{prefix}:{identity}:{start}``（1 基）为起始码点。
 
-    游标绑定对象身份（成果 ``id:version`` / operation id）与查询上下文；跨对象、
-    跨用户域或错前缀复用 → ``invalid_cursor``（§4.2「游标绑定准确身份」）。只核
-    语法与身份，不核页边界。
+    游标绑定对象身份（成果 ``id:version`` / operation id）与查询上下文；跨对象
+    或错前缀复用 → ``invalid_cursor``（§4.2「游标绑定准确身份」）。用户域由查询
+    的 ``user_scope`` 过滤保证，不写入游标。只核语法与身份，不核页边界。
     """
 
     marker = f"{prefix}:{identity}:"

@@ -142,9 +142,13 @@ def _query(
     )
 
 
-async def _seed_session(dao: AgentDao) -> None:
+async def _seed_session(dao: AgentDao, *, draft_revision: int = 3) -> None:
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]
-        await conn.execute(sa.insert(AgentSession).values(user_scope="u1", session_id="s1", title="来源会话"))
+        await conn.execute(
+            sa.insert(AgentSession).values(
+                user_scope="u1", session_id="s1", title="来源会话", draft_revision=draft_revision
+            )
+        )
 
 
 async def _seed_execution(dao: AgentDao, *, execution_id: str = "exec-1", round_id: str = "round-1") -> None:
@@ -398,7 +402,19 @@ class TestReadSourceRepresentation:
 
         assert read.available is False
         assert read.missing_reason == "用户禁用"
-        assert read.body_text is None
+        assert read.body_text == "已存正文"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_draft_revision_must_match_session(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, draft_revision=3)
+        await _seed_asset(dao, body_text="正文")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(_query(draft_revision=2), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "not registered" in excinfo.value.sanitized_message
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")

@@ -824,7 +824,9 @@ class AgentDao(BaseDao):
                 ) from exc
             await self._assert_source_registered(conn, query=query, user_scope=user_scope, identity=identity)
             body_text: str | None = None
-            if read_state in (ReadState.READY, ReadState.PARTIAL):
+            # 未读/未知态没有可信表示（不外泄矛盾正文）；禁用/不可得≠清理，
+            # 已保存正文仍按原样返回并由 available/原因标注当前依据状态（§9.7）。
+            if read_state not in (ReadState.UNREAD, ReadState.UNKNOWN):
                 body_text = row.body_text
                 if body_text is None and row.body_ref is not None:
                     body_text = await self._read_body_text(
@@ -865,15 +867,19 @@ class AgentDao(BaseDao):
     ) -> None:
         """核对来源已登记到请求上下文（§4.2：草稿 revision 或已受理执行输入版）。
 
-        - 草稿上下文：须存在 ``consumer_kind='draft'`` 且 ``consumer_version`` 为
-          该修订的谱系边；
+        - 草稿上下文：须存在**会话内**谱系边（``session_id`` 非空），且该会话
+          当前 ``agent_session.draft_revision`` 等于请求修订——查询未携会话 id，
+          故以「来源所属会话的草稿修订」定位，避免同域不同会话的草稿互认；
         - 执行上下文：须存在 ``consumer_kind='execution'`` 且 ``execution_id``
           一致的谱系边；给出 ``round_id`` 时再核该轮次属于此执行且
           ``input_revision`` 与轮次一致。
 
         未登记（或轮次/版本不符）→ ``INPUT_INVALID``：不因「同用户域有该来源版本」
-        就放行未进入该请求的资料（正本未逐列冻结草稿/执行 consumer_version 语义，
-        此处按 consumer_kind+版本/轮次核定，实施记录见 spec 计划 B）。
+        就放行未进入该请求的资料。
+
+        **已知缺口**：草稿来源登记写入方（``consumer_kind='draft'`` + session_id）
+        属 F-03 草稿保存交付；在那之前草稿上下文读取恒为未登记拒绝，不自行造写入
+        路径（spec 计划 B §B2 留痕）。
         """
 
         base = (
@@ -882,8 +888,24 @@ class AgentDao(BaseDao):
             AgentSourceLink.source_version == query.version,
         )
         if query.draft_revision is not None:
-            conditions = (*base, AgentSourceLink.consumer_kind == "draft")
-            conditions += (AgentSourceLink.consumer_version == str(query.draft_revision),)
+            link = (
+                await conn.execute(
+                    sa.select(AgentSourceLink.link_id)
+                    .join(
+                        AgentSession,
+                        sa.and_(
+                            AgentSession.user_scope == AgentSourceLink.user_scope,
+                            AgentSession.session_id == AgentSourceLink.session_id,
+                        ),
+                    )
+                    .where(
+                        *base,
+                        AgentSourceLink.session_id.is_not(None),
+                        AgentSession.draft_revision == query.draft_revision,
+                    )
+                    .limit(1)
+                )
+            ).first()
         else:
             conditions = (*base, AgentSourceLink.consumer_kind == "execution")
             conditions += (
@@ -909,7 +931,7 @@ class AgentDao(BaseDao):
                     raise AgentServiceError(
                         AgentErrorCode.INPUT_INVALID, "input_revision does not match requested round", identity
                     )
-        link = (await conn.execute(sa.select(AgentSourceLink.link_id).where(*conditions).limit(1))).first()
+            link = (await conn.execute(sa.select(AgentSourceLink.link_id).where(*conditions).limit(1))).first()
         if link is None:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, "source is not registered to requested context", identity
