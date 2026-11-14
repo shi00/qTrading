@@ -29,6 +29,8 @@ E09 远端部分只做本地只读静态核验（合成夹具参照实现 + 真�
 from __future__ import annotations
 
 import dataclasses
+import os
+import shutil
 import subprocess
 import sys
 from datetime import date
@@ -611,6 +613,195 @@ def test_e09_real_workflow_aggregation_fail_closed_readonly() -> None:
     assert required_gates <= needs, f"发行聚合 needs 必须覆盖全部 CI 门 job: 缺 {sorted(required_gates - needs)}"
     if_expr = build.get("if") or ""
     assert "always()" not in if_expr, "聚合 job if 不得引入 always()（失败/取消也继续 = 装绿路径）"
+
+
+# --- E09 真实聚合脚本执行矩阵 ---------------------------------------------
+# 直接提取 docs-ci / ci-aux-gate 聚合 job 的 run 脚本并以 bash 执行，
+# 覆盖成功 / 失败 / 取消 / 非许可 skip，而不是只跑 tests/docs 内的参照实现。
+
+_DOCS_AGGREGATE = (".github/workflows/docs-ci.yml", "docs-check")
+_AUX_AGGREGATE = (".github/workflows/ci-aux-gate.yml", "ci-aux-gate")
+
+
+def _aggregate_job_and_script(workflow_rel: str, job_id: str) -> tuple[dict, str]:
+    workflow = yaml.safe_load((ROOT / workflow_rel).read_text(encoding="utf-8"))
+    job = workflow["jobs"][job_id]
+    step = next(s for s in job["steps"] if "Evaluate" in s.get("name", ""))
+    return job, step["run"]
+
+
+def _run_aggregate_script(script: str, variables: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("未找到 bash，无法在本地执行 workflow 聚合脚本（静态合同仍由相邻用例核验）")
+    env = {**os.environ, **variables, "GITHUB_STEP_SUMMARY": "summary.md"}
+    return subprocess.run(
+        [bash, "-c", script],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+
+
+_DOCS_MATRIX = [
+    ("both-success", {"STATIC_RESULT": "success", "CONTRACTS_RESULT": "success"}, True),
+    ("static-failure", {"STATIC_RESULT": "failure", "CONTRACTS_RESULT": "success"}, False),
+    ("static-cancelled", {"STATIC_RESULT": "cancelled", "CONTRACTS_RESULT": "success"}, False),
+    ("static-skipped", {"STATIC_RESULT": "skipped", "CONTRACTS_RESULT": "success"}, False),
+    ("contracts-skipped", {"STATIC_RESULT": "success", "CONTRACTS_RESULT": "skipped"}, False),
+    ("static-result-missing", {"STATIC_RESULT": "", "CONTRACTS_RESULT": "success"}, False),
+]
+
+_AUX_MATRIX = [
+    (
+        "skip-by-change",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "true",
+            "PRECOMMIT_RESULT": "success",
+        },
+        True,
+    ),
+    (
+        "meta-failure",
+        {
+            "DETECT": "success",
+            "META_RESULT": "failure",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "meta-unpermitted-skip",
+        {
+            "DETECT": "success",
+            "META_RESULT": "skipped",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-failure",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "true",
+            "SIDECAR_RESULT": "failure",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-cancelled",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "true",
+            "SIDECAR_RESULT": "cancelled",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-unpermitted-skip",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "true",
+            "SIDECAR_RESULT": "skipped",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "sidecar-ran-without-request",
+        {
+            "DETECT": "success",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "false",
+            "SIDECAR_RESULT": "success",
+            "PRECOMMIT_REQUESTED": "false",
+            "PRECOMMIT_RESULT": "skipped",
+        },
+        False,
+    ),
+    (
+        "detect-failure",
+        {
+            "DETECT": "failure",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "",
+            "SIDECAR_RESULT": "",
+            "PRECOMMIT_REQUESTED": "",
+            "PRECOMMIT_RESULT": "",
+        },
+        False,
+    ),
+    (
+        "detect-missing",
+        {
+            "DETECT": "",
+            "META_RESULT": "success",
+            "SIDECAR_REQUESTED": "",
+            "SIDECAR_RESULT": "",
+            "PRECOMMIT_REQUESTED": "",
+            "PRECOMMIT_RESULT": "",
+        },
+        False,
+    ),
+]
+
+
+def test_e09_aggregate_jobs_are_declared_always() -> None:
+    """docs/aux 聚合 job 必须显式 always()：上游失败/取消时仍执行，else 会被跳过而不认证。"""
+    for workflow_rel, job_id in (_DOCS_AGGREGATE, _AUX_AGGREGATE):
+        job, _script = _aggregate_job_and_script(workflow_rel, job_id)
+        assert "always()" in (job.get("if") or ""), f"{workflow_rel} 的 {job_id} 必须以 if: always() 汇总"
+
+
+@pytest.mark.parametrize("case_name,results,expected_ok", _DOCS_MATRIX)
+def test_e09_docs_aggregation_matrix_runs_real_script(
+    tmp_path: Path, case_name: str, results: dict[str, str], expected_ok: bool
+) -> None:
+    """docs 聚合脚本真实执行：仅两个必要 job 均成功才通过。"""
+    _job, script = _aggregate_job_and_script(*_DOCS_AGGREGATE)
+    run = _run_aggregate_script(script, {"EVENT_NAME": "pull_request", **results}, tmp_path)
+    if expected_ok:
+        assert run.returncode == 0, f"{case_name} 应聚合通过:\n{run.stdout}\n{run.stderr}"
+    else:
+        assert run.returncode != 0, f"{case_name} 不得聚合通过（失败/取消/非许可 skip）:\n{run.stdout}"
+        assert "不通过" in run.stdout + run.stderr
+
+
+@pytest.mark.parametrize("case_name,results,expected_ok", _AUX_MATRIX)
+def test_e09_aux_aggregation_matrix_runs_real_script(
+    tmp_path: Path, case_name: str, results: dict[str, str], expected_ok: bool
+) -> None:
+    """aux 聚合脚本真实执行：请求且成功，或未请求且按改动 skipped 才通过。"""
+    _job, script = _aggregate_job_and_script(*_AUX_AGGREGATE)
+    run = _run_aggregate_script(script, {"EVENT_NAME": "pull_request", **results}, tmp_path)
+    if expected_ok:
+        assert run.returncode == 0, f"{case_name} 应聚合通过:\n{run.stdout}\n{run.stderr}"
+    else:
+        assert run.returncode != 0, f"{case_name} 不得聚合通过（失败/取消/非许可 skip）:\n{run.stdout}"
+        assert "不通过" in run.stdout + run.stderr
 
 
 # ---------------------------------------------------------------------------
