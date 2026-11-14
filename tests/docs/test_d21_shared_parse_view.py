@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -118,8 +119,9 @@ class TestCompletionSectionSharedView:
 
     def test_setext_completion_heading_is_recognized(self):
         block = cdc._completion_section("完成判定\n------\n\n- 判据\n- 最小验证命令\n")
-        assert block is not None
-        assert "- 最小验证命令" in block or "最小验证命令" in block
+        assert block is not None, "Setext 标题应被识别为完成判定章节"
+        assert "- 判据" in block
+        assert "- 最小验证命令" in block
 
     def test_heading_inside_fence_does_not_count(self):
         content = "## 其他\n\n```\n## 完成判定\n\n- 判据\n- 最小验证命令\n```\n"
@@ -141,7 +143,9 @@ class TestCompletionSectionSharedView:
             return original(content)
 
         monkeypatch.setattr(cdc, "parse_doc_view", spy)
-        assert cdc._completion_section("## 完成判定\n\n- x\n") is not None
+        block = cdc._completion_section("## 完成判定\n\n- x\n")
+        assert block is not None, "完成判定章节应被识别"
+        assert "- x" in block
         assert calls, "完成判定必须经 docs_markdown 共享视图解析"
 
 
@@ -188,7 +192,7 @@ class TestChangelogDateSharedView:
             return original(path)
 
         monkeypatch.setattr(dm, "load_document_view", spy)
-        assert cdc._extract_changelog_top_date() is not None
+        assert cdc._extract_changelog_top_date() == date(2026, 11, 13)
         assert calls, "变更日志日期必须经 docs_markdown 共享视图解析"
 
 
@@ -249,7 +253,7 @@ class TestGeneratedBlockScanSharedView:
 
     def test_replace_refuses_fenced_only_marker(self):
         text = "~~~\n<!-- generated:x -->\nold\n<!-- /generated -->\n~~~\n"
-        with pytest.raises(dg.MissingBlockError):
+        with pytest.raises(dg.MissingBlockError, match="缺少生成块 'x'"):
             dg.replace_block(text, "markdown", "x", ["changed"])
 
     def test_replace_leaves_fenced_example_untouched(self):
