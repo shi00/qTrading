@@ -123,3 +123,18 @@ class TestRelativeDeadLinksAfterMigration:
         (doc_repo / "real.md").write_text("# 目标\n", encoding="utf-8")
         _register(monkeypatch, doc, doc_repo / "real.md")
         assert cdc.check_relative_dead_links() == []
+
+    def test_formatted_reference_defined_missing_target_fails(self, doc_repo, monkeypatch):
+        # D30：已定义但目标缺失的格式化引用是真实链接，必须失败
+        doc = doc_repo / "a.md"
+        doc.write_text("[**格式化**][defn]\n\n[defn]: ./missing.md\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert errors and any("missing.md" in e for e in errors), errors
+
+    def test_escaped_reference_like_text_passes(self, doc_repo, monkeypatch):
+        # D30：转义方括号是普通文字，不得从反转义后的显示文本倒猜引用语法
+        doc = doc_repo / "a.md"
+        doc.write_text("示例：\\[ok\\]\\[undefined\\]\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        assert cdc.check_relative_dead_links() == [], "转义文字不得误报引用死链"

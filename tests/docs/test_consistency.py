@@ -3590,15 +3590,10 @@ class TestEvalsCaseIndexConsistency:
 
     def test_current_index_parses_nonempty(self):
         """空转守护：README 实际解析出类别目录与 case 文件（证明解析未空转）."""
-        from check_docs_consistency import EVALS_README_PATH, _EVALS_README_LINK_PATTERN
+        from check_docs_consistency import EVALS_README_PATH, parse_doc_view
 
-        content = EVALS_README_PATH.read_text(encoding="utf-8")
-        targets = [
-            m.group(1)
-            for line in content.splitlines()
-            if line.lstrip().startswith("|")
-            for m in _EVALS_README_LINK_PATTERN.finditer(line)
-        ]
+        view = parse_doc_view(EVALS_README_PATH.read_text(encoding="utf-8"))
+        targets = [link.target[2:] for link in view.links if link.target.startswith("./")]
         dirs = {t.rstrip("/") for t in targets if t.endswith("/")}
         files = {t for t in targets if "/" in t and t.endswith(".md")}
         assert dirs, "README 未解析到任何类别目录（门禁空转）"
