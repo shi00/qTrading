@@ -33,6 +33,35 @@ HTML_ID_DOC = '## 落款\n正文 <a id="api-ref">说明</a> 续\n\n<div id="box"
 # 组 4 样例：两类围栏 + 行内代码中的假链接（全部在代码语境，不应判为链接）
 FENCED_DOC = "```py\n[a][nope]\n```\n\n~~~py\n[x](y)\n~~~\n\n行内 `[x](y)` 与 `[a][nope]` 均为代码语境\n"
 
+# 组 4b 样例（Q11）：代码块实际 content / 闭合状态 / 行号区间。
+# (markdown 文本, (fence, content, closed, start_line, end_line))
+CODE_BLOCK_CONTENT_CASES: list[tuple[str, tuple[str, str, bool, int, int]]] = [
+    ("```python\na\n```\n", ("```", "a\n", True, 1, 3)),
+    ("```python\na\n", ("```", "a\n", False, 1, 2)),
+    ("````python\na\n````\n", ("````", "a\n", True, 1, 3)),
+    ("````python\na\n", ("````", "a\n", False, 1, 2)),
+    ("- 列表项\n\n  ```python\n  a\n  ```\n", ("```", "a\n", True, 3, 5)),
+    ("- 列表项\n\n  ```python\n  a\n", ("```", "a\n", False, 3, 4)),
+    ("    a\n    b\n", ("", "a\nb\n", True, 1, 2)),
+    ("```python\r\na\r\n```\r\n", ("```", "a\n", True, 1, 3)),
+    ("```python\na\n\n```\n", ("```", "a\n\n", True, 1, 4)),
+    ("```python\na\n\n", ("```", "a\n\n", False, 1, 3)),
+    ("```python\na\u2028b\n```\n", ("```", "a\u2028b\n", True, 1, 3)),
+]
+CODE_BLOCK_CONTENT_IDS = [
+    "closed-backtick",
+    "eof-backtick",
+    "closed-long",
+    "eof-long",
+    "closed-nested-list",
+    "eof-nested-list",
+    "indented",
+    "closed-crlf",
+    "closed-trailing-blank",
+    "eof-trailing-blank",
+    "unicode-line-separator",
+]
+
 # 组 6 样例（D30）：转义方括号是普通文字，不得从反转义后的显示文本倒猜引用语法
 ESCAPED_REF_DOC = (
     "正文 \\[ok\\]\\[undefined\\] 继续，含不完整转义 \\[ok][undefined]。\n\n"
@@ -93,6 +122,16 @@ def test_fences_and_inline_code_no_false_link(view_factory) -> None:
     assert view.links == (), view.links
     blocks = [(b.fence, b.info, b.start_line, b.end_line) for b in view.code_blocks]
     assert blocks == [("```", "py", 1, 3), ("~~~", "py", 5, 7)], blocks
+
+
+@pytest.mark.parametrize(("text", "expected"), CODE_BLOCK_CONTENT_CASES, ids=CODE_BLOCK_CONTENT_IDS)
+def test_code_block_content_and_closed_state(view_factory, text, expected) -> None:
+    """组 4b（Q11）：保存 token 实际 content 与闭合状态；EOF 未闭合围栏内容不丢末行。"""
+    view = view_factory(text)
+    assert len(view.code_blocks) == 1, view.code_blocks
+    block = view.code_blocks[0]
+    assert (block.fence, block.content, block.closed, block.start_line, block.end_line) == expected
+    assert view.code_block_text(block) == expected[1].removesuffix("\n")
 
 
 def test_escaped_reference_like_text_not_reported(view_factory) -> None:

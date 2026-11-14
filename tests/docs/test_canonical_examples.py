@@ -83,17 +83,19 @@ def _read(path: Path) -> str:
 
 
 def _live_python_blocks(text: str, name: str, *, historical_stub: bool = False) -> list[str]:
-    """提取未被迁移注释豁免的 python 代码块；活文档非空是硬要求。
+    """提取内容非空且未被迁移注释豁免的 python 代码块；活文档非空是硬要求。
 
-    历史 stub 以具名路径显式豁免（允许 0 块）；其余文档既要有 python 代码块，
-    也要至少保留一个未被豁免的活示例，防止「移除全部活示例」静默通过。
+    历史 stub 以具名路径显式豁免（允许 0 块）；其余文档既要有内容非空的 python
+    代码块，也要至少保留一个未被豁免的活示例，防止「移除全部活示例」或「围栏内容
+    被抽成空串」静默通过。
     """
     blocks = _extract_python_blocks(text)
-    live = [block for block in blocks if not _is_migration_annotated(block)]
+    non_blank = [block for block in blocks if block.strip()]
     if historical_stub:
-        return live
-    assert blocks, f"{name}: 活文档必须包含 python 代码块（示例不得为空）"
-    assert live, f"{name}: 至少保留一个未被 `# migration reference` 注释豁免的活示例"
+        return [block for block in non_blank if not _is_migration_annotated(block)]
+    assert non_blank, f"{name}: 活文档必须包含 python 代码块（示例内容不得为空）"
+    live = [block for block in non_blank if not _is_migration_annotated(block)]
+    assert live, f"{name}: 至少保留一个未被 `# migration reference` 注释豁免的非空活示例"
     return live
 
 

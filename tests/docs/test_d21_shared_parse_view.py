@@ -68,6 +68,60 @@ class TestCanonicalExampleExtraction:
     def test_named_historical_stub_exempt_from_nonempty(self):
         assert tce._live_python_blocks("# stub\n", "flet-best-practices.md", historical_stub=True) == []
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "```python\nI18n.subscribe()\n```\n",
+            "~~~python\nI18n.subscribe()\n~~~\n",
+            "````python\nI18n.subscribe()\n````\n",
+            "- 列表项\n\n  ```python\n  I18n.subscribe()\n  ```\n",
+            "> ```python\n> I18n.subscribe()\n> ```\n",
+            "```python\r\nI18n.subscribe()\r\n```\r\n",
+        ],
+        ids=["closed-backtick", "closed-tilde", "closed-long", "nested-list", "blockquote", "crlf"],
+    )
+    def test_closed_fence_content_extracted(self, text):
+        """闭合围栏（含长围栏 / 列表嵌套 / 引用块 / CRLF）完整抽取内容。"""
+        assert tce._extract_python_blocks(text) == [FORBIDDEN_BODY.rstrip("\n")]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "```python\nI18n.subscribe()\n",
+            "~~~python\nI18n.subscribe()\n",
+            "````python\nI18n.subscribe()\n",
+            "- 列表项\n\n  ```python\n  I18n.subscribe()\n",
+            "> ```python\n> I18n.subscribe()\n",
+            "```python\r\nI18n.subscribe()\r\n",
+        ],
+        ids=["eof-backtick", "eof-tilde", "eof-long", "eof-nested-list", "eof-blockquote", "eof-crlf"],
+    )
+    def test_unclosed_fence_at_eof_extracts_content(self, text):
+        """Q11：EOF 未闭合围栏的内容不得因「末行=闭合围栏」假设被丢弃。"""
+        assert tce._extract_python_blocks(text) == [FORBIDDEN_BODY.rstrip("\n")]
+        assert tce._live_python_blocks(text, "doc.md") == [FORBIDDEN_BODY.rstrip("\n")]
+
+    def test_last_line_violation_in_unclosed_fence_still_fails(self):
+        """末行违规仍须被 canonical 检查发现（不得因末行被抽空而伪绿）。"""
+        text = "```python\nsafe = 1\nI18n.subscribe()\n"
+        live = tce._live_python_blocks(text, "doc.md")
+        violations = [block for block in live if "I18n.subscribe()" in block]
+        assert violations == ["safe = 1\nI18n.subscribe()"]
+
+    @pytest.mark.parametrize(
+        "text",
+        ["```python\n```\n", "```python\n", "```python\n   \n```\n"],
+        ids=["empty-closed", "empty-eof", "whitespace-only"],
+    )
+    def test_empty_fence_is_not_a_live_example(self, text):
+        """Q11：活例检查按内容非空判定，仅「代码块列表非空」不再视为通过。"""
+        with pytest.raises(AssertionError, match="活文档必须包含 python 代码块"):
+            tce._live_python_blocks(text, "doc.md")
+
+    def test_named_stub_with_empty_block_is_not_blocked(self):
+        """具名历史 stub 允许空围栏，不因内容非空要求误阻。"""
+        assert tce._live_python_blocks("```python\n```\n", "flet-best-practices.md", historical_stub=True) == []
+
 
 class TestCanonicalRoutingSharedView:
     """引用式与内联式链接等价；围栏/行内代码中的伪路由不冒正文。"""
