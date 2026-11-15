@@ -223,7 +223,11 @@ class TestCleanupExecutionFailures:
     async def test_retry_after_prepared_allows_missing_native_rows(self) -> None:
         """§10.7：已有可靠 prepared 且 fence 持续的重试允许原生行已缺失。"""
 
-        record = _record(phase=CleanupPhase.RETRY_PENDING, fence_committed=True)
+        record = _record(
+            phase=CleanupPhase.RETRY_PENDING,
+            fence_committed=True,
+            prior_error_category="cleanup_execution_failed",
+        )
         executor = _Executor(missing=("wf-a",))
         service, _, dao, executor = _service(record, executor=executor)
 
@@ -233,6 +237,25 @@ class TestCleanupExecutionFailures:
         assert receipt.phase is CleanupPhase.VERIFIED
         assert dao.phases[-1]["phase"] is CleanupPhase.VERIFIED
         assert dao.tombstones[0][0] == "owner-1"
+
+    @pytest.mark.asyncio
+    async def test_retry_after_preflight_missing_still_refuses(self) -> None:
+        """§10.7 反例：上次失败在预检阶段（从未删过）时，重试缺失仍不得放行。"""
+
+        record = _record(
+            phase=CleanupPhase.RETRY_PENDING,
+            fence_committed=True,
+            prior_error_category="native_target_missing",
+        )
+        executor = _Executor(missing=("wf-a",))
+        service, _, dao, _ = _service(record, executor=executor)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert [call[0] for call in executor.calls] == ["preflight"]
+        assert dao.phases[0]["error_category"] == "native_target_missing"
 
     @pytest.mark.asyncio
     async def test_missing_without_committed_fence_still_refuses(self) -> None:

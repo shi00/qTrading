@@ -115,6 +115,7 @@ class CleanupService:
             fence_committed=True,
             session_ids=normalize_cleanup_ids(record.session_ids),
             asset_keys=normalize_cleanup_asset_keys(record.asset_keys),
+            prior_error_category=record.prior_error_category,
         )
         await self._store.commit_fence(committed)
         return CleanupReceipt(

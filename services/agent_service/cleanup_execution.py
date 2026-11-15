@@ -27,6 +27,9 @@ from services.agent_service.cleanup import (
 )
 from services.agent_service.cleanup_native import NativeCleanupResult, NativePreflight
 
+_RETRY_AFTER_DELETION_CATEGORIES: frozenset[str] = frozenset({"cleanup_execution_failed", "native_rows_remaining"})
+# 上次失败发生在删除尝试之后 → §10.7 允许重试时原生行已缺失。
+
 
 class NativeCleanupPort(Protocol):
     """原生目标执行端口（生产接 ``NativeCleanupExecutor``）。"""
@@ -101,13 +104,14 @@ class CleanupExecutionService:
         try:
             preflight = await self._executor.preflight(record.exact_ids)
             if preflight.missing_ids:
-                # §10.7：只有「已有可靠 prepared 且 fence 持续」的**重试**允许原生行已缺失
-                # （重试的前置就是 job 已落 retry_pending）；首次预检缺失仍判失败，
-                # 不以「查不到」冒充「已清理」。
+                # §10.7：只有「已有可靠 prepared 且 fence 持续」的**重试**允许原生行已缺失。
+                # 判据是上次失败发生在删除尝试之后（cleanup_execution_failed / rows_remaining）；
+                # 预检阶段缺失（native_target_missing）与首次确认一律拒绝，不以「查不到」
+                # 冒充「已清理」。
                 retry_after_prepared = (
                     record.fence_committed
                     and bool(record.exact_ids)
-                    and confirmation.phase is CleanupPhase.RETRY_PENDING
+                    and record.prior_error_category in _RETRY_AFTER_DELETION_CATEGORIES
                 )
                 if not retry_after_prepared:
                     await self._mark_retry(record.user_scope, record.cleanup_job_id, "native_target_missing")

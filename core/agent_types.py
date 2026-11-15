@@ -6538,6 +6538,8 @@ class CleanupJobRecord:
     fence_committed: bool
     session_ids: tuple[str, ...] = ()
     asset_keys: tuple[tuple[str, str], ...] = ()
+    prior_error_category: str | None = None
+    """上次失败所处阶段（§10.7 重试豁免判据：仅「已尝试删除」的失败可放行原生行缺失）。"""
 
     def identities(self) -> CleanupIdentitySet:
         return CleanupIdentitySet(self.exact_ids, self.session_ids, self.asset_keys)

@@ -6611,6 +6611,7 @@ class AgentDao(BaseDao):
                         AgentCleanupJob.exact_identity_set,
                         AgentCleanupJob.phase,
                         AgentCleanupJob.fence_committed,
+                        AgentCleanupJob.error_category,
                     ).where(
                         AgentCleanupJob.user_scope == user_scope,
                         AgentCleanupJob.cleanup_job_id == cleanup_job_id,
@@ -6703,7 +6704,9 @@ class AgentDao(BaseDao):
 
     @staticmethod
     def _cleanup_record_from_row(row: Any) -> CleanupJobRecord:
-        user_scope, cleanup_job_id, owner_ref, preview_digest, expected_revision, identity_set, phase, fence = row
+        user_scope, cleanup_job_id, owner_ref, preview_digest, expected_revision, identity_set, phase, fence, error = (
+            row
+        )
         label = f"{user_scope}/{cleanup_job_id}"
         try:
             identities = decode_cleanup_identity_set(identity_set)
@@ -6728,6 +6731,7 @@ class AgentDao(BaseDao):
             fence_committed=bool(fence),
             session_ids=identities.session_ids,
             asset_keys=identities.asset_keys,
+            prior_error_category=None if error is None else str(error),
         )
 
     # ------------------------------------------------------------------
