@@ -151,6 +151,120 @@ class TestAttributionSerialization:
         assert back.conditions[0].threshold == (1.0, 2.0)
 
 
+class TestAttributionStrictParse:
+    """D11-002: 畸形归因不得合成 ``gt 0.0`` 假条件/伪通过标，且任何输入不得抛异常。"""
+
+    @staticmethod
+    def _parse(conditions: object, rank: object = None) -> FilterAttribution | None:
+        return attribution_from_json({"conditions": conditions, "rank": rank})
+
+    def test_missing_threshold_dropped(self):
+        attr = self._parse([{"column": "pe", "operator": "gt"}])
+        assert attr is not None
+        assert attr.conditions == ()
+
+    def test_unknown_operator_dropped(self):
+        attr = self._parse([{"column": "pe", "operator": "==", "threshold": 5.0}])
+        assert attr is not None
+        assert attr.conditions == ()
+
+    @pytest.mark.parametrize("threshold", [float("nan"), float("inf"), float("-inf"), True, "5", None])
+    def test_non_finite_or_non_numeric_threshold_dropped(self, threshold):
+        attr = self._parse([{"column": "pe", "operator": "gt", "threshold": threshold}])
+        assert attr is not None
+        assert attr.conditions == ()
+
+    def test_nan_and_infinity_json_tokens_dropped(self):
+        # json.loads 默认接受 NaN/Infinity 字面量，同样不得视为合法阈值。
+        for token in ("NaN", "Infinity", "-Infinity"):
+            raw = f'{{"conditions":[{{"column":"pe","operator":"gt","threshold":{token}}}],"rank":null}}'
+            attr = attribution_from_json(raw)
+            assert attr is not None
+            assert attr.conditions == ()
+
+    @pytest.mark.parametrize(
+        "threshold",
+        [
+            [1.0],
+            [1.0, 2.0, 3.0],
+            [],
+            [None, 1.0],
+            [1.0, None],
+            ["1", "2"],
+            (1.0, float("nan")),
+            (5.0, 1.0),
+        ],
+    )
+    def test_bad_between_threshold_dropped(self, threshold):
+        attr = self._parse([{"column": "pe", "operator": "between", "threshold": threshold}])
+        assert attr is not None
+        assert attr.conditions == ()
+
+    @pytest.mark.parametrize("conditions", [None, 3, "bad", {"column": "pe"}, [None], [1], [None, 1]])
+    def test_malformed_conditions_never_raise(self, conditions):
+        attr = self._parse(conditions)
+        if isinstance(conditions, (list, tuple)):
+            assert attr is not None
+            assert attr.conditions == ()
+        else:
+            # 容器本身形态损坏 → 整体拒绝，View 跳过。
+            assert attr is None
+
+    def test_invalid_condition_dropped_valid_condition_kept(self):
+        attr = self._parse(
+            [
+                None,
+                {"column": "pe", "operator": "gt", "threshold": 5.0, "actual": 6.0},
+                1,
+                {"column": "pb", "operator": "bogus", "threshold": 1.0},
+            ]
+        )
+        assert attr is not None
+        assert len(attr.conditions) == 1
+        assert attr.conditions[0] == FilterCondition("pe", "gt", 5.0, 6.0)
+
+    @pytest.mark.parametrize(
+        "rank",
+        [
+            {"field": "pe", "position": "1", "total": 10},
+            {"field": "pe", "position": 0, "total": 10},
+            {"field": "pe", "position": 1, "total": 0},
+            {"field": "pe", "position": 11, "total": 10},
+            {"field": "", "position": 1, "total": 10},
+            {"field": 1, "position": 1, "total": 10},
+            {"field": "pe", "ascending": 0, "position": 1, "total": 10},
+            {"field": "pe", "value": float("nan"), "position": 1, "total": 10},
+            {"field": "pe", "value": "1.0", "position": 1, "total": 10},
+            {"field": "pe", "position": True, "total": 10},
+        ],
+    )
+    def test_bad_rank_dropped_conditions_kept(self, rank):
+        attr = self._parse([{"column": "pe", "operator": "gt", "threshold": 0.0}], rank)
+        assert attr is not None
+        assert attr.rank is None
+        assert len(attr.conditions) == 1
+
+    def test_zero_threshold_and_valid_rank_roundtrip(self):
+        """真实 0 阈值/0 排名值不得被当作缺失剔除（区别于 R21 的伪造 0）。"""
+        attr = FilterAttribution(
+            conditions=(
+                FilterCondition("pe", "gt", 0.0, 0.0),
+                FilterCondition("pb", "between", (0.0, 2.0), 0.0),
+            ),
+            rank=RankAttribution(field="pe", value=0.0, position=1, total=1),
+        )
+        raw = attribution_to_json(attr)
+        assert raw is not None
+        assert attribution_from_json(raw) == attr
+
+    def test_legacy_bad_json_yields_no_conditions(self):
+        """历史坏 JSON（未知 operator）：解析后无条件，View 依既有「空条件跳过」不渲染通过标。"""
+        raw = '{"conditions":[{"column":"pe","operator":"==","threshold":5}],"rank":null}'
+        attr = attribution_from_json(raw)
+        assert attr is not None
+        assert attr.conditions == ()
+
+
 # ============================================================================
 # polars_base._build_attributions — 候选池序位与列写入
 # ============================================================================
