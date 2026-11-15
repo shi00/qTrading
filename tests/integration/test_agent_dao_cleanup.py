@@ -44,11 +44,14 @@ from data.persistence.models import (
     AgentArtifact,
     AgentAssetVersion,
     AgentBodyPayload,
+    AgentCommand,
+    AgentDecision,
     AgentExecution,
     AgentMessage,
     AgentOperation,
     AgentRound,
     AgentSession,
+    AgentSourceLink,
 )
 from services.agent_service.cleanup import (
     CleanupConfirmCommand,
@@ -411,7 +414,7 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
     app_engine = create_test_engine(url)
     try:
         dao = AgentDao(app_engine)
-        assert await dao.save_cleanup_job(record) is True
+        assert await dao.save_cleanup_job(record, content_manifest={"body_refs": ["body-e2e"]}) is True
         async with app_engine.begin() as conn:
             await conn.execute(
                 sa.insert(AgentSession),
@@ -463,6 +466,15 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
 
         loaded = await dao.load_cleanup_job(_USER_SCOPE, job_id)
         async with app_engine.connect() as conn:
+            content_manifest = (
+                await conn.execute(
+                    text(
+                        "SELECT content_manifest FROM agent_cleanup_job "
+                        "WHERE user_scope = :scope AND cleanup_job_id = :job"
+                    ),
+                    {"scope": _USER_SCOPE, "job": job_id},
+                )
+            ).scalar_one()
             session_row = (
                 await conn.execute(
                     sa.select(AgentSession.title, AgentSession.draft_payload).where(
@@ -496,6 +508,7 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
     assert loaded.phase is CleanupPhase.VERIFIED
     assert loaded.fence_committed is True
     assert loaded.exact_ids == (in_set,)
+    assert content_manifest is None
     assert session_row.title == CLEANUP_TOMBSTONE
     assert session_row.draft_payload is None
     assert asset_row.display_name == CLEANUP_TOMBSTONE
@@ -808,7 +821,7 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
     assert artifact_row.body_text is None
     assert artifact_row.body_ref is None
     assert artifact_row.result_payload is None
-    assert artifact_row.result_digest == "b" * 64
+    assert artifact_row.result_digest == CLEANUP_TOMBSTONE_DIGEST
     # 已清理信号必须可见：read_artifact 依 cleaned_at 区分 body_cleaned 与 body_not_saved（R21）
     assert artifact_row.cleaned_at is not None
     assert round_row.frozen_manifest is None
@@ -827,4 +840,383 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
     assert out_artifact_row.result_digest == "b" * 64
     assert out_round_row.frozen_manifest == {"goal": secret}
     assert out_round_row.model_binding == {"prompt": secret}
+    assert leaked == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_structural_receipts_and_content_digests_cleared(real_embedded_pg) -> None:
+    """E-06-5b：结构回执/载荷清空、可 NULL 摘要置 NULL、NOT NULL 摘要换 tombstone。
+
+    覆盖 §10.7 表第 2—4 行：命令请求/回执、决定问题与答案 schema、同意载荷、
+    操作交付清单/worker 引用、来源 locator 清空；执行意图、轮次冻结/实际、参数、
+    来源作用域摘要置 NULL；成果与命令的 NOT NULL 内容摘要换固定 tombstone。
+    身份/grant/phase/unknown/计量（``attempt_refs``）保原值，集合外原样。
+    """
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+
+    suffix = uuid.uuid4().hex[:8]
+    secret = "私人原句-结构回执清理后不应可查"
+    session_in, session_out = f"s-in-{suffix}", f"s-out-{suffix}"
+    execution_in, execution_out = f"e-in-{suffix}", f"e-out-{suffix}"
+    round_in, round_out = f"r-in-{suffix}", f"r-out-{suffix}"
+    artifact_in, artifact_out = f"a-in-{suffix}", f"a-out-{suffix}"
+    command_in, command_out = f"c-in-{suffix}", f"c-out-{suffix}"
+    decision_in, decision_out = f"d-in-{suffix}", f"d-out-{suffix}"
+    link_in, link_out = f"l-in-{suffix}", f"l-out-{suffix}"
+    asset_src = f"asset-src-{suffix}"
+
+    def _execution(execution_id: str, session_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "execution_kind": "root",
+            "source_module": f"module-{execution_id}",
+            "business_request_id": f"request-{execution_id}",
+            "intent_digest": "e" * 64,
+            "node_id": "root",
+            "display_state": "complete",
+            "goal_coverage": "full",
+        }
+
+    def _round(round_id: str, execution_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "round_id": round_id,
+            "execution_id": execution_id,
+            "round_number": 1,
+            "workflow_id": f"wf-{round_id}",
+            "workflow_code_version": "1",
+            "run_epoch": 1,
+            "input_revision": 1,
+            "plan_revision": 1,
+            "frozen_digest": "f" * 64,
+            "actual_digest": "g" * 64,
+        }
+
+    def _artifact(artifact_id: str, session_id: str, execution_id: str, round_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "artifact_id": artifact_id,
+            "artifact_version": 1,
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "round_id": round_id,
+            "artifact_kind": "explanation",
+            "input_revision": 1,
+            "actual_input_digest": "a" * 64,
+            "actual_model_ref": "model-in",
+            "result_digest": "b" * 64,
+            "source_available_state": "available",
+        }
+
+    def _command(command_id: str, session_id: str, execution_id: str, round_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "command_record_id": command_id,
+            "client_command_id": f"client-{command_id}",
+            "target_id": session_id,
+            "command_kind": "submit",
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "round_id": round_id,
+            "expected_revision": 1,
+            "input_revision": 1,
+            "input_digest": "1" * 64,
+            "request_payload": {"text": secret},
+            "commit_state": "committed",
+            "delivery_state": "delivered",
+            "consumption_state": "consumed",
+            "receipt_payload": {"text": secret},
+        }
+
+    def _decision(decision_id: str, session_id: str, execution_id: str, round_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "decision_id": decision_id,
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "round_id": round_id,
+            "node_id": "root",
+            "decision_kind": "tool_permission",
+            "question_payload": {"text": secret},
+            "answer_schema": {"text": secret},
+            "parameter_digest": "2" * 64,
+            "source_scope_digest": "3" * 64,
+            "grant_id": f"grant-{decision_id}",
+            "grant_revision": 4,
+            "grant_state": "granted",
+            "presentation_batch_seq": 1,
+            "data_consent_payload": {"text": secret},
+        }
+
+    def _link(link_id: str, consumer_session: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "link_id": link_id,
+            "source_id": asset_src,
+            "source_version": "1",
+            "consumer_kind": "draft",
+            "consumer_id": consumer_session,
+            "consumer_version": "1",
+            "session_id": consumer_session,
+            "locator_payload": {"path": f"C:/private/{secret}"},
+            "claim_ref": f"claim-{link_id}",
+            "relation_kind": "accepted_input",
+        }
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession),
+                [
+                    {"user_scope": _USER_SCOPE, "session_id": session_in, "title": secret},
+                    {"user_scope": _USER_SCOPE, "session_id": session_out, "title": secret},
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentAssetVersion),
+                [
+                    {
+                        "user_scope": _USER_SCOPE,
+                        "asset_id": asset_src,
+                        "asset_version": "1",
+                        "asset_kind": "summary",
+                        "display_name": secret,
+                        "digest": "9" * 64,
+                        "read_state": "ready",
+                        "verification_state": "program_verified",
+                    }
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentExecution),
+                [_execution(execution_in, session_in), _execution(execution_out, session_out)],
+            )
+            await conn.execute(
+                sa.insert(AgentRound),
+                [_round(round_in, execution_in), _round(round_out, execution_out)],
+            )
+            await conn.execute(
+                sa.insert(AgentArtifact),
+                [
+                    _artifact(artifact_in, session_in, execution_in, round_in),
+                    _artifact(artifact_out, session_out, execution_out, round_out),
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentCommand),
+                [
+                    _command(command_in, session_in, execution_in, round_in),
+                    _command(command_out, session_out, execution_out, round_out),
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentDecision),
+                [
+                    _decision(decision_in, session_in, execution_in, round_in),
+                    _decision(decision_out, session_out, execution_out, round_out),
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentSourceLink),
+                [_link(link_in, session_in), _link(link_out, session_out)],
+            )
+            await conn.execute(
+                sa.insert(AgentOperation),
+                [
+                    {
+                        "user_scope": _USER_SCOPE,
+                        "operation_id": f"op-in-{suffix}",
+                        "session_id": session_in,
+                        "execution_id": execution_in,
+                        "owner_epoch": 1,
+                        "run_epoch": 1,
+                        "phase": "result_saved",
+                        "effect_state": "confirmed",
+                        "io_state": "known",
+                        "parameter_digest": "4" * 64,
+                        "worker_refs": {"worker": secret},
+                        "delivery_manifest": {"path": secret},
+                        "data_consent_claims": {"claim": secret},
+                        "attempt_refs": {"attempt": "attempt-1"},
+                    }
+                ],
+            )
+
+        touched = await dao.tombstone_cleanup_text(_USER_SCOPE, session_ids=[session_in])
+
+        async with app_engine.connect() as conn:
+            execution_row = (
+                await conn.execute(
+                    sa.select(AgentExecution.intent_digest).where(AgentExecution.execution_id == execution_in)
+                )
+            ).one()
+            execution_out_row = (
+                await conn.execute(
+                    sa.select(AgentExecution.intent_digest).where(AgentExecution.execution_id == execution_out)
+                )
+            ).one()
+            round_row = (
+                await conn.execute(
+                    sa.select(AgentRound.frozen_digest, AgentRound.actual_digest).where(AgentRound.round_id == round_in)
+                )
+            ).one()
+            round_out_row = (
+                await conn.execute(
+                    sa.select(AgentRound.frozen_digest, AgentRound.actual_digest).where(
+                        AgentRound.round_id == round_out
+                    )
+                )
+            ).one()
+            artifact_row = (
+                await conn.execute(
+                    sa.select(AgentArtifact.actual_input_digest, AgentArtifact.result_digest).where(
+                        AgentArtifact.artifact_id == artifact_in
+                    )
+                )
+            ).one()
+            artifact_out_row = (
+                await conn.execute(
+                    sa.select(AgentArtifact.actual_input_digest, AgentArtifact.result_digest).where(
+                        AgentArtifact.artifact_id == artifact_out
+                    )
+                )
+            ).one()
+            command_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.request_payload,
+                        AgentCommand.receipt_payload,
+                        AgentCommand.input_digest,
+                        AgentCommand.commit_state,
+                    ).where(AgentCommand.command_record_id == command_in)
+                )
+            ).one()
+            command_out_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.request_payload,
+                        AgentCommand.receipt_payload,
+                        AgentCommand.input_digest,
+                    ).where(AgentCommand.command_record_id == command_out)
+                )
+            ).one()
+            decision_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentDecision.question_payload,
+                        AgentDecision.answer_schema,
+                        AgentDecision.parameter_digest,
+                        AgentDecision.source_scope_digest,
+                        AgentDecision.data_consent_payload,
+                        AgentDecision.grant_id,
+                        AgentDecision.grant_revision,
+                        AgentDecision.grant_state,
+                    ).where(AgentDecision.decision_id == decision_in)
+                )
+            ).one()
+            decision_out_row = (
+                await conn.execute(
+                    sa.select(AgentDecision.question_payload, AgentDecision.answer_schema).where(
+                        AgentDecision.decision_id == decision_out
+                    )
+                )
+            ).one()
+            operation_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.parameter_digest,
+                        AgentOperation.worker_refs,
+                        AgentOperation.delivery_manifest,
+                        AgentOperation.data_consent_claims,
+                        AgentOperation.attempt_refs,
+                    ).where(AgentOperation.session_id == session_in)
+                )
+            ).one()
+            link_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentSourceLink.locator_payload,
+                        AgentSourceLink.claim_ref,
+                        AgentSourceLink.relation_kind,
+                    ).where(AgentSourceLink.link_id == link_in)
+                )
+            ).one()
+            link_out_row = (
+                await conn.execute(
+                    sa.select(AgentSourceLink.locator_payload, AgentSourceLink.claim_ref).where(
+                        AgentSourceLink.link_id == link_out
+                    )
+                )
+            ).one()
+            leaked = 0
+            for model, condition in (
+                (AgentExecution, AgentExecution.session_id == session_in),
+                (AgentDecision, AgentDecision.session_id == session_in),
+                (AgentCommand, AgentCommand.session_id == session_in),
+                (AgentSourceLink, AgentSourceLink.session_id == session_in),
+            ):
+                rows = (await conn.execute(sa.select(*model.__table__.columns).where(condition))).all()
+                for row in rows:
+                    if secret in str(dict(row._mapping)):
+                        leaked += 1
+    finally:
+        await app_engine.dispose()
+
+    assert touched["agent_execution"] == 1
+    assert touched["agent_decision"] == 1
+    assert touched["agent_command"] == 1
+    assert touched["agent_source_link"] == 1
+    assert touched["agent_session"] == 1
+    assert touched["agent_asset_version"] == 0
+    assert touched["agent_body_payload"] == 0
+    assert touched["agent_message"] == 0
+
+    assert execution_row.intent_digest is None
+    assert execution_out_row.intent_digest == "e" * 64
+    assert round_row.frozen_digest is None
+    assert round_row.actual_digest is None
+    assert round_out_row.frozen_digest == "f" * 64
+    assert round_out_row.actual_digest == "g" * 64
+
+    assert artifact_row.actual_input_digest == CLEANUP_TOMBSTONE_DIGEST
+    assert artifact_row.result_digest == CLEANUP_TOMBSTONE_DIGEST
+    assert artifact_out_row.actual_input_digest == "a" * 64
+    assert artifact_out_row.result_digest == "b" * 64
+
+    assert command_row.request_payload is None
+    assert command_row.receipt_payload is None
+    assert command_row.input_digest == CLEANUP_TOMBSTONE_DIGEST
+    assert command_row.commit_state == "committed"
+    assert command_out_row.request_payload == {"text": secret}
+    assert command_out_row.receipt_payload == {"text": secret}
+    assert command_out_row.input_digest == "1" * 64
+
+    assert decision_row.question_payload is None
+    assert decision_row.answer_schema is None
+    assert decision_row.parameter_digest is None
+    assert decision_row.source_scope_digest is None
+    assert decision_row.data_consent_payload is None
+    assert decision_row.grant_id == f"grant-{decision_in}"
+    assert decision_row.grant_revision == 4
+    assert decision_row.grant_state == "granted"
+    assert decision_out_row.question_payload == {"text": secret}
+    assert decision_out_row.answer_schema == {"text": secret}
+
+    assert operation_row.parameter_digest is None
+    assert operation_row.worker_refs is None
+    assert operation_row.delivery_manifest is None
+    assert operation_row.data_consent_claims is None
+    assert operation_row.attempt_refs == {"attempt": "attempt-1"}
+
+    assert link_row.locator_payload is None
+    assert link_row.claim_ref == f"claim-{link_in}"
+    assert link_row.relation_kind == "accepted_input"
+    assert link_out_row.locator_payload == {"path": f"C:/private/{secret}"}
+    assert link_out_row.claim_ref == f"claim-{link_out}"
     assert leaked == 0

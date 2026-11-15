@@ -27,7 +27,7 @@
 
 | ID | 一句话 | 级别 | upgrade 触发条件 |
 |----|--------|------|------------------|
-| P2-AgentCleanup-Residual-Risks | 清理阶段可回退（`retry_pending` 可覆盖已 `verified`）、§10.7 表第 2/4 行正文与各域 digest 未清（属 E-06-5b 白名单裁决）、孤儿 `agent_body_payload` 行不回收、运行库引擎的 `is_disposed` 守卫语义失效（生产未装配该 store） | P2 | ① 出现 verified 被回退或并发重复确认事故；② Q6 白名单冻结（E-06-5b 一并处理）；③ 清理后磁盘计量与实际正文留存出现偏差；④ 运行库 handle 接入清理链路或实现额外引擎登记 |
+| P2-AgentCleanup-Residual-Risks | 清理阶段可回退（`retry_pending` 可覆盖已 `verified`）、清理后命令重放归为 `INPUT_CONFLICT`（摘要已 tombstone，无法再核原输入）、孤儿 `agent_body_payload` 行不回收、运行库引擎的 `is_disposed` 守卫语义失效（生产未装配该 store） | P2 | ① 出现 verified 被回退或并发重复确认事故；② 需要按原命令摘要区分「幂等重放」与「异输入冲突」；③ 清理后磁盘计量与实际正文留存出现偏差；④ 运行库 handle 接入清理链路或实现额外引擎登记 |
 | P3-ExcStrategies-NoteLazy-Classify | strategies/ 层 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify\_error | P3 | ① 策略层再次出现未分类 `except Exception` 的新实例时；② 或策略层异常处理被独立重构时 |
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | ① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时 |
 | P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
@@ -756,19 +756,19 @@ E-05 提供 `read_delivery(operation_id)` 查回原 manifest 与修订，但尚�
 
 按 HANDOFF §10.2 中断边界表实现续接与残留清理；在此之前 UI 必须显式区分「可能已保存（unknown）」与「确认未发布」，禁止盲重导。upgrade 触发条件同上。
 
-#### P2-AgentCleanup-Residual-Risks：清理阶段单调性、正文域覆盖余量与孤儿载荷
+#### P2-AgentCleanup-Residual-Risks：清理阶段单调性、清理后重放语义与孤儿载荷
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P2-AgentCleanup-Residual-Risks** | ① `save_cleanup_phase` 允许 `retry_pending` 覆盖已 `verified`（阶段可回退，R22 类比）；② §10.7 表第 2/4 行的 `agent_decision.question_payload/answer_schema`、`agent_command.request_payload/receipt_payload`、`agent_source_link.locator_payload/claim_ref`、`agent_operation.delivery_manifest/worker_refs/attempt_refs` 及 `agent_artifact.result_digest`/`agent_round` 各 digest 仍未清或未换 tombstone（属 E-06-5b 白名单裁决，当前以「最小保留」保守处理）；③ `agent_body_payload` 仅按受清 owner 的当前 `body_ref` 发现，历史半清理留下的孤儿行不会被回收；④ `AgentRuntimeNativeStore` 已补 `_check_engine`，但运行库引擎由 `assemble_agent_runtime` 单独创建、`AgentRuntimeHandle.close()` 直接 dispose 而未经 `mark_disposed`，故 `is_disposed` 对运行库引擎恒 False（当前生产未装配该 store，仅测试构造） | ① 出现 verified 被回退或并发重复确认事故；② Q6 白名单冻结时随 E-06-5b 一并处理；③ 清理后磁盘计量与实际正文留存出现偏差；④ 运行库 handle 接入清理链路或支持额外引擎登记 |
+| **P2-AgentCleanup-Residual-Risks** | ① `save_cleanup_phase` 允许 `retry_pending` 覆盖已 `verified`（阶段可回退，R22 类比）；② 清理后 `agent_command.input_digest` 换 tombstone，同 `client_command_id` 重放不再能核原输入摘要，归为 `INPUT_CONFLICT`（拒绝而非幂等成功，符合「不重建正文」但错误分类较粗）；③ `agent_body_payload` 仅按受清 owner 的当前 `body_ref` 发现，历史半清理留下的孤儿行不会被回收；④ `AgentRuntimeNativeStore` 已补 `_check_engine`，但运行库引擎由 `assemble_agent_runtime` 单独创建、`AgentRuntimeHandle.close()` 直接 dispose 而未经 `mark_disposed`，故 `is_disposed` 对运行库引擎恒 False（当前生产未装配该 store，仅测试构造） | ① 出现 verified 被回退或并发重复确认事故；② 需要按原命令摘要区分「幂等重放」与「异输入冲突」；③ 清理后磁盘计量与实际正文留存出现偏差；④ 运行库 handle 接入清理链路或支持额外引擎登记 |
 
 **产生背景与现状**
 
-E-06 里程碑独立检视（基线 `e0e8c651a^..`，覆盖 E-06-1…E-06-5a）确认主链路可靠（fence 前置、九域核 0、tombstone 集合外不变、body payload 准确删行），并发现上述三处残余：① 阶段写入仅对 `verified` 增加 `fence_committed` 条件，非 `verified` 写入不限制来源阶段，`retry_pending` 因此可覆盖 `verified` 且不清 `verified_at`；② §10.7 表后续行的正文与摘要须在白名单冻结后方可处理，当前未冻结故未动（未清即未扩大删除范围）；③ 孤儿 payload 无 owner 引用，本条不主张按全表删除（防止越界）。
+E-06 里程碑独立检视（基线 `e0e8c651a^..`，覆盖 E-06-1…E-06-5a）确认主链路可靠（fence 前置、九域核 0、tombstone 集合外不变、body payload 准确删行），并发现上述残余：① 阶段写入仅对 `verified` 增加 `fence_committed` 条件，非 `verified` 写入不限制来源阶段，`retry_pending` 因此可覆盖 `verified` 且不清 `verified_at`；② E-06-5b 已按 §10.7 表第 2—4 行清理结构载荷/回执、可 NULL 摘要置 NULL、NOT NULL 摘要换 tombstone（`agent_artifact.actual_input_digest`/`result_digest`、`agent_command.input_digest`），并在 `verified` 时清 `agent_cleanup_job.content_manifest`；按第 5 行明确保留 `claim_ref`、`attempt_refs`、`agent_execution.unknown_refs`、grant 与 phase/计量字段，这些是归属/禁用/unknown 核定所需，不属遗漏；③ 孤儿 payload 无 owner 引用，本条不主张按全表删除（防止越界）。
 
 **期望的最终解法**
 
-① 阶段写入增加单调约束：已 `verified` 时拒绝非 `verified` 写入（必要时区分「行缺失」与「已 verified 回退」错误码）；② Q6 冻结后随 E-06-5b 逐键清理并按反例标准复核；③ 若出现磁盘计量偏差，改为「按集合内 owner 全量（含历史 body_ref 快照）回收」，不得使用 LIKE/前缀/全表删除。
+① 阶段写入增加单调约束：已 `verified` 时拒绝非 `verified` 写入（必要时区分「行缺失」与「已 verified 回退」错误码）；② 若产品需要清理后仍可幂等重放，改为在 `agent_cleanup_job` 保存命令身份摘要而非留在命令行，且只覆盖「已清理会话」的有限重放窗口；③ 若出现磁盘计量偏差，改为「按集合内 owner 全量（含历史 body_ref 快照）回收」，不得使用 LIKE/前缀/全表删除。
 
 ## 已接受的权衡（Accepted Tradeoffs）
 

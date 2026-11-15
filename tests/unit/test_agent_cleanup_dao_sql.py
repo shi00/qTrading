@@ -203,5 +203,9 @@ class TestCleanupTombstoneContract:
             "agent_round",
             "agent_operation",
             "agent_body_payload",
+            "agent_execution",
+            "agent_decision",
+            "agent_command",
+            "agent_source_link",
         }
         assert all(count == 0 for count in touched.values())

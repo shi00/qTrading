@@ -6363,8 +6363,14 @@ class AgentDao(BaseDao):
 
         E-06-5a 起覆盖正文承载域（§10.7 表第 1—3 行「删除正文及受管副本」）：
         ``agent_message``/``agent_artifact``/``agent_round``/``agent_operation`` 的正文
-        与载荷列清空，``agent_body_payload`` 对应行准确删除。digest 与身份列不在本
-        方法内改动（结果摘要换 tombstone 等属 E-06-5b 白名单裁决）。
+        与载荷列清空，``agent_body_payload`` 对应行准确删除。
+
+        E-06-5b 起按 §10.7 表第 2—4 行处理结构回执与内容摘要：结构载荷/回执列
+        （命令请求与回执、决定问题与答案 schema、同意载荷、操作交付清单/worker 引用、
+        来源 locator）清空；可 NULL 的内容摘要（执行意图、轮次冻结/实际、参数、来源
+        作用域）置 NULL；NOT NULL 的内容摘要（成果 ``actual_input_digest``/
+        ``result_digest``、命令 ``input_digest``）换固定 tombstone 摘要。身份、fence、
+        unknown/phase、计量与 ``attempt_refs`` 等核定所需非正文引用保原值。
         """
 
         self._check_engine()
@@ -6380,6 +6386,10 @@ class AgentDao(BaseDao):
             "agent_round": 0,
             "agent_operation": 0,
             "agent_body_payload": 0,
+            "agent_execution": 0,
+            "agent_decision": 0,
+            "agent_command": 0,
+            "agent_source_link": 0,
         }
         if not sessions and not assets:
             return touched
@@ -6459,6 +6469,8 @@ class AgentDao(BaseDao):
                         body_text=None,
                         body_ref=None,
                         result_payload=None,
+                        actual_input_digest=CLEANUP_TOMBSTONE_DIGEST,
+                        result_digest=CLEANUP_TOMBSTONE_DIGEST,
                         cleaned_at=sa.func.now(),
                     )
                 )
@@ -6475,6 +6487,8 @@ class AgentDao(BaseDao):
                         actual_input=None,
                         model_binding=None,
                         sdk_history_ref=None,
+                        frozen_digest=None,
+                        actual_digest=None,
                     )
                 )
                 touched["agent_round"] = int(round_result.rowcount or 0)
@@ -6488,9 +6502,60 @@ class AgentDao(BaseDao):
                             AgentOperation.execution_id.in_(execution_scope),
                         ),
                     )
-                    .values(result_payload=None, request_ref=None, result_ref=None)
+                    .values(
+                        result_payload=None,
+                        request_ref=None,
+                        result_ref=None,
+                        parameter_digest=None,
+                        worker_refs=None,
+                        delivery_manifest=None,
+                        data_consent_claims=None,
+                    )
                 )
                 touched["agent_operation"] = int(operation_result.rowcount or 0)
+
+                execution_result = await conn.execute(
+                    sa.update(AgentExecution)
+                    .where(
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.session_id.in_(session_scope),
+                    )
+                    .values(intent_digest=None)
+                )
+                touched["agent_execution"] = int(execution_result.rowcount or 0)
+
+                decision_result = await conn.execute(
+                    sa.update(AgentDecision)
+                    .where(
+                        AgentDecision.user_scope == user_scope,
+                        AgentDecision.session_id.in_(session_scope),
+                    )
+                    .values(
+                        question_payload=None,
+                        answer_schema=None,
+                        parameter_digest=None,
+                        source_scope_digest=None,
+                        data_consent_payload=None,
+                    )
+                )
+                touched["agent_decision"] = int(decision_result.rowcount or 0)
+
+                command_result = await conn.execute(
+                    sa.update(AgentCommand)
+                    .where(
+                        AgentCommand.user_scope == user_scope,
+                        sa.or_(
+                            AgentCommand.session_id.in_(session_scope),
+                            AgentCommand.execution_id.in_(execution_scope),
+                        ),
+                    )
+                    .values(
+                        request_payload=None,
+                        receipt_payload=None,
+                        input_digest=CLEANUP_TOMBSTONE_DIGEST,
+                    )
+                )
+                touched["agent_command"] = int(command_result.rowcount or 0)
             if assets:
                 asset_scope = list(assets)
                 asset_refs = (
@@ -6525,6 +6590,27 @@ class AgentDao(BaseDao):
                     )
                 )
                 touched["agent_asset_version"] = int(asset_result.rowcount or 0)
+            # 来源边的 locator 可能含私人 origin/路径（§10.7 表第 3 行）；按会话边
+            # 与资产边合并为单条更新，避免交集行重复计数。其他列（source_id、
+            # claim_ref、relation_kind、disabled_inherited）为归属/禁用核定所需。
+            link_clauses: list[Any] = []
+            if sessions:
+                link_clauses.append(AgentSourceLink.session_id.in_(list(sessions)))
+            if assets:
+                asset_scope = list(assets)
+                link_clauses.append(
+                    sa.tuple_(AgentSourceLink.source_id, AgentSourceLink.source_version).in_(asset_scope)
+                )
+                link_clauses.append(
+                    sa.tuple_(AgentSourceLink.derived_asset_id, AgentSourceLink.derived_asset_version).in_(asset_scope)
+                )
+            if link_clauses:
+                link_result = await conn.execute(
+                    sa.update(AgentSourceLink)
+                    .where(AgentSourceLink.user_scope == user_scope, sa.or_(*link_clauses))
+                    .values(locator_payload=None)
+                )
+                touched["agent_source_link"] = int(link_result.rowcount or 0)
             if body_refs:
                 payload_result = await conn.execute(
                     sa.delete(AgentBodyPayload).where(
@@ -6651,7 +6737,12 @@ class AgentDao(BaseDao):
         error_category: str | None = None,
         sqlstate: str | None = None,
     ) -> None:
-        """推进阶段：``verified`` 要求 fence 已提交；不改写固定集合。"""
+        """推进阶段：``verified`` 要求 fence 已提交；不改写固定集合。
+
+        ``verified`` 时同时清空 ``content_manifest``：该列只承载内容摘要/引用，
+        §10.7 表第 4 行要求清理后不默认保留内容摘要；集合身份仍在
+        ``exact_identity_set``（第 5 行），fence 与幂等核定不受影响。
+        """
 
         self._check_engine()
         engine = self._require_async_engine()
@@ -6665,6 +6756,7 @@ class AgentDao(BaseDao):
         }
         if phase is CleanupPhase.VERIFIED:
             values["verified_at"] = sa.func.now()
+            values["content_manifest"] = None
         statement = (
             sa.update(AgentCleanupJob)
             .where(AgentCleanupJob.user_scope == user_scope, AgentCleanupJob.cleanup_job_id == cleanup_job_id)
