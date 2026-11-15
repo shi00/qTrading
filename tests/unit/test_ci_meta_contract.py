@@ -47,6 +47,14 @@ def _load_workflow(name: str) -> dict[str, Any]:
     return yaml.load((WORKFLOWS_DIR / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
+def _step_with_run(docs: dict[str, Any], job_id: str, marker: str) -> dict[str, Any]:
+    """返回 job 内 run 含 marker 的 step（单一变因测试用）。"""
+    for step in docs["jobs"][job_id]["steps"]:
+        if isinstance(step.get("run"), str) and marker in step["run"]:
+            return step
+    raise AssertionError(f"job `{job_id}` 中未找到含 `{marker}` 的 run 步骤")
+
+
 def _build_repo(tmp_path: Path, mutate: Mutation | None = None) -> Path:
     """复制真实 workflow + 选择目标文件到临时仓库，可选施加单变因。"""
     root = tmp_path / "repo"
@@ -100,6 +108,36 @@ class TestNegativeMutations:
 
         errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
         assert any("被条件关闭" in e and "docs-static" in e for e in errors), errors
+
+    def test_disabling_required_step_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            _step_with_run(docs, "docs-static", "-m pytest")["if"] = "false"
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("被 `if: false` 关闭" in e and "docs-static" in e for e in errors), errors
+
+    def test_echoing_required_command_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            step = _step_with_run(docs, "docs-static", "-m pytest")
+            step["run"] = f'echo "{step["run"]}"'
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("未选择必需命令" in e and "-m pytest" in e for e in errors), errors
+
+    @pytest.mark.parametrize("flag", ["--collect-only", "--co"])
+    def test_pytest_collect_only_is_rejected(self, tmp_path: Path, flag: str) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            step = _step_with_run(docs, "docs-static", "-m pytest")
+            step["run"] = f"{step['run']} {flag}"
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("只收集不执行" in e and flag in e for e in errors), errors
+
+    def test_legal_step_condition_is_not_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            _step_with_run(docs, "docs-static", "-m pytest")["if"] = "github.event_name == 'pull_request'"
+
+        assert _meta_module().check_repo(_build_repo(tmp_path, mutate)) == []
 
     def test_swallowing_failure_marker_is_rejected(self, tmp_path: Path) -> None:
         def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
