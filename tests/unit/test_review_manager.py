@@ -1427,11 +1427,11 @@ class TestReviewManagerSaveResults:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_save_with_data_returns_row_count(self, mock_cm, mock_tc):
-        """D4-C1: 正常写入 → 返回写入条数。"""
+        """D4-C1: 正常写入 → 返回 DAO 实际落库条数。"""
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao = MagicMock()
-        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock(return_value=2)
         rm = ReviewManager()
         rm.cache = mock_cache
         df = pd.DataFrame(
@@ -1480,7 +1480,7 @@ class TestReviewManagerSaveResults:
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao = MagicMock()
-        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock(return_value=2)
         rm = ReviewManager()
         rm.cache = mock_cache
         df = pd.DataFrame(
@@ -3104,6 +3104,52 @@ class TestReviewManagerSaveResultsEdgeCases:
         assert records[0]["ai_score"] is None
 
 
+class TestReviewManagerSaveResultsPersistedCount:
+    """D05-001: save_results 承诺返回「实际落库条数」，必须透传 DAO 的去重后计数，
+    不得回退为输入记录数——调用方（夜间任务/UI）据此发成功文案并推进完成标记。"""
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_returns_dao_persisted_count_not_input_rows(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        # 输入 2 行同 4 键重复，DAO 去重后实际落库 1 行
+        mock_cache.screener_dao.save_screening_results = AsyncMock(return_value=1)
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "name": ["First", "Latest"],
+                "close": [10.0, 10.5],
+                "trade_date": ["20240615", "20240615"],
+            }
+        )
+
+        result = await rm.save_results("test_strategy", df, trade_date="20240615", run_id="r1")
+
+        assert result == 1
+        assert len(mock_cache.screener_dao.save_screening_results.call_args.args[0]) == 2
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_dao_write_failure_propagates_never_returns_count(self, mock_cm, mock_tc):
+        """写库失败必须上抛：调用方不得收到任何「落库条数」而误判成功。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock(side_effect=RuntimeError("db down"))
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240615"]})
+
+        with pytest.raises(RuntimeError, match="db down"):
+            await rm.save_results("test_strategy", df, trade_date="20240615")
+
+
 class TestReviewManagerSaveResultsAiStatusFilter:
     """D3-7 / MINOR-03: 复盘/预测写入侧守卫——只写入「AI 已产出结论」的行。
 
@@ -3117,7 +3163,7 @@ class TestReviewManagerSaveResultsAiStatusFilter:
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao = MagicMock()
-        mock_cache.screener_dao.save_screening_results = AsyncMock()
+        mock_cache.screener_dao.save_screening_results = AsyncMock(return_value=1)
         rm = ReviewManager()
         rm.cache = mock_cache
         return rm, mock_cache

@@ -896,14 +896,14 @@ class TestScreenerDaoSaveScreeningResults:
     async def test_empty_records(self):
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=0)
-        await dao.save_screening_results([])
+        assert await dao.save_screening_results([]) == 0
         dao._save_upsert.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_none_records(self):
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=0)
-        await dao.save_screening_results(None)
+        assert await dao.save_screening_results(None) == 0
         dao._save_upsert.assert_not_called()
 
     @pytest.mark.asyncio
@@ -993,6 +993,73 @@ class TestScreenerDaoSaveScreeningResults:
         assert len(df) == 2
         by_run = {row.run_id: row.name for row in df.itertuples()}
         assert by_run == {"r1": "First", "r2": "Latest2"}
+
+    @pytest.mark.asyncio
+    async def test_same_key_dedup_returns_persisted_count(self):
+        """D05-001: 批内同 4 键去重后，返回值必须取 _save_upsert 的实际落库数（1），
+        而非输入条数（2）——调用方据此发「已保存 N 条」并推进完成标记。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "First",
+            },
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "Latest",
+            },
+        ]
+        result = await dao.save_screening_results(records)
+        assert len(dao._save_upsert.call_args.kwargs["df"]) == 1
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_distinct_run_ids_return_persisted_count(self):
+        """D05-001: 不同 run_id 各自成行，返回值等于 _save_upsert 的实际落库数（2）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=2)
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "First",
+            },
+            {
+                "run_id": "r2",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "Second",
+            },
+        ]
+        assert await dao.save_screening_results(records) == 2
+        assert len(dao._save_upsert.call_args.kwargs["df"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_sql_failure_propagates_without_count(self):
+        """D05-001: 写库异常必须上抛，调用方不得拿到「已落库条数」而误判成功。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(side_effect=RuntimeError("boom"))
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "First",
+            }
+        ]
+        with pytest.raises(RuntimeError, match="boom"):
+            await dao.save_screening_results(records)
 
 
 class TestScreenerDaoBuildScreeningSql:
@@ -1977,6 +2044,34 @@ class TestScreenerDaoGetStrategyReviewStats:
         assert "GROUP BY" in sql
         assert "screening_history.benchmark_code" in sql
 
+    @pytest.mark.asyncio
+    async def test_expired_snapshot_metrics_masked_after_dedup(self):
+        """D06-001: 最近快照为 EXPIRED 时旧收益/胜负按 NULL 计，且不在去重前按状态过滤。
+
+        迁移 0030/0032 把超窗旧 COMPLETED 置 EXPIRED 却保留旧 alpha/t1/t5/WIN/LOSS。
+        掩码必须发生在 DISTINCT ON 之后：若在去重子查询内按状态过滤，同键更旧的
+        COMPLETED run 会顶替最近快照复活（绕过 ADR-0010「取最近一次运行」口径）。
+        """
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_strategy_review_stats()
+        stmt = dao._read_db_select.call_args.args[0]
+        from sqlalchemy.dialects import postgresql
+
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        sql = str(compiled)
+        # t1/t5/alpha/WIN 四类掩码，各被均值+计数（或 WIN+LOSS）引用两次 → 8 处
+        assert sql.count("IS DISTINCT FROM") == 8
+        assert REVIEW_STATUS_EXPIRED in compiled.params.values()
+        # 去重仍按「最近一次运行」：DISTINCT ON 保留，且子查询内无状态等值过滤
+        assert "DISTINCT ON" in sql
+        assert "review_status = " not in sql
+        # 聚合输入必须是掩码表达式而非原始列（防止回归为直接 avg(t1_pct)）
+        assert "avg(CASE WHEN" in sql
+        assert "count(CASE WHEN" in sql
+        # 胜负计数同样基于掩码后的标签
+        assert "FILTER (WHERE CASE WHEN" in sql
+
 
 class TestScreenerDaoGetAiAttributionStats:
     """BIZ-04 第二层: get_ai_attribution_stats 聚合 SQL 构建 (mock 读通道)。"""
@@ -1996,6 +2091,25 @@ class TestScreenerDaoGetAiAttributionStats:
         assert "loss_cnt" in sql
         assert "group by" in sql.lower()
         dao._read_db_select.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_expired_snapshot_metrics_masked_after_dedup(self) -> None:
+        """D06-001: AI 归因同样在 DISTINCT ON 之后屏蔽 EXPIRED 快照的旧收益/胜负。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_ai_attribution_stats()
+
+        stmt = dao._read_db_select.call_args[0][0]
+        from sqlalchemy.dialects import postgresql
+
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        sql = str(compiled)
+        assert sql.count("IS DISTINCT FROM") == 8
+        assert REVIEW_STATUS_EXPIRED in compiled.params.values()
+        assert "DISTINCT ON" in sql
+        assert "review_status = " not in sql
+        assert "avg(CASE WHEN" in sql
+        assert "FILTER (WHERE CASE WHEN" in sql
 
 
 class TestScreenerDaoScreeningDerivation:
@@ -2184,6 +2298,9 @@ class TestExpireStalePending:
         # 参数化：OFFSET 绑定参数（值=lookback-1=59，非字符串拼接，R4）
         assert any(v == 59 for v in compiled.params.values())
         assert "OFFSET" in sql
+        # D06-001: 置 EXPIRED 时同步清空不可信收益/胜负标签（EXPIRED 不携带复盘收益）
+        for column in ("t1_pct", "t5_pct", "alpha", "prediction_result", "index_pct"):
+            assert f"{column}=:" in sql
 
     @pytest.mark.asyncio
     async def test_engine_disposed_raises(self):
