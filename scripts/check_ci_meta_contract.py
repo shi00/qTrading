@@ -12,11 +12,15 @@ job ``ci-meta-contract`` 执行（每次 PR / merge_group 稳定运行），覆�
 
 1. **删除必需文件**：验证 job 选中的检查脚本 / 测试文件 / pytest 配置必须真实存在；
 2. **``run`` 被替换为 ``echo``**：必需命令必须由真实执行的 step 承载，纯 ``echo`` / 注释
-   文本、``--collect-only`` / ``--co`` 只收集不执行均不构成执行证据；
-3. **禁用必要 job / step**：验证 job 不得被 job 级 ``if: false`` 关闭，承载必需命令的
-   step 也不得被 step 级 ``if: false`` 等常量假值关闭；聚合 job 必须 ``needs`` 两侧；
+   文本、仅在字符串参数里提及的命令文本、``--collect-only`` / ``--co`` 只收集不执行
+   均不构成执行证据；
+3. **禁用必要 job / step**：验证 job 不得带任何无法证明恒真的 ``if``，承载必需命令的
+   step 也不得被 ``if: false`` / ``0`` 或事件名比较等可跳过条件关闭（GitHub 在 step
+   被跳过时仍把 job 标为 success，等于「未执行却成功」）；聚合 job 必须 ``needs`` 两侧；
 4. **吞失败**：``run`` 中出现 ``|| true`` / ``|| :`` / ``set +e``，或步骤
-   ``continue-on-error: true``，聚合 job 缺少 ``exit 1`` 均拒绝。
+   ``continue-on-error`` 不是常量假值（``true`` / 动态表达式均可能吞失败），聚合 job
+   的 ``success`` 比较、``exit 1``、``fail=1`` 未出现在真实执行命令（``echo`` / 注释
+   不算）中均拒绝。
 
 同时断言本检查自身已接入辅助门必达聚合（job 存在且命令一致、聚合 ``needs`` 含该
 job、非 ``success`` 即失败），避免检查被静默摘除后仍保持绿色。
@@ -63,6 +67,9 @@ COLLECT_ONLY_FLAGS: frozenset[str] = frozenset({"--collect-only", "--co"})
 
 # step 级 `if` 的常量假值（GitHub Actions 表达式：false / 0）。
 DISABLED_STEP_CONDITIONS: frozenset[str] = frozenset({"false", "0"})
+
+# 可证明恒真的 `if`：只有这些形式才允许出现在必需 step / 验证 job 上。
+TRUE_LIKE_CONDITIONS: frozenset[str] = frozenset({"true", "always()"})
 
 # 不改变被调用命令的前置 shell 修饰词。
 SHELL_QUALIFIERS: frozenset[str] = frozenset({"command", "builtin", "exec", "time"})
@@ -213,14 +220,8 @@ def _tokenize(command: str) -> list[str]:
         return command.split()
 
 
-def _is_output_only_command(command: str) -> bool:
-    """echo / printf 只打印参数文本，不执行被打印的命令。
-
-    跳过前置的环境变量赋值与 ``command`` / ``builtin`` / ``exec`` / ``time``，
-    避免 ``FOO=1 echo "python -m pytest ..."``、``CMD="python -m pytest ..."``
-    被误认为执行证据。没有可执行 token（纯赋值）同样不构成执行证据。
-    """
-    tokens = _tokenize(command)
+def _first_executable_index(tokens: list[str]) -> int:
+    """跳过前置环境变量赋值与 shell 修饰词，返回首个可执行 token 的下标。"""
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -229,11 +230,44 @@ def _is_output_only_command(command: str) -> bool:
             index += 1
             continue
         break
+    return index
+
+
+def _is_echo_command(command: str) -> bool:
+    """命令首个可执行 token 是 ``echo`` / ``printf``（只打印文本，不执行参数）。"""
+    tokens = _tokenize(command)
+    index = _first_executable_index(tokens)
+    return index < len(tokens) and tokens[index] in OUTPUT_ONLY_COMMAND_PREFIXES
+
+
+def _is_output_only_command(command: str) -> bool:
+    """echo / printf 只打印参数文本，不执行被打印的命令。
+
+    跳过前置的环境变量赋值与 ``command`` / ``builtin`` / ``exec`` / ``time``，
+    避免 ``FOO=1 echo "python -m pytest ..."``、``CMD="python -m pytest ..."``
+    被误认为执行证据。没有可执行 token（纯赋值）同样不构成执行证据。
+    """
+    tokens = _tokenize(command)
+    index = _first_executable_index(tokens)
     return index >= len(tokens) or tokens[index] in OUTPUT_ONLY_COMMAND_PREFIXES
 
 
 def _executed_commands(run_text: str) -> list[str]:
     return [command for command in _shell_commands(run_text) if not _is_output_only_command(command)]
+
+
+def _job_non_echo_commands(job: dict[str, Any]) -> list[str]:
+    """job 内去掉注释、排除 ``echo`` / ``printf`` 的命令（保留纯变量赋值如 ``fail=1``）。"""
+    commands: list[str] = []
+    steps = job.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            run = step.get("run")
+            if isinstance(run, str):
+                commands.extend(command for command in _shell_commands(run) if not _is_echo_command(command))
+    return commands
 
 
 def _is_noop_run(run_text: str) -> bool:
@@ -242,16 +276,59 @@ def _is_noop_run(run_text: str) -> bool:
     return bool(commands) and all(_is_output_only_command(command) for command in commands)
 
 
-def _disabled_step_condition(step: dict[str, Any]) -> str | None:
-    """step 级 ``if`` 被写成常量假值（``false`` / ``0``）时返回原条件。"""
-    condition = step.get("if")
+def _condition_text(condition: Any) -> str | None:
+    """归一化条件表达式文本（去掉 ``${{ }}`` 包裹与整体引号），非字符串返回 None。"""
     if not isinstance(condition, str):
         return None
     normalized = _normalize(condition)
     if normalized.startswith("${{") and normalized.endswith("}}"):
         normalized = normalized[3:-2].strip()
-    normalized = normalized.strip("\"'").strip().lower()
-    return condition if normalized in DISABLED_STEP_CONDITIONS else None
+    return normalized.strip("\"'").strip()
+
+
+def _step_condition_problem(step: dict[str, Any]) -> str | None:
+    """必需 step 必须无条件执行；常量假值或无法证明恒真的条件都不可接受。
+
+    GitHub 在 step 被 ``if`` 跳过时仍把所在 job 标为 success，因此事件名比较、
+    分支比较、动态表达式等任何可能为假的条件都会造成「必需检查未执行却成功」。
+    """
+    raw = step.get("if")
+    if raw is None:
+        return None
+    text = _condition_text(raw)
+    if text is not None and text.lower() in TRUE_LIKE_CONDITIONS:
+        return None
+    if text is not None and text.lower() in DISABLED_STEP_CONDITIONS:
+        return f"被 `if: {raw}` 关闭"
+    return f"带 `if: {raw}` 条件，无法证明必定执行（step 跳过时 job 仍为 success）"
+
+
+def _continue_on_error_problem(step: dict[str, Any]) -> str | None:
+    """``continue-on-error`` 只接受缺省或常量假值，动态表达式无法证明不吞失败。"""
+    raw = step.get("continue-on-error")
+    if raw is None:
+        return None
+    text = _condition_text(raw)
+    if text is not None and text.lower() == "false":
+        return None
+    return f"设置 continue-on-error: {raw}，失败被吞掉或无法证明不吞"
+
+
+def _has_token_sequence(tokens: list[str], sequence: tuple[str, ...]) -> bool:
+    """判断 ``sequence`` 是否为 ``tokens`` 的连续子序列（按完整 token 边界匹配）。"""
+    size = len(sequence)
+    if size == 0:
+        return False
+    return any(tuple(tokens[index : index + size]) == sequence for index in range(len(tokens) - size + 1))
+
+
+def _command_contains_tokens(command: str, needle_tokens: tuple[str, ...]) -> bool:
+    """必需命令必须以完整 token 出现在真实命令中。
+
+    用 token 连续子序列而非归一化子串，避免 ``python -c "print('python -m pytest ...')"``
+    这类「命令文本只作为字符串参数」的伪造被当成执行证据。
+    """
+    return _has_token_sequence(_tokenize(command), needle_tokens)
 
 
 def _collect_only_flags(command: str) -> set[str]:
@@ -261,6 +338,7 @@ def _collect_only_flags(command: str) -> set[str]:
 def _check_required_step(errors: list[str], label: str, job_id: str, job: dict[str, Any], command: str) -> None:
     """必需命令必须由该 job 内真实执行（未被关闭、非只收集）的 step 承载。"""
     needle = _normalize(command)
+    needle_tokens = tuple(_tokenize(command))
     candidates: list[tuple[int, dict[str, Any], list[str]]] = []
     steps = job.get("steps")
     if isinstance(steps, list):
@@ -270,19 +348,21 @@ def _check_required_step(errors: list[str], label: str, job_id: str, job: dict[s
             run = step.get("run")
             if not isinstance(run, str):
                 continue
-            matched = [segment for segment in _executed_commands(run) if needle in _normalize(segment)]
+            matched = [
+                segment for segment in _executed_commands(run) if _command_contains_tokens(segment, needle_tokens)
+            ]
             if matched:
                 candidates.append((index, step, matched))
 
     if not candidates:
-        errors.append(f"{label}: job `{job_id}` 未选择必需命令 `{needle}`（echo/注释不构成执行证据）")
+        errors.append(f"{label}: job `{job_id}` 未选择必需命令 `{needle}`（echo/注释/字符串参数不构成执行证据）")
         return
 
     problems: list[str] = []
     for index, step, matched in candidates:
-        condition = _disabled_step_condition(step)
-        if condition is not None:
-            problems.append(f"step[{index}] 被 `if: {condition}` 关闭")
+        condition_problem = _step_condition_problem(step)
+        if condition_problem is not None:
+            problems.append(f"step[{index}] {condition_problem}")
             continue
         collect_flags = {flag for segment in matched for flag in _collect_only_flags(segment)}
         if "pytest" in needle and collect_flags:
@@ -294,8 +374,13 @@ def _check_required_step(errors: list[str], label: str, job_id: str, job: dict[s
 
 def _check_job_not_disabled(errors: list[str], label: str, job_id: str, job: dict[str, Any]) -> None:
     condition = job.get("if")
-    if isinstance(condition, str) and "false" in condition.lower():
-        errors.append(f"{label}: 验证 job `{job_id}` 被条件关闭（if: {condition}），结果将不再代表真实执行")
+    if condition is not None:
+        text = _condition_text(condition)
+        if text is None or text.lower() not in TRUE_LIKE_CONDITIONS:
+            if text is not None and text.lower() in DISABLED_STEP_CONDITIONS:
+                errors.append(f"{label}: 验证 job `{job_id}` 被条件关闭（if: {condition}），结果将不再代表真实执行")
+            else:
+                errors.append(f"{label}: 验证 job `{job_id}` 带条件 `if: {condition}`，无法证明必定执行")
     if not _job_runs(job):
         errors.append(f"{label}: 验证 job `{job_id}` 缺少可执行的 run 步骤（被禁用或清空）")
 
@@ -306,9 +391,9 @@ def _check_swallow(errors: list[str], label: str, job_id: str, job: dict[str, An
         for index, step in enumerate(steps):
             if not isinstance(step, dict):
                 continue
-            continue_on_error = step.get("continue-on-error")
-            if isinstance(continue_on_error, str) and continue_on_error.strip().lower() == "true":
-                errors.append(f"{label}: job `{job_id}` step[{index}] 设置 continue-on-error: true，失败被吞掉")
+            continue_on_error = _continue_on_error_problem(step)
+            if continue_on_error is not None:
+                errors.append(f"{label}: job `{job_id}` step[{index}] {continue_on_error}")
             run = step.get("run")
             if isinstance(run, str):
                 for marker in SWALLOW_MARKERS:
@@ -377,12 +462,16 @@ def _check_docs_workflow(errors: list[str], root: Path, data: dict[str, Any]) ->
     if not isinstance(aggregate_if, str) or "always()" not in aggregate_if:
         errors.append(f"{DOCS_CI_NAME}: 聚合 job 必须 `if: always()`，否则上游失败会以 skipped 伪装通过")
 
-    aggregate_run = _normalize("\n".join(_job_runs(aggregate)))
-    if '"success"' not in aggregate_run and "'success'" not in aggregate_run:
-        errors.append(f"{DOCS_CI_NAME}: 聚合 job 未要求各验证 job 结果为 success")
-    if "exit 1" not in aggregate_run:
+    aggregate_tokens = [_tokenize(command) for command in _job_non_echo_commands(aggregate)]
+    if not any(
+        "success" in tokens and any(operator in tokens for operator in ("=", "==", "!=")) for tokens in aggregate_tokens
+    ):
+        errors.append(
+            f"{DOCS_CI_NAME}: 聚合 job 未要求各验证 job 结果为 success（比较必须出现在真实执行命令中，echo/注释不算）"
+        )
+    if not any(_has_token_sequence(tokens, ("exit", "1")) for tokens in aggregate_tokens):
         errors.append(f"{DOCS_CI_NAME}: 聚合 job 缺少 `exit 1`，失败不会传播为门禁失败")
-    if "fail=1" not in aggregate_run:
+    if not any("fail=1" in tokens for tokens in aggregate_tokens):
         errors.append(f"{DOCS_CI_NAME}: 聚合 job 缺少 `fail=1` 失败累计")
     _check_swallow(errors, DOCS_CI_NAME, DOCS_AGGREGATE_JOB, aggregate)
 
@@ -439,10 +528,10 @@ def _check_aux_gate_wiring(errors: list[str], data: dict[str, Any]) -> None:
             f"{AUX_GATE_NAME}: 聚合 job 未以 `META_RESULT: ${{{{ needs.{META_JOB_ID}.result }}}}` 读取元检查结果"
         )
 
-    aggregate_run = _normalize("\n".join(_job_runs(aggregate)))
-    if '"$META_RESULT" != "success"' not in aggregate_run:
+    aggregate_tokens = [_tokenize(command) for command in _job_non_echo_commands(aggregate)]
+    if not any(_has_token_sequence(tokens, ("$META_RESULT", "!=", "success")) for tokens in aggregate_tokens):
         errors.append(f"{AUX_GATE_NAME}: 聚合 job 未把 `$META_RESULT` 非 success 判为失败")
-    if "exit 1" not in aggregate_run:
+    if not any(_has_token_sequence(tokens, ("exit", "1")) for tokens in aggregate_tokens):
         errors.append(f"{AUX_GATE_NAME}: 聚合 job 缺少 `exit 1`，元检查失败不会阻断门禁")
 
 
