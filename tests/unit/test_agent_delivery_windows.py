@@ -231,6 +231,25 @@ class TestStagingSafety:
             _file_identity(os.stat_result((0, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
         assert exc.value.code == "delivery_file_identity_unavailable"
 
+    def test_zero_identity_volume_is_refused_at_stage(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """stage 层也必须拒绝 0 身份卷，且不残留暂存文件。"""
+
+        real_stat = os.stat
+
+        def fake_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            result = real_stat(path, *args, **kwargs)  # pyright: ignore[reportCallIssue]
+            if str(path).endswith(".staged"):
+                values = list(result)
+                values[1] = 0
+                return os.stat_result(values)
+            return result
+
+        monkeypatch.setattr("services.agent_service.delivery.os.stat", fake_stat)
+        with pytest.raises(DeliveryFileError) as exc:
+            _store().stage(target=_target(tmp_path / "zero.md"), content=_CONTENT, expected_digest=_DIGEST)
+        assert exc.value.code == "delivery_file_identity_unavailable"
+        assert list(tmp_path.iterdir()) == []
+
     def test_readback_mismatch_removes_staging(self, tmp_path: Path) -> None:
         target_path = tmp_path / "readback.md"
         with pytest.raises(DeliveryFileError) as exc:

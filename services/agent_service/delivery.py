@@ -166,6 +166,8 @@ class WindowsManagedFileStore:
         target_path = Path(validate_delivery_target_path(target.target_path))
         if not target_path.parent.is_dir():
             raise DeliveryFileError("delivery_target_parent_missing", "target parent directory does not exist")
+        parent_stat = os.stat(target_path.parent)
+        parent_id = _file_identity(parent_stat)
         self._assert_target_matches(_snapshot(target_path), target, phase="stage")
         prefix = _stage_prefix(target_path.name, name_hint)
         handle, raw_path = tempfile.mkstemp(
@@ -192,7 +194,7 @@ class WindowsManagedFileStore:
                 volume_serial=staged_stat.st_dev,
                 file_id=_file_identity(staged_stat),
                 parent_volume_serial=staged_stat.st_dev,
-                parent_file_id=os.stat(target_path.parent).st_ino,
+                parent_file_id=parent_id,
             )
         except BaseException:
             staged_path.unlink(missing_ok=True)
@@ -208,6 +210,10 @@ class WindowsManagedFileStore:
             raise DeliveryFileError("delivery_stage_changed", "staged content changed before publish")
         before = _snapshot(target_path)
         self._assert_target_matches(before, target, phase="publish")
+        if before.parent_file_id == 0:
+            raise DeliveryFileError(
+                "delivery_file_identity_unavailable", "target parent volume does not expose a stable identity"
+            )
         if before.parent_volume_serial != staged.parent_volume_serial or before.parent_file_id != staged.parent_file_id:
             raise DeliveryFileError("delivery_target_parent_changed", "target parent changed since confirmation")
         if staged.path.parent != target_path.parent:
