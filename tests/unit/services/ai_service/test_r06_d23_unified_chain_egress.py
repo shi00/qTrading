@@ -10,10 +10,12 @@
 经 ``ScenarioExecutor → _LiteLLMChatAdapter → LiteLLMClient.invoke_single_connection``
 出站，本文件验证该唯一云出口的既有安全机制接线：
 
-1. SEC-01（R06-D3）：``is_egress_acknowledged()`` 未确认 → 抛
-   ``AIPolicyNotAcknowledgedError``（与旧链门控同异常同 i18n key），``acompletion``
-   零调用（零出站）、``EgressAudit.record`` 零调用（未外发即无外发记录）；
-2. SEC-01：已确认 → 正常 dispatch，不抛策略异常；
+1. SEC-01（R06-D3 / D13-002）：外发确认门控绑定本次尝试许可——
+   ``attempt_context.egress_permit`` 缺失 / 跨 attempt / 目标或 provider 变更 /
+   scope 过期 / 许可有效期过期 / 用户未确认 → 抛 ``AIPolicyNotAcknowledgedError``
+   （与旧链门控同异常同 i18n key），``acompletion`` 零调用（零出站）、
+   ``EgressAudit.record`` 零调用（未外发即无外发记录）；
+2. SEC-01：许可有效且 provider 已确认 → 正常 dispatch，不抛策略异常；
 3. SEC-03（R06-D2）：dispatch 前接既有 ``EgressAudit`` 账本（真实单例落盘断言，
    证明接入的是审计状态栏消费的同一 JSONL 事实源，非平行账本）——destination 用
    真实发送的 litellm_model（含 provider 前缀），category 用场景 id；
@@ -31,14 +33,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from core.errors import AIContentRefusedError, AIPolicyNotAcknowledgedError
-from core.model_management_types import InferenceRequest, ResolvedConnection
+from core.model_management_types import AttemptContext, InferenceRequest, ResolvedConnection
 from services.ai_service.litellm_client import LiteLLMClient
+from utils.egress_ack import bind_egress_ack_permit
 from utils.egress_audit import EgressAudit
 
 pytestmark = pytest.mark.unit
@@ -52,6 +57,15 @@ def _tmp_egress_path(tmp_path):
     EgressAudit._reset_singleton()
     EgressAudit._configure_for_tests(str(tmp_path / "egress_audit.jsonl"))
     yield tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _acknowledged_provider(monkeypatch):
+    """默认用户已确认（SEC-01 二次确认）：仅隔离配置读取，不绕过许可绑定校验。"""
+    monkeypatch.setattr(
+        "utils.egress_ack.ConfigHandler.is_ai_external_acknowledged",
+        lambda provider=None, **kwargs: True,
+    )
 
 
 def _read_records(path) -> list[dict]:
@@ -97,16 +111,40 @@ def _ok_response() -> SimpleNamespace:
     )
 
 
+def _attempt_context(
+    request: InferenceRequest | None = None, connection: ResolvedConnection | None = None
+) -> AttemptContext:
+    """构造绑定本次尝试 / 连接 / 目标 / 有效期的外发确认许可（D13-002）。"""
+    request = request or _request()
+    connection = connection or _connection()
+    context = AttemptContext(
+        owner_session_id="sess-r06",
+        owner_epoch=1,
+        invocation_id=request.invocation_id,
+        attempt_id=f"att-{uuid.uuid4().hex[:8]}",
+    )
+    permit = bind_egress_ack_permit(
+        attempt_context=context,
+        resolved_connection=connection,
+        now=asyncio.get_running_loop().time(),
+        deadline=request.deadline,
+    )
+    return replace(context, egress_permit=permit)
+
+
 async def _invoke(request: InferenceRequest | None = None):
     """统一调用入口：打桩 litellm 加载与 acompletion（零真实网络），真实 EgressAudit。"""
     request = request or _request()
+    connection = _connection()
     client = LiteLLMClient(MagicMock())
     acompletion = AsyncMock(return_value=_ok_response())
     with (
         patch("services.ai_service._ensure_litellm_loaded", return_value=True),
         patch("services.ai_service.acompletion", acompletion),
     ):
-        response = await client.invoke_single_connection(request, _connection(), request.deadline, MagicMock())
+        response = await client.invoke_single_connection(
+            request, connection, request.deadline, _attempt_context(request, connection)
+        )
     return response, acompletion
 
 
@@ -118,34 +156,36 @@ async def _invoke_with(
 ):
     """按给定 acompletion 行为执行单连接调用（知情确认已通过，零真实网络）。"""
     request = request or _request()
+    connection = connection or _connection()
     client = LiteLLMClient(MagicMock())
     with (
-        patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
         patch("services.ai_service._ensure_litellm_loaded", return_value=True),
         patch("services.ai_service.acompletion", acompletion),
     ):
         return await client.invoke_single_connection(
-            request, connection or _connection(), request.deadline, MagicMock()
+            request, connection, request.deadline, _attempt_context(request, connection)
         )
 
 
 class TestSec01EgressGate:
-    """SEC-01（R06-D3）：统一链出口知情确认门控。"""
+    """SEC-01（R06-D3 / D13-002）：统一链出口外发确认门控绑定本次尝试许可。"""
 
     @pytest.mark.asyncio
     async def test_unacknowledged_refuses_without_outbound(self, _tmp_egress_path) -> None:
-        """未确认 → 抛策略异常，acompletion 零调用（零出站）、EgressAudit 零记录。"""
+        """用户未确认 → 抛策略异常，acompletion 零调用（零出站）、EgressAudit 零记录。"""
         acompletion = AsyncMock()
         record = AsyncMock()
+        request = _request()
+        connection = _connection()
+        attempt_context = _attempt_context(request, connection)
         with (
-            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=False),
+            patch("utils.egress_ack.ConfigHandler.is_ai_external_acknowledged", return_value=False),
             patch("services.ai_service.acompletion", acompletion),
             patch("utils.egress_audit.EgressAudit.record", record),
         ):
-            request = _request()
             with pytest.raises(AIPolicyNotAcknowledgedError) as excinfo:
                 await LiteLLMClient(MagicMock()).invoke_single_connection(
-                    request, _connection(), request.deadline, MagicMock()
+                    request, connection, request.deadline, attempt_context
                 )
 
         # 精确异常属性断言（非弱断言）：类型 + i18n key 与旧链门控同源
@@ -157,11 +197,75 @@ class TestSec01EgressGate:
 
     @pytest.mark.asyncio
     async def test_acknowledged_dispatches(self, _tmp_egress_path) -> None:
-        """已确认 → 正常 dispatch，不抛策略异常。"""
-        with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True):
-            response, _ = await _invoke()
+        """许可有效且 provider 已确认 → 正常 dispatch，不抛策略异常。"""
+        response, acompletion = await _invoke()
 
         assert response.content == "ok"
+        acompletion.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_permit_fails_closed(self, _tmp_egress_path) -> None:
+        """未绑定许可（缺上下文）→ 零出站拒绝，禁止回退到进程级全局确认。"""
+        request = _request()
+        connection = _connection()
+        unbound = AttemptContext(
+            owner_session_id="sess-r06",
+            owner_epoch=1,
+            invocation_id=request.invocation_id,
+            attempt_id="att-unbound",
+        )
+        acompletion = AsyncMock()
+        with (
+            patch("services.ai_service.acompletion", acompletion),
+            pytest.raises(AIPolicyNotAcknowledgedError),
+        ):
+            await LiteLLMClient(MagicMock()).invoke_single_connection(request, connection, request.deadline, unbound)
+        acompletion.assert_not_awaited()
+        assert _read_records(_tmp_egress_path) == []
+
+    @pytest.mark.asyncio
+    async def test_cross_attempt_permit_rejected(self, _tmp_egress_path) -> None:
+        """跨 attempt 复用许可 → 拒绝（attempt 身份不匹配，禁止串味）。"""
+        request = _request()
+        connection = _connection()
+        other_attempt = _attempt_context(request, connection)
+        current = replace(other_attempt, attempt_id="att-other-attempt")
+        acompletion = AsyncMock()
+        with (
+            patch("services.ai_service.acompletion", acompletion),
+            pytest.raises(AIPolicyNotAcknowledgedError),
+        ):
+            await LiteLLMClient(MagicMock()).invoke_single_connection(request, connection, request.deadline, current)
+        acompletion.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_provider_or_target_mismatch_rejected(self, _tmp_egress_path) -> None:
+        """许可对象（provider）/ 目标（api_base）与本次实际出站不一致 → 拒绝。"""
+        request = _request()
+        connection = _connection()
+        permit_ctx = _attempt_context(request, connection)
+        acompletion = AsyncMock()
+
+        # provider 变更：许可绑定 openai，实际连接 deepseek
+        other_provider = _connection(provider="deepseek")
+        with (
+            patch("services.ai_service.acompletion", acompletion),
+            pytest.raises(AIPolicyNotAcknowledgedError),
+        ):
+            await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, other_provider, request.deadline, permit_ctx
+            )
+
+        # 目标变更：许可绑定 api.test.com，实际连接 api.other.com
+        other_target = _connection(api_base="https://api.other.com")
+        with (
+            patch("services.ai_service.acompletion", acompletion),
+            pytest.raises(AIPolicyNotAcknowledgedError),
+        ):
+            await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, other_target, request.deadline, permit_ctx
+            )
+        acompletion.assert_not_awaited()
 
 
 class TestSec03EgressAudit:
@@ -170,8 +274,7 @@ class TestSec03EgressAudit:
     @pytest.mark.asyncio
     async def test_dispatch_records_to_shared_audit_ledger(self, _tmp_egress_path) -> None:
         """dispatch 后既有账本恰一条记录：destination=真实发送 model、category=场景 id。"""
-        with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True):
-            await _invoke()
+        await _invoke()
 
         records = _read_records(_tmp_egress_path)
         assert len(records) == 1
@@ -188,10 +291,7 @@ class TestSec03EgressAudit:
     @pytest.mark.asyncio
     async def test_audit_failure_degrades_dispatch(self, _tmp_egress_path) -> None:
         """审计 record 抛普通异常 → 降级不阻断，dispatch 仍成功返回。"""
-        with (
-            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
-            patch("utils.egress_audit.EgressAudit.record", AsyncMock(side_effect=RuntimeError("boom"))),
-        ):
+        with patch("utils.egress_audit.EgressAudit.record", AsyncMock(side_effect=RuntimeError("boom"))):
             response, _ = await _invoke()
 
         assert response.content == "ok"
@@ -201,7 +301,6 @@ class TestSec03EgressAudit:
     async def test_audit_cancelled_error_propagates(self, _tmp_egress_path) -> None:
         """审计 record 抛 CancelledError 必须传播（R2：不吞没、优雅停机）。"""
         with (
-            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
             patch(
                 "utils.egress_audit.EgressAudit.record",
                 AsyncMock(side_effect=asyncio.CancelledError()),
@@ -302,17 +401,21 @@ class TestEgressOutcomeWriteback:
     async def test_retry_attempts_each_record_once(self, _tmp_egress_path) -> None:
         """Executor 重试语义：每次尝试恰一条结果记录（先 failed 后 sent，无多余意图记录）。"""
         request = _request()
+        connection = _connection()
         client = LiteLLMClient(MagicMock())
         acompletion = AsyncMock(side_effect=[TimeoutError("Request timed out"), _ok_response()])
         with (
-            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
             patch("services.ai_service.acompletion", acompletion),
         ):
             with pytest.raises(TimeoutError) as excinfo:
-                await client.invoke_single_connection(request, _connection(), request.deadline, MagicMock())
+                await client.invoke_single_connection(
+                    request, connection, request.deadline, _attempt_context(request, connection)
+                )
             assert excinfo.type is TimeoutError
-            await client.invoke_single_connection(request, _connection(), request.deadline, MagicMock())
+            await client.invoke_single_connection(
+                request, connection, request.deadline, _attempt_context(request, connection)
+            )
 
         assert acompletion.await_count == 2
         records = _read_records(_tmp_egress_path)
@@ -418,14 +521,14 @@ class TestF27ContentRefusalExtraction:
     async def test_message_refusal_raises_terminal_refusal(self, _tmp_egress_path) -> None:
         """message.refusal 非空白 → AIContentRefusedError（i18n key 与既有错误文案同源）。"""
         request = _request()
+        connection = _connection()
         with (
-            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
             patch("services.ai_service.acompletion", AsyncMock(return_value=self._refusal_response())),
         ):
             with pytest.raises(AIContentRefusedError) as excinfo:
                 await LiteLLMClient(MagicMock()).invoke_single_connection(
-                    request, _connection(), request.deadline, MagicMock()
+                    request, connection, request.deadline, _attempt_context(request, connection)
                 )
         assert excinfo.type is AIContentRefusedError
         assert excinfo.value.message.key == "llm_err_content_policy"
@@ -434,15 +537,15 @@ class TestF27ContentRefusalExtraction:
     async def test_content_filter_finish_reason_raises_terminal_refusal(self, _tmp_egress_path) -> None:
         """finish_reason == "content_filter"（refusal 字段缺失的 provider 形态）→ 同样终止。"""
         request = _request()
+        connection = _connection()
         response = self._refusal_response(refusal=None, finish_reason="content_filter")
         with (
-            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
             patch("services.ai_service.acompletion", AsyncMock(return_value=response)),
         ):
             with pytest.raises(AIContentRefusedError) as excinfo:
                 await LiteLLMClient(MagicMock()).invoke_single_connection(
-                    request, _connection(), request.deadline, MagicMock()
+                    request, connection, request.deadline, _attempt_context(request, connection)
                 )
         assert excinfo.value.message.key == "llm_err_content_policy"
 
@@ -450,21 +553,20 @@ class TestF27ContentRefusalExtraction:
     async def test_blank_refusal_does_not_raise(self, _tmp_egress_path) -> None:
         """空白 refusal（非真实拒绝）→ 不误判，走正常 content 提取路径。"""
         request = _request()
+        connection = _connection()
         response = self._refusal_response(refusal="   ", finish_reason="stop")
         response.choices[0].message.content = "ok"
         with (
-            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
             patch("services.ai_service.acompletion", AsyncMock(return_value=response)),
         ):
             result = await LiteLLMClient(MagicMock()).invoke_single_connection(
-                request, _connection(), request.deadline, MagicMock()
+                request, connection, request.deadline, _attempt_context(request, connection)
             )
         assert result.content == "ok"
 
     @pytest.mark.asyncio
     async def test_response_without_refusal_field_regression(self, _tmp_egress_path) -> None:
         """回归：无 refusal 属性的历史响应形态不受影响（getattr 缺省 None 不触发）。"""
-        with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True):
-            response, _ = await _invoke()
+        response, _ = await _invoke()
         assert response.content == "ok"
