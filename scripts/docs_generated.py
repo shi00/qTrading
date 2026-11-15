@@ -1009,13 +1009,14 @@ def _docs_index_candidates(root: Path) -> list[Path]:
     """docs/README 文件级目录索引的作者源候选集：git 交付候选的 docs/** 治理文件。
 
     git 索引（含已 staged 新增）与显式申报的暂存前交付候选求并后为候选来源
-    （gitignored/未申报的未跟踪产物天然排除，见 ``git_delivery_files``）；git 不可用
-    （临时目录 / 归档环境）降级文件系统发现。注意：作者源为 docs 树本身，渲染读取
+    （gitignored/未申报的未跟踪产物天然排除，见 ``git_delivery_files``）；仅当 git
+    查询失败/不可用（返回 ``None``，如临时目录 / 归档环境）降级文件系统发现——成功
+    空集保持空，不得因空列表为假而回退扫描。注意：作者源为 docs 树本身，渲染读取
     窗口不做逐文件独占保护（开销不成比例），并发编辑漂移由更新后 all 检查 fail-closed 检出。
     """
     docs_root = root / "docs"
     tracked = git_delivery_files(root, "docs")
-    if tracked:
+    if tracked is not None:
         candidates = [
             root / rel for rel in tracked if (root / rel).suffix in _INDEX_COVERED_SUFFIXES and (root / rel).is_file()
         ]
