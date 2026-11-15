@@ -6787,18 +6787,9 @@ class AgentDao(BaseDao):
                         "source_message_version": int(source.subject_revision),
                         "causal_cutoff_message_id": causal_head_ref,
                     }
-                duplicate = (
-                    await conn.execute(
-                        sa.select(AgentSession.session_id).where(
-                            AgentSession.user_scope == user_scope,
-                            AgentSession.session_id == command.session_id,
-                        )
-                    )
-                ).first()
-                if duplicate is not None:
-                    raise AgentServiceError(
-                        AgentErrorCode.INPUT_INVALID, "session already exists in user scope", identity
-                    )
+                # 不做「先查目标是否已存在」的预检查：那会在命令键查重与预检查
+                # 之间留出并发窗口（同键命令刚提交 → 后到者被误判为重复目标）。
+                # 直接插入，由唯一约束仲裁，冲突后先复查命令键（重放）再判占用。
                 try:
                     async with conn.begin_nested():
                         await conn.execute(

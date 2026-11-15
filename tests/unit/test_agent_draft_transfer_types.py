@@ -22,6 +22,7 @@ from core.agent_types import (
     DraftTransferReceipt,
     DraftTransferSourceKind,
     Mode,
+    Purpose,
     SendableOwner,
     decode_draft_transfer_command,
     decode_draft_transfer_receipt,
@@ -398,6 +399,18 @@ class TestEmptyDraftSemantics:
     def test_empty_text_but_unsent_selection_is_not_empty(self) -> None:
         # 模型/对象选择仍在：正文空不构成空位。
         assert is_empty_draft_payload(_payload(text="", mode=Mode.EXECUTE)) is False
+        assert (
+            is_empty_draft_payload(
+                _payload(
+                    text="",
+                    mode=Mode.EXECUTE,
+                    model_selection=None,
+                    object_context=None,
+                    purpose=Purpose.CONCEPT,
+                )
+            )
+            is False
+        )
 
     def test_user_touched_default_is_not_empty(self) -> None:
         payload = _payload(
