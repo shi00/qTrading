@@ -11,8 +11,10 @@ workflow 时主分类器判 ``code=false``（``scripts/classify_changed_paths.py
 job ``ci-meta-contract`` 执行（每次 PR / merge_group 稳定运行），覆盖四类负例：
 
 1. **删除必需文件**：验证 job 选中的检查脚本 / 测试文件 / pytest 配置必须真实存在；
-2. **``run`` 被替换为 ``echo``**：验证 job 必须包含真实可执行的检查命令，纯 echo 步骤拒绝；
-3. **禁用必要 job**：验证 job 不得被 ``if: false`` 关闭，聚合 job 必须 ``needs`` 两侧；
+2. **``run`` 被替换为 ``echo``**：必需命令必须由真实执行的 step 承载，纯 ``echo`` / 注释
+   文本、``--collect-only`` / ``--co`` 只收集不执行均不构成执行证据；
+3. **禁用必要 job / step**：验证 job 不得被 job 级 ``if: false`` 关闭，承载必需命令的
+   step 也不得被 step 级 ``if: false`` 等常量假值关闭；聚合 job 必须 ``needs`` 两侧；
 4. **吞失败**：``run`` 中出现 ``|| true`` / ``|| :`` / ``set +e``，或步骤
    ``continue-on-error: true``，聚合 job 缺少 ``exit 1`` 均拒绝。
 
@@ -29,6 +31,7 @@ job、非 ``success`` 即失败），避免检查被静默摘除后仍保持绿�
 from __future__ import annotations
 
 import argparse
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +54,18 @@ AUX_AGGREGATE_JOB = "ci-aux-gate"
 
 # 吞失败形态（含前后空白容忍的简单文本匹配）。
 SWALLOW_MARKERS: tuple[str, ...] = ("|| true", "|| :", "set +e")
+
+# 只把参数当文本输出、不执行参数内容的 shell 前缀（不能充当执行证据）。
+OUTPUT_ONLY_COMMAND_PREFIXES: tuple[str, ...] = ("echo", "printf")
+
+# pytest 的只收集不执行开关。
+COLLECT_ONLY_FLAGS: frozenset[str] = frozenset({"--collect-only", "--co"})
+
+# step 级 `if` 的常量假值（GitHub Actions 表达式：false / 0）。
+DISABLED_STEP_CONDITIONS: frozenset[str] = frozenset({"false", "0"})
+
+# 不改变被调用命令的前置 shell 修饰词。
+SHELL_QUALIFIERS: frozenset[str] = frozenset({"command", "builtin", "exec", "time"})
 
 
 @dataclass(frozen=True)
@@ -117,10 +132,164 @@ def _job_runs(job: dict[str, Any]) -> list[str]:
     return runs
 
 
+def _strip_shell_comment(line: str) -> str:
+    """去掉行内 shell 注释（引号内、``${var#pattern}`` 等词内的 ``#`` 不算注释）。"""
+    quote: str | None = None
+    for index, char in enumerate(line):
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&("):
+            return line[:index]
+    return line
+
+
+def _split_shell_segments(line: str) -> list[str]:
+    """按引号外的 ``&&`` / ``||`` / ``;`` 拆分命令，引号内的分隔符视为普通文本。"""
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+        elif char in ("'", '"'):
+            quote = char
+            current.append(char)
+            index += 1
+        elif line.startswith(("&&", "||"), index):
+            segments.append("".join(current))
+            current = []
+            index += 2
+        elif char == ";":
+            segments.append("".join(current))
+            current = []
+            index += 1
+        else:
+            current.append(char)
+            index += 1
+    segments.append("".join(current))
+    return [segment.strip() for segment in segments if segment.strip()]
+
+
+def _shell_commands(run_text: str) -> list[str]:
+    """按 shell 行与分隔符拆出命令，合并续行并丢弃注释。
+
+    逐条返回（不跨命令拼接），使必需命令只能来自单条真实命令，而不是
+    ``python -m pytest; tests/docs`` 这类被分隔符切碎的文本；引号内的命令文本
+    （如 ``echo "python -m pytest ..."``）也不会被拆成「可执行命令」。
+    """
+    lines: list[str] = []
+    pending = ""
+    for raw in run_text.splitlines():
+        line = _strip_shell_comment(raw).strip()
+        if not line:
+            continue
+        if line.endswith("\\"):
+            pending = f"{pending} {line[:-1]}".strip()
+            continue
+        lines.append(f"{pending} {line}".strip() if pending else line)
+        pending = ""
+    if pending:
+        lines.append(pending)
+
+    commands: list[str] = []
+    for line in lines:
+        commands.extend(_split_shell_segments(line))
+    return commands
+
+
+def _tokenize(command: str) -> list[str]:
+    """按 shell 引号规则分词；引号不配对时退化为空白分词。"""
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _is_output_only_command(command: str) -> bool:
+    """echo / printf 只打印参数文本，不执行被打印的命令。
+
+    跳过前置的环境变量赋值与 ``command`` / ``builtin`` / ``exec`` / ``time``，
+    避免 ``FOO=1 echo "python -m pytest ..."``、``CMD="python -m pytest ..."``
+    被误认为执行证据。没有可执行 token（纯赋值）同样不构成执行证据。
+    """
+    tokens = _tokenize(command)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        is_assignment = "=" in token and token.split("=", 1)[0].isidentifier()
+        if token in SHELL_QUALIFIERS or is_assignment:
+            index += 1
+            continue
+        break
+    return index >= len(tokens) or tokens[index] in OUTPUT_ONLY_COMMAND_PREFIXES
+
+
+def _executed_commands(run_text: str) -> list[str]:
+    return [command for command in _shell_commands(run_text) if not _is_output_only_command(command)]
+
+
 def _is_noop_run(run_text: str) -> bool:
-    """run 块去掉空行/注释后全部是 echo（或被替换为占位 echo）即视为空操作。"""
-    commands = [line.strip() for line in run_text.splitlines() if line.strip() and not line.strip().startswith("#")]
-    return bool(commands) and all(cmd == "echo" or cmd.startswith("echo ") for cmd in commands)
+    """run 块去掉空行/注释后全部是 echo/printf（或被替换为占位 echo）即视为空操作。"""
+    commands = _shell_commands(run_text)
+    return bool(commands) and all(_is_output_only_command(command) for command in commands)
+
+
+def _disabled_step_condition(step: dict[str, Any]) -> str | None:
+    """step 级 ``if`` 被写成常量假值（``false`` / ``0``）时返回原条件。"""
+    condition = step.get("if")
+    if not isinstance(condition, str):
+        return None
+    normalized = _normalize(condition)
+    if normalized.startswith("${{") and normalized.endswith("}}"):
+        normalized = normalized[3:-2].strip()
+    normalized = normalized.strip("\"'").strip().lower()
+    return condition if normalized in DISABLED_STEP_CONDITIONS else None
+
+
+def _collect_only_flags(command: str) -> set[str]:
+    return {token for token in _tokenize(command) if token in COLLECT_ONLY_FLAGS}
+
+
+def _check_required_step(errors: list[str], label: str, job_id: str, job: dict[str, Any], command: str) -> None:
+    """必需命令必须由该 job 内真实执行（未被关闭、非只收集）的 step 承载。"""
+    needle = _normalize(command)
+    candidates: list[tuple[int, dict[str, Any], list[str]]] = []
+    steps = job.get("steps")
+    if isinstance(steps, list):
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            run = step.get("run")
+            if not isinstance(run, str):
+                continue
+            matched = [segment for segment in _executed_commands(run) if needle in _normalize(segment)]
+            if matched:
+                candidates.append((index, step, matched))
+
+    if not candidates:
+        errors.append(f"{label}: job `{job_id}` 未选择必需命令 `{needle}`（echo/注释不构成执行证据）")
+        return
+
+    problems: list[str] = []
+    for index, step, matched in candidates:
+        condition = _disabled_step_condition(step)
+        if condition is not None:
+            problems.append(f"step[{index}] 被 `if: {condition}` 关闭")
+            continue
+        collect_flags = {flag for segment in matched for flag in _collect_only_flags(segment)}
+        if "pytest" in needle and collect_flags:
+            problems.append(f"step[{index}] 使用 {'/'.join(sorted(collect_flags))} 只收集不执行")
+            continue
+        return
+    errors.append(f"{label}: job `{job_id}` 的必需命令 `{needle}` 缺少真实执行证据：{'；'.join(problems)}")
 
 
 def _check_job_not_disabled(errors: list[str], label: str, job_id: str, job: dict[str, Any]) -> None:
@@ -160,10 +329,8 @@ def _check_docs_job(errors: list[str], root: Path, jobs: dict[str, Any], contrac
     if runs and all(_is_noop_run(run) for run in runs):
         errors.append(f"{DOCS_CI_NAME}: job `{contract.job_id}` 的 run 全部为空操作（如被替换为 echo），未执行真实检查")
 
-    combined = _normalize("\n".join(runs))
     for command in contract.required_commands:
-        if _normalize(command) not in combined:
-            errors.append(f"{DOCS_CI_NAME}: job `{contract.job_id}` 未选择必需命令 `{_normalize(command)}`")
+        _check_required_step(errors, DOCS_CI_NAME, contract.job_id, job, command)
 
     for rel in contract.required_files:
         if not (root / rel).is_file():
@@ -253,9 +420,7 @@ def _check_aux_gate_wiring(errors: list[str], data: dict[str, Any]) -> None:
 
     _check_job_not_disabled(errors, AUX_GATE_NAME, META_JOB_ID, meta_job)
     _check_swallow(errors, AUX_GATE_NAME, META_JOB_ID, meta_job)
-    meta_runs = _normalize("\n".join(_job_runs(meta_job)))
-    if f"python {META_SCRIPT}" not in meta_runs:
-        errors.append(f"{AUX_GATE_NAME}: job `{META_JOB_ID}` 未执行 `python {META_SCRIPT}`")
+    _check_required_step(errors, AUX_GATE_NAME, META_JOB_ID, meta_job, f"python {META_SCRIPT}")
     if _job_runs(meta_job) and all(_is_noop_run(run) for run in _job_runs(meta_job)):
         errors.append(f"{AUX_GATE_NAME}: job `{META_JOB_ID}` 的 run 为空操作，元检查未真实执行")
 
