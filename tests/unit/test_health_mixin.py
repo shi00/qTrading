@@ -11,7 +11,7 @@ import pandas as pd
 
 from data.mixins.health_mixin import HealthCheckMixin, _classify_table_tier, _compute_tier
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.quality_gate import QualityGateError
+from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
 from data.persistence.write_quality import WriteQuality
 from strategies.market import VolumeBreakoutStrategy
 from data.constants import (
@@ -2619,3 +2619,149 @@ class TestTierByTableCoverageIsolation:
         assert proc._quality_tier_by_table["financial_reports"] == 1
         assert proc._quality_tier_by_table["daily_quotes"] == 3
         assert proc._quality_tier_by_table["daily_indicators"] == 2
+
+
+class _CoverageSnapshotProcessor(FakeProcessor):
+    """补 `_get_cancel_event` 的宿主：让 run_quality_scan 的覆盖率快照真正执行。
+
+    FakeProcessor 未提供该属性，异常被内部 `except Exception` 吞掉 → 覆盖率快照总是
+    跳过（missing_critical 恒 False）。本类只补这一处，用于验证「按表归因」。
+    """
+
+    def _get_cancel_event(self):
+        return asyncio.Event()
+
+
+class TestRunQualityScanPerTableTierSync:
+    """D10-001: run_quality_scan 必须在同一提交边界更新全局与逐表等级。
+
+    缺陷现场：上一轮（fast-path / deep-sweep）残留 daily_quotes=GOLD，深扫发现报价滞后
+    13 天 ⇒ global=BRONZE，但 `_quality_tier_by_table` 未重建 ⇒ 声明
+    required_tables=("daily_quotes",) 的 SILVER 策略仍被旧 GOLD 放行；health 10s 缓存
+    早返也无法纠正。空表早退/异常分支同样只改返回值、留旧状态。
+    """
+
+    _CRIT = ("daily_quotes", "financial_reports", "daily_indicators", "moneyflow_daily")
+
+    @staticmethod
+    def _arrange(proc, *, last_quote_date: str = "20240601") -> None:
+        basics = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "list_status": ["L", "L"]})
+        proc.cache.stock_dao.get_stock_basic = AsyncMock(return_value=basics)
+        proc.cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": [last_quote_date, last_quote_date],
+                    "close": [10.0, 11.0],
+                    "vol": [1000, 2000],
+                }
+            )
+        )
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=last_quote_date)
+        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+        proc.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value=pd.DataFrame({"table_name": ["financial_reports"], "last_data_date": ["20240610"]})
+        )
+        proc.trade_calendar.get_trade_cal_df = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": ["20240601", "20240614"], "is_open": [1, 1]})
+        )
+        # 对齐生产返回类型（datetime.date），避免 str→tz-aware 解析使 recency 落入 LAG_ERROR。
+        proc.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+
+    @pytest.mark.asyncio
+    async def test_stale_quotes_override_previous_gold_table_tier(self):
+        """报价滞后 13 天 ⇒ global BRONZE 且 daily_quotes 逐表同步降为 BRONZE，SILVER 被拦截。"""
+        proc = FakeProcessor()
+        proc._quality_tier = 3
+        proc._quality_tier_by_table = {"daily_quotes": 3, "financial_reports": 3}
+        self._arrange(proc, last_quote_date="20240601")
+
+        with patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await proc.run_quality_scan(sample_size=2)
+
+        assert result["tier"] == 1
+        assert proc._quality_tier == 1
+        assert proc._quality_tier_by_table["daily_quotes"] == 1
+
+        with patch("core.i18n.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "quality_err_too_low"
+            with pytest.raises(QualityGateError):
+                _check_tier(proc, QualityTier.SILVER, "filter", required_tables=("daily_quotes",))
+
+    @pytest.mark.asyncio
+    async def test_empty_stock_basic_clears_stale_tables(self):
+        """无 stock_basic ⇒ 早退必须把全局置 CRITICAL 并清空逐表残留。"""
+        proc = FakeProcessor()
+        proc._quality_tier = 3
+        proc._quality_tier_by_table = {"daily_quotes": 3, "financial_reports": 3}
+        proc.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
+
+        result = await proc.run_quality_scan()
+
+        assert result["tier"] == 0
+        assert proc._quality_tier == 0
+        assert proc._quality_tier_by_table == {}
+        with patch("core.i18n.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "quality_err_too_low"
+            with pytest.raises(QualityGateError):
+                _check_tier(proc, QualityTier.BRONZE, "filter", required_tables=("daily_quotes",))
+
+    @pytest.mark.asyncio
+    async def test_scan_crash_fails_closed(self):
+        """深扫崩溃（返回 error）不得保留上一轮等级，必须 fail-closed。"""
+        proc = FakeProcessor()
+        proc._quality_tier = 3
+        proc._quality_tier_by_table = {"daily_quotes": 3}
+        proc.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=RuntimeError("db down"))
+
+        result = await proc.run_quality_scan()
+
+        assert "error" in result
+        assert proc._quality_tier == 0
+        assert proc._quality_tier_by_table == {}
+        with patch("core.i18n.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "quality_err_too_low"
+            with pytest.raises(QualityGateError):
+                _check_tier(proc, QualityTier.BRONZE, "filter", required_tables=("daily_quotes",))
+
+    @pytest.mark.asyncio
+    async def test_cancelled_scan_does_not_keep_stale_gold(self):
+        """取消即中断采样：不得留下上一轮 GOLD，逐表与全局同边界更新。"""
+        proc = FakeProcessor()
+        proc._quality_tier = 3
+        proc._quality_tier_by_table = {"daily_quotes": 3, "financial_reports": 3}
+        proc.is_cancelled = MagicMock(return_value=True)
+        self._arrange(proc, last_quote_date="20240614")
+
+        with patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await proc.run_quality_scan(sample_size=2)
+
+        assert result["tier"] == proc._quality_tier == 1
+        assert proc._quality_tier_by_table["daily_quotes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unrelated_critical_gap_keeps_quote_table_gold(self):
+        """逐表隔离：仅 financial_reports 覆盖率不足 ⇒ 该表 CRITICAL，daily_quotes 仍 GOLD。
+
+        修复不得用「任一 critical 缺失即全表置 0」或全局 min 误伤无关表。
+        """
+        proc = _CoverageSnapshotProcessor()
+        proc._quality_tier = 3
+        proc._quality_tier_by_table = {"daily_quotes": 3, "financial_reports": 3}
+        self._arrange(proc, last_quote_date="20240614")
+        tables = {t: {"ratio": 0.9, "type": "stock"} for t in self._CRIT}
+        tables["financial_reports"]["ratio"] = 0.02
+        proc.cache.check_comprehensive_health = AsyncMock(return_value={"tables": tables, "global_trade_days": 500})
+
+        with patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await proc.run_quality_scan(sample_size=2)
+
+        assert result["tier"] == proc._quality_tier == 0
+        assert proc._quality_tier_by_table["daily_quotes"] == 3
+        assert proc._quality_tier_by_table["financial_reports"] == 0
+
+        _check_tier(proc, QualityTier.SILVER, "filter", required_tables=("daily_quotes",))
+        with patch("core.i18n.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "quality_err_too_low"
+            with pytest.raises(QualityGateError):
+                _check_tier(proc, QualityTier.GOLD, "filter", required_tables=("financial_reports",))

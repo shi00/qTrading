@@ -995,6 +995,10 @@ class HealthCheckMixin:
         # D2-9: 重置采样缺失日集合。每次扫描重建，避免上一轮残留陈旧值误导门控归因。
         self._scan_missing_dates = frozenset()
 
+        # D10-001: 逐表等级与全局等级必须同边界重置。上一轮（fast-path / 深扫）残留的表级
+        # 等级若不清空，本轮全局降级后 required_tables 门控仍会取到旧 GOLD 而放行。
+        self._quality_tier_by_table = {}
+
         if progress_callback:
             progress_callback(0, 100, Message("scan_step_init"))
 
@@ -1002,6 +1006,8 @@ class HealthCheckMixin:
             # 1. Select Sample
             basics = await self.cache.stock_dao.get_stock_basic()
             if basics is None or basics.empty:
+                # D10-001: 无任何可采样数据 ⇒ fail-closed，不得沿用上一轮的全局等级。
+                self._quality_tier = 0
                 return {"score": 0, "tier": 0, "details": {}}
 
             active_stocks = basics[basics["list_status"].isin(["L", "D"])]["ts_code"].tolist()
@@ -1014,7 +1020,9 @@ class HealthCheckMixin:
 
             deep_health = {}
             fin_fresh_ratio = 0.0
-            missing_critical = False
+            # D10-001: 逐表归因。覆盖率不足的 critical 表必须按表登记 CRITICAL，
+            # 不得用「任一缺失即全表降级」误伤健康的无关表。
+            missing_critical_tables: list[str] = []
             try:
                 deep_health = await self.cache.check_comprehensive_health(cancel_event=self._get_cancel_event())  # type: ignore[attr-defined]  # mixin 依赖宿主 DataProcessor 提供 _get_cancel_event
                 tables = deep_health.get("tables", {}) if isinstance(deep_health, dict) else {}
@@ -1022,7 +1030,7 @@ class HealthCheckMixin:
                 critical_tables = [
                     name for name, meta in TABLE_DEFINITIONS.items() if meta.get("quality_config", {}).get("critical")
                 ]
-                missing_critical = any(tables.get(t, {}).get("ratio", 0.0) < 0.1 for t in critical_tables)
+                missing_critical_tables = [t for t in critical_tables if tables.get(t, {}).get("ratio", 0.0) < 0.1]
             except Exception as e:
                 logger.debug("[DataProcessor] QualityScan | Coverage snapshot skipped: %s", e)
 
@@ -1193,12 +1201,26 @@ class HealthCheckMixin:
             tier = _compute_tier(
                 lag_days=int(avg_recency),
                 fin_fresh_ratio=fin_fresh_ratio,
-                missing_critical=missing_critical,
+                missing_critical=bool(missing_critical_tables),
                 fin_lag_days=fin_lag_days,
                 avg_fundamental=avg_fundamental if fundamental_completeness else None,
             )
 
             self._quality_tier = tier
+            # D10-001: 与全局等级同一提交边界重建逐表等级（F01 次序：先按新鲜度/完整性登记，
+            # 最后落覆盖率不足的 CRITICAL 表，避免被后续分类覆盖）。
+            # 未登记的 critical 表回退全局等级，保持逐表隔离（不用全局 min 误伤无关表）。
+            if "daily_quotes" not in missing_critical_tables:
+                self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=int(avg_recency))
+            if "financial_reports" not in missing_critical_tables:
+                self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
+                    fin_lag_days=fin_lag_days,
+                    is_financial=True,
+                    avg_fundamental=avg_fundamental if fundamental_completeness else None,
+                )
+            for _t in missing_critical_tables:
+                self._quality_tier_by_table[_t] = 0
+
             fin_score_str = f"{fundamental_score:.0f}" if fundamental_score is not None else "N/A"
             logger.info(
                 "[DataProcessor] QualityScan | ✅ Thorough evaluation complete. "
@@ -1234,7 +1256,14 @@ class HealthCheckMixin:
                 safe,
                 exc_info=True,
             )
+            # D10-001: 崩溃时无法证明任何表仍达标 ⇒ fail-closed（R21：未知 ≠ 健康），
+            # 不得把上一轮等级留作放行依据。
+            self._quality_tier = 0
+            self._quality_tier_by_table = {}
             return {"score": 0, "tier": 0, "error": safe}
         finally:
+            # D10-001: 失效 health 10s 快照缓存，避免深扫提交新等级后首个 check_data_health
+            # 早返旧快照，使面板与门控口径不一致。
+            self._health_cache = {"time": 0, "data": None}
             # Ensure cancel state doesn't leak into subsequent operations
             self.clear_cancel()  # type: ignore[attr-defined]
