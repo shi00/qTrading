@@ -374,12 +374,20 @@ class HtmlHrefInfo:
 
 @dataclass(frozen=True)
 class CodeBlockInfo:
-    """代码块：围栏记号（``` / ~~~，缩进块为空串）、info 串、1-based 闭区间行号。"""
+    """代码块：围栏记号（``` / ~~~，缩进块为空串）、info 串、1-based 闭区间行号、
+    解析器实际内容与闭合状态。
+
+    ``content`` 保存 token 实际内容（围栏行已剥离，换行符统一为 ``\n``）；``closed``
+    表示围栏是否存在闭合标记（缩进块无围栏，恒为 True）。EOF 处未闭合的围栏仍是
+    一个代码块，内容行直到文件末尾，不能假定末行是闭合围栏。
+    """
 
     fence: str
     info: str
     start_line: int
     end_line: int
+    content: str
+    closed: bool
 
 
 @dataclass(frozen=True)
@@ -438,12 +446,12 @@ class DocumentView:
         return frozenset(lines)
 
     def code_block_text(self, block: CodeBlockInfo) -> str:
-        """代码块内容文本（不含围栏标记行；缩进块原样保留内容行）。"""
-        if block.fence:
-            content = self.source[block.start_line : block.end_line - 1]
-        else:
-            content = self.source[block.start_line - 1 : block.end_line]
-        return "\n".join(content)
+        """代码块内容文本（不含围栏标记行；取自 token 实际 content）。
+
+        末尾至多去掉一个换行，保持与 ``splitlines()`` 对齐；EOF 处未闭合围栏的
+        内容行同样完整返回，不再依赖「末行必为闭合围栏」的假设。
+        """
+        return block.content[:-1] if block.content.endswith("\n") else block.content
 
 
 # ---------------------------------------------------------------------------
@@ -597,18 +605,42 @@ def _collect_code_spans(tokens: list[Token]) -> tuple[CodeSpanInfo, ...]:
     return tuple(spans)
 
 
+def _code_block_closed(fence: str, content: str, start_line: int, end_line: int) -> bool:
+    """围栏是否闭合：内容行数等于「末行 - 首行 - 1」即末行是闭合围栏。
+
+    token.map 对闭合围栏覆盖首/尾围栏行，对 EOF 未闭合围栏覆盖到文件末行；
+    因此闭合时 content 行数比 map 跨度少 1，未闭合时与「末行 - 首行」相等。
+    内容行数只按 ``\\n`` 计（不能用 ``str.splitlines``：它会把 U+2028 等字符也
+    当作行界，导致闭合状态误判）。该判定不依赖容器前缀（列表 / 引用块）与围栏
+    字符长度；缩进块无围栏恒为闭合。
+    """
+    if not fence:
+        return True
+    if not content:
+        content_lines = 0
+    else:
+        content_lines = len(content.split("\n"))
+        if content.endswith("\n"):
+            content_lines -= 1
+    return content_lines == end_line - start_line - 1
+
+
 def _collect_code_blocks(tokens: list[Token]) -> tuple[CodeBlockInfo, ...]:
     """代码块：围栏（fence，含 markup ```/~~~）与缩进块（code_block）。"""
     blocks: list[CodeBlockInfo] = []
     for token in tokens:
         if token.type == "fence" and token.map:
             mapping = token.map
+            start_line = mapping[0] + 1
+            end_line = mapping[1]
             blocks.append(
                 CodeBlockInfo(
                     fence=token.markup,
                     info=token.info.strip(),
-                    start_line=mapping[0] + 1,
-                    end_line=mapping[1],
+                    start_line=start_line,
+                    end_line=end_line,
+                    content=token.content,
+                    closed=_code_block_closed(token.markup, token.content, start_line, end_line),
                 )
             )
         elif token.type == "code_block" and token.map:
@@ -619,6 +651,8 @@ def _collect_code_blocks(tokens: list[Token]) -> tuple[CodeBlockInfo, ...]:
                     info="",
                     start_line=mapping[0] + 1,
                     end_line=mapping[1],
+                    content=token.content,
+                    closed=True,
                 )
             )
     return tuple(blocks)
