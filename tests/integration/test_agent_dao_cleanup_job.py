@@ -260,3 +260,36 @@ async def test_cleanup_service_confirm_commits_fence_once_on_real_store(dao: Age
 
     denied = await service.confirm(command, _precondition(scope_settled=False))
     assert denied.admission.reason == "already_verified"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_verified_phase_is_terminal_and_cannot_regress(dao: AgentDao) -> None:
+    """阶段单调：已 verified 的作业拒绝 retry_pending 覆盖（R22 语义），行与时间戳不变。"""
+
+    job_id = _job_id()
+    await dao.save_cleanup_job(_record(job_id))
+    await dao.commit_cleanup_fence(_record(job_id))
+    zeros = {table: 0 for table in ("dbos.workflow_status", "dbos.streams")}
+    await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=zeros, complete=True)
+
+    with pytest.raises(AgentServiceError) as exc:
+        await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.RETRY_PENDING, error_category="transient")
+    assert exc.value.code is AgentErrorCode.INPUT_INVALID
+    assert "already verified" in str(exc.value)
+
+    loaded = await dao.load_cleanup_job(_USER_SCOPE, job_id)
+    assert loaded is not None
+    assert loaded.phase is CleanupPhase.VERIFIED
+    async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 集成测试直读核验
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT complete, verified_at, error_category FROM agent_cleanup_job "
+                    "WHERE user_scope = :scope AND cleanup_job_id = :job"
+                ),
+                {"scope": _USER_SCOPE, "job": job_id},
+            )
+        ).one()
+    assert row[0] is True
+    assert row[1] is not None
+    assert row[2] is None

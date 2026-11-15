@@ -6739,6 +6739,9 @@ class AgentDao(BaseDao):
     ) -> None:
         """推进阶段：``verified`` 要求 fence 已提交；不改写固定集合。
 
+        阶段单调（R22 语义）：已 ``verified`` 的作业拒绝任何非 ``verified`` 写入，
+        防止 ``retry_pending`` 覆盖完成态、留下不清的 ``verified_at``。
+
         ``verified`` 时同时清空 ``content_manifest``：该列只承载内容摘要/引用，
         §10.7 表第 4 行要求清理后不默认保留内容摘要；集合身份仍在
         ``exact_identity_set``（第 5 行），fence 与幂等核定不受影响。
@@ -6764,11 +6767,15 @@ class AgentDao(BaseDao):
         )
         if phase is CleanupPhase.VERIFIED:
             statement = statement.where(AgentCleanupJob.fence_committed.is_(True))
+        else:
+            statement = statement.where(AgentCleanupJob.phase != CleanupPhase.VERIFIED.value)
         async with engine.begin() as conn:
             result = await conn.execute(statement)
             if int(result.rowcount or 0) == 0:
                 raise AgentServiceError(
-                    AgentErrorCode.INPUT_INVALID, "cleanup job phase target missing or fence absent", label
+                    AgentErrorCode.INPUT_INVALID,
+                    "cleanup job phase target missing, fence absent, or already verified",
+                    label,
                 )
 
     def _require_async_engine(self) -> AsyncEngine:
