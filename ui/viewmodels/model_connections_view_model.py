@@ -25,6 +25,9 @@
 - 单次测试回执身份（MC-03）：operation_id 于首个 await 前登记，成功 / 失败结果仅在
   操作身份、草稿代与编辑版本均仍为发起时值时才写入 state；执行字段真实变化即让结果
   失效回 idle（同值重写不失效），旧测试不得覆盖新草稿 / 新测试的状态与消息
+- 刷新代次（D16-003）：刷新发起即取得代次，快照 / 引用计数 / 用量 / 行全部保存在
+  局部；末次 await 后核对代次、修订单调性与 disposed，获准时在同一同步段原子提交
+  raw 元数据与公开 state——乱序完成的旧刷新整体丢弃，展示与 CAS 基线不随旧快照回退
 
 R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 """
@@ -32,6 +35,7 @@ R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import math
 import uuid
@@ -303,6 +307,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._draft_edit_revision: int = 0
         # F02：回执身份绑定的编辑版本（登记时快照），供 committed 回执判定内容是否仍当前
         self._pending_operation_edit_revision: int | None = None
+        # D16-003：刷新代次——刷新发起即递增，末次 await 后仅最新代次可提交快照，
+        # 旧刷新（含注入用量 loader 晚返回）不得回退行 / raw 元数据 / CAS 基线
+        self._refresh_generation: int = 0
         # 回执身份的操作种类：草稿保存与安全命令（授权 / 撤销）共用恢复槽位，仅凭
         # id / 草稿代 / 编辑版本无法区分；回执恢复据此避免把安全命令的提交当成草稿已保存
         self._pending_operation_kind: Literal["draft", "egress"] | None = None
@@ -487,23 +494,43 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             )
             self._set_state(message=Message("model_connections_load_failed"))
 
-    async def _refresh_snapshot(self) -> None:
+    async def _refresh_snapshot(self) -> bool:
+        """读取已提交快照并在最新刷新代次下原子提交（D16-003）。
+
+        刷新发起即取得代次，快照 / 引用计数 / 用量 / 行全部保存在局部；末次 await
+        后核对代次、修订单调性与 disposed，获准时在同一同步段更新 raw 元数据与公开
+        state。旧刷新（A）晚于新刷新（B）完成时整体丢弃——行 / raw routes / grants /
+        ref counts / CAS 修订均保持 B，禁止旧快照回退展示或混代。
+
+        Returns:
+            ``True`` 表示本次快照已采纳；``False`` 表示已被更新的刷新取代、修订过期
+            或 VM 已 dispose（未写任何状态，不伪装成功，R21）。
+        """
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         snapshot = await self._service.get_snapshot()
+        ref_counts = self._count_refs(snapshot)
+        usage = UsageCostSummary()
+        if self._usage_summary_loader is not None:
+            usage = await self._usage_summary_loader()
+        if self.disposed or generation != self._refresh_generation:
+            return False  # 更新的刷新已发起 / 已完成：丢弃本次过期快照
+        if snapshot.config_revision < self._state.config_revision:
+            return False  # 陈旧快照：不回退已前移的 CAS 基线（R22 单调性）
+        # 同一同步段提交（其间无 await）：raw 元数据与公开 state 必须来自同一快照
         self._raw_connections = snapshot.connections
         self._raw_routes = snapshot.scenario_routes
         self._usage_policy = snapshot.usage_policy
         self._raw_grants = snapshot.security_grants
         self._security_scope_version = snapshot.security_scope_version
-        self._ref_counts = self._count_refs(snapshot)
-        usage = UsageCostSummary()
-        if self._usage_summary_loader is not None:
-            usage = await self._usage_summary_loader()
+        self._ref_counts = ref_counts
         rows = tuple(self._row_from_raw(c) for c in snapshot.connections)
         self._set_state(
             connections=rows,
             summary=self._summary_from_snapshot(snapshot, usage),
             config_revision=snapshot.config_revision,
         )
+        return True
 
     @staticmethod
     def _count_refs(snapshot: ModelManagementSnapshot) -> dict[str, int]:
@@ -653,13 +680,34 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             return current
         return current + 1
 
+    def _raw_connection(self, connection_id: str) -> Mapping[str, Any] | None:
+        """按 id 取已提交连接（草稿不含磁盘上的未建模嵌套键，合并需以其为基线）。"""
+        if not connection_id:
+            return None
+        return next((c for c in self._raw_connections if str(c.get("connection_id")) == connection_id), None)
+
     def _draft_to_connection_payload(
         self,
         draft: ModelConnectionDraft,
         credential_ref: str | None,
         credential_version: str | None,
     ) -> dict[str, Any]:
-        adapter_options: dict[str, Any] = {}
+        """草稿 → 连接 payload（普通保存 / 向导 / 单次测试同源）。
+
+        D16-002：同一 ``adapter_kind`` 编辑时以磁盘既有 ``adapter_options`` /
+        ``billing`` 为基线，只覆盖本表单受管键——草稿未建模的运行参数
+        （n_threads / n_gpu_layers / api_version 等）与计价元数据
+        （fx_to_cny / 缓存单价等）原样保留；kind 或计量方式变化时不用旧基线，
+        显式移除不适用键（不恢复旧模型路径 / 旧计费元数据）。凭据语义不变：
+        ``credential_ref`` 只来自草稿（新填 / 保留 / 显式清除），不经基线合并恢复。
+        """
+        raw = self._raw_connection(draft.connection_id)
+        same_kind = raw is not None and str(raw.get("adapter_kind", "")) == draft.adapter_kind
+        baseline_options = raw.get("adapter_options") if same_kind and raw is not None else None
+        # 深拷贝：payload 与快照不得共享可变嵌套对象（后续写入不得污染已提交快照）
+        adapter_options: dict[str, Any] = (
+            copy.deepcopy(dict(baseline_options)) if isinstance(baseline_options, Mapping) else {}
+        )
         if draft.adapter_kind == ADAPTER_GGUF_CHAT:
             provider, api_base, model = "", None, draft.model.strip() or draft.dialog_model_path.strip()
             credential_ref, credential_version = None, None
@@ -675,6 +723,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         timeout = self._to_float_or_none(draft.timeout_seconds)
         if timeout is not None:
             adapter_options["timeout"] = timeout
+        else:
+            # 表单受管键：清空即移除，基线残留的旧 timeout 不得复活
+            adapter_options.pop("timeout", None)
         if draft.adapter_kind in (ADAPTER_GGUF_CHAT, ADAPTER_GGUF_SENTIMENT):
             # F32：n_ctx 显式化落盘（磁盘已有合法值保留，缺失补默认），兼容服务不再因缺失拒绝
             adapter_options["n_ctx"] = self._resolve_gguf_n_ctx(draft.connection_id)
@@ -691,12 +742,25 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             "adapter_options": adapter_options,
             "context_window": self._to_int_or_none(draft.context_window),
             "concurrency_limit": self._to_int_or_none(draft.concurrency_limit) or 1,
-            "billing": self._billing_payload(draft),
+            "billing": self._billing_payload(draft, raw.get("billing") if same_kind and raw is not None else None),
             "connection_revision": max(1, int(draft.connection_revision or 1)),
         }
 
     @staticmethod
-    def _billing_payload(draft: ModelConnectionDraft) -> dict[str, Any]:
+    def _billing_payload(draft: ModelConnectionDraft, baseline: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        managed = ModelConnectionsViewModel._managed_billing(draft)
+        # 计量方式不变（mode + 有效 pricing_unit 相同）才以磁盘为基线保留未建模键；
+        # 变化时旧汇率 / 缓存单价不再适用，显式丢弃（不恢复旧计费元数据）。
+        if not isinstance(baseline, Mapping):
+            return managed
+        if baseline.get("mode") != managed["mode"] or baseline.get("pricing_unit") != managed["pricing_unit"]:
+            return managed
+        merged = copy.deepcopy(dict(baseline))
+        merged.update(managed)
+        return merged
+
+    @staticmethod
+    def _managed_billing(draft: ModelConnectionDraft) -> dict[str, Any]:
         if draft.billing_mode == "estimate_cost":
             if _is_encoder_priced(draft):
                 # F32：分类费用型（encoder 计量）——pricing_unit 与表单可见单价一致，缺失用 None（R21）
@@ -1092,12 +1156,17 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         草稿未变时错误提示仍真实（R21）。核心作用：场景保存提交后刷新
         ``_raw_routes``，防止下次连接保存以陈旧路由回退路由修订（F30）。
 
+        D16-003：仅当本次快照被采纳（最新刷新代次、修订未过期、VM 未 dispose）才
+        返回 ``True`` 并复位冲突态；被更新的刷新取代时如实返回 ``False``，不把旧
+        刷新丢弃伪装成新鲜重基成功（R21）。
+
         Returns:
-            ``True`` 表示重基成功；``False`` 表示读快照失败（不伪装成功，R21）。
+            ``True`` 表示已按本次快照完成重基；``False`` 表示读快照失败、快照已被
+            更新的刷新取代 / 已过期，或 VM 已 dispose（未写任何状态）。
         """
         self._track_inflight_cancellable()  # F40：只读刷新，页面卸载可安全取消
         try:
-            await self._refresh_snapshot()
+            adopted = await self._refresh_snapshot()
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
@@ -1106,6 +1175,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
+            return False
+        if not adopted:
             return False
         if self._state.save_state == SAVE_CONFLICT:
             # 冲突已由新基线解决：恢复 idle 允许就地重试（草稿保留）
