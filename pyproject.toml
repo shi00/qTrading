@@ -71,6 +71,7 @@ dependencies = [
     "pydantic-ai-slim==2.66.0",  # Agent 模型桥（设计 §10.1/HANDOFF §6）：GatewayModel 固定框架；slim 发行不含未用可选集成；SDK 内部结构（StreamedResponse/_parts_manager）强耦合 → == 精确固定（Q3 裁决）
     "pydantic-ai-harness[skills]==0.66.0",  # Agent 计划/压缩能力（设计 §10.1、HANDOFF §6）：PlanStore/Planning/SummarizingCompaction 宿主，须与 pydantic-ai-slim 2.66.0 锁步 → == 精确固定（Q5 裁决）
     "pypdf==6.19.0",  # Agent 附件 PDF 文本抽取（E-01）：纯 Python 实现、无系统依赖，输出文本边界可测 → == 精确固定（Q5 裁决）
+    "jsonschema>=4.26.0",  # Agent MCP 工具参数闭合校验（E-02-5）：MCP 目录 schema → 参数全量校验的正式适配器
 ]
 
 [project.optional-dependencies]

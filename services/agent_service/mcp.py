@@ -3,9 +3,10 @@
 本模块只承载**静态可验证**的准入合同：保存不启连、连接测试只发现（0 研究工具
 调用）、预算与只读审核证据不足拒启、显式断开且在途时拒停、断线不自动重连。
 
-真实 FastMCP 传输内部插入点（逐 send 门、FD 级 stderr 收尾、四诊断通道、
-各传输前置预算数值与早拒绝）仍为 needs-spike，由 :class:`MCPClientFactoryPort`
-等端口隔离；本模块不声称已接入或已验证真实 SDK 行为。
+真实 FastMCP 传输适配见 :mod:`services.agent_service.mcp_fastmcp`（E-02-5 实证：
+stdio 插入点、逐 send 门、FD 级 stderr、四诊断通道）。仍为残留：HTTP/SSE 的真实
+往返、原始接收字节计量（类型化客户端在库内解析）、子进程退出码可观测性；各传输
+前置预算数值仍需维护者批准后回填 ``MCPBudgetProfile``，本模块不主张已冻结。
 """
 
 from __future__ import annotations

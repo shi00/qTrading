@@ -724,6 +724,10 @@ E-01 里程碑第二轮独立检视 PASS（B1-B6 已闭环：CSV 多段行限额
 
 E-02 里程碑独立检视（B1-B3 已修：结果不可编码 → unknown、单条结果按单条比较、门内强制单一 deadline）。以上为静态范围残余：真实 transport 接入前无法端到端验证计量与诊断通道；`ToolDispatchVerdict` 与 core `ToolGrantState` 平行建模需在 C-04 接线时映射。
 
+**E-02-5 spike 已实证（`mcp_fastmcp.py`）**：stdio 传输插入点、逐 send 门（关闭/deadline 过期在 SDK 请求前拒绝）、FD 级 stderr 尾部、四诊断通道形状、真实发现/调用。
+
+**spike 新增未收敛项**：① 类型化客户端在库内解析，`receive_bytes` 族仍无真实计量入口（当前仅以解码后表示计 `decoded_bytes`）；② 子进程退出码不可经 FastMCP 观测，`exit_status` 恒 `None`（已标注 unknown，不填 0）；③ HTTP/SSE 仅完成传输构造，未做真实往返实证；④ 会话内自建 `MCPBudgetGuard` 与连接管理器的 guard 分族计量（decoded/catalog vs single_result/retention），尚未合并为单一账本。
+
 **期望的最终解法**
 
 随 E-02-5 spike 与 F-04 接线逐条收敛并补断言；届时删除本条目。
