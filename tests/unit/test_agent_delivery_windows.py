@@ -130,6 +130,45 @@ class TestTargetRaceProtection:
         assert exc.value.code == "delivery_publish_unverified"
         assert target_path.read_bytes() == b"external-after-publish"
 
+    def test_target_written_by_other_file_is_unknown_despite_same_content(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """替换窗口内被外部写入同内容新文件：文件身份不符即不可确证（不得报成功）。"""
+
+        target_path = tmp_path / "identity.md"
+        store = _store()
+        staged = store.stage(target=_target(target_path), content=_CONTENT, expected_digest=_DIGEST)
+
+        def copy_instead_of_move(source: object, destination: object) -> None:
+            Path(source).unlink()
+            Path(destination).write_bytes(_CONTENT)
+
+        monkeypatch.setattr("services.agent_service.delivery.os.replace", copy_instead_of_move)
+        with pytest.raises(DeliveryUnknownError) as exc:
+            store.publish(target=_target(target_path), staged=staged)
+        assert exc.value.code == "delivery_publish_unverified"
+        assert target_path.read_bytes() == _CONTENT
+
+    def test_replace_oserror_is_unknown_even_with_identical_target(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``os.replace`` 抛错且目标已是同内容：不得凭内容判成功，只能 unknown。"""
+
+        target_path = tmp_path / "same.md"
+        target_path.write_bytes(_CONTENT)
+        store = _store()
+        target = _target(target_path, existing=True, digest=_DIGEST, confirmed=True)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+
+        def refuse_replace(source: object, destination: object) -> None:
+            raise OSError("file is locked")
+
+        monkeypatch.setattr("services.agent_service.delivery.os.replace", refuse_replace)
+        with pytest.raises(DeliveryUnknownError) as exc:
+            store.publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_publish_unverified"
+        assert target_path.read_bytes() == _CONTENT
+
     def test_reparse_point_target_is_refused(self, tmp_path: Path) -> None:
         real = tmp_path / "real.txt"
         real.write_bytes(b"old")
@@ -163,6 +202,17 @@ class TestTargetRaceProtection:
 
 
 class TestStagingSafety:
+    def test_staged_name_carries_delivery_identity(self, tmp_path: Path) -> None:
+        target_path = tmp_path / "named.md"
+        staged = _store().stage(
+            target=_target(target_path),
+            content=_CONTENT,
+            expected_digest=_DIGEST,
+            name_hint="delivery_deadbeef",
+        )
+        assert "delivery_deadbeef" in staged.path.name
+        assert staged.file_id is not None and staged.volume_serial is not None
+
     def test_readback_mismatch_removes_staging(self, tmp_path: Path) -> None:
         target_path = tmp_path / "readback.md"
         with pytest.raises(DeliveryFileError) as exc:

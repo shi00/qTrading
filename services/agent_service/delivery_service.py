@@ -93,7 +93,14 @@ class DeliveryPhasePort(Protocol):
 class DeliveryFilePort(Protocol):
     """本机文件交付端口（生产接 ``WindowsManagedFileStore``）。"""
 
-    def stage(self, *, target: DeliveryTarget, content: bytes, expected_digest: str) -> StagedFile: ...
+    def stage(
+        self,
+        *,
+        target: DeliveryTarget,
+        content: bytes,
+        expected_digest: str,
+        name_hint: str | None = None,
+    ) -> StagedFile: ...
 
     def publish(self, *, target: DeliveryTarget, staged: StagedFile) -> PublishResult: ...
 
@@ -246,6 +253,7 @@ class DeliveryCommandService:
                 target=command.target,
                 content=rendered.content,
                 expected_digest=digest,
+                name_hint=command.delivery_id,
             )
         except DeliveryFileError as exc:
             # 暂存未落库：回执与已存 manifest 一致（manifest_saved 无输出摘要）。

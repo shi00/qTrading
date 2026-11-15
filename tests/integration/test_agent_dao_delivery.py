@@ -263,6 +263,25 @@ class TestDeliveryPhaseCas:
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
 
     @pytest.mark.asyncio
+    async def test_same_phase_rewrite_with_other_facts_is_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=1, manifest=_manifest()
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.save_delivery_phase(
+                user_scope=USER_SCOPE,
+                operation_id="op-deliver",
+                expected_revision=2,
+                manifest=_manifest(source_state="unknown"),
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        read = await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+        assert read.manifest is not None and read.manifest.source_state == "available"
+        assert read.revision == 2
+
+    @pytest.mark.asyncio
     async def test_operation_bound_to_other_delivery_is_rejected(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_operation(dao)

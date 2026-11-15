@@ -1571,6 +1571,12 @@ class AgentDao(BaseDao):
                     raise AgentServiceError(
                         AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity
                     ) from exc
+                if previous.phase == manifest.phase and json_doc(row.delivery_manifest) != json_doc(wire):
+                    # 同阶段改写（含 unknown/终态、换目标/换摘要）一律冲突：
+                    # 阶段只前进不回写，终态与 unknown 必须保持原事实。
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT, "delivery phase already saved with other facts", identity
+                    )
             revision = row.revision + 1
             await conn.execute(
                 sa.update(AgentOperation)

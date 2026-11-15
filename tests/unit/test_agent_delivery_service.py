@@ -219,6 +219,7 @@ class FakeStore:
 
     def __init__(self) -> None:
         self.staged_contents: list[bytes] = []
+        self.stage_name_hints: list[str | None] = []
         self.published: list[tuple[DeliveryTarget, StagedFile]] = []
         self.publish_attempts = 0
         self.cancelled: list[StagedFile] = []
@@ -227,14 +228,24 @@ class FakeStore:
         self.stage_digest_override: str | None = None
         self.publish_digest_override: str | None = None
 
-    def stage(self, *, target: DeliveryTarget, content: bytes, expected_digest: str) -> StagedFile:
+    def stage(
+        self,
+        *,
+        target: DeliveryTarget,
+        content: bytes,
+        expected_digest: str,
+        name_hint: str | None = None,
+    ) -> StagedFile:
         if self.stage_error is not None:
             raise self.stage_error
         self.staged_contents.append(content)
+        self.stage_name_hints.append(name_hint)
         return StagedFile(
             path=_STAGED_PATH,
             digest=self.stage_digest_override or expected_digest,
             size=len(content),
+            volume_serial=7,
+            file_id=11,
             parent_volume_serial=7,
             parent_file_id=8,
         )
@@ -311,6 +322,7 @@ class TestHappyPath:
 
         assert len(store.published) == 1
         assert store.published[0][0] == _command().target
+        assert store.stage_name_hints == [_command().delivery_id]
 
         receipt = outcome.receipt
         assert receipt.phase == "published_confirmed"

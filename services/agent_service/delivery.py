@@ -56,11 +56,13 @@ class FileSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class StagedFile:
-    """已落盘并通过回读校验的暂存内容。"""
+    """已落盘并通过回读校验的暂存内容（含暂存文件自身身份，用于发布后确证归属）。"""
 
     path: Path
     digest: str
     size: int
+    volume_serial: int
+    file_id: int
     parent_volume_serial: int
     parent_file_id: int
 
@@ -120,15 +122,27 @@ def _snapshot(path: Path, *, with_digest: bool = True) -> FileSnapshot:
 class WindowsManagedFileStore:
     """同卷暂存 + 复核 + 原子替换的本地文件交付实现。"""
 
-    def stage(self, *, target: DeliveryTarget, content: bytes, expected_digest: str) -> StagedFile:
-        """把内容写入同卷暂存并回读；任何偏差都清理暂存后失败。"""
+    def stage(
+        self,
+        *,
+        target: DeliveryTarget,
+        content: bytes,
+        expected_digest: str,
+        name_hint: str | None = None,
+    ) -> StagedFile:
+        """把内容写入同卷暂存并回读；任何偏差都清理暂存后失败。
+
+        ``name_hint`` 用于让暂存文件名可从交付身份派生（进程崩溃后仍可按
+        原交付定位残留）；只影响名称，不影响内容与校验。
+        """
 
         target_path = Path(validate_delivery_target_path(target.target_path))
         if not target_path.parent.is_dir():
             raise DeliveryFileError("delivery_target_parent_missing", "target parent directory does not exist")
         self._assert_target_matches(_snapshot(target_path), target, phase="stage")
+        prefix = f".{target_path.name}." if not name_hint else f".{target_path.name}.{name_hint}."
         handle, raw_path = tempfile.mkstemp(
-            prefix=f".{target_path.name}.",
+            prefix=prefix,
             suffix=".staged",
             dir=str(target_path.parent),
         )
@@ -148,6 +162,8 @@ class WindowsManagedFileStore:
                 path=staged_path,
                 digest=digest,
                 size=staged_stat.st_size,
+                volume_serial=staged_stat.st_dev,
+                file_id=staged_stat.st_ino,
                 parent_volume_serial=staged_stat.st_dev,
                 parent_file_id=os.stat(target_path.parent).st_ino,
             )
@@ -172,9 +188,8 @@ class WindowsManagedFileStore:
         try:
             os.replace(staged.path, target_path)
         except OSError as exc:
-            if _snapshot(target_path).digest == staged.digest:
-                # 替换可能已生效但异常发生在返回前：内容一致才可确证。
-                return PublishResult(snapshot=_snapshot(target_path))
+            # 替换可能已生效也可能未生效；内容相同不能证明「属于本交付」，
+            # 只能进入 unknown（HANDOFF §10.2：同内容不等于本交付已发布）。
             raise DeliveryUnknownError(
                 "delivery_publish_unverified", "target replace failed and effect cannot be verified"
             ) from exc
@@ -182,6 +197,10 @@ class WindowsManagedFileStore:
         if not after.exists or after.digest != staged.digest or after.is_reparse_point:
             raise DeliveryUnknownError(
                 "delivery_publish_unverified", "published target content does not match staged content"
+            )
+        if after.volume_serial != staged.volume_serial or after.file_id != staged.file_id:
+            raise DeliveryUnknownError(
+                "delivery_publish_unverified", "published target is not the staged file of this delivery"
             )
         if after.parent_volume_serial != staged.parent_volume_serial or after.parent_file_id != staged.parent_file_id:
             raise DeliveryUnknownError("delivery_publish_unverified", "target parent identity changed during publish")
