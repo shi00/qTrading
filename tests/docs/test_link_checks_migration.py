@@ -294,3 +294,52 @@ class TestUrlDecomposition:
         doc.write_text("[外站](//example.com/x.md)\n", encoding="utf-8")
         _register(monkeypatch, doc)
         assert cdc.check_relative_dead_links() == []
+
+
+class TestFilteredProtocolTargets:
+    """R04：默认 URL 校验过滤的目标（file:/javascript:/data:）不得漏检。"""
+
+    def test_filtered_schemes_reported_as_unsupported(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        doc.write_text(
+            "[文件](file:///missing.md)\n\n"
+            "[大写](FILE:///missing.md)\n\n"
+            "[脚本](javascript:void(0))\n\n"
+            "[数据](data:text/plain;base64,AAAA)\n\n"
+            "<file:///missing.md>\n",
+            encoding="utf-8",
+        )
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert len(errors) == 5, errors
+        assert all("不支持的链接协议" in e for e in errors), errors
+        assert any("'file:'" in e for e in errors), "协议判定须大小写不敏感"
+        assert not any("目标" in e for e in errors), "未知协议不得误报为本地死链"
+        assert cdc.check_anchor_dead_links() == [], "未知协议不得进入锚点分支"
+
+    def test_file_protocol_reference_definition_reported_once(self, doc_repo, monkeypatch):
+        # 默认校验会拒绝该引用定义，令链接退化为「引用式死链」；放行后应报不支持协议
+        doc = doc_repo / "a.md"
+        doc.write_text("[文档][defn]\n\n[defn]: file:///missing.md\n", encoding="utf-8")
+        _register(monkeypatch, doc)
+        errors = cdc.check_relative_dead_links()
+        assert len(errors) == 1, errors
+        assert "不支持的链接协议" in errors[0], errors
+        assert "引用式死链" not in errors[0], errors
+
+    def test_supported_links_and_code_context_not_false_positive(self, doc_repo, monkeypatch):
+        doc = doc_repo / "a.md"
+        (doc_repo / "real.md").write_text("# 目标\n", encoding="utf-8")
+        doc.write_text(
+            "# 标题\n\n"
+            "[相对](./real.md)\n\n"
+            "[HTTP](https://example.com/x)\n\n"
+            "[邮件](mailto:a@example.com)\n\n"
+            "转义 \\[文本\\](file:///missing.md)\n\n"
+            "行内 `[代码](file:///missing.md)`\n\n"
+            "```text\n[围栏](file:///missing.md)\n```\n",
+            encoding="utf-8",
+        )
+        _register(monkeypatch, doc, doc_repo / "real.md")
+        assert cdc.check_relative_dead_links() == []
+        assert cdc.check_anchor_dead_links() == []

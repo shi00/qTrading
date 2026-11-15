@@ -204,6 +204,22 @@ def test_escaped_reference_does_not_suppress_real_dead_link(view_factory) -> Non
     assert refs == [("dead", "nope", 3)], refs
 
 
+def test_static_analysis_preserves_filtered_url_targets(view_factory) -> None:
+    """R04：默认 URL 校验会过滤的 file:/javascript: 目标仍须进入链接视图。
+
+    静态分析不渲染、不执行链接，故解析视图放行这些目标供死链检查分类；
+    图片 token、行内代码与转义方括号不扩域。
+    """
+    view = view_factory(
+        "[文件](file:///missing.md)\n\n"
+        "[脚本](javascript:void(0))\n\n"
+        "![图片](file:///missing.png)\n\n"
+        "\\[转义\\](file:///missing.md) 与 `[代码](file:///missing.md)`\n"
+    )
+    targets = [(link.target, link.line) for link in view.links]
+    assert targets == [("file:///missing.md", 1), ("javascript:void(0)", 3)], targets
+
+
 def test_html_href_extraction_with_source_and_line(view_factory) -> None:
     """组 7（Q12）：HTML href 抽取标签/来源/行号；围栏与行内代码中的 HTML 不参与。"""
     view = view_factory(HTML_HREF_DOC)
