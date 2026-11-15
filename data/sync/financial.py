@@ -489,7 +489,8 @@ class FinancialSyncStrategy(ISyncStrategy):
         if not pending_stocks:
             logger.debug("[FinancialSync] FullSync | All stocks already synced.")
             # D05-F01: 没有待处理股票即本轮全量无未完成目标，清理可能残留的未完成态。
-            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]")
+            # D05-002：关键断点清理须确认落库，写失败不推进完成。
+            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]", strict=True)
             if progress_callback:
                 progress_callback(
                     total_stocks,
@@ -507,6 +508,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             engine,
             _FINANCIAL_FULL_SYNC_PENDING_KEY,
             _dump_full_sync_pending_stocks(set(pending_stocks)),
+            strict=True,
         )
 
         completed_count = skipped_count
@@ -757,7 +759,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         # D05-F01: 未完成目标态只描述「股票层面未完成」：无失败股票才清理。
         # 取消/异常已在上面提前返回并保留未完成态，供后续普通 run 优先恢复。
         if failed_stock_count == 0:
-            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]")
+            await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]", strict=True)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _run_incremental_sync(
@@ -1057,6 +1059,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             engine,
                             _FINANCIAL_DISCLOSURE_CHECKPOINT_KEY,
                             day_str,
+                            strict=True,
                         )
 
                 if pending_dirty:
@@ -1064,6 +1067,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         engine,
                         _FINANCIAL_DISCLOSURE_PENDING_KEY,
                         _dump_pending_disclosure_targets(pending),
+                        strict=True,
                     )
                     pending_dirty = False
 
@@ -1086,12 +1090,20 @@ class FinancialSyncStrategy(ISyncStrategy):
                     break
         finally:
             # 取消/异常时也持久化已知未解决目标（检查点未推进，下次从该日重试）。
+            # D05-002：此时主异常（含 CancelledError，R2）在途，生命周期错误不得掩盖它；
+            # 检查点未推进，pending 丢失由下次从旧检查点重扫自愈。
             if pending_dirty:
-                await set_app_state(
-                    engine,
-                    _FINANCIAL_DISCLOSURE_PENDING_KEY,
-                    _dump_pending_disclosure_targets(pending),
-                )
+                try:
+                    await set_app_state(
+                        engine,
+                        _FINANCIAL_DISCLOSURE_PENDING_KEY,
+                        _dump_pending_disclosure_targets(pending),
+                    )
+                except EngineDisposedError:
+                    logger.warning(
+                        "[FinancialSync] Incremental | Engine disposed while persisting pending targets; "
+                        "checkpoint not advanced, retry from previous checkpoint."
+                    )
 
         # --- Step 2: Batch Sync Corporate Actions (O(Time) Optimization) ---
         # Sync Forecasts, Dividends, etc. by date. 即使 day 循环已取消也要调用：
@@ -1181,6 +1193,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     engine,
                     _FINANCIAL_CORPORATE_ACTION_PENDING_KEY,
                     _dump_pending_corporate_targets(pending_map),
+                    strict=True,
                 )
                 pending_dirty = False
 
@@ -1341,6 +1354,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     engine,
                     _FINANCIAL_CORPORATE_ACTION_PENDING_KEY,
                     _dump_pending_corporate_targets(pending_map),
+                    strict=True,
                 )
                 pending_dirty = False
 
