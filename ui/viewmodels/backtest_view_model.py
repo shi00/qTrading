@@ -21,7 +21,7 @@ from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TERMINAL_STATUSES, AppTask, TaskManager, TaskStatus
-from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning, WarningCategory
+from strategies.backtest.config import BacktestConfig, BacktestResult, BacktestStatus, DataWarning, WarningCategory
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -813,6 +813,31 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 # BT-02: 归属判定 —— 旧任务（已取消/已被新运行取代）的迟到结果
                 # 不得写入当前 state（不做「前面已算完所以照写」的例外）。
                 if not self._owns_run(run_token):
+                    return None
+
+                # D12-005: 引擎/服务返回显式取消终态时，不得映射为「已完成」
+                # （不写 metrics/run_id，也不伪造成功文案）；与 CancelledError 路径
+                # 一致落取消状态，并标记该运行不得被迟到回调复活（R21）。
+                if result.status == BacktestStatus.CANCELLED:
+                    if self._claim_run_terminal(run_token):
+                        self._cancelled_run_id = run_token
+                        self._set_state(
+                            is_running=False,
+                            progress=0.0,
+                            progress_message=None,
+                            status_message=Message("backtest_cancelled"),
+                            status_color="warning",
+                            nav_dates=(),
+                            benchmark_curve=(),
+                            ic_dates=(),
+                            strategy_name=None,
+                            benchmark_name=None,
+                            credibility_level="ok",
+                            warnings=(),
+                            skipped_order_count=0,
+                            failed_date_count=0,
+                            caveats=(),
+                        )
                     return None
 
                 # 透传净值横轴日期与 IC 横轴日期; 构造基准相对净值曲线 (同起点锚定)

@@ -16,7 +16,7 @@ import pytest
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from services.backtest_service import BacktestService
 from services.task_manager import AppTask, TaskManager, TaskStatus
-from strategies.backtest.config import BacktestConfig, DataWarning
+from strategies.backtest.config import BacktestConfig, BacktestStatus, DataWarning
 from strategies.backtest.engine import VectorBacktestEngine
 from ui.viewmodels import Message
 from ui.viewmodels.backtest_view_model import (
@@ -540,6 +540,22 @@ class TestBacktestViewModelRunBacktest:
         assert captured["factory"] is not None
         await captured["factory"](task_id="task_credibility")
         return vm
+
+    @pytest.mark.asyncio
+    async def test_cancelled_result_maps_to_cancelled_not_completed(self):
+        """D12-005: 服务返回 CANCELLED 终态 → UI 落取消态，且不写成功结果字段。"""
+        result = self._result_with(status=BacktestStatus.CANCELLED)
+
+        vm = await self._exec_backtest(result)
+
+        assert vm.state.is_running is False
+        assert vm.state.status_color == "warning"
+        assert vm.state.status_message == Message("backtest_cancelled")
+        assert vm.state.metrics == ()
+        assert vm.state.run_id is None
+        assert vm.state.nav_dates == ()
+        assert vm.state.trades == ()
+        assert vm.state.caveats == ()
 
     async def _exec_backtest_with_strategy(self, strategy_obj: Any, result: Any = None) -> BacktestViewModel:
         """运行一次成功的回测, 使用指定策略对象 (BIZ-04: 控制 supports_ai)."""

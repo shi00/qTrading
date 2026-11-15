@@ -21,7 +21,7 @@ from core.i18n import Message
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
-from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning, WarningCategory
+from strategies.backtest.config import BacktestConfig, BacktestResult, BacktestStatus, DataWarning, WarningCategory
 from strategies.backtest.data_provider import BacktestDataProvider
 from strategies.backtest.metrics import BacktestMetrics
 from strategies.backtest.portfolio import PortfolioSimulator
@@ -143,6 +143,12 @@ class VectorBacktestEngine:
         if errors:
             raise ValueError(f"Invalid backtest config: {errors}")
 
+        # D12-005: 取消是显式终态，不是「正常完成」。无进展取消直接在取数前短路，
+        # 避免继续加载行情/撮合并把空信号结果伪装成一次成功的回测。
+        if cancel_check is not None and cancel_check():
+            logger.info("[VectorBacktestEngine] Backtest cancelled before run (run_id=%s)", run_id)
+            return self._cancelled_result(strategy, params, run_id, start_time)
+
         # UIR-F11-001: 运行前校验历史数据上下文能力（cache / trade_calendar）。
         # 缺失时明确拒绝，而非让策略在历史窗口取数前抛 AttributeError 或静默空信号。
         self.data_provider.validate_history_capabilities()
@@ -175,6 +181,17 @@ class VectorBacktestEngine:
             failed_signal_dates,
             cancel_check,
         )
+
+        # D12-005: _generate_signals 在检测到取消时仅 break（协程需正常返回以完成
+        # 清理），此处再次确认取消标志：已取消的运行必须返回 CANCELLED 终态，
+        # 不得继续进入行情加载/撮合，更不能被服务层当作完整结果持久化。
+        if cancel_check is not None and cancel_check():
+            logger.info(
+                "[VectorBacktestEngine] Backtest cancelled after signal generation (run_id=%s, signals=%s)",
+                run_id,
+                signals.height,
+            )
+            return self._cancelled_result(strategy, params, run_id, start_time, failed_signal_dates)
 
         # D4-9: 信号非空时仅加载信号涉及标的；空信号回退全市场（等价旧行为，兼容无信号路径）。
         target_codes = signals["ts_code"].unique().to_list() if not signals.is_empty() else None
@@ -351,6 +368,42 @@ class VectorBacktestEngine:
             delist_loss_amount=delist_stats["delist_loss_amount"],
             has_real_score=has_real_score,
             real_score_ratio=real_score_ratio,
+            status=BacktestStatus.COMPLETED,
+        )
+
+    def _cancelled_result(
+        self,
+        strategy: BaseStrategy,
+        params: dict | None,
+        run_id: str,
+        start_time: float,
+        failed_signal_dates: list[dict] | None = None,
+    ) -> BacktestResult:
+        """构造显式取消终态结果（D12-005，不进入完成保存路径）。
+
+        取消时只保留运行身份与已发生的失败交易日摘要，净值/指标/持仓等完成态
+        字段一律为空：这些字段在没有完整模拟时没有业务含义，填充任何数值都会
+        被下游误读为「一次完成的回测」。状态由 ``status=CANCELLED`` 承载。
+        """
+        return BacktestResult(
+            config=self.config,
+            strategy_name=strategy.name,
+            params_snapshot=params or {},
+            nav_curve=pl.DataFrame(),
+            daily_returns=pl.Series([], dtype=pl.Float64),
+            benchmark_returns=pl.Series([], dtype=pl.Float64),
+            trades=pl.DataFrame(),
+            positions=pl.DataFrame(),
+            skipped_orders=pl.DataFrame(),
+            metrics={},
+            ic_series=pl.Series([], dtype=pl.Float64),
+            period_stats=pl.DataFrame(),
+            data_warnings=(),
+            failed_signal_dates=tuple(failed_signal_dates or ()),
+            run_id=run_id,
+            executed_at=get_now(),
+            duration_ms=int((time.perf_counter() - start_time) * 1000),
+            status=BacktestStatus.CANCELLED,
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

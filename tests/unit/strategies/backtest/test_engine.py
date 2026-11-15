@@ -11,7 +11,7 @@ import pytest
 
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
-from strategies.backtest.config import BacktestConfig, DataWarning, WarningCategory
+from strategies.backtest.config import BacktestConfig, BacktestStatus, DataWarning, WarningCategory
 from strategies.backtest.engine import VectorBacktestEngine, _compute_real_score_ratio
 
 
@@ -1733,6 +1733,74 @@ class TestRunMergesRangePreloadWarnings:
         result = await engine.run(strategy=strategy)
 
         assert not any(str(w).startswith("[preload_range_too_wide]") for w in result.data_warnings)
+        assert result.status == BacktestStatus.COMPLETED
+
+
+class TestRunCancellationTerminalState:
+    """D12-005: 取消是显式终态，不得被当作正常完成结果返回。"""
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_run_returns_cancelled_without_data_access(self):
+        """无进展取消：取数/预载前直接短路，返回 CANCELLED 且完成态字段为空。"""
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.data_provider = MagicMock()
+        engine._get_trade_dates = AsyncMock(return_value=[date(2024, 1, 2)])
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        result = await engine.run(strategy=strategy, cancel_check=lambda: True)
+
+        assert result.status == BacktestStatus.CANCELLED
+        assert result.run_id
+        assert result.metrics == {}
+        assert result.nav_curve.is_empty()
+        assert result.trades.is_empty()
+        engine._get_trade_dates.assert_not_called()
+        engine.data_provider.validate_history_capabilities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_signal_generation_returns_cancelled_and_skips_simulation(self, monkeypatch):
+        """中途取消：信号生成 break 后再次确认取消，不进入行情加载/撮合。"""
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.preload_range = AsyncMock(return_value=None)
+        dp.build_context = AsyncMock(return_value={})
+        engine.data_provider = dp
+
+        state = {"cancel": False}
+
+        async def _generate_signal(*args, **kwargs):
+            state["cancel"] = True
+            return pl.DataFrame()
+
+        strategy_adapter = MagicMock()
+        strategy_adapter.generate_signal = AsyncMock(side_effect=_generate_signal)
+        engine.strategy_adapter = strategy_adapter
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_check_trade_dates_coverage", MagicMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        load_quotes = AsyncMock(return_value=(pl.DataFrame(), []))
+        monkeypatch.setattr(engine, "_load_quotes", load_quotes)
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        result = await engine.run(strategy=strategy, cancel_check=lambda: state["cancel"])
+
+        assert result.status == BacktestStatus.CANCELLED
+        assert result.metrics == {}
+        assert result.nav_curve.is_empty()
+        load_quotes.assert_not_called()
 
 
 class TestRunDelistingAsOfApproximationWarning:
