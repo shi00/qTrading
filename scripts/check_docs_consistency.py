@@ -4998,8 +4998,9 @@ def _report_update_result(result: docs_generated.UpdateResult) -> None:
             print(f"  - {rel}: {reason}")
     if result.failed:
         print("[FAIL] 写入失败目标（不承诺跨文件事务，其余目标已各自提交）:")
-        for rel in result.failed:
-            print(f"  - {rel}")
+        for index, rel in enumerate(result.failed):
+            reason = result.failure_reasons[index] if index < len(result.failure_reasons) else "未提供原因"
+            print(f"  - {rel}: {reason}")
     if result.post_check_errors:
         print("[FAIL] 更新后 all 检查失败:")
         for err in result.post_check_errors:
