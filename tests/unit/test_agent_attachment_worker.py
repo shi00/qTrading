@@ -6,6 +6,7 @@ XLSX 同源双表示与缓存适用性（有/无/空/错误/字符串）、sheet
 """
 
 import asyncio
+import hashlib
 import io
 import json
 import sys
@@ -26,6 +27,7 @@ from core.agent_types import (
     RowsRange,
     Selection,
     SheetsRange,
+    decode_selected_range,
     to_wire_dict,
 )
 from services.agent_service.attachment_worker import AttachmentParseError, parse_attachment
@@ -55,6 +57,35 @@ def _parse(
         budget=budget or AttachmentBudget(),
         deadline=_deadline(),
     )
+
+
+def _parse_expired(
+    kind: AttachmentKind, data: bytes, selection: Selection | None = None, budget: AttachmentBudget | None = None
+):
+    """以已过期的 deadline 解析（模拟 30 秒预算耗尽时的部分读取）。"""
+
+    return parse_attachment(
+        kind=kind,
+        data=data,
+        selection=selection or Selection(kind="all"),
+        budget=budget or AttachmentBudget(),
+        deadline=time.monotonic() - 1.0,
+    )
+
+
+def _assert_selected_range_contract(selection: Selection, parsed: Any) -> None:
+    decoded = decode_selected_range(
+        {
+            "selection": to_wire_dict(selection),
+            "read_ranges": parsed.read_ranges,
+            "unread_ranges": parsed.unread_ranges,
+            "stats": parsed.stats,
+            "limitations": parsed.limitations,
+            "accepted_limited_version": None,
+        },
+        "$.result.selected_range",
+    )
+    assert decoded.selection == selection
 
 
 def _limit_of(data: bytes, selection: Selection, budget: AttachmentBudget, kind: AttachmentKind) -> str:
@@ -138,6 +169,22 @@ class TestCsvExtraction:
         assert _limit_of(data, Selection(kind="all"), AttachmentBudget(max_rows=2), AttachmentKind.CSV) == (
             "attachment_rows_exceeded"
         )
+
+    def test_multi_range_rows_limit_is_cumulative_across_segments(self) -> None:
+        data = b"h\n1\n2\n3\n4\n"  # 表头 + 4 条数据记录
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet=None, start=2, end=3),
+                RowsRange(kind="rows", sheet=None, start=4, end=5),
+            ),
+        )
+        # 两段各 2 条，合计 4 条：max_rows=3 必须拒绝（不能按段重置）。
+        assert _limit_of(data, selection, AttachmentBudget(max_rows=3), AttachmentKind.CSV) == (
+            "attachment_rows_exceeded"
+        )
+        exact = _parse(AttachmentKind.CSV, data, selection, AttachmentBudget(max_rows=4))
+        assert exact.stats["rows"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +356,64 @@ class TestXlsxExtraction:
         code = _limit_of(data, Selection(kind="all"), AttachmentBudget(max_rows=2), AttachmentKind.XLSX)
         assert code == "attachment_rows_exceeded"
 
+    def test_rows_selection_across_sheets_does_not_count_as_overlap(self) -> None:
+        # B2：不同工作表的相同行号互不重叠，不能被跨表误判为重叠选择。
+        data = _xlsx_bytes(sheets=2)
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=3),
+                RowsRange(kind="rows", sheet="S2", start=1, end=1),
+            ),
+        )
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_state is ReadState.READY
+        assert parsed.stats["rows"] == 4
+        assert parsed.unread_ranges == []
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_rows_selection_same_sheet_overlap_is_rejected(self) -> None:
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=2),
+                RowsRange(kind="rows", sheet="S1", start=2, end=3),
+            ),
+        )
+        assert _limit_of(_xlsx_bytes(), selection, AttachmentBudget(), AttachmentKind.XLSX) == "invalid_selection"
+
+    def test_timeout_partial_rows_reports_complete_read_and_unread(self) -> None:
+        # B3：超时部分读取必须生成 decode_selected_range 可接受的已读/未读原子。
+        data = _xlsx_bytes(sheets=2)
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=3),
+                RowsRange(kind="rows", sheet="S2", start=1, end=1),
+            ),
+        )
+        parsed = _parse_expired(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == [to_wire_dict(atom) for atom in selection.ranges]
+        assert parsed.limitations[0]["code"] == "extract_timeout"
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_timeout_partial_sheets_marks_incomplete_sheet_unread(self) -> None:
+        data = _xlsx_bytes(sheets=2)
+        selection = Selection(kind="limited", ranges=(SheetsRange(kind="sheets", names=("S1", "S2")),))
+        parsed = _parse_expired(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == [to_wire_dict(SheetsRange(kind="sheets", names=("S1", "S2")))]
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_timeout_all_selection_is_explicitly_rejected(self) -> None:
+        # all 分型无法表达部分读取：明确拒绝，不把截断伪装成完整读取。
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse_expired(AttachmentKind.XLSX, _xlsx_bytes())
+        assert exc.value.code == "attachment_time_exceeded"
+
 
 # ---------------------------------------------------------------------------
 # 内容类型嗅探
@@ -354,7 +459,7 @@ def _request(
         file_name=name,
         source_id="src-1",
         source_version="1",
-        source_digest="0" * 64,
+        source_digest=hashlib.sha256(data).hexdigest(),
         kind=kind,
         data=data,
         selection=Selection(kind="all"),
@@ -404,6 +509,59 @@ class TestWorkerLifecycle:
                 break
             await asyncio.sleep(0.1)
         assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_cancel_only_terminates_its_own_worker(self) -> None:
+        worker = SubprocessAttachmentWorker(
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+            timeout_s=30.0,
+        )
+        first = asyncio.create_task(worker.extract(_request(b"one")))
+        second = asyncio.create_task(worker.extract(_request(b"two")))
+        for _ in range(50):
+            if len(worker.active_pids()) == 2:
+                break
+            await asyncio.sleep(0.1)
+        assert len(worker.active_pids()) == 2
+        first.cancel()
+        try:
+            await first
+        except asyncio.CancelledError:
+            pass
+        # 取消 A 不得误杀同实例的 B：A 退出后仍应恰有一个在途子进程。
+        for _ in range(50):
+            if len(worker.active_pids()) == 1:
+                break
+            await asyncio.sleep(0.1)
+        assert len(worker.active_pids()) == 1
+        second.cancel()
+        try:
+            await second
+        except asyncio.CancelledError:
+            pass
+        for _ in range(50):
+            if worker.active_pids() == ():
+                break
+            await asyncio.sleep(0.1)
+        assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_worker_rejects_digest_mismatch(self) -> None:
+        request = _request(b"hello")
+        mismatched = AttachmentExtractionRequest(
+            user_scope=request.user_scope,
+            attachment_id=request.attachment_id,
+            file_name=request.file_name,
+            source_id=request.source_id,
+            source_version=request.source_version,
+            source_digest="0" * 64,
+            kind=request.kind,
+            data=request.data,
+            selection=request.selection,
+        )
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await SubprocessAttachmentWorker().extract(mismatched)
+        assert exc.value.code == "attachment_digest_mismatch"
 
     def test_parent_rejects_oversize_before_spawn(self) -> None:
         worker = SubprocessAttachmentWorker()

@@ -33,7 +33,8 @@ from core.agent_types import (
 )
 from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
 
-_TIMESTAMP_KEYS = ("created_at", "timestamp", "run_time", "created_time")
+#: 可用的回测时间列：``executed_at`` 是 ``backtest_results`` 的真实列（无 ``created_at``）。
+_TIMESTAMP_KEYS = ("executed_at", "created_at", "timestamp", "run_time", "created_time")
 
 
 class BacktestResultReader(Protocol):
@@ -86,6 +87,11 @@ async def read_backtest_snapshot(
     available_at = _wire_timestamp(_first_timestamp(row))
     cutoff_dt = _parse_timestamp(cutoff, identity)
     if cutoff_dt is not None:
+        if available_at is None:
+            # 时点未知不能伪装成「晚于截止」（R21）：单独给出可审计原因。
+            return BusinessSnapshotRead(
+                source=None, read_state=ReadState.UNAVAILABLE, missing_reason="available_at_unknown"
+            )
         available_dt = _parse_timestamp(available_at, identity)
         if available_dt is None or available_dt > cutoff_dt:
             return BusinessSnapshotRead(

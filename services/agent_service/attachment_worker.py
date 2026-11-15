@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import itertools
 import json
@@ -126,15 +127,17 @@ def _check_no_overlap(
     selection: Selection,
     atom_type: type[PagesRange] | type[RowsRange] | type[CodepointsRange] | type[ParagraphsRange],
 ) -> None:
-    spans: list[tuple[int, int]] = []
+    # RowsRange 的行号按工作表独立编号：不同表可共享行号，只有同表行段才构成重叠。
+    groups: dict[str | None, list[tuple[int, int]]] = {}
     for atom in selection.ranges:
         if isinstance(atom, atom_type):
-            start, end = atom.start, atom.end
-            spans.append((start, end))
-    spans.sort()
-    for (_prev_start, prev_end), (start, _end) in itertools.pairwise(spans):
-        if start <= prev_end:
-            raise AttachmentParseError("invalid_selection", "overlapping ranges in selection")
+            sheet = atom.sheet if isinstance(atom, RowsRange) else None
+            groups.setdefault(sheet, []).append((atom.start, atom.end))
+    for spans in groups.values():
+        spans.sort()
+        for (_prev_start, prev_end), (start, _end) in itertools.pairwise(spans):
+            if start <= prev_end:
+                raise AttachmentParseError("invalid_selection", "overlapping ranges in selection")
 
 
 def _require_ranges(selection: Selection, atom_type: type) -> list[Any]:
@@ -215,6 +218,7 @@ def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
     else:
         selected = []
         read_ranges = []
+        selected_data_rows = 0
         for atom in selection.ranges:
             assert isinstance(atom, RowsRange)
             if atom.sheet is not None:
@@ -222,7 +226,9 @@ def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
             if atom.end > total_records:
                 raise AttachmentParseError("invalid_selection", "rows range exceeds selected source")
             chunk = records[atom.start - 1 : atom.end]
-            budget.enforce_rows(max(0, len(chunk) - (1 if atom.start == 1 else 0)))
+            # D06 记录行限额按本文件累计（不按每个行段重置）；表头只在被选中时不计。
+            selected_data_rows += max(0, len(chunk) - (1 if atom.start == 1 else 0))
+            budget.enforce_rows(selected_data_rows)
             selected.extend(chunk)
             read_ranges.append(to_wire_dict(atom))
 
@@ -553,10 +559,8 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         sheet_names = list(formulas.sheetnames)
         if selection.kind == "all":
             selected_sheets = sheet_names
-            read_ranges: list[dict[str, Any]] = [to_wire_dict(AllAtom())]
         else:
             selected_sheets = []
-            read_ranges = []
             for atom in selection.ranges:
                 if isinstance(atom, SheetsRange):
                     for name in atom.names:
@@ -570,7 +574,6 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                         raise AttachmentParseError("invalid_selection", "XLSX rows must name an existing sheet")
                     if atom.sheet not in selected_sheets:
                         selected_sheets.append(atom.sheet)
-                    read_ranges.append(to_wire_dict(atom))
         budget.enforce_sheets(len(selected_sheets))
 
         blocks: list[str] = []
@@ -579,8 +582,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         total_chars = 0
         read_sheets: list[str] = []
         partial_sheet: str | None = None
-        partial_completed_row: int = 0
-        partial_total_row: int = 0
+        partial_last_row: int = 0
 
         for sheet_name in selected_sheets:
             target_rows = _xlsx_row_range(selection, sheet_name)
@@ -588,6 +590,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             cached_sheet = cached[sheet_name]
             rows: list[dict[str, Any]] = []
             row_number = 0
+            last_completed_row = 0
             for formula_row, cached_row in zip(formula_sheet.iter_rows(), cached_sheet.iter_rows(), strict=False):
                 first_cell = formula_row[0] if formula_row else None
                 physical_row = getattr(first_cell, "row", None)
@@ -598,8 +601,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 budget.enforce_rows(total_rows)
                 if time.monotonic() > deadline:
                     partial_sheet = sheet_name
-                    partial_completed_row = row_number - 1
-                    partial_total_row = target_rows[1] if target_rows is not None else row_number
+                    partial_last_row = last_completed_row
                     limitations.append(_limitation("extract_timeout", "所选范围未在 30 秒内完成，已读部分保留"))
                     break
                 formula_refs: set[str] = set()
@@ -642,33 +644,21 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                     )
                 budget.enforce_codepoints(total_chars)
                 rows.append({"row": row_number, "cells": cells})
+                last_completed_row = row_number
             if partial_sheet is not None:
                 break
             read_sheets.append(sheet_name)
             blocks.append(json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows}))
 
-        unread_ranges: list[dict[str, Any]] = []
+        read_ranges, unread_ranges = _xlsx_read_unread_atoms(
+            selection,
+            read_sheets=read_sheets,
+            partial_sheet=partial_sheet,
+            partial_last_row=partial_last_row,
+        )
         if partial_sheet is not None:
             read_state = ReadState.PARTIAL
             coverage = "limited"
-            if partial_completed_row >= 1:
-                read_ranges.append(
-                    to_wire_dict(RowsRange(kind="rows", sheet=partial_sheet, start=1, end=partial_completed_row))
-                )
-            if partial_total_row > partial_completed_row:
-                unread_ranges.append(
-                    to_wire_dict(
-                        RowsRange(
-                            kind="rows",
-                            sheet=partial_sheet,
-                            start=partial_completed_row + 1,
-                            end=partial_total_row,
-                        )
-                    )
-                )
-            remaining = [name for name in selected_sheets if name not in read_sheets and name != partial_sheet]
-            if remaining:
-                unread_ranges.append(to_wire_dict(SheetsRange(kind="sheets", names=tuple(remaining))))
         else:
             read_state = ReadState.READY
             coverage = "full"
@@ -694,6 +684,64 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             probe.close()
         formulas.close()
         cached.close()
+
+
+def _xlsx_read_unread_atoms(
+    selection: Selection,
+    *,
+    read_sheets: list[str],
+    partial_sheet: str | None,
+    partial_last_row: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """按选择轴生成契约合法的已读/未读原子（§3.3.1 / D06）。
+
+    - ``selection=all``：只允许空或恰一个 ``all`` 原子；无法表达部分读取，
+      故超时时明确拒绝（不把截断伪装成完整读取）。
+    - ``selection=sheets``：粒度为整表；未完成的表记未读（保守，不冒充已读）。
+    - ``selection=rows``：按每段准确行区间切分已完成前缀与剩余未读。
+    """
+
+    if selection.kind == "all":
+        if partial_sheet is None:
+            return [to_wire_dict(AllAtom())], []
+        raise AttachmentParseError(
+            "attachment_time_exceeded",
+            "所选范围未在 30 秒内完成，且 selection=all 无法表达部分读取",
+        )
+    if partial_sheet is None:
+        return [to_wire_dict(atom) for atom in selection.ranges], []
+    read_atoms: list[dict[str, Any]] = []
+    unread_atoms: list[dict[str, Any]] = []
+    seen_sheets: set[str] = set()
+    for atom in selection.ranges:
+        if isinstance(atom, SheetsRange):
+            read_names: list[str] = []
+            unread_names: list[str] = []
+            for name in atom.names:
+                if name in seen_sheets:
+                    continue
+                seen_sheets.add(name)
+                (read_names if name in read_sheets else unread_names).append(name)
+            if read_names:
+                read_atoms.append(to_wire_dict(SheetsRange(kind="sheets", names=tuple(read_names))))
+            if unread_names:
+                unread_atoms.append(to_wire_dict(SheetsRange(kind="sheets", names=tuple(unread_names))))
+            continue
+        assert isinstance(atom, RowsRange)
+        assert atom.sheet is not None
+        if atom.sheet in read_sheets:
+            read_atoms.append(to_wire_dict(atom))
+            continue
+        if atom.sheet == partial_sheet and partial_last_row >= atom.start:
+            read_end = min(atom.end, partial_last_row)
+            read_atoms.append(to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=atom.start, end=read_end)))
+            if read_end < atom.end:
+                unread_atoms.append(
+                    to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=read_end + 1, end=atom.end))
+                )
+        else:
+            unread_atoms.append(to_wire_dict(atom))
+    return read_atoms, unread_atoms
 
 
 def _xlsx_row_range(selection: Selection, sheet_name: str) -> tuple[int, int] | None:
@@ -857,6 +905,13 @@ def _read_exact(stream: Any, size: int) -> bytes:
 
 def _handle_request(header: dict[str, Any], payload: bytes) -> dict[str, Any]:
     try:
+        expected_digest = header["source_digest"]
+        if not isinstance(expected_digest, str) or not expected_digest:
+            raise AttachmentParseError("invalid_request", "worker source_digest is invalid")
+        if hashlib.sha256(payload).hexdigest() != expected_digest:
+            raise AttachmentParseError(
+                "attachment_digest_mismatch", "attachment payload does not match declared source digest"
+            )
         kind = AttachmentKind(header["kind"])
         selection = decode_selection(header["selection"], "$.selection")
         budget = AttachmentBudget(**header.get("budget", {}))

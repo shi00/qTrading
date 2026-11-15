@@ -27,7 +27,8 @@ def _row() -> dict:
     return {
         "run_id": "run-1",
         "strategy_name": "northbound",
-        "created_at": datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        # backtest_results 的真实时间列是 executed_at（无 created_at）。
+        "executed_at": datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
         "start_date": "2025-01-01",
         "end_date": "2025-12-31",
         "total_return": 0.123,
@@ -112,6 +113,30 @@ class TestBacktestSnapshotRead:
         assert result.source.source.source_id == "backtest:run-1"
         assert len(result.source.source.digest) == 64
         assert result.source.verification is VerificationState.PROGRAM_VERIFIED
+        assert result.read_state is ReadState.READY
+
+    @pytest.mark.asyncio
+    async def test_unknown_available_at_with_cutoff_is_not_mislabeled(self) -> None:
+        # R21：时点未知 ≠ 晚于截止；必须给可审计的独立原因。
+        row = _row()
+        row.pop("executed_at")
+        result = await read_backtest_snapshot(
+            FakeReader(row=row),
+            user_scope="u1",
+            result_id="run-1",
+            cutoff="2026-02-01T00:00:00.000000Z",
+        )
+        assert result.source is None
+        assert result.read_state is ReadState.UNAVAILABLE
+        assert result.missing_reason == "available_at_unknown"
+
+    @pytest.mark.asyncio
+    async def test_unknown_available_at_without_cutoff_stays_unknown(self) -> None:
+        row = _row()
+        row.pop("executed_at")
+        result = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
+        assert result.source is not None
+        assert result.source.source.available_at is None
         assert result.read_state is ReadState.READY
 
     @pytest.mark.asyncio

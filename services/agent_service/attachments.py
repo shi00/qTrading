@@ -19,7 +19,7 @@ import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import Final
+from typing import Any, Final
 
 from core.agent_types import (
     DEFAULT_ATTACHMENT_BUDGET,
@@ -36,8 +36,7 @@ from core.agent_types import (
     SourceVersionRef,
     decode_fact_value,
     decode_json_doc,
-    decode_range_atom,
-    decode_range_limitation,
+    decode_selected_range,
     to_wire_dict,
 )
 from services.agent_service.attachment_worker import MAX_HEADER_BYTES, MAX_RESULT_BYTES
@@ -151,6 +150,21 @@ def _is_xlsx_container(data: bytes) -> bool:
     return "xl/workbook.xml" in names
 
 
+@dataclass
+class _ActiveRun:
+    """单次请求的子进程登记；取消只作用于本请求，不误杀同实例其他 worker。"""
+
+    process: subprocess.Popen[bytes] | None = None
+    cancelled: bool = False
+
+
+def _consume_future_result(future: asyncio.Future[Any]) -> None:
+    """已取消外层 waiter 的后台任务：取走异常，避免「never retrieved」告警。"""
+
+    if not future.cancelled():
+        future.exception()
+
+
 class SubprocessAttachmentWorker:
     """受监督子进程提取器：默认 ``python -m services.agent_service.attachment_worker``。
 
@@ -177,18 +191,34 @@ class SubprocessAttachmentWorker:
             return tuple(self._active)
 
     async def extract(self, request: AttachmentExtractionRequest) -> AttachmentExtractionResult:
-        """在线程池执行同步子进程提取；调用方取消只终止本 worker 的子进程后 raise。"""
+        """在线程池执行同步子进程提取；调用方取消只终止本请求的子进程后 raise。"""
 
-        pending = asyncio.ensure_future(ThreadPoolManager().run_async(TaskType.IO, self._run_sync, request))
+        run = _ActiveRun()
+        pending = asyncio.ensure_future(ThreadPoolManager().run_async(TaskType.IO, self._run_sync, request, run))
         try:
             return await pending
         except asyncio.CancelledError:
-            self._terminate_active()
+            # 事件循环线程只做非阻塞 terminate；等待回收由 worker 线程完成（R16）。
+            self._cancel_run(run)
+            pending.add_done_callback(_consume_future_result)
             raise
+
+    def _cancel_run(self, run: _ActiveRun) -> None:
+        with self._lock:
+            run.cancelled = True
+            process = run.process
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                # 进程可能刚退出；回收仍由 worker 线程的 communicate/terminate 完成。
+                pass
 
     # ---- 同步实现（线程池内执行） ----
 
-    def _run_sync(self, request: AttachmentExtractionRequest) -> AttachmentExtractionResult:
+    def _run_sync(self, request: AttachmentExtractionRequest, run: _ActiveRun) -> AttachmentExtractionResult:
+        if run.cancelled:
+            raise AttachmentWorkerError("attachment_cancelled", "attachment extraction was cancelled")
         self._validate_request(request)
         detected = detect_attachment_kind(request.file_name, request.data)
         if detected is not request.kind:
@@ -201,6 +231,7 @@ class SubprocessAttachmentWorker:
             "schema_version": 1,
             "kind": request.kind.value,
             "selection": to_wire_dict(request.selection),
+            "source_digest": request.source_digest,
             "budget": {
                 "max_files": self._budget.max_files,
                 "max_source_bytes": self._budget.max_source_bytes,
@@ -234,7 +265,15 @@ class SubprocessAttachmentWorker:
         except OSError as exc:
             raise AttachmentWorkerError("worker_unavailable", "attachment worker cannot be started") from exc
         with self._lock:
+            run.process = process
             self._active[process.pid] = process
+            cancelled_before_spawn = run.cancelled
+        if cancelled_before_spawn:
+            # 取消发生在登记之前：此处终止，避免留下无人等待的孤儿子进程。
+            self._terminate(process)
+            with self._lock:
+                self._active.pop(process.pid, None)
+            raise AttachmentWorkerError("attachment_cancelled", "attachment extraction was cancelled")
         payload = header_bytes + b"\n" + request.data
         try:
             try:
@@ -247,6 +286,8 @@ class SubprocessAttachmentWorker:
         finally:
             with self._lock:
                 self._active.pop(process.pid, None)
+        if run.cancelled:
+            raise AttachmentWorkerError("attachment_cancelled", "attachment extraction was cancelled")
         elapsed_s = time.monotonic() - started
         exited = process.poll() is not None
         if not exited:
@@ -358,35 +399,20 @@ class SubprocessAttachmentWorker:
                 blocks_list.append(block)
             blocks = tuple(blocks_list)
             facts = tuple(decode_fact_value(fact, f"$.result.facts[{index}]") for index, fact in enumerate(facts_raw))
-            limitations = tuple(
-                decode_range_limitation(item, f"$.result.limitations[{index}]")
-                for index, item in enumerate(limitations_raw)
-            )
-            read_ranges = tuple(
-                decode_range_atom(item, f"$.result.read_ranges[{index}]", allow_all=True)
-                for index, item in enumerate(read_raw)
-            )
-            unread_ranges = tuple(
-                decode_range_atom(item, f"$.result.unread_ranges[{index}]", allow_all=True)
-                for index, item in enumerate(unread_raw)
-            )
             stats_raw = result["stats"]
             if not isinstance(stats_raw, dict):
                 raise ValueError("stats")
-            stats = RangeStats(
-                source_bytes=_opt_int(stats_raw.get("source_bytes")),
-                pages=_opt_int(stats_raw.get("pages")),
-                sheets=_opt_int(stats_raw.get("sheets")),
-                rows=_opt_int(stats_raw.get("rows")),
-                chars=_opt_int(stats_raw.get("chars")),
-            )
-            selected_range = SelectedRange(
-                selection=request.selection,
-                read_ranges=read_ranges,
-                unread_ranges=unread_ranges,
-                stats=stats,
-                limitations=limitations,
-                accepted_limited_version=None,
+            # 父进程按 §3.3.1 严格复核：all/limited 归属、同轴、包含与互斥重叠。
+            selected_range = decode_selected_range(
+                {
+                    "selection": to_wire_dict(request.selection),
+                    "read_ranges": read_raw,
+                    "unread_ranges": unread_raw,
+                    "stats": stats_raw,
+                    "limitations": limitations_raw,
+                    "accepted_limited_version": None,
+                },
+                "$.result.selected_range",
             )
         except AgentValidationError as exc:
             raise AttachmentWorkerError("worker_protocol_invalid", f"attachment result is invalid: {exc.code}") from exc
@@ -405,8 +431,8 @@ class SubprocessAttachmentWorker:
             body_text=body_text,
             blocks=blocks,
             facts=facts,
-            limitations=limitations,
-            stats=stats,
+            limitations=selected_range.limitations,
+            stats=selected_range.stats,
             worker_pid=pid,
             worker_exited=True,
             elapsed_s=elapsed_s,
@@ -423,19 +449,3 @@ class SubprocessAttachmentWorker:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(_KILL_GRACE_S)
-
-    def _terminate_active(self) -> None:
-        with self._lock:
-            processes = list(self._active.values())
-        for process in processes:
-            self._terminate(process)
-
-
-def _opt_int(value: object) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("stat value must be an integer or null")
-    if value < 0:
-        raise ValueError("stat value must be non-negative")
-    return value
