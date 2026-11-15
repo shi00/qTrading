@@ -30,6 +30,7 @@ from datetime import datetime as dt
 from datetime import UTC
 from decimal import Decimal
 from enum import Enum
+from pathlib import PureWindowsPath
 from typing import Any, Final, NoReturn, cast
 
 # ---------------------------------------------------------------------------
@@ -7633,5 +7634,468 @@ def decode_draft_transfer_receipt(value: object, path: str = "$.draft_transfer_r
         source_revision=_opt_positive_revision(value["source_revision"], f"{path}.source_revision"),
         target_revision=_opt_positive_revision(value["target_revision"], f"{path}.target_revision"),
         verified_at=_require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
+        next_action=next_action_raw,
+    )
+
+
+# ---------------------------------------------------------------------------
+# E-05 成果交付命令与 Windows 目标保护契约（§4.2 L438/L445、§10.5、HANDOFF §10.2）
+# ---------------------------------------------------------------------------
+
+#: 已保存成果导出格式（§10.2：Markdown / BOM UTF-8 CSV / XLSX，默认 Markdown）。
+DELIVERY_FORMATS: Final[frozenset[str]] = frozenset({"md", "csv", "xlsx"})
+
+#: 交付格式规则版本（与实现绑定；规则变更时递增，旧 manifest 保留原值）。
+DELIVERY_FORMAT_RULE_VERSION: Final = 1
+
+#: 单个可逆分段上限：30,000 UTF-16 单元（恰等通过；超一必须完整分条而非截断）。
+DELIVERY_CHUNK_MAX_UTF16: Final = 30_000
+
+#: 交付阶段（§4.2 L555 / HANDOFF §10.2；unknown 不等于失败或成功）。
+DELIVERY_PHASES: Final[frozenset[str]] = frozenset(
+    {
+        "manifest_saved",
+        "staged",
+        "validated",
+        "publish_claimed",
+        "published_confirmed",
+        "cancelled_before_publish",
+        "unknown",
+    }
+)
+
+#: 交付时原来源当前状态（与读取时点分开；Release 前重新核验）。
+DELIVERY_SOURCE_STATES: Final[frozenset[str]] = frozenset({"available", "unavailable", "disabled", "unknown"})
+
+#: 发布效果（未尝试 / 已发布 / 取消先胜 / 无法确证）。
+DELIVERY_PUBLISH_EFFECTS: Final[frozenset[str]] = frozenset(
+    {"not_attempted", "published", "cancelled_before_publish", "unknown"}
+)
+
+#: 取消效果（未请求 / 取消先胜 / 无法确证）。
+DELIVERY_CANCEL_EFFECTS: Final[frozenset[str]] = frozenset({"not_requested", "cancelled_before_publish", "unknown"})
+
+_WINDOWS_DELIVERY_INVALID_CHARS: Final = frozenset('<>:"|?*')
+
+#: Win32 设备名（基名不区分大小写；带扩展名同样拒绝）。
+_WINDOWS_DELIVERY_RESERVED_NAMES: Final = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+        "COM¹",
+        "COM²",
+        "COM³",
+        "LPT¹",
+        "LPT²",
+        "LPT³",
+    }
+)
+
+
+def validate_delivery_target_path(value: object, path: str = "$.delivery.target.target_path") -> str:
+    """校验本机交付目标：绝对盘符路径，拒绝 URL/UNC/设备命名空间/ADS/重解析前缀。
+
+    这里只做**语法与名称**策略（§10.5）；最终句柄/卷/父目录身份与重解析点
+    由文件适配器在真实句柄上核验，不能由本函数替代。
+    """
+
+    if not isinstance(value, str) or value == "" or "\x00" in value:
+        _fail("invalid_target_path", path)
+    if "/" in value:
+        # 只接受 Windows 反斜杠规范路径：避免同一目标出现多种等价写法。
+        _fail("invalid_target_path", path)
+    if len(value) < 4 or value[1] != ":" or not value[2:].startswith("\\"):
+        # 拒绝相对路径、URL、UNC（``\\\\server\\share``）、设备命名空间（``\\\\?\\``）。
+        _fail("invalid_target_path", path)
+    if not ("A" <= value[0].upper() <= "Z"):
+        _fail("invalid_target_path", path)
+    if ":" in value[2:]:
+        # 盘符后的冒号只能是 ADS 分隔符（``file.txt:stream``），拒绝。
+        _fail("invalid_target_path", path)
+    pure = PureWindowsPath(value)
+    if len(pure.parts) < 2:
+        _fail("invalid_target_path", path)
+    for part in pure.parts[1:]:
+        if part in (".", ".."):
+            _fail("invalid_target_path", path)
+        if part != part.rstrip(" ."):
+            _fail("invalid_target_path", path)
+        if any(character in _WINDOWS_DELIVERY_INVALID_CHARS or ord(character) < 32 for character in part):
+            _fail("invalid_target_path", path)
+        if part.split(".")[0].upper() in _WINDOWS_DELIVERY_RESERVED_NAMES:
+            _fail("invalid_target_path", path)
+    return str(pure)
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryTarget:
+    """用户确认的本机目标（HANDOFF §10.2「规范目标/覆盖依据」）。
+
+    ``expected_existing`` 为 False 表示确认时目标不存在；True 时必须带当时
+    文件内容摘要，且必须已确认覆盖。目标随后变化即原确认失效（由交付编排核验）。
+    """
+
+    target_path: str
+    expected_existing: bool
+    expected_existing_digest: str | None
+    overwrite_confirmed: bool
+
+
+_DELIVERY_TARGET_KEYS: Final = frozenset(
+    {"target_path", "expected_existing", "expected_existing_digest", "overwrite_confirmed"}
+)
+
+
+def encode_delivery_target(target: DeliveryTarget) -> dict[str, Any]:
+    """DeliveryTarget → wire 4 键（覆盖依据与确认位必须一致）。"""
+
+    target_path = validate_delivery_target_path(target.target_path)
+    if not isinstance(target.expected_existing, bool) or not isinstance(target.overwrite_confirmed, bool):
+        _fail("invalid_type", "$.delivery.target")
+    if target.expected_existing:
+        digest = _require_digest(target.expected_existing_digest, "$.delivery.target.expected_existing_digest")
+        if not target.overwrite_confirmed:
+            _fail("unconfirmed_overwrite", "$.delivery.target.overwrite_confirmed")
+    else:
+        if target.expected_existing_digest is not None:
+            _fail("invalid_value", "$.delivery.target.expected_existing_digest")
+        if target.overwrite_confirmed:
+            _fail("invalid_value", "$.delivery.target.overwrite_confirmed")
+        digest = None
+    return {
+        "target_path": target_path,
+        "expected_existing": target.expected_existing,
+        "expected_existing_digest": digest,
+        "overwrite_confirmed": target.overwrite_confirmed,
+    }
+
+
+def decode_delivery_target(value: object, path: str = "$.delivery.target") -> DeliveryTarget:
+    """严格解码交付目标（4 键全必填、禁额外键）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DELIVERY_TARGET_KEYS, path)
+    existing_raw = value["expected_existing"]
+    confirmed_raw = value["overwrite_confirmed"]
+    if not isinstance(existing_raw, bool) or not isinstance(confirmed_raw, bool):
+        _fail("invalid_type", path)
+    digest_raw = value["expected_existing_digest"]
+    if existing_raw:
+        digest: str | None = _require_digest(digest_raw, f"{path}.expected_existing_digest")
+    else:
+        if digest_raw is not None:
+            _fail("invalid_value", f"{path}.expected_existing_digest")
+        digest = None
+    return DeliveryTarget(
+        target_path=validate_delivery_target_path(value["target_path"], f"{path}.target_path"),
+        expected_existing=existing_raw,
+        expected_existing_digest=digest,
+        overwrite_confirmed=confirmed_raw,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactDeliveryCommand:
+    """显式成果导出（§4.2 L438）：用户确认目标与覆盖，不是模型任意写工具。
+
+    ``command.expected_revision`` 与 ``expected_delivery_revision`` 必须一致；
+    ``delivery_id`` 沿原命令与成果身份稳定派生（不含目标，换目标仍属同一交付，
+    必须报冲突而不是新交付）。
+    """
+
+    command: CommandRef
+    artifact_id: str
+    artifact_version: int
+    format: str
+    format_rule_version: int
+    delivery_id: str
+    target: DeliveryTarget
+    expected_delivery_revision: int
+
+
+_DELIVERY_COMMAND_KEYS: Final = frozenset(
+    {
+        "command",
+        "artifact_id",
+        "artifact_version",
+        "format",
+        "format_rule_version",
+        "delivery_id",
+        "target",
+        "expected_delivery_revision",
+    }
+)
+
+
+def derive_delivery_id(command: ArtifactDeliveryCommand) -> str:
+    """交付稳定身份：``user_scope + 命令键 + 成果版本 + 格式``（不含目标）。"""
+
+    return stable_id(
+        "delivery",
+        [
+            command.command.user_scope,
+            command.command.command_id,
+            command.artifact_id,
+            str(command.artifact_version),
+            command.format,
+        ],
+    )
+
+
+def encode_artifact_delivery_command(command: ArtifactDeliveryCommand) -> dict[str, Any]:
+    """ArtifactDeliveryCommand → wire 8 键（格式/规则版/目标/预期版逐项校验）。"""
+
+    expected = command.expected_delivery_revision
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        _fail("invalid_revision", "$.expected_delivery_revision")
+    if command.command.expected_revision != expected:
+        _fail("invalid_revision", "$.command.expected_revision")
+    artifact_id = _require_str(command.artifact_id, "$.artifact_id")
+    artifact_version = _require_positive_revision(command.artifact_version, "$.artifact_version")
+    format_name = _require_choice(command.format, DELIVERY_FORMATS, "$.format", "invalid_delivery_format")
+    rule_version = _require_positive_revision(command.format_rule_version, "$.format_rule_version")
+    if rule_version != DELIVERY_FORMAT_RULE_VERSION:
+        _fail("unsupported_format_rule_version", "$.format_rule_version")
+    delivery_id = _require_str(command.delivery_id, "$.delivery_id")
+    if delivery_id != derive_delivery_id(command):
+        _fail("invalid_value", "$.delivery_id")
+    return {
+        "command": encode_command_ref(command.command),
+        "artifact_id": artifact_id,
+        "artifact_version": artifact_version,
+        "format": format_name,
+        "format_rule_version": rule_version,
+        "delivery_id": delivery_id,
+        "target": encode_delivery_target(command.target),
+        "expected_delivery_revision": expected,
+    }
+
+
+def decode_artifact_delivery_command(
+    value: object, path: str = "$.artifact_delivery_command"
+) -> ArtifactDeliveryCommand:
+    """严格解码交付命令（8 键全必填、禁额外键、摘要/版本交叉复核）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DELIVERY_COMMAND_KEYS, path)
+    expected = value["expected_delivery_revision"]
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+        _fail("invalid_revision", f"{path}.expected_delivery_revision")
+    command = decode_command_ref(value["command"], f"{path}.command")
+    if command.expected_revision != expected:
+        _fail("invalid_revision", f"{path}.command.expected_revision")
+    artifact_version = _require_positive_revision(value["artifact_version"], f"{path}.artifact_version")
+    format_name = _require_choice(value["format"], DELIVERY_FORMATS, f"{path}.format", "invalid_delivery_format")
+    rule_version = _require_positive_revision(value["format_rule_version"], f"{path}.format_rule_version")
+    if rule_version != DELIVERY_FORMAT_RULE_VERSION:
+        _fail("unsupported_format_rule_version", f"{path}.format_rule_version")
+    decoded = ArtifactDeliveryCommand(
+        command=command,
+        artifact_id=_require_str(value["artifact_id"], f"{path}.artifact_id"),
+        artifact_version=artifact_version,
+        format=format_name,
+        format_rule_version=rule_version,
+        delivery_id=_require_str(value["delivery_id"], f"{path}.delivery_id"),
+        target=decode_delivery_target(value["target"], f"{path}.target"),
+        expected_delivery_revision=expected,
+    )
+    if decoded.delivery_id != derive_delivery_id(decoded):
+        _fail("invalid_value", f"{path}.delivery_id")
+    return decoded
+
+
+def validate_artifact_delivery_command(command: ArtifactDeliveryCommand) -> None:
+    """交付前整份校验（纯函数）；失败抛 :class:`AgentValidationError`。"""
+
+    encode_artifact_delivery_command(command)
+
+
+def delivery_input_digest(command: ArtifactDeliveryCommand) -> str:
+    """命令输入摘要：成果版本 + 格式规则 + 目标/覆盖确认 + 预期版。"""
+
+    return sha256_hex(
+        json_doc(
+            {
+                "artifact_id": command.artifact_id,
+                "artifact_version": command.artifact_version,
+                "format": command.format,
+                "format_rule_version": command.format_rule_version,
+                "target": encode_delivery_target(command.target),
+                "expected_delivery_revision": command.expected_delivery_revision,
+            }
+        )
+    )
+
+
+def split_utf16_chunks(text: object, max_units: int = DELIVERY_CHUNK_MAX_UTF16) -> tuple[str, ...]:
+    """把长文本切成每段 ≤ ``max_units`` UTF-16 单元的可逆分条（不截断、不拆代理对）。
+
+    §10.2 / QAC13：``record/field/chunk/value`` 分条上限 30,000 UTF-16 单元；
+    非 BMP 字符计 2 单元但提取仍是 1 个 Unicode 码点。空文本返回单个空段
+    （保留“空正文”事实，不解释为无内容）。
+    """
+
+    if not isinstance(text, str):
+        _fail("invalid_type", "$.delivery.chunk.text")
+    if isinstance(max_units, bool) or not isinstance(max_units, int) or max_units < 2:
+        _fail("invalid_chunk_limit", "$.delivery.chunk.max_units")
+    chunks: list[str] = []
+    current: list[str] = []
+    units = 0
+    for character in text:
+        width = 2 if ord(character) > 0xFFFF else 1
+        if units + width > max_units:
+            chunks.append("".join(current))
+            current = []
+            units = 0
+        current.append(character)
+        units += width
+    if current or not chunks:
+        chunks.append("".join(current))
+    return tuple(chunks)
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryReceipt:
+    """交付回执（§4.2 L445）：阶段、发布/取消效果、完整输出摘要与 unknown 原因。
+
+    ``phase`` 与效果位必须自洽：发布成功才可 ``published``；取消先胜不发布；
+    ``unknown`` 必须带错误码，禁止伪装成失败或取消成功（INV-07）。
+    """
+
+    command_record_id: str
+    delivery_id: str
+    artifact_id: str
+    artifact_version: int
+    artifact_digest: str
+    format: str
+    phase: str
+    publish_effect: str
+    cancel_effect: str
+    output_digest: str | None
+    verified_at: str
+    error_code: str | None
+    next_action: str | None
+
+
+_DELIVERY_RECEIPT_KEYS: Final = frozenset(
+    {
+        "command_record_id",
+        "delivery_id",
+        "artifact_id",
+        "artifact_version",
+        "artifact_digest",
+        "format",
+        "phase",
+        "publish_effect",
+        "cancel_effect",
+        "output_digest",
+        "verified_at",
+        "error_code",
+        "next_action",
+    }
+)
+
+#: 已进入暂存/校验/发布认领的阶段必须有输出摘要。
+_DELIVERY_PHASES_REQUIRING_OUTPUT: Final = frozenset({"staged", "validated", "publish_claimed", "published_confirmed"})
+
+
+def _validate_delivery_effects(phase: str, publish_effect: str, cancel_effect: str, output_digest: str | None) -> None:
+    if phase == "published_confirmed":
+        if output_digest is None:
+            _fail("missing_field", "$.output_digest")
+        if publish_effect != "published" or cancel_effect != "not_requested":
+            _fail("invalid_delivery_phase", "$.phase")
+        return
+    if phase == "cancelled_before_publish":
+        if publish_effect != "not_attempted" or cancel_effect != "cancelled_before_publish":
+            _fail("invalid_delivery_phase", "$.phase")
+        return
+    if phase == "unknown":
+        if publish_effect != "unknown" or cancel_effect not in {"unknown", "not_requested"}:
+            _fail("invalid_delivery_phase", "$.phase")
+        return
+    if publish_effect != "not_attempted" or cancel_effect != "not_requested":
+        _fail("invalid_delivery_phase", "$.phase")
+    if phase in _DELIVERY_PHASES_REQUIRING_OUTPUT and output_digest is None:
+        _fail("missing_field", "$.output_digest")
+
+
+def encode_delivery_receipt(receipt: DeliveryReceipt) -> dict[str, Any]:
+    """DeliveryReceipt → wire 13 键（阶段与效果位自洽校验）。"""
+
+    phase = _require_choice(receipt.phase, DELIVERY_PHASES, "$.phase", "invalid_delivery_phase")
+    publish_effect = _require_choice(
+        receipt.publish_effect, DELIVERY_PUBLISH_EFFECTS, "$.publish_effect", "invalid_publish_effect"
+    )
+    cancel_effect = _require_choice(
+        receipt.cancel_effect, DELIVERY_CANCEL_EFFECTS, "$.cancel_effect", "invalid_cancel_effect"
+    )
+    output_digest = None if receipt.output_digest is None else _require_digest(receipt.output_digest, "$.output_digest")
+    _validate_delivery_effects(phase, publish_effect, cancel_effect, output_digest)
+    if phase == "unknown" and receipt.error_code is None:
+        _fail("missing_field", "$.error_code")
+    return {
+        "command_record_id": _require_str(receipt.command_record_id, "$.command_record_id"),
+        "delivery_id": _require_str(receipt.delivery_id, "$.delivery_id"),
+        "artifact_id": _require_str(receipt.artifact_id, "$.artifact_id"),
+        "artifact_version": _require_positive_revision(receipt.artifact_version, "$.artifact_version"),
+        "artifact_digest": _require_digest(receipt.artifact_digest, "$.artifact_digest"),
+        "format": _require_choice(receipt.format, DELIVERY_FORMATS, "$.format", "invalid_delivery_format"),
+        "phase": phase,
+        "publish_effect": publish_effect,
+        "cancel_effect": cancel_effect,
+        "output_digest": output_digest,
+        "verified_at": _require_utc_timestamp(receipt.verified_at, "$.verified_at"),
+        "error_code": None if receipt.error_code is None else _require_str(receipt.error_code, "$.error_code"),
+        "next_action": None if receipt.next_action is None else _require_str(receipt.next_action, "$.next_action"),
+    }
+
+
+def decode_delivery_receipt(value: object, path: str = "$.delivery_receipt") -> DeliveryReceipt:
+    """严格解码交付回执（13 键；坏枚举/不自洽阶段 fail-closed）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DELIVERY_RECEIPT_KEYS, path)
+    phase = _require_choice(value["phase"], DELIVERY_PHASES, f"{path}.phase", "invalid_delivery_phase")
+    publish_effect = _require_choice(
+        value["publish_effect"], DELIVERY_PUBLISH_EFFECTS, f"{path}.publish_effect", "invalid_publish_effect"
+    )
+    cancel_effect = _require_choice(
+        value["cancel_effect"], DELIVERY_CANCEL_EFFECTS, f"{path}.cancel_effect", "invalid_cancel_effect"
+    )
+    output_raw = value["output_digest"]
+    output_digest = None if output_raw is None else _require_digest(output_raw, f"{path}.output_digest")
+    _validate_delivery_effects(phase, publish_effect, cancel_effect, output_digest)
+    error_raw = value["error_code"]
+    if error_raw is not None and not isinstance(error_raw, str):
+        _fail("invalid_type", f"{path}.error_code")
+    if phase == "unknown" and error_raw is None:
+        _fail("missing_field", f"{path}.error_code")
+    next_action_raw = value["next_action"]
+    if next_action_raw is not None and not isinstance(next_action_raw, str):
+        _fail("invalid_type", f"{path}.next_action")
+    return DeliveryReceipt(
+        command_record_id=_require_str(value["command_record_id"], f"{path}.command_record_id"),
+        delivery_id=_require_str(value["delivery_id"], f"{path}.delivery_id"),
+        artifact_id=_require_str(value["artifact_id"], f"{path}.artifact_id"),
+        artifact_version=_require_positive_revision(value["artifact_version"], f"{path}.artifact_version"),
+        artifact_digest=_require_digest(value["artifact_digest"], f"{path}.artifact_digest"),
+        format=_require_choice(value["format"], DELIVERY_FORMATS, f"{path}.format", "invalid_delivery_format"),
+        phase=phase,
+        publish_effect=publish_effect,
+        cancel_effect=cancel_effect,
+        output_digest=output_digest,
+        verified_at=_require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
+        error_code=error_raw,
         next_action=next_action_raw,
     )
