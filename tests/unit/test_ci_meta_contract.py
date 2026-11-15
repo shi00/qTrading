@@ -116,10 +116,45 @@ class TestNegativeMutations:
         errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
         assert any("被 `if: false` 关闭" in e and "docs-static" in e for e in errors), errors
 
+    def test_disabling_job_with_zero_condition_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            docs["jobs"]["docs-static"]["if"] = "0"
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("被条件关闭" in e and "docs-static" in e for e in errors), errors
+
+    @pytest.mark.parametrize(
+        "condition",
+        ["${{ github.event_name == 'workflow_dispatch' }}", "github.event_name == 'pull_request'"],
+    )
+    def test_skippable_required_step_condition_is_rejected(self, tmp_path: Path, condition: str) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            _step_with_run(docs, "docs-static", "-m pytest")["if"] = condition
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("无法证明必定执行" in e and "docs-static" in e for e in errors), errors
+
+    def test_meta_job_required_step_condition_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, _docs: dict[str, Any], gate: dict[str, Any]) -> None:
+            step = _step_with_run(gate, "ci-meta-contract", "check_ci_meta_contract.py")
+            step["if"] = "${{ github.event_name == 'workflow_dispatch' }}"
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("无法证明必定执行" in e and "ci-meta-contract" in e for e in errors), errors
+
     def test_echoing_required_command_is_rejected(self, tmp_path: Path) -> None:
         def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
             step = _step_with_run(docs, "docs-static", "-m pytest")
             step["run"] = f'echo "{step["run"]}"'
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("未选择必需命令" in e and "-m pytest" in e for e in errors), errors
+
+    def test_quoting_required_command_as_string_argument_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            step = _step_with_run(docs, "docs-static", "-m pytest")
+            flattened = " ".join(step["run"].split())
+            step["run"] = f"python -c \"print('{flattened}')\""
 
         errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
         assert any("未选择必需命令" in e and "-m pytest" in e for e in errors), errors
@@ -133,11 +168,24 @@ class TestNegativeMutations:
         errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
         assert any("只收集不执行" in e and flag in e for e in errors), errors
 
-    def test_legal_step_condition_is_not_rejected(self, tmp_path: Path) -> None:
+    def test_always_true_step_condition_is_not_rejected(self, tmp_path: Path) -> None:
         def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
-            _step_with_run(docs, "docs-static", "-m pytest")["if"] = "github.event_name == 'pull_request'"
+            _step_with_run(docs, "docs-static", "-m pytest")["if"] = "always()"
 
         assert _meta_module().check_repo(_build_repo(tmp_path, mutate)) == []
+
+    def test_continue_on_error_false_is_not_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            _step_with_run(docs, "docs-static", "-m pytest")["continue-on-error"] = "false"
+
+        assert _meta_module().check_repo(_build_repo(tmp_path, mutate)) == []
+
+    def test_dynamic_continue_on_error_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            _step_with_run(docs, "docs-static", "-m pytest")["continue-on-error"] = "${{ github.event_name == 'push' }}"
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("continue-on-error" in e and "无法证明" in e for e in errors), errors
 
     def test_swallowing_failure_marker_is_rejected(self, tmp_path: Path) -> None:
         def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
@@ -161,6 +209,31 @@ class TestNegativeMutations:
 
         errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
         assert any("needs 未包含 `ci-meta-contract`" in e for e in errors), errors
+
+    def test_aggregate_echo_spoof_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            docs["jobs"]["docs-check"]["steps"][0]["run"] = "echo '\"success\" fail=1 exit 1'"
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("未要求各验证 job 结果为 success" in e for e in errors), errors
+        assert any("缺少 `exit 1`" in e for e in errors), errors
+        assert any("缺少 `fail=1`" in e for e in errors), errors
+
+    def test_aggregate_fully_commented_out_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
+            step = docs["jobs"]["docs-check"]["steps"][0]
+            step["run"] = "\n".join(f"# {line}" for line in step["run"].splitlines())
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("未要求各验证 job 结果为 success" in e for e in errors), errors
+
+    def test_aux_aggregate_echo_spoof_is_rejected(self, tmp_path: Path) -> None:
+        def mutate(_root: Path, _docs: dict[str, Any], gate: dict[str, Any]) -> None:
+            gate["jobs"]["ci-aux-gate"]["steps"][0]["run"] = 'echo \'"$META_RESULT" != "success" exit 1\''
+
+        errors = _meta_module().check_repo(_build_repo(tmp_path, mutate))
+        assert any("未把 `$META_RESULT` 非 success 判为失败" in e for e in errors), errors
+        assert any("缺少 `exit 1`" in e for e in errors), errors
 
     def test_missing_aggregate_job_is_rejected(self, tmp_path: Path) -> None:
         def mutate(_root: Path, docs: dict[str, Any], _gate: dict[str, Any]) -> None:
