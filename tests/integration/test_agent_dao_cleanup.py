@@ -8,7 +8,10 @@
 - 重试幂等：已有可靠 fence 的重复删除不报错、仍查回 0；
 - 应用域 NOT NULL tombstone：``agent_session.title`` / ``agent_asset_version``
   ``display_name``+``digest`` 换固定占位，可 NULL 的草稿/来源/元数据/正文引用清除，
-  集合外会话/资产不变。
+  集合外会话/资产不变；
+- 结构回执与摘要（E-06-5b）：命令请求/回执、决定问题/schema、同意载荷、操作
+  worker 引用、来源 locator、交付回执清空；可 NULL 摘要置 NULL、NOT NULL 摘要换
+  tombstone；清理后读回报 ``result_cleaned`` / ``manifest_cleaned`` 而非「从未发生」。
 
 标记：``pytest.mark.integration`` + ``pytest.mark.embedded_real``。
 SQL 合规（R4）：全部经静态 ``sa.text()`` 常量承载，身份经命名参数绑定。
@@ -1217,12 +1220,9 @@ async def test_structural_receipts_and_content_digests_cleared(real_embedded_pg)
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_cleanup_keeps_delivery_manifest_and_reports_result_cleaned(real_embedded_pg) -> None:
-    """清理后回读语义：交付回执仍可读回（不撒谎成「从未交付」），已清结果报 ``result_cleaned``。
-
-    ``delivery_manifest`` 的私有 target 路径留存属待冻结的 cleaned receipt 契约
-    （见 known-technical-debt）；本用例锁定「不得把已交付读成从未交付」这条底线。
-    """
+async def test_cleanup_clears_delivery_manifest_and_reports_cleaned(real_embedded_pg) -> None:
+    """清理后回读语义：交付回执正文清除并报 ``manifest_cleaned``（不撒谎成「从未交付」），
+    已清结果读回报 ``result_cleaned`` 而非坏行。"""
 
     url = real_embedded_pg.url
     await _reset_and_migrate_app_schema(url)
@@ -1330,9 +1330,8 @@ async def test_cleanup_keeps_delivery_manifest_and_reports_result_cleaned(real_e
 
     assert touched["agent_session"] == 1
     assert touched["agent_operation"] == 2
-    assert delivery.manifest is not None
-    assert delivery.manifest.delivery_id == manifest.delivery_id
-    assert delivery.manifest.target.target_path == manifest.target.target_path
+    assert delivery.manifest is None
+    assert delivery.manifest_cleaned is True
     assert read.phase == "result_saved"
     assert read.result_payload is None
     assert read.result_text is None

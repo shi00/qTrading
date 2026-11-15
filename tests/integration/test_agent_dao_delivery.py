@@ -115,6 +115,8 @@ async def _seed_operation(dao: AgentDao, operation_id: str = "op-deliver") -> No
             insert(AgentOperation).values(
                 user_scope=USER_SCOPE,
                 operation_id=operation_id,
+                session_id="s1",
+                execution_id="exec-1",
                 owner_epoch=1,
                 run_epoch=1,
                 phase="dispatched",
@@ -345,7 +347,51 @@ class TestReadDelivery:
         read = await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
 
         assert read.manifest is None
+        assert read.manifest_cleaned is False
         assert read.revision == 1
+
+    @pytest.mark.asyncio
+    async def test_cleaned_session_reports_manifest_cleaned(self, real_embedded_pg) -> None:
+        """会话联合清理后：交付事实已清但不得读成「从未交付」（R21）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=1, manifest=_manifest()
+        )
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE agent_session SET cleaned_at = now() WHERE user_scope = :u"),
+                {"u": USER_SCOPE},
+            )
+            await conn.execute(
+                text("UPDATE agent_operation SET delivery_manifest = NULL WHERE user_scope = :u AND operation_id = :o"),
+                {"u": USER_SCOPE, "o": "op-deliver"},
+            )
+
+        read = await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+
+        assert read.manifest is None
+        assert read.manifest_cleaned is True
+
+    @pytest.mark.asyncio
+    async def test_save_delivery_on_cleaned_session_is_rejected(self, real_embedded_pg) -> None:
+        """会话已清理时禁止从零重开交付（§10.5 不复活）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE agent_session SET cleaned_at = now() WHERE user_scope = :u"),
+                {"u": USER_SCOPE},
+            )
+
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.save_delivery_phase(
+                user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=1, manifest=_manifest()
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "cannot be revived" in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_missing_operation_is_rejected(self, real_embedded_pg) -> None:

@@ -1564,6 +1564,8 @@ class AgentDao(BaseDao):
                         AgentOperation.revision,
                         AgentOperation.artifact_id,
                         AgentOperation.artifact_version,
+                        AgentOperation.session_id,
+                        AgentOperation.execution_id,
                     )
                     .where(
                         AgentOperation.user_scope == user_scope,
@@ -1574,6 +1576,13 @@ class AgentDao(BaseDao):
             ).first()
             if row is None:
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "operation does not exist", identity)
+            if row.delivery_manifest is None and await self._operation_owner_is_cleaned(
+                conn, user_scope=user_scope, session_id=row.session_id, execution_id=row.execution_id
+            ):
+                # 会话已联合清理：交付回执已清，禁止从零重开交付（§10.5 不复活）。
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "session cleaned; delivery cannot be revived", identity
+                )
             previous: DeliveryManifest | None = None
             if row.delivery_manifest is not None:
                 try:
@@ -1654,6 +1663,8 @@ class AgentDao(BaseDao):
           （初始态，不等于失败/unknown）；
         - 已存 manifest 不可解码 → ``OPERATION_UNKNOWN``，不静默当作未开始；
         - 行上 artifact 身份与 manifest 不一致 → ``OPERATION_UNKNOWN``（坏行）；
+        - 会话已联合清理（``cleaned_at`` 非空）且 manifest 已清 → 返回
+          ``manifest=None`` + ``manifest_cleaned=True``，不得读成「从未交付」（R21）；
         - 只读原事实，不按当前表单重推目标/格式，不改任何状态。
         """
 
@@ -1672,24 +1683,34 @@ class AgentDao(BaseDao):
                         AgentOperation.artifact_id,
                         AgentOperation.artifact_version,
                         AgentOperation.revision,
+                        AgentOperation.session_id,
+                        AgentOperation.execution_id,
                     ).where(
                         AgentOperation.user_scope == user_scope,
                         AgentOperation.operation_id == operation_id,
                     )
                 )
             ).first()
-        if row is None:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "operation does not exist", identity)
-        if row.delivery_manifest is None:
-            return DeliveryRead(operation_id=operation_id, revision=row.revision, manifest=None)
-        try:
-            manifest = decode_delivery_manifest(row.delivery_manifest)
-        except AgentValidationError as exc:
-            raise AgentServiceError(
-                AgentErrorCode.OPERATION_UNKNOWN,
-                f"stored delivery manifest is invalid: {exc.code}",
-                identity,
-            ) from exc
+            if row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "operation does not exist", identity)
+            if row.delivery_manifest is None:
+                cleaned = await self._operation_owner_is_cleaned(
+                    conn, user_scope=user_scope, session_id=row.session_id, execution_id=row.execution_id
+                )
+                return DeliveryRead(
+                    operation_id=operation_id,
+                    revision=row.revision,
+                    manifest=None,
+                    manifest_cleaned=cleaned,
+                )
+            try:
+                manifest = decode_delivery_manifest(row.delivery_manifest)
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"stored delivery manifest is invalid: {exc.code}",
+                    identity,
+                ) from exc
         if row.artifact_id is not None and (
             row.artifact_id != manifest.artifact_id or row.artifact_version != manifest.artifact_version
         ):
@@ -6410,15 +6431,14 @@ class AgentDao(BaseDao):
         与载荷列清空，``agent_body_payload`` 对应行准确删除。
 
         E-06-5b 起按 §10.7 表第 2—4 行处理结构回执与内容摘要：结构载荷/回执列
-        （命令请求与回执、决定问题与答案 schema、同意载荷、操作 worker 引用、
-        来源 locator）清空；可 NULL 的内容摘要（执行意图、轮次冻结/实际、参数、来源
-        作用域）置 NULL；NOT NULL 的内容摘要（成果 ``actual_input_digest``/
+        （命令请求与回执、决定问题与答案 schema、同意载荷、操作交付清单与 worker
+        引用、来源 locator）清空；可 NULL 的内容摘要（执行意图、轮次冻结/实际、参数、
+        来源作用域）置 NULL；NOT NULL 的内容摘要（成果 ``actual_input_digest``/
         ``result_digest``、命令 ``input_digest``）换固定 tombstone 摘要。身份、fence、
         unknown/phase、计量与 ``attempt_refs`` 等核定所需非正文引用保原值。
 
-        ``agent_operation.delivery_manifest`` 暂不清空：冻结的 16 键 wire 无法表达
-        「已交付但已清理」（清空会让 ``read_delivery`` 读成「从未交付」，R21），
-        待 cleaned receipt 契约冻结后处理（见 known-technical-debt）。
+        交付回执清空后由 ``read_delivery`` 报 ``manifest_cleaned=True``（衍生自
+        所属会话 ``cleaned_at``），不把「已交付但已清理」读成「从未交付」。
         """
 
         self._check_engine()
@@ -6556,6 +6576,7 @@ class AgentDao(BaseDao):
                         result_ref=None,
                         parameter_digest=None,
                         worker_refs=None,
+                        delivery_manifest=None,
                         data_consent_claims=None,
                     )
                 )
