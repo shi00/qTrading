@@ -3419,3 +3419,187 @@ class TestR02OpLockSerialization:
             )
             assert resp.content == "B-out"
             mgr._cancel_cleanup_task()
+
+
+# --------------------------------------------------------------------------- #
+# ADD-AI-003 回归：legacy run_inference 取消隔离
+# （ready / 提交(put) / 轮询(poll) 三个取消点；A 取消后 B 不得复用同一代）
+# --------------------------------------------------------------------------- #
+class TestLegacyCancelQuarantine:
+    """legacy 推理取消不得把忙碌 worker 留给后继请求。
+
+    离线替身（不加载真实模型）：真实 ``_ensure_worker_impl``（multiprocessing
+    Process/Queue 替身）+ 真实 ``_await_worker_ready``（result 队列喂 ready）；
+    ``ThreadPoolManager`` 以内联方式执行，消除线程池调度抖动。
+    """
+
+    @staticmethod
+    def _make_queues(mgr: LocalModelManager, pending: list[tuple]) -> tuple[MagicMock, MagicMock]:
+        def _get_nowait():
+            if not pending:
+                raise queue.Empty
+            item = pending.pop(0)
+            if item[0] == "ready":
+                return ("ready", item[1], mgr._worker_generation)
+            return item
+
+        req_q = MagicMock(spec=queue.Queue)
+        res_q = MagicMock(spec=queue.Queue)
+        res_q.get_nowait.side_effect = _get_nowait
+        return req_q, res_q
+
+    @pytest.mark.asyncio
+    async def test_poll_cancel_quarantines_and_next_call_uses_new_generation(self, tmp_path):
+        """轮询阶段取消：A 的代被隔离并清理，B 以新 generation 执行；
+        A 迟到响应按 generation 丢弃，不覆盖 B 的输出。"""
+        model = tmp_path / "legacy.gguf"
+        model.write_bytes(b"GGUF-legacy")
+        model_path = str(model)
+        pending: list[tuple] = []
+
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager.ConfigHandler") as mock_ch,
+            patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_ch.get_local_ai_config.return_value = {
+                "local_model_path": model_path,
+                "local_model_timeout": 30,
+            }
+
+            async def fake_run_async(task_type, fn, *args, **kwargs):
+                return fn(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = fake_run_async
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            mgr = LocalModelManager()
+            mgr._shutdown_worker = MagicMock()  # 清理任务 no-op，隔离意图保留到 B respawn
+
+            req_q_a, res_q_a = self._make_queues(mgr, pending)
+            mock_queue_cls.side_effect = [req_q_a, res_q_a]
+            pending.append(("ready", model_path))
+            dispatched = asyncio.Event()
+            req_q_a.put.side_effect = lambda payload, timeout=None: dispatched.set()
+
+            task_a = asyncio.create_task(mgr.run_inference("A-prompt"))
+            await asyncio.wait_for(dispatched.wait(), timeout=2.0)
+            task_a.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task_a
+            assert type(exc_info.value) is asyncio.CancelledError
+            assert mgr._worker_state == "quarantined"
+            assert mgr._worker_generation == 1
+            assert mgr._inflight == {}
+
+            # B：隔离意图使快路径失效 → respawn 新代，且 A 的迟到响应被 generation 丢弃
+            req_q_b, res_q_b = self._make_queues(mgr, pending)
+            mock_queue_cls.side_effect = [req_q_b, res_q_b]
+            pending.extend([("ready", model_path), ("ok", 0, 1, "A-late"), ("ok", 1, 2, "B-out")])
+
+            out = await asyncio.wait_for(mgr.run_inference("B-prompt"), timeout=5.0)
+            assert out == "B-out"
+            assert mgr._worker_generation == 2
+            assert mgr._worker_state == "idle"
+            assert mgr._inflight == {}
+            # 出站顺序：A=rid 0（旧代），B=rid 1（新代）
+            assert [c.args[0][4] for c in req_q_a.put.call_args_list if isinstance(c.args[0], tuple)] == [0]
+            assert [c.args[0][4] for c in req_q_b.put.call_args_list] == [1]
+            mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_ready_cancel_quarantines_spawned_generation(self):
+        """ready 等待阶段取消：CancelledError 立即传播（R2），本次 spawn 的代被隔离。"""
+        pending: list[tuple] = []
+        model_path = "/models/ready-cancel.gguf"
+
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager.ConfigHandler") as mock_ch,
+            patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_ch.get_local_ai_config.return_value = {
+                "local_model_path": model_path,
+                "local_model_timeout": 30,
+            }
+
+            async def fake_run_async(task_type, fn, *args, **kwargs):
+                return fn(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = fake_run_async
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            mgr = LocalModelManager()
+            mgr._shutdown_worker = MagicMock()
+            req_q, res_q = self._make_queues(mgr, pending)
+            mock_queue_cls.side_effect = [req_q, res_q]
+            mgr._await_worker_ready = AsyncMock(side_effect=asyncio.CancelledError())
+
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await mgr.run_inference("A-prompt")
+
+            assert type(exc_info.value) is asyncio.CancelledError
+            assert mgr._worker_generation == 1
+            assert mgr._worker_state == "quarantined"
+            assert mgr._quarantined_generations == {1}
+            assert mgr._inflight == {}
+            mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_submit_cancel_quarantines_generation(self):
+        """提交（put）阶段取消：CancelledError 立即传播（R2），本次代被隔离。"""
+        pending: list[tuple] = []
+        model_path = "/models/submit-cancel.gguf"
+
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager.ConfigHandler") as mock_ch,
+            patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_ch.get_local_ai_config.return_value = {
+                "local_model_path": model_path,
+                "local_model_timeout": 30,
+            }
+
+            async def fake_run_async(task_type, fn, *args, **kwargs):
+                return fn(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = fake_run_async
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            mgr = LocalModelManager()
+            mgr._shutdown_worker = MagicMock()
+            req_q, res_q = self._make_queues(mgr, pending)
+            mock_queue_cls.side_effect = [req_q, res_q]
+            pending.append(("ready", model_path))
+            dispatched = asyncio.Event()
+
+            def _blocking_put(payload, timeout=None):
+                dispatched.set()
+                time.sleep(0.1)
+
+            req_q.put.side_effect = _blocking_put
+
+            task = asyncio.create_task(mgr.run_inference("A-prompt"))
+            await asyncio.wait_for(dispatched.wait(), timeout=2.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+
+            assert type(exc_info.value) is asyncio.CancelledError
+            assert mgr._worker_generation == 1
+            assert mgr._worker_state == "quarantined"
+            assert mgr._inflight == {}  # 取消即终态，不以 inflight 是否为空做回收判断
+            mgr._cancel_cleanup_task()

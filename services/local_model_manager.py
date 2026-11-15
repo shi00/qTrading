@@ -971,6 +971,8 @@ class LocalModelManager:
             RuntimeError: If model cannot be loaded or inference fails.
             ImportError: If llama-cpp-python is missing.
             LocalInferenceTimeoutError: If inference exceeds the configured timeout.
+            asyncio.CancelledError: 调用方取消时原样传播（R2）；本次实际 generation
+                登记隔离并异步清理（ADD-AI-003），后继调用以新代重建，不复用忙碌 worker。
         """
         if not _HAS_LLAMA_CPP:
             raise ImportError("llama-cpp-python not installed.")
@@ -1007,59 +1009,80 @@ class LocalModelManager:
                 "flash_attn": config.get("flash_attn", True),
             }
 
-            if not await self._ensure_worker(path, core_config):
-                raise RuntimeError("Persistent worker failed to start. Check logs for details.")
-
-            if not self._worker_ready:
-                if not await self._await_worker_ready():
-                    raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
-
-            timeout_val = config.get("local_model_timeout", 90) or 90
-
-            logger.info(
-                "[LocalModel] Sending inference request to persistent worker. "
-                "Input len: %s, Max tokens: %s, "
-                "Temp: %s, Timeout: %ss",
-                len(prompt),
-                max_tokens,
-                temperature,
-                timeout_val,
-            )
-            start_time = asyncio.get_running_loop().time()
-            # S2: legacy 链亦走 5-tuple 协议（req_id 响应配对）；attempt 绑定用
-            # ("legacy", "0") 占位（attempt_context 归属仅 S3 Executor 语义需要）。
-            req_id = next(self._req_counter)
-
+            # ADD-AI-003: 本次调用实际占用的 generation（ensure 成功后即刻定格）。
+            # 取消处理器据此隔离「A 真正使用的那一代」，不使用 inflight 是否为空、
+            # 也不使用取消时刻可能被后继请求改写的当前状态做推断。
+            generation: int | None = None
             try:
-                output = await self._dispatch_and_collect(
-                    req_id=req_id,
-                    generation=self._worker_generation,
-                    request_payload=(prompt, max_tokens, temperature, system_prompt, req_id),
-                    poll_budget=float(timeout_val),
-                    invocation_id="legacy",
-                    attempt_id="0",
-                    should_abort=self._cancel_event.is_set,
-                )
-            except TimeoutError as te:
-                elapsed = asyncio.get_running_loop().time() - start_time
-                logger.error(
-                    "[LocalModel] Persistent worker inference timed out after %ss (elapsed: %.1fs). Terminating worker.",
-                    timeout_val,
-                    elapsed,
-                )
-                # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
-                await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
-                raise LocalInferenceTimeoutError(
-                    f"Local inference timed out ({timeout_val}s). Worker terminated, will restart on next call.",
-                ) from te
+                if not await self._ensure_worker(path, core_config):
+                    raise RuntimeError("Persistent worker failed to start. Check logs for details.")
 
-            elapsed = asyncio.get_running_loop().time() - start_time
-            logger.info(
-                "[LocalModel] Persistent worker inference completed in %.2fs. Output len: %s",
-                elapsed,
-                len(output),
-            )
-            return output
+                active_generation = self._current_generation()
+                generation = active_generation
+
+                if not self._worker_ready:
+                    if not await self._await_worker_ready():
+                        raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
+
+                timeout_val = config.get("local_model_timeout", 90) or 90
+
+                logger.info(
+                    "[LocalModel] Sending inference request to persistent worker. "
+                    "Input len: %s, Max tokens: %s, "
+                    "Temp: %s, Timeout: %ss",
+                    len(prompt),
+                    max_tokens,
+                    temperature,
+                    timeout_val,
+                )
+                start_time = asyncio.get_running_loop().time()
+                # S2: legacy 链亦走 5-tuple 协议（req_id 响应配对）；attempt 绑定用
+                # ("legacy", "0") 占位（attempt_context 归属仅 S3 Executor 语义需要）。
+                req_id = next(self._req_counter)
+
+                try:
+                    output = await self._dispatch_and_collect(
+                        req_id=req_id,
+                        generation=active_generation,
+                        request_payload=(prompt, max_tokens, temperature, system_prompt, req_id),
+                        poll_budget=float(timeout_val),
+                        invocation_id="legacy",
+                        attempt_id="0",
+                        should_abort=self._cancel_event.is_set,
+                    )
+                except TimeoutError as te:
+                    elapsed = asyncio.get_running_loop().time() - start_time
+                    logger.error(
+                        "[LocalModel] Persistent worker inference timed out after %ss "
+                        "(elapsed: %.1fs). Terminating worker.",
+                        timeout_val,
+                        elapsed,
+                    )
+                    # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+                    await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
+                    raise LocalInferenceTimeoutError(
+                        f"Local inference timed out ({timeout_val}s). Worker terminated, will restart on next call.",
+                    ) from te
+
+                elapsed = asyncio.get_running_loop().time() - start_time
+                logger.info(
+                    "[LocalModel] Persistent worker inference completed in %.2fs. Output len: %s",
+                    elapsed,
+                    len(output),
+                )
+                return output
+            except asyncio.CancelledError:
+                # ADD-AI-003：取消覆盖启动 / ready / 提交 / 轮询全程，与统一链
+                # invoke_for_connection 同口径——worker 状态未知（可能仍在执行 A 的
+                # native 推理，native 不随协程中断），登记隔离意图并 spawn 异步清理
+                # （复用 generation 守卫，旧清理不误杀后继代），随后立即重抛（R2：
+                # 不同步 join、不等清理完成、不以 inflight 为空假回收）。
+                # _ensure_worker 内部已按本次实际 spawn 的代登记（LMM-02），此处兜底
+                # 覆盖 ready/提交/轮询；同代登记在 _spawn_cleanup_task 幂等。
+                # 隔离后下一次调用快路径失效，B 只能走完整 shutdown+respawn 以新代
+                # 执行，不会复用 A 遗留的忙碌 worker 而耗尽自己的推理预算。
+                self._quarantine_worker(generation if generation is not None else self._current_generation())
+                raise
 
     # ------------------------------------------------------------------ #
     # S2 单连接执行共享底座（legacy run_inference 与 invoke_for_connection）
