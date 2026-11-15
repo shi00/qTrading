@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
 import pandas as pd
@@ -49,6 +49,22 @@ def _decode_cell(col: str, value) -> object:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
         return None
+
+
+def _deep_freeze(value: object) -> object:
+    """D16-008: 深复制并冻结嵌套 Mapping/list/set，供公开行只读外壳使用。
+
+    仅冻结容器、复制为新对象（不共享 DataFrame 单元格 / DAO 字典引用）：
+    Mapping → 只读 MappingProxyType，list/tuple → tuple，set → frozenset；
+    标量、None、NaN 等非容器值原样返回（保持原值，不回退）。
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(v) for v in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_deep_freeze(v) for v in value)
+    return value
 
 
 class PaginationSortingMixin:
@@ -198,8 +214,8 @@ class PaginationSortingMixin:
         """从过滤结果切出当前页原始行 (locale-neutral, VM 不调 I18n, C2b 唯一切片 owner).
 
         Returns:
-            tuple[ScreenerRow, ...]: 每行 ``values`` 为 MappingProxyType 只读映射;
-            空数据返回空元组。
+            tuple[ScreenerRow, ...]: 每行 ``values`` 为 MappingProxyType 只读映射,
+            且嵌套归因/参数快照经 ``_deep_freeze`` 深复制冻结; 空数据返回空元组。
         """
         if filtered is None or filtered.empty:
             return ()
@@ -207,7 +223,9 @@ class PaginationSortingMixin:
         end = start + page_size
         page_slice = filtered.iloc[start:end]
         return tuple(
-            ScreenerRow(values=MappingProxyType({str(k): _decode_cell(str(k), v) for k, v in record.items()}))
+            ScreenerRow(
+                values=MappingProxyType({str(k): _deep_freeze(_decode_cell(str(k), v)) for k, v in record.items()})
+            )
             for record in page_slice.to_dict("records")  # type: ignore[call-overload]
         )
 

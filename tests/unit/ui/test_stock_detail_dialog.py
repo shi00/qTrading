@@ -1710,6 +1710,26 @@ class TestBuildParamsSnapshotSection:
         result = _build_params_snapshot_section({})
         assert isinstance(result, ft.Container)
 
+    def test_frozen_mapping_nested_values_render_readably(self):
+        """D16-008: 冻结快照 (MappingProxyType/tuple) 仍渲染, 且不裸露 mappingproxy 表示."""
+        from types import MappingProxyType
+
+        from ui.components.stock_detail_dialog import _build_params_snapshot_section
+
+        params = MappingProxyType(
+            {
+                "strategy": "value_strategy",
+                "global_config": MappingProxyType({"exclude_st": True}),
+                "tags": ("a", "b"),
+            }
+        )
+        result = _build_params_snapshot_section(params)
+        assert isinstance(result.content, ft.Column)
+        assert len(result.content.controls) == 3
+        values = " ".join(row.controls[1].value for row in result.content.controls)
+        assert "mappingproxy" not in values
+        assert "exclude_st" in values
+
 
 class TestBuildReviewSection:
     """_build_review_section 模块级纯函数测试 (有/无复盘数据分支)."""
@@ -1999,6 +2019,32 @@ class TestBuildAttributionSection:
         )
         result = _build_attribution_section({"_filter_attribution": raw})
         assert isinstance(result, ft.Column)
+
+    def test_frozen_mapping_attribution_renders(self):
+        """D16-008: VM 深冻结后的 Mapping/tuple 归因仍渲染条件与排名."""
+        from types import MappingProxyType
+
+        from ui.components.stock_detail_dialog import _build_attribution_section
+
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: {
+            "filter_attribution_title": "筛选归因",
+            "filter_attribution_note": "说明",
+            "filter_op_between": "介于",
+        }.get(key, key)
+        raw = MappingProxyType(
+            {
+                "conditions": (
+                    MappingProxyType({"column": "pe", "operator": "between", "threshold": (1.0, 2.0), "actual": 1.5}),
+                ),
+                "rank": MappingProxyType(
+                    {"field": "dv_ttm", "ascending": False, "value": 2.5, "position": 1, "total": 285}
+                ),
+            }
+        )
+        result = _build_attribution_section({"_filter_attribution": raw})
+        assert isinstance(result, ft.Column)
+        texts = _collect_all_texts(result)
+        assert any("筛选归因" in t for t in texts)
 
 
 def _collect_all_texts(control, found=None):
