@@ -8614,3 +8614,172 @@ def build_delivery_fields(read: object, *, body_text: str | None = None) -> tupl
     if read.result_payload is not None:
         fields.extend(_payload_fields(parse_preserving_numbers(read.result_payload), ""))
     return validate_delivery_fields(tuple(fields))
+
+
+# ---------------------------------------------------------------------------
+# 计划提案（DD §8 F21 / §10.3；HANDOFF §7.3，E-04）
+# ---------------------------------------------------------------------------
+#
+# 计划提案是 Harness ``PlanStore`` 的私有工作状态：以不可变 asset 版本保存
+# （``asset_kind='plan'``），绑定 execution 与 plan_revision；只存提案，不更新
+# ``agent_round``、不改已派发图、不成为第二任务状态机。``plan_revision=0``
+# 表示尚无提案；每次写入以预期版 CAS 推进到 +1。
+# 本模块只做结构 codec 与摘要，不做 DAG/角色校验（那是派发前
+# ``validate_plan_spec_proposal`` 的职责）。
+
+#: 计划提案结构版本（进入规范摘要前缀，版本演进不改写旧版身份）。
+PLAN_STORE_VERSION: Final[int] = 1
+
+#: Harness ``TaskStatus`` 冻结五值（blocked 仅在启用子任务时可产生）。
+PLAN_ITEM_STATUSES: Final[frozenset[str]] = frozenset({"pending", "in_progress", "completed", "cancelled", "blocked"})
+
+_PLAN_PROPOSAL_KEYS: Final = frozenset({"plan_store_version", "plan_revision", "items"})
+_PLAN_ITEM_KEYS: Final = frozenset({"id", "content", "status", "active_form", "parent_id", "depends_on"})
+
+
+@dataclass(frozen=True, slots=True)
+class PlanItemSnapshot:
+    """单个计划步骤的冻结快照（对应 Harness ``PlanItem``）。
+
+    ``content``/``active_form`` 为用户可见正文，原样保留（不 trim、不改
+    Unicode）；``id`` 非空且在文档内唯一；数组顺序即身份（不排序）。
+    """
+
+    id: str
+    content: str
+    status: str
+    active_form: str
+    parent_id: str | None
+    depends_on: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PlanProposal:
+    """一次计划提案版本（不可变；``plan_revision`` 每 execution 单调递增）。"""
+
+    execution_id: str
+    plan_revision: int
+    items: tuple[PlanItemSnapshot, ...]
+
+
+def plan_asset_id(execution_id: str) -> str:
+    """计划提案资产身份：每 execution 一个资产，``plan_revision`` 为版本。"""
+
+    return f"plan:{require_identity(execution_id, '$.execution_id')}"
+
+
+def _validate_plan_item_snapshot(item: PlanItemSnapshot, path: str) -> None:
+    """内存对象结构校验（与 wire 解码同判据，防止绕过 codec 写入坏行）。"""
+
+    require_identity(item.id, f"{path}.id")
+    if not isinstance(item.content, str):
+        _fail("invalid_type", f"{path}.content")
+    if not isinstance(item.active_form, str):
+        _fail("invalid_type", f"{path}.active_form")
+    if not isinstance(item.status, str) or item.status not in PLAN_ITEM_STATUSES:
+        _fail("invalid_enum", f"{path}.status")
+    if item.parent_id is not None:
+        require_identity(item.parent_id, f"{path}.parent_id")
+    if not isinstance(item.depends_on, tuple):
+        _fail("invalid_type", f"{path}.depends_on")
+    for index, dependency in enumerate(item.depends_on):
+        require_identity(dependency, f"{path}.depends_on[{index}]")
+
+
+def decode_plan_item_snapshot(value: object, path: str = "$.plan_item") -> PlanItemSnapshot:
+    """严格解码单个步骤（六键必填、禁额外键；status 只接受冻结五值）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _PLAN_ITEM_KEYS, path)
+    status = value["status"]
+    if not isinstance(status, str) or status not in PLAN_ITEM_STATUSES:
+        _fail("invalid_enum", f"{path}.status")
+    content = value["content"]
+    if not isinstance(content, str):
+        _fail("invalid_type", f"{path}.content")
+    active_form = value["active_form"]
+    if not isinstance(active_form, str):
+        _fail("invalid_type", f"{path}.active_form")
+    raw_depends = value["depends_on"]
+    if not isinstance(raw_depends, list):
+        _fail("invalid_type", f"{path}.depends_on")
+    return PlanItemSnapshot(
+        id=_require_str(value["id"], f"{path}.id"),
+        content=content,
+        status=status,
+        active_form=active_form,
+        parent_id=_opt_str(value["parent_id"], f"{path}.parent_id"),
+        depends_on=tuple(_require_str(item, f"{path}.depends_on[{index}]") for index, item in enumerate(raw_depends)),
+    )
+
+
+def decode_plan_proposal(value: object, *, execution_id: str, path: str = "$.plan_proposal") -> PlanProposal:
+    """严格解码计划提案文档（``execution_id`` 来自存储绑定，不在文档内）。
+
+    Raises:
+        AgentValidationError: ``invalid_keys_missing`` / ``invalid_keys_unknown`` /
+            ``unsupported_version`` / ``invalid_type`` / ``invalid_range`` /
+            ``invalid_enum`` / ``duplicate_plan_item`` 及通用身份错误码。
+    """
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _PLAN_PROPOSAL_KEYS, path)
+    version = value["plan_store_version"]
+    if isinstance(version, bool) or version != PLAN_STORE_VERSION:
+        _fail("unsupported_version", f"{path}.plan_store_version")
+    revision = require_revision(value["plan_revision"], f"{path}.plan_revision")
+    raw_items = value["items"]
+    if not isinstance(raw_items, list):
+        _fail("invalid_type", f"{path}.items")
+    items = tuple(decode_plan_item_snapshot(item, f"{path}.items[{index}]") for index, item in enumerate(raw_items))
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        if item.id in seen:
+            _fail("duplicate_plan_item", f"{path}.items[{index}].id")
+        seen.add(item.id)
+    return PlanProposal(
+        execution_id=require_identity(execution_id, f"{path}.execution_id"),
+        plan_revision=revision,
+        items=items,
+    )
+
+
+def decode_plan_proposal_document(document: str, *, execution_id: str) -> PlanProposal:
+    """规范 JSON 文本 → 计划提案（落库正文读回入口）。"""
+
+    return decode_plan_proposal(decode_json_doc(document), execution_id=execution_id)
+
+
+def normalize_plan_proposal(proposal: PlanProposal) -> CanonicalJson:
+    """规范化计划提案 wire（结构版本 + revision + 全键显式；顺序即身份）。"""
+
+    if not isinstance(proposal, PlanProposal):
+        _fail("invalid_type", "$.plan_proposal")
+    require_identity(proposal.execution_id, "$.plan_proposal.execution_id")
+    require_revision(proposal.plan_revision, "$.plan_proposal.plan_revision")
+    if not isinstance(proposal.items, tuple):
+        _fail("invalid_type", "$.plan_proposal.items")
+    seen: set[str] = set()
+    for index, item in enumerate(proposal.items):
+        if not isinstance(item, PlanItemSnapshot):
+            _fail("invalid_type", f"$.plan_proposal.items[{index}]")
+        _validate_plan_item_snapshot(item, f"$.plan_proposal.items[{index}]")
+        if item.id in seen:
+            _fail("duplicate_plan_item", f"$.plan_proposal.items[{index}].id")
+        seen.add(item.id)
+    return json_doc(
+        {
+            "plan_store_version": PLAN_STORE_VERSION,
+            "plan_revision": proposal.plan_revision,
+            "items": list(proposal.items),
+        }
+    )
+
+
+def plan_proposal_digest(proposal: PlanProposal) -> str:
+    """计划提案内容摘要（SHA-256，绑定结构版本与 revision；顺序入身份）。"""
+
+    normalize_plan_proposal(proposal)
+    return sha256_hex(json_doc(["plan_proposal", PLAN_STORE_VERSION, proposal.plan_revision, list(proposal.items)]))
