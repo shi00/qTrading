@@ -5118,7 +5118,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """构建 CLI 解析器：--check/--scope/--update（检视 §5.2 固定接口）。"""
     parser = argparse.ArgumentParser(
         prog="check_docs_consistency",
-        description="文档一致性检查（--check --scope）与受控生成块更新（--update）。",
+        description=(
+            "文档一致性检查（--check --scope）与受控生成块更新（--update）。"
+            "注意：生产差异更新当前被安全拒绝，生成逻辑仅经测试替身验证，真实写入路线需另行确认。"
+        ),
     )
     parser.add_argument("--check", action="store_true", help="运行一致性检查（无参数时等价 --check --scope all）")
     parser.add_argument(
@@ -5130,7 +5133,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--update",
         action="store_true",
-        help="更新封闭注册表登记的生成块并自动运行 all 检查（不得与 --check/--scope 组合）",
+        help=(
+            "更新封闭注册表登记的生成块并自动运行 all 检查（不得与 --check/--scope 组合）；"
+            "生产差异更新当前被安全拒绝（生成逻辑仅经测试替身验证），真实写入路线需另行确认"
+        ),
     )
     return parser
 

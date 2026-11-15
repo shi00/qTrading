@@ -79,6 +79,6 @@
 
 - **长期维护流程唯一正本**：[docs/guides/documentation-maintenance.md](../guides/documentation-maintenance.md)（L01—L12 控制合同 / 六类变更协议 / E01—E12 演习合同，ADR-0018）。
 - **一致性检查**：`python scripts/check_docs_consistency.py --check --scope all`（无参数等价；scope=document/governance/source 按变更映射裁剪）。
-- **生成块更新**：`python scripts/check_docs_consistency.py --update`（封闭注册表 `scripts/docs_generated.py::BUILTIN_REGISTRY`：AGENTS.md / CLAUDE.md / docs/README.md / 本 README / `.pre-commit-config.yaml` / docs/flet/accessibility-baseline.md 的激活生成块；目标与作者源的完整清单以注册表为唯一来源，更新后自动跑 all 检查）。
+- **生成块更新**：`python scripts/check_docs_consistency.py --update`（封闭注册表 `scripts/docs_generated.py::BUILTIN_REGISTRY`：AGENTS.md / CLAUDE.md / docs/README.md / 本 README / `.pre-commit-config.yaml` / docs/flet/accessibility-baseline.md 的激活生成块；目标与作者源的完整清单以注册表为唯一来源，更新后自动跑 all 检查）。**能力现状**：生产差异更新当前被安全拒绝（生成逻辑仅经 `tests/docs` 测试替身验证，不构成生产写入能力证明），真实写入路线需另行确认；在写入后端可用前，作者源变更后的生成块需待后端可用时再生，禁止手改生成块或以强制/不安全写入绕过。
 - **治理 ID 溯源**：[governance-ids.md](./governance-ids.md)；**规则集变更记录**：[ruleset-changelog.md](./ruleset-changelog.md)；**检查迁移映射**：[checker-migration-map.md](./checker-migration-map.md)。
 - **例外移除条件季度复核**：逐条判断 `exceptions.yml` 中 `removal_trigger` 是否已满足（checker 只校验 `expires_at` 日期与字段完备性，不代替该语义判定），节律与处置见 [documentation-maintenance.md](../guides/documentation-maintenance.md) §9。
