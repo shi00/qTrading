@@ -83,6 +83,10 @@ class ShutdownCoordinator:
         self._service_stop_delay = service_stop_delay
         self._watchdog_timeout_s = watchdog_timeout_s
         self._force_exit = force_exit_callback or self._default_force_exit
+        # D02-001：强制退出是终态动作，多入口（窗口关闭 / disconnect / upgrade /
+        # watchdog）可能重叠触发；首次请求生效，避免重复强退与重复回调。
+        self._force_exit_requested = False
+        self._force_exit_lock = threading.Lock()
         # Phase 2A.1 Task 2A.1.9：注册的 fire-and-forget 任务（如启动期 auto probe），
         # 关机时先于 TaskManager 任务取消，避免资源泄漏
         self._registered_tasks: set[asyncio.Task] = set()
@@ -138,7 +142,18 @@ class ShutdownCoordinator:
         """公开入口：委托给构造时注入的 ``force_exit_callback`` 或默认实现。
 
         供 ``app/`` 层调用，避免跨模块访问 ``_force_exit`` 私有属性。
+
+        D02-001：多入口（窗口关闭 / disconnect / upgrade / watchdog）可能同时或先后
+        请求强制退出，此处按「首次请求生效」幂等化，避免重复强退与重复回调。
+        清理是否成功由 ``cleanup_success`` 单独表达，不依赖本方法被重复调用。
         """
+        with self._force_exit_lock:
+            duplicate = self._force_exit_requested
+            if not duplicate:
+                self._force_exit_requested = True
+        if duplicate:
+            logger.info("[Shutdown] force_exit(%s) ignored: an exit was already requested.", code)
+            return
         self._force_exit(code)
 
     @property
@@ -168,7 +183,6 @@ class ShutdownCoordinator:
         self._watchdog_started = True
         self._watchdog_cancel_event = threading.Event()
         cancel_event = self._watchdog_cancel_event
-        force_exit = self._force_exit
 
         def _force_exit_thread():
             if cancel_event.wait(effective_timeout):
@@ -190,7 +204,9 @@ class ShutdownCoordinator:
                 self._cleanup_running,
                 step_summary,
             )
-            force_exit(1)
+            # D02-001：经公开 force_exit 共享「首次请求生效」保护，避免与
+            # disconnect / 窗口关闭路径重复强退。
+            self.force_exit(1)
 
         threading.Thread(target=_force_exit_thread, daemon=True).start()
         logger.info("[Shutdown] Watchdog armed (%ss).", effective_timeout)

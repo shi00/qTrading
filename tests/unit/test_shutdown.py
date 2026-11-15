@@ -182,6 +182,15 @@ class TestShutdownCoordinatorInit:
         coord.force_exit(1)
         assert called_with == [1]
 
+    def test_force_exit_is_idempotent(self):
+        """D02-001: 多入口重叠时强制退出只触发一次（首次请求生效）。"""
+        called_with = []
+        coord = ShutdownCoordinator(force_exit_callback=lambda code: called_with.append(code))
+        coord.force_exit(1)
+        coord.force_exit(1)
+        coord.force_exit(0)
+        assert called_with == [1]
+
     def test_custom_service_stop_delay(self):
         coord = ShutdownCoordinator(service_stop_delay=2.0)
         assert coord._service_stop_delay == 2.0

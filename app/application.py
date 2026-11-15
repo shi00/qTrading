@@ -172,7 +172,7 @@ async def _run_session(
         page.window.on_event = _on_window_event
 
     async def _on_disconnect(e):
-        await handle_disconnect(coordinator, cleanup_done_fn=lambda: coordinator.cleanup_done)
+        await handle_disconnect(coordinator)
 
     # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
     # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。

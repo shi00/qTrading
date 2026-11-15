@@ -6,7 +6,7 @@
 - WindowDialogManager: dialog 显示/隐藏、close confirm 流程
 - perform_window_shutdown: coordinator cleanup + window destroy
 - perform_upgrade_exit: upgrade 失败后的清理与强制退出
-- handle_disconnect: disconnect 事件处理与 cleanup_done 短路
+- handle_disconnect: disconnect 事件处理与失败/超时强制退出
 """
 
 # pyright: reportAttributeAccessIssue=false, reportArgumentType=false
@@ -30,6 +30,7 @@ from app.window_lifecycle import (
     perform_window_shutdown,
     setup_window_geometry,
 )
+from utils.shutdown import ShutdownCoordinator
 
 pytestmark = pytest.mark.unit
 
@@ -718,44 +719,85 @@ class TestPerformUpgradeExit:
 # ============================================================================
 
 
+_CLEANUP_STEP_METHODS = (
+    "_step0_cancel_tasks",
+    "_step1_stop_services",
+    "_step2_flush_db_writes",
+    "_step3_stop_processor_workers",
+    "_step3b_dispose_async_engine",
+    "_step4_clear_toast",
+    "_step5_unload_ai_model",
+    "_step5b_stop_sentiment_scorer",
+    "_step6_shutdown_thread_pools",
+    "_step7_close_database_managers",
+    "_step8_stop_embedded_postgres",
+)
+
+
+def _install_cleanup_step_stubs(
+    coordinator: Any,
+    *,
+    executed: list[str],
+    failing: str | None = None,
+) -> None:
+    """把真实 ShutdownCoordinator 的清理步骤替换为记录器（D02-001 回归用）.
+
+    保留 ``_run_cleanup_steps`` / ``_execute_cleanup`` 的真实编排与错误隔离，
+    仅替换步骤实现，避免触发真实单例与外部资源。
+    """
+    for method_name in _CLEANUP_STEP_METHODS:
+
+        async def _step(_name: str = method_name) -> None:
+            executed.append(_name)
+            if _name == failing:
+                raise RuntimeError(f"{_name} boom")
+
+        setattr(coordinator, method_name, _step)
+
+
 class TestHandleDisconnect:
+    """D02-001: disconnect 清理失败/超时必须真正 force_exit(1).
+
+    ``cleanup_done`` 只表示「清理尝试已结束」，不得据此短路退出；
+    是否退出只由 ``cleanup_ok``（即 ``cleanup_success``）决定。
+    """
+
     @pytest.mark.asyncio
-    async def test_cleanup_done_short_circuits_without_force_exit(self) -> None:
-        """cleanup_done_fn() == True 时直接返回，不进入 cancel/force_exit 分支."""
-        coordinator = _FakeCoordinator(cleanup_ok=True, cleanup_done=True)
-        await handle_disconnect(
-            coordinator,
-            cleanup_done_fn=lambda: True,
-        )
+    async def test_cleanup_done_with_failed_cleanup_still_force_exits(self) -> None:
+        """cleanup_done=True 且 cleanup_ok=False：仍须 force_exit(1)（旧短路契约已废止）."""
+        coordinator = _FakeCoordinator(cleanup_ok=False, cleanup_done=True)
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            await handle_disconnect(coordinator)
         assert coordinator.start_watchdog_calls == 1
         # Phase 2 Step 8 调整：watchdog 70s + do_cleanup 60s
         assert coordinator.start_watchdog_args == [70]
         assert coordinator.do_cleanup_calls == 1
         assert coordinator.do_cleanup_kwargs == {"timeout_s": 60.0, "step_timeout_s": 35.0}
-        # cleanup_done=True 短路返回，不调用 cancel_watchdog/force_exit
         assert coordinator.cancel_watchdog_calls == 0
-        assert coordinator.force_exit_codes == []
+        assert coordinator.force_exit_codes == [1]
 
     @pytest.mark.asyncio
     async def test_cleanup_ok_cancels_watchdog(self) -> None:
-        """cleanup_done=False 且 cleanup_ok=True：cancel_watchdog 并 log info."""
+        """cleanup_ok=True：cancel_watchdog 并返回，不 force_exit."""
         coordinator = _FakeCoordinator(cleanup_ok=True, cleanup_done=False)
-        await handle_disconnect(
-            coordinator,
-            cleanup_done_fn=lambda: False,
-        )
+        await handle_disconnect(coordinator)
+        assert coordinator.cancel_watchdog_calls == 1
+        assert coordinator.force_exit_codes == []
+
+    @pytest.mark.asyncio
+    async def test_cleanup_ok_with_cleanup_done_cancels_watchdog(self) -> None:
+        """其他入口已完成清理（cleanup_done=True）且成功：不重复 force_exit."""
+        coordinator = _FakeCoordinator(cleanup_ok=True, cleanup_done=True)
+        await handle_disconnect(coordinator)
         assert coordinator.cancel_watchdog_calls == 1
         assert coordinator.force_exit_codes == []
 
     @pytest.mark.asyncio
     async def test_cleanup_failure_force_exits(self) -> None:
-        """cleanup_done=False 且 cleanup_ok=False：log error 并 force_exit(1)."""
+        """cleanup_ok=False：log error 并 force_exit(1)."""
         coordinator = _FakeCoordinator(cleanup_ok=False, cleanup_done=False)
         with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
-            await handle_disconnect(
-                coordinator,
-                cleanup_done_fn=lambda: False,
-            )
+            await handle_disconnect(coordinator)
         assert coordinator.cancel_watchdog_calls == 0
         assert coordinator.force_exit_codes == [1]
 
@@ -763,10 +805,7 @@ class TestHandleDisconnect:
     async def test_start_watchdog_uses_70_second_timeout(self) -> None:
         """disconnect 路径下 watchdog 超时为 70s（Phase 2 Step 8 调整，容纳 55s 步骤和 + margin）."""
         coordinator = _FakeCoordinator(cleanup_ok=True, cleanup_done=True)
-        await handle_disconnect(
-            coordinator,
-            cleanup_done_fn=lambda: True,
-        )
+        await handle_disconnect(coordinator)
         # Phase 2 Step 8 调整：watchdog 70s
         assert coordinator.start_watchdog_args == [70]
 
@@ -780,10 +819,85 @@ class TestHandleDisconnect:
         coordinator = _FakeCoordinator(cleanup_exc=asyncio.CancelledError())
         with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match；块外 force_exit_codes 已强断言
-                await handle_disconnect(
-                    coordinator,
-                    cleanup_done_fn=lambda: False,
-                )
+                await handle_disconnect(coordinator)
         assert coordinator.force_exit_codes == [1]
         # cancel_watchdog 不应被调用（CancelledError 在 do_cleanup 后立即 raise）
         assert coordinator.cancel_watchdog_calls == 0
+
+
+class TestHandleDisconnectRealCoordinator:
+    """D02-001: 真实 ShutdownCoordinator 的 disconnect 退出语义回归."""
+
+    @pytest.mark.asyncio
+    async def test_critical_step_failure_forces_exit_once_and_continues_release(self) -> None:
+        """critical 步骤抛异常：cleanup_done/success 语义不变，exit 恰一次，后续释放步骤仍执行."""
+        exit_codes: list[int] = []
+        executed: list[str] = []
+        coordinator = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=exit_codes.append)
+        _install_cleanup_step_stubs(coordinator, executed=executed, failing="_step1_stop_services")
+
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            await handle_disconnect(coordinator)
+
+        assert coordinator.cleanup_done is True
+        assert coordinator.cleanup_success is False
+        assert exit_codes == [1]
+        # 失败步骤之后的资源释放步骤仍执行（错误隔离不跳过）
+        assert executed[-1] == "_step8_stop_embedded_postgres"
+        assert "_step6_shutdown_thread_pools" in executed
+        assert len(executed) == len(_CLEANUP_STEP_METHODS)
+        # watchdog 已由 _execute_cleanup 撤销，force_exit 是唯一退出路径
+        assert coordinator.watchdog_started is False
+
+    @pytest.mark.asyncio
+    async def test_total_timeout_forces_exit(self) -> None:
+        """do_cleanup 总超时（TimeoutError 分支）：cleanup_done=True 仍须 force_exit(1)."""
+        exit_codes: list[int] = []
+        coordinator = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=exit_codes.append)
+
+        with (
+            patch("utils.shutdown.asyncio.wait_for", new=AsyncMock(side_effect=TimeoutError)),
+            patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await handle_disconnect(coordinator)
+
+        assert coordinator.cleanup_done is True
+        assert coordinator.cleanup_success is False
+        assert exit_codes == [1]
+        assert coordinator.watchdog_started is False
+
+    @pytest.mark.asyncio
+    async def test_success_path_cancels_watchdog_without_exit(self) -> None:
+        """全部步骤成功：cleanup_done/success=True，撤销 watchdog 且不 force_exit."""
+        exit_codes: list[int] = []
+        executed: list[str] = []
+        coordinator = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=exit_codes.append)
+        _install_cleanup_step_stubs(coordinator, executed=executed)
+
+        await handle_disconnect(coordinator)
+
+        assert coordinator.cleanup_done is True
+        assert coordinator.cleanup_success is True
+        assert exit_codes == []
+        assert coordinator.watchdog_started is False
+        assert len(executed) == len(_CLEANUP_STEP_METHODS)
+
+    @pytest.mark.asyncio
+    async def test_window_close_and_disconnect_overlap_forces_exit_once(self) -> None:
+        """窗口关闭与 disconnect 并发重叠：共享一次清理，force_exit 只触发一次."""
+        page = _make_page()
+        exit_codes: list[int] = []
+        executed: list[str] = []
+        coordinator = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=exit_codes.append)
+        _install_cleanup_step_stubs(coordinator, executed=executed, failing="_step1_stop_services")
+
+        with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
+            results = await asyncio.gather(
+                perform_window_shutdown(coordinator, page, is_web_mode_fn=lambda: False),
+                handle_disconnect(coordinator),
+            )
+
+        assert results[0] is False
+        assert coordinator.cleanup_success is False
+        assert exit_codes == [1]
+        assert len(executed) == len(_CLEANUP_STEP_METHODS)
