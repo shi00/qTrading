@@ -294,6 +294,27 @@ class TestDispatchEffects:
         ]
 
     @pytest.mark.asyncio
+    async def test_lone_surrogate_result_is_unknown(self) -> None:
+        """孤立代理项无法 UTF-8 编码时同样不得裸逃逸。"""
+
+        session = _Session(result={"text": "\ud800"})
+        dispatcher, session, _grants, _manager = await _dispatcher(session=session)
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.UNKNOWN
+        assert outcome.result is None
+
+    @pytest.mark.asyncio
+    async def test_transport_value_error_is_reported_failed(self) -> None:
+        """非超时/断线的传输异常标 FAILED（确证未完成派发效果不得标 unknown）。"""
+
+        session = _Session(raises=ValueError("bad arguments"))
+        dispatcher, session, _grants, _manager = await _dispatcher(session=session)
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result is None
+        assert [call[0] for call in session.calls] == ["read_file"]
+
+    @pytest.mark.asyncio
     async def test_cancellation_propagates_and_releases_in_flight(self) -> None:
         session = _Session(raises=asyncio.CancelledError())
         dispatcher, session, _grants, manager = await _dispatcher(session=session)

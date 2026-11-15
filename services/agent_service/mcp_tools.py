@@ -155,7 +155,7 @@ class MCPToolDispatcher:
         deadline_s: int,
     ) -> ToolCallOutcome:
         try:
-            # 单一总 deadline 由本层强制：端口实现不守时限也不会挂起事件循环。
+            # 单一总 deadline 由本层强制：端口不守时限时在 await 点切断（同步阻塞仍须端口自律）。
             async with asyncio.timeout(deadline_s):
                 result = await session.call_tool(
                     request.tool_name,
@@ -171,10 +171,10 @@ class MCPToolDispatcher:
             return ToolCallOutcome(ToolCallState.FAILED, None, request.operation_id)
         try:
             encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        except (TypeError, ValueError):
-            # 效果已发生但结果无法进入类型化契约（二进制/自定义对象）：无确证，不重试。
+            size = len(encoded.encode("utf-8"))
+        except (TypeError, ValueError, RecursionError):
+            # 效果已发生但结果无法进入类型化契约（二进制/自定义对象/孤立代理项/超深结构）：无确证，不重试。
             return ToolCallOutcome(ToolCallState.UNKNOWN, None, request.operation_id)
-        size = len(encoded.encode("utf-8"))
         guard.single_result_bytes(size)
         guard.retention_bytes(size)
         return ToolCallOutcome(ToolCallState.COMPLETED, result, request.operation_id)
