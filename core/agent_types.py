@@ -8099,3 +8099,228 @@ def decode_delivery_receipt(value: object, path: str = "$.delivery_receipt") -> 
         error_code=error_raw,
         next_action=next_action_raw,
     )
+
+
+#: 交付 manifest 结构版本（JSONB ``agent_operation.delivery_manifest``，§9.9/§10.2）。
+DELIVERY_MANIFEST_VERSION: Final = 1
+
+#: 允许的阶段迁移；``unknown`` 与终态不可再迁移（unknown 不得借新 delivery 绕过）。
+_DELIVERY_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
+    "manifest_saved": frozenset({"staged", "cancelled_before_publish", "unknown"}),
+    "staged": frozenset({"validated", "cancelled_before_publish", "unknown"}),
+    "validated": frozenset({"publish_claimed", "cancelled_before_publish", "unknown"}),
+    "publish_claimed": frozenset({"published_confirmed", "unknown"}),
+    "published_confirmed": frozenset(),
+    "cancelled_before_publish": frozenset(),
+    "unknown": frozenset(),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryManifest:
+    """文件交付完整合同（§9.9 ``delivery_manifest``）：目标、格式、成果版本/摘要、
+    暂存输出摘要与当前来源状态；``phase`` 只表示交付阶段，不表示成果质量。"""
+
+    delivery_id: str
+    command: CommandRef
+    artifact_id: str
+    artifact_version: int
+    artifact_digest: str
+    format: str
+    format_rule_version: int
+    target: DeliveryTarget
+    phase: str
+    source_state: str
+    output_digest: str | None
+    output_bytes: int | None
+    staged_path: str | None
+    verified_at: str
+    error_code: str | None
+
+
+_DELIVERY_MANIFEST_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "delivery_id",
+        "command",
+        "artifact_id",
+        "artifact_version",
+        "artifact_digest",
+        "format",
+        "format_rule_version",
+        "target",
+        "phase",
+        "source_state",
+        "output_digest",
+        "output_bytes",
+        "staged_path",
+        "verified_at",
+        "error_code",
+    }
+)
+
+
+def validate_delivery_transition(previous: str, following: str) -> None:
+    """校验交付阶段迁移；同阶段视为幂等重放，由调用方按内容判定。"""
+
+    if previous not in DELIVERY_PHASES or following not in DELIVERY_PHASES:
+        _fail("invalid_delivery_phase", "$.delivery_manifest.phase")
+    if following == previous:
+        return
+    if following not in _DELIVERY_TRANSITIONS[previous]:
+        _fail("invalid_delivery_transition", "$.delivery_manifest.phase")
+
+
+def _validate_manifest_phase_fields(
+    phase: str,
+    output_digest: str | None,
+    output_bytes: int | None,
+    staged_path: str | None,
+    error_code: str | None,
+) -> None:
+    if (output_digest is None) != (output_bytes is None):
+        _fail("missing_field", "$.delivery_manifest.output_bytes")
+    if phase == "manifest_saved":
+        if output_digest is not None or staged_path is not None:
+            _fail("invalid_delivery_phase", "$.delivery_manifest.phase")
+    elif phase in {"staged", "validated", "publish_claimed"}:
+        if output_digest is None:
+            _fail("missing_field", "$.delivery_manifest.output_digest")
+        if staged_path is None:
+            _fail("missing_field", "$.delivery_manifest.staged_path")
+    elif phase in {"published_confirmed", "cancelled_before_publish"}:
+        if staged_path is not None:
+            _fail("invalid_delivery_phase", "$.delivery_manifest.staged_path")
+    if phase == "published_confirmed" and output_digest is None:
+        _fail("missing_field", "$.delivery_manifest.output_digest")
+    if phase == "unknown" and error_code is None:
+        _fail("missing_field", "$.delivery_manifest.error_code")
+
+
+def encode_delivery_manifest(manifest: DeliveryManifest) -> dict[str, Any]:
+    """DeliveryManifest → wire 16 键（命令/目标/成果身份/阶段字段逐项复核）。"""
+
+    command_wire = encode_artifact_delivery_command(
+        ArtifactDeliveryCommand(
+            command=manifest.command,
+            artifact_id=manifest.artifact_id,
+            artifact_version=manifest.artifact_version,
+            format=manifest.format,
+            format_rule_version=manifest.format_rule_version,
+            delivery_id=manifest.delivery_id,
+            target=manifest.target,
+            expected_delivery_revision=manifest.command.expected_revision,
+        )
+    )
+    phase = _require_choice(manifest.phase, DELIVERY_PHASES, "$.delivery_manifest.phase", "invalid_delivery_phase")
+    source_state = _require_choice(
+        manifest.source_state, DELIVERY_SOURCE_STATES, "$.delivery_manifest.source_state", "invalid_source_state"
+    )
+    output_digest = (
+        None
+        if manifest.output_digest is None
+        else _require_digest(manifest.output_digest, "$.delivery_manifest.output_digest")
+    )
+    output_bytes = manifest.output_bytes
+    if output_bytes is not None and (isinstance(output_bytes, bool) or not isinstance(output_bytes, int)):
+        _fail("invalid_type", "$.delivery_manifest.output_bytes")
+    if output_bytes is not None and output_bytes < 0:
+        _fail("invalid_range", "$.delivery_manifest.output_bytes")
+    staged_path = manifest.staged_path
+    if staged_path is not None:
+        staged_path = validate_delivery_target_path(staged_path, "$.delivery_manifest.staged_path")
+    error_raw = manifest.error_code
+    if error_raw is not None and not isinstance(error_raw, str):
+        _fail("invalid_type", "$.delivery_manifest.error_code")
+    _validate_manifest_phase_fields(phase, output_digest, output_bytes, staged_path, error_raw)
+    return {
+        "schema_version": DELIVERY_MANIFEST_VERSION,
+        "delivery_id": command_wire["delivery_id"],
+        "command": command_wire["command"],
+        "artifact_id": command_wire["artifact_id"],
+        "artifact_version": command_wire["artifact_version"],
+        "artifact_digest": _require_digest(manifest.artifact_digest, "$.delivery_manifest.artifact_digest"),
+        "format": command_wire["format"],
+        "format_rule_version": command_wire["format_rule_version"],
+        "target": command_wire["target"],
+        "phase": phase,
+        "source_state": source_state,
+        "output_digest": output_digest,
+        "output_bytes": output_bytes,
+        "staged_path": staged_path,
+        "verified_at": _require_utc_timestamp(manifest.verified_at, "$.delivery_manifest.verified_at"),
+        "error_code": error_raw,
+    }
+
+
+def decode_delivery_manifest(value: object, path: str = "$.delivery_manifest") -> DeliveryManifest:
+    """严格解码交付 manifest（16 键、版本 1、阶段字段自洽）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DELIVERY_MANIFEST_KEYS, path)
+    version = value["schema_version"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        _fail("invalid_type", f"{path}.schema_version")
+    if version != DELIVERY_MANIFEST_VERSION:
+        _fail("unsupported_schema_version", f"{path}.schema_version")
+    command_wire = {
+        "command": value["command"],
+        "artifact_id": value["artifact_id"],
+        "artifact_version": value["artifact_version"],
+        "format": value["format"],
+        "format_rule_version": value["format_rule_version"],
+        "delivery_id": value["delivery_id"],
+        "target": value["target"],
+        "expected_delivery_revision": None,
+    }
+    command_ref = decode_command_ref(value["command"], f"{path}.command")
+    command_wire["expected_delivery_revision"] = command_ref.expected_revision
+    decoded_command = decode_artifact_delivery_command(command_wire, f"{path}.command_input")
+    phase = _require_choice(value["phase"], DELIVERY_PHASES, f"{path}.phase", "invalid_delivery_phase")
+    source_state = _require_choice(
+        value["source_state"], DELIVERY_SOURCE_STATES, f"{path}.source_state", "invalid_source_state"
+    )
+    output_raw = value["output_digest"]
+    output_digest = None if output_raw is None else _require_digest(output_raw, f"{path}.output_digest")
+    output_bytes_raw = value["output_bytes"]
+    if output_bytes_raw is not None and (
+        isinstance(output_bytes_raw, bool) or not isinstance(output_bytes_raw, int) or output_bytes_raw < 0
+    ):
+        _fail("invalid_type", f"{path}.output_bytes")
+    staged_raw = value["staged_path"]
+    staged_path = None if staged_raw is None else validate_delivery_target_path(staged_raw, f"{path}.staged_path")
+    error_raw = value["error_code"]
+    if error_raw is not None and not isinstance(error_raw, str):
+        _fail("invalid_type", f"{path}.error_code")
+    _validate_manifest_phase_fields(phase, output_digest, output_bytes_raw, staged_path, error_raw)
+    return DeliveryManifest(
+        delivery_id=decoded_command.delivery_id,
+        command=decoded_command.command,
+        artifact_id=decoded_command.artifact_id,
+        artifact_version=decoded_command.artifact_version,
+        artifact_digest=_require_digest(value["artifact_digest"], f"{path}.artifact_digest"),
+        format=decoded_command.format,
+        format_rule_version=decoded_command.format_rule_version,
+        target=decoded_command.target,
+        phase=phase,
+        source_state=source_state,
+        output_digest=output_digest,
+        output_bytes=output_bytes_raw,
+        staged_path=staged_path,
+        verified_at=_require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
+        error_code=error_raw,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryPhaseReceipt:
+    """交付阶段 CAS 回执（revision 单调；``idempotent`` 表示同内容重放）。"""
+
+    delivery_id: str
+    operation_id: str
+    phase: str
+    revision: int
+    artifact_id: str
+    artifact_version: int
+    idempotent: bool

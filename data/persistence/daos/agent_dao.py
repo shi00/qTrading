@@ -77,7 +77,12 @@ from core.agent_types import (
     DecisionBatchFact,
     DecisionSummary,
     DeliveryFact,
+    DeliveryManifest,
+    DeliveryPhaseReceipt,
     DeliveryState,
+    decode_delivery_manifest,
+    encode_delivery_manifest,
+    validate_delivery_transition,
     DispatchCloseFact,
     DispatchCloseRequest,
     DraftReceipt,
@@ -1472,6 +1477,123 @@ class AgentDao(BaseDao):
                 next_cursor=next_cursor,
                 result_available=result_text is not None,
                 unavailable_reason=unavailable_reason,
+            )
+
+    async def save_delivery_phase(
+        self,
+        *,
+        user_scope: str,
+        operation_id: str,
+        expected_revision: int,
+        manifest: DeliveryManifest,
+    ) -> DeliveryPhaseReceipt:
+        """交付阶段 CAS（§4.2/§9.9）：同内容重放幂等；unknown/终态不可绕过。
+
+        - 行不存在或跨用户 → ``INPUT_INVALID``；已存 manifest 属其他 delivery → ``INPUT_CONFLICT``；
+        - revision 不符且内容不同 → ``REVISION_CONFLICT``；内容相同返回幂等回执；
+        - 非法阶段迁移 → ``INPUT_INVALID``（``unknown``/终态为吸收态）；
+        - 首次落库写 artifact_id/version，后续身份不一致 → ``INPUT_CONFLICT``；
+        - 坏行（已存 manifest 不可解码）→ ``OPERATION_UNKNOWN``，不静默覆盖。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{operation_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(operation_id, "operation_id", identity)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "expected_revision must be >= 0", identity)
+        try:
+            wire = encode_delivery_manifest(manifest)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        if manifest.command.user_scope != user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "manifest user_scope mismatch", identity)
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.delivery_manifest,
+                        AgentOperation.revision,
+                        AgentOperation.artifact_id,
+                        AgentOperation.artifact_version,
+                    )
+                    .where(
+                        AgentOperation.user_scope == user_scope,
+                        AgentOperation.operation_id == operation_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "operation does not exist", identity)
+            previous: DeliveryManifest | None = None
+            if row.delivery_manifest is not None:
+                try:
+                    previous = decode_delivery_manifest(row.delivery_manifest)
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        f"stored delivery manifest is invalid: {exc.code}",
+                        identity,
+                    ) from exc
+                if previous.delivery_id != manifest.delivery_id:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "operation already belongs to another delivery",
+                        identity,
+                    )
+            if row.artifact_id is not None and (
+                row.artifact_id != manifest.artifact_id or row.artifact_version != manifest.artifact_version
+            ):
+                raise AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "delivery artifact identity mismatch", identity)
+            if row.revision != expected_revision:
+                if row.delivery_manifest is not None and json_doc(row.delivery_manifest) == json_doc(wire):
+                    return DeliveryPhaseReceipt(
+                        delivery_id=manifest.delivery_id,
+                        operation_id=operation_id,
+                        phase=manifest.phase,
+                        revision=row.revision,
+                        artifact_id=manifest.artifact_id,
+                        artifact_version=manifest.artifact_version,
+                        idempotent=True,
+                    )
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT, "delivery revision changed concurrently", identity
+                )
+            if previous is not None:
+                try:
+                    validate_delivery_transition(previous.phase, manifest.phase)
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity
+                    ) from exc
+            revision = row.revision + 1
+            await conn.execute(
+                sa.update(AgentOperation)
+                .where(
+                    AgentOperation.user_scope == user_scope,
+                    AgentOperation.operation_id == operation_id,
+                    AgentOperation.revision == expected_revision,
+                )
+                .values(
+                    delivery_manifest=wire,
+                    artifact_id=manifest.artifact_id,
+                    artifact_version=manifest.artifact_version,
+                    revision=AgentOperation.revision + 1,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            return DeliveryPhaseReceipt(
+                delivery_id=manifest.delivery_id,
+                operation_id=operation_id,
+                phase=manifest.phase,
+                revision=revision,
+                artifact_id=manifest.artifact_id,
+                artifact_version=manifest.artifact_version,
+                idempotent=False,
             )
 
     async def bind_actual_input(self, request: BindActualInputRequest) -> BindActualInputReceipt:

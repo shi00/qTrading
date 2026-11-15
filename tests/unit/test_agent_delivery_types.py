@@ -11,18 +11,22 @@ from core.agent_types import (
     AgentValidationError,
     ArtifactDeliveryCommand,
     CommandRef,
+    DeliveryManifest,
     DeliveryReceipt,
     DeliveryTarget,
     decode_artifact_delivery_command,
+    decode_delivery_manifest,
     decode_delivery_receipt,
     decode_delivery_target,
     delivery_input_digest,
     derive_delivery_id,
     encode_artifact_delivery_command,
+    encode_delivery_manifest,
     encode_delivery_receipt,
     encode_delivery_target,
     split_utf16_chunks,
     validate_delivery_target_path,
+    validate_delivery_transition,
 )
 
 _TIMESTAMP = "2026-11-15T08:00:00.000000Z"
@@ -259,3 +263,115 @@ class TestDeliveryReceipt:
         with pytest.raises(AgentValidationError) as exc:
             encode_delivery_receipt(_receipt(phase="done"))
         assert exc.value.code == "invalid_delivery_phase"
+
+
+_STAGED_PATH = "C:\\Users\\admin\\Desktop\\.result.md.abc.staged"
+
+
+def _manifest(**overrides: object) -> DeliveryManifest:
+    command = _command()
+    base = DeliveryManifest(
+        delivery_id=command.delivery_id,
+        command=command.command,
+        artifact_id=command.artifact_id,
+        artifact_version=command.artifact_version,
+        artifact_digest="d" * 64,
+        format=command.format,
+        format_rule_version=command.format_rule_version,
+        target=command.target,
+        phase="manifest_saved",
+        source_state="available",
+        output_digest=None,
+        output_bytes=None,
+        staged_path=None,
+        verified_at=_TIMESTAMP,
+        error_code=None,
+    )
+    return replace(base, **overrides)
+
+
+class TestDeliveryManifest:
+    def test_roundtrip_across_phases(self) -> None:
+        samples = (
+            _manifest(),
+            _manifest(phase="staged", output_digest="e" * 64, output_bytes=12, staged_path=_STAGED_PATH),
+            _manifest(phase="validated", output_digest="e" * 64, output_bytes=12, staged_path=_STAGED_PATH),
+            _manifest(phase="publish_claimed", output_digest="e" * 64, output_bytes=12, staged_path=_STAGED_PATH),
+            _manifest(phase="published_confirmed", output_digest="e" * 64, output_bytes=12),
+            _manifest(phase="cancelled_before_publish"),
+            _manifest(phase="unknown", error_code="delivery_publish_unverified"),
+        )
+        for manifest in samples:
+            assert decode_delivery_manifest(encode_delivery_manifest(manifest)) == manifest
+
+    def test_staged_phase_requires_output_and_staged_path(self) -> None:
+        with pytest.raises(AgentValidationError) as missing_output:
+            encode_delivery_manifest(_manifest(phase="staged", staged_path=_STAGED_PATH))
+        assert missing_output.value.code == "missing_field"
+        with pytest.raises(AgentValidationError) as missing_path:
+            encode_delivery_manifest(_manifest(phase="staged", output_digest="e" * 64, output_bytes=12))
+        assert missing_path.value.code == "missing_field"
+
+    def test_manifest_saved_rejects_output_fields(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_delivery_manifest(_manifest(output_digest="e" * 64, output_bytes=12))
+        assert exc.value.code == "invalid_delivery_phase"
+
+    def test_published_rejects_staged_path(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_delivery_manifest(
+                _manifest(
+                    phase="published_confirmed",
+                    output_digest="e" * 64,
+                    output_bytes=12,
+                    staged_path=_STAGED_PATH,
+                )
+            )
+        assert exc.value.code == "invalid_delivery_phase"
+
+    def test_unknown_requires_error_code(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_delivery_manifest(_manifest(phase="unknown"))
+        assert exc.value.code == "missing_field"
+
+    def test_output_digest_and_bytes_must_pair(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_delivery_manifest(_manifest(phase="staged", output_digest="e" * 64, staged_path=_STAGED_PATH))
+        assert exc.value.code == "missing_field"
+
+    def test_decode_rejects_unsupported_version(self) -> None:
+        wire = encode_delivery_manifest(_manifest())
+        wire["schema_version"] = 2
+        with pytest.raises(AgentValidationError) as exc:
+            decode_delivery_manifest(wire)
+        assert exc.value.code == "unsupported_schema_version"
+
+    @pytest.mark.parametrize(
+        ("previous", "following"),
+        [
+            ("manifest_saved", "staged"),
+            ("staged", "validated"),
+            ("validated", "publish_claimed"),
+            ("publish_claimed", "published_confirmed"),
+            ("staged", "cancelled_before_publish"),
+            ("publish_claimed", "unknown"),
+            ("unknown", "unknown"),
+        ],
+    )
+    def test_allowed_transitions(self, previous: str, following: str) -> None:
+        validate_delivery_transition(previous, following)
+
+    @pytest.mark.parametrize(
+        ("previous", "following"),
+        [
+            ("manifest_saved", "published_confirmed"),
+            ("staged", "publish_claimed"),
+            ("published_confirmed", "unknown"),
+            ("unknown", "staged"),
+            ("cancelled_before_publish", "staged"),
+        ],
+    )
+    def test_illegal_transitions_rejected(self, previous: str, following: str) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_delivery_transition(previous, following)
+        assert exc.value.code == "invalid_delivery_transition"
