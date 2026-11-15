@@ -7,6 +7,7 @@ import math
 import typing
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -84,12 +85,30 @@ def serialize_exec_warnings(warnings: Sequence[Message] | None) -> list[dict[str
     return serialized
 
 
-def deserialize_exec_warnings(raw: typing.Any) -> tuple[Message, ...] | None:
-    """JSONB 落库值 → Message 元组（CRITICAL-02 历史回看还原）。
+@dataclass(frozen=True)
+class ExecWarningsParseResult:
+    """``exec_warnings`` JSONB 值的解析结果（D16-009，R21/BT-03）。
+
+    - ``None``（函数返回 ``None``）表示「未记录执行上下文」：SQL NULL / 非法 JSON / 非数组；
+    - ``messages`` + ``corrupted=False``：已记录且全部成员可还原（空数组即空元组）；
+    - ``corrupted=True``：数组本身合法，但至少一个成员不可还原（非 dict、缺 key、params
+      缺失/类型损坏）。调用方必须据此保留「未知/损坏」提示，不得把非空数组洗成「无警告」。
+    """
+
+    messages: tuple[Message, ...]
+    corrupted: bool = False
+
+
+def deserialize_exec_warnings(raw: typing.Any) -> ExecWarningsParseResult | None:
+    """JSONB 落库值 → 解析结果（CRITICAL-02 历史回看还原；D16-009 成员损坏分类）。
 
     ``None``/空值（SQL NULL）表示「该次筛选未记录执行上下文」，返回 ``None`` 由调用方
-    决定渲染「未记录」哨兵；空数组返回空元组（已记录且无警告）。JSON 字符串（raw SQL
-    路径）与已解析 list（SQLAlchemy Core 路径）均接受，非法输入按「未记录」处理。
+    决定渲染「未记录」哨兵；空数组返回空 messages（已记录且无警告）。JSON 字符串（raw SQL
+    路径）与已解析 list（SQLAlchemy Core 路径）均接受，非法 JSON/非数组按「未记录」处理。
+
+    D16-009：数组本身合法但成员损坏时不得静默丢弃。非 dict 成员、缺失/空/非字符串 key
+    记 ``corrupted=True``；``params`` 缺失或非 dict 时保留可识别的 warning key 并记
+    ``corrupted=True``（不把损坏参数伪装成合法空参数）。合法成员的 key/params 原样保留。
     """
     if raw is None or (isinstance(raw, float) and math.isnan(raw)):
         return None
@@ -101,15 +120,22 @@ def deserialize_exec_warnings(raw: typing.Any) -> tuple[Message, ...] | None:
     if not isinstance(raw, list):
         return None
     out: list[Message] = []
+    corrupted = False
     for item in raw:
         if not isinstance(item, dict):
+            corrupted = True
             continue
         key = item.get("key")
-        if not key:
+        if not isinstance(key, str) or not key:
+            corrupted = True
             continue
         params = item.get("params")
-        out.append(Message(str(key), params if isinstance(params, dict) else {}))
-    return tuple(out)
+        if not isinstance(params, dict):
+            # params 缺失/类型损坏：保留 key（已知存在该警告），但标记不完整供调用方提示。
+            corrupted = True
+            params = {}
+        out.append(Message(key, params))
+    return ExecWarningsParseResult(tuple(out), corrupted)
 
 
 def _parse_filter_attribution(raw: typing.Any) -> dict[str, typing.Any] | None:
