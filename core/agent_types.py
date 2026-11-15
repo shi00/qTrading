@@ -6887,8 +6887,8 @@ class SessionAction(Enum):
     BRANCH = "branch"
 
 
-#: 本片已接地的动作（revise/branch 涉及消息因果与分支创建，随 F-03-2b 交付；
-#: 未落地前显式拒绝，不静默忽略、不做半链占位）。
+#: 已接地的动作全集（revise/branch 随 F-03-2b 交付：只保存新因果前缀/分支
+#: 会话与源消息引用，不改原消息/成果正文，也不派发研究）。
 SUPPORTED_SESSION_ACTIONS: Final = frozenset(
     {
         SessionAction.CREATE,
@@ -6896,6 +6896,8 @@ SUPPORTED_SESSION_ACTIONS: Final = frozenset(
         SessionAction.PIN,
         SessionAction.ARCHIVE,
         SessionAction.UNARCHIVE,
+        SessionAction.REVISE,
+        SessionAction.BRANCH,
     }
 )
 
@@ -6905,8 +6907,19 @@ class SessionChangeCommand:
     """会话元数据命令（§4.2 ``SessionChangeCommand``）：命令身份 + 预期会话版。
 
     ``command.expected_revision`` 必须等于 ``expected_session_revision``；``create``
-    要求预期版 0（目标尚不存在），其余动作要求 ≥1。``title`` 仅 create/rename
-    必填且非空（DAO 不猜显示名），其余动作携带标题即拒绝。
+    与 ``branch`` 要求预期版 0（目标尚不存在），其余动作要求 ≥1。``title`` 仅
+    create/rename/branch 必填且非空（DAO 不猜显示名），其余动作携带标题即拒绝。
+
+    修订/分支字段（§4.2 L436「源message/修订/因果截点」）：
+
+    - ``source_message_id`` + ``source_message_revision`` 是原消息身份与版本，
+      版本映射 ``agent_message.subject_revision``（消息事实版本，不用可变行
+      revision）；
+    - ``causal_cutoff_message_id`` 为可选因果截点（最后保留的消息，必须严格早于
+      源消息）；缺省时取源消息之前最近一条消息；源为会话首条时前缀为空；
+    - ``revise`` 在原会话保存新因果前缀后由用户另行发送（本命令不建消息/不派发）；
+      ``branch`` 新建会话并以 ``parent_session_id`` + ``branch_metadata`` 引用原
+      前缀，不复制正文、不迁 workflow/批准。
     """
 
     command: CommandRef
@@ -6914,15 +6927,36 @@ class SessionChangeCommand:
     session_id: str
     expected_session_revision: int
     title: str | None = None
+    source_message_id: str | None = None
+    source_message_revision: int | None = None
+    causal_cutoff_message_id: str | None = None
 
 
 _SESSION_CHANGE_COMMAND_KEYS: Final = frozenset(
-    {"command", "action", "session_id", "expected_session_revision", "title"}
+    {
+        "command",
+        "action",
+        "session_id",
+        "expected_session_revision",
+        "title",
+        "source_message_id",
+        "source_message_revision",
+        "causal_cutoff_message_id",
+    }
 )
+
+#: 需要「源消息身份/版本」的动作（revise/branch 共用同一组自身字段）。
+_SOURCE_MESSAGE_ACTIONS: Final = frozenset({SessionAction.REVISE, SessionAction.BRANCH})
+
+#: 需要新建会话（预期版 0）的动作。
+_CREATE_SESSION_ACTIONS: Final = frozenset({SessionAction.CREATE, SessionAction.BRANCH})
+
+#: 需要标题的动作（新建会话与改名必须有可读显示名）。
+_TITLE_ACTIONS: Final = frozenset({SessionAction.CREATE, SessionAction.RENAME, SessionAction.BRANCH})
 
 
 def encode_session_change_command(command: SessionChangeCommand) -> dict[str, Any]:
-    """SessionChangeCommand → wire 5 键（含命令引用与动作自身字段的空值约定）。"""
+    """SessionChangeCommand → wire 8 键（含动作自身字段的空值约定）。"""
 
     if not isinstance(command.action, SessionAction):
         _fail("invalid_action", "$.action")
@@ -6931,18 +6965,39 @@ def encode_session_change_command(command: SessionChangeCommand) -> dict[str, An
         _fail("invalid_revision", "$.expected_session_revision")
     if command.command.expected_revision != expected:
         _fail("invalid_revision", "$.command.expected_revision")
-    if command.action is SessionAction.CREATE and expected != 0:
+    if command.action in _CREATE_SESSION_ACTIONS and expected != 0:
         _fail("invalid_revision", "$.expected_session_revision")
-    if command.action is not SessionAction.CREATE and expected < 1:
+    if command.action not in _CREATE_SESSION_ACTIONS and expected < 1:
         _fail("invalid_revision", "$.expected_session_revision")
     title = command.title
     if title is not None and (not isinstance(title, str) or title == ""):
         _fail("invalid_value", "$.title")
-    if command.action in (SessionAction.CREATE, SessionAction.RENAME) and title is None:
+    if command.action in _TITLE_ACTIONS and title is None:
         _fail("missing_field", "$.title")
-    if command.action not in (SessionAction.CREATE, SessionAction.RENAME) and title is not None:
-        # 各 action 只接受自身字段：非 create/rename 携带标题即拒绝（不静默丢弃）。
+    if command.action not in _TITLE_ACTIONS and title is not None:
+        # 各 action 只接受自身字段：非标题动作携带标题即拒绝（不静默丢弃）。
         _fail("invalid_value", "$.title")
+    source_message_id: str | None = None
+    source_message_revision: int | None = None
+    causal_cutoff_message_id: str | None = None
+    if command.action in _SOURCE_MESSAGE_ACTIONS:
+        source_message_id = _require_str(command.source_message_id, "$.source_message_id")
+        source_message_revision = _require_positive_revision(
+            command.source_message_revision, "$.source_message_revision"
+        )
+        if command.causal_cutoff_message_id is not None:
+            causal_cutoff_message_id = _require_str(command.causal_cutoff_message_id, "$.causal_cutoff_message_id")
+            if causal_cutoff_message_id == source_message_id:
+                # 截点包含源消息等于「未修订」；显式拒绝而非静默改语义。
+                _fail("invalid_value", "$.causal_cutoff_message_id")
+    else:
+        for raw, path in (
+            (command.source_message_id, "$.source_message_id"),
+            (command.source_message_revision, "$.source_message_revision"),
+            (command.causal_cutoff_message_id, "$.causal_cutoff_message_id"),
+        ):
+            if raw is not None:
+                _fail("invalid_value", path)
     if command.action not in SUPPORTED_SESSION_ACTIONS:
         _fail("unsupported_action", "$.action")
     return {
@@ -6951,11 +7006,14 @@ def encode_session_change_command(command: SessionChangeCommand) -> dict[str, An
         "session_id": _require_str(command.session_id, "$.session_id"),
         "expected_session_revision": expected,
         "title": title,
+        "source_message_id": source_message_id,
+        "source_message_revision": source_message_revision,
+        "causal_cutoff_message_id": causal_cutoff_message_id,
     }
 
 
 def decode_session_change_command(value: object, path: str = "$.session_change_command") -> SessionChangeCommand:
-    """严格解码会话命令（5 键全必填、禁额外键、动作自身字段约束）。"""
+    """严格解码会话命令（8 键全必填、禁额外键、动作自身字段约束）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
@@ -6976,12 +7034,24 @@ def decode_session_change_command(value: object, path: str = "$.session_change_c
     title = value["title"]
     if title is not None and not isinstance(title, str):
         _fail("invalid_type", f"{path}.title")
+    source_message_id = value["source_message_id"]
+    if source_message_id is not None and not isinstance(source_message_id, str):
+        _fail("invalid_type", f"{path}.source_message_id")
+    source_revision_raw = value["source_message_revision"]
+    if source_revision_raw is not None and not isinstance(source_revision_raw, int):
+        _fail("invalid_type", f"{path}.source_message_revision")
+    cutoff = value["causal_cutoff_message_id"]
+    if cutoff is not None and not isinstance(cutoff, str):
+        _fail("invalid_type", f"{path}.causal_cutoff_message_id")
     decoded = SessionChangeCommand(
         command=command,
         action=action,
         session_id=_require_str(value["session_id"], f"{path}.session_id"),
         expected_session_revision=expected,
         title=title,
+        source_message_id=source_message_id,
+        source_message_revision=cast(int | None, source_revision_raw),
+        causal_cutoff_message_id=cutoff,
     )
     try:
         encode_session_change_command(decoded)
@@ -6998,7 +7068,7 @@ def validate_session_change_command(command: SessionChangeCommand) -> None:
 
 
 def session_change_input_digest(command: SessionChangeCommand) -> str:
-    """命令输入摘要：动作 + 目标 + 预期版 + 标题（同键同输入幂等）。"""
+    """命令输入摘要：动作 + 目标 + 预期版 + 标题 + 源消息身份/版本 + 因果截点。"""
 
     return sha256_hex(
         json_doc(
@@ -7007,6 +7077,9 @@ def session_change_input_digest(command: SessionChangeCommand) -> str:
                 "session_id": command.session_id,
                 "expected_session_revision": command.expected_session_revision,
                 "title": command.title,
+                "source_message_id": command.source_message_id,
+                "source_message_revision": command.source_message_revision,
+                "causal_cutoff_message_id": command.causal_cutoff_message_id,
             }
         )
     )

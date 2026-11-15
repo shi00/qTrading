@@ -12,7 +12,9 @@
   依赖原生 root workflow 派发（E-04 计划 + DBOS launch，当前受 Q5 阻塞），
   未就绪前不提供占位实现，避免把「未派发」伪装成「已受理」。
 - ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付；
-- ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）；
+- ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）与
+  修订/分支的因果前缀保存（revise 改 ``causal_head_ref``；branch 新建会话并引用
+  原消息身份/版本/截点，不复制正文、不派发）；
 - ``transfer_draft`` / ``read_draft_transfer`` 只做草稿跨会话移入与原阶段查回
   （不发送、不派发研究、零费用）。
 

@@ -278,15 +278,17 @@ class TestMetadataActions:
         assert len(await _command_rows(real_embedded_pg.url)) == 1
 
     @pytest.mark.parametrize("action", [SessionAction.REVISE, SessionAction.BRANCH])
-    async def test_revise_and_branch_not_yet_supported(
+    async def test_revise_and_branch_require_source_message(
         self, real_embedded_pg: ConnectionInfo, action: SessionAction
     ) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao)
+        expected = 0 if action is SessionAction.BRANCH else 1
+        title = "分支会话" if action is SessionAction.BRANCH else None
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.change_session(_command(action=action, expected=1, title=None))
+            await dao.change_session(_command(action=action, expected=expected, title=title))
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
-        assert "unsupported_action" in excinfo.value.sanitized_message
+        assert "source_message_id" in excinfo.value.sanitized_message
         row = await _session_row(real_embedded_pg.url)
         assert row.revision == 1
         assert await _command_rows(real_embedded_pg.url) == []

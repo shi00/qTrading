@@ -6655,17 +6655,22 @@ class AgentDao(BaseDao):
 
         语义：
 
-        - ``create``：预期会话版 0；同 ``session_id`` 已存在 → ``INPUT_INVALID``
-          （目标已存在不静默复用，亦不覆盖标题）；成功后 ``current_revision=1``；
+        - ``create`` / ``branch``：预期会话版 0；同 ``session_id`` 已存在 →
+          ``INPUT_INVALID``（目标已存在不静默复用，亦不覆盖标题）；成功后
+          ``current_revision=1``。``branch`` 先核原消息身份/版本（
+          ``subject_revision``），再以 ``parent_session_id`` + 冻结键集
+          ``branch_metadata`` + ``causal_head_ref`` 引用原因果前缀，**不复制
+          消息/成果正文、不迁 workflow/批准**；
         - ``rename`` / ``pin`` / ``archive`` / ``unarchive``：会话行锁下 CAS
           （``expected_session_revision`` 必须等于行 ``revision``），成功
           ``revision+1``；归档不改执行（§9.3「归档不终止执行」）；
+        - ``revise``：核原消息属于本会话且版本匹配，把新因果前缀（源消息之前
+          最近一条，或显式截点）写入 ``causal_head_ref``；**不改原消息/成果、
+          不建消息、不派发**，用户在修订后的草稿上另行发送；
         - 同命令键同输入 → 查回原回执；异输入 → ``INPUT_CONFLICT``；
-        - 会话不存在/不在调用用户域 → ``INPUT_INVALID``；
+        - 会话/原消息不存在或不在调用用户域 → ``INPUT_INVALID``；原消息版本
+          不符 → ``REVISION_CONFLICT``（零新事实）；
         - 动作本身不改草稿、不派发、不产生费用（元数据 CAS 与运行分离）。
-
-        ``revise`` / ``branch`` 涉及消息因果前缀与分支会话创建，随 F-03-2b 交付：
-        契约层显式 ``unsupported_action``，不放行半链。
 
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
@@ -6713,7 +6718,52 @@ class AgentDao(BaseDao):
                     ) from exc
 
             now = datetime.now(UTC)
-            if command.action is SessionAction.CREATE:
+            if command.action in (SessionAction.CREATE, SessionAction.BRANCH):
+                parent_session_id: str | None = None
+                branch_metadata: dict[str, Any] | None = None
+                causal_head_ref: str | None = None
+                if command.action is SessionAction.BRANCH:
+                    source = (
+                        await conn.execute(
+                            sa.select(
+                                AgentMessage.message_id,
+                                AgentMessage.session_id,
+                                AgentMessage.session_seq,
+                                AgentMessage.subject_revision,
+                            ).where(
+                                AgentMessage.user_scope == user_scope,
+                                AgentMessage.message_id == command.source_message_id,
+                            )
+                        )
+                    ).first()
+                    if source is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "source message does not exist in user scope",
+                            identity,
+                        )
+                    if int(source.subject_revision) != command.source_message_revision:
+                        raise AgentServiceError(
+                            AgentErrorCode.REVISION_CONFLICT,
+                            "source message revision does not match expected",
+                            identity,
+                        )
+                    causal_head_ref = await self._resolve_causal_cutoff(
+                        conn,
+                        user_scope=user_scope,
+                        source=source,
+                        cutoff_message_id=command.causal_cutoff_message_id,
+                        identity=identity,
+                    )
+                    parent_session_id = source.session_id
+                    # 冻结键集：只引用身份/版本/截点，不含正文（清理后不留内容）。
+                    branch_metadata = {
+                        "schema_version": 1,
+                        "source_session_id": source.session_id,
+                        "source_message_id": source.message_id,
+                        "source_message_version": int(source.subject_revision),
+                        "causal_cutoff_message_id": causal_head_ref,
+                    }
                 duplicate = (
                     await conn.execute(
                         sa.select(AgentSession.session_id).where(
@@ -6733,6 +6783,9 @@ class AgentDao(BaseDao):
                             session_id=command.session_id,
                             title=command.title,
                             source_module=command.command.source_module,
+                            parent_session_id=parent_session_id,
+                            branch_metadata=branch_metadata,
+                            causal_head_ref=causal_head_ref,
                         )
                     )
                 except IntegrityError as exc:
@@ -6771,6 +6824,40 @@ class AgentDao(BaseDao):
                     values["archived"] = True
                 elif command.action is SessionAction.UNARCHIVE:
                     values["archived"] = False
+                elif command.action is SessionAction.REVISE:
+                    source = (
+                        await conn.execute(
+                            sa.select(
+                                AgentMessage.message_id,
+                                AgentMessage.session_id,
+                                AgentMessage.session_seq,
+                                AgentMessage.subject_revision,
+                            ).where(
+                                AgentMessage.user_scope == user_scope,
+                                AgentMessage.message_id == command.source_message_id,
+                                AgentMessage.session_id == command.session_id,
+                            )
+                        )
+                    ).first()
+                    if source is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "source message does not exist in target session",
+                            identity,
+                        )
+                    if int(source.subject_revision) != command.source_message_revision:
+                        raise AgentServiceError(
+                            AgentErrorCode.REVISION_CONFLICT,
+                            "source message revision does not match expected",
+                            identity,
+                        )
+                    values["causal_head_ref"] = await self._resolve_causal_cutoff(
+                        conn,
+                        user_scope=user_scope,
+                        source=source,
+                        cutoff_message_id=command.causal_cutoff_message_id,
+                        identity=identity,
+                    )
                 await conn.execute(
                     sa.update(AgentSession)
                     .where(
@@ -6810,6 +6897,59 @@ class AgentDao(BaseDao):
                 )
             )
             return receipt
+
+    async def _resolve_causal_cutoff(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        source: Any,
+        cutoff_message_id: str | None,
+        identity: str,
+    ) -> str | None:
+        """解析修订/分支的新因果前缀末条（严格早于源消息）。
+
+        - 未显式给截点：取源消息之前 ``session_seq`` 最大的一条；源为会话首条时
+          返回 ``None``（空前缀）；
+        - 显式截点必须属于同一会话且严格早于源消息，否则 ``INPUT_INVALID``；
+        - 只返回消息身份，不读正文、不改任何消息。
+        """
+
+        if cutoff_message_id is None:
+            previous = (
+                await conn.execute(
+                    sa.select(AgentMessage.message_id)
+                    .where(
+                        AgentMessage.user_scope == user_scope,
+                        AgentMessage.session_id == source.session_id,
+                        AgentMessage.session_seq < source.session_seq,
+                    )
+                    .order_by(AgentMessage.session_seq.desc())
+                    .limit(1)
+                )
+            ).first()
+            return None if previous is None else previous.message_id
+        cutoff = (
+            await conn.execute(
+                sa.select(AgentMessage.message_id, AgentMessage.session_id, AgentMessage.session_seq).where(
+                    AgentMessage.user_scope == user_scope,
+                    AgentMessage.message_id == cutoff_message_id,
+                )
+            )
+        ).first()
+        if cutoff is None or cutoff.session_id != source.session_id:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "causal cutoff message does not belong to source session",
+                identity,
+            )
+        if int(cutoff.session_seq) >= int(source.session_seq):
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "causal cutoff must precede source message",
+                identity,
+            )
+        return cutoff.message_id
 
     # ------------------------------------------------------------------
     # F-03-3：草稿移入（§4.2 DraftTransfer 协议 / §9.8 transfer_* 列）

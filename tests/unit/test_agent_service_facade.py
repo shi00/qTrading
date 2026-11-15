@@ -444,13 +444,13 @@ class TestSessionChangeAuthority:
         assert [call[0] for call in fake.calls] == ["change_session"]
 
     @pytest.mark.asyncio
-    async def test_revise_rejected_before_dao(self) -> None:
+    async def test_revise_without_source_message_rejected_before_dao(self) -> None:
         fake = _FakeDao()
         command = _session_command(action=SessionAction.REVISE, expected=1)
         with pytest.raises(AgentServiceError) as excinfo:
             await _service(fake).change_session(command)
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
-        assert "unsupported_action" in excinfo.value.sanitized_message
+        assert "$.source_message_id" in excinfo.value.sanitized_message
         assert fake.calls == []
 
     @pytest.mark.asyncio

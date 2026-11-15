@@ -111,11 +111,13 @@ class TestSessionChangeCodec:
         _expect_error(excinfo, "invalid_value", "$.title")
 
     @pytest.mark.parametrize("action", [SessionAction.REVISE, SessionAction.BRANCH])
-    def test_revise_and_branch_explicitly_unsupported(self, action: SessionAction) -> None:
-        command = _command(command=_ref(1), action=action, expected_session_revision=1, title=None)
+    def test_revise_and_branch_require_source_message_fields(self, action: SessionAction) -> None:
+        expected = 0 if action is SessionAction.BRANCH else 1
+        title = "分支会话" if action is SessionAction.BRANCH else None
+        command = _command(command=_ref(expected), action=action, expected_session_revision=expected, title=title)
         with pytest.raises(AgentValidationError) as excinfo:
             encode_session_change_command(command)
-        _expect_error(excinfo, "unsupported_action", "$.action")
+        _expect_error(excinfo, "invalid_identity", "$.source_message_id")
 
     def test_unknown_action_rejected(self) -> None:
         wire = encode_session_change_command(_command())
