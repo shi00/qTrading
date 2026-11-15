@@ -224,6 +224,19 @@ class TestPackageLayout:
         )
         assert {entry.name for entry in inspection.files} == {"SKILL.md", "a/f.txt"}
 
+    def test_empty_directory_entries_count_toward_object_limit(self) -> None:
+        entries = {"SKILL.md": _DEFAULT_MANIFEST, "empty-a/": b"", "empty-b/": b""}
+        inspection = _inspect_with_budget(entries, SkillBudget(max_objects=3))
+        assert set(inspection.directories) == {"empty-a", "empty-b"}
+        with pytest.raises(AgentValidationError) as exc:
+            _inspect_with_budget(entries, SkillBudget(max_objects=2))
+        assert exc.value.code == "skill_objects_exceeded"
+
+    def test_reserved_version_manifest_name_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            _inspect({"SKILL.md": _DEFAULT_MANIFEST, ".skill-manifest.json": b"user"})
+        assert exc.value.code == "invalid_skill_package"
+
     @pytest.mark.parametrize(
         "entries",
         [
@@ -280,6 +293,22 @@ class TestDirectoryImport:
         with pytest.raises(AgentValidationError) as exc:
             inspect_skill_directory(str(directory))
         assert exc.value.code == "skill_manifest_missing"
+
+    def test_directory_empty_directories_count_toward_limit(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST})
+        (directory / "empty-a").mkdir()
+        (directory / "empty-b").mkdir()
+        inspection = inspect_skill_directory(str(directory), budget=SkillBudget(max_objects=3))
+        assert set(inspection.directories) == {"empty-a", "empty-b"}
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory), budget=SkillBudget(max_objects=2))
+        assert exc.value.code == "skill_objects_exceeded"
+
+    def test_directory_reserved_version_manifest_name_rejected(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST, ".skill-manifest.json": b"user"})
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory))
+        assert exc.value.code == "invalid_skill_package"
 
     def test_directory_symlink_rejected(self, tmp_path) -> None:
         directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST})

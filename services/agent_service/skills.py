@@ -130,6 +130,7 @@ class SkillPackageInspection:
     manifest_name: str
     manifest_text: str
     source_kind: str = "zip"
+    directories: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,22 +202,25 @@ def _enforce_entry_layout(entries: Sequence[tuple[str, bool]]) -> None:
         else:
             if full in file_keys or full in dir_keys:
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
+            if full == VERSION_MANIFEST_FILENAME.casefold():
+                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
             file_keys.add(full)
 
 
 def _object_count(entries: Sequence[tuple[str, bool]]) -> int:
-    files = {_entry_key(name) for name, is_dir in entries if not is_dir}
-    directories: set[str] = set()
+    objects: set[str] = set()
     for name, _ in entries:
         parts = PurePosixPath(name).parts
         keys = [_entry_key(part) for part in parts]
+        objects.add("/".join(keys))
         for index in range(1, len(parts)):
-            directories.add("/".join(keys[:index]))
-    return len(files | directories)
+            objects.add("/".join(keys[:index]))
+    return len(objects)
 
 
 def _finalize_inspection(
     files: Sequence[SkillFileEntry],
+    directories: Sequence[str],
     manifest_bytes: bytes,
     *,
     archive_digest: str | None,
@@ -243,6 +247,7 @@ def _finalize_inspection(
         manifest_name=manifest_name,
         manifest_text=manifest_text,
         source_kind=source_kind,
+        directories=tuple(directories),
     )
 
 
@@ -309,7 +314,13 @@ def inspect_skill_package(
             if is_manifest:
                 manifest_bytes = bytes(payload)
     budget.enforce_elapsed(clock() - started)
-    return _finalize_inspection(files, manifest_bytes, archive_digest=archive_digest, source_kind="zip")
+    return _finalize_inspection(
+        files,
+        [name for name, is_dir in entries if is_dir],
+        manifest_bytes,
+        archive_digest=archive_digest,
+        source_kind="zip",
+    )
 
 
 def inspect_skill_directory(
@@ -376,7 +387,13 @@ def inspect_skill_directory(
         if manifest_name:
             manifest_bytes = bytes(payload)
     budget.enforce_elapsed(clock() - started)
-    return _finalize_inspection(files, manifest_bytes, archive_digest=None, source_kind="directory")
+    return _finalize_inspection(
+        files,
+        [name for name, is_dir in entries if is_dir],
+        manifest_bytes,
+        archive_digest=None,
+        source_kind="directory",
+    )
 
 
 class _UniqueKeyLoader(yaml.BaseLoader):
@@ -569,6 +586,7 @@ def _write_version_manifest(staging: Path, inspection: SkillPackageInspection) -
         "source_kind": inspection.source_kind,
         "content_digest": content_digest_of_files(inspection.files),
         "files": [[entry.name, entry.size, entry.sha256] for entry in inspection.files],
+        "directories": list(inspection.directories),
     }
     (staging / VERSION_MANIFEST_FILENAME).write_text(json_doc(payload), encoding="utf-8")
 
@@ -578,7 +596,11 @@ def _version_matches(destination: Path, inspection: SkillPackageInspection) -> b
         stored = json.loads((destination / VERSION_MANIFEST_FILENAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return isinstance(stored, dict) and stored.get("content_digest") == content_digest_of_files(inspection.files)
+    return (
+        isinstance(stored, dict)
+        and stored.get("content_digest") == content_digest_of_files(inspection.files)
+        and stored.get("files") == [[entry.name, entry.size, entry.sha256] for entry in inspection.files]
+    )
 
 
 class ManagedSkillStore:
@@ -660,6 +682,9 @@ class ManagedSkillStore:
         staging = self._root / ".staging" / f"{ref.skill_id}-{ref.version}-{uuid.uuid4().hex}"
         try:
             staging.mkdir(parents=True)
+            for directory in sorted(inspection.directories, key=lambda name: len(PurePosixPath(name).parts)):
+                _enforce_deadline(deadline, clock)
+                staging.joinpath(*PurePosixPath(directory).parts).mkdir(parents=True, exist_ok=True)
             for entry in inspection.files:
                 _enforce_deadline(deadline, clock)
                 target = staging.joinpath(*PurePosixPath(entry.name).parts)
@@ -716,8 +741,16 @@ class ManagedSkillStore:
                     _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
                 target = staging.joinpath(*PurePosixPath(name).parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
+                payload = bytearray()
                 with archive.open(info) as source:
-                    payload = source.read(entry.size + 1)
+                    while True:
+                        _enforce_deadline(deadline, clock)
+                        chunk = source.read(_READ_CHUNK)
+                        if not chunk:
+                            break
+                        payload.extend(chunk)
+                        if len(payload) > entry.size:
+                            _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
                 if len(payload) != entry.size or hashlib.sha256(payload).hexdigest() != entry.sha256:
                     _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
                 target.write_bytes(payload)

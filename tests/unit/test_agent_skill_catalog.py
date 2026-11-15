@@ -225,12 +225,15 @@ class TestImportLifecycle:
         source = tmp_path / "src"
         source.mkdir()
         (source / "SKILL.md").write_bytes(b"---\nname: demo-skill\ndescription: demo\nlicense: MIT\n---\n# body\n")
+        (source / "empty").mkdir()
         receipt = await service.import_package(
             SkillPackageImportRequest(user_scope="scope", directory_name="demo-skill", directory=str(source))
         )
         assert receipt.status is SkillImportStatus.NEW
         assert receipt.source_kind == "directory"
-        assert store.version_dir(SkillVersionRef(receipt.skill_id, 1)).is_dir()
+        version_dir = store.version_dir(SkillVersionRef(receipt.skill_id, 1))
+        assert version_dir.is_dir()
+        assert (version_dir / "empty").is_dir()
         assert len(dao.assets) == 1
 
     async def test_reimport_heals_orphan_published_version(self, tmp_path: Path) -> None:
@@ -246,17 +249,32 @@ class TestImportLifecycle:
     async def test_staging_deadline_is_enforced_after_inspection(self, tmp_path: Path) -> None:
         store = ManagedSkillStore(str(tmp_path / "skills"))
         dao = FakeCatalogDao()
+        calls: list[int] = []
+        original = store.publish_package
+
+        def spy(*args: object, **kwargs: object):
+            calls.append(1)
+            return original(*args, **kwargs)  # type: ignore[arg-type]  # 测试透传发布参数
+
+        store.publish_package = spy  # type: ignore[method-assign]  # 测试注入发布探针
+        ticks = iter([0.0, 0.0, 0.0, 0.0, 0.0, 5.0])
         service = SkillCatalogService(
             store,
             dao,
             blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
-            budget=SkillBudget(max_preflight_seconds=0),
+            budget=SkillBudget(max_preflight_seconds=1),
+            clock=lambda: next(ticks, 5.0),
         )
         with pytest.raises(AgentServiceError) as exc:
             await _import(service, _package())
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
         assert "skill_time_exceeded" in str(exc.value)
+        assert calls == [1]
         assert dao.assets == {}
+        assert not any((tmp_path / "skills").rglob("SKILL.md"))
+        staging_root = tmp_path / "skills" / ".staging"
+        if staging_root.exists():
+            assert not list(staging_root.iterdir())
 
 
 class TestRoleSkillAssignmentService:
