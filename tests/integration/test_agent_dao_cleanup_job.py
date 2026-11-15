@@ -323,6 +323,8 @@ async def test_content_manifest_is_part_of_cleanup_identity(dao: AgentDao) -> No
     job_id = _job_id()
     assert await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-a"]}) is True
     assert await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-a"]}) is False
+    # tuple/list 与键序差异属同一身份（规范 JSON 比较），不得误判冲突。
+    assert await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ("body-a",)}) is False
 
     with pytest.raises(AgentServiceError) as exc:
         await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-b"]})

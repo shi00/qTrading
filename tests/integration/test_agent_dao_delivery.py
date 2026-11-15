@@ -351,6 +351,23 @@ class TestReadDelivery:
         assert read.revision == 1
 
     @pytest.mark.asyncio
+    async def test_cleaned_session_without_delivery_reports_initial_state(self, real_embedded_pg) -> None:
+        """清理会话里从未交付的 operation 仍报初始态，不得凭空声称「已交付并清理」。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE agent_session SET cleaned_at = now() WHERE user_scope = :u"),
+                {"u": USER_SCOPE},
+            )
+
+        read = await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+
+        assert read.manifest is None
+        assert read.manifest_cleaned is False
+
+    @pytest.mark.asyncio
     async def test_cleaned_session_reports_manifest_cleaned(self, real_embedded_pg) -> None:
         """会话联合清理后：交付事实已清但不得读成「从未交付」（R21）。"""
 

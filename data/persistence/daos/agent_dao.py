@@ -1701,7 +1701,9 @@ class AgentDao(BaseDao):
                     operation_id=operation_id,
                     revision=row.revision,
                     manifest=None,
-                    manifest_cleaned=cleaned,
+                    # 只有曾落过交付（artifact 身份由 save_delivery_phase 写入）
+                    # 的 operation 才可报「已清理」，否则会凭空声称有过交付（R21）。
+                    manifest_cleaned=cleaned and row.artifact_id is not None,
                 )
             try:
                 manifest = decode_delivery_manifest(row.delivery_manifest)
@@ -6747,7 +6749,9 @@ class AgentDao(BaseDao):
         except IntegrityError as exc:
             existing = await self.load_cleanup_job(record.user_scope, record.cleanup_job_id)
             self._require_same_cleanup_identity(existing, record, exc)
-            if await self._load_cleanup_content_manifest(record.user_scope, record.cleanup_job_id) != content_manifest:
+            existing_manifest = await self._load_cleanup_content_manifest(record.user_scope, record.cleanup_job_id)
+            # 规范 JSON 比较：tuple/list、键序与 JSONB 反序列化差异不得误判为异输入。
+            if json_doc(existing_manifest) != json_doc(content_manifest):
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT,
                     "cleanup job already exists with different content manifest",

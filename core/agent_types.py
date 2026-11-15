@@ -8336,8 +8336,9 @@ class DeliveryRead:
 
     ``manifest is None`` 表示该 operation 尚无交付记录（初始态），与「查不到
     operation」（``INPUT_INVALID``）和「坏行」（``OPERATION_UNKNOWN``）分开，
-    不得互相冒充。会话已完成联合清理时 ``manifest_cleaned=True``：交付事实
-    存在但回执正文按 §10.7 清理，不得读成「从未交付」（R21）。
+    不得互相冒充。会话已完成联合清理且该 operation 曾落过交付（artifact 身份
+    已写）时 ``manifest_cleaned=True``：交付事实存在但回执正文按 §10.7 清理，
+    不得读成「从未交付」（R21）；从未交付的 operation 仍报初始态。
     """
 
     operation_id: str

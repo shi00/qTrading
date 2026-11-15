@@ -760,7 +760,7 @@ E-05 提供 `read_delivery(operation_id)` 查回原 manifest 与修订，但尚�
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P2-AgentCleanup-Residual-Risks** | ① 清理后 `agent_command.input_digest`、`agent_round.frozen_digest/actual_digest`、`agent_execution.intent_digest` 换 tombstone 或置 NULL，7 条命令重放路径与 `bind_actual_input`/`accept_execution` 重放统一降级为 `INPUT_CONFLICT`；② `agent_body_payload` 仅按受清 owner 的当前 `body_ref` 发现，历史半清理留下的孤儿行不会被回收；③ `AgentRuntimeNativeStore` 已补 `_check_engine`，但运行库引擎由 `assemble_agent_runtime` 单独创建、`AgentRuntimeHandle.close()` 直接 dispose 而未经 `mark_disposed`，故 `is_disposed` 对运行库引擎恒 False（当前生产未装配该 store，仅测试构造） | ① 需要清理后命令/轮次重放区分「幂等」与「异输入」时处理 ①；② 清理后磁盘计量与实际正文留存出现偏差时处理 ②；③ 运行库 handle 接入清理链路或支持额外引擎登记时处理 ③ |
+| **P2-AgentCleanup-Residual-Risks** | ① 清理后 `agent_command.input_digest`、`agent_round.frozen_digest/actual_digest`、`agent_execution.intent_digest` 换 tombstone 或置 NULL，7 条命令重放路径与 `bind_actual_input`/`accept_execution` 重放统一降级为 `INPUT_CONFLICT`；② `agent_body_payload` 仅按受清 owner 的当前 `body_ref` 发现，历史半清理留下的孤儿行不会被回收；③ `AgentRuntimeNativeStore` 已补 `_check_engine`，但运行库引擎由 `assemble_agent_runtime` 单独创建、`AgentRuntimeHandle.close()` 直接 dispose 而未经 `mark_disposed`，故 `is_disposed` 对运行库引擎恒 False（当前生产未装配该 store，仅测试构造）；④ 清理准入谓词 `scope_settled`/`closure_known` 目前是调用方布尔，尚无「存在 unknown 交付时不得清理」的实现与用例，清空 `delivery_manifest` 后无法再事后区分 `published_confirmed`/`unknown`/`cancelled_before_publish`（§10.5 缺确证保持 unknown 的前提） | ① 需要清理后命令/轮次重放区分「幂等」与「异输入」时处理 ①；② 清理后磁盘计量与实际正文留存出现偏差时处理 ②；③ 运行库 handle 接入清理链路或支持额外引擎登记时处理 ③；④ 接入清理预览/准入服务时补齐 unknown 交付阻断与用例 |
 
 **产生背景与现状**
 
