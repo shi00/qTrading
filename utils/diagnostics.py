@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import config
+from core.i18n import Message
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -54,6 +55,26 @@ _CLIENT_PACKAGE_INFO_KEYS = ("app_name", "package_name", "version", "build_numbe
 # 产品名（项目自身），与 pyproject.toml 的 name 保持一致；版本从包元数据读取。
 _PRODUCT_NAME = "AStockScreener"
 _PRODUCT_DISTRIBUTION = "astock-screener"
+
+# D04-002：Message.params 递归脱敏用的敏感键关键字。沿用 DataSanitizer.sanitize_dict
+# 默认集，但剔除裸 "key"——core/i18n 约定 ``*_key`` 参数承载 i18n key（如 name_key），
+# 按子串 "key" 判定会把这些参数整体遮蔽为 ***，破坏 params 保留与 View 渲染。
+_TASK_PARAM_SENSITIVE_KEYWORDS = (
+    "token",
+    "password",
+    "pwd",
+    "pass",
+    "api_key",
+    "apikey",
+    "api-key",
+    "secret",
+    "credential",
+    "credentials",
+    "access_token",
+    "refresh_token",
+    "private_key",
+    "passphrase",
+)
 
 
 def _json_safe_scalar(value: Any) -> str | int | float | bool | None:
@@ -102,6 +123,40 @@ class SystemDiagnosticsCollector:
             if normalized_key == "model" and _looks_like_absolute_path(value):
                 return "<PATH>"
             return DataSanitizer.sanitize_paths(value)
+        return value
+
+    @staticmethod
+    def _sanitize_task_message_params(value: Any) -> Any:
+        """递归脱敏 ``Message.params``，保持键与容器结构不变。
+
+        - dict 节点经 ``DataSanitizer.sanitize_dict`` 遮蔽敏感键值（关键字集见
+          ``_TASK_PARAM_SENSITIVE_KEYWORDS``，保留 ``*_key`` i18n 参数），再递归子节点；
+        - list/tuple 逐项递归（tuple 转为 list，JSON 输出语义不变）；
+        - 字符串叶子经 ``DataSanitizer.sanitize_error`` 脱敏（凭证/路径/PII/裸 token）；
+        - 其余类型原样返回，交由 ``json_serial`` 维持 fail-fast。
+        """
+        if isinstance(value, dict):
+            sanitized = DataSanitizer.sanitize_dict(value, list(_TASK_PARAM_SENSITIVE_KEYWORDS))
+            return {k: SystemDiagnosticsCollector._sanitize_task_message_params(v) for k, v in sanitized.items()}
+        if isinstance(value, (list, tuple)):
+            return [SystemDiagnosticsCollector._sanitize_task_message_params(item) for item in value]
+        if isinstance(value, str):
+            return DataSanitizer.sanitize_error(value)
+        return value
+
+    @staticmethod
+    def _serialize_task_message_field(value: Any) -> Any:
+        """把 AppTask 的 ``Message | str`` 字段转为可 JSON 序列化的稳定表示。
+
+        ``Message`` → ``{"key": ..., "params": <递归脱敏后的 params>}``，只保留
+        i18n key 与参数，不调用 ``I18n.get``（不写入当前 locale 译文）；``str``/``None``
+        原样返回（兼容旧数据）；其余未知对象原样返回，交由 ``json_serial`` fail-fast。
+        """
+        if isinstance(value, Message):
+            return {
+                "key": value.key,
+                "params": SystemDiagnosticsCollector._sanitize_task_message_params(value.params),
+            }
         return value
 
     @staticmethod
@@ -261,10 +316,12 @@ class SystemDiagnosticsCollector:
                 "tasks_list": [
                     {
                         "id": getattr(t, "id", None),
-                        "name": getattr(t, "name", None),
+                        "name": SystemDiagnosticsCollector._serialize_task_message_field(getattr(t, "name", None)),
                         "status": str(getattr(t, "status", None)),
                         "progress": getattr(t, "progress", None),
-                        "description": getattr(t, "description", None),
+                        "description": SystemDiagnosticsCollector._serialize_task_message_field(
+                            getattr(t, "description", None)
+                        ),
                         "error": DataSanitizer.sanitize_error(str(getattr(t, "error", "")))
                         if getattr(t, "error", "")
                         else None,
