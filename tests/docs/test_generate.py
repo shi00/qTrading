@@ -15,6 +15,7 @@ import pytest
 
 import check_docs_consistency as cdc
 import docs_generated as dg
+import docs_markdown as dm
 from fixtures import generator_fixtures as gf
 
 pytestmark = pytest.mark.docs_pure
@@ -197,6 +198,80 @@ def test_crlf_real_block_position_content_and_line_ending() -> None:
     assert "\n" not in replaced.replace("\r\n", ""), "替换后不得残留裸 LF"
     assert "<!-- generated:real -->\r\n- 新\r\n<!-- /generated -->" in replaced
     assert replaced.endswith("尾行\r\n")
+
+
+# ---------------------------------------------------------------------------
+# 块外逐字节保真：混合行尾 / 仅 CR / 末行无行尾 / 空内容 / 多块与调用次序
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "a", "a\n", "a\nb", "a\r\nb\r\n", "a\rb\r", "a\r\nb\nc\r", "\r\n", "\n", "\r", "a\n\n", "a\u2028b\n"],
+    ids=[
+        "empty",
+        "no-eol",
+        "lf",
+        "two-lf",
+        "crlf",
+        "cr",
+        "mixed",
+        "only-crlf",
+        "only-lf",
+        "only-cr",
+        "blank-tail",
+        "u2028",
+    ],
+)
+def test_split_lines_with_endings_matches_parser_line_semantics(text: str) -> None:
+    """原始行切分与解析器行语义一一对应，且各行拼接可还原原文（块区间替换的行号基础）。"""
+    raws = dg._split_lines_with_endings(text)
+    assert "".join(raws) == text
+    assert len(raws) == len(dm.split_source_lines(text))
+    assert [raw.rstrip("\r\n") for raw in raws] == list(dm.split_source_lines(text))
+
+
+def test_replace_preserves_mixed_line_endings_outside_block() -> None:
+    """块外混合行尾逐字节保留：后缀 `after\\n` 不得被规范化为 `after\\r\\n`。"""
+    text = "# 目标\r\n\r\n<!-- generated:real -->\r\n- 旧\r\n<!-- /generated -->\r\nafter\n"
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert replaced == "# 目标\r\n\r\n<!-- generated:real -->\r\n- 新\r\n<!-- /generated -->\r\nafter\n"
+
+
+def test_replace_preserves_cr_only_line_endings() -> None:
+    """仅 CR 行尾：块内外均保留 CR，末行行尾不丢失。"""
+    text = "# 目标\r<!-- generated:real -->\r- 旧\r<!-- /generated -->\rafter\r"
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert replaced == "# 目标\r<!-- generated:real -->\r- 新\r<!-- /generated -->\rafter\r"
+
+
+def test_replace_preserves_missing_trailing_newline() -> None:
+    """末行无行尾：块位于文件末尾时不得凭空补行尾。"""
+    text = "before\n<!-- generated:real -->\n- 旧\n<!-- /generated -->"
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert replaced == "before\n<!-- generated:real -->\n- 新\n<!-- /generated -->"
+
+
+def test_replace_empty_block_content_keeps_marker_line_endings() -> None:
+    """空内容替换：首尾标记行各自行尾原样保留，块外文本不变。"""
+    text = "a\r\n<!-- generated:real -->\r\n- 旧\r\n<!-- /generated -->\r\nb\n"
+    replaced = dg.replace_block(text, "markdown", "real", [])
+    assert replaced == "a\r\n<!-- generated:real -->\r\n<!-- /generated -->\r\nb\n"
+
+
+def test_replace_two_blocks_preserves_each_line_ending() -> None:
+    """多块替换与调用次序无关：各块沿用自身标记行尾，其余文本逐字节保留且幂等。"""
+    text = (
+        "前言\n<!-- generated:a -->\nA\n<!-- /generated -->\n"
+        "中间\r\n<!-- generated:b -->\r\nB\r\n<!-- /generated -->\r\n后缀\n"
+    )
+    expected = (
+        "前言\n<!-- generated:a -->\nA2\n<!-- /generated -->\n"
+        "中间\r\n<!-- generated:b -->\r\nB2\r\n<!-- /generated -->\r\n后缀\n"
+    )
+    assert dg.replace_block(dg.replace_block(text, "markdown", "a", ["A2"]), "markdown", "b", ["B2"]) == expected
+    assert dg.replace_block(dg.replace_block(text, "markdown", "b", ["B2"]), "markdown", "a", ["A2"]) == expected
+    assert dg.replace_block(expected, "markdown", "a", ["A2"]) == expected, "同一作者源二次替换必须零差异"
 
 
 # ---------------------------------------------------------------------------
