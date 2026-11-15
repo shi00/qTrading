@@ -22,6 +22,7 @@ from services.news_sentiment_scorer import (
     _EMBEDDING_DIM,
     _LABELS_REQUIRED,
     _NUM_CLASSES,
+    _SCORE_CHUNK_SIZE,
     _SENTINEL,
     NewsSentimentScorer,
     _chunked,
@@ -1168,6 +1169,44 @@ class TestScoreForConnection:
         assert [c.args[0] for c in req_q.put.call_args_list] == [("score", 0, ["A-文本"]), ("score", 1, ["B-文本"])]
         assert mgr._worker_state == "idle"
         mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    @patch("services.news_sentiment_scorer._HAS_LLAMA_CPP", True)
+    @patch("services.news_sentiment_scorer._HAS_TOKENIZERS", True)
+    async def test_partial_usage_counts_only_completed_chunks(self):
+        """D13-009：partial 用量只累计已完成块的真实 token（未完成块不得回填）。"""
+        mgr = _make_mgr()
+        mgr._validate_input_files = lambda paths: True
+        mgr._ensure_ready = AsyncMock(return_value=_head("linear"))
+        calls = {"n": 0}
+
+        async def fake_chunk(chunk, *, timeout_s, generation):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                vectors = np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32)
+                meta = {
+                    "input_tokens": [2] * len(chunk),
+                    "truncated": [False] * len(chunk),
+                    "processed": len(chunk),
+                }
+                return vectors, meta
+            return None
+
+        mgr._score_chunk = fake_chunk
+
+        loop = asyncio.get_running_loop()
+        texts = ["文本"] * (_SCORE_CHUNK_SIZE + 1)
+        outcome = await mgr.score_for_connection(texts, _conn(), loop.time() + 30.0, _ctx())
+
+        assert outcome.status == "partial"
+        assert calls["n"] == 2
+        assert len(outcome.results) == _SCORE_CHUNK_SIZE
+        assert outcome.usage is not None
+        assert outcome.usage.input_total_tokens == 2 * _SCORE_CHUNK_SIZE
+        assert outcome.usage.uncached_input_tokens == 2 * _SCORE_CHUNK_SIZE
+        assert outcome.metadata is not None
+        assert outcome.metadata["processed"] == _SCORE_CHUNK_SIZE
+        assert len(outcome.metadata["input_tokens"]) == _SCORE_CHUNK_SIZE
 
     @pytest.mark.asyncio
     @patch("services.news_sentiment_scorer._HAS_LLAMA_CPP", True)

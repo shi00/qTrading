@@ -410,18 +410,24 @@ class TestHappyPath:
         assert obs_arg.metadata["pricing"] is None
 
     @pytest.mark.asyncio
-    async def test_encoder_pricing_metadata_carries_usage_evidence(self, monkeypatch):
-        """F17：encoder 计价连接的 text_count / encoder_input_tokens 进入落账元数据。
+    async def test_encoder_pricing_settles_reported_tokens_not_estimate(self, monkeypatch):
+        """D13-009：encoder 结算用适配器报告的真实 token，payload 估算仅另标。
 
-        修复前只冻结 pricing 快照而从不携带 encoder 用量 → Recorder 结算时
-        ``compute_cost_cny`` 因 token 缺失按不可计价返回 None（分类费用型实际成本
-        不入月汇总）。此处与预留估算同口径，payload texts 逐条估算求和。
+        估算 200 / 真实 64（截断后完成块）→ 落账元数据 encoder_input_tokens=64
+        （DAO 成本按 64），encoder_input_tokens_estimate=200 只留痕不参与结算。
         """
         monkeypatch.setattr(
             "services.ai_service.scenario_executor._estimate_tokens",
-            lambda text, model=None: {"新闻一": 200, "新闻二": 300}.get(text, 0),
+            lambda text, model=None: {"新闻一": 100, "新闻二": 100}.get(text, 0),
         )
-        adapter = _adapter_ok()
+        usage = NormalizedLLMUsage(
+            input_total_tokens=64,
+            uncached_input_tokens=64,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
+            output_tokens=None,
+        )
+        adapter = _adapter_ok(usage=usage)
         recorder = _recorder_mock()
         executor = _executor(adapter, recorder, validate=_validator_ok, adapters={"gguf_sentiment": adapter})
         connection = replace(_remote_conn("conn-sentiment"), adapter_kind="gguf_sentiment")
@@ -445,11 +451,58 @@ class TestHappyPath:
         assert result.status == "succeeded"
         obs_arg = recorder.observe_usage.call_args.args[0]
         assert obs_arg.metadata["text_count"] == 2
-        assert obs_arg.metadata["encoder_input_tokens"] == 500
-        # 终态落账记录同源携带（结算侧成本计算与账本列依赖）
+        assert obs_arg.metadata["encoder_input_tokens"] == 64
+        assert obs_arg.metadata["encoder_input_tokens_estimate"] == 200
+        # 终态落账记录同源携带真实 token（结算侧成本计算与账本列依赖）
         terminal = recorder.submit_terminal.call_args.args[0]
-        assert terminal.metadata["text_count"] == 2
-        assert terminal.metadata["encoder_input_tokens"] == 500
+        assert terminal.metadata["encoder_input_tokens"] == 64
+        assert terminal.metadata["encoder_input_tokens_estimate"] == 200
+        output = result.outputs[0]
+        assert isinstance(output, ScenarioOutput)
+        assert output.metadata["encoder_input_tokens"] == 64
+
+    @pytest.mark.asyncio
+    async def test_encoder_pricing_unreported_usage_keeps_tokens_unknown(self, monkeypatch):
+        """D13-009 / R21：适配器未报告用量 → 不写 encoder_input_tokens（不得以估算顶替）。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: {"新闻一": 100, "新闻二": 100}.get(text, 0),
+        )
+        adapter = MagicMock()
+        adapter.invoke = AsyncMock(
+            return_value=AdapterResponse(
+                content="ok",
+                usage=None,
+                actual_model="finbert2-base",
+                metadata={"status": "success"},
+            )
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, adapters={"gguf_sentiment": adapter})
+        connection = replace(_remote_conn("conn-sentiment"), adapter_kind="gguf_sentiment")
+        raw_conn = dataclasses.asdict(connection)
+        raw_conn["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "encoder_input_tokens",
+            "price_source": "user",
+            "encoder_price_per_m": "1.00",
+            "fx_to_cny": None,
+        }
+        request = replace(
+            _request(),
+            payload={"system_prompt": "系统提示", "prompt": "测试新闻", "texts": ["新闻一", "新闻二"]},
+        )
+        result = await executor.execute(
+            request,
+            _snapshot((_candidate(0, "conn-sentiment"),), (raw_conn,)),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert "encoder_input_tokens" not in obs_arg.metadata
+        assert obs_arg.metadata["encoder_input_tokens_estimate"] == 200
+        terminal = recorder.submit_terminal.call_args.args[0]
+        assert "encoder_input_tokens" not in terminal.metadata
 
     @pytest.mark.asyncio
     async def test_authorize_failure_rejects_candidate(self):

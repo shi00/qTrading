@@ -773,7 +773,15 @@ class ScenarioExecutor:
                 # F17：metadata 携带计价冻结快照——成本在终态落账时点由 Recorder
                 # 按真实 usage 计算（cost 与 usage 同源，避免重试场景失配）。
                 # F19③：actual_model 为响应事实（增量覆盖派发时点固化元数据）。
-                attempt_metadata = {**attempt_metadata, "actual_model": response.actual_model}
+                # D13-009：encoder 计价连接的用量证据以适配器报告的**真实** token
+                # 覆盖（截断后输入 / partial 仅完成块），payload 估算仅另标
+                # ``encoder_input_tokens_estimate``；未报告 → 不写 ``encoder_input_tokens``
+                # （结算按不可计价 None，R21 未知不填 0）。
+                attempt_metadata = {
+                    **attempt_metadata,
+                    "actual_model": response.actual_model,
+                    **_encoder_usage_metadata(pricing, request, connection.model, response),
+                }
                 self._recorder.observe_usage(_observation_from(request, attempt_id, response, attempt_metadata))
 
                 try:
@@ -1343,30 +1351,48 @@ def _estimate_reservation_amount(
     return None
 
 
+def _reported_encoder_input_tokens(usage: NormalizedLLMUsage | None) -> int | None:
+    """适配器报告的 encoder 真实输入 token（D13-009）；无报告 → ``None``。
+
+    encoder 计价无缓存分量语义，取输入总量（``input_total_tokens``，缺失回退
+    ``uncached_input_tokens``）；畸形报告（非整数 / 负数）同样按未知处理——
+    结算不得用估算顶替实测，未知保持 ``None``（R21）。
+    """
+    if usage is None:
+        return None
+    tokens = usage.input_total_tokens if usage.input_total_tokens is not None else usage.uncached_input_tokens
+    if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+        return None
+    return tokens
+
+
 def _encoder_usage_metadata(
     pricing: ConnectionPricing | None,
     request: InferenceRequest,
     model: str,
+    response: AdapterResponse | None = None,
 ) -> dict[str, Any]:
-    """encoder 计价连接的用量证据（F17，落账侧成本计算所需）。
+    """encoder 计价连接的用量证据（F17 / D13-009，落账侧成本计算所需）。
 
-    ``encoder_input_tokens`` / ``text_count`` 是 Recorder 结算时
-    ``compute_cost_cny`` 与账本列的唯一数据来源：此前生产链路从未携带这两个
-    字段，分类费用型（``pricing_unit == "encoder_input_tokens"``）连接即使
-    预留阶段按 payload texts 估算了金额，结算阶段也因 token 缺失按不可计价
-    返回 ``None``（实际成本不入月汇总，R21 只保住「未知不填 0」而丢了已知
-    用量）。此处与预留估算同口径（payload ``texts`` 逐条估算求和），
-    token 不可估算时仅记条数、不填 0（缺失语义保留）。
+    - ``encoder_input_tokens`` 仅在适配器**报告真实用量**时写入（D13-009：
+      结算与账本列用 Scorer 完成块的真实 token——截断后输入、partial 仅完成
+      块）；未报告（失败 / 无 token 计量）不写该键 → 结算按不可计价返回
+      ``None``（R21 未知不填 0，也不拿预估冒充实测）。
+    - payload ``texts`` 逐条估算只作 ``encoder_input_tokens_estimate`` 另标
+      （与预留金额同口径留痕），不参与结算。
     """
     if pricing is None or pricing.pricing_unit != "encoder_input_tokens":
         return {}
+    metadata: dict[str, Any] = {}
     texts = request.payload.get("texts")
-    if not isinstance(texts, (list, tuple)) or not texts:
-        return {}
-    metadata: dict[str, Any] = {"text_count": len(texts)}
-    tokens = sum(_estimate_tokens(text, model) for text in texts)
-    if tokens > 0:
-        metadata["encoder_input_tokens"] = tokens
+    if isinstance(texts, (list, tuple)) and texts:
+        metadata["text_count"] = len(texts)
+        estimate = sum(_estimate_tokens(text, model) for text in texts)
+        if estimate > 0:
+            metadata["encoder_input_tokens_estimate"] = estimate
+    reported = _reported_encoder_input_tokens(response.usage if response is not None else None)
+    if reported is not None:
+        metadata["encoder_input_tokens"] = reported
     return metadata
 
 
@@ -1429,7 +1455,9 @@ def _metadata(
         # 终态落账时点按真实 usage 经 connection_pricing.compute_cost_cny 计算
         # （cost 与 usage 同源）；快照缺失 → None（未知语义留证，R21 不伪装）。
         "pricing": pricing_snapshot_metadata(pricing),
-        # F17：encoder 计价连接的实际用量证据（text_count / encoder_input_tokens），
-        # 结算侧 compute_cost_cny 与账本列依赖；非 encoder 计价连接不引入该键。
+        # F17 / D13-009：encoder 计价连接的用量证据（text_count / 估算另标）。
+        # 派发时点尚无适配器真实用量 → 不写 encoder_input_tokens（结算侧
+        # compute_cost_cny 与账本列依赖真实 token，由响应返回后增量覆盖）。
+        # 非 encoder 计价连接不引入该键。
         **_encoder_usage_metadata(pricing, request, connection.model),
     }
