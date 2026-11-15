@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.1（strategies 分层）、§3.2（数据质量门控强制）；实现模板见本节。
+> 宪法依据：CLAUDE.md §3.2（数据质量门控强制）、[架构正文 §4.1](../architecture/overview.md#41-分层架构)（strategies 分层）；实现模板见本节。
 
 继承 `PolarsBaseStrategy` 使用 Polars LazyFrame 进行高性能向量化计算。
 `PolarsBaseStrategy` 同时继承了 `AIStrategyMixin`，Polars 过滤后自动进入 AI 分析阶段（可通过 `enable_ai_analysis = False` 关闭）：
@@ -38,7 +38,7 @@ class MyPolarsStrategy(PolarsBaseStrategy):
 
 ## 库边界约定
 
-pandas 与 Polars 在项目中有明确的职责划分（对应 CLAUDE.md §4.1 分层 / 技术栈：Flet + Polars + asyncio）：
+pandas 与 Polars 在项目中有明确的职责划分（对应[架构正文 §4.1 分层](../architecture/overview.md#41-分层架构) / 技术栈：Flet + Polars + asyncio）：
 
 - **pandas 是跨层数据契约**：`data/ → services/ → ui/` 的经手数据以 `pd.DataFrame` 承载。DAO 读取路径统一产出 pandas（见 `base_dao.py` 的 `_build_df_normalized`，用 `pd.DataFrame(rows, columns=cols)` 构造并归一化 Decimal 列）。
 - **Polars 是计算内核内部实现**：`PolarsBaseStrategy` 在 `_filter_logic` 内以 `pl.LazyFrame` 做向量化计算，属于策略计算内核，不直接对外暴露。

@@ -111,7 +111,7 @@ def test_l02_rename_keeps_old_path_and_real_topic_identity() -> None:
     assert impact.topics == ("viewmodel",), "真实 topic 身份由 canonical-topics.yml 绑定，不按文件名猜"
     assert ("viewmodel", "docs/patterns/mvvm.md", None, "canonical") in impact.routes
     assert "docs/patterns/mvvm-v2.md" in impact.unresolved, "未登记 canonical 的新路径必须显式列未核"
-    assert impact.test_groups == ("docs-suite",)
+    assert impact.test_groups == ("docs-gate", "docs-suite"), "测试组须计入真实消费者（门禁脚本引用）"
 
 
 def test_l02_old_path_alone_keeps_topic_identity() -> None:
@@ -122,16 +122,70 @@ def test_l02_old_path_alone_keeps_topic_identity() -> None:
 
 
 def test_l02_consumer_scan_lists_real_references() -> None:
-    """消费者来自真实 tests/scripts/.github 文本引用，不是测试内硬编码前缀映射。"""
+    """消费者来自真实调用方/正文/源码文本引用，不是测试内硬编码前缀映射。"""
     impact = cdc.build_doc_impact([_IMPACT_RENAME_EXAMPLE])
     assert impact.consumer_paths, "必须列出仍引用变更路径的真实消费者"
-    assert all(p.startswith(("tests/", "scripts/", ".github/")) for p in impact.consumer_paths)
     still_old = [
         path
         for path in impact.consumer_paths
         if "docs/patterns/mvvm.md" in (ROOT / path).read_text(encoding="utf-8", errors="ignore")
     ]
     assert still_old, "仍指向旧路径的未改消费者必须被列出（rename 迁移对象）"
+
+
+def test_l02_relative_body_link_is_consumer() -> None:
+    """正文相对链接（如 [mvvm.md](./mvvm.md)）必须解析为消费者，而非只看字面全路径。"""
+    impact = cdc.build_doc_impact([("docs/patterns/mvvm.md", None)])
+    assert "docs/patterns/application-service.md" in impact.consumer_paths, (
+        "仅含 ./mvvm.md 相对链接的正文必须被识别为消费者"
+    )
+    assert "docs/guides/how-to.md" in impact.consumer_paths, "带锚点的相对链接同样须解析目标文件"
+
+
+def test_l02_test_groups_aggregated_from_consumers(tmp_path: Path) -> None:
+    """测试组从消费者汇总：已发现 tests/unit 应用测试时不能仍只推荐 docs-suite。"""
+    root = tmp_path
+    (root / "docs" / "governance").mkdir(parents=True)
+    (root / "docs" / "governance" / "canonical-topics.yml").write_text(
+        "topics:\n  - id: viewmodel\n    title: VM\n    canonical: docs/patterns/mvvm.md\n",
+        encoding="utf-8",
+    )
+    (root / "docs" / "patterns").mkdir(parents=True)
+    (root / "docs" / "patterns" / "mvvm.md").write_text("# MVVM\n", encoding="utf-8")
+    (root / "tests" / "unit").mkdir(parents=True)
+    (root / "tests" / "unit" / "test_mvvm_contract.py").write_text('DOC = "docs/patterns/mvvm.md"\n', encoding="utf-8")
+
+    impact = cdc.build_doc_impact([("docs/patterns/mvvm.md", None)], root=root)
+    assert "tests/unit/test_mvvm_contract.py" in impact.consumer_paths
+    assert impact.test_groups == ("docs-suite", "unit-suite")
+
+
+def test_l02_consumer_read_failure_enters_unresolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """读取失败的候选消费者不得静默跳过，必须显式进入 unresolved。"""
+    root = tmp_path
+    (root / "docs" / "governance").mkdir(parents=True)
+    (root / "docs" / "governance" / "canonical-topics.yml").write_text(
+        "topics:\n  - id: viewmodel\n    title: VM\n    canonical: docs/patterns/mvvm.md\n",
+        encoding="utf-8",
+    )
+    (root / "docs" / "patterns").mkdir(parents=True)
+    (root / "docs" / "patterns" / "mvvm.md").write_text("# MVVM\n", encoding="utf-8")
+    (root / "tests" / "unit").mkdir(parents=True)
+    unreadable = root / "tests" / "unit" / "test_unreadable.py"
+    unreadable.write_text('DOC = "docs/patterns/mvvm.md"\n', encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def flaky_read_text(self: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if self == unreadable:
+            raise OSError("permission denied")
+        return original_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    impact = cdc.build_doc_impact([("docs/patterns/mvvm.md", None)], root=root)
+    assert "tests/unit/test_unreadable.py" in impact.unresolved, "读取失败必须显式列未核"
+    assert "tests/unit/test_unreadable.py" not in impact.consumer_paths, "读取失败不得伪装为已确认消费者"
 
 
 def test_l02_unresolved_listed_not_dropped() -> None:
@@ -167,7 +221,7 @@ def test_l02_impact_distinguishes_author_consumer_route_unknown() -> None:
         "消费者须由真实文本引用产生，不按路径前缀机械归类"
     )
     assert impact.topics == ("viewmodel",), "受影响 topic 须单列（非只列路径）"
-    assert impact.test_groups == ("docs-suite",)
+    assert impact.test_groups == ("docs-gate", "docs-suite"), "测试组须从消费者汇集，非只按变更路径推导"
     assert impact.unresolved == ("assets/logo.png", "docs/patterns/mvvm-v2.md")
 
 

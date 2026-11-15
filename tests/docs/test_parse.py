@@ -62,6 +62,18 @@ CODE_BLOCK_CONTENT_IDS = [
     "unicode-line-separator",
 ]
 
+# 组 7 样例（Q12）：HTML href 抽取——含标签/来源/行号；代码语境中的 HTML 不参与
+HTML_HREF_DOC = (
+    '正文 <a href="./target.md">行内</a> 续\n\n'
+    "<div>\n"
+    '<a href="#sec">块内</a>\n'
+    "</div>\n\n"
+    "```html\n"
+    '<a href="./fence-missing.md">围栏</a>\n'
+    "```\n\n"
+    '行内代码 `<a href="./code-missing.md">代码</a>`\n'
+)
+
 # Q10 固定上游向量：由锁定 github-slugger==0.0.3 源码（regex.py 字符表 +
 # replace.py / slug.py 语义）独立实现推导后冻结，覆盖组合附加符号、控制字符、
 # 空白、标点、emoji、表外码点。期望值不是用 Compat 自身生成，故可作差分基准。
@@ -192,6 +204,18 @@ def test_escaped_reference_does_not_suppress_real_dead_link(view_factory) -> Non
     assert refs == [("dead", "nope", 3)], refs
 
 
+def test_html_href_extraction_with_source_and_line(view_factory) -> None:
+    """组 7（Q12）：HTML href 抽取标签/来源/行号；围栏与行内代码中的 HTML 不参与。"""
+    view = view_factory(HTML_HREF_DOC)
+    hrefs = {(h.href, h.tag, h.source, h.line) for h in view.html_hrefs}
+    assert hrefs == {
+        ("./target.md", "a", "inline", 1),
+        ("#sec", "a", "block", 4),
+    }, hrefs
+    # HTML href 不混入 Markdown links（两条死链检查经统一去重入口合并消费）
+    assert view.links == (), view.links
+
+
 def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:
     """组 5：真缺失锚点显式 False；未知/不可解析输入显式失败或明确「未核」。"""
     view = dm.parse_text(HTML_ID_DOC)
@@ -211,6 +235,25 @@ def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:
     with pytest.raises(UnicodeDecodeError) as decode_info:
         dm.load_document_view(bad)
     assert decode_info.value.encoding == "utf-8"
+
+
+def test_unicode_line_separator_is_not_a_line_break(view_factory) -> None:
+    """U+2028/U+2029 是正文而非行界：视图行号与 token.map 对齐，围栏内容准确。"""
+    text = "a\u2028b\u2029c\n\n```py\nx = 1\n```\n"
+    view = view_factory(text)
+    assert view.source[0] == "a\u2028b\u2029c", "Unicode 行分隔符必须留在行内，不得被拆行"
+    assert view.code_line_numbers() == frozenset({3, 4, 5})
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
+
+
+def test_crlf_lines_align_with_token_map(view_factory) -> None:
+    """CRLF 原文：视图行号与 token.map 对齐（行尾归一不改变行序）。"""
+    text = "# 标题\r\n\r\n```py\r\nx = 1\r\n```\r\n\r\n尾行\r\n"
+    view = view_factory(text)
+    assert view.headings and view.headings[0].line == 1
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
 
 
 @pytest.mark.parametrize(("value", "expected"), UPSTREAM_SLUG_VECTORS)

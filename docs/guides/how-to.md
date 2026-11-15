@@ -69,7 +69,7 @@
 新增/修改 Tushare API 接入时遵循以下工作流：
 
 1. **客户端封装**：在 `data/external/tushare_client.py` 的 `TushareProApi` Protocol 中声明 API callable，并在对应 wrapper 方法中调用 `self._handle_api_call(...)` 统一限流/重试/熔断。
-2. **积分档位映射**：若新 API 有积分要求，新增积分档位追加到 `utils/constants.py` 的 `TUSHARE_POINT_TIERS`，API↔档位映射追加到 `data/external/tushare_client.py` 的 `TushareClient._TIER_API_COVERAGE`。注意 `data/constants.py` 中的 `TUSHARE_POINT_TIERS` 仅为兼容再导出（`from utils.constants import TUSHARE_POINT_TIERS`），新增档位只改 `utils` 侧。定位原因：`utils` 为横切叶子层（CLAUDE.md §4.1），R1 契约禁止 `utils` 导入 `data`，故真相源置于 `utils.constants`。
+2. **积分档位映射**：若新 API 有积分要求，新增积分档位追加到 `utils/constants.py` 的 `TUSHARE_POINT_TIERS`，API↔档位映射追加到 `data/external/tushare_client.py` 的 `TushareClient._TIER_API_COVERAGE`。注意 `data/constants.py` 中的 `TUSHARE_POINT_TIERS` 仅为兼容再导出（`from utils.constants import TUSHARE_POINT_TIERS`），新增档位只改 `utils` 侧。定位原因：`utils` 为横切叶子层（[架构正文 §4.1](../architecture/overview.md#41-分层架构)），R1 契约禁止 `utils` 导入 `data`，故真相源置于 `utils.constants`。
 3. **同步策略**：在 `data/sync/` 下对应 syncer 文件中实现 `ISyncStrategy.sync()`，通过 `SyncContext` 注入 `cancel_event`，分块调用 `TushareClient` wrapper。
 4. **表注册**：在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册新表（表名、同步配置、质量监控配置）。
 5. **DAO 实现**：在 `data/persistence/daos/` 下创建对应 DAO，继承 `BaseDao`，使用 `_save_upsert()` 批量写入。
@@ -119,7 +119,7 @@
 3. 实例创建必须受 `threading.Lock` 保护 (优先在 `__new__` 中持锁)。
 4. 支持 `_initialized` 标志防止重复初始化。
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
-6. 在 [docs/architecture/singleton-lifecycle.md](../architecture/singleton-lifecycle.md) 的注册清单中补充新单例名称（该清单为唯一正本，勿改 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式)，§4.3 仅含登记指引）。
+6. 在 [docs/architecture/singleton-lifecycle.md](../architecture/singleton-lifecycle.md) 的注册清单中补充新单例名称（该清单为唯一正本；[架构正文 §4.3](../architecture/overview.md#43-单例模式) 与 CLAUDE.md §4.3 摘要仅含登记指引，不复制清单）。
 7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器（[测试编写模板](../guides/testing.md#测试编写模板)）。
 
 ### 9. 内置 PostgreSQL 离线维护

@@ -18,10 +18,11 @@
    逐文件提交核对 + 替换 → 更新后 all 检查（同一保护边界内）→ 释放保护。
    检测到冲突时不覆盖原位、保留用户新稿、如实列出已写/未写；不承诺跨文件事务。
 
-写入保护的平台边界（§5.2.1-3）：Windows 经独占打开 + ``msvcrt.locking`` 内核级字节
-范围锁（任何进程对锁定字节的写入失败、替换因缺 FILE_SHARE_DELETE 被拒）实际覆盖外部
-写者；POSIX ``flock`` 为协作锁，无法证明覆盖外部编辑器，故**拒绝原位更新**（退出 1），
-不把共享工作区默认为独占环境。后端声明见 ``PLATFORM_LOCK_BACKEND``，不静默伪装。
+写入保护的平台边界（§5.2.1-3）：Windows 经 ``CreateFileW``（``dwShareMode=0``）独占
+打开，保护期间其他进程对这些文件的打开（读/写/截断/重命名替换）因 sharing violation
+失败，实际覆盖外部写者；保护内读取与文件身份查询经持有句柄进行。POSIX ``flock`` 为
+协作锁，无法证明覆盖外部编辑器，故**拒绝原位更新**（退出 1），不把共享工作区默认为
+独占环境。后端声明见 ``PLATFORM_LOCK_BACKEND``，不静默伪装。
 
 崩溃原子提交边界（D28）：``ftruncate`` + 单次 ``write`` 的原位写无法同时保证「写入
 保护」与「崩溃原子提交」——截断后失败、短写或进程中断都会把整份目标（含块外手写
@@ -44,7 +45,7 @@ import re
 import subprocess
 import sys
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +82,7 @@ __all__ = [
     "UnclosedBlockError",
     "UpdateResult",
     "WriteGuard",
+    "git_delivery_files",
     "load_validated_source",
     "render_block_lines",
     "replace_block",
@@ -232,7 +234,9 @@ def _scan_markdown(text: str) -> dict[str, BlockSpan]:
     """Markdown 成对注释块扫描（栈式配对；嵌套/孤儿/重复/未闭合显式拒绝）。
 
     代码块（两类围栏 + 长围栏 + 缩进块）内的生成标记只是示例文本，不构成现行块：
-    行号边界统一经 docs_markdown 解析视图判定，避免围栏中的标记被当作可修改块。
+    行号边界统一经 docs_markdown 解析视图判定，行切分同用解析器行语义
+    （仅 LF / CRLF / CR 计行，U+2028 / U+2029 等 Unicode 行分隔符留在行内），
+    避免 scan 行号与 token.map 错位后围栏中的标记被当作可修改块。
     代码语境只排除**块边界判定**：有效块内部的行（含围栏与缩进代码行）完整计入
     ``content_lines``，否则块内围栏内容不参与一致性比较，手改代码不会被判为漂移。
     """
@@ -242,7 +246,7 @@ def _scan_markdown(text: str) -> dict[str, BlockSpan]:
     open_start = 0
     open_tag = ""
     content: list[str] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    for lineno, raw in enumerate(docs_markdown.split_source_lines(text), start=1):
         if lineno in code_lines:
             if open_id is not None:
                 content.append(raw)
@@ -293,7 +297,7 @@ def _scan_yaml(text: str) -> dict[str, BlockSpan]:
     open_start = 0
     open_tag = ""
     content: list[str] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    for lineno, raw in enumerate(docs_markdown.split_source_lines(text), start=1):
         start_match = _YAML_START_RE.match(raw)
         end_match = _YAML_END_RE.match(raw)
         if open_id is None:
@@ -359,7 +363,7 @@ def replace_block(text: str, fmt: str, block_id: str, new_lines: Sequence[str]) 
     if block_id not in blocks:
         raise MissingBlockError(f"文本中缺少生成块 {block_id!r}")
     span = blocks[block_id]
-    lines = text.splitlines()
+    lines = list(docs_markdown.split_source_lines(text))
     replacement = [span.start_tag_line, *list(new_lines), span.end_tag_line]
     rebuilt = [*lines[: span.start_line - 1], *replacement, *lines[span.end_line :]]
     return _join_lines(text, rebuilt)
@@ -390,8 +394,8 @@ class SourceSchema:
 
     fmt="yaml" 须提供 ``item_key``（顶层取列表的键）；fmt="markdown-block" 须提供
     ``author_block_id``（作者源自身为受控块），``author_payload`` 决定传给渲染函数的
-    内容："block"=受控块内容行（默认），"full"=完整文件文本（供复用既有的、自行
-    定位受控块的正本解析器，如 CONTRIBUTING 最小验证命令解析器）。
+    内容："block"=受控块内容行（默认，直接消费已验证块区间），"full"=完整文件文本
+    （必要时由渲染器自行解析）。
 
     ``non_empty_string_fields`` 声明须为非空字符串的字段（身份字段自动纳入）；
     ``path_fields`` 声明须为非空字符串且在工作根内真实存在的路径字段。
@@ -583,7 +587,7 @@ _CONTRIBUTING_SCHEMA = SourceSchema(
     path="CONTRIBUTING.md",
     fmt="markdown-block",
     author_block_id="min-verify-commands",
-    author_payload="full",  # 传完整文本：既有正本解析器自行定位受控块（保持单一解析源）
+    author_payload="block",  # 直接消费已验证块区间：渲染器不再从全文二次定位受控块（Q07）
 )
 # canonical-topics.yml 全部登记字段（任务路由视图的渲染输入白名单）
 _CANONICAL_TOPICS_SCHEMA = SourceSchema(
@@ -697,7 +701,7 @@ def _render_claude_self_check(validated: dict[str, object], root: Path) -> list[
 
 
 def _render_agents_min_verify(validated: dict[str, object], root: Path) -> list[str]:
-    """AGENTS.md 最小验证命令块：复用既有正本解析器（单一解析源，避免第二套解析漂移）。"""
+    """AGENTS.md 最小验证命令块：消费已验证受控块区间（单一解析源，不二次全文定位）。"""
     content = validated[_CONTRIBUTING_SCHEMA.path]
     assert isinstance(content, str)
     import check_docs_consistency as cdc  # 函数体内惰性 import：复用正本解析器且避免模块循环
@@ -715,6 +719,8 @@ def _render_agents_min_verify(validated: dict[str, object], root: Path) -> list[
 
 _INDEX_COVERED_SUFFIXES = (".md", ".yml", ".yaml", ".json")
 _ADR_FILENAME_RE = re.compile(r"^(\d{4})-[A-Za-z0-9][A-Za-z0-9-]*\.md$")
+# 暂存前显式交付候选申报：os.pathsep 分隔的仓库相对 posix 路径（供 git_delivery_files 读取）
+_DELIVERY_CANDIDATE_ENV = "DOCS_DELIVERY_CANDIDATES"
 
 
 def _escape_cell(text: str) -> str:
@@ -722,15 +728,25 @@ def _escape_cell(text: str) -> str:
     return text.replace("|", "\\|")
 
 
-def _git_tracked_docs(root: Path, subdir: str) -> list[str] | None:
-    """git 索引列出子目录下被跟踪文件（相对 posix 路径）；非 git 环境返回 None 降级。
+def _delivery_candidates_from_env() -> tuple[str, ...]:
+    """读取暂存前显式交付候选申报（``DOCS_DELIVERY_CANDIDATES``）。
 
-    cwd 取传入 root（真实仓库 / 测试临时 git 仓库通用）；``-z`` 关闭路径转义，
-    避免非 ASCII 文件名被转义为八进制序列。
+    正常 ``git add`` 后新增文件已在索引中，无需申报；本申报只服务「暂存前」窗口：
+    让尚未暂存的新增正式页仍能进入受检集/生成候选。未申报的未跟踪文件（草案、
+    本地产物）不入集——不做「全部 untracked 升现行」。
+    """
+    raw = os.environ.get(_DELIVERY_CANDIDATE_ENV, "")
+    return tuple(item.strip() for item in raw.split(os.pathsep) if item.strip())
+
+
+def _git_ls_files(root: Path, *args: str) -> list[str] | None:
+    """执行 ``git ls-files`` 返回 posix 相对路径；git 不可用 / 非仓库返回 None（调用方降级）。
+
+    ``-z`` 关闭路径转义，避免非 ASCII 文件名被转义为八进制序列。
     """
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z", "--", subdir],
+            ["git", "ls-files", "-z", *args],
             cwd=root,
             capture_output=True,
             check=False,
@@ -742,15 +758,57 @@ def _git_tracked_docs(root: Path, subdir: str) -> list[str] | None:
     return [rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
 
 
-def _docs_index_candidates(root: Path) -> list[Path]:
-    """docs/README 文件级目录索引的作者源候选集：git 跟踪的 docs/** 治理文件。
+def git_delivery_files(root: Path, pathspec: str, declared: Iterable[str] | None = None) -> list[str] | None:
+    """git 交付候选集：索引内文件 ∪ 显式申报的暂存前候选（Q15）。
 
-    git 索引非空时为唯一候选来源（gitignored/未跟踪产物天然排除）；git 不可用
+    受检集与生成候选共用本函数，使「尚未 git add 的新增正式页」在暂存前即可被发现，
+    同时不扩大为「全部 untracked」：
+
+    - 索引内文件（含已 staged 新增）取自 ``git ls-files -- <pathspec>``；
+    - ``declared``（默认读 ``DOCS_DELIVERY_CANDIDATES``）只接受仓库内、真实存在、符合
+      ``pathspec`` 且未被 .gitignore 排除的文件——后者与
+      ``git ls-files --others --exclude-standard`` 求交，ignored 产物不会升为候选；
+      未申报的 untracked 文件（草案）不入集；
+    - rename 只保留索引中的新路径；申报路径不存在（含已从工作区删除）不入候选，
+      未暂存的删除由调用方 ``is_file`` 过滤兜底；
+    - git 不可用返回 None，由调用方降级为文件系统发现（既有语义）。
+    """
+    tracked = _git_ls_files(root, "--", pathspec)
+    if tracked is None:
+        return None
+    accepted = set(tracked)
+    root_resolved = root.resolve()
+    pending: set[str] = set()
+    for raw in _delivery_candidates_from_env() if declared is None else declared:
+        rel = posixpath.normpath(raw.replace("\\", "/") if os.sep == "\\" else raw)
+        if rel in {".", ""} or rel in accepted or Path(rel).is_absolute():
+            continue
+        candidate = root / rel
+        try:
+            candidate.resolve().relative_to(root_resolved)
+        except ValueError:
+            # 越界申报（含 .. 逃逸 / 符号链接出根）不升为候选
+            continue
+        if candidate.is_file():
+            pending.add(rel)
+    if pending:
+        untracked = _git_ls_files(root, "--others", "--exclude-standard", "--", pathspec)
+        if untracked is None:
+            return None
+        accepted.update(set(untracked) & pending)
+    return sorted(accepted)
+
+
+def _docs_index_candidates(root: Path) -> list[Path]:
+    """docs/README 文件级目录索引的作者源候选集：git 交付候选的 docs/** 治理文件。
+
+    git 索引（含已 staged 新增）与显式申报的暂存前交付候选求并后为候选来源
+    （gitignored/未申报的未跟踪产物天然排除，见 ``git_delivery_files``）；git 不可用
     （临时目录 / 归档环境）降级文件系统发现。注意：作者源为 docs 树本身，渲染读取
     窗口不做逐文件独占保护（开销不成比例），并发编辑漂移由更新后 all 检查 fail-closed 检出。
     """
     docs_root = root / "docs"
-    tracked = _git_tracked_docs(root, "docs")
+    tracked = git_delivery_files(root, "docs")
     if tracked:
         candidates = [
             root / rel for rel in tracked if (root / rel).suffix in _INDEX_COVERED_SUFFIXES and (root / rel).is_file()
@@ -764,10 +822,15 @@ def _docs_index_candidates(root: Path) -> list[Path]:
 
 
 def _h1_title_from(text: str) -> str | None:
-    """从 markdown 文本提取首个 ATX H1 标题（无 H1 返回 None，由调用方显式处置）。"""
-    for line in text.splitlines():
-        if line.startswith("# "):
-            return line[2:].strip()
+    """从 markdown 文本提取首个一级标题（ATX 与 Setext 统一由共享解析视图判定）。
+
+    经 docs_markdown 解析视图取标题：围栏/缩进代码块内的伪 H1 只是示例文本，
+    不冒充文档标题；Setext 一级标题（``====`` 下划线）与 ATX ``#`` 同等合法。
+    无一级标题返回 None，由调用方显式处置。
+    """
+    for heading in docs_markdown.parse_text(text).headings:
+        if heading.level == 1:
+            return heading.text
     return None
 
 
@@ -1519,6 +1582,7 @@ class UpdateResult:
     blocked: str | None
     post_check_errors: tuple[str, ...]
     conflict_reasons: tuple[str, ...] = ()
+    failure_reasons: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -1637,6 +1701,7 @@ def run_update(
         conflicts: list[str] = []
         conflict_reasons: list[str] = []
         failed: list[str] = []
+        failure_reasons: list[str] = []
         if blocked_by_barrier is not None:
             conflicts.extend(target_rels)
             conflict_reasons.extend(blocked_by_barrier for _ in target_rels)
@@ -1674,7 +1739,7 @@ def run_update(
                     # 原位写被拒绝（无已验证的崩溃原子提交方案）：该目标未写，
                     # 如实列入 failed 并继续其余目标（不承诺跨文件事务）。
                     failed.append(rel)
-                    conflict_reasons.append(f"{rel}: {exc}")
+                    failure_reasons.append(f"{rel}: {exc}")
                 except PermissionError as exc:
                     # 提交核对后但替换前，屏障注入的写入尝试被独占保护阻止：
                     # 检出冲突——该目标原位未覆盖，如实报告
@@ -1682,7 +1747,7 @@ def run_update(
                     conflict_reasons.append(f"提交核对后写入尝试被写入保护阻止: {exc}")
                 except OSError as exc:
                     failed.append(rel)
-                    conflict_reasons.append(f"{rel}: 写失败 {exc}")
+                    failure_reasons.append(f"{rel}: 写失败 {exc}")
 
         # 10) with 退出时释放保护
 
@@ -1707,6 +1772,7 @@ def run_update(
         unchanged=tuple(unchanged),
         conflicts=tuple(conflicts),
         conflict_reasons=tuple(conflict_reasons),
+        failure_reasons=tuple(failure_reasons),
         failed=tuple(failed),
         blocked=None,
         post_check_errors=tuple(post_errors),

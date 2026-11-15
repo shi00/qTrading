@@ -46,6 +46,13 @@
 
 使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含注册/非注册单例、非单例服务）见 [docs/architecture/singleton-lifecycle.md](./singleton-lifecycle.md)（完整注册清单的唯一正本，新增单例只更新该文件）。
 
+## 消费者迁移与兼容责任（T6）
+
+- **当前状态**：架构正文已收敛到本文（ruleset 1.10.0）。引用分层 / core 隔离 / 单例正文细节的 `docs/**` 规范类消费者已改指本文 §4.1—§4.3；历史 ADR（0002、0014 等）与代码注释保留原 `CLAUDE.md §4.x` 引用，仅作历史决策与局部说明，不承载正文。方法论类文档的元规则引用（声明项目规则优先、读取 CLAUDE.md §3 红线与 §4 架构边界）仍指向 CLAUDE.md，其 §4 摘要是宪法层架构不变量。
+- **兼容责任**：CLAUDE.md §4 保留与本文语义一致的最小摘要 + 指针，供 AI 工具加载 CLAUDE.md 的闭包（含 `@AGENTS.md` 导入）与旧深链直接读取；兼容期间由本文 owner（架构维护者）保证摘要与本文同步。CLAUDE.md §4.1 / §4.2 / §4.3 的标题与锚点不得删除或改名（旧深链依赖）。
+- **切换条件（已满足）**：① GDR-11 断言对象为本文 §4.2；② 死链与锚点检查（`check_anchor_dead_links` / `check_relative_dead_links`）同时覆盖新旧引用；③ `docs/**` 规范类消费者已全部指向本文；④ 工具加载闭包（CLAUDE.md `@AGENTS.md` 导入与 AGENTS.md 生成区块）校验通过。
+- **退役判据与执行边界**：退役仅针对旧锚点的「正文承载角色」，不退役宪法层最小摘要。执行条件：全量消费者（含 scripts / tests 的正文读取器）改指本文、仓库内无 `CLAUDE.md#4x` 链接引用、`python scripts/check_docs_consistency.py --check --scope all` 与文档测试通过，且 CLAUDE.md §4 已不再出现重复正文。当前消费者迁移与引用检查已满足，但本次迁移不移除摘要（ADR-0018 T6 保留最小安全集），退役动作须由后续工作包显式登记；退役前不得删除红线 / 安全摘要凑篇幅。
+
 ## 完成判定
 
 - 最小验证命令：`python scripts/check_docs_consistency.py --check --scope all`（含 GDR-11 core 模块清单一致性、架构正文锚点/链接死链门禁）+ `pre-commit run --all-files`（import-linter 3 条契约实际执行架构边界）。

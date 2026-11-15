@@ -17,11 +17,14 @@
 9. Flet 入口完整性检查：校验 docs/flet/README.md 覆盖全部 docs/flet/*.md 专题文档，
    且不引用不存在的专题文件。
 10. exceptions.yml 例外注册表一致性检查（P1-01）：校验 docs/governance/exceptions.yml 必填字段、
-   id 唯一性、rule_id 存在性、paths 存在性与 expires_at/removal_trigger 二选一。
+   字段类型与非空、未知字段、id 唯一性与格式、rule_id 存在性、paths 非空且为仓库内真实路径
+   （不指向仓库根，空范围不构成全局豁免）与 expires_at/removal_trigger 二选一。
+   owner/approved_by 仅校验身份字段非空，批准真实性仍由人工核验。
 11. canonical-topics.yml 主题映射一致性检查（P2-12）：校验 docs/governance/canonical-topics.yml
    必填字段、id 唯一性、canonical/workflow 路径在仓库中真实存在。
-12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version 相等、
-   last_reviewed 为合法日期且前者不早于后者。
+12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 的
+   ruleset_version 互不漂移（入口为其派生视图），last_reviewed 为合法日期且仅顶行
+   「受影响对象」列出的文档受「不早于顶行变更日期」复核门约束。
 13. 决策树映射一致性检查（DOC-04）：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致——
    每个数据行以行尾 `<!-- route: ... -->` 锚声明承载的 yml topic id（正文任务身份），
    校验「行 → 锚 id → canonical」精确对应（F03：路径集合相等不保证任务归属相等，两行入口
@@ -35,8 +38,8 @@
 17. 检视方法论文档登记检查（DOC-07）：docs/reviews/README.md 以文件级链接登记全部顶层
    方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使检视
    方法论对新会话一跳可达（检视报告不入库，正文落根 reviews/ 为本地 gitignored 产物）。
-18. core 模块清单完整性检查（GDR-11）：断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际
-   core/*.py 文件一致。
+18. core 模块清单完整性检查（GDR-11）：断言 docs/architecture/overview.md §4.2 声明的
+   core/ 模块列表与实际 core/*.py 文件一致（D6 起检查对象自 CLAUDE.md §4.2 迁至架构正文正本）。
 19. ADR 索引完整性检查（GDR-12）：校验 CONTRIBUTING.md 文件级登记全部 docs/adr/*.md
    决策文档。
 20. 书名号章节引用一致性检查（GDR-13）：扫描受检 markdown 中形如 `<文档路径>「<章节名>」`
@@ -90,13 +93,14 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import posixpath
 import re
 import subprocess
 import sys
 import tomllib
 import typing
 import urllib.parse
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
@@ -255,25 +259,18 @@ def _is_excluded(path: Path, scope: str, excludes: tuple[_DocExclusion, ...]) ->
 
 
 def _git_tracked_md_files() -> list[Path] | None:
-    """经 git 索引列出受跟踪的 markdown（受检集单一来源，H1）。
+    """经 git 交付候选列出 markdown（受检集单一来源，H1 + Q15）。
 
-    未跟踪 / gitignored 文件不在索引中，自动被排除。非 git 环境（归档解压、IDE 映射目录、
+    交付候选 = git 索引内文件（已 staged 新增亦在索引内）∪ 调用方经
+    ``DOCS_DELIVERY_CANDIDATES`` 显式申报的暂存前正式页（见
+    ``docs_generated.git_delivery_files``）；未申报的 untracked / gitignored 文件
+    自动排除，不把全部 untracked 升为现行。非 git 环境（归档解压、IDE 映射目录、
     git 不可用）返回 None，由调用方降级为文件系统发现。
-    `-z` 关闭路径转义（quotepath），避免非 ASCII 文件名被转义为八进制序列。
     """
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", "*.md"],
-            cwd=ROOT,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        # git 可执行文件缺失或无法启动
+    files = docs_generated.git_delivery_files(ROOT, "*.md")
+    if files is None:
         return None
-    if result.returncode != 0:
-        return None
-    return [ROOT / rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
+    return [ROOT / rel for rel in files]
 
 
 def _git_tracked_files_under(directory: Path) -> list[str]:
@@ -450,6 +447,34 @@ def _split_link_target(url: str) -> _LinkTarget:
     )
 
 
+def _iter_local_urls(view: docs_markdown.DocumentView) -> Iterator[tuple[int, str]]:
+    """统一本地 URL 来源：Markdown 链接 ∪ HTML href，按解析后的目标去重。
+
+    HTML href 经 ``docs_markdown`` 静态解析（不执行 HTML），与同一行指向同一目标的
+    Markdown 链接不重复计入，避免同一死链重复报错。去重键由 ``_split_link_target``
+    归一化（percent-decode 后组件比较）：markdown-it 会编码中文/空格，HTML href 保留
+    原文，不归一化会把同一目标误判为两条；按组件比较也避免 ``%23``（文件名中的 #）
+    与真实锚点被误并。真正的协议/路径校验仍由消费者调用 ``_split_link_target``。
+    """
+    seen: set[tuple[int, str, str, str, str, str]] = set()
+
+    def emit(line: int, raw_url: str) -> Iterator[tuple[int, str]]:
+        url = raw_url.strip()
+        if not url:
+            return
+        target = _split_link_target(url)
+        key = (line, target.scheme, target.netloc, target.path, target.query, target.fragment)
+        if key in seen:
+            return
+        seen.add(key)
+        yield (line, url)
+
+    for link in view.links:
+        yield from emit(link.line, link.target)
+    for href in view.html_hrefs:
+        yield from emit(href.line, href.href)
+
+
 def extract_headings(content: str) -> set[str]:
     """提取 markdown 文件所有标题对应的锚点集合（兼容层，委托统一解析视图）。
 
@@ -472,7 +497,8 @@ def check_anchor_dead_links() -> list[str]:
 
     链接提取与代码块排除（两类围栏 + 缩进块 + 行内代码）由 docs_markdown 视图
     token 判定（检视 §5.1 解析边界迁移，替代旧手写 ``` 状态机 + 行级链接正则）；
-    引用式链接（`[t][label]`，已解析成链者）同样纳入锚点校验。
+    引用式链接（`[t][label]`，已解析成链者）同样纳入锚点校验。Q12：HTML ``href``
+    经 ``html_hrefs`` 一并纳入（只静态解析，不执行 HTML），与 Markdown 链接去重。
     """
     errors: list[str] = []
     # 预加载所有受检文件的锚点集合（标题 slug ∪ HTML id）
@@ -482,8 +508,7 @@ def check_anchor_dead_links() -> list[str]:
 
     for doc in CHECKED_DOCS:
         view = _load_doc_view(doc)
-        for link in view.links:
-            url = link.target.strip()
+        for line, url in _iter_local_urls(view):
             target = _split_link_target(url)
             # 外部链接与协议相对地址不校验本地文件
             if target.is_non_local:
@@ -501,13 +526,13 @@ def check_anchor_dead_links() -> list[str]:
             # 同文件锚点：直接校验锚点存在性
             if not target.path:
                 if anchor not in doc_anchors.get(doc, frozenset()):
-                    errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
+                    errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
                 continue
 
             # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
             target_path = (doc.parent / target.path).resolve()
             if not target_path.exists():
-                errors.append(f"{doc.name}:{link.line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
+                errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
                 continue
 
             # 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）
@@ -516,9 +541,7 @@ def check_anchor_dead_links() -> list[str]:
 
             # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
             if anchor not in doc_anchors.get(target_path, frozenset()):
-                errors.append(
-                    f"{doc.name}:{link.line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)"
-                )
+                errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)")
     return errors
 
 
@@ -532,13 +555,13 @@ def check_relative_dead_links() -> list[str]:
 
     另检引用式死链（`[text][label]` label 未定义）：解析视图 unresolved_references
     显式失败（F17：真死链不得漏检、不从全文取样例代替）；围栏/行内代码内的假链接
-    由 token 判定天然排除（检视 §6.4 不误报负例）。
+    由 token 判定天然排除（检视 §6.4 不误报负例）。Q12：HTML ``href`` 经
+    ``html_hrefs`` 一并纳入（只静态解析，不执行 HTML），与 Markdown 链接去重。
     """
     errors: list[str] = []
     for doc in CHECKED_DOCS:
         view = _load_doc_view(doc)
-        for link in view.links:
-            url = link.target.strip()
+        for line, url in _iter_local_urls(view):
             target = _split_link_target(url)
             # 外部链接与协议相对地址不校验本地文件
             if target.is_non_local:
@@ -546,7 +569,7 @@ def check_relative_dead_links() -> list[str]:
             # 未知协议：明确不支持，不得拼成磁盘路径误报为死链
             if target.scheme:
                 errors.append(
-                    f"{doc.name}:{link.line}: 不支持的链接协议 '{target.scheme}:' '{url}' "
+                    f"{doc.name}:{line}: 不支持的链接协议 '{target.scheme}:' '{url}' "
                     f"(仅支持 http/https/mailto 与本地相对路径)"
                 )
                 continue
@@ -559,7 +582,7 @@ def check_relative_dead_links() -> list[str]:
             # 从 source_doc 所在目录解析相对路径
             local_path = (doc.parent / target.path).resolve()
             if not local_path.exists():
-                errors.append(f"{doc.name}:{link.line}: 相对链接死链 '{url}' (目标 '{local_path}' 不存在)")
+                errors.append(f"{doc.name}:{line}: 相对链接死链 '{url}' (目标 '{local_path}' 不存在)")
         for ref in view.unresolved_references:
             errors.append(
                 f"{doc.name}:{ref.line}: 引用式死链 '[{ref.text}][{ref.label}]' "
@@ -1911,6 +1934,17 @@ EXCEPTION_REQUIRED_FIELDS: frozenset[str] = frozenset(
 )
 # expires_at 与 removal_trigger 二选一必填
 EXCEPTION_EXPIRY_FIELDS: frozenset[str] = frozenset({"expires_at", "removal_trigger"})
+# 字段全集封闭：未登记字段一律拒绝（拼写错误的字段名不得充当豁免依据）
+EXCEPTION_ALLOWED_FIELDS: frozenset[str] = EXCEPTION_REQUIRED_FIELDS | EXCEPTION_EXPIRY_FIELDS
+# 自由文本字段须为非空白字符串；owner/approved_by 只校验身份字段非空，批准真实性仍人工核验
+EXCEPTION_TEXT_FIELDS: tuple[str, ...] = (
+    "reason",
+    "owner",
+    "approved_by",
+    "verification",
+    "validity_criteria",
+)
+EXCEPTION_ID_PATTERN = re.compile(r"^EX-\d{4}$")
 
 
 def check_exceptions_yaml_consistency() -> list[str]:
@@ -1918,11 +1952,15 @@ def check_exceptions_yaml_consistency() -> list[str]:
 
     校验 docs/governance/exceptions.yml：
     1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "exceptions" key (list)。
-    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)。
-    3. expires_at 与 removal_trigger 二选一必填。
-    4. id 唯一且格式为 EX-XXXX。
-    5. rule_id 必须存在于 docs/governance/redlines.yml。
-    6. paths 必须为 list 且每个路径在仓库中真实存在。
+    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)，
+       且字段值严格校验：文本字段为非空字符串；id 须为 EX-XXXX；rule_id 须为非空字符串；
+       paths 须为非空 list，每项为仓库相对、真实存在且不指向仓库根的路径（空范围不构成全局豁免）。
+    3. 字段全集封闭：出现未登记字段即报错。
+    4. expires_at 与 removal_trigger 二选一必填（日期合法性与到期判断由
+       check_exceptions_effectiveness() 负责，本函数不重复）。
+    5. id 唯一且格式为 EX-XXXX。
+    6. rule_id 必须存在于 docs/governance/redlines.yml。
+    7. owner/approved_by 仅校验身份字段非空；批准真实性仍由人工核验，本函数不自动化。
     """
     errors: list[str] = []
 
@@ -1959,10 +1997,16 @@ def check_exceptions_yaml_consistency() -> list[str]:
         }
 
     seen_ids: set[str] = set()
+    root_resolved = ROOT.resolve()
     for idx, entry in enumerate(exceptions, 1):
         if not isinstance(entry, dict):
             errors.append(f"exceptions[{idx}] 应为 dict, 实际 {type(entry).__name__}")
             continue
+
+        # 未知字段：拼错的字段名不得充当豁免依据
+        unknown_fields = sorted(set(entry.keys()) - EXCEPTION_ALLOWED_FIELDS)
+        if unknown_fields:
+            errors.append(f"exceptions[{idx}] 含未知字段: {unknown_fields}")
 
         # 必填字段
         missing = EXCEPTION_REQUIRED_FIELDS - entry.keys()
@@ -1972,32 +2016,57 @@ def check_exceptions_yaml_consistency() -> list[str]:
         if not (EXCEPTION_EXPIRY_FIELDS & entry.keys()):
             errors.append(f"exceptions[{idx}] 缺少 expires_at 或 removal_trigger (二选一必填)")
 
+        # 自由文本字段：类型与非空（空串/纯空白/null/非字符串均拒绝；
+        # owner/approved_by 只核身份字段非空，批准真实性仍由人工核验）
+        for field in EXCEPTION_TEXT_FIELDS:
+            if field in entry:
+                value = entry[field]
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"exceptions[{idx}] {field} 应为非空字符串, 实际 {value!r}")
+
         # id 唯一性与格式
-        exc_id = entry.get("id")
-        if exc_id is not None:
-            if not isinstance(exc_id, str) or not exc_id.startswith("EX-"):
+        if "id" in entry:
+            exc_id = entry["id"]
+            if not isinstance(exc_id, str) or not EXCEPTION_ID_PATTERN.match(exc_id):
                 errors.append(f"exceptions[{idx}] id 格式应为 EX-XXXX, 实际 {exc_id!r}")
             elif exc_id in seen_ids:
                 errors.append(f"exceptions[{idx}] id 重复: {exc_id}")
             else:
                 seen_ids.add(exc_id)
 
-        # rule_id 存在性
-        rule_id = entry.get("rule_id")
-        if rule_id is not None and registered_rule_ids and rule_id not in registered_rule_ids:
-            errors.append(f"exceptions[{idx}] rule_id '{rule_id}' 不存在于 redlines.yml")
+        # rule_id 形态与存在性
+        if "rule_id" in entry:
+            rule_id = entry["rule_id"]
+            if not isinstance(rule_id, str) or not rule_id.strip():
+                errors.append(f"exceptions[{idx}] rule_id 应为非空字符串, 实际 {rule_id!r}")
+            elif registered_rule_ids and rule_id not in registered_rule_ids:
+                errors.append(f"exceptions[{idx}] rule_id '{rule_id}' 不存在于 redlines.yml")
 
-        # paths 存在性
-        paths = entry.get("paths")
-        if isinstance(paths, list):
-            for p in paths:
-                if not isinstance(p, str):
-                    errors.append(f"exceptions[{idx}] paths 元素应为 str, 实际 {type(p).__name__}")
-                    continue
-                if not (ROOT / p).exists():
-                    errors.append(f"exceptions[{idx}] 路径不存在: {p}")
-        elif paths is not None:
-            errors.append(f"exceptions[{idx}] paths 应为 list, 实际 {type(paths).__name__}")
+        # paths 范围：非空 list、仓库相对、仓库内真实存在且不指向仓库根
+        # （空范围不得解释为全局豁免）
+        if "paths" in entry:
+            paths = entry["paths"]
+            if not isinstance(paths, list) or not paths:
+                errors.append(f"exceptions[{idx}] paths 应为非空 list, 实际 {paths!r}")
+            else:
+                for p in paths:
+                    if not isinstance(p, str) or not p.strip():
+                        errors.append(f"exceptions[{idx}] paths 元素应为非空字符串, 实际 {p!r}")
+                        continue
+                    if Path(p).is_absolute():
+                        errors.append(f"exceptions[{idx}] paths 须为仓库相对路径: {p!r}")
+                        continue
+                    try:
+                        resolved = (ROOT / p).resolve()
+                    except (OSError, RuntimeError, ValueError):
+                        errors.append(f"exceptions[{idx}] paths 元素不是合法路径: {p!r}")
+                        continue
+                    if not resolved.is_relative_to(root_resolved):
+                        errors.append(f"exceptions[{idx}] paths 不得指向仓库之外: {p!r}")
+                    elif resolved == root_resolved:
+                        errors.append(f"exceptions[{idx}] paths 不得指向仓库根（空范围不构成全局豁免）: {p!r}")
+                    elif not resolved.exists():
+                        errors.append(f"exceptions[{idx}] 路径不存在: {p}")
 
     # GATE-02: R1 例外条目数 == pyproject.toml "R1: utils must not import business layers" 契约 ignore_imports 条数（GDR-01 条数唯一事实源，
     # 防 exceptions.yml 自己文件里的头注释漂移）。
@@ -2450,53 +2519,71 @@ def check_agents_md_sync() -> list[str]:
 # check_agents_md_min_verify_commands() 经 _generated_block_sync 对 AGENTS.md 镜像做逐行精确比较，
 # 不再对正本做子串检查（与 redlines.yml → AGENTS.md 红线区块同机制）。
 _MIN_VERIFY_START_TAG = "<!-- generated:min-verify-commands -->"
+# 正本受控块 id（与 docs_generated 注册表一致）：块区间经共享块扫描器取得，
+# 不再全文 find——后者会被前置/后置围栏样例中的同名标记诱导（Q07）。
+_MIN_VERIFY_BLOCK_ID = "min-verify-commands"
 # 受控块两条 bullet 的固定标签前缀（受控契约：标签改写/增删 bullet 即视为正本形态漂移，fail-closed）。
 _MIN_VERIFY_GATE_LABEL = "- **变更相关门禁**"
 _MIN_VERIFY_DOC_LABEL = "- **仅 Markdown / 治理文档改动**"
 
 
-def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str], list[str]]:
-    """解析 CONTRIBUTING.md「常用开发与测试命令」受控块中的完整有序命令列表（M2/F02）。
+def _min_verify_block_text(content: str) -> tuple[str, list[str]]:
+    """取 CONTRIBUTING.md 最小验证命令受控块的**已验证块区间**文本（Q07）。
 
-    受控块 = `_MIN_VERIFY_START_TAG` 与 `<!-- /generated -->` 之间恰两条 bullet：
-    「变更相关门禁」（` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet
-    首个「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
-    「：」之前，不参与解析）。
-    返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
-    块缺失/结束标记缺失/含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令/
-    块后同节重复命令声明均显式报错，不静默跳过（fail-closed）。
+    直接消费 ``docs_generated.scan_blocks()`` 的块契约：围栏/缩进代码块内的同名标记
+    只是示例文本，不构成现行块；不再用全文 ``find`` 定位，避免被前置/后置样例诱导。
+    同时保留 F02 反例防护（Q08 收窄）：受控块结束后、同一小节（至下一个二级标题或
+    文末）内仅识别与受控块标签同前缀的 bullet（真正的命令声明），防止新增命令绕过
+    受控块被静默丢弃；普通说明列表项属于正文，不误判。代码块内的样例文本一并排除。
+    返回 (块内容文本, errors)：失败时文本为空且 errors 非空。
     """
-    errors: list[str] = []
-    start = content.find(_MIN_VERIFY_START_TAG)
-    if start == -1:
-        return (
-            [],
-            [],
-            [
-                f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
-                "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
-            ],
-        )
-    end = content.find(_GENERATED_END_TAG, start + len(_MIN_VERIFY_START_TAG))
-    if end == -1:
-        return [], [], [f"CONTRIBUTING.md 最小验证命令受控块缺少结束标记（{_GENERATED_END_TAG}）"]
-    # F02 反例防护（重复命令声明）：命令声明只能出现在受控块内。受控块结束后、同一小节
-    # （至下一个「## 」标题或文末）内仅识别与受控块标签同前缀的 bullet（真正的命令声明），
-    # 防止新增命令绕过受控块被静默丢弃；普通说明列表项属于正文，不在此误判（Q08）。
-    after_block = content[end + len(_GENERATED_END_TAG) :]
-    next_heading = after_block.find("\n## ")
-    section_after = after_block if next_heading == -1 else after_block[:next_heading]
+    try:
+        blocks = docs_generated.scan_blocks(content, "markdown")
+    except docs_generated.DocsGeneratedError as exc:
+        return "", [f"CONTRIBUTING.md 最小验证命令受控块结构非法: {exc}"]
+    span = blocks.get(_MIN_VERIFY_BLOCK_ID)
+    if span is None:
+        return "", [
+            f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
+            "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
+        ]
+    # 块结束后同节内容：边界与代码块行由共享解析视图给出（围栏内的伪标题/伪命令声明
+    # 只是示例文本），不重新在全文搜索标记。
+    view = docs_markdown.parse_text(content)
+    code_lines = view.code_line_numbers()
+    next_h2 = next((h.line for h in view.headings if h.level == 2 and h.line > span.end_line), None)
+    lines = content.splitlines()
+    scan_end = next_h2 - 1 if next_h2 is not None else len(lines)
     duplicate_declarations = [
-        line for line in section_after.splitlines() if line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
+        line
+        for lineno, line in enumerate(lines, start=1)
+        if span.end_line < lineno <= scan_end
+        and lineno not in code_lines
+        and line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
     ]
     if duplicate_declarations:
-        errors.append(
+        return "", [
             "CONTRIBUTING.md 最小验证命令受控块后同节内含重复命令声明"
             "（命令声明只能写入受控块内，防止被静默丢弃，F02）: " + " / ".join(duplicate_declarations)
-        )
-    body_lines = [
-        line for line in content[start + len(_MIN_VERIFY_START_TAG) : end].strip().splitlines() if line.strip()
-    ]
+        ]
+    return "\n".join(span.content_lines) + ("\n" if span.content_lines else ""), []
+
+
+def _parse_min_verify_command_block(block_text: str) -> tuple[list[str], list[str], list[str]]:
+    """解析最小验证命令受控块的已验证区间文本（M2/F02，Q07）。
+
+    ``block_text`` 为 ``_min_verify_block_text()`` 取得的块内容（或 docs_generated 以
+    ``author_payload="block"`` 校验后传入），不含包裹标记；本函数不再从全文定位块，
+    避免围栏样例中的同名标记冒充作者源。受控块恰两条 bullet：「变更相关门禁」
+    （` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet 首个
+    「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
+    「：」之前，不参与解析）。
+    返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
+    含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令均显式报错，
+    不静默跳过（fail-closed）。
+    """
+    errors: list[str] = []
+    body_lines = [line for line in block_text.strip().splitlines() if line.strip()]
     unknown_lines = [
         line for line in body_lines if not line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
     ]
@@ -2570,7 +2657,10 @@ def check_agents_md_min_verify_commands() -> list[str]:
         contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
     except OSError:
         return [f"CONTRIBUTING.md 不存在或不可读: {CONTRIBUTING_PATH}"]
-    gate_commands, doc_commands, parse_errors = _parse_min_verify_command_block(contributing)
+    block_text, block_errors = _min_verify_block_text(contributing)
+    if block_errors:
+        return block_errors
+    gate_commands, doc_commands, parse_errors = _parse_min_verify_command_block(block_text)
     if parse_errors:
         return parse_errors
     content = AGENTS_PATH.read_text(encoding="utf-8")
@@ -2693,7 +2783,7 @@ def check_claude_self_check_sync() -> list[str]:
     return errors
 
 
-# --- DOC-01: 规则集元数据一致性（CLAUDES 与 CONTRIBUTING 的 ruleset_version/last_reviewed 同步）---
+# --- DOC-01: 规则集元数据一致性（入口 ruleset_version 派生自日志顶行；受影响对象 last_reviewed 复核门）---
 # 元数据格式（P2-07 统一格式）：
 #   `> - ruleset_version: 1.3.0（...）`  与  `> - last_reviewed: 2026-09-03`
 _RULESET_VERSION_PATTERN = re.compile(r"ruleset_version[：:]\s*([0-9]+\.[0-9]+\.[0-9]+)")
@@ -2707,13 +2797,31 @@ def _extract_metadata_versions(content: str) -> tuple[str | None, str | None]:
     return (m.group(1) if m else None, d.group(1) if d else None)
 
 
-def _extract_changelog_top_date() -> date | None:
-    """从 ruleset-changelog.md「变更记录」表首条数据行提取变更日期（DS-05）。
+@dataclass(frozen=True)
+class _RulesetChangelogTopEntry:
+    """ruleset-changelog.md「变更记录」表顶行（ruleset_version 的唯一作者记录）。
 
-    表头 `| ruleset_version | 变更日期 | 变更摘要 |`，首条数据行如
-    `| 1.6.0 | 2026-09-14 | ... |`，日期为第 2 列（YYYY-MM-DD）。文件缺失、
-    未找到数据行、或日期非法时返回 None（调用方 fail-closed 报错）。
-    顶行判定与 check_ruleset_changelog_version 一致（锚定真实「变更记录」标题后取首个数据行）。
+    `affected_text` 为第 4 列「受影响对象」原文；该列缺失时为 None（由复核门消费方
+    fail-closed 报错），显式空值（`—` 等）由 `_parse_affected_objects` 归一为空元组。
+    """
+
+    version: str
+    date_text: str
+    affected_text: str | None
+
+
+# 复核门可守护的对象：仅这三份入口文档承载 last_reviewed 元数据。
+_RULESET_REVIEW_GATED_DOCS: tuple[str, ...] = ("CLAUDE.md", "CONTRIBUTING.md", "AGENTS.md")
+# 「受影响对象」列的空值标记（显式声明本轮不影响任何入口文档 / 历史行未登记）。
+_AFFECTED_NONE_MARKERS = frozenset({"-", "—", "–", "无", "不适用"})
+
+
+def _extract_changelog_top_entry() -> _RulesetChangelogTopEntry | None:
+    """从 ruleset-changelog.md「变更记录」表首条数据行提取顶行记录（DS-05/DS-10）。
+
+    表头 `| ruleset_version | 变更日期 | 变更摘要 | 受影响对象 |`，首条数据行如
+    `| 1.6.0 | 2026-09-14 | ... | CLAUDE.md、AGENTS.md |`。文件缺失、未找到数据行、
+    或首列不是 x.y.z 时返回 None（调用方 fail-closed 报错）；日期合法性由调用方校验。
     标题与代码块边界经 docs_markdown 解析视图判定：围栏内的伪标题/伪表格不得冒充日志结构。
     """
     if not RULESET_CHANGELOG_PATH.exists():
@@ -2744,27 +2852,46 @@ def _extract_changelog_top_date() -> date | None:
         if not cols or cols[0] in {"", "ruleset_version"}:
             continue  # 表头或空行
         if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]) and len(cols) >= 2:
-            try:
-                return date.fromisoformat(cols[1])
-            except ValueError:
-                return None
+            return _RulesetChangelogTopEntry(
+                version=cols[0],
+                date_text=cols[1],
+                affected_text=cols[3] if len(cols) >= 4 else None,
+            )
     return None
 
 
+def _extract_changelog_top_date() -> date | None:
+    """提取顶行变更日期（DS-05）；记录缺失或日期非法时返回 None（调用方 fail-closed）。"""
+    entry = _extract_changelog_top_entry()
+    if entry is None:
+        return None
+    try:
+        return date.fromisoformat(entry.date_text)
+    except ValueError:
+        return None
+
+
+def _parse_affected_objects(cell: str | None) -> tuple[str, ...] | None:
+    """解析顶行「受影响对象」列；列缺失返回 None（fail-closed），显式空值返回空元组。"""
+    if cell is None:
+        return None
+    tokens = [token.strip() for token in re.split(r"[,，、]", cell) if token.strip()]
+    if all(token in _AFFECTED_NONE_MARKERS for token in tokens):
+        return ()
+    return tuple(tokens)
+
+
 def check_ruleset_metadata_consistency() -> list[str]:
-    """检查项 12：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 规则集元数据一致性（DOC-01/DOC-13/DS-05）。
+    """检查项 12：入口文档规则集元数据一致性（DOC-01/DOC-13/DS-05）。
 
-    「对应版本」声明已随版本字面量收敛移除（版本唯一正本为 pyproject.toml，
-    verify-versions 对应检查一并删除），本检查守护 `ruleset_version` 与 `last_reviewed`
-    两个字段——它们**从未被任何检查读取**（DOC-01 门禁空白的主因），修复后禁止再漂移。
-    随后 DOC-13 将孤儿文件 AGENTS.md 一并纳入
-    ruleset_version 守护（AGENTS 作为跨工具入口，规则集版本必须与宪法同步）。
+    ruleset_version 的唯一作者是 ruleset-changelog.md「变更记录」表顶行（其派生视图
+    由 check_ruleset_changelog_version 校验）；本检查守护 last_reviewed：
 
-    断言：
-    1. 三份文件均有 ruleset_version，且值相等。
-    2. 三份文件均有 last_reviewed，且值为合法日期（AGENTS 为跨工具入口，审核时间与宪法同步）。
-    3. CONTRIBUTING.md / AGENTS.md 的 last_reviewed 均不早于 CLAUDE.md（更新自由度不低于宪法）。
-    4. 三份文件的 last_reviewed 均不早于 ruleset-changelog.md 顶行变更日期（治理变更后须重新审核同步，DS-05）。
+    1. 三份文件均有 last_reviewed，且值为合法日期（AGENTS 为跨工具入口）。
+    2. 复核门只作用于顶行「受影响对象」列出的文档：其 last_reviewed 不得早于顶行
+       变更日期（受影响对象确须复核）。未列出的文档保留真实复核日期，不因日志递增
+       或其他入口文档更新而被迫同步（日期表达真实复核事件，不设跨文件无条件下限）。
+    3. 顶行缺「受影响对象」列、列入未受守护的对象或日期非法时一律 fail-closed。
     """
     errors: list[str] = []
     claude_ver, claude_reviewed = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
@@ -2785,12 +2912,12 @@ def check_ruleset_metadata_consistency() -> list[str]:
     if claude_ver is not None and contributing_ver is not None and claude_ver != contributing_ver:
         errors.append(
             f"ruleset_version 漂移: CLAUDE.md={claude_ver} != CONTRIBUTING.md={contributing_ver} "
-            "(两文件须同步，规则集版本规则变更时递增)"
+            "(入口为规则集日志的派生视图，须与 ruleset-changelog 顶行版本一致)"
         )
     if claude_ver is not None and agents_ver is not None and claude_ver != agents_ver:
         errors.append(
             f"ruleset_version 漂移: CLAUDE.md={claude_ver} != AGENTS.md={agents_ver} "
-            "(AGENTS 为跨工具入口，规则集版本须与宪法同步)"
+            "(AGENTS 为跨工具入口，须与 ruleset-changelog 顶行版本一致)"
         )
 
     if claude_reviewed is None:
@@ -2800,51 +2927,56 @@ def check_ruleset_metadata_consistency() -> list[str]:
     if agents_ver is not None and agents_reviewed is None:
         errors.append("AGENTS.md 缺少 last_reviewed 元数据字段")
 
-    # DS-05：last_reviewed 不得早于 ruleset-changelog 顶行变更日期（治理变更后须重新审核同步）。
-    changelog_date = _extract_changelog_top_date()
-    if changelog_date is None:
-        errors.append("ruleset-changelog.md「变更记录」表未找到合法顶行变更日期 (YYYY-MM-DD)")
-
-    if claude_reviewed is not None and contributing_reviewed is not None and agents_reviewed is not None:
+    parsed_dates: dict[str, date] = {}
+    for _name, _raw in (
+        ("CLAUDE.md", claude_reviewed),
+        ("CONTRIBUTING.md", contributing_reviewed),
+        ("AGENTS.md", agents_reviewed),
+    ):
+        if _raw is None:
+            continue
         try:
-            claude_date = date.fromisoformat(claude_reviewed)
-            contributing_date = date.fromisoformat(contributing_reviewed)
-            agents_date = date.fromisoformat(agents_reviewed)
+            parsed_dates[_name] = date.fromisoformat(_raw)
         except ValueError:
-            errors.append("CLAUDE.md/CONTRIBUTING.md/AGENTS.md 的 last_reviewed 不是合法日期 (YYYY-MM-DD)")
-        else:
-            if contributing_date < claude_date:
-                errors.append(
-                    f"CONTRIBUTING.md last_reviewed({contributing_reviewed}) 早于 "
-                    f"CLAUDE.md last_reviewed({claude_reviewed})"
-                )
-            if agents_date < claude_date:
-                errors.append(
-                    f"AGENTS.md last_reviewed({agents_reviewed}) 早于 CLAUDE.md last_reviewed({claude_reviewed})"
-                )
-            if changelog_date is not None:
-                for _name, _date in (
-                    ("CLAUDE.md", claude_date),
-                    ("CONTRIBUTING.md", contributing_date),
-                    ("AGENTS.md", agents_date),
-                ):
-                    if _date < changelog_date:
-                        errors.append(
-                            f"{_name} last_reviewed({_date.isoformat()}) 早于 "
-                            f"ruleset-changelog 顶行变更日期({changelog_date.isoformat()}) "
-                            "(治理变更后须重新审核并同步 last_reviewed)"
-                        )
+            errors.append(f"{_name} 的 last_reviewed({_raw}) 不是合法日期 (YYYY-MM-DD)")
+
+    entry = _extract_changelog_top_entry()
+    if entry is None:
+        errors.append("ruleset-changelog.md「变更记录」表未找到合法顶行变更日期 (YYYY-MM-DD)")
+        return errors
+    try:
+        changelog_date = date.fromisoformat(entry.date_text)
+    except ValueError:
+        errors.append(f"ruleset-changelog.md 顶行变更日期({entry.date_text}) 不是合法日期 (YYYY-MM-DD)")
+        return errors
+
+    affected = _parse_affected_objects(entry.affected_text)
+    if affected is None:
+        errors.append("ruleset-changelog.md 顶行缺少「受影响对象」列（须声明本轮需复核的入口文档，无则为 —）")
+        return errors
+    unknown = [name for name in affected if name not in _RULESET_REVIEW_GATED_DOCS]
+    if unknown:
+        errors.append(
+            f"ruleset-changelog.md 顶行「受影响对象」含未受复核门守护的对象: {', '.join(unknown)} "
+            f"(仅支持 {' / '.join(_RULESET_REVIEW_GATED_DOCS)})"
+        )
+    for name in affected:
+        doc_date = parsed_dates.get(name)
+        if doc_date is not None and doc_date < changelog_date:
+            errors.append(
+                f"{name} last_reviewed({doc_date.isoformat()}) 早于 ruleset-changelog 顶行变更日期"
+                f"({changelog_date.isoformat()})（该文档在顶行「受影响对象」内，须重新审核并更新 last_reviewed）"
+            )
     return errors
 
 
 def check_ruleset_changelog_version() -> list[str]:
-    """检查项：规则集变更日志顶行版本与宪法正本一致（DS-10）。
+    """检查项：ruleset-changelog 顶行是 ruleset_version 的唯一作者（DS-10）。
 
-    ruleset-changelog.md「变更记录」表在每次 ruleset_version 递增时于顶部追加一行，
-    首条数据行应为当前正本最新版本。断言其与 CLAUDE.md 的 ruleset_version 一致
-    （CLAUDE/CONTRIBUTING/AGENTS 三文件 ruleset_version 同步已由
-    check_ruleset_metadata_consistency 守护，故取 CLAUDE.md 为正本即可）。
-    变更日志缺失、首行无合法版本号、或版本漂移时一律 fail-closed 报错。
+    「变更记录」表在 ruleset_version 递增时于顶部追加一行，该顶行即版本作者记录；
+    CLAUDE.md / CONTRIBUTING.md / AGENTS.md 的 ruleset_version 均为派生视图，必须等于
+    顶行版本（不得以宪法版本反向认证日志）。日志缺失、顶行无合法版本号或入口漂移时
+    一律 fail-closed 报错。
     """
     errors: list[str] = []
     if not RULESET_CHANGELOG_PATH.exists():
@@ -2855,40 +2987,26 @@ def check_ruleset_changelog_version() -> list[str]:
         errors.append(f"规则集变更日志不存在: {display}")
         return errors
 
-    changelog_ver: str | None = None
-    changelog_lines = RULESET_CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
-    # 锚定「变更记录」标题后的片段：避免文件其它位置出现 x.y.z 首列行干扰取行（对抗检视 P2）
-    start = 0
-    for _i, _line in enumerate(changelog_lines):
-        if _line.strip() == "## 变更记录":
-            start = _i + 1
-            break
-    for line in changelog_lines[start:]:
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        if re.fullmatch(r"\|[\s\-:]+\|", stripped):
-            continue  # 表格分隔行（|---|）
-        cols = [c.strip() for c in stripped.strip("|").split("|")]
-        if not cols or cols[0] in {"", "ruleset_version"}:
-            continue  # 表头（首列固定为 ruleset_version 标题）或空行
-        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]):
-            changelog_ver = cols[0]
-            break  # 首条数据行即最新版本
-
-    if changelog_ver is None:
+    entry = _extract_changelog_top_entry()
+    if entry is None:
         errors.append("ruleset-changelog.md「变更记录」表未找到首行合法 x.y.z 版本号")
         return errors
 
-    claude_ver, _ = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
-    if claude_ver is None:
-        errors.append("CLAUDE.md 缺少 ruleset_version 元数据字段")
-        return errors
-    if claude_ver != changelog_ver:
-        errors.append(
-            f"ruleset-changelog 顶行版本({changelog_ver}) != CLAUDE.md ruleset_version({claude_ver}) "
-            "(ruleset_version 递增须在 ruleset-changelog.md 变更记录表顶部追加一行)"
-        )
+    for _name, _path in (
+        ("CLAUDE.md", CLAUDE_PATH),
+        ("CONTRIBUTING.md", CONTRIBUTING_PATH),
+        ("AGENTS.md", AGENTS_PATH),
+    ):
+        if _name == "AGENTS.md" and not AGENTS_PATH.exists():
+            continue
+        ver, _ = _extract_metadata_versions(_path.read_text(encoding="utf-8"))
+        if ver is None:
+            errors.append(f"{_name} 缺少 ruleset_version 元数据字段")
+        elif ver != entry.version:
+            errors.append(
+                f"{_name} ruleset_version({ver}) != ruleset-changelog 顶行版本({entry.version}) "
+                "(日志记录为版本作者，入口 ruleset_version 须派生自顶行记录)"
+            )
     return errors
 
 
@@ -2940,8 +3058,37 @@ _IMPACT_AUTHOR_PREFIXES: tuple[str, ...] = (
     "CONTRIBUTING.md",
     "README.md",
 )
+# 消费者发现范围（L02：调用方/摘要/随包说明均查，不能仅凭目录名把活消费者排除）：
+# - 调用方/门禁消费：tests/、scripts/、.github/
+# - 正文/随包说明：docs/、man/、requirements/、resources/ 的 markdown（相对链接经共享解析视图）
+# - 源码静态消费：生产源码中的路径引用
+# - 随包清单：PyInstaller spec 与安装器脚本
 _IMPACT_CONSUMER_PREFIXES: tuple[str, ...] = ("tests/", "scripts/", ".github/")
-_IMPACT_SCANNED_SUFFIXES: frozenset[str] = frozenset({".py", ".yml", ".yaml", ".md", ".json", ".toml", ".txt"})
+_IMPACT_DOC_PREFIXES: tuple[str, ...] = ("docs/", "man/", "requirements/", "resources/")
+_IMPACT_SOURCE_PREFIXES: tuple[str, ...] = (
+    "app/",
+    "core/",
+    "data/",
+    "services/",
+    "strategies/",
+    "ui/",
+    "utils/",
+    "alembic/",
+    "hooks/",
+    "sidecars/",
+    "main.py",
+    "config.py",
+)
+_IMPACT_PACKAGED_PREFIXES: tuple[str, ...] = ("installer.iss", "AStockScreener.spec")
+_IMPACT_SCAN_PREFIXES: tuple[str, ...] = (
+    *_IMPACT_CONSUMER_PREFIXES,
+    *_IMPACT_DOC_PREFIXES,
+    *_IMPACT_SOURCE_PREFIXES,
+    *_IMPACT_PACKAGED_PREFIXES,
+)
+_IMPACT_SCANNED_SUFFIXES: frozenset[str] = frozenset(
+    {".py", ".yml", ".yaml", ".md", ".json", ".toml", ".txt", ".sh", ".bat", ".iss", ".spec"}
+)
 _IMPACT_SKIP_DIRS: frozenset[str] = frozenset(
     {".git", ".worktrees", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".venv", "venv", ".uploads"}
 )
@@ -3016,29 +3163,72 @@ def _load_impact_routes(root: Path) -> dict[str, list[tuple[str, str, str | None
     return routes
 
 
-def _iter_impact_consumer_files(root: Path) -> typing.Iterator[Path]:
-    """遍历真实消费者候选文件（tests/scripts/.github，跳过缓存与隔离目录）。"""
-    for prefix in _IMPACT_CONSUMER_PREFIXES:
+def _iter_impact_scan_files(root: Path) -> typing.Iterator[Path]:
+    """遍历影响分析候选消费文件（调用方/正文/源码/随包，跳过缓存与隔离目录）。
+
+    根级 markdown（CLAUDE.md / CONTRIBUTING.md 等）一并纳入正文消费范围；
+    去重后每份文件只读取一次，避免同一路径被多个前缀重复扫描。
+    """
+    seen: set[Path] = set()
+    for prefix in _IMPACT_SCAN_PREFIXES:
         base = root / prefix.rstrip("/")
         if base.is_file():
-            yield base
+            candidates: typing.Iterable[Path] = (base,)
+        elif base.is_dir():
+            candidates = base.rglob("*")
+        else:
             continue
-        if not base.is_dir():
-            continue
-        for candidate in base.rglob("*"):
-            if not candidate.is_file() or candidate.suffix.lower() not in _IMPACT_SCANNED_SUFFIXES:
+        for candidate in candidates:
+            if candidate in seen or not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in _IMPACT_SCANNED_SUFFIXES:
                 continue
             rel_parts = candidate.relative_to(root).parts
             if any(part in _IMPACT_SKIP_DIRS for part in rel_parts):
                 continue
+            seen.add(candidate)
             yield candidate
+    for candidate in sorted(root.glob("*.md")):
+        if candidate.is_file() and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
+def _read_impact_text(path: Path) -> str | None:
+    """读取候选消费文件文本；读取失败返回 None，由调用方显式列入 unresolved。"""
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+
+def _resolve_impact_link(source_rel: str, target: str) -> str | None:
+    """把 markdown 链接目标解析为仓库相对路径（相对链接以来源文件所在目录为基准）。
+
+    外部链接、纯锚点、绝对路径与越出仓库根的目标返回 None（不参与影响图）；
+    锚点/查询串剥离后再解析，URL 编码路径按渲染语义解码。
+    """
+    url = target.strip()
+    if not url or url.startswith(("http://", "https://", "mailto:", "#", "/")):
+        return None
+    path_part = urllib.parse.unquote(url.split("#", 1)[0].split("?", 1)[0].strip())
+    if not path_part:
+        return None
+    joined = posixpath.normpath(posixpath.join(posixpath.dirname(source_rel), path_part.replace("\\", "/")))
+    if joined == ".." or joined.startswith("../"):
+        return None
+    return joined
 
 
 def build_doc_impact(changes: Iterable[tuple[str, str | None]], root: Path = ROOT) -> DocImpact:
     """从 (new_path, old_path | None) 构建真实影响清单（D36 生产入口）。
 
     旧/新路径都参与作者源、路由与消费者扫描；rename 不得丢失旧路径身份。
-    无路由映射的作者路径与非作者/非消费者路径显式进入 unresolved，不静默丢弃。
+    消费者范围覆盖调用方（tests/scripts/.github）、正文相对链接与路径文本
+    （docs/man/requirements/resources 及根级 markdown）、源码静态引用与随包清单；
+    markdown 链接统一经既有解析视图解析，不另造正则解析器。读取失败的候选文件
+    显式进入 unresolved，不以其它检查全绿代替影响图完备性；自然语言语义关联
+    不要求自动穷尽。无路由映射的作者路径与非作者/非消费者路径同样进入 unresolved。
     """
     routes_by_path = _load_impact_routes(root)
     author_paths: set[str] = set()
@@ -3067,15 +3257,29 @@ def build_doc_impact(changes: Iterable[tuple[str, str | None]], root: Path = ROO
             test_groups.update(group for prefix, group in _IMPACT_GROUP_RULES if path.startswith(prefix))
 
     consumer_paths: set[str] = set()
+    # old/new 路径并集：rename 后旧路径的正文链接与源码引用仍须被看见
     search_refs = tuple(sorted(p for p in (author_paths | old_paths | new_paths) if _is_impact_author_path(p)))
+    search_ref_set = set(search_refs)
     if search_refs:
-        for candidate in _iter_impact_consumer_files(root):
-            try:
-                text = candidate.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+        for candidate in _iter_impact_scan_files(root):
+            source_rel = candidate.relative_to(root).as_posix()
+            text = _read_impact_text(candidate)
+            if text is None:
+                unresolved.add(source_rel)
                 continue
-            if any(ref in text for ref in search_refs):
-                consumer_paths.add(candidate.relative_to(root).as_posix())
+            matched = any(ref in text and ref != source_rel for ref in search_refs)
+            if not matched and candidate.suffix.lower() == ".md":
+                for link in parse_doc_view(text).links:
+                    resolved = _resolve_impact_link(source_rel, link.target)
+                    if resolved is not None and resolved in search_ref_set and resolved != source_rel:
+                        matched = True
+                        break
+            if matched:
+                consumer_paths.add(source_rel)
+
+    # 测试组从实际消费者汇总（发现应用测试时不能仍只推荐 docs-suite）
+    for path in consumer_paths:
+        test_groups.update(group for prefix, group in _IMPACT_GROUP_RULES if path.startswith(prefix))
 
     return DocImpact(
         author_paths=tuple(sorted(author_paths)),
@@ -3464,17 +3668,25 @@ def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
 
 
 def _docs_index_candidates(docs_root: Path) -> list[Path]:
-    """文档索引全覆盖候选集：仅 git 跟踪文件（检视开放问题 4，与 _collect_checked_docs 同源）。
+    """文档索引全覆盖候选集：git 交付候选（检视开放问题 4 + Q15，与 _collect_checked_docs 同源）。
 
     Path.rglob 不识别 .gitignore——未跟踪/被忽略的本地产物目录（如 docs/plans/ 会话计划、
     docs/audit 归档）会被误报「未被索引引用」，造成真实仓库门禁假失败。候选集单一来源
-    改为 git ls-files（H1 同源修法）；git 不可用时降级文件系统发现 + 静态排除清单
+    改为 git 交付候选（``docs_generated.git_delivery_files``：索引内文件含已 staged 新增，
+    加显式申报的暂存前正式页，ignored/未申报 untracked 排除），使尚未 ``git add`` 的新增
+    正式页在暂存前即可被发现；git 不可用时降级文件系统发现 + 静态排除清单
     （_GITIGNORED_ARTIFACT_DIRS，与历史行为兼容）。
     """
     covered_suffixes = (".md", ".yml", ".yaml", ".json")
-    tracked = _git_tracked_files_under(docs_root)
+    try:
+        rel_dir = docs_root.relative_to(ROOT).as_posix()
+    except ValueError:
+        # 目录不在 ROOT 内（测试注入临时仓库）→ 降级
+        tracked: list[str] | None = None
+    else:
+        tracked = docs_generated.git_delivery_files(ROOT, rel_dir)
     if tracked:
-        # git 跟踪集非空：以 git 索引为唯一候选来源（gitignored/未跟踪产物天然排除）
+        # git 交付候选非空：以 git 索引 + 显式交付候选为唯一候选来源（ignored/未申报产物天然排除）
         return sorted(
             ROOT / rel for rel in tracked if (ROOT / rel).suffix in covered_suffixes and (ROOT / rel).is_file()
         )
@@ -4881,8 +5093,9 @@ def _report_update_result(result: docs_generated.UpdateResult) -> None:
             print(f"  - {rel}: {reason}")
     if result.failed:
         print("[FAIL] 写入失败目标（不承诺跨文件事务，其余目标已各自提交）:")
-        for rel in result.failed:
-            print(f"  - {rel}")
+        for index, rel in enumerate(result.failed):
+            reason = result.failure_reasons[index] if index < len(result.failure_reasons) else "未提供原因"
+            print(f"  - {rel}: {reason}")
     if result.post_check_errors:
         print("[FAIL] 更新后 all 检查失败:")
         for err in result.post_check_errors:

@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.3（单例）、§3.2（ThreadPoolManager 强制）；实现细则见本节。
+> 宪法依据：CLAUDE.md §3.2（ThreadPoolManager 强制）、[架构正文 §4.3](../architecture/overview.md#43-单例模式)（单例）；实现细则见本节。
 
 ```text
 QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
