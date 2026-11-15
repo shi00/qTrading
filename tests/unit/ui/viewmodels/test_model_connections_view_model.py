@@ -101,8 +101,16 @@ def _conn(
     }
 
 
-def _route(scenario_id: str = "stock_analysis", enabled: bool = True, candidates: tuple[str, ...] = ("c1",)) -> dict:
-    return {"scenario_id": scenario_id, "enabled": enabled, "candidates": list(candidates)}
+def _route(
+    scenario_id: str = "stock_analysis",
+    enabled: bool = True,
+    candidates: tuple[str, ...] = ("c1",),
+    task_routes: dict | None = None,
+) -> dict:
+    route = {"scenario_id": scenario_id, "enabled": enabled, "candidates": list(candidates)}
+    if task_routes is not None:
+        route["task_routes"] = task_routes
+    return route
 
 
 def _make_service(snapshot: ModelManagementSnapshot | None = None) -> MagicMock:
@@ -249,6 +257,129 @@ class TestLoad:
         vm.set_search("")
         vm.set_status_filter("disabled")
         assert tuple(r.connection_id for r in vm.visible_connections()) == ("c2",)
+
+
+# --- Scenario ref count (D16-007) ---
+
+
+class TestScenarioRefCount:
+    """引用数口径为「被 N 个场景引用」：场景内主/子任务并集，不重复累计。
+
+    同一连接在同一场景承担主任务与 sentiment 子任务只计一个场景；跨场景逐场景
+    累计；原始候选顺序与真实子任务引用不得被重排或删除。
+    """
+
+    async def test_same_scene_main_and_sentiment_counts_once(self):
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn("c1"),),
+                scenario_routes=(
+                    _route(
+                        scenario_id="news_annotation",
+                        candidates=("c1",),
+                        task_routes={"sentiment": {"mode": "dedicated", "candidates": ["c1"]}},
+                    ),
+                ),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        assert vm.state.connections[0].scenario_ref_count == 1
+        # 原始候选与真实 sentiment 子任务引用原样保留（不重排、不删除）
+        assert vm._raw_routes[0]["candidates"] == ["c1"]  # noqa: SLF001
+        assert vm._raw_routes[0]["task_routes"]["sentiment"]["candidates"] == ["c1"]  # noqa: SLF001
+
+    async def test_two_scenes_count_two(self):
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn("c1"),),
+                scenario_routes=(
+                    _route(
+                        scenario_id="news_annotation",
+                        candidates=("c1",),
+                        task_routes={"sentiment": {"mode": "dedicated", "candidates": ["c1"]}},
+                    ),
+                    _route(scenario_id="stock_analysis", candidates=("c1",)),
+                ),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        assert vm.state.connections[0].scenario_ref_count == 2
+
+    async def test_three_scenes_count_three(self):
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn("c1"),),
+                scenario_routes=(
+                    _route(
+                        scenario_id="news_annotation",
+                        candidates=("c1",),
+                        task_routes={"sentiment": {"mode": "dedicated", "candidates": ["c1"]}},
+                    ),
+                    _route(scenario_id="stock_analysis", candidates=("c1",)),
+                    _route(scenario_id="news_risk", candidates=("c1",)),
+                ),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        assert vm.state.connections[0].scenario_ref_count == 3
+
+    async def test_multi_candidate_scene_counts_each_connection_once(self):
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn("c1"), _conn("c2")),
+                scenario_routes=(
+                    _route(
+                        scenario_id="news_annotation",
+                        candidates=("c1", "c2"),
+                        task_routes={"sentiment": {"mode": "dedicated", "candidates": ["c1"]}},
+                    ),
+                ),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        assert [r.scenario_ref_count for r in vm.state.connections] == [1, 1]
+
+    async def test_unreferenced_connection_counts_zero(self):
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn("c1"), _conn("c9", name="Unused")),
+                scenario_routes=(_route(scenario_id="stock_analysis", candidates=("c1",)),),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        rows = {r.connection_id: r.scenario_ref_count for r in vm.state.connections}
+        assert rows == {"c1": 1, "c9": 0}
+
+    async def test_bundled_and_dedicated_modes_share_same_count(self):
+        counts: list[int] = []
+        for mode in ("bundled", "dedicated"):
+            svc = _make_service(
+                _snapshot(
+                    connections=(_conn("c1"),),
+                    scenario_routes=(
+                        _route(
+                            scenario_id="news_annotation",
+                            candidates=("c1",),
+                            task_routes={"sentiment": {"mode": mode, "candidates": ["c1"]}},
+                        ),
+                    ),
+                )
+            )
+            vm = _make_vm(svc)
+            await vm.load()
+            counts.append(vm.state.connections[0].scenario_ref_count)
+
+        assert counts == [1, 1]
 
 
 # --- Editor / steps ---
