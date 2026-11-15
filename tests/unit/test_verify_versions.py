@@ -720,3 +720,147 @@ def test_check_security_supported_version_fail_closed_on_missing_doc(tmp_path):
 
     assert len(errors) == 1
     assert "fail-closed" in errors[0]
+
+
+# ============================================================================
+# D22-001: 发行 tag 数值门（verify_versions.py --release-tag）
+# ============================================================================
+
+
+def _write_version_files(tmp_path, pyproject_v: str, manifest_v: str):
+    """只写产品正本两文件：--release-tag 独立模式不应读取其他路径。"""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(f'[project]\nversion = "{pyproject_v}"\n', encoding="utf-8")
+    manifest = tmp_path / ".release-please-manifest.json"
+    manifest.write_text(json.dumps({".": manifest_v}), encoding="utf-8")
+    return pyproject, manifest
+
+
+@pytest.mark.parametrize("tag", ["v0.11.7", "v1.0.0", "v0.0.0"])
+def test_check_release_tag_version_accepts_matching_tags(tmp_path, tag):
+    """轻量 / annotated tag 的差异只在远端 ref 对象类型，数值门只看 tag 字符串本身。"""
+    pyproject, manifest = _write_version_files(tmp_path, tag[1:], tag[1:])
+    with (
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+    ):
+        assert verify_versions.check_release_tag_version(tag) == []
+
+
+def test_check_release_tag_version_rejects_numeric_mismatch(tmp_path):
+    """0.11.7 的提交上推 v0.11.8：数值不符必须同时报 pyproject 与 manifest。"""
+    pyproject, manifest = _write_version_files(tmp_path, "0.11.7", "0.11.7")
+    with (
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+    ):
+        errors = verify_versions.check_release_tag_version("v0.11.8")
+
+    joined = "\n".join(errors)
+    assert "0.11.8" in joined
+    assert "pyproject.toml" in joined
+    assert ".release-please-manifest.json" in joined
+
+
+def test_check_release_tag_version_rejects_manifest_mismatch(tmp_path):
+    """tag 与 pyproject 相符但 manifest 不同值：照样失败（正本两处不得漂移）。"""
+    pyproject, manifest = _write_version_files(tmp_path, "0.11.7", "0.11.8")
+    with (
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+    ):
+        errors = verify_versions.check_release_tag_version("v0.11.7")
+
+    assert len(errors) == 1
+    assert "manifest" in errors[0]
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["0.11.7", "v0.11", "v0.11.7.1", "v0.11.7-rc.1", "v0.11.7+build.5", "v01.11.7", "release-v0.11.7", ""],
+)
+def test_check_release_tag_version_rejects_unsupported_forms(tmp_path, tag):
+    """严格受支持 semver：缺 v 前缀 / 前导零 / 预发布 / 构建元数据一律拒绝。"""
+    pyproject, manifest = _write_version_files(tmp_path, "0.11.7", "0.11.7")
+    with (
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+    ):
+        errors = verify_versions.check_release_tag_version(tag)
+
+    assert len(errors) == 1
+    assert "not a supported form" in errors[0]
+
+
+def test_check_release_tag_version_reports_unreadable_product_version(tmp_path):
+    """产品正本缺失时报错而非抛栈，保持门禁 fail-closed。"""
+    manifest = tmp_path / ".release-please-manifest.json"
+    manifest.write_text(json.dumps({".": "0.11.7"}), encoding="utf-8")
+    with (
+        patch("verify_versions.PYPROJECT_PATH", tmp_path / "missing.toml"),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+    ):
+        errors = verify_versions.check_release_tag_version("v0.11.7")
+
+    assert len(errors) == 1
+    assert "failed to read product version" in errors[0]
+
+
+def test_main_release_tag_mode_is_standard_library_only(tmp_path):
+    """--release-tag 是独立模式：不读取其他路径（发行 job 只有标准库，无 docs 依赖）。"""
+    pyproject, manifest = _write_version_files(tmp_path, "0.11.7", "0.11.7")
+    missing = tmp_path / "missing"
+    unrelated_paths = (
+        "PACKAGE_JSON_PATH",
+        "CI_WORKFLOW_PATH",
+        "README_PATH",
+        "CONTRIBUTING_PATH",
+        "SECURITY_PATH",
+        "CLAUDE_PATH",
+        "REQUIREMENTS_DEV_PATH",
+        "SIDECAR_CARGO_PATH",
+        "SIDECAR_PROTOCOL_PATH",
+    )
+    with ExitStack() as stack:
+        stack.enter_context(patch("verify_versions.PYPROJECT_PATH", pyproject))
+        stack.enter_context(patch("verify_versions.RELEASE_MANIFEST_PATH", manifest))
+        for name in unrelated_paths:
+            stack.enter_context(patch(f"verify_versions.{name}", missing))
+        stack.enter_context(patch("sys.argv", ["verify_versions.py", "--release-tag", "v0.11.7"]))
+        verify_versions.main()  # 不抛 SystemExit
+
+
+def test_main_release_tag_mismatch_exits_nonzero(tmp_path):
+    """数值不符必须在编译 / Release 创建前以非零退出。"""
+    pyproject, manifest = _write_version_files(tmp_path, "0.11.7", "0.11.7")
+    with (
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+        patch("sys.argv", ["verify_versions.py", "--release-tag", "v0.11.8"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        verify_versions.main()
+
+    assert exc_info.value.code == 1
+
+
+def test_main_release_tag_requires_value():
+    """缺参数值属于用法错误（退出码 2），不得静默跳过门禁。"""
+    with (
+        patch("sys.argv", ["verify_versions.py", "--release-tag"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        verify_versions.main()
+
+    assert exc_info.value.code == 2
+
+
+def test_main_release_tag_rejects_fix_combination():
+    """--fix 会改写 manifest，与只读数值门语义冲突，须显式拒绝。"""
+    with (
+        patch("sys.argv", ["verify_versions.py", "--release-tag", "v0.11.7", "--fix"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        verify_versions.main()
+
+    assert exc_info.value.code == 2
