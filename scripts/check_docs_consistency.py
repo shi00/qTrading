@@ -3432,7 +3432,10 @@ def check_core_modules_completeness() -> list[str]:
 # （H6-c 教训）：FR-* 形态若被登记进对照表首列会被静默跳过而非报错（有意为之，需求编号不属
 # 治理命名空间）。已知宽松边角：任意以 FR- 结尾的更长前缀（XFR-UX-xxx）与两节误写
 # （FR-UX-0x，实为治理 ID 缺一节）同样不采集。
-_GOVERNANCE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?<!FR-)([A-Z][A-Z0-9]*-\d+)(?![A-Za-z0-9])")
+# 许可证标识（BSD-2-Clause / LGPL-3.0-only）不是治理 ID：禁止后接「-非数字」（三段式许可证）
+# 或「.数字」（带点版本号），否则会被截断成未登记 ID（E-05 文档门禁实测）。句子末尾的
+# 「P2-07.」仍正常采集（点后非数字）。
+_GOVERNANCE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?<!FR-)([A-Z][A-Z0-9]*-\d+)(?![A-Za-z0-9]|-\D|\.\d)")
 # review 系列形态（review01-A2 / review03-C11 / review05-E18）：小写 review 前缀 + 轮次号 + 短横 +
 # 字母数字后缀。通用形态要求大写前缀，无法匹配该形态——H6-c 复核发现其在「对照表登记」与「文档引用」
 # 两侧同时漏匹配（净零报错），review 系列 ID 实质失去门禁覆盖（旧白名单 `review\d+-[A-Za-z0-9]+`

@@ -66,6 +66,8 @@
 | P3-Polars-Streaming-Order-Semantics | Polars 2.x 流式默认与严格化把错误从「显式异常」变为「结果不同」；行序仅在显式 `maintain_order` 处保证，当前靠各 lazy 管线末步显式 sort 兜底 | P3 | ① 新增 lazy 管线未在末步显式 sort，或新增依赖行序的断言/导出时；② 或 Polars 大版本升级再次调整流式/行序语义时；③ 或出现顺序相关的 Golden / 单测偶发不一致时 |
 | P3-Sidecar-macOS26-SDK-Constraint | theseus 的 PG 16.15.0 macOS 归档构建于 macOS 26.0 SDK、引用 `_strchrnul`，仅 macOS 26+ 可运行；sidecar release workflow 的 macOS job 依赖 `macos-26` runner | P3 | ① sidecar release workflow 触发且 macOS 构建/运行失败时；② 或需支持 macOS 26 以下版本时；③ 或 GitHub Actions `macos-26` 镜像变更时 |
 | P3-E2E-MockAssets-Provenance-Blocked | E2E 离线资产（`tests/e2e/mock_assets`，138 文件：116 woff2 / 8 js / 8 wasm / 6 symbols）缺来源 URL、engineRevision、Flet-Web 版本、包与资源摘要、许可证与 NOTICE、下载与变换方式，来源链 blocked | P3 | ① 新增/替换 mock_assets 资产时；② 或 Flet/CanvasKit 升级导致 engineRevision 变化时；③ 或合规审计启动时 |
+| P2-AgentDelivery-Residual-Facts | Agent 交付残留在事实层不可定位/不可区分：终态 manifest 不含暂存路径、回执无残留字段；`publish_claimed` 后可确证失败不持久化 `error_code`；`unknown` 落库失败未转译；XLSX 坏 XML 与非法控制字符未映射为回执；`_read_complete` 无页数上限；无文件 ID 卷整体拒绝交付 | P2 | ① F-02/F-05 交付 UI 接线时须补「残留/未确证」可视字段；② 或出现用户报告「文件可能已保存」但无法核对原因时；③ 或交付接入非 NTFS/ReFS 目标卷时 |
+| P3-AgentDelivery-Resume-NotImplemented | Agent 交付中断后的续接与残留清理未实现：中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 `unknown`、unknown/取消后残留清理 | P3 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
 
 ## 技术债清单
 
@@ -691,8 +693,37 @@ review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积�
 
 出 ADR 并完成试点（权限降级 → 切源 → 来源标注两侧可区分）。前置：P2-REV06-External-SchemaValidation（review06 F9）关闭 + 候选接口联网可用性验证 + D3 结论。upgrade 触发条件：① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足时；③ 或数据源接入架构调整时。
 
-## 已接受的权衡（Accepted Tradeoffs）
+### Agent 运行时交付（E-05）
 
+#### P2-AgentDelivery-Residual-Facts：交付残留在事实层不可定位/不可区分
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-AgentDelivery-Residual-Facts** | 终态 manifest 不含暂存路径、回执无残留字段；`publish_claimed` 后可确证失败不持久化 `error_code`；`unknown` 落库失败未转译；XLSX 坏 XML/非法控制字符未映射为回执；`_read_complete` 无页数上限；无文件 ID 卷整体拒绝交付 | ① F-02/F-05 交付 UI 接线时须补「残留/未确证」可视字段；② 或出现用户报告「文件可能已保存」但无法核对原因时；③ 或交付接入非 NTFS/ReFS 目标卷时 |
+
+**产生背景与现状**
+
+E-05 里程碑独立检视（三轮）确认主链路可靠（阶段顺序、取消先胜、unknown 吸收、目标身份确证已闭环），但以下残留在事实层不可表达：终态（`unknown`/`cancelled_before_publish`）manifest 按 wire 校验不含 `staged_path`，`DeliveryReceipt` 无残留字段，残留只能按 `.{target}.{hint}.*.staged` 约定推导后复核摘要/身份；`publish_claimed` 后 `os.replace` 前的可确证失败只回在回执上，持久层无法区分「未替换」与「不可确证」；`_unknown` 落库失败、XLSX XML 级损坏、openpyxl 非法控制字符未转成回执错误码；`_read_complete` 仅防游标不前进，无页数上限；`st_ino == 0` 的卷（FAT/exFAT/部分 SMB）整体拒绝交付（fail-closed，不误报成功）。
+
+**期望的最终解法**
+
+交付 UI 接线时同步补：① manifest/回执增加「残留（路径+身份）」与「失败可确证性」字段；② `_unknown` 落库失败转译为可核结果；③ XLSX 异常全集映射；④ 页数上限；⑤ 发行说明/UI 明确「目标卷须提供文件 ID（NTFS/ReFS）」。upgrade 触发条件同上。
+
+#### P3-AgentDelivery-Resume-NotImplemented：交付中断续接与残留清理未实现
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentDelivery-Resume-NotImplemented** | 中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 unknown、unknown/取消后残留清理均未实现 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
+
+**产生背景与现状**
+
+E-05 提供 `read_delivery(operation_id)` 查回原 manifest 与修订，但尚未实现「按成果/交付维度定位原 unknown」「沿原 manifest 从 `staged`/`validated` 续接」「发布认领后中断的目标身份查回与补存成功回执」。当前中断后的安全路径是：查回原交付 → 未发布则作为新的 delivery 命令重导（同版重导会重核当前来源状态）。
+
+**期望的最终解法**
+
+按 HANDOFF §10.2 中断边界表实现续接与残留清理；在此之前 UI 必须显式区分「可能已保存（unknown）」与「确认未发布」，禁止盲重导。upgrade 触发条件同上。
+
+## 已接受的权衡（Accepted Tradeoffs）
 > 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「决策：不修 / 不回溯回填」类结论（详见各条目）。本节条目属结论可信度边界、**不占「技术债索引」**；产品含义（哪些指标在什么条件下不可信）见 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」。
 
 #### P3-DAT07-Restatement：回测不可复现（残余）：DATA-05 前存量财报无修订版本，早期重述覆盖使该段历史回测结果随时间漂移（review03 DAT-07①）
