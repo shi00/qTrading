@@ -3280,10 +3280,11 @@ class TestFinancialCooperativeCancellation:
         with (
             _patch_app_state(store),
             patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
-            pytest.raises(asyncio.CancelledError),
+            pytest.raises(asyncio.CancelledError) as exc_info,
         ):
             await strategy.run()
 
+        assert isinstance(exc_info.value, asyncio.CancelledError)
         assert _financial_status_calls(ctx) == []
         assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == {"000001.SZ", "000002.SZ"}
 
