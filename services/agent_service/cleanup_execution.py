@@ -179,13 +179,20 @@ class CleanupExecutionService:
         error_category: str,
         exc: BaseException | None = None,
     ) -> None:
-        await self._dao.save_cleanup_phase(
-            user_scope,
-            cleanup_job_id,
-            phase=CleanupPhase.RETRY_PENDING,
-            error_category=error_category,
-            sqlstate=self._sqlstate(exc),
-        )
+        try:
+            await self._dao.save_cleanup_phase(
+                user_scope,
+                cleanup_job_id,
+                phase=CleanupPhase.RETRY_PENDING,
+                error_category=error_category,
+                sqlstate=self._sqlstate(exc),
+            )
+        except AgentServiceError:
+            # 并发方已把作业推进到 verified：阶段不可回退，保留其完成态，也不让
+            # 本次阶段写入失败掩盖原始失败原因。作业确实缺失/仍可重试时照常抛出。
+            record = await self._store.load(user_scope, cleanup_job_id)
+            if record is None or record.phase is not CleanupPhase.VERIFIED:
+                raise
 
     @staticmethod
     def _sqlstate(exc: BaseException | None) -> str | None:

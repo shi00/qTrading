@@ -6700,7 +6700,9 @@ class AgentDao(BaseDao):
     ) -> bool:
         """创建清理作业；同身份重放返回 False，异输入抛 ``INPUT_CONFLICT``。
 
-        身份 = (user_scope, cleanup_job_id, owner_ref, preview_digest, 固定集合)。
+        身份 = (user_scope, cleanup_job_id, owner_ref, preview_digest, 固定集合)；
+        ``content_manifest`` 同属 §9.11 固定集合，同身份重放时须逐值一致，否则
+        拒绝（避免首个值被静默保留、后续调用方误以为自己的集合已生效）。
         """
 
         self._check_engine()
@@ -6724,8 +6726,29 @@ class AgentDao(BaseDao):
         except IntegrityError as exc:
             existing = await self.load_cleanup_job(record.user_scope, record.cleanup_job_id)
             self._require_same_cleanup_identity(existing, record, exc)
+            if await self._load_cleanup_content_manifest(record.user_scope, record.cleanup_job_id) != content_manifest:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "cleanup job already exists with different content manifest",
+                    f"{record.user_scope}/{record.cleanup_job_id}",
+                ) from exc
             return False
         return True
+
+    async def _load_cleanup_content_manifest(self, user_scope: str, cleanup_job_id: str) -> dict[str, object] | None:
+        """读取固定集合中的 ``content_manifest``（仅用于同身份重放核对）。"""
+
+        engine = self._require_async_engine()
+        async with engine.connect() as conn:
+            value = (
+                await conn.execute(
+                    sa.select(AgentCleanupJob.content_manifest).where(
+                        AgentCleanupJob.user_scope == user_scope,
+                        AgentCleanupJob.cleanup_job_id == cleanup_job_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        return value if isinstance(value, dict) else None
 
     async def load_cleanup_job(self, user_scope: str, cleanup_job_id: str) -> CleanupJobRecord | None:
         """读取作业事实；存储载形不可解释时显式失败（不返回伪造默认）。"""

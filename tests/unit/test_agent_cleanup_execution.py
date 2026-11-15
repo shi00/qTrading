@@ -103,7 +103,11 @@ class _Dao:
         sqlstate: str | None = None,
     ) -> None:
         if error_category in self._fail_categories:
-            raise RuntimeError(f"phase write failed: {error_category}")
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"phase write rejected: {error_category}",
+                f"{user_scope}/{cleanup_job_id}",
+            )
         self.phases.append(
             {
                 "user_scope": user_scope,
@@ -319,11 +323,13 @@ class TestCleanupExecutionFailures:
         dao = _Dao(fail_categories=frozenset({"native_target_missing"}))
         service, _, _, executor = _service(record, dao=dao, executor=_Executor(missing=("wf-a",)))
 
-        with pytest.raises(RuntimeError) as exc:
+        with pytest.raises(AgentServiceError) as exc:
             await service.confirm_and_execute(_command(record), _precondition())
 
         assert "native_target_missing" in str(exc.value)
-        assert [p["error_category"] for p in dao.phases] == ["cleanup_preflight_failed"]
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        # 拒绝类别自身写不进去：不落任何类别（尤其不落允许缺失放行的类别），不删。
+        assert dao.phases == []
         assert [call[0] for call in executor.calls] == ["preflight"]
 
     @pytest.mark.asyncio
@@ -387,6 +393,38 @@ class TestCleanupExecutionFailures:
         assert str(exc.value) == "lost"
         assert dao.phases[0]["phase"] is CleanupPhase.RETRY_PENDING
         assert dao.phases[0]["error_category"] == "cleanup_execution_failed"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_verified_keeps_original_error_when_retry_write_rejected(self) -> None:
+        """并发方已完成清理：阶段写入被拒不得掩盖原始失败，也不得回退 verified。"""
+
+        record = _record()
+        store = _Store(record)
+
+        class _VerifyingExecutor:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+            async def preflight(self, ids) -> NativePreflight:
+                self.calls.append(("preflight", tuple(ids)))
+                return NativePreflight(tuple(ids), dict(_zeros()), ())
+
+            async def delete(self, ids) -> NativeCleanupResult:
+                self.calls.append(("delete", tuple(ids)))
+                store.record = _record(phase=CleanupPhase.VERIFIED, fence_committed=True)
+                raise ConnectionError("lost during delete")
+
+        dao = _Dao(fail_categories=frozenset({"cleanup_execution_failed"}))
+        service = CleanupExecutionService(
+            jobs=CleanupService(store), store=store, dao=dao, executor=_VerifyingExecutor()
+        )
+
+        with pytest.raises(ConnectionError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert str(exc.value) == "lost during delete"
+        assert dao.phases == []
+        assert store.record.phase is CleanupPhase.VERIFIED
 
 
 class TestCleanupExecutionReplays:

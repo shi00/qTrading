@@ -317,6 +317,24 @@ async def test_fence_write_rejected_after_verified(dao: AgentDao) -> None:
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_content_manifest_is_part_of_cleanup_identity(dao: AgentDao) -> None:
+    """固定集合：content_manifest 同身份重放须逐值一致，异值不得被静默忽略。"""
+
+    job_id = _job_id()
+    assert await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-a"]}) is True
+    assert await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-a"]}) is False
+
+    with pytest.raises(AgentServiceError) as exc:
+        await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-b"]})
+    assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+    assert "content manifest" in str(exc.value)
+
+    with pytest.raises(AgentServiceError) as none_exc:
+        await dao.save_cleanup_job(_record(job_id))
+    assert none_exc.value.code is AgentErrorCode.INPUT_CONFLICT
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_fence_rejects_verified_record(dao: AgentDao) -> None:
     """DAO 面硬化：verified 记录不得经 fence 路径写入（否则出现无 verified_at 的坏态）。"""
 
