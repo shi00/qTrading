@@ -390,17 +390,21 @@ class TestEmptyDraftSemantics:
         assert is_empty_draft_payload(None) is True
 
     def test_text_empty_and_no_selection_is_empty(self) -> None:
-        assert is_empty_draft_payload(_payload(text="", model_selection=None, object_context=None)) is True
+        assert (
+            is_empty_draft_payload(_payload(text="", model_selection=None, object_context=None, mode=Mode.EXECUTE))
+            is True
+        )
 
     def test_empty_text_but_unsent_selection_is_not_empty(self) -> None:
-        assert is_empty_draft_payload(_payload(text="")) is False
-        assert is_empty_draft_payload(_payload(text="", purpose=None)) is False
+        # 模型/对象选择仍在：正文空不构成空位。
+        assert is_empty_draft_payload(_payload(text="", mode=Mode.EXECUTE)) is False
 
     def test_user_touched_default_is_not_empty(self) -> None:
         payload = _payload(
             text="",
             model_selection=None,
             object_context=None,
+            mode=Mode.EXECUTE,
             customized_fields=("mode",),
             defaults_baseline_digest=_BASELINE,
         )
@@ -411,11 +415,15 @@ class TestEmptyDraftSemantics:
             is_empty_draft_payload(_payload(text="", model_selection=None, object_context=None, mode=Mode.PLAN))
             is False
         )
+        assert (
+            is_empty_draft_payload(_payload(text="", model_selection=None, object_context=None, mode=Mode.DISCUSS))
+            is False
+        )
 
     def test_any_source_or_skill_or_mcp_selection_is_not_empty(self) -> None:
         from core.agent_types import MCPServiceIdentity, SkillVersionRef, SourceKind, SourceVersionRef
 
-        base = dict(text="", model_selection=None, object_context=None)
+        base = dict(text="", model_selection=None, object_context=None, mode=Mode.EXECUTE)
         assert (
             is_empty_draft_payload(
                 _payload(

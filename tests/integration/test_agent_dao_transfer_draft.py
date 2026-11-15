@@ -453,7 +453,11 @@ class TestTransferDraftSessionDraft:
         await _save_target_draft(
             dao,
             _payload(
-                text="", model_selection=None, object_context=None, send_target=json_doc({"kind": "new_question"})
+                text="",
+                model_selection=None,
+                object_context=None,
+                mode=Mode.EXECUTE,
+                send_target=json_doc({"kind": "new_question"}),
             ),
         )
 
@@ -480,7 +484,7 @@ class TestTransferDraftSessionDraft:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, session_id="s1")
         await _seed_session(dao, session_id="s2")
-        empty = _payload(text="", model_selection=None, object_context=None)
+        empty = _payload(text="", model_selection=None, object_context=None, mode=Mode.EXECUTE)
         await _save_source_draft(dao, empty)
 
         with pytest.raises(AgentServiceError) as excinfo:

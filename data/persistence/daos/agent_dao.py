@@ -6845,8 +6845,17 @@ class AgentDao(BaseDao):
                                 f"stored session command receipt invalid: {decode_exc.code}",
                                 identity,
                             ) from decode_exc
-                    if "agent_session_pkey" in str(exc.orig):
-                        # 竞态：另一命令已建同名会话；不覆盖、不静默复用。
+                    # 不依赖约束名：保存点回滚后复查目标是否已被另一命令创建；
+                    # 已存在 → 与前置检查同语义的 INPUT_INVALID，不静默复用。
+                    occupied = (
+                        await conn.execute(
+                            sa.select(AgentSession.session_id).where(
+                                AgentSession.user_scope == user_scope,
+                                AgentSession.session_id == command.session_id,
+                            )
+                        )
+                    ).first()
+                    if occupied is not None:
                         raise AgentServiceError(
                             AgentErrorCode.INPUT_INVALID, "session already exists in user scope", identity
                         ) from exc
