@@ -116,7 +116,9 @@ frozenlist==1.8.0
 fsspec==2026.9.0
     # via huggingface-hub
 genai-prices==0.2.3
-    # via pydantic-ai-slim
+    # via
+    #   pydantic-ai-harness
+    #   pydantic-ai-slim
 greenlet==3.5.6
     # via sqlalchemy
 griffelib==2.4.1
@@ -143,6 +145,7 @@ httpx==0.28.1
     #   flet
     #   litellm
     #   openai
+    #   pydantic-ai-harness
 httpx2==2.16.0
     # via
     #   genai-prices
@@ -290,8 +293,12 @@ pydantic==2.14.3
     #   pydantic-ai-slim
     #   pydantic-graph
     #   pydantic-settings
-pydantic-ai-slim==2.66.0
+pydantic-ai-harness==0.66.0
     # via astockscreener (pyproject.toml)
+pydantic-ai-slim==2.66.0
+    # via
+    #   astockscreener (pyproject.toml)
+    #   pydantic-ai-harness
 pydantic-core==2.50.4
     # via pydantic
 pydantic-graph==2.66.0
@@ -302,6 +309,8 @@ pygments==2.21.0
     # via rich
 pyluach==2.3.0
     # via exchange-calendars
+pypdf==6.19.0
+    # via astockscreener (pyproject.toml)
 python-dateutil==2.9.0.post0
     # via
     #   botocore
@@ -319,6 +328,7 @@ pyyaml==6.0.3
     # via
     #   dbos
     #   huggingface-hub
+    #   pydantic-ai-harness
 readerwriterlock==1.0.10
     # via astockscreener (pyproject.toml)
 referencing==0.37.0
