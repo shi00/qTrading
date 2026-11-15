@@ -36,7 +36,7 @@ class MCPBudgetGuard:
     """按冻结预算累计各计量族；未冻结即不准入。
 
     计量族：接收字节 / 解码表示 / 结构深度 / 目录数量与字节 / schema 累计 /
-    单结果 / 受管留存。
+    单条结果（按单条比较）/ 受管留存。
     """
 
     def __init__(self, profile: MCPBudgetProfile, *, identity: str) -> None:
@@ -111,7 +111,19 @@ class MCPBudgetGuard:
         self._charge("schema_bytes", amount)
 
     def single_result_bytes(self, amount: int) -> None:
-        self._charge("single_result_bytes", amount)
+        """单条结果上限：按单条比较（不跨调用累计），仅记录观测到的最大值。"""
+
+        limit = self._profile.single_result_bytes
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            raise AgentValidationError("invalid_budget", "$.mcp.budget.single_result_bytes")
+        if limit is None:
+            raise AgentServiceError(
+                AgentErrorCode.CAPABILITY_UNVERIFIED, "mcp budget not frozen: single_result_bytes", self._identity
+            )
+        if amount > limit:
+            raise MCPBudgetExceeded("single_result_bytes", self._identity)
+        if amount > self._used["single_result_bytes"]:
+            self._used["single_result_bytes"] = amount
 
     def retention_bytes(self, amount: int) -> None:
         self._charge("retention_bytes", amount)

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -58,12 +59,13 @@ def _budget(**overrides: int) -> MCPBudgetProfile:
     return MCPBudgetProfile(**values)
 
 
-def _config(budget: MCPBudgetProfile | None = None) -> MCPServerConfig:
+def _config(budget: MCPBudgetProfile | None = None, *, deadline_s: int = 30) -> MCPServerConfig:
     return MCPServerConfig(
         identity=_IDENTITY,
         display_name="本地文件服务",
         transport=MCPTransportConfig(kind=MCPTransportKind.STDIO, command="C:\\tool.exe"),
         budget=budget or _budget(),
+        tool_deadline_s=deadline_s,
         audit=MCPReadOnlyAudit(
             service=_IDENTITY,
             tool_scope=("read_file",),
@@ -92,9 +94,16 @@ class _Probe:
 
 
 class _Session:
-    def __init__(self, *, raises: BaseException | None = None, result: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        raises: BaseException | None = None,
+        result: dict[str, Any] | None = None,
+        delay: float = 0.0,
+    ) -> None:
         self.raises = raises
         self.result = result if result is not None else {"content": [{"type": "text", "text": "ok"}]}
+        self.delay = delay
         self.calls: list[tuple[str, dict[str, Any], int]] = []
         self.closed = False
 
@@ -103,6 +112,8 @@ class _Session:
 
     async def call_tool(self, name: str, arguments: dict[str, Any], *, deadline_s: int) -> dict[str, Any]:
         self.calls.append((name, arguments, deadline_s))
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.raises is not None:
             raise self.raises
         return self.result
@@ -146,8 +157,9 @@ async def _dispatcher(
     session: _Session | None = None,
     verdict: ToolDispatchVerdict = ToolDispatchVerdict.CLAIMED,
     budget: MCPBudgetProfile | None = None,
+    deadline_s: int = 30,
 ) -> tuple[MCPToolDispatcher, _Session, _Grants, SharedMCPConnectionManager]:
-    config = _config(budget)
+    config = _config(budget, deadline_s=deadline_s)
     session = session or _Session()
     manager = SharedMCPConnectionManager(store=_Store(config), factory=_Factory(session), probe=_Probe())
     await manager.connect(_IDENTITY)
@@ -242,6 +254,44 @@ class TestDispatchEffects:
         outcome = await dispatcher.call(_request())
         assert outcome.state is ToolCallState.UNKNOWN
         assert [call[0] for call in session.calls] == ["read_file"]
+
+    @pytest.mark.asyncio
+    async def test_hanging_call_is_cut_by_single_deadline(self) -> None:
+        """端口不守时限时由门强制单一 deadline：挂起调用必须被切断为 unknown。"""
+
+        session = _Session(delay=5.0)
+        dispatcher, session, _grants, _manager = await _dispatcher(session=session, deadline_s=1)
+        started = time.monotonic()
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.UNKNOWN
+        assert outcome.result is None
+        assert time.monotonic() - started < 3
+        assert [call[0] for call in session.calls] == ["read_file"]
+
+    @pytest.mark.asyncio
+    async def test_unencodable_result_is_unknown_not_success(self) -> None:
+        """二进制/自定义对象结果不得以裸异常逃逸，也不得冒完整成功。"""
+
+        session = _Session(result={"content": [{"type": "binary", "data": b"\x00\x01"}]})
+        dispatcher, session, _grants, _manager = await _dispatcher(session=session)
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.UNKNOWN
+        assert outcome.result is None
+        assert [call[0] for call in session.calls] == ["read_file"]
+
+    @pytest.mark.asyncio
+    async def test_two_small_results_both_pass_single_result_budget(self) -> None:
+        """单条结果族按单条比较：连续两条小结果都成功。"""
+
+        dispatcher, session, _grants, _manager = await _dispatcher(budget=_budget(single_result_bytes=60))
+        first = await dispatcher.call(_request())
+        second = await dispatcher.call(_request(operation_id="op-2"))
+        assert first.state is ToolCallState.COMPLETED
+        assert second.state is ToolCallState.COMPLETED
+        assert [(call[0], call[1]) for call in session.calls] == [
+            ("read_file", {"path": "C:\\data\\a.txt"}),
+            ("read_file", {"path": "C:\\data\\a.txt"}),
+        ]
 
     @pytest.mark.asyncio
     async def test_cancellation_propagates_and_releases_in_flight(self) -> None:

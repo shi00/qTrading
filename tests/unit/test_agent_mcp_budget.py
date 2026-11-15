@@ -132,11 +132,15 @@ class TestCatalogAndSchema:
 
 
 class TestSingleResultAndRetention:
-    def test_single_result_exact_and_plus_one(self) -> None:
+    def test_single_result_is_per_result_not_cumulative(self) -> None:
+        """单条结果族按单条比较：两条各 50 字节的小结果都通过，超一才拒绝。"""
+
         guard = _guard(single_result_bytes=50)
         guard.single_result_bytes(50)
+        guard.single_result_bytes(50)
+        assert guard.used("single_result_bytes") == 50
         with pytest.raises(MCPBudgetExceeded) as exc:
-            guard.single_result_bytes(1)
+            guard.single_result_bytes(51)
         assert exc.value.family == "single_result_bytes"
 
     def test_retention_accumulates_across_operations(self) -> None:

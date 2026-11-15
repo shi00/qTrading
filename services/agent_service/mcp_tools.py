@@ -155,11 +155,13 @@ class MCPToolDispatcher:
         deadline_s: int,
     ) -> ToolCallOutcome:
         try:
-            result = await session.call_tool(
-                request.tool_name,
-                dict(request.arguments),
-                deadline_s=deadline_s,
-            )
+            # 单一总 deadline 由本层强制：端口实现不守时限也不会挂起事件循环。
+            async with asyncio.timeout(deadline_s):
+                result = await session.call_tool(
+                    request.tool_name,
+                    dict(request.arguments),
+                    deadline_s=deadline_s,
+                )
         except asyncio.CancelledError:
             raise
         except (TimeoutError, ConnectionError):
@@ -167,7 +169,11 @@ class MCPToolDispatcher:
             return ToolCallOutcome(ToolCallState.UNKNOWN, None, request.operation_id)
         except Exception:
             return ToolCallOutcome(ToolCallState.FAILED, None, request.operation_id)
-        encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        try:
+            encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        except (TypeError, ValueError):
+            # 效果已发生但结果无法进入类型化契约（二进制/自定义对象）：无确证，不重试。
+            return ToolCallOutcome(ToolCallState.UNKNOWN, None, request.operation_id)
         size = len(encoded.encode("utf-8"))
         guard.single_result_bytes(size)
         guard.retention_bytes(size)
