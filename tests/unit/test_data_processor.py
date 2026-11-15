@@ -14,7 +14,7 @@ import pandas as pd
 
 from core.i18n import Message
 from data.data_processor import DataProcessor
-from data.sync.base import SyncResult
+from data.sync.base import SyncResult, SyncStatus
 
 pytestmark = pytest.mark.unit
 
@@ -1081,7 +1081,7 @@ class TestDataProcessorRunDailyUpdate:
         dp = _make_dp()
         dp.init_data = AsyncMock()
         dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
-        dp.sync_financial_reports = AsyncMock()
+        dp.sync_comprehensive_fundamentals = AsyncMock(return_value=SyncResult())
         with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
             mock_instance = MagicMock()
             mock_instance.run_review = AsyncMock()
@@ -1090,11 +1090,103 @@ class TestDataProcessorRunDailyUpdate:
             dp.init_data.assert_called_once()
             # D1-2: run_daily_update 返回承载完整性的 SyncResult（且 is_complete 属性可用）
             # D1-4: 单日快照 = days_processed=1；rows_written 由 sync_daily_market_snapshot 透传策略填充
-            from data.sync.base import SyncResult
-
             assert isinstance(result, SyncResult)
             assert result.days_processed == 1
             assert result.is_complete is True
+
+    @pytest.mark.asyncio
+    async def test_run_daily_update_financial_cancelled_stops_review(self):
+        """R02: 行情成功 + 财务取消 → 聚合 cancelled，停止后续复盘，且不推进完成水位。"""
+        dp = _make_dp()
+        dp.init_data = AsyncMock()
+        dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
+        dp.sync_comprehensive_fundamentals = AsyncMock(return_value=SyncResult(status=SyncStatus.CANCELLED.value))
+        callback = MagicMock()
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            result = await dp.run_daily_update(progress_callback=callback)
+        # 取消后复盘阶段不得启动（ReviewManager 未构造）
+        mock_rm.assert_not_called()
+        assert result.status == SyncStatus.CANCELLED.value
+        assert result.is_complete is False
+        dp.sync_comprehensive_fundamentals.assert_awaited_once_with()
+        # 进度仅到财务阶段（0.2/0.5），复盘阶段 0.8 未上报
+        assert [c.args[0] for c in callback.call_args_list] == [0.2, 0.5]
+
+    @pytest.mark.asyncio
+    async def test_run_daily_update_financial_failed_propagates(self):
+        """R02: 行情成功 + 财务失败 → 聚合 failed；无关键表也 is_complete=False，复盘仍执行。"""
+        dp = _make_dp()
+        dp.init_data = AsyncMock()
+        dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
+        dp.sync_comprehensive_fundamentals = AsyncMock(
+            return_value=SyncResult(status=SyncStatus.FAILED.value, errors=["financial down"])
+        )
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_instance = MagicMock()
+            mock_instance.run_review = AsyncMock()
+            mock_rm.return_value = mock_instance
+            result = await dp.run_daily_update()
+        mock_instance.run_review.assert_awaited_once()
+        assert result.status == SyncStatus.FAILED.value
+        assert result.is_complete is False
+        assert result.errors == ["financial down"]
+        assert result.failed_critical_tables == []
+
+    @pytest.mark.asyncio
+    async def test_run_daily_update_financial_partial_propagates(self):
+        """R02: 财务 partial 传播到聚合终态；不合并财务计数（rows_written 保持行情语义）。"""
+        dp = _make_dp()
+        dp.init_data = AsyncMock()
+        dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
+        dp.sync_comprehensive_fundamentals = AsyncMock(
+            return_value=SyncResult(status=SyncStatus.PARTIAL.value, added=9, rows_written=9)
+        )
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_instance = MagicMock()
+            mock_instance.run_review = AsyncMock()
+            mock_rm.return_value = mock_instance
+            result = await dp.run_daily_update()
+        assert result.status == SyncStatus.PARTIAL.value
+        assert result.is_complete is True
+        assert result.rows_written == 0
+        assert result.added == 0
+
+    @pytest.mark.asyncio
+    async def test_run_daily_update_market_cancelled_skips_financial_and_review(self):
+        """R02: 行情阶段取消 → 不执行财务与复盘，聚合 cancelled 且 is_complete=False。"""
+        dp = _make_dp()
+        dp.init_data = AsyncMock()
+
+        async def _market(sync_result=None):
+            sync_result.status = SyncStatus.CANCELLED.value
+
+        dp.sync_daily_market_snapshot = AsyncMock(side_effect=_market)
+        dp.sync_comprehensive_fundamentals = AsyncMock()
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            result = await dp.run_daily_update()
+        dp.sync_comprehensive_fundamentals.assert_not_awaited()
+        mock_rm.assert_not_called()
+        assert result.status == SyncStatus.CANCELLED.value
+        assert result.is_complete is False
+
+    @pytest.mark.asyncio
+    async def test_run_daily_update_market_partial_not_downgraded_by_financial_success(self):
+        """R02: 终态单调升级——行情 partial 不被后续财务 success 降级为 success。"""
+        dp = _make_dp()
+        dp.init_data = AsyncMock()
+
+        async def _market(sync_result=None):
+            sync_result.status = SyncStatus.PARTIAL.value
+
+        dp.sync_daily_market_snapshot = AsyncMock(side_effect=_market)
+        dp.sync_comprehensive_fundamentals = AsyncMock(return_value=SyncResult())
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_instance = MagicMock()
+            mock_instance.run_review = AsyncMock()
+            mock_rm.return_value = mock_instance
+            result = await dp.run_daily_update()
+        assert result.status == SyncStatus.PARTIAL.value
+        assert result.is_complete is True
 
     @pytest.mark.asyncio
     async def test_run_daily_update_passes_untradable_count(self):
@@ -1102,7 +1194,7 @@ class TestDataProcessorRunDailyUpdate:
         dp = _make_dp()
         dp.init_data = AsyncMock()
         dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
-        dp.sync_financial_reports = AsyncMock()
+        dp.sync_comprehensive_fundamentals = AsyncMock(return_value=SyncResult())
         with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
             mock_instance = MagicMock()
             mock_instance.run_review = AsyncMock()
@@ -1117,7 +1209,7 @@ class TestDataProcessorRunDailyUpdate:
         dp = _make_dp()
         dp.init_data = AsyncMock()
         dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
-        dp.sync_financial_reports = AsyncMock()
+        dp.sync_comprehensive_fundamentals = AsyncMock(return_value=SyncResult())
         with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
             mock_instance = MagicMock()
             mock_instance.run_review = AsyncMock()
@@ -1182,7 +1274,7 @@ class TestDataProcessorRunDailyUpdate:
         dp = _make_dp()
         dp.init_data = AsyncMock()
         dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
-        dp.sync_financial_reports = AsyncMock()
+        dp.sync_comprehensive_fundamentals = AsyncMock(return_value=SyncResult())
         callback = MagicMock()
         with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
             mock_instance = MagicMock()

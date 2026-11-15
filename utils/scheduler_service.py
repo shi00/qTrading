@@ -1232,27 +1232,46 @@ class SchedulerService:
             # C14/D02：协作结果取消（SyncResult.status=cancelled）先于完整性判定——取消不得
             # 映射 FAILED（用户取消 ≠ 失败假象），不推进水位；抛取消信号由 TaskManager 记
             # CANCELLED 终态（≠ COMPLETED）。
-            if getattr(result, "status", None) == SyncStatus.CANCELLED.value:
+            status = getattr(result, "status", None)
+            if status == SyncStatus.CANCELLED.value:
                 raise TaskCancelledError(Message("task_cancelled_desc"))
             # D1-2: 幂等键以 SyncResult.is_complete 为准（关键表全部成功），而非 not errors/无 is_complete。
             # is_complete 缺省 False（保守）：即便收到无法判定的结果也不写入幂等键，宁可下次重跑。
-            is_complete = getattr(result, "is_complete", False)
+            # R02: 日更终态已按阶段聚合（行情 + 财务）。聚合 status=failed 时即使行情关键表
+            # 全绿也不得推进完成水位，故显式前置为不完整。
+            if status == SyncStatus.FAILED.value:
+                is_complete = False
+            else:
+                is_complete = getattr(result, "is_complete", False)
             if is_complete:
+                # R02: partial 不阻断水位（既有可选表降级语义），但必须留痕，避免「残缺阶段
+                # 静默算整轮成功」。
+                if status == SyncStatus.PARTIAL.value:
+                    logger.warning(
+                        "[Scheduler] Daily update finished PARTIAL (degraded sources: %s); watermark advances",
+                        getattr(result, "failed_optional_tables", []),
+                    )
                 await self._mark_daily_update_done_db(today_str)
             else:
                 failed_critical = list(getattr(result, "failed_critical_tables", []) or [])
                 logger.warning(
-                    "[Scheduler] Daily update NOT complete (critical=%s, optional=%s), NOT marking done",
+                    "[Scheduler] Daily update NOT complete (status=%s, critical=%s, optional=%s), NOT marking done",
+                    status,
                     failed_critical,
                     getattr(result, "failed_optional_tables", []),
                 )
                 # D11-F03: 不完整/None/无 is_complete 一律映射 FAILED，不返回成功文案。
+                # R02: 仅在结果确实暴露阶段终态时附加 status；DataFrame fallback 无 status，
+                # 保持既有 reason 语义（is_complete=False 开头），避免回归 D11-F03 契约。
+                reason = f"is_complete=False; failed_critical_tables={failed_critical}"
+                if isinstance(status, str):
+                    reason = f"status={status}; {reason}"
                 raise TaskIncompleteError(
                     Message(
                         "sched_daily_incomplete",
                         {"tables": ", ".join(map(str, failed_critical)) or "-"},
                     ),
-                    reason=f"is_complete=False; failed_critical_tables={failed_critical}",
+                    reason=reason,
                 )
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.

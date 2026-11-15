@@ -1589,6 +1589,74 @@ class TestDailyUpdateLogicClosure:
             assert svc._last_update_date == "20240614"
 
     @pytest.mark.asyncio
+    async def test_daily_update_logic_financial_failed_not_marked(self):
+        """R02: 行情成功 + 财务失败（聚合 status=failed、无关键表）→ FAILED 且不推进水位。"""
+        svc = _make_svc()
+        mock_result = SyncResult(status=SyncStatus.FAILED.value, days_processed=1, rows_written=10)
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.run_daily_update = AsyncMock(return_value=mock_result)
+        mock_tm = MagicMock()
+        now_val = datetime(2024, 6, 14, 16, 30)
+
+        patches = _get_patches(mock_dp, mock_tm, now_val)
+        with patches[0] as mock_ch, patches[1], patches[2], patches[3]:
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            with pytest.raises(TaskIncompleteError) as exc_info:
+                await factory("test_task")
+            assert exc_info.value.description.key == "sched_daily_incomplete"
+            assert exc_info.value.reason is not None
+            assert "status=failed" in exc_info.value.reason
+        assert svc._last_update_date != "20240614"
+
+    @pytest.mark.asyncio
+    async def test_daily_update_logic_financial_cancelled_not_marked(self):
+        """R02: 行情成功 + 财务取消 → 取消终态，不推进水位（不伪装失败）。"""
+        svc = _make_svc()
+        mock_result = SyncResult(status=SyncStatus.CANCELLED.value, days_processed=1)
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.run_daily_update = AsyncMock(return_value=mock_result)
+        mock_tm = MagicMock()
+        now_val = datetime(2024, 6, 14, 16, 30)
+
+        patches = _get_patches(mock_dp, mock_tm, now_val)
+        with patches[0] as mock_ch, patches[1], patches[2], patches[3]:
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            with pytest.raises(TaskCancelledError) as exc_info:
+                await factory("test_task")
+            assert exc_info.value.description.key == "task_cancelled_desc"
+        assert svc._last_update_date != "20240614"
+
+    @pytest.mark.asyncio
+    async def test_daily_update_logic_partial_advances_watermark(self):
+        """R02: 聚合 partial（无关键表）→ 水位推进，完成消息保持行情天数/行数语义。"""
+        svc = _make_svc()
+        mock_result = SyncResult(status=SyncStatus.PARTIAL.value, days_processed=1, rows_written=12)
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.run_daily_update = AsyncMock(return_value=mock_result)
+        mock_tm = MagicMock()
+        now_val = datetime(2024, 6, 14, 16, 30)
+
+        patches = _get_patches(mock_dp, mock_tm, now_val)
+        with patches[0] as mock_ch, patches[1], patches[2], patches[3]:
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            result_msg = await factory("test_task")
+            assert isinstance(result_msg, Message)
+            assert result_msg.params == {"days": 1, "rows": 12}
+        assert svc._last_update_date == "20240614"
+
+    @pytest.mark.asyncio
     async def test_daily_update_logic_dataframe_result(self):
         svc = _make_svc()
         mock_result = pd.DataFrame({"ts_code": ["000001.SZ"]})
