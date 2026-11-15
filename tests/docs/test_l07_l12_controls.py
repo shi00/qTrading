@@ -324,6 +324,12 @@ def test_l10_production_check_rejects_blank_removal_trigger(tmp_path: Path, monk
     assert errors, "纯空白 removal_trigger 必须失败"
 
 
+def test_l10_production_check_registered_in_governance_scope_only() -> None:
+    """执行入口：check_exceptions_effectiveness 只归属 governance scope（迁移表承接行一致）。"""
+    scopes = {labels for labels, name in cdc._SCOPE_CHECK_NAMES if name == "check_exceptions_effectiveness"}
+    assert scopes == {frozenset({"governance"})}, f"有效期检查须只归属 governance scope: {scopes}"
+
+
 # ---------------------------------------------------------------------------
 # L10 范围边界：例外仅限原登记方法/流程——原登记可沿用 / 新增服务不可自动继承
 # ---------------------------------------------------------------------------
