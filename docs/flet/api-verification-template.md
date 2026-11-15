@@ -161,7 +161,7 @@
 ### Flet 1.0 升级核验 @ 1.0 系列 (2026-09-19)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API + TextField error 属性
-- **锁定版本**: Flet 1.0 系列（pyproject.toml 实际锁定确切补丁号；flet/flet-desktop/flet-charts/flet-code-editor 四包与 flet-mcp 同步锁定）
+- **锁定版本**: Flet 1.0.0（同批 2026-09-23 记录回溯确认：该记录称「1.0.0 核验结论（2026-09-19）」，且升级清单为 flet 五包 1.0.0 → 1.0.1；flet/flet-desktop/flet-charts/flet-code-editor 四包与 flet-mcp 同版本锁定）
 - **核验来源**:
   - 项目单元测试（在 Flet 1.0 实际锁定版本下实跑，42 项全部通过）:
     - tests/unit/ui/test_flet_0_86_v1_api_compat.py
@@ -182,7 +182,7 @@
 ### engineRevision 修正 @ 0.86 最新补丁 (2026-08-07)
 
 - **API**: CanvasKit engineRevision（非 Flet API，但影响 E2E 测试基础设施）
-- **锁定版本**: Flet 0.86 系列最新补丁（pyproject.toml 实际锁定见文件）
+- **锁定版本**: Flet 0.86.3（本记录实测 engineRevision `0cd610717bde95fd88343c64f81c11ba4e5c0010`，据同记录「0.86.2 → 0.86.3 跨越一次 Flutter engine 升级」回溯确认；适用范围为 E2E CanvasKit 资源，非 Flet Python API 面）
 - **核验来源**:
   - 项目运行期验证: 读取 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig.engineRevision`，实际值为 `0cd610717bde95fd88343c64f81c11ba4e5c0010`
 - **项目结论**: 需追加复验
@@ -196,7 +196,7 @@
 ### Flet 0.86 升级核验 @ 0.86 最新补丁 (2026-07-27)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
-- **锁定版本**: Flet 0.86 系列最新补丁（pyproject.toml 实际锁定见文件）
+- **锁定版本**: Flet 0.86.2（据 2026-08-07 engineRevision 修正记录回溯：本记录实测 engineRevision `a10d8ac38de835021c8d2f920dbf50a920ccc030` 即 0.86.2 的 engineRevision；该 patch 于 2026-07-26 发布，为本记录观察时点的系列最新补丁）
 - **核验来源**:
   - 官方文档: https://github.com/flet-dev/flet/releases + PyPI JSON API（2026-07-26 发布最新补丁）
   - Flet issue / PR: #6709/#6710 (MatplotlibChart 切 tab 冻结修复，本项目未用 MatplotlibChart 故不相关)
@@ -220,7 +220,7 @@
 ### Flet 0.86 升级核验 @ 0.86 (2026-07-23)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
-- **锁定版本**: Flet 0.86（pyproject.toml 实际锁定补丁号见文件）
+- **锁定版本**: Flet 0.86 系列内版本未知（观察版本未知，不得用于匹配免查；原记录仅实测 engineRevision `a10d8ac38de835021c8d2f920dbf50a920ccc030`，不足以唯一定位补丁号，禁止按当前 pin 补填）
 - **核验来源**:
   - 官方文档: https://github.com/flet-dev/flet/blob/main/CHANGELOG.md
   - 项目运行期验证: engineRevision 比对（升级前后均为 `a10d8ac38de835021c8d2f920dbf50a920ccc030`，未变化）；字体 URL 版本 `notosanssc/v37/` 未变化
@@ -243,7 +243,7 @@
 ### Flet 0.86 升级核验 @ 0.86 (2026-07-20)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
-- **锁定版本**: Flet 0.86（pyproject.toml 实际锁定补丁号见文件）
+- **锁定版本**: Flet 0.86 系列内版本未知（观察版本未知，不得用于匹配免查；原记录未保存可复现的补丁号证据，禁止按当前 pin 补填）
 - **核验来源**:
   - 官方文档: https://github.com/flet-dev/flet/blob/main/CHANGELOG.md
   - Flet issue / PR: #6680, #6606, #6684, #6686
