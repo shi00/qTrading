@@ -8,6 +8,11 @@ from services.agent_service.attachments import (
     detect_attachment_kind,
 )
 from services.agent_service.business_sources import BusinessSnapshotRead, read_backtest_snapshot
+from services.agent_service.capabilities import (
+    PlanProposalStore,
+    PlanStoreBinding,
+    build_plan_store,
+)
 from services.agent_service.delivery_service import (
     DeliveryCommandService,
     DeliveryContext,
@@ -47,10 +52,13 @@ __all__ = [
     "DeliveryContext",
     "DeliveryOutcome",
     "ManualRecoveryReceipt",
+    "PlanProposalStore",
+    "PlanStoreBinding",
     "StartupIsolationReceipt",
     "StartupOutcome",
     "SubprocessAttachmentWorker",
     "assemble_agent_runtime",
+    "build_plan_store",
     "detect_attachment_kind",
     "launch_agent_runtime",
     "read_backtest_snapshot",
