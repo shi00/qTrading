@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -9,6 +10,30 @@ from utils.sanitizers import DataSanitizer
 from .base_dao import BaseDao, DatabaseQueryError, EngineDisposedError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Top10PersistResult:
+    """top10_holders 单次写入的接纳统计（D09-002）。
+
+    字段口径与 ``_save_upsert`` 的落库返回值对齐：
+    - ``fetched``：调用方提交的输入行数；
+    - ``rejected``：因 ``holder_name`` 为 NULL 被 DAO 过滤掉的输入行数；
+    - ``accepted``：过滤后按主键（UPSERT 冲突键）去重得到的唯一业务键数；
+    - ``saved``：``_save_upsert`` 实际落库行数。
+
+    调用方据此确认落库事实，不得以 ``fetched`` 宣称保存成功。
+    """
+
+    fetched: int
+    rejected: int
+    accepted: int
+    saved: int
+
+    @property
+    def confirmed(self) -> bool:
+        """全部被接纳的唯一业务键均已落库；零写入不算确认。"""
+        return self.accepted > 0 and self.saved >= self.accepted
 
 
 class HolderDao(BaseDao):
@@ -82,25 +107,51 @@ class HolderDao(BaseDao):
         except Exception as e:
             logger.warning("[HolderDao] Failed to calculate holder changes: %s", DataSanitizer.sanitize_error(e))
 
-    async def save_top10_holders(self, df: pd.DataFrame):
-        """Save Top 10 Holders. Table: top10_holders"""
+    async def save_top10_holders(self, df: pd.DataFrame) -> Top10PersistResult:
+        """Save Top 10 Holders. Table: top10_holders
+
+        D09-002: 返回真实接纳/落库/拒绝计数，调用方须以 ``saved`` 而非输入行数确认成功；
+        全部行因 ``holder_name`` 为 NULL 被拒时返回 ``accepted=0, saved=0``（confirmed=False），
+        不再以裸 0 让调用方误判为「已保存」。
+        """
         if df is None or df.empty:
-            return 0
+            return Top10PersistResult(fetched=0, rejected=0, accepted=0, saved=0)
+        fetched = len(df)
+        rejected = 0
         if "holder_name" in df.columns:
-            null_count = df["holder_name"].isna().sum()
-            if null_count > 0:
-                logger.warning("[HolderDao] Filtering %s rows with NULL holder_name from top10_holders", null_count)
-                df = df[df["holder_name"].notna()].copy()  # type: ignore[assignment]
+            null_flags = df["holder_name"].isna().to_numpy()
+            rejected = int(null_flags.sum())
+            if rejected > 0:
+                logger.warning("[HolderDao] Filtering %s rows with NULL holder_name from top10_holders", rejected)
+                df = df.loc[~null_flags].copy()
             if df.empty:
-                return 0
+                return Top10PersistResult(fetched=fetched, rejected=rejected, accepted=0, saved=0)
         cols = get_model_columns(Top10Holders)
         pk_columns = get_model_pk_columns(Top10Holders)
-        return await self._save_upsert(
-            df,
-            "top10_holders",
-            cols,
-            pk_columns=pk_columns,
+        # D09-002: accepted 与 _save_upsert 的冲突键口径一致（过滤后按主键去重），
+        # 使「重复 UPSERT 静默合并」不被误判为短写，只有真实丢行才算未确认。
+        # 主键列缺失时 _save_upsert 会拒写（返回 0），此处 accepted 记 0 以免去重报错。
+        if all(col in df.columns for col in pk_columns):
+            accepted = len(df.drop_duplicates(subset=pk_columns))
+        else:
+            accepted = 0
+        saved = int(
+            await self._save_upsert(
+                df,
+                "top10_holders",
+                cols,
+                pk_columns=pk_columns,
+            )
         )
+        if saved < accepted:
+            logger.warning(
+                "[HolderDao] top10_holders short write: accepted=%s saved=%s (fetched=%s, rejected=%s)",
+                accepted,
+                saved,
+                fetched,
+                rejected,
+            )
+        return Top10PersistResult(fetched=fetched, rejected=rejected, accepted=accepted, saved=saved)
 
     async def get_top10_holders(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         try:

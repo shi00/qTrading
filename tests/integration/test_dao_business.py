@@ -1228,7 +1228,9 @@ class TestHolderDao:
         )
 
         saved = await holder_dao.save_top10_holders(df)
-        assert saved == 1
+        assert saved.saved == 1
+        assert saved.accepted == 1
+        assert saved.confirmed is True
 
     async def test_holder_number_change_calculation(self, holder_dao, clean_db):
         """测试股东户数变化计算逻辑"""
