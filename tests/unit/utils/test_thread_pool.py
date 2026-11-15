@@ -774,6 +774,82 @@ class TestThreadPoolManagerReloadQueuedWork:
         assert [c.get("cancel_futures") for c in calls] == [False, False]
 
 
+class TestThreadPoolManagerReloadShutdownAtomicity:
+    """D03-002: reload_config 的二次停机检查与 swap 必须与 shutdown 互斥。
+
+    修复前：二次 ``_shutdown_event.is_set()`` 为 False 后、写回 ``self._io_pool`` 之前，
+    并发 shutdown 可置位事件、关闭旧池并清空引用；reload 随后把新池写回。此后
+    property 因事件已置位拒绝访问，再次 shutdown 又幂等早退 → 新池永久泄漏。
+    修复后：重判与交换在同一生命周期锁内完成，shutdown 的「置位 + 摘取」同锁互斥，
+    两种交错（reload 先交换 → 停机关闭新池；停机先完成 → reload 早退释放新池）
+    都以「新池全部关闭、两字段最终 None」收敛。
+    """
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_concurrent_shutdown_during_swap_leaves_no_live_pool(self, mock_ch):
+        mock_ch.get_max_io_workers.return_value = 4
+        mock_ch.get_max_cpu_workers.return_value = 2
+        tpm = ThreadPoolManager()
+        old_io_pool, old_cpu_pool = tpm._io_pool, tpm._cpu_pool
+
+        barrier = threading.Barrier(2)  # reload 线程与主线程在「检查后、赋值前」对齐
+        real_swap = ThreadPoolManager._swap_pools
+        new_pools: list[ThreadPoolExecutor] = []
+        reload_errors: list[BaseException] = []
+
+        def swap_after_barrier(self, new_io_pool, new_cpu_pool, io_workers, cpu_workers):
+            new_pools.extend([new_io_pool, new_cpu_pool])
+            # 卡在「停机检查通过之后、写回新池之前」，此时主线程并发发起 shutdown
+            barrier.wait(timeout=10)
+            return real_swap(self, new_io_pool, new_cpu_pool, io_workers, cpu_workers)
+
+        def reload_worker():
+            try:
+                with patch.object(ThreadPoolManager, "_swap_pools", swap_after_barrier):
+                    tpm.reload_config()
+            except BaseException as exc:  # pragma: no cover - 仅测试防御
+                reload_errors.append(exc)
+
+        # 旧池关闭可能由 reload 的后台线程（交换胜出）或 shutdown（停机胜出）执行，
+        # 两者都须在断言前完成，故用 spy 等待两个旧池的实际关闭。
+        real_shutdown = ThreadPoolExecutor.shutdown
+        closed_old: list[ThreadPoolExecutor] = []
+        closed_old_lock = threading.Lock()
+        both_old_closed = threading.Event()
+
+        def shutdown_spy(self, *args, **kwargs):
+            try:
+                return real_shutdown(self, *args, **kwargs)
+            finally:
+                if self is old_io_pool or self is old_cpu_pool:
+                    with closed_old_lock:
+                        closed_old.append(self)
+                        if len(closed_old) == 2:
+                            both_old_closed.set()
+
+        reload_thread = threading.Thread(target=reload_worker)
+        try:
+            with patch.object(ThreadPoolExecutor, "shutdown", shutdown_spy):
+                reload_thread.start()
+                barrier.wait(timeout=10)
+                tpm.shutdown(wait=False)  # 与 reload 的写回并发
+                reload_thread.join(timeout=10)
+                assert both_old_closed.wait(timeout=5), "旧池未在断言前关闭"
+        finally:
+            barrier.abort()
+            reload_thread.join(timeout=10)
+
+        assert not reload_errors, reload_errors
+        assert len(new_pools) == 2
+        assert all(pool._shutdown for pool in new_pools), "reload 新建的池必须全部关闭，避免泄漏"
+        assert tpm._io_pool is None
+        assert tpm._cpu_pool is None
+        assert tpm._io_max_workers == 0
+        assert tpm._cpu_max_workers == 0
+        assert tpm._shutdown_event.is_set()
+        assert all(pool._shutdown for pool in (old_io_pool, old_cpu_pool))
+
+
 class TestThreadPoolManagerRunAsyncCancelSemantics:
     """run_async 取消语义守护（M04 检视补测，R19）。
 

@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# D03-002: reload_config 交换前后的 (io_pool, cpu_pool) 引用对
+_PoolPair = tuple[concurrent.futures.ThreadPoolExecutor | None, concurrent.futures.ThreadPoolExecutor | None]
+
 
 class TaskType(Enum):
     IO = auto()  # For Network, Database, Disk operations (High concurrency allowed)
@@ -77,6 +80,14 @@ class ThreadPoolManager:
             # 避免每次读取 CPython 私有属性 ThreadPoolExecutor._max_workers。
             self._io_max_workers = 0
             self._cpu_max_workers = 0
+            # D03-002: 生命周期锁——reload_config 的「重判停机 + 交换两池/尺寸」与
+            # shutdown 的「置位停机 + 摘取引用」必须在同一把锁内完成。独立 event 检查
+            # 无法与停机互斥：二次检查通过后 shutdown 可置位事件、关闭旧池并清空引用，
+            # reload 随后写回新池；访问因事件已置位被拒，再次 shutdown 又幂等早退，
+            # 新池永久泄漏。此锁只覆盖引用交换的临界区，创建/关闭池均在锁外执行。
+            # 先于 _shutdown_event 创建：保证任何能看到 event 的线程也能拿到锁
+            # （旧实现该窗口内 shutdown 可直接进入，不因新增锁而提前失败）。
+            self._lifecycle_lock = threading.Lock()
             self._shutdown_event = threading.Event()
 
             self._init_pools()
@@ -141,24 +152,20 @@ class ThreadPoolManager:
             thread_name_prefix="CPU_Worker",
         )
 
-        # 2. Re-check shutdown before swapping (CON-05): 收窄「检查通过后、并发停机
-        #    置位 _shutdown_event」的 TOCTOU 窗口，命中则释放刚建的新池并早退，
-        #    避免新池泄漏。
-        if self._shutdown_event.is_set():
+        # 2. 生命周期锁内重判停机并原子交换两池/尺寸（D03-002）：独立的二次 event 检查
+        #    与写入引用之间不是原子的——shutdown 可在检查通过后完成「置位 → 关闭旧池 →
+        #    清空引用」，reload 随后写回新池；此后 property 因事件已置位拒绝访问，
+        #    再次 shutdown 又幂等早退，新池永不关闭。锁内重判保证两种交错都收敛：
+        #    交换先于停机摘取（旧池仍由停机关闭），或停机先完成（本处早退并释放新池）。
+        old_pools = self._swap_pools(new_io_pool, new_cpu_pool, io_workers, cpu_workers)
+        if old_pools is None:
+            # 未发布的新池在锁外释放：真正停机语义用 cancel_futures=True 取消排队工作。
             new_io_pool.shutdown(wait=False, cancel_futures=True)
             new_cpu_pool.shutdown(wait=False, cancel_futures=True)
             logger.debug("Ignoring reload_config: shutdown started during pool creation (idempotent)")
             return
 
-        # 3. Swap references (Atomic in Python GIL)
-        old_io_pool = self._io_pool
-        old_cpu_pool = self._cpu_pool
-
-        self._io_pool = new_io_pool
-        self._cpu_pool = new_cpu_pool
-        # CON-10: 字段赋值紧跟 swap（早退分支不触碰字段，保持与 pool 一致）
-        self._io_max_workers = io_workers if io_workers > 0 else 0
-        self._cpu_max_workers = cpu_workers if cpu_workers > 0 else 0
+        old_io_pool, old_cpu_pool = old_pools
 
         logger.info(
             "Thread Pools swapped. New sizes: IO=%s, CPU=%s",
@@ -201,6 +208,31 @@ class ThreadPoolManager:
 
         threading.Thread(target=shutdown_old_pools, daemon=True).start()
 
+    def _swap_pools(
+        self,
+        new_io_pool: concurrent.futures.ThreadPoolExecutor,
+        new_cpu_pool: concurrent.futures.ThreadPoolExecutor,
+        io_workers: int,
+        cpu_workers: int,
+    ) -> _PoolPair | None:
+        """生命周期锁内重判停机并原子交换两池与 worker 数快照（D03-002）。
+
+        Returns:
+            ``(old_io_pool, old_cpu_pool)``；若停机已开始（``_shutdown_event`` 置位）
+            则返回 ``None``，调用方负责在锁外释放尚未发布的新池。
+        """
+        with self._lifecycle_lock:
+            if self._shutdown_event.is_set():
+                return None
+            old_io_pool = self._io_pool
+            old_cpu_pool = self._cpu_pool
+            self._io_pool = new_io_pool
+            self._cpu_pool = new_cpu_pool
+            # CON-10: 字段赋值紧跟 swap（早退分支不触碰字段，保持与 pool 一致）
+            self._io_max_workers = io_workers if io_workers > 0 else 0
+            self._cpu_max_workers = cpu_workers if cpu_workers > 0 else 0
+            return old_io_pool, old_cpu_pool
+
     @property
     def io_pool(self) -> concurrent.futures.ThreadPoolExecutor:
         """IO pool. Raises RuntimeError after shutdown.
@@ -212,26 +244,32 @@ class ThreadPoolManager:
         BEFORE shutdown if ``_io_pool`` is manually reset to None
         (e.g. for testing or recovery), in which case the pool is
         transparently re-initialized.
+
+        D03-002: 「判停机 → 取池 → 必要时恢复」整体持生命周期锁，与 reload_config 的
+        交换、shutdown 的摘取互斥；否则检查通过后被停机摘走引用，恢复分支会重建
+        一个停机后才创建、无人关闭的池（与 reload 竞态同源的泄漏）。
         """
-        if self._shutdown_event.is_set():
-            raise RuntimeError("Cannot access io_pool after shutdown")
-        if self._io_pool is None:
-            self._init_pools()
-        assert self._io_pool is not None
-        return self._io_pool
+        with self._lifecycle_lock:
+            if self._shutdown_event.is_set():
+                raise RuntimeError("Cannot access io_pool after shutdown")
+            if self._io_pool is None:
+                self._init_pools()
+            assert self._io_pool is not None
+            return self._io_pool
 
     @property
     def cpu_pool(self) -> concurrent.futures.ThreadPoolExecutor:
         """CPU pool. Raises RuntimeError after shutdown.
 
-        See ``io_pool`` docstring for design rationale (ASYNC-011).
+        See ``io_pool`` docstring for design rationale (ASYNC-011 / D03-002).
         """
-        if self._shutdown_event.is_set():
-            raise RuntimeError("Cannot access cpu_pool after shutdown")
-        if self._cpu_pool is None:
-            self._init_pools()
-        assert self._cpu_pool is not None
-        return self._cpu_pool
+        with self._lifecycle_lock:
+            if self._shutdown_event.is_set():
+                raise RuntimeError("Cannot access cpu_pool after shutdown")
+            if self._cpu_pool is None:
+                self._init_pools()
+            assert self._cpu_pool is not None
+            return self._cpu_pool
 
     @property
     def io_pool_max_workers(self) -> int:
@@ -240,10 +278,13 @@ class ThreadPoolManager:
         CON-10: 返回 _init_pools/reload_config 保存的决策值快照，不再读取
         CPython 私有属性 ThreadPoolExecutor._max_workers（无稳定性承诺）。
         返回 0 表示池未初始化、已停机或未显式配置（0 = 未配置/默认）。
+
+        D03-002: 池引用与尺寸快照同锁读取，避免读到交换中途的半新半旧组合。
         """
-        if self._io_pool is None or self._shutdown_event.is_set():
-            return 0
-        return self._io_max_workers
+        with self._lifecycle_lock:
+            if self._io_pool is None or self._shutdown_event.is_set():
+                return 0
+            return self._io_max_workers
 
     @property
     def cpu_pool_max_workers(self) -> int:
@@ -252,9 +293,10 @@ class ThreadPoolManager:
         CON-10: 返回决策值快照（见 io_pool_max_workers）。CPU 未显式配置
         （配置为 0）时返回 0，消费方（如 TaskManager）应按"未配置"走兜底。
         """
-        if self._cpu_pool is None or self._shutdown_event.is_set():
-            return 0
-        return self._cpu_max_workers
+        with self._lifecycle_lock:
+            if self._cpu_pool is None or self._shutdown_event.is_set():
+                return 0
+            return self._cpu_max_workers
 
     def get_executor(
         self,
@@ -328,30 +370,41 @@ class ThreadPoolManager:
         For GUI apps on exit, we might want to wait briefly then force kill?
         For now, we trust the executor's shutdown mechanism.
         S3-1 fix: Added idempotent guard to prevent double shutdown.
+
+        D03-002: 「幂等判定 → 置位停机 → 摘取两池引用」在同一生命周期锁内完成，与
+        reload_config 的「重判 → 交换」互斥，避免停机摘空后 reload 又写回新池。
+        实际的 executor shutdown 在锁外执行：调用方可能位于被关闭池的 worker 线程
+        （wait=True 时锁内自 join 会死锁），且关闭耗时不应阻塞 reload 的临界区。
         """
-        if self._shutdown_event.is_set():
-            return
-        self._shutdown_event.set()
+        with self._lifecycle_lock:
+            if self._shutdown_event.is_set():
+                return
+            self._shutdown_event.set()
+            io_pool = self._io_pool
+            cpu_pool = self._cpu_pool
+            self._io_pool = None
+            self._cpu_pool = None
+            # 停机后尺寸快照与池引用保持一致（0 = 已停机，property 亦按此兜底）
+            self._io_max_workers = 0
+            self._cpu_max_workers = 0
 
         shutdown_performed = False
-        if hasattr(self, "_io_pool") and self._io_pool:
+        if io_pool:
             if not _quiet:
                 try:
                     logger.info("Shutting down IO Pool...")
                 except (ValueError, OSError):
                     pass
-            self._io_pool.shutdown(wait=wait, cancel_futures=True)
-            self._io_pool = None
+            io_pool.shutdown(wait=wait, cancel_futures=True)
             shutdown_performed = True
 
-        if hasattr(self, "_cpu_pool") and self._cpu_pool:
+        if cpu_pool:
             if not _quiet:
                 try:
                     logger.info("Shutting down CPU Pool...")
                 except (ValueError, OSError):
                     pass
-            self._cpu_pool.shutdown(wait=wait, cancel_futures=True)
-            self._cpu_pool = None
+            cpu_pool.shutdown(wait=wait, cancel_futures=True)
             shutdown_performed = True
 
         if shutdown_performed and not _quiet:
