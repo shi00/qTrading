@@ -50,6 +50,7 @@ from services.agent_service.delivery_render import (
 from services.agent_service.delivery_service import (
     DeliveryCommandService,
     DeliveryContext,
+    _stage_name_hint,
 )
 
 _USER_SCOPE = "user-1"
@@ -322,7 +323,8 @@ class TestHappyPath:
 
         assert len(store.published) == 1
         assert store.published[0][0] == _command().target
-        assert store.stage_name_hints == [_command().delivery_id]
+        assert store.stage_name_hints == [_stage_name_hint(_command().delivery_id)]
+        assert len(store.stage_name_hints[0]) <= 32
 
         receipt = outcome.receipt
         assert receipt.phase == "published_confirmed"
@@ -457,6 +459,32 @@ class TestPrePublishFailures:
         assert dao.phases == ["manifest_saved"]
         assert store.staged_contents == []
         assert outcome.receipt.error_code == "body_missing"
+
+    async def test_stage_oserror_is_reported_as_receipt(self) -> None:
+        store = FakeStore()
+        store.stage_error = OSError("disk full")
+        dao = FakePhaseDao()
+
+        outcome = await _service(artifacts=FakeArtifacts([_read()]), dao=dao, store=store).deliver(
+            _command(), _context()
+        )
+
+        assert dao.phases == ["manifest_saved"]
+        assert outcome.receipt.error_code == "delivery_local_io_error"
+        assert store.published == []
+        _assert_receipt_wire(outcome.receipt)
+
+    async def test_publish_oserror_cannot_be_verified(self) -> None:
+        store = FakeStore()
+        store.publish_error = OSError("io error during replace")
+        dao = FakePhaseDao()
+
+        outcome = await _service(artifacts=FakeArtifacts([_read()]), dao=dao, store=store).deliver(
+            _command(), _context()
+        )
+
+        assert dao.phases[-1] == "unknown"
+        assert outcome.receipt.publish_effect == "unknown"
 
     async def test_manifest_save_failure_propagates_without_side_effects(self) -> None:
         dao = FakePhaseDao()

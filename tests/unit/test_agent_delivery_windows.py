@@ -15,6 +15,7 @@ from services.agent_service.delivery import (
     DeliveryFileError,
     DeliveryUnknownError,
     WindowsManagedFileStore,
+    _file_identity,
 )
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows 目标保护仅在 win32 验证")
@@ -212,6 +213,23 @@ class TestStagingSafety:
         )
         assert "delivery_deadbeef" in staged.path.name
         assert staged.file_id is not None and staged.volume_serial is not None
+
+    def test_invalid_name_hint_is_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(DeliveryFileError) as exc:
+            _store().stage(
+                target=_target(tmp_path / "hint.md"),
+                content=_CONTENT,
+                expected_digest=_DIGEST,
+                name_hint="../escaped",
+            )
+        assert exc.value.code == "delivery_stage_name_invalid"
+
+    def test_zero_file_identity_is_refused(self) -> None:
+        """无文件索引的卷（``st_ino == 0``）不得退化为「同内容即归属」。"""
+
+        with pytest.raises(DeliveryFileError) as exc:
+            _file_identity(os.stat_result((0, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
+        assert exc.value.code == "delivery_file_identity_unavailable"
 
     def test_readback_mismatch_removes_staging(self, tmp_path: Path) -> None:
         target_path = tmp_path / "readback.md"

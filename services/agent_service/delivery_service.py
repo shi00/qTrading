@@ -32,6 +32,7 @@ from core.agent_types import (
     DeliveryReceipt,
     DeliveryTarget,
     build_delivery_fields,
+    sha256_hex,
     validate_artifact_delivery_command,
 )
 from services.agent_service.delivery import (
@@ -123,6 +124,14 @@ async def _default_run_blocking[T](func: Callable[..., T], *args: object, **kwar
 
 def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _stage_name_hint(delivery_id: str) -> str:
+    """暂存名派生标识：短标识原样、超长取摘要前缀（可复算定位残留）。"""
+
+    if len(delivery_id) <= 32:
+        return delivery_id
+    return sha256_hex(delivery_id.encode("utf-8"))[:16]
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,11 +262,15 @@ class DeliveryCommandService:
                 target=command.target,
                 content=rendered.content,
                 expected_digest=digest,
-                name_hint=command.delivery_id,
+                name_hint=_stage_name_hint(command.delivery_id),
             )
         except DeliveryFileError as exc:
             # 暂存未落库：回执与已存 manifest 一致（manifest_saved 无输出摘要）。
             return self._failed(base, context, rendered=None, phase="manifest_saved", error_code=exc.code)
+        except OSError:
+            return self._failed(
+                base, context, rendered=None, phase="manifest_saved", error_code="delivery_local_io_error"
+            )
         if staged.digest != digest:
             cleaned = await self._discard(staged)
             return self._failed(
@@ -390,6 +403,11 @@ class DeliveryCommandService:
                 rendered=rendered,
                 phase="publish_claimed",
                 error_code=exc.code,
+            )
+        except OSError:
+            # 替换前/中本地 IO 异常：无法区分是否已生效，只能 unknown。
+            return await self._unknown(
+                base, context, rendered=rendered, state=state, expected_revision=revision, error_code=_UNVERIFIED_CODE
             )
         if published.snapshot.digest != digest:
             return await self._unknown(

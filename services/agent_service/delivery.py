@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from pathlib import Path
 from core.agent_types import DeliveryTarget, validate_delivery_target_path
 
 _READ_CHUNK = 1024 * 1024
+_NAME_HINT_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 
 class DeliveryFileError(RuntimeError):
@@ -80,6 +82,31 @@ def _digest_file(path: Path) -> str:
         while chunk := handle.read(_READ_CHUNK):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _file_identity(stat_result: os.stat_result) -> int:
+    """文件索引身份；为 0 表示该卷不提供文件 ID，无法证明归属（拒绝发布）。
+
+    FAT/exFAT、部分 SMB/虚拟卷上 ``st_ino`` 恒为 0；此时 ``0 == 0`` 会让
+    「目标就是本交付文件」的断言恒真，必须在此 fail-closed（§10.5）。
+    """
+
+    file_id = int(stat_result.st_ino)
+    if file_id == 0:
+        raise DeliveryFileError(
+            "delivery_file_identity_unavailable", "target volume does not expose a stable file identity"
+        )
+    return file_id
+
+
+def _stage_prefix(target_name: str, name_hint: str | None) -> str:
+    if name_hint is None:
+        return f".{target_name}."
+    if not _NAME_HINT_PATTERN.fullmatch(name_hint):
+        raise DeliveryFileError(
+            "delivery_stage_name_invalid", "staged name hint must be 1-32 characters of [A-Za-z0-9_-]"
+        )
+    return f".{target_name}.{name_hint}."
 
 
 def _is_reparse_point(stat_result: os.stat_result) -> bool:
@@ -140,7 +167,7 @@ class WindowsManagedFileStore:
         if not target_path.parent.is_dir():
             raise DeliveryFileError("delivery_target_parent_missing", "target parent directory does not exist")
         self._assert_target_matches(_snapshot(target_path), target, phase="stage")
-        prefix = f".{target_path.name}." if not name_hint else f".{target_path.name}.{name_hint}."
+        prefix = _stage_prefix(target_path.name, name_hint)
         handle, raw_path = tempfile.mkstemp(
             prefix=prefix,
             suffix=".staged",
@@ -163,7 +190,7 @@ class WindowsManagedFileStore:
                 digest=digest,
                 size=staged_stat.st_size,
                 volume_serial=staged_stat.st_dev,
-                file_id=staged_stat.st_ino,
+                file_id=_file_identity(staged_stat),
                 parent_volume_serial=staged_stat.st_dev,
                 parent_file_id=os.stat(target_path.parent).st_ino,
             )
