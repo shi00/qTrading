@@ -2445,53 +2445,71 @@ def check_agents_md_sync() -> list[str]:
 # check_agents_md_min_verify_commands() 经 _generated_block_sync 对 AGENTS.md 镜像做逐行精确比较，
 # 不再对正本做子串检查（与 redlines.yml → AGENTS.md 红线区块同机制）。
 _MIN_VERIFY_START_TAG = "<!-- generated:min-verify-commands -->"
+# 正本受控块 id（与 docs_generated 注册表一致）：块区间经共享块扫描器取得，
+# 不再全文 find——后者会被前置/后置围栏样例中的同名标记诱导（Q07）。
+_MIN_VERIFY_BLOCK_ID = "min-verify-commands"
 # 受控块两条 bullet 的固定标签前缀（受控契约：标签改写/增删 bullet 即视为正本形态漂移，fail-closed）。
 _MIN_VERIFY_GATE_LABEL = "- **变更相关门禁**"
 _MIN_VERIFY_DOC_LABEL = "- **仅 Markdown / 治理文档改动**"
 
 
-def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str], list[str]]:
-    """解析 CONTRIBUTING.md「常用开发与测试命令」受控块中的完整有序命令列表（M2/F02）。
+def _min_verify_block_text(content: str) -> tuple[str, list[str]]:
+    """取 CONTRIBUTING.md 最小验证命令受控块的**已验证块区间**文本（Q07）。
 
-    受控块 = `_MIN_VERIFY_START_TAG` 与 `<!-- /generated -->` 之间恰两条 bullet：
-    「变更相关门禁」（` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet
-    首个「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
-    「：」之前，不参与解析）。
-    返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
-    块缺失/结束标记缺失/含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令/
-    块后同节重复命令声明均显式报错，不静默跳过（fail-closed）。
+    直接消费 ``docs_generated.scan_blocks()`` 的块契约：围栏/缩进代码块内的同名标记
+    只是示例文本，不构成现行块；不再用全文 ``find`` 定位，避免被前置/后置样例诱导。
+    同时保留 F02 反例防护（Q08 收窄）：受控块结束后、同一小节（至下一个二级标题或
+    文末）内仅识别与受控块标签同前缀的 bullet（真正的命令声明），防止新增命令绕过
+    受控块被静默丢弃；普通说明列表项属于正文，不误判。代码块内的样例文本一并排除。
+    返回 (块内容文本, errors)：失败时文本为空且 errors 非空。
     """
-    errors: list[str] = []
-    start = content.find(_MIN_VERIFY_START_TAG)
-    if start == -1:
-        return (
-            [],
-            [],
-            [
-                f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
-                "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
-            ],
-        )
-    end = content.find(_GENERATED_END_TAG, start + len(_MIN_VERIFY_START_TAG))
-    if end == -1:
-        return [], [], [f"CONTRIBUTING.md 最小验证命令受控块缺少结束标记（{_GENERATED_END_TAG}）"]
-    # F02 反例防护（重复命令声明）：命令声明只能出现在受控块内。受控块结束后、同一小节
-    # （至下一个「## 」标题或文末）内仅识别与受控块标签同前缀的 bullet（真正的命令声明），
-    # 防止新增命令绕过受控块被静默丢弃；普通说明列表项属于正文，不在此误判（Q08）。
-    after_block = content[end + len(_GENERATED_END_TAG) :]
-    next_heading = after_block.find("\n## ")
-    section_after = after_block if next_heading == -1 else after_block[:next_heading]
+    try:
+        blocks = docs_generated.scan_blocks(content, "markdown")
+    except docs_generated.DocsGeneratedError as exc:
+        return "", [f"CONTRIBUTING.md 最小验证命令受控块结构非法: {exc}"]
+    span = blocks.get(_MIN_VERIFY_BLOCK_ID)
+    if span is None:
+        return "", [
+            f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
+            "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
+        ]
+    # 块结束后同节内容：边界与代码块行由共享解析视图给出（围栏内的伪标题/伪命令声明
+    # 只是示例文本），不重新在全文搜索标记。
+    view = docs_markdown.parse_text(content)
+    code_lines = view.code_line_numbers()
+    next_h2 = next((h.line for h in view.headings if h.level == 2 and h.line > span.end_line), None)
+    lines = content.splitlines()
+    scan_end = next_h2 - 1 if next_h2 is not None else len(lines)
     duplicate_declarations = [
-        line for line in section_after.splitlines() if line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
+        line
+        for lineno, line in enumerate(lines, start=1)
+        if span.end_line < lineno <= scan_end
+        and lineno not in code_lines
+        and line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
     ]
     if duplicate_declarations:
-        errors.append(
+        return "", [
             "CONTRIBUTING.md 最小验证命令受控块后同节内含重复命令声明"
             "（命令声明只能写入受控块内，防止被静默丢弃，F02）: " + " / ".join(duplicate_declarations)
-        )
-    body_lines = [
-        line for line in content[start + len(_MIN_VERIFY_START_TAG) : end].strip().splitlines() if line.strip()
-    ]
+        ]
+    return "\n".join(span.content_lines) + ("\n" if span.content_lines else ""), []
+
+
+def _parse_min_verify_command_block(block_text: str) -> tuple[list[str], list[str], list[str]]:
+    """解析最小验证命令受控块的已验证区间文本（M2/F02，Q07）。
+
+    ``block_text`` 为 ``_min_verify_block_text()`` 取得的块内容（或 docs_generated 以
+    ``author_payload="block"`` 校验后传入），不含包裹标记；本函数不再从全文定位块，
+    避免围栏样例中的同名标记冒充作者源。受控块恰两条 bullet：「变更相关门禁」
+    （` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet 首个
+    「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
+    「：」之前，不参与解析）。
+    返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
+    含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令均显式报错，
+    不静默跳过（fail-closed）。
+    """
+    errors: list[str] = []
+    body_lines = [line for line in block_text.strip().splitlines() if line.strip()]
     unknown_lines = [
         line for line in body_lines if not line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
     ]
@@ -2565,7 +2583,10 @@ def check_agents_md_min_verify_commands() -> list[str]:
         contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
     except OSError:
         return [f"CONTRIBUTING.md 不存在或不可读: {CONTRIBUTING_PATH}"]
-    gate_commands, doc_commands, parse_errors = _parse_min_verify_command_block(contributing)
+    block_text, block_errors = _min_verify_block_text(contributing)
+    if block_errors:
+        return block_errors
+    gate_commands, doc_commands, parse_errors = _parse_min_verify_command_block(block_text)
     if parse_errors:
         return parse_errors
     content = AGENTS_PATH.read_text(encoding="utf-8")
