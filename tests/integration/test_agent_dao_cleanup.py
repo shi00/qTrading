@@ -45,7 +45,6 @@ from core.agent_types import (
     DeliveryTarget,
     OperationReadQuery,
     derive_delivery_id,
-    encode_delivery_manifest,
 )
 from data.persistence.agent_migrator import run_agent_runtime_migrations
 from data.persistence.agent_runtime_store import AgentRuntimeNativeStore
@@ -1230,6 +1229,7 @@ async def test_cleanup_clears_delivery_manifest_and_reports_cleaned(real_embedde
     suffix = uuid.uuid4().hex[:8]
     session_id = f"s-del-{suffix}"
     execution_id = f"e-del-{suffix}"
+    round_id = f"r-del-{suffix}"
     delivery_op = f"op-delivery-{suffix}"
     result_op = f"op-result-{suffix}"
     delivery_command = ArtifactDeliveryCommand(
@@ -1293,6 +1293,36 @@ async def test_cleanup_clears_delivery_manifest_and_reports_cleaned(real_embedde
                 )
             )
             await conn.execute(
+                sa.insert(AgentRound).values(
+                    user_scope=_USER_SCOPE,
+                    round_id=round_id,
+                    execution_id=execution_id,
+                    round_number=1,
+                    workflow_id=f"wf-{round_id}",
+                    workflow_code_version="1",
+                    run_epoch=1,
+                    input_revision=1,
+                    plan_revision=1,
+                )
+            )
+            # 交付写路径会把 manifest 的 artifact 身份写进 operation（FK 约束），先种产物行。
+            await conn.execute(
+                sa.insert(AgentArtifact).values(
+                    user_scope=_USER_SCOPE,
+                    artifact_id=delivery_command.artifact_id,
+                    artifact_version=1,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    round_id=round_id,
+                    artifact_kind="explanation",
+                    input_revision=1,
+                    actual_input_digest="a" * 64,
+                    actual_model_ref="model-delivery",
+                    result_digest="b" * 64,
+                    source_available_state="available",
+                )
+            )
+            await conn.execute(
                 sa.insert(AgentOperation).values(
                     user_scope=_USER_SCOPE,
                     operation_id=delivery_op,
@@ -1303,7 +1333,6 @@ async def test_cleanup_clears_delivery_manifest_and_reports_cleaned(real_embedde
                     phase="result_saved",
                     effect_state="confirmed",
                     io_state="known",
-                    delivery_manifest=encode_delivery_manifest(manifest),
                 )
             )
             await conn.execute(
@@ -1320,6 +1349,11 @@ async def test_cleanup_clears_delivery_manifest_and_reports_cleaned(real_embedde
                     result_payload={"rows": [1, 2]},
                 )
             )
+
+        # 交付事实经真实写路径落库（同时写 artifact 身份），清理后才可报「已清理」。
+        await dao.save_delivery_phase(
+            user_scope=_USER_SCOPE, operation_id=delivery_op, expected_revision=1, manifest=manifest
+        )
 
         touched = await dao.tombstone_cleanup_text(_USER_SCOPE, session_ids=[session_id])
 

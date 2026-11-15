@@ -335,6 +335,12 @@ async def test_content_manifest_is_part_of_cleanup_identity(dao: AgentDao) -> No
         await dao.save_cleanup_job(_record(job_id))
     assert none_exc.value.code is AgentErrorCode.INPUT_CONFLICT
 
+    # 入口即校验规范 JSON：不可承载类型不得先入库成功、重放时才炸。
+    with pytest.raises(AgentServiceError) as bad_exc:
+        await dao.save_cleanup_job(_record(_job_id()), content_manifest={"ratio": 1.5})
+    assert bad_exc.value.code is AgentErrorCode.INPUT_INVALID
+    assert "canonical JSON" in str(bad_exc.value)
+
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_fence_rejects_verified_record(dao: AgentDao) -> None:

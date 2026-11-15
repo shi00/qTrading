@@ -1663,8 +1663,9 @@ class AgentDao(BaseDao):
           （初始态，不等于失败/unknown）；
         - 已存 manifest 不可解码 → ``OPERATION_UNKNOWN``，不静默当作未开始；
         - 行上 artifact 身份与 manifest 不一致 → ``OPERATION_UNKNOWN``（坏行）；
-        - 会话已联合清理（``cleaned_at`` 非空）且 manifest 已清 → 返回
-          ``manifest=None`` + ``manifest_cleaned=True``，不得读成「从未交付」（R21）；
+        - 会话已联合清理（``cleaned_at`` 非空）且该 operation 曾落过交付（artifact
+          身份已写）而 manifest 已清 → 返回 ``manifest=None`` + ``manifest_cleaned=True``，
+          不得读成「从未交付」（R21）；从未交付者仍报初始态；
         - 只读原事实，不按当前表单重推目标/格式，不改任何状态。
         """
 
@@ -6439,8 +6440,9 @@ class AgentDao(BaseDao):
         ``result_digest``、命令 ``input_digest``）换固定 tombstone 摘要。身份、fence、
         unknown/phase、计量与 ``attempt_refs`` 等核定所需非正文引用保原值。
 
-        交付回执清空后由 ``read_delivery`` 报 ``manifest_cleaned=True``（衍生自
-        所属会话 ``cleaned_at``），不把「已交付但已清理」读成「从未交付」。
+        交付回执清空后由 ``read_delivery`` 报 ``manifest_cleaned=True``（会话
+        ``cleaned_at`` 非空且 artifact 身份仍在，即确曾交付），不把「已交付但已清理」
+        读成「从未交付」。
         """
 
         self._check_engine()
@@ -6731,6 +6733,14 @@ class AgentDao(BaseDao):
         self._check_engine()
         engine = self._require_async_engine()
         identity = encode_cleanup_identity_set(record)
+        label = f"{record.user_scope}/{record.cleanup_job_id}"
+        try:
+            # 入口即校验规范 JSON：不能入库成功而重放时才因不可承载类型炸掉。
+            canonical_manifest = json_doc(content_manifest)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"content_manifest must be canonical JSON: {exc.code}", label
+            ) from exc
         statement = sa.insert(AgentCleanupJob).values(
             user_scope=record.user_scope,
             cleanup_job_id=record.cleanup_job_id,
@@ -6751,11 +6761,11 @@ class AgentDao(BaseDao):
             self._require_same_cleanup_identity(existing, record, exc)
             existing_manifest = await self._load_cleanup_content_manifest(record.user_scope, record.cleanup_job_id)
             # 规范 JSON 比较：tuple/list、键序与 JSONB 反序列化差异不得误判为异输入。
-            if json_doc(existing_manifest) != json_doc(content_manifest):
+            if json_doc(existing_manifest) != canonical_manifest:
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT,
                     "cleanup job already exists with different content manifest",
-                    f"{record.user_scope}/{record.cleanup_job_id}",
+                    label,
                 ) from exc
             return False
         return True
