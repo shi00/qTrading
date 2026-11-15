@@ -8,8 +8,8 @@
 - XLSX 使用同一不可变 snapshot 字节的两次独立只读打开（``data_only=False`` /
   ``data_only=True``），按 ``(sheet, coordinate)`` 配对公式与缓存，并有界探测
   worksheet XML 区分缓存不存在/存在但空/错误/类型不可核；
-- PDF / PNG / JPEG 依赖（pypdf / Pillow）未安装时明确 ``parser_dependency_missing``，
-  不伪造解码结果。
+- PDF / PNG / JPEG 解析依赖（pypdf / Pillow）已按 Q5/Q3 裁决纳入正式依赖；
+  结构不可读仍明确 ``invalid_structure``，不伪造解码结果。
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time
 from typing import Any, Final
 from xml.etree import ElementTree
+
+from PIL import Image
+from pypdf import PdfReader
 
 from core.agent_types import (
     AgentValidationError,
@@ -791,10 +794,6 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
     _reject_unsupported_selection(selection, (PagesRange,))
     _check_no_overlap(selection, PagesRange)
     try:
-        from pypdf import PdfReader  # type: ignore[reportMissingImports]  # 可选依赖：未安装时明确能力未核
-    except ImportError as exc:
-        raise AttachmentParseError("parser_dependency_missing", "pypdf is not installed") from exc
-    try:
         reader = PdfReader(io.BytesIO(data), strict=True)
         total_pages = len(reader.pages)
         if selection.kind == "all":
@@ -836,10 +835,6 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
 
 def _parse_image(data: bytes, selection: Selection) -> ParsedAttachment:
     _reject_unsupported_selection(selection, ())
-    try:
-        from PIL import Image  # 延迟导入：未安装时明确能力未核
-    except ImportError as exc:
-        raise AttachmentParseError("parser_dependency_missing", "Pillow is not installed") from exc
     try:
         with Image.open(io.BytesIO(data)) as image:
             image.verify()

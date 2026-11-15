@@ -594,19 +594,12 @@ class TestWorkerLifecycle:
             worker._validate_request(_request(b"x" * 20_000_001))  # noqa: SLF001  # 直接验证前置限额路径
         assert exc.value.code == "attachment_bytes_exceeded"
 
-    def test_pdf_dependency_missing_is_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # 依赖已按 Q3 授权安装（pypdf==6.19.0）：以 sys.modules 注入缺失确定性地覆盖该分支
-        monkeypatch.setitem(sys.modules, "pypdf", None)
-        with pytest.raises(AttachmentParseError) as exc:
-            _parse(AttachmentKind.PDF, b"%PDF-" + b"1.4\n")
-        assert exc.value.code == "parser_dependency_missing"
-
     def test_pdf_malformed_structure_is_explicit(self) -> None:
         with pytest.raises(AttachmentParseError) as exc:
             _parse(AttachmentKind.PDF, b"%PDF-" + b"1.4\n")
         assert exc.value.code == "invalid_structure"
 
-    def test_image_dependency_missing_or_structure_error_is_explicit(self) -> None:
+    def test_image_malformed_structure_is_explicit(self) -> None:
         with pytest.raises(AttachmentParseError) as exc:
             _parse(AttachmentKind.PNG, b"\x89PNG\r\n\x1a\n")
-        assert exc.value.code in {"parser_dependency_missing", "invalid_structure"}
+        assert exc.value.code == "invalid_structure"
