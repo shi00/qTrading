@@ -43,6 +43,14 @@ from utils.singleton_registry import register_singleton
 _CONCEPT_SOURCE_MAX_ATTEMPTS = 2
 _CONCEPT_SOURCE_RETRY_DELAY_SECONDS = 2.0
 
+# R02: 日更各阶段终态聚合的严重度序（单调升级，后一阶段不得降级前一阶段）。
+_DAILY_STAGE_STATUS_SEVERITY = {
+    SyncStatus.SUCCESS.value: 0,
+    SyncStatus.PARTIAL.value: 1,
+    SyncStatus.FAILED.value: 2,
+    SyncStatus.CANCELLED.value: 3,
+}
+
 
 async def _await_cancel_aware(awaitable, cancel_check):
     """将 awaitable 与取消轮询竞速，使 cancel_event flag 协作式取消能打断长 await。
@@ -395,6 +403,46 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # For compatibility with some callers expecting data, we fetch it back from cache
         return await self.get_screening_data(trade_date)
 
+    def _merge_daily_stage_result(
+        self,
+        aggregate: SyncResult,
+        stage_result: SyncResult | None,
+        stage_name: str,
+    ) -> None:
+        """R02: 把单个阶段的终态与诊断信息传播到日更聚合结果。
+
+        仅传播终态/诊断（status、errors、warnings、失败表、说明），**不合并计数**：
+        ``days_processed`` / ``rows_written`` 保持行情阶段语义，避免财务写入量稀释
+        「本日行情 0 行」的空日告警。终态按 ``_DAILY_STAGE_STATUS_SEVERITY`` 单调
+        升级，任一阶段取消/失败都不会被后续成功阶段覆盖；真正的
+        ``asyncio.CancelledError`` 不在此处理，仍向上抛出（R2）。
+        """
+        if stage_result is None:
+            return
+        stage_status = getattr(stage_result, "status", None)
+        if isinstance(stage_status, str):
+            current_severity = _DAILY_STAGE_STATUS_SEVERITY.get(aggregate.status, 0)
+            stage_severity = _DAILY_STAGE_STATUS_SEVERITY.get(stage_status, 0)
+            if stage_severity > current_severity:
+                aggregate.status = stage_status
+            if stage_status != SyncStatus.SUCCESS.value:
+                logger.warning(
+                    "[DataProcessor] Daily update | stage %s ended as %s",
+                    stage_name,
+                    stage_status,
+                )
+        aggregate.errors.extend(getattr(stage_result, "errors", None) or [])
+        aggregate.warnings.extend(getattr(stage_result, "warnings", None) or [])
+        for table in getattr(stage_result, "failed_critical_tables", None) or []:
+            if table not in aggregate.failed_critical_tables:
+                aggregate.failed_critical_tables.append(table)
+        for table in getattr(stage_result, "failed_optional_tables", None) or []:
+            if table not in aggregate.failed_optional_tables:
+                aggregate.failed_optional_tables.append(table)
+        stage_message = getattr(stage_result, "message", "") or ""
+        if stage_message:
+            aggregate.message = f"{aggregate.message} | {stage_message}" if aggregate.message else stage_message
+
     async def run_daily_update(self, progress_callback=None):
         from data.persistence.review_manager import ReviewManager
         from data.sync.base import SyncResult
@@ -410,9 +458,23 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # D1-4: 已重命名为 days_processed（天数语义）；rows_written 已由 sync_daily_market_snapshot 透传填充。
         sync_result.days_processed = 1
 
+        # R02/C14: 行情阶段取消/中止后不再执行财务与复盘——取消语义是「本次不再推进」，
+        # 继续跑后续阶段既浪费配额，也会让「行情取消 + 财务成功」被误判为整轮成功。
+        if sync_result.status == SyncStatus.CANCELLED.value:
+            logger.info("[DataProcessor] Daily update | market stage cancelled; skipping financial & review stages.")
+            return sync_result
+
         if progress_callback:
             progress_callback(0.5, 1.0, Message("init_sync_financial"))
-        await self.sync_financial_reports()
+        # R02: 财务阶段改用返回完整 SyncResult 的入口——旧 sync_financial_reports 只回传
+        # added，会丢失 cancelled/failed/partial（其整数契约保留给其他调用方）。
+        financial_result = await self.sync_comprehensive_fundamentals()
+        self._merge_daily_stage_result(sync_result, financial_result, "financial")
+
+        # 取消时停止后续复盘，且聚合终态 cancelled 使 is_complete=False（不推进整轮完成水位）。
+        if sync_result.status == SyncStatus.CANCELLED.value:
+            logger.info("[DataProcessor] Daily update | financial stage cancelled; skipping review stage.")
+            return sync_result
 
         if progress_callback:
             progress_callback(0.8, 1.0, Message("init_sync_ai_review"))
