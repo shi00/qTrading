@@ -8,6 +8,11 @@ from services.agent_service.attachments import (
     detect_attachment_kind,
 )
 from services.agent_service.business_sources import BusinessSnapshotRead, read_backtest_snapshot
+from services.agent_service.delivery_service import (
+    DeliveryCommandService,
+    DeliveryContext,
+    DeliveryOutcome,
+)
 from services.agent_service.recovery import (
     ManualRecoveryReceipt,
     StartupIsolationReceipt,
@@ -38,6 +43,9 @@ __all__ = [
     "BusinessSnapshotRead",
     "BusinessSourceService",
     "CloseReadinessReceipt",
+    "DeliveryCommandService",
+    "DeliveryContext",
+    "DeliveryOutcome",
     "ManualRecoveryReceipt",
     "StartupIsolationReceipt",
     "StartupOutcome",
