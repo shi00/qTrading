@@ -153,6 +153,53 @@ def test_end_tag_id_mismatch_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 行切分与解析器一致：Unicode 行分隔符 / CRLF 下围栏假作者恒缺失、真实块准确
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+def test_unicode_line_separator_keeps_fenced_marker_unreachable(sep: str) -> None:
+    """围栏前含 Unicode 行分隔符时，围栏内成对标记仍不得被认作现行块。"""
+    text = f"a{sep}b{sep}c{sep}d\n\n```\n<!-- generated:fake -->\n<!-- /generated -->\n```\n"
+    assert dg.scan_blocks(text, "markdown") == {}
+    with pytest.raises(dg.MissingBlockError, match="缺少生成块 'fake'"):
+        dg.replace_block(text, "markdown", "fake", ["changed"])
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+def test_unicode_line_separator_real_block_position_and_content(sep: str) -> None:
+    """Unicode 正文原样保留：真实块位置/内容准确，替换不吞正文。"""
+    text = f"前言{sep}续行\n\n<!-- generated:real -->\n- 旧\n<!-- /generated -->\n尾行\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert (blocks["real"].start_line, blocks["real"].end_line) == (3, 5)
+    assert blocks["real"].content_lines == ("- 旧",)
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert f"前言{sep}续行" in replaced
+    assert "- 旧" not in replaced and "- 新" in replaced
+    assert replaced.endswith("尾行\n")
+
+
+def test_crlf_fenced_marker_not_a_block() -> None:
+    """CRLF 原文：围栏内成对标记不构成现行块。"""
+    text = "a\r\n\r\n```\r\n<!-- generated:fake -->\r\n<!-- /generated -->\r\n```\r\n"
+    assert dg.scan_blocks(text, "markdown") == {}
+    with pytest.raises(dg.MissingBlockError, match="缺少生成块 'fake'"):
+        dg.replace_block(text, "markdown", "fake", ["changed"])
+
+
+def test_crlf_real_block_position_content_and_line_ending() -> None:
+    """CRLF 原文：真实块位置/内容准确，替换后行尾仍为 CRLF。"""
+    text = "# 目标\r\n\r\n<!-- generated:real -->\r\n- 旧\r\n<!-- /generated -->\r\n尾行\r\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert (blocks["real"].start_line, blocks["real"].end_line) == (3, 5)
+    assert blocks["real"].content_lines == ("- 旧",)
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert "\n" not in replaced.replace("\r\n", ""), "替换后不得残留裸 LF"
+    assert "<!-- generated:real -->\r\n- 新\r\n<!-- /generated -->" in replaced
+    assert replaced.endswith("尾行\r\n")
+
+
+# ---------------------------------------------------------------------------
 # 块协议：YAML 成对注释块
 # ---------------------------------------------------------------------------
 

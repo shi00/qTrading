@@ -234,7 +234,9 @@ def _scan_markdown(text: str) -> dict[str, BlockSpan]:
     """Markdown 成对注释块扫描（栈式配对；嵌套/孤儿/重复/未闭合显式拒绝）。
 
     代码块（两类围栏 + 长围栏 + 缩进块）内的生成标记只是示例文本，不构成现行块：
-    行号边界统一经 docs_markdown 解析视图判定，避免围栏中的标记被当作可修改块。
+    行号边界统一经 docs_markdown 解析视图判定，行切分同用解析器行语义
+    （仅 LF / CRLF / CR 计行，U+2028 / U+2029 等 Unicode 行分隔符留在行内），
+    避免 scan 行号与 token.map 错位后围栏中的标记被当作可修改块。
     代码语境只排除**块边界判定**：有效块内部的行（含围栏与缩进代码行）完整计入
     ``content_lines``，否则块内围栏内容不参与一致性比较，手改代码不会被判为漂移。
     """
@@ -244,7 +246,7 @@ def _scan_markdown(text: str) -> dict[str, BlockSpan]:
     open_start = 0
     open_tag = ""
     content: list[str] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    for lineno, raw in enumerate(docs_markdown.split_source_lines(text), start=1):
         if lineno in code_lines:
             if open_id is not None:
                 content.append(raw)
@@ -295,7 +297,7 @@ def _scan_yaml(text: str) -> dict[str, BlockSpan]:
     open_start = 0
     open_tag = ""
     content: list[str] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    for lineno, raw in enumerate(docs_markdown.split_source_lines(text), start=1):
         start_match = _YAML_START_RE.match(raw)
         end_match = _YAML_END_RE.match(raw)
         if open_id is None:
@@ -361,7 +363,7 @@ def replace_block(text: str, fmt: str, block_id: str, new_lines: Sequence[str]) 
     if block_id not in blocks:
         raise MissingBlockError(f"文本中缺少生成块 {block_id!r}")
     span = blocks[block_id]
-    lines = text.splitlines()
+    lines = list(docs_markdown.split_source_lines(text))
     replacement = [span.start_tag_line, *list(new_lines), span.end_tag_line]
     rebuilt = [*lines[: span.start_line - 1], *replacement, *lines[span.end_line :]]
     return _join_lines(text, rebuilt)
