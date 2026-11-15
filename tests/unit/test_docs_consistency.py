@@ -319,6 +319,7 @@ def _actual_registered_singletons() -> frozenset[str]:
     import data.persistence.embedded_postgres.service  # noqa: F401 (side-effect 注册)
     import data.persistence.metadata_manager  # noqa: F401 (side-effect 注册)
     import services.ai_service  # noqa: F401 (side-effect 注册)
+    import services.agent_service.workflows  # noqa: F401 (side-effect 注册)
     import services.embedded_pg_maintenance_service  # noqa: F401 (side-effect 注册)
     import services.local_model_manager  # noqa: F401 (side-effect 注册)
     import services.news_sentiment_index_service  # noqa: F401 (side-effect 注册)
