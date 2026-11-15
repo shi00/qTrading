@@ -7,7 +7,8 @@
 - rename/pin/archive/unarchive：行锁 CAS，成功 revision+1；归档不改运行；
 - 预期版不符 → REVISION_CONFLICT 且零新事实；并发同预期版单胜者；
 - 跨用户域/不存在会话 → INPUT_INVALID；
-- revise/branch 未落地 → INPUT_INVALID（显式，不写半链事实）。
+- revise/branch 需源消息身份/版本（缺失 → INPUT_INVALID，不写半链事实）；
+- 并发同命令键（update/create）均查回同一原回执，不重复推进。
 """
 
 # pyright: reportPrivateUsage=false
@@ -275,6 +276,54 @@ class TestMetadataActions:
         row = await _session_row(real_embedded_pg.url)
         assert row.revision == 2
         assert row.title in ("A", "B")
+        assert len(await _command_rows(real_embedded_pg.url)) == 1
+
+    async def test_concurrent_same_key_update_replays_original_receipt(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        command = _command(action=SessionAction.RENAME, expected=1, title="同一标题")
+        results = await asyncio.gather(
+            dao.change_session(command),
+            dao.change_session(command),
+            return_exceptions=True,
+        )
+        receipts = [item for item in results if not isinstance(item, BaseException)]
+        assert len(receipts) == 2, results
+        assert receipts[0] == receipts[1]
+        row = await _session_row(real_embedded_pg.url)
+        assert row.revision == 2
+        assert row.title == "同一标题"
+        assert len(await _command_rows(real_embedded_pg.url)) == 1
+
+    async def test_concurrent_same_key_create_replays_original_receipt(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        command = _command(action=SessionAction.CREATE, expected=0, title="并发会话")
+        results = await asyncio.gather(
+            dao.change_session(command),
+            dao.change_session(command),
+            return_exceptions=True,
+        )
+        receipts = [item for item in results if not isinstance(item, BaseException)]
+        assert len(receipts) == 2, results
+        assert receipts[0] == receipts[1]
+        row = await _session_row(real_embedded_pg.url)
+        assert row.revision == 1
+        assert row.title == "并发会话"
+        assert len(await _command_rows(real_embedded_pg.url)) == 1
+
+    async def test_concurrent_different_keys_same_session_single_winner(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        results = await asyncio.gather(
+            dao.change_session(_command(action=SessionAction.CREATE, expected=0, title="A", command_id="cmd-a")),
+            dao.change_session(_command(action=SessionAction.CREATE, expected=0, title="B", command_id="cmd-b")),
+            return_exceptions=True,
+        )
+        receipts = [item for item in results if not isinstance(item, BaseException)]
+        errors = [item for item in results if isinstance(item, AgentServiceError)]
+        assert len(receipts) == 1, results
+        assert len(errors) == 1 and errors[0].code is AgentErrorCode.INPUT_INVALID
+        row = await _session_row(real_embedded_pg.url)
+        assert row.revision == 1
         assert len(await _command_rows(real_embedded_pg.url)) == 1
 
     @pytest.mark.parametrize("action", [SessionAction.REVISE, SessionAction.BRANCH])

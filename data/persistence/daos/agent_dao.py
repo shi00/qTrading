@@ -6610,7 +6610,7 @@ class AgentDao(BaseDao):
         for ref in source_refs:
             asset = (
                 await conn.execute(
-                    sa.select(AgentAssetVersion.asset_id).where(
+                    sa.select(AgentAssetVersion.asset_id, AgentAssetVersion.digest).where(
                         AgentAssetVersion.user_scope == user_scope,
                         AgentAssetVersion.asset_id == ref.source_id,
                         AgentAssetVersion.asset_version == ref.source_version,
@@ -6621,6 +6621,13 @@ class AgentDao(BaseDao):
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_INVALID,
                     "draft references a source version not registered in user scope",
+                    identity,
+                )
+            if asset.digest != ref.source_digest:
+                # 版本存在但摘要不符：草稿引用的不是该受管版本的事实，fail-closed。
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "draft source digest does not match stored source version",
                     identity,
                 )
             await conn.execute(
@@ -6689,7 +6696,23 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            # 1. 命令键查重（先于目标读写：create 重放同样按原回执返回）。
+            # 0. 更新类动作先行锁目标会话行：并发同键请求在此排队，待先提交者
+            #    完成后于锁内查重 → 查回原回执（create/branch 无行可锁，见下）。
+            locked_row = None
+            if command.action not in (SessionAction.CREATE, SessionAction.BRANCH):
+                locked_row = (
+                    await conn.execute(
+                        sa.select(AgentSession.revision)
+                        .where(
+                            AgentSession.user_scope == user_scope,
+                            AgentSession.session_id == command.session_id,
+                        )
+                        .with_for_update()
+                    )
+                ).first()
+
+            # 1. 命令键查重（更新类已在行锁内；create/branch 的重放走快路径，
+            #    并发同键在插入冲突后复查）。
             existing = (
                 await conn.execute(
                     sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
@@ -6777,43 +6800,70 @@ class AgentDao(BaseDao):
                         AgentErrorCode.INPUT_INVALID, "session already exists in user scope", identity
                     )
                 try:
-                    await conn.execute(
-                        sa.insert(AgentSession).values(
-                            user_scope=user_scope,
-                            session_id=command.session_id,
-                            title=command.title,
-                            source_module=command.command.source_module,
-                            parent_session_id=parent_session_id,
-                            branch_metadata=branch_metadata,
-                            causal_head_ref=causal_head_ref,
+                    async with conn.begin_nested():
+                        await conn.execute(
+                            sa.insert(AgentSession).values(
+                                user_scope=user_scope,
+                                session_id=command.session_id,
+                                title=command.title,
+                                source_module=command.command.source_module,
+                                parent_session_id=parent_session_id,
+                                branch_metadata=branch_metadata,
+                                causal_head_ref=causal_head_ref,
+                            )
                         )
-                    )
                 except IntegrityError as exc:
-                    # 并发创建同一会话：先提交者胜，败者不覆盖、不静默复用。
+                    # 并发同键：先提交者已写入命令行；保存点回滚后在同一事务内
+                    # 复查命令键 → 同输入返回原回执，异输入/目标被占用才冲突。
+                    replay = (
+                        await conn.execute(
+                            sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
+                                AgentCommand.user_scope == user_scope,
+                                AgentCommand.target_id == command.session_id,
+                                AgentCommand.client_command_id == command.command.command_id,
+                            )
+                        )
+                    ).first()
+                    if replay is not None:
+                        if replay.input_digest != digest:
+                            raise AgentServiceError(
+                                AgentErrorCode.INPUT_CONFLICT,
+                                "same session command key with different input",
+                                identity,
+                            ) from exc
+                        if replay.receipt_payload is None:
+                            raise AgentServiceError(
+                                AgentErrorCode.OPERATION_UNKNOWN,
+                                "original session command receipt unavailable",
+                                identity,
+                            ) from exc
+                        try:
+                            return decode_command_receipt(replay.receipt_payload)
+                        except AgentValidationError as decode_exc:
+                            raise AgentServiceError(
+                                AgentErrorCode.OPERATION_UNKNOWN,
+                                f"stored session command receipt invalid: {decode_exc.code}",
+                                identity,
+                            ) from decode_exc
+                    if "agent_session_pkey" in str(exc.orig):
+                        # 竞态：另一命令已建同名会话；不覆盖、不静默复用。
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID, "session already exists in user scope", identity
+                        ) from exc
                     raise AgentServiceError(
                         AgentErrorCode.INPUT_CONFLICT, "session created concurrently by another command", identity
                     ) from exc
                 current_revision = 1
             else:
-                row = (
-                    await conn.execute(
-                        sa.select(AgentSession.revision)
-                        .where(
-                            AgentSession.user_scope == user_scope,
-                            AgentSession.session_id == command.session_id,
-                        )
-                        .with_for_update()
-                    )
-                ).first()
-                if row is None:
+                if locked_row is None:
                     raise AgentServiceError(
                         AgentErrorCode.INPUT_INVALID, "target session does not exist in user scope", identity
                     )
-                if int(row.revision) != command.expected_session_revision:
+                if int(locked_row.revision) != command.expected_session_revision:
                     raise AgentServiceError(
                         AgentErrorCode.REVISION_CONFLICT, "session revision does not match expected", identity
                     )
-                current_revision = int(row.revision) + 1
+                current_revision = int(locked_row.revision) + 1
                 values: dict[str, Any] = {"revision": current_revision, "updated_at": now}
                 if command.action is SessionAction.RENAME:
                     values["title"] = command.title

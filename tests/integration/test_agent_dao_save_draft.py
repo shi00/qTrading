@@ -436,3 +436,26 @@ class TestDraftSourceLinks:
             await dao.save_draft(_command(expected=1, payload=self._payload_with("src-1")))
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
         assert await _draft_links(real_embedded_pg.url) == []
+
+    async def test_source_digest_mismatch_rejected_without_side_effects(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, "src-1")
+        payload = _payload(
+            source_refs=(
+                SourceVersionRef(
+                    source_kind=SourceKind.USER_MESSAGE,
+                    source_id="src-1",
+                    source_version="1",
+                    source_digest="b" * 64,
+                ),
+            )
+        )
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_draft(_command(expected=1, payload=payload))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+        row = await _session_row(real_embedded_pg.url)
+        assert row.draft_revision == 1 and row.draft_payload is None
+        assert await _command_rows(real_embedded_pg.url) == []
+        assert await _draft_links(real_embedded_pg.url) == []

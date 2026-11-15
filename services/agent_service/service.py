@@ -221,10 +221,11 @@ class AgentService:
         return await self._dao.save_draft(command)
 
     async def change_session(self, command: SessionChangeCommand) -> CommandReceipt:
-        """会话元数据命令（§4.2 ``change_session``）：create/rename/pin/archive/unarchive。
+        """会话元数据命令（§4.2 ``change_session``）：元数据五动作 + 修订/分支。
 
-        边界整份校验（动作自身字段、预期版与命令引用一致）；``revise``/``branch``
-        涉及消息因果前缀与分支创建，随 F-03-2b 交付，当前显式拒绝而非静默忽略。
+        边界整份校验（动作自身字段、预期版与命令引用一致、源消息身份/版本）；
+        ``revise`` 只保存新因果前缀，``branch`` 只新建会话并引用原前缀，均不
+        复制正文、不派发；CAS/重放/冲突由 DAO 事务裁决。
         """
 
         self._require_open("change_session")

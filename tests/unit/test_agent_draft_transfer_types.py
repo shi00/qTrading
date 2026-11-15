@@ -406,6 +406,12 @@ class TestEmptyDraftSemantics:
         )
         assert is_empty_draft_payload(payload) is False
 
+    def test_non_default_mode_is_not_empty_even_without_customized_fields(self) -> None:
+        assert (
+            is_empty_draft_payload(_payload(text="", model_selection=None, object_context=None, mode=Mode.PLAN))
+            is False
+        )
+
     def test_any_source_or_skill_or_mcp_selection_is_not_empty(self) -> None:
         from core.agent_types import MCPServiceIdentity, SkillVersionRef, SourceKind, SourceVersionRef
 

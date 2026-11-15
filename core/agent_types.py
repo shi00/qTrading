@@ -7222,13 +7222,15 @@ def is_empty_draft_payload(payload: DraftPayload | None) -> bool:
     ``None``（无稿）与「空稿且无任何未发送选择」均可接收移入；**正文空但有
     对象/来源/手选模型/模式/用途/截止日/发送目标/Skill/MCP/角色/Prompt 等
     未发送选择不是空位**。``customized_fields`` 非空即表示用户触碰过默认值
-    （含把默认项显式选成默认值），按有稿处理。
+    （含把默认项显式选成默认值），按有稿处理；``mode`` 非默认值（DISCUSS）
+    同样按有选择处理，避免旧调用方漏填 ``customized_fields`` 时被误判为空位。
     """
 
     if payload is None:
         return True
     return (
         payload.text == ""
+        and payload.mode is Mode.DISCUSS
         and payload.model_selection is None
         and not payload.source_refs
         and not payload.skill_versions
