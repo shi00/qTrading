@@ -9,6 +9,7 @@ import inspect
 import logging
 import math
 import pytest
+from contextlib import asynccontextmanager
 from typing import cast, Any
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -41,6 +42,29 @@ def _setup_mock_engine_begin(mock_conn):
     mock_engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
     mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
     return mock_engine
+
+
+@asynccontextmanager
+async def _capture_read_db(sql_rows):
+    """D05-004: 提供可记录「实际下发 SQL / 参数 / 取数行数」的 BaseDao 替身。
+
+    ``sql_rows`` 为 DB 侧返回的行（fetchall 结果）；可据此断言下推后的 SQL 只可能
+    取到 max_rows+1 行，而不是物化完整结果后才拒绝。
+    """
+    mock_conn = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = sql_rows
+    mock_result.keys.return_value = ["id"] if sql_rows else []
+    mock_conn.exec_driver_sql.return_value = mock_result
+    dao = BaseDao(_setup_mock_engine_connect(mock_conn))
+    with (
+        patch("data.cache.cache_manager.CacheManager") as mock_cm,
+        patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+    ):
+        mock_cm._instance = MagicMock()
+        mock_cm._instance._disposed = False
+        mock_tpm.return_value.run_async = AsyncMock(return_value=pd.DataFrame())
+        yield dao, mock_conn
 
 
 class TestBaseDaoPrepareDataParams:
@@ -2880,6 +2904,93 @@ class TestBaseDaoReadDbMaxRowsAndParams:
             await dao._read_db("SELECT id FROM t -- 按主键查询\n", max_rows=10)
             got_sql = mock_conn.exec_driver_sql.call_args[0][0]
             assert got_sql == "SELECT id FROM t -- 按主键查询\nLIMIT 11"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sql", "max_rows", "expected_sql"),
+        [
+            (
+                "SELECT id FROM t ORDER BY id LIMIT 1000000",
+                10,
+                "SELECT * FROM (\nSELECT id FROM t ORDER BY id LIMIT 1000000\n) AS _bounded_rows\nLIMIT 11",
+            ),
+            (
+                "SELECT id FROM t ORDER BY id LIMIT ALL",
+                10,
+                "SELECT * FROM (\nSELECT id FROM t ORDER BY id LIMIT ALL\n) AS _bounded_rows\nLIMIT 11",
+            ),
+            (
+                "WITH latest AS (SELECT id FROM t ORDER BY id DESC LIMIT 1)\nSELECT * FROM latest",
+                10,
+                "WITH latest AS (SELECT id FROM t ORDER BY id DESC LIMIT 1)\nSELECT * FROM latest\nLIMIT 11",
+            ),
+            (
+                "SELECT * FROM t LEFT JOIN LATERAL (SELECT id FROM s ORDER BY id LIMIT 1) x ON TRUE",
+                10,
+                "SELECT * FROM t LEFT JOIN LATERAL (SELECT id FROM s ORDER BY id LIMIT 1) x ON TRUE\nLIMIT 11",
+            ),
+            (
+                "SELECT 'LIMIT 1000000' AS note FROM t",
+                10,
+                "SELECT 'LIMIT 1000000' AS note FROM t\nLIMIT 11",
+            ),
+            (
+                "SELECT id FROM t /* LIMIT 1000000 */ ORDER BY id",
+                10,
+                "SELECT id FROM t /* LIMIT 1000000 */ ORDER BY id\nLIMIT 11",
+            ),
+            ("SELECT id FROM t;", 10, "SELECT id FROM t\nLIMIT 11"),
+            ("SELECT id FROM t ORDER BY id LIMIT 11", 10, "SELECT id FROM t ORDER BY id LIMIT 11"),
+            ("SELECT id FROM t ORDER BY id LIMIT 5", 10, "SELECT id FROM t ORDER BY id LIMIT 5"),
+        ],
+        ids=[
+            "larger_limit_tightened",
+            "limit_all_tightened",
+            "cte_inner_limit_ignored",
+            "lateral_inner_limit_ignored",
+            "string_limit_ignored",
+            "comment_limit_ignored",
+            "trailing_semicolon",
+            "limit_equal_to_bound_kept",
+            "smaller_limit_kept",
+        ],
+    )
+    async def test_max_rows_bound_sql_forms(self, sql, max_rows, expected_sql):
+        """D05-004: 顶层 LIMIT 经词法扫描判定——更大/ALL 收紧为子查询包裹，
+        更严格 LIMIT 保留，字符串/注释/CTE/LATERAL 内的 LIMIT 不得影响下推。"""
+        async with _capture_read_db([]) as (dao, mock_conn):
+            await dao._read_db(sql, max_rows=max_rows)
+        assert mock_conn.exec_driver_sql.call_args[0][0] == expected_sql
+
+    @pytest.mark.asyncio
+    async def test_max_rows_bound_limit_param_is_wrapped_and_params_kept(self):
+        """D05-004: 绑定 LIMIT（$1）无法静态判定，必须包裹收紧且保留原参数。"""
+        async with _capture_read_db([]) as (dao, mock_conn):
+            await dao._read_db("SELECT id FROM t ORDER BY id LIMIT $1", (1_000_000,), max_rows=10)
+        assert mock_conn.exec_driver_sql.call_args[0][0] == (
+            "SELECT * FROM (\nSELECT id FROM t ORDER BY id LIMIT $1\n) AS _bounded_rows\nLIMIT 11"
+        )
+        assert mock_conn.exec_driver_sql.call_args[0][1] == (1_000_000,)
+
+    @pytest.mark.asyncio
+    async def test_max_rows_larger_limit_fetches_at_most_bound(self):
+        """D05-004: 原 SQL 带大 LIMIT 时，取数上界为 max_rows+1，越界在物化前即拒绝。"""
+        rows = [(i,) for i in range(11)]
+        async with _capture_read_db(rows) as (dao, mock_conn):
+            with pytest.raises(ValueError, match="exceeding max_rows limit"):
+                await dao._read_db("SELECT id FROM t LIMIT 1000000", max_rows=10)
+        sent_sql = mock_conn.exec_driver_sql.call_args[0][0]
+        assert sent_sql.endswith("\nLIMIT 11")
+        assert mock_conn.exec_driver_sql.call_args[0][1] == ()
+
+    @pytest.mark.asyncio
+    async def test_max_rows_within_bound_returns_frame(self):
+        """D05-004: 取数不超过 max_rows 时不误判越界。"""
+        rows = [(i,) for i in range(10)]
+        async with _capture_read_db(rows) as (dao, mock_conn):
+            df = await dao._read_db("SELECT id FROM t LIMIT 1000000", max_rows=10)
+        assert df is not None
+        assert mock_conn.exec_driver_sql.call_args[0][0].endswith("\nLIMIT 11")
 
     @pytest.mark.asyncio
     async def test_max_rows_negative_raises_value_error(self):

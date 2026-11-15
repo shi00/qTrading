@@ -47,8 +47,133 @@ _LONG_TX_ROW_THRESHOLD = 20_000
 # 已准入事务后续语句不再等待维护事件（见 _wait_maintenance_guard），DDL 只会按数据库
 # 锁等待事务自然结束，不会与「事务内等维护事件」构成锁环。
 _MAINTENANCE_DRAIN_TIMEOUT_SEC = 5.0
-# PRF-06: 匹配顶层 LIMIT 子句（排除子查询括号内的 LIMIT），避免重复追加语法错误
-_HAS_TOP_LEVEL_LIMIT = re.compile(r"\bLIMIT\b(?![^()]*\))", re.IGNORECASE)
+# D05-004: max_rows 下推用的常量包裹模板（R4 例外仅限常量包裹：只拼常量片段与受控 int，
+# 调用方 SQL 原样内嵌，不做任何改写；LIMIT 数值来自 max_rows，无注入面）。
+_BOUNDED_SUBQUERY_PREFIX = "SELECT * FROM (\n"
+_BOUNDED_SUBQUERY_SUFFIX = "\n) AS _bounded_rows\nLIMIT "
+_DOLLAR_QUOTE_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+_LIMIT_KEYWORD = "LIMIT"
+
+
+def _skip_quoted(sql: str, start: int, quote: str) -> int:
+    """跳过 quote 包裹的片段，返回其后索引；SQL 内连续两个 quote 视为转义。"""
+    i = start + 1
+    n = len(sql)
+    while i < n:
+        if sql[i] == quote:
+            if i + 1 < n and sql[i + 1] == quote:
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return n
+
+
+def _skip_dollar_quoted(sql: str, start: int) -> int | None:
+    """跳过 ``$tag$...$tag$`` 美元引用；非美元引用起始返回 None。"""
+    match = _DOLLAR_QUOTE_TAG.match(sql, start)
+    if match is None:
+        return None
+    tag = match.group(0)
+    end = sql.find(tag, match.end())
+    return len(sql) if end < 0 else end + len(tag)
+
+
+def _skip_block_comment(sql: str, start: int) -> int:
+    """跳过块注释（PostgreSQL 允许嵌套），返回其后索引。"""
+    i = start + 2
+    depth = 1
+    n = len(sql)
+    while i < n and depth > 0:
+        if sql.startswith("/*", i):
+            depth += 1
+            i += 2
+        elif sql.startswith("*/", i):
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return i
+
+
+def _is_limit_keyword_at(sql: str, idx: int) -> bool:
+    """判断 ``idx`` 处是否为独立的 LIMIT 关键字（前后不是标识符字符）。"""
+    if sql[idx : idx + len(_LIMIT_KEYWORD)].upper() != _LIMIT_KEYWORD:
+        return False
+    if idx > 0 and (sql[idx - 1].isalnum() or sql[idx - 1] == "_"):
+        return False
+    after = idx + len(_LIMIT_KEYWORD)
+    return not (after < len(sql) and (sql[after].isalnum() or sql[after] == "_"))
+
+
+def _parse_limit_literal(sql: str, idx: int) -> int | None:
+    """解析 LIMIT 后的纯整数字面量；参数、ALL、表达式均返回 None。"""
+    i = idx
+    n = len(sql)
+    while i < n and sql[i].isspace():
+        i += 1
+    start = i
+    while i < n and sql[i].isdigit():
+        i += 1
+    if i == start:
+        return None
+    if i < n and (sql[i].isalnum() or sql[i] in ("_", ".")):
+        return None
+    return int(sql[start:i])
+
+
+def _find_top_level_limit(sql: str) -> tuple[bool, int | None]:
+    """在括号深度 0 处查找 LIMIT，返回 ``(是否存在, 纯整数字面量值)``。
+
+    D05-004: 以字符级扫描替代正则——跳过单/双引号字符串、美元引用、行注释与
+    块注释，避免字符串或注释中的 "LIMIT" 被误判为顶层 LIMIT（误判会跳过下推，
+    使安全阀在完整物化后才生效）；子查询/CTE/LATERAL 内的 LIMIT 因括号深度 > 0
+    同样不计入顶层。
+    """
+    i = 0
+    depth = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch in ("'", '"'):
+            i = _skip_quoted(sql, i, ch)
+        elif ch == "$":
+            dollar_end = _skip_dollar_quoted(sql, i)
+            i = dollar_end if dollar_end is not None else i + 1
+        elif sql.startswith("--", i):
+            newline = sql.find("\n", i)
+            i = n if newline < 0 else newline + 1
+        elif sql.startswith("/*", i):
+            i = _skip_block_comment(sql, i)
+        elif ch == "(":
+            depth += 1
+            i += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            i += 1
+        elif depth == 0 and _is_limit_keyword_at(sql, i):
+            return True, _parse_limit_literal(sql, i + len(_LIMIT_KEYWORD))
+        else:
+            i += 1
+    return False, None
+
+
+def _apply_max_rows_bound(sql: str, max_rows: int) -> str:
+    """把 max_rows 安全阀下推为 DB 侧行数上界（最多返回 max_rows+1 行）。
+
+    - 无顶层 LIMIT：在末尾追加 ``LIMIT max_rows+1``（换行隔离尾随单行注释）；
+    - 已有顶层 LIMIT 且为纯整数且不超过 ``max_rows+1``：原样保留（业务 limit 更严格）；
+    - 更大 / 参数 / 表达式 / ALL 形态的顶层 LIMIT：外包
+      ``SELECT * FROM (<原 SQL>) AS _bounded_rows LIMIT max_rows+1``，保留原参数、
+      排序与内层 limit 语义，避免完整物化后才拒绝。
+    """
+    normalized = sql.rstrip().rstrip(";").rstrip()
+    has_limit, literal = _find_top_level_limit(normalized)
+    if not has_limit:
+        return normalized + "\nLIMIT " + str(max_rows + 1)
+    if literal is not None and literal <= max_rows + 1:
+        return normalized
+    return "".join((_BOUNDED_SUBQUERY_PREFIX, normalized, _BOUNDED_SUBQUERY_SUFFIX, str(max_rows + 1)))
 
 
 def _build_df_normalized(rows, cols):
@@ -1129,8 +1254,12 @@ class BaseDao:
                 must not be confused with "no data".
             max_rows: Safety valve - if set, raises ValueError when result
                       exceeds this row count to prevent accidental full-table loads.
-                      PRF-06: the constraint is pushed down to a top-level SQL LIMIT
-                      (max_rows+1), so the DB short-circuits before full materialization.
+                      PRF-06/D05-004: the constraint is pushed down to a DB-side row
+                      bound (max_rows+1) — no top-level LIMIT is appended when one
+                      already exists; a stricter top-level LIMIT is kept, otherwise
+                      the SQL is wrapped as ``SELECT * FROM (<sql>) AS _bounded_rows
+                      LIMIT max_rows+1`` so the DB short-circuits before full
+                      materialization.
         """
         if max_rows is not None and (not isinstance(max_rows, int) or max_rows < 0):
             raise ValueError(f"[{self.__class__.__name__}] max_rows must be a non-negative integer, got {max_rows!r}")
@@ -1147,12 +1276,11 @@ class BaseDao:
 
         start_time = time.perf_counter()
 
-        # PRF-06: max_rows 下推至 SQL 层 LIMIT——在 DB 侧截断至 max_rows+1 行，越界即拒绝，
-        # 避免先 fetchall 物化全表后才检查（安全阀在内存峰值过后才生效）。LIMIT 数值为受控 int，无注入面。
-        # 若原 SQL 顶层已含 LIMIT，则不重复追加以避免语法错误；追加时换行隔离单行注释。
-        effective_sql = sql
-        if max_rows is not None and not _HAS_TOP_LEVEL_LIMIT.search(sql):
-            effective_sql = sql.rstrip().rstrip(";").rstrip() + f"\nLIMIT {max_rows + 1}"
+        # PRF-06/D05-004: max_rows 下推至 SQL 层行数上界——在 DB 侧最多取 max_rows+1 行，
+        # 越界即拒绝，避免先 fetchall 物化全表后才检查。顶层 LIMIT 经词法扫描识别
+        # （不受字符串/注释/子查询内 LIMIT 干扰）：更严格的业务 LIMIT 保留，更大/参数/
+        # 表达式 LIMIT 或无 LIMIT 时收紧。LIMIT 数值为受控 int，无注入面。
+        effective_sql = sql if max_rows is None else _apply_max_rows_bound(sql, max_rows)
 
         try:
             async with self.engine.connect() as conn:
