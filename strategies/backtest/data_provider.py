@@ -175,6 +175,12 @@ class BacktestDataProvider:
         # 仅在近似「已生效」时由 engine 产出 delisting_asof_approximation 告警并在结果中
         # 标注（R24「显式声明并在结果中标注」）。
         self._saw_delisting_flagged = False
+        # D12-002 / R21+R24：回测票池的 ST 判定（is_st，见 screener_dao._st_columns_sql）在
+        # name-history 无 as-of 覆盖行时为 NULL（未知），不再回退当前名称冒充历史取值。
+        # 此处记录本次回测是否出现过「名称来源=当前快照」的行（st_name_source=
+        # 'current_snapshot'）：即历史 ST 状态**未知**、无法按 as-of 判定的标的确实存在，
+        # 由 engine 在结果中显式声明「历史 ST 判定为当期近似」（R24）。
+        self._saw_st_name_fallback = False
 
     @property
     def history_context(self) -> Any:
@@ -194,6 +200,16 @@ class BacktestDataProvider:
         当期近似（可能前视）」在回测结果中可见；全程无退市标记标的时为 False，不产生噪音。
         """
         return self._saw_delisting_flagged
+
+    @property
+    def st_name_fallback_seen(self) -> bool:
+        """本次回测票池内是否存在 as-of ST 状态未知（名称回退当前快照）的标的（D12-002）。
+
+        为 True 时 engine 产出 ``st_asof_approximation`` 告警，让「历史 ST 判定为当期近似
+        （name-history 缺覆盖）」在回测结果中可见；全程 name-history 覆盖完整时为 False，
+        不产生噪音。
+        """
+        return self._saw_st_name_fallback
 
     def validate_history_capabilities(self) -> None:
         """运行前校验历史数据上下文具备策略所需的最小能力（UIR-F11-001）。
@@ -218,6 +234,8 @@ class BacktestDataProvider:
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
         # R24：每次回测（区间预载入口）重置退市标记观测，避免跨多次运行残留旧状态。
         self._saw_delisting_flagged = False
+        # D12-002：同上，重置「历史 ST 状态未知」观测。
+        self._saw_st_name_fallback = False
         # 每次预载重置区间质量代理与降级警告列表，避免跨多次 preload_range 调用累积旧状态
         # （含区间超限早退路径：无论是否预载，本次评测都以全新状态开始，不残留上次区间判定）。
         self._range_preload_warnings = []
@@ -572,6 +590,19 @@ class BacktestDataProvider:
             and bool(screening_data["is_delisting"].astype("boolean").fillna(False).any())
         ):
             self._saw_delisting_flagged = True
+
+        # D12-002 / R21+R24：票池内出现「ST 判定名称来源=当前快照」（st_name_source=
+        # 'current_snapshot'）的行，说明该标的 as-of 名称无 name-history 覆盖、历史 ST 状态
+        # **未知**——SQL 已返回 is_st=NULL（不得当作非 ST，也不得用当前名称冒充历史取值）。
+        # 同样在 is_tradable 过滤前检测：口径生效与标的是否停牌无关；逐日检测（区间预载与
+        # 逐日降级两条路径均经本方法）保证单日/预载一致。
+        if (
+            screening_data is not None
+            and not screening_data.empty
+            and "st_name_source" in screening_data.columns
+            and bool(screening_data["st_name_source"].astype("string").fillna("").eq("current_snapshot").any())
+        ):
+            self._saw_st_name_fallback = True
 
         if screening_data is not None and not screening_data.empty and "is_tradable" in screening_data.columns:
             suspended_count = int((~screening_data["is_tradable"]).sum())

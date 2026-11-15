@@ -48,6 +48,9 @@ class DataWarning:
         # R24 当期近似：区间回放的退市整理期排除口径使用当前名称/delist_date 快照，
         # name-history 缺覆盖时可能存在前视（screener_dao._delisting_flag_expr）。
         "delisting_asof_approximation",
+        # D12-002 / R24：区间回放的 ST 排除口径对 name-history 无覆盖标的为**未知**
+        # （is_st=NULL，不回退当前名称冒充历史取值），结果须显式声明该口径为当期近似。
+        "st_asof_approximation",
         # UIR-X01-105 / R21：复权因子未知（adj_factor 全空或基准为 0）。
         # 未知 ≠ 合法的恒等复权：这些标的的复权价不可信（撮合层拒绝成交、IC 排除），
         # 结果必须标注，不得静默把未复权价当复权价使用。
@@ -148,6 +151,8 @@ class WarningCategory:
         "range_preload_error": "performance_path",
         "trade_dates_truncated": "data_quality",
         "delisting_asof_approximation": "asof_approximation",
+        # D12-002：历史 ST 判定未知（name-history 无覆盖）→ 方法学声明，不升级可信度级别。
+        "st_asof_approximation": "asof_approximation",
         # UIR-X01-105：复权因子未知 → data_quality（未知按不可信处理，R21 fail-closed）。
         "qfq_adjustment_unknown": "data_quality",
     }

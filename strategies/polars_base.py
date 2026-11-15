@@ -207,8 +207,10 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         exclude = ctx.get("exclude_st", self.exclude_st)
         if not exclude or "is_st" not in lf.collect_schema().names():
             return lf
-        # NULL is_st（stock_basic.name 可空，双 COALESCE 仍可能为 NULL）按「非 ST」处理：
-        # 不排除且不计数，避免 NULL 行被 ~pl.col() 过滤掉造成静默漏股。
+        # NULL is_st 为**未知**（D12-002：name-history 无 as-of 覆盖，或 name 可空），不得当作
+        # 「非 ST」宣称已判定，也不得当作 ST：不排除且不计数，避免 NULL 行被 ~pl.col() 过滤掉
+        # 造成静默漏股。历史回放中该未知由回测结果 st_asof_approximation 显式声明（R24）；
+        # 实盘 as_of=当前快照，DataProcessor 已用当前名称补齐 is_st，不产生 NULL。
         excluded = lf.filter(pl.col("is_st").is_not_null() & pl.col("is_st")).select(pl.len()).collect().item()
         if excluded:
             ctx.setdefault("warnings", []).append(Message("strategy_excluded_st", {"count": excluded}))

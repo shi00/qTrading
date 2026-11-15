@@ -282,6 +282,27 @@ def _has_delisting_asof_approximation(data_warnings: Sequence[str | DataWarning]
     return False
 
 
+# D12-002 / R24 当期近似的告警类型（与 strategies.backtest.config.DataWarning.warning_type 一致）。
+_ST_ASOF_WARNING_TYPE = "st_asof_approximation"
+
+
+def _has_st_asof_approximation(data_warnings: Sequence[str | DataWarning]) -> bool:
+    """R24/D12-002：判定回测结果是否标注了 ST 排除口径的「当期近似」。
+
+    兼容结构化 ``DataWarning``（引擎实时产出）与经持久化 round-trip 的无类型字符串
+    ``"[st_asof_approximation] ..."``（``DataWarning.__str__`` 前缀），二者等价。
+    命中时 VM 以 caveat 通道在结果区显式标注「部分标的历史 ST 状态未知」，不升级可信度级别。
+    """
+    prefix = f"[{_ST_ASOF_WARNING_TYPE}]"
+    for w in data_warnings or ():
+        if isinstance(w, DataWarning):
+            if w.warning_type == _ST_ASOF_WARNING_TYPE:
+                return True
+        elif isinstance(w, str) and w.startswith(prefix):
+            return True
+    return False
+
+
 # UIR-F11-005 / R21：区间覆盖未核实（质量未知）的告警类型（与
 # strategies.backtest.config.DataWarning.warning_type 一致）。
 _RANGE_QUALITY_UNVERIFIED_WARNING_TYPE = "range_quality_coverage_unverified"
@@ -868,6 +889,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 # 标的时产出 delisting_asof_approximation 告警，此处显式在结果中标注该口径近似。
                 if _has_delisting_asof_approximation(result.data_warnings):
                     caveat_msgs.append(Message("backtest_caveat_delisting_asof_approximation"))
+                # D12-002 / R21+R24: ST 排除口径（is_st）在 name-history 无覆盖时为未知（不回退
+                # 当前名称冒充历史取值），引擎产出 st_asof_approximation 告警，此处显式标注
+                # 「部分标的历史 ST 状态未知、未参与 ST 过滤」。
+                if _has_st_asof_approximation(result.data_warnings):
+                    caveat_msgs.append(Message("backtest_caveat_st_asof_approximation"))
                 caveats = tuple(caveat_msgs)
 
                 # 成功终态: 复位运行归属 + is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
