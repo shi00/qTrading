@@ -3140,3 +3140,261 @@ class TestFinancialCorporateActionRecovery:
 
         assert store.values["financial_full_sync_pending"] == full_pending
         assert _load_pending_corporate_targets(store.values.get(self._CORPORATE_KEY)) == {"20241021": {"fina_forecast"}}
+
+
+class TestFinancialCooperativeCancellation:
+    """R01: 协作退出统一映射 cancelled；成功水位仅在必要范围完整完成时推进。"""
+
+    _FULL_KEY = "financial_full_sync_pending"
+
+    @staticmethod
+    def _two_stock_basic():
+        return pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "list_status": ["L", "L"]})
+
+    @pytest.mark.asyncio
+    async def test_full_sync_cancelled_before_first_batch_marks_cancelled_and_keeps_pending(self):
+        """首批前协作退出：不得把未完成全量写成 success，未完成态保留待下轮恢复。"""
+        from data.sync.financial import _load_full_sync_pending_stocks
+
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        basic = self._two_stock_basic()
+
+        def get_basic():
+            # _run_impl 开头会 clear 取消事件，必须在进入 run 之后再发信号。
+            strategy._shutdown_event.set()
+            return basic
+
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=get_basic)
+        store = _FakeAppStateStore()
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        ctx.api.get_income.assert_not_awaited()
+        ctx.cache.financial_dao.save_financial_reports.assert_not_awaited()
+        fr_calls = _financial_status_calls(ctx)
+        assert len(fr_calls) == 1
+        assert fr_calls[0].kwargs.get("status") == "cancelled"
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == {"000001.SZ", "000002.SZ"}
+
+    @pytest.mark.asyncio
+    async def test_full_sync_cancelled_after_committed_batch_keeps_checkpoint_and_resumes(self):
+        """首批已提交后取消：checkpoint 不回退、水位不推进，下一轮只补齐剩余股票。"""
+        from data.sync.financial import _load_full_sync_pending_stocks
+
+        ctx = make_ctx()
+        _wire_per_stock_core_apis(ctx)
+        completed = _make_stateful_step4(ctx)
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=self._two_stock_basic())
+        strategy = FinancialSyncStrategy(ctx)
+        cancel_armed = {"value": True}
+        saved: list[str] = []
+
+        async def save(df, conn=None):
+            code = df["ts_code"].iloc[0]
+            saved.append(code)
+            if cancel_armed["value"]:
+                strategy._shutdown_event.set()
+            return len(df)
+
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=save)
+        store = _FakeAppStateStore()
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.ConfigHandler.get_sync_full_batch_size", return_value=1),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result1 = await strategy.run()
+
+        assert result1.status == SyncStatus.CANCELLED.value
+        assert saved == ["000001.SZ"]
+        assert {c.kwargs.get("ts_code") for c in ctx.api.get_income.await_args_list} == {"000001.SZ"}
+        # 已提交批次的 checkpoint 保持，不被回退/清理
+        assert completed == {"000001.SZ"}
+        ctx.cache.sync_dao.clear_step4_sync_status.assert_not_awaited()
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == {"000001.SZ", "000002.SZ"}
+        fr_calls = _financial_status_calls(ctx)
+        assert len(fr_calls) == 1
+        assert fr_calls[0].kwargs.get("status") == "cancelled"
+
+        # 下一轮：事件在 run 开头 clear，只补齐剩余股票，完成后才写成功水位
+        cancel_armed["value"] = False
+        ctx.api.get_income.reset_mock()
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.ConfigHandler.get_sync_full_batch_size", return_value=1),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result2 = await strategy.run()
+
+        assert result2.status == SyncStatus.SUCCESS.value
+        assert {c.kwargs.get("ts_code") for c in ctx.api.get_income.await_args_list} == {"000002.SZ"}
+        assert completed == {"000001.SZ", "000002.SZ"}
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == set()
+        fr_success = _financial_status_calls(ctx)
+        assert len(fr_success) == 1
+        assert fr_success[0].kwargs.get("status") == "success"
+
+    @pytest.mark.asyncio
+    async def test_full_sync_normal_completion_advances_watermark_and_clears_pending(self):
+        """正常结束：必要范围完整完成，写 success 并清理全量未完成态。"""
+        from data.sync.financial import _load_full_sync_pending_stocks
+
+        ctx = make_ctx()
+        _wire_per_stock_core_apis(ctx)
+        _make_stateful_step4(ctx)
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=self._two_stock_basic())
+        store = _FakeAppStateStore()
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == set()
+        fr_calls = _financial_status_calls(ctx)
+        assert len(fr_calls) == 1
+        assert fr_calls[0].kwargs.get("status") == "success"
+
+    @pytest.mark.asyncio
+    async def test_true_cancelled_error_propagates_without_success_watermark(self):
+        """真正的 asyncio.CancelledError 必须向上抛出（R2），且不得写成功水位。"""
+        from data.sync.financial import _load_full_sync_pending_stocks
+
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=asyncio.CancelledError)
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=self._two_stock_basic())
+        store = _FakeAppStateStore()
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+            pytest.raises(asyncio.CancelledError) as exc_info,
+        ):
+            await strategy.run()
+
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert _financial_status_calls(ctx) == []
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == {"000001.SZ", "000002.SZ"}
+
+    @pytest.mark.asyncio
+    async def test_full_sync_cancelled_during_corporate_phase_marks_cancelled(self):
+        """股票已提交但企业行动阶段取消：整体 cancelled，不提前启动企业行动网络阶段。"""
+        from data.sync.financial import _load_full_sync_pending_stocks
+
+        ctx = make_ctx()
+        _wire_per_stock_core_apis(ctx)
+        _make_stateful_step4(ctx)
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "list_status": ["L"]})
+        )
+        strategy = FinancialSyncStrategy(ctx)
+
+        async def save(df, conn=None):
+            strategy._shutdown_event.set()
+            return len(df)
+
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=save)
+        store = _FakeAppStateStore()
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.ConfigHandler.get_sync_full_batch_size", return_value=1),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        ctx.api.get_forecast.assert_not_awaited()
+        assert _load_full_sync_pending_stocks(store.values.get(self._FULL_KEY)) == {"000001.SZ"}
+        fr_calls = _financial_status_calls(ctx)
+        assert len(fr_calls) == 1
+        assert fr_calls[0].kwargs.get("status") == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_corporate_actions_cancel_before_loop_returns_false_without_completion_progress(self):
+        """企业行动入口取消：返回 False（调用方据此标 cancelled），不发“全部完成”进度。"""
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        strategy._shutdown_event.set()
+        progress = MagicMock()
+        store = _FakeAppStateStore()
+
+        with _patch_app_state(store):
+            completed = await strategy._sync_corporate_actions_by_date(["20241021"], progress_callback=progress)
+
+        assert completed is False
+        progress.assert_not_called()
+        ctx.api.get_forecast.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_incremental_cancelled_mid_day_keeps_pending_and_resumes(self):
+        """增量中途取消：当日写 cancelled、检查点不推进、未处理目标 pending，下轮恢复。"""
+        from data.sync.financial import _load_pending_disclosure_targets
+
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 10, 18)})
+        _wire_per_stock_core_apis(ctx)
+        codes = [f"00000{i}.SZ" for i in range(1, 7)]
+
+        def disclosure(date=None, **kwargs):
+            if date == "20241019":
+                return pd.DataFrame({"ts_code": codes, "end_date": ["20240930"] * len(codes)})
+            return None
+
+        ctx.api.get_disclosure_date = AsyncMock(side_effect=disclosure)
+        strategy = FinancialSyncStrategy(ctx)
+        cancel_armed = {"value": True}
+        saved: list[str] = []
+
+        async def save(df, conn=None):
+            saved.append(df["ts_code"].iloc[0])
+            if cancel_armed["value"]:
+                strategy._shutdown_event.set()
+            return len(df)
+
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=save)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241018"})
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.ConfigHandler.get_sync_batch_size", return_value=10),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result1 = await strategy.run()
+
+        assert result1.status == SyncStatus.CANCELLED.value
+        # _BATCH_SIZE = max(5, 10 // 2)：首批 5 个已提交，第 6 个未处理
+        assert len(saved) == 5
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == {
+            "20241019": {("000006.SZ", "20240930")}
+        }
+        assert store.values["financial_disclosure_checkpoint"] == "20241018"
+        day19_calls = _financial_status_calls(ctx, datetime.date(2024, 10, 19))
+        assert day19_calls and day19_calls[0].kwargs.get("status") == "cancelled"
+
+        cancel_armed["value"] = False
+        saved.clear()
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.ConfigHandler.get_sync_batch_size", return_value=10),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result2 = await strategy.run()
+
+        assert result2.status == SyncStatus.SUCCESS.value
+        assert "000006.SZ" in saved
+        assert store.values["financial_disclosure_checkpoint"] == "20241021"
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == {}

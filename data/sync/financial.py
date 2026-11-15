@@ -239,6 +239,38 @@ class FinancialSyncStrategy(ISyncStrategy):
             return provider(is_heavy)
         return ConfigHandler.get_sync_request_delay(is_heavy=is_heavy)
 
+    def _cancel_requested(self) -> bool:
+        """协作取消信号（与循环内既有 2s 检查同一来源）。
+
+        只读 ``_shutdown_event``：它在 ``_run_impl`` 开头 clear，并按事件循环隔离。
+        不参与判定基类 ``_cancelled``——该标志在 cancel() 后不会复位（策略对象随
+        DataProcessor 复用），纳入判定会让后续普通 run 永久 cancelled。
+        """
+        return self._shutdown_event.is_set()
+
+    def _mark_cancelled(self, result: SyncResult, stage: str) -> None:
+        """把协作退出统一映射为 ``SyncResult(cancelled)``（ADR-0018 C14）。
+
+        真正的 ``asyncio.CancelledError`` 仍由 ``_run_impl`` 记录状态后向上抛出（R2）。
+        """
+        result.status = SyncStatus.CANCELLED.value
+        logger.debug("[FinancialSync] %s | Cooperative cancellation mapped to cancelled.", stage)
+
+    async def _record_cancelled_watermark(self, result: SyncResult, stage: str) -> None:
+        """协作退出时提交 cancelled 状态，且不推进成功水位。
+
+        ``update_sync_status`` 对非 success/empty/skipped_permission 状态不更新
+        ``last_data_date``（R22），因此这里显式写 cancelled 只记录本次尝试被取消，
+        不会把未完成范围伪装成已完成的成功水位。
+        """
+        self._mark_cancelled(result, stage)
+        await self.context.cache.sync_dao.update_sync_status(
+            "financial_reports",
+            get_now().date(),
+            result.added,
+            status=SyncStatus.CANCELLED.value,
+        )
+
     @property
     def _shutdown_event(self):
         """Get or create shutdown event dynamically per event loop."""
@@ -376,7 +408,8 @@ class FinancialSyncStrategy(ISyncStrategy):
         ignores it and fetches EVERYTHING for active stocks.
         We will stick to the robust 'sync_comprehensive_fundamentals' logic.
         """
-        if self._shutdown_event.is_set():
+        if self._cancel_requested():
+            await self._record_cancelled_watermark(result_accumulator, "FullSync")
             return
 
         logger.debug(
@@ -501,13 +534,13 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Inner processing function
         async def process_one_stock(ts_code):
             nonlocal completed_count, total_mainbz_rows, total_audit_rows, failed_stock_count
-            if self._shutdown_event.is_set():
+            if self._cancel_requested():
                 return
 
             processed = False
             try:
                 async with semaphore:
-                    if self._shutdown_event.is_set():
+                    if self._cancel_requested():
                         return
 
                     processed = True
@@ -559,7 +592,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         # 「有失败但 status=success」假终态。
                         failed_stock_count += 1
 
-                    if self._shutdown_event.is_set():
+                    if self._cancel_requested():
                         return
 
                     if not has_error:
@@ -621,8 +654,11 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         # Batch execution
         batch_size = ConfigHandler.get_sync_full_batch_size()
+        cancelled_during_stocks = False
         for i in range(0, len(pending_stocks), batch_size):
-            if self._shutdown_event.is_set():
+            if self._cancel_requested():
+                cancelled_during_stocks = True
+                logger.debug("[FinancialSync] FullSync | Cancelled before batch offset=%s.", i)
                 break
 
             batch = pending_stocks[i : i + batch_size]
@@ -645,6 +681,12 @@ class FinancialSyncStrategy(ISyncStrategy):
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
+
+        # 协作取消：股票范围未完整处理，不得进入企业行动阶段，也不得写成功水位。
+        # 已提交批次的 step4 marker 保留（不回退），全量未完成态保留供下轮恢复。
+        if cancelled_during_stocks:
+            await self._record_cancelled_watermark(result_accumulator, "FullSync stocks")
+            return
 
         # M-DATA-11/D1: 批次结束后把可恢复失败反映到 SyncResult（S17 增量同模式），
         # 避免「失败股票仅记日志但 result_accumulator 恒 success」。不覆盖更严重终态。
@@ -686,7 +728,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                 pct = 80 + int(current / max(total, 1) * 20)
                 progress_callback(pct, 100, msg)
 
-        await self._sync_corporate_actions_by_date(all_dates, batch_progress, result_accumulator=result_accumulator)
+        corporate_completed = await self._sync_corporate_actions_by_date(
+            all_dates, batch_progress, result_accumulator=result_accumulator
+        )
+        if not corporate_completed:
+            # 企业行动阶段协作退出：必要范围（股票 + 企业行动）未完整完成，
+            # 同样不得推进成功水位；全量未完成态保留供下轮恢复。
+            await self._record_cancelled_watermark(result_accumulator, "FullSync corporate actions")
+            return
 
         # M-DATA-11/D4: 全量完成后写 financial_reports 同步状态。旧实现从不写该表
         # sync_status：a) _run_impl 增量分支（依赖 last_sync_date 存在）对新装用户永不可达，
@@ -705,10 +754,9 @@ class FinancialSyncStrategy(ISyncStrategy):
             status=_full_status,
         )
 
-        # D05-F01: 未完成目标态只描述「股票层面未完成」：无失败股票且未取消才清理。
-        # 不能用 _full_status（aux/corporate actions 的 partial 与股票目标无关，若据此
-        # 保留会导致普通 run 反复全量）；失败/取消/异常保留，供后续普通 run 优先恢复。
-        if failed_stock_count == 0 and not self._shutdown_event.is_set():
+        # D05-F01: 未完成目标态只描述「股票层面未完成」：无失败股票才清理。
+        # 取消/异常已在上面提前返回并保留未完成态，供后续普通 run 优先恢复。
+        if failed_stock_count == 0:
             await set_app_state(engine, _FINANCIAL_FULL_SYNC_PENDING_KEY, "[]")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -726,7 +774,8 @@ class FinancialSyncStrategy(ISyncStrategy):
         优先重试。检查点仅当早于候选日的全部披露目标均已解决后才单调推进，因此
         任一失败日不会被后续成功日跨过。
         """
-        if self._shutdown_event.is_set():
+        if self._cancel_requested():
+            await self._record_cancelled_watermark(result_accumulator, "Incremental")
             return
 
         # Local accumulators for aux tables (NOT self variables to avoid AttributeError)
@@ -867,14 +916,16 @@ class FinancialSyncStrategy(ISyncStrategy):
         # 本轮已处理但未解决的披露日，用于阻止检查点跨过失败日。
         blocking_days: set[datetime.date] = set()
         pending_dirty = False
+        cancelled = False
 
         try:
             for day in days_to_process:
                 now = time.monotonic()
                 if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
                     last_cancel_check = now
-                    if self._shutdown_event.is_set():
+                    if self._cancel_requested():
                         logger.debug("[FinancialSync] Incremental | Cancelled during day loop.")
+                        cancelled = True
                         break
 
                 day_str = day.strftime("%Y%m%d")
@@ -920,14 +971,16 @@ class FinancialSyncStrategy(ISyncStrategy):
                 day_saved = 0
                 attempted: set[tuple[str, str]] = set()
                 failed_targets: set[tuple[str, str]] = set()
+                cancelled_mid_day = False
 
                 for batch_start in range(0, len(day_targets), _BATCH_SIZE):
-                    # M7.4: 内层 batch 循环补 _shutdown_event.is_set() 检查。
-                    if self._shutdown_event.is_set():
+                    # M7.4: 内层 batch 循环补取消检查。
+                    if self._cancel_requested():
                         logger.debug(
                             "[FinancialSync] Incremental | Cancelled during batch loop at batch_start=%s",
                             batch_start,
                         )
+                        cancelled_mid_day = True
                         break
 
                     batch_targets = day_targets[batch_start : batch_start + _BATCH_SIZE]
@@ -962,7 +1015,16 @@ class FinancialSyncStrategy(ISyncStrategy):
                 pending_days = {d for d in (_parse_disclosure_day(key) for key in pending) if d is not None}
 
                 day_has_error = disclosure_failed or bool(unresolved)
-                if day_has_error and day_saved == 0:
+                if cancelled_mid_day:
+                    # 协作取消导致当日未处理完：写 cancelled（非 failed），不推进
+                    # last_data_date；未解决目标已进入 pending，下轮恢复。
+                    await self.context.cache.sync_dao.update_sync_status(
+                        "financial_reports",
+                        day,
+                        day_saved,
+                        status=SyncStatus.CANCELLED.value,
+                    )
+                elif day_has_error and day_saved == 0:
                     # 全部失败/未完成：标记 failed；检查点不推进，下次重试
                     await self.context.cache.sync_dao.update_sync_status(
                         "financial_reports",
@@ -1016,6 +1078,12 @@ class FinancialSyncStrategy(ISyncStrategy):
 
                 if progress_callback:
                     progress_callback(0, 0, Message("progress_sync_done", {"day": day_str}))
+
+                if cancelled_mid_day or self._cancel_requested():
+                    # 当日已处理完也停止后续 day：协作退出须尽快收敛，
+                    # 已完整处理日的检查点/水位保留（不回退）。
+                    cancelled = True
+                    break
         finally:
             # 取消/异常时也持久化已知未解决目标（检查点未推进，下次从该日重试）。
             if pending_dirty:
@@ -1026,17 +1094,22 @@ class FinancialSyncStrategy(ISyncStrategy):
                 )
 
         # --- Step 2: Batch Sync Corporate Actions (O(Time) Optimization) ---
-        # Sync Forecasts, Dividends, etc. by date
-        await self._sync_corporate_actions_by_date(
+        # Sync Forecasts, Dividends, etc. by date. 即使 day 循环已取消也要调用：
+        # record_remaining_on_cancel 会在方法入口登记本轮窗口的全部 (日期, 表) 目标，
+        # 保证取消后企业行动 pending 不丢失；入口取消检查会让它立即返回 False。
+        corporate_completed = await self._sync_corporate_actions_by_date(
             dates_to_sync,
             result_accumulator=result_accumulator,
             pending_targets=corporate_pending,
             record_remaining_on_cancel=True,
         )
+        if not corporate_completed:
+            cancelled = True
 
-        # Update sync status for aux tables (after all stocks processed)
+        # Update sync status for aux tables (after all stocks processed).
+        # 协作取消时 aux 行数只覆盖已提交部分，不得当作成功水位推进。
         today = get_now().date()
-        if total_mainbz_rows > 0:
+        if not cancelled and total_mainbz_rows > 0:
             await self.context.cache.sync_dao.update_sync_status(
                 "fina_mainbz",
                 today,
@@ -1044,7 +1117,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             )
             logger.debug("[FinancialSync] fina_mainbz total: %s", total_mainbz_rows)
 
-        if total_audit_rows > 0:
+        if not cancelled and total_audit_rows > 0:
             await self.context.cache.sync_dao.update_sync_status(
                 "fina_audit",
                 today,
@@ -1053,6 +1126,11 @@ class FinancialSyncStrategy(ISyncStrategy):
             logger.debug("[FinancialSync] fina_audit total: %s", total_audit_rows)
 
         result_accumulator.added = total_saved
+
+        if cancelled:
+            # 增量必要范围（披露日窗口 + 企业行动）未完整完成：统一收敛为 cancelled，
+            # 不推进 financial_reports 成功水位；检查点/pending 保持已提交状态，下轮恢复。
+            await self._record_cancelled_watermark(result_accumulator, "Incremental")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_corporate_actions_by_date(
@@ -1072,6 +1150,11 @@ class FinancialSyncStrategy(ISyncStrategy):
         skipped_permission；普通失败与保存失败不再被隐式 None 吞没，而是写入独立
         (日期, 表) pending 集合并反映到 SyncResult。该集合与披露检查点解耦，检查点
         只表示「披露日已解决」，不得被改写为「全部数据已完成」。
+
+        Returns:
+            True: 全部目标日期已处理完（无协作取消）。
+            False: 循环前/循环中检测到协作取消，剩余目标已保留在 pending 中；
+            调用方必须据此把本轮标记为 cancelled，不得推进成功水位。
         """
         engine = getattr(self.context.cache, "engine", None)
         pending = (
@@ -1083,7 +1166,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         dates_set = set(dates)
         all_dates = sorted(dates_set | set(pending_map))
         if not all_dates:
-            return
+            return True
 
         pending_dirty = False
         if record_remaining_on_cancel:
@@ -1102,6 +1185,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                 pending_dirty = False
 
         total = len(all_dates)
+        if self._cancel_requested():
+            # 取消已发生：pending 刚登记完毕，直接返回让调用方标记 cancelled，
+            # 不启动新的网络阶段，也不发“全部完成”进度。
+            logger.debug("[FinancialSync] BatchSync | Cancelled before corporate actions loop.")
+            return False
         logger.debug(
             "[FinancialSync] BatchSync | Syncing corporate actions across %s days...",
             total,
@@ -1202,14 +1290,16 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Iterate per-date (not all-at-once) to avoid task explosion
         # M7.6: corporate actions 循环转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
         last_cancel_check = time.monotonic()
+        cancelled = False
         for i, d in enumerate(all_dates):
             now = time.monotonic()
             if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
                 last_cancel_check = now
-                if self._shutdown_event.is_set():
+                if self._cancel_requested():
                     logger.debug(
                         "[FinancialSync] BatchSync | Cancelled during corporate actions.",
                     )
+                    cancelled = True
                     break
 
             if d in dates_set:
@@ -1265,9 +1355,15 @@ class FinancialSyncStrategy(ISyncStrategy):
                     ),
                 )
 
+        if cancelled:
+            # 剩余目标已保留在 pending（增量）或由全量未完成态覆盖（全量）；
+            # 不得发送“全部完成”进度，交由调用方标记 cancelled。
+            return False
+
         # Final completion report
         if progress_callback:
             progress_callback(total, total, Message("status_ready"))
+        return True
 
     @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _fetch_comprehensive_financial_data(
