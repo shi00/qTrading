@@ -873,8 +873,9 @@ def test_main_release_tag_rejects_fix_combination():
 
 def test_docs_markdown_module_attribute_preserved():
     """模块级 docs_markdown 属性必须保留：tests/docs 依赖它 monkeypatch 证明唯一解析。"""
-    assert verify_versions.docs_markdown is not None
-    assert verify_versions._load_docs_markdown() is verify_versions.docs_markdown
+    loaded = verify_versions._load_docs_markdown()
+    assert loaded is verify_versions.docs_markdown
+    assert loaded.__name__ == "docs_markdown"
 
 
 def test_release_tag_mode_works_without_docs_markdown(tmp_path):
