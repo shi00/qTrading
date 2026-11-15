@@ -1338,3 +1338,145 @@ async def test_cleanup_keeps_delivery_manifest_and_reports_result_cleaned(real_e
     assert read.result_text is None
     assert read.result_available is False
     assert read.unavailable_reason == "result_cleaned"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_asset_scoped_source_links_clear_locator(real_embedded_pg) -> None:
+    """资产闭包分支：非 draft 消费者（``session_id`` 为 NULL）只能靠源/派生资产键命中。
+
+    仅以资产集合执行清理：源资产在集合内的边、派生资产在集合内的边都要清 locator；
+    源与派生都不在集合内的边保持原样，且不误改会话域。
+    """
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+
+    suffix = uuid.uuid4().hex[:8]
+    secret = "私人原句-资产闭包清理后不应可查"
+    session_id = f"s-link-{suffix}"
+    execution_id = f"e-link-{suffix}"
+    asset_in, asset_out = f"asset-in-{suffix}", f"asset-out-{suffix}"
+    link_source, link_derived, link_out = (
+        f"l-src-{suffix}",
+        f"l-derived-{suffix}",
+        f"l-out-{suffix}",
+    )
+
+    def _asset(asset_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "asset_id": asset_id,
+            "asset_version": "1",
+            "asset_kind": "summary",
+            "display_name": secret,
+            "digest": "9" * 64,
+            "read_state": "ready",
+            "verification_state": "program_verified",
+        }
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession).values(user_scope=_USER_SCOPE, session_id=session_id, title=secret)
+            )
+            await conn.execute(
+                sa.insert(AgentExecution).values(
+                    user_scope=_USER_SCOPE,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    execution_kind="root",
+                    source_module=f"module-{execution_id}",
+                    business_request_id=f"request-{execution_id}",
+                    intent_digest="e" * 64,
+                    node_id="root",
+                    display_state="complete",
+                    goal_coverage="full",
+                )
+            )
+            await conn.execute(sa.insert(AgentAssetVersion), [_asset(asset_in), _asset(asset_out)])
+
+            def _link(
+                link_id: str,
+                *,
+                source_id: str,
+                consumer_kind: str,
+                consumer_id: str,
+                consumer_version: str,
+                execution: str | None = None,
+                derived: str | None = None,
+            ) -> dict[str, object]:
+                return {
+                    "user_scope": _USER_SCOPE,
+                    "link_id": link_id,
+                    "source_id": source_id,
+                    "source_version": "1",
+                    "consumer_kind": consumer_kind,
+                    "consumer_id": consumer_id,
+                    "consumer_version": consumer_version,
+                    "session_id": None,
+                    "execution_id": execution,
+                    "round_id": None,
+                    "message_id": None,
+                    "artifact_id": None,
+                    "artifact_version": None,
+                    "derived_asset_id": derived,
+                    "derived_asset_version": "1" if derived is not None else None,
+                    "locator_payload": {"path": f"C:/private/{secret}"},
+                    "relation_kind": "accepted_input",
+                }
+
+            await conn.execute(
+                sa.insert(AgentSourceLink),
+                [
+                    _link(
+                        link_source,
+                        source_id=asset_in,
+                        consumer_kind="execution",
+                        consumer_id=execution_id,
+                        consumer_version="1",
+                        execution=execution_id,
+                    ),
+                    _link(
+                        link_derived,
+                        source_id=asset_out,
+                        consumer_kind="asset",
+                        consumer_id=asset_in,
+                        consumer_version="1",
+                        derived=asset_in,
+                    ),
+                    _link(
+                        link_out,
+                        source_id=asset_out,
+                        consumer_kind="execution",
+                        consumer_id=execution_id,
+                        consumer_version="2",
+                        execution=execution_id,
+                    ),
+                ],
+            )
+
+        touched = await dao.tombstone_cleanup_text(_USER_SCOPE, asset_keys=[(asset_in, "1")])
+
+        async with app_engine.connect() as conn:
+            rows = {
+                row.link_id: row.locator_payload
+                for row in (
+                    await conn.execute(
+                        sa.select(AgentSourceLink.link_id, AgentSourceLink.locator_payload).where(
+                            AgentSourceLink.user_scope == _USER_SCOPE,
+                            AgentSourceLink.link_id.in_([link_source, link_derived, link_out]),
+                        )
+                    )
+                ).all()
+            }
+    finally:
+        await app_engine.dispose()
+
+    assert touched["agent_source_link"] == 2
+    assert touched["agent_session"] == 0
+    assert touched["agent_asset_version"] == 1
+    assert rows[link_source] is None
+    assert rows[link_derived] is None
+    assert rows[link_out] == {"path": f"C:/private/{secret}"}
