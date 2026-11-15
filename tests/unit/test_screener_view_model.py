@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from core.i18n import Message
+from strategies.attribution import ATTRIBUTION_COLUMN
 from ui.components.virtual_table import next_sort_state
 from ui.viewmodels.screener_view_model import (
     RealtimeSnapshot,
@@ -1488,6 +1489,73 @@ class TestCurrentPageRows:
             rows[0].values["A"] = 999  # MappingProxyType 只读
         # 赋值被拒绝后原值不变 (强断言: 非仅"抛异常", 还验证不可变语义)
         assert rows[0].values["A"] == 1
+
+    def test_nested_attribution_and_params_snapshot_are_deep_frozen(self, vm):
+        """D16-008: 公开行的嵌套归因/参数快照不可写, 修改源字典不影响旧行."""
+        attribution = {
+            "conditions": [
+                {"column": "pe_ttm", "operator": "between", "threshold": [5.0, 20.0], "actual": 6.5},
+            ],
+            "rank": {"field": "dv_ttm", "ascending": False, "value": 3.5, "position": 1, "total": 10},
+        }
+        params = {"roe_min": 15.0, "global_config": {"exclude_st": True}, "tags": ["a", "b"]}
+        vm._full_results = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "params_snapshot": [params],
+                ATTRIBUTION_COLUMN: [attribution],
+            }
+        )
+        vm._update_pagination()
+        row = vm.state.current_page_rows[0]
+
+        attr = row.values[ATTRIBUTION_COLUMN]
+        assert isinstance(attr, MappingProxyType)
+        assert isinstance(attr["conditions"], tuple)
+        condition = attr["conditions"][0]
+        assert isinstance(condition, MappingProxyType)
+        assert condition["threshold"] == (5.0, 20.0)
+        with pytest.raises(TypeError):
+            condition["operator"] = "gt"  # type: ignore[index]  # 冻结映射写入应被拒绝
+
+        snapshot = row.values["params_snapshot"]
+        assert isinstance(snapshot, MappingProxyType)
+        assert isinstance(snapshot["global_config"], MappingProxyType)
+        assert isinstance(snapshot["tags"], tuple)
+        with pytest.raises(TypeError):
+            snapshot["global_config"]["exclude_st"] = False  # type: ignore[index]  # 嵌套冻结映射写入应被拒绝
+        with pytest.raises(TypeError):
+            snapshot["tags"][0] = "c"  # type: ignore[index]  # tuple 不可写
+
+        # 源 DAO/DataFrame 字典就地改写不得穿透到已产出的公开行 (深复制)
+        attribution["rank"]["total"] = 999
+        params["global_config"]["exclude_st"] = False
+        params["tags"].append("c")
+        assert row.values[ATTRIBUTION_COLUMN]["rank"]["total"] == 10
+        assert row.values["params_snapshot"]["global_config"]["exclude_st"] is True
+        assert row.values["params_snapshot"]["tags"] == ("a", "b")
+
+    def test_deep_frozen_slice_reuses_reference(self, vm):
+        """D16-008: 嵌套冻结后内容等价时仍复用切片引用 (View memo 命中不受影响)."""
+        vm._full_results = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "params_snapshot": [{"global_config": {"exclude_st": True}}],
+            }
+        )
+        vm._update_pagination()
+        ref1 = vm.state.current_page_rows
+        vm._update_pagination()
+        assert vm.state.current_page_rows is ref1
+
+    def test_deep_freeze_keeps_none_and_original_values(self, vm):
+        """D16-008: 深冻结保持 None/标量原值, 不为缺失值回退或填充."""
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"], "params_snapshot": [None], "ai_score": [None]})
+        vm._update_pagination()
+        row = vm.state.current_page_rows[0]
+        assert row.values["params_snapshot"] is None
+        assert row.values["ai_score"] is None
+        assert row.values["ts_code"] == "000001.SZ"
 
     def test_unchanged_slice_reuses_reference(self, vm):
         """C2b: 内容未变 (如流式页满后仅 total_* 增长) 复用引用, 供 View 格式化 memo 命中."""

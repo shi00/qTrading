@@ -16,7 +16,9 @@ strategy 层不感知 locale (§3.2 MVVM)。
 from __future__ import annotations
 
 import json
+import typing
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 
 import polars as pl
@@ -104,34 +106,36 @@ def attribution_to_json(attr: FilterAttribution | None) -> str | None:
     return json.dumps(asdict(attr), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-def attribution_from_json(raw: str | dict | None) -> FilterAttribution | None:
-    """反序列化归因; 接受 JSON 字符串或已解析 dict, 非法/缺失时返回 None (View 忽略, 二次检视 m4 守卫).
+def attribution_from_json(raw: str | Mapping[str, typing.Any] | None) -> FilterAttribution | None:
+    """反序列化归因; 接受 JSON 字符串或已解析 Mapping, 非法/缺失时返回 None (View 忽略, 二次检视 m4 守卫).
 
-    VM 层 ``_decode_cell`` 已将 ``_filter_attribution`` 列解析为 dict,
-    而导出回归测试可能直供 JSON 串, 故两者皆接受 (View 渲染路径统一入口)。
+    VM 层 ``_decode_cell`` 已将 ``_filter_attribution`` 列解析为 dict 并经 ``_deep_freeze``
+    冻结为只读 Mapping (D16-008), 而导出回归测试可能直供 JSON 串, 故 JSON 串与 Mapping
+    皆接受 (View 渲染路径统一入口)。
     """
     if not raw:
         return None
-    if isinstance(raw, dict):
-        data = raw
+    if isinstance(raw, Mapping):
+        data: object = raw
     else:
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return None
-    if not isinstance(data, dict):
+    if not isinstance(data, Mapping):
         return None
     conditions = tuple(_condition_from_dict(c) for c in data.get("conditions", ()))
     rank = _rank_from_dict(data.get("rank"))
     return FilterAttribution(conditions=conditions, rank=rank)
 
 
-def _condition_from_dict(data: dict) -> FilterCondition:
+def _condition_from_dict(data: Mapping[str, typing.Any]) -> FilterCondition:
     try:
         t: object = data["threshold"]
-        # between 阈值在 asdict→JSON→loads 后为 list, 须还原为 tuple 以通过 __post_init__ 校验
-        # (二次检视 a3: 反序列化击穿, 原先降级为 gt 0.0 假条件)。
-        if isinstance(t, list) and len(t) == 2:
+        # between 阈值在 asdict→JSON→loads 后为 list; 经 _deep_freeze 冻结后为 tuple,
+        # 两者均须还原为二元 tuple 以通过 __post_init__ 校验 (D16-008: 冻结不得把
+        # tuple 阈值误判为非法后回退成 gt 0.0 假条件)。
+        if isinstance(t, (list, tuple)) and len(t) == 2:
             threshold: float | tuple[float, float] = (float(t[0]), float(t[1]))
         elif isinstance(t, (int, float)):
             threshold = float(t)
@@ -147,8 +151,8 @@ def _condition_from_dict(data: dict) -> FilterCondition:
         return FilterCondition(column=data.get("column", ""), operator="gt", threshold=0.0)
 
 
-def _rank_from_dict(data) -> RankAttribution | None:
-    if not isinstance(data, dict):
+def _rank_from_dict(data: object) -> RankAttribution | None:
+    if not isinstance(data, Mapping):
         return None
     return RankAttribution(
         field=data.get("field", ""),

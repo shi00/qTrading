@@ -18,7 +18,7 @@ import json
 import logging
 import math
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import flet as ft
 import flet_charts as fch
@@ -208,8 +208,21 @@ def _has_review_value(v) -> bool:
     return not (isinstance(v, str) and not v.strip())
 
 
+def _snapshot_display_value(value: object) -> object:
+    """把冻结快照值还原为可读普通结构（仅用于文本展示，不回写状态）。
+
+    D16-008: 公开行经深冻结后嵌套值为 MappingProxyType/tuple；直接 ``str()`` 会
+    渲染成 ``mappingproxy(...)``。此处递归还原为 dict/list 以保持与旧展示一致。
+    """
+    if isinstance(value, Mapping):
+        return {k: _snapshot_display_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_snapshot_display_value(v) for v in value]
+    return value
+
+
 def _build_params_snapshot_section(params) -> ft.Control:
-    """Task 4.3 (FR-UX-005): 结构化展示 params_snapshot (dict/str/None 三态)."""
+    """Task 4.3 (FR-UX-005): 结构化展示 params_snapshot (Mapping/str/None 三态)."""
     if params is None:
         return ft.Container()
     # 如果是 str, 尝试解析为 dict (JSONB 字段读取后可能是 str)
@@ -231,7 +244,8 @@ def _build_params_snapshot_section(params) -> ft.Control:
                 bgcolor=AppColors.SURFACE_VARIANT,
                 border_radius=8,
             )
-    if not isinstance(params, dict) or not params:
+    # D16-008: 冻结快照为 Mapping (MappingProxyType) 而非 dict, 仍须渲染。
+    if not isinstance(params, Mapping) or not params:
         return ft.Container()
     # key-value 列表
     rows = [
@@ -244,7 +258,7 @@ def _build_params_snapshot_section(params) -> ft.Control:
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Text(
-                    str(v),
+                    str(_snapshot_display_value(v)),
                     size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.TEXT_SECONDARY,
                     selectable=True,
