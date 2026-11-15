@@ -6454,7 +6454,13 @@ class AgentDao(BaseDao):
                         AgentArtifact.user_scope == user_scope,
                         AgentArtifact.session_id.in_(session_scope),
                     )
-                    .values(summary=None, body_text=None, body_ref=None, result_payload=None)
+                    .values(
+                        summary=None,
+                        body_text=None,
+                        body_ref=None,
+                        result_payload=None,
+                        cleaned_at=sa.func.now(),
+                    )
                 )
                 touched["agent_artifact"] = int(artifact_result.rowcount or 0)
 

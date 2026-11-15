@@ -101,8 +101,17 @@ class CleanupExecutionService:
         try:
             preflight = await self._executor.preflight(record.exact_ids)
             if preflight.missing_ids:
-                await self._mark_retry(record.user_scope, record.cleanup_job_id, "native_target_missing")
-                raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "native cleanup target not found", label)
+                # §10.7：只有「已有可靠 prepared 且 fence 持续」的**重试**允许原生行已缺失
+                # （重试的前置就是 job 已落 retry_pending）；首次预检缺失仍判失败，
+                # 不以「查不到」冒充「已清理」。
+                retry_after_prepared = (
+                    record.fence_committed
+                    and bool(record.exact_ids)
+                    and confirmation.phase is CleanupPhase.RETRY_PENDING
+                )
+                if not retry_after_prepared:
+                    await self._mark_retry(record.user_scope, record.cleanup_job_id, "native_target_missing")
+                    raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "native cleanup target not found", label)
             deletion = await self._executor.delete(record.exact_ids)
             state = CleanupState(
                 phase=CleanupPhase.PREPARED,

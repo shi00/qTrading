@@ -707,6 +707,7 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
                         AgentArtifact.body_ref,
                         AgentArtifact.result_payload,
                         AgentArtifact.result_digest,
+                        AgentArtifact.cleaned_at,
                     ).where(AgentArtifact.artifact_id == artifact_in)
                 )
             ).one()
@@ -808,6 +809,8 @@ async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_p
     assert artifact_row.body_ref is None
     assert artifact_row.result_payload is None
     assert artifact_row.result_digest == "b" * 64
+    # 已清理信号必须可见：read_artifact 依 cleaned_at 区分 body_cleaned 与 body_not_saved（R21）
+    assert artifact_row.cleaned_at is not None
     assert round_row.frozen_manifest is None
     assert round_row.actual_input is None
     assert round_row.model_binding is None

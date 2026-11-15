@@ -20,6 +20,8 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
 from core.agent_types import CLEANUP_NATIVE_TARGETS
+from data.persistence import engine_provider
+from data.persistence.daos.base_dao import EngineDisposedError
 
 #: 九类原生目标逐域计数（只读；键为常量匹配键，集合经展开参数绑定）。
 CLEANUP_COUNT_SQL: Final[dict[str, str]] = {
@@ -63,9 +65,16 @@ class AgentRuntimeNativeStore:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    def _check_engine(self, context: str = "cleanup") -> None:
+        """R5 守卫：已释放引擎上不得执行计数/预检/删除。"""
+
+        if engine_provider.is_disposed(self._engine):
+            raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed, {context} rejected.")
+
     def counts(self, ids: list[str]) -> dict[str, int]:
         """逐域计数：返回九类目标各自命中准确集合的行数。"""
 
+        self._check_engine("count")
         counts: dict[str, int] = {}
         with self._engine.connect() as conn:
             for table, _key in CLEANUP_NATIVE_TARGETS:
@@ -75,6 +84,7 @@ class AgentRuntimeNativeStore:
     def missing_primary_ids(self, ids: list[str]) -> tuple[str, ...]:
         """返回在两个主键域都查不到的 ID（查不到不得当作已清除）。"""
 
+        self._check_engine("preflight")
         with self._engine.connect() as conn:
             found = {
                 str(row[0]) for row in conn.execute(_bind_ids(CLEANUP_PRIMARY_PRESENCE_SQL), {"ids": ids}).fetchall()
@@ -84,6 +94,7 @@ class AgentRuntimeNativeStore:
     def delete_datasource_rows(self, ids: list[str]) -> int:
         """按准确集合删除 ``agent_ds.datasource_outputs``；返回删除行数。"""
 
+        self._check_engine("delete")
         with self._engine.begin() as conn:
             result = conn.execute(_bind_ids(CLEANUP_DATASOURCE_DELETE_SQL), {"ids": ids})
             return int(result.rowcount or 0)
