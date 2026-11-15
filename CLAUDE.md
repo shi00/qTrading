@@ -207,6 +207,8 @@
 ## 4. 架构原则
 
 > 架构正文（分层架构 / 依赖规则 / core 层隔离 / 单例模式全文）的唯一正本为 [docs/architecture/overview.md](./docs/architecture/overview.md)（ruleset 1.10.0 起，自本节迁入；import-linter 配置仍是实际执行配置）。本节仅保留与正本语义一致的最小摘要，供未加载正本时理解 AI 必须遵守什么。
+>
+> **兼容与退役**：本节为兼容层（最小摘要 + 指针）；迁移责任方、切换条件与旧锚点退役判据见正本的消费者迁移与兼容责任（T6）节。
 
 ### 4.1 分层架构
 
@@ -232,7 +234,7 @@
 
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.10.0（规则集版本，规则变更时递增）
+> - ruleset_version: 1.10.0（派生自 ruleset-changelog 顶行，规则变更时递增）
 > - last_reviewed: 2026-11-13
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4 摘要，正文正本见 docs/architecture/overview.md）、AI 行为准则

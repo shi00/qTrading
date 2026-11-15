@@ -3,7 +3,7 @@
 > 来源：从 CONTRIBUTING.md 迁移
 > canonical_for: 单例注册清单与生命周期（P3-02 链接语义正本）
 
-> 对应 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式)。
+> 对应 [架构正文 §4.3](./overview.md#43-单例模式)。
 
 使用 `@register_singleton` 装饰器统一管理单例生命周期：
 

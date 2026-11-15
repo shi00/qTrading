@@ -33,6 +33,54 @@ HTML_ID_DOC = '## 落款\n正文 <a id="api-ref">说明</a> 续\n\n<div id="box"
 # 组 4 样例：两类围栏 + 行内代码中的假链接（全部在代码语境，不应判为链接）
 FENCED_DOC = "```py\n[a][nope]\n```\n\n~~~py\n[x](y)\n~~~\n\n行内 `[x](y)` 与 `[a][nope]` 均为代码语境\n"
 
+# 组 7 样例（Q12）：HTML href 抽取——含标签/来源/行号；代码语境中的 HTML 不参与
+HTML_HREF_DOC = (
+    '正文 <a href="./target.md">行内</a> 续\n\n'
+    "<div>\n"
+    '<a href="#sec">块内</a>\n'
+    "</div>\n\n"
+    "```html\n"
+    '<a href="./fence-missing.md">围栏</a>\n'
+    "```\n\n"
+    '行内代码 `<a href="./code-missing.md">代码</a>`\n'
+)
+
+# Q10 固定上游向量：由锁定 github-slugger==0.0.3 源码（regex.py 字符表 +
+# replace.py / slug.py 语义）独立实现推导后冻结，覆盖组合附加符号、控制字符、
+# 空白、标点、emoji、表外码点。期望值不是用 Compat 自身生成，故可作差分基准。
+UPSTREAM_SLUG_VECTORS = [
+    ("", ""),
+    ("概述", "概述"),
+    ("Setup", "setup"),
+    ("3.1 ❌ 绝对禁止", "31--绝对禁止"),
+    ("已知架构技术债 (Known Technical Debt)", "已知架构技术债-known-technical-debt"),
+    ("V1 声明式 UI 开发规范", "v1-声明式-ui-开发规范"),
+    # 首尾空白不 trim（上游只把 U+0020 转 '-'，不 strip）
+    (" hello ", "-hello-"),
+    ("a  b", "a--b"),
+    ("x  ", "x--"),
+    ("  ", "--"),
+    # 控制字符与空白：Tab / 换行 / NUL / NBSP / 全角空格均删除（非转连字符）
+    ("a\tb", "ab"),
+    ("a\nb", "ab"),
+    ("a\x00b\x1fc", "abc"),
+    ("a\u00a0b", "ab"),
+    ("a\u3000b", "ab"),
+    # 组合附加符号（含 VS16）保留
+    ("café", "café"),
+    ("a\u0301b", "a\u0301b"),
+    ("\u26a0\ufe0f 风险", "\ufe0f-风险"),
+    # 标点与表外数字类码点按上游表删除
+    ("x²", "x"),
+    ("x¹", "x"),
+    ("①", ""),
+    ("a！b", "ab"),
+    ("😀 emoji", "-emoji"),
+    # 表外（未收录）的星体面字母保留
+    ("𝔸 letter", "𝔸-letter"),
+    ("A_B-C", "a_b-c"),
+]
+
 # 组 6 样例（D30）：转义方括号是普通文字，不得从反转义后的显示文本倒猜引用语法
 ESCAPED_REF_DOC = (
     "正文 \\[ok\\]\\[undefined\\] 继续，含不完整转义 \\[ok][undefined]。\n\n"
@@ -75,15 +123,16 @@ def test_html_id_extraction_distinguishable(view_factory) -> None:
         "box": ("div", "block", 4),
         "in-heading": ("a", "inline", 6),
     }, ids
-    # 标题文本提取跳过 HTML 子 token：第 6 行标题 slug 来自可见文本「章节」
+    # 标题文本提取跳过 HTML 子 token：第 6 行标题可见文本为「 章节」；Q10 对齐上游后
+    # 首尾空格不再 trim，前导空格按 github-slugger==0.0.3 语义转连字符，锚点为「-章节」
     heading_slugs = [h.slug for h in view.headings]
-    assert heading_slugs == ["落款", "章节"], heading_slugs
+    assert heading_slugs == ["落款", "-章节"], heading_slugs
     # <a id="x"> 与标题锚点可区分：独立字段且无交叉污染
     assert "in-heading" not in heading_slugs
-    assert "章节" not in ids
+    assert "-章节" not in ids
     # anchor_ids 是标题 slug 与 HTML ID 的并集
     anchors = view.anchor_ids()
-    assert anchors == frozenset({"落款", "章节", "api-ref", "box", "in-heading"}), anchors
+    assert anchors == frozenset({"落款", "-章节", "api-ref", "box", "in-heading"}), anchors
 
 
 def test_fences_and_inline_code_no_false_link(view_factory) -> None:
@@ -116,6 +165,18 @@ def test_escaped_reference_does_not_suppress_real_dead_link(view_factory) -> Non
     assert refs == [("dead", "nope", 3)], refs
 
 
+def test_html_href_extraction_with_source_and_line(view_factory) -> None:
+    """组 7（Q12）：HTML href 抽取标签/来源/行号；围栏与行内代码中的 HTML 不参与。"""
+    view = view_factory(HTML_HREF_DOC)
+    hrefs = {(h.href, h.tag, h.source, h.line) for h in view.html_hrefs}
+    assert hrefs == {
+        ("./target.md", "a", "inline", 1),
+        ("#sec", "a", "block", 4),
+    }, hrefs
+    # HTML href 不混入 Markdown links（两条死链检查经统一去重入口合并消费）
+    assert view.links == (), view.links
+
+
 def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:
     """组 5：真缺失锚点显式 False；未知/不可解析输入显式失败或明确「未核」。"""
     view = dm.parse_text(HTML_ID_DOC)
@@ -135,6 +196,50 @@ def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:
     with pytest.raises(UnicodeDecodeError) as decode_info:
         dm.load_document_view(bad)
     assert decode_info.value.encoding == "utf-8"
+
+
+def test_unicode_line_separator_is_not_a_line_break(view_factory) -> None:
+    """U+2028/U+2029 是正文而非行界：视图行号与 token.map 对齐，围栏内容准确。"""
+    text = "a\u2028b\u2029c\n\n```py\nx = 1\n```\n"
+    view = view_factory(text)
+    assert view.source[0] == "a\u2028b\u2029c", "Unicode 行分隔符必须留在行内，不得被拆行"
+    assert view.code_line_numbers() == frozenset({3, 4, 5})
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
+
+
+def test_crlf_lines_align_with_token_map(view_factory) -> None:
+    """CRLF 原文：视图行号与 token.map 对齐（行尾归一不改变行序）。"""
+    text = "# 标题\r\n\r\n```py\r\nx = 1\r\n```\r\n\r\n尾行\r\n"
+    view = view_factory(text)
+    assert view.headings and view.headings[0].line == 1
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
+
+
+@pytest.mark.parametrize(("value", "expected"), UPSTREAM_SLUG_VECTORS)
+def test_compat_slugger_matches_fixed_upstream_vectors(value: str, expected: str) -> None:
+    """Q10：Compat 实现与锁定 0.0.3 上游固定向量逐项一致（差分，非自身对照）。"""
+    assert dm.CompatGithubSlugger().slug(value) == expected
+
+
+def test_compat_slugger_matches_upstream_collision_sequence() -> None:
+    """Q10：重复/碰撞序号与上游一致（含与已存在 ``-1`` 后缀再碰撞）。"""
+    slugger = dm.CompatGithubSlugger()
+    assert [slugger.slug(value) for value in ["Setup", "Setup", "setup", "setup-1", "Setup"]] == [
+        "setup",
+        "setup-1",
+        "setup-2",
+        "setup-1-1",
+        "setup-3",
+    ]
+
+
+def test_compat_slugger_maintain_case_and_non_str_match_upstream() -> None:
+    """Q10：maintain_case 保留大小写；非 str 输入返回空串（上游 ``type(value) != str``）。"""
+    assert dm.CompatGithubSlugger().slug("Known (Debt)", maintain_case=True) == "Known-Debt"
+    assert dm.CompatGithubSlugger().slug(cast(Any, 1)) == ""
+    assert dm.CompatGithubSlugger.upstream_version == "0.0.3"
 
 
 def test_view_immutable_and_slugger_backend_honest() -> None:

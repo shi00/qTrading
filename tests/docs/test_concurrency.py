@@ -235,6 +235,11 @@ def test_write_refusal_lists_every_unwritten_target(tmp_path: Path, monkeypatch:
     assert result.ok is False
     assert result.written == (), "原位写被拒绝时不得有目标被记为已写"
     assert result.failed == ("a.md", "b.md"), "未写目标必须逐个如实列出（继续处理其余目标）"
+    assert result.conflict_reasons == (), "写失败原因不得混入冲突原因（否则 CLI 按冲突索引取因会错位）"
+    assert len(result.failure_reasons) == 2
+    assert all("崩溃原子提交" in reason for reason in result.failure_reasons), (
+        f"每个未写目标都须给出可定位的拒绝原因: {result.failure_reasons}"
+    )
     assert (root / "a.md").read_bytes() == before_a
     assert (root / "b.md").read_bytes() == before_b
 
@@ -315,8 +320,32 @@ def test_refused_write_maps_to_nonzero_exit(
     result = dg.run_update(root, gf.make_demo_registry())
 
     assert cdc.main(["--update"], update_runner=lambda: result) == 1
-    assert capsys.readouterr().out != "", "退出非零时必须如实输出未写/失败明细"
+    out = capsys.readouterr().out
+    assert "写入失败目标" in out, f"退出非零时必须如实输出未写明细，实际输出: {out!r}"
+    assert "崩溃原子提交" in out, "未写原因须说明受阻于崩溃原子提交方案未验证，而非笼统『写失败』"
     assert target.read_bytes() == before
+
+
+def test_conflict_and_failure_reasons_stay_aligned(capsys: pytest.CaptureFixture[str]) -> None:
+    """同批冲突与写失败各自取因：原因按各自列表对齐，不把一个目标的原因显示给另一个目标。"""
+    import check_docs_consistency as cdc
+
+    result = dg.UpdateResult(
+        written=(),
+        unchanged=(),
+        conflicts=("b.md",),
+        failed=("a.md",),
+        blocked=None,
+        post_check_errors=(),
+        conflict_reasons=("内容在快照后被修改",),
+        failure_reasons=("拒绝原位写入：崩溃原子提交未验证",),
+    )
+
+    cdc._report_update_result(result)
+    lines = capsys.readouterr().out.splitlines()
+    assert "  - b.md: 内容在快照后被修改" in lines
+    assert "  - a.md: 拒绝原位写入：崩溃原子提交未验证" in lines
+    assert "  - b.md: 拒绝原位写入：崩溃原子提交未验证" not in lines
 
 
 def test_render_is_deterministic(tmp_path: Path) -> None:

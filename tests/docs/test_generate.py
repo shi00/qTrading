@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import check_docs_consistency as cdc
 import docs_generated as dg
 from fixtures import generator_fixtures as gf
 
@@ -38,6 +39,68 @@ def test_scan_markdown_blocks_multiple() -> None:
     blocks = dg.scan_blocks(text, "markdown")
     assert blocks["first"].content_lines == ("A",)
     assert blocks["second"].content_lines == ("B",)
+
+
+def test_scan_markdown_block_content_keeps_code_lines() -> None:
+    """正例：有效块内的围栏代码行完整计入 content_lines（代码语境只排除块边界判定）。"""
+    text = '<!-- generated:code-sample -->\n说明\n```python\nprint("x")\n```\n<!-- /generated -->\n'
+    blocks = dg.scan_blocks(text, "markdown")
+    assert blocks["code-sample"].content_lines == ("说明", "```python", 'print("x")', "```")
+
+
+def test_fenced_marker_outside_block_not_registered() -> None:
+    """负例：块外围栏内的假标记不登记为块；块内围栏假标记是内容而非嵌套/结束。"""
+    text = (
+        "<!-- generated:real -->\n"
+        "```\n"
+        "<!-- generated:fake -->\n"
+        "<!-- /generated -->\n"
+        "```\n"
+        "<!-- /generated -->\n"
+        "\n"
+        "```markdown\n"
+        "<!-- generated:outside -->\n"
+        "<!-- /generated -->\n"
+        "```\n"
+    )
+    blocks = dg.scan_blocks(text, "markdown")
+    assert set(blocks) == {"real"}
+    assert blocks["real"].content_lines == ("```", "<!-- generated:fake -->", "<!-- /generated -->", "```")
+
+
+def _render_code_sample(validated: dict[str, object], root: Path) -> list[str]:
+    """代码型块渲染：输出含围栏代码的固定内容（漂移检测用例的最小渲染器）。"""
+    del validated, root
+    return ["说明", "```python", 'print("x")', "```"]
+
+
+def test_block_code_change_reports_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证：合法代码型块可相等；块内任意代码改动必须报漂移（不被代码语境过滤吞掉）。"""
+    root = tmp_path / "repo"
+    (root / "sources").mkdir(parents=True)
+    (root / "targets").mkdir()
+    (root / "sources" / "sample.txt").write_text("sample\n", encoding="utf-8")
+    target = root / "targets" / "derived.md"
+    target.write_text(
+        '# 目标\n\n<!-- generated:code-sample -->\n说明\n```python\nprint("x")\n```\n<!-- /generated -->\n',
+        encoding="utf-8",
+    )
+    spec = dg.BlockSpec(
+        block_id="code-sample",
+        target="targets/derived.md",
+        sources=(dg.SourceSchema(path="sources/sample.txt", fmt="text"),),
+        render=_render_code_sample,
+    )
+    monkeypatch.setattr(cdc, "ROOT", root)
+    monkeypatch.setattr(dg, "BUILTIN_REGISTRY", (spec,))
+    assert cdc.check_docs_generated() == [], "合法代码型块与渲染一致时必须通过"
+
+    target.write_text(
+        target.read_text(encoding="utf-8").replace('print("x")', 'print("tampered")'),
+        encoding="utf-8",
+    )
+    errors = cdc.check_docs_generated()
+    assert errors and all("code-sample" in e for e in errors), f"块内代码改动必须报漂移: {errors}"
 
 
 def test_missing_block_rejected() -> None:
@@ -87,6 +150,53 @@ def test_end_tag_id_mismatch_rejected() -> None:
     text = "<!-- generated:alpha -->\n<!-- /generated:beta -->\n"
     with pytest.raises(dg.EndMismatchError, match="结束标记身份不匹配: 'beta'"):
         dg.scan_blocks(text, "markdown")
+
+
+# ---------------------------------------------------------------------------
+# 行切分与解析器一致：Unicode 行分隔符 / CRLF 下围栏假作者恒缺失、真实块准确
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+def test_unicode_line_separator_keeps_fenced_marker_unreachable(sep: str) -> None:
+    """围栏前含 Unicode 行分隔符时，围栏内成对标记仍不得被认作现行块。"""
+    text = f"a{sep}b{sep}c{sep}d\n\n```\n<!-- generated:fake -->\n<!-- /generated -->\n```\n"
+    assert dg.scan_blocks(text, "markdown") == {}
+    with pytest.raises(dg.MissingBlockError, match="缺少生成块 'fake'"):
+        dg.replace_block(text, "markdown", "fake", ["changed"])
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+def test_unicode_line_separator_real_block_position_and_content(sep: str) -> None:
+    """Unicode 正文原样保留：真实块位置/内容准确，替换不吞正文。"""
+    text = f"前言{sep}续行\n\n<!-- generated:real -->\n- 旧\n<!-- /generated -->\n尾行\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert (blocks["real"].start_line, blocks["real"].end_line) == (3, 5)
+    assert blocks["real"].content_lines == ("- 旧",)
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert f"前言{sep}续行" in replaced
+    assert "- 旧" not in replaced and "- 新" in replaced
+    assert replaced.endswith("尾行\n")
+
+
+def test_crlf_fenced_marker_not_a_block() -> None:
+    """CRLF 原文：围栏内成对标记不构成现行块。"""
+    text = "a\r\n\r\n```\r\n<!-- generated:fake -->\r\n<!-- /generated -->\r\n```\r\n"
+    assert dg.scan_blocks(text, "markdown") == {}
+    with pytest.raises(dg.MissingBlockError, match="缺少生成块 'fake'"):
+        dg.replace_block(text, "markdown", "fake", ["changed"])
+
+
+def test_crlf_real_block_position_content_and_line_ending() -> None:
+    """CRLF 原文：真实块位置/内容准确，替换后行尾仍为 CRLF。"""
+    text = "# 目标\r\n\r\n<!-- generated:real -->\r\n- 旧\r\n<!-- /generated -->\r\n尾行\r\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert (blocks["real"].start_line, blocks["real"].end_line) == (3, 5)
+    assert blocks["real"].content_lines == ("- 旧",)
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert "\n" not in replaced.replace("\r\n", ""), "替换后不得残留裸 LF"
+    assert "<!-- generated:real -->\r\n- 新\r\n<!-- /generated -->" in replaced
+    assert replaced.endswith("尾行\r\n")
 
 
 # ---------------------------------------------------------------------------

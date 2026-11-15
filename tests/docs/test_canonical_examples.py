@@ -20,7 +20,9 @@ canonical 示例契约迁移到 docs/flet/ 子文档（v1-api-constraints.md / p
 活文档必须保留至少一个未被豁免的示例；历史 stub（man/flet-best-practices.md）具名豁免。
 """
 
+import io
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -58,7 +60,7 @@ REAL_SCREENER_VM_API = (
 )
 
 # 迁移反例只认明确的 Python 注释行（不是任意包含该词的字面量/字符串）
-MIGRATION_REFERENCE_COMMENT_RE = re.compile(r"^\s*#\s*migration reference\b")
+MIGRATION_REFERENCE_COMMENT_RE = re.compile(r"^#\s*migration reference\b")
 # 历史 stub：Phase 2.5 后无 python 示例，按具名路径豁免「活文档要求非空」
 HISTORICAL_STUB_PATHS = frozenset({MAN_FLET_BEST_PRACTICES_PATH})
 
@@ -74,8 +76,28 @@ def _extract_python_blocks(text: str) -> list[str]:
 
 
 def _is_migration_annotated(block: str) -> bool:
-    """仅当代码块含显式 Python 注释行 ``# migration reference`` 时豁免。"""
-    return any(MIGRATION_REFERENCE_COMMENT_RE.match(line) for line in block.splitlines())
+    """仅当代码块含独立的 Python 注释行 ``# migration reference`` 时豁免。
+
+    经 ``tokenize`` 只认 COMMENT token：三引号/普通字符串内的同形文本不产生
+    COMMENT token，不构成豁免；注释须独占物理行（行尾注释、f-string 表达式内的
+    注释均不豁免）。解析错误即停止扫描（错误前已确认的注释仍有效，错误后的文本
+    不会被接受）。
+    """
+    fstring_depth = 0
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(block).readline):
+            if token.type == tokenize.FSTRING_START:
+                fstring_depth += 1
+            elif token.type == tokenize.FSTRING_END:
+                fstring_depth -= 1
+            elif token.type == tokenize.COMMENT and fstring_depth == 0:
+                if token.line[: token.start[1]].strip():
+                    continue  # 行尾注释不是独立注释行
+                if MIGRATION_REFERENCE_COMMENT_RE.match(token.string):
+                    return True
+    except (SyntaxError, tokenize.TokenError):
+        return False
+    return False
 
 
 def _read(path: Path) -> str:
@@ -95,6 +117,35 @@ def _live_python_blocks(text: str, name: str, *, historical_stub: bool = False) 
     assert blocks, f"{name}: 活文档必须包含 python 代码块（示例不得为空）"
     assert live, f"{name}: 至少保留一个未被 `# migration reference` 注释豁免的活示例"
     return live
+
+
+class TestMigrationAnnotationSemantics:
+    """迁移豁免只认真实独立的 Python 注释行，字符串内同形文本不构成豁免。"""
+
+    _FAKE_MULTILINE_COMMENT = 'note = """\n# migration reference\n"""\nI18n.subscribe()\n'
+
+    def test_multiline_string_fake_comment_does_not_exempt(self):
+        """多行字符串里的 `# migration reference` 不是注释，坏例不得被豁免。"""
+        assert _is_migration_annotated(self._FAKE_MULTILINE_COMMENT) is False
+        live = _live_python_blocks(f"```python\n{self._FAKE_MULTILINE_COMMENT}```\n", "doc.md")
+        assert len(live) == 1
+        assert "I18n.subscribe()" in live[0]
+
+    def test_real_standalone_comment_exempts_block(self):
+        """真实独立注释行仍豁免，且活文档保留的非空活例被返回。"""
+        block = "# migration reference\nI18n.subscribe()\n"
+        assert _is_migration_annotated(block) is True
+        text = f"```python\n{block}```\n\n```python\npage.update()\n```\n"
+        assert _live_python_blocks(text, "doc.md") == ["page.update()"]
+
+    def test_trailing_comment_does_not_exempt(self):
+        """行尾注释不是独立注释行，不构成豁免（与原逐行语义一致）。"""
+        assert _is_migration_annotated("I18n.subscribe()  # migration reference\n") is False
+
+    def test_fstring_expression_comment_does_not_exempt(self):
+        """f-string 表达式内的注释 token 位于字符串字面量中，不构成豁免。"""
+        block = 'x = f"""{\n  # migration reference\n  1\n}"""\nI18n.subscribe()\n'
+        assert _is_migration_annotated(block) is False
 
 
 class TestContributingCanonicalExamples:

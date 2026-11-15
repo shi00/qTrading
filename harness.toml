@@ -1,10 +1,13 @@
 # Harness v4 Configuration
 # Edit this file, then run `harness sync` to generate CC plugin files.
 #
-# プロジェクト憲法は CLAUDE.md が唯一権威。本ファイルは Harness
-# ツール連携用の設定であり、CLAUDE.md の紅線・アーキテクチャ境界に優先しない。
-# 規約の正本ではない（AI ツール実行時権限・サンドボックス設定）。製品バージョンは
-# 保持しない（ADR-0017 バージョンSSOT収束、正本は pyproject.toml [project].version）。
+# 文書の権威はテーマ別に決まる（CLAUDE.md §1 の主題別権威表、ADR-0018）。
+# 紅線・アーキテクチャ不変条件（§4 は最小摘要、正文正本は docs/architecture/overview.md）
+# ・AI 行為は CLAUDE.md、グローバル行為（言語・授権・返信風格）は AGENTS.md が
+# 唯一の手書き作者源。本ファイルは Harness ツール連携用の設定（AI ツール実行時権限・
+# サンドボックス設定）であり、規約の正本ではない。CLAUDE.md の紅線・アーキテクチャ境界
+# に優先しない。製品バージョンは保持しない
+# （ADR-0017 バージョンSSOT収束、正本は pyproject.toml [project].version）。
 
 [project]
 # version フィールドは ADR-0017（バージョンSSOT収束）により削除：製品版の一意の正本は

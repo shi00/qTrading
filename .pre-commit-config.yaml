@@ -117,7 +117,14 @@ repos:
           - "pyyaml>=6.0"
           # /generated:precommit-docs-deps-docs-consistency
         # files 含 .py 以触发 NOTE(lazy) 三要素检查(任何 .py 变化都跑)；.ya?ml 覆盖治理正本 .yml 扩展名（GDR-02）。
-        files: \.(md|toml|ya?ml|py)$
+        # 受管 JSON（Q17）：
+        # - docs/ 下治理 JSON：check_docs_index_completeness 的 .json 候选（如 review-result.schema.json）；
+        # - locales/*/strings.json：check_strategy_desc_dynamic_consistency 的必需资产。
+        # 非受管 JSON（tests/ 夹具、package*.json、pyrightconfig.json、hooks/hooks.json 等）不触发。
+        # rename：pre-commit 只传重命名后的新路径，新路径命中即触发；删除：pre-commit 的文件选择
+        # 不含已删除路径（git diff --diff-filter 排除 D），本地无法由 files 过滤器触发，由脚本运行时的
+        # fail-closed（必需 locale 资产缺失即失败）与 docs-ci.yml 在 PR/merge_group 的全量执行兜底。
+        files: \.(md|toml|ya?ml|py)$|^docs/.*\.json$|^locales/[^/]+/strings\.json$
         pass_filenames: false
 
       - id: redline-check
