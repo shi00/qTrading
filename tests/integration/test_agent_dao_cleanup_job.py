@@ -223,6 +223,7 @@ async def test_retry_pending_reuses_original_set(dao: AgentDao) -> None:
     assert loaded.exact_ids == ("wf-a", "wf-b")
     assert loaded.session_ids == ("session-1", "session-2")
     assert loaded.asset_keys == (("asset-a", "1"), ("asset-b", "2"))
+    assert loaded.prior_error_category == "transient"
 
 
 @pytest.mark.asyncio(loop_scope="session")

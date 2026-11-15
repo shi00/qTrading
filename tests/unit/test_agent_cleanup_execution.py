@@ -128,14 +128,18 @@ class _Executor:
         counts: dict[str, int] | None = None,
         missing: tuple[str, ...] = (),
         error: Exception | None = None,
+        preflight_error: Exception | None = None,
     ) -> None:
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self._counts = _zeros() if counts is None else counts
         self._missing = missing
         self._error = error
+        self._preflight_error = preflight_error
 
     async def preflight(self, ids) -> NativePreflight:
         self.calls.append(("preflight", tuple(ids)))
+        if self._preflight_error is not None:
+            raise self._preflight_error
         return NativePreflight(tuple(ids), dict(self._counts), self._missing)
 
     async def delete(self, ids) -> NativeCleanupResult:
@@ -258,7 +262,48 @@ class TestCleanupExecutionFailures:
         assert dao.phases[0]["error_category"] == "native_target_missing"
 
     @pytest.mark.asyncio
-    async def test_missing_without_committed_fence_still_refuses(self) -> None:
+    async def test_first_missing_then_second_confirm_still_refuses(self) -> None:
+        """端到端：首次缺失 → 落 retry_pending(native_target_missing) → 二次确认仍拒绝。"""
+
+        first = _record(phase=CleanupPhase.PREPARED, fence_committed=False)
+        service, _, dao, _ = _service(first, executor=_Executor(missing=("wf-a",)))
+        with pytest.raises(AgentServiceError) as first_exc:
+            await service.confirm_and_execute(_command(first), _precondition())
+        assert first_exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        recorded = dao.phases[0]["error_category"]
+        assert recorded == "native_target_missing"
+
+        again = _record(
+            phase=CleanupPhase.RETRY_PENDING,
+            fence_committed=True,
+            prior_error_category=recorded,
+        )
+        retry_executor = _Executor(missing=("wf-a",))
+        service2, _, dao2, _ = _service(again, executor=retry_executor)
+        with pytest.raises(AgentServiceError) as retry_exc:
+            await service2.confirm_and_execute(_command(again), _precondition())
+        assert retry_exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+        assert [call[0] for call in retry_executor.calls] == ["preflight"]
+        assert dao2.phases[0]["error_category"] == "native_target_missing"
+
+    @pytest.mark.asyncio
+    async def test_preflight_failure_is_not_recorded_as_execution_failure(self) -> None:
+        """预检异常不得记为 cleanup_execution_failed，否则下次缺失会被误放行。"""
+
+        record = _record(phase=CleanupPhase.PREPARED, fence_committed=True)
+        executor = _Executor(preflight_error=RuntimeError("preflight boom"))
+        service, _, dao, _ = _service(record, executor=executor)
+
+        with pytest.raises(RuntimeError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+        assert str(exc.value) == "preflight boom"
+
+        assert dao.phases[0]["error_category"] == "cleanup_preflight_failed"
+        assert [call[0] for call in executor.calls] == ["preflight"]
+
+    @pytest.mark.asyncio
+    async def test_missing_without_prior_deletion_failure_still_refuses(self) -> None:
         """未提交 fence 的首次预检缺失仍判失败，不得以缺失冒充已清理。"""
 
         record = _record(phase=CleanupPhase.PREPARED, fence_committed=False)
