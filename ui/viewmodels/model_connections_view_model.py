@@ -534,13 +534,23 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
 
     @staticmethod
     def _count_refs(snapshot: ModelManagementSnapshot) -> dict[str, int]:
-        counts: dict[str, int] = {}
+        """按场景去重统计连接引用数（文案口径「被 N 个场景引用」，D16-007）。
+
+        同一场景内先并集主候选与子任务（sentiment）候选，再逐场景累计：同一连接
+        在同一场景承担多个任务只计一个场景；零引用连接不进入结果（取默认 0）。
+        """
+        scene_refs: dict[str, set[str]] = {}
         for route in snapshot.scenario_routes:
+            refs = scene_refs.setdefault(str(route.get("scenario_id") or ""), set())
             for cid in route.get("candidates") or []:
-                counts[str(cid)] = counts.get(str(cid), 0) + 1
+                refs.add(str(cid))
             for sub in (route.get("task_routes") or {}).values():
                 for cid in (sub or {}).get("candidates") or []:
-                    counts[str(cid)] = counts.get(str(cid), 0) + 1
+                    refs.add(str(cid))
+        counts: dict[str, int] = {}
+        for scene_cids in scene_refs.values():
+            for cid in scene_cids:
+                counts[cid] = counts.get(cid, 0) + 1
         return counts
 
     def _row_from_raw(self, raw: Mapping[str, Any]) -> ConnectionRow:
