@@ -31,6 +31,10 @@
   页号 / 行 / total 只在成功响应后按请求身份提交（``loaded_page``）；失败与
   在途期间「当前页」导出显式不可用，不生成新页号 + 旧页行的混合 CSV。
   ``all`` 导出保留独立过滤快照语义，不受当前页加载状态影响。
+- D16-005：预算草稿与已提交限额是两种事实——草稿为用户输入（独立编辑版本 /
+  dirty 身份），``load`` 只回填未被用户分叉的草稿；翻页 / 过滤 / 在途加载
+  不得以已提交配置覆盖未保存输入。保存回执只确认发起时的草稿版本，等待期间
+  的新输入保留；不把记录过滤与预算草稿绑成全局事务。
 """
 
 from __future__ import annotations
@@ -330,6 +334,7 @@ class ModelUsageState:
     # F37：明细导出范围（page=当前已加载页 / all=全部筛选结果）
     export_scope: str = EXPORT_SCOPE_PAGE
     # F36：预算录入（草稿为输入框值；limit 未设 None / 读取失败 unknown 分离，R21）
+    # D16-005：草稿为用户输入事实，load 只回填未分叉草稿（不覆盖未保存输入）
     budget_draft: str = ""
     monthly_limit_cny: Decimal | None = None
     monthly_limit_unknown: bool = False
@@ -502,6 +507,11 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         # F36：月汇总代次。进入 / 切换查看月 / 返回明细时推进，在途旧月份响应
         # （含失败降级）不回填——历史月数据不被其他月份（含当前月）替代。
         self._summary_generation: int = 0
+        # D16-005：预算草稿编辑身份。草稿承载用户输入，已提交限额承载配置事实；
+        # ``_budget_draft_version`` 每次输入变化推进（保存回执按发起版本判定），
+        # ``_budget_draft_dirty`` 标记草稿已分叉——load 仅在未分叉时同步回填。
+        self._budget_draft_version: int = 0
+        self._budget_draft_dirty: bool = False
         self._init_mixin_fields()
 
     # ------------------------------------------------------------------
@@ -587,6 +597,9 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         if generation != self._load_generation:
             return  # 旧代次响应：拒绝写入，保留最新请求的结果
 
+        # D16-005：已提交限额照常更新（配置事实），但草稿只在未分叉时同步回填——
+        # 用户已编辑的未保存输入不因翻页 / 过滤 / 在途加载被抹掉。
+        draft = self._state.budget_draft if self._budget_draft_dirty else _format_limit_text(limit)
         self._set_state(
             requests=tuple(_request_row_from_dao(row) for row in rows),
             total=int(total),
@@ -594,7 +607,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             loading=False,
             budget_summary=_budget_summary_from_dao(summary),
             unconfirmed_reservations=tuple(_reservation_row_from_dao(row) for row in unconfirmed),
-            budget_draft=_format_limit_text(limit),
+            budget_draft=draft,
             monthly_limit_cny=limit,
             monthly_limit_unknown=limit_unknown,
             message=Message("model_usage_limit_load_failed") if limit_unknown else None,
@@ -728,8 +741,18 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
     # ------------------------------------------------------------------
 
     def set_budget_draft(self, text: str) -> None:
-        """记录预算金额输入草稿（纯状态同步命令，on_change 直调，沿 set_search 先例）。"""
-        self._set_state(budget_draft=str(text or ""))
+        """记录预算金额输入草稿（纯状态同步命令，on_change 直调，沿 set_search 先例）。
+
+        D16-005：用户输入即草稿分叉——推进草稿编辑版本并标记 dirty，后续
+        ``load``（翻页 / 过滤 / 在途加载）不再以已提交配置覆盖该草稿。文本未变
+        （含 load 回填后的重渲染回传）不推进版本、不改变分叉状态。
+        """
+        new_text = str(text or "")
+        if new_text == self._state.budget_draft:
+            return
+        self._budget_draft_version += 1
+        self._budget_draft_dirty = True
+        self._set_state(budget_draft=new_text)
 
     async def save_monthly_budget(self) -> None:
         """录入月度软预算（F36）：解析草稿 → 经注入 saver CAS 保存 → 重载供重开核对。
@@ -740,6 +763,9 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         未注入 saver 明确降级（不伪装成功）；保存失败（含 CAS 冲突 / 回执未确认）
         如实反馈「未提交，请重试」，不自动重试。成功后 ``load()`` 重读限额与摘要，
         输入框回显已保存值供核对。
+        D16-005：回执只确认发起保存时的草稿版本——等待期间用户继续输入时保留新
+        草稿（不因回执或随之重载回退为已保存值）；无新输入才解除草稿分叉并回显
+        规范化已提交值。
         """
         saver = self._budget_limit_saver
         if saver is None:
@@ -750,6 +776,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         except (ArithmeticError, ValueError):
             self._set_state(message=Message("model_usage_budget_invalid"))
             return
+        draft_version = self._budget_draft_version
         try:
             committed = await saver(amount)
         except asyncio.CancelledError:
@@ -761,7 +788,14 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             self._set_state(message=Message("model_usage_budget_save_failed"))
             return
         await self.load()
-        self._set_state(message=Message("model_usage_budget_saved"))
+        changes: dict[str, Any] = {"message": Message("model_usage_budget_saved")}
+        if self._budget_draft_version == draft_version:
+            # 等待期间无新输入：保存回执确认发起版本，草稿与已提交限额同步。
+            self._budget_draft_dirty = False
+            committed_limit = self._state.monthly_limit_cny
+            if not self._state.monthly_limit_unknown and committed_limit == amount:  # None == None（清除限额）
+                changes["budget_draft"] = _format_limit_text(committed_limit)
+        self._set_state(**changes)
 
     # ------------------------------------------------------------------
     # 历史月汇总视图 + 导出

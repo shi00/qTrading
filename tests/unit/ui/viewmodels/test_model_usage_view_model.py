@@ -9,6 +9,9 @@
 - next/prev 分页（50/页，边界 no-op）；
 - D16-004 页身份：翻页在途 / 失败不可导出（当前页），成功 CSV 页号与 invocation IDs
   同源，前后翻页清空旧页行与展开、迟到展开不回填错页；
+- D16-005 预算草稿编辑身份：在途加载 / 过滤 / 翻页重载不覆盖未保存草稿，
+  已提交限额事实照常更新；保存回执只确认发起版本（等待期间新输入保留），
+  清除限额、保存失败均保护草稿；
 - expand 加载有序尝试并可折叠；
 - release_unconfirmed_reservation 未注入释放器时降级；注入后刷新摘要；
 - enter_monthly_summary 切月汇总模式；
@@ -1649,3 +1652,169 @@ async def test_stale_success_after_page_turn_keeps_fresh_page_data():
     assert [r.invocation_id for r in vm.state.requests] == ["inv-p1"]
     assert vm.state.total == 60
     assert vm.state.budget_draft == "120"  # A 的 10 未覆盖 B
+
+
+# ---------------------------------------------------------------------------
+# D16-005：预算草稿编辑身份（重载不得覆盖未保存输入）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_during_inflight_load_preserves_draft_and_committed_limit():
+    """D16-005 验收：reader 暂停期间输入 200，释放后限额事实 100、草稿保持 200。"""
+    dao = _dao()
+    reader = _ReaderBarrier(gated_value=Decimal("100"))
+    vm = _vm(dao, reader=reader)
+
+    load_task = asyncio.create_task(vm.load())
+    await asyncio.sleep(0)
+    assert reader.calls == 1  # 初始加载停在末段 reader
+
+    vm.set_budget_draft("200")
+    reader.release()
+    await load_task
+
+    assert vm.state.monthly_limit_cny == Decimal("100")  # 已提交配置事实
+    assert vm.state.budget_draft == "200"  # 未保存输入不被抹掉
+
+
+@pytest.mark.asyncio
+async def test_filter_reload_after_edit_preserves_draft():
+    """过滤重载（不同业务职责）不回填已提交值覆盖未保存草稿。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    vm = _vm(dao, reader=reader)
+    await vm.load()
+    assert vm.state.budget_draft == "100"  # 未编辑时正常回填
+
+    vm.set_budget_draft("200")
+    await vm.set_filter(scenario_id="stock_analysis")
+
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_page_turn_after_edit_preserves_draft():
+    """翻页重载不丢未保存预算草稿。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao, reader=AsyncMock(return_value=Decimal("100")))
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    await vm.next_page()
+
+    assert vm.state.page == 1
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_cleared_draft_survives_reload_and_saves_unset():
+    """清除限额草稿：重载不回填旧值，保存收到 None（不以 0 伪装，R21）。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=True)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+    assert vm.state.budget_draft == "100"
+
+    vm.set_budget_draft("")
+    await vm.set_filter(origin=ORIGIN_TEST)
+    assert vm.state.budget_draft == ""  # 清除意图不被重载回填
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+    reader.return_value = None
+    await vm.save_monthly_budget()
+    saver.assert_awaited_once_with(None)
+    assert vm.state.monthly_limit_cny is None
+    assert vm.state.budget_draft == ""
+
+
+@pytest.mark.asyncio
+async def test_edit_during_save_preserves_newer_draft():
+    """保存等待期间继续编辑：回执只确认发起版本，新输入保留。"""
+    dao = _dao()
+    saved: dict[str, Decimal | None] = {"limit": None}
+    gate = asyncio.Event()
+
+    async def _reader() -> Decimal | None:
+        return saved["limit"]
+
+    async def _saver(amount: Decimal | None) -> bool:
+        await gate.wait()
+        saved["limit"] = amount
+        return True
+
+    vm = _vm(dao, reader=_reader, saver=_saver)
+    await vm.load()
+
+    vm.set_budget_draft("100")
+    save_task = asyncio.create_task(vm.save_monthly_budget())
+    await asyncio.sleep(0)  # saver 挂起中
+
+    vm.set_budget_draft("200")  # 保存等待期间的新输入
+    gate.set()
+    await save_task
+
+    assert saved["limit"] == Decimal("100")
+    assert vm.state.monthly_limit_cny == Decimal("100")
+    assert vm.state.budget_draft == "200"
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_saved"
+
+
+@pytest.mark.asyncio
+async def test_save_without_new_input_syncs_draft_to_committed_value():
+    """保存等待期间无新输入：草稿规范化回显已提交值并解除分叉。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=True)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+
+    vm.set_budget_draft("100.00")
+    await vm.save_monthly_budget()
+
+    assert vm.state.budget_draft == "100"  # 回显规范化已提交值
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+    await vm.set_filter(scenario_id="stock_analysis")
+    assert vm.state.budget_draft == "100"  # 分叉已解除，后续重载同步已提交值
+
+
+@pytest.mark.asyncio
+async def test_failed_save_keeps_draft_protected_from_reload():
+    """保存未提交（CAS 冲突）后草稿仍属未保存输入，重载不回填已提交值。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=False)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    await vm.save_monthly_budget()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_save_failed"
+
+    await vm.set_filter(scenario_id="stock_analysis")
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_load_failure_after_edit_keeps_draft():
+    """重载失败属已提交读取失败，不触碰未保存草稿。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    vm = _vm(dao, reader=reader)
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    dao.read_request_page = AsyncMock(side_effect=RuntimeError("boom"))
+    await vm.set_filter(scenario_id="stock_analysis")
+
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_load_failed"
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
