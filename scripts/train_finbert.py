@@ -60,6 +60,7 @@ LABELS = ("利空", "中性", "利好")
 TRAIN_FILE = "split_train.jsonl"
 DEV_CANDIDATES = ("split_dev.jsonl", "split_val.jsonl")
 TEST_FILE = "split_test.jsonl"
+SPLIT_NAMES = ("train", "dev", "test")
 
 # seed 依据：离线产物未记录（见模块 docstring）；与 verify_finbert_gguf.DEFAULT_SEED 同源
 DEFAULT_SEED = 20261008
@@ -187,8 +188,9 @@ def _check_split_exclusivity(splits: Mapping[str, list[dict[str, str]]], file_na
        文本视为同组，不得跨集合（精确字符串匹配，不做日粒度放宽）。
 
     检查边界（如实声明，R21）：``id`` / ``ts_code`` / ``publish_time`` 缺失或非字符串的
-    样本跳过对应检查；文本近重复 / 转载改写 / 同股同日不同时刻样本不做相似度检查——
-    本检查仅排除可精确判定的泄漏形态，不构成「分组泄漏已全部排除」的证明。
+    样本跳过对应检查（跳过量由 ``exclusivity_coverage`` 显式报告为未校验）；文本近重复 /
+    转载改写 / 同股同日不同时刻样本不做相似度检查——本检查仅排除可精确判定的泄漏形态，
+    不构成「分组泄漏已全部排除」的证明。
     """
     for left, right in itertools.combinations(splits, 2):
         left_rows, right_rows = splits[left], splits[right]
@@ -225,6 +227,59 @@ def _check_split_exclusivity(splits: Mapping[str, list[dict[str, str]]], file_na
             )
 
 
+def exclusivity_coverage(splits: Mapping[str, list[dict[str, str]]]) -> dict[str, Any]:
+    """统计跨 split 互斥检查的元数据覆盖（纯函数），如实标注未校验样本（R21）。
+
+    互斥检查依赖 ``id`` 与 ``(ts_code, publish_time)`` 事件键；任一字段缺失的样本会被
+    ``_check_split_exclusivity`` **跳过**（无法判定，不猜测）。本函数把这些跳过量显式
+    计入 ``unverified_*`` 并生成 ``declaration``——缺元数据时报告「未做对应检查」，
+    **不得呈现为「泄漏已全部排除」**。覆盖统计只为观测口径，不改变拒绝/通过判定。
+    """
+    per_split: dict[str, dict[str, int]] = {}
+    total_rows = 0
+    covered_id = 0
+    covered_event_key = 0
+    for name in SPLIT_NAMES:
+        rows = splits[name]
+        rows_with_id = sum(1 for row in rows if _id_key(row))
+        rows_with_ts_code = sum(1 for row in rows if row.get("ts_code"))
+        rows_with_publish_time = sum(1 for row in rows if row.get("publish_time"))
+        rows_with_event_key = sum(1 for row in rows if _event_key(row) is not None)
+        per_split[name] = {
+            "rows": len(rows),
+            "id": rows_with_id,
+            "ts_code": rows_with_ts_code,
+            "publish_time": rows_with_publish_time,
+            "event_key": rows_with_event_key,
+        }
+        total_rows += len(rows)
+        covered_id += rows_with_id
+        covered_event_key += rows_with_event_key
+
+    unverified_id = total_rows - covered_id
+    unverified_event_key = total_rows - covered_event_key
+    if unverified_id == 0 and unverified_event_key == 0:
+        declaration = (
+            f"id 与 (ts_code, publish_time) 事件键覆盖全部 {total_rows} 条样本，跨 split 互斥检查已对全量样本执行"
+            "（不含文本近重复 / 转载改写的相似度检查，不构成「泄漏已全部排除」）"
+        )
+    else:
+        declaration = (
+            f"跨 split 互斥检查覆盖不完整：{unverified_id}/{total_rows} 条缺 id、"
+            f"{unverified_event_key}/{total_rows} 条缺 (ts_code, publish_time) 事件键——"
+            "这些样本未做对应检查，不构成「泄漏已全部排除」"
+        )
+    return {
+        "splits": per_split,
+        "total_rows": total_rows,
+        "covered_id": covered_id,
+        "covered_event_key": covered_event_key,
+        "unverified_id": unverified_id,
+        "unverified_event_key": unverified_event_key,
+        "declaration": declaration,
+    }
+
+
 def validate_corpus_dir(corpus_dir: Path | str, *, with_distribution: bool = False) -> dict[str, Any]:
     """校验语料目录三 split 完整性（纯函数）。
 
@@ -238,6 +293,9 @@ def validate_corpus_dir(corpus_dir: Path | str, *, with_distribution: bool = Fal
     ``raise ValueError``（规则与检查边界见 ``_check_split_exclusivity`` docstring）；
     现网 corpus-v1 语料（train 8813 / val 1102 / test 1102）实测三项检查均通过。
     文本近重复 / 转载改写不做相似度检查（如实声明，R21）。
+    返回值附 ``exclusivity``：各 split 的 ``id`` / ``ts_code`` / ``publish_time`` /
+    事件键覆盖计数与 ``declaration``（缺元数据时明示「未做对应检查」，见
+    ``exclusivity_coverage``）。
     """
     base = Path(corpus_dir)
     dev_path = next((base / name for name in DEV_CANDIDATES if (base / name).is_file()), None)
@@ -252,6 +310,7 @@ def validate_corpus_dir(corpus_dir: Path | str, *, with_distribution: bool = Fal
         {"train": splits["train"], "dev": splits["dev"], "test": splits["test"]},
         {"train": TRAIN_FILE, "dev": dev_path.name, "test": TEST_FILE},
     )
+    splits["exclusivity"] = exclusivity_coverage(splits)
     if with_distribution:
         splits["train_distribution"] = {
             label: sum(1 for row in splits["train"] if row["label"] == label) for label in LABELS
@@ -331,6 +390,7 @@ def build_training_plan(args: argparse.Namespace, *, splits: dict[str, Any] | No
         "test_rows": len(splits["test"]),
         "train_distribution": splits["train_distribution"],
         "class_weights": compute_class_weights(splits["train_distribution"]),
+        "exclusivity": splits.get("exclusivity") or exclusivity_coverage(splits),
         "model_dir": str(args.model_dir),
         "out_dir": str(args.out_dir),
         "best_dir": str(Path(args.out_dir) / BEST_DIR_NAME),
@@ -371,6 +431,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         splits["train_distribution"],
         plan["class_weights"],
     )
+    coverage = plan["exclusivity"]
+    if coverage["unverified_id"] or coverage["unverified_event_key"]:
+        LOGGER.warning("跨 split 泄漏检查覆盖不完整（缺失元数据未校验，非已排除）: %s", coverage["declaration"])
+    else:
+        LOGGER.info("跨 split 泄漏检查覆盖: %s", coverage["declaration"])
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(str(args.model_dir))
     model = transformers.AutoModelForSequenceClassification.from_pretrained(str(args.model_dir), num_labels=len(LABELS))
@@ -475,6 +540,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "best_dev_macro_f1": best_macro_f1,
         "test_macro_f1": float(test_metrics.get("test_macro_f1", float("nan"))),
         "labels": list(LABELS),
+        "exclusivity": plan["exclusivity"],
     }
     (best_dir / "train_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     if best_macro_f1 is not None:
