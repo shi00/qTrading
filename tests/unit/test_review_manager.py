@@ -204,10 +204,12 @@ class TestReviewManagerExecMetadataPersistence:
             {"key": "strategy_param_auto_adjusted", "params": {"min": 1.0, "adjusted_max": 9.0}},
             {"key": "strategy_ai_risk_check_skipped", "params": {}},
         ]
-        # 从库读回：往返后 Messages 等值且长度为 2
+        # 从库读回：往返后 Messages 等值且长度为 2（合法 wire format 不标记损坏）
         restored = deserialize_exec_warnings(saved[0]["exec_warnings"])
-        assert restored == tuple(exec_warnings)
-        assert len(restored) == 2
+        assert restored is not None
+        assert restored.messages == tuple(exec_warnings)
+        assert restored.corrupted is False
+        assert len(restored.messages) == 2
         # 每行归因：JSON 字符串 → JSONB dict（不伪造、不丢弃）
         assert saved[0]["filter_attribution"] == {"exclude_st": 3, "liquidity": 1}
 
@@ -239,7 +241,10 @@ class TestReviewManagerExecMetadataPersistence:
 
         saved = dao.save_screening_results.call_args.args[0]
         assert saved[0]["exec_warnings"] == []
-        assert deserialize_exec_warnings(saved[0]["exec_warnings"]) == ()
+        restored = deserialize_exec_warnings(saved[0]["exec_warnings"])
+        assert restored is not None
+        assert restored.messages == ()
+        assert restored.corrupted is False
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -287,6 +292,85 @@ class TestReviewManagerExecMetadataPersistence:
         saved = dao.save_screening_results.call_args.args[0]
         assert saved[0]["execution_metadata"] is None
         assert saved[1]["execution_metadata"] is None
+
+
+class TestDeserializeExecWarningsMemberCorruption:
+    """D16-009 (R21/BT-03)：合法 JSON 数组内的成员损坏不得洗成「已记录且无警告」。
+
+    ``exec_warnings`` 数组本身合法（JSON 可解析、类型为 list）时，旧实现静默跳过所有
+    坏成员并对「非空但全坏」返回空元组，与真正的空数组 ``[]`` 不可区分；``params``
+    类型损坏时也会被静默清成 ``{}``。本组用例锁定解析边界的三态：
+    ``None``（未记录）/ 已记录且无警告 / 已记录但存在不可还原成员（``corrupted``）。
+    """
+
+    def test_empty_array_is_recorded_with_no_warnings(self):
+        parsed = deserialize_exec_warnings("[]")
+        assert parsed is not None
+        assert parsed.messages == ()
+        assert parsed.corrupted is False
+
+    @pytest.mark.parametrize("raw", [None, float("nan"), "{not-json", {"key": "x"}, 3])
+    def test_null_or_non_array_inputs_remain_unrecorded(self, raw):
+        assert deserialize_exec_warnings(raw) is None
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            [None],
+            [{"params": {}}],
+            [{"key": ""}],
+            [{"key": None}],
+            [{"key": 123}],
+            ["not-a-member"],
+            [123],
+            [{}],
+        ],
+    )
+    def test_all_invalid_members_marked_corrupted(self, raw):
+        """非空数组但无可还原成员 → 必须标记损坏，不得返回与 ``[]`` 相同的空结果。"""
+        parsed = deserialize_exec_warnings(raw)
+        assert parsed is not None
+        assert parsed.messages == ()
+        assert parsed.corrupted is True
+
+    def test_mixed_members_keep_valid_warning_and_mark_corrupted(self):
+        parsed = deserialize_exec_warnings(
+            [{"key": "strategy_param_auto_adjusted", "params": {"min": 1.0}}, None, {"params": {}}]
+        )
+        assert parsed is not None
+        assert parsed.messages == (Message("strategy_param_auto_adjusted", {"min": 1.0}),)
+        assert parsed.corrupted is True
+
+    def test_damaged_params_keep_warning_key_and_mark_corrupted(self):
+        """``params`` 类型损坏：保留可识别的 warning key，同时标记损坏（不清成静默 ``{}``）。"""
+        parsed = deserialize_exec_warnings([{"key": "strategy_ai_risk_check_skipped", "params": "oops"}])
+        assert parsed is not None
+        assert parsed.messages == (Message("strategy_ai_risk_check_skipped"),)
+        assert parsed.corrupted is True
+
+    @pytest.mark.parametrize("member", [{"key": "strategy_ai_risk_check_skipped"}, {"key": "k", "params": None}])
+    def test_missing_or_null_params_marked_corrupted(self, member):
+        """``params`` 缺失/为 null：warning 身份仍可还原，但参数不可还原 → 标记损坏。"""
+        parsed = deserialize_exec_warnings([member])
+        assert parsed is not None
+        assert tuple(m.key for m in parsed.messages) == (member["key"],)
+        assert parsed.messages[0].params == {}
+        assert parsed.corrupted is True
+
+    def test_json_string_member_corruption_detected(self):
+        """raw SQL 路径的 JSON 字符串同样逐成员判定，不因可整体解析而放过坏成员。"""
+        parsed = deserialize_exec_warnings('[{"key": "strategy_ai_risk_check_skipped", "params": {}}, null]')
+        assert parsed is not None
+        assert parsed.messages == (Message("strategy_ai_risk_check_skipped"),)
+        assert parsed.corrupted is True
+
+    def test_valid_params_round_trip_preserved(self):
+        """合法成员（含嵌套 params）必须原样保留，不得被损坏判定吞掉。"""
+        params = {"min": 1.0, "adjusted_max": 9.0, "nested": {"a": [1, 2]}}
+        parsed = deserialize_exec_warnings([{"key": "strategy_param_auto_adjusted", "params": params}])
+        assert parsed is not None
+        assert parsed.corrupted is False
+        assert parsed.messages == (Message("strategy_param_auto_adjusted", params),)
 
 
 class TestReviewManagerRunReview:

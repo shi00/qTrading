@@ -2112,6 +2112,115 @@ class TestLoadHistoryExecWarningsRestore:
 
         assert vm.state.warnings == (Message("screener_history_exec_context_unrecorded"),)
 
+    # --- D16-009：合法数组内成员损坏不得洗成「已记录且无警告」 ---
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [[None], [{"params": {}}], ["not-a-member"], [{"key": ""}]])
+    async def test_all_corrupt_members_mark_corrupted(self, vm, raw):
+        """数组可解析但成员全坏 → 损坏哨兵，必须与 ``[]``（无警告）区分。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_score": [80], "exec_warnings": [raw]})
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (Message("screener_history_exec_context_corrupted"),)
+
+    @pytest.mark.asyncio
+    async def test_mixed_members_keep_valid_warning_and_mark_corrupted(self, vm):
+        """混合合法/非法成员：保留已知警告，同时追加损坏提示（不只报其中一种）。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ai_score": [80],
+                "exec_warnings": [[{"key": "strategy_ai_risk_check_skipped", "params": {}}, None]],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_corrupted"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_damaged_params_keep_warning_and_mark_corrupted(self, vm):
+        """params 类型损坏：保留可识别 warning key + 合法成员的完整 params，并标记损坏。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ai_score": [80],
+                "exec_warnings": [
+                    [
+                        {"key": "strategy_ai_risk_check_skipped", "params": "oops"},
+                        {"key": "strategy_param_auto_adjusted", "params": {"min": 1.0, "adjusted_max": 9.0}},
+                    ]
+                ],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("strategy_param_auto_adjusted", {"min": 1.0, "adjusted_max": 9.0}),
+            Message("screener_history_exec_context_corrupted"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_corrupt_run_union_keeps_other_run_warning(self, vm):
+        """跨 run 并集：一个 run 损坏、另一个 run 有合法警告 → 两者都保留，不互相覆盖。"""
+        df = pd.DataFrame(
+            {
+                "run_id": ["runA", "runB"],
+                "trade_date": ["20260906", "20260906"],
+                "strategy_name": ["s1", "s2"],
+                "ai_score": [90, 80],
+                "exec_warnings": [[{"key": "strategy_ai_risk_check_skipped", "params": {}}], [None]],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_corrupted"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_same_run_repeated_corruption_shown_once(self, vm):
+        """同一 run 的 100 行相同损坏只显示一次损坏哨兵（同 run 去重）。"""
+        df = pd.DataFrame(
+            {
+                "run_id": ["runX"] * 100,
+                "trade_date": ["20260906"] * 100,
+                "strategy_name": ["s"] * 100,
+                "ai_score": list(range(100)),
+                "exec_warnings": [[None] for _ in range(100)],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (Message("screener_history_exec_context_corrupted"),)
+
+    @pytest.mark.asyncio
+    async def test_json_string_member_corruption_marks_corrupted(self, vm):
+        """raw SQL 路径的 JSON 字符串：可整体解析但含坏成员时同样标记损坏。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ai_score": [80],
+                "exec_warnings": ['[{"key": "strategy_ai_risk_check_skipped", "params": {}}, null]'],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_corrupted"),
+        )
+
     @pytest.mark.asyncio
     async def test_missing_run_id_uses_date_strategy_sentinel_group(self, vm):
         """旧记录缺 run_id → 以 (trade_date, strategy_name) 哨兵组聚合（不伪造精确 run 来源）。"""

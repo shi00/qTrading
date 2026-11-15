@@ -292,6 +292,7 @@
     "screener_please_select": "Please select a strategy first!",
     "screener_history_viewing": "Viewing History: {date} / {label}",
     "screener_history_exec_context_unrecorded": "Execution context was not recorded for this run (cannot confirm whether data/parameter warnings existed).",
+    "screener_history_exec_context_corrupted": "The execution warning record for this run is partially corrupted; only restorable warnings are shown (may be incomplete).",
     "unit_year": "Year",
     "unit_years": "Years",
     "screener_strategy_not_found": "Strategy not found",

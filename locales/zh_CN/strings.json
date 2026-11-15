@@ -196,6 +196,7 @@
     "screener_please_select": "请先选择策略！",
     "screener_history_viewing": "查看历史: {date} / {label}",
     "screener_history_exec_context_unrecorded": "该次筛选未记录执行上下文（无法确认当时是否存在数据/参数警告）",
+    "screener_history_exec_context_corrupted": "该次筛选的执行警告记录部分损坏，仅显示可还原的警告（可能不完整）",
     "unit_year": "年",
     "unit_years": "年",
     "screener_strategy_not_found": "未找到该策略",
