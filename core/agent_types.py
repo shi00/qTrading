@@ -6278,9 +6278,10 @@ class SkillAssetRegistration:
     content_digest: str
     normalized_name: str
     license_id: str
-    archive_digest: str
+    archive_digest: str | None
     file_count: int
     expanded_bytes: int
+    source_kind: str = "zip"
     dependencies: tuple[str, ...] = ()
     missing_dependencies: tuple[str, ...] = ()
     ignored_behavioral_fields: tuple[str, ...] = ()

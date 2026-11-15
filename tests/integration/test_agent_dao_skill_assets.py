@@ -145,6 +145,45 @@ class TestSkillAssetPersistence:
         versions = await dao.list_skill_versions(user_scope=USER_SCOPE, skill_id="demo")
         assert [item[0] for item in versions] == [1, 2]
 
+    @pytest.mark.asyncio
+    async def test_directory_source_registration_has_no_archive_digest(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        request = SkillAssetRegistration(
+            user_scope=USER_SCOPE,
+            skill_id="demo",
+            version=1,
+            display_name="demo",
+            content_digest=sha256_hex(b"content"),
+            normalized_name="demo",
+            license_id="MIT",
+            archive_digest=None,
+            file_count=1,
+            expanded_bytes=10,
+            source_kind="directory",
+        )
+        await dao.register_skill_asset(request)
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试断言读取
+            metadata = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.metadata_payload).where(AgentAssetVersion.asset_id == "demo")
+                )
+            ).scalar_one()
+        assert metadata["archive_digest"] is None
+        assert metadata["source_kind"] == "directory"
+
+    @pytest.mark.asyncio
+    async def test_disabled_skill_is_not_a_usable_dependency(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await dao.register_skill_asset(_registration("base-skill"))
+        assert await dao.has_skill(user_scope=USER_SCOPE, skill_id="base-skill") is True
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试直接置禁用事实
+            await conn.execute(
+                sa.update(AgentAssetVersion)
+                .where(AgentAssetVersion.asset_id == "base-skill")
+                .values(read_state="disabled")
+            )
+        assert await dao.has_skill(user_scope=USER_SCOPE, skill_id="base-skill") is False
+
 
 class TestRoleSkillAssignmentPersistence:
     @pytest.mark.asyncio

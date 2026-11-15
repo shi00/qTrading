@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
 from pathlib import Path, PurePath
 from typing import NoReturn
 
@@ -103,6 +104,30 @@ class ReadOnlyWorkspace:
             return self.read_bytes(relative_path, max_bytes=max_bytes).decode("utf-8-sig")
         except UnicodeDecodeError:
             _fail("invalid_encoding", f"$.skill.path[{relative_path}]")
+
+    def iter_bytes(self, relative_path: str, *, chunk_size: int = 1_048_576) -> Iterator[bytes]:
+        """流式读取受管根内普通文件；同样以同句柄最终路径核越界。"""
+
+        if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size < 1:
+            _fail("invalid_type", "$.skill.chunk_size")
+        target = self._checked_join(relative_path)
+        try:
+            fd = os.open(target, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except OSError:
+            _fail("invalid_skill_path", f"$.skill.path[{relative_path}]")
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                _fail("invalid_skill_path", f"$.skill.path[{relative_path}]")
+            final = _final_path(fd)
+            if not _comparable(final).startswith(self._root_cmp):
+                _fail("skill_path_escape", f"$.skill.path[{relative_path}]")
+            while True:
+                chunk = os.read(fd, chunk_size)
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            os.close(fd)
 
     def _checked_join(self, relative_path: str) -> str:
         if not isinstance(relative_path, str) or not relative_path or "\x00" in relative_path:

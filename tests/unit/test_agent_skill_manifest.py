@@ -18,11 +18,12 @@ import zipfile
 
 import pytest
 
-from core.agent_types import AgentValidationError, sha256_hex, stable_id
+from core.agent_types import AgentValidationError, SkillBudget, sha256_hex, stable_id
 from services.agent_service.skills import (
     SkillImportStatus,
     content_digest_of_files,
     decide_skill_import,
+    inspect_skill_directory,
     inspect_skill_package,
     normalize_skill_name,
     parse_skill_manifest,
@@ -57,6 +58,10 @@ _DEFAULT_MANIFEST = _manifest(name="demo-skill", description="demo description",
 
 def _inspect(entries: dict[str, bytes]):
     return inspect_skill_package(_zip_bytes(entries))
+
+
+def _inspect_with_budget(entries: dict[str, bytes], budget: SkillBudget):
+    return inspect_skill_package(_zip_bytes(entries), budget=budget)
 
 
 class TestSkillManifestParsing:
@@ -114,7 +119,7 @@ class TestSkillManifestParsing:
 
     @pytest.mark.parametrize(
         "name",
-        ["Demo", "demo skill", "-demo", "demo-", "de--mo", "a" * 65, "demo_skill"],
+        ["Demo", "demo skill", "-demo", "demo-", "de--mo", "a" * 65, "demo_skill", "技能", "café"],
     )
     def test_invalid_skill_names_rejected(self, name: str) -> None:
         with pytest.raises(AgentValidationError) as exc:
@@ -199,6 +204,99 @@ class TestPackageLayout:
         with pytest.raises(AgentValidationError) as exc:
             _inspect({"SKILL.md": b"---\nname: demo\n\xff\n---"})
         assert exc.value.code == "invalid_skill_manifest"
+
+    def test_implicit_directories_count_toward_object_limit(self) -> None:
+        data = {
+            "SKILL.md": _DEFAULT_MANIFEST,
+            "a/f.txt": b"a",
+            "b/g.txt": b"b",
+        }
+        inspection = _inspect_with_budget(data, SkillBudget(max_objects=5))
+        assert len(inspection.files) == 3
+        with pytest.raises(AgentValidationError) as exc:
+            _inspect_with_budget({**data, "c/h.txt": b"c"}, SkillBudget(max_objects=5))
+        assert exc.value.code == "skill_objects_exceeded"
+
+    def test_explicit_directory_entry_counts_once(self) -> None:
+        inspection = _inspect_with_budget(
+            {"SKILL.md": _DEFAULT_MANIFEST, "a/": b"", "a/f.txt": b"a"},
+            SkillBudget(max_objects=3),
+        )
+        assert {entry.name for entry in inspection.files} == {"SKILL.md", "a/f.txt"}
+
+    @pytest.mark.parametrize(
+        "entries",
+        [
+            {"SKILL.md": _DEFAULT_MANIFEST, "a.txt": b"one", "./a.txt": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "A.txt": b"one", "a.txt": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "dir//f.txt": b"one", "dir/f.txt": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "a": b"one", "a/b.txt": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "a/": b"", "a": b"one"},
+            {"SKILL.md": _DEFAULT_MANIFEST, ".": b"one"},
+        ],
+    )
+    def test_normalized_duplicate_or_conflicting_paths_rejected(self, entries: dict[str, bytes]) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            _inspect(entries)
+        assert exc.value.code in {"invalid_skill_package", "skill_path_escape"}
+
+
+class TestDirectoryImport:
+    def _write(self, tmp_path, entries: dict[str, bytes]):
+        for name, content in entries.items():
+            target = tmp_path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        return tmp_path
+
+    def test_directory_and_zip_share_metrics(self, tmp_path) -> None:
+        entries = {"SKILL.md": _DEFAULT_MANIFEST, "refs/a.txt": b"abc"}
+        directory = self._write(tmp_path / "pkg", entries)
+        packed = _inspect(entries)
+        unpacked = inspect_skill_directory(str(directory))
+        assert unpacked.source_kind == "directory"
+        assert unpacked.archive_digest is None
+        assert [(entry.name, entry.size, entry.sha256) for entry in unpacked.files] == [
+            (entry.name, entry.size, entry.sha256) for entry in packed.files
+        ]
+        assert content_digest_of_files(unpacked.files) == content_digest_of_files(packed.files)
+
+    def test_directory_nested_layout_accepted(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST, "a/b/c.txt": b"c"})
+        inspection = inspect_skill_directory(str(directory), budget=SkillBudget(max_objects=4))
+        assert {entry.name for entry in inspection.files} == {"SKILL.md", "a/b/c.txt"}
+
+    def test_directory_implicit_directories_count(self, tmp_path) -> None:
+        directory = self._write(
+            tmp_path / "pkg",
+            {"SKILL.md": _DEFAULT_MANIFEST, "a/f.txt": b"a", "b/g.txt": b"b"},
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory), budget=SkillBudget(max_objects=4))
+        assert exc.value.code == "skill_objects_exceeded"
+
+    def test_directory_missing_manifest_rejected(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"a.txt": b"a"})
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory))
+        assert exc.value.code == "skill_manifest_missing"
+
+    def test_directory_symlink_rejected(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST})
+        target = tmp_path / "outside.txt"
+        target.write_bytes(b"secret")
+        try:
+            (directory / "link.txt").symlink_to(target)
+        except OSError:
+            pytest.skip("当前环境不允许创建符号链接；安全属性未由本用例验证")
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory))
+        assert exc.value.code == "skill_path_escape"
+
+    def test_directory_non_absolute_root_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory("relative-dir")
+        assert exc.value.code == "invalid_workspace_root"
 
 
 class TestContentDigest:

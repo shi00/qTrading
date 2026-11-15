@@ -20,6 +20,7 @@ from core.agent_types import (
     RoleSkillAssignmentReceipt,
     SkillAssetReceipt,
     SkillAssetRegistration,
+    SkillBudget,
     SkillVersionRef,
     sha256_hex,
 )
@@ -217,6 +218,44 @@ class TestImportLifecycle:
         with pytest.raises(AgentServiceError) as exc:
             await _import(service, data)
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert dao.assets == {}
+
+    async def test_directory_source_imports_without_archive(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "SKILL.md").write_bytes(b"---\nname: demo-skill\ndescription: demo\nlicense: MIT\n---\n# body\n")
+        receipt = await service.import_package(
+            SkillPackageImportRequest(user_scope="scope", directory_name="demo-skill", directory=str(source))
+        )
+        assert receipt.status is SkillImportStatus.NEW
+        assert receipt.source_kind == "directory"
+        assert store.version_dir(SkillVersionRef(receipt.skill_id, 1)).is_dir()
+        assert len(dao.assets) == 1
+
+    async def test_reimport_heals_orphan_published_version(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        first = await _import(service, _package())
+        dao.assets.clear()  # 模拟「目录已发布、登记行丢失」的崩溃窗口
+        second = await _import(service, _package())
+        assert second.status is SkillImportStatus.NEW
+        assert second.version == 1
+        assert len(dao.assets) == 1
+        assert store.current_version(first.skill_id) == 1
+
+    async def test_staging_deadline_is_enforced_after_inspection(self, tmp_path: Path) -> None:
+        store = ManagedSkillStore(str(tmp_path / "skills"))
+        dao = FakeCatalogDao()
+        service = SkillCatalogService(
+            store,
+            dao,
+            blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
+            budget=SkillBudget(max_preflight_seconds=0),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package())
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "skill_time_exceeded" in str(exc.value)
         assert dao.assets == {}
 
 

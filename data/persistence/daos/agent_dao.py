@@ -7393,6 +7393,7 @@ class AgentDao(BaseDao):
                         AgentAssetVersion.user_scope == user_scope,
                         AgentAssetVersion.asset_id == skill_id,
                         AgentAssetVersion.asset_kind == "skill",
+                        AgentAssetVersion.read_state == "ready",
                     )
                     .limit(1)
                 )
@@ -7604,8 +7605,10 @@ def _validate_skill_asset_request(request: SkillAssetRegistration, identity: str
         _require_text_field(getattr(request, field_name), field_name, identity)
     if not is_digest(request.content_digest):
         raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "content_digest must be sha256 hex", identity)
-    if not is_digest(request.archive_digest):
-        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "archive_digest must be sha256 hex", identity)
+    if request.archive_digest is not None and not is_digest(request.archive_digest):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "archive_digest must be sha256 hex or None", identity)
+    if request.source_kind not in {"zip", "directory"}:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source_kind must be zip or directory", identity)
     if isinstance(request.version, bool) or not isinstance(request.version, int) or request.version < 1:
         raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "version must be a positive integer", identity)
     for field_name in ("file_count", "expanded_bytes"):
@@ -7625,6 +7628,7 @@ def _skill_asset_metadata(request: SkillAssetRegistration) -> dict[str, Any]:
         "normalized_name": request.normalized_name,
         "license": request.license_id,
         "archive_digest": request.archive_digest,
+        "source_kind": request.source_kind,
         "file_count": request.file_count,
         "expanded_bytes": request.expanded_bytes,
         "dependencies": list(request.dependencies),

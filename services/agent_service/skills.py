@@ -19,9 +19,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import json
 import os
+import re
 import shutil
 import time
 import unicodedata
@@ -30,6 +33,7 @@ import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn, Protocol
 
@@ -57,6 +61,9 @@ _READ_CHUNK = 1024 * 1024
 
 #: 规范 Skill 说明文件名（大小写不敏感比较；Windows 文件系统同样不区分）。
 SKILL_MANIFEST_FILENAME = "SKILL.md"
+
+#: 版本目录内的规范内容清单（幂等恢复与防篡改核对；不参与导入内容摘要）。
+VERSION_MANIFEST_FILENAME = ".skill-manifest.json"
 
 #: 本项目准入的第三方许可（用户需求 §2 NFR：Apache-2.0/MIT/标准 BSD/LGPL-3.0-only；
 #: 其他 BSD 变体须单独核定，未知许可不允许使用）。
@@ -87,6 +94,9 @@ BEHAVIORAL_FRONTMATTER_FIELDS: frozenset[str] = frozenset(
 #: Skill 名上限（Harness 合同）。
 SKILL_NAME_MAX_LENGTH = 64
 
+#: Harness 名合同：小写字母数字段以单连字符连接（不接受非 ASCII/下划线/空段）。
+_SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
 
 def _fail(code: str, path: str) -> NoReturn:
     raise AgentValidationError(code, path)
@@ -112,13 +122,14 @@ class SkillFileEntry:
 
 @dataclass(frozen=True, slots=True)
 class SkillPackageInspection:
-    """预检结果（不含版本发布副作用）。"""
+    """预检结果（不含版本发布副作用）。``source_kind`` 区分 ZIP/目录来源。"""
 
     files: tuple[SkillFileEntry, ...]
     total_expanded_bytes: int
-    archive_digest: str
+    archive_digest: str | None
     manifest_name: str
     manifest_text: str
+    source_kind: str = "zip"
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +168,82 @@ def _require_safe_entry_name(name: str) -> str:
         _fail("skill_path_escape", "$.skill.package.entry")
     if any(part in {"..", ""} for part in pure.parts):
         _fail("skill_path_escape", "$.skill.package.entry")
-    return name
+    normalized = "/".join(pure.parts)
+    if not normalized:
+        _fail("skill_path_escape", "$.skill.package.entry")
+    return normalized
+
+
+def _entry_key(name: str) -> str:
+    return "/".join(unicodedata.normalize("NFKC", part).casefold() for part in PurePosixPath(name).parts)
+
+
+def _enforce_entry_layout(entries: Sequence[tuple[str, bool]]) -> None:
+    """规范化后重名 / 文件与目录冲突 / 对象总数（root 不计，隐含目录计一次）。"""
+
+    file_keys: set[str] = set()
+    dir_keys: set[str] = set()
+    explicit_dirs: set[str] = set()
+    for name, is_dir in entries:
+        parts = PurePosixPath(name).parts
+        keys = [_entry_key(part) for part in parts]
+        for index in range(1, len(parts)):
+            ancestor = "/".join(keys[:index])
+            if ancestor in file_keys:
+                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
+            dir_keys.add(ancestor)
+        full = "/".join(keys)
+        if is_dir:
+            if full in file_keys or full in explicit_dirs:
+                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
+            explicit_dirs.add(full)
+            dir_keys.add(full)
+        else:
+            if full in file_keys or full in dir_keys:
+                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
+            file_keys.add(full)
+
+
+def _object_count(entries: Sequence[tuple[str, bool]]) -> int:
+    files = {_entry_key(name) for name, is_dir in entries if not is_dir}
+    directories: set[str] = set()
+    for name, _ in entries:
+        parts = PurePosixPath(name).parts
+        keys = [_entry_key(part) for part in parts]
+        for index in range(1, len(parts)):
+            directories.add("/".join(keys[:index]))
+    return len(files | directories)
+
+
+def _finalize_inspection(
+    files: Sequence[SkillFileEntry],
+    manifest_bytes: bytes,
+    *,
+    archive_digest: str | None,
+    source_kind: str,
+) -> SkillPackageInspection:
+    candidates = [
+        entry.name for entry in files if PurePosixPath(entry.name).name.casefold() == SKILL_MANIFEST_FILENAME.casefold()
+    ]
+    if not candidates:
+        _fail("skill_manifest_missing", "$.skill.package")
+    if len(candidates) > 1:
+        _fail("skill_multiple_candidates", "$.skill.package")
+    manifest_name = candidates[0]
+    if len(PurePosixPath(manifest_name).parts) != 1:
+        _fail("skill_manifest_not_root", "$.skill.package")
+    try:
+        manifest_text = manifest_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AgentValidationError("invalid_skill_manifest", "$.skill.package.SKILL.md") from exc
+    return SkillPackageInspection(
+        files=tuple(files),
+        total_expanded_bytes=sum(entry.size for entry in files),
+        archive_digest=archive_digest,
+        manifest_name=manifest_name,
+        manifest_text=manifest_text,
+        source_kind=source_kind,
+    )
 
 
 def inspect_skill_package(
@@ -166,10 +252,11 @@ def inspect_skill_package(
     budget: SkillBudget = DEFAULT_SKILL_BUDGET,
     clock: Callable[[], float] = time.monotonic,
 ) -> SkillPackageInspection:
-    """四阈值预检 + 根 ``SKILL.md`` 布局校验，返回文件清单与摘要。
+    """ZIP 四阈值预检 + 根 ``SKILL.md`` 布局校验，返回文件清单与摘要。
 
-    布局校验在资源校验之后执行（超限优先报告），但仍在发布/解析前：
-    缺失、仅嵌套、多候选都拒绝（F12「每次导入恰好一个 Skill，提示拆包」）。
+    对象数按「文件 + 全部隐含/显式目录（root 不计）」计；规范化后重名、
+    文件与目录冲突都拒绝（F12「规范重名/重复路径」）。尺寸/时限在解压前与
+    逐块读取中双重计量。
     """
 
     if not isinstance(data, (bytes, bytearray)):
@@ -183,22 +270,21 @@ def inspect_skill_package(
         _fail("invalid_skill_package", "$.skill.package")
     with archive:
         infos = archive.infolist()
-        budget.enforce_objects(len(infos))
-        seen: set[str] = set()
+        entries: list[tuple[str, bool]] = []
+        for info in infos:
+            name = _require_safe_entry_name(info.filename)
+            if info.flag_bits & 0x1:
+                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
+            entries.append((name, info.filename.endswith("/")))
+        _enforce_entry_layout(entries)
+        budget.enforce_objects(_object_count(entries))
         declared = sum(info.file_size for info in infos)
         budget.enforce_expanded_bytes(declared)
         files: list[SkillFileEntry] = []
-        manifest_candidates: list[str] = []
         manifest_bytes = b""
         total = 0
-        for info in infos:
-            name = _require_safe_entry_name(info.filename)
-            if name in seen:
-                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
-            seen.add(name)
-            if info.flag_bits & 0x1:
-                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
-            if name.endswith("/"):
+        for (name, is_dir), info in zip(entries, infos, strict=True):
+            if is_dir:
                 continue
             is_manifest = PurePosixPath(name).name.casefold() == SKILL_MANIFEST_FILENAME.casefold()
             digest = hashlib.sha256()
@@ -221,27 +307,76 @@ def inspect_skill_package(
             budget.enforce_elapsed(clock() - started)
             files.append(SkillFileEntry(name=name, size=size, sha256=digest.hexdigest()))
             if is_manifest:
-                manifest_candidates.append(name)
                 manifest_bytes = bytes(payload)
-    if not manifest_candidates:
-        _fail("skill_manifest_missing", "$.skill.package")
-    if len(manifest_candidates) > 1:
-        _fail("skill_multiple_candidates", "$.skill.package")
-    manifest_name = manifest_candidates[0]
-    if len(PurePosixPath(manifest_name).parts) != 1:
-        _fail("skill_manifest_not_root", "$.skill.package")
-    try:
-        manifest_text = manifest_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise AgentValidationError("invalid_skill_manifest", "$.skill.package.SKILL.md") from exc
     budget.enforce_elapsed(clock() - started)
-    return SkillPackageInspection(
-        files=tuple(files),
-        total_expanded_bytes=total,
-        archive_digest=archive_digest,
-        manifest_name=manifest_name,
-        manifest_text=manifest_text,
-    )
+    return _finalize_inspection(files, manifest_bytes, archive_digest=archive_digest, source_kind="zip")
+
+
+def inspect_skill_directory(
+    root: str,
+    *,
+    budget: SkillBudget = DEFAULT_SKILL_BUDGET,
+    clock: Callable[[], float] = time.monotonic,
+) -> SkillPackageInspection:
+    """本地目录预检：与 ZIP 统一计量；符号链接/特殊文件拒绝，读取按同句柄最终路径核验。"""
+
+    from services.agent_service.skill_workspace import ReadOnlyWorkspace
+
+    started = clock()
+    workspace = ReadOnlyWorkspace(root)
+    entries: list[tuple[str, bool]] = []
+    declared = 0
+    stack: list[tuple[str, str]] = [("", workspace.root)]
+    while stack:
+        prefix, directory = stack.pop()
+        budget.enforce_elapsed(clock() - started)
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda child: child.name)
+        except OSError as exc:
+            raise AgentValidationError("invalid_skill_package", "$.skill.package") from exc
+        for child in children:
+            budget.enforce_elapsed(clock() - started)
+            if child.is_symlink():
+                _fail("skill_path_escape", f"$.skill.package.entry[{child.name}]")
+            rel = f"{prefix}/{child.name}" if prefix else child.name
+            if child.is_dir(follow_symlinks=False):
+                entries.append((rel, True))
+                stack.append((rel, child.path))
+            elif child.is_file(follow_symlinks=False):
+                entries.append((rel, False))
+                try:
+                    declared += child.stat(follow_symlinks=False).st_size
+                except OSError as exc:
+                    raise AgentValidationError("invalid_skill_package", f"$.skill.package.entry[{rel}]") from exc
+            else:
+                _fail("invalid_skill_package", f"$.skill.package.entry[{rel}]")
+    _enforce_entry_layout(entries)
+    budget.enforce_objects(_object_count(entries))
+    budget.enforce_expanded_bytes(declared)
+    files: list[SkillFileEntry] = []
+    manifest_bytes = b""
+    total = 0
+    for rel, is_dir in entries:
+        if is_dir:
+            continue
+        manifest_name = PurePosixPath(rel).name.casefold() == SKILL_MANIFEST_FILENAME.casefold()
+        digest = hashlib.sha256()
+        payload = bytearray()
+        size = 0
+        for chunk in workspace.iter_bytes(rel, chunk_size=_READ_CHUNK):
+            size += len(chunk)
+            total += len(chunk)
+            budget.enforce_expanded_bytes(total)
+            budget.enforce_elapsed(clock() - started)
+            digest.update(chunk)
+            if manifest_name:
+                payload.extend(chunk)
+        files.append(SkillFileEntry(name=rel, size=size, sha256=digest.hexdigest()))
+        if manifest_name:
+            manifest_bytes = bytes(payload)
+    budget.enforce_elapsed(clock() - started)
+    return _finalize_inspection(files, manifest_bytes, archive_digest=None, source_kind="directory")
 
 
 class _UniqueKeyLoader(yaml.BaseLoader):
@@ -306,21 +441,12 @@ def _frontmatter_boolean(value: object, field: str, *, default: bool) -> bool:
 
 
 def validate_skill_name(name: str) -> str:
-    """Harness Skill 名合同：NFKC、≤64、全小写、字母数字与单连字符。"""
+    """Harness Skill 名合同：NFKC、≤64、小写字母数字段以单连字符连接。"""
 
     if not isinstance(name, str):
         _fail("invalid_skill_name", "$.skill.name")
     normalized = unicodedata.normalize("NFKC", name)
-    allowed = all(character.isalnum() or character == "-" for character in normalized)
-    if (
-        not normalized
-        or len(normalized) > SKILL_NAME_MAX_LENGTH
-        or normalized != normalized.lower()
-        or normalized.startswith("-")
-        or normalized.endswith("-")
-        or "--" in normalized
-        or not allowed
-    ):
+    if len(normalized) > SKILL_NAME_MAX_LENGTH or _SKILL_NAME_RE.fullmatch(normalized) is None:
         _fail("invalid_skill_name", "$.skill.name")
     return normalized
 
@@ -432,6 +558,29 @@ def _require_skill_id(skill_id: str) -> str:
     return value
 
 
+def _enforce_deadline(deadline: float | None, clock: Callable[[], float]) -> None:
+    if deadline is not None and clock() > deadline:
+        _fail("skill_time_exceeded", "$.skill.elapsed_s")
+
+
+def _write_version_manifest(staging: Path, inspection: SkillPackageInspection) -> None:
+    payload = {
+        "schema_version": 1,
+        "source_kind": inspection.source_kind,
+        "content_digest": content_digest_of_files(inspection.files),
+        "files": [[entry.name, entry.size, entry.sha256] for entry in inspection.files],
+    }
+    (staging / VERSION_MANIFEST_FILENAME).write_text(json_doc(payload), encoding="utf-8")
+
+
+def _version_matches(destination: Path, inspection: SkillPackageInspection) -> bool:
+    try:
+        stored = json.loads((destination / VERSION_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(stored, dict) and stored.get("content_digest") == content_digest_of_files(inspection.files)
+
+
 class ManagedSkillStore:
     """受管 Skill 版本目录：不可变版本 + 原子发布（失败不残留）。"""
 
@@ -463,19 +612,69 @@ class ManagedSkillStore:
         ref: SkillVersionRef,
         data: bytes,
         inspection: SkillPackageInspection | None = None,
+        *,
+        deadline: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> Path:
-        """预检后原子发布：目标版本已存在即拒绝；任何失败清理临时目录。"""
+        """预检后原子发布：目标版本已存在且内容相同视为幂等恢复，异内容拒绝。"""
 
         if inspection is None:
             inspection = inspect_skill_package(data)
         destination = self.version_dir(ref)
         if destination.exists():
+            if _version_matches(destination, inspection):
+                return destination
             _fail("skill_version_exists", f"$.skill.version[{ref.skill_id}@{ref.version}]")
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = self._root / ".staging" / f"{ref.skill_id}-{ref.version}-{uuid.uuid4().hex}"
         try:
             staging.mkdir(parents=True)
-            self._extract(data, inspection, staging)
+            self._extract(data, inspection, staging, deadline=deadline, clock=clock)
+            _write_version_manifest(staging, inspection)
+            os.replace(staging, destination)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return destination
+
+    def publish_directory(
+        self,
+        ref: SkillVersionRef,
+        root: str,
+        inspection: SkillPackageInspection,
+        *,
+        deadline: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Path:
+        """本地目录原子发布：逐文件回读校验摘要与字节数，失败清理暂存。"""
+
+        from services.agent_service.skill_workspace import ReadOnlyWorkspace
+
+        destination = self.version_dir(ref)
+        if destination.exists():
+            if _version_matches(destination, inspection):
+                return destination
+            _fail("skill_version_exists", f"$.skill.version[{ref.skill_id}@{ref.version}]")
+        workspace = ReadOnlyWorkspace(root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = self._root / ".staging" / f"{ref.skill_id}-{ref.version}-{uuid.uuid4().hex}"
+        try:
+            staging.mkdir(parents=True)
+            for entry in inspection.files:
+                _enforce_deadline(deadline, clock)
+                target = staging.joinpath(*PurePosixPath(entry.name).parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256()
+                size = 0
+                with target.open("wb") as handle:
+                    for chunk in workspace.iter_bytes(entry.name, chunk_size=_READ_CHUNK):
+                        _enforce_deadline(deadline, clock)
+                        size += len(chunk)
+                        digest.update(chunk)
+                        handle.write(chunk)
+                if size != entry.size or digest.hexdigest() != entry.sha256:
+                    _fail("invalid_skill_package", f"$.skill.package.entry[{entry.name}]")
+            _write_version_manifest(staging, inspection)
             os.replace(staging, destination)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
@@ -483,8 +682,8 @@ class ManagedSkillStore:
         return destination
 
     def read_file(self, ref: SkillVersionRef, name: str) -> bytes:
-        _require_safe_entry_name(name)
-        target = self.version_dir(ref).joinpath(*PurePosixPath(name).parts)
+        normalized = _require_safe_entry_name(name)
+        target = self.version_dir(ref).joinpath(*PurePosixPath(normalized).parts)
         try:
             return target.read_bytes()
         except OSError as exc:
@@ -495,12 +694,21 @@ class ManagedSkillStore:
 
         shutil.rmtree(self.version_dir(ref), ignore_errors=True)
 
-    def _extract(self, data: bytes, inspection: SkillPackageInspection, staging: Path) -> None:
+    def _extract(
+        self,
+        data: bytes,
+        inspection: SkillPackageInspection,
+        staging: Path,
+        *,
+        deadline: float | None,
+        clock: Callable[[], float],
+    ) -> None:
         expected = {entry.name: entry for entry in inspection.files}
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             for info in archive.infolist():
+                _enforce_deadline(deadline, clock)
                 name = _require_safe_entry_name(info.filename)
-                if name.endswith("/"):
+                if info.filename.endswith("/"):
                     staging.joinpath(*PurePosixPath(name).parts).mkdir(parents=True, exist_ok=True)
                     continue
                 entry = expected.get(name)
@@ -510,7 +718,7 @@ class ManagedSkillStore:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info) as source:
                     payload = source.read(entry.size + 1)
-                if len(payload) != entry.size:
+                if len(payload) != entry.size or hashlib.sha256(payload).hexdigest() != entry.sha256:
                     _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
                 target.write_bytes(payload)
 
@@ -526,6 +734,8 @@ def install_skill_version(store: ManagedSkillStore, ref: SkillVersionRef, data: 
 
     inspection = inspect_skill_package(data)
     store.publish_package(ref, data, inspection)
+    if inspection.archive_digest is None:
+        _fail("invalid_skill_package", "$.skill.package")
     return inspection.archive_digest
 
 
@@ -554,11 +764,12 @@ class SkillCatalogPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class SkillPackageImportRequest:
-    """用户明确导入一个目录/ZIP Skill：``confirm_update`` 仅对同名不同内容生效。"""
+    """用户明确导入一个目录/ZIP Skill：``data`` 与 ``directory`` 恰一；更新需显式确认。"""
 
     user_scope: str
-    data: bytes
     directory_name: str
+    data: bytes | None = None
+    directory: str | None = None
     confirm_update: bool = False
 
 
@@ -578,6 +789,7 @@ class SkillImportReceipt:
     dependencies: tuple[str, ...]
     missing_dependencies: tuple[str, ...]
     requires_confirmation: bool
+    source_kind: str = "zip"
 
 
 async def _run_blocking(func: Callable[..., Any], /, *args: Any) -> Any:
@@ -595,24 +807,56 @@ class SkillCatalogService:
         dao: SkillCatalogPort,
         *,
         blocking_runner: Callable[..., Any] = _run_blocking,
+        budget: SkillBudget = DEFAULT_SKILL_BUDGET,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
         self._dao = dao
         self._run = blocking_runner
+        self._budget = budget
+        self._clock = clock
 
     async def import_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
-        """预检 → 同名判定 → （发布 + 登记）；同内容返回未变化，不同内容默认需确认。"""
+        """预检（ZIP/目录统一计量）→ 同名判定 → （发布 + 登记）。
+
+        预检、前台解析与暂存共用同一 10 秒预算；解析与暂存都在受管线程执行，
+        不在事件循环线程同步阻塞（R16）。同内容返回未变化；不同内容默认需确认。
+        """
 
         identity = f"{request.user_scope}/skill/{request.directory_name}"
+        started = self._clock()
+        deadline = started + self._budget.max_preflight_seconds
         try:
             require_identity(request.user_scope, "$.skill.user_scope")
             require_identity(request.directory_name, "$.skill.directory_name")
-            inspection = await self._run(inspect_skill_package, request.data)
-            manifest = parse_skill_manifest(
-                inspection.manifest_text.encode("utf-8"), directory_name=request.directory_name
+            if (request.data is None) == (request.directory is None):
+                _fail("invalid_skill_source", "$.skill.package")
+            if request.directory is not None and not os.path.isabs(request.directory):
+                _fail("invalid_skill_source", "$.skill.package")
+            if request.data is not None:
+                inspection = await self._run(
+                    partial(inspect_skill_package, budget=self._budget, clock=self._clock),
+                    request.data,
+                )
+            else:
+                inspection = await self._run(
+                    partial(inspect_skill_directory, budget=self._budget, clock=self._clock),
+                    request.directory,
+                )
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                _fail("skill_time_exceeded", "$.skill.elapsed_s")
+            manifest = await asyncio.wait_for(
+                self._run(
+                    partial(parse_skill_manifest, directory_name=request.directory_name),
+                    inspection.manifest_text.encode("utf-8"),
+                ),
+                timeout=remaining,
             )
         except AgentValidationError as exc:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        except TimeoutError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "skill_time_exceeded", identity) from exc
         normalized_name = normalize_skill_name(manifest.name)
         skill_id = stable_id("skill", [request.user_scope, normalized_name])
         content_digest = content_digest_of_files(inspection.files)
@@ -632,18 +876,34 @@ class SkillCatalogService:
             dependencies=manifest.dependencies,
             missing_dependencies=missing_dependencies,
             requires_confirmation=decision.status is SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION,
+            source_kind=inspection.source_kind,
         )
         if decision.status in {SkillImportStatus.UNCHANGED, SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION}:
             return receipt
         ref = SkillVersionRef(skill_id=skill_id, version=decision.next_version)
         try:
-            await self._run(self._store.publish_package, ref, request.data, inspection)
+            if request.data is not None:
+                await self._run(
+                    partial(self._store.publish_package, deadline=deadline, clock=self._clock),
+                    ref,
+                    request.data,
+                    inspection,
+                )
+            else:
+                await self._run(
+                    partial(self._store.publish_directory, deadline=deadline, clock=self._clock),
+                    ref,
+                    request.directory,
+                    inspection,
+                )
         except AgentValidationError as exc:
             if exc.code == "skill_version_exists":
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT, "skill version already exists", identity
                 ) from exc
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        except OSError as exc:
+            raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "skill publish failed", identity) from exc
         try:
             await self._dao.register_skill_asset(
                 SkillAssetRegistration(
@@ -657,6 +917,7 @@ class SkillCatalogService:
                     archive_digest=inspection.archive_digest,
                     file_count=len(inspection.files),
                     expanded_bytes=inspection.total_expanded_bytes,
+                    source_kind=inspection.source_kind,
                     dependencies=manifest.dependencies,
                     missing_dependencies=missing_dependencies,
                     ignored_behavioral_fields=manifest.ignored_behavioral_fields,
