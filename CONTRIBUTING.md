@@ -694,7 +694,7 @@ except Exception as e:
 
 ### 根目录 — AI 工具运行时配置
 
-- [harness.toml](./harness.toml) — AI 工具（Harness）运行时权限与沙箱配置（命令白名单 / deniedDomains / TDD 强制开关）；CLAUDE.md 为唯一规则正本，本文件不承载规则语义。伴生 `hooks/hooks.json` 为 hook 覆盖占位，当前为空（覆盖默认行为时填入）。
+- [harness.toml](./harness.toml) — AI 工具（Harness）运行时权限与沙箱配置（命令白名单 / deniedDomains / TDD 强制开关）；规则权威按主题正本（CLAUDE.md §1 主题权威表），本文件不承载规则语义。伴生 `hooks/hooks.json` 为 hook 覆盖占位，当前为空（覆盖默认行为时填入）。
 
 ### requirements/ — 用户需求
 

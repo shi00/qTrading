@@ -124,7 +124,7 @@ def ScreenerView():
 - 首次渲染：`factory()` 实例化 VM（内部模式）或直接使用传入的 `vm`（外部模式），调 `vm.subscribe(set_state)` 注册（保存返回的 unsub），返回 `(vm.state, vm)`
 - `_notify` 触发：VM 遍历订阅者调 `callback(self.state)`，hook 注册的 callback 即 `set_state(new_state)`，触发组件重渲染
 - 卸载时：`use_effect` 的显式 `cleanup=` 参数调 `unsub()` 退订；内部模式且 `dispose_on_unmount=True` 时额外调 `vm.dispose()`
-- `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: DemoViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) DI 原则）
+- `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: DemoViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [架构正文 §4.3](../architecture/overview.md#43-单例模式) DI 原则）
 
 ### 状态归属决策表
 

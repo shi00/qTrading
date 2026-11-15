@@ -35,8 +35,8 @@
 17. 检视方法论文档登记检查（DOC-07）：docs/reviews/README.md 以文件级链接登记全部顶层
    方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使检视
    方法论对新会话一跳可达（检视报告不入库，正文落根 reviews/ 为本地 gitignored 产物）。
-18. core 模块清单完整性检查（GDR-11）：断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际
-   core/*.py 文件一致。
+18. core 模块清单完整性检查（GDR-11）：断言 docs/architecture/overview.md §4.2 声明的
+   core/ 模块列表与实际 core/*.py 文件一致（D6 起检查对象自 CLAUDE.md §4.2 迁至架构正文正本）。
 19. ADR 索引完整性检查（GDR-12）：校验 CONTRIBUTING.md 文件级登记全部 docs/adr/*.md
    决策文档。
 20. 书名号章节引用一致性检查（GDR-13）：扫描受检 markdown 中形如 `<文档路径>「<章节名>」`

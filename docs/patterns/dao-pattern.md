@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.1（data 分层）、§3.1 R4/R5/R8/R12/R13/R17（数据库红线）；实现模板见本节。
+> 宪法依据：CLAUDE.md §3.1 R4/R5/R8/R12/R13/R17（数据库红线）、[架构正文 §4.1](../architecture/overview.md#41-分层架构)（data 分层）；实现模板见本节。
 
 所有数据访问通过 `BaseDao` 子类，统一提供：
 
@@ -24,7 +24,7 @@
 
 新增或修改 DAO / 数据表任务，至少阅读：
 
-1. [CLAUDE.md](../../CLAUDE.md) §3.1：R4 / R5 / R8 / R12 / R13 / R17（数据库红线）与 §4.1（data 分层边界）
+1. [CLAUDE.md](../../CLAUDE.md) §3.1：R4 / R5 / R8 / R12 / R13 / R17（数据库红线）与[架构正文 §4.1](../architecture/overview.md#41-分层架构)（data 分层边界）
 2. [docs/guides/how-to.md](../guides/how-to.md)「1. 新增一张数据表」与「2. 新增一个 DAO」（流程正本）
 3. [docs/governance/redlines.yml](../governance/redlines.yml)：R12 / R13 / R17 的 `rule_type` 与豁免语义
 4. `data/persistence/daos/base_dao.py` 与 `data/persistence/daos/` 下既有 DAO 样例

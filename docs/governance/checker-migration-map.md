@@ -72,12 +72,13 @@
 
 | # | 检查函数 | 处置 | 输入（必需源） | 对应测试 | 执行入口 |
 |---|---------|------|---------------|---------|---------|
-| 43 | `check_docs_generated` | 受控生成协议承载（D4） | `scripts/docs_generated.py` BUILTIN_REGISTRY 激活条目（AGENTS.md × 2、CLAUDE.md × 2 生成块 + 作者源） | `tests/docs/test_generate.py`、`test_concurrency.py`；必需输入负例 `test_required_inputs.py` | document / docs-consistency hook + docs-ci |
+| 43 | `check_docs_generated` | 受控生成协议承载（D4） | `scripts/docs_generated.py` BUILTIN_REGISTRY 激活条目（AGENTS.md / CLAUDE.md / docs/README.md / docs/governance/README.md / `.pre-commit-config.yaml` / docs/flet/accessibility-baseline.md 的生成块 + 作者源；完整清单与条数以注册表为唯一来源，本表不重复维护计数） | `tests/docs/test_generate.py`、`test_concurrency.py`；必需输入负例 `test_required_inputs.py` | document / docs-consistency hook + docs-ci |
 
 ## 迁移出口备注（退役前置条件）
 
 - **#4–#7（AGENTS/CLAUDE 同步四项）**：与 `check_docs_generated`（#43）构成「旧表达检查 + 注册表一致性」双保险。退役旧表达须同时满足：① D6/T6 已切作者源并激活对应注册条目；② 旧检查的既有反例（F20 修法负例）在注册表路径上有等价失败样例（检视 §2 T5「任一旧检查退役前，正常样例、原失败样例和迁移后的等价失败样例都必须运行」）。退役动作本身属后续工作包，不在 D5 内执行。
-- **#10/#11/#12（索引类）**：T6 生成 `docs/README.md` 目录后，候选集与覆盖判定可转由 `docs-readme-file-index` 注册槽位（现为非激活占位）承载；切换前本表现状为准。
+- **#10/#11/#12（索引类）**：T6 已把 `docs-readme-file-index` / `docs-readme-adr-index` 接入 `docs/README.md`（注册表 `active=True`），与 #10/#12 构成双保险；切换（退役 #10/#12）须同时满足：① 生成索引与既有检查使用同一 git ls-files 候选集、仅路径迁移不产生新失败；② 目录级覆盖与 ADR 索引的等价失败样例在注册表路径上有对应用例。**#11 不随生成块退役**：`docs/reviews/README.md` 的「检视方法论文档登记」职责不由 `docs/README.md` 文件索引替代，仍需保留独立检查。条件满足前本表以现状为准。
+- **本次迁移状态（Q18）**：架构正文消费者已迁至 [docs/architecture/overview.md](../architecture/overview.md)（`docs/**` 规范类引用；历史 ADR 与代码注释保留原 `CLAUDE.md §4.x` 引用）；旧章节兼容责任与退役判据见该文的消费者迁移与兼容责任（T6）节，本表不再重复。
 - 本表为 D5 时点快照；后续工作包调整处置时须同步更新本表并保持「逐项人工核对」口径（不得以函数计数代理责任完整）。
 
 ## 证据来源与替代（检视底稿缺失的处置）
