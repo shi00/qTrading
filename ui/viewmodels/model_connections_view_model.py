@@ -32,6 +32,7 @@ R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import math
 import uuid
@@ -653,13 +654,34 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             return current
         return current + 1
 
+    def _raw_connection(self, connection_id: str) -> Mapping[str, Any] | None:
+        """按 id 取已提交连接（草稿不含磁盘上的未建模嵌套键，合并需以其为基线）。"""
+        if not connection_id:
+            return None
+        return next((c for c in self._raw_connections if str(c.get("connection_id")) == connection_id), None)
+
     def _draft_to_connection_payload(
         self,
         draft: ModelConnectionDraft,
         credential_ref: str | None,
         credential_version: str | None,
     ) -> dict[str, Any]:
-        adapter_options: dict[str, Any] = {}
+        """草稿 → 连接 payload（普通保存 / 向导 / 单次测试同源）。
+
+        D16-002：同一 ``adapter_kind`` 编辑时以磁盘既有 ``adapter_options`` /
+        ``billing`` 为基线，只覆盖本表单受管键——草稿未建模的运行参数
+        （n_threads / n_gpu_layers / api_version 等）与计价元数据
+        （fx_to_cny / 缓存单价等）原样保留；kind 或计量方式变化时不用旧基线，
+        显式移除不适用键（不恢复旧模型路径 / 旧计费元数据）。凭据语义不变：
+        ``credential_ref`` 只来自草稿（新填 / 保留 / 显式清除），不经基线合并恢复。
+        """
+        raw = self._raw_connection(draft.connection_id)
+        same_kind = raw is not None and str(raw.get("adapter_kind", "")) == draft.adapter_kind
+        baseline_options = raw.get("adapter_options") if same_kind and raw is not None else None
+        # 深拷贝：payload 与快照不得共享可变嵌套对象（后续写入不得污染已提交快照）
+        adapter_options: dict[str, Any] = (
+            copy.deepcopy(dict(baseline_options)) if isinstance(baseline_options, Mapping) else {}
+        )
         if draft.adapter_kind == ADAPTER_GGUF_CHAT:
             provider, api_base, model = "", None, draft.model.strip() or draft.dialog_model_path.strip()
             credential_ref, credential_version = None, None
@@ -675,6 +697,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         timeout = self._to_float_or_none(draft.timeout_seconds)
         if timeout is not None:
             adapter_options["timeout"] = timeout
+        else:
+            # 表单受管键：清空即移除，基线残留的旧 timeout 不得复活
+            adapter_options.pop("timeout", None)
         if draft.adapter_kind in (ADAPTER_GGUF_CHAT, ADAPTER_GGUF_SENTIMENT):
             # F32：n_ctx 显式化落盘（磁盘已有合法值保留，缺失补默认），兼容服务不再因缺失拒绝
             adapter_options["n_ctx"] = self._resolve_gguf_n_ctx(draft.connection_id)
@@ -691,12 +716,25 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             "adapter_options": adapter_options,
             "context_window": self._to_int_or_none(draft.context_window),
             "concurrency_limit": self._to_int_or_none(draft.concurrency_limit) or 1,
-            "billing": self._billing_payload(draft),
+            "billing": self._billing_payload(draft, raw.get("billing") if same_kind and raw is not None else None),
             "connection_revision": max(1, int(draft.connection_revision or 1)),
         }
 
     @staticmethod
-    def _billing_payload(draft: ModelConnectionDraft) -> dict[str, Any]:
+    def _billing_payload(draft: ModelConnectionDraft, baseline: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        managed = ModelConnectionsViewModel._managed_billing(draft)
+        # 计量方式不变（mode + 有效 pricing_unit 相同）才以磁盘为基线保留未建模键；
+        # 变化时旧汇率 / 缓存单价不再适用，显式丢弃（不恢复旧计费元数据）。
+        if not isinstance(baseline, Mapping):
+            return managed
+        if baseline.get("mode") != managed["mode"] or baseline.get("pricing_unit") != managed["pricing_unit"]:
+            return managed
+        merged = copy.deepcopy(dict(baseline))
+        merged.update(managed)
+        return merged
+
+    @staticmethod
+    def _managed_billing(draft: ModelConnectionDraft) -> dict[str, Any]:
         if draft.billing_mode == "estimate_cost":
             if _is_encoder_priced(draft):
                 # F32：分类费用型（encoder 计量）——pricing_unit 与表单可见单价一致，缺失用 None（R21）

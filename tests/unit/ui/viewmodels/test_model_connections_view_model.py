@@ -2300,3 +2300,259 @@ class TestRebaseSnapshot:
         assert isinstance(exc_info.value, asyncio.CancelledError)  # 显式断言取消类型
         assert svc.get_snapshot.await_count == 1  # 取消发生在读快照中（非入口短路）
         assert vm.state is before  # 取消未产生部分状态更新
+
+
+# --- D16-002：编辑既有连接保留草稿未建模的嵌套配置 ---
+
+
+class TestNestedConfigPreservation:
+    """同一 adapter kind 编辑以磁盘 options / billing 为基线，只覆盖受管键。"""
+
+    async def test_rename_only_preserves_unmodeled_options_and_billing(self):
+        """只改名称：运行参数与计价元数据保持，修订不因丢键虚增。"""
+        raw = _conn(connection_id="c1", name="Existing")
+        raw["adapter_options"] = {
+            "n_threads": 8,
+            "n_gpu_layers": 12,
+            "api_version": "2024-02-01",
+            "timeout": 60,
+        }
+        raw["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "input_price_per_m": "1.5",
+            "output_price_per_m": "3",
+            "cache_read_price_per_m": "0.15",
+            "cache_write_price_per_m": "0.2",
+            "fx_to_cny": "7.2",
+            "price_source": "manual",
+            "price_effective_at": "2026-01-01T00:00:00+00:00",
+        }
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("Renamed")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["name"] == "Renamed"
+        # 草稿未建模键原样保留（后续调用不回落默认线程 / GPU / API 版本）
+        assert conn["adapter_options"]["n_threads"] == 8
+        assert conn["adapter_options"]["n_gpu_layers"] == 12
+        assert conn["adapter_options"]["api_version"] == "2024-02-01"
+        assert conn["adapter_options"]["timeout"] == 60
+        # 计价元数据保留（费用按原 fx / 缓存单价计算，不因重存变为不可计价）
+        assert conn["billing"]["fx_to_cny"] == "7.2"
+        assert conn["billing"]["cache_read_price_per_m"] == "0.15"
+        assert conn["billing"]["cache_write_price_per_m"] == "0.2"
+        assert conn["billing"]["price_source"] == "manual"
+        assert conn["billing"]["price_effective_at"] == "2026-01-01T00:00:00+00:00"
+        assert conn["billing"]["input_price_per_m"] == "1.5"
+        # 仅改显示名不改变执行 / 计费指纹：修订不虚增
+        assert conn["connection_revision"] == raw["connection_revision"]
+
+    async def test_saved_nested_config_survives_reopen_and_resave(self):
+        """保存 → 重开 → 再保存：未建模键仍在（消费方可继续读到原值）。"""
+        raw = _conn(connection_id="c1", name="Existing")
+        raw["adapter_options"] = {"n_threads": 8, "api_version": "2024-02-01"}
+        raw["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "input_price_per_m": "1.5",
+            "output_price_per_m": "3",
+            "fx_to_cny": "7.2",
+        }
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("Renamed")
+        assert await vm.save() is True
+        saved = dict(svc.save_draft.await_args.args[0]["connections"][0])
+
+        svc2 = _make_service(_snapshot(connections=(saved,)))
+        vm2 = _make_vm(svc2)
+        await vm2.load()
+        vm2.edit("c1")
+        assert vm2.state.draft.timeout_seconds == ""
+        vm2.update_name("Renamed Again")
+        assert await vm2.save() is True
+
+        reloaded = svc2.save_draft.await_args.args[0]["connections"][0]
+        assert reloaded["adapter_options"]["n_threads"] == 8
+        assert reloaded["adapter_options"]["api_version"] == "2024-02-01"
+        assert reloaded["billing"]["fx_to_cny"] == "7.2"
+
+    async def test_edit_gguf_preserves_runtime_options(self):
+        """GGUF：n_threads / n_gpu_layers / n_batch / flash_attn 与 n_ctx 一并保真。"""
+        raw = _conn(
+            connection_id="c1",
+            name="Local",
+            adapter_kind="gguf_chat",
+            provider="",
+            api_base=None,
+            credential_ref=None,
+            credential_version=None,
+        )
+        raw["model"] = "dialog.gguf"
+        raw["adapter_options"] = {
+            "dialog_model_path": "dialog.gguf",
+            "n_ctx": 2048,
+            "n_threads": 8,
+            "n_gpu_layers": 20,
+            "n_batch": 512,
+            "flash_attn": False,
+        }
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("Local Renamed")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["adapter_options"]["n_threads"] == 8
+        assert conn["adapter_options"]["n_gpu_layers"] == 20
+        assert conn["adapter_options"]["n_batch"] == 512
+        assert conn["adapter_options"]["flash_attn"] is False
+        assert conn["adapter_options"]["n_ctx"] == 2048
+        assert conn["connection_revision"] == raw["connection_revision"]
+
+    async def test_switch_kind_drops_inapplicable_options_and_billing_metadata(self):
+        """kind 变化：旧模型路径 / 旧 options 与旧计费元数据显式移除，不跨 kind 恢复。"""
+        raw = _conn(connection_id="c1", name="Cloud")
+        raw["adapter_options"] = {"api_version": "2024-02-01", "n_threads": 8}
+        raw["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "input_price_per_m": "1.5",
+            "output_price_per_m": "3",
+            "fx_to_cny": "7.2",
+            "cache_read_price_per_m": "0.15",
+        }
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_adapter_kind("gguf_chat")
+        vm.update_dialog_model_path("dialog.gguf")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["adapter_options"]["dialog_model_path"] == "dialog.gguf"
+        assert conn["adapter_options"]["n_ctx"] == 4096
+        assert "api_version" not in conn["adapter_options"]
+        assert "n_threads" not in conn["adapter_options"]
+        assert "fx_to_cny" not in conn["billing"]
+        assert "cache_read_price_per_m" not in conn["billing"]
+
+    async def test_billing_unit_change_drops_old_pricing_metadata(self):
+        """计量方式变化（llm_tokens → encoder）：旧汇率 / 缓存单价不恢复。"""
+        raw = _conn(connection_id="c1", name="Existing")
+        raw["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "input_price_per_m": "1.5",
+            "output_price_per_m": "3",
+            "fx_to_cny": "7.2",
+            "cache_read_price_per_m": "0.15",
+        }
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_billing_unit("encoder_input_tokens")
+        vm.update_encoder_price("0.5")
+
+        assert await vm.save() is True
+
+        billing = svc.save_draft.await_args.args[0]["connections"][0]["billing"]
+        assert billing["pricing_unit"] == "encoder_input_tokens"
+        assert billing["encoder_price_per_m"] == "0.5"
+        assert "fx_to_cny" not in billing
+        assert "cache_read_price_per_m" not in billing
+
+    async def test_zero_price_string_not_treated_as_missing(self):
+        """价格 "0" 是合法字符串：保留，不因 `or` 语义被当作缺失。"""
+        raw = _conn(connection_id="c1", name="Existing")
+        raw["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "input_price_per_m": "0",
+            "output_price_per_m": "0",
+            "fx_to_cny": "7.2",
+        }
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("Renamed")
+
+        assert await vm.save() is True
+
+        billing = svc.save_draft.await_args.args[0]["connections"][0]["billing"]
+        assert billing["input_price_per_m"] == "0"
+        assert billing["output_price_per_m"] == "0"
+        assert billing["fx_to_cny"] == "7.2"
+
+    async def test_explicit_credential_clear_not_restored(self):
+        """显式清除凭据不被 options / billing 基线合并复活。"""
+        raw = _conn(connection_id="c1", name="Existing")
+        raw["adapter_options"] = {"n_threads": 8}
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_credential_cleared(True)
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["credential_ref"] is None
+        assert conn["credential_version"] is None
+        assert conn["adapter_options"]["n_threads"] == 8  # 凭据清除不牵连运行参数
+
+    async def test_wizard_entry_uses_same_merged_nested_config(self):
+        """draft_connection_entry 与普通保存同源：向导 entry 也保留未建模嵌套键。"""
+        raw = _conn(connection_id="c1", name="Existing")
+        raw["adapter_options"] = {"n_threads": 8, "api_version": "2024-02-01"}
+        raw["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "input_price_per_m": "1.5",
+            "output_price_per_m": "3",
+            "fx_to_cny": "7.2",
+        }
+        vm = _make_vm(_make_service(_snapshot(connections=(raw,))))
+        await vm.load()
+        vm.edit("c1")
+
+        entry = await vm.draft_connection_entry("op-1")
+
+        assert entry is not None
+        assert entry["adapter_options"]["n_threads"] == 8
+        assert entry["adapter_options"]["api_version"] == "2024-02-01"
+        assert entry["billing"]["fx_to_cny"] == "7.2"
+        merged = vm.merged_connections(entry)
+        merged_conn = next(c for c in merged if c["connection_id"] == "c1")
+        assert merged_conn["adapter_options"]["n_threads"] == 8
+
+    async def test_cleared_timeout_removed_from_baseline(self):
+        """表单受管键 timeout 清空即移除：基线旧值不得复活。"""
+        raw = _conn(connection_id="c1", name="Existing")
+        raw["adapter_options"] = {"timeout": 60, "n_threads": 8}
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_timeout_seconds("")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert "timeout" not in conn["adapter_options"]
+        assert conn["adapter_options"]["n_threads"] == 8
