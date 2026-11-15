@@ -13,7 +13,8 @@
    ``# generated:<id>`` / ``# /generated:<id>``。缺块 / 重复块 / 嵌套块 / 孤儿结束 /
    结束标记身份错配 / 非法 id 一律显式拒绝。
 3. 路径越界（含 ``..`` 逃逸、绝对路径、符号链接解析后越界）显式拒绝。
-4. 渲染输入校验：作者源缺字段 / 未知字段 / 重复身份 / 非法 section 不得静默取默认值。
+4. 渲染输入校验：作者源重复 mapping 键 / 缺字段 / 未知字段 / 重复身份 / 非法 section
+   不得静默取默认值（重复键由共享安全 loader 在构造前拒绝，报告字段路径与位置）。
 5. 更新编排覆盖 §5.2.1 全窗口：读快照 → 取写入保护 → 保护内核对 → 渲染 → 预校验 →
    逐文件提交核对 + 替换 → 更新后 all 检查（同一保护边界内）→ 释放保护。
    检测到冲突时不覆盖原位、保留用户新稿、如实列出已写/未写；不承诺跨文件事务。
@@ -45,9 +46,12 @@ import re
 import subprocess
 import sys
 import tomllib
-from collections.abc import Callable, Iterable, Sequence
+import typing
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 import docs_markdown
 
@@ -59,6 +63,7 @@ __all__ = [
     "BlockSpec",
     "DocsGeneratedError",
     "DuplicateBlockError",
+    "DuplicateMappingKeyError",
     "EndMismatchError",
     "InPlaceWriteUnsupportedError",
     "InvalidBlockIdError",
@@ -84,6 +89,7 @@ __all__ = [
     "WriteGuard",
     "git_delivery_files",
     "load_validated_source",
+    "load_yaml",
     "render_block_lines",
     "replace_block",
     "resolve_within",
@@ -196,6 +202,107 @@ class InPlaceWriteUnsupportedError(ProtectionError):
 
 class SnapshotDriftError(DocsGeneratedError):
     """保护窗口内快照（字节 hash / 文件身份 / 解析路径）发生变化。"""
+
+
+# ---------------------------------------------------------------------------
+# YAML 安全加载：重复 mapping 键显式拒绝（歧义作者源不得被静默取最后值）
+# ---------------------------------------------------------------------------
+
+_YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
+class DuplicateMappingKeyError(yaml.YAMLError):
+    """同一映射内出现重复键；报告字段路径与重复键/首次出现的位置。"""
+
+    def __init__(
+        self,
+        key: object,
+        *,
+        path: str,
+        mark: yaml.Mark,
+        first_mark: yaml.Mark,
+        source: str,
+    ) -> None:
+        self.key = key
+        self.path = path
+        self.line = mark.line + 1
+        self.column = mark.column + 1
+        self.first_line = first_mark.line + 1
+        self.first_column = first_mark.column + 1
+        self.source = source
+        super().__init__(
+            f"{source} 第 {self.line} 行第 {self.column} 列: 重复 mapping 键 {key!r}"
+            f"（字段路径 {path}；首次出现于第 {self.first_line} 行第 {self.first_column} 列）"
+        )
+
+
+def _yaml_child_path(parent: str, key: object) -> str:
+    segment = str(key)
+    return f"{parent}.{segment}" if parent else segment
+
+
+def _reject_duplicate_mapping_keys(
+    loader: yaml.SafeLoader,
+    node: yaml.Node,
+    *,
+    path: str,
+    source: str,
+    visited: set[int],
+) -> None:
+    """遍历组合节点树，逐映射拒绝重复键（不构造文档，避免惰性生成器丢失路径上下文）。
+
+    合并键 ``<<`` 是 YAML 指令而非字段：跳过重复判定，显式键覆盖合并键属合法语义；
+    别名/递归引用按节点身份只检查一次（``visited``），列表项路径带下标。
+    """
+    node_id = id(node)
+    if node_id in visited:
+        return
+    visited.add(node_id)
+    if isinstance(node, yaml.MappingNode):
+        seen: dict[object, yaml.Mark] = {}
+        for key_node, value_node in node.value:
+            if key_node.tag == _YAML_MERGE_TAG:
+                _reject_duplicate_mapping_keys(loader, value_node, path=path, source=source, visited=visited)
+                continue
+            try:
+                key = loader.construct_object(key_node, deep=True)
+                hashable = isinstance(key, Hashable)
+            except yaml.YAMLError:
+                key, hashable = None, False
+            if hashable:
+                if key in seen:
+                    raise DuplicateMappingKeyError(
+                        key,
+                        path=_yaml_child_path(path, key),
+                        mark=key_node.start_mark,
+                        first_mark=seen[key],
+                        source=source,
+                    )
+                seen[key] = key_node.start_mark
+                child_path = _yaml_child_path(path, key)
+            else:
+                child_path = path
+            _reject_duplicate_mapping_keys(loader, value_node, path=child_path, source=source, visited=visited)
+    elif isinstance(node, yaml.SequenceNode):
+        for index, child in enumerate(node.value):
+            _reject_duplicate_mapping_keys(loader, child, path=f"{path}[{index}]", source=source, visited=visited)
+
+
+def load_yaml(text: str, *, source: str) -> typing.Any:
+    """安全加载 YAML 文本；任何映射出现重复键即抛 ``DuplicateMappingKeyError``。
+
+    ``source`` 仅用于错误信息定位（文件名/作者源标签）。除重复键外保持
+    ``yaml.safe_load`` 的语义（仅构造安全类型、单文档、非法 YAML 抛 ``yaml.YAMLError``）。
+    """
+    loader = yaml.SafeLoader(text)
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None
+        _reject_duplicate_mapping_keys(loader, node, path="", source=source, visited=set())
+        return loader.construct_document(node)
+    finally:
+        loader.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -495,10 +602,8 @@ def load_validated_source(root: Path, schema: SourceSchema, *, text: str | None 
         except UnicodeDecodeError as exc:
             raise SourceFormatError(f"作者源 {schema.path} 不是有效 UTF-8: {exc}") from exc
     if schema.fmt == "yaml":
-        import yaml  # 函数体内延迟 import：与 check_docs_consistency 渲染器风格一致（docs 组依赖）
-
         try:
-            data = yaml.safe_load(text)
+            data = load_yaml(text, source=schema.path)
         except yaml.YAMLError as exc:
             raise SourceFormatError(f"作者源 {schema.path} YAML 解析失败: {exc}") from exc
         if not isinstance(data, dict):
