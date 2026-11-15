@@ -19,16 +19,20 @@ per-file 门禁 80%。本文件在 unit 层复用 test_main.py 的 mock 策略
 from __future__ import annotations
 
 import asyncio
+import builtins
 import os
 from contextlib import suppress
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import flet as ft
 import pytest
 
 import app.application as app_main
 import utils.shutdown as shutdown_mod
 from core.startup_types import StartupState
+from tests.unit.ui.component_renderer import make_component, render_once
 
 pytestmark = pytest.mark.unit
 
@@ -477,3 +481,52 @@ async def test_run_f4_keyring_precheck_exception_is_caught(monkeypatch):
     page = _DummyPage()
     await app_main.run(page)  # 不抛异常：预检失败可安全降级
     assert isinstance(page.toast, MagicMock)  # run() 挂载 ToastManager（测试中 mock 为 MagicMock）
+
+
+def test_root_view_render_performs_no_trace_file_io(monkeypatch, tmp_path):
+    """D02-002：RootView 渲染期不得执行 trace 文件 IO（R16 渲染纯函数约束）。
+
+    修复前 RootView 在渲染函数顶层调用 ``_trace_log`` 两次，每次 ``mkdir`` +
+    追加写 ``logs/main_trace.log`` 并在渲染线程 flush。本用例在真实 Renderer
+    上下文渲染 RootView，以记录并阻断 ``builtins.open`` / ``Path.mkdir`` 的替身
+    证明渲染期零 trace 调用、零文件 IO，且不生成 ``logs/main_trace.log``。
+    """
+    monkeypatch.chdir(tmp_path)
+    # RootView 内的子组件与 IO 无关，替换为替身以聚焦被测渲染函数本身。
+    monkeypatch.setattr(app_main, "StartupView", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(app_main, "ToastManagerView", lambda: MagicMock())
+
+    trace_calls: list[str] = []
+    monkeypatch.setattr(app_main, "_trace_log", trace_calls.append)
+
+    io_attempts: list[str] = []
+    real_open = builtins.open
+    real_mkdir = Path.mkdir
+
+    def _blocked_open(file, *args, **kwargs):
+        if os.fspath(file).endswith("main_trace.log"):
+            io_attempts.append(os.fspath(file))
+            raise OSError("render-time trace file write blocked")
+        return real_open(file, *args, **kwargs)
+
+    def _blocked_mkdir(self, *args, **kwargs):
+        if "logs" in self.parts:
+            io_attempts.append(str(self))
+            raise OSError("render-time trace directory creation blocked")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _blocked_open)
+    monkeypatch.setattr(Path, "mkdir", _blocked_mkdir)
+
+    component = make_component(
+        app_main.RootView,
+        controller=MagicMock(),
+        bridge=MagicMock(),
+        run_task_fn=MagicMock(),
+    )
+    result = render_once(component)
+
+    assert isinstance(result, ft.Stack)
+    assert trace_calls == []
+    assert io_attempts == []
+    assert not (tmp_path / "logs").exists()
