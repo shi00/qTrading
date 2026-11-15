@@ -8,6 +8,9 @@
   快照仅含该场景路由、candidates 形态对齐 Executor 契约、连接全量透传；
 - F01 分派授权身份：候选携带规范化外发目标（本地 / 缺失 → None）与场景用途，
   快照 scope 版本取安全状态 scope_version（独立于 security_revision）；
+- D13-001 路由策略完整性：主路由经共享构造冻结 transient_retries /
+  fallback_enabled / total_timeout_seconds；0 重试 / 禁用 fallback 原值保留；
+  缺字段 / 非法值 / 旧版三键路由 → RoutePolicyIncompleteError 显式失败；
 - R1：services 层不 import app，调度服务经注册点注入（bootstrap app→services）。
 """
 
@@ -23,8 +26,26 @@ pytestmark = pytest.mark.unit
 
 _SCENARIO_ID = "news_annotation"
 
+# D13-001：路由冻结快照的完整可执行字段集合（白名单契约）
+_EXPECTED_ROUTE_FIELDS = {
+    "scenario_id",
+    "route_revision",
+    "candidates",
+    "transient_retries",
+    "fallback_enabled",
+    "total_timeout_seconds",
+}
 
-def _mm_snapshot(migration_state: str = "active", enabled: bool = True, candidates: list[str] | None = None):
+
+def _mm_snapshot(
+    migration_state: str = "active",
+    enabled: bool = True,
+    candidates: list[str] | None = None,
+    *,
+    transient_retries: int = 1,
+    fallback_enabled: bool = True,
+    total_timeout_seconds: int = 45,
+):
     """构造 ModelManagementSnapshot 形态的 dict 快照（对齐 get_snapshot 产出）。"""
     return MagicMock(
         snapshot_id=str(uuid.uuid4()),
@@ -40,7 +61,9 @@ def _mm_snapshot(migration_state: str = "active", enabled: bool = True, candidat
                 "enabled": enabled,
                 "candidates": candidates if candidates is not None else ["conn-1", "conn-2"],
                 "route_revision": 3,
-                "total_timeout_seconds": 45,
+                "total_timeout_seconds": total_timeout_seconds,
+                "transient_retries": transient_retries,
+                "fallback_enabled": fallback_enabled,
                 "task_routes": {"sentiment": {"mode": "bundled", "candidates": [], "reuse_bundled_sentiment": True}},
             },
         ),
@@ -116,6 +139,11 @@ async def test_dispatch_built_when_all_conditions_met(monkeypatch):
     route = snap.routes[0]
     assert route["scenario_id"] == _SCENARIO_ID
     assert route["route_revision"] == 3
+    # D13-001：路由条目一次携带完整可执行策略字段（白名单），默认策略原值保留
+    assert set(route) == _EXPECTED_ROUTE_FIELDS
+    assert route["transient_retries"] == 1
+    assert route["fallback_enabled"] is True
+    assert route["total_timeout_seconds"] == 45.0
     assert [c["connection_id"] for c in route["candidates"]] == ["conn-1", "conn-2"]
     assert [c["candidate_index"] for c in route["candidates"]] == [0, 1]
     assert all(c["task_id"] == _SCENARIO_ID for c in route["candidates"])
@@ -177,6 +205,106 @@ async def test_dispatch_fee_candidates_with_monthly_limit(monkeypatch):
         assert cand["budget_policy_snapshot"] == {"monthly_cny_limit": "50.00"}
     # 父请求预算政策快照可由候选冻结值提取（executor 侧 _budget_policy_snapshot 消费）
     assert route["candidates"][0]["budget_policy_snapshot"] is not None
+
+
+async def test_dispatch_freezes_zero_retries_and_fallback_disabled(monkeypatch):
+    """D13-001：用户保存的 0 重试 / 禁用备用策略必须进入冻结快照（不得丢键）。"""
+    mm = _mm_snapshot(transient_retries=0, fallback_enabled=False)
+    _patch_env(monkeypatch, mm, {"executor": MagicMock()})
+
+    dispatch = await scenario_dispatch.resolve_executor(_SCENARIO_ID)
+
+    assert dispatch is not None
+    route = dispatch.snapshot.routes[0]
+    assert set(route) == _EXPECTED_ROUTE_FIELDS
+    # 零重试原值保留（不被默认值 1 覆盖），禁用备用为 False（不被默认值 True 覆盖）
+    assert route["transient_retries"] == 0
+    assert route["fallback_enabled"] is False
+    assert route["total_timeout_seconds"] == 45.0
+    assert dispatch.total_timeout_seconds == 45.0
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["transient_retries", "fallback_enabled", "total_timeout_seconds"],
+)
+async def test_route_policy_missing_field_fails_explicitly(monkeypatch, field):
+    """D13-001：策略字段缺失 → 显式失败，不返回 None 降级旧链、不静默用默认。"""
+    mm = _mm_snapshot()
+    mm.scenario_routes[0].pop(field)
+    _patch_env(monkeypatch, mm, {"executor": MagicMock()})
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError, match=field):
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transient_retries", 3),
+        ("transient_retries", True),
+        ("transient_retries", "1"),
+        ("fallback_enabled", "no"),
+        ("fallback_enabled", 0),
+        ("total_timeout_seconds", 0),
+        ("total_timeout_seconds", None),
+    ],
+)
+async def test_route_policy_invalid_value_fails_explicitly(monkeypatch, field, value):
+    """D13-001：策略字段非法（越界 / bool 冒充 int / 类型错误）→ 显式失败。"""
+    mm = _mm_snapshot()
+    mm.scenario_routes[0][field] = value
+    _patch_env(monkeypatch, mm, {"executor": MagicMock()})
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError, match=field):
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID)
+
+
+async def test_legacy_three_key_route_fails_explicitly(monkeypatch):
+    """D13-001：旧版路由形态（仅 scenario_id/route_revision/candidates）→ 显式失败。
+
+    D13-001 前的分派构造即此三键形态；策略键丢失必须暴露，不得按默认重试 /
+    允许 fallback 继续执行并把「策略未生效」伪装成成功（R21）。
+    """
+    mm = _mm_snapshot()
+    mm.scenario_routes = (
+        {
+            "scenario_id": _SCENARIO_ID,
+            "enabled": True,
+            "candidates": ["conn-1"],
+            "route_revision": 3,
+            "task_routes": {},
+        },
+    )
+    _patch_env(monkeypatch, mm, {"executor": MagicMock()})
+
+    with pytest.raises(scenario_dispatch.RoutePolicyIncompleteError, match="transient_retries"):
+        await scenario_dispatch.resolve_executor(_SCENARIO_ID)
+
+
+def test_build_route_snapshot_whitelists_executable_fields():
+    """D13-001：共享构造只输出白名单字段，未知 / 展示用配置键不进入执行快照。"""
+    built = scenario_dispatch.build_route_snapshot(
+        {
+            "scenario_id": _SCENARIO_ID,
+            "route_revision": 4,
+            "candidates": ["stale-candidate-id"],
+            "transient_retries": 0,
+            "fallback_enabled": False,
+            "total_timeout_seconds": 30,
+            "execution_options": {"future_key": True},
+            "task_routes": {"sentiment": {"mode": "bundled"}},
+        },
+        scenario_id=_SCENARIO_ID,
+        candidates=(),
+    )
+
+    assert set(built) == _EXPECTED_ROUTE_FIELDS
+    assert built["candidates"] == ()
+    assert built["route_revision"] == 4
+    assert built["transient_retries"] == 0
+    assert built["fallback_enabled"] is False
+    assert built["total_timeout_seconds"] == 30.0
 
 
 async def test_provider_injection_roundtrip():

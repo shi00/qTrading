@@ -135,12 +135,21 @@ def _dispatch(mode: str = "bundled", sentiment_candidates: list[str] | None = No
     return dispatch
 
 
-def _patch_env(monkeypatch, dispatch: MagicMock | None, connections: tuple | None = None):
+def _patch_env(
+    monkeypatch,
+    dispatch: MagicMock | None,
+    connections: tuple | None = None,
+    *,
+    transient_retries: int = 1,
+    fallback_enabled: bool = True,
+):
     """patch 分派环境：provider + config service。
 
     connections（F24）：可选覆盖快照连接定义——dedicated gguf 全链路用例需为
     情绪候选连接声明 adapter_kind="gguf_sentiment"（_sentiment_adapter_kind
     据此判定 sentiment_source）；默认保持原连接形态，存量用例不受影响。
+    transient_retries / fallback_enabled（D13-001）：路由策略字段，分派侧共享
+    构造要求必填；dedicated 子路由需与主路由同值（默认取 schema 默认 1 / True）。
     """
 
     svc = {"executor": dispatch.executor} if dispatch is not None else None
@@ -163,6 +172,8 @@ def _patch_env(monkeypatch, dispatch: MagicMock | None, connections: tuple | Non
                     "candidates": ["conn-1"],
                     "route_revision": 3,
                     "total_timeout_seconds": 45,
+                    "transient_retries": transient_retries,
+                    "fallback_enabled": fallback_enabled,
                     "task_routes": dispatch.task_routes if dispatch else {},
                 },
             ),
@@ -630,6 +641,56 @@ async def test_dedicated_sentiment_uses_subroute_candidates(monkeypatch):
     assert "budget_amount_cny" not in sub_cand
     assert sub_cand["budget_limit_cny"] == base_cand["budget_limit_cny"]
     assert sub_cand["budget_policy_snapshot"] == base_cand["budget_policy_snapshot"]
+
+
+async def test_dedicated_sentiment_subroute_preserves_route_policy(monkeypatch):
+    """D13-001：情绪子路由快照继承主路由冻结策略（0 重试 / 禁用备用），两路径同构。
+
+    修复前子路由 dict 只带 scenario_id/route_revision/candidates，Executor 解包
+    transient_retries / fallback_enabled 缺失即回退默认——用户策略静默失效。
+    """
+    dispatch = _patch_env(
+        monkeypatch,
+        _dispatch(mode="dedicated"),
+        transient_retries=0,
+        fallback_enabled=False,
+    )
+    classifier, _svc = _service()
+
+    results = [
+        _succeeded_result(_bundled_json(sentiment=None)),
+        ScenarioExecutionResult(
+            scenario_id=_SCENARIO_ID,
+            invocation_id="inv-2",
+            status="succeeded",
+            outputs=(ScenarioOutput(output={"sentiment": "Negative"}),),
+            candidate_decisions=(),
+            actual_usage=(),
+        ),
+    ]
+    dispatch.executor.execute = AsyncMock(side_effect=results)
+
+    await classifier.classify_news("央行宣布降准")
+
+    topic_snap = dispatch.executor.execute.await_args_list[0].args[1]
+    sentiment_snap = dispatch.executor.execute.await_args_list[1].args[1]
+    expected_fields = {
+        "scenario_id",
+        "route_revision",
+        "candidates",
+        "transient_retries",
+        "fallback_enabled",
+        "total_timeout_seconds",
+    }
+    for snap in (topic_snap, sentiment_snap):
+        route = snap.routes[0]
+        assert set(route) == expected_fields
+        assert route["transient_retries"] == 0
+        assert route["fallback_enabled"] is False
+        assert route["total_timeout_seconds"] == 45.0
+    # 主路由与情绪子路由策略一致（同一次请求同版冻结，不复用默认值）
+    assert topic_snap.routes[0]["transient_retries"] == sentiment_snap.routes[0]["transient_retries"]
+    assert topic_snap.routes[0]["fallback_enabled"] == sentiment_snap.routes[0]["fallback_enabled"]
 
 
 async def test_dedicated_sentiment_candidates_carry_authorization_identity(monkeypatch):
