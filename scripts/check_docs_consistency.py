@@ -20,8 +20,9 @@
    id 唯一性、rule_id 存在性、paths 存在性与 expires_at/removal_trigger 二选一。
 11. canonical-topics.yml 主题映射一致性检查（P2-12）：校验 docs/governance/canonical-topics.yml
    必填字段、id 唯一性、canonical/workflow 路径在仓库中真实存在。
-12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version 相等、
-   last_reviewed 为合法日期且前者不早于后者。
+12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 的
+   ruleset_version 互不漂移（入口为其派生视图），last_reviewed 为合法日期且仅顶行
+   「受影响对象」列出的文档受「不早于顶行变更日期」复核门约束。
 13. 决策树映射一致性检查（DOC-04）：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致——
    每个数据行以行尾 `<!-- route: ... -->` 锚声明承载的 yml topic id（正文任务身份），
    校验「行 → 锚 id → canonical」精确对应（F03：路径集合相等不保证任务归属相等，两行入口
@@ -2686,7 +2687,7 @@ def check_claude_self_check_sync() -> list[str]:
     return errors
 
 
-# --- DOC-01: 规则集元数据一致性（CLAUDES 与 CONTRIBUTING 的 ruleset_version/last_reviewed 同步）---
+# --- DOC-01: 规则集元数据一致性（入口 ruleset_version 派生自日志顶行；受影响对象 last_reviewed 复核门）---
 # 元数据格式（P2-07 统一格式）：
 #   `> - ruleset_version: 1.3.0（...）`  与  `> - last_reviewed: 2026-09-03`
 _RULESET_VERSION_PATTERN = re.compile(r"ruleset_version[：:]\s*([0-9]+\.[0-9]+\.[0-9]+)")
@@ -2700,13 +2701,31 @@ def _extract_metadata_versions(content: str) -> tuple[str | None, str | None]:
     return (m.group(1) if m else None, d.group(1) if d else None)
 
 
-def _extract_changelog_top_date() -> date | None:
-    """从 ruleset-changelog.md「变更记录」表首条数据行提取变更日期（DS-05）。
+@dataclass(frozen=True)
+class _RulesetChangelogTopEntry:
+    """ruleset-changelog.md「变更记录」表顶行（ruleset_version 的唯一作者记录）。
 
-    表头 `| ruleset_version | 变更日期 | 变更摘要 |`，首条数据行如
-    `| 1.6.0 | 2026-09-14 | ... |`，日期为第 2 列（YYYY-MM-DD）。文件缺失、
-    未找到数据行、或日期非法时返回 None（调用方 fail-closed 报错）。
-    顶行判定与 check_ruleset_changelog_version 一致（锚定真实「变更记录」标题后取首个数据行）。
+    `affected_text` 为第 4 列「受影响对象」原文；该列缺失时为 None（由复核门消费方
+    fail-closed 报错），显式空值（`—` 等）由 `_parse_affected_objects` 归一为空元组。
+    """
+
+    version: str
+    date_text: str
+    affected_text: str | None
+
+
+# 复核门可守护的对象：仅这三份入口文档承载 last_reviewed 元数据。
+_RULESET_REVIEW_GATED_DOCS: tuple[str, ...] = ("CLAUDE.md", "CONTRIBUTING.md", "AGENTS.md")
+# 「受影响对象」列的空值标记（显式声明本轮不影响任何入口文档 / 历史行未登记）。
+_AFFECTED_NONE_MARKERS = frozenset({"-", "—", "–", "无", "不适用"})
+
+
+def _extract_changelog_top_entry() -> _RulesetChangelogTopEntry | None:
+    """从 ruleset-changelog.md「变更记录」表首条数据行提取顶行记录（DS-05/DS-10）。
+
+    表头 `| ruleset_version | 变更日期 | 变更摘要 | 受影响对象 |`，首条数据行如
+    `| 1.6.0 | 2026-09-14 | ... | CLAUDE.md、AGENTS.md |`。文件缺失、未找到数据行、
+    或首列不是 x.y.z 时返回 None（调用方 fail-closed 报错）；日期合法性由调用方校验。
     标题与代码块边界经 docs_markdown 解析视图判定：围栏内的伪标题/伪表格不得冒充日志结构。
     """
     if not RULESET_CHANGELOG_PATH.exists():
@@ -2737,27 +2756,46 @@ def _extract_changelog_top_date() -> date | None:
         if not cols or cols[0] in {"", "ruleset_version"}:
             continue  # 表头或空行
         if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]) and len(cols) >= 2:
-            try:
-                return date.fromisoformat(cols[1])
-            except ValueError:
-                return None
+            return _RulesetChangelogTopEntry(
+                version=cols[0],
+                date_text=cols[1],
+                affected_text=cols[3] if len(cols) >= 4 else None,
+            )
     return None
 
 
+def _extract_changelog_top_date() -> date | None:
+    """提取顶行变更日期（DS-05）；记录缺失或日期非法时返回 None（调用方 fail-closed）。"""
+    entry = _extract_changelog_top_entry()
+    if entry is None:
+        return None
+    try:
+        return date.fromisoformat(entry.date_text)
+    except ValueError:
+        return None
+
+
+def _parse_affected_objects(cell: str | None) -> tuple[str, ...] | None:
+    """解析顶行「受影响对象」列；列缺失返回 None（fail-closed），显式空值返回空元组。"""
+    if cell is None:
+        return None
+    tokens = [token.strip() for token in re.split(r"[,，、]", cell) if token.strip()]
+    if all(token in _AFFECTED_NONE_MARKERS for token in tokens):
+        return ()
+    return tuple(tokens)
+
+
 def check_ruleset_metadata_consistency() -> list[str]:
-    """检查项 12：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 规则集元数据一致性（DOC-01/DOC-13/DS-05）。
+    """检查项 12：入口文档规则集元数据一致性（DOC-01/DOC-13/DS-05）。
 
-    「对应版本」声明已随版本字面量收敛移除（版本唯一正本为 pyproject.toml，
-    verify-versions 对应检查一并删除），本检查守护 `ruleset_version` 与 `last_reviewed`
-    两个字段——它们**从未被任何检查读取**（DOC-01 门禁空白的主因），修复后禁止再漂移。
-    随后 DOC-13 将孤儿文件 AGENTS.md 一并纳入
-    ruleset_version 守护（AGENTS 作为跨工具入口，规则集版本必须与宪法同步）。
+    ruleset_version 的唯一作者是 ruleset-changelog.md「变更记录」表顶行（其派生视图
+    由 check_ruleset_changelog_version 校验）；本检查守护 last_reviewed：
 
-    断言：
-    1. 三份文件均有 ruleset_version，且值相等。
-    2. 三份文件均有 last_reviewed，且值为合法日期（AGENTS 为跨工具入口，审核时间与宪法同步）。
-    3. CONTRIBUTING.md / AGENTS.md 的 last_reviewed 均不早于 CLAUDE.md（更新自由度不低于宪法）。
-    4. 三份文件的 last_reviewed 均不早于 ruleset-changelog.md 顶行变更日期（治理变更后须重新审核同步，DS-05）。
+    1. 三份文件均有 last_reviewed，且值为合法日期（AGENTS 为跨工具入口）。
+    2. 复核门只作用于顶行「受影响对象」列出的文档：其 last_reviewed 不得早于顶行
+       变更日期（受影响对象确须复核）。未列出的文档保留真实复核日期，不因日志递增
+       或其他入口文档更新而被迫同步（日期表达真实复核事件，不设跨文件无条件下限）。
+    3. 顶行缺「受影响对象」列、列入未受守护的对象或日期非法时一律 fail-closed。
     """
     errors: list[str] = []
     claude_ver, claude_reviewed = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
@@ -2778,12 +2816,12 @@ def check_ruleset_metadata_consistency() -> list[str]:
     if claude_ver is not None and contributing_ver is not None and claude_ver != contributing_ver:
         errors.append(
             f"ruleset_version 漂移: CLAUDE.md={claude_ver} != CONTRIBUTING.md={contributing_ver} "
-            "(两文件须同步，规则集版本规则变更时递增)"
+            "(入口为规则集日志的派生视图，须与 ruleset-changelog 顶行版本一致)"
         )
     if claude_ver is not None and agents_ver is not None and claude_ver != agents_ver:
         errors.append(
             f"ruleset_version 漂移: CLAUDE.md={claude_ver} != AGENTS.md={agents_ver} "
-            "(AGENTS 为跨工具入口，规则集版本须与宪法同步)"
+            "(AGENTS 为跨工具入口，须与 ruleset-changelog 顶行版本一致)"
         )
 
     if claude_reviewed is None:
@@ -2793,51 +2831,56 @@ def check_ruleset_metadata_consistency() -> list[str]:
     if agents_ver is not None and agents_reviewed is None:
         errors.append("AGENTS.md 缺少 last_reviewed 元数据字段")
 
-    # DS-05：last_reviewed 不得早于 ruleset-changelog 顶行变更日期（治理变更后须重新审核同步）。
-    changelog_date = _extract_changelog_top_date()
-    if changelog_date is None:
-        errors.append("ruleset-changelog.md「变更记录」表未找到合法顶行变更日期 (YYYY-MM-DD)")
-
-    if claude_reviewed is not None and contributing_reviewed is not None and agents_reviewed is not None:
+    parsed_dates: dict[str, date] = {}
+    for _name, _raw in (
+        ("CLAUDE.md", claude_reviewed),
+        ("CONTRIBUTING.md", contributing_reviewed),
+        ("AGENTS.md", agents_reviewed),
+    ):
+        if _raw is None:
+            continue
         try:
-            claude_date = date.fromisoformat(claude_reviewed)
-            contributing_date = date.fromisoformat(contributing_reviewed)
-            agents_date = date.fromisoformat(agents_reviewed)
+            parsed_dates[_name] = date.fromisoformat(_raw)
         except ValueError:
-            errors.append("CLAUDE.md/CONTRIBUTING.md/AGENTS.md 的 last_reviewed 不是合法日期 (YYYY-MM-DD)")
-        else:
-            if contributing_date < claude_date:
-                errors.append(
-                    f"CONTRIBUTING.md last_reviewed({contributing_reviewed}) 早于 "
-                    f"CLAUDE.md last_reviewed({claude_reviewed})"
-                )
-            if agents_date < claude_date:
-                errors.append(
-                    f"AGENTS.md last_reviewed({agents_reviewed}) 早于 CLAUDE.md last_reviewed({claude_reviewed})"
-                )
-            if changelog_date is not None:
-                for _name, _date in (
-                    ("CLAUDE.md", claude_date),
-                    ("CONTRIBUTING.md", contributing_date),
-                    ("AGENTS.md", agents_date),
-                ):
-                    if _date < changelog_date:
-                        errors.append(
-                            f"{_name} last_reviewed({_date.isoformat()}) 早于 "
-                            f"ruleset-changelog 顶行变更日期({changelog_date.isoformat()}) "
-                            "(治理变更后须重新审核并同步 last_reviewed)"
-                        )
+            errors.append(f"{_name} 的 last_reviewed({_raw}) 不是合法日期 (YYYY-MM-DD)")
+
+    entry = _extract_changelog_top_entry()
+    if entry is None:
+        errors.append("ruleset-changelog.md「变更记录」表未找到合法顶行变更日期 (YYYY-MM-DD)")
+        return errors
+    try:
+        changelog_date = date.fromisoformat(entry.date_text)
+    except ValueError:
+        errors.append(f"ruleset-changelog.md 顶行变更日期({entry.date_text}) 不是合法日期 (YYYY-MM-DD)")
+        return errors
+
+    affected = _parse_affected_objects(entry.affected_text)
+    if affected is None:
+        errors.append("ruleset-changelog.md 顶行缺少「受影响对象」列（须声明本轮需复核的入口文档，无则为 —）")
+        return errors
+    unknown = [name for name in affected if name not in _RULESET_REVIEW_GATED_DOCS]
+    if unknown:
+        errors.append(
+            f"ruleset-changelog.md 顶行「受影响对象」含未受复核门守护的对象: {', '.join(unknown)} "
+            f"(仅支持 {' / '.join(_RULESET_REVIEW_GATED_DOCS)})"
+        )
+    for name in affected:
+        doc_date = parsed_dates.get(name)
+        if doc_date is not None and doc_date < changelog_date:
+            errors.append(
+                f"{name} last_reviewed({doc_date.isoformat()}) 早于 ruleset-changelog 顶行变更日期"
+                f"({changelog_date.isoformat()})（该文档在顶行「受影响对象」内，须重新审核并更新 last_reviewed）"
+            )
     return errors
 
 
 def check_ruleset_changelog_version() -> list[str]:
-    """检查项：规则集变更日志顶行版本与宪法正本一致（DS-10）。
+    """检查项：ruleset-changelog 顶行是 ruleset_version 的唯一作者（DS-10）。
 
-    ruleset-changelog.md「变更记录」表在每次 ruleset_version 递增时于顶部追加一行，
-    首条数据行应为当前正本最新版本。断言其与 CLAUDE.md 的 ruleset_version 一致
-    （CLAUDE/CONTRIBUTING/AGENTS 三文件 ruleset_version 同步已由
-    check_ruleset_metadata_consistency 守护，故取 CLAUDE.md 为正本即可）。
-    变更日志缺失、首行无合法版本号、或版本漂移时一律 fail-closed 报错。
+    「变更记录」表在 ruleset_version 递增时于顶部追加一行，该顶行即版本作者记录；
+    CLAUDE.md / CONTRIBUTING.md / AGENTS.md 的 ruleset_version 均为派生视图，必须等于
+    顶行版本（不得以宪法版本反向认证日志）。日志缺失、顶行无合法版本号或入口漂移时
+    一律 fail-closed 报错。
     """
     errors: list[str] = []
     if not RULESET_CHANGELOG_PATH.exists():
@@ -2848,40 +2891,26 @@ def check_ruleset_changelog_version() -> list[str]:
         errors.append(f"规则集变更日志不存在: {display}")
         return errors
 
-    changelog_ver: str | None = None
-    changelog_lines = RULESET_CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
-    # 锚定「变更记录」标题后的片段：避免文件其它位置出现 x.y.z 首列行干扰取行（对抗检视 P2）
-    start = 0
-    for _i, _line in enumerate(changelog_lines):
-        if _line.strip() == "## 变更记录":
-            start = _i + 1
-            break
-    for line in changelog_lines[start:]:
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        if re.fullmatch(r"\|[\s\-:]+\|", stripped):
-            continue  # 表格分隔行（|---|）
-        cols = [c.strip() for c in stripped.strip("|").split("|")]
-        if not cols or cols[0] in {"", "ruleset_version"}:
-            continue  # 表头（首列固定为 ruleset_version 标题）或空行
-        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]):
-            changelog_ver = cols[0]
-            break  # 首条数据行即最新版本
-
-    if changelog_ver is None:
+    entry = _extract_changelog_top_entry()
+    if entry is None:
         errors.append("ruleset-changelog.md「变更记录」表未找到首行合法 x.y.z 版本号")
         return errors
 
-    claude_ver, _ = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
-    if claude_ver is None:
-        errors.append("CLAUDE.md 缺少 ruleset_version 元数据字段")
-        return errors
-    if claude_ver != changelog_ver:
-        errors.append(
-            f"ruleset-changelog 顶行版本({changelog_ver}) != CLAUDE.md ruleset_version({claude_ver}) "
-            "(ruleset_version 递增须在 ruleset-changelog.md 变更记录表顶部追加一行)"
-        )
+    for _name, _path in (
+        ("CLAUDE.md", CLAUDE_PATH),
+        ("CONTRIBUTING.md", CONTRIBUTING_PATH),
+        ("AGENTS.md", AGENTS_PATH),
+    ):
+        if _name == "AGENTS.md" and not AGENTS_PATH.exists():
+            continue
+        ver, _ = _extract_metadata_versions(_path.read_text(encoding="utf-8"))
+        if ver is None:
+            errors.append(f"{_name} 缺少 ruleset_version 元数据字段")
+        elif ver != entry.version:
+            errors.append(
+                f"{_name} ruleset_version({ver}) != ruleset-changelog 顶行版本({entry.version}) "
+                "(日志记录为版本作者，入口 ruleset_version 须派生自顶行记录)"
+            )
     return errors
 
 

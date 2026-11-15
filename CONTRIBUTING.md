@@ -5,9 +5,9 @@
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载；仅对不自动加载 `CLAUDE.md` 的工具提供 [AGENTS.md](./AGENTS.md)（最小安全集 + 指针）跨工具入口。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
 >
 > **对应版本**：以 [pyproject.toml](./pyproject.toml) `[project].version` 为唯一正本（版本字面量收敛，见 ADR-0017）。
-> **元数据**（P2-07 统一格式，与 CLAUDE.md 规则集版本一致）：
+> **元数据**（P2-07 统一格式，ruleset_version 派生自 ruleset-changelog 顶行）：
 > - owner: 架构维护者
-> - ruleset_version: 1.10.0（与 CLAUDE.md 同步，规则集版本变更时递增）
+> - ruleset_version: 1.10.0（派生自 ruleset-changelog 顶行，规则集版本变更时递增）
 > - last_reviewed: 2026-11-13
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 人类贡献流程、最小命令入口、实现规范手册索引
