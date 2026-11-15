@@ -17,6 +17,10 @@ if [ ! -x "$SIDECAR_BIN" ]; then
     exit 1
 fi
 
+# 业务库名：必须与应用配置 embedded_pg_database 一致。
+# 来源优先级：前置参数 --database <db> > 环境变量 QTRADING_PG_DATABASE。
+# 脚本不内置默认值（D07-005）：静默回落 qtrading 会让自定义库部署的备份/恢复落到错误库。
+PG_DATABASE="${QTRADING_PG_DATABASE:-}"
 # 超级用户名：与 sidecar --username 默认值一致（postgres）。
 # 来源优先级：前置参数 --username <user> > 环境变量 QTRADING_PG_USERNAME > postgres。
 # 非 postgres 时向 dump / restore / maintenance-shell 显式透传 --username
@@ -24,6 +28,18 @@ fi
 PG_USERNAME="${QTRADING_PG_USERNAME:-postgres}"
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --database)
+            if [ -z "$2" ]; then
+                echo "ERROR: --database requires a value" >&2
+                exit 1
+            fi
+            PG_DATABASE="$2"
+            shift 2
+            ;;
+        --database=*)
+            PG_DATABASE="${1#--database=}"
+            shift
+            ;;
         --username)
             if [ -z "$2" ]; then
                 echo "ERROR: --username requires a value" >&2
@@ -60,13 +76,52 @@ if [ "${#PG_USERNAME}" -gt 63 ]; then
     exit 1
 fi
 
+# 业务库名守卫（D07-005）：dump / restore / maintenance-shell 必须显式提供库名。
+# - 空值：拒绝并给出取值来源（应用配置 embedded_pg_database，默认 qtrading）；
+# - 非安全标识符：[A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63（与 sidecar validate_database_name 对齐）；
+# - 维护库（postgres/template0/template1）：不是业务数据，误用会得到空备份或恢复失败；
+# - 测试库（test_* / *_test）：避免用生产维护流程误碰测试数据（含 TEST_DB_NAME=test_astock）。
+require_database() {
+    if [ -z "$PG_DATABASE" ]; then
+        echo "ERROR: business database name is required." >&2
+        echo "Set --database <db> or QTRADING_PG_DATABASE to the app config embedded_pg_database value" >&2
+        echo "(default: qtrading). Example: --database qtrading" >&2
+        exit 1
+    fi
+    case "$PG_DATABASE" in
+        *[!A-Za-z0-9_]* | [!A-Za-z_]*)
+            echo "ERROR: invalid database (expected [A-Za-z_][A-Za-z0-9_]*, length <= 63): $PG_DATABASE" >&2
+            exit 1
+            ;;
+    esac
+    if [ "${#PG_DATABASE}" -gt 63 ]; then
+        echo "ERROR: invalid database (expected [A-Za-z_][A-Za-z0-9_]*, length <= 63): $PG_DATABASE" >&2
+        exit 1
+    fi
+    case "$PG_DATABASE" in
+        postgres | template0 | template1)
+            echo "ERROR: --database must be the business database, not maintenance database: $PG_DATABASE" >&2
+            echo "Use the app config embedded_pg_database value (default: qtrading)." >&2
+            exit 1
+            ;;
+    esac
+    case "$PG_DATABASE" in
+        test | test_* | *_test)
+            echo "ERROR: --database looks like a test database: $PG_DATABASE" >&2
+            echo "Offline maintenance targets the app business database (embedded_pg_database), not test data." >&2
+            exit 1
+            ;;
+    esac
+}
+
 # 默认 postgres 时不传 --username，保持既有调用契约不变；自定义用户名始终作为独立、
 # 加引号的 argv 追加，禁止经未加引号的字符串变量展开（word-splitting / glob）。
+# 业务库名始终经加引号的 --database 透传，不使用未加引号的字符串变量拼接。
 run_sidecar() {
     if [ "$PG_USERNAME" != "postgres" ]; then
-        exec "$SIDECAR_BIN" "$@" --username "$PG_USERNAME"
+        exec "$SIDECAR_BIN" "$@" --database "$PG_DATABASE" --username "$PG_USERNAME"
     fi
-    exec "$SIDECAR_BIN" "$@"
+    exec "$SIDECAR_BIN" "$@" --database "$PG_DATABASE"
 }
 
 # 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/16/data
@@ -98,22 +153,25 @@ case "$CMD" in
         ;;
     dump)
         if [ -z "$1" ]; then
-            echo "Usage: $0 dump <output-file>" >&2
+            echo "Usage: $0 --database <db> dump <output-file>" >&2
             exit 1
         fi
+        require_database
         run_sidecar dump --data-dir "$DEFAULT_DATA_DIR" --output "$1"
         ;;
     restore)
         if [ -z "$1" ]; then
-            echo "Usage: $0 restore <input-file>" >&2
+            echo "Usage: $0 --database <db> restore <input-file>" >&2
             exit 1
         fi
+        require_database
         run_sidecar restore --data-dir "$DEFAULT_DATA_DIR" --input "$1"
         ;;
     stop)
         exec "$SIDECAR_BIN" stop --data-dir "$DEFAULT_DATA_DIR" "$@"
         ;;
     maintenance-shell)
+        require_database
         run_sidecar maintenance-shell --data-dir "$DEFAULT_DATA_DIR" "$@"
         ;;
     version)
@@ -123,7 +181,7 @@ case "$CMD" in
         cat <<EOF
 qTrading Database Maintenance (offline)
 
-Usage: $0 [--username <user>] <command> [args]
+Usage: $0 [--database <db>] [--username <user>] <command> [args]
 
 Commands:
   status                Show embedded PostgreSQL status
@@ -136,8 +194,14 @@ Commands:
   help                  Show this help
 
 Options:
+  --database <db>           Business database name, must equal app config
+                            embedded_pg_database (or set env QTRADING_PG_DATABASE).
+                            Required for dump/restore/maintenance-shell; no default.
   --username <user>         Superuser name passed to dump/restore/maintenance-shell
                             (or set env QTRADING_PG_USERNAME; default: postgres)
+
+Rejected database names: postgres / template0 / template1 (maintenance DBs)
+and test / test_* / *_test (test databases).
 
 Default data dir: $DEFAULT_DATA_DIR
 Sidecar binary:   $SIDECAR_BIN

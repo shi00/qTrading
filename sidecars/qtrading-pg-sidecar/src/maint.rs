@@ -8,7 +8,7 @@
 //!
 //! 恢复后 schema 停留于备份时点；Alembic 补平由 app 下次启动的既有迁移流程负责（Phase 2+，§12.2 step 7）。
 
-use crate::cli::{self, DEFAULT_DATABASE};
+use crate::cli;
 use crate::commands::state_file_condition;
 use crate::exit_codes;
 use crate::lockfile::{AcquireError, MaintenanceLock};
@@ -1968,20 +1968,27 @@ struct MaintenanceShellJson {
     connection_string_redacted: String,
 }
 
-fn maintenance_shell_json(install_dir: &Path, port: u16, username: &str) -> MaintenanceShellJson {
+fn maintenance_shell_json(
+    install_dir: &Path,
+    port: u16,
+    username: &str,
+    database: &str,
+) -> MaintenanceShellJson {
     MaintenanceShellJson {
         psql_path: pgbin::tool_path(install_dir, "psql")
             .to_string_lossy()
             .into_owned(),
-        // 用户名须与实际临时实例一致，否则自定义用户名部署下 stdout 连接串显示错误角色
+        // 用户名/库名须与实际临时实例一致，否则自定义部署下 stdout 连接串显示错误角色/库
         connection_string_redacted: format!(
-            "postgresql://{username}:***@{LISTEN_LOCAL}:{port}/{DEFAULT_DATABASE}"
+            "postgresql://{username}:***@{LISTEN_LOCAL}:{port}/{database}"
         ),
     }
 }
 
 pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8> {
     logging::init(None);
+    // D07-005：库名会进入连接串/psql 提示，先校验再获取维护锁（不在错误输入上产生副作用）
+    validate_database_name(&args.database)?;
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
 
     let _lock = acquire_lock(&layout)?;
@@ -1999,10 +2006,11 @@ pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
     let username = args.username.as_str();
+    let database = args.database.as_str();
     let instance = TempInstance::start(layout.clone(), username, &password)
         .await
         .map_err(|e| e.code)?;
-    let info = maintenance_shell_json(&layout.install_dir, instance.port, username);
+    let info = maintenance_shell_json(&layout.install_dir, instance.port, username, database);
     if let Err(e) = protocol::print_json_line(&info) {
         // stdout 管道不可用：无法向调用方交付连接信息，停止临时实例后失败退出。
         eprintln!("[sidecar] maintenance-shell JSON 输出失败: {e}");
@@ -2014,11 +2022,11 @@ pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8
     let psql_path = pgbin::tool_path(&layout.install_dir, "psql");
     eprintln!("[sidecar] 维护实例已启动：");
     eprintln!(
-        "  连接（脱敏）: postgresql://{username}:***@{LISTEN_LOCAL}:{}/{DEFAULT_DATABASE}",
+        "  连接（脱敏）: postgresql://{username}:***@{LISTEN_LOCAL}:{}/{database}",
         instance.port
     );
     eprintln!(
-        "  psql: {} -h {LISTEN_LOCAL} -p {} -U {username} -d {DEFAULT_DATABASE}",
+        "  psql: {} -h {LISTEN_LOCAL} -p {} -U {username} -d {database}",
         psql_path.display(),
         instance.port
     );
@@ -2262,6 +2270,7 @@ impl Drop for HbaRestoreGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::DEFAULT_DATABASE;
     use crate::cli::DEFAULT_USERNAME;
 
     fn unique_tmp(name: &str) -> PathBuf {
@@ -3780,7 +3789,12 @@ mod tests {
     /// maintenance-shell stdout 契约：psql 路径 + 脱敏连接串（密码段固定 `***`）。
     #[test]
     fn maintenance_shell_json_redacts_password() {
-        let info = maintenance_shell_json(Path::new("/x/install"), 55432, DEFAULT_USERNAME);
+        let info = maintenance_shell_json(
+            Path::new("/x/install"),
+            55432,
+            DEFAULT_USERNAME,
+            DEFAULT_DATABASE,
+        );
         let v = serde_json::to_value(&info).unwrap();
         assert!(v["psql_path"].as_str().unwrap().contains("psql"));
         assert_eq!(
@@ -3791,12 +3805,12 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(":***@"));
-        // 自定义用户名部署：stdout 连接串须与实际实例角色一致（M21 × M19 合并适配）
-        let info = maintenance_shell_json(Path::new("/x/install"), 55432, "qtrading");
+        // 自定义用户名/库名部署：stdout 连接串须与实际实例角色/库一致
+        let info = maintenance_shell_json(Path::new("/x/install"), 55432, "qtrading", "stock_db");
         let v = serde_json::to_value(&info).unwrap();
         assert_eq!(
             v["connection_string_redacted"],
-            "postgresql://qtrading:***@127.0.0.1:55432/qtrading"
+            "postgresql://qtrading:***@127.0.0.1:55432/stock_db"
         );
     }
 
@@ -4123,6 +4137,7 @@ mod tests {
         let data_dir = dir.join("postgres/16/data");
         let args = cli::MaintenanceShellArgs {
             data_dir,
+            database: DEFAULT_DATABASE.to_string(),
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(
@@ -4143,6 +4158,7 @@ mod tests {
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
         let args = cli::MaintenanceShellArgs {
             data_dir,
+            database: DEFAULT_DATABASE.to_string(),
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(
@@ -4150,6 +4166,33 @@ mod tests {
             Err(exit_codes::LOCK_CONFLICT)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `maintenance-shell` 非法/空库名 → 参数错误，且不获取维护锁、不启动实例（D07-005）。
+    #[tokio::test]
+    async fn maintenance_shell_rejects_invalid_database_before_side_effects() {
+        for bad in ["", "bad name", "a;drop"] {
+            let dir = unique_tmp("shell-baddb");
+            let data_dir = dir.join("postgres/16/data");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
+            let layout = Layout::from_data_dir(&data_dir, None, None, None);
+            let args = cli::MaintenanceShellArgs {
+                data_dir,
+                database: bad.to_string(),
+                username: DEFAULT_USERNAME.to_string(),
+            };
+            assert_eq!(
+                maintenance_shell(args).await,
+                Err(exit_codes::ARGUMENT_ERROR),
+                "{bad:?} 应被拒绝"
+            );
+            assert!(
+                !MaintenanceLock::is_held(&layout.lock_file),
+                "非法库名不得获取维护锁"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     // ---- P3-Rust-Coverage-D38: 补充 doctor 残留物报告与边界分支 ----

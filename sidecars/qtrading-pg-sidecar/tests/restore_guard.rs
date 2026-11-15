@@ -373,6 +373,8 @@ fn test_restore_explicit_target_layout_is_self_contained() {
         .arg("restore")
         .arg("--data-dir")
         .arg(&data_dir)
+        .arg("--database")
+        .arg(TEST_DATABASE)
         .arg("--input")
         .arg(&dump_path)
         .arg("--target-data-dir")
