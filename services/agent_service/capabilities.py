@@ -275,19 +275,19 @@ def build_summarizing_compaction(
     max_tokens: int,
     keep_messages: int,
 ) -> SummarizingCompaction[Any]:
-    """装配摘要压缩，摘要出口必须与主轮同一绑定模型（summary 一账）。
+    """装配摘要压缩，摘要出口与主轮同一绑定模型（summary 一账）。
 
-    - ``model`` 必须显式传入已绑定的 GatewayModel（``None`` → ``ValueError``），
-      不允许落到供应商默认出口；摘要请求与主轮共用同一 executor/binding，
-      因此记入同一 Recorder 账本；
+    - ``model=None`` 按正本 §10.3 形态继承本次请求的模型；运行装配必须保证该
+      模型就是已绑定 GatewayModel（摘要请求因此与主轮共用同一 executor/
+      Recorder 账本），不得在 Agent 构造处放非绑定模型；
     - ``retries=0``：空摘要/模仿工具调用等失败不回退重试，直接显式失败；
     - ``tool_return_max_chars=None``：工具返回原文进入摘要，不静默截断；
     - ``preserve_first_user_message``/``incremental`` 显式冻结（早纠正保留、
       摘要增量化而非摘要的摘要）。
     """
 
-    if model is None:
-        raise ValueError("summarizing compaction requires the bound GatewayModel instance")
+    if model is not None and not isinstance(model, str | Model):
+        raise ValueError("model must be a bound Model instance, a model id string, or None (inherit)")
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
         raise ValueError("max_tokens must be a positive int")
     if isinstance(keep_messages, bool) or not isinstance(keep_messages, int) or keep_messages < 0:

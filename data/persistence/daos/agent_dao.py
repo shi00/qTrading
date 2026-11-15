@@ -425,6 +425,8 @@ def _decode_plan_proposal_row(row: Any, *, execution_id: str, identity: str) -> 
     document = row.body_text
     if not isinstance(document, str) or not document:
         raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal body missing", identity)
+    if row.read_state != "ready":
+        raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal row is not ready", identity)
     try:
         proposal = decode_plan_proposal_document(document, execution_id=execution_id)
         canonical = normalize_plan_proposal(proposal)
@@ -440,6 +442,26 @@ def _decode_plan_proposal_row(row: Any, *, execution_id: str, identity: str) -> 
     if row.digest != digest:
         raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal digest mismatch", identity)
     return proposal
+
+
+def _plan_head_row(rows: Sequence[Any], identity: str) -> tuple[Any | None, int]:
+    """计划版本行集 → (head 行, head revision)；非数字/非正版本 fail-closed。"""
+
+    head: Any | None = None
+    head_revision = 0
+    for row in rows:
+        raw_version = row.asset_version
+        if not isinstance(raw_version, str):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan revision row invalid", identity)
+        try:
+            revision = int(raw_version)
+        except ValueError as exc:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan revision row invalid", identity) from exc
+        if revision < 1:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan revision row invalid", identity)
+        if revision > head_revision:
+            head, head_revision = row, revision
+    return head, head_revision
 
 
 def _validate_plan_items_for_save(items: object, *, execution_id: str, identity: str) -> tuple[PlanItemSnapshot, ...]:
@@ -7997,6 +8019,7 @@ class AgentDao(BaseDao):
                         AgentAssetVersion.body_text,
                         AgentAssetVersion.digest,
                         AgentAssetVersion.asset_version,
+                        AgentAssetVersion.read_state,
                     ).where(
                         AgentAssetVersion.user_scope == user_scope,
                         AgentAssetVersion.asset_id == plan_asset_id(execution_id),
@@ -8019,25 +8042,24 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.connect() as conn:
-            row = (
+            rows = (
                 await conn.execute(
                     sa.select(
                         AgentAssetVersion.body_text,
                         AgentAssetVersion.digest,
                         AgentAssetVersion.asset_version,
-                    )
-                    .where(
+                        AgentAssetVersion.read_state,
+                    ).where(
                         AgentAssetVersion.user_scope == user_scope,
                         AgentAssetVersion.asset_id == plan_asset_id(execution_id),
                         AgentAssetVersion.asset_kind == "plan",
                     )
-                    .order_by(sa.cast(AgentAssetVersion.asset_version, sa.BigInteger).desc())
-                    .limit(1)
                 )
-            ).first()
-        if row is None:
+            ).all()
+        head, _ = _plan_head_row(rows, identity)
+        if head is None:
             return None
-        return _decode_plan_proposal_row(row, execution_id=execution_id, identity=identity)
+        return _decode_plan_proposal_row(head, execution_id=execution_id, identity=identity)
 
     async def save_plan_proposal(
         self,
@@ -8076,31 +8098,21 @@ class AgentDao(BaseDao):
             ).first()
             if execution_row is None:
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution not found", identity)
-            head_row = (
+            head_rows = (
                 await conn.execute(
                     sa.select(
                         AgentAssetVersion.body_text,
                         AgentAssetVersion.digest,
                         AgentAssetVersion.asset_version,
-                    )
-                    .where(
+                        AgentAssetVersion.read_state,
+                    ).where(
                         AgentAssetVersion.user_scope == user_scope,
                         AgentAssetVersion.asset_id == asset_id,
                         AgentAssetVersion.asset_kind == "plan",
                     )
-                    .order_by(sa.cast(AgentAssetVersion.asset_version, sa.BigInteger).desc())
-                    .limit(1)
                 )
-            ).first()
-            if head_row is None:
-                head_revision = 0
-            else:
-                try:
-                    head_revision = int(head_row.asset_version)
-                except (TypeError, ValueError) as exc:
-                    raise AgentServiceError(
-                        AgentErrorCode.OPERATION_UNKNOWN, "plan revision row invalid", identity
-                    ) from exc
+            ).all()
+            head_row, head_revision = _plan_head_row(head_rows, identity)
             if head_revision != expected_revision:
                 raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "plan revision conflict", identity)
             if head_row is not None:

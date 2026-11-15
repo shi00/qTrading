@@ -327,3 +327,54 @@ class TestPlanProposalPersistence:
         assert saved.items == ()
         assert await dao.read_current_plan_proposal(user_scope="u1", execution_id="exec-1") == saved
         await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_non_ready_row_is_operation_unknown(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_execution(dao)
+        await dao.save_plan_proposal(user_scope="u1", execution_id="exec-1", expected_revision=0, items=(_item(),))
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                sa.update(AgentAssetVersion)
+                .where(
+                    AgentAssetVersion.user_scope == "u1",
+                    AgentAssetVersion.asset_id == "plan:exec-1",
+                    AgentAssetVersion.asset_version == "1",
+                )
+                .values(read_state="unavailable")
+            )
+
+        with pytest.raises(AgentServiceError) as error:
+            await dao.read_plan_proposal(user_scope="u1", execution_id="exec-1", plan_revision=1)
+        assert error.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_non_numeric_version_fails_closed_without_db_error(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_execution(dao)
+        await dao.save_plan_proposal(user_scope="u1", execution_id="exec-1", expected_revision=0, items=(_item(),))
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                sa.insert(AgentAssetVersion).values(
+                    user_scope="u1",
+                    asset_id="plan:exec-1",
+                    asset_version="bad",
+                    asset_kind="plan",
+                    display_name="plan bad",
+                    digest="c" * 64,
+                    metadata_payload={"plan_store_version": 1},
+                    body_text="{}",
+                    read_state="ready",
+                    verification_state="unverified",
+                )
+            )
+
+        with pytest.raises(AgentServiceError) as read_error:
+            await dao.read_current_plan_proposal(user_scope="u1", execution_id="exec-1")
+        assert read_error.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        with pytest.raises(AgentServiceError) as save_error:
+            await dao.save_plan_proposal(user_scope="u1", execution_id="exec-1", expected_revision=1, items=(_item(),))
+        assert save_error.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert await _count_versions(dao) == 2
+        await dao.engine.dispose()  # type: ignore[union-attr]

@@ -99,10 +99,8 @@ class TestPlanningAssembly:
 
 class TestSummarizingCompactionAssembly:
     def test_bound_model_and_frozen_parameters(self) -> None:
-        model = cast(Model, object())
-        compaction = build_summarizing_compaction(model=model, max_tokens=8000, keep_messages=6)
-
-        assert compaction.model is model
+        compaction = build_summarizing_compaction(model="gateway:bound-model", max_tokens=8000, keep_messages=6)
+        assert compaction.model == "gateway:bound-model"
         assert compaction.max_tokens == 8000
         assert compaction.keep_messages == 6
         assert compaction.retries == 0
@@ -110,20 +108,26 @@ class TestSummarizingCompactionAssembly:
         assert compaction.preserve_first_user_message is True
         assert compaction.incremental is True
 
-    def test_missing_model_rejected(self) -> None:
+    def test_none_inherits_request_model(self) -> None:
+        # 正本 §10.3 形态：model=None 继承本次请求模型（必须已是绑定 GatewayModel）
+        compaction = build_summarizing_compaction(model=None, max_tokens=8000, keep_messages=6)
+        assert compaction.model is None
+        assert compaction.retries == 0
+
+    def test_non_model_value_rejected(self) -> None:
         with pytest.raises(ValueError) as error:
-            build_summarizing_compaction(model=None, max_tokens=8000, keep_messages=6)
-        assert "bound GatewayModel" in str(error.value)
+            build_summarizing_compaction(model=cast(Any, object()), max_tokens=8000, keep_messages=6)
+        assert "bound Model" in str(error.value)
 
     @pytest.mark.parametrize("max_tokens", [0, -1, True])
     def test_invalid_max_tokens_rejected(self, max_tokens: Any) -> None:
         with pytest.raises(ValueError) as error:
-            build_summarizing_compaction(model=cast(Model, object()), max_tokens=max_tokens, keep_messages=6)
+            build_summarizing_compaction(model="gateway:bound-model", max_tokens=max_tokens, keep_messages=6)
         assert "max_tokens" in str(error.value)
 
     def test_invalid_keep_messages_rejected(self) -> None:
         with pytest.raises(ValueError) as error:
-            build_summarizing_compaction(model=cast(Model, object()), max_tokens=8000, keep_messages=-1)
+            build_summarizing_compaction(model="gateway:bound-model", max_tokens=8000, keep_messages=-1)
         assert "keep_messages" in str(error.value)
 
 
