@@ -207,6 +207,16 @@ def test_gate_runs_before_release_artifact_upload_in_job1(workflow: dict) -> Non
     assert gate_idx < sums_idx < note_idx < rel_idx
 
 
+def test_gate_passes_training_model_for_head_provenance(workflow: dict) -> None:
+    """D15-002：Gate 必须同时传 best 权重目录，供逐张量核对分类头来源。"""
+    steps = workflow["jobs"][JOB1_NAME]["steps"]
+    step = next(s for s in steps if s.get("name") == "Consistency gate (verify_finbert_gguf.py --head)")
+    run = step["run"]
+    assert "--head stage_b_out/head.npz" in run
+    assert "--training-model stage_b_out/best" in run
+    assert "--reference-model stage_b_out/best" in run
+
+
 def test_debug_artifact_upload_kept_always(workflow: dict) -> None:
     job1 = workflow["jobs"][JOB1_NAME]
     debug_steps = [s for s in job1["steps"] if s.get("name") == "Upload artifacts (incl. gate-failure debugging)"]

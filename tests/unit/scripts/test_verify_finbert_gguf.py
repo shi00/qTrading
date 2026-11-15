@@ -167,6 +167,38 @@ def _write_head(
     return path
 
 
+def _matching_head_and_state(tmp_path: Path) -> tuple[Path, dict[str, np.ndarray]]:
+    """构造与训练权重同源的 bert 形态 head.npz + state_dict（合成，零真实权重）。"""
+    rng = np.random.default_rng(17)
+    cw = rng.standard_normal((3, vfg.EMBEDDING_DIM)).astype(np.float32)
+    cb = rng.standard_normal(3).astype(np.float32)
+    pw = rng.standard_normal((vfg.EMBEDDING_DIM, vfg.EMBEDDING_DIM)).astype(np.float32)
+    pb = rng.standard_normal(vfg.EMBEDDING_DIM).astype(np.float32)
+    head_path = tmp_path / "head.npz"
+    np.savez(head_path, mode="bert", labels=np.array(["利空", "中性", "利好"]), cw=cw, cb=cb, pw=pw, pb=pb)
+    state = {
+        "classifier.weight": cw,
+        "classifier.bias": cb,
+        "bert.pooler.dense.weight": pw,
+        "bert.pooler.dense.bias": pb,
+    }
+    return head_path, state
+
+
+def _patch_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    state: dict[str, np.ndarray],
+    *,
+    declared_cls_domain: bool = False,
+) -> None:
+    """拦掉训练权重加载：注入合成 state_dict 与 config（零网络零真实权重）。"""
+    config: dict[str, Any] = {"architectures": ["BertForSequenceClassification"]}
+    if declared_cls_domain:
+        config[vfg.HEAD_DOMAIN_CONFIG_KEY] = vfg.HEAD_DOMAIN_CLS
+    monkeypatch.setattr(vfg, "_read_training_config", lambda path: dict(config))
+    monkeypatch.setattr(vfg, "_load_training_state", lambda path: dict(state))
+
+
 def test_load_head_npz_nonlinear_returns_pre(tmp_path: Path) -> None:
     """bert 头载入返回 (pw, pb) 预处理对。"""
     path = _write_head(tmp_path / "head.npz", mode="bert")
@@ -215,6 +247,147 @@ def test_load_head_npz_rejects_pickle_payload(tmp_path: Path) -> None:
     np.savez(path, **payload)
     with pytest.raises(ValueError, match="allow_pickle"):
         vfg.load_head_npz(path)
+
+
+# --------------------------------------------------------------------------- #
+# 分类头来源校验（D15-002）
+# --------------------------------------------------------------------------- #
+def test_compare_head_to_training_state_matching_bert_passes() -> None:
+    """bert 头与训练 classifier/pooler 同源时通过（逐张量最大差 0）。"""
+    rng = np.random.default_rng(21)
+    cw = rng.standard_normal((3, vfg.EMBEDDING_DIM)).astype(np.float32)
+    cb = rng.standard_normal(3).astype(np.float32)
+    pw = rng.standard_normal((vfg.EMBEDDING_DIM, vfg.EMBEDDING_DIM)).astype(np.float32)
+    pb = rng.standard_normal(vfg.EMBEDDING_DIM).astype(np.float32)
+    result = vfg.compare_head_to_training_state(
+        mode="bert",
+        weight=cw,
+        bias=cb,
+        pre=(pw, pb),
+        state_dict={
+            "classifier.weight": cw,
+            "classifier.bias": cb,
+            "bert.pooler.dense.weight": pw,
+            "bert.pooler.dense.bias": pb,
+        },
+        declared_cls_domain=False,
+    )
+    assert result["ok"] is True
+    assert set(result["checks"]) == {
+        "classifier.weight",
+        "classifier.bias",
+        "bert.pooler.dense.weight",
+        "bert.pooler.dense.bias",
+    }
+    assert all(item["max_abs_diff"] == 0.0 for item in result["checks"].values())
+
+
+def test_compare_head_to_training_state_wrong_epoch_head_fails() -> None:
+    """正确形状但错轮次的头：概率可能接近，来源校验必须 FAIL。"""
+    rng = np.random.default_rng(22)
+    cw = rng.standard_normal((3, vfg.EMBEDDING_DIM)).astype(np.float32)
+    wrong_cw = cw + 0.01
+    result = vfg.compare_head_to_training_state(
+        mode="bert",
+        weight=wrong_cw,
+        bias=np.zeros(3, dtype=np.float32),
+        pre=(
+            np.zeros((vfg.EMBEDDING_DIM, vfg.EMBEDDING_DIM), dtype=np.float32),
+            np.zeros(vfg.EMBEDDING_DIM, dtype=np.float32),
+        ),
+        state_dict={
+            "classifier.weight": cw,
+            "classifier.bias": np.zeros(3, dtype=np.float32),
+            "bert.pooler.dense.weight": np.zeros((vfg.EMBEDDING_DIM, vfg.EMBEDDING_DIM), dtype=np.float32),
+            "bert.pooler.dense.bias": np.zeros(vfg.EMBEDDING_DIM, dtype=np.float32),
+        },
+        declared_cls_domain=False,
+    )
+    assert result["ok"] is False
+    assert result["checks"]["classifier.weight"]["ok"] is False
+    assert result["checks"]["classifier.weight"]["max_abs_diff"] == pytest.approx(0.01, abs=1e-6)
+
+
+def test_compare_head_to_training_state_linear_missing_pooler_fails() -> None:
+    """标准池化模型 + linear 头（只有 classifier，无 pooler）必须 FAIL；声明 cls 域才放行。"""
+    rng = np.random.default_rng(23)
+    cw = rng.standard_normal((3, vfg.EMBEDDING_DIM)).astype(np.float32)
+    cb = rng.standard_normal(3).astype(np.float32)
+    state = {
+        "classifier.weight": cw,
+        "classifier.bias": cb,
+        "bert.pooler.dense.weight": rng.standard_normal((vfg.EMBEDDING_DIM, vfg.EMBEDDING_DIM)).astype(np.float32),
+        "bert.pooler.dense.bias": rng.standard_normal(vfg.EMBEDDING_DIM).astype(np.float32),
+    }
+    pooled = vfg.compare_head_to_training_state(
+        mode="linear", weight=cw, bias=cb, pre=None, state_dict=state, declared_cls_domain=False
+    )
+    assert pooled["ok"] is False
+    assert any("linear_missing_pooler" in reason for reason in pooled["reasons"])
+
+    declared = vfg.compare_head_to_training_state(
+        mode="linear", weight=cw, bias=cb, pre=None, state_dict=state, declared_cls_domain=True
+    )
+    assert declared["ok"] is True
+
+
+def test_compare_head_to_training_state_missing_or_mismatched_tensors_fail() -> None:
+    """训练权重缺 pooler / 形状不符时 fail-closed，且错误细节不泄露路径。"""
+    cw = np.zeros((3, vfg.EMBEDDING_DIM), dtype=np.float32)
+    cb = np.zeros(3, dtype=np.float32)
+    missing = vfg.compare_head_to_training_state(
+        mode="bert",
+        weight=cw,
+        bias=cb,
+        pre=(np.zeros((vfg.EMBEDDING_DIM, vfg.EMBEDDING_DIM), dtype=np.float32), np.zeros(vfg.EMBEDDING_DIM)),
+        state_dict={"classifier.weight": cw, "classifier.bias": cb},
+        declared_cls_domain=False,
+    )
+    assert missing["ok"] is False
+    assert missing["missing_state_keys"] == ["bert.pooler.dense.weight", "bert.pooler.dense.bias"]
+
+    bad_shape = vfg.compare_head_to_training_state(
+        mode="linear",
+        weight=cw,
+        bias=cb,
+        pre=None,
+        state_dict={"classifier.weight": np.zeros((3, 8), dtype=np.float32), "classifier.bias": cb},
+        declared_cls_domain=True,
+    )
+    assert bad_shape["ok"] is False
+    detail = str(bad_shape["checks"]["classifier.weight"]["detail"])
+    assert "形状不符" in detail
+    assert "/" not in detail
+
+
+def test_digest_files_and_record(tmp_path: Path) -> None:
+    """摘要按文件内容计算；缺失文件跳过、空目录返回 None（不伪造）。"""
+    (tmp_path / "vocab.txt").write_text("v1", encoding="utf-8")
+    (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+    digest = vfg.digest_files(tmp_path, ["vocab.txt", "tokenizer.json", "missing.json"])
+    assert digest["files"] == {
+        "vocab.txt": vfg.sha256_file(tmp_path / "vocab.txt"),
+        "tokenizer.json": vfg.sha256_file(tmp_path / "tokenizer.json"),
+    }
+    assert digest["sha256"] is not None
+    assert vfg.digest_files(tmp_path, ["missing.json"]) == {"sha256": None, "files": {}}
+
+
+def test_build_digest_record_skips_absent_artifacts(tmp_path: Path) -> None:
+    """未提供 / 不存在的产物槽位为 None；存在的 head.npz 记录真实 SHA256。"""
+    head, _state = _matching_head_and_state(tmp_path)
+    record = vfg.build_digest_record(
+        f16_gguf=None,
+        q8_gguf=tmp_path / "absent.gguf",
+        head=head,
+        reference_model=tmp_path / "absent-model",
+        training_model=None,
+    )
+    assert record["encoder_gguf"] is None
+    assert record["q8_gguf"] is None
+    assert record["training_model"] is None
+    assert record["tokenizer"] == {"sha256": None, "files": {}}
+    assert record["head_npz"] == {"path": str(head), "sha256": vfg.sha256_file(head)}
 
 
 def test_head_scale_sensitivity_rows() -> None:
@@ -418,6 +591,18 @@ def test_is_gate_passed_ignores_skipped_only() -> None:
     assert vfg.is_gate_passed({"a": {"ok": True}, "b": {"ok": False}}) is False
 
 
+def _criteria_with_provenance(ok: bool | None = True, **overrides: Any) -> dict[str, dict[str, Any]]:
+    """在判据集合中附加分类头来源校验结果（D15-002 发布合格前提）。"""
+    criteria = vfg.evaluate_criteria(**_criteria_kwargs(**overrides))
+    criteria[vfg.HEAD_PROVENANCE_CRITERION] = {
+        "ok": ok,
+        "value": ok,
+        "threshold": True,
+        "detail": "test",
+    }
+    return criteria
+
+
 def test_evaluate_release_q8_only_is_not_applicable_even_if_diagnostic_passes() -> None:
     """仅 q8（诊断模式）：诊断 verdict 可 PASS，但发布结论必须 NOT_APPLICABLE / 不合格。"""
     criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_f16=None, prob_diff_f16=None, label_rate_f16=None))
@@ -429,9 +614,30 @@ def test_evaluate_release_q8_only_is_not_applicable_even_if_diagnostic_passes() 
     assert release["subject"] is None
 
 
+def test_evaluate_release_m0_without_provenance_is_not_applicable() -> None:
+    """M0 形态（f16 有了但缺 --head / --training-model）：诊断可 PASS，发布必须 NOT_APPLICABLE。"""
+    criteria = _criteria_with_provenance(None)
+    assert vfg.is_gate_passed(criteria) is True
+    release = vfg.evaluate_release(criteria, f16_gguf_provided=True)
+    assert release["applicable"] is False
+    assert release["qualified"] is False
+    assert release["verdict"] == "NOT_APPLICABLE"
+    assert "来源校验" in release["note"]
+
+
+def test_evaluate_release_failed_provenance_is_fail_not_not_applicable() -> None:
+    """明确不配套（错轮次头 / linear 漏 pooler）：发布结论必须 FAIL 并定位 head_provenance。"""
+    criteria = _criteria_with_provenance(False)
+    release = vfg.evaluate_release(criteria, f16_gguf_provided=True)
+    assert release["applicable"] is False
+    assert release["qualified"] is False
+    assert release["verdict"] == "FAIL"
+    assert vfg.HEAD_PROVENANCE_CRITERION in release["failed_criteria"]
+
+
 def test_evaluate_release_qualified_by_f16_ignoring_q8() -> None:
-    """提供 f16 时发布合格由 f16 判据决定；q8 失败只影响诊断 verdict，不影响发布合格。"""
-    criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_q8=0.1))
+    """f16 + 来源校验通过时发布合格由 f16 判据决定；q8 失败只影响诊断 verdict。"""
+    criteria = _criteria_with_provenance(True, cos_q8=0.1)
     assert vfg.is_gate_passed(criteria) is False
     release = vfg.evaluate_release(criteria, f16_gguf_provided=True)
     assert release["applicable"] is True
@@ -443,7 +649,7 @@ def test_evaluate_release_qualified_by_f16_ignoring_q8() -> None:
 
 def test_evaluate_release_f16_failure_is_not_qualified() -> None:
     """f16 主体判据任一失败即发布不合格，并在 failed_criteria 中定位。"""
-    criteria = vfg.evaluate_criteria(**_criteria_kwargs(prob_diff_f16=0.05))
+    criteria = _criteria_with_provenance(True, prob_diff_f16=0.05)
     release = vfg.evaluate_release(criteria, f16_gguf_provided=True)
     assert release["qualified"] is False
     assert release["verdict"] == "FAIL"
@@ -494,11 +700,26 @@ def _patch_heavy(
     return cls
 
 
-def test_run_gate_passes_with_direct_tokenizer_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    """直连分词一致时走直连路径，门禁 PASS。"""
+def test_run_gate_passes_with_direct_tokenizer_match(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """直连分词一致且分类头来源校验通过时，门禁 PASS 且发布合格。"""
     decode_ids: list[list[list[int]]] = []
     _patch_heavy(monkeypatch, direct_match=True, decode_ids=decode_ids)
-    args = vfg._parse_args(["--n-titles", "6", "--q8-gguf", "q8.gguf", "--f16-gguf", "f16.gguf"])
+    head_path, state = _matching_head_and_state(tmp_path)
+    _patch_provenance(monkeypatch, state)
+    args = vfg._parse_args(
+        [
+            "--n-titles",
+            "6",
+            "--q8-gguf",
+            "q8.gguf",
+            "--f16-gguf",
+            "f16.gguf",
+            "--head",
+            str(head_path),
+            "--training-model",
+            "model",
+        ]
+    )
     report = vfg.run_gate(args)
     assert report["tokenizer"]["input_mode"] == "auto"
     assert report["tokenizer"]["effective_path"] == "direct"
@@ -507,6 +728,8 @@ def test_run_gate_passes_with_direct_tokenizer_match(monkeypatch: pytest.MonkeyP
     assert report["embedding"]["dim"] == 768
     assert report["verdict"] == "PASS"
     assert report["criteria"]["tokenizer_ids_consistent"]["ok"] is True
+    assert report["criteria"][vfg.HEAD_PROVENANCE_CRITERION]["ok"] is True
+    assert report["head"]["provenance"]["checked"] is True
     assert report["release"]["applicable"] is True
     assert report["release"]["qualified"] is True
     assert report["release"]["verdict"] == "PASS"
@@ -637,8 +860,10 @@ def test_main_returns_nonzero_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert payload["release"]["verdict"] == "NOT_APPLICABLE"
 
 
-def test_run_gate_f16_only_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    """f16-only（f16 交付方案 A 的发布形态）：probe 用 f16，q8 判据 skipped，Gate PASS。"""
+def test_run_gate_f16_only_without_head_is_diagnostic_not_release_qualified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M0 形态（f16 + 确定性参考头，无 --head/--training-model）：诊断 PASS 但发布 NOT_APPLICABLE。"""
     _patch_heavy(monkeypatch, direct_match=True)
     args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf"])
     report = vfg.run_gate(args)
@@ -646,15 +871,80 @@ def test_run_gate_f16_only_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report["inputs"]["q8_gguf"] is None
     assert report["criteria"]["cls_cosine_f16"]["ok"] is True
     assert report["criteria"]["cls_cosine_q8"]["skipped"] is True
+    assert report["criteria"][vfg.HEAD_PROVENANCE_CRITERION]["skipped"] is True
     assert report["verdict"] == "PASS"
-    assert report["release"]["applicable"] is True
-    assert report["release"]["qualified"] is True
-    assert report["release"]["verdict"] == "PASS"
+    assert report["release"]["applicable"] is False
+    assert report["release"]["qualified"] is False
+    assert report["release"]["verdict"] == "NOT_APPLICABLE"
 
 
-def test_run_gate_q8_failure_does_not_disqualify_f16_release(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_gate_wrong_epoch_head_fails_and_blocks_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """错轮次 head（形状正确、权重不同源）：诊断与发布均 FAIL。"""
+    _patch_heavy(monkeypatch, direct_match=True)
+    head_path, state = _matching_head_and_state(tmp_path)
+    state["classifier.weight"] = state["classifier.weight"] + 0.05
+    _patch_provenance(monkeypatch, state)
+    args = vfg._parse_args(
+        [
+            "--n-titles",
+            "6",
+            "--f16-gguf",
+            "f16.gguf",
+            "--head",
+            str(head_path),
+            "--training-model",
+            "model",
+        ]
+    )
+    report = vfg.run_gate(args)
+    assert report["criteria"][vfg.HEAD_PROVENANCE_CRITERION]["ok"] is False
+    assert report["verdict"] == "FAIL"
+    assert report["release"]["verdict"] == "FAIL"
+    assert report["release"]["qualified"] is False
+    assert vfg.HEAD_PROVENANCE_CRITERION in report["release"]["failed_criteria"]
+
+
+def test_run_gate_records_artifact_digests(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """报告记录 head.npz / f16 GGUF / tokenizer / 训练权重目录摘要（发布溯源）。"""
+    _patch_heavy(monkeypatch, direct_match=True)
+    head_path, state = _matching_head_and_state(tmp_path)
+    _patch_provenance(monkeypatch, state)
+    gguf = tmp_path / "f16.gguf"
+    gguf.write_bytes(b"GGUF" + b"\x00" * 8)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text('{"architectures": ["BertForSequenceClassification"]}', encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"weights")
+    args = vfg._parse_args(
+        [
+            "--n-titles",
+            "6",
+            "--f16-gguf",
+            str(gguf),
+            "--head",
+            str(head_path),
+            "--training-model",
+            str(model_dir),
+            "--reference-model",
+            str(tmp_path),
+        ]
+    )
+    report = vfg.run_gate(args)
+    digests = report["digests"]
+    assert digests["encoder_gguf"] == {"path": str(gguf), "sha256": vfg.sha256_file(gguf)}
+    assert digests["head_npz"] == {"path": str(head_path), "sha256": vfg.sha256_file(head_path)}
+    assert (
+        digests["training_model"]["sha256"]
+        == vfg.digest_files(model_dir, ["config.json", "model.safetensors"])["sha256"]
+    )
+    assert report["inputs"]["training_model"] == str(model_dir)
+
+
+def test_run_gate_q8_failure_does_not_disqualify_f16_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """f16 + q8 双后端：q8 对照失败使诊断 verdict FAIL，但发布合格仍由 f16 决定。"""
     cls = _patch_heavy(monkeypatch, direct_match=True)
+    head_path, state = _matching_head_and_state(tmp_path)
+    _patch_provenance(monkeypatch, state)
     calls: list[int] = []
 
     def _decode(llm: Any, mod: Any, ids: list[list[int]], timing_sink: list[float] | None = None) -> np.ndarray:
@@ -663,7 +953,20 @@ def test_run_gate_q8_failure_does_not_disqualify_f16_release(monkeypatch: pytest
         return cls if len(calls) == 1 else -cls
 
     monkeypatch.setattr(vfg, "_gguf_cls_via_ids", _decode)
-    args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf", "--q8-gguf", "q8.gguf"])
+    args = vfg._parse_args(
+        [
+            "--n-titles",
+            "6",
+            "--f16-gguf",
+            "f16.gguf",
+            "--q8-gguf",
+            "q8.gguf",
+            "--head",
+            str(head_path),
+            "--training-model",
+            "model",
+        ]
+    )
     report = vfg.run_gate(args)
     assert report["criteria"]["cls_cosine_f16"]["ok"] is True
     assert report["criteria"]["cls_cosine_q8"]["ok"] is False
@@ -709,4 +1012,6 @@ def test_parse_args_defaults_f16_delivery() -> None:
     """CLI 默认值（f16 交付方案 A）：q8 为可选对照件默认 None，report 默认 f16 命名。"""
     args = vfg._parse_args([])
     assert args.q8_gguf is None
+    assert args.head is None
+    assert args.training_model is None
     assert args.report == "ai_models/finbert2-news-f16.verify.json"
