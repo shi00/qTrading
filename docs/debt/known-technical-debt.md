@@ -68,6 +68,7 @@
 | P3-E2E-MockAssets-Provenance-Blocked | E2E 离线资产（`tests/e2e/mock_assets`，138 文件：116 woff2 / 8 js / 8 wasm / 6 symbols）缺来源 URL、engineRevision、Flet-Web 版本、包与资源摘要、许可证与 NOTICE、下载与变换方式，来源链 blocked | P3 | ① 新增/替换 mock_assets 资产时；② 或 Flet/CanvasKit 升级导致 engineRevision 变化时；③ 或合规审计启动时 |
 | P2-AgentDelivery-Residual-Facts | Agent 交付残留在事实层不可定位/不可区分：终态 manifest 不含暂存路径、回执无残留字段；`publish_claimed` 后可确证失败不持久化 `error_code`；`unknown` 落库失败未转译；XLSX 坏 XML 与非法控制字符未映射为回执；`_read_complete` 无页数上限；无文件 ID 卷整体拒绝交付 | P2 | ① F-02/F-05 交付 UI 接线时须补「残留/未确证」可视字段；② 或出现用户报告「文件可能已保存」但无法核对原因时；③ 或交付接入非 NTFS/ReFS 目标卷时 |
 | P2-AgentMCP-Residual-Risks | 共享 MCP 残余：错误分类只覆盖 Timeout/Connection（其余异常标 FAILED 可诱导重试）；连接不复核载入配置的审核身份与工具范围；connection_test 可能关闭既有共享会话；目录/接收/解码/schema 四族计量无服务路径调用点；retention 无释放；`_in_flight` 按 operation_id 去重不足以隔离并发；`mark_session_lost` 不关会话不清在途；`disconnect` 异常路径残留 config/guard；`call` 在 claim 后才取会话 | P2 | ① 真实 FastMCP transport/预算数值冻结（E-02-5 spike）落地前须逐条收敛；② 或 F-04 接线出现重复调用/误重试/连接误关时 |
+| P3-AgentSource-Residual-Risks | E-01 残余：父进程范围复核缺「伪造越界/重叠 selected_range 被拒」负向用例；worker 自身 deadline 与父进程 communicate 超时同值（竞态下父进程常先 kill）；超时 limitation 硬编码「30 秒」与实际可注入超时不符；header 恰 64KiB 的 off-by-one；`_json_safe` 将 NaN→null/Decimal→字符串后求摘要（理论上与 None 同摘要） | P3 | ① 附件 worker 接入 F 系列真实链路前；② 或出现部分结果丢失/超时文案与配置不一致的报告时；③ 或扩到新解析格式需复用 `_json_safe` 摘要时 |
 | P3-AgentDelivery-Resume-NotImplemented | Agent 交付中断后的续接与残留清理未实现：中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 `unknown`、unknown/取消后残留清理 | P3 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
 
 ## 技术债清单
@@ -693,6 +694,22 @@ review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积�
 **期望的最终解法**
 
 出 ADR 并完成试点（权限降级 → 切源 → 来源标注两侧可区分）。前置：P2-REV06-External-SchemaValidation（review06 F9）关闭 + 候选接口联网可用性验证 + D3 结论。upgrade 触发条件：① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足时；③ 或数据源接入架构调整时。
+
+### Agent 运行时来源读取与附件（E-01）
+
+#### P3-AgentSource-Residual-Risks：来源读取/附件 worker 残余
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSource-Residual-Risks** | 父进程范围复核缺「伪造越界/重叠 `selected_range` 被拒」负向用例；worker 自身 deadline 与父进程 `communicate` 超时同值；超时 limitation 硬编码「30 秒」；header 恰 64KiB 的 off-by-one；`_json_safe` 摘要碰撞 | ① 附件 worker 接入 F 系列真实链路前；② 或出现部分结果丢失/超时文案与配置不一致的报告时；③ 或扩到新解析格式需复用 `_json_safe` 摘要时 |
+
+**产生背景与现状**
+
+E-01 里程碑第二轮独立检视 PASS（B1-B6 已闭环：CSV 多段行限额累计、跨表行段不误判重叠、XLSX 超时原子前缀块 + 父进程 `decode_selected_range` 复核、取消只终止本请求子进程、回测 `executed_at`/`available_at_unknown`、worker 校验 `source_digest`）。以上为不阻塞交付的覆盖面残余。
+
+**期望的最终解法**
+
+接 F 系列时补负向用例、统一 worker/父进程超时余量、文案改为按实际配置渲染、修正 64KiB 边界、`_json_safe` 对非有限数用类型标记而非 `null`。
 
 ### Agent 运行时共享 MCP（E-02）
 
