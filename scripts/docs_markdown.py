@@ -11,7 +11,9 @@ HTML href、代码块/行号映射的不可变视图；缓存限本次调用。*
 
 解析配置（检视 §5.1）：CommonMark + table/strikethrough；允许读取原文 HTML token
 （raw_html_tokens 供原验证者核验 fragment）；不启用 linkify / typographer / 宏 /
-远程 include，不新增插件栈。未知或解析器无法语义化的结构不静默采样：要么原样保留
+远程 include，不新增插件栈。静态分析视图放行默认 URL 校验会降级为纯文本的目标
+（file:/javascript:/data: 等，见 ``_StaticAnalysisParser``）以保留证据，不渲染、
+不执行链接，协议支持性由消费方统一分类。未知或解析器无法语义化的结构不静默采样：要么原样保留
 在 raw_html_tokens（「未核」通道），要么异常显式传播（显式失败）。
 
 公共 API（预留供 docs_generated.py / check_docs_consistency.py 复用）：
@@ -53,9 +55,26 @@ __all__ = [
     "split_source_lines",
 ]
 
+
+class _StaticAnalysisParser(MarkdownIt):
+    """静态分析专用解析器：保留默认 URL 校验会过滤掉的链接目标。
+
+    markdown-it 的默认 ``validateLink``（``common/normalize_url.py`` 的
+    ``BAD_PROTO_RE``：``vbscript|javascript|file|data``）会把这类目标降级为纯文本，
+    链接与引用定义都不产生 link token，死链检查因而看不到它们。本视图只做静态
+    分析：不渲染、不执行链接、不启用 linkify，因此放行全部目标以保留证据；
+    协议是否受支持统一由消费方（check_docs_consistency 的 ``check_relative_dead_links``）
+    分类并显式报错，图片 token 不在此责任内。
+    """
+
+    def validateLink(self, url: str) -> bool:
+        """静态分析视图不做 XSS 过滤（无渲染输出），保留原始目标供协议分类。"""
+        return True
+
+
 # 解析模式固定：CommonMark + table/strikethrough（检视 §5.1），模块级单例，
 # parse 无共享可变状态（env 由每次调用新建），解析结果不做跨调用缓存。
-_PARSER = MarkdownIt("commonmark").enable(["table", "strikethrough"])
+_PARSER = _StaticAnalysisParser("commonmark").enable(["table", "strikethrough"])
 
 # 引用式链接残余形态（仅作用于解析器判定未成链的 text token 内）：
 # full 形态 `[text][label]` 与 collapsed 形态 `[text][]`，兼容图片引用 `![alt][label]`。
