@@ -6,6 +6,7 @@ import pytest
 
 from data.domain_services.transaction_cost import (
     STAMP_DUTY_SCHEDULE,
+    TransactionCost,
     TransactionCostConfig,
     TransactionCostModel,
     get_stamp_duty_rate,
@@ -79,9 +80,16 @@ class TestTransactionCost:
             assert cost.cost_bps == cost.total_cost / cost.gross_amount * 10000
 
     def test_cost_bps_zero_gross(self):
-        config = TransactionCostConfig()
-        model = TransactionCostModel(config)
-        cost = model.calculate(price=0.0, volume=0, is_buy=True)
+        # D12-004: 零价/零量已由 calculate() 显式拒绝（非法成交），
+        # cost_bps 的零除保护改为直接对零成交金额构造体验证。
+        cost = TransactionCost(
+            gross_amount=0.0,
+            commission=0.0,
+            stamp_duty=0.0,
+            transfer_fee=0.0,
+            slippage_cost=0.0,
+            net_amount=0.0,
+        )
         assert cost.cost_bps == 0.0
 
     def test_volume_ratio_slippage(self):
@@ -200,3 +208,57 @@ class TestStampDutyScheduleIntegration:
         )
         assert cost_before.stamp_duty == 0.0
         assert cost_after.stamp_duty == 0.0
+
+
+class TestInvalidTradeInputsRejected:
+    """D12-004: 非法价格/成交量/滑点必须显式失败，不得返回可入账的负数成交金额。"""
+
+    @pytest.mark.parametrize("bad_price", [0.0, -1.0, -1e-9, float("nan"), float("inf"), float("-inf")])
+    def test_non_positive_or_non_finite_price_rejected(self, bad_price: float) -> None:
+        model = TransactionCostModel(TransactionCostConfig())
+        with pytest.raises(ValueError, match="price must be finite and positive"):
+            model.calculate(price=bad_price, volume=1000, is_buy=False)
+
+    @pytest.mark.parametrize("bad_volume", [0.0, -100.0, float("nan"), float("inf")])
+    def test_non_positive_or_non_finite_volume_rejected(self, bad_volume: float) -> None:
+        model = TransactionCostModel(TransactionCostConfig())
+        with pytest.raises(ValueError, match="volume must be finite and positive"):
+            model.calculate(price=10.0, volume=bad_volume, is_buy=True)
+
+    def test_sell_with_100pct_slippage_rejected_not_booked(self) -> None:
+        """10000bps 卖出调整价恰为 0：必须显式失败（调用方跳过），不得按 0 价入账。"""
+        model = TransactionCostModel(TransactionCostConfig(slippage_bps=10_000.0))
+        with pytest.raises(ValueError, match="invalid execution price"):
+            model.calculate(price=10.0, volume=1000, is_buy=False)
+
+    def test_sell_above_slippage_ceiling_rejected(self) -> None:
+        model = TransactionCostModel(TransactionCostConfig(slippage_bps=10_001.0))
+        with pytest.raises(ValueError, match="slippage_bps must be in"):
+            model.calculate(price=10.0, volume=1000, is_buy=False)
+
+    @pytest.mark.parametrize("bad_bps", [-1.0, float("nan"), float("inf")])
+    def test_non_finite_or_negative_slippage_config_rejected(self, bad_bps: float) -> None:
+        model = TransactionCostModel(TransactionCostConfig(slippage_bps=bad_bps))
+        with pytest.raises(ValueError, match="slippage_bps must be in"):
+            model.calculate(price=10.0, volume=1000, is_buy=True)
+
+    def test_buy_with_100pct_slippage_still_valid(self) -> None:
+        """买入方向 100% 滑点成交价为 2×price（仍为正），不得被卖出护栏误伤。"""
+        model = TransactionCostModel(TransactionCostConfig(slippage_bps=10_000.0, commission_min=0.0))
+        cost = model.calculate(price=10.0, volume=1000, is_buy=True)
+        assert cost.slippage_adjusted_price == pytest.approx(20.0)
+        assert cost.gross_amount == pytest.approx(20_000.0)
+        assert cost.net_amount > cost.gross_amount
+
+    def test_volume_ratio_participation_above_100pct_rejected(self) -> None:
+        """配置内滑点（5bps）经参与率放大后仍可能 >100%，卖出价非正必须拒绝。"""
+        model = TransactionCostModel(TransactionCostConfig(slippage_model="volume_ratio", slippage_bps=5.0))
+        with pytest.raises(ValueError, match="invalid execution price"):
+            model.calculate(price=10.0, volume=1_000_000, is_buy=False, avg_daily_volume=100.0)
+
+    def test_non_positive_avg_daily_volume_falls_back_to_fixed(self) -> None:
+        """avg_daily_volume 为 0/NaN/负时退回固定滑点，不产生负滑点或除零。"""
+        for avg in (0.0, -100.0, float("nan")):
+            model = TransactionCostModel(TransactionCostConfig(slippage_model="sqrt_volume", slippage_bps=5.0))
+            cost = model.calculate(price=10.0, volume=1000, is_buy=False, avg_daily_volume=avg)
+            assert cost.slippage_adjusted_price == pytest.approx(10.0 * (1 - 5 / 10000))

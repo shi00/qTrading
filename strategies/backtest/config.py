@@ -10,7 +10,7 @@ from typing import ClassVar, Literal
 import polars as pl
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
-from data.domain_services.transaction_cost import TransactionCostConfig
+from data.domain_services.transaction_cost import MAX_SLIPPAGE_BPS, TransactionCostConfig
 
 
 @dataclass(frozen=True)
@@ -301,8 +301,10 @@ class BacktestConfig:
             errors.append("stamp_duty_rate must be non-negative")
         if not math.isfinite(self.transfer_fee_rate) or self.transfer_fee_rate < 0:
             errors.append("transfer_fee_rate must be non-negative")
-        if not math.isfinite(self.slippage_bps) or self.slippage_bps < 0:
-            errors.append("slippage_bps must be non-negative")
+        if not math.isfinite(self.slippage_bps) or self.slippage_bps < 0 or self.slippage_bps > MAX_SLIPPAGE_BPS:
+            # D12-004: 10000bps=100% 已是卖出滑点上限；超过它会让卖出调整价为非正，
+            # 导致「成交价回退原价、账务却按模型负数入账」的不一致。
+            errors.append(f"slippage_bps must be in [0, {MAX_SLIPPAGE_BPS:g}]")
         if not math.isfinite(self.max_single_weight) or self.max_single_weight <= 0 or self.max_single_weight > 1:
             errors.append("max_single_weight must be in (0, 1]")
         if self.on_empty_signal not in ("liquidate", "hold"):

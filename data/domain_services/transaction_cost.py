@@ -22,6 +22,12 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
+# D12-004: 滑点合理上界（10000bps = 100%）。超过该值的卖出滑点会让调整后成交价
+# 变为非正数；即使不超过，volume_ratio / sqrt_volume 模型的参与率放大仍可能把有效
+# 滑点推过 100%，因此 calculate() 还会对最终成交价做非正校验（本常量只是配置侧
+# 的第一道界，不替代成交价校验）。
+MAX_SLIPPAGE_BPS: float = 10_000.0
+
 
 @dataclass(frozen=True)
 class StampDutySchedule:
@@ -158,6 +164,14 @@ class TransactionCostModel:
         avg_daily_volume: float | None = None,
         trade_date: date | None = None,
     ) -> TransactionCost:
+        """计算单笔交易成本。
+
+        D12-004: 非法价格/成交量或滑点导致调整后成交价非正时抛出 ``ValueError``，
+        调用方必须显式失败或跳过（如回测撮合记 ``invalid_price``）。禁止返回负数
+        成交价后由调用方回退原价成交、却按模型金额入账——成交价与账务必须使用同一
+        校验后价格。
+        """
+        self._validate_trade_inputs(price, volume)
         slippage_pct = self._calc_slippage_pct(price, volume, is_buy, avg_daily_volume)
 
         # 滑点调整成交价：买入上浮、卖出下浮
@@ -165,6 +179,13 @@ class TransactionCostModel:
             adjusted_price = price * (1 + slippage_pct)
         else:
             adjusted_price = price * (1 - slippage_pct)
+
+        # 有效滑点可能被参与率放大模型推过 100%（配置上界无法覆盖），
+        # 卖出价非正或价格非有限时显式失败，绝不按非法价入账。
+        if not math.isfinite(adjusted_price) or adjusted_price <= 0:
+            raise ValueError(
+                f"invalid execution price: price={price!r}, slippage_pct={slippage_pct!r} (is_buy={is_buy})"
+            )
 
         gross_amount = adjusted_price * volume
 
@@ -200,6 +221,20 @@ class TransactionCostModel:
             slippage_adjusted_price=adjusted_price,
         )
 
+    def _validate_trade_inputs(self, price: float, volume: float) -> None:
+        """D12-004: 成交价/成交量必须是有限正数；滑点配置必须有限且在合理上界内。
+
+        这些是账务一致性的前置条件：price<=0 或 volume<=0 时任何费用/净额都无业务
+        含义（如空仓零价会算出负数成交金额），必须显式失败而非静默按模型入账。
+        """
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError(f"price must be finite and positive, got {price!r}")
+        if not math.isfinite(volume) or volume <= 0:
+            raise ValueError(f"volume must be finite and positive, got {volume!r}")
+        bps = self.config.slippage_bps
+        if not math.isfinite(bps) or bps < 0 or bps > MAX_SLIPPAGE_BPS:
+            raise ValueError(f"slippage_bps must be in [0, {MAX_SLIPPAGE_BPS:g}], got {bps!r}")
+
     def _get_effective_stamp_duty_rate(self, trade_date: date | None) -> float:
         """获取有效的印花税率。"""
         if self.config.stamp_duty_rate is not None:
@@ -216,10 +251,20 @@ class TransactionCostModel:
         """计算滑点百分比（小数形式，如 0.0005 表示 5bps）。"""
         if self.config.slippage_model == "fixed_bps":
             return self.config.slippage_bps / 10000
-        elif self.config.slippage_model == "volume_ratio" and avg_daily_volume:
+        elif (
+            self.config.slippage_model == "volume_ratio"
+            and avg_daily_volume is not None
+            and math.isfinite(avg_daily_volume)
+            and avg_daily_volume > 0
+        ):
             participation = volume / avg_daily_volume
             return self.config.slippage_bps / 10000 * (1 + participation * 10)
-        elif self.config.slippage_model == "sqrt_volume" and avg_daily_volume:
+        elif (
+            self.config.slippage_model == "sqrt_volume"
+            and avg_daily_volume is not None
+            and math.isfinite(avg_daily_volume)
+            and avg_daily_volume > 0
+        ):
             participation = volume / avg_daily_volume
             return self.config.slippage_bps / 10000 * math.sqrt(participation * 100)
         return self.config.slippage_bps / 10000

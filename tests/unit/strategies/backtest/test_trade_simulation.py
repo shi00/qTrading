@@ -715,12 +715,12 @@ class TestDelistedLiquidation:
         expected_net = gross_amount - 5 - gross_amount * 5e-4 - gross_amount * 1e-5
         assert simulator.cash == pytest.approx(initial_cash + expected_net)
 
-        # 断言：记录了 sell 交易（price=回收价，成本非零）
+        # 断言：记录了 sell 交易（D12-004: price=滑点调整后成交价，与 gross/net 同一价格）
         trades = simulator.get_results()[0]
         sell_trades = trades.filter(pl.col("action") == "sell")
         assert len(sell_trades) == 1
         assert sell_trades["ts_code"][0] == "000001.SZ"
-        assert float(sell_trades["price"][0]) == pytest.approx(recover_price)
+        assert float(sell_trades["price"][0]) == pytest.approx(recover_price * (1 - 5e-4))
         assert int(sell_trades["volume"][0]) == volume
         assert float(sell_trades["net_amount"][0]) == pytest.approx(expected_net)
         assert float(sell_trades["total_cost"][0]) > 0
@@ -768,7 +768,9 @@ class TestDelistedLiquidation:
         sell_trades = trades.filter(pl.col("action") == "sell")
         assert len(sell_trades) == 1
         assert float(sell_trades["total_cost"][0]) > 0
-        assert float(sell_trades["price"][0]) == pytest.approx(recover_price)
+        # D12-004: 记录价与账务一致，均为滑点调整后成交价
+        assert float(sell_trades["price"][0]) == pytest.approx(recover_price * (1 - 5e-4))
+        assert float(sell_trades["gross_amount"][0]) == pytest.approx(gross_amount)
 
         # 分项统计
         assert simulator.delist_liquidation_count == 1
@@ -1090,6 +1092,37 @@ class TestSuspendedMarketValueEstimation:
         # 断言：total_value 包含估算市值
         expected_total = initial_cash + volume * last_known_price
         assert last_day["total_value"] == expected_total
+
+    @pytest.mark.parametrize("bad_qfq_close", [0.0, -1.0])
+    def test_non_positive_qfq_close_treated_as_missing(self, config: BacktestConfig, bad_qfq_close: float) -> None:
+        """D12-004: 0/负 qfq_close 不得写入最后已知价，按缺失估值（防止负市值）。"""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        simulator.positions["000001.SZ"] = {
+            "volume": 800,
+            "cost_basis": 8_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = 12.0
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "raw_close": [10.0],
+                "qfq_close": [bad_qfq_close],
+                "qfq_open": [10.0],
+                "raw_open": [10.0],
+                "is_tradable": [True],
+            }
+        )
+
+        simulator._record_daily_positions(date(2024, 1, 16), day_quotes)
+
+        assert simulator._last_known_prices["000001.SZ"] == 12.0
+        last_day = simulator.positions_list[-1]
+        assert last_day["positions"]["000001.SZ"]["estimated"] is True
+        assert last_day["positions"]["000001.SZ"]["market_value"] == 800 * 12.0
+        assert last_day["total_value"] == simulator.cash + 800 * 12.0
 
     def test_c1_long_suspension_guard_warns_after_threshold(self, config: BacktestConfig) -> None:
         """D1-C1: 长停（临时停牌）可见性护栏——连续 estimated 估值超阈值追加 warning。"""
