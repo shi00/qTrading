@@ -11,6 +11,7 @@
 import threading
 from utils.singleton_registry import register_singleton
 
+
 @register_singleton
 class MyService:
     _instance = None
