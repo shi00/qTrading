@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,7 @@ def _synthetic_state_dict(hidden_size: int = 4, num_classes: int = 3) -> dict[st
     }
 
 
-def _make_model_dir(tmp_path: Path) -> Path:
+def _make_model_dir(tmp_path: Path, *, head_domain: str | None = None) -> Path:
     """构造仅含 config.json 的伪 HF 模型目录（dry-run 只需 config 元数据）。"""
     model_dir = tmp_path / "best"
     model_dir.mkdir()
@@ -54,6 +55,8 @@ def _make_model_dir(tmp_path: Path) -> Path:
         "num_hidden_layers": 12,
         "vocab_size": 34932,
     }
+    if head_domain is not None:
+        config[efg.HEAD_DOMAIN_CONFIG_KEY] = head_domain
     (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
     return model_dir
 
@@ -87,6 +90,23 @@ def test_extract_head_linear_mode_requires_folded_head() -> None:
     np.testing.assert_array_equal(head["cb"], state["classifier.bias"])
     assert "pw" not in head
     assert "pb" not in head
+
+
+def test_extract_head_linear_accepts_stage_a_cls_domain_state_dict(tmp_path: Path) -> None:
+    """阶段 A 折算头（state_dict 仅 classifier.*、无 pooler）仍可纯抽头并产出 linear head。"""
+    rng = np.random.default_rng(20261116)
+    state = {
+        "classifier.weight": rng.standard_normal((3, 768)).astype(np.float32),
+        "classifier.bias": rng.standard_normal(3).astype(np.float32),
+    }
+    head = efg.extract_head_from_state_dict(state, mode="linear")
+    assert head["mode"] == "linear"
+    assert "pw" not in head and "pb" not in head
+    path = tmp_path / "head.npz"
+    efg.write_head_npz(head, path)
+    weight, bias, pre = load_head_npz(path)
+    assert pre is None
+    np.testing.assert_array_equal(weight, state["classifier.weight"])
 
 
 def test_extract_head_rejects_bad_classifier_shape() -> None:
@@ -152,6 +172,119 @@ def test_write_head_npz_linear_roundtrip_gate_contract(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# D15-001：head 模式入口守卫（标准 HF 池化头 + linear 必须拒绝）
+# --------------------------------------------------------------------------- #
+def test_ensure_head_mode_rejects_linear_for_pooled_bert() -> None:
+    """标准 BertForSequenceClassification（池化头）配 linear 必须拒绝；bert 不受影响。"""
+    config = {"architectures": ["BertForSequenceClassification"]}
+    with pytest.raises(ValueError, match="linear"):
+        efg.ensure_head_mode_matches_model(config, "linear")
+    assert efg.ensure_head_mode_matches_model(config, "bert") == efg.HEAD_DOMAIN_POOLED
+
+
+def test_ensure_head_mode_allows_declared_cls_domain() -> None:
+    """显式声明 qtrading_head_domain=cls 时放行 linear（阶段 A 折算形态）；bert 仍按池化头。"""
+    config = {"architectures": ["BertForSequenceClassification"], efg.HEAD_DOMAIN_CONFIG_KEY: "cls"}
+    assert efg.ensure_head_mode_matches_model(config, "linear") == efg.HEAD_DOMAIN_CLS
+    assert efg.ensure_head_mode_matches_model(config, "bert") == efg.HEAD_DOMAIN_POOLED
+
+
+def test_build_export_plan_rejects_linear_for_pooled_bert(tmp_path: Path) -> None:
+    """build_export_plan（写文件前入口）对普通 HF BERT + linear 直接拒绝。"""
+    model_dir = _make_model_dir(tmp_path)
+    convert = tmp_path / "convert_hf_to_gguf.py"
+    convert.write_text("# stub", encoding="utf-8")
+    args = efg._parse_args(
+        [
+            "--model-dir",
+            str(model_dir),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--convert-script",
+            str(convert),
+            "--head-mode",
+            "linear",
+        ]
+    )
+    with pytest.raises(ValueError, match="linear"):
+        efg.build_export_plan(args)
+
+
+def test_build_export_plan_allows_linear_for_declared_cls_domain(tmp_path: Path) -> None:
+    """声明 CLS 域后 linear 计划放行：无 pw/pb，input_domain 回显 cls 供核验。"""
+    model_dir = _make_model_dir(tmp_path, head_domain=efg.HEAD_DOMAIN_CLS)
+    convert = tmp_path / "convert_hf_to_gguf.py"
+    convert.write_text("# stub", encoding="utf-8")
+    args = efg._parse_args(
+        [
+            "--model-dir",
+            str(model_dir),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--convert-script",
+            str(convert),
+            "--head-mode",
+            "linear",
+        ]
+    )
+    plan = efg.build_export_plan(args)
+    assert plan["head"]["mode"] == "linear"
+    assert plan["head"]["input_domain"] == efg.HEAD_DOMAIN_CLS
+    assert plan["head"]["pw_shape"] is None and plan["head"]["pb_shape"] is None
+
+
+def test_main_dry_run_rejects_linear_for_pooled_bert(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """dry-run 在普通 HF BERT 上使用 linear 时退出码 1，且不创建输出目录。"""
+    model_dir = _make_model_dir(tmp_path)
+    convert = tmp_path / "convert_hf_to_gguf.py"
+    convert.write_text("# stub", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    with caplog.at_level("ERROR", logger="scripts.export_finbert_gguf"):
+        code = efg.main(
+            [
+                "--model-dir",
+                str(model_dir),
+                "--out-dir",
+                str(out_dir),
+                "--convert-script",
+                str(convert),
+                "--head-mode",
+                "linear",
+                "--dry-run",
+            ]
+        )
+    assert code == 1
+    assert any("linear" in record.getMessage() for record in caplog.records)
+    assert not out_dir.exists()
+
+
+def test_export_rejects_linear_for_pooled_bert_before_writing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实导出路径同样在写任何文件之前拒绝（torch/transformers 以替身绕过）。"""
+    model_dir = _make_model_dir(tmp_path)
+    convert = tmp_path / "convert_hf_to_gguf.py"
+    convert.write_text("# stub", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    args = efg._parse_args(
+        [
+            "--model-dir",
+            str(model_dir),
+            "--out-dir",
+            str(out_dir),
+            "--convert-script",
+            str(convert),
+            "--head-mode",
+            "linear",
+        ]
+    )
+    monkeypatch.setattr(efg, "importlib", types.SimpleNamespace(import_module=lambda _name: object()))
+    with pytest.raises(ValueError, match="linear"):
+        efg.export(args)
+    assert not out_dir.exists()
+
+
+# --------------------------------------------------------------------------- #
 # 工具路径解析
 # --------------------------------------------------------------------------- #
 def test_resolve_tool_paths_explicit_argument(tmp_path: Path) -> None:
@@ -205,6 +338,7 @@ def test_build_export_plan_shape(tmp_path: Path) -> None:
     )
     plan = efg.build_export_plan(args)
     assert plan["head"]["mode"] == "bert"
+    assert plan["head"]["input_domain"] == efg.HEAD_DOMAIN_POOLED
     assert plan["head"]["labels"] == ["利空", "中性", "利好"]
     assert plan["head"]["cw_shape"] == [3, 768]
     assert plan["head"]["pw_shape"] == [768, 768]

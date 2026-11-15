@@ -18,8 +18,13 @@
 ``labels = [利空, 中性, 利好]``（0=利空, 1=中性, 2=利好，§4.4 正本）。
 ``mode="linear"``（§5.1 阶段 A 探针形态：cw/cb 直接作用于 CLS 特征，无 pooler）仅在
 权重已折算到 CLS 域时可选；从 ``BertForSequenceClassification`` 原始权重出发的默认
-且语义正确的路径是 ``bert``（tanh 非线性不可折算为线性头）。产物可被
-``scripts/verify_finbert_gguf.load_head_npz`` 读取（导出后应跑该门禁，reviews §7）。
+且语义正确的路径是 ``bert``（tanh 非线性不可折算为线性头）。**因此标准 HF 池化分类头
+（classifier 消费 ``tanh(pooler(CLS))``）+ ``--head-mode linear`` 在
+:func:`build_export_plan` 即拒绝，早于任何文件写入**（D15-001）；仅当 ``config.json``
+显式声明 ``qtrading_head_domain="cls"``（分类头确以原始 CLS 为输入，如阶段 A 线性探针
+折算产物）时放行，该声明会回显到 dry-run 计划的 ``head.input_domain`` 供核验。
+``extract_head_from_state_dict`` 保持纯抽头语义不变（格式兼容，不承担入口策略）。
+产物可被 ``scripts/verify_finbert_gguf.load_head_npz`` 读取（导出后应跑该门禁，reviews §7）。
 
 **llama.cpp 工具链对齐查证（2026-10-13，GitHub API 实证）**：
 
@@ -80,6 +85,12 @@ HEAD_MODE_LINEAR = "linear"
 HEAD_MODE_BERT = "bert"
 HEAD_MODE_CHOICES = (HEAD_MODE_LINEAR, HEAD_MODE_BERT)
 
+# 分类头输入域（D15-001）：pooled = 标准 HF 池化头（classifier 消费 tanh(pooler(CLS))）；
+# cls = 头已折算到 CLS 域（阶段 A 线性探针形态），须经 config 显式声明才允许 linear。
+HEAD_DOMAIN_CONFIG_KEY = "qtrading_head_domain"
+HEAD_DOMAIN_CLS = "cls"
+HEAD_DOMAIN_POOLED = "pooled"
+
 # llama.cpp 对齐结论（查证过程与证据 URL 见模块 docstring；勿改值前先复核证据链）
 LLAMA_CPP_ALIGN_TAG = "v0.3.0"
 LLAMA_CPP_ALIGN_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"
@@ -105,6 +116,8 @@ def extract_head_from_state_dict(
 
     ``bert``（非线性）模式取 ``bert.pooler.dense.*`` 与 ``classifier.*``；
     ``linear`` 模式仅取 ``classifier.*``（语义：权重已折算到 CLS 域，§5.1）。
+    ``linear`` 的入口策略（标准池化头拒绝）由 :func:`build_export_plan` 经
+    :func:`ensure_head_mode_matches_model` 承担，本函数保持纯抽头、不校验输入域。
     state_dict 中所需张量之外的键（编码器各层等）静默忽略——本函数只抽取分类头
     所需张量，不校验全量权重。张量缺失或形状不符时以 ``ValueError`` 拒绝
     （不能静默降级，§8.2）。
@@ -195,10 +208,44 @@ def _read_model_config(model_dir: Path) -> dict[str, Any]:
     return config
 
 
+def ensure_head_mode_matches_model(config: Mapping[str, Any], head_mode: str) -> str:
+    """校验 head 模式与分类头输入域一致，返回输入域（``cls`` / ``pooled``）。
+
+    标准 ``BertForSequenceClassification`` 的 classifier 消费 ``tanh(pooler(CLS))``，
+    把 ``classifier.*`` 当 CLS 域线性头使用会丢弃 pooler 权重与 tanh 非线性并产出
+    错误概率（D15-001）。故 ``linear`` 与标准池化头组合必须拒绝；仅当 config 显式
+    声明 ``qtrading_head_domain="cls"``（分类头确以原始 CLS 为输入）时放行。
+    ``bert``（默认）模式恒按池化头抽取，不受该声明影响。
+
+    Raises:
+        ValueError: ``linear`` 用于未声明 CLS 域的标准池化分类头。消息只含配置字段
+            与架构名，不含文件系统路径（R9）。
+    """
+    if head_mode != HEAD_MODE_LINEAR:
+        return HEAD_DOMAIN_POOLED
+    declared = str(config.get(HEAD_DOMAIN_CONFIG_KEY) or "").strip().lower()
+    if declared == HEAD_DOMAIN_CLS:
+        return HEAD_DOMAIN_CLS
+    architectures = [str(item) for item in (config.get("architectures") or [])]
+    if "BertForSequenceClassification" in architectures:
+        raise ValueError(
+            "--head-mode linear 不适用于标准 HF BertForSequenceClassification："
+            "其 classifier 消费 tanh(pooler(CLS))，直接作用于 CLS 会丢弃 pooler 权重与非线性，"
+            "产出错误分类头（默认 --head-mode bert 即语义正确路径；若分类头确已折算到 CLS 域，"
+            f"须在 config.json 声明 {HEAD_DOMAIN_CONFIG_KEY}={HEAD_DOMAIN_CLS!r}）"
+        )
+    return HEAD_DOMAIN_POOLED
+
+
 def build_export_plan(args: argparse.Namespace) -> dict[str, Any]:
-    """构造导出计划（dry-run 预检：输入 config / 工具路径存在性 + 期望产物路径）。"""
+    """构造导出计划（dry-run 预检：输入 config / 工具路径存在性 + 期望产物路径）。
+
+    写文件前的唯一入口：``export()`` 先调用本函数，故 head 模式与模型不兼容时
+    （``linear`` + 标准池化头）在任何文件创建之前即拒绝。
+    """
     model_dir = Path(args.model_dir)
     config = _read_model_config(model_dir)
+    head_domain = ensure_head_mode_matches_model(config, args.head_mode)
     hidden = int(config.get("hidden_size", EMBEDDING_DIM))
     convert = resolve_tool_paths(
         convert_script=args.convert_script,
@@ -213,6 +260,7 @@ def build_export_plan(args: argparse.Namespace) -> dict[str, Any]:
         "head_path": str(out_dir / HEAD_FILE_NAME),
         "head": {
             "mode": args.head_mode,
+            "input_domain": head_domain,
             "labels": list(LABELS),
             "cw_shape": [NUM_CLASSES, hidden],
             "cb_shape": [NUM_CLASSES],
@@ -283,7 +331,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--head-mode",
         choices=HEAD_MODE_CHOICES,
         default=HEAD_MODE_BERT,
-        help="head 模式：bert=非线性（pooler+classifier，§6.1/§8.2，实物形态）；linear=已折算 CLS 域线性头（§5.1）",
+        help=(
+            "head 模式：bert=非线性（pooler+classifier，§6.1/§8.2，默认且对标准 HF 权重唯一正确）；"
+            "linear=已折算 CLS 域线性头（§5.1；标准 BertForSequenceClassification 会被拒绝，"
+            f"除非 config.json 声明 {HEAD_DOMAIN_CONFIG_KEY}={HEAD_DOMAIN_CLS!r}）"
+        ),
     )
     parser.add_argument("--convert-script", default=None, help="llama.cpp convert_hf_to_gguf.py 路径（CI 提供）")
     parser.add_argument(
