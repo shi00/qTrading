@@ -128,6 +128,9 @@ from core.agent_types import (
     ResearchSnapshot,
     ResourceClaimRequest,
     ResourceReleaseReceipt,
+    PlanItemSnapshot,
+    PlanProposal,
+    PLAN_STORE_VERSION,
     ResourceReleaseRequest,
     ResourceSlotKind,
     ResourceTicket,
@@ -180,6 +183,10 @@ from core.agent_types import (
     decode_json_doc,
     decode_message_page_item,
     decode_operation_summary,
+    decode_plan_proposal_document,
+    plan_asset_id,
+    plan_proposal_digest,
+    normalize_plan_proposal,
     decode_fact_value,
     decode_range_limitation,
     decode_read_mark_entry,
@@ -410,6 +417,47 @@ def _event_from_row(row: Any) -> Any:
         },
         "$",
     )
+
+
+def _decode_plan_proposal_row(row: Any, *, execution_id: str, identity: str) -> PlanProposal:
+    """计划提案行 → 冻结提案；行内自相矛盾 fail-closed（``OPERATION_UNKNOWN``）。"""
+
+    document = row.body_text
+    if not isinstance(document, str) or not document:
+        raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal body missing", identity)
+    try:
+        proposal = decode_plan_proposal_document(document, execution_id=execution_id)
+        canonical = normalize_plan_proposal(proposal)
+        digest = plan_proposal_digest(proposal)
+    except AgentValidationError as exc:
+        raise AgentServiceError(
+            AgentErrorCode.OPERATION_UNKNOWN, f"plan proposal row invalid: {exc.code}", identity
+        ) from exc
+    if row.asset_version != str(proposal.plan_revision):
+        raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan revision row mismatch", identity)
+    if canonical != document:
+        raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal body is not canonical", identity)
+    if row.digest != digest:
+        raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "plan proposal digest mismatch", identity)
+    return proposal
+
+
+def _validate_plan_items_for_save(items: object, *, execution_id: str, identity: str) -> tuple[PlanItemSnapshot, ...]:
+    """写入前校验步骤序列（结构、状态值、id 唯一；失败 ``INPUT_INVALID``）。"""
+
+    if isinstance(items, str) or not isinstance(items, Sequence):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "plan items must be a sequence", identity)
+    item_tuple = tuple(items)
+    for index, item in enumerate(item_tuple):
+        if not isinstance(item, PlanItemSnapshot):
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"plan items[{index}] must be PlanItemSnapshot", identity
+            )
+    try:
+        normalize_plan_proposal(PlanProposal(execution_id=execution_id, plan_revision=1, items=item_tuple))
+    except AgentValidationError as exc:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"plan items invalid: {exc.code}", identity) from exc
+    return item_tuple
 
 
 class AgentDao(BaseDao):
@@ -7920,6 +7968,166 @@ class AgentDao(BaseDao):
                 )
             ).first()
         return row is not None
+
+    # ------------------------------------------------------------------
+    # 计划提案（DD §8 F21 / §10.3；HANDOFF §7.3，E-04）
+    # ------------------------------------------------------------------
+    #
+    # 提案以不可变 asset 版本保存（asset_kind='plan'），绑定 execution 与
+    # plan_revision；只存提案：不更新 agent_round、不改已派发图、不是第二
+    # 任务状态机。revision 每 execution 单调，0 表示尚无提案。
+
+    async def read_plan_proposal(
+        self, *, user_scope: str, execution_id: str, plan_revision: int
+    ) -> PlanProposal | None:
+        """读取精确版计划提案；无行或跨用户 → ``None``，坏行 → ``OPERATION_UNKNOWN``。"""
+
+        self._check_engine()
+        identity = f"{user_scope}/{execution_id}@{plan_revision}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(execution_id, "execution_id", identity)
+        if isinstance(plan_revision, bool) or not isinstance(plan_revision, int) or plan_revision < 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "plan_revision must be an int >= 1", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.body_text,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.asset_version,
+                    ).where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == plan_asset_id(execution_id),
+                        AgentAssetVersion.asset_version == str(plan_revision),
+                        AgentAssetVersion.asset_kind == "plan",
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return _decode_plan_proposal_row(row, execution_id=execution_id, identity=identity)
+
+    async def read_current_plan_proposal(self, *, user_scope: str, execution_id: str) -> PlanProposal | None:
+        """读取当前（最大 revision）计划提案；无提案 → ``None``，坏行 → ``OPERATION_UNKNOWN``。"""
+
+        self._check_engine()
+        identity = f"{user_scope}/{execution_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(execution_id, "execution_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.body_text,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.asset_version,
+                    )
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == plan_asset_id(execution_id),
+                        AgentAssetVersion.asset_kind == "plan",
+                    )
+                    .order_by(sa.cast(AgentAssetVersion.asset_version, sa.BigInteger).desc())
+                    .limit(1)
+                )
+            ).first()
+        if row is None:
+            return None
+        return _decode_plan_proposal_row(row, execution_id=execution_id, identity=identity)
+
+    async def save_plan_proposal(
+        self,
+        *,
+        user_scope: str,
+        execution_id: str,
+        expected_revision: int,
+        items: Sequence[PlanItemSnapshot],
+    ) -> PlanProposal:
+        """以预期版 CAS 追加不可变计划提案版本（单事务，冲突零新事实）。
+
+        同 content 重写不增版（返回当前版）；``expected_revision`` 落后于 head
+        → ``REVISION_CONFLICT``；执行行不存在/跨用户 → ``INPUT_INVALID``。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{execution_id}@{expected_revision}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(execution_id, "execution_id", identity)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "expected_revision must be an int >= 0", identity)
+        item_tuple = _validate_plan_items_for_save(items, execution_id=execution_id, identity=identity)
+        asset_id = plan_asset_id(execution_id)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            execution_row = (
+                await conn.execute(
+                    sa.select(AgentExecution.execution_id)
+                    .where(
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.execution_id == execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if execution_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution not found", identity)
+            head_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.body_text,
+                        AgentAssetVersion.digest,
+                        AgentAssetVersion.asset_version,
+                    )
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == asset_id,
+                        AgentAssetVersion.asset_kind == "plan",
+                    )
+                    .order_by(sa.cast(AgentAssetVersion.asset_version, sa.BigInteger).desc())
+                    .limit(1)
+                )
+            ).first()
+            if head_row is None:
+                head_revision = 0
+            else:
+                try:
+                    head_revision = int(head_row.asset_version)
+                except (TypeError, ValueError) as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN, "plan revision row invalid", identity
+                    ) from exc
+            if head_revision != expected_revision:
+                raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "plan revision conflict", identity)
+            if head_row is not None:
+                head = _decode_plan_proposal_row(head_row, execution_id=execution_id, identity=identity)
+                if head.items == item_tuple:
+                    return head
+            new_revision = expected_revision + 1
+            proposal = PlanProposal(execution_id=execution_id, plan_revision=new_revision, items=item_tuple)
+            await conn.execute(
+                sa.insert(AgentAssetVersion).values(
+                    user_scope=user_scope,
+                    asset_id=asset_id,
+                    asset_version=str(new_revision),
+                    asset_kind="plan",
+                    display_name=f"plan r{new_revision}",
+                    digest=plan_proposal_digest(proposal),
+                    metadata_payload={
+                        "plan_store_version": PLAN_STORE_VERSION,
+                        "plan_revision": new_revision,
+                        "item_count": len(item_tuple),
+                    },
+                    body_text=normalize_plan_proposal(proposal),
+                    read_state="ready",
+                    verification_state="unverified",
+                )
+            )
+        return proposal
 
     async def register_skill_asset(self, request: SkillAssetRegistration) -> SkillAssetReceipt:
         """受管 Skill 版本落库（同身份同内容幂等；异内容冲突；不复制脚本/凭据）。"""
