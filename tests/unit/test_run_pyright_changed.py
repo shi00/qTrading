@@ -3,10 +3,11 @@
 验证：
 - 无文件/非 .py 文件过滤
 - FileNotFoundError（pyright 未安装）返回 2 + 友好提示
-- JSON 解析失败透传返回码
+- JSON 解析失败按工具失败返回 2（不因退出码 0 放行）
 - summary.fatalError 返回 2
 - error 级别诊断返回 1 + 输出格式
 - warning 不阻断
+- 工具非零/输出结构异常不得因空诊断放行（D22-005）
 """
 
 import json
@@ -31,6 +32,14 @@ def _mock_result(stdout: str = "", returncode: int = 0, stderr: str = "") -> Mag
     mock.stderr = stderr
     mock.returncode = returncode
     return mock
+
+
+def _run_with(monkeypatch, stdout: str = "", returncode: int = 0, stderr: str = "") -> int:
+    """以受控 subprocess 结果调用 main（不依赖真实 pyright）。"""
+    result = _mock_result(stdout=stdout, returncode=returncode, stderr=stderr)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: result)
+    monkeypatch.setattr(sys, "argv", ["script.py", "foo.py"])
+    return main()
 
 
 class TestMainFileFilter:
@@ -137,7 +146,7 @@ class TestMainPyrightFatalError:
         assert "配置错误" in captured.err
         assert "pyrightconfig.json not found" in captured.err
 
-    def test_json_decode_error_returns_returncode(self, monkeypatch, capsys):
+    def test_json_decode_error_returns_two(self, monkeypatch, capsys):
         mock = _mock_result(stdout="not json", stderr="some stderr", returncode=2)
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock)
         monkeypatch.setattr(sys, "argv", ["script.py", "foo.py"])
@@ -146,6 +155,109 @@ class TestMainPyrightFatalError:
         assert rc == 2
         captured = capsys.readouterr()
         assert "some stderr" in captured.err
+        assert "未输出可解析的 JSON" in captured.err
+
+    def test_json_decode_error_with_exit_zero_returns_two(self, monkeypatch, capsys):
+        """退出码 0 但输出不是 JSON 时同样不得放行。"""
+        assert _run_with(monkeypatch, stdout="not json", returncode=0) == 2
+        assert "未输出可解析的 JSON" in capsys.readouterr().err
+
+
+class TestMainToolFailure:
+    """D22-005: 工具非零退出不得被空诊断/仅 warning 掩盖成通过。"""
+
+    def test_exit_two_with_empty_diagnostics_returns_two(self, monkeypatch, capsys):
+        output = json.dumps({"generalDiagnostics": [], "summary": {}})
+        rc = _run_with(monkeypatch, stdout=output, returncode=2, stderr="pyright: config error")
+
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert "退出码 2" in captured.err
+        assert "pyright: config error" in captured.err
+
+    def test_exit_two_with_warning_only_returns_two(self, monkeypatch, capsys):
+        output = json.dumps(
+            {
+                "generalDiagnostics": [{"severity": "warning", "message": "unused"}],
+                "summary": {},
+            }
+        )
+        rc = _run_with(monkeypatch, stdout=output, returncode=2, stderr="tool failed")
+
+        assert rc == 2
+        captured = capsys.readouterr()
+        assert "tool failed" in captured.err
+        # 工具失败时不应渲染成「无 error」的通过输出
+        assert "Pyright 发现" not in captured.out
+
+    def test_unexpected_exit_code_returns_two(self, monkeypatch):
+        output = json.dumps({"generalDiagnostics": [], "summary": {}})
+        assert _run_with(monkeypatch, stdout=output, returncode=3) == 2
+
+    def test_exit_one_with_empty_diagnostics_returns_one(self, monkeypatch, capsys):
+        output = json.dumps({"generalDiagnostics": [], "summary": {}})
+        rc = _run_with(monkeypatch, stdout=output, returncode=1, stderr="internal error")
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "无 error 级诊断" in captured.err
+        assert "internal error" in captured.err
+
+    def test_exit_zero_with_error_diagnostic_still_returns_one(self, monkeypatch):
+        """退出码 0 但 JSON 含 error 诊断时按诊断阻断（不因退出码放行）。"""
+        output = json.dumps(
+            {
+                "generalDiagnostics": [
+                    {
+                        "file": "foo.py",
+                        "severity": "error",
+                        "message": "boom",
+                        "range": {"start": {"line": 0, "character": 0}},
+                    }
+                ],
+                "summary": {},
+            }
+        )
+        assert _run_with(monkeypatch, stdout=output, returncode=0) == 1
+
+
+class TestMainPayloadStructure:
+    """D22-005: 错型/不完整 JSON 不得回落为「无 error」。"""
+
+    @pytest.mark.parametrize(
+        ("payload", "fragment"),
+        [
+            ([], "顶层不是 JSON 对象"),
+            ("ok", "顶层不是 JSON 对象"),
+            ({"generalDiagnostics": []}, "缺少 summary 对象"),
+            ({"summary": []}, "缺少 summary 对象"),
+            ({"summary": {}}, "缺少 generalDiagnostics 数组"),
+            ({"summary": {}, "generalDiagnostics": {}}, "缺少 generalDiagnostics 数组"),
+            ({"summary": {}, "generalDiagnostics": ["oops"]}, "含非对象元素"),
+        ],
+    )
+    def test_structural_error_returns_two(self, monkeypatch, capsys, payload, fragment):
+        rc = _run_with(monkeypatch, stdout=json.dumps(payload), returncode=0)
+
+        assert rc == 2
+        assert fragment in capsys.readouterr().err
+
+    def test_realistic_payload_with_counts_passes(self, monkeypatch):
+        output = json.dumps(
+            {
+                "version": "1.1.414",
+                "time": "1700000000000",
+                "generalDiagnostics": [],
+                "summary": {
+                    "filesAnalyzed": 1,
+                    "errorCount": 0,
+                    "warningCount": 0,
+                    "informationCount": 0,
+                    "timeInSec": 0.12,
+                },
+            }
+        )
+        assert _run_with(monkeypatch, stdout=output, returncode=0) == 0
 
 
 class TestBuildPyrightCmd:
