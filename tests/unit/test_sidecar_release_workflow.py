@@ -234,7 +234,11 @@ def test_local_verify_checks_twelve_assets_and_cross_platform_digests(workflow: 
     assert '.schema // ""' in run
     assert '.git_sha // ""' in run
     assert "qtrading.sidecar.manifest.v1" in run
-    assert '[[ ! "$tag_commit_sha" == "$manifest_git"* ]]' in run
+    # git_sha 先校验 12-40 位小写十六进制格式，再校验是 tag commit 的前缀：
+    # 空串/1 位/非 hex 不再能通过空串前缀匹配放行。
+    assert 'if [[ ! "$manifest_git" =~ ^[0-9a-f]{12,40}$ ]]' in run
+    assert 'if [[ "$tag_commit_sha" != "$manifest_git"* ]]' in run
+    assert run.index("^[0-9a-f]{12,40}$") < run.index('"$tag_commit_sha" != "$manifest_git"*')
     # 远端 tag 必须存在并解析到被标记 commit（annotated tag 需再 peel 一层）
     assert 'gh api "repos/${GH_REPO}/git/ref/tags/${TAG}"' in run
     assert 'gh api "repos/${GH_REPO}/git/tags/${object_sha}"' in run

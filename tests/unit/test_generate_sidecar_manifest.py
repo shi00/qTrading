@@ -43,6 +43,7 @@ def _valid_version_json(target: str, **overrides: object) -> dict[str, object]:
         "protocol_version": "v1",
         "postgres_version": "16.14.0",
         "target": target,
+        "git_sha": "0123456789ab",
         "self_sha256": None,
     }
     data.update(overrides)
@@ -255,7 +256,7 @@ class TestMainArgparse:
             "postgres_binary_source": "theseus-bundled",
             "postgresql_embedded_version": "0.21.0",
             "rustc_version": "rustc 1.97.0",
-            "git_sha": "abc123",
+            "git_sha": "abc123def456",
             "build_time_utc": "2026-07-20T00:00:00Z",
             "build_time_unix": 1784505600,
             "target": "t",
@@ -277,7 +278,7 @@ class TestMainArgparse:
         sidecar = tmp_path / "sidecar.exe"
         sidecar.write_bytes(b"binary")
         output = tmp_path / "manifest.json"
-        version_json = {"schema": VERSION_SCHEMA, "sidecar_version": "0.1.0", "target": "t"}
+        version_json = {"schema": VERSION_SCHEMA, "sidecar_version": "0.1.0", "target": "t", "git_sha": "0123456789ab"}
         with patch(
             "sys.argv",
             ["prog", "--sidecar", str(sidecar), "--target", "t", "--output", str(output)],
@@ -357,6 +358,64 @@ class TestMainReleaseValidation:
         assert code == 0
         manifest = json.loads(captured.out)
         assert manifest["sidecar_self_sha256"] == actual
+
+    def test_rejects_missing_git_sha(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        output = tmp_path / "manifest.json"
+        version_json = _valid_version_json("t")
+        del version_json["git_sha"]
+        code = _invoke_main(tmp_path, version_json, output=output)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "git_sha must be a 12-40 char lowercase hex commit id" in captured.err
+        assert captured.out == ""
+        assert not output.exists()
+
+    @pytest.mark.parametrize(
+        "git_sha",
+        [
+            None,
+            "",
+            "0",
+            "0" * 11,
+            "0" * 41,
+            "g" * 12,
+            "abcdefABCDEF",
+            " 0123456789ab",
+            "0123456789ab ",
+            "unknown",
+            123456789012,
+        ],
+    )
+    def test_rejects_invalid_git_sha(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        git_sha: object,
+    ) -> None:
+        output = tmp_path / "manifest.json"
+        version_json = _valid_version_json("t", git_sha=git_sha)
+        code = _invoke_main(tmp_path, version_json, output=output)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "git_sha must be a 12-40 char lowercase hex commit id" in captured.err
+        assert captured.out == ""
+        assert not output.exists()
+
+    @pytest.mark.parametrize(
+        "git_sha",
+        ["0123456789ab", "0123456789abcdef0123456789abcdef01234567"],
+    )
+    def test_accepts_supported_git_sha(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        git_sha: str,
+    ) -> None:
+        version_json = _valid_version_json("t", git_sha=git_sha)
+        code = _invoke_main(tmp_path, version_json)
+        captured = capsys.readouterr()
+        assert code == 0
+        assert json.loads(captured.out)["git_sha"] == git_sha
 
     def test_failure_does_not_overwrite_existing_output(
         self, capsys: pytest.CaptureFixture[str], tmp_path: Path
