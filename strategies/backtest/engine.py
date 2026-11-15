@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
+from bisect import bisect_right
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from itertools import pairwise
@@ -1034,16 +1035,13 @@ class VectorBacktestEngine:
         signals_by_date = dict(signals.partition_by("execution_date", as_dict=True)) if not signals.is_empty() else {}
         quotes_by_date = dict(quotes_df.partition_by("trade_date", as_dict=True)) if not quotes_df.is_empty() else {}
 
+        # D12-006: 调仓日集合由唯一调仓计划推导，与 IC 持有期退出日同源。
+        rebalance_days = set(self._build_rebalance_plan(trade_dates, signals_by_date, self.config.rebalance_freq))
+
         for exec_date in trade_dates:
             day_signals = signals_by_date.get((exec_date,), signals.clear())
             day_quotes = quotes_by_date.get((exec_date,), quotes_df.clear())
-            is_rebalance = self._is_rebalance_day(
-                exec_date,
-                trade_dates,
-                signals_by_date,
-                self.config.rebalance_freq,
-            )
-            simulator.process_day(exec_date, day_signals, day_quotes, is_rebalance)
+            simulator.process_day(exec_date, day_signals, day_quotes, exec_date in rebalance_days)
 
         if delist_stats is not None:
             delist_stats["delist_liquidation_count"] = simulator.delist_liquidation_count
@@ -1064,6 +1062,9 @@ class VectorBacktestEngine:
         1. 根据 rebalance_freq 确定持有期
         2. forward_return = 执行价到下一次调仓执行价的收益
         3. 使用复权价格计算收益（qfq_close）
+        4. 下一次调仓日由与撮合层同一调仓计划（``_build_rebalance_plan``）推导：
+           ``signal`` 频率只取实际有信号的执行日，不再退化为「次交易日」；
+           区间内无后续调仓日的信号按截尾跳过。
 
         返回 ``(ic_values, ic_dates, ic_sample_sizes)``，``ic_dates[i]`` 为
         ``ic_values[i]`` 对应的信号日期（即 ``trade_dates[i]``，非执行日期），
@@ -1089,6 +1090,13 @@ class VectorBacktestEngine:
             if not signals.is_empty()
             else {}
         )
+        # D12-006: 执行日分区与撮合层一致（signal 频率的调仓日集合即实际有信号的执行日）。
+        signals_by_exec_date = dict(signals.partition_by("execution_date", as_dict=True))
+        rebalance_plan = self._build_rebalance_plan(
+            trade_dates,
+            signals_by_exec_date,
+            self.config.rebalance_freq,
+        )
 
         ic_values = []
         ic_dates = []
@@ -1106,7 +1114,7 @@ class VectorBacktestEngine:
             if execution_quotes is None:
                 continue
 
-            next_rebalance_date = self._get_next_rebalance_date(execution_date, trade_dates, self.config.rebalance_freq)
+            next_rebalance_date = self._next_rebalance_date_in_plan(rebalance_plan, execution_date)
 
             if next_rebalance_date is None:
                 continue
@@ -1150,32 +1158,46 @@ class VectorBacktestEngine:
         assert len(ic_values) == len(ic_dates)
         return pl.Series(ic_values, dtype=pl.Float64), ic_dates, ic_sample_sizes
 
+    def _build_rebalance_plan(
+        self,
+        trade_dates: list[date],
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] | None,
+        rebalance_freq: str,
+    ) -> list[date]:
+        """按与撮合层相同的判定口径（``_is_rebalance_day``）生成调仓执行日序列。
+
+        D12-006：调仓日集合是唯一来源——撮合层按该集合判定 ``is_rebalance``，
+        IC 持有期退出日也在同一集合上取「下一个」，避免二者各自推导导致口径漂移。
+        ``signal`` 频率必须传入按 ``execution_date`` 分区的信号：该频率只在
+        **实际有信号的执行日**调仓，无信号日不构成调仓日。
+        """
+        by_date = signals_by_date or {}
+        return [
+            exec_date
+            for exec_date in trade_dates
+            if self._is_rebalance_day(exec_date, trade_dates, by_date, rebalance_freq)
+        ]
+
+    @staticmethod
+    def _next_rebalance_date_in_plan(rebalance_plan: list[date], execution_date: date) -> date | None:
+        """返回调仓计划中严格晚于 ``execution_date`` 的第一个调仓日；无后续返回 None（截尾）。"""
+        idx = bisect_right(rebalance_plan, execution_date)
+        return rebalance_plan[idx] if idx < len(rebalance_plan) else None
+
     def _get_next_rebalance_date(
         self,
         execution_date: date,
         trade_dates: list[date],
         rebalance_freq: str,
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] | None = None,
     ) -> date | None:
-        try:
-            current_idx = trade_dates.index(execution_date)
-        except ValueError:
-            return None
+        """返回 ``execution_date`` 之后的下一个实际调仓执行日。
 
-        if rebalance_freq in ("daily", "signal"):
-            next_idx = current_idx + 1
-            if next_idx >= len(trade_dates):
-                return None
-            return trade_dates[next_idx]
-
-        for j in range(current_idx + 1, len(trade_dates)):
-            candidate = trade_dates[j]
-            prev_date = trade_dates[j - 1]
-            if rebalance_freq == "weekly" and candidate.isocalendar()[1] != prev_date.isocalendar()[1]:
-                return candidate
-            if rebalance_freq == "monthly" and candidate.month != prev_date.month:
-                return candidate
-
-        return None
+        ``signal`` 频率需传入按 ``execution_date`` 分区的信号；未传时该频率没有
+        可判定的调仓日（返回 None），不得退化为「次交易日」近似。
+        """
+        plan = self._build_rebalance_plan(trade_dates, signals_by_date, rebalance_freq)
+        return self._next_rebalance_date_in_plan(plan, execution_date)
 
     def _calc_benchmark_returns(
         self,
