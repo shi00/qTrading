@@ -326,7 +326,8 @@ _BLOCK_FORMATS = ("markdown", "yaml")
 class BlockSpan:
     """扫描到的生成块：块身份、首/末标记 1-based 行号、内容行、原标记行文本。
 
-    保留原标记行文本用于替换重组（不重写形态，避免对既有目标产生意外 diff）。
+    原标记行文本仅供调用方参考形态；替换按原文行区间拼接，不重写标记行，
+    避免对既有目标产生意外 diff。
     """
 
     block_id: str
@@ -452,28 +453,58 @@ def scan_blocks(text: str, fmt: str) -> dict[str, BlockSpan]:
     raise InvalidSpecError(f"未知块格式: {fmt!r}（允许 {' / '.join(_BLOCK_FORMATS)}）")
 
 
-def _join_lines(text: str, lines: list[str]) -> str:
-    """按原文主流行尾重组文本并保留尾换行标志（CRLF/LF 不被规范化改写）。"""
-    newline = "\r\n" if "\r\n" in text else "\n"
-    out = newline.join(lines)
-    if text.endswith("\n"):
-        out += newline
-    return out
+def _split_lines_with_endings(text: str) -> list[str]:
+    """按解析器行界切分原文并保留每行自身行尾（末行无行尾时保留整行）。
+
+    切分口径与 ``docs_markdown.split_source_lines`` 一致（仅 LF / CRLF / CR 计行，
+    Unicode 行分隔符留在行内），行数一一对应；额外保留行尾，供块内区间替换时
+    逐字节保留块外文本。
+    """
+    lines: list[str] = []
+    start = 0
+    index = 0
+    while index < len(text):
+        if text[index] == "\r":
+            index += 2 if text.startswith("\r\n", index) else 1
+            lines.append(text[start:index])
+            start = index
+        elif text[index] == "\n":
+            index += 1
+            lines.append(text[start:index])
+            start = index
+        else:
+            index += 1
+    if start < len(text):
+        lines.append(text[start:])
+    return lines
+
+
+def _line_ending(raw_line: str) -> str:
+    """返回单行文本的行尾（``\\r\\n`` / ``\\r`` / ``\\n``；无行尾返回空串）。"""
+    if raw_line.endswith("\r\n"):
+        return "\r\n"
+    if raw_line.endswith(("\r", "\n")):
+        return raw_line[-1]
+    return ""
 
 
 def replace_block(text: str, fmt: str, block_id: str, new_lines: Sequence[str]) -> str:
-    """将目标文本中登记块的内容替换为渲染输出；块边界标记与块外正文原样保留。
+    """将目标文本中登记块的内容替换为渲染输出；块外正文与各行行尾逐字节保留。
 
-    同一文本多块替换时按起始行号**降序**应用，保证先应用的块不使后应用块的行号失效。
+    只替换开始标记行之后、结束标记行之前的区间：前缀、后缀与首尾标记行（含各自
+    行尾）原样保留，不全文统一 join，故混合行尾 / 仅 CR 行尾 / 末行无行尾均不被
+    规范化。新内容行沿用开始标记行的行尾。多块替换时逐块重新扫描，结果与调用
+    次序无关，故无需依赖起始行号降序。
     """
     blocks = scan_blocks(text, fmt)
     if block_id not in blocks:
         raise MissingBlockError(f"文本中缺少生成块 {block_id!r}")
     span = blocks[block_id]
-    lines = list(docs_markdown.split_source_lines(text))
-    replacement = [span.start_tag_line, *list(new_lines), span.end_tag_line]
-    rebuilt = [*lines[: span.start_line - 1], *replacement, *lines[span.end_line :]]
-    return _join_lines(text, rebuilt)
+    raw_lines = _split_lines_with_endings(text)
+    start_raw = raw_lines[span.start_line - 1]
+    terminator = _line_ending(start_raw)
+    content = "".join(f"{line}{terminator}" for line in new_lines)
+    return "".join(raw_lines[: span.start_line - 1]) + start_raw + content + "".join(raw_lines[span.end_line - 1 :])
 
 
 # ---------------------------------------------------------------------------
