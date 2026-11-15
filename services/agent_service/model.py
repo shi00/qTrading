@@ -173,6 +173,19 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                     text = content
                 elif isinstance(content, TextContent):
                     text = content.content
+                elif isinstance(content, Sequence) and not isinstance(content, (bytes, bytearray, str)):
+                    # Harness 计划提醒等以 UserPromptPart([TextContent(..., metadata=...)] )
+                    # 投递：按出现顺序取文本，元数据（origin 等）留在服务侧，不出站。
+                    texts: list[str] = []
+                    for sub_index, item in enumerate(content):
+                        if not isinstance(item, TextContent):
+                            # BinaryContent 等非文本内容：明确拒绝，不静默降级为图片
+                            kind = getattr(item, "part_kind", type(item).__name__)
+                            raise ModelTurnProtocolError(
+                                "unknown_part", f"{part_path}.user_prompt.content[{sub_index}].{kind}"
+                            )
+                        texts.append(item.content)
+                    text = "\n".join(texts)
                 else:
                     # BinaryContent 等非文本内容：明确拒绝，不静默降级为图片
                     raise _reject_part(part, f"{part_path}.user_prompt.content")

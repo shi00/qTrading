@@ -13,13 +13,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Protocol
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Protocol, cast
 
-from pydantic_ai_harness.planning import PlanItem, TaskStatus
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.tools import RunContext
+from pydantic_ai_harness.compaction import SummarizingCompaction
+from pydantic_ai_harness.planning import PlanItem, Planning, PlanStore, TaskStatus
 
-from core.agent_types import PlanItemSnapshot, PlanProposal
+from core.agent_types import AgentErrorCode, AgentServiceError, Mode, PlanItemSnapshot, PlanProposal
 
 
 class PlanProposalDao(Protocol):
@@ -219,3 +223,183 @@ def build_plan_store(dao: PlanProposalDao, binding: PlanStoreBinding) -> PlanPro
     """装配计划提案 store（生产由运行装配以受理的 execution/plan_revision 调用）。"""
 
     return PlanProposalStore(dao, binding)
+
+
+# ---------------------------------------------------------------------------
+# Planning 装配（HANDOFF §7.3；DD §10.3）
+# ---------------------------------------------------------------------------
+
+
+def resolve_plan_store(ctx: RunContext[Any]) -> PlanStore:
+    """默认 store 解析器：从运行 deps 取已绑定的 store。
+
+    不提供进程级隐式 store：deps 未暴露 ``plan_store`` 即报错，避免把不同
+    execution 的计划串到同一份内存状态上。
+    """
+
+    deps = getattr(ctx, "deps", None)
+    store = getattr(deps, "plan_store", None)
+    if store is None:
+        raise ValueError("agent run deps must expose plan_store to use Planning")
+    return cast(PlanStore, store)
+
+
+def build_planning_capability(
+    *,
+    tools: Sequence[str] | None = None,
+    enable_subtasks: bool = True,
+    store_resolver: Callable[[RunContext[Any]], PlanStore] | None = None,
+) -> Planning[Any]:
+    """装配 ``Planning``（计划在工具结果中以 ``<plan_reminder>`` 回显）。
+
+    - ``store_resolver`` 缺省为 :func:`resolve_plan_store`（deps.plan_store）；
+    - ``tools`` 为工具白名单（``None`` 注册全部）；
+    - ``enable_subtasks`` 默认开启（子任务/依赖工具与 ``blocked`` 状态）。
+    """
+
+    return Planning(
+        store_resolver=store_resolver or resolve_plan_store,
+        tools=tools,
+        enable_subtasks=enable_subtasks,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 摘要压缩装配（DD §10.3「SummarizingCompaction」）
+# ---------------------------------------------------------------------------
+
+
+def build_summarizing_compaction(
+    *,
+    model: Model | str | None,
+    max_tokens: int,
+    keep_messages: int,
+) -> SummarizingCompaction[Any]:
+    """装配摘要压缩，摘要出口必须与主轮同一绑定模型（summary 一账）。
+
+    - ``model`` 必须显式传入已绑定的 GatewayModel（``None`` → ``ValueError``），
+      不允许落到供应商默认出口；摘要请求与主轮共用同一 executor/binding，
+      因此记入同一 Recorder 账本；
+    - ``retries=0``：空摘要/模仿工具调用等失败不回退重试，直接显式失败；
+    - ``tool_return_max_chars=None``：工具返回原文进入摘要，不静默截断；
+    - ``preserve_first_user_message``/``incremental`` 显式冻结（早纠正保留、
+      摘要增量化而非摘要的摘要）。
+    """
+
+    if model is None:
+        raise ValueError("summarizing compaction requires the bound GatewayModel instance")
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+        raise ValueError("max_tokens must be a positive int")
+    if isinstance(keep_messages, bool) or not isinstance(keep_messages, int) or keep_messages < 0:
+        raise ValueError("keep_messages must be an int >= 0")
+    return SummarizingCompaction(
+        model=model,
+        max_tokens=max_tokens,
+        keep_messages=keep_messages,
+        retries=0,
+        tool_return_max_chars=None,
+        preserve_first_user_message=True,
+        incremental=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ResearchBoundary（DD §10.3：核模式、来源撤用、窗口）
+# ---------------------------------------------------------------------------
+
+SourceKey = tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchBoundaryPolicy:
+    """一次模型请求前的边界策略（由运行装配按最新事实提供）。
+
+    - ``allowed_tool_names``：当前模式允许暴露的工具名（讨论/计划模式收窄）；
+    - ``active_source_keys``：本轮已登记来源 (source_id, version)；
+    - ``disabled_source_keys``：当前已禁用的来源键；
+    - ``context_window_tokens`` / ``estimated_input_tokens``：实际窗口与估计
+      输入；任一为 ``None`` 表示无法核定——边界拒绝放行，不用测试字节数代替。
+    """
+
+    mode: Mode
+    allowed_tool_names: frozenset[str]
+    active_source_keys: frozenset[SourceKey]
+    disabled_source_keys: frozenset[SourceKey]
+    context_window_tokens: int | None
+    estimated_input_tokens: int | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, Mode):
+            raise ValueError("research boundary mode must be a core Mode")
+        for name in ("context_window_tokens", "estimated_input_tokens"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive int or None")
+        for key_set_name in ("active_source_keys", "disabled_source_keys"):
+            for key in getattr(self, key_set_name):
+                if not isinstance(key, tuple) or len(key) != 2:
+                    raise ValueError(f"{key_set_name} entries must be (source_id, version) tuples")
+                if not all(isinstance(part, str) and part for part in key):
+                    raise ValueError(f"{key_set_name} entries must carry non-empty text")
+
+
+def evaluate_research_boundary(policy: ResearchBoundaryPolicy) -> str | None:
+    """返回阻断原因；``None`` 表示未触发阻断（不代表授权已通过）。"""
+
+    if policy.active_source_keys & policy.disabled_source_keys:
+        return "source_disabled"
+    if policy.context_window_tokens is None or policy.estimated_input_tokens is None:
+        return "window_unknown"
+    if policy.estimated_input_tokens > policy.context_window_tokens:
+        return "context_window_exceeded"
+    return None
+
+
+@dataclass(kw_only=True)
+class ResearchBoundary(AbstractCapability[Any]):
+    """模型请求前的边界能力：模式裁剪工具、禁用来源阻断、窗口阻断。
+
+    只做裁剪/阻断，不授权：真实授权仍在派发点按最新事实二次核定；策略由
+    ``policy_provider`` 每次请求新鲜取得（异步，可回读 DAO）。不修改
+    ``messages``/持久历史，不捕获 ``CancelledError``（R2）。
+    """
+
+    policy_provider: Callable[[RunContext[Any]], Awaitable[ResearchBoundaryPolicy]]
+    id: str | None = "research_boundary"
+
+    async def before_model_request(
+        self, ctx: RunContext[Any], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        policy = await self.policy_provider(ctx)
+        reason = evaluate_research_boundary(policy)
+        if reason == "source_disabled":
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "source disabled for new dispatch",
+                "research_boundary",
+            )
+        if reason == "window_unknown":
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "context window unknown; refusing to guess before dispatch",
+                "research_boundary",
+            )
+        if reason == "context_window_exceeded":
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                f"context window exceeded: estimated={policy.estimated_input_tokens} "
+                f"window={policy.context_window_tokens}",
+                "research_boundary",
+            )
+        if policy.mode is Mode.EXECUTE:
+            return request_context
+        parameters = request_context.model_request_parameters
+        allowed = [tool for tool in parameters.function_tools if tool.name in policy.allowed_tool_names]
+        if len(allowed) == len(parameters.function_tools):
+            return request_context
+        return replace(
+            request_context,
+            model_request_parameters=replace(parameters, function_tools=allowed),
+        )
