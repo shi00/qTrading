@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import hashlib
 
+import requests
+
 from data.external.tushare.capability_probe import _RUNTIME_UNAVAILABLE_TTL
 from data.external.tushare_client import TushareClient, TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
@@ -742,6 +744,129 @@ class TestProbeTokenConsistency:
         assert client.token == "new_token_after_cancel"
         # 互斥标志应释放（finally 块）
         assert client._probe_in_progress is False
+
+
+class TestProbeCapabilityGenerationIsolation:
+    """D08-001：probe 结果归属必须按 token 代次（generation）判定，而非 token 字符串。
+
+    ``set_token_async`` 每次替换 token 都会在同一把锁内清空缓存并递增代次。A→B→A
+    期间代次已从 0 递增到 2，即使 token 字符串回到 A，probe 入口快照/写回也不得把
+    第 0 代的权限结论与运行标记写入第 2 代缓存（同 token 重复提交不递增代次）。
+    """
+
+    def _make_client(self, tier="points_120"):
+        """创建 client 并 mock 档位（points_120 仅 probe daily + shibor_lpr）。"""
+        with (
+            patch("data.external.tushare_client.ts") as mock_ts,
+            patch("data.external.tushare_client.ConfigHandler") as mock_ch,
+        ):
+            mock_ts.pro_api.return_value = MagicMock()
+            mock_ch.get_token.return_value = "test_token"
+            mock_ch.get_tushare_timeout.return_value = 30
+            mock_ch.get_request_max_retries.return_value = 3
+            mock_ch.get_tushare_point_tier.return_value = tier
+            client = TushareClient(token="test_token")
+        client._get_tushare_point_tier = lambda: tier
+        return client
+
+    @staticmethod
+    async def _switch_token_round_trip(client):
+        """模拟 probe 在飞期间 token A→B→A（两次 set_token 各自清缓存 + 递增代次）。"""
+        await client.set_token_async("token_b")
+        await client.set_token_async("test_token")
+
+    @pytest.mark.asyncio
+    async def test_a_b_a_success_discards_stale_results(self):
+        """A→B→A 后 probe 成功：旧代次结果不得写入新代次缓存，也不得更新 last_probe_time。"""
+        client = self._make_client()
+        persist_mock = AsyncMock()
+        client.persist_capabilities_to_app_state = persist_mock
+        client.mark_api_unavailable("daily")  # 第 0 代权限结论
+        entry_generation = client.get_capability_generation()
+        switched = [False]
+
+        async def fake_probe_call(api_name, func, **params):
+            if not switched[0]:
+                switched[0] = True
+                await self._switch_token_round_trip(client)
+            return None  # probe 成功（结论属于已被替换的 token 上下文）
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+
+        # 代次确实递增了两次（前置条件自检）
+        assert client.get_capability_generation() == entry_generation + 2
+        # set_token 已清空缓存，旧代次结果不得写入；第 0 代 False 也不得残留
+        assert client.is_api_available("daily") is None
+        assert client.get_last_probe_time() is None
+        persist_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_b_a_exception_does_not_restore_stale_cache(self):
+        """A→B→A 后普通异常：不得把已清空的第 0 代 False 权限回滚进第 2 代缓存。"""
+        client = self._make_client()
+        client.mark_api_unavailable("daily")  # 第 0 代权限结论（入口快照内容）
+        assert client.is_api_available("daily") is False
+
+        persist_calls: list[bool] = []
+
+        async def persist_with_round_trip_then_fail():
+            persist_calls.append(True)
+            await self._switch_token_round_trip(client)
+            raise RuntimeError("persist failed")
+
+        client.persist_capabilities_to_app_state = persist_with_round_trip_then_fail
+
+        async def fake_probe_call(api_name, func, **params):
+            return None  # probe 成功 → 主流程先写入 True
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+
+        # 证明普通异常路径确实被执行（而非提前返回）
+        assert persist_calls == [True]
+        # 回滚必须按代次判定为过时：第 0 代 daily=False 不得复活到第 2 代
+        assert client.is_api_available("daily") is None
+
+    @pytest.mark.asyncio
+    async def test_a_b_a_cancel_does_not_restore_stale_cache(self):
+        """A→B→A 后取消：保持 CancelledError 传播（R2），且不回滚旧代次缓存。"""
+        client = self._make_client()
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client.mark_api_unavailable("daily")  # 第 0 代权限结论
+
+        async def fake_probe_call(api_name, func, **params):
+            await self._switch_token_round_trip(client)
+            raise asyncio.CancelledError()
+
+        client._handle_probe_call = fake_probe_call
+        with pytest.raises(asyncio.CancelledError):
+            await client.probe_api_capabilities()
+
+        assert client.is_api_available("daily") is None
+        assert client.get_last_probe_time() is None
+        assert client._probe_in_progress is False
+
+    @pytest.mark.asyncio
+    async def test_a_b_a_service_unavailable_skips_probe_time_and_persist(self):
+        """A→B→A 后服务不可用降级分支：过时代次不得更新 last_probe_time / 落库。"""
+        client = self._make_client()
+        persist_mock = AsyncMock()
+        client.persist_capabilities_to_app_state = persist_mock
+
+        switched = [False]
+
+        async def fake_probe_call(api_name, func, **params):
+            if not switched[0]:
+                switched[0] = True
+                await self._switch_token_round_trip(client)
+            raise requests.exceptions.ConnectionError("connection refused")
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+
+        assert client.get_last_probe_time() is None
+        persist_mock.assert_not_awaited()
 
 
 class TestResetSingletonBgTasks:
