@@ -8,6 +8,7 @@
 - ``read_command`` 查命令保存/投递/消费原事实（§4.2，不生成新决定）；
 - ``read_session`` / ``get_snapshot`` / ``read_events`` / ``observe_session`` 为
   §4.1/§4.2 读取入口，直接复用 C-03 一致读取截点与观察实现；
+- ``read_delivery`` 查回原交付 manifest 与当前修订（§10.5 unknown/中断核对）；
 - ``submit`` / ``control`` / ``answer`` / ``search`` / ``deliver_artifact`` 等写路径
   依赖原生 root workflow 派发（E-04 计划 + DBOS launch，当前受 Q5 阻塞），
   未就绪前不提供占位实现，避免把「未派发」伪装成「已受理」。
@@ -35,6 +36,7 @@ from core.agent_types import (
     ArtifactReadQuery,
     CommandReceipt,
     CommandRef,
+    DeliveryRead,
     DraftReceipt,
     DraftSaveCommand,
     DraftTransferCommand,
@@ -129,6 +131,16 @@ class AgentService:
 
         self._require_open("read_artifact")
         return await self._dao.read_artifact(query, user_scope=user_scope)
+
+    async def read_delivery(self, *, user_scope: str, operation_id: str) -> DeliveryRead:
+        """原交付查回（§10.5）：按原 operation 定位 manifest 与当前修订。
+
+        unknown/中断核对只读原身份与事实，不按当前表单重推目标/格式；未开始
+        交付返回 ``manifest=None``（初始态），坏行为 ``OPERATION_UNKNOWN``。
+        """
+
+        self._require_open("read_delivery")
+        return await self._dao.read_delivery(user_scope=user_scope, operation_id=operation_id)
 
     async def read_operation(self, query: OperationReadQuery, *, user_scope: str) -> OperationRead:
         """公开过程/完整工具返回（§4.2）：调用元数据与 effect/io 事实单列。

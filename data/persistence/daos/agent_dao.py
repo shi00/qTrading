@@ -79,6 +79,7 @@ from core.agent_types import (
     DeliveryFact,
     DeliveryManifest,
     DeliveryPhaseReceipt,
+    DeliveryRead,
     DeliveryState,
     decode_delivery_manifest,
     encode_delivery_manifest,
@@ -1595,6 +1596,55 @@ class AgentDao(BaseDao):
                 artifact_version=manifest.artifact_version,
                 idempotent=False,
             )
+
+    async def read_delivery(self, *, user_scope: str, operation_id: str) -> DeliveryRead:
+        """查回原交付事实（§10.5）：按原 operation 定位 manifest 与当前修订。
+
+        - 行不存在/跨用户 → ``INPUT_INVALID``；未开始交付返回 ``manifest=None``
+          （初始态，不等于失败/unknown）；
+        - 已存 manifest 不可解码 → ``OPERATION_UNKNOWN``，不静默当作未开始；
+        - 行上 artifact 身份与 manifest 不一致 → ``OPERATION_UNKNOWN``（坏行）；
+        - 只读原事实，不按当前表单重推目标/格式，不改任何状态。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{operation_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(operation_id, "operation_id", identity)
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.delivery_manifest,
+                        AgentOperation.artifact_id,
+                        AgentOperation.artifact_version,
+                        AgentOperation.revision,
+                    ).where(
+                        AgentOperation.user_scope == user_scope,
+                        AgentOperation.operation_id == operation_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "operation does not exist", identity)
+        if row.delivery_manifest is None:
+            return DeliveryRead(operation_id=operation_id, revision=row.revision, manifest=None)
+        try:
+            manifest = decode_delivery_manifest(row.delivery_manifest)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"stored delivery manifest is invalid: {exc.code}",
+                identity,
+            ) from exc
+        if row.artifact_id is not None and (
+            row.artifact_id != manifest.artifact_id or row.artifact_version != manifest.artifact_version
+        ):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "delivery artifact identity mismatch", identity)
+        return DeliveryRead(operation_id=operation_id, revision=row.revision, manifest=manifest)
 
     async def bind_actual_input(self, request: BindActualInputRequest) -> BindActualInputReceipt:
         """首派发实际输入绑定（§9.13/SQ-02 W 首步）：建 agent_round +

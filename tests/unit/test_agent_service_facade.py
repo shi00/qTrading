@@ -19,6 +19,7 @@ from core.agent_types import (
     CommandRef,
     CommitState,
     ConsumptionState,
+    DeliveryRead,
     DeliveryState,
     DraftPayload,
     DraftReceipt,
@@ -267,6 +268,12 @@ class _FakeDao:
             raise self.error
         return _RECEIPT
 
+    async def read_delivery(self, *, user_scope: str, operation_id: str) -> DeliveryRead:
+        self.calls.append(("read_delivery", (), {"user_scope": user_scope, "operation_id": operation_id}))
+        if self.error is not None:
+            raise self.error
+        return DeliveryRead(operation_id=operation_id, revision=4, manifest=None)
+
     async def get_session_read(self, query: SessionReadQuery, *, user_scope: str) -> SessionRead:
         self.calls.append(("get_session_read", (query,), {"user_scope": user_scope}))
         return cast(SessionRead, self.session)
@@ -328,6 +335,24 @@ class TestReadDelegation:
         event_query = EventReadQuery(user_scope="u1", session_id="s1", after_seq=0)
         assert await service.read_events(event_query) is fake.events
         assert [call[0] for call in fake.calls] == ["get_session_read", "read_events"]
+
+    @pytest.mark.asyncio
+    async def test_read_delivery_passes_operation_identity(self) -> None:
+        fake = _FakeDao()
+        read = await _service(fake).read_delivery(user_scope="u1", operation_id="op-1")
+        assert read.operation_id == "op-1"
+        assert read.manifest is None
+        assert fake.calls == [("read_delivery", (), {"user_scope": "u1", "operation_id": "op-1"})]
+
+    @pytest.mark.asyncio
+    async def test_read_delivery_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.read_delivery(user_scope="u1", operation_id="op-1")
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
 
     def test_observe_session_delegates_iterator(self) -> None:
         fake = _FakeDao()

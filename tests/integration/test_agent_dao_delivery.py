@@ -299,3 +299,98 @@ class TestDeliveryPhaseCas:
                 user_scope=USER_SCOPE, operation_id="op-missing", expected_revision=0, manifest=_manifest()
             )
         assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+
+class TestReadDelivery:
+    """E-05-4c：unknown/中断核对只读原交付事实，不按当前表单重推。"""
+
+    @pytest.mark.asyncio
+    async def test_manifest_and_revision_are_returned(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        saved = await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=1, manifest=_manifest()
+        )
+
+        read = await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+
+        assert read.operation_id == "op-deliver"
+        assert read.revision == saved.revision
+        assert read.manifest == _manifest()
+
+    @pytest.mark.asyncio
+    async def test_operation_without_delivery_is_initial_state(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+
+        read = await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+
+        assert read.manifest is None
+        assert read.revision == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_operation_is_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-missing")
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_cross_user_read_is_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=1, manifest=_manifest()
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.read_delivery(user_scope=OTHER_SCOPE, operation_id="op-deliver")
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_corrupt_manifest_is_operation_unknown(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE agent_operation SET delivery_manifest = CAST(:m AS JSONB) "
+                    "WHERE user_scope = :u AND operation_id = :o"
+                ),
+                {"m": '{"phase": "staged"}', "u": USER_SCOPE, "o": "op-deliver"},
+            )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+    @pytest.mark.asyncio
+    async def test_artifact_identity_mismatch_is_operation_unknown(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_operation(dao)
+        await dao.save_delivery_phase(
+            user_scope=USER_SCOPE, operation_id="op-deliver", expected_revision=1, manifest=_manifest()
+        )
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                insert(AgentArtifact).values(
+                    user_scope=USER_SCOPE,
+                    artifact_id="art-1",
+                    artifact_version=99,
+                    session_id="s1",
+                    execution_id="exec-1",
+                    round_id="round-1",
+                    artifact_kind="plan",
+                    input_revision=1,
+                    actual_input_digest="d" * 64,
+                    actual_model_ref="model/main",
+                    result_digest="e" * 64,
+                    source_available_state="current",
+                )
+            )
+            await conn.execute(
+                text("UPDATE agent_operation SET artifact_version = 99 WHERE user_scope = :u AND operation_id = :o"),
+                {"u": USER_SCOPE, "o": "op-deliver"},
+            )
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.read_delivery(user_scope=USER_SCOPE, operation_id="op-deliver")
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN

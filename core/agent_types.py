@@ -8326,6 +8326,20 @@ class DeliveryPhaseReceipt:
     idempotent: bool
 
 
+@dataclass(frozen=True, slots=True)
+class DeliveryRead:
+    """原交付查回（§10.5）：operation 行当前修订 + 已存 manifest。
+
+    ``manifest is None`` 表示该 operation 尚无交付记录（初始态），与「查不到
+    operation」（``INPUT_INVALID``）和「坏行」（``OPERATION_UNKNOWN``）分开，
+    不得互相冒充。
+    """
+
+    operation_id: str
+    revision: int
+    manifest: DeliveryManifest | None
+
+
 # ---------------------------------------------------------------------------
 # E-05-3 三格式渲染与逐字段回读契约（DD-F26 / §10.5 / HANDOFF §10.2）
 # ---------------------------------------------------------------------------
