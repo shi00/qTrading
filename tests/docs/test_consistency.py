@@ -2916,6 +2916,77 @@ class TestExceptionsYamlConsistency:
         errors = check_exceptions_yaml_consistency()
         assert errors == [], "当前项目配置应通过 exceptions.yml 校验, 失败:\n  " + "\n  ".join(errors)
 
+    def _mutate_real_ex0017(self, tmp_path, monkeypatch, **changes):
+        """复制真实 exceptions.yml 并只改 EX-0017 的指定字段（单变因），切换到临时注册表.
+
+        保留其余条目与真实 pyproject 回指，确保完整 all 检查中不会被 GATE-02/04 等
+        其他守卫替代拦截——断言失败即由本次字段校验负责。
+        """
+        import yaml
+
+        real_registry = ROOT / "docs" / "governance" / "exceptions.yml"
+        data = yaml.safe_load(real_registry.read_text(encoding="utf-8"))
+        entry = next(e for e in data["exceptions"] if e.get("id") == "EX-0017")
+        entry.update(changes)
+        target = tmp_path / "exceptions.yml"
+        target.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", target)
+        return target
+
+    @pytest.mark.parametrize(
+        ("field", "value", "expected"),
+        [
+            ("approved_by", "", "approved_by 应为非空字符串"),
+            ("approved_by", 123, "approved_by 应为非空字符串"),
+            ("paths", [], "paths 应为非空 list"),
+            ("paths", "services/news_subscription_service.py", "paths 应为非空 list"),
+            ("paths", [""], "paths 元素应为非空字符串"),
+            ("owner", "", "owner 应为非空字符串"),
+            ("owner", ["架构维护者"], "owner 应为非空字符串"),
+            ("verification", "   ", "verification 应为非空字符串"),
+            ("validity_criteria", "", "validity_criteria 应为非空字符串"),
+            ("validity_criteria", None, "validity_criteria 应为非空字符串"),
+            ("reason", "  ", "reason 应为非空字符串"),
+            ("id", "EX-17", "id 格式应为 EX-XXXX"),
+            ("rule_id", "", "rule_id 应为非空字符串"),
+        ],
+    )
+    def test_rejects_blank_or_wrong_typed_exception_field(self, tmp_path, monkeypatch, field, value, expected):
+        """EX-0017 任一字段置空或类型错误（单变因）都必须被拒绝，不得只核 key 存在."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        self._mutate_real_ex0017(tmp_path, monkeypatch, **{field: value})
+        errors = check_exceptions_yaml_consistency()
+        assert any(expected in e for e in errors), f"{field}={value!r} 应被拒绝（{expected}）, got: {errors}"
+
+    def test_rejects_unknown_exception_field(self, tmp_path, monkeypatch):
+        """未登记字段（如拼写错误的 approved）不得被当作合法豁免依据."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        self._mutate_real_ex0017(tmp_path, monkeypatch, approved="架构维护者")
+        errors = check_exceptions_yaml_consistency()
+        assert any("含未知字段" in e and "approved" in e for e in errors), f"应拒绝未知字段, got: {errors}"
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            (".", "不得指向仓库根"),
+            ("../pyproject.toml", "不得指向仓库之外"),
+        ],
+    )
+    def test_rejects_scope_that_escapes_or_means_global(self, tmp_path, monkeypatch, path, expected):
+        """空范围/仓库根/越界路径不得被解释为全仓库豁免."""
+        from check_docs_consistency import ROOT, check_exceptions_yaml_consistency
+
+        absolute = str((ROOT / "pyproject.toml").resolve())
+        self._mutate_real_ex0017(tmp_path, monkeypatch, paths=[path])
+        errors = check_exceptions_yaml_consistency()
+        assert any(expected in e for e in errors), f"paths={path!r} 应被拒绝（{expected}）, got: {errors}"
+
+        self._mutate_real_ex0017(tmp_path, monkeypatch, paths=[absolute])
+        errors = check_exceptions_yaml_consistency()
+        assert any("须为仓库相对路径" in e for e in errors), f"绝对路径 {absolute!r} 应被拒绝, got: {errors}"
+
     def test_gate02_detects_r1_count_mismatch(self, tmp_path, monkeypatch):
         """exceptions.yml R1 条目数 ≠ pyproject "R1: utils must not import business layers" 契约 ignore_imports 数 → 报错（GATE-02，GDR-01 计数唯一事实源）."""
         from check_docs_consistency import check_exceptions_yaml_consistency
