@@ -134,7 +134,8 @@ async def read_backtest_snapshot(
 def _first_timestamp(row: Mapping[str, Any]) -> datetime | date | None:
     for key in _TIMESTAMP_KEYS:
         value = row.get(key)
-        if isinstance(value, datetime):
+        # NaT/NaN 不与自身相等：必须按「时点未知」处理，不能进入 astimezone 抛裸异常。
+        if isinstance(value, datetime) and value == value:
             return value
     return None
 

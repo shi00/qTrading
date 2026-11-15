@@ -406,6 +406,31 @@ class TestXlsxExtraction:
         assert parsed.read_state is ReadState.PARTIAL
         assert parsed.read_ranges == []
         assert parsed.unread_ranges == [to_wire_dict(SheetsRange(kind="sheets", names=("S1", "S2")))]
+        # sheets 轴不投递半表内容，统计也不把未投递行计入。
+        assert parsed.blocks == []
+        assert parsed.stats["rows"] == 0
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_timeout_partial_rows_delivers_prefix_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # N1：rows 轴声明为已读的前缀行必须有对应投递内容，且统计只计已投递行。
+        data = _xlsx_bytes()
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet="S1", start=1, end=3),))
+        ticks = iter([0.0, 100.0])
+        monkeypatch.setattr("services.agent_service.attachment_worker.time.monotonic", lambda: next(ticks, 100.0))
+        parsed = parse_attachment(
+            kind=AttachmentKind.XLSX,
+            data=data,
+            selection=selection,
+            budget=AttachmentBudget(),
+            deadline=10.0,
+        )
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.read_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=1, end=1))]
+        assert parsed.unread_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=2, end=3))]
+        block = json.loads(parsed.blocks[0])
+        assert block["sheet"] == "S1"
+        assert [row["row"] for row in block["rows"]] == [1]
+        assert parsed.stats["rows"] == 1
         _assert_selected_range_contract(selection, parsed)
 
     def test_timeout_all_selection_is_explicitly_rejected(self) -> None:

@@ -185,7 +185,7 @@ class SubprocessAttachmentWorker:
         self._lock = threading.Lock()
 
     def active_pids(self) -> tuple[int, ...]:
-        """当前在途子进程 PID（取消/超时后应为空；供测试与关闭核验）。"""
+        """当前在途子进程 PID（取消/超时后回收是异步的：worker 线程收尾后清空）。"""
 
         with self._lock:
             return tuple(self._active)

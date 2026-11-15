@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC, datetime
 
+import pandas as pd
 import pytest
 
 from core.agent_types import AgentErrorCode, AgentServiceError, ReadState, SourceKind, VerificationState
@@ -138,6 +139,23 @@ class TestBacktestSnapshotRead:
         assert result.source is not None
         assert result.source.source.available_at is None
         assert result.read_state is ReadState.READY
+
+    @pytest.mark.asyncio
+    async def test_nat_available_at_is_unknown_not_an_exception(self) -> None:
+        # N3：pandas NaT 是 datetime 实例；不得进入 astimezone 抛裸 ValueError。
+        row = _row()
+        row["executed_at"] = pd.NaT
+        with_cutoff = await read_backtest_snapshot(
+            FakeReader(row=row),
+            user_scope="u1",
+            result_id="run-1",
+            cutoff="2026-02-01T00:00:00.000000Z",
+        )
+        assert with_cutoff.source is None
+        assert with_cutoff.missing_reason == "available_at_unknown"
+        without_cutoff = await read_backtest_snapshot(FakeReader(row=row), user_scope="u1", result_id="run-1")
+        assert without_cutoff.source is not None
+        assert without_cutoff.source.source.available_at is None
 
     @pytest.mark.asyncio
     async def test_naive_cutoff_rejected(self) -> None:

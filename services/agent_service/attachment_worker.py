@@ -583,6 +583,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         read_sheets: list[str] = []
         partial_sheet: str | None = None
         partial_last_row: int = 0
+        rows_axis = selection.kind == "limited" and isinstance(selection.ranges[0], RowsRange)
 
         for sheet_name in selected_sheets:
             target_rows = _xlsx_row_range(selection, sheet_name)
@@ -597,13 +598,20 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 row_number = physical_row if isinstance(physical_row, int) else row_number + 1
                 if target_rows is not None and not (target_rows[0] <= row_number <= target_rows[1]):
                     continue
-                total_rows += 1
-                budget.enforce_rows(total_rows)
                 if time.monotonic() > deadline:
                     partial_sheet = sheet_name
                     partial_last_row = last_completed_row
-                    limitations.append(_limitation("extract_timeout", "所选范围未在 30 秒内完成，已读部分保留"))
+                    limitations.append(
+                        _limitation(
+                            "extract_timeout",
+                            "所选范围未在 30 秒内完成，已完成行保留"
+                            if rows_axis
+                            else "所选范围未在 30 秒内完成，未完成的表记为未读",
+                        )
+                    )
                     break
+                total_rows += 1
+                budget.enforce_rows(total_rows)
                 formula_refs: set[str] = set()
                 for index, formula_cell in enumerate(formula_row, start=1):
                     column = getattr(formula_cell, "column", None)
@@ -646,6 +654,12 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 rows.append({"row": row_number, "cells": cells})
                 last_completed_row = row_number
             if partial_sheet is not None:
+                if rows_axis and rows:
+                    # rows 轴：已完成行是真实已读内容，必须与 read_ranges 的前缀一致地投递。
+                    blocks.append(json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows}))
+                else:
+                    # sheets 轴/all：整表记未读，不投递半表内容；统计只计已投递行。
+                    total_rows -= len(rows)
                 break
             read_sheets.append(sheet_name)
             blocks.append(json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows}))
@@ -708,8 +722,6 @@ def _xlsx_read_unread_atoms(
             "attachment_time_exceeded",
             "所选范围未在 30 秒内完成，且 selection=all 无法表达部分读取",
         )
-    if partial_sheet is None:
-        return [to_wire_dict(atom) for atom in selection.ranges], []
     read_atoms: list[dict[str, Any]] = []
     unread_atoms: list[dict[str, Any]] = []
     seen_sheets: set[str] = set()
@@ -721,7 +733,10 @@ def _xlsx_read_unread_atoms(
                 if name in seen_sheets:
                     continue
                 seen_sheets.add(name)
-                (read_names if name in read_sheets else unread_names).append(name)
+                if partial_sheet is None or name in read_sheets:
+                    read_names.append(name)
+                else:
+                    unread_names.append(name)
             if read_names:
                 read_atoms.append(to_wire_dict(SheetsRange(kind="sheets", names=tuple(read_names))))
             if unread_names:
@@ -729,7 +744,7 @@ def _xlsx_read_unread_atoms(
             continue
         assert isinstance(atom, RowsRange)
         assert atom.sheet is not None
-        if atom.sheet in read_sheets:
+        if partial_sheet is None or atom.sheet in read_sheets:
             read_atoms.append(to_wire_dict(atom))
             continue
         if atom.sheet == partial_sheet and partial_last_row >= atom.start:
