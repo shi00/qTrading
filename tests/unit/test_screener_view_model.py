@@ -1515,17 +1515,20 @@ class TestCurrentPageRows:
         condition = attr["conditions"][0]
         assert isinstance(condition, MappingProxyType)
         assert condition["threshold"] == (5.0, 20.0)
-        with pytest.raises(TypeError):
-            condition["operator"] = "gt"  # type: ignore[index]  # 冻结映射写入应被拒绝
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            condition["operator"] = "gt"  # type: ignore[index]  # 冻结映射写入应被拒绝 (运行时 TypeError)
+        assert condition["operator"] == "between"
 
         snapshot = row.values["params_snapshot"]
         assert isinstance(snapshot, MappingProxyType)
         assert isinstance(snapshot["global_config"], MappingProxyType)
         assert isinstance(snapshot["tags"], tuple)
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match="does not support item assignment"):
             snapshot["global_config"]["exclude_st"] = False  # type: ignore[index]  # 嵌套冻结映射写入应被拒绝
-        with pytest.raises(TypeError):
+        assert snapshot["global_config"]["exclude_st"] is True
+        with pytest.raises(TypeError, match="does not support item assignment"):
             snapshot["tags"][0] = "c"  # type: ignore[index]  # tuple 不可写
+        assert snapshot["tags"] == ("a", "b")
 
         # 源 DAO/DataFrame 字典就地改写不得穿透到已产出的公开行 (深复制)
         attribution["rank"]["total"] = 999
