@@ -1168,6 +1168,91 @@ class TestInvocationAndReservation:
         assert "budget reserve rejected: DB_UNAVAILABLE" in result.candidate_decisions[0].reason
 
     @pytest.mark.asyncio
+    async def test_fee_candidate_unknown_price_zero_egress_fail_closed(self):
+        """D13-005：限额已配置但价格未知（billing 缺失）→ fail-closed 拒绝，零出站。
+
+        修复前该候选估算金额 None → usage_only 放行，DAO 预算门（双非 None 才判定）
+        完全失效，形成无上限消耗。
+        """
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "budget amount unestimable" in decision.reason
+        assert "fail-closed" in decision.reason
+        # 零出站 / 零预留 / 零派发 / 零授权
+        adapter.invoke.assert_not_awaited()
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        executor._config_service.authorize_attempt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fee_candidate_usage_only_mode_zero_egress_fail_closed(self):
+        """D13-005：限额 + 显式 usage_only 计价模式（价格未知）同样 fail-closed。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        raw_conn = dict(dataclasses.asdict(_remote_conn()))
+        raw_conn["billing"] = {"mode": "usage_only", "pricing_unit": "llm_tokens"}
+        result = await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (raw_conn,)),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        assert "budget amount unestimable" in result.candidate_decisions[0].reason
+        adapter.invoke.assert_not_awaited()
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fee_candidate_unknown_price_falls_over_to_priced_candidate(self):
+        """D13-005：未知价格候选拒绝不阻断遍历——切换下一计价可估算候选成功。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_fee_candidate(0, "conn-a"), _fee_candidate(1, "conn-b")),
+                (_remote_conn("conn-a"), _priced_conn("conn-b")),
+            ),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        adapter.invoke.assert_awaited_once()
+        decisions = result.candidate_decisions
+        assert decisions[0].decision == "rejected"
+        assert "budget amount unestimable" in decisions[0].reason
+        assert decisions[1].decision == "succeeded"
+        # 仅计价可估算候选发生预留（未知价格候选零预留副作用）
+        assert recorder.try_reserve.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fee_candidate_zero_limit_with_known_price_goes_to_budget_gate(self):
+        """D13-005：0 限额不是「未配置」——金额已知仍走 DAO 预算门（拒绝 → 零出站）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=True, error_code="RESERVE_REJECTED", reservation=None)
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        cand = dict(_fee_candidate(0, "conn-remote"), budget_limit_cny="0.00")
+        result = await executor.execute(_request(), _snapshot((cand,), (_priced_conn(),)), _validator_ok)
+        adapter.invoke.assert_not_awaited()
+        reserve_kwargs = recorder.try_reserve.await_args.kwargs
+        assert reserve_kwargs["budget_limit_cny"] == "0.00"
+        assert Decimal(reserve_kwargs["amount_cny"]) > 0
+        assert result.status == "failed"
+        assert "budget reserve rejected" in result.candidate_decisions[0].reason
+
+    @pytest.mark.asyncio
     async def test_usage_only_degrades_when_reserve_unavailable(self):
         """usage_only 预留不可用 → 降级进程内派发身份（reservation_id=None）执行成功。"""
         adapter = _adapter_ok()

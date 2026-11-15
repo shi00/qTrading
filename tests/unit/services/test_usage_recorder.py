@@ -250,6 +250,38 @@ class TestTryReserve:
         assert outcome == ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("limit", ["50.00", "0.00", "-5.00", "NaN", "Infinity"])
+    async def test_try_reserve_limit_with_unknown_amount_rejected_fail_closed(self, limit):
+        """D13-005：限额已配置但金额未知（价格 / 用量不可估算）→ 拒绝预留。
+
+        DAO 预算门仅在 amount/limit 双非 None 时判定，若放行等于无上限消耗；
+        本层 fail-closed 且零 DB 副作用（不登记不占预算的 NULL 金额预留）。
+        """
+        dao = _dao_mock()
+        dao.try_reserve = AsyncMock(return_value=MagicMock())
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        kwargs = self._reserve_kwargs()
+        kwargs["amount_cny"] = None
+        kwargs["budget_limit_cny"] = limit
+        outcome = await recorder.try_reserve(**kwargs)
+        assert outcome == ReservationOutcome(persisted=True, error_code="RESERVE_AMOUNT_UNKNOWN", reservation=None)
+        dao.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_zero_limit_with_known_amount_still_gated(self):
+        """D13-005：金额已知时 0 限额仍交 DAO 预算门判定（0 不等于「未配置」）。"""
+        dao = _dao_mock()
+        dao.try_reserve = AsyncMock(return_value=None)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        kwargs = self._reserve_kwargs()
+        kwargs["amount_cny"] = "0.10"
+        kwargs["budget_limit_cny"] = "0.00"
+        outcome = await recorder.try_reserve(**kwargs)
+        assert outcome == ReservationOutcome(persisted=True, error_code="RESERVE_REJECTED", reservation=None)
+        assert dao.try_reserve.await_args.kwargs["amount_cny"] == "0.10"
+        assert dao.try_reserve.await_args.kwargs["budget_limit_cny"] == "0.00"
+
+    @pytest.mark.asyncio
     async def test_try_reserve_usage_only_null_amount(self):
         """usage_only（amount/limit 均 None）同样透传 DAO（NULL 金额预留，不占预算）。"""
         dao = _dao_mock()
