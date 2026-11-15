@@ -1130,9 +1130,15 @@ class ScreenerDao(BaseDao):
             except Exception as e:
                 logger.warning("[ScreenerDao] Failed to update prediction result: %s", safe_error(e))
 
-    async def save_screening_results(self, records: list[dict | tuple]):
+    async def save_screening_results(self, records: list[dict | tuple] | None) -> int:
+        """批量 UPSERT 筛选结果，返回 ``_save_upsert`` 的实际落库行数。
+
+        D05-001: 批内同 4 键预去重会减少实际写入行数，调用方（夜间任务/UI）据此
+        发「已保存 N 条」并推进完成标记，故不得回退为输入条数。空输入返回 0；
+        写库异常原样上抛，调用方不得拿到条数而误判成功。
+        """
         if not records:
-            return
+            return 0
 
         # computed 列（t1_price, alpha, prediction_result 等）由 get_model_columns 自动排除。
         # D03-F05: review_status 同样排除——首次插入由模型 server_default='PENDING' 生成；
@@ -1175,7 +1181,7 @@ class ScreenerDao(BaseDao):
         _pk = ["trade_date", "strategy_name", "ts_code", "run_id"]
         df = df.drop_duplicates(subset=_pk, keep="last")
 
-        await self._save_upsert(
+        saved = await self._save_upsert(
             df=df,
             table_name="screening_history",
             columns=all_cols,
@@ -1184,6 +1190,8 @@ class ScreenerDao(BaseDao):
 
         if thinking_records:
             await self._save_thinking(thinking_records)
+
+        return saved
 
     async def _save_thinking(self, thinking_records: list[dict]):
         ids_sql = "SELECT id, run_id, ts_code FROM screening_history WHERE run_id = ANY($1)"

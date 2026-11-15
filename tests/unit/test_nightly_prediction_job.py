@@ -355,6 +355,36 @@ class TestNightlyPredictionLogicClosure:
             await factory("test_task")
         return mock_tm, mock_rm
 
+    async def _execute_logic_result(
+        self,
+        svc: _FakeSvc,
+        runner,
+        mock_tm: MagicMock,
+        mock_rm: MagicMock,
+    ) -> str:
+        """执行 job factory 并返回 _prediction_logic 的结果（异常原样上抛）。"""
+        svc._last_update_date = "20240614"
+        job = build_nightly_prediction_job(runner)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager", return_value=mock_tm),
+            patch("services.scheduled_jobs.nightly_prediction.ReviewManager", return_value=mock_rm),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+            mock_dp_instance.init_data = AsyncMock()
+            mock_dp_instance.prepare_market_data = AsyncMock()
+            mock_dp_instance.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value = datetime(2024, 6, 14, 20, 30)
+            await job(svc)
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            return await factory("test_task")
+
     @pytest.mark.asyncio
     async def test_prediction_logic_with_empty_result(self):
         svc = _FakeSvc()
@@ -377,6 +407,36 @@ class TestNightlyPredictionLogicClosure:
         assert mock_rm.save_results.call_count == 1
         assert mock_rm.save_results.call_args.args[0] == "strategy_ai_nightly_name"
         assert svc.marked_dates == ["20240614"]
+
+    @pytest.mark.asyncio
+    async def test_prediction_logic_message_uses_persisted_count(self):
+        """D05-001: 成功文案与完成标记基于 DAO 的真实落库数（同键去重后 1），
+        而非输入候选数（2）——避免「宣称保存 2 条、实际只落 1 条」。"""
+        svc = _FakeSvc()
+        mock_tm = MagicMock()
+        result_df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "score": [80, 70]})
+        runner = AsyncMock(return_value=result_df)
+        mock_rm = MagicMock()
+        mock_rm.save_results = AsyncMock(return_value=1)
+
+        message = await self._execute_logic_result(svc, runner, mock_tm, mock_rm)
+
+        assert message == I18n.get("sched_pred_done_found", count=1)
+        assert svc.marked_dates == ["20240614"]
+
+    @pytest.mark.asyncio
+    async def test_prediction_logic_save_failure_does_not_mark_done(self):
+        """D05-001: save_results 抛异常（SQL 失败）时任务失败，不得发成功文案或标记完成。"""
+        svc = _FakeSvc()
+        mock_tm = MagicMock()
+        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
+        runner = AsyncMock(return_value=result_df)
+        mock_rm = MagicMock()
+        mock_rm.save_results = AsyncMock(side_effect=RuntimeError("db down"))
+
+        with pytest.raises(RuntimeError, match="db down"):
+            await self._execute_logic_result(svc, runner, mock_tm, mock_rm)
+        assert svc.marked_dates == []
 
     @pytest.mark.asyncio
     async def test_prediction_logic_passes_exec_warnings(self):
