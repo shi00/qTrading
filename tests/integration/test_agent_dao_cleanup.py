@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -39,7 +40,16 @@ from core.agent_types import (
 from data.persistence.agent_migrator import run_agent_runtime_migrations
 from data.persistence.agent_runtime_store import AgentRuntimeNativeStore
 from data.persistence.daos.agent_dao import AgentDao
-from data.persistence.models import AgentAssetVersion, AgentSession
+from data.persistence.models import (
+    AgentArtifact,
+    AgentAssetVersion,
+    AgentBodyPayload,
+    AgentExecution,
+    AgentMessage,
+    AgentOperation,
+    AgentRound,
+    AgentSession,
+)
 from services.agent_service.cleanup import (
     CleanupConfirmCommand,
     CleanupService,
@@ -341,7 +351,18 @@ async def test_tombstone_not_null_text_and_digest_with_outside_unchanged(real_em
     finally:
         await engine.dispose()
 
-    assert touched == {"agent_session": 1, "agent_asset_version": 1}
+    assert touched["agent_session"] == 1
+    assert touched["agent_asset_version"] == 1
+    assert all(
+        touched[key] == 0
+        for key in (
+            "agent_message",
+            "agent_artifact",
+            "agent_round",
+            "agent_operation",
+            "agent_body_payload",
+        )
+    )
     assert session_in.title == CLEANUP_TOMBSTONE
     assert session_in.draft_payload is None
     assert session_in.origin_ref is None
@@ -467,7 +488,10 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
     assert receipt.replayed is False
     assert len(receipt.verified_counts) == 9
     assert set(receipt.verified_counts.values()) == {0}
-    assert receipt.tombstoned == {"agent_session": 1, "agent_asset_version": 1}
+    assert receipt.tombstoned["agent_session"] == 1
+    assert receipt.tombstoned["agent_asset_version"] == 1
+    assert receipt.tombstoned["agent_message"] == 0
+    assert receipt.tombstoned["agent_body_payload"] == 0
     assert loaded is not None
     assert loaded.phase is CleanupPhase.VERIFIED
     assert loaded.fence_committed is True
@@ -480,3 +504,324 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
     assert asset_row.tombstoned is True
     assert outside.missing_ids == ()
     assert set(outside.counts.values()) == {1}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_content_domains_cleared_and_body_payloads_deleted(real_embedded_pg) -> None:
+    """E-06-5a：集合内正文承载域清空、受管正文行删除；集合外原样（§10.7 表第 1—3 行）。"""
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+
+    suffix = uuid.uuid4().hex[:8]
+    session_in, session_out = f"session-in-{suffix}", f"session-out-{suffix}"
+    execution_in, execution_out = f"execution-in-{suffix}", f"execution-out-{suffix}"
+    round_in, round_out = f"round-in-{suffix}", f"round-out-{suffix}"
+    message_in, message_out = f"message-in-{suffix}", f"message-out-{suffix}"
+    artifact_in, artifact_out = f"artifact-in-{suffix}", f"artifact-out-{suffix}"
+    operation_in = f"operation-in-{suffix}"
+    body_in, body_out = f"body-in-{suffix}", f"body-out-{suffix}"
+    secret = "私人原句-清理后不应可查"
+    now = datetime.now(UTC)
+
+    def _execution(execution_id: str, session_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "execution_id": execution_id,
+            "session_id": session_id,
+            "execution_kind": "root",
+            "source_module": f"module-{execution_id}",
+            "business_request_id": f"request-{execution_id}",
+            "intent_digest": "e" * 64,
+            "node_id": "root",
+            "display_state": "complete",
+            "goal_coverage": "full",
+        }
+
+    def _round(round_id: str, execution_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "round_id": round_id,
+            "execution_id": execution_id,
+            "round_number": 1,
+            "workflow_id": f"wf-{round_id}",
+            "workflow_code_version": "1",
+            "run_epoch": 1,
+            "input_revision": 1,
+            "plan_revision": 1,
+            "frozen_manifest": {"goal": secret},
+            "actual_input": {"input": secret},
+            "model_binding": {"prompt": secret},
+            "sdk_history_ref": f"C:/private/{suffix}-{round_id}.json",
+        }
+
+    def _message(message_id: str, session_id: str, execution_id: str, round_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "message_id": message_id,
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "round_id": round_id,
+            "event_id": f"evt-{message_id}",
+            "session_seq": 1,
+            "execution_seq": 1,
+            "event_kind": "public_message_saved",
+            "payload_kind": "public_message",
+            "subject_id": message_id,
+            "subject_revision": 1,
+            "role": "assistant",
+            "body_text": None,
+            "payload": {"text": secret},
+            "occurred_at": now,
+            "committed_at": now,
+            "search_text": secret,
+        }
+
+    def _artifact(artifact_id: str, session_id: str, execution_id: str, round_id: str) -> dict[str, object]:
+        return {
+            "user_scope": _USER_SCOPE,
+            "artifact_id": artifact_id,
+            "artifact_version": 1,
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "round_id": round_id,
+            "artifact_kind": "explanation",
+            "input_revision": 1,
+            "actual_input_digest": "a" * 64,
+            "actual_model_ref": "model-in",
+            "summary": secret,
+            "result_payload": {"text": secret},
+            "result_digest": "b" * 64,
+            "source_available_state": "available",
+        }
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession),
+                [
+                    {"user_scope": _USER_SCOPE, "session_id": session_in, "title": secret},
+                    {"user_scope": _USER_SCOPE, "session_id": session_out, "title": secret},
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentExecution),
+                [_execution(execution_in, session_in), _execution(execution_out, session_out)],
+            )
+            await conn.execute(
+                sa.insert(AgentRound),
+                [_round(round_in, execution_in), _round(round_out, execution_out)],
+            )
+            message_rows = [
+                _message(message_in, session_in, execution_in, round_in),
+                _message(message_out, session_out, execution_out, round_out),
+            ]
+            message_rows[0]["body_text"] = secret
+            await conn.execute(sa.insert(AgentMessage), message_rows)
+            await conn.execute(
+                sa.insert(AgentArtifact),
+                [
+                    _artifact(artifact_in, session_in, execution_in, round_in),
+                    _artifact(artifact_out, session_out, execution_out, round_out),
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentOperation),
+                [
+                    {
+                        "user_scope": _USER_SCOPE,
+                        "operation_id": operation_in,
+                        "session_id": session_in,
+                        "execution_id": execution_in,
+                        "owner_epoch": 1,
+                        "run_epoch": 1,
+                        "phase": "prepared",
+                        "effect_state": "not_dispatched",
+                        "io_state": "unknown",
+                        "request_ref": f"C:/private/request-{suffix}.json",
+                        "result_ref": f"C:/private/result-{suffix}.json",
+                        "result_payload": {"text": secret},
+                    }
+                ],
+            )
+            await conn.execute(
+                sa.insert(AgentBodyPayload),
+                [
+                    {
+                        "user_scope": _USER_SCOPE,
+                        "body_ref": body_in,
+                        "owner_kind": "artifact",
+                        "owner_id": artifact_in,
+                        "owner_version": "1",
+                        "artifact_id": artifact_in,
+                        "artifact_version": 1,
+                        "message_id": None,
+                        "encoding": "utf-8",
+                        "payload_bytes": secret.encode("utf-8"),
+                        "byte_length": len(secret.encode("utf-8")),
+                        "payload_digest": "c" * 64,
+                    },
+                    {
+                        "user_scope": _USER_SCOPE,
+                        "body_ref": body_out,
+                        "owner_kind": "message",
+                        "owner_id": message_out,
+                        "owner_version": "1",
+                        "message_id": message_out,
+                        "artifact_id": None,
+                        "artifact_version": None,
+                        "encoding": "utf-8",
+                        "payload_bytes": secret.encode("utf-8"),
+                        "byte_length": len(secret.encode("utf-8")),
+                        "payload_digest": "d" * 64,
+                    },
+                ],
+            )
+            await conn.execute(
+                sa.update(AgentArtifact).where(AgentArtifact.artifact_id == artifact_in).values(body_ref=body_in)
+            )
+            await conn.execute(
+                sa.update(AgentMessage).where(AgentMessage.message_id == message_out).values(body_ref=body_out)
+            )
+
+        touched = await dao.tombstone_cleanup_text(_USER_SCOPE, session_ids=[session_in])
+
+        async with app_engine.connect() as conn:
+            message_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentMessage.body_text,
+                        AgentMessage.body_ref,
+                        AgentMessage.payload,
+                        AgentMessage.search_text,
+                    ).where(AgentMessage.message_id == message_in)
+                )
+            ).one()
+            artifact_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentArtifact.summary,
+                        AgentArtifact.body_text,
+                        AgentArtifact.body_ref,
+                        AgentArtifact.result_payload,
+                        AgentArtifact.result_digest,
+                    ).where(AgentArtifact.artifact_id == artifact_in)
+                )
+            ).one()
+            round_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentRound.frozen_manifest,
+                        AgentRound.actual_input,
+                        AgentRound.model_binding,
+                        AgentRound.sdk_history_ref,
+                    ).where(AgentRound.round_id == round_in)
+                )
+            ).one()
+            operation_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentOperation.result_payload,
+                        AgentOperation.request_ref,
+                        AgentOperation.result_ref,
+                    ).where(AgentOperation.operation_id == operation_in)
+                )
+            ).one()
+            remaining_bodies = (
+                (
+                    await conn.execute(
+                        sa.select(AgentBodyPayload.body_ref).where(
+                            AgentBodyPayload.user_scope == _USER_SCOPE,
+                            AgentBodyPayload.body_ref.in_([body_in, body_out]),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            out_message_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentMessage.body_ref,
+                        AgentMessage.payload,
+                        AgentMessage.search_text,
+                    ).where(AgentMessage.message_id == message_out)
+                )
+            ).one()
+            out_artifact_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentArtifact.summary,
+                        AgentArtifact.body_ref,
+                        AgentArtifact.result_payload,
+                        AgentArtifact.result_digest,
+                    ).where(AgentArtifact.artifact_id == artifact_out)
+                )
+            ).one()
+            out_round_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentRound.frozen_manifest,
+                        AgentRound.actual_input,
+                        AgentRound.model_binding,
+                        AgentRound.sdk_history_ref,
+                    ).where(AgentRound.round_id == round_out)
+                )
+            ).one()
+            leaked = 0
+            for model, condition in (
+                (AgentSession, AgentSession.session_id == session_in),
+                (AgentExecution, AgentExecution.session_id == session_in),
+                (AgentRound, AgentRound.execution_id == execution_in),
+                (AgentMessage, AgentMessage.session_id == session_in),
+                (AgentArtifact, AgentArtifact.session_id == session_in),
+                (AgentOperation, AgentOperation.session_id == session_in),
+                (AgentBodyPayload, AgentBodyPayload.owner_id.in_([artifact_in, message_in])),
+            ):
+                rows = (await conn.execute(sa.select(*model.__table__.columns).where(condition))).all()
+                for row in rows:
+                    values = dict(row._mapping)
+                    if secret in str(values):
+                        leaked += 1
+                    payload_bytes = values.get("payload_bytes")
+                    if isinstance(payload_bytes, bytes) and secret.encode("utf-8") in payload_bytes:
+                        leaked += 1
+    finally:
+        await app_engine.dispose()
+
+    assert touched["agent_message"] == 1
+    assert touched["agent_artifact"] == 1
+    assert touched["agent_round"] == 1
+    assert touched["agent_operation"] == 1
+    assert touched["agent_body_payload"] == 1
+    assert touched["agent_session"] == 1
+    assert touched["agent_asset_version"] == 0
+
+    assert message_row.body_text is None
+    assert message_row.body_ref is None
+    assert message_row.payload is None
+    assert message_row.search_text is None
+    assert artifact_row.summary is None
+    assert artifact_row.body_text is None
+    assert artifact_row.body_ref is None
+    assert artifact_row.result_payload is None
+    assert artifact_row.result_digest == "b" * 64
+    assert round_row.frozen_manifest is None
+    assert round_row.actual_input is None
+    assert round_row.model_binding is None
+    assert round_row.sdk_history_ref is None
+    assert operation_row.result_payload is None
+    assert operation_row.request_ref is None
+    assert operation_row.result_ref is None
+    assert sorted(remaining_bodies) == [body_out]
+    assert out_message_row.body_ref == body_out
+    assert out_message_row.payload == {"text": secret}
+    assert out_message_row.search_text == secret
+    assert out_artifact_row.summary == secret
+    assert out_artifact_row.result_payload == {"text": secret}
+    assert out_artifact_row.result_digest == "b" * 64
+    assert out_round_row.frozen_manifest == {"goal": secret}
+    assert out_round_row.model_binding == {"prompt": secret}
+    assert leaked == 0

@@ -194,4 +194,14 @@ class TestCleanupTombstoneContract:
 
     @pytest.mark.asyncio
     async def test_empty_domains_are_no_write(self) -> None:
-        assert await self._dao().tombstone_cleanup_text("u") == {"agent_session": 0, "agent_asset_version": 0}
+        touched = await self._dao().tombstone_cleanup_text("u")
+        assert set(touched) == {
+            "agent_session",
+            "agent_asset_version",
+            "agent_message",
+            "agent_artifact",
+            "agent_round",
+            "agent_operation",
+            "agent_body_payload",
+        }
+        assert all(count == 0 for count in touched.values())

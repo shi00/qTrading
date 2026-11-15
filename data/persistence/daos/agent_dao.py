@@ -6360,6 +6360,11 @@ class AgentDao(BaseDao):
 
         单事务执行；两个域都为空时零写入（仅「未启动计划」允许空原生集合，应用域
         是否可空由服务层准入判定）。返回各域命中行数。
+
+        E-06-5a 起覆盖正文承载域（§10.7 表第 1—3 行「删除正文及受管副本」）：
+        ``agent_message``/``agent_artifact``/``agent_round``/``agent_operation`` 的正文
+        与载荷列清空，``agent_body_payload`` 对应行准确删除。digest 与身份列不在本
+        方法内改动（结果摘要换 tombstone 等属 E-06-5b 白名单裁决）。
         """
 
         self._check_engine()
@@ -6367,18 +6372,28 @@ class AgentDao(BaseDao):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope is required", "cleanup")
         sessions = self._normalize_cleanup_values(session_ids)
         assets = self._normalize_asset_keys(asset_keys)
-        touched = {"agent_session": 0, "agent_asset_version": 0}
+        touched = {
+            "agent_session": 0,
+            "agent_asset_version": 0,
+            "agent_message": 0,
+            "agent_artifact": 0,
+            "agent_round": 0,
+            "agent_operation": 0,
+            "agent_body_payload": 0,
+        }
         if not sessions and not assets:
             return touched
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
+        body_refs: set[str] = set()
         async with engine.begin() as conn:
             if sessions:
+                session_scope = list(sessions)
                 session_result = await conn.execute(
                     sa.update(AgentSession)
                     .where(
                         AgentSession.user_scope == user_scope,
-                        AgentSession.session_id.in_(list(sessions)),
+                        AgentSession.session_id.in_(session_scope),
                     )
                     .values(
                         title=CLEANUP_TOMBSTONE,
@@ -6389,12 +6404,108 @@ class AgentDao(BaseDao):
                     )
                 )
                 touched["agent_session"] = int(session_result.rowcount or 0)
+
+                execution_scope = sa.select(AgentExecution.execution_id).where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.session_id.in_(session_scope),
+                )
+                message_refs = (
+                    (
+                        await conn.execute(
+                            sa.select(AgentMessage.body_ref).where(
+                                AgentMessage.user_scope == user_scope,
+                                AgentMessage.session_id.in_(session_scope),
+                                AgentMessage.body_ref.is_not(None),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                body_refs.update(ref for ref in message_refs if ref)
+                artifact_refs = (
+                    (
+                        await conn.execute(
+                            sa.select(AgentArtifact.body_ref).where(
+                                AgentArtifact.user_scope == user_scope,
+                                AgentArtifact.session_id.in_(session_scope),
+                                AgentArtifact.body_ref.is_not(None),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                body_refs.update(ref for ref in artifact_refs if ref)
+
+                message_result = await conn.execute(
+                    sa.update(AgentMessage)
+                    .where(
+                        AgentMessage.user_scope == user_scope,
+                        AgentMessage.session_id.in_(session_scope),
+                    )
+                    .values(body_text=None, body_ref=None, payload=None, search_text=None)
+                )
+                touched["agent_message"] = int(message_result.rowcount or 0)
+
+                artifact_result = await conn.execute(
+                    sa.update(AgentArtifact)
+                    .where(
+                        AgentArtifact.user_scope == user_scope,
+                        AgentArtifact.session_id.in_(session_scope),
+                    )
+                    .values(summary=None, body_text=None, body_ref=None, result_payload=None)
+                )
+                touched["agent_artifact"] = int(artifact_result.rowcount or 0)
+
+                round_result = await conn.execute(
+                    sa.update(AgentRound)
+                    .where(
+                        AgentRound.user_scope == user_scope,
+                        AgentRound.execution_id.in_(execution_scope),
+                    )
+                    .values(
+                        frozen_manifest=None,
+                        actual_input=None,
+                        model_binding=None,
+                        sdk_history_ref=None,
+                    )
+                )
+                touched["agent_round"] = int(round_result.rowcount or 0)
+
+                operation_result = await conn.execute(
+                    sa.update(AgentOperation)
+                    .where(
+                        AgentOperation.user_scope == user_scope,
+                        sa.or_(
+                            AgentOperation.session_id.in_(session_scope),
+                            AgentOperation.execution_id.in_(execution_scope),
+                        ),
+                    )
+                    .values(result_payload=None, request_ref=None, result_ref=None)
+                )
+                touched["agent_operation"] = int(operation_result.rowcount or 0)
             if assets:
+                asset_scope = list(assets)
+                asset_refs = (
+                    (
+                        await conn.execute(
+                            sa.select(AgentAssetVersion.body_ref).where(
+                                AgentAssetVersion.user_scope == user_scope,
+                                sa.tuple_(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).in_(asset_scope),
+                                AgentAssetVersion.body_ref.is_not(None),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                body_refs.update(ref for ref in asset_refs if ref)
                 asset_result = await conn.execute(
                     sa.update(AgentAssetVersion)
                     .where(
                         AgentAssetVersion.user_scope == user_scope,
-                        sa.tuple_(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).in_(list(assets)),
+                        sa.tuple_(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).in_(asset_scope),
                     )
                     .values(
                         display_name=CLEANUP_TOMBSTONE,
@@ -6408,6 +6519,14 @@ class AgentDao(BaseDao):
                     )
                 )
                 touched["agent_asset_version"] = int(asset_result.rowcount or 0)
+            if body_refs:
+                payload_result = await conn.execute(
+                    sa.delete(AgentBodyPayload).where(
+                        AgentBodyPayload.user_scope == user_scope,
+                        AgentBodyPayload.body_ref.in_(sorted(body_refs)),
+                    )
+                )
+                touched["agent_body_payload"] = int(payload_result.rowcount or 0)
         return touched
 
     @staticmethod
