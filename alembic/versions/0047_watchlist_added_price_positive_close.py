@@ -1,8 +1,12 @@
 """watchlist.added_price 回填仅接受有限正行情 (D06-002)
 
-Revision ID: 0046
-Revises: 0045
+Revision ID: 0047
+Revises: 0046
 Create Date: 2026-11-15 00:00:00.000000
+
+编号说明：本迁移原为 0046，与 D06-001（``0046_clear_expired_review_metrics``）同号；
+按约定顺序（D06-001 在前、D06-002 依赖其后）归并为 0047，``down_revision`` 指向 0046。
+数据归一逻辑与依赖（0044 的回填口径）不变。
 
 D06-002：0044 的「可用行情」判据为 ``close IS NOT NULL AND adj_factor IS NOT NULL
 AND adj_factor > 0``，而消费方 ``WatchlistDao._latest_quote`` 要求 close / adj_factor
@@ -28,8 +32,8 @@ from collections.abc import Sequence
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0046"
-down_revision: str | Sequence[str] | None = "0045"
+revision: str = "0047"
+down_revision: str | Sequence[str] | None = "0046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

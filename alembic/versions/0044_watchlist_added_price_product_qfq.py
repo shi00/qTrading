@@ -36,8 +36,8 @@ D06-002：初版「可用行情」判据只要求 ``close`` / ``adj_factor`` 非
 ``adj_factor > 0``，与 ``WatchlistDao._latest_quote`` 的「有限正数」判据不一致——
 ``close`` 为 0 / 负数 / NaN / Infinity 时仍会回填 0 / 负值而非「未知」（R21）。
 本迁移各 SQL 的可用行情判据已统一收敛到 ``_USABLE_QUOTE_SQL``（与 DAO 同口径）；
-已发布库不会重跑 0044，由前向 revision 0046 重放同一归一回填（见
-``0046_watchlist_added_price_positive_close.py``）。
+已发布库不会重跑 0044，由前向 revision 0047 重放同一归一回填（见
+``0047_watchlist_added_price_positive_close.py``）。
 """
 
 import logging

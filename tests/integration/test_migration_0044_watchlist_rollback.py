@@ -1,11 +1,12 @@
-"""Integration tests for 0044/0046 watchlist added_price backfill and rollback guards.
+"""Integration tests for 0044/0047 watchlist added_price backfill and rollback guards.
 
 D04-F02：0044 downgrade 反算 ``close / adj_factor`` 可能超出旧列 ``Numeric(12, 6)``
 上限。本文件验证 fail-closed 预检与显式有损回滚路径。
 
 D06-002：0044 的「可用行情」判据曾只要求 ``adj_factor > 0``，``close = 0 / -1``
 会被回填成 0 / -2（而非「未知」）。本文件同时验证 upgrade 的「有限正」判据、含
-NaN / Infinity 的边界，以及已发布库对应的前向 revision 0046 的归一回填。
+NaN / Infinity 的边界，以及已发布库对应的前向 revision 0047 的归一回填（0046 已由
+D06-001 占用，本迁移按约定排在其后）。
 
 独立成文件（原位于 ``test_data_db_migrator.py``）：避免与 D04-F01 在同一共享文件的
 同一区域新增测试产生合并冲突。需要 PostgreSQL；无 PG 时在 fixture 建连阶段失败。
@@ -37,7 +38,7 @@ pytestmark = pytest.mark.integration
 _W0044_MIGRATED_TO = "0044"
 _W0044_ROLLBACK_TARGET = "0043"
 _W0044_BEFORE = "0043"
-_W0046_MIGRATED_TO = "0045"
+_W0047_MIGRATED_TO = "0045"
 
 # (ts_code, 加入交易日)；预期 downgrade 后 added_price：
 # T1/T2/T9/T10 反算 close/adj_factor >= 1e6，旧列 Numeric(12,6) 无法表示；
@@ -473,9 +474,9 @@ class TestWatchlistPriceUpgrade0044:
             assert rows[ts_code][2] == f"keep-{ts_code}"
 
 
-# D06-002：0044 已发布库可能已回填 0 / -2 / NaN / Infinity。0046 重放归一化：
+# D06-002：0044 已发布库可能已回填 0 / -2 / NaN / Infinity。0047 重放归一化：
 # 行情不可用 → NULL；行情可用 → 重算乘积（修正历史错值）；原 NULL 不回填。
-_W0046_QUOTES: dict[str, tuple[Decimal | None, Decimal | None]] = {
+_W0047_QUOTES: dict[str, tuple[Decimal | None, Decimal | None]] = {
     "V1": (Decimal("10"), Decimal("2")),
     "V2": (Decimal("0"), Decimal("2")),
     "V3": (Decimal("-1"), Decimal("2")),
@@ -489,9 +490,9 @@ _W0046_QUOTES: dict[str, tuple[Decimal | None, Decimal | None]] = {
     "V12": (Decimal("10"), Decimal("-1")),
     "V13": (Decimal("10"), Decimal("NaN")),
 }
-_W0046_CODES = ["V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10", "V11", "V12", "V13"]
+_W0047_CODES = ["V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10", "V11", "V12", "V13"]
 # 模拟 0044（旧判据）写入后的现状：0 / -2 / NaN / Infinity / 无行情对应值。
-_W0046_STORED: dict[str, Decimal | None] = {
+_W0047_STORED: dict[str, Decimal | None] = {
     "V1": Decimal("0"),
     "V2": Decimal("0"),
     "V3": Decimal("-2"),
@@ -506,17 +507,17 @@ _W0046_STORED: dict[str, Decimal | None] = {
     "V12": Decimal("-10"),
     "V13": Decimal("0"),
 }
-_W0046_NULL = {"V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V11", "V12", "V13"}
+_W0047_NULL = {"V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V11", "V12", "V13"}
 
 
-class TestWatchlistPositiveClose0046:
-    """0046 前向 revision：已发布库中非法行情回填值归一为 NULL / 正确乘积。"""
+class TestWatchlistPositiveClose0047:
+    """0047 前向 revision：已发布库中非法行情回填值归一为 NULL / 正确乘积。"""
 
     @pytest_asyncio.fixture(loop_scope="function")
-    async def db_0046(self, pg_params):
-        """Create an isolated database migrated to 0045 (head before 0046)."""
+    async def db_0047(self, pg_params):
+        """Create an isolated database migrated to 0045 (head before the 0046→0047 revisions)."""
         async_engine, db_name, sync_url, sync_engine = await _migrated_db_fixture(
-            pg_params, "migrator_w0046", _W0046_MIGRATED_TO
+            pg_params, "migrator_w0047", _W0047_MIGRATED_TO
         )
         yield async_engine, db_name, sync_url, sync_engine
         await _cleanup_migrated_db(pg_params, async_engine, sync_engine, db_name)
@@ -530,13 +531,13 @@ class TestWatchlistPositiveClose0046:
                 "stock_name": ts_code,
                 "note": f"keep-{ts_code}",
                 "added_trade_date": date(2026, 1, 2),
-                "added_price": _W0046_STORED[ts_code],
+                "added_price": _W0047_STORED[ts_code],
             }
-            for ts_code in _W0046_CODES
+            for ts_code in _W0047_CODES
         ]
         quote_params = [
             {"ts_code": ts_code, "trade_date": date(2026, 1, 2), "close": close, "adj_factor": adj}
-            for ts_code, (close, adj) in _W0046_QUOTES.items()
+            for ts_code, (close, adj) in _W0047_QUOTES.items()
         ]
         async with engine.begin() as conn:
             await conn.execute(
@@ -561,40 +562,40 @@ class TestWatchlistPositiveClose0046:
             return {row[0]: (row[1], row[2], row[3]) for row in result.fetchall()}
 
     @pytest.mark.asyncio
-    async def test_upgrade_normalizes_released_backfill(self, db_0046):
+    async def test_upgrade_normalizes_released_backfill(self, db_0047):
         """非法行情的旧回填值降级为 NULL；可用行情重算乘积；原 NULL 不回填。"""
-        engine, db_name, sync_url, sync_engine = db_0046
+        engine, db_name, sync_url, sync_engine = db_0047
         await self._seed(engine)
 
         await _alembic_upgrade(sync_url, "head")
 
         rows = await self._snapshot(engine)
-        assert len(rows) == len(_W0046_CODES)
-        for ts_code in _W0046_NULL:
+        assert len(rows) == len(_W0047_CODES)
+        for ts_code in _W0047_NULL:
             assert rows[ts_code][0] is None, f"{ts_code} 的行情不可用，价格必须为未知"
         # 可用行情按 close × adj_factor 重算（修正被写成 0 的 V1）
         assert rows["V1"][0] == Decimal("20.000000")
         assert rows["V10"][0] == Decimal("20.000000")
         # 行数 / 日期 / 备注守恒
-        for ts_code in _W0046_CODES:
+        for ts_code in _W0047_CODES:
             assert rows[ts_code][1] == date(2026, 1, 2)
             assert rows[ts_code][2] == f"keep-{ts_code}"
 
     @pytest.mark.asyncio
-    async def test_downgrade_replays_same_normalization(self, db_0046):
+    async def test_downgrade_replays_same_normalization(self, db_0047):
         """downgrade 不恢复已知错误值，只重放同一归一化（幂等）。"""
-        engine, db_name, sync_url, sync_engine = db_0046
+        engine, db_name, sync_url, sync_engine = db_0047
         await self._seed(engine)
 
         await _alembic_upgrade(sync_url, "head")
         after_upgrade = await self._snapshot(engine)
 
-        await _alembic_downgrade(sync_url, _W0046_MIGRATED_TO)
+        await _alembic_downgrade(sync_url, _W0047_MIGRATED_TO)
 
-        assert await TestWatchlistPriceRollback0044._version(engine) == _W0046_MIGRATED_TO
+        assert await TestWatchlistPriceRollback0044._version(engine) == _W0047_MIGRATED_TO
         after_downgrade = await self._snapshot(engine)
         assert after_downgrade == after_upgrade
-        assert len(after_downgrade) == len(_W0046_CODES)
-        for ts_code in _W0046_NULL:
+        assert len(after_downgrade) == len(_W0047_CODES)
+        for ts_code in _W0047_NULL:
             assert after_downgrade[ts_code][0] is None
         assert after_downgrade["V1"][0] == Decimal("20.000000")
