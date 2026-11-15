@@ -7134,6 +7134,26 @@ class TestContractCountProse:
         errors = check_contract_count_prose()
         assert errors == [], f"ADR/CHANGELOG 不应被误报, got: {errors}"
 
+    def test_contract_count_change_fails_under_governance_scope(self, tmp_path, monkeypatch):
+        """pyproject.toml 契约节数变更（3→4）→ 报漂移，且该检查只归属 governance scope。"""
+        from check_docs_consistency import _SCOPE_CHECK_NAMES, check_contract_count_prose
+
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            "".join(f'[[tool.importlinter.contracts]]\nname = "c{i}"\n' for i in range(4)),
+            encoding="utf-8",
+        )
+        doc = tmp_path / "contracts.md"
+        doc.write_text("R1 由 import-linter 3 条契约守护\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.PYPROJECT_PATH", pyproject)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+
+        errors = check_contract_count_prose()
+        assert any("3 条契约" in e and "实际 4 条" in e for e in errors), f"应报契约数变更漂移, got: {errors}"
+
+        scopes = {labels for labels, name in _SCOPE_CHECK_NAMES if name == "check_contract_count_prose"}
+        assert scopes == {frozenset({"governance"})}, f"契约数检查须只归属 governance scope: {scopes}"
+
 
 class TestSingletonCountProse:
     """盲1：注册单例散文数量守卫（@register_singleton，N 个）vs 表格实计。
