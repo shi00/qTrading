@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 import logging
 
 import pytest
@@ -48,6 +49,13 @@ def _us_moves_response() -> MagicMock:
     """新浪美股 JSONP 响应 mock（供 get_us_major_moves 的 AsyncClient 路径断言解析结果）。"""
     resp = MagicMock()
     resp.text = _US_MOVES_JSONP_TEXT
+    return resp
+
+
+def _us_moves_response_from_rows(rows: list[dict]) -> MagicMock:
+    """按 rows 构造新浪美股 JSONP 响应 mock（缺键行即真实响应缺 chg 的情形）。"""
+    resp = MagicMock()
+    resp.text = f"IO({json.dumps({'data': rows})});"
     return resp
 
 
@@ -893,6 +901,115 @@ class TestGetUsMajorMoves:
 
         result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
+
+
+class TestUsMajorMovesUnknownChange:
+    """ADD-AI-002（R21）：涨跌幅缺失/非法不得伪装 0%，真 0 必须保留。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("row", "expected"),
+        [
+            ({"name": "NVDA", "cname": "英伟达"}, "NVDA: 未知"),  # 缺 chg 键
+            ({"name": "NVDA", "cname": "英伟达", "chg": None}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": ""}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "   "}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "invalid"}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "nan"}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "NaN"}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "inf"}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "-inf"}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "1e400"}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": True}, "NVDA: 未知"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": 0}, "NVDA: 0.0%"),  # 真 0 保留
+            ({"name": "NVDA", "cname": "英伟达", "chg": "0.0"}, "NVDA: 0.0%"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": "2.45"}, "NVDA: 2.45%"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": -1.0}, "NVDA: -1.0%"),
+            ({"name": "NVDA", "cname": "英伟达", "chg": 5}, "NVDA: 5.0%"),
+        ],
+    )
+    @patch("httpx.AsyncClient")
+    async def test_key_ticker_chg_matrix(self, mock_client, row, expected):
+        _wire_http_get(mock_client, _us_moves_response_from_rows([row]))
+
+        result = await NewsFetcher.get_us_major_moves()
+
+        assert result == expected
+        # 任何输入都不得把未知写成 0 / nan / inf
+        if expected == "NVDA: 未知":
+            assert "0.0%" not in result
+            assert "nan" not in result.lower()
+            assert "inf" not in result.lower()
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_unknown_result_cached_and_not_refetched(self, mock_client):
+        _wire_http_get(mock_client, _us_moves_response_from_rows([{"name": "NVDA", "cname": "英伟达"}]))
+
+        first = await NewsFetcher.get_us_major_moves()
+        assert first == "NVDA: 未知"
+        assert _US_MOVES_CACHE["result"] == "NVDA: 未知"
+
+        second = await NewsFetcher.get_us_major_moves()
+        assert second == "NVDA: 未知"
+        mock_client.return_value.get.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_non_key_ticker_kept_only_when_known_and_above_threshold(self, mock_client):
+        rows = [
+            {"name": "BIGUP", "cname": "大涨", "chg": "5.0"},
+            {"name": "BIGBAD", "cname": "坏值", "chg": "nan"},
+            {"name": "SMALL", "cname": "小涨", "chg": "0.5"},
+            {"name": "FLAT", "cname": "平盘", "chg": "0"},
+        ]
+        _wire_http_get(mock_client, _us_moves_response_from_rows(rows))
+
+        result = await NewsFetcher.get_us_major_moves()
+
+        # 非重点仅 |涨跌幅|>3 且数值已知者进入；未知/小幅值不改写为 0
+        assert result == "BIGUP: 5.0%"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_fallback_skips_unknown_but_keeps_true_zero(self, mock_client):
+        rows = [
+            {"name": "SMALL1", "cname": "小公司1"},
+            {"name": "SMALL2", "cname": "小公司2", "chg": "0.3"},
+            {"name": "SMALL3", "cname": "小公司3", "chg": None},
+            {"name": "SMALL4", "cname": "小公司4", "chg": "-0.2"},
+            {"name": "SMALL5", "cname": "小公司5", "chg": "0"},
+        ]
+        _wire_http_get(mock_client, _us_moves_response_from_rows(rows))
+
+        result = await NewsFetcher.get_us_major_moves()
+
+        assert result == "SMALL2: 0.3%, SMALL4: -0.2%, SMALL5: 0.0%"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_fallback_all_unknown_returns_empty_and_caches_empty(self, mock_client):
+        rows = [{"name": "SMALL1", "cname": "小公司1"}, {"name": "SMALL2", "cname": "小公司2", "chg": "bad"}]
+        _wire_http_get(mock_client, _us_moves_response_from_rows(rows))
+
+        first = await NewsFetcher.get_us_major_moves()
+        second = await NewsFetcher.get_us_major_moves()
+
+        assert first == ""
+        assert second == ""
+        assert _US_MOVES_CACHE["result"] == ""
+        mock_client.return_value.get.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_historical_as_of_writes_no_cache(self, mock_client):
+        _wire_http_get(mock_client, _us_moves_response_from_rows([{"name": "NVDA", "cname": "英伟达"}]))
+
+        result = await NewsFetcher.get_us_major_moves(as_of=datetime.date(2024, 1, 1))
+
+        assert result == ""
+        assert "result" not in _US_MOVES_CACHE
+        mock_client.return_value.get.assert_not_awaited()
 
 
 class TestGetHotConcepts:
