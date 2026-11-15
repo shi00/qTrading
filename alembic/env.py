@@ -22,6 +22,7 @@ from sqlalchemy.engine import Connection
 
 import config
 from alembic import context
+from data.persistence.migration_lock import acquire_migration_lock, release_migration_lock
 from data.persistence.models import Base
 from utils.db_utils import to_async_db_url, to_sync_db_url
 
@@ -132,7 +133,15 @@ async def run_async_migrations() -> None:
 
     try:
         async with connectable.connect() as connection:
-            await connection.run_sync(do_run_migrations)
+            # 跨进程互斥：DatabaseMigrator._alembic_lock 只是进程内 threading.Lock，
+            # 无法覆盖 CLI `alembic upgrade head`、第二个应用实例或 E2E 子进程。
+            # 会话级 advisory lock 绑定本连接（连接关闭即释放），且必须在
+            # run_migrations 之前取得，Alembic 才会在锁内读取 alembic_version。
+            await acquire_migration_lock(connection)
+            try:
+                await connection.run_sync(do_run_migrations)
+            finally:
+                await release_migration_lock(connection)
     finally:
         original_error = sys.exception()
         try:
