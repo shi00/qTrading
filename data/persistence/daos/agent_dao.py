@@ -6366,11 +6366,15 @@ class AgentDao(BaseDao):
         与载荷列清空，``agent_body_payload`` 对应行准确删除。
 
         E-06-5b 起按 §10.7 表第 2—4 行处理结构回执与内容摘要：结构载荷/回执列
-        （命令请求与回执、决定问题与答案 schema、同意载荷、操作交付清单/worker 引用、
+        （命令请求与回执、决定问题与答案 schema、同意载荷、操作 worker 引用、
         来源 locator）清空；可 NULL 的内容摘要（执行意图、轮次冻结/实际、参数、来源
         作用域）置 NULL；NOT NULL 的内容摘要（成果 ``actual_input_digest``/
         ``result_digest``、命令 ``input_digest``）换固定 tombstone 摘要。身份、fence、
         unknown/phase、计量与 ``attempt_refs`` 等核定所需非正文引用保原值。
+
+        ``agent_operation.delivery_manifest`` 暂不清空：冻结的 16 键 wire 无法表达
+        「已交付但已清理」（清空会让 ``read_delivery`` 读成「从未交付」，R21），
+        待 cleaned receipt 契约冻结后处理（见 known-technical-debt）。
         """
 
         self._check_engine()
@@ -6508,7 +6512,6 @@ class AgentDao(BaseDao):
                         result_ref=None,
                         parameter_digest=None,
                         worker_refs=None,
-                        delivery_manifest=None,
                         data_consent_claims=None,
                     )
                 )
@@ -6707,7 +6710,12 @@ class AgentDao(BaseDao):
         return None if row is None else self._cleanup_record_from_row(row)
 
     async def commit_cleanup_fence(self, record: CleanupJobRecord) -> None:
-        """提交删除 fence（只一次）；集合与摘要不匹配则拒绝，不静默改写。"""
+        """提交删除 fence（只一次）；集合与摘要不匹配则拒绝，不静默改写。
+
+        已 ``verified`` 的作业拒绝任何 fence 写入：并发确认时后到的一方不得把
+        阶段改回 ``prepared``/``retry_pending``（与 ``save_cleanup_phase`` 同一
+        单调约束，R22 语义）。
+        """
 
         self._check_engine()
         engine = self._require_async_engine()
@@ -6720,11 +6728,14 @@ class AgentDao(BaseDao):
                     AgentCleanupJob.cleanup_job_id == record.cleanup_job_id,
                     AgentCleanupJob.preview_digest == record.preview_digest,
                     AgentCleanupJob.expected_revision == record.expected_revision,
+                    AgentCleanupJob.phase != CleanupPhase.VERIFIED.value,
                 )
                 .values(fence_committed=True, phase=record.phase.value)
             )
             if int(result.rowcount or 0) == 0:
-                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup fence target missing or drifted", label)
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "cleanup fence target missing, drifted, or already verified", label
+                )
 
     async def save_cleanup_phase(
         self,
@@ -6741,10 +6752,6 @@ class AgentDao(BaseDao):
 
         阶段单调（R22 语义）：已 ``verified`` 的作业拒绝任何非 ``verified`` 写入，
         防止 ``retry_pending`` 覆盖完成态、留下不清的 ``verified_at``。
-
-        ``verified`` 时同时清空 ``content_manifest``：该列只承载内容摘要/引用，
-        §10.7 表第 4 行要求清理后不默认保留内容摘要；集合身份仍在
-        ``exact_identity_set``（第 5 行），fence 与幂等核定不受影响。
         """
 
         self._check_engine()
@@ -6759,7 +6766,6 @@ class AgentDao(BaseDao):
         }
         if phase is CleanupPhase.VERIFIED:
             values["verified_at"] = sa.func.now()
-            values["content_manifest"] = None
         statement = (
             sa.update(AgentCleanupJob)
             .where(AgentCleanupJob.user_scope == user_scope, AgentCleanupJob.cleanup_job_id == cleanup_job_id)

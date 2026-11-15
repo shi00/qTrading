@@ -27,7 +27,7 @@
 
 | ID | 一句话 | 级别 | upgrade 触发条件 |
 |----|--------|------|------------------|
-| P2-AgentCleanup-Residual-Risks | 清理后命令重放归为 `INPUT_CONFLICT`（摘要已 tombstone，无法再核原输入）、孤儿 `agent_body_payload` 行不回收、运行库引擎的 `is_disposed` 守卫语义失效（生产未装配该 store） | P2 | ① 需要按原命令摘要区分「幂等重放」与「异输入冲突」；② 清理后磁盘计量与实际正文留存出现偏差；③ 运行库 handle 接入清理链路或实现额外引擎登记 |
+| P2-AgentCleanup-Residual-Risks | 清理后交付回执/操作结果读回语义缺 cleaned 契约（`delivery_manifest` 私有 target 路径未清、`read_operation` 把已清结果当坏行）、清理后命令/轮次/执行摘要重放统一降级为 `INPUT_CONFLICT`、孤儿 `agent_body_payload` 行不回收、运行库引擎的 `is_disposed` 守卫语义失效（生产未装配该 store） | P2 | ① 冻结 cleaned receipt / operation cleaned 标记契约；② 需区分清理后幂等与异输入重放；③ 清理后磁盘计量出现偏差；④ 运行库 handle 接入清理链路 |
 | P3-ExcStrategies-NoteLazy-Classify | strategies/ 层 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify\_error | P3 | ① 策略层再次出现未分类 `except Exception` 的新实例时；② 或策略层异常处理被独立重构时 |
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | ① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时 |
 | P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
@@ -756,19 +756,19 @@ E-05 提供 `read_delivery(operation_id)` 查回原 manifest 与修订，但尚�
 
 按 HANDOFF §10.2 中断边界表实现续接与残留清理；在此之前 UI 必须显式区分「可能已保存（unknown）」与「确认未发布」，禁止盲重导。upgrade 触发条件同上。
 
-#### P2-AgentCleanup-Residual-Risks：清理后重放语义与孤儿载荷
+#### P2-AgentCleanup-Residual-Risks：交付回执/操作结果读回与摘要幂等的清理残余
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P2-AgentCleanup-Residual-Risks** | ① 清理后 `agent_command.input_digest` 换 tombstone，同 `client_command_id` 重放不再能核原输入摘要，归为 `INPUT_CONFLICT`（拒绝而非幂等成功，符合「不重建正文」但错误分类较粗）；② `agent_body_payload` 仅按受清 owner 的当前 `body_ref` 发现，历史半清理留下的孤儿行不会被回收；③ `AgentRuntimeNativeStore` 已补 `_check_engine`，但运行库引擎由 `assemble_agent_runtime` 单独创建、`AgentRuntimeHandle.close()` 直接 dispose 而未经 `mark_disposed`，故 `is_disposed` 对运行库引擎恒 False（当前生产未装配该 store，仅测试构造） | ① 需要按原命令摘要区分「幂等重放」与「异输入冲突」；② 清理后磁盘计量与实际正文留存出现偏差；③ 运行库 handle 接入清理链路或支持额外引擎登记 |
+| **P2-AgentCleanup-Residual-Risks** | ① `agent_operation.delivery_manifest` 未清：私有 `target` 路径与 `output_digest` 在清理后仍留存（§10.7 表第 3/4 行要求清除），但冻结的 16 键 wire 无法表达「已交付但已清理」，整列置空会让 `read_delivery` 把已交付读成「从未交付」（R21），故需先冻结 cleaned receipt 契约；② 清理后 `read_operation` 对 `phase='result_saved'` 且结果已被清的操作抛 `OPERATION_UNKNOWN`（坏行），与 `read_artifact` 用 `cleaned_at` 报 `body_cleaned` 不一致（R21 变体），需 operation 级 cleaned 标记；③ 清理后 `agent_command.input_digest`、`agent_round.frozen_digest/actual_digest`、`agent_execution.intent_digest` 换 tombstone 或置 NULL，7 条命令重放路径与 `bind_actual_input`/`accept_execution` 重放统一降级为 `INPUT_CONFLICT`；④ `agent_body_payload` 仅按受清 owner 的当前 `body_ref` 发现，历史半清理留下的孤儿行不会被回收；⑤ `AgentRuntimeNativeStore` 已补 `_check_engine`，但运行库引擎由 `assemble_agent_runtime` 单独创建、`AgentRuntimeHandle.close()` 直接 dispose 而未经 `mark_disposed`，故 `is_disposed` 对运行库引擎恒 False（当前生产未装配该 store，仅测试构造） | ① 冻结 cleaned receipt 契约（wire v2 或 operation 级标记）后处理 ①②；② 需要清理后命令/轮次重放区分「幂等」与「异输入」时处理 ③；③ 清理后磁盘计量与实际正文留存出现偏差时处理 ④；④ 运行库 handle 接入清理链路或支持额外引擎登记时处理 ⑤ |
 
 **产生背景与现状**
 
-E-06 里程碑独立检视（基线 `e0e8c651a^..`，覆盖 E-06-1…E-06-5a）确认主链路可靠（fence 前置、九域核 0、tombstone 集合外不变、body payload 准确删行），并发现阶段可回退、摘要未清与孤儿行三类残余。已关闭：阶段单调性——`save_cleanup_phase` 现对非 `verified` 写入追加 `phase <> 'verified'` 条件，已 `verified` 的作业拒绝回退（`test_verified_phase_is_terminal_and_cannot_regress`）。已关闭：§10.7 表第 2—4 行——E-06-5b 清理结构载荷/回执、可 NULL 摘要置 NULL、NOT NULL 摘要换 tombstone，并在 `verified` 时清 `agent_cleanup_job.content_manifest`；按第 5 行明确保留 `claim_ref`、`attempt_refs`、`agent_execution.unknown_refs`、grant 与 phase/计量字段，这些是归属/禁用/unknown 核定所需，不属遗漏。仍存：① 摘要 tombstone 使清理后的命令重放无法区分「同输入幂等」与「异输入冲突」；② 孤儿 payload 无 owner 引用，本条不主张按全表删除（防止越界）。
+E-06 里程碑独立检视（基线 `e0e8c651a^..` 与增量 `e627fd4fb..c320374f4`）确认主链路可靠（fence 前置、九域核 0、tombstone 集合外不变、body payload 准确删行、结构载荷与可 NULL 摘要清理、NOT NULL 摘要换 tombstone）。已关闭：阶段单调性——`save_cleanup_phase` 对非 `verified` 写入追加 `phase <> 'verified'`，且 `commit_cleanup_fence` 同受该约束（并发确认后到者不再能把阶段改回未完成态），例见 `test_verified_phase_is_terminal_and_cannot_regress` / `test_fence_write_rejected_after_verified`。仍存 ①②③④⑤：①② 是「清理后读回语义」的契约缺口（需新增 cleaned receipt / operation cleaned 标记，属未确认契约，不自行发明）；③ 是 §10.7 第 5 行「幂等核定所需摘要逐项说明用途」的裁决项；④ 孤儿行无 owner 引用，本条不主张全表删除（防止越界）。
 
 **期望的最终解法**
 
-① 若产品需要清理后仍可幂等重放，改为在 `agent_cleanup_job` 保存命令身份摘要而非留在命令行，且只覆盖「已清理会话」的有限重放窗口；② 若出现磁盘计量偏差，改为「按集合内 owner 全量（含历史 body_ref 快照）回收」，不得使用 LIKE/前缀/全表删除。
+① 冻结 cleaned receipt 契约：交付回执保留 identity+phase+source_state+计量，私有 target/输出摘要清空，`read_delivery` 返回明确的「已清理」态而非 `None`；② 为 operation 增加「结果已清理」判别（如随会话 `cleaned_at` 派生 `result_cleaned`），不得把已清当坏行；③ 逐项冻结哪些摘要属幂等/身份必需，其余保持 tombstone；④ 若出现磁盘计量偏差，改为「按集合内 owner 全量（含历史 body_ref 快照）回收」，不得使用 LIKE/前缀/全表删除。
 
 ## 已接受的权衡（Accepted Tradeoffs）
 

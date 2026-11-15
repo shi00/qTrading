@@ -414,7 +414,7 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
     app_engine = create_test_engine(url)
     try:
         dao = AgentDao(app_engine)
-        assert await dao.save_cleanup_job(record, content_manifest={"body_refs": ["body-e2e"]}) is True
+        assert await dao.save_cleanup_job(record) is True
         async with app_engine.begin() as conn:
             await conn.execute(
                 sa.insert(AgentSession),
@@ -466,15 +466,6 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
 
         loaded = await dao.load_cleanup_job(_USER_SCOPE, job_id)
         async with app_engine.connect() as conn:
-            content_manifest = (
-                await conn.execute(
-                    text(
-                        "SELECT content_manifest FROM agent_cleanup_job "
-                        "WHERE user_scope = :scope AND cleanup_job_id = :job"
-                    ),
-                    {"scope": _USER_SCOPE, "job": job_id},
-                )
-            ).scalar_one()
             session_row = (
                 await conn.execute(
                     sa.select(AgentSession.title, AgentSession.draft_payload).where(
@@ -508,7 +499,6 @@ async def test_full_cleanup_execution_verifies_native_and_app_domains(real_embed
     assert loaded.phase is CleanupPhase.VERIFIED
     assert loaded.fence_committed is True
     assert loaded.exact_ids == (in_set,)
-    assert content_manifest is None
     assert session_row.title == CLEANUP_TOMBSTONE
     assert session_row.draft_payload is None
     assert asset_row.display_name == CLEANUP_TOMBSTONE
@@ -1041,7 +1031,6 @@ async def test_structural_receipts_and_content_digests_cleared(real_embedded_pg)
                         "io_state": "known",
                         "parameter_digest": "4" * 64,
                         "worker_refs": {"worker": secret},
-                        "delivery_manifest": {"path": secret},
                         "data_consent_claims": {"claim": secret},
                         "attempt_refs": {"attempt": "attempt-1"},
                     }
@@ -1132,7 +1121,6 @@ async def test_structural_receipts_and_content_digests_cleared(real_embedded_pg)
                     sa.select(
                         AgentOperation.parameter_digest,
                         AgentOperation.worker_refs,
-                        AgentOperation.delivery_manifest,
                         AgentOperation.data_consent_claims,
                         AgentOperation.attempt_refs,
                     ).where(AgentOperation.session_id == session_in)
@@ -1210,7 +1198,6 @@ async def test_structural_receipts_and_content_digests_cleared(real_embedded_pg)
 
     assert operation_row.parameter_digest is None
     assert operation_row.worker_refs is None
-    assert operation_row.delivery_manifest is None
     assert operation_row.data_consent_claims is None
     assert operation_row.attempt_refs == {"attempt": "attempt-1"}
 
