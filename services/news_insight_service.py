@@ -774,10 +774,17 @@ class NewsInsightService:
         if not regenerate:
             latest = await self.dao.get_latest_success_brief(ts_code, window_start_utc, window_end_utc)
             if latest is not None and latest.get("evidence_news_ids"):
+                # D14-003：复用须同配置契约——快照的分析指纹与 Prompt 版本必须与本次冻结值
+                # 逐字相等。旧行 NULL / 缺列按「未知」处理（R21），不得以当前值补足；最近
+                # 成功快照属其他配置时不回退更早快照，避免跨配置拼接复用。
+                same_contract = (
+                    latest.get("analysis_profile") == analysis_profile
+                    and latest.get("prompt_version") == NEWS_RISK_PROMPT_VERSION
+                )
                 curr_ids = {ev.news_id for ev in evidence}
                 snap_ids = set(latest.get("evidence_news_ids") or [])
                 has_db_error = any(isinstance(c, dict) and c.get("status") == "db_error" for c in coverage.values())
-                if curr_ids < snap_ids and has_db_error:
+                if same_contract and curr_ids < snap_ids and has_db_error:
                     return NewsInsightOutcome(
                         result=self._row_to_result(latest, coverage),
                         reused=True,

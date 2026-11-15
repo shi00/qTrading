@@ -1397,6 +1397,8 @@ class TestAnalyze:
             "events": [],
             "evidence_news_ids": [1, 2, 3],
             "model_id": "local",
+            "analysis_profile": "profile-a",
+            "prompt_version": NEWS_RISK_PROMPT_VERSION,
             "generated_at": datetime.datetime(2026, 9, 8, 6, 30, 0),
             "coverage": {
                 "event_validation": {"dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 3}]}
@@ -1411,6 +1413,7 @@ class TestAnalyze:
             evidence=[EvidenceDocument(news_id=1, content_hash="h")],
             coverage={"announcement": {"status": "db_error"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
         )
+        monkeypatch.setattr(svc, "_freeze_profile_and_dispatch", AsyncMock(return_value=("profile-a", True, None)))
         outcome = asyncio.run(svc.analyze("000001.SZ"))
         assert outcome.reused is True
         assert outcome.reuse_type == "subset"
@@ -1429,6 +1432,8 @@ class TestAnalyze:
             "events": [],
             "evidence_news_ids": [1, 2, 3],
             "model_id": "local",
+            "analysis_profile": "profile-a",
+            "prompt_version": NEWS_RISK_PROMPT_VERSION,
             "generated_at": t0,
         }
         dao = _make_dao()
@@ -1440,6 +1445,7 @@ class TestAnalyze:
             evidence=[EvidenceDocument(news_id=1, content_hash="h")],
             coverage={"announcement": {"status": "db_error"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
         )
+        monkeypatch.setattr(svc, "_freeze_profile_and_dispatch", AsyncMock(return_value=("profile-a", True, None)))
         outcome = asyncio.run(svc.analyze("000001.SZ"))
         assert outcome.reused is True
         assert outcome.reuse_type == "subset"
@@ -1460,6 +1466,8 @@ class TestAnalyze:
             "events": [],
             "evidence_news_ids": [1, 2, 3],
             "model_id": "local",
+            "analysis_profile": "profile-a",
+            "prompt_version": NEWS_RISK_PROMPT_VERSION,
         }
         dao = _make_dao()
         dao.get_news_risk_brief = AsyncMock(return_value=None)
@@ -1470,9 +1478,99 @@ class TestAnalyze:
             evidence=[EvidenceDocument(news_id=1, content_hash="h")],
             coverage={"announcement": {"status": "ok"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
         )
+        monkeypatch.setattr(svc, "_freeze_profile_and_dispatch", AsyncMock(return_value=("profile-a", True, None)))
         outcome = asyncio.run(svc.analyze("000001.SZ"))
         assert outcome.reused is False
         assert outcome.reuse_type == "none"
+        ai.analyze_news_risk.assert_awaited_once()
+
+    def test_no_subset_on_profile_mismatch(self, monkeypatch):
+        """D14-003：仅分析指纹不同（Prompt 版本相同、真子集 + db_error）即不得复用快照。"""
+        latest = {
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "medium",
+            "confidence": 60,
+            "summary": "配置 B 的更完整结果",
+            "events": [],
+            "evidence_news_ids": [1, 2, 3],
+            "model_id": "local",
+            "analysis_profile": "profile-b",
+            "prompt_version": NEWS_RISK_PROMPT_VERSION,
+        }
+        dao = _make_dao()
+        dao.get_news_risk_brief = AsyncMock(return_value=None)
+        dao.get_latest_success_brief = AsyncMock(return_value=latest)
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            dao=dao,
+            evidence=[EvidenceDocument(news_id=1, content_hash="h")],
+            coverage={"announcement": {"status": "db_error"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
+        )
+        monkeypatch.setattr(svc, "_freeze_profile_and_dispatch", AsyncMock(return_value=("profile-a", True, None)))
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.reused is False
+        assert outcome.reuse_type == "none"
+        dao.get_latest_success_brief.assert_awaited_once()
+        ai.analyze_news_risk.assert_awaited_once()
+
+    def test_no_subset_on_prompt_version_mismatch(self, monkeypatch):
+        """D14-003：仅 Prompt 版本不同（分析指纹相同、真子集 + db_error）即不得复用快照。"""
+        latest = {
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "medium",
+            "confidence": 60,
+            "summary": "旧 Prompt 的更完整结果",
+            "events": [],
+            "evidence_news_ids": [1, 2, 3],
+            "model_id": "local",
+            "analysis_profile": "profile-a",
+            "prompt_version": "news-risk-v0",
+        }
+        dao = _make_dao()
+        dao.get_news_risk_brief = AsyncMock(return_value=None)
+        dao.get_latest_success_brief = AsyncMock(return_value=latest)
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            dao=dao,
+            evidence=[EvidenceDocument(news_id=1, content_hash="h")],
+            coverage={"announcement": {"status": "db_error"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
+        )
+        monkeypatch.setattr(svc, "_freeze_profile_and_dispatch", AsyncMock(return_value=("profile-a", True, None)))
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.reused is False
+        assert outcome.reuse_type == "none"
+        dao.get_latest_success_brief.assert_awaited_once()
+        ai.analyze_news_risk.assert_awaited_once()
+
+    @pytest.mark.parametrize("missing_key", ["analysis_profile", "prompt_version"])
+    def test_no_subset_when_snapshot_contract_missing(self, monkeypatch, missing_key):
+        """D14-003/R21：旧快照缺分析指纹或 Prompt 版本（未知）不得当作与当前一致而复用。"""
+        latest = {
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "medium",
+            "confidence": 60,
+            "summary": "旧快照更完整结果",
+            "events": [],
+            "evidence_news_ids": [1, 2, 3],
+            "model_id": "local",
+            "analysis_profile": "profile-a",
+            "prompt_version": NEWS_RISK_PROMPT_VERSION,
+        }
+        latest.pop(missing_key)
+        dao = _make_dao()
+        dao.get_news_risk_brief = AsyncMock(return_value=None)
+        dao.get_latest_success_brief = AsyncMock(return_value=latest)
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            dao=dao,
+            evidence=[EvidenceDocument(news_id=1, content_hash="h")],
+            coverage={"announcement": {"status": "db_error"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
+        )
+        monkeypatch.setattr(svc, "_freeze_profile_and_dispatch", AsyncMock(return_value=("profile-a", True, None)))
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.reused is False
+        assert outcome.reuse_type == "none"
+        dao.get_latest_success_brief.assert_awaited_once()
         ai.analyze_news_risk.assert_awaited_once()
 
     def test_no_cache_calls_ai_and_persists(self, monkeypatch):
