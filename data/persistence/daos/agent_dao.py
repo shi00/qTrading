@@ -127,8 +127,11 @@ from core.agent_types import (
     ResourceTicket,
     ReviseQueuedRequest,
     RevisionReceipt,
+    RoleSkillAssignment,
+    RoleSkillAssignmentReceipt,
     ROUND_STOP_REASON_USER_TERMINATION,
     RECOVERY_UNVERIFIED_DISPLAY_STATES,
+    SKILL_ASSET_METADATA_VERSION,
     SOURCE_COVERAGES,
     SOURCE_REGISTRATION_CONSUMER_KINDS,
     SaveAnswerRequest,
@@ -138,6 +141,9 @@ from core.agent_types import (
     SessionRead,
     SessionReadQuery,
     SessionSummary,
+    SkillAssetReceipt,
+    SkillAssetRegistration,
+    SkillVersionRef,
     SourceClaimBinding,
     SourceClaimFact,
     SourceClaimRequest,
@@ -210,7 +216,9 @@ from core.agent_types import (
     derive_event_identity,
     evaluate_data_attempt,
     json_doc,
+    is_digest,
     normalize_cleanup_ids,
+    role_skill_assignment_digest,
     sha256_hex,
     slice_body_page,
     stable_id,
@@ -219,6 +227,7 @@ from core.agent_types import (
     validate_data_consent_claim,
     validate_read_mark_command,
     validate_resource_claim_request,
+    validate_role_skill_assignment,
     validate_session_read_query,
 )
 from data.persistence.daos.base_dao import BaseDao
@@ -7332,3 +7341,359 @@ class AgentDao(BaseDao):
                 f"stored draft transfer receipt invalid: {exc.code}",
                 identity,
             ) from exc
+
+    # ------------------------------------------------------------------
+    # E-03-4 Skill 资产与角色版本引用（§9.10 / F12-F13）
+    # ------------------------------------------------------------------
+
+    async def list_skill_versions(self, *, user_scope: str, skill_id: str) -> tuple[tuple[int, str], ...]:
+        """同一 Skill 身份的全部已登记版本（版本升序）与内容摘要。"""
+
+        self._check_engine()
+        identity = f"{user_scope}/skill/{skill_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(skill_id, "skill_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.asset_version, AgentAssetVersion.digest).where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == skill_id,
+                        AgentAssetVersion.asset_kind == "skill",
+                    )
+                )
+            ).all()
+        versions: list[tuple[int, str]] = []
+        for row in rows:
+            try:
+                version = int(row.asset_version)
+            except (TypeError, ValueError) as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN, "skill asset version is not numeric", identity
+                ) from exc
+            versions.append((version, row.digest))
+        return tuple(sorted(versions))
+
+    async def has_skill(self, *, user_scope: str, skill_id: str) -> bool:
+        """该 Skill 身份是否已有任一登记版本（依赖存在性核验用）。"""
+
+        self._check_engine()
+        identity = f"{user_scope}/skill/{skill_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(skill_id, "skill_id", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.asset_id)
+                    .where(
+                        AgentAssetVersion.user_scope == user_scope,
+                        AgentAssetVersion.asset_id == skill_id,
+                        AgentAssetVersion.asset_kind == "skill",
+                    )
+                    .limit(1)
+                )
+            ).first()
+        return row is not None
+
+    async def register_skill_asset(self, request: SkillAssetRegistration) -> SkillAssetReceipt:
+        """受管 Skill 版本落库（同身份同内容幂等；异内容冲突；不复制脚本/凭据）。"""
+
+        self._check_engine()
+        identity = f"{request.user_scope}/skill/{request.skill_id}@{request.version}"
+        _validate_skill_asset_request(request, identity)
+        metadata = _skill_asset_metadata(request)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            row = await _read_asset_row(
+                conn,
+                user_scope=request.user_scope,
+                asset_id=request.skill_id,
+                asset_version=str(request.version),
+            )
+            if row is None:
+                try:
+                    async with conn.begin_nested():
+                        await conn.execute(
+                            sa.insert(AgentAssetVersion).values(
+                                user_scope=request.user_scope,
+                                asset_id=request.skill_id,
+                                asset_version=str(request.version),
+                                asset_kind="skill",
+                                display_name=request.display_name,
+                                digest=request.content_digest,
+                                origin_ref=None,
+                                metadata_payload=metadata,
+                                read_state="ready",
+                                verification_state="program_verified",
+                            )
+                        )
+                except IntegrityError:
+                    row = await _read_asset_row(
+                        conn,
+                        user_scope=request.user_scope,
+                        asset_id=request.skill_id,
+                        asset_version=str(request.version),
+                    )
+                    if row is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.PERSISTENCE_UNAVAILABLE, "skill asset insert conflicted", identity
+                        ) from None
+                else:
+                    return SkillAssetReceipt(
+                        user_scope=request.user_scope,
+                        skill_id=request.skill_id,
+                        version=request.version,
+                        content_digest=request.content_digest,
+                        replayed=False,
+                    )
+            return _compare_skill_asset_row(row, request, metadata, identity)
+
+    async def save_role_skill_assignment(
+        self,
+        assignment: RoleSkillAssignment,
+        *,
+        user_scope: str,
+        display_name: str,
+    ) -> RoleSkillAssignmentReceipt:
+        """角色版本对准确 Skill 版本的引用（单事务；引用阻删；默认⊆启用）。"""
+
+        self._check_engine()
+        identity = f"{user_scope}/{assignment.role_id}@{assignment.role_version}"
+        _require_text_field(user_scope, "user_scope", identity)
+        _require_text_field(display_name, "display_name", identity)
+        try:
+            validate_role_skill_assignment(assignment)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        wire = assignment.wire()
+        digest = role_skill_assignment_digest(assignment)
+        metadata = {"schema_version": SKILL_ASSET_METADATA_VERSION, "role_skill_assignment": wire}
+        refs = tuple(
+            SkillVersionRef(skill_id=skill_id, version=version)
+            for skill_id, version in sorted(
+                {(ref.skill_id, ref.version) for ref in (*assignment.enabled, *assignment.defaults)}
+            )
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            row = await _read_asset_row(
+                conn,
+                user_scope=user_scope,
+                asset_id=assignment.role_id,
+                asset_version=assignment.role_version,
+            )
+            if row is not None:
+                return _compare_role_assignment_row(row, assignment, digest, metadata, user_scope, refs, identity)
+            if refs:
+                skill_rows = (
+                    await conn.execute(
+                        sa.select(
+                            AgentAssetVersion.asset_id,
+                            AgentAssetVersion.asset_version,
+                            AgentAssetVersion.read_state,
+                            AgentAssetVersion.metadata_payload,
+                        )
+                        .where(
+                            AgentAssetVersion.user_scope == user_scope,
+                            AgentAssetVersion.asset_kind == "skill",
+                            sa.tuple_(AgentAssetVersion.asset_id, AgentAssetVersion.asset_version).in_(
+                                [(ref.skill_id, str(ref.version)) for ref in refs]
+                            ),
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+                installed = {(item.asset_id, item.asset_version) for item in skill_rows}
+                for ref in refs:
+                    if (ref.skill_id, str(ref.version)) not in installed:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            f"skill version not installed: {ref.skill_id}@{ref.version}",
+                            identity,
+                        )
+                for item in skill_rows:
+                    if item.read_state in {"disabled", "unavailable"}:
+                        raise AgentServiceError(
+                            AgentErrorCode.POLICY_DENIED,
+                            f"skill version not enabled: {item.asset_id}@{item.asset_version}",
+                            identity,
+                        )
+                    if (item.metadata_payload or {}).get("missing_dependencies"):
+                        raise AgentServiceError(
+                            AgentErrorCode.POLICY_DENIED,
+                            f"skill dependency missing: {item.asset_id}@{item.asset_version}",
+                            identity,
+                        )
+            try:
+                async with conn.begin_nested():
+                    await conn.execute(
+                        sa.insert(AgentAssetVersion).values(
+                            user_scope=user_scope,
+                            asset_id=assignment.role_id,
+                            asset_version=assignment.role_version,
+                            asset_kind="role",
+                            display_name=display_name,
+                            digest=digest,
+                            origin_ref=None,
+                            metadata_payload=metadata,
+                            read_state="ready",
+                            verification_state="program_verified",
+                        )
+                    )
+            except IntegrityError:
+                row = await _read_asset_row(
+                    conn,
+                    user_scope=user_scope,
+                    asset_id=assignment.role_id,
+                    asset_version=assignment.role_version,
+                )
+                if row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.PERSISTENCE_UNAVAILABLE, "role asset insert conflicted", identity
+                    ) from None
+                return _compare_role_assignment_row(row, assignment, digest, metadata, user_scope, refs, identity)
+            for ref in refs:
+                await conn.execute(
+                    sa.insert(AgentSourceLink).values(
+                        user_scope=user_scope,
+                        link_id=stable_id(
+                            "source_link",
+                            [
+                                user_scope,
+                                ref.skill_id,
+                                str(ref.version),
+                                "asset",
+                                assignment.role_id,
+                                assignment.role_version,
+                            ],
+                        ),
+                        source_id=ref.skill_id,
+                        source_version=str(ref.version),
+                        consumer_kind="asset",
+                        consumer_id=assignment.role_id,
+                        consumer_version=assignment.role_version,
+                        derived_asset_id=assignment.role_id,
+                        derived_asset_version=assignment.role_version,
+                        relation_kind=SourceRelationKind.ROLE_SKILL_BINDING.value,
+                    )
+                )
+        return RoleSkillAssignmentReceipt(
+            user_scope=user_scope,
+            role_id=assignment.role_id,
+            role_version=assignment.role_version,
+            digest=digest,
+            linked_skill_versions=refs,
+            replayed=False,
+        )
+
+
+def _validate_skill_asset_request(request: SkillAssetRegistration, identity: str) -> None:
+    for field_name in (
+        "user_scope",
+        "skill_id",
+        "display_name",
+        "normalized_name",
+        "license_id",
+    ):
+        _require_text_field(getattr(request, field_name), field_name, identity)
+    if not is_digest(request.content_digest):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "content_digest must be sha256 hex", identity)
+    if not is_digest(request.archive_digest):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "archive_digest must be sha256 hex", identity)
+    if isinstance(request.version, bool) or not isinstance(request.version, int) or request.version < 1:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "version must be a positive integer", identity)
+    for field_name in ("file_count", "expanded_bytes"):
+        value = getattr(request, field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{field_name} must be non-negative", identity)
+    for field_name in ("dependencies", "missing_dependencies", "ignored_behavioral_fields"):
+        values = getattr(request, field_name)
+        if len(set(values)) != len(values):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{field_name} contains duplicates", identity)
+
+
+def _skill_asset_metadata(request: SkillAssetRegistration) -> dict[str, Any]:
+    return {
+        "schema_version": SKILL_ASSET_METADATA_VERSION,
+        "skill_version_ref": {"skill_id": request.skill_id, "version": request.version},
+        "normalized_name": request.normalized_name,
+        "license": request.license_id,
+        "archive_digest": request.archive_digest,
+        "file_count": request.file_count,
+        "expanded_bytes": request.expanded_bytes,
+        "dependencies": list(request.dependencies),
+        "missing_dependencies": list(request.missing_dependencies),
+        "ignored_behavioral_fields": list(request.ignored_behavioral_fields),
+    }
+
+
+async def _read_asset_row(
+    conn: AsyncConnection,
+    *,
+    user_scope: str,
+    asset_id: str,
+    asset_version: str,
+) -> Any:
+    return (
+        await conn.execute(
+            sa.select(
+                AgentAssetVersion.asset_kind,
+                AgentAssetVersion.digest,
+                AgentAssetVersion.metadata_payload,
+            )
+            .where(
+                AgentAssetVersion.user_scope == user_scope,
+                AgentAssetVersion.asset_id == asset_id,
+                AgentAssetVersion.asset_version == asset_version,
+            )
+            .with_for_update()
+        )
+    ).first()
+
+
+def _compare_skill_asset_row(
+    row: Any,
+    request: SkillAssetRegistration,
+    metadata: dict[str, Any],
+    identity: str,
+) -> SkillAssetReceipt:
+    if row.asset_kind != "skill":
+        raise AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "asset identity belongs to another kind", identity)
+    if row.digest != request.content_digest or json_doc(dict(row.metadata_payload or {})) != json_doc(metadata):
+        raise AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "skill version differs from stored facts", identity)
+    return SkillAssetReceipt(
+        user_scope=request.user_scope,
+        skill_id=request.skill_id,
+        version=request.version,
+        content_digest=request.content_digest,
+        replayed=True,
+    )
+
+
+def _compare_role_assignment_row(
+    row: Any,
+    assignment: RoleSkillAssignment,
+    digest: str,
+    metadata: dict[str, Any],
+    user_scope: str,
+    refs: tuple[SkillVersionRef, ...],
+    identity: str,
+) -> RoleSkillAssignmentReceipt:
+    if row.asset_kind != "role":
+        raise AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "asset identity belongs to another kind", identity)
+    if row.digest != digest or json_doc(dict(row.metadata_payload or {})) != json_doc(metadata):
+        raise AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "role version differs from stored facts", identity)
+    return RoleSkillAssignmentReceipt(
+        user_scope=user_scope,
+        role_id=assignment.role_id,
+        role_version=assignment.role_version,
+        digest=digest,
+        linked_skill_versions=refs,
+        replayed=True,
+    )  # ------------------------------------------------------------------

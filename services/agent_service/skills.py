@@ -31,18 +31,26 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Protocol
 
 import yaml
 
 from core.agent_types import (
     DEFAULT_SKILL_BUDGET,
+    AgentErrorCode,
+    AgentServiceError,
     AgentValidationError,
+    RoleSkillAssignment,
+    RoleSkillAssignmentReceipt,
+    SkillAssetReceipt,
+    SkillAssetRegistration,
     SkillBudget,
     SkillVersionRef,
     json_doc,
     require_identity,
     sha256_hex,
+    stable_id,
+    validate_role_skill_assignment,
 )
 
 _READ_CHUNK = 1024 * 1024
@@ -482,6 +490,11 @@ class ManagedSkillStore:
         except OSError as exc:
             raise AgentValidationError("invalid_skill_path", f"$.skill.path[{name}]") from exc
 
+    def remove_version(self, ref: SkillVersionRef) -> None:
+        """补偿删除：仅用于「刚发布成功但登记失败」的本进程版本，不用于历史版本卸载。"""
+
+        shutil.rmtree(self.version_dir(ref), ignore_errors=True)
+
     def _extract(self, data: bytes, inspection: SkillPackageInspection, staging: Path) -> None:
         expected = {entry.name: entry for entry in inspection.files}
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -514,3 +527,169 @@ def install_skill_version(store: ManagedSkillStore, ref: SkillVersionRef, data: 
     inspection = inspect_skill_package(data)
     store.publish_package(ref, data, inspection)
     return inspection.archive_digest
+
+
+# ---------------------------------------------------------------------------
+# E-03-4b 导入编排与角色版本引用（F12/F13；管理入口留给 F 系列 UI）
+# ---------------------------------------------------------------------------
+
+
+class SkillCatalogPort(Protocol):
+    """Skill 资产持久化端口（生产为 ``AgentDao``；测试可注入替身）。"""
+
+    async def list_skill_versions(self, *, user_scope: str, skill_id: str) -> tuple[tuple[int, str], ...]: ...
+
+    async def has_skill(self, *, user_scope: str, skill_id: str) -> bool: ...
+
+    async def register_skill_asset(self, request: SkillAssetRegistration) -> SkillAssetReceipt: ...
+
+    async def save_role_skill_assignment(
+        self,
+        assignment: RoleSkillAssignment,
+        *,
+        user_scope: str,
+        display_name: str,
+    ) -> RoleSkillAssignmentReceipt: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SkillPackageImportRequest:
+    """用户明确导入一个目录/ZIP Skill：``confirm_update`` 仅对同名不同内容生效。"""
+
+    user_scope: str
+    data: bytes
+    directory_name: str
+    confirm_update: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SkillImportReceipt:
+    """导入回执：状态/版本/内容摘要与依赖缺口；未确认更新时不发布、不落库。"""
+
+    status: SkillImportStatus
+    user_scope: str
+    skill_id: str
+    version: int
+    display_name: str
+    content_digest: str
+    license_id: str
+    file_count: int
+    expanded_bytes: int
+    dependencies: tuple[str, ...]
+    missing_dependencies: tuple[str, ...]
+    requires_confirmation: bool
+
+
+async def _run_blocking(func: Callable[..., Any], /, *args: Any) -> Any:
+    from utils.thread_pool import TaskType, ThreadPoolManager
+
+    return await ThreadPoolManager().run_async(TaskType.IO, func, *args)
+
+
+class SkillCatalogService:
+    """Skill 导入/角色分配应用服务：复用 ``ManagedSkillStore`` 与 ``AgentDao``，不另立存储。"""
+
+    def __init__(
+        self,
+        store: ManagedSkillStore,
+        dao: SkillCatalogPort,
+        *,
+        blocking_runner: Callable[..., Any] = _run_blocking,
+    ) -> None:
+        self._store = store
+        self._dao = dao
+        self._run = blocking_runner
+
+    async def import_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
+        """预检 → 同名判定 → （发布 + 登记）；同内容返回未变化，不同内容默认需确认。"""
+
+        identity = f"{request.user_scope}/skill/{request.directory_name}"
+        try:
+            require_identity(request.user_scope, "$.skill.user_scope")
+            require_identity(request.directory_name, "$.skill.directory_name")
+            inspection = await self._run(inspect_skill_package, request.data)
+            manifest = parse_skill_manifest(
+                inspection.manifest_text.encode("utf-8"), directory_name=request.directory_name
+            )
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        normalized_name = normalize_skill_name(manifest.name)
+        skill_id = stable_id("skill", [request.user_scope, normalized_name])
+        content_digest = content_digest_of_files(inspection.files)
+        existing = await self._dao.list_skill_versions(user_scope=request.user_scope, skill_id=skill_id)
+        decision = decide_skill_import(existing, content_digest=content_digest, confirm_update=request.confirm_update)
+        missing_dependencies = await self._missing_dependencies(request.user_scope, manifest.dependencies)
+        receipt = SkillImportReceipt(
+            status=decision.status,
+            user_scope=request.user_scope,
+            skill_id=skill_id,
+            version=decision.next_version,
+            display_name=manifest.name,
+            content_digest=content_digest,
+            license_id=manifest.license_id,
+            file_count=len(inspection.files),
+            expanded_bytes=inspection.total_expanded_bytes,
+            dependencies=manifest.dependencies,
+            missing_dependencies=missing_dependencies,
+            requires_confirmation=decision.status is SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION,
+        )
+        if decision.status in {SkillImportStatus.UNCHANGED, SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION}:
+            return receipt
+        ref = SkillVersionRef(skill_id=skill_id, version=decision.next_version)
+        try:
+            await self._run(self._store.publish_package, ref, request.data, inspection)
+        except AgentValidationError as exc:
+            if exc.code == "skill_version_exists":
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT, "skill version already exists", identity
+                ) from exc
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        try:
+            await self._dao.register_skill_asset(
+                SkillAssetRegistration(
+                    user_scope=request.user_scope,
+                    skill_id=skill_id,
+                    version=ref.version,
+                    display_name=manifest.name,
+                    content_digest=content_digest,
+                    normalized_name=normalized_name,
+                    license_id=manifest.license_id,
+                    archive_digest=inspection.archive_digest,
+                    file_count=len(inspection.files),
+                    expanded_bytes=inspection.total_expanded_bytes,
+                    dependencies=manifest.dependencies,
+                    missing_dependencies=missing_dependencies,
+                    ignored_behavioral_fields=manifest.ignored_behavioral_fields,
+                )
+            )
+        except BaseException:
+            # 登记失败不回滚已原子发布的目录：删除本次新版本（旧版本不受影响）后传播。
+            await self._run(self._store.remove_version, ref)
+            raise
+        return receipt
+
+    async def assign_role_skills(
+        self,
+        assignment: RoleSkillAssignment,
+        *,
+        user_scope: str,
+        display_name: str,
+    ) -> RoleSkillAssignmentReceipt:
+        """保存角色版本对准确 Skill 版本的引用；默认⊆启用由 core 合同校验。"""
+
+        identity = f"{user_scope}/{assignment.role_id}@{assignment.role_version}"
+        try:
+            require_identity(user_scope, "$.role.user_scope")
+            require_identity(display_name, "$.role.display_name")
+            validate_role_skill_assignment(assignment)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        return await self._dao.save_role_skill_assignment(assignment, user_scope=user_scope, display_name=display_name)
+
+    async def _missing_dependencies(self, user_scope: str, dependencies: Sequence[str]) -> tuple[str, ...]:
+        missing: list[str] = []
+        for dependency in dependencies:
+            dependency_id = stable_id("skill", [user_scope, normalize_skill_name(dependency)])
+            if not await self._dao.has_skill(user_scope=user_scope, skill_id=dependency_id):
+                missing.append(dependency)
+        return tuple(missing)

@@ -1681,11 +1681,13 @@ def encode_submission_receipt(receipt: SubmissionReceipt) -> dict[str, Any]:
 #: 谱系边关系（§9.10 relation_kind；本轮工程冻结首批值——设计未逐枚举）。
 class SourceRelationKind(Enum):
     """源-消费者谱系边语义：origin=源→其 originating message；accepted_input=源→受理输入版；
-    draft_reference=源→当前会话草稿引用（F-03-4，随草稿保存替换为当前集合）。"""
+    draft_reference=源→当前会话草稿引用（F-03-4，随草稿保存替换为当前集合）；
+    role_skill_binding=Skill 资产→引用它的角色版本（E-03-4，引用阻删）。"""
 
     ORIGIN = "origin"
     ACCEPTED_INPUT = "accepted_input"
     DRAFT_REFERENCE = "draft_reference"
+    ROLE_SKILL_BINDING = "role_skill_binding"
 
 
 #: 可靠事件载荷结构标识（§4.4 payload_kind；本轮工程冻结首批值——设计未逐枚举）。
@@ -6248,6 +6250,137 @@ def resolve_skill_selection(
         if key in enabled_keys:
             chosen[key] = ref
     return tuple(chosen[key] for key in sorted(chosen))
+
+
+# ---------------------------------------------------------------------------
+# E-03-4 Skill 资产与角色版本引用（§9.10 / §10.3 / F12-F13）
+# ---------------------------------------------------------------------------
+
+#: Skill 资产元数据与角色分配 wire 结构版本。
+SKILL_ASSET_METADATA_VERSION: Final = 1
+ROLE_SKILL_ASSIGNMENT_VERSION: Final = 1
+
+_ROLE_SKILL_ASSIGNMENT_KEYS: Final = frozenset({"schema_version", "role_id", "role_version", "enabled", "defaults"})
+
+
+@dataclass(frozen=True, slots=True)
+class SkillAssetRegistration:
+    """受管 Skill 版本落库请求（agent_asset_version，§9.10）。
+
+    ``digest`` 为规范内容摘要；``archive_digest``、文件数/展开字节、许可、依赖与
+    行为字段全部进入 ``metadata_payload``，不复制脚本或凭据到数据库。
+    """
+
+    user_scope: str
+    skill_id: str
+    version: int
+    display_name: str
+    content_digest: str
+    normalized_name: str
+    license_id: str
+    archive_digest: str
+    file_count: int
+    expanded_bytes: int
+    dependencies: tuple[str, ...] = ()
+    missing_dependencies: tuple[str, ...] = ()
+    ignored_behavioral_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SkillAssetReceipt:
+    """Skill 资产落库回执：同输入重放 ``replayed=True``，零新事实。"""
+
+    user_scope: str
+    skill_id: str
+    version: int
+    content_digest: str
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RoleSkillAssignment:
+    """角色版本对 Skill 版本的引用（F13）。
+
+    ``defaults`` 必须是 ``enabled`` 的精确版本子集；空集合确实为空（不解释为全部）。
+    角色版本不可变：同 role_id/role_version 不同内容报冲突，不静默覆盖。
+    """
+
+    role_id: str
+    role_version: str
+    enabled: tuple[SkillVersionRef, ...]
+    defaults: tuple[SkillVersionRef, ...]
+
+    def wire(self) -> dict[str, Any]:
+        """规范 wire（键排序由 CanonicalJson 承担；集合按身份排序稳定）。"""
+
+        return {
+            "schema_version": ROLE_SKILL_ASSIGNMENT_VERSION,
+            "role_id": require_identity(self.role_id, "$.role.role_id"),
+            "role_version": require_identity(self.role_version, "$.role.role_version"),
+            "enabled": [encode_skill_version_ref(ref) for ref in _sorted_skill_refs(self.enabled)],
+            "defaults": [encode_skill_version_ref(ref) for ref in _sorted_skill_refs(self.defaults)],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RoleSkillAssignmentReceipt:
+    """角色版本落库回执：摘要绑定完整分配内容。"""
+
+    user_scope: str
+    role_id: str
+    role_version: str
+    digest: str
+    linked_skill_versions: tuple[SkillVersionRef, ...]
+    replayed: bool
+
+
+def validate_role_skill_assignment(assignment: RoleSkillAssignment) -> None:
+    """校验角色分配：身份非空、无重复版本、默认⊆启用（F13）。"""
+
+    require_identity(assignment.role_id, "$.role.role_id")
+    require_identity(assignment.role_version, "$.role.role_version")
+    for field_name, refs in (("enabled", assignment.enabled), ("defaults", assignment.defaults)):
+        for index, ref in enumerate(refs):
+            require_identity(ref.skill_id, f"$.role.{field_name}[{index}].skill_id")
+            require_revision(ref.version, f"$.role.{field_name}[{index}].version")
+        if len(_skill_keys(refs)) != len(refs):
+            _fail("duplicate_skill_version", f"$.role.{field_name}")
+    validate_skill_assignment(enabled=assignment.enabled, defaults=assignment.defaults)
+
+
+def decode_role_skill_assignment(value: object, path: str = "$.role_skill_assignment") -> RoleSkillAssignment:
+    """严格解码角色分配 wire：全键必填、禁额外键、版本从 1 起、默认⊆启用。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _ROLE_SKILL_ASSIGNMENT_KEYS, path)
+    if value["schema_version"] != ROLE_SKILL_ASSIGNMENT_VERSION or isinstance(value["schema_version"], bool):
+        _fail("invalid_schema_version", f"{path}.schema_version")
+    enabled_value = value["enabled"]
+    defaults_value = value["defaults"]
+    if not isinstance(enabled_value, list) or not isinstance(defaults_value, list):
+        _fail("invalid_type", f"{path}.enabled")
+    enabled = tuple(
+        decode_skill_version_ref(item, f"{path}.enabled[{index}]") for index, item in enumerate(enabled_value)
+    )
+    defaults = tuple(
+        decode_skill_version_ref(item, f"{path}.defaults[{index}]") for index, item in enumerate(defaults_value)
+    )
+    assignment = RoleSkillAssignment(
+        role_id=require_identity(value["role_id"], f"{path}.role_id"),
+        role_version=require_identity(value["role_version"], f"{path}.role_version"),
+        enabled=enabled,
+        defaults=defaults,
+    )
+    validate_role_skill_assignment(assignment)
+    return assignment
+
+
+def role_skill_assignment_digest(assignment: RoleSkillAssignment) -> str:
+    """分配摘要：覆盖角色身份与完整启用/默认集合（规范字节）。"""
+
+    validate_role_skill_assignment(assignment)
+    return sha256_hex(json_doc(assignment.wire()))
 
 
 # ---------------------------------------------------------------------------
