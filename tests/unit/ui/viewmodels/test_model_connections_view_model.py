@@ -2302,6 +2302,148 @@ class TestRebaseSnapshot:
         assert vm.state is before  # 取消未产生部分状态更新
 
 
+# --- D16-003：刷新代次门控（乱序刷新不得回退展示与 CAS 基线）---
+
+
+class TestRefreshGeneration:
+    """刷新 A(r) 停在注入用量 loader 边界，B(r+1) 完成后释放 A：旧快照整体丢弃。"""
+
+    async def test_slow_earlier_refresh_does_not_roll_back_newer_snapshot(self):
+        gate = asyncio.Event()
+        a_at_loader = asyncio.Event()
+        usage_calls = 0
+
+        async def loader() -> UsageCostSummary:
+            nonlocal usage_calls
+            usage_calls += 1
+            if usage_calls == 1:
+                a_at_loader.set()
+                await gate.wait()  # A 停在真实注入 loader 边界
+                return UsageCostSummary(known_cost_cny="1.00")
+            return UsageCostSummary(known_cost_cny="2.00")
+
+        grant_b = {
+            "connection_id": "c2",
+            "purpose": "model_call",
+            "target_fingerprint": "https://b.example.com",
+            "scope_version": 2,
+            "revoked_at": None,
+        }
+        snap_a = _snapshot(
+            revision=3,
+            connections=(_conn("c1", name="A Conn"),),
+            scenario_routes=(_route(candidates=("c1",)),),
+        )
+        snap_b = _snapshot(
+            revision=4,
+            connections=(_conn("c2", name="B Conn"),),
+            scenario_routes=(_route(candidates=("c2",)),),
+            security_grants=(grant_b,),
+            security_scope_version=2,
+        )
+        svc = _make_service(snap_a)
+        svc.get_snapshot = AsyncMock(side_effect=[snap_a, snap_b, snap_b])
+        vm = _make_vm(svc, usage_summary_loader=loader)
+        vm.start_add()
+        vm.update_name("Kept Draft")
+
+        task_a = asyncio.create_task(vm.rebase_snapshot())
+        await a_at_loader.wait()  # A 已取得 r=3 且未提交任何状态
+        assert await vm.rebase_snapshot() is True  # B 提交 r+1
+        gate.set()
+        assert await task_a is False  # 旧刷新如实返回未采纳
+
+        st = vm.state
+        assert st.config_revision == 4
+        assert [r.connection_id for r in st.connections] == ["c2"]
+        assert st.connections[0].name == "B Conn"
+        assert st.summary.known_cost_cny == "2.00"
+        assert st.draft.name == "Kept Draft"  # 草稿保留
+        # raw 元数据与公开状态同代（均为 B）
+        assert [str(c["connection_id"]) for c in vm._raw_connections] == ["c2"]  # noqa: SLF001
+        assert [str(r["scenario_id"]) for r in vm._raw_routes] == ["stock_analysis"]  # noqa: SLF001
+        assert [r["candidates"] for r in vm._raw_routes] == [["c2"]]  # noqa: SLF001
+        assert [g["target_fingerprint"] for g in vm._raw_grants] == ["https://b.example.com"]  # noqa: SLF001
+        assert vm._ref_counts == {"c2": 1}  # noqa: SLF001
+        assert vm._security_scope_version == 2  # noqa: SLF001
+
+        # 后续保存使用 B 的一致基线（修订 + routes 均不回退）
+        vm.update_model("gpt-4o")
+        vm.update_provider("openai")
+        assert await vm.save() is True
+        payload, expected_revision, _op = svc.save_draft.await_args.args
+        assert expected_revision == 4
+        assert payload["config_revision"] == 4
+        assert [r["candidates"] for r in payload["scenario_routes"]] == [["c2"]]
+        assert str(payload["connections"][0]["connection_id"]) == "c2"
+
+    async def test_stale_revision_snapshot_is_not_adopted(self):
+        """最新代次但修订更旧：不回退已前移的 CAS 基线（R22 单调性）。"""
+        snap_new = _snapshot(revision=5, connections=(_conn("c1", name="New"),))
+        snap_old = _snapshot(revision=3, connections=(_conn("c1", name="Old"),))
+        svc = _make_service(snap_new)
+        svc.get_snapshot = AsyncMock(side_effect=[snap_new, snap_old])
+        vm = _make_vm(svc)
+        await vm.load()
+        before = vm.state
+
+        assert await vm.rebase_snapshot() is False
+        assert vm.state is before
+        assert [str(c["name"]) for c in vm._raw_connections] == ["New"]  # noqa: SLF001
+
+    async def test_usage_degradation_still_adopts_rows_with_unknown_cost(self):
+        """用量查询失败降级（空摘要）：行照常采纳，费用保持未知而非伪零（R21）。"""
+
+        async def degraded() -> UsageCostSummary:
+            return UsageCostSummary()
+
+        vm = _make_vm(_make_service(_snapshot(revision=2, connections=(_conn("c1"),))), usage_summary_loader=degraded)
+        assert await vm.rebase_snapshot() is True
+        st = vm.state
+        assert st.config_revision == 2
+        assert [r.connection_id for r in st.connections] == ["c1"]
+        assert st.summary.known_cost_cny is None
+        assert st.summary.unpriced_count is None
+
+    async def test_usage_loader_failure_does_not_publish_partial_snapshot(self):
+        """loader 抛错：不留下已写 raw / 部分公开状态，重基如实失败。"""
+
+        async def failing() -> UsageCostSummary:
+            raise RuntimeError("usage unavailable")
+
+        vm = _make_vm(_make_service(_snapshot(revision=2, connections=(_conn("c1"),))), usage_summary_loader=failing)
+        before = vm.state
+
+        assert await vm.rebase_snapshot() is False
+        assert vm.state is before
+        assert vm._raw_connections == ()  # noqa: SLF001
+        assert vm._ref_counts == {}  # noqa: SLF001
+
+    async def test_dispose_while_refresh_in_flight_discards_result(self):
+        """dispose 后完成的刷新不得写 raw / 公开 state。"""
+        gate = asyncio.Event()
+        at_loader = asyncio.Event()
+
+        async def loader() -> UsageCostSummary:
+            at_loader.set()
+            await gate.wait()
+            return UsageCostSummary(known_cost_cny="9.00")
+
+        vm = _make_vm(
+            _make_service(_snapshot(revision=2, connections=(_conn("c1", name="Late"),))), usage_summary_loader=loader
+        )
+        vm.start_add()
+        refresh = asyncio.create_task(vm._refresh_snapshot())  # noqa: SLF001
+        await at_loader.wait()
+        vm.dispose()
+        gate.set()
+
+        assert await refresh is False
+        assert vm.state.config_revision == 0
+        assert vm.state.connections == ()
+        assert vm._raw_connections == ()  # noqa: SLF001
+
+
 # --- D16-002：编辑既有连接保留草稿未建模的嵌套配置 ---
 
 
