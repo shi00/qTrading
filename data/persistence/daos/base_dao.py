@@ -43,6 +43,10 @@ _IN_CHUNK_SIZE = 500
 _UPSERT_CHUNK_SIZE = 500
 # review03-C2: 超过该行数时 _save_upsert 改为每块独立事务（UPSERT 幂等，重跑安全）
 _LONG_TX_ROW_THRESHOLD = 20_000
+# D05-003: 维护侧排空「已准入事务」的有界等待窗口（秒）。超时后维护照常继续——
+# 已准入事务后续语句不再等待维护事件（见 _wait_maintenance_guard），DDL 只会按数据库
+# 锁等待事务自然结束，不会与「事务内等维护事件」构成锁环。
+_MAINTENANCE_DRAIN_TIMEOUT_SEC = 5.0
 # PRF-06: 匹配顶层 LIMIT 子句（排除子查询括号内的 LIMIT），避免重复追加语法错误
 _HAS_TOP_LEVEL_LIMIT = re.compile(r"\bLIMIT\b(?![^()]*\))", re.IGNORECASE)
 
@@ -110,6 +114,50 @@ def _normalize_records_frame(
     return records, coerce_stats
 
 
+class _TransactionAdmission:
+    """已准入事务计数 + 排空信号（D05-003，loop-local 实例，不用类属性，遵守 R11）。
+
+    准入门由维护事件（``BaseDao._get_maintenance_event``）把关：事务开始前必须等到
+    事件 set 才能进入；进入后登记为「已准入」。维护侧（``clear_all_cache``）先 clear
+    事件关闭准入门，再有界等待计数归零（``wait_idle``）后才执行需要 ACCESS EXCLUSIVE
+    的 DDL。
+
+    关键不变量：**已准入事务内的后续语句不得再等待维护事件**——事件由维护方在 DDL
+    完成（即等待该事务结束）之后才 set，事务内再等它就构成环。
+    """
+
+    __slots__ = ("_active", "_idle")
+
+    def __init__(self) -> None:
+        self._active = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    def enter(self) -> None:
+        self._active += 1
+        self._idle.clear()
+
+    def exit(self) -> None:
+        if self._active > 0:
+            self._active -= 1
+        if self._active == 0:
+            self._idle.set()
+
+    async def wait_idle(self, timeout: float) -> bool:
+        """等待计数归零；超时返回 False（有界，不悬挂）。"""
+        if self._active == 0:
+            return True
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            return False
+
+
 class BaseDao:
     _maintenance_event = None
 
@@ -138,7 +186,7 @@ class BaseDao:
                 f"[{self.__class__.__name__}] Engine disposed{suffix} Call CacheManager.init_db() to reinitialize."
             )
 
-    async def _wait_maintenance_guard(self, context: str = "dao") -> None:
+    async def _wait_maintenance_guard(self, context: str = "dao", *, conn: typing.Any = None) -> None:
         """等待维护事件后重新检查引擎（DAT-01：消除 R5 守卫 TOCTOU）。
 
         ``await self._get_maintenance_event().wait()`` 之后引擎状态可能已变——
@@ -148,8 +196,16 @@ class BaseDao:
 
         所有 DAO 执行出口（write/read/upsert/guarded_begin）统一经此方法等待
         + 复查，保证新增/复用路径自动获得守卫。
+
+        D05-003 锁环窗口：``conn is not None`` 表示语句运行在**已准入事务**内
+        （该事务已通过准入门，且可能已持有行/表锁）。此时**禁止再等待维护事件**：
+        维护方（``clear_all_cache``）先 clear 事件、再执行需要 ACCESS EXCLUSIVE 的
+        DDL，DDL 必须等本事务结束；若本事务在事务内再等该事件，两者互等即锁环。
+        该分支保留 R5 复查——事务内引擎若已被释放，立即抛 ``EngineDisposedError``
+        明确拒绝（明确失败优于静默悬挂）。
         """
-        await self._get_maintenance_event().wait()
+        if conn is None:
+            await self._get_maintenance_event().wait()
         self._check_engine(context=f"{context}:post-maintenance")
 
     @asynccontextmanager
@@ -160,24 +216,32 @@ class BaseDao:
         Otherwise, it starts an engine.begin() transaction.
         """
         self._check_engine()
-        await self._wait_maintenance_guard(context="begin")
 
         if conn is not None:
+            # D05-003: 外部事务已准入（由外层 _guarded_begin 登记），本层不再是准入方，
+            # 且事务可能已持锁——不得再等维护事件，只保留 R5 复查（上方 _check_engine）。
             yield conn
             return
 
+        await self._wait_maintenance_guard(context="begin")
+
+        admission = self._get_transaction_admission()
+        admission.enter()
         try:
-            async with self.engine.begin() as tx_conn:
-                yield tx_conn
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
-            if classify_error(e, "db")["code"] == "interrupted":
-                raise EngineDisposedError(
-                    f"[{self.__class__.__name__}] Engine disposed during guarded begin: {e}"
-                ) from e
-            raise
+            try:
+                async with self.engine.begin() as tx_conn:
+                    yield tx_conn
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # P3-M5-ClassifyError-System-Gap: 用 classify_error 替代手写字符串匹配
+                if classify_error(e, "db")["code"] == "interrupted":
+                    raise EngineDisposedError(
+                        f"[{self.__class__.__name__}] Engine disposed during guarded begin: {e}"
+                    ) from e
+                raise
+        finally:
+            admission.exit()
 
     @staticmethod
     async def _chunked_execute(
@@ -497,6 +561,28 @@ class BaseDao:
 
         return get_loop_local("basedao_maint_event", _factory)
 
+    @classmethod
+    def _get_transaction_admission(cls) -> _TransactionAdmission:
+        """已准入事务计数（loop-local，R11：不将 asyncio 原语作为类属性）。"""
+        return get_loop_local("basedao_tx_admission", _TransactionAdmission)
+
+    @classmethod
+    def admitted_transaction_count(cls) -> int:
+        """当前已准入（已通过准入门、事务未结束）的事务数。"""
+        return cls._get_transaction_admission().active
+
+    @classmethod
+    async def drain_admitted_transactions(cls, timeout: float | None = None) -> bool:
+        """维护侧排空屏障（D05-003）：有界等待已准入事务全部结束。
+
+        调用方（``CacheManager.clear_all_cache``）必须**先** clear 维护事件关闭准入门，
+        再调用本方法，之后才执行 DROP SCHEMA 等 ACCESS EXCLUSIVE DDL。返回 True 表示
+        已排空；False 表示超时（调用方记录告警后继续——已准入事务不再等待维护事件，
+        DDL 只会按数据库锁等待其自然结束，不会成环）。
+        """
+        effective_timeout = _MAINTENANCE_DRAIN_TIMEOUT_SEC if timeout is None else timeout
+        return await cls._get_transaction_admission().wait_idle(effective_timeout)
+
     def __init__(self, engine: typing.Any):
         self.engine = engine
 
@@ -586,7 +672,7 @@ class BaseDao:
                 self._convert_param_for_asyncpg(p) for p in params
             )  # RUF034/SIM: 参数恒为 tuple 或 list，统一转换
 
-        await self._wait_maintenance_guard(context="write")
+        await self._wait_maintenance_guard(context="write", conn=conn)
 
         # Check if engine is disposed/closed
         try:
@@ -726,7 +812,7 @@ class BaseDao:
 
         self._check_engine(context="upsert")
 
-        await self._wait_maintenance_guard(context="upsert")
+        await self._wait_maintenance_guard(context="upsert", conn=conn)
 
         table = Base.metadata.tables.get(table_name)
         if table is None:

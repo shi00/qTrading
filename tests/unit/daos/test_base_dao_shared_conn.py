@@ -1,6 +1,6 @@
-"""P1-4 回归测试：共享事务连接场景下 _chunked_execute 必须串行执行分块。
+"""共享事务连接场景的 DAO 回归测试。
 
-背景：
+P1-4 背景：
     HolderDao._calculate_holder_changes 在 ``async with self._guarded_begin() as tx_conn:``
     内调用 ``self.chunked_in_write(self._write_db, sql_template, ts_codes, conn=tx_conn)``。
     原实现 ``_chunked_execute`` 不区分共享 conn 场景，统一走 ``Semaphore(8)+asyncio.gather``
@@ -11,6 +11,14 @@
 修复：
     ``_chunked_execute`` 新增 ``conn: typing.Any = None`` 显式形参，
     ``conn is not None`` 时强制串行 for 循环执行（与 ``_save_upsert`` conn 分支同型）。
+
+D05-003 背景（锁环窗口）：
+    已准入事务内若再等待维护事件，维护方的 DDL（DROP SCHEMA，需 ACCESS EXCLUSIVE）
+    在等该事务结束、该事务在等 DDL 之后才 set 的事件 → 环。修复：事务内语句
+    （``conn is not None``）不再等待维护事件（仅保留 R5 复查），维护侧新增有界排空屏障。
+
+说明：本文件全部用例使用可控替身（MagicMock/AsyncMock），不连接真实数据库，
+也不执行真实 DDL；DDL 权限降级路径由 ``metadata.drop_all`` 替身覆盖。
 """
 
 import asyncio
@@ -18,6 +26,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from data.cache.cache_manager import CacheManager
+from data.persistence import engine_provider
 from data.persistence.daos.base_dao import BaseDao, DatabaseQueryError, EngineDisposedError
 
 pytestmark = pytest.mark.unit
@@ -380,3 +390,321 @@ class TestChunkedExecuteSharedConnErrorPropagation:
                 chunk_size=1,
                 conn=mock_conn,
             )
+
+
+_UPDATE_TEMPLATE = "UPDATE t SET x=1 WHERE ts_code IN ({placeholders})"
+
+
+def _make_engine(conn):
+    """构造 engine 替身：``engine.begin()`` 产出固定 conn（不连真实库）。"""
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    engine = MagicMock()
+    engine.sync_engine = MagicMock()
+    engine.begin = MagicMock(return_value=ctx)
+    return engine
+
+
+class TestMaintenanceAdmissionBarrier:
+    """D05-003：已准入事务内不得等待维护事件，维护侧用有界排空屏障取代隐式互等。"""
+
+    @pytest.mark.asyncio
+    async def test_multi_chunk_write_inside_admitted_transaction_completes(self):
+        """首块已持锁 + 并发维护（事件已 clear、DDL 等事务结束）必须有界完成。
+
+        生产形态：``_guarded_begin`` + ``chunked_in_write(conn=tx_conn)``（holder 全量
+        计算，>500 只股票即多块）。未修复时第 2 块在事务内等维护事件，维护事件要等本
+        事务结束才 set → 环；修复后事务内语句跳过事件等待，写入完成、维护放行。
+        """
+        maint_event = BaseDao._get_maintenance_event()
+        writer_done = asyncio.Event()
+        exec_count = 0
+        conn = AsyncMock()
+
+        async def _exec_driver_sql(sql, params=None):
+            nonlocal exec_count
+            exec_count += 1
+            if exec_count == 1:
+                # 首块 UPDATE 已持锁：此刻维护方 clear 事件并进入「等事务结束」阶段
+                maint_event.clear()
+                await asyncio.sleep(0.01)
+            return None
+
+        conn.exec_driver_sql = _exec_driver_sql
+        dao = BaseDao(_make_engine(conn))
+
+        async def _writer() -> None:
+            async with dao._guarded_begin() as tx_conn:
+                await dao.chunked_in_write(dao._write_db, _UPDATE_TEMPLATE, ["A", "B", "C"], conn=tx_conn, chunk_size=1)
+            writer_done.set()
+
+        async def _maintenance() -> None:
+            # 模拟 clear_all_cache：事件已 clear，DROP SCHEMA 需等写事务释放锁
+            await writer_done.wait()
+            maint_event.set()
+
+        maintenance_task = asyncio.create_task(_maintenance())
+        try:
+            await asyncio.wait_for(asyncio.gather(_writer(), maintenance_task), timeout=3)
+        finally:
+            maint_event.set()
+
+        assert exec_count == 3
+        assert writer_done.is_set() is True
+
+    @pytest.mark.asyncio
+    async def test_shared_conn_write_does_not_wait_event(self):
+        """共享事务连接上的单条写入在事件 clear 时也必须立即完成（不等待）。"""
+        maint_event = BaseDao._get_maintenance_event()
+        conn = AsyncMock()
+        dao = BaseDao(_make_engine(conn))
+        maint_event.clear()
+        try:
+            await asyncio.wait_for(dao._write_db("SELECT 1", conn=conn), timeout=1)
+        finally:
+            maint_event.set()
+        conn.exec_driver_sql.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_shared_write_still_waits_for_maintenance(self):
+        """回归保护：无共享 conn 的写入仍必须在准入门（维护事件）上等待。"""
+        maint_event = BaseDao._get_maintenance_event()
+        conn = AsyncMock()
+        dao = BaseDao(_make_engine(conn))
+        maint_event.clear()
+        try:
+            write_task = asyncio.create_task(dao._write_db("SELECT 1"))
+            await asyncio.sleep(0.01)
+            assert write_task.done() is False, "无共享 conn 的写入未等待维护事件，准入门被绕过"
+            maint_event.set()
+            await asyncio.wait_for(write_task, timeout=1)
+        finally:
+            maint_event.set()
+        conn.exec_driver_sql.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_admission_count_visible_to_drain(self):
+        """准入事务未结束前 drain 返回 False；结束后返回 True。"""
+        conn = AsyncMock()
+        dao = BaseDao(_make_engine(conn))
+
+        async with dao._guarded_begin():
+            assert BaseDao.admitted_transaction_count() == 1
+            assert await BaseDao.drain_admitted_transactions(timeout=0.01) is False
+
+        assert BaseDao.admitted_transaction_count() == 0
+        assert await BaseDao.drain_admitted_transactions(timeout=0.01) is True
+
+    @pytest.mark.asyncio
+    async def test_drain_returns_true_when_idle(self):
+        """无已准入事务时 drain 立即返回 True（不消耗超时窗口）。"""
+        assert await BaseDao.drain_admitted_transactions(timeout=0.01) is True
+
+    @pytest.mark.asyncio
+    async def test_cancelled_transaction_releases_admission(self):
+        """事务内取消：CancelledError 传播（R2），且准入计数不泄漏。"""
+        maint_event = BaseDao._get_maintenance_event()
+        conn = AsyncMock()
+        calls = 0
+
+        async def _exec_driver_sql(sql, params=None):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise asyncio.CancelledError()
+            return None
+
+        conn.exec_driver_sql = _exec_driver_sql
+        dao = BaseDao(_make_engine(conn))
+
+        with pytest.raises(asyncio.CancelledError):
+            async with dao._guarded_begin() as tx_conn:
+                await dao.chunked_in_write(dao._write_db, _UPDATE_TEMPLATE, ["A", "B"], conn=tx_conn, chunk_size=1)
+
+        assert maint_event.is_set() is True
+        assert BaseDao.admitted_transaction_count() == 0
+        assert await BaseDao.drain_admitted_transactions(timeout=0.01) is True
+
+    @pytest.mark.asyncio
+    async def test_shared_conn_write_rejects_disposed_engine_without_waiting(self):
+        """R5 保留：已准入事务内引擎被释放时必须立即明确拒绝，而非等待维护事件。"""
+        maint_event = BaseDao._get_maintenance_event()
+        conn = AsyncMock()
+        engine = _make_engine(conn)
+        dao = BaseDao(engine)
+        engine_provider.set_engine(engine)
+        engine_provider.mark_disposed(True)
+        maint_event.clear()
+        try:
+            with pytest.raises(EngineDisposedError):
+                await asyncio.wait_for(dao._write_db("SELECT 1", conn=conn), timeout=1)
+        finally:
+            maint_event.set()
+            engine_provider.reset_engine_provider()
+        conn.exec_driver_sql.assert_not_awaited()
+
+
+def _make_cache_manager(engine):
+    """构造 CacheManager 替身（__new__ 绕过单例初始化，不连真实库）。"""
+    mgr = CacheManager.__new__(CacheManager)
+    mgr._initialized = True
+    mgr._schema_initialized = False
+    mgr._disposed = False
+    mgr.engine = engine
+    return mgr
+
+
+class TestMaintenanceClearAdmission:
+    """D05-003：clear/close/init 维护入口与准入屏障的交互（全部为可控替身）。"""
+
+    @staticmethod
+    def _make_ddl_conn(order: list[str], cascade_error: Exception | None = None):
+        conn = AsyncMock()
+        savepoint_ctx = AsyncMock()
+        savepoint_ctx.__aexit__ = AsyncMock(return_value=None)
+        conn.begin_nested = MagicMock(return_value=savepoint_ctx)
+        calls = {"n": 0}
+
+        async def _execute(stmt, params=None):
+            order.append("ddl")
+            calls["n"] += 1
+            # 仅首条 DROP SCHEMA 失败，触发降级；降级路径的后续语句必须能继续执行
+            if cascade_error is not None and calls["n"] == 1:
+                raise cascade_error
+            return None
+
+        conn.execute = AsyncMock(side_effect=_execute)
+        conn.run_sync = AsyncMock()
+        return conn
+
+    @pytest.mark.asyncio
+    async def test_clear_all_cache_drains_admitted_transaction_before_ddl(self):
+        """DDL 必须发生在已准入事务结束之后（排空屏障前置）。"""
+        order: list[str] = []
+        ddl_conn = self._make_ddl_conn(order)
+        mgr = _make_cache_manager(_make_engine(ddl_conn))
+
+        writer_conn = AsyncMock()
+        dao = BaseDao(_make_engine(writer_conn))
+        admitted = asyncio.Event()
+
+        async def _writer() -> None:
+            async with dao._guarded_begin():
+                admitted.set()
+                await asyncio.sleep(0.05)
+            order.append("tx_closed")
+
+        with patch.object(mgr, "init_db", new_callable=AsyncMock):
+            writer_task = asyncio.create_task(_writer())
+            await asyncio.wait_for(admitted.wait(), timeout=1)
+            await asyncio.wait_for(asyncio.gather(writer_task, mgr.clear_all_cache()), timeout=3)
+
+        assert order[0] == "tx_closed", f"DDL 先于已准入事务结束：{order}"
+        assert "ddl" in order
+        assert BaseDao.admitted_transaction_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_clear_all_cache_proceeds_after_drain_timeout(self):
+        """排空超时后维护仍有界继续（不悬挂），且不阻塞写事务自行结束。"""
+        order: list[str] = []
+        ddl_conn = self._make_ddl_conn(order)
+        mgr = _make_cache_manager(_make_engine(ddl_conn))
+
+        writer_conn = AsyncMock()
+        dao = BaseDao(_make_engine(writer_conn))
+        admitted = asyncio.Event()
+
+        async def _writer() -> None:
+            async with dao._guarded_begin():
+                admitted.set()
+                await asyncio.sleep(0.2)
+            order.append("tx_closed")
+
+        with (
+            patch.object(mgr, "init_db", new_callable=AsyncMock),
+            patch("data.persistence.daos.base_dao._MAINTENANCE_DRAIN_TIMEOUT_SEC", 0.02),
+        ):
+            writer_task = asyncio.create_task(_writer())
+            await asyncio.wait_for(admitted.wait(), timeout=1)
+            await asyncio.wait_for(asyncio.gather(writer_task, mgr.clear_all_cache()), timeout=3)
+
+        # 超时窗口逼近后 DDL 先执行，写事务随后自然结束——两方都不悬挂
+        assert order.index("ddl") < order.index("tx_closed")
+        assert BaseDao.admitted_transaction_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_clear_all_cache_ddl_privilege_downgrade_still_bounded(self):
+        """DDL 权限降级（CASCADE 失败 → metadata.drop_all 替身）在排空后仍完成。"""
+        order: list[str] = []
+        ddl_conn = self._make_ddl_conn(order, cascade_error=RuntimeError("insufficient privilege"))
+        mgr = _make_cache_manager(_make_engine(ddl_conn))
+
+        writer_conn = AsyncMock()
+        dao = BaseDao(_make_engine(writer_conn))
+        admitted = asyncio.Event()
+
+        async def _writer() -> None:
+            async with dao._guarded_begin():
+                admitted.set()
+                await asyncio.sleep(0.02)
+            order.append("tx_closed")
+
+        with patch.object(mgr, "init_db", new_callable=AsyncMock):
+            writer_task = asyncio.create_task(_writer())
+            await asyncio.wait_for(admitted.wait(), timeout=1)
+            await asyncio.wait_for(asyncio.gather(writer_task, mgr.clear_all_cache()), timeout=3)
+
+        ddl_conn.run_sync.assert_awaited_once()  # 降级路径执行
+        assert order[0] == "tx_closed"
+        assert BaseDao.admitted_transaction_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_close_then_shared_conn_write_rejects_without_waiting(self):
+        """close 释放引擎后，事务内写入明确拒绝（R5），不等待维护事件。"""
+        engine = _make_engine(AsyncMock())
+        engine_provider.set_engine(engine)
+        mgr = _make_cache_manager(engine)
+        engine_mgr = MagicMock()
+        engine_mgr.engine = engine
+
+        async def _dispose() -> None:
+            engine_mgr.engine = None
+
+        engine_mgr.dispose = AsyncMock(side_effect=_dispose)
+        mgr._engine_manager = engine_mgr
+        mgr._dao_registry = MagicMock()
+
+        dao = BaseDao(engine)
+        try:
+            await asyncio.wait_for(mgr.close(), timeout=2)
+            assert mgr.engine is None
+            with pytest.raises(EngineDisposedError):
+                await asyncio.wait_for(dao._write_db("SELECT 1", conn=AsyncMock()), timeout=1)
+            # close 的 finally 已放行维护事件，且准入计数无泄漏
+            assert BaseDao._get_maintenance_event().is_set() is True
+            assert BaseDao.admitted_transaction_count() == 0
+        finally:
+            engine_provider.reset_engine_provider()
+
+    @pytest.mark.asyncio
+    async def test_guarded_begin_works_after_init_cycle(self):
+        """clear/init 之后新引擎上的事务仍可正常准入与排空（准入状态按 loop 隔离）。"""
+        order: list[str] = []
+        mgr = _make_cache_manager(_make_engine(self._make_ddl_conn(order)))
+        tx_mock = AsyncMock()
+        new_engine = _make_engine(tx_mock)
+
+        async def _init_db(force=False, auto_migrate=None):
+            mgr.engine = new_engine
+            mgr._schema_initialized = True
+
+        with patch.object(mgr, "init_db", new=_init_db):
+            await asyncio.wait_for(mgr.clear_all_cache(), timeout=3)
+
+        dao = BaseDao(new_engine)
+        async with dao._guarded_begin() as tx_conn:
+            assert tx_conn is tx_mock
+            assert BaseDao.admitted_transaction_count() == 1
+        assert BaseDao.admitted_transaction_count() == 0
+        assert await BaseDao.drain_admitted_transactions(timeout=0.01) is True

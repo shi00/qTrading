@@ -416,6 +416,15 @@ class CacheManager:
                 raise EngineDisposedError("CacheManager disposed during clear_all_cache")
             if self.engine is None:
                 raise RuntimeError("Database engine not initialized")
+            # D05-003: 准入门已在上面 clear（新事务不得再进入），这里先有界排空已准入事务，
+            # 再执行 DROP SCHEMA 的 ACCESS EXCLUSIVE DDL。已准入事务内的后续语句不再等待
+            # 维护事件（见 BaseDao._wait_maintenance_guard），故超时后继续也不会形成锁环。
+            if not await BaseDao.drain_admitted_transactions():
+                logger.warning(
+                    "[CacheManager] Wipe | %d admitted transaction(s) did not drain before DDL; "
+                    "DROP SCHEMA will wait on their locks (no maintenance-event wait inside transactions).",
+                    BaseDao.admitted_transaction_count(),
+                )
             async with self.engine.begin() as conn:
                 try:
                     # 优先使用 CASCADE 删除整个 public schema 并重建，确保无残留表。
