@@ -21,7 +21,7 @@
 ## 文件级目录索引（受控生成）
 
 > 本节与「ADR 索引」由 `scripts/docs_generated.py` 按封闭注册表从作者源（文件自身标题/角色）生成：
-> 更新用 `python scripts/check_docs_consistency.py --update`，一致性由 `check_docs_generated` 门禁守护，**勿手工修改生成区块**。正式文件逐篇可发现（含 .md/.yml/.yaml/.json）即本索引的验收语义。
+> 更新用 `python scripts/check_docs_consistency.py --update`，一致性由 `check_docs_generated` 门禁守护，**勿手工修改生成区块**。**能力现状**：生产差异更新当前被安全拒绝（生成逻辑仅经 `tests/docs` 测试替身验证，不构成生产写入能力证明），真实写入路线需另行确认；写入后端可用前，生成区块需待后端可用时再生，禁止手改或强制/不安全写入。正式文件逐篇可发现（含 .md/.yml/.yaml/.json）即本索引的验收语义。
 
 <!-- generated:docs-readme-file-index -->
 | 文档 | 标题 / 角色 |
