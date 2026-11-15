@@ -288,7 +288,8 @@ class AIStreamMixin:
     async def retry_single_stock(self, name: str) -> None:
         """UX-2.3: 重试单股 AI 分析。
 
-        流程：防抖检查 → 策略一致性检查 → 移除失败卡片 → 构建新 context → 调用策略 retry_single。
+        流程：防抖检查 → 策略一致性检查 → 复用失败卡片为占位卡 → 构建新 context
+        （注入本次专用 on_result）→ 调用策略 retry_single → 就地替换既有结果行。
         """
         # 1. 防抖：重试中拒绝再次触发
         if self._retrying:
@@ -330,10 +331,28 @@ class AIStreamMixin:
         retry_context["_task_id"] = None  # 不关联 TaskManager
         retry_context["on_progress"] = lambda c, t, m: None  # noop，不更新进度
         retry_context["strategy_key"] = self._last_strategy_key  # 透传给 retry_single
-        # on_result / on_card_start / on_card_error 保持原回调（更新 StreamCard）
+        # D16-001: 本次重试专用结果回调 —— 捕获结果行，待 retry_single 返回后在结果锁内
+        # 就地替换既有行；不复用批量追加通道（_on_ai_result_stream → _flush_ai_buffer 的
+        # concat 会保留原失败行，使同股同时出现在失败与推荐/排除分区）。
+        captured_result: dict | None = None
+
+        def _capture_retry_result(result_row: dict) -> None:
+            nonlocal captured_result
+            captured_result = result_row
+
+        retry_context["on_result"] = _capture_retry_result
+        retry_revision = self._dataset_revision
+        # on_card_start / on_card_error 保持原回调（更新 StreamCard）
         # 5. 调用策略重试
         try:
             await strategy.retry_single(name, retry_context)
+            if captured_result is not None:
+                await self._apply_single_retry_result(
+                    name,
+                    captured_result,
+                    strategy_key=retry_context["strategy_key"],
+                    dataset_revision=retry_revision,
+                )
         except asyncio.CancelledError:
             raise  # R2 合规（占位卡终结由 select_strategy 取消路径处理）
         except Exception as e:
@@ -385,6 +404,95 @@ class AIStreamMixin:
         self._last_ai_context = None
         self._last_strategy_key = None
         self._set_state(is_retrying=False)
+
+    @staticmethod
+    def _match_existing_result_mask(base_df: pd.DataFrame, result_row: dict, name: str) -> pd.Series | None:
+        """D16-001: 定位结果表中同一股票的既有行（优先 ts_code，缺失时回落 name）。
+
+        同一股票在批次结果中唯一；若旧缺陷已写入重复行，调用方负责收敛为一行。
+        返回 ``None`` 表示表中无该股行（不改表，仅终结卡片）。
+        """
+        ts_code = result_row.get("ts_code")
+        if ts_code is not None and "ts_code" in base_df.columns:
+            mask = base_df["ts_code"] == ts_code
+            if bool(mask.any()):
+                return mask
+        if "name" in base_df.columns:
+            target_name = result_row.get("name") or name
+            mask = base_df["name"] == target_name
+            if bool(mask.any()):
+                return mask
+        return None
+
+    async def _apply_single_retry_result(
+        self,
+        name: str,
+        result_row: dict,
+        *,
+        strategy_key: str | None,
+        dataset_revision: int,
+    ) -> None:
+        """D16-001: 单股重试结果就地替换既有结果行，并同帧重算分页/分区。
+
+        重试原先复用批量回调 ``_on_ai_result_stream``：结果进入 ``_ai_buffer`` 后经
+        ``_flush_ai_buffer`` concat **追加**，批次最终表中原失败行不会被替换，同一股票
+        同时出现在失败与推荐/排除分区（全量计数、导出随之重复）。本方法不与批量缓冲
+        交互，单次回调即立即可见，不受批量节流窗口影响。
+
+        实现要点：
+        - 在 ``screener_vm_results_lock``（与 flush/sort/最终提交同锁）内按身份
+          （ts_code，缺失时回落 name）替换该行；旧缺陷遗留的同股重复行一并收敛为一行。
+        - 先复制再整体替换 ``_full_results`` 引用，不就地改行：导出线程可能仍持有旧
+          DataFrame 引用（``to_csv``/``to_excel`` 在 CPU 线程池读取）。
+        - 所有权守卫：仅当重试发起时的策略 key、``_dataset_revision`` 与重试占位卡仍是
+          当前值时写表 —— 切策略/取消/新运行后的迟到结果不得修改新表。等待锁期间的取消
+          经 CancelledError 正常传播（R2）。
+        - 失败重试不产生结果（策略走 ``on_card_error``），原失败行保持不变。
+        """
+        lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
+        async with lock:
+            if self._disposed or self._state.mode != "REALTIME":
+                return
+            if not self._retrying or self._retrying_name != name:
+                return
+            if self._last_strategy_key != strategy_key or self._dataset_revision != dataset_revision:
+                return
+
+            updated_df: pd.DataFrame | None = None
+            base_df = self._full_results
+            if base_df is not None and not base_df.empty:
+                mask = self._match_existing_result_mask(base_df, result_row, name)
+                if mask is None:
+                    logger.warning("[ScreenerVM] retry result row not found in results: %s", name)
+                else:
+                    positions = [i for i, hit in enumerate(mask.to_list()) if hit]
+                    replacement_df = pd.DataFrame([result_row])
+                    # 以位置索引重建，避免依赖原表索引唯一性（并发写点可能留下重复索引）
+                    updated_df = base_df.reset_index(drop=True).copy()
+                    for col in replacement_df.columns:
+                        if col not in updated_df.columns:
+                            # 仅失败行的批次缺少 conclusion_label/execution_metadata 等列
+                            updated_df[col] = None
+                        updated_df.at[positions[0], col] = replacement_df.iloc[0][col]
+                    if len(positions) > 1:
+                        # 旧缺陷可能已写入同股多行：收敛为一行，保证「同股仅一行」不变量
+                        updated_df = updated_df.drop(index=positions[1:]).reset_index(drop=True)
+                    self._full_results = updated_df
+
+            entry = LogEntry(
+                name=name,
+                score=result_row.get("ai_score", 0),
+                thinking=str(result_row.get("thinking", "")),
+            )
+            content = str(result_row.get("ai_reason", ""))
+            new_cards = tuple(
+                replace(c, reasoning=entry.thinking, content=content, is_analyzing=False)
+                if c.name == name and c.is_analyzing
+                else c
+                for c in self._state.stream_cards
+            )
+            # 卡片/日志与分页/分区同帧原子落定（唯一 owner _update_pagination）
+            self._update_pagination(stream_cards=new_cards, logs=(*self._state.logs, entry))
 
     # --- AI Streaming Handlers ---
 

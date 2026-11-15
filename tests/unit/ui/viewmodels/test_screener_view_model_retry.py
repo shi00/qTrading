@@ -5,6 +5,7 @@
 2. retry_single_stock: 防抖/策略一致性/无 context/成功/异常/CancelledError/无 retry_single
 3. schedule_retry: 重试中跳过/无 loop 跳过/正常创建 task
 4. select_strategy 在重试中：取消重试任务 + 清空上下文
+5. D16-001: 重试结果就地替换既有行（失败/否决/重复行收敛/取消与切策略隔离）
 
 测试范式参考 test_screener_view_model.py (vm fixture + patch 依赖)。
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
@@ -455,3 +457,200 @@ class TestSwitchToHistoryDuringRetry:
         assert vm._retry_task is None
         assert vm._retrying is False
         assert vm.state.mode == "HISTORY"
+
+
+# ============================================================================
+# 5. D16-001: 重试结果就地替换既有行
+# ============================================================================
+
+
+def _result_row(
+    ts_code: str,
+    name: str,
+    ai_status: str,
+    ai_score: float | None,
+    ai_reason: str = "",
+) -> dict:
+    """构造结果表行（含 AI 结论列，与 _build_result_row 输出同构）。"""
+    return {
+        "ts_code": ts_code,
+        "name": name,
+        "ai_status": ai_status,
+        "ai_score": ai_score,
+        "ai_reason": ai_reason,
+        "thinking": "",
+    }
+
+
+def _prepare_retry_table(vm, rows: list[dict], name: str = "平安银行") -> None:
+    """构造含 A 成功 / B 失败的权威结果表 + B 的失败卡片与重试上下文。"""
+    vm._full_results = pd.DataFrame(rows)
+    vm._update_pagination()
+    vm._set_state(stream_cards=(_make_error_card(name, "timeout"),), selected_strategy="strategy_x")
+    vm._last_ai_context = {"on_result": lambda r: None, "on_card_error": vm._on_card_error}
+    vm._last_strategy_key = "strategy_x"
+
+
+def _install_retry(vm, retry_impl) -> None:
+    strategy = MagicMock()
+    strategy.retry_single = retry_impl
+    vm.strategy_mgr.get_strategy.return_value = strategy
+
+
+class TestRetryResultRowReplacement:
+    """D16-001: 重试结果就地替换原失败行；失败保留原行；迟到结果不改新表。"""
+
+    @staticmethod
+    def _base_rows() -> list[dict]:
+        return [
+            _result_row("600519.SH", "贵州茅台", "analyzed", 90.0),
+            _result_row("000001.SZ", "平安银行", "failed", None),
+        ]
+
+    def test_success_replaces_failed_row_immediately(self, vm):
+        """成功重试：原失败行被替换（非追加），失败-1/推荐+1，单次回调立即可见。"""
+        _prepare_retry_table(vm, self._base_rows())
+        retry_row = _result_row("000001.SZ", "平安银行", "analyzed", 77.0, "重试成功")
+
+        async def _retry(_name, context):
+            context["on_result"](retry_row)
+
+        _install_retry(vm, _retry)
+        asyncio.run(vm.retry_single_stock("平安银行"))
+
+        df = vm._full_results
+        assert df is not None
+        assert len(df) == 2  # 原失败行被替换，而非 concat 追加
+        assert df["ts_code"].is_unique
+        bank = df.loc[df["ts_code"] == "000001.SZ"].iloc[0]
+        assert bank["ai_status"] == "analyzed"
+        assert float(bank["ai_score"]) == 77.0
+        # 失败数 -1、推荐分区 +1；单次回调立即可见（不经批量缓冲/节流窗口）
+        assert vm.state.ai_section_counts == (2, 0, 0)
+        assert vm._ai_buffer == []
+        card = vm.state.stream_cards[0]
+        assert card.is_analyzing is False
+        assert card.error is None
+        assert "重试成功" in card.content
+        # 导出与结果表同源，无重复行
+        export_df = vm.get_export_data()
+        assert export_df is not None
+        assert len(export_df) == 2
+
+    def test_rejected_result_moves_row_to_excluded(self, vm):
+        """被否决：原失败行替换为 rejected，失败-1/排除+1，仍仅一行。"""
+        _prepare_retry_table(vm, self._base_rows())
+        retry_row = _result_row("000001.SZ", "平安银行", "rejected", 0.0, "明确否决")
+
+        async def _retry(_name, context):
+            context["on_result"](retry_row)
+
+        _install_retry(vm, _retry)
+        asyncio.run(vm.retry_single_stock("平安银行"))
+
+        df = vm._full_results
+        assert df is not None
+        assert len(df) == 2
+        bank = df.loc[df["ts_code"] == "000001.SZ"].iloc[0]
+        assert bank["ai_status"] == "rejected"
+        assert vm.state.ai_section_counts == (1, 1, 0)
+
+    def test_failed_retry_keeps_original_row(self, vm):
+        """重试仍失败：不产生结果行，原失败行与失败计数保持不变。"""
+        _prepare_retry_table(vm, self._base_rows())
+
+        async def _retry(_name, context):
+            context["on_card_error"]("平安银行", "仍然失败")
+
+        _install_retry(vm, _retry)
+        asyncio.run(vm.retry_single_stock("平安银行"))
+
+        df = vm._full_results
+        assert df is not None
+        assert len(df) == 2
+        bank = df.loc[df["ts_code"] == "000001.SZ"].iloc[0]
+        assert bank["ai_status"] == "failed"
+        assert pd.isna(bank["ai_score"])
+        assert vm.state.ai_section_counts == (1, 0, 1)
+        card = vm.state.stream_cards[0]
+        assert card.is_analyzing is False
+        assert card.error == "仍然失败"
+
+    def test_duplicate_rows_for_same_stock_collapse_to_one(self, vm):
+        """旧缺陷已写入同股重复行时，重试成功后将重复行收敛为一行。"""
+        rows = [
+            _result_row("600519.SH", "贵州茅台", "analyzed", 90.0),
+            _result_row("000001.SZ", "平安银行", "failed", None),
+            _result_row("000001.SZ", "平安银行", "failed", None),  # 旧缺陷遗留
+        ]
+        _prepare_retry_table(vm, rows)
+        retry_row = _result_row("000001.SZ", "平安银行", "analyzed", 66.0, "重试成功")
+
+        async def _retry(_name, context):
+            context["on_result"](retry_row)
+
+        _install_retry(vm, _retry)
+        asyncio.run(vm.retry_single_stock("平安银行"))
+
+        df = vm._full_results
+        assert df is not None
+        assert len(df) == 2
+        assert df["ts_code"].is_unique
+        assert vm.state.ai_section_counts == (2, 0, 0)
+
+    def test_cancel_retry_does_not_modify_table(self, vm):
+        """取消重试：迟到结果不得修改结果表，卡片还原为原始错误态。"""
+        _prepare_retry_table(vm, self._base_rows())
+        retry_row = _result_row("000001.SZ", "平安银行", "analyzed", 77.0)
+
+        async def _retry(_name, context):
+            context["on_result"](retry_row)
+            vm.cancel_retry()
+
+        _install_retry(vm, _retry)
+        asyncio.run(vm.retry_single_stock("平安银行"))
+
+        df = vm._full_results
+        assert df is not None
+        assert len(df) == 2
+        assert df.loc[df["ts_code"] == "000001.SZ"].iloc[0]["ai_status"] == "failed"
+        assert vm.state.ai_section_counts == (1, 0, 1)
+        assert vm.state.stream_cards[0].error == "timeout"
+
+    def test_strategy_switch_during_retry_does_not_modify_new_table(self, vm):
+        """切策略：重试上下文已清空，迟到结果不得修改结果表。"""
+        _prepare_retry_table(vm, self._base_rows())
+        retry_row = _result_row("000001.SZ", "平安银行", "analyzed", 77.0)
+
+        async def _retry(_name, context):
+            context["on_result"](retry_row)
+            vm.select_strategy("other_strategy")
+
+        _install_retry(vm, _retry)
+        asyncio.run(vm.retry_single_stock("平安银行"))
+
+        df = vm._full_results
+        assert df is not None
+        assert len(df) == 2
+        assert df.loc[df["ts_code"] == "000001.SZ"].iloc[0]["ai_status"] == "failed"
+        assert vm._last_strategy_key is None
+        assert vm.state.selected_strategy == "other_strategy"
+
+    def test_late_result_ignored_after_dataset_replaced(self, vm):
+        """新运行已整体替换数据集（修订号推进）：旧重试不得改写新表。"""
+        _prepare_retry_table(vm, self._base_rows())
+        retry_row = _result_row("000001.SZ", "平安银行", "analyzed", 77.0)
+
+        async def _retry(_name, context):
+            context["on_result"](retry_row)
+            # 模拟新运行的权威提交：整体替换结果表并推进数据集修订号
+            vm._full_results = pd.DataFrame([_result_row("300750.SZ", "宁德时代", "analyzed", 85.0)])
+            vm._dataset_revision += 1
+
+        _install_retry(vm, _retry)
+        asyncio.run(vm.retry_single_stock("平安银行"))
+
+        df = vm._full_results
+        assert df is not None
+        assert len(df) == 1
+        assert df.iloc[0]["ts_code"] == "300750.SZ"
