@@ -300,6 +300,7 @@ class TestCleanupExecutionFailures:
         assert str(exc.value) == "preflight boom"
 
         assert dao.phases[0]["error_category"] == "cleanup_preflight_failed"
+        assert len(dao.phases) == 1
         assert [call[0] for call in executor.calls] == ["preflight"]
 
     @pytest.mark.asyncio
