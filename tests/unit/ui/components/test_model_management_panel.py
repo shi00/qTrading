@@ -569,12 +569,34 @@ class TestUsageView:
         dropdowns = [c for c in _walk_controls(view) if isinstance(c, ft.Dropdown)]
         assert dropdowns == []
 
+    def test_page_export_disabled_until_loaded_page_matches(self):
+        """D16-004：当前页导出只在已加载页身份与当前页一致时可用；all 范围不受影响。"""
+
+        def _export_button(state: ModelUsageState) -> Any:
+            view = _build_usage_view(state, MagicMock(), [], None, MagicMock())
+            return next(c for c in _walk_controls(view) if getattr(c, "key", None) == "usage_export")
+
+        assert _export_button(_usage_state(page=0)).disabled is True  # 尚未加载
+        assert _export_button(_usage_state(page=1, loaded_page=0)).disabled is True  # 页号已前移
+        assert _export_button(_usage_state(page=1, loaded_page=1)).disabled is False
+        assert _export_button(_usage_state(page=1, export_scope=EXPORT_SCOPE_ALL)).disabled is False
+
+    def test_loading_hint_rendered_while_page_turn_in_flight(self):
+        """D16-004：翻页在途界面显式「加载中」（旧页行已清空）。"""
+        view = _build_usage_view(_usage_state(page=1, loading=True), MagicMock(), [], None, MagicMock())
+        assert "model_usage_loading" in set(_collect_keys(view))
+
 
 class TestExportFilename:
     def test_page_scope_token_uses_page_number(self):
         name = panel_module._export_filename(_usage_state(page=2))
         assert name.startswith("ai_usage_page3_")
         assert name.endswith(".csv")
+
+    def test_page_token_uses_loaded_page_identity(self):
+        """D16-004：当前页令牌取已加载页身份（与 CSV 行集同源）。"""
+        name = panel_module._export_filename(_usage_state(page=3, loaded_page=1))
+        assert name.startswith("ai_usage_page2_")
 
     def test_all_scope_token(self):
         name = panel_module._export_filename(_usage_state(export_scope=EXPORT_SCOPE_ALL))
@@ -725,6 +747,51 @@ class TestExportCsvAndNotify:
         else:
             vm.write_csv.assert_awaited_once_with("/tmp/out.csv", "csv-body")
         show_snack.assert_called_once_with(I18n.get("model_usage_export_ready"), color=AppColors.SUCCESS)
+
+    @pytest.mark.asyncio
+    async def test_page_export_during_page_turn_writes_nothing_then_page2_consistent(self):
+        """D16-004：下一页停在 DAO 时不落盘「标第 2 页的第 1 页」CSV；成功后页号与行集一致。"""
+        dao = MagicMock()
+        dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-p0"}], 60))
+        dao.read_budget_summary = AsyncMock(return_value={})
+        dao.read_unconfirmed_reservations = AsyncMock(return_value=[])
+        vm = ModelUsageViewModel(dao_provider=lambda: dao, month_provider=lambda: "202601")
+        await vm.load()
+
+        gate = asyncio.Event()
+
+        async def _gated(**_kwargs: Any) -> tuple[list[dict], int]:
+            await gate.wait()
+            return ([{"invocation_id": "inv-p1"}], 60)
+
+        dao.read_request_page = _gated
+        turn_task = asyncio.create_task(vm.next_page())
+        await asyncio.sleep(0)  # 第 2 页请求停在 DAO
+        assert vm.state.page == 1
+        assert vm.state.loaded_page is None
+
+        picker = MagicMock()
+        picker.save_file = AsyncMock(return_value="/tmp/out.csv")
+        show_snack = MagicMock()
+        with patch.object(panel_module, "_get_page", return_value=_fake_page(web=False)):
+            await _export_csv_and_notify(vm, picker, show_snack)
+
+        picker.save_file.assert_not_awaited()
+        show_snack.assert_called_once_with(I18n.get("model_usage_export_failed"), color=AppColors.ERROR)
+
+        gate.set()
+        await turn_task
+        assert vm.state.loaded_page == 1
+
+        picker.save_file.reset_mock()
+        show_snack.reset_mock()
+        with patch.object(panel_module, "_get_page", return_value=_fake_page(web=True)):
+            await _export_csv_and_notify(vm, picker, show_snack)
+
+        assert picker.save_file.await_args.kwargs["file_name"].startswith("ai_usage_page2_")
+        csv_text = picker.save_file.await_args.kwargs["src_bytes"].decode("utf-8-sig")
+        assert "inv-p1" in csv_text
+        assert "inv-p0" not in csv_text
 
 
 def _texts(control: Any) -> list[str]:

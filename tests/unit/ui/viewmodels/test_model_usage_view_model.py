@@ -7,6 +7,8 @@
 - F35 请求代次隔离：两个 load 逆序完成保留最新请求结果；旧代次失败降级不覆盖；
   在途展开响应在筛选变化后不回填；重载在途时翻页 no-op（旧 total 路径已被统一重载取代）；
 - next/prev 分页（50/页，边界 no-op）；
+- D16-004 页身份：翻页在途 / 失败不可导出（当前页），成功 CSV 页号与 invocation IDs
+  同源，前后翻页清空旧页行与展开、迟到展开不回填错页；
 - expand 加载有序尝试并可折叠；
 - release_unconfirmed_reservation 未注入释放器时降级；注入后刷新摘要；
 - enter_monthly_summary 切月汇总模式；
@@ -471,6 +473,114 @@ async def test_prev_page_noop_at_zero():
     await vm.prev_page()
     assert vm.state.page == 0
     assert dao.read_request_page.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_page_turn_blocks_current_page_export_until_dao_returns():
+    """D16-004：翻页停在 DAO 时不得以新页号导出旧页行（已加载页身份为空即拒绝）。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+    assert vm.state.page == 0
+    assert vm.state.loaded_page == 0
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-p1"}], total=60)
+    turn_task = asyncio.create_task(vm.next_page())
+    await asyncio.sleep(0)  # 新页请求停在 DAO 读取
+
+    assert vm.state.page == 1  # 请求页已前移
+    assert vm.state.requests == ()  # 旧页行已清空，不展示为新页数据
+    assert vm.state.loaded_page is None  # 无已加载页身份
+    assert vm.state.loading is True
+    with pytest.raises(RuntimeError):
+        await vm.export_csv()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_export_not_loaded"
+
+    gate.set()
+    await turn_task
+    assert vm.state.loaded_page == 1
+    assert vm.state.loading is False
+    text = await vm.export_csv()  # 成功页身份与行集同源
+    assert "inv-p1" in text
+    assert "inv-p0" not in text
+
+
+@pytest.mark.asyncio
+async def test_page_turn_failure_leaves_no_exportable_mixed_state():
+    """D16-004：翻页查询失败不保留「新页号 + 旧页行」混合态，当前页导出明确不可用。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-p0"]
+
+    dao.read_request_page = AsyncMock(side_effect=RuntimeError("db boom"))
+    await vm.next_page()
+
+    assert vm.state.page == 1
+    assert vm.state.requests == ()
+    assert vm.state.loaded_page is None
+    assert vm.state.loading is False
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_load_failed"
+    with pytest.raises(RuntimeError):
+        await vm.export_csv()
+    assert vm.state.message.key == "model_usage_export_not_loaded"
+
+
+@pytest.mark.asyncio
+async def test_prev_page_clears_loaded_identity_before_reload():
+    """D16-004：前翻同样先清空旧页身份，重载完成前导出不可用。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+    await vm.next_page()
+    assert vm.state.page == 1
+    assert vm.state.loaded_page == 1
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-p0"}], total=60)
+    turn_task = asyncio.create_task(vm.prev_page())
+    await asyncio.sleep(0)
+
+    assert vm.state.page == 0
+    assert vm.state.requests == ()
+    assert vm.state.loaded_page is None
+    with pytest.raises(RuntimeError):
+        await vm.export_csv()
+
+    gate.set()
+    await turn_task
+    assert vm.state.loaded_page == 0
+
+
+@pytest.mark.asyncio
+async def test_page_turn_discards_late_expand_from_old_page():
+    """D16-004：翻页后旧页在途展开响应不得回填新页界面。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    gate = asyncio.Event()
+
+    async def _gated_attempts(**_kwargs: Any) -> list[dict]:
+        await gate.wait()
+        return [{"kind": "old-attempt"}]
+
+    dao.read_request_attempts = _gated_attempts
+    vm = _vm(dao)
+    await vm.load()
+
+    expand_task = asyncio.create_task(vm.expand("inv-p0"))
+    await asyncio.sleep(0)
+
+    dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-p1"}], 60))
+    await vm.next_page()
+    assert vm.state.page == 1
+    assert vm.state.expanded_id is None
+
+    gate.set()  # 旧页展开响应迟到
+    await expand_task
+    assert vm.state.expanded_id is None
+    assert vm.state.attempts == ()
 
 
 @pytest.mark.asyncio
@@ -1471,6 +1581,46 @@ async def test_stale_reader_cancel_after_barrier_propagates_without_overwriting(
     assert vm.state.budget_summary.known_cny == Decimal("0.02")
     assert vm.state.budget_draft == "120"
     assert vm.state.message is None
+
+
+@pytest.mark.asyncio
+async def test_current_reader_cancel_resets_loading_but_propagates():
+    """D16-004 + R2：当前代次在末段 reader 被取消时复位在途标记，仍上抛。"""
+    dao = _dao(rows=[{"invocation_id": "inv-A"}], total=1)
+    reader = _ReaderBarrier(gated_error=asyncio.CancelledError())
+    vm = _vm(dao, reader=reader)
+
+    task = asyncio.create_task(vm.load())
+    await asyncio.sleep(0)
+    assert reader.calls == 1
+    assert vm.state.loading is True
+
+    reader.release()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert vm.state.loading is False
+    assert vm.state.loaded_page is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_page_turn_resets_loading_and_leaves_no_identity():
+    """D16-004：翻页请求在 DAO 处被取消后不残留加载中 / 可导出混合态。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-p1"}], total=60)
+    turn_task = asyncio.create_task(vm.next_page())
+    await asyncio.sleep(0)
+    assert vm.state.loading is True
+
+    turn_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn_task
+    assert vm.state.loading is False
+    assert vm.state.loaded_page is None
+    assert vm.state.requests == ()
 
 
 @pytest.mark.asyncio

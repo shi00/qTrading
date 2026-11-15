@@ -27,6 +27,10 @@
   分页入口稳定遍历（页序固定从 0 起，不受当前页影响），构建前快照粒度 /
   范围 / 过滤条件；导出行保留请求身份（``invocation_id``）；未知费用空值
   （R21）；月汇总导出对齐查看月（随 ``summary_month``，不混当前月）。
+- D16-004：请求页与已加载页身份分离——翻页立即清空旧页行 / 展开并标加载中，
+  页号 / 行 / total 只在成功响应后按请求身份提交（``loaded_page``）；失败与
+  在途期间「当前页」导出显式不可用，不生成新页号 + 旧页行的混合 CSV。
+  ``all`` 导出保留独立过滤快照语义，不受当前页加载状态影响。
 """
 
 from __future__ import annotations
@@ -310,6 +314,11 @@ class ModelUsageState:
     requests: tuple[RequestRow, ...] = ()
     page: int = 0
     total: int = 0
+    # D16-004：``requests`` 所属的已加载页身份（None=未加载 / 翻页在途 / 加载失败）；
+    # 「当前页」导出要求该身份与 ``page`` 一致，禁止新页号 + 旧页行混合导出。
+    loaded_page: int | None = None
+    # D16-004：请求在途标记（翻页清空旧行后界面显式「加载中」）。
+    loading: bool = False
     filters: UsageFilters = UsageFilters()
     expanded_id: str | None = None
     attempts: tuple[AttemptRow, ...] = ()
@@ -507,13 +516,16 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         VMD-F01：预算限额读取（``budget_limit_reader``）是末段 await，成功或降级
         完成后、最终写入 state 前须再次复核代次——否则旧请求停在此处期间被新请求
         超越后仍会覆盖新请求的 rows / total / budget，而 filters 已属新请求。
+        D16-004：发起时快照请求页，成功提交 ``loaded_page`` 为同一页号；失败 / 取消
+        不提交页身份（翻页已清空旧行），「当前页」导出据此拒绝混合态。
         """
         self._load_generation += 1
         generation = self._load_generation
-        self._set_state(retention_exceeded=self._compute_retention_exceeded())
+        request_page = self._state.page
+        self._set_state(retention_exceeded=self._compute_retention_exceeded(), loading=True)
         dao = self._resolve_dao()
         if dao is None:
-            self._set_state(message=Message("model_usage_dao_unavailable"))
+            self._set_state(message=Message("model_usage_dao_unavailable"), loading=False)
             return
 
         f = self._state.filters
@@ -528,21 +540,29 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
                 terminal_status=f.terminal_status,
                 cost_status=f.cost_status,
                 limit=PAGE_SIZE,
-                offset=self._state.page * PAGE_SIZE,
+                offset=request_page * PAGE_SIZE,
             )
             summary = await dao.read_budget_summary(month=self._current_month())
             unconfirmed = await dao.read_unconfirmed_reservations()
         except asyncio.CancelledError:
+            if generation == self._load_generation:
+                self._set_state(loading=False)  # 当前请求被取消：复位在途标记，随后仍上抛（R2）
             raise  # R2: 必须传播
         except ValueError:
             if generation != self._load_generation:
                 return  # 旧代次：不得覆盖当前消息
-            self._set_state(message=Message("model_usage_filter_invalid"), requests=(), total=0)
+            self._set_state(
+                message=Message("model_usage_filter_invalid"),
+                requests=(),
+                total=0,
+                loaded_page=None,
+                loading=False,
+            )
             return
         except Exception:
             if generation != self._load_generation:
                 return  # 旧代次：不得覆盖当前消息
-            self._set_state(message=Message("model_usage_load_failed"))
+            self._set_state(message=Message("model_usage_load_failed"), loading=False)
             return
 
         if generation != self._load_generation:
@@ -556,6 +576,8 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             try:
                 limit = await self._budget_limit_reader()
             except asyncio.CancelledError:
+                if generation == self._load_generation:
+                    self._set_state(loading=False)  # 当前请求被取消：复位在途标记，随后仍上抛（R2）
                 raise  # R2: 必须传播
             except Exception:
                 limit_unknown = True
@@ -568,6 +590,8 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         self._set_state(
             requests=tuple(_request_row_from_dao(row) for row in rows),
             total=int(total),
+            loaded_page=request_page,
+            loading=False,
             budget_summary=_budget_summary_from_dao(summary),
             unconfirmed_reservations=tuple(_reservation_row_from_dao(row) for row in unconfirmed),
             budget_draft=_format_limit_text(limit),
@@ -602,6 +626,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             page=0,
             requests=(),
             total=0,
+            loaded_page=None,
             expanded_id=None,
             attempts=(),
             retention_exceeded=self._compute_retention_exceeded(new_filters.start),
@@ -613,18 +638,31 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
     # ------------------------------------------------------------------
 
     async def next_page(self) -> None:
-        """下一页（50/页）；已到末页为 no-op。"""
+        """下一页（50/页）；已到末页为 no-op。
+
+        D16-004：翻页先作废旧页行 / 展开并标加载中，再按新页请求；成功前「当前页」
+        导出不可用，旧页行不得以新页号导出。
+        """
         if (self._state.page + 1) * PAGE_SIZE >= self._state.total:
             return
-        self._set_state(page=self._state.page + 1)
+        self._begin_page_turn(self._state.page + 1)
         await self.load()
 
     async def prev_page(self) -> None:
-        """上一页；已在首页为 no-op。"""
+        """上一页；已在首页为 no-op（D16-004：同 ``next_page`` 清空旧页身份）。"""
         if self._state.page <= 0:
             return
-        self._set_state(page=self._state.page - 1)
+        self._begin_page_turn(self._state.page - 1)
         await self.load()
+
+    def _begin_page_turn(self, page: int) -> None:
+        """切页起点：清空旧页行 / 展开并推进展开代次（D16-004）。
+
+        旧页行与展开明细不得在新页号下继续展示或导出；在途旧展开响应经代次校验
+        丢弃，不回填错页。``total`` 为同一过滤口径的计数，跨页保持。
+        """
+        self._expand_generation += 1
+        self._set_state(page=page, requests=(), loaded_page=None, expanded_id=None, attempts=())
 
     # ------------------------------------------------------------------
     # 展开尝试
@@ -791,6 +829,9 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         不覆盖新条件结果的消息。DAO 不可用（``all``）显式抛错由 View 呈现失败，
         不返回部分文本伪装成功（R21）；DAO 读取失败沿既有降级边界
         （``_export_csv_and_notify``）向上传播。
+        D16-004：``page`` 范围要求已加载页身份与当前页一致（``loaded_page``）；
+        翻页在途 / 加载失败时显式不可导出（消息 + 抛错），禁止以新页号导出旧页行。
+        ``all`` 范围沿用独立过滤快照，不受当前页加载状态影响。
         """
         granularity = self._state.export_granularity
         scope = self._state.export_scope
@@ -800,6 +841,10 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         elif scope == EXPORT_SCOPE_ALL:
             text = _build_detail_csv(await self._fetch_all_filtered_requests(self._state.filters))
         else:
+            loaded_page = self._state.loaded_page
+            if loaded_page is None or loaded_page != self._state.page:
+                self._set_state(message=Message("model_usage_export_not_loaded"))
+                raise RuntimeError("export scope 'page' requires the current page to be loaded")
             text = _build_detail_csv(self._state.requests)
         if generation == self._load_generation:
             self._set_state(message=Message("model_usage_export_ready"))
