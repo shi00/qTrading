@@ -16,6 +16,7 @@ GitHub needs 聚合）。
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sys
@@ -24,6 +25,7 @@ import pytest
 
 from tests.unit.sidecar_release_harness import (
     LOCAL_VERIFY_STEP,
+    PLATFORMS,
     PUBLISH_STEP,
     REMOTE_VERIFY_STEP,
     STATE_STEP,
@@ -82,6 +84,18 @@ def _executed(chain: ChainResult) -> list[str]:
 def _output(result: StepResult) -> str:
     """workflow 用 ``::error::`` 写 stdout（Actions 注解），错误文本不一定在 stderr。"""
     return result.stdout + result.stderr
+
+
+_MANIFEST_BY_OS = {os_name: (artifact, f"sidecar-manifest-{os_name}.json") for os_name, _target, artifact in PLATFORMS}
+
+
+def _set_git_sha(harness: SidecarReleaseHarness, os_name: str, git_sha: object) -> None:
+    """改写指定平台 manifest 的 git_sha，模拟构建元数据缺失/降级/跨平台漂移。"""
+    artifact, manifest_name = _MANIFEST_BY_OS[os_name]
+    path = harness.assets_dir / artifact / manifest_name
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["git_sha"] = git_sha
+    path.write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def test_published_release_refuses_state_and_writes_nothing(tmp_path) -> None:
@@ -409,4 +423,62 @@ def test_tag_commit_mismatch_refuses_before_release_writes(tmp_path) -> None:
 
     assert chain.executed[0].exit_code == 1
     assert "does not match trigger commit" in _output(chain.executed[0])
+    assert _writes(harness) == []
+
+
+@pytest.mark.parametrize(
+    "git_sha",
+    [
+        None,
+        "",
+        "0",
+        "0" * 11,
+        "0" * 41,
+        "z" * 12,
+        "0123456789AB",
+        "unknown",
+    ],
+)
+def test_invalid_manifest_git_sha_refuses_before_draft(tmp_path, git_sha: object) -> None:
+    """manifest git_sha 缺失/null/空/过短/过长/非 hex：本地校验失败，draft 之前中止。"""
+    harness = SidecarReleaseHarness(tmp_path, tag=TAG, commit_sha=COMMIT)
+    _set_git_sha(harness, "windows", git_sha)
+
+    chain = harness.run_chain()
+
+    assert _executed(chain) == [LOCAL_VERIFY_STEP]
+    assert chain.executed[0].exit_code == 1
+    assert "is not a 12-40 char lowercase hex commit id" in _output(chain.executed[0])
+    assert _writes(harness) == []
+    assert _creates(harness) == []
+    assert harness.world()["releases"] == []
+
+
+def test_manifest_git_sha_outside_tag_commit_refuses_before_draft(tmp_path) -> None:
+    """单平台 git_sha 格式合法但不是 tag commit 前缀（跨平台来源漂移）：draft 之前拒绝。"""
+    harness = SidecarReleaseHarness(tmp_path, tag=TAG, commit_sha=COMMIT)
+    _set_git_sha(harness, "macos", "f" * 12)
+
+    chain = harness.run_chain()
+
+    assert _executed(chain) == [LOCAL_VERIFY_STEP]
+    assert chain.executed[0].exit_code == 1
+    output = _output(chain.executed[0])
+    assert "sidecar-manifest-macos.json" in output
+    assert "is not a prefix of tag commit" in output
+    assert _writes(harness) == []
+    assert _creates(harness) == []
+    assert harness.world()["releases"] == []
+
+
+@pytest.mark.parametrize("git_sha", [COMMIT[:12], COMMIT])
+def test_manifest_git_sha_prefix_or_full_sha_is_accepted(tmp_path, git_sha: str) -> None:
+    """四平台使用同一 commit 的 12 位前缀或完整 SHA：本地校验通过。"""
+    harness = SidecarReleaseHarness(tmp_path, tag=TAG, commit_sha=COMMIT)
+    for os_name in ("windows", "linux", "linux-arm", "macos"):
+        _set_git_sha(harness, os_name, git_sha)
+
+    chain = harness.run_chain([LOCAL_VERIFY_STEP])
+
+    assert chain.executed[0].exit_code == 0
     assert _writes(harness) == []

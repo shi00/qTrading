@@ -10,7 +10,8 @@
         [--output manifest.json]
 
 退出码: 0 成功; 1 参数/文件错误; 2 sidecar version --json 调用失败，或发布校验失败
-（返回非 dict / schema 不符 / target 缺失或不匹配 / self_sha256 与实际摘要不一致）。
+（返回非 dict / schema 不符 / target 缺失或不匹配 / self_sha256 与实际摘要不一致 /
+git_sha 缺失或不是 12-40 位小写十六进制 commit id）。
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +28,9 @@ from pathlib import Path
 MANIFEST_SCHEMA = "qtrading.sidecar.manifest.v1"
 VERSION_SCHEMA = "qtrading.embedded_postgres.version.v1"
 VERSION_TIMEOUT_S = 10
+# 构建期 short SHA 最少位数（校验发布产物与 tag commit 同一来源的最小身份强度）；
+# 40 位为 SHA-1 完整 commit id 上限。
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{12,40}$")
 
 
 def compute_sha256(path: Path) -> str:
@@ -87,6 +92,9 @@ def _validate_release_version(version_json: object, target: str, sha256: str) ->
             raise ValueError(
                 f"sidecar self_sha256 mismatch: version JSON self_sha256={self_sha!r}, actual sha256={sha256!r}"
             )
+    git_sha = version_json.get("git_sha")
+    if not isinstance(git_sha, str) or not GIT_SHA_RE.fullmatch(git_sha):
+        raise ValueError(f"sidecar version JSON git_sha must be a 12-40 char lowercase hex commit id, got {git_sha!r}")
     return version_json
 
 
