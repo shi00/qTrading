@@ -25,6 +25,9 @@
 - 单次测试回执身份（MC-03）：operation_id 于首个 await 前登记，成功 / 失败结果仅在
   操作身份、草稿代与编辑版本均仍为发起时值时才写入 state；执行字段真实变化即让结果
   失效回 idle（同值重写不失效），旧测试不得覆盖新草稿 / 新测试的状态与消息
+- 刷新代次（D16-003）：刷新发起即取得代次，快照 / 引用计数 / 用量 / 行全部保存在
+  局部；末次 await 后核对代次、修订单调性与 disposed，获准时在同一同步段原子提交
+  raw 元数据与公开 state——乱序完成的旧刷新整体丢弃，展示与 CAS 基线不随旧快照回退
 
 R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 """
@@ -304,6 +307,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._draft_edit_revision: int = 0
         # F02：回执身份绑定的编辑版本（登记时快照），供 committed 回执判定内容是否仍当前
         self._pending_operation_edit_revision: int | None = None
+        # D16-003：刷新代次——刷新发起即递增，末次 await 后仅最新代次可提交快照，
+        # 旧刷新（含注入用量 loader 晚返回）不得回退行 / raw 元数据 / CAS 基线
+        self._refresh_generation: int = 0
         # 回执身份的操作种类：草稿保存与安全命令（授权 / 撤销）共用恢复槽位，仅凭
         # id / 草稿代 / 编辑版本无法区分；回执恢复据此避免把安全命令的提交当成草稿已保存
         self._pending_operation_kind: Literal["draft", "egress"] | None = None
@@ -488,23 +494,43 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             )
             self._set_state(message=Message("model_connections_load_failed"))
 
-    async def _refresh_snapshot(self) -> None:
+    async def _refresh_snapshot(self) -> bool:
+        """读取已提交快照并在最新刷新代次下原子提交（D16-003）。
+
+        刷新发起即取得代次，快照 / 引用计数 / 用量 / 行全部保存在局部；末次 await
+        后核对代次、修订单调性与 disposed，获准时在同一同步段更新 raw 元数据与公开
+        state。旧刷新（A）晚于新刷新（B）完成时整体丢弃——行 / raw routes / grants /
+        ref counts / CAS 修订均保持 B，禁止旧快照回退展示或混代。
+
+        Returns:
+            ``True`` 表示本次快照已采纳；``False`` 表示已被更新的刷新取代、修订过期
+            或 VM 已 dispose（未写任何状态，不伪装成功，R21）。
+        """
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         snapshot = await self._service.get_snapshot()
+        ref_counts = self._count_refs(snapshot)
+        usage = UsageCostSummary()
+        if self._usage_summary_loader is not None:
+            usage = await self._usage_summary_loader()
+        if self.disposed or generation != self._refresh_generation:
+            return False  # 更新的刷新已发起 / 已完成：丢弃本次过期快照
+        if snapshot.config_revision < self._state.config_revision:
+            return False  # 陈旧快照：不回退已前移的 CAS 基线（R22 单调性）
+        # 同一同步段提交（其间无 await）：raw 元数据与公开 state 必须来自同一快照
         self._raw_connections = snapshot.connections
         self._raw_routes = snapshot.scenario_routes
         self._usage_policy = snapshot.usage_policy
         self._raw_grants = snapshot.security_grants
         self._security_scope_version = snapshot.security_scope_version
-        self._ref_counts = self._count_refs(snapshot)
-        usage = UsageCostSummary()
-        if self._usage_summary_loader is not None:
-            usage = await self._usage_summary_loader()
+        self._ref_counts = ref_counts
         rows = tuple(self._row_from_raw(c) for c in snapshot.connections)
         self._set_state(
             connections=rows,
             summary=self._summary_from_snapshot(snapshot, usage),
             config_revision=snapshot.config_revision,
         )
+        return True
 
     @staticmethod
     def _count_refs(snapshot: ModelManagementSnapshot) -> dict[str, int]:
@@ -1130,12 +1156,17 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         草稿未变时错误提示仍真实（R21）。核心作用：场景保存提交后刷新
         ``_raw_routes``，防止下次连接保存以陈旧路由回退路由修订（F30）。
 
+        D16-003：仅当本次快照被采纳（最新刷新代次、修订未过期、VM 未 dispose）才
+        返回 ``True`` 并复位冲突态；被更新的刷新取代时如实返回 ``False``，不把旧
+        刷新丢弃伪装成新鲜重基成功（R21）。
+
         Returns:
-            ``True`` 表示重基成功；``False`` 表示读快照失败（不伪装成功，R21）。
+            ``True`` 表示已按本次快照完成重基；``False`` 表示读快照失败、快照已被
+            更新的刷新取代 / 已过期，或 VM 已 dispose（未写任何状态）。
         """
         self._track_inflight_cancellable()  # F40：只读刷新，页面卸载可安全取消
         try:
-            await self._refresh_snapshot()
+            adopted = await self._refresh_snapshot()
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
@@ -1144,6 +1175,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
+            return False
+        if not adopted:
             return False
         if self._state.save_state == SAVE_CONFLICT:
             # 冲突已由新基线解决：恢复 idle 允许就地重试（草稿保留）
