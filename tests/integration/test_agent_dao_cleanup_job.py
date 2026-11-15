@@ -314,3 +314,43 @@ async def test_fence_write_rejected_after_verified(dao: AgentDao) -> None:
     assert loaded is not None
     assert loaded.phase is CleanupPhase.VERIFIED
     assert loaded.fence_committed is True
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fence_rejects_verified_record(dao: AgentDao) -> None:
+    """DAO 面硬化：verified 记录不得经 fence 路径写入（否则出现无 verified_at 的坏态）。"""
+
+    job_id = _job_id()
+    await dao.save_cleanup_job(_record(job_id))
+
+    with pytest.raises(AgentServiceError) as exc:
+        await dao.commit_cleanup_fence(_record(job_id, phase=CleanupPhase.VERIFIED))
+    assert exc.value.code is AgentErrorCode.INPUT_INVALID
+    assert "cannot rewrite fence" in str(exc.value)
+
+    loaded = await dao.load_cleanup_job(_USER_SCOPE, job_id)
+    assert loaded is not None
+    assert loaded.phase is CleanupPhase.PREPARED
+    assert loaded.fence_committed is False
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_verified_keeps_content_manifest(dao: AgentDao) -> None:
+    """固定集合留存：verified 阶段不得清空 content_manifest（§9.11 / §10.7 第 5 行）。"""
+
+    job_id = _job_id()
+    await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-keep"]})
+    await dao.commit_cleanup_fence(_record(job_id))
+    zeros = {table: 0 for table in ("dbos.workflow_status", "dbos.streams")}
+    await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=zeros, complete=True)
+
+    async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 集成测试直读核验
+        manifest = (
+            await conn.execute(
+                text(
+                    "SELECT content_manifest FROM agent_cleanup_job WHERE user_scope = :scope AND cleanup_job_id = :job"
+                ),
+                {"scope": _USER_SCOPE, "job": job_id},
+            )
+        ).scalar_one()
+    assert manifest == {"body_refs": ["body-keep"]}

@@ -36,6 +36,13 @@ from core.agent_types import (
     CleanupJobRecord,
     CleanupPhase,
     CleanupPrecondition,
+    CommandRef,
+    ArtifactDeliveryCommand,
+    DeliveryManifest,
+    DeliveryTarget,
+    OperationReadQuery,
+    derive_delivery_id,
+    encode_delivery_manifest,
 )
 from data.persistence.agent_migrator import run_agent_runtime_migrations
 from data.persistence.agent_runtime_store import AgentRuntimeNativeStore
@@ -1207,3 +1214,127 @@ async def test_structural_receipts_and_content_digests_cleared(real_embedded_pg)
     assert link_out_row.locator_payload == {"path": f"C:/private/{secret}"}
     assert link_out_row.claim_ref == f"claim-{link_out}"
     assert leaked == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cleanup_keeps_delivery_manifest_and_reports_result_cleaned(real_embedded_pg) -> None:
+    """清理后回读语义：交付回执仍可读回（不撒谎成「从未交付」），已清结果报 ``result_cleaned``。
+
+    ``delivery_manifest`` 的私有 target 路径留存属待冻结的 cleaned receipt 契约
+    （见 known-technical-debt）；本用例锁定「不得把已交付读成从未交付」这条底线。
+    """
+
+    url = real_embedded_pg.url
+    await _reset_and_migrate_app_schema(url)
+
+    suffix = uuid.uuid4().hex[:8]
+    session_id = f"s-del-{suffix}"
+    execution_id = f"e-del-{suffix}"
+    delivery_op = f"op-delivery-{suffix}"
+    result_op = f"op-result-{suffix}"
+    delivery_command = ArtifactDeliveryCommand(
+        command=CommandRef(
+            user_scope=_USER_SCOPE,
+            source_module="module-delivery",
+            business_request_id=f"req-{suffix}",
+            command_id=f"cmd-{suffix}",
+            expected_revision=0,
+        ),
+        artifact_id=f"artifact-{suffix}",
+        artifact_version=1,
+        format="md",
+        format_rule_version=1,
+        delivery_id="delivery-placeholder",
+        target=DeliveryTarget(
+            target_path="C:\\Users\\admin\\Desktop\\result.md",
+            expected_existing=False,
+            expected_existing_digest=None,
+            overwrite_confirmed=False,
+        ),
+        expected_delivery_revision=0,
+    )
+    manifest = DeliveryManifest(
+        delivery_id=derive_delivery_id(delivery_command),
+        command=delivery_command.command,
+        artifact_id=delivery_command.artifact_id,
+        artifact_version=1,
+        artifact_digest="d" * 64,
+        format="md",
+        format_rule_version=1,
+        target=delivery_command.target,
+        phase="manifest_saved",
+        source_state="available",
+        output_digest=None,
+        output_bytes=None,
+        staged_path=None,
+        verified_at="2026-11-15T08:00:00.000000Z",
+        error_code=None,
+    )
+
+    app_engine = create_test_engine(url)
+    try:
+        dao = AgentDao(app_engine)
+        async with app_engine.begin() as conn:
+            await conn.execute(
+                sa.insert(AgentSession).values(user_scope=_USER_SCOPE, session_id=session_id, title="交付会话")
+            )
+            await conn.execute(
+                sa.insert(AgentExecution).values(
+                    user_scope=_USER_SCOPE,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    execution_kind="root",
+                    source_module=f"module-{execution_id}",
+                    business_request_id=f"request-{execution_id}",
+                    intent_digest="e" * 64,
+                    node_id="root",
+                    display_state="complete",
+                    goal_coverage="full",
+                )
+            )
+            await conn.execute(
+                sa.insert(AgentOperation).values(
+                    user_scope=_USER_SCOPE,
+                    operation_id=delivery_op,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    owner_epoch=1,
+                    run_epoch=1,
+                    phase="result_saved",
+                    effect_state="confirmed",
+                    io_state="known",
+                    delivery_manifest=encode_delivery_manifest(manifest),
+                )
+            )
+            await conn.execute(
+                sa.insert(AgentOperation).values(
+                    user_scope=_USER_SCOPE,
+                    operation_id=result_op,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    owner_epoch=1,
+                    run_epoch=1,
+                    phase="result_saved",
+                    effect_state="confirmed",
+                    io_state="returned",
+                    result_payload={"rows": [1, 2]},
+                )
+            )
+
+        touched = await dao.tombstone_cleanup_text(_USER_SCOPE, session_ids=[session_id])
+
+        delivery = await dao.read_delivery(user_scope=_USER_SCOPE, operation_id=delivery_op)
+        read = await dao.read_operation(OperationReadQuery(operation_id=result_op), user_scope=_USER_SCOPE)
+    finally:
+        await app_engine.dispose()
+
+    assert touched["agent_session"] == 1
+    assert touched["agent_operation"] == 2
+    assert delivery.manifest is not None
+    assert delivery.manifest.delivery_id == manifest.delivery_id
+    assert delivery.manifest.target.target_path == manifest.target.target_path
+    assert read.phase == "result_saved"
+    assert read.result_payload is None
+    assert read.result_text is None
+    assert read.result_available is False
+    assert read.unavailable_reason == "result_cleaned"

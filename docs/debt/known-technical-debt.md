@@ -756,7 +756,7 @@ E-05 提供 `read_delivery(operation_id)` 查回原 manifest 与修订，但尚�
 
 按 HANDOFF §10.2 中断边界表实现续接与残留清理；在此之前 UI 必须显式区分「可能已保存（unknown）」与「确认未发布」，禁止盲重导。upgrade 触发条件同上。
 
-#### P2-AgentCleanup-Residual-Risks：交付回执/操作结果读回与摘要幂等的清理残余
+#### P2-AgentCleanup-Residual-Risks：交付回执留存与摘要幂等的清理残余
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
@@ -764,7 +764,7 @@ E-05 提供 `read_delivery(operation_id)` 查回原 manifest 与修订，但尚�
 
 **产生背景与现状**
 
-E-06 里程碑独立检视（基线 `e0e8c651a^..` 与增量 `e627fd4fb..c320374f4`）确认主链路可靠（fence 前置、九域核 0、tombstone 集合外不变、body payload 准确删行、结构载荷与可 NULL 摘要清理、NOT NULL 摘要换 tombstone）。已关闭：阶段单调性——`save_cleanup_phase` 与 `commit_cleanup_fence` 均对已 `verified` 作业拒绝回退写入（例见 `test_verified_phase_is_terminal_and_cannot_regress` / `test_fence_write_rejected_after_verified`）；操作结果读回——`read_operation` 按所属会话 `cleaned_at` 把「已清结果」报为 `result_cleaned`（与 `read_artifact` 的 `body_cleaned` 同构），未清理仍按坏行拒绝（`test_cleaned_session_reports_result_cleaned_not_bad_row`）。仍存 ①②③④：① 是「清理后交付回执」的契约缺口（需新增 cleaned receipt 或 `DeliveryRead` cleaned 态，属未确认契约，不自行发明）；② 是 §10.7 第 5 行「幂等核定所需摘要逐项说明用途」的裁决项；③ 孤儿行无 owner 引用，本条不主张全表删除（防止越界）。
+E-06 里程碑独立检视（基线 `e0e8c651a^..` 与增量 `e627fd4fb..c320374f4`）确认主链路可靠（fence 前置、九域核 0、tombstone 集合外不变、body payload 准确删行、结构载荷与可 NULL 摘要清理、NOT NULL 摘要换 tombstone）。已关闭：阶段单调性——`save_cleanup_phase` 与 `commit_cleanup_fence` 均对已 `verified` 作业拒绝回退写入（例见 `test_verified_phase_is_terminal_and_cannot_regress` / `test_fence_write_rejected_after_verified`）；操作结果读回——`read_operation` 按所属会话 `cleaned_at` 把「已清结果」报为 `result_cleaned`（与 `read_artifact` 的 `body_cleaned` 同构），未清理仍按坏行拒绝（`test_cleaned_session_reports_result_cleaned_not_bad_row`）。仍存 ①②③④⑤：① 是「清理后交付回执」的契约缺口（需新增 cleaned receipt 或 `DeliveryRead` cleaned 态，属未确认契约，不自行发明）；② 是 §10.7 第 5 行「幂等核定所需摘要逐项说明用途」的裁决项；③ 孤儿行无 owner 引用，本条不主张全表删除（防止越界）；④ 运行库引擎 dispose 语义未接入登记；⑤ 并发已达 verified 时 `CleanupExecutionService._mark_retry` 的阶段写入会被拒（`INPUT_INVALID`），从而掩盖原始失败原因，需按「已 verified 视为良性结束」处理（当前生产无并发确认调用方）。
 
 **期望的最终解法**
 

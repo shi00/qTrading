@@ -289,7 +289,6 @@ class TestReadOperationFailures:
         assert read.result_available is False
         assert read.unavailable_reason == "result_cleaned"
         await dao.engine.dispose()  # type: ignore[union-attr]
-        await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_scope_mismatch_rejected(self, real_embedded_pg: ConnectionInfo) -> None:

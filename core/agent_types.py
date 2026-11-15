@@ -5647,7 +5647,9 @@ class OperationRead:
 
     ``phase='unknown'`` 或 ``effect_state=unknown`` 原样返回并置
     ``result_available=False``/``unavailable_reason='effect_unknown'``——不猜成功
-    或失败（§9.9）；``result_ref`` 指向同库正文时按游标分页。
+    或失败（§9.9）；``result_ref`` 指向同库正文时按游标分页。清理后结果不可查时
+    置 ``unavailable_reason='result_cleaned'``（与 ``read_artifact`` 的
+    ``body_cleaned`` 同构，不把已清当坏行、不用空结果冒充成功）。
     """
 
     operation_id: str

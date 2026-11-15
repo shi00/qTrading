@@ -6764,6 +6764,9 @@ class AgentDao(BaseDao):
         self._check_engine()
         engine = self._require_async_engine()
         label = f"{record.user_scope}/{record.cleanup_job_id}"
+        if record.phase is CleanupPhase.VERIFIED:
+            # 终态不可由 fence 路径写入（否则会出现 verified 但无 verified_at 的坏态）。
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "verified cleanup job cannot rewrite fence", label)
         async with engine.begin() as conn:
             result = await conn.execute(
                 sa.update(AgentCleanupJob)
