@@ -215,14 +215,19 @@ def _parse_date_filter(value: str, *, end_of_day: bool) -> dt.datetime | None:
 
 
 def _export_filename(state: ModelUsageState) -> str:
-    """导出文件名（F37）：可辨识范围与月份——明细按页 / 全部，月汇总带查看月。"""
+    """导出文件名（F37）：可辨识范围与月份——明细按页 / 全部，月汇总带查看月。
+
+    D16-004：明细「当前页」令牌取已加载页身份（``loaded_page``），与 CSV 行集
+    同源；未加载时 VM 侧导出会被拒绝，不会落盘。
+    """
     timestamp = get_now().strftime("%Y%m%d_%H%M%S")
     if state.export_granularity == EXPORT_MONTHLY_SUMMARY:
         scope_token = f"monthly_{state.summary_month or 'unknown'}"
     elif state.export_scope == EXPORT_SCOPE_ALL:
         scope_token = "all"
     else:
-        scope_token = f"page{state.page + 1}"
+        page_no = state.loaded_page if state.loaded_page is not None else state.page
+        scope_token = f"page{page_no + 1}"
     return f"ai_usage_{scope_token}_{timestamp}.csv"
 
 
@@ -1181,6 +1186,8 @@ def _build_usage_view(
     # 月汇总模式只渲染月汇总区（返回 / 月份选择 / 查看月数据），不再渲染
     # 当前月预算摘要与请求行，避免历史月数据被当前月替代（R21）。
     controls: list[ft.Control] = []
+    # D16-004：当前页导出要求已加载页身份与当前页一致（翻页在途 / 失败时不可导出）。
+    page_export_ready = state.loaded_page is not None and state.loaded_page == state.page
     if state.monthly_summary_mode:
         controls.append(_build_month_summary_section(state, vm))
     else:
@@ -1231,6 +1238,9 @@ def _build_usage_view(
                             content=I18n.get("model_usage_export"),
                             icon=ft.Icons.DOWNLOAD,
                             key="usage_export",
+                            # D16-004：当前页导出只在已加载页身份匹配时可用；
+                            # 「全部筛选结果」不受当前页加载状态影响。
+                            disabled=state.export_scope == EXPORT_SCOPE_PAGE and not page_export_ready,
                             on_click=safe_on_click(
                                 _run_task_handler(_export_csv_and_notify, vm, file_picker, show_snack)
                             ),
@@ -1247,6 +1257,8 @@ def _build_usage_view(
     else:
         if state.retention_exceeded:
             controls.append(_hint_text("model_usage_retention_hint"))
+        if state.loading:
+            controls.append(_hint_text("model_usage_loading"))
         controls.extend(_build_request_rows(state, vm))
         controls.append(_build_pagination(state, vm))
     if state.message is not None:

@@ -7,6 +7,14 @@
 - F35 请求代次隔离：两个 load 逆序完成保留最新请求结果；旧代次失败降级不覆盖；
   在途展开响应在筛选变化后不回填；重载在途时翻页 no-op（旧 total 路径已被统一重载取代）；
 - next/prev 分页（50/页，边界 no-op）；
+- D16-004 页身份：翻页在途 / 失败不可导出（当前页），成功 CSV 页号与 invocation IDs
+  同源，前后翻页清空旧页行与展开、迟到展开不回填错页；
+- D16-005 预算草稿编辑身份：在途加载 / 过滤 / 翻页重载不覆盖未保存草稿，
+  已提交限额事实照常更新；保存回执只确认发起版本（等待期间新输入保留），
+  清除限额、保存失败均保护草稿；
+- D16-006 提交与回读分离：保存 / 释放已提交但回读失败（请求 DAO / 限额 reader）
+  呈现「已提交、显示未刷新」并携带原因，旧值 / unknown 保留；回读被后继请求
+  取代时不覆盖后继消息；保存只提交一次；正常回读仍给已保存与新限额；
 - expand 加载有序尝试并可折叠；
 - release_unconfirmed_reservation 未注入释放器时降级；注入后刷新摘要；
 - enter_monthly_summary 切月汇总模式；
@@ -474,6 +482,119 @@ async def test_prev_page_noop_at_zero():
 
 
 @pytest.mark.asyncio
+async def test_page_turn_blocks_current_page_export_until_dao_returns():
+    """D16-004：翻页停在 DAO 时不得以新页号导出旧页行（已加载页身份为空即拒绝）。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+    assert vm.state.page == 0
+    assert vm.state.loaded_page == 0
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-p1"}], total=60)
+    turn_task = asyncio.create_task(vm.next_page())
+    await asyncio.sleep(0)  # 新页请求停在 DAO 读取
+
+    assert vm.state.page == 1  # 请求页已前移
+    assert vm.state.requests == ()  # 旧页行已清空，不展示为新页数据
+    assert vm.state.loaded_page is None  # 无已加载页身份
+    assert vm.state.loading is True
+    with pytest.raises(RuntimeError) as exc_info:
+        await vm.export_csv()
+    assert str(exc_info.value) == "export scope 'page' requires the current page to be loaded"
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_export_not_loaded"
+
+    gate.set()
+    await turn_task
+    assert vm.state.loaded_page == 1
+    assert vm.state.loading is False
+    text = await vm.export_csv()  # 成功页身份与行集同源
+    assert "inv-p1" in text
+    assert "inv-p0" not in text
+
+
+@pytest.mark.asyncio
+async def test_page_turn_failure_leaves_no_exportable_mixed_state():
+    """D16-004：翻页查询失败不保留「新页号 + 旧页行」混合态，当前页导出明确不可用。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+    assert [r.invocation_id for r in vm.state.requests] == ["inv-p0"]
+
+    dao.read_request_page = AsyncMock(side_effect=RuntimeError("db boom"))
+    await vm.next_page()
+
+    assert vm.state.page == 1
+    assert vm.state.requests == ()
+    assert vm.state.loaded_page is None
+    assert vm.state.loading is False
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_load_failed"
+    with pytest.raises(RuntimeError) as exc_info:
+        await vm.export_csv()
+    assert str(exc_info.value) == "export scope 'page' requires the current page to be loaded"
+    assert vm.state.message.key == "model_usage_export_not_loaded"
+
+
+@pytest.mark.asyncio
+async def test_prev_page_clears_loaded_identity_before_reload():
+    """D16-004：前翻同样先清空旧页身份，重载完成前导出不可用。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+    await vm.next_page()
+    assert vm.state.page == 1
+    assert vm.state.loaded_page == 1
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-p0"}], total=60)
+    turn_task = asyncio.create_task(vm.prev_page())
+    await asyncio.sleep(0)
+
+    assert vm.state.page == 0
+    assert vm.state.requests == ()
+    assert vm.state.loaded_page is None
+    with pytest.raises(RuntimeError) as exc_info:
+        await vm.export_csv()
+    assert str(exc_info.value) == "export scope 'page' requires the current page to be loaded"
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_export_not_loaded"
+
+    gate.set()
+    await turn_task
+    assert vm.state.loaded_page == 0
+
+
+@pytest.mark.asyncio
+async def test_page_turn_discards_late_expand_from_old_page():
+    """D16-004：翻页后旧页在途展开响应不得回填新页界面。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    gate = asyncio.Event()
+
+    async def _gated_attempts(**_kwargs: Any) -> list[dict]:
+        await gate.wait()
+        return [{"kind": "old-attempt"}]
+
+    dao.read_request_attempts = _gated_attempts
+    vm = _vm(dao)
+    await vm.load()
+
+    expand_task = asyncio.create_task(vm.expand("inv-p0"))
+    await asyncio.sleep(0)
+
+    dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-p1"}], 60))
+    await vm.next_page()
+    assert vm.state.page == 1
+    assert vm.state.expanded_id is None
+
+    gate.set()  # 旧页展开响应迟到
+    await expand_task
+    assert vm.state.expanded_id is None
+    assert vm.state.attempts == ()
+
+
+@pytest.mark.asyncio
 async def test_expand_loads_attempts_and_toggles():
     dao = _dao(attempts=[{"kind": "attempt", "status": "failed"}])
     vm = _vm(dao)
@@ -820,6 +941,149 @@ async def test_save_monthly_budget_success_reloads_and_echoes_limit():
     assert vm.state.monthly_limit_cny == Decimal("100")
     assert vm.state.budget_draft == "100"  # 重开核对回显
     assert dao.read_request_page.await_count == 2  # 初始 load + 保存后重载
+
+
+# ---------------------------------------------------------------------------
+# D16-006：提交成功但回读失败 / 被后继请求取代
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_returns_outcome_for_adopted_and_unavailable():
+    """load 返回是否完整采纳及失败原因（保存 / 释放据此分流消息）。"""
+    adopted = await _vm(_dao()).load()
+    assert adopted.adopted is True
+    assert adopted.failure is None
+
+    unavailable = await _vm(None).load()
+    assert unavailable.adopted is False
+    assert unavailable.failure == "dao_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_save_committed_but_request_reload_failure_keeps_failure_evidence():
+    """saver True 后请求 DAO 失败：呈现已保存但未刷新，保留旧限额与失败原因。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=True)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    dao.read_request_page = AsyncMock(side_effect=RuntimeError("usage boom"))
+    await vm.save_monthly_budget()
+
+    saver.assert_awaited_once_with(Decimal("200"))  # 只提交一次，不因回读失败重写
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_saved_refresh_failed"
+    assert vm.state.message.params["reason_key"] == "model_usage_load_failed"
+    assert vm.state.monthly_limit_cny == Decimal("100")  # 旧值保留，未伪装刷新成功
+    assert vm.state.monthly_limit_unknown is False
+    assert vm.state.budget_draft == "200"  # 用户输入不因失败回读被改写
+
+
+@pytest.mark.asyncio
+async def test_save_committed_but_limit_reader_failure_marks_unrefreshed():
+    """saver True 后限额 reader 失败：已保存 + unknown 标识 + 真实原因。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=True)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    reader.side_effect = RuntimeError("config boom")
+    await vm.save_monthly_budget()
+
+    saver.assert_awaited_once_with(Decimal("200"))
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_saved_refresh_failed"
+    assert vm.state.message.params["reason_key"] == "model_usage_limit_load_failed"
+    assert vm.state.monthly_limit_unknown is True  # R21：保持未知，不回退为「未设置」
+    assert vm.state.monthly_limit_cny is None
+    assert vm.state.budget_draft == "200"
+
+
+@pytest.mark.asyncio
+async def test_save_committed_but_reload_superseded_keeps_newer_message():
+    """回读被后继请求取代：不写自己的消息，保留后继请求发布的最终结果。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=True)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+
+    reload_started = asyncio.Event()
+    reload_gate = asyncio.Event()
+    original_read = dao.read_request_page
+    calls = {"count": 0}
+
+    async def _gated_read(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:  # 保存触发的回读挂起；随后发起的新请求直接返回
+            reload_started.set()
+            await reload_gate.wait()
+        return await original_read(**kwargs)
+
+    dao.read_request_page = _gated_read
+    vm.set_budget_draft("200")
+    save_task = asyncio.create_task(vm.save_monthly_budget())
+    await asyncio.wait_for(reload_started.wait(), timeout=2)
+    await vm.load()  # 后继请求完成并发布 message=None
+    reload_gate.set()
+    await save_task
+
+    saver.assert_awaited_once_with(Decimal("200"))
+    assert vm.state.message is None  # 后继请求结果未被 budget_saved / 失败消息覆盖
+
+
+@pytest.mark.asyncio
+async def test_release_committed_but_reload_failure_keeps_failure_evidence():
+    """释放成功但回读失败：已释放但显示未刷新，保留旧摘要与失败原因。"""
+    dao = _dao()
+    releaser = AsyncMock(return_value=None)
+    vm = _vm(dao, releaser=releaser)
+    await vm.load()
+
+    dao.read_request_page = AsyncMock(side_effect=RuntimeError("usage boom"))
+    await vm.release_unconfirmed_reservation("res-1")
+
+    releaser.assert_awaited_once_with("res-1")
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_release_refresh_failed"
+    assert vm.state.message.params["reason_key"] == "model_usage_load_failed"
+    assert vm.state.budget_summary.unconfirmed_reserved_cny == Decimal("0.02")  # 旧摘要保留
+
+
+@pytest.mark.asyncio
+async def test_release_committed_but_reload_superseded_keeps_newer_message():
+    """释放后回读被后继请求取代：不覆盖后继请求的最终消息。"""
+    dao = _dao()
+    releaser = AsyncMock(return_value=None)
+    vm = _vm(dao, releaser=releaser)
+    await vm.load()
+
+    reload_started = asyncio.Event()
+    reload_gate = asyncio.Event()
+    original_read = dao.read_request_page
+    calls = {"count": 0}
+
+    async def _gated_read(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:  # 释放触发的回读挂起；随后发起的新请求直接返回
+            reload_started.set()
+            await reload_gate.wait()
+        return await original_read(**kwargs)
+
+    dao.read_request_page = _gated_read
+    release_task = asyncio.create_task(vm.release_unconfirmed_reservation("res-1"))
+    await asyncio.wait_for(reload_started.wait(), timeout=2)
+    await vm.load()
+    reload_gate.set()
+    await release_task
+
+    releaser.assert_awaited_once_with("res-1")
+    assert vm.state.message is None
 
 
 @pytest.mark.asyncio
@@ -1474,6 +1738,48 @@ async def test_stale_reader_cancel_after_barrier_propagates_without_overwriting(
 
 
 @pytest.mark.asyncio
+async def test_current_reader_cancel_resets_loading_but_propagates():
+    """D16-004 + R2：当前代次在末段 reader 被取消时复位在途标记，仍上抛。"""
+    dao = _dao(rows=[{"invocation_id": "inv-A"}], total=1)
+    reader = _ReaderBarrier(gated_error=asyncio.CancelledError())
+    vm = _vm(dao, reader=reader)
+
+    task = asyncio.create_task(vm.load())
+    await asyncio.sleep(0)
+    assert reader.calls == 1
+    assert vm.state.loading is True
+
+    reader.release()
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await task
+    assert type(exc_info.value) is asyncio.CancelledError
+    assert vm.state.loading is False
+    assert vm.state.loaded_page is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_page_turn_resets_loading_and_leaves_no_identity():
+    """D16-004：翻页请求在 DAO 处被取消后不残留加载中 / 可导出混合态。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-p1"}], total=60)
+    turn_task = asyncio.create_task(vm.next_page())
+    await asyncio.sleep(0)
+    assert vm.state.loading is True
+
+    turn_task.cancel()
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await turn_task
+    assert type(exc_info.value) is asyncio.CancelledError
+    assert vm.state.loading is False
+    assert vm.state.loaded_page is None
+    assert vm.state.requests == ()
+
+
+@pytest.mark.asyncio
 async def test_stale_success_after_page_turn_keeps_fresh_page_data():
     """VMD-F01 翻页：旧页请求停在末段 reader，翻页新请求提交后，旧页迟到成功不清新数据。"""
     dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
@@ -1499,3 +1805,169 @@ async def test_stale_success_after_page_turn_keeps_fresh_page_data():
     assert [r.invocation_id for r in vm.state.requests] == ["inv-p1"]
     assert vm.state.total == 60
     assert vm.state.budget_draft == "120"  # A 的 10 未覆盖 B
+
+
+# ---------------------------------------------------------------------------
+# D16-005：预算草稿编辑身份（重载不得覆盖未保存输入）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_during_inflight_load_preserves_draft_and_committed_limit():
+    """D16-005 验收：reader 暂停期间输入 200，释放后限额事实 100、草稿保持 200。"""
+    dao = _dao()
+    reader = _ReaderBarrier(gated_value=Decimal("100"))
+    vm = _vm(dao, reader=reader)
+
+    load_task = asyncio.create_task(vm.load())
+    await asyncio.sleep(0)
+    assert reader.calls == 1  # 初始加载停在末段 reader
+
+    vm.set_budget_draft("200")
+    reader.release()
+    await load_task
+
+    assert vm.state.monthly_limit_cny == Decimal("100")  # 已提交配置事实
+    assert vm.state.budget_draft == "200"  # 未保存输入不被抹掉
+
+
+@pytest.mark.asyncio
+async def test_filter_reload_after_edit_preserves_draft():
+    """过滤重载（不同业务职责）不回填已提交值覆盖未保存草稿。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    vm = _vm(dao, reader=reader)
+    await vm.load()
+    assert vm.state.budget_draft == "100"  # 未编辑时正常回填
+
+    vm.set_budget_draft("200")
+    await vm.set_filter(scenario_id="stock_analysis")
+
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_page_turn_after_edit_preserves_draft():
+    """翻页重载不丢未保存预算草稿。"""
+    dao = _dao(rows=[{"invocation_id": "inv-p0"}], total=60)
+    vm = _vm(dao, reader=AsyncMock(return_value=Decimal("100")))
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    await vm.next_page()
+
+    assert vm.state.page == 1
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_cleared_draft_survives_reload_and_saves_unset():
+    """清除限额草稿：重载不回填旧值，保存收到 None（不以 0 伪装，R21）。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=True)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+    assert vm.state.budget_draft == "100"
+
+    vm.set_budget_draft("")
+    await vm.set_filter(origin=ORIGIN_TEST)
+    assert vm.state.budget_draft == ""  # 清除意图不被重载回填
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+    reader.return_value = None
+    await vm.save_monthly_budget()
+    saver.assert_awaited_once_with(None)
+    assert vm.state.monthly_limit_cny is None
+    assert vm.state.budget_draft == ""
+
+
+@pytest.mark.asyncio
+async def test_edit_during_save_preserves_newer_draft():
+    """保存等待期间继续编辑：回执只确认发起版本，新输入保留。"""
+    dao = _dao()
+    saved: dict[str, Decimal | None] = {"limit": None}
+    gate = asyncio.Event()
+
+    async def _reader() -> Decimal | None:
+        return saved["limit"]
+
+    async def _saver(amount: Decimal | None) -> bool:
+        await gate.wait()
+        saved["limit"] = amount
+        return True
+
+    vm = _vm(dao, reader=_reader, saver=_saver)
+    await vm.load()
+
+    vm.set_budget_draft("100")
+    save_task = asyncio.create_task(vm.save_monthly_budget())
+    await asyncio.sleep(0)  # saver 挂起中
+
+    vm.set_budget_draft("200")  # 保存等待期间的新输入
+    gate.set()
+    await save_task
+
+    assert saved["limit"] == Decimal("100")
+    assert vm.state.monthly_limit_cny == Decimal("100")
+    assert vm.state.budget_draft == "200"
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_saved"
+
+
+@pytest.mark.asyncio
+async def test_save_without_new_input_syncs_draft_to_committed_value():
+    """保存等待期间无新输入：草稿规范化回显已提交值并解除分叉。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=True)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+
+    vm.set_budget_draft("100.00")
+    await vm.save_monthly_budget()
+
+    assert vm.state.budget_draft == "100"  # 回显规范化已提交值
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+    await vm.set_filter(scenario_id="stock_analysis")
+    assert vm.state.budget_draft == "100"  # 分叉已解除，后续重载同步已提交值
+
+
+@pytest.mark.asyncio
+async def test_failed_save_keeps_draft_protected_from_reload():
+    """保存未提交（CAS 冲突）后草稿仍属未保存输入，重载不回填已提交值。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    saver = AsyncMock(return_value=False)
+    vm = _vm(dao, reader=reader, saver=saver)
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    await vm.save_monthly_budget()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_save_failed"
+
+    await vm.set_filter(scenario_id="stock_analysis")
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_load_failure_after_edit_keeps_draft():
+    """重载失败属已提交读取失败，不触碰未保存草稿。"""
+    dao = _dao()
+    reader = AsyncMock(return_value=Decimal("100"))
+    vm = _vm(dao, reader=reader)
+    await vm.load()
+
+    vm.set_budget_draft("200")
+    dao.read_request_page = AsyncMock(side_effect=RuntimeError("boom"))
+    await vm.set_filter(scenario_id="stock_analysis")
+
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_load_failed"
+    assert vm.state.budget_draft == "200"
+    assert vm.state.monthly_limit_cny == Decimal("100")
