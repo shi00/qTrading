@@ -155,6 +155,7 @@ sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --output <备份文�
 输出 PostgreSQL custom format 备份文件，可用 `pg_restore` 工具恢复。
 
 **停止失败按硬失败处理（D16-R01）**：离线备份会启动临时实例；备份完成后若临时实例无法被**证明**已停止（分级停止 smart/fast/kill 全部失败，crate 的 Drop 只是 best-effort、不作为停止依据），命令返回 exit 20。此时已完成的备份仍会原子改名为 `--output` 指定路径保留（不删除唯一备份成果），但命令**不报告成功**——残留 postgres 可能仍占用数据目录，请先确认并停止残留进程后再依赖该备份。
+- **实例状态判定（D07-002）**：`postmaster.pid` 存在不等于可离线。仅当 PID 已不存在（可证明 stale）时，dump 才在维护锁内**重读**状态并清理 pid 文件、启动临时实例；以下情形返回 exit 50、**保留 `postmaster.pid`**、不启动第二实例：PID 仍存活但无法证明属于本 PGDATA（如 sidecar 崩溃后残留的孤儿 postgres）、`postmaster.pid` 端口缺失/为 `0`/非法、pid 文件存在但无法解析。在线备份前同样先校验 PID 归属与端口可信，端口不可信时**不回退**任何配置端口。
 - **不覆盖旧备份**：最终输出文件已存在时 dump 拒绝执行（exit 30），请改用新的输出路径或自行移走旧文件。
 - **并发与临时文件**：同一输出路径的并发 dump 由输出级排他锁互斥（冲突方 exit 30；不同输出可并行）；在线 dump 不占 PGDATA 维护锁。临时文件使用本次任务唯一的 `<output>.<pid>-<时间戳>.partial`，成功后原子改名为最终文件；失败/中断只清理或遗留本任务临时文件，不会删除其他任务的临时文件。
 
@@ -220,7 +221,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止 smart/fast/kill 后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；临时实例（dump 离线 / restore / maintenance-shell / reset-password）停止结果不可证明时按硬失败传播：不报告维护成功，restore 禁止切换并保留恢复目录，dump 保留已完成备份；PG 未运行时 stop 幂等成功返回 0 | stop / run / dump / restore / maintenance-shell / reset-password |
 | 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败、dump 输出已存在或另一任务占用同一输出等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
-| 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
+| 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码；dump 的实例状态判定亦复用此码：活 PID 但归属/端口不可信、pid 文件无法解析时拒绝并保留 pid 文件）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
 | 60 | `POSTGRES_DIED` | 监督期间 postgres 意外退出（sidecar 不自动重启） | run |
 
 > doctor 只返回 0/2 两种退出码（见 9.2），上表其余退出码不会由 doctor 返回。
