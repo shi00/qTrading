@@ -80,10 +80,16 @@ class _Store:
 
 
 class _Dao:
-    def __init__(self, *, tombstone_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        tombstone_error: Exception | None = None,
+        fail_categories: frozenset[str] = frozenset(),
+    ) -> None:
         self.phases: list[dict[str, object]] = []
         self.tombstones: list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] = []
         self._tombstone_error = tombstone_error
+        self._fail_categories = fail_categories
 
     async def save_cleanup_phase(
         self,
@@ -96,6 +102,8 @@ class _Dao:
         error_category: str | None = None,
         sqlstate: str | None = None,
     ) -> None:
+        if error_category in self._fail_categories:
+            raise RuntimeError(f"phase write failed: {error_category}")
         self.phases.append(
             {
                 "user_scope": user_scope,
@@ -301,6 +309,21 @@ class TestCleanupExecutionFailures:
 
         assert dao.phases[0]["error_category"] == "cleanup_preflight_failed"
         assert len(dao.phases) == 1
+        assert [call[0] for call in executor.calls] == ["preflight"]
+
+    @pytest.mark.asyncio
+    async def test_refusal_write_failure_never_leaves_allowing_category(self) -> None:
+        """拒绝写入自身失败时，最终也不得留下可触发缺失放行的类别。"""
+
+        record = _record(phase=CleanupPhase.PREPARED, fence_committed=True)
+        dao = _Dao(fail_categories=frozenset({"native_target_missing"}))
+        service, _, _, executor = _service(record, dao=dao, executor=_Executor(missing=("wf-a",)))
+
+        with pytest.raises(RuntimeError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert "native_target_missing" in str(exc.value)
+        assert [p["error_category"] for p in dao.phases] == ["cleanup_preflight_failed"]
         assert [call[0] for call in executor.calls] == ["preflight"]
 
     @pytest.mark.asyncio

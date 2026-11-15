@@ -103,15 +103,6 @@ class CleanupExecutionService:
 
         try:
             preflight = await self._executor.preflight(record.exact_ids)
-        except AgentServiceError:
-            raise
-        except Exception as exc:
-            # 预检阶段尚未尝试删除：不得并入 cleanup_execution_failed，
-            # 否则下次预检缺失时会被当作「删除已执行」而误放行。
-            await self._mark_retry(record.user_scope, record.cleanup_job_id, "cleanup_preflight_failed", exc)
-            raise
-
-        try:
             if preflight.missing_ids:
                 # §10.7：只有「已有可靠 prepared 且 fence 持续」的**重试**允许原生行已缺失。
                 # 判据是上次失败发生在删除尝试之后（cleanup_execution_failed / rows_remaining）；
@@ -125,6 +116,15 @@ class CleanupExecutionService:
                 if not retry_after_prepared:
                     await self._mark_retry(record.user_scope, record.cleanup_job_id, "native_target_missing")
                     raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "native cleanup target not found", label)
+        except AgentServiceError:
+            raise
+        except Exception as exc:
+            # 预检阶段尚未尝试删除：任何失败（含拒绝写入自身失败）都记
+            # cleanup_preflight_failed，绝不并入 cleanup_execution_failed。
+            await self._mark_retry(record.user_scope, record.cleanup_job_id, "cleanup_preflight_failed", exc)
+            raise
+
+        try:
             deletion = await self._executor.delete(record.exact_ids)
             state = CleanupState(
                 phase=CleanupPhase.PREPARED,
