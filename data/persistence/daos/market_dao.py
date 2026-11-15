@@ -800,7 +800,13 @@ class MarketDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def get_moneyflow_hsgt(self, trade_date: datetime.date | str | None = None, limit: int | None = None):
+    async def get_moneyflow_hsgt(
+        self,
+        trade_date: datetime.date | str | None = None,
+        limit: int | None = None,
+        *,
+        suppress_errors: bool = True,
+    ):
         """Get Northbound Money Flow."""
         sql = "SELECT * FROM moneyflow_hsgt WHERE 1=1"
         params = []
@@ -816,14 +822,18 @@ class MarketDao(BaseDao):
             sql += " LIMIT $" + str(idx)
             params.append(limit)
 
-        df = await self._read_db(sql, params)
+        df = await self._read_db(sql, params, suppress_errors=suppress_errors)
         if df is not None and not df.empty:
             df = attach_hsgt_column_units(df)
         return df
 
-    async def get_moneyflow_hsgt_range(self, start_date: str, end_date: str):
+    async def get_moneyflow_hsgt_range(self, start_date: str, end_date: str, *, suppress_errors: bool = True):
         sql = "SELECT * FROM moneyflow_hsgt WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY trade_date DESC"
-        df = await self._read_db(sql, [self._to_db_date(start_date), self._to_db_date(end_date)])
+        df = await self._read_db(
+            sql,
+            [self._to_db_date(start_date), self._to_db_date(end_date)],
+            suppress_errors=suppress_errors,
+        )
         if df is not None and not df.empty:
             df = attach_hsgt_column_units(df)
         return df
