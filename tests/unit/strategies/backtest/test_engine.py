@@ -11,8 +11,10 @@ import pytest
 
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+from strategies.backtest.adapter import BacktestRequiredDataError, BacktestStrategyAdapter
 from strategies.backtest.config import BacktestConfig, DataWarning, WarningCategory
 from strategies.backtest.engine import VectorBacktestEngine, _compute_real_score_ratio
+from strategies.base_strategy import BaseStrategy
 
 
 class TestComputeRealScoreRatio:
@@ -2937,3 +2939,73 @@ class TestR9SanitizationGuard:
         assert len(failed_signal_dates) == 1
         assert self._SECRET_PASSWORD not in failed_signal_dates[0]["error"]
         assert "***" in failed_signal_dates[0]["error"]
+
+
+class _RequiredDataFailureStrategy(BaseStrategy):
+    """D12-001 替身：依赖行情表，但当日取数失败（不得进入 filter）。"""
+
+    required_context_keys = ("screening_data",)
+    required_tables = ("daily_quotes",)
+
+    def __init__(self):
+        super().__init__("required_failure_strategy", "Required Failure Strategy")
+
+    async def filter(self, context):  # pragma: no cover - 不应被调用
+        raise AssertionError("filter must not run when required data failed")
+
+
+class TestRequiredDataFailureFailFast:
+    """D12-001：必需数据失败经既有 failed_signal_dates / fail_fast 通道暴露。"""
+
+    def _make_engine(self, *, fail_fast: bool) -> VectorBacktestEngine:
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            fail_fast=fail_fast,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.data_provider = MagicMock()
+        engine.data_provider.preload_range = AsyncMock()
+        engine.data_provider.build_context = AsyncMock(
+            return_value={
+                "screening_data": None,
+                "_diagnostics": {
+                    "required_failures": {"screening_data": "DB read failed"},
+                    "table_status": {"screening_data": {"ready": False, "rows": 0}},
+                },
+            }
+        )
+        engine.strategy_adapter = BacktestStrategyAdapter()
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_true_aborts_on_required_data_failure(self) -> None:
+        engine = self._make_engine(fail_fast=True)
+
+        with pytest.raises(BacktestRequiredDataError, match="screening_data"):
+            await engine._generate_signals(
+                strategy=_RequiredDataFailureStrategy(),
+                params={},
+                trade_dates=[date(2024, 1, 2), date(2024, 1, 3)],
+            )
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_false_records_failed_signal_date(self) -> None:
+        engine = self._make_engine(fail_fast=False)
+        failed_signal_dates: list[dict] = []
+
+        signals = await engine._generate_signals(
+            strategy=_RequiredDataFailureStrategy(),
+            params={},
+            trade_dates=[date(2024, 1, 2), date(2024, 1, 3)],
+            failed_signal_dates=failed_signal_dates,
+        )
+
+        assert signals.is_empty()
+        assert len(failed_signal_dates) == 1
+        entry = failed_signal_dates[0]
+        assert entry["date"] == date(2024, 1, 2)
+        assert "screening_data" in entry["error"]
+        assert "daily_quotes" in entry["error"]
+        assert "DB read failed" in entry["error"]

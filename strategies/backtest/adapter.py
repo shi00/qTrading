@@ -21,6 +21,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class BacktestRequiredDataError(RuntimeError):
+    """回测必需数据取数失败/缺失（D12-001）。
+
+    ``fail_fast=False`` 时由 engine 记入 ``BacktestResult.failed_signal_dates``（既有失败日
+    通道），``fail_fast=True`` 时直接中止——不得折叠成「正常无匹配」空信号（R21）。
+    """
+
+
 class BacktestStrategyAdapter:
     """
     将现有 BaseStrategy.filter(context) 输出规范化为回测信号。
@@ -44,10 +52,13 @@ class BacktestStrategyAdapter:
 
         步骤：
         1. 检查策略依赖：dep_result = strategy.check_dependencies(context)
-        2. 如果 unready：记录警告，返回空 DataFrame
-        3. 如果 degraded：记录信息，继续执行
-        4. 调用 strategy.filter(context)
-        5. 规范化输出为标准信号 schema
+        2. 必需数据取数失败（diagnostics.required_failures / 必需辅助表 failed）→ 抛
+           BacktestRequiredDataError（D12-001，进入 engine 失败日通道）
+        3. 如果 unready：记录警告，返回空 DataFrame
+        4. 如果 degraded：记录信息，继续执行（合法稀疏空日不升级）
+        5. 调用 strategy.filter(context)
+        6. 空结果且 _empty_reason 指示必需数据缺失 → 抛 BacktestRequiredDataError
+        7. 规范化输出为标准信号 schema
 
         Args:
             strategy: 策略实例
@@ -65,6 +76,17 @@ class BacktestStrategyAdapter:
             - reason: str | None
         """
         dep_result = strategy.check_dependencies(context)
+
+        # D12-001 / R21：必需数据取数失败必须显式报错，不得退化成空信号。
+        # 合法稀疏空日（如当日龙虎榜无数据）不进入 diagnostics["required_failures"]，
+        # 仍按 degraded（仅日志）继续执行，不升级为质量告警。
+        required_failure = self._collect_required_data_failure(strategy, context)
+        if required_failure is not None:
+            message = (
+                f"[BacktestAdapter] Required data unavailable for {strategy.name} on {signal_date}: {required_failure}"
+            )
+            logger.error(message)
+            raise BacktestRequiredDataError(message)
 
         if dep_result["status"] == "unready":
             logger.warning(
@@ -86,11 +108,76 @@ class BacktestStrategyAdapter:
 
         result_df = await strategy.filter(context)
 
+        # D12-001：策略因「必需数据缺失」而空返回（如财报低覆盖守卫）时，
+        # `_empty_reason` 与 warnings 已给出原因；该空结果不是「无匹配」，
+        # 必须走失败日通道，避免 hold/清仓被当成正常空信号。
+        missing_reason = self._empty_result_missing_reason(context, result_df)
+        if missing_reason is not None:
+            warning_keys = [getattr(w, "key", str(w)) for w in (context.get("warnings") or [])]
+            message = (
+                f"[BacktestAdapter] Strategy {strategy.name} returned empty on {signal_date} "
+                f"because required data is missing: reason={missing_reason}, warnings={warning_keys}"
+            )
+            logger.error(message)
+            raise BacktestRequiredDataError(message)
+
         return self._normalize_signal_output(
             result_df,
             signal_date,
             execution_date,
         )
+
+    @staticmethod
+    def _collect_required_data_failure(strategy: BaseStrategy, context: StrategyContext) -> str | None:
+        """D12-001：从 provider 的逐表失败身份中筛出「本策略必需」的失败。
+
+        仅当失败表属于策略声明依赖（``required_context_keys`` / ``required_tables``，
+        或基本面策略的 ``requires_fundamental_coverage``）时才升级为显式错误；
+        策略未声明的可选表失败只由 provider 记为降级告警，不阻断当日信号。
+        """
+        diagnostics = context.get("_diagnostics") or {}
+        table_map = getattr(strategy, "CONTEXT_KEY_TABLE_MAP", {}) or {}
+        required_keys = tuple(getattr(strategy, "required_context_keys", ()) or ())
+        required_tables = tuple(getattr(strategy, "required_tables", ()) or ())
+        requires_fundamental = bool(getattr(strategy, "requires_fundamental_coverage", False))
+
+        def _is_required(key: str) -> bool:
+            if key in required_keys:
+                return True
+            table = table_map.get(key)
+            if table is not None and table in required_tables:
+                return True
+            return key == "fundamental_screening_data" and requires_fundamental
+
+        def _describe(key: str, error: str) -> str:
+            return f"{key} ({table_map.get(key) or 'unknown table'}): {error}"
+
+        for key, error in (diagnostics.get("required_failures") or {}).items():
+            if _is_required(key):
+                return _describe(key, str(error))
+
+        for key, status in (diagnostics.get("table_status") or {}).items():
+            if isinstance(status, dict) and status.get("failed") and _is_required(key):
+                return _describe(key, str(status.get("error") or "fetch failed"))
+        return None
+
+    @staticmethod
+    def _empty_result_missing_reason(context: StrategyContext, result_df) -> str | None:
+        """空结果是否由必需数据缺失导致（而非合法「无匹配」）。
+
+        仅认 ``_empty_reason == "fundamental_data_missing"``（PolarsBase 覆盖率守卫与
+        空表守卫的既有原因通道）；``no_match`` 等正常空结果保持原样。
+        """
+        if result_df is None:
+            is_empty = True
+        elif isinstance(result_df, pl.DataFrame):
+            is_empty = result_df.is_empty()
+        else:
+            is_empty = bool(getattr(result_df, "empty", False))
+        if not is_empty:
+            return None
+        reason = context.get("_empty_reason")
+        return reason if reason == "fundamental_data_missing" else None
 
     def _normalize_signal_output(
         self,

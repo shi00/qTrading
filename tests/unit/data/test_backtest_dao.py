@@ -792,3 +792,49 @@ class TestBacktestDAODataFingerprintBaseline:
         stmt = dao._read_db_select.call_args[0][0]
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "run_x" in compiled
+
+
+class TestFailedSignalDatePersistence:
+    """D12-001 / BT-03：失败日的表/日/原因经落库→重载→列表标记完整保留。"""
+
+    @pytest.mark.asyncio
+    async def test_failed_signal_dates_roundtrip_preserves_table_date_reason(self, dao: BacktestDAO) -> None:
+        dao._save_upsert = AsyncMock(return_value=1)
+        failed_entry = {
+            "date": date(2024, 1, 2),
+            "error": "[BacktestAdapter] Required data unavailable: screening_data (daily_quotes): DB read failed",
+        }
+        await dao.save_result(
+            {
+                "run_id": "test_failed_days",
+                "strategy_name": "test_strategy",
+                "config": None,
+                "metrics": {},
+                "duration_ms": 10,
+                "quality_json": {"data_warnings": [], "failed_signal_dates": [failed_entry]},
+            }
+        )
+
+        saved_record = dao._save_upsert.call_args[0][0].iloc[0]
+        saved_entry = saved_record["quality_json"]["failed_signal_dates"][0]
+        assert saved_entry["date"] == "2024-01-02"
+        assert "daily_quotes" in saved_entry["error"]
+        assert "DB read failed" in saved_entry["error"]
+
+        # 重载：列表摘要必须把该记录标为 has_warnings=True（不得在持久化边界丢失）。
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "run_id": ["test_failed_days"],
+                    "strategy_name": ["test_strategy"],
+                    "start_date": [date(2024, 1, 1)],
+                    "end_date": [date(2024, 1, 31)],
+                    "sharpe_ratio": [1.0],
+                    "max_drawdown": [0.1],
+                    "executed_at": [datetime(2024, 1, 31)],
+                    "quality_json": [saved_record["quality_json"]],
+                }
+            )
+        )
+        results = await dao.list_results()
+        assert results[0]["has_warnings"] is True
