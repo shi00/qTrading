@@ -82,6 +82,11 @@ from core.agent_types import (
     DispatchCloseRequest,
     DraftReceipt,
     DraftSaveCommand,
+    DraftTransferCommand,
+    DraftTransferPhase,
+    DraftTransferReceipt,
+    DraftTransferSourceKind,
+    SendableOwner,
     EffectState,
     EventFact,
     EventKind,
@@ -173,10 +178,17 @@ from core.agent_types import (
     decode_source_read_summary,
     decode_source_ref,
     decode_submission_receipt,
+    decode_draft_payload,
     decode_draft_receipt,
+    decode_draft_transfer_receipt,
     draft_save_input_digest,
+    draft_transfer_input_digest,
     encode_draft_payload,
     encode_draft_receipt,
+    encode_draft_transfer_command,
+    encode_draft_transfer_receipt,
+    is_empty_draft_payload,
+    validate_draft_transfer_command,
     encode_session_change_command,
     session_change_input_digest,
     validate_draft_save_command,
@@ -6427,8 +6439,11 @@ class AgentDao(BaseDao):
         - 载荷 ``source_refs`` 在同事务登记为本会话草稿谱系边（当前集合，F-03-4）；
           引用未受管源版本 → ``INPUT_INVALID`` 整体回滚。
 
-        转移 fence（``draft_transfer_ref``）门闩随 F-03-3 ``transfer_draft`` 落地：
-        当前无写入方，未决转移状态不可达，故本方法不改该列。
+        转移 fence（``draft_transfer_ref``，F-03-3）：成功移入会把源草稿清空并
+        留下不可发送恢复记录；本方法保存**新草稿**时同事务清空该 fence——新版本
+        不是被移入的旧版本，不得因旧引用被发送门误判为不可发送。单事务转移不
+        存在「进行中」可见态，故无需额外拒绝分支；并发转移已由 draft_revision
+        CAS 串行化。
 
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT。
@@ -6523,6 +6538,7 @@ class AgentDao(BaseDao):
                 .values(
                     draft_payload=payload_object,
                     draft_revision=next_revision,
+                    draft_transfer_ref=None,
                     revision=AgentSession.revision + 1,
                     updated_at=now,
                 )
@@ -6794,3 +6810,335 @@ class AgentDao(BaseDao):
                 )
             )
             return receipt
+
+    # ------------------------------------------------------------------
+    # F-03-3：草稿移入（§4.2 DraftTransfer 协议 / §9.8 transfer_* 列）
+    # ------------------------------------------------------------------
+    async def transfer_draft(self, command: DraftTransferCommand) -> DraftTransferReceipt:
+        """草稿移入（§4.2 ``transfer_draft``）：**单个显式事务**直达 ``completed``。
+
+        语义（§4.2 L413-419 R03、§9.8 transfer_* 列）：
+
+        - 双方会话行按 ``session_id`` 排序加锁（A→B 与 B→A 并发不死锁），锁内
+          先查命令键重放：同键同输入查回原回执（不二次移动），异输入
+          ``INPUT_CONFLICT``；
+        - 目标 CAS：``expected_target_draft_revision`` 必须等于目标当前草稿版，
+          否则 ``REVISION_CONFLICT`` 且零新事实；目标须为无稿或空稿
+          （:func:`is_empty_draft_payload`，正文空但有未发送选择不是空位），
+          否则 ``INPUT_INVALID``；归档目标先取消归档（``INPUT_INVALID``）；
+        - 源 CAS（``source_kind=session_draft``）：源版必须匹配；调用方 payload
+          必须与源会话存储的草稿逐字节规范相等（``INPUT_CONFLICT``），空源拒绝；
+        - 源 claim：本命令行同事务写 ``transfer_source_*`` + ``claimed=true``，
+          源键部分唯一索引拒第二个转移（保护后冲突/unknown 也保留 claim，不因
+          只读 phase 判断）。``source_kind=business_preparation`` 时本库无源行，
+          claim 即唯一仲裁，源清理由生产者按同一源键自行收尾；
+        - 目标安装：草稿载荷 + 版 +1 + 草稿来源边（当前集合）；目标获得可发送
+          归属（清其旧 ``draft_transfer_ref``，新版本不是被移入的旧版本）；
+        - 源清空：会话稿置 NULL、版 +1、``draft_transfer_ref`` 指向本命令（不可
+          发送恢复记录；完整 payload 留在命令 ``request_payload``），并清空其
+          草稿来源边；
+        - ``commit_state=committed`` 只表示保存事实；移入不发送、不派发研究、
+          不产生费用（零自动研究）。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
+                OPERATION_UNKNOWN。
+        """
+
+        self._check_engine()
+        user_scope = command.command.user_scope
+        identity = f"{user_scope}/{command.target_session_id}/{command.command.command_id}"
+        try:
+            validate_draft_transfer_command(command)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+        digest = draft_transfer_input_digest(command)
+        command_record_id = stable_id("command", [user_scope, command.target_session_id, command.command.command_id])
+        payload_object = encode_draft_payload(command.payload)
+        is_session_draft = command.source_kind is DraftTransferSourceKind.SESSION_DRAFT
+        lock_ids = sorted(
+            {command.target_session_id, command.source_id} if is_session_draft else {command.target_session_id}
+        )
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. 双方会话行锁（固定顺序，避免反向并发死锁）。
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentSession.session_id,
+                        AgentSession.draft_revision,
+                        AgentSession.draft_payload,
+                        AgentSession.archived,
+                    )
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id.in_(lock_ids),
+                    )
+                    .order_by(AgentSession.session_id)
+                    .with_for_update()
+                )
+            ).all()
+            sessions = {row.session_id: row for row in rows}
+
+            # 2. 命令键查重（锁内：并发同键只有先提交者可见，后到者重放）。
+            existing = (
+                await conn.execute(
+                    sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.target_id == command.target_session_id,
+                        AgentCommand.client_command_id == command.command.command_id,
+                    )
+                )
+            ).first()
+            if existing is not None:
+                if existing.input_digest != digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "same draft transfer command key with different input",
+                        identity,
+                    )
+                if existing.receipt_payload is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "original draft transfer receipt unavailable",
+                        identity,
+                    )
+                try:
+                    return decode_draft_transfer_receipt(existing.receipt_payload)
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        f"stored draft transfer receipt invalid: {exc.code}",
+                        identity,
+                    ) from exc
+
+            # 3. 目标必须存在、未归档，且为无稿/空稿。
+            target = sessions.get(command.target_session_id)
+            if target is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "target session does not exist in user scope", identity
+                )
+            if target.archived:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "target session is archived; unarchive before transfer", identity
+                )
+            if int(target.draft_revision) != command.expected_target_draft_revision:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT, "target draft revision does not match expected", identity
+                )
+            try:
+                target_payload = None if target.draft_payload is None else decode_draft_payload(target.draft_payload)
+            except AgentValidationError as exc:
+                # 无法证明空稿即按有稿处理（§4.2 L413），不把坏事实读成空位。
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    f"target draft is not provably empty: {exc.code}",
+                    identity,
+                ) from exc
+            if not is_empty_draft_payload(target_payload):
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "target draft is not empty", identity)
+
+            # 4. 源核验（会话稿）：版本 + 完整载荷一致 + 非空。
+            source: Any = None
+            if is_session_draft:
+                source = sessions.get(command.source_id)
+                if source is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID, "source session does not exist in user scope", identity
+                    )
+                if int(source.draft_revision) != command.expected_source_draft_revision:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT, "source draft revision does not match expected", identity
+                    )
+                try:
+                    source_payload = (
+                        None if source.draft_payload is None else decode_draft_payload(source.draft_payload)
+                    )
+                except AgentValidationError as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        f"source draft is unreadable: {exc.code}",
+                        identity,
+                    ) from exc
+                if source_payload is None or is_empty_draft_payload(source_payload):
+                    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source draft is empty", identity)
+                if encode_draft_payload(source_payload) != payload_object:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "transfer payload does not match source draft",
+                        identity,
+                    )
+
+            now = datetime.now(UTC)
+            target_next = int(target.draft_revision) + 1
+            source_next: int | None = None
+            if source is not None:
+                source_next = int(source.draft_revision) + 1
+            receipt = DraftTransferReceipt(
+                command_record_id=command_record_id,
+                transfer_id=command.transfer_id,
+                source_kind=command.source_kind,
+                source_id=command.source_id,
+                source_session_id=command.source_session_id,
+                target_session_id=command.target_session_id,
+                expected_source_draft_revision=command.expected_source_draft_revision,
+                expected_target_draft_revision=command.expected_target_draft_revision,
+                payload_digest=command.payload_digest,
+                commit_state=CommitState.COMMITTED,
+                phase=DraftTransferPhase.COMPLETED,
+                sendable_owner=SendableOwner.TARGET,
+                # 会话稿：清空后的可靠当前版；业务准备稿：本库无源行，不伪造可靠值。
+                source_revision=source_next,
+                target_revision=target_next,
+                verified_at=_wire_time(now),
+                next_action=None,
+            )
+
+            # 5. 源 claim 与原阶段同事务保存（唯一约束拒第二个转移）。
+            try:
+                await conn.execute(
+                    sa.insert(AgentCommand).values(
+                        user_scope=user_scope,
+                        command_record_id=command_record_id,
+                        client_command_id=command.command.command_id,
+                        target_id=command.target_session_id,
+                        command_kind="draft_transfer",
+                        session_id=command.target_session_id,
+                        expected_revision=command.expected_target_draft_revision,
+                        input_revision=command.expected_source_draft_revision,
+                        input_digest=digest,
+                        request_payload=encode_draft_transfer_command(command),
+                        commit_state=CommitState.COMMITTED.value,
+                        delivery_state=DeliveryState.NOT_DELIVERED.value,
+                        consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                        receipt_payload=encode_draft_transfer_receipt(receipt),
+                        verified_at=now,
+                        transfer_id=command.transfer_id,
+                        transfer_phase=DraftTransferPhase.COMPLETED.value,
+                        sendable_owner=SendableOwner.TARGET.value,
+                        transfer_source_kind=command.source_kind.value,
+                        transfer_source_id=command.source_id,
+                        transfer_source_revision=command.expected_source_draft_revision,
+                        transfer_source_claimed=True,
+                    )
+                )
+            except IntegrityError as exc:
+                # 同一源键/版已被另一命令 claim（含跨目标争抢、业务准备稿生产者）。
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_CONFLICT,
+                    "source draft revision already claimed by another transfer",
+                    identity,
+                ) from exc
+
+            # 6. 目标安装（可发送归属；清旧 fence）。
+            await conn.execute(
+                sa.update(AgentSession)
+                .where(
+                    AgentSession.user_scope == user_scope,
+                    AgentSession.session_id == command.target_session_id,
+                )
+                .values(
+                    draft_payload=payload_object,
+                    draft_revision=target_next,
+                    draft_transfer_ref=None,
+                    revision=AgentSession.revision + 1,
+                    updated_at=now,
+                )
+            )
+            await self._sync_draft_source_links(
+                conn,
+                user_scope=user_scope,
+                session_id=command.target_session_id,
+                draft_revision=target_next,
+                source_refs=command.payload.source_refs,
+                identity=identity,
+            )
+
+            # 7. 源只读收尾（不可发送恢复记录）。
+            if source is not None:
+                assert source_next is not None
+                await conn.execute(
+                    sa.update(AgentSession)
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == command.source_id,
+                    )
+                    .values(
+                        draft_payload=None,
+                        draft_revision=source_next,
+                        draft_transfer_ref=command_record_id,
+                        revision=AgentSession.revision + 1,
+                        updated_at=now,
+                    )
+                )
+                await self._sync_draft_source_links(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=command.source_id,
+                    draft_revision=source_next,
+                    source_refs=(),
+                    identity=identity,
+                )
+            return receipt
+
+    async def read_draft_transfer(self, ref: CommandRef, *, user_scope: str) -> DraftTransferReceipt:
+        """只查原转移回执（§4.2 ``read_draft_transfer``）：零移动、零发送。
+
+        - ``ref.user_scope`` 必须等于可信调用上下文（§4.1）；
+        - 用户域内按命令键查：0 行/多行歧义/非 ``draft_transfer`` 命令/预期版
+          不符 → ``INPUT_INVALID``（不把别的命令回执当转移）；
+        - 存行回执缺失或不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
+          unknown 不从界面猜归属，R21/INV-07）；
+        - 转移命令行不关联 execution，故不比对意图键（与叶 execution 边界一致）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{ref.command_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
+        if ref.user_scope != user_scope:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref outside caller user scope", identity)
+        try:
+            encode_command_ref(ref)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentCommand.command_kind,
+                        AgentCommand.expected_revision,
+                        AgentCommand.receipt_payload,
+                    ).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.client_command_id == ref.command_id,
+                    )
+                )
+            ).all()
+        if not rows:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command not found in user scope", identity)
+        if len(rows) > 1:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref is ambiguous across targets", identity)
+        row = rows[0]
+        if row.command_kind != "draft_transfer":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command is not a draft transfer", identity)
+        if ref.expected_revision != row.expected_revision:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "command ref does not match stored transfer: expected_revision",
+                identity,
+            )
+        if row.receipt_payload is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "original transfer receipt unavailable", identity)
+        try:
+            return decode_draft_transfer_receipt(row.receipt_payload)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"stored draft transfer receipt invalid: {exc.code}",
+                identity,
+            ) from exc

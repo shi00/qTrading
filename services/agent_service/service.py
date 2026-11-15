@@ -12,7 +12,9 @@
   依赖原生 root workflow 派发（E-04 计划 + DBOS launch，当前受 Q5 阻塞），
   未就绪前不提供占位实现，避免把「未派发」伪装成「已受理」。
 - ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付；
-- ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）。
+- ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）；
+- ``transfer_draft`` / ``read_draft_transfer`` 只做草稿跨会话移入与原阶段查回
+  （不发送、不派发研究、零费用）。
 
 ``aclose`` 只标记服务关闭并拒绝后续读取；DAO/Engine 生命周期归应用组合根
 （DD §10.6：宿主关闭由 Runtime 前置门闩编排，服务不越权释放共享引擎）。
@@ -33,6 +35,8 @@ from core.agent_types import (
     CommandRef,
     DraftReceipt,
     DraftSaveCommand,
+    DraftTransferCommand,
+    DraftTransferReceipt,
     EventPage,
     EventReadQuery,
     OperationRead,
@@ -47,6 +51,7 @@ from core.agent_types import (
     SubmissionReceipt,
     derive_accept_identity,
     validate_draft_save_command,
+    validate_draft_transfer_command,
     validate_session_change_command,
 )
 from data.persistence.daos.agent_dao import AgentDao
@@ -230,6 +235,35 @@ class AgentService:
                 f"{command.command.user_scope}/{command.session_id}",
             ) from exc
         return await self._dao.change_session(command)
+
+    async def transfer_draft(self, command: DraftTransferCommand) -> DraftTransferReceipt:
+        """草稿移入（§4.2 ``transfer_draft``）：唯一可发送归属，不发送。
+
+        边界整份校验（双方身份/预期版、源类别约束、payload 摘要、确认位），失败
+        为 ``INPUT_INVALID`` 且不触达 DAO；双方 CAS、源 claim 仲裁与源清空由 DAO
+        单事务裁决（``REVISION_CONFLICT`` / ``INPUT_CONFLICT``）。
+        """
+
+        self._require_open("transfer_draft")
+        try:
+            validate_draft_transfer_command(command)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                f"{command.command.user_scope}/{command.target_session_id}",
+            ) from exc
+        return await self._dao.transfer_draft(command)
+
+    async def read_draft_transfer(self, ref: CommandRef, *, user_scope: str) -> DraftTransferReceipt:
+        """只查原转移回执（§4.2 ``read_draft_transfer``）：零移动、零发送。
+
+        读取失败由 DAO 抛类型化错误（不存在/歧义/非转移命令 → ``INPUT_INVALID``；
+        坏回执 → ``OPERATION_UNKNOWN``），服务不把失败读成「未转移」。
+        """
+
+        self._require_open("read_draft_transfer")
+        return await self._dao.read_draft_transfer(ref, user_scope=user_scope)
 
     # ------------------------------------------------------------------
     # 生命周期

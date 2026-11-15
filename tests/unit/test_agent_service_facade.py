@@ -6,6 +6,7 @@ DAO 事务语义由集成测试覆盖。
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -22,16 +23,23 @@ from core.agent_types import (
     DraftPayload,
     DraftReceipt,
     DraftSaveCommand,
+    DraftTransferCommand,
+    DraftTransferPhase,
+    DraftTransferReceipt,
+    DraftTransferSourceKind,
     EventPage,
     EventReadQuery,
     Mode,
     Purpose,
     ResearchSnapshot,
+    SendableOwner,
     SessionRead,
     SessionReadQuery,
     SessionAction,
     SessionChangeCommand,
     SubmissionReceipt,
+    derive_draft_transfer_id,
+    draft_transfer_payload_digest,
     json_doc,
 )
 from data.persistence.daos.agent_dao import AgentDao
@@ -118,6 +126,59 @@ _DRAFT_RECEIPT = DraftReceipt(
 )
 
 
+def _transfer_command(
+    *,
+    target: str = "s2",
+    expected_source: int = 2,
+    expected_target: int = 1,
+    payload: DraftPayload | None = None,
+    payload_digest: str | None = None,
+    confirmed: Any = True,
+    ref_revision: int | None = None,
+) -> DraftTransferCommand:
+    payload = _draft_payload() if payload is None else payload
+    command = DraftTransferCommand(
+        command=CommandRef(
+            user_scope="u1",
+            source_module="ui",
+            business_request_id="req-transfer",
+            command_id="client-transfer-1",
+            expected_revision=expected_target if ref_revision is None else ref_revision,
+        ),
+        transfer_id="transfer-pending",
+        source_kind=DraftTransferSourceKind.SESSION_DRAFT,
+        source_id="s1",
+        source_session_id="s1",
+        expected_source_draft_revision=expected_source,
+        target_session_id=target,
+        expected_target_draft_revision=expected_target,
+        payload=payload,
+        payload_digest=draft_transfer_payload_digest(payload) if payload_digest is None else payload_digest,
+        confirmed=confirmed,
+    )
+    return replace(command, transfer_id=derive_draft_transfer_id(command))
+
+
+_TRANSFER_RECEIPT = DraftTransferReceipt(
+    command_record_id="cmd-transfer-1",
+    transfer_id="draft_transfer_abc",
+    source_kind=DraftTransferSourceKind.SESSION_DRAFT,
+    source_id="s1",
+    source_session_id="s1",
+    target_session_id="s2",
+    expected_source_draft_revision=3,
+    expected_target_draft_revision=1,
+    payload_digest="a" * 64,
+    commit_state=CommitState.COMMITTED,
+    phase=DraftTransferPhase.COMPLETED,
+    sendable_owner=SendableOwner.TARGET,
+    source_revision=4,
+    target_revision=2,
+    verified_at="2026-11-14T00:00:00.000000Z",
+    next_action=None,
+)
+
+
 def _session_command(
     *,
     action: SessionAction = SessionAction.PIN,
@@ -187,6 +248,18 @@ class _FakeDao:
         if self.error is not None:
             raise self.error
         return _RECEIPT
+
+    async def transfer_draft(self, command: DraftTransferCommand) -> DraftTransferReceipt:
+        self.calls.append(("transfer_draft", (command,), {}))
+        if self.error is not None:
+            raise self.error
+        return _TRANSFER_RECEIPT
+
+    async def read_draft_transfer(self, ref: CommandRef, *, user_scope: str) -> DraftTransferReceipt:
+        self.calls.append(("read_draft_transfer", (ref,), {"user_scope": user_scope}))
+        if self.error is not None:
+            raise self.error
+        return _TRANSFER_RECEIPT
 
     async def read_command(self, ref: CommandRef, *, user_scope: str) -> CommandReceipt:
         self.calls.append(("read_command", (ref,), {"user_scope": user_scope}))
@@ -407,6 +480,80 @@ class TestSessionChangeAuthority:
         await service.aclose()
         with pytest.raises(AgentServiceError) as excinfo:
             await service.change_session(_session_command())
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+class TestDraftTransferAuthority:
+    """草稿移入入口：边界整份校验，失败不触达 DAO（F-03-3）。"""
+
+    @pytest.mark.asyncio
+    async def test_valid_command_delegates(self) -> None:
+        fake = _FakeDao()
+        assert await _service(fake).transfer_draft(_transfer_command()) is _TRANSFER_RECEIPT
+        assert [call[0] for call in fake.calls] == ["transfer_draft"]
+
+    @pytest.mark.asyncio
+    async def test_payload_digest_mismatch_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        command = _transfer_command(payload_digest="a" * 64)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).transfer_draft(command)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.payload_digest" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_unconfirmed_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).transfer_draft(_transfer_command(confirmed=False))
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.confirmed" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_self_target_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).transfer_draft(_transfer_command(target="s1"))
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.target_session_id" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_revision_mismatch_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).transfer_draft(_transfer_command(ref_revision=9))
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.command.expected_revision" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_transfer_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.transfer_draft(_transfer_command())
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_read_draft_transfer_delegates_caller_scope(self) -> None:
+        fake = _FakeDao()
+        receipt = await _service(fake).read_draft_transfer(_REF, user_scope="u1")
+        assert receipt is _TRANSFER_RECEIPT
+        assert fake.calls == [("read_draft_transfer", (_REF,), {"user_scope": "u1"})]
+
+    @pytest.mark.asyncio
+    async def test_read_draft_transfer_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.read_draft_transfer(_REF, user_scope="u1")
         assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
         assert fake.calls == []
 

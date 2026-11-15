@@ -7010,3 +7010,418 @@ def session_change_input_digest(command: SessionChangeCommand) -> str:
             }
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# F-03-3 草稿转移契约（§4.2 L434-435 DraftTransferCommand / DraftTransferReceipt）
+# ---------------------------------------------------------------------------
+
+
+class DraftTransferSourceKind(Enum):
+    """转移源类别（§4.2 L434 唯一 wire 拼写；与 :class:`SourceKind` 不混用）。"""
+
+    SESSION_DRAFT = "session_draft"
+    BUSINESS_PREPARATION = "business_preparation"
+
+
+class DraftTransferPhase(Enum):
+    """原转移阶段（§4.2 L435；§9.8 ``agent_command.transfer_phase`` 值域）。
+
+    本片单事务实现直接落 ``completed``，其余值供分阶段实现与重启核查：
+    unknown 不等于失败或成功（INV-07）。
+    """
+
+    PREPARED = "prepared"
+    TARGET_INSTALLED = "target_installed"
+    COMPLETED = "completed"
+    CONFLICT = "conflict"
+    NOT_COMMITTED = "not_committed"
+    UNKNOWN = "unknown"
+
+
+class SendableOwner(Enum):
+    """可发送归属（§4.2 L435）：最多一个 owner；未决时双方可为 ``none``。"""
+
+    SOURCE = "source"
+    TARGET = "target"
+    NONE = "none"
+
+
+_DRAFT_TRANSFER_COMMAND_KEYS: Final = frozenset(
+    {
+        "command",
+        "transfer_id",
+        "source_kind",
+        "source_id",
+        "source_session_id",
+        "expected_source_draft_revision",
+        "target_session_id",
+        "expected_target_draft_revision",
+        "payload",
+        "payload_digest",
+        "confirmed",
+    }
+)
+
+_DRAFT_TRANSFER_RECEIPT_KEYS: Final = frozenset(
+    {
+        "command_record_id",
+        "transfer_id",
+        "source_kind",
+        "source_id",
+        "source_session_id",
+        "target_session_id",
+        "expected_source_draft_revision",
+        "expected_target_draft_revision",
+        "payload_digest",
+        "commit_state",
+        "phase",
+        "sendable_owner",
+        "source_revision",
+        "target_revision",
+        "verified_at",
+        "next_action",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DraftTransferCommand:
+    """草稿移入命令（§4.2 L434）：双方身份/预期版 + 完整 payload，不发送。
+
+    工程冻结（§4.2/§9.8 未逐字段说明处，按可辩护最小语义）：
+
+    - ``command.expected_revision`` 必须等于 ``expected_target_draft_revision``
+      （命令的准确目标是目标会话；源版另有显式字段，不重复承载）；
+    - ``transfer_id`` 沿原命令稳定派生（:func:`derive_draft_transfer_id`），
+      不含 payload 摘要——同 ID 异输入由命令键摘要判冲突；
+    - ``source_kind=session_draft``：``source_id`` 即源会话身份，
+      ``source_session_id`` 必填且必须相等（源草稿存于该会话行）；目标不得为源自身；
+    - ``source_kind=business_preparation``：源由业务准备稿生产者持有，本库无源行，
+      ``source_session_id`` 必须为 None；源版/清源由生产者按同一 claim 键自行核验；
+    - ``payload`` 为 :class:`DraftPayload`（不含原命令/保存版/凭据/有效批准）；
+      ``payload_digest`` 必须等于该载荷的规范摘要（防调用方自述与载荷不一致）；
+    - ``confirmed`` 必须为 ``True``（用户已预览完整载荷并确认）。
+    """
+
+    command: CommandRef
+    transfer_id: str
+    source_kind: DraftTransferSourceKind
+    source_id: str
+    source_session_id: str | None
+    expected_source_draft_revision: int
+    target_session_id: str
+    expected_target_draft_revision: int
+    payload: DraftPayload
+    payload_digest: str
+    confirmed: bool
+
+
+def draft_transfer_payload_digest(payload: DraftPayload) -> str:
+    """完整草稿载荷的规范摘要（SHA-256 over canonical payload）。"""
+
+    return sha256_hex(json_doc(encode_draft_payload(payload)))
+
+
+def derive_draft_transfer_id(command: DraftTransferCommand) -> str:
+    """转移稳定身份：``user_scope + 原命令键 + 源类别/身份 + 目标会话``。
+
+    不含 payload 摘要（§4.2 L415）：同 ID 异 payload 必须报冲突，而不是新转移。
+    """
+
+    if not isinstance(command.source_kind, DraftTransferSourceKind):
+        _fail("invalid_tag", "$.source_kind")
+    return stable_id(
+        "draft_transfer",
+        [
+            command.command.user_scope,
+            command.command.command_id,
+            command.source_kind.value,
+            command.source_id,
+            command.target_session_id,
+        ],
+    )
+
+
+def is_empty_draft_payload(payload: DraftPayload | None) -> bool:
+    """目标是否为空稿（§4.2 L413 R03）。
+
+    ``None``（无稿）与「空稿且无任何未发送选择」均可接收移入；**正文空但有
+    对象/来源/手选模型/模式/用途/截止日/发送目标/Skill/MCP/角色/Prompt 等
+    未发送选择不是空位**。``customized_fields`` 非空即表示用户触碰过默认值
+    （含把默认项显式选成默认值），按有稿处理。
+    """
+
+    if payload is None:
+        return True
+    return (
+        payload.text == ""
+        and payload.model_selection is None
+        and not payload.source_refs
+        and not payload.skill_versions
+        and not payload.mcp_selection
+        and payload.purpose is None
+        and payload.cutoff is None
+        and payload.send_target is None
+        and payload.object_context is None
+        and payload.role_prompt_selection is None
+        and not payload.customized_fields
+    )
+
+
+def _require_positive_revision(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        _fail("invalid_revision", path)
+    return value
+
+
+def encode_draft_transfer_command(command: DraftTransferCommand) -> dict[str, Any]:
+    """DraftTransferCommand → wire 11 键（双方身份/预期版 + 完整 payload + 摘要）。"""
+
+    if not isinstance(command.source_kind, DraftTransferSourceKind):
+        _fail("invalid_tag", "$.source_kind")
+    source_expected = _require_positive_revision(
+        command.expected_source_draft_revision, "$.expected_source_draft_revision"
+    )
+    target_expected = _require_positive_revision(
+        command.expected_target_draft_revision, "$.expected_target_draft_revision"
+    )
+    if command.command.expected_revision != target_expected:
+        _fail("invalid_revision", "$.command.expected_revision")
+    source_id = _require_str(command.source_id, "$.source_id")
+    target_session_id = _require_str(command.target_session_id, "$.target_session_id")
+    if command.source_kind is DraftTransferSourceKind.SESSION_DRAFT:
+        source_session_id: str | None = _require_str(command.source_session_id, "$.source_session_id")
+        if source_session_id != source_id:
+            _fail("invalid_value", "$.source_session_id")
+        if source_id == target_session_id:
+            _fail("invalid_value", "$.target_session_id")
+    else:
+        if command.source_session_id is not None:
+            _fail("invalid_value", "$.source_session_id")
+        source_session_id = None
+    if command.confirmed is not True:
+        _fail("unconfirmed_transfer", "$.confirmed")
+    payload_object = encode_draft_payload(command.payload)
+    payload_digest = _require_digest(command.payload_digest, "$.payload_digest")
+    if payload_digest != sha256_hex(json_doc(payload_object)):
+        _fail("invalid_digest", "$.payload_digest")
+    transfer_id = _require_str(command.transfer_id, "$.transfer_id")
+    if transfer_id != derive_draft_transfer_id(command):
+        _fail("invalid_value", "$.transfer_id")
+    return {
+        "command": encode_command_ref(command.command),
+        "transfer_id": transfer_id,
+        "source_kind": command.source_kind.value,
+        "source_id": source_id,
+        "source_session_id": source_session_id,
+        "expected_source_draft_revision": source_expected,
+        "target_session_id": target_session_id,
+        "expected_target_draft_revision": target_expected,
+        "payload": payload_object,
+        "payload_digest": payload_digest,
+        "confirmed": True,
+    }
+
+
+def decode_draft_transfer_command(value: object, path: str = "$.draft_transfer_command") -> DraftTransferCommand:
+    """严格解码草稿转移命令（11 键全必填、禁额外键、跨字段一致性复核）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DRAFT_TRANSFER_COMMAND_KEYS, path)
+    source_kind_raw = value["source_kind"]
+    if not isinstance(source_kind_raw, str):
+        _fail("invalid_tag", f"{path}.source_kind")
+    try:
+        source_kind = DraftTransferSourceKind(source_kind_raw)
+    except ValueError:
+        _fail("invalid_tag", f"{path}.source_kind")
+    source_session_raw = value["source_session_id"]
+    if source_session_raw is not None and not isinstance(source_session_raw, str):
+        _fail("invalid_type", f"{path}.source_session_id")
+    confirmed_raw = value["confirmed"]
+    if not isinstance(confirmed_raw, bool):
+        _fail("invalid_type", f"{path}.confirmed")
+    decoded = DraftTransferCommand(
+        command=decode_command_ref(value["command"], f"{path}.command"),
+        transfer_id=_require_str(value["transfer_id"], f"{path}.transfer_id"),
+        source_kind=source_kind,
+        source_id=_require_str(value["source_id"], f"{path}.source_id"),
+        source_session_id=source_session_raw,
+        expected_source_draft_revision=_require_positive_revision(
+            value["expected_source_draft_revision"], f"{path}.expected_source_draft_revision"
+        ),
+        target_session_id=_require_str(value["target_session_id"], f"{path}.target_session_id"),
+        expected_target_draft_revision=_require_positive_revision(
+            value["expected_target_draft_revision"], f"{path}.expected_target_draft_revision"
+        ),
+        payload=decode_draft_payload(value["payload"], f"{path}.payload"),
+        payload_digest=_require_digest(value["payload_digest"], f"{path}.payload_digest"),
+        confirmed=confirmed_raw,
+    )
+    try:
+        encode_draft_transfer_command(decoded)
+    except AgentValidationError as exc:
+        suffix = exc.field_path[1:] if exc.field_path.startswith("$") else f".{exc.field_path}"
+        _fail(exc.code, f"{path}{suffix}")
+    return decoded
+
+
+def validate_draft_transfer_command(command: DraftTransferCommand) -> None:
+    """转移前整份校验（纯函数）；失败抛 :class:`AgentValidationError`。"""
+
+    encode_draft_transfer_command(command)
+
+
+def draft_transfer_input_digest(command: DraftTransferCommand) -> str:
+    """命令输入摘要：源/目标身份与预期版 + 完整载荷 + 摘要 + 确认位。
+
+    同命令键同输入查回原阶段；异 payload/身份/版本一律冲突（§4.2 L415）。
+    """
+
+    return sha256_hex(
+        json_doc(
+            {
+                "transfer_id": command.transfer_id,
+                "source_kind": command.source_kind.value,
+                "source_id": command.source_id,
+                "source_session_id": command.source_session_id,
+                "expected_source_draft_revision": command.expected_source_draft_revision,
+                "target_session_id": command.target_session_id,
+                "expected_target_draft_revision": command.expected_target_draft_revision,
+                "payload": encode_draft_payload(command.payload),
+                "payload_digest": command.payload_digest,
+                "confirmed": command.confirmed,
+            }
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DraftTransferReceipt:
+    """原转移回执（§4.2 L435）：阶段/唯一可发送归属/可靠双方 revision。
+
+    ``source_revision`` / ``target_revision`` 为本次成功提交后的可靠当前版本；
+    事实不足时以 ``None`` 表示 unknown（不当 0 或「未变」）。来源侧完成移入后
+    仅保留不可发送恢复记录，``expected_source_draft_revision`` 才是被消费的源版。
+    """
+
+    command_record_id: str
+    transfer_id: str
+    source_kind: DraftTransferSourceKind
+    source_id: str
+    source_session_id: str | None
+    target_session_id: str
+    expected_source_draft_revision: int
+    expected_target_draft_revision: int
+    payload_digest: str
+    commit_state: CommitState
+    phase: DraftTransferPhase
+    sendable_owner: SendableOwner
+    source_revision: int | None
+    target_revision: int | None
+    verified_at: str
+    next_action: str | None
+
+
+def encode_draft_transfer_receipt(receipt: DraftTransferReceipt) -> dict[str, Any]:
+    """DraftTransferReceipt → wire 16 键（规范 JSONB 回执载荷）。"""
+
+    if not isinstance(receipt.source_kind, DraftTransferSourceKind):
+        _fail("invalid_tag", "$.source_kind")
+    if not isinstance(receipt.commit_state, CommitState):
+        _fail("invalid_commit_state", "$.commit_state")
+    if not isinstance(receipt.phase, DraftTransferPhase):
+        _fail("invalid_phase", "$.phase")
+    if not isinstance(receipt.sendable_owner, SendableOwner):
+        _fail("invalid_owner", "$.sendable_owner")
+    source_session_id: str | None = None
+    if receipt.source_kind is DraftTransferSourceKind.SESSION_DRAFT:
+        source_session_id = _require_str(receipt.source_session_id, "$.source_session_id")
+    elif receipt.source_session_id is not None:
+        _fail("invalid_value", "$.source_session_id")
+    return {
+        "command_record_id": _require_str(receipt.command_record_id, "$.command_record_id"),
+        "transfer_id": _require_str(receipt.transfer_id, "$.transfer_id"),
+        "source_kind": receipt.source_kind.value,
+        "source_id": _require_str(receipt.source_id, "$.source_id"),
+        "source_session_id": source_session_id,
+        "target_session_id": _require_str(receipt.target_session_id, "$.target_session_id"),
+        "expected_source_draft_revision": _require_positive_revision(
+            receipt.expected_source_draft_revision, "$.expected_source_draft_revision"
+        ),
+        "expected_target_draft_revision": _require_positive_revision(
+            receipt.expected_target_draft_revision, "$.expected_target_draft_revision"
+        ),
+        "payload_digest": _require_digest(receipt.payload_digest, "$.payload_digest"),
+        "commit_state": receipt.commit_state.value,
+        "phase": receipt.phase.value,
+        "sendable_owner": receipt.sendable_owner.value,
+        "source_revision": _opt_positive_revision(receipt.source_revision, "$.source_revision"),
+        "target_revision": _opt_positive_revision(receipt.target_revision, "$.target_revision"),
+        "verified_at": _require_utc_timestamp(receipt.verified_at, "$.verified_at"),
+        "next_action": None if receipt.next_action is None else _require_str(receipt.next_action, "$.next_action"),
+    }
+
+
+def _opt_positive_revision(value: object, path: str) -> int | None:
+    if value is None:
+        return None
+    return _require_positive_revision(value, path)
+
+
+def decode_draft_transfer_receipt(value: object, path: str = "$.draft_transfer_receipt") -> DraftTransferReceipt:
+    """严格解码转移回执（16 键；坏枚举/坏时刻 fail-closed，unknown 不当成功）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys(value, _DRAFT_TRANSFER_RECEIPT_KEYS, path)
+
+    def _enum(raw: object, enum_type: type[Enum], code: str, field: str) -> Any:
+        if not isinstance(raw, str):
+            _fail(code, f"{path}.{field}")
+        try:
+            return enum_type(raw)
+        except ValueError:
+            _fail(code, f"{path}.{field}")
+
+    source_kind = cast(
+        DraftTransferSourceKind, _enum(value["source_kind"], DraftTransferSourceKind, "invalid_tag", "source_kind")
+    )
+    source_session_raw = value["source_session_id"]
+    if source_session_raw is not None and not isinstance(source_session_raw, str):
+        _fail("invalid_type", f"{path}.source_session_id")
+    if source_kind is DraftTransferSourceKind.BUSINESS_PREPARATION and source_session_raw is not None:
+        _fail("invalid_value", f"{path}.source_session_id")
+    if source_kind is DraftTransferSourceKind.SESSION_DRAFT and source_session_raw is None:
+        _fail("invalid_identity", f"{path}.source_session_id")
+    next_action_raw = value["next_action"]
+    if next_action_raw is not None and not isinstance(next_action_raw, str):
+        _fail("invalid_type", f"{path}.next_action")
+    return DraftTransferReceipt(
+        command_record_id=_require_str(value["command_record_id"], f"{path}.command_record_id"),
+        transfer_id=_require_str(value["transfer_id"], f"{path}.transfer_id"),
+        source_kind=source_kind,
+        source_id=_require_str(value["source_id"], f"{path}.source_id"),
+        source_session_id=source_session_raw,
+        target_session_id=_require_str(value["target_session_id"], f"{path}.target_session_id"),
+        expected_source_draft_revision=_require_positive_revision(
+            value["expected_source_draft_revision"], f"{path}.expected_source_draft_revision"
+        ),
+        expected_target_draft_revision=_require_positive_revision(
+            value["expected_target_draft_revision"], f"{path}.expected_target_draft_revision"
+        ),
+        payload_digest=_require_digest(value["payload_digest"], f"{path}.payload_digest"),
+        commit_state=cast(
+            CommitState, _enum(value["commit_state"], CommitState, "invalid_commit_state", "commit_state")
+        ),
+        phase=cast(DraftTransferPhase, _enum(value["phase"], DraftTransferPhase, "invalid_phase", "phase")),
+        sendable_owner=cast(
+            SendableOwner, _enum(value["sendable_owner"], SendableOwner, "invalid_owner", "sendable_owner")
+        ),
+        source_revision=_opt_positive_revision(value["source_revision"], f"{path}.source_revision"),
+        target_revision=_opt_positive_revision(value["target_revision"], f"{path}.target_revision"),
+        verified_at=_require_utc_timestamp(value["verified_at"], f"{path}.verified_at"),
+        next_action=next_action_raw,
+    )
