@@ -8324,3 +8324,272 @@ class DeliveryPhaseReceipt:
     artifact_id: str
     artifact_version: int
     idempotent: bool
+
+
+# ---------------------------------------------------------------------------
+# E-05-3 三格式渲染与逐字段回读契约（DD-F26 / §10.5 / HANDOFF §10.2）
+# ---------------------------------------------------------------------------
+
+#: 交付文件记录域：成果元数据、完整正文、``result_payload`` 结构字段。
+DELIVERY_RENDER_RECORDS: Final[frozenset[str]] = frozenset({"metadata", "body", "payload"})
+
+#: 显式值类型（None/0/False/空串互不混同；数字保留原词法）。
+DELIVERY_VALUE_TYPES: Final[frozenset[str]] = frozenset({"null", "string", "int", "float", "bool", "object", "array"})
+
+#: 三格式共用的可逆列（表头文本即 wire 拼写）。
+DELIVERY_RENDER_COLUMNS: Final[tuple[str, ...]] = ("path", "value_type", "chunk_index", "chunk_count", "value")
+
+#: 元数据字段固定顺序（渲染顺序稳定 → 摘要可复现）。
+_DELIVERY_METADATA_ORDER: Final[tuple[str, ...]] = (
+    "artifact_id",
+    "artifact_version",
+    "session_id",
+    "execution_id",
+    "round_id",
+    "artifact_kind",
+    "input_revision",
+    "actual_input_digest",
+    "actual_model_ref",
+    "result_digest",
+    "source_available_state",
+    "summary",
+    "published_at",
+    "cleaned_at",
+    "updated_at",
+    "revision",
+    "body_available",
+    "unavailable_reason",
+)
+
+_METADATA_POINTER_RE: Final = re.compile(r"[a-z][a-z0-9_]*")
+_JSON_POINTER_RE: Final = re.compile(r"(?:/(?:[^~/]|~[01])*)*")
+_JSON_INTEGER_RE: Final = re.compile(r"-?(?:0|[1-9][0-9]*)")
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryField:
+    """交付文件的一行：``record:pointer`` 身份 + 显式类型 + 可逆分段。
+
+    ``path`` 为 ``record`` 与 ``pointer`` 的稳定拼接（元数据指针为字段名、
+    正文为空、``result_payload`` 为 RFC6901 JSON Pointer）；同一 ``path`` 的
+    分段必须从 1 连续到 ``chunk_count``，拼接即原值，不截断。
+    """
+
+    record: str
+    pointer: str
+    value_type: str
+    value_text: str
+    chunk_index: int = 1
+    chunk_count: int = 1
+
+    @property
+    def path(self) -> str:
+        return f"{self.record}:{self.pointer}"
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedDelivery:
+    """已渲染的交付内容（字节 + 摘要）；格式规则版本见 ``DELIVERY_FORMAT_RULE_VERSION``。"""
+
+    format: str
+    content: bytes
+    digest: str
+    field_count: int
+    chunk_count: int
+
+
+def _utf16_units(text: str) -> int:
+    return sum(2 if ord(character) > 0xFFFF else 1 for character in text)
+
+
+def _escape_json_pointer_token(token: str) -> str:
+    return token.replace("~", "~0").replace("/", "~1")
+
+
+def _chunked_fields(record: str, pointer: str, value_type: str, text: str) -> tuple[DeliveryField, ...]:
+    """按 30,000 UTF-16 单元切分单个字段（非字符串值单段）。"""
+
+    if value_type != "string":
+        return (DeliveryField(record, pointer, value_type, text),)
+    chunks = split_utf16_chunks(text)
+    count = len(chunks)
+    return tuple(
+        DeliveryField(record, pointer, value_type, chunk, index, count) for index, chunk in enumerate(chunks, start=1)
+    )
+
+
+def _scalar_field(record: str, pointer: str, value: object, path: str) -> tuple[DeliveryField, ...]:
+    """元数据标量 → 显式类型字段（None/0/False/空串各自保留）。"""
+
+    if value is None:
+        return _chunked_fields(record, pointer, "null", "")
+    if isinstance(value, bool):
+        return _chunked_fields(record, pointer, "bool", "true" if value else "false")
+    if isinstance(value, int):
+        return _chunked_fields(record, pointer, "int", str(value))
+    if isinstance(value, str):
+        return _chunked_fields(record, pointer, "string", value)
+    _fail("invalid_type", path)
+
+
+def _payload_fields(value: object, pointer: str) -> tuple[DeliveryField, ...]:
+    """把 ``result_payload`` 展开成逐节点字段（容器显式标记类型）。"""
+
+    if isinstance(value, dict):
+        fields = [DeliveryField("payload", pointer, "object", "")]
+        for key, child in value.items():
+            if not isinstance(key, str):
+                _fail("invalid_json", "$.delivery.payload")
+            token = _escape_json_pointer_token(key)
+            fields.extend(_payload_fields(child, f"{pointer}/{token}"))
+        return tuple(fields)
+    if isinstance(value, list):
+        fields = [DeliveryField("payload", pointer, "array", "")]
+        for index, child in enumerate(value):
+            fields.extend(_payload_fields(child, f"{pointer}/{index}"))
+        return tuple(fields)
+    if isinstance(value, ExactNumber):
+        kind = "int" if value.raw_type == INTEGER_RAW_TYPE else "float"
+        return _chunked_fields("payload", pointer, kind, value.lexeme)
+    if value is None:
+        return _chunked_fields("payload", pointer, "null", "")
+    if isinstance(value, bool):
+        return _chunked_fields("payload", pointer, "bool", "true" if value else "false")
+    if isinstance(value, str):
+        return _chunked_fields("payload", pointer, "string", value)
+    _fail("invalid_json", "$.delivery.payload")
+
+
+def _validate_delivery_pointer(record: str, pointer: object, path: str) -> str:
+    if not isinstance(pointer, str):
+        _fail("invalid_pointer", path)
+    if record == "metadata":
+        if _METADATA_POINTER_RE.fullmatch(pointer) is None:
+            _fail("invalid_pointer", path)
+        return pointer
+    if record == "body":
+        if pointer != "":
+            _fail("invalid_pointer", path)
+        return pointer
+    if pointer != "" and _JSON_POINTER_RE.fullmatch(pointer) is None:
+        _fail("invalid_pointer", path)
+    return pointer
+
+
+def _validate_delivery_value(field: DeliveryField, path: str) -> None:
+    value_type = field.value_type
+    text = field.value_text
+    if value_type in {"null", "object", "array"}:
+        if text != "":
+            _fail("invalid_value", path)
+    elif value_type == "bool":
+        if text not in {"true", "false"}:
+            _fail("invalid_value", path)
+    elif value_type == "int":
+        if _JSON_INTEGER_RE.fullmatch(text) is None:
+            _fail("invalid_value", path)
+    elif value_type == "float":
+        if _JSON_NUMBER_RE.fullmatch(text) is None or not ("." in text or "e" in text or "E" in text):
+            _fail("invalid_value", path)
+    if value_type != "string" and field.chunk_count != 1:
+        _fail("invalid_chunk_range", path)
+
+
+def validate_delivery_fields(fields: object) -> tuple[DeliveryField, ...]:
+    """校验交付字段（类型/指针/分段连续/段长上限）；失败抛 :class:`AgentValidationError`。"""
+
+    if not isinstance(fields, (tuple, list)) or not fields:
+        _fail("invalid_type", "$.delivery.fields")
+    validated: list[DeliveryField] = []
+    groups: dict[str, dict[str, object]] = {}
+    for index, field in enumerate(fields):
+        path = f"$.delivery.fields[{index}]"
+        if not isinstance(field, DeliveryField):
+            _fail("invalid_type", path)
+        if field.record not in DELIVERY_RENDER_RECORDS:
+            _fail("invalid_record", f"{path}.record")
+        pointer = _validate_delivery_pointer(field.record, field.pointer, f"{path}.pointer")
+        if field.value_type not in DELIVERY_VALUE_TYPES:
+            _fail("invalid_value_type", f"{path}.value_type")
+        if not isinstance(field.value_text, str):
+            _fail("invalid_type", f"{path}.value_text")
+        chunk_index = field.chunk_index
+        chunk_count = field.chunk_count
+        if (
+            isinstance(chunk_index, bool)
+            or isinstance(chunk_count, bool)
+            or not isinstance(chunk_index, int)
+            or not isinstance(chunk_count, int)
+            or chunk_index < 1
+            or chunk_count < 1
+            or chunk_index > chunk_count
+        ):
+            _fail("invalid_chunk_range", f"{path}.chunk_index")
+        if _utf16_units(field.value_text) > DELIVERY_CHUNK_MAX_UTF16:
+            _fail("chunk_too_large", f"{path}.value_text")
+        _validate_delivery_value(field, path)
+        key = f"{field.record}:{pointer}"
+        group = groups.setdefault(key, {"type": field.value_type, "count": chunk_count, "chunks": set()})
+        if group["type"] != field.value_type or group["count"] != chunk_count:
+            _fail("inconsistent_chunks", path)
+        chunk_set = cast(set[int], group["chunks"])
+        if chunk_index in chunk_set:
+            _fail("duplicate_field", path)
+        chunk_set.add(chunk_index)
+        validated.append(
+            DeliveryField(field.record, pointer, field.value_type, field.value_text, chunk_index, chunk_count)
+        )
+    for key, group in groups.items():
+        chunk_set = cast(set[int], group["chunks"])
+        count = cast(int, group["count"])
+        if chunk_set != set(range(1, count + 1)):
+            _fail("missing_chunk", f"$.delivery.fields.{key}")
+        if count > 1 and any(field.value_text == "" for field in validated if f"{field.record}:{field.pointer}" == key):
+            _fail("invalid_chunk_range", f"$.delivery.fields.{key}")
+    return tuple(validated)
+
+
+def build_delivery_fields(read: object, *, body_text: str | None = None) -> tuple[DeliveryField, ...]:
+    """把已保存成果版本转换为交付字段（完整正文 + 元数据 + 结构字段）。
+
+    ``body_text`` 提供跨页组装后的完整正文；读取结果仍有 ``next_cursor`` 且
+    未提供完整正文时拒绝（导出分页正文等同静默截断）。``result_payload`` 为
+    ``None`` 表示未保存结构字段，与保存了空容器不同，不补造字段（R21）。
+    """
+
+    if not isinstance(read, ArtifactRead):
+        _fail("invalid_type", "$.delivery.artifact_read")
+    if read.next_cursor is not None and body_text is None:
+        _fail("page_not_complete", "$.delivery.artifact_read.next_cursor")
+    full_body = body_text if body_text is not None else read.body_text
+    if read.body_available and full_body is None:
+        _fail("body_missing", "$.delivery.artifact_read.body_text")
+
+    fields: list[DeliveryField] = []
+    metadata: dict[str, object] = {
+        "artifact_id": read.artifact_id,
+        "artifact_version": read.artifact_version,
+        "session_id": read.session_id,
+        "execution_id": read.execution_id,
+        "round_id": read.round_id,
+        "artifact_kind": read.artifact_kind,
+        "input_revision": read.input_revision,
+        "actual_input_digest": read.actual_input_digest,
+        "actual_model_ref": read.actual_model_ref,
+        "result_digest": read.result_digest,
+        "source_available_state": read.source_available_state,
+        "summary": read.summary,
+        "published_at": read.published_at,
+        "cleaned_at": read.cleaned_at,
+        "updated_at": read.updated_at,
+        "revision": read.revision,
+        "body_available": read.body_available,
+        "unavailable_reason": read.unavailable_reason,
+    }
+    for key in _DELIVERY_METADATA_ORDER:
+        fields.extend(_scalar_field("metadata", key, metadata[key], f"$.delivery.metadata.{key}"))
+    if read.body_available and full_body is not None:
+        fields.extend(_chunked_fields("body", "", "string", full_body))
+    if read.result_payload is not None:
+        fields.extend(_payload_fields(parse_preserving_numbers(read.result_payload), ""))
+    return validate_delivery_fields(tuple(fields))
