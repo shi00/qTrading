@@ -142,14 +142,16 @@ jobs:
       # 失败取证：app 子进程 stdout/stderr 只落在 logs/e2e-flet-app.log，job 日志里看不到
       # 退出原因（run 42008447714 的 3 个 setup error 因此无根因证据）。上传前按 R9 脱敏，
       # 与 ci_cd.yml embedded-tests 的工件处理保持一致。
+      # 上传仅在本步骤成功时执行：脱敏失败/cancel/skipped 时不得回退上传未脱敏原始日志。
       - name: Sanitize E2E diagnostics
+        id: sanitize_e2e_diagnostics
         if: always()
         shell: bash
         run: |
           python scripts/sanitize_artifacts.py logs/e2e-flet-app.log logs/main_trace.log
 
       - name: Upload E2E diagnostics
-        if: always()
+        if: always() && steps.sanitize_e2e_diagnostics.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: flet-nightly-e2e-diagnostics
