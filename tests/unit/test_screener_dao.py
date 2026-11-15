@@ -10,8 +10,13 @@ import re
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import pandas as pd
+import sqlalchemy as sa
 
-from data.persistence.daos.screener_dao import ScreenerDao, _derive_screening_from_fundamental
+from data.persistence.daos.screener_dao import (
+    ScreenerDao,
+    _derive_screening_from_fundamental,
+    _learning_maturity_cutoff,
+)
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.stock_dao import stock_alive_condition
@@ -402,9 +407,38 @@ class TestScreenerDaoGetLearningContext:
         compiled = stmt.compile()
         assert compiled.params["prediction_result_1"] == "WIN"
         assert compiled.params["review_status_1"] == REVIEW_STATUS_COMPLETED
-        assert compiled.params["trade_date_1"] == as_of_date
+        # D13-007: as_of 作为日历锚点子查询的边界与 coalesce 回退值各绑定一次。
+        assert compiled.params["cal_date_1"] == as_of_date
+        assert compiled.params["coalesce_1"] == as_of_date
         assert "LIMIT :PARAM_1" in sql.upper() or "LIMIT 3" in sql.upper()
-        assert compiled.params.get("param_1") == 3 or compiled.params.get("limit_1") == 3
+        # 外层样本 LIMIT=3；日历锚点另占用 LIMIT=1 / OFFSET=4（D13-007）
+        assert 3 in compiled.params.values()
+        assert 4 in compiled.params.values()
+
+    @pytest.mark.asyncio
+    async def test_as_of_anchors_maturity_on_trade_calendar(self):
+        """D13-007: as_of 边界必须经 trade_cal 换算为「as_of 之前第 5 个开市日」。
+
+        完成态只证明样本在查询时点已成熟；历史决策时点的可见性须由交易日历锚点保证，
+        否则长休市下自然日偏移不足会让 T+5 标签穿透决策时点（前视）。
+        """
+        import datetime
+
+        from sqlalchemy.dialects import postgresql
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        as_of_date = datetime.date(2024, 6, 1)
+        await dao.get_learning_context(limit=3, is_win=True, as_of=as_of_date)
+        compiled = dao._read_db_select.call_args[0][0]
+        sql = str(compiled.compile(dialect=postgresql.dialect()))
+        assert "trade_cal" in sql
+        assert "trade_cal.is_open = " in sql
+        assert "trade_cal.cal_date < " in sql
+        assert "ORDER BY trade_cal.cal_date DESC" in sql
+        params = compiled.compile().params
+        assert params["param_2"] == 4  # OFFSET = T+5 标签窗口 - 1
+        assert params["coalesce_1"] == as_of_date
 
     @pytest.mark.asyncio
     async def test_no_as_of_no_date_filter(self):
@@ -638,10 +672,73 @@ class TestScreenerDaoGetLearningContext:
         assert "screening_history.ai_score IS NOT NULL" in stats_snapshot
         # as_of 范围排除未来日期，strategy_name 范围一致
         assert "screening_history.trade_date < " in stats_sql
-        assert stats_params["trade_date_1"] == as_of_date
+        assert stats_params["cal_date_1"] == as_of_date
+        assert stats_params["coalesce_1"] == as_of_date
         assert stats_params["strategy_name_1"] == "strategy_x"
-        assert sample_params["trade_date_1"] == as_of_date
+        assert sample_params["cal_date_1"] == as_of_date
+        assert sample_params["coalesce_1"] == as_of_date
         assert sample_params["strategy_name_1"] == "strategy_x"
+
+
+class TestLearningMaturityCutoff:
+    """D13-007: 学习样本的 T+5 成熟截止日以交易日历锚定。
+
+    完成态（COMPLETED + t5_pct）只证明查询时点已成熟；历史决策时点的可见性必须由
+    「样本 trade_date 与 as_of 之间至少 5 个开市日」保证，否则长休市时自然日偏移不足。
+    """
+
+    @staticmethod
+    def _sqlite_engine_with_open_days(open_days: list[datetime.date]):
+        meta = sa.MetaData()
+        cal = sa.Table(
+            "trade_cal",
+            meta,
+            sa.Column("cal_date", sa.Date, primary_key=True),
+            sa.Column("is_open", sa.Integer),
+        )
+        engine = sa.create_engine("sqlite://")
+        meta.create_all(engine)
+        if open_days:
+            with engine.begin() as conn:
+                conn.execute(cal.insert(), [{"cal_date": day, "is_open": 1} for day in open_days])
+        return engine
+
+    def test_cutoff_is_fifth_open_day_across_holiday(self):
+        """春节连续休市：第 5 个开市日锚点跳过整段假期，而非按自然日回退。"""
+        d = datetime.date
+        open_days = [d(2024, 2, day) for day in (5, 6, 7, 8)] + [d(2024, 2, day) for day in (19, 20, 21, 22, 23)]
+        engine = self._sqlite_engine_with_open_days(open_days)
+        with engine.connect() as conn:
+            cutoff = conn.execute(sa.select(_learning_maturity_cutoff(d(2024, 2, 24)))).scalar_one()
+        # as_of 前最近 5 个开市日依次为 23/22/21/20/19，锚点取第 5 个 → 2024-02-19
+        assert cutoff == d(2024, 2, 19)
+        # 节前最后交易日（2024-02-08）的 T+5 收盘为 2024-02-23 < as_of → 仍可见（不误杀）
+        assert d(2024, 2, 8) < cutoff
+        # 2024-02-19 的 T+5 收盘为 2024-02-26（> as_of）→ 必须排除
+        assert not d(2024, 2, 19) < cutoff
+
+    def test_cutoff_excludes_sample_whose_label_matures_after_as_of(self):
+        """超长休市（模拟极端停市）：自然日边界会放行未成熟样本，日历锚点必须排除。"""
+        d = datetime.date
+        open_days = [d(2024, 1, day) for day in (2, 3, 4, 5)] + [d(2024, 2, day) for day in (20, 21, 22, 23, 26)]
+        engine = self._sqlite_engine_with_open_days(open_days)
+        with engine.connect() as conn:
+            cutoff = conn.execute(sa.select(_learning_maturity_cutoff(d(2024, 2, 27)))).scalar_one()
+        assert cutoff == d(2024, 2, 20)
+        # 2024-02-22 仍满足 ``trade_date < as_of``（自然日口径），但其后只有 2 个开市日，
+        # T+5 收盘尚未出现 → 标签在 as_of 时点不可见，必须被锚点排除。
+        assert d(2024, 2, 22) < d(2024, 2, 27)
+        assert not d(2024, 2, 22) < cutoff
+        # 2024-01-05 之后恰有 5 个开市日（T+5 收盘 2024-02-26 < as_of）→ 可见
+        assert d(2024, 1, 5) < cutoff
+
+    def test_cutoff_falls_back_to_as_of_without_calendar_coverage(self):
+        """R21 空集语义：日历未覆盖时回退到 as_of（既有自然日边界），不清空全部样本。"""
+        engine = self._sqlite_engine_with_open_days([])
+        as_of = datetime.date(2024, 6, 1)
+        with engine.connect() as conn:
+            cutoff = conn.execute(sa.select(_learning_maturity_cutoff(as_of))).scalar_one()
+        assert cutoff == as_of
 
 
 class TestScreenerDaoUpdatePredictionResult:

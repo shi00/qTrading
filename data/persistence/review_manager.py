@@ -1246,7 +1246,9 @@ class ReviewManager:
         traceability metadata of this injection (sample IDs + learning switch state).
 
         P0-5 fix: as_of parameter prevents look-ahead bias. When provided,
-        only predictions with trade_date < as_of are included, preventing
+        only predictions whose T+5 label had matured before as_of are included
+        (DAO 侧以交易日历锚定：样本 ``trade_date`` 与 ``as_of`` 之间至少间隔
+        ``LEARNING_LABEL_HORIZON_TRADE_DAYS`` 个开市日，D13-007), preventing
         future data from leaking into historical replay contexts.
 
         D4-M3: ``strategy_name`` 非空时只取同策略样本，避免跨策略 few-shot 混用导致

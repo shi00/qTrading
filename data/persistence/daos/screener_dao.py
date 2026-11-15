@@ -47,6 +47,49 @@ REVIEW_STATS_WINDOW_DAYS = 180
 
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
+# D13-007: 学习标签窗口为 T+5 交易日（``ReviewManager`` 以 ``t0_mpos + 5`` 取 ``t5_date``，
+# 即 T+1 开盘 → T+5 收盘）。样本的 ``t5_pct`` 只有在该第 5 个交易日收盘后才可观测，故
+# 「样本成熟日」是交易日概念，不能按自然日近似。
+LEARNING_LABEL_HORIZON_TRADE_DAYS = 5
+
+
+def _learning_maturity_cutoff(as_of: datetime.date) -> sa.ColumnElement:
+    """D13-007: 以交易日历锚定学习样本的成熟截止日（``trade_date < cutoff``）。
+
+    ``review_status == COMPLETED`` + ``t5_pct IS NOT NULL`` 只能证明样本在**查询时点**已
+    成熟，不能证明它在**历史决策时点**（``as_of``，回测下为决策日减安全偏移）已成熟：
+    回测重放时数据库里已含决策日之后才回填的 T+5 标签，若仅按 ``trade_date < as_of``
+    的自然日边界取样，长假导致「5 个交易日跨越 ≥16 自然日」时，样本的 T+5 收盘仍晚于
+    ``as_of``，标签即引入前视。
+
+    本表达式取 ``as_of`` 之前（``cal_date < as_of``）**第 5 个开市日**作为锚点，要求样本
+    ``trade_date < 锚点``——等价于样本 ``trade_date`` 与 ``as_of`` 之间至少间隔 5 个开市日，
+    即其 T+5 收盘严格早于 ``as_of``。用交易日历计数，长休市/周末自动覆盖，与自然日偏移
+    解耦。
+
+    R21 空集语义：``trade_cal`` 未覆盖该窗口（标量子查询为 NULL）时回退到 ``as_of``，
+    即退化为原有的 ``trade_date < as_of`` 自然日边界，而不是清空全部样本——但此时**不再
+    具备**上述交易日结构性保证，只保留调用方自然日偏移的冗余边界。生产库 ``trade_cal``
+    为主键日历表且同步覆盖历史/未来年度，正常路径均命中锚点。
+
+    不以 ``created_at`` 判定可见性：行写入时刻反映的是「何时跑过复盘/回填」，而非
+    「该 T+5 价格何时可被观测」——历史回放时数据库里所有行都是后来写入的，用写入时刻
+    会把全部历史样本误判为不可见；信息可得性由标签价格窗口（T+5 交易日）决定。
+
+    Args:
+        as_of: 排他截止日（决策时点）。仅作绑定参数，非用户输入拼接（R4）。
+    """
+    tc = Base.metadata.tables["trade_cal"]
+    anchor = (
+        sa.select(tc.c.cal_date)
+        .where(tc.c.is_open == 1, tc.c.cal_date < as_of)
+        .order_by(tc.c.cal_date.desc())
+        .offset(LEARNING_LABEL_HORIZON_TRADE_DAYS - 1)
+        .limit(1)
+        .scalar_subquery()
+    )
+    return sa.func.coalesce(anchor, as_of)
+
 
 def _build_learning_snapshot(
     t: sa.Table,
@@ -67,6 +110,10 @@ def _build_learning_snapshot(
 
     ``as_of`` / ``strategy_name`` 是去重键组成部分（trade_date、strategy_name），
     放在 DISTINCT ON 之前与之后等价；两者收敛在此处，保证样本与统计共用同一范围。
+
+    D13-007：``as_of`` 不再直接作为 ``trade_date`` 的排他边界，而是经
+    :func:`_learning_maturity_cutoff` 换算为「``as_of`` 之前第 5 个开市日」——只有
+    T+5 标签在 ``as_of`` 之前已被观测的样本才可见，见该函数文档。
     """
     stmt = sa.select(
         t.c.id,
@@ -94,7 +141,7 @@ def _build_learning_snapshot(
     if strategy_name is not None:
         stmt = stmt.where(t.c.strategy_name == strategy_name)
     if as_of is not None:
-        stmt = stmt.where(t.c.trade_date < as_of)
+        stmt = stmt.where(t.c.trade_date < _learning_maturity_cutoff(as_of))
     return (
         stmt.ext(distinct_on(t.c.trade_date, t.c.strategy_name, t.c.ts_code))
         .order_by(t.c.trade_date, t.c.strategy_name, t.c.ts_code, t.c.id.desc())
@@ -974,10 +1021,13 @@ class ScreenerDao(BaseDao):
         跨策略 few-shot 会让模型学到错误的「特征 → 收益」映射（BIZ-01 排除纯数学记录
         是同一动机的策略维度延伸）。
 
-        D4-M5 维护契约：**前视防护的真正正主是下方 WHERE 的 ``review_status ==
-        REVIEW_STATUS_COMPLETED`` + ``t5_pct.isnot(None)`` 过滤**（二者保证样本的 T+5 复盘
-        窗口已成熟、标签已定稿）。调用方 ``compute_learning_as_of`` 传入的 ``as_of`` 偏移是
-        按自然日计算的额外冗余边界，语义上并不等于「T+5 已回填」。**因此放宽本过滤条件前
+        D4-M5 维护契约：**查询时点的成熟性**由下方 WHERE 的 ``review_status ==
+        REVIEW_STATUS_COMPLETED`` + ``t5_pct.isnot(None)`` 过滤保证；**历史决策时点的
+        可见性**（回测重放）由 ``as_of`` 经 :func:`_learning_maturity_cutoff` 换算出的
+        交易日历锚点保证（D13-007：样本 ``trade_date`` 与 ``as_of`` 之间至少间隔 5 个
+        开市日）。二者缺一不可：只有 COMPLETED 过滤时，若按自然日近似 ``as_of``，长假
+        会让样本的 T+5 收盘晚于决策时点，标签即为前视。调用方
+        ``compute_learning_as_of`` 的自然日偏移仅是额外冗余边界。**因此放宽本过滤条件前
         （如为增加样本量而接受 T1_DONE 记录），必须先同步把 ``as_of`` 偏移改为交易日口径
         （经 TradeCalendarService 回退 N 个交易日）**，否则偏移不足会立刻退化为真实的前视泄漏。
 
