@@ -454,3 +454,92 @@ fn test_restore_explicit_target_layout_is_self_contained() {
 
     cleanup_sidecar(&mut target_child, &target_data_dir);
 }
+
+// ---- D07-006：默认 restore 目录必须独占，失败清理不得删除既有恢复点 ----
+
+const INJECT_INITDB_FAIL_ENV: &str = "QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL";
+const FORCE_RESTORE_TS_ENV: &str = "QTRADING_PG_SIDECAR_FORCE_RESTORE_TS";
+/// 固定秒级时间戳，使默认恢复目录名可预期（真实时钟只到秒，时钟回拨会撞名）。
+const FIXED_TS: &str = "20260101T000000Z";
+
+/// 预存同名 `.restore-<ts>`（模拟时钟回拨或上次 exit 20 保留的唯一恢复成果）后注入
+/// initdb 失败：restore 必须换名独占新目录，既有恢复点与 `.bak-*` 均不得被复用或删除，
+/// 本次换名目录在失败后自清理，源数据目录不变。
+#[test]
+fn test_restore_default_dir_never_reuses_or_deletes_existing_recovery_point() {
+    let (_tmp, data_dir) = unique_data_dir("rg_d07006_default_dir");
+    let parent = data_dir
+        .parent()
+        .expect("data_dir has parent")
+        .to_path_buf();
+    let dump_path = parent.join("backup.dump");
+
+    // 初始化源集群 + dump（顺带生成 runtime 密码与 bundled binaries）。
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    let (dump_code, dump_stderr) = dump_sidecar_with_stderr(&data_dir, &dump_path);
+    assert_eq!(dump_code, 0, "dump should succeed; stderr:\n{dump_stderr}");
+    graceful_stop(&mut child);
+    assert_eq!(
+        wait_for_exit(&mut child, STOP_TIMEOUT),
+        0,
+        "source run should stop cleanly"
+    );
+
+    let pg_version_before = std::fs::read(data_dir.join("PG_VERSION")).expect("read PG_VERSION");
+    let pidfile_before = std::fs::read(postmaster_pid_path(&data_dir)).ok();
+
+    let existing_restore = parent.join(format!("data.restore-{FIXED_TS}"));
+    let existing_bak = parent.join(format!("data.bak-{FIXED_TS}"));
+    std::fs::create_dir_all(&existing_restore).expect("create existing restore dir");
+    std::fs::write(existing_restore.join("only-recovery-point"), b"precious")
+        .expect("write sentinel");
+    std::fs::create_dir_all(&existing_bak).expect("create existing bak dir");
+    std::fs::write(existing_bak.join("original-cluster"), b"precious").expect("write sentinel");
+
+    let output = Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--input")
+        .arg(&dump_path)
+        .env(INJECT_INITDB_FAIL_ENV, "1")
+        .env(FORCE_RESTORE_TS_ENV, FIXED_TS)
+        .output()
+        .expect("run restore with injected initdb failure");
+    let code = output.status.code().unwrap_or(255) as u8;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        code, 11,
+        "injected initdb failure should map to exit 11; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("已存在"),
+        "restore should report the occupied default name; stderr:\n{stderr}"
+    );
+
+    assert_eq!(
+        std::fs::read(existing_restore.join("only-recovery-point")).expect("sentinel intact"),
+        b"precious",
+        "既有 .restore-* 恢复点不得被复用或清理"
+    );
+    assert_eq!(
+        std::fs::read(existing_bak.join("original-cluster")).expect("bak sentinel intact"),
+        b"precious",
+        "既有 .bak-* 不得被删除或覆盖"
+    );
+    assert!(
+        !parent.join(format!("data.restore-{FIXED_TS}-1")).exists(),
+        "本次换名创建的恢复目录应在失败后自清理"
+    );
+    assert_eq!(
+        std::fs::read(data_dir.join("PG_VERSION")).expect("source PG_VERSION"),
+        pg_version_before,
+        "源数据目录不得被改动"
+    );
+    assert_eq!(
+        std::fs::read(postmaster_pid_path(&data_dir)).ok(),
+        pidfile_before,
+        "源 postmaster.pid 不得被改动"
+    );
+}
