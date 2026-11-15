@@ -1,9 +1,27 @@
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from data.persistence import engine_provider
 from data.persistence.app_state_service import get_app_state, set_app_state, set_app_state_max
+from data.persistence.daos.base_dao import EngineDisposedError
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _clean_engine_provider():
+    """R7：隔离 engine_provider 模块级状态（已释放引擎集合）。"""
+    engine_provider.reset_engine_provider()
+    yield
+    engine_provider.reset_engine_provider()
+
+
+def _mark_disposed(engine):
+    """模拟 CacheManager.close()：登记已释放引擎，随后替换为新对象。"""
+    engine_provider.set_engine(engine)
+    engine_provider.mark_disposed(True)
 
 
 def _make_connect_engine(mock_conn):
@@ -125,3 +143,103 @@ class TestSetAppStateMax:
         await set_app_state_max(engine, "key", "value")
 
         assert any("Failed to write max key='key'" in rec.getMessage() for rec in caplog.records)
+
+
+class TestDisposedEngineGuard:
+    """D05-002 / R5：已释放引擎（登记后换新）不得再被 connect/begin/execute。"""
+
+    @pytest.mark.asyncio
+    async def test_get_app_state_zero_touch_on_disposed_engine_and_new_engine_works(self):
+        old_engine = _make_connect_engine(MagicMock())
+        _mark_disposed(old_engine)
+
+        new_conn = MagicMock()
+        new_result = MagicMock()
+        new_result.fetchone.return_value = ("20250901",)
+        new_conn.execute = AsyncMock(return_value=new_result)
+        new_engine = _make_connect_engine(new_conn)
+        engine_provider.set_engine(new_engine)
+
+        with pytest.raises(EngineDisposedError):
+            await get_app_state(old_engine, "sync_attempted_upto:moneyflow_daily")
+
+        old_engine.connect.assert_not_called()
+        assert await get_app_state(new_engine, "sync_attempted_upto:moneyflow_daily") == "20250901"
+
+    @pytest.mark.asyncio
+    async def test_set_app_state_zero_touch_on_disposed_engine_and_new_engine_works(self):
+        old_engine = _make_begin_engine(MagicMock())
+        _mark_disposed(old_engine)
+
+        new_conn = MagicMock()
+        new_conn.execute = AsyncMock()
+        new_engine = _make_begin_engine(new_conn)
+        engine_provider.set_engine(new_engine)
+
+        with pytest.raises(EngineDisposedError):
+            await set_app_state(old_engine, "financial:full_sync_pending", "[]", strict=True)
+
+        old_engine.begin.assert_not_called()
+        await set_app_state(new_engine, "financial:full_sync_pending", "[]", strict=True)
+        new_conn.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_set_app_state_max_zero_touch_on_disposed_engine_and_new_engine_works(self):
+        old_engine = _make_begin_engine(MagicMock())
+        _mark_disposed(old_engine)
+
+        new_conn = MagicMock()
+        new_conn.execute = AsyncMock()
+        new_engine = _make_begin_engine(new_conn)
+        engine_provider.set_engine(new_engine)
+
+        with pytest.raises(EngineDisposedError):
+            await set_app_state_max(old_engine, "financial:disclosure_checkpoint", "20250901", strict=True)
+
+        old_engine.begin.assert_not_called()
+        await set_app_state_max(new_engine, "financial:disclosure_checkpoint", "20250901", strict=True)
+        new_conn.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_from_read_and_writes(self):
+        read_conn = MagicMock()
+        read_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        read_engine = _make_connect_engine(read_conn)
+        with pytest.raises(asyncio.CancelledError):
+            await get_app_state(read_engine, "key")
+
+        write_conn = MagicMock()
+        write_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        write_engine = _make_begin_engine(write_conn)
+        with pytest.raises(asyncio.CancelledError):
+            await set_app_state(write_engine, "key", "value")
+        with pytest.raises(asyncio.CancelledError):
+            await set_app_state_max(write_engine, "key", "value", strict=True)
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_error_from_operation_is_not_downgraded(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=EngineDisposedError("disposed mid-write"))
+        engine = _make_begin_engine(mock_conn)
+
+        with pytest.raises(EngineDisposedError):
+            await set_app_state(engine, "key", "value")
+        with pytest.raises(EngineDisposedError):
+            await set_app_state_max(engine, "key", "value")
+
+    @pytest.mark.asyncio
+    async def test_strict_write_failure_does_not_advance_checkpoint(self):
+        """关键断点：写失败必须传播，后续「推进完成」语句不得执行。"""
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        engine = _make_begin_engine(mock_conn)
+        advanced = False
+
+        with pytest.raises(RuntimeError):
+            await set_app_state_max(engine, "financial:disclosure_checkpoint", "20250901", strict=True)
+            advanced = True
+        with pytest.raises(RuntimeError):
+            await set_app_state(engine, "financial:full_sync_pending", "[]", strict=True)
+            advanced = True
+
+        assert advanced is False

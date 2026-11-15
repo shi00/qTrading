@@ -646,7 +646,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             """SYNC-02：把聚合桶中累积的表水位单调写库后清空。
 
             仅在驱动方提供了 watermark_sink（批处理路径）时才有累积数据；
-            独立单日调用不走此处。写失败由 set_app_state_max 吞掉，不阻断同步。
+            独立单日调用不走此处。水位属关键断点，写库失败（strict=True）向上抛出，
+            不清空待写桶，避免把"未持久化"当成"已完成"。
             硬取消/异常传播时本次待写水位被跳过——因单调自愈，下次运行会重设为真实 max，
             不产生错误持久值（区别于旧无条件覆盖 bug 的"永久写坏"）。
             """
@@ -654,7 +655,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if engine is None or not pending_watermarks:
                 return
             for table, date in pending_watermarks.items():
-                await set_app_state_max(engine, f"{_WATERMARK_KEY_PREFIX}:{table}", date.strftime("%Y%m%d"))
+                # D05-002：水位为关键断点，须确认落库后才清空待写桶（写失败不推进完成）
+                await set_app_state_max(
+                    engine,
+                    f"{_WATERMARK_KEY_PREFIX}:{table}",
+                    date.strftime("%Y%m%d"),
+                    strict=True,
+                )
             pending_watermarks.clear()
 
         async def _flush_empty_days() -> None:
