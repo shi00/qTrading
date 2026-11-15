@@ -464,6 +464,128 @@ class TestComputeAnalysisBudget:
         assert budget >= 1
 
 
+class TestUnifiedConnectionBudgetBasis:
+    """D13-006：统一链下预算以连接（ResolvedConnection）context_window 为准。"""
+
+    def _svc(self):
+        svc = AIService.__new__(AIService)
+        # 旧链配置故意给大窗口（1M），用于证明统一链下不被沿用
+        svc._litellm_config = {"provider": "deepseek", "model": "deepseek-v4-flash"}
+        return svc
+
+    @staticmethod
+    def _dispatch(connections, candidate_ids):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            snapshot=SimpleNamespace(
+                routes=(
+                    {
+                        "scenario_id": "stock_analysis",
+                        "candidates": [{"connection_id": cid} for cid in candidate_ids],
+                    },
+                ),
+                connections=tuple(connections),
+            )
+        )
+
+    def test_connection_window_is_budget_basis(self):
+        """已知连接窗口（8192）优先于旧链 failover 主模型窗口。"""
+        svc = self._svc()
+        dispatch = self._dispatch(
+            [{"connection_id": "conn-local", "provider": "ollama", "model": "qwen3:8b", "context_window": 8192}],
+            ["conn-local"],
+        )
+        with patch(
+            "services.ai_service.ConfigHandler.get_failover_config",
+            return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+        ):
+            budget = svc._compute_analysis_budget(dispatch=dispatch)
+        assert budget == max(1, 8192 - CONTEXT_RESERVE_TOKENS)
+
+    def test_unknown_connection_window_uses_conservative_fallback(self, caplog):
+        """连接未声明窗口：使用保守回退值并显式告警，不静默按 128k 计。"""
+        import logging
+
+        svc = self._svc()
+        dispatch = self._dispatch(
+            [{"connection_id": "conn-unknown", "provider": "custom", "model": "mystery", "context_window": None}],
+            ["conn-unknown"],
+        )
+        with (
+            patch(
+                "services.ai_service.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            budget = svc._compute_analysis_budget(dispatch=dispatch)
+        assert budget == max(1, DEFAULT_CONTEXT_WINDOW - CONTEXT_RESERVE_TOKENS)
+        assert DEFAULT_CONTEXT_WINDOW < 128_000
+        assert any("conservative" in r.message for r in caplog.records)
+
+    def test_unknown_connection_window_not_replaced_by_legacy_model_window(self):
+        """连接窗口未知时不得回退到旧链模型窗口（来源分叉即本缺陷）。"""
+        svc = self._svc()
+        dispatch = self._dispatch(
+            [{"connection_id": "conn-unknown", "provider": "custom", "model": "mystery"}],
+            ["conn-unknown"],
+        )
+        with (
+            patch(
+                "services.ai_service.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+            ),
+            patch(
+                "utils.llm_providers.get_model_info",
+                return_value={"id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "context": 1_000_000},
+            ),
+        ):
+            budget = svc._compute_analysis_budget(dispatch=dispatch)
+        assert budget == max(1, DEFAULT_CONTEXT_WINDOW - CONTEXT_RESERVE_TOKENS)
+
+    def test_multi_model_uses_primary_candidate_window(self):
+        """多候选（模型）时按用户序首候选窗口计，不被更小候选拖小（P2-3 一致）。"""
+        svc = self._svc()
+        dispatch = self._dispatch(
+            [
+                {"connection_id": "conn-a", "provider": "deepseek", "model": "pro", "context_window": 1_000_000},
+                {"connection_id": "conn-b", "provider": "ollama", "model": "qwen3:8b", "context_window": 8192},
+            ],
+            ["conn-a", "conn-b"],
+        )
+        with patch(
+            "services.ai_service.ConfigHandler.get_failover_config",
+            return_value={"primary": "", "fallbacks": []},
+        ):
+            budget = svc._compute_analysis_budget(dispatch=dispatch)
+        assert budget == max(1, 1_000_000 - CONTEXT_RESERVE_TOKENS)
+
+    def test_tiny_connection_window_raises_on_overflow(self):
+        """极小窗口（2048）下固定块超窗时显式抛 AIBudgetError（不静默超限）。"""
+        from core.errors import AIBudgetError
+
+        svc = self._svc()
+        dispatch = self._dispatch(
+            [{"connection_id": "conn-tiny", "provider": "ollama", "model": "tiny", "context_window": 2048}],
+            ["conn-tiny"],
+        )
+        with (
+            patch(
+                "services.ai_service.ConfigHandler.get_failover_config",
+                return_value={"primary": "", "fallbacks": []},
+            ),
+            patch("litellm.token_counter", side_effect=lambda model, text: len(text) // 3 + 1),
+            pytest.raises(AIBudgetError) as excinfo,
+        ):
+            svc._compute_analysis_budget(
+                system_messages=[{"role": "system", "content": "x" * 20000}],
+                reserved_output_tokens=4000,
+                dispatch=dispatch,
+            )
+        assert excinfo.value.info.format_args["window"] == 2048
+
+
 class TestComputeAnalysisBudgetDeductFixed:
     """Issue D5-4: 动态扣减 system 消息与不可裁剪固定块。"""
 
@@ -660,6 +782,43 @@ class TestAnalyzeStockBudgetIntegration:
         assert any("SYSTEM_STRATEGY_RULES" in m["content"] for m in sys_msgs)
         # fixed_blocks 包含 user_custom_instructions
         assert any("safe_custom" in str(b) for b in call_kwargs["fixed_blocks"])
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_passes_dispatch_to_budget(self):
+        """统一链（dispatch 非 None）预算基准必须来自 dispatch 冻结快照（D13-006）。"""
+        svc = AIService.__new__(AIService)
+        dispatch = TestUnifiedConnectionBudgetBasis._dispatch(
+            [{"connection_id": "conn-local", "provider": "ollama", "model": "qwen3:8b", "context_window": 8192}],
+            ["conn-local"],
+        )
+        dispatch.route_revision = 1
+        dispatch.total_timeout_seconds = 60
+        dispatch.snapshot.config_revision = 1
+        dispatch.executor = MagicMock()
+        dispatch.executor.execute = AsyncMock(side_effect=RuntimeError("stop after budget"))
+
+        with (
+            patch.object(AIService, "_compute_analysis_budget", return_value=50000) as mock_budget,
+            patch("services.ai_service.ConfigHandler") as mock_ch,
+            patch("core.prompt_base.get_base_prompt", return_value="prompt"),
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", return_value="safe_custom"),
+        ):
+            mock_ch.get_ai_system_prompt.return_value = "SYSTEM_STRATEGY_RULES"
+            mock_ch.get_setting.return_value = False
+            mock_ch.is_ai_local_only_mode.return_value = False
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                scenario_dispatch=dispatch,
+            )
+
+        assert mock_budget.call_count == 1
+        assert mock_budget.call_args.kwargs["dispatch"] is dispatch
+        # 新链执行由 Executor 承担（此处替身抛错 → 可读 failed，不冒泡）
+        assert result is not None
+        assert result.get("ai_status") == "failed"
 
     @pytest.mark.asyncio
     async def test_analyze_stock_budget_overflow_returns_readable_error(self):
