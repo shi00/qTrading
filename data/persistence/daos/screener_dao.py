@@ -102,6 +102,28 @@ def _build_learning_snapshot(
     )
 
 
+def _trusted_metric(
+    expr: sa.ColumnElement[typing.Any],
+    review_status: sa.ColumnElement[typing.Any],
+) -> sa.ColumnElement[typing.Any]:
+    """D06-001: 复盘数值/胜负标签的可信性掩码——``EXPIRED`` 快照一律返回 NULL。
+
+    背景：迁移 0030/0032 把 60 交易日锚点前（仍在 180 自然日统计窗内）的旧
+    ``COMPLETED`` 置 ``EXPIRED`` 终态，但未清其按旧口径算出的
+    ``alpha`` / ``t1_pct`` / ``t5_pct`` / ``prediction_result``（旧收益与旧胜负）。
+
+    为什么是「去重后掩码」而非「先过滤状态」：统计口径是 ADR-0010 的「取最近一次
+    运行」，若在 ``DISTINCT ON`` 之前加 ``review_status = 'COMPLETED'``，同键更旧的
+    ``COMPLETED`` run 会顶替「最近快照」被取出——旧 run 复活，且与历史树/学习样本
+    看到的最近快照分叉。故本函数在去重后的快照上以 ``CASE`` 屏蔽，行本身保留：
+    ``daily_cnt`` 仍计当日入选股票数（组合规模），被屏蔽的股票自然体现为 RV-10
+    覆盖缺口（row_n 不含、daily_cnt 含），不伪装成「无入选」。
+
+    ``review_status IS NULL``（无状态列的存量行）按非 EXPIRED 处理，保持既有口径。
+    """
+    return sa.case((review_status.is_distinct_from(REVIEW_STATUS_EXPIRED), expr), else_=None)
+
+
 # review09-24-dim01-major01: 退市整理期识别的自然日窗口。退市整理期约 15 个交易日
 # （约 21 自然日），留节假日余量故取 30；值拼接进 SQL 的 INTERVAL，为受控模块常量、
 # 非用户输入，无注入面（与 REVIEW_STATS_WINDOW_DAYS 同模式）。
@@ -482,6 +504,11 @@ class ScreenerDao(BaseDao):
           与日序列 N 独立，四审 M2）。
         - NULL 基准：benchmark_code 为 NULL 的历史行自成一组（UI 归入「基准未知」组）。
         - 窗口：近 REVIEW_STATS_WINDOW_DAYS 天，与 get_history_tree 共用常量。
+        - **EXPIRED 掩码（D06-001）**：迁移 0030/0032 把超 60 交易日锚点的旧
+          COMPLETED 置 EXPIRED 但保留旧口径收益/标签；最近快照为 EXPIRED 时其
+          t1/t5/alpha/WIN/LOSS 一律按 NULL 计（见 :func:`_trusted_metric`），避免
+          不可信旧收益进入 N/均值/胜率。掩码在 DISTINCT ON 之后，不改变「取最近一次
+          运行」口径（先过滤状态会让同键更旧 run 复活）。
         全 SQLAlchemy Core（参数化 window_days），无 SQL 注入（R4）。
         """
         sh = ScreeningHistory.__table__
@@ -492,6 +519,8 @@ class ScreenerDao(BaseDao):
                 sh.c.strategy_name,
                 sh.c.ts_code,
                 sh.c.benchmark_code,
+                # D06-001: 供外层掩码判定（EXPIRED 快照数值/标签不可信）
+                sh.c.review_status,
                 sh.c.t1_pct,
                 sh.c.t5_pct,
                 sh.c.alpha,
@@ -507,20 +536,25 @@ class ScreenerDao(BaseDao):
             .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.id.desc())
             .subquery("latest_review_stats")
         )
+        # D06-001: 去重后按状态掩码（EXPIRED 的旧口径数值/标签不可信），不改去重口径。
+        t1_pct = _trusted_metric(latest.c.t1_pct, latest.c.review_status)
+        t5_pct = _trusted_metric(latest.c.t5_pct, latest.c.review_status)
+        alpha = _trusted_metric(latest.c.alpha, latest.c.review_status)
+        prediction_result = _trusted_metric(latest.c.prediction_result, latest.c.review_status)
         stmt = (
             sa.select(
                 latest.c.trade_date,
                 latest.c.strategy_name,
                 latest.c.benchmark_code,
                 sa.func.count().label("daily_cnt"),
-                sa.func.avg(latest.c.t1_pct).label("t1_mean"),
-                sa.func.count(latest.c.t1_pct).label("t1_n"),
-                sa.func.avg(latest.c.t5_pct).label("t5_mean"),
-                sa.func.count(latest.c.t5_pct).label("t5_n"),
-                sa.func.avg(latest.c.alpha).label("alpha_mean"),
-                sa.func.count(latest.c.alpha).label("alpha_n"),
-                sa.func.count().filter(latest.c.prediction_result == "WIN").label("win_cnt"),
-                sa.func.count().filter(latest.c.prediction_result == "LOSS").label("loss_cnt"),
+                sa.func.avg(t1_pct).label("t1_mean"),
+                sa.func.count(t1_pct).label("t1_n"),
+                sa.func.avg(t5_pct).label("t5_mean"),
+                sa.func.count(t5_pct).label("t5_n"),
+                sa.func.avg(alpha).label("alpha_mean"),
+                sa.func.count(alpha).label("alpha_n"),
+                sa.func.count().filter(prediction_result == "WIN").label("win_cnt"),
+                sa.func.count().filter(prediction_result == "LOSS").label("loss_cnt"),
             )
             .select_from(latest)
             .group_by(latest.c.trade_date, latest.c.strategy_name, latest.c.benchmark_code)
@@ -541,6 +575,9 @@ class ScreenerDao(BaseDao):
           样本数（AVG/COUNT 自动忽略 NULL）。
         - 胜率：prediction_result 为 WIN/LOSS 的逐股计数。
         - 窗口：近 REVIEW_STATS_WINDOW_DAYS 天。
+        - **EXPIRED 掩码（D06-001）**：同 ``get_strategy_review_stats``，最近快照为
+          EXPIRED 时其旧口径 t1/t5/alpha/WIN/LOSS 按 NULL 计，不进入归因均值与胜率；
+          has_ai 分组仍按 ai_score 原值（AI 是否发生过是事实，不随复盘状态失真）。
         全 SQLAlchemy Core（参数化 window_days），无 SQL 注入（R4）。
         """
         sh = ScreeningHistory.__table__
@@ -551,6 +588,8 @@ class ScreenerDao(BaseDao):
                 sh.c.strategy_name,
                 sh.c.ts_code,
                 sh.c.benchmark_code,
+                # D06-001: 供外层掩码判定（EXPIRED 快照数值/标签不可信）
+                sh.c.review_status,
                 sh.c.ai_score,
                 sh.c.t1_pct,
                 sh.c.t5_pct,
@@ -568,6 +607,11 @@ class ScreenerDao(BaseDao):
             .subquery("latest_ai_attribution")
         )
         has_ai = latest.c.ai_score.isnot(None).label("has_ai")
+        # D06-001: 去重后按状态掩码，与 get_strategy_review_stats 同口径。
+        t1_pct = _trusted_metric(latest.c.t1_pct, latest.c.review_status)
+        t5_pct = _trusted_metric(latest.c.t5_pct, latest.c.review_status)
+        alpha = _trusted_metric(latest.c.alpha, latest.c.review_status)
+        prediction_result = _trusted_metric(latest.c.prediction_result, latest.c.review_status)
         stmt = (
             sa.select(
                 latest.c.trade_date,
@@ -575,14 +619,14 @@ class ScreenerDao(BaseDao):
                 latest.c.benchmark_code,
                 has_ai,
                 sa.func.count().label("daily_cnt"),
-                sa.func.avg(latest.c.t1_pct).label("t1_mean"),
-                sa.func.count(latest.c.t1_pct).label("t1_n"),
-                sa.func.avg(latest.c.t5_pct).label("t5_mean"),
-                sa.func.count(latest.c.t5_pct).label("t5_n"),
-                sa.func.avg(latest.c.alpha).label("alpha_mean"),
-                sa.func.count(latest.c.alpha).label("alpha_n"),
-                sa.func.count().filter(latest.c.prediction_result == "WIN").label("win_cnt"),
-                sa.func.count().filter(latest.c.prediction_result == "LOSS").label("loss_cnt"),
+                sa.func.avg(t1_pct).label("t1_mean"),
+                sa.func.count(t1_pct).label("t1_n"),
+                sa.func.avg(t5_pct).label("t5_mean"),
+                sa.func.count(t5_pct).label("t5_n"),
+                sa.func.avg(alpha).label("alpha_mean"),
+                sa.func.count(alpha).label("alpha_n"),
+                sa.func.count().filter(prediction_result == "WIN").label("win_cnt"),
+                sa.func.count().filter(prediction_result == "LOSS").label("loss_cnt"),
             )
             .select_from(latest)
             .group_by(latest.c.trade_date, latest.c.strategy_name, latest.c.benchmark_code, has_ai)
@@ -727,6 +771,10 @@ class ScreenerDao(BaseDao):
         清理，防止僵尸 PENDING 无限累积挤占 ``get_pending_reviews`` 的 LIMIT 500
         配额。返回清理行数。
 
+        D06-001：EXPIRED 为「不可信复盘数值」终态（迁移 0030/0032 的同义），置状态时
+        同步清空收益/标签列，保证「EXPIRED 行不带旧口径收益」不变量对新写入成立；
+        WHERE 已要求 ``t1_pct IS NULL``，其余列清空为防御（历史脏态不扩散）。
+
         外部 DB 失败按说明日志记录并返回 0（幂等，次日重试）；引擎 disposed 由
         ``_guarded_begin`` + EngineDisposedError 上抛（R5）。SQLAlchemy Core
         参数化（R4，无字符串拼接）。
@@ -750,7 +798,15 @@ class ScreenerDao(BaseDao):
         )
         stmt = (
             sa.update(t)
-            .values(review_status=REVIEW_STATUS_EXPIRED)
+            .values(
+                review_status=REVIEW_STATUS_EXPIRED,
+                # D06-001: 终态同步清空不可信复盘数值/胜负标签（不变量：EXPIRED 不携带收益）。
+                t1_pct=None,
+                t5_pct=None,
+                alpha=None,
+                prediction_result=None,
+                index_pct=None,
+            )
             .where(
                 sa.or_(t.c.review_status == REVIEW_STATUS_PENDING, t.c.review_status.is_(None)),
                 t.c.t1_pct.is_(None),

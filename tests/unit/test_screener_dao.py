@@ -2044,6 +2044,34 @@ class TestScreenerDaoGetStrategyReviewStats:
         assert "GROUP BY" in sql
         assert "screening_history.benchmark_code" in sql
 
+    @pytest.mark.asyncio
+    async def test_expired_snapshot_metrics_masked_after_dedup(self):
+        """D06-001: 最近快照为 EXPIRED 时旧收益/胜负按 NULL 计，且不在去重前按状态过滤。
+
+        迁移 0030/0032 把超窗旧 COMPLETED 置 EXPIRED 却保留旧 alpha/t1/t5/WIN/LOSS。
+        掩码必须发生在 DISTINCT ON 之后：若在去重子查询内按状态过滤，同键更旧的
+        COMPLETED run 会顶替最近快照复活（绕过 ADR-0010「取最近一次运行」口径）。
+        """
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_strategy_review_stats()
+        stmt = dao._read_db_select.call_args.args[0]
+        from sqlalchemy.dialects import postgresql
+
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        sql = str(compiled)
+        # t1/t5/alpha/WIN 四类掩码，各被均值+计数（或 WIN+LOSS）引用两次 → 8 处
+        assert sql.count("IS DISTINCT FROM") == 8
+        assert REVIEW_STATUS_EXPIRED in compiled.params.values()
+        # 去重仍按「最近一次运行」：DISTINCT ON 保留，且子查询内无状态等值过滤
+        assert "DISTINCT ON" in sql
+        assert "review_status = " not in sql
+        # 聚合输入必须是掩码表达式而非原始列（防止回归为直接 avg(t1_pct)）
+        assert "avg(CASE WHEN" in sql
+        assert "count(CASE WHEN" in sql
+        # 胜负计数同样基于掩码后的标签
+        assert "FILTER (WHERE CASE WHEN" in sql
+
 
 class TestScreenerDaoGetAiAttributionStats:
     """BIZ-04 第二层: get_ai_attribution_stats 聚合 SQL 构建 (mock 读通道)。"""
@@ -2063,6 +2091,25 @@ class TestScreenerDaoGetAiAttributionStats:
         assert "loss_cnt" in sql
         assert "group by" in sql.lower()
         dao._read_db_select.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_expired_snapshot_metrics_masked_after_dedup(self) -> None:
+        """D06-001: AI 归因同样在 DISTINCT ON 之后屏蔽 EXPIRED 快照的旧收益/胜负。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_ai_attribution_stats()
+
+        stmt = dao._read_db_select.call_args[0][0]
+        from sqlalchemy.dialects import postgresql
+
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        sql = str(compiled)
+        assert sql.count("IS DISTINCT FROM") == 8
+        assert REVIEW_STATUS_EXPIRED in compiled.params.values()
+        assert "DISTINCT ON" in sql
+        assert "review_status = " not in sql
+        assert "avg(CASE WHEN" in sql
+        assert "FILTER (WHERE CASE WHEN" in sql
 
 
 class TestScreenerDaoScreeningDerivation:
@@ -2251,6 +2298,9 @@ class TestExpireStalePending:
         # 参数化：OFFSET 绑定参数（值=lookback-1=59，非字符串拼接，R4）
         assert any(v == 59 for v in compiled.params.values())
         assert "OFFSET" in sql
+        # D06-001: 置 EXPIRED 时同步清空不可信收益/胜负标签（EXPIRED 不携带复盘收益）
+        for column in ("t1_pct", "t5_pct", "alpha", "prediction_result", "index_pct"):
+            assert f"{column}=:" in sql
 
     @pytest.mark.asyncio
     async def test_engine_disposed_raises(self):
