@@ -1,7 +1,7 @@
 """docs_markdown.py — 文档 Markdown 统一解析视图（检视 §5.1，工作包 D3）。
 
-职责边界（检视 §5.1 职责表）：一次解析形成标题/锚点、标准与引用式链接、HTML ID、
-代码块/行号映射的不可变视图；缓存限本次调用。**不承担**：编辑文档、读秘密、联网、
+职责边界（检视 §5.1 职责表）：一次解析形成标题/锚点、标准与引用式链接、HTML ID 与
+HTML href、代码块/行号映射的不可变视图；缓存限本次调用。**不承担**：编辑文档、读秘密、联网、
 业务导入 —— 本模块仅依赖标准库与 docs 组（markdown-it-py / github-slugger），
 保证「只装 docs 组」的独立 hook 环境可运行（检视 §6.4 依赖/测试负例、AC15）。
 
@@ -41,6 +41,7 @@ __all__ = [
     "CompatGithubSlugger",
     "DocumentView",
     "HeadingInfo",
+    "HtmlHrefInfo",
     "HtmlIdInfo",
     "LinkInfo",
     "ReferenceDefInfo",
@@ -356,6 +357,22 @@ class HtmlIdInfo:
 
 
 @dataclass(frozen=True)
+class HtmlHrefInfo:
+    """HTML 元素 href：目标、标签名、来源 token 形态、所在行（1-based）。
+
+    HTML href 由标准库 HTMLParser 静态提取（只解析、不执行、不联网），与 Markdown
+    链接分开存储，由消费者纳入统一本地 URL 死链检查；代码块/行内代码中的 HTML
+    不是 html token，天然不进入本视图。块级 HTML 按标签实际行定位，行内 HTML 与
+    Markdown 链接一致取所在段落起始行（inline token 不携带子 token 偏移）。
+    """
+
+    href: str
+    tag: str
+    source: str  # "inline" 或 "block"
+    line: int
+
+
+@dataclass(frozen=True)
 class CodeBlockInfo:
     """代码块：围栏记号（``` / ~~~，缩进块为空串）、info 串、1-based 闭区间行号。"""
 
@@ -399,6 +416,7 @@ class DocumentView:
     code_spans: tuple[CodeSpanInfo, ...]
     reference_definitions: tuple[ReferenceDefInfo, ...]
     raw_html_tokens: tuple[tuple[str, int], ...]  # (原 HTML 内容, 所在行)
+    html_hrefs: tuple[HtmlHrefInfo, ...]
 
     def anchor_ids(self) -> frozenset[str]:
         """全部可用锚点 = 标题 slug ∪ HTML id。"""
@@ -433,18 +451,28 @@ class DocumentView:
 # ---------------------------------------------------------------------------
 
 
-class _HtmlIdParser(HTMLParser):
-    """标准库 HTMLParser：收集标签 id 属性（不执行任何内嵌 HTML 语义）。"""
+class _HtmlAttrParser(HTMLParser):
+    """标准库 HTMLParser：静态收集标签 id / href 属性（不执行任何内嵌 HTML 语义）。
+
+    ``getpos()`` 返回相对本次 feed 文本的行号（1-based），调用方以 base_line 换算
+    为文档绝对行号，使多行 html_block 能逐标签定位而非统一记块起始行。
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.ids: list[tuple[str, str]] = []
+        self.ids: list[tuple[str, str, int]] = []
+        self.hrefs: list[tuple[str, str, int]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        rel_line = self.getpos()[0]
         for key, value in attrs:
-            if key.lower() == "id" and value:
-                self.ids.append((tag, value))
-                break
+            if not value:
+                continue
+            lowered = key.lower()
+            if lowered == "id":
+                self.ids.append((tag, value, rel_line))
+            elif lowered == "href":
+                self.hrefs.append((tag, value, rel_line))
 
 
 def _normalize_label(label: str) -> str:
@@ -511,33 +539,49 @@ def _collect_headings(tokens: list[Token], slugger: Slugger) -> tuple[HeadingInf
     return tuple(headings)
 
 
-def _parse_html_ids(content: str, source: str, line: int) -> list[HtmlIdInfo]:
-    parser = _HtmlIdParser()
+def _parse_html_attrs(content: str, source: str, base_line: int) -> tuple[list[HtmlIdInfo], list[HtmlHrefInfo]]:
+    parser = _HtmlAttrParser()
     parser.feed(content)
     parser.close()
-    return [HtmlIdInfo(id=value, tag=tag, source=source, line=line) for tag, value in parser.ids]
+    ids = [
+        HtmlIdInfo(id=value, tag=tag, source=source, line=base_line + rel_line - 1)
+        for tag, value, rel_line in parser.ids
+    ]
+    hrefs = [
+        HtmlHrefInfo(href=value, tag=tag, source=source, line=base_line + rel_line - 1)
+        for tag, value, rel_line in parser.hrefs
+    ]
+    return ids, hrefs
 
 
-def _collect_html(tokens: list[Token]) -> tuple[list[HtmlIdInfo], list[tuple[str, int]]]:
-    """从 html_block / html_inline token 原文提取 id，并保留未核 HTML 原样。
+def _collect_html(
+    tokens: list[Token],
+) -> tuple[list[HtmlIdInfo], list[HtmlHrefInfo], list[tuple[str, int]]]:
+    """从 html_block / html_inline token 原文提取 id 与 href，并保留未核 HTML 原样。
 
     html_inline 位于 inline token 的 children 中，须下钻一层收集；
     html_block 在顶层 token（注意 CommonMark type 6 块仅由空行结束）。
+    围栏/缩进代码块与行内代码不是 html token，其中的 HTML 文本不会进入本路径。
     """
     ids: list[HtmlIdInfo] = []
+    hrefs: list[HtmlHrefInfo] = []
     raw: list[tuple[str, int]] = []
     for token in tokens:
         if token.type == "html_block":
             line = _token_line(token)
             raw.append((token.content, line))
-            ids.extend(_parse_html_ids(token.content, "block", line))
+            block_ids, block_hrefs = _parse_html_attrs(token.content, "block", line)
+            ids.extend(block_ids)
+            hrefs.extend(block_hrefs)
         elif token.type == "inline":
             line = _token_line(token)
             for child in token.children or []:
                 if child.type == "html_inline":
                     raw.append((child.content, line))
-                    ids.extend(_parse_html_ids(child.content, "inline", line))
-    return ids, raw
+                    inline_ids, inline_hrefs = _parse_html_attrs(child.content, "inline", line)
+                    ids.extend(inline_ids)
+                    hrefs.extend(inline_hrefs)
+    return ids, hrefs, raw
 
 
 def _collect_code_spans(tokens: list[Token]) -> tuple[CodeSpanInfo, ...]:
@@ -717,7 +761,7 @@ def parse_text(text: str) -> DocumentView:
 
     slugger = create_slugger()
     headings = _collect_headings(tokens, slugger)
-    html_ids, raw_html = _collect_html(tokens)
+    html_ids, html_hrefs, raw_html = _collect_html(tokens)
     code_blocks = _collect_code_blocks(tokens)
     code_spans = _collect_code_spans(tokens)
     defined_labels = {
@@ -769,6 +813,7 @@ def parse_text(text: str) -> DocumentView:
         code_spans=code_spans,
         reference_definitions=definitions,
         raw_html_tokens=tuple(raw_html),
+        html_hrefs=tuple(html_hrefs),
     )
 
 

@@ -33,6 +33,18 @@ HTML_ID_DOC = '## 落款\n正文 <a id="api-ref">说明</a> 续\n\n<div id="box"
 # 组 4 样例：两类围栏 + 行内代码中的假链接（全部在代码语境，不应判为链接）
 FENCED_DOC = "```py\n[a][nope]\n```\n\n~~~py\n[x](y)\n~~~\n\n行内 `[x](y)` 与 `[a][nope]` 均为代码语境\n"
 
+# 组 7 样例（Q12）：HTML href 抽取——含标签/来源/行号；代码语境中的 HTML 不参与
+HTML_HREF_DOC = (
+    '正文 <a href="./target.md">行内</a> 续\n\n'
+    "<div>\n"
+    '<a href="#sec">块内</a>\n'
+    "</div>\n\n"
+    "```html\n"
+    '<a href="./fence-missing.md">围栏</a>\n'
+    "```\n\n"
+    '行内代码 `<a href="./code-missing.md">代码</a>`\n'
+)
+
 # Q10 固定上游向量：由锁定 github-slugger==0.0.3 源码（regex.py 字符表 +
 # replace.py / slug.py 语义）独立实现推导后冻结，覆盖组合附加符号、控制字符、
 # 空白、标点、emoji、表外码点。期望值不是用 Compat 自身生成，故可作差分基准。
@@ -151,6 +163,18 @@ def test_escaped_reference_does_not_suppress_real_dead_link(view_factory) -> Non
     view = view_factory("\\[ok\\]\\[nope\\]\n\n[dead][nope]\n")
     refs = [(ref.text, ref.label, ref.line) for ref in view.unresolved_references]
     assert refs == [("dead", "nope", 3)], refs
+
+
+def test_html_href_extraction_with_source_and_line(view_factory) -> None:
+    """组 7（Q12）：HTML href 抽取标签/来源/行号；围栏与行内代码中的 HTML 不参与。"""
+    view = view_factory(HTML_HREF_DOC)
+    hrefs = {(h.href, h.tag, h.source, h.line) for h in view.html_hrefs}
+    assert hrefs == {
+        ("./target.md", "a", "inline", 1),
+        ("#sec", "a", "block", 4),
+    }, hrefs
+    # HTML href 不混入 Markdown links（两条死链检查经统一去重入口合并消费）
+    assert view.links == (), view.links
 
 
 def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:
