@@ -44,7 +44,7 @@ import re
 import subprocess
 import sys
 import tomllib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +81,7 @@ __all__ = [
     "UnclosedBlockError",
     "UpdateResult",
     "WriteGuard",
+    "git_delivery_files",
     "load_validated_source",
     "render_block_lines",
     "replace_block",
@@ -715,6 +716,8 @@ def _render_agents_min_verify(validated: dict[str, object], root: Path) -> list[
 
 _INDEX_COVERED_SUFFIXES = (".md", ".yml", ".yaml", ".json")
 _ADR_FILENAME_RE = re.compile(r"^(\d{4})-[A-Za-z0-9][A-Za-z0-9-]*\.md$")
+# 暂存前显式交付候选申报：os.pathsep 分隔的仓库相对 posix 路径（供 git_delivery_files 读取）
+_DELIVERY_CANDIDATE_ENV = "DOCS_DELIVERY_CANDIDATES"
 
 
 def _escape_cell(text: str) -> str:
@@ -722,15 +725,25 @@ def _escape_cell(text: str) -> str:
     return text.replace("|", "\\|")
 
 
-def _git_tracked_docs(root: Path, subdir: str) -> list[str] | None:
-    """git 索引列出子目录下被跟踪文件（相对 posix 路径）；非 git 环境返回 None 降级。
+def _delivery_candidates_from_env() -> tuple[str, ...]:
+    """读取暂存前显式交付候选申报（``DOCS_DELIVERY_CANDIDATES``）。
 
-    cwd 取传入 root（真实仓库 / 测试临时 git 仓库通用）；``-z`` 关闭路径转义，
-    避免非 ASCII 文件名被转义为八进制序列。
+    正常 ``git add`` 后新增文件已在索引中，无需申报；本申报只服务「暂存前」窗口：
+    让尚未暂存的新增正式页仍能进入受检集/生成候选。未申报的未跟踪文件（草案、
+    本地产物）不入集——不做「全部 untracked 升现行」。
+    """
+    raw = os.environ.get(_DELIVERY_CANDIDATE_ENV, "")
+    return tuple(item.strip() for item in raw.split(os.pathsep) if item.strip())
+
+
+def _git_ls_files(root: Path, *args: str) -> list[str] | None:
+    """执行 ``git ls-files`` 返回 posix 相对路径；git 不可用 / 非仓库返回 None（调用方降级）。
+
+    ``-z`` 关闭路径转义，避免非 ASCII 文件名被转义为八进制序列。
     """
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z", "--", subdir],
+            ["git", "ls-files", "-z", *args],
             cwd=root,
             capture_output=True,
             check=False,
@@ -742,15 +755,57 @@ def _git_tracked_docs(root: Path, subdir: str) -> list[str] | None:
     return [rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
 
 
-def _docs_index_candidates(root: Path) -> list[Path]:
-    """docs/README 文件级目录索引的作者源候选集：git 跟踪的 docs/** 治理文件。
+def git_delivery_files(root: Path, pathspec: str, declared: Iterable[str] | None = None) -> list[str] | None:
+    """git 交付候选集：索引内文件 ∪ 显式申报的暂存前候选（Q15）。
 
-    git 索引非空时为唯一候选来源（gitignored/未跟踪产物天然排除）；git 不可用
+    受检集与生成候选共用本函数，使「尚未 git add 的新增正式页」在暂存前即可被发现，
+    同时不扩大为「全部 untracked」：
+
+    - 索引内文件（含已 staged 新增）取自 ``git ls-files -- <pathspec>``；
+    - ``declared``（默认读 ``DOCS_DELIVERY_CANDIDATES``）只接受仓库内、真实存在、符合
+      ``pathspec`` 且未被 .gitignore 排除的文件——后者与
+      ``git ls-files --others --exclude-standard`` 求交，ignored 产物不会升为候选；
+      未申报的 untracked 文件（草案）不入集；
+    - rename 只保留索引中的新路径；申报路径不存在（含已从工作区删除）不入候选，
+      未暂存的删除由调用方 ``is_file`` 过滤兜底；
+    - git 不可用返回 None，由调用方降级为文件系统发现（既有语义）。
+    """
+    tracked = _git_ls_files(root, "--", pathspec)
+    if tracked is None:
+        return None
+    accepted = set(tracked)
+    root_resolved = root.resolve()
+    pending: set[str] = set()
+    for raw in _delivery_candidates_from_env() if declared is None else declared:
+        rel = posixpath.normpath(raw.replace("\\", "/") if os.sep == "\\" else raw)
+        if rel in {".", ""} or rel in accepted or Path(rel).is_absolute():
+            continue
+        candidate = root / rel
+        try:
+            candidate.resolve().relative_to(root_resolved)
+        except ValueError:
+            # 越界申报（含 .. 逃逸 / 符号链接出根）不升为候选
+            continue
+        if candidate.is_file():
+            pending.add(rel)
+    if pending:
+        untracked = _git_ls_files(root, "--others", "--exclude-standard", "--", pathspec)
+        if untracked is None:
+            return None
+        accepted.update(set(untracked) & pending)
+    return sorted(accepted)
+
+
+def _docs_index_candidates(root: Path) -> list[Path]:
+    """docs/README 文件级目录索引的作者源候选集：git 交付候选的 docs/** 治理文件。
+
+    git 索引（含已 staged 新增）与显式申报的暂存前交付候选求并后为候选来源
+    （gitignored/未申报的未跟踪产物天然排除，见 ``git_delivery_files``）；git 不可用
     （临时目录 / 归档环境）降级文件系统发现。注意：作者源为 docs 树本身，渲染读取
     窗口不做逐文件独占保护（开销不成比例），并发编辑漂移由更新后 all 检查 fail-closed 检出。
     """
     docs_root = root / "docs"
-    tracked = _git_tracked_docs(root, "docs")
+    tracked = git_delivery_files(root, "docs")
     if tracked:
         candidates = [
             root / rel for rel in tracked if (root / rel).suffix in _INDEX_COVERED_SUFFIXES and (root / rel).is_file()
