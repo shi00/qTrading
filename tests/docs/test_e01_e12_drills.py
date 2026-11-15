@@ -107,7 +107,8 @@ def test_e01_new_file_discovered_index_registered_then_recovered(
     spec = dg.BlockSpec(
         block_id="e01-file-index",
         target="docs/README.md",
-        sources=(),
+        # 索引目标同时是标题输入：登记为 text 作者源经快照渲染（保护窗口内不重开磁盘）。
+        sources=(dg.SourceSchema(path="docs/README.md", fmt="text"),),
         render=dg._render_docs_readme_file_index,
         block_format="markdown",
         active=True,

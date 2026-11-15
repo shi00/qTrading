@@ -133,6 +133,169 @@ def test_file_index_empty_candidates_rejected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 文件级目录索引：受保护候选的输入闭包（N02）
+# ---------------------------------------------------------------------------
+
+_INDEX_BLOCK_ID = "docs-readme-file-index"
+_A11Y_REL = "docs/flet/accessibility-baseline.md"
+
+
+def _a11y_demo_render(validated: dict[str, object], root: Path) -> list[str]:
+    del validated, root
+    return ["- demo"]
+
+
+def _a11y_index_registry(*, register_a11y: bool = True) -> tuple[dg.BlockSpec, ...]:
+    """文件级索引 + a11y baseline 受保护目标的最小 target→source 闭包注册表。"""
+    sources = [dg.SourceSchema(path="docs/README.md", fmt="text")]
+    if register_a11y:
+        sources.append(dg.SourceSchema(path=_A11Y_REL, fmt="text"))
+    index_spec = dg.BlockSpec(
+        block_id=_INDEX_BLOCK_ID,
+        target="docs/README.md",
+        sources=tuple(sources),
+        render=dg._render_docs_readme_file_index,
+    )
+    a11y_spec = dg.BlockSpec(
+        block_id="a11y-demo",
+        target=_A11Y_REL,
+        sources=(),
+        render=_a11y_demo_render,
+    )
+    return (index_spec, a11y_spec)
+
+
+def _build_index_closure_tree(root: Path) -> None:
+    _write(
+        root,
+        "docs/README.md",
+        "# 文档索引\n\n<!-- generated:docs-readme-file-index -->\n<!-- /generated -->\n",
+    )
+    _write(
+        root,
+        _A11Y_REL,
+        "# UI 可访问性最低标准\n\n<!-- generated:a11y-demo -->\n<!-- /generated -->\n",
+    )
+
+
+class _ReadBlockState:
+    """模拟独占保护窗口：标记是否处于保护内，并统计被拒的新句柄读取次数。"""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.blocked = 0
+
+
+class _ReadBlockingGuard(gf.AtomicReplaceWriteGuard):
+    """写入后端可用的保护替身 + 独占读取语义（保护内对受保护路径重开句柄即被拒）。"""
+
+    def __init__(self, paths: list[Path], state: _ReadBlockState) -> None:
+        super().__init__(paths)
+        self._state = state
+
+    def __enter__(self) -> _ReadBlockingGuard:
+        self._state.active = True
+        super().__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._state.active = False
+        super().__exit__(exc_type, exc, tb)
+
+
+def _install_protected_read_blocking(monkeypatch: pytest.MonkeyPatch, protected: set[Path]) -> _ReadBlockState:
+    """保护窗口内对受保护路径的 ``Path.read_text`` 抛 PermissionError（Windows 共享冲突语义）。"""
+    state = _ReadBlockState()
+    real_read_text = Path.read_text
+
+    def blocked_read_text(self: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if state.active and self.resolve() in protected:
+            state.blocked += 1
+            raise PermissionError(13, "sharing violation")
+        return real_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", blocked_read_text)
+    monkeypatch.setattr(dg, "WriteGuard", lambda paths: _ReadBlockingGuard(paths, state))
+    return state
+
+
+def test_file_index_protected_titles_come_from_snapshot_inside_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """判别性回归（N02）：生产注册表完整闭包下，锁内标题 == 锁外标题且不出现占位符。
+
+    仅恢复写入后端（AtomicReplaceWriteGuard）不能让本用例转绿：旧实现未把 a11y
+    baseline 登记为索引输入，保护内重开该路径读取被拒 → 标题变成占位符。
+    """
+    root = tmp_path
+    by_id = {spec.block_id: spec for spec in dg.BUILTIN_REGISTRY}
+    registry = (by_id["docs-readme-file-index"], by_id["a11y-contrast-reference"])
+    _write(
+        root,
+        "docs/README.md",
+        "# 文档索引\n\n<!-- generated:docs-readme-file-index -->\n<!-- /generated -->\n",
+    )
+    _write(
+        root,
+        _A11Y_REL,
+        "# UI 可访问性最低标准\n\n<!-- generated:a11y-contrast-reference -->\n<!-- /generated -->\n",
+    )
+    _write(root, "docs/governance/README.md", "# 治理索引\n")
+    _write(root, "docs/governance/redlines.yml", "# 红线正本\nredlines: []\n")
+    _write(root, "docs/governance/canonical-topics.yml", "# 路由正本\ntopics: []\n")
+    _write(
+        root,
+        "scripts/check_theme_contrast.py",
+        _contrast_source_text('    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'),
+    )
+
+    outside = dg.render_block_lines(root, registry[0])
+    protected = {
+        (root / rel).resolve() for spec in registry for rel in (spec.target, *(schema.path for schema in spec.sources))
+    }
+    state = _install_protected_read_blocking(monkeypatch, protected)
+    result = dg.run_update(root, registry)
+
+    assert result.ok, result.failure_reasons + result.conflict_reasons
+    a11y_row = "| [flet/accessibility-baseline.md](./flet/accessibility-baseline.md) | UI 可访问性最低标准 |"
+    assert a11y_row in outside
+    assert state.blocked == 0, "保护窗口内不得重开受保护路径（标题只能取自已核对快照）"
+    written = dg.scan_blocks((root / "docs/README.md").read_text(encoding="utf-8"), "markdown")[_INDEX_BLOCK_ID]
+    assert list(written.content_lines) == outside, "锁内生成的标题必须与锁外渲染一致"
+    assert all("（无 H1 标题）" not in line for line in written.content_lines)
+
+
+def test_file_index_protected_candidate_must_be_registered_as_snapshot_source(tmp_path: Path) -> None:
+    """负例（快照缺项）：受保护的 docs 索引候选未登记为快照输入 → 更新前显式拒绝。"""
+    _build_index_closure_tree(tmp_path)
+    with pytest.raises(dg.InvalidSpecError, match="accessibility-baseline.md"):
+        dg.run_update(tmp_path, _a11y_index_registry(register_a11y=False))
+
+
+def test_file_index_read_failure_raises_instead_of_missing_h1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：未受保护候选读取失败 → 显式报错；不得伪报为「文档无 H1」（占位符）。"""
+    root = tmp_path
+    _write(root, "docs/README.md", "# 索引\n<!-- generated:idx -->\n<!-- /generated -->\n")
+    _write(root, "docs/other.md", "# 其他页面\n")
+    spec = dg.BlockSpec(
+        block_id="idx",
+        target="docs/README.md",
+        sources=(dg.SourceSchema(path="docs/README.md", fmt="text"),),
+        render=dg._render_docs_readme_file_index,
+    )
+    real_read_text = Path.read_text
+
+    def failing_read_text(self: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if self.name == "other.md":
+            raise PermissionError(13, "sharing violation")
+        return real_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+    with pytest.raises(dg.SourceReadError, match="读取失败"):
+        dg.render_block_lines(root, spec)
+
+
+# ---------------------------------------------------------------------------
 # ADR 索引
 # ---------------------------------------------------------------------------
 
@@ -329,6 +492,8 @@ def test_builtin_registry_d6_entries_active_and_consistent() -> None:
     assert contrast.active and contrast.render is not None
     assert contrast.target == "docs/flet/accessibility-baseline.md"
     assert contrast.sources == (dg._A11Y_CONTRAST_SCHEMA,)
+    # N02：a11y baseline 是受保护目标且同时是文件级目录候选——标题输入必须来自快照。
+    assert dg._A11Y_BASELINE_TEXT_SCHEMA in by_id["docs-readme-file-index"].sources
     dg._validate_specs(dg.BUILTIN_REGISTRY)  # 注册表整体跨条目约束（目标格式一致/块 id 不重复）
 
 
