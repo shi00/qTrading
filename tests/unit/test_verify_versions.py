@@ -864,3 +864,40 @@ def test_main_release_tag_rejects_fix_combination():
         verify_versions.main()
 
     assert exc_info.value.code == 2
+
+
+# ============================================================================
+# docs_markdown 委托契约（D5 回归守护）
+# ============================================================================
+
+
+def test_docs_markdown_module_attribute_preserved():
+    """模块级 docs_markdown 属性必须保留：tests/docs 依赖它 monkeypatch 证明唯一解析。"""
+    assert verify_versions.docs_markdown is not None
+    assert verify_versions._load_docs_markdown() is verify_versions.docs_markdown
+
+
+def test_release_tag_mode_works_without_docs_markdown(tmp_path):
+    """发行门禁环境无 docs 依赖（docs_markdown=None）时 --release-tag 仍须通过。"""
+    pyproject, manifest = _write_version_files(tmp_path, "0.11.7", "0.11.7")
+    with (
+        patch("verify_versions.docs_markdown", None),
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+        patch("sys.argv", ["verify_versions.py", "--release-tag", "v0.11.7"]),
+    ):
+        verify_versions.main()  # 不抛 SystemExit
+
+
+def test_document_checks_fail_closed_without_docs_markdown(tmp_path):
+    """真正执行文档检查而依赖缺失时必须显式失败，不得静默跳过装通过（F17/F22）。"""
+    readme = tmp_path / "README.md"
+    readme.write_text("# 标题\n\n[中文文档]()\n", encoding="utf-8")
+    with (
+        patch("verify_versions.docs_markdown", None),
+        patch("verify_versions.README_PATH", readme),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        verify_versions.check_empty_markdown_links()
+
+    assert "docs_markdown" in str(exc_info.value)

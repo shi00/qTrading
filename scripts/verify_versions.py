@@ -14,7 +14,8 @@ Checks:
 9. 发行 tag 数值门（D22-001）：``--release-tag <tag>`` 时只执行本项——原始 tag 必须是严格
    ``v<major>.<minor>.<patch>``（拒绝前导零 / 预发布 / 构建元数据 / 缺 ``v`` 前缀），去 ``v``
    后同时等于 pyproject.toml [project].version 与 .release-please-manifest.json 的 ``.`` 值。
-   该模式仅用标准库（不导入 docs_markdown），供发行流水线在编译与 Release 创建前独立校验
+   该模式仅用标准库（不依赖 docs_markdown：缺失时模块属性置 None，仅实际执行文档检查时
+   显式失败），供发行流水线在编译与 Release 创建前独立校验
    tag 数值；不检查远端 tag 指针（commit 归属由 release-windows 的 tag lock 负责），
    不得以「远端 tag 指向本提交」替代数值检查。
 
@@ -30,14 +31,27 @@ Usage: python scripts/verify_versions.py [--check-sidecar-binary <path>]
        python scripts/verify_versions.py --release-tag <tag>
 """
 
+import importlib
 import json
 import re
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 文档解析视图（D5：与 check_docs_consistency 共用唯一解析实现，检视 §5.1）。
+# 保留模块级属性 docs_markdown（tests/docs 通过 monkeypatch 该属性证明委托唯一解析）。
+# ``--release-tag`` 发行门禁须在仅含标准库的环境（无 requirements-docs 依赖）独立运行，
+# 故导入失败时置 None，由真正执行文档检查的路径显式失败（不静默降级为第二套解析）——
+# verify-versions hook 环境须含 markdown-it-py（pre-commit additional_dependencies 由
+# docs 组条目提供）。
+try:
+    docs_markdown: ModuleType | None = importlib.import_module("docs_markdown")
+except ImportError:  # pragma: no cover - 发行门禁环境无 docs 依赖
+    docs_markdown = None
 
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 REQUIREMENTS_DEV_PATH = ROOT / "requirements-dev.txt"
@@ -62,21 +76,17 @@ SIDECAR_VERSION_TIMEOUT_S = 10
 SUPPORTED_RELEASE_TAG_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
-def _load_docs_markdown():
-    """按需导入文档解析视图（D5：与 check_docs_consistency 共用唯一解析实现，检视 §5.1）。
+def _load_docs_markdown() -> ModuleType:
+    """返回共享文档解析视图（D5：与 check_docs_consistency 共用唯一解析实现，检视 §5.1）。
 
-    ``--release-tag`` 发行门禁须在仅含标准库的环境（无 requirements-docs 依赖）独立运行，
-    故把导入推迟到文档检查实际执行时；导入失败仍显式失败（不静默降级为第二套解析）——
-    verify-versions hook 环境须含 markdown-it-py（pre-commit additional_dependencies 由
-    docs 组条目提供）。
+    ``--release-tag`` 发行门禁须在仅含标准库的环境独立运行，故导入失败时模块属性置 None
+    而不在此处中断；真正执行文档检查时显式失败（不静默降级为第二套解析）。
     """
-    try:
-        import docs_markdown
-    except ImportError as _exc:  # pragma: no cover - 环境缺依赖时显式失败
+    if docs_markdown is None:
         raise SystemExit(
-            f"verify_versions.py 需要文档解析依赖 docs_markdown（markdown-it-py）：{_exc}；"
+            "verify_versions.py 需要文档解析依赖 docs_markdown（markdown-it-py）；"
             "请安装 docs 依赖组（requirements-docs.txt）"
-        ) from _exc
+        )
     return docs_markdown
 
 
