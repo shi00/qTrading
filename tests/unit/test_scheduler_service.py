@@ -2966,13 +2966,16 @@ class TestOnJobMissedCatchup:
         mock_loop.create_task.return_value = created_task
         with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop):
             svc._on_job_missed(event)
-        # 校验调度的是 _catch_up_missed_updates 协程（call_args 访问即证明被调用）
-        coro = mock_loop.create_task.call_args.args[0]
+        # D03-001: create_task 接收代际守卫协程，业务补跑协程作为其参数持有。
+        guard = mock_loop.create_task.call_args.args[0]
+        assert guard.cr_code.co_name == "_run_misfire_guarded"
+        coro = guard.cr_frame.f_locals["coro"]
         assert coro.cr_code.co_name == "_catch_up_missed_updates"
         # D6-1 Q21: misfire 已过计划时刻+宽限（已收盘），须回补今天（include_today=True），
         # 否则"当天永久跳过"依旧存在。
         assert coro.cr_frame.f_locals.get("include_today") is True
         coro.close()  # 测试中不真正调度，close 释放协程避免 RuntimeWarning
+        guard.close()
 
     def test_non_business_job_falls_back_to_catchup(self):
         """D11-F04: 未知 job 回落旧行为（仅行情补偿），不再忽略。"""
@@ -2984,11 +2987,14 @@ class TestOnJobMissedCatchup:
         mock_loop.create_task.return_value = MagicMock()
         with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop):
             svc._on_job_missed(event)
-        coro = mock_loop.create_task.call_args.args[0]
+        guard = mock_loop.create_task.call_args.args[0]
+        assert guard.cr_code.co_name == "_run_misfire_guarded"
+        coro = guard.cr_frame.f_locals["coro"]
         assert coro.cr_code.co_name == "_catch_up_missed_updates"
         assert coro.cr_frame.f_locals.get("include_today") is True
         assert coro.cr_frame.f_locals.get("bypass_backoff") is True
         coro.close()
+        guard.close()
 
 
 class TestOnJobMissedDispatch:
@@ -4293,3 +4299,91 @@ class TestCatchupCancelWatermarkBoundary:
         svc._mark_daily_update_done_db.assert_awaited_once_with(self._D1.strftime("%Y%m%d"))
         # 失败退避照常记录，且原因与 TaskIncompleteError 一致（强断言参数内容）
         svc._record_catchup_failure.assert_called_once_with(reason=exc_info.value.reason)
+
+
+class TestSchedulerShutdownAdmissionGate:
+    """D03-001: 停机准入——停触发后取消并 drain misfire 补跑，拒绝迟到 callback。"""
+
+    @staticmethod
+    def _misfire_event(job_id: str = "daily_update") -> MagicMock:
+        event = MagicMock()
+        event.job_id = job_id
+        event.scheduled_run_time = "2026-09-22 16:30:00"
+        return event
+
+    @pytest.mark.asyncio
+    async def test_stop_async_cancels_drains_and_rejects_late_misfire(self):
+        """停触发后取消在途补跑并 drain；停机后到达的 misfire 不再投递。"""
+        svc = _make_svc()
+        svc.scheduler = MagicMock()
+        svc.scheduler.running = True
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _blocked_catchup(**_kwargs):
+            entered.set()
+            await release.wait()
+
+        svc._catch_up_missed_updates = AsyncMock(side_effect=_blocked_catchup)
+        svc._on_job_missed(self._misfire_event())
+        await entered.wait()
+        assert len(svc._catchup_tasks) == 1
+
+        await svc.stop_async(drain_timeout=1.0)
+
+        assert svc._catchup_tasks == set(), "取消后必须 drain 至集合清空"
+        svc.scheduler.shutdown.assert_called_once_with(wait=False)
+        assert svc._accepting_misfire is False
+        # 停机后到达的 misfire 回调不得再投递补跑
+        svc._on_job_missed(self._misfire_event())
+        assert svc._catchup_tasks == set()
+        assert svc._catch_up_missed_updates.await_count == 1
+        release.set()
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_stale_generation_callback_is_dropped(self):
+        """重启语义：旧代际已创建、尚未启动的补跑协程被守卫拒绝且不执行。"""
+        svc = _make_svc()
+        svc._catch_up_missed_updates = AsyncMock()
+        stale_coro = svc._catch_up_missed_updates(include_today=True, bypass_backoff=True)
+        await svc._run_misfire_guarded(stale_coro, svc._run_generation - 1)
+        svc._catch_up_missed_updates.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_during_calendar_wait_never_submits_business_task(self):
+        """交易日历 await 阻塞期间停机：再释放不得调用业务 factory / 产生新活动任务 / 写库。
+
+        复现路径：misfire 补跑在 ``get_trade_dates`` 上等待 → 停机取消并 drain →
+        释放日历 Event。补跑任务不得越过取消继续 ``submit_task``，水位也不得被推进。
+        """
+        svc = _make_svc()
+        svc.scheduler = MagicMock()
+        svc.scheduler.running = True
+        svc._last_update_date = "20240610"
+        calendar_entered = asyncio.Event()
+        calendar_release = asyncio.Event()
+
+        async def _blocked_trade_dates(**_kwargs):
+            calendar_entered.set()
+            await calendar_release.wait()
+            return [date(2024, 6, 11)]
+
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar.get_trade_dates = AsyncMock(side_effect=_blocked_trade_dates)
+        mock_tm = MagicMock()
+        with (
+            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 18, 0, 0)),
+        ):
+            svc._on_job_missed(self._misfire_event())
+            await calendar_entered.wait()
+            await svc.stop_async(drain_timeout=1.0)
+            calendar_release.set()
+            await asyncio.sleep(0.05)
+
+        mock_tm.submit_task.assert_not_called()
+        assert svc._catchup_tasks == set()
+        assert svc._last_update_date == "20240610", "取消路径不得推进幂等水位"

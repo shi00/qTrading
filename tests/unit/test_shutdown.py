@@ -308,7 +308,38 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance.cancel_all_running_async = AsyncMock()
             mock_tm._instance = mock_instance
             await coord._step0_cancel_tasks()
+            mock_instance.close_admission.assert_called_once()
             mock_instance.cancel_all_running_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_step0_closes_admission_after_scheduler_drain_before_cancel(self):
+        """D03-001: 停机准入顺序——停触发/drain misfire → 关闭准入 → cancel/join。"""
+        coord = ShutdownCoordinator()
+        order: list[str] = []
+        with (
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
+            patch("services.task_manager.TaskManager") as mock_tm,
+        ):
+            sched = MagicMock()
+
+            async def _stop_async(*, drain_timeout: float = 2.0) -> None:
+                order.append("scheduler_stop_async")
+
+            sched.stop_async = AsyncMock(side_effect=_stop_async)
+            mock_sched._instance = sched
+
+            tm = MagicMock()
+            tm.close_admission = MagicMock(side_effect=lambda: order.append("close_admission"))
+
+            async def _cancel_all() -> None:
+                order.append("cancel_all_running_async")
+
+            tm.cancel_all_running_async = AsyncMock(side_effect=_cancel_all)
+            mock_tm._instance = tm
+
+            await coord._step0_cancel_tasks()
+
+        assert order == ["scheduler_stop_async", "close_admission", "cancel_all_running_async"]
 
     @pytest.mark.asyncio
     async def test_step1_stop_services_no_instances(self):
@@ -847,6 +878,8 @@ class TestShutdownCoordinatorDoCleanup:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
         ):
             mock_tm._instance = None
+            # D03-001: Step 0 会 await 调度器异步停机协议，需显式置空单例。
+            mock_sched._instance = None
             mock_sched.scheduler.running = False
             mock_news._instance = None
             mock_mds._instance = None
@@ -873,6 +906,8 @@ class TestShutdownCoordinatorDoCleanup:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
         ):
             mock_tm._instance = None
+            # D03-001: Step 0 会 await 调度器异步停机协议，需显式置空单例。
+            mock_sched._instance = None
             mock_sched.scheduler.running = False
             mock_news._instance = None
             mock_mds._instance = None
@@ -1132,6 +1167,8 @@ class TestMainPyCleanupTimeouts:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
         ):
             mock_tm._instance = None
+            # D03-001: Step 0 会 await 调度器异步停机协议，需显式置空单例。
+            mock_sched._instance = None
             mock_sched.scheduler.running = False
             mock_news._instance = None
             mock_mds._instance = None
@@ -1158,6 +1195,9 @@ class TestMainPyCleanupTimeouts:
             mock_instance = MagicMock()
             mock_instance.cancel_all_running_async = slow_cancel
             mock_tm._instance = mock_instance
+            # D03-001: Step 0 会先 await 调度器异步停机协议；本用例不涉及调度器，
+            # 置空单例避免 MagicMock.stop_async 非 awaitable 立即抛错（令慢步骤不被超时）。
+            mock_sched._instance = None
             mock_sched.scheduler.running = False
             mock_news._instance = None
             mock_mds._instance = None
@@ -1561,6 +1601,8 @@ class TestDoCleanupConcurrent:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
         ):
             mock_tm._instance = None
+            # D03-001: Step 0 会 await 调度器异步停机协议，需显式置空单例。
+            mock_sched._instance = None
             mock_sched.scheduler.running = False
             mock_news._instance = None
             mock_mds._instance = None
@@ -1762,6 +1804,8 @@ class TestFullCleanupWithCriticalFailure:
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
         ):
             mock_tm._instance = None
+            # D03-001: Step 0 会 await 调度器异步停机协议，需显式置空单例。
+            mock_sched._instance = None
             mock_sched.scheduler.running = False
             mock_news._instance = None
             mock_mds._instance = None

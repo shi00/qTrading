@@ -311,6 +311,14 @@ class TaskManager:
             # （A 取消或被清理）的迟到释放抹掉同键新任务（B）的占位，故释放前必须核对 owner。
             self._active_keys: dict[str, str] = {}
             self._active_keys_lock = threading.Lock()
+            # D03-001: 业务提交准入闸门。与 unique_key 占位共用 _active_keys_lock——
+            # 关闭判定与占位登记在同一临界区，不存在「检查通过后停机」的窗口。
+            # 关闭后 submit_task 一律拒绝；已投递、尚未在事件循环 tick 的 _enqueue
+            # 在准入边界二次检查并释放本 owner 的占位，不启动 runner。
+            # 代际用于重启语义：reopen 递增代际，旧代际遗留的 _enqueue 闭包被拒绝。
+            # 闸门只约束业务提交，不停用最后状态持久化通道（_persist_task* / flush_persistence）。
+            self._admission_closed = False
+            self._admission_generation = 0
             self._finished_order: OrderedDict[str, datetime.datetime] = OrderedDict()
             self._subscribers: list[Callable[[list[AppTask]], None]] = []
             self._subscriber_error_counts: dict[Callable[[list[AppTask]], None], int] = {}
@@ -353,6 +361,44 @@ class TaskManager:
     def _get_active_task_count(self) -> int:
         """Count active tasks that are either running or queued (holding or waiting for semaphore)."""
         return sum(1 for t in self._tasks.values() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED))
+
+    def close_admission(self) -> None:
+        """D03-001: 关闭业务提交准入（停机在取消快照之前调用）。
+
+        与 unique_key 占位共用 ``_active_keys_lock``：关闭判定与占位登记原子化。
+        关闭即递增代际——本代际已 ``call_soon_threadsafe`` 投递、尚未执行的
+        ``_enqueue`` 会在二次检查处被拒绝并释放本 owner 的占位，不会在取消快照
+        之后启动新 runner 与 flush / dispose / 线程池 / PG 关闭交错。
+        仅关闭业务提交；最后状态持久化通道（``_persist_task*`` / ``flush_persistence``）
+        不受影响。重复调用幂等。
+        """
+        with self._active_keys_lock:
+            if self._admission_closed:
+                return
+            self._admission_closed = True
+            self._admission_generation += 1
+            generation = self._admission_generation
+        logger.info(
+            "[TaskManager] Admission closed (generation=%s); new business submissions rejected.",
+            generation,
+        )
+
+    def reopen_admission(self) -> None:
+        """D03-001: 重新开放业务提交准入（启动/重启边界，由 ``init_db`` 调用）。
+
+        递增代际：停机窗口内已投递但尚未 tick 的旧代际 ``_enqueue`` 闭包即使随后
+        被事件循环执行也不会再启动 runner——重启后只接受本代际的提交。
+        """
+        with self._active_keys_lock:
+            self._admission_closed = False
+            self._admission_generation += 1
+            generation = self._admission_generation
+        logger.info("[TaskManager] Admission reopened (generation=%s).", generation)
+
+    def _admission_open_for(self, generation: int) -> bool:
+        """D03-001: 准入边界二次检查（在事件循环线程执行）。"""
+        with self._active_keys_lock:
+            return not self._admission_closed and generation == self._admission_generation
 
     def _release_active_key(self, unique_key: str | None, task_id: str) -> None:
         """UIR-F12-001: 仅当 unique_key 的持有者仍是 task_id 时释放占位。
@@ -561,9 +607,19 @@ class TaskManager:
         task._coroutine_factory = coroutine_factory
         task._coroutine_kwargs = dict(kwargs)
 
-        # Synchronous dedup via _active_keys (thread-safe, O(1))
-        if unique_key:
-            with self._active_keys_lock:
+        # D03-001: 准入闸门与 unique_key 占位在同一临界区（同一准入/占位边界）——
+        # 关闭判定与占位登记原子化，不存在「检查通过后停机」的窗口。关闭后一律返回
+        # None（调用方按既有契约判空），且不登记占位，避免键残留。
+        with self._active_keys_lock:
+            if self._admission_closed:
+                logger.warning(
+                    "[TaskManager] Task '%s' rejected: shutdown admission closed (generation=%s).",
+                    name,
+                    self._admission_generation,
+                )
+                return None
+            generation = self._admission_generation
+            if unique_key:
                 if unique_key in self._active_keys:
                     logger.warning(
                         "[TaskManager] Duplicate task skipped: '%s' (key=%s)",
@@ -588,6 +644,16 @@ class TaskManager:
 
         # All _tasks mutations (register + launch) on loop thread only
         def _enqueue():
+            # D03-001: 准入边界二次检查。停机在取消快照前关闭准入，本闭包可能在
+            # 关闭之后才被执行；此时不得登记任务或启动 runner（否则新 runner 会与
+            # flush / dispose / 线程池 / PG 关闭交错），仅释放本 owner 的占位。
+            if not self._admission_open_for(generation):
+                self._release_active_key(unique_key, task.id)
+                logger.warning(
+                    "[TaskManager] Task '%s' dropped at enqueue: admission closed or generation changed.",
+                    name,
+                )
+                return
             self._tasks[task.id] = task
             self._register_and_run(task)
 
@@ -1102,6 +1168,10 @@ class TaskManager:
 
         # Capture the running loop so thread-pool callers can schedule back
         self._loop = asyncio.get_running_loop()
+
+        # D03-001: 启动/重启边界重新开放业务提交准入（递增代际，拒绝上一代际遗留的
+        # 延迟 _enqueue 闭包）。停机路径由 close_admission 关闭。
+        self.reopen_admission()
 
         # Wait for database schema to be ready (handled safely by CacheManager)
 
