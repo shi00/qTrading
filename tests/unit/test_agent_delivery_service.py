@@ -587,6 +587,14 @@ class TestFreshSourceState:
         assert dao.saved[3].source_state == "unknown"
         assert dao.saved[4].source_state == "unknown"
 
+    async def test_non_standard_source_state_is_recorded_as_unknown(self) -> None:
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts([_read(source_available_state="current")])
+
+        await _service(artifacts=artifacts, dao=dao, store=FakeStore()).deliver(_command(), _context())
+
+        assert [manifest.source_state for manifest in dao.saved] == ["unknown"] * 5
+
     async def test_source_recheck_failure_blocks_publication(self) -> None:
         class BrokenFresh(FakeArtifacts):
             async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> ArtifactRead:

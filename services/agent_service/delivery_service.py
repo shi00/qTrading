@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from core.agent_types import (
+    DELIVERY_SOURCE_STATES,
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
@@ -55,6 +56,19 @@ _SOURCE_RECHECK_FAILED = "delivery_source_recheck_failed"
 
 #: 发布认领后禁止重试的下一步说明（可核原交付后再决定）。
 _UNKNOWN_NEXT_ACTION = "查原交付回执与目标文件身份；确认前不得再次导出"
+
+
+def _manifest_source_state(value: object) -> str:
+    """原来源当前状态 → manifest 词表；库内其他取值按 ``unknown`` 记录，不臆测。
+
+    ``agent_artifact.source_available_state`` 是自由文本列（当前核定），manifest
+    只接受 ``DELIVERY_SOURCE_STATES``；非标准取值不得改写原核验事实，也不得
+    伪装成 ``available``。
+    """
+
+    if isinstance(value, str) and value in DELIVERY_SOURCE_STATES:
+        return value
+    return "unknown"
 
 
 class DeliveryArtifactPort(Protocol):
@@ -207,7 +221,7 @@ class DeliveryCommandService:
             format_rule_version=command.format_rule_version,
             target=command.target,
         )
-        state = read.source_available_state
+        state = _manifest_source_state(read.source_available_state)
         revision = command.expected_delivery_revision
 
         saved = await self._save(
@@ -306,7 +320,7 @@ class DeliveryCommandService:
                 phase="validated",
                 error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
             )
-        state = fresh.source_available_state
+        state = _manifest_source_state(fresh.source_available_state)
 
         if cancel_requested is not None and cancel_requested():
             cancelled = await self._save(
