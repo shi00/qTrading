@@ -1319,6 +1319,41 @@ class AgentDao(BaseDao):
     # F-02-3：操作精确读取（§4.2 read_operation）
     # ------------------------------------------------------------------
 
+    async def _operation_owner_is_cleaned(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_id: str | None,
+        execution_id: str | None,
+    ) -> bool:
+        """所属会话是否已清理（``cleaned_at`` 非空）：区分「结果已清理」与坏行。"""
+
+        if session_id is not None:
+            cleaned_at = (
+                await conn.execute(
+                    sa.select(AgentSession.cleaned_at).where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == session_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            return cleaned_at is not None
+        if execution_id is None:
+            return False
+        cleaned_at = (
+            await conn.execute(
+                sa.select(AgentSession.cleaned_at)
+                .select_from(AgentExecution)
+                .join(AgentSession, AgentSession.session_id == AgentExecution.session_id)
+                .where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.execution_id == execution_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return cleaned_at is not None
+
     async def read_operation(self, query: OperationReadQuery, *, user_scope: str) -> OperationRead:
         """读调用元数据与已保存返回（§4.2/§9.9）：effect/io 事实单列，unknown 不猜。
 
@@ -1328,7 +1363,9 @@ class AgentDao(BaseDao):
           ``effect_state='unknown'`` 原样返回并置 ``result_available=False``；
         - 返回体优先取 ``result_ref`` 同库正文（核 owner 自洽/编码/长度/SHA-256，
           按码点分页），否则取 ``result_payload`` 原子；``result_saved`` 却两者皆空
-          按坏行拒绝，不用空结果冒充成功。
+          且所属会话已清理（``cleaned_at`` 非空）时按「结果已清理」返回
+          （``unavailable_reason='result_cleaned'``），否则按坏行拒绝，不用空结果
+          冒充成功（R21）。
         """
 
         self._check_engine()
@@ -1435,7 +1472,14 @@ class AgentDao(BaseDao):
                     )
                 result_text = json_doc(row.result_payload)
             elif row.phase == "result_saved":
-                raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "result_saved without saved return", identity)
+                if await self._operation_owner_is_cleaned(
+                    conn, user_scope=user_scope, session_id=row.session_id, execution_id=row.execution_id
+                ):
+                    unavailable_reason = "result_cleaned"
+                else:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN, "result_saved without saved return", identity
+                    )
             elif row.phase == "failed_confirmed":
                 unavailable_reason = "failed_confirmed"
             else:

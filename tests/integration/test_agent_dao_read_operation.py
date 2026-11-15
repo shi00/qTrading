@@ -5,7 +5,8 @@
 - 调用元数据 + effect/io 三维事实单列；``phase/effect_state='unknown'`` 原样
   返回且不给结果（不猜成功/失败，§9.9）；
 - 返回体优先 ``result_ref`` 同库正文（owner 自洽/编码/长度/SHA-256 + 码点分页），
-  否则 ``result_payload`` 原子；``result_saved`` 却无返回按坏行拒绝；
+  否则 ``result_payload`` 原子；``result_saved`` 却无返回按坏行拒绝，所属会话已
+  清理时报 ``result_cleaned``（不把已清当坏行，也不拿空结果冒充成功）；
 - 查询给出的 execution/round/tool_call 与行不符 → ``INPUT_INVALID``；不存在/跨
   用户同；坏枚举/坏载荷 → ``OPERATION_UNKNOWN``/``PERSISTENCE_UNAVAILABLE``。
 
@@ -265,6 +266,29 @@ class TestReadOperationFailures:
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.read_operation(_query(), user_scope=_USER)
         assert excinfo.value.code is AgentErrorCode.OPERATION_UNKNOWN
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_cleaned_session_reports_result_cleaned_not_bad_row(self, real_embedded_pg: ConnectionInfo) -> None:
+        """清理后结果缺失是预期态：按会话 ``cleaned_at`` 报 ``result_cleaned``，不当坏行。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_chain(dao)
+        await _seed_operation(dao)
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                sa.update(AgentSession)
+                .where(AgentSession.user_scope == _USER, AgentSession.session_id == "s1")
+                .values(cleaned_at=sa.func.now())
+            )
+
+        read = await dao.read_operation(_query(), user_scope=_USER)
+
+        assert read.phase == "result_saved"
+        assert read.result_payload is None
+        assert read.result_text is None
+        assert read.result_available is False
+        assert read.unavailable_reason == "result_cleaned"
+        await dao.engine.dispose()  # type: ignore[union-attr]
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
