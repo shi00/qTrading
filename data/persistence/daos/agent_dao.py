@@ -6741,6 +6741,9 @@ class AgentDao(BaseDao):
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, f"content_manifest must be canonical JSON: {exc.code}", label
             ) from exc
+        # 落库值取规范 JSON 的反解析结果：JSONB 编码器只接受基础类型，Decimal 等
+        # 规范 JSON 可承载而 json.dumps 拒绝的类型不得以 StatementError 逃逸。
+        stored_manifest = None if content_manifest is None else json.loads(canonical_manifest)
         statement = sa.insert(AgentCleanupJob).values(
             user_scope=record.user_scope,
             cleanup_job_id=record.cleanup_job_id,
@@ -6748,7 +6751,7 @@ class AgentDao(BaseDao):
             preview_digest=record.preview_digest,
             expected_revision=record.expected_revision,
             exact_identity_set=identity,
-            content_manifest=content_manifest,
+            content_manifest=stored_manifest,
             phase=record.phase.value,
             complete=False,
             fence_committed=record.fence_committed,
@@ -6814,9 +6817,10 @@ class AgentDao(BaseDao):
     async def commit_cleanup_fence(self, record: CleanupJobRecord) -> None:
         """提交删除 fence（只一次）；集合与摘要不匹配则拒绝，不静默改写。
 
-        已 ``verified`` 的作业拒绝任何 fence 写入：并发确认时后到的一方不得把
-        阶段改回 ``prepared``/``retry_pending``（与 ``save_cleanup_phase`` 同一
-        单调约束，R22 语义）。
+        fence 提交只写 ``fence_committed``，不改写 ``phase``：阶段推进唯一入口是
+        ``save_cleanup_phase``（单调约束），否则携带旧 ``prepared`` 记录的并发确认
+        会把 ``retry_pending`` 回退成 ``prepared``。已 ``verified`` 的作业拒绝任何
+        fence 写入（与 ``save_cleanup_phase`` 同一单调约束，R22 语义）。
         """
 
         self._check_engine()
@@ -6835,7 +6839,7 @@ class AgentDao(BaseDao):
                     AgentCleanupJob.expected_revision == record.expected_revision,
                     AgentCleanupJob.phase != CleanupPhase.VERIFIED.value,
                 )
-                .values(fence_committed=True, phase=record.phase.value)
+                .values(fence_committed=True)
             )
             if int(result.rowcount or 0) == 0:
                 raise AgentServiceError(

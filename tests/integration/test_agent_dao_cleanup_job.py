@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -340,6 +341,45 @@ async def test_content_manifest_is_part_of_cleanup_identity(dao: AgentDao) -> No
         await dao.save_cleanup_job(_record(_job_id()), content_manifest={"ratio": 1.5})
     assert bad_exc.value.code is AgentErrorCode.INPUT_INVALID
     assert "canonical JSON" in str(bad_exc.value)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_decimal_content_manifest_is_stored_via_canonical_json(dao: AgentDao) -> None:
+    """规范 JSON 可承载的 Decimal 不得被 JSONB 编码器拒绝后以 StatementError 逃逸。"""
+
+    job_id = _job_id()
+    assert await dao.save_cleanup_job(_record(job_id), content_manifest={"ratio": Decimal("1.5")}) is True
+    # 重放核对与落库同一规范形态：Decimal("1.5") 与字符串 "1.5" 同身份。
+    assert await dao.save_cleanup_job(_record(job_id), content_manifest={"ratio": "1.5"}) is False
+
+    async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 集成测试直读核验
+        stored = (
+            await conn.execute(
+                text(
+                    "SELECT content_manifest FROM agent_cleanup_job WHERE user_scope = :scope AND cleanup_job_id = :job"
+                ),
+                {"scope": _USER_SCOPE, "job": job_id},
+            )
+        ).scalar_one()
+    assert stored == {"ratio": "1.5"}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fence_commit_does_not_regress_retry_pending_phase(dao: AgentDao) -> None:
+    """fence 提交只写 fence 位：携带旧 ``prepared`` 记录的并发确认不得回退阶段（R22）。"""
+
+    job_id = _job_id()
+    await dao.save_cleanup_job(_record(job_id))
+    await dao.commit_cleanup_fence(_record(job_id))
+    await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.RETRY_PENDING, error_category="transient")
+
+    await dao.commit_cleanup_fence(_record(job_id))
+
+    loaded = await dao.load_cleanup_job(_USER_SCOPE, job_id)
+    assert loaded is not None
+    assert loaded.phase is CleanupPhase.RETRY_PENDING
+    assert loaded.fence_committed is True
+    assert loaded.prior_error_category == "transient"
 
 
 @pytest.mark.asyncio(loop_scope="session")
