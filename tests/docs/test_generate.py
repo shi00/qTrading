@@ -153,6 +153,204 @@ def test_end_tag_id_mismatch_rejected() -> None:
         dg.scan_blocks(text, "markdown")
 
 
+# 疑似生成标记（严格语法未命中但意图明确）：每例给「畸形形态 + 合法基线/恢复形态」。
+# 畸形形态此前被静默当作正文，导致孤儿/嵌套/重复误判或整块被忽略。
+MALFORMED_MARKER_CASES = [
+    pytest.param(
+        "markdown",
+        "<!-- generated:bad.id -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "<!-- generated:bad-id -->\n<!-- /generated -->\n",
+        {"bad-id"},
+        id="markdown-dot-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:other! -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'other!'",
+        "<!-- generated:other -->\n<!-- /generated -->\n",
+        {"other"},
+        id="markdown-bang-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated: -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "<!-- generated:empty -->\n<!-- /generated -->\n",
+        {"empty"},
+        id="markdown-empty-id-colon",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "<!-- generated:bare -->\n<!-- /generated -->\n",
+        {"bare"},
+        id="markdown-empty-id-bare",
+    ),
+    pytest.param(
+        "markdown",
+        "正文\n<!-- /generated:bad.id -->\n正文\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "正文\n<!-- generated:orphan-free -->\n<!-- /generated -->\n正文\n",
+        {"orphan-free"},
+        id="markdown-orphan-end-bad-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:outer -->\n<!-- generated:inner! -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'inner!'",
+        "<!-- generated:outer -->\n<!-- /generated -->\n<!-- generated:inner -->\n<!-- /generated -->\n",
+        {"outer", "inner"},
+        id="markdown-nested-bad-inner",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:dup.id -->\nA\n<!-- /generated -->\n<!-- generated:dup.id -->\nB\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'dup.id'",
+        "<!-- generated:dup-a -->\nA\n<!-- /generated -->\n<!-- generated:dup-b -->\nB\n<!-- /generated -->\n",
+        {"dup-a", "dup-b"},
+        id="markdown-duplicate-bad-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:x -->\nA\n<!-- /generated:bad.id -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "<!-- generated:x -->\nA\n<!-- /generated:x -->\n",
+        {"x"},
+        id="markdown-end-bad-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!--generated:sample-->\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-missing-space",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:sample --> extra\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-trailing-content",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:sample-->\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-missing-space-before-close",
+    ),
+    pytest.param(
+        "markdown",
+        "  <!-- generated:sample -->\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-indented-marker",
+    ),
+    pytest.param(
+        "yaml",
+        "# generated:bad.id\n# /generated:bad.id\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "# generated:y-block\n- 行\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-dot-id",
+    ),
+    pytest.param(
+        "yaml",
+        "# generated\n# /generated:y-block\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "# generated:y-block\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-empty-id",
+    ),
+    pytest.param(
+        "yaml",
+        "# generated:y-block\n# /generated\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "# generated:y-block\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-end-without-id",
+    ),
+    pytest.param(
+        "yaml",
+        "#generated:y-block\n#/generated:y-block\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "# generated:y-block\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-missing-space",
+    ),
+]
+
+
+@pytest.mark.parametrize(("fmt", "malformed", "error", "match", "legal", "block_ids"), MALFORMED_MARKER_CASES)
+def test_suspect_marker_rejected_with_legal_recovery(
+    fmt: str,
+    malformed: str,
+    error: type[dg.BlockError],
+    match: str,
+    legal: str,
+    block_ids: set[str],
+) -> None:
+    """负例：疑似生成标记但 id/语法非法 → 显式拒绝；改成合法形态后恢复扫描。"""
+    with pytest.raises(error, match=match):
+        dg.scan_blocks(malformed, fmt)
+    assert set(dg.scan_blocks(legal, fmt)) == block_ids, "合法基线/恢复形态必须正常登记"
+
+
+def test_crlf_malformed_marker_rejected() -> None:
+    """CRLF 原文：畸形标记同样显式拒绝，行号按解析器行语义定位。"""
+    text = "a\r\n<!-- generated:bad.id -->\r\n<!-- /generated -->\r\n"
+    with pytest.raises(dg.InvalidBlockIdError, match="第 2 行块 id 非法: 'bad.id'"):
+        dg.scan_blocks(text, "markdown")
+
+
+@pytest.mark.parametrize(
+    ("fmt", "text"),
+    [
+        ("markdown", "<!-- generated by scripts/docs_generated.py -->\n"),
+        ("markdown", "<!-- 生成块由 docs_generated 维护，勿手改 -->\n"),
+        ("markdown", "2. 生成区块用 `<!-- generated:redlines-invariant -->` 包裹；\n"),
+        ("markdown", "```\n<!-- generated:bad.id -->\n<!-- /generated:bad.id -->\n```\n"),
+        ("markdown", "    <!-- generated:bad.id -->\n"),
+        ("yaml", "# generated by scripts/docs_generated.py\n"),
+        ("yaml", "# 由 docs_generated 维护，勿手改\n"),
+    ],
+    ids=[
+        "md-prose-generated-by",
+        "md-prose-chinese",
+        "md-inline-mention",
+        "md-fenced-example",
+        "md-indented-code",
+        "yaml-prose-generated-by",
+        "yaml-prose-chinese",
+    ],
+)
+def test_ordinary_comments_and_code_examples_not_validated(fmt: str, text: str) -> None:
+    """不得误杀：普通业务注释、正文顺带提及、围栏/缩进代码内的示例文本照常放行。"""
+    assert dg.scan_blocks(text, fmt) == {}
+
+
 # ---------------------------------------------------------------------------
 # 行切分与解析器一致：Unicode 行分隔符 / CRLF 下围栏假作者恒缺失、真实块准确
 # ---------------------------------------------------------------------------
