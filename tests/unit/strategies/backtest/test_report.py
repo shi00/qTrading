@@ -636,3 +636,140 @@ class TestFormatSummaryMetricGuards:
     ) -> None:
         summary = self._summary_with_metrics(backtest_result, {**backtest_result.metrics, key: value})
         assert self._rendered_line(summary, key) == f"{I18n.get(f'report_{key}')}: N/A"
+
+
+def _failed_entry(day: date | str, error: str) -> dict:
+    return {"date": day, "error": error}
+
+
+def _adapter_error(key: str, table: str, reason: str) -> str:
+    return f"[BacktestAdapter] Required data unavailable for s on 2024-01-02: {key} ({table}): {reason}"
+
+
+class TestFailedSignalDatesInReport:
+    """D12-003：D12-001 的失败信号日必须随导出报告呈现表/日/原因（R21/BT-03）。"""
+
+    def test_summary_single_failure_shows_date_table_reason(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=(
+                _failed_entry(date(2024, 1, 2), _adapter_error("screening_data", "daily_quotes", "DB read failed")),
+            ),
+        )
+        summary = BacktestReport().format_summary(result)
+        assert I18n.get("report_failed_signal_dates", count=1) + ":" in summary
+        assert (
+            f"  - 2024-01-02 | {I18n.get('report_failed_signal_col_table')}: daily_quotes"
+            f" | {I18n.get('report_failed_signal_col_reason')}: DB read failed"
+        ) in summary
+
+    def test_consecutive_failed_days_all_listed(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=(
+                _failed_entry(date(2024, 1, 2), _adapter_error("screening_data", "daily_quotes", "DB read failed")),
+                _failed_entry(
+                    date(2024, 1, 3), _adapter_error("fundamental_screening_data", "financial_reports", "timeout")
+                ),
+                _failed_entry(date(2024, 1, 4), _adapter_error("screening_data", "daily_quotes", "DB read failed")),
+            ),
+        )
+        summary = BacktestReport().format_summary(result)
+        assert I18n.get("report_failed_signal_dates", count=3) + ":" in summary
+        for day in ("2024-01-02", "2024-01-03", "2024-01-04"):
+            assert f"  - {day} |" in summary
+
+    def test_all_success_adds_no_noise(self, backtest_result: BacktestResult) -> None:
+        report = BacktestReport()
+        summary = report.format_summary(backtest_result)
+        md = report.to_markdown(backtest_result)
+        assert I18n.get("report_failed_signal_dates", count=0) not in summary
+        assert I18n.get("report_failed_signal_col_table") not in summary
+        assert f"## {I18n.get('report_section_failed_signal_dates')}" not in md
+        assert "|---|---|---|" not in md
+
+    def test_multiple_tables_and_reasons_rendered_per_row(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=(
+                _failed_entry(date(2024, 1, 2), _adapter_error("screening_data", "daily_quotes", "DB read failed")),
+                _failed_entry(
+                    date(2024, 1, 3), _adapter_error("fundamental_screening_data", "financial_reports", "timeout")
+                ),
+            ),
+        )
+        md = BacktestReport().to_markdown(result)
+        assert f"## {I18n.get('report_section_failed_signal_dates')}" in md
+        assert "| 2024-01-02 | daily_quotes | DB read failed |" in md
+        assert "| 2024-01-03 | financial_reports | timeout |" in md
+
+    def test_rows_are_stable_regardless_of_input_order(self, backtest_result: BacktestResult) -> None:
+        entries = [
+            _failed_entry(date(2024, 1, 3), _adapter_error("screening_data", "daily_quotes", "b")),
+            _failed_entry(date(2024, 1, 2), _adapter_error("screening_data", "daily_quotes", "a")),
+        ]
+        forward = BacktestReport().format_summary(
+            dataclasses.replace(backtest_result, failed_signal_dates=tuple(entries))
+        )
+        backward = BacktestReport().format_summary(
+            dataclasses.replace(backtest_result, failed_signal_dates=tuple(reversed(entries)))
+        )
+        assert forward == backward
+        assert forward.index("2024-01-02") < forward.index("2024-01-03")
+
+    def test_markdown_escapes_pipes_and_newlines(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=(
+                _failed_entry(
+                    date(2024, 1, 2),
+                    _adapter_error("screening_data", "daily_quotes", "pipe | value\nnext line \\ end"),
+                ),
+            ),
+        )
+        md = BacktestReport().to_markdown(result)
+        assert "| 2024-01-02 | daily_quotes | pipe \\| value next line \\\\ end |" in md
+        # 表格行数不因换行/竖线被破坏：仅 1 条数据行 + 表头 + 分隔行
+        table_lines = [line for line in md.splitlines() if line.startswith("|")]
+        assert len(table_lines) == 3
+
+    def test_sensitive_values_are_sanitized(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=(_failed_entry(date(2024, 1, 2), "strategy failed password=Sup3rSecret"),),
+        )
+        summary = BacktestReport().format_summary(result)
+        md = BacktestReport().to_markdown(result)
+        for text in (summary, md):
+            assert "Sup3rSecret" not in text
+            assert "***" in text
+
+    def test_persisted_entries_render_identically_after_reload(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=(
+                _failed_entry(date(2024, 1, 2), _adapter_error("screening_data", "daily_quotes", "DB read failed")),
+            ),
+        )
+        persisted = result.to_persist_dict()["quality_json"]["failed_signal_dates"]
+        assert persisted[0]["date"] == date(2024, 1, 2)
+        assert "daily_quotes" in persisted[0]["error"]
+        assert "DB read failed" in persisted[0]["error"]
+
+        reloaded = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=tuple({**entry, "date": entry["date"].isoformat()} for entry in persisted),
+        )
+        assert BacktestReport().format_summary(reloaded) == BacktestReport().format_summary(result)
+        assert BacktestReport().to_markdown(reloaded) == BacktestReport().to_markdown(result)
+
+    def test_unparseable_error_renders_na_table_without_dropping_entry(self, backtest_result: BacktestResult) -> None:
+        result = dataclasses.replace(
+            backtest_result,
+            failed_signal_dates=(_failed_entry(date(2024, 1, 2), "unexpected failure without table identity"),),
+        )
+        summary = BacktestReport().format_summary(result)
+        assert (
+            f"  - 2024-01-02 | {I18n.get('report_failed_signal_col_table')}: N/A"
+            f" | {I18n.get('report_failed_signal_col_reason')}: unexpected failure without table identity"
+        ) in summary

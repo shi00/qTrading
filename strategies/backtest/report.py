@@ -2,13 +2,69 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+from datetime import date, datetime
 
 from core.i18n import I18n, translate_strategy_name
 from strategies.backtest.config import BacktestResult
 from strategies.backtest.metrics import PROFIT_THRESHOLD
+from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
+
+# D12-003：D12-001 的失败日条目为 ``{"date": ..., "error": ...}``，必需数据失败的
+# 错误文本由 adapter 统一为 ``<context_key> (<table>): <reason>``。报告只在此契约内
+# 提取表身份；不匹配时表渲染 N/A，不猜测、不伪造。
+_FAILED_TABLE_PATTERN = re.compile(r"\[BacktestAdapter\][^\n]*?\b[a-z][a-z0-9_]* \(([^()]+)\)\s*:\s*")
+# D12-003：失败日条目缺字段 / 空文本时的统一占位，避免把「未知」渲染成空串。
+_FAILED_UNKNOWN = "N/A"
+
+
+def _normalize_failed_text(value: object) -> str:
+    """折叠换行与连续空白，保证摘要逐行与 Markdown 表格结构稳定。"""
+    text = "" if value is None else str(value)
+    return " ".join(text.split())
+
+
+def _format_failed_date(value: object) -> str:
+    """失败日渲染为 ISO 日期；date/datetime 与落库重载后的字符串同口径。"""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()[:10]
+    text = _normalize_failed_text(value)
+    return text or _FAILED_UNKNOWN
+
+
+def _failed_signal_rows(result: BacktestResult) -> list[tuple[str, str, str]]:
+    """把失败信号日归一为 ``(日期, 表, 原因)`` 并稳定排序。
+
+    错误文本在 engine 已由 ``DataSanitizer.sanitize_error`` 脱敏；报告层再做一次
+    脱敏兜底（R9），避免历史/手工构造的结果把凭证明文写进导出文件。日期排序
+    保证同一结果多次导出的行序一致。
+    """
+    rows: list[tuple[str, str, str]] = []
+    for entry in result.failed_signal_dates:
+        if isinstance(entry, dict):
+            day = _format_failed_date(entry.get("date"))
+            raw_error = entry.get("error")
+        else:
+            day = _FAILED_UNKNOWN
+            raw_error = entry
+        error = _normalize_failed_text(DataSanitizer.sanitize_error("" if raw_error is None else str(raw_error)))
+        match = _FAILED_TABLE_PATTERN.search(error)
+        if match is None:
+            table, reason = _FAILED_UNKNOWN, error
+        else:
+            table = match.group(1).strip() or _FAILED_UNKNOWN
+            reason = error[match.end() :].strip()
+        rows.append((day, table, reason or _FAILED_UNKNOWN))
+    rows.sort()
+    return rows
+
+
+def _escape_markdown_cell(text: str) -> str:
+    """Markdown 表格单元转义：反斜杠、竖线与换行不得破坏表格结构。"""
+    return _normalize_failed_text(text).replace("\\", "\\\\").replace("|", "\\|")
 
 
 def _format_metric_or_na(value: object, fmt: str) -> str:
@@ -82,6 +138,17 @@ class BacktestReport:
             lines.append(I18n.get("report_data_warnings", count=len(result.data_warnings)) + ":")
             for w in result.data_warnings:
                 lines.append(f"  - {w!s}")
+        # D12-003：失败信号日必须随结果导出（表/日/原因），不得只在 UI 侧提示；
+        # 无失败时不输出任何段落，避免给干净结果增加噪声。
+        if result.failed_signal_dates:
+            rows = _failed_signal_rows(result)
+            lines.append("")
+            lines.append(I18n.get("report_failed_signal_dates", count=len(rows)) + ":")
+            for day, table, reason in rows:
+                lines.append(
+                    f"  - {day} | {I18n.get('report_failed_signal_col_table')}: {table} | "
+                    f"{I18n.get('report_failed_signal_col_reason')}: {reason}"
+                )
         return "\n".join(lines)
 
     def format_monthly_stats(self, result: BacktestResult) -> str:
@@ -156,4 +223,21 @@ class BacktestReport:
             )
             for w in result.data_warnings:
                 sections.append(f"- {w!s}")
+        if result.failed_signal_dates:
+            sections.extend(
+                [
+                    "",
+                    f"## {I18n.get('report_section_failed_signal_dates')}",
+                    "",
+                    f"| {I18n.get('report_failed_signal_col_date')} "
+                    f"| {I18n.get('report_failed_signal_col_table')} "
+                    f"| {I18n.get('report_failed_signal_col_reason')} |",
+                    "|---|---|---|",
+                ]
+            )
+            for day, table, reason in _failed_signal_rows(result):
+                sections.append(
+                    f"| {_escape_markdown_cell(day)} | {_escape_markdown_cell(table)} "
+                    f"| {_escape_markdown_cell(reason)} |"
+                )
         return "\n".join(sections)
