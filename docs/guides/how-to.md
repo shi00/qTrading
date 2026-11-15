@@ -219,7 +219,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
 | 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01）；显式恢复目标已有无关凭据、目标 runtime/密码文件不可用或写入失败亦返回此码 | run / dump / restore / maintenance-shell / reset-password |
 | 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止 smart/fast/kill 后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；临时实例（dump 离线 / restore / maintenance-shell / reset-password）停止结果不可证明时按硬失败传播：不报告维护成功，restore 禁止切换并保留恢复目录，dump 保留已完成备份；PG 未运行时 stop 幂等成功返回 0 | stop / run / dump / restore / maintenance-shell / reset-password |
-| 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败、dump 输出已存在或另一任务占用同一输出等 | dump / restore / reset-password |
+| 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败、dump 输出已存在或另一任务占用同一输出等；reset-password 无法备份原 `pg_hba.conf` 或重写基线失败亦返回此码 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
 | 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
 | 60 | `POSTGRES_DIED` | 监督期间 postgres 意外退出（sidecar 不自动重启） | run |
@@ -273,10 +273,11 @@ sidecars/qtrading-pg-sidecar reset-password --data-dir <数据目录> [--usernam
 行为与前提（与 sidecar 实现一致）：
 
 - **不需要旧密码**：临时将 `pg_hba.conf` 置为仅 `127.0.0.1` trust 启动临时实例执行 `ALTER USER <角色> PASSWORD`（`<角色>` 默认为 `postgres`），随后重写 `pg_hba.conf` 为 scram-sha-256；出错路径自动恢复原 `pg_hba.conf`。
+- **必须先能备份原 `pg_hba.conf`**：原文件不可读时直接中止（exit 30），不会在无备份的前提下写入临时 trust；trust 与基线均以原子替换写入，成功/失败/取消路径都会恢复原文件（原文件原本不存在时删除临时文件），并清理临时文件。
 - **自定义用户名**：`--username <角色>` 为可选参数，默认 `postgres`；自定义超级用户名的实例须传入与既有 PGDATA 超级用户一致的角色名（与 run 的 `--username` 相同），否则临时实例认证失败。改用户名需重建 cluster，reset-password 不会重命名角色。
 - **不触碰业务数据**：只重置认证凭据；成功后生成新的随机密码写入密码文件（Windows DPAPI 加密 / Unix 0600，见 9.8），覆盖旧文件。完成后重启 qTrading 即可，随后可按 9.3 重新 `dump` 建立新恢复点。
 - **前提**：数据目录已初始化（`PG_VERSION` 存在，否则 exit 40）；应用完全退出且无活实例（exit 50；残留 stale pid 自动清理，活实例须先 `stop`）。
-- 其余退出码见 9.6：临时实例启动失败 / ALTER USER 失败 / 新密码文件写入失败 → exit 16；`pg_hba.conf` 重写失败 → exit 30。
+- 其余退出码见 9.6：临时实例启动失败 / ALTER USER 失败 / 新密码文件写入失败 / 临时 trust 写入失败 → exit 16；原 `pg_hba.conf` 无法备份 / 重写基线失败 → exit 30。
 
 ##### 9.9.2 数据损坏的恢复路径
 
