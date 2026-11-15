@@ -65,6 +65,8 @@ _EXCHANGE_PREFIX = {"sh": "sh", "sz": "sz", "bj": "bj"}
 
 # 规格 §3.1 列表行正则：无秒时间 + 单引号 href（页面导航链接为双引号，天然不命中）
 LIST_ROW_RE = re.compile(r"(\d{4}-\d{2}-\d{2})&nbsp;(\d{2}:\d{2})&nbsp;&nbsp;<a[^>]*href='([^']+)'[^>]*>([^<]+)</a>")
+# 列表容器标记（实测 ``<div class="datelist"><ul>``）；真实空页保留容器，拦截页不含
+LIST_ENVELOPE_MARKER = 'class="datelist"'
 
 
 def ts_code_to_symbol(ts_code: object) -> str | None:
@@ -173,6 +175,15 @@ def parse_news_list(html: object, *, symbol: str | None = None) -> list[dict[str
             }
         )
     return docs
+
+
+def has_expected_envelope(html: object) -> bool:
+    """是否为该源必需的 envelope：HTML 含列表容器 ``class="datelist"``。
+
+    真实空页仍保留该容器（``<ul></ul>``）；登录 / 拦截页、错误页与 wrong-type 响应不含它，
+    返回 ``False``，调用方据此判为解析失败而非空结果。
+    """
+    return isinstance(html, str) and LIST_ENVELOPE_MARKER in html
 
 
 @log_async_operation(operation_name="sina_stock_fetch_page", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)

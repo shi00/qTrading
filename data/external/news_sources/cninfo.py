@@ -263,6 +263,23 @@ def parse_announcement_payload(payload: object) -> tuple[list[dict[str, Any]], d
     return docs, page_info
 
 
+def has_expected_envelope(payload: object) -> bool:
+    """是否为该源必需的 envelope：含整数 ``totalRecordNum`` 与 ``announcements`` 字段。
+
+    ``announcements`` 为数组（含空数组）或 ``null`` 均属合法；``null`` 也是分页越界时的正常
+    形态（``totalRecordNum`` 仍为总数）。缺分页字段、``totalRecordNum`` 非整数、
+    ``announcements`` 为字符串 / 对象（登录页解出的非预期 JSON、schema 漂移）一律视为解析失败。
+    """
+    if not isinstance(payload, dict):
+        return False
+    if "totalRecordNum" not in payload or "announcements" not in payload:
+        return False
+    if not isinstance(payload.get("totalRecordNum"), int) or isinstance(payload.get("totalRecordNum"), bool):
+        return False
+    raw_list = payload.get("announcements")
+    return raw_list is None or isinstance(raw_list, list)
+
+
 @log_async_operation(operation_name="cninfo_fetch_page", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
 async def fetch_page(
     client: httpx.AsyncClient,
