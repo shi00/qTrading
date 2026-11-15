@@ -97,6 +97,14 @@ SKILL_NAME_MAX_LENGTH = 64
 #: Harness 名合同：小写字母数字段以单连字符连接（不接受非 ASCII/下划线/空段）。
 _SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
+#: Win32 设备名（不带扩展名也保留）；包内同名文件在 Windows 上不可落盘。
+_WINDOWS_RESERVED_NAMES: frozenset[str] = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10))}
+)
+
+#: Win32 文件名禁用字符（含 ADS 分隔符 ``:``）。
+_WINDOWS_INVALID_CHARS: frozenset[str] = frozenset('<>:"|?*')
+
 
 def _fail(code: str, path: str) -> NoReturn:
     raise AgentValidationError(code, path)
@@ -169,6 +177,15 @@ def _require_safe_entry_name(name: str) -> str:
         _fail("skill_path_escape", "$.skill.package.entry")
     if any(part in {"..", ""} for part in pure.parts):
         _fail("skill_path_escape", "$.skill.package.entry")
+    for part in pure.parts:
+        # Win32 会剥离尾随空格/点、把 ":" 当 ADS 分隔符；统一在预检拒绝，
+        # 避免「预检名 ≠ 落盘名」造成覆盖或隐藏内容（F12 规范重名）。
+        if part != part.rstrip(" ."):
+            _fail("skill_path_escape", "$.skill.package.entry")
+        if any(character in _WINDOWS_INVALID_CHARS or ord(character) < 32 for character in part):
+            _fail("skill_path_escape", "$.skill.package.entry")
+        if part.split(".")[0].upper() in _WINDOWS_RESERVED_NAMES:
+            _fail("skill_path_escape", "$.skill.package.entry")
     normalized = "/".join(pure.parts)
     if not normalized:
         _fail("skill_path_escape", "$.skill.package.entry")
@@ -196,6 +213,8 @@ def _enforce_entry_layout(entries: Sequence[tuple[str, bool]]) -> None:
         full = "/".join(keys)
         if is_dir:
             if full in file_keys or full in explicit_dirs:
+                _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
+            if full == VERSION_MANIFEST_FILENAME.casefold():
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
             explicit_dirs.add(full)
             dir_keys.add(full)
@@ -600,6 +619,7 @@ def _version_matches(destination: Path, inspection: SkillPackageInspection) -> b
         isinstance(stored, dict)
         and stored.get("content_digest") == content_digest_of_files(inspection.files)
         and stored.get("files") == [[entry.name, entry.size, entry.sha256] for entry in inspection.files]
+        and stored.get("directories") == list(inspection.directories)
     )
 
 

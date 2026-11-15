@@ -246,6 +246,13 @@ class TestPackageLayout:
             {"SKILL.md": _DEFAULT_MANIFEST, "a": b"one", "a/b.txt": b"two"},
             {"SKILL.md": _DEFAULT_MANIFEST, "a/": b"", "a": b"one"},
             {"SKILL.md": _DEFAULT_MANIFEST, ".": b"one"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "a.txt ": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "a.txt.": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "a.txt::$DATA": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "a.txt:evil": b"two"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "CON": b"one"},
+            {"SKILL.md": _DEFAULT_MANIFEST, "bad<name": b"one"},
+            {"SKILL.md": _DEFAULT_MANIFEST, ".skill-manifest.json/": b""},
         ],
     )
     def test_normalized_duplicate_or_conflicting_paths_rejected(self, entries: dict[str, bytes]) -> None:
