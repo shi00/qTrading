@@ -97,9 +97,24 @@ SKILL_NAME_MAX_LENGTH = 64
 #: Harness 名合同：小写字母数字段以单连字符连接（不接受非 ASCII/下划线/空段）。
 _SKILL_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
-#: Win32 设备名（不带扩展名也保留）；包内同名文件在 Windows 上不可落盘。
+#: Win32 设备名（不带扩展名也保留；含控制台伪设备与上标数字端口）。
 _WINDOWS_RESERVED_NAMES: frozenset[str] = frozenset(
-    {"CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10))}
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "CONIN$",
+        "CONOUT$",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+        "COM¹",
+        "COM²",
+        "COM³",
+        "LPT¹",
+        "LPT²",
+        "LPT³",
+    }
 )
 
 #: Win32 文件名禁用字符（含 ADS 分隔符 ``:``）。
@@ -369,7 +384,7 @@ def inspect_skill_directory(
             budget.enforce_elapsed(clock() - started)
             if child.is_symlink():
                 _fail("skill_path_escape", f"$.skill.package.entry[{child.name}]")
-            rel = f"{prefix}/{child.name}" if prefix else child.name
+            rel = _require_safe_entry_name(f"{prefix}/{child.name}" if prefix else child.name)
             if child.is_dir(follow_symlinks=False):
                 entries.append((rel, True))
                 stack.append((rel, child.path))
