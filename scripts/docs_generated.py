@@ -82,6 +82,7 @@ __all__ = [
     "SourceFieldError",
     "SourceFormatError",
     "SourceMissingError",
+    "SourceReadError",
     "SourceSchema",
     "SourceSectionError",
     "SourceUnknownFieldError",
@@ -169,6 +170,10 @@ class SourceError(DocsGeneratedError):
 
 class SourceMissingError(SourceError):
     """作者源文件缺失。"""
+
+
+class SourceReadError(SourceError):
+    """索引输入文件读取失败（与「内容解析后确实缺 H1 / 无注释」区分，不得渲染成占位符）。"""
 
 
 class SourceFormatError(SourceError):
@@ -814,6 +819,10 @@ _DOCS_README_TEXT_SCHEMA = SourceSchema(path="docs/README.md", fmt="text")
 _DOCS_GOVERNANCE_README_TEXT_SCHEMA = SourceSchema(path="docs/governance/README.md", fmt="text")
 _REDLINES_TEXT_SCHEMA = SourceSchema(path="docs/governance/redlines.yml", fmt="text")
 _CANONICAL_TOPICS_TEXT_SCHEMA = SourceSchema(path="docs/governance/canonical-topics.yml", fmt="text")
+# D38 受保护目标同样是文件级目录候选（标题输入）：登记为 text 作者源后标题取自保护内
+# 核对过的快照字节；否则 Windows 独占保护期间磁盘直读被拒，会把「读取失败」伪报成
+# 「文档无 H1」。受保护索引候选的登记闭包由 _validate_specs 静态校验（缺登记即拒绝）。
+_A11Y_BASELINE_TEXT_SCHEMA = SourceSchema(path="docs/flet/accessibility-baseline.md", fmt="text")
 # D23：pre-commit hook 隔离环境的 docs 解析依赖作者源 = pyproject [dependency-groups].docs。
 # 该组同时供 uv 编译 requirements-docs.txt 与 tests/docs 使用；hook 片段只派生运行脚本所需的
 # 解析依赖，排除纯测试运行器（pytest 及其插件）。
@@ -1028,6 +1037,15 @@ def _docs_index_candidates(root: Path) -> list[Path]:
     return sorted(candidates, key=lambda p: p.relative_to(root).as_posix())
 
 
+def _is_docs_index_candidate_rel(rel: str) -> bool:
+    """相对路径是否可能进入文件级目录索引（docs/ 下受索引后缀；不判断 git 跟踪状态）。
+
+    用于受保护输入的 fail-closed 闭包校验：已受保护的文件即便尚未被跟踪（例如
+    git 不可用时的文件系统降级发现）也按候选对待，避免「保护窗口内重开磁盘读取」。
+    """
+    return rel.startswith("docs/") and Path(rel).suffix in _INDEX_COVERED_SUFFIXES
+
+
 def _h1_title_from(text: str) -> str | None:
     """从 markdown 文本提取首个一级标题（ATX 与 Setext 统一由共享解析视图判定）。
 
@@ -1053,19 +1071,25 @@ def _data_role_from(text: str) -> str:
 
 
 def _md_h1_title(path: Path) -> str | None:
-    """文件级读取 H1（仅用于不在写入保护窗口内的文件；读取失败返回 None 不吞异常语义）。"""
+    """文件级读取 H1（仅用于未登记为快照输入的候选，保护窗口内不重开受保护路径）。
+
+    读取失败显式抛 ``SourceReadError``——「读不到」与「文件确实没有 H1」是不同事实，
+    后者返回 None 由调用方显式占位，前者不得被伪报成缺 H1。
+    """
     try:
-        return _h1_title_from(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        return None
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SourceReadError(f"{path}: 读取失败（不是缺 H1，不得渲染为占位符）: {exc}") from exc
+    return _h1_title_from(text)
 
 
 def _data_file_role(path: Path) -> str:
-    """文件级读取角色描述（仅用于不在写入保护窗口内的文件）。"""
+    """文件级读取角色描述（仅用于未登记为快照输入的候选，保护窗口内不重开受保护路径）。"""
     try:
-        return _data_role_from(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        return "—"
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SourceReadError(f"{path}: 读取失败（不是无注释，不得渲染为占位符）: {exc}") from exc
+    return _data_role_from(text)
 
 
 def _render_docs_readme_file_index(validated: dict[str, object], root: Path) -> list[str]:
@@ -1073,8 +1097,10 @@ def _render_docs_readme_file_index(validated: dict[str, object], root: Path) -> 
 
     行格式 ``| [相对路径](./…) | 标题/角色 |``；md 取首个 H1，yml/yaml/json 取首个
     注释行；缺 H1 的 markdown 以「（无 H1 标题）」显式占位——发现信息缺失可见，不静默省略。
-    登记为 text 作者源的文件（本更新窗口内的受保护目标/作者源）经快照字节渲染，
-    其余文件磁盘直读（并发编辑漂移由更新后 all 检查 fail-closed 检出）。
+    受保护候选（同一更新窗口内的目标/作者源）登记为 text 作者源后经快照字节渲染，
+    渲染器只读 ``validated``、不重开受保护路径；仅未受保护的候选磁盘直读（并发编辑
+    漂移由更新后 all 检查 fail-closed 检出）。读取失败由 ``_md_h1_title`` /
+    ``_data_file_role`` 显式抛错，不与「真实缺 H1 / 无注释」混同。
     """
     snapshot_texts: dict[str, str] = {k: v for k, v in validated.items() if isinstance(v, str)}
     lines = ["| 文档 | 标题 / 角色 |", "|------|--------------|"]
@@ -1528,6 +1554,7 @@ BUILTIN_REGISTRY: tuple[BlockSpec, ...] = (
             _DOCS_GOVERNANCE_README_TEXT_SCHEMA,
             _REDLINES_TEXT_SCHEMA,
             _CANONICAL_TOPICS_TEXT_SCHEMA,
+            _A11Y_BASELINE_TEXT_SCHEMA,
         ),
         render=_render_docs_readme_file_index,
         block_format="markdown",
@@ -1797,7 +1824,12 @@ class UpdateResult:
 
 
 def _validate_specs(specs: Sequence[BlockSpec]) -> None:
-    """注册表条目静态校验：激活块须有渲染函数、块 id/格式合法、同目标格式一致。"""
+    """注册表条目静态校验：激活块须有渲染函数、块 id/格式合法、同目标格式一致。
+
+    另校验文件级目录索引的输入闭包：本次更新窗口内所有受保护路径（目标/作者源）中，
+    凡可能进入索引的 docs 候选都必须登记为该索引块的 text 作者源——否则保护期间
+    渲染器只能重开磁盘读取，Windows 独占保护下读取失败会被伪报成「文档无 H1」。
+    """
     format_by_target: dict[str, str] = {}
     block_ids: set[tuple[str, str]] = set()
     for spec in specs:
@@ -1809,6 +1841,17 @@ def _validate_specs(specs: Sequence[BlockSpec]) -> None:
         if key in block_ids:
             raise DuplicateBlockError(f"注册表内同一目标的块身份重复: {spec.target}#{spec.block_id}")
         block_ids.add(key)
+    index_specs = [spec for spec in specs if spec.active and spec.render is _render_docs_readme_file_index]
+    if index_specs:
+        index_inputs = {schema.path for spec in index_specs for schema in spec.sources}
+        protected = {spec.target for spec in specs if spec.active} | {
+            schema.path for spec in specs if spec.active for schema in spec.sources
+        }
+        missing = sorted(rel for rel in protected if _is_docs_index_candidate_rel(rel) and rel not in index_inputs)
+        if missing:
+            raise InvalidSpecError(
+                "文件级目录索引的受保护候选未登记为快照输入（保护窗口内不得重开磁盘读取）: " + ", ".join(missing)
+            )
 
 
 def run_update(
