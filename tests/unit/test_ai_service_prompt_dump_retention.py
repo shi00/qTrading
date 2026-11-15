@@ -48,7 +48,17 @@ async def test_analyze_stock_does_not_dump_prompt_when_feature_disabled(monkeypa
     monkeypatch.setattr(
         service,
         "_chat_completion_with_failover",
-        AsyncMock(return_value={"score": 88, "reason": "ok"}),
+        AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 88,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "reason": "ok",
+            }
+        ),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
     monkeypatch.setattr(ai_mod.config, "USER_DATA_ROOT", str(tmp_path), raising=False)
@@ -90,7 +100,17 @@ async def test_prompt_dump_cleanup_outside_hot_path(monkeypatch, tmp_path):
     monkeypatch.setattr(
         service,
         "_chat_completion_with_failover",
-        AsyncMock(return_value={"score": 90, "reason": "ok"}),
+        AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 90,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "reason": "ok",
+            }
+        ),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
     monkeypatch.setattr(ai_mod.config, "USER_DATA_ROOT", str(tmp_path), raising=False)
@@ -132,7 +152,17 @@ def _setup_dump_enabled(monkeypatch, tmp_path, service):
     monkeypatch.setattr(
         service,
         "_chat_completion_with_failover",
-        AsyncMock(return_value={"score": 90, "reason": "ok"}),
+        AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 90,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "reason": "ok",
+            }
+        ),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
     monkeypatch.setattr(ai_mod.config, "USER_DATA_ROOT", str(tmp_path), raising=False)

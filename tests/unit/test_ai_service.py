@@ -1876,7 +1876,17 @@ class TestUniversalRulesSeparateSystemMessage:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 80,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "recommendation": "buy",
+            }
+        )
         with patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"):
             await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "name": "test"},
@@ -1907,7 +1917,16 @@ class TestUniversalRulesSeparateSystemMessage:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "uncertain",
+                "score": 60,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+            }
+        )
         with (
             patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
             patch("utils.prompt_guard.sanitize_prompt", return_value="safe custom prompt"),
@@ -1944,7 +1963,16 @@ class TestUniversalRulesSeparateSystemMessage:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "reject",
+                "score": 40,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "卖出",
+            }
+        )
         with (
             patch(
                 "utils.prompt_guard.validate_prompt",
@@ -2128,7 +2156,17 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion_with_failover = AsyncMock(
-            return_value={"score": 80, "recommendation": "buy", "reason": "Good stock"}
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 80,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "recommendation": "buy",
+                # 契约外键（未知键策略：忽略并记录，不透传下游）
+                "reason": "Good stock",
+            }
         )
         with (
             patch("core.prompt_base.get_base_prompt") as mock_resolve,
@@ -2168,7 +2206,17 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         with patch("core.prompt_base.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
@@ -2194,7 +2242,17 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         with patch("core.prompt_base.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
@@ -2219,7 +2277,16 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "uncertain",
+                "score": 60,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+            }
+        )
         with (
             patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
             patch("utils.prompt_guard.sanitize_prompt", return_value="safe"),
@@ -2247,7 +2314,16 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "reject",
+                "score": 40,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "卖出",
+            }
+        )
         with (
             patch(
                 "utils.prompt_guard.validate_prompt",
@@ -3138,7 +3214,17 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_concepts_exception_fallback(self):
         """concepts.get raising Exception is caught; concepts key removed."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
 
         class BadDict(dict):
             def get(self, key, default=None):
@@ -3159,7 +3245,17 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_learning_context_fetch_failed(self):
         """ReviewManager raising Exception is caught; history_context falls back to empty."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         with (
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch(
@@ -3180,7 +3276,17 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_include_learning_context_false(self):
         """include_learning_context=False skips learning context fetch entirely."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         with patch("core.prompt_base.get_base_prompt", return_value="prompt"):
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ"},
@@ -3195,7 +3301,17 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_fallback_learning_context_passes_non_none_as_of(self):
         """Live-mode fallback path passes non-None as_of to prevent lookahead bias."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
 
         mock_rm = AsyncMock()
         mock_rm.get_learning_context_with_meta = AsyncMock(return_value=("<learning>test</learning>", {}))
@@ -3225,7 +3341,17 @@ class TestAIServiceAnalyzeStockDeepBranches:
         MAJOR-03（review09-24 维度04）复核：学习上下文已改为只注入事后可观察事实
         （不再注入 ai_reason），故系统指令不得再声称 <history_context> 含「AI 生成的评语」。"""
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         with (
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch(
@@ -3272,7 +3398,17 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_analyze_stock_fallback_works_in_live_mode(self):
         """Live mode with history_context=None fetches learning context successfully."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         mock_rm = AsyncMock()
         mock_rm.get_learning_context_with_meta = AsyncMock(return_value=("<learning>test</learning>", {}))
 
@@ -3295,7 +3431,17 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_no_strategy_key_no_override(self):
         """No strategy_key and no ui_prompt_override uses ConfigHandler.get_ai_system_prompt."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         with patch("services.ai_service.ConfigHandler") as mock_ch:
             mock_ch.get_ai_system_prompt.return_value = "default prompt"
             mock_ch.get_setting.return_value = False
@@ -3330,7 +3476,17 @@ class TestAnalyzeStockExternalTextNeutralization:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
 
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 80,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "recommendation": "buy",
+            }
+        )
 
         malicious_news = [
             {
@@ -3400,7 +3556,17 @@ class TestAnalyzeStockExternalTextNeutralization:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
 
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 80,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "recommendation": "buy",
+            }
+        )
 
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "茅台\u200b酒"},
@@ -3435,7 +3601,17 @@ class TestAnalyzeStockExternalTextNeutralization:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
 
         svc = AIService()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 80,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "recommendation": "buy",
+            }
+        )
 
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "test"},
@@ -3587,7 +3763,17 @@ class TestStockAnalysisFilterLabelsGenericException:
         import logging
 
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         with (
             patch(
                 "services.ai_service.stock_analysis.filter_available_labels",
@@ -3622,7 +3808,17 @@ class TestStockAnalysisPromptDumpFailure:
         import logging
 
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 50,
+                "confidence": 60,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+                "recommendation": "hold",
+            }
+        )
         svc._get_prompt_dump_dir = MagicMock(side_effect=OSError("cannot write prompt dump"))
 
         def fake_get_setting(k, d=False):
@@ -3661,7 +3857,17 @@ class TestAnalyzeStockBacktestNameFilter:
     @pytest.mark.asyncio
     async def test_backtest_mode_removes_name_from_prompt(self):
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 80,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "recommendation": "buy",
+            }
+        )
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "ST Example"},
             tech_info={},
@@ -3680,7 +3886,17 @@ class TestAnalyzeStockBacktestNameFilter:
     @pytest.mark.asyncio
     async def test_live_mode_keeps_name_in_prompt(self):
         svc = _make_svc_with_cloud()
-        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "strong_buy",
+                "score": 80,
+                "confidence": 70,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "买入",
+                "recommendation": "buy",
+            }
+        )
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "ST Example"},
             tech_info={},
