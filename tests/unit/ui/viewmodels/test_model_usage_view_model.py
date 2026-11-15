@@ -499,8 +499,9 @@ async def test_page_turn_blocks_current_page_export_until_dao_returns():
     assert vm.state.requests == ()  # 旧页行已清空，不展示为新页数据
     assert vm.state.loaded_page is None  # 无已加载页身份
     assert vm.state.loading is True
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc_info:
         await vm.export_csv()
+    assert str(exc_info.value) == "export scope 'page' requires the current page to be loaded"
     assert vm.state.message is not None
     assert vm.state.message.key == "model_usage_export_not_loaded"
 
@@ -530,8 +531,9 @@ async def test_page_turn_failure_leaves_no_exportable_mixed_state():
     assert vm.state.loading is False
     assert vm.state.message is not None
     assert vm.state.message.key == "model_usage_load_failed"
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc_info:
         await vm.export_csv()
+    assert str(exc_info.value) == "export scope 'page' requires the current page to be loaded"
     assert vm.state.message.key == "model_usage_export_not_loaded"
 
 
@@ -553,8 +555,11 @@ async def test_prev_page_clears_loaded_identity_before_reload():
     assert vm.state.page == 0
     assert vm.state.requests == ()
     assert vm.state.loaded_page is None
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc_info:
         await vm.export_csv()
+    assert str(exc_info.value) == "export scope 'page' requires the current page to be loaded"
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_export_not_loaded"
 
     gate.set()
     await turn_task
@@ -1745,8 +1750,9 @@ async def test_current_reader_cancel_resets_loading_but_propagates():
     assert vm.state.loading is True
 
     reader.release()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as exc_info:
         await task
+    assert type(exc_info.value) is asyncio.CancelledError
     assert vm.state.loading is False
     assert vm.state.loaded_page is None
 
@@ -1765,8 +1771,9 @@ async def test_cancelled_page_turn_resets_loading_and_leaves_no_identity():
     assert vm.state.loading is True
 
     turn_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as exc_info:
         await turn_task
+    assert type(exc_info.value) is asyncio.CancelledError
     assert vm.state.loading is False
     assert vm.state.loaded_page is None
     assert vm.state.requests == ()
