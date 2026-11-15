@@ -1261,12 +1261,17 @@ class SchedulerService:
                     getattr(result, "failed_optional_tables", []),
                 )
                 # D11-F03: 不完整/None/无 is_complete 一律映射 FAILED，不返回成功文案。
+                # R02: 仅在结果确实暴露阶段终态时附加 status；DataFrame fallback 无 status，
+                # 保持既有 reason 语义（is_complete=False 开头），避免回归 D11-F03 契约。
+                reason = f"is_complete=False; failed_critical_tables={failed_critical}"
+                if isinstance(status, str):
+                    reason = f"status={status}; {reason}"
                 raise TaskIncompleteError(
                     Message(
                         "sched_daily_incomplete",
                         {"tables": ", ".join(map(str, failed_critical)) or "-"},
                     ),
-                    reason=(f"status={status}; is_complete=False; failed_critical_tables={failed_critical}"),
+                    reason=reason,
                 )
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.
