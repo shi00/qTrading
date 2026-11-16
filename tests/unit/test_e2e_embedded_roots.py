@@ -88,7 +88,7 @@ def test_permission_error_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(Path, "mkdir", _fail_mkdir)
 
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError, match="denied by test"):
         create_isolated_embedded_roots(tmp_path)
 
 
