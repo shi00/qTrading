@@ -575,7 +575,7 @@ def build_param_control(
     on_update: typing.Callable[[str, typing.Any], None],
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
-    prompt_error: str = "",
+    prompt_error: Message | None = None,
     param_error: Message | None = None,
 ) -> ft.Control | None:
     """构建单个策略参数控件 (D15: 从 ScreenerView._build_param_control 提取, props 化)."""
@@ -667,9 +667,9 @@ def build_param_control(
             },
             text_size=AppStyles.FONT_SIZE_BODY_SM,
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
-            error=(prompt_error or None)
-            if p_name == "ai_system_prompt"
-            else None,  # D19: AI prompt 校验失败 inline 错误
+            # D19/ADD-UI-004: inline 错误按当前 locale 渲染; Message 保持 key+params,
+            # 常驻页切语言后重渲染即重译 (不保存已翻译字符串).
+            error=(_render_status_message(prompt_error) or None) if p_name == "ai_system_prompt" else None,
             on_change=lambda e, n=p_name: on_update(n, e.control.value if e and e.control else ""),
         )
         if p_name == "ai_system_prompt":
@@ -719,7 +719,7 @@ def build_params_panel(
     on_update: typing.Callable[[str, typing.Any], None],
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
-    prompt_error: str = "",
+    prompt_error: Message | None = None,
     param_errors: typing.Mapping[str, Message] | None = None,
 ) -> list[ft.Control]:
     """构建策略参数面板 (D15: 从 ScreenerView._build_params_panel 提取, props 化)."""
@@ -1491,26 +1491,28 @@ async def _execute_save_prompt(
     vm: ScreenerViewModel,
     page: ft.Page | None,
     strat: str,
-    set_prompt_error: typing.Callable[[str], None],
+    set_prompt_error: typing.Callable[[Message | None], None],
 ) -> None:
-    """保存 AI Prompt."""
+    """保存 AI Prompt.
+
+    ADD-UI-004: 失败时回传 ``Message(key, params)`` 而非已翻译字符串, 由 View 在
+    渲染期按当前 locale 翻译; 生产页常驻, 切语言后错误提示随之重译且 ``{max}`` 参数保留。
+    """
     try:
         prompt_val = (vm.state.strategy_params).get("ai_system_prompt", "") or ""
         success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
         if page is None:
             return
         if success:
-            set_prompt_error("")
+            set_prompt_error(None)
             UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
             _show_toast(page, I18n.get("ai_settings_saved"), "success")
         else:
             from utils.prompt_guard import MAX_PROMPT_LENGTH
 
             assert error_key is not None
-            msg = I18n.get(error_key, error_key)
-            if error_key == "prompt_err_length":
-                msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-            set_prompt_error(msg)
+            params = {"max": MAX_PROMPT_LENGTH} if error_key == "prompt_err_length" else {}
+            set_prompt_error(Message(error_key, params))
     except asyncio.CancelledError:
         raise
     except Exception as ex:
@@ -1563,13 +1565,13 @@ def _handle_update_param(
     vm: ScreenerViewModel,
     name: str,
     value: typing.Any,
-    prompt_err: str,
-    set_err: typing.Callable[[str], None],
+    prompt_err: Message | None,
+    set_err: typing.Callable[[Message | None], None],
 ) -> None:
     """策略参数更新处理."""
     vm.set_strategy_param(name, value)
     if name == "ai_system_prompt" and prompt_err:
-        set_err("")
+        set_err(None)
 
 
 def _sync_file_picker_service(page: ft.Page | None, picker: ft.FilePicker | None, attach: bool) -> None:
@@ -1728,7 +1730,7 @@ def _build_screener_params_sidebar(
     vm: ScreenerViewModel,
     *,
     handlers: dict[str, typing.Any],
-    prompt_error: str,
+    prompt_error: Message | None,
     param_errors: typing.Mapping[str, Message] | None = None,
 ) -> ft.Control | None:
     """构建左侧策略参数侧栏 (MAJOR-07)。
@@ -2394,7 +2396,10 @@ def ScreenerView(
 
     detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
     pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
-    prompt_error, set_prompt_error = ft.use_state("")
+    # ADD-UI-004: prompt 错误保存为 Message(key+params), 渲染期按当前 locale 翻译;
+    # 不保存译文, 常驻页切语言后自动重译 (None 表示无错误).
+    prompt_error: Message | None = None
+    prompt_error, set_prompt_error = ft.use_state(prompt_error)
     desc_timer_ref = ft.use_ref(lambda: None)
     table_memo_ref = ft.use_ref(lambda: typing.cast(tuple | None, None))
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
