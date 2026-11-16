@@ -779,6 +779,27 @@ class TestHomeViewModelInitData:
         with pytest.raises(Exception, match="Init Error"):
             await vm.init_data()
 
+    @pytest.mark.asyncio
+    async def test_init_data_idempotent_after_success(self, vm):
+        """D17-001: 成功后重复调用不得重复 init_db / stock_basic 同步."""
+        await vm.init_data()
+        await vm.init_data()
+
+        vm.processor.init_data.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_init_data_retries_after_failure(self, vm):
+        """D17-001: 失败不置位就绪标记, 首页重试可重新初始化."""
+        vm.processor.init_data = AsyncMock(side_effect=[Exception("db down"), None])
+
+        with pytest.raises(Exception, match="db down"):
+            await vm.init_data()
+
+        await vm.init_data()
+
+        assert vm.processor.init_data.await_count == 2
+        assert vm._data_ready is True
+
 
 class TestHomeViewModelPagination:
     """测试分页逻辑"""
@@ -1415,6 +1436,8 @@ class TestEnsureValidStockCodes:
         result = await vm._ensure_valid_stock_codes()
         assert result == frozenset({"600519", "000001"})
         assert vm.state.valid_stock_codes == frozenset({"600519", "000001"})
+        # D18-005: 同一映射同时产出完整 ts_code 身份集合 (宿主传给 NewsFeed)
+        assert vm.state.valid_stock_ts_codes == frozenset({"600519.SH", "000001.SZ"})
 
         # 二次调用命中实例缓存, 不再读库
         vm.processor.cache.stock_dao.get_ts_code_map.reset_mock()
@@ -1422,10 +1445,24 @@ class TestEnsureValidStockCodes:
         vm.processor.cache.stock_dao.get_ts_code_map.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_ts_codes_deduped_and_keep_full_identity(self, vm):
+        """D18-005: 完整身份集合保留 BJ 等交易所且去重, 不按 symbol 拼装猜测。"""
+        vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(
+            return_value={
+                "000001": "000001.SZ",
+                "000002": "000001.SZ",
+                "430047": "430047.BJ",
+            }
+        )
+        await vm._ensure_valid_stock_codes()
+        assert vm.state.valid_stock_ts_codes == frozenset({"000001.SZ", "430047.BJ"})
+
+    @pytest.mark.asyncio
     async def test_empty_map_returns_empty_set(self, vm):
         vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={})
         assert await vm._ensure_valid_stock_codes() == frozenset()
         assert vm.state.valid_stock_codes == frozenset()
+        assert vm.state.valid_stock_ts_codes == frozenset()
 
     @pytest.mark.asyncio
     async def test_db_error_degrades_to_empty_without_caching(self, vm):
@@ -1433,6 +1470,8 @@ class TestEnsureValidStockCodes:
         vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(side_effect=Exception("db down"))
         assert await vm._ensure_valid_stock_codes() == frozenset()
         assert vm._valid_stock_codes is None
+        assert vm._valid_stock_ts_codes is None
+        assert vm.state.valid_stock_ts_codes == frozenset()
 
     @pytest.mark.asyncio
     async def test_refresh_news_loads_valid_codes(self, vm):
@@ -1441,3 +1480,4 @@ class TestEnsureValidStockCodes:
         vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame())
         await vm.refresh_news()
         assert vm.state.valid_stock_codes == frozenset({"600519"})
+        assert vm.state.valid_stock_ts_codes == frozenset({"600519.SH"})

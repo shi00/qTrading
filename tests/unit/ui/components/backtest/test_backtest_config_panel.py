@@ -19,7 +19,7 @@ tests/unit/ui/test_backtest_config_panel.py (顶层) 已覆盖:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -38,6 +38,7 @@ from ui.components.backtest import backtest_config_panel as panel_module
 from ui.components.backtest.backtest_config_panel import (
     BacktestConfigPanel,
     _make_date_picker,
+    _normalize_picker_date,
 )
 from utils.time_utils import get_now
 
@@ -759,6 +760,183 @@ class TestDatePickerStateUpdate:
         _invoke(run_btn.on_click, _make_event())
         config = on_run.call_args.args[0]
         assert config["start_date"] == new_date
+
+
+# ============================================================================
+# D18-002: DatePicker 回填 datetime 归一化为 date
+# ============================================================================
+
+
+class TestDatePickerValueNormalization:
+    """D18-002: Flet 协议把 DatePicker 回填日期解码为 ``datetime``，写入 state 前须归一化为 ``date``。
+
+    缺陷路径: 初始两端为 ``date``，首次只改一端（事件值为 ``datetime``）→
+    ``_validate_backtest_inputs`` 的 ``start_date >= end_date`` 混比较抛 ``TypeError``。
+    """
+
+    @staticmethod
+    def _open_picker(page: FakePage, component: Any, btn: ft.OutlinedButton) -> ft.DatePicker:
+        """点击 date 按钮 → 重新渲染 → 返回本次打开的 DatePicker（列表最近一项）。"""
+        _invoke(btn.on_click, _make_event())
+        _rerender(component)
+        pickers = [c for c in page._dialogs.controls if isinstance(c, ft.DatePicker)]
+        assert pickers, "DatePicker 未注册到 page._dialogs.controls"
+        return pickers[-1]
+
+    def test_normalize_keeps_date_unchanged(self) -> None:
+        """``date`` 原样返回（不得退化为 datetime 或字符串）。"""
+        value = date(2024, 3, 15)
+        result = _normalize_picker_date(value)
+        assert result == value
+        assert type(result) is date
+
+    def test_normalize_converts_naive_datetime(self) -> None:
+        """naive datetime → date（丢弃时间部分）。"""
+        result = _normalize_picker_date(datetime(2024, 3, 15, 23, 59, 59))
+        assert result == date(2024, 3, 15)
+        assert type(result) is date
+
+    def test_normalize_converts_aware_datetime(self) -> None:
+        """时区感知 datetime → 其自身时区表示的日历 date，不抛异常。"""
+        aware = datetime(2024, 3, 15, 8, 30, tzinfo=timezone(timedelta(hours=8)))
+        result = _normalize_picker_date(aware)
+        assert result == date(2024, 3, 15)
+        assert type(result) is date
+
+    def test_start_only_datetime_event_no_type_error(self) -> None:
+        """初始两端 date，只把起点改为 datetime（另一端仍 date）→ 不抛 TypeError，配置输出 date。"""
+        on_run, page, result, component = _render_panel()
+        start_btn = _find_date_buttons(result)[0]
+        picker = self._open_picker(page, component, start_btn)
+
+        new_start = get_now().date() - timedelta(days=700)
+        _invoke(picker.on_change, _make_event(datetime(new_start.year, new_start.month, new_start.day, 0, 0)))
+        # 旧实现会在此渲染期的 _validate_backtest_inputs 抛 TypeError
+        new_result = _rerender(component)
+
+        assert _find_date_buttons(new_result)[0].content == new_start.strftime("%Y-%m-%d")
+        assert _find_run_button(new_result).disabled is False
+        _invoke(_find_run_button(new_result).on_click, _make_event())
+        config = on_run.call_args.args[0]
+        assert config["start_date"] == new_start
+        assert type(config["start_date"]) is date
+        assert type(config["end_date"]) is date
+
+    def test_end_only_datetime_event_no_type_error(self) -> None:
+        """初始两端 date，只把终点改为 datetime（另一端仍 date）→ 不抛 TypeError，配置输出 date。"""
+        on_run, page, result, component = _render_panel()
+        end_btn = _find_date_buttons(result)[1]
+        picker = self._open_picker(page, component, end_btn)
+
+        today = get_now().date()
+        _invoke(picker.on_change, _make_event(datetime(today.year, today.month, today.day, 12, 0)))
+        new_result = _rerender(component)
+
+        assert _find_date_buttons(new_result)[1].content == today.strftime("%Y-%m-%d")
+        assert _find_run_button(new_result).disabled is False
+        _invoke(_find_run_button(new_result).on_click, _make_event())
+        config = on_run.call_args.args[0]
+        assert config["end_date"] == today
+        assert type(config["end_date"]) is date
+        assert type(config["start_date"]) is date
+
+    def test_aware_datetime_event_normalized(self) -> None:
+        """带时区的 datetime 事件值 → 归一化为 date，校验与配置不混类型。"""
+        on_run, page, result, component = _render_panel()
+        start_btn = _find_date_buttons(result)[0]
+        picker = self._open_picker(page, component, start_btn)
+
+        new_start = get_now().date() - timedelta(days=400)
+        aware = datetime(
+            new_start.year,
+            new_start.month,
+            new_start.day,
+            8,
+            0,
+            tzinfo=timezone(timedelta(hours=8)),
+        )
+        _invoke(picker.on_change, _make_event(aware))
+        new_result = _rerender(component)
+
+        assert _find_run_button(new_result).disabled is False
+        _invoke(_find_run_button(new_result).on_click, _make_event())
+        config = on_run.call_args.args[0]
+        assert config["start_date"] == new_start
+        assert type(config["start_date"]) is date
+
+    def test_both_datetime_events_config_dates(self) -> None:
+        """两端先后都改为 datetime 事件值 → 校验通过，配置两端均为 date。"""
+        on_run, page, result, component = _render_panel()
+        today = get_now().date()
+        new_start = today - timedelta(days=500)
+        new_end = today - timedelta(days=30)
+
+        picker = self._open_picker(page, component, _find_date_buttons(result)[0])
+        _invoke(picker.on_change, _make_event(datetime(new_start.year, new_start.month, new_start.day)))
+        mid_result = _rerender(component)
+
+        picker = self._open_picker(page, component, _find_date_buttons(mid_result)[1])
+        _invoke(picker.on_change, _make_event(datetime(new_end.year, new_end.month, new_end.day, 18, 0)))
+        new_result = _rerender(component)
+
+        assert _find_run_button(new_result).disabled is False
+        _invoke(_find_run_button(new_result).on_click, _make_event())
+        config = on_run.call_args.args[0]
+        assert config["start_date"] == new_start
+        assert config["end_date"] == new_end
+        assert type(config["start_date"]) is date
+        assert type(config["end_date"]) is date
+
+    def test_same_day_datetime_event_reports_date_range_error(self) -> None:
+        """datetime 事件值与另一端同日 → 明确报日期区间错误（不吞异常、不静默放过）。"""
+        _, page, result, component = _render_panel()
+        today = get_now().date()
+        picker = self._open_picker(page, component, _find_date_buttons(result)[0])
+
+        _invoke(picker.on_change, _make_event(datetime(today.year, today.month, today.day, 0, 0)))
+        new_result = _rerender(component)
+
+        assert _find_run_button(new_result).disabled is True
+        errors = [
+            c
+            for c in _walk_controls(new_result)
+            if isinstance(c, ft.Text) and c.value == "i18n[backtest_error_date_range]" and c.visible is True
+        ]
+        assert errors, "同日区间应渲染可见的日期区间错误"
+
+    def test_reversed_datetime_event_reports_date_range_error(self) -> None:
+        """datetime 事件值早于另一端（逆序）→ 日期区间错误 + run disabled。"""
+        _, page, result, component = _render_panel()
+        today = get_now().date()
+        reversed_end = today - timedelta(days=800)
+        picker = self._open_picker(page, component, _find_date_buttons(result)[1])
+
+        _invoke(
+            picker.on_change,
+            _make_event(datetime(reversed_end.year, reversed_end.month, reversed_end.day, 0, 0)),
+        )
+        new_result = _rerender(component)
+
+        assert _find_run_button(new_result).disabled is True
+        errors = [
+            c
+            for c in _walk_controls(new_result)
+            if isinstance(c, ft.Text) and c.value == "i18n[backtest_error_date_range]" and c.visible is True
+        ]
+        assert errors, "逆序区间应渲染可见的日期区间错误"
+
+    def test_dismiss_does_not_change_dates(self) -> None:
+        """取消（on_dismiss）不改变日期（只关闭 picker）。"""
+        _, page, result, component = _render_panel()
+        start_btn = _find_date_buttons(result)[0]
+        original_content = start_btn.content
+        picker = self._open_picker(page, component, start_btn)
+
+        _invoke(picker.on_dismiss, _make_event())
+        new_result = _rerender(component)
+
+        assert _find_date_buttons(new_result)[0].content == original_content
+        assert _find_run_button(new_result).disabled is False
 
 
 # ============================================================================
