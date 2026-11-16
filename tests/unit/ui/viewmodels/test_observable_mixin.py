@@ -725,33 +725,59 @@ class TestCrossThreadNotification:
 
     @pytest.mark.asyncio
     async def test_t9_throttle_keeps_only_latest_notification(self):
-        """T9: 连续 N 次跨线程 _notify 在同一 tick 只保留最后 1 次。"""
+        """T9: loop 忙时跨线程连续 N 次 _set_state 只送达最后 1 次通知。
+
+        控制手段：主线程同步阻塞在 ``fired.wait()`` 上，loop 无法执行
+        ``call_soon_threadsafe`` 回调，worker burst 期间通知只能排队；放行后
+        旧 handle 已取消、其余按过期丢弃，因此同一批恰好送达 1 次（非"少于 N"），
+        且快照内容等于最后一次写入的 state。
+        """
         import asyncio
         import threading
 
         vm = _DefaultVM()
         snapshots: list[_DummyState] = []
-        unsub = vm.subscribe(lambda s: snapshots.append(s))
+        delivered = asyncio.Event()
+
+        def _cb(s: _DummyState) -> None:
+            snapshots.append(s)
+            delivered.set()
+
+        unsub = vm.subscribe(_cb)
         assert vm._main_loop is not None
 
         N = 50
         fired = threading.Event()
+        worker_errors: list[Exception] = []
 
         def worker_burst() -> None:
-            for i in range(N):
-                vm._set_state(count=i, name=f"burst_{i}")
-            fired.set()
+            try:
+                for i in range(N):
+                    vm._set_state(count=i, name=f"burst_{i}")
+            except Exception as e:  # noqa: BLE001
+                worker_errors.append(e)
+            finally:
+                fired.set()
 
         t = threading.Thread(target=worker_burst, daemon=True)
         t.start()
-        assert fired.wait(timeout=2.0)
-        t.join(timeout=1.0)
+        try:
+            assert fired.wait(timeout=5.0), "worker burst 未在 5s 内完成"
+            # loop 仍被本协程同步阻塞：队列中的通知尚未送达任何订阅者
+            assert snapshots == [], f"loop 未运行却已通知: {snapshots!r}"
+        finally:
+            t.join(timeout=2.0)
+        assert not t.is_alive(), "worker 线程未退出"
+        assert worker_errors == [], f"worker 不应抛异常: {worker_errors!r}"
 
-        await asyncio.sleep(0.1)
-        # 最终 state 应为最后一次写入
-        assert vm.state.name == f"burst_{N - 1}"
-        assert vm.state.count == N - 1
-        # 实际通知次数 < N（节流）；但测试不假设具体次数（调度器行为）
+        # 放行 loop：合并后的唯一回调应送达；再让 ready 队列剩余回调跑完
+        await asyncio.wait_for(delivered.wait(), timeout=2.0)
+        await asyncio.sleep(0)
+
+        assert len(snapshots) == 1, f"节流应只送达 1 次通知, 实际 {len(snapshots)} 次: {snapshots!r}"
+        assert snapshots[0] == vm.state, "送达快照应等于最终 state"
+        assert snapshots[0].name == f"burst_{N - 1}"
+        assert snapshots[0].count == N - 1
         unsub()
 
 
