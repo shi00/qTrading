@@ -508,6 +508,19 @@ def _scan_source(source: str) -> dict[str, list[str]]:
     return visitor.violations
 
 
+def _scan_with_preseeded_alias(source: str, alias: str, forbidden_key: str) -> dict[str, list[str]]:
+    """辅助: 预置 ``alias`` → ``forbidden_key`` 模块别名后扫描, 返回违规字典.
+
+    用于隔离间接引用分支 (getattr / 属性访问) 的证据: 源码本身不含 import, 因此
+    不会残留 ``import`` 语句记录的违规来掩盖分支失效 (D21-UIA-002).
+    """
+    tree = ast.parse(source)
+    visitor = _BusinessObjectVisitor(FORBIDDEN_BUSINESS_OBJECTS)
+    visitor._module_aliases[alias] = forbidden_key
+    visitor.visit(tree)
+    return visitor.violations
+
+
 @pytest.mark.unit
 def test_ast_scanner_catches_alias_import() -> None:
     """负向测试: ``from X import Y as Z`` alias import 必须被捕获."""
@@ -534,18 +547,42 @@ def test_ast_scanner_catches_from_importlib_import_module() -> None:
 
 @pytest.mark.unit
 def test_ast_scanner_catches_getattr_indirect_reference() -> None:
-    """负向测试: ``getattr(mod_alias, 'ForbiddenSym')`` 间接引用必须被捕获."""
-    source = "import services.task_manager as tm\nTaskStatus = getattr(tm, 'TaskStatus')\n"
-    violations = _scan_source(source)
-    assert "services.task_manager" in violations, "AST 扫描器未能捕获 getattr(mod, 'ForbiddenSym') 间接引用"
+    """负向测试: ``getattr(mod_alias, 'ForbiddenSym')`` 间接引用必须被捕获.
+
+    源码不含 import 语句 (模块别名由 visitor 预置), 证据只能来自 getattr 分支;
+    若先 ``import services.task_manager as tm``, import 自身记录的违规会让本用例
+    在 getattr 分支被删除时仍然通过 (D21-UIA-002).
+    """
+    source = "instance = getattr(tm, 'TaskManager')\n"
+    # 未预置别名时 tm 无法解析为禁止模块, 证明下方证据确由 getattr 分支产生
+    assert _scan_source(source) == {}
+    violations = _scan_with_preseeded_alias(source, "tm", "services.task_manager")
+    assert violations == {"services.task_manager": ["line 1: getattr(tm, 'TaskManager')"]}, (
+        f"AST 扫描器未能独立捕获 getattr(mod, 'ForbiddenSym') 间接引用, 实际证据: {violations}"
+    )
 
 
 @pytest.mark.unit
 def test_ast_scanner_catches_attribute_access_on_module_alias() -> None:
-    """负向测试: ``mod_alias.ForbiddenSym`` 属性访问必须被捕获."""
-    source = "import services.task_manager as tm\nstatus = tm.TaskStatus\n"
-    violations = _scan_source(source)
-    assert "services.task_manager" in violations, "AST 扫描器未能捕获 mod_alias.ForbiddenSym 属性访问"
+    """负向测试: ``mod_alias.ForbiddenSym`` 属性访问必须被捕获.
+
+    源码不含 import 语句 (模块别名由 visitor 预置), 证据只能来自属性访问分支
+    (D21-UIA-002).
+    """
+    source = "instance = tm.TaskManager\n"
+    assert _scan_source(source) == {}
+    violations = _scan_with_preseeded_alias(source, "tm", "services.task_manager")
+    assert violations == {"services.task_manager": ["line 1: tm.TaskManager"]}, (
+        f"AST 扫描器未能独立捕获 mod_alias.ForbiddenSym 属性访问, 实际证据: {violations}"
+    )
+
+
+@pytest.mark.unit
+def test_ast_scanner_allows_whitelisted_symbol_via_indirect_reference() -> None:
+    """白名单符号 ``TaskStatus`` 经 getattr / 属性访问均不违规 (仅 TaskManager/AppTask 禁止)."""
+    for source in ("status = getattr(tm, 'TaskStatus')\n", "status = tm.TaskStatus\n"):
+        violations = _scan_with_preseeded_alias(source, "tm", "services.task_manager")
+        assert violations == {}, f"AST 扫描器误报白名单符号 TaskStatus: {source!r} -> {violations}"
 
 
 @pytest.mark.unit
