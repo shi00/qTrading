@@ -1860,7 +1860,7 @@ class TestTableFailureIdentity:
         provider = BacktestDataProvider(cache)
         context = await provider.build_context(date(2024, 1, 2))
 
-        diagnostics = context["_diagnostics"]
+        diagnostics = context.get("_diagnostics", {})
         assert "screening_data" in diagnostics["required_failures"]
         assert "DB read failed" in diagnostics["required_failures"]["screening_data"]
         assert diagnostics["table_status"]["screening_data"]["ready"] is False
@@ -1873,7 +1873,7 @@ class TestTableFailureIdentity:
         provider = BacktestDataProvider(cache)
         context = await provider.build_context(date(2024, 1, 2))
 
-        diagnostics = context["_diagnostics"]
+        diagnostics = context.get("_diagnostics", {})
         assert diagnostics["required_failures"] == {}
         assert diagnostics["table_status"]["screening_data"] == {"ready": False, "rows": 0}
 
@@ -1885,7 +1885,7 @@ class TestTableFailureIdentity:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        status = context["_diagnostics"]["table_status"]["top_list"]
+        status = context.get("_diagnostics", {})["table_status"]["top_list"]
         assert status["ready"] is True
         assert status["rows"] == 0
         assert "failed" not in status
@@ -1900,7 +1900,7 @@ class TestTableFailureIdentity:
         context = await provider.build_context(date(2024, 1, 2))
         await provider.build_context(date(2024, 1, 3))
 
-        status = context["_diagnostics"]["table_status"]["top_list"]
+        status = context.get("_diagnostics", {})["table_status"]["top_list"]
         assert status["failed"] is True
         assert "read timeout" in status["error"]
         warnings = [w for w in provider.range_preload_warnings if "top_list" in w]
@@ -1926,6 +1926,6 @@ class TestTableFailureIdentity:
 
         context = await provider.build_context(date(2024, 1, 2))
 
-        failures = context["_diagnostics"]["required_failures"]
+        failures = context.get("_diagnostics", {})["required_failures"]
         assert "screening_data" in failures
         assert "daily retry failed" in failures["screening_data"]
