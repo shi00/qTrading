@@ -375,6 +375,33 @@ class AIStrategyMixin:
             DataFrame enriched with ai_score, ai_reason columns, sorted by ai_score desc.
             Falls back to original candidates_df if AI is unavailable.
         """
+        # ADD-AI-001: news_tasks 在资金/辅助/限价/策略 hook/宏观等后续预取之前创建，
+        # 而这些预取阶段的异常或取消（CancelledError 不被各自的 except Exception 捕获）
+        # 发生在并发分析循环的 try/finally 之前，原实现会留下未取消的孤儿新闻任务
+        # （后台 HTTP 请求/连接泄漏）。故在方法级建立统一清理作用域：任何退出路径
+        # （正常 / 异常 / 取消）都取消并 await 回收未完成的新闻任务。
+        news_tasks: dict = {}
+        try:
+            return await self._run_ai_analysis_impl(candidates_df, context, news_tasks, max_stocks)
+        finally:
+            # 正常路径（任务均已完成，含分析循环内已清理）不进入，避免额外等待；
+            # 清理协程先 cancel 全部未完成任务再 gather 回收，即使清理自身再次被取消，
+            # 任务也已被 cancel，不会遗留孤儿，且不吞取消信号（R2）。
+            if any(not task.done() for task in news_tasks.values()):
+                await self._cancel_orphan_news_tasks(news_tasks)
+
+    async def _run_ai_analysis_impl(
+        self,
+        candidates_df: pd.DataFrame,
+        context: dict,
+        news_tasks: dict,
+        max_stocks: int | None = None,
+    ) -> pd.DataFrame:
+        """``run_ai_analysis`` 的实现体。
+
+        ``news_tasks`` 由 ``run_ai_analysis`` 创建并负责最终清理（其生命周期跨越本方法内
+        全部后续预取），本方法只写入 ``bg_fetch_news`` 派生的任务引用。
+        """
         ai_client = AIService()
         dp = context.get("data_processor")
         on_progress = context.get("on_progress")
@@ -663,7 +690,6 @@ class AIStrategyMixin:
 
         # --- Ultimate Pipeline: Bulk History DB Query & Async News Task Pipelining (Fixing N+1) ---
         prefetched_history = {}
-        news_tasks = {}
         try:
             # 1. O(1) DB Query for History (with LRU cache)
             end_date = get_now().date()
@@ -1174,7 +1200,7 @@ class AIStrategyMixin:
             # F4-ST-001: 无论正常完成、CancelledError 或异常，都清理 news_tasks
             # _cancel_orphan_news_tasks 内部用 gather_for_shutdown_cleanup（清理语义，
             # 吞内部 CancelledError、不抛普通异常），finally 中安全
-            await self._cancel_orphan_news_tasks(prefetched)
+            await self._cancel_orphan_news_tasks(prefetched.news_tasks)
 
         # D3-7: 仅当所有任务被用户取消时（final_rows 为空）才退回原始候选集,
         # 以保留取消/退出的既有语义。AI 全部失败已由 analyze_one 构造 failed 行,
@@ -1556,13 +1582,14 @@ class AIStrategyMixin:
             await tracker.add_unpriced(unpriced_calls, unpriced_tokens)
 
     @staticmethod
-    async def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:
+    async def _cancel_orphan_news_tasks(news_tasks: dict) -> None:
         """Cancel any orphan news fetch tasks that were never awaited.
 
         R2 合规：调用 ``task.cancel()`` 后必须 ``await`` 被取消的 task 实际终止，
         避免 HTTP 连接/文件句柄等资源泄漏（被取消的 task 仍可能持有资源直到调度器回收）。
+        幂等：已完成的 task 被跳过，重复调用不会重复 cancel 或抛异常。
         """
-        pending = [task for task in prefetched.news_tasks.values() if not task.done()]
+        pending = [task for task in news_tasks.values() if not task.done()]
         if not pending:
             return
         for task in pending:

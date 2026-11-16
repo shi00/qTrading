@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import functools
+import io
 import logging
 import re
 import typing
@@ -581,6 +582,37 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             TaskType.CPU,
             functools.partial(df.to_excel, filepath, index=False, engine="openpyxl"),
         )
+
+    async def export_data_bytes(self, df: pd.DataFrame, format_: str) -> bytes:
+        """将本次已取得的导出 DataFrame 序列化为浏览器下载所需 bytes (R16 线程池).
+
+        Flet 1.1.0 ``FilePicker.save_file`` 在 Web 模式下缺少 ``src_bytes`` 会抛
+        ValueError, 故由 VM 统一序列化后交给 View 传入; 桌面仍走 write_csv/write_excel.
+
+        Args:
+            df: 本次导出已取得的 DataFrame
+            format_: "csv" 或 "xlsx"
+
+        Returns:
+            序列化后的文件字节 (CSV 带 UTF-8 BOM, 与 write_csv 一致)
+
+        Raises:
+            asyncio.CancelledError: 取消时传播 (R2)
+            Exception: 序列化失败时传播, 由 View 提示「导出失败」
+        """
+        if format_ == "csv":
+            csv_str = await self._tp.run_async(
+                TaskType.CPU,
+                functools.partial(df.to_csv, index=False, encoding="utf-8-sig"),
+            )
+            assert csv_str is not None
+            return csv_str.encode("utf-8-sig")
+        buf = io.BytesIO()
+        await self._tp.run_async(
+            TaskType.CPU,
+            functools.partial(df.to_excel, buf, index=False, engine="openpyxl"),
+        )
+        return buf.getvalue()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def execute_sql(self, sql: str) -> dict:
