@@ -789,7 +789,8 @@ class TestReviseQueued:
         assert rev.command_record_id.startswith("command_")
         assert rev.input_revision == 2
         assert rev.execution_revision == 2
-        assert rev.source_version == "2"
+        # 源自身不可变版恒为 "1"（AR-07），输入版 2 只由源边 consumer_version 承载（检视 D13）。
+        assert rev.source_version == "1"
         # 命令 input_digest 为完整规范输入摘要（正文 + manifest + 期望版/node，检视 D05）。
         assert rev.input_digest == frozen_command_input_digest(
             "revise",
@@ -832,6 +833,23 @@ class TestReviseQueued:
                 AgentSourceLink.execution_id == receipt.execution_id,
                 AgentSourceLink.consumer_version == "2",
             )
+            # 新源资产自身不可变版恒为 "1"；两源边的 consumer_version 分列
+            # （message 版 "1" / execution 输入版 "2"，检视 D13）。
+            s2 = (
+                await conn.execute(
+                    sa.select(AgentAssetVersion.asset_version).where(AgentAssetVersion.asset_id == rev.source_id)
+                )
+            ).scalar_one()
+            edge_versions = {
+                (row.consumer_kind, row.consumer_version)
+                for row in (
+                    await conn.execute(
+                        sa.select(AgentSourceLink.consumer_kind, AgentSourceLink.consumer_version).where(
+                            AgentSourceLink.source_id == rev.source_id
+                        )
+                    )
+                ).all()
+            }
         assert m2.session_seq == 1 and m2.role == "user"
         assert m2.body_text == "改为研究两家公司"
         assert m2.execution_id is None  # 修订消息纯 session 事件（无 round，§9.6）
@@ -839,6 +857,8 @@ class TestReviseQueued:
         assert cmd.target_id == receipt.execution_id and cmd.expected_revision == 1
         assert exec_revision == 2
         assert execution_edges == 1
+        assert s2 == "1"
+        assert edge_versions == {("message", "1"), ("execution", "2")}
         # 新源资产 S2 落地
         assert await _count(engine, "agent_asset_version") == 2
         assert await _count(engine, "agent_message") == 2

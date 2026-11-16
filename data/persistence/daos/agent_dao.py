@@ -2546,6 +2546,9 @@ class AgentDao(BaseDao):
         ``REVISION_CONFLICT``。
         M2 与受理消息同为纯 session 事件（先于派发无 round，§9.6 CHECK），执行
         关联由源谱系边（consumer_kind=execution, input_revision=N）承载。
+        **源自身版与执行输入版分列**：新消息/新源 id 是不可变新源，自身
+        ``message_version`` / ``source_version`` 恒为 "1"（AR-07），execution
+        输入版 N 只由源边的 ``consumer_version`` 承载（检视 D13）。
         锁序（§5.4 第 4 条）：先持 execution（CAS 目标）再锁其 session。
         """
 
@@ -2633,7 +2636,7 @@ class AgentDao(BaseDao):
                         command_record_id=command_record_id,
                         message_id=message_id,
                         source_id=source_id,
-                        source_version=str(existing_command.input_revision),
+                        source_version="1",
                         input_digest=existing_command.input_digest,
                         input_revision=existing_command.input_revision,
                         execution_revision=exec_row.revision,
@@ -2680,7 +2683,8 @@ class AgentDao(BaseDao):
                     )
                 ).scalar_one()
             ) + 1
-            # 5. 新输入版：既有命令版 max+1（受理=1，首次修订=2）。
+            # 5. 新输入版：既有命令版 max+1（受理=1，首次修订=2）；源自身不可变版
+            #    恒为 "1"（AR-07），两者分列（检视 D13）。
             input_revision = (
                 (
                     await conn.execute(
@@ -2692,7 +2696,7 @@ class AgentDao(BaseDao):
                     )
                 ).scalar_one()
             ) + 1
-            source_version = str(input_revision)
+            source_version = "1"
             event_id = stable_id("event", [request.user_scope, request.session_id, message_id])
 
             # 6. M2 修订消息（纯 session 公开消息，role=user，正文即源）。
@@ -2748,10 +2752,11 @@ class AgentDao(BaseDao):
                     available_at=occurred,
                 )
             )
-            # 8. 两条源边：源→message v1（origin）+ 源→执行新输入版（accepted_input）。
+            # 8. 两条源边：源→message v1（origin）+ 源→执行新输入版（accepted_input，
+            #    consumer_version=N 承载执行输入版，源自身版仍为 "1"；检视 D13）。
             for consumer_kind, consumer_ref_id, consumer_version, relation in (
                 ("message", message_id, "1", SourceRelationKind.ORIGIN),
-                ("execution", request.execution_id, source_version, SourceRelationKind.ACCEPTED_INPUT),
+                ("execution", request.execution_id, str(input_revision), SourceRelationKind.ACCEPTED_INPUT),
             ):
                 await conn.execute(
                     sa.insert(AgentSourceLink).values(

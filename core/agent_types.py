@@ -1945,7 +1945,11 @@ class ReviseQueuedRequest:
 
 @dataclass(frozen=True)
 class RevisionReceipt:
-    """队列修订事实（§9.13）：M2/S2 新输入版与 revision CAS 结果。"""
+    """队列修订事实（§9.13）：M2/S2 新输入版与 revision CAS 结果。
+
+    ``source_version`` 为新源自身不可变版（恒 "1"，AR-07）；本次执行输入版见
+    ``input_revision``，不得把输入版写进源自身版（检视 D13）。
+    """
 
     execution_id: str
     command_record_id: str
