@@ -7,7 +7,8 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from strategies.backtest.adapter import BacktestStrategyAdapter
+from core.i18n import Message
+from strategies.backtest.adapter import BacktestRequiredDataError, BacktestStrategyAdapter
 from strategies.base_strategy import BaseStrategy
 
 pytestmark = pytest.mark.unit
@@ -826,3 +827,166 @@ class TestBacktestStrategyAdapter:
         assert s.to_list() == [None, 1.0]  # 当前默认:null 在降序最前
         s_last = pl.Series([None, 1.0]).sort(descending=True, nulls_last=True)
         assert s_last.to_list() == [1.0, None]  # 显式 nulls_last:null 在最后
+
+
+class _EmptyResultStrategy(BaseStrategy):
+    """返回空结果的策略替身；可按用例覆写 `_empty_reason` 与 warnings。"""
+
+    required_context_keys = ("screening_data",)
+    required_tables = ("daily_quotes",)
+
+    def __init__(self, empty_reason: str | None = None):
+        super().__init__("empty_result_strategy", "Empty Result Strategy")
+        self._empty_reason = empty_reason
+
+    async def filter(self, context):
+        if self._empty_reason is not None:
+            context["_empty_reason"] = self._empty_reason
+            context["warnings"] = [Message("strategy_fundamental_data_missing", {"coverage": 0.1})]
+        return pd.DataFrame()
+
+
+class TestRequiredDataFailureChannel:
+    """D12-001：必需数据失败/缺失不得折叠成正常空信号。"""
+
+    @pytest.fixture
+    def adapter(self) -> BacktestStrategyAdapter:
+        return BacktestStrategyAdapter()
+
+    @pytest.mark.asyncio
+    async def test_legit_sparse_empty_does_not_raise(self, adapter: BacktestStrategyAdapter) -> None:
+        """合法稀疏空日（如当日龙虎榜无数据）保持空信号，不升级为失败。"""
+        strategy = _EmptyResultStrategy(empty_reason="no_match")
+        context = {
+            "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+            "_diagnostics": {
+                "required_failures": {},
+                "table_status": {"top_list": {"ready": True, "rows": 0}},
+            },
+        }
+
+        result = await adapter.generate_signal(
+            strategy=strategy,
+            context=context,
+            signal_date=date(2024, 1, 2),
+            execution_date=date(2024, 1, 3),
+        )
+
+        assert isinstance(result, pl.DataFrame)
+        assert result.is_empty()
+
+    @pytest.mark.asyncio
+    async def test_required_screening_query_failure_raises(self, adapter: BacktestStrategyAdapter) -> None:
+        """DB 失败（必需行情表）→ 显式错误，含表名与原因。"""
+        strategy = _EmptyResultStrategy()
+        context = {
+            "screening_data": None,
+            "_diagnostics": {
+                "required_failures": {"screening_data": "DB read failed: connection reset"},
+                "table_status": {"screening_data": {"ready": False, "rows": 0}},
+            },
+        }
+
+        with pytest.raises(BacktestRequiredDataError) as exc_info:
+            await adapter.generate_signal(
+                strategy=strategy,
+                context=context,
+                signal_date=date(2024, 1, 2),
+                execution_date=date(2024, 1, 3),
+            )
+
+        message = str(exc_info.value)
+        assert "screening_data" in message
+        assert "daily_quotes" in message
+        assert "connection reset" in message
+
+    @pytest.mark.asyncio
+    async def test_required_aux_table_failure_raises(self, adapter: BacktestStrategyAdapter) -> None:
+        """策略声明的必需辅助表失败 → 显式错误（不因空表同形而被当作稀疏）。"""
+
+        class TopListStrategy(_EmptyResultStrategy):
+            required_context_keys = ("screening_data", "top_list")
+            required_tables = ("daily_quotes", "top_list")
+
+        strategy = TopListStrategy()
+        context = {
+            "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+            "top_list": pd.DataFrame(),
+            "_diagnostics": {
+                "required_failures": {},
+                "table_status": {"top_list": {"ready": False, "rows": 0, "failed": True, "error": "read timeout"}},
+            },
+        }
+
+        with pytest.raises(BacktestRequiredDataError, match="top_list"):
+            await adapter.generate_signal(
+                strategy=strategy,
+                context=context,
+                signal_date=date(2024, 1, 2),
+                execution_date=date(2024, 1, 3),
+            )
+
+    @pytest.mark.asyncio
+    async def test_optional_aux_table_failure_does_not_block_signal(self, adapter: BacktestStrategyAdapter) -> None:
+        """策略未声明的可选表失败不阻断当日信号（由 provider 降级告警承载）。"""
+
+        class BasicStrategy(BaseStrategy):
+            required_context_keys = ("screening_data",)
+            required_tables = ("daily_quotes",)
+
+            def __init__(self):
+                super().__init__("basic_strategy", "Basic Strategy")
+
+            async def filter(self, context):
+                return pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        context = {
+            "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+            "_diagnostics": {
+                "required_failures": {},
+                "table_status": {"top_list": {"ready": False, "rows": 0, "failed": True, "error": "read timeout"}},
+            },
+        }
+
+        result = await adapter.generate_signal(
+            strategy=BasicStrategy(),
+            context=context,
+            signal_date=date(2024, 1, 2),
+            execution_date=date(2024, 1, 3),
+        )
+
+        assert len(result) == 1
+        assert result["ts_code"].to_list() == ["000001.SZ"]
+
+    @pytest.mark.asyncio
+    async def test_fundamental_low_coverage_empty_raises(self, adapter: BacktestStrategyAdapter) -> None:
+        """财报低覆盖守卫空返回 → 失败日，而非「无匹配」（保留原因与 warnings key）。"""
+        strategy = _EmptyResultStrategy(empty_reason="fundamental_data_missing")
+        context = {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})}
+
+        with pytest.raises(BacktestRequiredDataError) as exc_info:
+            await adapter.generate_signal(
+                strategy=strategy,
+                context=context,
+                signal_date=date(2024, 1, 2),
+                execution_date=date(2024, 1, 3),
+            )
+
+        message = str(exc_info.value)
+        assert "fundamental_data_missing" in message
+        assert "strategy_fundamental_data_missing" in message
+
+    @pytest.mark.asyncio
+    async def test_no_match_empty_is_not_failure(self, adapter: BacktestStrategyAdapter) -> None:
+        """正常无匹配空日不进入失败日通道。"""
+        strategy = _EmptyResultStrategy(empty_reason="no_match")
+        context = {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})}
+
+        result = await adapter.generate_signal(
+            strategy=strategy,
+            context=context,
+            signal_date=date(2024, 1, 2),
+            execution_date=date(2024, 1, 3),
+        )
+
+        assert result.is_empty()

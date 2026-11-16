@@ -2168,6 +2168,7 @@ class TestQuoteDaoGetTopListRange:
         dao._read_db.assert_called_once_with(
             "SELECT * FROM top_list WHERE trade_date >= $1 AND trade_date <= $2",
             [datetime.date(2024, 6, 1), datetime.date(2024, 6, 15)],
+            suppress_errors=True,
         )
 
     @pytest.mark.asyncio

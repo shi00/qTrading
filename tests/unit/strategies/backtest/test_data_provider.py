@@ -1832,3 +1832,100 @@ class TestDefaultHistoryContext:
         dp = context.get("data_processor")
         assert dp.cache is cache
         assert dp.trade_calendar is provider.history_context.trade_calendar
+
+
+class TestTableFailureIdentity:
+    """D12-001：逐表保留失败身份，区分「DB 失败」与「合法稀疏空日」。"""
+
+    def _make_cache(self) -> MagicMock:
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True], "close": [10.0]})
+        )
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True], "roe": [12.0]})
+        )
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_required_screening_query_failure_marks_failure(self) -> None:
+        cache = self._make_cache()
+        cache.screener_dao.get_screening_data = AsyncMock(side_effect=RuntimeError("DB read failed"))
+
+        provider = BacktestDataProvider(cache)
+        context = await provider.build_context(date(2024, 1, 2))
+
+        diagnostics = context.get("_diagnostics", {})
+        assert "screening_data" in diagnostics["required_failures"]
+        assert "DB read failed" in diagnostics["required_failures"]["screening_data"]
+        assert diagnostics["table_status"]["screening_data"]["ready"] is False
+
+    @pytest.mark.asyncio
+    async def test_required_screening_legit_empty_is_not_failure(self) -> None:
+        cache = self._make_cache()
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        context = await provider.build_context(date(2024, 1, 2))
+
+        diagnostics = context.get("_diagnostics", {})
+        assert diagnostics["required_failures"] == {}
+        assert diagnostics["table_status"]["screening_data"] == {"ready": False, "rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_aux_legit_empty_is_not_failure(self) -> None:
+        """龙虎榜等低频表合法空日：ready=True/rows=0，不产生降级告警。"""
+        cache = self._make_cache()
+        provider = BacktestDataProvider(cache)
+
+        context = await provider.build_context(date(2024, 1, 2))
+
+        status = context.get("_diagnostics", {})["table_status"]["top_list"]
+        assert status["ready"] is True
+        assert status["rows"] == 0
+        assert "failed" not in status
+        assert provider.range_preload_warnings == []
+
+    @pytest.mark.asyncio
+    async def test_aux_daily_failure_marks_failed_and_warns_once(self) -> None:
+        cache = self._make_cache()
+        cache.quote_dao.get_top_list = AsyncMock(side_effect=RuntimeError("read timeout"))
+
+        provider = BacktestDataProvider(cache)
+        context = await provider.build_context(date(2024, 1, 2))
+        await provider.build_context(date(2024, 1, 3))
+
+        status = context.get("_diagnostics", {})["table_status"]["top_list"]
+        assert status["failed"] is True
+        assert "read timeout" in status["error"]
+        warnings = [w for w in provider.range_preload_warnings if "top_list" in w]
+        assert len(warnings) == 1
+        assert "read timeout" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_preloaded_failure_falls_back_and_marks_required_failure(self) -> None:
+        """预载失败（_preloaded[key]=None）→ 逐日重试仍失败时保留失败身份。"""
+        cache = self._make_cache()
+        cache.screener_dao.get_screening_data = AsyncMock(side_effect=RuntimeError("daily retry failed"))
+
+        provider = BacktestDataProvider(cache)
+        provider._preloaded = {
+            "screening_data": None,
+            "fundamental_screening_data": None,
+            "northbound_data": None,
+            "northbound_flow_data": None,
+            "moneyflow_data": None,
+            "top_list": None,
+            "block_trade": None,
+        }
+
+        context = await provider.build_context(date(2024, 1, 2))
+
+        failures = context.get("_diagnostics", {})["required_failures"]
+        assert "screening_data" in failures
+        assert "daily retry failed" in failures["screening_data"]
