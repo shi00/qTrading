@@ -311,6 +311,46 @@ class TestMainThresholds:
         assert "::warning::[分层覆盖率]" not in captured.err
 
 
+class TestMainRelaxedFileThreshold:
+    """登记阈值低于默认的放宽例外：以登记阈值为唯一门禁，豁免默认阈值.
+
+    背景（2026-11-16 Agent 平台性覆盖例外）：per_file_minimum_by_path 支持
+    文件级条目，其阈值（如 70%）低于默认 80%。原分类逻辑假设分层阈值只会
+    高于默认，导致该类文件即使达到登记阈值仍被默认门禁误判 FAIL。
+    """
+
+    LAYERED = [("services/agent_service/attachment_worker.py", 70)]
+
+    def test_above_registered_below_default_passes(self, tmp_path, monkeypatch, capsys):
+        """71.3% < 默认 80 但 >= 登记 70：必须 PASS（修复前误判 FAIL）。"""
+        payload = {"files": {"services/agent_service/attachment_worker.py": _entry(71.3, stmts=604, missing=160)}}
+        assert _run_main(tmp_path, monkeypatch, payload=payload, layered=self.LAYERED, enforce=False) == 0
+        out = capsys.readouterr().out
+        assert "PASS" in out
+        assert "FAIL" not in out
+
+    def test_below_registered_threshold_fails_even_in_advisory_mode(self, tmp_path, monkeypatch, capsys):
+        """低于自身登记阈值必须 FAIL（放宽例外始终 enforce，不受 enforce_layered 影响）。"""
+        payload = {"files": {"services/agent_service/attachment_worker.py": _entry(69.0, stmts=604, missing=187)}}
+        assert _run_main(tmp_path, monkeypatch, payload=payload, layered=self.LAYERED, enforce=False) == 1
+        out = capsys.readouterr().out
+        assert "FAIL" in out
+        assert "below registered per-file threshold" in out
+
+    def test_relaxed_exception_does_not_leak_to_default_gate(self, tmp_path, monkeypatch, capsys):
+        """同 payload 下未登记文件仍受默认门禁约束（放宽不扩散）。"""
+        payload = {
+            "files": {
+                "services/agent_service/attachment_worker.py": _entry(71.3, stmts=604, missing=160),
+                "app/foo.py": _entry(79.0, stmts=100, missing=21),
+            }
+        }
+        assert _run_main(tmp_path, monkeypatch, payload=payload, layered=self.LAYERED, enforce=False) == 1
+        out = capsys.readouterr().out
+        assert "below 80%" in out
+        assert "app/foo.py" in out
+
+
 class TestMainReportMode:
     """--report 保留不阻断语义：合法输入 0，非法输入仍 2."""
 
