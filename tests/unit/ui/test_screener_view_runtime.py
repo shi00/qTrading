@@ -1475,6 +1475,27 @@ class TestOnPaginationChange:
         assert "change_page:1" in fake_vm.method_calls
 
 
+class TestHistoryLoadingLocksInteraction:
+    """ADD-UI-002: HISTORY 加载中锁定表格行/分页交互, 避免把在途目标误当已显示结果操作."""
+
+    def test_history_loading_disables_rows_and_pagination(self, screener_view_env, monkeypatch) -> None:
+        env = screener_view_env
+        mod = env["mod"]
+        # 默认 mock 的分割器只返回左栏; 此处返回右栏以检查真实挂载路径上的表格交互。
+        monkeypatch.setattr(mod, "ResizableSplitter", lambda **kwargs: kwargs.get("right_content"))
+
+        env["fake_vm"]._set_state(mode="HISTORY", loading=True)
+        _rerender(env)
+
+        icon_btns = [b for b in _get_buttons(env) if isinstance(b, ft.IconButton)]
+        assert len(icon_btns) >= 2, "分页栏应渲染上一页/下一页控件"
+        assert icon_btns[0].disabled is True
+        assert icon_btns[1].disabled is True
+        page_size_dd = _get_dropdowns(env)[-1]
+        assert page_size_dd.disabled is True
+        assert env["captured_callbacks"]["on_row_click"] is None, "加载中行点击应被禁用"
+
+
 # ============================================================================
 # Handler 测试: _on_mode_change
 # ============================================================================
@@ -1981,13 +2002,26 @@ class TestLoadHistoryForDate:
         asyncio.run(handler(*args))
 
         # RV-03: 传 strategy_name + run_id=abc12345def 给 VM, 载入该 run 的精确快照
-        assert any(
-            "set_history_viewing_status" in c and "strategy_name=value" in c and "run_id=abc12345def" in c
-            for c in fake_vm.method_calls
-        ), f"应调用 set_history_viewing_status with strategy_name + run_id, 实际: {fake_vm.method_calls}"
+        # ADD-UI-002: View 不得在 await 前预提交身份标签, 由 VM 成功提交时同帧落库。
         assert any(c.startswith("load_history_data:20240615:value:abc12345def") for c in fake_vm.method_calls), (
             f"应按 (trade_date, strategy_name, run_id) 载入该 run 快照, 实际: {fake_vm.method_calls}"
         )
+        assert not any(c.startswith("set_history_viewing_status") for c in fake_vm.method_calls), (
+            f"加载失败/取消前不得预提交身份标签 (ADD-UI-002), 实际: {fake_vm.method_calls}"
+        )
+
+    def test_date_like_trade_date_normalized_before_vm_call(self) -> None:
+        """ADD-UI-002: date 入参归一化为 YYYY-MM-DD, 字符串入参原样透传."""
+        from ui.views import screener_view as mod
+
+        fake_vm: Any = _FakeScreenerViewModel()
+        asyncio.run(mod._execute_load_history_for_date(fake_vm, None, datetime.date(2024, 6, 15), "value", "run01"))
+        asyncio.run(mod._execute_load_history_for_date(fake_vm, None, "20240615", None, None))
+
+        assert fake_vm.method_calls == [
+            "load_history_data:2024-06-15:value:run01",
+            "load_history_data:20240615:None:None",
+        ]
 
     def test_all_strategies_label_when_no_run_id(self, screener_view_env) -> None:
         """_load_history_for_date: run_id=None, strategy_name=None → VM 用 screener_all_strategies key."""
@@ -2019,10 +2053,12 @@ class TestLoadHistoryForDate:
         asyncio.run(handler(*args))
 
         # 验证 strategy_name=None, run_id=None 传入 VM (VM 用 screener_all_strategies key)
-        assert any(
-            "set_history_viewing_status" in c and "strategy_name=None" in c and "run_id=None" in c
-            for c in fake_vm.method_calls
-        ), f"应传 strategy_name=None + run_id=None 给 VM, 实际: {fake_vm.method_calls}"
+        assert any(c.startswith("load_history_data:20240615:None:None") for c in fake_vm.method_calls), (
+            f"应传 strategy_name=None + run_id=None 给 VM, 实际: {fake_vm.method_calls}"
+        )
+        assert not any(c.startswith("set_history_viewing_status") for c in fake_vm.method_calls), (
+            f"View 不得预提交身份标签 (ADD-UI-002), 实际: {fake_vm.method_calls}"
+        )
 
     def test_cancelled_error_propagates(self, screener_view_env) -> None:
         """R2: _load_history_for_date: vm.load_history_data 抛 CancelledError → 传播."""
