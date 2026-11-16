@@ -555,6 +555,8 @@ class TestUsageView:
         dropdowns = [c for c in _walk_controls(export_row) if isinstance(c, ft.Dropdown)]
         assert len(dropdowns) == 1
         dd = dropdowns[0]
+        # D19-002：导出范围下拉必须有持久 label（可访问名称），不依赖旁置 Text。
+        assert dd.label == I18n.get("model_usage_export_scope_label")
         assert dd.value == EXPORT_SCOPE_ALL  # 回显 state
         assert {o.key for o in dd.options} == {EXPORT_SCOPE_PAGE, EXPORT_SCOPE_ALL}
         event = MagicMock()
