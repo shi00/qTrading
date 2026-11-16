@@ -461,7 +461,7 @@ class TestUsageView:
         assert len(inputs) == 1
         assert inputs[0].on_submit is not None
         event = MagicMock(name="event")
-        inputs[0].on_submit(event)
+        inputs[0].on_submit(event)  # type: ignore[reportCallIssue]  # Flet stub 将 on_submit 声明为 0 参联合成员，运行时实际传 event
         page.run_task.assert_called_once_with(vm.save_monthly_budget)
 
         save = next(c for c in _walk_controls(row) if getattr(c, "key", None) == "usage_budget_save")
