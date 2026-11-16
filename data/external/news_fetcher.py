@@ -178,6 +178,25 @@ def _parse_news_time(raw: str | None, *, day_only: bool = False) -> datetime.dat
     return to_utc_for_db(parsed)
 
 
+def _parse_us_change_pct(raw: Any) -> float | None:
+    """解析新浪美股涨跌幅（``chg``）；无法确认为真实数值时返回 None（R21 未知≠0）。
+
+    缺键 / None / 空串 / 非数字 / NaN / ±Inf / 布尔 一律返回 None，由调用方显式表达
+    未知；只有解析出的有限数值（含真 0.0）才返回 float，从而把「平盘」与「未知」分开。
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+    try:
+        pct = float(raw)
+    except (ValueError, TypeError):
+        return None
+    return pct if math.isfinite(pct) else None
+
+
 def _fetch_stock_news_core(
     symbol: str,
     ts_code: str,
@@ -774,6 +793,10 @@ class NewsFetcher:
         P0-4 fix: as_of parameter prevents look-ahead bias. When as_of is not
         today's date (i.e. historical replay), returns empty string instead of
         injecting real-time data into a past context.
+
+        R21: ``chg`` 缺键/非法/非有限时，重点 ticker 显式标注「未知」、top5 回退不列入，
+        不得以 0.0% 冒充平盘；真 0 保留为 0.0%。未知结果照常写入 TTL 缓存，避免同一
+        未知状态重复请求外部源。
         """
         if as_of is not None:
             if isinstance(as_of, datetime.datetime):
@@ -924,13 +947,17 @@ class NewsFetcher:
                 if ticker in key_tickers:
                     matched = True
 
-                # Safe float conversion
-                try:
-                    pct = float(item.get("chg", 0))
-                except (ValueError, TypeError):
-                    pct = 0.0
+                # R21：涨跌幅缺键/非法/非有限时不得以 0.0% 冒充平盘，pct=None 表示未知
+                pct = _parse_us_change_pct(item.get("chg"))
 
-                if matched or abs(pct) > 3.0:
+                if matched:
+                    display_name = ticker if ticker else cname
+                    if pct is None:
+                        # 重点 ticker 仍列出，但显式标注未知（不得伪造成 0%）
+                        summary.append(f"{display_name}: 未知")
+                    else:
+                        summary.append(f"{display_name}: {pct}%")
+                elif pct is not None and abs(pct) > 3.0:
                     display_name = ticker if ticker else cname
                     summary.append(f"{display_name}: {pct}%")
 
@@ -938,8 +965,11 @@ class NewsFetcher:
             if not summary and data_list:
                 for item in data_list[:5]:
                     name = item.get("name", "Unknown")
-                    chg = item.get("chg", "0")
-                    summary.append(f"{name}: {chg}%")
+                    pct = _parse_us_change_pct(item.get("chg"))
+                    if pct is None:
+                        # 未知涨跌幅不参与「异动」列表，避免以 0 或原始坏值入 Prompt
+                        continue
+                    summary.append(f"{name}: {pct}%")
 
             result = ", ".join(summary)
             with _US_MOVES_CACHE_LOCK:

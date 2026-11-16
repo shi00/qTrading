@@ -101,6 +101,10 @@ class NewsInsightState:
     confidence: int | None = None  # AI 置信度（0-100），None=未知
     summary: str | None = None
     events: tuple[RiskEvent, ...] = ()
+    # D14-002：证据引用校验剔除事件的受控质量提示（count + reason 代码，不含 fact/quote）。
+    # None=未记录（旧快照/非成功分析，R21，不得渲染成「无剔除」）；0=已校验且无剔除。
+    events_dropped_count: int | None = None
+    events_dropped_reasons: tuple[str, ...] = ()
     # 复用历史快照标注（§11 cache_hit/subset）
     reused: bool = False
     reuse_type: str = "none"

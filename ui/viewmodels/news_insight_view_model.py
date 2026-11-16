@@ -122,6 +122,35 @@ def _evidence_to_items(docs: list[EvidenceDocument]) -> tuple[EvidenceItem, ...]
     return tuple(items)
 
 
+def _events_dropped_summary(dropped) -> tuple[int | None, tuple[str, ...]]:
+    """把服务层受控剔除摘要转为 ``(count, reasons)``；无法识别 → ``(None, ())``（未知，R21）。
+
+    只接受 ``[{"drop_reason": str, "dropped_count": int>0}]``；空列表 = 已校验无剔除
+    （count=0），非列表 / 脏项 = 未记录。VM 不感知被剔除事件的 fact/quote（R9）。
+    """
+    if not isinstance(dropped, list):
+        return None, ()
+    total = 0
+    reasons: list[str] = []
+    for item in dropped:
+        if not isinstance(item, dict):
+            return None, ()
+        reason = item.get("drop_reason")
+        count = item.get("dropped_count")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            return None, ()
+        total += count
+        if reason not in reasons:
+            reasons.append(reason)
+    return total, tuple(reasons)
+
+
 def _events_to_tuple(events: list) -> tuple[RiskEvent, ...]:
     """把服务层事件 dict 列表转不可变 RiskEvent tuple。"""
     out: list[RiskEvent] = []
@@ -232,6 +261,8 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             confidence=None,
             summary=None,
             events=(),
+            events_dropped_count=None,
+            events_dropped_reasons=(),
             reused=False,
             reuse_type="none",
             message=None,
@@ -331,6 +362,8 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
         else:
             analysis_time = generated_at_text or self._now_str()
             cache_read_time = None
+        # D14-002：首次展示与缓存/子集复用走同一受控摘要（复用结果由服务层从快照回读）。
+        dropped_count, dropped_reasons = _events_dropped_summary(getattr(result, "events_dropped", None))
         self._set_state(
             phase=phase,
             risk_level=result.risk_level,
@@ -338,6 +371,8 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             confidence=result.confidence,
             summary=result.summary,
             events=_events_to_tuple(result.events or []),
+            events_dropped_count=dropped_count,
+            events_dropped_reasons=dropped_reasons,
             reused=reused,
             reuse_type=reuse_type,
             coverage=_coverage_to_source(result.coverage or {}),
