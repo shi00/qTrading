@@ -217,7 +217,7 @@ class TestSec01EgressGate:
         acompletion = AsyncMock()
         with (
             patch("services.ai_service.acompletion", acompletion),
-            pytest.raises(AIPolicyNotAcknowledgedError),
+            pytest.raises(AIPolicyNotAcknowledgedError, match="missing or invalid permit"),
         ):
             await LiteLLMClient(MagicMock()).invoke_single_connection(request, connection, request.deadline, unbound)
         acompletion.assert_not_awaited()
@@ -233,7 +233,7 @@ class TestSec01EgressGate:
         acompletion = AsyncMock()
         with (
             patch("services.ai_service.acompletion", acompletion),
-            pytest.raises(AIPolicyNotAcknowledgedError),
+            pytest.raises(AIPolicyNotAcknowledgedError, match="attempt id mismatch"),
         ):
             await LiteLLMClient(MagicMock()).invoke_single_connection(request, connection, request.deadline, current)
         acompletion.assert_not_awaited()
@@ -250,7 +250,7 @@ class TestSec01EgressGate:
         other_provider = _connection(provider="deepseek")
         with (
             patch("services.ai_service.acompletion", acompletion),
-            pytest.raises(AIPolicyNotAcknowledgedError),
+            pytest.raises(AIPolicyNotAcknowledgedError, match="provider mismatch"),
         ):
             await LiteLLMClient(MagicMock()).invoke_single_connection(
                 request, other_provider, request.deadline, permit_ctx
@@ -260,7 +260,7 @@ class TestSec01EgressGate:
         other_target = _connection(api_base="https://api.other.com")
         with (
             patch("services.ai_service.acompletion", acompletion),
-            pytest.raises(AIPolicyNotAcknowledgedError),
+            pytest.raises(AIPolicyNotAcknowledgedError, match="egress target mismatch"),
         ):
             await LiteLLMClient(MagicMock()).invoke_single_connection(
                 request, other_target, request.deadline, permit_ctx

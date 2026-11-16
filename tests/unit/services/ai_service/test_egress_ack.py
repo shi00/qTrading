@@ -132,13 +132,13 @@ class TestVerifyEgressAckPermit:
         _verify(_permit())
 
     def test_missing_permit_rejected(self) -> None:
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="missing or invalid permit"):
             _verify(None)
 
     def test_mock_permit_rejected(self) -> None:
         """非 ``EgressAckPermit`` 替身（如 MagicMock）不得被误当有效许可。"""
         with patch("utils.egress_ack.ConfigHandler.is_ai_external_acknowledged", return_value=True):
-            with pytest.raises(AIPolicyNotAcknowledgedError):
+            with pytest.raises(AIPolicyNotAcknowledgedError, match="missing or invalid permit"):
                 verify_egress_ack_permit(
                     MagicMock(),  # type: ignore[arg-type]
                     attempt_context=_context(),
@@ -150,22 +150,22 @@ class TestVerifyEgressAckPermit:
     def test_cross_attempt_reuse_rejected(self) -> None:
         """A attempt 的许可不能用于 B attempt（跨 attempt 不串味）。"""
         permit = _permit()
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="attempt id mismatch"):
             _verify(permit, context=_context(attempt_id="att-2"))
 
     def test_cross_invocation_reuse_rejected(self) -> None:
         permit = _permit()
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="invocation id mismatch"):
             _verify(permit, context=_context(invocation_id="inv-2"), invocation_id="inv-2")
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="invocation id mismatch"):
             _verify(permit, invocation_id="inv-2")
 
     def test_cross_session_reuse_rejected(self) -> None:
         """跨会话（owner session / epoch 变更）复用 → 拒绝。"""
         permit = _permit()
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="owner session mismatch"):
             _verify(permit, context=_context(owner_session_id="sess-2"))
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="owner epoch mismatch"):
             _verify(permit, context=_context(owner_epoch=4))
 
     def test_connection_provider_model_target_mismatch_rejected(self) -> None:
@@ -176,40 +176,40 @@ class TestVerifyEgressAckPermit:
             _connection(model="deepseek-reasoner"),
             _connection(api_base="https://api.other.com"),
         ):
-            with pytest.raises(AIPolicyNotAcknowledgedError):
+            with pytest.raises(AIPolicyNotAcknowledgedError, match="mismatch"):
                 _verify(permit, connection=connection)
 
     def test_expired_permit_rejected(self) -> None:
         permit = _permit(deadline=_NOW + 1.0)
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="permit expired"):
             _verify(permit, now=_NOW + 2.0)
 
     def test_future_issued_permit_rejected(self) -> None:
         permit = replace(_permit(), issued_at=_NOW + 10.0)
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="issued in the future"):
             _verify(permit)
 
     def test_scope_version_rotation_expires_permit(self) -> None:
         permit = replace(_permit(), scope_version=AI_EGRESS_SCOPE_VERSION + 1)
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="scope version expired"):
             _verify(permit)
 
     def test_non_finite_validity_rejected(self) -> None:
         """NaN / 反向时间窗不得让比较恒为 False 绕过有效期校验。"""
         for broken in (float("nan"), float("inf")):
-            with pytest.raises(AIPolicyNotAcknowledgedError):
+            with pytest.raises(AIPolicyNotAcknowledgedError, match="invalid validity window"):
                 _verify(replace(_permit(), expires_at=broken))
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="invalid validity window"):
             _verify(replace(_permit(), issued_at=_NOW + 5.0, expires_at=_NOW))
 
     def test_boolean_owner_epoch_in_permit_rejected(self) -> None:
         """``True == 1`` 不得被当作合法 owner epoch（布尔绕过）。"""
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="owner epoch mismatch"):
             _verify(replace(_permit(), owner_epoch=True))  # type: ignore[arg-type]
 
     def test_provider_not_acknowledged_rejected(self) -> None:
         """用户对实际 provider 的确认缺失 → 拒绝（既有二次确认不放宽）。"""
-        with pytest.raises(AIPolicyNotAcknowledgedError):
+        with pytest.raises(AIPolicyNotAcknowledgedError, match="not acknowledged"):
             _verify(_permit(), acknowledged=False)
 
     def test_ack_lookup_uses_actual_provider_not_global_primary(self) -> None:
