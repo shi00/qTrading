@@ -30,12 +30,19 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 pytestmark = pytest.mark.unit
+
+# os.getpgid / os.killpg 仅 POSIX 存在；Windows 上 monkeypatch.setattr(os, ...) 会 AttributeError。
+_requires_posix_group_api = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX 进程组语义（os.getpgid/os.killpg），Windows 不适用",
+)
 
 
 # mock doctor JSON（对齐 sidecar maint.rs DoctorJson struct）
@@ -1604,6 +1611,7 @@ class TestProcessTreeHelpersUnit:
         assert _wait_process_exit(proc, 0.15) is False
 
     # ---- _process_group_alive 探测异常分支 ----
+    @_requires_posix_group_api
     def test_process_group_alive_false_when_group_gone(self, monkeypatch) -> None:
         from services.embedded_pg_maintenance_service import _process_group_alive
 
@@ -1614,6 +1622,7 @@ class TestProcessTreeHelpersUnit:
 
         assert _process_group_alive(proc) is False
 
+    @_requires_posix_group_api
     def test_process_group_alive_true_on_eperm(self, monkeypatch) -> None:
         """EPERM：组仍存在但无权探测，保守视为存活。"""
         from services.embedded_pg_maintenance_service import _process_group_alive
@@ -1631,18 +1640,27 @@ class TestProcessTreeHelpersUnit:
 
         monkeypatch.setattr(os, "name", "nt")
         proc = MagicMock()
+        # POSIX 平台：防御性断言 nt 分支不得触碰 os.getpgid；Windows 无该属性（POSIX
+        # 路径物理不可达），patch 不存在目标反而 AttributeError，故仅 POSIX 需要。
+        posix_guard = (
+            patch(
+                "services.embedded_pg_maintenance_service.os.getpgid",
+                side_effect=AssertionError("POSIX 路径不得执行"),
+            )
+            if sys.platform != "win32"
+            else nullcontext()
+        )
         with (
             patch(
                 "services.embedded_pg_maintenance_service._wait_process_exit",
                 return_value=False,
             ) as routed,
-            patch(
-                "services.embedded_pg_maintenance_service.os.getpgid", side_effect=AssertionError("POSIX 路径不得执行")
-            ),
+            posix_guard,
         ):
             assert _wait_process_tree_exit(proc, 0.2) is False
         routed.assert_called_once_with(proc, 0.2)
 
+    @_requires_posix_group_api
     def test_wait_process_tree_exit_tolerates_poll_oserror(self, monkeypatch) -> None:
         """回收 wrapper 的 poll() 竞态（OSError）不得中断等待循环。"""
         from services.embedded_pg_maintenance_service import _wait_process_tree_exit
@@ -1687,6 +1705,7 @@ class TestProcessTreeHelpersUnit:
         ):
             assert _signal_process_tree(MagicMock(pid=99), force=False) is False
 
+    @_requires_posix_group_api
     def test_signal_process_tree_terminates_single_proc_when_not_leader(self, monkeypatch) -> None:
         """未成为进程组长（或 pid 复用）时不得 killpg；wrapper 存活则单进程终止。"""
         from services.embedded_pg_maintenance_service import _signal_process_tree
@@ -1700,6 +1719,7 @@ class TestProcessTreeHelpersUnit:
         proc.terminate.assert_called_once_with()
         proc.kill.assert_not_called()
 
+    @_requires_posix_group_api
     def test_signal_process_tree_force_kills_single_proc(self, monkeypatch) -> None:
         from services.embedded_pg_maintenance_service import _signal_process_tree
 
@@ -1711,6 +1731,7 @@ class TestProcessTreeHelpersUnit:
         assert _signal_process_tree(proc, force=True) is True
         proc.kill.assert_called_once_with()
 
+    @_requires_posix_group_api
     def test_signal_process_tree_refuses_when_wrapper_exited(self, monkeypatch) -> None:
         """wrapper 已退出且组 id 不可信：放弃信号，交由上层证明逻辑。"""
         from services.embedded_pg_maintenance_service import _signal_process_tree
@@ -1722,6 +1743,7 @@ class TestProcessTreeHelpersUnit:
 
         assert _signal_process_tree(proc, force=False) is False
 
+    @_requires_posix_group_api
     def test_signal_process_tree_killpg_group_graceful_and_force(self, monkeypatch) -> None:
         from services.embedded_pg_maintenance_service import _signal_process_tree
 
@@ -1735,6 +1757,7 @@ class TestProcessTreeHelpersUnit:
         assert _signal_process_tree(proc, force=True) is True
         assert sent == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
+    @_requires_posix_group_api
     def test_signal_process_tree_oserror_returns_false(self, monkeypatch) -> None:
         """进程组已不存在（OSError）：命令已自然结束，返回 False。"""
         from services.embedded_pg_maintenance_service import _signal_process_tree
