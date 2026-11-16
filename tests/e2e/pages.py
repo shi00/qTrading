@@ -815,30 +815,35 @@ class DataPage:
         await self.page.expect_text(I18n.get("data_tab_explorer"), timeout_ms=timeout_ms)
 
     async def select_table(self, table_name: str, timeout_ms: int = TIMEOUTS.TITLE) -> None:
-        """选择数据表（通过 anchor），并等待新表 schema 加载完成。
+        """选择数据表（通过 anchor），并确认目标表 schema 已加载完成。
 
-        PR-478 修复: 替代固定 ``wait_for_timeout(1000)`` sleep. 通过等待
-        ``TABLE_READY`` EID 先消失（reset_table_state 清空 table_columns）
-        再出现（load_table_schema 重新填充 table_columns）来确认切表完成.
-        只等待可见会误命中上一张表遗留的 ready 状态，必须先消失再出现.
+        D21-OTHER-006: 等待 **目标表专属** 就绪锚点
+        （``EIDS.DATA.table_ready(table_name)``，identifier 携带表名），而非通用
+        ``TABLE_READY``。通用锚点只要「某张表已加载」即可见，切表未生效时上一张表的
+        ready 仍在可见 → 旧实现静默返回假成功。目标表专属锚点把「加载的就是目标表」
+        变成等待条件本身：选择未落地 / 目标表不存在时超时抛错（保留末次原始异常，
+        EID 内含表名可诊断），不再吞等待失败。
+
+        快速加载场景：不要求先观察到 ready 消失，正确切表即使从未观察到短暂 hidden
+        也能通过（身份锚点只在目标表 schema 落地后渲染）。
 
         PR-4 Task 4.2: 整体重试（N=3）抗 CI 高负载下 headless CanvasKit 渲染
-        抖动导致的下拉展开/选项渲染抖动（option not found）或 TABLE_READY 未按时
-        出现. 重试粒度 = 整个 select_table（含 select_option + TABLE_READY 等待），
+        抖动导致的下拉展开/选项渲染抖动（option not found）或目标表就绪迟到.
+        重试粒度 = 整个 select_table（含 select_option + 目标表就绪等待），
         每次失败休眠 RETRY_INTERVAL_MS，RETRY_ATTEMPTS 次耗尽抛最后一次的原始异常.
         """
+        ready_eid = EIDS.DATA.table_ready(table_name)
         last_exc: Exception | None = None
         for idx in range(TIMEOUTS.RETRY_ATTEMPTS):
             try:
                 await self.ap.select_option(EIDS.DATA.TABLE_DROPDOWN, table_name, timeout_ms=timeout_ms)
-                try:
-                    await self.ap.expect_hidden(EIDS.DATA.TABLE_READY, timeout_ms=1000)
-                except Exception:
-                    pass
-                await self.ap.expect_visible(EIDS.DATA.TABLE_READY, timeout_ms=timeout_ms)
+                await self.ap.expect_visible(ready_eid, timeout_ms=timeout_ms)
                 return
             except Exception as exc:  # noqa: BLE001  # 记录末次异常，耗尽后抛原始异常
                 last_exc = exc
+                logger.warning(
+                    "select_table(%r): 第 %d/%d 次尝试失败: %s", table_name, idx + 1, TIMEOUTS.RETRY_ATTEMPTS, exc
+                )
                 if idx < TIMEOUTS.RETRY_ATTEMPTS - 1:  # 仅尝试间休眠，末次失败不再等待直接抛原始异常
                     await asyncio.sleep(TIMEOUTS.RETRY_INTERVAL_MS / 1000)
         if last_exc is not None:

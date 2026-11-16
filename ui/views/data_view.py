@@ -1016,6 +1016,16 @@ def TableViewerTab(
                 ft.Text(" ", size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TRANSPARENT),
             )
         )
+    if table_ready and state.current_table:
+        # D21-OTHER-006: 表身份就绪信号 (identifier 携带当前表名). 通用 TABLE_READY
+        # 只要「某张表已加载」即可见，切表未生效时旧 ready 仍在 → E2E 假成功;
+        # 调用方等待本 anchor 才能确认目标表 schema 已落地.
+        controls.append(
+            anchored(
+                EIDS.DATA.table_ready(state.current_table),
+                ft.Text(" ", size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TRANSPARENT),
+            )
+        )
     return ft.Column(
         controls,
         expand=True,

@@ -148,7 +148,7 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
 - **根因**：CI 共享 runner 高负载/性能波动 → headless Chromium 无 GPU、CanvasKit 走 SwiftShader 软件渲染 → 帧率不稳（日志 `GL Driver Message (...) GPU stall due to ReadPixels`）→ 偶发时刻物理鼠标点击落在渲染中间帧被吞（交互未触发），或 `<flt-semantics>` 更新延迟导致断言超时。锚点（anchor）只能解决"定位"，不能解决"CI 时序抖动吞事件"，故需在交互层做健壮化。
 - **规程**：步骤级"确认触发 + N=3 重试"（间隔 500ms），以可靠"确认指标"判断交互是否真正触发，确认不到才重试，3 次仍失败抛真错误（不静默吞）。通用实现 `tests/e2e/helpers/anchor_page.py::retry_until_triggered(interact, confirm, attempts, interval_ms)`；`confirm` 为可注入 async 谓词，便于单测注入模拟"前 N-1 次失败"。
   - **确认指标必须是"短轮询等待状态迁移"而非"点击后立即查询"**：`ScreenerPage.run` 点击 RUN_BUTTON 后，异步 loading 状态可能延迟数帧才反映到 DOM，立即 `count==0` 会误判"未触发"→ 重复点击已消失按钮 → 等满超时误报失败（恰与抗抖动目标相悖）。应改为 `expect_hidden(RUN_BUTTON, timeout_ms=2000)` 短轮询，区分"点击被吞（按钮持续可见→重试）"与"渲染延迟（按钮数帧内消失→成功）"。
-  - **重试粒度**：步骤级（交互方法内部），优于用例级 flaky（flaky 重跑整个用例含 DB seeding/页面加载，CI 成本高且不精准）。`DataPage.select_table` 整体重试（含 `select_option` + `TABLE_READY` 先 hidden 再 visible）。
+  - **重试粒度**：步骤级（交互方法内部），优于用例级 flaky（flaky 重跑整个用例含 DB seeding/页面加载，CI 成本高且不精准）。`DataPage.select_table` 整体重试（含 `select_option` + 目标表专属就绪锚点 `EIDS.DATA.table_ready(<table>)`；通用 `TABLE_READY` 只证明「某张表已加载」，切表未生效时旧 ready 仍可见，不能作为身份判据）。
   - 本地无法复现 CI 偶发，最终验收依赖 CI 连续多次运行时验证。
 
 ### 坑点 7：语义树启用 ≠ 应用内容渲染完成（P0-1 PoC 实证）
@@ -199,7 +199,8 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
 - **后果（两层）**：
   1. 命中错误选项后菜单**正常收合**——既有防御（N=3 重试防 option not found、收合确认
      防点击被吞、TABLE_READY 消失→重现防未加载）全部通过，因为它们只能证明「某次选择
-     落地」，不能证明「选中了目标项」；
+     落地」，不能证明「选中了目标项」；`select_table` 现额外等待目标表专属就绪锚点，
+     误选其他表会因目标锚点缺失而失败；
   2. 错误选项在种子库无数据 → 空状态 → 下游文本断言（`000001.SZ`）30s 超时，报错方向
      与根因完全脱节（表象在断言，病灶在 select_option）。
 - **规程**（`AnchorPage.select_option` C8 面板锚定滚动；C7 选中值校验已撤销）：
