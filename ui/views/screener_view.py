@@ -1628,12 +1628,19 @@ def _resolve_table_data(
 # CRITICAL-01: 分区标题只表达 AI 处理状态, 不作投资判断。"analyzed"(score>0) 分区原用
 # 「AI 推荐」+ SUCCESS 对勾, 会被误读为买入建议; 现改中性文案 + 中性色, 投资判断交由每行
 # ai_score 数值承载 (不依赖分区颜色暗示)。
+# D19-001: 颜色位保存 AppColors 语义属性名 (非导入期 Hex 快照), 渲染时经
+# _resolve_section_color 取当期主题色, 主题热切换后分区图标随之更新.
 _SECTION_META: tuple[tuple[str, typing.Any, str, str], ...] = (
-    # (i18n key, 图标名, 图标色, 分区标签)
-    ("screener_section_recommended", ft.Icons.ANALYTICS, AppColors.TEXT_SECONDARY, "recommended"),
-    ("screener_section_excluded", ft.Icons.DO_NOT_DISTURB, AppColors.WARNING, "excluded"),
-    ("screener_section_failed", ft.Icons.ERROR_OUTLINE, AppColors.ERROR, "failed"),
+    # (i18n key, 图标名, AppColors 语义属性名, 分区标签)
+    ("screener_section_recommended", ft.Icons.ANALYTICS, "TEXT_SECONDARY", "recommended"),
+    ("screener_section_excluded", ft.Icons.DO_NOT_DISTURB, "WARNING", "excluded"),
+    ("screener_section_failed", ft.Icons.ERROR_OUTLINE, "ERROR", "failed"),
 )
+
+
+def _resolve_section_color(section_color: str) -> str:
+    """解析分区语义色名到当期主题色 (D19-001: 不固化导入期快照)."""
+    return getattr(AppColors, section_color)
 
 
 def _build_screener_sections_card(
@@ -1666,7 +1673,7 @@ def _build_screener_sections_card(
             ft.Segment(
                 value=meta[3],
                 label=ft.Text(I18n.get(meta[0]).format(count=section_counts[index])),
-                icon=ft.Icon(meta[1], color=meta[2]),
+                icon=ft.Icon(meta[1], color=_resolve_section_color(meta[2])),
             )
             for index, meta in enumerate(_SECTION_META)
         ],
