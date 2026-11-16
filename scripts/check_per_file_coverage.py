@@ -53,12 +53,14 @@ def load_config() -> tuple[int, list[tuple[str, int]], bool]:
 def match_threshold(file_path: str, default_threshold: int, layered: list[tuple[str, int]]) -> tuple[int, str | None]:
     """按最长前缀匹配返回文件应适用的阈值.
 
-    路径归一化为 / 分隔后匹配，前缀去掉尾部 / 后做 startswith 判断。
+    路径归一化为 / 分隔后匹配：目录前缀做 ``startswith(prefix + "/")`` 判断；
+    同时支持文件级条目（prefix 与归一化路径完全相等，2026-11-16 Agent 特性登记
+    平台性覆盖来源例外时引入，见 pyproject 注释）。
     """
     normalized = PurePath(file_path.replace("\\", "/")).as_posix().lstrip("./")
     for prefix, threshold in layered:
         prefix_clean = prefix.rstrip("/")
-        if prefix_clean and normalized.startswith(prefix_clean + "/"):
+        if prefix_clean and (normalized == prefix_clean or normalized.startswith(prefix_clean + "/")):
             return threshold, prefix
     return default_threshold, None
 
