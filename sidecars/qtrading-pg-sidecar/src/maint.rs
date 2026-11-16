@@ -2763,6 +2763,8 @@ mod tests {
     /// 注：单测进程自身无法证明归属（可执行文件/工作目录均非该安装的 postgres），
     /// 故「身份不可证明的活 PID → Refuse」经 classify_dump_instance 断言；
     /// 「身份已证明后的端口分流」经 classify_proven_online 直接验证。
+    /// （身份证明依赖 unix 专属测试辅助 link_install_postgres，故本测试仅 unix。）
+    #[cfg(unix)]
     #[test]
     fn classify_dump_instance_requires_trusted_port_for_online() {
         let dir = unique_tmp("dump-classify-port");
