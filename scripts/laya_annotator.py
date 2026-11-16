@@ -46,7 +46,7 @@ import random
 import sys
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -158,13 +158,29 @@ def predict_batch(
 # ------------------------------------------------- 3. 抽检集抽样
 
 
-def _review_record(doc: dict[str, Any]) -> dict[str, Any]:
-    """把语料库文档投影为待人工标注记录（保留 source 分层身份；ts_code 不伪造）。"""
+def _document_record(doc: Mapping[str, Any]) -> dict[str, Any]:
+    """把语料库文档投影为标注记录（透传稳定身份与事件元数据，缺失保留 ``None``）。
+
+    字段契约（annotate → split → train 闭环）：
+
+    - ``id``：``source`` + ``source_id`` 组合的稳定样本 ID，供训练侧
+      ``train_finbert.load_split_file`` 的 ``id`` 互斥检查消费；
+    - ``ts_code`` / ``publish_time``：事件分组键，训练侧按
+      ``(ts_code, publish_time)`` 拒绝同事件不同文本跨 split；
+    - 语料缺失事件元数据时**原样写 null**，不丢弃字段（R21：丢弃会让下游把
+      「无元数据」误当「无需检查」，从而把未校验伪装成已排除）。
+    """
+    source = str(doc["source"])
+    source_id = str(doc["source_id"])
+    ts_code = doc.get("ts_code")
+    publish_time = doc.get("publish_time")
     return {
-        "source": str(doc["source"]),
-        "source_id": str(doc["source_id"]),
+        "id": f"{source}:{source_id}",
+        "source": source,
+        "source_id": source_id,
         "text": str(doc["text"]),
-        "ts_code": doc.get("ts_code"),
+        "ts_code": ts_code if isinstance(ts_code, str) and ts_code else None,
+        "publish_time": publish_time if isinstance(publish_time, str) and publish_time else None,
     }
 
 
@@ -176,8 +192,9 @@ def sample_review_set(
 ) -> list[dict[str, Any]]:
     """从语料库**按源分层抽样** ``n`` 条待人工标注样本（可复现 seed）。
 
-    每条为 ``{"source", "source_id", "text", "ts_code"}``（ts_code 可能为 None，R21
-    透传不伪造）。分层使人工抽检覆盖三源（规格 §4.1 构成建议）。
+    每条为 ``{"id", "source", "source_id", "text", "ts_code", "publish_time"}``
+    （``id`` 为 ``source:source_id`` 稳定样本 ID；``ts_code`` / ``publish_time`` 缺失时
+    保留 ``None``，R21 透传不伪造）。分层使人工抽检覆盖三源（规格 §4.1 构成建议）。
 
     抽样分两阶段：先按源均分名额（余数按源名顺序 +1），某源条数不足配额时其空余
     名额在第二阶段由同一 seed 的 RNG 从未选中且有剩余的源轮转补足，最终条数为
@@ -207,7 +224,7 @@ def sample_review_set(
         # 按下标分区，保证首轮选中与待补足集合互斥（不会重复选同一条）
         positions = rng.sample(range(len(pool)), count) if count < len(pool) else list(range(len(pool)))
         chosen = [pool[i] for i in positions]
-        picked.extend(_review_record(doc) for doc in chosen)
+        picked.extend(_document_record(doc) for doc in chosen)
         chosen_set = set(positions)
         leftovers[name] = [pool[i] for i in range(len(pool)) if i not in chosen_set]
     # 第二阶段：从未选中且有剩余的源轮转补足到 min(n, 总条数)，同一 rng 保证可复现
@@ -219,7 +236,7 @@ def sample_review_set(
             if len(picked) >= target:
                 break
             if leftovers[name]:
-                picked.append(_review_record(leftovers[name].pop(0)))
+                picked.append(_document_record(leftovers[name].pop(0)))
                 advanced = True
         if not advanced:  # 理论上不可达（target <= 总条数）；保留以防死循环
             break
@@ -376,17 +393,18 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
         return 1
     # 按原始下标回填：丢弃中间非法项后 results 变短，不能按下标直接 zip（否则错位）
     records = [
-        {
-            "source": str(docs[res["index"]]["source"]),
-            "source_id": str(docs[res["index"]]["source_id"]),
-            "text": str(docs[res["index"]]["text"]),
-            "label": res["label"],
-            "confidence": res["confidence"],
-        }
+        {**_document_record(docs[res["index"]]), "label": res["label"], "confidence": res["confidence"]}
         for res in results
     ]
     _write_jsonl(args.out, records)
+    missing_ts_code = sum(1 for rec in records if rec["ts_code"] is None)
+    missing_publish_time = sum(1 for rec in records if rec["publish_time"] is None)
     print(f"已标注 {len(records)} 条（丢弃 {dropped} 条非法/缺失）→ {args.out}")
+    if missing_ts_code or missing_publish_time:
+        print(
+            f"事件元数据缺失：ts_code {missing_ts_code} 条 / publish_time {missing_publish_time} 条"
+            "（split 阶段这些样本无法参与事件分组互斥检查，未校验 ≠ 已排除泄漏）"
+        )
     return 0
 
 
