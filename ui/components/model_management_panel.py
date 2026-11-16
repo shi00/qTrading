@@ -1207,14 +1207,11 @@ def _build_usage_view(
                         ),
                     ),
                     # F37：导出范围选择（当前页 / 全部筛选结果），范围进文件名可辨识。
-                    ft.Text(
-                        I18n.get("model_usage_export_scope_label"),
-                        size=AppStyles.FONT_SIZE_CAPTION,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
+                    # D19-002：持久 label 承载可访问名称，替代原先无关联的旁置 Text。
                     anchored(
                         EIDS.MODEL.USE_EXPORT_SCOPE,
                         ft.Dropdown(
+                            label=I18n.get("model_usage_export_scope_label"),
                             value=state.export_scope,
                             width=AppStyles.CONTROL_WIDTH_SM,
                             options=[
