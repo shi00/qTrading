@@ -27,7 +27,9 @@ async def test_full_cleanup_all_steps(mock_singletons):
         ok = await coordinator.do_cleanup()
 
     mock_singletons["TaskManager"]._instance.cancel_all_running_async.assert_awaited_once()
-    mock_singletons["scheduler"].stop.assert_called_once()
+    # D03-001: Step 0 stop_async 内部先调 stop()（停触发+发取消），Step 1 服务停止再调一次；
+    # stop() 幂等（二调仅重发取消，不重复 shutdown 内层 scheduler）。
+    assert mock_singletons["scheduler"].stop.call_count == 2
     mock_singletons["NewsSubscriptionService"]._instance.stop_async.assert_awaited_once()
     mock_singletons["MarketDataService"]._instance.stop_async.assert_awaited_once()
     mock_singletons["DataProcessor"]._instance.stop.assert_awaited_once()
