@@ -841,8 +841,9 @@ class TestScannerFailClosed:
         (root / "app.py").write_text("import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD)\n", encoding="utf-8")
         (root / "broken.py").write_text("x = (\n", encoding="utf-8")
 
-        with pytest.raises(AccessibilityScanError):
+        with pytest.raises(AccessibilityScanError) as excinfo:
             _scan_all()
+        assert "broken.py" in str(excinfo.value)
 
     def test_clean_file_returns_no_violations(self, tmp_path, monkeypatch):
         """合法零违规文件返回空集合 (与 "未检查" 区分)."""
