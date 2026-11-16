@@ -1419,6 +1419,10 @@ class TestDumpCancellationIntegrity:
             with pytest.raises(EmbeddedPgMaintenanceCancelUnprovenError, match="可能仍在运行"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="Windows 无进程组探测，wrapper 退出即按已取消报告（见 test_windows_cancel_after_wrapper_exit_counts_as_cancelled）",
+    )
     @pytest.mark.asyncio(loop_scope="function")
     async def test_cancel_unproven_after_wrapper_exit_raises_unproven(self, maintenance_service) -> None:
         """wrapper 已退出但无法证明 pg 子进程停止：报未知，不得谎报「已取消」。"""
@@ -1442,6 +1446,36 @@ class TestDumpCancellationIntegrity:
         ):
             with pytest.raises(EmbeddedPgMaintenanceCancelUnprovenError, match="可能仍在运行"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+    @pytest.mark.skipif(
+        os.name != "nt",
+        reason="仅 Windows：平台门跳过进程树探测，wrapper 退出即报已取消",
+    )
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_windows_cancel_after_wrapper_exit_counts_as_cancelled(self, maintenance_service) -> None:
+        """Windows（os.name=="nt"）平台门跳过 _wait_process_tree_exit：取消后不得误报 Unproven。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceCancelledError
+
+        proc_mock = self._proc_requesting_cancel(maintenance_service, returncode=-15)
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service._wait_process_tree_exit",
+                return_value=False,
+            ) as tree_wait,
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceCancelledError, match="已被取消"):
+                await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        tree_wait.assert_not_called()
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_dump_cancel_without_target_raises_cancelled(self, maintenance_service, tmp_path: Path) -> None:
@@ -1535,6 +1569,236 @@ class TestDumpCancellationIntegrity:
             await maintenance_service._run_sidecar(["sidecar", "doctor"])
 
         assert popen_mock.call_args.kwargs.get("start_new_session") is (os.name != "nt")
+
+
+class TestProcessTreeHelpersUnit:
+    """D07-007 进程树工具函数分支单测（diff coverage 补强，全 mock 无真实进程）。"""
+
+    # ---- _wait_process_exit（Windows 证明函数，分支覆盖） ----
+    def test_wait_process_exit_proves_exit_after_retry(self) -> None:
+        from services.embedded_pg_maintenance_service import _wait_process_exit
+
+        proc = MagicMock()
+        proc.poll = MagicMock(side_effect=[None, 7])
+        proc.wait = MagicMock(side_effect=[subprocess.TimeoutExpired(cmd="x", timeout=0.1)])
+
+        assert _wait_process_exit(proc, 5.0) is True
+
+    def test_wait_process_exit_treats_recycled_process_as_exit(self) -> None:
+        """waitpid 竞态（OSError: 进程已被他线程回收）视为等待目的已达成。"""
+        from services.embedded_pg_maintenance_service import _wait_process_exit
+
+        proc = MagicMock()
+        proc.poll = MagicMock(side_effect=[None, None, None])
+        proc.wait = MagicMock(side_effect=OSError("process already reaped"))
+
+        assert _wait_process_exit(proc, 5.0) is True
+
+    def test_wait_process_exit_returns_false_on_timeout(self) -> None:
+        from services.embedded_pg_maintenance_service import _wait_process_exit
+
+        proc = MagicMock()
+        proc.poll = MagicMock(return_value=None)
+        proc.wait = MagicMock(side_effect=subprocess.TimeoutExpired(cmd="x", timeout=0.1))
+
+        assert _wait_process_exit(proc, 0.15) is False
+
+    # ---- _process_group_alive 探测异常分支 ----
+    def test_process_group_alive_false_when_group_gone(self, monkeypatch) -> None:
+        from services.embedded_pg_maintenance_service import _process_group_alive
+
+        proc = MagicMock()
+        proc.pid = 4321
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid, raising=True)
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+
+        assert _process_group_alive(proc) is False
+
+    def test_process_group_alive_true_on_eperm(self, monkeypatch) -> None:
+        """EPERM：组仍存在但无权探测，保守视为存活。"""
+        from services.embedded_pg_maintenance_service import _process_group_alive
+
+        proc = MagicMock()
+        proc.pid = 4321
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(PermissionError()))
+
+        assert _process_group_alive(proc) is True
+
+    # ---- _wait_process_tree_exit 平台分流与回收竞态 ----
+    def test_wait_process_tree_exit_windows_routes_to_wait_process_exit(self, monkeypatch) -> None:
+        from services.embedded_pg_maintenance_service import _wait_process_tree_exit
+
+        monkeypatch.setattr(os, "name", "nt")
+        proc = MagicMock()
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service._wait_process_exit",
+                return_value=False,
+            ) as routed,
+            patch(
+                "services.embedded_pg_maintenance_service.os.getpgid", side_effect=AssertionError("POSIX 路径不得执行")
+            ),
+        ):
+            assert _wait_process_tree_exit(proc, 0.2) is False
+        routed.assert_called_once_with(proc, 0.2)
+
+    def test_wait_process_tree_exit_tolerates_poll_oserror(self, monkeypatch) -> None:
+        """回收 wrapper 的 poll() 竞态（OSError）不得中断等待循环。"""
+        from services.embedded_pg_maintenance_service import _wait_process_tree_exit
+
+        proc = MagicMock()
+        proc.pid = 4321
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+        killpg_calls = {"n": 0}
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            killpg_calls["n"] += 1
+            if killpg_calls["n"] == 1:
+                return  # 首轮：组仍存活
+            raise ProcessLookupError()  # 次轮：组已消失
+
+        monkeypatch.setattr(os, "killpg", fake_killpg)
+        monkeypatch.setattr("services.embedded_pg_maintenance_service.time.sleep", lambda s: None)
+        proc.poll = MagicMock(side_effect=OSError("race with reaper"))
+
+        assert _wait_process_tree_exit(proc, 1.0) is True
+
+    # ---- _signal_process_tree Windows taskkill / POSIX 分支 ----
+    def test_signal_process_tree_windows_taskkill_success(self, monkeypatch) -> None:
+        from services.embedded_pg_maintenance_service import _signal_process_tree
+
+        monkeypatch.setattr(os, "name", "nt")
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with patch("services.embedded_pg_maintenance_service.subprocess.run", return_value=completed) as run_mock:
+            assert _signal_process_tree(MagicMock(pid=99), force=False) is True
+
+        args = run_mock.call_args[0][0]
+        assert args[0] == "taskkill"
+        assert "/T" in args and "/F" in args
+
+    def test_signal_process_tree_windows_taskkill_timeout_returns_false(self, monkeypatch) -> None:
+        from services.embedded_pg_maintenance_service import _signal_process_tree
+
+        monkeypatch.setattr(os, "name", "nt")
+        with patch(
+            "services.embedded_pg_maintenance_service.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="taskkill", timeout=5),
+        ):
+            assert _signal_process_tree(MagicMock(pid=99), force=False) is False
+
+    def test_signal_process_tree_terminates_single_proc_when_not_leader(self, monkeypatch) -> None:
+        """未成为进程组长（或 pid 复用）时不得 killpg；wrapper 存活则单进程终止。"""
+        from services.embedded_pg_maintenance_service import _signal_process_tree
+
+        proc = MagicMock()
+        proc.pid = 4321
+        proc.poll = MagicMock(return_value=None)
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid + 7)
+
+        assert _signal_process_tree(proc, force=False) is True
+        proc.terminate.assert_called_once_with()
+        proc.kill.assert_not_called()
+
+    def test_signal_process_tree_force_kills_single_proc(self, monkeypatch) -> None:
+        from services.embedded_pg_maintenance_service import _signal_process_tree
+
+        proc = MagicMock()
+        proc.pid = 4321
+        proc.poll = MagicMock(return_value=None)
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid + 7)
+
+        assert _signal_process_tree(proc, force=True) is True
+        proc.kill.assert_called_once_with()
+
+    def test_signal_process_tree_refuses_when_wrapper_exited(self, monkeypatch) -> None:
+        """wrapper 已退出且组 id 不可信：放弃信号，交由上层证明逻辑。"""
+        from services.embedded_pg_maintenance_service import _signal_process_tree
+
+        proc = MagicMock()
+        proc.pid = 4321
+        proc.poll = MagicMock(return_value=0)
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid + 7)
+
+        assert _signal_process_tree(proc, force=False) is False
+
+    def test_signal_process_tree_killpg_group_graceful_and_force(self, monkeypatch) -> None:
+        from services.embedded_pg_maintenance_service import _signal_process_tree
+
+        proc = MagicMock()
+        proc.pid = 4321
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+        sent: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+
+        assert _signal_process_tree(proc, force=False) is True
+        assert _signal_process_tree(proc, force=True) is True
+        assert sent == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
+
+    def test_signal_process_tree_oserror_returns_false(self, monkeypatch) -> None:
+        """进程组已不存在（OSError）：命令已自然结束，返回 False。"""
+        from services.embedded_pg_maintenance_service import _signal_process_tree
+
+        proc = MagicMock()
+        proc.pid = 4321
+        monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(OSError("no group")))
+
+        assert _signal_process_tree(proc, force=False) is False
+
+    # ---- 取消后产物状态未知（stat OSError → Unproven） ----
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_dump_cancel_stat_oserror_raises_unproven(self, maintenance_service, tmp_path: Path) -> None:
+        """取消后 target stat 失败：只能报「无法确认输出文件状态」。"""
+        import errno
+
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceCancelUnprovenError
+
+        output_path = tmp_path / "unknown_state.dump"
+        proc_mock = TestDumpCancellationIntegrity._proc_requesting_cancel(maintenance_service, returncode=-15)
+
+        real_stat = Path.stat
+
+        def fake_stat(self: Path, *args: object, **kwargs: object):
+            if str(self) == str(output_path):
+                raise OSError(errno.EIO, "simulated io failure")
+            return real_stat(self, *args, **kwargs)
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+            patch.object(Path, "stat", fake_stat),
+        ):
+            with pytest.raises(EmbeddedPgMaintenanceCancelUnprovenError, match="无法确认输出文件状态"):
+                await maintenance_service.dump(output_path)
+
+    # ---- 单例/解析补充分支 ----
+    def test_has_active_operation_false_without_instance(self) -> None:
+        """未构造单例时只读探测必须返回 False（不触发构造）。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceService
+
+        with patch.object(EmbeddedPgMaintenanceService, "_instance", None):
+            assert EmbeddedPgMaintenanceService.has_active_operation() is False
+
+    def test_doctor_json_missing_required_fields_rejected(self) -> None:
+        """data_dir / initialized 缺失必须显式报错，不得静默默认值。"""
+        from services.embedded_pg_maintenance_service import (
+            EXPECTED_DOCTOR_SCHEMA,
+            EmbeddedPgMaintenanceError,
+            EmbeddedPgMaintenanceService,
+        )
+
+        svc = EmbeddedPgMaintenanceService.__new__(EmbeddedPgMaintenanceService)
+        with pytest.raises(EmbeddedPgMaintenanceError, match="data_dir"):
+            svc._validate_doctor_json({"schema": EXPECTED_DOCTOR_SCHEMA})
+        with pytest.raises(EmbeddedPgMaintenanceError, match="initialized"):
+            svc._validate_doctor_json({"schema": EXPECTED_DOCTOR_SCHEMA, "data_dir": "/fake/data"})
 
 
 @pytest.mark.skipif(os.name == "nt", reason="进程组/信号语义仅 POSIX")
