@@ -45,6 +45,7 @@ def _make_result(
     events=None,
     generated_at: datetime | None = None,
     execution_metadata: dict | None = None,
+    events_dropped=None,
 ) -> MagicMock:
     result = MagicMock()
     result.analysis_status = status
@@ -53,6 +54,7 @@ def _make_result(
     result.summary = "示例摘要"
     result.generated_at = generated_at
     result.execution_metadata = execution_metadata
+    result.events_dropped = events_dropped
     result.events = events or [
         {
             "event_type": "litigation",
@@ -579,6 +581,65 @@ class TestExecutionMetadataState:
         await _drain(vm)
         assert vm.state.phase == PHASE_EVIDENCE_READY
         assert vm.state.execution_metadata is None
+
+
+class TestEventsDroppedState:
+    """D14-002：剔除质量提示在 state 中受控呈现；None=未记录、0=已校验无剔除（R21）。"""
+
+    async def _generate_with(self, fake_service, *, result, reused=False, reuse_type="none"):
+        fake_service.analyze = AsyncMock(
+            return_value=NewsInsightOutcome(result=result, reused=reused, reuse_type=reuse_type)
+        )
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_READY
+        return vm
+
+    async def test_partial_drop_count_and_reasons(self, fake_service):
+        dropped = [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 2}]
+        vm = await self._generate_with(fake_service, result=_make_result(events_dropped=dropped))
+        assert vm.state.events_dropped_count == 2
+        assert vm.state.events_dropped_reasons == ("no_valid_evidence_quote",)
+
+    async def test_cache_hit_keeps_warning(self, fake_service):
+        """复用快照走同一字段（服务层已从 coverage 回读），VM 不丢警告。"""
+        dropped = [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 1}]
+        vm = await self._generate_with(
+            fake_service,
+            result=_make_result(events_dropped=dropped),
+            reused=True,
+            reuse_type="cache_hit",
+        )
+        assert vm.state.events_dropped_count == 1
+        assert vm.state.events_dropped_reasons == ("no_valid_evidence_quote",)
+
+    async def test_unknown_is_none_not_zero(self, fake_service):
+        vm = await self._generate_with(fake_service, result=_make_result(events_dropped=None))
+        assert vm.state.events_dropped_count is None
+        assert vm.state.events_dropped_reasons == ()
+
+    async def test_recorded_zero_is_zero(self, fake_service):
+        vm = await self._generate_with(fake_service, result=_make_result(events_dropped=[]))
+        assert vm.state.events_dropped_count == 0
+        assert vm.state.events_dropped_reasons == ()
+
+    async def test_invalid_shape_is_unknown(self, fake_service):
+        vm = await self._generate_with(
+            fake_service,
+            result=_make_result(events_dropped=[{"drop_reason": "x", "dropped_count": True}]),
+        )
+        assert vm.state.events_dropped_count is None
+
+    async def test_new_selection_clears_previous_warning(self, fake_service):
+        dropped = [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 1}]
+        vm = await self._generate_with(fake_service, result=_make_result(events_dropped=dropped))
+        vm.select_stock("000002.SZ")
+        await _drain(vm)
+        assert vm.state.events_dropped_count is None
+        assert vm.state.events_dropped_reasons == ()
 
 
 class TestNowStrError:
