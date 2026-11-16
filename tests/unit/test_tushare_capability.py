@@ -840,8 +840,9 @@ class TestProbeCapabilityGenerationIsolation:
             raise asyncio.CancelledError()
 
         client._handle_probe_call = fake_probe_call
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:  # R2：必须传播，不得吞没
             await client.probe_api_capabilities()
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         assert client.is_api_available("daily") is None
         assert client.get_last_probe_time() is None
