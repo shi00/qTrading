@@ -166,6 +166,7 @@ class TestStartBackup:
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False):
             await vm.start_backup(Path("/tmp/backup.dump"))
         assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "backup_failed"
 
         # 第二次: 恢复成功
         success_result = MagicMock(output_path="/tmp/backup.dump", file_size=100, exit_code=0)
@@ -174,6 +175,7 @@ class TestStartBackup:
             await vm.start_backup(Path("/tmp/backup.dump"))
         assert vm.state.error_message is None
         assert vm.state.backup_success_message is not None
+        assert vm.state.backup_success_message.key == "backup_success"
 
     @pytest.mark.asyncio
     async def test_start_backup_skip_when_already_backing_up(self, vm, mock_maintenance_service):
@@ -335,32 +337,71 @@ def _thread_pool_patch(run_async_impl: Any) -> Any:
 
 
 class TestDefaultBackupPath:
-    """_generate_default_backup_path 纯函数测试 (P1-7: 绝对路径, 自组件模块下沉)."""
+    """_generate_default_backup_path 测试 (P1-7: 绝对路径, 自组件模块下沉).
 
-    def test_returns_absolute_path_with_timestamp(self) -> None:
+    所有用例经 autouse fixture 把 ``platformdirs.user_data_dir`` 重定向到一次性
+    tmp_path 根, 并核对 mkdir 目标恒受控于 tmp_path, 不读写真实用户目录
+    (D21-UIB-001, R7).
+    """
+
+    @pytest.fixture(autouse=True)
+    def isolated_app_data_root(self, tmp_path, monkeypatch):
+        """隔离应用数据根, 并断言路径接缝零越界访问 (D21-UIB-001).
+
+        生产函数解析应用数据根的唯一接缝是 ``platformdirs.user_data_dir``;
+        将其指向 ``tmp_path/app-data`` 后, 任何被解析出的目录都落在受控根内。
+        用例故意不 stat 真实用户目录, 而以「生成路径落在受控根内」「mkdir
+        目标不越出 tmp_path」作为真实目录零访问/零写入的证明。
+        """
+        import platformdirs
+
+        app_data_root = tmp_path / "app-data"
+        real_app_data_root = Path(platformdirs.user_data_dir("qTrading"))
+        assert not app_data_root.resolve().is_relative_to(real_app_data_root.resolve()), (
+            "隔离根必须位于真实用户数据目录之外"
+        )
+        monkeypatch.setattr(
+            vm_module.platformdirs,
+            "user_data_dir",
+            lambda _app_name: str(app_data_root),
+        )
+
+        mkdir_targets: list[Path] = []
+        real_mkdir = Path.mkdir
+
+        def _recording_mkdir(self_path: Path, *args: Any, **kwargs: Any) -> None:
+            mkdir_targets.append(self_path)
+            real_mkdir(self_path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", _recording_mkdir)
+        yield app_data_root
+        assert mkdir_targets, "默认备份路径应执行 mkdir, 否则用例未覆盖目录创建"
+        tmp_root = tmp_path.resolve()
+        leaked = [p for p in mkdir_targets if not p.resolve().is_relative_to(tmp_root)]
+        assert not leaked, f"mkdir 越界访问真实文件系统: {leaked}"
+
+    def test_returns_absolute_path_with_timestamp(self, isolated_app_data_root) -> None:
         """返回绝对 Path, 格式 <backups>/qtrading-backup-YYYYMMDD-HHMMSS.dump (P1-7)."""
         path = vm_module._generate_default_backup_path()
         assert isinstance(path, Path)
         assert path.is_absolute(), f"P1-7: path 应为绝对路径, 实际: {path}"
+        assert path.is_relative_to(isolated_app_data_root.resolve()), f"默认路径应落在隔离的应用数据根内, 实际: {path}"
         assert path.name.startswith("qtrading-backup-")
         assert path.suffix == ".dump"
 
-    def test_name_contains_timestamp_pattern(self) -> None:
+    def test_name_contains_timestamp_pattern(self, isolated_app_data_root) -> None:
         """文件名含时间戳 (8 位日期 + 6 位时间)."""
         import re
 
         path = vm_module._generate_default_backup_path()
+        assert path.is_relative_to(isolated_app_data_root.resolve()), f"默认路径应落在隔离的应用数据根内, 实际: {path}"
         assert re.match(r"^qtrading-backup-\d{8}-\d{6}\.dump$", path.name), path.name
 
-    def test_parent_dir_is_backups_under_app_data(self) -> None:
-        """P1-7: 父目录为 <app data>/backups (platformdirs.user_data_dir)."""
-        import platformdirs
-
+    def test_parent_dir_is_backups_under_app_data(self, isolated_app_data_root) -> None:
+        """P1-7: 父目录为 <app data>/backups (平台数据根已隔离到 tmp_path)."""
         path = vm_module._generate_default_backup_path()
-        expected_parent = Path(platformdirs.user_data_dir("qTrading")) / "backups"
-        assert path.parent == expected_parent.resolve(), (
-            f"P1-7: 父目录应为 {expected_parent.resolve()}, 实际: {path.parent}"
-        )
+        expected_parent = (isolated_app_data_root / "backups").resolve()
+        assert path.parent == expected_parent, f"P1-7: 父目录应为 {expected_parent}, 实际: {path.parent}"
 
     def test_backups_dir_created_if_missing(self, tmp_path, monkeypatch) -> None:
         """P1-7: backups 目录不存在时自动创建 (mkdir parents=True exist_ok=True)."""
