@@ -314,11 +314,11 @@ class TestBindActualInput:
         assert round_row.input_revision == 1
         assert current == bind.round_id
         # input_bound 执行事件：execution/round/execution_seq 同设（§9.6 CHECK），
-        # M1 是 session_seq=0 的受理消息，故本事件 session_seq=1。
+        # M1 是 session_seq=1 的受理消息（水位起点 1，检视 D01），故本事件 session_seq=2。
         assert event is not None
         assert event.event_kind == "input_bound"
         assert event.execution_id == receipt.execution_id and event.round_id == bind.round_id
-        assert event.execution_seq == 0 and event.session_seq == 1
+        assert event.execution_seq == 1 and event.session_seq == 2
         assert event.role is None
         await engine.dispose()
 
@@ -460,7 +460,7 @@ class TestBindActualInput:
         assert exc_node.value.code is AgentErrorCode.INPUT_CONFLICT
 
         replay = await dao.bind_actual_input(_bind_request(receipt))
-        assert replay.execution_seq == 0
+        assert replay.execution_seq == 1  # 水位起点 1（检视 D01）
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
@@ -799,7 +799,7 @@ class TestReviseQueued:
             expected_revision=revise.expected_execution_revision,
             node_id=revise.node_id,
         )
-        assert rev.session_seq == 1
+        assert rev.session_seq == 2  # M1=1 之后的第二条 session 事件（水位起点 1，检视 D01）
         async with engine.connect() as conn:
             m2 = (
                 await conn.execute(
@@ -850,7 +850,7 @@ class TestReviseQueued:
                     )
                 ).all()
             }
-        assert m2.session_seq == 1 and m2.role == "user"
+        assert m2.session_seq == 2 and m2.role == "user"
         assert m2.body_text == "改为研究两家公司"
         assert m2.execution_id is None  # 修订消息纯 session 事件（无 round，§9.6）
         assert cmd.command_kind == "revise" and cmd.input_revision == 2

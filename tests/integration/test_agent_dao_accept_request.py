@@ -29,6 +29,8 @@ from core.agent_types import (
     AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
+    EventKind,
+    EventReadQuery,
     Mode,
     Purpose,
     json_doc,
@@ -356,7 +358,7 @@ class TestAcceptRequestTransaction:
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_session_seq_monotonic_and_watermark_greatest(self, real_embedded_pg: ConnectionInfo) -> None:
-        """session_seq 单调分配；session.event_seq GREATEST 推进（R22）。"""
+        """session_seq 从 1 起单调分配；session.event_seq GREATEST 推进（R22，检视 D01）。"""
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
         engine = create_test_engine(real_embedded_pg.url)
@@ -368,9 +370,16 @@ class TestAcceptRequestTransaction:
         async with engine.connect() as conn:
             rows = (await conn.execute(text("SELECT session_seq FROM agent_message ORDER BY session_seq"))).fetchall()
             wm2 = (await conn.execute(text("SELECT event_seq FROM agent_session"))).scalar_one()
-        assert seq1 == 0
-        assert [r[0] for r in rows] == [0, 1]
-        assert wm1 == 0 and wm2 == 1
+        # 水位起点 1：事件 codec 要求 session_seq ≥ 1，受理消息不得为 0（检视 D01）。
+        assert seq1 == 1
+        assert [r[0] for r in rows] == [1, 2]
+        assert wm1 == 1 and wm2 == 2
+        # 真实受理 → 首次观察：after_seq=0 追平必须取到首条受理事件，
+        # 不得被「seq > 0」过滤跳过（不经 seq=1 手工种子的正例，检视 D01）。
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=0))
+        assert [e.session_seq for e in page.events] == [1, 2]
+        assert page.events[0].event_kind is EventKind.PUBLIC_MESSAGE_SAVED
+        assert page.last_seq == 2 and page.has_more is False
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")

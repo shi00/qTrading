@@ -534,7 +534,9 @@ class AgentDao(BaseDao):
           ``INPUT_CONFLICT``；旧行摘要仅覆盖正文，按 command 行存储的 manifest 与
           期望版补核（检视 D05）。
 
-        序号分配持目标 session 行锁（§5.4.4）；session.event_seq 以 GREATEST
+        序号分配持目标 session 行锁（§5.4.4）；**序号起点 1**（首条消息
+        ``session_seq=1``，与事件 codec 的 ``session_seq ≥ 1`` 及 ``read_events``
+        的 ``after_seq=0`` 追平语义一致，检视 D01）；session.event_seq 以 GREATEST
         单调推进（R22）。occurred_at/committed_at 用受理时刻（同事务内一致）。
 
         Raises:
@@ -622,11 +624,11 @@ class AgentDao(BaseDao):
                     f"{request.user_scope}/{request.session_id}/{request.client_command_id}",
                 )
 
-            # 4. 序号分配（持锁下 max+1；首条消息即首个执行序）。
+            # 4. 序号分配（持锁下 max+1，起点 1：首条消息 session_seq=1，检视 D01）。
             session_seq = (
                 (
                     await conn.execute(
-                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.session_seq), -1)).where(
+                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.session_seq), 0)).where(
                             AgentMessage.user_scope == request.user_scope,
                             AgentMessage.session_id == request.session_id,
                         )
@@ -1999,7 +2001,9 @@ class AgentDao(BaseDao):
                     identity,
                 )
             input_revision = _require_int_field(accepted_revision, "input_revision", identity, 1)
-            # 6. 序号分配（持锁下 max+1；执行事件双 seq 同设，§9.6 CHECK）。
+            # 6. 序号分配（持锁下 max+1，起点 1：首个执行事件 ``execution_seq=1``、
+            #    首条 session 事件 ``session_seq=1``，与事件 codec 下限 1 一致，
+            #    检视 D01；执行事件双 seq 同设，§9.6 CHECK）。
             round_number = (
                 (
                     await conn.execute(
@@ -2013,7 +2017,7 @@ class AgentDao(BaseDao):
             execution_seq = (
                 (
                     await conn.execute(
-                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.execution_seq), -1)).where(
+                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.execution_seq), 0)).where(
                             AgentMessage.user_scope == request.user_scope,
                             AgentMessage.execution_id == request.execution_id,
                         )
@@ -2023,7 +2027,7 @@ class AgentDao(BaseDao):
             session_seq = (
                 (
                     await conn.execute(
-                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.session_seq), -1)).where(
+                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.session_seq), 0)).where(
                             AgentMessage.user_scope == request.user_scope,
                             AgentMessage.session_id == request.session_id,
                         )
@@ -2664,7 +2668,7 @@ class AgentDao(BaseDao):
                     "execution revision changed concurrently",
                     identity,
                 )
-            # 4. session 行锁 + 序号分配。
+            # 4. session 行锁 + 序号分配（起点 1，与事件 codec 下限 1 一致，检视 D01）。
             await conn.execute(
                 sa.select(AgentSession.session_id)
                 .where(
@@ -2676,7 +2680,7 @@ class AgentDao(BaseDao):
             session_seq = (
                 (
                     await conn.execute(
-                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.session_seq), -1)).where(
+                        sa.select(sa.func.coalesce(sa.func.max(AgentMessage.session_seq), 0)).where(
                             AgentMessage.user_scope == request.user_scope,
                             AgentMessage.session_id == request.session_id,
                         )
@@ -3412,6 +3416,7 @@ class AgentDao(BaseDao):
                             AgentMessage.search_text,
                             AgentMessage.native_fact_ref,
                             AgentMessage.tool_call_id,
+                            AgentMessage.occurred_at,
                             AgentMessage.committed_at,
                         ).where(
                             AgentMessage.user_scope == request.user_scope,
