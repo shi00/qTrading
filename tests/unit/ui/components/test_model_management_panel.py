@@ -450,6 +450,25 @@ class TestUsageView:
         assert "usage_exit_monthly" not in keys
         assert "usage_month_query" not in keys
 
+    def test_budget_input_enter_shares_save_command(self, monkeypatch):
+        """D19-003：预算输入框 Enter 与保存按钮共用同一 VM 命令（不另造保存路径）。"""
+        page = MagicMock(name="page")
+        monkeypatch.setattr(ft, "context", SimpleNamespace(page=page))
+        state = _usage_state(monthly_limit_cny=Decimal("100"), budget_draft="100")
+        vm = MagicMock()
+        row = panel_module._build_budget_edit_row(state, vm)
+        inputs = [c for c in _walk_controls(row) if isinstance(c, ft.TextField)]
+        assert len(inputs) == 1
+        assert inputs[0].on_submit is not None
+        event = MagicMock(name="event")
+        inputs[0].on_submit(event)
+        page.run_task.assert_called_once_with(vm.save_monthly_budget)
+
+        save = next(c for c in _walk_controls(row) if getattr(c, "key", None) == "usage_budget_save")
+        page.run_task.reset_mock()
+        save.on_click(event)
+        page.run_task.assert_called_once_with(vm.save_monthly_budget)
+
     def test_monthly_mode_renders_month_summary_section(self):
         """F36：月汇总模式渲染返回 / 月份选择 / 查询区，不渲染明细模式控件。"""
         vm = MagicMock()

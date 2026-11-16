@@ -693,6 +693,8 @@ def _build_budget_edit_row(state: ModelUsageState, vm: ModelUsageViewModel) -> f
     未设限额显式「未设置」（空输入保存即清除限额）、读取失败显式「未知」，
     均不以 0 伪装（R21）。金额经 VM 草稿状态承载（on_change 同步 setter，沿
     ``set_search`` 先例），保存经 ``page.run_task(vm.save_monthly_budget)`` 提交（R16）。
+    D19-003：输入框 Enter 与保存按钮共用同一 VM 命令（不另造保存路径），
+    重复提交由 VM 进行中守卫归属；非法 / 空值仍走 VM 校验，不因按键绕过。
     """
     if state.monthly_limit_unknown:
         current_text = I18n.get("model_usage_unknown")
@@ -720,6 +722,7 @@ def _build_budget_edit_row(state: ModelUsageState, vm: ModelUsageViewModel) -> f
                     color=AppColors.INPUT_TEXT,
                     border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
                     on_change=safe_on_change(lambda e: vm.set_budget_draft(get_control_value(e.control, ft.TextField))),
+                    on_submit=safe_on_click(_run_task_handler(vm.save_monthly_budget)),
                 ),
             ),
             anchored(

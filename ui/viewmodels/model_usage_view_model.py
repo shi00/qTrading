@@ -555,6 +555,9 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         # ``_budget_draft_dirty`` 标记草稿已分叉——load 仅在未分叉时同步回填。
         self._budget_draft_version: int = 0
         self._budget_draft_dirty: bool = False
+        # D19-003：预算提交进行中守卫。Enter 与保存按钮共用同一命令，连续 Enter 时
+        # 第二次调用在首个提交完成前直接返回（不重复提交），校验仍先于守卫执行。
+        self._budget_saving: bool = False
         self._init_mixin_fields()
 
     # ------------------------------------------------------------------
@@ -828,6 +831,8 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         保留旧值 / unknown 标识，不以 ``budget_saved`` 覆盖回读错误；回读被后继
         请求取代时不写消息（由后继请求发布最终结果）。保存只提交一次，不因回读
         失败自动重写。
+        D19-003：Enter 与保存按钮共用本命令；校验先于进行中守卫（非法值仍显式报
+        错），守卫期间的重复调用直接返回，不重复提交。
         """
         saver = self._budget_limit_saver
         if saver is None:
@@ -838,34 +843,40 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         except (ArithmeticError, ValueError):
             self._set_state(message=Message("model_usage_budget_invalid"))
             return
-        draft_version = self._budget_draft_version
+        if self._budget_saving:
+            return  # D19-003：上一提交未完成，连续 Enter / 双击不重复提交
+        self._budget_saving = True
         try:
-            committed = await saver(amount)
-        except asyncio.CancelledError:
-            raise  # R2: 必须传播
-        except Exception:
-            self._set_state(message=Message("model_usage_budget_save_failed"))
-            return
-        if not committed:
-            self._set_state(message=Message("model_usage_budget_save_failed"))
-            return
-        outcome = await self.load()
-        if outcome.failure == LOAD_FAILURE_SUPERSEDED:
-            # 后继请求已接管加载与消息：不再写入成功消息覆盖其最终结果（D16-006）。
-            return
-        changes: dict[str, Any] = {
-            "message": Message("model_usage_budget_saved")
-            if outcome.adopted
-            else _refresh_failure_message("model_usage_budget_saved_refresh_failed", outcome)
-        }
-        if self._budget_draft_version == draft_version:
-            # 等待期间无新输入：保存回执确认发起版本，草稿与已提交限额同步。
-            self._budget_draft_dirty = False
-            committed_limit = self._state.monthly_limit_cny
-            # 仅完整回读时以读回值规范化草稿；回读失败保留用户输入与旧值 / unknown。
-            if outcome.adopted and committed_limit == amount:  # None == None（清除限额）
-                changes["budget_draft"] = _format_limit_text(committed_limit)
-        self._set_state(**changes)
+            draft_version = self._budget_draft_version
+            try:
+                committed = await saver(amount)
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播
+            except Exception:
+                self._set_state(message=Message("model_usage_budget_save_failed"))
+                return
+            if not committed:
+                self._set_state(message=Message("model_usage_budget_save_failed"))
+                return
+            outcome = await self.load()
+            if outcome.failure == LOAD_FAILURE_SUPERSEDED:
+                # 后继请求已接管加载与消息：不再写入成功消息覆盖其最终结果（D16-006）。
+                return
+            changes: dict[str, Any] = {
+                "message": Message("model_usage_budget_saved")
+                if outcome.adopted
+                else _refresh_failure_message("model_usage_budget_saved_refresh_failed", outcome)
+            }
+            if self._budget_draft_version == draft_version:
+                # 等待期间无新输入：保存回执确认发起版本，草稿与已提交限额同步。
+                self._budget_draft_dirty = False
+                committed_limit = self._state.monthly_limit_cny
+                # 仅完整回读时以读回值规范化草稿；回读失败保留用户输入与旧值 / unknown。
+                if outcome.adopted and committed_limit == amount:  # None == None（清除限额）
+                    changes["budget_draft"] = _format_limit_text(committed_limit)
+            self._set_state(**changes)
+        finally:
+            self._budget_saving = False
 
     # ------------------------------------------------------------------
     # 历史月汇总视图 + 导出
