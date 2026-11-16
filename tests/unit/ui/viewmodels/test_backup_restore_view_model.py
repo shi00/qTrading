@@ -166,6 +166,7 @@ class TestStartBackup:
         with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False):
             await vm.start_backup(Path("/tmp/backup.dump"))
         assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "backup_failed"
 
         # 第二次: 恢复成功
         success_result = MagicMock(output_path="/tmp/backup.dump", file_size=100, exit_code=0)
@@ -174,6 +175,7 @@ class TestStartBackup:
             await vm.start_backup(Path("/tmp/backup.dump"))
         assert vm.state.error_message is None
         assert vm.state.backup_success_message is not None
+        assert vm.state.backup_success_message.key == "backup_success"
 
     @pytest.mark.asyncio
     async def test_start_backup_skip_when_already_backing_up(self, vm, mock_maintenance_service):
