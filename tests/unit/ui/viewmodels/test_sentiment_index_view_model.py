@@ -185,8 +185,9 @@ class TestSelectDay:
             await asyncio.wait_for(started.wait(), timeout=1.0)
             assert not detail_task.done()
             vm.select_stock("000001.SZ")  # 旧明细在途时换股：取消旧任务 + 重置 selected_day
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as excinfo:
                 await asyncio.wait_for(detail_task, timeout=1.0)
+            assert isinstance(excinfo.value, asyncio.CancelledError)
             assert detail_task.cancelled()
         finally:
             release.set()
