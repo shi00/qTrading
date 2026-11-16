@@ -4377,7 +4377,10 @@ class TestTaskManagerAdmissionGate:
 
         mgr._schedule_coro = MagicMock(return_value=True)
         mgr._persist_task(task)
-        mgr._schedule_coro.assert_called_once()
+        assert mgr._schedule_coro.call_count == 1
+        persist_args = mgr._schedule_coro.call_args
+        assert asyncio.iscoroutine(persist_args.args[0])
+        assert callable(persist_args.kwargs.get("on_drop"))
         assert mgr._persist_pending_count == 1
         # 关闭未执行的持久化协程，避免 "coroutine was never awaited"
         mgr._schedule_coro.call_args.args[0].close()

@@ -308,8 +308,8 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance.cancel_all_running_async = AsyncMock()
             mock_tm._instance = mock_instance
             await coord._step0_cancel_tasks()
-            mock_instance.close_admission.assert_called_once()
-            mock_instance.cancel_all_running_async.assert_called_once()
+            mock_instance.close_admission.assert_called_once_with()
+            mock_instance.cancel_all_running_async.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_step0_closes_admission_after_scheduler_drain_before_cancel(self):
