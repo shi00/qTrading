@@ -1475,41 +1475,10 @@ class TestCheckDataHealthDeepBranches:
             assert result["status"] in ("red", "yellow", "green")
             assert "lag" in result["details"]
 
-    @pytest.mark.asyncio
-    async def test_api_trade_cal_cross_check(self):
-        proc = FakeProcessor()
-        proc._health_cache = {"time": 0, "data": None}
-        proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={"20240610"})
-        proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={
-                "tables": {"financial_reports": {"ratio": 0.9}},
-                "global_trade_days": 500,
-            }
-        )
-        proc.cache.get_concept_count = AsyncMock(return_value=100)
-        proc.cache.sync_dao.get_sync_status = AsyncMock(
-            return_value=pd.DataFrame({"table_name": ["financial_reports"], "last_data_date": ["20240610"]})
-        )
-        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
-        proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
+    def _prepare_probe_case(self):
+        """D09-003：本地日历与行情均止于周一 6/10，供官方日历探测用例复用。"""
+        from data.external.tushare_client import TushareClient
 
-        async def fake_get_trade_dates(start_date=None, end_date=None):
-            return ["20240101", "20240614"]
-
-        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
-
-        mock_tc = MagicMock()
-        mock_tc.trade_cal = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240614"]}))
-
-        with patch("data.mixins.health_mixin.get_now") as mock_now:
-            mock_now.return_value = datetime.datetime(2024, 6, 14)
-            with patch("data.external.tushare_client.TushareClient", return_value=mock_tc):
-                result = await proc.check_data_health()
-                assert result["status"] in ("red", "yellow", "green")
-                assert "lag" in result["details"]
-
-    @pytest.mark.asyncio
-    async def test_api_extends_gold_standard(self):
         proc = FakeProcessor()
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.quote_dao.get_cached_trade_dates = AsyncMock(return_value={datetime.date(2024, 6, 10)})
@@ -1523,23 +1492,99 @@ class TestCheckDataHealthDeepBranches:
         proc.cache.sync_dao.get_sync_status = AsyncMock(
             return_value=pd.DataFrame({"table_name": ["financial_reports"], "last_data_date": ["20240610"]})
         )
-        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240614")
+        proc.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20240610")
         proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
 
         async def fake_get_trade_dates(start_date=None, end_date=None):
-            return [datetime.date(2024, 1, 1), datetime.date(2024, 6, 13)]
+            return [datetime.date(2024, 6, 10)]
+
+        async def fake_get_latest_trade_date():
+            return "20240610"
 
         proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_latest_trade_date = fake_get_latest_trade_date
 
-        mock_tc = MagicMock()
-        mock_tc.trade_cal = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240614"]}))
+        # spec_set 受约束替身：未在 TushareClient 声明的方法（如旧代码的 trade_cal）会报 AttributeError。
+        api = MagicMock(spec_set=TushareClient)
+        return proc, api
 
-        with patch("data.mixins.health_mixin.get_now") as mock_now:
-            mock_now.return_value = datetime.datetime(2024, 6, 14)
-            with patch("data.external.tushare_client.TushareClient", return_value=mock_tc):
-                result = await proc.check_data_health()
-                assert result["status"] in ("red", "yellow", "green")
-                assert "lag" in result["details"]
+    @pytest.mark.asyncio
+    async def test_api_trade_cal_probe_merges_full_official_set(self):
+        """D09-003：调用真实 get_trade_cal，探测截止日为已收盘自然日，合并完整官方集合后 lag=2。
+
+        本地日历/行情止于周一 6/10，官方开市日含周二 6/11、周三 6/12；
+        6/13 09:00 开市前探测上界须为 6/12（不含当日），完整合并后 lag=2 而非仅按末日计 1。
+        """
+        proc, api = self._prepare_probe_case()
+        assert not hasattr(api, "trade_cal")  # 约束替身拒绝不存在的旧方法，防再犯
+        api.get_trade_cal = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240611", "20240612"]}))
+
+        with (
+            patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 13, 9, 0)),
+            patch("data.external.tushare_client.TushareClient", return_value=api),
+        ):
+            result = await proc.check_data_health()
+
+        api.get_trade_cal.assert_awaited_once_with(
+            start_date="20240610",
+            end_date="20240612",
+            is_open=1,
+        )
+        assert result["market"]["lag_days"] == 2
+        assert result["details"]["lag"] == 2
+        assert result["market"]["latest_official"] == datetime.date(2024, 6, 12)
+        assert not any("cross-check unavailable" in r for r in result["reasons"])
+
+    @pytest.mark.asyncio
+    async def test_api_trade_cal_empty_response_is_known_empty(self):
+        """D09-003：API 成功返回空集合 = 区间内确无开市日（已知），不误标未知。"""
+        proc, api = self._prepare_probe_case()
+        api.get_trade_cal = AsyncMock(return_value=pd.DataFrame(columns=["cal_date"]))
+
+        with (
+            patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 13, 9, 0)),
+            patch("data.external.tushare_client.TushareClient", return_value=api),
+        ):
+            result = await proc.check_data_health()
+
+        api.get_trade_cal.assert_awaited_once()
+        assert result["market"]["lag_days"] == 0
+        assert not any("cross-check unavailable" in r for r in result["reasons"])
+
+    @pytest.mark.asyncio
+    async def test_api_trade_cal_none_response_keeps_unknown(self):
+        """D09-003：API 返回 None（不可得）时保留未知标记，不臆造官方扩展。"""
+        proc, api = self._prepare_probe_case()
+        api.get_trade_cal = AsyncMock(return_value=None)
+
+        with (
+            patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 13, 9, 0)),
+            patch("data.external.tushare_client.TushareClient", return_value=api),
+        ):
+            result = await proc.check_data_health()
+
+        api.get_trade_cal.assert_awaited_once()
+        assert result["market"]["lag_days"] == 0
+        assert any("cross-check unavailable" in r for r in result["reasons"])
+
+    @pytest.mark.asyncio
+    async def test_api_trade_cal_error_keeps_unknown(self):
+        """D09-003：API 不可得（异常）时交叉校验降级，不中断健康检查也不伪造滞后。"""
+        from data.external.tushare_client import TushareConfigError
+
+        proc, api = self._prepare_probe_case()
+        api.get_trade_cal = AsyncMock(side_effect=TushareConfigError())
+
+        with (
+            patch("data.mixins.health_mixin.get_now", return_value=datetime.datetime(2024, 6, 13, 9, 0)),
+            patch("data.external.tushare_client.TushareClient", return_value=api),
+        ):
+            result = await proc.check_data_health()
+
+        api.get_trade_cal.assert_awaited_once()
+        assert result["market"]["lag_days"] == 0
+        assert any("cross-check unavailable" in r for r in result["reasons"])
+        assert result["status"] in ("red", "yellow", "green")
 
     @pytest.mark.asyncio
     async def test_concept_count_error(self):
