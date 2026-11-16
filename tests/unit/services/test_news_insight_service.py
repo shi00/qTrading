@@ -413,6 +413,45 @@ class TestRowToResult:
         r = NewsInsightService._row_to_result({"coverage": {"announcement": {"x": 1}}}, {"news": {"y": 2}})
         assert r.coverage == {"news": {"y": 2}}
 
+    def test_events_dropped_restored_from_coverage_quality_channel(self):
+        """D14-002：剔除摘要从快照 coverage 同源回读，不依赖调用方本次 coverage。"""
+        stored = {
+            "announcement": {"status": "ok"},
+            "event_validation": {"dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 2}]},
+        }
+        r = NewsInsightService._row_to_result({"coverage": stored}, {"news": {"status": "ok"}})
+        assert r.events_dropped == [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 2}]
+        assert r.coverage["news"] == {"status": "ok"}
+        assert r.coverage["event_validation"] == {
+            "dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 2}]
+        }
+
+    def test_events_dropped_old_row_unknown(self):
+        """旧快照无该键 → None（未知，R21），不得回填 [] 伪装成「无剔除」。"""
+        r = NewsInsightService._row_to_result({"coverage": {"announcement": {"status": "ok"}}}, {})
+        assert r.events_dropped is None
+        assert "event_validation" not in r.coverage
+
+    def test_events_dropped_recorded_zero(self):
+        """显式记录 count=0 → []（已校验无剔除），与旧快照 None 区分。"""
+        stored = {"event_validation": {"dropped": []}}
+        r = NewsInsightService._row_to_result({"coverage": stored}, {})
+        assert r.events_dropped == []
+
+    def test_events_dropped_invalid_payload_unknown(self):
+        """脏值（非受控 reason / 非正计数 / 非 dict 项）→ None，不得部分采信。"""
+        for payload in (
+            {"dropped": [{"drop_reason": "free text quote!", "dropped_count": 1}]},
+            {"dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 0}]},
+            {"dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": True}]},
+            {"dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 1}, "bogus"]},
+            {"dropped": "bogus"},
+            "bogus",
+        ):
+            r = NewsInsightService._row_to_result({"coverage": {"event_validation": payload}}, {})
+            assert r.events_dropped is None
+            assert "event_validation" not in r.coverage
+
 
 class TestModulePureFunctions:
     def test_publish_time_or_none(self):
@@ -920,6 +959,49 @@ class TestPersist:
         dao.save_news_risk_brief.assert_awaited_once()
         dao.get_news_risk_brief.assert_not_awaited()
 
+    def test_success_persists_controlled_events_dropped_summary(self):
+        """D14-002：剔除摘要写入既有 coverage 质量通道（count/reason），不落未校验 fact/quote。"""
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        result = _result("analyzed_with_events")
+        result.events_dropped = [
+            {"event_type": "litigation", "fact": "未经校验的长文本A", "drop_reason": "no_valid_evidence_quote"},
+            {"event_type": "debt", "fact": "未经校验的长文本B", "drop_reason": "no_valid_evidence_quote"},
+        ]
+        svc._attach_event_validation(result)
+        asyncio.run(
+            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
+        )
+        brief = dao.save_news_risk_brief.await_args.args[0]
+        assert brief["coverage"]["event_validation"] == {
+            "dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 2}]
+        }
+        assert result.events_dropped == [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 2}]
+        assert "未经校验的长文本A" not in str(brief["coverage"])
+
+    def test_success_without_drops_records_empty_summary(self):
+        """合法空（无剔除）记录 ``dropped=[]``：与旧快照未知 None 区分（R21）。"""
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        result = _result("analyzed_no_event")
+        svc._attach_event_validation(result)
+        asyncio.run(
+            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
+        )
+        brief = dao.save_news_risk_brief.await_args.args[0]
+        assert brief["coverage"]["event_validation"] == {"dropped": []}
+        assert result.events_dropped == []
+
+    def test_failed_does_not_record_events_dropped(self):
+        """全坏 FAIL 不写质量通道（不得把校验失败伪装成可用结果的部分剔除）。"""
+        svc = NewsInsightService(market_dao=_make_dao(), ai_service=_make_ai())
+        result = _result("failed")
+        result.events_dropped = [{"drop_reason": "no_valid_evidence_quote"}]
+        svc._attach_event_validation(result)
+        assert "event_validation" not in result.coverage
+
     def test_success_records_generated_at_utc_naive(self, monkeypatch):
         """UIR-F05-003：新生成成功由服务侧记录生成时点（CST aware → UTC-naive 落库并回填 DTO）。"""
         t0_cst = datetime.datetime(2026, 9, 1, 10, 0, 0).replace(tzinfo=CST)
@@ -1239,6 +1321,102 @@ class TestAnalyze:
         assert outcome.result.generated_at is None
         # UIR-F05-002/R21：旧行 NULL → None（未记录），不伪装成空元数据
         assert outcome.result.execution_metadata is None
+
+    def test_partial_drop_result_and_snapshot_use_controlled_summary(self, monkeypatch):
+        """D14-002：一好一坏首次成功即返回并落库受控 count/reason（不含未校验 fact）。"""
+        ai = _make_ai()
+        ai.analyze_news_risk = AsyncMock(
+            return_value=NewsInsightResult(
+                analysis_status="analyzed_with_events",
+                risk_level="high",
+                confidence=80,
+                summary="s",
+                events=[{"severity": "high"}],
+                evidence_news_ids=[1],
+                coverage={"announcement": {"status": "ok"}},
+                model_id="local",
+                analysis_profile="",
+                prompt_version=NEWS_RISK_PROMPT_VERSION,
+                events_dropped=[
+                    {
+                        "event_type": "litigation",
+                        "fact": "未校验原文",
+                        "drop_reason": "no_valid_evidence_quote",
+                    }
+                ],
+            )
+        )
+        dao = _make_dao()
+        svc, _, _ = _make_svc_with_fake_load(
+            monkeypatch, dao=dao, ai=ai, evidence=[EvidenceDocument(news_id=1, content_hash="h")]
+        )
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        expected = [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 1}]
+        assert outcome.result.events_dropped == expected
+        brief = dao.save_news_risk_brief.await_args.args[0]
+        assert brief["coverage"]["event_validation"] == {"dropped": expected}
+        assert "未校验原文" not in str(brief["coverage"])
+
+    def test_cache_hit_restores_events_dropped_warning(self, monkeypatch):
+        """D14-002：缓存命中从快照同源回读剔除摘要，复用不丢警告。"""
+        hit = {
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "high",
+            "confidence": 70,
+            "summary": "x",
+            "events": [{"severity": "high"}],
+            "evidence_news_ids": [1],
+            "model_id": "local",
+            "generated_at": datetime.datetime(2026, 9, 10, 2, 0, 0),
+            "coverage": {
+                "announcement": {"status": "ok"},
+                "event_validation": {"dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 1}]},
+            },
+        }
+        dao = _make_dao()
+        dao.get_news_risk_brief = AsyncMock(return_value=hit)
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch, dao=dao, evidence=[EvidenceDocument(news_id=1, content_hash="h")]
+        )
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.reused is True
+        assert outcome.reuse_type == "cache_hit"
+        assert outcome.result.events_dropped == [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 1}]
+        assert outcome.result.coverage["event_validation"] == {
+            "dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 1}]
+        }
+        ai.analyze_news_risk.assert_not_awaited()
+
+    def test_subset_reuse_restores_events_dropped_warning(self, monkeypatch):
+        """D14-002：子集复用同样从快照回读剔除摘要。"""
+        latest = {
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "medium",
+            "confidence": 60,
+            "summary": "更完整",
+            "events": [],
+            "evidence_news_ids": [1, 2, 3],
+            "model_id": "local",
+            "generated_at": datetime.datetime(2026, 9, 8, 6, 30, 0),
+            "coverage": {
+                "event_validation": {"dropped": [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 3}]}
+            },
+        }
+        dao = _make_dao()
+        dao.get_news_risk_brief = AsyncMock(return_value=None)
+        dao.get_latest_success_brief = AsyncMock(return_value=latest)
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch,
+            dao=dao,
+            evidence=[EvidenceDocument(news_id=1, content_hash="h")],
+            coverage={"announcement": {"status": "db_error"}, "news": {"status": "ok"}, "telegraph": {"status": "ok"}},
+        )
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.reused is True
+        assert outcome.reuse_type == "subset"
+        assert outcome.result.events_dropped == [{"drop_reason": "no_valid_evidence_quote", "dropped_count": 3}]
+        assert outcome.result.coverage["news"] == {"status": "ok"}
+        ai.analyze_news_risk.assert_not_awaited()
 
     def test_subset_reuse(self, monkeypatch):
         # UIR-F05-003：子集复用同样必须回读快照生成时点 t0。

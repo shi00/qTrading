@@ -257,6 +257,23 @@ def _resolve_health_visuals(health_key: str) -> tuple[ft.IconData, str]:
 # ============================================================================
 
 
+def _coverage_metric_value(state: DataSourceState) -> str:
+    """覆盖率卡取值: 只呈现已测得的覆盖率, 或明确的未检查/检查中/不可用态 (R21).
+
+    - 检查中: 「检测中」, 不把上次测量冒充本次结果;
+    - 已有结果: 格式化测量值 (真实 0.0% 仍显示 0.0%, 不得视为缺失);
+    - 检查失败且无结果: N/A (测量不可用);
+    - 从未检查: 「未检查」, 禁止用固定股票数伪装成覆盖率.
+    """
+    if state.health_checking:
+        return I18n.get("ds_status_checking")
+    if state.health_result is not None:
+        return f"{state.health_result.details_financial_coverage:.1f}%"
+    if state.health_error is not None:
+        return I18n.get("health_not_available")
+    return I18n.get("ds_not_checked")
+
+
 def _build_health_dashboard(
     state: DataSourceState,
     on_check_health: Callable[[ft.ControlEvent], None],
@@ -290,11 +307,9 @@ def _build_health_dashboard(
     if state.health_result is not None:
         latest = state.health_result.market_latest_local
         metric_sync_value = I18n.get("ds_never_sync") if not latest or str(latest) == "None" else str(latest)
-        cov_val = state.health_result.details_financial_coverage
-        metric_coverage_value = f"{cov_val:.1f}%"
     else:
         metric_sync_value = I18n.get("ds_not_checked")
-        metric_coverage_value = I18n.get("ds_val_placeholder_count")
+    metric_coverage_value = _coverage_metric_value(state)
 
     # Health summary content
     if state.health_checking:
