@@ -292,6 +292,7 @@ def HomeView(
                     on_load_more_click=_on_load_more_click,
                     on_view_stock=_on_view_stock,
                     valid_stock_codes=state.valid_stock_codes,
+                    valid_stock_ts_codes=state.valid_stock_ts_codes,
                     is_loading_more=state.is_loading_more,
                 ),
             ]

@@ -55,6 +55,30 @@ def _read_source() -> str:
     return _HOME_VIEW_PATH.read_text(encoding="utf-8")
 
 
+def _collect_link_labels(control: Any) -> list[str]:
+    """递归收集控件树中「查看个股」TextButton 标签 (宿主渲染级断言辅助)。
+
+    嵌套 ``@ft.component`` 在同步渲染中只生成 Component 包装, 需再驱动一次
+    函数体才能取得实际控件树。
+    """
+    from flet.components.component import Component
+
+    if isinstance(control, Component):
+        return _collect_link_labels(render_once(control))
+    labels: list[str] = []
+    if isinstance(control, ft.TextButton):
+        content = control.content
+        labels.append(content if isinstance(content, str) else "")
+    for attr in ("content", "controls"):
+        value = getattr(control, attr, None)
+        if isinstance(value, ft.Control):
+            labels.extend(_collect_link_labels(value))
+        elif isinstance(value, list):
+            for child in value:
+                labels.extend(_collect_link_labels(child))
+    return labels
+
+
 class TestHomeViewDeclarativeContract:
     """验证 HomeView 声明式重写的契约合规性 (源码静态断言)."""
 
@@ -225,6 +249,8 @@ class _FakeHomeState:
     news_rows: tuple = ()
     # UX-09 MINOR-03: 有效股票代码集合 (对齐 HomeState), 供 NewsFeed 链接校验
     valid_stock_codes: Any = None
+    # D18-005: 完整股票身份集合 (CODE.EXCHANGE, 对齐 HomeState), 供带前缀链接校验
+    valid_stock_ts_codes: Any = None
     market_indices: tuple = ()
     market_hsgt: Any = None
     market_hot_concepts: tuple = ()
@@ -568,6 +594,58 @@ class TestHomeViewRuntime:
         source = Path(__file__).parent.parent.parent.parent / "ui" / "views" / "home_view.py"
         content = source.read_text(encoding="utf-8")
         assert "is_loading_more=state.is_loading_more" in content
+
+    def test_newsfeed_receives_valid_stock_ts_codes_prop(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D18-005: HomeView 将完整股票身份集合传给 NewsFeed (源码契约)."""
+        assert "valid_stock_ts_codes=state.valid_stock_ts_codes" in _read_source()
+
+    def test_host_render_links_prefixed_stock_but_not_index(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D18-005: 宿主渲染中 SZ000001 唯一入口, SH000001 指数不冒充该股票."""
+        from ui.viewmodels.home_view_model import NewsRow
+        from ui.views.home_view import HomeView
+
+        mock_home_vm._set_state(
+            news_rows=(
+                NewsRow(
+                    content="平安银行 SZ000001 上涨，上证指数 SH000001 收涨",
+                    publish_time="2024-06-15 10:30:00",
+                ),
+            ),
+            valid_stock_codes=frozenset({"000001", "600519"}),
+            valid_stock_ts_codes=frozenset({"000001.SZ", "600519.SH"}),
+        )
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        labels = _collect_link_labels(result)
+        assert len(labels) == 1
+        assert "000001" in labels[0]
+        assert "SH000001" not in labels[0]
+
+    def test_host_render_without_ts_identity_hides_prefixed_link(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D18-005: 宿主未加载完整身份集合时, 带前缀引用降级为不展示 (R21)."""
+        from ui.viewmodels.home_view_model import NewsRow
+        from ui.views.home_view import HomeView
+
+        mock_home_vm._set_state(
+            news_rows=(NewsRow(content="平安银行 SZ000001 上涨", publish_time="2024-06-15 10:30:00"),),
+            valid_stock_codes=frozenset({"000001"}),
+            valid_stock_ts_codes=frozenset(),
+        )
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        assert _collect_link_labels(result) == []
 
     def test_render_includes_dashboard_and_news_section(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
