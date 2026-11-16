@@ -1419,14 +1419,14 @@ async def _execute_load_history_for_date(
     strategy_name: str | None,
     run_id: str | None,
 ) -> None:
-    """加载指定日期的历史选股结果."""
+    """加载指定日期的历史选股结果.
+
+    ADD-UI-002: 不在 await 之前预提交「查看历史」身份标签。身份标签（日期 / 策略 / run）
+    只由 ``load_history_data`` 在数据快照成功提交时与行/分页/警告同帧落库；请求失败或
+    取消时保持上一次完整结果的身份，避免顶部标签标 B、表格/警告仍是 A 的持续失配。
+    """
     if isinstance(trade_date, (datetime.date, datetime.datetime)):
-        display = trade_date.strftime("%Y-%m-%d")
-        trade_date = display
-    else:
-        ts = str(trade_date)
-        display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
-    vm.set_history_viewing_status(display, strategy_name=strategy_name, run_id=run_id)
+        trade_date = trade_date.strftime("%Y-%m-%d")
     try:
         await vm.load_history_data(trade_date, strategy_name, run_id)
     except asyncio.CancelledError:
@@ -1645,7 +1645,7 @@ def _build_screener_sections_card(
     sort_col: str | None,
     sort_asc: bool,
     on_virtual_sort: typing.Callable[[str, bool], None],
-    on_row_click: typing.Callable[[dict], None],
+    on_row_click: typing.Callable[[dict], None] | None,
     on_section_change: typing.Callable[[ft.ControlEvent], None],
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
@@ -2007,13 +2007,18 @@ def _build_screener_table_card(
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
     is_realtime: bool,
+    interaction_disabled: bool = False,
 ) -> ft.Container:
     """构建表格卡片区 (D7-3: AI 三分区 + 统一分页栏/空态).
 
     REALTIME 模式按 ai_status 渲染 recommended/excluded/failed 三分区;
     HISTORY 模式的历史记录无 ai_status 列 (ScreeningHistory 表无该字段),
     无法按 AI 三态分区, 渲染单一结果表, 避免全部行误入「分析失败」分区误导用户。
+
+    ADD-UI-002: ``interaction_disabled`` 为历史加载中 —— 表格仍展示上一次完整结果
+    (身份不预提交), 但禁用行点击/分页/页大小交互, 防止把在途目标误当作已显示结果操作。
     """
+    row_click = None if interaction_disabled else on_row_click
     page_no = state.page_no
     total_pages = state.total_pages
 
@@ -2024,7 +2029,7 @@ def _build_screener_table_card(
                     ft.Icons.CHEVRON_LEFT,
                     on_click=safe_on_click(on_prev_page),
                     icon_color=AppColors.PRIMARY,
-                    disabled=page_no <= 1,
+                    disabled=interaction_disabled or page_no <= 1,
                     tooltip=I18n.get("screener_page_prev"),
                 ),
                 ft.Text(
@@ -2035,7 +2040,7 @@ def _build_screener_table_card(
                     ft.Icons.CHEVRON_RIGHT,
                     on_click=safe_on_click(on_next_page),
                     icon_color=AppColors.PRIMARY,
-                    disabled=page_no >= total_pages,
+                    disabled=interaction_disabled or page_no >= total_pages,
                     tooltip=I18n.get("screener_page_next"),
                 ),
                 ft.Container(width=20),
@@ -2046,6 +2051,7 @@ def _build_screener_table_card(
                     width=AppStyles.CONTROL_WIDTH_SM,
                     dense=True,
                     text_size=AppStyles.FONT_SIZE_BODY,
+                    disabled=interaction_disabled,
                     on_select=safe_on_select(on_page_size_change),
                 ),
             ]
@@ -2095,7 +2101,7 @@ def _build_screener_table_card(
                     sort_col=state.sort_column,
                     sort_asc=state.sort_ascending,
                     on_virtual_sort=on_virtual_sort,
-                    on_row_click=on_row_click,
+                    on_row_click=row_click,
                     on_section_change=on_section_change,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
@@ -2114,12 +2120,12 @@ def _build_screener_table_card(
                         sort_col=state.sort_column,
                         sort_asc=state.sort_ascending,
                         on_sort=on_virtual_sort,
-                        on_row_click=on_row_click,
+                        on_row_click=row_click,
                         col_anchor=EIDS.SCREENER.column_header,
                         row_anchor=(
                             lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None
                         ),
-                        on_row_detail=on_row_click,
+                        on_row_detail=row_click,
                         detail_anchor=(
                             lambda row: EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
                         ),
@@ -2698,6 +2704,8 @@ def ScreenerView(
         on_load_col_widths=lambda: vm.get_col_widths(_VT_COL_WIDTHS_KEY),
         on_persist_col_widths=lambda widths: vm.persist_col_widths(_VT_COL_WIDTHS_KEY, widths),
         is_realtime=is_realtime,
+        # ADD-UI-002: HISTORY 加载中仅锁定表格/分页交互, 仍展示上一次完整结果 (身份不预提交)。
+        interaction_disabled=state.mode == "HISTORY" and state.loading,
     )
 
     log_card = _build_screener_log_card(
