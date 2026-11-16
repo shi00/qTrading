@@ -386,6 +386,6 @@ class TestTestDbOwnershipDdl:
     def test_unsafe_db_name_rejected_before_ddl(self, db_config):
         conn = _FakeDbConnection(exists=True)
         unsafe = 'test_ok"; DROP DATABASE qtrading; --'
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="must contain only letters, digits, and underscores"):
             asyncio.run(db_config.execute_quoted_ddl(conn, db_config.DDL_CREATE_DB, unsafe))
         assert conn.statements == [], "unsafe identifier must be rejected before any DDL"
