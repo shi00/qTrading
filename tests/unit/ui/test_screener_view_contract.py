@@ -469,8 +469,12 @@ class TestScreenerViewContract:
         set_matches = re.findall(r"\bset_status_color\b", code)
         assert set_matches == [], f"禁止 set_status_color 调用 (VM 内聚, R.2.6.3): {set_matches}"
 
-        # 必须: 调用 vm.set_history_viewing_status (新 API, 替代 set_status_msg + set_status_color)
-        assert "vm.set_history_viewing_status" in code, "必须调用 vm.set_history_viewing_status (R.2.6.3 新 API)"
+        # ADD-UI-002: View 禁止在 await 之前预提交历史身份标签；身份由 VM 在
+        # load_history_data 成功提交数据快照时同帧落库，失败/取消保持上一次完整身份。
+        assert "vm.set_history_viewing_status" not in code, (
+            "禁止 View 预提交历史身份标签 (ADD-UI-002: 应由 load_history_data 成功时同帧提交)"
+        )
+        assert "vm.load_history_data" in code, "历史加载必须经 vm.load_history_data (成功时同帧提交身份)"
 
         # 必须: 从 state.status_message 渲染 (VM state 单源真相, 无 else 回退)
         assert "state.status_message" in code, "必须从 state.status_message 读取 (R.2.6.3)"
