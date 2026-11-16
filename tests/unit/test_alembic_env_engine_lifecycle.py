@@ -100,6 +100,18 @@ def _load_env_module() -> types.ModuleType:
 class _FakeConnection:
     def __init__(self, on_run_sync: Callable[[], Awaitable[None]] | None) -> None:
         self._on_run_sync = on_run_sync
+        self.executed_sql: list[str] = []
+        self.commit_calls = 0
+
+    async def execute(self, statement: object, params: object = None) -> types.SimpleNamespace:
+        self.executed_sql.append(str(statement))
+        # pg_try_advisory_lock 成功，pg_advisory_unlock 的返回值不参与断言
+        return types.SimpleNamespace(scalar_one=lambda: True)
+
+    async def commit(self) -> None:
+        # D06-003：acquire 后必须先提交锁事务（防止 autobegin 吞掉迁移写入），
+        # release 后再提交 unlock 事务。记录次数供时序断言。
+        self.commit_calls += 1
 
     async def run_sync(self, _fn: object) -> None:
         if self._on_run_sync is not None:
@@ -113,7 +125,9 @@ class _FakeConnectContext:
     async def __aenter__(self) -> _FakeConnection:
         if self._engine.connect_error is not None:
             raise self._engine.connect_error
-        return _FakeConnection(self._engine.on_run_sync)
+        connection = _FakeConnection(self._engine.on_run_sync)
+        self._engine.connections.append(connection)
+        return connection
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
         return False
@@ -132,6 +146,7 @@ class _FakeAsyncEngine:
         self.dispose_error = dispose_error
         self.connect_calls = 0
         self.dispose_calls = 0
+        self.connections: list[_FakeConnection] = []
 
     def connect(self) -> _FakeConnectContext:
         self.connect_calls += 1
@@ -175,6 +190,32 @@ async def test_success_path_disposes_engine(
 
     assert engine.connect_calls == 1
     assert engine.dispose_calls == 1
+    connection = engine.connections[0]
+    executed = connection.executed_sql
+    assert any("pg_try_advisory_lock" in sql for sql in executed)
+    assert any("pg_advisory_unlock" in sql for sql in executed)
+    # D06-003：acquire 后、release 后各一次 commit，终结 autobegin 事务，
+    # 保证迁移写入与 unlock 均不悬挂在 connect() 退出的隐式回滚里。
+    assert connection.commit_calls == 2
+
+
+async def test_cross_process_lock_is_released_when_migration_fails(
+    alembic_env: types.ModuleType,
+    install_engine: Callable[[_FakeAsyncEngine], _FakeAsyncEngine],
+) -> None:
+    """迁移失败时跨进程锁必须释放，否则后续进程会被锁挡在启动阶段。"""
+
+    async def _fail() -> None:
+        await _raise_runtime_error("migration failed")
+
+    engine = install_engine(_FakeAsyncEngine(on_run_sync=_fail))
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        await alembic_env.run_async_migrations()
+
+    executed = engine.connections[0].executed_sql
+    assert any("pg_try_advisory_lock" in sql for sql in executed)
+    assert any("pg_advisory_unlock" in sql for sql in executed)
 
 
 async def test_connect_failure_still_disposes_engine(

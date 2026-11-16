@@ -109,6 +109,10 @@ class DatabaseMigrator:
     to head.
     """
 
+    # 仅进程内互斥（防止同进程两个入口并发起 Alembic 线程）。
+    # 跨进程互斥由 alembic/env.py 在迁移连接上取得的 PostgreSQL advisory lock
+    # 保证（见 data/persistence/migration_lock.py），因此 CLI `alembic upgrade head`
+    # 与其他应用实例也会串行化。
     _alembic_lock = threading.Lock()
 
     @classmethod
@@ -336,8 +340,18 @@ class DatabaseMigrator:
             await ThreadPoolManager().run_async(TaskType.IO, run_upgrade)
             logger.info("[DatabaseMigrator] Alembic upgrade completed successfully.")
         except asyncio.CancelledError:
-            logger.warning("[DatabaseMigrator] Migration cancelled during shutdown.")
-            raise  # R2: CancelledError must propagate for graceful shutdown
+            # R2: CancelledError 必须上抛。取消 ``run_async`` 的 await 只取消等待，
+            # IO worker 线程仍会继续执行 ``command.upgrade``（见
+            # ThreadPoolManager.run_async 的取消语义），因此这里既不能释放
+            # _alembic_lock（否则同进程可再起一次迁移），也不能假装 schema 已核验：
+            # 升级后的版本校验被跳过，本进程的 schema 状态保持"未核验"，
+            # 由下一次 init_db 在锁内重新读取 alembic_version 并对齐 head。
+            logger.warning(
+                "[DatabaseMigrator] Migration cancelled; the Alembic upgrade may still be running in the "
+                "IO worker thread. Any migration locks it holds are not released here, and the "
+                "post-upgrade revision check was skipped (schema unverified for this process)."
+            )
+            raise
         except Exception as e:
             log_classified(
                 logger,
