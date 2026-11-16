@@ -386,7 +386,11 @@ def ToastManagerView() -> ft.Container:
 
     return ft.Container(
         content=ft.Column(
-            controls=[ToastCard(data=td, on_dismiss=_on_dismiss) for td in state.toasts],
+            # D18-001: 每张卡显式绑定 toast ID 作为 control key。frozen 列表重建时
+            # 无 key 的 dataclass 按位置配对（ObjectPatch 的 ("pos", n)），删除前项会
+            # 把前项的 hook state（hover/展开/dismissing）与 timer 迁移给后项；
+            # 显式 key 使配对按 ("k", key)，state/timer 与 toast ID 同寿。
+            controls=[ToastCard(data=td, on_dismiss=_on_dismiss, key=f"toast_{td.id}") for td in state.toasts],
             spacing=10,
             alignment=ft.MainAxisAlignment.END,
             horizontal_alignment=ft.CrossAxisAlignment.END,
@@ -399,8 +403,12 @@ def ToastManagerView() -> ft.Container:
 
 
 @ft.component
-def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Container:
+def ToastCard(data: ToastData, on_dismiss: Callable[[int], None], *, key: str | None = None) -> ft.Container:
     """声明式单个 Toast 卡片。
+
+    ``key`` 仅用于声明式列表的稳定身份：由 ``@ft.component`` 装饰器消费并写入
+    ``Component.key``，不会传入函数体；frozen 列表据此按 toast ID 而非位置配对
+    （见 ``ToastManagerView`` 的调用点）。
 
     状态驱动:
     - ``is_hovered``: hover 暂停倒计时
