@@ -30,6 +30,7 @@ from ui.components.news_insight_panel import (
     severity_color,
     source_status_label_key,
 )
+from ui.theme import AppColors, ThemeName
 
 if TYPE_CHECKING:
     from ui.viewmodels.news_insight_types import RiskEvent
@@ -60,23 +61,25 @@ def test_risk_level_label_key(level, expected):
 
 
 @pytest.mark.parametrize(
-    ("severity", "expected"),
+    ("severity", "expected_token"),
     [
-        ("critical", "#F44336"),  # AppColors.ERROR 由 UP_RED 派生同值，断言同 token 即可
-        ("high", "#F44336"),
-        ("medium", "#FFAB00"),
-        ("low", None),  # fallback 中性
-        (None, None),
+        ("critical", "ERROR"),
+        ("high", "UP_RED"),
+        ("medium", "WARNING"),
+        ("low", "TEXT_SECONDARY"),  # fallback 中性
+        (None, "TEXT_SECONDARY"),
+        ("other", "TEXT_SECONDARY"),  # 未知严重度
     ],
 )
-def test_severity_color(severity, expected):
-    from ui.theme import AppColors
+@pytest.mark.parametrize("theme_name", [ThemeName.DARK, ThemeName.LIGHT])
+def test_severity_color(severity, expected_token, theme_name):
+    """每种严重度精确映射单一 AppColors token，而非三态共用集合。
 
-    color = severity_color(severity)
-    if expected is None:
-        assert color == AppColors.TEXT_SECONDARY
-    else:
-        assert color in (AppColors.ERROR, AppColors.UP_RED, AppColors.WARNING)
+    期望值按 token 属性名在当前主题下解析，避免导入期固化 Hex（Layer 2 颜色
+    随主题切换，Layer 1 为 Flet 语义 token）。
+    """
+    AppColors.load_theme(theme_name)
+    assert severity_color(severity) == getattr(AppColors, expected_token)
 
 
 @pytest.mark.parametrize(
