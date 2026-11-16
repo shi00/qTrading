@@ -104,10 +104,14 @@ async def test_unexpected_probe_error_propagates() -> None:
 
 async def test_cancellation_propagates() -> None:
     """R2：取消必须传播，不能被探测重试吞掉。"""
-    page = _FakePage({ERROR_SELECTOR: asyncio.CancelledError()})
+    cancelled = asyncio.CancelledError()
+    page = _FakePage({ERROR_SELECTOR: cancelled})
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as exc_info:
         await _probe(page)
+
+    assert exc_info.value is cancelled, "取消异常必须原样传播，不得被包装或转译（R2）"
+    assert page.queried == [ERROR_SELECTOR], "取消后不得继续探测就绪文本"
 
 
 def _tree() -> ast.Module:
