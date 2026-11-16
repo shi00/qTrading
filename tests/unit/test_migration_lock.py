@@ -105,8 +105,9 @@ class TestAcquireMigrationLock:
 
         assert len(conn.calls) == 1
         sql, params = conn.calls[0]
-        assert "pg_try_advisory_lock" in sql
+        assert "pg_try_advisory_lock" in conn.calls[0][0]
         assert params == {"lock_key": MIGRATION_ADVISORY_LOCK_KEY}
+        assert "pg_try_advisory_lock" in sql
 
     @pytest.mark.asyncio
     async def test_retries_until_peer_releases(self):
@@ -115,7 +116,7 @@ class TestAcquireMigrationLock:
         await acquire_migration_lock(conn, timeout_s=5.0, poll_interval_s=0)
 
         assert len(conn.calls) == 3
-        assert all("pg_try_advisory_lock" in sql for sql, _ in conn.calls)
+        assert all("pg_try_advisory_lock" in conn.calls[i][0] for i in range(len(conn.calls)))
 
     @pytest.mark.asyncio
     async def test_timeout_raises_without_starting_migration(self):
@@ -128,16 +129,19 @@ class TestAcquireMigrationLock:
         assert LOCK_TIMEOUT_ENV_VAR in str(exc_info.value)
         # One probe only: the budget is exhausted before any retry sleep.
         assert len(conn.calls) == 1
+        assert "pg_try_advisory_lock" in conn.calls[0][0]
 
     @pytest.mark.asyncio
     async def test_cancellation_while_waiting_propagates(self):
         conn = _FakeConnection([False, asyncio.CancelledError()])
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await acquire_migration_lock(conn, timeout_s=5.0, poll_interval_s=0)
 
         # R2: cancellation must not be converted into a timeout/acquired result.
+        assert isinstance(exc_info.value, asyncio.CancelledError)
         assert len(conn.calls) == 2
+        assert "pg_try_advisory_lock" in conn.calls[1][0]
 
 
 class TestReleaseMigrationLock:
@@ -149,8 +153,9 @@ class TestReleaseMigrationLock:
 
         assert len(conn.calls) == 1
         sql, params = conn.calls[0]
-        assert "pg_advisory_unlock" in sql
+        assert "pg_advisory_unlock" in conn.calls[0][0]
         assert params == {"lock_key": MIGRATION_ADVISORY_LOCK_KEY}
+        assert "pg_advisory_unlock" in sql
 
     @pytest.mark.asyncio
     async def test_release_failure_does_not_mask_migration_error(self, caplog):
@@ -165,5 +170,8 @@ class TestReleaseMigrationLock:
     async def test_release_cancellation_propagates(self):
         conn = _FakeConnection([True], release_error=asyncio.CancelledError())
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await release_migration_lock(conn)
+
+        # R2: release-side cancellation propagates verbatim, never downgraded.
+        assert isinstance(exc_info.value, asyncio.CancelledError)

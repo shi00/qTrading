@@ -65,7 +65,7 @@ class TestAdvisoryLockSerialisation:
         second = await engine.connect()
         try:
             await acquire_migration_lock(first, timeout_s=0)
-            with pytest.raises(MigrationLockTimeoutError):
+            with pytest.raises(MigrationLockTimeoutError, match="跨进程迁移锁超时"):
                 await acquire_migration_lock(second, timeout_s=0)
 
             await release_migration_lock(first)
