@@ -12,7 +12,7 @@ from datetime import date
 
 import polars as pl
 
-from data.domain_services.transaction_cost import TransactionCostModel
+from data.domain_services.transaction_cost import TransactionCost, TransactionCostModel
 from strategies.backtest.config import BacktestConfig
 
 logger = logging.getLogger(__name__)
@@ -342,16 +342,29 @@ class PortfolioSimulator:
 
         volume = nominal_shares
 
-        cost = self.cost_model.calculate(
+        cost = self._calculate_cost(
             price=exit_price,
             volume=volume,
             is_buy=False,
             avg_daily_volume=self._get_avg_daily_volume(quote),
             trade_date=exec_date,
         )
+        if cost is None:
+            # D12-004: 滑点使调整后卖价非正（含配置 10000bps 的极端场景）时显式跳过，
+            # 不回退原价成交却按模型负数入账。
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "invalid_price",
+                    "intended_volume": self._reported_volume(pos, quote),
+                }
+            )
+            return
 
-        # 使用滑点调整后的成交价
-        actual_exit_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else exit_price
+        # D12-004: trades.price 与 gross/net 必须使用同一校验后的成交价（不再回退原价）。
+        actual_exit_price = cost.slippage_adjusted_price
 
         realized_pnl = cost.net_amount - pos["cost_basis"]
 
@@ -488,14 +501,26 @@ class PortfolioSimulator:
             return
 
         # 部分减持：记录 sell 交易 + 按平均成本摊销剩余 cost_basis
-        cost = self.cost_model.calculate(
+        cost = self._calculate_cost(
             price=exit_price,
             volume=volume,
             is_buy=False,
             avg_daily_volume=self._get_avg_daily_volume(quote),
             trade_date=exec_date,
         )
-        actual_exit_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else exit_price
+        if cost is None:
+            # D12-004: 与全额卖出同一护栏——非法滑点/价格不改动持仓与账务。
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "invalid_price",
+                    "intended_volume": self._reported_volume(pos, quote),
+                }
+            )
+            return
+        actual_exit_price = cost.slippage_adjusted_price
         # 名义股数占比与复权单位占比相同（同一 ratio），可直接用于摊销
         sell_fraction = volume / nominal_total
         allocated_cost = pos["cost_basis"] * sell_fraction
@@ -658,25 +683,32 @@ class PortfolioSimulator:
                 lot_indivisible_count += 1
                 continue
 
-            cost = self.cost_model.calculate(
+            cost = self._calculate_cost(
                 price=raw_entry_price,
                 volume=volume,
                 is_buy=True,
                 avg_daily_volume=self._get_avg_daily_volume(quote),
                 trade_date=exec_date,
             )
+            if cost is None:
+                _record_skip(ts_code, "invalid_price", volume)
+                continue
             # 名义整手按「目标金额/名义价」向下取整后，费用可能把总支出顶过现金余额
             # （尤其 cash_reserve=0 的全仓场景）；此时少买一手而不是整笔跳过。
             if cost.net_amount > self.cash and volume >= 200:
                 volume -= 100
-                cost = self.cost_model.calculate(
+                cost = self._calculate_cost(
                     price=raw_entry_price,
                     volume=volume,
                     is_buy=True,
                     avg_daily_volume=self._get_avg_daily_volume(quote),
                     trade_date=exec_date,
                 )
-            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else raw_entry_price
+                if cost is None:
+                    _record_skip(ts_code, "invalid_price", volume)
+                    continue
+            # D12-004: 成交记录与账务统一使用模型校验后的成交价（不再回退原价）。
+            actual_price = cost.slippage_adjusted_price
 
             if cost.net_amount > self.cash:
                 _record_skip(ts_code, "insufficient_cash", volume)
@@ -845,14 +877,18 @@ class PortfolioSimulator:
             if volume <= 0:
                 continue
 
-            cost = self.cost_model.calculate(
+            cost = self._calculate_cost(
                 price=raw_entry_price,
                 volume=volume,
                 is_buy=True,
                 avg_daily_volume=self._get_avg_daily_volume(quote),
                 trade_date=exec_date,
             )
-            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else raw_entry_price
+            if cost is None:
+                # 补分配无用户可见明细，与主遍 invalid_price 同语义：直接跳过。
+                continue
+            # D12-004: 成交记录与账务统一使用模型校验后的成交价（不再回退原价）。
+            actual_price = cost.slippage_adjusted_price
             if cost.net_amount > self.cash:
                 continue
 
@@ -950,13 +986,26 @@ class PortfolioSimulator:
             volume = pos["volume"]
             recover_price = recover_price_qfq
 
-        cost = self.cost_model.calculate(
+        cost = self._calculate_cost(
             price=recover_price,
             volume=volume,
             is_buy=False,
             avg_daily_volume=None,
             trade_date=exec_date,
         )
+        if cost is None:
+            # D12-004: 最后已知价/回收价非正或滑点使成交价非正 → 显式跳过并保留持仓，
+            # 不得以非法价清算或按模型负数入账。
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "invalid_price",
+                    "intended_volume": self._reported_volume(pos),
+                }
+            )
+            return
         realized_pnl = cost.net_amount - pos["cost_basis"]
 
         # 退市假设导致相对全额变现被扣减的账面金额
@@ -969,7 +1018,9 @@ class PortfolioSimulator:
                 "ts_code": ts_code,
                 "action": "sell",
                 "exit_reason": "DELISTED",
-                "price": recover_price,
+                # D12-004: 记录与 gross/net 同一校验后的滑点成交价（原记录 recover_price，
+                # 与滑点调整后的账务金额不一致）。
+                "price": cost.slippage_adjusted_price,
                 "volume": volume,
                 "gross_amount": cost.gross_amount,
                 "total_cost": cost.total_cost,
@@ -982,6 +1033,37 @@ class PortfolioSimulator:
         self.cash += cost.net_amount
         del self.positions[ts_code]
         self._last_known_prices.pop(ts_code, None)
+
+    def _calculate_cost(
+        self,
+        *,
+        price: float,
+        volume: float,
+        is_buy: bool,
+        avg_daily_volume: float | None,
+        trade_date: date,
+    ) -> TransactionCost | None:
+        """调用成本模型；非法价格/成交量或滑点使成交价非正时返回 ``None``。
+
+        D12-004: 成本模型会拒绝非有限/非正的成交价、成交量与滑点，并对调整后成交价
+        做非正校验。调用方必须把 ``None`` 记为 ``invalid_price`` 跳过（可观测），
+        禁止回退原价成交却按模型金额入账——成交价（trades.price）与账务
+        （gross/net_amount）必须来自同一校验后的 ``cost.slippage_adjusted_price``。
+        """
+        try:
+            return self.cost_model.calculate(
+                price=price,
+                volume=volume,
+                is_buy=is_buy,
+                avg_daily_volume=avg_daily_volume,
+                trade_date=trade_date,
+            )
+        except ValueError as exc:
+            # 非法价格/滑点是数据/配置问题而非程序缺陷：单笔跳过，不中断整轮回测。
+            logger.warning(
+                "跳过无效成交（%s）: price=%r volume=%r is_buy=%s; %s", trade_date, price, volume, is_buy, exc
+            )
+            return None
 
     def _record_daily_positions(
         self,
@@ -1108,10 +1190,12 @@ class PortfolioSimulator:
 
     @staticmethod
     def _safe_quote_price(quote: pl.DataFrame, column: str) -> float | None:
-        """PORTFOLIO-01: 读取单值价格列；缺列/NULL/非数值/NaN/±inf 统一返回 None。
+        """读取单值价格列；缺列/NULL/非数值/NaN/±inf/非正价格统一返回 None。
 
-        与买卖护栏同源：坏报价不得让估值/调仓支路抛 TypeError 中断回测，也不得把
-        NaN 写入 _last_known_prices 污染停牌估值与退市清算（R21：未知不伪装成实测值）。
+        PORTFOLIO-01 / D12-004: 与买卖护栏同源：坏报价不得让估值/调仓支路抛
+        TypeError 中断回测，也不得把 NaN 或 0/负价写入 ``_last_known_prices`` 污染
+        停牌估值与退市清算（R21：未知不伪装成实测值；非正价格在股票行情中无业务
+        含义，按缺失处理）。
         """
         if column not in quote.columns:
             return None
@@ -1122,7 +1206,7 @@ class PortfolioSimulator:
             num = float(val)
         except (TypeError, ValueError):
             return None
-        return num if math.isfinite(num) else None
+        return num if math.isfinite(num) and num > 0 else None
 
     def _safe_exec_price(self, quote: pl.DataFrame) -> float | None:
         """``_exec_price`` 的安全版：执行价 NULL/NaN/±inf 返回 None，调用方兜底。"""

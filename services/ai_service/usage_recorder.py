@@ -52,6 +52,9 @@ _DB_SETTLE_TIMEOUT = "DB_SETTLE_TIMEOUT"
 # 预留被拒（F16）：try_reserve 返回 None = 余额不足 **或** owner 失权（D2/D3+F23
 # 语义统一按「不可派发」处置，DAO 层不可区分，错误码合并表达）。
 _RESERVE_REJECTED = "RESERVE_REJECTED"
+# D13-005：限额已配置但金额未知（价格 / 用量不可估算）——预算门无法判定，
+# fail-closed 拒绝，不静默降级为不占预算的 usage_only。
+_RESERVE_AMOUNT_UNKNOWN = "RESERVE_AMOUNT_UNKNOWN"
 
 # F20：可恢复失败错误码（保留重放）。其余错误码确认为不可恢复——
 # METADATA_INCOMPLETE：重放无新元数据来源（观察 / 记录不可变）；
@@ -301,9 +304,25 @@ class UsageRecorder:
 
         ``amount_cny`` 非 None 且 ``budget_limit_cny`` 非 None 时执行预算门
         判定（已结算 + 在途 + 本次 > 上限 → 拒绝）；两者均 None（usage_only）
-        时仅登记 NULL 金额预留（不占预算）。返回 :class:`ReservationOutcome`
-        三态（见其 docstring），调用方按费用型 / usage_only 各自语义处置。
+        时仅登记 NULL 金额预留（不占预算）。
+
+        D13-005：``budget_limit_cny`` 非 None 而 ``amount_cny`` 为 None（价格 /
+        用量不可估算）时**拒绝预留**（``RESERVE_AMOUNT_UNKNOWN``）——DAO 预算门
+        仅在双非 None 时判定，放行等于无上限消耗，不得静默降级 usage_only。
+        返回 :class:`ReservationOutcome` 三态（见其 docstring），调用方按费用型 /
+        usage_only 各自语义处置。
         """
+
+        if budget_limit_cny is not None and amount_cny is None:
+            # D13-005：限额已配置但单次金额未知 = 预算不可判定，fail-closed。
+            # 零 DB 副作用（不登记不占预算的 NULL 金额预留），原因可观测（R21）。
+            logger.warning(
+                "[UsageRecorder] reserve rejected: budget limit configured but amount unestimable "
+                "(invocation=%s..., scenario=%s)",
+                invocation_id[:8],
+                scenario_id,
+            )
+            return ReservationOutcome(persisted=True, error_code=_RESERVE_AMOUNT_UNKNOWN, reservation=None)
 
         async def _run() -> BudgetReservation | None:
             dao = self._dao_provider()

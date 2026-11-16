@@ -477,6 +477,7 @@ class AIService:
         system_messages: list[dict] | None = None,
         fixed_blocks: str | list[str] | None = None,
         reserved_output_tokens: int = OUTPUT_RESERVE_TOKENS,
+        dispatch: "ScenarioDispatch | None" = None,
     ) -> int:
         """委托 TokenBudgetService._compute_analysis_budget。"""
         self._ensure_subservices()
@@ -484,6 +485,7 @@ class AIService:
             system_messages=system_messages,
             fixed_blocks=fixed_blocks,
             reserved_output_tokens=reserved_output_tokens,
+            dispatch=dispatch,
         )
 
     # ------------------------------------------------------------------

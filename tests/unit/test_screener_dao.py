@@ -896,14 +896,14 @@ class TestScreenerDaoSaveScreeningResults:
     async def test_empty_records(self):
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=0)
-        await dao.save_screening_results([])
+        assert await dao.save_screening_results([]) == 0
         dao._save_upsert.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_none_records(self):
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=0)
-        await dao.save_screening_results(None)
+        assert await dao.save_screening_results(None) == 0
         dao._save_upsert.assert_not_called()
 
     @pytest.mark.asyncio
@@ -993,6 +993,73 @@ class TestScreenerDaoSaveScreeningResults:
         assert len(df) == 2
         by_run = {row.run_id: row.name for row in df.itertuples()}
         assert by_run == {"r1": "First", "r2": "Latest2"}
+
+    @pytest.mark.asyncio
+    async def test_same_key_dedup_returns_persisted_count(self):
+        """D05-001: 批内同 4 键去重后，返回值必须取 _save_upsert 的实际落库数（1），
+        而非输入条数（2）——调用方据此发「已保存 N 条」并推进完成标记。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "First",
+            },
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "Latest",
+            },
+        ]
+        result = await dao.save_screening_results(records)
+        assert len(dao._save_upsert.call_args.kwargs["df"]) == 1
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_distinct_run_ids_return_persisted_count(self):
+        """D05-001: 不同 run_id 各自成行，返回值等于 _save_upsert 的实际落库数（2）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=2)
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "First",
+            },
+            {
+                "run_id": "r2",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "Second",
+            },
+        ]
+        assert await dao.save_screening_results(records) == 2
+        assert len(dao._save_upsert.call_args.kwargs["df"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_sql_failure_propagates_without_count(self):
+        """D05-001: 写库异常必须上抛，调用方不得拿到「已落库条数」而误判成功。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(side_effect=RuntimeError("boom"))
+        records = [
+            {
+                "run_id": "r1",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "First",
+            }
+        ]
+        with pytest.raises(RuntimeError, match="boom"):
+            await dao.save_screening_results(records)
 
 
 class TestScreenerDaoBuildScreeningSql:

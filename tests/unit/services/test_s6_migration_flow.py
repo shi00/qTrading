@@ -572,6 +572,8 @@ class TestThreeEntryHelpers:
                     "candidates": ["conn-1"],
                     "route_revision": 1,
                     "total_timeout_seconds": 60,
+                    "transient_retries": 1,
+                    "fallback_enabled": True,
                     "task_routes": {},
                 },
             ),

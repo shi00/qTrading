@@ -317,7 +317,14 @@ class InstitutionalStrategy(PolarsBaseStrategy):
         ]
 
     def get_ai_context(self, row: dict) -> str:
-        """D2-M3：覆写基类默认空实现，告知 AI 该股被选中的机构席位原因，杜绝 context vacuum。
+        """D2-M3 / D11-001：告知 AI 该股被选中的龙虎榜净买入事实，杜绝 context vacuum。
+
+        数据边界（D11-001 补证）：本策略仅消费 ``top_list``（龙虎榜汇总口径，字段见
+        ``data/persistence/models.py::TopList``），该表**没有**机构专用席位标识列；
+        机构席位明细只存在于 ``top_inst``（``TopInst.exalter``，"机构专用" 只出现在该表），
+        而 ``top_inst`` 未进入策略上下文（``data/data_processor.py`` 的 auxiliary_tables
+        仅装配 top_list）。因此不得把该汇总净买入断言为"机构专用席位净买入"，
+        文案须保持中性并显式声明身份未知。
 
         net_amount 列单位为元（TOP_LIST_NET_AMOUNT_UNIT），除以 10000 换算为万元展示。
         """
@@ -327,11 +334,15 @@ class InstitutionalStrategy(PolarsBaseStrategy):
         net_f = safe_float(net, default=float("nan"))
         net_wan = "N/A" if math.isnan(net_f) else round(net_f / 10000, 1)
         return (
-            f"该股票由龙虎榜机构席位策略筛选：当日机构专用席位净买入 {net_wan} 万元。\n"
-            f"请评估该笔机构买入的性质：是长线配置资金建仓，还是游资借机构席位做短线接力？\n"
+            f"该股票由龙虎榜净买入策略筛选：当日龙虎榜净买入额（top_list 汇总口径，含全部上榜营业部）"
+            f"{net_wan} 万元。\n"
+            f"口径说明：本策略仅使用龙虎榜汇总数据，未取得机构专用席位标识（top_inst 席位明细未参与选股），"
+            f"无法确认该笔净买入是否来自机构——不得认定为机构行为，也不得据此排除机构参与。\n"
+            f"请评估该笔净买入的性质：是持续性配置资金介入，还是上榜营业部短线对倒/接力？\n"
             f"重点核对：净买入金额相对流通市值的占比是否足以形成支撑；"
             f"上榜原因（涨跌幅/换手率异动）是否说明该股已处于情绪高位；"
-            f"若同时出现机构席位净卖出对倒，请直接 reject。"
+            f"若净买入额缺失（N/A），或 <market_data> 中机构席位明细显示净卖出对倒，"
+            f"请直接 reject 或降低 confidence 并计入 uncertainty_factors。"
         )
 
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:

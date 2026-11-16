@@ -3054,6 +3054,115 @@ class TestBuildMultiPeriodFinancials:
         assert result_text is not None
 
     @pytest.mark.asyncio
+    async def test_cashflow_ratio_aligns_same_period(self):
+        """D13-004：最新期缺净利润时不得用上一期净利润配对（防跨期错配）。"""
+        df = pd.DataFrame(
+            {
+                "end_date": ["20231231", "20230930"],
+                "n_cashflow_act": [100.0, 50.0],
+                "n_income_attr_p": [float("nan"), 10.0],
+            }
+        )
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
+        assert result_valid is True
+        assert "现金流/净利润: 5.00" in result_text  # 同一期（20230930）：50/10
+        assert "现金流/净利润: 10.00" not in result_text  # 100（最新期）/10（上一期）为跨期错配
+
+    @pytest.mark.asyncio
+    async def test_cashflow_ratio_missing_side_omitted(self):
+        """D13-004：仅一侧有值时不输出该指标（缺侧省略，不伪造）。"""
+        df = pd.DataFrame(
+            {
+                "end_date": ["20231231"],
+                "roe": [12.0],
+                "n_cashflow_act": [100.0],
+                "n_income_attr_p": [float("nan")],
+            }
+        )
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        labels_out: list[str] = []
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache, labels_out=labels_out)
+        assert result_valid is True
+        assert "现金流/净利润" not in result_text
+        assert "ai_label_cf_profit_ratio" not in labels_out
+
+    @pytest.mark.asyncio
+    async def test_goodwill_ratio_aligns_same_period(self):
+        """D13-004：最新期缺总资产时不得用上一期总资产配对。"""
+        df = pd.DataFrame(
+            {
+                "end_date": ["20231231", "20230930"],
+                "total_assets": [float("nan"), 1000.0],
+                "goodwill": [200.0, 100.0],
+            }
+        )
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
+        assert result_valid is True
+        assert "商誉/总资产: 10.00%" in result_text  # 同一期（20230930）：100/1000
+        assert "商誉/总资产: 20.00%" not in result_text  # 200（最新期）/1000（上一期）为跨期错配
+
+    @pytest.mark.asyncio
+    async def test_ratio_denominator_non_positive_omitted(self):
+        """D13-004：分母为 0/负时省略比率，避免除零或无经济含义的比值。"""
+        df = pd.DataFrame(
+            {
+                "end_date": ["20231231"],
+                "total_assets": [0.0],
+                "goodwill": [100.0],
+                "n_cashflow_act": [100.0],
+                "n_income_attr_p": [0.0],
+            }
+        )
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        result_text, _ = await _build_multi_period_financials("000001.SZ", cache)
+        assert "商誉/总资产" not in result_text
+        assert "现金流/净利润" not in result_text
+
+    @pytest.mark.asyncio
+    async def test_paired_metrics_all_missing_omitted(self):
+        """D13-004：配对列全缺时两个比率均省略，其余指标照常渲染。"""
+        df = pd.DataFrame(
+            {
+                "end_date": ["20231231", "20230930"],
+                "roe": [12.0, 11.0],
+                "n_cashflow_act": [float("nan"), float("nan")],
+                "n_income_attr_p": [float("nan"), float("nan")],
+                "total_assets": [float("nan"), float("nan")],
+                "goodwill": [float("nan"), float("nan")],
+            }
+        )
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
+        assert result_valid is True
+        assert "现金流/净利润" not in result_text
+        assert "商誉/总资产" not in result_text
+        assert "ROE" in result_text
+
+    @pytest.mark.asyncio
+    async def test_period_alignment_uses_end_date_not_row_order(self):
+        """D13-004：行序/索引非降序时，仍按 end_date 取最近报告期配对。"""
+        df = pd.DataFrame(
+            {
+                "end_date": ["20230930", "20231231"],
+                "n_cashflow_act": [50.0, 100.0],
+                "n_income_attr_p": [10.0, 25.0],
+            },
+            index=[9, 4],
+        )
+        cache = MagicMock()
+        cache.get_financial_reports_history = AsyncMock(return_value=df)
+        result_text, result_valid = await _build_multi_period_financials("000001.SZ", cache)
+        assert result_valid is True
+        assert "现金流/净利润: 4.00" in result_text  # 20231231：100/25
+
+    @pytest.mark.asyncio
     async def test_passes_as_of_date_to_cache(self):
         df = pd.DataFrame({"roe": [10.0]})
         cache = MagicMock()

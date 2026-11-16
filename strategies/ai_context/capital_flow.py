@@ -28,6 +28,16 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
     try:
         sf = safe_float
         parts = []
+        # 缺失/非法字段统一渲染为「未知」哨兵（R21：不得把缺失伪装成业务合法的 0）
+        unknown = I18n.get("ai_unknown")
+
+        def parse_optional(value: object) -> float | None:
+            """缺失或非有限值返回 None，真实 0 / 负数原样返回。
+
+            在调用点显式使用 NaN 默认值，不改动 safe_float 的全局默认 0.0 语义。
+            """
+            fval = sf(value, default=float("nan"))
+            return fval if math.isfinite(fval) else None
 
         def format_amount(amount: float, source_unit: str) -> str:
             amount_yuan = amount * 10000 if source_unit == "wan_yuan" else amount
@@ -38,21 +48,26 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
                 return f"{amount_yuan / 1e4:.2f}{I18n.get('ai_unit_ten_thousand')}"
             return f"{amount_yuan:.0f}{I18n.get('ai_unit_yuan')}"
 
+        def format_optional_amount(amount: float | None, source_unit: str) -> str:
+            return unknown if amount is None else format_amount(amount, source_unit)
+
         mf_df = prefetched.get("moneyflow_df")
         if mf_df is not None and not mf_df.empty:
             stock_mf = mf_df[mf_df["ts_code"] == ts_code]
             if not stock_mf.empty:
                 row = stock_mf.iloc[0]
-                buy_lg = sf(row.get("buy_lg_amount"))
-                sell_lg = sf(row.get("sell_lg_amount"))
-                buy_elg = sf(row.get("buy_elg_amount"))
-                sell_elg = sf(row.get("sell_elg_amount"))
-                net_main = (buy_lg + buy_elg) - (sell_lg + sell_elg)
-                net_total = sf(row.get("net_mf_amount"))
-                parts.append(
-                    f"{I18n.get('ai_main_net_inflow')}: {format_amount(net_main, 'wan_yuan')} ({I18n.get('ai_large_extra_large')})"
-                )
-                parts.append(f"{I18n.get('ai_total_net_inflow')}: {format_amount(net_total, 'wan_yuan')}")
+                buy_lg = parse_optional(row.get("buy_lg_amount"))
+                sell_lg = parse_optional(row.get("sell_lg_amount"))
+                buy_elg = parse_optional(row.get("buy_elg_amount"))
+                sell_elg = parse_optional(row.get("sell_elg_amount"))
+                net_total = parse_optional(row.get("net_mf_amount"))
+                # 四项任一缺失即无法还原净额，整项渲染「未知」，不得用 0 补齐后求差
+                if buy_lg is None or sell_lg is None or buy_elg is None or sell_elg is None:
+                    main_text = unknown
+                else:
+                    main_text = format_amount((buy_lg + buy_elg) - (sell_lg + sell_elg), "wan_yuan")
+                parts.append(f"{I18n.get('ai_main_net_inflow')}: {main_text} ({I18n.get('ai_large_extra_large')})")
+                parts.append(f"{I18n.get('ai_total_net_inflow')}: {format_optional_amount(net_total, 'wan_yuan')}")
                 if labels_out is not None:
                     labels_out.append("ai_label_main_flow")
             else:
@@ -72,8 +87,8 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
                 for _, row in stock_tl.iterrows():
                     reason = "" if pd.isna(row.get("reason")) else str(row.get("reason"))
                     # 缺失/非有限净买入额置 None 渲染 N/A，避免被 safe_float 的默认值伪装成业务合法的「0元」（R21）
-                    net_amt = sf(row.get("net_amount"), default=float("nan"))
-                    entries.append((reason, net_amt if math.isfinite(net_amt) else None))
+                    net_amt = parse_optional(row.get("net_amount"))
+                    entries.append((reason, net_amt))
                 detail = "; ".join(
                     f"{I18n.get('ai_reason')}: {reason or 'N/A'}, {I18n.get('ai_net_buy')}: "
                     f"{'N/A' if net_amt is None else format_amount(net_amt, net_amount_unit)}"  # type: ignore[arg-type]  # get_column_unit 返回 str | None，format_amount 需 str
@@ -94,10 +109,12 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
             stock_nb = nb_df[nb_df["ts_code"] == ts_code]
             if not stock_nb.empty:
                 row = stock_nb.iloc[0]
-                vol = sf(row.get("vol"))
-                ratio = sf(row.get("ratio"))
+                vol = parse_optional(row.get("vol"))
+                ratio = parse_optional(row.get("ratio"))
+                vol_text = unknown if vol is None else f"{vol:.0f}{I18n.get('ai_shares')}"
+                ratio_text = unknown if ratio is None else f"{ratio:.2f}%"
                 parts.append(
-                    f"{I18n.get('ai_north_holding')}: {vol:.0f}{I18n.get('ai_shares')}, {I18n.get('ai_circulating_ratio')}: {ratio:.2f}%"
+                    f"{I18n.get('ai_north_holding')}: {vol_text}, {I18n.get('ai_circulating_ratio')}: {ratio_text}"
                 )
                 if labels_out is not None:
                     labels_out.append("ai_label_northbound")
@@ -116,10 +133,10 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
 
                 def _format_top_inst(df: pd.DataFrame) -> str:
                     row = df.iloc[0]
-                    net_buy = sf(row.get("net_buy"))
+                    net_buy = parse_optional(row.get("net_buy"))
                     return (
                         f"{I18n.get('ai_top_inst_yes')} ({I18n.get('ai_net_buy')}: "
-                        f"{format_amount(net_buy, TOP_LIST_NET_AMOUNT_UNIT)})"
+                        f"{format_optional_amount(net_buy, TOP_LIST_NET_AMOUNT_UNIT)})"
                     )
 
                 section = _build_stale_section("top_inst", stock_ti, _format_top_inst, date_column="trade_date")

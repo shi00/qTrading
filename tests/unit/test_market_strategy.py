@@ -456,23 +456,78 @@ class TestInstitutionalStrategy:
         """D2-M3：get_ai_context 将 net_amount（元）换算为万元并注入 AI 上下文。"""
         strategy = InstitutionalStrategy()
         text = strategy.get_ai_context({"net_amount": 30000000.0})
-        assert "净买入 3000.0 万元" in text
+        assert "3000.0 万元" in text
         text_missing = strategy.get_ai_context({"ts_code": "000001.SZ"})
         assert "N/A" in text_missing
 
-    def test_get_ai_context_nan_net_amount_shows_na(self) -> None:
-        """M16-F2：net_amount 为 NaN（LEFT JOIN 缺口常见）时不把 "nan" 泄漏进 AI prompt。
+    def test_get_ai_context_top_list_aggregate_never_claims_institution_seat(self) -> None:
+        """D11-001：top_list 无机构专用席位标识，汇总净买入不得断言为机构行为。
 
-        旧实现 ``net not in (None, "")`` 对 NaN 判真，输出 "净买入 nan 万元"；
-        修复后经 safe_float 归一为 "N/A"（R21：不把缺失值伪装成数值）。
+        三态之「无标识」：当前 top_list 契约（data/persistence/models.py::TopList）不含
+        机构标识列，文案须中性并显式声明身份未知。
+        """
+        strategy = InstitutionalStrategy()
+        text = strategy.get_ai_context({"net_amount": 30000000.0})
+        assert "机构专用席位净买入" not in text
+        assert "汇总口径" in text
+        assert "未取得机构专用席位标识" in text
+        # 未知不得被渲染成「无机构参与」或「确定为机构」（R21：不把未知伪装成任一确定结论）
+        assert "不得认定为机构行为" in text
+        assert "也不得据此排除机构参与" in text
+
+    def test_get_ai_context_ignores_unverified_institution_columns(self) -> None:
+        """D11-001：即使行内混入 top_inst 风格列，也不得升级为机构身份断言。
+
+        三态之「有标识」：本策略数据源为 top_list 汇总表，未核验 exalter 来源，
+        get_ai_context 不得据任意附加列改口称「机构专用席位」。
+        """
+        strategy = InstitutionalStrategy()
+        text = strategy.get_ai_context(
+            {"net_amount": 30000000.0, "exalter": "机构专用", "net_buy": 30000000.0, "side": "0"}
+        )
+        assert "机构专用席位净买入" not in text
+        assert "未取得机构专用席位标识" in text
+
+    def test_get_ai_context_nan_net_amount_shows_na(self) -> None:
+        """M16-F2 / D11-001：net_amount 缺失时输出 N/A 且不得断言机构身份。
+
+        三态之「标识缺失」：旧实现 ``net not in (None, "")`` 对 NaN 判真，输出
+        "净买入 nan 万元"；修复后经 safe_float 归一为 "N/A"（R21：不把缺失值伪装成数值），
+        文案同时保留「身份未知」声明，缺失不得被反推为机构行为。
         """
         strategy = InstitutionalStrategy()
         text = strategy.get_ai_context({"net_amount": float("nan")})
         assert "nan" not in text.lower()
         assert "N/A" in text
+        assert "机构专用席位净买入" not in text
         # 非数值字符串同样归一为 N/A，不抛异常
         text_bad = strategy.get_ai_context({"net_amount": "not-a-number"})
         assert "N/A" in text_bad
+
+    def test_filter_numeric_semantics_unchanged(self) -> None:
+        """D11-001：文案中性化不改变选股数值逻辑（阈值换算 + 降序排序保持）。"""
+        strategy = InstitutionalStrategy()
+        base_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "name": ["A", "B", "C"],
+                "industry_sw_l2": ["x", "y", "z"],
+                "pe_ttm": [10.0, 20.0, 30.0],
+                "total_mv": [100.0, 200.0, 300.0],
+                "circ_mv": [80.0, 180.0, 280.0],
+            }
+        )
+        lhb_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "net_amount": [50000000.0, 10000000.0, 40000000.0],  # 元；阈值 3000万=3e7元
+            }
+        )
+        lhb_df.attrs["column_units"] = {"net_amount": "yuan"}
+        lf = pl.from_pandas(base_df).lazy()
+        result = strategy._filter_logic(lf, {"top_list": lhb_df, "params": {"inst_net_min": 3000}}).collect()
+        # 仅 > 3e7 元入选，且按 net_amount 降序：5000万 > 4000万
+        assert result["ts_code"].to_list() == ["000001.SZ", "000003.SZ"]
 
     def test_get_parameters_returns_one_param(self) -> None:
         strategy = InstitutionalStrategy()

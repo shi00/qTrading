@@ -37,7 +37,7 @@ from services.ai_service.labels import filter_available_labels
 from services.ai_service.litellm_client import AIServiceUnavailableError, DEFAULT_ANALYSIS_TIMEOUT
 from services.ai_service.output import validate_ai_analysis_response
 from services.ai_service.scenario_executor import ScenarioOutput
-from services.ai_service.token_budget import _apply_context_budget
+from services.ai_service.token_budget import _apply_context_budget, _unified_connection_budget_basis
 from services.local_model_manager import LocalInferenceTimeoutError
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -594,6 +594,7 @@ class StockAnalysisService:
             budget_tokens = self._service._compute_analysis_budget(
                 system_messages=messages,
                 fixed_blocks=fixed_blocks,
+                dispatch=dispatch,
             )
         except AIBudgetError as e:
             # D5-4：固定提示词+输出预留超出模型窗口 → 显式抛可操作异常。
@@ -607,11 +608,16 @@ class StockAnalysisService:
                 "[AIService] Token budget unavailable (%s: %s)",
             )
             return {"error": str(e), "score": None, "ai_status": "failed"}
-        _model = (getattr(self._service, "_litellm_config", None) or {}).get("model")
+        # 预算裁剪 tokenizer：统一链按连接模型（与预算窗口同源），旧链按生效配置模型。
+        if dispatch is not None:
+            _model, _ = _unified_connection_budget_basis(dispatch)
+        else:
+            _legacy_model = (getattr(self._service, "_litellm_config", None) or {}).get("model")
+            _model = _legacy_model if isinstance(_legacy_model, str) else None
         budget_res = _apply_context_budget(
             sections,
             budget_tokens,
-            model=_model if isinstance(_model, str) else None,
+            model=_model,
         )
         _user_prompt, surviving_names = budget_res  # 解构仅需 surviving_names（user_prompt 由下游 section_map 重派生）
         section_map = budget_res.section_map

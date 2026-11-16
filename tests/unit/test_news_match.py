@@ -5,6 +5,8 @@
 import datetime
 import pytest
 
+import pandas as pd
+
 from data.news_match import (
     dedupe_documents,
     match_news_to_stock,
@@ -390,9 +392,10 @@ class TestDedupeDocuments:
         assert len(kept) == 2  # 同标题但时间不接近 → 保留
 
     def test_announcement_same_day_title_dropped(self):
-        """announcement 同日同标题视为重复。"""
-        a = datetime.datetime(2026, 9, 1, 8, 0, 0)
-        b = datetime.datetime(2026, 9, 1, 23, 0, 0)
+        """announcement 同一 CST 自然日同标题视为重复（publish_time 为 UTC naive）。"""
+        # 01:00 UTC = 09:00 CST；08:00 UTC = 16:00 CST
+        a = datetime.datetime(2026, 9, 1, 1, 0, 0)
+        b = datetime.datetime(2026, 9, 1, 8, 0, 0)
         docs = [
             self._doc(source_kind="announcement", title="业绩预增", publish_time=a),
             self._doc(source_kind="announcement", title="业绩预增", publish_time=b),
@@ -402,9 +405,10 @@ class TestDedupeDocuments:
         assert dropped[0]["dedup_reason"] == "title_time_similar"
 
     def test_announcement_cross_day_title_kept(self):
-        """announcement 标题相同但跨日不视为重复。"""
-        a = datetime.datetime(2026, 9, 1, 23, 0, 0)
-        b = datetime.datetime(2026, 9, 2, 1, 0, 0)
+        """announcement 标题相同但跨 CST 自然日不视为重复（即便 UTC 日期相同）。"""
+        # 15:00 UTC = 09-01 23:00 CST；16:30 UTC = 09-02 00:30 CST
+        a = datetime.datetime(2026, 9, 1, 15, 0, 0)
+        b = datetime.datetime(2026, 9, 1, 16, 30, 0)
         docs = [
             self._doc(source_kind="announcement", title="业绩预增", publish_time=a),
             self._doc(source_kind="announcement", title="业绩预增", publish_time=b),
@@ -441,3 +445,84 @@ class TestDedupeDocuments:
         kept, dropped = dedupe_documents(docs)
         assert dropped[0]["title"] == "副本"
         assert dropped[0]["dedup_reason"] == "url_same"
+
+
+# ---------- 跨时区公告去重（D14-001） ----------
+class TestCrossTimezoneAnnouncementDedupe:
+    """公告「同日」按 Asia/Shanghai 自然日判定；publish_time 入库存 UTC tz-naive。"""
+
+    def _ann(self, publish_time, title="业绩预增"):
+        return {
+            "source_kind": "announcement",
+            "title": title,
+            "publish_time": publish_time,
+            "url": None,
+            "content_hash": None,
+        }
+
+    def test_night_utc_pair_maps_to_same_cst_day(self):
+        """23:30 UTC 与次日 00:10 UTC 同属次日 CST（07:30 / 08:10），UTC 日期不同仍应配对。"""
+        a = datetime.datetime(2026, 9, 1, 23, 30, 0)  # 09-02 07:30 CST
+        b = datetime.datetime(2026, 9, 2, 0, 10, 0)  # 09-02 08:10 CST
+        kept, dropped = dedupe_documents([self._ann(a), self._ann(b)])
+        assert len(kept) == 1
+        assert dropped[0]["dedup_reason"] == "title_time_similar"
+
+    def test_same_utc_date_but_different_cst_day_kept(self):
+        """15:00 / 16:30 UTC 分属 CST 09-01 23:00 与 09-02 00:30，UTC 同日也不得误配。"""
+        a = datetime.datetime(2026, 9, 1, 15, 0, 0)
+        b = datetime.datetime(2026, 9, 1, 16, 30, 0)
+        kept, dropped = dedupe_documents([self._ann(a), self._ann(b)])
+        assert len(kept) == 2
+        assert dropped == []
+
+    def test_cst_midnight_boundary(self):
+        """16:00 UTC 恰为次日 00:00 CST：跨该边界分属不同自然日，同日内侧仍配对。"""
+        before = datetime.datetime(2026, 9, 1, 15, 59, 59)  # 09-01 23:59:59 CST
+        midnight = datetime.datetime(2026, 9, 1, 16, 0, 0)  # 09-02 00:00:00 CST
+        kept, _ = dedupe_documents([self._ann(before), self._ann(midnight)])
+        assert len(kept) == 2
+        late = datetime.datetime(2026, 9, 2, 15, 59, 59)  # 09-02 23:59:59 CST
+        kept2, dropped2 = dedupe_documents([self._ann(midnight), self._ann(late)])
+        assert len(kept2) == 1
+        assert dropped2[0]["dedup_reason"] == "title_time_similar"
+
+    def test_naive_utc_and_aware_cst_same_instant(self):
+        """naive(UTC) 与 aware(+08:00) 表示同一绝对时刻 → 同一 CST 日，应配对。"""
+        naive_utc = datetime.datetime(2026, 9, 1, 23, 30, 0)  # 09-02 07:30 CST
+        cst = datetime.timezone(datetime.timedelta(hours=8))
+        aware_cst = datetime.datetime(2026, 9, 2, 7, 30, 0, tzinfo=cst)  # 同一时刻
+        kept, dropped = dedupe_documents([self._ann(naive_utc), self._ann(aware_cst)])
+        assert len(kept) == 1
+        assert dropped[0]["dedup_reason"] == "title_time_similar"
+
+    def test_aware_utc_and_naive_utc_same_instant(self):
+        """aware(UTC) 与 naive(UTC) 同刻视为同日，不因 tzinfo 差异漏配。"""
+        naive_utc = datetime.datetime(2026, 9, 2, 0, 10, 0)
+        aware_utc = datetime.datetime(2026, 9, 2, 0, 10, 0, tzinfo=datetime.UTC)
+        kept, dropped = dedupe_documents([self._ann(naive_utc), self._ann(aware_utc)])
+        assert len(kept) == 1
+        assert dropped[0]["dedup_reason"] == "title_time_similar"
+
+    @pytest.mark.parametrize("bad", [None, "2026-09-01T10:00:00", pd.NaT])
+    def test_missing_or_invalid_time_not_paired(self, bad):
+        """缺失 / 非法 / NaT 时间不参与标题时间配对（不误配）。"""
+        good = datetime.datetime(2026, 9, 1, 10, 0, 0)
+        kept, dropped = dedupe_documents([self._ann(good), self._ann(bad)])
+        assert len(kept) == 2
+        assert dropped == []
+
+    def test_news_threshold_unchanged_after_normalization(self):
+        """news 秒级阈值口径不变：600 秒内配对、601 秒不配对（naive/aware 混合亦正确）。"""
+        t0 = datetime.datetime(2026, 9, 1, 10, 0, 0)  # UTC naive
+        cst = datetime.timezone(datetime.timedelta(hours=8))
+        within = datetime.datetime(2026, 9, 1, 18, 10, 0, tzinfo=cst)  # 10:10 UTC，差 600 秒
+        beyond = datetime.datetime(2026, 9, 1, 18, 10, 1, tzinfo=cst)  # 差 601 秒
+        docs = [
+            {"source_kind": "news", "title": "相同标题", "publish_time": t0},
+            {"source_kind": "news", "title": "相同标题", "publish_time": within},
+            {"source_kind": "news", "title": "相同标题", "publish_time": beyond},
+        ]
+        kept, dropped = dedupe_documents(docs)
+        assert len(kept) == 2
+        assert [d["publish_time"] for d in dropped] == [within]

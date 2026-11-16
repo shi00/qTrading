@@ -37,9 +37,10 @@
   不散落 if-else；
 - **F27 路由策略传递**：路由冻结快照（ExecutionSnapshot.routes 条目）携带的
   ``transient_retries``（int 0..2，零重试）与 ``fallback_enabled``（bool，禁
-  备用）在 Executor 消费生效——键缺失 / 非法时回退构造默认（分派侧未填充该键
-  的诚实缺省，不伪装策略存在，R21）；``fallback_enabled=False`` 只派发路由首
-  个候选，其余候选记 skipped（不静默）。
+  备用）在 Executor 消费生效。D13-001：分派侧经共享构造保证两键必填；本层
+  仅在旧版快照（键缺失 / 非法）上按构造默认兼容，且 **warning 留痕**——不静默
+  回退（用户策略丢失不得伪装成功，R21）；``fallback_enabled=False`` 只派发路由
+  首个候选，其余候选记 skipped（不静默）。
 
 B-02-3（HANDOFF §6.1）：旧入口 ``execute`` 与新入口 ``execute_chat_turn`` 共享
 同一遍历主干与逐尝试执行段（预留 → 派发绑定 → 授权 → attempt 登记 → 执行 →
@@ -481,13 +482,23 @@ class ScenarioExecutor:
 
         candidates: tuple[Mapping[str, Any], ...] = route.get("candidates", ())  # type: ignore[assignment]
         # F27 路由策略（快照冻结语义）：分派侧保存的零重试 / 禁备用策略在消费端
-        # 生效；键缺失 / 非法回退构造默认（不伪装策略存在，R21）。
+        # 生效。D13-001：分派侧共享构造保证两键必填；旧版快照键缺失 / 非法时按
+        # 构造默认兼容但 warning 留痕——静默回退会让用户策略丢失后仍报成功（R21）。
         route_retries = _route_transient_retries(route)
+        fallback_enabled = _route_fallback_enabled(route)
+        if route_retries is None or fallback_enabled is None:
+            logger.warning(
+                "[ScenarioExecutor] route policy unavailable or invalid (scenario=%s, "
+                "transient_retries=%r, fallback_enabled=%r); legacy snapshot compatibility, "
+                "construction defaults applied",
+                route.get("scenario_id"),
+                route.get("transient_retries"),
+                route.get("fallback_enabled"),
+            )
         # 路由策略重试预算与构造重试预算取小（_retry_attempts 已按构造上限 clamp）
         total_attempts = (
             self._retry_attempts if route_retries is None else min(route_retries, self._retry_attempts)
         ) + 1
-        fallback_enabled = _route_fallback_enabled(route)
         fallback_skipped: tuple[CandidateDecision, ...] = ()
         if fallback_enabled is False and len(candidates) > 1:
             # 禁备用（F27）：只派发路由首个候选；其余候选记 skipped（R21 不静默），
@@ -843,15 +854,25 @@ class ScenarioExecutor:
         # 适配器存在性已由 _admit_candidate 准入保证（派发前淘汰，零预留副作用）
         adapter = self._adapters[connection.adapter_kind]
         # F19：单次预留金额按连接计价快照 + 请求 payload 估算（dispatch 不持有
-        # payload，不伪造金额）；未配置月限额 → usage_only（金额 NULL 不占预算）；
-        # 限额已配置但计价 / 用量不可估算 → None（usage_only 语义，不把未知成本
-        # 当 0 占位，R21）。
+        # payload，不伪造金额）；未配置月限额 → usage_only（金额 NULL 不占预算）。
+        # D13-005：限额已配置但金额不可估算（计价快照缺失 / usage_only 模式 /
+        # token 不可估算）= 价格未知——usage_only 放行会让预算门（DAO 仅在
+        # amount/limit 双非 None 时判定）完全失效，形成无上限消耗；此处 fail-closed
+        # 拒绝本候选、零出站（不静默降级 usage_only，R21）；计价可估算路径不受影响。
         budget_limit = cand.get("budget_limit_cny")
         budget_amount = (
             _estimate_reservation_amount(pricing, identity.payload, model=connection.model)
             if budget_limit is not None
             else None
         )
+        if budget_limit is not None and budget_amount is None:
+            return _CandidateOutcome(
+                status="failed",
+                decision_hint="rejected",
+                reason="budget amount unestimable: price or usage unknown (fail-closed)",
+                outputs=(),
+                usages=(),
+            )
         last_reason = "exhausted"
         # F27：尝试预算可由路由冻结快照的瞬态重试策略（transient_retries）驱动
         # （execute 计算传入）；None 回退构造默认。
@@ -1169,7 +1190,15 @@ class ScenarioExecutor:
                 # F17：metadata 携带计价冻结快照——成本在终态落账时点由 Recorder
                 # 按真实 usage 计算（cost 与 usage 同源，避免重试场景失配）。
                 # F19③：actual_model 为响应事实（增量覆盖派发时点固化元数据）。
-                attempt_metadata = {**attempt_metadata, "actual_model": response.actual_model}
+                # D13-009：encoder 计价连接的用量证据以适配器报告的**真实** token
+                # 覆盖（截断后输入 / partial 仅完成块），payload 估算仅另标
+                # ``encoder_input_tokens_estimate``；未报告 → 不写 ``encoder_input_tokens``
+                # （结算按不可计价 None，R21 未知不填 0）。
+                attempt_metadata = {
+                    **attempt_metadata,
+                    "actual_model": response.actual_model,
+                    **_encoder_usage_metadata(pricing, identity, connection.model, response),
+                }
                 scope = _AttemptScope(identity, attempt_id, reservation_id, attempt_metadata, ledger)
                 self._recorder.observe_usage(_observation_from(identity, attempt_id, response, attempt_metadata))
 
@@ -1916,7 +1945,8 @@ def _estimate_reservation_amount(
       取 payload ``max_tokens``（未声明时按 ``OUTPUT_RESERVE_TOKENS`` 保守预留）；
     - ``encoder_input_tokens``：payload ``texts`` 逐条 token 估算求和；
     - 计价快照缺失 / ``mode`` 非 ``estimate_cost`` / 单价或用量不可得 → ``None``
-      （usage_only 语义：金额 NULL 不占预算；R21：未知成本不以 0 占位）。
+      （R21：未知成本不以 0 占位）。D13-005：限额已配置时 ``None`` 由调用方按
+      fail-closed 拒绝（不静默降级 usage_only 绕过预算门）。
     """
     if pricing is None or pricing.mode != "estimate_cost":
         return None
@@ -1958,30 +1988,48 @@ def _estimate_reservation_amount(
     return None
 
 
+def _reported_encoder_input_tokens(usage: NormalizedLLMUsage | None) -> int | None:
+    """适配器报告的 encoder 真实输入 token（D13-009）；无报告 → ``None``。
+
+    encoder 计价无缓存分量语义，取输入总量（``input_total_tokens``，缺失回退
+    ``uncached_input_tokens``）；畸形报告（非整数 / 负数）同样按未知处理——
+    结算不得用估算顶替实测，未知保持 ``None``（R21）。
+    """
+    if usage is None:
+        return None
+    tokens = usage.input_total_tokens if usage.input_total_tokens is not None else usage.uncached_input_tokens
+    if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+        return None
+    return tokens
+
+
 def _encoder_usage_metadata(
     pricing: ConnectionPricing | None,
     identity: _TurnIdentity,
     model: str,
+    response: AdapterResponse | None = None,
 ) -> dict[str, Any]:
-    """encoder 计价连接的用量证据（F17，落账侧成本计算所需）。
+    """encoder 计价连接的用量证据（F17 / D13-009，落账侧成本计算所需）。
 
-    ``encoder_input_tokens`` / ``text_count`` 是 Recorder 结算时
-    ``compute_cost_cny`` 与账本列的唯一数据来源：此前生产链路从未携带这两个
-    字段，分类费用型（``pricing_unit == "encoder_input_tokens"``）连接即使
-    预留阶段按 payload texts 估算了金额，结算阶段也因 token 缺失按不可计价
-    返回 ``None``（实际成本不入月汇总，R21 只保住「未知不填 0」而丢了已知
-    用量）。此处与预留估算同口径（payload ``texts`` 逐条估算求和），
-    token 不可估算时仅记条数、不填 0（缺失语义保留）。
+    - ``encoder_input_tokens`` 仅在适配器**报告真实用量**时写入（D13-009：
+      结算与账本列用 Scorer 完成块的真实 token——截断后输入、partial 仅完成
+      块）；未报告（失败 / 无 token 计量）不写该键 → 结算按不可计价返回
+      ``None``（R21 未知不填 0，也不拿预估冒充实测）。
+    - payload ``texts`` 逐条估算只作 ``encoder_input_tokens_estimate`` 另标
+      （与预留金额同口径留痕），不参与结算。
     """
     if pricing is None or pricing.pricing_unit != "encoder_input_tokens":
         return {}
+    metadata: dict[str, Any] = {}
     texts = identity.payload.get("texts")
-    if not isinstance(texts, (list, tuple)) or not texts:
-        return {}
-    metadata: dict[str, Any] = {"text_count": len(texts)}
-    tokens = sum(_estimate_tokens(text, model) for text in texts)
-    if tokens > 0:
-        metadata["encoder_input_tokens"] = tokens
+    if isinstance(texts, (list, tuple)) and texts:
+        metadata["text_count"] = len(texts)
+        estimate = sum(_estimate_tokens(text, model) for text in texts)
+        if estimate > 0:
+            metadata["encoder_input_tokens_estimate"] = estimate
+    reported = _reported_encoder_input_tokens(response.usage if response is not None else None)
+    if reported is not None:
+        metadata["encoder_input_tokens"] = reported
     return metadata
 
 
@@ -2044,7 +2092,9 @@ def _metadata(
         # 终态落账时点按真实 usage 经 connection_pricing.compute_cost_cny 计算
         # （cost 与 usage 同源）；快照缺失 → None（未知语义留证，R21 不伪装）。
         "pricing": pricing_snapshot_metadata(pricing),
-        # F17：encoder 计价连接的实际用量证据（text_count / encoder_input_tokens），
-        # 结算侧 compute_cost_cny 与账本列依赖；非 encoder 计价连接不引入该键。
+        # F17 / D13-009：encoder 计价连接的用量证据（text_count / 估算另标）。
+        # 派发时点尚无适配器真实用量 → 不写 encoder_input_tokens（结算侧
+        # compute_cost_cny 与账本列依赖真实 token，由响应返回后增量覆盖）。
+        # 非 encoder 计价连接不引入该键。
         **_encoder_usage_metadata(pricing, identity, connection.model),
     }

@@ -413,18 +413,24 @@ class TestHappyPath:
         assert obs_arg.metadata["pricing"] is None
 
     @pytest.mark.asyncio
-    async def test_encoder_pricing_metadata_carries_usage_evidence(self, monkeypatch):
-        """F17：encoder 计价连接的 text_count / encoder_input_tokens 进入落账元数据。
+    async def test_encoder_pricing_settles_reported_tokens_not_estimate(self, monkeypatch):
+        """D13-009：encoder 结算用适配器报告的真实 token，payload 估算仅另标。
 
-        修复前只冻结 pricing 快照而从不携带 encoder 用量 → Recorder 结算时
-        ``compute_cost_cny`` 因 token 缺失按不可计价返回 None（分类费用型实际成本
-        不入月汇总）。此处与预留估算同口径，payload texts 逐条估算求和。
+        估算 200 / 真实 64（截断后完成块）→ 落账元数据 encoder_input_tokens=64
+        （DAO 成本按 64），encoder_input_tokens_estimate=200 只留痕不参与结算。
         """
         monkeypatch.setattr(
             "services.ai_service.scenario_executor._estimate_tokens",
-            lambda text, model=None: {"新闻一": 200, "新闻二": 300}.get(text, 0),
+            lambda text, model=None: {"新闻一": 100, "新闻二": 100}.get(text, 0),
         )
-        adapter = _adapter_ok()
+        usage = NormalizedLLMUsage(
+            input_total_tokens=64,
+            uncached_input_tokens=64,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
+            output_tokens=None,
+        )
+        adapter = _adapter_ok(usage=usage)
         recorder = _recorder_mock()
         executor = _executor(adapter, recorder, validate=_validator_ok, adapters={"gguf_sentiment": adapter})
         connection = replace(_remote_conn("conn-sentiment"), adapter_kind="gguf_sentiment")
@@ -448,11 +454,58 @@ class TestHappyPath:
         assert result.status == "succeeded"
         obs_arg = recorder.observe_usage.call_args.args[0]
         assert obs_arg.metadata["text_count"] == 2
-        assert obs_arg.metadata["encoder_input_tokens"] == 500
-        # 终态落账记录同源携带（结算侧成本计算与账本列依赖）
+        assert obs_arg.metadata["encoder_input_tokens"] == 64
+        assert obs_arg.metadata["encoder_input_tokens_estimate"] == 200
+        # 终态落账记录同源携带真实 token（结算侧成本计算与账本列依赖）
         terminal = recorder.submit_terminal.call_args.args[0]
-        assert terminal.metadata["text_count"] == 2
-        assert terminal.metadata["encoder_input_tokens"] == 500
+        assert terminal.metadata["encoder_input_tokens"] == 64
+        assert terminal.metadata["encoder_input_tokens_estimate"] == 200
+        output = result.outputs[0]
+        assert isinstance(output, ScenarioOutput)
+        assert output.metadata["encoder_input_tokens"] == 64
+
+    @pytest.mark.asyncio
+    async def test_encoder_pricing_unreported_usage_keeps_tokens_unknown(self, monkeypatch):
+        """D13-009 / R21：适配器未报告用量 → 不写 encoder_input_tokens（不得以估算顶替）。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: {"新闻一": 100, "新闻二": 100}.get(text, 0),
+        )
+        adapter = MagicMock()
+        adapter.invoke = AsyncMock(
+            return_value=AdapterResponse(
+                content="ok",
+                usage=None,
+                actual_model="finbert2-base",
+                metadata={"status": "success"},
+            )
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, adapters={"gguf_sentiment": adapter})
+        connection = replace(_remote_conn("conn-sentiment"), adapter_kind="gguf_sentiment")
+        raw_conn = dataclasses.asdict(connection)
+        raw_conn["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "encoder_input_tokens",
+            "price_source": "user",
+            "encoder_price_per_m": "1.00",
+            "fx_to_cny": None,
+        }
+        request = replace(
+            _request(),
+            payload={"system_prompt": "系统提示", "prompt": "测试新闻", "texts": ["新闻一", "新闻二"]},
+        )
+        result = await executor.execute(
+            request,
+            _snapshot((_candidate(0, "conn-sentiment"),), (raw_conn,)),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert "encoder_input_tokens" not in obs_arg.metadata
+        assert obs_arg.metadata["encoder_input_tokens_estimate"] == 200
+        terminal = recorder.submit_terminal.call_args.args[0]
+        assert "encoder_input_tokens" not in terminal.metadata
 
     @pytest.mark.asyncio
     async def test_authorize_failure_rejects_candidate(self):
@@ -1204,6 +1257,91 @@ class TestInvocationAndReservation:
         decision = result.candidate_decisions[0]
         assert decision.decision == "rejected"
         assert "attempt registration unavailable: DB_UNAVAILABLE" in decision.reason
+
+    @pytest.mark.asyncio
+    async def test_fee_candidate_unknown_price_zero_egress_fail_closed(self):
+        """D13-005：限额已配置但价格未知（billing 缺失）→ fail-closed 拒绝，零出站。
+
+        修复前该候选估算金额 None → usage_only 放行，DAO 预算门（双非 None 才判定）
+        完全失效，形成无上限消耗。
+        """
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "budget amount unestimable" in decision.reason
+        assert "fail-closed" in decision.reason
+        # 零出站 / 零预留 / 零派发 / 零授权
+        adapter.invoke.assert_not_awaited()
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        executor._config_service.authorize_attempt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fee_candidate_usage_only_mode_zero_egress_fail_closed(self):
+        """D13-005：限额 + 显式 usage_only 计价模式（价格未知）同样 fail-closed。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        raw_conn = dict(dataclasses.asdict(_remote_conn()))
+        raw_conn["billing"] = {"mode": "usage_only", "pricing_unit": "llm_tokens"}
+        result = await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (raw_conn,)),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        assert "budget amount unestimable" in result.candidate_decisions[0].reason
+        adapter.invoke.assert_not_awaited()
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fee_candidate_unknown_price_falls_over_to_priced_candidate(self):
+        """D13-005：未知价格候选拒绝不阻断遍历——切换下一计价可估算候选成功。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_fee_candidate(0, "conn-a"), _fee_candidate(1, "conn-b")),
+                (_remote_conn("conn-a"), _priced_conn("conn-b")),
+            ),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        adapter.invoke.assert_awaited_once()
+        decisions = result.candidate_decisions
+        assert decisions[0].decision == "rejected"
+        assert "budget amount unestimable" in decisions[0].reason
+        assert decisions[1].decision == "succeeded"
+        # 仅计价可估算候选发生预留（未知价格候选零预留副作用）
+        assert recorder.try_reserve.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fee_candidate_zero_limit_with_known_price_goes_to_budget_gate(self):
+        """D13-005：0 限额不是「未配置」——金额已知仍走 DAO 预算门（拒绝 → 零出站）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=True, error_code="RESERVE_REJECTED", reservation=None)
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        cand = dict(_fee_candidate(0, "conn-remote"), budget_limit_cny="0.00")
+        result = await executor.execute(_request(), _snapshot((cand,), (_priced_conn(),)), _validator_ok)
+        adapter.invoke.assert_not_awaited()
+        reserve_kwargs = recorder.try_reserve.await_args.kwargs
+        assert reserve_kwargs["budget_limit_cny"] == "0.00"
+        assert Decimal(reserve_kwargs["amount_cny"]) > 0
+        assert result.status == "failed"
+        assert "budget reserve rejected" in result.candidate_decisions[0].reason
 
     @pytest.mark.asyncio
     async def test_begin_attempt_registration_failure_usage_only_zero_egress(self):

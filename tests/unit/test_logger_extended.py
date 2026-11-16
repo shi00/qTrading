@@ -1,8 +1,11 @@
 import logging
 import os
+import queue
 import tempfile
+import threading
+import time
 import unittest
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from types import TracebackType
 from typing import NoReturn
 from unittest.mock import patch
@@ -867,6 +870,150 @@ class TestLoggingListenerLifecycle:
             assert not thread.is_alive()  # 线程已 join，无悬挂监听线程
             assert _ul._LISTENER is None
             assert not any(isinstance(h, QueueHandler) for h in logging.getLogger().handlers)
+
+
+class _BlockingOrderHandler(logging.Handler):
+    """在 release_event 事件前阻塞 emit 的 handler，按发生顺序记录 emit/close。
+
+    D04-003 用于制造「满队列 + 写盘阻塞」：stop_logging 必须在 listener 线程结束后
+    才 close handler，故 events 中 close 必须晚于全部 emit。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_event = threading.Event()
+        self.entered = threading.Event()
+        self.events: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.entered.set()
+        self.release_event.wait(10)
+        self.events.append(f"emit:{record.getMessage()}")
+
+    def close(self) -> None:
+        self.events.append("close")
+        super().close()
+
+
+def _make_record(message: str) -> logging.LogRecord:
+    return logging.LogRecord("d04003", logging.INFO, "", 0, message, (), None)
+
+
+@pytest.fixture
+def bounded_queue_listener():
+    """安装小容量队列 + 受控 listener，测试后强制释放并回收（R7 隔离）。"""
+    import utils.logger as _ul
+
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_listener, saved_queue = _ul._LISTENER, _ul._FILE_QUEUE
+    created: list[tuple[QueueListener, _BlockingOrderHandler]] = []
+
+    def _install(maxsize: int):
+        handler = _BlockingOrderHandler()
+        file_queue = queue.Queue(maxsize=maxsize)
+        listener = _ul._DrainableQueueListener(file_queue, handler, respect_handler_level=True)
+        listener.start()
+        _ul._FILE_QUEUE = file_queue
+        _ul._LISTENER = listener
+        root.addHandler(_ul._QueueHandler(file_queue))
+        created.append((listener, handler))
+        return file_queue, listener, handler
+
+    yield _install
+
+    # 无论断言是否失败：先放行阻塞 handler，再回收 listener，避免线程/全局状态残留
+    for _listener, handler in created:
+        handler.release_event.set()
+    _ul.stop_logging()
+    root.handlers = saved_handlers
+    _ul._LISTENER = saved_listener
+    _ul._FILE_QUEUE = saved_queue
+
+
+class TestStopLoggingBoundedDrain:
+    """D04-003：有界队列满时 stop_logging 先停 listener 再关 handler；超时不假回收。"""
+
+    def test_full_queue_stop_waits_for_listener_then_closes_in_order(self, bounded_queue_listener):
+        import utils.logger as _ul
+
+        file_queue, listener, handler = bounded_queue_listener(maxsize=2)
+        file_queue.put_nowait(_make_record("a"))
+        assert handler.entered.wait(2)  # listener 已阻塞在写盘
+        file_queue.put_nowait(_make_record("b"))
+        file_queue.put_nowait(_make_record("c"))
+        assert file_queue.full()
+
+        stopper = threading.Thread(target=_ul.stop_logging, daemon=True)
+        stopper.start()
+        stopper.join(0.2)
+        assert stopper.is_alive()  # 满队列 + 阻塞 handler：不得关掉 handler 就返回
+
+        handler.release_event.set()
+        stopper.join(5)
+        assert not stopper.is_alive()
+
+        # 遗留记录按序全部写完，handler 在 listener 线程结束之后才关闭
+        assert handler.events == ["emit:a", "emit:b", "emit:c", "close"]
+        assert listener._thread is None
+        assert _ul._LISTENER is None
+        assert _ul._FILE_QUEUE is None
+        assert not any(isinstance(h, QueueHandler) for h in logging.getLogger().handlers)
+        assert file_queue.unfinished_tasks == 0
+
+    def test_stop_timeout_keeps_listener_and_defers_handler_close(self, bounded_queue_listener, monkeypatch, caplog):
+        import utils.logger as _ul
+
+        file_queue, listener, handler = bounded_queue_listener(maxsize=2)
+        file_queue.put_nowait(_make_record("a"))
+        assert handler.entered.wait(2)
+        file_queue.put_nowait(_make_record("b"))
+        file_queue.put_nowait(_make_record("c"))
+        assert file_queue.full()
+
+        monkeypatch.setattr(_ul, "_STOP_DRAIN_TIMEOUT_SECONDS", 0.2)
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING):
+            _ul.stop_logging()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 3.0  # 有界返回：停机路径不在满队列上无界阻塞
+        assert _ul._LISTENER is listener
+        assert _ul._FILE_QUEUE is file_queue
+        assert listener._thread is not None
+        assert listener._thread.is_alive()
+        assert "close" not in handler.events  # 超时不假回收：handler 保持可用
+        assert any("保留未停止" in record.getMessage() for record in caplog.records)
+        # 准入已关闭：QueueHandler 已移除，不会继续向满队列写入
+        assert not any(isinstance(h, QueueHandler) for h in logging.getLogger().handlers)
+
+        # 阻塞解除后重试：排空、关 handler、清引用，证明超时状态可恢复
+        handler.release_event.set()
+        monkeypatch.setattr(_ul, "_STOP_DRAIN_TIMEOUT_SECONDS", 5.0)
+        _ul.stop_logging()
+        assert handler.events == ["emit:a", "emit:b", "emit:c", "close"]
+        assert listener._thread is None
+        assert _ul._LISTENER is None
+        assert _ul._FILE_QUEUE is None
+
+    def test_repeated_stop_is_idempotent(self, tmp_path):
+        import utils.logger as _ul
+
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+        ):
+            setup_logging("idempotent_stop_test")
+            assert _ul._LISTENER is not None
+            _ul.stop_logging()
+            _ul.stop_logging()  # 重复调用：不再入队 sentinel、不抛异常
+
+        assert _ul._LISTENER is None
+        assert _ul._FILE_QUEUE is None
+        assert not any(isinstance(h, QueueHandler) for h in logging.getLogger().handlers)
 
 
 class TestExceptionTextSanitization:

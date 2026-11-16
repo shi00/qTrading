@@ -485,6 +485,9 @@ class NewsClassifier:
         - sentiment 子列表独立排序（正本 §8.1 L249）：情绪请求经 ``task_routes[
           "sentiment"]["candidates"]`` 构造独立 ExecutionSnapshot（dataclasses.replace
           子路由快照），Executor 按 scenario_id 命中该子路由候选，与主题候选互不干扰；
+          子路由经 :func:`scenario_dispatch.build_route_snapshot` 与主路由同构构造，
+          继承冻结的 transient_retries / fallback_enabled / total_timeout_seconds
+          （D13-001：不得丢键后由 Executor 静默回退默认）；
         - reuse_bundled_sentiment 显式降级（正本 L249/L250，方案 §2.1）：主题响应若
           携带合法联合情绪（validator 捕获），仅当
           ``task_routes.sentiment.reuse_bundled_sentiment`` 严格为 True（缺键默认 True）
@@ -493,6 +496,8 @@ class NewsClassifier:
           主题请求为纯主题 prompt，联合情绪仅在模型自愿输出时产生。
         """
         import services.ai_service as _ai
+
+        from services.ai_service.scenario_dispatch import build_route_snapshot
 
         topic_request = InferenceRequest(
             scenario_id="news_annotation",
@@ -526,10 +531,10 @@ class NewsClassifier:
         sentiment_snapshot = dataclass_replace(
             dispatch.snapshot,
             routes=(
-                {
-                    "scenario_id": "news_annotation",
-                    "route_revision": dispatch.route_revision,
-                    "candidates": tuple(
+                build_route_snapshot(
+                    base_route,
+                    scenario_id="news_annotation",
+                    candidates=tuple(
                         {
                             "candidate_index": index,
                             "task_id": "sentiment",
@@ -541,7 +546,7 @@ class NewsClassifier:
                         }
                         for index, conn_id in enumerate(sentiment_candidates)
                     ),
-                },
+                ),
             ),
         )
         sentiment_request = InferenceRequest(

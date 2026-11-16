@@ -19,6 +19,40 @@ from utils.sanitizers import DataSanitizer
 logger = logging.getLogger(__name__)
 
 
+def _latest_aligned_values(df: pd.DataFrame, columns: tuple[str, ...]) -> tuple[float, ...] | None:
+    """取同一报告期内各列均有有效值的最近一期数值。
+
+    多列各自 ``dropna()`` 后取首元素会跨报告期错配（某一期缺一侧时，用另一期
+    的数据配对成伪指标），故必须按行联合过滤后再取最近一期。报告期由
+    ``end_date`` 降序确定（无 ``end_date`` 或全为缺失时退化为输入行序）。
+
+    Args:
+        df: 多期财务数据（通常按 ``end_date`` 降序）
+        columns: 需要同期限对齐的列名
+
+    Returns:
+        各列在最近有效报告期的数值元组；列缺失、无共同有效报告期或存在
+        非数值（NaN/inf/不可转换）时返回 None，由调用方省略该指标。
+    """
+    if not all(col in df.columns for col in columns):
+        return None
+    aligned = df.dropna(subset=list(columns))
+    if aligned.empty:
+        return None
+    if "end_date" in aligned.columns:
+        aligned = aligned.sort_values("end_date", ascending=False, na_position="last", kind="stable")
+    for _, row in aligned.iterrows():
+        values: list[float] = []
+        for col in columns:
+            value = safe_float(row[col], default=None)
+            if value is None:
+                break
+            values.append(value)
+        else:
+            return tuple(values)
+    return None
+
+
 @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
 async def _build_multi_period_financials(
     ts_code: str,
@@ -31,6 +65,8 @@ async def _build_multi_period_financials(
     构建多期财务趋势数据。
 
     获取最近8个季度的财务数据，分析ROE、毛利率、营收/利润增速趋势。
+    现金流/净利润与商誉/总资产按**同一报告期**对齐后取最近有效报告期：
+    仅当两侧均有值时计算，任一侧缺失则省略该指标，不用其他报告期数据补位。
 
     Args:
         ts_code: 股票代码
@@ -95,11 +131,9 @@ async def _build_multi_period_financials(
                     labels_out.append("ai_label_profit_growth_trend")
 
         if "n_cashflow_act" in df.columns and "n_income_attr_p" in df.columns:
-            cf_values = df["n_cashflow_act"].dropna().tolist()
-            profit_values = df["n_income_attr_p"].dropna().tolist()
-            if cf_values and profit_values:
-                latest_cf = cf_values[0] if cf_values else 0
-                latest_profit = profit_values[0] if profit_values else 0
+            cf_pair = _latest_aligned_values(df, ("n_cashflow_act", "n_income_attr_p"))
+            if cf_pair is not None:
+                latest_cf, latest_profit = cf_pair
                 if latest_profit > 0:
                     cf_ratio = latest_cf / latest_profit
                     parts.append(f"{I18n.get('ai_cf_profit_ratio')}: {cf_ratio:.2f}")
@@ -107,13 +141,14 @@ async def _build_multi_period_financials(
                         labels_out.append("ai_label_cf_profit_ratio")
 
         if "total_assets" in df.columns and "goodwill" in df.columns:
-            ta_values = df["total_assets"].dropna().tolist()
-            gw_values = df["goodwill"].dropna().tolist()
-            if ta_values and gw_values and ta_values[0] and ta_values[0] > 0:
-                gw_ratio = (gw_values[0] / ta_values[0]) * 100
-                parts.append(f"{I18n.get('ai_goodwill_ratio')}: {gw_ratio:.2f}%")
-                if labels_out is not None:
-                    labels_out.append("ai_label_goodwill_ratio")
+            gw_pair = _latest_aligned_values(df, ("total_assets", "goodwill"))
+            if gw_pair is not None:
+                latest_ta, latest_gw = gw_pair
+                if latest_ta > 0:
+                    gw_ratio = (latest_gw / latest_ta) * 100
+                    parts.append(f"{I18n.get('ai_goodwill_ratio')}: {gw_ratio:.2f}%")
+                    if labels_out is not None:
+                        labels_out.append("ai_label_goodwill_ratio")
 
         if "money_cap" in df.columns:
             mc_values = df["money_cap"].dropna().tolist()

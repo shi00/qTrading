@@ -11,8 +11,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 
+from core.i18n import Message
 from utils.diagnostics import SystemDiagnosticsCollector
-from services.task_manager import TaskStatus, AppTask
+from services.task_manager import (
+    TaskStatus,
+    AppTask,
+    _deserialize_msg_field,
+    _serialize_msg_field,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -41,6 +47,7 @@ def _patch_diagnostics_env(
     health_return=None,
     health_exc=None,
     config_dict=None,
+    tasks=None,
 ):
     """统一 patch diagnostics.export 所依赖的 5 个外部入口。
 
@@ -54,7 +61,7 @@ def _patch_diagnostics_env(
         mock_dp.check_data_health = AsyncMock(return_value=health_return or {"status": "green"})
 
     mock_tm = MagicMock()
-    mock_tm.get_all_tasks.return_value = []
+    mock_tm.get_all_tasks.return_value = tasks if tasks is not None else []
 
     mock_tp = MagicMock()
     mock_tp.io_pool_max_workers = 10
@@ -834,6 +841,112 @@ async def test_diagnostics_versions_without_provider(tmp_path):
     assert versions["client"] == {"status": "unavailable", "reason": "not_provided"}
     assert versions["product"]["name"] == "AStockScreener"
     assert isinstance(versions["product"]["version"], str)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_export_serializes_apptask_i18n_messages(tmp_path):
+    """D04-002：真实 AppTask（QUEUED/RUNNING/历史）的 Message 字段须稳定序列化为
+    ``{key, params}``，params 递归脱敏，旧 str 原样保留，导出不因 Message 非 JSON
+    类型而整体失败。
+
+    覆盖场景：
+    - QUEUED 使用 AppTask 默认 Message（name/description）；
+    - RUNNING 的 name/description 带参数，含 i18n ``*_key`` 参数、路径、明文 token
+      与嵌套 list/dict；
+    - 历史任务经 ``_serialize_msg_field``/``_deserialize_msg_field`` 往返后仍为
+      Message（模拟 DB 加载）；
+    - 旧数据为 str 时保持原样。
+    """
+    secret_token = "diagtask_secret_token_1234567890"
+    fake_user = "diaguser_d04002"
+    fake_path = f"C:\\Users\\{fake_user}\\reports\\out.csv"
+
+    queued = AppTask(id="queued1", name=Message("task_name_daily_sync"), status=TaskStatus.QUEUED)
+    running = AppTask(
+        id="running1",
+        name=Message("task_name_backtest", {"name_key": "strategy_value_name"}),
+        description=Message(
+            "task_running_desc",
+            {
+                "report_path": fake_path,
+                "detail": f"token={secret_token}",
+                "count": 3,
+                "targets": [{"symbol": "600000", "note": fake_path}],
+            },
+        ),
+        status=TaskStatus.RUNNING,
+        progress=0.4,
+    )
+    # 历史任务：Message 经持久化格式往返（与 TaskManager 从 DB 加载一致）
+    history_desc = _deserialize_msg_field(_serialize_msg_field(Message("task_failed_desc", {"reason": "timeout"})))
+    historical = AppTask(
+        id="history1",
+        name=Message("task_name_nightly_sync"),
+        description=history_desc,
+        status=TaskStatus.FAILED,
+    )
+    # 旧数据兼容：str 字段原样导出
+    legacy = AppTask(
+        id="legacy1",
+        name="Legacy Task",
+        description="Legacy description",
+        status=TaskStatus.COMPLETED,
+    )
+
+    _make_log_files(tmp_path)
+    with _patch_diagnostics_env(tmp_path, tasks=[queued, running, historical, legacy]):
+        zip_path = await SystemDiagnosticsCollector.export()
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                raw = zf.read("diagnostics_summary.json").decode("utf-8")
+                summary = json.loads(raw)
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+
+    tasks_by_id = {task["id"]: task for task in summary["tasks"]["tasks_list"]}
+
+    # QUEUED 默认 Message → {key, params}，params 为空 dict
+    assert tasks_by_id["queued1"]["name"] == {"key": "task_name_daily_sync", "params": {}}
+    assert tasks_by_id["queued1"]["description"] == {"key": "task_status_queued", "params": {}}
+
+    # RUNNING：Message.key 与 i18n ``*_key`` 参数保留，路径/凭证脱敏，嵌套结构递归
+    running_desc = tasks_by_id["running1"]["description"]
+    assert running_desc["key"] == "task_running_desc"
+    assert running_desc["params"]["report_path"] == "<PATH>"
+    assert running_desc["params"]["count"] == 3
+    assert running_desc["params"]["detail"] == "token=***"
+    assert running_desc["params"]["targets"] == [{"symbol": "600000", "note": "<PATH>"}]
+    assert tasks_by_id["running1"]["name"]["params"] == {"name_key": "strategy_value_name"}
+
+    # 历史任务（DB 往返后的 Message）同样稳定序列化
+    assert tasks_by_id["history1"]["description"] == {
+        "key": "task_failed_desc",
+        "params": {"reason": "timeout"},
+    }
+
+    # 旧 str 数据向后兼容
+    assert tasks_by_id["legacy1"]["name"] == "Legacy Task"
+    assert tasks_by_id["legacy1"]["description"] == "Legacy description"
+
+    # 整包 JSON 不含明文凭证与用户名路径
+    assert secret_token not in raw
+    assert fake_user not in raw
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_export_task_message_unknown_param_fails_fast(tmp_path):
+    """D04-002：Message.params 中未知对象不做 repr/str 兜底，仍由 json_serial fail-fast。"""
+    task = AppTask(
+        id="bad1",
+        name=Message("task_name_bad", {"unsupported": {1, 2, 3}}),
+        status=TaskStatus.QUEUED,
+    )
+
+    _make_log_files(tmp_path)
+    with _patch_diagnostics_env(tmp_path, tasks=[task]):
+        with pytest.raises(TypeError, match="not serializable"):
+            await SystemDiagnosticsCollector.export()
 
 
 @pytest.mark.asyncio

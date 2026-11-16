@@ -1,15 +1,19 @@
 """首页快讯与个股的确定性直接关联 + 去重纯逻辑（B4）。
 
-本模块位于 ``data/`` 层，只依赖标准库，不导入 services/strategies/ui（R1 分层）。
+本模块位于 ``data/`` 层，只依赖标准库与 ``utils.time_utils``（横切时区常量），
+不导入 services/strategies/ui（R1 分层）。
 首期只做**高精度直接关联**：股票代码 / 公司全称 / 唯一简称；行业、产品、人物、
 地域、供应链、宏观等推理型关联一律不命中（保持只报确定、不报推测）。
 
 去重规则（§8.4）：URL 相同 / 标准化标题相同且发布时间接近（同源 10 分钟内，
-公告同日算接近）/ content_hash 相同 → 视为重复；跨 source_kind 不互去重。
+公告同日算接近，同日按 **Asia/Shanghai 自然日** 判定）/ content_hash 相同 → 视为重复；
+跨 source_kind 不互去重。
 """
 
 import datetime
 import re
+
+from utils.time_utils import CST_TZ
 
 # 完整股票代码 token：`SH600519` / `600519.SH` / `sh600519` 等；前后不得紧邻字母数字
 _FULL_CODE_RE = re.compile(r"(?<![0-9A-Za-z])(?:[A-Za-z]{2}\d{6}|\d{6}\.[A-Za-z]{1,3})(?![0-9A-Za-z])")
@@ -213,15 +217,41 @@ def _normalize_title(title: str | None) -> str:
     return " ".join((title or "").split()).lower()
 
 
+def _comparable_time(value: object) -> datetime.datetime | None:
+    """归一为可比较的发布时间；``None`` / 非 datetime / NaT 返回 ``None``（视为未知，不配对）。"""
+    if not isinstance(value, datetime.datetime):
+        return None
+    if value != value:  # NaT 是 datetime 子类但自比较不等
+        return None
+    return value
+
+
+def _as_utc(value: datetime.datetime) -> datetime.datetime:
+    """归一为 tz-aware UTC。
+
+    naive 输入按项目存储约定视为 **UTC 墙钟**（各新闻源解析后经 ``to_utc_for_db`` 落库，
+    见 docs/patterns/data-sync.md「时间口径」）；aware 输入按其时区换算。
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.UTC)
+    return value.astimezone(datetime.UTC)
+
+
 def _time_near(a: dict, b: dict) -> bool:
-    """发布时间接近：announcement（同日算接近）；news 10 分钟内。"""
-    pa: datetime.datetime | None = a.get("publish_time")
-    pb: datetime.datetime | None = b.get("publish_time")
-    if not pa or not pb:
+    """发布时间接近：announcement 按 Asia/Shanghai 自然日（同日算接近）；news 10 分钟内。
+
+    ``publish_time`` 在数据层统一为 UTC tz-naive（``cninfo.parse_publish_time`` 等），
+    直接比较 UTC 日期会把夜间公告（如 23:30 UTC = 次日 07:30 CST）错算到前一日，
+    故公告「同日」须先折算 Asia/Shanghai 后再比日期；news 的秒级阈值比较亦先归一到
+    tz-aware UTC，避免 aware/naive 混合相减报错。
+    """
+    pa = _comparable_time(a.get("publish_time"))
+    pb = _comparable_time(b.get("publish_time"))
+    if pa is None or pb is None:
         return False
     if a.get("source_kind") == "announcement" or b.get("source_kind") == "announcement":
-        return pa.date() == pb.date()
-    return abs(pa - pb).total_seconds() <= _NEWS_NEAR_WINDOW_SECONDS
+        return _as_utc(pa).astimezone(CST_TZ).date() == _as_utc(pb).astimezone(CST_TZ).date()
+    return abs((_as_utc(pa) - _as_utc(pb)).total_seconds()) <= _NEWS_NEAR_WINDOW_SECONDS
 
 
 def _duplicate_reason(a: dict, b: dict) -> str | None:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from core.errors import AIBudgetError
@@ -15,12 +16,15 @@ from core.i18n import Message
 
 if TYPE_CHECKING:
     from services.ai_service import AIService
+    from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 logger = logging.getLogger(__name__)
 
 # === Issue #70: 模型上下文感知的 Token 化全局预算 ===
-# 未知/自定义模型或无 provider 时的保守上下文窗口回退值。
-DEFAULT_CONTEXT_WINDOW = 128_000
+# 未知/自定义模型（或统一连接未声明 context_window）时的保守回退窗口。
+# D13-006：不再假定 128k——未知窗口按保守值并显式告警，避免预算大于实际连接
+# 窗口导致请求超限/被供应商截断。
+DEFAULT_CONTEXT_WINDOW = 32_000
 # 预算预留 token：覆盖 system_instruction + <strategy_rules> + 预期输出，并留安全余量。
 # 注意：不覆盖预算外的 <user_custom_instructions>（该块不受预算截断）。
 # 取值 8000：对常见 32k~128k 上下文模型，可为 user 内容保留足够余量。
@@ -128,8 +132,53 @@ def _get_model_context_window(llm_config: dict, model_override: str | None = Non
     if isinstance(context, int) and context > 0:
         return context
 
-    # 3) 保守回退
+    # 3) 保守回退（D13-006：显式标记，不静默假定大窗口）
+    logger.warning(
+        "[AIService] Model context window unknown (provider=%r, model=%r); using conservative fallback %d tokens",
+        provider,
+        model,
+        DEFAULT_CONTEXT_WINDOW,
+    )
     return DEFAULT_CONTEXT_WINDOW
+
+
+def _unified_connection_budget_basis(dispatch: ScenarioDispatch) -> tuple[str | None, int | None]:
+    """统一链预算基准：场景路由首个候选连接的 (tokenizer 模型引用, context_window)。
+
+    以用户序首候选（primary）为基准，与旧链 P2-3「长上下文主模型不被短 fallback
+    拖小」一致；连接未声明 ``context_window`` 或快照结构不可解析时返回 ``None``，
+    由调用方按未知窗口保守回退并显式告警（D13-006：预算与统一连接窗口同源，
+    不再与 ``ConfigHandler`` failover / ``_litellm_config`` 分叉）。
+
+    模型引用用于按实际模型选择 tokenizer（``provider/model`` 形态，provider 为空
+    时仅 model）。
+    """
+    snapshot = getattr(dispatch, "snapshot", None)
+    routes = getattr(snapshot, "routes", None)
+    connections = getattr(snapshot, "connections", None)
+    if not routes or not connections:
+        return None, None
+    for route in routes:
+        candidates = route.get("candidates") if isinstance(route, Mapping) else None
+        if not candidates or not isinstance(candidates[0], Mapping):
+            continue
+        connection_id = candidates[0].get("connection_id")
+        connection = next(
+            (c for c in connections if isinstance(c, Mapping) and str(c.get("connection_id")) == str(connection_id)),
+            None,
+        )
+        if connection is None:
+            return None, None
+        raw_model = connection.get("model")
+        provider = connection.get("provider")
+        model_ref = str(raw_model) if isinstance(raw_model, str) and raw_model else None
+        if model_ref is not None and isinstance(provider, str) and provider:
+            model_ref = f"{provider}/{model_ref}"
+        window = connection.get("context_window")
+        if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+            window = None
+        return model_ref, window
+    return None, None
 
 
 class BudgetResult(tuple):
@@ -216,41 +265,58 @@ class TokenBudgetService:
         system_messages: list[dict] | None = None,
         fixed_blocks: str | list[str] | None = None,
         reserved_output_tokens: int = OUTPUT_RESERVE_TOKENS,
+        dispatch: ScenarioDispatch | None = None,
     ) -> int:
-        """计算 user 内容 token 预算（Issue #70 / D5-4）。
+        """计算 user 内容 token 预算（Issue #70 / D5-4 / D13-006）。
 
         从模型窗口逐层扣减：窗口 − 输出预留 − system 消息 − 不可裁剪固定块。
         未显式传入 system_messages/fixed_blocks 时向后兼容回退至保守常数预留。
-        以主模型 context 为基准（P2-3 决策）：长上下文主模型不被短 fallback 拖小。
-        """
-        # 经组合根模块属性访问 ConfigHandler/DataSanitizer：保证测试
-        # patch("services.ai_service.ConfigHandler"/"DataSanitizer") 生效。
-        import services.ai_service as _ai
 
-        try:
-            failover_config = _ai.ConfigHandler.get_failover_config()
-        except Exception as exc:
-            # 配置读取异常不应阻塞分析：回退保守预算（不截断）。R9 脱敏惯例对齐。
-            logger.warning(
-                "[AIService] Failover config read failed, falling back to active/default context budget: %s",
-                _ai.DataSanitizer.sanitize_error(exc),
-            )
-            failover_config = {"primary": "", "fallbacks": []}
-        primary = failover_config.get("primary", "")
-        primary_override = primary.strip() if isinstance(primary, str) and primary.strip() else None
-        # _litellm_config 可能未初始化（如测试以 AIService.__new__ 构造）：
-        # 预算计算不应因此阻塞分析，缺失时按默认窗口处理。
-        llm_config = getattr(self._service, "_litellm_config", None) or {}
-        # 未配置 failover 时（primary 为空），以当前生效模型（llm_config）为准，而非硬编码默认窗口（D5-3）
-        primary_context = _get_model_context_window(llm_config, model_override=primary_override)
+        ``dispatch`` 非 None（统一调度链）时，窗口与 tokenizer 模型取冻结快照中
+        场景路由首候选连接（用户序 primary，P2-3 一致）；连接窗口未知时按
+        ``DEFAULT_CONTEXT_WINDOW`` 保守回退并显式告警，不回退旧链配置——预算与
+        实际连接窗口必须同源。``dispatch`` 为 None（旧链 / 迁移期）时沿用
+        ConfigHandler failover primary 与 ``_litellm_config`` 解析。
+        """
+        if dispatch is not None:
+            model, primary_context = _unified_connection_budget_basis(dispatch)
+            if primary_context is None:
+                primary_context = DEFAULT_CONTEXT_WINDOW
+                logger.warning(
+                    "[AIService] Unified connection context window unknown (model=%r); "
+                    "using conservative fallback %d tokens",
+                    model,
+                    DEFAULT_CONTEXT_WINDOW,
+                )
+        else:
+            # 经组合根模块属性访问 ConfigHandler/DataSanitizer：保证测试
+            # patch("services.ai_service.ConfigHandler"/"DataSanitizer") 生效。
+            import services.ai_service as _ai
+
+            try:
+                failover_config = _ai.ConfigHandler.get_failover_config()
+            except Exception as exc:
+                # 配置读取异常不应阻塞分析：回退保守预算（不截断）。R9 脱敏惯例对齐。
+                logger.warning(
+                    "[AIService] Failover config read failed, falling back to active/default context budget: %s",
+                    _ai.DataSanitizer.sanitize_error(exc),
+                )
+                failover_config = {"primary": "", "fallbacks": []}
+            primary = failover_config.get("primary", "")
+            primary_override = primary.strip() if isinstance(primary, str) and primary.strip() else None
+            # _litellm_config 可能未初始化（如测试以 AIService.__new__ 构造）：
+            # 预算计算不应因此阻塞分析，缺失时按默认窗口处理。
+            llm_config = getattr(self._service, "_litellm_config", None) or {}
+            # 未配置 failover 时（primary 为空），以当前生效模型（llm_config）为准，而非硬编码默认窗口（D5-3）
+            primary_context = _get_model_context_window(llm_config, model_override=primary_override)
+            # oss-A3：按生效模型（failover primary 优先，否则当前配置模型）选 tokenizer 精确计数。
+            model = primary_override or (llm_config.get("model") if isinstance(llm_config.get("model"), str) else "")
 
         if system_messages is None and fixed_blocks is None:
             # 向后兼容：未提供固定块时，按原保守常数预留扣除
             return max(1, primary_context - CONTEXT_RESERVE_TOKENS)
 
         # D5-4：精准扣除 system 消息与不可裁剪固定块
-        # oss-A3：按生效模型（failover primary 优先，否则当前配置模型）选 tokenizer 精确计数。
-        model = primary_override or (llm_config.get("model") if isinstance(llm_config.get("model"), str) else "")
         system_tokens = sum(
             _estimate_tokens(m.get("content", ""), model) for m in (system_messages or []) if isinstance(m, dict)
         )
