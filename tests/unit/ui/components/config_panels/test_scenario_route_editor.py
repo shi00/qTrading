@@ -479,7 +479,7 @@ class TestFocusRestore:
             with patch.object(editor_module, "I18n") as mock_i18n:
                 mock_i18n.get.side_effect = lambda key, **kw: key
                 run_render_effects(component)
-        try_focus.assert_called_once()
+        assert try_focus.call_count == 1
         target = try_focus.call_args.args[0]
         assert isinstance(target, ft.OutlinedButton)
         assert target.key == "add_candidate"
