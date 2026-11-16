@@ -1281,11 +1281,12 @@ class TestColumnWidthPersistence:
         回归: drag-start 仅对当前列 setdefault, 拖拽镜像只有当前列; drag-update/end 用
         「仅含当前列」的镜像整体覆盖 state.col_widths 并持久化, 会清空其他列已保存宽度。
         """
-        persisted: dict = {}
+        # 替身按事件保存独立 payload 快照 (dict(w)), 不跨帧累积旧键
+        payloads: list[dict[str, int]] = []
         component = _make_component(
             col_widths_key="vt_key",
             on_load_col_widths=lambda: {"ts_code": 250, "name": 180},
-            on_persist_col_widths=lambda w: persisted.update(w),
+            on_persist_col_widths=lambda w: payloads.append(dict(w)),
         )
         _, result = _render(component)
         assert _header_cell_of(result, 0).width == 250
@@ -1301,15 +1302,20 @@ class TestColumnWidthPersistence:
         result2 = render_once(component)
         assert _header_cell_of(result2, 0).width == 250  # 未拖拽列宽度未被清空
         assert _header_cell_of(result2, 1).width == 220  # 拖拽列提交新宽度
-        assert persisted == {"ts_code": 250, "name": 220}
+        # 单次拖拽只提交一帧, payload 为完整映射
+        assert payloads == [{"ts_code": 250, "name": 220}]
 
     def test_consecutive_drags_accumulate_all_columns(self, mock_i18n_state, mock_app_colors_state):
-        """UIR-X01-002: 多列连续拖拽时每次持久化都包含全部列 (不互相覆盖)。"""
-        persisted: dict = {}
+        """UIR-X01-002: 多列连续拖拽时每帧 payload 都包含全部列 (不互相覆盖)。
+
+        D21-UIA-007: 替身按事件保存独立快照; 帧 N 缺失已持久化列键即失败,
+        不会被前帧键累积掩盖。
+        """
+        payloads: list[dict[str, int]] = []
         component = _make_component(
             col_widths_key="vt_key",
             on_load_col_widths=lambda: {"ts_code": 250},
-            on_persist_col_widths=lambda w: persisted.update(w),
+            on_persist_col_widths=lambda w: payloads.append(dict(w)),
         )
         _, result = _render(component)
 
@@ -1319,7 +1325,7 @@ class TestColumnWidthPersistence:
         e.primary_delta = 40
         _trigger_callback(handle_name.on_horizontal_drag_update, e)
         _trigger_callback(handle_name.on_horizontal_drag_end, MagicMock())
-        assert persisted == {"ts_code": 250, "name": 240}
+        assert payloads == [{"ts_code": 250, "name": 240}]
 
         result2 = render_once(component)
         handle_price = _header_handle_of(result2, 3)  # price 默认 100
@@ -1328,7 +1334,10 @@ class TestColumnWidthPersistence:
         e2.primary_delta = 20
         _trigger_callback(handle_price.on_horizontal_drag_update, e2)
         _trigger_callback(handle_price.on_horizontal_drag_end, MagicMock())
-        assert persisted == {"ts_code": 250, "name": 240, "price": 120}
+        assert payloads == [
+            {"ts_code": 250, "name": 240},
+            {"ts_code": 250, "name": 240, "price": 120},
+        ]
 
         result3 = render_once(component)
         assert _header_cell_of(result3, 0).width == 250
@@ -1337,10 +1346,10 @@ class TestColumnWidthPersistence:
 
     def test_persist_called_on_drag_end(self, mock_i18n_state, mock_app_colors_state):
         """拖拽结束时经 on_persist_col_widths 上抛最终列宽。"""
-        persisted: dict = {}
+        payloads: list[dict[str, int]] = []
         component = _make_component(
             col_widths_key="vt_key",
-            on_persist_col_widths=lambda w: persisted.update(w),
+            on_persist_col_widths=lambda w: payloads.append(dict(w)),
         )
         _, result = _render(component)
         handle = _header_handle_of(result, 0)
@@ -1349,7 +1358,7 @@ class TestColumnWidthPersistence:
         e.primary_delta = 50
         _trigger_callback(handle.on_horizontal_drag_update, e)
         _trigger_callback(handle.on_horizontal_drag_end, MagicMock())
-        assert persisted == {"ts_code": 170}
+        assert payloads == [{"ts_code": 170}]
 
     def test_no_persist_callback_drag_end_is_noop(self, mock_i18n_state, mock_app_colors_state):
         """未接线 on_persist_col_widths 时拖拽结束不抛 (降级为实例级)。"""
@@ -1366,8 +1375,8 @@ class TestColumnWidthPersistence:
 
     def test_widths_restored_on_remount_with_same_key(self, mock_i18n_state, mock_app_colors_state):
         """DoD 切页后保持: 拖拽结果经持久化, 重新挂载 (切页/重建) 时按键加载恢复。"""
-        persisted: dict = {}
-        comp1 = _make_component(on_persist_col_widths=lambda w: persisted.update(w))
+        payloads: list[dict[str, int]] = []
+        comp1 = _make_component(on_persist_col_widths=lambda w: payloads.append(dict(w)))
         _, result1 = _render(comp1)
         handle = _header_handle_of(result1, 0)
         _trigger_callback(handle.on_horizontal_drag_start, MagicMock())
@@ -1375,8 +1384,8 @@ class TestColumnWidthPersistence:
         e.primary_delta = 50
         _trigger_callback(handle.on_horizontal_drag_update, e)
         _trigger_callback(handle.on_horizontal_drag_end, MagicMock())
-        assert persisted == {"ts_code": 170}
+        assert payloads == [{"ts_code": 170}]
 
-        comp2 = _make_component(col_widths_key="vt_key", on_load_col_widths=lambda: dict(persisted))
+        comp2 = _make_component(col_widths_key="vt_key", on_load_col_widths=lambda: dict(payloads[-1]))
         _, result2 = _render(comp2)
         assert _header_cell_of(result2, 0).width == 170
