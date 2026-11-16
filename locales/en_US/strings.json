@@ -1106,7 +1106,6 @@
     "init_health_check": "Running Health Check...",
     "init_complete": "Init Complete! Health: {status} (Coverage: {coverage})",
     "progress_sync_fundamentals": "Fundamentals: {current}/{total} ({stock})",
-    "ds_val_placeholder_count": "5000+ Stocks",
     "ds_health_summary_sys": "System: Coverage {cov} | Lag {lag} days",
     "ds_health_summary_core": "Integrity: {miss} core missing",
     "ds_health_summary_core_ok": "Integrity: Core covered",
