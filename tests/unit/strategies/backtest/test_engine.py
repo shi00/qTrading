@@ -2087,6 +2087,81 @@ class TestRunDelistingAsOfApproximationWarning:
         assert not any(str(w).startswith("[delisting_asof_approximation]") for w in result.data_warnings)
 
 
+class TestRunStAsOfApproximationWarning:
+    """D12-002 / R21+R24：历史 ST 状态未知时，engine.run 在 data_warnings 显式标注口径近似。
+
+    ST 判定（screener_dao._st_columns_sql）在 name-history 无 as-of 覆盖行时为 NULL（未知），
+    不再回退当前名称冒充历史取值；provider.st_name_fallback_seen 置位时产出
+    st_asof_approximation（category=asof_approximation，不升级可信度级别），并随
+    quality_json 落库，供 VM 经 caveat 通道呈现（保存重载不丢声明）。
+    """
+
+    async def _run(self, monkeypatch, *, fallback_seen: bool):
+        from strategies.backtest.metrics import BacktestMetrics
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.delisting_flag_seen = False
+        dp.st_name_fallback_seen = fallback_seen
+        dp.get_stock_meta = AsyncMock(return_value={})
+        engine.data_provider = dp
+        engine.strategy_adapter = MagicMock()
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        empty_signals = pl.DataFrame({"ts_code": [], "trade_date": [], "signal_rank": []})
+
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
+        monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
+        monkeypatch.setattr(
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), [], 0))
+        )
+        monkeypatch.setattr(
+            engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
+        )
+        monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_nav_curve", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_daily_returns", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(BacktestMetrics, "calc_all_metrics", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_investment_metrics", MagicMock(return_value={}))
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        return await engine.run(strategy=strategy)
+
+    @pytest.mark.asyncio
+    async def test_appends_warning_and_persists_declaration(self, monkeypatch):
+        result = await self._run(monkeypatch, fallback_seen=True)
+
+        warnings = [
+            w for w in result.data_warnings if isinstance(w, DataWarning) and w.warning_type == "st_asof_approximation"
+        ]
+        assert warnings, "应产出 st_asof_approximation 声明"
+        assert warnings[0].category == "asof_approximation"
+        assert any(str(w).startswith("[st_asof_approximation]") for w in result.data_warnings)
+        # 保存重载不丢声明：quality_json 落库后仍可识别该类型前缀。
+        persisted = result.to_persist_dict()["quality_json"]["data_warnings"]
+        assert any(str(w).startswith("[st_asof_approximation]") for w in persisted)
+
+    @pytest.mark.asyncio
+    async def test_omits_warning_when_flag_absent(self, monkeypatch):
+        result = await self._run(monkeypatch, fallback_seen=False)
+
+        assert not any(str(w).startswith("[st_asof_approximation]") for w in result.data_warnings)
+
+
 class TestRunPortfolioWipedOutWarning:
     """D5-M2: 净值归零（爆仓）必须通过 portfolio_wiped_out 告警在 UI 可见。
 

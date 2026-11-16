@@ -2021,6 +2021,7 @@
     "backtest_warn_more_days": "…及另外 {count} 个交易日（更多详见导出报告）",
     "backtest_caveat_ai_disabled": "本次回测未包含 AI 分析环节，结果仅反映数学筛选部分的表现，不能代表该策略在实盘启用 AI 时的表现。",
     "backtest_caveat_delisting_asof_approximation": "本次回测票池内存在退市整理期标的，其排除口径采用「当期近似」（R24）：名称经 name-history 按 as-of 还原，无历史覆盖时回退当前名称，退市日亦用当前快照；个别标的的剔除时点可能与当时实际不符，可能引入前视/幸存者偏差。",
+    "backtest_caveat_st_asof_approximation": "本次回测中部分标的的 as-of 名称无 name-history 覆盖，其历史 ST 状态未知（按未知处理，不以当前名称冒充历史取值），因此未参与 ST 过滤剔除；这些标的是否属风险警示股无法按当时信息判定（R24 当期近似）。",
     "backtest_skip_no_quote": "无行情无法交易：{count} 笔",
     "backtest_skip_suspended": "停牌无法交易：{count} 笔",
     "backtest_skip_down_limit": "跌停无法卖出：{count} 笔",

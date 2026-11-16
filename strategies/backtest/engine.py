@@ -318,6 +318,26 @@ class VectorBacktestEngine:
                 )
             )
 
+        # D12-002 / R21+R24：票池内存在 as-of ST 状态未知的标的（name-history 无覆盖，
+        # st_name_source='current_snapshot'，is_st=NULL 而非回退当前名称的布尔值）时，ST 排除
+        # 口径对这批标的不可判定，必须在结果中显式标注为「当期近似」，不得让「未知」被静默
+        # 当作非 ST 或 ST 处理。category=asof_approximation（方法学声明，不升级可信度级别）。
+        if self.data_provider.st_name_fallback_seen:
+            all_warnings.append(
+                DataWarning(
+                    warning_type="st_asof_approximation",
+                    start_date=str(trade_dates[0]),
+                    end_date=str(trade_dates[-1]),
+                    affected_stock_count=0,
+                    error_message=(
+                        "ST 排除口径为「当期近似」（R24）：区间回放中部分标的的 as-of 名称无 "
+                        "name-history 覆盖，其历史 ST 状态未知（is_st 保持未知，不以当前名称冒充）。"
+                        "这些标的未被 ST 过滤剔除，是否属风险警示股无法按当时信息判定。"
+                    ),
+                    category=WarningCategory.ASOF_APPROXIMATION,
+                )
+            )
+
         # D5-M2: 净值归零（爆仓）检测——不是数值噪声，必须让爆仓在 UI 可见。
         # daily_returns 已把爆仓日转为 null（无定义）供 drop_nulls 剔除，此处显式追加
         # DataWarning 进入 unreliable 判定，避免波动率低估/夏普被高估被静默掩盖。
