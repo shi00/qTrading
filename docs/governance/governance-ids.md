@@ -125,6 +125,7 @@
 | BT-03 | R21 变体：可信度元数据在持久化边界丢失（`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃，UI 渲染为「无问题」） | review03 业务语义与可信度 | [CLAUDE.md](../../CLAUDE.md) R21 / [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | AI-01 | 缺失/失败被伪装成合法具体值：AI 调用失败/无结论不得伪装成「AI 否决」（`score=0`），不可计价调用不得伪装为「零成本」——催生 R21 | business-review-2026-09-11（业务检视） | [CLAUDE.md](../../CLAUDE.md) R21 / [strategies/ai_mixin.py](../../strategies/ai_mixin.py) | 使用中 |
 | AI-02 | 业务语义字段（`score` / `ai_score` / `confidence` 等）的缺失表示：必须用 `None`/哨兵，禁止填充业务上合法的具体值（检视报告 04 AI-02，缺陷根因见 R21） | 本地检视报告（gitignored） | [CONTRIBUTING.md](../../CONTRIBUTING.md)「业务语义字段的缺失表示」 | 使用中 |
+| ADD-AI-001 | 新闻预取任务清理缺口：`news_tasks` 在资金/辅助/限价/策略 hook/宏观等后续预取之前创建，后续预取抛错或被取消时孤儿任务未被回收（后台任务泄漏，占用预算直至超时） | AI 代码检视（ADD 系列） | [strategies/ai_mixin.py](../../strategies/ai_mixin.py) | 使用中 |
 | E4 | OSS 检视：import-linter 6 条手工 forbidden 契约重构为 1 条 layers + 2 条 forbidden（AST 静态测试随之退役，例外注册表路径校验保留） | OSS 检视（E 系列） | [pyproject.toml](../../pyproject.toml) / [docs/architecture/overview.md](../architecture/overview.md#41-分层架构) §4.1 | 使用中 |
 | DAT-07 | 回测不可复现（残余）：DATA-05 已保留财报多版本 + PIT，迁移前存量行仅单版本，早期重述覆盖使该段历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | DAT-08 | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（含存量污染 `industry_tushare`） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
