@@ -36,6 +36,7 @@ def _sanitize_logged_value(value: object) -> str:
         sanitized = f"{sanitized[:_LOG_VALUE_MAX_LEN]}...(truncated)"
     return f"{type(value).__name__} {sanitized}"
 
+
 # ---------------------------------------------------------------------------
 # 个股分析输出契约（D13-008 / P2-REV06-LLMOutput-SchemaValidation）
 # ---------------------------------------------------------------------------
