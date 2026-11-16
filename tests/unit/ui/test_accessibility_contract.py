@@ -350,18 +350,32 @@ class _KeywordPresenceVisitor(ast.NodeVisitor):
 # ============================================================================
 
 
+class AccessibilityScanError(RuntimeError):
+    """扫描失败 (读取/解析错误), 绝不折算为 "零违规" (D21-UIB-003)."""
+
+
 def _collect_ui_python_files() -> list[Path]:
     """收集 ui/ 目录下所有 .py 文件 (递归, 排除 __init__.py)."""
     return sorted(p for p in UI_DIR.rglob("*.py") if p.name != "__init__.py")
 
 
 def _scan_file(path: Path) -> list[AccessibilityViolation]:
-    """扫描单个文件, 返回所有违规记录 (含 file 字段)."""
-    raw = path.read_text(encoding="utf-8")
+    """扫描单个文件, 返回所有违规记录 (含 file 字段).
+
+    fail closed: 读取或解析失败抛出 ``AccessibilityScanError``, 携带相对路径与定位信息,
+    使 "未被检查" 与 "检查通过且零违规" 可区分. 其余异常不吞没.
+    """
+    rel = path.relative_to(UI_DIR).as_posix()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        msg = f"{rel}: 无法读取源码 ({type(exc).__name__}); 可访问性契约未检查"
+        raise AccessibilityScanError(msg) from exc
     try:
         tree = ast.parse(raw, filename=str(path))
-    except SyntaxError:
-        return []
+    except SyntaxError as exc:
+        msg = f"{rel}:{exc.lineno}:{exc.offset}: SyntaxError ({exc.msg}); 可访问性契约未检查"
+        raise AccessibilityScanError(msg) from exc
     icon_v = _IconButtonVisitor()
     dialog_v = _AlertDialogVisitor()
     text_v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
@@ -370,17 +384,32 @@ def _scan_file(path: Path) -> list[AccessibilityViolation]:
     dialog_v.visit(tree)
     text_v.visit(tree)
     checkbox_v.visit(tree)
-    rel = str(path.relative_to(UI_DIR)).replace("\\", "/")
     for v in icon_v.violations + dialog_v.violations + text_v.violations + checkbox_v.violations:
         v.file = rel
     return icon_v.violations + dialog_v.violations + text_v.violations + checkbox_v.violations
 
 
 def _scan_all() -> list[AccessibilityViolation]:
-    """扫描 ui/ 下所有 .py 文件, 聚合违规记录."""
+    """扫描 ui/ 下所有 .py 文件, 聚合违规记录.
+
+    fail closed: 空扫描根或任一文件扫描失败时抛出 ``AccessibilityScanError``,
+    不返回部分结果, 也不把失败折算为零违规.
+    """
+    if not UI_DIR.is_dir():
+        raise AccessibilityScanError(f"扫描根不存在: {UI_DIR}; 可访问性契约未检查")
+    paths = _collect_ui_python_files()
+    if not paths:
+        raise AccessibilityScanError(f"扫描根下无可扫描 .py 文件: {UI_DIR}; 可访问性契约未检查")
     result: list[AccessibilityViolation] = []
-    for path in _collect_ui_python_files():
-        result.extend(_scan_file(path))
+    errors: list[AccessibilityScanError] = []
+    for path in paths:
+        try:
+            result.extend(_scan_file(path))
+        except AccessibilityScanError as exc:
+            errors.append(exc)
+    if errors:
+        message = f"{len(errors)} 个文件扫描失败, 可访问性契约未检查:\n" + "\n".join(f"  {e}" for e in errors)
+        raise AccessibilityScanError(message) from errors[0]
     return result
 
 
@@ -913,3 +942,128 @@ def _build_upgrade_in_progress_dialog():
             if x.violation_type == "missing_close" and (x.file, x.func_name, x.violation_type) not in ALLOWED_VIOLATIONS
         ]
         assert len(close_violations) == 0, "白名单应按 func_name 豁免, 不受行号偏移影响"
+
+
+# ============================================================================
+# 测试: 扫描失败必须 fail closed (D21-UIB-003)
+# ============================================================================
+
+
+class TestScannerFailClosed:
+    """解析/读取失败不得折算为零违规, 必须显式失败."""
+
+    @staticmethod
+    def _isolate_scan_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """把扫描根指向受控临时目录, 隔离真实 ui/."""
+        root = tmp_path / "ui"
+        root.mkdir()
+        monkeypatch.setitem(globals(), "UI_DIR", root)
+        return root
+
+    def test_syntax_error_fails_scan_with_path_and_line(self, tmp_path, monkeypatch):
+        """坏源码必须使扫描失败, 并定位到相对路径与行号."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "broken.py").write_text("import flet as ft\ndef broken(:\n    pass\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        message = str(excinfo.value)
+        assert "broken.py" in message
+        assert ":2:" in message
+        assert "未检查" in message
+
+    def test_scan_file_preserves_syntax_error_cause(self, tmp_path, monkeypatch):
+        """单文件扫描直接抛错并保留 SyntaxError 作为 cause (定位到行/列)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        broken = root / "broken.py"
+        broken.write_text("x = (\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_file(broken)
+
+        assert "broken.py:1:" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, SyntaxError)
+
+    def test_all_parse_errors_are_reported(self, tmp_path, monkeypatch):
+        """聚合全部解析失败, 不只报告第一个坏文件."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "broken_a.py").write_text("x = (\n", encoding="utf-8")
+        (root / "broken_b.py").write_text("y = )\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        message = str(excinfo.value)
+        assert "broken_a.py" in message
+        assert "broken_b.py" in message
+        assert "2 个文件扫描失败" in message
+
+    def test_parse_error_not_masked_by_other_violations(self, tmp_path, monkeypatch):
+        """存在真实违规文件时, 坏源码仍必须使扫描整体失败 (不返回部分结果)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "app.py").write_text("import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD)\n", encoding="utf-8")
+        (root / "broken.py").write_text("x = (\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+        assert "broken.py" in str(excinfo.value)
+
+    def test_clean_file_returns_no_violations(self, tmp_path, monkeypatch):
+        """合法零违规文件返回空集合 (与 "未检查" 区分)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "clean.py").write_text(
+            "import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD, tooltip='add')\n", encoding="utf-8"
+        )
+
+        assert _scan_all() == []
+
+    def test_empty_file_is_clean(self, tmp_path, monkeypatch):
+        """空文件可正常解析, 视为零违规而非扫描失败."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "empty.py").write_text("", encoding="utf-8")
+
+        assert _scan_all() == []
+
+    def test_violation_still_reported_after_refactor(self, tmp_path, monkeypatch):
+        """正常扫描路径保留违规记录 (含相对路径)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "app.py").write_text("import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD)\n", encoding="utf-8")
+
+        violations = _scan_all()
+
+        assert len(violations) == 1
+        assert violations[0].file == "app.py"
+        assert violations[0].violation_type == "missing_tooltip"
+        assert violations[0].line == 2
+
+    def test_undecodable_file_fails_closed(self, tmp_path, monkeypatch):
+        """非 UTF-8 文件必须失败并给出文件路径, 不得折算为零违规."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        latin1 = root / "latin1.py"
+        latin1.write_bytes(b"import flet as ft\nx = '\xff\xfe'\n")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_file(latin1)
+
+        assert "latin1.py" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+
+    def test_missing_scan_root_fails_closed(self, tmp_path, monkeypatch):
+        """扫描根不存在时失败, 不因空扫描结果而放行."""
+        monkeypatch.setitem(globals(), "UI_DIR", tmp_path / "missing")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        assert "扫描根不存在" in str(excinfo.value)
+
+    def test_root_without_python_files_fails_closed(self, tmp_path, monkeypatch):
+        """扫描根下无 .py 文件时失败, 不产生空扫描即合规的假象."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "__init__.py").write_text("", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        assert "无可扫描 .py 文件" in str(excinfo.value)
