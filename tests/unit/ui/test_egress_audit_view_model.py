@@ -17,12 +17,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from unittest.mock import AsyncMock
 
 from ui.viewmodels.egress_audit_view_model import EgressAuditViewModel, _to_rows
 from utils.egress_audit import EgressAudit
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -137,6 +139,31 @@ class TestLoadAggregates:
         assert vm.state.session_count == 0
         _assert_immutable_rows(vm.state.today_rows)
         _assert_immutable_rows(vm.state.month_rows)
+
+    @pytest.mark.asyncio
+    async def test_mixed_corrupt_lines_keep_valid_rows_loaded(self, monkeypatch, tmp_path) -> None:
+        """真实扫描器：文件混杂合法非对象行时仍展示有效行，loaded=True（D20-002）。"""
+        audit = EgressAudit()
+        path = tmp_path / "egress_audit.jsonl"
+        ts = get_now().date().isoformat()
+        valid = json.dumps(
+            {"timestamp": f"{ts}T00:00:00", "destination": "llm:ok/ok", "payload_size_bytes": 7},
+            ensure_ascii=False,
+        )
+        path.write_text("\n".join(["[]", "null", valid, "123", '"a string"', valid]) + "\n", encoding="utf-8")
+        monkeypatch.setattr(audit, "_file_path", lambda: str(path))
+
+        vm = _make_vm()
+        await vm.load_aggregates()
+
+        # 跳过损坏行 ≠ 整体读取失败：loaded=True 且有效聚合保留
+        assert vm.state.loaded is True
+        assert [(r.destination, r.count, r.payload_size_bytes) for r in vm.state.today_rows] == [
+            ("llm:ok/ok", 2, 14),
+        ]
+        assert [(r.destination, r.count, r.payload_size_bytes) for r in vm.state.month_rows] == [
+            ("llm:ok/ok", 2, 14),
+        ]
 
     @pytest.mark.asyncio
     async def test_exception_degrades_to_empty(self, monkeypatch, caplog):

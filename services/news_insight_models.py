@@ -113,7 +113,10 @@ class NewsInsightResult:
     prompt_version: str
     # S4 统一场景链（s4_plan §4.1）：程序构造的执行元数据（8 键），旧链为 None。
     execution_metadata: dict | None = None
-    # F28：部分事件因证据校验无效被剔除的质量提示（保留剔除原因溯源）；无剔除为 None（R21）。
+    # F28 / D14-002：部分事件因证据校验无效被剔除的质量提示。分析层产出明细；服务边界
+    # 规范化为受控 ``[{"drop_reason", "dropped_count"}]``（不含未校验 fact/quote，R9）后
+    # 随成功快照写入 coverage 质量通道。成功态无剔除为 ``[]``（已校验无剔除）；None 表示
+    # 未知（旧快照 / 非成功分析，R21，不得渲染成「无剔除」）。
     events_dropped: list[dict] | None = None
     # UIR-F05-003：快照真实生成时点（UTC-naive，与 DB DateTime(timezone=False) 同语义）。
     # None 表示未记录（旧快照 / 未持久化的降级结果），禁止用读取时刻或 updated_at 填充（R21）。
