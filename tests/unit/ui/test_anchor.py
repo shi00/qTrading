@@ -394,6 +394,12 @@ class TestEidsPr3Namespaces:
         assert eid_str == "e2e.data.table_ready"
         assert kind == AnchorKind.LABEL
 
+    def test_data_table_ready_scoped_to_table(self):
+        """D21-OTHER-006: 表身份就绪 EID，identifier 携带表名（LABEL）。"""
+        eid_str, kind = EIDS.DATA.table_ready("stock_basic")
+        assert eid_str == "e2e.data.table_ready.stock_basic"
+        assert kind == AnchorKind.LABEL
+
     def test_backtest_strategy_dropdown(self):
         eid_str, kind = EIDS.BACKTEST.STRATEGY_DROPDOWN
         assert eid_str == "e2e.backtest.strategy_dropdown"

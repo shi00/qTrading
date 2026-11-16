@@ -27,7 +27,6 @@ Windows skipif：
 
 import pytest
 
-from tests.e2e.helpers.app_launcher import PROJECT_ROOT
 from tests.e2e.pages import WizardPage
 from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
@@ -127,7 +126,7 @@ async def test_embedded_real_db_info_message_displayed(embedded_real_wizard_page
     await embedded_real_wizard_page.expect_text(embedded_no_config_text)
 
 
-async def test_real_embedded_app_db_queryable(embedded_real_wizard_page) -> None:
+async def test_real_embedded_app_db_queryable(embedded_real_wizard_page, embedded_real_wizard_app) -> None:
     """E2E: 真实 sidecar 启动后，应用日志间接验证 DB 已就绪 (spec §3.6 用例 2)。
 
     验证：
@@ -148,7 +147,7 @@ async def test_real_embedded_app_db_queryable(embedded_real_wizard_page) -> None
     welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await embedded_real_wizard_page.expect_text(welcome_guide)
 
-    log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
+    log_path = embedded_real_wizard_app.logs.stdout_path
     content = log_path.read_text(encoding="utf-8", errors="replace")
     assert "[Bootstrap] embedded postgres ready on 127.0.0.1:" in content, (
         "应用日志未含 embedded postgres ready 消息，sidecar 可能未启动成功"

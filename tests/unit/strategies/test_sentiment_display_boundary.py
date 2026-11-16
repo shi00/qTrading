@@ -13,13 +13,17 @@ docs/patterns/ai-service.md §5「仅展示边界」：打分输出（label/conf
 2. 属性读取：      ``row.sentiment``
 3. 裸变量引用：    ``sentiment = ...``（含 import 绑定名、函数体内引用）
 4. dict.get：      ``item.get("sentiment")``
-5. Polars 列操作： ``pl.col("sentiment")`` / ``df.select("sentiment_score")``
+5. Polars 列操作： ``pl.col("sentiment")`` / ``df.select("sentiment_score")``，含列名容器与
+   后续参数形式 ``df.select(["sentiment_score"])`` / ``pl.col("close", "sentiment_conf")``
 6. 关键字传参：    ``save_market_news(sentiment=...)``
 7. dict 字面量键： ``df.rename({"sentiment": ...})``
 8. 直接 import：   ``from services.news_sentiment_scorer import NewsSentimentScorer``
 9. importlib：     ``importlib.import_module("services.news_sentiment_scorer")``
 
 豁免：``TYPE_CHECKING`` 块内 import（仅类型注解，无运行时依赖）。
+
+能力边界：列名扫描只展开静态字面量（list/tuple/set、``*`` 展开、关键字参数值）。经变量、
+字符串拼接、f-string 或 ``**`` 解包传入的列名不做数据流追踪，不在此守护范围。
 
 不误报的既有现场（鲁棒性由负向测试锁定）：
 - ``strategies/oversold_strategy.py`` 的 ``SENTIMENT_INDICES`` / ``SENTIMENT_INDEX_NAMES``
@@ -35,6 +39,7 @@ docs/patterns/ai-service.md §5「仅展示边界」：打分输出（label/conf
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -51,9 +56,9 @@ GUARDED_FIELDS: frozenset[str] = frozenset({"sentiment", "sentiment_score", "sen
 # 打分服务模块（策略层不得导入：输出仅展示边界，ADR-0008 / ai-service.md §5）
 SCORER_MODULE = "services.news_sentiment_scorer"
 
-# 数据访问语义的方法名白名单：调用名（Attribute.attr 或 Name.id）命中且第一个位置参数
-# 为守护字段名的字符串常量时违规。仅收 Polars/dict 的数据访问方法，避免误伤
-# logger.info("...") 等任意位置参数恰好为字段名的非数据访问场景。
+# 数据访问语义的方法名白名单：调用名（Attribute.attr 或 Name.id）命中且任一位置参数
+# 或关键字参数值的（可嵌套）字面量中含守护字段名时违规。仅收 Polars/dict 的数据访问方法，
+# 避免误伤 logger.info("...") 等任意位置参数恰好为字段名的非数据访问场景。
 FIELD_ACCESS_METHODS: frozenset[str] = frozenset(
     {
         "col",
@@ -77,6 +82,22 @@ FIELD_ACCESS_METHODS: frozenset[str] = frozenset(
 def _is_guarded_str(node: ast.expr) -> bool:
     """节点是否为值精确等于守护字段名的字符串常量。"""
     return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in GUARDED_FIELDS
+
+
+def _iter_guarded_literals(node: ast.expr) -> Iterator[ast.Constant]:
+    """递归展开列名字面量，产出值精确等于守护字段名的字符串常量。
+
+    覆盖 list/tuple/set 容器与 ``*`` 展开的形式；变量、拼接与 f-string 等非字面量
+    不属于本函数能力范围（见模块 docstring「能力边界」）。
+    """
+    if isinstance(node, ast.Starred):
+        yield from _iter_guarded_literals(node.value)
+    elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        for element in node.elts:
+            yield from _iter_guarded_literals(element)
+    elif _is_guarded_str(node):
+        assert isinstance(node, ast.Constant)
+        yield node
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -139,9 +160,11 @@ class _SentimentBoundaryVisitor(ast.NodeVisitor):
         elif isinstance(func, ast.Name):
             call_name = func.id
         # 形式 4/5：item.get("sentiment") / pl.col("sentiment") / df.select("sentiment_score")
-        if call_name in FIELD_ACCESS_METHODS and node.args and _is_guarded_str(node.args[0]):
-            assert isinstance(node.args[0], ast.Constant)
-            self._record(node.lineno, f'{call_name}("{node.args[0].value}") field access')
+        # 检查全部位置参数及关键字参数值，递归展开列名容器（列表元素与后续参数同样违规）
+        if call_name in FIELD_ACCESS_METHODS:
+            for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                for literal in _iter_guarded_literals(arg):
+                    self._record(literal.lineno, f'{call_name}("{literal.value}") field access')
         # 形式 9：importlib.import_module(...) 间接导入打分服务
         if (
             isinstance(func, ast.Attribute)
@@ -272,6 +295,20 @@ def test_scanner_catches_polars_column_access() -> None:
     assert sum("field access" in v for v in violations) == 2, f"未能捕获 Polars 列操作: {violations}"
 
 
+def test_scanner_catches_column_container_and_following_args() -> None:
+    """形式 5 回归（D21-UNIT-002）：列名容器元素与后续位置参数中的字段必须被捕获。"""
+    violations = _scan_source(
+        'import polars as pl\nvalue = df.select(["sentiment_score"])\nexpr = pl.col("close", "sentiment_conf")\n'
+    )
+    assert len(violations) == 2, f"应捕获 2 处列名违规, 实际: {violations}"
+    assert any(v.startswith("line 2:") and 'select("sentiment_score")' in v for v in violations), (
+        f"未能捕获列名容器: {violations}"
+    )
+    assert any(v.startswith("line 3:") and 'col("sentiment_conf")' in v for v in violations), (
+        f"未能捕获后续位置参数: {violations}"
+    )
+
+
 def test_scanner_catches_keyword_argument() -> None:
     """形式 6：关键字传参必须被捕获。"""
     violations = _scan_source("save_market_news(rows, sentiment=item)\n")
@@ -359,6 +396,15 @@ def test_scanner_ignores_comments() -> None:
     """注释中的伪引用不误报（AST 不解析注释）。"""
     violations = _scan_source('# row["sentiment"] 是展示字段，策略不得读取\nx = 1\n')
     assert not violations, f"注释被误报: {violations}"
+
+
+def test_scanner_ignores_safe_column_containers() -> None:
+    """安全列名容器/关键字参数值不误报（精确匹配守护字段，含 * 展开）。"""
+    violations = _scan_source(
+        'picked = df.select(["ts_code", "close"], columns=["close", "amount"])\n'
+        'sorted_df = df.sort(*["pct_chg", "ts_code"], descending=[True, False])\n'
+    )
+    assert not violations, f"安全列名容器被误报: {violations}"
 
 
 def test_scanner_ignores_similar_but_different_fields() -> None:

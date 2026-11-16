@@ -1223,7 +1223,8 @@ jobs:
     # Windows E2E skipif 复验 job：临时取消 8 个 Windows skipif 用例的 skipif，
     # 在 windows-latest runner 实机运行以判断 Flet 0.86.x 下问题是否仍存在.
     # 拆分为 3 个并行 matrix group 解决 timeout + 隔离卡死用例：
-    #   - no-sidecar (4 用例): 3 fake sidecar + 1 wizard，无需 Rust 构建（wizard 仅 3s 失败不影响）
+    #   - no-sidecar (4 用例): 3 fake sidecar + 1 external wizard，无需 Rust 构建
+    #     （wizard 使用 external_wizard_page，由 job 真实 PG 承载外部表单成功路径）
     #   - real-sidecar (3 用例): 真实 sidecar binary，需 Rust 构建链路
     #   - settings-slow (1 用例): test_settings_log_level_switch 单独跑（已知 34min 卡死，独立 60min timeout）
     # 触发：workflow_dispatch（手动触发复验，Task 2.5-2.7）.
@@ -1241,7 +1242,10 @@ jobs:
         include:
           - group: no-sidecar
             # 4 用例：3 fake sidecar (test_onboarding_embedded.py) + 1 wizard
-            # wizard 用例使用 external DB (wizard_page fixture)，3s 快速失败不影响其他用例
+            # wizard 用例使用 external_wizard_page（external 模式 fixture，不依赖 Rust
+            # sidecar），由 job 的真实 PG 校验外部 DB 表单并前进；database_mode=external
+            # 使模式 skip 失效，embedded 条件 skip 仍由 _windows_skip 保留。
+            database_mode: external
             test_targets: >-
               tests/e2e/test_onboarding_embedded.py
               tests/e2e/test_onboarding_wizard.py::test_wizard_db_validation_success
@@ -1249,11 +1253,13 @@ jobs:
             timeout_minutes: 30
           - group: real-sidecar
             # 3 用例：test_onboarding_embedded_real.py (embedded_real_wizard_page fixture)
+            database_mode: embedded
             test_targets: tests/e2e/test_onboarding_embedded_real.py
             needs_rust: 'true'
             timeout_minutes: 60
           - group: settings-slow
             # 1 用例：test_settings_log_level_switch（已知 34min 卡死，单独跑避免拖累其他 job）
+            database_mode: embedded
             test_targets: tests/e2e/test_settings_flow.py::test_settings_log_level_switch
             needs_rust: 'false'
             timeout_minutes: 60
@@ -1442,6 +1448,9 @@ jobs:
       - name: Run Windows skip revalidation (--run-windows-skip)
         env:
           E2E_TEST_DB: 1
+          # no-sidecar 组显式 external：wizard 成功 node 使用 external_wizard_page，
+          # 其余组保持 embedded（各 fixture 亦在子进程 env 中显式设置模式）。
+          QTRADING_DATABASE_MODE: ${{ matrix.database_mode }}
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
           E2E_ARTIFACT_DIR: "e2e-artifacts"
           E2E_TIMEOUT_MULTIPLIER: "2.0"

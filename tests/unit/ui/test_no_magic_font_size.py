@@ -3,16 +3,18 @@
 P1-1 决策: 所有字号必须引用 ``AppStyles.FONT_SIZE_*`` token, 消除硬编码数值.
 本测试动态扫描 ui/ 下所有 .py 文件 (不含 __pycache__ / theme.py), 拦截魔术数字回归.
 
-豁免:
+豁免 (由 AST 判定保证, 不依赖行首启发):
 - theme.py (token 定义源头, 合法存在 ``FONT_SIZE_* = 11`` 等)
-- 注释/docstring 中的数值说明
+- 注释/docstring 中的数值说明 (注释不在 AST 中; docstring 不是调用参数)
 - 非字号属性 (width/height/border_radius/spacing 等不在此约束)
 """
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
+import textwrap
 
 import pytest
 
@@ -21,14 +23,70 @@ pytestmark = pytest.mark.unit
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
 _SCAN_DIR = _PROJECT_ROOT / "ui"
 
-# 检测 size=N / text_size=N / icon_size=N 中的字面数值
-# 允许:
-#   size=AppStyles.FONT_SIZE_*  (token)
-#   size=<variable>             (变量引用)
-#   size=<expr>                 (复杂表达式)
-# 禁止:
-#   size=<int literal>
-_MAGIC_SIZE_PATTERN = re.compile(r"\b(?:size|text_size|icon_size)=(\d+)\b")
+# 字号/图标尺寸关键字参数或属性
+_FONT_SIZE_KEYWORDS = frozenset({"size", "text_size", "icon_size"})
+
+# ``size`` 在非字号控件上可能表示无关语义 (如分页大小), 仅在真实字号控件调用上判定;
+# ``text_size`` / ``icon_size`` 名称本身即字号/图标尺寸语义, 任意调用均判定.
+_SIZE_KEYWORD_CONTROLS = frozenset({"Text", "TextStyle", "Icon"})
+
+
+def _callee_name(node: ast.Call) -> str | None:
+    """返回调用名 (``ft.Text(...)`` -> ``"Text"``), 无法静态确定时返回 None."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _is_numeric_literal(node: ast.expr) -> bool:
+    """判断节点是否为数值字面量 (排除 bool: bool 是 int 子类但非尺寸语义)."""
+    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+
+
+def _find_magic_font_size_violations(source: str) -> list[tuple[int, str]]:
+    """AST 扫描源码中的字号魔术数字, 返回 ``(行号, 描述)`` 列表.
+
+    - 仅匹配关键字参数/属性赋值中的真实字号参数 (跨行调用天然支持);
+    - 注释与 docstring 在 AST 中不是调用参数, 天然排除;
+    - 数值字面量才违规, token/变量/复杂表达式放行.
+    """
+    tree = ast.parse(source)
+    violations: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            is_size_control = _callee_name(node) in _SIZE_KEYWORD_CONTROLS
+            for kw in node.keywords:
+                if kw.arg not in _FONT_SIZE_KEYWORDS:
+                    continue
+                if kw.arg == "size" and not is_size_control:
+                    continue
+                if not _is_numeric_literal(kw.value):
+                    continue
+                violations.append((kw.value.lineno, f"{kw.arg}={kw.value.value}"))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if value is None or not _is_numeric_literal(value):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Attribute) and target.attr in _FONT_SIZE_KEYWORDS:
+                    violations.append((target.lineno, f".{target.attr}={value.value}"))
+    return sorted(violations)
+
+
+def _scan_file_magic_font_size(f: pathlib.Path) -> list[str]:
+    """扫描单个 UI 源文件, 返回带相对路径与行号的违规描述."""
+    src = f.read_text(encoding="utf-8")
+    lines = src.splitlines()
+    rel = f.relative_to(_PROJECT_ROOT)
+    offenders: list[str] = []
+    for line_no, expr in _find_magic_font_size_violations(src):
+        snippet = lines[line_no - 1].strip()[:80] if line_no <= len(lines) else ""
+        offenders.append(f"{rel}:{line_no}: {expr} in: {snippet}")
+    return offenders
 
 
 def test_no_magic_font_size_in_ui():
@@ -39,18 +97,58 @@ def test_no_magic_font_size_in_ui():
             continue
         if f.name == "theme.py":
             continue  # token 定义源头
-        src = f.read_text(encoding="utf-8")
-        for i, line in enumerate(src.splitlines(), 1):
-            stripped = line.lstrip()
-            if stripped.startswith("#"):
-                continue
-            for m in _MAGIC_SIZE_PATTERN.finditer(line):
-                num = m.group(1)
-                offenders.append(f"{f.relative_to(_PROJECT_ROOT)}:{i}: size={num} in: {line.strip()[:80]}")
+        offenders.extend(_scan_file_magic_font_size(f))
     assert not offenders, (
         "UI 源代码的 size/text_size/icon_size 不得使用字面数值 (P1-1). "
         "请改用 AppStyles.FONT_SIZE_CAPTION/BODY_SM/BODY/LG/TITLE/HEADLINE/XL/DISPLAY:\n" + "\n".join(offenders)
     )
+
+
+def _violations(source: str) -> list[tuple[int, str]]:
+    """测试辅助: 对受控源码片段运行 AST 扫描."""
+    return _find_magic_font_size_violations(textwrap.dedent(source).strip("\n"))
+
+
+def test_detects_spaced_cross_line_and_attribute_size_literals():
+    """紧贴/等号空白/跨行/属性赋值写法必须等价报出, 且行号精确."""
+    source = """
+        ft.Text(label, size = 16)
+        ft.Text(
+            label,
+            size=13,
+        )
+        ft.Icon(icon, size=20)
+        ft.TextStyle(size=12)
+        ft.TextField(text_size=14)
+        icon.size = 18
+    """
+    assert _violations(source) == [
+        (1, "size=16"),
+        (4, "size=13"),
+        (6, "size=20"),
+        (7, "size=12"),
+        (8, "text_size=14"),
+        (9, ".size=18"),
+    ]
+
+
+def test_ignores_docstrings_trailing_comments_and_tokens():
+    """模块/嵌套函数 docstring、行尾注释、token/变量与无关参数均不误报."""
+    source = '''
+        """模块说明: size=13 仅为文档示例."""
+        # 行首注释 size=13
+
+        def build(label):
+            """函数说明: size=13."""
+            return ft.Text(label, size=AppStyles.FONT_SIZE_BODY)  # size=13
+
+        api.request(size=10)
+        ft.Text(label, max_lines=16, width=200)
+        ft.Text(label, size=some_variable)
+        ft.Text(**kwargs)
+        container.width = 200
+    '''
+    assert _violations(source) == []
 
 
 # 页面主标题必须使用 FONT_SIZE_XL (Issue #445)

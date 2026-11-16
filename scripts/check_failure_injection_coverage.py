@@ -3,6 +3,8 @@
 解析并比较两侧失败注入场景编号：
 1. Rust 测试侧：``sidecars/qtrading-pg-sidecar/tests/failure_injection.rs`` 中
    ``fn test_inject_NN_*`` 函数名（NN 为场景编号，可能含 ``b`` 后缀表示对称测试）。
+   只认真实代码：注释（行/块/文档）与字符串、字符字面量中的伪声明会被剔除，
+   避免 ``// fn test_inject_03_x() {}`` 之类的假绿。
 2. 文档矩阵侧：``reviews/pg_plan.md`` §17.6 失败注入测试矩阵中的场景编号。
 
 报告缺失（矩阵有但 Rust 无）与冗余（Rust 有但矩阵无），供 CI/pre-commit 守护
@@ -42,6 +44,144 @@ _SECTION_END_RE = re.compile(r"^#{2,3}\s+(?!17\.6\b)")
 _MATRIX_ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
 # Rust 测试函数：fn test_inject_NN_*（NN 含可选 b 后缀）
 _RUST_FN_RE = re.compile(r"\bfn\s+test_inject_(\d+[a-z]?)_")
+# Rust 字符串字面量前缀（普通 b/c 与 raw r/br/cr）
+_STRING_PREFIXES = ("br", "cr", "r", "b", "c")
+_RAW_STRING_PREFIXES = frozenset({"r", "br", "cr"})
+
+
+def _mask_rust_comments_and_strings(content: str) -> str:
+    """把 Rust 源码中的注释与字符串/字符字面量替换为空白，保留换行。
+
+    目的：``extract_rust_scenarios`` 只匹配真实代码里的函数声明，避免把注释或
+    字符串中的伪 ``fn test_inject_NN_*`` 当作已覆盖场景（D21-UNIT-005）。
+
+    保守实现，不做完整 Rust 词法分析，但覆盖会影响匹配的构造：
+    - 行注释 ``//``（含 ``///`` / ``//!`` 文档注释）
+    - 块注释 ``/* ... */``（Rust 支持嵌套）
+    - 普通字符串 ``"..."``、字节/c 字符串 ``b"..."`` / ``c"..."``（处理转义）
+    - raw 字符串 ``r"..."`` / ``r#"..."#`` / ``br#"..."#``（任意 ``#`` 数量）
+    - 字符字面量 ``'a'`` / ``'\\n'`` / ``'"'``（生命周期 ``'a`` 不当字面量）
+
+    Args:
+        content: Rust 源文件全文。
+
+    Returns:
+        等长文本，注释与字面量内容被空格替换（换行保留）。
+    """
+    out: list[str] = []
+    i = 0
+    n = len(content)
+
+    def masked(start: int, end: int) -> None:
+        for ch in content[start:end]:
+            out.append(ch if ch in "\r\n" else " ")
+
+    while i < n:
+        ch = content[i]
+        next_ch = content[i + 1] if i + 1 < n else ""
+
+        if ch == "/" and next_ch == "/":
+            end = content.find("\n", i)
+            end = n if end == -1 else end
+            masked(i, end)
+            i = end
+            continue
+
+        if ch == "/" and next_ch == "*":
+            # Rust 块注释可嵌套
+            depth = 1
+            j = i + 2
+            while j < n and depth:
+                if content.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif content.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            masked(i, j)
+            i = j
+            continue
+
+        # 字符串字面量（含前缀）：前缀必须是独立 token，避免误吞 for/bar 等标识符
+        prefix = ""
+        if ch in ("b", "c", "r") and (i == 0 or not (content[i - 1].isalnum() or content[i - 1] == "_")):
+            for candidate in _STRING_PREFIXES:
+                if content.startswith(candidate, i):
+                    prefix = candidate
+                    break
+        if prefix:
+            j = i + len(prefix)
+            if prefix in _RAW_STRING_PREFIXES:
+                hashes = 0
+                k = j
+                while k < n and content[k] == "#":
+                    hashes += 1
+                    k += 1
+                if k < n and content[k] == '"':
+                    terminator = '"' + "#" * hashes
+                    end = content.find(terminator, k + 1)
+                    end = n if end == -1 else end + len(terminator)
+                    masked(i, end)
+                    i = end
+                    continue
+            elif j < n and content[j] == '"':
+                end = _scan_escaped_string_end(content, j)
+                masked(i, end)
+                i = end
+                continue
+
+        if ch == '"':
+            end = _scan_escaped_string_end(content, i)
+            masked(i, end)
+            i = end
+            continue
+
+        if ch == "'":
+            end = _scan_char_literal_end(content, i)
+            if end is not None:
+                masked(i, end)
+                i = end
+                continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+def _scan_escaped_string_end(content: str, start: int) -> int:
+    """返回普通字符串的结束下标（``start`` 指向起始双引号）。"""
+    i = start + 1
+    n = len(content)
+    while i < n:
+        if content[i] == "\\":
+            i += 2
+            continue
+        if content[i] == '"':
+            return i + 1
+        i += 1
+    return n
+
+
+def _scan_char_literal_end(content: str, start: int) -> int | None:
+    """识别字符字面量并返回结束下标；判定为生命周期时返回 None。"""
+    n = len(content)
+    j = start + 1
+    if j >= n:
+        return None
+    if content[j] == "\\":
+        k = j + 2  # 跳过多字节转义的首个字符，如 '\n' / '\u{...}' / '\''
+        limit = start + 16
+        while k < n and k <= limit:
+            if content[k] == "'":
+                return k + 1
+            k += 1
+        return None
+    if j + 1 < n and content[j + 1] == "'":
+        return j + 2
+    return None
 
 
 def _normalize_rust_scenario(raw: str) -> str:
@@ -62,6 +202,9 @@ def _normalize_rust_scenario(raw: str) -> str:
 def extract_rust_scenarios(rust_path: Path) -> set[str]:
     """从 failure_injection.rs 提取 test_inject_NN_* 场景号（归一化后）。
 
+    只匹配真实代码中的函数声明：注释（行/块/文档）与普通、raw 字符串及字符
+    字面量中的伪声明会被剔除，不当作已覆盖场景。
+
     Args:
         rust_path: failure_injection.rs 文件路径。
 
@@ -74,8 +217,9 @@ def extract_rust_scenarios(rust_path: Path) -> set[str]:
     if not rust_path.exists():
         raise FileNotFoundError(f"Rust failure_injection.rs not found: {rust_path}")
     content = rust_path.read_text(encoding="utf-8")
+    code = _mask_rust_comments_and_strings(content)
     scenarios: set[str] = set()
-    for m in _RUST_FN_RE.finditer(content):
+    for m in _RUST_FN_RE.finditer(code):
         raw = m.group(1)
         scenarios.add(_normalize_rust_scenario(raw))
     return scenarios
