@@ -94,8 +94,33 @@ def _is_call_named(node: ast.AST, attr_name: str) -> bool:
     return isinstance(func, ast.Name) and func.id == attr_name
 
 
+def _is_statically_empty_name(node: ast.AST) -> bool:
+    """检测可访问名称表达式是否**静态可确定为空**.
+
+    仅识别可确定的空值, 避免对动态表达式误报:
+    - ``None`` 常量
+    - 空串 / 纯空白字符串常量
+    - 不含占位符的空 f-string (如 ``f""`` / ``f"   "``)
+
+    变量引用 / 函数调用 (如 ``I18n.get(...)``) / 含占位符的 f-string /
+    条件表达式等动态值无法静态确认, 返回 False (保守放行).
+    """
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return True
+        return isinstance(node.value, str) and not node.value.strip()
+    if isinstance(node, ast.JoinedStr):
+        if any(isinstance(value, ast.FormattedValue) for value in node.values):
+            return False
+        joined = "".join(
+            value.value for value in node.values if isinstance(value, ast.Constant) and isinstance(value.value, str)
+        )
+        return not joined.strip()
+    return False
+
+
 class _IconButtonVisitor(ast.NodeVisitor):
-    """扫描 ft.IconButton(...) 调用, 检查是否含 tooltip= 关键字参数."""
+    """扫描 ft.IconButton(...) 调用, 检查 tooltip= 是否为有效非空名称."""
 
     def __init__(self) -> None:
         self.violations: list[AccessibilityViolation] = []
@@ -113,14 +138,24 @@ class _IconButtonVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, "IconButton"):
-            has_tooltip = any(kw.arg == "tooltip" for kw in node.keywords)
-            if not has_tooltip:
+            tooltip_kw = next((kw for kw in node.keywords if kw.arg == "tooltip"), None)
+            if tooltip_kw is None:
                 self.violations.append(
                     AccessibilityViolation(
                         file="",  # 由调用方填充
                         line=node.lineno,
                         violation_type="missing_tooltip",
                         detail=f"ft.IconButton(...) at line {node.lineno} 缺 tooltip 参数",
+                        func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
+                    )
+                )
+            elif _is_statically_empty_name(tooltip_kw.value):
+                self.violations.append(
+                    AccessibilityViolation(
+                        file="",  # 由调用方填充
+                        line=node.lineno,
+                        violation_type="missing_tooltip",
+                        detail=f"ft.IconButton(...) at line {node.lineno} tooltip 为空值",
                         func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
                     )
                 )
@@ -147,7 +182,7 @@ class _AlertDialogVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, "AlertDialog"):
             func_name = self._func_stack[-1] if self._func_stack else "<MODULE>"
-            # title 检查: 关键字必须存在且非空 Container
+            # title 检查: 关键字必须存在, 且非静态空值 / 非空 Container
             title_kw = next((kw for kw in node.keywords if kw.arg == "title"), None)
             if title_kw is None:
                 self.violations.append(
@@ -156,6 +191,16 @@ class _AlertDialogVisitor(ast.NodeVisitor):
                         line=node.lineno,
                         violation_type="missing_title",
                         detail=f"ft.AlertDialog(...) at line {node.lineno} 缺 title 参数",
+                        func_name=func_name,
+                    )
+                )
+            elif _is_statically_empty_name(title_kw.value):
+                self.violations.append(
+                    AccessibilityViolation(
+                        file="",
+                        line=node.lineno,
+                        violation_type="missing_title",
+                        detail=f"ft.AlertDialog(...) at line {node.lineno} title 为空值",
                         func_name=func_name,
                     )
                 )
@@ -253,11 +298,12 @@ class _AlertDialogVisitor(ast.NodeVisitor):
 
 
 class _KeywordPresenceVisitor(ast.NodeVisitor):
-    """扫描指定控件调用, 检查语义名称关键字参数是否至少存在一个 (F08).
+    """扫描指定控件调用, 检查语义名称关键字参数是否至少有一个非空值 (F08).
 
     用于 TextField (label/tooltip) 与 Checkbox (label/semantics_label/tooltip)
     的可访问名称契约: hint_text/placeholder 不被屏幕阅读器视为标签, 控件自身
-    必须携带可访问名称. func_name 栈语义与 _IconButtonVisitor 一致.
+    必须携带可访问名称; 显式 None / 空串 / 纯空白不算有效名称. func_name 栈
+    语义与 _IconButtonVisitor 一致.
     """
 
     def __init__(self, control_name: str, accepted_kwargs: tuple[str, ...]) -> None:
@@ -278,15 +324,21 @@ class _KeywordPresenceVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, self.control_name):
-            has_name = any(kw.arg in self.accepted_kwargs for kw in node.keywords)
+            name_kwargs = [kw for kw in node.keywords if kw.arg in self.accepted_kwargs]
+            has_name = any(not _is_statically_empty_name(kw.value) for kw in name_kwargs)
             if not has_name:
                 kwargs_desc = "/".join(self.accepted_kwargs)
+                if name_kwargs:
+                    empty_desc = "/".join(kw.arg for kw in name_kwargs if kw.arg is not None)
+                    detail = f"ft.{self.control_name}(...) at line {node.lineno} {empty_desc} 为空值"
+                else:
+                    detail = f"ft.{self.control_name}(...) at line {node.lineno} 缺 {kwargs_desc} 参数"
                 self.violations.append(
                     AccessibilityViolation(
                         file="",  # 由调用方填充
                         line=node.lineno,
                         violation_type="missing_label",
-                        detail=f"ft.{self.control_name}(...) at line {node.lineno} 缺 {kwargs_desc} 参数",
+                        detail=detail,
                         func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
                     )
                 )
@@ -630,6 +682,118 @@ dlg = ft.AlertDialog(
         v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
         v.visit(tree)
         assert len(v.violations) == 1
+
+
+class TestEmptyAccessibleName:
+    """显式空名称不算有效可访问名称 (D21-UIB-002).
+
+    仅静态可确定为空的值 (None / 空串 / 纯空白 / 无占位符空 f-string) 判违规;
+    变量、I18n 调用、含占位符 f-string、条件表达式等动态值保守放行.
+    """
+
+    @pytest.mark.parametrize("empty_value", ["None", "''", "'   '", 'f""', 'f"   "'])
+    def test_iconbutton_rejects_static_empty_tooltip(self, empty_value):
+        """IconButton 的 tooltip=None/空串/空白/空 f-string 均判违规."""
+        source = f"import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD, tooltip={empty_value})\n"
+        tree = ast.parse(source)
+        v = _IconButtonVisitor()
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_tooltip"
+        assert v.violations[0].line == 2
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        ["label=None", "label=''", "label='   '", "tooltip=' '", 'tooltip=f""'],
+    )
+    def test_textfield_rejects_static_empty_name(self, kwargs):
+        """TextField 唯一的名称参数为静态空值时判违规."""
+        source = f"import flet as ft\nx = ft.TextField({kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_label"
+        assert v.violations[0].line == 2
+        assert "为空值" in v.violations[0].detail
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        ["label=None", "semantics_label=''", "tooltip='   '", "semantics_label=f''"],
+    )
+    def test_checkbox_rejects_static_empty_name(self, kwargs):
+        """Checkbox 唯一的名称参数为静态空值时判违规."""
+        source = f"import flet as ft\nx = ft.Checkbox(value=False, {kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("Checkbox", ("label", "semantics_label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_label"
+        assert v.violations[0].line == 2
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            "label=None, tooltip='search'",
+            "label='', tooltip='search'",
+            "label='search', tooltip='   '",
+        ],
+    )
+    def test_one_valid_name_is_enough(self, kwargs):
+        """任一名称参数非空即满足门禁 (混有空值与有效值不误报)."""
+        source = f"import flet as ft\nx = ft.TextField({kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 0
+
+    @pytest.mark.parametrize("empty_value", ["None", "''", "'   '", 'f""'])
+    def test_alertdialog_rejects_static_empty_title(self, empty_value):
+        """AlertDialog 的 title 为静态空值时判 missing_title."""
+        source = f"import flet as ft\ndlg = ft.AlertDialog(title={empty_value}, actions=[])\n"
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        title_violations = [x for x in v.violations if x.violation_type == "missing_title"]
+        assert len(title_violations) == 1
+        assert title_violations[0].line == 2
+        assert "为空值" in title_violations[0].detail
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            "tooltip=I18n.get('common_search')",
+            "tooltip=dynamic_tooltip",
+            "tooltip=f'{label_text}'",
+            "label='' if condition else 'fallback'",
+        ],
+    )
+    def test_dynamic_name_not_reported(self, kwargs):
+        """动态名称表达式无法静态确认, 保守放行 (不误报)."""
+        source = f"import flet as ft\nx = ft.TextField({kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 0
+
+    def test_dynamic_tooltip_not_reported(self):
+        """IconButton 的动态 tooltip (函数调用 / 变量) 保守放行."""
+        for kwargs in ("tooltip=I18n.get('common_add')", "tooltip=tooltip_text"):
+            source = f"import flet as ft\nx = ft.IconButton({kwargs})\n"
+            tree = ast.parse(source)
+            v = _IconButtonVisitor()
+            v.visit(tree)
+            assert len(v.violations) == 0
+
+    def test_dynamic_alertdialog_title_not_reported(self):
+        """AlertDialog 的动态 title (I18n / 调用 / 条件表达式) 保守放行."""
+        for title in ("I18n.get('title')", "build_title()", "'a' if flag else 'b'"):
+            source = f"import flet as ft\ndlg = ft.AlertDialog(title={title}, actions=[])\n"
+            tree = ast.parse(source)
+            v = _AlertDialogVisitor()
+            v.visit(tree)
+            title_violations = [x for x in v.violations if x.violation_type == "missing_title"]
+            assert len(title_violations) == 0
 
 
 class TestFuncNameResolution:
