@@ -1959,11 +1959,20 @@ class RevisionReceipt:
 FROZEN_COMMAND_INPUT_DIGEST_VERSION: Final = 1
 
 
-def frozen_command_input_digest(command_kind: str, text: str, manifest_payload: CanonicalJson) -> str:
+def frozen_command_input_digest(
+    command_kind: str,
+    text: str,
+    manifest_payload: CanonicalJson,
+    *,
+    expected_revision: int,
+    node_id: str,
+) -> str:
     """命令冻结输入的完整规范摘要（受理/修订共用的唯一构造入口，检视 D05）。
 
-    覆盖正文与冻结 manifest（manifest 已含模式/用途等冻结字段），并带命令
-    ``command_kind`` 区分受理与修订；同键同两项才算重放，任一项不同即异输入。
+    覆盖正文、冻结 manifest（契约要求 CanonicalJson，按规范字节参与摘要，与
+    ``intent_digest`` 同源，故键序/数值表示不同的非规范字节两侧一致判为异输入）
+    、命令级期望版本（受理 expected_revision / 修订 expected_execution_revision）
+    与 node 身份，并带 ``command_kind`` 区分受理与修订；同键同以上各项才算重放。
     旧行摘要由 :func:`legacy_command_input_digest` 识别，不得用于新写入。
     """
 
@@ -1974,6 +1983,8 @@ def frozen_command_input_digest(command_kind: str, text: str, manifest_payload: 
                 "kind": command_kind,
                 "text": text,
                 "manifest": manifest_payload,
+                "expected_revision": expected_revision,
+                "node_id": node_id,
             }
         )
     )

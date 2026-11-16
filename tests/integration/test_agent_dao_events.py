@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
@@ -325,6 +326,37 @@ class TestExecutionEvents:
         with pytest.raises(AgentServiceError) as exc:
             await dao.record_event(_session_request(event_kind=EventKind.INPUT_BOUND))
         assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
+
+    async def test_same_identity_different_message_id_conflicts(self, real_embedded_pg) -> None:
+        """同事件身份换 message_id → INPUT_CONFLICT，不把请求 message_id 静默丢弃（检视 D05）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        first = await dao.record_event(_session_request())
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.record_event(_session_request(message_id="m-other"))
+        assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
+        # 原事实不变：既有 message_id 未被覆盖。
+        async with dao.engine.connect() as conn:
+            stored = (
+                await conn.execute(sa.select(AgentMessage.message_id).where(AgentMessage.event_id == first.event_id))
+            ).scalar_one()
+            assert stored == "m-native-1"
+
+    async def test_same_identity_different_occurred_at_conflicts(self, real_embedded_pg) -> None:
+        """occurred_at 属冻结事件事实：同身份换时刻 → INPUT_CONFLICT，原事实不变（检视 D05）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        first = await dao.record_event(_session_request())
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.record_event(_session_request(occurred_at="2026-06-01T12:00:01.000000Z"))
+        assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
+        async with dao.engine.connect() as conn:
+            stored = (
+                await conn.execute(
+                    sa.select(AgentMessage.occurred_at).where(AgentMessage.message_id == first.message_id)
+                )
+            ).scalar_one()
+            assert stored == datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 
     async def test_missing_session_invalid(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)

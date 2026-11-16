@@ -715,8 +715,14 @@ class TestReviseQueued:
         assert rev.input_revision == 2
         assert rev.execution_revision == 2
         assert rev.source_version == "2"
-        # 命令 input_digest 为完整规范输入摘要（正文 + 冻结 manifest，检视 D05）。
-        assert rev.input_digest == frozen_command_input_digest("revise", revise.text, revise.manifest_payload)
+        # 命令 input_digest 为完整规范输入摘要（正文 + manifest + 期望版/node，检视 D05）。
+        assert rev.input_digest == frozen_command_input_digest(
+            "revise",
+            revise.text,
+            revise.manifest_payload,
+            expected_revision=revise.expected_execution_revision,
+            node_id=revise.node_id,
+        )
         assert rev.session_seq == 1
         async with engine.connect() as conn:
             m2 = (
@@ -827,6 +833,29 @@ class TestReviseQueued:
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_same_key_different_expected_revision_or_node_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """同修订键同正文同 manifest 换期望版/node → INPUT_CONFLICT（检视 D05），零新事实。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        frozen = json_doc({"schema_version": 1, "text": "改为研究两家公司"})
+        await dao.revise_queued(_revise_request(receipt, manifest_payload=frozen))
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt, expected=2, manifest_payload=frozen))
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt, node_id="node-2", manifest_payload=frozen))
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_revise_legacy_digest_row_replays_and_manifest_change_conflicts(
         self, real_embedded_pg: ConnectionInfo
     ) -> None:
@@ -849,6 +878,10 @@ class TestReviseQueued:
         assert replay.input_revision == first.input_revision
         assert replay.input_digest == sha256_hex("改为研究两家公司")
         assert replay.session_seq == first.session_seq
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt, expected=2, manifest_payload=frozen_a))
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
 
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.revise_queued(_revise_request(receipt, manifest_payload=frozen_b))

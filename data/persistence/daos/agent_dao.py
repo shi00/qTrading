@@ -471,18 +471,22 @@ def _command_input_replays(
     *,
     text: str,
     manifest_payload: CanonicalJson,
+    expected_revision: int,
     command_input_digest: str,
 ) -> bool:
     """同命令键重放判定（检视 D05）：完整规范输入摘要优先，旧摘要行按存储事实核对。
 
     旧行 ``input_digest`` 仅覆盖正文（:func:`legacy_command_input_digest`）；命中旧
-    摘要时改以 command 行存储的冻结 manifest（``request_payload``）核对，避免
-    「同键同正文换 manifest」被误判为重放。无法证明一致即按异输入处理。
+    摘要时改以 command 行存储的冻结 manifest（``request_payload``）与期望版本
+    （``expected_revision``）核对，避免「同键同正文换 manifest/期望版」被误判为
+    重放（旧行无 node 列，node 身份仅由新摘要覆盖）。无法证明一致即按异输入处理。
     """
 
     if existing.input_digest == command_input_digest:
         return True
     if existing.input_digest != legacy_command_input_digest(text):
+        return False
+    if existing.expected_revision != expected_revision:
         return False
     stored_payload = existing.request_payload
     if stored_payload is None:
@@ -524,10 +528,11 @@ class AgentDao(BaseDao):
         - 同 intent（user_scope+source_module+business_request_id）同冻结输入
           （intent_digest 相等）→ 重传：查回并返回原回执，零新事实；
         - 同 intent 异输入 → ``AgentServiceError(INPUT_CONFLICT)``，零新事实；
-        - 同命令键（target+client_command_id）同完整输入（正文 + 冻结 manifest，
-          ``frozen_command_input_digest`` 相等）→ 返回原回执；
-        - 同命令键异输入（正文或 manifest 任一不同）→ ``INPUT_CONFLICT``；旧行
-          摘要仅覆盖正文，按 command 行存储的 manifest 补核（检视 D05）。
+        - 同命令键（target+client_command_id）同完整输入（正文 + 冻结 manifest +
+          期望版/node 身份，``frozen_command_input_digest`` 相等）→ 返回原回执；
+        - 同命令键异输入（正文、manifest、期望版或 node 任一不同）→
+          ``INPUT_CONFLICT``；旧行摘要仅覆盖正文，按 command 行存储的 manifest 与
+          期望版补核（检视 D05）。
 
         序号分配持目标 session 行锁（§5.4.4）；session.event_seq 以 GREATEST
         单调推进（R22）。occurred_at/committed_at 用受理时刻（同事务内一致）。
@@ -540,7 +545,13 @@ class AgentDao(BaseDao):
 
         self._check_engine()
         identity = derive_accept_identity(request)
-        command_input_digest = frozen_command_input_digest("accept", request.text, request.manifest_payload)
+        command_input_digest = frozen_command_input_digest(
+            "accept",
+            request.text,
+            request.manifest_payload,
+            expected_revision=request.expected_revision,
+            node_id=request.node_id,
+        )
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
@@ -587,6 +598,7 @@ class AgentDao(BaseDao):
                     sa.select(
                         AgentCommand.execution_id,
                         AgentCommand.input_digest,
+                        AgentCommand.expected_revision,
                         AgentCommand.request_payload,
                     ).where(
                         AgentCommand.user_scope == request.user_scope,
@@ -600,6 +612,7 @@ class AgentDao(BaseDao):
                     existing_command,
                     text=request.text,
                     manifest_payload=request.manifest_payload,
+                    expected_revision=request.expected_revision,
                     command_input_digest=command_input_digest,
                 ):
                     return await self._replay_original_receipt(conn, request, existing_command.execution_id)
@@ -2486,10 +2499,11 @@ class AgentDao(BaseDao):
         CAS（§9.2 通用 revision 列）单胜者后建 M2/S2 新输入版 + 新源资产/两源边
         + revise 命令，保 intent/execution/队列位，**单个显式事务**。
 
-        幂等：同命令键（target=execution_id）同完整输入（正文 + 冻结 manifest，
-        ``frozen_command_input_digest`` 相等）→ 查回原事实零新行；正文或 manifest
-        任一不同 → ``INPUT_CONFLICT``（旧行摘要仅覆盖正文，按存储 manifest 补核，
-        检视 D05）；revision CAS 败者 → ``REVISION_CONFLICT``。
+        幂等：同命令键（target=execution_id）同完整输入（正文 + 冻结 manifest +
+        期望版/node 身份，``frozen_command_input_digest`` 相等）→ 查回原事实零新行；
+        正文、manifest、期望版或 node 任一不同 → ``INPUT_CONFLICT``（旧行摘要仅覆盖
+        正文，按存储 manifest 与期望版补核，检视 D05）；revision CAS 败者 →
+        ``REVISION_CONFLICT``。
         M2 与受理消息同为纯 session 事件（先于派发无 round，§9.6 CHECK），执行
         关联由源谱系边（consumer_kind=execution, input_revision=N）承载。
         锁序（§5.4 第 4 条）：先持 execution（CAS 目标）再锁其 session。
@@ -2507,7 +2521,13 @@ class AgentDao(BaseDao):
         _require_text_field(request.manifest_payload, "manifest_payload", identity)
         _require_text_field(request.source_display_name, "source_display_name", identity)
         source_digest = sha256_hex(request.text)
-        command_input_digest = frozen_command_input_digest("revise", request.text, request.manifest_payload)
+        command_input_digest = frozen_command_input_digest(
+            "revise",
+            request.text,
+            request.manifest_payload,
+            expected_revision=request.expected_execution_revision,
+            node_id=request.node_id,
+        )
         command_record_id = stable_id("command", [request.user_scope, request.execution_id, request.client_command_id])
         message_id = stable_id("user_message", [request.user_scope, request.session_id, command_record_id])
         source_id = stable_id("message_source", [request.user_scope, request.session_id, message_id])
@@ -2537,6 +2557,7 @@ class AgentDao(BaseDao):
                     sa.select(
                         AgentCommand.input_digest,
                         AgentCommand.input_revision,
+                        AgentCommand.expected_revision,
                         AgentCommand.request_payload,
                     ).where(
                         AgentCommand.user_scope == request.user_scope,
@@ -2550,6 +2571,7 @@ class AgentDao(BaseDao):
                     existing_command,
                     text=request.text,
                     manifest_payload=request.manifest_payload,
+                    expected_revision=request.expected_execution_revision,
                     command_input_digest=command_input_digest,
                 ):
                     event_row = (
@@ -3179,9 +3201,11 @@ class AgentDao(BaseDao):
           保持单调，R22）；执行事件另分配 ``execution_seq`` 并同步
           ``execution.event_seq``；
         - ``event_id`` 由 (execution/round/node/native_event_id) 规范组合派生；
-          同 (session_id, event_id) 同完整输入（kind/主题/载荷/role/正文等全部行
-          字段一致）→ 重放返回原事实（replayed=True），任一字段不同 →
-          ``INPUT_CONFLICT``（§9.6 去重身份语义；检视 D05 补齐 role/kind/正文比较）；
+          同 (session_id, event_id) 同完整输入（message_id、occurred_at、kind/主题/
+          载荷/role/正文等全部行字段一致）→ 重放返回原事实（replayed=True），任一
+          字段不同 → ``INPUT_CONFLICT``（§9.6 去重身份语义；检视 D05 补齐身份与
+          正文比较）。``occurred_at`` 为冻结事件事实时刻，重放须与首次一致；不同
+          即异输入冲突，原事实不变，不静默改用请求时刻。
         - 执行事件必须同时有 round/node（§9.6），round 须归属该 execution；
         - ``body_text``/``body_ref`` 互斥（§9.6）；committed_at 取库时钟。
 
@@ -3357,10 +3381,13 @@ class AgentDao(BaseDao):
                         "event persistence conflict without recoverable original",
                         identity_str,
                     ) from exc
-                # 完整输入比较（检视 D05）：同事件身份下 kind/主题/载荷与全部消息
-                # 行字段一致才算重放；换正文/role/kind 等任一字段即异输入冲突。
+                # 完整输入比较（检视 D05）：同事件身份下 message_id/occurred_at、
+                # kind/主题/载荷与全部消息行字段一致才算重放；换正文/role/kind 等
+                # 任一字段即异输入冲突。
                 same_payload = (
-                    existing.event_kind == request.event_kind.value
+                    existing.message_id == request.message_id
+                    and existing.occurred_at == occurred
+                    and existing.event_kind == request.event_kind.value
                     and existing.subject_id == request.subject_id
                     and existing.subject_revision == request.subject_revision
                     and existing.payload_kind == request.payload_kind

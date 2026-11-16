@@ -473,33 +473,87 @@ class TestParsePreservingNumbers:
 
 
 class TestFrozenCommandInputDigest:
-    """命令冻结输入摘要（检视 D05：正文 + manifest 必须同覆盖）。"""
+    """命令冻结输入摘要（检视 D05：正文/manifest/期望版/node 必须同覆盖）。"""
 
     _MANIFEST_A = '{"purpose":"concept","schema_version":1,"text":"研究三家公司"}'
     _MANIFEST_B = '{"purpose":"decide","schema_version":1,"text":"研究三家公司"}'
+    _EXPECTED = 0
+    _NODE = "root"
 
     def test_same_kind_text_manifest_is_stable(self) -> None:
-        first = frozen_command_input_digest("accept", "研究三家公司", self._MANIFEST_A)
-        second = frozen_command_input_digest("accept", "研究三家公司", self._MANIFEST_A)
+        first = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
+        second = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
         assert first == second
         assert is_digest(first)
 
     def test_same_text_different_manifest_changes_digest(self) -> None:
-        base = frozen_command_input_digest("accept", "研究三家公司", self._MANIFEST_A)
-        other = frozen_command_input_digest("accept", "研究三家公司", self._MANIFEST_B)
+        base = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
+        other = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_B, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
         assert base != other
 
     def test_different_text_changes_digest(self) -> None:
-        base = frozen_command_input_digest("revise", "研究三家公司", self._MANIFEST_A)
-        other = frozen_command_input_digest("revise", "研究两家公司", self._MANIFEST_A)
+        base = frozen_command_input_digest(
+            "revise", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
+        other = frozen_command_input_digest(
+            "revise", "研究两家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
         assert base != other
 
     def test_command_kind_is_part_of_digest(self) -> None:
-        accept = frozen_command_input_digest("accept", "研究三家公司", self._MANIFEST_A)
-        revise = frozen_command_input_digest("revise", "研究三家公司", self._MANIFEST_A)
+        accept = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
+        revise = frozen_command_input_digest(
+            "revise", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
         assert accept != revise
+
+    def test_expected_revision_changes_digest(self) -> None:
+        base = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=0, node_id=self._NODE
+        )
+        other = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=3, node_id=self._NODE
+        )
+        assert base != other
+
+    def test_node_id_changes_digest(self) -> None:
+        base = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id="root"
+        )
+        other = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id="node-2"
+        )
+        assert base != other
+
+    def test_manifest_is_digested_as_canonical_bytes(self) -> None:
+        """契约：manifest 为 CanonicalJson，按规范字节参与摘要（与 intent_digest 同源）。
+
+        因此键序/空白不同的非规范字节判为异输入，而非在摘要内二次规范化——
+        与 intent_digest 的判定保持一致，避免两分支结论互斥。
+        """
+        canonical = '{"purpose":"concept","text":"研究三家公司"}'
+        reordered = '{ "text": "研究三家公司", "purpose": "concept" }'
+        base = frozen_command_input_digest(
+            "accept", "研究三家公司", canonical, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
+        other = frozen_command_input_digest(
+            "accept", "研究三家公司", reordered, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
+        assert base != other
 
     def test_legacy_digest_covers_text_only_and_differs(self) -> None:
         legacy = legacy_command_input_digest("研究三家公司")
         assert legacy == sha256_hex("研究三家公司")
-        assert legacy != frozen_command_input_digest("accept", "研究三家公司", self._MANIFEST_A)
+        assert legacy != frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )

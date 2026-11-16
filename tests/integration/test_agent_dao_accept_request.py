@@ -261,6 +261,32 @@ class TestAcceptRequestTransaction:
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_command_key_different_expected_revision_or_node_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """同命令键同正文同 manifest 换期望版/node → INPUT_CONFLICT（检视 D05），零新事实。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        await dao.accept_request(_request(manifest_payload=frozen))
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(
+                _request(business_request_id="req-2", manifest_payload=frozen, expected_revision=3)
+            )
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(business_request_id="req-3", manifest_payload=frozen, node_id="node-2"))
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_legacy_digest_row_replays_and_manifest_change_conflicts(
         self, real_embedded_pg: ConnectionInfo
     ) -> None:
@@ -284,7 +310,13 @@ class TestAcceptRequestTransaction:
         assert replay == first
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.accept_request(_request(business_request_id="req-3", manifest_payload=frozen_b))
+            await dao.accept_request(
+                _request(business_request_id="req-3", manifest_payload=frozen_a, expected_revision=5)
+            )
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(business_request_id="req-4", manifest_payload=frozen_b))
         assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
         after = {t: await _count(engine, t) for t in before}
         assert after == before
