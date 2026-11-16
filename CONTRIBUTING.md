@@ -181,7 +181,7 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 > - **项目名**：`AStockScreener`
 > - **嵌入式 PG 业务库（默认）**：`qtrading`（sidecar 自动创建）
 > - **外部 PostgreSQL 开发库（可选）**：`astock_screener`（须手动创建，由 Alembic 迁移驱动）
-> - **本地集成测试库**：`test_astock`（由测试配置自动加载与清空，详见 [测试规范](#测试规范)）
+> - **本地集成测试库**：`test_astock_<run-id>_<worker>`（本次 run 独占，由测试配置自动创建与清理；显式 `TEST_DB_NAME` 默认只创建不删除，需 `TEST_DB_ALLOW_REBUILD=1` 才允许重建，详见 [测试规范](#测试规范)）
 
 ```bash
 # 仅外部 PostgreSQL 场景——创建开发库（库名同为 astock_screener，小写+下划线、非 SQL 保留字，无需引号）
