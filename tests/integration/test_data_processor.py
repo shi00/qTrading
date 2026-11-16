@@ -426,6 +426,11 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_ensure_trade_cal_memory_cache(self):
         """Test ensure_trade_cal correctly delegates to TradeCalendarService"""
+        # D10-002：ensure_calendar_range 按自然日核对（缺行即缺口），mock 需返回
+        # 请求日（20230101）的日历行才能判定覆盖完整。
+        self.mock_cache.stock_dao.get_trade_cal = AsyncMock(
+            return_value=pd.DataFrame({"cal_date": ["20230101"], "is_open": [1]}),
+        )
         result = await self.processor.ensure_trade_cal("20230101")
         self.assertTrue(result)
 
@@ -807,8 +812,18 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_sync_historical_breakpoint_resume(self):
         """Test that existing dates are skipped"""
         days = 5
-        mock_dates = ["20230105", "20230104", "20230103", "20230102", "20230101"]
-        mock_df = pd.DataFrame({"cal_date": mock_dates, "is_open": [1] * 5})
+        # D10-002：日历覆盖按自然日核对（缺行即缺口）。mock 日历必须覆盖请求区间
+        # [end-37d, end] 的每个自然日，否则缺行段会走 API/offline 兜底产生虚假交易日，
+        # 断点续传断言失真。区间 2022-11-29..2023-01-05 共 38 个自然日：
+        # 前 33 天休市(is_open=0)、2023-01-01..05 为交易日(is_open=1)。
+        start_day = datetime.date(2023, 1, 5) - datetime.timedelta(days=37)
+        natural_days = [start_day + datetime.timedelta(days=i) for i in range(38)]
+        mock_df = pd.DataFrame(
+            {
+                "cal_date": [d.strftime("%Y%m%d") for d in natural_days],
+                "is_open": [0] * 33 + [1] * 5,
+            },
+        )
         self.mock_api.get_trade_cal.return_value = mock_df
         self.mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=mock_df)
 

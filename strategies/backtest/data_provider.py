@@ -426,6 +426,9 @@ class BacktestDataProvider:
         - ``covered_dates``：screening_data 实际覆盖的日期键集合（"YYYYMMDD"）。为 None 时
           退化为一次轻量 ``SELECT DISTINCT trade_date``（daily_quotes），以 O(交易日数) 量级
           独立评估覆盖，与 preload_range 的 OOM 护栏解耦。
+        - 交易日历按自然日核对覆盖（D10-002）：区间内存在无法判定开/休的自然日时，
+          期望交易日全集本身不完整，写入 ``[range_quality_coverage_unverified]`` 告警
+          （R21）后返回，不得把残缺全集与行情覆盖同集误判为「无缺口」。
         - 交易日历查询失败 / 轻量覆盖查询失败时保持默认 GOLD 代理，并写入
           ``[range_quality_coverage_unverified]`` 告警（R21 fail-closed）：覆盖状态**未知**，
           既不得伪装成「无缺口」，也不得伪造成「有缺口」；该信号经 engine 并入
@@ -440,8 +443,8 @@ class BacktestDataProvider:
         from data.domain_services.trade_calendar_service import TradeCalendarService
 
         try:
-            cal_dates = await TradeCalendarService(self.cache, None).get_trade_dates(start_date, end_date)
-            expected_dates = {d.strftime("%Y%m%d") for d in cal_dates}
+            coverage = await TradeCalendarService(self.cache, None).get_trade_dates_with_coverage(start_date, end_date)
+            expected_dates = {d.strftime("%Y%m%d") for d in coverage.dates}
         except asyncio.CancelledError:
             raise
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出交易日历查询异常. upgrade: 策略层重构时统一走 classify_error.
@@ -457,6 +460,17 @@ class BacktestDataProvider:
                 f"[{_RANGE_QUALITY_UNVERIFIED_TYPE}] {start_str}-{end_str}: "
                 f"交易日历查询失败（{DataSanitizer.sanitize_error(e)}），无法核对区间覆盖；"
                 "区间缺口状态未知（未核实）。"
+            )
+            return
+
+        if not coverage.complete:
+            # D10-002 / R21: 区间内仍有自然日无法判定开/休（日历内部或缺尾端），
+            # 期望交易日全集残缺，缺口求差不可信 → 显式标注覆盖未核实。
+            unresolved = len(coverage.unresolved_days)
+            detail = f"（{unresolved} 个自然日无法判定）" if unresolved else ""
+            self._range_preload_warnings.append(
+                f"[{_RANGE_QUALITY_UNVERIFIED_TYPE}] {start_str}-{end_str}: "
+                f"交易日历自然日覆盖未核实{detail}，区间缺口状态未知（未核实）。"
             )
             return
 

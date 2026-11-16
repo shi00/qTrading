@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
+from data.domain_services.trade_calendar_service import CalendarCoverage
 from strategies.backtest.data_provider import BacktestDataProvider
 
 pytestmark = pytest.mark.unit
@@ -24,16 +25,16 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _autouse_mock_trade_calendar(monkeypatch) -> AsyncMock:
-    """D3-M2: preload_range 会调用 TradeCalendarService.get_trade_dates 计算区间"全市场交易日"全集。
+    """D3-M2: preload_range 会调用 TradeCalendarService 计算区间"全市场交易日"全集。
 
     默认兜底 patch 为返回与 screening_data 覆盖一致的交易日（20240102/20240103 → 无缺口 → GOLD），
     避免走真实日历（API/offline 依赖 DB）导致既有 preload 断言不稳定。
-    用例可按需通过返回值 AsyncMock 覆写（如抛异常）。autouse 作用于全模块，非 preload 用例不受影响。
+    用例可按需通过返回值 AsyncMock 覆写（如抛异常、覆盖未知）。autouse 作用于全模块。
     """
     from data.domain_services.trade_calendar_service import TradeCalendarService
 
-    mock = AsyncMock(return_value=[date(2024, 1, 2), date(2024, 1, 3)])
-    monkeypatch.setattr(TradeCalendarService, "get_trade_dates", mock)
+    mock = AsyncMock(return_value=CalendarCoverage(dates=[date(2024, 1, 2), date(2024, 1, 3)], complete=True))
+    monkeypatch.setattr(TradeCalendarService, "get_trade_dates_with_coverage", mock)
     return mock
 
 
@@ -943,13 +944,16 @@ class TestBacktestQualityProxy:
         from data.persistence.quality_gate import QualityTier
 
         # 日历给出 5 个交易日；daily_quotes 轻量覆盖查询仅覆盖其中 3 个 → 缺 2 个
-        _autouse_mock_trade_calendar.return_value = [
-            date(2024, 1, 2),
-            date(2024, 1, 3),
-            date(2024, 1, 4),
-            date(2024, 1, 5),
-            date(2024, 1, 8),
-        ]
+        _autouse_mock_trade_calendar.return_value = CalendarCoverage(
+            dates=[
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+                date(2024, 1, 4),
+                date(2024, 1, 5),
+                date(2024, 1, 8),
+            ],
+            complete=True,
+        )
         cache = MagicMock()
         cache.quote_dao.get_quote_trade_dates = AsyncMock(
             return_value={date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)}
@@ -971,6 +975,83 @@ class TestBacktestQualityProxy:
         cache.quote_dao.get_quote_trade_dates.assert_awaited_once_with(date(2024, 1, 1), date(2025, 2, 4))
         # UIR-F11-005: 覆盖核实成功且有真实缺口 → 只报缺口，不得叠加「未核实」
         assert not any(w.startswith("[range_quality_coverage_unverified]") for w in provider.range_preload_warnings)
+
+    @pytest.mark.asyncio
+    async def test_internal_calendar_gap_against_quotes_is_reported(self, _autouse_mock_trade_calendar) -> None:
+        """D10-002: 交易日历补齐内部缺日 B 后，quotes 仅 A/C → 缺口 1/3 必须可见。
+
+        修复前日历只返回 DB 命中的 {A,C}，与 quotes 同集 → 误判「无缺口」。
+        """
+        from data.persistence.quality_gate import QualityTier
+
+        _autouse_mock_trade_calendar.return_value = CalendarCoverage(
+            dates=[date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+            complete=True,
+        )
+        cache = MagicMock()
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(return_value=[date(2024, 1, 2), date(2024, 1, 4)])
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 4))
+
+        assert any(
+            w.startswith("[range_quality_gaps]") and "1 of 3" in w and "20240103" in w
+            for w in provider.range_preload_warnings
+        )
+        assert provider._quality_proxy._scan_missing_dates == frozenset({"20240103"})
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
+        assert not any(w.startswith("[range_quality_coverage_unverified]") for w in provider.range_preload_warnings)
+
+    @pytest.mark.asyncio
+    async def test_incomplete_calendar_coverage_marks_unverified(self, _autouse_mock_trade_calendar) -> None:
+        """D10-002/R21: 日历内部/尾端缺日无法判定 → 显式「覆盖未核实」，绝不无告警。
+
+        残缺的期望交易日全集与 quotes 同集时不得当作「无缺口」。
+        """
+        from data.persistence.quality_gate import QualityTier
+
+        _autouse_mock_trade_calendar.return_value = CalendarCoverage(
+            dates=[date(2024, 1, 2)],
+            complete=False,
+            unresolved_days=(date(2024, 1, 3),),
+        )
+        cache = MagicMock()
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(return_value=[date(2024, 1, 2)])
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        unverified = [w for w in provider.range_preload_warnings if w.startswith("[range_quality_coverage_unverified]")]
+        assert len(unverified) == 1
+        assert "1 个自然日无法判定" in unverified[0]
+        assert "区间缺口状态未知" in unverified[0]
+        assert not any(w.startswith("[range_quality_gaps]") for w in provider.range_preload_warnings)
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
 
     @pytest.mark.asyncio
     async def test_wide_range_coverage_query_failure_keeps_default_gold(self) -> None:

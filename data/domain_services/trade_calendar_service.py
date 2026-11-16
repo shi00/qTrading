@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from cachetools import TTLCache
@@ -41,6 +43,44 @@ _LATEST_TRADE_DATE_CACHE_KEY = "latest_trade_date"
 # 前一交易日 1/23 与后一交易日 2/3 相距 11 个自然日）；10 天窗口会在长假边缘
 # 查不到相邻交易日而返回 None。30 天为安全余量，DB/离线日历按 30 天查询成本可忽略。
 _TRADE_DATE_SEARCH_WINDOW_DAYS = 30
+
+# 缺失自然日补数的连续段上限（D10-002）：段数超过该值时合并为单段补拉，
+# 避免碎片化缺口（如仅缺周末行）把一次请求放大为数十次 API 调用。
+_MAX_BACKFILL_SEGMENTS = 8
+
+
+def _iter_natural_days(start: datetime.date, end: datetime.date) -> Iterator[datetime.date]:
+    """按自然日逐个产出 ``[start, end]``（含端点），不跳过周末/节假日。"""
+    day = start
+    while day <= end:
+        yield day
+        day += datetime.timedelta(days=1)
+
+
+def _contiguous_segments(days: set[datetime.date]) -> list[tuple[datetime.date, datetime.date]]:
+    """把自然日集合合并为连续区间段（升序）。"""
+    segments: list[tuple[datetime.date, datetime.date]] = []
+    for day in sorted(days):
+        if segments and day == segments[-1][1] + datetime.timedelta(days=1):
+            segments[-1] = (segments[-1][0], day)
+        else:
+            segments.append((day, day))
+    return segments
+
+
+@dataclass
+class CalendarCoverage:
+    """交易日历区间的覆盖结果（D10-002）。
+
+    ``complete=True`` 表示区间内**每个自然日**都已获得确定判定（交易日或休市），
+    ``dates`` 即该区间完整的交易日集合。``complete=False`` 时 ``dates`` 仅包含已确定
+    部分，``unresolved_days`` 为无法判定的自然日（R21 未知态）；调用方（如回测区间
+    缺口评估）必须显式标注覆盖未知，不得把未知当作「无缺口」。
+    """
+
+    dates: list[datetime.date]
+    complete: bool
+    unresolved_days: tuple[datetime.date, ...] = ()
 
 
 class TradeDateUnavailableError(RuntimeError):
@@ -277,8 +317,9 @@ class TradeCalendarService:
         确保 trade_cal 表覆盖 [start_date, end_date] 的完整日历。
 
         此方法用于初始化阶段的批量同步，不同于按需懒加载。
-        - 检查 DB 已有覆盖范围
-        - 对缺失范围调 API 批量拉取（完整日历，含非交易日）
+        - 判据为「区间内每个自然日都有日历行」（含 is_open=0 的休市行），
+          不再以 min/max 边界或「API 返回非空」判定完整（D10-002）
+        - 只对缺失自然日所在的连续段调 API 补拉，不重复拉取已覆盖历史
         - 幂等设计：重复调用不会重复写入（upsert）
 
         Args:
@@ -286,7 +327,7 @@ class TradeCalendarService:
             end_date: 需要覆盖的截止日期
 
         Returns:
-            bool: 是否成功确保覆盖
+            bool: 是否成功确保覆盖（每个自然日均由 DB 行或本次补拉确定）
         """
         start_obj = self._to_date(start_date)
         end_obj = self._to_date(end_date)
@@ -294,65 +335,78 @@ class TradeCalendarService:
             return False
 
         try:
-            # 1. 检查 DB 已有覆盖范围
-            existing_range = await self._cache.get_trade_cal_range()
-            db_min, db_max = existing_range
+            # 1. 精确核对自然日覆盖：缺行即缺口，不按 weekday 猜测休市
+            existing_df = await self._cache.stock_dao.get_trade_cal(start_date=start_obj, end_date=end_obj)
+            existing_days = self._calendar_day_sets(existing_df)[1]
+            missing = set(_iter_natural_days(start_obj, end_obj)) - existing_days
 
-            if db_min and db_max:
-                db_min = self._to_date(db_min)
-                db_max = self._to_date(db_max)
-                if db_min is not None and db_max is not None:
-                    if db_min <= start_obj and db_max >= end_obj:
-                        # 简单的范围检查：如果边界覆盖了就认为完整
-                        # 更精确的方式是 count 日期数，但作为初始化快速路径这已足够
-                        logger.debug(
-                            "[TradeCalendarService] Calendar range already covers %s to %s (DB: %s to %s)",
-                            start_obj,
-                            end_obj,
-                            db_min,
-                            db_max,
-                        )
-                        return True
-
-            if self._api is None:
-                # D4-8：离线/仅 DB 模式，无法通过 API 补齐，认定未覆盖。
+            if not missing:
                 logger.debug(
-                    "[TradeCalendarService] ensure_calendar_range: no Tushare client (offline/DB-only mode), cannot backfill %s to %s via API",
-                    start_obj,
-                    end_obj,
-                )
-                return False
-
-            # 2. 调 API 批量拉取完整日历（不带 is_open 过滤）
-            # M13-F1: start_obj/end_obj 已判非 None，_to_str 必返 str（YYYYMMDD）
-            df = await self._api.get_trade_cal(start_date=self._to_str(start_obj), end_date=self._to_str(end_obj))
-            if df is not None and not df.empty:
-                persisted = await self._ensure_data_persisted(df)
-                if not persisted:
-                    # RS-F02: 拉取成功但落库失败时不得宣称批量同步完成。失败原因已由
-                    # _ensure_data_persisted 经 log_classified 分类记录，此处记录未覆盖的后果。
-                    logger.error(
-                        "[TradeCalendarService] Bulk calendar fetched but persistence failed "
-                        "(%s to %s); calendar range not guaranteed",
-                        start_obj,
-                        end_obj,
-                    )
-                    return False
-                logger.info(
-                    "[TradeCalendarService] Bulk synced %s calendar records (%s to %s)",
-                    len(df),
+                    "[TradeCalendarService] Calendar range fully covered by DB: %s to %s",
                     start_obj,
                     end_obj,
                 )
                 return True
 
-            logger.warning(
-                "[TradeCalendarService] API returned empty for %s to %s",
+            if self._api is None:
+                # D4-8：离线/仅 DB 模式，无法通过 API 补齐，认定未覆盖。
+                logger.debug(
+                    "[TradeCalendarService] ensure_calendar_range: no Tushare client (offline/DB-only mode), "
+                    "cannot backfill %s uncovered day(s) in %s to %s via API",
+                    len(missing),
+                    start_obj,
+                    end_obj,
+                )
+                return False
+
+            # 2. 只对缺失自然日的连续段调 API 批量拉取（不带 is_open 过滤）
+            segments = _contiguous_segments(missing)
+            api_ranges = segments if len(segments) <= _MAX_BACKFILL_SEGMENTS else [(segments[0][0], segments[-1][1])]
+            resolved: set[datetime.date] = set()
+            fetched_rows = 0
+            for seg_start, seg_end in api_ranges:
+                df = await self._api.get_trade_cal(start_date=self._to_str(seg_start), end_date=self._to_str(seg_end))
+                if df is None or df.empty:
+                    logger.warning(
+                        "[TradeCalendarService] API returned empty for %s to %s",
+                        seg_start,
+                        seg_end,
+                    )
+                    continue
+                if not await self._ensure_data_persisted(df):
+                    # RS-F02: 拉取成功但落库失败时不得宣称批量同步完成。失败原因已由
+                    # _ensure_data_persisted 经 log_classified 分类记录，此处记录未覆盖的后果。
+                    logger.error(
+                        "[TradeCalendarService] Bulk calendar fetched but persistence failed "
+                        "(%s to %s); calendar range not guaranteed",
+                        seg_start,
+                        seg_end,
+                    )
+                    return False
+                resolved.update(d for d in self._calendar_day_sets(df)[1] if seg_start <= d <= seg_end)
+                fetched_rows += len(df)
+
+            remaining = missing - resolved
+            if remaining:
+                logger.warning(
+                    "[TradeCalendarService] ensure_calendar_range incomplete: %s natural day(s) still uncovered "
+                    "in %s to %s after API backfill",
+                    len(remaining),
+                    start_obj,
+                    end_obj,
+                )
+                return False
+
+            logger.info(
+                "[TradeCalendarService] Bulk synced %s calendar records (%s to %s)",
+                fetched_rows,
                 start_obj,
                 end_obj,
             )
-            return False
+            return True
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log_classified(
                 logger,
@@ -426,55 +480,149 @@ class TradeCalendarService:
                 )
             return result
 
-    def _extract_calendar_dates(self, df: pd.DataFrame | None) -> tuple[list[datetime.date], datetime.date | None]:
-        """从 trade_cal DataFrame 提取交易日列表与日历原始覆盖上界。
+    def _calendar_day_sets(self, df: pd.DataFrame | None) -> tuple[list[datetime.date], set[datetime.date]]:
+        """从 trade_cal DataFrame 提取（开市日升序, 全部自然日集合）。
 
-        ``coverage_end`` 取最大 ``cal_date``（含非交易日行），用于判断 DB 是否真正
-        覆盖到请求区间尾端；不能以「最后一个开市日 == end_date」作判据（end_date
-        可能本身是休市日）。
+        DB 与 API 返回的 DF 共用此判据（D10-002）：完整日历对区间内**每个自然日**
+        都有 ``is_open`` 为 0/1 的行，缺行表示数据缺口，既不得按 weekday 推断，
+        也不得把缺行当作休市。
         """
         if df is None or df.empty:
-            return [], None
+            return [], set()
 
         cal_dates = pd.to_datetime(df["cal_date"]).dt.date
-        coverage_end = cal_dates.max()
         if "is_open" in df.columns:
             open_dates = sorted(cal_dates[df["is_open"].astype(int) == 1].tolist())
         else:
             open_dates = sorted(cal_dates.tolist())
-        return open_dates, coverage_end
+        return open_dates, set(cal_dates.tolist())
 
-    async def _resolve_range_dates(
-        self, start_obj: datetime.date, end_obj: datetime.date
-    ) -> tuple[list[datetime.date], bool]:
-        """按 API → 离线可信区间补齐区间日历。
+    def _offline_open_days(self, seg_start: datetime.date, seg_end: datetime.date) -> set[datetime.date]:
+        """取离线日历在 ``[seg_start, seg_end]`` 内的开市日（受可信区间截断）。"""
+        raw = self._offline.get_trade_dates(seg_start, seg_end) or []
+        open_days: set[datetime.date] = set()
+        for item in raw:
+            day = parse_date(item).date() if isinstance(item, str) else self._to_date(item)
+            if day is not None and seg_start <= day <= seg_end:
+                open_days.add(day)
+        return open_days
+
+    async def _backfill_missing_days(
+        self, missing: set[datetime.date]
+    ) -> tuple[set[datetime.date], set[datetime.date]]:
+        """只对缺失自然日补数（D10-002）。
 
         Returns:
-            (交易日列表, 是否确认覆盖到 ``end_obj``)。离线源只对可信区间负责：
-            超出信任上限时返回空列表 / ``is_trading_day`` 返回 None，此时
-            ``complete=False``，由调用方显式降级而非猜测。
+            (补出的交易日, 仍无法判定的自然日)。判定来源为 API 行（is_open 明确）
+            或离线日历可信区间；离线超出可信区间时保持未知，不按 weekday 猜测。
         """
-        dates: set[datetime.date] = set()
-        complete = False
-        offline_start = start_obj
+        if not missing:
+            return set(), set()
 
-        api_df = await self._fetch_from_api_and_persist(start_obj, end_obj)
-        if api_df is not None and not api_df.empty:
-            api_dates, api_coverage_end = self._extract_calendar_dates(api_df)
-            dates.update(api_dates)
-            if api_coverage_end is not None and api_coverage_end >= end_obj:
-                complete = True
-            elif api_coverage_end is not None:
-                offline_start = api_coverage_end + datetime.timedelta(days=1)
+        open_dates: set[datetime.date] = set()
+        resolved: set[datetime.date] = set()
+        # 离线日历不可用时 is_trading_day 会保守返回 False，不能据此把缺行当休市；
+        # 此时未判定自然日保持未知（D10-002 / R21）。
+        offline_available = self._offline.get_instance() is not None
+        segments = _contiguous_segments(missing)
+        # 碎片化缺口合并为单段，避免逐缺口放大 API 请求；仍不重拉已覆盖历史。
+        api_ranges = segments if len(segments) <= _MAX_BACKFILL_SEGMENTS else [(segments[0][0], segments[-1][1])]
 
-        if not complete and offline_start <= end_obj:
-            offline_dates = self._offline.get_trade_dates(offline_start, end_obj)
-            if offline_dates:
-                dates.update(parse_date(d).date() for d in offline_dates)
-            # 离线三态：None = 超出可信区间（未知），False/True 均为已覆盖该日期。
+        for seg_start, seg_end in api_ranges:
+            api_df = await self._fetch_from_api_and_persist(seg_start, seg_end)
+            if api_df is None or api_df.empty:
+                continue
+            api_open, api_days = self._calendar_day_sets(api_df)
+            open_dates.update(d for d in api_open if seg_start <= d <= seg_end)
+            resolved.update(d for d in api_days if seg_start <= d <= seg_end)
+
+        for seg_start, seg_end in segments:
+            pending = {d for d in missing if seg_start <= d <= seg_end and d not in resolved}
+            if not pending or not offline_available:
+                continue
+
+            if self._offline.is_trading_day(seg_end) is not None:
+                # 整段在离线可信区间内：开市日由离线日历给出，其余自然日即明确休市。
+                open_dates.update(d for d in self._offline_open_days(seg_start, seg_end) if d in pending)
+                resolved.update(pending)
+                continue
+            # 段尾超出可信区间：逐日取三态，None 保持未知（不猜测）。
+            for day in sorted(pending):
+                verdict = self._offline.is_trading_day(day)
+                if verdict is None:
+                    continue
+                resolved.add(day)
+                if verdict:
+                    open_dates.add(day)
+
+        unresolved = missing - resolved
+        if unresolved and not offline_available:
+            logger.warning(
+                "[TradeCalendarService] Offline calendar unavailable; %s natural day(s) remain undetermined",
+                len(unresolved),
+            )
+        return open_dates, unresolved
+
+    async def get_trade_dates_with_coverage(self, start_date, end_date) -> CalendarCoverage:
+        """获取日期范围内的交易日并返回覆盖证据（D10-002）。
+
+        数据源优先级: Database -> Tushare API -> Offline。
+
+        覆盖语义：先按**自然日**核对 DB 原始日历（含 ``is_open=0`` 休市行）是否覆盖
+        整个区间；仅对缺失自然日（连续段）调 API / 离线可信区间补数，已覆盖历史不重拉。
+        中间缺日与尾端缺日同等待：不得因「总条数达标」或「尾端已覆盖」而把内部缺口
+        当作完整真值。
+
+        Returns:
+            :class:`CalendarCoverage`：``complete=False`` 时 ``dates`` 只是已确定部分，
+            调用方必须显式标注覆盖未知（R21），不得当作「无缺口」。
+        """
+        start_obj = self._to_date(start_date)
+        end_obj = self._to_date(end_date)
+
+        if start_obj is None or end_obj is None or start_obj > end_obj:
+            return CalendarCoverage(dates=[], complete=False)
+
+        try:
+            df = await self._cache.stock_dao.get_trade_cal(start_date=start_obj, end_date=end_obj)
+            db_open, db_days = self._calendar_day_sets(df)
+            missing = set(_iter_natural_days(start_obj, end_obj)) - db_days
+
+            if not missing:
+                return CalendarCoverage(dates=db_open, complete=True)
+
+            backfilled, unresolved = await self._backfill_missing_days(missing)
+            dates = sorted(set(db_open) | backfilled)
+            if unresolved:
+                logger.warning(
+                    "[TradeCalendarService] Calendar coverage incomplete for %s to %s: "
+                    "%s natural day(s) undetermined after API/offline (returning %s known trade date(s))",
+                    start_obj,
+                    end_obj,
+                    len(unresolved),
+                    len(dates),
+                )
+            return CalendarCoverage(
+                dates=dates,
+                complete=not unresolved,
+                unresolved_days=tuple(sorted(unresolved)),
+            )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[TradeCalendarService] get_trade_dates failed (%s): %s",
+                exc_info=True,
+            )
+            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)  # type: ignore[arg-type]
+            dates = sorted({parse_date(d).date() for d in offline_dates}) if offline_dates else []
+            # 离线可信区间覆盖到 end 才认为覆盖完整；否则日期集合只是已确定部分。
             complete = self._offline.is_trading_day(end_obj) is not None
-
-        return sorted(dates), complete
+            return CalendarCoverage(dates=dates, complete=complete)
 
     @log_async_operation(
         operation_name="get_trade_dates",
@@ -487,11 +635,10 @@ class TradeCalendarService:
 
         数据源优先级: Database -> Tushare API -> Offline
 
-        覆盖语义（RS-F03）：DB 命中的交易日列表**不直接早返**，先校验原始日历
-        （含非交易日行）的覆盖上界是否到达 ``end_date``；尾段缺失时只对
-        ``[覆盖上界+1, end_date]`` 调 API / 离线可信区间补齐，避免「总条数达标
-        但缺未来交易日」被误判为完整。补齐仍不可得时返回已覆盖部分并记 warning，
-        由上层（如新闻窗口）显式判定不可用。
+        覆盖语义（D10-002）：按自然日核对原始日历（含非交易日行）的覆盖，仅对缺失
+        自然日连续段补数；内部缺日、尾段缺日同等待，补齐仍不可得时返回已确定部分并
+        记 warning。需要区分「完整」与「覆盖未知」的调用方（如回测缺口评估）应使用
+        :meth:`get_trade_dates_with_coverage` 获取 :class:`CalendarCoverage` 证据。
 
         Args:
             start_date: 开始日期
@@ -505,71 +652,8 @@ class TradeCalendarService:
             [date(2024, 3, 18), date(2024, 3, 19), date(2024, 3, 20),
              date(2024, 3, 21), date(2024, 3, 22)]
         """
-        start_obj = self._to_date(start_date)
-        end_obj = self._to_date(end_date)
-
-        if start_obj is None or end_obj is None:
-            return []
-
-        if start_obj > end_obj:
-            return []
-
-        try:
-            df = await self._cache.stock_dao.get_trade_cal(start_date=start_obj, end_date=end_obj)
-            db_dates, db_coverage_end = self._extract_calendar_dates(df)
-
-            span_days = (end_obj - start_obj).days
-            expected_min = max(1, int(span_days * 0.6))  # 保守估计：60% 是交易日
-            is_e2e = is_e2e_mode()
-            is_sparse = not is_e2e and span_days > 30 and len(db_dates) < expected_min * 0.5
-            covered_to_end = db_coverage_end is not None and db_coverage_end >= end_obj
-
-            if covered_to_end and not is_sparse:
-                return db_dates
-
-            if db_coverage_end is None or is_sparse:
-                # DB 无覆盖或内部密度不足：走 API → 离线补齐整个区间，并保留已命中的 DB 交易日
-                full_dates, full_complete = await self._resolve_range_dates(start_obj, end_obj)
-                merged_full = sorted(set(db_dates).union(full_dates))
-                if merged_full or full_complete:
-                    return merged_full
-                logger.warning(
-                    "[TradeCalendarService] Calendar range %s to %s not covered by API/offline; "
-                    "returning partial DB data (%s dates)",
-                    start_obj,
-                    end_obj,
-                    len(db_dates),
-                )
-                return db_dates
-
-            # 部分覆盖且不稀疏：只补尾段，避免为已知历史重复放大 API 请求
-            tail_dates, tail_complete = await self._resolve_range_dates(
-                db_coverage_end + datetime.timedelta(days=1), end_obj
-            )
-            merged = sorted(set(db_dates).union(tail_dates))
-            if not tail_complete:
-                logger.warning(
-                    "[TradeCalendarService] Calendar tail after %s not covered for request ending %s; "
-                    "returning partial data (offline/API unavailable or beyond trusted interval)",
-                    db_coverage_end,
-                    end_obj,
-                )
-            return merged
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log_classified(
-                logger,
-                e,
-                "general",
-                "[TradeCalendarService] get_trade_dates failed (%s): %s",
-                exc_info=True,
-            )
-            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)  # type: ignore[arg-type]
-            if offline_dates:
-                return [parse_date(d).date() for d in offline_dates]
-            return []
+        coverage = await self.get_trade_dates_with_coverage(start_date, end_date)
+        return coverage.dates
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def count_trade_days(self, start_date, end_date) -> int:

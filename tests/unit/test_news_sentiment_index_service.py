@@ -482,7 +482,21 @@ _TAIL_DATES = [datetime.date(2026, 11, d) for d in range(3, 13)]
 
 
 def _history_df() -> pd.DataFrame:
-    return pd.DataFrame({"cal_date": _HISTORY_TO_AS_OF, "is_open": [1] * len(_HISTORY_TO_AS_OF)})
+    """完整自然日历史（10-01 至 as_of，含周末/国庆休市行）。
+
+    D10-002：日历完整性判据是「每个自然日都有行」，缺行即缺口；因此历史夹具必须
+    包含 is_open=0 的休市行，否则会被判定为需要补数。
+    """
+    start = datetime.date(2026, 10, 1)
+    end = datetime.date(2026, 11, 2)
+    national_day = {datetime.date(2026, 10, d) for d in range(1, 8)}
+    days = [start + datetime.timedelta(days=i) for i in range((end - start).days + 1)]
+    return pd.DataFrame(
+        {
+            "cal_date": days,
+            "is_open": [1 if (day.weekday() < 5 and day not in national_day) else 0 for day in days],
+        }
+    )
 
 
 def _tail_df() -> pd.DataFrame:
