@@ -962,6 +962,64 @@ async def test_save_monthly_budget_success_reloads_and_echoes_limit():
     assert dao.read_request_page.await_count == 2  # 初始 load + 保存后重载
 
 
+@pytest.mark.asyncio
+async def test_save_monthly_budget_reentrant_submit_ignored_while_saving():
+    """D19-003：提交在途期间的重复调用（连续 Enter / 双击）不重复提交，守卫完成后复位。"""
+    calls: list[Decimal | None] = []
+    saver_started = asyncio.Event()
+    saver_gate = asyncio.Event()
+
+    async def _saver(amount: Decimal | None) -> bool:
+        calls.append(amount)
+        saver_started.set()
+        await saver_gate.wait()
+        return True
+
+    vm = _vm(_dao(), saver=_saver)
+    vm.set_budget_draft("100")
+    first = asyncio.create_task(vm.save_monthly_budget())
+    await asyncio.wait_for(saver_started.wait(), timeout=2)
+
+    await vm.save_monthly_budget()  # 第二次提交在首个完成前直接返回
+    assert calls == [Decimal("100")]
+
+    saver_gate.set()
+    await first
+    assert calls == [Decimal("100")]
+
+    vm.set_budget_draft("200")
+    await vm.save_monthly_budget()  # 守卫已复位，后续提交生效
+    assert calls == [Decimal("100"), Decimal("200")]
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_invalid_reported_while_saving():
+    """D19-003：校验先于进行中守卫——在途提交期间非法输入仍显式报错，不排队提交。"""
+    calls: list[Decimal | None] = []
+    saver_started = asyncio.Event()
+    saver_gate = asyncio.Event()
+
+    async def _saver(amount: Decimal | None) -> bool:
+        calls.append(amount)
+        saver_started.set()
+        await saver_gate.wait()
+        return True
+
+    vm = _vm(_dao(), saver=_saver)
+    vm.set_budget_draft("100")
+    first = asyncio.create_task(vm.save_monthly_budget())
+    await asyncio.wait_for(saver_started.wait(), timeout=2)
+
+    vm.set_budget_draft("abc")
+    await vm.save_monthly_budget()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_invalid"
+    assert calls == [Decimal("100")]
+
+    saver_gate.set()
+    await first
+
+
 # ---------------------------------------------------------------------------
 # D16-006：提交成功但回读失败 / 被后继请求取代
 # ---------------------------------------------------------------------------
