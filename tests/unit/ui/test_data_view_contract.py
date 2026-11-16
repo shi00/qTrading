@@ -39,6 +39,7 @@ from tests.unit.ui.component_renderer import (
 )
 from ui.viewmodels import Message
 from ui.viewmodels.data_explorer_view_model import (
+    MAX_EXPORT_ROWS,
     SqlErrorInfo,
     SqlResultRow,
     TableRow,
@@ -1776,6 +1777,132 @@ class TestTableViewerTabEventHandlers:
         # Verify success toast
         toast_args = page.toast.show.call_args
         assert toast_args[0][1] == "success"
+
+    def _prepare_web_export(self, page: FakePage) -> dict[str, Any]:
+        """启用 Web 模式并捕获 FilePicker.save_file kwargs。"""
+        page.web = True
+        captured: dict[str, Any] = {}
+        for svc in page.services:
+            if isinstance(svc, ft.FilePicker):
+
+                async def _fake_save_file(**kwargs: Any) -> str:
+                    captured.update(kwargs)
+                    # 浏览器返回值不得被当成本机路径使用
+                    return "/browser/download/OTHER-NAME.csv"
+
+                svc.save_file = _fake_save_file  # type: ignore[method-assign]
+                break
+        return captured
+
+    def test_export_web_csv_passes_src_bytes(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """ADD-UI-001: Web 模式 CSV → vm.export_data_bytes + save_file(src_bytes=...), 免写盘."""
+        from ui.views.data_view import TableViewerTab
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
+        vm._current_data = pd.DataFrame({"ts_code": ["000001"], "name": ["测试"]})
+        vm.export_data_bytes = AsyncMock(return_value=b"csv-bytes")
+        vm.write_csv = AsyncMock(return_value=None)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+        captured = self._prepare_web_export(page)
+
+        popup_menus = _find_by_type(result, ft.PopupMenuButton)
+        popup_menus[0].items[0].on_click(MagicMock())
+
+        # 序列化在 VM 完成, 且传入本次已取得的 df / csv 格式
+        assert vm.export_data_bytes.await_args.args[0] is vm._current_data
+        assert vm.export_data_bytes.await_args.args[1] == "csv"
+        # Web 不写本机路径
+        vm.write_csv.assert_not_called()
+        # save_file 必须携带 src_bytes, 且不再使用浏览器返回值
+        assert captured["src_bytes"] == b"csv-bytes"
+        assert captured["file_name"].endswith(".csv")
+        # 成功 toast 使用默认文件名, 不提供"打开文件夹"
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "success"
+        assert captured["file_name"] in toast_args[0][0]
+        assert toast_args.kwargs == {"action_text": None, "on_action": None}
+
+    def test_export_web_excel_passes_src_bytes(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """ADD-UI-001: Web 模式 Excel → src_bytes + xlsx 扩展名, 免写盘."""
+        from ui.views.data_view import TableViewerTab
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
+        vm._current_data = pd.DataFrame({"ts_code": ["000001"]})
+        vm.export_data_bytes = AsyncMock(return_value=b"xlsx-bytes")
+        vm.write_excel = AsyncMock(return_value=None)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+        captured = self._prepare_web_export(page)
+
+        popup_menus = _find_by_type(result, ft.PopupMenuButton)
+        popup_menus[0].items[2].on_click(MagicMock())
+
+        assert vm.export_data_bytes.await_args.args[1] == "excel"
+        vm.write_excel.assert_not_called()
+        assert captured["src_bytes"] == b"xlsx-bytes"
+        assert captured["allowed_extensions"] == ["xlsx"]
+        assert captured["file_name"].endswith(".xlsx")
+        assert page.toast.show.call_args[0][1] == "success"
+
+    def test_export_web_serialization_failure_shows_error(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """ADD-UI-001: 序列化失败 → 仅失败 toast, 不误报成功、不调用 save_file."""
+        from ui.views.data_view import TableViewerTab
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
+        vm._current_data = pd.DataFrame({"ts_code": ["000001"]})
+        vm.export_data_bytes = AsyncMock(side_effect=RuntimeError("serialize boom"))
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+        captured = self._prepare_web_export(page)
+
+        popup_menus = _find_by_type(result, ft.PopupMenuButton)
+        popup_menus[0].items[0].on_click(MagicMock())
+
+        page.toast.show.assert_called_once()
+        assert page.toast.show.call_args[0][1] == "error"
+        assert captured == {}  # save_file 未被调用
+
+    def test_export_web_all_scope_shows_truncation_warning(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """ADD-UI-001: Web 全部导出达到上限时保留截断提示."""
+        from ui.views.data_view import TableViewerTab
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
+        vm._current_data = pd.DataFrame({"ts_code": ["000001"] * MAX_EXPORT_ROWS})
+        vm.export_data_bytes = AsyncMock(return_value=b"csv-bytes")
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+        self._prepare_web_export(page)
+
+        popup_menus = _find_by_type(result, ft.PopupMenuButton)
+        popup_menus[0].items[1].on_click(MagicMock())
+
+        toast_types = [call[0][1] for call in page.toast.show.call_args_list]
+        assert toast_types == ["success", "warning"]
 
     def test_init_tables_triggers_when_not_loaded(
         self,

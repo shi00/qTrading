@@ -1294,6 +1294,41 @@ class TestWriteExcel:
         assert result is None
 
 
+class TestExportDataBytes:
+    """export_data_bytes: Web FilePicker src_bytes 序列化 (ADD-UI-001, R16)."""
+
+    async def test_csv_returns_utf8_sig_bytes(self, vm, mock_tp):
+        """CSV: CPU 线程池 offload to_csv, 返回带 UTF-8 BOM 的 bytes."""
+        df = pd.DataFrame({"name": ["中文"], "value": [1]})
+        result = await vm.export_data_bytes(df, "csv")
+        assert result.startswith(b"\xef\xbb\xbf")
+        assert "中文" in result.decode("utf-8-sig")
+        call_args = mock_tp.run_async.call_args
+        assert call_args[0][0] is TaskType.CPU
+        assert call_args[0][1].keywords == {"index": False, "encoding": "utf-8-sig"}
+
+    async def test_xlsx_returns_zip_bytes(self, vm, mock_tp):
+        """Excel: CPU 线程池写 BytesIO, 返回 ZIP magic 开头的 xlsx bytes."""
+        df = pd.DataFrame({"A": [1, 2]})
+        result = await vm.export_data_bytes(df, "xlsx")
+        assert result[:2] == b"PK"
+        call_args = mock_tp.run_async.call_args
+        assert call_args[0][0] is TaskType.CPU
+        assert call_args[0][1].keywords == {"index": False, "engine": "openpyxl"}
+
+    async def test_serialization_error_propagates(self, vm, mock_tp):
+        """序列化失败必须传播, 由 View 提示导出失败 (不得静默返回空 bytes)."""
+        mock_tp.run_async = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(RuntimeError):
+            await vm.export_data_bytes(pd.DataFrame({"A": [1]}), "csv")
+
+    async def test_cancelled_error_propagates(self, vm, mock_tp):
+        """R2: CancelledError 必须重新 raise, 不可吞没."""
+        mock_tp.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await vm.export_data_bytes(pd.DataFrame({"A": [1]}), "csv")
+
+
 class TestLoadDataFreshness:
     """Phase 6.4 FR-UX-006: load_data_freshness 分支覆盖。"""
 
