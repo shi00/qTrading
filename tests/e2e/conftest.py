@@ -1686,6 +1686,47 @@ def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
     _terminate(proc)
 
 
+@pytest.fixture(scope="session")
+def external_wizard_app(tmp_path_factory):
+    """Onboarding wizard app（external 模式，不依赖 Rust sidecar）。
+
+    用于验证 external DB 表单「填写 → 校验 → 前进」路径：子进程显式
+    ``QTRADING_DATABASE_MODE=external`` 且 ``embedded_pg_enabled=False``，
+    既不启动 embedded sidecar，也不依赖 ``real_sidecar_binary_e2e``。
+    外置 DB 连接串沿用测试进程的 ``DATABASE_URL`` / ``E2E_DATABASE_URL``
+    （CI 由 job 提供真实 PG）。
+    """
+    proc, url, cfg_file = _spawn(
+        tmp_path_factory,
+        config={
+            "locale": "zh_CN",
+            "embedded_pg_enabled": False,
+        },
+        env_overrides={
+            "TS_TOKEN": "e2e-dummy-token",
+            "AI_API_KEY": "e2e-dummy-key",
+            "QTRADING_DATABASE_MODE": "external",
+            "AUTO_MIGRATE": "true",
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+        },
+    )
+    app = AppServer(proc, url, cfg_file)
+    yield app
+    _terminate(proc)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def external_wizard_page(e2e_browser, external_wizard_app: AppServer, request):
+    """Function 级 Page（external 模式向导测试）：渲染外部 DB 表单。"""
+    fp = await _make_page(e2e_browser, external_wizard_app, request)
+    yield fp
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
+
+
 @pytest.fixture
 def _e2e_app_dep(request) -> AppServer:
     """同步解析 e2e_page 依赖的 AppServer 实例（依 mutates_config 路由）。

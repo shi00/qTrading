@@ -165,19 +165,19 @@ async def test_wizard_db_validation_failure(wizard_page):
 # 历史背景:Windows CI 环境 CanvasKit 中文字体网络加载曾致 textbox a11y 节点未渲染
 # （Windows E2E skip 已解禁移除），外部 DB 校验失败流程改由集成测试替代覆盖:
 #   tests/integration/test_onboarding_wizard_integration.py
-# embedded 模式跳过：wizard database 步骤在 embedded 模式下渲染 EmbeddedStatusCard
-# （只读状态卡片，无 host/port/user/password/database 表单字段），无法填写外部 DB 配置。
-# embedded 模式下 database 步骤验证为 always-true（_validate_database_embedded），
-# 外部 DB 配置验证流程由集成测试覆盖（test_onboarding_wizard_integration.py）。
+# embedded 模式跳过：wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单），无法填写
+# 外部 DB 配置。成功校验 node 使用 external_wizard_page（external 模式，不依赖 Rust
+# sidecar）；embedded 模式下仍跳过，external 模式由 CI no-sidecar 组复验。
 @pytest.mark.skipif(
     os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower() == "embedded",
-    reason=(
-        "embedded 模式下 wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单），"
-        "外部 DB 配置验证流程由集成测试覆盖"
-    ),
+    reason="embedded 模式下 wizard database 步骤渲染 EmbeddedStatusCard（无外部 DB 表单）",
 )
-async def test_wizard_db_validation_success(wizard_page):
+async def test_wizard_db_validation_success(external_wizard_page):
     """测试：数据库校验成功后前进到 Token 步骤（A 类门禁，用 CI 测试库）。
+
+    使用 ``external_wizard_page``（``QTRADING_DATABASE_MODE=external``，不依赖
+    Rust sidecar）：只有 external 模式才渲染 host/port/user/password/database
+    表单；embedded 模式下本 node 由上方 skipif 跳过。
 
     PR-3 注记：btn_start / btn_verify_next / db_host 等 TextField 未 anchor 化
     （PR-3 范围仅 anchor 化 next/prev/skip/token），保留 FletPage.click_button / fill_textbox。
@@ -195,23 +195,23 @@ async def test_wizard_db_validation_success(wizard_page):
     # 导致"开始使用"按钮不存在。确定性判定：若当前已在 DB 步骤则跳过导航点击。
     # accept_risk_disclaimer 为幂等「确保已勾选」（先读态再决定是否点击），
     # 故可安全无条件调用，无需 try/except 兜底。
-    if not await wizard_page.has_text(db_title):
+    if not await external_wizard_page.has_text(db_title):
         btn_start = I18n.get("wizard_btn_start")
-        await WizardPage(wizard_page).accept_risk_disclaimer()
-        await wizard_page.click_button(btn_start)
-        await wizard_page.expect_text(db_title)
+        await WizardPage(external_wizard_page).accept_risk_disclaimer()
+        await external_wizard_page.click_button(btn_start)
+        await external_wizard_page.expect_text(db_title)
 
-    await wizard_page.fill_textbox(I18n.get("db_host"), db["host"])
-    await wizard_page.fill_textbox(I18n.get("db_port"), db["port"])
-    await wizard_page.fill_textbox(I18n.get("db_user"), db["user"])
-    await wizard_page.fill_textbox(I18n.get("db_password"), db["password"])
-    await wizard_page.fill_textbox(I18n.get("db_name"), db["database"])
+    await external_wizard_page.fill_textbox(I18n.get("db_host"), db["host"])
+    await external_wizard_page.fill_textbox(I18n.get("db_port"), db["port"])
+    await external_wizard_page.fill_textbox(I18n.get("db_user"), db["user"])
+    await external_wizard_page.fill_textbox(I18n.get("db_password"), db["password"])
+    await external_wizard_page.fill_textbox(I18n.get("db_name"), db["database"])
 
     # 等待 Flet 处理所有输入并更新表单状态，防止验证按钮点击时表单尚未同步
-    await wizard_page.page.wait_for_timeout(500)
+    await external_wizard_page.page.wait_for_timeout(500)
 
     btn_verify = I18n.get("wizard_btn_verify_next")
-    await wizard_page.click_button(btn_verify)
+    await external_wizard_page.click_button(btn_verify)
 
     token_title = I18n.get("wizard_step1_title")
-    await wizard_page.expect_text(token_title, timeout_ms=TIMEOUTS.WIZARD_TOKEN)
+    await external_wizard_page.expect_text(token_title, timeout_ms=TIMEOUTS.WIZARD_TOKEN)
