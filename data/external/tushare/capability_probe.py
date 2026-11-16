@@ -199,6 +199,48 @@ class CapabilityProbeService:
         """读取代次原始值（调用方须已持有 ``_capability_cache_lock``）。"""
         return getattr(self.client, "_capability_generation", 0)
 
+    def _is_stale_generation(self, generation: int) -> bool:
+        """判断入口代次是否已被替换（调用方须已持有 ``_capability_cache_lock``）。"""
+        return generation != self._current_capability_generation()
+
+    def _rollback_capability_cache_to(
+        self,
+        generation: int,
+        cache_snapshot: dict[str, bool | None],
+        runtime_marks_snapshot: dict[str, datetime.datetime],
+    ) -> bool:
+        """回滚到 probe 入口快照，仅在代次未变时执行。
+
+        Args:
+            generation: probe 入口快照的 token 代次。
+            cache_snapshot: 入口 ``_capability_cache`` 快照。
+            runtime_marks_snapshot: 入口 ``_capability_runtime_marks`` 快照。
+        Returns:
+            True 表示已回滚；False 表示代次已变（token 已被替换，入口快照属于旧代次，
+            不得写回已清空的新代次缓存）。
+        """
+        with self._capability_cache_lock:
+            if self._is_stale_generation(generation):
+                return False
+            self._capability_cache.clear()
+            self._capability_cache.update(cache_snapshot)
+            self._capability_runtime_marks.clear()
+            self._capability_runtime_marks.update(runtime_marks_snapshot)
+            return True
+
+    def _mark_probe_completed(self, generation: int) -> bool:
+        """记录 probe 完成时间，仅在代次未变时执行。
+
+        Returns:
+            True 表示已记录；False 表示代次已变（过时代次不得写 ``_last_probe_time``，
+            否则新代次会以旧代次的探测时间冒充「已探测」）。
+        """
+        with self._capability_cache_lock:
+            if self._is_stale_generation(generation):
+                return False
+            self.client._last_probe_time = get_now()
+            return True
+
     def clear_capability_cache(self) -> None:
         """Clear all cached capabilities. Call after token change."""
         with self._capability_cache_lock:
@@ -413,7 +455,7 @@ class CapabilityProbeService:
 
         Phase 2B §3.2.5 实测基础设施：
         - 入口互斥（``_probe_in_progress`` bool 标志，单线程 asyncio 同步段内原子）
-        - 入口快照（取消/异常时回滚 ``_capability_cache``，避免部分污染）
+        - 入口快照（代次 + cache + 运行时标记；取消/异常时仅代次未变才回滚，避免部分污染）
         - 档位预筛（``is_api_covered_by_tier`` 过滤候选池）
         - 并行探测（semaphore=4 + ``gather_return_exceptions_propagating_cancel`` 传播 CancelledError）
         - 三态分类（True/False/None，None 不写入 ``_capability_cache``）
@@ -442,15 +484,16 @@ class CapabilityProbeService:
         self.client._probe_in_progress = True
 
         # 入口持锁快照：取消/异常时回滚到入口状态（v1.9.0 P0-3/M-3）
-        # B5/B19 修复：持锁访问 _capability_cache；B3 修复：同时快照 token，
-        # set_token 在 probe 期间替换 token + 清空 cache + 重建 pro，回滚/写入时
-        # 检查 token 一致性避免污染新 token 的 cache。
+        # B5/B19 修复：持锁访问 _capability_cache；D08-001：同时快照 token 代次。
+        # set_token 在 probe 期间替换 token 时于同一把锁内清空缓存并递增代次，
+        # 写入/回滚必须按代次判定归属——只比 token 字符串会被 A→B→A 骗过
+        # （代次 0→1→2 而字符串相同），把已清空的旧代次权限写回新代次缓存。
         # 快照同时覆盖运行时标记字典：否则回滚只还原 cache、残留的运行时时间戳会把
         # 权威负缓存误判为可 TTL 过期（review09-24/05 MINOR-02）。
         with self._capability_cache_lock:
             cache_snapshot = dict(self._capability_cache)
             runtime_marks_snapshot = dict(self._capability_runtime_marks)
-        token_snapshot = self.token
+            entry_generation = self._current_capability_generation()
 
         try:
             recent_date = get_now().strftime("%Y%m%d")
@@ -514,8 +557,8 @@ class CapabilityProbeService:
 
             total = len(filtered_configs)
             if total == 0:
-                self.client._last_probe_time = get_now()
-                await self.client.persist_capabilities_to_app_state()
+                if self._mark_probe_completed(entry_generation):
+                    await self.client.persist_capabilities_to_app_state()
                 return {}
 
             # 并行探测过滤后的候选（semaphore=4 + gather 传播 CancelledError）
@@ -562,7 +605,14 @@ class CapabilityProbeService:
                     total,
                 )
                 # 保留旧缓存，仅更新 last_probe_time 标记本次 probe 尝试过
-                self.client._last_probe_time = get_now()
+                # D08-001：过时代次不得写 last_probe_time，也不得以新代次 token_hash 落库
+                if not self._mark_probe_completed(entry_generation):
+                    logger.info(
+                        "[TushareClient] Token generation changed during probe (entry=%d), "
+                        "skip last_probe_time update on degraded run",
+                        entry_generation,
+                    )
+                    return self.client.get_capability_cache()
                 await self.client.persist_capabilities_to_app_state()
                 return self.client.get_capability_cache()
 
@@ -575,56 +625,58 @@ class CapabilityProbeService:
                     total,
                 )
 
-            # B3 修复：写入前检查 token 一致性，set_token 后旧 probe 持有的结果丢弃，
-            # 避免旧 token 的 probe 结果覆盖新 token 的 cache（路径 B 污染）
-            if self.token != token_snapshot:
+            # D08-001：写入前按代次校验，set_token 后旧 probe 持有的结果丢弃，
+            # 避免旧代次结果覆盖新代次 cache。代次在 set_token 内与清空缓存原子递增，
+            # A→B→A（token 字符串相同）也能识别。
+            with self._capability_cache_lock:
+                stale_generation = self._is_stale_generation(entry_generation)
+            if stale_generation:
                 logger.info(
-                    "[TushareClient] Token changed during probe (entry=%s, current=%s), "
+                    "[TushareClient] Token generation changed during probe (entry=%d, current=%d), "
                     "discarding probe results to avoid cache pollution",
-                    DataSanitizer.sanitize_token(token_snapshot or ""),
-                    DataSanitizer.sanitize_token(self.token or ""),
+                    entry_generation,
+                    self.get_capability_generation(),
                 )
                 return self.client.get_capability_cache()
 
             # gather 全部成功后统一写入 _capability_cache（None 不写入，避免污染）
+            # mark_api_* 在 _capability_cache_lock 内二次校验代次，过时结论不落缓存。
             for api_name, available in results.items():
                 if available is True:
-                    self.client.mark_api_available(api_name)
+                    self.client.mark_api_available(api_name, generation=entry_generation)
                 elif available is False:
-                    self.client.mark_api_unavailable(api_name)
+                    self.client.mark_api_unavailable(api_name, generation=entry_generation)
                 # None 不写入 _capability_cache（保持原值或不存在）
 
-            self.client._last_probe_time = get_now()
+            if not self._mark_probe_completed(entry_generation):
+                logger.info(
+                    "[TushareClient] Token generation changed during probe commit (entry=%d), "
+                    "skip last_probe_time update",
+                    entry_generation,
+                )
+                return self.client.get_capability_cache()
             await self.client.persist_capabilities_to_app_state()
             return results
         except asyncio.CancelledError:
             # 取消时回滚 _capability_cache 到入口快照（R2 红线：raise 传播）
-            # B3+B5/B19 修复：持锁回滚 + token 一致性检查，避免污染新 token 的 cache
+            # D08-001：回滚按代次判定，token 已被替换时入口快照属于旧代次，不得写回
             logger.info("[TushareClient] Probe cancelled, rolling back _capability_cache to entry snapshot")
-            if self.token == token_snapshot:
-                with self._capability_cache_lock:
-                    self._capability_cache.clear()
-                    self._capability_cache.update(cache_snapshot)
-                    self._capability_runtime_marks.clear()
-                    self._capability_runtime_marks.update(runtime_marks_snapshot)
-            else:
-                logger.info("[TushareClient] Token changed during probe, skip rollback to avoid cache pollution")
+            if not self._rollback_capability_cache_to(entry_generation, cache_snapshot, runtime_marks_snapshot):
+                logger.info(
+                    "[TushareClient] Token generation changed during probe, skip rollback to avoid cache pollution"
+                )
             raise
         except Exception as exc:
             # 其他异常（网络抖动等非取消）也回退到入口快照，避免部分污染
-            # B3+B5/B19 修复：持锁回滚 + token 一致性检查
+            # D08-001：回滚同样按代次判定
             logger.warning(
                 "[TushareClient] Probe failed, rolling back _capability_cache to entry snapshot: %s",
                 DataSanitizer.sanitize_error(exc),
             )
-            if self.token == token_snapshot:
-                with self._capability_cache_lock:
-                    self._capability_cache.clear()
-                    self._capability_cache.update(cache_snapshot)
-                    self._capability_runtime_marks.clear()
-                    self._capability_runtime_marks.update(runtime_marks_snapshot)
-            else:
-                logger.info("[TushareClient] Token changed during probe, skip rollback to avoid cache pollution")
+            if not self._rollback_capability_cache_to(entry_generation, cache_snapshot, runtime_marks_snapshot):
+                logger.info(
+                    "[TushareClient] Token generation changed during probe, skip rollback to avoid cache pollution"
+                )
             return self.client.get_capability_cache()
         finally:
             self.client._probe_in_progress = False
