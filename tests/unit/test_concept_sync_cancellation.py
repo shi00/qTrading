@@ -161,9 +161,7 @@ class TestAKShareLoopCancellation:
             MockClient.return_value.get_concept_constituents = AsyncMock(
                 return_value=pd.DataFrame({"代码": ["000001", "000002"], "名称": ["A", "B"]})
             )
-            ctx.cache.stock_dao.get_ts_code_map = AsyncMock(
-                return_value={"000001": "000001.SZ", "000002": "000002.SZ"}
-            )
+            ctx.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={"000001": "000001.SZ", "000002": "000002.SZ"})
             ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=2)
 
             result = await strategy.run()
