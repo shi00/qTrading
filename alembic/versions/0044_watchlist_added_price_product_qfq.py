@@ -31,6 +31,13 @@ downgrade 对称但可能不可逆：反算回 ``close / adj_factor`` 后若超�
 ``added_price`` 置 NULL（``added_trade_date`` 保留，表示「关注起点价格未知」），
 其余行正常反算，再窄化回 ``Numeric(12, 6)``。有损路径仅删除「观测起点价格」，
 不回填、不伪造，需在备份后执行。
+
+D06-002：初版「可用行情」判据只要求 ``close`` / ``adj_factor`` 非空且
+``adj_factor > 0``，与 ``WatchlistDao._latest_quote`` 的「有限正数」判据不一致——
+``close`` 为 0 / 负数 / NaN / Infinity 时仍会回填 0 / 负值而非「未知」（R21）。
+本迁移各 SQL 的可用行情判据已统一收敛到 ``_USABLE_QUOTE_SQL``（与 DAO 同口径）；
+已发布库不会重跑 0044，由前向 revision 0047 重放同一归一回填（见
+``0047_watchlist_added_price_positive_close.py``）。
 """
 
 import logging
@@ -48,6 +55,23 @@ down_revision: str | Sequence[str] | None = "0043"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# 可用行情判据（D06-002）：close 与 adj_factor 必须同为「有限正数」，与
+# WatchlistDao._latest_quote 的 math.isfinite + 正值判据同口径（两处口径一致才
+# 不会出现「迁移回填了 DAO 视为不可用的行情」）。PostgreSQL numeric 的 NaN 参与
+# 比较时被视为大于一切值（NaN > 0 为真），Infinity 亦满足 > 0，故 `> 0` 不能
+# 排除二者，必须显式 `<> 'NaN'` / `<> 'Infinity'`；-Infinity 已由 `> 0` 排除。
+# 缺此判据时 close=0 / -1、adj=2 会回填 0 / -2（业务上非法的分母）而非「未知」。
+_USABLE_QUOTE_SQL = (
+    "dq.close IS NOT NULL "
+    "AND dq.close > 0 "
+    "AND dq.close <> 'NaN'::numeric "
+    "AND dq.close <> 'Infinity'::numeric "
+    "AND dq.adj_factor IS NOT NULL "
+    "AND dq.adj_factor > 0 "
+    "AND dq.adj_factor <> 'NaN'::numeric "
+    "AND dq.adj_factor <> 'Infinity'::numeric"
+)
+
 # 旧语义（close / adj_factor）→ 新语义（close × adj_factor）：以同交易日行情重算，
 # 不依赖旧值本身（旧值可被反推但乘法重算更直接、且不受旧值精度影响）。
 # R4：常量 SQL，无参数拼接；仅 UPDATE watchlist 单表 + daily_quotes 主键等值关联。
@@ -58,14 +82,12 @@ _REBASE_TO_PRODUCT_SQL = (
     "WHERE w.added_price IS NOT NULL "
     "AND dq.ts_code = w.ts_code "
     "AND dq.trade_date = w.added_trade_date "
-    "AND dq.close IS NOT NULL "
-    "AND dq.adj_factor IS NOT NULL "
-    "AND dq.adj_factor > 0"
+    "AND " + _USABLE_QUOTE_SQL
 )
 # 反算值能否装入旧列 Numeric(12, 6)（上限 999999.999999）的判据：三处
 # abs(round(close / adj_factor, 6)) 比较必须逐字一致（_UNREPRESENTABLE_COUNT_SQL /
-# _NULL_UNREPRESENTABLE_SQL / _REBASE_TO_QUOTIENT_SQL 护栏）；可用行情条件在
-# _NULL_UNREBASABLE_SQL 等语句中亦须与 JOIN 条件一致。
+# _NULL_UNREPRESENTABLE_SQL / _REBASE_TO_QUOTIENT_SQL 护栏）；可用行情判据统一经
+# _USABLE_QUOTE_SQL 注入，不得在任何语句里另写一份。
 # 先 round 到 6 位小数再比较，覆盖 PostgreSQL 赋值时的 6 位舍入（舍入进位的
 # 999999.9999995 被 round 为 1000000.000000，判为不可表示）。
 # 新语义（close × adj_factor）→ 旧语义（close / adj_factor），downgrade 用。
@@ -76,9 +98,7 @@ _REBASE_TO_QUOTIENT_SQL = (
     "WHERE w.added_price IS NOT NULL "
     "AND dq.ts_code = w.ts_code "
     "AND dq.trade_date = w.added_trade_date "
-    "AND dq.close IS NOT NULL "
-    "AND dq.adj_factor IS NOT NULL "
-    "AND dq.adj_factor > 0 "
+    "AND " + _USABLE_QUOTE_SQL + " "
     "AND abs(round(dq.close / dq.adj_factor, 6)) < 1000000"
 )
 # 预检：反算会超出旧列宽的行数（只读，downgrade 最先执行，未做任何写入）。
@@ -88,9 +108,7 @@ _UNREPRESENTABLE_COUNT_SQL = (
     "ON dq.ts_code = w.ts_code "
     "AND dq.trade_date = w.added_trade_date "
     "WHERE w.added_price IS NOT NULL "
-    "AND dq.close IS NOT NULL "
-    "AND dq.adj_factor IS NOT NULL "
-    "AND dq.adj_factor > 0 "
+    "AND " + _USABLE_QUOTE_SQL + " "
     "AND abs(round(dq.close / dq.adj_factor, 6)) >= 1000000"
 )
 # 有损路径：仅显式授权后执行，把不可表示的行置 NULL（added_trade_date 保留）。
@@ -102,9 +120,7 @@ _NULL_UNREPRESENTABLE_SQL = (
     "SELECT 1 FROM daily_quotes AS dq "
     "WHERE dq.ts_code = w.ts_code "
     "AND dq.trade_date = w.added_trade_date "
-    "AND dq.close IS NOT NULL "
-    "AND dq.adj_factor IS NOT NULL "
-    "AND dq.adj_factor > 0 "
+    "AND " + _USABLE_QUOTE_SQL + " "
     "AND abs(round(dq.close / dq.adj_factor, 6)) >= 1000000)"
 )
 # 无法重算的旧值不得保留（混语义即误导），置 NULL 表示「观察起点价格未知」。
@@ -117,9 +133,7 @@ _NULL_UNREBASABLE_SQL = (
     "SELECT 1 FROM daily_quotes AS dq "
     "WHERE dq.ts_code = w.ts_code "
     "AND dq.trade_date = w.added_trade_date "
-    "AND dq.close IS NOT NULL "
-    "AND dq.adj_factor IS NOT NULL "
-    "AND dq.adj_factor > 0)"
+    "AND " + _USABLE_QUOTE_SQL + ")"
 )
 
 
