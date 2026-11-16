@@ -100,8 +100,8 @@ class SystemDiagnosticsCollector:
     def _sanitize_config_snapshot(value: Any, *, key: str | None = None) -> Any:
         """在诊断序列化边界递归生成配置安全快照，不修改原始配置。
 
-        - 每个 dict 节点经 ``DataSanitizer.sanitize_dict`` 遮蔽敏感键（含嵌套
-          list/dict 内未被顶层 sanitize_dict 覆盖的 dict）；
+        - 每个 dict 节点经 ``DataSanitizer.sanitize_dict`` 递归遮蔽敏感键
+          （D20-004 起 sanitize_dict 自身覆盖嵌套 list/tuple/set/dict）；
         - 已知模型/本地路径键（见 ``_CONFIG_PATH_KEYS``）整体输出 ``<PATH>``，
           含空格的路径不做正则切分，避免残留用户名片段；
         - ``model`` 仅在呈绝对路径（GGUF 路径回退形态）时输出 ``<PATH>``，

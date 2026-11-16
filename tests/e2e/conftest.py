@@ -68,6 +68,7 @@ from tests.e2e.helpers.app_launcher import (
     start_flet_app,
 )
 from tests.e2e.helpers.flet_page import FletPage
+from tests.e2e.helpers.seeding_probe import require_seeding_page_ready
 from ui.testing.e2e_ids import EIDS
 
 from tests.conftest import _get_test_db_url
@@ -1276,7 +1277,7 @@ async def _trigger_sidecar_startup_via_browser(
     可能导致 CacheManager 等单例资源被清理，第二次 ``main(page)``（e2e_page fixture）
     的 DB 初始化失败。保持 page 打开让第一次 ``main(page)`` 持续运行，单例资源保持有效，
     第二次 ``main(page)`` 复用已初始化的单例。context 由 ``seed_e2e_data`` fixture
-    在 teardown 时关闭。
+    在 teardown 时关闭；失败/取消路径由本函数的 ``finally`` 回收（恰好关闭一次）。
 
     为什么必须等页面初始化完成再播种数据：
     - 第一次 main(page) 会执行完整初始化（sidecar 启动 + DB 迁移 + 服务初始化）
@@ -1330,161 +1331,166 @@ async def _trigger_sidecar_startup_via_browser(
     except Exception as e:
         logger.warning("[E2E Seeding] Flutter Web semantics init failed (non-fatal): %s", e)
 
+    from playwright.async_api import Error as PlaywrightError
+
+    # 仅 Playwright 等待/定位类暂态失败可重试；错误 UI 等确定性失败由
+    # require_seeding_page_ready 直接抛出，不得在此处被 except 捕获（D21-OTHER-004）。
+    retryable_probe_errors: tuple[type[BaseException], ...] = (PlaywrightError, TimeoutError)
+
     deadline = time.monotonic() + timeout_s
     url_file_appeared = False
     last_diag_log = 0.0
-    while time.monotonic() < deadline:
-        if not url_file_appeared and embedded_url_file.exists():
-            elapsed = timeout_s - (deadline - time.monotonic())
-            logger.info("[E2E Seeding] URL file appeared after %.1fs", elapsed)
-            url_file_appeared = True
-            last_diag_log = time.monotonic()
-        if not flet_app.is_alive():
-            await context.close()
-            # 退出码与 app 日志尾部内联进异常消息：app 子进程日志只落盘，CI job 日志默认
-            # 看不到，仅提示「Check logs/...」会让 setup error 缺少根因证据
-            # （2026-11-05 run 42008447714 的 3 个 setup error 即此形态）。
-            log_tail = _read_log_tail(flet_app.stdout_log_path, max_chars=4000)
-            raise RuntimeError(
-                f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup "
-                f"with code {flet_app.proc.poll()}. Check {flet_app.stdout_log_path} for details. "
-                f"Log tail:\n{log_tail}"
-            )
-        if url_file_appeared:
-            error_text = I18n.get("error_db_init_failed")
-            try:
-                error_locator = page.locator(f"text={error_text}")
-                if await error_locator.count() > 0:
-                    await context.close()
-                    raise RuntimeError(
-                        "Flet app shows DB initialization error UI during seeding setup. "
-                        f"See log: {flet_app.stdout_log_path}"
-                    )
-            except Exception as exc:  # noqa: BLE001
-                # 探测性检查: locator 操作可能因 page not ready/target detached 失败, 循环会重试
-                logger.debug("[E2E Seeding] DB error UI check failed (non-fatal): %s", exc, exc_info=True)
-            nav_screener_text = I18n.get("nav_screener")
-            try:
-                nav_locator = page.locator(f"text={nav_screener_text}")
-                if await nav_locator.count() > 0:
+    deliver_context = False
+    try:
+        while time.monotonic() < deadline:
+            if not url_file_appeared and embedded_url_file.exists():
+                elapsed = timeout_s - (deadline - time.monotonic())
+                logger.info("[E2E Seeding] URL file appeared after %.1fs", elapsed)
+                url_file_appeared = True
+                last_diag_log = time.monotonic()
+            if not flet_app.is_alive():
+                # 退出码与 app 日志尾部内联进异常消息：app 子进程日志只落盘，CI job 日志默认
+                # 看不到，仅提示「Check logs/...」会让 setup error 缺少根因证据
+                # （2026-11-05 run 42008447714 的 3 个 setup error 即此形态）。
+                log_tail = _read_log_tail(flet_app.stdout_log_path, max_chars=4000)
+                raise RuntimeError(
+                    f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup "
+                    f"with code {flet_app.proc.poll()}. Check {flet_app.stdout_log_path} for details. "
+                    f"Log tail:\n{log_tail}"
+                )
+            if url_file_appeared:
+                # 探测只吞暂态异常；命中错误 UI 时 helper 直接抛 SeedingProbeFailure，
+                # 若包进 try/except 就会退化为 600s 通用超时（D21-OTHER-004）。
+                if await require_seeding_page_ready(
+                    page,
+                    error_text=I18n.get("error_db_init_failed"),
+                    ready_text=I18n.get("nav_screener"),
+                    retryable_errors=retryable_probe_errors,
+                ):
                     elapsed = timeout_s - (deadline - time.monotonic())
                     logger.info("[E2E Seeding] page initialized after %.1fs", elapsed)
+                    deliver_context = True
                     return context
-            except Exception as exc:  # noqa: BLE001
-                # 探测性检查: locator 操作可能因 page not ready/target detached 失败, 循环会重试
-                logger.debug("[E2E Seeding] nav_screener check failed (non-fatal): %s", exc, exc_info=True)
-            # 每 30 秒输出一次页面状态诊断，便于定位 main(page) 卡死位置
-            if time.monotonic() - last_diag_log >= 30.0:
-                elapsed = timeout_s - (deadline - time.monotonic())
-                try:
-                    title = await page.title()
-                    url = page.url
-                    # 浏览器端 DOM 诊断：检查 Flutter Web 是否加载、文本是否在 DOM 中
-                    dom_diag = await page.evaluate(
-                        """() => {
-                            const diag = {};
-                            diag.bodyLength = document.body ? document.body.innerHTML.length : 0;
-                            diag.fltGlassPane = !!document.querySelector('flt-glass-pane');
-                            diag.fltSemantic = !!document.querySelector('flt-semantic');
-                            diag.fltSemanticsPlaceholder = !!document.querySelector('flt-semantics-placeholder');
-                            diag.canvases = document.querySelectorAll('canvas').length;
-                            // 检查 flt-glass-pane 的 shadow DOM（Flutter Web 可能把 canvas 放在 shadow DOM 里）
-                            const glassPane = document.querySelector('flt-glass-pane');
-                            if (glassPane && glassPane.shadowRoot) {
-                                diag.shadowCanvases = glassPane.shadowRoot.querySelectorAll('canvas').length;
-                                diag.shadowSceneHost = !!glassPane.shadowRoot.querySelector('flt-scene-host');
-                                diag.shadowInnerHtmlLen = glassPane.shadowRoot.innerHTML.length;
-                            } else {
-                                diag.shadowCanvases = 0;
-                                diag.shadowSceneHost = false;
-                                diag.shadowInnerHtmlLen = 0;
-                            }
-                            // 检查 WebGL 上下文
-                            diag.webglContexts = 0;
-                            const allCanvases = document.querySelectorAll('canvas');
-                            for (const c of allCanvases) {
-                                try {
-                                    if (c.getContext('webgl') || c.getContext('webgl2')) diag.webglContexts++;
-                                } catch(e) {}
-                            }
-                            // 检查 Flutter/Dart 全局变量
-                            // Flutter Web 0.86.x: _flutter.loader（不是 _flutterLoader）
-                            diag.hasFlutter = typeof _flutter !== 'undefined' && !!_flutter.loader;
-                            diag.hasDart = typeof _flutter !== 'undefined' && !!_flutter.loader;
-                            // 查找所有文本节点（去除空白）
-                            const walker = document.createTreeWalker(
-                                document.body,
-                                NodeFilter.SHOW_TEXT,
-                                { acceptNode: (node) => node.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT }
-                            );
-                            const texts = [];
-                            let node;
-                            while (node = walker.nextNode()) {
-                                texts.push(node.textContent.trim());
-                                if (texts.length >= 10) break;
-                            }
-                            diag.textSamples = texts;
-                            diag.navScreenerInDom = document.body.innerHTML.includes('智能选股');
-                            return diag;
-                        }"""
-                    )
-                    logger.info(
-                        "[E2E Seeding] still waiting for page init after %.1fs (title=%r, url=%r, dom_diag=%s)",
-                        elapsed,
-                        title,
-                        url,
-                        dom_diag,
-                    )
-                except Exception as diag_err:
-                    logger.info(
-                        "[E2E Seeding] still waiting for page init after %.1fs (diag failed: %s)",
-                        elapsed,
-                        diag_err,
-                    )
-                # 读取本实例 Flet app 日志 tail 输出到 CI 日志，定位 main(page) 服务端卡死位置。
-                # 根因：浏览器端 DOM 诊断只能看到 Flutter Web 框架状态，无法看到 Python
-                # 服务端 main(page) 执行进度。main(page) 卡在 CacheManager/init_services
-                # 时，浏览器端会一直等待渲染指令，DOM 诊断始终相同。读取本实例 stdout
-                # 日志能直接看到 main(page) 执行到了哪一步。
-                try:
-                    log_tail = _read_log_tail(flet_app.stdout_log_path, max_chars=4000)
-                    logger.info("[E2E Seeding] Flet app log tail:\n%s", log_tail)
-                    # 额外读取本实例 main_trace.log（绕过 logging/stdout 的直接文件日志），
-                    # 用于定位 page.render 是否阻塞、阻塞在哪一步。
-                    trace_tail = _read_log_tail(flet_app.trace_log_path, max_chars=4000)
-                    logger.info("[E2E Seeding] main_trace.log tail:\n%s", trace_tail)
-                except Exception as log_err:  # noqa: BLE001
-                    logger.debug("[E2E Seeding] Flet app log read failed: %s", log_err)
-                last_diag_log = time.monotonic()
-        await asyncio.sleep(2.0)
-    # 超时前保存截图和页面内容，便于诊断
-    try:
-        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-        await page.screenshot(path=str(ARTIFACT_DIR / "seed-timeout.png"))
-        content = await page.content()
-        (ARTIFACT_DIR / "seed-timeout.html").write_text(content, encoding="utf-8")
-        title = await page.title()
-        logger.error(
-            "[E2E Seeding] timeout after %.1fs: title=%r, url=%r, screenshot+html saved to %s",
-            timeout_s,
-            title,
-            page.url,
-            ARTIFACT_DIR,
-        )
-        # 超时时也读取本实例 main_trace.log，定位 page.render 阻塞点
+                # 每 30 秒输出一次页面状态诊断，便于定位 main(page) 卡死位置
+                if time.monotonic() - last_diag_log >= 30.0:
+                    elapsed = timeout_s - (deadline - time.monotonic())
+                    try:
+                        title = await page.title()
+                        url = page.url
+                        # 浏览器端 DOM 诊断：检查 Flutter Web 是否加载、文本是否在 DOM 中
+                        dom_diag = await page.evaluate(
+                            """() => {
+                                const diag = {};
+                                diag.bodyLength = document.body ? document.body.innerHTML.length : 0;
+                                diag.fltGlassPane = !!document.querySelector('flt-glass-pane');
+                                diag.fltSemantic = !!document.querySelector('flt-semantic');
+                                diag.fltSemanticsPlaceholder = !!document.querySelector('flt-semantics-placeholder');
+                                diag.canvases = document.querySelectorAll('canvas').length;
+                                // 检查 flt-glass-pane 的 shadow DOM（Flutter Web 可能把 canvas 放在 shadow DOM 里）
+                                const glassPane = document.querySelector('flt-glass-pane');
+                                if (glassPane && glassPane.shadowRoot) {
+                                    diag.shadowCanvases = glassPane.shadowRoot.querySelectorAll('canvas').length;
+                                    diag.shadowSceneHost = !!glassPane.shadowRoot.querySelector('flt-scene-host');
+                                    diag.shadowInnerHtmlLen = glassPane.shadowRoot.innerHTML.length;
+                                } else {
+                                    diag.shadowCanvases = 0;
+                                    diag.shadowSceneHost = false;
+                                    diag.shadowInnerHtmlLen = 0;
+                                }
+                                // 检查 WebGL 上下文
+                                diag.webglContexts = 0;
+                                const allCanvases = document.querySelectorAll('canvas');
+                                for (const c of allCanvases) {
+                                    try {
+                                        if (c.getContext('webgl') || c.getContext('webgl2')) diag.webglContexts++;
+                                    } catch(e) {}
+                                }
+                                // 检查 Flutter/Dart 全局变量
+                                // Flutter Web 0.86.x: _flutter.loader（不是 _flutterLoader）
+                                diag.hasFlutter = typeof _flutter !== 'undefined' && !!_flutter.loader;
+                                diag.hasDart = typeof _flutter !== 'undefined' && !!_flutter.loader;
+                                // 查找所有文本节点（去除空白）
+                                const walker = document.createTreeWalker(
+                                    document.body,
+                                    NodeFilter.SHOW_TEXT,
+                                    { acceptNode: (node) => node.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT }
+                                );
+                                const texts = [];
+                                let node;
+                                while (node = walker.nextNode()) {
+                                    texts.push(node.textContent.trim());
+                                    if (texts.length >= 10) break;
+                                }
+                                diag.textSamples = texts;
+                                diag.navScreenerInDom = document.body.innerHTML.includes('智能选股');
+                                return diag;
+                            }"""
+                        )
+                        logger.info(
+                            "[E2E Seeding] still waiting for page init after %.1fs (title=%r, url=%r, dom_diag=%s)",
+                            elapsed,
+                            title,
+                            url,
+                            dom_diag,
+                        )
+                    except Exception as diag_err:  # 仅诊断输出，不参与等待/失败判定
+                        logger.info(
+                            "[E2E Seeding] still waiting for page init after %.1fs (diag failed: %s)",
+                            elapsed,
+                            diag_err,
+                        )
+                    # 读取本实例 Flet app 日志 tail 输出到 CI 日志，定位 main(page) 服务端卡死位置。
+                    # 根因：浏览器端 DOM 诊断只能看到 Flutter Web 框架状态，无法看到 Python
+                    # 服务端 main(page) 执行进度。main(page) 卡在 CacheManager/init_services
+                    # 时，浏览器端会一直等待渲染指令，DOM 诊断始终相同。读取本实例 stdout
+                    # 日志能直接看到 main(page) 执行到了哪一步。
+                    try:
+                        log_tail = _read_log_tail(flet_app.stdout_log_path, max_chars=4000)
+                        logger.info("[E2E Seeding] Flet app log tail:\n%s", log_tail)
+                        # 额外读取本实例 main_trace.log（绕过 logging/stdout 的直接文件日志），
+                        # 用于定位 page.render 是否阻塞、阻塞在哪一步。
+                        trace_tail = _read_log_tail(flet_app.trace_log_path, max_chars=4000)
+                        logger.info("[E2E Seeding] main_trace.log tail:\n%s", trace_tail)
+                    except Exception as log_err:  # noqa: BLE001
+                        logger.debug("[E2E Seeding] Flet app log read failed: %s", log_err)
+                    last_diag_log = time.monotonic()
+            await asyncio.sleep(2.0)
+        # 超时前保存截图和页面内容，便于诊断
         try:
-            trace_tail = _read_log_tail(flet_app.trace_log_path, max_chars=8000)
-            logger.error("[E2E Seeding] main_trace.log tail on timeout:\n%s", trace_tail)
-        except Exception as trace_err:  # noqa: BLE001
-            logger.error("[E2E Seeding] main_trace.log read failed: %s", trace_err)
-    except Exception as diag_err:
-        logger.error("[E2E Seeding] timeout diag failed: %s", diag_err)
-    await context.close()
-    raise RuntimeError(
-        f"Timeout waiting for sidecar + page init within {timeout_s}s. "
-        "Sidecar may have failed to start or page init failed. "
-        f"Check {flet_app.stdout_log_path} for details."
-    )
+            ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(ARTIFACT_DIR / "seed-timeout.png"))
+            content = await page.content()
+            (ARTIFACT_DIR / "seed-timeout.html").write_text(content, encoding="utf-8")
+            title = await page.title()
+            logger.error(
+                "[E2E Seeding] timeout after %.1fs: title=%r, url=%r, screenshot+html saved to %s",
+                timeout_s,
+                title,
+                page.url,
+                ARTIFACT_DIR,
+            )
+            # 超时时也读取本实例 main_trace.log，定位 page.render 阻塞点
+            try:
+                trace_tail = _read_log_tail(flet_app.trace_log_path, max_chars=8000)
+                logger.error("[E2E Seeding] main_trace.log tail on timeout:\n%s", trace_tail)
+            except Exception as trace_err:  # noqa: BLE001
+                logger.error("[E2E Seeding] main_trace.log read failed: %s", trace_err)
+        except Exception as diag_err:  # 仅诊断输出，不覆盖下面的超时异常
+            logger.error("[E2E Seeding] timeout diag failed: %s", diag_err)
+        raise RuntimeError(
+            f"Timeout waiting for sidecar + page init within {timeout_s}s. "
+            "Sidecar may have failed to start or page init failed. "
+            f"Check {flet_app.stdout_log_path} for details."
+        )
+    finally:
+        # 未交付给调用方时必须回收 context（成功路径由 seed_e2e_data /
+        # warmup_flet_app_mut 的 teardown 关闭，保持第一次 main(page) 继续运行）。
+        # 清理失败只记录，不得覆盖主异常及其异常链。
+        if not deliver_context:
+            try:
+                await context.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[E2E Seeding] context.close() failed during cleanup: %s", exc, exc_info=True)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
