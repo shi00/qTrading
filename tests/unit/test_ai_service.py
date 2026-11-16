@@ -4,6 +4,9 @@
 # 测试行为由测试用例本身验证。
 
 import datetime
+import io
+import json
+import logging
 import pytest
 import httpx
 from unittest.mock import ANY, patch, AsyncMock, MagicMock
@@ -21,6 +24,8 @@ from services.ai_service import (
 )
 from services.ai_service.news_risk import RiskOutput
 from services.ai_service.scenario_executor import ScenarioOutput
+from utils.logger import JSONFormatter
+from utils.sanitizers import DataSanitizer
 
 pytestmark = pytest.mark.unit
 
@@ -729,6 +734,93 @@ class TestValidateAiAnalysisResponseContinued:
     def test_confidence_missing_field_untouched(self):
         result = validate_ai_analysis_response({"score": 80})
         assert "confidence" not in result
+
+
+class TestValidateAiAnalysisResponseLogSanitization:
+    """D20-001: 畸形模型字段原值不得以明文进入普通/JSON 日志（R9）。"""
+
+    @pytest.fixture(autouse=True)
+    def _reset_registered_secrets(self):
+        DataSanitizer._reset_known_secrets()
+        yield
+        DataSanitizer._reset_known_secrets()
+
+    def test_invalid_score_pii_not_logged(self, caplog):
+        pii = "联系人 someone@example.com 电话 13800138000"
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.output"):
+            result = validate_ai_analysis_response({"score": pii})
+        assert result["score"] is None
+        assert "invalid score type" in caplog.text
+        assert "someone@example.com" not in caplog.text
+        assert "13800138000" not in caplog.text
+
+    def test_invalid_confidence_id_card_not_logged(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.output"):
+            result = validate_ai_analysis_response({"score": 80, "confidence": "证件 11010519491231002X"})
+        assert result["confidence"] is None
+        assert "invalid confidence type" in caplog.text
+        assert "11010519491231002X" not in caplog.text
+
+    def test_invalid_recommendation_url_password_and_secret_not_logged(self, caplog):
+        synthetic_secret = "sk-d20synthetic-9f3a1c7e5b2d"
+        DataSanitizer.register_secret(synthetic_secret)
+        value = f"see https://alice:pa55w0rd@example.com/x and key {synthetic_secret}"
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.output"):
+            result = validate_ai_analysis_response({"score": 50, "recommendation": value})
+        assert result["recommendation"] is None
+        assert "unexpected recommendation" in caplog.text
+        assert "pa55w0rd" not in caplog.text
+        assert synthetic_secret not in caplog.text
+        # 保留主机便于定位问题，不因脱敏丢失全部诊断信息
+        assert "example.com" in caplog.text
+
+    def test_invalid_conclusion_label_sanitized_in_json_handler(self):
+        email = "json-user@example.com"
+        output_logger = logging.getLogger("services.ai_service.output")
+        buffer = io.StringIO()
+        handler = logging.StreamHandler(buffer)
+        handler.setFormatter(JSONFormatter())
+        previous_level = output_logger.level
+        output_logger.addHandler(handler)
+        output_logger.setLevel(logging.WARNING)
+        try:
+            result = validate_ai_analysis_response({"score": 80, "conclusion_label": f"结论 {email}"})
+        finally:
+            output_logger.removeHandler(handler)
+            output_logger.setLevel(previous_level)
+        assert result["conclusion_label"] is None
+        message = json.loads(buffer.getvalue().strip())["message"]
+        assert "unexpected conclusion_label" in message
+        assert email not in message
+
+    def test_non_str_mapping_value_logged_without_raw_payload(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.output"):
+            result = validate_ai_analysis_response({"score": 50, "recommendation": {"note": "someone@example.com"}})
+        assert result["recommendation"] is None
+        assert "dict" in caplog.text
+        assert "someone@example.com" not in caplog.text
+
+    def test_long_invalid_value_truncated(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.output"):
+            validate_ai_analysis_response({"score": "x" * 5000})
+        assert "truncated" in caplog.text
+        assert "x" * 200 not in caplog.text
+
+    def test_plain_invalid_value_kept_for_diagnostics(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.output"):
+            validate_ai_analysis_response({"score": 50, "conclusion_label": "maybe"})
+        assert "maybe" in caplog.text
+
+    def test_valid_zero_score_and_labels_not_altered(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.output"):
+            result = validate_ai_analysis_response(
+                {"score": 0, "confidence": 0, "recommendation": "buy", "conclusion_label": "reject"}
+            )
+        assert result["score"] == 0
+        assert result["confidence"] == 0
+        assert result["recommendation"] == "buy"
+        assert result["conclusion_label"] == "reject"
+        assert "Output validation" not in caplog.text
 
 
 class TestValidateAiAnalysisResponseFreeText:
