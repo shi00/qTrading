@@ -667,6 +667,85 @@ class TestConfigHandlerEnsureDefaults:
             mock_save.assert_not_called()
 
 
+class TestRelativeConfigFilePath:
+    """D04-001：``ASTOCK_CONFIG_FILE`` 为相对文件名时保存必须成功。
+
+    根因回归：``_save_json_atomically`` 曾对 ``os.path.dirname(path)`` 无条件
+    ``os.makedirs``，裸文件名得到空字符串抛 ``FileNotFoundError``，导致
+    ``save_config`` 与 ``ensure_defaults`` 全部失败、设置无法落盘。用例在独立
+    工作目录内以相对路径配置，断言真实 JSON 落盘、清缓存后重读一致，并覆盖
+    子目录 / Unicode+空格 / 父目录不可创建（失败且原件不变、无临时文件残留）。
+    """
+
+    @pytest.fixture()
+    def relative_config(self, tmp_path, monkeypatch):
+        """切到独立目录，把配置路径设为裸相对文件名。"""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", "prefs.json")
+        # 声明外部覆盖：禁用 legacy 配置位置迁移（同 TestF10StartupPreserveCorruption）。
+        monkeypatch.setenv("ASTOCK_CONFIG_FILE", "prefs.json")
+        monkeypatch.setattr(cfg_mod.ConfigHandler, "_config_cache", None)
+        yield tmp_path / "prefs.json"
+        cfg_mod.ConfigHandler._clear_cache()
+
+    def test_save_bare_filename_persists_real_json(self, relative_config):
+        """裸文件名保存 → 落盘成功，清缓存后重读为同一值。"""
+        assert ConfigHandler.save_config({"auto_update_time": "03:00"}) is True
+        assert relative_config.exists()
+        on_disk = json.loads(relative_config.read_text(encoding="utf-8"))
+        assert on_disk["auto_update_time"] == "03:00"
+        cfg_mod.ConfigHandler._clear_cache()
+        assert ConfigHandler.load_config()["auto_update_time"] == "03:00"
+
+    def test_ensure_defaults_bare_filename_writes_defaults(self, relative_config):
+        """ensure_defaults 在裸文件名路径上同样能补全并落盘。"""
+        ConfigHandler.ensure_defaults()
+        assert relative_config.exists()
+        on_disk = json.loads(relative_config.read_text(encoding="utf-8"))
+        assert on_disk["auto_update_time"] == ConfigHandler.DEFAULT_CONFIG["auto_update_time"]
+
+    def test_save_relative_subdirectory_path(self, tmp_path, monkeypatch):
+        """相对路径含子目录 → 自动创建父目录后落盘。"""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", "conf/prefs.json")
+        monkeypatch.setenv("ASTOCK_CONFIG_FILE", "conf/prefs.json")
+        monkeypatch.setattr(cfg_mod.ConfigHandler, "_config_cache", None)
+        assert ConfigHandler.save_config({"auto_update_time": "04:00"}) is True
+        target = tmp_path / "conf" / "prefs.json"
+        assert json.loads(target.read_text(encoding="utf-8"))["auto_update_time"] == "04:00"
+
+    def test_save_unicode_and_space_path(self, tmp_path, monkeypatch):
+        """相对路径含 Unicode 与空格 → 落盘成功。"""
+        rel_path = "用户 配置/偏好 设置.json"
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", rel_path)
+        monkeypatch.setenv("ASTOCK_CONFIG_FILE", rel_path)
+        monkeypatch.setattr(cfg_mod.ConfigHandler, "_config_cache", None)
+        assert ConfigHandler.save_config({"auto_update_time": "05:00"}) is True
+        target = tmp_path / "用户 配置" / "偏好 设置.json"
+        assert json.loads(target.read_text(encoding="utf-8"))["auto_update_time"] == "05:00"
+
+    def test_uncreatable_parent_keeps_original_untouched(self, tmp_path, monkeypatch):
+        """父目录不可创建 → 保存返回 False，原件字节不变，无 .tmp 残留（不吞 mkdir 失败）。"""
+
+        def _deny_makedirs(*args, **kwargs):
+            raise PermissionError("parent directory is not writable")
+
+        sub_dir = tmp_path / "sub"
+        sub_dir.mkdir()
+        config_file = sub_dir / "prefs.json"
+        config_file.write_text(json.dumps({"auto_update_time": "01:00"}), encoding="utf-8")
+        before = config_file.read_bytes()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", "sub/prefs.json")
+        monkeypatch.setenv("ASTOCK_CONFIG_FILE", "sub/prefs.json")
+        monkeypatch.setattr(cfg_mod.ConfigHandler, "_config_cache", None)
+        monkeypatch.setattr("utils.config.storage.os.makedirs", _deny_makedirs)
+        assert ConfigHandler.save_config({"auto_update_time": "02:00"}) is False
+        assert config_file.read_bytes() == before
+        assert not (sub_dir / "prefs.json.tmp").exists()
+
+
 class TestF10StartupPreserveCorruption:
     """F10 回归：启动补全损坏不写 + 旧情绪七键保留。
 

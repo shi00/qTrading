@@ -274,10 +274,19 @@ def _migrate_custom_models_credentials(current_config: dict) -> bool:
 
 
 def _save_json_atomically(data, path):
-    """Helper: Atomic write for JSON config."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    """Helper: Atomic write for JSON config.
+
+    D04-001：``path`` 允许是裸文件名（如 ``ASTOCK_CONFIG_FILE=prefs.json``）。
+    此时 ``os.path.dirname`` 返回空字符串，不能据此建目录——否则
+    ``os.makedirs("")`` 抛 ``FileNotFoundError``，所有保存（含 ``ensure_defaults``）
+    失败。仅在存在父目录时创建；临时文件仍与目标同目录，保持 fsync + ``os.replace``
+    的原子性。建目录失败不吞：由下方统一异常分支记 error 并返回 False，磁盘原件不变。
+    """
     tmp_file = path + ".tmp"
     try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
             f.flush()
