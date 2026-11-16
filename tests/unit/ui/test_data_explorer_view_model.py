@@ -1319,7 +1319,7 @@ class TestExportDataBytes:
     async def test_serialization_error_propagates(self, vm, mock_tp):
         """序列化失败必须传播, 由 View 提示导出失败 (不得静默返回空 bytes)."""
         mock_tp.run_async = AsyncMock(side_effect=RuntimeError("boom"))
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="boom"):
             await vm.export_data_bytes(pd.DataFrame({"A": [1]}), "csv")
 
     async def test_cancelled_error_propagates(self, vm, mock_tp):

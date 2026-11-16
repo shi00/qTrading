@@ -1864,6 +1864,7 @@ class TestTableViewerTabEventHandlers:
         mock_metadata,
     ):
         """ADD-UI-001: 序列化失败 → 仅失败 toast, 不误报成功、不调用 save_file."""
+        from ui.i18n import I18n
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
@@ -1877,8 +1878,7 @@ class TestTableViewerTabEventHandlers:
         popup_menus = _find_by_type(result, ft.PopupMenuButton)
         popup_menus[0].items[0].on_click(MagicMock())
 
-        page.toast.show.assert_called_once()
-        assert page.toast.show.call_args[0][1] == "error"
+        page.toast.show.assert_called_once_with(I18n.get("data_export_fail"), "error", action_text=None, on_action=None)
         assert captured == {}  # save_file 未被调用
 
     def test_export_web_all_scope_shows_truncation_warning(
