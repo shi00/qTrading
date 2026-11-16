@@ -1140,6 +1140,8 @@ Data page checksum version:           1\n\
             process: process_identity::ProcessIdentity {
                 pid: dead_pid,
                 created: "dead".to_string(),
+                started_at: 0,
+                working_dir: None,
                 executable: PathBuf::from("/nonexistent/postgres"),
             },
         };
@@ -1157,15 +1159,20 @@ Data page checksum version:           1\n\
     async fn graded_stop_refuses_pid_reuse_before_any_signal() {
         let dir = unique_tmp("graded-stop-reuse");
         std::fs::create_dir_all(&dir).unwrap();
+        // cwd = data_dir，模拟 postmaster chdir 到 PGDATA 的真实行为。
         let mut helper = std::process::Command::new("/bin/sleep")
             .arg("60")
+            .current_dir(&dir)
             .spawn()
             .expect("spawn sleep helper");
         let helper_pid = helper.id();
+        let started_at = process_identity::process_identity(helper_pid)
+            .expect("helper identity")
+            .started_at;
         std::fs::write(
             dir.join("postmaster.pid"),
             format!(
-                "{helper_pid}\n{}\n123\n55432\n/tmp\n127.0.0.1\n",
+                "{helper_pid}\n{}\n{started_at}\n55432\n/tmp\n127.0.0.1\n",
                 dir.display()
             ),
         )
@@ -1187,6 +1194,59 @@ Data page checksum version:           1\n\
             matches!(
                 outcome.failure,
                 Some(StopFailure::Identity(IdentityError::ProcessMismatch { .. }))
+            ),
+            "unexpected failure: {:?}",
+            outcome.failure
+        );
+        assert!(
+            process_alive(helper_pid),
+            "helper process must survive rejected stop"
+        );
+
+        let _ = helper.kill();
+        let _ = helper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `graded_stop`：pid 文件启动时刻与该 PID 的 OS 创建时刻不相容（陈旧 pid 文件
+    /// 指向被复用的 PID）→ 在发送任何信号前拒绝，受控辅助进程必须仍存活（D07-001）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graded_stop_refuses_stale_start_time_before_any_signal() {
+        let dir = unique_tmp("graded-stop-stale-start");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut helper = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .current_dir(&dir)
+            .spawn()
+            .expect("spawn sleep helper");
+        let helper_pid = helper.id();
+        let stale_started_at = 1_234_567_890i64;
+        std::fs::write(
+            dir.join("postmaster.pid"),
+            format!(
+                "{helper_pid}\n{}\n{stale_started_at}\n55432\n/tmp\n127.0.0.1\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+
+        // 直接构造身份：捕获阶段会拒绝，这里专门验证 graded_stop 的复核闸门。
+        let identity = ClusterIdentity {
+            pid: helper_pid,
+            data_dir: std::fs::canonicalize(&dir).unwrap(),
+            postmaster_started_at: stale_started_at,
+            process: process_identity::process_identity(helper_pid).expect("helper identity"),
+        };
+        let outcome = graded_stop(&dir, &dir, Some(&identity)).await;
+        assert_eq!(outcome.mode, None, "must not escalate any signal");
+        assert!(!outcome.stopped);
+        assert!(
+            matches!(
+                outcome.failure,
+                Some(StopFailure::Identity(
+                    IdentityError::StartTimeMismatch { .. }
+                ))
             ),
             "unexpected failure: {:?}",
             outcome.failure

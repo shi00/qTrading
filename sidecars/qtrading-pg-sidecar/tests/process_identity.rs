@@ -3,6 +3,8 @@
 //! 覆盖：
 //! - pid 文件指向受控非 PG 辅助进程 → stop 非零，辅助进程仍存活，pid 文件保留；
 //! - pid 文件指向另一受控集群 → stop 非零，两集群进程均存活；
+//! - D07-001：A 的陈旧 pid 文件指向已被 B 复用的 PID（第 2 行仍是 A 的 PGDATA）→
+//!   stop 非零，B 的 postgres 存活；
 //! - 真本集群（sidecar 崩溃后残留 postgres）→ stop 成功分级停止；
 //! - 真 stale（PID 已死）→ stop 幂等成功并清理 pid 文件；
 //! - 检查与升级信号之间身份变化（pid 文件被重写）→ 拒绝且不发送信号。
@@ -88,6 +90,27 @@ fn spawn_controlled_process() -> Child {
     }
 }
 
+/// 以 `cwd = data_dir` 启动受控进程，模拟 postmaster 启动后 chdir 到 PGDATA 的真实行为。
+#[cfg(unix)]
+fn spawn_controlled_process_in(data_dir: &Path) -> Child {
+    Command::new("/bin/sleep")
+        .arg("60")
+        .current_dir(data_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn controlled helper in data_dir")
+}
+
+/// 当前 epoch 秒：辅助进程刚创建，pid 文件第 3 行写该值即与 OS 创建时刻相容。
+#[cfg(unix)]
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs() as i64
+}
+
 fn kill_helper(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -148,6 +171,53 @@ fn test_stop_refuses_other_instance_pidfile() {
     );
     // B 仍在正常运行（其维护锁由 sidecar B 持有，A 的 stop 无权也不应影响它）。
     assert_eq!(status_json(&data_b)["status"], "running");
+
+    cleanup_sidecar(&mut child_b, &data_b);
+}
+
+/// D07-001：A 的陈旧 pid 文件指向已被 B 复用的 PID。
+///
+/// 与「复制 B 整个 pid 文件」不同，这里第 2 行仍是 A 的 PGDATA、期望可执行文件也能解析到
+/// B 的 postgres。旧实现只比较 pid 文件 PGDATA + 可执行路径就会放行，并把 B 的当前创建
+/// 时刻当作原集群证据，最终向 B 发送停止信号。修复后必须以「pid 文件启动时刻与该 PID
+/// 的 OS 创建时刻不相容」为由拒绝，且 B 的 postgres 不受影响。
+#[cfg(unix)]
+#[test]
+fn test_stop_refuses_stale_pidfile_with_reused_pid() {
+    let (_tmp_a, data_a) = unique_data_dir("pid_reused_a");
+    let (_tmp_b, data_b) = unique_data_dir("pid_reused_b");
+
+    let mut child_b = spawn_run(&data_b);
+    let ready_b = wait_for_ready(&mut child_b, READY_TIMEOUT);
+    let pg_pid_b = ready_pid(&ready_b).expect("pid in ready JSON");
+    assert_eq!(ready_b["status"], "running");
+
+    // 让 A 的期望可执行文件（A_parent/install/bin/postgres）解析到 B 的安装目录，
+    // 从而把判定焦点隔离到「启动时刻关联 / 真实 PGDATA」这一新证据上。
+    std::os::unix::fs::symlink(install_dir_for(&data_b), install_dir_for(&data_a))
+        .expect("symlink install dir for A");
+
+    // A 的旧 pid 文件：PID 已被 B 复用，但记录的是 A 的 PGDATA 与 A 的旧启动时刻。
+    write_pidfile(&data_a, pg_pid_b, 1_234_567_890, 55432);
+
+    let (code, stderr) = run_stop(&data_a);
+    assert_eq!(
+        code, 20,
+        "stop on A must refuse a stale pidfile pointing at a reused PID; stderr:\n{stderr}"
+    );
+    assert!(
+        process_alive(pg_pid_b),
+        "B's postgres must survive rejected stop (pid {pg_pid_b})"
+    );
+    assert_eq!(status_json(&data_b)["status"], "running");
+    assert!(
+        postmaster_pid_path(&data_a).exists(),
+        "A's stale postmaster.pid must be preserved for diagnostics"
+    );
+    assert!(
+        postmaster_pid_path(&data_b).exists(),
+        "B's postmaster.pid must stay intact"
+    );
 
     cleanup_sidecar(&mut child_b, &data_b);
 }
@@ -225,9 +295,10 @@ fn test_stop_refuses_when_pidfile_changes_before_escalation() {
     std::fs::set_permissions(&fake_pg_ctl, std::fs::Permissions::from_mode(0o755))
         .expect("chmod fake pg_ctl");
 
-    let mut helper_a = spawn_controlled_process();
+    let mut helper_a = spawn_controlled_process_in(&data_dir);
     let mut helper_b = spawn_controlled_process();
-    write_pidfile(&data_dir, helper_a.id(), 1_234_567_890, 55432);
+    let started_at = now_epoch_secs();
+    write_pidfile(&data_dir, helper_a.id(), started_at, 55432);
 
     // 在 stop 命令执行 smart 阶段时重写 pid 文件，模拟 PID 复用/身份换代。
     let stop_child = Command::new(sidecar_path())
@@ -240,7 +311,7 @@ fn test_stop_refuses_when_pidfile_changes_before_escalation() {
         .expect("spawn stop");
 
     std::thread::sleep(Duration::from_millis(600));
-    write_pidfile(&data_dir, helper_b.id(), 1_234_567_890, 55432);
+    write_pidfile(&data_dir, helper_b.id(), started_at, 55432);
 
     let output = stop_child.wait_with_output().expect("wait stop");
     let code = output.status.code().unwrap_or(255) as u8;

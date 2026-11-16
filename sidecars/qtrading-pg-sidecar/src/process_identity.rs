@@ -1,11 +1,16 @@
-//! 集群进程身份校验（D16-F02）。
+//! 集群进程身份校验（D16-F02 / D07-001）。
 //!
 //! PID 存在性不等于归属：`postmaster.pid` 可能残留，PID 也可能被系统复用。
 //! 在向任何 PID 发送信号（含 `pg_ctl stop`/`pg_ctl kill`）前，必须先证明该 PID
 //! 仍是本 PGDATA 的 postmaster：
 //!
 //! - 规范化 PGDATA（`postmaster.pid` 第 2 行 vs 调用方 data_dir）
-//! - postmaster 启动时刻（`postmaster.pid` 第 3 行）
+//! - **pid 文件启动时刻与 OS 创建时刻的关联**（`postmaster.pid` 第 3 行 vs
+//!   [`ProcessIdentity::started_at`]，允许 [`MAX_START_SKEW_SECS`] 内的真实启动延迟）：
+//!   仅各自记录而不比较会让「陈旧 pid 文件 + 已被复用的 PID」冒充原集群
+//! - **进程真实 PGDATA**（`ProcessIdentity::working_dir`；postmaster 启动后 chdir
+//!   到 PGDATA。Linux `/proc/<pid>/cwd`、macOS `proc_pidinfo(PROC_PIDVNODEPATHINFO)`；
+//!   平台不提供该证据时为 `None`，由前两项 + 可执行路径承担）
 //! - OS 进程创建时刻（Linux `/proc/<pid>/stat` starttime + boot_id；
 //!   macOS `proc_pidinfo` start_tvsec/usec；Windows `GetProcessTimes` FILETIME）
 //! - 可执行文件路径（Linux `/proc/<pid>/exe`；macOS `proc_pidpath`；
@@ -20,6 +25,14 @@
 use crate::pgbin::PostmasterInfo;
 use std::path::{Component, Path, PathBuf};
 
+/// `postmaster.pid` 第 3 行与 OS 进程创建时刻的允许偏差（秒）。
+///
+/// postmaster 在 exec 之后才创建锁文件并写入第 3 行，因此两者天然相差一段真实
+/// 启动延迟；Linux `btime` 仅有秒级精度，系统时钟也可能被 NTP 小幅校正。
+/// 超出该偏差即视为「pid 文件与当前进程不属于同一次启动」（PID 复用或陈旧
+/// pid 文件，D07-001），不得据此发送信号。
+pub const MAX_START_SKEW_SECS: i64 = 30;
+
 /// OS 层进程身份证据（同一 PID 被复用后 `created` 必然不同）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessIdentity {
@@ -30,6 +43,11 @@ pub struct ProcessIdentity {
     /// - macOS: `<pbi_start_tvsec>.<pbi_start_tvusec>`
     /// - Windows: `<creation FILETIME high>:<low>`
     pub created: String,
+    /// OS 记录的进程创建时刻（epoch 秒），用于与 pid 文件第 3 行建立关联。
+    pub started_at: i64,
+    /// 进程真实工作目录（PostgreSQL postmaster 启动后 chdir 到 PGDATA，
+    /// 故其值应等于 PGDATA）。平台无法读取该证据时为 `None`。
+    pub working_dir: Option<PathBuf>,
     /// 进程可执行文件绝对路径。
     pub executable: PathBuf,
 }
@@ -72,6 +90,14 @@ pub enum IdentityError {
         expected_created: String,
         actual_created: String,
     },
+    /// pid 文件启动时刻与该 PID 的 OS 创建时刻相差过大（陈旧 pid 文件 / PID 复用）。
+    StartTimeMismatch {
+        pid: u32,
+        pidfile_started_at: i64,
+        process_started_at: i64,
+    },
+    /// 进程真实 PGDATA（工作目录）与请求操作的不是同一目录。
+    ProcessDataDirMismatch { expected: PathBuf, actual: PathBuf },
     /// 身份 API 不可用（权限、平台不支持、procfs 缺失等）→ fail closed。
     ProcessUnavailable { pid: u32, reason: String },
     /// 当前平台没有可用的身份证据实现 → fail closed。
@@ -124,6 +150,21 @@ impl std::fmt::Display for IdentityError {
             } => write!(
                 f,
                 "PID {pid} 创建时刻不匹配（期望 {expected_created}，实际 {actual_created}），疑似 PID 复用"
+            ),
+            Self::StartTimeMismatch {
+                pid,
+                pidfile_started_at,
+                process_started_at,
+            } => write!(
+                f,
+                "PID {pid} 的 pid 文件启动时刻 {pidfile_started_at} 与该进程 OS 创建时刻 \
+                 {process_started_at} 相差超过 {MAX_START_SKEW_SECS}s，pid 文件与当前进程不属于同一次启动"
+            ),
+            Self::ProcessDataDirMismatch { expected, actual } => write!(
+                f,
+                "进程真实 PGDATA 不匹配（期望 {}，实际 {}）",
+                expected.display(),
+                actual.display()
             ),
             Self::ProcessUnavailable { pid, reason } => {
                 write!(f, "无法读取 PID {pid} 的进程身份（{reason}）")
@@ -226,18 +267,63 @@ pub fn capture_with_expected_exe(
     }
 
     let process = process_identity(info.pid)?;
+    capture_from_process(
+        &actual_data_dir,
+        expected_exe,
+        postmaster_started_at,
+        process,
+    )
+}
+
+/// 用已读取的 OS 进程证据构造身份（测试可注入合成证据，避免依赖真实 cwd）。
+///
+/// D07-001：`postmaster.pid` 与 OS 进程证据必须**互相关联**，而不是各自记录。
+fn capture_from_process(
+    data_dir: &Path,
+    expected_exe: &Path,
+    postmaster_started_at: i64,
+    process: ProcessIdentity,
+) -> Result<ClusterIdentity, IdentityError> {
     if !executable_matches(expected_exe, &process.executable) {
         return Err(IdentityError::ExecutableMismatch {
             expected: normalize_data_dir(expected_exe),
             actual: process.executable,
         });
     }
+    let data_dir = normalize_data_dir(data_dir);
+    validate_process_evidence(&data_dir, postmaster_started_at, &process)?;
     Ok(ClusterIdentity {
-        pid: info.pid,
-        data_dir: actual_data_dir,
+        pid: process.pid,
+        data_dir,
         postmaster_started_at,
         process,
     })
+}
+
+/// 校验 pid 文件与 OS 进程证据的关联：启动时刻一致（容忍真实启动延迟）且真实 PGDATA 相符。
+fn validate_process_evidence(
+    data_dir: &Path,
+    postmaster_started_at: i64,
+    process: &ProcessIdentity,
+) -> Result<(), IdentityError> {
+    let skew = postmaster_started_at.saturating_sub(process.started_at);
+    if skew.unsigned_abs() > MAX_START_SKEW_SECS.unsigned_abs() {
+        return Err(IdentityError::StartTimeMismatch {
+            pid: process.pid,
+            pidfile_started_at: postmaster_started_at,
+            process_started_at: process.started_at,
+        });
+    }
+    if let Some(working_dir) = &process.working_dir {
+        let actual = normalize_data_dir(working_dir);
+        if actual != data_dir {
+            return Err(IdentityError::ProcessDataDirMismatch {
+                expected: data_dir.to_path_buf(),
+                actual,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// 重新读取 `postmaster.pid` 与 OS 进程身份，证明该 PID 仍是被捕获的 postmaster。
@@ -289,6 +375,8 @@ pub fn verify_cluster_identity(identity: &ClusterIdentity) -> Result<(), Identit
             actual: process.executable,
         });
     }
+    // 复核时同样要求 pid 文件与 OS 证据互相关联，避免捕获后 pid 文件被换成别的世代。
+    validate_process_evidence(&identity.data_dir, identity.postmaster_started_at, &process)?;
     Ok(())
 }
 
@@ -329,6 +417,13 @@ pub fn process_identity(pid: u32) -> Result<ProcessIdentity, IdentityError> {
             pid,
             reason: format!("{stat_path} 缺少 starttime 字段"),
         })?;
+    let starttime_ticks: u64 =
+        starttime
+            .parse()
+            .map_err(|_| IdentityError::ProcessUnavailable {
+                pid,
+                reason: format!("{stat_path} 的 starttime 不可解析: {starttime}"),
+            })?;
     // boot_id 用于区分跨重启后可能重复的 starttime；不可读即无法证明身份 → fail closed。
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map(|s| s.trim().to_string())
@@ -342,6 +437,8 @@ pub fn process_identity(pid: u32) -> Result<ProcessIdentity, IdentityError> {
             reason: "boot_id 为空".to_string(),
         });
     }
+    // 与 pid 文件第 3 行比较需要 epoch 秒：btime（开机墙钟）+ starttime / USER_HZ。
+    let started_at = process_start_epoch(pid, starttime_ticks)?;
     let exe_path = format!("/proc/{pid}/exe");
     let executable = match std::fs::read_link(&exe_path) {
         Ok(p) => p,
@@ -356,10 +453,65 @@ pub fn process_identity(pid: u32) -> Result<ProcessIdentity, IdentityError> {
             })
         }
     };
+    // postmaster 启动后 chdir 到 PGDATA：cwd 即进程真实 PGDATA（D07-001）。
+    let cwd_path = format!("/proc/{pid}/cwd");
+    let working_dir = match std::fs::read_link(&cwd_path) {
+        Ok(p) => Some(p),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(IdentityError::NotRunning(pid))
+        }
+        Err(e) => {
+            return Err(IdentityError::ProcessUnavailable {
+                pid,
+                reason: format!("读取 {cwd_path} 失败: {e}"),
+            })
+        }
+    };
     Ok(ProcessIdentity {
         pid,
         created: format!("{boot_id}:{starttime}"),
+        started_at,
+        working_dir,
         executable,
+    })
+}
+
+/// 由 `/proc/stat` 内容解析 `btime`（开机时刻 epoch 秒）。
+#[cfg(any(target_os = "linux", test))]
+fn parse_btime(proc_stat: &str) -> Option<i64> {
+    proc_stat.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        if parts.next()? != "btime" {
+            return None;
+        }
+        parts.next()?.parse().ok()
+    })
+}
+
+/// 由 btime + starttime 换算进程创建时刻；时钟频率非法时返回 None（fail closed）。
+#[cfg(any(target_os = "linux", test))]
+fn start_epoch(btime: i64, starttime_ticks: u64, clk_tck: i64) -> Option<i64> {
+    let clk_tck = u64::try_from(clk_tck).ok().filter(|t| *t > 0)?;
+    let elapsed = i64::try_from(starttime_ticks / clk_tck).ok()?;
+    btime.checked_add(elapsed)
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_epoch(pid: u32, starttime_ticks: u64) -> Result<i64, IdentityError> {
+    // SAFETY: sysconf 只读取系统常量，无副作用。
+    let clk_tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let proc_stat =
+        std::fs::read_to_string("/proc/stat").map_err(|e| IdentityError::ProcessUnavailable {
+            pid,
+            reason: format!("读取 /proc/stat 失败: {e}"),
+        })?;
+    let btime = parse_btime(&proc_stat).ok_or_else(|| IdentityError::ProcessUnavailable {
+        pid,
+        reason: "/proc/stat 缺少 btime，无法关联 pid 文件启动时刻".to_string(),
+    })?;
+    start_epoch(btime, starttime_ticks, clk_tck).ok_or(IdentityError::ProcessUnavailable {
+        pid,
+        reason: format!("无法由 btime={btime} 与 starttime={starttime_ticks} 换算进程创建时刻"),
     })
 }
 
@@ -420,8 +572,42 @@ pub fn process_identity(pid: u32) -> Result<ProcessIdentity, IdentityError> {
     Ok(ProcessIdentity {
         pid,
         created: format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec),
+        started_at: info.pbi_start_tvsec as i64,
+        working_dir: process_working_dir(pid),
         executable: PathBuf::from(path),
     })
+}
+
+/// 读取进程真实工作目录（postmaster 启动后 chdir 到 PGDATA）。
+///
+/// 失败时返回 `None`：该证据不可得不应把 live 进程误判为已退出；启动时刻关联
+/// 与可执行路径仍构成 fail closed 判据。
+#[cfg(target_os = "macos")]
+fn process_working_dir(pid: u32) -> Option<PathBuf> {
+    use std::ffi::CStr;
+    // SAFETY: proc_pidinfo 只读；缓冲区是本栈上的正确类型与长度。
+    let mut vn: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let rc = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            &mut vn as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if rc <= 0 {
+        return None;
+    }
+    // SAFETY: vip_path 是 NUL 结尾的 C 字符串（MAXPATHLEN 字节），缓冲区由内核填充且在本栈上。
+    let cwd = unsafe { CStr::from_ptr(vn.pvi_cdir.vip_path.as_ptr() as *const libc::c_char) };
+    let cwd = cwd.to_string_lossy();
+    if cwd.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(cwd.as_ref()))
+    }
 }
 
 #[cfg(windows)]
@@ -439,6 +625,13 @@ mod win {
 
     fn filetime_key(t: FILETIME) -> String {
         format!("{:08x}:{:08x}", t.dwHighDateTime, t.dwLowDateTime)
+    }
+
+    /// FILETIME（1601-01-01 起的 100ns 计数）→ epoch 秒，用于与 pid 文件第 3 行关联。
+    fn filetime_epoch_secs(t: FILETIME) -> i64 {
+        const EPOCH_DIFF_SECS: i64 = 11_644_473_600;
+        let ticks = ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+        (ticks / 10_000_000) as i64 - EPOCH_DIFF_SECS
     }
 
     fn open(
@@ -509,6 +702,10 @@ mod win {
         Ok(ProcessIdentity {
             pid,
             created: filetime_key(creation),
+            started_at: filetime_epoch_secs(creation),
+            // Windows 无同权限级别的进程工作目录查询；该证据为 None，
+            // 由启动时刻关联 + 可执行路径 + pid 文件承担归属判定。
+            working_dir: None,
             executable: PathBuf::from(String::from_utf16_lossy(&buf[..size as usize])),
         })
     }
@@ -637,6 +834,43 @@ mod tests {
         std::env::current_exe().unwrap()
     }
 
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// 合成 OS 进程证据：可精确控制创建时刻与真实 PGDATA（cwd）证据。
+    fn synthetic_process(pid: u32, working_dir: Option<&Path>, started_at: i64) -> ProcessIdentity {
+        ProcessIdentity {
+            pid,
+            created: "synthetic-boot:1".to_string(),
+            started_at,
+            working_dir: working_dir.map(Path::to_path_buf),
+            executable: own_exe(),
+        }
+    }
+
+    /// 启动一个 cwd = data_dir 的受控进程，模拟「真实孤儿 postmaster」。
+    #[cfg(unix)]
+    fn spawn_postmaster_like(data_dir: &Path) -> std::process::Child {
+        use std::process::Stdio;
+        std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .current_dir(data_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn postmaster-like helper")
+    }
+
+    #[cfg(unix)]
+    fn kill_child(child: &mut std::process::Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[test]
     fn normalize_removes_curdir_and_parentdir() {
         let dir = unique_tmp("normalize");
@@ -657,10 +891,33 @@ mod tests {
         assert_eq!(id.pid, std::process::id());
         assert!(!id.created.is_empty());
         assert!(
+            id.started_at > 1_600_000_000,
+            "started_at should be a plausible epoch, got {}",
+            id.started_at
+        );
+        assert!(
             id.executable.exists(),
             "exe should exist: {:?}",
             id.executable
         );
+        #[cfg(target_os = "linux")]
+        {
+            let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+            assert_eq!(
+                id.working_dir.as_deref(),
+                Some(cwd.as_path()),
+                "Linux 应能读到进程真实工作目录（cwd = 进程真实 PGDATA）"
+            );
+            // 本测试进程刚启动：btime + starttime/USER_HZ 换算应接近当前时刻（D07-001 关联基础）。
+            let now = now_secs();
+            assert!(
+                (now - id.started_at).unsigned_abs() <= 300,
+                "started_at={} 应接近当前时刻 {now}",
+                id.started_at
+            );
+        }
+        #[cfg(windows)]
+        assert!(id.working_dir.is_none(), "Windows 不提供 cwd 证据");
     }
 
     #[test]
@@ -700,16 +957,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 坏 pid 行：第 3 行不可解析（启动时刻不可读）→ 证据不足，拒绝捕获。
     #[test]
-    fn capture_and_verify_own_process_succeeds() {
-        let dir = unique_tmp("capture-own");
-        write_pidfile(&dir, std::process::id(), 1_784_505_600);
-        let info = own_info(&dir, 1_784_505_600);
-        let identity =
-            capture_with_expected_exe(&dir, &own_exe(), &info).expect("capture own process");
-        assert_eq!(identity.pid, std::process::id());
-        assert_eq!(identity.postmaster_started_at, 1_784_505_600);
-        verify_cluster_identity(&identity).expect("verify own process");
+    fn pidfile_with_unparsable_start_time_is_rejected() {
+        let dir = unique_tmp("bad-start-line");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("postmaster.pid"),
+            format!(
+                "{}\n{}\nnot-an-epoch\n55432\n/tmp\n127.0.0.1\n",
+                std::process::id(),
+                dir.display()
+            ),
+        )
+        .unwrap();
+        let info = crate::pgbin::read_postmaster_pid(&dir).expect("pid line 1 still parses");
+        assert_eq!(info.started_at, None);
+        let err = capture_with_expected_exe(&dir, &own_exe(), &info).unwrap_err();
+        assert!(
+            matches!(err, IdentityError::IncompletePidFile("第 3 行（启动时刻）")),
+            "got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 对齐证据（真实孤儿 postmaster 的等价形态）：pid 文件与 OS 证据一致 → 捕获 + 复核通过。
+    #[cfg(unix)]
+    #[test]
+    fn capture_and_verify_genuine_orphan_succeeds() {
+        let dir = unique_tmp("capture-orphan");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = spawn_postmaster_like(&dir);
+        let pid = child.id();
+        let real = process_identity(pid).expect("helper identity");
+        write_pidfile(&dir, pid, real.started_at);
+        let info = crate::pgbin::read_postmaster_pid(&dir).expect("read pidfile");
+
+        let identity = capture_with_expected_exe(&dir, Path::new("/bin/sleep"), &info)
+            .expect("genuine orphan must be capturable");
+        assert_eq!(identity.pid, pid);
+        assert_eq!(identity.postmaster_started_at, real.started_at);
+        verify_cluster_identity(&identity).expect("genuine orphan must verify");
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "no signal must be sent during capture/verify"
+        );
+
+        kill_child(&mut child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -742,18 +1036,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 复用 PID：pid 文件记录的启动时刻远早于该 PID 当前进程的创建时刻 → 拒绝捕获。
+    #[test]
+    fn capture_rejects_reused_pid_start_time_skew() {
+        let dir = unique_tmp("reused-pid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = now_secs();
+        let process = synthetic_process(4242, Some(&dir), now);
+        let err = capture_from_process(&dir, &own_exe(), now - 3600, process).unwrap_err();
+        match err {
+            IdentityError::StartTimeMismatch {
+                pid,
+                pidfile_started_at,
+                process_started_at,
+            } => {
+                assert_eq!(pid, 4242);
+                assert_eq!(pidfile_started_at, now - 3600);
+                assert_eq!(process_started_at, now);
+            }
+            other => panic!("expected StartTimeMismatch, got {other}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 容忍真实启动延迟：pid 文件在进程创建后数秒写入仍应通过；超出窗口则拒绝。
+    #[test]
+    fn capture_tolerates_real_startup_delay() {
+        let dir = unique_tmp("startup-delay");
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = now_secs();
+        let within = synthetic_process(4243, Some(&dir), now);
+        capture_from_process(&dir, &own_exe(), now + 10, within)
+            .expect("10s startup delay must be tolerated");
+
+        let beyond = synthetic_process(4244, Some(&dir), now);
+        let err = capture_from_process(&dir, &own_exe(), now + MAX_START_SKEW_SECS + 1, beyond)
+            .unwrap_err();
+        assert!(
+            matches!(err, IdentityError::StartTimeMismatch { .. }),
+            "got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 进程真实 PGDATA（cwd）不是期望目录 → 拒绝（陈旧 pid 文件指向其它集群的同名进程）。
+    #[test]
+    fn capture_rejects_foreign_real_pgdata() {
+        let dir = unique_tmp("foreign-pgdata");
+        let other = unique_tmp("foreign-pgdata-other");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let now = now_secs();
+        let process = synthetic_process(4245, Some(&other), now);
+        let err = capture_from_process(&dir, &own_exe(), now, process).unwrap_err();
+        assert!(
+            matches!(err, IdentityError::ProcessDataDirMismatch { .. }),
+            "got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// 平台不提供 cwd 证据时（Windows 语义）仍以启动时刻关联 + 可执行路径为准。
+    #[test]
+    fn capture_without_working_dir_evidence_uses_start_time() {
+        let dir = unique_tmp("no-cwd-evidence");
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = now_secs();
+        let aligned = synthetic_process(4246, None, now);
+        capture_from_process(&dir, &own_exe(), now + 3, aligned)
+            .expect("aligned evidence must pass without cwd");
+
+        let skewed = synthetic_process(4247, None, now);
+        let err = capture_from_process(&dir, &own_exe(), now - 3600, skewed).unwrap_err();
+        assert!(
+            matches!(err, IdentityError::StartTimeMismatch { .. }),
+            "got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn verify_rejects_pidfile_rewrite() {
         let dir = unique_tmp("pidfile-change");
-        write_pidfile(&dir, std::process::id(), 123);
-        let info = own_info(&dir, 123);
-        let identity =
-            capture_with_expected_exe(&dir, &own_exe(), &info).expect("capture own process");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = spawn_postmaster_like(&dir);
+        let pid = child.id();
+        let real = process_identity(pid).expect("helper identity");
+        write_pidfile(&dir, pid, real.started_at);
+        let info = crate::pgbin::read_postmaster_pid(&dir).expect("read pidfile");
+        let identity = capture_with_expected_exe(&dir, Path::new("/bin/sleep"), &info)
+            .expect("capture genuine orphan");
 
         // 模拟检查后 pid 文件被重写（指向另一 PID）→ 升级信号前必须拒绝。
         std::fs::write(
             dir.join("postmaster.pid"),
-            format!("999999\n{}\n123\n55432\n/tmp\n127.0.0.1\n", dir.display()),
+            format!(
+                "999999\n{}\n{}\n55432\n/tmp\n127.0.0.1\n",
+                dir.display(),
+                real.started_at
+            ),
         )
         .unwrap();
         let err = verify_cluster_identity(&identity).unwrap_err();
@@ -761,16 +1144,23 @@ mod tests {
             matches!(err, IdentityError::PidFileChanged { .. }),
             "got {err}"
         );
+
+        kill_child(&mut child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn verify_rejects_creation_change() {
         let dir = unique_tmp("created-change");
-        write_pidfile(&dir, std::process::id(), 123);
-        let info = own_info(&dir, 123);
-        let mut identity =
-            capture_with_expected_exe(&dir, &own_exe(), &info).expect("capture own process");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = spawn_postmaster_like(&dir);
+        let pid = child.id();
+        let real = process_identity(pid).expect("helper identity");
+        write_pidfile(&dir, pid, real.started_at);
+        let info = crate::pgbin::read_postmaster_pid(&dir).expect("read pidfile");
+        let mut identity = capture_with_expected_exe(&dir, Path::new("/bin/sleep"), &info)
+            .expect("capture genuine orphan");
         // 模拟 PID 复用：同一 PID 但 OS 创建时刻不同。
         identity.process.created = "foreign-boot:foreign-starttime".to_string();
         let err = verify_cluster_identity(&identity).unwrap_err();
@@ -778,6 +1168,8 @@ mod tests {
             matches!(err, IdentityError::ProcessMismatch { .. }),
             "got {err}"
         );
+
+        kill_child(&mut child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -803,5 +1195,23 @@ mod tests {
         let err = capture_cluster_identity(&dir, &dir).unwrap_err();
         assert_eq!(err, IdentityError::NoPidFile);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/proc/stat` 解析：取 btime；缺失/非法返回 None（不可读启动时刻 → fail closed）。
+    #[test]
+    fn parse_btime_extracts_or_rejects() {
+        let stat = "cpu  1 2 3\nbtime 1784505600\nprocesses 42\n";
+        assert_eq!(parse_btime(stat), Some(1_784_505_600));
+        assert_eq!(parse_btime("btime   1784505600  \n"), Some(1_784_505_600));
+        assert_eq!(parse_btime("cpu 1 2 3\nprocesses 42\n"), None);
+        assert_eq!(parse_btime("btime not-a-number\n"), None);
+    }
+
+    /// btime + starttime 换算：USER_HZ 为 100 时按秒取整；非法时钟频率 → None。
+    #[test]
+    fn start_epoch_converts_ticks_and_rejects_invalid_hz() {
+        assert_eq!(start_epoch(1_700_000_000, 12_345, 100), Some(1_700_000_123));
+        assert_eq!(start_epoch(1_700_000_000, 12_345, 0), None);
+        assert_eq!(start_epoch(1_700_000_000, 12_345, -1), None);
     }
 }
