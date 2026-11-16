@@ -2003,6 +2003,19 @@ class TestLoadHistoryForDate:
             f"加载失败/取消前不得预提交身份标签 (ADD-UI-002), 实际: {fake_vm.method_calls}"
         )
 
+    def test_date_like_trade_date_normalized_before_vm_call(self) -> None:
+        """ADD-UI-002: date 入参归一化为 YYYY-MM-DD, 字符串入参原样透传."""
+        from ui.views import screener_view as mod
+
+        fake_vm: Any = _FakeScreenerViewModel()
+        asyncio.run(mod._execute_load_history_for_date(fake_vm, None, datetime.date(2024, 6, 15), "value", "run01"))
+        asyncio.run(mod._execute_load_history_for_date(fake_vm, None, "20240615", None, None))
+
+        assert fake_vm.method_calls == [
+            "load_history_data:2024-06-15:value:run01",
+            "load_history_data:20240615:None:None",
+        ]
+
     def test_all_strategies_label_when_no_run_id(self, screener_view_env) -> None:
         """_load_history_for_date: run_id=None, strategy_name=None → VM 用 screener_all_strategies key."""
         env = screener_view_env
