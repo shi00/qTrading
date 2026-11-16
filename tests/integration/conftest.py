@@ -548,6 +548,9 @@ _ISOLATED_DB_FIXTURES = frozenset(
         "db_via_init_db",
         "db_via_alembic",
         "real_embedded_pg",
+        # 自带隔离库（CREATE/DROP 两个独立 DB），不依赖 test_engine/TEST_DB schema；
+        # 以此声明替代 no_db marker，避免绕过 schema 就绪契约（D21-OTHER-010）。
+        "pg_targets",
     }
 )
 

@@ -8,8 +8,10 @@
 3. 契约：``task_history`` 无目标指纹列，历史任务本身不携带目标信息
    （生产 schema 未新增列；本测试只读断言，不改 schema）。
 
-本沙箱无 PostgreSQL：fixture 连接失败时 ``pytest.skip``，不静默吞 CI 失败
-（CI 提供 PG 时本文件必须真实执行）。
+连接语义（D21-OTHER-010）：本机**明确没有 PostgreSQL**（连接拒绝/超时）时 skip，
+仅收集不失败；鉴权/配置/协议错误（坏密码、坏库名、坏端口）始终 raise；CI
+（``GITHUB_ACTIONS=true``）或显式 ``TEST_DB_REQUIRED=1`` 的 required-real 运行下，
+连接不可达也必须失败，避免真实 PG 证据被静默跳过。判定见 ``_real_pg_gate``。
 """
 
 import asyncio
@@ -25,8 +27,15 @@ from data.cache.cache_manager import CacheManager
 from data.persistence.db_url_override import override_db_url
 from services.task_manager import TaskManager, TaskStatus
 from tests._helpers import build_db_urls, create_test_engine, get_pg_connection_params
+from tests.integration._real_pg_gate import (
+    describe_connect_failure,
+    is_required_real_pg,
+    should_skip_connect_failure,
+)
 
-pytestmark = [pytest.mark.integration, pytest.mark.no_db]
+# 本文件自带隔离库（pg_targets），由 tests/integration/conftest.py 的
+# ``_ISOLATED_DB_FIXTURES`` 声明，而不是用 no_db 绕过 schema 就绪契约。
+pytestmark = [pytest.mark.integration]
 
 # 常量 DDL 模板 + PostgreSQL format(%I) 引用库名，避免源码级 SQL 拼接（R4）。
 _DDL_CREATE_DB = "CREATE DATABASE %I"
@@ -71,10 +80,16 @@ class _PgTargets:
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def pg_targets():
-    """创建两个真实隔离库（A=旧目标，B=新目标）；无 PG 时 skip。"""
+    """创建两个真实隔离库（A=旧目标，B=新目标）。
+
+    - 本地明确无 PG（连接拒绝/超时）：skip；
+    - 鉴权/配置/协议错误：始终 raise；
+    - required-real（CI 或 ``TEST_DB_REQUIRED=1``）：不可达也 raise（D21-OTHER-010）。
+    """
     params = get_pg_connection_params()
     suffix = uuid.uuid4().hex[:8]
     names = (f"d11r02_a_{suffix}", f"d11r02_b_{suffix}")
+    required = is_required_real_pg()
 
     try:
         conn = await asyncpg.connect(
@@ -85,8 +100,13 @@ async def pg_targets():
             database="postgres",
             timeout=5,
         )
-    except Exception:
-        pytest.skip("需要真实 PostgreSQL（CI 提供）；本沙箱未提供")
+    except Exception as exc:
+        if should_skip_connect_failure(exc, required=required):
+            pytest.skip(
+                "需要真实 PostgreSQL（当前无可用本地服务："
+                f"{describe_connect_failure(exc)}）；required-real 运行请设置 TEST_DB_REQUIRED=1"
+            )
+        raise
 
     created: list[str] = []
     try:
