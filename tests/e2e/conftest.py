@@ -1709,7 +1709,7 @@ def external_wizard_app(tmp_path_factory):
     外置 DB 连接串沿用测试进程的 ``DATABASE_URL`` / ``E2E_DATABASE_URL``
     （CI 由 job 提供真实 PG）。
     """
-    proc, url, cfg_file = _spawn(
+    proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh_CN",
@@ -1722,8 +1722,9 @@ def external_wizard_app(tmp_path_factory):
             "AUTO_MIGRATE": "true",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        instance_label="external-wizard",
     )
-    app = AppServer(proc, url, cfg_file)
+    app = AppServer(proc, url, cfg_file, logs)
     yield app
     _terminate(proc)
 
@@ -2076,16 +2077,23 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
 
     与 wizard_app 区别：注入 QTRADING_DATABASE_MODE=embedded + fake_sidecar 路径，
     使 app 内部 EmbeddedPostgresService 启动时 Popen fake_sidecar 而非真实 sidecar。
+
+    三个 embedded PG 根目录必须显式指向 tmp（D21-OTHER-001）：未配置时服务与
+    maintenance 服务回退 platformdirs 用户目录，会读写真实用户数据并可能覆写
+    ``runtime/password`` 凭据。每个 worker session 独立一份，天然隔离。
     """
+    from tests.e2e._embedded_roots import create_isolated_embedded_roots
     from tests.e2e.fixtures.fake_sidecar import create_fake_sidecar
 
     fake_sidecar_path = create_fake_sidecar(tmp_path_factory.mktemp("fake_sidecar"))
+    embedded_roots = create_isolated_embedded_roots(tmp_path_factory.mktemp("embedded_pg_roots"))
     proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh_CN",
             "embedded_pg_enabled": True,
             "embedded_pg_sidecar_path": str(fake_sidecar_path),
+            **embedded_roots,
         },
         env_overrides={
             "TS_TOKEN": "e2e-dummy-token",
