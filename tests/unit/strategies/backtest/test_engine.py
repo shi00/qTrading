@@ -11,8 +11,9 @@ import pytest
 
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
-from strategies.backtest.config import BacktestConfig, DataWarning, WarningCategory
+from strategies.backtest.config import BacktestConfig, BacktestStatus, DataWarning, WarningCategory
 from strategies.backtest.engine import VectorBacktestEngine, _compute_real_score_ratio
+from strategies.backtest.metrics import BacktestMetrics
 
 
 class TestComputeRealScoreRatio:
@@ -156,6 +157,217 @@ class TestIsRebalanceDay:
         signals_by_date: dict[tuple[date, ...], pl.DataFrame] = {}
 
         assert engine._is_rebalance_day(date(2024, 1, 2), trade_dates, signals_by_date, "unknown") is True
+
+
+class TestRebalancePlanConsistency:
+    """D12-006: 调仓日由同一调仓计划推导（日/周/月/signal），IC 退出日不再取「次交易日」。"""
+
+    def _make_engine(self, **kwargs):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 2, 28),
+            **kwargs,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+        return engine
+
+    def test_daily_plan_covers_every_trade_date(self):
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+
+        plan = engine._build_rebalance_plan(trade_dates, {}, "daily")
+
+        assert plan == trade_dates
+        assert engine._next_rebalance_date_in_plan(plan, trade_dates[1]) == trade_dates[2]
+        assert engine._next_rebalance_date_in_plan(plan, trade_dates[-1]) is None
+
+    def test_weekly_plan_skips_holiday_gap(self):
+        """节假日不产生合成交易日：下一调仓日取日历中实际存在的交易日。"""
+        engine = self._make_engine(rebalance_freq="weekly")
+        trade_dates = [
+            date(2024, 1, 8),
+            date(2024, 1, 9),
+            date(2024, 1, 10),
+            date(2024, 1, 11),
+            date(2024, 1, 15),
+            date(2024, 1, 16),
+        ]
+
+        plan = engine._build_rebalance_plan(trade_dates, {}, "weekly")
+
+        assert plan == [date(2024, 1, 8), date(2024, 1, 15)]
+        assert engine._next_rebalance_date_in_plan(plan, date(2024, 1, 9)) == date(2024, 1, 15)
+
+    def test_monthly_plan_across_year_boundary(self):
+        """跨年月份边界取新月份首个交易日（1/1 休市 → 1/2）。"""
+        engine = self._make_engine(rebalance_freq="monthly")
+        trade_dates = [date(2023, 12, 28), date(2023, 12, 29), date(2024, 1, 2), date(2024, 1, 3)]
+
+        plan = engine._build_rebalance_plan(trade_dates, {}, "monthly")
+
+        assert plan == [date(2023, 12, 28), date(2024, 1, 2)]
+        assert engine._next_rebalance_date_in_plan(plan, date(2023, 12, 29)) == date(2024, 1, 2)
+
+    def test_weekly_last_incomplete_period_has_no_next_rebalance(self):
+        """区间末尾不足一个完整周期 → 无下一调仓日（截尾，不合成区间外日期）。"""
+        engine = self._make_engine(rebalance_freq="weekly")
+        trade_dates = [date(2024, 1, 8), date(2024, 1, 9), date(2024, 1, 10)]
+
+        plan = engine._build_rebalance_plan(trade_dates, {}, "weekly")
+
+        assert plan == [date(2024, 1, 8)]
+        assert engine._next_rebalance_date_in_plan(plan, date(2024, 1, 9)) is None
+
+    def test_signal_plan_uses_only_execution_days_with_signals(self):
+        engine = self._make_engine(rebalance_freq="signal")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2), date(2024, 1, 4)],
+                "execution_date": [date(2024, 1, 3), date(2024, 1, 5)],
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "signal_rank": [1, 1],
+            }
+        )
+        signals_by_date = dict(signals.partition_by("execution_date", as_dict=True))
+
+        plan = engine._build_rebalance_plan(trade_dates, signals_by_date, "signal")
+
+        assert plan == [date(2024, 1, 3), date(2024, 1, 5)]
+        assert engine._next_rebalance_date_in_plan(plan, date(2024, 1, 3)) == date(2024, 1, 5)
+        # 无信号 → 该频率没有调仓日，不得退化为次交易日
+        assert engine._build_rebalance_plan(trade_dates, {}, "signal") == []
+
+    def test_plan_preserves_calendar_dates_without_timezone_shift(self):
+        """计划日期沿用交易日历的 date 原值，不做时区换算/偏移。"""
+        engine = self._make_engine(rebalance_freq="weekly")
+        trade_dates = [date(2024, 1, 8), date(2024, 1, 9), date(2024, 1, 15)]
+
+        plan = engine._build_rebalance_plan(trade_dates, {}, "weekly")
+
+        assert all(type(d) is date for d in plan)
+        assert [d.isoformat() for d in plan] == ["2024-01-08", "2024-01-15"]
+
+    def test_signal_freq_ic_exit_is_next_signal_execution_day(self, monkeypatch):
+        """D12-006 回归：signal 频率 IC 用下一实际调仓执行价，而非次交易日。
+
+        构造：A 信号 → B 买入，E 信号 → F 调仓。次交易日 C 与真实持有期 F 的收益
+        方向相反：旧口径（B→C）forward_return=[20,0,-20]，修复后（B→F）=[-20,0,20]。
+        """
+        engine = self._make_engine(rebalance_freq="signal", min_ic_sample_size=3)
+        signal_a, buy, skip = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
+        signal_e, next_rb = date(2024, 1, 8), date(2024, 1, 9)
+        trade_dates = [signal_a, buy, skip, date(2024, 1, 5), signal_e, next_rb, date(2024, 1, 10)]
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [signal_a] * 3 + [signal_e] * 3,
+                "execution_date": [buy] * 3 + [next_rb] * 3,
+                "ts_code": codes * 2,
+                "signal_rank": [1, 2, 3] * 2,
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": codes * 3,
+                "trade_date": [buy] * 3 + [skip] * 3 + [next_rb] * 3,
+                "qfq_open": [10.0] * 3 + [12.0, 10.0, 8.0] + [8.0, 10.0, 12.0],
+                "qfq_close": [10.0] * 3 + [12.0, 10.0, 8.0] + [8.0, 10.0, 12.0],
+            }
+        )
+        captured = self._capture_forward_returns(monkeypatch)
+
+        ic_series, ic_dates, _ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
+
+        # E→F 之后无后续调仓 → 截尾跳过；仅 A 一期 IC，且退出价为 F（非 C）
+        assert ic_series.len() == 1
+        assert ic_dates == [signal_a]
+        returns = captured[0].sort("signal_rank")["forward_return"].to_list()
+        assert returns == pytest.approx([-20.0, 0.0, 20.0])
+
+    def test_signal_freq_ic_without_later_rebalance_is_truncated(self):
+        """signal 频率最后一期调仓无后续执行日 → IC 截尾跳过（不取次交易日兜底）。"""
+        engine = self._make_engine(rebalance_freq="signal", min_ic_sample_size=3)
+        signal_a, buy = date(2024, 1, 2), date(2024, 1, 3)
+        trade_dates = [signal_a, buy]
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [signal_a] * 3,
+                "execution_date": [buy] * 3,
+                "ts_code": codes,
+                "signal_rank": [1, 2, 3],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": codes,
+                "trade_date": [buy] * 3,
+                "qfq_open": [10.0, 10.0, 10.0],
+                "qfq_close": [10.0, 10.0, 10.0],
+            }
+        )
+
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
+
+        assert ic_series.len() == 0
+        assert ic_dates == []
+        assert ic_sample_sizes == []
+
+    def test_signal_freq_ic_skips_suspended_stock_on_exit_day(self, monkeypatch):
+        """出场日停牌（无行情）的标的从该期 IC 中剔除，其余标的按下一调仓日计算。"""
+        engine = self._make_engine(rebalance_freq="signal", min_ic_sample_size=3)
+        signal_a, buy = date(2024, 1, 2), date(2024, 1, 3)
+        signal_e, next_rb = date(2024, 1, 8), date(2024, 1, 9)
+        trade_dates = [signal_a, buy, date(2024, 1, 5), signal_e, next_rb]
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [signal_a] * 4 + [signal_e] * 3,
+                "execution_date": [buy] * 4 + [next_rb] * 3,
+                "ts_code": codes + codes[:3],
+                "signal_rank": [1, 2, 3, 4] + [1, 2, 3],
+            }
+        )
+        # 000004.SZ 在出场日停牌（next_rb 无行情）→ 该期 IC 样本降为 3 只
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": codes + codes[:3],
+                "trade_date": [buy] * 4 + [next_rb] * 3,
+                "qfq_open": [10.0] * 4 + [8.0, 9.5, 11.0],
+                "qfq_close": [10.0] * 4 + [8.0, 9.5, 11.0],
+            }
+        )
+        captured = self._capture_forward_returns(monkeypatch)
+
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
+
+        assert ic_series.len() == 1
+        assert ic_dates == [signal_a]
+        assert ic_sample_sizes == [3]
+        returns = captured[0].sort("signal_rank")["forward_return"].to_list()
+        assert returns == pytest.approx([-20.0, -5.0, 10.0])
+
+    @staticmethod
+    def _capture_forward_returns(monkeypatch) -> list[pl.DataFrame]:
+        """替换 calc_ic 以捕获每期 (signal_rank, forward_return)，避免依赖 Spearman 实现。"""
+        captured: list[pl.DataFrame] = []
+
+        def _fake_calc_ic(signal_rank, forward_return):
+            captured.append(
+                pl.DataFrame(
+                    {
+                        "signal_rank": signal_rank,
+                        "forward_return": forward_return,
+                    }
+                )
+            )
+            return 1.0
+
+        monkeypatch.setattr(BacktestMetrics, "calc_ic", staticmethod(_fake_calc_ic))
+        return captured
 
 
 class TestCalcICSeries:
@@ -328,7 +540,7 @@ class TestCalcICSeries:
             }
         )
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
-        engine = self._make_engine(execution_price="next_open", min_ic_sample_size=3)
+        engine = self._make_engine(rebalance_freq="daily", execution_price="next_open", min_ic_sample_size=3)
         ic_series, _, _ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 1
         assert ic_series[0] == pytest.approx(1.0, abs=1e-6)
@@ -357,7 +569,7 @@ class TestCalcICSeries:
             }
         )
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
-        engine = self._make_engine(execution_price="next_close", min_ic_sample_size=3)
+        engine = self._make_engine(rebalance_freq="daily", execution_price="next_close", min_ic_sample_size=3)
         ic_series, _, _ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 1
         assert ic_series[0] == pytest.approx(1.0, abs=1e-6)
@@ -1733,6 +1945,74 @@ class TestRunMergesRangePreloadWarnings:
         result = await engine.run(strategy=strategy)
 
         assert not any(str(w).startswith("[preload_range_too_wide]") for w in result.data_warnings)
+        assert result.status == BacktestStatus.COMPLETED
+
+
+class TestRunCancellationTerminalState:
+    """D12-005: 取消是显式终态，不得被当作正常完成结果返回。"""
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_run_returns_cancelled_without_data_access(self):
+        """无进展取消：取数/预载前直接短路，返回 CANCELLED 且完成态字段为空。"""
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.data_provider = MagicMock()
+        engine._get_trade_dates = AsyncMock(return_value=[date(2024, 1, 2)])
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        result = await engine.run(strategy=strategy, cancel_check=lambda: True)
+
+        assert result.status == BacktestStatus.CANCELLED
+        assert result.run_id
+        assert result.metrics == {}
+        assert result.nav_curve.is_empty()
+        assert result.trades.is_empty()
+        engine._get_trade_dates.assert_not_called()
+        engine.data_provider.validate_history_capabilities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_signal_generation_returns_cancelled_and_skips_simulation(self, monkeypatch):
+        """中途取消：信号生成 break 后再次确认取消，不进入行情加载/撮合。"""
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.preload_range = AsyncMock(return_value=None)
+        dp.build_context = AsyncMock(return_value={})
+        engine.data_provider = dp
+
+        state = {"cancel": False}
+
+        async def _generate_signal(*args, **kwargs):
+            state["cancel"] = True
+            return pl.DataFrame()
+
+        strategy_adapter = MagicMock()
+        strategy_adapter.generate_signal = AsyncMock(side_effect=_generate_signal)
+        engine.strategy_adapter = strategy_adapter
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_check_trade_dates_coverage", MagicMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        load_quotes = AsyncMock(return_value=(pl.DataFrame(), []))
+        monkeypatch.setattr(engine, "_load_quotes", load_quotes)
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        result = await engine.run(strategy=strategy, cancel_check=lambda: state["cancel"])
+
+        assert result.status == BacktestStatus.CANCELLED
+        assert result.metrics == {}
+        assert result.nav_curve.is_empty()
+        load_quotes.assert_not_called()
 
 
 class TestRunDelistingAsOfApproximationWarning:

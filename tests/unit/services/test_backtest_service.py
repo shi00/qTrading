@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from strategies.backtest.config import BacktestConfig, BacktestResult
+from strategies.backtest.config import BacktestConfig, BacktestResult, BacktestStatus
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService, diff_data_fingerprints
 from strategies.base_strategy import BaseStrategy
@@ -558,6 +558,111 @@ def _make_persist_result(
         executed_at=datetime(2024, 1, 4, 12, 0, 0),
         duration_ms=100,
     )
+
+
+class TestCancelledRunNotPersisted:
+    """D12-005: 取消运行是显式终态，不得落成功集/覆盖先验基线。"""
+
+    @pytest.fixture
+    def mock_cache(self) -> MagicMock:
+        return MagicMock()
+
+    @staticmethod
+    def _config() -> BacktestConfig:
+        return BacktestConfig(start_date=date(2024, 1, 2), end_date=date(2024, 1, 4))
+
+    @staticmethod
+    def _service(mock_cache: MagicMock, engine: MagicMock) -> BacktestService:
+        return BacktestService(
+            cache=mock_cache,
+            engine_factory=lambda *args: engine,
+            strategy_lookup=lambda key: MockStrategy,
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancelled_engine_result_skips_persist_even_when_persist_true(self, mock_cache: MagicMock) -> None:
+        engine = MagicMock()
+        engine.run = AsyncMock(return_value=_make_persist_result().as_cancelled())
+        service = self._service(mock_cache, engine)
+
+        result = await service.run_backtest("mock_strategy", self._config(), persist=True)
+
+        assert result.status == BacktestStatus.CANCELLED
+        mock_cache.backtest_dao.save_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_observed_after_engine_returns_marks_cancelled_without_save(
+        self, mock_cache: MagicMock
+    ) -> None:
+        engine = MagicMock()
+        engine.run = AsyncMock(return_value=_make_persist_result(run_id="run_completed"))
+        service = self._service(mock_cache, engine)
+
+        result = await service.run_backtest(
+            "mock_strategy",
+            self._config(),
+            persist=True,
+            cancel_check=lambda: True,
+        )
+
+        assert result.status == BacktestStatus.CANCELLED
+        assert result.run_id == "run_completed"
+        mock_cache.backtest_dao.save_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_at_save_boundary_rechecks_and_skips_save(self, mock_cache: MagicMock) -> None:
+        """引擎返回时未取消、指纹查询后取消：写入前最后一次检查必须生效。"""
+        engine = MagicMock()
+        engine.run = AsyncMock(return_value=_make_persist_result(run_id="run_race"))
+        service = self._service(mock_cache, engine)
+        checks = iter([False, True])
+
+        result = await service.run_backtest(
+            "mock_strategy",
+            self._config(),
+            persist=True,
+            cancel_check=lambda: next(checks),
+        )
+
+        assert result.status == BacktestStatus.CANCELLED
+        mock_cache.backtest_dao.save_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_persist_false_keeps_completed_without_save(self, mock_cache: MagicMock) -> None:
+        engine = MagicMock()
+        engine.run = AsyncMock(return_value=_make_persist_result())
+        service = self._service(mock_cache, engine)
+
+        result = await service.run_backtest("mock_strategy", self._config(), persist=False)
+
+        assert result.status == BacktestStatus.COMPLETED
+        mock_cache.backtest_dao.save_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_persist_result_directly_refuses_cancelled_result(self, mock_cache: MagicMock) -> None:
+        service = BacktestService(cache=mock_cache)
+        cancelled = _make_persist_result(run_id="run_cancelled").as_cancelled()
+
+        returned = await service._persist_result(cancelled)
+
+        assert returned.status == BacktestStatus.CANCELLED
+        mock_cache.backtest_dao.save_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_run_then_rerun_persists_only_successful_run(self, mock_cache: MagicMock) -> None:
+        """取消后重跑：取消运行不落库，重跑成功结果正常持久化（无伪造先验）。"""
+        completed = _make_persist_result(run_id="run_success")
+        engine = MagicMock()
+        engine.run = AsyncMock(side_effect=[_make_persist_result(run_id="run_cancelled").as_cancelled(), completed])
+        service = self._service(mock_cache, engine)
+
+        first = await service.run_backtest("mock_strategy", self._config(), persist=True)
+        second = await service.run_backtest("mock_strategy", self._config(), persist=True)
+
+        assert first.status == BacktestStatus.CANCELLED
+        assert second.status == BacktestStatus.COMPLETED
+        mock_cache.backtest_dao.save_result.assert_called_once()
+        assert mock_cache.backtest_dao.save_result.call_args[0][0]["run_id"] == "run_success"
 
 
 class TestDataFingerprintPersistence:

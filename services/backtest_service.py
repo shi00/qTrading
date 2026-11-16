@@ -40,6 +40,16 @@ _FINGERPRINT_FIELDS: tuple[str, ...] = (
     "financial_reports_max_ann_date",
 )
 
+# D12-005: 回测运行终态「已取消」。此处以字符串常量而非运行时导入
+# strategies.backtest.config.BacktestStatus —— services 不得运行时依赖 strategies
+# （CLAUDE.md §3.1 R1），取值须与 BacktestStatus.CANCELLED 保持一致。
+_CANCELLED_STATUS = "CANCELLED"
+
+
+def _is_cancelled_result(result: Any) -> bool:
+    """判定回测结果是否为显式取消终态（D12-005，duck typing 避免跨层导入）。"""
+    return getattr(result, "status", None) == _CANCELLED_STATUS
+
 
 def diff_data_fingerprints(prev: dict | None, curr: dict | None) -> list[str]:
     """比对两次运行的数据指纹，返回发生变化的字段名列表（BT-03 MINOR-03）。
@@ -87,6 +97,13 @@ class BacktestService:
         persist: bool = True,
         cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:
+        """按策略 key 运行回测。
+
+        ``persist`` 仅决定**完成**结果是否落库；取消（CANCELLED）运行一律不落库
+        （D12-005）：取消不是可比较的成功样本，写入会覆盖历史基线/先验并伪造
+        「已完成」记录。``cancel_check`` 在引擎返回后、持久化前再次生效（R2：
+        真实 CancelledError 原样传播，不在此吞没）。
+        """
         strategy = self._get_strategy(strategy_key)
         if strategy is None:
             raise ValueError(f"Strategy not found: {strategy_key}")
@@ -100,10 +117,7 @@ class BacktestService:
             cancel_check=cancel_check,
         )
 
-        if persist:
-            result = await self._persist_result(result)
-
-        return result
+        return await self._finalize_result(result, persist=persist, cancel_check=cancel_check)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run_backtest_with_strategy(
@@ -115,6 +129,7 @@ class BacktestService:
         persist: bool = True,
         cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:
+        """使用已实例化策略运行回测；``persist``/``cancel_check`` 语义同 ``run_backtest``。"""
         engine = self._create_engine(config)
 
         result = await engine.run(
@@ -124,19 +139,72 @@ class BacktestService:
             cancel_check=cancel_check,
         )
 
-        if persist:
-            result = await self._persist_result(result)
+        return await self._finalize_result(result, persist=persist, cancel_check=cancel_check)
 
-        return result
+    async def _finalize_result(
+        self,
+        result: BacktestResult,
+        *,
+        persist: bool,
+        cancel_check: Callable[[], bool] | None,
+    ) -> BacktestResult:
+        """终态收敛：取消结果不落库，完成结果按 ``persist`` 决定是否保存（D12-005）。
+
+        引擎可能因取消返回 CANCELLED；也可能在引擎返回后、保存前才观察到取消
+        （用户点击取消与完整计算存在竞态），故保存边界必须再次检查 ``cancel_check``。
+        """
+        if _is_cancelled_result(result):
+            logger.info(
+                "[BacktestService] Backtest cancelled, skip persist: run_id=%s, strategy=%s",
+                result.run_id,
+                result.strategy_name,
+            )
+            return result
+
+        if cancel_check is not None and cancel_check():
+            logger.info(
+                "[BacktestService] Backtest cancelled before persist, skip save: run_id=%s, strategy=%s",
+                result.run_id,
+                result.strategy_name,
+            )
+            return result.as_cancelled()
+
+        if not persist:
+            return result
+
+        return await self._persist_result(result, cancel_check=cancel_check)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def _persist_result(self, result: BacktestResult) -> BacktestResult:
+    async def _persist_result(
+        self,
+        result: BacktestResult,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> BacktestResult:
+        # D12-005: 取消结果不得进入成功样本集（backtest_results），否则会成为
+        # 下次运行的「先验」基线并被展示为已完成。此守卫对直接调用方同样生效。
+        if _is_cancelled_result(result):
+            logger.warning(
+                "[BacktestService] Refuse to persist cancelled backtest: run_id=%s, strategy=%s",
+                result.run_id,
+                result.strategy_name,
+            )
+            return result
         try:
             result_dict = result.to_persist_dict()
             result_dict["app_version"] = self._get_app_version()
 
             # BT-03 MINOR-03: 注入数据版本指纹与重跑比对结论（best-effort，不阻断持久化）。
             await self._augment_data_fingerprint(result_dict, result)
+
+            # D12-005: 写入前最后一次取消检查（指纹查询等 await 点之后），
+            # 避免已取消的运行仍覆盖历史基线/先验样本。
+            if cancel_check is not None and cancel_check():
+                logger.info(
+                    "[BacktestService] Backtest cancelled at save boundary, skip save: run_id=%s, strategy=%s",
+                    result.run_id,
+                    result.strategy_name,
+                )
+                return result.as_cancelled()
 
             await self.cache.backtest_dao.save_result(result_dict)
             logger.info(

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
-from typing import ClassVar, Literal
+from typing import ClassVar, Final, Literal
 
 import polars as pl
 
@@ -338,6 +338,18 @@ class BacktestConfig:
         )
 
 
+class BacktestStatus:
+    """回测运行终态（D12-005）。
+
+    取消必须是**显式终态**：引擎在检测到取消后返回 ``CANCELLED`` 结果，
+    服务层拒绝持久化，UI 映射为取消而非完成。缺省值仅用于兼容既有构造点，
+    成功路径必须由引擎显式产出 ``COMPLETED`` 语义（取消不得伪装成完成）。
+    """
+
+    COMPLETED: Final = "COMPLETED"
+    CANCELLED: Final = "CANCELLED"
+
+
 @dataclass(frozen=True)
 class BacktestResult:
     """回测结果（不可变，确保回测可复现）"""
@@ -385,6 +397,11 @@ class BacktestResult:
     delist_liquidation_count: int = 0
     delist_loss_amount: float = 0.0
 
+    # D12-005: 运行终态。默认 COMPLETED 仅为兼容既有构造点；取消路径由引擎/服务
+    # 显式置为 CANCELLED，消费方（服务持久化、UI 映射）必须以此判据区分，
+    # 禁止把取消结果当成功样本落库或展示为「已完成」。
+    status: Literal["COMPLETED", "CANCELLED"] = BacktestStatus.COMPLETED
+
     def with_warnings(self, warnings: list[str | DataWarning] | tuple[str | DataWarning, ...]) -> BacktestResult:
         warnings_tuple = tuple(warnings) if isinstance(warnings, list) else warnings
         return BacktestResult(
@@ -410,7 +427,18 @@ class BacktestResult:
             delist_loss_amount=self.delist_loss_amount,
             has_real_score=self.has_real_score,
             real_score_ratio=self.real_score_ratio,
+            status=self.status,
         )
+
+    def as_cancelled(self) -> BacktestResult:
+        """返回同一结果的显式取消终态副本（D12-005）。
+
+        取消检查在持久化前再次生效时使用：结果内容即使已算出，也不得被当作
+        可比较的成功样本落库；调用方据此跳过持久化并在 UI 映射为「已取消」。
+        """
+        if self.status == BacktestStatus.CANCELLED:
+            return self
+        return replace(self, status=BacktestStatus.CANCELLED)
 
     def to_persist_dict(self) -> dict:
         """生成持久化所需的字典（不含 app_version，由调用方补充）。

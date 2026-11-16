@@ -609,11 +609,29 @@ class TestNextRebalanceDate:
         next_rb = engine._get_next_rebalance_date(date(2024, 1, 2), trade_dates, "daily")
         assert next_rb == date(2024, 1, 3)
 
-    def test_signal_next_rebalance_is_next_day(self):
+    def test_signal_next_rebalance_uses_next_signal_execution_day(self):
+        """D12-006: signal 频率只在有信号的执行日调仓，下一调仓日不是次交易日。"""
+        engine = self._make_engine(rebalance_freq="signal")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)]
+        signals = pl.DataFrame(
+            {
+                "execution_date": [date(2024, 1, 3), date(2024, 1, 5)],
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "signal_rank": [1, 1],
+            }
+        )
+        signals_by_date = dict(signals.partition_by("execution_date", as_dict=True))
+        # 1/4 无信号 → 不构成调仓日；下一调仓应为 1/5
+        assert engine._get_next_rebalance_date(date(2024, 1, 3), trade_dates, "signal", signals_by_date) == date(
+            2024, 1, 5
+        )
+
+    def test_signal_next_rebalance_without_signals_returns_none(self):
+        """D12-006: 无信号时 signal 频率没有调仓日，不得退化为次交易日。"""
         engine = self._make_engine(rebalance_freq="signal")
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
-        next_rb = engine._get_next_rebalance_date(date(2024, 1, 2), trade_dates, "signal")
-        assert next_rb == date(2024, 1, 3)
+
+        assert engine._get_next_rebalance_date(date(2024, 1, 2), trade_dates, "signal") is None
 
     def test_next_rebalance_returns_none_at_end(self):
         engine = self._make_engine(rebalance_freq="daily")
