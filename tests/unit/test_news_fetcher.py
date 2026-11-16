@@ -904,7 +904,7 @@ class TestGetUsMajorMoves:
 
 
 class TestUsMajorMovesUnknownChange:
-    """ADD-AI-002（R21）：涨跌幅缺失/非法不得伪装 0%，真 0 必须保留。"""
+    """AI-02（R21）：涨跌幅缺失/非法不得伪装 0%，真 0 必须保留。"""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
