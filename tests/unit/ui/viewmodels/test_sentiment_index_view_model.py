@@ -28,6 +28,17 @@ def _dp(trade_date: datetime.date = DAY, index: float | None = 0.5, n: int = 4, 
     return DailySentimentPoint(trade_date=trade_date, index=index, sample_count=n, sample_insufficient=insufficient)
 
 
+def _news_row(title: str) -> dict:
+    return {
+        "publish_time": None,
+        "title": title,
+        "content": None,
+        "source_kind": None,
+        "sentiment_score": 1.0,
+        "sentiment_conf": 1.0,
+    }
+
+
 def _mk_service(points: list | None = None, day_rows: list | None = None) -> MagicMock:
     svc = MagicMock()
     svc.get_stock_daily_index = AsyncMock(return_value=list(points or []))
@@ -148,33 +159,92 @@ class TestSelectDay:
         assert vm.state.message is not None and vm.state.message.key == "sentiment_index_err"
 
     @pytest.mark.asyncio
-    async def test_late_detail_result_dropped_on_reselect(self, vm_factory):
-        """换股后迟到明细丢弃（selected_day 代次守卫）。"""
-        slow = MagicMock()
-        slow.get_stock_daily_index = AsyncMock(return_value=[_dp()])
+    async def test_cancel_after_detail_started_drops_late_success(self, vm_factory):
+        """换股取消：服务已进入旧请求后再切换，旧任务必须真正取消且不写回。"""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        svc = MagicMock()
+        svc.get_stock_daily_index = AsyncMock(return_value=[_dp()])
 
-        async def _slow_day_news(*args, **kwargs):
-            await asyncio.sleep(0.05)
-            return [
-                {
-                    "publish_time": None,
-                    "title": "迟到",
-                    "content": None,
-                    "source_kind": None,
-                    "sentiment_score": 1.0,
-                    "sentiment_conf": 1.0,
-                }
-            ]
+        async def _gated_day_news(ts_code, stock_name, day):
+            if day == DAY:
+                started.set()
+                await release.wait()
+                return [_news_row("迟到成功")]
+            return []
 
-        slow.get_stock_day_news = AsyncMock(side_effect=_slow_day_news)
-        vm = vm_factory(slow)
+        svc.get_stock_day_news = AsyncMock(side_effect=_gated_day_news)
+        vm = vm_factory(svc)
         vm.select_stock("600519.SH")
-        await asyncio.sleep(0)
+        await asyncio.wait_for(vm._index_task, timeout=1.0)
         vm.select_day(DAY)
-        vm.select_stock("000001.SZ")  # 换股：取消明细 + selected_day 重置
-        await asyncio.sleep(0.2)
+        detail_task = vm._detail_task
+        assert detail_task is not None
+        try:
+            # 断言服务确实进入旧请求（停在受控 await），而非取消一个尚未启动的任务
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert not detail_task.done()
+            vm.select_stock("000001.SZ")  # 旧明细在途时换股：取消旧任务 + 重置 selected_day
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(detail_task, timeout=1.0)
+            assert detail_task.cancelled()
+        finally:
+            release.set()
+            await asyncio.gather(detail_task, return_exceptions=True)
+            if vm._index_task is not None:
+                await asyncio.wait_for(vm._index_task, timeout=1.0)
+        assert vm.state.ts_code == "000001.SZ"
+        assert vm.state.selected_day is None
         assert vm.state.day_news == ()
         assert vm.state.day_news_loading is False
+
+    @pytest.mark.asyncio
+    async def test_late_detail_success_dropped_on_day_switch(self, vm_factory):
+        """成功分支代次守卫：旧请求已进入服务后切到新 day，迟到成功不得写回状态或通知。"""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        svc = MagicMock()
+        svc.get_stock_daily_index = AsyncMock(return_value=[_dp(), _dp(DAY2)])
+
+        async def _gated_day_news(ts_code, stock_name, day):
+            if day == DAY:
+                started.set()
+                await release.wait()
+                return [_news_row("迟到成功")]
+            return [_news_row("DAY2 正常")]
+
+        svc.get_stock_day_news = AsyncMock(side_effect=_gated_day_news)
+        vm = vm_factory(svc)
+        snapshots: list[SentimentIndexState] = []
+        unsub = vm.subscribe(snapshots.append)
+        old_task: asyncio.Task | None = None
+        try:
+            vm.select_stock("600519.SH")
+            await asyncio.wait_for(vm._index_task, timeout=1.0)
+            # 直接驱动旧 DAY 请求（模拟绕过任务取消的迟到成功），停在服务入口
+            old_task = asyncio.create_task(vm._load_detail_task("600519.SH", "", DAY))
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            assert not old_task.done()
+            # 旧请求在途时切到新 day 并完成其明细加载
+            vm.select_day(DAY2)
+            await asyncio.wait_for(vm._detail_task, timeout=1.0)
+            assert vm.state.selected_day == DAY2
+            assert [item.title for item in vm.state.day_news] == ["DAY2 正常"]
+            snapshots.clear()
+            release.set()  # 放行旧请求，返回成功结果
+            await asyncio.wait_for(old_task, timeout=1.0)
+            assert not old_task.cancelled()
+        finally:
+            release.set()
+            if old_task is not None:
+                await asyncio.gather(old_task, return_exceptions=True)
+            unsub()
+        assert vm.state.selected_day == DAY2
+        assert [item.title for item in vm.state.day_news] == ["DAY2 正常"]
+        assert vm.state.day_news_loading is False
+        assert vm.state.message is None
+        # 订阅快照同样不得携带旧请求结果
+        assert all(item.title != "迟到成功" for snap in snapshots for item in snap.day_news)
 
     @pytest.mark.asyncio
     async def test_late_detail_error_dropped_on_reselect(self, vm_factory):
