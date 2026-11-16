@@ -107,8 +107,7 @@ class TestFieldTypes:
 
         reason = validate_analysis_output_contract(payload)
 
-        assert reason is not None
-        assert "score is not numeric" in reason
+        assert reason is not None and "score is not numeric" in reason
 
     @pytest.mark.parametrize("bad_confidence", ["high", None, False, {}])
     def test_non_numeric_confidence_rejected(self, bad_confidence):
@@ -117,8 +116,7 @@ class TestFieldTypes:
 
         reason = validate_analysis_output_contract(payload)
 
-        assert reason is not None
-        assert "confidence is not numeric" in reason
+        assert reason is not None and "confidence is not numeric" in reason
 
     @pytest.mark.parametrize("label", ["maybe", "", 1, ["strong_buy"]])
     def test_invalid_conclusion_label_rejected(self, label):
@@ -127,8 +125,7 @@ class TestFieldTypes:
 
         reason = validate_analysis_output_contract(payload)
 
-        assert reason is not None
-        assert "conclusion_label" in reason
+        assert reason is not None and "conclusion_label" in reason
 
     def test_invalid_recommendation_alias_rejected(self):
         payload = _valid_payload()
@@ -137,8 +134,7 @@ class TestFieldTypes:
 
         reason = validate_analysis_output_contract(payload)
 
-        assert reason is not None
-        assert "conclusion_label/recommendation" in reason
+        assert reason is not None and "conclusion_label/recommendation" in reason
 
     @pytest.mark.parametrize("bad_uncertainty", [None, {"risk": 1}, 3])
     def test_uncertainty_type_error_rejected(self, bad_uncertainty):
@@ -147,8 +143,7 @@ class TestFieldTypes:
 
         reason = validate_analysis_output_contract(payload)
 
-        assert reason is not None
-        assert "uncertainty_factors" in reason
+        assert reason is not None and "uncertainty_factors" in reason
 
     @pytest.mark.parametrize("field", ["thinking", "summary"])
     def test_free_text_type_error_rejected(self, field):
@@ -157,8 +152,7 @@ class TestFieldTypes:
 
         reason = validate_analysis_output_contract(payload)
 
-        assert reason is not None
-        assert field in reason
+        assert reason is not None and field in reason
 
     def test_out_of_range_score_is_not_contract_violation(self):
         """越界属 R21 归一化职责（置 None），不在此判违规——避免职责重叠。"""
