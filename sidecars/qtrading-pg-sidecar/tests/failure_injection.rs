@@ -693,7 +693,15 @@ fn test_inject_r01_dump_stop_failure_exit_20_preserves_backup() {
     let data = data_dir.to_str().unwrap();
     let backup_s = backup.to_str().unwrap();
     let (exit, _stdout, stderr) = run_sidecar_env(
-        &["dump", "--data-dir", data, "--database", TEST_DATABASE, "--output", backup_s],
+        &[
+            "dump",
+            "--data-dir",
+            data,
+            "--database",
+            TEST_DATABASE,
+            "--output",
+            backup_s,
+        ],
         &[(INJECT_STOP_FAIL, "all")],
     );
     assert_eq!(exit, 20, "dump 停止失败必须 exit 20: {stderr}");
@@ -722,7 +730,15 @@ fn test_inject_r01_restore_stop_failure_blocks_swap_and_preserves_dir() {
     let data = data_dir.to_str().unwrap();
     let backup_s = backup.to_str().unwrap();
     let (exit, stdout, stderr) = run_sidecar_env(
-        &["restore", "--data-dir", data, "--database", TEST_DATABASE, "--input", backup_s],
+        &[
+            "restore",
+            "--data-dir",
+            data,
+            "--database",
+            TEST_DATABASE,
+            "--input",
+            backup_s,
+        ],
         &[(INJECT_STOP_FAIL, "all")],
     );
     assert_eq!(exit, 20, "restore 停止失败必须 exit 20: {stderr}");
@@ -768,7 +784,13 @@ fn test_inject_r01_maintenance_shell_stop_failure_exit_20() {
     let (_tmp, data_dir) = init_cluster_and_stop("fi_r01_maint");
     let data = data_dir.to_str().unwrap();
     let (exit, stdout, stderr) = run_sidecar_env(
-        &["maintenance-shell", "--data-dir", data, "--database", TEST_DATABASE],
+        &[
+            "maintenance-shell",
+            "--data-dir",
+            data,
+            "--database",
+            TEST_DATABASE,
+        ],
         &[(INJECT_STOP_FAIL, "all")],
     );
     assert_eq!(exit, 20, "maintenance-shell 停止失败必须 exit 20: {stderr}");
@@ -883,7 +905,7 @@ fn force_kill_process(pid: u32) {
 
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
         };
         // SAFETY: 句柄非空才 TerminateProcess，之后总是 CloseHandle。
         let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
