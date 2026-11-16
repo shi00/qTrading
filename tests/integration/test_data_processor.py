@@ -817,9 +817,7 @@ class TestDataProcessor(unittest.TestCase):
         # 断点续传断言失真。区间 2022-11-29..2023-01-05 共 38 个自然日：
         # 前 33 天休市(is_open=0)、2023-01-01..05 为交易日(is_open=1)。
         start_day = datetime.date(2023, 1, 5) - datetime.timedelta(days=37)
-        natural_days = [
-            start_day + datetime.timedelta(days=i) for i in range(38)
-        ]
+        natural_days = [start_day + datetime.timedelta(days=i) for i in range(38)]
         mock_df = pd.DataFrame(
             {
                 "cal_date": [d.strftime("%Y%m%d") for d in natural_days],
