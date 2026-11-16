@@ -779,6 +779,27 @@ class TestHomeViewModelInitData:
         with pytest.raises(Exception, match="Init Error"):
             await vm.init_data()
 
+    @pytest.mark.asyncio
+    async def test_init_data_idempotent_after_success(self, vm):
+        """D17-001: 成功后重复调用不得重复 init_db / stock_basic 同步."""
+        await vm.init_data()
+        await vm.init_data()
+
+        vm.processor.init_data.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_init_data_retries_after_failure(self, vm):
+        """D17-001: 失败不置位就绪标记, 首页重试可重新初始化."""
+        vm.processor.init_data = AsyncMock(side_effect=[Exception("db down"), None])
+
+        with pytest.raises(Exception, match="db down"):
+            await vm.init_data()
+
+        await vm.init_data()
+
+        assert vm.processor.init_data.await_count == 2
+        assert vm._data_ready is True
+
 
 class TestHomeViewModelPagination:
     """测试分页逻辑"""

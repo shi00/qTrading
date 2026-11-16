@@ -130,6 +130,9 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         # 构造。E2E 下 home_view._init_and_load 顶部早返（home_view.py L165-167）在
         # init_data 之前，不会触发懒构造；原 E2E_TESTING 特判已删除（懒构造天然兼容）。
         self.processor: DataProcessor | None = None
+        # D17-001: init_data 成功标记。失败后允许重试重新初始化; 成功后刷新/重激活
+        # 不重复 init_db + stock_basic 同步 (无谓外部网络调用)。
+        self._data_ready = False
 
         # Internal state (frozen snapshot)
         self._state = HomeState()
@@ -356,9 +359,17 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
     # --- Data Actions ---
 
     async def init_data(self):
-        """Initialize data processor"""
+        """Initialize data processor (幂等: 成功一次后跳过重复初始化).
+
+        D17-001: 首页刷新/重试走统一入口 ``_init_and_load`` 时会再次调用本命令,
+        成功后的重复调用不得重复执行 init_db / stock_basic 同步 (外部网络副作用)。
+        失败时不置位, 允许重试; ``CancelledError`` 原样传播 (R2)。
+        """
+        if self._data_ready:
+            return
         processor = await self._ensure_processor()
         await processor.init_data()
+        self._data_ready = True
 
     async def load_market_data(self):
         """
