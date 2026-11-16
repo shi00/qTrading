@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import collections
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1029,7 +1030,7 @@ class TestObservableNotificationOrder:
         vm = _DefaultVM()
         snapshots: list[_DummyState] = []
         vm.subscribe(lambda s: snapshots.append(s))
-        assert vm._main_loop is not None
+        assert vm._main_loop is asyncio.get_running_loop()
         loop = vm._main_loop
         tid = vm._owner_tid
         subs = list(vm._subscribers)
@@ -1075,7 +1076,7 @@ class TestExceptionIsolationAndDispose:
 
         vm = _DefaultVM()
         unsub = vm.subscribe(lambda s: None)
-        assert vm._main_loop is not None
+        assert vm._main_loop is asyncio.get_running_loop()
 
         # 标记 disposed 并调 dispose（Mixin dispose 将 _main_loop 置 None）
         vm.dispose()
