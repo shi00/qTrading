@@ -345,28 +345,38 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
 
         return _combined
 
-    def dispose(self):
+    def dispose(self) -> None:
         if self._state.sync_in_progress:
             logger.warning(
                 "[OnboardingVM] dispose() called while sync in progress; callbacks cleared, DataProcessor will self-complete"
             )
         # UIR-F02-002: 卸载后任何在途同步的迟到结果都不得再导航，递增令牌使其作废。
         self._sync_generation += 1
-        # 取消可能正在进行的本地模型验证 (sync classmethod, safe no-op if no active verification)
-        from services.local_model_manager import LocalModelManager
+        try:
+            # 取消可能正在进行的本地模型验证 (sync classmethod, safe no-op if no active verification)
+            # 取消失败时异常继续传播（R2 语义），但 finally 仍保证下方统一关闭协议执行。
+            from services.local_model_manager import LocalModelManager
 
-        LocalModelManager.cancel_verification_if_active()
-        self.fn_validate_database = None
-        self.fn_validate_token = None
-        self.fn_validate_model_scenario = None
-        self.fn_validate_cloud_ai = None
-        self.fn_validate_local_model = None
-        self.fn_push_schedule_state = None
-        self.on_complete = None
-        self._subscribers.clear()
-        self._step_validated.clear()
-        self._persisted_schedule = None
-        self._state = OnboardingState()
+            LocalModelManager.cancel_verification_if_active()
+        finally:
+            # 清业务回调与验证缓存；subscriber 列表 / pending 通知不再手工操作，
+            # 交由基类统一清理。
+            self.fn_validate_database = None
+            self.fn_validate_token = None
+            self.fn_validate_model_scenario = None
+            self.fn_validate_cloud_ai = None
+            self.fn_validate_local_model = None
+            self.fn_push_schedule_state = None
+            self.on_complete = None
+            self._step_validated.clear()
+            self._persisted_schedule = None
+            # 走基类三步原子关闭协议（shutdown_lock 翻转 disposed + 清 subscribers/
+            # pending + cancel pending handle + 取消 cancellable 在途任务），使卸载后迟到
+            # 的 _set_state 与已排队通知被统一 disposed 守卫拦截，旧 subscriber 不再被调用。
+            super().dispose()
+            # disposed 翻转后再重置 state：此后任何迟到 _set_state 均被守卫拦截，直接赋值
+            # 保证卸载后 state 恒为默认快照（与 system/data_source VM 既有范式一致）。
+            self._state = OnboardingState()
 
     # ------------------------------------------------------------------
     # Step Navigation
@@ -609,6 +619,13 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         run_id = self._sync_generation
         origin_step = self._state.current_step
         origin_epoch = self._nav_epoch
+
+        # OB-02: 本模块所有同步进度/结果/异常回写的统一所有权判据——旧运行在
+        # 取消 / 新一轮同步 / 卸载后的迟到回调与结果一律不得改写新运行的状态；
+        # 导航归属仍由 _complete_sync_success 另核 nav_epoch（UIR-F02-002）。
+        def owns_sync() -> bool:
+            return not self._disposed and run_id == self._sync_generation
+
         self._set_state(
             sync_in_progress=True,
             sync_progress=0.0,
@@ -618,6 +635,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         try:
 
             def progress_callback(current, total, message):
+                # OB-02: 旧运行的迟到进度回调不得覆盖新运行/取消后的进度状态。
+                if not owns_sync():
+                    return
                 # DataProcessor 传入的 message 为 Message(key+params) (D7 改造后)；
                 # onboarding 引导页刻意使用固定 key 展示，进度百分比仍实时更新，
                 # 不逐条翻译下游同步阶段文案。
@@ -630,33 +650,36 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             )
 
             if result:
-                self._set_state(
-                    sync_progress=1.0,
-                    sync_progress_message=Message("wizard_status_done"),
-                )
+                if owns_sync():
+                    self._set_state(
+                        sync_progress=1.0,
+                        sync_progress_message=Message("wizard_status_done"),
+                    )
                 await asyncio.sleep(1)
                 await self._complete_sync_success(run_id, origin_step, origin_epoch)
             else:
-                self._set_state(
-                    sync_progress=0.0,
-                    sync_progress_message=Message("wizard_status_cancelled"),
-                )
+                if owns_sync():
+                    self._set_state(
+                        sync_progress=0.0,
+                        sync_progress_message=Message("wizard_status_cancelled"),
+                    )
 
         except asyncio.CancelledError:
             logger.warning("[OnboardingVM] Sync cancelled during shutdown.")
             raise
         except Exception as e:
             error_info = classify_error(e, context="general")
-            self._set_state(
-                sync_progress=0.0,
-                sync_progress_message=Message(
-                    error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
-                ),
-            )
+            if owns_sync():
+                self._set_state(
+                    sync_progress=0.0,
+                    sync_progress_message=Message(
+                        error_info.get("message_key", "common_err_unknown"),
+                        error_info.get("format_args") or {},
+                    ),
+                )
         finally:
             # 旧运行不得清除新一轮同步的忙碌标记（否则新同步期间 UI 会重新放行前进）。
-            if run_id == self._sync_generation:
+            if owns_sync():
                 self._set_state(sync_in_progress=False)
 
     async def _complete_sync_success(self, run_id: int, origin_step: int, origin_epoch: int) -> None:

@@ -9,8 +9,8 @@
 
 退出码:
     0: 无 error（warning 不阻断）
-    1: 发现 error 级别诊断
-    2: pyright 调用失败（未安装/配置错误）
+    1: 发现 error 级别诊断，或 pyright 以退出码 1 报告失败
+    2: pyright 调用失败（未安装/配置错误/输出结构异常）
 """
 
 import json
@@ -65,12 +65,31 @@ def _build_pyright_cmd(files: list[str]) -> list[str]:
     return cmd
 
 
+def _validate_payload(data: object) -> str | None:
+    """校验 ``--outputjson`` 的输出结构，返回错误描述；结构合法时返回 None。
+
+    结构缺失（如只有 summary 没有 generalDiagnostics）不得回落为「无 error」，
+    否则工具失败会被空数组掩盖成通过。
+    """
+    if not isinstance(data, dict):
+        return "顶层不是 JSON 对象"
+    if not isinstance(data.get("summary"), dict):
+        return "缺少 summary 对象"
+    diagnostics = data.get("generalDiagnostics")
+    if not isinstance(diagnostics, list):
+        return "缺少 generalDiagnostics 数组"
+    if any(not isinstance(item, dict) for item in diagnostics):
+        return "generalDiagnostics 含非对象元素"
+    return None
+
+
 def main() -> int:
     files = [f for f in sys.argv[1:] if f.endswith((".py", ".pyi"))]
     if not files:
         return 0
 
-    # pyright --outputjson 输出 JSON 到 stdout，退出码: 0=无 error, 1=有 error, 2=配置错误
+    # pyright --outputjson 输出 JSON 到 stdout：0=无 error，1=有 error，
+    # 其余退出码（实测配置解析失败为 3、参数/文件错误为 4）均为工具失败。
     try:
         result = subprocess.run(
             _build_pyright_cmd(files),
@@ -89,12 +108,25 @@ def main() -> int:
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
-        # 非 JSON 输出（如配置错误直接 stderr），透传输出
+        # 非 JSON 输出（如配置错误直接 stderr），透传输出后按工具失败处理
         if result.stdout:
             print(result.stdout)
         if result.stderr:
             print(result.stderr, file=sys.stderr)
-        return result.returncode
+        print(
+            "✗ pyright 未输出可解析的 JSON（--outputjson 预期 JSON），按工具失败处理。",
+            file=sys.stderr,
+        )
+        return 2
+
+    structural_error = _validate_payload(data)
+    if structural_error is not None:
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        print(f"✗ pyright 输出结构异常：{structural_error}", file=sys.stderr)
+        return 2
 
     # 检查 summary.fatalError（配置错误时 JSON 中含此字段，退出码通常为 2）
     summary = data.get("summary", {})
@@ -105,10 +137,29 @@ def main() -> int:
             print(result.stderr, file=sys.stderr)
         return 2
 
+    # 除 0/1（0=通过、1=有 error 诊断）外的退出码均为工具/配置失败，
+    # 不得因 JSON 中诊断为空而放行。
+    if result.returncode not in (0, 1):
+        print(
+            f"✗ Pyright 调用失败（退出码 {result.returncode}），不因输出无 error 诊断而放行。",
+            file=sys.stderr,
+        )
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        return 2
+
     diagnostics = data.get("generalDiagnostics", [])
     errors = [d for d in diagnostics if d.get("severity") == "error"]
 
     if not errors:
+        if result.returncode == 1:
+            print(
+                "✗ Pyright 退出码为 1（报告失败），但 JSON 中无 error 级诊断；按工具异常处理。",
+                file=sys.stderr,
+            )
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            return 1
         return 0
 
     print(f"✗ Pyright 发现 {len(errors)} 个 error（共 {len(diagnostics)} 个诊断）：\n")

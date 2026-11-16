@@ -302,6 +302,24 @@ class TestCloudModelId:
         assert _analyzer()._cloud_model_id() is None
 
 
+# --- _raw_model_id ---
+
+
+class TestRawModelId:
+    def test_prefers_program_metadata_model(self):
+        assert NewsRiskAnalyzer._raw_model_id({"model": "deepseek/chat"}) == "deepseek/chat"
+
+    def test_missing_returns_none(self):
+        assert NewsRiskAnalyzer._raw_model_id({}) is None
+
+    @pytest.mark.parametrize("bad", [None, 123, "", "   ", ["m"]])
+    def test_non_string_or_blank_returns_none(self, bad):
+        assert NewsRiskAnalyzer._raw_model_id({"model": bad}) is None
+
+    def test_non_dict_returns_none(self):
+        assert NewsRiskAnalyzer._raw_model_id(["not", "a", "dict"]) is None
+
+
 # --- analyze_news_risk ---
 
 
@@ -376,6 +394,64 @@ class TestAnalyzeNewsRisk:
         analyzer = _analyzer(svc)
         result = await analyzer.analyze_news_risk(_request())
         assert result.analysis_status == "evidence_only"
+
+    async def test_cloud_raw_model_wins_over_config_switched_in_flight(self, monkeypatch):
+        """请求 A 在途期间配置切到 B：model_id 仍为 A 的实际请求模型（raw 程序元数据）。"""
+        monkeypatch.setattr(
+            "services.ai_service.ConfigHandler.get_llm_config", lambda: {"provider": "switched", "model": "b"}
+        )
+        svc = AIService.__new__(AIService)
+
+        async def chat(messages, **kwargs):
+            if kwargs.get("provider") == "local":
+                raise RuntimeError("local down")
+            return {**_valid_raw(), "model": "pw/md-a"}
+
+        svc._chat_completion = AsyncMock(side_effect=chat)
+        result = await _analyzer(svc).analyze_news_risk(_request())
+        assert result.analysis_status == "analyzed_with_events"
+        assert result.model_id == "pw/md-a"
+
+    @pytest.mark.parametrize("bad_model", [123, "", "   "])
+    async def test_cloud_untrusted_raw_model_falls_back_to_config(self, monkeypatch, bad_model):
+        """raw.model 非字符串/空白 → 回退当前配置兼容标签（非实际模型证据）。"""
+        monkeypatch.setattr(
+            "services.ai_service.ConfigHandler.get_llm_config", lambda: {"provider": "pw", "model": "md"}
+        )
+        svc = AIService.__new__(AIService)
+
+        async def chat(messages, **kwargs):
+            if kwargs.get("provider") == "local":
+                raise RuntimeError("local down")
+            return {**_valid_raw(), "model": bad_model}
+
+        svc._chat_completion = AsyncMock(side_effect=chat)
+        result = await _analyzer(svc).analyze_news_risk(_request())
+        assert result.analysis_status == "analyzed_with_events"
+        assert result.model_id == "pw/md"
+
+    async def test_cloud_non_dict_raw_stays_failed(self, monkeypatch):
+        """非对象 JSON 输出：标签回退 "cloud"，但格式校验失败仍为 failed（不降级 evidence_only）。"""
+        monkeypatch.setattr("services.ai_service.ConfigHandler.get_llm_config", lambda: {"provider": "", "model": ""})
+        svc = AIService.__new__(AIService)
+
+        async def chat(messages, **kwargs):
+            if kwargs.get("provider") == "local":
+                raise RuntimeError("local down")
+            return ["not", "an", "object"]
+
+        svc._chat_completion = AsyncMock(side_effect=chat)
+        result = await _analyzer(svc).analyze_news_risk(_request())
+        assert result.analysis_status == "failed"
+        assert result.model_id == "cloud"
+
+    async def test_local_ignores_llm_supplied_model_field(self):
+        """本地成功路径 model_id 恒为 "local"：LLM 输出自填 model 不得覆盖程序元数据。"""
+        svc = _service_stub()
+        svc._chat_completion = AsyncMock(return_value={**_valid_raw(), "model": "llm-spoofed"})
+        result = await _analyzer(svc).analyze_news_risk(_request())
+        assert result.analysis_status == "analyzed_with_events"
+        assert result.model_id == "local"
 
 
 # --- _process_raw ---

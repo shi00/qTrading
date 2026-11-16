@@ -1,0 +1,867 @@
+"""D4 生成器机制测试（检视 §5.2 / §6.4「生成」负例与 AC06/AC07 的机制部分）。
+
+覆盖：块协议（缺块/重复/嵌套/孤儿结束/非法 id/结束标记错配）、作者源渲染输入校验
+（缺源/缺字段/未知字段/重复身份/非法 section 不得静默取默认值）、路径越界（含符号
+链接解析后越界）、封闭目标清单（目标不在清单即拒绝且不被触碰）。全部在临时目录
+构造（夹具工厂见 fixtures/generator_fixtures.py），不触碰仓库真实正文。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+import check_docs_consistency as cdc
+import docs_generated as dg
+import docs_markdown as dm
+from fixtures import generator_fixtures as gf
+
+pytestmark = pytest.mark.docs_pure
+
+
+# ---------------------------------------------------------------------------
+# 块协议：Markdown 成对注释块
+# ---------------------------------------------------------------------------
+
+
+def test_scan_markdown_blocks_single() -> None:
+    """正例：单块扫描返回块身份与内容行。"""
+    text = "前文\n<!-- generated:a-block -->\n- 内容行\n<!-- /generated -->\n后文\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert set(blocks) == {"a-block"}
+    assert blocks["a-block"].content_lines == ("- 内容行",)
+
+
+def test_scan_markdown_blocks_multiple() -> None:
+    """正例：同文档多块按各自身份归位（结束标记不带 id 时按栈配对）。"""
+    text = "<!-- generated:first -->\nA\n<!-- /generated -->\n<!-- generated:second -->\nB\n<!-- /generated -->\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert blocks["first"].content_lines == ("A",)
+    assert blocks["second"].content_lines == ("B",)
+
+
+def test_scan_markdown_block_content_keeps_code_lines() -> None:
+    """正例：有效块内的围栏代码行完整计入 content_lines（代码语境只排除块边界判定）。"""
+    text = '<!-- generated:code-sample -->\n说明\n```python\nprint("x")\n```\n<!-- /generated -->\n'
+    blocks = dg.scan_blocks(text, "markdown")
+    assert blocks["code-sample"].content_lines == ("说明", "```python", 'print("x")', "```")
+
+
+def test_fenced_marker_outside_block_not_registered() -> None:
+    """负例：块外围栏内的假标记不登记为块；块内围栏假标记是内容而非嵌套/结束。"""
+    text = (
+        "<!-- generated:real -->\n"
+        "```\n"
+        "<!-- generated:fake -->\n"
+        "<!-- /generated -->\n"
+        "```\n"
+        "<!-- /generated -->\n"
+        "\n"
+        "```markdown\n"
+        "<!-- generated:outside -->\n"
+        "<!-- /generated -->\n"
+        "```\n"
+    )
+    blocks = dg.scan_blocks(text, "markdown")
+    assert set(blocks) == {"real"}
+    assert blocks["real"].content_lines == ("```", "<!-- generated:fake -->", "<!-- /generated -->", "```")
+
+
+def _render_code_sample(validated: dict[str, object], root: Path) -> list[str]:
+    """代码型块渲染：输出含围栏代码的固定内容（漂移检测用例的最小渲染器）。"""
+    del validated, root
+    return ["说明", "```python", 'print("x")', "```"]
+
+
+def test_block_code_change_reports_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证：合法代码型块可相等；块内任意代码改动必须报漂移（不被代码语境过滤吞掉）。"""
+    root = tmp_path / "repo"
+    (root / "sources").mkdir(parents=True)
+    (root / "targets").mkdir()
+    (root / "sources" / "sample.txt").write_text("sample\n", encoding="utf-8")
+    target = root / "targets" / "derived.md"
+    target.write_text(
+        '# 目标\n\n<!-- generated:code-sample -->\n说明\n```python\nprint("x")\n```\n<!-- /generated -->\n',
+        encoding="utf-8",
+    )
+    spec = dg.BlockSpec(
+        block_id="code-sample",
+        target="targets/derived.md",
+        sources=(dg.SourceSchema(path="sources/sample.txt", fmt="text"),),
+        render=_render_code_sample,
+    )
+    monkeypatch.setattr(cdc, "ROOT", root)
+    monkeypatch.setattr(dg, "BUILTIN_REGISTRY", (spec,))
+    assert cdc.check_docs_generated() == [], "合法代码型块与渲染一致时必须通过"
+
+    target.write_text(
+        target.read_text(encoding="utf-8").replace('print("x")', 'print("tampered")'),
+        encoding="utf-8",
+    )
+    errors = cdc.check_docs_generated()
+    assert errors and all("code-sample" in e for e in errors), f"块内代码改动必须报漂移: {errors}"
+
+
+def test_missing_block_rejected() -> None:
+    """负例：登记块在文本中缺失 → replace_block 显式拒绝（不静默当空块）。"""
+    with pytest.raises(dg.MissingBlockError, match="缺少生成块 'some-block'"):
+        dg.replace_block("没有生成块标记的正文", "markdown", "some-block", ["新内容"])
+
+
+def test_missing_block_via_update_rejected(tmp_path: Path) -> None:
+    """负例（端到端）：目标缺块标记 → run_update 拒绝。"""
+    root = gf.build_demo_tree(tmp_path, target_text="# 无块目标\n正文\n")
+    with pytest.raises(dg.MissingBlockError, match="缺生成块 'demo-block'"):
+        dg.run_update(root, gf.make_demo_registry())
+
+
+def test_duplicate_block_rejected() -> None:
+    """负例：同一块身份出现两次 → 显式拒绝（不静默取第一处）。"""
+    text = "<!-- generated:dup -->\nA\n<!-- /generated -->\n<!-- generated:dup -->\nB\n<!-- /generated -->\n"
+    with pytest.raises(dg.DuplicateBlockError, match="块身份重复: 'dup'"):
+        dg.scan_blocks(text, "markdown")
+
+
+def test_nested_block_rejected() -> None:
+    """负例：块内再出现开始标记（嵌套/重叠）→ 显式拒绝。"""
+    text = "<!-- generated:outer -->\n<!-- generated:inner -->\n<!-- /generated -->\n<!-- /generated -->\n"
+    with pytest.raises(dg.NestedBlockError, match="块 'outer'（第 1 行起）内嵌套新的块开始标记"):
+        dg.scan_blocks(text, "markdown")
+
+
+def test_orphan_end_rejected() -> None:
+    """负例：无开始标记的孤儿结束标记 → 显式拒绝。"""
+    text = "正文\n<!-- /generated -->\n正文\n"
+    with pytest.raises(dg.OrphanEndError, match="孤儿结束标记"):
+        dg.scan_blocks(text, "markdown")
+
+
+def test_invalid_block_id_rejected() -> None:
+    """负例：块 id 含大写/下划线/空形态等非法形式 → 显式拒绝。"""
+    for bad_id in ("Bad_Id", "BAD-ID", "_x"):
+        text = f"<!-- generated:{bad_id} -->\n<!-- /generated -->\n"
+        with pytest.raises(dg.InvalidBlockIdError, match="块 id 非法"):
+            dg.scan_blocks(text, "markdown")
+
+
+def test_end_tag_id_mismatch_rejected() -> None:
+    """负例：带 id 的结束标记与开始标记身份不一致 → 显式拒绝。"""
+    text = "<!-- generated:alpha -->\n<!-- /generated:beta -->\n"
+    with pytest.raises(dg.EndMismatchError, match="结束标记身份不匹配: 'beta'"):
+        dg.scan_blocks(text, "markdown")
+
+
+# 疑似生成标记（严格语法未命中但意图明确）：每例给「畸形形态 + 合法基线/恢复形态」。
+# 畸形形态此前被静默当作正文，导致孤儿/嵌套/重复误判或整块被忽略。
+MALFORMED_MARKER_CASES = [
+    pytest.param(
+        "markdown",
+        "<!-- generated:bad.id -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "<!-- generated:bad-id -->\n<!-- /generated -->\n",
+        {"bad-id"},
+        id="markdown-dot-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:other! -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'other!'",
+        "<!-- generated:other -->\n<!-- /generated -->\n",
+        {"other"},
+        id="markdown-bang-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated: -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "<!-- generated:empty -->\n<!-- /generated -->\n",
+        {"empty"},
+        id="markdown-empty-id-colon",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "<!-- generated:bare -->\n<!-- /generated -->\n",
+        {"bare"},
+        id="markdown-empty-id-bare",
+    ),
+    pytest.param(
+        "markdown",
+        "正文\n<!-- /generated:bad.id -->\n正文\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "正文\n<!-- generated:orphan-free -->\n<!-- /generated -->\n正文\n",
+        {"orphan-free"},
+        id="markdown-orphan-end-bad-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:outer -->\n<!-- generated:inner! -->\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'inner!'",
+        "<!-- generated:outer -->\n<!-- /generated -->\n<!-- generated:inner -->\n<!-- /generated -->\n",
+        {"outer", "inner"},
+        id="markdown-nested-bad-inner",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:dup.id -->\nA\n<!-- /generated -->\n<!-- generated:dup.id -->\nB\n<!-- /generated -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'dup.id'",
+        "<!-- generated:dup-a -->\nA\n<!-- /generated -->\n<!-- generated:dup-b -->\nB\n<!-- /generated -->\n",
+        {"dup-a", "dup-b"},
+        id="markdown-duplicate-bad-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:x -->\nA\n<!-- /generated:bad.id -->\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "<!-- generated:x -->\nA\n<!-- /generated:x -->\n",
+        {"x"},
+        id="markdown-end-bad-id",
+    ),
+    pytest.param(
+        "markdown",
+        "<!--generated:sample-->\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-missing-space",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:sample --> extra\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-trailing-content",
+    ),
+    pytest.param(
+        "markdown",
+        "<!-- generated:sample-->\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-missing-space-before-close",
+    ),
+    pytest.param(
+        "markdown",
+        "  <!-- generated:sample -->\n<!-- /generated -->\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "<!-- generated:sample -->\n<!-- /generated -->\n",
+        {"sample"},
+        id="markdown-indented-marker",
+    ),
+    pytest.param(
+        "yaml",
+        "# generated:bad.id\n# /generated:bad.id\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: 'bad.id'",
+        "# generated:y-block\n- 行\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-dot-id",
+    ),
+    pytest.param(
+        "yaml",
+        "# generated\n# /generated:y-block\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "# generated:y-block\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-empty-id",
+    ),
+    pytest.param(
+        "yaml",
+        "# generated:y-block\n# /generated\n",
+        dg.InvalidBlockIdError,
+        "块 id 非法: ''",
+        "# generated:y-block\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-end-without-id",
+    ),
+    pytest.param(
+        "yaml",
+        "#generated:y-block\n#/generated:y-block\n",
+        dg.MalformedMarkerError,
+        "开始标记语法非法",
+        "# generated:y-block\n# /generated:y-block\n",
+        {"y-block"},
+        id="yaml-missing-space",
+    ),
+]
+
+
+@pytest.mark.parametrize(("fmt", "malformed", "error", "match", "legal", "block_ids"), MALFORMED_MARKER_CASES)
+def test_suspect_marker_rejected_with_legal_recovery(
+    fmt: str,
+    malformed: str,
+    error: type[dg.BlockError],
+    match: str,
+    legal: str,
+    block_ids: set[str],
+) -> None:
+    """负例：疑似生成标记但 id/语法非法 → 显式拒绝；改成合法形态后恢复扫描。"""
+    with pytest.raises(error, match=match):
+        dg.scan_blocks(malformed, fmt)
+    assert set(dg.scan_blocks(legal, fmt)) == block_ids, "合法基线/恢复形态必须正常登记"
+
+
+def test_crlf_malformed_marker_rejected() -> None:
+    """CRLF 原文：畸形标记同样显式拒绝，行号按解析器行语义定位。"""
+    text = "a\r\n<!-- generated:bad.id -->\r\n<!-- /generated -->\r\n"
+    with pytest.raises(dg.InvalidBlockIdError, match="第 2 行块 id 非法: 'bad.id'"):
+        dg.scan_blocks(text, "markdown")
+
+
+@pytest.mark.parametrize(
+    ("fmt", "text"),
+    [
+        ("markdown", "<!-- generated by scripts/docs_generated.py -->\n"),
+        ("markdown", "<!-- 生成块由 docs_generated 维护，勿手改 -->\n"),
+        ("markdown", "2. 生成区块用 `<!-- generated:redlines-invariant -->` 包裹；\n"),
+        ("markdown", "```\n<!-- generated:bad.id -->\n<!-- /generated:bad.id -->\n```\n"),
+        ("markdown", "    <!-- generated:bad.id -->\n"),
+        ("yaml", "# generated by scripts/docs_generated.py\n"),
+        ("yaml", "# 由 docs_generated 维护，勿手改\n"),
+    ],
+    ids=[
+        "md-prose-generated-by",
+        "md-prose-chinese",
+        "md-inline-mention",
+        "md-fenced-example",
+        "md-indented-code",
+        "yaml-prose-generated-by",
+        "yaml-prose-chinese",
+    ],
+)
+def test_ordinary_comments_and_code_examples_not_validated(fmt: str, text: str) -> None:
+    """不得误杀：普通业务注释、正文顺带提及、围栏/缩进代码内的示例文本照常放行。"""
+    assert dg.scan_blocks(text, fmt) == {}
+
+
+# ---------------------------------------------------------------------------
+# 行切分与解析器一致：Unicode 行分隔符 / CRLF 下围栏假作者恒缺失、真实块准确
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+def test_unicode_line_separator_keeps_fenced_marker_unreachable(sep: str) -> None:
+    """围栏前含 Unicode 行分隔符时，围栏内成对标记仍不得被认作现行块。"""
+    text = f"a{sep}b{sep}c{sep}d\n\n```\n<!-- generated:fake -->\n<!-- /generated -->\n```\n"
+    assert dg.scan_blocks(text, "markdown") == {}
+    with pytest.raises(dg.MissingBlockError, match="缺少生成块 'fake'"):
+        dg.replace_block(text, "markdown", "fake", ["changed"])
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029"], ids=["U+2028", "U+2029"])
+def test_unicode_line_separator_real_block_position_and_content(sep: str) -> None:
+    """Unicode 正文原样保留：真实块位置/内容准确，替换不吞正文。"""
+    text = f"前言{sep}续行\n\n<!-- generated:real -->\n- 旧\n<!-- /generated -->\n尾行\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert (blocks["real"].start_line, blocks["real"].end_line) == (3, 5)
+    assert blocks["real"].content_lines == ("- 旧",)
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert f"前言{sep}续行" in replaced
+    assert "- 旧" not in replaced and "- 新" in replaced
+    assert replaced.endswith("尾行\n")
+
+
+def test_crlf_fenced_marker_not_a_block() -> None:
+    """CRLF 原文：围栏内成对标记不构成现行块。"""
+    text = "a\r\n\r\n```\r\n<!-- generated:fake -->\r\n<!-- /generated -->\r\n```\r\n"
+    assert dg.scan_blocks(text, "markdown") == {}
+    with pytest.raises(dg.MissingBlockError, match="缺少生成块 'fake'"):
+        dg.replace_block(text, "markdown", "fake", ["changed"])
+
+
+def test_crlf_real_block_position_content_and_line_ending() -> None:
+    """CRLF 原文：真实块位置/内容准确，替换后行尾仍为 CRLF。"""
+    text = "# 目标\r\n\r\n<!-- generated:real -->\r\n- 旧\r\n<!-- /generated -->\r\n尾行\r\n"
+    blocks = dg.scan_blocks(text, "markdown")
+    assert (blocks["real"].start_line, blocks["real"].end_line) == (3, 5)
+    assert blocks["real"].content_lines == ("- 旧",)
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert "\n" not in replaced.replace("\r\n", ""), "替换后不得残留裸 LF"
+    assert "<!-- generated:real -->\r\n- 新\r\n<!-- /generated -->" in replaced
+    assert replaced.endswith("尾行\r\n")
+
+
+# ---------------------------------------------------------------------------
+# 块外逐字节保真：混合行尾 / 仅 CR / 末行无行尾 / 空内容 / 多块与调用次序
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "a", "a\n", "a\nb", "a\r\nb\r\n", "a\rb\r", "a\r\nb\nc\r", "\r\n", "\n", "\r", "a\n\n", "a\u2028b\n"],
+    ids=[
+        "empty",
+        "no-eol",
+        "lf",
+        "two-lf",
+        "crlf",
+        "cr",
+        "mixed",
+        "only-crlf",
+        "only-lf",
+        "only-cr",
+        "blank-tail",
+        "u2028",
+    ],
+)
+def test_split_lines_with_endings_matches_parser_line_semantics(text: str) -> None:
+    """原始行切分与解析器行语义一一对应，且各行拼接可还原原文（块区间替换的行号基础）。"""
+    raws = dg._split_lines_with_endings(text)
+    assert "".join(raws) == text
+    assert len(raws) == len(dm.split_source_lines(text))
+    assert [raw.rstrip("\r\n") for raw in raws] == list(dm.split_source_lines(text))
+
+
+def test_replace_preserves_mixed_line_endings_outside_block() -> None:
+    """块外混合行尾逐字节保留：后缀 `after\\n` 不得被规范化为 `after\\r\\n`。"""
+    text = "# 目标\r\n\r\n<!-- generated:real -->\r\n- 旧\r\n<!-- /generated -->\r\nafter\n"
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert replaced == "# 目标\r\n\r\n<!-- generated:real -->\r\n- 新\r\n<!-- /generated -->\r\nafter\n"
+
+
+def test_replace_preserves_cr_only_line_endings() -> None:
+    """仅 CR 行尾：块内外均保留 CR，末行行尾不丢失。"""
+    text = "# 目标\r<!-- generated:real -->\r- 旧\r<!-- /generated -->\rafter\r"
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert replaced == "# 目标\r<!-- generated:real -->\r- 新\r<!-- /generated -->\rafter\r"
+
+
+def test_replace_preserves_missing_trailing_newline() -> None:
+    """末行无行尾：块位于文件末尾时不得凭空补行尾。"""
+    text = "before\n<!-- generated:real -->\n- 旧\n<!-- /generated -->"
+    replaced = dg.replace_block(text, "markdown", "real", ["- 新"])
+    assert replaced == "before\n<!-- generated:real -->\n- 新\n<!-- /generated -->"
+
+
+def test_replace_empty_block_content_keeps_marker_line_endings() -> None:
+    """空内容替换：首尾标记行各自行尾原样保留，块外文本不变。"""
+    text = "a\r\n<!-- generated:real -->\r\n- 旧\r\n<!-- /generated -->\r\nb\n"
+    replaced = dg.replace_block(text, "markdown", "real", [])
+    assert replaced == "a\r\n<!-- generated:real -->\r\n<!-- /generated -->\r\nb\n"
+
+
+def test_replace_two_blocks_preserves_each_line_ending() -> None:
+    """多块替换与调用次序无关：各块沿用自身标记行尾，其余文本逐字节保留且幂等。"""
+    text = (
+        "前言\n<!-- generated:a -->\nA\n<!-- /generated -->\n"
+        "中间\r\n<!-- generated:b -->\r\nB\r\n<!-- /generated -->\r\n后缀\n"
+    )
+    expected = (
+        "前言\n<!-- generated:a -->\nA2\n<!-- /generated -->\n"
+        "中间\r\n<!-- generated:b -->\r\nB2\r\n<!-- /generated -->\r\n后缀\n"
+    )
+    assert dg.replace_block(dg.replace_block(text, "markdown", "a", ["A2"]), "markdown", "b", ["B2"]) == expected
+    assert dg.replace_block(dg.replace_block(text, "markdown", "b", ["B2"]), "markdown", "a", ["A2"]) == expected
+    assert dg.replace_block(expected, "markdown", "a", ["A2"]) == expected, "同一作者源二次替换必须零差异"
+
+
+# ---------------------------------------------------------------------------
+# 块协议：YAML 成对注释块
+# ---------------------------------------------------------------------------
+
+
+def test_scan_yaml_blocks() -> None:
+    """正例：YAML 成对 `# generated:<id>` / `# /generated:<id>` 块扫描。"""
+    text = "key: value\n# generated:y-block\n- 行一\n# /generated:y-block\n"
+    blocks = dg.scan_blocks(text, "yaml")
+    assert blocks["y-block"].content_lines == ("- 行一",)
+
+
+def test_scan_yaml_blocks_indented() -> None:
+    """正例：缩进的 YAML 成对注释块（hook 映射内部的受控片段）同样被识别。"""
+    text = (
+        "hooks:\n"
+        "  - id: x\n"
+        "    additional_dependencies:\n"
+        "      # generated:inner-block\n"
+        '      - "dep>=1"\n'
+        "      # /generated:inner-block\n"
+    )
+    blocks = dg.scan_blocks(text, "yaml")
+    assert blocks["inner-block"].content_lines == ('      - "dep>=1"',)
+
+
+def test_yaml_block_missing_end_rejected(tmp_path: Path) -> None:
+    """负例（端到端）：YAML 目标缺结束标记（块未闭合）→ run_update 显式拒绝。"""
+    root = tmp_path
+    (root / "sources").mkdir()
+    (root / gf.DEMO_SOURCE_REL).write_text(gf.VALID_SOURCE_YAML, encoding="utf-8")
+    (root / gf.YAML_TARGET_REL).write_text("# generated:demo-yaml-block\n", encoding="utf-8")
+    with pytest.raises(dg.UnclosedBlockError, match="块 'demo-yaml-block'（第 1 行起）缺少结束标记"):
+        dg.run_update(root, gf.make_yaml_registry())
+
+
+# ---------------------------------------------------------------------------
+# 作者源渲染输入校验（不得静默取默认值）
+# ---------------------------------------------------------------------------
+
+
+def test_source_missing_rejected(tmp_path: Path) -> None:
+    """负例：作者源文件缺失 → 显式拒绝（缺源负例）。"""
+    root = tmp_path
+    (root / gf.DEMO_TARGET_REL).write_text(gf.DEMO_TARGET, encoding="utf-8")
+    with pytest.raises(dg.SourceMissingError, match="作者源缺失: sources/demo.yml"):
+        dg.run_update(root, gf.make_demo_registry())
+
+
+def test_source_required_field_missing_rejected(tmp_path: Path) -> None:
+    """负例：作者源条目缺必填字段 → 显式拒绝，渲染函数不得被调用。"""
+    broken = gf.VALID_SOURCE_YAML.replace("    title: 演示红线一\n", "")
+    root = gf.build_demo_tree(tmp_path, source_text=broken)
+    calls: list[int] = []
+
+    def counting_render(validated: dict[str, object], root: Path) -> list[str]:
+        calls.append(1)
+        return []
+
+    registry = gf.make_demo_registry(render=counting_render)
+    with pytest.raises(dg.SourceFieldError, match="缺必填字段 \\['title'\\]"):
+        dg.run_update(root, registry)
+    assert calls == [], "校验失败时渲染函数被调用=静默取默认值，违规"
+
+
+def test_source_unknown_field_rejected(tmp_path: Path) -> None:
+    """负例：作者源条目含 schema 未登记的未知字段 → 显式拒绝。"""
+    broken = gf.VALID_SOURCE_YAML.replace(
+        "    rule_type: INVARIANT\n",
+        "    rule_type: INVARIANT\n    rogue_field: 值\n",
+        1,
+    )
+    root = gf.build_demo_tree(tmp_path, source_text=broken)
+    with pytest.raises(dg.SourceUnknownFieldError, match="未知字段 \\['rogue_field'\\]"):
+        dg.run_update(root, gf.make_demo_registry())
+
+
+def test_source_duplicate_identity_rejected(tmp_path: Path) -> None:
+    """负例：作者源条目身份重复（同 id 两条）→ 显式拒绝。"""
+    broken = gf.VALID_SOURCE_YAML.replace("  - id: R2", "  - id: R1", 1)
+    root = gf.build_demo_tree(tmp_path, source_text=broken)
+    with pytest.raises(dg.SourceDuplicateIdentityError, match="身份重复: 'R1'"):
+        dg.run_update(root, gf.make_demo_registry())
+
+
+def test_source_invalid_section_rejected(tmp_path: Path) -> None:
+    """负例：section 字段取值不在允许集合 → 显式拒绝。"""
+    broken = gf.VALID_SOURCE_YAML.replace("rule_type: WORKFLOW", "rule_type: BOGUS", 1)
+    root = gf.build_demo_tree(tmp_path, source_text=broken)
+    with pytest.raises(dg.SourceSectionError, match="取值非法: 'BOGUS'"):
+        dg.run_update(root, gf.make_demo_registry())
+
+
+def test_source_yaml_not_dict_rejected(tmp_path: Path) -> None:
+    """负例：作者源 YAML 顶层不是映射 → 显式拒绝（不静默当空集合）。"""
+    root = gf.build_demo_tree(tmp_path, source_text="- 纯列表\n")
+    with pytest.raises(dg.SourceFormatError, match="顶层须为映射"):
+        dg.run_update(root, gf.make_demo_registry())
+
+
+# ---------------------------------------------------------------------------
+# D34：必填值形态校验（null/空串/空集合/路径不存在）必须在渲染与写入之前失败
+# ---------------------------------------------------------------------------
+
+
+def _spy_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, source_text: str
+) -> tuple[Path, tuple[dg.BlockSpec, ...], list[int], list[Path]]:
+    """构造「渲染调用 + 写入调用」双计数夹具（写入阶段被触达即违规）。"""
+    root = gf.build_demo_tree(tmp_path, source_text=source_text)
+    calls: list[int] = []
+    writes: list[Path] = []
+
+    def counting_render(validated: dict[str, object], root: Path) -> list[str]:
+        calls.append(1)
+        return []
+
+    def recording_write(self: dg.WriteGuard, path: Path, data: bytes) -> None:
+        writes.append(Path(path))
+        raise AssertionError("非法作者源不得触达写入阶段")
+
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    monkeypatch.setattr(gf.HeldFdWriteGuard, "write_bytes", recording_write)
+    return root, gf.make_demo_registry(render=counting_render), calls, writes
+
+
+@pytest.mark.parametrize("bad_title", ["null", "''", "'   '", "123"])
+def test_source_invalid_title_rejected_before_render_and_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_title: str
+) -> None:
+    """负例：title 为 null/空串/纯空白/非字符串 → 渲染与写入阶段均不得被触达。"""
+    broken = gf.VALID_SOURCE_YAML.replace("title: 演示红线一", f"title: {bad_title}")
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text=broken)
+    with pytest.raises(dg.SourceFieldError, match="title 须为非空字符串"):
+        dg.run_update(root, registry)
+    assert calls == [], "值形态校验失败时渲染函数被调用=非法值进入了渲染阶段"
+    assert writes == [], "值形态校验失败时写入被调用=非法值进入了写入阶段"
+
+
+@pytest.mark.parametrize("bad_id", ["null", "''", "'   '", "123"])
+def test_source_invalid_identity_rejected_before_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_id: str
+) -> None:
+    """负例：身份字段为 null/空串/纯空白/非字符串 → 渲染前拒绝。"""
+    broken = gf.VALID_SOURCE_YAML.replace("  - id: R1", f"  - id: {bad_id}", 1)
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text=broken)
+    with pytest.raises(dg.SourceFieldError, match="id 须为非空字符串"):
+        dg.run_update(root, registry)
+    assert calls == []
+    assert writes == []
+
+
+def test_source_empty_item_collection_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：作者源条目集合为空（空 topics/redlines）→ 渲染前显式拒绝。"""
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text="redlines: []\n")
+    with pytest.raises(dg.SourceFormatError, match="条目集合为空"):
+        dg.run_update(root, registry)
+    assert calls == []
+    assert writes == []
+
+
+def test_source_null_item_collection_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：作者源条目集合为 null（仅键无值）→ 渲染前显式拒绝。"""
+    root, registry, calls, writes = _spy_update(tmp_path, monkeypatch, source_text="redlines:\n")
+    with pytest.raises(dg.SourceFormatError, match="缺 'redlines' 列表"):
+        dg.run_update(root, registry)
+    assert calls == []
+    assert writes == []
+
+
+def _canonical_schema() -> dg.SourceSchema:
+    """canonical 主题作者源 schema（路径字段与必填值形态按真实内置 schema 声明）。"""
+    return dg.SourceSchema(
+        path=gf.DEMO_SOURCE_REL,
+        fmt="yaml",
+        item_key="topics",
+        required_fields=frozenset({"id", "title", "canonical"}),
+        known_fields=frozenset({"id", "title", "canonical", "section", "workflow", "note"}),
+        non_empty_string_fields=frozenset({"title", "canonical"}),
+        path_fields=frozenset({"canonical"}),
+        identity_field="id",
+    )
+
+
+def _build_canonical_tree(root: Path, canonical_value: str) -> None:
+    """落盘 canonical 主题作者源与目标块（canonical 值由用例注入）。"""
+    (root / "sources").mkdir()
+    (root / gf.DEMO_SOURCE_REL).write_text(
+        f"topics:\n  - id: strategy\n    title: 新增/修改策略\n    canonical: {canonical_value}\n",
+        encoding="utf-8",
+    )
+    (root / gf.DEMO_TARGET_REL).write_text(gf.DEMO_TARGET, encoding="utf-8")
+
+
+@pytest.mark.parametrize("canonical_value", ["null", "''", "'   '", "docs/nonexistent.md"])
+def test_source_canonical_value_shape_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, canonical_value: str
+) -> None:
+    """负例：canonical 为 null/空串/纯空白/不存在的路径 → 渲染前拒绝。"""
+    root = tmp_path
+    _build_canonical_tree(root, canonical_value)
+    calls: list[int] = []
+
+    def counting_render(validated: dict[str, object], root: Path) -> list[str]:
+        calls.append(1)
+        return []
+
+    registry = (
+        dg.BlockSpec(
+            block_id="demo-block",
+            target=gf.DEMO_TARGET_REL,
+            sources=(_canonical_schema(),),
+            render=counting_render,
+        ),
+    )
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    with pytest.raises(dg.SourceFieldError, match="canonical"):
+        dg.run_update(root, registry)
+    assert calls == [], "canonical 值形态非法时渲染函数被调用=非法值进入了渲染阶段"
+
+
+def test_source_canonical_path_exists_accepted(tmp_path: Path) -> None:
+    """正例：canonical 指向真实存在的路径 → 校验通过并可供渲染。"""
+    root = tmp_path
+    (root / "docs" / "patterns").mkdir(parents=True)
+    (root / "docs" / "patterns" / "strategy-template.md").write_text("# 策略\n", encoding="utf-8")
+    _build_canonical_tree(root, "docs/patterns/strategy-template.md")
+    items = dg.load_validated_source(root, _canonical_schema())
+    assert isinstance(items, list)
+    assert items[0]["canonical"] == "docs/patterns/strategy-template.md"
+
+
+def test_source_value_shapes_valid_accepted(tmp_path: Path) -> None:
+    """正例：合法身份/标题/非空集合正常通过校验并渲染（防误伤）。"""
+    root = gf.build_demo_tree(tmp_path)
+    items = dg.load_validated_source(root, gf.demo_source_schema())
+    assert isinstance(items, list)
+    assert [item["id"] for item in items if isinstance(item, dict)] == ["R1", "R2"]
+    assert gf.demo_render({gf.DEMO_SOURCE_REL: items}, root) == ["- R1：演示红线一", "- R2：演示红线二"]
+
+
+# ---------------------------------------------------------------------------
+# 路径安全：越界与符号链接
+# ---------------------------------------------------------------------------
+
+
+def test_parent_escape_target_rejected(tmp_path: Path) -> None:
+    """负例：目标路径 `..` 逃逸出 root → 显式拒绝。"""
+    import dataclasses
+
+    spec = dataclasses.replace(gf.make_demo_registry()[0], target="../escaped.md")
+    root = gf.build_demo_tree(tmp_path)
+    with pytest.raises(dg.PathEscapeError, match="路径解析后越界"):
+        dg.run_update(root, (spec,))
+
+
+def test_absolute_target_rejected(tmp_path: Path) -> None:
+    """负例：目标为绝对路径（Path 拼接覆盖语义）→ 显式拒绝。"""
+    import dataclasses
+
+    outside = tmp_path.parent / "absolute-outside.md"
+    spec = dataclasses.replace(gf.make_demo_registry()[0], target=str(outside))
+    root = gf.build_demo_tree(tmp_path)
+    with pytest.raises(dg.PathEscapeError, match="路径解析后越界"):
+        dg.run_update(root, (spec,))
+
+
+def test_symlink_escape_rejected(tmp_path: Path) -> None:
+    """负例：符号链接解析后指向 root 外 → 显式拒绝。"""
+    outside = tmp_path.parent / "symlink-outside.md"
+    outside.write_text("外部文件\n", encoding="utf-8")
+    root = gf.build_demo_tree(tmp_path)
+    link = root / "link.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("当前环境无符号链接创建权限（Windows 非开发者模式），负例在 POSIX CI 真跑")
+    import dataclasses
+
+    spec = dataclasses.replace(gf.make_demo_registry()[0], target="link.md")
+    with pytest.raises(dg.PathEscapeError, match="路径解析后越界"):
+        dg.run_update(root, (spec,))
+
+
+# ---------------------------------------------------------------------------
+# 封闭目标清单
+# ---------------------------------------------------------------------------
+
+
+def test_only_outside_registry_rejected(tmp_path: Path) -> None:
+    """负例：only 请求的目标不在封闭清单 → 显式拒绝。"""
+    root = gf.build_demo_tree(tmp_path)
+    with pytest.raises(dg.TargetNotRegisteredError, match="目标不在封闭清单: \\['ghost.md'\\]"):
+        dg.run_update(root, gf.make_demo_registry(), only=("ghost.md",))
+
+
+def test_unregistered_target_with_markers_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：未登记目标即使含合法生成块标记，也不被任何路径扫描或写入（封闭清单）。"""
+    root = gf.build_demo_tree(tmp_path)
+    stray = root / "stray.md"
+    stray.write_text("<!-- generated:demo-block -->\n旧内容\n<!-- /generated -->\n", encoding="utf-8")
+    before = stray.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False and result.written == (), "原位写被拒绝时不得把目标记为已写"
+    assert stray.read_bytes() == before, "未登记目标被触碰=扫描到标记就能写，违反封闭清单"
+
+
+# ---------------------------------------------------------------------------
+# 更新编排正例（端到端）
+# ---------------------------------------------------------------------------
+
+
+def test_update_renders_block_and_preserves_prose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """正例：块内容被渲染替换、块外手写正文逐字节保留；原位写被拒绝时文件保持原样。"""
+    root = gf.build_demo_tree(tmp_path)
+    target = root / gf.DEMO_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_demo_registry()[0])
+    text = dg.replace_block(original, "markdown", "demo-block", rendered)
+    assert "<!-- generated:demo-block -->" in text
+    assert "- R1：演示红线一" in text
+    assert "- R2：演示红线二" in text
+    assert "块外手写正文必须原样保留。" in text
+    assert text.startswith("# 演示目标\n\n<!-- generated:demo-block -->\n")
+
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False and result.written == (), "拒绝原位写时不得记为已写"
+    assert target.read_bytes() == before, "拒绝原位写不得改动目标（含块外手写正文）"
+
+
+def test_update_yaml_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """正例：YAML 目标块按 `# generated:<id>` 成对注释渲染替换；原位写被拒绝时保持原样。"""
+    root = gf.build_yaml_tree(tmp_path)
+    target = root / gf.YAML_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_yaml_registry()[0])
+    text = dg.replace_block(original, "yaml", "demo-yaml-block", rendered)
+    assert "# generated:demo-yaml-block" in text
+    assert "# /generated:demo-yaml-block" in text
+    assert "- R1：演示红线一" in text
+
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_yaml_registry())
+    assert result.ok is False and result.written == ()
+    assert target.read_bytes() == before
+
+
+def test_render_output_cannot_write_outside_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：渲染输出只产出行内容，不伪造块边界；原位写被拒绝时目标保持原样。"""
+    root = gf.build_demo_tree(tmp_path)
+    target = root / gf.DEMO_TARGET_REL
+    original = target.read_text(encoding="utf-8")
+    rendered = dg.render_block_lines(root, gf.make_demo_registry()[0])
+    text = dg.replace_block(original, "markdown", "demo-block", rendered)
+    # 块标记行之外不新增 generated 标记（渲染输出不得伪造块边界）
+    assert text.count("<!-- generated:") == 1
+    assert text.count("<!-- /generated") == 1
+
+    before = target.read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, gf.make_demo_registry())
+    assert result.ok is False and result.written == ()
+    assert target.read_bytes() == before
+
+
+def test_platform_import_guard() -> None:
+    """机制自检：docs_generated 在当前平台可导入且声明其保护/原位写后端（不静默伪装）。"""
+    assert dg.PLATFORM_LOCK_BACKEND in ("win32-exclusive-open", "posix-advisory-unsupported")
+    if sys.platform == "win32":
+        assert dg.PLATFORM_LOCK_BACKEND == "win32-exclusive-open"
+    # D28：无已验证「保护 + 崩溃原子提交」方案前，所有平台的值都必须是拒绝态
+    assert dg.INPLACE_WRITE_BACKEND == "refused-unverified-atomic-commit"
+
+
+def test_docs_index_candidates_order_is_platform_independent(tmp_path: Path) -> None:
+    """文件级目录候选集按 POSIX 相对路径排序：`README.md` 必须排在 `adr/` 之前。
+
+    平台回归：Path 自带排序在 Windows 大小写不敏感（readme 落在 adr 之后）、Linux 按
+    ASCII（README 在 adr 之前），同一作者源两平台渲染次序不同 → 生成块跨平台判不一致
+    （PR #2196 首轮 Docs Static Checks / Code Quality 即因此失败）。
+    """
+    docs = tmp_path / "docs"
+    (docs / "adr").mkdir(parents=True)
+    (docs / "README.md").write_text("# 索引\n", encoding="utf-8")
+    (docs / "adr" / "0001-x.md").write_text("# X\n", encoding="utf-8")
+
+    order = [p.relative_to(tmp_path).as_posix() for p in dg._docs_index_candidates(tmp_path)]
+
+    assert order == ["docs/README.md", "docs/adr/0001-x.md"]

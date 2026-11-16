@@ -1542,11 +1542,35 @@ class TestLoadStrategyStats:
         assert vm.state.strategy_stats == ()
 
     @pytest.mark.asyncio
+    async def test_missing_trade_date_safe_degrade_to_empty(self, stats_vm_with_dao):
+        """缺 trade_date（HAC 排序键）时安全降级, 不用未知行序伪装统计。"""
+        vm, fake_dao = stats_vm_with_dao
+        df = pd.DataFrame(
+            {
+                "strategy_name": ["sA"],
+                "benchmark_code": ["sh000001"],
+                "daily_cnt": [3],
+                "t1_mean": [0.01],
+                "t1_n": [1],
+                "t5_mean": [0.02],
+                "t5_n": [1],
+                "alpha_mean": [0.005],
+                "alpha_n": [1],
+                "win_cnt": [1],
+                "loss_cnt": [0],
+            }
+        )
+        fake_dao.get_strategy_review_stats.return_value = df
+        await vm.load_strategy_stats()
+        assert vm.state.strategy_stats == ()
+
+    @pytest.mark.asyncio
     async def test_valid_df_parses_rows(self, stats_vm_with_dao):
         """有效数据解析为 StrategyStatRow, 基准 NULL 组归入'基准未知'组。"""
         vm, fake_dao = stats_vm_with_dao
         df = pd.DataFrame(
             {
+                "trade_date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"]),
                 "strategy_name": ["sA", "sA", "sA"],
                 "benchmark_code": ["sh000001", "sh000001", None],
                 "daily_cnt": [3, 5, 2],
@@ -1619,6 +1643,30 @@ class TestLoadAiAttribution:
         assert vm.state.ai_attribution == ()
 
     @pytest.mark.asyncio
+    async def test_missing_trade_date_safe_degrade_to_empty(self, ai_attr_vm_with_dao):
+        """缺 trade_date（HAC 排序键）时同样安全降级。"""
+        vm, fake_dao = ai_attr_vm_with_dao
+        df = pd.DataFrame(
+            {
+                "strategy_name": ["sA"],
+                "benchmark_code": ["sh000001"],
+                "has_ai": [True],
+                "daily_cnt": [3],
+                "t1_mean": [0.01],
+                "t1_n": [1],
+                "t5_mean": [0.02],
+                "t5_n": [1],
+                "alpha_mean": [0.005],
+                "alpha_n": [1],
+                "win_cnt": [1],
+                "loss_cnt": [0],
+            }
+        )
+        fake_dao.get_ai_attribution_stats.return_value = df
+        await vm.load_ai_attribution()
+        assert vm.state.ai_attribution == ()
+
+    @pytest.mark.asyncio
     async def test_missing_has_ai_column_safe_degrade_to_empty(self, ai_attr_vm_with_dao):
         """缺 has_ai 分组列（区别于复盘统计列）时同样安全降级, 不 raise。"""
         vm, fake_dao = ai_attr_vm_with_dao
@@ -1644,6 +1692,7 @@ class TestLoadAiAttribution:
         vm, fake_dao = ai_attr_vm_with_dao
         df = pd.DataFrame(
             {
+                "trade_date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
                 "strategy_name": ["sA", "sA"],
                 "benchmark_code": ["sh000001", "sh000001"],
                 "has_ai": [True, False],

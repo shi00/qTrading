@@ -21,6 +21,10 @@ ViewModel（ModelConnectionsViewModel / ModelRoutesViewModel / ModelUsageViewMod
 - 同步阻塞 ConfigHandler 写入通过 ThreadPoolManager.run_async offload (R16)
 - R2: asyncio.CancelledError 显式 raise, 不被 except Exception 吞没
 - 重复提交检测：save_state="saving" 时拒绝新提交
+- 取消生命周期 (UIB-AIBRAIN-01)：外层保存等待被取消时, 持久化 task 经
+  asyncio.shield 继续执行至写盘真正终结；占用 (SAVE_SAVING) 由持久化完成
+  回调收束为非 saving 后才释放——写盘未终结前重复提交守卫持续生效,
+  防并发第二次写与旧写覆盖新写；取消的保存不推进 saved_revision（不伪成功）
 
 不感知 locale：状态字段为字符串/布尔值，View 渲染时按当前 locale 翻译。
 """
@@ -84,7 +88,8 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
     - 草稿编辑版本 (draft_revision) 与最近确认版本 (saved_revision) 分离
     - 同步阻塞 ConfigHandler/ThreadPoolManager IO 通过 ThreadPoolManager.run_async offload (R16)
     - R2: CancelledError 显式 raise, 不被 except Exception 吞没
-    - 重复提交检测：save_state="saving" 时拒绝新提交
+    - 重复提交检测：save_state="saving" 时拒绝新提交；取消路径下占用由持久化
+      完成回调收束（写盘真正终结后才释放），无永久锁定 (UIB-AIBRAIN-01)
 
     消费方 (AIBrainTab) 通过 use_viewmodel(factory=AIBrainSettingsViewModel) 实例化。
     """
@@ -180,12 +185,20 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         （local-only / 调优参数 / prompt），完成态为 ``SAVE_STALE`` 且保留
         当前草稿的未保存状态，不会对当前草稿报「全部已保存」。
 
+        取消生命周期 (UIB-AIBRAIN-01)：外层等待被取消时只终止等待——写盘线程
+        无法被外部中断（run_in_executor 固有语义），持久化在独立 task 中经
+        ``asyncio.shield`` 继续至真正终结，占用（SAVE_SAVING）由其完成回调
+        收束为非 saving 状态后才释放（写盘未终结前重复提交守卫持续生效，
+        防并发第二次写与旧写覆盖新写）。取消的保存不推进 ``saved_revision``
+        （不宣称已写入），收束态为 ``SAVE_ERROR``。
+
         Returns:
             True 发起版本的原子保存与重载成功（若完成后草稿再被编辑，
             save_state=SAVE_STALE 表示发起版本已落盘、当前草稿仍待保存）;
             False 保存失败 (验证错误 / IO 错误 / 重复提交)。
         Raises:
-            asyncio.CancelledError: 取消时显式 raise (R2)。
+            asyncio.CancelledError: 取消时显式 raise (R2)；占用由持久化 task
+            完成回调或 reload 取消分支收束为非 saving 状态，无永久锁定。
         """
         # 重复提交检测
         if self._state.save_state == SAVE_SAVING:
@@ -217,7 +230,21 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 """
                 return ConfigHandler.save_ai_tuning_and_prompts(max_cand, min_turn, local_only, ai_prompt, news_prompt)
 
-            success = await ThreadPoolManager().run_async(TaskType.IO, _save_configs_sync)
+            # UIB-AIBRAIN-01: 持久化放入独立 task 并经 shield 等待——外层取消只
+            # 终止等待，写盘线程继续执行至真正终结；取消时挂完成回调收束占用
+            # （见 _finalize_cancelled_save_persist），正常路径不挂回调，
+            # 终态写入两路径互斥。
+            persist_task = asyncio.create_task(ThreadPoolManager().run_async(TaskType.IO, _save_configs_sync))
+            try:
+                success = await asyncio.shield(persist_task)
+            except asyncio.CancelledError:
+                # R2: 取消传播；占用由 persist_task 完成回调收束（此时写盘可能
+                # 仍在运行，不得立即解锁）。
+                persist_task.add_done_callback(
+                    lambda task: self._finalize_cancelled_save_persist(task, captured_revision)
+                )
+                raise
+
             if not success:
                 self._set_state(save_state=SAVE_ERROR, warning_message="")
                 return False
@@ -225,7 +252,13 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             # ========== 阶段 3: 重载 AIService 配置 ==========
             from services.ai_service import AIService
 
-            await AIService().reload_config()
+            try:
+                await AIService().reload_config()
+            except asyncio.CancelledError:
+                # 真实持久化已终结（写盘收尾完成），占用即时释放：取消的保存
+                # 不推进 saved_revision，收束为非 saving 后传播 (R2)。
+                self._set_state(save_state=SAVE_ERROR, warning_message="")
+                raise
 
             if self._state.draft_revision != captured_revision:
                 # 发起后草稿又被编辑：仅确认已落盘的发起版本，当前草稿仍待保存。
@@ -265,3 +298,60 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 )
             self._set_state(save_state=SAVE_ERROR, warning_message="")
             return False
+
+    def _finalize_cancelled_save_persist(self, persist_task: "asyncio.Future[bool]", captured_revision: int) -> None:
+        """取消路径的持久化完成回调：收束保存占用为非 saving 状态 (UIB-AIBRAIN-01)。
+
+        仅在外层 ``save_ai_settings`` 的持久化等待被取消后挂载，与正常路径的
+        终态写入互斥（正常路径不挂回调）。职责：
+        - 消费 persist_task 结果/异常，避免 "Task exception was never retrieved"；
+        - 异常与常规失败路径同口径：classify_error / classify_severity 分类、
+          按严重度记日志并经 DataSanitizer 脱敏 (R9)；
+        - 统一收束为非 ``SAVE_SAVING`` 状态释放占用（取消的保存不推进
+          ``saved_revision``，不宣称已写入）——后续保存可用，且旧写已在回调
+          触发前终结，不会覆盖新写。
+        """
+        if persist_task.cancelled():
+            # persist_task 自身被取消仅发生在事件循环关闭收尾等场景：
+            # 写盘结果未知，同样按未确认收束（VM 若已 dispose，_set_state 为 no-op）。
+            logger.warning("[AIBrainSettingsVM] cancelled save persist aborted (loop shutdown)")
+        else:
+            exc = persist_task.exception()
+            if exc is not None:
+                if isinstance(exc, Exception):
+                    from utils.error_classifier import classify_error, classify_severity
+
+                    error_info = classify_error(exc, context="general")
+                    severity = classify_severity(exc, context="general")
+                    sanitized = DataSanitizer.sanitize_error(exc)  # R9 异常消息脱敏
+                    if severity == "system":
+                        logger.critical(
+                            "[AIBrainSettingsVM] SYSTEM-LEVEL failure in cancelled save persist: %s",
+                            sanitized,
+                            exc_info=exc,
+                        )
+                    else:
+                        logger.error(
+                            "[AIBrainSettingsVM] Error in cancelled save persist (%s): %s",
+                            error_info["code"],
+                            sanitized,
+                            exc_info=exc,
+                        )
+                else:
+                    # R9: 非 Exception 的 BaseException 消息同样经脱敏后才进入日志
+                    # （sanitize_error 签名限 Exception | str，此处经 str() 传入）。
+                    sanitized_base = DataSanitizer.sanitize_error(str(exc))
+                    logger.error(
+                        "[AIBrainSettingsVM] cancelled save persist failed with non-exception base error: %s",
+                        sanitized_base,
+                        exc_info=exc,
+                    )
+            else:
+                persisted = persist_task.result()
+                logger.warning(
+                    "[AIBrainSettingsVM] cancelled save persist finished (persisted=%s); captured revision %d kept unconfirmed",
+                    persisted,
+                    captured_revision,
+                )
+        # 统一收束：非 saving 反馈态 + 版本不动（无永久锁定、不伪成功）。
+        self._set_state(save_state=SAVE_ERROR, warning_message="")

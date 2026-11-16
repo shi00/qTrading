@@ -2,6 +2,8 @@
 
 > 用途：每次 Flet 版本升级或新增/变更 API 使用时，按本模板沉淀核验记录，作为升级证据。配合 [upgrade-checklist.md](./upgrade-checklist.md) 使用。
 >
+> 每条记录必须保存**观察时的精确版本（含补丁号）、核验日期与观察摘要**，使历史证据可复现；禁止以当前 `pyproject.toml` pin 补填历史观察版本。旧版本的核验记录**不免除**新目标版本的核验义务（目标版本变化须重新核验，见 [mcp-usage.md §2](./mcp-usage.md#2-何时使用-flet-mcp触发条件)）。
+>
 > 文档入口：[Flet 开发文档入口](./README.md)
 
 > Owner: UI 维护者
@@ -14,7 +16,7 @@
 | 字段 | 说明 |
 |------|------|
 | **API** | 受核验的 Flet API（如 `ft.use_dialog`、`ft.Dropdown.on_select`、`use_viewmodel(factory=)`） |
-| **锁定版本** | 核验时的 Flet 锁定版本（从 [`pyproject.toml`](../../pyproject.toml) 读取，不写补丁号漂移；写小版本+日期） |
+| **锁定版本** | 核验时**实际观察**的 Flet 精确版本（含补丁号，从核验环境实测读取，如 `pip list`）。本模板为 API 核验历史快照（按定义需记录具体补丁版本号），豁免 GDR-06 版本漂移检查；历史证据必须可复现，**禁止以当前 pin 补填** |
 | **核验来源** | 官方文档链接 / Flet issue / 项目运行期验证 / 项目单元测试 |
 | **项目结论** | 在项目中的契约判定（继续使用 / 调整契约 / 暂禁用 / 待评估） |
 | **需更新文件** | 核验结果波及的文件清单（`v1-api-constraints.md` / `project-differences.md` / `upgrade-checklist.md` / `ui/hooks.py` / `tests/unit/ui/*_contract.py` 等）。仅当新增、删除或改变专题职责时更新 [docs/flet/README.md](./README.md)。 |
@@ -28,10 +30,11 @@
 ### 核验记录模板
 
 ```markdown
-### <API 名> @ <锁定版本小版本> (<核验日期>)
+### <API 名> @ <精确观察版本（含补丁号）> (<核验日期>)
 
 - **API**: <API 签名/行为>
-- **锁定版本**: Flet <major.minor>（pyproject.toml 实际锁定见文件）
+- **锁定版本**: Flet <精确版本，含补丁号>（核验环境实测，如 `pip list`；禁止以当前 pyproject.toml pin 补填）
+- **观察摘要**: <一句话概括本版观察到的关键行为/差异，供后续版本比对>
 - **核验来源**:
   - 官方文档: <URL>
   - Flet issue / PR: <URL 或 N/A>
@@ -158,7 +161,7 @@
 ### Flet 1.0 升级核验 @ 1.0 系列 (2026-09-19)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API + TextField error 属性
-- **锁定版本**: Flet 1.0 系列（pyproject.toml 实际锁定确切补丁号；flet/flet-desktop/flet-charts/flet-code-editor 四包与 flet-mcp 同步锁定）
+- **锁定版本**: Flet 1.0.0（同批 2026-09-23 记录回溯确认：该记录称「1.0.0 核验结论（2026-09-19）」，且升级清单为 flet 五包 1.0.0 → 1.0.1；flet/flet-desktop/flet-charts/flet-code-editor 四包与 flet-mcp 同版本锁定）
 - **核验来源**:
   - 项目单元测试（在 Flet 1.0 实际锁定版本下实跑，42 项全部通过）:
     - tests/unit/ui/test_flet_0_86_v1_api_compat.py
@@ -179,7 +182,7 @@
 ### engineRevision 修正 @ 0.86 最新补丁 (2026-08-07)
 
 - **API**: CanvasKit engineRevision（非 Flet API，但影响 E2E 测试基础设施）
-- **锁定版本**: Flet 0.86 系列最新补丁（pyproject.toml 实际锁定见文件）
+- **锁定版本**: Flet 0.86.3（本记录实测 engineRevision `0cd610717bde95fd88343c64f81c11ba4e5c0010`，据同记录「0.86.2 → 0.86.3 跨越一次 Flutter engine 升级」回溯确认；适用范围为 E2E CanvasKit 资源，非 Flet Python API 面）
 - **核验来源**:
   - 项目运行期验证: 读取 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig.engineRevision`，实际值为 `0cd610717bde95fd88343c64f81c11ba4e5c0010`
 - **项目结论**: 需追加复验
@@ -193,7 +196,7 @@
 ### Flet 0.86 升级核验 @ 0.86 最新补丁 (2026-07-27)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
-- **锁定版本**: Flet 0.86 系列最新补丁（pyproject.toml 实际锁定见文件）
+- **锁定版本**: Flet 0.86.2（据 2026-08-07 engineRevision 修正记录回溯：本记录实测 engineRevision `a10d8ac38de835021c8d2f920dbf50a920ccc030` 即 0.86.2 的 engineRevision；该 patch 于 2026-07-26 发布，为本记录观察时点的系列最新补丁）
 - **核验来源**:
   - 官方文档: https://github.com/flet-dev/flet/releases + PyPI JSON API（2026-07-26 发布最新补丁）
   - Flet issue / PR: #6709/#6710 (MatplotlibChart 切 tab 冻结修复，本项目未用 MatplotlibChart 故不相关)
@@ -217,7 +220,7 @@
 ### Flet 0.86 升级核验 @ 0.86 (2026-07-23)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
-- **锁定版本**: Flet 0.86（pyproject.toml 实际锁定补丁号见文件）
+- **锁定版本**: Flet 0.86 系列内版本未知（观察版本未知，不得用于匹配免查；原记录仅实测 engineRevision `a10d8ac38de835021c8d2f920dbf50a920ccc030`，不足以唯一定位补丁号，禁止按当前 pin 补填）
 - **核验来源**:
   - 官方文档: https://github.com/flet-dev/flet/blob/main/CHANGELOG.md
   - 项目运行期验证: engineRevision 比对（升级前后均为 `a10d8ac38de835021c8d2f920dbf50a920ccc030`，未变化）；字体 URL 版本 `notosanssc/v37/` 未变化
@@ -240,7 +243,7 @@
 ### Flet 0.86 升级核验 @ 0.86 (2026-07-20)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
-- **锁定版本**: Flet 0.86（pyproject.toml 实际锁定补丁号见文件）
+- **锁定版本**: Flet 0.86 系列内版本未知（观察版本未知，不得用于匹配免查；原记录未保存可复现的补丁号证据，禁止按当前 pin 补填）
 - **核验来源**:
   - 官方文档: https://github.com/flet-dev/flet/blob/main/CHANGELOG.md
   - Flet issue / PR: #6680, #6606, #6684, #6686

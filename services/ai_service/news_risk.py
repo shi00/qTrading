@@ -299,6 +299,23 @@ class NewsRiskAnalyzer:
         except Exception:
             return None
 
+    @staticmethod
+    def _raw_model_id(raw: object) -> str | None:
+        """云端本次请求的实际模型（helper 程序元数据），优先于「响应后读当前配置」。
+
+        ``_chat_completion`` 云端成功分支把 litellm 层 ``effective_model`` 以 ``model``
+        键合并进返回 dict（模型输出同名键被程序元数据覆盖）；该值属于本次请求事实，
+        请求在途期间配置切换不影响它。非 dict（JSON 数组等非对象输出）、字段缺失、
+        非字符串或空白串 → ``None``，由调用方回退 ``_cloud_model_id() or "cloud"``
+        兼容标签（该回退不是实际模型证据）。
+        """
+        if not isinstance(raw, dict):
+            return None
+        model = raw.get("model")
+        if isinstance(model, str) and model.strip():
+            return model
+        return None
+
     def _result(
         self,
         request: NewsInsightRequest,
@@ -474,7 +491,9 @@ class NewsRiskAnalyzer:
                     json_mode=True,
                     purpose="news",
                 )
-                model_id = self._cloud_model_id() or "cloud"
+                # 实际模型取本次响应携带的程序元数据；配置可能在请求在途期间切换，
+                # 故仅在其缺失时才回退读当前配置的兼容标签。
+                model_id = self._raw_model_id(raw) or self._cloud_model_id() or "cloud"
                 logger.debug("[NewsRisk] Cloud OK (%s)", request.ts_code)
             except AIPolicyNotAcknowledgedError:
                 logger.warning(

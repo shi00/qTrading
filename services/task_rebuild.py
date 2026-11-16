@@ -18,7 +18,7 @@ import logging
 
 from core.i18n import Message
 from data.sync.errors import InitSyncError
-from services.task_manager import TaskManager
+from services.task_manager import TaskCancelledError, TaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,11 @@ async def _rebuild_init_historical_sync(task_id: str, **kwargs) -> Message:
 
     report = await dp.initialize_system(progress_callback=_progress, **kwargs)
     if report is None:
+        if dp.is_cancelled():
+            # C14（ADR-0018 承接）：协作取消（取消信号置位）映射取消终态——抛
+            # TaskCancelledError 由 TaskManager 记 CANCELLED（≠ COMPLETED/FAILED），
+            # 不伪装为失败假象；真实取消异常（上方 _progress 路径）不受影响（R2）。
+            raise TaskCancelledError(Message("task_cancelled_desc"))
         # 抛异常使 task 进入 FAILED（可重试），而非返回成功造成"已完成"假象
         raise InitSyncError(Message("ds_init_fail_generic"))
     return Message("sys_init_success")

@@ -30,6 +30,11 @@ def _snapshot_relation_sql(compiled_sql: str) -> str:
     return compiled_sql.split("FROM (SELECT", 1)[1].split(") AS latest_learning", 1)[0]
 
 
+def _bound_param_values(stmt) -> list:
+    """返回 Core 语句编译后的绑定参数值（用于断言 DAO 边界归一后的绑定形态）。"""
+    return list(dict(stmt.compile().params).values())
+
+
 class TestScreenerDaoGetScreeningHistory:
     @pytest.mark.asyncio
     async def test_with_strategy(self):
@@ -134,6 +139,83 @@ class TestScreenerDaoGetHistoryRecords:
         await dao.get_history_records(trade_date="20240615")
         sql = str(dao._read_db_select.call_args[0][0])
         assert "NULLS LAST" in sql.upper()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw_trade_date", "expected"),
+        [
+            ("20240615", datetime.date(2024, 6, 15)),
+            ("2024-06-15", datetime.date(2024, 6, 15)),
+            (datetime.date(2024, 6, 15), datetime.date(2024, 6, 15)),
+        ],
+    )
+    async def test_without_run_id_binds_trade_date_as_date_object(self, raw_trade_date, expected):
+        """SC-F1: 无 run_id 分支必须在 DAO 边界经 _to_db_date 归一为 date 对象绑定。
+
+        screening_history.trade_date 为 DATE 列，asyncpg 不接受字符串绑定；此前字符串
+        日期（YYYYMMDD / ISO）直接进谓词，DB 报错被 _read_db_select 默认吞成空历史。
+        """
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        result = await dao.get_history_records(trade_date=raw_trade_date)
+
+        bound = _bound_param_values(dao._read_db_select.call_args[0][0])
+        assert bound == [expected]
+        assert isinstance(bound[0], datetime.date)
+        assert result["id"].tolist() == [1]
+
+    @pytest.mark.asyncio
+    async def test_without_run_id_all_strategies_binds_only_date(self):
+        """无 run_id + 未指定策略：只绑定归一后的日期，语义仍是「该日全策略」。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1, 2]}))
+        result = await dao.get_history_records(trade_date="20240615")
+
+        assert _bound_param_values(dao._read_db_select.call_args[0][0]) == [datetime.date(2024, 6, 15)]
+        assert len(result) == 2
+
+    @pytest.mark.asyncio
+    async def test_without_run_id_with_strategy_binds_date_and_strategy(self):
+        """无 run_id + 指定策略：日期归一与策略过滤并存，绑定顺序不变（日期、策略）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        result = await dao.get_history_records(trade_date="20240615", strategy_name="test")
+
+        assert _bound_param_values(dao._read_db_select.call_args[0][0]) == [datetime.date(2024, 6, 15), "test"]
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_without_run_id_none_trade_date_keeps_null_predicate(self):
+        """trade_date 为 None 时保持既有 IS NULL 语义，不补当前日期（R21 禁止伪造取值）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_history_records(trade_date=None)
+
+        stmt = dao._read_db_select.call_args[0][0]
+        # IS NULL 为无参谓词（compile().params 不含 None 绑定），证明未把 None 伪造成具体日期。
+        assert _bound_param_values(stmt) == []
+        assert "IS NULL" in str(stmt).upper()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("irrelevant_trade_date", ["2024-13-45", "20241345", "not-a-date"])
+    async def test_with_run_id_ignores_trade_date(self, irrelevant_trade_date):
+        """run_id 分支不绑定/解析 trade_date：无关的坏日期不得影响查询，也不得进入绑定参数。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        result = await dao.get_history_records(trade_date=irrelevant_trade_date, run_id="r1")
+
+        assert _bound_param_values(dao._read_db_select.call_args[0][0]) == ["r1"]
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_trade_date", ["2024-13-45", "20241345", "not-a-date"])
+    async def test_invalid_trade_date_passes_through_unchanged(self, invalid_trade_date):
+        """非法日期沿用 _to_db_date 既有契约：原样透传交由 DB 报错，不猜测/不补默认日期。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_history_records(trade_date=invalid_trade_date)
+
+        assert _bound_param_values(dao._read_db_select.call_args[0][0]) == [invalid_trade_date]
 
 
 class TestScreenerDaoGetPendingReviews:

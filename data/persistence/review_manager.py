@@ -1,11 +1,13 @@
 import asyncio
 import datetime
+import functools
 import json
 import logging
 import math
 import typing
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -25,6 +27,7 @@ from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.loop_local import get_loop_local
 from utils.time_utils import get_now, parse_date, to_date
 from utils.prompt_guard import neutralize_external_text
 
@@ -33,6 +36,34 @@ logger = logging.getLogger(__name__)
 # CRITICAL-02：策略结果中承载结构化归因的列名（``strategies.attribution.ATTRIBUTION_COLUMN``
 # 的镜像常量）。R1 禁止 data 层 import strategies 层，故此处复制字面量，两侧修改须同步。
 _ATTRIBUTION_COLUMN = "_filter_attribution"
+
+
+def _serialize_review_cycle[**P, R](
+    func: typing.Callable[P, typing.Awaitable[R]],
+) -> typing.Callable[P, typing.Awaitable[R]]:
+    """按事件循环串行化复盘入口的「读候选 → 预取 → 计算 → 写库」整个周期（DLP-RM-01）。
+
+    ``run_review`` / ``backfill_horizon_returns`` / ``backfill_t1_returns`` 并发交错时，
+    A 读到旧快照后暂停、B 回填并定稿同一记录，A 恢复后仍以旧快照写
+    ``t5_pct=None / alpha=None / label=DRAW``，把已成熟记录回退（DAO 侧仅有
+    ``guard_t1``，无「不得回退成熟值」条件）。
+
+    锁经 ``get_loop_local`` 绑定当前事件循环（R11，不得作类属性跨循环复用），
+    仅在**单进程单事件循环**内互斥；不提供跨进程/跨事件循环的写入安全，亦不改变
+    DAO 幂等语义或公开签名。锁位于 ``@log_async_operation`` 内侧，排队等待会计入
+    该入口的耗时统计。
+    """
+
+    @functools.wraps(func)
+    # wrapper 注解不用 P.args/P.kwargs/R：CodeQL 分析器不识别 PEP 695 类型参数作用域，
+    # 会把嵌套函数注解中的类型参数误报为「可能未初始化的局部变量」；Any 与 ParamSpec
+    # 调用兼容，外层签名仍以 P/R 承载精确类型。
+    async def wrapper(*args: typing.Any, **kwargs: typing.Any) -> typing.Any:
+        lock = get_loop_local("review_manager_cycle_lock", asyncio.Lock)
+        async with lock:
+            return await func(*args, **kwargs)
+
+    return wrapper
 
 
 def serialize_exec_warnings(warnings: Sequence[Message] | None) -> list[dict[str, typing.Any]] | None:
@@ -54,12 +85,30 @@ def serialize_exec_warnings(warnings: Sequence[Message] | None) -> list[dict[str
     return serialized
 
 
-def deserialize_exec_warnings(raw: typing.Any) -> tuple[Message, ...] | None:
-    """JSONB 落库值 → Message 元组（CRITICAL-02 历史回看还原）。
+@dataclass(frozen=True)
+class ExecWarningsParseResult:
+    """``exec_warnings`` JSONB 值的解析结果（D16-009，R21/BT-03）。
+
+    - ``None``（函数返回 ``None``）表示「未记录执行上下文」：SQL NULL / 非法 JSON / 非数组；
+    - ``messages`` + ``corrupted=False``：已记录且全部成员可还原（空数组即空元组）；
+    - ``corrupted=True``：数组本身合法，但至少一个成员不可还原（非 dict、缺 key、params
+      缺失/类型损坏）。调用方必须据此保留「未知/损坏」提示，不得把非空数组洗成「无警告」。
+    """
+
+    messages: tuple[Message, ...]
+    corrupted: bool = False
+
+
+def deserialize_exec_warnings(raw: typing.Any) -> ExecWarningsParseResult | None:
+    """JSONB 落库值 → 解析结果（CRITICAL-02 历史回看还原；D16-009 成员损坏分类）。
 
     ``None``/空值（SQL NULL）表示「该次筛选未记录执行上下文」，返回 ``None`` 由调用方
-    决定渲染「未记录」哨兵；空数组返回空元组（已记录且无警告）。JSON 字符串（raw SQL
-    路径）与已解析 list（SQLAlchemy Core 路径）均接受，非法输入按「未记录」处理。
+    决定渲染「未记录」哨兵；空数组返回空 messages（已记录且无警告）。JSON 字符串（raw SQL
+    路径）与已解析 list（SQLAlchemy Core 路径）均接受，非法 JSON/非数组按「未记录」处理。
+
+    D16-009：数组本身合法但成员损坏时不得静默丢弃。非 dict 成员、缺失/空/非字符串 key
+    记 ``corrupted=True``；``params`` 缺失或非 dict 时保留可识别的 warning key 并记
+    ``corrupted=True``（不把损坏参数伪装成合法空参数）。合法成员的 key/params 原样保留。
     """
     if raw is None or (isinstance(raw, float) and math.isnan(raw)):
         return None
@@ -71,15 +120,22 @@ def deserialize_exec_warnings(raw: typing.Any) -> tuple[Message, ...] | None:
     if not isinstance(raw, list):
         return None
     out: list[Message] = []
+    corrupted = False
     for item in raw:
         if not isinstance(item, dict):
+            corrupted = True
             continue
         key = item.get("key")
-        if not key:
+        if not isinstance(key, str) or not key:
+            corrupted = True
             continue
         params = item.get("params")
-        out.append(Message(str(key), params if isinstance(params, dict) else {}))
-    return tuple(out)
+        if not isinstance(params, dict):
+            # params 缺失/类型损坏：保留 key（已知存在该警告），但标记不完整供调用方提示。
+            corrupted = True
+            params = {}
+        out.append(Message(key, params))
+    return ExecWarningsParseResult(tuple(out), corrupted)
 
 
 def _parse_filter_attribution(raw: typing.Any) -> dict[str, typing.Any] | None:
@@ -132,15 +188,40 @@ def _qfq_return_pct(
     return (tn_close / basis_close) - 1.0
 
 
+# DLP-RM-02: 比值/收益计算的单一「端点有效性」判据（可复用最小入口）。
+# 进入任何比值前统一校验：可转 float（捕获 None/不可转换/超范围）且有限（math.isfinite，
+# 排除 NaN/±Inf）且为正（> 0）。合法返回 float，非法一律 None。
+# 与个股侧 _qfq_return_pct 的有限正值守卫同口径，供指数端点及其后续复用。
+def _finite_positive_price(value: typing.Any) -> float | None:
+    """端点有效性判据：有限且为正的可转 float 值 → float，否则 None。
+
+    None/NaN/±Inf/0/负值/不可转换类型（含 int 溢出）均视为无效，由调用方按缺失处理，
+    避免把「拒绝的基准」伪装成合法收益（R21）。
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    return numeric
+
+
 # RV-01: 基准侧窗口累计收益（百分比）。个股侧 _qfq_return_pct 返回分数、调用方 ×100，
 # 此处直接返回百分比以便与 t5_pct 同为百分数相减算 alpha。指数点位已含分红除权调整、
 # 无 adj_factor（index_daily 无复权因子），无需复权，直接用窗口首尾收盘价比值。
-# 窗口两端任一 close 缺失/0 均视为窗口无意义，返回 None 由调用方跳过避免标签污染
-# （对抗检视 Blocking-1：仅守卫 t0 会让终点缺失时产生 None 除法 TypeError）。
+# DLP-RM-02: 窗口两端任一 close 缺失/0/负/非有限均视为窗口无意义，返回 None 由调用方
+# 跳过避免标签污染（NaN/Inf 会在比值中产生 NaN 或荒谬的超额收益，负端点产出有限但
+# 无意义的超额）；两端点均合法但比值仍溢出为 ±Inf 时，计算后再做 isfinite 校验兜底。
 def _index_window_return_pct(idx_close_t0: float, idx_close_tn: float) -> float | None:
-    if not idx_close_t0 or not idx_close_tn:
+    start = _finite_positive_price(idx_close_t0)
+    end = _finite_positive_price(idx_close_tn)
+    if start is None or end is None:
         return None
-    return (idx_close_tn / idx_close_t0 - 1.0) * 100.0
+    pct = (end / start - 1.0) * 100.0
+    if not math.isfinite(pct):
+        return None
+    return pct
 
 
 # MAJOR-02: 一字涨停可成交性判定容差。stk_limit 的 up_limit 与个股 open 均为名义价，
@@ -212,6 +293,7 @@ class ReviewManager:
         operation_name="t1_review",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
+    @_serialize_review_cycle
     async def run_review(self):
         """
         Main entry point: Review all pending predictions.
@@ -513,8 +595,14 @@ class ReviewManager:
         logger.info("[Review] Completed. Updated %s records.", len(updates))
 
     @log_async_operation(operation_name="t5_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
+    @_serialize_review_cycle
     async def backfill_horizon_returns(self, horizon: int = 5) -> int:
-        """阶段 2：回填所有已满 horizon 个交易日、但 T+{horizon} 仍为 NULL 的复盘记录。
+        """阶段 2：回填所有已满 5 个交易日、但 T+5 仍为 NULL 的复盘记录。
+
+        仅支持 T+5 口径：候选池、更新列（``t5_pct`` / ``t5_price``）与 DAO 均固定为
+        T+5。``horizon`` 仅保留以兼容既有 ``horizon=5`` 调用方；任何其它 horizon
+        （含 T+1）或非整数输入都在查询/IO 之前以 ``ValueError`` 拒绝，避免 T+1
+        开盘→T+1 收盘收益落入 ``t5_pct``、或 B 类以一日指数窗口定稿五日 alpha。
 
         D2-4：``run_review`` 只覆盖近 10 交易日的 pending 记录，一旦预测移出窗口，
         其 T+5 不再被任何机制回访。本方法每日调度一次即可自然覆盖全部历史，
@@ -523,12 +611,18 @@ class ReviewManager:
         只处理 ``review_status='T1_DONE'`` 的记录，分两类（RV-04）：A 类缺 ``t5_pct``
         数值（全量计算）；B 类数值已齐但标签未定稿（``alpha IS NULL``，基准缺失时
         数值-only 解耦写入的记录 + #1097 迁移重置的历史行）——仅补定稿标签。
-        未满 horizon / 停牌缺行 / 复权计算失败的记录保持 NULL，次日重试；基准
+        未满 5 个交易日 / 停牌缺行 / 复权计算失败的记录保持 NULL，次日重试；基准
         缺失时 A 类仍写数值（解耦），B 类留待重试。与 ``_qfq_return_pct`` 共享
         复权口径，避免预测当天与回填口径不一致。
+
+        Raises:
+            RuntimeError: 引擎不可用或批量与逐条降级均失败。返回条数仅在无失败时可信；
+                部分逐条成功可能已落库，调用方不得把异常当作“未发生写入”。
         """
-        if horizon <= 0:
-            raise ValueError("[Review] backfill horizon must be positive")
+        # T+5-only 守卫必须位于一切查询/IO 之前：bool 是 int 子类须先显式拒绝，
+        # 再拒绝非 int（如 5.0/"5"）与任何非 5 的整数，否则 T+1 收益会写入 T+5 列。
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon != 5:
+            raise ValueError("[Review] only the T+5 backfill horizon is supported")
 
         # RV-04: A 类（缺 t5_pct 数值）与 B 类（数值已齐、标签未定稿：基准缺失时
         # 数值-only 解耦写入的记录 + #1097 迁移重置的历史行）分池取数、各自独立
@@ -796,6 +890,7 @@ class ReviewManager:
         return total
 
     @log_async_operation(operation_name="t1_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
+    @_serialize_review_cycle
     async def backfill_t1_returns(self) -> int:
         """阶段 1b：回填所有缺 T+1 的 PENDING/NULL 复盘记录（BIZ-03）。
 
@@ -816,6 +911,10 @@ class ReviewManager:
         写库经 ``_batch_update_results(guard_t1=True)`` 启用 T+1 幂等守卫
         （WHERE 带 ``t1_pct IS NULL``），避免与 run_review 同批并行时把已填的
         T+1 重复覆盖。
+
+        Raises:
+            RuntimeError: 引擎不可用或批量与逐条降级均失败。返回条数仅在无失败时可信；
+                部分逐条成功可能已落库，调用方不得把异常当作“未发生写入”。
         """
         candidates = await self.cache.screener_dao.get_unfilled_t1_predictions()
         if not candidates:
@@ -964,8 +1063,8 @@ class ReviewManager:
         dao = self.cache.screener_dao
         engine = self.cache.engine
         if engine is None:
-            logger.error("[Review] Engine not available for T+5 backfill.")
-            return
+            # 引擎缺失属于调用方可分类失败，不得静默返回（否则公开方法会把计划条数当成功计数）。
+            raise RuntimeError("[Review] Engine not available for T+5 backfill; write result unknown.")
 
         try:
             async with engine.begin() as conn:
@@ -980,39 +1079,48 @@ class ReviewManager:
                         alpha=u.get("alpha"),
                         conn=conn,
                     )
-        except EngineDisposedError:
-            # R5 一致性： disposed 引擎不可恢复，主路径必须上抛避免被吞没.
+        except (EngineDisposedError, asyncio.CancelledError):
+            # R2/R5：取消与 disposed 引擎原样传播，不降级、不聚合.
             raise
         except Exception as e:
             logger.error("[Review] Batch T+5 backfill failed, falling back to individual updates: %s", safe_error(e))
+            failed = 0
             for u in updates:
                 try:
-                    await dao.backfill_t5_prediction(
-                        u["record_id"],
-                        u["t5_pct"],
-                        u["t5_price"],
-                        label=u.get("label"),
-                        index_pct=u.get("index_pct"),
-                        benchmark_code=u.get("benchmark_code"),
-                        alpha=u.get("alpha"),
-                    )
-                except EngineDisposedError:
-                    # R5 一致性：fallback 路径同样必须上抛（与主路径对齐）.
+                    # 逐条事务仍传真实 conn：DAO 的无连接分支会吞掉普通错误，导致 fallback 假成功。
+                    async with engine.begin() as conn:
+                        await dao.backfill_t5_prediction(
+                            u["record_id"],
+                            u["t5_pct"],
+                            u["t5_price"],
+                            label=u.get("label"),
+                            index_pct=u.get("index_pct"),
+                            benchmark_code=u.get("benchmark_code"),
+                            alpha=u.get("alpha"),
+                            conn=conn,
+                        )
+                except (EngineDisposedError, asyncio.CancelledError):
+                    # R2/R5：fallback 路径同样必须原样上抛（与主路径对齐）.
                     raise
                 except Exception as inner_e:
+                    failed += 1
                     logger.error(
                         "[Review] Individual T+5 backfill also failed for record %s: %s",
                         u["record_id"],
                         safe_error(inner_e),
                     )
+            if failed:
+                raise RuntimeError(
+                    f"[Review] T+5 backfill failed for {failed} of {len(updates)} record(s) after per-record fallback"
+                ) from e
 
     async def _batch_finalize_labels(self, label_updates: list[dict]) -> None:
         """RV-04: 单事务批量补定稿标签（对齐 _batch_backfill_t5 的事务与逐条降级语义）。"""
         dao = self.cache.screener_dao
         engine = self.cache.engine
         if engine is None:
-            logger.error("[Review] Engine not available for label finalization.")
-            return
+            # 引擎缺失属于调用方可分类失败，不得静默返回（否则公开方法会把计划条数当成功计数）。
+            raise RuntimeError("[Review] Engine not available for label finalization; write result unknown.")
 
         try:
             async with engine.begin() as conn:
@@ -1025,32 +1133,42 @@ class ReviewManager:
                         alpha=u["alpha"],
                         conn=conn,
                     )
-        except EngineDisposedError:
-            # R5 一致性：disposed 引擎不可恢复，主路径必须上抛避免被吞没.
+        except (EngineDisposedError, asyncio.CancelledError):
+            # R2/R5：取消与 disposed 引擎原样传播，不降级、不聚合.
             raise
         except Exception as e:
             logger.error(
                 "[Review] Batch label finalization failed, falling back to individual updates: %s",
                 safe_error(e),
             )
+            failed = 0
             for u in label_updates:
                 try:
-                    await dao.finalize_prediction_label(
-                        u["record_id"],
-                        label=u["label"],
-                        index_pct=u["index_pct"],
-                        benchmark_code=u["benchmark_code"],
-                        alpha=u["alpha"],
-                    )
-                except EngineDisposedError:
-                    # R5 一致性：fallback 路径同样必须上抛（与主路径对齐）.
+                    # 逐条事务仍传真实 conn：DAO 的无连接分支会吞掉普通错误，导致 fallback 假成功。
+                    async with engine.begin() as conn:
+                        await dao.finalize_prediction_label(
+                            u["record_id"],
+                            label=u["label"],
+                            index_pct=u["index_pct"],
+                            benchmark_code=u["benchmark_code"],
+                            alpha=u["alpha"],
+                            conn=conn,
+                        )
+                except (EngineDisposedError, asyncio.CancelledError):
+                    # R2/R5：fallback 路径同样必须原样上抛（与主路径对齐）.
                     raise
                 except Exception as inner_e:
+                    failed += 1
                     logger.error(
                         "[Review] Individual label finalization also failed for record %s: %s",
                         u["record_id"],
                         safe_error(inner_e),
                     )
+            if failed:
+                raise RuntimeError(
+                    f"[Review] Label finalization failed for {failed} of {len(label_updates)} record(s) "
+                    "after per-record fallback"
+                ) from e
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_pending_predictions(self):
@@ -1296,8 +1414,8 @@ class ReviewManager:
         dao = self.cache.screener_dao
         engine = self.cache.engine
         if engine is None:
-            logger.error("[Review] Engine not available for batch update.")
-            return
+            # 引擎缺失属于调用方可分类失败，不得静默返回（否则调用方会把计划条数当成功计数）。
+            raise RuntimeError("[Review] Engine not available for batch update; write result unknown.")
 
         try:
             async with engine.begin() as conn:
@@ -1316,33 +1434,43 @@ class ReviewManager:
                         conn=conn,
                         guard_t1=guard_t1,
                     )
-        except EngineDisposedError:
-            # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
+        except (EngineDisposedError, asyncio.CancelledError):
+            # R2/R5：取消与 disposed 引擎原样传播，不降级、不聚合.
             raise
         except Exception as e:
             logger.error("[Review] Batch update failed, falling back to individual updates: %s", safe_error(e))
+            failed = 0
             for u in updates:
                 try:
-                    await self._update_result(
-                        u["record_id"],
-                        u["pct"],
-                        u["label"],
-                        index_pct=u["index_pct"],
-                        benchmark_code=u.get("benchmark_code"),
-                        t1_price=u["t1_price"],
-                        t5_pct=u["t5_pct"],
-                        t5_price=u["t5_price"],
-                        alpha=u["alpha"],
-                        review_status=u.get("review_status"),
-                        guard_t1=guard_t1,
-                    )
-                except EngineDisposedError:
-                    # R5 一致性： disposed 引擎不可恢复，fallback 路径同样必须上抛（与主路径对齐）.
+                    # 逐条事务仍传真实 conn：DAO 的无连接分支会吞掉普通错误，导致 fallback 假成功。
+                    async with engine.begin() as conn:
+                        await self._update_result(
+                            u["record_id"],
+                            u["pct"],
+                            u["label"],
+                            index_pct=u["index_pct"],
+                            benchmark_code=u.get("benchmark_code"),
+                            t1_price=u["t1_price"],
+                            t5_pct=u["t5_pct"],
+                            t5_price=u["t5_price"],
+                            alpha=u["alpha"],
+                            review_status=u.get("review_status"),
+                            guard_t1=guard_t1,
+                            conn=conn,
+                        )
+                except (EngineDisposedError, asyncio.CancelledError):
+                    # R2/R5：fallback 路径同样必须原样上抛（与主路径对齐）.
                     raise
                 except Exception as inner_e:
+                    failed += 1
                     logger.error(
                         "[Review] Individual update also failed for record %s: %s", u["record_id"], safe_error(inner_e)
                     )
+            if failed:
+                raise RuntimeError(
+                    f"[Review] Review result update failed for {failed} of {len(updates)} record(s) "
+                    "after per-record fallback"
+                ) from e
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _update_result(
@@ -1358,6 +1486,7 @@ class ReviewManager:
         alpha: typing.Any = None,
         review_status: typing.Any = None,
         guard_t1: bool = False,
+        conn: typing.Any = None,
     ):
         """Update DB with T+1/T+5 review metrics and review_status."""
         await self.cache.screener_dao.update_prediction_result(
@@ -1372,6 +1501,7 @@ class ReviewManager:
             alpha=alpha,
             review_status=review_status,
             guard_t1=guard_t1,
+            conn=conn,
         )
 
     @staticmethod
@@ -1609,8 +1739,10 @@ class ReviewManager:
         run_review 与 backfill_horizon_returns 共用，口径一致：先查缓存（本地库），
         缺失再降级 Tushare API；API 不可得 / 数据缺失返回 None，由调用方决定跳过。
         RV-01 起取 close（收盘点位）供窗口累计收益换算，RV-02 起同时取 open——
-        窗口起点为 T+1 开盘，open 或 close 任一侧缺失即整点 None（窗口无意义，
-        对抗检视：避免以 (None, close) 进窗口导致 TypeError）。
+        窗口起点为 T+1 开盘，open 或 close 任一侧无效即该来源不可用。
+        DLP-RM-04: 本地「有行但端点 NULL/非有限/非正」与「整帧无行」同属无可用点位，
+        必须继续尝试同日 API，不得提前 return None 短路兜底；本地与 API 两支统一经
+        ``_finite_positive_price`` 校验，只有两端点均有效才返回 (open, close)。
         """
         trade_date_str = trade_date.strftime("%Y%m%d")
         try:
@@ -1619,13 +1751,10 @@ class ReviewManager:
                 trade_date=trade_date,
             )
             if df_idx is not None and not df_idx.empty:
-                raw_open = df_idx.iloc[0].get("open")
-                raw_close = df_idx.iloc[0]["close"]
-                open_ok = raw_open is not None and pd.notna(raw_open) is True
-                close_ok = raw_close is not None and pd.notna(raw_close) is True
-                if open_ok and close_ok:
-                    return (float(raw_open), float(raw_close))
-                return None
+                open_px = _finite_positive_price(df_idx.iloc[0].get("open"))
+                close_px = _finite_positive_price(df_idx.iloc[0].get("close"))
+                if open_px is not None and close_px is not None:
+                    return (open_px, close_px)
             try:
                 df_idx_api = await self.api.get_index_daily(
                     ts_code=index_code,
@@ -1633,12 +1762,10 @@ class ReviewManager:
                     end_date=trade_date_str,
                 )
                 if df_idx_api is not None and not df_idx_api.empty:
-                    raw_open = df_idx_api.iloc[0].get("open")
-                    raw_close = df_idx_api.iloc[0]["close"]
-                    open_ok = raw_open is not None and pd.notna(raw_open) is True
-                    close_ok = raw_close is not None and pd.notna(raw_close) is True
-                    if open_ok and close_ok:
-                        return (float(raw_open), float(raw_close))
+                    open_px = _finite_positive_price(df_idx_api.iloc[0].get("open"))
+                    close_px = _finite_positive_price(df_idx_api.iloc[0].get("close"))
+                    if open_px is not None and close_px is not None:
+                        return (open_px, close_px)
                 return None
             except (ValueError, TypeError, KeyError):
                 return None

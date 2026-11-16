@@ -2,10 +2,12 @@
 
 验证:
 - parse_diff: git diff 输出解析，提取源码文件新增行号
-- load_coverage: coverage.json 加载，statements = executed ∪ missing
+- load_coverage: coverage.json 加载，statements = executed ∪ missing；缺测量数组/错型
+  元素/重复/相交/归一化键碰撞/与 summary 矛盾一律 fail-closed
 - compute_diff_coverage: 排除非可执行行（空行/注释）、跳过被 omit 文件、路径规范化
 - _is_source_file: 源码目录/文件判定
 - 分母为 0 的语义区分：仅非可执行行（合法跳过）vs 可执行变更未被统计（fail-closed）
+- 已记录但 statements 为空（测量数组被清空/截断）且存在可执行变更 → fail-closed
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from check_diff_coverage import (  # noqa: E402 - sys.path 注入后导入
     _is_omitted,
     _is_source_file,
     compute_diff_coverage,
+    find_contradictory_measured_files,
     find_executable_added_lines,
     find_unmeasured_files,
     get_diff_added_lines,
@@ -346,21 +349,22 @@ class TestLoadCoverage:
         result = load_coverage(cov_file)
         assert result == {}
 
-    def test_missing_lines_field_defaults_to_empty(self, tmp_path: Path):
-        """coverage.json 无 missing_lines 字段 → missing 默认空集，statements = executed。"""
-        cov_data = {
-            "files": {
-                "app/foo.py": {
-                    "executed_lines": [1, 2],
-                }
-            }
-        }
+    def test_missing_lines_field_raises(self, tmp_path: Path):
+        """coverage.json 缺 missing_lines 数组 → fail-closed（不得按未测量静默跳过）。"""
+        cov_data = {"files": {"app/foo.py": {"executed_lines": [1, 2]}}}
         cov_file = tmp_path / "coverage.json"
         cov_file.write_text(json.dumps(cov_data), encoding="utf-8")
 
-        result = load_coverage(cov_file)
-        assert result["app/foo.py"]["executed"] == {1, 2}
-        assert result["app/foo.py"]["statements"] == {1, 2}
+        with pytest.raises(DiffCoverageInputError, match="missing_lines"):
+            load_coverage(cov_file)
+
+    def test_recorded_but_empty_entry_raises(self, tmp_path: Path):
+        """条目为空对象（D22-003 可达输入）→ fail-closed，不得当作已测量。"""
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(json.dumps({"files": {"config.py": {}}}), encoding="utf-8")
+
+        with pytest.raises(DiffCoverageInputError, match="executed_lines"):
+            load_coverage(cov_file)
 
     def test_missing_files_field_raises(self, tmp_path: Path):
         """coverage.json 缺少合法的 files 字段 → fail-closed，不静默按空覆盖率通过。"""
@@ -377,6 +381,103 @@ class TestLoadCoverage:
 
         with pytest.raises(DiffCoverageInputError, match="files"):
             load_coverage(cov_file)
+
+
+class TestLoadCoverageValidation:
+    """load_coverage: 缺测量数组、错型元素、重复/相交行、键碰撞与 summary 矛盾均 fail-closed。"""
+
+    def _load(self, tmp_path: Path, files: dict) -> dict[str, dict[str, set[int]]]:
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(json.dumps({"files": files}), encoding="utf-8")
+        return load_coverage(cov_file)
+
+    @pytest.mark.parametrize("entry", [None, [], "x", 1])
+    def test_non_object_entry_raises(self, tmp_path: Path, entry):
+        """文件条目不是 JSON 对象 → fail-closed（不得 AttributeError 崩溃）。"""
+        with pytest.raises(DiffCoverageInputError, match="JSON 对象"):
+            self._load(tmp_path, {"app/foo.py": entry})
+
+    def test_missing_executed_lines_raises(self, tmp_path: Path):
+        """缺 executed_lines 数组 → fail-closed。"""
+        with pytest.raises(DiffCoverageInputError, match="executed_lines"):
+            self._load(tmp_path, {"app/foo.py": {"missing_lines": [1]}})
+
+    @pytest.mark.parametrize("value", [None, {}, "1,2", 3])
+    def test_non_list_line_array_raises(self, tmp_path: Path, value):
+        """行号数组不是 list → fail-closed。"""
+        with pytest.raises(DiffCoverageInputError, match="必须为数组"):
+            self._load(tmp_path, {"app/foo.py": {"executed_lines": value, "missing_lines": []}})
+
+    @pytest.mark.parametrize("item", [True, False, 1.0, "1", 0, -1, None])
+    def test_invalid_line_element_raises(self, tmp_path: Path, item):
+        """bool / 浮点 / 字符串 / 非正整数 → fail-closed。"""
+        with pytest.raises(DiffCoverageInputError, match="非法行号"):
+            self._load(tmp_path, {"app/foo.py": {"executed_lines": [item], "missing_lines": []}})
+
+    def test_duplicate_line_raises(self, tmp_path: Path):
+        """同一数组中重复行号 → fail-closed。"""
+        with pytest.raises(DiffCoverageInputError, match="重复行号"):
+            self._load(tmp_path, {"app/foo.py": {"executed_lines": [1, 1], "missing_lines": []}})
+
+    def test_line_in_both_arrays_raises(self, tmp_path: Path):
+        """同一行同时标记已执行与缺失（矛盾）→ fail-closed。"""
+        with pytest.raises(DiffCoverageInputError, match="同时出现"):
+            self._load(tmp_path, {"app/foo.py": {"executed_lines": [1], "missing_lines": [1, 2]}})
+
+    def test_normalized_key_collision_raises(self, tmp_path: Path):
+        """``app\\foo.py`` 与 ``app/foo.py`` 归一化后碰撞 → fail-closed，不得静默覆盖。"""
+        with pytest.raises(DiffCoverageInputError, match="归一化后冲突"):
+            self._load(
+                tmp_path,
+                {
+                    "app\\foo.py": {"executed_lines": [1], "missing_lines": []},
+                    "app/foo.py": {"executed_lines": [], "missing_lines": [2]},
+                },
+            )
+
+    def test_summary_num_statements_mismatch_raises(self, tmp_path: Path):
+        """summary 声明有语句但测量数组为空（截断/清空）→ fail-closed。"""
+        with pytest.raises(DiffCoverageInputError, match="num_statements"):
+            self._load(
+                tmp_path,
+                {
+                    "config.py": {
+                        "executed_lines": [],
+                        "missing_lines": [],
+                        "summary": {"num_statements": 3},
+                    }
+                },
+            )
+
+    def test_summary_num_statements_bool_raises(self, tmp_path: Path):
+        """summary.num_statements 为 bool → fail-closed（bool 是 int 子类）。"""
+        with pytest.raises(DiffCoverageInputError, match="num_statements"):
+            self._load(
+                tmp_path,
+                {"app/foo.py": {"executed_lines": [], "missing_lines": [], "summary": {"num_statements": True}}},
+            )
+
+    def test_summary_consistent_passes(self, tmp_path: Path):
+        """summary.num_statements 与测量行数一致 → 正常加载。"""
+        result = self._load(
+            tmp_path,
+            {
+                "app/foo.py": {
+                    "executed_lines": [1, 2],
+                    "missing_lines": [3],
+                    "summary": {"num_statements": 3, "missing_lines": 1},
+                }
+            },
+        )
+        assert result["app/foo.py"]["statements"] == {1, 2, 3}
+
+    def test_summary_without_num_statements_passes(self, tmp_path: Path):
+        """summary 不含 num_statements（精简夹具/其他工具）→ 不校验，正常加载。"""
+        result = self._load(
+            tmp_path,
+            {"app/foo.py": {"executed_lines": [1], "missing_lines": [], "summary": {}}},
+        )
+        assert result["app/foo.py"]["statements"] == {1}
 
 
 # ============================================================================
@@ -578,6 +679,71 @@ class TestFindUnmeasuredFiles:
         """匹配 omit glob → 有意不计入覆盖率，不算未统计。"""
         diff_lines = {"main.py": [5]}
         assert find_unmeasured_files(diff_lines, {}, ("main.py",)) == []
+
+
+class TestFindContradictoryMeasuredFiles:
+    """find_contradictory_measured_files: 已记录但 statements 为空、且可执行变更存在。"""
+
+    def _write_source(self, tmp_path: Path, relpath: str, lines: list[str]) -> None:
+        source = tmp_path / relpath
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_empty_statements_with_executable_diff_listed(self, tmp_path: Path):
+        """条目已记录但 statements 为空 + 可执行新增行（D22-003）→ 列入矛盾文件。"""
+        self._write_source(tmp_path, "config.py", ["x = 1", "y = 2"])
+        contradictory = find_contradictory_measured_files(
+            {"config.py": [2]},
+            {"config.py": {"executed": set(), "statements": set()}},
+            root=tmp_path,
+        )
+        assert contradictory == {"config.py": [2]}
+
+    def test_empty_statements_with_comment_only_diff_skipped(self, tmp_path: Path):
+        """合法 0 statement 文件的纯注释新增行 → 不算矛盾，保留跳过语义。"""
+        self._write_source(tmp_path, "app/foo.py", ["# header", "# comment"])
+        assert (
+            find_contradictory_measured_files(
+                {"app/foo.py": [2]},
+                {"app/foo.py": {"executed": set(), "statements": set()}},
+                root=tmp_path,
+            )
+            == {}
+        )
+
+    def test_measured_file_not_listed(self, tmp_path: Path):
+        """statements 非空 → 由 compute_diff_coverage 正常统计，不列入矛盾文件。"""
+        self._write_source(tmp_path, "app/foo.py", ["x = 1"])
+        assert (
+            find_contradictory_measured_files(
+                {"app/foo.py": [1]},
+                {"app/foo.py": {"executed": {1}, "statements": {1}}},
+                root=tmp_path,
+            )
+            == {}
+        )
+
+    def test_absent_file_not_listed(self, tmp_path: Path):
+        """文件未收录 → 属 find_unmeasured_files 职责，不重复列入。"""
+        assert find_contradictory_measured_files({"app/missing.py": [1]}, {}, root=tmp_path) == {}
+
+    def test_omitted_file_not_listed(self, tmp_path: Path):
+        """匹配 omit → 有意不计入统计，不按矛盾处理。"""
+        self._write_source(tmp_path, "main.py", ["x = 1"])
+        assert (
+            find_contradictory_measured_files(
+                {"main.py": [1]},
+                {"main.py": {"executed": set(), "statements": set()}},
+                ("main.py",),
+                root=tmp_path,
+            )
+            == {}
+        )
+
+    def test_absent_file_with_executable_diff_listed(self, tmp_path: Path):
+        """coverage 缺键 + 可执行新增行 → 由 find_unmeasured_files 负责（对照断言）。"""
+        self._write_source(tmp_path, "app/missing.py", ["x = 1"])
+        assert find_unmeasured_files({"app/missing.py": [1]}, {}) == ["app/missing.py"]
 
 
 class TestFindExecutableAddedLines:
@@ -1091,6 +1257,88 @@ class TestMainEmptyDenominator:
         )
         self._write_source(tmp_path, "app/foo.py", ["x = 1", "y = 2"])
         assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
+
+
+# ============================================================================
+# main: 已记录但缺测量数组/statements 为空（D22-003）必须 fail-closed
+# ============================================================================
+
+
+class TestMainRecordedButUnmeasured:
+    """main: 「键存在」不等于「已测量」，不得因 statements 为空而静默 exit 0。"""
+
+    def _prepare(self, monkeypatch, tmp_path: Path, files: dict, diff_lines: dict[str, list[int]]) -> Path:
+        import check_diff_coverage as m
+
+        monkeypatch.setattr(m, "ROOT", tmp_path)
+        monkeypatch.setattr(m, "get_diff_added_lines", lambda base: diff_lines)
+        cov_file = tmp_path / "coverage.json"
+        cov_file.write_text(json.dumps({"files": files}), encoding="utf-8")
+        return cov_file
+
+    def _write_source(self, tmp_path: Path, relpath: str, lines: list[str]) -> None:
+        source = tmp_path / relpath
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_missing_arrays_returns_2(self, monkeypatch, tmp_path: Path):
+        """条目为空对象（缺测量数组）+ 可执行 diff → exit 2（D22-003 原假通过场景）。"""
+        cov_file = self._prepare(monkeypatch, tmp_path, {"config.py": {}}, {"config.py": [1]})
+        self._write_source(tmp_path, "config.py", ["x = 1"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
+
+    def test_empty_arrays_with_executable_diff_returns_2(self, monkeypatch, tmp_path: Path):
+        """空测量数组 + 可执行 diff → exit 2（不得把空 statements 当测量完成）。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"config.py": {"executed_lines": [], "missing_lines": []}},
+            {"config.py": [1]},
+        )
+        self._write_source(tmp_path, "config.py", ["x = 1"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict") == 2
+
+    def test_empty_arrays_with_comment_only_diff_returns_0(self, monkeypatch, tmp_path: Path):
+        """合法 0 statement 文件仅注释新增 → 保留合法跳过（exit 0），不误杀。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"config.py": {"executed_lines": [], "missing_lines": []}},
+            {"config.py": [2]},
+        )
+        self._write_source(tmp_path, "config.py", ["x = 1", "# comment"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 0
+
+    def test_invalid_line_element_returns_2(self, monkeypatch, tmp_path: Path):
+        """测量数组含错型元素（bool）→ exit 2，不得崩溃或放行。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"config.py": {"executed_lines": [True], "missing_lines": []}},
+            {"config.py": [1]},
+        )
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 2
+
+    def test_exact_threshold_returns_0(self, monkeypatch, tmp_path: Path):
+        """正常 80%（4/5）且 --strict --threshold 80 → exit 0（阈值边界不变）。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/foo.py": {"executed_lines": [1, 2, 3, 4], "missing_lines": [5]}},
+            {"app/foo.py": [1, 2, 3, 4, 5]},
+        )
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file), "--strict", "--threshold", "80") == 0
+
+    def test_measured_file_non_executable_diff_returns_0(self, monkeypatch, tmp_path: Path):
+        """文件正常测量、diff 仅注释 → 合法跳过 exit 0（既有语义不退化）。"""
+        cov_file = self._prepare(
+            monkeypatch,
+            tmp_path,
+            {"app/foo.py": {"executed_lines": [1], "missing_lines": []}},
+            {"app/foo.py": [2]},
+        )
+        self._write_source(tmp_path, "app/foo.py", ["x = 1", "# comment"])
+        assert _invoke_main(monkeypatch, "--coverage-file", str(cov_file)) == 0
 
 
 # ============================================================================

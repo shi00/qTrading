@@ -549,6 +549,11 @@ def _run_async_coro(coro: Any) -> None:
         asyncio.run(coro)
 
 
+def _method_call_count(vm: _FakeDataExplorerViewModel, method_name: str) -> int:
+    """统计 FakeVM 指定方法的调用次数。"""
+    return sum(1 for name, _ in vm.method_calls if name == method_name)
+
+
 def _make_fake_page() -> FakePage:
     """创建扩展的 FakePage, 支持 run_task/show_toast/pubsub。"""
     page = FakePage()
@@ -2106,6 +2111,147 @@ class TestDataExplorerViewCacheClearedObserver:
         calls = [c[0] for c in fake_vm.method_calls]
         assert "mark_tables_stale" not in calls
 
+    def test_inactive_cache_clear_invalidates_on_activation(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: inactive 期间收到的重置信号延迟到激活时失效一次。
+
+        回归缺陷: 旧实现失活时先推进 last_seq 再跳过 mark_tables_stale,
+        重激活后 seq 相等早退, 通知永久丢失且 tables_loaded 仍为 True。
+        """
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        notify_cache_cleared()
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0, "inactive 时不得失效"
+
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1, "激活后应失效且仅一次"
+
+    def test_multiple_inactive_notifications_coalesce_into_single_invalidation(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: inactive 期间多次通知合并为激活后的单次失效。"""
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        for _ in range(3):
+            notify_cache_cleared()
+            run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0
+
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1, "多次通知应合并为一次失效"
+
+    def test_activation_without_new_signal_does_not_invalidate(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: 无新信号时 active False→True 不误失效。"""
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=False)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        component.kwargs["active"] = True
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0
+
+    def test_mount_after_signal_does_not_invalidate(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: 挂载前已发生的信号不属于本次挂载, 初 mount 不误失效。"""
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        notify_cache_cleared()
+        notify_cache_cleared()
+
+        component = make_component(DataExplorerView)
+        page = _make_fake_page()
+        _mount(component, page=page)
+        run_render_effects(component)
+
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 0
+
+    def test_reactivation_invalidates_only_for_unconsumed_signal(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """M35-02: 反复切换 active 时仅对未消费信号失效, 已消费信号不重放。"""
+        from ui.cache_cleared_state import notify_cache_cleared
+        from ui.views.data_view import DataExplorerView
+
+        fake_vm = _FakeDataExplorerViewModel()
+        monkeypatch.setattr("ui.views.data_view.DataExplorerViewModel", lambda: fake_vm)
+
+        component = make_component(DataExplorerView, active=True)
+        page = _make_fake_page()
+        _mount(component, page=page)
+
+        notify_cache_cleared()
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1
+
+        component.kwargs["active"] = False
+        run_render_effects(component)
+        component.kwargs["active"] = True
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 1, "已消费信号不得随切换重放"
+
+        component.kwargs["active"] = False
+        run_render_effects(component)
+        notify_cache_cleared()
+        run_render_effects(component)
+        component.kwargs["active"] = True
+        run_render_effects(component)
+        assert _method_call_count(fake_vm, "mark_tables_stale") == 2, "新信号应在重激活后失效一次"
+
     def test_cache_cleared_uses_observable_not_pubsub(
         self,
         mock_i18n_state,
@@ -2535,6 +2681,201 @@ class TestSQLConsoleTabAsyncErrorPaths:
         coro = btn_run.on_click(MagicMock())
         with pytest.raises(asyncio.CancelledError):
             _run_async_coro(coro)
+
+
+# ============================================================================
+# 状态响应性测试: SQLConsoleTab status message / color (M35-04)
+# ============================================================================
+
+
+class TestSQLConsoleTabStatusReactivity:
+    """M35-04: 状态文案/颜色不得在组件 state 中固化 locale 与主题快照。
+
+    status 应保存 locale 无关的 ``Message(key, params)`` 与颜色语义名，
+    渲染时按当前 locale / AppColors token 解析，切语言或主题后无需重新挂载。
+    """
+
+    @staticmethod
+    def _mount_with_sql() -> tuple[Any, Any]:
+        """挂载 SQLConsoleTab 并通过模板按钮写入非空 SQL。"""
+        from ui.views.data_view import SQLConsoleTab
+
+        vm = _FakeDataExplorerViewModel()
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
+        result, _ = _mount(component)
+        _find_by_type(result, ft.OutlinedButton)[0].on_click(MagicMock())
+        return component, vm
+
+    @staticmethod
+    def _execute(component: Any) -> Any:
+        """点击执行按钮并渲染 handler 更新后的状态。"""
+        result = render_once(component)
+        _run_async_coro(_find_by_type(result, ft.Button)[0].on_click(MagicMock()))
+        return render_once(component)
+
+    @staticmethod
+    def _texts_equal(result: Any, value: str) -> list[ft.Text]:
+        return [c for c in _find_by_type(result, ft.Text) if (getattr(c, "value", "") or "") == value]
+
+    @staticmethod
+    def _texts_starting(result: Any, prefix: str) -> list[ft.Text]:
+        return [c for c in _find_by_type(result, ft.Text) if (getattr(c, "value", "") or "").startswith(prefix)]
+
+    def test_ready_status_translates_after_locale_switch(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """初始就绪状态在切 locale 后重新翻译，而非沿用 mount 时的字符串。"""
+        from core.i18n import I18n
+        from ui.theme import AppColors
+        from ui.views.data_view import SQLConsoleTab
+
+        vm = _FakeDataExplorerViewModel()
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
+        result, _ = _mount(component)
+
+        initial_ready = I18n.get("data_sql_ready")
+        ready_texts = self._texts_equal(result, initial_ready)
+        assert len(ready_texts) == 1, "初始状态应渲染 data_sql_ready 文案"
+        assert ready_texts[0].color == AppColors.TEXT_SECONDARY
+
+        I18n.set_locale("en_US")
+        result = render_once(component)
+        english_ready = I18n.get("data_sql_ready")
+        assert english_ready != initial_ready
+        assert self._texts_equal(result, english_ready), "切 locale 后就绪状态应重新翻译"
+
+    def test_status_color_resolves_token_after_theme_change(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """状态颜色在渲染时读取 AppColors token，而非保存主题快照。"""
+        from core.i18n import I18n
+        from ui.theme import AppColors
+        from ui.views.data_view import SQLConsoleTab
+
+        vm = _FakeDataExplorerViewModel()
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
+        _mount(component)
+
+        monkeypatch.setattr(AppColors, "TEXT_SECONDARY", "#010203")
+        result = render_once(component)
+
+        ready_texts = self._texts_equal(result, I18n.get("data_sql_ready"))
+        assert len(ready_texts) == 1
+        assert ready_texts[0].color == "#010203", "状态颜色应在渲染时按当前 AppColors token 解析"
+
+    @pytest.mark.parametrize(
+        ("sql_result", "status_key", "zh_contains", "en_contains"),
+        [
+            (
+                {"success": True, "data": pd.DataFrame({"col": [1, 2, 3]}), "error": None},
+                "data_sql_success",
+                "共返回 3 行",
+                "Returned 3 rows.",
+            ),
+            (
+                {"success": True, "data": pd.DataFrame(), "error": None},
+                "data_sql_success_empty",
+                "无匹配结果",
+                "No matching rows.",
+            ),
+            (
+                {"success": True, "data": pd.DataFrame({"col": list(range(200))}), "error": None},
+                "data_sql_success_truncated",
+                "显示前 100 行",
+                "Showing first 100 rows (Total 200).",
+            ),
+            (
+                {"success": False, "data": None, "error": None},
+                "data_sql_error",
+                "执行错误",
+                "Execution Error",
+            ),
+        ],
+    )
+    def test_query_status_translates_after_locale_switch(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        sql_result: dict,
+        status_key: str,
+        zh_contains: str,
+        en_contains: str,
+    ):
+        """执行结果状态（成功/空/截断/无 err 失败）切 locale 后均重新翻译且保留参数。"""
+        from core.i18n import I18n
+
+        component, vm = self._mount_with_sql()
+        vm._sql_result = sql_result
+        result = self._execute(component)
+
+        zh_prefix = I18n.get(status_key).split("{")[0]
+        zh_texts = self._texts_starting(result, zh_prefix)
+        assert zh_texts, f"{status_key} 应在当前 locale 渲染"
+        assert zh_contains in (zh_texts[0].value or ""), f"{status_key} 应保留 format 参数"
+        assert "{" not in (zh_texts[0].value or ""), f"{status_key} 不应残留未格式化占位符"
+
+        # 状态更新后用户 SQL 草稿不得丢失
+        assert _find_by_type(result, fce.CodeEditor)[0].value == "SELECT * FROM stock_basic LIMIT 10"
+
+        I18n.set_locale("en_US")
+        result = render_once(component)
+        en_prefix = I18n.get(status_key).split("{")[0]
+        en_texts = self._texts_starting(result, en_prefix)
+        assert en_texts, f"{status_key} 切 locale 后应重新翻译"
+        assert en_contains in (en_texts[0].value or ""), f"{status_key} 切 locale 后应保留 format 参数"
+
+    def test_query_error_status_keeps_raw_message_across_locale(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """失败且 VM 提供 SqlErrorInfo 时，状态渲染其 i18n key/default 参数。"""
+        from core.i18n import I18n
+
+        component, vm = self._mount_with_sql()
+        vm._sql_result = {"success": False, "data": None, "error": "syntax error near FROM"}
+        result = self._execute(component)
+        assert self._texts_equal(result, "syntax error near FROM"), "失败状态应渲染 SqlErrorInfo 的 default 参数"
+
+        I18n.set_locale("en_US")
+        result = render_once(component)
+        assert self._texts_equal(result, "syntax error near FROM"), "切 locale 后错误原文参数不得丢失"
+
+    def test_executing_status_translates_after_locale_switch(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """执行中状态在 CancelledError 传播后保留，并能随 locale 重新翻译 (R2)。"""
+        from core.i18n import I18n
+
+        async def _cancelling_sql(sql: str) -> dict:
+            raise asyncio.CancelledError()
+
+        component, vm = self._mount_with_sql()
+        vm.execute_sql = _cancelling_sql  # type: ignore[method-assign]
+        result = render_once(component)
+        with pytest.raises(asyncio.CancelledError):
+            _run_async_coro(_find_by_type(result, ft.Button)[0].on_click(MagicMock()))
+
+        result = render_once(component)
+        zh_prefix = I18n.get("data_status_executing").split("{")[0]
+        assert self._texts_starting(result, zh_prefix), "执行中状态应渲染 data_status_executing"
+
+        I18n.set_locale("en_US")
+        result = render_once(component)
+        en_prefix = I18n.get("data_status_executing").split("{")[0]
+        assert self._texts_starting(result, en_prefix), "切 locale 后执行中状态应重新翻译"
 
 
 # ============================================================================

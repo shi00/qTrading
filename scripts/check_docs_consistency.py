@@ -17,11 +17,14 @@
 9. Flet 入口完整性检查：校验 docs/flet/README.md 覆盖全部 docs/flet/*.md 专题文档，
    且不引用不存在的专题文件。
 10. exceptions.yml 例外注册表一致性检查（P1-01）：校验 docs/governance/exceptions.yml 必填字段、
-   id 唯一性、rule_id 存在性、paths 存在性与 expires_at/removal_trigger 二选一。
+   字段类型与非空、未知字段、id 唯一性与格式、rule_id 存在性、paths 非空且为仓库内真实路径
+   （不指向仓库根，空范围不构成全局豁免）与 expires_at/removal_trigger 二选一。
+   owner/approved_by 仅校验身份字段非空，批准真实性仍由人工核验。
 11. canonical-topics.yml 主题映射一致性检查（P2-12）：校验 docs/governance/canonical-topics.yml
    必填字段、id 唯一性、canonical/workflow 路径在仓库中真实存在。
-12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version 相等、
-   last_reviewed 为合法日期且前者不早于后者。
+12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 的
+   ruleset_version 互不漂移（入口为其派生视图），last_reviewed 为合法日期且仅顶行
+   「受影响对象」列出的文档受「不早于顶行变更日期」复核门约束。
 13. 决策树映射一致性检查（DOC-04）：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致——
    每个数据行以行尾 `<!-- route: ... -->` 锚声明承载的 yml topic id（正文任务身份），
    校验「行 → 锚 id → canonical」精确对应（F03：路径集合相等不保证任务归属相等，两行入口
@@ -35,8 +38,8 @@
 17. 检视方法论文档登记检查（DOC-07）：docs/reviews/README.md 以文件级链接登记全部顶层
    方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使检视
    方法论对新会话一跳可达（检视报告不入库，正文落根 reviews/ 为本地 gitignored 产物）。
-18. core 模块清单完整性检查（GDR-11）：断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际
-   core/*.py 文件一致。
+18. core 模块清单完整性检查（GDR-11）：断言 docs/architecture/overview.md §4.2 声明的
+   core/ 模块列表与实际 core/*.py 文件一致（D6 起检查对象自 CLAUDE.md §4.2 迁至架构正文正本）。
 19. ADR 索引完整性检查（GDR-12）：校验 CONTRIBUTING.md 文件级登记全部 docs/adr/*.md
    决策文档。
 20. 书名号章节引用一致性检查（GDR-13）：扫描受检 markdown 中形如 `<文档路径>「<章节名>」`
@@ -81,22 +84,31 @@
 - 3c enforcement 字段与实际 hook / CI job 映射检查（已实现：check_enforcement_mapping()，见 ADR-0005）。
 - Flet 入口完整性检查（已实现：check_flet_hub_completeness()）。
 - exceptions.yml 例外注册表一致性检查（已实现：check_exceptions_yaml_consistency()，P1-01）。
+- 例外有效期与移除条件有效性检查（已实现：check_exceptions_effectiveness()，L10 生产集成）。
 - canonical-topics.yml 主题映射一致性检查（已实现：check_canonical_topics_consistency()，P2-12）。
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
 import json
+import posixpath
 import re
 import subprocess
 import sys
 import tomllib
 import typing
+import urllib.parse
+from collections.abc import Callable, Iterable, Iterator
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
 from io import TextIOWrapper
 from pathlib import Path
+
+import docs_generated
+import docs_markdown
 
 # Windows 默认 GBK 终端会因 emoji（✅/❌）输出触发 UnicodeEncodeError，强制 UTF-8 输出。
 # 在模块加载时配置，确保 main() 与单元测试导入时均生效（不依赖 -X utf8 启动参数）。
@@ -151,6 +163,12 @@ REVIEWS_README_PATH = REVIEWS_DOCS_DIR / "README.md"
 ADR_DOCS_DIR = ROOT / "docs" / "adr"
 SCRIPTS_DIR = ROOT / "scripts"
 CI_CD_PATH = ROOT / "docs" / "guides" / "ci-cd.md"
+
+
+def _load_yaml_file(path: Path) -> typing.Any:
+    """读取治理 YAML 作者源：共用安全 loader（重复 mapping 键报告字段路径与位置）。"""
+    return docs_generated.load_yaml(path.read_text(encoding="utf-8"), source=path.name)
+
 
 # 动态发现 docs/flet/*.md（含 README.md、ui-ux-best-practices.md、canvaskit-rendering-e2e-guide.md 等）
 # 新增 Flet 专题文档会自动纳入门禁，无需手动维护清单
@@ -247,25 +265,18 @@ def _is_excluded(path: Path, scope: str, excludes: tuple[_DocExclusion, ...]) ->
 
 
 def _git_tracked_md_files() -> list[Path] | None:
-    """经 git 索引列出受跟踪的 markdown（受检集单一来源，H1）。
+    """经 git 交付候选列出 markdown（受检集单一来源，H1 + Q15）。
 
-    未跟踪 / gitignored 文件不在索引中，自动被排除。非 git 环境（归档解压、IDE 映射目录、
+    交付候选 = git 索引内文件（已 staged 新增亦在索引内）∪ 调用方经
+    ``DOCS_DELIVERY_CANDIDATES`` 显式申报的暂存前正式页（见
+    ``docs_generated.git_delivery_files``）；未申报的 untracked / gitignored 文件
+    自动排除，不把全部 untracked 升为现行。非 git 环境（归档解压、IDE 映射目录、
     git 不可用）返回 None，由调用方降级为文件系统发现。
-    `-z` 关闭路径转义（quotepath），避免非 ASCII 文件名被转义为八进制序列。
     """
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", "*.md"],
-            cwd=ROOT,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        # git 可执行文件缺失或无法启动
+    files = docs_generated.git_delivery_files(ROOT, "*.md")
+    if files is None:
         return None
-    if result.returncode != 0:
-        return None
-    return [ROOT / rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
+    return [ROOT / rel for rel in files]
 
 
 def _git_tracked_files_under(directory: Path) -> list[str]:
@@ -328,163 +339,261 @@ _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "fl
 
 
 def github_anchor(heading_text: str) -> str:
-    """生成 GitHub 风格 markdown 锚点。
+    """生成 GitHub 风格 markdown 锚点（兼容层，委托 docs_markdown 唯一工厂）。
 
-    规则：转小写 → 移除非 word/空格/连字符字符 → 每个空格独立转连字符（不折叠）。
-    与 GitHub 渲染器行为一致（CJK 保留，标点/emoji/括号移除，连续空格 → 连续连字符）。
+    检视 §5.1 解析边界迁移（D5）+ Q10：锚点语义唯一来源为 ``create_slugger()``，
+    与共享解析视图同源；本函数不再自行固定 Compat 实现，避免消费者后端与解析视图分叉。
+    实际生效后端由 ``docs_markdown.SLUGGER_BACKEND`` 声明（github-slugger 可用则用包，
+    否则回退等价实现）。本函数保留旧名兼容既有调用方与测试，单次调用无历史状态。
+
     例如 "3.1 ❌ 绝对禁止" → 移除 "." 和 "❌" 后得 "31  绝对禁止" → "31--绝对禁止"。
     """
-    s = heading_text.lower()
-    # \w 含字母数字下划线与 Unicode 字母（CJK）；re.UNICODE 默认开启
-    s = re.sub(r"[^\w\s-]", "", s)
-    # GitHub 不折叠连续空格，每个空格独立替换为连字符
-    s = s.replace(" ", "-")
-    return s
+    return docs_markdown.create_slugger().slug(heading_text)
 
 
-# fenced code block 起始/结束行：3 个及以上连续反引号或波浪号，允许前置空白
-_FENCE_LINE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+def parse_doc_view(content: str) -> docs_markdown.DocumentView:
+    """解析 Markdown 文本为统一不可变视图（检视 §5.1：一次解析，全检查复用）。
+
+    check_docs_consistency 不再全文正则再造 Markdown：标题/锚点、标准与引用式链接、
+    HTML ID、代码块/行号映射一律经 docs_markdown 解析视图承载。
+    """
+    return docs_markdown.parse_text(content)
+
+
+def _view_effective_lines(view: docs_markdown.DocumentView) -> list[tuple[int, str]]:
+    """非代码块正文行序列 [(1-based 行号, 原文行)]（行级治理结构扫描的共享底座）。
+
+    代码块区间（含围栏 ```/~~~ 与缩进代码块）来自解析视图 token 行号映射，
+    替代旧手写 ``` 单字符状态机（旧实现漏 ~~~ 围栏与缩进块）。
+    """
+    blocked: set[int] = set()
+    for block in view.code_blocks:
+        blocked.update(range(block.start_line, block.end_line + 1))
+    return [(no, line) for no, line in enumerate(view.source, 1) if no not in blocked]
+
+
+def _view_effective_text(view: docs_markdown.DocumentView) -> str:
+    """非代码块正文拼接文本（保留原始行结构，行号 = 视图行号）。"""
+    return "\n".join(line for _, line in _view_effective_lines(view))
+
+
+@lru_cache(maxsize=1024)
+def _load_doc_view_cached(path_str: str, mtime_ns: int, size: int) -> docs_markdown.DocumentView:
+    """路径+mtime+size 键控的视图缓存：main() 中同一文档被多个检查复用，避免重复解析。
+
+    D5 迁移后每份受检文档平均被 6+ 个检查各解析一次（锚点预载 / 死链 / 书名号 /
+    索引覆盖 / 散文数量守卫等），300 份受检文档全量运行时解析次数从 ~2000 次降至 ~300 次。
+    mtime_ns/size 入键保证文件内容变化后缓存自然失效（测试注入 tmp 文件同路径不同内容）。
+    """
+    del mtime_ns, size  # 仅作缓存键参与
+    return docs_markdown.load_document_view(Path(path_str))
+
+
+def _load_doc_view(path: Path) -> docs_markdown.DocumentView:
+    """读取并解析文档为统一视图（带缓存）；文件读取异常按直接传播边界原样上抛。"""
+    stat = path.stat()
+    return _load_doc_view_cached(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+# 检查器视为「外部链接、无需本地存在性校验」的协议（大小写不敏感，urlsplit 归一化）。
+_EXTERNAL_SCHEMES = frozenset({"http", "https", "mailto"})
+
+
+@dataclass(frozen=True)
+class _LinkTarget:
+    """链接 URL 的分解结果（scheme/netloc/path/query/fragment，本地 path 已解码）。"""
+
+    scheme: str
+    netloc: str
+    path: str
+    query: str
+    fragment: str
+
+    @property
+    def is_external(self) -> bool:
+        """外部协议链接：无需本地文件存在性校验。"""
+        return self.scheme in _EXTERNAL_SCHEMES
+
+    @property
+    def is_non_local(self) -> bool:
+        """非本地链接：外部协议或协议相对地址（`//host/path`）。
+
+        未知协议（如 `ftp:` / `tel:`）不算「非本地」而是「不支持」，由相对链接检查
+        显式报错——否则带 host 的未知协议会被静默跳过（Q09）。
+        """
+        return self.is_external or (not self.scheme and bool(self.netloc))
+
+
+def _split_link_target(url: str) -> _LinkTarget:
+    """统一 URL 分解入口（Q09）：分离 scheme/netloc/path/query/fragment，再解码本地 path。
+
+    解析视图（docs_markdown / markdown-it）按 URL 规范对目标 percent-encode：
+    `中文.md` → `%E4%B8%AD%E6%96%87.md`、`a b.md` → `a%20b.md`。直接拿编码串拼磁盘
+    路径会把编码当文件名而误报，故本地 path 必须解码。解码发生在组件分离之后：
+    - 先分离 query/fragment，`%23`/`%3F` 才不会被误当成锚点/查询分隔符；
+    - 只解码一次，`%2520` 保持为字面 `%20`（避免二次解码把用户显式编码还原成空格）；
+    - query 不参与磁盘路径。
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        # 畸形 URL（如非法 IPv6 主机）：按既有本地路径语义处理，不让检查器崩溃。
+        return _LinkTarget(scheme="", netloc="", path=url, query="", fragment="")
+    path = urllib.parse.unquote(parts.path)
+    if "\x00" in path:
+        # NUL 不是合法文件名字符，解码后会让 Path.resolve()/stat 抛 ValueError；
+        # 保留编码形态，令其按「不存在的本地路径」正常报错而非中断整个检查。
+        path = parts.path
+    return _LinkTarget(
+        scheme=parts.scheme,
+        netloc=parts.netloc,
+        path=path,
+        query=parts.query,
+        fragment=urllib.parse.unquote(parts.fragment),
+    )
+
+
+def _iter_local_urls(view: docs_markdown.DocumentView) -> Iterator[tuple[int, str]]:
+    """统一本地 URL 来源：Markdown 链接 ∪ HTML href，按解析后的目标去重。
+
+    HTML href 经 ``docs_markdown`` 静态解析（不执行 HTML），与同一行指向同一目标的
+    Markdown 链接不重复计入，避免同一死链重复报错。去重键由 ``_split_link_target``
+    归一化（percent-decode 后组件比较）：markdown-it 会编码中文/空格，HTML href 保留
+    原文，不归一化会把同一目标误判为两条；按组件比较也避免 ``%23``（文件名中的 #）
+    与真实锚点被误并。真正的协议/路径校验仍由消费者调用 ``_split_link_target``。
+    """
+    seen: set[tuple[int, str, str, str, str, str]] = set()
+
+    def emit(line: int, raw_url: str) -> Iterator[tuple[int, str]]:
+        url = raw_url.strip()
+        if not url:
+            return
+        target = _split_link_target(url)
+        key = (line, target.scheme, target.netloc, target.path, target.query, target.fragment)
+        if key in seen:
+            return
+        seen.add(key)
+        yield (line, url)
+
+    for link in view.links:
+        yield from emit(link.line, link.target)
+    for href in view.html_hrefs:
+        yield from emit(href.line, href.href)
 
 
 def extract_headings(content: str) -> set[str]:
-    """提取 markdown 文件所有标题对应的锚点集合。
+    """提取 markdown 文件所有标题对应的锚点集合（兼容层，委托统一解析视图）。
 
-    fenced code block 内的行不计入标题，避免示例代码中的 `# xxx` 被当成真实锚点：
-    反引号与波浪号均可开启 fence；关闭 fence 须与开启字符一致且长度不小于开启长度；
-    未闭合的 fence 持续到文末。反引号 fence 的 info string 不得含反引号，
-    否则视为行内代码（如显示 ```` ``` ````）而非 fence 开启。
+    检视 §5.1 解析边界迁移（D5）：旧手写 fence 状态机 + 行级标题正则退役——
+    围栏（```/~~~，含更长围栏与匹配关闭）、缩进代码块、行内代码边界一律由
+    CommonMark token 判定；锚点 slug 经 docs_markdown slugger（github 语义）。
     """
-    anchors: set[str] = set()
-    fence_char: str | None = None
-    fence_len = 0
-    for line in content.splitlines():
-        fence_match = _FENCE_LINE_RE.match(line)
-        if fence_char is not None:
-            if fence_match is not None:
-                fence = fence_match.group(1)
-                if fence[0] == fence_char and len(fence) >= fence_len and not fence_match.group(2).strip():
-                    fence_char = None
-                    fence_len = 0
-            continue
-        if fence_match is not None:
-            fence = fence_match.group(1)
-            # 反引号 fence 的 info string 含反引号时为行内代码，不开启 fence
-            if fence[0] == "~" or "`" not in fence_match.group(2):
-                fence_char = fence[0]
-                fence_len = len(fence)
-                continue
-        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-        if m:
-            anchors.add(github_anchor(m.group(2)))
-    return anchors
+    return {heading.slug for heading in parse_doc_view(content).headings}
 
 
 def check_anchor_dead_links() -> list[str]:
-    """检查项 1：markdown 锚点死链。
+    """检查项 1：markdown 锚点死链（D5 迁移：经统一解析视图判定）。
 
     校验逻辑（spec §11.3 修复锚点逃逸）：
-    1. 同文件锚点（`#anchor`）：直接校验锚点存在性。
+    1. 同文件锚点（`#anchor`）：直接校验锚点存在性（标题 slug ∪ HTML id）。
     2. 跨文件链接（`./file.md#anchor`）：
        a. 先判断目标文件是否存在，不存在立即报错（不跳过）。
        b. 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）。
        c. 文件存在且在 CHECKED_DOCS 中：校验锚点存在性。
 
-    跳过 fenced code block（```...```）内的链接，避免代码示例被误判。
+    链接提取与代码块排除（两类围栏 + 缩进块 + 行内代码）由 docs_markdown 视图
+    token 判定（检视 §5.1 解析边界迁移，替代旧手写 ``` 状态机 + 行级链接正则）；
+    引用式链接（`[t][label]`，已解析成链者）同样纳入锚点校验。Q12：HTML ``href``
+    经 ``html_hrefs`` 一并纳入（只静态解析，不执行 HTML），与 Markdown 链接去重。
     """
     errors: list[str] = []
-    # 预加载所有受检文件的标题集合
-    doc_headings: dict[Path, set[str]] = {}
+    # 预加载所有受检文件的锚点集合（标题 slug ∪ HTML id）
+    doc_anchors: dict[Path, frozenset[str]] = {}
     for doc in CHECKED_DOCS:
-        doc_headings[doc] = extract_headings(doc.read_text(encoding="utf-8"))
-
-    # 匹配 markdown 链接 [text](url)，url 含 #anchor
-    link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+        doc_anchors[doc] = _load_doc_view(doc).anchor_ids()
 
     for doc in CHECKED_DOCS:
-        content = doc.read_text(encoding="utf-8")
-        in_code_block = False
-        for line_no, line in enumerate(content.splitlines(), 1):
-            # 跟踪 fenced code block 状态
-            if line.lstrip().startswith("```"):
-                in_code_block = not in_code_block
+        view = _load_doc_view(doc)
+        for line, url in _iter_local_urls(view):
+            target = _split_link_target(url)
+            # 外部链接与协议相对地址不校验本地文件
+            if target.is_non_local:
                 continue
-            if in_code_block:
+            # 未知协议由 check_relative_dead_links 统一报「不支持」，此处不重复
+            if target.scheme:
                 continue
-            for m in link_pattern.finditer(line):
-                url = m.group(2).strip()
-                # 忽略外部链接
-                if url.startswith(("http://", "https://", "mailto:")):
-                    continue
-                # 只检查带锚点的链接
-                if "#" not in url:
-                    continue
-                anchor = url.split("#", 1)[1]
-                # 锚点为空（如 `[text](./file.md#)` ）跳过
-                if not anchor:
-                    continue
+            # 只检查带锚点的链接
+            if not target.fragment:
+                continue
+            # 解析视图按 URL 规范对目标 percent-encode（中文锚点 → %XX 形态），
+            # 已在统一入口解码（GitHub 渲染器同语义）
+            anchor = target.fragment
 
-                # 提取目标文件路径部分（锚点前的部分）
-                target_path_part = url.split("#", 1)[0]
+            # 同文件锚点：直接校验锚点存在性
+            if not target.path:
+                if anchor not in doc_anchors.get(doc, frozenset()):
+                    errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)")
+                continue
 
-                # 同文件锚点：直接校验锚点存在性
-                if not target_path_part:
-                    if anchor not in doc_headings.get(doc, set()):
-                        errors.append(
-                            f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {doc.name} 中不存在)"
-                        )
-                    continue
+            # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
+            target_path = (doc.parent / target.path).resolve()
+            if not target_path.exists():
+                errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
+                continue
 
-                # 跨文件链接：先检查目标文件存在性（spec §11.3 修复锚点逃逸）
-                target_path = (doc.parent / target_path_part).resolve()
-                if not target_path.exists():
-                    errors.append(f"{doc.name}:{line_no}: 锚点死链 '{url}' (目标文件 '{target_path}' 不存在)")
-                    continue
+            # 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）
+            if target_path not in CHECKED_DOCS:
+                continue
 
-                # 文件存在但不在 CHECKED_DOCS 中：跳过锚点校验（避免误报外部文档）
-                if target_path not in CHECKED_DOCS:
-                    continue
-
-                # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
-                if anchor not in doc_headings.get(target_path, set()):
-                    errors.append(
-                        f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)"
-                    )
+            # 文件存在且在 CHECKED_DOCS 中：校验锚点存在性
+            if anchor not in doc_anchors.get(target_path, frozenset()):
+                errors.append(f"{doc.name}:{line}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_path.name} 中不存在)")
     return errors
 
 
 def check_relative_dead_links() -> list[str]:
-    """检查项 6：相对链接死链（不含锚点的相对路径链接）。
+    """检查项 6：相对链接死链（不含锚点的相对路径链接；D5 迁移：经统一解析视图判定）。
 
-    扫描 CHECKED_DOCS 中所有 markdown 链接 [text](url)，若 url 是相对路径
-    （非 http/mailto，不含 # 锚点），从 source_doc 所在目录解析，若目标文件
-    不存在则报错。
+    扫描 CHECKED_DOCS 中所有 markdown 链接，经统一 URL 入口分离
+    scheme/netloc/path/query/fragment 并解码本地 path 后，从 source_doc 所在目录解析，
+    目标文件不存在则报错。query 不参与磁盘路径（`./f.md?x=1` 校验 `f.md`）；
+    带锚点的链接由 check_anchor_dead_links 处理；未知协议显式报「不支持」而非误报死链。
 
-    跳过 fenced code block（```...```）内的链接，避免代码示例被误判。
+    另检引用式死链（`[text][label]` label 未定义）：解析视图 unresolved_references
+    显式失败（F17：真死链不得漏检、不从全文取样例代替）；围栏/行内代码内的假链接
+    由 token 判定天然排除（检视 §6.4 不误报负例）。Q12：HTML ``href`` 经
+    ``html_hrefs`` 一并纳入（只静态解析，不执行 HTML），与 Markdown 链接去重。
     """
     errors: list[str] = []
-    link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
-
     for doc in CHECKED_DOCS:
-        content = doc.read_text(encoding="utf-8")
-        in_code_block = False
-        for line_no, line in enumerate(content.splitlines(), 1):
-            if line.lstrip().startswith("```"):
-                in_code_block = not in_code_block
+        view = _load_doc_view(doc)
+        for line, url in _iter_local_urls(view):
+            target = _split_link_target(url)
+            # 外部链接与协议相对地址不校验本地文件
+            if target.is_non_local:
                 continue
-            if in_code_block:
+            # 未知协议：明确不支持，不得拼成磁盘路径误报为死链
+            if target.scheme:
+                errors.append(
+                    f"{doc.name}:{line}: 不支持的链接协议 '{target.scheme}:' '{url}' "
+                    f"(仅支持 http/https/mailto 与本地相对路径)"
+                )
                 continue
-            for m in link_pattern.finditer(line):
-                url = m.group(2).strip()
-                # 忽略外部链接
-                if url.startswith(("http://", "https://", "mailto:")):
-                    continue
-                # 只检查不含锚点的相对路径链接（带锚点的由 check_anchor_dead_links 处理）
-                if "#" in url:
-                    continue
-                # 从 source_doc 所在目录解析相对路径
-                target = (doc.parent / url).resolve()
-                if not target.exists():
-                    errors.append(f"{doc.name}:{line_no}: 相对链接死链 '{url}' (目标 '{target}' 不存在)")
+            # 只检查不含锚点的相对路径链接（带锚点的由 check_anchor_dead_links 处理）
+            if target.fragment:
+                continue
+            # 纯 query 链接（`?x=1`）不指向文件，无可校验的本地路径
+            if not target.path:
+                continue
+            # 从 source_doc 所在目录解析相对路径
+            local_path = (doc.parent / target.path).resolve()
+            if not local_path.exists():
+                errors.append(f"{doc.name}:{line}: 相对链接死链 '{url}' (目标 '{local_path}' 不存在)")
+        for ref in view.unresolved_references:
+            errors.append(
+                f"{doc.name}:{ref.line}: 引用式死链 '[{ref.text}][{ref.label}]' "
+                f"(引用定义 '{ref.label}' 在 {doc.name} 中不存在)"
+            )
     return errors
 
 
@@ -499,22 +608,25 @@ def _count_local_hooks() -> int:
 
 
 def check_precommit_hook_count() -> list[str]:
-    """检查项 3：文档中 pre-commit hook 数量与配置一致。"""
+    """检查项 3：文档中 pre-commit hook 数量与配置一致。
+
+    D5 迁移：散文扫描底座改为统一解析视图的非代码块正文行（检视 §5.1 解析边界），
+    替代旧全文 finditer（旧实现把命令示例代码块中的数量自述也当正文）。
+    """
     errors: list[str] = []
     actual_count = _count_local_hooks()
 
+    prose_re = re.compile(r"(\d+)\s*个\s*pre-commit\s*hook")
     for doc in CHECKED_DOCS:
-        content = doc.read_text(encoding="utf-8")
-        # 匹配"项目使用 N 个 pre-commit hook"或"使用 N 个 pre-commit hook"
-        for m in re.finditer(r"(\d+)\s*个\s*pre-commit\s*hook", content):
-            declared = int(m.group(1))
-            if declared != actual_count:
-                # 定位行号便于报错
-                line_no = content[: m.start()].count("\n") + 1
-                errors.append(
-                    f"{doc.name}:{line_no}: 声明 {declared} 个 pre-commit hook，"
-                    f"实际 .pre-commit-config.yaml 有 {actual_count} 个"
-                )
+        view = _load_doc_view(doc)
+        for line_no, line in _view_effective_lines(view):
+            for m in prose_re.finditer(line):
+                declared = int(m.group(1))
+                if declared != actual_count:
+                    errors.append(
+                        f"{doc.name}:{line_no}: 声明 {declared} 个 pre-commit hook，"
+                        f"实际 .pre-commit-config.yaml 有 {actual_count} 个"
+                    )
     return errors
 
 
@@ -562,8 +674,12 @@ def check_workflow_enum() -> list[str]:
 
     断言 .github/workflows/*.yml 每一文件 base（如 `docs-ci.yml`）都在 ci-cd.md 中出现，
     守护 docs-ci / flet-nightly / sidecar 等流水线因仅在文件系统中存在而未被文档登记
-    （CI 前端存在性漂移）。仅做「配置 ⊆ 文档」单向：ci-cd.md 还会引用 audit-allowlist.yml
-    等非 workflow 的 .yml，故不做幽灵方向。
+    （CI 前端存在性漂移）。
+
+    D5（F21 rename 新旧路径并集）：补登记幽灵方向——ci-cd.md 中登记为
+    `.github/workflows/<name>.yml` 形态的引用，实际文件必须存在；workflow rename 后
+    文档残留旧名即报幽灵，使「登记集合 == 实际路径集合」双向一致
+    （旧名与新名的引用闭包取并集后仍须各自可达，rename 必须同步清理旧引用）。
 
     逐文件按文件名断言（F-09 复核修正）：原实现的条件是「文档中存在任意 .yml 引用」，
     未使用循环变量 `wf`，只要 ci-cd.md 提及任一 `.yml` 即对全部 workflow 放行，实为空操作。
@@ -576,9 +692,18 @@ def check_workflow_enum() -> list[str]:
     if not CI_CD_PATH.exists():
         return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
     content = CI_CD_PATH.read_text(encoding="utf-8")
-    for wf in sorted(p.name for p in WORKFLOWS_DIR.glob("*.yml") if p.is_file()):
+    actual_names = {p.name for p in WORKFLOWS_DIR.glob("*.yml") if p.is_file()}
+    for wf in sorted(actual_names):
         if not re.search(rf"(?<![\w.-]){re.escape(wf)}(?![\w.-])", content):
             errors.append(f"workflow 枚举无遗漏: .github/workflows/{wf} 未在 ci-cd.md 登记（F-09）")
+    # 幽灵方向（D5）：文档登记的 workflows 目录引用必须实际存在（rename 后旧名残留即报）
+    workflow_ref_re = re.compile(r"\.github/workflows/([A-Za-z0-9_.-]+\.yml)")
+    for ref_name in sorted(set(workflow_ref_re.findall(content))):
+        if ref_name not in actual_names:
+            errors.append(
+                f"workflow 枚举幽灵: ci-cd.md 登记的 .github/workflows/{ref_name} 不存在"
+                "（workflow rename 后须同步清理旧路径引用，F-09/D5）"
+            )
     return errors
 
 
@@ -671,7 +796,12 @@ def check_note_lazy_format() -> list[str]:
     errors: list[str] = []
     self_path = Path(__file__).resolve()
     # 显式跳过专门测试 NOTE(lazy) 校验规则的测试文件，防止其单元测试用例中的演示文本被误判
-    test_consistency_path = ROOT / "tests" / "unit" / "test_docs_consistency.py"
+    # （D9 迁移：规则测试自 tests/unit/test_docs_consistency.py 迁至 tests/docs/test_consistency.py）
+    test_consistency_path = ROOT / "tests" / "docs" / "test_consistency.py"
+
+    # D5（F17）：扫描根缺失显式失败，不得以空文件集合自然通过（失踪输入空转）
+    if not ROOT.is_dir():
+        return [f"NOTE(lazy) 扫描根不存在，源码契约检查无法执行: {ROOT}"]
 
     for p in ROOT.rglob("*.py"):
         rel_path = p.relative_to(ROOT)
@@ -806,7 +936,7 @@ def _count_exceptions() -> int | None:
     import yaml  # PyYAML 是 transitive 依赖，与 check_exceptions_yaml_consistency 一致延迟 import
 
     try:
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (OSError, yaml.YAMLError):
         return None
     if isinstance(data, dict):
@@ -822,23 +952,26 @@ def check_exception_count_prose() -> list[str]:
     治理清单数量（如 governance-ids.md 的「现存 N 条 R1 例外」）此前为人工自述无守卫：
     新增 EX id 后若遗漏同步 N，会宣称「现存 N 条」却与实际不符。对齐 check_precommit_hook_count
     的散文数量守卫范式。受检范围限 CHECKED_DOCS（markdown），exceptions.yml 以实计为唯一正本。
+    D5（F17）：exceptions.yml 缺失/解析失败不再静默空转——必需源缺失显式失败
+    （check_exceptions_yaml_consistency 仍负责结构细节，两者可重复报错）。
     """
     errors: list[str] = []
     actual = _count_exceptions()
     if actual is None:
-        return errors  # exceptions.yml 缺失/解析失败由 check_exceptions_yaml_consistency 报告
+        return [f"exceptions.yml 缺失或无法解析，例外数量守卫无法执行: {EXCEPTIONS_YAML_PATH}"]
+    prose_re = re.compile(r"现存\s*(\d+)\s*条\s*R1\s*例外")
     for doc in CHECKED_DOCS:
         try:
-            content = doc.read_text(encoding="utf-8")
+            view = _load_doc_view(doc)
         except OSError:
             continue
-        for m in re.finditer(r"现存\s*(\d+)\s*条\s*R1\s*例外", content):
-            declared = int(m.group(1))
-            if declared != actual:
-                line_no = content[: m.start()].count("\n") + 1
-                errors.append(
-                    f"{doc.name}:{line_no}: 声明现存 {declared} 条 R1 例外，exceptions.yml 实际注册 {actual} 条"
-                )
+        for line_no, line in _view_effective_lines(view):
+            for m in prose_re.finditer(line):
+                declared = int(m.group(1))
+                if declared != actual:
+                    errors.append(
+                        f"{doc.name}:{line_no}: 声明现存 {declared} 条 R1 例外，exceptions.yml 实际注册 {actual} 条"
+                    )
     return errors
 
 
@@ -849,8 +982,8 @@ def check_exception_count_prose() -> list[str]:
 # 且不引用不存在的专题文件。新增 docs/flet/*.md 未登记到 README 时 fail closed。
 # =============================================================================
 
-# markdown 链接正则：[text](url)，url 为相对路径（含 ./ 前缀或纯文件名）
-_MD_LINK_PATTERN = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+# markdown 链接提取统一由 docs_markdown 解析视图承担（见 parse_doc_view），
+# 不在本模块保留行级链接正则（两类围栏/行内代码边界由 token 判定）。
 
 
 def check_flet_hub_completeness() -> list[str]:
@@ -873,45 +1006,36 @@ def check_flet_hub_completeness() -> list[str]:
         errors.append(f"Flet 入口文件不存在: {FLET_HUB_PATH}")
         return errors
 
-    readme_content = FLET_HUB_PATH.read_text(encoding="utf-8")
-
     # 枚举 docs/flet/*.md 实际文件（排除 README.md 自身）
     actual_files: set[str] = set()
     for flet_doc in FLET_DOCS_PATHS:
         if flet_doc.name == "README.md":
             continue
         actual_files.add(flet_doc.name)
-
     # 提取 README 中所有 markdown 链接的 url，筛选指向 docs/flet/ 目录内 .md 文件的链接
     # 链接 url 形态：./xxx.md / xxx.md / ./subdir/xxx.md 等（相对 FLET_HUB_PATH 所在目录）
+    # D5 迁移：链接提取经统一解析视图 token 判定，替代旧手写 ``` 状态机 + 行级正则。
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in readme_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    for link in _load_doc_view(FLET_HUB_PATH).links:
+        url = link.target.strip()
+        # 忽略外部链接
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        # 提取文件名部分（去掉锚点和查询参数）
+        url_path = url.split("#", 1)[0].split("?", 1)[0]
+        if not url_path:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            # 忽略外部链接
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            # 提取文件名部分（去掉锚点和查询参数）
-            url_path = url.split("#", 1)[0].split("?", 1)[0]
-            if not url_path:
-                continue
-            # 解析目标文件路径（相对 FLET_HUB_PATH 所在目录）
-            target_path = (FLET_HUB_PATH.parent / url_path).resolve()
-            # 只检查解析后仍在 FLET_DOCS_DIR 目录内的链接（排除 ../CLAUDE.md 等外部链接）
-            try:
-                target_path.relative_to(FLET_DOCS_DIR)
-            except ValueError:
-                # 目标在 docs/flet/ 目录外，跳过（不属于 Flet 专题文档）
-                continue
-            url_basename = target_path.name
-            if url_basename.endswith(".md") and url_basename != "README.md":
-                referenced_files.add(url_basename)
+        # 解析目标文件路径（相对 FLET_HUB_PATH 所在目录）
+        target_path = (FLET_HUB_PATH.parent / url_path).resolve()
+        # 只检查解析后仍在 FLET_DOCS_DIR 目录内的链接（排除 ../CLAUDE.md 等外部链接）
+        try:
+            target_path.relative_to(FLET_DOCS_DIR)
+        except ValueError:
+            # 目标在 docs/flet/ 目录外，跳过（不属于 Flet 专题文档）
+            continue
+        url_basename = target_path.name
+        if url_basename.endswith(".md") and url_basename != "README.md":
+            referenced_files.add(url_basename)
 
     # 检查 1：README 是否覆盖全部专题文件
     missing_in_readme = actual_files - referenced_files
@@ -1022,7 +1146,7 @@ def check_redlines_yaml_consistency() -> list[str]:
     """检查项 7：redlines.yml 与 CLAUDE.md §3.1 红线表一致性（ADR-0003 决策落地）。
 
     校验:
-    1. redlines.yml 可被 yaml.safe_load 解析, 顶层为 dict, 含 "redlines" key (list)
+    1. redlines.yml 可被安全 loader 解析（重复 mapping 键拒绝）, 顶层为 dict, 含 "redlines" key (list)
     2. 每条红线含 7 字段: id/title/description/enforcement/automation_coverage/human_review_required/rule_type
     3. id 格式为 R\\d+; 当前连续 (R1, R2, ..., R_N, 无缺号/重号/跳号)。
        注: 连续性是 append-only「不复用废弃编号」的机器可验证子集——它只能证明当前
@@ -1052,7 +1176,7 @@ def check_redlines_yaml_consistency() -> list[str]:
         return errors
 
     try:
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"redlines.yml YAML 解析失败: {e}")
         return errors
@@ -1116,7 +1240,7 @@ def check_redlines_yaml_consistency() -> list[str]:
     try:
         import yaml  # noqa: F811
 
-        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        exc_data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         exc_data = None
     if isinstance(exc_data, dict) and isinstance(exc_data.get("exceptions"), list):
@@ -1218,12 +1342,14 @@ def check_redline_range_consistency() -> list[str]:
     try:
         import yaml  # PyYAML 是 transitive 依赖，与 check_redlines_yaml_consistency 一致延迟 import
 
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except (ImportError, OSError, yaml.YAMLError):
-        return errors  # yml 缺失/解析失败由 check_redlines_yaml_consistency 报告
+        # D5（F17）：必需源缺失/解析失败显式失败，不再静默空转
+        # （scope 固定责任下本检查自身必须可达，"由 3b 报告"不能作为跳过依据）
+        return [f"redlines.yml 缺失或无法解析，红线总数散文守卫无法执行: {REDLINES_YAML_PATH}"]
     redlines = data.get("redlines") if isinstance(data, dict) else None
     if not isinstance(redlines, list):
-        return errors
+        return [f"redlines.yml 结构非法（无 redlines 列表），红线总数散文守卫无法执行: {REDLINES_YAML_PATH}"]
     rmax = max(int(r["id"][1:]) for r in redlines if isinstance(r, dict) and str(r.get("id", "")).startswith("R"))
 
     for doc in CHECKED_DOCS:
@@ -1398,7 +1524,7 @@ def _check_precommit_hook(
 
 
 def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
-    """提取 GitHub Actions workflow 中的 run: 命令块。
+    """提取 GitHub Actions workflow 中的 run: 命令块（F21 兼容层：仅文本，不含触发器）。
 
     支持 4 种 YAML 风格：
     1. run: pytest（单行无引号）
@@ -1407,8 +1533,46 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
     4. run: >- + 多行折叠块（折叠去尾换行）
 
     用轻量缩进扫描而非完整 YAML 解析，避免 GitHub Actions 表达式带来的解析兼容成本。
+    F21：N5 执行证据判定须用 _extract_run_blocks_with_triggers（触发器感知），
+    本函数保留为旧调用方的文本形态兼容层。
     """
-    blocks: list[str] = []
+    return [block.text for block in _extract_run_blocks_with_triggers(workflow_content)]
+
+
+# 禁用触发器形态（F21：配置存在不冒充执行——禁用步骤/job 下的 run 块不构成执行证据）：
+# - `if: false` / `if: ${{ false }}` / `if: 'false'`（显式永假条件）；
+# - `continue-on-error: true`（失败不阻断 → 不构成「必要门真实运行」证据）。
+# 复合条件表达式（如 `if: ${{ github.event_name == 'dispatch' }}`）按可达处理，
+# 执行必达由真实 CI 运行层证明（粗配置检查只守护机制配置可达，范围见 N5 docstring）。
+_DISABLED_IF_RE = re.compile(r"^if:\s*(?:['\"]|\$\{\{)?\s*false\s*(?:['\"]]|\}\})?\s*$", re.IGNORECASE)
+_CONTINUE_ON_ERROR_TRUE_RE = re.compile(r"^continue-on-error:\s*true\s*$", re.IGNORECASE)
+
+# N5 执行证据排除形态（F21「测试选择/skip 有负例」）：
+# - `--collect-only` / `--co`：仅收集不执行；
+# - `|| true` / `|| :` / `; true`：吞失败命令（失败仍绿 ≠ 必要门真实运行）。
+_PYTEST_COLLECT_ONLY_RE = re.compile(r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?=\s|$).*?(?:--collect-only|--co(?:\s|$))")
+_PYTEST_SWALLOWED_FAILURE_RE = re.compile(
+    r"^\s*(?:python[0-9]*\s+-m\s+)?pytest(?=\s|$).*(?:\|\|\s*(?:true|:)|;\s*true)"
+)
+
+
+@dataclass(frozen=True)
+class _RunBlock:
+    """workflow run 块及其触发器可达性（F21：enabled=False 的块不冒充执行证据）。"""
+
+    text: str
+    enabled: bool
+
+
+def _extract_run_blocks_with_triggers(workflow_content: str) -> list[_RunBlock]:
+    """提取 workflow run: 块并感知其上游触发器（F21）。
+
+    触发器判定（缩进扫描近似）：自 run: 行向上回溯至 `jobs:` 边界，收集路径上全部
+    `if:` / `continue-on-error:` 键值行；任一 `if: false` 形态或 `continue-on-error: true`
+    即判定该 run 块禁用。复合条件按可达处理（无法可靠判定的不冒充「已禁用」，
+    执行必达由真实运行层承担——见模块 F21 范围声明）。
+    """
+    blocks: list[_RunBlock] = []
     lines = workflow_content.splitlines()
     i = 0
     while i < len(lines):
@@ -1421,6 +1585,22 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
             continue
         prefix_str, rest = m.group(1), m.group(2)
         run_indent = len(prefix_str)
+        # —— 触发器回溯（F21）：从 run: 行向上至 jobs: 边界收集 if:/continue-on-error: ——
+        enabled = True
+        for back in range(i - 1, -1, -1):
+            back_line = lines[back]
+            stripped = back_line.strip()
+            if not stripped:
+                continue
+            back_indent = len(back_line) - len(back_line.lstrip())
+            if back_indent < run_indent or (back_indent == run_indent and stripped.startswith("- ")):
+                # 剥离列表项前缀（`- if: false` 与 `if: false` 同义）
+                normalized = stripped[2:].strip() if stripped.startswith("- ") else stripped
+                if re.match(r"^jobs:\s*$", normalized):
+                    break
+                if _CONTINUE_ON_ERROR_TRUE_RE.match(normalized) or _DISABLED_IF_RE.match(normalized):
+                    enabled = False
+                    break
         if rest in ("|", "|-", "|+", ">", ">-", ">+"):
             # 块状字面量 / 折叠块：收集后续更深层缩进的行
             block_lines: list[str] = []
@@ -1437,15 +1617,32 @@ def _extract_workflow_run_blocks(workflow_content: str) -> list[str]:
                     i += 1
                 else:
                     break
-            blocks.append("\n".join(block_lines))
+            blocks.append(_RunBlock(text="\n".join(block_lines), enabled=enabled))
         elif rest:
             # 单行命令：rest 即命令
-            blocks.append(rest)
+            blocks.append(_RunBlock(text=rest, enabled=enabled))
             i += 1
         else:
             # run: 后为空（罕见），跳过
             i += 1
     return blocks
+
+
+def _run_block_is_pytest_evidence(block: _RunBlock) -> bool:
+    """run 块是否构成 N5 的 pytest 执行证据（F21：可达 + 非收集选择 + 未吞失败）。"""
+    if not block.enabled:
+        return False
+    for line in block.text.splitlines():
+        if not PYTEST_COMMAND_PATTERN.search(line):
+            continue
+        # 测试选择排除：--collect-only / --co 仅收集不执行
+        if _PYTEST_COLLECT_ONLY_RE.search(line):
+            continue
+        # 吞失败排除：|| true / || : / ; true 失败仍绿
+        if _PYTEST_SWALLOWED_FAILURE_RE.search(line):
+            continue
+        return True
+    return False
 
 
 def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironment) -> list[str]:
@@ -1518,15 +1715,21 @@ def _check_enforcement_invariants(redlines: list[dict], env: EnforcementEnvironm
                     f"{rid}: N4 enforcement 含 '安全扫描' 但未检测到 Gitleaks workflow 与 .gitleaks.toml 同时存在"
                 )
 
-        # N5: CI-test（在任一 workflow 的 run: 命令块中检测 pytest 命令）
+        # N5: CI-test（在任一 workflow 的 run: 命令块中检测 pytest 命令）。
+        # F21 范围声明：本不变量为**粗配置可达**检查——run 块须触发器可达（非 if:false /
+        # continue-on-error:true）、非 --collect-only 测试选择、未 `|| true` 吞失败；
+        # 复合条件表达式按可达处理，执行必达由真实 CI 运行层证明，粗配置检查不冒充执行。
         if ENFORCEMENT_KEYWORD_CI_TEST in keywords:
             pytest_ok = any(
-                PYTEST_COMMAND_PATTERN.search(block)
+                _run_block_is_pytest_evidence(block)
                 for content in env.workflow_contents
-                for block in _extract_workflow_run_blocks(content)
+                for block in _extract_run_blocks_with_triggers(content)
             )
             if not pytest_ok:
-                errors.append(f"{rid}: N5 enforcement 含 'CI-test' 但 workflow run: 命令块未检测到 pytest 命令")
+                errors.append(
+                    f"{rid}: N5 enforcement 含 'CI-test' 但 workflow 中无触发器可达的 pytest 执行命令"
+                    "（if:false / continue-on-error / --collect-only / || true 均不构成执行证据，F21）"
+                )
 
         # N6~N8: automation_coverage 与 human_review_required 一致性校验
         # 字段缺失时跳过（由 3b check_redlines_yaml_consistency() 守护字段完整性）
@@ -1604,7 +1807,7 @@ def check_enforcement_mapping() -> list[str]:
         return errors
 
     try:
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"redlines.yml YAML 解析失败: {e}")
         return errors
@@ -1693,7 +1896,7 @@ def check_enforcement_reverse_coverage() -> list[str]:
     try:
         import yaml  # noqa: F811
 
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except (yaml.YAMLError, OSError) as e:
         errors.append(f"redlines.yml 解析失败: {e}")
         return errors
@@ -1737,18 +1940,33 @@ EXCEPTION_REQUIRED_FIELDS: frozenset[str] = frozenset(
 )
 # expires_at 与 removal_trigger 二选一必填
 EXCEPTION_EXPIRY_FIELDS: frozenset[str] = frozenset({"expires_at", "removal_trigger"})
+# 字段全集封闭：未登记字段一律拒绝（拼写错误的字段名不得充当豁免依据）
+EXCEPTION_ALLOWED_FIELDS: frozenset[str] = EXCEPTION_REQUIRED_FIELDS | EXCEPTION_EXPIRY_FIELDS
+# 自由文本字段须为非空白字符串；owner/approved_by 只校验身份字段非空，批准真实性仍人工核验
+EXCEPTION_TEXT_FIELDS: tuple[str, ...] = (
+    "reason",
+    "owner",
+    "approved_by",
+    "verification",
+    "validity_criteria",
+)
+EXCEPTION_ID_PATTERN = re.compile(r"^EX-\d{4}$")
 
 
 def check_exceptions_yaml_consistency() -> list[str]:
     """例外注册表一致性检查 (P1-01)。
 
     校验 docs/governance/exceptions.yml：
-    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "exceptions" key (list)。
-    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)。
-    3. expires_at 与 removal_trigger 二选一必填。
-    4. id 唯一且格式为 EX-XXXX。
-    5. rule_id 必须存在于 docs/governance/redlines.yml。
-    6. paths 必须为 list 且每个路径在仓库中真实存在。
+    1. 可被安全 loader 解析（重复 mapping 键拒绝）, 顶层为 dict, 含 "exceptions" key (list)。
+    2. 每条例外必填字段齐全 (id/rule_id/paths/reason/owner/approved_by/verification/validity_criteria)，
+       且字段值严格校验：文本字段为非空字符串；id 须为 EX-XXXX；rule_id 须为非空字符串。
+    3. 字段全集封闭：出现未登记字段即报错。
+    4. expires_at 与 removal_trigger 二选一必填（日期合法性与到期判断由
+       check_exceptions_effectiveness() 负责，本函数不重复）。
+    5. id 唯一且格式为 EX-XXXX。
+    6. rule_id 必须存在于 docs/governance/redlines.yml。
+    7. paths 必须为非空 list，每项为仓库相对、真实存在且不指向仓库根的路径（空范围不构成全局豁免）。
+    8. owner/approved_by 仅校验身份字段非空；批准真实性仍由人工核验，本函数不自动化。
     """
     errors: list[str] = []
 
@@ -1759,7 +1977,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"exceptions.yml YAML 解析失败: {e}")
         return errors
@@ -1775,7 +1993,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
 
     # 收集 redlines.yml 中已注册的 rule_id (用于校验 rule_id 存在性)
     try:
-        redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        redlines_data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError:
         redlines_data = None
     registered_rule_ids: set[str] = set()
@@ -1785,10 +2003,16 @@ def check_exceptions_yaml_consistency() -> list[str]:
         }
 
     seen_ids: set[str] = set()
+    root_resolved = ROOT.resolve()
     for idx, entry in enumerate(exceptions, 1):
         if not isinstance(entry, dict):
             errors.append(f"exceptions[{idx}] 应为 dict, 实际 {type(entry).__name__}")
             continue
+
+        # 未知字段：拼错的字段名不得充当豁免依据
+        unknown_fields = sorted(set(entry.keys()) - EXCEPTION_ALLOWED_FIELDS)
+        if unknown_fields:
+            errors.append(f"exceptions[{idx}] 含未知字段: {unknown_fields}")
 
         # 必填字段
         missing = EXCEPTION_REQUIRED_FIELDS - entry.keys()
@@ -1798,32 +2022,57 @@ def check_exceptions_yaml_consistency() -> list[str]:
         if not (EXCEPTION_EXPIRY_FIELDS & entry.keys()):
             errors.append(f"exceptions[{idx}] 缺少 expires_at 或 removal_trigger (二选一必填)")
 
+        # 自由文本字段：类型与非空（空串/纯空白/null/非字符串均拒绝；
+        # owner/approved_by 只核身份字段非空，批准真实性仍由人工核验）
+        for field in EXCEPTION_TEXT_FIELDS:
+            if field in entry:
+                value = entry[field]
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(f"exceptions[{idx}] {field} 应为非空字符串, 实际 {value!r}")
+
         # id 唯一性与格式
-        exc_id = entry.get("id")
-        if exc_id is not None:
-            if not isinstance(exc_id, str) or not exc_id.startswith("EX-"):
+        if "id" in entry:
+            exc_id = entry["id"]
+            if not isinstance(exc_id, str) or not EXCEPTION_ID_PATTERN.match(exc_id):
                 errors.append(f"exceptions[{idx}] id 格式应为 EX-XXXX, 实际 {exc_id!r}")
             elif exc_id in seen_ids:
                 errors.append(f"exceptions[{idx}] id 重复: {exc_id}")
             else:
                 seen_ids.add(exc_id)
 
-        # rule_id 存在性
-        rule_id = entry.get("rule_id")
-        if rule_id is not None and registered_rule_ids and rule_id not in registered_rule_ids:
-            errors.append(f"exceptions[{idx}] rule_id '{rule_id}' 不存在于 redlines.yml")
+        # rule_id 形态与存在性
+        if "rule_id" in entry:
+            rule_id = entry["rule_id"]
+            if not isinstance(rule_id, str) or not rule_id.strip():
+                errors.append(f"exceptions[{idx}] rule_id 应为非空字符串, 实际 {rule_id!r}")
+            elif registered_rule_ids and rule_id not in registered_rule_ids:
+                errors.append(f"exceptions[{idx}] rule_id '{rule_id}' 不存在于 redlines.yml")
 
-        # paths 存在性
-        paths = entry.get("paths")
-        if isinstance(paths, list):
-            for p in paths:
-                if not isinstance(p, str):
-                    errors.append(f"exceptions[{idx}] paths 元素应为 str, 实际 {type(p).__name__}")
-                    continue
-                if not (ROOT / p).exists():
-                    errors.append(f"exceptions[{idx}] 路径不存在: {p}")
-        elif paths is not None:
-            errors.append(f"exceptions[{idx}] paths 应为 list, 实际 {type(paths).__name__}")
+        # paths 范围：非空 list、仓库相对、仓库内真实存在且不指向仓库根
+        # （空范围不得解释为全局豁免）
+        if "paths" in entry:
+            paths = entry["paths"]
+            if not isinstance(paths, list) or not paths:
+                errors.append(f"exceptions[{idx}] paths 应为非空 list, 实际 {paths!r}")
+            else:
+                for p in paths:
+                    if not isinstance(p, str) or not p.strip():
+                        errors.append(f"exceptions[{idx}] paths 元素应为非空字符串, 实际 {p!r}")
+                        continue
+                    if Path(p).is_absolute():
+                        errors.append(f"exceptions[{idx}] paths 须为仓库相对路径: {p!r}")
+                        continue
+                    try:
+                        resolved = (ROOT / p).resolve()
+                    except (OSError, RuntimeError, ValueError):
+                        errors.append(f"exceptions[{idx}] paths 元素不是合法路径: {p!r}")
+                        continue
+                    if not resolved.is_relative_to(root_resolved):
+                        errors.append(f"exceptions[{idx}] paths 不得指向仓库之外: {p!r}")
+                    elif resolved == root_resolved:
+                        errors.append(f"exceptions[{idx}] paths 不得指向仓库根（空范围不构成全局豁免）: {p!r}")
+                    elif not resolved.exists():
+                        errors.append(f"exceptions[{idx}] 路径不存在: {p}")
 
     # GATE-02: R1 例外条目数 == pyproject.toml "R1: utils must not import business layers" 契约 ignore_imports 条数（GDR-01 条数唯一事实源，
     # 防 exceptions.yml 自己文件里的头注释漂移）。
@@ -1891,19 +2140,20 @@ def check_exceptions_reverse_coverage() -> list[str]:
     """
     errors: list[str] = []
 
-    if not REDLINES_YAML_PATH.exists() or not EXCEPTIONS_YAML_PATH.exists() or not KNOWN_TECHNICAL_DEBT_PATH.exists():
-        # 依赖文件缺失由对应一致性检查（check_redlines_yaml_consistency /
-        # check_exceptions_yaml_consistency / check_note_lazy_format）fail-closed 守护，
-        # 本检查仅在其存在时执行，避免重复报错。
-        return errors
+    # D5（F17）：必需源缺失显式失败，不再静默空转（scope 固定责任下本检查自身必须可达）
+    missing_sources = [
+        str(path) for path in (REDLINES_YAML_PATH, EXCEPTIONS_YAML_PATH, KNOWN_TECHNICAL_DEBT_PATH) if not path.exists()
+    ]
+    if missing_sources:
+        return [f"反向覆盖检查必需源缺失: {', '.join(missing_sources)}"]
 
     import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
     try:
-        redlines_data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
-        exc_data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
-        return errors  # YAML 解析错误由对应检查函数守护，此处静默由它报
+        redlines_data = _load_yaml_file(REDLINES_YAML_PATH)
+        exc_data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
+    except yaml.YAMLError as exc:
+        return [f"反向覆盖检查必需源解析失败: {exc}"]
 
     # 1. EXCEPTIONABLE 红线 id 集合
     exceptable_ids: set[str] = set()
@@ -1965,12 +2215,74 @@ def check_exceptions_reverse_coverage() -> list[str]:
     return errors
 
 
+def check_exceptions_effectiveness(*, today: date | None = None) -> list[str]:
+    """例外有效期与移除条件有效性检查（L10 生产集成：例外不得自动续效）。
+
+    逐条机判 docs/governance/exceptions.yml：
+    1. 声明 expires_at 者须为非空字符串且为合法 ISO 日期；过期（expires_at < 判定日）
+       即报错——须移除该例外或重新批准续期，不得自动续效；
+    2. 声明 removal_trigger 者须为非空白字符串。
+    expires_at 与 removal_trigger 两者皆缺由 check_exceptions_yaml_consistency() 的
+    二选一必填检查负责，本函数不重复报同一问题。
+
+    边界：removal_trigger 是否已实际满足属人工语义判定，机器不判定（checker 只校验
+    expires_at 日期合法性与字段完备性）；逐条人工判定节律与处置见
+    docs/guides/documentation-maintenance.md §9。判定日经关键字参数注入以便测试确定性。
+    """
+    errors: list[str] = []
+    judge_day = today if today is not None else date.today()
+
+    if not EXCEPTIONS_YAML_PATH.exists():
+        errors.append(f"exceptions.yml 不存在: {EXCEPTIONS_YAML_PATH}")
+        return errors
+
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
+    except yaml.YAMLError as e:
+        errors.append(f"exceptions.yml YAML 解析失败: {e}")
+        return errors
+
+    if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
+        errors.append("exceptions.yml 顶层应为 dict 且含 'exceptions' list（例外有效期检查无法执行）")
+        return errors
+
+    for idx, entry in enumerate(data["exceptions"], 1):
+        if not isinstance(entry, dict):
+            errors.append(f"exceptions[{idx}] 应为 dict, 实际 {type(entry).__name__}")
+            continue
+
+        if "expires_at" in entry:
+            expires_raw = entry.get("expires_at")
+            if not isinstance(expires_raw, str) or not expires_raw.strip():
+                errors.append(f"exceptions[{idx}] expires_at 应为非空字符串, 实际 {expires_raw!r}")
+            else:
+                try:
+                    expires_on = date.fromisoformat(expires_raw.strip())
+                except ValueError:
+                    errors.append(f"exceptions[{idx}] expires_at 非法日期: {expires_raw!r}（须为 YYYY-MM-DD）")
+                else:
+                    if expires_on < judge_day:
+                        errors.append(
+                            f"exceptions[{idx}] 例外已过期（expires_at={expires_raw} < 判定日 "
+                            f"{judge_day.isoformat()}）：须移除该例外或重新批准续期，不得自动续效"
+                        )
+
+        if "removal_trigger" in entry:
+            trigger_raw = entry.get("removal_trigger")
+            if not isinstance(trigger_raw, str) or not trigger_raw.strip():
+                errors.append(f"exceptions[{idx}] removal_trigger 应为非空白字符串, 实际 {trigger_raw!r}")
+
+    return errors
+
+
 def check_canonical_topics_consistency() -> list[str]:
     """主题 → canonical 正本映射一致性检查 (P2-12)。
 
     校验 docs/governance/canonical-topics.yml：
-    1. 可被 yaml.safe_load 解析, 顶层为 dict, 含 "topics" key (list)。
-    2. 每个主题必填 id/title/canonical。
+    1. 可被安全 loader 解析（重复 mapping 键拒绝）, 顶层为 dict, 含 "topics" key (非空 list)。
+    2. 每个主题必填 id/title/canonical, 且三者均为非空字符串（null/空串/纯空白拒绝）。
     3. id 唯一。
     4. canonical 路径在仓库中真实存在。
     5. workflow 路径（若存在）在仓库中真实存在。
@@ -1986,7 +2298,7 @@ def check_canonical_topics_consistency() -> list[str]:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(CANONICAL_TOPICS_YAML_PATH)
     except yaml.YAMLError as e:
         errors.append(f"canonical-topics.yml YAML 解析失败: {e}")
         return errors
@@ -1998,6 +2310,9 @@ def check_canonical_topics_consistency() -> list[str]:
     topics = data["topics"]
     if not isinstance(topics, list):
         errors.append(f"'topics' 应为 list, 实际 {type(topics).__name__}")
+        return errors
+    if not topics:
+        errors.append("'topics' 应为非空 list（不得静默当空集合）")
         return errors
 
     seen_ids: set[str] = set()
@@ -2011,9 +2326,17 @@ def check_canonical_topics_consistency() -> list[str]:
         if missing:
             errors.append(f"topics[{idx}] 缺少必填字段: {sorted(missing)}")
 
+        # 必填值形态：id/title/canonical 须为非空字符串（null/空串/纯空白/非字符串均拒绝）
+        for field in ("id", "title", "canonical"):
+            if field not in entry:
+                continue
+            value = entry[field]
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"topics[{idx}] {field} 须为非空字符串, 实际 {value!r}")
+
         # id 唯一性
         topic_id = entry.get("id")
-        if isinstance(topic_id, str):
+        if isinstance(topic_id, str) and topic_id.strip():
             if topic_id in seen_ids:
                 errors.append(f"topics[{idx}] id 重复: {topic_id}")
             else:
@@ -2022,17 +2345,19 @@ def check_canonical_topics_consistency() -> list[str]:
         # canonical 路径存在性
         canonical = entry.get("canonical")
         canonical_path: Path | None = None
-        if isinstance(canonical, str):
+        if isinstance(canonical, str) and canonical.strip():
             canonical_path = ROOT / canonical
             if not canonical_path.exists():
                 errors.append(f"topics[{idx}] canonical 路径不存在: {canonical}")
-        elif canonical is not None:
+        elif canonical is not None and not isinstance(canonical, str):
             errors.append(f"topics[{idx}] canonical 应为 str, 实际 {type(canonical).__name__}")
 
         # workflow 路径存在性（可选）
         workflow = entry.get("workflow")
         if isinstance(workflow, str):
-            if not (ROOT / workflow).exists():
+            if not workflow.strip():
+                errors.append(f"topics[{idx}] workflow 须为非空字符串, 实际 {workflow!r}")
+            elif not (ROOT / workflow).exists():
                 errors.append(f"topics[{idx}] workflow 路径不存在: {workflow}")
         elif workflow is not None:
             errors.append(f"topics[{idx}] workflow 应为 str, 实际 {type(workflow).__name__}")
@@ -2063,9 +2388,7 @@ def _render_agents_invariant_lines() -> list[str]:
     CLAUDE.md 的工具也能拿到可执行的最小安全集（GOV-01）。INVARIANT 与 R18 条目在
     redlines.yml 均有 description 字段（缺字段即刻 KeyError 暴露，不做静默回退）。
     """
-    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 避免未安装时影响其他检查
-
-    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    data = _load_yaml_file(REDLINES_YAML_PATH)
     redlines = data["redlines"]
     lines: list[str] = []
     for entry in redlines:
@@ -2089,9 +2412,7 @@ def _render_claude_executive_block() -> list[str]:
     （工作区整洁）。修复手工摘要仅列 R5 可豁免而漏 R1（EXCEPTIONABLE，例外 16 条）导致的
     「第一屏」失真（F-04，机制推广 DOC-08）。
     """
-    import yaml  # 延迟 import: 与 _render_agents_invariant_lines 保持一致
-
-    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    data = _load_yaml_file(REDLINES_YAML_PATH)
     redlines = data["redlines"]
 
     def _join(rule_type: str, sep: str) -> str:
@@ -2171,16 +2492,22 @@ def check_agents_md_sync() -> list[str]:
     必须等于由 redlines.yml 渲染的结果（见 _render_agents_invariant_lines），从机制上消除多源漂移；
     同时校验区块前声明句披露组成规则（见 _check_agents_declaration）。
     """
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 仅用于解析失败报告
+
     errors: list[str] = []
     if not AGENTS_PATH.exists():
         return [f"AGENTS.md 不存在: {AGENTS_PATH}"]
     content = AGENTS_PATH.read_text(encoding="utf-8")
     start_tag = "<!-- generated:redlines-invariant -->"
+    try:
+        rendered = _render_agents_invariant_lines()
+    except yaml.YAMLError as exc:
+        return [f"redlines.yml YAML 解析失败: {exc}"]
     errors.extend(
         _generated_block_sync(
             content,
             start_tag,
-            _render_agents_invariant_lines(),
+            rendered,
             "AGENTS.md 生成区块与 redlines.yml 不一致（INVARIANT 红线 + R18）。"
             "请改正本 redlines.yml 后同步 AGENTS.md，勿手工修改生成区块。",
             f"AGENTS.md 缺少生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
@@ -2200,51 +2527,71 @@ def check_agents_md_sync() -> list[str]:
 # check_agents_md_min_verify_commands() 经 _generated_block_sync 对 AGENTS.md 镜像做逐行精确比较，
 # 不再对正本做子串检查（与 redlines.yml → AGENTS.md 红线区块同机制）。
 _MIN_VERIFY_START_TAG = "<!-- generated:min-verify-commands -->"
+# 正本受控块 id（与 docs_generated 注册表一致）：块区间经共享块扫描器取得，
+# 不再全文 find——后者会被前置/后置围栏样例中的同名标记诱导（Q07）。
+_MIN_VERIFY_BLOCK_ID = "min-verify-commands"
 # 受控块两条 bullet 的固定标签前缀（受控契约：标签改写/增删 bullet 即视为正本形态漂移，fail-closed）。
 _MIN_VERIFY_GATE_LABEL = "- **变更相关门禁**"
 _MIN_VERIFY_DOC_LABEL = "- **仅 Markdown / 治理文档改动**"
 
 
-def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str], list[str]]:
-    """解析 CONTRIBUTING.md「常用开发与测试命令」受控块中的完整有序命令列表（M2/F02）。
+def _min_verify_block_text(content: str) -> tuple[str, list[str]]:
+    """取 CONTRIBUTING.md 最小验证命令受控块的**已验证块区间**文本（Q07）。
 
-    受控块 = `_MIN_VERIFY_START_TAG` 与 `<!-- /generated -->` 之间恰两条 bullet：
-    「变更相关门禁」（` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet
-    首个「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
+    直接消费 ``docs_generated.scan_blocks()`` 的块契约：围栏/缩进代码块内的同名标记
+    只是示例文本，不构成现行块；不再用全文 ``find`` 定位，避免被前置/后置样例诱导。
+    同时保留 F02 反例防护（Q08 收窄）：受控块结束后、同一小节（至下一个二级标题或
+    文末）内仅识别与受控块标签同前缀的 bullet（真正的命令声明），防止新增命令绕过
+    受控块被静默丢弃；普通说明列表项属于正文，不误判。代码块内的样例文本一并排除。
+    返回 (块内容文本, errors)：失败时文本为空且 errors 非空。
+    """
+    try:
+        blocks = docs_generated.scan_blocks(content, "markdown")
+    except docs_generated.DocsGeneratedError as exc:
+        return "", [f"CONTRIBUTING.md 最小验证命令受控块结构非法: {exc}"]
+    span = blocks.get(_MIN_VERIFY_BLOCK_ID)
+    if span is None:
+        return "", [
+            f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
+            "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
+        ]
+    # 块结束后同节内容：边界与代码块行由共享解析视图给出（围栏内的伪标题/伪命令声明
+    # 只是示例文本），不重新在全文搜索标记。
+    view = docs_markdown.parse_text(content)
+    code_lines = view.code_line_numbers()
+    next_h2 = next((h.line for h in view.headings if h.level == 2 and h.line > span.end_line), None)
+    lines = content.splitlines()
+    scan_end = next_h2 - 1 if next_h2 is not None else len(lines)
+    duplicate_declarations = [
+        line
+        for lineno, line in enumerate(lines, start=1)
+        if span.end_line < lineno <= scan_end
+        and lineno not in code_lines
+        and line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
+    ]
+    if duplicate_declarations:
+        return "", [
+            "CONTRIBUTING.md 最小验证命令受控块后同节内含重复命令声明"
+            "（命令声明只能写入受控块内，防止被静默丢弃，F02）: " + " / ".join(duplicate_declarations)
+        ]
+    return "\n".join(span.content_lines) + ("\n" if span.content_lines else ""), []
+
+
+def _parse_min_verify_command_block(block_text: str) -> tuple[list[str], list[str], list[str]]:
+    """解析最小验证命令受控块的已验证区间文本（M2/F02，Q07）。
+
+    ``block_text`` 为 ``_min_verify_block_text()`` 取得的块内容（或 docs_generated 以
+    ``author_payload="block"`` 校验后传入），不含包裹标记；本函数不再从全文定位块，
+    避免围栏样例中的同名标记冒充作者源。受控块恰两条 bullet：「变更相关门禁」
+    （` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet 首个
+    「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
     「：」之前，不参与解析）。
     返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
-    块缺失/结束标记缺失/含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令
-    均显式报错，不静默跳过（fail-closed）。
+    含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令均显式报错，
+    不静默跳过（fail-closed）。
     """
     errors: list[str] = []
-    start = content.find(_MIN_VERIFY_START_TAG)
-    if start == -1:
-        return (
-            [],
-            [],
-            [
-                f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
-                "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
-            ],
-        )
-    end = content.find(_GENERATED_END_TAG, start + len(_MIN_VERIFY_START_TAG))
-    if end == -1:
-        return [], [], [f"CONTRIBUTING.md 最小验证命令受控块缺少结束标记（{_GENERATED_END_TAG}）"]
-    # F02 反例防护（增加命令）：受控块结束后、同一小节（至下一个「## 」标题或文末）内新出现的
-    # bullet 一律 fail-closed 报错，防止新增命令绕过受控块被静默丢弃；真实正本该区间为 bash 代码块
-    # 与散文（行首非「- 」），不会误报。
-    after_block = content[end + len(_GENERATED_END_TAG) :]
-    next_heading = after_block.find("\n## ")
-    section_after = after_block if next_heading == -1 else after_block[:next_heading]
-    stray_bullets = [line for line in section_after.splitlines() if line.startswith("- ")]
-    if stray_bullets:
-        errors.append(
-            "CONTRIBUTING.md 最小验证命令受控块后同节内含无法识别的行"
-            "（新增命令必须写入受控块内，防止被静默丢弃，F02）: " + " / ".join(stray_bullets)
-        )
-    body_lines = [
-        line for line in content[start + len(_MIN_VERIFY_START_TAG) : end].strip().splitlines() if line.strip()
-    ]
+    body_lines = [line for line in block_text.strip().splitlines() if line.strip()]
     unknown_lines = [
         line for line in body_lines if not line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
     ]
@@ -2318,7 +2665,10 @@ def check_agents_md_min_verify_commands() -> list[str]:
         contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
     except OSError:
         return [f"CONTRIBUTING.md 不存在或不可读: {CONTRIBUTING_PATH}"]
-    gate_commands, doc_commands, parse_errors = _parse_min_verify_command_block(contributing)
+    block_text, block_errors = _min_verify_block_text(contributing)
+    if block_errors:
+        return block_errors
+    gate_commands, doc_commands, parse_errors = _parse_min_verify_command_block(block_text)
     if parse_errors:
         return parse_errors
     content = AGENTS_PATH.read_text(encoding="utf-8")
@@ -2341,12 +2691,18 @@ def check_claude_executive_sync() -> list[str]:
     与 check_agents_md_sync 同机制：CLAUDE.md 的 `<!-- generated:claude-executive -->` 与
     `<!-- /generated -->` 之间内容须等于 redlines.yml 渲染结果（见 _render_claude_executive_block）。
     """
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 仅用于解析失败报告
+
     content = CLAUDE_PATH.read_text(encoding="utf-8")
     start_tag = "<!-- generated:claude-executive -->"
+    try:
+        rendered = _render_claude_executive_block()
+    except yaml.YAMLError as exc:
+        return [f"redlines.yml YAML 解析失败: {exc}"]
     return _generated_block_sync(
         content,
         start_tag,
-        _render_claude_executive_block(),
+        rendered,
         "CLAUDE.md 顶部摘要生成区块与 redlines.yml 不一致（INVARIANT + EXCEPTIONABLE + R18）。"
         "请改正本 redlines.yml 后同步生成区块，勿手工修改。",
         f"CLAUDE.md 缺少顶部摘要生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
@@ -2370,9 +2726,7 @@ def _render_claude_self_check_lines() -> list[str]:
     未声明 self_check 的红线不入清单（R18 有独立执行决策树），首行显式说明其去向，避免
     「清单不完整」的误读。字段缺失即刻跳过而非静默补空（缺字段由本检查的形态校验守护）。
     """
-    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 与 _render_agents_invariant_lines 一致
-
-    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    data = _load_yaml_file(REDLINES_YAML_PATH)
     lines: list[str] = []
     ids: list[str] = []
     for entry in data["redlines"]:
@@ -2399,7 +2753,7 @@ def _check_self_check_field_shape() -> list[str]:
     if not REDLINES_YAML_PATH.exists():
         return [f"redlines.yml 不存在: {REDLINES_YAML_PATH}"]
     try:
-        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(REDLINES_YAML_PATH)
     except yaml.YAMLError as e:
         return [f"redlines.yml YAML 解析失败: {e}"]
     if not isinstance(data, dict) or not isinstance(data.get("redlines"), list):
@@ -2441,7 +2795,7 @@ def check_claude_self_check_sync() -> list[str]:
     return errors
 
 
-# --- DOC-01: 规则集元数据一致性（CLAUDES 与 CONTRIBUTING 的 ruleset_version/last_reviewed 同步）---
+# --- DOC-01: 规则集元数据一致性（入口 ruleset_version 派生自日志顶行；受影响对象 last_reviewed 复核门）---
 # 元数据格式（P2-07 统一格式）：
 #   `> - ruleset_version: 1.3.0（...）`  与  `> - last_reviewed: 2026-09-03`
 _RULESET_VERSION_PATTERN = re.compile(r"ruleset_version[：:]\s*([0-9]+\.[0-9]+\.[0-9]+)")
@@ -2455,24 +2809,53 @@ def _extract_metadata_versions(content: str) -> tuple[str | None, str | None]:
     return (m.group(1) if m else None, d.group(1) if d else None)
 
 
-def _extract_changelog_top_date() -> date | None:
-    """从 ruleset-changelog.md「变更记录」表首条数据行提取变更日期（DS-05）。
+@dataclass(frozen=True)
+class _RulesetChangelogTopEntry:
+    """ruleset-changelog.md「变更记录」表顶行（ruleset_version 的唯一作者记录）。
 
-    表头 `| ruleset_version | 变更日期 | 变更摘要 |`，首条数据行如
-    `| 1.6.0 | 2026-09-14 | ... |`，日期为第 2 列（YYYY-MM-DD）。文件缺失、
-    未找到数据行、或日期非法时返回 None（调用方 fail-closed 报错）。
-    顶行判定与 check_ruleset_changelog_version 一致（锚定「变更记录」标题后取首个数据行）。
+    `affected_text` 为第 4 列「受影响对象」原文；该列缺失时为 None（由复核门消费方
+    fail-closed 报错），显式空值（`—` 等）由 `_parse_affected_objects` 归一为空元组。
+    """
+
+    version: str
+    date_text: str
+    affected_text: str | None
+
+
+# 复核门可守护的对象：仅这三份入口文档承载 last_reviewed 元数据。
+_RULESET_REVIEW_GATED_DOCS: tuple[str, ...] = ("CLAUDE.md", "CONTRIBUTING.md", "AGENTS.md")
+# 「受影响对象」列的空值标记（显式声明本轮不影响任何入口文档 / 历史行未登记）。
+_AFFECTED_NONE_MARKERS = frozenset({"-", "—", "–", "无", "不适用"})
+
+
+def _extract_changelog_top_entry() -> _RulesetChangelogTopEntry | None:
+    """从 ruleset-changelog.md「变更记录」表首条数据行提取顶行记录（DS-05/DS-10）。
+
+    表头 `| ruleset_version | 变更日期 | 变更摘要 | 受影响对象 |`，首条数据行如
+    `| 1.6.0 | 2026-09-14 | ... | CLAUDE.md、AGENTS.md |`。文件缺失、未找到数据行、
+    或首列不是 x.y.z 时返回 None（调用方 fail-closed 报错）；日期合法性由调用方校验。
+    标题与代码块边界经 docs_markdown 解析视图判定：围栏内的伪标题/伪表格不得冒充日志结构。
     """
     if not RULESET_CHANGELOG_PATH.exists():
         return None
-    lines = RULESET_CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
-    start = 0
-    for _i, line in enumerate(lines):
-        if line.strip() == "## 变更记录":
-            start = _i + 1
+    view = docs_markdown.load_document_view(RULESET_CHANGELOG_PATH)
+    heading_index: int | None = None
+    for idx, heading in enumerate(view.headings):
+        if heading.text.strip() == "变更记录" and heading.level == 2:
+            heading_index = idx
             break
-    for line in lines[start:]:
-        stripped = line.strip()
+    if heading_index is None:
+        return None
+    section_end = len(view.source) + 1
+    for nxt in view.headings[heading_index + 1 :]:
+        if nxt.level <= 2:
+            section_end = nxt.line
+            break
+    code_lines = view.code_line_numbers()
+    for lineno in range(view.headings[heading_index].end_line + 1, section_end):
+        if lineno in code_lines:
+            continue  # 代码块内的伪表格不算变更记录
+        stripped = view.source[lineno - 1].strip()
         if not stripped.startswith("|"):
             continue
         if re.fullmatch(r"\|[\s\-:]+\|", stripped):
@@ -2481,27 +2864,46 @@ def _extract_changelog_top_date() -> date | None:
         if not cols or cols[0] in {"", "ruleset_version"}:
             continue  # 表头或空行
         if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]) and len(cols) >= 2:
-            try:
-                return date.fromisoformat(cols[1])
-            except ValueError:
-                return None
+            return _RulesetChangelogTopEntry(
+                version=cols[0],
+                date_text=cols[1],
+                affected_text=cols[3] if len(cols) >= 4 else None,
+            )
     return None
 
 
+def _extract_changelog_top_date() -> date | None:
+    """提取顶行变更日期（DS-05）；记录缺失或日期非法时返回 None（调用方 fail-closed）。"""
+    entry = _extract_changelog_top_entry()
+    if entry is None:
+        return None
+    try:
+        return date.fromisoformat(entry.date_text)
+    except ValueError:
+        return None
+
+
+def _parse_affected_objects(cell: str | None) -> tuple[str, ...] | None:
+    """解析顶行「受影响对象」列；列缺失返回 None（fail-closed），显式空值返回空元组。"""
+    if cell is None:
+        return None
+    tokens = [token.strip() for token in re.split(r"[,，、]", cell) if token.strip()]
+    if all(token in _AFFECTED_NONE_MARKERS for token in tokens):
+        return ()
+    return tuple(tokens)
+
+
 def check_ruleset_metadata_consistency() -> list[str]:
-    """检查项 12：CLAUDE.md / CONTRIBUTING.md / AGENTS.md 规则集元数据一致性（DOC-01/DOC-13/DS-05）。
+    """检查项 12：入口文档规则集元数据一致性（DOC-01/DOC-13/DS-05）。
 
-    「对应版本」声明已随版本字面量收敛移除（版本唯一正本为 pyproject.toml，
-    verify-versions 对应检查一并删除），本检查守护 `ruleset_version` 与 `last_reviewed`
-    两个字段——它们**从未被任何检查读取**（DOC-01 门禁空白的主因），修复后禁止再漂移。
-    随后 DOC-13 将孤儿文件 AGENTS.md 一并纳入
-    ruleset_version 守护（AGENTS 作为跨工具入口，规则集版本必须与宪法同步）。
+    ruleset_version 的唯一作者是 ruleset-changelog.md「变更记录」表顶行（其派生视图
+    由 check_ruleset_changelog_version 校验）；本检查守护 last_reviewed：
 
-    断言：
-    1. 三份文件均有 ruleset_version，且值相等。
-    2. 三份文件均有 last_reviewed，且值为合法日期（AGENTS 为跨工具入口，审核时间与宪法同步）。
-    3. CONTRIBUTING.md / AGENTS.md 的 last_reviewed 均不早于 CLAUDE.md（更新自由度不低于宪法）。
-    4. 三份文件的 last_reviewed 均不早于 ruleset-changelog.md 顶行变更日期（治理变更后须重新审核同步，DS-05）。
+    1. 三份文件均有 last_reviewed，且值为合法日期（AGENTS 为跨工具入口）。
+    2. 复核门只作用于顶行「受影响对象」列出的文档：其 last_reviewed 不得早于顶行
+       变更日期（受影响对象确须复核）。未列出的文档保留真实复核日期，不因日志递增
+       或其他入口文档更新而被迫同步（日期表达真实复核事件，不设跨文件无条件下限）。
+    3. 顶行缺「受影响对象」列、列入未受守护的对象或日期非法时一律 fail-closed。
     """
     errors: list[str] = []
     claude_ver, claude_reviewed = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
@@ -2522,12 +2924,12 @@ def check_ruleset_metadata_consistency() -> list[str]:
     if claude_ver is not None and contributing_ver is not None and claude_ver != contributing_ver:
         errors.append(
             f"ruleset_version 漂移: CLAUDE.md={claude_ver} != CONTRIBUTING.md={contributing_ver} "
-            "(两文件须同步，规则集版本规则变更时递增)"
+            "(入口为规则集日志的派生视图，须与 ruleset-changelog 顶行版本一致)"
         )
     if claude_ver is not None and agents_ver is not None and claude_ver != agents_ver:
         errors.append(
             f"ruleset_version 漂移: CLAUDE.md={claude_ver} != AGENTS.md={agents_ver} "
-            "(AGENTS 为跨工具入口，规则集版本须与宪法同步)"
+            "(AGENTS 为跨工具入口，须与 ruleset-changelog 顶行版本一致)"
         )
 
     if claude_reviewed is None:
@@ -2537,51 +2939,56 @@ def check_ruleset_metadata_consistency() -> list[str]:
     if agents_ver is not None and agents_reviewed is None:
         errors.append("AGENTS.md 缺少 last_reviewed 元数据字段")
 
-    # DS-05：last_reviewed 不得早于 ruleset-changelog 顶行变更日期（治理变更后须重新审核同步）。
-    changelog_date = _extract_changelog_top_date()
-    if changelog_date is None:
-        errors.append("ruleset-changelog.md「变更记录」表未找到合法顶行变更日期 (YYYY-MM-DD)")
-
-    if claude_reviewed is not None and contributing_reviewed is not None and agents_reviewed is not None:
+    parsed_dates: dict[str, date] = {}
+    for _name, _raw in (
+        ("CLAUDE.md", claude_reviewed),
+        ("CONTRIBUTING.md", contributing_reviewed),
+        ("AGENTS.md", agents_reviewed),
+    ):
+        if _raw is None:
+            continue
         try:
-            claude_date = date.fromisoformat(claude_reviewed)
-            contributing_date = date.fromisoformat(contributing_reviewed)
-            agents_date = date.fromisoformat(agents_reviewed)
+            parsed_dates[_name] = date.fromisoformat(_raw)
         except ValueError:
-            errors.append("CLAUDE.md/CONTRIBUTING.md/AGENTS.md 的 last_reviewed 不是合法日期 (YYYY-MM-DD)")
-        else:
-            if contributing_date < claude_date:
-                errors.append(
-                    f"CONTRIBUTING.md last_reviewed({contributing_reviewed}) 早于 "
-                    f"CLAUDE.md last_reviewed({claude_reviewed})"
-                )
-            if agents_date < claude_date:
-                errors.append(
-                    f"AGENTS.md last_reviewed({agents_reviewed}) 早于 CLAUDE.md last_reviewed({claude_reviewed})"
-                )
-            if changelog_date is not None:
-                for _name, _date in (
-                    ("CLAUDE.md", claude_date),
-                    ("CONTRIBUTING.md", contributing_date),
-                    ("AGENTS.md", agents_date),
-                ):
-                    if _date < changelog_date:
-                        errors.append(
-                            f"{_name} last_reviewed({_date.isoformat()}) 早于 "
-                            f"ruleset-changelog 顶行变更日期({changelog_date.isoformat()}) "
-                            "(治理变更后须重新审核并同步 last_reviewed)"
-                        )
+            errors.append(f"{_name} 的 last_reviewed({_raw}) 不是合法日期 (YYYY-MM-DD)")
+
+    entry = _extract_changelog_top_entry()
+    if entry is None:
+        errors.append("ruleset-changelog.md「变更记录」表未找到合法顶行变更日期 (YYYY-MM-DD)")
+        return errors
+    try:
+        changelog_date = date.fromisoformat(entry.date_text)
+    except ValueError:
+        errors.append(f"ruleset-changelog.md 顶行变更日期({entry.date_text}) 不是合法日期 (YYYY-MM-DD)")
+        return errors
+
+    affected = _parse_affected_objects(entry.affected_text)
+    if affected is None:
+        errors.append("ruleset-changelog.md 顶行缺少「受影响对象」列（须声明本轮需复核的入口文档，无则为 —）")
+        return errors
+    unknown = [name for name in affected if name not in _RULESET_REVIEW_GATED_DOCS]
+    if unknown:
+        errors.append(
+            f"ruleset-changelog.md 顶行「受影响对象」含未受复核门守护的对象: {', '.join(unknown)} "
+            f"(仅支持 {' / '.join(_RULESET_REVIEW_GATED_DOCS)})"
+        )
+    for name in affected:
+        doc_date = parsed_dates.get(name)
+        if doc_date is not None and doc_date < changelog_date:
+            errors.append(
+                f"{name} last_reviewed({doc_date.isoformat()}) 早于 ruleset-changelog 顶行变更日期"
+                f"({changelog_date.isoformat()})（该文档在顶行「受影响对象」内，须重新审核并更新 last_reviewed）"
+            )
     return errors
 
 
 def check_ruleset_changelog_version() -> list[str]:
-    """检查项：规则集变更日志顶行版本与宪法正本一致（DS-10）。
+    """检查项：ruleset-changelog 顶行是 ruleset_version 的唯一作者（DS-10）。
 
-    ruleset-changelog.md「变更记录」表在每次 ruleset_version 递增时于顶部追加一行，
-    首条数据行应为当前正本最新版本。断言其与 CLAUDE.md 的 ruleset_version 一致
-    （CLAUDE/CONTRIBUTING/AGENTS 三文件 ruleset_version 同步已由
-    check_ruleset_metadata_consistency 守护，故取 CLAUDE.md 为正本即可）。
-    变更日志缺失、首行无合法版本号、或版本漂移时一律 fail-closed 报错。
+    「变更记录」表在 ruleset_version 递增时于顶部追加一行，该顶行即版本作者记录；
+    CLAUDE.md / CONTRIBUTING.md / AGENTS.md 的 ruleset_version 均为派生视图，必须等于
+    顶行版本（不得以宪法版本反向认证日志）。日志缺失、顶行无合法版本号或入口漂移时
+    一律 fail-closed 报错。
     """
     errors: list[str] = []
     if not RULESET_CHANGELOG_PATH.exists():
@@ -2592,44 +2999,30 @@ def check_ruleset_changelog_version() -> list[str]:
         errors.append(f"规则集变更日志不存在: {display}")
         return errors
 
-    changelog_ver: str | None = None
-    changelog_lines = RULESET_CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
-    # 锚定「变更记录」标题后的片段：避免文件其它位置出现 x.y.z 首列行干扰取行（对抗检视 P2）
-    start = 0
-    for _i, _line in enumerate(changelog_lines):
-        if _line.strip() == "## 变更记录":
-            start = _i + 1
-            break
-    for line in changelog_lines[start:]:
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        if re.fullmatch(r"\|[\s\-:]+\|", stripped):
-            continue  # 表格分隔行（|---|）
-        cols = [c.strip() for c in stripped.strip("|").split("|")]
-        if not cols or cols[0] in {"", "ruleset_version"}:
-            continue  # 表头（首列固定为 ruleset_version 标题）或空行
-        if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", cols[0]):
-            changelog_ver = cols[0]
-            break  # 首条数据行即最新版本
-
-    if changelog_ver is None:
+    entry = _extract_changelog_top_entry()
+    if entry is None:
         errors.append("ruleset-changelog.md「变更记录」表未找到首行合法 x.y.z 版本号")
         return errors
 
-    claude_ver, _ = _extract_metadata_versions(CLAUDE_PATH.read_text(encoding="utf-8"))
-    if claude_ver is None:
-        errors.append("CLAUDE.md 缺少 ruleset_version 元数据字段")
-        return errors
-    if claude_ver != changelog_ver:
-        errors.append(
-            f"ruleset-changelog 顶行版本({changelog_ver}) != CLAUDE.md ruleset_version({claude_ver}) "
-            "(ruleset_version 递增须在 ruleset-changelog.md 变更记录表顶部追加一行)"
-        )
+    for _name, _path in (
+        ("CLAUDE.md", CLAUDE_PATH),
+        ("CONTRIBUTING.md", CONTRIBUTING_PATH),
+        ("AGENTS.md", AGENTS_PATH),
+    ):
+        if _name == "AGENTS.md" and not AGENTS_PATH.exists():
+            continue
+        ver, _ = _extract_metadata_versions(_path.read_text(encoding="utf-8"))
+        if ver is None:
+            errors.append(f"{_name} 缺少 ruleset_version 元数据字段")
+        elif ver != entry.version:
+            errors.append(
+                f"{_name} ruleset_version({ver}) != ruleset-changelog 顶行版本({entry.version}) "
+                "(日志记录为版本作者，入口 ruleset_version 须派生自顶行记录)"
+            )
     return errors
 
 
-# --- DOC-04: 决策树与其机器可读镜像的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
+# --- DOC-04: 决策树生成视图与判据正本的一致性（CLAUDE.md §1.8 ↔ canonical-topics.yml）---
 # CLAUDE.md §1.8「必读入口」列既可能以 markdown 链接 `[text](./docs/x.md)` 出现，
 # 也可能以裸路径文本出现（如 `docs/guides/how-to.md「7. 新增回测配置」`、`CONTRIBUTING.md「...」`）。
 # canonical-topics.yml 的 canonical 值统一为仓库相对路径（如 `docs/patterns/mvvm.md` / `CONTRIBUTING.md`）。
@@ -2655,12 +3048,261 @@ def _load_canonical_topics() -> list[dict] | None:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(CANONICAL_TOPICS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("topics"), list):
         return None
     return [t for t in data["topics"] if isinstance(t, dict)]
+
+
+# ---------------------------------------------------------------------------
+# D36：文档变更影响分析（T12 / LA03/04/16）
+# 读取真实作者源（canonical-topics.yml 的 canonical/workflow 路由）、消费者文本引用
+# 与 old/new 路径并集；未映射项显式进入 unresolved。只做一次临时计算，不建永久库。
+# ---------------------------------------------------------------------------
+
+_IMPACT_AUTHOR_PREFIXES: tuple[str, ...] = (
+    "docs/",
+    "requirements/",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "README.md",
+)
+# 消费者发现范围（L02：调用方/摘要/随包说明均查，不能仅凭目录名把活消费者排除）：
+# - 调用方/门禁消费：tests/、scripts/、.github/
+# - 正文/随包说明：docs/、man/、requirements/、resources/ 的 markdown（相对链接经共享解析视图）
+# - 源码静态消费：生产源码中的路径引用
+# - 随包清单：PyInstaller spec 与安装器脚本
+_IMPACT_CONSUMER_PREFIXES: tuple[str, ...] = ("tests/", "scripts/", ".github/")
+_IMPACT_DOC_PREFIXES: tuple[str, ...] = ("docs/", "man/", "requirements/", "resources/")
+_IMPACT_SOURCE_PREFIXES: tuple[str, ...] = (
+    "app/",
+    "core/",
+    "data/",
+    "services/",
+    "strategies/",
+    "ui/",
+    "utils/",
+    "alembic/",
+    "hooks/",
+    "sidecars/",
+    "main.py",
+    "config.py",
+)
+_IMPACT_PACKAGED_PREFIXES: tuple[str, ...] = ("installer.iss", "AStockScreener.spec")
+_IMPACT_SCAN_PREFIXES: tuple[str, ...] = (
+    *_IMPACT_CONSUMER_PREFIXES,
+    *_IMPACT_DOC_PREFIXES,
+    *_IMPACT_SOURCE_PREFIXES,
+    *_IMPACT_PACKAGED_PREFIXES,
+)
+_IMPACT_SCANNED_SUFFIXES: frozenset[str] = frozenset(
+    {".py", ".yml", ".yaml", ".md", ".json", ".toml", ".txt", ".sh", ".bat", ".iss", ".spec"}
+)
+_IMPACT_SKIP_DIRS: frozenset[str] = frozenset(
+    {".git", ".worktrees", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".venv", "venv", ".uploads"}
+)
+# 责任测试组映射（维护合同 §5：影响清单须区分 test_groups；纯函数规则，不建关系库）
+_IMPACT_GROUP_RULES: tuple[tuple[str, str], ...] = (
+    ("tests/docs/", "docs-suite"),
+    ("tests/unit/", "unit-suite"),
+    ("scripts/check_docs", "docs-gate"),
+    ("scripts/docs_", "docs-gate"),
+    ("docs/", "docs-suite"),
+)
+
+
+@dataclass(frozen=True)
+class DocImpact:
+    """文档变更影响清单（结构化、可复核；不完整项显式落 unresolved）。"""
+
+    author_paths: tuple[str, ...]
+    consumer_paths: tuple[str, ...]
+    old_paths: tuple[str, ...]
+    new_paths: tuple[str, ...]
+    topics: tuple[str, ...]
+    # (topic_id, 路由路径, section | None, "canonical" | "workflow")
+    routes: tuple[tuple[str, str, str | None, str], ...]
+    test_groups: tuple[str, ...]
+    unresolved: tuple[str, ...]
+
+
+def _normalize_repo_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _is_impact_author_path(path: str) -> bool:
+    return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _IMPACT_AUTHOR_PREFIXES)
+
+
+def _is_impact_consumer_path(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in _IMPACT_CONSUMER_PREFIXES)
+
+
+def _load_impact_routes(root: Path) -> dict[str, list[tuple[str, str, str | None, str]]]:
+    """按 canonical/workflow 索引真实路由；作者源不可用时 fail-closed。"""
+    path = root / "docs" / "governance" / "canonical-topics.yml"
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖
+
+        data = _load_yaml_file(path)
+    except OSError as exc:
+        raise RuntimeError(f"D36 影响分析缺少作者源 {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"D36 影响分析作者源 {path} 解析失败: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("topics"), list):
+        raise RuntimeError(f"D36 影响分析作者源 {path} 顶层结构非法（须含 topics 列表）")
+
+    routes: dict[str, list[tuple[str, str, str | None, str]]] = {}
+    for topic in data["topics"]:
+        if not isinstance(topic, dict):
+            continue
+        topic_id = topic.get("id")
+        if not isinstance(topic_id, str) or not topic_id:
+            continue
+        section = topic.get("section") if isinstance(topic.get("section"), str) else None
+        for key, kind in (("canonical", "canonical"), ("workflow", "workflow")):
+            value = topic.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            route_path = _normalize_repo_path(value.strip())
+            routes.setdefault(route_path, []).append((topic_id, route_path, section, kind))
+    return routes
+
+
+def _iter_impact_scan_files(root: Path) -> typing.Iterator[Path]:
+    """遍历影响分析候选消费文件（调用方/正文/源码/随包，跳过缓存与隔离目录）。
+
+    根级 markdown（CLAUDE.md / CONTRIBUTING.md 等）一并纳入正文消费范围；
+    去重后每份文件只读取一次，避免同一路径被多个前缀重复扫描。
+    """
+    seen: set[Path] = set()
+    for prefix in _IMPACT_SCAN_PREFIXES:
+        base = root / prefix.rstrip("/")
+        if base.is_file():
+            candidates: typing.Iterable[Path] = (base,)
+        elif base.is_dir():
+            candidates = base.rglob("*")
+        else:
+            continue
+        for candidate in candidates:
+            if candidate in seen or not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in _IMPACT_SCANNED_SUFFIXES:
+                continue
+            rel_parts = candidate.relative_to(root).parts
+            if any(part in _IMPACT_SKIP_DIRS for part in rel_parts):
+                continue
+            seen.add(candidate)
+            yield candidate
+    for candidate in sorted(root.glob("*.md")):
+        if candidate.is_file() and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
+def _read_impact_text(path: Path) -> str | None:
+    """读取候选消费文件文本；读取失败返回 None，由调用方显式列入 unresolved。"""
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+
+def _resolve_impact_link(source_rel: str, target: str) -> str | None:
+    """把 markdown 链接目标解析为仓库相对路径（相对链接以来源文件所在目录为基准）。
+
+    外部链接、纯锚点、绝对路径与越出仓库根的目标返回 None（不参与影响图）；
+    锚点/查询串剥离后再解析，URL 编码路径按渲染语义解码。
+    """
+    url = target.strip()
+    if not url or url.startswith(("http://", "https://", "mailto:", "#", "/")):
+        return None
+    path_part = urllib.parse.unquote(url.split("#", 1)[0].split("?", 1)[0].strip())
+    if not path_part:
+        return None
+    joined = posixpath.normpath(posixpath.join(posixpath.dirname(source_rel), path_part.replace("\\", "/")))
+    if joined == ".." or joined.startswith("../"):
+        return None
+    return joined
+
+
+def build_doc_impact(changes: Iterable[tuple[str, str | None]], root: Path = ROOT) -> DocImpact:
+    """从 (new_path, old_path | None) 构建真实影响清单（D36 生产入口）。
+
+    旧/新路径都参与作者源、路由与消费者扫描；rename 不得丢失旧路径身份。
+    消费者范围覆盖调用方（tests/scripts/.github）、正文相对链接与路径文本
+    （docs/man/requirements/resources 及根级 markdown）、源码静态引用与随包清单；
+    markdown 链接统一经既有解析视图解析，不另造正则解析器。读取失败的候选文件
+    显式进入 unresolved，不以其它检查全绿代替影响图完备性；自然语言语义关联
+    不要求自动穷尽。无路由映射的作者路径与非作者/非消费者路径同样进入 unresolved。
+    """
+    routes_by_path = _load_impact_routes(root)
+    author_paths: set[str] = set()
+    old_paths: set[str] = set()
+    new_paths: set[str] = set()
+    topics: set[str] = set()
+    routes: set[tuple[str, str, str | None, str]] = set()
+    test_groups: set[str] = set()
+    unresolved: set[str] = set()
+
+    for new_path, old_path in changes:
+        labeled = [(_normalize_repo_path(new_path), True)]
+        if old_path is not None:
+            labeled.append((_normalize_repo_path(old_path), False))
+        for path, is_new in labeled:
+            (new_paths if is_new else old_paths).add(path)
+            is_author = _is_impact_author_path(path)
+            if is_author:
+                author_paths.add(path)
+            matched = routes_by_path.get(path, [])
+            for entry in matched:
+                topics.add(entry[0])
+                routes.add(entry)
+            if not matched and (is_author or not _is_impact_consumer_path(path)):
+                unresolved.add(path)
+            test_groups.update(group for prefix, group in _IMPACT_GROUP_RULES if path.startswith(prefix))
+
+    consumer_paths: set[str] = set()
+    # old/new 路径并集：rename 后旧路径的正文链接与源码引用仍须被看见
+    search_refs = tuple(sorted(p for p in (author_paths | old_paths | new_paths) if _is_impact_author_path(p)))
+    search_ref_set = set(search_refs)
+    if search_refs:
+        for candidate in _iter_impact_scan_files(root):
+            source_rel = candidate.relative_to(root).as_posix()
+            text = _read_impact_text(candidate)
+            if text is None:
+                unresolved.add(source_rel)
+                continue
+            matched = any(ref in text and ref != source_rel for ref in search_refs)
+            if not matched and candidate.suffix.lower() == ".md":
+                for link in parse_doc_view(text).links:
+                    resolved = _resolve_impact_link(source_rel, link.target)
+                    if resolved is not None and resolved in search_ref_set and resolved != source_rel:
+                        matched = True
+                        break
+            if matched:
+                consumer_paths.add(source_rel)
+
+    # 测试组从实际消费者汇总（发现应用测试时不能仍只推荐 docs-suite）
+    for path in consumer_paths:
+        test_groups.update(group for prefix, group in _IMPACT_GROUP_RULES if path.startswith(prefix))
+
+    return DocImpact(
+        author_paths=tuple(sorted(author_paths)),
+        consumer_paths=tuple(sorted(consumer_paths)),
+        old_paths=tuple(sorted(old_paths)),
+        new_paths=tuple(sorted(new_paths)),
+        topics=tuple(sorted(topics)),
+        routes=tuple(sorted(routes)),
+        test_groups=tuple(sorted(test_groups)),
+        unresolved=tuple(sorted(unresolved)),
+    )
 
 
 class _DecisionTreeRow(typing.NamedTuple):
@@ -2722,9 +3364,9 @@ def _extract_decision_tree_targets(claude_content: str) -> set[str]:
 def check_decision_tree_mapping() -> list[str]:
     """检查项 13：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致（DOC-04）。
 
-    宪法 §1.8 是「本体」，canonical-topics.yml 是「机器可读镜像」。检查把正文任务身份
-    绑定到路由（F03）：每个数据行以 `<!-- route: ... -->` 锚声明承载的 yml topic id，
-    校验「行 → 锚 id → canonical」精确对应：
+    canonical-topics.yml 是「判据正本」，CLAUDE.md §1.8 是「生成视图」。检查把视图中
+    的任务身份绑定到路由（F03）：每个数据行以 `<!-- route: ... -->` 锚声明承载的 yml
+    topic id，校验「行 → 锚 id → canonical」精确对应：
     1. fail-closed：数据行缺锚即报错（防新增行绕过身份绑定）；
     2. 行锚引用的 topic id 必须在 yml 登记，且同一 id 不得绑定多行；
     3. 行入口路径必须已登记（方向 1），且与该行锚主题的 canonical 双向一致——
@@ -2815,29 +3457,24 @@ def check_decision_tree_mapping() -> list[str]:
 def _canonical_routes_to_workflow(doc_content: str, doc_dir: Path, workflow_target: Path) -> bool:
     """canonical 文档中是否存在一条真实 markdown 链接，经相对解析后指向 workflow 目标文档。
 
-    纯文本/反引号提及、代码块内示例链接不算真路由：DOC-05 要求 canonical 入口文档完整承担
-    条件路由责任，必须以可点击的相对路径链接指向 workflow 文档。
+    纯文本/反引号提及、代码块/行内代码内示例链接不算真路由：DOC-05 要求 canonical 入口
+    文档完整承担条件路由责任，必须以可点击的相对路径链接指向 workflow 文档。
+    链接提取统一走 docs_markdown 解析视图（引用式与内联式同等处理，代码语境天然排除）。
     """
-    in_code_block = False
-    for line in doc_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    view = parse_doc_view(doc_content)
+    for link in view.links:
+        url = link.target.strip()
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        path_part = url.split("#", 1)[0].split("?", 1)[0]
+        if not path_part:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            path_part = url.split("#", 1)[0].split("?", 1)[0]
-            if not path_part:
-                continue
-            try:
-                target = (doc_dir / path_part).resolve()
-            except Exception:
-                continue
-            if target == workflow_target:
-                return True
+        try:
+            target = (doc_dir / path_part).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if target == workflow_target:
+            return True
     return False
 
 
@@ -2882,19 +3519,27 @@ def check_canonical_routing() -> list[str]:
 # 主题正本须承载『完成判定』，否则 AI 交付『做没做完』只能自行推断，交付质量随任务类型随机波动（F-03）。
 # 与 check_canonical_routing()（workflow 条件路由）同一思路，实现成本低。
 def _completion_section(content: str) -> str | None:
-    """「完成判定」章节的正文块：截取首个含「完成判定」标题之后、下一个同级或更高级标题之前的行。"""
-    lines = content.splitlines()
-    for i, line in enumerate(lines):
-        m = re.match(r"^(#{1,6})\s+(.+)$", line)
-        if m and "完成判定" in m.group(2):
-            level = len(m.group(1))
-            block: list[str] = []
-            for j in range(i + 1, len(lines)):
-                mm = re.match(r"^(#{1,6})\s+", lines[j])
-                if mm and len(mm.group(1)) <= level:
-                    break
-                block.append(lines[j])
-            return "\n".join(block)
+    """「完成判定」章节的正文块：首个含「完成判定」的真实标题之后、下一同级或更高级标题之前。
+
+    标题识别（含 Setext）与代码块边界统一由 docs_markdown 解析视图承担：围栏/缩进块内的
+    伪标题不参与匹配，代码示例行也不计入章节正文（避免示例冒认判据与最小验证命令）。
+    """
+    view = parse_doc_view(content)
+    code_lines = view.code_line_numbers()
+    for idx, heading in enumerate(view.headings):
+        if "完成判定" not in heading.text:
+            continue
+        end_line = len(view.source) + 1
+        for nxt in view.headings[idx + 1 :]:
+            if nxt.level <= heading.level:
+                end_line = nxt.line
+                break
+        block: list[str] = []
+        for line_idx in range(heading.end_line, end_line - 1):
+            if line_idx + 1 in code_lines:
+                continue
+            block.append(view.source[line_idx])
+        return "\n".join(block)
     return None
 
 
@@ -3005,12 +3650,15 @@ def check_canonical_docs_are_gated() -> list[str]:
 
 
 def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
-    """判断 doc 是否被任一索引源的链接（文件级或目录级）覆盖。"""
+    """判断 doc 是否被任一索引源的链接（文件级或目录级）覆盖。
+
+    D5 迁移：链接提取经统一解析视图 token 判定（替代旧行级正则——旧实现未排除
+    代码块内的示例链接，存在误覆盖通道）。
+    """
     docs_root = DOCS_README_PATH.parent
     for src in index_sources:
-        content = src.read_text(encoding="utf-8")
-        for m in _MD_LINK_PATTERN.finditer(content):
-            url = m.group(2).strip()
+        for link in _load_doc_view(src).links:
+            url = link.target.strip()
             if url.startswith(("http://", "https://", "mailto:")):
                 continue
             target = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
@@ -3031,6 +3679,40 @@ def _docs_doc_covered(doc: Path, index_sources: list[Path]) -> bool:
     return False
 
 
+def _docs_index_candidates(docs_root: Path) -> list[Path]:
+    """文档索引全覆盖候选集：git 交付候选（检视开放问题 4 + Q15，与 _collect_checked_docs 同源）。
+
+    Path.rglob 不识别 .gitignore——未跟踪/被忽略的本地产物目录（如 docs/plans/ 会话计划、
+    docs/audit 归档）会被误报「未被索引引用」，造成真实仓库门禁假失败。候选集单一来源
+    改为 git 交付候选（``docs_generated.git_delivery_files``：索引内文件含已 staged 新增，
+    加显式申报的暂存前正式页，ignored/未申报 untracked 排除），使尚未 ``git add`` 的新增
+    正式页在暂存前即可被发现；git 不可用时降级文件系统发现 + 静态排除清单
+    （_GITIGNORED_ARTIFACT_DIRS，与历史行为兼容）。
+    """
+    covered_suffixes = (".md", ".yml", ".yaml", ".json")
+    try:
+        rel_dir = docs_root.relative_to(ROOT).as_posix()
+    except ValueError:
+        # 目录不在 ROOT 内（测试注入临时仓库）→ 降级
+        tracked: list[str] | None = None
+    else:
+        tracked = docs_generated.git_delivery_files(ROOT, rel_dir)
+    if tracked:
+        # git 交付候选非空：以 git 索引 + 显式交付候选为唯一候选来源（ignored/未申报产物天然排除）
+        return sorted(
+            ROOT / rel for rel in tracked if (ROOT / rel).suffix in covered_suffixes and (ROOT / rel).is_file()
+        )
+    # git 跟踪集为空（git 不可用 / 目录不在 ROOT / 仓库无跟踪文件）→ 降级文件系统发现
+    # + 静态排除（历史行为，含 _LOCAL_ARTIFACT_DIRS 别名）；git 环境异常时不得以空候选集
+    # 静默通过（F17）。
+    artifact_exclusions = (*_GITIGNORED_ARTIFACT_DIRS, *_LOCAL_ARTIFACT_DIRS)
+    return sorted(
+        p
+        for p in docs_root.rglob("*")
+        if p.is_file() and p.suffix in covered_suffixes and not any(p.is_relative_to(d) for d in artifact_exclusions)
+    )
+
+
 def check_docs_index_completeness() -> list[str]:
     """检查项 15：文档索引全覆盖（DOC-07 / DOC-11）。
 
@@ -3039,10 +3721,12 @@ def check_docs_index_completeness() -> list[str]:
     目录级引用（指向目录的链接）视为覆盖其下全部文件。
 
     这是 check_flet_hub_completeness() 向全 docs 目录的推广，同时闭合
-    DOC-07（reviews 检视报告不可发现）与 DOC-11（索引自称全覆盖实缺目录）。
+    DOC-07（reviews 检视报告不可发现）与 DOC-11（索自称全覆盖实缺目录）。
     DS-10：扫描范围由仅 `.md` 扩展为 `.md`/`.yml`/`.yaml`/`.json`，使
     docs/ 下非 markdown 治理文件（redlines.yml / canonical-topics.yml 等）
     同样纳入索引全覆盖门禁，避免新增治理文件成为不可发现的暗坑。
+    候选集仅取 git 跟踪文件（检视开放问题 4）：未跟踪/gitignored 产物目录
+    （docs/plans/ 等）不再触发「未被索引引用」假失败。
     """
     errors: list[str] = []
     if not DOCS_README_PATH.exists():
@@ -3050,16 +3734,9 @@ def check_docs_index_completeness() -> list[str]:
 
     docs_root = DOCS_README_PATH.parent
     index_sources = [CONTRIBUTING_PATH, DOCS_README_PATH]
-    covered_suffixes = (".md", ".yml", ".yaml", ".json")
-    candidates = sorted(p for p in docs_root.rglob("*") if p.is_file() and p.suffix in covered_suffixes)
+    candidates = _docs_index_candidates(docs_root)
     for doc in candidates:
         if doc == DOCS_README_PATH:
-            continue
-        # 真实 gitignored 本地产物 / 归档目录豁免：Path.rglob 不识别 .gitignore，未跟踪/被忽略产物
-        # 不属于「需进索引的治理活文档」，跳过避免误报「未进索引」（兼容 _LOCAL_ARTIFACT_DIRS 别名）。
-        if any(doc.is_relative_to(d) for d in _GITIGNORED_ARTIFACT_DIRS) or any(
-            doc.is_relative_to(d) for d in _LOCAL_ARTIFACT_DIRS
-        ):
             continue
         if _docs_doc_covered(doc, index_sources):
             continue
@@ -3090,42 +3767,33 @@ def check_reviews_index_completeness() -> list[str]:
     if not REVIEWS_README_PATH.exists():
         return [f"reviews 索引入口不存在: {REVIEWS_README_PATH}"]
 
-    readme_content = REVIEWS_README_PATH.read_text(encoding="utf-8")
-
     # 枚举 docs/reviews/ 顶层 .md（排除 README 自身）
     actual_files: set[str] = set()
     for path in REVIEWS_README_PATH.parent.glob("*.md"):
         if path.name == "README.md":
             continue
         actual_files.add(path.name)
-
     # 提取 README 中指向 docs/reviews/ 目录内 .md 文件的链接的文件名集合
+    # D5 迁移：链接提取经统一解析视图 token 判定，替代旧手写 ``` 状态机 + 行级正则。
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in readme_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    for link in _load_doc_view(REVIEWS_README_PATH).links:
+        url = link.target.strip()
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        url_path = url.split("#", 1)[0].split("?", 1)[0]
+        if not url_path:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            url_path = url.split("#", 1)[0].split("?", 1)[0]
-            if not url_path:
-                continue
-            target_path = (REVIEWS_README_PATH.parent / url_path).resolve()
-            try:
-                rel = target_path.relative_to(REVIEWS_DOCS_DIR)
-            except ValueError:
-                continue  # 目标在 docs/reviews/ 外，跳过（如 ../../CLAUDE.md、../debt/...）
-            if len(rel.parts) != 1:
-                # 仅统计顶层（`./xxx.md` 形式）引用；根 reviews/ 路径/子目录引用不纳入登记集
-                continue
-            url_basename = rel.name
-            if url_basename.endswith(".md") and url_basename != "README.md":
-                referenced_files.add(url_basename)
+        target_path = (REVIEWS_README_PATH.parent / url_path).resolve()
+        try:
+            rel = target_path.relative_to(REVIEWS_DOCS_DIR)
+        except ValueError:
+            continue  # 目标在 docs/reviews/ 外，跳过（如 ../../CLAUDE.md、../debt/...）
+        if len(rel.parts) != 1:
+            # 仅统计顶层（`./xxx.md` 形式）引用；根 reviews/ 路径/子目录引用不纳入登记集
+            continue
+        url_basename = rel.name
+        if url_basename.endswith(".md") and url_basename != "README.md":
+            referenced_files.add(url_basename)
 
     # 未登记的顶层文档（按前缀区分方法论文档与误落的检视报告）
     for fname in sorted(actual_files - referenced_files):
@@ -3169,8 +3837,6 @@ def check_adr_index_completeness() -> list[str]:
     if not CONTRIBUTING_PATH.exists():
         return [f"CONTRIBUTING.md 不存在: {CONTRIBUTING_PATH}"]
 
-    contributing_content = CONTRIBUTING_PATH.read_text(encoding="utf-8")
-
     # 枚举 docs/adr/ 下全部 *.md（排除 README 自身）
     actual_files: set[str] = set()
     for path in ADR_DOCS_DIR.glob("*.md"):
@@ -3179,28 +3845,22 @@ def check_adr_index_completeness() -> list[str]:
         actual_files.add(path.name)
 
     # 提取 CONTRIBUTING.md 中指向 docs/adr/*.md 文件的链接的文件名集合
+    # D5 迁移：链接提取经统一解析视图 token 判定，替代旧手写 ``` 状态机 + 行级正则。
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in contributing_content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
+    for link in _load_doc_view(CONTRIBUTING_PATH).links:
+        url = link.target.strip()
+        if url.startswith(("http://", "https://", "mailto:")):
             continue
-        if in_code_block:
+        url_path = url.split("#", 1)[0].split("?", 1)[0]
+        if not url_path:
             continue
-        for m in _MD_LINK_PATTERN.finditer(line):
-            url = m.group(2).strip()
-            if url.startswith(("http://", "https://", "mailto:")):
-                continue
-            url_path = url.split("#", 1)[0].split("?", 1)[0]
-            if not url_path:
-                continue
-            target_path = (CONTRIBUTING_PATH.parent / url_path).resolve()
-            try:
-                rel = target_path.relative_to(ADR_DOCS_DIR)
-            except ValueError:
-                continue  # 目标在 docs/adr/ 外，跳过
-            if len(rel.parts) == 1 and rel.name.endswith(".md"):
-                referenced_files.add(rel.name)
+        target_path = (CONTRIBUTING_PATH.parent / url_path).resolve()
+        try:
+            rel = target_path.relative_to(ADR_DOCS_DIR)
+        except ValueError:
+            continue  # 目标在 docs/adr/ 外，跳过
+        if len(rel.parts) == 1 and rel.name.endswith(".md"):
+            referenced_files.add(rel.name)
 
     # 未登记的 ADR 文档
     for fname in sorted(actual_files - referenced_files):
@@ -3232,19 +3892,15 @@ def check_scripts_index_completeness() -> list[str]:
     if not CI_CD_PATH.exists():
         return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
 
-    content = CI_CD_PATH.read_text(encoding="utf-8")
     actual_files: set[str] = {p.name for p in SCRIPTS_DIR.glob("*.py") if p.is_file()}
 
+    # D5 迁移：逐行扫描底座改为统一解析视图的非代码块正文行（_view_effective_lines），
+    # 替代旧手写 ``` 状态机；`scripts/<name>.py` 引用为裸文本形态（非链接），仍按行正则提取。
+    effective_text = _view_effective_text(_load_doc_view(CI_CD_PATH))
+
     referenced_files: set[str] = set()
-    in_code_block = False
-    for line in content.splitlines():
-        if line.lstrip().startswith("```"):
-            in_code_block = not in_code_block
-            continue
-        if in_code_block:
-            continue
-        for m in _SCRIPT_FILE_REF.finditer(line):
-            referenced_files.add(m.group(1))
+    for m in _SCRIPT_FILE_REF.finditer(effective_text):
+        referenced_files.add(m.group(1))
 
     # 未登记的工程脚本
     for fname in sorted(actual_files - referenced_files):
@@ -3275,7 +3931,7 @@ def _load_exception_ids() -> list[str] | None:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
@@ -3288,7 +3944,7 @@ def _load_exception_r1_count() -> int:
     try:
         import yaml  # 延迟 import: PyYAML 是 transitive 依赖
 
-        data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
+        data = _load_yaml_file(EXCEPTIONS_YAML_PATH)
     except (yaml.YAMLError, OSError):
         return -1
     if not isinstance(data, dict) or not isinstance(data.get("exceptions"), list):
@@ -3391,15 +4047,19 @@ def check_governance_id_references() -> list[str]:
 
 
 def check_core_modules_completeness() -> list[str]:
-    """断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际 core/*.py 文件一致 (GDR-11)."""
+    """断言 docs/architecture/overview.md §4.2 声明的 core/ 模块列表与实际 core/*.py 文件一致 (GDR-11).
+
+    D6 迁移：架构正文正本自 CLAUDE.md §4.2 迁至 docs/architecture/overview.md（ADR-0018 §4.1），
+    本检查作为消费者同步切换断言对象；检查语义（双向一致性 + fail-closed）不变。
+    """
     errors: list[str] = []
-    claude_path = ROOT / "CLAUDE.md"
-    if not claude_path.exists():
-        return ["CLAUDE.md 不存在"]
-    claude_text = claude_path.read_text(encoding="utf-8")
-    m = re.search(r"core/`\s*是架构核心层.*?目前含\s*(.*?)[)）]", claude_text, re.DOTALL)
+    overview_path = ROOT / "docs" / "architecture" / "overview.md"
+    if not overview_path.exists():
+        return ["docs/architecture/overview.md 不存在（架构正文正本，GDR-11 断言对象）"]
+    overview_text = overview_path.read_text(encoding="utf-8")
+    m = re.search(r"core/`\s*是架构核心层.*?目前含\s*(.*?)[)）]", overview_text, re.DOTALL)
     if not m:
-        return ["CLAUDE.md §4.2 未找到 core/ 模块清单声明（如 '目前含 `...`'）"]
+        return ["docs/architecture/overview.md §4.2 未找到 core/ 模块清单声明（如 '目前含 `...`'）"]
     declared_str = m.group(1)
     declared_modules = set(re.findall(r"`([a-zA-Z0-9_]+)`", declared_str))
     core_dir = ROOT / "core"
@@ -3409,10 +4069,12 @@ def check_core_modules_completeness() -> list[str]:
     missing_in_doc = sorted(actual_modules - declared_modules)
     extra_in_doc = sorted(declared_modules - actual_modules)
     if missing_in_doc:
-        errors.append(f"CLAUDE.md §4.2 漏声明 core/ 实际模块: {missing_in_doc}，实际模块包括: {sorted(actual_modules)}")
+        errors.append(
+            f"docs/architecture/overview.md §4.2 漏声明 core/ 实际模块: {missing_in_doc}，实际模块包括: {sorted(actual_modules)}"
+        )
     if extra_in_doc:
         errors.append(
-            f"CLAUDE.md §4.2 声明了不存在的 core/ 模块: {extra_in_doc}，实际模块包括: {sorted(actual_modules)}"
+            f"docs/architecture/overview.md §4.2 声明了不存在的 core/ 模块: {extra_in_doc}，实际模块包括: {sorted(actual_modules)}"
         )
     return errors
 
@@ -3787,7 +4449,8 @@ def check_governance_id_dual_meaning() -> list[str]:
     warnings: list[str] = []
     entries = _load_glossary_entries()
     if entries is None:
-        return warnings
+        # D5（F17）：对照表正本缺失/无法解析显式失败，不再静默空转
+        return [f"governance-ids.md 缺失或无法解析，治理 ID 对义守卫无法执行: {GOVERNANCE_IDS_PATH}"]
     for gov_id in sorted(entries):
         rows = entries[gov_id]
         if len(rows) < 2:
@@ -3936,8 +4599,9 @@ def check_adr_supersede_chain() -> list[str]:
     ADR-0002，构成单向断链。本守卫对 docs/adr/*.md 头元数据建立双向映射并校验对称性。
     """
     errors: list[str] = []
+    # D5（F17）：ADR 目录为必需源，缺失显式失败，不得静默空转
     if not ADR_DOCS_DIR.is_dir():
-        return errors  # 目录缺失由 check_adr_index_completeness 报告
+        return [f"ADR 目录不存在，supersede 双向链守卫无法执行: {ADR_DOCS_DIR}"]
 
     supersedes: dict[str, set[str]] = {}
     superseded_by: dict[str, set[str]] = {}
@@ -4049,14 +4713,22 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
 _GUILLEMET_REF_PATTERN = re.compile(r"(?<![\w./-])([\w./-]+\.md)\s*「([^」]+)」")
 
 
+def _strip_md_links_from_line(line: str) -> str:
+    """剔除单行内的 markdown 链接形态 ``[text](url)``（书名号扫描的行级文本准备）。
+
+    仅用于已知含链接的行（链接行号来自解析视图），fence/缩进块边界由视图承载；
+    本函数只做行内链接形态剔除，不承担 Markdown 结构解析。
+    """
+    return re.sub(r"\[[^\]]*\]\([^)]*\)", "", line)
+
+
 def _extract_heading_texts(content: str) -> set[str]:
-    """提取 markdown 全部标题的原文（保留序号/前缀，如「### 7. 新增回测配置」）。"""
-    headings: set[str] = set()
-    for line in content.splitlines():
-        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-        if m:
-            headings.add(m.group(2))
-    return headings
+    """提取 markdown 全部标题的原文（保留序号/前缀，如「### 7. 新增回测配置」）。
+
+    D5 迁移：委托统一解析视图 token 判定（替代旧行级正则——旧实现会把代码示例中的
+    `# 标题` 注释行误判为真实标题）。
+    """
+    return {heading.text for heading in parse_doc_view(content).headings}
 
 
 def _strip_english_suffix(heading: str) -> str:
@@ -4114,30 +4786,38 @@ def check_guillemet_references() -> list[str]:
     errors: list[str] = []
     for doc in CHECKED_DOCS:
         if not doc.exists():
+            # D5（F17）：受检文件缺失显式失败，不得静默 continue（失踪输入空转）
+            errors.append(f"书名号引用: 受检文档不存在（受检集与文件系统不一致）: {doc}")
             continue
-        content = doc.read_text(encoding="utf-8")
-        # 剔除 markdown 链接 `[text](url)`，链接内书名号由锚点门禁覆盖
-        text = re.sub(r"\[[^\]]*\]\([^)]*\)", "", content)
-        for m in _GUILLEMET_REF_PATTERN.finditer(text):
-            raw_path, section = m.group(1), m.group(2).strip()
-            target = ROOT / raw_path
-            candidates = [target] if target.exists() else _resolve_bare_doc_name(raw_path)
-            if not candidates:
-                errors.append(f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档 {raw_path} 不存在")
-                continue
-            if any(_has_guillemet_heading(candidate, section) for candidate in candidates):
-                continue
-            if len(candidates) == 1:
-                headings = _extract_heading_texts(candidates[0].read_text(encoding="utf-8"))
-                errors.append(
-                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
-                    f"（现有标题示例: {sorted(headings)[:6]}）"
-                )
-            else:
-                errors.append(
-                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，"
-                    f"docs/、man/、requirements/ 下存在 {len(candidates)} 个同名文档但均无该标题"
-                )
+        view = _load_doc_view(doc)
+        # 剔除 markdown 链接 `[text](url)`，链接内书名号由锚点门禁覆盖。
+        # D5 迁移：代码块边界来自统一解析视图（_view_effective_lines）；链接形态剔除
+        # 逐行做（行级文本准备，非结构解析）——inline token 的行号是段落起始行
+        # （多行段落 lazy continuation），按链接行号剔除会漏掉段落后续物理行。
+        for line_no, line in _view_effective_lines(view):
+            text = _strip_md_links_from_line(line)
+            for m in _GUILLEMET_REF_PATTERN.finditer(text):
+                raw_path, section = m.group(1), m.group(2).strip()
+                target = ROOT / raw_path
+                candidates = [target] if target.exists() else _resolve_bare_doc_name(raw_path)
+                if not candidates:
+                    errors.append(
+                        f"书名号引用: {doc.name}:{line_no} 引用 {raw_path}「{section}」，目标文档 {raw_path} 不存在"
+                    )
+                    continue
+                if any(_has_guillemet_heading(candidate, section) for candidate in candidates):
+                    continue
+                if len(candidates) == 1:
+                    headings = _extract_heading_texts(candidates[0].read_text(encoding="utf-8"))
+                    errors.append(
+                        f"书名号引用: {doc.name}:{line_no} 引用 {raw_path}「{section}」，目标文档无同名标题"
+                        f"（现有标题示例: {sorted(headings)[:6]}）"
+                    )
+                else:
+                    errors.append(
+                        f"书名号引用: {doc.name}:{line_no} 引用 {raw_path}「{section}」，"
+                        f"docs/、man/、requirements/ 下存在 {len(candidates)} 个同名文档但均无该标题"
+                    )
     return errors
 
 
@@ -4151,9 +4831,11 @@ def check_strategy_desc_dynamic_consistency() -> list[str]:
     """
     errors: list[str] = []
     number_re = re.compile(r"\d")
+    # D5（F17）：locale 资产为必需源，缺失显式失败，不得静默 continue（失踪输入空转）
     for locale_dir in ("zh_CN", "en_US"):
         path = ROOT / "locales" / locale_dir / "strings.json"
         if not path.exists():
+            errors.append(f"策略描述动态一致性: 必需 locale 资产缺失: {path}")
             continue
         try:
             strings = json.loads(path.read_text(encoding="utf-8"))
@@ -4186,8 +4868,8 @@ def check_strategy_desc_dynamic_consistency() -> list[str]:
 # 样例文件，README 自述「新增 case 必须同步改本 README」，但此前无门禁守护：追加 case-002.md
 # 而漏登记 README（或登记了不存在的文件）均无报警。本检查双向断言二者一致。
 EVALS_README_PATH = ROOT / "docs" / "reviews" / "evals" / "README.md"
-# 「样例目录」表内仅本表使用 `./<相对路径>` 形式的链接（其余链接均为 `../` 跨目录引用或纯文本）。
-_EVALS_README_LINK_PATTERN = re.compile(r"\]\(\./([^)]+)\)")
+# 「样例目录」表内仅本表使用 `./<相对路径>` 形式的链接（其余链接均为 `../` 跨目录引用或纯文本），
+# 链接提取统一由 docs_markdown 解析视图承担（内联式/引用式等价，代码块内示例不计数）。
 
 
 def check_evals_case_index_consistency() -> list[str]:
@@ -4206,15 +4888,18 @@ def check_evals_case_index_consistency() -> list[str]:
 
     evals_dir = EVALS_README_PATH.parent
     declared: dict[str, set[str]] = {}
-    for line in EVALS_README_PATH.read_text(encoding="utf-8").splitlines():
-        if not line.lstrip().startswith("|"):
+    view = docs_markdown.load_document_view(EVALS_README_PATH)
+    for link in view.links:
+        target = link.target.strip()
+        if not target.startswith("./"):
             continue
-        for m in _EVALS_README_LINK_PATTERN.finditer(line):
-            target = m.group(1)
-            if target.endswith("/"):
-                declared.setdefault(target.rstrip("/"), set())
-            elif "/" in target and target.endswith(".md"):
-                declared.setdefault(target.rsplit("/", 1)[0], set()).add(target)
+        target = target[2:]
+        if not target:
+            continue
+        if target.endswith("/"):
+            declared.setdefault(target.rstrip("/"), set())
+        elif "/" in target and target.endswith(".md"):
+            declared.setdefault(target.rsplit("/", 1)[0], set()).add(target)
 
     if not declared:
         errors.append(
@@ -4236,82 +4921,262 @@ def check_evals_case_index_consistency() -> list[str]:
     return errors
 
 
-def main() -> int:
-    """运行全部检查，返回退出码。"""
-    all_errors: list[str] = []
-    all_errors.extend(check_anchor_dead_links())
-    all_errors.extend(check_relative_dead_links())
-    all_errors.extend(check_precommit_hook_count())
-    all_errors.extend(check_precommit_hook_names())
-    all_errors.extend(check_workflow_enum())
-    all_errors.extend(check_flet_version_drift())
-    all_errors.extend(check_note_lazy_format())
-    all_errors.extend(check_redlines_yaml_consistency())
-    # 7b：红线总数散文（R1~Rxx）守卫，紧随表格式一致性之后，守护散文式自述漏同步（DS 根因）
-    all_errors.extend(check_redline_range_consistency())
-    # 7c：import-linter 契约数量散文（「N 条契约」）守卫，与 7b 同族，守护 E4 重构后的数量漂移（H6-b）
-    all_errors.extend(check_contract_count_prose())
-    # 3c 紧随 3b 之后：3b 守护 yml schema 完整性，3c 守护 enforcement 与实际配置一致
-    # 3c 独立解析 yml，不依赖 3b 执行结果，顺序仅为可读性
-    all_errors.extend(check_enforcement_mapping())
-    # enforcement 反向覆盖（DS-11）：check_redlines.py 实际执行的 check_* 必须全部在 redlines.yml 登记
-    all_errors.extend(check_enforcement_reverse_coverage())
-    # 例外注册表一致性：紧随红线一致性之后，守护集中例外治理 (P1-01)
-    all_errors.extend(check_exceptions_yaml_consistency())
-    # 例外反向覆盖：技术债表中豁免 EXCEPTIONABLE 红线的条目必须已登记例外 (P1-04)
-    all_errors.extend(check_exceptions_reverse_coverage())
-    # 主题 → canonical 正本映射一致性：守护决策树机器可读镜像的路径有效性 (P2-12)
-    all_errors.extend(check_canonical_topics_consistency())
-    # Flet 入口完整性：紧随 Flet 版本漂移检查之后，守护 docs/flet/README.md 覆盖全部专题
-    all_errors.extend(check_flet_hub_completeness())
-    # AGENTS.md 生成区块与 redlines.yml 一致性：守护跨工具入口的最小安全集导出镜像 (DOC-08/DOC-13)
-    all_errors.extend(check_agents_md_sync())
-    # AGENTS.md 最小验证命令生成区块（M2）：跨工具入口补齐「改完代码跑什么验证」
-    all_errors.extend(check_agents_md_min_verify_commands())
-    # CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性：守护自动加载文档第一屏 (F-04)
-    all_errors.extend(check_claude_executive_sync())
-    # CLAUDE.md 人工评审红线可执行自查清单生成区块（H2）：把「尤须 AI 自查」变成可勾选判据
-    all_errors.extend(check_claude_self_check_sync())
+# ---------------------------------------------------------------------------
+# D4：scope 固定责任映射、生成输出检查与 --check/--update CLI（检视 §5.2）
+# ---------------------------------------------------------------------------
 
-    # 分支E 机制补全（DOC-01/04/05/07/09/11）：规则集元数据、决策树镜像、canonical 路由、
-    # docs 索引全覆盖、治理 id（EX-\d{4}）双向引用。补齐「字段存在」之外的「语义正确」守卫。
-    all_errors.extend(check_ruleset_metadata_consistency())
-    all_errors.extend(check_ruleset_changelog_version())
-    all_errors.extend(check_decision_tree_mapping())
-    all_errors.extend(check_canonical_routing())
-    all_errors.extend(check_canonical_completion_criteria())
-    all_errors.extend(check_canonical_docs_are_gated())
-    all_errors.extend(check_docs_index_completeness())
-    all_errors.extend(check_reviews_index_completeness())
-    all_errors.extend(check_adr_index_completeness())
-    all_errors.extend(check_scripts_index_completeness())
-    all_errors.extend(check_governance_id_references())
-    all_errors.extend(check_core_modules_completeness())
-    # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后。
-    # .py 扫描（scripts/ + tests/）的未登记 ID 暂为 WARNING，不阻断（DS-02 渐进部署）。
-    glossary_errors, glossary_warnings = check_governance_id_glossary()
-    all_errors.extend(glossary_errors)
-    if glossary_warnings:
+_SCOPE_LABELS = frozenset({"all", "document", "governance", "source"})
+
+# scope 固定责任映射（D4 初始分类，D5 迁移时逐项精调；顺序与旧 main() 线性调用一致）：
+# - document：正式文档结构、路径/锚点、目录索引与生成输出；
+# - governance：作者源（redlines/exceptions/canonical）、路由与配置映射；
+# - source：NOTE(lazy)/模块/单例/动态文案等源码契约。
+_SCOPE_CHECK_NAMES: tuple[tuple[frozenset[str], str], ...] = (
+    (frozenset({"document"}), "check_anchor_dead_links"),
+    (frozenset({"document"}), "check_relative_dead_links"),
+    (frozenset({"governance"}), "check_precommit_hook_count"),
+    (frozenset({"governance"}), "check_precommit_hook_names"),
+    (frozenset({"governance"}), "check_workflow_enum"),
+    (frozenset({"governance"}), "check_flet_version_drift"),
+    (frozenset({"source"}), "check_note_lazy_format"),
+    (frozenset({"governance"}), "check_redlines_yaml_consistency"),
+    (frozenset({"governance"}), "check_redline_range_consistency"),
+    (frozenset({"governance"}), "check_contract_count_prose"),
+    (frozenset({"governance"}), "check_enforcement_mapping"),
+    (frozenset({"governance"}), "check_enforcement_reverse_coverage"),
+    (frozenset({"governance"}), "check_exceptions_yaml_consistency"),
+    (frozenset({"governance"}), "check_exceptions_reverse_coverage"),
+    (frozenset({"governance"}), "check_exceptions_effectiveness"),
+    (frozenset({"governance"}), "check_canonical_topics_consistency"),
+    (frozenset({"document"}), "check_flet_hub_completeness"),
+    (frozenset({"document"}), "check_agents_md_sync"),
+    (frozenset({"document"}), "check_agents_md_min_verify_commands"),
+    (frozenset({"document"}), "check_claude_executive_sync"),
+    (frozenset({"document"}), "check_claude_self_check_sync"),
+    (frozenset({"governance"}), "check_ruleset_metadata_consistency"),
+    (frozenset({"governance"}), "check_ruleset_changelog_version"),
+    (frozenset({"governance"}), "check_decision_tree_mapping"),
+    (frozenset({"governance"}), "check_canonical_routing"),
+    (frozenset({"document"}), "check_canonical_completion_criteria"),
+    (frozenset({"document"}), "check_canonical_docs_are_gated"),
+    (frozenset({"document"}), "check_docs_index_completeness"),
+    (frozenset({"document"}), "check_reviews_index_completeness"),
+    (frozenset({"document"}), "check_adr_index_completeness"),
+    (frozenset({"document"}), "check_scripts_index_completeness"),
+    (frozenset({"governance"}), "check_governance_id_references"),
+    (frozenset({"source"}), "check_core_modules_completeness"),
+    (frozenset({"governance"}), "_glossary_check_with_warnings"),
+    (frozenset({"document"}), "check_guillemet_references"),
+    (frozenset({"source"}), "check_strategy_desc_dynamic_consistency"),
+    (frozenset({"governance"}), "check_flet_badge_version"),
+    (frozenset({"governance"}), "check_exception_count_prose"),
+    (frozenset({"source"}), "check_singleton_count_prose"),
+    (frozenset({"source"}), "check_non_registered_singleton_doc"),
+    (frozenset({"document"}), "check_adr_supersede_chain"),
+    (frozenset({"governance"}), "check_governance_id_dual_meaning"),
+    (frozenset({"document"}), "check_evals_case_index_consistency"),
+    (frozenset({"document"}), "check_docs_generated"),
+)
+
+
+def _glossary_check_with_warnings() -> list[str]:
+    """治理 ID 对照表检查的 warning 打印包装（保持旧 main() 的渐进部署输出行为）。
+
+    F19 分层口径（与实际退出码一致）：
+    - WARNING（渐进部署项，如治理 ID 渐进部署 warning / R3 tests 存量）：以
+      ``::warning::`` 前缀输出，**不进** errors 聚合 → CLI 退出码 0（不阻断）；
+    - ERROR（真实违规）：进 errors 聚合 → main() 以退出码 1 失败；
+    - 真实仓库基线：all 检查退出码应为 0；基线非零即失败，不与 warning 互相背书。
+    """
+    errors, warnings = check_governance_id_glossary()
+    if warnings:
         print("::warning::治理 ID 对照表（渐进部署，不阻断）存在未在 governance-ids.md 登记的治理 ID：")
-        for w in glossary_warnings[:40]:
+        for w in warnings[:40]:
             print(f"  - {w}")
-        if len(glossary_warnings) > 40:
-            print(f"  - ...另有 {len(glossary_warnings) - 40} 条未列出（存量清零后翻转为 ERROR）")
-    # 书名号式章节引用：补上锚点/相对链接门禁之外的最后一类跨文档引用（GDR-13）
-    all_errors.extend(check_guillemet_references())
-    # 策略静态描述与可调参数一致性（D2-M4）：硬编码数字阈值必须配套 _desc_dynamic 动态模板
-    all_errors.extend(check_strategy_desc_dynamic_consistency())
+        if len(warnings) > 40:
+            print(f"  - ...另有 {len(warnings) - 40} 条未列出（存量清零后翻转为 ERROR）")
+    return errors
 
-    # 散文式自述元信息守卫（文档复检 H1/L1/H3 根因治理，补「对比型/锚点型」之外的漏检单点）
-    all_errors.extend(check_flet_badge_version())  # H1：README UI 徽章 Flet 版本对齐
-    all_errors.extend(check_exception_count_prose())  # L1：「现存 N 条 R1 例外」数量守卫
-    # 盲1：注册单例散文数量守卫 + 盲2：ADR supersede 双向链守卫（文档复检指标盲区治理）
-    all_errors.extend(check_singleton_count_prose())  # 盲1：散文 N vs 表格行数
-    all_errors.extend(check_non_registered_singleton_doc())  # M1：非注册单例清单双向校验
-    all_errors.extend(check_adr_supersede_chain())  # 盲2：ADR supersede 双向链对称性
-    all_errors.extend(check_governance_id_dual_meaning())  # GOV-06：治理 ID 同名异义（双义已清零，翻转 ERROR）
-    # L7：evals 样例目录「当前 case 文件」列与实际 case 文件双向一致（新增 case 漏登记 README 即报错）
-    all_errors.extend(check_evals_case_index_consistency())
+
+def _describe_line_diff(actual: list[str], expected: list[str], limit: int = 3) -> str:
+    """生成块不一致时的可核差异摘要（首个差异行号 + 前后内容，避免只看「不一致」无从定位）。
+
+    只输出前 ``limit`` 处差异且截断单行长度；行数差异单列，便于区分「多/少行」与「同行内容不同」。
+    """
+    parts: list[str] = []
+    if len(actual) != len(expected):
+        parts.append(f"（行数 现块 {len(actual)} / 渲染 {len(expected)}）")
+    shown = 0
+    for idx in range(max(len(actual), len(expected))):
+        got = actual[idx] if idx < len(actual) else "<缺失行>"
+        want = expected[idx] if idx < len(expected) else "<多余行>"
+        if got == want:
+            continue
+        parts.append(f" 第 {idx + 1} 行 现块={got[:160]!r} 渲染={want[:160]!r}")
+        shown += 1
+        if shown >= limit:
+            break
+    return "".join(parts)
+
+
+def check_docs_generated() -> list[str]:
+    """生成输出一致性检查（D4 新增，document scope）。
+
+    遍历内置封闭注册表的激活条目：目标现块内容须等于作者源渲染结果；缺块/块结构
+    违规/作者源校验失败/路径越界均显式报错（fail-closed，不做静默跳过）。
+    """
+    errors: list[str] = []
+    for spec in docs_generated.BUILTIN_REGISTRY:
+        if not spec.active:
+            continue
+        label = f"{spec.target}#{spec.block_id}"
+        try:
+            target_path = docs_generated.resolve_within(ROOT, spec.target)
+            if not target_path.is_file():
+                errors.append(f"{label}: 登记目标文件不存在")
+                continue
+            text = target_path.read_text(encoding="utf-8")
+            blocks = docs_generated.scan_blocks(text, spec.block_format)
+            if spec.block_id not in blocks:
+                errors.append(f"{label}: 目标缺生成块标记（开始/结束成对注释缺失或形态不符）")
+                continue
+            rendered = docs_generated.render_block_lines(ROOT, spec)
+            actual = list(blocks[spec.block_id].content_lines)
+            if actual != rendered:
+                errors.append(
+                    f"{label}: 生成块与作者源渲染结果不一致（请改正本后同步生成区块，勿手工修改）"
+                    + _describe_line_diff(actual, rendered)
+                )
+        except docs_generated.DocsGeneratedError as exc:
+            errors.append(f"{label}: {exc}")
+    return errors
+
+
+def build_scope_plan() -> list[tuple[frozenset[str], Callable[[], list[str]]]]:
+    """构建 scope 固定责任映射的检查计划（条目为 标签集 → 检查函数）。
+
+    检查函数经 globals() 按名动态解析：保持 tests/unit 以 monkeypatch 替换单个检查
+    函数后调用 main() 的既有兼容（计划不在导入期固化函数引用）。
+    """
+    return [(labels, globals()[name]) for labels, name in _SCOPE_CHECK_NAMES]
+
+
+def collect_scope_errors(plan: list[tuple[frozenset[str], Callable[[], list[str]]]], scope: str) -> list[str]:
+    """执行 scope 固定责任映射内的检查并聚合错误（scope 是固定责任，不是跳过失败的途径）。"""
+    errors: list[str] = []
+    for labels, check in plan:
+        if scope == "all" or scope in labels:
+            errors.extend(check())
+    return errors
+
+
+def _builtin_registry() -> tuple[docs_generated.BlockSpec, ...]:
+    """生产 --update 所用封闭内置注册表（生成目标是封闭清单，非扫描到标记就能写）。"""
+    return docs_generated.BUILTIN_REGISTRY
+
+
+def run_builtin_update() -> docs_generated.UpdateResult:
+    """生产 --update 入口：内置封闭注册表更新 + 更新后 all 检查（同一写入保护窗口）。"""
+    return docs_generated.run_update(
+        ROOT,
+        docs_generated.BUILTIN_REGISTRY,
+        post_check=lambda: collect_scope_errors(build_scope_plan(), "all"),
+    )
+
+
+def _report_update_result(result: docs_generated.UpdateResult) -> None:
+    """如实输出已写/未变/冲突/写失败/阻塞与更新后检查错误（§5.2.1-4）。
+
+    不谎称全批事务回滚：部分目标写失败或冲突时其余目标按各自核对结果提交，
+    输出必须让调用方分辨哪些目标已写、哪些未写。
+    """
+    if result.blocked:
+        print(f"[FAIL] 更新被阻塞（不基于旧快照继续、不自动重试）: {result.blocked}")
+        return
+    if result.written:
+        print("[更新] 已写入目标:")
+        for rel in result.written:
+            print(f"  - {rel}")
+    if result.unchanged:
+        print("[更新] 渲染零差异未写目标:")
+        for rel in result.unchanged:
+            print(f"  - {rel}")
+    if result.conflicts:
+        print("[FAIL] 检出并发冲突（原位未覆盖，用户新稿已保留）:")
+        for index, rel in enumerate(result.conflicts):
+            reason = result.conflict_reasons[index] if index < len(result.conflict_reasons) else "未提供原因"
+            print(f"  - {rel}: {reason}")
+    if result.failed:
+        print("[FAIL] 写入失败目标（不承诺跨文件事务，其余目标已各自提交）:")
+        for index, rel in enumerate(result.failed):
+            reason = result.failure_reasons[index] if index < len(result.failure_reasons) else "未提供原因"
+            print(f"  - {rel}: {reason}")
+    if result.post_check_errors:
+        print("[FAIL] 更新后 all 检查失败:")
+        for err in result.post_check_errors:
+            print(f"  - {err}")
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """构建 CLI 解析器：--check/--scope/--update（检视 §5.2 固定接口）。"""
+    parser = argparse.ArgumentParser(
+        prog="check_docs_consistency",
+        description=(
+            "文档一致性检查（--check --scope）与受控生成块更新（--update）。"
+            "注意：生产差异更新当前被安全拒绝，生成逻辑仅经测试替身验证，真实写入路线需另行确认。"
+        ),
+    )
+    parser.add_argument("--check", action="store_true", help="运行一致性检查（无参数时等价 --check --scope all）")
+    parser.add_argument(
+        "--scope",
+        choices=sorted(_SCOPE_LABELS),
+        default=None,
+        help="固定责任范围：document=结构/路径/锚点/目录/生成输出；governance=作者源/例外/路由/配置映射；source=NOTE/模块/单例/动态文案源码契约",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help=(
+            "更新封闭注册表登记的生成块并自动运行 all 检查（不得与 --check/--scope 组合）；"
+            "生产差异更新当前被安全拒绝（生成逻辑仅经测试替身验证），真实写入路线需另行确认"
+        ),
+    )
+    return parser
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    plan: list[tuple[frozenset[str], Callable[[], list[str]]]] | None = None,
+    update_runner: Callable[[], docs_generated.UpdateResult] | None = None,
+) -> int:
+    """CLI 入口：无参数等价 --check --scope all；退出码 成功 0 / 失败 1 / 参数误用 2。
+
+    argv=None（既有调用方直接 main()）时不解析命令行、只读执行全部检查，保持旧签名兼容；
+    真实 CLI 经 __main__ 显式传入 sys.argv[1:]。
+    """
+    if argv is None:
+        args = argparse.Namespace(check=False, scope=None, update=False)
+    else:
+        parser = _build_arg_parser()
+        args = parser.parse_args(argv)
+    if args.update and (args.check or args.scope is not None):
+        parser = _build_arg_parser()
+        parser.error("--update 不得与 --check/--scope 组合（更新隐含更新后 all 检查）")
+    if args.update:
+        runner = update_runner if update_runner is not None else run_builtin_update
+        try:
+            result = runner()
+        except docs_generated.DocsGeneratedError as exc:
+            # 显式拒绝（缺源/缺块/越界/保护失败/目标未登记等）→ 如实报告并退出 1
+            print(f"[FAIL] 更新被拒绝: {exc}")
+            return 1
+        _report_update_result(result)
+        return 0 if result.ok else 1
+
+    scope = args.scope if args.scope is not None else "all"
+    effective_plan = plan if plan is not None else build_scope_plan()
+    all_errors = collect_scope_errors(effective_plan, scope)
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -4319,18 +5184,21 @@ def main() -> int:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
-    print(
-        "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
-        "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
-        "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
-        "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
-        "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
-        "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
-        "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
-        "注册单例散文数量守卫 / ADR supersede 双向链守卫 / "
-        "canonical section 章节存在性 / evals 样例目录索引一致性 / 非注册单例清单守卫）"
-    )
+    if scope == "all":
+        print(
+            "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
+            "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
+            "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / 例外有效期与移除条件有效性 / canonical-topics.yml 一致性 / "
+            "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
+            "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
+            "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
+            "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
+            "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
+            "注册单例散文数量守卫 / ADR supersede 双向链守卫 / "
+            "canonical section 章节存在性 / evals 样例目录索引一致性 / 非注册单例清单守卫）"
+        )
+    else:
+        print(f"[PASS] 文档一致性检查通过（scope={scope}；仅执行该 scope 固定责任映射内检查）")
     return 0
 
 
@@ -4341,4 +5209,5 @@ if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):
         if hasattr(_stream, "reconfigure"):
             typing.cast(TextIOWrapper, _stream).reconfigure(encoding="utf-8", errors="replace")
-    sys.exit(main())
+    # 显式传入命令行参数：main(argv=None) 保持旧签名兼容（不解析 argv），CLI 路径在此解析。
+    sys.exit(main(sys.argv[1:]))

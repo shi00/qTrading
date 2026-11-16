@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from core.i18n import Message
+from strategies.attribution import ATTRIBUTION_COLUMN
 from ui.components.virtual_table import next_sort_state
 from ui.viewmodels.screener_view_model import (
     RealtimeSnapshot,
@@ -1489,6 +1490,76 @@ class TestCurrentPageRows:
         # 赋值被拒绝后原值不变 (强断言: 非仅"抛异常", 还验证不可变语义)
         assert rows[0].values["A"] == 1
 
+    def test_nested_attribution_and_params_snapshot_are_deep_frozen(self, vm):
+        """D16-008: 公开行的嵌套归因/参数快照不可写, 修改源字典不影响旧行."""
+        attribution = {
+            "conditions": [
+                {"column": "pe_ttm", "operator": "between", "threshold": [5.0, 20.0], "actual": 6.5},
+            ],
+            "rank": {"field": "dv_ttm", "ascending": False, "value": 3.5, "position": 1, "total": 10},
+        }
+        params = {"roe_min": 15.0, "global_config": {"exclude_st": True}, "tags": ["a", "b"]}
+        vm._full_results = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "params_snapshot": [params],
+                ATTRIBUTION_COLUMN: [attribution],
+            }
+        )
+        vm._update_pagination()
+        row = vm.state.current_page_rows[0]
+
+        attr = row.values[ATTRIBUTION_COLUMN]
+        assert isinstance(attr, MappingProxyType)
+        assert isinstance(attr["conditions"], tuple)
+        condition = attr["conditions"][0]
+        assert isinstance(condition, MappingProxyType)
+        assert condition["threshold"] == (5.0, 20.0)
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            condition["operator"] = "gt"  # type: ignore[index]  # 冻结映射写入应被拒绝 (运行时 TypeError)
+        assert condition["operator"] == "between"
+
+        snapshot = row.values["params_snapshot"]
+        assert isinstance(snapshot, MappingProxyType)
+        assert isinstance(snapshot["global_config"], MappingProxyType)
+        assert isinstance(snapshot["tags"], tuple)
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            snapshot["global_config"]["exclude_st"] = False  # type: ignore[index]  # 嵌套冻结映射写入应被拒绝
+        assert snapshot["global_config"]["exclude_st"] is True
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            snapshot["tags"][0] = "c"  # type: ignore[index]  # tuple 不可写
+        assert snapshot["tags"] == ("a", "b")
+
+        # 源 DAO/DataFrame 字典就地改写不得穿透到已产出的公开行 (深复制)
+        attribution["rank"]["total"] = 999
+        params["global_config"]["exclude_st"] = False
+        params["tags"].append("c")
+        assert row.values[ATTRIBUTION_COLUMN]["rank"]["total"] == 10
+        assert row.values["params_snapshot"]["global_config"]["exclude_st"] is True
+        assert row.values["params_snapshot"]["tags"] == ("a", "b")
+
+    def test_deep_frozen_slice_reuses_reference(self, vm):
+        """D16-008: 嵌套冻结后内容等价时仍复用切片引用 (View memo 命中不受影响)."""
+        vm._full_results = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "params_snapshot": [{"global_config": {"exclude_st": True}}],
+            }
+        )
+        vm._update_pagination()
+        ref1 = vm.state.current_page_rows
+        vm._update_pagination()
+        assert vm.state.current_page_rows is ref1
+
+    def test_deep_freeze_keeps_none_and_original_values(self, vm):
+        """D16-008: 深冻结保持 None/标量原值, 不为缺失值回退或填充."""
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"], "params_snapshot": [None], "ai_score": [None]})
+        vm._update_pagination()
+        row = vm.state.current_page_rows[0]
+        assert row.values["params_snapshot"] is None
+        assert row.values["ai_score"] is None
+        assert row.values["ts_code"] == "000001.SZ"
+
     def test_unchanged_slice_reuses_reference(self, vm):
         """C2b: 内容未变 (如流式页满后仅 total_* 增长) 复用引用, 供 View 格式化 memo 命中."""
         vm._full_results = pd.DataFrame({"A": [1, 2], "B": [3, 4]})
@@ -2111,6 +2182,115 @@ class TestLoadHistoryExecWarningsRestore:
             await vm.load_history_data("20260906")
 
         assert vm.state.warnings == (Message("screener_history_exec_context_unrecorded"),)
+
+    # --- D16-009：合法数组内成员损坏不得洗成「已记录且无警告」 ---
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [[None], [{"params": {}}], ["not-a-member"], [{"key": ""}]])
+    async def test_all_corrupt_members_mark_corrupted(self, vm, raw):
+        """数组可解析但成员全坏 → 损坏哨兵，必须与 ``[]``（无警告）区分。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_score": [80], "exec_warnings": [raw]})
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (Message("screener_history_exec_context_corrupted"),)
+
+    @pytest.mark.asyncio
+    async def test_mixed_members_keep_valid_warning_and_mark_corrupted(self, vm):
+        """混合合法/非法成员：保留已知警告，同时追加损坏提示（不只报其中一种）。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ai_score": [80],
+                "exec_warnings": [[{"key": "strategy_ai_risk_check_skipped", "params": {}}, None]],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_corrupted"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_damaged_params_keep_warning_and_mark_corrupted(self, vm):
+        """params 类型损坏：保留可识别 warning key + 合法成员的完整 params，并标记损坏。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ai_score": [80],
+                "exec_warnings": [
+                    [
+                        {"key": "strategy_ai_risk_check_skipped", "params": "oops"},
+                        {"key": "strategy_param_auto_adjusted", "params": {"min": 1.0, "adjusted_max": 9.0}},
+                    ]
+                ],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("strategy_param_auto_adjusted", {"min": 1.0, "adjusted_max": 9.0}),
+            Message("screener_history_exec_context_corrupted"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_corrupt_run_union_keeps_other_run_warning(self, vm):
+        """跨 run 并集：一个 run 损坏、另一个 run 有合法警告 → 两者都保留，不互相覆盖。"""
+        df = pd.DataFrame(
+            {
+                "run_id": ["runA", "runB"],
+                "trade_date": ["20260906", "20260906"],
+                "strategy_name": ["s1", "s2"],
+                "ai_score": [90, 80],
+                "exec_warnings": [[{"key": "strategy_ai_risk_check_skipped", "params": {}}], [None]],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_corrupted"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_same_run_repeated_corruption_shown_once(self, vm):
+        """同一 run 的 100 行相同损坏只显示一次损坏哨兵（同 run 去重）。"""
+        df = pd.DataFrame(
+            {
+                "run_id": ["runX"] * 100,
+                "trade_date": ["20260906"] * 100,
+                "strategy_name": ["s"] * 100,
+                "ai_score": list(range(100)),
+                "exec_warnings": [[None] for _ in range(100)],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (Message("screener_history_exec_context_corrupted"),)
+
+    @pytest.mark.asyncio
+    async def test_json_string_member_corruption_marks_corrupted(self, vm):
+        """raw SQL 路径的 JSON 字符串：可整体解析但含坏成员时同样标记损坏。"""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ai_score": [80],
+                "exec_warnings": ['[{"key": "strategy_ai_risk_check_skipped", "params": {}}, null]'],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_corrupted"),
+        )
 
     @pytest.mark.asyncio
     async def test_missing_run_id_uses_date_strategy_sentinel_group(self, vm):

@@ -509,6 +509,144 @@ class TestAiAttribution:
         assert compute_ai_attribution_stats(pd.DataFrame()) == ()
 
 
+class TestDateOrderInvariance:
+    """RSS-01：日序列统计必须先按 trade_date 升序，HAC 的 lag 自协方差才对应相邻交易日。
+
+    同一批行以正序/逆序/交错三种行序输入，两个入口必须得到完全一致的 MetricStat；
+    缺日仍按等间隔近似（既有限制，本修复不改变），重复日期不被去重（数据质量问题，
+    不由本服务合法化）。
+    """
+
+    @staticmethod
+    def _periodic_values(n_days: int = 40, *, phase: int = 0, step: int = 1) -> list[float]:
+        """固定周期波动序列（10 日周期），lag1-4 强正相关，使 HAC CI 对行序敏感。"""
+        return [float((i * step + phase) % 10) for i in range(n_days)]
+
+    @staticmethod
+    def _ordered_frame(rows: list[dict], order: str) -> pd.DataFrame:
+        if order == "desc":
+            rows = list(reversed(rows))
+        elif order == "interleaved":
+            rows = rows[::2] + rows[1::2]
+        return pd.DataFrame(rows)
+
+    def test_strategy_stats_order_invariant(self) -> None:
+        values = self._periodic_values()
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=v, alpha=v, t5=v) for i, v in enumerate(values)]
+        frames = {order: self._ordered_frame(rows, order) for order in ("asc", "desc", "interleaved")}
+        before = frames["desc"].copy(deep=True)
+
+        results = {order: compute_strategy_review_stats(frame) for order, frame in frames.items()}
+
+        assert results["asc"] == results["desc"] == results["interleaved"]
+        (row,) = results["asc"]
+        # 行序修复不得改变有序输入的横截面累计（row_n / 胜率 / 日均纳入数）。
+        assert row.alpha.row_n == 40
+        assert row.t1.row_n == 40
+        assert row.alpha.n == 40
+        assert row.alpha.ci_lower is not None
+        # 不得原地修改调用方 DataFrame。
+        pd.testing.assert_frame_equal(frames["desc"], before)
+
+    def test_ai_attribution_stats_order_invariant(self) -> None:
+        values_ai = self._periodic_values()
+        values_no_ai = self._periodic_values(phase=2, step=3)
+        # 两个组各自成块，保证下文的逆序/交错排列会打乱组内日序（而非恰好还原）。
+        rows: list[dict] = []
+        for has_ai, values in ((True, values_ai), (False, values_no_ai)):
+            rows.extend(
+                _ai_metric_row(strat="sA", bm="sh000001", has_ai=has_ai, day=i, t1=v, alpha=v, t5=v)
+                for i, v in enumerate(values)
+            )
+        frames = {order: self._ordered_frame(rows, order) for order in ("asc", "desc", "interleaved")}
+        before = frames["interleaved"].copy(deep=True)
+
+        results = {order: compute_ai_attribution_stats(frame) for order, frame in frames.items()}
+
+        assert results["asc"] == results["desc"] == results["interleaved"]
+        for row in results["asc"]:
+            assert row.alpha.n == 40
+            assert row.alpha.row_n == 40
+            assert row.alpha.ci_lower is not None
+        pd.testing.assert_frame_equal(frames["interleaved"], before)
+
+    def test_ordered_input_values_unchanged(self) -> None:
+        """有序输入（DAO 现有顺序）数值逐位不变：t1 朴素 CI，alpha NW CI。"""
+        values = pd.Series(self._periodic_values())
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=v, alpha=v, t5=v) for i, v in enumerate(values)]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+
+        n = int(values.size)
+        std = float(values.std(ddof=1))
+        naive_half = _t_crit(n - 1) * std / math.sqrt(n)
+        se = _newey_west_se(values, lags=HORIZON_WINDOW_OVERLAP - 1)
+        assert se is not None
+        nw_half = _t_crit(n - 1) * se
+        assert row.t1.mean == pytest.approx(float(values.mean()))
+        assert row.t1.std == pytest.approx(std)
+        assert row.t1.ci_lower == pytest.approx(float(values.mean()) - naive_half)
+        assert row.t1.ci_upper == pytest.approx(float(values.mean()) + naive_half)
+        assert row.alpha.std == pytest.approx(std)
+        assert row.alpha.ci_lower == pytest.approx(float(values.mean()) - nw_half)
+        assert row.alpha.ci_upper == pytest.approx(float(values.mean()) + nw_half)
+
+    def test_duplicate_trade_dates_not_deduplicated(self) -> None:
+        """重复日期不合法化：仍按原始行逐行计数（不合并、不去重）。"""
+        values = self._periodic_values()
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i // 2, t1=v, alpha=v, t5=v) for i, v in enumerate(values)]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert row.t1.n == 40  # 20 个唯一日期 × 2 行，未被折叠成 20
+        assert row.alpha.n == 40
+        assert row.t1.row_n == 40
+        assert row.t1.mean == pytest.approx(sum(values) / len(values))
+
+        ai_rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=i // 2, t1=v, alpha=v, t5=v)
+            for i, v in enumerate(values)
+        ]
+        (ai_row,) = compute_ai_attribution_stats(pd.DataFrame(ai_rows))
+        assert ai_row.t1.n == 40
+        assert ai_row.alpha.n == 40
+        assert ai_row.alpha.row_n == 40
+
+    def test_missing_dates_equal_spacing_known_limitation(self) -> None:
+        """已知限制（未在本修复中改变）：缺日仍按等间隔近似，日期缺口不参与重采样。
+
+        同一组数值放在连续日期与稀疏日期上得到相同统计——排序只修正行序，
+        不修复缺口日期的等间隔假设。
+        """
+        values = self._periodic_values()
+        dense = pd.DataFrame(
+            [_metric_row(strat="sA", bm="sh000001", day=i, t1=v, alpha=v, t5=v) for i, v in enumerate(values)]
+        )
+        sparse = pd.DataFrame(
+            [_metric_row(strat="sA", bm="sh000001", day=i * 3, t1=v, alpha=v, t5=v) for i, v in enumerate(values)]
+        )
+        assert compute_strategy_review_stats(sparse) == compute_strategy_review_stats(dense)
+
+    def test_empty_and_none_paths_unchanged(self) -> None:
+        assert compute_strategy_review_stats(pd.DataFrame()) == ()
+        assert compute_ai_attribution_stats(pd.DataFrame()) == ()
+
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=None, alpha=None) for i in range(40)]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert row.t1.n == 0
+        assert row.t1.mean is None
+        assert row.t1.ci_lower is None
+        assert row.alpha.n == 0
+        assert row.alpha.mean is None
+        assert row.alpha.ci_lower is None
+        assert row.t1.row_n == 0
+
+        ai_rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=i, t1=None, alpha=None) for i in range(40)
+        ]
+        (ai_row,) = compute_ai_attribution_stats(pd.DataFrame(ai_rows))
+        assert ai_row.alpha.n == 0
+        assert ai_row.alpha.mean is None
+        assert ai_row.alpha.ci_lower is None
+
+
 class TestRowN:
     """RV-10: 每股有效样本数 row_n 接入 MetricStat 并随统计行返回。
 

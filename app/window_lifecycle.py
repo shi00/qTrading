@@ -280,8 +280,6 @@ async def perform_upgrade_exit(
 
 async def handle_disconnect(
     coordinator: ShutdownCoordinator,
-    *,
-    cleanup_done_fn: Callable[[], bool],
 ) -> None:
     """处理外部 disconnect 事件.
 
@@ -289,9 +287,13 @@ async def handle_disconnect(
     1. 启动 watchdog（70s）
     2. 执行 cleanup（timeout=60s, step_timeout=35s）
     3. cleanup 被 cancel：force_exit(1) 并 raise CancelledError（R2 红线，与 perform_window_shutdown 对齐）
-    4. 如果 cleanup_done_fn() 返回 True：直接返回（其他路径已处理）
-    5. cleanup_ok=True：cancel_watchdog，log info，返回（等待 runtime 自然终止）
-    6. cleanup_ok=False：log error，sleep 0.2s，force_exit(1)
+    4. cleanup_ok=True：cancel_watchdog，log info，返回（等待 runtime 自然终止）
+    5. cleanup_ok=False（含关键步骤失败 / 总超时）：log error，sleep 0.2s，force_exit(1)
+
+    D02-001：退出与否只由 ``cleanup_ok`` 决定。``cleanup_done`` 仅表示「清理尝试已结束」，
+    失败/超时路径同样会置 True（且 ``_execute_cleanup`` 已撤销 watchdog），
+    若据此短路会既不 force_exit 也失去 watchdog 兜底，导致进程悬挂。
+    多入口重复 force_exit 由 ``ShutdownCoordinator.force_exit`` 的首次请求生效保护消解。
     """
     # Phase 2 Step 8 加入后，disconnect 路径同步调整：watchdog 70s + do_cleanup 60s
     coordinator.start_watchdog(70)
@@ -305,8 +307,6 @@ async def handle_disconnect(
         await asyncio.sleep(0.2)
         coordinator.force_exit(1)
         raise
-    if cleanup_done_fn():
-        return
     if cleanup_ok:
         coordinator.cancel_watchdog()
         logger.info("[Main] External disconnect cleanup completed; waiting for runtime to terminate naturally.")

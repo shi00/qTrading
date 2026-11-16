@@ -11,23 +11,47 @@ Checks:
 8. Sidecar 版本一致性：Cargo.toml [package].version / pyproject.toml [tool.qtrading.sidecar] /
    src/protocol.rs PROTOCOL_VERSION 三方对齐（pg_plan §15.5 AI-12）；
    可选 ``--check-sidecar-binary`` 启用四方校验（调用 sidecar version --json）。
+9. 发行 tag 数值门（D22-001）：``--release-tag <tag>`` 时只执行本项——原始 tag 必须是严格
+   ``v<major>.<minor>.<patch>``（拒绝前导零 / 预发布 / 构建元数据 / 缺 ``v`` 前缀），去 ``v``
+   后同时等于 pyproject.toml [project].version 与 .release-please-manifest.json 的 ``.`` 值。
+   该模式仅用标准库（不依赖 docs_markdown：缺失时模块属性置 None，仅实际执行文档检查时
+   显式失败），供发行流水线在编译与 Release 创建前独立校验
+   tag 数值；不检查远端 tag 指针（commit 归属由 release-windows 的 tag lock 负责），
+   不得以「远端 tag 指向本提交」替代数值检查。
 
 （原 Check 1 installer.iss / Check 10 AGENTS.md「对应版本」/ Check 11 harness.toml [project].version
 已随「版本字面量收敛」移除：版本唯一正本为 pyproject.toml [project].version，文档与工具配置
 不再携带产品版本字面量，故无副本可校验。installer.iss 的本地兜底默认值改为 0.0.0-local，
 发布构建始终经 ``/DMyAppVersion`` 注入 tag 版本。）
 
+D5（检视 §5.1 职责表）：文档引用检查（Check 5 / Check 6）委托 docs_markdown 统一解析
+视图，不再维护第二套文档解析；产品/依赖/安全支持/Flet/sidecar 版本职责保留在本脚本。
+
 Usage: python scripts/verify_versions.py [--check-sidecar-binary <path>]
+       python scripts/verify_versions.py --release-tag <tag>
 """
 
+import importlib
 import json
 import re
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 文档解析视图（D5：与 check_docs_consistency 共用唯一解析实现，检视 §5.1）。
+# 保留模块级属性 docs_markdown（tests/docs 通过 monkeypatch 该属性证明委托唯一解析）。
+# ``--release-tag`` 发行门禁须在仅含标准库的环境（无 requirements-docs 依赖）独立运行，
+# 故导入失败时置 None，由真正执行文档检查的路径显式失败（不静默降级为第二套解析）——
+# verify-versions hook 环境须含 markdown-it-py（pre-commit additional_dependencies 由
+# docs 组条目提供）。
+try:
+    docs_markdown: ModuleType | None = importlib.import_module("docs_markdown")
+except ImportError:  # pragma: no cover - 发行门禁环境无 docs 依赖
+    docs_markdown = None
 
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 REQUIREMENTS_DEV_PATH = ROOT / "requirements-dev.txt"
@@ -46,6 +70,24 @@ EXPECTED_REPO_URL = "shi00/qTrading"
 
 # sidecar version --json 调用超时（秒），与 generate_sidecar_manifest.py 对齐
 SIDECAR_VERSION_TIMEOUT_S = 10
+
+# 受支持的发行 tag 形式（release-please include-v-in-tag: true）：严格 semver，无前导零，
+# 不接受预发布 / 构建元数据——这些形式无法与 [project].version 的 PVP 版本直接相等比较。
+SUPPORTED_RELEASE_TAG_RE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+
+
+def _load_docs_markdown() -> ModuleType:
+    """返回共享文档解析视图（D5：与 check_docs_consistency 共用唯一解析实现，检视 §5.1）。
+
+    ``--release-tag`` 发行门禁须在仅含标准库的环境独立运行，故导入失败时模块属性置 None
+    而不在此处中断；真正执行文档检查时显式失败（不静默降级为第二套解析）。
+    """
+    if docs_markdown is None:
+        raise SystemExit(
+            "verify_versions.py 需要文档解析依赖 docs_markdown（markdown-it-py）；"
+            "请安装 docs 依赖组（requirements-docs.txt）"
+        )
+    return docs_markdown
 
 
 def get_pyproject_version() -> str:
@@ -110,6 +152,8 @@ def check_repo_url_consistency() -> list[str]:
     errors = []
     for doc_path in [README_PATH, CONTRIBUTING_PATH, SECURITY_PATH]:
         if not doc_path.exists():
+            # F17/§5.1：必需正文缺失须显式失败，不得静默跳过装通过（fail-closed）
+            errors.append(f"必需正文缺失: {doc_path} 不存在，仓库 URL 一致性检查无法执行（fail-closed）")
             continue
         content = doc_path.read_text(encoding="utf-8")
         if STALE_REPO_URL in content:
@@ -121,6 +165,8 @@ def check_security_supported_version(pyproject_ver: str) -> list[str]:
     """Check 4: SECURITY.md supported version matches pyproject major.minor."""
     errors = []
     if not SECURITY_PATH.exists():
+        # F17/§5.1：安全支持表所在正文缺失须显式失败，不得静默跳过装通过（fail-closed）
+        errors.append(f"必需正文缺失: {SECURITY_PATH} 不存在，安全支持版本检查无法执行（fail-closed）")
         return errors
     content = SECURITY_PATH.read_text(encoding="utf-8")
     major_minor = ".".join(pyproject_ver.split(".")[:2])
@@ -133,30 +179,46 @@ def check_security_supported_version(pyproject_ver: str) -> list[str]:
 
 
 def check_empty_markdown_links() -> list[str]:
-    """Check 5: No empty markdown links ]() in README.md."""
+    """Check 5: No empty markdown links ]() in README.md（D5：经共享解析视图判定）。
+
+    空链接 ``[text]()` ``在 CommonMark 下解析为 target 为空的 link token，
+    经 docs_markdown 视图 links 提取（代码块/行内代码内的示例文本天然排除，
+    替代旧行级子串扫描的第二套解析）。
+    """
     errors = []
     if not README_PATH.exists():
+        # D5/F22：README.md 为必需正文，缺失显式失败——不得静默跳过装通过（F17 失踪输入空转）。
+        errors.append(f"必需正文缺失: {README_PATH} 不存在，空链接检查无法执行（fail-closed）")
         return errors
-    content = README_PATH.read_text(encoding="utf-8")
-    for i, line in enumerate(content.splitlines(), 1):
-        if "]()" in line:
-            errors.append(f"README.md:{i} contains empty markdown link ']()'")
+    view = _load_docs_markdown().load_document_view(README_PATH)
+    for link in view.links:
+        if link.target.strip() == "":
+            errors.append(f"README.md:{link.line} contains empty markdown link ']()'")
     return errors
 
 
 def check_claude_references() -> list[str]:
-    """Check 6: CLAUDE.md reference-style pointers target existing files."""
+    """Check 6: CLAUDE.md reference-style pointers target existing files（D5：经共享解析视图判定）。
+
+    反引号代码 span 经解析视图 code_spans 提取（替代旧行级正则的第二套解析）。
+    仅校验指向代码文件的引用；§/章节类引用跳过。
+    """
     errors = []
     if not CLAUDE_PATH.exists():
+        # D5/F22：CLAUDE.md 为必需正文，缺失显式失败——不得静默跳过装通过（F17 失踪输入空转）。
+        errors.append(f"必需正文缺失: {CLAUDE_PATH} 不存在，引用检查无法执行（fail-closed）")
         return errors
-    content = CLAUDE_PATH.read_text(encoding="utf-8")
-    # Match patterns like: 见 `xxx.py` or 见 `xxx/yyy.py`
-    refs = re.findall(r"见 `([^`]+)`", content)
-    for ref in refs:
+    view = _load_docs_markdown().load_document_view(CLAUDE_PATH)
+    for span in view.code_spans:
+        ref = span.text
         # Skip non-file references (e.g., section references like §4.1)
         if ref.startswith("§") or not (
             ref.endswith(".py") or ref.endswith(".yml") or ref.endswith(".yaml") or ref.endswith(".json")
         ):
+            continue
+        # 命令形态（含空白，如 `python scripts/check_redlines.py`）不是路径引用，跳过；
+        # 路径引用为无空白的路径/文件名形态（与旧「见 `xxx.py`」语义等价的 token 判定）。
+        if not ref or any(ch.isspace() for ch in ref):
             continue
         # Try as full path from root first
         target = ROOT / ref
@@ -436,6 +498,50 @@ def _get_cargo_postgresql_embedded_version() -> str:
     return raw.lstrip("=").strip()
 
 
+def check_release_tag_version(tag: str) -> list[str]:
+    """Check 9: 发行 tag 的版本数值必须等于产品正本（D22-001）。
+
+    只校验「原始 tag 字符串」本身：严格 ``v<major>.<minor>.<patch>``（拒绝前导零 /
+    预发布 / 构建元数据 / 缺 ``v`` 前缀），去 ``v`` 后须同时等于 pyproject.toml
+    [project].version 与 .release-please-manifest.json 的 ``.`` 值。
+    远端 tag 是否指向本次提交不在本检查范围（由 release-windows 的 tag lock 独立负责）：
+    在旧版本提交上推新版本 tag 时指针完全合法，但安装器 ISCC 注入的 ``github.ref_name``
+    与 Release 声明的版本会与产品正本不一致，故不得用指针检查替代数值检查。
+    """
+    if not SUPPORTED_RELEASE_TAG_RE.match(tag):
+        return [
+            f"release tag '{tag}' is not a supported form 'v<major>.<minor>.<patch>' "
+            "(no leading zeros, pre-release or build metadata)"
+        ]
+    tag_version = tag[1:]
+    try:
+        pyproject_ver = get_pyproject_version()
+        manifest_ver = get_release_manifest_version()
+    except (OSError, KeyError, ValueError) as exc:
+        return [f"failed to read product version: {exc}"]
+    errors: list[str] = []
+    if tag_version != pyproject_ver:
+        errors.append(
+            f"release tag '{tag}' version '{tag_version}' != pyproject.toml [project].version '{pyproject_ver}'"
+        )
+    if tag_version != manifest_ver:
+        errors.append(
+            f"release tag '{tag}' version '{tag_version}' != .release-please-manifest.json version '{manifest_ver}'"
+        )
+    return errors
+
+
+def _parse_release_tag_arg(argv: list[str]) -> str | None:
+    """解析 ``--release-tag <tag>`` 参数，未提供时返回 None。"""
+    if "--release-tag" not in argv:
+        return None
+    idx = argv.index("--release-tag")
+    if idx + 1 >= len(argv) or argv[idx + 1].startswith("--"):
+        print("ERROR: --release-tag requires a tag argument", file=sys.stderr)
+        sys.exit(2)
+    return argv[idx + 1]
+
+
 def _parse_check_sidecar_binary_arg(argv: list[str]) -> Path | None:
     """解析 ``--check-sidecar-binary <path>`` 参数，未提供时返回 None。"""
     if "--check-sidecar-binary" not in argv:
@@ -451,6 +557,26 @@ def main() -> None:
     errors: list[str] = []
     fixed_any = False
     fix_mode = "--fix" in sys.argv
+    release_tag = _parse_release_tag_arg(sys.argv)
+
+    # Check 9 为独立模式：只校验原始 tag 数值，供发行流水线在编译 / Release 创建前运行，
+    # 不执行其余检查（发行 job 只有标准库，且其余检查已在 ci-checks-static 全量执行）。
+    if release_tag is not None:
+        if fix_mode:
+            print("ERROR: --release-tag cannot be combined with --fix", file=sys.stderr)
+            sys.exit(2)
+        errors = check_release_tag_version(release_tag)
+        if errors:
+            print("Release tag version check FAILED:")
+            for e in errors:
+                print(f"  - {e}")
+            sys.exit(1)
+        print(
+            f"Release tag '{release_tag}' matches pyproject.toml / .release-please-manifest.json "
+            f"version '{release_tag[1:]}'."
+        )
+        return
+
     sidecar_binary = _parse_check_sidecar_binary_arg(sys.argv)
 
     try:

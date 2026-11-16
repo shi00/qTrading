@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 # 覆盖率，按「已知不可信不伪装」降级为空（R21 变体）。
 _REVIEW_STATS_REQUIRED_COLUMNS = frozenset(
     {
+        "trade_date",
         "strategy_name",
         "benchmark_code",
         "daily_cnt",
@@ -428,6 +429,9 @@ class HistoryModeMixin:
           （保留 run 标识）。
         - 任一来源上下文缺失（NULL / 非法 JSON / 非数组）→ 追加「未记录执行上下文」哨兵
           （已知不可信不得伪装成无警告）；同来源既有已记录又有缺失值时按保守并集处理并记诊断。
+        - 数组本身合法但成员损坏（D16-009：非 dict / 缺 key / params 缺失或非 dict）→ 保留可
+          还原的已知警告，并追加「执行警告记录损坏/不完整」哨兵一次；非空但全坏的数组不得洗成
+          「已记录且无警告」。
         - 无记录（空 df）：返回空元组（无结果可展示，避免产生误导性横幅）。
         """
         if records_df is None or records_df.empty:
@@ -448,15 +452,19 @@ class HistoryModeMixin:
         seen: set[tuple] = set()
         recorded_sources: set[tuple] = set()
         unrecorded_sources: set[tuple] = set()
+        corrupted_sources: set[tuple] = set()
         for idx, raw in enumerate(warning_values):
             source = _history_run_source(run_ids[idx], trade_dates[idx], strategy_names[idx])
-            restored = deserialize_exec_warnings(raw)
-            if restored is None:
+            parsed = deserialize_exec_warnings(raw)
+            if parsed is None:
                 # NULL / 非法 JSON / 非数组：该来源上下文未知，不得丢弃为「干净」。
                 unrecorded_sources.add(source)
                 continue
             recorded_sources.add(source)
-            for msg in restored:
+            if parsed.corrupted:
+                # D16-009：数组合法但成员不可还原（含非空全坏），必须保留「损坏」提示。
+                corrupted_sources.add(source)
+            for msg in parsed.messages:
                 dedup_key = (source, msg.key, _canonical_params_key(msg.params))
                 if dedup_key in seen:
                     continue
@@ -471,6 +479,12 @@ class HistoryModeMixin:
                 "[ScreenerVM] 存在 %d 个运行来源的 exec_warnings 记录/缺失不一致，按保守并集处理",
                 len(inconsistent),
             )
+        if corrupted_sources:
+            logger.warning(
+                "[ScreenerVM] 存在 %d 个运行来源的 exec_warnings 成员损坏，已标记为不完整",
+                len(corrupted_sources),
+            )
+            ordered.append(Message("screener_history_exec_context_corrupted"))
         if unrecorded_sources:
             ordered.append(Message("screener_history_exec_context_unrecorded"))
         return tuple(ordered)

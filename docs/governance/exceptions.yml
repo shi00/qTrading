@@ -206,7 +206,7 @@ exceptions:
     approved_by: 架构维护者（P1-06 方案1，R5 分类修正）
     removal_trigger: "R5 红线扩展到应用服务层轮询循环时，或 NewsSubscriptionService 重构时移除（与技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 的 upgrade 触发条件一致）。"
     verification: "人工评审（R5 为 EXCEPTIONABLE，仅人工评审）。"
-    validity_criteria: "`services/news_subscription_service.py` 的 `_safe_fetch_task`/`_processing_loop`/`_fetch_and_notify` 仍以捕获 `EngineDisposedError` 置 `self._running=False`/break 的方式优雅停止轮询（未改为显式停止信号），且 R5 红线尚未扩展到应用服务层轮询循环——二者任一成立即本条仍有效。"
+    validity_criteria: "`services/news_subscription_service.py` 的 `_safe_fetch_task`/`_processing_loop`/`_fetch_and_notify` 仍以捕获 `EngineDisposedError` 置 `self._running=False`/break 的方式优雅停止轮询（未改为显式停止信号）——原获批偏离前提仍成立；且 R5 红线尚未扩展到应用服务层轮询循环——R5 对应范围未变；且未触发本条 removal_trigger——三者必须全部成立本条才有效（AND 语义，ADR-0018 C15），任一失效即停止沿用；本例外仅限上述既有方法与既有轮询流程，不扩展到新方法/新服务。"
   # EX-0018: services/backtest_service.py 回测持久化失败不阻塞结果返回（R5，P1-06 方案1）
   # 技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 登记于此（案文：#M9-011）。
   - id: EX-0018
@@ -217,7 +217,7 @@ exceptions:
     approved_by: 架构维护者（P1-06 方案1，R5 分类修正）
     removal_trigger: "R5 红线扩展到回测持久化路径时，或 BacktestService 重构时移除（与技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 的 upgrade 触发条件一致）。"
     verification: "人工评审（R5 为 EXCEPTIONABLE，仅人工评审）。"
-    validity_criteria: "`services/backtest_service.py` 的 `_persist_result` 仍以捕获持久化异常（如 `EngineDisposedError` 落入 `except Exception`）并返回带 `persist_failed` 警告的回测结果（不 raise）的方式处理持久化失败，且 R5 红线尚未扩展到回测持久化路径——二者任一成立即本条仍有效。"
+    validity_criteria: "`services/backtest_service.py` 的 `_persist_result` 仍以捕获持久化异常（如 `EngineDisposedError` 落入 `except Exception`）并返回带 `persist_failed` 警告的回测结果（不 raise）的方式处理持久化失败——原获批偏离前提仍成立；且 R5 红线尚未扩展到回测持久化路径——R5 对应范围未变；且未触发本条 removal_trigger——三者必须全部成立本条才有效（AND 语义，ADR-0018 C15），任一失效即停止沿用；本例外仅限上述既有方法与既有持久化流程，不扩展到新方法/新服务。"
   # EX-0019: utils/scheduler_service.py -> data.persistence.engine_provider（R5 引擎状态守卫，REVIEW-06 TO-04）
   - id: EX-0019
     rule_id: R1

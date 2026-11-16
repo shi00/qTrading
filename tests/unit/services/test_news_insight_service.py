@@ -1,9 +1,9 @@
 """NewsInsightService 单元测试（新闻风险解读第一期 Phase C，R19）。
 
 覆盖：纯工具（_window / _analysis_profile / _build_input_hash / _row_to_result /
-_sort_pub / _fill_time_range）、证据加载（_load_evidence 各来源/降级/取消分支）、
-持久化（_persist 成功/失败/降级不持久化）、preview 标签、主流程 analyze
-（no_evidence / cache_hit / subset / 无缓存 AI 编排 / regenerate 跳过缓存）。
+_publish_time_or_none / _order_evidence / _fill_time_range）、证据加载（_load_evidence
+各来源/降级/取消分支）、持久化（_persist 成功/失败/降级不持久化）、preview 标签、
+主流程 analyze（no_evidence / cache_hit / subset / 无缓存 AI 编排 / regenerate 跳过缓存）。
 
 isolate：注入 mock economy DAO / AI service，monkeypatch NewsFetcher 静态方法、
 dedupe_documents / match_news_to_stock / get_now / ConfigHandler，避免真实网络/时间。
@@ -415,10 +415,52 @@ class TestRowToResult:
 
 
 class TestModulePureFunctions:
-    def test_sort_pub_none_last(self):
+    def test_publish_time_or_none(self):
         ts = datetime.datetime(2026, 9, 1, 12, 0, 0)
-        assert module._sort_pub({"publish_time": ts}) == ts
-        assert module._sort_pub({}) == datetime.datetime.max
+        assert module._publish_time_or_none({"publish_time": ts}) == ts
+        assert module._publish_time_or_none({}) is None
+        assert module._publish_time_or_none({"publish_time": None}) is None
+        # NaT 是 datetime 子类但自比较不等；不得作为已知时间参与排序
+        assert module._publish_time_or_none({"publish_time": pd.NaT}) is None
+        assert module._publish_time_or_none({"publish_time": "2026-09-01"}) is None
+
+    def test_order_evidence_announcement_first_then_newest(self):
+        """公告优先（即使更旧），组内发布时间降序。"""
+        docs = [
+            {"id": "n_old", "source_kind": "news", "publish_time": datetime.datetime(2026, 9, 2)},
+            {"id": "a_old", "source_kind": "announcement", "publish_time": datetime.datetime(2026, 9, 1)},
+            {"id": "n_new", "source_kind": "news", "publish_time": datetime.datetime(2026, 9, 4)},
+            {"id": "a_new", "source_kind": "announcement", "publish_time": datetime.datetime(2026, 9, 3)},
+        ]
+        assert [d["id"] for d in module._order_evidence(docs)] == ["a_new", "a_old", "n_new", "n_old"]
+
+    def test_order_evidence_unknown_time_last_per_group(self):
+        """未知时间（None / NaT / 缺键）在各优先级组内末置，且保持相对顺序。"""
+        pub = datetime.datetime(2026, 9, 2)
+        docs = [
+            {"id": "a_none", "source_kind": "announcement", "publish_time": None},
+            {"id": "n_t", "source_kind": "news", "publish_time": pub},
+            {"id": "a_nat", "source_kind": "announcement", "publish_time": pd.NaT},
+            {"id": "a_t", "source_kind": "announcement", "publish_time": pub},
+            {"id": "n_none", "source_kind": "news"},
+        ]
+        assert [d["id"] for d in module._order_evidence(docs)] == ["a_t", "a_none", "a_nat", "n_t", "n_none"]
+
+    def test_order_evidence_same_time_keeps_input_order(self):
+        """同时间稳定排序：保持去重后的输入顺序。"""
+        pub = datetime.datetime(2026, 9, 2)
+        docs = [{"id": i, "source_kind": "news", "publish_time": pub} for i in (1, 2, 3)]
+        assert [d["id"] for d in module._order_evidence(docs)] == [1, 2, 3]
+
+    def test_order_evidence_all_unknown_keeps_group_order(self):
+        """全部未知时间：组间公告优先、组内保持输入顺序。"""
+        docs = [
+            {"id": 1, "source_kind": "news"},
+            {"id": 2, "source_kind": "announcement"},
+            {"id": 3, "source_kind": "news"},
+            {"id": 4, "source_kind": "announcement"},
+        ]
+        assert [d["id"] for d in module._order_evidence(docs)] == [2, 4, 1, 3]
 
     def test_fill_time_range(self):
         src = {"earliest": None, "latest": None}
@@ -537,7 +579,108 @@ class TestLoadEvidence:
 
         evidence, coverage = asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
         assert len(evidence) == 12
+        # 同组内发布时间降序：保留最新 12 条（id 12..1），最旧 id=0 被截断
+        assert [ev.news_id for ev in evidence] == list(range(12, 0, -1))
         assert coverage["news"]["adopted"] == 12
+
+    def test_fewer_than_limit_keeps_all_newest_first(self, monkeypatch):
+        dao = _make_dao()
+        rows = [
+            {
+                "id": i,
+                "source_kind": "news",
+                "title": f"n{i}",
+                "content": "c",
+                "publish_time": datetime.datetime(2026, 9, 10, 8, 0, 0) + datetime.timedelta(minutes=i),
+                "content_hash": f"h{i}",
+            }
+            for i in range(3)
+        ]
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        dao.get_market_news_documents = AsyncMock(return_value=_candidate_df(rows))
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        pub = datetime.datetime(2026, 9, 10, 8, 0, 0)
+
+        evidence, _coverage = asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
+        assert [ev.news_id for ev in evidence] == [2, 1, 0]
+
+    def test_announcement_priority_over_newer_news(self, monkeypatch):
+        """公告优先不得被整体反转为「新闻在前」（旧实现按升序取最旧材料的回归防线）。"""
+        dao = _make_dao()
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        dao.get_market_news_documents = AsyncMock(
+            return_value=_candidate_df(
+                [
+                    {
+                        "id": 1,
+                        "source_kind": "announcement",
+                        "title": "公告",
+                        "content": "c",
+                        "publish_time": datetime.datetime(2026, 9, 10, 8, 0, 0),
+                        "content_hash": "h1",
+                    },
+                    {
+                        "id": 2,
+                        "source_kind": "news",
+                        "title": "新闻",
+                        "content": "c",
+                        "publish_time": datetime.datetime(2026, 9, 10, 9, 0, 0),
+                        "content_hash": "h2",
+                    },
+                ]
+            )
+        )
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        pub = datetime.datetime(2026, 9, 10, 0, 0, 0)
+
+        evidence, _coverage = asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
+        assert [ev.news_id for ev in evidence] == [1, 2]
+
+    def test_dedupe_then_order(self, monkeypatch):
+        """先去重再排序：同 source_kind 重复行被丢弃，不因发布时间更近而复活。"""
+        dao = _make_dao()
+        monkeypatch.setattr(
+            module.NewsFetcher, "get_stock_news_documents", AsyncMock(return_value={"docs": [], "coverage": {}})
+        )
+        dao.get_market_news_documents = AsyncMock(
+            return_value=_candidate_df(
+                [
+                    {
+                        "id": 5,
+                        "source_kind": "news",
+                        "title": "同题",
+                        "content": "c",
+                        "publish_time": datetime.datetime(2026, 9, 10, 8, 10, 0),
+                        "content_hash": "h5",
+                    },
+                    {
+                        "id": 6,
+                        "source_kind": "news",
+                        "title": "同题",
+                        "content": "c",
+                        "publish_time": datetime.datetime(2026, 9, 10, 8, 11, 0),
+                        "content_hash": "h5",
+                    },
+                    {
+                        "id": 7,
+                        "source_kind": "news",
+                        "title": "另一条",
+                        "content": "c",
+                        "publish_time": datetime.datetime(2026, 9, 10, 8, 20, 0),
+                        "content_hash": "h7",
+                    },
+                ]
+            )
+        )
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        pub = datetime.datetime(2026, 9, 10, 0, 0, 0)
+
+        evidence, _coverage = asyncio.run(svc._load_evidence("000001.SZ", None, pub, pub, None))
+        assert [ev.news_id for ev in evidence] == [7, 5]
 
     def test_telegraph_matched(self, monkeypatch):
         dao = _make_dao()

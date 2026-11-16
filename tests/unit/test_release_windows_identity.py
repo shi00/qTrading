@@ -10,8 +10,11 @@
   ``--jq`` 按页执行，合并时只取首个命中 id。
 - **PATCH 类型化布尔**：发布 draft 使用 ``-F draft=false -F make_latest=true``
   （类型化布尔）；``-f`` 发送字符串 "false"，会被 GitHub 视为真值。
-- **原有触发/依赖语义不变**：release-windows 仍仅 tag 触发、仍依赖
-  build-windows + real sidecar smoke，权限仍为 contents: write。
+- **发行 tag 数值门（D22-001）**：新增 ``release-tag-gate`` 在编译前校验原始 tag 的版本数值
+  （严格 ``v<major>.<minor>.<patch>``，去 ``v`` 后等于产品正本），``build-windows`` 与
+  ``release-windows`` 均依赖它；指针检查（tag → commit == GITHUB_SHA）不得替代数值检查。
+- **触发语义**：release-windows 仍仅 tag 触发、仍等待 build-windows + real sidecar smoke，
+  权限仍为 contents: write。
 
 全部为 workflow YAML 与 run 文本的静态断言，不触发任何发布副作用。
 """
@@ -27,7 +30,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci_cd.yml"
 
 RELEASE_JOB_NAME = "release-windows"
+RELEASE_TAG_GATE_JOB = "release-tag-gate"
 TAG_LOCK_STEP_NAME = "Check release state and tag lock (fail-closed)"
+TAG_GATE_STEP_NAME = "Verify raw tag version against product version (fail-closed)"
 DRAFT_VERIFY_STEP_NAME = "Verify draft assets and SHA256 digests (gate before publish)"
 PUBLISH_STEP_NAME = "Publish draft Release as latest (verification passed)"
 
@@ -42,17 +47,64 @@ def release_job(workflow: dict) -> dict:
     return workflow["jobs"][RELEASE_JOB_NAME]
 
 
+@pytest.fixture(scope="module")
+def gate_job(workflow: dict) -> dict:
+    assert RELEASE_TAG_GATE_JOB in workflow["jobs"], f"ci_cd.yml 缺少 job {RELEASE_TAG_GATE_JOB}"
+    return workflow["jobs"][RELEASE_TAG_GATE_JOB]
+
+
 def _step(job: dict, name: str) -> dict:
     steps = [s for s in job["steps"] if s.get("name") == name]
-    assert len(steps) == 1, f"release-windows 缺少唯一步骤: {name}"
+    assert len(steps) == 1, f"缺少唯一步骤: {name}"
     return steps[0]
 
 
-def test_release_windows_trigger_and_needs_unchanged(release_job: dict) -> None:
-    # 最小方案不改变触发面与依赖关系：仍仅 tag 触发、仍等待真实 sidecar smoke。
+def test_release_windows_stays_tag_only_and_waits_for_build_smoke_and_tag_gate(release_job: dict) -> None:
+    # D22-001：依赖集合新增发行 tag 数值门，触发面与权限不变。
     assert release_job["if"] == "startsWith(github.ref, 'refs/tags/v')"
-    assert release_job["needs"] == ["build-windows", "e2e-sidecar-real-smoke"]
+    assert release_job["needs"] == [RELEASE_TAG_GATE_JOB, "build-windows", "e2e-sidecar-real-smoke"]
     assert release_job["permissions"] == {"contents": "write"}
+
+
+def test_release_tag_gate_is_read_only_lightweight_and_outside_ci_gate(workflow: dict, gate_job: dict) -> None:
+    """数值门在轻量 runner 上只读执行，tag / dispatch 触发，不进入 CI Gate 必达集合。"""
+    assert gate_job["if"] == "startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'"
+    assert gate_job["runs-on"] == "ubuntu-latest"
+    assert gate_job["permissions"] == {"contents": "read"}
+    assert gate_job["timeout-minutes"] <= 5
+    # 不依赖质量 job：tag 推送时尽早 fail-closed；PR / merge_group 不运行。
+    assert "needs" not in gate_job
+    assert RELEASE_TAG_GATE_JOB not in workflow["jobs"]["ci-gate"]["needs"]
+
+
+def test_release_tag_gate_checks_raw_tag_numeric_value(gate_job: dict) -> None:
+    """数值校验只看原始 tag 字符串，不得被远端 tag → commit 指针检查替代，且不装依赖。"""
+    step = _step(gate_job, TAG_GATE_STEP_NAME)
+    run = step["run"]
+    assert 'python scripts/verify_versions.py --release-tag "$REF_NAME"' in run
+    assert step["env"]["REF_NAME"] == "${{ github.ref_name }}"
+    assert "GIT_REF" in step["env"]
+    assert "gh api" not in run
+    assert "GITHUB_SHA" not in run
+    all_run_text = "\n".join(s.get("run", "") for s in gate_job["steps"])
+    assert "pip install" not in all_run_text
+    assert "markdown-it-py" not in all_run_text
+
+
+def test_non_tag_dispatch_remains_build_only_with_explicit_non_release_notice(gate_job: dict) -> None:
+    """dispatch 到非 tag ref 时不阻断 build-only 流程，但显式声明产物非正式版本。"""
+    run = _step(gate_job, TAG_GATE_STEP_NAME)["run"]
+    assert "Non-release build:" in run
+    assert "artifacts are unpublished" in run
+    assert "not a release version" in run
+    else_branch = run.split("else", 1)[1]
+    assert "exit 1" not in else_branch
+
+
+def test_build_and_publisher_both_depend_on_release_tag_gate(workflow: dict) -> None:
+    """build 与 publisher 都消费数值门结果：失败即跳过，其余检查全绿也不能发布错误 tag。"""
+    assert RELEASE_TAG_GATE_JOB in workflow["jobs"]["build-windows"]["needs"]
+    assert RELEASE_TAG_GATE_JOB in workflow["jobs"][RELEASE_JOB_NAME]["needs"]
 
 
 def test_tag_lock_resolves_annotated_tag_and_compares_github_sha(release_job: dict) -> None:

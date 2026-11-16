@@ -18,7 +18,7 @@
 
 | 测试目录（glob） | 覆盖对象 | 如何定位（关键词 / glob） | 新增用例入该目录的条件 |
 |---|---|---|---|
-| `tests/unit/test_*.py`（顶层，约 240 个文件） | 各层纯逻辑单测 + **治理/文档门禁**（见下） | `tests/unit/test_<主题>.py`；按类名如 `test_no_cancelled_error_swallow.py`（R2）/ `test_no_class_attr_asyncio_primitives.py`（R11）/ `test_architecture_boundaries.py`（R1）/ `test_redline_checks.py` / `test_data_dictionary_alignment.py`（R12）/ `test_cache_manager_dao_registry.py`（R13）/ `test_r8_enforcement.py`（R8）/ `test_i18n_*.py` | 不依赖真实 DB / 外部服务，用 mock 隔离即归此域；门禁 / 脚本 / 工具类变更的配套测试必放此 |
+| `tests/unit/test_*.py`（顶层，约 240 个文件） | 各层纯逻辑单测 + **治理/文档门禁**（见下） | `tests/unit/test_<主题>.py`；按类名如 `test_no_cancelled_error_swallow.py`（R2）/ `test_no_class_attr_asyncio_primitives.py`（R11）/ `test_architecture_boundaries.py`（R1）/ `test_redline_checks.py` / `test_data_dictionary_alignment.py`（R12）/ `test_cache_manager_dao_registry.py`（R13）/ `test_r8_enforcement.py`（R8）/ `test_i18n_*.py` | 不依赖真实 DB / 外部服务，用 mock 隔离即归此域；工程门禁 / 脚本类变更的配套测试默认放此，但文档静态解析 / 生成 / 结构 / 示例类测试归 `tests/docs/`（见「测试域归属」） |
 | `tests/unit/strategies/` | 策略类（`strategies/`） | `strategies/`、`backtest/` 等子目录 | 单测断言 `required_quality_tier` + `_filter_logic`（Polars 夹具） |
 | `tests/unit/data/` + `persistence/` + `daos/` + `data/domain_services/` + `data/persistence/daos/` | `data/` 层：DAO / 数据清洗 / 域服务 | `tests/unit/data/**`、`tests/unit/daos/**`、`tests/unit/persistence/**` | 用 mock engine / mock TushareClient 隔离真实 IO（sync/DAO 顶层单测如 `test_holder_sync.py` 亦在此域） |
 | `tests/unit/services/` + `ai_service/` | `services/` 层：应用服务 / AI 服务 / 编排 | `tests/unit/services/**`、`services/ai_service/` | 服务单测；涉及 is_refresh 生命周期 / 轮询编排 |
@@ -28,8 +28,19 @@
 | `tests/integration/`（约 70 个文件） | DAO / 服务 / 模型 / schema（真实 `test_astock` PostgreSQL） | `tests/integration/*.py`；`fixtures/mvd_data.py`；`tests/integration/_db_config.py` | 需真实 DB / schema 的行为验证（标记 `integration`） |
 | `tests/e2e/`（+`fixtures/fake_sidecar.py`） | Flet UI 端到端 / embedded 启动 / onboarding 流程 | `tests/e2e/*.py` | 端到端真实运行（标记 `e2e`），依赖 E2E 环境（见下） |
 
-**治理 / 文档门禁测试**（`tests/unit/` 顶层，与施工门禁强相关）：
-`test_docs_consistency.py`（文档一致性）· `test_docs_template_symbols.py`（文档代码块符号可落地性）· `test_redline_checks.py`（红线检查）· `test_architecture_boundaries.py`（R1 分层）· `test_import_linter_config.py`（import-linter 契约）· `test_no_cancelled_error_swallow.py`（R2）· `test_no_class_attr_asyncio_primitives.py`（R11）· `test_check_diff_coverage.py` · `test_check_per_file_coverage.py` · `test_check_staged_weak_assertions.py` · `test_scan_weak_assertions.py` · `test_run_pyright_changed.py`。新增/修改门禁或工程脚本规范时，配套测试一律放入 `tests/unit/` 顶层。
+#### 测试域归属（docs 组 vs 应用环境）
+
+> 完成门按测试的**依赖域**归属，不按「是否门禁」一刀切；隔离合同见 [`tests/docs/pytest.ini`](../../tests/docs/pytest.ini) 与 [`tests/docs/test_isolation.py`](../../tests/docs/test_isolation.py)。
+
+| 测试内容 | 归属 | 判据 |
+|---|---|---|
+| 文档静态解析 / 受控生成 / 文档结构校验（标题 / 链接 / 索引）/ canonical 示例（否定式 API 检查） | `tests/docs/`（docs 组） | 只依赖 Markdown 文本、YAML 作者源与仓库结构，不导入业务模块；由独立 docs 配置收集 |
+| 真实应用符号导入、Flet API 字段、业务夹具合同 | `tests/unit/` 顶层（应用环境） | 需要真实 import 或 `MockFletPage` 等夹具；保留 `_reset_all_singletons` autouse fixture（R7） |
+
+- **归 `tests/docs/`**：`test_consistency.py`（文档一致性）· `test_parse.py` · `test_generate.py` · `test_canonical_examples.py` 等；新增静态解析 / 生成 / 结构 / 示例类用例放此，不得引入业务 import（隔离负例由 `test_isolation.py` 静态 + 运行时双重守护）。
+- **留应用环境（`tests/unit/` 顶层）**：`test_docs_consistency.py`（应用符号合同 + 旧入口转发）· `test_docs_template_symbols.py`（模板代码块真实 import 可落地性）· `test_docs_accessibility_baseline_api.py`（Flet API 字段）· `test_redline_checks.py`（红线检查）· `test_architecture_boundaries.py`（R1 分层）· `test_import_linter_config.py`（import-linter 契约）· `test_no_cancelled_error_swallow.py`（R2）· `test_no_class_attr_asyncio_primitives.py`（R11）· `test_check_diff_coverage.py` · `test_check_per_file_coverage.py` · `test_check_staged_weak_assertions.py` · `test_scan_weak_assertions.py` · `test_run_pyright_changed.py`。**不得**为了让用例进 docs 组而把真实符号或 Flet API 断言降级为文本 / 正则测试。
+- **旧节点仅转发**：迁移后的 `tests/unit/` 旧文件只保留模块级 re-export，同一用例不得在新旧两处各存实现；同一 job 只能选新实现或旧转发之一，显式混选由 `tests/docs/conftest.py` 的收集钩子拒绝（守卫：`tests/docs/test_no_double_collection.py`）。
+- **运行方式**：docs 组 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -c tests/docs/pytest.ini --confcutdir=tests/docs tests/docs -q`；应用环境按 `tests/unit/` 常规命令。
 
 #### conftest 层级与 autouse fixture
 
@@ -236,9 +247,14 @@ def test_market_trend_filter_selects_in_range():
 
 ## 完成判定（canonical 入口）
 
-- 新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法
-- 覆盖率达标（单文件 ≥ 80%、diff coverage ≥80% 与整体 ≥ 85% 均为 CI 强制；分层阈值为 advisory）
-- E2E 用例按要求串行/网络隔离（Windows skipif 等既有约定）依从
+> 完成门按本次变更**实际触域**分条件适用：只要求触及的域过门，不要求无关文件改动过门（R19 仅约束业务逻辑变更；纯测试 / 纯文档 / 纯配置改动不触发覆盖率义务）。
+
+- **新增/修改单测**：新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法；单例隔离、Mock 规范等「测试编写规则」依从
+- **新增/修改业务逻辑**（R19 触发时）：配套测试同步新增/更新，覆盖率达标（单文件 ≥ 80%、diff coverage ≥80% 与整体 ≥ 85% 均为 CI 强制；分层阈值为 advisory）
+- **新增/修改集成测试**：标记 `integration`，连接 `test_astock` 的 DB 隔离约定依从
+- **新增/修改 E2E 用例**：按要求串行/网络隔离（Windows skipif 等既有约定）依从
+- **测试门禁 / 工程脚本变更**：按「测试域归属」落位——文档静态解析 / 生成 / 结构 / 示例 → `tests/docs/`；真实应用符号 / Flet API / 业务夹具合同 → `tests/unit/` 顶层
 
 _最小验证命令：_ `ruff` + `pyright` + 对应 `tests/unit/`/`tests/integration/`；
-        E2E → `python -m pytest tests/e2e/`；文档改动 → `python scripts/check_docs_consistency.py`。
+        E2E → `python -m pytest tests/e2e/`；文档改动 → `python scripts/check_docs_consistency.py`；
+        docs 组测试改动 → `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -c tests/docs/pytest.ini --confcutdir=tests/docs tests/docs -q`。

@@ -5,10 +5,10 @@
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载；仅对不自动加载 `CLAUDE.md` 的工具提供 [AGENTS.md](./AGENTS.md)（最小安全集 + 指针）跨工具入口。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
 >
 > **对应版本**：以 [pyproject.toml](./pyproject.toml) `[project].version` 为唯一正本（版本字面量收敛，见 ADR-0017）。
-> **元数据**（P2-07 统一格式，与 CLAUDE.md 规则集版本一致）：
+> **元数据**（P2-07 统一格式，ruleset_version 派生自 ruleset-changelog 顶行）：
 > - owner: 架构维护者
-> - ruleset_version: 1.9.0（与 CLAUDE.md 同步，规则集版本变更时递增）
-> - last_reviewed: 2026-10-25
+> - ruleset_version: 1.10.0（派生自 ruleset-changelog 顶行，规则集版本变更时递增）
+> - last_reviewed: 2026-11-13
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 人类贡献流程、最小命令入口、实现规范手册索引
 > - supersedes: 无
@@ -210,13 +210,16 @@ python -m ruff check . --fix
 python -m ruff format .
 python -m pyright
 
-# 运行测试
+# 运行测试（默认 testpaths 已排除 tests/docs 纯文档套件）
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
 python -m pytest tests/integration/ -n auto -v --tb=short
 python -m pytest tests/e2e/ -v --tb=short
 
-# 覆盖率
-python -m pytest tests/ --cov --cov-report=term-missing --cov-report=json
+# 纯文档独立套件（禁插件自动加载 + 截断业务 conftest，与 docs-ci 的 docs-static 一致）
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -c tests/docs/pytest.ini --confcutdir=tests/docs tests/docs -q
+
+# 覆盖率（业务套件；不要选整个 tests/，否则会连同 tests/docs 混选并被双收集守卫拒绝）
+python -m pytest tests/unit tests/integration tests/e2e --cov --cov-report=term-missing --cov-report=json
 python scripts/check_per_file_coverage.py
 
 # 数据库与安全
@@ -557,7 +560,7 @@ hooks/            ← 本地 Git/工具钩子脚本
   | `tests/` 其他 `[error-code]` 无 human reason | WARNING，不阻断（建议 `# type: ignore[code]  # <原因>`；存量 ≤5 处或 2026-11-30 前转 ERROR，存量策略见 `scripts/check_type_ignore_reason.py` 文件头） |
   | `tests/` 其他 `[error-code]` 带 human reason | 通过 |
 
-  覆盖边界：触发面为 pre-commit `type-ignore-reason` hook（本地 staged 文件；CI 经 `pre-commit run --all-files` 全量触发，hook 清单见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)）；脚本按 `# type: ignore` 规范形态匹配（`type:` 与 `ignore` 间至多一个空白，不覆盖多空白变体）；入口仅处理 `.py`（hook 声明含 `.pyi`，但入口过滤后不检查，仓库当前亦无自有 `.pyi`）。
+  覆盖边界：触发面为 pre-commit `type-ignore-reason` hook（本地 staged 文件；CI 经 `pre-commit run --all-files` 全量触发，hook 清单见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)）；脚本仅检查 tokenize 产出的 COMMENT token（字符串/文档字符串中的示例文本不计入），按 `# type: ignore` 规范形态匹配（`type:` 与 `ignore` 间至多一个空白，不覆盖多空白变体）；入口处理 `.py` 与 `.pyi`（stub 同受 R3 约束，不可在入口过滤掉；hook `types_or` 声明含 python/pyi）。
 
 ## 日志规范
 
@@ -691,7 +694,7 @@ except Exception as e:
 
 ### 根目录 — AI 工具运行时配置
 
-- [harness.toml](./harness.toml) — AI 工具（Harness）运行时权限与沙箱配置（命令白名单 / deniedDomains / TDD 强制开关）；CLAUDE.md 为唯一规则正本，本文件不承载规则语义。伴生 `hooks/hooks.json` 为 hook 覆盖占位，当前为空（覆盖默认行为时填入）。
+- [harness.toml](./harness.toml) — AI 工具（Harness）运行时权限与沙箱配置（命令白名单 / deniedDomains / TDD 强制开关）；规则权威按主题正本（CLAUDE.md §1 主题权威表），本文件不承载规则语义。伴生 `hooks/hooks.json` 为 hook 覆盖占位，当前为空（覆盖默认行为时填入）。
 
 ### requirements/ — 用户需求
 
@@ -705,6 +708,7 @@ except Exception as e:
 - [dependency-management.md](./docs/guides/dependency-management.md) — 依赖管理 + PyInstaller 打包
 - [finbert-pipeline.md](./docs/guides/finbert-pipeline.md) — FinBERT 模型产线流水线机制（指纹路由 / 双 Gate / 发布闭环）
 - [how-to.md](./docs/guides/how-to.md) — 标准开发工作流 (How-To)
+- [documentation-maintenance.md](./docs/guides/documentation-maintenance.md) — 文档长期编写、变更与维护流程唯一正本（ADR-0018；L01—L12 控制合同 / 六类变更协议 / E01—E12 演习合同）
 
 ### docs/architecture/ — 架构类深入
 
@@ -751,6 +755,7 @@ except Exception as e:
 - [0015-fingerprint-driven-release.md](./docs/adr/0015-fingerprint-driven-release.md) — FinBERT 产线指纹驱动发布（内容寻址去重：装依赖前对训练输入算指纹与最新 Release 对比，输入无变化即拒绝重训）
 - [0016-agent-permission-exception.md](./docs/adr/0016-agent-permission-exception.md) — 智能体有限权限例外与允许操作矩阵（部分替代 ADR-0008 的 E1—E5 范围，原禁止项继续有效）
 - [0017-version-ssot.md](./docs/adr/0017-version-ssot.md) — 版本号单一正本收敛（产品版本唯一正本为 pyproject.toml；文档/工具配置版本字面量与对应门禁全部移除）
+- [0018-documentation-single-source.md](./docs/adr/0018-documentation-single-source.md) — 文档体系单写入源与长期治理（承接检视 C01—C15 裁定；作者源表为 T6 切换目标，切换前现行 CLAUDE/AGENTS 权威声明与守卫保留）
 
 ### docs/governance/ — 治理类机器可读文件
 

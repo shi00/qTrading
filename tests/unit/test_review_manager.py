@@ -6,7 +6,7 @@
 import asyncio
 import json
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock, ANY
 import pandas as pd
 import datetime
 
@@ -16,13 +16,21 @@ from data.constants import (
     BOARD_BENCHMARK_CHINEXT,
     BOARD_BENCHMARK_STAR,
     DEFAULT_BENCHMARK_INDEX,
+    REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_PENDING,
     REVIEW_STATUS_T1_DONE,
     REVIEW_STATUS_UNTRADABLE,
     board_benchmark_for,
 )
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
-from data.persistence.review_manager import ReviewManager, _is_t1_untradable, deserialize_exec_warnings
+from data.persistence.review_manager import (
+    ReviewManager,
+    _finite_positive_price,
+    _index_window_return_pct,
+    _is_t1_untradable,
+    deserialize_exec_warnings,
+)
 from utils.time_utils import to_date
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -196,10 +204,12 @@ class TestReviewManagerExecMetadataPersistence:
             {"key": "strategy_param_auto_adjusted", "params": {"min": 1.0, "adjusted_max": 9.0}},
             {"key": "strategy_ai_risk_check_skipped", "params": {}},
         ]
-        # 从库读回：往返后 Messages 等值且长度为 2
+        # 从库读回：往返后 Messages 等值且长度为 2（合法 wire format 不标记损坏）
         restored = deserialize_exec_warnings(saved[0]["exec_warnings"])
-        assert restored == tuple(exec_warnings)
-        assert len(restored) == 2
+        assert restored is not None
+        assert restored.messages == tuple(exec_warnings)
+        assert restored.corrupted is False
+        assert len(restored.messages) == 2
         # 每行归因：JSON 字符串 → JSONB dict（不伪造、不丢弃）
         assert saved[0]["filter_attribution"] == {"exclude_st": 3, "liquidity": 1}
 
@@ -231,7 +241,10 @@ class TestReviewManagerExecMetadataPersistence:
 
         saved = dao.save_screening_results.call_args.args[0]
         assert saved[0]["exec_warnings"] == []
-        assert deserialize_exec_warnings(saved[0]["exec_warnings"]) == ()
+        restored = deserialize_exec_warnings(saved[0]["exec_warnings"])
+        assert restored is not None
+        assert restored.messages == ()
+        assert restored.corrupted is False
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -279,6 +292,85 @@ class TestReviewManagerExecMetadataPersistence:
         saved = dao.save_screening_results.call_args.args[0]
         assert saved[0]["execution_metadata"] is None
         assert saved[1]["execution_metadata"] is None
+
+
+class TestDeserializeExecWarningsMemberCorruption:
+    """D16-009 (R21/BT-03)：合法 JSON 数组内的成员损坏不得洗成「已记录且无警告」。
+
+    ``exec_warnings`` 数组本身合法（JSON 可解析、类型为 list）时，旧实现静默跳过所有
+    坏成员并对「非空但全坏」返回空元组，与真正的空数组 ``[]`` 不可区分；``params``
+    类型损坏时也会被静默清成 ``{}``。本组用例锁定解析边界的三态：
+    ``None``（未记录）/ 已记录且无警告 / 已记录但存在不可还原成员（``corrupted``）。
+    """
+
+    def test_empty_array_is_recorded_with_no_warnings(self):
+        parsed = deserialize_exec_warnings("[]")
+        assert parsed is not None
+        assert parsed.messages == ()
+        assert parsed.corrupted is False
+
+    @pytest.mark.parametrize("raw", [None, float("nan"), "{not-json", {"key": "x"}, 3])
+    def test_null_or_non_array_inputs_remain_unrecorded(self, raw):
+        assert deserialize_exec_warnings(raw) is None
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            [None],
+            [{"params": {}}],
+            [{"key": ""}],
+            [{"key": None}],
+            [{"key": 123}],
+            ["not-a-member"],
+            [123],
+            [{}],
+        ],
+    )
+    def test_all_invalid_members_marked_corrupted(self, raw):
+        """非空数组但无可还原成员 → 必须标记损坏，不得返回与 ``[]`` 相同的空结果。"""
+        parsed = deserialize_exec_warnings(raw)
+        assert parsed is not None
+        assert parsed.messages == ()
+        assert parsed.corrupted is True
+
+    def test_mixed_members_keep_valid_warning_and_mark_corrupted(self):
+        parsed = deserialize_exec_warnings(
+            [{"key": "strategy_param_auto_adjusted", "params": {"min": 1.0}}, None, {"params": {}}]
+        )
+        assert parsed is not None
+        assert parsed.messages == (Message("strategy_param_auto_adjusted", {"min": 1.0}),)
+        assert parsed.corrupted is True
+
+    def test_damaged_params_keep_warning_key_and_mark_corrupted(self):
+        """``params`` 类型损坏：保留可识别的 warning key，同时标记损坏（不清成静默 ``{}``）。"""
+        parsed = deserialize_exec_warnings([{"key": "strategy_ai_risk_check_skipped", "params": "oops"}])
+        assert parsed is not None
+        assert parsed.messages == (Message("strategy_ai_risk_check_skipped"),)
+        assert parsed.corrupted is True
+
+    @pytest.mark.parametrize("member", [{"key": "strategy_ai_risk_check_skipped"}, {"key": "k", "params": None}])
+    def test_missing_or_null_params_marked_corrupted(self, member):
+        """``params`` 缺失/为 null：warning 身份仍可还原，但参数不可还原 → 标记损坏。"""
+        parsed = deserialize_exec_warnings([member])
+        assert parsed is not None
+        assert tuple(m.key for m in parsed.messages) == (member["key"],)
+        assert parsed.messages[0].params == {}
+        assert parsed.corrupted is True
+
+    def test_json_string_member_corruption_detected(self):
+        """raw SQL 路径的 JSON 字符串同样逐成员判定，不因可整体解析而放过坏成员。"""
+        parsed = deserialize_exec_warnings('[{"key": "strategy_ai_risk_check_skipped", "params": {}}, null]')
+        assert parsed is not None
+        assert parsed.messages == (Message("strategy_ai_risk_check_skipped"),)
+        assert parsed.corrupted is True
+
+    def test_valid_params_round_trip_preserved(self):
+        """合法成员（含嵌套 params）必须原样保留，不得被损坏判定吞掉。"""
+        params = {"min": 1.0, "adjusted_max": 9.0, "nested": {"a": [1, 2]}}
+        parsed = deserialize_exec_warnings([{"key": "strategy_param_auto_adjusted", "params": params}])
+        assert parsed is not None
+        assert parsed.corrupted is False
+        assert parsed.messages == (Message("strategy_param_auto_adjusted", params),)
 
 
 class TestReviewManagerRunReview:
@@ -1863,35 +1955,53 @@ class TestReviewManagerRv04Decouple:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_batch_finalize_labels_no_engine_logs_and_returns(self, mock_cm, mock_tc):
-        """engine 不可用（None）→ 记 error 返回不抛（次日 job 重试兜底），不触碰 DAO。"""
+    async def test_batch_finalize_labels_no_engine_raises(self, mock_cm, mock_tc):
+        """engine 不可用（None）→ 抛可分类 RuntimeError，不得静默返回（否则调用方误报成功）。"""
         rm, mock_cache = self._make_rm(mock_cm)
         mock_cache.engine = None
         mock_cache.screener_dao.finalize_prediction_label = AsyncMock()
-        await rm._batch_finalize_labels([self._finalize_update(1)])  # 不抛
+        with pytest.raises(RuntimeError, match="Engine not available"):
+            await rm._batch_finalize_labels([self._finalize_update(1)])
         mock_cache.screener_dao.finalize_prediction_label.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_finalize_labels_propagates_cancelled_error(self, mock_cm, mock_tc):
+        """R2: 取消信号原样传播，不降级为逐条写入。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.engine.begin = MagicMock(side_effect=asyncio.CancelledError())
+        mock_cache.screener_dao.finalize_prediction_label = AsyncMock()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._batch_finalize_labels([self._finalize_update(1)])
+        assert exc_info.type is asyncio.CancelledError
+        assert mock_cache.screener_dao.finalize_prediction_label.await_count == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
     async def test_batch_finalize_labels_batch_failure_falls_back_to_individual(self, mock_cm, mock_tc):
-        """批量事务失败（非 disposed）→ 降级逐条自建事务（无 conn），逐条成功仍完成定稿。"""
+        """批量事务失败（非 disposed）→ 降级逐条自建事务并透传 conn（DAO 无连接分支会吞普通错误）。"""
         from contextlib import asynccontextmanager
 
         rm, mock_cache = self._make_rm(mock_cm)
+        state = {"calls": 0}
 
         @asynccontextmanager
-        async def failing_begin():
-            raise RuntimeError("batch tx failed")
-            yield
+        async def flaky_begin():
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise RuntimeError("batch tx failed")
+            yield AsyncMock()
 
-        mock_cache.engine.begin = failing_begin
+        mock_cache.engine.begin = flaky_begin
         mock_cache.screener_dao.finalize_prediction_label = AsyncMock()
         await rm._batch_finalize_labels([self._finalize_update(1), self._finalize_update(2)])
         assert mock_cache.screener_dao.finalize_prediction_label.await_count == 2
         first = mock_cache.screener_dao.finalize_prediction_label.await_args_list[0]
         assert first.args[0] == 1
-        assert "conn" not in first.kwargs  # fallback 路径逐条自建事务
+        # fallback 逐条事务必须传真实 conn：DAO 无连接分支会把普通错误吞成 warning。
+        assert first.kwargs["conn"] is not None
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -1921,13 +2031,16 @@ class TestReviewManagerRv04Decouple:
         from contextlib import asynccontextmanager
 
         rm, mock_cache = self._make_rm(mock_cm)
+        state = {"calls": 0}
 
         @asynccontextmanager
-        async def failing_begin():
-            raise RuntimeError("batch tx failed")
-            yield
+        async def flaky_begin():
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise RuntimeError("batch tx failed")
+            yield AsyncMock()
 
-        mock_cache.engine.begin = failing_begin
+        mock_cache.engine.begin = flaky_begin
         mock_cache.screener_dao.finalize_prediction_label = AsyncMock(
             side_effect=EngineDisposedError("engine disposed")
         )
@@ -1937,20 +2050,24 @@ class TestReviewManagerRv04Decouple:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_batch_finalize_labels_fallback_individual_failure_logged(self, mock_cm, mock_tc):
-        """fallback 逐条仍失败（非 disposed）→ 记 error 不抛（次日 backfill job 兜底重试）。"""
+    async def test_batch_finalize_labels_fallback_individual_failure_raises_aggregate(self, mock_cm, mock_tc):
+        """fallback 逐条仍失败（非 disposed）→ 抛聚合 RuntimeError（含失败计数），不得谎报成功。"""
         from contextlib import asynccontextmanager
 
         rm, mock_cache = self._make_rm(mock_cm)
+        state = {"calls": 0}
 
         @asynccontextmanager
-        async def failing_begin():
-            raise RuntimeError("batch tx failed")
-            yield
+        async def flaky_begin():
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise RuntimeError("batch tx failed")
+            yield AsyncMock()
 
-        mock_cache.engine.begin = failing_begin
+        mock_cache.engine.begin = flaky_begin
         mock_cache.screener_dao.finalize_prediction_label = AsyncMock(side_effect=RuntimeError("row failed"))
-        await rm._batch_finalize_labels([self._finalize_update(1), self._finalize_update(2)])  # 不抛
+        with pytest.raises(RuntimeError, match="2 of 2"):
+            await rm._batch_finalize_labels([self._finalize_update(1), self._finalize_update(2)])
         assert mock_cache.screener_dao.finalize_prediction_label.await_count == 2
 
 
@@ -3234,15 +3351,99 @@ class TestReviewManagerEngineDisposedErrorR5:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_update_results_no_engine_raises(self, mock_cm, mock_tc):
+        """engine 不可用 → 抛可分类 RuntimeError，不得静默返回（否则调用方谎报写入成功）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.engine = None
+        mock_cache.screener_dao = MagicMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        with pytest.raises(RuntimeError, match="Engine not available"):
+            await rm._batch_update_results([{"record_id": 1, "pct": 1.0}])
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_update_results_propagates_cancelled_error(self, mock_cm, mock_tc):
+        """R2: 取消信号原样传播，不降级为逐条写入。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.engine = MagicMock()
+        mock_cache.engine.begin = MagicMock(side_effect=asyncio.CancelledError())
+        mock_cache.screener_dao = MagicMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._batch_update_results([{"record_id": 1, "pct": 1.0}])
+        assert exc_info.type is asyncio.CancelledError
+        assert mock_cache.screener_dao.update_prediction_result.call_count == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_update_results_fallback_failure_raises_aggregate(self, mock_cm, mock_tc):
+        """主路径 + fallback 均普通异常 → 抛聚合 RuntimeError（含失败计数）。"""
+        from contextlib import asynccontextmanager
+
+        state = {"calls": 0}
+        fallback_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def flaky_begin():
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise RuntimeError("batch tx failed")
+            yield fallback_conn
+
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.engine = MagicMock()
+        mock_cache.engine.begin = flaky_begin
+        mock_cache.screener_dao = MagicMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._update_result = AsyncMock(side_effect=RuntimeError("row failed"))
+        updates = [
+            {
+                "record_id": 1,
+                "pct": 1.0,
+                "label": "WIN",
+                "t1_price": 10.0,
+                "t5_pct": 2.0,
+                "t5_price": 10.5,
+                "index_pct": 0.5,
+                "alpha": 0.5,
+            }
+        ]
+        with pytest.raises(RuntimeError, match="1 of 1"):
+            await rm._batch_update_results(updates)
+        assert rm._update_result.await_count == 1
+        assert rm._update_result.await_args.kwargs["conn"] is fallback_conn
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
     async def test_batch_update_results_fallback_propagates_engine_disposed(self, mock_cm, mock_tc):
         """R5 一致性：主路径抛普通 Exception 触发 fallback 时，_update_result 抛 EngineDisposedError 必须上抛。
 
         防止 fallback 路径的 except Exception 误吞 disposed 引擎异常（与主路径对齐）。
         """
+        from contextlib import asynccontextmanager
+
+        state = {"calls": 0}
+
+        @asynccontextmanager
+        async def flaky_begin():
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise RuntimeError("batch tx failed")
+            yield AsyncMock()
+
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_engine = MagicMock()
-        mock_engine.begin = MagicMock(side_effect=RuntimeError("batch tx failed"))
+        mock_engine.begin = flaky_begin
         mock_cache.engine = mock_engine
         mock_cache.screener_dao = MagicMock()
         rm = ReviewManager()
@@ -3662,12 +3863,39 @@ class TestReviewManagerBackfill:
         return rm, mock_cache
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_horizon",
+        [0, -1, 1, 10, True, False, 5.0, "5", None],
+        ids=["zero", "negative", "one", "ten", "bool-true", "bool-false", "float", "str", "none"],
+    )
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_backfill_invalid_horizon_raises(self, mock_cm, mock_tc):
-        rm, _ = self._make_rm(mock_cm)
-        with pytest.raises(ValueError, match="horizon"):
-            await rm.backfill_horizon_returns(horizon=0)
+    async def test_backfill_rejects_non_t5_horizon_before_any_io(self, mock_cm, mock_tc, bad_horizon):
+        """DLP-RM-03: 只支持 T+5 口径——非法 horizon 必须在任何查询/IO 之前拒绝。
+
+        `backfill_horizon_returns` 的候选池、更新列（t5_pct/t5_price）与 DAO 均固定为
+        T+5。若接受其它 horizon（尤其 T+1），T+1 开盘→T+1 收盘收益会写入 t5_pct，
+        B 类还会用一日指数窗口定稿五日 alpha。故 0/负数/1/10/bool/非整数一律
+        ValueError，且不得触达任何取数或写库路径。
+        """
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        rm._batch_finalize_labels = AsyncMock()
+        rm._batch_update_results = AsyncMock()
+        rm._resolve_benchmark = AsyncMock()
+        with pytest.raises(ValueError, match=r"\[Review\] only the T\+5 backfill horizon is supported"):
+            await rm.backfill_horizon_returns(horizon=bad_horizon)
+        # 校验失败必须早于两类候选池取数、行情/基准 IO 与任何写入。
+        mock_cache.screener_dao.get_unfilled_horizon_predictions.assert_not_awaited()
+        mock_cache.screener_dao.get_unlabeled_predictions.assert_not_awaited()
+        mock_cache.quote_dao.get_daily_quotes.assert_not_awaited()
+        rm._resolve_benchmark.assert_not_awaited()
+        rm._batch_backfill_t5.assert_not_awaited()
+        rm._batch_finalize_labels.assert_not_awaited()
+        rm._batch_update_results.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -3721,9 +3949,10 @@ class TestReviewManagerBackfill:
         rm._batch_backfill_t5.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("horizon_kwargs", [{}, {"horizon": 5}], ids=["default", "explicit-5"])
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_backfill_fills_mature_record(self, mock_cm, mock_tc):
+    async def test_backfill_fills_mature_record(self, mock_cm, mock_tc, horizon_kwargs):
         rm, mock_cache = self._make_rm(mock_cm)
         mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
             return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
@@ -3738,12 +3967,13 @@ class TestReviewManagerBackfill:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        count = await rm.backfill_horizon_returns()
+        count = await rm.backfill_horizon_returns(**horizon_kwargs)
         assert count == 1
         rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 其载荷在紧邻 call_args 断言中逐字段验证
         updates = rm._batch_backfill_t5.call_args.args[0]
         assert len(updates) == 1
         assert updates[0]["record_id"] == 1
+        # T+1 开盘（10.0，20240611 行）→ T+5 收盘（9.8，20240617 行）
         assert updates[0]["t5_pct"] == round(((9.8 / 1.0) / (10.0 / 1.0) - 1.0) * 100.0, 4)
         assert updates[0]["t5_price"] == 9.8
         # D4-M4: T+5 回填同步定稿标签（alpha = t5_pct - index = -2.0 - 2.0 = -4.0 → LOSS）
@@ -3869,14 +4099,31 @@ class TestReviewManagerBackfillBatch:
         rm.cache = mock_cache
         return rm, mock_cache
 
+    @staticmethod
+    def _flaky_begin(fail_times: int = 1):
+        """前 ``fail_times`` 次建事务失败，之后返回可用 conn（模拟批事务失败后逐条降级）。"""
+        from contextlib import asynccontextmanager
+
+        state = {"calls": 0}
+
+        @asynccontextmanager
+        async def _begin():
+            state["calls"] += 1
+            if state["calls"] <= fail_times:
+                raise RuntimeError("batch tx failed")
+            yield AsyncMock()
+
+        return _begin
+
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_batch_engine_none_returns(self, mock_cm, mock_tc):
-        """engine 不可用 → 记 ERROR 直接返回，不抛异常。"""
+    async def test_batch_engine_none_raises(self, mock_cm, mock_tc):
+        """engine 不可用 → 抛可分类 RuntimeError，不得静默返回（否则调用方谎报回填成功）。"""
         rm, mock_cache = self._make_rm(mock_cm)
         mock_cache.engine = None
-        await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
+        with pytest.raises(RuntimeError, match="Engine not available"):
+            await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
         mock_cache.screener_dao.backfill_t5_prediction.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3914,16 +4161,57 @@ class TestReviewManagerBackfillBatch:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_batch_fallback_individual(self, mock_cm, mock_tc):
-        """主路径抛普通异常 → fallback 逐条回填（无 conn）。"""
+        """主路径抛普通异常 → fallback 逐条自建事务并透传 conn（DAO 无连接分支会吞普通错误）。"""
         rm, mock_cache = self._make_rm(mock_cm)
-        mock_cache.engine.begin = MagicMock(side_effect=RuntimeError("batch tx failed"))
+        mock_cache.engine.begin = self._flaky_begin()
         updates = [{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}]
         await rm._batch_backfill_t5(updates)
         calls = mock_cache.screener_dao.backfill_t5_prediction.call_args_list
-        # 主路径失败无 conn 调用，fallback 路径各调用一次（无 conn 关键字）
+        # 主路径失败未调用 DAO，fallback 路径调用一次且携带真实 conn
         assert len(calls) == 1
         assert calls[0].args[0] == 1
-        assert calls[0].kwargs.get("conn") is None
+        assert calls[0].kwargs["conn"] is not None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_fallback_partial_success_still_raises_aggregate(self, mock_cm, mock_tc):
+        """fallback 部分成功：成功条目保留，但仍有失败 → 抛聚合 RuntimeError（含失败计数）。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.engine.begin = self._flaky_begin()
+        mock_cache.screener_dao.backfill_t5_prediction = AsyncMock(side_effect=[RuntimeError("row 1 failed"), None])
+        updates = [
+            {"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0},
+            {"record_id": 2, "t5_pct": 2.0, "t5_price": 10.5},
+        ]
+        with pytest.raises(RuntimeError, match="1 of 2"):
+            await rm._batch_backfill_t5(updates)
+        assert mock_cache.screener_dao.backfill_t5_prediction.await_count == 2
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_propagates_cancelled_error(self, mock_cm, mock_tc):
+        """R2: 主路径取消信号原样传播，不降级、不聚合。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.engine.begin = MagicMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
+        assert exc_info.type is asyncio.CancelledError
+        assert mock_cache.screener_dao.backfill_t5_prediction.await_count == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_fallback_propagates_cancelled_error(self, mock_cm, mock_tc):
+        """R2: fallback 逐条期间的取消信号同样原样传播。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.engine.begin = self._flaky_begin()
+        mock_cache.screener_dao.backfill_t5_prediction = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
+        assert exc_info.type is asyncio.CancelledError
+        assert mock_cache.screener_dao.backfill_t5_prediction.await_count == 1
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -3931,7 +4219,7 @@ class TestReviewManagerBackfillBatch:
     async def test_batch_fallback_propagates_engine_disposed(self, mock_cm, mock_tc):
         """主路径普通异常 → fallback 逐条时 DAO 抛 EngineDisposedError → 必须上抛（R5）。"""
         rm, mock_cache = self._make_rm(mock_cm)
-        mock_cache.engine.begin = MagicMock(side_effect=RuntimeError("batch tx failed"))
+        mock_cache.engine.begin = self._flaky_begin()
         mock_cache.screener_dao.backfill_t5_prediction = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
         with pytest.raises(EngineDisposedError):
             await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
@@ -3939,16 +4227,53 @@ class TestReviewManagerBackfillBatch:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_batch_fallback_individual_error_logged(self, mock_cm, mock_tc):
-        """主路径 + fallback 均普通异常 → 逐条 ERROR 记录不中断。"""
+    async def test_batch_fallback_individual_error_raises_aggregate(self, mock_cm, mock_tc):
+        """主路径 + fallback 均普通异常 → 抛聚合 RuntimeError，日志经 safe_error 脱敏。"""
         rm, mock_cache = self._make_rm(mock_cm)
-        mock_cache.engine.begin = MagicMock(side_effect=RuntimeError("batch tx failed"))
+        mock_cache.engine.begin = self._flaky_begin()
         mock_cache.screener_dao.backfill_t5_prediction = AsyncMock(side_effect=RuntimeError("db down"))
-        await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
+        with pytest.raises(RuntimeError, match="1 of 1"):
+            await rm._batch_backfill_t5([{"record_id": 1, "t5_pct": 1.0, "t5_price": 10.0}])
         # D4-M4: 签名已扩展 label/index_pct/benchmark_code/alpha，fallback 载荷同样透传
         mock_cache.screener_dao.backfill_t5_prediction.assert_called_once_with(
-            1, 1.0, 10.0, label=None, index_pct=None, benchmark_code=None, alpha=None
+            1, 1.0, 10.0, label=None, index_pct=None, benchmark_code=None, alpha=None, conn=ANY
         )
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_horizon_write_failure_propagates_instead_of_count(self, mock_cm, mock_tc):
+        """故障链路闭合：写库失败 → 公开方法上抛，绝不把计划条数当“已回填”返回给 job。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.engine = None
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 7,
+                    "trade_date": [
+                        "20240610",
+                        "20240611",
+                        "20240612",
+                        "20240613",
+                        "20240614",
+                        "20240617",
+                        "20240618",
+                    ],
+                    "close": [10.0, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6],
+                    "open": [10.0] * 7,
+                    "adj_factor": [1.0] * 7,
+                }
+            )
+        )
+        rm._resolve_benchmark = AsyncMock(return_value=None)
+        rm._prefetch_benchmark_caches = AsyncMock(return_value=({}, {}))
+        rm._prefetch_limit_up_cache = AsyncMock(return_value={})
+        with pytest.raises(RuntimeError, match="Engine not available"):
+            await rm.backfill_horizon_returns()
 
 
 class TestReviewManagerBackfillSkipBranches:
@@ -4192,6 +4517,29 @@ class TestReviewManagerT1Backfill:
         assert u["index_pct"] is None
         assert u["alpha"] is None
         assert u["label"] == "DRAW"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_write_failure_propagates_instead_of_count(self, mock_cm, mock_tc):
+        """故障链路闭合：写库失败 → 公开方法上抛，绝不把计划条数当“已回填”返回给 job。"""
+        rm, mock_cache = self._make_rm(
+            mock_cm,
+            [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}],
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "trade_date": ["20240610", "20240611", "20240612"],
+                    "close": [10.0, 10.5, 11.0],
+                    "open": [10.0, 10.0, 10.0],
+                    "adj_factor": [1.0, 1.0, 1.0],
+                }
+            ),
+        )
+        del rm._batch_update_results  # 恢复真实 helper，闭合“故障→公开计数”链路
+        mock_cache.engine = None
+        with pytest.raises(RuntimeError, match="Engine not available"):
+            await rm.backfill_t1_returns()
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -5352,3 +5700,689 @@ class TestReviewManagerMajor02Tradability:
         rm.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
         with pytest.raises(EngineDisposedError):
             await rm._prefetch_limit_up_cache(datetime.date(2024, 6, 10), datetime.date(2024, 6, 17))
+
+
+class _FakeCycleTxn:
+    """最小异步事务上下文：仅供 ReviewManager 的 engine.begin() 批写路径使用。"""
+
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeCycleEngine:
+    def begin(self):
+        return _FakeCycleTxn()
+
+
+class TestReviewCycleSerialization:
+    """DLP-RM-01: 三个复盘入口的「读候选 → 预取 → 计算 → 写库」整周期必须串行。
+
+    并发交错时（A 读旧快照后暂停，B 回填并定稿同一记录），A 恢复后仍以旧快照写
+    ``t5_pct=None / alpha=None / label=DRAW``，把已成熟记录回退。本组用例以内存行 +
+    忠实复刻 DAO WHERE 守卫的写路径验证：周期互斥、不回退、B 在 A 结束后重新读候选，
+    以及异常/取消释放锁与顺序调用三通路正常。
+    """
+
+    _OLD_QUOTES = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000001.SZ"],
+            "trade_date": ["20240615", "20240616"],
+            "close": [10.0, 10.5],
+            "open": [10.0, 10.0],
+            "pct_chg": [0.0, 5.0],
+        }
+    )
+    _FULL_QUOTES = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * 6,
+            "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+            "close": [10.0, 10.5, 10.6, 10.7, 10.8, 11.0],
+            "open": [10.0] * 6,
+            "pct_chg": [0.0, 5.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    _OLD_DATES = [datetime.date(2024, 6, 15), datetime.date(2024, 6, 16)]
+    _FULL_DATES = [datetime.date(2024, 6, day) for day in (15, 16, 17, 18, 19, 20)]
+
+    @staticmethod
+    def _new_store() -> dict[int, dict]:
+        return {
+            1: {
+                "id": 1,
+                "ts_code": "000001.SZ",
+                "trade_date": datetime.date(2024, 6, 15),
+                "review_status": REVIEW_STATUS_PENDING,
+                "t1_pct": None,
+                "t5_pct": None,
+                "alpha": None,
+                "prediction_result": None,
+                "index_pct": None,
+                "benchmark_code": None,
+            }
+        }
+
+    @staticmethod
+    def _apply_update(store: dict[int, dict], events: list[str]):
+        """复刻 update_prediction_result 的 SQL 语义（含 guard_t1，仅无「拒绝回退成熟值」条件）。"""
+
+        async def _update(
+            record_id,
+            pct,
+            label,
+            *,
+            t1_price=None,
+            t5_pct=None,
+            t5_price=None,
+            index_pct=None,
+            benchmark_code=None,
+            alpha=None,
+            review_status=None,
+            conn=None,
+            guard_t1=False,
+        ):
+            row = store[record_id]
+            if guard_t1 and row["t1_pct"] is not None:
+                return
+            events.append("write_update")
+            row["t1_pct"] = pct
+            row["t5_pct"] = t5_pct
+            row["alpha"] = alpha
+            row["prediction_result"] = label
+            row["t5_price"] = t5_price
+            row["t1_price"] = t1_price
+            row["index_pct"] = index_pct
+            if benchmark_code is not None:
+                row["benchmark_code"] = benchmark_code
+            row["review_status"] = (
+                review_status if review_status is not None else ("COMPLETED" if t5_pct is not None else "T1_DONE")
+            )
+
+        return _update
+
+    @staticmethod
+    def _apply_t5(store: dict[int, dict], events: list[str]):
+        """复刻 backfill_t5_prediction 的 WHERE t5_pct IS NULL 幂等语义。"""
+
+        async def _backfill(
+            record_id, t5_pct, t5_price, *, label=None, index_pct=None, benchmark_code=None, alpha=None, conn=None
+        ):
+            row = store[record_id]
+            if row["t5_pct"] is not None:
+                return
+            events.append("write_t5")
+            row["t5_pct"] = t5_pct
+            row["t5_price"] = t5_price
+            row["review_status"] = REVIEW_STATUS_COMPLETED if label is not None else REVIEW_STATUS_T1_DONE
+            if label is not None:
+                row["prediction_result"] = label
+            if index_pct is not None:
+                row["index_pct"] = index_pct
+            if benchmark_code is not None:
+                row["benchmark_code"] = benchmark_code
+            if alpha is not None:
+                row["alpha"] = alpha
+
+        return _backfill
+
+    def _make_rm(self, mock_cm, store: dict[int, dict], events: list[str], quotes_getter, dates, *, with_pending=True):
+        """构造注入内存行存储的 ReviewManager；写路径走真实 _batch_* 方法与假 DAO。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.engine = _FakeCycleEngine()
+        dao = MagicMock()
+        mock_cache.screener_dao = dao
+        dao.update_prediction_result = AsyncMock(side_effect=self._apply_update(store, events))
+        dao.backfill_t5_prediction = AsyncMock(side_effect=self._apply_t5(store, events))
+
+        async def _unfilled_t1(limit=2000):
+            events.append("read_t1")
+            return [
+                {"id": rid, "ts_code": r["ts_code"], "trade_date": r["trade_date"]}
+                for rid, r in store.items()
+                if r["review_status"] in (REVIEW_STATUS_PENDING, None) and r["t1_pct"] is None
+            ]
+
+        async def _unfilled_t5(limit=2000):
+            events.append("read_t5")
+            return [
+                {"id": rid, "ts_code": r["ts_code"], "trade_date": r["trade_date"]}
+                for rid, r in store.items()
+                if r["review_status"] == REVIEW_STATUS_T1_DONE and r["t5_pct"] is None
+            ]
+
+        async def _unlabeled(limit=2000):
+            return [
+                {"id": rid, "ts_code": r["ts_code"], "trade_date": r["trade_date"], "t5_pct": r["t5_pct"]}
+                for rid, r in store.items()
+                if r["review_status"] == REVIEW_STATUS_T1_DONE and r["t5_pct"] is not None and r["alpha"] is None
+            ]
+
+        dao.get_unfilled_t1_predictions = AsyncMock(side_effect=_unfilled_t1)
+        dao.get_unfilled_horizon_predictions = AsyncMock(side_effect=_unfilled_t5)
+        dao.get_unlabeled_predictions = AsyncMock(side_effect=_unlabeled)
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=quotes_getter)
+
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                [{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240615", "ai_score": 80, "ai_reason": "t"}]
+            )
+            if with_pending
+            else pd.DataFrame()
+        )
+        rm._market_trade_dates = AsyncMock(return_value=list(dates))
+        rm._resolve_benchmark = AsyncMock(return_value="000300.SH")
+        rm._prefetch_benchmark_caches = AsyncMock(return_value=({}, {}))
+        rm._prefetch_limit_up_cache = AsyncMock(return_value={})
+        rm._window_index_pct = AsyncMock(return_value=1.5)
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_concurrent_run_review_and_backfill_do_not_regress_matured_values(self, mock_cm, mock_tc):
+        """A 读旧行情后暂停、B 回填定稿、A 恢复写库：最终 T+5/alpha/COMPLETED 不得回退。
+
+        有锁时 B 必须等 A 周期结束才读候选（read_t5 在 A 的 write_update 之后），
+        A 的 staged DRAW 写入先落库，B 再以 T+5 超额定稿覆盖为 WIN/COMPLETED。
+        """
+        store = self._new_store()
+        events: list[str] = []
+        a_reached = asyncio.Event()
+        a_may_finish = asyncio.Event()
+
+        async def _a_quotes(**kwargs):
+            events.append("read_quotes_a")
+            a_reached.set()
+            await a_may_finish.wait()
+            return self._OLD_QUOTES
+
+        async def _b_quotes(**kwargs):
+            events.append("read_quotes_b")
+            return self._FULL_QUOTES
+
+        rm_a, _ = self._make_rm(mock_cm, store, events, _a_quotes, self._OLD_DATES)
+        rm_b, _ = self._make_rm(mock_cm, store, events, _b_quotes, self._FULL_DATES)
+
+        task_a = asyncio.create_task(rm_a.run_review())
+        await asyncio.wait_for(a_reached.wait(), timeout=2)
+
+        async def _b_cycle() -> None:
+            await rm_b.backfill_t1_returns()
+            await rm_b.backfill_horizon_returns()
+
+        task_b = asyncio.create_task(_b_cycle())
+        try:
+            for _ in range(10):
+                await asyncio.sleep(0)
+            # 排队：A 尚未结束，B 不得进入候选读取（无锁时会读到并写库）。
+            assert "read_t1" not in events
+            assert "read_t5" not in events
+
+            a_may_finish.set()
+            await asyncio.wait_for(task_a, timeout=2)
+            await asyncio.wait_for(task_b, timeout=2)
+        finally:
+            a_may_finish.set()
+            for task in (task_a, task_b):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(task_a, task_b, return_exceptions=True)
+
+        row = store[1]
+        assert row["t1_pct"] == pytest.approx(5.0)
+        assert row["t5_pct"] == pytest.approx(10.0)
+        assert row["alpha"] == pytest.approx(8.5)
+        assert row["prediction_result"] == "WIN"
+        assert row["review_status"] == REVIEW_STATUS_COMPLETED
+        # B 的 T+5 候选读取发生在 A 周期写库之后（重新读快照，而非复用旧快照）。
+        assert events.index("write_update") < events.index("read_t5")
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_cycle_lock_queues_second_instance(self, mock_cm, mock_tc):
+        """两个实例的同一周期入口不得交错：候选读取的最大并发为 1。"""
+        store = self._new_store()
+        events: list[str] = []
+        state = {"active": 0, "peak": 0}
+
+        rm_a, cache_a = self._make_rm(
+            mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES
+        )
+        rm_b, cache_b = self._make_rm(
+            mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES
+        )
+
+        async def _slow_read(limit=2000):
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            await asyncio.sleep(0.01)
+            state["active"] -= 1
+            return []
+
+        cache_a.screener_dao.get_unfilled_horizon_predictions = AsyncMock(side_effect=_slow_read)
+        cache_b.screener_dao.get_unfilled_horizon_predictions = AsyncMock(side_effect=_slow_read)
+
+        await asyncio.gather(rm_a.backfill_horizon_returns(), rm_b.backfill_horizon_returns())
+        assert state["peak"] == 1
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_cycle_lock_released_on_exception(self, mock_cm, mock_tc):
+        """周期内抛异常：锁必须释放，后续入口可立即执行（不挂起）。"""
+        store = self._new_store()
+        events: list[str] = []
+        rm_a, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+        rm_b, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+        rm_a._get_pending_predictions = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await rm_a.run_review()
+        assert await asyncio.wait_for(rm_b.backfill_horizon_returns(), timeout=1) == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_cycle_lock_released_on_cancellation(self, mock_cm, mock_tc):
+        """R2：取消必须原样传播，且持锁任务被取消后锁释放，后续入口可执行。"""
+        store = self._new_store()
+        events: list[str] = []
+        a_reached = asyncio.Event()
+
+        async def _hanging_quotes(**kwargs):
+            a_reached.set()
+            await asyncio.Event().wait()
+
+        rm_a, _ = self._make_rm(mock_cm, store, events, _hanging_quotes, self._OLD_DATES)
+        rm_b, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+
+        task = asyncio.create_task(rm_a.run_review())
+        await asyncio.wait_for(a_reached.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert exc_info.type is asyncio.CancelledError
+        assert task.cancelled()
+        assert await asyncio.wait_for(rm_b.backfill_horizon_returns(), timeout=1) == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_three_entries_work_sequentially(self, mock_cm, mock_tc):
+        """顺序调用三通路：run_review 定稿后两回填均为 0，最终值不回退。"""
+        store = self._new_store()
+        events: list[str] = []
+        rm, _ = self._make_rm(mock_cm, store, events, AsyncMock(return_value=self._FULL_QUOTES), self._FULL_DATES)
+
+        await rm.run_review()
+        assert await rm.backfill_t1_returns() == 0
+        assert await rm.backfill_horizon_returns() == 0
+
+        row = store[1]
+        assert row["t5_pct"] == pytest.approx(10.0)
+        assert row["alpha"] == pytest.approx(8.5)
+        assert row["prediction_result"] == "WIN"
+        assert row["review_status"] == REVIEW_STATUS_COMPLETED
+
+
+class TestIndexWindowFinitePositiveGuard:
+    """DLP-RM-02: 指数窗口端点须为有限正值，否则窗口收益返回 None（R21 不伪造标签）。
+
+    覆盖端点 None/NaN/±Inf/0/负值/不可转换/比值溢出，以及 run_review / backfill 两条
+    消费路径：无效 index_pct → index_pct/alpha/label 留 NULL，数值收益仍暂存。
+    """
+
+    @pytest.mark.parametrize(
+        "bad_endpoint",
+        [None, float("nan"), float("inf"), float("-inf"), 0, 0.0, -1.0, -3000.0, "not-a-number", 10**400],
+        ids=[
+            "none",
+            "nan",
+            "pos-inf",
+            "neg-inf",
+            "int-zero",
+            "float-zero",
+            "negative",
+            "negative-point",
+            "non-numeric",
+            "int-overflow",
+        ],
+    )
+    def test_invalid_endpoint_returns_none(self, bad_endpoint):
+        """任一无效端点（起点或终点）→ 窗口收益 None（不在比值中产生 NaN/Inf/负超额）。"""
+        assert _index_window_return_pct(bad_endpoint, 3180.0) is None
+        assert _index_window_return_pct(3000.0, bad_endpoint) is None
+
+    def test_ratio_overflow_returns_none(self):
+        """两端点各自有限为正，但比值溢出为 +Inf → 计算后 isfinite 校验须返回 None。"""
+        assert _index_window_return_pct(1e-308, 1e308) is None
+
+    def test_flat_window_is_zero_pct(self):
+        """合法平盘（3000 → 3000）仍为 0%（不得因假值守卫把 0% 判成缺失）。"""
+        assert _index_window_return_pct(3000.0, 3000.0) == pytest.approx(0.0)
+
+    def test_valid_window_is_six_pct(self):
+        """单位保持百分点：3180/3000-1 = 6.0（不是 0.06）。"""
+        assert _index_window_return_pct(3000.0, 3180.0) == pytest.approx(6.0)
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (3000, 3000.0),
+            (True, 1.0),
+            (None, None),
+            (float("nan"), None),
+            (float("inf"), None),
+            (0.0, None),
+            (-1.0, None),
+        ],
+    )
+    def test_finite_positive_price_criterion(self, raw, expected):
+        """单一有效性判据入口（后续问题复用）：合法 → float，非法 → None。"""
+        assert _finite_positive_price(raw) == expected
+
+    @staticmethod
+    def _pending() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "id": [1],
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240610"],
+                "ai_score": [80],
+                "ai_reason": ["test"],
+            }
+        )
+
+    @staticmethod
+    def _quotes() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                "open": [10.0] * 6,
+                "close": [10.0, 11.5, 11.6, 11.7, 11.8, 12.0],
+                "adj_factor": [1.0] * 6,
+                "pct_chg": [1.0] * 6,
+            }
+        )
+
+    def _make_rm(self, mock_cm) -> ReviewManager:
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(return_value=self._pending())
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=self._quotes())
+        rm._resolve_index_quote = AsyncMock(return_value=(100.0, 100.0))
+        rm._prefetch_index_cache = AsyncMock(return_value={})
+        rm._batch_update_results = AsyncMock()
+        return rm
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_invalid_index_endpoint_stages_numeric_only(self, mock_cm, mock_tc):
+        """run_review：起点为 0 的无效端点 → index_pct/alpha/label 全 NULL，数值收益仍暂存。"""
+        rm = self._make_rm(mock_cm)
+        rm._prefetch_index_cache = AsyncMock(return_value={"20240611": (0.0, 3050.0), "20240617": (3160.0, 3180.0)})
+        await rm.run_review()
+        rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 哨兵；下方载荷逐字段强验证
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["index_pct"] is None
+        assert u["alpha"] is None
+        assert u["label"] is None  # 不定稿标签（R21：不伪装成 DRAW）
+        assert u["benchmark_code"] is None
+        assert u["pct"] == pytest.approx(round((11.5 / 10.0 - 1.0) * 100.0, 4))
+        assert u["t5_pct"] == pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
+        assert u["review_status"] == REVIEW_STATUS_T1_DONE
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_horizon_invalid_index_endpoint_keeps_numeric(self, mock_cm, mock_tc):
+        """backfill：+Inf 无效端点 → 数值-only 暂存 t5_pct，label/index_pct/alpha 留 NULL。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=self._quotes())
+        rm._resolve_index_quote = AsyncMock(return_value=(100.0, 100.0))
+        rm._prefetch_index_cache = AsyncMock(
+            return_value={"20240611": (float("inf"), 3050.0), "20240617": (3160.0, 3180.0)}
+        )
+        rm._batch_backfill_t5 = AsyncMock()
+        rm._batch_finalize_labels = AsyncMock()
+        rm._batch_update_results = AsyncMock()
+
+        count = await rm.backfill_horizon_returns()
+
+        assert count == 1
+        rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 哨兵；下方载荷逐字段强验证
+        (u,) = rm._batch_backfill_t5.call_args.args[0]
+        assert u["label"] is None
+        assert u["index_pct"] is None
+        assert u["alpha"] is None
+        assert u["benchmark_code"] is None
+        assert u["t5_pct"] == pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
+        assert u["t5_price"] == pytest.approx(12.0)
+        rm._batch_finalize_labels.assert_not_called()
+
+
+class TestResolveIndexQuoteDirtyLocalFallback:
+    """DLP-RM-04: 本地该日有行但端点 NULL/非法时，须继续尝试同日 API 兜底。
+
+    批量预取（_prefetch_index_cache）已正确不为缺点位日期写缓存 key；单条解析此前却因
+    「有行但端点不可用」早返 None，把 API 分支短路。修复后本地与 API 两支共用
+    _finite_positive_price：只有拿到有效 (open, close) 才返回，否则落入既有 API 调用。
+    """
+
+    _CODE = "000300.SH"
+    _DATE = datetime.date(2024, 6, 11)
+    _DATE_STR = "20240611"
+
+    @staticmethod
+    def _make_rm(mock_cm):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        mock_api = MagicMock()
+        rm.api = mock_api
+        return rm, mock_cache, mock_api
+
+    @staticmethod
+    def _row(open_value: object = 3160.0, close_value: object = 3180.0) -> pd.DataFrame:
+        return pd.DataFrame({"open": [open_value], "close": [close_value]})
+
+    @pytest.mark.parametrize(
+        ("open_value", "close_value"),
+        [
+            (None, 3180.0),
+            (3160.0, None),
+            (float("nan"), 3180.0),
+            (3160.0, float("nan")),
+            (float("inf"), 3180.0),
+            (3160.0, float("-inf")),
+            (-1.0, 3180.0),
+            (0.0, 3180.0),
+            (3160.0, 0.0),
+        ],
+        ids=[
+            "open-null",
+            "close-null",
+            "open-nan",
+            "close-nan",
+            "open-inf",
+            "close-neg-inf",
+            "open-negative",
+            "open-zero",
+            "close-zero",
+        ],
+    )
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_dirty_local_row_falls_back_to_api(self, mock_cm, mock_tc, open_value, close_value):
+        """本地脏行（端点 NULL/NaN/Inf/负/0）→ 继续调用同日 API 并返回 API 有效点位。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(open_value, close_value))
+        mock_api.get_index_daily = AsyncMock(return_value=self._row(3160.0, 3180.0))
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) == (3160.0, 3180.0)
+        mock_api.get_index_daily.assert_awaited_once_with(
+            ts_code=self._CODE,
+            start_date=self._DATE_STR,
+            end_date=self._DATE_STR,
+        )
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_valid_local_row_does_not_call_api(self, mock_cm, mock_tc):
+        """本地点位有效 → 直接返回本地值，保持本地优先、不触达 API。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(3160.0, 3180.0))
+        mock_api.get_index_daily = AsyncMock(return_value=self._row(3100.0, 3200.0))
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) == (3160.0, 3180.0)
+        mock_api.get_index_daily.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "api_result",
+        [
+            None,
+            pd.DataFrame(),
+            pd.DataFrame({"open": [0.0], "close": [3180.0]}),
+            pd.DataFrame({"open": [3160.0], "close": [float("nan")]}),
+        ],
+        ids=["api-none", "api-empty", "api-open-zero", "api-close-nan"],
+    )
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_local_and_api_unavailable_returns_none(self, mock_cm, mock_tc, api_result):
+        """本地脏行且 API 同无有效点位 → None（不返回本地脏值，不伪造点位）。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(return_value=api_result)
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) is None
+        mock_api.get_index_daily.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "api_exc",
+        [ValueError("bad data"), TypeError("bad type"), KeyError("close"), RuntimeError("api down")],
+        ids=["value-error", "type-error", "key-error", "runtime-error"],
+    )
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_dirty_local_row_api_error_returns_none(self, mock_cm, mock_tc, api_exc):
+        """本地脏行后 API 失败/异常 → None（既有 operational 降级语义不变）。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(side_effect=api_exc)
+
+        assert await rm._resolve_index_quote(self._CODE, self._DATE) is None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_local_lookup_cancelled_propagates(self, mock_cm, mock_tc):
+        """本地查询取消 → CancelledError 上抛（R2），不得降级为 None。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_api.get_index_daily = AsyncMock(return_value=self._row())
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._resolve_index_quote(self._CODE, self._DATE)
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        mock_api.get_index_daily.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_api_lookup_cancelled_propagates(self, mock_cm, mock_tc):
+        """本地脏行后 API 取消 → CancelledError 上抛（R2），不得降级为 None。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await rm._resolve_index_quote(self._CODE, self._DATE)
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_system_level_local_error_still_raises(self, mock_cm, mock_tc):
+        """真正 system 级 DB 故障（PermissionError）仍上抛，不得被当作脏缓存盲目绕过。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=PermissionError("permission denied"))
+        mock_api.get_index_daily = AsyncMock(return_value=self._row())
+
+        with pytest.raises(PermissionError) as exc_info:
+            await rm._resolve_index_quote(self._CODE, self._DATE)
+        assert str(exc_info.value) == "permission denied"
+        mock_api.get_index_daily.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_window_pct_dirty_local_records_missing_and_dedupes(self, mock_cm, mock_tc):
+        """本地脏行且 API 不可得 → 记入 index_missing；再次调用不重复探测同一日期。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, 3180.0))
+        mock_api.get_index_daily = AsyncMock(return_value=None)
+        caches: dict[str, dict[str, tuple[float, float]]] = {self._CODE: {}}
+        missing: dict[str, set[str]] = {self._CODE: set()}
+        start = datetime.date(2024, 6, 11)
+        end = datetime.date(2024, 6, 17)
+
+        assert await rm._window_index_pct(self._CODE, start, end, caches, missing) is None
+        assert missing[self._CODE] == {"20240611", "20240617"}
+        assert mock_cache.quote_dao.get_index_daily.await_count == 2
+
+        assert await rm._window_index_pct(self._CODE, start, end, caches, missing) is None
+        assert mock_cache.quote_dao.get_index_daily.await_count == 2  # 去重：不重复探测
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_window_pct_uses_api_quote_when_local_dirty(self, mock_cm, mock_tc):
+        """本地脏行但 API 有同日点位 → 窗口收益按 API 端点计算（备用链路真正生效）。"""
+        rm, mock_cache, mock_api = self._make_rm(mock_cm)
+        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=self._row(None, None))
+
+        async def _api_quote(ts_code, start_date, end_date):
+            assert ts_code == self._CODE
+            assert start_date == end_date
+            if start_date == "20240611":
+                return self._row(3000.0, 3050.0)
+            return self._row(3160.0, 3180.0)
+
+        mock_api.get_index_daily = AsyncMock(side_effect=_api_quote)
+        caches: dict[str, dict[str, tuple[float, float]]] = {self._CODE: {}}
+        missing: dict[str, set[str]] = {self._CODE: set()}
+
+        result = await rm._window_index_pct(
+            self._CODE,
+            datetime.date(2024, 6, 11),
+            datetime.date(2024, 6, 17),
+            caches,
+            missing,
+        )
+
+        assert result == pytest.approx((3180.0 / 3000.0 - 1.0) * 100.0)
+        assert caches[self._CODE] == {"20240611": (3000.0, 3050.0), "20240617": (3160.0, 3180.0)}
+        assert missing[self._CODE] == set()

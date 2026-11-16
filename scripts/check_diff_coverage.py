@@ -14,7 +14,8 @@
     1: --strict 模式下覆盖率低于阈值
     2: 无法确定覆盖率输入（coverage 文件缺失/不可读/非法、merge-base 不可用、
        git diff 失败），或 diff 含可执行变更行但所属文件未被 coverage 统计
-       （未收录且不匹配 [tool.coverage.run].omit）——fail-closed，不得静默通过
+       （未收录且不匹配 [tool.coverage.run].omit），或文件在 coverage 中已记录
+       却缺测量数组/测量行数为 0 而源码存在可执行变更——fail-closed，不得静默通过
 """
 
 import argparse
@@ -221,11 +222,58 @@ def get_diff_added_lines(base: str) -> dict[str, list[int]]:
     return parse_diff(result.stdout)
 
 
+def _parse_line_list(value: object, filepath: str, field: str) -> set[int]:
+    """校验 coverage 行号数组：必须是 list，元素为正整数（排除 bool），且无重复。
+
+    以下均视为非法输入并抛 DiffCoverageInputError：数组缺失（由调用方判定）、
+    类型错误、``true``/``1.0``/``"1"`` 等错型元素、``0``/负数、重复行号。
+    """
+    if not isinstance(value, list):
+        raise DiffCoverageInputError(f"coverage 条目 {filepath} 的 {field} 必须为数组（实际 {type(value).__name__}）")
+    lines: set[int] = set()
+    for item in value:
+        if type(item) is not int or item < 1:
+            raise DiffCoverageInputError(
+                f"coverage 条目 {filepath} 的 {field} 含非法行号 {item!r}（须为正整数，不含 bool）"
+            )
+        if item in lines:
+            raise DiffCoverageInputError(f"coverage 条目 {filepath} 的 {field} 含重复行号: {item}")
+        lines.add(item)
+    return lines
+
+
+def _check_summary_consistency(filepath: str, summary: object, statement_count: int) -> None:
+    """条目含 coverage.py summary 时，num_statements 必须与测量行数一致。
+
+    用于发现「测量数组被清空/截断但 summary 仍声明有语句」的矛盾数据。条目无
+    summary 或 summary 无 num_statements（如精简夹具）时不校验。
+    """
+    if summary is None:
+        return
+    if not isinstance(summary, dict):
+        raise DiffCoverageInputError(f"coverage 条目 {filepath} 的 summary 必须为 JSON 对象")
+    if "num_statements" not in summary:
+        return
+    declared = summary["num_statements"]
+    if type(declared) is not int or declared < 0:
+        raise DiffCoverageInputError(f"coverage 条目 {filepath} 的 summary.num_statements 必须为非负整数")
+    if declared != statement_count:
+        raise DiffCoverageInputError(
+            f"coverage 条目 {filepath} 的 summary.num_statements={declared} "
+            f"与测量行数 {statement_count} 不一致（测量数组缺失或被截断）"
+        )
+
+
 def load_coverage(coverage_file: Path) -> dict[str, dict[str, set[int]]]:
     """加载 coverage.json，返回 {filepath: {"executed": set, "statements": set}}。
 
     statements = executed_lines ∪ missing_lines，即 coverage.py 识别的所有可执行行
     （含文档字符串，不含空行/纯注释）。用于过滤 diff 中的非可执行行。
+
+    每个文件条目必须为 JSON 对象且同时含 executed_lines / missing_lines 数组
+    （缺数组即「已记录但未测量」，不得按空 statements 静默跳过）；数组元素须为
+    正整数、无重复、两数组不得相交；summary.num_statements 若存在须与测量行数
+    一致。以上任一不满足、或不同原始键归一化后碰撞，均 fail-closed。
 
     路径规范化：coverage.py 在 Windows 上生成反斜杠路径（``app\\bootstrap.py``），
     而 git diff 始终使用正斜杠（``app/bootstrap.py``）。统一为正斜杠避免跨平台不匹配。
@@ -235,12 +283,30 @@ def load_coverage(coverage_file: Path) -> dict[str, dict[str, set[int]]]:
     if not isinstance(cov, dict) or not isinstance(cov.get("files"), dict):
         raise DiffCoverageInputError(f"coverage 文件缺少合法的 files 字段（无法确定覆盖率输入）: {coverage_file}")
     result: dict[str, dict[str, set[int]]] = {}
-    for fp, d in cov.get("files", {}).items():
+    raw_keys: dict[str, str] = {}
+    for fp, d in cov["files"].items():
+        if not isinstance(d, dict):
+            raise DiffCoverageInputError(f"coverage 条目 {fp} 必须为 JSON 对象（实际 {type(d).__name__}）")
+        for field in ("executed_lines", "missing_lines"):
+            if field not in d:
+                raise DiffCoverageInputError(f"coverage 条目 {fp} 缺少 {field}（无法确认该文件已被测量）")
+        executed = _parse_line_list(d["executed_lines"], fp, "executed_lines")
+        missing = _parse_line_list(d["missing_lines"], fp, "missing_lines")
+        overlap = executed & missing
+        if overlap:
+            raise DiffCoverageInputError(
+                f"coverage 条目 {fp} 的行同时出现在 executed_lines 与 missing_lines: {sorted(overlap)[:5]}"
+            )
         # 统一为 POSIX 风格路径（正斜杠），与 git diff 输出一致
         normalized_fp = fp.replace("\\", "/")
-        executed = set(d.get("executed_lines", []))
-        missing = set(d.get("missing_lines", []))
-        result[normalized_fp] = {"executed": executed, "statements": executed | missing}
+        if normalized_fp in result:
+            raise DiffCoverageInputError(
+                f"coverage 路径归一化后冲突: {raw_keys[normalized_fp]!r} 与 {fp!r} 均指向 {normalized_fp}"
+            )
+        raw_keys[normalized_fp] = fp
+        statements = executed | missing
+        _check_summary_consistency(fp, d.get("summary"), len(statements))
+        result[normalized_fp] = {"executed": executed, "statements": statements}
     return result
 
 
@@ -282,6 +348,30 @@ def find_unmeasured_files(
     return sorted(
         filepath for filepath in diff_lines if filepath not in coverage and not _is_omitted(filepath, omit_patterns)
     )
+
+
+def find_contradictory_measured_files(
+    diff_lines: dict[str, list[int]],
+    coverage: dict[str, dict[str, set[int]]],
+    omit_patterns: Sequence[str] = (),
+    root: Path | None = None,
+) -> dict[str, list[int]]:
+    """返回 coverage 已收录但 statements 为空、而 diff 新增行可执行的文件。
+
+    coverage.py 会为 source 下所有文件报告 statements；条目已存在却没有任何可执行
+    行，与源码中存在可执行新增行相矛盾（如测量数组被清空/截断），说明该文件并未
+    真正测量，调用方须 fail-closed，不得把「键存在」当作测量完成。合法 0 statement
+    文件（空模块/纯注释）的新增行按源码判定后为空，仍正常跳过。
+    """
+    contradictory: dict[str, list[int]] = {}
+    for filepath, lines in diff_lines.items():
+        file_cov = coverage.get(filepath)
+        if file_cov is None or file_cov["statements"] or _is_omitted(filepath, omit_patterns):
+            continue
+        executable = find_executable_added_lines(filepath, lines, root=root)
+        if executable:
+            contradictory[filepath] = executable
+    return contradictory
 
 
 def find_executable_added_lines(filepath: str, lines: list[int], root: Path | None = None) -> list[int]:
@@ -404,6 +494,20 @@ def main():
         print()
         print("无法用覆盖率数据判定这些变更行是否被测试覆盖，fail-closed（exit 2）。")
         print("请确认该文件已被测试导入并纳入 coverage，或在 pyproject.toml 的 omit 中显式声明。")
+        return 2
+
+    # 文件在 coverage 中「已记录」不等于「已测量」：条目缺测量数组已在 load_coverage
+    # 拦截；此处兜底 statements 为空（空数组/空集合）却存在可执行新增行的矛盾数据。
+    contradictory = find_contradictory_measured_files(diff_lines, coverage, omit_patterns, root=ROOT)
+    if contradictory:
+        print("✗ 以下文件在 coverage 中已记录，但无可执行行统计（statements 为空），与 diff 的可执行变更矛盾：")
+        for filepath, lines in contradictory.items():
+            print(f"  {filepath}:")
+            for ln in lines:
+                print(f"    L{ln}")
+        print()
+        print("coverage 数据未能证明这些文件已被测量（测量数组缺失或被截断），fail-closed（exit 2）。")
+        print("请重新生成 coverage.json，确认每个文件条目含完整的 executed_lines / missing_lines。")
         return 2
 
     if total == 0:

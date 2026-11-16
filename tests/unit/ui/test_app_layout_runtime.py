@@ -312,6 +312,60 @@ class TestDoTabSwitch:
         asyncio.run(handler(0))  # new_tab == current_tab (0) → 不切换
         assert not env["mod"].UILogger.log_action.called, "new_tab == current_tab 不应调用 log_action"
 
+    def test_switch_back_to_initial_tab_via_stale_closure(self, app_layout_env) -> None:
+        """APP-F1 回归 (_do_tab_switch 侧): 旧渲染闭包在 ref 更新后仍能切回初始 tab.
+
+        缺陷机理: _do_tab_switch 由长期闭包 (_apply_navigate / 订阅渲染轮) 持有时,
+        同页判断读闭包捕获的初始 current_tab=MARKET 快照 → 先切走后, 用同一旧闭包
+        调 handler(MARKET) 会因 new_tab != stale current_tab 为 False 不 set,
+        无法返回行情。修复后判断读 current_tab_ref 最新值。
+
+        修复前行为: 第二次 asyncio.run(handler(0)) 读闭包 current_tab=0 → 0!=0
+        False → 不切换, selected_index 停在 SCREENER → 断言失败。
+        """
+        env = app_layout_env
+        nav_rail = _get_nav_rail(env)
+        page = env["page"]
+
+        # 1) 用初始渲染轮的 _do_tab_switch 闭包切到 SCREENER (2)
+        page.run_task.reset_mock()
+        _invoke(nav_rail.on_change, _make_event(selected_index=2))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+        _rerender(env)
+        assert _get_nav_rail(env).selected_index == int(env["mod"].NavTabs.SCREENER)
+
+        # 2) 用同一旧闭包切回初始 MARKET (0): 须读 ref 最新值 (2) 而非闭包快照 (0)
+        env["mod"].UILogger.log_action.reset_mock()
+        asyncio.run(handler(0))
+        _rerender(env)
+        assert _get_nav_rail(env).selected_index == int(env["mod"].NavTabs.MARKET), (
+            "旧闭包经 ref 重判后应能切回初始 tab (stale 快照判断会吞掉本次切换)"
+        )
+        env["mod"].UILogger.log_action.assert_called_with("AppLayout", "Navigate", "tab=market")
+
+    def test_stale_closure_rereads_ref_no_repeat_switch_log(self, app_layout_env) -> None:
+        """APP-F1: 旧闭包对已生效 tab 的重复调用不重复切换/日志 (ref 同页判断).
+
+        第一次 handler(1) 切到 WATCHLIST 后 (ref 已同步为 1), 再用同一初始渲染轮
+        旧闭包调 handler(1): 修复前读闭包 current_tab=0 → 1!=0 → 重复 set + 重复
+        Navigate 日志; 修复后读 ref=1 → same-tab 早返回, 无日志。
+        """
+        env = app_layout_env
+        nav_rail = _get_nav_rail(env)
+        page = env["page"]
+
+        # 用初始渲染轮闭包切到 WATCHLIST (1)
+        page.run_task.reset_mock()
+        _invoke(nav_rail.on_change, _make_event(selected_index=1))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        # 同一旧闭包再次 handler(1): ref 已是 1 → 不重复切换/日志
+        env["mod"].UILogger.log_action.reset_mock()
+        asyncio.run(handler(1))
+        assert not env["mod"].UILogger.log_action.called, "ref 判 same-tab 不应重复 log_action"
+
 
 # ============================================================================
 # _toggle_nav 测试: nav_collapsed 状态切换
@@ -594,6 +648,76 @@ class TestOnNavigate:
         _rerender(env)
         nav_rail = _get_nav_rail(env)
         assert nav_rail.selected_index == int(env["mod"].NavTabs.MARKET), "相同 tab 不应切换"
+
+    def test_navigate_back_to_initial_tab_after_switching_away(self, app_layout_env) -> None:
+        """APP-F1 核心回归: 先切走再导航回初始 tab 须生效, 不被 stale 快照吞掉.
+
+        缺陷机理: _on_navigate 是 use_effect(dependencies=[]) 订阅闭包, 调度的
+        _apply_navigate 与其内部 _do_tab_switch 均捕获挂载时 current_tab=MARKET
+        快照 → 经导航切到 SCREENER 后发送合法 "market", _apply_navigate 仍与
+        初始 MARKET 比较误判 same-tab 直接 return, 界面不返回行情。
+
+        修复前行为: 最终 selected_index 停在 SCREENER → 断言失败。
+        """
+        env = app_layout_env
+        nav_rail = _get_nav_rail(env)
+        page = env["page"]
+
+        # 1) 经导航切到 SCREENER (2)
+        page.run_task.reset_mock()
+        _invoke(nav_rail.on_change, _make_event(selected_index=2))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+        _rerender(env)
+        assert _get_nav_rail(env).selected_index == int(env["mod"].NavTabs.SCREENER)
+
+        # 2) 经 TOPIC_NAVIGATE 发送合法 "market" 消息 (目标=初始 tab)
+        nav_handler = _get_navigate_handler(env)
+        page.run_task.reset_mock()
+        nav_handler(env["mod"].TOPIC_NAVIGATE, "market")
+        apply_fn, apply_args, _ = _await_run_task_handler(page)
+        assert apply_args == (int(env["mod"].NavTabs.MARKET), None)
+        asyncio.run(apply_fn(*apply_args))
+
+        # 3) 须返回行情页 (修复前 stale 快照误判 same-tab 吞掉导航)
+        _rerender(env)
+        assert _get_nav_rail(env).selected_index == int(env["mod"].NavTabs.MARKET), (
+            "先切走再导航回初始 tab 不应被 stale current_tab 快照吞掉"
+        )
+
+    def test_same_tab_navigate_after_return_no_repeat_log(self, app_layout_env) -> None:
+        """APP-F1: 返回初始 tab 后再发同页导航消息, 不重复切换且无重复日志.
+
+        same-tab 早返回改读 ref 后须保持原语义: 判断命中 → 不进 _do_tab_switch,
+        无 Navigate 日志、无多余 set。
+        """
+        env = app_layout_env
+        nav_rail = _get_nav_rail(env)
+        page = env["page"]
+
+        # 1) 切到 SCREENER 再经导航返回 MARKET (见核心回归用例)
+        page.run_task.reset_mock()
+        _invoke(nav_rail.on_change, _make_event(selected_index=2))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+        _rerender(env)
+        nav_handler = _get_navigate_handler(env)
+        page.run_task.reset_mock()
+        nav_handler(env["mod"].TOPIC_NAVIGATE, "market")
+        apply_fn, apply_args, _ = _await_run_task_handler(page)
+        asyncio.run(apply_fn(*apply_args))
+        _rerender(env)
+        assert _get_nav_rail(env).selected_index == int(env["mod"].NavTabs.MARKET)
+
+        # 2) 再发同页 "market": same-tab 早返回, 无 Navigate 日志
+        env["mod"].UILogger.log_action.reset_mock()
+        page.run_task.reset_mock()
+        nav_handler(env["mod"].TOPIC_NAVIGATE, "market")
+        apply_fn, apply_args, _ = _await_run_task_handler(page)
+        asyncio.run(apply_fn(*apply_args))
+        assert not env["mod"].UILogger.log_action.called, "同页导航不应产生 Navigate 日志"
+        _rerender(env)
+        assert _get_nav_rail(env).selected_index == int(env["mod"].NavTabs.MARKET)
 
     def test_on_navigate_body_has_no_context_dependent_calls(self, app_layout_env) -> None:
         """F07-FULLMOUNT-1 结构守卫: _on_navigate 池线程执行, 函数体内禁止 hook setter.

@@ -3,7 +3,8 @@
 对 DAO 日级聚合 ``screener_dao.get_strategy_review_stats`` 的产出做**日序列统计**计算：
 
 - **样本单位 = 交易日**：各指标按非 NULL 日序列算独立 N / 均值 / 标准差
-  （先按 trade_date 聚类求日组合均值，消除横截面相关，三审 M1）。
+  （先按 trade_date 聚类求日组合均值，消除横截面相关，三审 M1；组内行按
+  trade_date 升序重排后再计算，保证 HAC 的 lag 自协方差对应相邻交易日）。
 - **置信区间用 t 分布**（``mean ± t_{0.975, n-1} * std / sqrt(n)``）。scipy 未入
   pyproject，采用固定内插表 ``_T_CRIT_0_975`` 覆盖 df=1..179（四审 L2），
   df>179 时钳制到表尾近似值。
@@ -410,7 +411,9 @@ def compute_strategy_review_stats(df: pd.DataFrame) -> tuple[StrategyStatRow, ..
     """将 DAO 日级聚合 DataFrame 换算为按 (strategy_name, benchmark_code) 分组的统计行。
 
     分组内各日期为独立样本点；指标独立 N（t1/t5/alpha 各以非 NULL 日序列计算），
-    胜率以股票行 N 独立累计。基准 NULL 组自成一组并始终排在同名策略的可比组之后。
+    胜率以股票行 N 独立累计。分组内行先按 trade_date 升序重排（稳定排序），
+    使 Newey-West HAC 的相邻行对应相邻交易日；基准 NULL 组自成一组并始终排在同名
+    策略的可比组之后。
 
     Args:
         df: ``get_strategy_review_stats`` 产出，列含 trade_date / strategy_name /
@@ -427,6 +430,9 @@ def compute_strategy_review_stats(df: pd.DataFrame) -> tuple[StrategyStatRow, ..
     for (strategy_name, benchmark_code), group in df.groupby(
         ["strategy_name", "benchmark_code"], dropna=False, sort=False
     ):
+        # RSS-01: Newey-West 的 lag 自协方差假设相邻行 = 相邻交易日，必须先按
+        # trade_date 升序（stable 保留同日行相对序）。sort_values 返回新对象，不改输入 df。
+        group = group.sort_values("trade_date", kind="stable")
         bm: str | None = (
             None if pd.isna(cast("float | str | None", benchmark_code)) else str(benchmark_code)
         )  # NULL 组归一为 None
@@ -509,7 +515,8 @@ def compute_ai_attribution_stats(df: pd.DataFrame) -> tuple[AiAttributionRow, ..
     """将 DAO 日级聚合 DataFrame 换算为按 (strategy_name, benchmark_code, has_ai) 分组的归因行。
 
     与 ``compute_strategy_review_stats`` 同口径（日序列 N/均值/std/CI + 胜率股票行 N），
-    仅分组键增加 has_ai 维度。AI 组（has_ai=True）在前、无 AI 组在后，便于 UI 并排对比。
+    仅分组键增加 has_ai 维度；分组内行同样先按 trade_date 升序重排。AI 组
+    （has_ai=True）在前、无 AI 组在后，便于 UI 并排对比。
 
     Args:
         df: ``get_ai_attribution_stats`` 产出，列含 trade_date / strategy_name /
@@ -526,6 +533,8 @@ def compute_ai_attribution_stats(df: pd.DataFrame) -> tuple[AiAttributionRow, ..
     for (strategy_name, benchmark_code, has_ai), group in df.groupby(
         ["strategy_name", "benchmark_code", "has_ai"], dropna=False, sort=False
     ):
+        # RSS-01: 同 compute_strategy_review_stats，组内按 trade_date 升序后再算日序列。
+        group = group.sort_values("trade_date", kind="stable")
         bm: str | None = (
             None if pd.isna(cast("float | str | None", benchmark_code)) else str(benchmark_code)
         )  # NULL 组归一为 None

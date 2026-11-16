@@ -2,19 +2,20 @@
 
 > **目的**：`CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` 元数据块中 `ruleset_version` 与产品版本分离（P2-07 统一格式），但此版本号无配套变更记录，导致「版本号退化为一个数字」、无处可查每次递增改了什么（AI文档检视 P3-04）。本文件提供 ruleset_version 递增的最小还原日志。
 >
-> **记录规则**：`ruleset_version` 在治理正本（仓库根 [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) / [CONTRIBUTING.md](../../CONTRIBUTING.md) 的元数据块，以及 `docs/governance/` 下相关治理文档）中每次递增时，在本文件变更记录表**顶部追加一行**，列格式为 `ruleset_version | 变更日期 | 变更摘要`。仅登记版本递增，不登记产品版本、不复制红线表全文。
+> **记录规则**：`ruleset_version` 在治理正本（仓库根 [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) / [CONTRIBUTING.md](../../CONTRIBUTING.md) 的元数据块，以及 `docs/governance/` 下相关治理文档）中每次递增时，在本文件变更记录表**顶部追加一行**，列格式为 `ruleset_version | 变更日期 | 变更摘要 | 受影响对象`。**顶行是 `ruleset_version` 的唯一作者**：三份入口文档的 `ruleset_version` 均为其派生视图，必须等于顶行版本（由 `check_ruleset_changelog_version()` 守护，禁止以宪法版本反向认证日志）。**受影响对象**以 `、` 分隔列出本轮确需重新审核的入口文档（仅可为 `CLAUDE.md` / `CONTRIBUTING.md` / `AGENTS.md`，本轮不影响任何入口文档时填 `—`）：仅这些文档的 `last_reviewed` 受「不早于顶行变更日期」复核门约束，未列出的文档保留真实复核日期，不因日志递增被迫同步更新（由 `check_ruleset_metadata_consistency()` 守护）。仅登记版本递增，不登记产品版本、不复制红线表全文。
 >
-> **维护约束**：顶行版本号由 `scripts/check_docs_consistency.py::check_ruleset_changelog_version()` 自动守护，必须与 `CLAUDE.md` 元数据块 `ruleset_version` 一致（不一致时 docs 一致性门禁 FAIL）。涉及红线变更的递增必须同时在 [redlines.yml](./redlines.yml) 与 [exceptions.yml](./exceptions.yml) 留痕。
+> **维护约束**：顶行版本号由 `scripts/check_docs_consistency.py::check_ruleset_changelog_version()` 自动守护——顶行是版本作者，`CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` 的 `ruleset_version` 必须与其一致（不一致时 docs 一致性门禁 FAIL）；顶行「受影响对象」的 `last_reviewed` 复核门由 `check_ruleset_metadata_consistency()` 守护。涉及红线变更的递增必须同时在 [redlines.yml](./redlines.yml) 与 [exceptions.yml](./exceptions.yml) 留痕。
 
 ## 变更记录
 
-| ruleset_version | 变更日期 | 变更摘要 |
-|-----------------|----------|---------|
-| 1.9.0 | 2026-09-24 | 新增 R24「时点正确性」红线（报告模式）：任何进入策略或回测的数据取数时点不得晚于被决策交易日，使用「当前快照」类维度参与历史区间计算即违规；check_redlines.py 新增 check_R24（warning 不阻断），redlines.yml/CLAUDE.md §3.1 同步登记；新增 docs/patterns/backtest-correctness.md 为 backtest 主题 canonical 正本（时点正确性/幸存者偏差/复权口径/财报修订/结论可信度边界），DAT-07/DAT-08/BT-05 迁入其「已知限制」 |
-| 1.9.0 | 2026-09-24 | R21 报告模式落地（H2）：check_redlines.py 新增 check_R21（warning 输出 stderr 不阻断，复用原型 MissingMaskingVisitor），redlines.yml R21 登记 checks/enforcement、automation_coverage none→partial；redlines.yml 新增 self_check 字段（R5/R17/R21 可执行自查判据），CLAUDE.md §3.1 新增「人工评审红线可执行自查清单」生成区块（check_claude_self_check_sync 守护）；检视协议新增 ROUND3-05 无自动拦截红线独立会话复核 |
-| 1.8.0 | 2026-09-21 | R13 语义简化（OSS-03）：删除 _DAO_REGISTRY 显式注册清单，改为 CacheManager.__init__ 显式实例化 + sync_engines() 按类型发现（isinstance BaseDao）；CLAUDE.md/redlines.yml R13 描述与 enforcement 同步（补回 CI-test 静态契约维度），how-to.md/dao-pattern.md 登记步骤同步删除 |
-| 1.7.0 | 2026-09-17 | R20 第一阶段报告模式落地：check_redlines.py 新增 check_R20（warning 输出 stderr 不阻断），redlines.yml R20 登记 checks/enforcement，automation_coverage none→partial（语义仍以人工评审为准，误报率达标后评估升级为拦截） |
-| 1.6.0 | 2026-09-14 | 初版快照登记（ruleset-changelog.md 引入时所在版本；历史 1.3.1→1.6.0 的变更未回溯，自本版本起记录） |
+| ruleset_version | 变更日期 | 变更摘要 | 受影响对象 |
+|-----------------|----------|---------|-----------|
+| 1.10.0 | 2026-11-13 | 文档体系检视 D6 入口切换：架构正文（CLAUDE.md §4 分层架构/依赖规则/core 隔离/单例模式）迁出为唯一正本 docs/architecture/overview.md，CLAUDE.md §4 改为最小摘要 + 指针（语义不减），GDR-11 消费者（check_core_modules_completeness）断言对象同步切换；docs/README.md 文件级目录索引/ADR 索引（含补齐存量缺失的 ADR-0017 行）与新增 docs/governance/README.md 规则参考/任务路由视图接入 docs_generated.py 受控生成（封闭注册表 +4 激活条目）；CLAUDE.md 头部/§2/§5 压缩精简（§1.8 决策树与 §3 红线不动）；CLAUDE/AGENTS/CONTRIBUTING 元数据同步，checker-migration-map.md 与 governance-ids.md 消费者登记同步 | CLAUDE.md、AGENTS.md、CONTRIBUTING.md |
+| 1.9.0 | 2026-09-24 | 新增 R24「时点正确性」红线（报告模式）：任何进入策略或回测的数据取数时点不得晚于被决策交易日，使用「当前快照」类维度参与历史区间计算即违规；check_redlines.py 新增 check_R24（warning 不阻断），redlines.yml/CLAUDE.md §3.1 同步登记；新增 docs/patterns/backtest-correctness.md 为 backtest 主题 canonical 正本（时点正确性/幸存者偏差/复权口径/财报修订/结论可信度边界），DAT-07/DAT-08/BT-05 迁入其「已知限制」 | — |
+| 1.9.0 | 2026-09-24 | R21 报告模式落地（H2）：check_redlines.py 新增 check_R21（warning 输出 stderr 不阻断，复用原型 MissingMaskingVisitor），redlines.yml R21 登记 checks/enforcement、automation_coverage none→partial；redlines.yml 新增 self_check 字段（R5/R17/R21 可执行自查判据），CLAUDE.md §3.1 新增「人工评审红线可执行自查清单」生成区块（check_claude_self_check_sync 守护）；检视协议新增 ROUND3-05 无自动拦截红线独立会话复核 | — |
+| 1.8.0 | 2026-09-21 | R13 语义简化（OSS-03）：删除 _DAO_REGISTRY 显式注册清单，改为 CacheManager.__init__ 显式实例化 + sync_engines() 按类型发现（isinstance BaseDao）；CLAUDE.md/redlines.yml R13 描述与 enforcement 同步（补回 CI-test 静态契约维度），how-to.md/dao-pattern.md 登记步骤同步删除 | — |
+| 1.7.0 | 2026-09-17 | R20 第一阶段报告模式落地：check_redlines.py 新增 check_R20（warning 输出 stderr 不阻断），redlines.yml R20 登记 checks/enforcement，automation_coverage none→partial（语义仍以人工评审为准，误报率达标后评估升级为拦截） | — |
+| 1.6.0 | 2026-09-14 | 初版快照登记（ruleset-changelog.md 引入时所在版本；历史 1.3.1→1.6.0 的变更未回溯，自本版本起记录） | — |
 
 ## 治理 ID 存量 WARNING 清零期限
 
@@ -102,5 +103,5 @@ WARNING」的反模式）：
 `ruleset_version` 元数据块中 `review_triggers` 写明「检视报告发布时」复核。复核流程（GOV-07，规则性约定，不写日期快照）：
 
 1. 检视报告发布后，由**架构维护者**对照 `docs/debt/known-technical-debt.md` 登记的未关闭发现（含历次检视迁入项），评估治理变更是否需要递增 `ruleset_version`；
-2. 若递增：按本文件「记录规则」在变更记录表顶部登记，并同步三方（CLAUDE.md / CONTRIBUTING.md / AGENTS.md）`last_reviewed`（须不早于本文件顶行变更日期，DS-05）与 `ruleset_version`；
+2. 若递增：按本文件「记录规则」在变更记录表顶部登记（含「受影响对象」），并同步三份入口文档的 `ruleset_version`（入口派生自顶行）；仅对「受影响对象」列出的文档将 `last_reviewed` 更新为真实复核日期（须不早于本文件顶行变更日期，DS-05），未受影响的入口文档保留原复核日期，不因日志递增被迫同步；
 3. 动态状态（`last_reviewed` 现值、未关闭发现与技术债）由 `docs/debt/known-technical-debt.md` 与三份治理文档元数据块单一承载，本段落不复制。

@@ -116,6 +116,40 @@ class TestAttributionSerialization:
         assert back.rank is None
         assert back.conditions[0].column == "pe"
 
+    def test_from_frozen_mapping_with_tuple_threshold(self):
+        """D16-008: 冻结后的 Mapping/tuple 阈值仍可反序列化 (不回退为 gt 0.0 假条件)."""
+        from types import MappingProxyType
+
+        raw = MappingProxyType(
+            {
+                "conditions": (
+                    MappingProxyType(
+                        {"column": "pe_ttm", "operator": "between", "threshold": (5.0, 20.0), "actual": 6.5}
+                    ),
+                ),
+                "rank": MappingProxyType(
+                    {"field": "dv_ttm", "ascending": False, "value": 3.5, "position": 1, "total": 10}
+                ),
+            }
+        )
+        back = cast(FilterAttribution, attribution_from_json(raw))
+        assert back.conditions[0].operator == "between"
+        assert back.conditions[0].threshold == (5.0, 20.0)
+        assert back.rank is not None
+        assert back.rank.field == "dv_ttm"
+        assert back.rank.position == 1
+        assert back.rank.total == 10
+
+    def test_from_plain_dict_accepts_tuple_threshold(self):
+        """D16-008: 普通 dict 直供二元 tuple 阈值亦应被接受."""
+        back = cast(
+            FilterAttribution,
+            attribution_from_json(
+                {"conditions": [{"column": "pe", "operator": "between", "threshold": (1.0, 2.0)}], "rank": None}
+            ),
+        )
+        assert back.conditions[0].threshold == (1.0, 2.0)
+
 
 # ============================================================================
 # polars_base._build_attributions — 候选池序位与列写入

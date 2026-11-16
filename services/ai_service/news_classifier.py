@@ -116,9 +116,9 @@ def _validate_gguf_sentiment_output(response: AdapterResponse) -> ValidatedBusin
 
     - 仅接受 ``status ∈ {"success", "partial"}``（其余终态 adapter 已转译为异常，
       到达即契约破坏，抛错切换候选）；
-    - 按 ``text_id="0"`` 取本请求（单文本）条目；条目缺失 / label 缺失或未知 →
-      :class:`ModelOutputValidationError`（Executor 切换候选；全候选耗尽 →
-      unavailable → 情绪缺失，R21 不伪装）；
+    - 严格按 ``text_id="0"`` 取本请求（单文本）条目，**不回退**到其他 text_id 或
+      缺 ID 条目；条目缺失 / label 缺失或未知 → :class:`ModelOutputValidationError`
+      （Executor 切换候选；全候选耗尽 → unavailable → 情绪缺失，R21 不伪装）；
     - score / confidence 经 :func:`_finite_float` 归一（坏值归 None，不因数值列
       坏而丢弃有效 label；合法中性/零分不误报缺失）；
     - ``sentiment_model`` 取 adapter 产出身份（actual_model = 模型文件 stem tag，
@@ -142,9 +142,9 @@ def _validate_gguf_sentiment_output(response: AdapterResponse) -> ValidatedBusin
     if not isinstance(results, list) or not results:
         raise ModelOutputValidationError("sentiment output: results missing or empty")
 
-    entry = next((r for r in results if isinstance(r, dict) and r.get("text_id") == "0"), results[0])
-    if not isinstance(entry, dict):
-        raise ModelOutputValidationError("sentiment output: result entry is not an object")
+    entry = next((r for r in results if isinstance(r, dict) and r.get("text_id") == "0"), None)
+    if entry is None:
+        raise ModelOutputValidationError("sentiment output: text_id=0 result missing")
 
     raw_label = entry.get("label")
     code = _GGUF_LABEL_TO_CODE.get(raw_label) if isinstance(raw_label, str) else None
@@ -486,9 +486,11 @@ class NewsClassifier:
           "sentiment"]["candidates"]`` 构造独立 ExecutionSnapshot（dataclasses.replace
           子路由快照），Executor 按 scenario_id 命中该子路由候选，与主题候选互不干扰；
         - reuse_bundled_sentiment 显式降级（正本 L249/L250，方案 §2.1）：主题响应若
-          携带合法联合情绪（validator 捕获），仅当「专用链整体不可用」（非 invalid_output
-          耗尽）时复用（source="reuse_bundled"）；invalid_output 耗尽 → 保持缺失不回填
-          （R21）。dedicated 主题请求为纯主题 prompt，联合情绪仅在模型自愿输出时产生。
+          携带合法联合情绪（validator 捕获），仅当
+          ``task_routes.sentiment.reuse_bundled_sentiment`` 严格为 True（缺键默认 True）
+          且「专用链整体不可用」（非 invalid_output 耗尽）时复用（source="reuse_bundled"）；
+          invalid_output 耗尽或开关显式 False/畸形值 → 保持缺失不回填（R21）。dedicated
+          主题请求为纯主题 prompt，联合情绪仅在模型自愿输出时产生。
         """
         import services.ai_service as _ai
 
@@ -616,9 +618,15 @@ class NewsClassifier:
                     dispatch,
                     cast(ScenarioOutput, sentiment_result.outputs[0]).metadata,
                 )
-        elif self._sentiment_failure_kind(sentiment_error) == "unavailable" and bundled_sentiment in _SENTIMENT_ENUM:
+        elif (
+            sentiment_route.get("reuse_bundled_sentiment", True) is True
+            and self._sentiment_failure_kind(sentiment_error) == "unavailable"
+            and bundled_sentiment in _SENTIMENT_ENUM
+        ):
             # D3（检视修复）：专用链整体不可用 + 已有合法联合情绪 → 显式降级复用
             # （正本 L249「可保留其合法情绪用于显式降级」；方案 reuse_bundled_sentiment）。
+            # M27-01：受 task_routes.sentiment.reuse_bundled_sentiment 显式开关约束；
+            # 缺键保持默认 True（旧快照读兼容），非 bool 畸形值严格不放行。
             result["sentiment"] = bundled_sentiment
             result["sentiment_status"] = "success"
             result["sentiment_source"] = "reuse_bundled"

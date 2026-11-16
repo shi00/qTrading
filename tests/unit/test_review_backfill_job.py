@@ -157,6 +157,27 @@ class TestBuildReviewBackfillJob:
         mock_rm.expire_stale_pending.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_job_propagates_t1_write_failure_instead_of_count(self):
+        """DLP-RM-05: T+1 写库失败 → job 上抛，绝不把计划条数呈现为 "T+1 backfilled"。"""
+        job = build_review_backfill_job()
+        with (
+            patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls,
+            patch("services.scheduled_jobs.review_backfill.TaskManager") as mock_tm_cls,
+        ):
+            mock_rm = MagicMock()
+            mock_rm.backfill_t1_returns = AsyncMock(
+                side_effect=RuntimeError("T+1 backfill failed for 2 of 2 record(s) after per-record fallback")
+            )
+            mock_rm.backfill_horizon_returns = AsyncMock(return_value=0)
+            mock_rm.expire_stale_pending = AsyncMock(return_value=0)
+            mock_rm._benchmark_diag = None
+            mock_rm_cls.return_value = mock_rm
+            with pytest.raises(RuntimeError, match="failed for 2 of 2"):
+                await _submit_and_run(job, mock_tm_cls)
+        mock_rm.backfill_horizon_returns.assert_not_awaited()
+        mock_rm.expire_stale_pending.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_job_stops_after_t1_read_failure(self):
         """TP11-F02: T+1 关键行情读失败后，T+5 回填与过期清扫均不得被 await。"""
         job = build_review_backfill_job()

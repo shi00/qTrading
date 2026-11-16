@@ -94,8 +94,10 @@ class ThemeColors(TypedDict):
 CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     ThemeName.DARK: {
         # F06: UP_RED 用于 13/14px 正文涨跌文字, 原 #F44336 在 #1E1E1E 上仅 4.53 (压线),
-        #   调整为 Red A200 #FF5252 (5.22) 留出对比度余量 (如 SURFACE_VARIANT 派生背景).
-        "UP_RED": "#FF5252",
+        #   先调整为 Red A200 #FF5252 (5.22); M30-C2 补齐表格 hover 行底色验收后发现其在
+        #   TABLE_ROW_HOVER(#2A2A2A) 上仅 4.50 (压线), 再微调为 #FF5A5A
+        #   (ODD/EVEN/HOVER = 5.45/5.80/4.69) 留出对比度余量.
+        "UP_RED": "#FF5A5A",
         "DOWN_GREEN": "#4CAF50",
         "SUCCESS": "#00E676",
         "WARNING": "#FFAB00",
@@ -124,7 +126,9 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         #   (原 UP_RED #F44336=3.68、DOWN_GREEN/SUCCESS #388E3C=4.12、WARNING #EF6C00=3.08 仅达 3.0 大字号档).
         #   ceiling: 视觉鲜艳度以 WCAG 为准. upgrade: Dracula/其他主题统一刷新调色板时一并复核.
         "UP_RED": "#C62828",  # Red 800
-        "DOWN_GREEN": "#2E7D32",  # Green 800
+        # M30-C2: DOWN_GREEN 原 Green 800 (#2E7D32) 在 TABLE_ROW_HOVER(#E8E8E8) 上仅 4.18,
+        #   调深为 #2A722D (ODD/EVEN/HOVER = 5.93/5.44/4.84); SUCCESS 不进表格单元格, 保持 Green 800.
+        "DOWN_GREEN": "#2A722D",
         "SUCCESS": "#2E7D32",  # Green 800
         "WARNING": "#BF360C",  # Deep Orange 900
         "INFO": "#1976D2",
@@ -147,8 +151,9 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     },
     ThemeName.NAVY: {
         # F06: UP_RED 用于 13/14px 正文涨跌文字, 原 #EF4444 在 #1E293B 上仅 3.89 (<4.5),
-        #   调整为 Red 400 #F87171 (5.29) 以满足 WCAG §1.4.3 正常文字阈值.
-        "UP_RED": "#F87171",
+        #   调整为 Red 400 #F87171 (5.29); M30-C2 补齐表格 hover 行底色验收后发现其在
+        #   TABLE_ROW_HOVER(#2A3A52) 上仅 4.16, 再调亮为 #FB8A8A (ODD/EVEN/HOVER = 6.34/7.57/4.99).
+        "UP_RED": "#FB8A8A",
         "DOWN_GREEN": "#22C55E",
         "SUCCESS": "#4ADE80",
         "WARNING": "#FBBF24",
@@ -171,10 +176,13 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TEXT_DISABLED": "#94A3B8",
     },
     ThemeName.DRACULA: {
-        # F06: UP_RED 用于 13/14px 正文涨跌文字, 原 #F44336 在 #282A36 上仅 3.87 (<4.5),
-        #   调整为 Dracula Red #FF5555 (4.53) 以满足 WCAG §1.4.3 正常文字阈值.
-        "UP_RED": "#FF5555",
-        "DOWN_GREEN": "#4CAF50",
+        # F06: UP_RED 用于 13/14px 正文涨跌文字, 原 #F44336 在 #282A36 上仅 3.87 (<4.5);
+        #   M30-C2: 旧值 Dracula Red #FF5555 在交替行 TABLE_ROW_EVEN(#44475A) 仅 2.91、
+        #   TABLE_ROW_HOVER(#3A3C4E) 仅 3.45, 故调亮为 #FFAAAA (ODD/EVEN/HOVER = 7.85/5.05/5.98).
+        "UP_RED": "#FFAAAA",
+        # M30-C2: 旧 DOWN_GREEN #4CAF50 (Material Green 500) 在 EVEN 3.29、HOVER 3.90 不达标,
+        #   调整为 #7CDF80 (ODD/EVEN/HOVER = 8.63/5.54/6.57), 保持绿色通道占优.
+        "DOWN_GREEN": "#7CDF80",
         "SUCCESS": "#50FA7B",
         "WARNING": "#FFB86C",  # Orange
         "INFO": "#8BE9FD",  # Cyan
@@ -378,7 +386,7 @@ class AppColors:
     # Layer 2: 业务自定义色 (Hex 值 — 需手动更新)
     # ====================================================================
     # UP_RED/INFO 默认值与 DARK preset 同步 (DARK 为 _reset_singleton 复位基线, F06)
-    UP_RED = "#FF5252"
+    UP_RED = "#FF5A5A"
     DOWN_GREEN = "#4CAF50"
     # 业务语义直通色 (随主题切换) — SUCCESS 成功 / WARNING 警告 / INFO 信息状态色
     SUCCESS = "#00E676"

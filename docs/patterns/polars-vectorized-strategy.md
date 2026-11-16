@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §4.1（strategies 分层）、§3.2（数据质量门控强制）；实现模板见本节。
+> 宪法依据：CLAUDE.md §3.2（数据质量门控强制）、[架构正文 §4.1](../architecture/overview.md#41-分层架构)（strategies 分层）；实现模板见本节。
 
 继承 `PolarsBaseStrategy` 使用 Polars LazyFrame 进行高性能向量化计算。
 `PolarsBaseStrategy` 同时继承了 `AIStrategyMixin`，Polars 过滤后自动进入 AI 分析阶段（可通过 `enable_ai_analysis = False` 关闭）：
@@ -25,14 +25,20 @@ class MyPolarsStrategy(PolarsBaseStrategy):
         super().__init__(name_key="strategy_my_polars", desc_key="strategy_my_polars_desc")
 
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
-        return lf.filter(pl.col("pct_chg") > 5.0)
+        return (
+            lf.filter(pl.col("pct_chg") > 5.0)
+            # 末步必须排序：主排序键 + ts_code 稳定并列键，保证同分结果可复现
+            .sort(["pct_chg", "ts_code"], descending=[True, False])
+        )
 ```
+
+> **反例（不合规）**：以 `filter` 收尾、或在排序主键后不补 `ts_code` 并列键，会使同值行顺序不确定、结果不可复现；旧策略中仅单列排序的现状只标为现状，不得作为新模板复制（F05）。
 
 > 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 继承 `BaseStrategy` + `AIStrategyMixin`）可使用 `@require_quality` 装饰器。
 
 ## 库边界约定
 
-pandas 与 Polars 在项目中有明确的职责划分（对应 CLAUDE.md §4.1 分层 / 技术栈：Flet + Polars + asyncio）：
+pandas 与 Polars 在项目中有明确的职责划分（对应[架构正文 §4.1 分层](../architecture/overview.md#41-分层架构) / 技术栈：Flet + Polars + asyncio）：
 
 - **pandas 是跨层数据契约**：`data/ → services/ → ui/` 的经手数据以 `pd.DataFrame` 承载。DAO 读取路径统一产出 pandas（见 `base_dao.py` 的 `_build_df_normalized`，用 `pd.DataFrame(rows, columns=cols)` 构造并归一化 Decimal 列）。
 - **Polars 是计算内核内部实现**：`PolarsBaseStrategy` 在 `_filter_logic` 内以 `pl.LazyFrame` 做向量化计算，属于策略计算内核，不直接对外暴露。
@@ -80,7 +86,7 @@ Polars 2.x 的流式默认与语义严格化，把一部分问题从**抛异常*
 - `lf.group_by("industry").agg(...).collect()` 直接用于导出，未声明 `maintain_order=True`。
 - 单测用 `assert_frame_equal(result, expected)` 比较未显式 sort 的管线输出（该断言默认比较行序）。
 
-**正例**：`strategies/fundamental.py` / `strategies/market.py` 的 `_filter_logic` 筛选管线以 `.sort("dv_ttm", descending=True)` / `.sort("pct_chg", descending=True)` 收尾，新增策略沿用该形态。
+**正例**：末步排序在业务主键后追加唯一并列键，如 `.sort(["dv_ttm", "ts_code"], descending=[True, False])`、`.sort(["pct_chg", "ts_code"], descending=[True, False])`。`strategies/fundamental.py` / `strategies/market.py` 现存的 `.sort("dv_ttm", descending=True)` / `.sort("pct_chg", descending=True)` 单列收尾仅为**现状示意**（历史代码，未含并列键），**不是合规新模板**；新增策略不得沿用单列收尾形态。
 
 > 背景与升级触发条件见技术债 [P3-Polars-Streaming-Order-Semantics](../debt/known-technical-debt.md)；Polars 大版本升级前须按该条复核流式与行序语义。
 

@@ -1005,9 +1005,9 @@ class SchedulerService:
         is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_not_ready）
         之前就重抛，该日「失败了却没记账」，只看 is_complete 会把未记账的失败日当成功。
         """
-        from services.task_manager import TaskManager, TaskIncompleteError  # lazy-import: 启动性能
+        from services.task_manager import TaskCancelledError, TaskIncompleteError, TaskManager  # lazy-import: 启动性能
         from data.data_processor import DataProcessor  # lazy-import: 启动性能
-        from data.sync.base import SyncResult  # lazy-import: 启动性能
+        from data.sync.base import SyncResult, SyncStatus  # lazy-import: 启动性能
 
         # D11-F01: 关闭前已排队的补偿任务，获得组锁/信号量后可能才开始执行——此时自动更新
         # 可能已被关闭，必须在业务 IO 之前二次判定，避免仍调用 sync_daily_market_snapshot。
@@ -1037,28 +1037,81 @@ class SchedulerService:
         # 仍不影响完整性（由 sync_empty_days 登记）。
         failed_dates: list[datetime.date] = []
         contiguous_success_end: datetime.date | None = None
-        for i, d in enumerate(missed_dates):
-            if not tm.update_progress(
-                task_id, i / total, Message("sched_catchup_progress", {"date": d.strftime("%Y%m%d")})
-            ):
-                raise asyncio.CancelledError("catchup cancelled (update_progress returned False)")
-            try:
-                await processor.sync_daily_market_snapshot(trade_date=d, sync_result=sync_result)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                failed_dates.append(d)
-                log_classified(
-                    logger,
-                    e,
-                    "general",
-                    "[Scheduler] Catch-up failed for %s, continuing (%s): %s",
-                    d.strftime("%Y%m%d"),
-                    exc_info=True,
-                )
-                continue
-            if not failed_dates and sync_result.is_complete:
-                contiguous_success_end = d
+        cancelled = False
+        try:
+            for i, d in enumerate(missed_dates):
+                if not tm.update_progress(
+                    task_id, i / total, Message("sched_catchup_progress", {"date": d.strftime("%Y%m%d")})
+                ):
+                    # C14：协作取消（任务已被取消，进度上报被拒）→ 抛真实取消异常
+                    # 配合优雅停机（R2 不吞没）；已连续成功批次的水位经 finally 收敛
+                    # （已提交进度不回退、不越洞推进），取消由 TaskManager 记 CANCELLED。
+                    cancelled = True
+                    raise asyncio.CancelledError("catchup cancelled (update_progress returned False)")
+                try:
+                    await processor.sync_daily_market_snapshot(trade_date=d, sync_result=sync_result)
+                except asyncio.CancelledError:
+                    # C14/R2：真实取消异常原样传播（不吞没）；已连续成功批次的水位
+                    # 经 finally 收敛——已提交进度不回退，未完成部分不越洞推进。
+                    cancelled = True
+                    raise
+                except Exception as e:
+                    failed_dates.append(d)
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[Scheduler] Catch-up failed for %s, continuing (%s): %s",
+                        d.strftime("%Y%m%d"),
+                        exc_info=True,
+                    )
+                    continue
+                if getattr(sync_result, "status", None) == SyncStatus.CANCELLED.value:
+                    # C14/D02：共享结果被同步层标记 cancelled（historical.py 的合法「标记取消并
+                    # 正常返回」分支）→ 立即停止，不再启动后续日期（不跨 d2），复用取消收敛
+                    # 路径保留已连续成功批次的水位；不得走到整批末尾按「无失败日」误推进水位，
+                    # 也不得记普通失败退避（取消 ≠ 失败）。
+                    cancelled = True
+                    logger.warning(
+                        "[Scheduler] Catch-up aborted at %s (sync result marked cancelled); "
+                        "remaining days stay in catch-up range",
+                        d.strftime("%Y%m%d"),
+                    )
+                    break
+                if not failed_dates and sync_result.is_complete:
+                    contiguous_success_end = d
+        finally:
+            # C14：取消传播路径先收敛已连续成功批次的水位（合法 checkpoint 保留）——
+            # 仅推进到最后一个「无异常且关键表全部成功」的日子（不跨未完成/失败批次，
+            # R21/R22）；正常完成与失败路径的水位推进在下方统一处理，不双写。
+            # 水位单调由 _mark_daily_update_done_db 的内存 max() + DB GREATEST 保证（R22）。
+            if cancelled and contiguous_success_end is not None:
+                watermark = contiguous_success_end.strftime("%Y%m%d")
+                try:
+                    await self._mark_daily_update_done_db(watermark)
+                except Exception as e:
+                    # R2：finally 内的水位落盘失败（DB 异常/引擎已释放）不得顶替原
+                    # CancelledError 向外传播，否则取消语义被吞为普通失败。记日志后
+                    # 让取消异常继续传播；水位退化为未推进，重跑按补数区间覆盖。
+                    log_classified(
+                        logger,
+                        e,
+                        "db",
+                        "[Scheduler] Failed to persist catch-up watermark %s on cancel (%s): %s",
+                        watermark,
+                        exc_info=True,
+                    )
+                else:
+                    logger.warning(
+                        "[Scheduler] Catch-up cancelled after partial progress; watermark kept at %s "
+                        "(remaining days stay in catch-up range)",
+                        watermark,
+                    )
+        if cancelled:
+            # C14/D02：协作结果取消 → 抛取消信号，由 TaskManager 映射 CANCELLED 终态
+            # （≠ FAILED）；主循环已停止，不再执行剩余日期。已连续成功批次的水位已在
+            # finally 收敛（R22 单调，不越洞），取消不计普通失败退避。
+            raise TaskCancelledError(Message("task_cancelled_desc"))
         # D1-2/MAJOR-05: 仅「全部日期成功且关键表全成功」才推进到最后一个遗漏交易日。
         if not failed_dates and sync_result.is_complete:
             latest = missed_dates[-1]
@@ -1164,9 +1217,11 @@ class SchedulerService:
         async def _daily_update_logic(task_id: str, **kwargs):
             tm = TaskManager()
             from services.task_manager import (
+                TaskCancelledError,
                 TaskIncompleteError,
             )  # lazy-import: R1 EX-0007（utils 仅编排期引用业务异常）
             from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
+            from data.sync.base import SyncStatus  # lazy-import: 启动性能——仅判定取消终态
 
             processor = DataProcessor()
 
@@ -1174,25 +1229,49 @@ class SchedulerService:
                 tm.update_progress(task_id, current / total if total else 0, msg)
 
             result = await processor.run_daily_update(progress_callback=_progress)
+            # C14/D02：协作结果取消（SyncResult.status=cancelled）先于完整性判定——取消不得
+            # 映射 FAILED（用户取消 ≠ 失败假象），不推进水位；抛取消信号由 TaskManager 记
+            # CANCELLED 终态（≠ COMPLETED）。
+            status = getattr(result, "status", None)
+            if status == SyncStatus.CANCELLED.value:
+                raise TaskCancelledError(Message("task_cancelled_desc"))
             # D1-2: 幂等键以 SyncResult.is_complete 为准（关键表全部成功），而非 not errors/无 is_complete。
             # is_complete 缺省 False（保守）：即便收到无法判定的结果也不写入幂等键，宁可下次重跑。
-            is_complete = getattr(result, "is_complete", False)
+            # R02: 日更终态已按阶段聚合（行情 + 财务）。聚合 status=failed 时即使行情关键表
+            # 全绿也不得推进完成水位，故显式前置为不完整。
+            if status == SyncStatus.FAILED.value:
+                is_complete = False
+            else:
+                is_complete = getattr(result, "is_complete", False)
             if is_complete:
+                # R02: partial 不阻断水位（既有可选表降级语义），但必须留痕，避免「残缺阶段
+                # 静默算整轮成功」。
+                if status == SyncStatus.PARTIAL.value:
+                    logger.warning(
+                        "[Scheduler] Daily update finished PARTIAL (degraded sources: %s); watermark advances",
+                        getattr(result, "failed_optional_tables", []),
+                    )
                 await self._mark_daily_update_done_db(today_str)
             else:
                 failed_critical = list(getattr(result, "failed_critical_tables", []) or [])
                 logger.warning(
-                    "[Scheduler] Daily update NOT complete (critical=%s, optional=%s), NOT marking done",
+                    "[Scheduler] Daily update NOT complete (status=%s, critical=%s, optional=%s), NOT marking done",
+                    status,
                     failed_critical,
                     getattr(result, "failed_optional_tables", []),
                 )
                 # D11-F03: 不完整/None/无 is_complete 一律映射 FAILED，不返回成功文案。
+                # R02: 仅在结果确实暴露阶段终态时附加 status；DataFrame fallback 无 status，
+                # 保持既有 reason 语义（is_complete=False 开头），避免回归 D11-F03 契约。
+                reason = f"is_complete=False; failed_critical_tables={failed_critical}"
+                if isinstance(status, str):
+                    reason = f"status={status}; {reason}"
                 raise TaskIncompleteError(
                     Message(
                         "sched_daily_incomplete",
                         {"tables": ", ".join(map(str, failed_critical)) or "-"},
                     ),
-                    reason=f"is_complete=False; failed_critical_tables={failed_critical}",
+                    reason=reason,
                 )
             # NOTE: Never use `if result` here.
             # Pandas DataFrame truth-value is ambiguous and raises ValueError.

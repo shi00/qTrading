@@ -1,9 +1,12 @@
 import datetime
 import logging
+import os
+from uuid import uuid4
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from core.model_management_types import LegacySealedError
 from services.ai_service.usage_tracker import AIUsageTracker, month_key
 from utils.singleton_registry import reset_all_singletons
 
@@ -28,6 +31,25 @@ def _make_begin_engine(mock_conn):
     engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
     engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
     return engine
+
+
+def _sensitive_text() -> str:
+    """测试敏感文本：优先经环境变量注入（R10 禁止硬编码密钥），缺省随机生成。
+
+    随机回退保证 CI 无该变量时用例仍可确定性运行。本组用例把敏感文本以
+    SQLAlchemy/asyncpg 连接错误最常见的 URL userinfo / query 参数两类
+    **有键上下文形态**注入异常消息，仅断言「注入原值完整字符串不落日志」，
+    不宣称 DataSanitizer 对任意秘密格式完全识别（未注册裸 token 仅部分遮蔽）。
+    """
+    return os.environ.get("M26_UTD1_TEST_SECRET") or uuid4().hex
+
+
+def _sensitive_db_error(secret: str) -> str:
+    """构造带敏感文本的伪连接错误消息（连接 URL 凭据 + query 参数双形态，非 SQL 语句）。"""
+    return (
+        f"connection to server failed: postgresql+asyncpg://app_user:{secret}@db.host:5432/qscreener"
+        f"?password={secret}&sslmode=require"
+    )
 
 
 class TestMonthKey:
@@ -309,3 +331,101 @@ class TestAddUnpriced:
 
         # 写库失败降级为告警而非抛出（不阻断 AI 主流程），且异常路径确实被执行
         assert "Failed to accumulate unpriced" in caplog.text
+
+
+class TestFailureLogSanitized:
+    """UT-D1 (M26)：用量统计失败时原始异常必须经 DataSanitizer.sanitize_error 脱敏后入日志（R9）。"""
+
+    @pytest.mark.asyncio
+    async def test_read_failure_log_sanitized(self, caplog):
+        secret = _sensitive_text()
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError(_sensitive_db_error(secret)))
+        engine = _make_connect_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        with caplog.at_level(logging.DEBUG, logger="services.ai_service.usage_tracker"):
+            result = await tracker.get_month_cost_cents()
+
+        assert result == 0  # 读失败降级为 0，既有行为不变
+        assert secret not in caplog.text  # 原始敏感值不落日志（R9）
+        assert "Failed to read" in caplog.text  # 失败标识保留（可观测性不回退）
+
+    @pytest.mark.asyncio
+    async def test_add_cost_failure_log_sanitized(self, caplog):
+        secret = _sensitive_text()
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError(_sensitive_db_error(secret)))
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.usage_tracker"):
+            await tracker.add_cost_cents(100)
+
+        assert "Failed to accumulate cost" in caplog.text  # 降级告警保留失败标识
+        assert secret not in caplog.text  # 原始敏感值不落日志（R9）
+
+    @pytest.mark.asyncio
+    async def test_read_unpriced_failure_log_sanitized(self, caplog):
+        secret = _sensitive_text()
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError(_sensitive_db_error(secret)))
+        engine = _make_connect_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        with caplog.at_level(logging.DEBUG, logger="services.ai_service.usage_tracker"):
+            result = await tracker.get_month_unpriced()
+
+        assert result == (0, 0)  # 读失败降级为 (0, 0)，既有行为不变
+        assert secret not in caplog.text  # 原始敏感值不落日志（R9）
+        assert "Failed to read unpriced" in caplog.text  # 失败标识保留
+
+    @pytest.mark.asyncio
+    async def test_add_unpriced_failure_log_sanitized(self, caplog):
+        secret = _sensitive_text()
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError(_sensitive_db_error(secret)))
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.usage_tracker"):
+            await tracker.add_unpriced(3, 500)
+
+        assert "Failed to accumulate unpriced" in caplog.text  # 降级告警保留失败标识
+        assert secret not in caplog.text  # 原始敏感值不落日志（R9）
+
+
+class TestLegacySealedNotSwallowed:
+    """S6 D6：LegacySealedError 是「明确不可用」信号，必须原样 raise，不得落入 except Exception 被吞（R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_add_cost_cents_sealed_raises(self, caplog):
+        mock_conn = MagicMock()
+        seal_result = MagicMock()
+        seal_result.fetchone.return_value = ("1",)  # 同事务封口检查命中
+        mock_conn.execute = AsyncMock(return_value=seal_result)
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.usage_tracker"):
+            with pytest.raises(LegacySealedError) as exc_info:
+                await tracker.add_cost_cents(100)
+
+        assert exc_info.value.month == "2026-09"  # 被拒月份正确（YYYY-MM，与 DAO 封口记录口径一致）
+        assert "Failed to accumulate cost" not in caplog.text  # 未被 except Exception 分支吞没
+
+    @pytest.mark.asyncio
+    async def test_add_unpriced_sealed_raises(self, caplog):
+        mock_conn = MagicMock()
+        seal_result = MagicMock()
+        seal_result.fetchone.return_value = ("1",)  # 同事务封口检查命中
+        mock_conn.execute = AsyncMock(return_value=seal_result)
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.usage_tracker"):
+            with pytest.raises(LegacySealedError) as exc_info:
+                await tracker.add_unpriced(3, 500)
+
+        assert exc_info.value.month == "2026-09"  # 被拒月份正确（YYYY-MM，与 DAO 封口记录口径一致）
+        assert "Failed to accumulate unpriced" not in caplog.text  # 未被 except Exception 分支吞没

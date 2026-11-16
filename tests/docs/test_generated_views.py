@@ -1,0 +1,779 @@
+"""D6 生成视图测试：docs/README 文件级目录/ADR 索引与 governance README 规则参考/任务路由。
+
+覆盖：四个新渲染函数的正例与 fail-closed 负例（缺 H1/非法文件名/空清单显式拒绝）、
+快照字节渲染通道（同一文件兼为目标与作者源时，独占保护窗口内经快照读取而非磁盘
+直读——防 Windows 共享冲突导致的标题占位漂移）、内置注册表新增激活条目的不变量。
+全部在临时目录构造，不触碰仓库真实正文；真实仓库的块一致性由 check_docs_generated 守护。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+import docs_generated as dg
+from fixtures import generator_fixtures as gf
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import check_docs_consistency as cdc  # noqa: E402
+
+pytestmark = pytest.mark.docs_pure
+
+
+# ---------------------------------------------------------------------------
+# 文件级目录索引
+# ---------------------------------------------------------------------------
+
+
+def _write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _file_index_registry() -> tuple[dg.BlockSpec, ...]:
+    return (
+        dg.BlockSpec(
+            block_id="docs-readme-file-index",
+            target="docs/README.md",
+            sources=(
+                dg.SourceSchema(path="docs/README.md", fmt="text"),
+                dg.SourceSchema(path="docs/governance/redlines.yml", fmt="text"),
+            ),
+            render=dg._render_docs_readme_file_index,
+        ),
+    )
+
+
+def test_file_index_renders_titles_from_h1_and_comments(tmp_path: Path) -> None:
+    """正例：md 取 H1、yml 取首注释行、无 H1 md 显式占位、无注释 json 显式 —。"""
+    root = tmp_path
+    _write(root, "docs/README.md", "# Project Documentation Index\n<!-- generated:idx -->\n<!-- /generated -->\n")
+    _write(root, "docs/a.md", "# Alpha 专题\n正文\n")
+    _write(root, "docs/sub/b.md", "无标题正文\n")
+    _write(root, "docs/governance/redlines.yml", "# 红线正本\nredlines: []\n")
+    _write(root, "docs/data.json", '{"k": 1}\n')
+
+    rendered = dg.render_block_lines(root, _file_index_registry()[0])
+    assert "| [a.md](./a.md) | Alpha 专题 |" in rendered
+    assert "| [sub/b.md](./sub/b.md) | （无 H1 标题） |" in rendered
+    assert "| [governance/redlines.yml](./governance/redlines.yml) | 红线正本 |" in rendered
+    assert "| [data.json](./data.json) | — |" in rendered
+    assert "| [README.md](./README.md) | Project Documentation Index |" in rendered
+
+
+def test_file_index_title_uses_shared_heading_view(tmp_path: Path) -> None:
+    """Q07：标题取共享解析视图的一级标题——Setext 合法，围栏内伪 H1 不冒充真实标题。"""
+    root = tmp_path
+    _write(root, "docs/README.md", "# Index\n<!-- generated:idx -->\n<!-- /generated -->\n")
+    _write(root, "docs/governance/redlines.yml", "# 红线正本\nredlines: []\n")
+    _write(
+        root,
+        "docs/setext.md",
+        "```markdown\n# 伪 H1\n```\n\n真实 Setext 标题\n================\n\n```markdown\n# 尾随伪 H1\n```\n",
+    )
+    _write(root, "docs/no-real-h1.md", "```markdown\n# 伪 H1\n```\n\n仅二级标题\n----\n")
+    rendered = dg.render_block_lines(root, _file_index_registry()[0])
+    assert "| [setext.md](./setext.md) | 真实 Setext 标题 |" in rendered
+    assert "| [no-real-h1.md](./no-real-h1.md) | （无 H1 标题） |" in rendered
+    assert "伪 H1" not in "\n".join(rendered), "围栏样例中的伪 H1 不得冒充文档标题"
+
+
+def test_file_index_uses_snapshot_text_for_protected_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """快照通道回归：登记为 text 作者源的文件在更新窗口内经快照字节渲染。
+
+    渲染只读 validated（保护窗口内目标被独占锁定，磁盘直读会 PermissionError）——
+    这是独占保护窗口下更新与 --check 两侧渲染一致的根（Windows 共享冲突语义的回归）。
+    原位写被拒绝（D28），因此以渲染输入捕获证明快照通道，而非读取落盘结果。
+    """
+    root = tmp_path
+    original = "# 磁盘标题\n<!-- generated:idx -->\n<!-- /generated -->\n"
+    _write(root, "docs/README.md", original)
+    captured: dict[str, str] = {}
+
+    def render(validated: dict[str, object], root_path: Path) -> list[str]:
+        del root_path
+        text = str(validated["docs/README.md"])
+        captured["rows"] = str(len(text.splitlines()))
+        captured["first"] = text.splitlines()[0]
+        return [f"rows={captured['rows']}", f"first={captured['first']}"]
+
+    spec = dg.BlockSpec(
+        block_id="idx",
+        target="docs/README.md",
+        sources=(dg.SourceSchema(path="docs/README.md", fmt="text"),),
+        render=render,
+    )
+    before = (root / "docs/README.md").read_bytes()
+    monkeypatch.setattr(dg, "WriteGuard", gf.HeldFdWriteGuard)
+    result = dg.run_update(root, (spec,))
+    assert result.ok is False and result.written == ()
+    assert (root / "docs/README.md").read_bytes() == before
+    assert captured == {"rows": "3", "first": "# 磁盘标题"}  # 渲染输入 = 保护内核对过的快照字节
+
+
+def test_file_index_empty_candidates_rejected(tmp_path: Path) -> None:
+    """负例：docs/ 下无候选文件 → 显式拒绝（不静默渲染空表）。"""
+    root = tmp_path
+    (root / "docs").mkdir()
+    spec = dg.BlockSpec(
+        block_id="idx",
+        target="docs/README.md",
+        sources=(),
+        render=dg._render_docs_readme_file_index,
+    )
+    with pytest.raises(dg.SourceFormatError, match="作者源为空"):
+        dg.render_block_lines(root, spec)
+
+
+# ---------------------------------------------------------------------------
+# 文件级目录索引：受保护候选的输入闭包（N02）
+# ---------------------------------------------------------------------------
+
+_INDEX_BLOCK_ID = "docs-readme-file-index"
+_A11Y_REL = "docs/flet/accessibility-baseline.md"
+
+
+def _a11y_demo_render(validated: dict[str, object], root: Path) -> list[str]:
+    del validated, root
+    return ["- demo"]
+
+
+def _a11y_index_registry(*, register_a11y: bool = True) -> tuple[dg.BlockSpec, ...]:
+    """文件级索引 + a11y baseline 受保护目标的最小 target→source 闭包注册表。"""
+    sources = [dg.SourceSchema(path="docs/README.md", fmt="text")]
+    if register_a11y:
+        sources.append(dg.SourceSchema(path=_A11Y_REL, fmt="text"))
+    index_spec = dg.BlockSpec(
+        block_id=_INDEX_BLOCK_ID,
+        target="docs/README.md",
+        sources=tuple(sources),
+        render=dg._render_docs_readme_file_index,
+    )
+    a11y_spec = dg.BlockSpec(
+        block_id="a11y-demo",
+        target=_A11Y_REL,
+        sources=(),
+        render=_a11y_demo_render,
+    )
+    return (index_spec, a11y_spec)
+
+
+def _build_index_closure_tree(root: Path) -> None:
+    _write(
+        root,
+        "docs/README.md",
+        "# 文档索引\n\n<!-- generated:docs-readme-file-index -->\n<!-- /generated -->\n",
+    )
+    _write(
+        root,
+        _A11Y_REL,
+        "# UI 可访问性最低标准\n\n<!-- generated:a11y-demo -->\n<!-- /generated -->\n",
+    )
+
+
+class _ReadBlockState:
+    """模拟独占保护窗口：标记是否处于保护内，并统计被拒的新句柄读取次数。"""
+
+    def __init__(self) -> None:
+        self.active = False
+        self.blocked = 0
+
+
+class _ReadBlockingGuard(gf.AtomicReplaceWriteGuard):
+    """写入后端可用的保护替身 + 独占读取语义（保护内对受保护路径重开句柄即被拒）。"""
+
+    def __init__(self, paths: list[Path], state: _ReadBlockState) -> None:
+        super().__init__(paths)
+        self._state = state
+
+    def __enter__(self) -> _ReadBlockingGuard:
+        self._state.active = True
+        super().__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self._state.active = False
+        super().__exit__(exc_type, exc, tb)
+
+
+def _install_protected_read_blocking(monkeypatch: pytest.MonkeyPatch, protected: set[Path]) -> _ReadBlockState:
+    """保护窗口内对受保护路径的 ``Path.read_text`` 抛 PermissionError（Windows 共享冲突语义）。"""
+    state = _ReadBlockState()
+    real_read_text = Path.read_text
+
+    def blocked_read_text(self: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if state.active and self.resolve() in protected:
+            state.blocked += 1
+            raise PermissionError(13, "sharing violation")
+        return real_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", blocked_read_text)
+    monkeypatch.setattr(dg, "WriteGuard", lambda paths: _ReadBlockingGuard(paths, state))
+    return state
+
+
+def test_file_index_protected_titles_come_from_snapshot_inside_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """判别性回归（N02）：生产注册表完整闭包下，锁内标题 == 锁外标题且不出现占位符。
+
+    仅恢复写入后端（AtomicReplaceWriteGuard）不能让本用例转绿：旧实现未把 a11y
+    baseline 登记为索引输入，保护内重开该路径读取被拒 → 标题变成占位符。
+    """
+    root = tmp_path
+    by_id = {spec.block_id: spec for spec in dg.BUILTIN_REGISTRY}
+    registry = (by_id["docs-readme-file-index"], by_id["a11y-contrast-reference"])
+    _write(
+        root,
+        "docs/README.md",
+        "# 文档索引\n\n<!-- generated:docs-readme-file-index -->\n<!-- /generated -->\n",
+    )
+    _write(
+        root,
+        _A11Y_REL,
+        "# UI 可访问性最低标准\n\n<!-- generated:a11y-contrast-reference -->\n<!-- /generated -->\n",
+    )
+    _write(root, "docs/governance/README.md", "# 治理索引\n")
+    _write(root, "docs/governance/redlines.yml", "# 红线正本\nredlines: []\n")
+    _write(root, "docs/governance/canonical-topics.yml", "# 路由正本\ntopics: []\n")
+    _write(
+        root,
+        "scripts/check_theme_contrast.py",
+        _contrast_source_text('    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'),
+    )
+
+    outside = dg.render_block_lines(root, registry[0])
+    protected = {
+        (root / rel).resolve() for spec in registry for rel in (spec.target, *(schema.path for schema in spec.sources))
+    }
+    state = _install_protected_read_blocking(monkeypatch, protected)
+    result = dg.run_update(root, registry)
+
+    assert result.ok, result.failure_reasons + result.conflict_reasons
+    a11y_row = "| [flet/accessibility-baseline.md](./flet/accessibility-baseline.md) | UI 可访问性最低标准 |"
+    assert a11y_row in outside
+    assert state.blocked == 0, "保护窗口内不得重开受保护路径（标题只能取自已核对快照）"
+    written = dg.scan_blocks((root / "docs/README.md").read_text(encoding="utf-8"), "markdown")[_INDEX_BLOCK_ID]
+    assert list(written.content_lines) == outside, "锁内生成的标题必须与锁外渲染一致"
+    assert all("（无 H1 标题）" not in line for line in written.content_lines)
+
+
+def test_file_index_protected_candidate_must_be_registered_as_snapshot_source(tmp_path: Path) -> None:
+    """负例（快照缺项）：受保护的 docs 索引候选未登记为快照输入 → 更新前显式拒绝。"""
+    _build_index_closure_tree(tmp_path)
+    with pytest.raises(dg.InvalidSpecError, match="accessibility-baseline.md"):
+        dg.run_update(tmp_path, _a11y_index_registry(register_a11y=False))
+
+
+def test_file_index_read_failure_raises_instead_of_missing_h1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """负例：未受保护候选读取失败 → 显式报错；不得伪报为「文档无 H1」（占位符）。"""
+    root = tmp_path
+    _write(root, "docs/README.md", "# 索引\n<!-- generated:idx -->\n<!-- /generated -->\n")
+    _write(root, "docs/other.md", "# 其他页面\n")
+    spec = dg.BlockSpec(
+        block_id="idx",
+        target="docs/README.md",
+        sources=(dg.SourceSchema(path="docs/README.md", fmt="text"),),
+        render=dg._render_docs_readme_file_index,
+    )
+    real_read_text = Path.read_text
+
+    def failing_read_text(self: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if self.name == "other.md":
+            raise PermissionError(13, "sharing violation")
+        return real_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+    with pytest.raises(dg.SourceReadError, match="读取失败"):
+        dg.render_block_lines(root, spec)
+
+
+# ---------------------------------------------------------------------------
+# ADR 索引
+# ---------------------------------------------------------------------------
+
+
+def test_adr_index_renders_all_adrs_with_h1_title(tmp_path: Path) -> None:
+    """正例：编号取自文件名、标题取自 H1 并剥离 ADR-NNNN 前缀；编号自动补齐（ADR-0017 场景）。"""
+    root = tmp_path
+    _write(root, "docs/adr/0001-record-decisions.md", "# ADR-0001: 记录架构决策\n\n正文\n")
+    _write(root, "docs/adr/0017-version-ssot.md", "# ADR-0017: 版本号单一正本收敛\n")
+    _write(root, "docs/README.md", "# Index\n<!-- generated:adr -->\n<!-- /generated -->\n")
+    spec = dg.BlockSpec(
+        block_id="adr",
+        target="docs/README.md",
+        sources=(),
+        render=dg._render_docs_readme_adr_index,
+    )
+    rendered = dg.render_block_lines(root, spec)
+    assert "| ADR-0001 | 记录架构决策 | [0001-record-decisions.md](./adr/0001-record-decisions.md) |" in rendered
+    assert "| ADR-0017 | 版本号单一正本收敛 | [0017-version-ssot.md](./adr/0017-version-ssot.md) |" in rendered
+
+
+def test_adr_index_missing_h1_rejected(tmp_path: Path) -> None:
+    """负例：ADR 缺 H1 → 显式拒绝（文件自己的标题是发现信息正本）。"""
+    root = tmp_path
+    _write(root, "docs/adr/0001-no-title.md", "没有 H1\n")
+    _write(root, "docs/README.md", "# Index\n<!-- generated:adr -->\n<!-- /generated -->\n")
+    spec = dg.BlockSpec(
+        block_id="adr",
+        target="docs/README.md",
+        sources=(),
+        render=dg._render_docs_readme_adr_index,
+    )
+    with pytest.raises(dg.SourceFormatError, match="缺 H1 标题"):
+        dg.render_block_lines(root, spec)
+
+
+def test_adr_index_bad_filename_rejected(tmp_path: Path) -> None:
+    """负例：文件名不符合 NNNN-slug.md → 显式拒绝。"""
+    root = tmp_path
+    _write(root, "docs/adr/笔记.md", "# 标题\n")
+    _write(root, "docs/README.md", "# Index\n<!-- generated:adr -->\n<!-- /generated -->\n")
+    spec = dg.BlockSpec(
+        block_id="adr",
+        target="docs/README.md",
+        sources=(),
+        render=dg._render_docs_readme_adr_index,
+    )
+    with pytest.raises(dg.SourceFormatError, match="NNNN-slug"):
+        dg.render_block_lines(root, spec)
+
+
+def test_adr_index_missing_dir_rejected(tmp_path: Path) -> None:
+    """负例：docs/adr/ 缺失 → SourceMissingError。"""
+    root = tmp_path
+    _write(root, "docs/README.md", "# Index\n<!-- generated:adr -->\n<!-- /generated -->\n")
+    spec = dg.BlockSpec(
+        block_id="adr",
+        target="docs/README.md",
+        sources=(),
+        render=dg._render_docs_readme_adr_index,
+    )
+    with pytest.raises(dg.SourceMissingError, match="docs/adr"):
+        dg.render_block_lines(root, spec)
+
+
+# ---------------------------------------------------------------------------
+# 规则参考视图（redlines.yml）
+# ---------------------------------------------------------------------------
+
+
+def test_rules_view_renders_redlines_table(tmp_path: Path) -> None:
+    """正例：全量红线四列视图；coverage 缺失以 — 显式占位；竖线转义不破表。"""
+    root = tmp_path
+    _write(
+        root,
+        "docs/governance/redlines.yml",
+        "redlines:\n"
+        "  - id: R1\n"
+        "    title: 架构越界\n"
+        "    rule_type: EXCEPTIONABLE\n"
+        "    automation_coverage: pre-commit（import-linter）\n"
+        "    description: 不允许越界\n"
+        "  - id: R2\n"
+        "    title: 异常吞没\n"
+        "    rule_type: INVARIANT\n"
+        "    description: 含|竖线标题\n",
+    )
+    spec = dg.BlockSpec(
+        block_id="rules",
+        target="docs/governance/README.md",
+        sources=(dg._REDLINES_SCHEMA,),
+        render=dg._render_governance_rules_view,
+    )
+    rendered = dg.render_block_lines(root, spec)
+    assert "| R1 | 架构越界 | EXCEPTIONABLE | pre-commit（import-linter） |" in rendered
+    assert "| R2 | 异常吞没 | INVARIANT | — |" in rendered
+
+
+# ---------------------------------------------------------------------------
+# 任务路由视图（canonical-topics.yml）
+# ---------------------------------------------------------------------------
+
+
+def test_topics_view_merges_by_canonical_and_section(tmp_path: Path) -> None:
+    """正例：相同 canonical+section 合并一行并保全部 topic id；相对链接指向仓库根。"""
+    root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
+    _write(root, "docs/guides/testing.md", "# Testing\n")
+    _write(
+        root,
+        "docs/governance/canonical-topics.yml",
+        "topics:\n"
+        "  - id: ui-view\n"
+        "    title: 新增/修改 UI 视图\n"
+        "    canonical: docs/flet/README.md\n"
+        "  - id: ui-layout\n"
+        "    title: 修改 UI 布局\n"
+        "    canonical: docs/flet/README.md\n"
+        "  - id: fallback\n"
+        "    title: 未列出的任务类型\n"
+        "    canonical: CLAUDE.md\n"
+        "  - id: testing\n"
+        "    title: 新增测试\n"
+        "    canonical: docs/guides/testing.md\n"
+        "    section: 测试编写模板\n",
+    )
+    spec = dg.BlockSpec(
+        block_id="topics",
+        target="docs/governance/README.md",
+        sources=(dg._CANONICAL_TOPICS_SCHEMA,),
+        render=dg._render_governance_topics_view,
+    )
+    rendered = dg.render_block_lines(root, spec)
+    assert (
+        "| ui-view, ui-layout | 新增/修改 UI 视图 / 修改 UI 布局 | [docs/flet/README.md](../flet/README.md) | — |"
+        in rendered
+    )
+    assert "| fallback | 未列出的任务类型 | [CLAUDE.md](../../CLAUDE.md) | — |" in rendered
+    assert "| testing | 新增测试 | [docs/guides/testing.md](../guides/testing.md) | 测试编写模板 |" in rendered
+
+
+def test_topics_view_identity_duplicate_rejected(tmp_path: Path) -> None:
+    """负例：topic id 重复 → 作者源校验显式拒绝（不静默合并），错误信息指认重复 id。"""
+    root = tmp_path
+    _write(root, "docs/flet/README.md", "# Flet\n")
+    _write(root, "CLAUDE.md", "# CLAUDE\n")
+    _write(
+        root,
+        "docs/governance/canonical-topics.yml",
+        "topics:\n"
+        "  - id: dup\n"
+        "    title: A\n"
+        "    canonical: docs/flet/README.md\n"
+        "  - id: dup\n"
+        "    title: B\n"
+        "    canonical: CLAUDE.md\n",
+    )
+    spec = dg.BlockSpec(
+        block_id="topics",
+        target="docs/governance/README.md",
+        sources=(dg._CANONICAL_TOPICS_SCHEMA,),
+        render=dg._render_governance_topics_view,
+    )
+    with pytest.raises(dg.SourceDuplicateIdentityError) as excinfo:
+        dg.render_block_lines(root, spec)
+    assert "dup" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# 内置注册表不变量（D6 新增激活条目）
+# ---------------------------------------------------------------------------
+
+
+def test_builtin_registry_d6_entries_active_and_consistent() -> None:
+    """D6 四个激活条目 + D23 两个 hook 依赖派生条目：接线正确；未接线槽位不伪造生成。"""
+    by_id = {spec.block_id: spec for spec in dg.BUILTIN_REGISTRY}
+    for block_id, target in (
+        ("docs-readme-file-index", "docs/README.md"),
+        ("docs-readme-adr-index", "docs/README.md"),
+        ("governance-readme-rules", "docs/governance/README.md"),
+        ("governance-readme-topics", "docs/governance/README.md"),
+    ):
+        spec = by_id[block_id]
+        assert spec.active and spec.render is not None
+        assert spec.target == target and spec.block_format == "markdown"
+    for block_id in _HOOK_DEP_BLOCKS:
+        spec = by_id[block_id]
+        assert spec.active and spec.render is dg._render_precommit_docs_deps
+        assert spec.target == ".pre-commit-config.yaml" and spec.block_format == "yaml"
+        assert spec.sources == (dg._PYPROJECT_DOCS_SCHEMA,)
+    # D38：对比度块已接线真实作者源（check_theme_contrast.py），不再是空槽位
+    contrast = by_id["a11y-contrast-reference"]
+    assert contrast.active and contrast.render is not None
+    assert contrast.target == "docs/flet/accessibility-baseline.md"
+    assert contrast.sources == (dg._A11Y_CONTRAST_SCHEMA,)
+    # N02：a11y baseline 是受保护目标且同时是文件级目录候选——标题输入必须来自快照。
+    assert dg._A11Y_BASELINE_TEXT_SCHEMA in by_id["docs-readme-file-index"].sources
+    dg._validate_specs(dg.BUILTIN_REGISTRY)  # 注册表整体跨条目约束（目标格式一致/块 id 不重复）
+
+
+# ---------------------------------------------------------------------------
+# D38：对比度受控派生（阈值/色对唯一作者源 = check_theme_contrast.py）
+# ---------------------------------------------------------------------------
+
+
+def _contrast_source_text(pairs: str, *, text_threshold: str = "4.5") -> str:
+    return (
+        "_THRESHOLD_TEXT = " + text_threshold + "\n"
+        "_THRESHOLD_LARGE = 3.0\n"
+        "\n"
+        "class ContrastPair(NamedTuple):\n"
+        "    fg: str\n"
+        "    bg: str\n"
+        "    threshold: float\n"
+        "    purpose: str\n"
+        "\n"
+        "_CONTRAST_PAIRS: list[ContrastPair] = [\n" + pairs + "]\n"
+        "\n"
+        "def check_contrast():\n"
+        "    themes = [ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA]\n"
+        "    return themes\n"
+    )
+
+
+def test_a11y_contrast_block_derives_from_script_source(tmp_path: Path) -> None:
+    """渲染结果来自脚本常量：阈值、登记色对、主题都不在正文另存。"""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "check_theme_contrast.py").write_text(
+        _contrast_source_text(
+            '    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'
+            '    ContrastPair("ERROR", "SURFACE", _THRESHOLD_LARGE, "icon"),\n'
+        ),
+        encoding="utf-8",
+    )
+    text_threshold, large_threshold, pairs, themes = dg._parse_contrast_source(
+        (scripts / "check_theme_contrast.py").read_text(encoding="utf-8")
+    )
+    assert (text_threshold, large_threshold) == (4.5, 3.0)
+    assert pairs == [
+        ("TEXT_PRIMARY", "SURFACE", 4.5, "text"),
+        ("ERROR", "SURFACE", 3.0, "icon"),
+    ]
+    assert themes == ["dark", "light", "navy", "dracula"]
+
+
+def test_a11y_contrast_block_tracks_single_source_edit(tmp_path: Path) -> None:
+    """只改一次脚本阈值/色对，派生块变化可检出；二次渲染零差异（幂等）。"""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    source = scripts / "check_theme_contrast.py"
+    source.write_text(
+        _contrast_source_text('    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'),
+        encoding="utf-8",
+    )
+    spec = next(s for s in dg.BUILTIN_REGISTRY if s.block_id == "a11y-contrast-reference")
+    first = dg.render_block_lines(tmp_path, spec)
+    assert any("4.5" in line for line in first)
+    assert not any("WARNING" in line for line in first)
+
+    source.write_text(
+        _contrast_source_text(
+            '    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),\n'
+            '    ContrastPair("WARNING", "CARD_BG", _THRESHOLD_TEXT, "text"),\n',
+            text_threshold="5.0",
+        ),
+        encoding="utf-8",
+    )
+    second = dg.render_block_lines(tmp_path, spec)
+    assert any("5.0" in line for line in second), "阈值单源修改必须传播到派生块"
+    assert any("`WARNING`" in line for line in second), "新增色对必须传播到派生块"
+    assert second == dg.render_block_lines(tmp_path, spec), "二次渲染必须零差异"
+
+
+def test_a11y_contrast_block_rejects_missing_source_constants(tmp_path: Path) -> None:
+    """脚本缺 _CONTRAST_PAIRS / 主题列表时显式拒绝，不伪造空块。"""
+    spec = next(s for s in dg.BUILTIN_REGISTRY if s.block_id == "a11y-contrast-reference")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "check_theme_contrast.py").write_text(
+        "_THRESHOLD_TEXT = 4.5\n_THRESHOLD_LARGE = 3.0\n", encoding="utf-8"
+    )
+    with pytest.raises(dg.SourceFormatError, match="_CONTRAST_PAIRS"):
+        dg.render_block_lines(tmp_path, spec)
+
+
+# ---------------------------------------------------------------------------
+# D01：CLAUDE §1.8 决策树 / §3.1 红线表由 YAML 单一作者源生成
+# ---------------------------------------------------------------------------
+
+
+def _builtin(block_id: str) -> dg.BlockSpec:
+    return next(spec for spec in dg.BUILTIN_REGISTRY if spec.block_id == block_id)
+
+
+def test_claude_generated_views_match_author_sources() -> None:
+    """真实 CLAUDE.md 的两个生成块与 YAML 渲染结果逐行一致。"""
+    content = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    for block_id, tag in (
+        ("claude-decision-tree", "<!-- generated:claude-decision-tree -->"),
+        ("claude-redlines-table", "<!-- generated:claude-redlines-table -->"),
+    ):
+        expected = dg.render_block_lines(ROOT, _builtin(block_id))
+        errors = cdc._generated_block_sync(content, tag, expected, f"{block_id} 与作者源不一致", f"{block_id} 缺生成块")
+        assert errors == [], errors
+
+
+def test_claude_derived_copy_edit_fails() -> None:
+    """只改派生副本（CLAUDE 表）不改作者源必须被一致性检查判红（L01/D01）。"""
+    content = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    tag = "<!-- generated:claude-decision-tree -->"
+    expected = dg.render_block_lines(ROOT, _builtin("claude-decision-tree"))
+    assert cdc._generated_block_sync(content, tag, expected, "mismatch", "missing") == []
+    tampered = content.replace("<!-- route: strategy -->", "<!-- route: strategy --> 手改", 1)
+    assert tampered != content
+    assert cdc._generated_block_sync(tampered, tag, expected, "mismatch", "missing") == ["mismatch"]
+
+
+def test_claude_redlines_render_tracks_yaml_author_source(tmp_path: Path) -> None:
+    """只改一次 redlines.yml（新增红线）即传播到 CLAUDE 红线表，无需手改正文。"""
+    source = tmp_path / "docs" / "governance" / "redlines.yml"
+    source.parent.mkdir(parents=True)
+    original = (ROOT / "docs/governance/redlines.yml").read_text(encoding="utf-8")
+    source.write_text(
+        original
+        + "\n  - id: R25\n"
+        + "    title: 演示新增红线\n"
+        + "    description: 演示说明\n"
+        + "    enforcement: 仅人工评审\n"
+        + "    automation_coverage: none\n"
+        + "    human_review_required: true\n"
+        + "    rule_type: WORKFLOW\n",
+        encoding="utf-8",
+    )
+    lines = dg.render_block_lines(tmp_path, _builtin("claude-redlines-table"))
+    assert any("R25" in line and "演示新增红线" in line and "仅人工评审" in line for line in lines)
+    assert dg.render_block_lines(tmp_path, _builtin("claude-redlines-table")) == lines, "二次渲染必须零差异"
+
+
+def _seed_topic_paths(root: Path, yaml_text: str) -> None:
+    """按 canonical-topics.yml 的 canonical/workflow 字段落位占位文件。
+
+    作者源校验要求路径真实存在；临时根目录须先补齐被引用文件，否则渲染前即拒绝。
+    """
+    import yaml
+
+    for topic in yaml.safe_load(yaml_text)["topics"]:
+        for field in ("canonical", "workflow"):
+            rel = topic.get(field)
+            if isinstance(rel, str) and rel.strip():
+                _write(root, rel.strip(), "# stub\n")
+
+
+def test_claude_decision_tree_render_tracks_yaml_author_source(tmp_path: Path) -> None:
+    """只改一次 canonical-topics.yml（新增 topic）即传播到 CLAUDE 决策树。"""
+    source = tmp_path / "docs" / "governance" / "canonical-topics.yml"
+    source.parent.mkdir(parents=True)
+    original = (ROOT / "docs/governance/canonical-topics.yml").read_text(encoding="utf-8")
+    text = (
+        original
+        + "\n  - id: demo-topic\n"
+        + "    title: 演示新增任务\n"
+        + "    canonical: docs/guides/how-to.md\n"
+        + "    section: 1. 演示章节\n"
+    )
+    source.write_text(text, encoding="utf-8")
+    _seed_topic_paths(tmp_path, text)
+    lines = dg.render_block_lines(tmp_path, _builtin("claude-decision-tree"))
+    assert any("演示新增任务" in line and "route: demo-topic" in line for line in lines)
+    assert any("how-to.md「1. 演示章节」" in line for line in lines)
+    assert dg.render_block_lines(tmp_path, _builtin("claude-decision-tree")) == lines, "二次渲染必须零差异"
+
+
+def test_claude_decision_tree_meta_entry_requires_note(tmp_path: Path) -> None:
+    """元条目（fallback）缺 note 时显式拒绝，不生成半行或空入口。"""
+    source = tmp_path / "docs" / "governance" / "canonical-topics.yml"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "topics:\n  - id: fallback\n    title: 未列出的任务类型\n    canonical: CLAUDE.md\n",
+        encoding="utf-8",
+    )
+    _write(tmp_path, "CLAUDE.md", "# CLAUDE\n")
+    with pytest.raises(dg.SourceFieldError, match="note"):
+        dg.render_block_lines(tmp_path, _builtin("claude-decision-tree"))
+
+
+# ---------------------------------------------------------------------------
+# D23：hook docs 依赖派生（pyproject docs 组 → 两个 hook 片段）
+# ---------------------------------------------------------------------------
+
+_PYPROJECT_DOCS = """\
+[dependency-groups]
+docs = [
+    "markdown-it-py==4.0.0",
+    "github-slugger==0.0.3",
+    "pyyaml>=6.0",
+    "pytest>=9.2.0",
+]
+"""
+
+_HOOK_DEP_BLOCKS = ("precommit-docs-deps-verify-versions", "precommit-docs-deps-docs-consistency")
+
+
+def _precommit_target() -> str:
+    """含两个 hook 受控片段的 .pre-commit-config.yaml 最小目标文本。"""
+    return (
+        "repos:\n"
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      - id: verify-versions\n"
+        "        additional_dependencies:\n"
+        "          # generated:precommit-docs-deps-verify-versions\n"
+        "          # /generated:precommit-docs-deps-verify-versions\n"
+        "      - id: docs-consistency\n"
+        "        additional_dependencies:\n"
+        "          # generated:precommit-docs-deps-docs-consistency\n"
+        "          # /generated:precommit-docs-deps-docs-consistency\n"
+    )
+
+
+def _hook_dep_specs() -> tuple[dg.BlockSpec, ...]:
+    return tuple(spec for spec in dg.BUILTIN_REGISTRY if spec.target == ".pre-commit-config.yaml")
+
+
+def _render_hook_deps(root: Path) -> dict[str, list[str]]:
+    return {spec.block_id: dg.render_block_lines(root, spec) for spec in _hook_dep_specs()}
+
+
+def test_precommit_docs_deps_derived_from_docs_group(tmp_path: Path) -> None:
+    """D23 正例：两个 hook 片段同源派生，保留版本范围写法、排序稳定、pytest 被排除。"""
+    _write(tmp_path, "pyproject.toml", _PYPROJECT_DOCS)
+    rendered = _render_hook_deps(tmp_path)
+    expected = [
+        '          - "github-slugger==0.0.3"',
+        '          - "markdown-it-py==4.0.0"',
+        '          - "pyyaml>=6.0"',
+    ]
+    for block_id in _HOOK_DEP_BLOCKS:
+        assert rendered[block_id] == expected
+        assert all("pytest" not in line for line in rendered[block_id])
+
+
+def test_docs_group_change_updates_both_hooks_and_is_idempotent(tmp_path: Path) -> None:
+    """D23 正例：只改 docs 组一次 → 两个 hook 片段同时变化；二次生成零差异。"""
+    _write(tmp_path, "pyproject.toml", _PYPROJECT_DOCS)
+    before = _render_hook_deps(tmp_path)
+    text = _precommit_target()
+    for block_id in _HOOK_DEP_BLOCKS:
+        text = dg.replace_block(text, "yaml", block_id, before[block_id])
+    once = text
+    for block_id in _HOOK_DEP_BLOCKS:
+        text = dg.replace_block(text, "yaml", block_id, before[block_id])
+    assert text == once, "同一作者源二次生成必须零差异"
+
+    _write(tmp_path, "pyproject.toml", _PYPROJECT_DOCS.replace("markdown-it-py==4.0.0", "markdown-it-py==4.1.0"))
+    after = _render_hook_deps(tmp_path)
+    for block_id in _HOOK_DEP_BLOCKS:
+        assert after[block_id] != before[block_id], "同一 docs 组变化必须同时反映到两个 hook"
+        assert any("markdown-it-py==4.1.0" in line for line in after[block_id])
+
+
+def test_precommit_docs_deps_missing_docs_group_rejected(tmp_path: Path) -> None:
+    """D23 负例：pyproject 缺 docs 组 → 显式拒绝（不静默生成空依赖）。"""
+    _write(tmp_path, "pyproject.toml", '[project]\nname = "x"\n')
+    with pytest.raises(dg.SourceFormatError, match="dependency-groups"):
+        dg.render_block_lines(tmp_path, _hook_dep_specs()[0])
+
+
+def test_precommit_docs_deps_only_pytest_rejected(tmp_path: Path) -> None:
+    """D23 负例：docs 组排除 pytest 后为空 → 显式拒绝。"""
+    _write(tmp_path, "pyproject.toml", '[dependency-groups]\ndocs = ["pytest>=9.2.0"]\n')
+    with pytest.raises(dg.SourceFormatError, match="排除 pytest 后为空"):
+        dg.render_block_lines(tmp_path, _hook_dep_specs()[0])
+
+
+def test_precommit_docs_deps_non_string_entry_rejected(tmp_path: Path) -> None:
+    """D23 负例：docs 组含非字符串条目 → 显式拒绝。"""
+    _write(tmp_path, "pyproject.toml", "[dependency-groups]\ndocs = [42]\n")
+    with pytest.raises(dg.SourceFormatError, match="第 0 条不是非空字符串"):
+        dg.render_block_lines(tmp_path, _hook_dep_specs()[0])

@@ -31,8 +31,15 @@ from ui.components.toast_manager import (
     _resolve_icon,
 )
 from ui.theme import CUSTOM_COLOR_PRESETS, AppColors, ThemeName
+from ui.viewmodels import Message
+from ui.viewmodels.data_source_view_model import DataSourceState, HealthResultRow
 from ui.views.backtest_view import _resolve_credibility_accent, _resolve_status_color as _bt_status
 from ui.views.screener_view import _resolve_status_color as _screener_status
+from ui.views.settings_tabs.data_source_tab import (
+    _HEALTH_STATUS_VISUALS,
+    _build_health_dashboard,
+    _resolve_health_visuals,
+)
 from ui.views.task_center_view import _get_status_color
 
 pytestmark = pytest.mark.unit
@@ -134,7 +141,7 @@ def test_task_center_status_color_follows_current_theme() -> None:
 # ============================================================================
 
 
-def _find_icon(root: Any, name: str) -> ft.Icon:
+def _find_icon(root: Any, name: str | ft.IconData) -> ft.Icon:
     for ctrl in _walk_controls(root):
         if isinstance(ctrl, ft.Icon) and ctrl.icon == name:
             return ctrl
@@ -217,3 +224,125 @@ def test_toast_foreground_and_background_pair(theme: str) -> None:
     # 前景正文色走语义 token (TEXT_PRIMARY), 与背景配对
     text = next(c for c in _walk_controls(ctrl) if isinstance(c, ft.Text) and c.value == "msg")
     assert text.color == AppColors.TEXT_PRIMARY
+
+
+# ============================================================================
+# 4. 数据源健康状态色随主题变化 (M35-05 / UIV-DS-01)
+# ============================================================================
+
+_HEALTH_VISUAL_EXPECTATIONS: tuple[tuple[str, ft.IconData, str], ...] = (
+    ("ds_health_ok", ft.Icons.CHECK_CIRCLE, "SUCCESS"),
+    ("ds_health_lag", ft.Icons.WARNING, "WARNING"),
+    ("ds_health_error", ft.Icons.ERROR, "ERROR"),
+    ("ds_health_cancelled", ft.Icons.CANCEL_OUTLINED, "WARNING"),
+    ("common_check_fail", ft.Icons.ERROR, "ERROR"),
+)
+
+
+def _expected_health_color(theme: str, color_name: str) -> str:
+    """语义名 → 当期主题实际色值 (Layer 1 token 不在 preset 中, 直接取 AppColors)."""
+    preset = CUSTOM_COLOR_PRESETS[theme]
+    return preset[color_name] if color_name in preset else getattr(AppColors, color_name)
+
+
+def test_health_status_visuals_store_semantic_appcolors_names() -> None:
+    """健康状态映射须存 AppColors 语义属性名, 而非导入期 Hex 快照 (M35-05)."""
+    assert set(_HEALTH_STATUS_VISUALS) == {key for key, _, _ in _HEALTH_VISUAL_EXPECTATIONS}
+    for key, (_icon, color_name) in _HEALTH_STATUS_VISUALS.items():
+        assert isinstance(color_name, str), f"_HEALTH_STATUS_VISUALS[{key!r}] 必须是语义属性名"
+        assert not color_name.startswith("#"), f"_HEALTH_STATUS_VISUALS[{key!r}] = {color_name!r} 固化了 Hex 快照"
+        assert hasattr(AppColors, color_name), (
+            f"_HEALTH_STATUS_VISUALS[{key!r}] = {color_name!r} 不是 AppColors 语义属性"
+        )
+
+
+@pytest.mark.parametrize(("health_key", "expected_icon", "color_name"), _HEALTH_VISUAL_EXPECTATIONS)
+@pytest.mark.parametrize("theme", _THEMES)
+def test_resolve_health_visuals_follows_current_theme(
+    theme: str, health_key: str, expected_icon: ft.IconData, color_name: str
+) -> None:
+    """健康状态图标/颜色解析必须读取当期主题色 (四主题 × 五种状态)."""
+    AppColors.load_theme(theme)
+    icon, color = _resolve_health_visuals(health_key)
+    assert icon == expected_icon
+    assert color == _expected_health_color(theme, color_name)
+
+
+@pytest.mark.parametrize("theme", _THEMES)
+def test_unknown_health_key_falls_back_to_warning_not_ok(theme: str) -> None:
+    """未知健康状态回退为警告语义, 不得伪装为「正常」(R21/M35-05)."""
+    AppColors.load_theme(theme)
+    icon, color = _resolve_health_visuals("ds_health_unknown")
+    assert icon == ft.Icons.HEALTH_AND_SAFETY
+    assert color == _expected_health_color(theme, "WARNING")
+    assert color != _expected_health_color(theme, "SUCCESS")
+
+
+def _health_dashboard_state(scenario: str) -> DataSourceState:
+    """构造健康看板渲染场景 (未检查 / 检查中 / 错误 / red / yellow / green)."""
+    if scenario == "checking":
+        return DataSourceState(health_checking=True)
+    if scenario == "error":
+        return DataSourceState(health_error=Message("common_check_fail"))
+    if scenario == "error_with_result":
+        # 错误与旧结果并存时, 错误分支优先 (不得回退显示旧的绿色「正常」)
+        return DataSourceState(
+            health_error=Message("common_check_fail"),
+            health_result=HealthResultRow(status="green"),
+        )
+    if scenario == "none":
+        return DataSourceState()
+    return DataSourceState(health_result=HealthResultRow(status=scenario))
+
+
+@ft.component
+def _HealthDashboardProbe(state: DataSourceState) -> ft.Control:
+    """测试探针: 在渲染上下文中执行健康看板构建 (含嵌套声明式组件)."""
+    return _build_health_dashboard(state, lambda e: None, lambda e: None)
+
+
+_HEALTH_RENDER_EXPECTATIONS: tuple[tuple[str, ft.IconData, str], ...] = (
+    ("checking", ft.Icons.HOURGLASS_TOP, "INFO"),
+    ("error", ft.Icons.ERROR, "ERROR"),
+    ("error_with_result", ft.Icons.ERROR, "ERROR"),
+    ("red", ft.Icons.ERROR, "ERROR"),
+    ("yellow", ft.Icons.WARNING, "WARNING"),
+    ("green", ft.Icons.CHECK_CIRCLE, "SUCCESS"),
+    ("none", ft.Icons.HEALTH_AND_SAFETY, "WARNING"),
+)
+
+
+def _health_metric_status_color(root: Any, expected_icon: ft.IconData) -> str:
+    """取健康 MetricCard 收到的 status_color (渲染消费点, 而非导入期映射)."""
+    from flet.components.component import Component
+
+    stack: list[Any] = [root]
+    while stack:
+        ctrl = stack.pop()
+        if isinstance(ctrl, Component):
+            kwargs = ctrl.kwargs
+            if kwargs.get("icon") == expected_icon and "status_color" in kwargs:
+                return kwargs["status_color"]
+            stack.extend(v for v in [*ctrl.args, *kwargs.values()] if v is not None)
+        elif isinstance(ctrl, ft.Control):
+            stack.extend(x for x in (getattr(ctrl, "controls", None) or []) if x is not None)
+            content = getattr(ctrl, "content", None)
+            if isinstance(content, ft.Control):
+                stack.append(content)
+    raise AssertionError(f"Health MetricCard with icon {expected_icon!r} not found")
+
+
+@pytest.mark.parametrize(("scenario", "expected_icon", "color_name"), _HEALTH_RENDER_EXPECTATIONS)
+def test_health_dashboard_metric_color_recomputes_after_theme_switch(
+    scenario: str, expected_icon: ft.IconData, color_name: str
+) -> None:
+    """已加载健康结果后切主题, 重渲染仍取当期主题色, 且不重新请求健康数据 (M35-05)."""
+    state = _health_dashboard_state(scenario)
+    AppColors.load_theme(ThemeName.DARK)
+    component = make_component(_HealthDashboardProbe, state)
+    dark_color = _health_metric_status_color(render_once(component), expected_icon)
+    assert dark_color == _expected_health_color(ThemeName.DARK, color_name)
+
+    AppColors.load_theme(ThemeName.LIGHT)
+    light_color = _health_metric_status_color(render_once(component), expected_icon)
+    assert light_color == _expected_health_color(ThemeName.LIGHT, color_name)

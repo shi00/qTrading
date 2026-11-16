@@ -113,7 +113,7 @@ jobs:
 
       - name: Install cargo-llvm-cov (Linux only)
         if: matrix.os == 'linux'
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2  # v2.90.0
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # v2.90.3
         with:
           tool: cargo-llvm-cov
 
@@ -255,7 +255,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2  # v2.90.0
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # v2.90.3
         with:
           tool: cargo-audit
 
@@ -376,7 +376,8 @@ jobs:
               exit 1
             fi
             # manifest 的摘要 / target / schema / 构建提交必须与本次产物一致；
-            # git_sha 为构建期 short SHA，按前缀匹配被标记 commit（兼容 12+ 位短哈希）。
+            # git_sha 必须是 12-40 位小写十六进制（构建期 short SHA 或完整 SHA），
+            # 且作为被标记 commit 的前缀。空串/1 位/非 hex 前缀没有身份强度，一律拒绝。
             manifest_sha=$(jq -r '.sha256 // ""' "${dir}/${manifest}")
             manifest_target=$(jq -r '.target // ""' "${dir}/${manifest}")
             manifest_schema=$(jq -r '.schema // ""' "${dir}/${manifest}")
@@ -393,8 +394,12 @@ jobs:
               echo "::error::${manifest} schema ${manifest_schema} is not the expected manifest schema"
               exit 1
             fi
-            if [[ ! "$tag_commit_sha" == "$manifest_git"* ]]; then
-              echo "::error::${manifest} git_sha ${manifest_git} does not match tag commit ${tag_commit_sha}"
+            if [[ ! "$manifest_git" =~ ^[0-9a-f]{12,40}$ ]]; then
+              echo "::error::${manifest} git_sha ${manifest_git} is not a 12-40 char lowercase hex commit id"
+              exit 1
+            fi
+            if [[ "$tag_commit_sha" != "$manifest_git"* ]]; then
+              echo "::error::${manifest} git_sha ${manifest_git} is not a prefix of tag commit ${tag_commit_sha}"
               exit 1
             fi
             expected_count=$((expected_count + 3))

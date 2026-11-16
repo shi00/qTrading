@@ -14,7 +14,7 @@
 | 新的界面 / 交互 | [4. 新增一个 UI 视图](#4-新增一个-ui-视图) |
 | 仅澄清 / 修订需求（无实现落点） | 更新 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 及其「变更历史」，止于需求正本 |
 
-新增 FR 时在实现处留 `FR-XX-00N` 注释，并在 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 对应条目回填实现位置（参照既有 FR 条目在代码中的注释先例）。
+新增 FR **进入实现交付时**在实现处留 `FR-XX-00N` 注释，并在 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 对应条目回填实现位置（参照既有 FR 条目在代码中的注释先例）；仅澄清/设计阶段按上表末行止于需求正本，不要求代码改动。
 
 ### 1. 新增一张数据表
 
@@ -69,12 +69,12 @@
 新增/修改 Tushare API 接入时遵循以下工作流：
 
 1. **客户端封装**：在 `data/external/tushare_client.py` 的 `TushareProApi` Protocol 中声明 API callable，并在对应 wrapper 方法中调用 `self._handle_api_call(...)` 统一限流/重试/熔断。
-2. **积分档位映射**：若新 API 有积分要求，新增积分档位追加到 `utils/constants.py` 的 `TUSHARE_POINT_TIERS`，API↔档位映射追加到 `data/external/tushare_client.py` 的 `TushareClient._TIER_API_COVERAGE`。注意 `data/constants.py` 中的 `TUSHARE_POINT_TIERS` 仅为兼容再导出（`from utils.constants import TUSHARE_POINT_TIERS`），新增档位只改 `utils` 侧。定位原因：`utils` 为横切叶子层（CLAUDE.md §4.1），R1 契约禁止 `utils` 导入 `data`，故真相源置于 `utils.constants`。
+2. **积分档位映射**：若新 API 有积分要求，新增积分档位追加到 `utils/constants.py` 的 `TUSHARE_POINT_TIERS`，API↔档位映射追加到 `data/external/tushare_client.py` 的 `TushareClient._TIER_API_COVERAGE`。注意 `data/constants.py` 中的 `TUSHARE_POINT_TIERS` 仅为兼容再导出（`from utils.constants import TUSHARE_POINT_TIERS`），新增档位只改 `utils` 侧。定位原因：`utils` 为横切叶子层（[架构正文 §4.1](../architecture/overview.md#41-分层架构)），R1 契约禁止 `utils` 导入 `data`，故真相源置于 `utils.constants`。
 3. **同步策略**：在 `data/sync/` 下对应 syncer 文件中实现 `ISyncStrategy.sync()`，通过 `SyncContext` 注入 `cancel_event`，分块调用 `TushareClient` wrapper。
 4. **表注册**：在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册新表（表名、同步配置、质量监控配置）。
 5. **DAO 实现**：在 `data/persistence/daos/` 下创建对应 DAO，继承 `BaseDao`，使用 `_save_upsert()` 批量写入。
 6. **质量门控**：`data/sync` 层作为同步入口不挂 `@require_quality`，质量门控由业务消费方（`strategies/`）按数据质量声明；质量评分评估机制详见文末 [data-sync.md 质量门控](../patterns/data-sync.md#质量门控c15) 链接。
-7. **取消传播**：syncer 分块循环中检查 `cancel_event.is_set()`，主动退出时 `raise asyncio.CancelledError`（R2 红线）。
+7. **取消传播**：syncer 分块循环中检查 `cancel_event.is_set()`；真实取消异常必须原样向上传播（R2 红线，禁止吞没）。协作取消可经 `SyncResult.status=cancelled` 正常返回（统计结果不丢），由提交方适配器转为 `TaskCancelledError` 映射 `CANCELLED` 终态，不得算完成或伪装失败。
 8. **错误处理**：`except asyncio.CancelledError: raise`；`TushareAPIPermissionError` 捕获后跳过对应 API；其他异常经 `classify_error()` 分类。
 9. **测试**：在 `tests/unit/test_historical_sync.py` / `test_financial_sync.py` 等对应测试文件中补充用例，使用 mock TushareClient 隔离外部 API（[测试编写模板](../guides/testing.md#测试编写模板)）。
 
@@ -119,7 +119,7 @@
 3. 实例创建必须受 `threading.Lock` 保护 (优先在 `__new__` 中持锁)。
 4. 支持 `_initialized` 标志防止重复初始化。
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
-6. 在 [docs/architecture/singleton-lifecycle.md](../architecture/singleton-lifecycle.md) 的注册清单中补充新单例名称（该清单为唯一正本，勿改 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式)，§4.3 仅含登记指引）。
+6. 在 [docs/architecture/singleton-lifecycle.md](../architecture/singleton-lifecycle.md) 的注册清单中补充新单例名称（该清单为唯一正本；[架构正文 §4.3](../architecture/overview.md#43-单例模式) 与 CLAUDE.md §4.3 摘要仅含登记指引，不复制清单）。
 7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器（[测试编写模板](../guides/testing.md#测试编写模板)）。
 
 ### 9. 内置 PostgreSQL 离线维护
@@ -391,7 +391,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 1. **单例 vs 非单例判定**：读 [singleton-lifecycle.md](../architecture/singleton-lifecycle.md)「注册单例」与「非单例服务」两张表。持有全局共享状态 / 需跨调用点共享 / 是资源生命周期所有者 → `@register_singleton` + `_reset_singleton`（R15）；否则按需实例化 + 构造器注入（如 `BacktestService`）。改单例注册必须同步更新 singleton-lifecycle.md 表格。
 2. **错误分类**：挂 `classify_error()` + `classify_severity()`（CONTRIBUTING「错误处理标准模式」）；`system` 级上抛、`recoverable`/`operational` 层内降级；涉及外部 IO 的方法挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)`。
 3. **编排边界**：外部动作/定时触发用 `TaskManager.submit_task()`（协程内同步阻塞仍经 `ThreadPoolManager.run_async()`，R16）；周期性定时用 `SchedulerService`。
-4. **取消与生命周期**：轮询/长生命周期任务的优雅停止按 [exceptions.yml](../governance/exceptions.yml) EX-0017 豁免语义（吞 `EngineDisposedError` 停止轮询为合理设计）；`asyncio.CancelledError` 必须 `raise`（R2）。
+4. **取消与生命周期**：轮询/长生命周期任务的优雅停止须先核对 [exceptions.yml](../governance/exceptions.yml) EX-0017 的**具体登记范围及全部有效条件**（`paths` + `validity_criteria`，AND 语义见 ADR-0018 C15）；**新增轮询服务不能自动继承**该例外，须另按 R5 规则判断（确需偏离时依治理流程登记）；`asyncio.CancelledError` 必须 `raise`（R2）。
 5. **单测**：按 CONTRIBUTING「变更类型 → 最小验证子集」配套（R19）；Service 单测模板见 [testing.md](./testing.md)。
 6. **接线**：启动编排/调度注册按第 3 步边界接入（`app/` 层注入或 `SchedulerService.register_job`）。
 
@@ -430,7 +430,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 | 应用启动即崩 / 打不开 | PG 数据目录损坏或维护锁冲突 | 先跑离线诊断 `sidecars/qtrading-pg-sidecar doctor`（流程见本文档第 9 章），诊断结论看输出 JSON 的 `issues` 字段（doctor 退出码 0 不代表健康）；exit 40（数据目录异常）/ exit 50（维护锁冲突）是 `run`/`stop` 等命令的退出码 |
 | 进程无栈静默退出 | 未捕获异常或原生扩展崩溃 | 查 `logs/error.log` 与 `logs/latest.log`；仍无线索则按 12.1 导出诊断包 |
 | 界面卡死 | 主循环被同步 IO/CPU 阻塞 | 在 `app.log` 搜超 `PerfThreshold` 的告警；核对 UI 事件是否经 `ThreadPoolManager.run_async()` 提交（R16） |
-| 数据库连接断开后操作持续失败 | PG 进程整体不可用，连接池无法自愈 | 显式调用 `CacheManager.init_db()` 重建引擎（不作自动重连）；生命周期契约见 [data-sync.md](../patterns/data-sync.md) |
+| 数据库连接断开后操作持续失败 | PG 进程整体不可用，连接池无法自愈 | PG 恢复后重跑任务即经既有引擎 `pool_pre_ping`（默认开启）恢复连接，无需 `init_db()`；`init_db()` 仅做 schema 初始化且幂等，非空引擎不因 `init_db(force=True)` 重建引擎/连接池；需彻底重建时按顺序 `await CacheManager.close()` → `await CacheManager.init_db()`。不作后台自动重连；生命周期契约见 [data-sync.md](../patterns/data-sync.md) |
 
 ### 13. 获取新闻情绪模型产物（finbert-gguf-v* Release）
 
@@ -451,7 +451,7 @@ curl -L -o tokenizer.json \
   "https://huggingface.co/valuesimplex-ai-lab/FinBERT2-base/resolve/<revision>/tokenizer.json"
 ```
 
-下载完成后到 设置 → AI 大脑 → 新闻情绪卡片，为三个路径选择文件（或手输路径）保存即生效（保存时校验 GGUF 魔数、分类头结构与分词器文件）；模型来源与合规由用户承担。
+下载完成后到 设置 → AI 大脑 → 模型管理，新建/编辑连接并选择 `gguf_sentiment` 适配器（编码模型/分类头/分词器三路径，手输 + 文件选择器）：表单保存仅校验三路径非空，**保存成功不等于模型可用**（保存只让配置生效，不触发模型校验）；首次加载/打分时才校验 GGUF 魔数、分类头结构与分词器文件——旧入口 `score_texts` 校验不过整体返回 `None`，统一连接入口 `score_for_connection` 返回 `ScoringOutcome(status="unavailable")` 并由 `gguf_sentiment_adapter` 转译为 `RuntimeError`（语义正本见 [ai-service.md](../patterns/ai-service.md)）；模型来源与合规由用户承担。
 
 ---
 

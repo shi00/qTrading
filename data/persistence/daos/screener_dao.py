@@ -425,7 +425,10 @@ class ScreenerDao(BaseDao):
         )
 
     async def get_history_records(
-        self, trade_date: str | None, strategy_name: str | None = None, run_id: str | None = None
+        self,
+        trade_date: str | datetime.date | None,
+        strategy_name: str | None = None,
+        run_id: str | None = None,
     ):
         sh = ScreeningHistory.__table__
         st = Base.metadata.tables["screening_thinking"]
@@ -437,7 +440,10 @@ class ScreenerDao(BaseDao):
         if run_id:
             stmt = stmt.where(sh.c.run_id == run_id)
         else:
-            stmt = stmt.where(sh.c.trade_date == trade_date)
+            # SC-F1: trade_date 为 DATE 列，调用方（history_mode_mixin）传 ISO/YYYYMMDD
+            # 字符串；须在 DAO 边界经 _to_db_date 归一为 date 对象绑定（DAT-26），否则
+            # asyncpg 拒绝字符串绑定、错误被 _read_db_select 默认吞成空历史。
+            stmt = stmt.where(sh.c.trade_date == self._to_db_date(trade_date))
             if strategy_name:
                 stmt = stmt.where(sh.c.strategy_name == strategy_name)
         # BIZ-01: 无 AI 记录 ai_score 为 NULL，Postgres DESC 默认 NULLS FIRST 会把

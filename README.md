@@ -70,7 +70,7 @@ Polars 引擎毫秒级全市场回测；内置夏普/回撤/Alpha-Beta/胜率等
 ```
 qTrading/
 ├── main.py         # 应用入口，服务编排与生命周期管理
-├── harness.toml    # Harness 工具协作配置（CLAUDE.md 为唯一权威，本文件不优先于红线/架构边界）
+├── harness.toml    # Harness 工具协作配置（规则权威按主题正本见 CLAUDE.md §1，本文件不优先于红线/架构边界）
 ├── package.json    # CI 类型检查工具 pyright 的 npm 声明（配合 package-lock.json 锁定版本）
 ├── core/           # 核心层：国际化、Prompt 基础模板
 ├── app/            # 引导层：启动初始化、服务编排
@@ -205,7 +205,7 @@ python main.py
 
 ## 🧪 测试
 
-三层测试金字塔：单元测试 + 集成测试 + E2E（数量随开发演进，统计见 [docs/guides/testing.md](docs/guides/testing.md) 或用 `python -m pytest --collect-only -q`）。集成测试需可连接的 PostgreSQL 测试库（默认 `test_astock`），E2E 需 sidecar/前端测试环境（含 Playwright），详见 [docs/guides/testing.md](docs/guides/testing.md)。CI 强制 **单文件 ≥80% + diff coverage ≥80%**；**整体 ≥85% 为本地目标**（`pyproject.toml` 的 `fail_under = 85` 未在 CI 路径启用）。
+三层测试金字塔：单元测试 + 集成测试 + E2E（数量随开发演进，统计见 [docs/guides/testing.md](docs/guides/testing.md) 或用 `python -m pytest --collect-only -q`）。集成测试需可连接的 PostgreSQL 测试库（默认 `test_astock`），E2E 需 sidecar/前端测试环境（含 Playwright），详见 [docs/guides/testing.md](docs/guides/testing.md)。CI 强制 **单文件 ≥80% + diff coverage ≥80%**；CI pytest 启用 `--cov`（未追加 `--cov-fail-under`），整体 ≥85% 阈值读取 `pyproject.toml` `[tool.coverage.report]` 的 `fail_under = 85` 生效，本文不另写阈值正本。
 
 ```bash
 # 全部 / 单元 / 集成 / E2E
@@ -214,8 +214,8 @@ python -m pytest tests/unit/ -v
 python -m pytest tests/integration/ -v
 python -m pytest tests/e2e/ -v
 
-# 覆盖率
-python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
+# 覆盖率（阈值读取 pyproject.toml [tool.coverage.report] fail_under，无需 --cov-fail-under）
+python -m pytest tests/ --cov --cov-report=term-missing
 ```
 
 | 层级 | 目录 | 覆盖内容 |
@@ -227,7 +227,7 @@ python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 | 覆盖维度 | 说明 |
 |----------|------|
 | **覆盖目标** | `core/` `app/` `data/` `services/` `strategies/` `utils/` `ui/` `config/` `main/` 9 个核心模块 |
-| **门禁阈值** | **单文件 ≥80%**（CI 强制，`check_per_file_coverage.py`）+ **diff coverage ≥80%**（CI 强制）；**整体 ≥85%** 为本地目标（CI 未启用 `fail_under`） |
+| **门禁阈值** | **单文件 ≥80%**（CI 强制，`check_per_file_coverage.py`，阈值源 `pyproject.toml` `[tool.custom_coverage]`）+ **diff coverage ≥80%**（CI 强制）；**整体 ≥85%**（CI pytest 启用 `--cov` 后读取 `[tool.coverage.report]` 的 `fail_under = 85` 生效） |
 | **排除项** | tiktoken 缓存、离线日历数据、辅助脚本 |
 
 ---

@@ -28,7 +28,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # 变更探测：决定两个补偿检查是否执行。
+  # 变更探测：决定两个补偿检查是否执行。选择器对 rename 的新旧路径取并集
+  # （PR 用 filename + previous_filename，merge_group 用 --no-renames 的删除 + 新增两行）。
   # fork PR / API 失败 / 触达 3000 文件上限 / merge_group 取不到 diff / 未知事件一律两者 true
   # （fail-closed），保证不会因探测失败而少跑检查。
   detect:
@@ -43,8 +44,16 @@ jobs:
       precommit: ${{ steps.detect.outputs.precommit }}
 
     steps:
+      - name: Checkout pull request commit
+        # PR 事件的变更列表走 API，但选择逻辑在 scripts/classify_aux_changed_paths.py，
+        # 需要工作区脚本；只取当前提交，不拉全量历史。
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+
       - name: Checkout merge group commits
-        # merge_group 需要 base / head 两个提交对象才能做 git diff；PR 事件走 API，不 checkout。
+        # merge_group 需要 base / head 两个提交对象才能做 git diff。
         if: github.event_name == 'merge_group'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -75,14 +84,15 @@ jobs:
             exit 0
           }
 
-          mark_from_file() {
-            local files="$1"
-            if grep -qE '(^sidecars/qtrading-pg-sidecar/|^\.github/workflows/sidecar\.yml$|^\.github/workflows/ci-aux-gate\.yml$)' "$files"; then
-              sidecar=true
+          classify_file() {
+            local files="$1" result
+            # 选择逻辑在 scripts/classify_aux_changed_paths.py：每行取 filename 与
+            # previous_filename 两列的并集后再匹配，rename 的新旧两端都参与选择。
+            if ! result="$(python scripts/classify_aux_changed_paths.py < "$files")"; then
+              run_both "辅助变更选择器执行失败，运行全部补偿检查（fail-closed）"
             fi
-            if grep -qE '(^\.pre-commit-config\.yaml$|^\.github/workflows/precommit-config-ci\.yml$|^\.github/workflows/ci-aux-gate\.yml$)' "$files"; then
-              precommit=true
-            fi
+            sidecar="$(printf '%s\n' "$result" | sed -n 's/^sidecar=//p')"
+            precommit="$(printf '%s\n' "$result" | sed -n 's/^precommit=//p')"
           }
 
           case "$EVENT_NAME" in
@@ -91,7 +101,10 @@ jobs:
               ;;
             pull_request)
               files="$(mktemp)"
-              if ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' > "$files"; then
+              # 每个 API 条目输出一行两列（filename<TAB>previous_filename）。GitHub 对
+              # 重命名只在 filename 给新路径、previous_filename 给旧路径；两列都保留后交给
+              # 选择器取并集。行数仍等于 API 条目数，3000 上限计数口径不变。
+              if ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[] | [.filename, (.previous_filename // "")] | @tsv' > "$files"; then
                 rm -f "$files"
                 run_both "PR 变更文件 API 读取失败（fork / 权限 / 网络），运行全部补偿检查（fail-closed）"
               fi
@@ -100,7 +113,7 @@ jobs:
                 rm -f "$files"
                 run_both "变更文件数 $count 达到 API 分页上限 3000，运行全部补偿检查（fail-closed）"
               fi
-              mark_from_file "$files"
+              classify_file "$files"
               rm -f "$files"
               ;;
             merge_group)
@@ -108,11 +121,13 @@ jobs:
                 run_both "merge_group 缺少 base/head SHA，运行全部补偿检查（fail-closed）"
               fi
               files="$(mktemp)"
-              if ! git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$files"; then
+              # --no-renames 把重命名拆成「删除旧路径 + 新增新路径」两行，新旧两端都保留；
+              # git 本地 diff 没有 API 分页上限，无需 3000 判断。
+              if ! git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA" > "$files"; then
                 rm -f "$files"
                 run_both "merge_group git diff 失败，运行全部补偿检查（fail-closed）"
               fi
-              mark_from_file "$files"
+              classify_file "$files"
               rm -f "$files"
               ;;
             *)
@@ -123,6 +138,33 @@ jobs:
           echo "sidecar=$sidecar" >> "$GITHUB_OUTPUT"
           echo "precommit=$precommit" >> "$GITHUB_OUTPUT"
           echo "- 事件 \`$EVENT_NAME\`：sidecar=$sidecar，precommit=$precommit" >> "$GITHUB_STEP_SUMMARY"
+
+  # 独立必达元检查（检视 D22）：对真实 workflow 做静态 + 语义解析，验证
+  # docs-ci.yml 的 job 图、测试文件选择、执行条件与错误传播，并断言本 job 自身
+  # 已接入下面的聚合判定。不做路径过滤、不 depends detect：每次事件都运行，避免
+  # 「只改 workflow → 主分类器 code=false → 合同测试未被选中」时选择被改成 echo
+  # 仍保持绿色。
+  ci-meta-contract:
+    name: "Auxiliary check: CI meta contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Install PyYAML
+        run: python -m pip install --quiet 'pyyaml>=6'
+
+      - name: Run CI meta contract check
+        run: python scripts/check_ci_meta_contract.py
 
   sidecar-check:
     name: "Auxiliary check: qtrading-pg-sidecar"
@@ -147,7 +189,7 @@ jobs:
   # 稳定聚合 check 名称：`CI Aux Gate`。显式校验 needs 结果，不用「skipped 即通过」的默认语义。
   ci-aux-gate:
     name: CI Aux Gate
-    needs: [detect, sidecar-check, precommit-check]
+    needs: [detect, ci-meta-contract, sidecar-check, precommit-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -159,6 +201,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           DETECT: ${{ needs.detect.result }}
+          META_RESULT: ${{ needs.ci-meta-contract.result }}
           SIDECAR_REQUESTED: ${{ needs.detect.outputs.sidecar }}
           SIDECAR_RESULT: ${{ needs.sidecar-check.result }}
           PRECOMMIT_REQUESTED: ${{ needs.detect.outputs.precommit }}
@@ -177,6 +220,12 @@ jobs:
 
           if [ "$DETECT" != "success" ]; then
             echo "| detect | - | ${DETECT:-missing} | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
+            fail=1
+          fi
+
+          # 元检查无条件必达：success 之外的任何结果（failure / cancelled / skipped）均判失败。
+          if [ "$META_RESULT" != "success" ]; then
+            echo "| ci-meta-contract | - | ${META_RESULT:-missing} | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
             fail=1
           fi
 

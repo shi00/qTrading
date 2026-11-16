@@ -172,7 +172,7 @@ async def _run_session(
         page.window.on_event = _on_window_event
 
     async def _on_disconnect(e):
-        await handle_disconnect(coordinator, cleanup_done_fn=lambda: coordinator.cleanup_done)
+        await handle_disconnect(coordinator)
 
     # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
     # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
@@ -509,7 +509,6 @@ def RootView(
     返回的 ``ft.Container`` 继承 ``LayoutControl``, 其 ``right=20, bottom=20``
     属性作为 Stack 子项绝对定位, 视觉等价于原 ``page.overlay`` 挂载。
     """
-    _trace_log("[RootView] constructing StartupView + ToastManagerView")
     stack = ft.Stack(
         [
             StartupView(
@@ -521,7 +520,6 @@ def RootView(
         ],
         expand=True,
     )
-    _trace_log("[RootView] construction complete, returning Stack")
     return stack
 
 

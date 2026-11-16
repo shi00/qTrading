@@ -1724,7 +1724,7 @@ jobs:
           uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
 
       - name: Create PR for requirements update
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1  # v8.1.3
         with:
           token: ${{ secrets.PAT_FOR_CI }}
           # main-only 写回：固定 base=main，避免在 detached HEAD 上缺少 base 而失败。
@@ -1811,6 +1811,42 @@ jobs:
           commit-message: "chore: update requirements*.txt via uv pip compile"
           delete-branch: true
           labels: dependencies, auto
+
+  # D22-001：发行 tag 的版本数值必须锁定产品正本。原实现只有 release-windows 校验
+  # 「远端 tag 解析到 commit == GITHUB_SHA」，而 ISCC 直接以原始 github.ref_name 注入安装器
+  # 版本：在 0.11.7 的提交上推 v0.11.8 时，代码 / manifest 自洽、指针检查也通过，但安装包与
+  # Release 声明 0.11.8、产品正本仍是 0.11.7。本 job 只读原始 tag 字符串做数值校验
+  # （严格 vX.Y.Z，去 v 后等于 pyproject [project].version 与 .release-please-manifest.json），
+  # stdlib 运行、不安装依赖、不查询远端 tag 指针（指针语义仍由 release-windows tag lock 负责，
+  # 不得以其替代数值检查）。build-windows 与 release-windows 均依赖本 job：失败即因 needs
+  # 未成功而在编译与 Release 创建前中止，其余检查全绿也无法发布错误 tag。
+  release-tag-gate:
+    name: Verify release tag matches product version
+    # tag 推送与 workflow_dispatch 均运行；dispatch 到非 tag ref 时只打印「非正式版本」说明
+    # （build-only，不创建 Release），不阻断手动复验构建。
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Verify raw tag version against product version (fail-closed)
+        shell: bash
+        env:
+          GIT_REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "${GIT_REF#refs/tags/}" != "$GIT_REF" ]; then
+            # 数值校验只看所推 tag 的原始字符串（含 v 前缀），与远端 tag 指向哪个 commit 无关。
+            python scripts/verify_versions.py --release-tag "$REF_NAME"
+          else
+            echo "Non-release build: ${EVENT_NAME} on ${GIT_REF} is a non-tag ref; artifacts are unpublished and the version label is not a release version."
+          fi
 
   # D18-A01: 统一解析「最新稳定 sidecar-v* Release」，供 build-windows 的两个 embedded
   # 矩阵腿共享。原实现解析表格输出的第一列（实际是 NAME 而非 TAG），
@@ -1921,7 +1957,7 @@ jobs:
     # needs 关系，其失败/超时都不得影响发布门禁（needs 对失败 job 的默认 skip 语义无法可靠规避）。
     # 两条 cuda 腿在 Install dependencies 前用 `gh release download` 自取 wheel（continue-on-error），
     # 未命中（冷路径 / 预编译失败 / Release 尚未预热）即回退内联源码编译，与改动前行为等价。
-    needs: [resolve-sidecar-release, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests]
+    needs: [release-tag-gate, resolve-sidecar-release, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     # 锁定 windows-2022（VS 2022）：windows-latest 已滚动迁移到 VS 2026（GitHub 2026-05 公告），
     # 而 CUDA 12.4 nvcc 仅支持 MSVC 192x/193x（VS 2019/2022），在 VS 2026 上 CMake 报
@@ -2739,7 +2775,7 @@ jobs:
     # 本 job 因 needs 未全成功而跳过，避免“同次 workflow 红色但 Release 已发布”。
     # e2e-sidecar-real-smoke 与 build-windows 在 tag 场景均会执行；workflow_dispatch
     # 非 tag ref 下 smoke 被 skip，而本 job 的 if 同为 tag-only，同样跳过，不会误发布。
-    needs: [build-windows, e2e-sidecar-real-smoke]
+    needs: [release-tag-gate, build-windows, e2e-sidecar-real-smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -2872,7 +2908,7 @@ jobs:
           fi
 
       - name: Create or reuse draft Release (assets uploaded, still unpublished)
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           # draft 对外不可见（仅写权限可见）、不能被标记 latest；失败时留下的只是这个
           # draft，不会被外部当作正式版本。同名资产由 overwrite_files 覆盖（重跑恢复）。

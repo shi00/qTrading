@@ -1,0 +1,311 @@
+"""D3 解析视图测试：对应检视 §6.4「解析」负例清单与 §5.1 职责边界。
+
+五组负例：
+1. 引用式死链（未定义引用）必须检出；
+2. 重复标题锚点经 slugger 序号正确区分；
+3. HTML ID 正确提取，且 ``<a id="x">`` 与标题锚点可区分；
+4. 两类围栏（``` 与 ~~~）与行内代码中的假链接不误报为死链；
+5. 真缺失锚点/未知语法显式失败或明确「未核」，绝不从全文任取样例代替。
+"""
+
+from __future__ import annotations
+
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+import docs_markdown as dm
+
+pytestmark = pytest.mark.docs_pure
+
+# 组 1 样例：引用式死链 + 合法引用对照（行号 1-based）
+DEAD_REF_DOC = "# 标题\n\n[dead][nope]\n\n[plain][]\n\n[ok][ref]\n\n[ref]: https://example.com/a\n"
+
+# 组 2 样例：重复标题（ASCII 与中文）
+DUPLICATE_HEADINGS_DOC = "## Setup\n内容\n## Setup\n## 安装 指南\n尾行\n## 安装 指南\n"
+
+# 组 3 样例：HTML ID（行内 a / 块级 div / 标题内嵌）与标题锚点
+# （块级 div 后必须空行：CommonMark type 6 HTML 块仅由空行结束，否则吞掉后续标题行）
+HTML_ID_DOC = '## 落款\n正文 <a id="api-ref">说明</a> 续\n\n<div id="box"></div>\n\n## <a id="in-heading"></a> 章节\n'
+
+# 组 4 样例：两类围栏 + 行内代码中的假链接（全部在代码语境，不应判为链接）
+FENCED_DOC = "```py\n[a][nope]\n```\n\n~~~py\n[x](y)\n~~~\n\n行内 `[x](y)` 与 `[a][nope]` 均为代码语境\n"
+
+# 组 4b 样例（Q11）：代码块实际 content / 闭合状态 / 行号区间。
+# (markdown 文本, (fence, content, closed, start_line, end_line))
+CODE_BLOCK_CONTENT_CASES: list[tuple[str, tuple[str, str, bool, int, int]]] = [
+    ("```python\na\n```\n", ("```", "a\n", True, 1, 3)),
+    ("```python\na\n", ("```", "a\n", False, 1, 2)),
+    ("````python\na\n````\n", ("````", "a\n", True, 1, 3)),
+    ("````python\na\n", ("````", "a\n", False, 1, 2)),
+    ("- 列表项\n\n  ```python\n  a\n  ```\n", ("```", "a\n", True, 3, 5)),
+    ("- 列表项\n\n  ```python\n  a\n", ("```", "a\n", False, 3, 4)),
+    ("    a\n    b\n", ("", "a\nb\n", True, 1, 2)),
+    ("```python\r\na\r\n```\r\n", ("```", "a\n", True, 1, 3)),
+    ("```python\na\n\n```\n", ("```", "a\n\n", True, 1, 4)),
+    ("```python\na\n\n", ("```", "a\n\n", False, 1, 3)),
+    ("```python\na\u2028b\n```\n", ("```", "a\u2028b\n", True, 1, 3)),
+]
+CODE_BLOCK_CONTENT_IDS = [
+    "closed-backtick",
+    "eof-backtick",
+    "closed-long",
+    "eof-long",
+    "closed-nested-list",
+    "eof-nested-list",
+    "indented",
+    "closed-crlf",
+    "closed-trailing-blank",
+    "eof-trailing-blank",
+    "unicode-line-separator",
+]
+
+# 组 7 样例（Q12）：HTML href 抽取——含标签/来源/行号；代码语境中的 HTML 不参与
+HTML_HREF_DOC = (
+    '正文 <a href="./target.md">行内</a> 续\n\n'
+    "<div>\n"
+    '<a href="#sec">块内</a>\n'
+    "</div>\n\n"
+    "```html\n"
+    '<a href="./fence-missing.md">围栏</a>\n'
+    "```\n\n"
+    '行内代码 `<a href="./code-missing.md">代码</a>`\n'
+)
+
+# Q10 固定上游向量：由锁定 github-slugger==0.0.3 源码（regex.py 字符表 +
+# replace.py / slug.py 语义）独立实现推导后冻结，覆盖组合附加符号、控制字符、
+# 空白、标点、emoji、表外码点。期望值不是用 Compat 自身生成，故可作差分基准。
+UPSTREAM_SLUG_VECTORS = [
+    ("", ""),
+    ("概述", "概述"),
+    ("Setup", "setup"),
+    ("3.1 ❌ 绝对禁止", "31--绝对禁止"),
+    ("已知架构技术债 (Known Technical Debt)", "已知架构技术债-known-technical-debt"),
+    ("V1 声明式 UI 开发规范", "v1-声明式-ui-开发规范"),
+    # 首尾空白不 trim（上游只把 U+0020 转 '-'，不 strip）
+    (" hello ", "-hello-"),
+    ("a  b", "a--b"),
+    ("x  ", "x--"),
+    ("  ", "--"),
+    # 控制字符与空白：Tab / 换行 / NUL / NBSP / 全角空格均删除（非转连字符）
+    ("a\tb", "ab"),
+    ("a\nb", "ab"),
+    ("a\x00b\x1fc", "abc"),
+    ("a\u00a0b", "ab"),
+    ("a\u3000b", "ab"),
+    # 组合附加符号（含 VS16）保留
+    ("café", "café"),
+    ("a\u0301b", "a\u0301b"),
+    ("\u26a0\ufe0f 风险", "\ufe0f-风险"),
+    # 标点与表外数字类码点按上游表删除
+    ("x²", "x"),
+    ("x¹", "x"),
+    ("①", ""),
+    ("a！b", "ab"),
+    ("😀 emoji", "-emoji"),
+    # 表外（未收录）的星体面字母保留
+    ("𝔸 letter", "𝔸-letter"),
+    ("A_B-C", "a_b-c"),
+]
+
+# 组 6 样例（D30）：转义方括号是普通文字，不得从反转义后的显示文本倒猜引用语法
+ESCAPED_REF_DOC = (
+    "正文 \\[ok\\]\\[undefined\\] 继续，含不完整转义 \\[ok][undefined]。\n\n"
+    "行内代码 `\\[ok\\]\\[undefined\\]` 与围栏：\n\n"
+    "```text\n[ok][undefined]\n```\n"
+)
+
+
+def test_reference_dead_link_detected(view_factory) -> None:
+    """组 1：未定义引用（full / collapsed）必须检出；已定义引用不算死链。"""
+    view = view_factory(DEAD_REF_DOC)
+    unresolved = view.unresolved_references
+    labels = [(r.label, r.form, r.line) for r in unresolved]
+    assert ("nope", "full", 3) in labels, f"full 引用死链未检出: {labels}"
+    assert ("plain", "collapsed", 5) in labels, f"collapsed 引用死链未检出: {labels}"
+    assert len(unresolved) == 2, f"应恰有 2 个死引用: {labels}"
+    # 已定义引用不误报，且解析为链接（引用式 kind）
+    assert all(r.label != "ref" for r in unresolved)
+    resolved = [(link.text, link.target, link.kind, link.line) for link in view.links]
+    assert resolved == [("ok", "https://example.com/a", "reference", 7)], resolved
+
+
+def test_duplicate_heading_anchor_slugger_suffix(view_factory) -> None:
+    """组 2：重复标题锚点必须带 slugger 序号正确区分（含中文标题）。"""
+    view = view_factory(DUPLICATE_HEADINGS_DOC)
+    slugs = [h.slug for h in view.headings]
+    assert slugs == ["setup", "setup-1", "安装-指南", "安装-指南-1"], slugs
+    lines = [h.line for h in view.headings]
+    assert lines == [1, 3, 4, 6], lines
+    # 每个锚点可独立命中（重复标题不共享同一锚）
+    assert view.has_anchor("setup") and view.has_anchor("setup-1")
+
+
+def test_html_id_extraction_distinguishable(view_factory) -> None:
+    """组 3：HTML ID 提取正确，且 <a id="x"> 与标题锚点可区分。"""
+    view = view_factory(HTML_ID_DOC)
+    ids = {i.id: (i.tag, i.source, i.line) for i in view.html_ids}
+    assert ids == {
+        "api-ref": ("a", "inline", 2),
+        "box": ("div", "block", 4),
+        "in-heading": ("a", "inline", 6),
+    }, ids
+    # 标题文本提取跳过 HTML 子 token：第 6 行标题可见文本为「 章节」；Q10 对齐上游后
+    # 首尾空格不再 trim，前导空格按 github-slugger==0.0.3 语义转连字符，锚点为「-章节」
+    heading_slugs = [h.slug for h in view.headings]
+    assert heading_slugs == ["落款", "-章节"], heading_slugs
+    # <a id="x"> 与标题锚点可区分：独立字段且无交叉污染
+    assert "in-heading" not in heading_slugs
+    assert "-章节" not in ids
+    # anchor_ids 是标题 slug 与 HTML ID 的并集
+    anchors = view.anchor_ids()
+    assert anchors == frozenset({"落款", "-章节", "api-ref", "box", "in-heading"}), anchors
+
+
+def test_fences_and_inline_code_no_false_link(view_factory) -> None:
+    """组 4：两类围栏与行内代码中的假链接不误报为死链/链接。"""
+    view = view_factory(FENCED_DOC)
+    assert view.unresolved_references == (), view.unresolved_references
+    assert view.links == (), view.links
+    blocks = [(b.fence, b.info, b.start_line, b.end_line) for b in view.code_blocks]
+    assert blocks == [("```", "py", 1, 3), ("~~~", "py", 5, 7)], blocks
+
+
+@pytest.mark.parametrize(("text", "expected"), CODE_BLOCK_CONTENT_CASES, ids=CODE_BLOCK_CONTENT_IDS)
+def test_code_block_content_and_closed_state(view_factory, text, expected) -> None:
+    """组 4b（Q11）：保存 token 实际 content 与闭合状态；EOF 未闭合围栏内容不丢末行。"""
+    view = view_factory(text)
+    assert len(view.code_blocks) == 1, view.code_blocks
+    block = view.code_blocks[0]
+    assert (block.fence, block.content, block.closed, block.start_line, block.end_line) == expected
+    assert view.code_block_text(block) == expected[1].removesuffix("\n")
+
+
+def test_escaped_reference_like_text_not_reported(view_factory) -> None:
+    """组 6（D30）：转义方括号、行内代码/围栏中的同形文本都不是引用死链。"""
+    view = view_factory(ESCAPED_REF_DOC)
+    assert view.unresolved_references == (), view.unresolved_references
+    assert view.links == (), "转义方括号不得被解析为链接"
+
+
+def test_formatted_unresolved_reference_is_plain_text(view_factory) -> None:
+    """组 6（D30）：格式化文本的未定义引用形态是 CommonMark 普通文字，不得扩大正则误报。"""
+    view = view_factory("[**x**][undefined]\n")
+    assert view.unresolved_references == (), view.unresolved_references
+    assert view.links == ()
+
+
+def test_escaped_reference_does_not_suppress_real_dead_link(view_factory) -> None:
+    """组 6（D30）：转义文字放行后，同 label 的真实未定义引用仍须检出。"""
+    view = view_factory("\\[ok\\]\\[nope\\]\n\n[dead][nope]\n")
+    refs = [(ref.text, ref.label, ref.line) for ref in view.unresolved_references]
+    assert refs == [("dead", "nope", 3)], refs
+
+
+def test_static_analysis_preserves_filtered_url_targets(view_factory) -> None:
+    """R04：默认 URL 校验会过滤的 file:/javascript: 目标仍须进入链接视图。
+
+    静态分析不渲染、不执行链接，故解析视图放行这些目标供死链检查分类；
+    图片 token、行内代码与转义方括号不扩域。
+    """
+    view = view_factory(
+        "[文件](file:///missing.md)\n\n"
+        "[脚本](javascript:void(0))\n\n"
+        "![图片](file:///missing.png)\n\n"
+        "\\[转义\\](file:///missing.md) 与 `[代码](file:///missing.md)`\n"
+    )
+    targets = [(link.target, link.line) for link in view.links]
+    assert targets == [("file:///missing.md", 1), ("javascript:void(0)", 3)], targets
+
+
+def test_html_href_extraction_with_source_and_line(view_factory) -> None:
+    """组 7（Q12）：HTML href 抽取标签/来源/行号；围栏与行内代码中的 HTML 不参与。"""
+    view = view_factory(HTML_HREF_DOC)
+    hrefs = {(h.href, h.tag, h.source, h.line) for h in view.html_hrefs}
+    assert hrefs == {
+        ("./target.md", "a", "inline", 1),
+        ("#sec", "a", "block", 4),
+    }, hrefs
+    # HTML href 不混入 Markdown links（两条死链检查经统一去重入口合并消费）
+    assert view.links == (), view.links
+
+
+def test_missing_anchor_and_unknown_syntax_explicit(write_doc) -> None:
+    """组 5：真缺失锚点显式 False；未知/不可解析输入显式失败或明确「未核」。"""
+    view = dm.parse_text(HTML_ID_DOC)
+    # 缺失锚点显式返回 False（不伪造、不从全文任取样例代替）
+    assert view.has_anchor("never-defined") is False
+    assert view.has_anchor("api-ref") is True
+    # 未核通道：真实 HTML 原样保留（fragment 由原验证者核验，不在解析层内嵌执行）
+    assert len(view.raw_html_tokens) > 0
+    assert any("api-ref" in content for content, _line in view.raw_html_tokens)
+    # 文件级异常原样传播（显式失败，不吞不降级）；断言异常携带定位信息
+    missing = Path(write_doc("absent.sentinel", "x")).parent / "absent.md"
+    with pytest.raises(FileNotFoundError) as missing_info:
+        dm.load_document_view(missing)
+    assert missing_info.value.filename == str(missing)
+    bad = write_doc("bad.md", "ok")
+    bad.write_bytes(b"# \xff\xfe invalid utf8\n")
+    with pytest.raises(UnicodeDecodeError) as decode_info:
+        dm.load_document_view(bad)
+    assert decode_info.value.encoding == "utf-8"
+
+
+def test_unicode_line_separator_is_not_a_line_break(view_factory) -> None:
+    """U+2028/U+2029 是正文而非行界：视图行号与 token.map 对齐，围栏内容准确。"""
+    text = "a\u2028b\u2029c\n\n```py\nx = 1\n```\n"
+    view = view_factory(text)
+    assert view.source[0] == "a\u2028b\u2029c", "Unicode 行分隔符必须留在行内，不得被拆行"
+    assert view.code_line_numbers() == frozenset({3, 4, 5})
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
+
+
+def test_crlf_lines_align_with_token_map(view_factory) -> None:
+    """CRLF 原文：视图行号与 token.map 对齐（行尾归一不改变行序）。"""
+    text = "# 标题\r\n\r\n```py\r\nx = 1\r\n```\r\n\r\n尾行\r\n"
+    view = view_factory(text)
+    assert view.headings and view.headings[0].line == 1
+    assert [(b.start_line, b.end_line) for b in view.code_blocks] == [(3, 5)]
+    assert view.code_block_text(view.code_blocks[0]) == "x = 1"
+
+
+@pytest.mark.parametrize(("value", "expected"), UPSTREAM_SLUG_VECTORS)
+def test_compat_slugger_matches_fixed_upstream_vectors(value: str, expected: str) -> None:
+    """Q10：Compat 实现与锁定 0.0.3 上游固定向量逐项一致（差分，非自身对照）。"""
+    assert dm.CompatGithubSlugger().slug(value) == expected
+
+
+def test_compat_slugger_matches_upstream_collision_sequence() -> None:
+    """Q10：重复/碰撞序号与上游一致（含与已存在 ``-1`` 后缀再碰撞）。"""
+    slugger = dm.CompatGithubSlugger()
+    assert [slugger.slug(value) for value in ["Setup", "Setup", "setup", "setup-1", "Setup"]] == [
+        "setup",
+        "setup-1",
+        "setup-2",
+        "setup-1-1",
+        "setup-3",
+    ]
+
+
+def test_compat_slugger_maintain_case_and_non_str_match_upstream() -> None:
+    """Q10：maintain_case 保留大小写；非 str 输入返回空串（上游 ``type(value) != str``）。"""
+    assert dm.CompatGithubSlugger().slug("Known (Debt)", maintain_case=True) == "Known-Debt"
+    assert dm.CompatGithubSlugger().slug(cast(Any, 1)) == ""
+    assert dm.CompatGithubSlugger.upstream_version == "0.0.3"
+
+
+def test_view_immutable_and_slugger_backend_honest() -> None:
+    """视图不可变；slugger 后端声明与实际返回类型一致（不假装用了不可用的包）。"""
+    view = dm.parse_text("# t\n")
+    with pytest.raises(FrozenInstanceError) as frozen_info:
+        # frozen dataclass 禁止就地修改（cast 绕过静态检查，仅验证运行时不可变契约）
+        cast(Any, view.headings[0]).slug = "mutated"
+    assert "slug" in str(frozen_info.value)
+    slugger = dm.create_slugger()
+    if dm.SLUGGER_BACKEND == "github-slugger":
+        assert type(slugger).__module__.startswith("github_slugger"), type(slugger)
+    else:
+        assert isinstance(slugger, dm.CompatGithubSlugger), type(slugger)

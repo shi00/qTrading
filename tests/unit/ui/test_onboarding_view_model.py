@@ -4,6 +4,8 @@ TDD RED phase: these tests define the expected ViewModel contract.
 """
 
 import asyncio
+import threading
+from collections.abc import Callable
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -1214,6 +1216,328 @@ class TestOnboardingVMSyncOwnership:
 
 
 # =====================================================================
+# Test: Sync run ownership — OB-02（旧运行迟到进度/结果/异常回写不得覆盖新运行状态）
+# =====================================================================
+
+
+class _StaleCallbackGate:
+    """OB-02 受控闸门：捕获 progress_callback，返回值/异常可配置。
+
+    与 _ControlledSync 不同：旧运行的 progress_callback 引用在释放后仍被保留，
+    可由测试在新运行飞行中手动触发（模拟 DataProcessor 持有旧回调迟到回调）。
+    """
+
+    def __init__(self, result: bool = True, error: BaseException | None = None) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.progress_callback: Callable[[int, int, object], None] | None = None
+        self.stop = AsyncMock()
+        self._result = result
+        self._error = error
+
+    def emit_progress(self, current: int, total: int, message: object) -> None:
+        """经捕获的 progress_callback 转发一次进度（回调未捕获前调用为 no-op）。"""
+        if self.progress_callback is not None:
+            self.progress_callback(current, total, message)
+
+    async def initialize_system(self, **kwargs) -> bool:
+        self.progress_callback = kwargs["progress_callback"]
+        self.started.set()
+        await self.release.wait()
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+class TestOnboardingVMSyncRunOwnership:
+    """OB-02: 同步进度/结果/异常回写先核 run_id 当前代次，导航仍核 epoch（UIR-F02-002）。
+
+    验证标准（M33 检视报告）：Given 两受控运行 A/B，When A 在 B 启动后回调进度/
+    返回成功，Then B 仍显示 B 进度，A 不得写 done；取消后同样保留 cancelled。
+    """
+
+    @staticmethod
+    def _install(bound_vm, gate) -> None:
+        bound_vm._data_processor = gate
+        bound_vm.current_step = 4  # data_sync step
+
+    @staticmethod
+    def _start_second_run(bound_vm):
+        """在 A 飞行中启动受控运行 B，返回 (gate_b, task_b)。"""
+        gate_b = _StaleCallbackGate()
+        bound_vm._data_processor = gate_b
+        task_b = asyncio.create_task(bound_vm.start_sync(quick=True))
+        return gate_b, task_b
+
+    async def test_stale_progress_callback_does_not_overwrite_new_run(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+
+        # A 迟到进度回调不得改写 B 的进度
+        gate_a.emit_progress(75, 100, "stale")
+        assert bound_vm.state.sync_progress == 0.0
+        # B 自己的进度正常更新
+        gate_b.emit_progress(50, 100, "fresh")
+        assert bound_vm.state.sync_progress == 0.5
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到成功：不得写 done/1.0，不得清 B 的忙碌标记，不得导航
+            assert bound_vm.state.sync_progress == 0.5
+            assert bound_vm.sync_in_progress is True
+            assert bound_vm.current_step == 4
+            mock_config_handler.save_config.assert_not_called()
+
+            gate_b.release.set()
+            await task_b
+
+        # B 正常完成仍到 schedule
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.sync_progress == 1.0
+        assert bound_vm.sync_in_progress is False
+
+    async def test_stale_success_does_not_write_done(self, bound_vm, snapshots, mock_config_handler):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到成功不得写 done（B 完成前快照中不存在 done）
+            assert all(
+                s.sync_progress_message is None or s.sync_progress_message.key != "wizard_status_done"
+                for s in snapshots
+            )
+
+            gate_b.release.set()
+            await task_b
+
+        # done 只属于 B 的正常完成
+        assert any(
+            s.sync_progress_message is not None and s.sync_progress_message.key == "wizard_status_done"
+            for s in snapshots
+        )
+        assert bound_vm.current_step == 5
+
+    async def test_stale_success_after_cancel_keeps_cancelled(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        await bound_vm.cancel_sync()
+        assert bound_vm.state.sync_progress_message is not None
+        assert bound_vm.state.sync_progress_message.key == "wizard_status_cancelled"
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+        # A 迟到成功不得用 done 覆盖取消提示
+        assert bound_vm.state.sync_progress_message is not None
+        assert bound_vm.state.sync_progress_message.key == "wizard_status_cancelled"
+        assert bound_vm.state.sync_progress == 0.0
+        assert bound_vm.sync_in_progress is False
+        assert bound_vm.current_step == 4
+        bound_vm.on_complete.assert_not_awaited()
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_stale_result_false_does_not_overwrite_new_run(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate(result=False)
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+        gate_b.emit_progress(50, 100, "fresh")
+        assert bound_vm.state.sync_progress == 0.5
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到失败(result=False)不得把 B 的进度清 0 或写 cancelled
+            assert bound_vm.state.sync_progress == 0.5
+            assert bound_vm.state.sync_progress_message is not None
+            assert bound_vm.state.sync_progress_message.key == "wizard_status_syncing"
+            assert bound_vm.sync_in_progress is True
+            assert bound_vm.current_step == 4
+
+            gate_b.release.set()
+            await task_b
+
+        assert bound_vm.current_step == 5
+        assert bound_vm.sync_in_progress is False
+
+    async def test_stale_exception_does_not_overwrite_new_run(self, bound_vm, mock_config_handler):
+        gate_a = _StaleCallbackGate(error=RuntimeError("stale boom"))
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_b, task_b = self._start_second_run(bound_vm)
+        await gate_b.started.wait()
+        gate_b.emit_progress(50, 100, "fresh")
+
+        with (
+            patch(
+                "ui.viewmodels.onboarding_view_model.classify_error",
+                return_value={"message_key": "common_err_unknown", "format_args": {}},
+            ),
+            patch(_SLEEP_PATCH, new_callable=AsyncMock),
+        ):
+            gate_a.release.set()
+            await task_a
+
+            # A 迟到异常不得写错误状态覆盖 B
+            assert bound_vm.state.sync_progress == 0.5
+            assert bound_vm.state.sync_progress_message is not None
+            assert bound_vm.state.sync_progress_message.key == "wizard_status_syncing"
+            assert bound_vm.sync_in_progress is True
+
+            gate_b.release.set()
+            await task_b
+
+        assert bound_vm.current_step == 5
+        assert bound_vm.sync_in_progress is False
+
+    async def test_progress_callback_after_dispose_does_not_mutate_state(self, bound_vm):
+        gate_a = _StaleCallbackGate()
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        bound_vm.dispose()
+        default_state = bound_vm.state
+
+        # dispose 后迟到的进度回调不得改写 state
+        gate_a.emit_progress(80, 100, "late")
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate_a.release.set()
+            await task_a
+
+        assert bound_vm.disposed is True
+        assert bound_vm.state == default_state == OnboardingState()
+
+    async def test_cancelled_error_propagates_from_start_sync(self, bound_vm):
+        """R2: 取消无条件传播，不得被 owner 判据吞掉；finally 仍按代次清理忙碌标记。"""
+        gate_a = _StaleCallbackGate(error=asyncio.CancelledError())
+        self._install(bound_vm, gate_a)
+        task_a = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate_a.started.wait()
+
+        gate_a.release.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_a
+
+        # R2: 取消无条件传播，不得被 owner 判据吞掉；finally 仍按代次清理忙碌标记
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert bound_vm.sync_in_progress is False
+
+
+# =====================================================================
+# Test: Dispose 协议（卸载必须走基类统一关闭协议）
+# =====================================================================
+
+
+class TestOnboardingVMDisposeProtocol:
+    """dispose 必须调用 super.dispose() 进入统一 notifier 关闭协议。
+
+    验证标准（M33 检视报告）：Given 同步/通知已挂起，When dispose 后释放它们，
+    Then disposed=True、state 保持默认、旧 subscriber 无调用，且不导航。
+    """
+
+    def test_dispose_sets_disposed_flag(self, bound_vm):
+        assert bound_vm.disposed is False
+        bound_vm.dispose()
+        assert bound_vm.disposed is True
+        assert bound_vm._disposed is True
+
+    def test_set_state_after_dispose_is_noop(self, vm):
+        """卸载后迟到的 _set_state 不得改写 state（disposed 守卫拦截）。"""
+        vm._set_state(current_step=2)
+        vm.dispose()
+        vm._set_state(current_step=5)
+        vm._set_state(sync_in_progress=True)
+        assert vm.state == OnboardingState()
+
+    async def test_late_sync_completion_after_dispose_keeps_default_state(self, bound_vm, mock_config_handler):
+        """同步挂起中卸载：迟到完成不得改写 state（进度/消息/步号均保持默认）且不落盘。"""
+        gate = _ControlledSync(1)
+        bound_vm._data_processor = gate
+        bound_vm.current_step = 4  # data_sync step
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        try:
+            await gate.started[0].wait()
+            bound_vm.dispose()
+
+            with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+                gate.release[0].set()
+                await task
+
+            assert bound_vm.disposed is True
+            assert bound_vm.state == OnboardingState()
+            assert bound_vm.current_step == 0
+            mock_config_handler.save_config.assert_not_called()
+        finally:
+            with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+                gate.release[0].set()
+                await task
+
+    async def test_queued_notification_after_dispose_does_not_invoke_subscriber(self, bound_vm):
+        """dispose 后释放已排队通知（dispose 前捕获的 subscriber 快照）不得调用旧 subscriber。"""
+        received: list = []
+        bound_vm.subscribe(lambda s: received.append(s))
+        subs_snapshot = list(bound_vm._subscribers)
+        state_snapshot = bound_vm.state
+        loop = asyncio.get_running_loop()
+
+        bound_vm.dispose()
+        assert bound_vm.disposed is True
+
+        # 模拟「dispose 前已排队、dispose 后才释放」的通知投递（同线程 fast-path）。
+        bound_vm._dispatch_notification_impl(subs_snapshot, state_snapshot, loop, threading.get_ident())
+        await asyncio.sleep(0)
+
+        assert received == []
+
+    def test_dispose_propagates_cancel_error_but_still_disposes(self, bound_vm):
+        """验证取消抛异常：异常继续传播，且 finally 保证基类收尾仍执行。"""
+        with patch("services.local_model_manager.LocalModelManager") as mock_lm:
+            mock_lm.cancel_verification_if_active.side_effect = RuntimeError("cancel failed")
+            with pytest.raises(RuntimeError, match="cancel failed"):
+                bound_vm.dispose()
+        assert bound_vm.disposed is True
+        assert bound_vm.fn_validate_database is None
+        assert bound_vm.on_complete is None
+        assert bound_vm.state == OnboardingState()
+
+    def test_dispose_is_idempotent(self, bound_vm):
+        """重复 dispose 不得异常、不得复活 state、disposed 保持 True。"""
+        bound_vm._set_state(current_step=3)
+        bound_vm.dispose()
+        bound_vm.dispose()
+        assert bound_vm.disposed is True
+        assert bound_vm.state == OnboardingState()
+        assert bound_vm.fn_validate_database is None
+
+
+# =====================================================================
 # Test: Service Delegation
 # =====================================================================
 
@@ -1306,12 +1630,19 @@ class TestOnboardingVMUnboundValidator:
         result = await vm.validate_and_persist_current_step()
         assert result is True
 
-    async def test_dispose_then_validate_blocks(self, bound_vm):
-        """After dispose(), injected validators are None → must block."""
+    async def test_dispose_then_commands_frozen(self, bound_vm):
+        """dispose 后 state 冻结——换步不生效，验证命令不产生任何状态变化。
+
+        原 P2 语义（dispose 清空 validator → database 步阻断）被 disposed 守卫强化：
+        state 恒为默认快照，任何步（含需 validator 的步）都不可达；未 dispose 时
+        unbound validator 的阻断语义仍由 test_unbound_database_validator_blocks 守护。
+        """
         bound_vm.dispose()
-        bound_vm.current_step = 1
-        result = await bound_vm.validate_and_persist_current_step()
-        assert result is False
+        bound_vm.current_step = 1  # disposed 守卫：换步不生效
+        assert bound_vm.current_step == 0
+        await bound_vm.validate_and_persist_current_step()
+        assert bound_vm.state == OnboardingState()
+        assert bound_vm.validation_in_progress is False
 
     async def test_welcome_step_passes_without_validator(self, vm):
         """Welcome step has no validator and should still pass."""
