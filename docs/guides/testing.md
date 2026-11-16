@@ -59,7 +59,7 @@
 | 关注域 | 运行命令 |
 |---|---|
 | 单元测试 | `python -m pytest tests/unit/ -n auto -v --tb=short` |
-| 集成测试 | `python -m pytest tests/integration/ -n auto -v --tb=short`（需 `test_astock` 库，见 CONTRIBUTING.md「数据库设置」） |
+| 集成测试 | `python -m pytest tests/integration/ -n auto -v --tb=short`（需可创建 `test_*` 库的 PostgreSQL，见 CONTRIBUTING.md「数据库设置」） |
 | E2E 本地跑 | 根目录 `python run_e2e_local.py`（绕过 PowerShell ExecutionPolicy，自动设 sidecar/artifact/env 变量） |
 | embedded 真实 sidecar 集成/E2E | 见 [how-to.md「10. 运行 embedded 模式真实 sidecar 测试」](../guides/how-to.md#10-运行-embedded-模式真实-sidecar-测试)（前提、命令、skip 行为/CI 均在该节，不复制） |
 
@@ -92,7 +92,7 @@
   - **integration / e2e**：在 `tests/integration/conftest.py` 等处通过 `@pytest_asyncio.fixture(scope="session", loop_scope="session")` 显式 override，复用 session 级事件循环以降低启动开销
   - Windows 事件循环通过 `tests/conftest.py::pytest_asyncio_loop_factories()` hook 返回 `asyncio.SelectorEventLoop`，与原 `WindowsSelectorEventLoopPolicy` 等价（hook 替换了 pytest-asyncio 已废弃的 `event_loop_policy` fixture）
 - **配置隔离**: 测试使用临时配置文件 (`tempfile.mkdtemp`)，通过 `pytest_configure` 在 import 之前重写 `utils.config_handler.CONFIG_FILE`。
-- **DB 隔离**: 集成测试连接 `test_astock` 数据库 (CI 通过 service container 启动 PostgreSQL 16，模拟最低兼容外置环境；生产内置为 PostgreSQL 16.15.0)，通过 `TEST_DB_*` 环境变量配置。
+- **DB 隔离**: 集成测试默认使用 `test_astock_<run-id>_<worker>`（run-id 由 controller 生成并经 `TEST_DB_RUN_ID` 传给 xdist worker），该库为本次 run 独占，允许首次 clean slate 与会话结束清理；显式 `TEST_DB_NAME` 视为外部共享目标，默认只创建不删除，需 `TEST_DB_ALLOW_REBUILD=1` 才允许重建。CI 通过 service container 启动 PostgreSQL 16，模拟最低兼容外置环境；生产内置为 PostgreSQL 16.15.0，通过 `TEST_DB_*` 环境变量配置。
 
 ### 覆盖率要求
 
@@ -251,7 +251,7 @@ def test_market_trend_filter_selects_in_range():
 
 - **新增/修改单测**：新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法；单例隔离、Mock 规范等「测试编写规则」依从
 - **新增/修改业务逻辑**（R19 触发时）：配套测试同步新增/更新，覆盖率达标（单文件 ≥ 80%、diff coverage ≥80% 与整体 ≥ 85% 均为 CI 强制；分层阈值为 advisory）
-- **新增/修改集成测试**：标记 `integration`，连接 `test_astock` 的 DB 隔离约定依从
+- **新增/修改集成测试**：标记 `integration`，连接本次 run 独占的 `test_*` 库，DB 隔离约定依从
 - **新增/修改 E2E 用例**：按要求串行/网络隔离（Windows skipif 等既有约定）依从
 - **测试门禁 / 工程脚本变更**：按「测试域归属」落位——文档静态解析 / 生成 / 结构 / 示例 → `tests/docs/`；真实应用符号 / Flet API / 业务夹具合同 → `tests/unit/` 顶层
 
