@@ -495,15 +495,25 @@ class ScenarioExecutor:
             )
 
         # F19：单次预留金额按连接计价快照 + 请求 payload 估算（dispatch 不持有
-        # payload，不伪造金额）；未配置月限额 → usage_only（金额 NULL 不占预算）；
-        # 限额已配置但计价 / 用量不可估算 → None（usage_only 语义，不把未知成本
-        # 当 0 占位，R21）。
+        # payload，不伪造金额）；未配置月限额 → usage_only（金额 NULL 不占预算）。
+        # D13-005：限额已配置但金额不可估算（计价快照缺失 / usage_only 模式 /
+        # token 不可估算）= 价格未知——usage_only 放行会让预算门（DAO 仅在
+        # amount/limit 双非 None 时判定）完全失效，形成无上限消耗；此处 fail-closed
+        # 拒绝本候选、零出站（不静默降级 usage_only，R21）；计价可估算路径不受影响。
         budget_limit = cand.get("budget_limit_cny")
         budget_amount = (
             _estimate_reservation_amount(pricing, request.payload, model=connection.model)
             if budget_limit is not None
             else None
         )
+        if budget_limit is not None and budget_amount is None:
+            return _CandidateOutcome(
+                status="failed",
+                decision_hint="rejected",
+                reason="budget amount unestimable: price or usage unknown (fail-closed)",
+                outputs=(),
+                usages=(),
+            )
         last_reason = "exhausted"
         # F27：尝试预算可由路由冻结快照的瞬态重试策略（transient_retries）驱动
         # （execute 计算传入）；None 回退构造默认。
@@ -1320,7 +1330,8 @@ def _estimate_reservation_amount(
       取 payload ``max_tokens``（未声明时按 ``OUTPUT_RESERVE_TOKENS`` 保守预留）；
     - ``encoder_input_tokens``：payload ``texts`` 逐条 token 估算求和；
     - 计价快照缺失 / ``mode`` 非 ``estimate_cost`` / 单价或用量不可得 → ``None``
-      （usage_only 语义：金额 NULL 不占预算；R21：未知成本不以 0 占位）。
+      （R21：未知成本不以 0 占位）。D13-005：限额已配置时 ``None`` 由调用方按
+      fail-closed 拒绝（不静默降级 usage_only 绕过预算门）。
     """
     if pricing is None or pricing.mode != "estimate_cost":
         return None
