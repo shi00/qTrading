@@ -239,9 +239,16 @@ def _get_restore_prompt_button(env: dict) -> ft.TextButton:
 
 
 def _get_ai_prompt_field(env: dict) -> ft.TextField:
-    """定位 ai_system_prompt 文本域 (multiline 且无 label, 与普通 textarea 参数区分)."""
+    """定位 ai_system_prompt 文本域 (multiline 且带当前语言持久 label).
+
+    按 label 定位而非 "label is None" 定位: 字段自身必须保留可访问名称
+    (docs/flet/accessibility-baseline.md §2.1), 若实现回退为清除 label 则此处失败。
+    """
+    expected_label = env["mock_i18n"].get("ai_system_prompt")
     fields = [
-        c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.TextField) and c.multiline and c.label is None
+        c
+        for c in _walk_all_controls(env["result"])
+        if isinstance(c, ft.TextField) and c.multiline and c.label == expected_label
     ]
     assert len(fields) == 1, f"ai_system_prompt 文本域应恰好 1 个, 实际 {len(fields)}"
     return fields[0]
@@ -2307,6 +2314,9 @@ class TestDoSavePromptAsync:
             _rerender(env)
             prompt_field = _get_ai_prompt_field(env)
             assert prompt_field.value == "draft prompt"
+            assert prompt_field.label == env["mock_i18n"].get("ai_system_prompt"), (
+                "ADD-UI-006: 错误态仍须保留持久 label"
+            )
             assert prompt_field.error == "i18n[prompt_err_length]", (
                 "校验失败应在 ai_system_prompt 字段上显示 inline 错误"
             )
@@ -2480,6 +2490,17 @@ class TestBuildParamControl:
         restore_btn = _get_restore_prompt_button(env)
         assert callable(save_btn.on_click)
         assert callable(restore_btn.on_click)
+
+    def test_ai_system_prompt_keeps_persistent_label(self, screener_view_with_params_env) -> None:
+        """ADD-UI-006: ai_system_prompt 字段保留持久 label, 不以独立视觉标题替代.
+
+        构造期 label= 不足以证明运行期未被清除 (AST 扫描不覆盖 ``ctrl.label = None``),
+        故在完整渲染树上断言字段自身仍携带当前语言 label。
+        """
+        env = screener_view_with_params_env
+        field = _get_ai_prompt_field(env)
+        assert field.label == env["mock_i18n"].get("ai_system_prompt")
+        assert field.label, "ai_system_prompt 字段 label 不得为空"
 
 
 class TestBuildParamsPanel:

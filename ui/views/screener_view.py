@@ -673,7 +673,9 @@ def build_param_control(
             on_change=lambda e, n=p_name: on_update(n, e.control.value if e and e.control else ""),
         )
         if p_name == "ai_system_prompt":
-            ctrl.label = None
+            # 保留构造函数设置的持久 label: 字段自身须有可访问名称
+            # (docs/flet/accessibility-baseline.md §2.1), 故不再清空 label,
+            # 也不再重复渲染同文视觉标题; 保存/重置入口单独成行且保留。
             # 面板仅在选中策略时渲染 (build_params_panel 先判空), 此处 selected_strategy 必非 None;
             # or "" 仅为消除 pyright str|None→str 告警 (D15 props 化后参数类型为 str | None).
             strat = selected_strategy or ""
@@ -682,7 +684,6 @@ def build_param_control(
                     [
                         ft.Row(
                             [
-                                ft.Text(label, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
                                 ft.Container(expand=True),
                                 ft.TextButton(
                                     content=I18n.get("ai_save_prompt"),
