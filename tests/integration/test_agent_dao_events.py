@@ -292,6 +292,40 @@ class TestExecutionEvents:
             await dao.record_event(_session_request(subject_revision=2))
         assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
 
+    async def test_same_payload_different_role_or_body_conflicts(self, real_embedded_pg) -> None:
+        """同事件身份同 payload 换 role/正文 → INPUT_CONFLICT（检视 D05），零新行。"""
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_execution_chain(dao)
+        await dao.record_event(_execution_request(session_id, execution_id, round_id=round_id))
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.record_event(
+                _execution_request(session_id, execution_id, round_id=round_id, role=MessageRole.USER)
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.record_event(
+                _execution_request(session_id, execution_id, round_id=round_id, body_text="换了正文")
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
+        async with dao.engine.connect() as conn:
+            count = (
+                await conn.execute(
+                    sa.select(sa.func.count())
+                    .select_from(AgentMessage)
+                    .where(AgentMessage.user_scope == USER_SCOPE, AgentMessage.session_id == session_id)
+                )
+            ).scalar_one()
+            assert count == 1
+
+    async def test_same_identity_different_event_kind_conflicts(self, real_embedded_pg) -> None:
+        """同事件身份同 payload 换 event_kind → INPUT_CONFLICT（检视 D05）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await dao.record_event(_session_request())
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.record_event(_session_request(event_kind=EventKind.INPUT_BOUND))
+        assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
+
     async def test_missing_session_invalid(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
         with pytest.raises(AgentServiceError) as exc:

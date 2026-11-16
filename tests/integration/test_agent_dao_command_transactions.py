@@ -43,6 +43,7 @@ from core.agent_types import (
     ReviseQueuedRequest,
     SaveAnswerRequest,
     ToolGrantState,
+    frozen_command_input_digest,
     json_doc,
     sha256_hex,
 )
@@ -706,14 +707,16 @@ class TestReviseQueued:
         # 修订前事实基线（M1/1 源/2 边/1 命令）
         assert await _count(engine, "agent_message") == 1
 
-        rev = await dao.revise_queued(_revise_request(receipt))
+        revise = _revise_request(receipt)
+        rev = await dao.revise_queued(revise)
 
         assert rev.execution_id == receipt.execution_id
         assert rev.command_record_id.startswith("command_")
         assert rev.input_revision == 2
         assert rev.execution_revision == 2
         assert rev.source_version == "2"
-        assert rev.input_digest == sha256_hex(_revise_request(receipt).text)
+        # 命令 input_digest 为完整规范输入摘要（正文 + 冻结 manifest，检视 D05）。
+        assert rev.input_digest == frozen_command_input_digest("revise", revise.text, revise.manifest_payload)
         assert rev.session_seq == 1
         async with engine.connect() as conn:
             m2 = (
@@ -798,6 +801,57 @@ class TestReviseQueued:
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.revise_queued(_revise_request(receipt, text="又改成别的"))
 
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_same_key_same_text_different_manifest_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """同修订键同正文换 manifest → INPUT_CONFLICT（检视 D05），零新事实。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        frozen_a = json_doc({"schema_version": 1, "text": "改为研究两家公司", "purpose": "concept"})
+        frozen_b = json_doc({"schema_version": 1, "text": "改为研究两家公司", "purpose": "decide"})
+        await dao.revise_queued(_revise_request(receipt, manifest_payload=frozen_a))
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt, manifest_payload=frozen_b))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_legacy_digest_row_replays_and_manifest_change_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """旧摘要行（仅正文）同输入重放返回原事实；同正文换 manifest 仍冲突（D05 兼容路径）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        frozen_a = json_doc({"schema_version": 1, "text": "改为研究两家公司", "purpose": "concept"})
+        frozen_b = json_doc({"schema_version": 1, "text": "改为研究两家公司", "purpose": "decide"})
+        first = await dao.revise_queued(_revise_request(receipt, manifest_payload=frozen_a))
+        # 模拟 D05 修复前的历史行：命令 input_digest 仅覆盖正文。
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentCommand)
+                .where(AgentCommand.user_scope == "u1", AgentCommand.command_kind == "revise")
+                .values(input_digest=sha256_hex("改为研究两家公司"))
+            )
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        replay = await dao.revise_queued(_revise_request(receipt, manifest_payload=frozen_a))
+        assert replay.input_revision == first.input_revision
+        assert replay.input_digest == sha256_hex("改为研究两家公司")
+        assert replay.session_seq == first.session_seq
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt, manifest_payload=frozen_b))
         assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
         after = {t: await _count(engine, t) for t in _COUNT_TABLES}
         assert after == before

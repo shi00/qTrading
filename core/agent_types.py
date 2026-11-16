@@ -1955,6 +1955,36 @@ class RevisionReceipt:
     session_seq: int
 
 
+#: 命令冻结输入摘要的规范版本（检视 D05：旧摘要只覆盖正文，版本化区分新旧）。
+FROZEN_COMMAND_INPUT_DIGEST_VERSION: Final = 1
+
+
+def frozen_command_input_digest(command_kind: str, text: str, manifest_payload: CanonicalJson) -> str:
+    """命令冻结输入的完整规范摘要（受理/修订共用的唯一构造入口，检视 D05）。
+
+    覆盖正文与冻结 manifest（manifest 已含模式/用途等冻结字段），并带命令
+    ``command_kind`` 区分受理与修订；同键同两项才算重放，任一项不同即异输入。
+    旧行摘要由 :func:`legacy_command_input_digest` 识别，不得用于新写入。
+    """
+
+    return sha256_hex(
+        json_doc(
+            {
+                "schema_version": FROZEN_COMMAND_INPUT_DIGEST_VERSION,
+                "kind": command_kind,
+                "text": text,
+                "manifest": manifest_payload,
+            }
+        )
+    )
+
+
+def legacy_command_input_digest(text: str) -> str:
+    """旧版命令输入摘要（仅正文）：只用于读取历史行的兼容判定，禁止用于新写入。"""
+
+    return sha256_hex(text)
+
+
 # ---------------------------------------------------------------------------
 # §9.8 R04 owner 命令/核权合同（C-02-4a）
 # ---------------------------------------------------------------------------

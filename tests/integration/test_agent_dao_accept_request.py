@@ -32,6 +32,7 @@ from core.agent_types import (
     Mode,
     Purpose,
     json_doc,
+    sha256_hex,
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
@@ -220,18 +221,71 @@ class TestAcceptRequestTransaction:
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_same_command_key_same_input_returns_original_receipt(self, real_embedded_pg: ConnectionInfo) -> None:
-        """同命令键同输入（不同 intent id）→ 取原已分配消息/源（§3.3.2 重传规则）。"""
+        """同命令键同完整输入（不同 intent id）→ 取原已分配消息/源（§3.3.2 重传规则）。"""
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
-        first = await dao.accept_request(_request())
+        # 冻结 manifest 与 intent 键解耦：两次请求共享同一 manifest 字节（同输入）。
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        first = await dao.accept_request(_request(manifest_payload=frozen))
         engine = create_test_engine(real_embedded_pg.url)
         before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
 
-        # 同命令键 + 同正文 + 不同 business_request_id：命令身份相同（target+键），
-        # 同输入取原记录，不新建第二 intent。
-        replay = await dao.accept_request(_request(business_request_id="req-2"))
+        # 同命令键 + 同正文 + 同 manifest + 不同 business_request_id：命令身份相同
+        # （target+键），同完整输入取原记录，不新建第二 intent。
+        replay = await dao.accept_request(_request(business_request_id="req-2", manifest_payload=frozen))
 
         assert replay == first
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_command_key_same_text_different_manifest_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """同命令键同正文换 manifest → INPUT_CONFLICT（检视 D05），零新事实。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen_a = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司", "purpose": "concept"})
+        frozen_b = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司", "purpose": "decide"})
+        await dao.accept_request(_request(manifest_payload=frozen_a))
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(business_request_id="req-2", manifest_payload=frozen_b))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_legacy_digest_row_replays_and_manifest_change_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """旧摘要行（仅正文）同输入重放返回原回执；同正文换 manifest 仍冲突（D05 兼容路径）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen_a = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司", "purpose": "concept"})
+        frozen_b = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司", "purpose": "decide"})
+        first = await dao.accept_request(_request(manifest_payload=frozen_a))
+        engine = create_test_engine(real_embedded_pg.url)
+        # 模拟 D05 修复前的历史行：命令 input_digest 仅覆盖正文。
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentCommand)
+                .where(AgentCommand.user_scope == "u1", AgentCommand.command_kind == "submit")
+                .values(input_digest=sha256_hex("研究三家公司"))
+            )
+        before = {t: await _count(engine, t) for t in ("agent_execution", "agent_command", "agent_message")}
+
+        replay = await dao.accept_request(_request(business_request_id="req-2", manifest_payload=frozen_a))
+        assert replay == first
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(business_request_id="req-3", manifest_payload=frozen_b))
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
         after = {t: await _count(engine, t) for t in before}
         assert after == before
         await engine.dispose()
