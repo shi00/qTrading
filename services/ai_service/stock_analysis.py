@@ -35,7 +35,12 @@ from core.model_management_types import (
 )
 from services.ai_service.labels import filter_available_labels
 from services.ai_service.litellm_client import AIServiceUnavailableError, DEFAULT_ANALYSIS_TIMEOUT
-from services.ai_service.output import validate_ai_analysis_response
+from services.ai_service.output import (
+    ANALYSIS_METADATA_FIELDS,
+    discard_unknown_analysis_fields,
+    validate_ai_analysis_response,
+    validate_analysis_output_contract,
+)
 from services.ai_service.scenario_executor import ScenarioOutput
 from services.ai_service.token_budget import _apply_context_budget, _unified_connection_budget_basis
 from services.local_model_manager import LocalInferenceTimeoutError
@@ -106,10 +111,13 @@ def _scenario_ai_status(reason: str) -> str:
 
 
 def _validate_analysis_output(response: AdapterResponse) -> ValidatedBusinessOutput:
-    """stock_analysis 输出校验（s4_plan §3.1）：复用 validate_ai_analysis_response。
+    """stock_analysis 输出校验（s4_plan §3.1 / D13-008）：严格 JSON + 契约 + 归一化。
 
-    JSON 不可解析 / 非 dict 抛 :class:`ModelOutputValidationError`（Executor 按失败
-    表格切换候选）；字段级无效由 validate 内部按 R21 置 None（不抛）。
+    - JSON 不可解析 / 非 dict / 契约违规（缺必需键、类型错）抛
+      :class:`ModelOutputValidationError`，Executor 按失败表格切换候选——截断或
+      幻觉 JSON 不得被当作有效分析结论；
+    - 契约外未知键忽略并记录（保留 litellm 计量元数据键）；
+    - 字段级无效（score 越界等）由 validate 内部按 R21 置 None（不抛）。
     """
     content = response.content
     if not content:
@@ -120,9 +128,44 @@ def _validate_analysis_output(response: AdapterResponse) -> ValidatedBusinessOut
         raise ModelOutputValidationError(f"analysis output: invalid json ({type(e).__name__})") from e
     if not isinstance(raw, dict):
         raise ModelOutputValidationError("analysis output: non-dict payload")
+    violation = validate_analysis_output_contract(raw)
+    if violation:
+        raise ModelOutputValidationError(f"analysis output: contract violation ({violation})")
+    dropped = discard_unknown_analysis_fields(raw)
+    if dropped:
+        logger.warning("[AIService] Analyze | dropped unknown output keys: %s", ", ".join(dropped))
     validated = validate_ai_analysis_response(raw)
     metadata = {"actual_model": response.actual_model, **dict(response.metadata)}
     return ValidatedBusinessOutput(output=validated, metadata=metadata)
+
+
+def _finalize_legacy_analysis_output(response: dict) -> dict:
+    """旧链输出边界（D13-008）：契约校验 + 未知键忽略 + 字段级归一化。
+
+    旧链 failover 返回的 dict 可能来自 ``json.JSONDecoder.raw_decode`` 的抢救式提取
+    （截断响应被截出部分对象），也可能被模型幻觉出额外键。缺必需键/类型错时返回
+    显式失败 dict（``error`` + ``ai_status="failed"``，score/confidence 保持 None），
+    由 ``_build_result_row`` 归入 failed，不伪装成「AI 已分析」。
+    """
+    violation = validate_analysis_output_contract(response)
+    if violation:
+        logger.warning("[AIService] Analyze | output contract violation: %s", violation)
+        failure: dict = {
+            "error": f"Analysis output rejected: {violation}",
+            "score": None,
+            "confidence": None,
+            "ai_status": "failed",
+        }
+        # 本次调用确实消耗了 token：保留计量元数据，_accumulate_usage 才能如实记账
+        # （R21：「不可计量/被拒」不等于「零成本」，不得静默丢账）。
+        for key in ANALYSIS_METADATA_FIELDS:
+            if key in response:
+                failure[key] = response[key]
+        return failure
+    dropped = discard_unknown_analysis_fields(response)
+    if dropped:
+        logger.warning("[AIService] Analyze | dropped unknown output keys: %s", ", ".join(dropped))
+    return validate_ai_analysis_response(response)
 
 
 async def _resolve_stock_analysis_dispatch() -> ScenarioDispatch | None:
@@ -735,10 +778,14 @@ class StockAnalysisService:
                 json_mode=True,
                 on_chunk=on_chunk,
             )
-            if isinstance(res, dict) and learning_meta is not None:
+            if not isinstance(res, dict):
+                return validate_ai_analysis_response(res)
+            result = _finalize_legacy_analysis_output(res)
+            if learning_meta is not None:
                 # D4-M3 可追溯：随该股结果回传注入元数据，供 _build_result_row 逐行携带落库。
-                res["learning_context_meta"] = learning_meta
-            return validate_ai_analysis_response(res)
+                # 契约校验后再附加，避免被未知键策略当作模型输出丢弃。
+                result["learning_context_meta"] = learning_meta
+            return result
 
         except AIServiceUnavailableError as ae:
             logger.error("[AIService] Analyze | ❌ All providers failed: %s", _ai.DataSanitizer.sanitize_error(ae))
@@ -781,7 +828,8 @@ class StockAnalysisService:
 
         - payload 复用同一输入构造产物（messages）：多条 system 合并为单 system_prompt
           （adapter 契约），user content 原样透传（上下文截断已在请求构造时完成，不经 Executor）；
-        - validate_output 复用 validate_ai_analysis_response（包装为 Executor 校验器）；
+        - validate_output 先做输出契约校验（缺必需键/类型错抛 ModelOutputValidationError，
+          截断/坏 JSON 不得当有效），再复用 validate_ai_analysis_response 归一化；
         - 程序状态覆写：``execution_metadata`` 整体由程序构造（§3.3 字段清单），
           模型输出中同名键丢弃；
         - 全部候选失败 → ai_status ∈ {failed, unavailable, budget_blocked, policy_blocked}，
