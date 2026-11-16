@@ -224,8 +224,10 @@ class TestSectionMetaNeutral:
         meta = {m[3]: m for m in _SECTION_META}
         assert meta["recommended"][0] == "screener_section_recommended"
         assert meta["recommended"][1] != ft.Icons.CHECK_CIRCLE
-        assert meta["recommended"][2] == AppColors.TEXT_SECONDARY
-        assert meta["recommended"][2] != AppColors.SUCCESS
+        # D19-001: 颜色位保存语义属性名, 渲染期解析为当期主题色.
+        assert meta["recommended"][2] == "TEXT_SECONDARY"
+        assert getattr(AppColors, meta["recommended"][2]) == AppColors.TEXT_SECONDARY
+        assert meta["recommended"][2] != "SUCCESS"
 
     def test_section_order_and_labels_unchanged(self):
         assert [m[0] for m in _SECTION_META] == [
