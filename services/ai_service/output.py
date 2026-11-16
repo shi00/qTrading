@@ -13,6 +13,7 @@ from core.prompt_base import (
     CONCLUSION_LABELS,
     RECOMMENDATION_TO_CONCLUSION_LABEL,
 )
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,19 @@ VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "ne
 _FREE_TEXT_MAX_LEN = 1000
 _FREE_TEXT_FIELDS = ("summary", "thinking", "ai_reason", "uncertainty_factors")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# R9: 畸形模型字段原值可能夹带个人信息/密钥，日志摘要先脱敏再截断。
+_LOG_VALUE_MAX_LEN = 120
+
+
+def _sanitize_logged_value(value: object) -> str:
+    """R9：把模型字段原值转为可安全入日志的摘要（类型 + 脱敏后 repr，超长截断）。
+
+    先脱敏再截断，避免截断把已注册 secret 切成半截绕过精确替换。
+    """
+    sanitized = DataSanitizer.sanitize_error(repr(value))
+    if len(sanitized) > _LOG_VALUE_MAX_LEN:
+        sanitized = f"{sanitized[:_LOG_VALUE_MAX_LEN]}...(truncated)"
+    return f"{type(value).__name__} {sanitized}"
 
 
 def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
@@ -71,7 +85,7 @@ def validate_ai_analysis_response(response: dict) -> dict:
                 response["score"] = score
         except (ValueError, TypeError):
             # R21：不可解析的分数不是"0 分否决"，置 None 让下游按"未打分"处理。
-            logger.warning("[AIService] Output validation: invalid score type: %s", score)
+            logger.warning("[AIService] Output validation: invalid score type: %s", _sanitize_logged_value(score))
             response["score"] = None
 
     # AI-02: 模型能力信息——缺失 confidence 记 debug 日志，供排查某模型是否持续不返回置信度。
@@ -87,7 +101,9 @@ def validate_ai_analysis_response(response: dict) -> dict:
         try:
             confidence = float(raw_confidence)
         except (ValueError, TypeError):
-            logger.warning("[AIService] Output validation: invalid confidence type: %s", raw_confidence)
+            logger.warning(
+                "[AIService] Output validation: invalid confidence type: %s", _sanitize_logged_value(raw_confidence)
+            )
             response["confidence"] = None
         else:
             if 0 <= confidence < 1:
@@ -104,7 +120,9 @@ def validate_ai_analysis_response(response: dict) -> dict:
         if rec_lower not in VALID_RECOMMENDATIONS:
             # R21：不认识的推荐值是模型失控/新词，不是"中性"结论。置 None 交由
             # 下游按"未给出建议"处理，不把"模型说了句听不懂的话"伪装成业务结论。
-            logger.warning("[AIService] Output validation: unexpected recommendation: %s", recommendation)
+            logger.warning(
+                "[AIService] Output validation: unexpected recommendation: %s", _sanitize_logged_value(recommendation)
+            )
             response["recommendation"] = None
         else:
             response["recommendation"] = rec_lower
@@ -121,7 +139,9 @@ def validate_ai_analysis_response(response: dict) -> dict:
         if label_lower in CONCLUSION_LABELS:
             response[CONCLUSION_LABEL_FIELD] = label_lower
         else:
-            logger.warning("[AIService] Output validation: unexpected conclusion_label: %s", raw_label)
+            logger.warning(
+                "[AIService] Output validation: unexpected conclusion_label: %s", _sanitize_logged_value(raw_label)
+            )
             response[CONCLUSION_LABEL_FIELD] = None
 
     # SEC-002: sanitize free-text fields (length limit + control-char cleaning)
