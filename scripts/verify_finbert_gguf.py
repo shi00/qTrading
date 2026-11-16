@@ -38,7 +38,21 @@ f16 产物四判据宽裕通过（见 scripts/export_finbert_gguf.py docstring�
 **分类头对照（N3-1 产物 ``head.npz``）**：业务分类头已由 N3-1 产出（``head.npz``），
 产线 workflow 与正式发布均以 ``--head`` 指向该文件，第 3 / 4 项按训练好的头计算
 （格式见 ``reviews/新闻达标模型微调.md`` §8.2：``mode`` / ``labels`` / ``cw`` / ``cb``，
-非线性另有 ``pw`` / ``pb``）。省略 ``--head`` 时回退为**固定种子的确定性参考头**
+非线性另有 ``pw`` / ``pb``）。
+
+**分类头来源校验（D15-002）**：两侧共用同一 ``head.npz`` 只能证明「两条链路在同一映射下
+数值等价」，**不能证明该头来自本次训练的 best 权重**——正确形状的错轮次头，或标准池化
+模型漏取 pooler 的 linear 头，仍可能让概率接近；SHA256 也不替代语义核对。故
+``--head`` 与 ``--training-model``（训练产出的 ``BertForSequenceClassification`` 权重目录，
+产线为 ``stage_b_out/best``）**同时提供**时，门禁逐张量核对 ``cw`` / ``cb``（``bert``
+模式另含 ``pw`` / ``pb``）与训练权重 ``classifier.*`` / ``bert.pooler.dense.*`` 是否同源，
+并拒绝「标准池化头 + linear（缺 pooler）」组合。发布合格要求：f16 判据全过 **且**
+来源校验（``criteria.head_provenance``）通过；``--head`` 或 ``--training-model`` 缺一时
+仅诊断——``release.verdict=NOT_APPLICABLE``、``release.qualified=false``（M0 无训练头 /
+无训练权重的形态），不得作为发布合格结论。报告同时在 ``digests`` 记录 f16 GGUF /
+``head.npz`` / 分词器文件 / 训练权重目录的 SHA256 摘要，供发布溯源。
+
+省略 ``--head`` 时回退为**固定种子的确定性参考头**
 （linear 模式，行向量为单位向量、增益 1.0（不做任意缩放）、零偏置），同一权重
 同时作用于 PyTorch 侧与 GGUF 侧的**原始 CLS 特征**，使两侧概率在**同一映射**下
 可比——该模式用于在无训练头时独立复验两条链路的数值等价。
@@ -58,22 +72,26 @@ Usage:
         --reference-model ai_models/FinBERT2-base \
         --f16-gguf "$FINBERT_F16_GGUF" \
         --head ai_models/head.npz \
+        --training-model ai_models/best \
         --report ai_models/finbert2-news-f16.verify.json
 
-（``--head`` 可省略：省略时使用确定性参考头；正式发布须提供训练好的 ``head.npz``。）
+（``--head`` 可省略：省略时使用确定性参考头；正式发布须同时提供训练好的 ``head.npz``
+与 ``--training-model``，否则发布结论为 ``NOT_APPLICABLE``。）
 
 退出码：诊断 ``verdict`` 全部通过为 0，任一已评估判据失败为 1。退出码不区分
-「发布合格」与「仅诊断」：仅 q8 诊断模式 PASS 仍返回 0，但须以 ``release.qualified=false``
-与 ``release.verdict=NOT_APPLICABLE`` 判定其不构成发布合格。
+「发布合格」与「仅诊断」：仅 q8 诊断模式或缺少来源校验时 PASS 仍返回 0，但须以
+``release.qualified=false`` 与 ``release.verdict=NOT_APPLICABLE`` 判定其不构成发布合格。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import os
 import time
+from collections.abc import Mapping
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any
@@ -103,6 +121,26 @@ RELEASE_CRITERIA_F16 = (
 
 # 参考头增益灵敏度扫描点（仅用于披露第 3 项判据对头尺度的依赖，不参与主判定）
 SENSITIVITY_GAINS = (1.0, 2.0, 4.0, 6.0, 8.0)
+
+# 分类头来源校验（D15-002）：head.npz 与训练权重逐张量核对的容差。
+# 导出链路 float32 直存，同源张量应逐位相等；1e-6 仅吸收 dtype 转换舍入。
+HEAD_PROVENANCE_ATOL = 1e-6
+HEAD_PROVENANCE_CRITERION = "head_provenance"
+
+# 分类头输入域声明键（与 scripts/export_finbert_gguf.py 同源，D15-001）
+HEAD_DOMAIN_CONFIG_KEY = "qtrading_head_domain"
+HEAD_DOMAIN_CLS = "cls"
+
+# 报告 digest 覆盖的分词器文件（存在即记录，缺失不阻断——HF 分词器加载本身会失败）
+TOKENIZER_FILE_CANDIDATES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.txt",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "sentencepiece.bpe.model",
+    "spiece.model",
+)
 
 DEFAULT_N_TITLES = 200
 DEFAULT_SEED = 20261008
@@ -273,6 +311,14 @@ def load_head_npz(path: Path) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray,
     ``mode`` 只接受 ``linear`` / ``bert``，``labels`` 必须恰为 ``LABELS``，各数组
     dtype 为实数、形状与有限性合法；任一不符即拒绝加载（与 §8.2 的「不能静默降级」一致）。
     """
+    weight, bias, pre, _mode = load_head_npz_with_mode(path)
+    return weight, bias, pre
+
+
+def load_head_npz_with_mode(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray] | None, str]:
+    """同 :func:`load_head_npz`，额外返回 ``mode``（供 D15-002 来源校验区分 linear / bert）。"""
     with np.load(path, allow_pickle=False) as data:
         missing = [key for key in ("mode", "labels", "cw", "cb") if key not in data.files]
         if missing:
@@ -307,7 +353,161 @@ def load_head_npz(path: Path) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray,
                 _array("pw", (EMBEDDING_DIM, EMBEDDING_DIM)),
                 _array("pb", (EMBEDDING_DIM,)),
             )
-    return weight, bias, pre
+    return weight, bias, pre, mode
+
+
+def compare_head_to_training_state(
+    *,
+    mode: str,
+    weight: np.ndarray,
+    bias: np.ndarray,
+    pre: tuple[np.ndarray, np.ndarray] | None,
+    state_dict: Mapping[str, np.ndarray],
+    declared_cls_domain: bool,
+    atol: float = HEAD_PROVENANCE_ATOL,
+) -> dict[str, Any]:
+    """核对 ``head.npz`` 与训练权重是否同源（D15-002，纯函数）。
+
+    发布 Gate 不能只用同一份 external head 作用于两侧 CLS 就宣称「配套」：错轮次头、
+    或标准池化模型漏取 pooler 的 linear 头，形状合法且概率可能接近。本函数逐张量比对：
+
+    - ``cw`` ↔ ``classifier.weight``、``cb`` ↔ ``classifier.bias``；
+    - ``bert`` 模式另比对 ``pw`` ↔ ``bert.pooler.dense.weight``、``pb`` ↔ pooler bias；
+    - ``linear`` 模式在「存在 pooler 权重但未声明 ``qtrading_head_domain=cls``」时拒绝
+      （linear 头缺 pooler 与 tanh 非线性，与训练语义不配套）。
+
+    任一必需训练张量缺失、形状不符、超出 ``atol`` 或上述域不匹配即 ``ok=False``
+    （fail-closed）。错误细节只含参数名与形状，不含文件系统路径（R9）。
+
+    Args:
+        mode: ``head.npz`` 的 ``mode``（``linear`` / ``bert``）。
+        weight: ``head.npz`` 的 ``cw``。
+        bias: ``head.npz`` 的 ``cb``。
+        pre: ``bert`` 模式的 ``(pw, pb)``；``linear`` 为 ``None``。
+        state_dict: 训练产物 ``state_dict``（值为 numpy 数组）。
+        declared_cls_domain: 训练模型 ``config.json`` 是否声明 ``qtrading_head_domain=cls``。
+        atol: 逐元素最大绝对差容差。
+
+    Returns:
+        含 ``ok`` / ``checks`` / ``missing_state_keys`` / ``reasons`` 的 JSON 友好字典。
+    """
+    checks: dict[str, dict[str, Any]] = {}
+    missing_state_keys: list[str] = []
+    reasons: list[str] = []
+
+    expected: dict[str, np.ndarray] = {
+        "classifier.weight": weight,
+        "classifier.bias": bias,
+    }
+    if mode == "bert":
+        if pre is None:
+            reasons.append("mode=bert 但未提供 pw/pb（分类头不完整）")
+        else:
+            expected["bert.pooler.dense.weight"] = pre[0]
+            expected["bert.pooler.dense.bias"] = pre[1]
+
+    for key, head_array in expected.items():
+        state_array = state_dict.get(key)
+        if state_array is None:
+            missing_state_keys.append(key)
+            continue
+        state_float = np.ascontiguousarray(np.asarray(state_array, dtype=np.float32))
+        head_float = np.ascontiguousarray(np.asarray(head_array, dtype=np.float32))
+        if state_float.shape != head_float.shape:
+            checks[key] = {
+                "ok": False,
+                "max_abs_diff": None,
+                "detail": f"形状不符: state={state_float.shape} head={head_float.shape}",
+            }
+            continue
+        diff = max_abs_diff(state_float, head_float)
+        checks[key] = {"ok": diff <= atol, "max_abs_diff": diff}
+
+    if mode == "linear" and "bert.pooler.dense.weight" in state_dict and not declared_cls_domain:
+        reasons.append(
+            "linear_missing_pooler: 训练模型为标准池化头（存在 pooler 权重），"
+            "linear 头只取 classifier，缺少 pooler 与 tanh 非线性"
+        )
+
+    ok = bool(checks) and not missing_state_keys and all(item["ok"] for item in checks.values()) and not reasons
+    return {
+        "ok": ok,
+        "mode": mode,
+        "atol": atol,
+        "declared_cls_domain": declared_cls_domain,
+        "checks": checks,
+        "missing_state_keys": missing_state_keys,
+        "reasons": reasons,
+    }
+
+
+def sha256_file(path: Path) -> str:
+    """文件 SHA256（流式读取，避免整文件载入内存）。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def digest_files(base_dir: Path, filenames: list[str]) -> dict[str, Any]:
+    """对目录内指定文件做逐文件 + 合并 SHA256 摘要（缺失文件跳过）。"""
+    entries = {name: sha256_file(base_dir / name) for name in filenames if (base_dir / name).is_file()}
+    combined = hashlib.sha256()
+    for name in sorted(entries):
+        combined.update(f"{name}\0{entries[name]}\n".encode())
+    return {"sha256": combined.hexdigest() if entries else None, "files": entries}
+
+
+def build_digest_record(
+    *,
+    f16_gguf: Path | None,
+    q8_gguf: Path | None,
+    head: Path | None,
+    reference_model: Path,
+    training_model: Path | None,
+) -> dict[str, Any]:
+    """记录发布产物 / 分类头 / 分词器 / 训练权重摘要（D15-002 发布溯源用，纯函数）。
+
+    只记录本次实际提供的路径对应内容；文件或目录缺失时该槽位为 ``None``（不伪造摘要）。
+    训练权重目录覆盖 ``config.json`` 与权重文件，作为「best 权重」的可追溯锚点。
+    """
+    training_files: list[str] = []
+    if training_model is not None and training_model.is_dir():
+        training_files = ["config.json"]
+        training_files.extend(
+            sorted(
+                path.name
+                for path in training_model.iterdir()
+                if path.is_file() and (path.suffix == ".safetensors" or path.suffix == ".bin")
+            )
+        )
+    return {
+        "encoder_gguf": None
+        if f16_gguf is None or not f16_gguf.is_file()
+        else {
+            "path": str(f16_gguf),
+            "sha256": sha256_file(f16_gguf),
+        },
+        "q8_gguf": None
+        if q8_gguf is None or not q8_gguf.is_file()
+        else {
+            "path": str(q8_gguf),
+            "sha256": sha256_file(q8_gguf),
+        },
+        "head_npz": None
+        if head is None or not head.is_file()
+        else {
+            "path": str(head),
+            "sha256": sha256_file(head),
+        },
+        "tokenizer": digest_files(reference_model, list(TOKENIZER_FILE_CANDIDATES))
+        if reference_model.is_dir()
+        else {"sha256": None, "files": {}},
+        "training_model": None
+        if training_model is None or not training_files
+        else digest_files(training_model, training_files),
+    }
 
 
 def head_scale_sensitivity(
@@ -501,9 +701,12 @@ def evaluate_release(
 ) -> dict[str, Any]:
     """按「诊断结论 / 发布合格」双口径给出发布评估（纯函数）。
 
-    发布判据主体仅为 f16：``qualified`` 由 ``RELEASE_CRITERIA_F16`` 全部通过决定，
-    q8 对照判据不参与。仅提供 q8（诊断模式）时发布结论为 ``NOT_APPLICABLE``、
-    ``qualified=False``，即使诊断 ``verdict`` 为 PASS 也不构成发布合格结论。
+    发布判据主体为 f16 **且** 须通过分类头来源校验（``criteria.head_provenance``，
+    D15-002）：两侧共用 external head 只能证明表示等价，不能证明该头来自 best 权重。
+    q8 对照判据不参与发布合格。来源校验未执行（缺 ``--head`` / ``--training-model``，
+    即 M0 诊断形态）时发布结论为 ``NOT_APPLICABLE``、``qualified=False``，即使诊断
+    ``verdict`` 为 PASS 也不构成发布合格；来源校验明确失败（``ok=False``，错轮次头 /
+    linear 漏 pooler）时发布结论为 ``FAIL``。仅提供 q8 时同样 ``NOT_APPLICABLE``。
     """
     if not f16_gguf_provided:
         return {
@@ -513,7 +716,24 @@ def evaluate_release(
             "verdict": "NOT_APPLICABLE",
             "note": "仅诊断：未提供 --f16-gguf（发布判据主体），本报告不构成发布合格结论。",
         }
+    provenance_ok = criteria.get(HEAD_PROVENANCE_CRITERION, {}).get("ok")
     failed = [name for name in RELEASE_CRITERIA_F16 if criteria[name]["ok"] is not True]
+    if provenance_ok is not True:
+        if provenance_ok is False:
+            failed.insert(0, HEAD_PROVENANCE_CRITERION)
+            verdict = "FAIL"
+            note = "发布不合格：分类头与训练权重不配套（错轮次头或 linear 漏 pooler），不得发布。"
+        else:
+            verdict = "NOT_APPLICABLE"
+            note = "仅诊断：未执行分类头来源校验（须同时提供 --head 与 --training-model），本报告不构成发布合格结论。"
+        return {
+            "subject": "f16",
+            "applicable": False,
+            "qualified": False,
+            "verdict": verdict,
+            "failed_criteria": failed,
+            "note": note,
+        }
     qualified = not failed
     return {
         "subject": "f16",
@@ -521,7 +741,7 @@ def evaluate_release(
         "qualified": qualified,
         "verdict": "PASS" if qualified else "FAIL",
         "failed_criteria": failed,
-        "note": "发布判据主体 f16 已提供：qualified 由 f16 判据决定，q8 仅作对照。",
+        "note": "发布判据主体 f16 已提供且分类头来源校验通过：qualified 由 f16 判据决定，q8 仅作对照。",
     }
 
 
@@ -535,6 +755,38 @@ def _load_hf_reference(reference_model: Path) -> tuple[Any, Any]:
     model = transformers.AutoModel.from_pretrained(str(reference_model))
     model.eval()
     return tokenizer, model
+
+
+def _read_training_config(training_model: Path) -> dict[str, Any]:
+    """读取训练权重目录的 ``config.json``（仅本地目录，不访问网络）。
+
+    要求目录存在且架构声明 ``BertForSequenceClassification``——分类头来源校验必须
+    对比训练产出的 classifier / pooler，纯编码器目录无法证明配套性（fail-closed）。
+    异常消息只说明缺失字段，不回显文件系统路径（R9）。
+    """
+    if not training_model.is_dir():
+        raise ValueError("--training-model 必须是本地 HF 模型目录（用于离线校验分类头来源）")
+    config_path = training_model / "config.json"
+    if not config_path.is_file():
+        raise ValueError("--training-model 目录缺少 config.json，无法校验分类头来源")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    architectures = [str(item) for item in (config.get("architectures") or [])]
+    if "BertForSequenceClassification" not in architectures:
+        raise ValueError("--training-model 的 config.json 未声明 BertForSequenceClassification，无法校验分类头来源")
+    return config
+
+
+def _load_training_state(training_model: Path) -> dict[str, np.ndarray]:
+    """加载训练产出的序列分类 ``state_dict``（numpy float32），仅用于头部配套校验。"""
+    transformers = _import_optional("transformers")
+    model = transformers.AutoModelForSequenceClassification.from_pretrained(str(training_model))
+    try:
+        state = {
+            key: np.ascontiguousarray(value.detach().float().cpu().numpy()) for key, value in model.state_dict().items()
+        }
+    finally:
+        del model
+    return state
 
 
 def _hf_input_ids(tokenizer: Any, texts: list[str], max_length: int) -> list[list[int]]:
@@ -660,11 +912,15 @@ def _verify_one_backend(
 def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     """执行完整门禁并返回结构化报告。"""
     texts = build_probe_corpus(args.n_titles)
-    if args.head:
-        reference_head = load_head_npz(Path(args.head))
+    head_path = Path(args.head) if args.head else None
+    head_mode: str | None = None
+    if head_path is not None:
+        weight, bias, pre, head_mode = load_head_npz_with_mode(head_path)
+        reference_head = (weight, bias, pre)
         head_meta: dict[str, Any] = {
             "kind": "trained-npz",
-            "path": str(args.head),
+            "mode": head_mode,
+            "path": str(head_path),
             "note": "N3-1 产出的训练好的分类头；第 3 / 4 项直接使用该头。",
         }
     else:
@@ -678,6 +934,37 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "note": "M0 阶段无训练好的 head.npz（N3-1 产出）；同一固定头同时作用于两侧 CLS。"
             "正式发布前须用训练好的 head.npz 重跑本门禁（--head）。",
         }
+
+    # D15-002：分类头来源校验。仅当 --head 与 --training-model 同时提供时才执行；
+    # 缺失时保留 ok=None（诊断态），发布结论由 evaluate_release 判为 NOT_APPLICABLE。
+    training_model = Path(args.training_model) if args.training_model else None
+    if head_path is not None and training_model is not None:
+        training_config = _read_training_config(training_model)
+        declared = str(training_config.get(HEAD_DOMAIN_CONFIG_KEY) or "").strip().lower() == HEAD_DOMAIN_CLS
+        training_state = _load_training_state(training_model)
+        provenance = compare_head_to_training_state(
+            mode=str(head_mode),
+            weight=weight,
+            bias=bias,
+            pre=pre,
+            state_dict=training_state,
+            declared_cls_domain=declared,
+        )
+        provenance["checked"] = True
+        provenance["training_model"] = str(training_model)
+        provenance["detail"] = (
+            "已逐张量核对 head.npz 与训练 classifier/pooler 权重（D15-002）"
+            if provenance["ok"]
+            else "head.npz 与训练权重不配套（错轮次 / 漏 pooler / 形状或张量缺失），发布不合格"
+        )
+    else:
+        provenance = {
+            "ok": None,
+            "checked": False,
+            "detail": "未执行分类头来源校验（须同时提供 --head 与 --training-model），仅诊断、不构成发布合格",
+        }
+    head_meta["provenance"] = provenance
+
     tokenizer, model = _load_hf_reference(Path(args.reference_model))
     hf_ids = _hf_input_ids(tokenizer, texts, args.max_length)
     pytorch_cls = _pytorch_cls(model, tokenizer, texts, args.max_length)
@@ -743,7 +1030,22 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         # 同一编码器的 f16 / q8 embedding_dim 一致；probe_path 非空保证 backends 非空
         embedding_dim=int(next(iter(backends.values()))["embedding_dim"]),
     )
+    criteria[HEAD_PROVENANCE_CRITERION] = {
+        "ok": provenance["ok"],
+        "value": provenance["ok"],
+        "threshold": True,
+        "detail": provenance["detail"],
+    }
+    if provenance["ok"] is None:
+        criteria[HEAD_PROVENANCE_CRITERION]["skipped"] = True
     release = evaluate_release(criteria, f16_gguf_provided=f16_path is not None)
+    digests = build_digest_record(
+        f16_gguf=f16_path,
+        q8_gguf=q8_path,
+        head=head_path,
+        reference_model=Path(args.reference_model),
+        training_model=training_model,
+    )
 
     return {
         "schema": "finbert-gguf-verification.v1",
@@ -752,6 +1054,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "reference_model": str(args.reference_model),
             "f16_gguf": args.f16_gguf,
             "q8_gguf": None if q8_path is None else str(q8_path),
+            "training_model": args.training_model,
             "n_titles": args.n_titles,
             "seed": args.seed,
             "max_length": args.max_length,
@@ -759,6 +1062,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "corpus": "synthetic-deterministic (25 entities × 8 events; 宏观标题仅在 n_titles > 200 时追加)",
         },
         "head": head_meta,
+        "digests": digests,
         "embedding": {
             "dim": int(next(iter(backends.values()))["embedding_dim"]),
             "expected_dim": EMBEDDING_DIM,
@@ -821,7 +1125,7 @@ def _print_summary(report: dict[str, Any]) -> None:
     release = report["release"]
     print(f"发布口径: applicable={release['applicable']} qualified={release['qualified']} verdict={release['verdict']}")
     if not release["applicable"]:
-        print("[警告] 仅诊断、非发布合格：未提供 --f16-gguf（发布判据主体），本报告不得作为发布通过依据。")
+        print(f"[警告] 仅诊断、非发布合格：{release['note']}")
     print(f"VERDICT: {report['verdict']}")
     print("=" * 68)
 
@@ -837,6 +1141,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--report", default="ai_models/finbert2-news-f16.verify.json", help="报告输出路径")
     parser.add_argument("--head", default=None, help="训练好的分类头 head.npz（N3-1 产出；提供时取代确定性参考头）")
+    parser.add_argument(
+        "--training-model",
+        default=None,
+        help=(
+            "训练产出的 HF BertForSequenceClassification 权重目录（如 stage_b_out/best）："
+            "提供时逐张量核对 head.npz 与训练 classifier/pooler 配套性；与 --head 缺一时"
+            "发布结论为 NOT_APPLICABLE（仅诊断）"
+        ),
+    )
     parser.add_argument("--n-titles", type=int, default=DEFAULT_N_TITLES, help="探针标题数")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="确定性参考头种子")
     parser.add_argument("--head-gain", type=float, default=DEFAULT_HEAD_GAIN, help="参考头权重增益")
