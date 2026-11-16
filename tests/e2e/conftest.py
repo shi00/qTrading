@@ -1709,7 +1709,7 @@ def external_wizard_app(tmp_path_factory):
     外置 DB 连接串沿用测试进程的 ``DATABASE_URL`` / ``E2E_DATABASE_URL``
     （CI 由 job 提供真实 PG）。
     """
-    proc, url, cfg_file = _spawn(
+    proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh_CN",
@@ -1722,8 +1722,9 @@ def external_wizard_app(tmp_path_factory):
             "AUTO_MIGRATE": "true",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        instance_label="external-wizard",
     )
-    app = AppServer(proc, url, cfg_file)
+    app = AppServer(proc, url, cfg_file, logs)
     yield app
     _terminate(proc)
 
