@@ -1943,6 +1943,71 @@ class TestLoadHistoryData:
         assert vm.state.loading is False  # 异常路径仍复位 loading
 
     @pytest.mark.asyncio
+    async def test_failure_keeps_last_committed_identity(self, vm):
+        """ADD-UI-002: B 请求失败时, 标签/行/分页/警告仍完整归属上一次成功结果 A。"""
+        df_a = pd.DataFrame(
+            {
+                "ts_code": ["A.SZ"],
+                "ai_score": [1.0],
+                "exec_warnings": ['[{"key": "warn_a"}]'],
+            }
+        )
+        records = AsyncMock(side_effect=[df_a, RuntimeError("db down")])
+        with patch(
+            "ui.viewmodels.history_mode_mixin.CacheManager",
+            return_value=MagicMock(screener_dao=MagicMock(get_history_records=records)),
+        ):
+            await vm.load_history_data("20260906", run_id="runA")
+            before = vm.state
+            assert before.status_message is not None
+            assert before.current_page_rows and before.current_page_rows[0].values["ts_code"] == "A.SZ"
+            assert before.warnings, "前置条件: A 必须带有自身警告"
+            with pytest.raises(RuntimeError, match="db down"):
+                await vm.load_history_data("20260907", run_id="runB")
+
+        assert vm.state.loading is False
+        assert vm.state.status_message == before.status_message, "失败后标签必须保持 A, 不得标 B"
+        assert [r.values["ts_code"] for r in vm.state.current_page_rows] == ["A.SZ"]
+        assert vm.state.warnings == before.warnings
+        assert (vm.state.page_no, vm.state.total_items) == (before.page_no, before.total_items)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_load_keeps_last_committed_identity(self, vm):
+        """ADD-UI-002/R2: B 请求取消时保持 A 身份, 并继续传播 CancelledError。"""
+        df_a = pd.DataFrame({"ts_code": ["A.SZ"], "ai_score": [1.0], "exec_warnings": [[]]})
+        records = AsyncMock(side_effect=[df_a, asyncio.CancelledError()])
+        with patch(
+            "ui.viewmodels.history_mode_mixin.CacheManager",
+            return_value=MagicMock(screener_dao=MagicMock(get_history_records=records)),
+        ):
+            await vm.load_history_data("20260906", run_id="runA")
+            before = vm.state
+            with pytest.raises(asyncio.CancelledError):
+                await vm.load_history_data("20260907", run_id="runB")
+
+        assert vm.state.loading is False
+        assert vm.state.status_message == before.status_message
+        assert [r.values["ts_code"] for r in vm.state.current_page_rows] == ["A.SZ"]
+        assert vm.state.warnings == before.warnings
+
+    @pytest.mark.asyncio
+    async def test_empty_success_date_commits_its_own_identity(self, vm):
+        """ADD-UI-002: 区间外日期成功返回空集时, 全帧切换为 B+空表, 不残留 A 行。"""
+        df_a = pd.DataFrame({"ts_code": ["A.SZ"], "ai_score": [1.0], "exec_warnings": [[]]})
+        records = AsyncMock(side_effect=[df_a, pd.DataFrame()])
+        with patch(
+            "ui.viewmodels.history_mode_mixin.CacheManager",
+            return_value=MagicMock(screener_dao=MagicMock(get_history_records=records)),
+        ):
+            await vm.load_history_data("20260906", run_id="runA")
+            await vm.load_history_data("19900101", run_id="runB")
+
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.params["label"] == "#runB"
+        assert vm.state.current_page_rows == ()
+        assert vm.state.total_items == 0
+
+    @pytest.mark.asyncio
     async def test_load_discarded_when_mode_switched_during_await(self, vm):
         """M-UI-05: DAO await 期间用户切回 REALTIME, 迟到的历史写回必须丢弃 (丢失更新回归).
 

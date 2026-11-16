@@ -83,6 +83,66 @@ def _new_config_service() -> typing.Any:
     return ModelConfigurationService()
 
 
+# D14-002：事件剔除质量提示写入既有 ``coverage`` 质量通道的受控键。
+# 只保存 count / reason 代码；被剔除事件的 fact/quote 属未经引用校验的模型输出，
+# 不进入服务结果与持久化（R9）。
+_EVENT_VALIDATION_KEY: typing.Final[str] = "event_validation"
+_DROP_REASON_MAX_LEN: typing.Final[int] = 64
+
+
+def _is_controlled_drop_reason(reason: typing.Any) -> bool:
+    """剔除原因须为受控代码（小写 ASCII / 数字 / 下划线），拒绝自由文本。"""
+    if not isinstance(reason, str) or not reason or len(reason) > _DROP_REASON_MAX_LEN:
+        return False
+    return all(ch.isascii() and (ch.islower() or ch.isdigit() or ch == "_") for ch in reason)
+
+
+def _summarize_events_dropped(dropped: list[dict] | None) -> list[dict]:
+    """把分析层剔除明细压成受控摘要 ``[{"drop_reason", "dropped_count"}]``。
+
+    仅保留受控 reason 代码与计数（R9：不保留未校验 fact/quote）。无剔除 → ``[]``，
+    表示「已校验且无剔除」，区别于 ``None``（未知，R21）。
+    """
+    counts: dict[str, int] = {}
+    for item in dropped or []:
+        if not isinstance(item, dict):
+            continue
+        reason: typing.Any = item.get("drop_reason")
+        code = reason if isinstance(reason, str) and _is_controlled_drop_reason(reason) else "unknown"
+        counts[code] = counts.get(code, 0) + 1
+    return [{"drop_reason": code, "dropped_count": counts[code]} for code in sorted(counts)]
+
+
+def _events_dropped_from_coverage(coverage: typing.Any) -> list[dict] | None:
+    """从 coverage 质量通道严格回读剔除摘要。
+
+    缺失 / 非 dict / 脏值 → ``None``（旧快照未记录，R21：未知不得伪装成「无剔除」）。
+    """
+    if not isinstance(coverage, dict):
+        return None
+    payload = coverage.get(_EVENT_VALIDATION_KEY)
+    if not isinstance(payload, dict):
+        return None
+    dropped = payload.get("dropped")
+    if not isinstance(dropped, list):
+        return None
+    out: list[dict] = []
+    for item in dropped:
+        if not isinstance(item, dict):
+            return None
+        reason = item.get("drop_reason")
+        count = item.get("dropped_count")
+        if (
+            not _is_controlled_drop_reason(reason)
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+        ):
+            return None
+        out.append({"drop_reason": reason, "dropped_count": count})
+    return out
+
+
 @dataclass
 class NewsInsightOutcome:
     """服务编排结果：``result`` 为结构化风险简报；``reused`` 标记是否复用历史快照。
@@ -325,12 +385,28 @@ class NewsInsightService:
         return (cleaned or None), stripped
 
     @staticmethod
+    def _attach_event_validation(result: NewsInsightResult) -> None:
+        """D14-002：把剔除质量提示写入结果与既有 coverage 质量通道（仅成功态记录）。
+
+        - ``events_dropped`` 规范化为受控 count/reason 摘要（不含未校验 fact/quote，R9）；
+        - 同一摘要落 ``coverage["event_validation"]``，缓存 / 子集复用从该键同源回读；
+        - 非成功态不记录（failed / evidence_only 不落快照，也不得把校验失败伪装成提示）。
+        """
+        if result.analysis_status not in SUCCESS_STATUS:
+            return
+        summary = _summarize_events_dropped(result.events_dropped)
+        result.events_dropped = summary
+        base_coverage = result.coverage if isinstance(result.coverage, dict) else {}
+        result.coverage = {**base_coverage, _EVENT_VALIDATION_KEY: {"dropped": summary}}
+
+    @staticmethod
     def _row_to_result(row: dict, coverage: dict) -> NewsInsightResult:
         """把持久化快照行还原为 NewsInsightResult（缓存/子集复用）。
 
         ``generated_at`` 保留快照生成时点的 UTC-naive 原始语义；旧行 NULL / pandas NaT
         一律还原为 None（R21：未知不得伪装为读取时刻）。``execution_metadata`` 同样按
         原值恢复；历史 NULL / 非 dict 脏值还原为 None（未记录），不得用其他列推断或填默认。
+        D14-002：剔除摘要从 coverage 质量通道同源回读；旧行缺失该键 → None（未知）。
         """
         generated_at = row.get("generated_at")
         # NaT 是 datetime 子类（isinstance 为 True），但其自比较为 True；同时拦截非 datetime 的脏值。
@@ -341,6 +417,14 @@ class NewsInsightService:
         execution_metadata = row.get("execution_metadata")
         if not isinstance(execution_metadata, dict):
             execution_metadata = None
+        # D14-002：剔除摘要只认快照行（同源回读）；调用方传入的本次 coverage 不参与判定。
+        stored_coverage = row.get("coverage")
+        base_coverage = coverage if coverage else (stored_coverage or {})
+        merged_coverage = dict(base_coverage) if isinstance(base_coverage, dict) else {}
+        merged_coverage.pop(_EVENT_VALIDATION_KEY, None)
+        events_dropped = _events_dropped_from_coverage(stored_coverage)
+        if events_dropped is not None:
+            merged_coverage[_EVENT_VALIDATION_KEY] = {"dropped": events_dropped}
         return NewsInsightResult(
             analysis_status=row.get("analysis_status") or "failed",
             risk_level=row.get("risk_level"),
@@ -348,12 +432,13 @@ class NewsInsightService:
             summary=row.get("summary"),
             events=row.get("events") or [],
             evidence_news_ids=row.get("evidence_news_ids") or [],
-            coverage=coverage if coverage else (row.get("coverage") or {}),
+            coverage=merged_coverage,
             model_id=row.get("model_id"),
             analysis_profile=row.get("analysis_profile") or "",
             prompt_version=row.get("prompt_version") or NEWS_RISK_PROMPT_VERSION,
             generated_at=generated_at,
             execution_metadata=execution_metadata,
+            events_dropped=events_dropped,
         )
 
     # ------------------------------------------------------------------
@@ -714,6 +799,8 @@ class NewsInsightService:
         )
         result = await self.ai.analyze_news_risk(request)  # CancelledError 由 _chat_completion 传播（R2）
 
+        # D14-002：剔除质量提示规范化并写入 coverage 质量通道，随成功快照持久化。
+        self._attach_event_validation(result)
         await self._persist(ts_code, input_hash, window_start_utc, window_end_utc, result)
         return NewsInsightOutcome(result=result, reused=False)
 
