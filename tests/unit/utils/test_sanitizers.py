@@ -577,6 +577,68 @@ class TestSanitizeDict:
         finally:
             DataSanitizer._reset_known_secrets()
 
+    def test_list_and_nested_list_string_values_sanitized(self):
+        """D20-004: list（含嵌套 list）内的字符串叶子也应应用 PII 规则。"""
+        data = {
+            "messages": [
+                "客服电话: 13812345678",
+                ["邮箱 user@example.com", ["身份证 11010119900101123X"]],
+                42,
+                True,
+                None,
+            ]
+        }
+        result = DataSanitizer.sanitize_dict(data)
+        messages = result["messages"]
+        assert "13812345678" not in messages[0]
+        assert "user@example.com" not in messages[1][0]
+        assert "11010119900101123X" not in messages[1][1][0]
+        assert messages[2:] == [42, True, None]
+
+    def test_nested_container_url_credentials_and_query_sanitized(self):
+        """D20-004: 嵌套容器内的 URL 凭证与查询参数同样脱敏。"""
+        data = {"items": [{"url": "http://user:pass@example.com/path?token=abcdef"}]}
+        result = DataSanitizer.sanitize_dict(data)
+        url = result["items"][0]["url"]
+        assert "pass" not in url
+        assert "abcdef" not in url
+        assert "***" in url
+
+    def test_tuple_and_set_containers_recursed(self):
+        """D20-004: tuple/set 容器递归且保持容器类型。"""
+        data = {"pair": ("13812345678", {"secret": "x"}), "tags": {"user@example.com"}}
+        result = DataSanitizer.sanitize_dict(data)
+        assert isinstance(result["pair"], tuple)
+        assert "13812345678" not in result["pair"][0]
+        assert result["pair"][1]["secret"] == "***"
+        assert isinstance(result["tags"], set)
+        assert not any("@" in item for item in result["tags"])
+
+    def test_scalar_semantics_preserved(self):
+        """D20-004: 非字符串标量（bool/int/float/None/bytes）语义不变。"""
+        data = {"flag": True, "count": 0, "ratio": 1.5, "nothing": None, "raw": b"\x00"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert result["flag"] is True
+        assert result["count"] == 0
+        assert result["ratio"] == 1.5
+        assert result["nothing"] is None
+        assert result["raw"] == b"\x00"
+
+    def test_cyclic_container_does_not_recurse_forever(self):
+        """D20-004: 自引用容器以占位符截断，不触发 RecursionError。"""
+        loop: list = []
+        loop.append(loop)
+        result = DataSanitizer.sanitize_dict({"loop": loop})
+        assert result["loop"][0] == "***"
+
+    def test_deep_nesting_bounded(self):
+        """D20-004: 超过最大深度的容器以占位符截断，原值不泄露。"""
+        value: object = "13812345678"
+        for _ in range(DataSanitizer._MAX_SANITIZE_DEPTH + 5):
+            value = [value]
+        result = DataSanitizer.sanitize_dict({"deep": value})
+        assert "13812345678" not in repr(result)
+
 
 class TestSanitizeDictPwdPassKeys:
     """UIR-X01-102 残留：env 中的 PWD/PASS 类键须默认脱敏（R9）。
@@ -710,6 +772,48 @@ class TestSanitizeArgs:
             assert "***" in args[0]
         finally:
             DataSanitizer._reset_known_secrets()
+
+    def test_positional_string_pii_masked(self):
+        """D20-004: 位置字符串参数应用 PII 规则（不再仅替换已注册 secret）。"""
+        args, _ = DataSanitizer.sanitize_args("联系 13812345678 或 user@example.com")
+        assert "13812345678" not in args[0]
+        assert "user@example.com" not in args[0]
+        assert "***" in args[0]
+
+    def test_positional_string_url_rules_applied(self):
+        """D20-004: 位置字符串参数应用 URL 凭证与查询参数规则。"""
+        args, _ = DataSanitizer.sanitize_args("GET http://user:pass@api.example.com/v1?token=abcdef")
+        assert "pass" not in args[0]
+        assert "abcdef" not in args[0]
+
+    def test_positional_container_pii_masked(self):
+        """D20-004: list/dict 位置参数内的字符串叶子应用 PII 规则。"""
+        args, _ = DataSanitizer.sanitize_args(["13812345678", {"contact": "user@example.com"}])
+        assert "13812345678" not in args[0]
+        assert "user@example.com" not in args[0]
+
+    def test_positional_tuple_and_set_pii_masked(self):
+        """D20-004: tuple/set 位置参数同样递归脱敏。"""
+        args, _ = DataSanitizer.sanitize_args(("13812345678", "ok"), {"user@example.com"})
+        assert "13812345678" not in args[0]
+        assert "user@example.com" not in args[1]
+
+    def test_positional_dict_sensitive_key_masked(self):
+        """D20-004: dict 位置参数的敏感键按 sensitive_patterns 遮蔽。"""
+        args, _ = DataSanitizer.sanitize_args({"password": "short"})
+        assert "short" not in args[0]
+        assert "***" in args[0]
+
+    def test_positional_none_bytes_and_numbers(self):
+        """D20-004: None/bytes/bool/数字位置参数保持既有 repr 语义。"""
+        args, _ = DataSanitizer.sanitize_args(None, b"raw", True, 3.5)
+        assert args == ("None", "b'raw'", "True", "3.5")
+
+    def test_positional_long_string_pii_within_truncation_window(self):
+        """D20-004: 长字符串截断前对窗口内 PII 脱敏，截断标记保持。"""
+        args, _ = DataSanitizer.sanitize_args("联系 13812345678 " + "x" * 200)
+        assert "13812345678" not in args[0]
+        assert args[0].endswith("...(truncated)")
 
 
 class TestAIServiceErrorSanitization:

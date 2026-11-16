@@ -49,7 +49,6 @@ from ui.viewmodels.model_usage_view_model import (
     EXPORT_MONTHLY_SUMMARY,
     EXPORT_SCOPE_ALL,
     EXPORT_SCOPE_PAGE,
-    PAGE_SIZE,
     PRICING_STATUS_ALL_UNPRICED,
     PRICING_STATUS_EMPTY,
     PRICING_STATUS_KNOWN,
@@ -60,6 +59,7 @@ from ui.viewmodels.model_usage_view_model import (
     ModelUsageViewModel,
     MonthUsageRow,
     month_pricing_status,
+    total_page_count,
 )
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -693,6 +693,8 @@ def _build_budget_edit_row(state: ModelUsageState, vm: ModelUsageViewModel) -> f
     未设限额显式「未设置」（空输入保存即清除限额）、读取失败显式「未知」，
     均不以 0 伪装（R21）。金额经 VM 草稿状态承载（on_change 同步 setter，沿
     ``set_search`` 先例），保存经 ``page.run_task(vm.save_monthly_budget)`` 提交（R16）。
+    D19-003：输入框 Enter 与保存按钮共用同一 VM 命令（不另造保存路径），
+    重复提交由 VM 进行中守卫归属；非法 / 空值仍走 VM 校验，不因按键绕过。
     """
     if state.monthly_limit_unknown:
         current_text = I18n.get("model_usage_unknown")
@@ -720,6 +722,7 @@ def _build_budget_edit_row(state: ModelUsageState, vm: ModelUsageViewModel) -> f
                     color=AppColors.INPUT_TEXT,
                     border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
                     on_change=safe_on_change(lambda e: vm.set_budget_draft(get_control_value(e.control, ft.TextField))),
+                    on_submit=safe_on_click(_run_task_handler(vm.save_monthly_budget)),
                 ),
             ),
             anchored(
@@ -960,6 +963,8 @@ def _build_request_rows(state: ModelUsageState, vm: ModelUsageViewModel) -> list
 
 
 def _build_pagination(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Control:
+    """分页控件（D18-007）：``state.total`` 是记录数，显示与边界均按总页数换算。"""
+    total_pages = total_page_count(state.total)
     return ft.Row(
         [
             anchored(
@@ -972,7 +977,7 @@ def _build_pagination(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Con
                 ),
             ),
             ft.Text(
-                I18n.get("model_usage_page_indicator", page=state.page + 1, total=state.total),
+                I18n.get("model_usage_page_indicator", page=state.page + 1, total=total_pages),
                 size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.TEXT_SECONDARY,
             ),
@@ -981,7 +986,7 @@ def _build_pagination(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Con
                 ft.TextButton(
                     content=I18n.get("model_usage_next_page"),
                     key="usage_next_page",
-                    disabled=(state.page + 1) * PAGE_SIZE >= state.total,
+                    disabled=state.page + 1 >= total_pages,
                     on_click=safe_on_click(_run_task_handler(vm.next_page)),
                 ),
             ),
@@ -1207,14 +1212,11 @@ def _build_usage_view(
                         ),
                     ),
                     # F37：导出范围选择（当前页 / 全部筛选结果），范围进文件名可辨识。
-                    ft.Text(
-                        I18n.get("model_usage_export_scope_label"),
-                        size=AppStyles.FONT_SIZE_CAPTION,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
+                    # D19-002：持久 label 承载可访问名称，替代原先无关联的旁置 Text。
                     anchored(
                         EIDS.MODEL.USE_EXPORT_SCOPE,
                         ft.Dropdown(
+                            label=I18n.get("model_usage_export_scope_label"),
                             value=state.export_scope,
                             width=AppStyles.CONTROL_WIDTH_SM,
                             options=[
