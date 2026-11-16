@@ -38,7 +38,10 @@ pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
 class _FakePlugin(SourcePlugin):
-    """测试替身：``build_queries`` 按 payload 数展开，``request`` 直接返回预置 payload。"""
+    """测试替身：``build_queries`` 按 payload 数展开，``request`` 直接返回预置 payload。
+
+    envelope 校验按「payload 是否为 list」模拟：非 list（如登录 HTML / wrong-type）判为解析失败。
+    """
 
     name = "fake"
     source_kind = "news"
@@ -46,7 +49,12 @@ class _FakePlugin(SourcePlugin):
     rate_limit_seconds = DEFAULT_RATE_LIMIT_SECONDS
     drop_routine = False
 
-    def __init__(self, payloads: list[list[dict[str, Any]]], *, fail_at: set[int] | None = None) -> None:
+    def __init__(
+        self,
+        payloads: list[Any],
+        *,
+        fail_at: set[int] | None = None,
+    ) -> None:
         self._payloads = payloads
         self._fail_at = fail_at or set()
         self.calls = 0
@@ -67,6 +75,16 @@ class _FakePlugin(SourcePlugin):
 
     def parse(self, raw: Any, query: CollectQuery) -> list[dict[str, Any]]:
         return raw
+
+    def has_expected_envelope(self, raw: Any) -> bool:
+        return isinstance(raw, list)
+
+
+class _RaisingParsePlugin(_FakePlugin):
+    """envelope 合法但解析抛错的替身（验证解析异常不中断整轮采集）。"""
+
+    def parse(self, raw: Any, query: CollectQuery) -> list[dict[str, Any]]:
+        raise ValueError("parse boom")
 
 
 class _RoutinePlugin(_FakePlugin):
@@ -442,3 +460,140 @@ async def test_collect_source_circuit_opens_and_skips_remaining(tmp_path: Path):
     assert summary["ok_requests"] == 0
     assert summary["circuit_opened"] is True
     assert summary["skipped_queries"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# D14-004：HTTP 成功 ≠ 解析成功（真实空 / envelope 不符 / 解析抛错）
+# --------------------------------------------------------------------------- #
+async def test_collect_source_valid_empty_is_success_not_failure(tmp_path: Path):
+    fake = _FakePlugin([[]])
+    with CorpusStore(tmp_path / "c.db") as store:
+        summary = await collect_corpus._collect_source(
+            fake,
+            CollectParams(pages=1),
+            store,
+            {},
+            rate_limit=0.0,
+            failure_threshold=1,
+            cooldown_seconds=60.0,
+            dry_run=False,
+        )
+    assert (summary["ok_requests"], summary["empty_responses"]) == (1, 1)
+    assert (summary["failed_requests"], summary["parse_failed"]) == (0, 0)
+    assert summary["kept"] == 0 and summary["circuit_opened"] is False
+
+
+async def test_collect_source_invalid_envelope_counts_failure_and_opens_circuit(tmp_path: Path):
+    fake = _FakePlugin([object(), object(), object()])
+    with CorpusStore(tmp_path / "c.db") as store:
+        summary = await collect_corpus._collect_source(
+            fake,
+            CollectParams(pages=3),
+            store,
+            {},
+            rate_limit=0.0,
+            failure_threshold=2,
+            cooldown_seconds=60.0,
+            dry_run=False,
+        )
+        assert store.count() == 0  # 解析失败不得入库
+    assert summary["ok_requests"] == 0
+    assert (summary["failed_requests"], summary["parse_failed"]) == (2, 2)
+    assert summary["circuit_opened"] is True and summary["skipped_queries"] == 1
+    assert summary["empty_responses"] == 0  # 不得把解析失败当作真实空
+
+
+async def test_collect_source_parse_exception_counts_failure_without_aborting(tmp_path: Path):
+    plugin = _RaisingParsePlugin([[]])
+    with CorpusStore(tmp_path / "c.db") as store:
+        summary = await collect_corpus._collect_source(
+            plugin,
+            CollectParams(pages=1),
+            store,
+            {},
+            rate_limit=0.0,
+            failure_threshold=3,
+            cooldown_seconds=60.0,
+            dry_run=False,
+        )
+    assert summary["ok_requests"] == 0
+    assert (summary["failed_requests"], summary["parse_failed"]) == (1, 1)
+
+
+async def test_collect_source_partial_parse_failure_keeps_valid_pages(tmp_path: Path):
+    fake = _FakePlugin([[_doc("1", "甲")], object()])
+    with CorpusStore(tmp_path / "c.db") as store:
+        summary = await collect_corpus._collect_source(
+            fake,
+            CollectParams(pages=2),
+            store,
+            {},
+            rate_limit=0.0,
+            failure_threshold=3,
+            cooldown_seconds=60.0,
+            dry_run=False,
+        )
+        assert store.count() == 1  # 合法页仍入库，失败页不写入
+    assert (summary["ok_requests"], summary["parse_failed"], summary["inserted"]) == (1, 1, 1)
+
+
+def test_main_returns_zero_for_legit_empty_response(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    assert _run_main(monkeypatch, _FakePlugin([[]]), tmp_path) == 0
+
+
+def test_main_returns_nonzero_and_persists_nothing_on_parse_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    assert _run_main(monkeypatch, _FakePlugin([object()]), tmp_path) == 1
+    with CorpusStore(tmp_path / "corpus.db") as store:
+        assert store.count() == 0
+    captured = capsys.readouterr()
+    assert "解析失败 1" in captured.err
+    assert "解析失败 1" in captured.out
+
+
+def test_main_returns_nonzero_on_request_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    assert _run_main(monkeypatch, _FakePlugin([[_doc("1", "甲")]], fail_at={0}), tmp_path) == 1
+
+
+@pytest.mark.parametrize(
+    ("source", "payload", "expected_status"),
+    [
+        # 新浪 7x24：空 list 为真实空；HTML / 缺层级 / wrong-type 为解析失败
+        ("sina_7x24", {"result": {"data": {"feed": {"list": [], "page_info": {"totalNum": 0}}}}}, "valid_empty"),
+        ("sina_7x24", {"result": {"data": {"feed": {"list": None}}}}, "valid_empty"),
+        ("sina_7x24", "<html>请登录</html>", "invalid"),
+        ("sina_7x24", {"result": {"data": {"feed": {"list": "bad"}}}}, "invalid"),
+        ("sina_7x24", {"result": {"data": {"feed": {}}}}, "invalid"),
+        ("sina_7x24", {"result": {"data": {"feed": {"list": [{"id": 1, "rich_text": "正文"}]}}}}, "ok"),
+        # 巨潮：两种合法空形态；登录 HTML / 缺分页字段 / wrong-type 为解析失败
+        ("cninfo", {"announcements": [], "totalRecordNum": 0}, "valid_empty"),
+        ("cninfo", {"announcements": None, "totalRecordNum": 0}, "valid_empty"),
+        # 分页越界：announcements=null 但总数仍 >0，属合法空而非解析失败
+        ("cninfo", {"announcements": None, "totalRecordNum": 743}, "valid_empty"),
+        ("cninfo", "<html>请登录</html>", "invalid"),
+        ("cninfo", {"code": 0, "message": "ok"}, "invalid"),
+        ("cninfo", {"announcements": "bad", "totalRecordNum": 0}, "invalid"),
+        ("cninfo", {"announcements": [], "totalRecordNum": "0"}, "invalid"),
+        (
+            "cninfo",
+            {"announcements": [{"announcementId": "1", "announcementTitle": "标题"}], "totalRecordNum": 1},
+            "ok",
+        ),
+        # 新浪个股：容器在但无行为真实空；拦截页 / wrong-type 为解析失败
+        ("sina_stock", '<div class="datelist"><ul></ul></div>', "valid_empty"),
+        ("sina_stock", "<html><body>请登录</body></html>", "invalid"),
+        ("sina_stock", 123, "invalid"),
+        (
+            "sina_stock",
+            '<div class="datelist"><ul>2026-10-08&nbsp;18:03&nbsp;&nbsp;'
+            "<a target='_blank' href='https://news/1'>标题</a> <br></ul></div>",
+            "ok",
+        ),
+    ],
+)
+def test_builtin_plugin_parse_page_separates_empty_from_invalid(source: str, payload: Any, expected_status: str):
+    outcome = get_plugin(source).parse_page(payload, CollectQuery())
+    assert outcome.status == expected_status
+    if expected_status != "ok":
+        assert outcome.docs == []
