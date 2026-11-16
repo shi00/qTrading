@@ -2311,6 +2311,74 @@ class TestDoSavePromptAsync:
                 "校验失败应在 ai_system_prompt 字段上显示 inline 错误"
             )
 
+    def test_invalid_prompt_error_stored_as_message(self) -> None:
+        """ADD-UI-004: 失败时回传 Message(key+params), 不保存已翻译字符串."""
+        from ui.views import screener_view as mod
+        from utils.prompt_guard import MAX_PROMPT_LENGTH
+
+        fake_vm = MagicMock()
+        fake_vm.state.strategy_params = {"ai_system_prompt": "draft prompt"}
+        fake_vm.save_strategy_prompt = AsyncMock(return_value=(False, "prompt_err_length"))
+
+        captured: list[Any] = []
+        asyncio.run(mod._execute_save_prompt(fake_vm, MagicMock(), "value", captured.append))
+
+        assert len(captured) == 1
+        error = captured[0]
+        assert isinstance(error, Message), "错误必须以 Message 保存, 否则切语言后无法重译"
+        assert error.key == "prompt_err_length"
+        assert error.params == {"max": MAX_PROMPT_LENGTH}
+
+    def test_invalid_prompt_error_retranslated_on_locale_switch(self, screener_view_with_params_env) -> None:
+        """ADD-UI-004: 常驻页切 zh↔en 后 inline 错误重译, 上限值与草稿保留."""
+        env = screener_view_with_params_env
+        page = env["page"]
+        fake_vm = env["fake_vm"]
+        mock_i18n = env["mock_i18n"]
+
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
+
+        def _zh_get(key: str, *a: Any, **kw: Any) -> str:
+            if key == "prompt_err_length":
+                return f"提示词长度超过限制（最大 {kw['max']} 字符）"
+            return f"i18n[{key}]"
+
+        def _en_get(key: str, *a: Any, **kw: Any) -> str:
+            if key == "prompt_err_length":
+                return f"Prompt exceeds maximum length of {kw['max']} characters"
+            return f"i18n[{key}]"
+
+        mock_i18n.get.side_effect = _zh_get
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
+            mock_save.return_value = (False, "prompt_err_length")
+            page.run_task.reset_mock()
+            _invoke(save_btn.on_click, _make_event())
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
+
+        _rerender(env)
+        prompt_field = _get_ai_prompt_field(env)
+        assert prompt_field.error == "提示词长度超过限制（最大 8000 字符）"
+        assert prompt_field.value == "draft prompt", "切语言不得清空用户 Prompt 草稿"
+
+        mock_i18n.get.side_effect = _en_get
+        _rerender(env)
+        prompt_field = _get_ai_prompt_field(env)
+        assert prompt_field.error == "Prompt exceeds maximum length of 8000 characters", (
+            "错误应按当前 locale 重译, 而非沿用保存时的译文"
+        )
+        assert prompt_field.value == "draft prompt"
+
+    def test_non_i18n_error_text_rendered_verbatim(self) -> None:
+        """ADD-UI-004: 非 i18n 文本 (如异常消息) 按原文渲染, 不被当作 key 误译/误格式化."""
+        from core.i18n import I18n
+        from ui.views.screener_view import _render_status_message
+
+        I18n.initialize()
+        assert _render_status_message(Message("db error: connection refused")) == "db error: connection refused"
+
     def test_valid_prompt_saves_successfully(self, screener_view_with_params_env) -> None:
         """vm.save_strategy_prompt 返回 (True, None) → show_toast("ai_settings_saved")."""
         env = screener_view_with_params_env
@@ -2467,7 +2535,7 @@ class TestBuildScreenerParamsSidebar:
 
         def _impl() -> Any:
             return env["mod"]._build_screener_params_sidebar(
-                env["fake_vm"].state, env["fake_vm"], handlers=handlers, prompt_error=""
+                env["fake_vm"].state, env["fake_vm"], handlers=handlers, prompt_error=None
             )
 
         return render_once(make_component(_impl))
