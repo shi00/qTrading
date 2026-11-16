@@ -704,7 +704,7 @@ async def test_diagnostics_export_config_snapshot_edge_shapes(tmp_path):
                 {"adapter_options": {"dialog_model_path": "", "head_path": None}},
                 {"adapter_options": {"dialog_model_path": f"\\\\fileserver\\Users\\{fake_user}\\model.gguf"}},
                 {"model": f"\\\\fileserver\\Users\\{fake_user}\\model.gguf", "adapter_options": {"n_ctx": 4096}},
-                # 嵌套 list 内的 dict：顶层 sanitize_dict 不会触达
+                # 嵌套 list 内的 dict：验证序列化边界仍递归脱敏（D20-004）
                 {"extra": [{"api_key": "nestedlist_diag_secret", "value": 1.5}]},
             ]
         }

@@ -37,6 +37,7 @@ import pytest
 
 from tests.unit.ui.component_renderer import (
     FakePage,
+    attach_fake_page,
     make_component,
     render_once,
     run_mount_effects,
@@ -52,6 +53,30 @@ pytestmark = pytest.mark.unit
 
 def _read_source() -> str:
     return _HOME_VIEW_PATH.read_text(encoding="utf-8")
+
+
+def _collect_link_labels(control: Any) -> list[str]:
+    """递归收集控件树中「查看个股」TextButton 标签 (宿主渲染级断言辅助)。
+
+    嵌套 ``@ft.component`` 在同步渲染中只生成 Component 包装, 需再驱动一次
+    函数体才能取得实际控件树。
+    """
+    from flet.components.component import Component
+
+    if isinstance(control, Component):
+        return _collect_link_labels(render_once(control))
+    labels: list[str] = []
+    if isinstance(control, ft.TextButton):
+        content = control.content
+        labels.append(content if isinstance(content, str) else "")
+    for attr in ("content", "controls"):
+        value = getattr(control, attr, None)
+        if isinstance(value, ft.Control):
+            labels.extend(_collect_link_labels(value))
+        elif isinstance(value, list):
+            for child in value:
+                labels.extend(_collect_link_labels(child))
+    return labels
 
 
 class TestHomeViewDeclarativeContract:
@@ -224,6 +249,8 @@ class _FakeHomeState:
     news_rows: tuple = ()
     # UX-09 MINOR-03: 有效股票代码集合 (对齐 HomeState), 供 NewsFeed 链接校验
     valid_stock_codes: Any = None
+    # D18-005: 完整股票身份集合 (CODE.EXCHANGE, 对齐 HomeState), 供带前缀链接校验
+    valid_stock_ts_codes: Any = None
     market_indices: tuple = ()
     market_hsgt: Any = None
     market_hot_concepts: tuple = ()
@@ -257,6 +284,8 @@ class _FakeHomeViewModel:
         self.news_return: tuple[pd.DataFrame | None, bool] = (pd.DataFrame(), False)
         self.next_page_return: tuple[pd.DataFrame | None, bool] = (None, False)
         self.cached_market_data_return: dict | None = {"date": "2025-01-01"}
+        # D17-001: 与真实 VM 一致的全量加载所有权代次
+        self._view_generation = 0
 
     @property
     def state(self) -> _FakeHomeState:
@@ -319,12 +348,15 @@ class _FakeHomeViewModel:
     def begin_load(self) -> tuple[int, int]:
         """UIR-F04-003: Mock 全量加载入口, 返回 (view 代次, news 代次)."""
         self.method_calls.append("begin_load")
+        self._view_generation += 1
         self._set_state(is_loading=True, load_error=None, is_loading_more=False)
-        return (1, 1)
+        return (self._view_generation, 1)
 
     def end_load(self, view_generation: int, error: Any = None) -> None:
-        """UIR-F04-003: Mock 全量加载收尾 (归属由真实 VM 校验)."""
-        self.method_calls.append("end_load")
+        """UIR-F04-003: Mock 全量加载收尾 (旧代次收尾为 no-op, 同真实 VM)."""
+        self.method_calls.append(f"end_load:{view_generation}")
+        if view_generation != self._view_generation:
+            return
         self._set_state(is_loading=False, load_error=error)
 
     async def refresh_news(self, generation: int | None = None) -> tuple[pd.DataFrame | None, bool]:
@@ -563,6 +595,58 @@ class TestHomeViewRuntime:
         content = source.read_text(encoding="utf-8")
         assert "is_loading_more=state.is_loading_more" in content
 
+    def test_newsfeed_receives_valid_stock_ts_codes_prop(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D18-005: HomeView 将完整股票身份集合传给 NewsFeed (源码契约)."""
+        assert "valid_stock_ts_codes=state.valid_stock_ts_codes" in _read_source()
+
+    def test_host_render_links_prefixed_stock_but_not_index(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D18-005: 宿主渲染中 SZ000001 唯一入口, SH000001 指数不冒充该股票."""
+        from ui.viewmodels.home_view_model import NewsRow
+        from ui.views.home_view import HomeView
+
+        mock_home_vm._set_state(
+            news_rows=(
+                NewsRow(
+                    content="平安银行 SZ000001 上涨，上证指数 SH000001 收涨",
+                    publish_time="2024-06-15 10:30:00",
+                ),
+            ),
+            valid_stock_codes=frozenset({"000001", "600519"}),
+            valid_stock_ts_codes=frozenset({"000001.SZ", "600519.SH"}),
+        )
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        labels = _collect_link_labels(result)
+        assert len(labels) == 1
+        assert "000001" in labels[0]
+        assert "SH000001" not in labels[0]
+
+    def test_host_render_without_ts_identity_hides_prefixed_link(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D18-005: 宿主未加载完整身份集合时, 带前缀引用降级为不展示 (R21)."""
+        from ui.viewmodels.home_view_model import NewsRow
+        from ui.views.home_view import HomeView
+
+        mock_home_vm._set_state(
+            news_rows=(NewsRow(content="平安银行 SZ000001 上涨", publish_time="2024-06-15 10:30:00"),),
+            valid_stock_codes=frozenset({"000001"}),
+            valid_stock_ts_codes=frozenset(),
+        )
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        assert _collect_link_labels(result) == []
+
     def test_render_includes_dashboard_and_news_section(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
     ) -> None:
@@ -611,7 +695,7 @@ class TestHomeViewRuntime:
         mock_app_colors_state,
         mock_home_vm,
     ) -> None:
-        """refresh button on_click 触发 page.run_task(_load_data)."""
+        """refresh button on_click 触发 page.run_task(统一加载入口 _init_and_load)."""
         from ui.views.home_view import HomeView
 
         component = make_component(HomeView)
@@ -629,8 +713,9 @@ class TestHomeViewRuntime:
         # 触发 on_click (传入 mock event)
         refresh_btn.on_click(MagicMock())
 
-        # run_task 被调用 (传入 _load_data 协程函数)
+        # run_task 被调用 (传入统一加载入口协程函数; D17-001: 刷新也覆盖初始化阶段)
         assert page.run_task.called
+        assert getattr(page.run_task.call_args.args[0], "__name__", "") == "_init_and_load"
 
     def test_cache_cleared_notify_clears_state(
         self,
@@ -996,6 +1081,16 @@ class TestHomeViewExceptionPaths:
                 return ctrl.kwargs["on_load_more_click"]
         raise AssertionError("NewsFeed on_load_more_click not found")
 
+    @staticmethod
+    def _find_error_state(result: Any) -> Any:
+        """从渲染结果中找到 ErrorState 组件 (以 on_retry kwargs 识别)。"""
+        from flet.components.component import Component
+
+        for ctrl in result.content.controls:
+            if isinstance(ctrl, Component) and "on_retry" in ctrl.kwargs:
+                return ctrl
+        return None
+
     def test_on_load_more_click_handles_exception(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
         """_on_load_more_click 中 vm.load_next_page 抛 Exception → logger.error + R9 守卫.
 
@@ -1056,10 +1151,13 @@ class TestHomeViewExceptionPaths:
             asyncio.run(on_load_more())
 
     def test_init_and_load_handles_init_exception(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
-        """_init_and_load 中 vm.init 抛 Exception → 不传播 (logger.error).
+        """D17-001: vm.init 抛 Exception → 提交可见错误态 + 退出 busy + 渲染重试入口。
 
-        覆盖 lines 106-107 (except Exception: logger.error).
+        原缺陷: 仅记日志, HomeState 保持 is_loading=False/load_error=None,
+        View 继续渲染行情/新闻正常分支, 初始化失败被表现为"空内容"。
         """
+        from flet.components.component import Component
+
         from ui.views.home_view import HomeView
 
         def raise_init() -> None:
@@ -1069,17 +1167,27 @@ class TestHomeViewExceptionPaths:
 
         component = make_component(HomeView)
         page = _make_fake_page()
-        # mount effect 调 _init_and_load, vm.init 抛 Exception 被 except 捕获
+        # mount effect 调 _init_and_load, vm.init 抛 Exception → 由 VM 公开命令收尾
         run_mount_effects(component, page=page)
-        # 不抛异常即通过
+
+        assert mock_home_vm.state.load_error is not None
+        assert mock_home_vm.state.load_error.key == "home_load_failed_title"
+        assert mock_home_vm.state.is_loading is False
+
+        # 错误态渲染: ErrorState(含 on_retry) 出现, 正常内容分支不渲染
+        result = render_once(component)
+        controls = result.content.controls
+        error_ctrl = self._find_error_state(result)
+        assert error_ctrl is not None, "初始化失败必须渲染 ErrorState"
+        assert error_ctrl.kwargs["retry_text"], "错误态必须提供重试按钮文案"
+        assert not any(isinstance(c, Component) and "news_rows" in c.kwargs for c in controls), (
+            "初始化失败不得同时渲染正常新闻/行情分支"
+        )
 
     def test_init_and_load_handles_init_data_exception(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
     ) -> None:
-        """_init_and_load 中 vm.init_data 抛 Exception → 不传播 (logger.error).
-
-        覆盖 lines 106-107 (except Exception: logger.error).
-        """
+        """D17-001: vm.init_data 抛 Exception → 同样收敛为可见错误态 (非空内容)。"""
         from ui.views.home_view import HomeView
 
         async def raise_init_data() -> None:
@@ -1090,7 +1198,108 @@ class TestHomeViewExceptionPaths:
         component = make_component(HomeView)
         page = _make_fake_page()
         run_mount_effects(component, page=page)
-        # 不抛异常即通过
+
+        assert mock_home_vm.state.load_error is not None
+        assert mock_home_vm.state.load_error.key == "home_load_failed_title"
+        assert mock_home_vm.state.is_loading is False
+        assert "load_market_data" not in mock_home_vm.method_calls
+
+        result = render_once(component)
+        assert self._find_error_state(result) is not None
+
+    def test_retry_after_init_failure_reruns_init_and_recovers(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D17-001: 初始化失败后重试必须重跑初始化的失败阶段并恢复。
+
+        反证点: 若重试只重跑 _load_data, processor 未就绪将永久不可恢复。
+        """
+        import asyncio
+
+        from ui.views.home_view import HomeView
+
+        attempts = {"count": 0}
+
+        def flaky_init() -> None:
+            attempts["count"] += 1
+            mock_home_vm.method_calls.append("init")
+            if attempts["count"] == 1:
+                raise RuntimeError("init failed")
+
+        mock_home_vm.init = flaky_init
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        assert mock_home_vm.state.load_error is not None
+
+        result = render_once(component)
+        error_ctrl = self._find_error_state(result)
+        assert error_ctrl is not None
+
+        page.run_task.reset_mock()
+        error_ctrl.kwargs["on_retry"]()
+        assert page.run_task.called
+        # 重试经 run_task 调度统一入口协程函数; 测试中手动执行该协程
+        scheduled = page.run_task.call_args.args[0]
+        asyncio.run(scheduled())
+
+        assert attempts["count"] == 2, "重试必须重新执行失败的初始化阶段"
+        assert mock_home_vm.method_calls.count("init_data") == 1, "失败阶段未跑到的后续初始化在重试中补齐"
+        assert "load_market_data" in mock_home_vm.method_calls
+        assert mock_home_vm.state.load_error is None
+        assert mock_home_vm.state.is_loading is False
+
+    def test_old_init_completion_cannot_clear_newer_error_state(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """D17-001: 旧代次初始化晚到失败不得清掉/覆盖新一代的收尾状态.
+
+        新加载经 begin_load 推进代次后, 旧初始化异常经 end_load 收尾必须为 no-op。
+        """
+        import asyncio
+
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        attach_fake_page(component, page)
+        result = render_once(component)
+        header = result.content.controls[0]
+        refresh_btn = header.controls[-1]
+
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        calls = {"count": 0}
+
+        async def gated_init_data() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                started.set()
+                await gate.wait()
+                raise RuntimeError("old init failed")
+
+        mock_home_vm.init_data = gated_init_data
+
+        page.run_task.reset_mock()
+        refresh_btn.on_click(MagicMock())
+        old_entry = page.run_task.call_args.args[0]
+        page.run_task.reset_mock()
+        refresh_btn.on_click(MagicMock())
+        new_entry = page.run_task.call_args.args[0]
+
+        async def scenario() -> None:
+            old_task = asyncio.create_task(old_entry())
+            await started.wait()  # 旧代次已进入 init_data 并阻塞
+            await new_entry()  # 新代次成功收尾
+            gate.set()
+            await old_task  # 旧代次晚到失败
+
+        asyncio.run(scenario())
+
+        assert calls["count"] == 2
+        assert mock_home_vm.state.load_error is None, "旧代次晚到错误不得覆盖新代次结果"
+        assert mock_home_vm.state.is_loading is False
 
     def test_load_data_cancelled_error_propagates(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
         """R2: _load_data 中 CancelledError 必须传播 (经由 _init_and_load).
