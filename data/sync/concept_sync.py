@@ -123,6 +123,11 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
     its existing ``EM_`` rows are deleted and rebuilt within one transaction, so
     constituents removed from a board no longer linger. Boards that failed, or
     whose constituents were only partially resolved, are upsert-only (no deletion).
+
+    软失败（空板块列表 / 空成分 / 全或部分代码未解析）**不得**上报 success：
+    既有 ``EM_`` 行原样保留是已批准语义（upsert-only / 禁删），但「未刷新」这一
+    事实必须登记为失败身份（终态 partial，无任何板块落库时 failed），否则门面
+    ``ConceptSyncResult.is_complete`` 为真、调度器推进当日水位并跳过重试（R21）。
     """
 
     @log_async_operation(
@@ -139,7 +144,12 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             df_boards = await client.get_concept_list()
 
             if df_boards is None or df_boards.empty:
-                logger.debug("[AKShareConceptSync] Empty concept board list, nothing to sync.")
+                # 空板块列表 ≠ 刷新成功：本次未校验任何板块，旧 EM_ 行只是恰好还在。
+                # 按 success 上报会让门面 is_complete=True → 调度器推进当日水位并跳过
+                # 重试（R21：已知不可信不得伪装为完整），故显式登记为 failed。
+                logger.warning("[AKShareConceptSync] Empty concept board list from AKShare; no board refreshed.")
+                result.status = SyncStatus.FAILED.value
+                result.errors.append("Empty concept board list; no board refreshed (soft failure treated as failure)")
                 return result
 
             if self._check_cancelled(result):
@@ -155,6 +165,9 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             semaphore = asyncio.Semaphore(_AKSHARE_CONCURRENCY)
             records: list[dict] = []
             failed_boards: list[str] = []
+            # 软失败板块（空成分 / 全未解析 / 部分未解析）：旧行保留但「未刷新」必须
+            # 作为失败身份传播，否则仅凭 warning 会被门面判为 success（R21）。
+            soft_failed_boards: list[str] = []
             unresolved: set[str] = set()
             # 允许「删除-重建」的板块代码：仅当该板块成分成功抓取且全部解析为权威
             # ts_code 时才登记，避免把抓取失败/部分解析板块的有效旧成分误删。
@@ -173,10 +186,16 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                         try:
                             df_cons = await client.get_concept_constituents(board_name)
                             if df_cons is None or df_cons.empty:
-                                # 空响应（软失败）：不替换该板块，保留既有 EM_ 行（R21）
-                                logger.debug(
-                                    "[AKShareConceptSync] Board %s returned no constituents, skip replacement.",
+                                # 空响应（软失败）：不替换该板块，保留既有 EM_ 行（R21），
+                                # 但必须登记失败身份，避免「旧行还在」被误判为刷新成功。
+                                soft_failed_boards.append(
+                                    f"{board_name}({board_code}): empty_constituents (existing rows retained)"
+                                )
+                                logger.warning(
+                                    "[AKShareConceptSync] Board %s(%s) returned no constituents, "
+                                    "keep existing rows (soft failure).",
                                     board_name,
+                                    board_code,
                                 )
                                 return
                             concept_id = f"{StockDao.EM_CONCEPT_PREFIX}{board_code}"
@@ -197,7 +216,12 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                     }
                                 )
                             if not board_records:
-                                # 全部代码均未解析：不替换，避免清空该板块既有 EM_ 行（R21）
+                                # 全部代码均未解析：不替换，避免清空该板块既有 EM_ 行（R21）。
+                                # 该板块本次零刷新，登记为软失败（缺口与「部分未解析」可辨）。
+                                soft_failed_boards.append(
+                                    f"{board_name}({board_code}): all_codes_unresolved "
+                                    f"({board_unresolved}/{board_unresolved} code(s), existing rows retained)"
+                                )
                                 logger.warning(
                                     "[AKShareConceptSync] Board %s: all %d code(s) unresolved, skip replacement.",
                                     board_name,
@@ -207,7 +231,11 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                             records.extend(board_records)
                             if board_unresolved:
                                 # 部分未解析：只 upsert，不删除该板块旧行，避免把「映射临时
-                                # 缺失」的有效成分一并删除（R21 精神）。
+                                # 缺失」的有效成分一并删除（R21 精神）。缺口仍需登记为软失败。
+                                soft_failed_boards.append(
+                                    f"{board_name}({board_code}): partial_codes_unresolved "
+                                    f"({board_unresolved}/{len(board_records) + board_unresolved} code(s), upsert-only)"
+                                )
                                 logger.warning(
                                     "[AKShareConceptSync] Board %s: %d of %d code(s) unresolved, upsert-only (no replacement).",
                                     board_name,
@@ -308,14 +336,19 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                 )
                 result.added = saved or 0
 
-            if failed_boards:
-                result.status = SyncStatus.PARTIAL.value
+            if failed_boards or soft_failed_boards:
+                # 有板块未刷新：已落库板块的 upsert-only / 删除-重建语义不变，但终态
+                # 必须降级——有记录落库为 partial，零记录（整源无有效刷新）为 failed。
+                # 两种缺口均使门面 failed_sources 含 akshare，从而阻止水位推进并保留重试。
+                result.status = SyncStatus.PARTIAL.value if records else SyncStatus.FAILED.value
                 result.errors.extend(failed_boards)
+                result.errors.extend(f"[AKShareConceptSync] soft-failed board: {entry}" for entry in soft_failed_boards)
 
             logger.info(
-                "[AKShareConceptSync] Done | added=%d, failed_boards=%d",
+                "[AKShareConceptSync] Done | added=%d, failed_boards=%d, soft_failed_boards=%d",
                 result.added,
                 len(failed_boards),
+                len(soft_failed_boards),
             )
         except asyncio.CancelledError:
             result.status = SyncStatus.CANCELLED.value

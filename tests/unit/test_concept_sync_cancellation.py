@@ -156,10 +156,13 @@ class TestAKShareLoopCancellation:
             patch("data.sync.concept_sync.time.monotonic", return_value=fixed_time),
         ):
             MockClient.return_value.get_concept_list = AsyncMock(return_value=boards_df)
+            # D09-001 软失败语义：空成分/代码未解析属软失败（终态降级）。本用例验证
+            # 取消检查时序，需构造可解析的非空成分使同步真正成功。
             MockClient.return_value.get_concept_constituents = AsyncMock(
-                return_value=pd.DataFrame({"代码": [], "名称": []})
+                return_value=pd.DataFrame({"代码": ["000001", "000002"], "名称": ["A", "B"]})
             )
-            ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
+            ctx.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={"000001": "000001.SZ", "000002": "000002.SZ"})
+            ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=2)
 
             result = await strategy.run()
 
