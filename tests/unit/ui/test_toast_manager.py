@@ -21,12 +21,14 @@ import concurrent.futures
 import inspect
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
 from flet.components.component import Component
+from flet.controls.base_control import BaseControl
+from flet.controls.object_patch import ObjectPatch
 
 from tests.unit.ui.component_renderer import (
     FakePage,
@@ -1396,6 +1398,124 @@ class TestToastManagerView:
         state = get_global_state()
         assert len(state.toasts) == 1
         assert all(t.id != toast_id for t in state.toasts)
+
+
+# ============================================================================
+# 18B. D18-001: ToastCard 以 toast ID 为稳定 control key
+# ============================================================================
+
+
+class TestToastCardStableIdentity:
+    """D18-001 回归：frozen 列表重建时按 toast ID 配对，而非按位置配对。
+
+    框架依据（flet 1.1.0 只读源码）：``ObjectPatch._compare_lists`` 对 frozen
+    列表中的 dataclass 使用复合 key —— 显式 key 为 ``("k", key)``，无 key 为
+    ``("pos", n)``；``_compare_dataclasses`` 在 frozen 下经
+    ``Component._migrate_state`` 迁移 hooks。因此无 key 时删除前项会让后项继承
+    前项的 hook state/timer（位置配对），显式 key 后配对跟随 toast ID。
+    """
+
+    def _show(self, *messages: str) -> ToastManager:
+        page = MagicMock()
+        page.controls = [MagicMock()]
+        manager = ToastManager(page)
+        for message in messages:
+            manager.show(message)
+        return manager
+
+    def _render_view(self) -> tuple[Component, ft.Container]:
+        component = make_component(ToastManagerView)
+        run_mount_effects(component, page=FakePage())
+        return component, render_once(component)
+
+    @staticmethod
+    def _cards(result: ft.Container) -> list[Component]:
+        content = result.content
+        assert isinstance(content, ft.Column)
+        return [cast(Component, control) for control in content.controls]
+
+    def test_cards_are_keyed_by_toast_id(self):
+        """每张卡的 control key 为 ``toast_<id>``（显式 key 是配对身份的前提）。"""
+        self._show("A", "B")
+        _, result = self._render_view()
+
+        state = get_global_state()
+        assert [card.key for card in self._cards(result)] == [f"toast_{td.id}" for td in state.toasts]
+
+    def test_removing_first_toast_keeps_second_card_state(self):
+        """[A, B] 关闭 A 后，B 保留自己的 hook state（不继承 A 的 dismissing/hover/timer）。"""
+        self._show("A", "B")
+        view, old_tree = self._render_view()
+        card_a, card_b = self._cards(old_tree)
+        assert card_a._state is not card_b._state
+
+        state = get_global_state()
+        tm_module._remove_toast(state.toasts[0].id)
+        new_tree = render_once(view)
+
+        new_cards = self._cards(new_tree)
+        assert len(new_cards) == 1
+
+        _, _added, removed = ObjectPatch.from_diff(old_tree, new_tree, control_cls=BaseControl, frozen=True)
+
+        assert new_cards[0].key == f"toast_{state.toasts[0].id}"
+        # 位置配对会把 A 的 _state 迁移给位置 0 的组件（即 B），断言 B 仍持有自己的 state
+        assert new_cards[0]._state is card_b._state
+        # A 的卡片按独立身份卸载（其 cleanup 取消 A 的 timer），不迁移给 B
+        assert any(control is card_a for control in removed)
+
+    def test_trimming_oldest_keeps_remaining_card_identity(self):
+        """6 项超限裁掉最旧项后，剩余 5 张卡各自保留原 state。"""
+        manager = self._show("t1", "t2", "t3", "t4", "t5")
+        view, old_tree = self._render_view()
+        old_cards = self._cards(old_tree)
+        state_by_key = {card.key: card._state for card in old_cards}
+
+        manager.show("t6")  # 超过 MAX_TOAST_COUNT，裁剪最旧的 t1
+
+        state = get_global_state()
+        assert [td.message for td in state.toasts] == ["t2", "t3", "t4", "t5", "t6"]
+
+        new_tree = render_once(view)
+        new_cards = self._cards(new_tree)
+        assert [card.key for card in new_cards] == [f"toast_{td.id}" for td in state.toasts]
+
+        _, _added, removed = ObjectPatch.from_diff(old_tree, new_tree, control_cls=BaseControl, frozen=True)
+        for card in new_cards:
+            if card.key in state_by_key:  # 保留的卡片沿用原 state；新增的 toast_6 无历史 state
+                assert card._state is state_by_key[card.key]
+        # 被裁剪的最旧卡按独立身份卸载，其余卡片不被卸载
+        assert any(control is old_cards[0] for control in removed)
+
+    def test_unmounting_removed_card_cancels_only_its_timer(self):
+        """被移除的卡片卸载时取消自身 timer；保留卡片（B）的 timer 不被取消。"""
+        self._show("A", "B")
+        view, old_tree = self._render_view()
+        card_a, card_b = self._cards(old_tree)
+
+        task_a = MagicMock()
+        task_a.done.return_value = False
+        task_b = MagicMock()
+        task_b.done.return_value = False
+        page = _make_fake_page()
+        page.run_task = MagicMock(side_effect=[task_a, task_b])  # type: ignore[method-assign]
+        run_mount_effects(card_a, page=page)
+        run_mount_effects(card_b, page=page)
+
+        state = get_global_state()
+        tm_module._remove_toast(state.toasts[0].id)
+        new_tree = render_once(view)
+        _, _added, removed = ObjectPatch.from_diff(old_tree, new_tree, control_cls=BaseControl, frozen=True)
+        assert any(control is card_a for control in removed)
+
+        async def _fake_gather(*_args: Any) -> list[Any]:
+            return []
+
+        with patch("ui.components.toast_manager.gather_for_shutdown_cleanup", _fake_gather):
+            run_unmount_effects(card_a)  # 模拟 session 对 removed control 的 will_unmount
+
+        task_a.cancel.assert_called_once()
+        task_b.cancel.assert_not_called()
 
 
 # ============================================================================
