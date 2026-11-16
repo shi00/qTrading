@@ -64,26 +64,49 @@ class TestIsAllowedDomain:
 
 class TestSafeOpenUrl:
     def _make_event(self, url):
+        page = MagicMock()
         e = MagicMock()
         e.data = url
+        e.control.page = page
+        e.page = page
         return e
 
+    @pytest.mark.asyncio
     @patch("ui.components._markdown_safe.webbrowser.open")
-    def test_whitelisted_url_opened(self, mock_open):
+    async def test_whitelisted_url_opened(self, mock_open):
         url = "https://finance.eastmoney.com/stock/000001"
-        e = MagicMock()
-        e.data = url
-        e.control = MagicMock()
-        e.control.page = MagicMock()
-        safe_open_url(e)
-        # R16: webbrowser.open 通过 page.run_task 调度 _open_url_async 异步执行
-        mock_open.assert_not_called()
-        e.control.page.run_task.assert_called_once_with(_open_url_async, url)
+        dispatched = []
+        e = self._make_event(url)
+        e.control.page.run_task.side_effect = lambda fn, *args: dispatched.append((fn, args))
+        with patch("ui.components._markdown_safe.ThreadPoolManager") as mock_tp_cls:
+            mock_tp = MagicMock()
+            mock_tp_cls.return_value = mock_tp
+
+            async def _run_now(_task_type, func, *args):
+                func(*args)
+
+            mock_tp.run_async = AsyncMock(side_effect=_run_now)
+            safe_open_url(e)
+            # R16: webbrowser.open 通过 page.run_task 调度 _open_url_async 异步执行
+            mock_open.assert_not_called()
+            e.control.page.run_task.assert_called_once_with(_open_url_async, url)
+            assert len(dispatched) == 1
+            submitted, args = dispatched[0]
+            assert submitted is _open_url_async
+            assert args == (url,)
+            # 执行被调度的协程，验证仅经线程池触发一次浏览器打开
+            await submitted(*args)
+        mock_tp.run_async.assert_called_once_with(TaskType.IO, mock_open, url)
+        mock_open.assert_called_once_with(url)
 
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_non_whitelisted_url_not_opened(self, mock_open):
-        safe_open_url(self._make_event("https://evil.com/phish"))
+        e = self._make_event("https://evil.com/phish")
+        with patch("ui.components._markdown_safe.ThreadPoolManager") as mock_tp_cls:
+            safe_open_url(e)
         mock_open.assert_not_called()
+        e.control.page.run_task.assert_not_called()
+        mock_tp_cls.assert_not_called()
 
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_empty_data_does_nothing(self, mock_open):
@@ -108,10 +131,7 @@ class TestSafeOpenUrl:
             "https://tushare.pro/c",
         ):
             mock_open.reset_mock()
-            e = MagicMock()
-            e.data = url
-            e.control = MagicMock()
-            e.control.page = MagicMock()
+            e = self._make_event(url)
             safe_open_url(e)
             # R16: webbrowser.open 通过 page.run_task 调度，不直接调用
             mock_open.assert_not_called()
@@ -122,20 +142,27 @@ class TestSafeOpenUrlToast:
     """SEC-010: 非白名单链接应 toast 提示"链接已拦截"。"""
 
     def _make_event_with_page(self, url):
+        page = MagicMock()
         e = MagicMock()
         e.data = url
         e.control = MagicMock()
-        e.control.page = MagicMock()
+        e.control.page = page
+        e.page = page
         return e
 
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_non_whitelisted_url_toast_uses_i18n_key(self, mock_open):
         """P3-25: toast 文案应经 I18n.get('markdown_link_blocked') 国际化。"""
         e = self._make_event_with_page("https://evil.com/phish")
-        with patch("ui.components._markdown_safe.I18n") as mock_i18n:
+        with (
+            patch("ui.components._markdown_safe.ThreadPoolManager") as mock_tp_cls,
+            patch("ui.components._markdown_safe.I18n") as mock_i18n,
+        ):
             mock_i18n.get.return_value = "Link blocked"
             safe_open_url(e)
             mock_open.assert_not_called()
+            e.control.page.run_task.assert_not_called()
+            mock_tp_cls.assert_not_called()
             mock_i18n.get.assert_called_once_with("markdown_link_blocked")
             e.control.page.toast.show.assert_called_once_with("Link blocked", "error")
 
@@ -163,9 +190,14 @@ class TestSafeOpenUrlToast:
         """toast 抛异常时降级为 logger.warning。"""
         e = self._make_event_with_page("https://evil.com/phish")
         e.control.page.toast.show.side_effect = RuntimeError("page closed")
-        with patch("ui.components._markdown_safe.logger") as mock_logger:
+        with (
+            patch("ui.components._markdown_safe.ThreadPoolManager") as mock_tp_cls,
+            patch("ui.components._markdown_safe.logger") as mock_logger,
+        ):
             safe_open_url(e)
             mock_open.assert_not_called()
+            e.control.page.run_task.assert_not_called()
+            mock_tp_cls.assert_not_called()
             mock_logger.warning.assert_called()
 
     @patch("ui.components._markdown_safe.webbrowser.open")

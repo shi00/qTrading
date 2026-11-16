@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from typing import TYPE_CHECKING, ClassVar, TypeGuard
+from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, cast
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -354,10 +354,124 @@ class DataSanitizer:
         segments = {segment.lower() for segment in cls._KEY_SEGMENT_SPLIT.split(key) if segment}
         return any(keyword in segments for keyword in ambiguous)
 
+    # D20-004: 容器递归脱敏的最大深度（防御构造式深层嵌套/循环引用），
+    # 以及位置参数超长字符串仅需清洗的截断窗口（输出被 [:100] 截断，无需全量正则）。
+    _MAX_SANITIZE_DEPTH = 12
+    _SANITIZE_ELIDED = "***"
+    _ARGS_SCAN_WINDOW = 4096
+
+    @classmethod
+    def _replace_known_secrets(cls, text: str) -> str:
+        """精确替换已注册 secret（最先执行，保持既有替换优先级）。"""
+        for secret in list(cls._known_secrets):
+            if secret in text:
+                text = text.replace(secret, "***")
+        return text
+
+    @classmethod
+    def _apply_text_rules(cls, text: str) -> str:
+        """对字符串叶子应用 PII 与 URL 规则。
+
+        顺序为 PII 先于 URL：保持 sanitize_dict 既有脱敏结果（诊断包 env 导出
+        依赖 "PII 邮箱规则先于 URL 凭证规则" 的既有口径）；不做路径清洗。
+        """
+        text = cls._sanitize_pii_text(text)
+        text = cls._PATTERN_URL_CREDENTIALS.sub(cls._mask_url_userinfo, text)
+        text = cls._PATTERN_URL_QUERY_KEY.sub(r"\1\2=***", text)
+        return text
+
+    @classmethod
+    def _sanitize_string_leaf(cls, text: str) -> str:
+        return cls._apply_text_rules(cls._replace_known_secrets(text))
+
+    @classmethod
+    def _sanitize_value(
+        cls,
+        value: Any,
+        sensitive_keys: list[str],
+        *,
+        depth: int = 0,
+        seen: set[int] | None = None,
+    ) -> Any:
+        """统一递归脱敏任意值：dict/list/tuple/set/frozenset 与字符串叶子。
+
+        非字符串标量（bool/int/float/None/bytes 等）原样返回以保持语义。
+        """
+        if _is_dataframe(value):
+            return cls.sanitize_dataframe(value)
+        if isinstance(value, dict):
+            return cls._sanitize_mapping(value, sensitive_keys, depth=depth, seen=seen)
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return cls._sanitize_sequence(value, sensitive_keys, depth=depth, seen=seen)
+        if isinstance(value, str):
+            return cls._sanitize_string_leaf(value)
+        return value
+
+    @classmethod
+    def _sanitize_mapping(
+        cls,
+        data: dict,
+        sensitive_keys: list[str],
+        *,
+        depth: int,
+        seen: set[int] | None,
+    ) -> Any:
+        if depth > cls._MAX_SANITIZE_DEPTH:
+            return cls._SANITIZE_ELIDED
+        if seen is None:
+            seen = set()
+        marker = id(data)
+        if marker in seen:
+            return cls._SANITIZE_ELIDED
+        seen.add(marker)
+        try:
+            result: dict = {}
+            for key, item in data.items():
+                if isinstance(key, str) and cls._is_sensitive_key(key, sensitive_keys):
+                    result[key] = cls.sanitize_token(item) if isinstance(item, str) else "***"
+                else:
+                    result[key] = cls._sanitize_value(item, sensitive_keys, depth=depth + 1, seen=seen)
+            return result
+        finally:
+            seen.discard(marker)
+
+    @classmethod
+    def _sanitize_sequence(
+        cls,
+        value: list | tuple | set | frozenset,
+        sensitive_keys: list[str],
+        *,
+        depth: int,
+        seen: set[int] | None,
+    ) -> Any:
+        if depth > cls._MAX_SANITIZE_DEPTH:
+            return cls._SANITIZE_ELIDED
+        if seen is None:
+            seen = set()
+        marker = id(value)
+        if marker in seen:
+            return cls._SANITIZE_ELIDED
+        seen.add(marker)
+        try:
+            items = [cls._sanitize_value(item, sensitive_keys, depth=depth + 1, seen=seen) for item in value]
+        finally:
+            seen.discard(marker)
+        if isinstance(value, tuple):
+            return tuple(items)
+        if isinstance(value, frozenset):
+            return frozenset(items)
+        if isinstance(value, set):
+            return set(items)
+        return items
+
     @staticmethod
     def sanitize_dict(data: dict, sensitive_keys: list[str] | None = None) -> dict:
         """
         字典脱敏处理
+
+        递归处理 dict/list/tuple/set 容器内的字符串叶子（D20-004）：已注册
+        secret 精确替换、PII 与 URL 规则对所有深度生效，避免仅顶层与非敏感
+        key 的字符串被脱敏。
 
         Args:
             data: 原始字典
@@ -385,42 +499,16 @@ class DataSanitizer:
                 "passphrase",
             ]
 
-        result = {}
-        for k, v in data.items():
-            # 检查key是否敏感
-            if DataSanitizer._is_sensitive_key(k, sensitive_keys):
-                if isinstance(v, str):
-                    result[k] = DataSanitizer.sanitize_token(v)
-                else:
-                    result[k] = "***"
-            # DataFrame特殊处理
-            elif _is_dataframe(v):
-                result[k] = DataSanitizer.sanitize_dataframe(v)
-            elif isinstance(v, dict):
-                result[k] = DataSanitizer.sanitize_dict(v, sensitive_keys)
-            elif isinstance(v, list):
-                result[k] = [
-                    DataSanitizer.sanitize_dict(item, sensitive_keys) if isinstance(item, dict) else item for item in v
-                ]
-            else:
-                # R9: 非敏感 key 的 str 值也跑一遍 _known_secrets 精确替换，
-                # 避免已注册 secret 经非敏感 key 名（如自定义环境变量）泄露
-                if isinstance(v, str):
-                    for _secret in list(DataSanitizer._known_secrets):
-                        if _secret in v:
-                            v = v.replace(_secret, "***")
-                    # PII 检测: 非敏感 key 的 str 值也可能包含 PII
-                    v = DataSanitizer._sanitize_pii_text(v)
-                result[k] = v
-
-        return result
+        return cast(dict, DataSanitizer._sanitize_value(data, sensitive_keys))
 
     @staticmethod
     def sanitize_args(*args, sensitive_patterns: list[str] | None = None, **kwargs) -> tuple:
         """
         函数参数脱敏
 
-        用于装饰器自动脱敏参数
+        用于装饰器自动脱敏参数。关键字参数经 ``sanitize_dict`` 递归脱敏；
+        位置参数（字符串与容器）应用同一字符串规则链（已注册 secret 精确替换
+        → PII → URL），容器按 dict/list/tuple/set 递归（D20-004）。
 
         Args:
             *args: 位置参数
@@ -439,24 +527,26 @@ class DataSanitizer:
         # 位置参数转为安全表示(避免大对象)
         clean_args = []
         for arg in args:
-            # R9: 位置字符串参数追加 _known_secrets 精确替换（与 sanitize_error 同源兜底），
-            # 避免裸 token 经 repr()[:100] 原样记录到日志
-            if isinstance(arg, str):
-                for _secret in list(DataSanitizer._known_secrets):
-                    if _secret in arg:
-                        arg = arg.replace(_secret, "***")
             if _is_dataframe(arg):
                 clean_args.append(DataSanitizer.sanitize_dataframe(arg))
-            elif isinstance(arg, str) and len(arg) > 100:
-                clean_args.append(f"{arg[:50]}...(truncated)")
-            else:
-                # R9: 非字符串位置参数（dict/list 等）的 repr 也跑一遍 _known_secrets 精确替换，
-                # 避免含 secret 字段的容器经 repr()[:100] 泄露明文。
-                # 先在完整 repr 上替换再截断，防止 secret 跨 [:100] 边界时前缀泄露
-                full_repr = repr(arg)
-                for _secret in list(DataSanitizer._known_secrets):
-                    if _secret in full_repr:
-                        full_repr = full_repr.replace(_secret, "***")
-                clean_args.append(full_repr[:100])
+                continue
+            # R9: 位置字符串参数应用与 sanitize_dict 相同的字符串规则链
+            # （已注册 secret 精确替换 → PII → URL），而非仅精确替换（D20-004）。
+            # 长字符串先做 secret 全量替换（防止 secret 跨截断边界），再仅对
+            # 截断窗口应用正则，避免超长参数触发全量正则扫描。
+            if isinstance(arg, str):
+                sanitized = DataSanitizer._replace_known_secrets(arg)
+                if len(arg) > 100:
+                    sanitized = DataSanitizer._apply_text_rules(sanitized[: DataSanitizer._ARGS_SCAN_WINDOW])
+                    clean_args.append(f"{sanitized[:50]}...(truncated)")
+                else:
+                    clean_args.append(DataSanitizer._apply_text_rules(sanitized))
+                continue
+            # R9: 非字符串位置参数（dict/list/tuple/set 等）先按容器递归脱敏
+            # （敏感键遮蔽 + 字符串叶子规则），再对 repr 应用字符串规则并截断，
+            # 避免含 secret/PII 的容器经 repr()[:100] 泄露明文（D20-004）。
+            sanitized_value = DataSanitizer._sanitize_value(arg, sensitive_patterns)
+            full_repr = DataSanitizer._replace_known_secrets(repr(sanitized_value))
+            clean_args.append(DataSanitizer._apply_text_rules(full_repr[: DataSanitizer._ARGS_SCAN_WINDOW])[:100])
 
         return tuple(clean_args), clean_kwargs
