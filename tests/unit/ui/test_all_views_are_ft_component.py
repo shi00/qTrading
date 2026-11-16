@@ -235,7 +235,7 @@ def WrappedView():
     assert result.files_scanned == 1
     assert result.functions_checked == 1
     assert any("WrappedView" in v and "缺少真实的 @ft.component 标记" in v for v in result.violations)
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="缺少真实的 @ft.component 标记"):
         guard._assert_guard_passes(tmp_path)
 
 
@@ -252,7 +252,7 @@ def test_scan_rejects_bare_view_without_marker(tmp_path: Path, monkeypatch: pyte
 
     assert result.functions_checked == 1
     assert any("BareView" in v and "缺少真实的 @ft.component 标记" in v for v in result.violations)
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="缺少真实的 @ft.component 标记"):
         guard._assert_guard_passes(tmp_path)
 
 
