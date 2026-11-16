@@ -37,9 +37,10 @@
   不散落 if-else；
 - **F27 路由策略传递**：路由冻结快照（ExecutionSnapshot.routes 条目）携带的
   ``transient_retries``（int 0..2，零重试）与 ``fallback_enabled``（bool，禁
-  备用）在 Executor 消费生效——键缺失 / 非法时回退构造默认（分派侧未填充该键
-  的诚实缺省，不伪装策略存在，R21）；``fallback_enabled=False`` 只派发路由首
-  个候选，其余候选记 skipped（不静默）。
+  备用）在 Executor 消费生效。D13-001：分派侧经共享构造保证两键必填；本层
+  仅在旧版快照（键缺失 / 非法）上按构造默认兼容，且 **warning 留痕**——不静默
+  回退（用户策略丢失不得伪装成功，R21）；``fallback_enabled=False`` 只派发路由
+  首个候选，其余候选记 skipped（不静默）。
 """
 
 from __future__ import annotations
@@ -252,13 +253,23 @@ class ScenarioExecutor:
 
         candidates: tuple[Mapping[str, Any], ...] = route.get("candidates", ())  # type: ignore[assignment]
         # F27 路由策略（快照冻结语义）：分派侧保存的零重试 / 禁备用策略在消费端
-        # 生效；键缺失 / 非法回退构造默认（不伪装策略存在，R21）。
+        # 生效。D13-001：分派侧共享构造保证两键必填；旧版快照键缺失 / 非法时按
+        # 构造默认兼容但 warning 留痕——静默回退会让用户策略丢失后仍报成功（R21）。
         route_retries = _route_transient_retries(route)
+        fallback_enabled = _route_fallback_enabled(route)
+        if route_retries is None or fallback_enabled is None:
+            logger.warning(
+                "[ScenarioExecutor] route policy unavailable or invalid (scenario=%s, "
+                "transient_retries=%r, fallback_enabled=%r); legacy snapshot compatibility, "
+                "construction defaults applied",
+                route.get("scenario_id"),
+                route.get("transient_retries"),
+                route.get("fallback_enabled"),
+            )
         # 路由策略重试预算与构造重试预算取小（_retry_attempts 已按构造上限 clamp）
         total_attempts = (
             self._retry_attempts if route_retries is None else min(route_retries, self._retry_attempts)
         ) + 1
-        fallback_enabled = _route_fallback_enabled(route)
         fallback_skipped: tuple[CandidateDecision, ...] = ()
         if fallback_enabled is False and len(candidates) > 1:
             # 禁备用（F27）：只派发路由首个候选；其余候选记 skipped（R21 不静默），

@@ -25,6 +25,12 @@ R21），旧链记账写入由 ``AIUsageTracker`` 写入口封口检查二次拦
 R1 合规：本模块与三入口同在 services 层，不 import ``app.bootstrap``——
 调度服务经 :func:`set_scheduling_services_provider` 注册点由 app 层注入
 （app → services 为合法方向），bootstrap 组装完成后注册。
+
+D13-001 路由策略完整性：冻结快照的 Executor 消费字段（``transient_retries`` /
+``fallback_enabled`` / ``total_timeout_seconds``）由 :func:`build_route_snapshot`
+**唯一构造**，主路由与 news_annotation 情绪子路由共用；缺失 / 非法时显式
+raise :class:`RoutePolicyIncompleteError`，不得由消费侧静默回退构造默认
+（否则用户保存的 0 重试 / 禁用备用策略丢失而调用仍报成功，R21）。
 """
 
 from __future__ import annotations
@@ -53,6 +59,10 @@ _TASK_CONTRACT_VERSIONS: Final[Mapping[str, str]] = {
     "risk": "news_risk_v1",
 }
 
+# 重试预算域（与 utils.config_models.ScenarioRouteConfig 的 ge=0 / le=2 一致）
+_ROUTE_RETRIES_MIN: Final[int] = 0
+_ROUTE_RETRIES_MAX: Final[int] = 2
+
 # 调度服务注册点（R1：services 不 import app；bootstrap 组装后注入 provider）。
 _scheduling_services_provider: Callable[[], dict[str, Any] | None] | None = None
 
@@ -68,6 +78,69 @@ def get_scheduling_services() -> dict[str, Any] | None:
     """读取当前调度服务（未注册 / 未组装返回 None，走旧链）。"""
 
     return _scheduling_services_provider() if _scheduling_services_provider is not None else None
+
+
+class RoutePolicyIncompleteError(ValueError):
+    """路由快照缺少 / 携非法可执行策略字段（D13-001）。
+
+    显式失败而非由 Executor 静默回退构造默认：用户保存的 0 重试 / 禁用备用
+    策略在分派侧丢失后，消费侧按默认继续执行会把「策略未生效」伪装成成功
+    （R21）。调用方（三入口 helper）按分派异常阻断旧链并传出，不降级放行。
+    """
+
+
+def build_route_snapshot(
+    route: Mapping[str, Any],
+    *,
+    scenario_id: str,
+    candidates: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any]:
+    """构造冻结路由条目：一次携带 Executor 消费的全部可执行策略字段（D13-001）。
+
+    两条分派路径（:func:`resolve_executor` 主路由 / ``news_classifier`` 情绪
+    子路由）共用本函数，任何路径不得自行拼装路由 dict——否则丢键后 Executor
+    回退构造默认，0 重试 / 禁用 fallback 不生效而日志仍报成功。
+
+    ``transient_retries``（int 0..2）/ ``fallback_enabled``（bool）/
+    ``total_timeout_seconds``（> 0）缺失或非法 → raise
+    :class:`RoutePolicyIncompleteError`（显式失败，不静默回退默认）。
+    bool 是 int 子类，重试预算显式排除，避免 True 被当作 1 重试。
+    白名单外的配置键（草稿态 / 展示字段 / 未知新键）不进入执行快照。
+    """
+
+    retries = route.get("transient_retries")
+    if (
+        isinstance(retries, bool)
+        or not isinstance(retries, int)
+        or not (_ROUTE_RETRIES_MIN <= retries <= _ROUTE_RETRIES_MAX)
+    ):
+        raise RoutePolicyIncompleteError(
+            f"route {scenario_id!r}: transient_retries missing or invalid ({retries!r}); "
+            f"expected int in [{_ROUTE_RETRIES_MIN}, {_ROUTE_RETRIES_MAX}]"
+        )
+    fallback_enabled = route.get("fallback_enabled")
+    if not isinstance(fallback_enabled, bool):
+        raise RoutePolicyIncompleteError(
+            f"route {scenario_id!r}: fallback_enabled missing or invalid ({fallback_enabled!r}); expected bool"
+        )
+    total_timeout_seconds = route.get("total_timeout_seconds")
+    if (
+        isinstance(total_timeout_seconds, bool)
+        or not isinstance(total_timeout_seconds, int | float)
+        or float(total_timeout_seconds) <= 0
+    ):
+        raise RoutePolicyIncompleteError(
+            f"route {scenario_id!r}: total_timeout_seconds missing or invalid "
+            f"({total_timeout_seconds!r}); expected positive number"
+        )
+    return {
+        "scenario_id": scenario_id,
+        "route_revision": int(route.get("route_revision", 1)),
+        "candidates": candidates,
+        "transient_retries": retries,
+        "fallback_enabled": fallback_enabled,
+        "total_timeout_seconds": float(total_timeout_seconds),
+    }
 
 
 def _new_config_service() -> Any:
@@ -90,7 +163,12 @@ class ScenarioDispatch:
 
 
 async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
-    """按三条件分派新链；任一不满足返回 None（调用方走旧链）。"""
+    """按三条件分派新链；任一不满足返回 None（调用方走旧链）。
+
+    命中时经 :func:`build_route_snapshot` 冻结完整路由策略；路由缺少 / 携非法
+    可执行字段 → raise :class:`RoutePolicyIncompleteError`（D13-001 显式失败，
+    不返回 None 降级旧链、不静默按默认策略继续）。
+    """
 
     services = get_scheduling_services()
     executor = services.get("executor") if services else None
@@ -148,17 +226,15 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
         for index, conn_id in enumerate(route["candidates"])
     )
 
+    # D13-001：路由条目经共享构造一次携带全部可执行策略字段（0 重试 / 禁用
+    # fallback / 总时限），缺失或非法显式 RoutePolicyIncompleteError——
+    # 不得省略后让 Executor 静默回退构造默认（策略丢失仍报成功，R21）。
+    route_snapshot = build_route_snapshot(route, scenario_id=scenario_id, candidates=candidates)
     snapshot = ExecutionSnapshot(
         snapshot_id=mm_snapshot.snapshot_id,
         run_id=None,
         config_revision=mm_snapshot.config_revision,
-        routes=(
-            {
-                "scenario_id": scenario_id,
-                "route_revision": int(route.get("route_revision", 1)),
-                "candidates": candidates,
-            },
-        ),
+        routes=(route_snapshot,),
         connections=mm_snapshot.connections,
         business_contract_versions=dict(_TASK_CONTRACT_VERSIONS),
         security_scope_version=mm_snapshot.security_scope_version,
@@ -167,8 +243,8 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
     return ScenarioDispatch(
         executor=executor,
         snapshot=snapshot,
-        route_revision=int(route.get("route_revision", 1)),
-        total_timeout_seconds=float(route.get("total_timeout_seconds", 60)),
+        route_revision=int(route_snapshot["route_revision"]),
+        total_timeout_seconds=float(route_snapshot["total_timeout_seconds"]),
         task_routes=route.get("task_routes") or {},
     )
 
