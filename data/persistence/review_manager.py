@@ -2039,6 +2039,8 @@ class ReviewManager:
             )
             return 0
 
-        await self.cache.screener_dao.save_screening_results(records)
-        logger.info("[Review] Saved %s predictions for %s", len(records), strategy_name)
-        return len(records)
+        saved = await self.cache.screener_dao.save_screening_results(records)
+        # D05-001: 返回 DAO 实际落库条数（同 4 键批内去重后可能少于输入条数），
+        # 不得回退为 len(records)——调用方据此发成功文案并推进完成标记。
+        logger.info("[Review] Saved %s/%s predictions for %s", saved, len(records), strategy_name)
+        return saved
