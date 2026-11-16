@@ -461,7 +461,7 @@ pyluach==2.3.0
     # via exchange-calendars
 pyparsing==3.3.3
     # via pip-requirements-parser
-pypdf==6.19.0
+pypdf==6.21.4
     # via astockscreener (pyproject.toml)
 pyperclip==1.11.0
     # via fastmcp-slim

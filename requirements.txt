@@ -311,7 +311,7 @@ pygments==2.21.0
     # via rich
 pyluach==2.3.0
     # via exchange-calendars
-pypdf==6.19.0
+pypdf==6.21.4
     # via astockscreener (pyproject.toml)
 python-dateutil==2.9.0.post0
     # via
