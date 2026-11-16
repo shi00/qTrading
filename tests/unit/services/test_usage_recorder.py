@@ -579,6 +579,42 @@ class TestSubmitTerminalCostCalculation:
         assert kwargs["text_count"] == 2
 
     @pytest.mark.asyncio
+    async def test_encoder_pricing_settles_reported_tokens_not_estimate(self):
+        """D13-009：结算按真实 encoder token（64），估算另标（200）不参与计费。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        metadata = {
+            "connection_id": "conn-sentiment",
+            "month": "202610",
+            "encoder_input_tokens": 64,
+            "encoder_input_tokens_estimate": 200,
+            "text_count": 2,
+            "pricing": {
+                **self._PRICING_META,
+                "pricing_unit": "encoder_input_tokens",
+                "encoder_price_per_m": "1.00",
+                "input_price_per_m": None,
+                "output_price_per_m": None,
+                "cache_read_price_per_m": None,
+            },
+        }
+        recorder.observe_usage(
+            AttemptUsageObservation(
+                attempt_id="att-1",
+                invocation_id="inv-1",
+                usage=_usage(),
+                actual_model="local-model",
+                metadata=metadata,
+            )
+        )
+        await recorder.submit_terminal(_terminal())
+        kwargs = dao.settle_attempt_usage.await_args.kwargs
+        # 64 / 1e6 × 1.00 = 0.000064 → 4 位 HALF_UP = 0.0001（估算 200 会得 0.0002）
+        assert kwargs["cost_cny"] == "0.0001"
+        assert kwargs["encoder_input_tokens"] == 64
+        assert kwargs["text_count"] == 2
+
+    @pytest.mark.asyncio
     async def test_encoder_pricing_without_token_evidence_yields_none_cost(self):
         """encoder 计价但无 encoder_input_tokens → None（未知不伪装为零成本，R21）。"""
         dao = _dao_mock()
