@@ -1620,9 +1620,10 @@ class TestRunAiAnalysis:
                 await s.run_ai_analysis(candidates, context)
 
             # F4-ST-001: finally 块应调用 _cancel_orphan_news_tasks 清理资源
-            mock_cancel.assert_called_once()  # noqa: weak-assertion 下一行强断言验证参数类型
-            # 强断言：验证传入的是 PreFetchedContext 实例（含 news_tasks 字段）
-            assert isinstance(mock_cancel.call_args.args[0], PreFetchedContext)
+            mock_cancel.assert_called_once()  # noqa: weak-assertion 下一行强断言验证参数
+            # 强断言：传入的是本批次的新闻任务映射（dict）
+            assert isinstance(mock_cancel.call_args.args[0], dict)
+            assert "000001.SZ" in mock_cancel.call_args.args[0]
 
     @pytest.mark.asyncio
     async def test_prefetch_external_failures_degrades_gracefully(self):
@@ -1972,7 +1973,7 @@ class TestCancelOrphanNewsTasks:
 
         prefetched = PreFetchedContext(news_tasks={"A": task1, "B": task2})
 
-        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched.news_tasks)
 
         # 验证 task 已被取消并实际终止（await 完成）
         assert task1.done()
@@ -1985,7 +1986,7 @@ class TestCancelOrphanNewsTasks:
         """_cancel_orphan_news_tasks should handle empty news_tasks"""
         prefetched = PreFetchedContext(news_tasks={})
         # 不应抛异常
-        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched.news_tasks)
 
     @pytest.mark.asyncio
     async def test_skips_done_tasks(self):
@@ -2006,7 +2007,7 @@ class TestCancelOrphanNewsTasks:
 
         prefetched = PreFetchedContext(news_tasks={"done": done_task, "pending": pending_task})
 
-        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+        await AIStrategyMixin._cancel_orphan_news_tasks(prefetched.news_tasks)
 
         # done_task 保持已完成状态，未被取消
         assert done_task.done()
@@ -2028,8 +2029,156 @@ class TestCancelOrphanNewsTasks:
             await done_task
 
             prefetched = PreFetchedContext(news_tasks={"A": done_task})
-            await AIStrategyMixin._cancel_orphan_news_tasks(prefetched)
+            await AIStrategyMixin._cancel_orphan_news_tasks(prefetched.news_tasks)
             mock_gather.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repeated_cleanup_is_idempotent(self):
+        """ADD-AI-001: 重复清理必须幂等（内层分析循环 + 方法级兜底作用域都会调用）。"""
+        pending_task = asyncio.create_task(asyncio.sleep(100))
+        await asyncio.sleep(0)
+        assert not pending_task.done()
+
+        tasks = {"A": pending_task}
+        await AIStrategyMixin._cancel_orphan_news_tasks(tasks)
+        # 第二次清理：已取消任务不再 cancel，也不抛异常
+        await AIStrategyMixin._cancel_orphan_news_tasks(tasks)
+
+        assert pending_task.done()
+        assert pending_task.cancelled()
+
+
+class TestNewsTaskCleanupScope:
+    """ADD-AI-001：新闻任务清理作用域必须覆盖后续所有预取。
+
+    news_tasks 在资金/辅助/限价/策略 hook/宏观等预取之前创建，原实现的
+    try/finally 仅包住并发分析循环；这些预取阶段的异常或取消（CancelledError
+    不被各自的 except Exception 捕获）会直接向上传播，新闻任务成为孤儿后台任务
+    （后台 HTTP 请求/连接泄漏）。修复后由 run_ai_analysis 方法级作用域兜底清理。
+    """
+
+    @staticmethod
+    def _hanging_news_fetcher(cancelled_flags: list[bool]):
+        """新闻抓取永不返回，直到被取消——保证后续预取阶段任务仍未完成。"""
+
+        async def _fetch(*args, **kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled_flags.append(True)
+                raise
+
+        return _fetch
+
+    @staticmethod
+    def _failing_prefetch_hook(exc: BaseException):
+        """策略 hook 先让出一次调度（使已创建的新闻任务进入抓取等待）再失败/取消。"""
+
+        async def _hook(*args, **kwargs):
+            await asyncio.sleep(0)
+            raise exc
+
+        return _hook
+
+    @staticmethod
+    def _capture_news_tasks(created: list):
+        """仅拦截新闻预取阶段（bg_fetch_news）的任务创建，其余走真实 create_task。"""
+        real_create_task = asyncio.create_task
+
+        def fake_create_task(coro, **kwargs):
+            if getattr(coro, "__name__", "") != "bg_fetch_news":
+                return real_create_task(coro, **kwargs)
+            task = real_create_task(coro, **kwargs)
+            created.append(task)
+            return task
+
+        return fake_create_task
+
+    @pytest.mark.asyncio
+    async def test_later_prefetch_exception_cancels_news_tasks(self):
+        """后续预取（策略 hook）抛异常时，已创建的新闻任务被取消并 await 回收。"""
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        cancelled_flags: list[bool] = []
+        created: list = []
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=self._hanging_news_fetcher(cancelled_flags),
+            ),
+            patch("asyncio.create_task", side_effect=self._capture_news_tasks(created)),
+            patch.object(
+                AIStrategyMixin,
+                "_prefetch_strategy_specific",
+                new=self._failing_prefetch_hook(RuntimeError("prefetch down")),
+            ),
+        ):
+            mock_ai.return_value.is_cloud_available.return_value = True
+            with pytest.raises(RuntimeError, match="prefetch down"):
+                await s.run_ai_analysis(candidates, context)
+
+        # 取消信号已被投递（依赖清理协程 await 被取消任务才可观测），且任务已终止
+        assert cancelled_flags == [True]
+        assert created and all(task.done() and task.cancelled() for task in created)
+
+    @pytest.mark.asyncio
+    async def test_later_prefetch_cancellation_cancels_news_tasks(self):
+        """后续预取阶段收到取消信号时，新闻任务被取消、await 回收且取消不被吞没（R2）。"""
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        cancelled_flags: list[bool] = []
+        created: list = []
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_stock_news",
+                new=self._hanging_news_fetcher(cancelled_flags),
+            ),
+            patch("asyncio.create_task", side_effect=self._capture_news_tasks(created)),
+            patch.object(
+                AIStrategyMixin,
+                "_prefetch_strategy_specific",
+                new=self._failing_prefetch_hook(asyncio.CancelledError()),
+            ),
+        ):
+            mock_ai.return_value.is_cloud_available.return_value = True
+            with pytest.raises(asyncio.CancelledError):
+                await s.run_ai_analysis(candidates, context)
+
+        assert cancelled_flags == [True]
+        assert created and all(task.done() and task.cancelled() for task in created)
+
+    @pytest.mark.asyncio
+    async def test_normal_path_leaves_news_tasks_completed(self):
+        """正常路径不受影响：新闻任务照常 await 复用，不被兜底清理取消。"""
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"], "close": [10.0]})
+        created: list = []
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("asyncio.create_task", side_effect=self._capture_news_tasks(created)),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            result = await s.run_ai_analysis(candidates, context)
+
+        assert len(result) == 1
+        assert result.iloc[0]["ai_status"] == "analyzed"
+        assert created and all(task.done() and not task.cancelled() for task in created)
 
 
 class TestAIStrategyMixinAnalyzeSingle:

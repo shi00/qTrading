@@ -24,6 +24,11 @@ from tests.unit.ui.component_renderer import (
     run_mount_effects,
 )
 from ui.components import toast_manager as tm_module
+from ui.components.health_report_dialog import (
+    _HEALTH_DEFAULT_STATUS,
+    _HEALTH_STATUS_MAP,
+    _build_health_score_card,
+)
 from ui.components.toast_manager import (
     ToastCard,
     ToastData,
@@ -34,7 +39,11 @@ from ui.theme import CUSTOM_COLOR_PRESETS, AppColors, ThemeName
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceState, HealthResultRow
 from ui.views.backtest_view import _resolve_credibility_accent, _resolve_status_color as _bt_status
-from ui.views.screener_view import _resolve_status_color as _screener_status
+from ui.views.screener_view import (
+    _SECTION_META,
+    _build_screener_sections_card,
+    _resolve_status_color as _screener_status,
+)
 from ui.views.settings_tabs.data_source_tab import (
     _HEALTH_STATUS_VISUALS,
     _build_health_dashboard,
@@ -346,3 +355,170 @@ def test_health_dashboard_metric_color_recomputes_after_theme_switch(
     AppColors.load_theme(ThemeName.LIGHT)
     light_color = _health_metric_status_color(render_once(component), expected_icon)
     assert light_color == _expected_health_color(ThemeName.LIGHT, color_name)
+
+
+# ============================================================================
+# 5. 健康卡与选股分区: 导入期快照 → 渲染期语义色 (D19-001)
+# ============================================================================
+
+
+@ft.component
+def _HealthScoreCardProbe(status: str) -> ft.Control:
+    """测试探针: 在渲染上下文中构建健康卡并订阅主题状态."""
+    ft.use_state(AppColors.get_observable_state)
+    return _build_health_score_card(status, 5)
+
+
+@ft.component
+def _ScreenerSectionsProbe() -> ft.Control:
+    """测试探针: 在渲染上下文中构建选股分区卡并订阅主题状态."""
+    ft.use_state(AppColors.get_observable_state)
+    return _build_screener_sections_card(
+        section_counts=(0, 0, 0),
+        active_section="recommended",
+        section_rows=[],
+        vt_columns=[],
+        sort_col=None,
+        sort_asc=True,
+        on_virtual_sort=lambda *_args: None,
+        on_row_click=lambda *_args: None,
+        on_section_change=lambda *_args: None,
+        on_load_col_widths=lambda: None,
+        on_persist_col_widths=lambda *_args: None,
+    )
+
+
+def _health_card_parts(card: Any) -> tuple[str, str, list[str]]:
+    """取健康卡 (图标色, 标题色, 渐变基色列表)."""
+    icon = card.content.controls[0]
+    title = card.content.controls[1].controls[1]
+    return icon.color, title.color, list(card.gradient.colors)
+
+
+def _screener_section_icon_colors(card: Any) -> dict[str, str]:
+    """取选股三分区页签图标色 (分区标签 → 颜色)."""
+    switcher = card.content.controls[0]
+    return {segment.value: segment.icon.color for segment in switcher.segments}
+
+
+def test_health_status_map_stores_semantic_appcolors_names() -> None:
+    """健康状态映射须存语义属性名, 而非导入期 Hex 快照 (D19-001)."""
+    for color_name, _icon, _key in [*_HEALTH_STATUS_MAP.values(), _HEALTH_DEFAULT_STATUS]:
+        assert isinstance(color_name, str)
+        assert not color_name.startswith("#"), f"固化了 Hex 快照: {color_name!r}"
+        assert hasattr(AppColors, color_name), f"不是 AppColors 语义属性名: {color_name!r}"
+
+
+def test_section_meta_stores_semantic_appcolors_names() -> None:
+    """选股分区映射须存语义属性名, 而非导入期 Hex 快照 (D19-001)."""
+    for _key, _icon, color_name, _label in _SECTION_META:
+        assert isinstance(color_name, str)
+        assert not color_name.startswith("#"), f"固化了 Hex 快照: {color_name!r}"
+        assert hasattr(AppColors, color_name), f"不是 AppColors 语义属性名: {color_name!r}"
+
+
+@pytest.mark.parametrize(
+    ("module_path", "component_symbol"),
+    [
+        ("ui.components.health_report_dialog", "HealthReportDialog"),
+        ("ui.views.screener_view", "ScreenerView"),
+    ],
+)
+def test_theme_consumer_subscribes_appcolors_state(module_path: str, component_symbol: str) -> None:
+    """使用业务色的声明式组件须订阅主题状态, 已显示卡才会随热切换重渲染 (D19-001)."""
+    source = inspect.getsource(importlib.import_module(module_path))
+    assert "AppColors.get_observable_state" in source, f"{module_path} 未订阅主题状态 ({component_symbol})"
+
+
+@pytest.mark.parametrize("theme", _THEMES)
+@pytest.mark.parametrize(("status", "color_name"), (("green", "SUCCESS"), ("yellow", "WARNING")))
+def test_health_score_card_colors_follow_current_theme(
+    theme: str, status: str, color_name: str, mock_i18n: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """健康卡图标/标题/渐变基色取当期主题色 (D19-001, 四主题 × 绿/黄)."""
+    import ui.components.health_report_dialog as health_mod
+
+    monkeypatch.setattr(health_mod, "I18n", mock_i18n)
+    AppColors.load_theme(theme)
+    card = _build_health_score_card(status, 5)
+    expected = _expected_health_color(theme, color_name)
+    icon_color, title_color, gradient_colors = _health_card_parts(card)
+    assert icon_color == expected
+    assert title_color == expected
+    assert gradient_colors[0] == ft.Colors.with_opacity(0.2, expected)
+    assert gradient_colors[1] == ft.Colors.with_opacity(0.05, expected)
+
+
+@pytest.mark.parametrize("theme", _THEMES)
+def test_health_card_default_status_uses_error_token(
+    theme: str, mock_i18n: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未知/红色状态回退 ERROR 语义 token, 不得误改为业务色 (D19-001)."""
+    import ui.components.health_report_dialog as health_mod
+
+    monkeypatch.setattr(health_mod, "I18n", mock_i18n)
+    AppColors.load_theme(theme)
+    icon_color, title_color, _gradient = _health_card_parts(_build_health_score_card("red", 0))
+    expected = _expected_health_color(theme, "ERROR")
+    assert icon_color == expected
+    assert title_color == expected
+
+
+def test_health_score_card_recomputes_after_theme_switch(mock_i18n: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    """已显示健康卡在主题切换后重渲染取当期色 (D19-001)."""
+    import ui.components.health_report_dialog as health_mod
+
+    monkeypatch.setattr(health_mod, "I18n", mock_i18n)
+    AppColors.load_theme(ThemeName.DARK)
+    component = make_component(_HealthScoreCardProbe, "yellow")
+    run_mount_effects(component)
+    assert _health_card_parts(render_once(component))[0] == CUSTOM_COLOR_PRESETS[ThemeName.DARK]["WARNING"]
+
+    AppColors.load_theme(ThemeName.LIGHT)
+    assert _health_card_parts(render_once(component))[0] == CUSTOM_COLOR_PRESETS[ThemeName.LIGHT]["WARNING"]
+
+
+@pytest.mark.parametrize("theme", _THEMES)
+def test_screener_section_icon_colors_follow_current_theme(
+    theme: str, mock_i18n: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """选股分区图标取当期主题色, Layer1 token 保持原语义 (D19-001)."""
+    import ui.views.screener_view as screener_mod
+
+    monkeypatch.setattr(screener_mod, "I18n", mock_i18n)
+    AppColors.load_theme(theme)
+    colors = _screener_section_icon_colors(
+        _build_screener_sections_card(
+            section_counts=(0, 0, 0),
+            active_section="recommended",
+            section_rows=[],
+            vt_columns=[],
+            sort_col=None,
+            sort_asc=True,
+            on_virtual_sort=lambda *_args: None,
+            on_row_click=lambda *_args: None,
+            on_section_change=lambda *_args: None,
+            on_load_col_widths=lambda: None,
+            on_persist_col_widths=lambda *_args: None,
+        )
+    )
+    assert colors["excluded"] == CUSTOM_COLOR_PRESETS[theme]["WARNING"]
+    assert colors["recommended"] == AppColors.TEXT_SECONDARY
+    assert colors["failed"] == AppColors.ERROR
+
+
+def test_screener_sections_recompute_after_theme_switch(mock_i18n: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    """已显示选股分区卡在主题切换后重渲染取当期色 (D19-001)."""
+    import ui.views.screener_view as screener_mod
+
+    monkeypatch.setattr(screener_mod, "I18n", mock_i18n)
+    AppColors.load_theme(ThemeName.DARK)
+    component = make_component(_ScreenerSectionsProbe)
+    run_mount_effects(component)
+    dark_colors = _screener_section_icon_colors(render_once(component))
+    assert dark_colors["excluded"] == CUSTOM_COLOR_PRESETS[ThemeName.DARK]["WARNING"]
+
+    AppColors.load_theme(ThemeName.LIGHT)
+    light_colors = _screener_section_icon_colors(render_once(component))
+    assert light_colors["excluded"] == CUSTOM_COLOR_PRESETS[ThemeName.LIGHT]["WARNING"]
+    assert dark_colors["excluded"] != light_colors["excluded"]
