@@ -3,7 +3,7 @@
 职责：
 - Popen 拉起 Rust sidecar 子进程，解析 ready JSON（schema qtrading.embedded_postgres.run.ready.v1）
 - 构造 ``postgresql+asyncpg://`` URL 并返回 ConnectionInfo
-- 幂等 stop（stdin.close → wait → kill 兜底）
+- 幂等 stop（stdin.close → wait → kill 兜底），按 sidecar 退出码分类停止结果（D07-003）
 - 收集 sidecar/PG/Python 服务日志便于诊断（用户额外要求）
 
 设计要点：
@@ -28,6 +28,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from enum import StrEnum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -46,6 +47,23 @@ logger = logging.getLogger("qtrading.embedded_postgres")
 
 class EmbeddedPostgresStartError(RuntimeError):
     """sidecar 启动失败（binary 缺失/ready 超时/JSON 无效/password_file 缺失等）。"""
+
+
+class StopStatus(StrEnum):
+    """``stop_sync`` 停止结果（D07-003 按 sidecar 退出码分类，禁止一律记成功）。
+
+    - ``NOT_RUNNING``：无受管进程（未启动，或上一次 stop 已回收），幂等无操作
+    - ``GRACEFUL``：sidecar exit 0 —— PG 已由 sidecar 证明停止，可安全重启
+    - ``FORCED``：graceful 超时后 kill 兜底 —— sidecar 未证明 PG 停止（可能残留孤儿
+      postgres），须人工确认后再依赖数据目录
+    - ``FAILED``：sidecar 非零退出（如 exit 20 stop_failed / exit 60 postgres_died /
+      无法执行等）—— 停止结果不被证明
+    """
+
+    NOT_RUNNING = "not_running"
+    GRACEFUL = "graceful"
+    FORCED = "forced"
+    FAILED = "failed"
 
 
 # Windows 下主程序为 GUI（windowed）进程，拉起 console 子系统的 sidecar 时若不带
@@ -409,6 +427,10 @@ class EmbeddedPostgresService:
             self._process: subprocess.Popen[str] | None = None
             self._connection_info: ConnectionInfo | None = None
             self._stderr_file: object | None = None
+            # D07-003：最近一次停止结果与「停止未经证明」标记（供调用方判断是否需要
+            # 重试/人工确认真实 postgres 状态，避免非零退出被当作 graceful 成功）。
+            self._last_stop_status = StopStatus.NOT_RUNNING
+            self._needs_stop = False
             # D16-S01：有界事件缓冲与未知 schema 诊断状态（reader 线程写、调用方读）。
             self._events: deque[EmbeddedPgEvent] = deque(maxlen=_EVENT_BUFFER_MAX)
             self._events_lock = threading.Lock()
@@ -475,6 +497,25 @@ class EmbeddedPostgresService:
             username=config.embedded_pg_username,
             database=config.embedded_pg_database,
         )
+
+    @property
+    def last_stop_status(self) -> StopStatus:
+        """最近一次受管进程的停止结果（初始且从未停止过为 ``NOT_RUNNING``）。
+
+        无进程时的幂等 stop 不覆盖此值，避免失败结果被后续空调用洗成成功态。
+        """
+        return self._last_stop_status
+
+    @property
+    def needs_stop(self) -> bool:
+        """是否残留「停止未经证明」状态（D07-003）。
+
+        ``GRACEFUL`` 之外的结果（超时 kill 兜底 / sidecar 非零退出）置 True：此时
+        sidecar 未证明 postgres 已停止，调用方须先人工确认/用
+        ``qtrading-pg-sidecar stop --data-dir <目录>`` 补齐，再重新 start；成功
+        stop（exit 0）或下一次 start 进入 ready 后清零。
+        """
+        return self._needs_stop
 
     @log_async_operation(
         operation_name="embedded_pg_start",
@@ -734,6 +775,8 @@ class EmbeddedPostgresService:
         )
         # 日志中 URL 脱敏（R9）：仅记 host:port
         self._svc_logger.info("embedded postgres started on %s:%s (pid=%s)", self._listen, port, pid)
+        # D07-003：本次 ready 证明实例可用，此前「停止未经证明」的残留标记清零
+        self._needs_stop = False
         # M9: 启动 daemon 线程持续读 sidecar stdout 写入日志文件，避免 stdout 缓冲区满
         # 阻塞 sidecar（虽然当前 sidecar ready 后不再写 stdout，但防御未来版本变化）
         # 注意：stderr reader 已在 Popen 后立即启动（见上方），此处不再重复
@@ -1266,10 +1309,12 @@ class EmbeddedPostgresService:
         operation_name="embedded_pg_stop",
         threshold_ms=PerfThreshold.GLOBAL_INIT,
     )
-    async def stop(self) -> None:
+    async def stop(self) -> StopStatus:
         """幂等停止 sidecar：stdin.close → wait(timeout) → kill 兜底。
 
-        清理 _process / _connection_info / _stderr_file。
+        返回 :class:`StopStatus`（D07-003）：仅 sidecar exit 0 为 ``GRACEFUL``；
+        非零退出返回 ``FAILED`` 且服务保留 ``needs_stop`` 状态，调用方不得当作
+        停止成功。清理 _process / _connection_info / _stderr_file。
 
         H7: 挂 ``@log_async_operation`` 记录 stop 耗时，便于发现 sidecar 关停卡死。
 
@@ -1277,21 +1322,32 @@ class EmbeddedPostgresService:
         """
         import asyncio
 
-        await asyncio.to_thread(self.stop_sync)
+        return await asyncio.to_thread(self.stop_sync)
 
-    def stop_sync(self) -> None:
+    def stop_sync(self) -> StopStatus:
         """同步停止 sidecar（供 asyncio.to_thread 包装，shutdown Step 8 使用）。
 
         M3: 持 ``cls._lock`` 保护，避免 _reset_singleton/_atexit_cleanup 与外部 stop()
         并发执行时双线程同时操作 ``self._process`` / ``self._stderr_file``。
         ``cls._lock`` 为 RLock，_reset_singleton/_atexit_cleanup 持锁调用同线程可重入。
 
+        D07-003 退出码状态机（不再无条件记「gracefully stopped」）：
+        - 无进程 → ``NOT_RUNNING``（幂等，不动 ``needs_stop``）
+        - wait 返回 0 → ``GRACEFUL``，清 ``needs_stop``，记 INFO
+        - wait 返回非零 → ``FAILED``，记 ERROR（含 `_format_sidecar_exit_error` 分类），
+          置 ``needs_stop``，保留可重试/需人工确认状态；进程已退出故 ``_process`` 置 None
+        - wait 超时 → kill 兜底 + 二次有界 wait → ``FORCED``，记 WARNING，置 ``needs_stop``
+          （kill 只终止 wrapper，postgres 可能孤儿化，停止结果未经 sidecar 证明）
+        等待均有界（``stop_timeout`` + kill 后 5s），不在锁内重试，避免阻塞异步 stop。
+
         并发契约：不可与 ``_start_sync`` 并发调用（详见类 docstring）。
         """
         with type(self)._lock:
-            if self._process is None:
-                return
             proc = self._process
+            if proc is None:
+                # 幂等无操作；保留上一次停止结果（失败后重试不得把 FAILED 洗成成功）
+                return StopStatus.NOT_RUNNING
+            status = StopStatus.FAILED
             try:
                 if proc.stdin is not None:
                     try:
@@ -1301,10 +1357,14 @@ class EmbeddedPostgresService:
                             "stop_sync stdin close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
                         )
                 try:
-                    proc.wait(timeout=self._stop_timeout)
-                    self._svc_logger.info("embedded postgres stopped gracefully")
+                    exit_code = proc.wait(timeout=self._stop_timeout)
                 except subprocess.TimeoutExpired:
-                    self._svc_logger.warning("sidecar stop timeout after %ss, killing", self._stop_timeout)
+                    # 超时后 kill 只终止 wrapper，postgres 可能孤儿化 → 停止结果未经证明
+                    self._svc_logger.warning(
+                        "sidecar stop timeout after %ss, killing; postgres stop unproven (data_dir=%s)",
+                        self._stop_timeout,
+                        self._data_dir,
+                    )
                     proc.kill()
                     try:
                         proc.wait(timeout=5)
@@ -1312,9 +1372,21 @@ class EmbeddedPostgresService:
                         logger.debug(
                             "stop_sync wait after kill fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
                         )
+                    status = StopStatus.FORCED
+                else:
+                    if exit_code == 0:
+                        self._svc_logger.info("embedded postgres stopped gracefully")
+                        status = StopStatus.GRACEFUL
+                    else:
+                        detail = self._format_sidecar_exit_error(exit_code)
+                        self._svc_logger.error("embedded postgres stop failed (exit=%s): %s", exit_code, detail)
+                        status = StopStatus.FAILED
             finally:
                 self._process = None
                 self._connection_info = None
+                self._last_stop_status = status
+                # 仅 exit 0 才算停止成功；超时/非零保留「需要停止」状态供重试或人工确认
+                self._needs_stop = status is not StopStatus.GRACEFUL
                 if self._stderr_file is not None:
                     try:
                         self._stderr_file.close()  # type: ignore[attr-defined]
@@ -1323,6 +1395,7 @@ class EmbeddedPostgresService:
                             "stop_sync stderr_file close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
                         )
                     self._stderr_file = None
+            return status
 
     def collect_logs_summary(self, tail_bytes: int = 8192) -> dict[str, str]:
         """收集四类日志尾部内容，供 doctor 命令/UI 诊断面板调用（§3.7）。

@@ -5,9 +5,9 @@ FAKE_READY JSON + 写 password 到 password_file + 等 stdin EOF 退出），通
 平台包装器（.bat/.sh）使其可执行。service.start() 真实 Popen 该脚本，
 验证 sidecar 协议解析端到端正确。
 
-测试分组（共 39 个）：
+测试分组（共 44 个）：
 - TestEmbeddedPostgresServiceStart: 1 TDD + 14 start 协议 = 15 个
-- TestEmbeddedPostgresServiceStop: 1 TDD + 10 stop 行为 = 11 个
+- TestEmbeddedPostgresServiceStop: 1 TDD + 15 stop 行为 = 16 个
 - TestEmbeddedPostgresServiceSingleton: 2 TDD = 2 个
 - TestEmbeddedPostgresServiceFromConfig: 1 TDD = 1 个
 - TestEmbeddedPostgresServiceLog: 10 个日志测试 = 10 个
@@ -205,6 +205,7 @@ class _FakePopen:
         self.stdin = _FakeStdin()
         self._stdout_line = ""
         self._wait_side_effect = None
+        self._wait_exit_code = 0
         self._wait_calls = 0
         self._kill_calls = 0
         self._poll_value: int | None = None
@@ -224,11 +225,15 @@ class _FakePopen:
     def set_wait_side_effect(self, exc: Exception) -> None:
         self._wait_side_effect = exc
 
+    def set_wait_exit_code(self, code: int) -> None:
+        """设置 wait 正常返回的退出码（D07-003：模拟 sidecar exit 0 / 非零）。"""
+        self._wait_exit_code = code
+
     def wait(self, timeout: float | None = None) -> int:
         self._wait_calls += 1
         if self._wait_side_effect is not None and self._wait_calls == 1:
             raise self._wait_side_effect
-        return 0
+        return self._wait_exit_code
 
     def kill(self) -> None:
         self._kill_calls += 1
@@ -933,7 +938,7 @@ class TestEmbeddedPostgresServiceStart:
 
 
 # =============================================================================
-# TestEmbeddedPostgresServiceStop: 1 TDD + 10 stop 行为测试 = 11 个
+# TestEmbeddedPostgresServiceStop: 1 TDD + 15 stop 行为测试 = 16 个
 # =============================================================================
 class TestEmbeddedPostgresServiceStop:
     @pytest.mark.asyncio(loop_scope="function")
@@ -1122,6 +1127,120 @@ class TestEmbeddedPostgresServiceStop:
         await service.stop()
         # _FakePopen.wait 不记录 timeout 参数，但我们可验证 stop_timeout 存储正确
         assert service._stop_timeout == 30.0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stop_exit_zero_returns_graceful(self, fake_paths, caplog) -> None:
+        """D07-003: sidecar exit 0 → GRACEFUL，记录 gracefully，needs_stop 清零。"""
+        import logging
+
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        fake_proc = _FakePopen(["fake"])
+        fake_proc.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+        fake_proc.set_wait_exit_code(0)
+        service._process = fake_proc
+        service._connection_info = svc_module.ConnectionInfo(
+            url="postgresql+asyncpg://u:p@h:1/d", port=1, pid=1, data_dir="/d"
+        )
+        with caplog.at_level(logging.INFO, logger="qtrading.embedded_postgres"):
+            status = await service.stop()
+        assert status is svc_module.StopStatus.GRACEFUL
+        assert service.last_stop_status is svc_module.StopStatus.GRACEFUL
+        assert service.needs_stop is False
+        assert any("stopped gracefully" in rec.message for rec in caplog.records)
+        assert service._process is None
+        assert service._connection_info is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stop_nonzero_exit_is_failure_not_graceful(self, fake_paths, caplog) -> None:
+        """D07-003: sidecar exit 20 → FAILED + ERROR，不得记录成功、不得进入 ready。"""
+        import logging
+
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        fake_proc = _FakePopen(["fake"])
+        fake_proc.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+        fake_proc.set_wait_exit_code(20)  # STOP_FAILED：postgres 仍存活/归属不可证明
+        service._process = fake_proc
+        service._connection_info = svc_module.ConnectionInfo(
+            url="postgresql+asyncpg://u:p@h:1/d", port=1, pid=1, data_dir="/d"
+        )
+        with caplog.at_level(logging.INFO, logger="qtrading.embedded_postgres"):
+            status = await service.stop()
+        assert status is svc_module.StopStatus.FAILED
+        assert service.last_stop_status is svc_module.StopStatus.FAILED
+        assert service.needs_stop is True
+        assert not any("stopped gracefully" in rec.message for rec in caplog.records), (
+            f"非零退出不得记录优雅停止，实际日志：{[r.message for r in caplog.records]}"
+        )
+        assert any(
+            rec.levelno >= logging.ERROR and "exit=20" in rec.message and "stop failed" in rec.message
+            for rec in caplog.records
+        ), f"期望 ERROR 日志含 exit=20/stop failed，实际：{[r.message for r in caplog.records]}"
+        # 进程已退出，但服务不得残留「已 ready」的连接信息（不静默变 ready）
+        assert service._process is None
+        assert service._connection_info is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stop_failure_is_retryable_and_clears_after_success(self, fake_paths) -> None:
+        """D07-003: 非零失败后 needs_stop 保留、重试不抛；重试成功才清零。"""
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        failed_proc = _FakePopen(["fake"])
+        failed_proc.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+        failed_proc.set_wait_exit_code(20)
+        service._process = failed_proc
+        assert await service.stop() is svc_module.StopStatus.FAILED
+        assert service.needs_stop is True
+
+        # 幂等重试：无受管进程 → NOT_RUNNING（不抛），失败态不被空调用洗白
+        assert await service.stop() is svc_module.StopStatus.NOT_RUNNING
+        assert service.needs_stop is True
+        assert service.last_stop_status is svc_module.StopStatus.FAILED
+
+        # 重试成功（受管进程 exit 0）→ 清零
+        retry_proc = _FakePopen(["fake"])
+        retry_proc.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+        retry_proc.set_wait_exit_code(0)
+        service._process = retry_proc
+        assert await service.stop() is svc_module.StopStatus.GRACEFUL
+        assert service.needs_stop is False
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stop_timeout_returns_forced_and_needs_stop(self, fake_paths, caplog) -> None:
+        """D07-003: 超时 kill 兜底 → FORCED（非 GRACEFUL），停止结果未经证明。"""
+        import logging
+
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        fake_proc = _FakePopen(["fake"])
+        fake_proc.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+        fake_proc.set_wait_side_effect(subprocess.TimeoutExpired(cmd=["fake"], timeout=60))
+        service._process = fake_proc
+        with caplog.at_level(logging.WARNING, logger="qtrading.embedded_postgres"):
+            status = await service.stop()
+        assert status is svc_module.StopStatus.FORCED
+        assert service.last_stop_status is svc_module.StopStatus.FORCED
+        assert service.needs_stop is True
+        assert fake_proc._kill_calls >= 1
+        assert fake_proc._wait_calls >= 2
+        assert not any("stopped gracefully" in rec.message for rec in caplog.records)
+        assert any("timeout" in rec.message.lower() or "killing" in rec.message.lower() for rec in caplog.records)
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stop_without_managed_process_returns_not_running(self, fake_paths) -> None:
+        """D07-003: 进程不存在 → NOT_RUNNING，不抛异常且不置 needs_stop。"""
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        status = await service.stop()
+        assert status is svc_module.StopStatus.NOT_RUNNING
+        assert service.last_stop_status is svc_module.StopStatus.NOT_RUNNING
+        assert service.needs_stop is False
 
 
 # =============================================================================
