@@ -244,6 +244,22 @@ jobs:
             --allowlist .security/audit-allowlist.yml \
             --sources pypi
 
+      # 临时诊断（定位 3.14 Pyright 失败根因后移除）：打印解释器与错误摘要。
+      - name: Debug Pyright interpreter (temporary)
+        continue-on-error: true
+        run: |
+          which python; python --version
+          python -c "import dbos, pydantic_ai, pypdf; print('agent imports ok')"
+          pyright --outputjson > /tmp/pyright.json || true
+          python - <<'PYEOF'
+          import json
+          d = json.load(open('/tmp/pyright.json'))
+          errs = [x for x in d['generalDiagnostics'] if x['severity'] == 'error']
+          print('PYRIGHT_ERRORS', len(errs))
+          for e in errs[:25]:
+              print(e['file'], e['range']['start']['line'], e['message'][:160].replace('\n', ' '))
+          PYEOF
+
       - name: Pyright Type Check
         continue-on-error: false
         run: pyright
