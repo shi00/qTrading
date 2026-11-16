@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import flet as ft
 
@@ -89,6 +89,19 @@ def _validate_backtest_inputs(
         errors["date_range"] = "backtest_error_date_range"
 
     return errors
+
+
+def _normalize_picker_date(value: date | datetime) -> date:
+    """把 DatePicker 回填值统一为 ``date``（D18-002）。
+
+    ``DatePicker.value`` 的 ``DateTimeValue`` 是 ``datetime | date``：Flet 协议把客户端
+    回填的日期经 msgpack 扩展类型解码为 ``datetime``（``messaging/protocol.py``），而面板
+    初始状态是 ``date``。两者混比较（``start_date >= end_date``）会抛 ``TypeError``；
+    写入 state 前统一为 ``date``，``date`` 原样返回（``datetime`` 是 ``date`` 子类，须先判）。
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    return value
 
 
 def _get_config_from_state(
@@ -211,13 +224,13 @@ def BacktestConfigPanel(
     def _on_start_change(e: ft.ControlEvent) -> None:
         val = get_control_value(e.control, ft.DatePicker)
         if val is not None:
-            set_start_date(val)
+            set_start_date(_normalize_picker_date(val))
         set_show_start_picker(False)
 
     def _on_end_change(e: ft.ControlEvent) -> None:
         val = get_control_value(e.control, ft.DatePicker)
         if val is not None:
-            set_end_date(val)
+            set_end_date(_normalize_picker_date(val))
         set_show_end_picker(False)
 
     def _on_start_dismiss(e: ft.ControlEvent) -> None:
