@@ -35,7 +35,7 @@ def _final_path(fd: int) -> str:
         import msvcrt
         from ctypes import wintypes
 
-        handle = msvcrt.get_osfhandle(fd)
+        handle = msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]  # typeshed 3.14 的 msvcrt stub 未收录 get_osfhandle；运行时 CPython Windows 恒提供
         buffer = ctypes.create_unicode_buffer(32_768)
         length = ctypes.windll.kernel32.GetFinalPathNameByHandleW(  # type: ignore[attr-defined]  # Windows-only API
             wintypes.HANDLE(handle), buffer, len(buffer), 0
