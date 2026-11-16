@@ -1844,9 +1844,16 @@ class AgentDao(BaseDao):
     async def bind_actual_input(self, request: BindActualInputRequest) -> BindActualInputReceipt:
         """首派发实际输入绑定（§9.13/SQ-02 W 首步）：建 agent_round +
 
-        幂等（§9.5 workflow_id UNIQUE）：同 workflow_id 同双摘要 → 查回原事实
-        零新行；同 workflow_id 异输入 → ``INPUT_CONFLICT``。同 execution 已有
-        有效轮（active_round）→ ``INPUT_CONFLICT``（§9.5 部分唯一防双有效轮）。
+        幂等（§9.5 workflow_id UNIQUE）：同 workflow_id **完整身份**（execution /
+        node / workflow_code_version / run_epoch / 双摘要）相等 → 查回原事实
+        零新行；身份任一不同 → ``INPUT_CONFLICT``（旧实现只比双摘要，跨 execution
+        同 workflow 会被误判为重放，检视 D03）。同 execution 已有有效轮
+        （active_round）→ ``INPUT_CONFLICT``（§9.5 部分唯一防双有效轮）。
+
+        ``input_revision`` 取自权威有效修订（该 execution 受理/修订单
+        ``agent_command.input_revision`` 最大值，受理=1、首次修订=2），不再恒为 1；
+        ``run_epoch`` 下限 1，与 ``decode_snapshot_identity`` 快照身份解码一致
+        （0 会导致快照身份解码失败，检视 D03）。
 
         锁序（§5.4 第 4 条）：先持 execution 行锁，再锁其 session 分配序号；
         session/execution 事件水位均 GREATEST 单调推进（R22）。
@@ -1860,7 +1867,7 @@ class AgentDao(BaseDao):
         _require_text_field(request.node_id, "node_id", identity)
         _require_text_field(request.workflow_id, "workflow_id", identity)
         _require_text_field(request.workflow_code_version, "workflow_code_version", identity)
-        _require_int_field(request.run_epoch, "run_epoch", identity, 0)
+        _require_int_field(request.run_epoch, "run_epoch", identity, 1)
         _require_text_field(request.frozen_manifest, "frozen_manifest", identity)
         _require_text_field(request.actual_input, "actual_input", identity)
         frozen_digest = sha256_hex(request.frozen_manifest)
@@ -1895,13 +1902,16 @@ class AgentDao(BaseDao):
                 )
                 .with_for_update()
             )
-            # 3. workflow 幂等重放（§9.5 UNIQUE(workflow_id)）。
+            # 3. workflow 幂等重放（§9.5 UNIQUE(workflow_id)）：完整身份比对。
             existing_round = (
                 await conn.execute(
                     sa.select(
                         AgentRound.round_id,
                         AgentRound.round_number,
+                        AgentRound.execution_id,
                         AgentRound.input_revision,
+                        AgentRound.workflow_code_version,
+                        AgentRound.run_epoch,
                         AgentRound.frozen_digest,
                         AgentRound.actual_digest,
                     ).where(
@@ -1911,24 +1921,35 @@ class AgentDao(BaseDao):
                 )
             ).first()
             if existing_round is not None:
-                if existing_round.frozen_digest == frozen_digest and existing_round.actual_digest == actual_digest:
-                    event_row = (
-                        await conn.execute(
-                            sa.select(AgentMessage.execution_seq, AgentMessage.session_seq)
-                            .where(
-                                AgentMessage.user_scope == request.user_scope,
-                                AgentMessage.round_id == existing_round.round_id,
-                                AgentMessage.event_kind == "input_bound",
-                            )
-                            .limit(1)
+                event_row = (
+                    await conn.execute(
+                        sa.select(
+                            AgentMessage.execution_seq,
+                            AgentMessage.session_seq,
+                            AgentMessage.node_id,
+                        ).where(
+                            AgentMessage.user_scope == request.user_scope,
+                            AgentMessage.round_id == existing_round.round_id,
+                            AgentMessage.event_kind == "input_bound",
                         )
-                    ).first()
-                    if event_row is None or event_row.execution_seq is None:
-                        raise AgentServiceError(
-                            AgentErrorCode.OPERATION_UNKNOWN,
-                            "original input_bound event unavailable",
-                            identity,
-                        )
+                    )
+                ).first()
+                if event_row is None or event_row.execution_seq is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "original input_bound event unavailable",
+                        identity,
+                    )
+                # 完整身份（execution/node/code/epoch + 双摘要）相等才是重放；
+                # 任一不同即同 workflow 异身份 → 冲突，不得跨 execution 冒认原事实。
+                if (
+                    existing_round.execution_id == request.execution_id
+                    and event_row.node_id == request.node_id
+                    and existing_round.workflow_code_version == request.workflow_code_version
+                    and existing_round.run_epoch == request.run_epoch
+                    and existing_round.frozen_digest == frozen_digest
+                    and existing_round.actual_digest == actual_digest
+                ):
                     return BindActualInputReceipt(
                         round_id=existing_round.round_id,
                         round_number=existing_round.round_number,
@@ -1940,7 +1961,7 @@ class AgentDao(BaseDao):
                     )
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT,
-                    "workflow already bound with different input",
+                    "workflow already bound with different input identity",
                     identity,
                 )
             # 4. 单有效轮（§9.5：同 execution 仅一有效运行轮）。
@@ -1959,7 +1980,26 @@ class AgentDao(BaseDao):
                     "execution already has an active round",
                     identity,
                 )
-            # 5. 序号分配（持锁下 max+1；执行事件双 seq 同设，§9.6 CHECK）。
+            # 5. 权威有效输入版：该 execution 受理/修订单 input_revision 最大值
+            #    （受理=1、首次修订=2；队列期多次修订取最新有效版，检视 D03）。
+            #    权威版缺失即无可绑定的冻结输入 → 拒绝，不冒充版本 1（R21）。
+            accepted_revision = (
+                await conn.execute(
+                    sa.select(sa.func.max(AgentCommand.input_revision)).where(
+                        AgentCommand.user_scope == request.user_scope,
+                        AgentCommand.execution_id == request.execution_id,
+                        AgentCommand.input_revision.is_not(None),
+                    )
+                )
+            ).scalar_one()
+            if accepted_revision is None:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    "authoritative accepted input revision unavailable",
+                    identity,
+                )
+            input_revision = _require_int_field(accepted_revision, "input_revision", identity, 1)
+            # 6. 序号分配（持锁下 max+1；执行事件双 seq 同设，§9.6 CHECK）。
             round_number = (
                 (
                     await conn.execute(
@@ -1995,7 +2035,7 @@ class AgentDao(BaseDao):
                 "event", [request.user_scope, request.execution_id, round_id, request.node_id, "input_bound"]
             )
 
-            # 6. round 行（首轮：round_number 由既有轮次派生，首派发即 1；§9.5）。
+            # 7. round 行（首轮：round_number 由既有轮次派生，首派发即 1；§9.5）。
             await conn.execute(
                 sa.insert(AgentRound).values(
                     user_scope=request.user_scope,
@@ -2005,7 +2045,7 @@ class AgentDao(BaseDao):
                     workflow_id=request.workflow_id,
                     workflow_code_version=request.workflow_code_version,
                     run_epoch=request.run_epoch,
-                    input_revision=1,
+                    input_revision=input_revision,
                     plan_revision=1,
                     frozen_manifest=json.loads(request.frozen_manifest),
                     actual_input=json.loads(request.actual_input),
@@ -2014,7 +2054,7 @@ class AgentDao(BaseDao):
                     active_round=True,
                 )
             )
-            # 7. execution 更新：current_round_id + 事件水位 GREATEST + revision CAS 位推进。
+            # 8. execution 更新：current_round_id + 事件水位 GREATEST + revision CAS 位推进。
             await conn.execute(
                 sa.update(AgentExecution)
                 .where(
@@ -2028,7 +2068,7 @@ class AgentDao(BaseDao):
                     updated_at=occurred,
                 )
             )
-            # 8. input_bound 执行事件（执行事件 execution/round/execution_seq 同设，§9.6）。
+            # 9. input_bound 执行事件（执行事件 execution/round/execution_seq 同设，§9.6）。
             await conn.execute(
                 sa.insert(AgentMessage).values(
                     user_scope=request.user_scope,
@@ -2053,14 +2093,14 @@ class AgentDao(BaseDao):
                         "run_epoch": request.run_epoch,
                         "frozen_digest": frozen_digest,
                         "actual_digest": actual_digest,
-                        "input_revision": 1,
+                        "input_revision": input_revision,
                     },
-                    input_revision=1,
+                    input_revision=input_revision,
                     occurred_at=occurred,
                     committed_at=occurred,
                 )
             )
-            # 9. session 事件水位 GREATEST 推进（R22）。
+            # 10. session 事件水位 GREATEST 推进（R22）。
             await conn.execute(
                 sa.update(AgentSession)
                 .where(
@@ -2072,7 +2112,7 @@ class AgentDao(BaseDao):
             return BindActualInputReceipt(
                 round_id=round_id,
                 round_number=round_number,
-                input_revision=1,
+                input_revision=input_revision,
                 frozen_digest=frozen_digest,
                 actual_digest=actual_digest,
                 execution_seq=execution_seq,

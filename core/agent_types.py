@@ -1805,7 +1805,10 @@ class BindActualInputRequest:
     """首派发实际输入绑定（§9.13 bind_actual_input；SQ-02 W 首步调用）。
 
     ``frozen_manifest`` / ``actual_input`` 为 CanonicalJson，摘要由其规范字节
-    单一事实源派生（``sha256``）；``workflow_id`` 为幂等重放键（§9.5 UNIQUE）。
+    单一事实源派生（``sha256``）；``workflow_id`` 为幂等重放键（§9.5 UNIQUE，
+    重放需 execution/node/代码版/epoch 完整身份相等，检视 D03）。
+    ``run_epoch`` 下限 1（与 ``decode_snapshot_identity`` 一致）；``input_revision``
+    由 DAO 从权威受理/修订单派生，不由调用方传入（检视 D03）。
     """
 
     user_scope: str

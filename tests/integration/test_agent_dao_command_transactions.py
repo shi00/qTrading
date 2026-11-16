@@ -4,7 +4,8 @@
 
 - ``bind_actual_input``：首派发建 agent_round（round_number=1、active_round、
   双摘要）+ execution.current_round_id + input_bound 执行事件（execution/round/
-  execution_seq 同设）；workflow_id 唯一幂等重放（§9.5）；
+  execution_seq 同设）；输入版取自权威受理/修订单（检视 D03）；workflow_id
+  唯一幂等重放须 execution/node/代码版/epoch 完整身份相等（§9.5，检视 D03）；
 - ``save_answer``/``mark_answer_delivered``/``consume_answer``：answer_command_id
   CAS 单胜者、投递/消费事实分列（INV-06）、已消费返回原事实（SQ-03）；
 - ``claim_tool_dispatch``/``revoke_tool_grant``：grant_revision CAS 单胜者，
@@ -397,6 +398,80 @@ class TestBindActualInput:
             ).one()
         assert tuple(wm) == (bind.session_seq, bind.execution_seq)
         await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_uses_authoritative_input_revision(self, real_embedded_pg: ConnectionInfo) -> None:
+        """输入版取自权威修订单（受理=1、首次修订=2），不恒为 1（检视 D03）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        rev = await dao.revise_queued(_revise_request(receipt, expected=1))
+
+        bind = await dao.bind_actual_input(_bind_request(receipt))
+
+        assert rev.input_revision == 2
+        assert bind.input_revision == 2
+        async with engine.connect() as conn:
+            round_revision = (
+                await conn.execute(sa.select(AgentRound.input_revision).where(AgentRound.round_id == bind.round_id))
+            ).scalar_one()
+            event = (
+                await conn.execute(
+                    sa.select(AgentMessage.payload, AgentMessage.input_revision).where(
+                        AgentMessage.round_id == bind.round_id,
+                        AgentMessage.event_kind == "input_bound",
+                    )
+                )
+            ).one()
+        assert round_revision == 2
+        assert event.input_revision == 2
+        assert event.payload["input_revision"] == 2
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_same_workflow_other_execution_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """同 workflow 双摘要相同但 execution 不同 → 冲突，不得跨执行冒认重放（检视 D03）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        first = await dao.accept_request(_request(business_request_id="req-1", client_command_id="client-1"))
+        second = await dao.accept_request(_request(business_request_id="req-2", client_command_id="client-2"))
+        engine = create_test_engine(real_embedded_pg.url)
+        await dao.bind_actual_input(_bind_request(first, workflow_id="wf-shared"))
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(_bind_request(second, workflow_id="wf-shared"))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_replay_requires_matching_code_version_and_node(self, real_embedded_pg: ConnectionInfo) -> None:
+        """同 workflow 双摘要相同但代码版/node 不同 → 冲突（检视 D03）。"""
+        dao, receipt, _ = await _full_setup(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+
+        with pytest.raises(AgentServiceError) as exc_code:
+            await dao.bind_actual_input(_bind_request(receipt, workflow_code_version="wcv-2"))
+        assert exc_code.value.code is AgentErrorCode.INPUT_CONFLICT
+        with pytest.raises(AgentServiceError) as exc_node:
+            await dao.bind_actual_input(_bind_request(receipt, node_id="node-2"))
+        assert exc_node.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        replay = await dao.bind_actual_input(_bind_request(receipt))
+        assert replay.execution_seq == 0
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_run_epoch_zero_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """run_epoch=0 拒绝：与快照身份解码下限 1 对齐（检视 D03）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(_bind_request(receipt, run_epoch=0))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
 
 
 class TestAnswerLifecycle:
