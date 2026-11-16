@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import sys
+import time
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 
 import config
@@ -21,6 +22,12 @@ _LOG_DIR_LEGACY = os.path.join(config.APP_ROOT, "logs")
 # 事件循环线程绝不因写盘阻塞（CLAUDE.md R16）；日志为尽力而为，极端突发峰值时的少量
 # 丢弃相对于回阻主循环可接受。
 _QUEUE_MAXSIZE = 1000
+# D04-003：stop_logging 的受控排空预算。sentinel 入队与 listener 线程 join 共用该
+# 预算；超时保留「未停止」状态并告警，不在 atexit / 事件循环路径无界阻塞。
+_STOP_DRAIN_TIMEOUT_SECONDS = 5.0
+# sentinel 入队重试间隔：队列满时按该间隔重试 put_nowait，直到预算耗尽（有界轮询，
+# 不引入忙等；关闭准入后队列只减不增，正常一次即可入队）。
+_STOP_ENQUEUE_RETRY_INTERVAL_SECONDS = 0.01
 _FILE_QUEUE: queue.Queue | None = None
 _LISTENER: QueueListener | None = None
 
@@ -118,6 +125,43 @@ class _QueueHandler(QueueHandler):
         new_record = copy.copy(record)
         new_record.correlation_id = correlation_id.get() or "-"
         return new_record
+
+
+class _DrainableQueueListener(QueueListener):
+    """有界队列下可受控停止的 QueueListener。
+
+    stdlib ``QueueListener.enqueue_sentinel`` 使用 ``put_nowait``：容量固定的队列一旦
+    写满，``stop()`` 直接抛 ``queue.Full``，后台线程收不到 sentinel 继续存活；调用方若在
+    finally 关闭 handler，会与仍在写盘的 listener 线程竞争（句柄关闭后写失败/丢日志）。
+    本类在有界预算内重试 sentinel 入队，并用同一预算 join 线程；超时抛 ``TimeoutError``，
+    由 ``stop_logging`` 保留未停止状态并告警。普通运行期「队列满丢日志」路径
+    （``_QueueHandler`` + put_nowait）不变。
+    """
+
+    def stop(self, timeout: float | None = None) -> None:
+        """停止后台线程；sentinel 入队与 join 共享 ``timeout`` 预算。
+
+        线程已结束（重复调用）时直接返回，保证幂等；超时抛 ``TimeoutError`` 且不清空
+        ``_thread``，使调用方可保留未停止状态并重试。
+        """
+        thread = self._thread
+        if thread is None:
+            return
+        budget = _STOP_DRAIN_TIMEOUT_SECONDS if timeout is None else timeout
+        deadline = time.monotonic() + budget
+        while True:
+            try:
+                self.enqueue_sentinel()
+                break
+            except queue.Full:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("日志队列持续满，sentinel 未能在截止时间内入队") from None
+                time.sleep(min(_STOP_ENQUEUE_RETRY_INTERVAL_SECONDS, remaining))
+        thread.join(max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            raise TimeoutError(f"日志 listener 未能在 {budget:.1f}s 内结束")
+        self._thread = None
 
 
 class JSONFormatter(_SanitizingFormatter):
@@ -289,7 +333,7 @@ def setup_logging(name="astock_screener"):
             # respect_handler_level=True：QueueListener.handle 直接调用 handler.handle，
             # 不经 Logger.callHandlers 的级别门——缺此参数时 error.log 会收录 INFO/DEBUG
             # 记录（handler.setLevel 被旁路），错误日志不再只含 ERROR+（R21 诊断出口失真）。
-            _LISTENER = QueueListener(_FILE_QUEUE, *file_handlers, respect_handler_level=True)
+            _LISTENER = _DrainableQueueListener(_FILE_QUEUE, *file_handlers, respect_handler_level=True)
             _LISTENER.start()
             queue_handler = _QueueHandler(_FILE_QUEUE)
             queue_handler.setLevel(logging_level)
@@ -371,28 +415,45 @@ def flush_logging() -> None:
 def stop_logging() -> None:
     """停止并回收日志队列 listener 线程及其 QueueHandler（幂等）。
 
-    QueueListener.stop() 会入队 sentinel 排空队列中的遗留记录并 join 后台线程，
-    随后从 root logger 移除 QueueHandler。生产在进程退出（atexit）时调用；测试在
-    teardown 调用以保证不泄漏线程、不残留队列任务（CLAUDE.md R7 测试隔离）。
+    顺序为「关闭准入 → 受控排空/join → 关 handler → 清引用」：
+    ① 先从 root 移除 QueueHandler，队列只减不增，新记录仅走 console；
+    ② 交给 ``_DrainableQueueListener.stop`` 在 ``_STOP_DRAIN_TIMEOUT_SECONDS`` 预算内
+       把 sentinel 入队并 join，确认后台线程结束后才关闭文件 handler（避免与仍在写盘
+       的线程竞争句柄）；
+    ③ 预算内未停止（磁盘/下游阻塞）时保留 ``_LISTENER`` / ``_FILE_QUEUE`` 与未关闭的
+       handler，仅告警，供后续重试或进程退出兜底，不在 atexit / 事件循环路径无界阻塞。
+       该状态下新记录准入已关闭、文件日志暂停（仅剩 console），避免向可能即将退出的
+       listener 继续入队造成静默丢弃；恢复文件日志需先再次 stop_logging 成功清空全局
+       引用，再由 setup_logging 重建 listener。
+
+    生产在进程退出（atexit）时调用；测试在 teardown 调用以保证不泄漏线程、不残留队列
+    任务（CLAUDE.md R7 测试隔离）。
     """
     global _FILE_QUEUE, _LISTENER
-    if _LISTENER is not None:
-        listener = _LISTENER
-        try:
-            listener.stop()
-        finally:
-            # QueueListener.stop() 只停止后台线程、不关闭 handler；重复 setup_logging
-            # （测试隔离/进程内重启）会累积未关闭的文件句柄，Windows 下还会锁定
-            # app.log/error.log 影响轮转与清理。此处按「先停线程、再关 handler」关闭。
-            for file_handler in listener.handlers:
-                with contextlib.suppress(Exception):
-                    file_handler.close()
-            _LISTENER = None
-            _FILE_QUEUE = None
     root = logging.getLogger()
-    for h in list(root.handlers):
-        if isinstance(h, QueueHandler):
-            root.removeHandler(h)
+    # ① 关闭新记录准入：必须先于等待队列腾空，否则并发写入可能持续填满队列
+    for queue_handler in [h for h in root.handlers if isinstance(h, QueueHandler)]:
+        root.removeHandler(queue_handler)
+
+    listener = _LISTENER
+    if listener is None:
+        return
+
+    # ② 受控等待 sentinel 入队并 join；超时不关闭 handler、不清引用
+    try:
+        listener.stop()
+    except TimeoutError as exc:
+        logger.warning("stop_logging: %s；保留未停止的日志 listener 待重试", exc)
+        return
+
+    # ③ QueueListener.stop() 只停止后台线程、不关闭 handler；重复 setup_logging
+    # （测试隔离/进程内重启）会累积未关闭的文件句柄，Windows 下还会锁定
+    # app.log/error.log 影响轮转与清理。此处按「先停线程、再关 handler」关闭。
+    for file_handler in listener.handlers:
+        with contextlib.suppress(Exception):
+            file_handler.close()
+    _LISTENER = None
+    _FILE_QUEUE = None
 
 
 atexit.register(stop_logging)
