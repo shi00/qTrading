@@ -69,6 +69,30 @@ def source_status_label_key(status: str) -> str:
     return "news_insight_coverage_fail"
 
 
+def dropped_reason_label_key(reason: str) -> str:
+    """剔除原因代码 → i18n key；未知代码回退通用文案，不展示未受控原文。"""
+    if reason == "no_valid_evidence_quote":
+        return "news_insight_drop_reason_no_valid_evidence_quote"
+    return "news_insight_drop_reason_unknown"
+
+
+def events_dropped_warning_text(state: NewsInsightState) -> str:
+    """剔除质量提示文案；未记录（None）/ 无剔除（0）返回空串。
+
+    R21：None=未记录不渲染成「无剔除」；只有服务端明确记录 count>0 才提示。
+    """
+    count = state.events_dropped_count
+    if not count or count <= 0:
+        return ""
+    labels: list[str] = []
+    for reason in state.events_dropped_reasons:
+        label = I18n.get(dropped_reason_label_key(reason))
+        if label not in labels:
+            labels.append(label)
+    reasons_text = " · ".join(labels) if labels else I18n.get("news_insight_drop_reason_unknown")
+    return I18n.get("news_insight_events_dropped_warning", count=count, reasons=reasons_text)
+
+
 # --- 声明式组件 ---
 
 
@@ -294,6 +318,16 @@ def _build_ready(
         ft.Column(info_rows, spacing=4),
         anchored(EIDS.NEWS_RISK.COVERAGE, _build_coverage(state.coverage)),
     ]
+    # D14-002：部分事件因引用校验被剔除时显式警示（count/reason，不展示未校验 fact/quote）。
+    warning_text = events_dropped_warning_text(state)
+    if warning_text:
+        children.append(
+            ft.Text(
+                warning_text,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.WARNING,
+            )
+        )
     if state.summary:
         children.append(
             ft.Column(
