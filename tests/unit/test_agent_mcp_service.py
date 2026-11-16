@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -38,6 +41,8 @@ from services.agent_service.mcp import (
 
 _FINGERPRINT = sha256_hex(b"mcp-local-implementation")
 _SCHEMA = '{"type":"object","properties":{}}'
+# 平台中性绝对路径：夹具不得假设 Windows（Linux CI 上 "C:\\..." 非 os.path.isabs）
+_ABS_EXE = os.path.join(str(Path(tempfile.gettempdir())), "mcp-server.exe")
 
 
 def _identity(config_version: int = 1) -> MCPServiceIdentity:
@@ -47,7 +52,7 @@ def _identity(config_version: int = 1) -> MCPServiceIdentity:
 def _transport(kind: MCPTransportKind = MCPTransportKind.STDIO, **overrides: object) -> MCPTransportConfig:
     values: dict[str, object] = {"kind": kind}
     if kind is MCPTransportKind.STDIO:
-        values["command"] = "C:\\Program Files\\nodejs\\mcp-server.exe"
+        values["command"] = _ABS_EXE
     else:
         values["url"] = "https://mcp.example.test/tools"
     values.update(overrides)
@@ -163,7 +168,7 @@ class TestTransportConfig:
         assert exc.value.code == "invalid_transport"
 
     def test_stdio_rejects_http_url(self) -> None:
-        config = MCPTransportConfig(kind=MCPTransportKind.STDIO, command="C:\\tool.exe", url="https://x.test")
+        config = MCPTransportConfig(kind=MCPTransportKind.STDIO, command=_ABS_EXE, url="https://x.test")
         with pytest.raises(AgentValidationError) as exc:
             validate_transport_config(config)
         assert exc.value.code == "invalid_transport"
