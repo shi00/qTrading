@@ -24,6 +24,7 @@ from tests.unit.ui.component_renderer import (
     run_render_effects,
 )
 from ui.components.slider_input import SliderInput, _default_fmt, _snap_to_step
+from ui.i18n import I18n
 
 pytestmark = pytest.mark.unit
 
@@ -255,17 +256,18 @@ class TestSliderInputFormat:
         text_field = _find_control(result, ft.TextField)
         assert text_field.value == "3.5"
 
-    def test_custom_fmt_formats_value(
+    def test_unit_suffix_rendered_outside_editable_text(
         self,
         mock_app_colors_state,
     ) -> None:
-        """自定义 fmt：按 fmt 函数格式化。"""
-        component = make_component(SliderInput, value=3.0, fmt=lambda v: f"{v:.1f}%")
-        run_mount_effects(component)
-        result = render_once(component)
+        """单位后缀独立展示：输入框只含裸数值，单位作为 suffix；Slider 标签同样带单位。"""
+        _, result = _mount({"value": 3.0, "unit_suffix": "‱"})
 
         text_field = _find_control(result, ft.TextField)
-        assert text_field.value == "3.0%"
+        assert text_field.value == "3"
+        assert text_field.suffix is not None
+        assert text_field.suffix.value == "‱"
+        assert _find_control(result, ft.Slider).label == "{value}‱"
 
     def test_default_fmt_small_decimal_precision(
         self,
@@ -467,11 +469,11 @@ class TestSliderInputTextInput:
 
         callback.assert_called_once_with(30.0)
 
-    def test_invalid_text_input_restores_value(
+    def test_invalid_text_input_keeps_text_with_visible_error(
         self,
         mock_app_colors_state,
     ) -> None:
-        """非法输入 → 不触发 on_change，draft 恢复为当前 value。"""
+        """非法输入 → 不触发 on_change；保留用户文本并显示错误（不静默还原）。"""
         callback = MagicMock()
         component = make_component(
             SliderInput,
@@ -488,13 +490,15 @@ class TestSliderInputTextInput:
         _invoke(text_field.on_blur, _make_event("abc"))
 
         callback.assert_not_called()
-        assert _find_control(_rerender(component), ft.TextField).value == "50"
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == "abc"
+        assert rerendered.error == I18n.get("screener_param_invalid")
 
-    def test_empty_text_input_restores_value(
+    def test_empty_text_input_keeps_empty_with_visible_error(
         self,
         mock_app_colors_state,
     ) -> None:
-        """空输入 → 不触发 on_change，draft 恢复为当前 value。"""
+        """空输入 → 不触发 on_change；保持空文本并显示错误（不静默还原）。"""
         callback = MagicMock()
         component = make_component(
             SliderInput,
@@ -511,7 +515,9 @@ class TestSliderInputTextInput:
         _invoke(text_field.on_blur, _make_event(""))
 
         callback.assert_not_called()
-        assert _find_control(_rerender(component), ft.TextField).value == "50"
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == ""
+        assert rerendered.error == I18n.get("screener_param_invalid")
 
     def test_text_input_same_value_no_callback(
         self,
@@ -581,15 +587,15 @@ class TestSliderInputTextInput:
         assert _find_control(_rerender(component), ft.TextField).value == "1"
 
     @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "infinity", "NaN"])
-    def test_non_finite_text_input_restores_value(
+    def test_non_finite_text_input_keeps_text_with_visible_error(
         self,
         mock_app_colors_state,
         raw: str,
     ) -> None:
-        """非有限输入（nan/±inf）→ float() 可解析但不上抛，恢复当前值。
+        """非有限输入（nan/±inf）→ float() 可解析但不上抛；保留文本并显示错误。
 
         回归：NaN 经 _snap_to_step 与 min/max 比较恒 False 会意外收敛到
-        max_val 并上抛（静默写入边界极值），须与 "abc" 同口径恢复。
+        max_val 并上抛（静默写入边界极值），须与 "abc" 同口径拒绝。
         """
         callback = MagicMock()
         component = make_component(
@@ -607,7 +613,174 @@ class TestSliderInputTextInput:
         _invoke(text_field.on_blur, _make_event(raw))
 
         callback.assert_not_called()
-        assert _find_control(_rerender(component), ft.TextField).value == "50"
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == raw
+        assert rerendered.error == I18n.get("screener_param_invalid")
+
+
+class TestSliderInputUnitAndValidation:
+    """D18-003：单位后缀编辑、零值、越界/非法输入的可见反馈。"""
+
+    @pytest.mark.parametrize(
+        ("raw", "unit_suffix", "value", "max_val", "step", "expected", "draft"),
+        [
+            ("4‱", "‱", 3.0, 10.0, 1.0, 4.0, "4"),
+            ("1.0‰", "‰", 0.5, 2.0, 0.5, 1.0, "1"),
+            ("7 bps", " bps", 5.0, 20.0, 1.0, 7.0, "7"),
+            ("7bps", " bps", 5.0, 20.0, 1.0, 7.0, "7"),
+            ("4", "‱", 3.0, 10.0, 1.0, 4.0, "4"),
+        ],
+    )
+    def test_unit_suffixed_or_bare_number_commits(
+        self,
+        mock_app_colors_state,
+        raw: str,
+        unit_suffix: str,
+        value: float,
+        max_val: float,
+        step: float,
+        expected: float,
+        draft: str,
+    ) -> None:
+        """保留后缀或粘贴裸数值均可提交；提交后输入框回到裸数值且无错误。"""
+        callback = MagicMock()
+        component = make_component(
+            SliderInput,
+            value=value,
+            min_val=0,
+            max_val=max_val,
+            step=step,
+            unit_suffix=unit_suffix,
+            on_change=callback,
+        )
+        run_mount_effects(component)
+        result = render_once(component)
+        text_field = _find_control(result, ft.TextField)
+
+        _invoke(text_field.on_blur, _make_event(raw))
+
+        callback.assert_called_once_with(expected)
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == draft
+        assert rerendered.error is None
+
+    def test_zero_value_commits_and_is_not_reverted(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """输入 0 → 提交 0（0 是合法值，不回退为当前值）。"""
+        callback = MagicMock()
+        component = make_component(
+            SliderInput,
+            value=3.0,
+            min_val=0,
+            max_val=10,
+            step=1.0,
+            unit_suffix="‱",
+            on_change=callback,
+        )
+        run_mount_effects(component)
+        result = render_once(component)
+
+        _invoke(_find_control(result, ft.TextField).on_blur, _make_event("0"))
+
+        callback.assert_called_once_with(0.0)
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == "0"
+        assert rerendered.error is None
+
+    def test_out_of_range_clamps_and_shows_range_error(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """越界输入 → clamp 到边界后提交，同时显示范围错误（不静默夹取）。"""
+        callback = MagicMock()
+        component = make_component(
+            SliderInput,
+            value=3.0,
+            min_val=0,
+            max_val=10,
+            step=1.0,
+            unit_suffix="‱",
+            on_change=callback,
+        )
+        run_mount_effects(component)
+        result = render_once(component)
+
+        _invoke(_find_control(result, ft.TextField).on_blur, _make_event("11‱"))
+
+        callback.assert_called_once_with(10.0)
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == "10"
+        assert rerendered.error == I18n.get("sys_err_out_of_range_fmt", min="0", max="10")
+
+    def test_negative_below_min_clamps_and_shows_range_error(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """负值低于 min → clamp 到 min，并显示范围错误。"""
+        callback = MagicMock()
+        component = make_component(
+            SliderInput,
+            value=50.0,
+            min_val=0,
+            max_val=100,
+            step=1.0,
+            on_change=callback,
+        )
+        run_mount_effects(component)
+        result = render_once(component)
+
+        _invoke(_find_control(result, ft.TextField).on_blur, _make_event("-1"))
+
+        callback.assert_called_once_with(0.0)
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == "0"
+        assert rerendered.error == I18n.get("sys_err_out_of_range_fmt", min="0", max="100")
+
+    @pytest.mark.parametrize("raw", ["1,000", "bps", "7 MB"])
+    def test_unparseable_or_foreign_unit_text_preserved_with_error(
+        self,
+        mock_app_colors_state,
+        raw: str,
+    ) -> None:
+        """逗号分隔/仅单位/未知单位均不提交，保留文本并显示错误（不猜格式化逆运算）。"""
+        callback = MagicMock()
+        component = make_component(
+            SliderInput,
+            value=5.0,
+            min_val=0,
+            max_val=20,
+            step=1.0,
+            unit_suffix=" bps",
+            on_change=callback,
+        )
+        run_mount_effects(component)
+        result = render_once(component)
+
+        _invoke(_find_control(result, ft.TextField).on_blur, _make_event(raw))
+
+        callback.assert_not_called()
+        rerendered = _find_control(_rerender(component), ft.TextField)
+        assert rerendered.value == raw
+        assert rerendered.error == I18n.get("screener_param_invalid")
+
+    def test_parent_value_change_clears_validation_error(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """父级 value 变化（rAF/effect 同步）→ draft 更新且错误清除。"""
+        component = make_component(SliderInput, value=5.0, min_val=0, max_val=20, step=1.0)
+        run_mount_effects(component)
+        result = render_once(component)
+        _invoke(_find_control(result, ft.TextField).on_blur, _make_event("abc"))
+
+        component.kwargs["value"] = 10.0  # type: ignore[index]  # 测试模拟父级 props 变化
+        run_render_effects(component)
+        rerendered = _find_control(render_once(component), ft.TextField)
+
+        assert rerendered.value == "10"
+        assert rerendered.error is None
 
 
 class TestSliderInputControlledSync:
