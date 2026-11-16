@@ -399,7 +399,7 @@ def BacktestConfigPanel(
         max_val=10,
         step=1.0,
         divisions=10,
-        fmt=lambda v: f"{v:g}‱",
+        unit_suffix="‱",
         on_change=_on_commission_change,
         expand=True,
     )
@@ -421,7 +421,7 @@ def BacktestConfigPanel(
         max_val=2,
         step=0.5,
         divisions=4,
-        fmt=lambda v: f"{v:.1f}‰",
+        unit_suffix="‰",
         on_change=_on_stamp_duty_rate_change,
         disabled=stamp_duty_auto,
         expand=True,
@@ -449,7 +449,7 @@ def BacktestConfigPanel(
         max_val=20,
         step=1.0,
         divisions=20,
-        fmt=lambda v: f"{v:g} bps",
+        unit_suffix=" bps",
         on_change=_on_slippage_change,
         expand=True,
     )
