@@ -295,7 +295,14 @@ class EgressAudit:
         return today_map, month_map
 
     def _scan_aggregates(self) -> tuple[dict[str, tuple[int, int]], dict[str, tuple[int, int]]]:
-        """同步扫描 JSONL 文件聚合今日/本月（在 IO 线程池执行）。"""
+        """同步扫描 JSONL 文件聚合今日/本月（在 IO 线程池执行）。
+
+        容错契约：单行损坏只跳过该行并计入受控损坏计数，绝不清空同文件其它有效行的
+        聚合；仅文件级读取失败才整体降级（返回已聚合部分）。损坏行分类：
+        JSON 语法错误/半行、合法非对象（``[]`` / ``null`` / 数字 / 字符串）、
+        ``timestamp``/``destination`` 缺失或类型非法、``payload_size_bytes`` 无法转 int。
+        R9：只记录损坏行数，不记录行内容（行内可能含目的地等业务信息）。
+        """
         today_prefix = get_now().date().isoformat()  # "2026-09-14"
         month_prefix = get_now().strftime("%Y-%m")
         today_map: dict[str, tuple[int, int]] = {}
@@ -303,6 +310,7 @@ class EgressAudit:
         path = self._file_path()
         if not os.path.isfile(path):
             return today_map, month_map
+        corrupt_lines = 0
         try:
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -311,21 +319,37 @@ class EgressAudit:
                         continue
                     try:
                         obj = json.loads(line)
-                        ts_str = obj.get("timestamp", "")
-                        dest = obj.get("destination", "")
-                        if not ts_str or not dest:
-                            continue
-                        rec_date = ts_str[:10]  # ISO 日期前缀
-                        rec_month = ts_str[:7]
+                    except ValueError:  # JSONDecodeError（含半行）是 ValueError 子类
+                        corrupt_lines += 1
+                        continue
+                    if not isinstance(obj, dict):
+                        # 合法 JSON 但非对象（[] / null / 数字 / 字符串）→ 损坏行，
+                        # 不得触发 AttributeError 使整段聚合清空。
+                        corrupt_lines += 1
+                        continue
+                    ts_str = obj.get("timestamp")
+                    dest = obj.get("destination")
+                    if not isinstance(ts_str, str) or not isinstance(dest, str) or not ts_str or not dest:
+                        corrupt_lines += 1
+                        continue
+                    try:
                         payload = int(obj.get("payload_size_bytes", 0))
-                        if rec_date == today_prefix:
-                            _agg_add(today_map, dest, payload)
-                        if rec_month == month_prefix:
-                            _agg_add(month_map, dest, payload)
-                    except (ValueError, KeyError, TypeError):
-                        continue  # 容忍损坏行
+                    except (TypeError, ValueError):
+                        corrupt_lines += 1
+                        continue
+                    rec_date = ts_str[:10]  # ISO 日期前缀
+                    rec_month = ts_str[:7]
+                    if rec_date == today_prefix:
+                        _agg_add(today_map, dest, payload)
+                    if rec_month == month_prefix:
+                        _agg_add(month_map, dest, payload)
         except OSError:
             return today_map, month_map
+        if corrupt_lines:
+            logger.warning(
+                "[EgressAudit] skipped %d corrupt JSONL line(s) during aggregation",
+                corrupt_lines,
+            )
         return today_map, month_map
 
     def recent(self, limit: int = 20) -> list[dict]:

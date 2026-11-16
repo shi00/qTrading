@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 
@@ -116,6 +117,52 @@ class TestAggregatesNoDoubleCount:
         )
         today_map, _ = await EgressAudit().get_aggregates()
         assert today_map == {"llm:ok/ok": (1, 0)}
+
+    async def test_aggregates_skip_non_object_json_lines(self, _tmp_egress_path, caplog) -> None:
+        """合法非对象 JSON（[]/null/数字/字符串）与半行只跳过，不清空有效聚合（D20-002）。"""
+        path = _tmp_egress_path / "egress_audit.jsonl"
+        ts = get_now().date().isoformat()
+        valid = json.dumps(
+            {"timestamp": f"{ts}T00:00:00", "destination": "llm:ok/ok", "payload_size_bytes": 7},
+            ensure_ascii=False,
+        )
+        path.write_text(
+            "\n".join([valid, "[]", "null", "123", '"a string"', "[]", valid, '{"timestamp": "2026-']) + "\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="utils.egress_audit"):
+            today_map, month_map = await EgressAudit().get_aggregates()
+
+        # 有效行（损坏行前后各一条）全部保留，计数与字节数不被清空
+        assert today_map == {"llm:ok/ok": (2, 14)}
+        assert month_map == {"llm:ok/ok": (2, 14)}
+        messages = [r.getMessage() for r in caplog.records if r.name == "utils.egress_audit"]
+        assert any("skipped 6 corrupt JSONL line(s)" in m for m in messages)
+        # R9: 受控损坏计数不携带行内容/目的地
+        assert all("llm:ok/ok" not in m for m in messages)
+
+    async def test_aggregates_skip_bad_payload_and_destination(self, _tmp_egress_path) -> None:
+        """坏 payload / 非字符串 destination / 非字符串 timestamp 均跳过，不影响有效行。"""
+        path = _tmp_egress_path / "egress_audit.jsonl"
+        ts = get_now().date().isoformat()
+        lines = [
+            json.dumps({"timestamp": f"{ts}T01:00:00", "destination": "llm:ok/ok", "payload_size_bytes": 5}),
+            json.dumps({"timestamp": f"{ts}T01:00:01", "destination": "llm:bad/payload", "payload_size_bytes": "abc"}),
+            json.dumps({"timestamp": f"{ts}T01:00:02", "destination": 12345, "payload_size_bytes": 1}),
+            json.dumps({"timestamp": 20260101, "destination": "llm:bad/ts", "payload_size_bytes": 1}),
+            json.dumps({"timestamp": f"{ts}T01:00:03", "destination": "", "payload_size_bytes": 1}),
+            json.dumps({"timestamp": f"{ts}T01:00:04", "destination": "llm:ok/ok", "payload_size_bytes": 5}),
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        today_map, _ = await EgressAudit().get_aggregates()
+
+        assert today_map == {"llm:ok/ok": (2, 10)}
+
+    async def test_aggregates_empty_file_returns_empty_maps(self, _tmp_egress_path) -> None:
+        (_tmp_egress_path / "egress_audit.jsonl").write_text("", encoding="utf-8")
+        assert await EgressAudit().get_aggregates() == ({}, {})
 
 
 # ============================================================================
