@@ -194,6 +194,120 @@ class TestCoverageExtraInRust:
 
 
 # ============================================================================
+# 注释 / 字符串中的伪声明不得被当成已覆盖场景（D21-UNIT-005）
+# ============================================================================
+
+
+def _append_text(path: Path, text: str) -> None:
+    """向已有 mock 文件追加文本（保留原始换行，不做平台转换）。"""
+    with path.open("a", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+class TestCommentedPseudoDeclarationsIgnored:
+    """只有注释/字符串中的 ``fn test_inject_NN_*`` 时，仍应报告该场景缺失。"""
+
+    def test_line_and_block_comment_pseudo_declarations(self, tmp_path: Path) -> None:
+        rust_file = tmp_path / "failure_injection.rs"
+        pg_plan_file = tmp_path / "pg_plan.md"
+        _write_rust_file(rust_file, [s for s in CURRENT_RUST_SCENARIOS if s not in ("03", "04")])
+        _append_text(
+            rust_file,
+            "// fn test_inject_03_disabled_in_line_comment() {}\n"
+            "/*\n"
+            "fn test_inject_04_disabled_in_block_comment() {}\n"
+            "*/\n",
+        )
+        _write_pg_plan_file(pg_plan_file, EXPECTED_MATRIX_SCENARIOS)
+
+        result = _run_script(rust_file, pg_plan_file)
+
+        assert result.returncode == 1, (
+            f"expected exit 1 when scenarios only appear in comments, got {result.returncode}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "MISSING" in result.stdout, f"expected MISSING report, got: {result.stdout}"
+        assert "'3'" in result.stdout and "'4'" in result.stdout, (
+            f"expected commented #3/#4 reported as missing, got: {result.stdout}"
+        )
+
+    def test_doc_comment_pseudo_declaration(self, tmp_path: Path) -> None:
+        rust_file = tmp_path / "failure_injection.rs"
+        pg_plan_file = tmp_path / "pg_plan.md"
+        _write_rust_file(rust_file, [s for s in CURRENT_RUST_SCENARIOS if s != "08"])
+        _append_text(rust_file, "/// fn test_inject_08_disabled_in_doc_comment() {}\n")
+        _write_pg_plan_file(pg_plan_file, EXPECTED_MATRIX_SCENARIOS)
+
+        result = _run_script(rust_file, pg_plan_file)
+
+        assert result.returncode == 1, f"expected exit 1, got {result.returncode}\nstdout: {result.stdout}"
+        assert "'8'" in result.stdout, f"expected commented #8 reported as missing, got: {result.stdout}"
+
+    def test_string_and_raw_string_pseudo_declarations(self, tmp_path: Path) -> None:
+        rust_file = tmp_path / "failure_injection.rs"
+        pg_plan_file = tmp_path / "pg_plan.md"
+        _write_rust_file(rust_file, [s for s in CURRENT_RUST_SCENARIOS if s not in ("26", "27")])
+        _append_text(
+            rust_file,
+            'const NOT_A_TEST: &str = "fn test_inject_26_disabled_in_string() {}";\n'
+            'const NOT_A_TEST_RAW: &str = r#"fn test_inject_27_disabled_in_raw_string() {}"#;\n',
+        )
+        _write_pg_plan_file(pg_plan_file, EXPECTED_MATRIX_SCENARIOS)
+
+        result = _run_script(rust_file, pg_plan_file)
+
+        assert result.returncode == 1, f"expected exit 1, got {result.returncode}\nstdout: {result.stdout}"
+        assert "'26'" in result.stdout and "'27'" in result.stdout, (
+            f"expected string-embedded #26/#27 reported as missing, got: {result.stdout}"
+        )
+
+
+class TestRealDeclarationsStillDetected:
+    """注释/字符串不得干扰真实声明（行内注释、字符字面量、CRLF）。"""
+
+    def test_inline_comments_char_literal_and_raw_ident(self, tmp_path: Path) -> None:
+        rust_file = tmp_path / "failure_injection.rs"
+        pg_plan_file = tmp_path / "pg_plan.md"
+        _write_rust_file(rust_file, CURRENT_RUST_SCENARIOS)
+        _append_text(
+            rust_file,
+            "const QUOTE: char = '\"';\n"
+            "let r#fn = 1;\n"
+            "#[test] // 行内属性注释\n"
+            "fn /* 行内块注释 */ test_inject_03_with_inline_comment() {}\n"
+            "/* 嵌套 /* 内层 */ 外层注释 */\n",
+        )
+        _write_pg_plan_file(pg_plan_file, EXPECTED_MATRIX_SCENARIOS)
+
+        result = _run_script(rust_file, pg_plan_file)
+
+        assert result.returncode == 0, (
+            f"expected exit 0 when only real declarations exist, got {result.returncode}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+
+    def test_crlf_file_with_commented_declaration(self, tmp_path: Path) -> None:
+        rust_file = tmp_path / "failure_injection.rs"
+        pg_plan_file = tmp_path / "pg_plan.md"
+        lines = [
+            "//! Rust sidecar 集成测试（CRLF 换行）。",
+            "",
+        ]
+        for sn in (s for s in CURRENT_RUST_SCENARIOS if s != "03"):
+            lines.extend([f"/// #{sn} 场景测试。", "#[test]", f"fn test_inject_{sn}_scenario() {{", "}", ""])
+        lines.extend(["// fn test_inject_03_disabled_in_line_comment() {}", ""])
+        rust_file.write_bytes("\r\n".join(lines).encode("utf-8"))
+        _write_pg_plan_file(pg_plan_file, EXPECTED_MATRIX_SCENARIOS)
+
+        result = _run_script(rust_file, pg_plan_file)
+
+        assert result.returncode == 1, (
+            f"expected exit 1 for CRLF file with only commented #3, got {result.returncode}\nstdout: {result.stdout}"
+        )
+        assert "'3'" in result.stdout, f"expected #3 reported as missing, got: {result.stdout}"
+
+
+# ============================================================================
 # 兜底：§17.6 矩阵格式异常 → 友好报错，exit 2
 # ============================================================================
 
