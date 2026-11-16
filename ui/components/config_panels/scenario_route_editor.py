@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -135,19 +136,40 @@ def _run_task_handler(coro_func: Callable, *args: Any) -> Callable[[ft.ControlEv
     return _on_click
 
 
-def _try_focus(control: Any) -> None:
-    """best-effort 焦点恢复（关闭选择器后返回发起按钮）。
+async def _restore_focus(control: Any) -> None:
+    """await 控件协程 ``focus()``（Flet 1.1.0 起为 async def）。
 
-    仅当控件暴露可调用 ``focus`` 时才调用，且吞掉一切异常——无 renderer 上下文
-    （单元测试）或控件未挂载时静默跳过，绝不阻断渲染。
+    控件已卸载 / 未挂载时 ``_invoke_method`` 抛 ``RuntimeError``，属可预期
+    best-effort 失败，记 debug 后跳过；``CancelledError`` 不拦截（R2）。
     """
-    focus = getattr(control, "focus", None)
+    focus: Any = getattr(control, "focus", None)
     if not callable(focus):
         return
     try:
-        focus()
-    except Exception:
+        result = focus()
+        if inspect.isawaitable(result):
+            await result
+    except RuntimeError:
         logger.debug("[ScenarioRouteEditor] focus return skipped", exc_info=True)
+
+
+def _try_focus(control: Any) -> None:
+    """best-effort 焦点恢复（关闭选择器后返回发起按钮）。
+
+    ``focus`` 是协程，须经 ``page.run_task`` 分派；同步直接调用只会创建
+    coroutine 而不会执行。无 page 上下文（单元测试）或控件已卸载时静默跳过，
+    绝不阻断渲染。
+    """
+    try:
+        page = ft.context.page
+    except RuntimeError:
+        return
+    if page is None:
+        return
+    try:
+        page.run_task(_restore_focus, control)
+    except RuntimeError:
+        logger.debug("[ScenarioRouteEditor] focus return skipped (page unavailable)", exc_info=True)
 
 
 def _confirm_add(vm: ModelRoutesViewModel, connection_id: str) -> None:

@@ -30,20 +30,28 @@ logger = logging.getLogger(__name__)
 # Sub-Components (模块级纯函数，由旧命令式 class 转换)
 # ==============================================================================
 
-# HealthScoreCard 状态映射 (status -> (color, icon, i18n_key))
-_HEALTH_STATUS_MAP = {
-    "green": (AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE, "health_status_excellent"),
+# HealthScoreCard 状态映射 (status -> (AppColors 语义属性名, icon, i18n_key))
+# D19-001: 只存语义属性名, 渲染期经 _resolve_health_status_visual 读取当期主题色,
+# 避免在模块导入时固化 Hex (主题热切换后已显示/新打开的卡仍用旧色)。
+_HEALTH_STATUS_MAP: dict[str, tuple[str, ft.IconData, str]] = {
+    "green": ("SUCCESS", ft.Icons.CHECK_CIRCLE, "health_status_excellent"),
     "yellow": (
-        AppColors.WARNING,
+        "WARNING",
         ft.Icons.WARNING_ROUNDED,
         "health_status_warning",
     ),
 }
-_HEALTH_DEFAULT_STATUS = (
-    AppColors.ERROR,
+_HEALTH_DEFAULT_STATUS: tuple[str, ft.IconData, str] = (
+    "ERROR",
     ft.Icons.ERROR_OUTLINE,
     "health_status_critical",
 )
+
+
+def _resolve_health_status_visual(status: str) -> tuple[str, ft.IconData, str]:
+    """解析健康状态为 (当期主题色, icon, i18n_key)（D19-001: 不固化导入期快照）。"""
+    color_name, icon, i18n_key = _HEALTH_STATUS_MAP.get(status, _HEALTH_DEFAULT_STATUS)
+    return getattr(AppColors, color_name), icon, i18n_key
 
 
 def _make_gradient(color: str) -> ft.LinearGradient:
@@ -63,7 +71,7 @@ def _build_health_score_card(status: str, tables_count: int) -> ft.Container:
 
     由旧 ``HealthScoreCard(ft.Container)`` class 转换。
     """
-    color, icon, i18n_key = _HEALTH_STATUS_MAP.get(status, _HEALTH_DEFAULT_STATUS)
+    color, icon, i18n_key = _resolve_health_status_visual(status)
     text = I18n.get(i18n_key)
 
     return ft.Container(
@@ -549,6 +557,8 @@ def HealthReportDialog(
         on_sync_now: 立即同步回调（Task 5.3: 关闭弹窗并触发同步）
     """
     ft.use_state(get_observable_state)
+    # D19-001: 订阅主题状态, 主题热切换后已显示的健康卡随重渲染读取当期语义色.
+    ft.use_state(AppColors.get_observable_state)
     open_, set_open = ft.use_state(open_state)
 
     width, height = _health_dialog_size(page)

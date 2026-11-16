@@ -1036,7 +1036,9 @@ class TestHealthReportDialogComponent:
         on_dismiss(None)
         # dismiss 关闭对话框（open_state=False）并以无参调用通知消费方
         env["on_close"].assert_called_once_with()
-        assert env["component"]._state.hooks[1].value is False
+        # hooks: [i18n_state, appcolors_state, open_state, ...] — 按值定位布尔 open state
+        open_hook = next(h for h in env["component"]._state.hooks if isinstance(h.value, bool))
+        assert open_hook.value is False
 
     def test_deep_scan_handler_invokes_on_deep_scan(self, health_report_dialog_env):
         """_deep_scan handler 调用 on_close + on_deep_scan。"""
