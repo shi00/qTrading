@@ -49,7 +49,6 @@ from ui.viewmodels.model_usage_view_model import (
     EXPORT_MONTHLY_SUMMARY,
     EXPORT_SCOPE_ALL,
     EXPORT_SCOPE_PAGE,
-    PAGE_SIZE,
     PRICING_STATUS_ALL_UNPRICED,
     PRICING_STATUS_EMPTY,
     PRICING_STATUS_KNOWN,
@@ -60,6 +59,7 @@ from ui.viewmodels.model_usage_view_model import (
     ModelUsageViewModel,
     MonthUsageRow,
     month_pricing_status,
+    total_page_count,
 )
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -960,6 +960,8 @@ def _build_request_rows(state: ModelUsageState, vm: ModelUsageViewModel) -> list
 
 
 def _build_pagination(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Control:
+    """分页控件（D18-007）：``state.total`` 是记录数，显示与边界均按总页数换算。"""
+    total_pages = total_page_count(state.total)
     return ft.Row(
         [
             anchored(
@@ -972,7 +974,7 @@ def _build_pagination(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Con
                 ),
             ),
             ft.Text(
-                I18n.get("model_usage_page_indicator", page=state.page + 1, total=state.total),
+                I18n.get("model_usage_page_indicator", page=state.page + 1, total=total_pages),
                 size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.TEXT_SECONDARY,
             ),
@@ -981,7 +983,7 @@ def _build_pagination(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Con
                 ft.TextButton(
                     content=I18n.get("model_usage_next_page"),
                     key="usage_next_page",
-                    disabled=(state.page + 1) * PAGE_SIZE >= state.total,
+                    disabled=state.page + 1 >= total_pages,
                     on_click=safe_on_click(_run_task_handler(vm.next_page)),
                 ),
             ),

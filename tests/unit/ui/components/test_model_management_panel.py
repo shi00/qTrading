@@ -13,6 +13,7 @@
 - ``_parse_date_filter`` / ``_format_date_filter``：本地日期与 ``created_at`` 墙钟边界往返。
 - ``_build_usage_view`` / ``_export_csv_and_notify``：CSV 导出真实落盘（web 走 ``src_bytes``，
   桌面经线程池写路径，C-1）。
+- ``_build_pagination``：页码文案按记录数换算总页数（D18-007），prev/next 禁用与边界一致。
 """
 
 import ast
@@ -44,6 +45,7 @@ from ui.components.model_management_panel import (
     _build_budget_summary,
     _build_connection_row,
     _build_connections_view,
+    _build_pagination,
     _build_release_controls,
     _build_request_rows,
     _build_usage_filters,
@@ -585,6 +587,51 @@ class TestUsageView:
         """D16-004：翻页在途界面显式「加载中」（旧页行已清空）。"""
         view = _build_usage_view(_usage_state(page=1, loading=True), MagicMock(), [], None, MagicMock())
         assert "model_usage_loading" in set(_collect_keys(view))
+
+
+class TestUsagePagination:
+    """D18-007：页码文案的总页数由记录数换算，翻页禁用与其边界一致。"""
+
+    @staticmethod
+    def _row(state: ModelUsageState) -> ft.Row:
+        return cast(ft.Row, _build_pagination(state, MagicMock()))
+
+    def _indicator(self, state: ModelUsageState) -> str:
+        return cast(ft.Text, self._row(state).controls[1]).value
+
+    @pytest.mark.parametrize(
+        ("total_records", "page", "total_pages"),
+        [(0, 0, 1), (1, 0, 1), (50, 0, 1), (51, 1, 2), (100, 1, 2)],
+    )
+    def test_page_indicator_shows_total_pages_not_record_count(
+        self, total_records: int, page: int, total_pages: int
+    ) -> None:
+        """0/1/50 条 → 1 页，51/100 条 → 2 页；不再把记录数当总页数。"""
+        text = self._indicator(_usage_state(total=total_records, page=page))
+        assert text == I18n.get("model_usage_page_indicator", page=page + 1, total=total_pages)
+
+    def test_page_indicator_locales_share_total_pages_semantics(self) -> None:
+        """zh/en 模板同义：``{total}`` 在两语言下都表示总页数。"""
+        assert I18n.get("model_usage_page_indicator", locale="zh_CN", page=1, total=2) == "第 1 / 2 页"
+        assert I18n.get("model_usage_page_indicator", locale="en_US", page=1, total=2) == "Page 1 of 2"
+
+    @pytest.mark.parametrize(
+        ("total_records", "page", "prev_disabled", "next_disabled"),
+        [
+            (0, 0, True, True),
+            (50, 0, True, True),
+            (51, 0, True, False),
+            (51, 1, False, True),
+            (100, 1, False, True),
+        ],
+    )
+    def test_page_buttons_follow_total_pages_boundary(
+        self, total_records: int, page: int, prev_disabled: bool, next_disabled: bool
+    ) -> None:
+        """记录数边界与翻页禁用一致（空结果 / 末页 / 中间页）。"""
+        row = self._row(_usage_state(total=total_records, page=page))
+        assert cast(ft.TextButton, row.controls[0]).disabled is prev_disabled
+        assert cast(ft.TextButton, row.controls[2]).disabled is next_disabled
 
 
 class TestExportFilename:
