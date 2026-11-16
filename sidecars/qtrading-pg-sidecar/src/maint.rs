@@ -288,8 +288,27 @@ fn load_password(layout: &Layout) -> Result<String, u8> {
     }
 }
 
+/// 测试注入：固定 restore/bak 时间戳（仅故障路径回归用，非法值忽略）。
+///
+/// 默认模式恢复目录名只含秒级时间戳，回归「时钟回拨/预存同名目录」需要可预期的名字；
+/// 与 `QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL` 同款 env override 模式（非 cfg(test)）。
+const FORCE_RESTORE_TS_ENV: &str = "QTRADING_PG_SIDECAR_FORCE_RESTORE_TS";
+
+fn injected_ts(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// 目录名用紧凑时间戳（`20260721T153000Z`）。
 fn ts_compact() -> String {
+    if let Ok(raw) = std::env::var(FORCE_RESTORE_TS_ENV) {
+        if let Some(forced) = injected_ts(&raw) {
+            return forced;
+        }
+    }
     run::utc_now_iso8601()
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -1325,11 +1344,181 @@ fn verify_target_credentials(target_layout: &Layout, password: &str) -> Result<(
     }
 }
 
-fn cleanup_restored_target(restore_dir: &Path) {
-    if let Err(e) = std::fs::remove_dir_all(restore_dir) {
+// ---- 恢复目录所有权（D07-006） ----
+
+/// 默认恢复目录名的换名上限（`<data>.restore-<ts>` 被占时依次尝试 `-1`…）。
+const RESTORE_DIR_ATTEMPTS: u8 = 16;
+
+/// 恢复目录所有权：决定失败清理的范围，避免误删既有恢复成果。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DirOwnership {
+    /// 本次进程用 `create_dir` 原子独占创建，失败时可整体删除。
+    Created,
+    /// 复用的既有空目录（显式目标）；失败只清空本次写入的条目，保留目录本身。
+    AdoptedEmpty,
+}
+
+/// 本次 restore 的目标目录及其所有权（所有权随结果传递到清理路径）。
+struct RestoreDir {
+    path: PathBuf,
+    ownership: DirOwnership,
+}
+
+/// 默认模式下原子独占申请 `<数据目录名>.restore-<ts>`。
+///
+/// 同名目录已存在时换名 `-1`、`-2`…，**绝不复用**既有目录：它可能是上次 exit 20
+/// 保留的唯一恢复成果（时钟回拨或同一秒内重复 restore 也会撞名）。复用会让 initdb
+/// 因目录非空失败，随后失败清理把该恢复点整体删除。
+fn claim_default_restore_dir(base: &Path) -> Result<RestoreDir, u8> {
+    for attempt in 0..RESTORE_DIR_ATTEMPTS {
+        let path = if attempt == 0 {
+            base.to_path_buf()
+        } else {
+            sibling_with_suffix(base, &format!("-{attempt}"))
+        };
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                if attempt > 0 {
+                    eprintln!(
+                        "[sidecar] 默认恢复目录 {} 已存在，改用 {}（不复用既有目录）",
+                        base.display(),
+                        path.display()
+                    );
+                }
+                return Ok(RestoreDir {
+                    path,
+                    ownership: DirOwnership::Created,
+                });
+            }
+            // create_dir 对同名的目录/文件/符号链接（含悬空链接）均返回 AlreadyExists。
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                eprintln!("[sidecar] 恢复目录创建失败 {}: {e}", path.display());
+                return Err(exit_codes::DUMP_RESTORE_FAILED);
+            }
+        }
+    }
+    eprintln!(
+        "[sidecar] 连续 {} 个默认恢复目录名均被占用，无法开始恢复：{}",
+        RESTORE_DIR_ATTEMPTS,
+        base.display()
+    );
+    Err(exit_codes::DUMP_RESTORE_FAILED)
+}
+
+/// 申请显式恢复目标：不存在时原子创建；已存在时只接受真实空目录。
+///
+/// 拒绝符号链接别名（清理与写入会转发到链接目标）、非目录与非空目录（§12.2 不覆盖）。
+fn claim_explicit_restore_dir(target: &Path) -> Result<RestoreDir, u8> {
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("[sidecar] 目标父目录创建失败 {}: {e}", parent.display());
+            return Err(exit_codes::DUMP_RESTORE_FAILED);
+        }
+    }
+    match std::fs::create_dir(target) {
+        Ok(()) => Ok(RestoreDir {
+            path: target.to_path_buf(),
+            ownership: DirOwnership::Created,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let meta = match std::fs::symlink_metadata(target) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    eprintln!("[sidecar] 目标目录状态读取失败 {}: {e}", target.display());
+                    return Err(exit_codes::DUMP_RESTORE_FAILED);
+                }
+            };
+            if meta.file_type().is_symlink() {
+                eprintln!(
+                    "[sidecar] 目标目录是符号链接（别名可指向任意位置），拒绝恢复：{}",
+                    target.display()
+                );
+                return Err(exit_codes::ARGUMENT_ERROR);
+            }
+            if !meta.is_dir() {
+                eprintln!("[sidecar] 目标路径不是目录，拒绝恢复：{}", target.display());
+                return Err(exit_codes::DUMP_RESTORE_FAILED);
+            }
+            match std::fs::read_dir(target) {
+                Ok(entries) => {
+                    if entries.into_iter().next().is_some() {
+                        eprintln!(
+                            "[sidecar] 目标目录非空，拒绝覆盖（§12.2 不覆盖原则）：{}",
+                            target.display()
+                        );
+                        Err(exit_codes::DUMP_RESTORE_FAILED)
+                    } else {
+                        Ok(RestoreDir {
+                            path: target.to_path_buf(),
+                            ownership: DirOwnership::AdoptedEmpty,
+                        })
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[sidecar] 目标目录读取失败，拒绝覆盖 {}: {e}",
+                        target.display()
+                    );
+                    Err(exit_codes::DUMP_RESTORE_FAILED)
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[sidecar] 恢复目录创建失败 {}: {e}", target.display());
+            Err(exit_codes::DUMP_RESTORE_FAILED)
+        }
+    }
+}
+
+/// 清空目录内容但保留目录本身（复用既有空目录的失败清理）。
+fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// 失败清理：只清理本次拥有的恢复目录。
+///
+/// - `Created`：删除本次独占创建的目录（含 initdb 残留）；
+/// - `AdoptedEmpty`：清空本次写入的条目，保留用户目录本身。
+///
+/// 清理前确认路径仍是真实目录；若已被替换为符号链接则拒绝删除，避免把删除转发到
+/// 链接目标（既有恢复点）。
+fn cleanup_restore_dir(dir: &RestoreDir) {
+    match std::fs::symlink_metadata(&dir.path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            eprintln!(
+                "[sidecar] 恢复目录已不是真实目录，拒绝清理：{}",
+                dir.path.display()
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            eprintln!(
+                "[sidecar] 恢复目录状态读取失败，跳过清理 {}: {e}",
+                dir.path.display()
+            );
+            return;
+        }
+    }
+    let result = match dir.ownership {
+        DirOwnership::Created => std::fs::remove_dir_all(&dir.path),
+        DirOwnership::AdoptedEmpty => clear_dir_contents(&dir.path),
+    };
+    if let Err(e) = result {
         eprintln!(
-            "[sidecar] 目标数据目录清理失败，请手动删除 {}: {e}",
-            restore_dir.display()
+            "[sidecar] 恢复目录清理失败，请手动删除 {}: {e}",
+            dir.path.display()
         );
     }
 }
@@ -1339,10 +1528,10 @@ fn cleanup_restored_target(restore_dir: &Path) {
 fn finalize_target_credentials(
     credentials: &TargetCredentials,
     password: &str,
-    restore_dir: &Path,
+    restore_dir: &RestoreDir,
 ) -> Result<(), u8> {
     if let Err(code) = verify_target_credentials(&credentials.layout, password) {
-        cleanup_restored_target(restore_dir);
+        cleanup_restore_dir(restore_dir);
         return Err(code);
     }
     match password::write_password_file(&credentials.layout.password_file, password) {
@@ -1358,7 +1547,7 @@ fn finalize_target_credentials(
                 "[sidecar] 目标 runtime 密码文件写入失败 {}: {e}",
                 credentials.layout.password_file.display()
             );
-            cleanup_restored_target(restore_dir);
+            cleanup_restore_dir(restore_dir);
             Err(exit_codes::PASSWORD_FAILED)
         }
     }
@@ -1396,18 +1585,7 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
                     _lock: lock,
                 });
             }
-            let nonempty = target.exists()
-                && std::fs::read_dir(target)
-                    .map(|mut r| r.next().is_some())
-                    .unwrap_or(false);
-            if nonempty {
-                eprintln!(
-                    "[sidecar] 目标目录非空，拒绝覆盖（§12.2 不覆盖原则）：{}",
-                    target.display()
-                );
-                return Err(exit_codes::DUMP_RESTORE_FAILED);
-            }
-            (target.clone(), false)
+            (claim_explicit_restore_dir(target)?, false)
         }
         None => {
             let name = layout
@@ -1415,18 +1593,17 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy();
-            (
-                layout
-                    .data_dir
-                    .with_file_name(format!("{name}.restore-{ts}")),
-                true,
-            )
+            let base = layout
+                .data_dir
+                .with_file_name(format!("{name}.restore-{ts}"));
+            // 原子独占新目录；同名目录已存在时换名，绝不复用（可能是唯一恢复点）。
+            (claim_default_restore_dir(&base)?, true)
         }
     };
 
     let outcome = restore_into(
         &layout,
-        &restore_dir,
+        &restore_dir.path,
         &args.input,
         &args.database,
         &args.username,
@@ -1438,10 +1615,11 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
             // 停止结果不可证明：目录可能仍被 postgres 使用，且可能是唯一恢复成果。
             eprintln!(
                 "[sidecar] 未切换目录：恢复目录保留于 {}（临时实例停止不可证明，禁止删除/切换）",
-                restore_dir.display()
+                restore_dir.path.display()
             );
         } else {
-            let _ = std::fs::remove_dir_all(&restore_dir);
+            // 只清理本次拥有的目录，既有 `.restore-*` 恢复点不受影响。
+            cleanup_restore_dir(&restore_dir);
         }
         return Err(err.code);
     }
@@ -1453,7 +1631,7 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
             eprintln!(
                 "[sidecar] 未切换目录：已完成的恢复目录保留于 {}，源 PGDATA 未改动；\
                  可人工处理或清理后重试",
-                restore_dir.display()
+                restore_dir.path.display()
             );
             return Err(code);
         }
@@ -1463,24 +1641,7 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
             .unwrap_or_default()
             .to_string_lossy();
         let bak = layout.data_dir.with_file_name(format!("{name}.bak-{ts}"));
-        if layout.data_dir.exists() {
-            std::fs::rename(&layout.data_dir, &bak).map_err(|e| {
-                eprintln!(
-                    "[sidecar] 原目录改名失败（恢复原状需手动处理 {} 与 {}）: {e}",
-                    layout.data_dir.display(),
-                    restore_dir.display()
-                );
-                exit_codes::DUMP_RESTORE_FAILED
-            })?;
-        }
-        if let Err(e) = std::fs::rename(&restore_dir, &layout.data_dir) {
-            // 回滚：尽量把原目录改回去
-            if bak.exists() {
-                let _ = std::fs::rename(&bak, &layout.data_dir);
-            }
-            eprintln!("[sidecar] 新目录切换失败（已尝试回滚）: {e}");
-            return Err(exit_codes::DUMP_RESTORE_FAILED);
-        }
+        swap_restore_dir(&layout.data_dir, &restore_dir.path, &bak)?;
         // cluster 身份已更换：重置 state 避免残留旧实例的 running/port 误导 status
         let mut st = state::read(&layout.state_file).unwrap_or_default();
         st.status = "stopped".to_string();
@@ -1495,11 +1656,11 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         }
         eprintln!(
             "[sidecar] 恢复完成：{}（原目录未改动）",
-            restore_dir.display()
+            restore_dir.path.display()
         );
     }
 
-    let reported = restore_target_to_report(&layout, &restore_dir, do_swap);
+    let reported = restore_target_to_report(&layout, &restore_dir.path, do_swap);
     use std::io::Write as _;
     let mut stdout = std::io::stdout().lock();
     if let Err(e) = writeln!(stdout, "{reported}") {
@@ -1507,6 +1668,43 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         tracing::warn!("restore target stdout write failed: {e}");
     }
     Ok(())
+}
+
+/// 把恢复目录原子切换为当前数据目录：原目录先改名为 `.bak-<ts>`，再改入恢复目录。
+///
+/// 任一步失败都不删除恢复目录（已完成的恢复成果）；第二次改名失败时尝试把原目录
+/// 改回去，回滚失败则保留 `.bak-*` 供人工处理。
+fn swap_restore_dir(data_dir: &Path, restore_dir: &Path, bak: &Path) -> Result<(), u8> {
+    if data_dir.exists() {
+        std::fs::rename(data_dir, bak).map_err(|e| {
+            eprintln!(
+                "[sidecar] 原目录改名失败（恢复原状需手动处理 {} 与 {}）: {e}",
+                data_dir.display(),
+                restore_dir.display()
+            );
+            exit_codes::DUMP_RESTORE_FAILED
+        })?;
+    }
+    if let Err(e) = std::fs::rename(restore_dir, data_dir) {
+        rollback_backup(bak, data_dir);
+        eprintln!("[sidecar] 新目录切换失败（已尝试回滚）: {e}");
+        return Err(exit_codes::DUMP_RESTORE_FAILED);
+    }
+    Ok(())
+}
+
+/// 切换失败时把 `.bak-*` 改回原数据目录；回滚本身失败不改动任何目录。
+fn rollback_backup(bak: &Path, data_dir: &Path) {
+    if !bak.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::rename(bak, data_dir) {
+        eprintln!(
+            "[sidecar] 回滚失败：原数据保留于 {}，请手动改回 {}: {e}",
+            bak.display(),
+            data_dir.display()
+        );
+    }
 }
 
 /// restore_into 失败信息：错误码 + 是否必须保留恢复目录。
@@ -1519,7 +1717,7 @@ struct RestoreError {
 }
 
 /// 在 restore_dir 上执行：initdb → 安全基线 → 临时实例 → create db → pg_restore → 健康检查。
-/// 任一步失败返回错误码，调用方负责清理 restore_dir（停止不可证明时除外）。
+/// 调用方必须已用独占方式申请好空的 restore_dir（`RestoreDir`），失败时由调用方按所有权清理。
 async fn restore_into(
     layout: &Layout,
     restore_dir: &Path,
@@ -1535,14 +1733,6 @@ async fn restore_into(
         None,
     );
 
-    // initdb 要求空目录；--target-data-dir 场景目录可能不存在，先建空壳
-    std::fs::create_dir_all(restore_dir).map_err(|e| {
-        eprintln!("[sidecar] 恢复目录创建失败 {}: {e}", restore_dir.display());
-        RestoreError {
-            code: exit_codes::DUMP_RESTORE_FAILED,
-            preserve_dir: false,
-        }
-    })?;
     setup::run_initdb(&restore_layout, username, password)
         .await
         .map_err(|code| RestoreError {
@@ -2410,6 +2600,282 @@ mod tests {
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- D07-006 恢复目录独占申请与失败清理所有权 ----
+
+    #[test]
+    fn injected_ts_requires_ascii_alnum() {
+        assert_eq!(
+            injected_ts(" 20260101T000000Z "),
+            Some("20260101T000000Z".to_string())
+        );
+        assert_eq!(injected_ts(""), None);
+        assert_eq!(injected_ts("2026-01-01"), None);
+        assert_eq!(injected_ts("../../etc"), None);
+    }
+
+    /// 时钟回拨/上次 exit 20 保留的同名目录必须被跳过，绝不复用后再被失败清理删除。
+    #[test]
+    fn claim_default_restore_dir_skips_existing_recovery_point() {
+        let dir = unique_tmp("d07006-claim-default");
+        let base = dir.join("data.restore-20260101T000000Z");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("keep"), b"recovery").unwrap();
+
+        let claimed = claim_default_restore_dir(&base).unwrap();
+        assert_eq!(claimed.ownership, DirOwnership::Created);
+        assert_eq!(
+            claimed.path,
+            dir.join("data.restore-20260101T000000Z-1"),
+            "同名目录存在时必须换名"
+        );
+        assert!(claimed.path.is_dir());
+
+        // 本次恢复失败（模拟 initdb 非空失败后的清理）：只删除 -1，既有恢复点不变。
+        cleanup_restore_dir(&claimed);
+        assert!(!claimed.path.exists(), "本次创建的目录应被清理");
+        assert_eq!(
+            std::fs::read(base.join("keep")).unwrap(),
+            b"recovery",
+            "既有恢复点内容不得被改动"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 并发申请同一 base：`create_dir` 原子占名保证每个进程/线程拿到不同目录。
+    #[test]
+    fn claim_default_restore_dir_is_exclusive_under_race() {
+        let dir = unique_tmp("d07006-claim-race");
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("data.restore-20260101T000000Z");
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let base = base.clone();
+                std::thread::spawn(move || claim_default_restore_dir(&base))
+            })
+            .collect();
+        let claimed: Vec<RestoreDir> = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().expect("每个申请都应成功"))
+            .collect();
+
+        let mut paths: Vec<_> = claimed.iter().map(|d| d.path.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 8, "并发申请必须各自独占不同目录");
+        assert!(
+            claimed.iter().all(|d| d.path.is_dir()),
+            "每个申请都应真实创建目录"
+        );
+
+        for d in &claimed {
+            cleanup_restore_dir(d);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 占名者是符号链接（含悬空）：不得复用，也不得删除链接或其目标。
+    #[cfg(unix)]
+    #[test]
+    fn claim_default_restore_dir_skips_symlink_occupant() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_tmp("d07006-claim-symlink");
+        let base = dir.join("data.restore-20260101T000000Z");
+        let real = dir.join("real-recovery");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep"), b"recovery").unwrap();
+        symlink(&real, &base).unwrap();
+
+        let claimed = claim_default_restore_dir(&base).unwrap();
+        assert_eq!(claimed.path, dir.join("data.restore-20260101T000000Z-1"));
+        assert!(
+            std::fs::symlink_metadata(&base)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "既有符号链接不得被替换"
+        );
+        assert_eq!(std::fs::read(real.join("keep")).unwrap(), b"recovery");
+
+        cleanup_restore_dir(&claimed);
+        assert!(std::fs::symlink_metadata(&base)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claim_explicit_restore_dir_adopts_empty_and_rejects_nonempty() {
+        let dir = unique_tmp("d07006-claim-explicit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("second/postgres/16/data");
+
+        // 不存在：连同父目录原子创建，所有权归本次。
+        let created = claim_explicit_restore_dir(&target).unwrap();
+        assert_eq!(created.ownership, DirOwnership::Created);
+        assert!(target.is_dir());
+        cleanup_restore_dir(&created);
+        assert!(!target.exists());
+
+        // 已存在空目录：接管（AdoptedEmpty），失败清理保留目录本身。
+        std::fs::create_dir_all(&target).unwrap();
+        let adopted = claim_explicit_restore_dir(&target).unwrap();
+        assert_eq!(adopted.ownership, DirOwnership::AdoptedEmpty);
+        std::fs::write(target.join("initdb-leftover"), b"x").unwrap();
+        cleanup_restore_dir(&adopted);
+        assert!(target.is_dir(), "既有空目录不得被删除");
+        assert!(
+            std::fs::read_dir(&target).unwrap().next().is_none(),
+            "只清理本次写入的内容"
+        );
+
+        // 非空：不覆盖。
+        std::fs::write(target.join("foreign"), b"y").unwrap();
+        assert_eq!(
+            claim_explicit_restore_dir(&target).err(),
+            Some(exit_codes::DUMP_RESTORE_FAILED)
+        );
+        assert!(target.join("foreign").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 显式目标为符号链接（别名）→ 入口拒绝，不写不删链接目标。
+    #[cfg(unix)]
+    #[test]
+    fn claim_explicit_restore_dir_rejects_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_tmp("d07006-explicit-symlink");
+        let real = dir.join("second/postgres/16/real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep"), b"recovery").unwrap();
+        let target = dir.join("second/postgres/16/data");
+        symlink(&real, &target).unwrap();
+
+        assert_eq!(
+            claim_explicit_restore_dir(&target).err(),
+            Some(exit_codes::ARGUMENT_ERROR)
+        );
+        assert!(std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(real.join("keep")).unwrap(), b"recovery");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清理前若路径已被替换为符号链接，拒绝删除（避免把删除转发到链接目标）。
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_restore_dir_refuses_symlink_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_tmp("d07006-cleanup-symlink");
+        let owned = dir.join("data.restore-20260101T000000Z");
+        std::fs::create_dir_all(&owned).unwrap();
+        let real = dir.join("real-recovery");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep"), b"recovery").unwrap();
+
+        std::fs::remove_dir(&owned).unwrap();
+        symlink(&real, &owned).unwrap();
+        let claimed = RestoreDir {
+            path: owned.clone(),
+            ownership: DirOwnership::Created,
+        };
+        cleanup_restore_dir(&claimed);
+        assert!(
+            std::fs::symlink_metadata(&owned)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "符号链接不得被清理"
+        );
+        assert_eq!(std::fs::read(real.join("keep")).unwrap(), b"recovery");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `.bak-*` 占名时切换失败：源目录与恢复目录都必须原地保留。
+    #[test]
+    fn swap_restore_dir_failure_preserves_restore_dir_and_source() {
+        let dir = unique_tmp("d07006-swap-bak-occupied");
+        let data_dir = dir.join("data");
+        let restore_dir = dir.join("data.restore-20260101T000000Z");
+        let bak = dir.join("data.bak-20260101T000000Z");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&restore_dir).unwrap();
+        std::fs::create_dir_all(&bak).unwrap();
+        std::fs::write(data_dir.join("marker"), b"source").unwrap();
+        std::fs::write(restore_dir.join("marker"), b"restored").unwrap();
+        std::fs::write(bak.join("marker"), b"old-bak").unwrap();
+
+        assert_eq!(
+            swap_restore_dir(&data_dir, &restore_dir, &bak),
+            Err(exit_codes::DUMP_RESTORE_FAILED)
+        );
+        assert_eq!(std::fs::read(data_dir.join("marker")).unwrap(), b"source");
+        assert_eq!(
+            std::fs::read(restore_dir.join("marker")).unwrap(),
+            b"restored",
+            "切换失败不得删除已完成的恢复目录"
+        );
+        assert_eq!(
+            std::fs::read(bak.join("marker")).unwrap(),
+            b"old-bak",
+            "既有 .bak 不得被覆盖"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 第二次改名失败（恢复目录不存在）→ 回滚把原目录改回，源目录不丢。
+    #[test]
+    fn swap_restore_dir_rolls_back_when_restore_dir_missing() {
+        let dir = unique_tmp("d07006-swap-rollback");
+        let data_dir = dir.join("data");
+        let restore_dir = dir.join("data.restore-20260101T000000Z");
+        let bak = dir.join("data.bak-20260101T000000Z");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("marker"), b"source").unwrap();
+
+        assert_eq!(
+            swap_restore_dir(&data_dir, &restore_dir, &bak),
+            Err(exit_codes::DUMP_RESTORE_FAILED)
+        );
+        assert_eq!(
+            std::fs::read(data_dir.join("marker")).unwrap(),
+            b"source",
+            "回滚后源目录必须恢复"
+        );
+        assert!(!bak.exists(), "回滚成功后 .bak 不再存在");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回滚本身失败：保留 `.bak-*` 供人工处理，不删除、不 panic。
+    #[test]
+    fn rollback_backup_failure_keeps_bak() {
+        let dir = unique_tmp("d07006-rollback-fail");
+        let data_dir = dir.join("data");
+        let bak = dir.join("data.bak-20260101T000000Z");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&bak).unwrap();
+        std::fs::write(data_dir.join("marker"), b"occupied").unwrap();
+        std::fs::write(bak.join("marker"), b"source").unwrap();
+
+        rollback_backup(&bak, &data_dir);
+        assert_eq!(std::fs::read(data_dir.join("marker")).unwrap(), b"occupied");
+        assert_eq!(
+            std::fs::read(bak.join("marker")).unwrap(),
+            b"source",
+            "回滚失败时原数据仍保留于 .bak"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
