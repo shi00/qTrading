@@ -8731,7 +8731,9 @@ def decode_plan_proposal(value: object, *, execution_id: str, path: str = "$.pla
         _fail("invalid_type", path)
     _require_keys(value, _PLAN_PROPOSAL_KEYS, path)
     version = value["plan_store_version"]
-    if isinstance(version, bool) or version != PLAN_STORE_VERSION:
+    # 结构版本必须是整数 1：bool 是 int 子类、1.0/Decimal("1.0") 与 1 等值，
+    # 仅做等值比较会放行这些输入，故先显式拒 bool 与非整数类型，再核版本值。
+    if isinstance(version, bool) or not isinstance(version, int) or version != PLAN_STORE_VERSION:
         _fail("unsupported_version", f"{path}.plan_store_version")
     revision = require_revision(value["plan_revision"], f"{path}.plan_revision")
     raw_items = value["items"]

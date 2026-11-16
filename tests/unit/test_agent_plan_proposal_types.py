@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from core.agent_types import (
@@ -170,6 +172,30 @@ def test_document_bool_version_rejected() -> None:
     with pytest.raises(AgentValidationError) as error:
         decode_plan_proposal(_wire(plan_store_version=True), execution_id="exec-1")
     _assert_code(error, "unsupported_version")
+
+
+@pytest.mark.parametrize("version", [True, 1.0, Decimal("1.0"), "1"])
+def test_document_non_integer_version_rejected(version: object) -> None:
+    """结构版本拒 bool 与一切非整数输入（``True``/``1.0`` 与 1 等值但类型不符）。"""
+    with pytest.raises(AgentValidationError) as error:
+        decode_plan_proposal(_wire(plan_store_version=version), execution_id="exec-1")
+    _assert_code(error, "unsupported_version")
+    assert error.value.field_path == "$.plan_proposal.plan_store_version"
+
+
+def test_document_integer_version_accepted() -> None:
+    """显式整数 1 接受（规范化保存形态可再解码）。"""
+    proposal = decode_plan_proposal(_wire(plan_store_version=1), execution_id="exec-1")
+    assert proposal.execution_id == "exec-1"
+
+
+def test_document_missing_version_rejected() -> None:
+    """版本键必填（无缺省值）：缺失即 missing_field，不静默按 1 处理。"""
+    doc = _wire()
+    del doc["plan_store_version"]
+    with pytest.raises(AgentValidationError) as error:
+        decode_plan_proposal(doc, execution_id="exec-1")
+    _assert_code(error, "missing_field")
 
 
 def test_document_unknown_version_rejected() -> None:
