@@ -160,27 +160,23 @@ class TestAttributionStrictParse:
 
     def test_missing_threshold_dropped(self):
         attr = self._parse([{"column": "pe", "operator": "gt"}])
-        assert attr is not None
-        assert attr.conditions == ()
+        assert attr is not None and attr.conditions == ()
 
     def test_unknown_operator_dropped(self):
         attr = self._parse([{"column": "pe", "operator": "==", "threshold": 5.0}])
-        assert attr is not None
-        assert attr.conditions == ()
+        assert attr is not None and attr.conditions == ()
 
     @pytest.mark.parametrize("threshold", [float("nan"), float("inf"), float("-inf"), True, "5", None])
     def test_non_finite_or_non_numeric_threshold_dropped(self, threshold):
         attr = self._parse([{"column": "pe", "operator": "gt", "threshold": threshold}])
-        assert attr is not None
-        assert attr.conditions == ()
+        assert attr is not None and attr.conditions == ()
 
     def test_nan_and_infinity_json_tokens_dropped(self):
         # json.loads 默认接受 NaN/Infinity 字面量，同样不得视为合法阈值。
         for token in ("NaN", "Infinity", "-Infinity"):
             raw = f'{{"conditions":[{{"column":"pe","operator":"gt","threshold":{token}}}],"rank":null}}'
             attr = attribution_from_json(raw)
-            assert attr is not None
-            assert attr.conditions == ()
+            assert attr is not None and attr.conditions == ()
 
     @pytest.mark.parametrize(
         "threshold",
@@ -197,8 +193,7 @@ class TestAttributionStrictParse:
     )
     def test_bad_between_threshold_dropped(self, threshold):
         attr = self._parse([{"column": "pe", "operator": "between", "threshold": threshold}])
-        assert attr is not None
-        assert attr.conditions == ()
+        assert attr is not None and attr.conditions == ()
 
     @pytest.mark.parametrize("conditions", [None, 3, "bad", {"column": "pe"}, [None], [1], [None, 1]])
     def test_malformed_conditions_never_raise(self, conditions):
@@ -254,15 +249,13 @@ class TestAttributionStrictParse:
             rank=RankAttribution(field="pe", value=0.0, position=1, total=1),
         )
         raw = attribution_to_json(attr)
-        assert raw is not None
-        assert attribution_from_json(raw) == attr
+        assert raw is not None and attribution_from_json(raw) == attr
 
     def test_legacy_bad_json_yields_no_conditions(self):
         """历史坏 JSON（未知 operator）：解析后无条件，View 依既有「空条件跳过」不渲染通过标。"""
         raw = '{"conditions":[{"column":"pe","operator":"==","threshold":5}],"rank":null}'
         attr = attribution_from_json(raw)
-        assert attr is not None
-        assert attr.conditions == ()
+        assert attr is not None and attr.conditions == ()
 
 
 # ============================================================================
