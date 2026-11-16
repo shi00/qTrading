@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import inspect
+import json
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -1205,6 +1207,53 @@ class TestSQLConsoleTabComponentBody:
         run_unmount_effects(component)
 
         assert vm.dispose_called is False
+
+
+# ============================================================================
+# 文案一致性: SQL 执行按钮快捷键声明 (ADD-UI-005)
+# ============================================================================
+
+
+class TestSQLExecuteShortcutCopyConsistency:
+    """ADD-UI-005: 执行按钮文案不得宣称未接线的快捷键。
+
+    SQL 执行回调只接到按钮 ``on_click``；Flet 1.1.0 的 ``Page.on_keyboard_event``
+    不携带焦点目标，``flet_code_editor.CodeEditor`` 也没有 ``on_submit``/按键事件，
+    无法实现「编辑器聚焦时 Ctrl+Enter 执行」的焦点守卫分派。文案宣称快捷键即属
+    未兑现承诺，两 locale 必须与按钮实际接线保持一致。
+    """
+
+    _LOCALES_DIR = Path(__file__).resolve().parents[3] / "locales"
+    _SHORTCUT_CLAIM = re.compile(r"(?:Ctrl|Cmd|⌘)\s*\+\s*([A-Za-z0-9]+)")
+
+    @pytest.mark.parametrize("locale", ("zh_CN", "en_US"))
+    def test_execute_copy_has_no_unwired_shortcut_claim(self, locale: str):
+        """zh/en 的 data_sql_execute 不得出现未接线的组合键声明。"""
+        with open(self._LOCALES_DIR / locale / "strings.json", encoding="utf-8") as f:
+            copy = json.load(f)["data_sql_execute"]
+        claims = self._SHORTCUT_CLAIM.findall(copy)
+        assert not claims, (
+            f"{locale} data_sql_execute 声明了快捷键 {claims}，但 SQLConsoleTab 只把执行接到按钮点击，"
+            "不存在焦点守卫的键盘分派路径；须先接线再声明，或删除声明"
+        )
+
+    def test_execute_button_label_uses_same_copy(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """渲染出的按钮标签与 locale 文案同源，且同样不含快捷键声明。"""
+        from core.i18n import I18n
+        from ui.views.data_view import SQLConsoleTab
+
+        vm = _FakeDataExplorerViewModel()
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
+        result, _ = _mount(component)
+
+        btn_run = _find_by_type(result, ft.Button)[0]
+        assert btn_run.content == I18n.get("data_sql_execute")
+        assert not self._SHORTCUT_CLAIM.search(btn_run.content)
 
 
 # ============================================================================

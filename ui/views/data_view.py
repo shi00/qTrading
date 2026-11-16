@@ -1160,6 +1160,9 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
         italic=True,
     )
 
+    # ADD-UI-005: 执行按钮是唯一入口。Flet 1.1.0 的 Page.on_keyboard_event 不携带
+    # 焦点目标，CodeEditor 也无 on_submit/按键事件，无法做到「编辑器聚焦时 Ctrl+Enter
+    # 执行」的焦点守卫；文案不得再宣称该快捷键。
     btn_run = ft.Button(
         I18n.get("data_sql_execute"),
         icon=ft.Icons.PLAY_ARROW,
