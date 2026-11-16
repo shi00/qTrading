@@ -1514,7 +1514,7 @@ class TestToastCardStableIdentity:
         with patch("ui.components.toast_manager.gather_for_shutdown_cleanup", _fake_gather):
             run_unmount_effects(card_a)  # 模拟 session 对 removed control 的 will_unmount
 
-        task_a.cancel.assert_called_once()
+        task_a.cancel.assert_called_once_with()
         task_b.cancel.assert_not_called()
 
 
