@@ -160,7 +160,7 @@ class TestDisposedEngineGuard:
         new_engine = _make_connect_engine(new_conn)
         engine_provider.set_engine(new_engine)
 
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected"):
             await get_app_state(old_engine, "sync_attempted_upto:moneyflow_daily")
 
         old_engine.connect.assert_not_called()
@@ -176,7 +176,7 @@ class TestDisposedEngineGuard:
         new_engine = _make_begin_engine(new_conn)
         engine_provider.set_engine(new_engine)
 
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="Engine disposed, write rejected"):
             await set_app_state(old_engine, "financial:full_sync_pending", "[]", strict=True)
 
         old_engine.begin.assert_not_called()
@@ -193,7 +193,7 @@ class TestDisposedEngineGuard:
         new_engine = _make_begin_engine(new_conn)
         engine_provider.set_engine(new_engine)
 
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="Engine disposed, write-max rejected"):
             await set_app_state_max(old_engine, "financial:disclosure_checkpoint", "20250901", strict=True)
 
         old_engine.begin.assert_not_called()
@@ -205,16 +205,19 @@ class TestDisposedEngineGuard:
         read_conn = MagicMock()
         read_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
         read_engine = _make_connect_engine(read_conn)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as read_exc:
             await get_app_state(read_engine, "key")
+        assert isinstance(read_exc.value, asyncio.CancelledError)  # R2：必须传播，不得吞没
 
         write_conn = MagicMock()
         write_conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
         write_engine = _make_begin_engine(write_conn)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as write_exc:
             await set_app_state(write_engine, "key", "value")
-        with pytest.raises(asyncio.CancelledError):
+        assert isinstance(write_exc.value, asyncio.CancelledError)
+        with pytest.raises(asyncio.CancelledError) as max_exc:
             await set_app_state_max(write_engine, "key", "value", strict=True)
+        assert isinstance(max_exc.value, asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_engine_disposed_error_from_operation_is_not_downgraded(self):
@@ -222,9 +225,9 @@ class TestDisposedEngineGuard:
         mock_conn.execute = AsyncMock(side_effect=EngineDisposedError("disposed mid-write"))
         engine = _make_begin_engine(mock_conn)
 
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed mid-write"):
             await set_app_state(engine, "key", "value")
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed mid-write"):
             await set_app_state_max(engine, "key", "value")
 
     @pytest.mark.asyncio
@@ -235,10 +238,10 @@ class TestDisposedEngineGuard:
         engine = _make_begin_engine(mock_conn)
         advanced = False
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="db down"):
             await set_app_state_max(engine, "financial:disclosure_checkpoint", "20250901", strict=True)
             advanced = True
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="db down"):
             await set_app_state(engine, "financial:full_sync_pending", "[]", strict=True)
             advanced = True
 
