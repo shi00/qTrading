@@ -481,6 +481,10 @@ def _spawn_app_session(
         # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
         # _migrate_custom_models_credentials 等无法用 AI_API_KEY 短路的 per-provider 路径。
         "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+        # D21-OTHER-003：Flet 子进程是独立 Python 进程，Playwright page.route 无法
+        # 拦截其 Tushare 请求。注入确定性假验证边界（network 失败），使设置页
+        # Token 验证 E2E 不依赖真实网络与配额。
+        "TUSHARE_VERIFY_FAKE": "network",
         **(extra_env or {}),
     }
     if embedded_url_file is not None:
