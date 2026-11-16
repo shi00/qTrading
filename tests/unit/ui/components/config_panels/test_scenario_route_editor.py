@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import Mapping
 from typing import Any
@@ -24,7 +25,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import flet as ft
 import pytest
 
-from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+from tests.unit.ui.component_renderer import (
+    FakePage,
+    attach_fake_page,
+    make_component,
+    render_once,
+    run_mount_effects,
+    run_render_effects,
+)
 from ui.components.config_panels import scenario_route_editor as editor_module
 from ui.components.config_panels.scenario_route_editor import ScenarioRouteEditor
 from ui.viewmodels.model_routes_view_model import (
@@ -450,6 +458,66 @@ class TestCandidatePicker:
         root, _, _ = _render(vm)
         _find(root, "picker_close").on_click(_make_event())
         vm.close_candidate_picker.assert_called_once_with()
+
+
+# ============================================================================
+# 焦点恢复（D18-004：focus 为协程，须经 page.run_task 分派）
+# ============================================================================
+
+
+class TestFocusRestore:
+    """选择器关闭后焦点返回发起按钮，且不吞协程 / 不在无 page 时抛错。"""
+
+    def test_close_restores_focus_to_real_add_button(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """开 → 关触发 effect，焦点目标为真实 OutlinedButton（非 Semantics wrapper）。"""
+        vm = _FakeRoutesVM(_picker_state())
+        _, component, _ = _render(vm)
+        closed = _make_state(candidate_picker_open=False)
+        for subscriber in list(vm._subscribers):
+            subscriber(closed)
+        with patch.object(editor_module, "_try_focus") as try_focus:
+            with patch.object(editor_module, "I18n") as mock_i18n:
+                mock_i18n.get.side_effect = lambda key, **kw: key
+                run_render_effects(component)
+        try_focus.assert_called_once()
+        target = try_focus.call_args.args[0]
+        assert isinstance(target, ft.OutlinedButton)
+        assert target.key == "add_candidate"
+
+    def test_try_focus_dispatches_focus_via_run_task(self) -> None:
+        """``_try_focus`` 经 page.run_task 分派协程，focus 实际被 await（非裸调用）。"""
+        control = MagicMock()
+        control.focus = AsyncMock()
+        page = FakePage()
+        scheduled: list[Any] = []
+
+        def _run_task(handler: Any, *args: Any) -> Any:
+            scheduled.append(handler)
+            return asyncio.run(handler(*args))
+
+        page.run_task = _run_task  # type: ignore[method-assign]  # FakePage 仅需 run_task 接口
+        attach_fake_page(MagicMock(), page)
+        editor_module._try_focus(control)
+        assert scheduled == [editor_module._restore_focus]
+        control.focus.assert_awaited_once_with()
+
+    def test_try_focus_skips_without_page_context(self) -> None:
+        """无 page 上下文（单元测试 / 未挂载）时静默跳过，不产生未 await 协程。"""
+        from flet.controls.context import _context_page
+
+        control = MagicMock()
+        control.focus = AsyncMock()
+        token = _context_page.set(None)
+        try:
+            editor_module._try_focus(control)
+        finally:
+            _context_page.reset(token)
+        control.focus.assert_not_called()
+
+    def test_restore_focus_ignores_unmounted_control(self) -> None:
+        """控件未挂载时 focus 抛 RuntimeError，可预期失败不向上传播。"""
+        button = ft.OutlinedButton(content="x")
+        asyncio.run(editor_module._restore_focus(button))  # 不抛即通过
 
 
 # ============================================================================
