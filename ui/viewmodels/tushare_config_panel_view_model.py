@@ -18,8 +18,9 @@ View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_
 
 import asyncio
 import logging
+import os
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -40,6 +41,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"
+
+# E2E 假验证边界（D21-OTHER-003）：Flet 子进程独立于 pytest 进程，
+# Playwright page.route 只能拦截浏览器请求，无法拦截 Python 侧 Tushare 调用。
+# 由 E2E 启动器注入该环境变量，让子进程内的 verify_token 走确定性 fake。
+_E2E_FAKE_VERIFY_ENV = "TUSHARE_VERIFY_FAKE"
+_E2E_FAKE_VERIFY_SCENARIOS = ("network", "timeout", "invalid")
+
+
+def _resolve_e2e_fake_verify() -> Callable[[str], Awaitable[None]] | None:
+    """解析 E2E 假 Tushare 验证边界；生产默认返回 None（走真实探活）。
+
+    仅当 ``is_e2e_mode()`` 为 True 且设置 ``TUSHARE_VERIFY_FAKE`` 时启用。
+    非法场景值回退为 ``network``，避免 E2E 因拼写错误意外落到真实网络/配额。
+    """
+    from utils.app_env import is_e2e_mode
+
+    if not is_e2e_mode():
+        return None
+    scenario = (os.environ.get(_E2E_FAKE_VERIFY_ENV) or "").strip().lower()
+    if not scenario:
+        return None
+    if scenario not in _E2E_FAKE_VERIFY_SCENARIOS:
+        scenario = "network"
+
+    async def _fake_verify(_token: str) -> None:
+        # 异常消息只描述场景、不引用 token（R9/R10：token 不进日志/UI）。
+        if scenario == "timeout":
+            raise TimeoutError("e2e fake tushare verify timed out")
+        if scenario == "invalid":
+            raise RuntimeError("invalid token")
+        raise ConnectionError("e2e fake tushare network connection refused")
+
+    return _fake_verify
 
 
 @dataclass(frozen=True)
@@ -197,6 +231,8 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         TushareClient 构造等同步 IO 必须通过 ThreadPoolManager offload。
 
         token 全程显式传参（ts.pro_api(token=...)），不写 tushare SDK 全局 ~/tk.csv。
+        E2E 模式下（``E2E_TESTING=true`` + ``TUSHARE_VERIFY_FAKE``）改走确定性 fake
+        边界，不触达真实 Tushare 网络/配额；生产默认行为不变。
         """
         token = self._state.token.strip()
 
@@ -215,28 +251,33 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         self._set_loading_state(True)
 
         try:
-            import tushare as ts
+            fake_verify = _resolve_e2e_fake_verify()
+            if fake_verify is not None:
+                # E2E 边界：伪验证直接抛出确定性异常，不触达真实网络/SDK。
+                await fake_verify(token)
+            else:
+                import tushare as ts
 
-            from data.external.tushare_client import _ASYNC_TIMEOUT_MULTIPLIER
+                from data.external.tushare_client import _ASYNC_TIMEOUT_MULTIPLIER
 
-            # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
-            timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
-            # get_tushare_timeout 无最小值钳制，配置异常（<=0）时兜底为 1s，
-            # 避免 wait_for(timeout<=0) 未真正网络调用前即失败。
-            timeout_val = max(timeout_val, 1)
-            temp_pro = ts.pro_api(token=token, timeout=timeout_val)
-            # asyncio.wait_for 兜底：requests.post 的 timeout 不覆盖 DNS 解析挂起等场景，
-            # 与 _handle_api_call 的 timeout=self.timeout*_ASYNC_TIMEOUT_MULTIPLIER 同模式。
-            await asyncio.wait_for(
-                ThreadPoolManager().run_async(
-                    TaskType.IO,
-                    temp_pro.trade_cal,
-                    exchange="SSE",
-                    start_date="20250101",
-                    end_date="20250101",
-                ),
-                timeout=timeout_val * _ASYNC_TIMEOUT_MULTIPLIER,
-            )
+                # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
+                timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
+                # get_tushare_timeout 无最小值钳制，配置异常（<=0）时兜底为 1s，
+                # 避免 wait_for(timeout<=0) 未真正网络调用前即失败。
+                timeout_val = max(timeout_val, 1)
+                temp_pro = ts.pro_api(token=token, timeout=timeout_val)
+                # asyncio.wait_for 兜底：requests.post 的 timeout 不覆盖 DNS 解析挂起等场景，
+                # 与 _handle_api_call 的 timeout=self.timeout*_ASYNC_TIMEOUT_MULTIPLIER 同模式。
+                await asyncio.wait_for(
+                    ThreadPoolManager().run_async(
+                        TaskType.IO,
+                        temp_pro.trade_cal,
+                        exchange="SSE",
+                        start_date="20250101",
+                        end_date="20250101",
+                    ),
+                    timeout=timeout_val * _ASYNC_TIMEOUT_MULTIPLIER,
+                )
 
             from strategies.all_strategies import StrategyManager
 
