@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from core.agent_types import (
@@ -294,3 +296,18 @@ def test_decode_rejects_non_list_containers() -> None:
     with pytest.raises(AgentValidationError) as excinfo:
         decode_plan_spec_proposal({"nodes": "a"})
     assert excinfo.value.code == "invalid_type"
+
+
+def test_decode_accepts_explicit_integer_version() -> None:
+    """显式整数 1 接受（规范化保存形态可再解码）。"""
+    plan = decode_plan_spec_proposal({"plan_spec_version": 1, "nodes": [_wire_node("a")]})
+    assert [node.node_id for node in plan.nodes] == ["a"]
+
+
+@pytest.mark.parametrize("version", [True, 1.0, Decimal("1.0"), "1", None])
+def test_decode_rejects_non_integer_version(version: object) -> None:
+    """结构版本拒 bool 与一切非整数输入（``True``/``1.0`` 与 1 等值但类型不符）。"""
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_plan_spec_proposal({"plan_spec_version": version, "nodes": [_wire_node("a")]})
+    assert excinfo.value.code == "unsupported_version"
+    assert excinfo.value.field_path == "$.plan_spec.plan_spec_version"

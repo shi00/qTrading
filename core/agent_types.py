@@ -4847,8 +4847,12 @@ def decode_plan_spec_proposal(value: object, path: str = "$.plan_spec") -> PlanS
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys_with_optional(value, _PLAN_SPEC_KEYS, {"plan_spec_version"}, path)
-    if "plan_spec_version" in value and value["plan_spec_version"] != PLAN_SPEC_VERSION:
-        _fail("unsupported_version", f"{path}.plan_spec_version")
+    if "plan_spec_version" in value:
+        version = value["plan_spec_version"]
+        # 结构版本必须是整数 1：bool 是 int 子类、1.0/Decimal("1.0") 与 1 等值，
+        # 仅做等值比较会放行这些输入，故先显式拒 bool 与非整数类型，再核版本值。
+        if isinstance(version, bool) or not isinstance(version, int) or version != PLAN_SPEC_VERSION:
+            _fail("unsupported_version", f"{path}.plan_spec_version")
     raw_nodes = value["nodes"]
     if not isinstance(raw_nodes, list):
         _fail("invalid_type", f"{path}.nodes")
