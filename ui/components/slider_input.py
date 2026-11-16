@@ -23,6 +23,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import get_control_value, safe_on_change
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,31 @@ def _default_fmt(value: float) -> str:
     return f"{value:.10f}".rstrip("0").rstrip(".")
 
 
+def _parse_text_value(text: str, unit_suffix: str | None) -> float | None:
+    """解析输入框文本为有限浮点数；空串/非法/非有限值返回 ``None``。
+
+    输入框只承载裸数值，单位由 ``unit_suffix`` 独立展示。为兼容用户从旧显示
+    或外部粘贴的带单位文本（如 ``4‱`` / ``7 bps``），解析前剥离本组件声明的
+    已知单位后缀；不猜测任意 ``fmt`` 函数的逆运算。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if unit_suffix:
+        unit = unit_suffix.strip()
+        if unit and stripped.endswith(unit):
+            stripped = stripped[: -len(unit)].rstrip()
+            if not stripped:
+                return None
+    try:
+        parsed = float(stripped)
+    except ValueError:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
 @ft.component
 def SliderInput(
     value: float = 0.0,
@@ -67,7 +93,7 @@ def SliderInput(
     step: float = 1.0,
     divisions: int | None = None,
     width: float | int | None = None,
-    fmt: Callable[[float], str] | None = None,
+    unit_suffix: str | None = None,
     on_change: Callable[[float], None] | None = None,
     disabled: bool = False,
     label: str | None = None,
@@ -83,7 +109,8 @@ def SliderInput(
         step: 步长（用于 snap 与 divisions 计算）。
         divisions: Slider 离散分段数；None 时由 ``(max-min)/step`` 自动计算。
         width: 组件总宽度；None 时不约束（配合 ``expand=True`` 填充父容器）。
-        fmt: 值显示格式化函数（如 ``lambda v: f"{v:.1f}%"``）；None 用默认。
+        unit_suffix: 单位后缀文本（如 ``"‱"`` / ``" ‰"`` / ``" bps"``），仅作展示并
+            在解析时剥离；None 时无单位。输入框始终只承载裸数值，单位不进入可编辑文本。
         on_change: 值变化回调（已 snap + clamp）；None 时无回调。
         disabled: 是否禁用（Slider 与 TextField 同步禁用）。
         label: 标签文案（已翻译字符串，由父级传入）；None 时不渲染顶部 Text（嵌入场景）。
@@ -93,15 +120,23 @@ def SliderInput(
             参数较多时用于区分同页同名 SliderInput 实例。
         expand: 是否在父容器中扩展填充（``Column(expand=True)``）。
     """
-    formatter = fmt or _default_fmt
+    # i18n 变更自动重渲染（错误提示文案随 locale 切换）。
+    ft.use_state(get_observable_state)
     # F08: 语义名称解析——嵌入场景（label=None）必须由调用方提供 accessible_name，
     # 否则 Tab/读屏聚焦时无法区分同页参数（accessibility-baseline.md §2.1）。
     semantic_name = accessible_name or label
 
     # 编辑中间态：TextField 光标输入中不即时上抛；父级 value 变化由 use_effect 同步。
     # use_state setter 有浅值比较，相同值不触发 re-render（不打断输入/拖动）。
-    draft, set_draft = ft.use_state(lambda: formatter(value))
-    ft.use_effect(lambda: set_draft(formatter(value)), [value])
+    draft, set_draft = ft.use_state(lambda: _default_fmt(value))
+    # 非法/越界输入的可见反馈；空串表示无错误（不静默还原用户输入）。
+    error_text, set_error_text = ft.use_state(lambda: "")
+
+    def _sync_draft_from_value(new_value: float) -> None:
+        set_draft(_default_fmt(new_value))
+        set_error_text("")
+
+    ft.use_effect(lambda: _sync_draft_from_value(value), [value])
 
     if divisions is None:
         divisions = round((max_val - min_val) / step) if step > 0 else None  # RUF046: round 已返回 int，无需再 int()
@@ -112,32 +147,36 @@ def SliderInput(
             new_val = _snap_to_step(float(raw), min_val, max_val, step)
         except (TypeError, ValueError):
             return
-        set_draft(formatter(new_val))
+        set_draft(_default_fmt(new_val))
+        set_error_text("")
         if on_change is not None:
             on_change(new_val)
 
     def _commit_text(raw: str | None) -> None:
         """解析 TextField 文本，clamp + snap 后上抛 on_change。
 
-        空输入或非法输入时恢复为当前 ``value`` prop 的格式化值（不调用 on_change）。
+        空/非法/非有限输入保留用户文本并显示错误（不静默还原、不调用 on_change）；
+        越界输入 clamp 到边界并显示范围提示后提交；合法输入清除错误。
         """
         text = (raw or "").strip()
-        if not text:
-            set_draft(formatter(value))
-            return
-        try:
-            parsed = float(text)
-        except ValueError:
-            set_draft(formatter(value))
-            return
-        if not math.isfinite(parsed):
-            # "inf"/"nan" 等非有限值：float() 可解析但非合法输入。若放行，
-            # NaN 与 min/max 比较恒 False 会经 _snap_to_step 意外收敛到 max_val
-            # 并上抛（静默写入边界极值）；此处与 "abc" 同口径恢复当前值。
-            set_draft(formatter(value))
+        parsed = _parse_text_value(text, unit_suffix)
+        if parsed is None:
+            if raw is not None:
+                set_draft(text)
+            set_error_text(I18n.get("screener_param_invalid"))
             return
         new_val = _snap_to_step(parsed, min_val, max_val, step)
-        set_draft(formatter(new_val))
+        if parsed < min_val or parsed > max_val:
+            set_error_text(
+                I18n.get(
+                    "sys_err_out_of_range_fmt",
+                    min=_default_fmt(min_val),
+                    max=_default_fmt(max_val),
+                )
+            )
+        else:
+            set_error_text("")
+        set_draft(_default_fmt(new_val))
         if new_val != value and on_change is not None:
             on_change(new_val)
 
@@ -148,6 +187,7 @@ def SliderInput(
         """
         if e and e.control:
             set_draft(get_control_value(e.control, ft.TextField))
+            set_error_text("")
 
     def _on_text_submit(e: ft.ControlEvent) -> None:
         _commit_text(get_control_value(e.control, ft.TextField) if e and e.control else None)
@@ -155,11 +195,16 @@ def SliderInput(
     def _on_text_blur(e: ft.ControlEvent) -> None:
         _commit_text(get_control_value(e.control, ft.TextField) if e and e.control else None)
 
+    unit_control = (
+        ft.Text(unit_suffix, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY) if unit_suffix else None
+    )
     text_field = ft.TextField(
         value=draft,
         keyboard_type=ft.KeyboardType.NUMBER,
         dense=True,
         tooltip=semantic_name,
+        suffix=unit_control,
+        error=error_text or None,
         border={
             ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
             ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
@@ -173,12 +218,13 @@ def SliderInput(
         on_blur=safe_on_change(_on_text_blur),
     )
 
+    slider_label = f"{{value}}{unit_suffix}" if unit_suffix else "{value}"
     slider = ft.Slider(
         min=min_val,
         max=max_val,
         value=value,
         divisions=divisions,
-        label="{value}",
+        label=slider_label,
         tooltip=semantic_name,
         active_color=AppColors.PRIMARY,
         expand=True,
@@ -197,6 +243,8 @@ def SliderInput(
         )
     # 根因防范: 将包含 Slider(expand=True) 的水平 Row 包裹在固定 height=38
     # 的 Container 约束中，在 SliderInput 内部提供明确的垂直高度界限。
+    # 错误文案在输入框下方占额外高度，出错时临时增高，避免反馈被裁切。
+    row_height = 60 if error_text else 38
     column_controls.append(
         ft.Container(
             content=ft.Row(
@@ -204,7 +252,7 @@ def SliderInput(
                 spacing=8,
                 alignment=ft.MainAxisAlignment.START,
             ),
-            height=38,
+            height=row_height,
         )
     )
     return ft.Column(

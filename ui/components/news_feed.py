@@ -427,9 +427,10 @@ def NewsFeed(
         is_loading_more: "加载更多"请求进行中 — 按钮置灰禁用并显示加载中文案,
                    为用户提供忙碌反馈 (对齐 ScreenerView run_disabled 惯例)
         valid_stock_ts_codes: 完整股票身份集合 (``CODE.EXCHANGE``, stock_basic),
-                   用于校验带交易所前缀的「查看个股」链接候选 (M27-08); 为空时
-                   带前缀候选不生成链接 (宁少链接不伪造)。宿主需后续传入该集合,
-                   未传入时仅括号内无交易所的引用仍按 ``valid_stock_codes`` 展示。
+                   用于校验带交易所前缀的「查看个股」链接候选 (M27-08); 由宿主
+                   (HomeView 经 HomeState) 传入; 为空时不生成带前缀链接
+                   (宁少链接不伪造)。未传入时仅括号内无交易所的引用仍按
+                   ``valid_stock_codes`` 展示。
     """
     # Subscribe to i18n + theme changes (triggers auto-rerender)
     ft.use_state(get_observable_state)

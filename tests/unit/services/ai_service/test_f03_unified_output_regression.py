@@ -133,7 +133,16 @@ def _config_free_text_len(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_real_executor_output_feeds_stock_analysis():
-    payload = {"score": 82, "recommendation": "buy", "confidence": 70}
+    # D13-008：成功出口夹具须满足 prompt 输出契约（六必需键），否则校验器按
+    # 「输出非法」切候选——此处靶点是公共类型出口，不是契约宽松性。
+    payload = {
+        "conclusion_label": "strong_buy",
+        "score": 82,
+        "confidence": 70,
+        "uncertainty_factors": ["估值偏高"],
+        "thinking": "推理过程",
+        "summary": "逢低买入",
+    }
     dispatch = _dispatch("stock_analysis", "analysis", _response(payload))
     analysis = StockAnalysisService(AIService.__new__(AIService))
 
