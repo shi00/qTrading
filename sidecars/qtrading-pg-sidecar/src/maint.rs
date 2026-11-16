@@ -976,17 +976,22 @@ fn classify_dump_instance(layout: &Layout) -> DumpInstanceState {
             info.pid,
             layout.data_dir.display()
         )),
-        Ok(_) => match runtime_port(Some(&info), true) {
-            Some(port) => DumpInstanceState::Online { port },
-            // 端口缺失 / 为 0 / 非法：不回退任何配置端口，也不在活实例上起第二实例。
-            None => DumpInstanceState::Refuse(format!(
-                "PID {} 存活且身份可证明，但 postmaster.pid 未记录可信端口（原始值 {:?}）。\
-                 请先执行 `qtrading-pg-sidecar stop --data-dir {}` 后重试",
-                info.pid,
-                info.port,
-                layout.data_dir.display()
-            )),
-        },
+        Ok(_) => classify_proven_online(layout, &info),
+    }
+}
+
+/// 身份已证明（PID 归属成立）后的端口分流：可信端口 → Online；
+/// 端口缺失 / 为 0 / 非法 → Refuse（不回退任何配置端口，也不在活实例上起第二实例）。
+fn classify_proven_online(layout: &Layout, info: &pgbin::PostmasterInfo) -> DumpInstanceState {
+    match runtime_port(Some(info), true) {
+        Some(port) => DumpInstanceState::Online { port },
+        None => DumpInstanceState::Refuse(format!(
+            "PID {} 存活且身份可证明，但 postmaster.pid 未记录可信端口（原始值 {:?}）。\
+             请先执行 `qtrading-pg-sidecar stop --data-dir {}` 后重试",
+            info.pid,
+            info.port,
+            layout.data_dir.display()
+        )),
     }
 }
 
@@ -2754,7 +2759,10 @@ mod tests {
     }
 
     /// 分类：活且可证明归属时，只有可信端口才允许在线；缺端口/0/非法端口一律拒绝。
-    #[cfg(unix)]
+    ///
+    /// 注：单测进程自身无法证明归属（可执行文件/工作目录均非该安装的 postgres），
+    /// 故「身份不可证明的活 PID → Refuse」经 classify_dump_instance 断言；
+    /// 「身份已证明后的端口分流」经 classify_proven_online 直接验证。
     #[test]
     fn classify_dump_instance_requires_trusted_port_for_online() {
         let dir = unique_tmp("dump-classify-port");
@@ -2770,17 +2778,30 @@ mod tests {
             )
         };
 
+        // 活 PID 但身份不可证明（假启动时刻 + 非本安装可执行文件）→ Refuse，
+        // 不得当作离线，也不得当作在线（D07-002 fail-closed）。
         write_pidfile_raw(&data_dir, &row("55432"));
-        assert_eq!(
-            classify_dump_instance(&layout),
-            DumpInstanceState::Online { port: 55432 }
+        assert!(
+            matches!(
+                classify_dump_instance(&layout),
+                DumpInstanceState::Refuse(_)
+            ),
+            "身份不可证明的活 PID 必须 Refuse"
         );
 
-        for port in ["0", "not-a-port", ""] {
+        // 身份已证明后的端口分流：可信端口 → Online；0/非法/缺失 → Refuse。
+        let info_with_port = |port: &str| {
             write_pidfile_raw(&data_dir, &row(port));
+            pgbin::read_postmaster_pid(&data_dir).expect("pid 文件应可解析")
+        };
+        assert_eq!(
+            classify_proven_online(&layout, &info_with_port("55432")),
+            DumpInstanceState::Online { port: 55432 }
+        );
+        for port in ["0", "not-a-port", ""] {
             assert!(
                 matches!(
-                    classify_dump_instance(&layout),
+                    classify_proven_online(&layout, &info_with_port(port)),
                     DumpInstanceState::Refuse(_)
                 ),
                 "端口 {port:?} 不可信时不得走在线/离线"
