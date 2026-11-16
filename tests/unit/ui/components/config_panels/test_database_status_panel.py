@@ -54,6 +54,19 @@ def _read_source() -> str:
     return Path(panel_module.__file__).read_text(encoding="utf-8")
 
 
+def _fake_i18n_get(key: str, **kwargs: Any) -> str:
+    """I18n.get 替身: 把 key 与格式化参数一起编码进返回文本 (D21-UIA-008).
+
+    仅返回 key 会丢弃 params，使测试只能验证 key 是否出现：View 写死
+    port=5432、漏传 version/path 或参数名错位时仍可通过。编码后实际 Text
+    同时携带精确 key 与逐项 kwargs，上述错误都会使断言失败。
+    """
+    if not kwargs:
+        return key
+    encoded = "&".join(f"{name}={kwargs[name]!r}" for name in sorted(kwargs))
+    return f"{key}[{encoded}]"
+
+
 def _walk_controls(root: Any) -> list[Any]:
     """深度优先遍历控件树 (含 controls/items/content)。"""
     if root is None or not isinstance(root, ft.Control):
@@ -69,6 +82,17 @@ def _walk_controls(root: Any) -> list[Any]:
     if isinstance(content, ft.Control):
         result.extend(_walk_controls(content))
     return result
+
+
+def _text_values(root: Any) -> list[str]:
+    """收集控件树中 ft.Text 的字符串值."""
+    values: list[str] = []
+    for control in _walk_controls(root):
+        if isinstance(control, ft.Text):
+            value = getattr(control, "value", None)
+            if isinstance(value, str):
+                values.append(value)
+    return values
 
 
 def _render_panel(
@@ -103,7 +127,7 @@ def _render_panel(
 
     with contextlib.ExitStack() as stack:
         mock_i18n = stack.enter_context(patch.object(panel_module, "I18n"))
-        mock_i18n.get.side_effect = lambda key, **kw: key
+        mock_i18n.get.side_effect = _fake_i18n_get
         stack.enter_context(patch.object(panel_module, "AppColors"))
         mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
         from ui.theme import AppStyles as _RealAppStyles
@@ -263,6 +287,15 @@ class TestRenderMessage:
         assert result == "translated:db_status_running"
         mock_i18n.get.assert_called_once_with("db_status_running")
 
+    def test_message_params_forwarded_to_i18n(self, mock_i18n_state) -> None:
+        """Message.params 原样透传给 I18n.get (不丢弃 / 不改名)."""
+        msg = Message("db_status_port", {"port": 55432})
+        with patch.object(panel_module, "I18n") as mock_i18n:
+            mock_i18n.get.side_effect = _fake_i18n_get
+            result = panel_module._render_message(msg)
+        assert result == "db_status_port[port=55432]"
+        mock_i18n.get.assert_called_once_with("db_status_port", port=55432)
+
 
 # ============================================================================
 # Click handler factory 测试
@@ -341,7 +374,7 @@ def _render_panel_with_state(
 
     with contextlib.ExitStack() as stack:
         mock_i18n = stack.enter_context(patch.object(panel_module, "I18n"))
-        mock_i18n.get.side_effect = lambda key, **kw: key
+        mock_i18n.get.side_effect = _fake_i18n_get
         stack.enter_context(patch.object(panel_module, "AppColors"))
         mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
         from ui.theme import AppStyles as _RealAppStyles
@@ -366,37 +399,64 @@ def _render_panel_with_state(
 class TestDatabaseStatusPanelStateRendering:
     """DatabaseStatusPanel 各 state 渲染分支测试."""
 
-    def test_renders_version_when_pg_version_set(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """pg_version 非 None 时渲染 db_status_version."""
-        state = DatabaseStatusState(pg_version="16")
+    @pytest.mark.parametrize(
+        ("state", "expected_text"),
+        [
+            pytest.param(
+                DatabaseStatusState(pg_version="17.4"),
+                "db_status_version[version='17.4']",
+                id="version",
+            ),
+            pytest.param(
+                DatabaseStatusState(port=55432),
+                "db_status_port[port=55432]",
+                id="port",
+            ),
+            pytest.param(
+                DatabaseStatusState(data_dir="/srv/pg data/用户#1"),
+                "db_status_data_dir[path='/srv/pg data/用户#1']",
+                id="data_dir",
+            ),
+            pytest.param(
+                DatabaseStatusState(log_dir="/var/log/pg/用户#1"),
+                "db_status_log_dir[path='/var/log/pg/用户#1']",
+                id="log_dir",
+            ),
+        ],
+    )
+    def test_info_line_forwards_exact_key_and_kwarg(
+        self,
+        state: DatabaseStatusState,
+        expected_text: str,
+        mock_i18n_state,
+        mock_app_colors_state,
+    ) -> None:
+        """信息行以精确 key + 该字段的 state 值输出 (写死值 / 漏传参数必须失败)."""
         _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "db_status_version" in text_values
+        assert expected_text in _text_values(result)
 
-    def test_renders_port_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """port 非 None 时渲染 db_status_port."""
-        state = DatabaseStatusState(port=5432)
+    def test_info_lines_keep_distinct_values_when_all_set(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """四项信息同时存在时各自携带自己的值 (参数错位必须失败)."""
+        state = DatabaseStatusState(
+            pg_version="17.4",
+            port=55432,
+            data_dir="/srv/pg-a",
+            log_dir="/var/log/pg-b",
+        )
         _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "db_status_port" in text_values
+        text_values = _text_values(result)
+        assert "db_status_version[version='17.4']" in text_values
+        assert "db_status_port[port=55432]" in text_values
+        assert "db_status_data_dir[path='/srv/pg-a']" in text_values
+        assert "db_status_log_dir[path='/var/log/pg-b']" in text_values
 
-    def test_renders_data_dir_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """data_dir 非 None 时渲染 db_status_data_dir."""
-        state = DatabaseStatusState(data_dir="/var/lib/pg")
+    def test_port_line_absent_when_port_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """port 为 None 时不生成端口行 (不得以配置端口 5432 补位)."""
+        state = DatabaseStatusState(pg_version="17.4", port=None)
         _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "db_status_data_dir" in text_values
-
-    def test_renders_log_dir_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """log_dir 非 None 时渲染 db_status_log_dir."""
-        state = DatabaseStatusState(log_dir="/var/log/pg")
-        _, _, result, _ = _render_panel_with_state(state)
-        ctrls = _walk_controls(result)
-        text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "db_status_log_dir" in text_values
+        text_values = _text_values(result)
+        info_lines = [value for value in text_values if value.startswith(("db_status_version", "db_status_port"))]
+        assert info_lines == ["db_status_version[version='17.4']"]
 
     def test_renders_status_message_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
         """status_message 非 None 时渲染翻译文本 + status icon."""
