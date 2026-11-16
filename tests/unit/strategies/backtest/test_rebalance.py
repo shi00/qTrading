@@ -1162,7 +1162,11 @@ class TestDiffRebalance:
         assert pos["cost_basis"] == pytest.approx(5000.0, abs=1e-6)
         assert sim.cash == pytest.approx(float(sells["net_amount"][0]), abs=1e-6)
 
-    def _make_simulator(self, **kwargs) -> tuple[PortfolioSimulator, BacktestConfig]:
+    def _make_simulator(
+        self,
+        cost_config: TransactionCostConfig | None = None,
+        **kwargs,
+    ) -> tuple[PortfolioSimulator, BacktestConfig]:
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
             end_date=date(2024, 1, 31),
@@ -1170,7 +1174,7 @@ class TestDiffRebalance:
         )
         simulator = PortfolioSimulator(
             config,
-            TransactionCostModel(TransactionCostConfig(slippage_bps=0.0)),
+            TransactionCostModel(cost_config or TransactionCostConfig(slippage_bps=0.0)),
         )
         return simulator, config
 
@@ -2000,6 +2004,105 @@ class TestDiffRebalance:
         assert "000001.SZ" in sim.positions
         assert [t for t in sim.trades_list if t["action"] == "sell"] == []
         assert math.isfinite(sim.cash)
+
+    @pytest.mark.parametrize("slippage_bps", [10_000.0, 10_001.0])
+    def test_sell_position_non_positive_slippage_price_skips_not_booked(self, slippage_bps: float) -> None:
+        """D12-004: 滑点使卖出调整价非正时记 invalid_price 跳过。
+
+        修复前：trades.price 回退原价 10 元，但 net_amount 按模型负数入账，
+        成交价与账务不一致（10000bps 时 gross≈0、净额被费用扣成负数）。
+        """
+        sim, _ = self._make_simulator(cost_config=TransactionCostConfig(slippage_bps=slippage_bps))
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        cash_before = sim.cash
+        q = self._quote(date(2024, 1, 8), price=10.0)
+
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], q)
+
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert [t for t in sim.trades_list if t["action"] == "sell"] == []
+        assert sim.cash == cash_before
+
+    @pytest.mark.parametrize("slippage_bps", [10_000.0, 10_001.0])
+    def test_sell_position_to_value_non_positive_slippage_price_skips(self, slippage_bps: float) -> None:
+        """D12-004: 减持路径与全额卖出同一护栏，非法滑点不改动持仓与账务。"""
+        sim, _ = self._make_simulator(cost_config=TransactionCostConfig(slippage_bps=slippage_bps))
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        cash_before = sim.cash
+        q = self._quote(date(2024, 1, 8), price=10.0)
+
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", q, target_value=5000.0)
+
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert sim.positions["000001.SZ"]["volume"] == 1000
+        assert sim.cash == cash_before
+
+    def test_sell_all_positions_non_positive_slippage_price_keeps_positions(self) -> None:
+        """D12-004: 期末/无信号全清仓路径（_sell_all_positions）同样跳过非法成交。"""
+        sim, _ = self._make_simulator(cost_config=TransactionCostConfig(slippage_bps=10_000.0))
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=10.0)
+
+        sim._sell_all_positions(date(2024, 1, 8), q)
+
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert sim.trades_list == []
+
+    def test_sell_trade_price_matches_booked_slippage_price(self) -> None:
+        """D12-004: trades.price 与 gross/net 使用同一滑点调整价（不再回退原价）。"""
+        sim, _ = self._make_simulator(
+            cost_config=TransactionCostConfig(
+                slippage_bps=50.0,
+                commission_rate=0.0,
+                commission_min=0.0,
+                stamp_duty_rate=0.0,
+            )
+        )
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=10.0)
+
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], q)
+
+        trade = sim.trades_list[0]
+        expected_price = 10.0 * (1 - 50.0 / 10000)
+        expected_gross = expected_price * 1000
+        assert trade["price"] == pytest.approx(expected_price)
+        assert trade["gross_amount"] == pytest.approx(expected_gross)
+        # commission_min/stamp_duty=0，仅过户费（默认 1e-5）
+        assert trade["net_amount"] == pytest.approx(expected_gross * (1 - 1e-5))
+
+    @pytest.mark.parametrize("bad_last_price", [0.0, -1.0, float("nan")])
+    def test_liquidate_delisted_position_invalid_last_price_skips(self, bad_last_price: float) -> None:
+        """D12-004: 最后已知价非正/非有限时退市清算跳过，不按非法价注销。"""
+        sim, _ = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim._last_known_prices["000001.SZ"] = bad_last_price
+        cash_before = sim.cash
+
+        sim._liquidate_delisted_position("000001.SZ", sim.positions["000001.SZ"], date(2024, 1, 8))
+
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert sim.cash == cash_before
+        assert sim.delist_liquidation_count == 0
+
+    def test_liquidate_delisted_position_records_slippage_price(self) -> None:
+        """D12-004: 退市清算记录价与账务同为滑点调整价（原记录未调整的 recover_price）。"""
+        sim, _ = self._make_simulator(cost_config=TransactionCostConfig(slippage_bps=50.0))
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        sim._last_known_prices["000001.SZ"] = 10.0
+
+        sim._liquidate_delisted_position("000001.SZ", sim.positions["000001.SZ"], date(2024, 1, 8))
+
+        trade = sim.trades_list[0]
+        recover_price = 10.0 * sim.config.delist_recovery_rate
+        expected_price = recover_price * (1 - 50.0 / 10000)
+        assert trade["exit_reason"] == "DELISTED"
+        assert trade["price"] == pytest.approx(expected_price)
+        assert trade["gross_amount"] == pytest.approx(expected_price * 1000)
+        assert sim.delist_liquidation_count == 1
 
 
 class TestRebalanceValuationExecPrice:

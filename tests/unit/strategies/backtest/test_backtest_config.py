@@ -134,7 +134,7 @@ class TestBacktestConfigValidation:
             ("commission_min must be non-negative", {"commission_min": -1.0}),
             ("stamp_duty_rate must be non-negative", {"stamp_duty_rate": -0.001}),
             ("transfer_fee_rate must be non-negative", {"transfer_fee_rate": -1e-5}),
-            ("slippage_bps must be non-negative", {"slippage_bps": -5.0}),
+            ("slippage_bps must be in [0, 10000]", {"slippage_bps": -5.0}),
         ]
         for expected_msg, kwargs in cases:
             config = BacktestConfig(
@@ -229,7 +229,7 @@ _FLOAT_FIELD_ERRORS: list[tuple[str, str]] = [
     ("commission_min", "commission_min must be non-negative"),
     ("stamp_duty_rate", "stamp_duty_rate must be non-negative"),
     ("transfer_fee_rate", "transfer_fee_rate must be non-negative"),
-    ("slippage_bps", "slippage_bps must be non-negative"),
+    ("slippage_bps", "slippage_bps must be in [0, 10000]"),
     ("max_single_weight", "max_single_weight must be in (0, 1]"),
     ("delist_recovery_rate", "delist_recovery_rate must be in (0, 1]"),
     ("cash_reserve_pct", "cash_reserve_pct must be in [0, 1)"),
@@ -313,7 +313,7 @@ class TestBacktestConfigFiniteValidation:
             ("commission_min", -1e-9, "commission_min must be non-negative"),
             ("stamp_duty_rate", -1e-9, "stamp_duty_rate must be non-negative"),
             ("transfer_fee_rate", -1e-9, "transfer_fee_rate must be non-negative"),
-            ("slippage_bps", -1e-9, "slippage_bps must be non-negative"),
+            ("slippage_bps", -1e-9, "slippage_bps must be in [0, 10000]"),
             ("max_single_weight", math.nextafter(1.0, math.inf), "max_single_weight must be in (0, 1]"),
             ("delist_recovery_rate", math.nextafter(1.0, math.inf), "delist_recovery_rate must be in (0, 1]"),
             ("cash_reserve_pct", -1e-9, "cash_reserve_pct must be in [0, 1)"),
@@ -324,6 +324,20 @@ class TestBacktestConfigFiniteValidation:
     )
     def test_out_of_bounds_rejected_with_exactly_one_error(self, field: str, value: float, message: str) -> None:
         assert _config_with_float(field, value).validate() == [message]
+
+
+class TestSlippageUpperBound:
+    """D12-004: 滑点必须有合理上界，避免卖出调整价为非正后账务失真。"""
+
+    def test_upper_bound_10000_accepted(self) -> None:
+        assert _config_with_float("slippage_bps", 10_000.0).validate() == []
+
+    @pytest.mark.parametrize("value", [10_000.0 + 1e-9, 10_001.0, 1e9])
+    def test_above_upper_bound_rejected(self, value: float) -> None:
+        assert _config_with_float("slippage_bps", value).validate() == ["slippage_bps must be in [0, 10000]"]
+
+    def test_negative_rejected(self) -> None:
+        assert _config_with_float("slippage_bps", -1.0).validate() == ["slippage_bps must be in [0, 10000]"]
 
 
 def _make_result(**overrides) -> BacktestResult:
