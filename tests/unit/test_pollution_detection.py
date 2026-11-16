@@ -9,8 +9,9 @@
 探测策略：
 1. 选取核心子集（AI 服务/任务管理器/数据处理器相关测试）
 2. 用 subprocess 调用 pytest，随机打乱文件顺序，跑 3 次
-3. 比较各次运行的 pass/fail 结果
-4. 若某测试在某次运行中通过、在另一次运行中失败，判定为污染
+3. 校验每轮子 pytest 退出码为 0 且解析出的节点集合一致，否则判定探测无效
+4. 比较各次运行的 pass/fail 结果
+5. 若某测试在某次运行中通过、在另一次运行中失败，判定为污染
 
 标注 @pytest.mark.slow 因为多次跑耗时。CI 中仅在 nightly flaky-detection job 的专用 step
 执行一次；PR 单测与 10 轮 flaky 循环均以 --deselect 排除（详见 docs/guides/ci-cd.md）。
@@ -116,6 +117,28 @@ def _abort(message: str) -> None:
     pytest.skip(message)
 
 
+# 子 pytest 非零退出码的含义（pytest ExitCode）；未列出者按信号终止处理
+_PROBE_EXIT_REASONS: dict[int, str] = {
+    1: "存在失败测试，可能为基线失败，不能据此判定顺序污染",
+    2: "测试收集或执行被中断",
+    3: "pytest 内部错误",
+    4: "pytest 用法错误",
+    5: "未收集到任何测试",
+}
+
+
+def _ensure_run_completed(result: subprocess.CompletedProcess[str], run_idx: int) -> None:
+    """校验子 pytest 完整成功完成；非零退出说明输出可能只是部分结果，不能据此判定污染。"""
+    if result.returncode == 0:
+        return
+    reason = _PROBE_EXIT_REASONS.get(result.returncode, "子进程被信号终止或异常退出（可能 OOM/崩溃/中断）")
+    _abort(
+        f"第 {run_idx + 1} 次运行退出码 {result.returncode}（{reason}），探测无效：\n"
+        "子 pytest 未完整成功完成，其输出可能只是部分结果，不能据此判定无污染。\n"
+        f"stdout 片段: {result.stdout[:500]}\nstderr 片段: {result.stderr[:500]}"
+    )
+
+
 def test_core_subset_files_exist():
     """快速检查：核心子集中的所有文件都存在（不标记 slow，快速验证）。"""
     for rel_path in CORE_SUBSET_FILES:
@@ -156,6 +179,73 @@ def test_run_command_forces_serial_mode(monkeypatch):
     assert cmd[cmd.index("-n") + 1] == "0"
 
 
+@pytest.mark.parametrize("returncode", [1, 2])
+def test_nonzero_exit_invalidates_probe(monkeypatch, returncode):
+    """守护：子 pytest 非零退出时，即使有可解析的部分 PASSED 输出也必须判为探测无效。"""
+
+    def _fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=returncode,
+            stdout="tests/unit/test_a.py::test_pass PASSED   [ 50%]\n",
+            stderr="E   collection error\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setenv("CI", "1")
+
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        test_no_cross_test_pollution_in_core_subset()
+
+    message = str(excinfo.value)
+    assert f"退出码 {returncode}" in message
+    assert "探测无效" in message
+    assert "stdout 片段" in message
+    assert "stderr 片段" in message
+    assert "检测到跨测试状态污染" not in message
+
+
+def test_zero_exit_with_consistent_results_passes(monkeypatch):
+    """守护：三轮 0 退出且节点/状态一致时探测正常通过。"""
+
+    def _fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="tests/unit/test_a.py::test_pass PASSED   [100%]\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setenv("CI", "1")
+
+    test_no_cross_test_pollution_in_core_subset()
+
+
+def test_incomplete_node_set_invalidates_probe(monkeypatch):
+    """守护：0 退出但各轮节点集合不一致（报告截断）时判为探测无效。"""
+    outputs = iter(
+        [
+            "tests/unit/test_a.py::test_pass PASSED   [100%]\n",
+            "tests/unit/test_a.py::test_pass PASSED   [ 50%]\ntests/unit/test_b.py::test_extra PASSED   [100%]\n",
+            "tests/unit/test_a.py::test_pass PASSED   [100%]\n",
+        ]
+    )
+
+    def _fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setenv("CI", "1")
+
+    with pytest.raises(pytest.fail.Exception) as excinfo:
+        test_no_cross_test_pollution_in_core_subset()
+
+    message = str(excinfo.value)
+    assert "节点集合" in message
+    assert "探测无效" in message
+
+
 @pytest.mark.slow
 def test_no_cross_test_pollution_in_core_subset():
     """随机打乱顺序跑核心子集 3 次，检测跨测试状态污染。
@@ -178,6 +268,9 @@ def test_no_cross_test_pollution_in_core_subset():
         except OSError as e:
             _abort(f"第 {run_idx + 1} 次运行无法启动 subprocess: {e}")
 
+        # 非零退出说明子 pytest 未完整完成，其输出可能只是部分结果，禁止据此下结论
+        _ensure_run_completed(result, run_idx)
+
         test_results = _parse_test_results(result.stdout)
         if not test_results:
             # 解析失败或无输出，可能是收集错误
@@ -186,6 +279,20 @@ def test_no_cross_test_pollution_in_core_subset():
                 f"stdout 片段: {result.stdout[:500]}\nstderr 片段: {result.stderr[:500]}"
             )
         all_results.append(test_results)
+
+    # 节点集合必须三轮一致：不一致说明报告不完整/被截断，同样不能比较顺序结果
+    expected_node_ids = set(all_results[0])
+    for run_idx, results in enumerate(all_results[1:], start=2):
+        run_node_ids = set(results)
+        if run_node_ids == expected_node_ids:
+            continue
+        missing = sorted(expected_node_ids - run_node_ids)
+        extra = sorted(run_node_ids - expected_node_ids)
+        _abort(
+            f"第 {run_idx} 次运行节点集合与第 1 次不一致，探测无效："
+            "子 pytest 报告可能被截断或收集不完整，不能据此比较执行顺序结果。\n"
+            f"缺失节点: {missing[:5]}\n新增节点: {extra[:5]}"
+        )
 
     # 收集所有测试 node ID
     all_node_ids: set[str] = set()
