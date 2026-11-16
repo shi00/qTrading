@@ -60,7 +60,13 @@ sys.modules["keyring"] = _E2E_MOCK_KEYRING
 
 from tests.e2e._windows_skip import add_windows_skip_option, strip_windows_skipif
 from tests.e2e.helpers.anchor_page import AnchorPage
-from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail, start_flet_app
+from tests.e2e.helpers.app_launcher import (
+    PROJECT_ROOT,
+    AppLogPaths,
+    _read_log_tail,
+    iter_run_log_paths,
+    start_flet_app,
+)
 from tests.e2e.helpers.flet_page import FletPage
 from ui.testing.e2e_ids import EIDS
 
@@ -395,6 +401,7 @@ def _spawn(
     config: dict,
     env_overrides: dict,
     *,
+    instance_label: str,
     startup_timeout_s: float = 60.0,
 ) -> tuple:
     cfg_dir = tmp_path_factory.mktemp("e2e_cfg")
@@ -414,18 +421,20 @@ def _spawn(
     is_embedded = env_overrides.get("QTRADING_DATABASE_MODE", "").lower() == "embedded"
     saved_db_url = os.environ.pop("DATABASE_URL", None) if is_embedded else None
     try:
-        proc, url = start_flet_app(
+        proc, url, logs = start_flet_app(
             cfg_file,
             {"USERPROFILE": e2e_home, **env_overrides},
             startup_timeout_s=startup_timeout_s,
+            instance_label=instance_label,
         )
     finally:
         if saved_db_url is not None:
             os.environ["DATABASE_URL"] = saved_db_url
-    return proc, url, cfg_file
+    return proc, url, cfg_file, logs
 
 
-def _terminate(proc):
+def _terminate(app: "AppServer") -> None:
+    proc = app.proc
     proc.terminate()
     try:
         proc.wait(timeout=10)
@@ -438,10 +447,20 @@ def _terminate(proc):
 
 
 class AppServer:
-    def __init__(self, proc, url: str, config_file: Path | None = None):
+    def __init__(self, proc, url: str, config_file: Path | None = None, logs: AppLogPaths | None = None):
         self.proc = proc
         self.url = url
         self.config_file = config_file
+        # 本实例专属诊断路径；缺失时仅在旧构造方式下回退到 run 级汇总日志。
+        self.logs = logs
+
+    @property
+    def stdout_log_path(self) -> Path:
+        return self.logs.stdout_path if self.logs is not None else PROJECT_ROOT / "logs" / "e2e-flet-app.log"
+
+    @property
+    def trace_log_path(self) -> Path:
+        return self.logs.trace_path if self.logs is not None else PROJECT_ROOT / "logs" / "main_trace.log"
 
     def is_alive(self) -> bool:
         return self.proc.poll() is None
@@ -451,7 +470,7 @@ class AppServer:
             retcode = self.proc.returncode
             raise RuntimeError(
                 f"Flet app process (PID {self.proc.pid}) has exited with code {retcode}. "
-                f"URL was {self.url}. Check logs/e2e-flet-app.log for details."
+                f"URL was {self.url}. Check {self.stdout_log_path} for details."
             )
 
 
@@ -485,7 +504,7 @@ def _spawn_app_session(
     }
     if embedded_url_file is not None:
         env_overrides["QTRADING_EMBEDDED_PG_URL_FILE"] = str(embedded_url_file)
-    proc, url, cfg_file = _spawn(
+    proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "onboarding_complete": True,
@@ -495,9 +514,10 @@ def _spawn_app_session(
             "embedded_pg_data_root": str(data_root),
         },
         env_overrides=env_overrides,
+        instance_label=pool_name,
         startup_timeout_s=300.0,
     )
-    return AppServer(proc, url, cfg_file)
+    return AppServer(proc, url, cfg_file, logs)
 
 
 async def _setup_canvaskit_intercept(page) -> None:
@@ -706,9 +726,7 @@ async def _make_page(
             for _ in range(10):  # 最多 2s，每 200ms 检查一次
                 if await fp.has_text(error_text):
                     # R9: 不内联日志原文（可能含 DB 连接串/密码），只引用已脱敏的日志工件路径
-                    raise RuntimeError(
-                        "Flet app shows DB initialization error UI. See sanitized log artifact: logs/e2e-flet-app.log"
-                    )
+                    raise RuntimeError(f"Flet app shows DB initialization error UI. See log: {app.stdout_log_path}")
                 await page.wait_for_timeout(200)
         except RuntimeError:
             await context.close()
@@ -1326,13 +1344,10 @@ async def _trigger_sidecar_startup_via_browser(
             # 退出码与 app 日志尾部内联进异常消息：app 子进程日志只落盘，CI job 日志默认
             # 看不到，仅提示「Check logs/...」会让 setup error 缺少根因证据
             # （2026-11-05 run 42008447714 的 3 个 setup error 即此形态）。
-            # 本函数内同名符号由下方诊断分支的局部 import 绑定为局部变量，须先局部导入再用。
-            from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
-
-            log_tail = _read_log_tail(PROJECT_ROOT / "logs" / "e2e-flet-app.log", max_chars=4000)
+            log_tail = _read_log_tail(flet_app.stdout_log_path, max_chars=4000)
             raise RuntimeError(
                 f"Flet app process (PID {flet_app.proc.pid}) exited during sidecar startup "
-                f"with code {flet_app.proc.poll()}. Check logs/e2e-flet-app.log for details. "
+                f"with code {flet_app.proc.poll()}. Check {flet_app.stdout_log_path} for details. "
                 f"Log tail:\n{log_tail}"
             )
         if url_file_appeared:
@@ -1343,7 +1358,7 @@ async def _trigger_sidecar_startup_via_browser(
                     await context.close()
                     raise RuntimeError(
                         "Flet app shows DB initialization error UI during seeding setup. "
-                        "See sanitized log artifact: logs/e2e-flet-app.log"
+                        f"See log: {flet_app.stdout_log_path}"
                     )
             except Exception as exc:  # noqa: BLE001
                 # 探测性检查: locator 操作可能因 page not ready/target detached 失败, 循环会重试
@@ -1426,21 +1441,17 @@ async def _trigger_sidecar_startup_via_browser(
                         elapsed,
                         diag_err,
                     )
-                # 读取 Flet app 日志 tail 输出到 CI 日志，定位 main(page) 服务端卡死位置
+                # 读取本实例 Flet app 日志 tail 输出到 CI 日志，定位 main(page) 服务端卡死位置。
                 # 根因：浏览器端 DOM 诊断只能看到 Flutter Web 框架状态，无法看到 Python
                 # 服务端 main(page) 执行进度。main(page) 卡在 CacheManager/init_services
-                # 时，浏览器端会一直等待渲染指令，DOM 诊断始终相同。读取 Flet app stdout
-                # 日志（logs/e2e-flet-app.log）能直接看到 main(page) 执行到了哪一步。
+                # 时，浏览器端会一直等待渲染指令，DOM 诊断始终相同。读取本实例 stdout
+                # 日志能直接看到 main(page) 执行到了哪一步。
                 try:
-                    from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
-
-                    log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
-                    log_tail = _read_log_tail(log_path, max_chars=4000)
+                    log_tail = _read_log_tail(flet_app.stdout_log_path, max_chars=4000)
                     logger.info("[E2E Seeding] Flet app log tail:\n%s", log_tail)
-                    # 额外读取 main_trace.log（绕过 logging/stdout 的直接文件日志），
+                    # 额外读取本实例 main_trace.log（绕过 logging/stdout 的直接文件日志），
                     # 用于定位 page.render 是否阻塞、阻塞在哪一步。
-                    trace_path = PROJECT_ROOT / "logs" / "main_trace.log"
-                    trace_tail = _read_log_tail(trace_path, max_chars=4000)
+                    trace_tail = _read_log_tail(flet_app.trace_log_path, max_chars=4000)
                     logger.info("[E2E Seeding] main_trace.log tail:\n%s", trace_tail)
                 except Exception as log_err:  # noqa: BLE001
                     logger.debug("[E2E Seeding] Flet app log read failed: %s", log_err)
@@ -1460,12 +1471,9 @@ async def _trigger_sidecar_startup_via_browser(
             page.url,
             ARTIFACT_DIR,
         )
-        # 超时时也读取 main_trace.log，定位 page.render 阻塞点
+        # 超时时也读取本实例 main_trace.log，定位 page.render 阻塞点
         try:
-            from tests.e2e.helpers.app_launcher import PROJECT_ROOT, _read_log_tail
-
-            trace_path = PROJECT_ROOT / "logs" / "main_trace.log"
-            trace_tail = _read_log_tail(trace_path, max_chars=8000)
+            trace_tail = _read_log_tail(flet_app.trace_log_path, max_chars=8000)
             logger.error("[E2E Seeding] main_trace.log tail on timeout:\n%s", trace_tail)
         except Exception as trace_err:  # noqa: BLE001
             logger.error("[E2E Seeding] main_trace.log read failed: %s", trace_err)
@@ -1475,7 +1483,7 @@ async def _trigger_sidecar_startup_via_browser(
     raise RuntimeError(
         f"Timeout waiting for sidecar + page init within {timeout_s}s. "
         "Sidecar may have failed to start or page init failed. "
-        "Check logs/e2e-flet-app.log for details."
+        f"Check {flet_app.stdout_log_path} for details."
     )
 
 
@@ -1587,7 +1595,7 @@ def flet_app_ro(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file):
     )
     yield app
     print(f"[E2E DIAG] flet_app_ro: teardown, terminating proc {app.proc.pid}", flush=True)
-    _terminate(app.proc)
+    _terminate(app)
 
 
 @pytest.fixture(scope="session")
@@ -1616,7 +1624,7 @@ def flet_app_mut(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file_mu
     )
     yield app
     print(f"[E2E DIAG] flet_app_mut: teardown, terminating proc {app.proc.pid}", flush=True)
-    _terminate(app.proc)
+    _terminate(app)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -1658,7 +1666,7 @@ def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
     （``seed_e2e_data`` 通过它连接 sidecar DB 播种）。
     """
     data_root = tmp_path_factory.mktemp("embedded_pg_data_wizard")
-    proc, url, cfg_file = _spawn(
+    proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh_CN",
@@ -1673,11 +1681,12 @@ def wizard_app(tmp_path_factory, real_sidecar_binary_e2e):
             "AUTO_MIGRATE": "true",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        instance_label="wizard",
         startup_timeout_s=300.0,
     )
-    app = AppServer(proc, url, cfg_file)
+    app = AppServer(proc, url, cfg_file, logs)
     yield app
-    _terminate(proc)
+    _terminate(app)
 
 
 @pytest.fixture
@@ -1843,7 +1852,7 @@ def news_risk_app_success(
         },
     )
     yield app
-    _terminate(app.proc)
+    _terminate(app)
 
 
 @pytest.fixture(scope="session")
@@ -1859,7 +1868,7 @@ def news_risk_app_noevents(
         extra_env={"NEWS_AISERVICE_MOCK": "success_no_events"},
     )
     yield app
-    _terminate(app.proc)
+    _terminate(app)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -1924,7 +1933,7 @@ def flet_app_full_mount(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_
     )
     yield app
     print(f"[E2E DIAG] flet_app_full_mount: teardown, terminating proc {app.proc.pid}", flush=True)
-    _terminate(app.proc)
+    _terminate(app)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -1947,7 +1956,7 @@ async def full_mount_page(e2e_browser, seed_full_mount, flet_app_full_mount, req
 def _collect_e2e_artifacts(request):
     """PR-4 Task 4.7: 集中化 artifact 收集。
 
-    失败时打包 trace + screenshot + flet log tail + main_trace.log tail 到单 tar.gz，
+    失败时打包 trace + screenshot + 本 run 每个 app 实例的 stdout/trace tail 到单 tar.gz，
     CI artifact upload 只需 1 个入口（``ARTIFACT_DIR/*.tar.gz``）；日志文件按用例名分组。
 
     autouse + function scope：setup 先于 ``e2e_page``/``wizard_page``，teardown 后于
@@ -1969,14 +1978,13 @@ def _collect_e2e_artifacts(request):
     png = ARTIFACT_DIR / f"{name}.png"
     trace = ARTIFACT_DIR / f"{name}-trace.zip"
 
-    # 收集 Flet app log + main_trace.log 的 tail（共享文件，取尾部避免 tar.gz 膨胀）
+    # 收集本 run 每个 app 实例的 stdout/trace tail（按实例分文件，取尾部避免 tar.gz 膨胀）
     log_files: list[tuple[Path, str]] = []
-    flet_log = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
-    if flet_log.exists():
-        log_files.append((flet_log, "e2e-flet-app.log.tail"))
-    main_trace = PROJECT_ROOT / "logs" / "main_trace.log"
-    if main_trace.exists():
-        log_files.append((main_trace, "main_trace.log.tail"))
+    for paths in iter_run_log_paths():
+        if paths.stdout_path.exists():
+            log_files.append((paths.stdout_path, f"{paths.instance_id}-stdout.log.tail"))
+        if paths.trace_path.exists():
+            log_files.append((paths.trace_path, f"{paths.instance_id}-main_trace.log.tail"))
 
     if not png.exists() and not trace.exists() and not log_files:
         return
@@ -2021,7 +2029,7 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
     from tests.e2e.fixtures.fake_sidecar import create_fake_sidecar
 
     fake_sidecar_path = create_fake_sidecar(tmp_path_factory.mktemp("fake_sidecar"))
-    proc, url, cfg_file = _spawn(
+    proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh_CN",
@@ -2035,10 +2043,11 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
             "AUTO_MIGRATE": "true",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        instance_label="embedded-wizard",
     )
-    app = AppServer(proc, url, cfg_file)
+    app = AppServer(proc, url, cfg_file, logs)
     yield app
-    _terminate(proc)
+    _terminate(app)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -2092,7 +2101,7 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
     独立临时 data_root，避免跨 worker 冲突。
     """
     data_root = tmp_path_factory.mktemp("embedded_pg_data")
-    proc, url, cfg_file = _spawn(
+    proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh_CN",
@@ -2107,11 +2116,12 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
             "AUTO_MIGRATE": "true",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        instance_label="embedded-real-wizard",
         startup_timeout_s=300.0,
     )
-    app = AppServer(proc, url, cfg_file)
+    app = AppServer(proc, url, cfg_file, logs)
     yield app
-    _terminate(proc)
+    _terminate(app)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -2138,7 +2148,7 @@ def embedded_real_flet_app(tmp_path_factory, mock_keyring, real_sidecar_binary_e
     独立 data_root：避免跨 worker/session 的 PGDATA 锁冲突（同 ``embedded_real_wizard_app``）。
     """
     data_root = tmp_path_factory.mktemp("embedded_pg_data")
-    proc, url, cfg_file = _spawn(
+    proc, url, cfg_file, logs = _spawn(
         tmp_path_factory,
         config={
             "locale": "zh_CN",
@@ -2153,11 +2163,12 @@ def embedded_real_flet_app(tmp_path_factory, mock_keyring, real_sidecar_binary_e
             "QTRADING_DATABASE_MODE": "embedded",
             "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
+        instance_label="embedded-real",
         startup_timeout_s=300.0,
     )
-    app = AppServer(proc, url, cfg_file)
+    app = AppServer(proc, url, cfg_file, logs)
     yield app
-    _terminate(proc)
+    _terminate(app)
 
 
 @pytest_asyncio.fixture(loop_scope="session")

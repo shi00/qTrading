@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import flet as ft
@@ -29,17 +30,29 @@ if TYPE_CHECKING:
 
 
 def _trace_log(msg: str) -> None:
-    """E2E 诊断专用：直接写文件，绕过 logging/stdout，避免 Flet IPC 或缓冲吞没日志。"""
-    try:
-        from pathlib import Path
+    """E2E 诊断专用：直接写文件，绕过 logging/stdout，避免 Flet IPC 或缓冲吞没日志。
 
-        trace_path = Path("logs") / "main_trace.log"
-        trace_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(trace_path, "a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d}] {msg}\n")
-            f.flush()
-    except Exception:
-        pass
+    E2E 启动器通过 ``E2E_MAIN_TRACE_PATH`` 为每个 app 实例分配独立 trace，
+    并通过 ``E2E_INSTANCE_ID`` 标识归属；同时镜像到 run 级 ``logs/main_trace.log``
+    （带实例前缀）供 CI 工件使用。未设置时保持原有单文件行为。
+    """
+    line = f"[{time.strftime('%H:%M:%S')}.{int(time.time() * 1000) % 1000:03d}] {msg}\n"
+    legacy_path = Path("logs") / "main_trace.log"
+    instance_trace = os.environ.get("E2E_MAIN_TRACE_PATH")
+    instance_id = os.environ.get("E2E_INSTANCE_ID")
+    targets: list[tuple[Path, str]] = [(legacy_path, f"[{instance_id}] {line}" if instance_id else line)]
+    if instance_trace:
+        instance_path = Path(instance_trace)
+        if instance_path != legacy_path:
+            targets.append((instance_path, line))
+    for trace_path, content in targets:
+        try:
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(trace_path, "a", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+        except Exception:
+            pass
 
 
 from app.error_logging import log_exception_with_severity
