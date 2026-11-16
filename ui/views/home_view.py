@@ -77,12 +77,17 @@ def HomeView(
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(_load_data)
+                # D17-001: 刷新也走统一入口, 初始化阶段失败后点刷新可恢复
+                # (vm.init_data() 成功后幂等, 不重复 DB/stock_basic 初始化)。
+                page.run_task(_init_and_load)
         except RuntimeError:
             logger.debug("[HomeView] page not available for refresh")
 
     def _on_retry_load() -> None:
         """ErrorState on_retry: 触发 _refresh_clicked 逻辑 (P1-3 批次 2).
+
+        D17-001: 重试必须覆盖失败的初始化阶段 (init/init_data), 不能只重跑
+        数据加载——否则 processor 未就绪时错误态永久不可恢复。
 
         _refresh_clicked 内部 e 参数未使用, 可安全传 None。
         """
@@ -132,10 +137,12 @@ def HomeView(
 
     # --- Data loading ---
 
-    async def _load_data() -> None:
-        # P1-3 批次 2: 加载态/错误态. UIR-F04-003: 代次在命令入口分配,
-        # 收尾经 end_load 校验所有权 (旧请求不清新 loading、不写旧错误).
-        view_generation, news_generation = vm.begin_load()
+    async def _load_data(news_generation: int) -> Message | None:
+        """执行行情 + 新闻加载, 返回本代次应写回的可见错误 (None = 成功).
+
+        D17-001: loading 所有权 (begin_load/end_load) 统一由 ``_init_and_load``
+        持有, 本函数不再自行分配代次, 避免初始化与加载各持一次所有权。
+        """
         load_error: Message | None = None
         try:
             await vm.load_market_data()
@@ -148,8 +155,7 @@ def HomeView(
         except Exception as exc:
             logger.error("[HomeView] Load failed: %s", DataSanitizer.sanitize_error(exc))
             load_error = Message("home_load_failed_title", {})
-        finally:
-            vm.end_load(view_generation, load_error)
+        return load_error
 
     async def _init_and_load() -> None:
         if not active:
@@ -168,10 +174,15 @@ def HomeView(
         if is_e2e_mode():
             vm.set_loading(False)
             return
+        # D17-001: 初始化与数据加载共用一次加载所有权。初始化异常经 VM 公开命令
+        # end_load 提交错误态并退出 busy (View 不触碰 VM 私有状态), 首帧不再把
+        # 初始化失败渲染成"空内容"; 取消仍经 except CancelledError 传播 (R2)。
+        view_generation, news_generation = vm.begin_load()
+        load_error: Message | None = None
         try:
             vm.init()  # 添加 service listener (active 失活时经下方 effect cleanup 调 vm.stop() 退订)
             await vm.init_data()
-            await _load_data()
+            load_error = await _load_data(news_generation)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as exc:
@@ -180,6 +191,11 @@ def HomeView(
                 DataSanitizer.sanitize_error(exc),
                 exc_info=True,
             )
+            load_error = Message("home_load_failed_title", {})
+        finally:
+            # 代次失效 (新加载/clear_state/dispose) 时 end_load 为 no-op,
+            # 旧初始化结果不会清掉新一代的错误或 loading。
+            vm.end_load(view_generation, load_error)
 
     # --- CacheCleared 订阅 (UIX-01: pubsub → Observable 转发, 保留 active 门控) ---
 
@@ -276,6 +292,7 @@ def HomeView(
                     on_load_more_click=_on_load_more_click,
                     on_view_stock=_on_view_stock,
                     valid_stock_codes=state.valid_stock_codes,
+                    valid_stock_ts_codes=state.valid_stock_ts_codes,
                     is_loading_more=state.is_loading_more,
                 ),
             ]

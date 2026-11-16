@@ -6,7 +6,7 @@
 - set_filter 重置分页、清空展开与旧结果并统一异步重载（F35）；非法 origin 显式失败；
 - F35 请求代次隔离：两个 load 逆序完成保留最新请求结果；旧代次失败降级不覆盖；
   在途展开响应在筛选变化后不回填；重载在途时翻页 no-op（旧 total 路径已被统一重载取代）；
-- next/prev 分页（50/页，边界 no-op）；
+- next/prev 分页（50/页，边界 no-op）；D18-007 总页数由记录数换算（0/1/50/51/100 条）；
 - D16-004 页身份：翻页在途 / 失败不可导出（当前页），成功 CSV 页号与 invocation IDs
   同源，前后翻页清空旧页行与展开、迟到展开不回填错页；
 - D16-005 预算草稿编辑身份：在途加载 / 过滤 / 翻页重载不覆盖未保存草稿，
@@ -61,6 +61,7 @@ from ui.viewmodels.model_usage_view_model import (
     UsageFilters,
     _write_csv_text,
     month_pricing_status,
+    total_page_count,
 )
 from utils.thread_pool import TaskType
 
@@ -193,6 +194,24 @@ async def test_load_and_month_summary_propagate_pricing_integrity():
 def test_month_pricing_status_distinguishes_free_partial_and_unknown(summary, expected):
     """三态判定（R21）：免费 0 可显示，未计价 0 不得伪装为免费/已知。"""
     assert month_pricing_status(summary) == expected
+
+
+@pytest.mark.parametrize(
+    ("total_records", "expected_pages"),
+    [
+        (0, 1),
+        (1, 1),
+        (PAGE_SIZE - 1, 1),
+        (PAGE_SIZE, 1),
+        (PAGE_SIZE + 1, 2),
+        (2 * PAGE_SIZE, 2),
+        (2 * PAGE_SIZE + 1, 3),
+        (100, 2),
+    ],
+)
+def test_total_page_count_derives_pages_from_record_count(total_records, expected_pages):
+    """D18-007：``total`` 为记录数，总页数按 ceil 换算，空结果至少 1 页。"""
+    assert total_page_count(total_records) == expected_pages
 
 
 @pytest.mark.asyncio
@@ -941,6 +960,64 @@ async def test_save_monthly_budget_success_reloads_and_echoes_limit():
     assert vm.state.monthly_limit_cny == Decimal("100")
     assert vm.state.budget_draft == "100"  # 重开核对回显
     assert dao.read_request_page.await_count == 2  # 初始 load + 保存后重载
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_reentrant_submit_ignored_while_saving():
+    """D19-003：提交在途期间的重复调用（连续 Enter / 双击）不重复提交，守卫完成后复位。"""
+    calls: list[Decimal | None] = []
+    saver_started = asyncio.Event()
+    saver_gate = asyncio.Event()
+
+    async def _saver(amount: Decimal | None) -> bool:
+        calls.append(amount)
+        saver_started.set()
+        await saver_gate.wait()
+        return True
+
+    vm = _vm(_dao(), saver=_saver)
+    vm.set_budget_draft("100")
+    first = asyncio.create_task(vm.save_monthly_budget())
+    await asyncio.wait_for(saver_started.wait(), timeout=2)
+
+    await vm.save_monthly_budget()  # 第二次提交在首个完成前直接返回
+    assert calls == [Decimal("100")]
+
+    saver_gate.set()
+    await first
+    assert calls == [Decimal("100")]
+
+    vm.set_budget_draft("200")
+    await vm.save_monthly_budget()  # 守卫已复位，后续提交生效
+    assert calls == [Decimal("100"), Decimal("200")]
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_invalid_reported_while_saving():
+    """D19-003：校验先于进行中守卫——在途提交期间非法输入仍显式报错，不排队提交。"""
+    calls: list[Decimal | None] = []
+    saver_started = asyncio.Event()
+    saver_gate = asyncio.Event()
+
+    async def _saver(amount: Decimal | None) -> bool:
+        calls.append(amount)
+        saver_started.set()
+        await saver_gate.wait()
+        return True
+
+    vm = _vm(_dao(), saver=_saver)
+    vm.set_budget_draft("100")
+    first = asyncio.create_task(vm.save_monthly_budget())
+    await asyncio.wait_for(saver_started.wait(), timeout=2)
+
+    vm.set_budget_draft("abc")
+    await vm.save_monthly_budget()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_invalid"
+    assert calls == [Decimal("100")]
+
+    saver_gate.set()
+    await first
 
 
 # ---------------------------------------------------------------------------
