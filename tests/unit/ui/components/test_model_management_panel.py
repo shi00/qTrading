@@ -459,7 +459,7 @@ class TestUsageView:
         row = panel_module._build_budget_edit_row(state, vm)
         inputs = [c for c in _walk_controls(row) if isinstance(c, ft.TextField)]
         assert len(inputs) == 1
-        assert inputs[0].on_submit is not None
+        assert inputs[0].on_submit is not None  # noqa: weak-assertion 仅类型收窄，行为由下方 run_task 断言验证
         event = MagicMock(name="event")
         inputs[0].on_submit(event)  # type: ignore[reportCallIssue]  # Flet stub 将 on_submit 声明为 0 参联合成员，运行时实际传 event
         page.run_task.assert_called_once_with(vm.save_monthly_budget)
