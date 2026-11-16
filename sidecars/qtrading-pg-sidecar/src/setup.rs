@@ -522,7 +522,7 @@ pub async fn run_initdb(layout: &Layout, username: &str, password: &str) -> Resu
 
 /// 安全基线幂等写入（§7.4/§7.6）：pg_hba 整文件覆盖 + postgresql.conf 受管块替换。
 pub fn write_security_baseline(data_dir: &Path, listen: &str) -> std::io::Result<()> {
-    std::fs::write(data_dir.join("pg_hba.conf"), PG_HBA_TEMPLATE)?;
+    write_hba_atomic(&data_dir.join("pg_hba.conf"), PG_HBA_TEMPLATE)?;
 
     let conf_path = data_dir.join("postgresql.conf");
     let existing = std::fs::read_to_string(&conf_path).unwrap_or_default();
@@ -534,6 +534,48 @@ pub fn write_security_baseline(data_dir: &Path, listen: &str) -> std::io::Result
             managed_block(listen)
         ),
     )
+}
+
+/// 原子替换 `pg_hba.conf`：同目录临时文件写满并 fsync 后 rename（D07-008）。
+///
+/// 中断或失败时原文件保持不变，不会因部分写入留下半截（尤其不是 trust）认证规则；
+/// rename 前沿用原文件权限，避免临时文件默认权限放宽认证配置。
+pub fn write_hba_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let file_name = path.file_name().map_or_else(
+        || "pg_hba.conf".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
+
+    // 清理本进程上次崩溃残留的同名临时文件；remove_file 只删链接本身，不跟随符号链接。
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// `--listen` 会写入 postgresql.conf 的单引号字面量；含引号/反斜杠/控制字符即可逃逸
@@ -731,6 +773,56 @@ mod tests {
         assert!(!hba.contains("0.0.0.0"));
         std::fs::write(dir.join("pg_hba.conf"), "host all all 0.0.0.0/0 trust\n").unwrap();
         assert!(!hba_matches_template(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_hba_atomic_replaces_content_and_preserves_permissions() {
+        let dir = unique_tmp("hba-atomic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pg_hba.conf");
+        std::fs::write(&path, "original\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        // 同进程崩溃残留的同名临时文件不得阻塞原子替换
+        std::fs::write(
+            dir.join(format!(".pg_hba.conf.tmp-{}", std::process::id())),
+            "stale",
+        )
+        .unwrap();
+
+        write_hba_atomic(&path, "replaced\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replaced\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "原子替换必须沿用原 pg_hba.conf 权限");
+        }
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| {
+                !e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pg_hba.conf.tmp-")
+            }),
+            "原子替换不得残留临时文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_hba_atomic_failure_leaves_no_partial_file() {
+        let dir = unique_tmp("hba-atomic-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("missing").join("pg_hba.conf");
+
+        assert!(write_hba_atomic(&path, "host all all 127.0.0.1/32 trust\n").is_err());
+        assert!(!path.exists(), "写入失败不得留下（尤其 trust）pg_hba.conf");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

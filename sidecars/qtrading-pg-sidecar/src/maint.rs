@@ -1974,7 +1974,8 @@ async fn wait_for_enter_reader<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) 
 /// 硬编码 postgres 会让 `ALTER USER` 作用在错误角色（M23）。
 ///
 /// 流程：validate_username → acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries →
-///       stale pid 清理 → 临时改 pg_hba.conf 为 trust（仅 127.0.0.1，RAII guard 出错路径恢复）→
+///       stale pid 清理 → 备份原 pg_hba.conf（不可得即中止）→ 原子改 pg_hba.conf 为 trust
+///       （仅 127.0.0.1，RAII guard 在成功/失败/取消路径恢复或删除）→
 ///       启动临时 postgres 实例（复用 dump 离线 TempInstance 路径）→
 ///       psql 经 stdin 执行 `ALTER USER <username> PASSWORD '<new>'`（trust 模式无需密码，
 ///       SQL 不进 argv）→ 停止实例 → 重写 pg_hba.conf（scram-sha-256，新密码生效）→
@@ -1984,8 +1985,9 @@ async fn wait_for_enter_reader<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) 
 /// - 2 ARGUMENT_ERROR：用户名非法（白名单外的标识符，防 SQL 注入）
 /// - 50 LOCK_CONFLICT：维护锁冲突（qTrading 运行中）/ PGDATA 已有活实例
 /// - 40 DATA_DIR_ABNORMAL：数据目录未初始化
-/// - 16 PASSWORD_FAILED：临时实例启动失败 / ALTER USER 失败 / password file 写入失败
-/// - 30 DUMP_RESTORE_FAILED：pg_hba.conf 重写失败
+/// - 16 PASSWORD_FAILED：临时实例启动失败 / ALTER USER 失败 / password file 写入失败 /
+///   临时 trust pg_hba.conf 写入失败
+/// - 30 DUMP_RESTORE_FAILED：原 pg_hba.conf 不可读（无法备份，未写 trust）/ pg_hba.conf 重写失败
 pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     logging::init(None);
     validate_username(&args.username)?;
@@ -2029,15 +2031,11 @@ pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     logging::register_secret(&new_pwd);
 
     // 临时改 pg_hba.conf 为 trust（仅 127.0.0.1）：绕过密码认证以执行 ALTER USER。
-    // 出错路径由 HbaRestoreGuard RAII 恢复原 pg_hba.conf；成功路径在 write_security_baseline
-    // 重写后 disarm，避免恢复覆盖 scram-sha-256 新内容。
+    // 原文件必须先成功备份，否则中止且不写 trust（D07-008）；写入为原子替换。
+    // 出错/取消路径由 HbaRestoreGuard 的 Drop 恢复原内容（原文件不存在则删除临时文件）；
+    // 成功路径在 write_security_baseline 重写后 disarm，避免恢复覆盖 scram-sha-256 新内容。
     let hba_path = layout.data_dir.join("pg_hba.conf");
-    let mut hba_guard = HbaRestoreGuard::new(hba_path.clone());
-    const TRUST_HBA: &str = "host all all 127.0.0.1/32 trust\n";
-    if let Err(e) = std::fs::write(&hba_path, TRUST_HBA) {
-        eprintln!("[sidecar] pg_hba.conf 临时 trust 写入失败: {e}");
-        return Err(exit_codes::PASSWORD_FAILED);
-    }
+    let mut hba_guard = arm_trust_hba(&hba_path)?;
 
     // 启动临时 postgres 实例（postgresql_embedded 内部 pg_ctl，Windows admin 也能启动）。
     // dummy 密码：trust 模式下 psql 健康检查不验证密码（PGPASSWORD 会被 postgres 忽略）。
@@ -2127,29 +2125,87 @@ fn alter_password_error_message(username: &str, err: &pgbin::ToolError) -> Strin
     )
 }
 
-/// RAII guard：临时 trust pg_hba.conf 修改失败/出错路径下恢复原内容。
+/// 备份失败 / 临时 trust 写入失败时返回错误码；写入成功则返回守护对象。
+///
+/// 备份不可得（读取失败）即中止，绝不在无备份的情况下写 trust（D07-008）。
+fn arm_trust_hba(hba_path: &Path) -> Result<HbaRestoreGuard, u8> {
+    const TRUST_HBA: &str = "host all all 127.0.0.1/32 trust\n";
+    let guard = HbaRestoreGuard::new(hba_path.to_path_buf()).map_err(|e| {
+        eprintln!(
+            "[sidecar] 无法备份原 pg_hba.conf（{}）：{}；已中止，未写入临时 trust",
+            hba_path.display(),
+            logging::sanitize(&e.to_string())
+        );
+        exit_codes::DUMP_RESTORE_FAILED
+    })?;
+    if let Err(e) = setup::write_hba_atomic(hba_path, TRUST_HBA) {
+        eprintln!(
+            "[sidecar] pg_hba.conf 临时 trust 写入失败: {}",
+            logging::sanitize(&e.to_string())
+        );
+        return Err(exit_codes::PASSWORD_FAILED);
+    }
+    Ok(guard)
+}
+
+/// 原 pg_hba.conf 备份：区分「文件存在（内容是正本）」与「原本不存在（恢复=删除）」，
+/// 后者不得被当成「无需恢复」，否则临时 trust 文件会残留（D07-008）。
+enum HbaBackup {
+    Content(String),
+    Absent,
+}
+
+/// RAII guard：临时 trust pg_hba.conf 修改后，成功/失败/取消路径均恢复原状态。
 /// 成功路径由 write_security_baseline 重写 pg_hba.conf 后调 disarm() 抑制恢复。
 struct HbaRestoreGuard {
     path: PathBuf,
-    backup: Option<String>,
+    backup: Option<HbaBackup>,
 }
 
 impl HbaRestoreGuard {
-    fn new(path: PathBuf) -> Self {
-        let backup = std::fs::read_to_string(&path).ok();
-        Self { path, backup }
+    /// 读取原 pg_hba.conf 作为内存备份；除「文件不存在」外的读取失败一律向上传播，
+    /// 调用方必须中止（备份不可得即中止）。
+    fn new(path: PathBuf) -> std::io::Result<Self> {
+        let backup = match std::fs::read_to_string(&path) {
+            Ok(content) => HbaBackup::Content(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HbaBackup::Absent,
+            Err(e) => return Err(e),
+        };
+        Ok(Self {
+            path,
+            backup: Some(backup),
+        })
     }
 
     /// 成功路径调用：避免恢复覆盖 write_security_baseline 已写入的 scram-sha-256 内容。
     fn disarm(&mut self) {
         self.backup = None;
     }
+
+    /// 恢复原状态：有内容则原子写回，原本不存在则删除临时文件。
+    fn restore(&mut self) -> std::io::Result<()> {
+        match self.backup.take() {
+            None => Ok(()),
+            Some(HbaBackup::Content(content)) => setup::write_hba_atomic(&self.path, &content),
+            Some(HbaBackup::Absent) => match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            },
+        }
+    }
 }
 
 impl Drop for HbaRestoreGuard {
     fn drop(&mut self) {
-        if let Some(content) = self.backup.take() {
-            let _ = std::fs::write(&self.path, content);
+        if let Err(e) = self.restore() {
+            // Drop 无法传播错误，只能显式告警；R9：输出前脱敏。
+            eprintln!(
+                "[sidecar] 恢复 pg_hba.conf 失败（{}）：{}；该文件可能残留临时 trust 规则，\
+                 请立即人工检查或从备份恢复后再启动",
+                self.path.display(),
+                logging::sanitize(&e.to_string())
+            );
         }
     }
 }
@@ -3455,63 +3511,140 @@ mod tests {
         );
     }
 
-    /// `HbaRestoreGuard`：构造时备份原内容，drop 时恢复（未 disarm 路径）。
+    /// 目录内是否残留原子写 pg_hba.conf 的临时文件。
+    fn has_hba_tmp(dir: &Path) -> bool {
+        std::fs::read_dir(dir).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pg_hba.conf.tmp-")
+        })
+    }
+
+    /// `arm_trust_hba`：先备份再原子写 trust；失败路径 drop（未 disarm）恢复原文且不留临时文件。
     #[test]
-    fn hba_restore_guard_restores_on_drop_without_disarm() {
-        let dir = unique_tmp("hba-restore");
+    fn arm_trust_hba_restores_original_on_drop() {
+        let dir = unique_tmp("hba-arm");
         std::fs::create_dir_all(&dir).unwrap();
         let hba_path = dir.join("pg_hba.conf");
         std::fs::write(&hba_path, "original content\n").unwrap();
         {
-            let _guard = HbaRestoreGuard::new(hba_path.clone());
-            // 修改文件内容模拟 trust 写入
-            std::fs::write(&hba_path, "modified trust content\n").unwrap();
-            // guard 离开作用域时 drop 应恢复 original content
+            let _guard = arm_trust_hba(&hba_path).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&hba_path).unwrap(),
+                "host all all 127.0.0.1/32 trust\n",
+                "临时 trust 必须在备份成功后写入"
+            );
+            assert!(!has_hba_tmp(&dir), "trust 写入必须为原子替换");
         }
-        let restored = std::fs::read_to_string(&hba_path).unwrap();
         assert_eq!(
-            restored, "original content\n",
-            "guard should restore original content on drop without disarm"
+            std::fs::read_to_string(&hba_path).unwrap(),
+            "original content\n",
+            "失败/取消路径（drop 未 disarm）必须恢复原 pg_hba.conf"
+        );
+        assert!(!has_hba_tmp(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `arm_trust_hba`：原文件不可读时中止（exit 30），绝不写 trust。
+    #[test]
+    fn arm_trust_hba_aborts_when_backup_unreadable() {
+        let dir = unique_tmp("hba-unreadable");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hba_path = dir.join("pg_hba.conf");
+        // 非法 UTF-8 使 read_to_string 失败（非 NotFound），模拟备份不可得
+        let unreadable = [0xff_u8, 0xfe];
+        std::fs::write(&hba_path, unreadable).unwrap();
+        assert_eq!(
+            arm_trust_hba(&hba_path).err(),
+            Some(exit_codes::DUMP_RESTORE_FAILED)
+        );
+        assert_eq!(
+            std::fs::read(&hba_path).unwrap(),
+            unreadable,
+            "备份不可得时不得改写 pg_hba.conf"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `HbaRestoreGuard`：disarm 后 drop 不恢复（成功路径，避免覆盖新 baseline）。
+    /// `arm_trust_hba`：trust 写入失败返回 exit 16，且不留下任何 trust 文件。
     #[test]
-    fn hba_restore_guard_disarm_prevents_restore_on_drop() {
+    fn arm_trust_hba_write_failure_leaves_no_trust() {
+        let dir = unique_tmp("hba-writefail");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 父目录不存在 → 原子写失败
+        let hba_path = dir.join("missing").join("pg_hba.conf");
+        assert_eq!(
+            arm_trust_hba(&hba_path).err(),
+            Some(exit_codes::PASSWORD_FAILED)
+        );
+        assert!(!hba_path.exists(), "写入失败不得留下 trust pg_hba.conf");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 原文件不存在（备份为 Absent）：drop 的恢复语义是删除临时 trust 文件，而非什么都不做。
+    #[test]
+    fn arm_trust_hba_absent_original_is_removed_on_drop() {
+        let dir = unique_tmp("hba-absent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hba_path = dir.join("pg_hba.conf");
+        {
+            let _guard = arm_trust_hba(&hba_path).unwrap();
+            assert!(hba_path.exists(), "guard 存活期间应存在临时 trust 文件");
+        }
+        assert!(
+            !hba_path.exists(),
+            "原文件不存在时 drop 必须删除临时 trust 文件"
+        );
+        assert!(!has_hba_tmp(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 成功路径：write_security_baseline 重写后 disarm，drop 不得回滚新 baseline。
+    #[test]
+    fn arm_trust_hba_disarm_keeps_new_baseline() {
         let dir = unique_tmp("hba-disarm");
         std::fs::create_dir_all(&dir).unwrap();
         let hba_path = dir.join("pg_hba.conf");
         std::fs::write(&hba_path, "original content\n").unwrap();
         {
-            let mut guard = HbaRestoreGuard::new(hba_path.clone());
+            let mut guard = arm_trust_hba(&hba_path).unwrap();
             std::fs::write(&hba_path, "new scram-sha-256 baseline\n").unwrap();
             guard.disarm();
-            // disarm 后 drop 不应恢复
         }
-        let after = std::fs::read_to_string(&hba_path).unwrap();
         assert_eq!(
-            after, "new scram-sha-256 baseline\n",
-            "disarm should prevent restore on drop"
+            std::fs::read_to_string(&hba_path).unwrap(),
+            "new scram-sha-256 baseline\n",
+            "disarm 后 drop 不得覆盖新 baseline"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `HbaRestoreGuard`：构造时文件不存在（backup=None），drop 不写入任何内容。
-    #[test]
-    fn hba_restore_guard_no_backup_does_nothing_on_drop() {
-        let dir = unique_tmp("hba-nobackup");
+    /// 取消路径：guard 在 await 处被取消 drop 时仍恢复原文（D07-008）。
+    #[tokio::test]
+    async fn arm_trust_hba_cancel_restores_original() {
+        let dir = unique_tmp("hba-cancel");
         std::fs::create_dir_all(&dir).unwrap();
         let hba_path = dir.join("pg_hba.conf");
-        // 文件不存在时构造 guard
-        {
-            let _guard = HbaRestoreGuard::new(hba_path.clone());
-            // drop 时 backup=None，不应创建文件
-        }
+        std::fs::write(&hba_path, "original content\n").unwrap();
+
+        let path = hba_path.clone();
+        let fut = async move {
+            let _guard = arm_trust_hba(&path).unwrap();
+            std::future::pending::<()>().await;
+        };
         assert!(
-            !hba_path.exists(),
-            "guard with no backup should not create file on drop"
+            tokio::time::timeout(Duration::from_millis(50), fut)
+                .await
+                .is_err(),
+            "future 应保持 pending 以模拟取消"
         );
+        assert_eq!(
+            std::fs::read_to_string(&hba_path).unwrap(),
+            "original content\n",
+            "任务取消时 guard drop 必须恢复原 pg_hba.conf"
+        );
+        assert!(!has_hba_tmp(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
