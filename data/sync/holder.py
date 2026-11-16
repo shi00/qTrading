@@ -13,6 +13,7 @@ from utils.time_utils import get_now
 
 from .base import ISyncStrategy, SyncResult, SyncStatus, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.daos.holder_dao import Top10PersistResult
 from data.external.tushare_client import TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
@@ -358,7 +359,12 @@ class HolderSyncStrategy(ISyncStrategy):
             consecutive_errors = 0
             rate_limit_hits = 0
             total_rows = 0
-            checkpoint_rows = 0
+            persisted_rows = 0
+            rejected_rows = 0
+            pending_saved = 0
+            pending_rejected = 0
+            attempted_rows = 0
+            persist_incomplete = False
 
             logger.info(
                 "[HolderSync] top10_holders | Starting per-stock sync: %s stocks, period=%s",
@@ -449,28 +455,72 @@ class HolderSyncStrategy(ISyncStrategy):
                         elapsed_info,
                     )
 
-                if total_rows - checkpoint_rows >= _CHECKPOINT_INTERVAL and all_dfs:
-                    if await self._save_top10_checkpoint(all_dfs, period):
-                        checkpoint_rows = total_rows
+                if total_rows - attempted_rows >= _CHECKPOINT_INTERVAL and all_dfs:
+                    # D09-002: checkpoint 必须核对实际落库数。未确认（零写/短写/保存失败）时
+                    # 保留 all_dfs（不清缓冲，UPSERT 幂等可重试），并只按新增行数再次尝试，
+                    # 避免每个股票都重试同一批而放大写库压力。
+                    attempted_rows = total_rows
+                    checkpoint = await self._save_top10_checkpoint(all_dfs, period)
+                    if checkpoint is not None and checkpoint.confirmed:
+                        persisted_rows += checkpoint.saved
+                        rejected_rows += checkpoint.rejected
+                        pending_saved = 0
+                        pending_rejected = 0
                         all_dfs = []
+                    else:
+                        # 未确认批次保留在缓冲中，其 saved/rejected 以最后一次尝试快照上报
+                        # （重试会整批重放，避免重复累计）。
+                        if checkpoint is not None:
+                            pending_saved = checkpoint.saved
+                            pending_rejected = checkpoint.rejected
+                        persist_incomplete = True
 
             if all_dfs:
                 combined = pd.concat(all_dfs, ignore_index=True)
-                await self.context.cache.holder_dao.save_top10_holders(combined)
+                final_result = await self.context.cache.holder_dao.save_top10_holders(combined)
+                if final_result.confirmed:
+                    persisted_rows += final_result.saved
+                    rejected_rows += final_result.rejected
+                    pending_saved = 0
+                    pending_rejected = 0
+                    # 最终保存已整批确认缓冲（含此前 checkpoint 失败/未确认的数据），
+                    # 早前的未确认不再构成失实上报。
+                    persist_incomplete = False
+                else:
+                    pending_saved = final_result.saved
+                    pending_rejected = final_result.rejected
+                    persist_incomplete = True
+                    logger.warning(
+                        "[HolderSync] top10_holders | Final save incomplete period=%s: "
+                        "fetched=%s saved=%s accepted=%s rejected=%s",
+                        period,
+                        final_result.fetched,
+                        final_result.saved,
+                        final_result.accepted,
+                        final_result.rejected,
+                    )
                 logger.info(
-                    "[HolderSync] Table | top10_holders period=%s: saved final batch of %s records",
+                    "[HolderSync] Table | top10_holders period=%s: final batch fetched=%s saved=%s rejected=%s",
                     period,
-                    len(combined),
+                    final_result.fetched,
+                    final_result.saved,
+                    final_result.rejected,
                 )
+
+            # 已确认批次累计 + 未确认缓冲的最后一次尝试快照 = 对调用方的真实计数
+            reported_persisted = persisted_rows + pending_saved
+            reported_rejected = rejected_rows + pending_rejected
 
             total_coverage = len(existing_ts_codes) + (remaining - stock_errors)
             logger.info(
                 "[HolderSync] Table | top10_holders period=%s: "
-                "%s records, "
+                "fetched=%s records, persisted=%s, rejected=%s, "
                 "coverage: %s/%s stocks, "
                 "errors=%s, rate_limits=%s",
                 period,
                 total_rows,
+                reported_persisted,
+                reported_rejected,
                 total_coverage,
                 total,
                 stock_errors,
@@ -483,12 +533,27 @@ class HolderSyncStrategy(ISyncStrategy):
             if self._cancelled or self._shutdown_event.is_set():
                 return -1
 
+            # D09-002: 零写/短写/checkpoint 未确认都不得以 fetched 行数宣称成功，
+            # 也不推进水位（返回 -1 交 _run_impl 记失败），缓冲保留待下次重跑收敛。
+            if persist_incomplete:
+                if result is not None:
+                    result.errors.append(
+                        f"top10_holders period={period}: persisted={reported_persisted}/{total_rows} "
+                        f"rejected={reported_rejected} (zero/short write or unconfirmed)"
+                    )
+                    if result.status not in (
+                        SyncStatus.FAILED.value,
+                        SyncStatus.CANCELLED.value,
+                    ):
+                        result.status = SyncStatus.PARTIAL.value
+                return -1
+
             # S17: partial per-stock failures (non-abort, non-cancel) must surface
             # as PARTIAL so the aggregation layer can distinguish full success
             # from partial. Only set when result is provided; do not overwrite
             # an existing "failed"/"cancelled" status set by upstream logic.
             if (
-                stock_errors > 0
+                (stock_errors > 0 or reported_rejected > 0)
                 and result is not None
                 and result.status
                 not in (
@@ -497,8 +562,13 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
             ):
                 result.status = SyncStatus.PARTIAL.value
+                if reported_rejected > 0:
+                    result.errors.append(
+                        f"top10_holders period={period}: {reported_rejected} rows rejected (NULL holder_name)"
+                    )
 
-            return total_rows
+            # D09-002: 返回实际确认落库行数，而非 fetched 行数。
+            return reported_persisted
         except EngineDisposedError:
             raise
         except Exception as e:
@@ -532,25 +602,41 @@ class HolderSyncStrategy(ISyncStrategy):
             return set()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def _save_top10_checkpoint(self, all_dfs: list[pd.DataFrame], period: str) -> bool:
+    async def _save_top10_checkpoint(self, all_dfs: list[pd.DataFrame], period: str) -> Top10PersistResult | None:
         """
         Save accumulated top10_holders data as a checkpoint.
         This ensures that if the sync is interrupted, already-fetched data
         is persisted and won't need to be re-fetched on the next run.
 
-        Returns True if checkpoint was saved successfully, False otherwise.
-        Caller MUST NOT clear all_dfs unless this returns True, otherwise
-        data will be lost.
+        D09-002: 返回 DAO 的接纳统计（含真实 saved/rejected），调用方据此确认落库；
+        仅当 ``confirmed`` 为真才可清空 all_dfs，否则必须保留缓冲重试，避免
+        「零写却宣称已保存」并丢数据。
+
+        Returns the persist result on call completion, None on save failure
+        (caller MUST NOT clear all_dfs unless confirmed).
         """
         try:
             combined = pd.concat(all_dfs, ignore_index=True)
-            await self.context.cache.holder_dao.save_top10_holders(combined)
-            logger.info(
-                "[HolderSync] top10_holders | Checkpoint saved: %s records for period=%s",
-                len(combined),
-                period,
-            )
-            return True
+            persist_result = await self.context.cache.holder_dao.save_top10_holders(combined)
+            if persist_result.confirmed:
+                logger.info(
+                    "[HolderSync] top10_holders | Checkpoint saved: %s/%s records for period=%s (rejected=%s)",
+                    persist_result.saved,
+                    persist_result.fetched,
+                    period,
+                    persist_result.rejected,
+                )
+            else:
+                logger.warning(
+                    "[HolderSync] top10_holders | Checkpoint NOT confirmed for period=%s: "
+                    "fetched=%s saved=%s accepted=%s rejected=%s; 保留缓冲待重试.",
+                    period,
+                    persist_result.fetched,
+                    persist_result.saved,
+                    persist_result.accepted,
+                    persist_result.rejected,
+                )
+            return persist_result
         except EngineDisposedError:
             raise
         except Exception as e:
@@ -565,7 +651,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             if severity == "system":
                 raise
-            return False
+            return None
 
     def _log_sync_error(self, table_name: str, date_str: str, e: Exception):
         severity = classify_severity(e, context="general")

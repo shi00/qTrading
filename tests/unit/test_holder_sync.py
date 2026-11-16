@@ -13,6 +13,7 @@ import pandas as pd
 
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
+from data.persistence.daos.holder_dao import Top10PersistResult
 from data.sync.holder import (
     HolderSyncStrategy,
     _MAX_ERRORS,
@@ -22,6 +23,20 @@ from data.sync.holder import (
 from data.sync.base import SyncContext, SyncResult, SyncStatus
 
 pytestmark = pytest.mark.unit
+
+
+def _fake_top10_save(df: pd.DataFrame) -> Top10PersistResult:
+    """按 DAO 口径模拟 top10_holders 落库：过滤 NULL holder_name 后按业务主键去重。"""
+    fetched = len(df)
+    if "holder_name" in df.columns:
+        valid = df[df["holder_name"].notna()]
+        rejected = fetched - len(valid)
+    else:
+        valid = df
+        rejected = 0
+    key = [c for c in ("ts_code", "end_date", "holder_name") if c in valid.columns]
+    accepted = int(len(valid.drop_duplicates(subset=key))) if key else len(valid)
+    return Top10PersistResult(fetched=fetched, rejected=rejected, accepted=accepted, saved=accepted)
 
 
 class TestHolderSyncCancel:
@@ -142,7 +157,7 @@ class TestHolderSyncTop10Holders:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -163,7 +178,7 @@ class TestHolderSyncCancelReturnsMinusOne:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -213,11 +228,13 @@ class TestHolderSyncSaveTop10Checkpoint:
     async def test_success(self):
         ctx = MagicMock()
         ctx.cache = MagicMock()
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
-        assert result is True
+        assert result is not None
+        assert result.confirmed is True
+        assert result.saved == 1
 
     @pytest.mark.asyncio
     async def test_error(self):
@@ -227,7 +244,7 @@ class TestHolderSyncSaveTop10Checkpoint:
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
-        assert result is False
+        assert result is None
 
 
 class TestHolderSyncOneTable:
@@ -921,7 +938,7 @@ class TestHolderSyncSyncTop10Holders:
                 }
             )
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame(
@@ -1127,7 +1144,7 @@ class TestHolderSyncTop10ErrorPaths:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(10)]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=Exception("API error"))
         strategy = HolderSyncStrategy(ctx)
@@ -1153,7 +1170,7 @@ class TestHolderSyncTop10ErrorPaths:
                 }
             )
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=Exception("每分钟最多访问"))
         strategy = HolderSyncStrategy(ctx)
@@ -1178,7 +1195,7 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -1195,7 +1212,7 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         big_df = pd.DataFrame(
             {
@@ -1216,7 +1233,7 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -1922,26 +1939,26 @@ class TestSaveTop10CheckpointSeverityBranches:
         assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_recoverable_severity_returns_false(self):
-        """recoverable severity（OSError with network）应返回 False（不 raise）。"""
+    async def test_recoverable_severity_returns_none(self):
+        """recoverable severity（OSError with network）应返回 None（不 raise）。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=OSError("network down"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
-        assert result is False
+        assert result is None
 
     @pytest.mark.asyncio
-    async def test_operational_severity_returns_false(self):
-        """operational severity（普通 ValueError）应返回 False。"""
+    async def test_operational_severity_returns_none(self):
+        """operational severity（普通 ValueError）应返回 None。"""
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
         result = await strategy._save_top10_checkpoint(dfs, "20240331")
-        assert result is False
+        assert result is None
 
 
 class TestSyncOneTableSeverityBranches:
@@ -2142,7 +2159,7 @@ class TestSyncTop10HoldersSystemSeverityAndRateLimit:
                 {"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ", "000006.SZ"]}
             )
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         # 前 4 次抛不同 rate-limit 字符串，第 5 次成功，第 6 次普通错误
         errors = [
@@ -2172,7 +2189,7 @@ class TestSyncTop10HoldersSystemSeverityAndRateLimit:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 8)]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
         strategy = HolderSyncStrategy(ctx)
@@ -2197,7 +2214,7 @@ class TestSyncTop10HoldersCancelDuringIteration:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 6)]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         api_call_count = 0
 
@@ -2229,7 +2246,7 @@ class TestSyncTop10HoldersCancelDuringIteration:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -2547,7 +2564,7 @@ class TestSyncTop10HoldersCancellation:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 6)]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         api_call_count = 0
 
@@ -2578,7 +2595,7 @@ class TestSyncTop10HoldersCancellation:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -2628,7 +2645,7 @@ class TestSyncTop10HoldersPartialFailure:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ", "FAIL.SZ", "000004.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
 
         async def mock_api(ts_code, period):
@@ -2658,7 +2675,7 @@ class TestSyncTop10HoldersPartialFailure:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})
@@ -2680,7 +2697,7 @@ class TestSyncTop10HoldersPartialFailure:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ", "FAIL.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
 
         async def mock_api(ts_code, period):
@@ -2703,7 +2720,7 @@ class TestSyncTop10HoldersPartialFailure:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": [f"00000{i}.SZ" for i in range(1, 8)]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
         ctx.api.get_top10_holders = AsyncMock(side_effect=ValueError("bad input"))
         strategy = HolderSyncStrategy(ctx)
@@ -2724,7 +2741,7 @@ class TestSyncTop10HoldersPartialFailure:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["OK1.SZ", "FAIL1.SZ", "OK2.SZ", "FAIL2.SZ", "OK3.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.api = MagicMock()
 
         async def mock_api(ts_code, period):
@@ -2756,7 +2773,7 @@ class TestSyncTop10HoldersPartialFailure:
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["OK1.SZ", "FAIL.SZ", "OK2.SZ"]})
         )
-        ctx.cache.holder_dao.save_top10_holders = AsyncMock()
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
         ctx.cache.get_existing_top10_ts_codes = AsyncMock(return_value=set())
 
         async def mock_api(ts_code, period):
@@ -2913,3 +2930,171 @@ class TestRunImplPartialStatus:
         # 取消产生的 -1 仍登记，但终态不得被 partial 覆盖
         assert result.errors == ["stk_holdernumber period=20240331"]
         strategy._sync_pledge_stat.assert_not_awaited()
+
+
+class TestTop10PersistConfirmation:
+    """D09-002: checkpoint/最终保存必须核对实际落库数，零/短写不得以 fetched 行数报成功。"""
+
+    @staticmethod
+    def _make_strategy(ts_codes, api_mock):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.stock_dao.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": ts_codes}))
+        ctx.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=_fake_top10_save)
+        ctx.api = MagicMock()
+        ctx.api.get_top10_holders = api_mock
+        ctx.api._api_limiters = {}
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
+        return strategy
+
+    @pytest.mark.asyncio
+    async def test_all_null_5000_rows_zero_write_not_success_and_buffer_kept(self):
+        """5000 行全 NULL：DAO 零写，checkpoint 不清缓冲、不得报 5000 成功。"""
+        api = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"] * 5000, "holder_name": [None] * 5000}))
+        strategy = self._make_strategy(["000001.SZ"], api)
+        dao = strategy.context.cache.holder_dao.save_top10_holders
+        result = SyncResult()
+
+        count = await strategy._sync_top10_holders("20240331", result)
+
+        assert count == -1, "零写不得以 fetched 行数宣称成功"
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("persisted=0/5000" in err and "rejected=5000" in err for err in result.errors)
+        # checkpoint 未确认不得清缓冲：最终保存仍携带完整 5000 行重试
+        assert dao.await_count == 2
+        assert len(dao.await_args_list[-1].args[0]) == 5000
+
+    @pytest.mark.asyncio
+    async def test_partial_rejection_reports_real_counts_and_partial(self):
+        """部分 NULL 被拒：只报实际落库数，并标记 partial。"""
+
+        async def mock_api(ts_code, period):
+            if ts_code == "000001.SZ":
+                return pd.DataFrame({"ts_code": [ts_code, ts_code], "holder_name": ["A", None]})
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["B"]})
+
+        strategy = self._make_strategy(["000001.SZ", "000002.SZ"], AsyncMock(side_effect=mock_api))
+        result = SyncResult()
+
+        count = await strategy._sync_top10_holders("20240331", result)
+
+        assert count == 2, "应报实际落库 2 行，而非 fetched 3 行"
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("1 rows rejected" in err for err in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_all_valid_rows_returns_persisted_count(self):
+        """全部有效：返回实际落库行数且不误标 partial。"""
+
+        async def mock_api(ts_code, period):
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Valid"]})
+
+        strategy = self._make_strategy(["000001.SZ", "000002.SZ"], AsyncMock(side_effect=mock_api))
+        result = SyncResult()
+
+        count = await strategy._sync_top10_holders("20240331", result)
+
+        assert count == 2
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.errors == []
+
+    @pytest.mark.asyncio
+    async def test_duplicate_business_keys_not_treated_as_failure(self):
+        """重复主键被 UPSERT 合并属正常，按去重口径核对，不机械判错。"""
+        api = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 3,
+                    "holder_name": ["Dupe", "Dupe", "Other"],
+                }
+            )
+        )
+        strategy = self._make_strategy(["000001.SZ"], api)
+        result = SyncResult()
+
+        count = await strategy._sync_top10_holders("20240331", result)
+
+        assert count == 2, "fetched=3 但唯一业务键=2，应报 2"
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.errors == []
+
+    @pytest.mark.asyncio
+    async def test_short_write_marks_partial_and_returns_minus_one(self):
+        """保存返回少于被接纳唯一键：保留缓冲、标记 partial、不推进水位。"""
+
+        async def mock_api(ts_code, period):
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["A"]})
+
+        api_mock = AsyncMock(side_effect=mock_api)
+        strategy = self._make_strategy(["000001.SZ", "000002.SZ"], api_mock)
+        strategy.context.cache.holder_dao.save_top10_holders = AsyncMock(
+            return_value=Top10PersistResult(fetched=2, rejected=0, accepted=2, saved=1)
+        )
+        result = SyncResult()
+
+        count = await strategy._sync_top10_holders("20240331", result)
+
+        assert count == -1
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("persisted=1/2" in err for err in result.errors)
+        assert api_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_save_error_returns_minus_one(self):
+        """最终保存抛异常：如实返回 -1，不得吞没为成功。"""
+
+        async def mock_api(ts_code, period):
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Valid"]})
+
+        strategy = self._make_strategy(["000001.SZ"], AsyncMock(side_effect=mock_api))
+        strategy.context.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=ValueError("db down"))
+
+        count = await strategy._sync_top10_holders("20240331")
+
+        assert count == -1
+
+    @pytest.mark.asyncio
+    async def test_cancel_with_buffered_data_returns_minus_one(self):
+        """取消时仍保存已取数缓冲，但返回 -1 不宣称成功。"""
+        strategy = self._make_strategy(["000001.SZ", "000002.SZ"], AsyncMock())
+
+        async def mock_api(ts_code, period):
+            strategy._cancelled = True
+            return pd.DataFrame({"ts_code": [ts_code], "holder_name": ["Valid"]})
+
+        strategy.context.api.get_top10_holders = AsyncMock(side_effect=mock_api)
+        dao = strategy.context.cache.holder_dao.save_top10_holders
+        with patch("data.sync.holder.time.monotonic", side_effect=count(0, 3.0)):
+            result = await strategy._sync_top10_holders("20240331")
+
+        assert result == -1
+        dao.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_failure_then_final_success_is_not_false_failure(self):
+        """checkpoint 瞬时失败后最终整批确认：数据已落库，不得机械判失败。"""
+        api = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 5000,
+                    "holder_name": [f"holder-{i}" for i in range(5000)],
+                }
+            )
+        )
+        strategy = self._make_strategy(["000001.SZ"], api)
+
+        def flaky_save(df):
+            if flaky_save.calls == 0:
+                flaky_save.calls += 1
+                raise ValueError("bad input")
+            return _fake_top10_save(df)
+
+        flaky_save.calls = 0
+        strategy.context.cache.holder_dao.save_top10_holders = AsyncMock(side_effect=flaky_save)
+        result = SyncResult()
+
+        count = await strategy._sync_top10_holders("20240331", result)
+
+        assert count == 5000
+        assert result.status == SyncStatus.SUCCESS.value

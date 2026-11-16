@@ -118,18 +118,25 @@ class TestSaveTop10Holders:
     @pytest.mark.asyncio
     async def test_save_none(self):
         dao = _make_dao()
-        assert await dao.save_top10_holders(None) == 0
+        result = await dao.save_top10_holders(None)
+        assert result.saved == 0
+        assert result.accepted == 0
 
     @pytest.mark.asyncio
     async def test_save_empty(self):
         dao = _make_dao()
-        assert await dao.save_top10_holders(pd.DataFrame()) == 0
+        result = await dao.save_top10_holders(pd.DataFrame())
+        assert result.saved == 0
+        assert result.confirmed is False
 
     @pytest.mark.asyncio
     async def test_save_valid(self):
         dao = _make_dao()
-        df = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        assert await dao.save_top10_holders(df) == 5
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240630"], "holder_name": ["张三"]})
+        result = await dao.save_top10_holders(df)
+        assert result.saved == 5
+        assert result.fetched == 1
+        assert result.accepted == 1
 
 
 class TestGetTop10Holders:
@@ -417,11 +424,15 @@ class TestSaveTop10HoldersNullFilter:
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "end_date": ["20240630"] * 3,
                 "holder_name": ["张三", None, "李四"],
             }
         )
         result = await dao.save_top10_holders(df)
-        assert result == 2
+        assert result.saved == 2
+        assert result.rejected == 1
+        assert result.accepted == 2
+        assert result.confirmed is True
         call_args = dao._save_upsert.call_args
         saved_df = call_args[0][0]
         assert len(saved_df) == 2
@@ -434,26 +445,51 @@ class TestSaveTop10HoldersNullFilter:
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
+                "end_date": ["20240630"] * 2,
                 "holder_name": [None, None],
             }
         )
         result = await dao.save_top10_holders(df)
-        assert result == 0
+        assert result.saved == 0
+        assert result.accepted == 0
+        assert result.rejected == 2
+        assert result.confirmed is False, "D09-002: 全 NULL 零写不得被判定为已确认"
         dao._save_upsert.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_null_holder_name_passes_through(self):
         dao = _make_dao()
-        dao._save_upsert = AsyncMock(return_value=5)
+        dao._save_upsert = AsyncMock(return_value=2)
         df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000002.SZ"],
+                "end_date": ["20240630"] * 2,
                 "holder_name": ["张三", "李四"],
             }
         )
         result = await dao.save_top10_holders(df)
-        assert result == 5
+        assert result.saved == 2
+        assert result.rejected == 0
+        assert result.accepted == 2
         dao._save_upsert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_business_keys_counted_once_not_short_write(self):
+        """D09-002: 重复冲突键被 UPSERT 静默合并属正常，accepted 按去重口径计，不判短写。"""
+        dao = _make_dao()
+        dao._save_upsert = AsyncMock(return_value=2)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ"],
+                "end_date": ["20240630"] * 3,
+                "holder_name": ["张三", "张三", "李四"],
+            }
+        )
+        result = await dao.save_top10_holders(df)
+        assert result.fetched == 3
+        assert result.accepted == 2
+        assert result.saved == 2
+        assert result.confirmed is True
 
 
 class TestHolderDaoEngineDisposedErrorPropagation:
