@@ -543,6 +543,68 @@ class TestBuildHealthSummaryContent:
         assert len(integrity_row.controls) >= 2
 
 
+class TestCoverageMetricValue:
+    """ADD-UI-003: 覆盖率卡的无结果态必须显式未知, 禁止伪计数 (R21)。"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        import ui.views.settings_tabs.data_source_tab as mod
+
+        monkeypatch.setattr(mod.I18n, "get", staticmethod(lambda key, *a, **kw: key))
+
+    def test_unchecked_is_not_checked_not_fake_count(self):
+        """首次帧 (health_result/health_error 均 None) → 「未检查」, 不是固定股票数。"""
+        from ui.viewmodels.data_source_view_model import DataSourceState
+        from ui.views.settings_tabs.data_source_tab import _coverage_metric_value
+
+        value = _coverage_metric_value(DataSourceState())
+        assert value == "ds_not_checked"
+        assert value != "ds_val_placeholder_count"
+
+    def test_checking_shows_checking(self):
+        """检查中 → 「检测中」, 与未检查可区分。"""
+        from ui.viewmodels.data_source_view_model import DataSourceState
+        from ui.views.settings_tabs.data_source_tab import _coverage_metric_value
+
+        assert _coverage_metric_value(DataSourceState(health_checking=True)) == "ds_status_checking"
+
+    def test_checking_with_previous_result_does_not_present_stale_value(self):
+        """重新检查中即使有旧结果, 也不把旧测量冒充为当期覆盖率。"""
+        from ui.viewmodels.data_source_view_model import DataSourceState, HealthResultRow
+        from ui.views.settings_tabs.data_source_tab import _coverage_metric_value
+
+        state = DataSourceState(
+            health_checking=True,
+            health_result=HealthResultRow(details_financial_coverage=42.5),
+        )
+        assert _coverage_metric_value(state) == "ds_status_checking"
+
+    def test_failed_without_result_shows_not_available(self):
+        """首次检查失败且无结果 → N/A (测量不可用), 与未检查可区分。"""
+        from ui.viewmodels import Message
+        from ui.viewmodels.data_source_view_model import DataSourceState
+        from ui.views.settings_tabs.data_source_tab import _coverage_metric_value
+
+        state = DataSourceState(health_error=Message("common_check_fail"))
+        assert _coverage_metric_value(state) == "health_not_available"
+
+    def test_measured_zero_is_not_treated_as_missing(self):
+        """真实测量 0.0% 必须显示 0.0%, 不得回退为未检查/N/A。"""
+        from ui.viewmodels.data_source_view_model import DataSourceState, HealthResultRow
+        from ui.views.settings_tabs.data_source_tab import _coverage_metric_value
+
+        state = DataSourceState(health_result=HealthResultRow(details_financial_coverage=0.0))
+        assert _coverage_metric_value(state) == "0.0%"
+
+    def test_measured_value_formatted(self):
+        """真实测量值按一位小数格式化。"""
+        from ui.viewmodels.data_source_view_model import DataSourceState, HealthResultRow
+        from ui.views.settings_tabs.data_source_tab import _coverage_metric_value
+
+        state = DataSourceState(health_result=HealthResultRow(details_financial_coverage=87.25))
+        assert _coverage_metric_value(state) == "87.2%"
+
+
 # ============================================================================
 # 组件体测试基础设施 (FakeViewModel + 渲染辅助)
 # ============================================================================
@@ -1387,6 +1449,72 @@ class TestDataSourceTabStateBranches:
         assert any(t.value == "ds_not_checked" for t in texts)
         # 反向守护: 不应出现硬编码 "15:30" 占位
         assert not any("15:30" in (t.value or "") for t in texts)
+
+    def _metric_value_by_label(self, result, label_key: str) -> str:
+        """读取指定 MetricCard 的取值 (测试桩以 "label=value" 形式渲染)。"""
+        prefix = f"{label_key}="
+        for text in _find_by_type(result, ft.Text):
+            value = text.value or ""
+            if value.startswith(prefix):
+                return value[len(prefix) :]
+        raise AssertionError(f"MetricCard label {label_key!r} not found")
+
+    def _stub_metric_card_with_label(self, monkeypatch) -> None:
+        """覆盖 MetricCard 桩, 保留 label 以便按卡片断言取值 (默认桩只渲染 value)。"""
+        import ui.views.settings_tabs.data_source_tab as _mod
+
+        monkeypatch.setattr(
+            _mod,
+            "MetricCard",
+            lambda label="", value="", **kw: ft.Container(content=ft.Text(f"{label}={value}")),
+        )
+
+    def test_metric_coverage_unchecked_not_fake_count(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """ADD-UI-003: 首次帧覆盖率卡显示「未检查」, 不得用固定股票数伪装成覆盖率。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        self._stub_metric_card_with_label(monkeypatch)
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        assert self._metric_value_by_label(result, "ds_data_coverage") == "ds_not_checked"
+        values = [t.value for t in _find_by_type(result, ft.Text)]
+        assert "5000+ 股票" not in values
+        assert "5000+ Stocks" not in values
+
+    def test_metric_coverage_failed_without_result_shows_not_available(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """ADD-UI-003: 首次检查失败且无结果覆盖率卡显示 N/A, 与未检查可区分。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        self._stub_metric_card_with_label(monkeypatch)
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(health_error=Message("common_check_fail"))),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        assert self._metric_value_by_label(result, "ds_data_coverage") == "health_not_available"
+
+    def test_metric_coverage_measured_zero_is_preserved(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """ADD-UI-003: 真实测得 0.0% 仍显示 0.0%, 不因假值判定回退为未检查。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        self._stub_metric_card_with_label(monkeypatch)
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(
+                state=_FakeDataSourceState(health_result=HealthResultRow(details_financial_coverage=0.0))
+            ),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        assert self._metric_value_by_label(result, "ds_data_coverage") == "0.0%"
 
     # --- P1-5: Secondary progress 区域 (daily_sync/cache_clear) ---
 

@@ -239,9 +239,16 @@ def _get_restore_prompt_button(env: dict) -> ft.TextButton:
 
 
 def _get_ai_prompt_field(env: dict) -> ft.TextField:
-    """定位 ai_system_prompt 文本域 (multiline 且无 label, 与普通 textarea 参数区分)."""
+    """定位 ai_system_prompt 文本域 (multiline 且带当前语言持久 label).
+
+    按 label 定位而非 "label is None" 定位: 字段自身必须保留可访问名称
+    (docs/flet/accessibility-baseline.md §2.1), 若实现回退为清除 label 则此处失败。
+    """
+    expected_label = env["mock_i18n"].get("ai_system_prompt")
     fields = [
-        c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.TextField) and c.multiline and c.label is None
+        c
+        for c in _walk_all_controls(env["result"])
+        if isinstance(c, ft.TextField) and c.multiline and c.label == expected_label
     ]
     assert len(fields) == 1, f"ai_system_prompt 文本域应恰好 1 个, 实际 {len(fields)}"
     return fields[0]
@@ -1468,6 +1475,27 @@ class TestOnPaginationChange:
         assert "change_page:1" in fake_vm.method_calls
 
 
+class TestHistoryLoadingLocksInteraction:
+    """ADD-UI-002: HISTORY 加载中锁定表格行/分页交互, 避免把在途目标误当已显示结果操作."""
+
+    def test_history_loading_disables_rows_and_pagination(self, screener_view_env, monkeypatch) -> None:
+        env = screener_view_env
+        mod = env["mod"]
+        # 默认 mock 的分割器只返回左栏; 此处返回右栏以检查真实挂载路径上的表格交互。
+        monkeypatch.setattr(mod, "ResizableSplitter", lambda **kwargs: kwargs.get("right_content"))
+
+        env["fake_vm"]._set_state(mode="HISTORY", loading=True)
+        _rerender(env)
+
+        icon_btns = [b for b in _get_buttons(env) if isinstance(b, ft.IconButton)]
+        assert len(icon_btns) >= 2, "分页栏应渲染上一页/下一页控件"
+        assert icon_btns[0].disabled is True
+        assert icon_btns[1].disabled is True
+        page_size_dd = _get_dropdowns(env)[-1]
+        assert page_size_dd.disabled is True
+        assert env["captured_callbacks"]["on_row_click"] is None, "加载中行点击应被禁用"
+
+
 # ============================================================================
 # Handler 测试: _on_mode_change
 # ============================================================================
@@ -1974,13 +2002,26 @@ class TestLoadHistoryForDate:
         asyncio.run(handler(*args))
 
         # RV-03: 传 strategy_name + run_id=abc12345def 给 VM, 载入该 run 的精确快照
-        assert any(
-            "set_history_viewing_status" in c and "strategy_name=value" in c and "run_id=abc12345def" in c
-            for c in fake_vm.method_calls
-        ), f"应调用 set_history_viewing_status with strategy_name + run_id, 实际: {fake_vm.method_calls}"
+        # ADD-UI-002: View 不得在 await 前预提交身份标签, 由 VM 成功提交时同帧落库。
         assert any(c.startswith("load_history_data:20240615:value:abc12345def") for c in fake_vm.method_calls), (
             f"应按 (trade_date, strategy_name, run_id) 载入该 run 快照, 实际: {fake_vm.method_calls}"
         )
+        assert not any(c.startswith("set_history_viewing_status") for c in fake_vm.method_calls), (
+            f"加载失败/取消前不得预提交身份标签 (ADD-UI-002), 实际: {fake_vm.method_calls}"
+        )
+
+    def test_date_like_trade_date_normalized_before_vm_call(self) -> None:
+        """ADD-UI-002: date 入参归一化为 YYYY-MM-DD, 字符串入参原样透传."""
+        from ui.views import screener_view as mod
+
+        fake_vm: Any = _FakeScreenerViewModel()
+        asyncio.run(mod._execute_load_history_for_date(fake_vm, None, datetime.date(2024, 6, 15), "value", "run01"))
+        asyncio.run(mod._execute_load_history_for_date(fake_vm, None, "20240615", None, None))
+
+        assert fake_vm.method_calls == [
+            "load_history_data:2024-06-15:value:run01",
+            "load_history_data:20240615:None:None",
+        ]
 
     def test_all_strategies_label_when_no_run_id(self, screener_view_env) -> None:
         """_load_history_for_date: run_id=None, strategy_name=None → VM 用 screener_all_strategies key."""
@@ -2012,10 +2053,12 @@ class TestLoadHistoryForDate:
         asyncio.run(handler(*args))
 
         # 验证 strategy_name=None, run_id=None 传入 VM (VM 用 screener_all_strategies key)
-        assert any(
-            "set_history_viewing_status" in c and "strategy_name=None" in c and "run_id=None" in c
-            for c in fake_vm.method_calls
-        ), f"应传 strategy_name=None + run_id=None 给 VM, 实际: {fake_vm.method_calls}"
+        assert any(c.startswith("load_history_data:20240615:None:None") for c in fake_vm.method_calls), (
+            f"应传 strategy_name=None + run_id=None 给 VM, 实际: {fake_vm.method_calls}"
+        )
+        assert not any(c.startswith("set_history_viewing_status") for c in fake_vm.method_calls), (
+            f"View 不得预提交身份标签 (ADD-UI-002), 实际: {fake_vm.method_calls}"
+        )
 
     def test_cancelled_error_propagates(self, screener_view_env) -> None:
         """R2: _load_history_for_date: vm.load_history_data 抛 CancelledError → 传播."""
@@ -2307,9 +2350,80 @@ class TestDoSavePromptAsync:
             _rerender(env)
             prompt_field = _get_ai_prompt_field(env)
             assert prompt_field.value == "draft prompt"
+            assert prompt_field.label == env["mock_i18n"].get("ai_system_prompt"), (
+                "ADD-UI-006: 错误态仍须保留持久 label"
+            )
             assert prompt_field.error == "i18n[prompt_err_length]", (
                 "校验失败应在 ai_system_prompt 字段上显示 inline 错误"
             )
+
+    def test_invalid_prompt_error_stored_as_message(self) -> None:
+        """ADD-UI-004: 失败时回传 Message(key+params), 不保存已翻译字符串."""
+        from ui.views import screener_view as mod
+        from utils.prompt_guard import MAX_PROMPT_LENGTH
+
+        fake_vm = MagicMock()
+        fake_vm.state.strategy_params = {"ai_system_prompt": "draft prompt"}
+        fake_vm.save_strategy_prompt = AsyncMock(return_value=(False, "prompt_err_length"))
+
+        captured: list[Any] = []
+        asyncio.run(mod._execute_save_prompt(fake_vm, MagicMock(), "value", captured.append))
+
+        assert len(captured) == 1
+        error = captured[0]
+        assert isinstance(error, Message), "错误必须以 Message 保存, 否则切语言后无法重译"
+        assert error.key == "prompt_err_length"
+        assert error.params == {"max": MAX_PROMPT_LENGTH}
+
+    def test_invalid_prompt_error_retranslated_on_locale_switch(self, screener_view_with_params_env) -> None:
+        """ADD-UI-004: 常驻页切 zh↔en 后 inline 错误重译, 上限值与草稿保留."""
+        env = screener_view_with_params_env
+        page = env["page"]
+        fake_vm = env["fake_vm"]
+        mock_i18n = env["mock_i18n"]
+
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
+
+        def _zh_get(key: str, *a: Any, **kw: Any) -> str:
+            if key == "prompt_err_length":
+                return f"提示词长度超过限制（最大 {kw['max']} 字符）"
+            return f"i18n[{key}]"
+
+        def _en_get(key: str, *a: Any, **kw: Any) -> str:
+            if key == "prompt_err_length":
+                return f"Prompt exceeds maximum length of {kw['max']} characters"
+            return f"i18n[{key}]"
+
+        mock_i18n.get.side_effect = _zh_get
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
+            mock_save.return_value = (False, "prompt_err_length")
+            page.run_task.reset_mock()
+            _invoke(save_btn.on_click, _make_event())
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
+
+        _rerender(env)
+        prompt_field = _get_ai_prompt_field(env)
+        assert prompt_field.error == "提示词长度超过限制（最大 8000 字符）"
+        assert prompt_field.value == "draft prompt", "切语言不得清空用户 Prompt 草稿"
+
+        mock_i18n.get.side_effect = _en_get
+        _rerender(env)
+        prompt_field = _get_ai_prompt_field(env)
+        assert prompt_field.error == "Prompt exceeds maximum length of 8000 characters", (
+            "错误应按当前 locale 重译, 而非沿用保存时的译文"
+        )
+        assert prompt_field.value == "draft prompt"
+
+    def test_non_i18n_error_text_rendered_verbatim(self) -> None:
+        """ADD-UI-004: 非 i18n 文本 (如异常消息) 按原文渲染, 不被当作 key 误译/误格式化."""
+        from core.i18n import I18n
+        from ui.views.screener_view import _render_status_message
+
+        I18n.initialize()
+        assert _render_status_message(Message("db error: connection refused")) == "db error: connection refused"
 
     def test_valid_prompt_saves_successfully(self, screener_view_with_params_env) -> None:
         """vm.save_strategy_prompt 返回 (True, None) → show_toast("ai_settings_saved")."""
@@ -2413,6 +2527,17 @@ class TestBuildParamControl:
         assert callable(save_btn.on_click)
         assert callable(restore_btn.on_click)
 
+    def test_ai_system_prompt_keeps_persistent_label(self, screener_view_with_params_env) -> None:
+        """ADD-UI-006: ai_system_prompt 字段保留持久 label, 不以独立视觉标题替代.
+
+        构造期 label= 不足以证明运行期未被清除 (AST 扫描不覆盖 ``ctrl.label = None``),
+        故在完整渲染树上断言字段自身仍携带当前语言 label。
+        """
+        env = screener_view_with_params_env
+        field = _get_ai_prompt_field(env)
+        assert field.label == env["mock_i18n"].get("ai_system_prompt")
+        assert field.label, "ai_system_prompt 字段 label 不得为空"
+
 
 class TestBuildParamsPanel:
     """_build_params_panel: 无策略/有参数/分组渲染."""
@@ -2467,7 +2592,7 @@ class TestBuildScreenerParamsSidebar:
 
         def _impl() -> Any:
             return env["mod"]._build_screener_params_sidebar(
-                env["fake_vm"].state, env["fake_vm"], handlers=handlers, prompt_error=""
+                env["fake_vm"].state, env["fake_vm"], handlers=handlers, prompt_error=None
             )
 
         return render_once(make_component(_impl))
