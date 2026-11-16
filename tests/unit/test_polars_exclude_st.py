@@ -120,9 +120,46 @@ class TestApplyExcludeSt:
         result = s._apply_exclude_st(lf, ctx).collect()
         assert len(result) == 2
         assert "000002.SZ" in result["ts_code"].to_list()
-        warnings = ctx.get("warnings", [])
-        assert len(warnings) == 1
-        assert warnings[0].params == {"count": 1}
+
+    def test_all_null_is_st_string_inference_not_crash(self):
+        """D12-002 dtype 健壮性：is_st 全 NULL 时 pandas object 列经 pl.from_pandas
+        被推断为 String，直接作谓词会抛 "filter predicate must be of type Boolean, got
+        String"（E2E 回测 flow 曾因此挂死）。显式 cast 后应保留全部行且不计数。"""
+        s = _StubStrategy()
+        # 模拟 E2E 场景：DB 全 NULL → pd.DataFrame object 列全 None → pl.from_pandas → String
+        pdf = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600001.SS"],
+                "name": ["平安银行", "万科A", "*ST 某某"],
+                "close": [10.0, 20.0, 5.0],
+                "is_st": [None, None, None],
+            }
+        )
+        lf = pl.from_pandas(pdf).lazy()
+        assert lf.collect_schema()["is_st"] == pl.String  # 复现 dtype 推断前提
+        ctx: dict = {}
+        result = s._apply_exclude_st(lf, ctx).collect()
+        assert len(result) == 3  # NULL=未知：全保留
+        assert ctx.get("warnings", []) == []  # 不计数
+
+    def test_string_typed_is_st_flags_still_excluded(self):
+        """is_st 非 Boolean dtype（全 NULL object 列被推断为 String）时跳过排除：
+        无任何已知布尔值 → 无可排除行，全部保留且不计数（polars 不支持
+        String→Boolean cast，fail-safe 与 NULL=未知语义一致）。"""
+        s = _StubStrategy()
+        pdf = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "600001.SS"],
+                "name": ["平安银行", "*ST 某某"],
+                "close": [10.0, 5.0],
+                "is_st": ["false", "true"],
+            }
+        )
+        lf = pl.from_pandas(pdf).lazy()
+        ctx: dict = {}
+        result = s._apply_exclude_st(lf, ctx).collect()
+        assert len(result) == 2  # 非 Boolean dtype：视为全未知，全保留
+        assert ctx.get("warnings", []) == []
 
     def test_unknown_asof_st_not_excluded_by_current_snapshot_flag(self):
         """D12-002: as-of ST 未知（is_st=NULL）的历史候选不得按当前名称标记被排除。

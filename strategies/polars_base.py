@@ -207,14 +207,23 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         exclude = ctx.get("exclude_st", self.exclude_st)
         if not exclude or "is_st" not in lf.collect_schema().names():
             return lf
+        # D12-002 dtype 健壮性：is_st 三态（TRUE/FALSE/NULL）。全 NULL 的 object 列经
+        # pl.from_pandas 会被推断为 String（pandas object 列无原型时缺失 dtype 信息），
+        # 直接作谓词会抛 "filter predicate must be of type Boolean, got String"，而
+        # polars 不支持 String→Boolean cast。生产数据中非 Boolean 的 is_st 只可能是
+        # 全 NULL（未知）——按「无任何已知 ST 行」处理：跳过排除（NULL=不排除、不计数，
+        # 语义与下方 NULL 行一致）。
+        if lf.collect_schema()["is_st"] != pl.Boolean:
+            return lf
+        st_flag = pl.col("is_st")
         # NULL is_st 为**未知**（D12-002：name-history 无 as-of 覆盖，或 name 可空），不得当作
         # 「非 ST」宣称已判定，也不得当作 ST：不排除且不计数，避免 NULL 行被 ~pl.col() 过滤掉
         # 造成静默漏股。历史回放中该未知由回测结果 st_asof_approximation 显式声明（R24）；
         # 实盘 as_of=当前快照，DataProcessor 已用当前名称补齐 is_st，不产生 NULL。
-        excluded = lf.filter(pl.col("is_st").is_not_null() & pl.col("is_st")).select(pl.len()).collect().item()
+        excluded = lf.filter(st_flag.is_not_null() & st_flag).select(pl.len()).collect().item()
         if excluded:
             ctx.setdefault("warnings", []).append(Message("strategy_excluded_st", {"count": excluded}))
-        return lf.filter(pl.col("is_st").fill_null(False).not_())
+        return lf.filter(st_flag.fill_null(False).not_())
 
     def _apply_exclude_delisting(self, lf: pl.LazyFrame, ctx: StrategyContext) -> pl.LazyFrame:
         """F1（review09-24-dim01-major01）: 基类统一排除退市整理期股票（「XX退」）。
@@ -232,12 +241,16 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         """
         if "is_delisting" not in lf.collect_schema().names():
             return lf
-        excluded = (
-            lf.filter(pl.col("is_delisting").is_not_null() & pl.col("is_delisting")).select(pl.len()).collect().item()
-        )
+        # 与 _apply_exclude_st 同源的 dtype 健壮性：is_delisting 三态，全 NULL object 列
+        # 经 pl.from_pandas 会被推断为 String，直接作谓词会崩溃且 polars 不支持
+        # String→Boolean cast——非 Boolean 即视为全部未知，跳过排除（NULL=不排除）。
+        if lf.collect_schema()["is_delisting"] != pl.Boolean:
+            return lf
+        delisting_flag = pl.col("is_delisting")
+        excluded = lf.filter(delisting_flag.is_not_null() & delisting_flag).select(pl.len()).collect().item()
         if excluded:
             ctx.setdefault("warnings", []).append(Message("strategy_excluded_delisting", {"count": excluded}))
-        return lf.filter(pl.col("is_delisting").fill_null(False).not_())
+        return lf.filter(delisting_flag.fill_null(False).not_())
 
     def _preprocess_lf(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         """可选钩子：过滤前注入派生列（默认 no-op，CRIT-01）。
