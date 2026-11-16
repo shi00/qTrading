@@ -14,6 +14,32 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _restore_singleton_registry():
+    """用例结束（含断言失败）时恢复全局注册清单（R7 测试状态隔离）。
+
+    本文件用例直接向 ``utils.singleton_registry._registry`` 追加测试类，且
+    ``reset_all_singletons()`` 只重置实例、不删除注册类；仅在断言后手动
+    ``remove`` 无法覆盖失败路径。此 fixture 在 ``finally`` 中同时恢复原列表
+    对象与内容，避免假类残留污染后续用例的 reset/atexit 行为；不修改生产
+    reset 语义。
+
+    模块级 autouse fixture 先于显式 fixture 建立、晚于其拆除，故本文件内
+    ``_dedicated_registry`` 的 swap 在恢复时已先还原为原列表对象。
+    """
+    import utils.singleton_registry as singleton_registry
+
+    with singleton_registry._lock:
+        original_registry = singleton_registry._registry
+        original_contents = list(original_registry)
+    try:
+        yield
+    finally:
+        with singleton_registry._lock:
+            original_registry[:] = original_contents
+            singleton_registry._registry = original_registry
+
+
 class TestSingletonRegistry:
     """S5-2: Singleton registry for unified reset"""
 
