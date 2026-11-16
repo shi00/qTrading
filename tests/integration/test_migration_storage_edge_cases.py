@@ -6,6 +6,8 @@
 - 0018 非法 stock_basic.ts_code 使 CHECK 建立失败时不删行、不部分提交，修正后重试成功；
 - screening_thinking.history_id 由 integer 升 bigint、回退窄化到 int32 的边界（> 2^31-1 失败关闭）；
 - 0031 携数据 upgrade/downgrade/re-upgrade：结构、版本、行数与前映像（逻辑备份）校验。
+- D06-001：0029→head 后 EXPIRED 行不携带旧口径收益/胜负（0046 前向修正），且统计
+  在 DISTINCT ON 之后掩码（最新 EXPIRED + 更旧 COMPLETED 不复活）。
 
 未覆盖（不在此伪造通过）：
 - 跨进程并发迁移需要强隔离 PostgreSQL + 多进程编排，同进程 ``asyncio.gather``
@@ -27,7 +29,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -508,3 +510,256 @@ async def test_upgrade_downgrade_reupgrade_round_trip(alembic_db_engine: _Migrat
     await _assert_backup_preserved(db.engine, backup)
     assert "execution_metadata" in await _columns(db.engine, "news_risk_brief")
     assert (await _column_info(db.engine, "watchlist", "added_price"))["numeric_precision"] == 24
+
+
+async def test_0046_clears_expired_review_metrics_from_0029(alembic_db_engine: _MigrationDb) -> None:
+    """D06-001: 0029→head 后 EXPIRED 行不带旧口径收益/标签，窗内与 T1_DONE 状态机不变。
+
+    覆盖：
+    - 窗内 COMPLETED → 0030/0032 重置为 PENDING 且八列全 NULL（不得被 0046 误伤）；
+    - 窗外 COMPLETED → EXPIRED，0046 清空 t1/t5/alpha/index_pct/prediction_result，
+      研究记录（ai_score/ai_reason）保留；
+    - T1_DONE（含旧基点 t1_pct）→ PENDING 且 t1_pct 清空（0032 既有语义）；
+    - 已是 EXPIRED 且带旧收益 → 0046 清空；
+    - UNTRADABLE 不动；
+    - 最新 EXPIRED + 更旧 COMPLETED 同键：统计掩码而非「先过滤状态再 DISTINCT ON」
+      （否则更旧 COMPLETED 复活被计入 N/均值/胜负）。
+    """
+    from data.constants import (
+        REVIEW_STATUS_COMPLETED,
+        REVIEW_STATUS_EXPIRED,
+        REVIEW_STATUS_PENDING,
+        REVIEW_STATUS_T1_DONE,
+        REVIEW_STATUS_UNTRADABLE,
+    )
+    from data.persistence.daos.screener_dao import ScreenerDao
+
+    db = alembic_db_engine
+    await _upgrade(db, "0029")
+    assert await _current_version(db.engine) == "0029"
+
+    today = await _scalar(db.engine, "SELECT CURRENT_DATE")
+    assert isinstance(today, date)
+    # 连续 150 个自然日全部记为交易日：0030/0032 的 OFFSET 59 锚点 = today-59，
+    # 故 today-100 超窗（EXPIRED）、today-10 窗内（重置/回填通道）。
+    for offset in range(150):
+        await _execute(
+            db.engine,
+            "INSERT INTO trade_cal (cal_date, exchange, is_open) VALUES (:d, 'SSE', 1)",
+            {"d": today - timedelta(days=offset)},
+        )
+
+    async def _insert(
+        run_id: str,
+        trade_date: date,
+        review_status: str,
+        *,
+        strategy: str,
+        ts_code: str,
+        t1_pct: float | None = None,
+        t5_pct: float | None = None,
+        alpha: float | None = None,
+        index_pct: float | None = None,
+        prediction_result: str | None = None,
+        ai_score: float | None = None,
+        ai_reason: str | None = None,
+    ) -> None:
+        await _execute(
+            db.engine,
+            "INSERT INTO screening_history (run_id, trade_date, strategy_name, ts_code, "
+            "review_status, t1_pct, t5_pct, alpha, index_pct, prediction_result, ai_score, ai_reason) "
+            "VALUES (:run_id, :trade_date, :strategy_name, :ts_code, :review_status, :t1_pct, "
+            ":t5_pct, :alpha, :index_pct, :prediction_result, :ai_score, :ai_reason)",
+            {
+                "run_id": run_id,
+                "trade_date": trade_date,
+                "strategy_name": strategy,
+                "ts_code": ts_code,
+                "review_status": review_status,
+                "t1_pct": t1_pct,
+                "t5_pct": t5_pct,
+                "alpha": alpha,
+                "index_pct": index_pct,
+                "prediction_result": prediction_result,
+                "ai_score": ai_score,
+                "ai_reason": ai_reason,
+            },
+        )
+
+    async def _row(run_id: str) -> dict[str, Any]:
+        async with db.engine.connect() as conn:
+            result = (
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT review_status, t1_pct, t5_pct, alpha, index_pct, "
+                            "prediction_result, ai_score, ai_reason "
+                            "FROM screening_history WHERE run_id = :run_id"
+                        ),
+                        {"run_id": run_id},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        assert result is not None, f"缺少测试行: {run_id}"
+        return dict(result)
+
+    await _insert(
+        "d06_old_comp",
+        today - timedelta(days=100),
+        REVIEW_STATUS_COMPLETED,
+        strategy="d06_mig",
+        ts_code="000001.SZ",
+        t1_pct=0.01,
+        t5_pct=0.06,
+        alpha=0.05,
+        index_pct=0.01,
+        prediction_result="WIN",
+        ai_score=80.0,
+        ai_reason="keep-research-record",
+    )
+    await _insert(
+        "d06_win_comp",
+        today - timedelta(days=10),
+        REVIEW_STATUS_COMPLETED,
+        strategy="d06_mig",
+        ts_code="000002.SZ",
+        t1_pct=0.02,
+        t5_pct=0.08,
+        alpha=0.06,
+        index_pct=0.02,
+        prediction_result="WIN",
+    )
+    await _insert(
+        "d06_old_t1_done",
+        today - timedelta(days=100),
+        REVIEW_STATUS_T1_DONE,
+        strategy="d06_mig",
+        ts_code="000003.SZ",
+        t1_pct=0.03,
+    )
+    await _insert(
+        "d06_leg_exp",
+        today - timedelta(days=100),
+        REVIEW_STATUS_EXPIRED,
+        strategy="d06_mig",
+        ts_code="000004.SZ",
+        t1_pct=0.04,
+        t5_pct=0.09,
+        alpha=0.07,
+        index_pct=0.02,
+        prediction_result="LOSS",
+    )
+    await _insert(
+        "d06_untrad",
+        today - timedelta(days=10),
+        REVIEW_STATUS_UNTRADABLE,
+        strategy="d06_mig",
+        ts_code="000005.SZ",
+    )
+
+    await _upgrade(db, "head")
+    assert await _current_version(db.engine) == await DatabaseMigrator._get_head_revision()
+
+    # 窗外 COMPLETED → EXPIRED；0046 清空不可信旧收益/标签，研究记录保留。
+    old = await _row("d06_old_comp")
+    assert old["review_status"] == REVIEW_STATUS_EXPIRED
+    assert (old["t1_pct"], old["t5_pct"], old["alpha"], old["index_pct"], old["prediction_result"]) == (
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    assert float(old["ai_score"]) == 80.0
+    assert old["ai_reason"] == "keep-research-record"
+
+    # 窗内 COMPLETED → PENDING 且八列全空（0030/0032 语义，不被 0046 误伤）。
+    window = await _row("d06_win_comp")
+    assert window["review_status"] == REVIEW_STATUS_PENDING
+    assert (window["t1_pct"], window["t5_pct"], window["alpha"], window["prediction_result"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+    # T1_DONE + 旧基点 t1_pct → PENDING 且清空（0032 既有语义保持不变）。
+    t1_done = await _row("d06_old_t1_done")
+    assert t1_done["review_status"] == REVIEW_STATUS_PENDING
+    assert t1_done["t1_pct"] is None
+
+    # 已是 EXPIRED 的存量脏行同样被 0046 清空。
+    legacy = await _row("d06_leg_exp")
+    assert legacy["review_status"] == REVIEW_STATUS_EXPIRED
+    assert (legacy["t1_pct"], legacy["t5_pct"], legacy["alpha"], legacy["prediction_result"]) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+    # UNTRADABLE 终态不被数据修正迁移改写。
+    assert (await _row("d06_untrad"))["review_status"] == REVIEW_STATUS_UNTRADABLE
+
+    # DAO 统计：同键「最新 EXPIRED + 更旧 COMPLETED」——掩码后旧 run 不得复活。
+    recent = today - timedelta(days=5)
+    await _insert(
+        "d06_old_run",
+        recent,
+        REVIEW_STATUS_COMPLETED,
+        strategy="d06_dao",
+        ts_code="000001.SZ",
+        t1_pct=0.01,
+        t5_pct=0.10,
+        alpha=0.10,
+        prediction_result="WIN",
+        ai_score=70.0,
+    )
+    await _insert(
+        "d06_late_exp",
+        recent,
+        REVIEW_STATUS_EXPIRED,
+        strategy="d06_dao",
+        ts_code="000001.SZ",
+        t1_pct=0.05,
+        t5_pct=0.50,
+        alpha=0.50,
+        prediction_result="WIN",
+        ai_score=70.0,
+    )
+    # 同组另一只股票为正常 COMPLETED：掩码不应把有效样本一并剔除。
+    await _insert(
+        "d06_valid",
+        recent,
+        REVIEW_STATUS_COMPLETED,
+        strategy="d06_dao",
+        ts_code="000002.SZ",
+        t1_pct=0.02,
+        t5_pct=0.02,
+        alpha=0.02,
+        prediction_result="WIN",
+        ai_score=70.0,
+    )
+
+    dao = ScreenerDao(db.engine)
+    stats = await dao.get_strategy_review_stats()
+    dao_rows = stats[stats["strategy_name"] == "d06_dao"]
+    assert len(dao_rows) == 1
+    row = dao_rows.iloc[0]
+    # 最近快照为 EXPIRED 的键仍计入当日入选数（组合规模），但不贡献任何收益/胜负；
+    # 若错误地「先过滤 COMPLETED 再 DISTINCT ON」，更旧 run 复活会使 alpha_n=2、
+    # alpha_mean=(0.10+0.02)/2 且 win_cnt=2。
+    assert int(row["daily_cnt"]) == 2
+    assert int(row["alpha_n"]) == 1
+    assert float(row["alpha_mean"]) == pytest.approx(0.02)
+    assert int(row["t1_n"]) == 1
+    assert int(row["win_cnt"]) == 1
+    assert int(row["loss_cnt"]) == 0
+
+    attribution = await dao.get_ai_attribution_stats()
+    attr_rows = attribution[attribution["strategy_name"] == "d06_dao"]
+    assert len(attr_rows) == 1
+    assert int(attr_rows.iloc[0]["alpha_n"]) == 1
+    assert int(attr_rows.iloc[0]["win_cnt"]) == 1
