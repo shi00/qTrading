@@ -14,6 +14,8 @@
   维护命令必须与 ``run --username`` 一致，否则角色认证/改密作用于错误角色；默认配置不传该参数，
   兼容不支持 ``--username`` 的旧 sidecar）。dump/restore/maintenance-shell 与 reset-password
   均由同一实现透传（M21 / M23）
+- 业务库名 ``--database`` 始终由 ``embedded_pg_database`` 显式透传给 dump/restore/maintenance-shell
+  （D07-005：sidecar 维护命令不设默认库，避免自定义库部署备份/恢复落空）
 - exit code 语义正本为 ``sidecars/qtrading-pg-sidecar/src/exit_codes.rs`` 与 how-to §9.6；
   doctor 只返回 0/2，任何非 0 退出（含 20 STOP_FAILED）均按失败处理
 """
@@ -459,8 +461,21 @@ class EmbeddedPgMaintenanceService:
         return argv
 
     def _build_maintenance_shell_argv(self) -> list[str]:
+        """maintenance-shell argv：库名取 ``embedded_pg_database``。
+
+        D07-005：sidecar 已不提供默认库名，连接串/psql 提示须显示应用实际业务库，
+        否则自定义库部署会按 qtrading 连接空库。
+        """
         sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
-        return [sidecar_path, "maintenance-shell", "--data-dir", data_dir, *self._username_args()]
+        return [
+            sidecar_path,
+            "maintenance-shell",
+            "--data-dir",
+            data_dir,
+            "--database",
+            self._get_database_name(),
+            *self._username_args(),
+        ]
 
     def _build_reset_password_argv(self) -> list[str]:
         """reset-password argv：自定义超级用户名必须透传，否则 ALTER USER 作用于不存在的角色。"""

@@ -692,6 +692,26 @@ class TestEmbeddedPgMaintenanceServiceArgv:
         assert argv[database_idx] == "stock_db"
         assert "--target-data-dir" in argv
 
+    def test_build_maintenance_shell_argv_passes_configured_database(
+        self, maintenance_service, mock_config_dict: dict[str, object]
+    ) -> None:
+        """D07-005：maintenance-shell 连接串/psql 提示须使用配置库名，不得回落 qtrading。"""
+        config = {**mock_config_dict, "embedded_pg_database": "stock_db"}
+        with patch(
+            "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+            return_value=config,
+        ):
+            argv = maintenance_service._build_maintenance_shell_argv()
+        assert argv[1] == "maintenance-shell"
+        database_idx = argv.index("--database") + 1
+        assert argv[database_idx] == "stock_db"
+
+    def test_build_maintenance_shell_argv_default_database_is_qtrading(self, maintenance_service) -> None:
+        """默认配置下 maintenance-shell 仍显式透传 qtrading（不是依赖 sidecar 默认值）。"""
+        argv = maintenance_service._build_maintenance_shell_argv()
+        database_idx = argv.index("--database") + 1
+        assert argv[database_idx] == "qtrading"
+
     @pytest.mark.parametrize(
         "bad_database",
         ["", " bad", "bad name", "a;drop", "a-b", "1abc", "a" * 64],

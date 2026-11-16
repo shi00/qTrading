@@ -11,6 +11,9 @@
 - ``.bat`` 与 ``.sh`` 两条脚本暴露的命令集合一致（跨平台行为对齐）；
 - 超级用户名（UIR-M21）：``dump`` / ``restore`` / ``maintenance-shell`` 仅在非默认
   ``postgres`` 时透传 ``--username``，默认路径调用形态与旧脚本一致。
+- 业务库名（D07-005）：``dump`` / ``restore`` / ``maintenance-shell`` 必须显式提供
+  ``--database``（Unix 前置参数或 ``QTRADING_PG_DATABASE``，Windows 环境变量），
+  脚本无默认库；拒绝维护库/测试库/非法标识符，避免自定义库部署备份/恢复落空。
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ SH_PATH = MAINTENANCE_DIR / "qtrading-db-maintenance.sh"
 README_PATH = MAINTENANCE_DIR / "README-maintenance.md"
 
 _PG_USERNAME_ENV = "QTRADING_PG_USERNAME"
+_PG_DATABASE_ENV = "QTRADING_PG_DATABASE"
 _USERNAME_COMMANDS = ("dump", "restore", "maintenance-shell")
 _SH_AVAILABLE = os.name == "posix" and shutil.which("sh") is not None
 
@@ -77,6 +81,12 @@ def _sh_dispatch_commands(text: str) -> set[str]:
     for label in re.findall(r"(?m)^ {4}([a-z][a-z|-]*)\)", body):
         names.update(alias for alias in label.split("|") if not alias.startswith("-"))
     return names
+
+
+def _sh_block(text: str, cmd: str) -> str:
+    match = re.search(rf"(?ms)^ {{4}}{re.escape(cmd)}\)\n(.*?)^ {{8}};;", text)
+    assert match is not None, f"未找到 {cmd} 分派分支"
+    return match.group(1)
 
 
 @pytest.mark.parametrize("cmd", ["dump", "restore"])
@@ -143,8 +153,8 @@ def test_sh_forwards_username_arg_for_auth_commands(cmd: str) -> None:
     assert "$USERNAME_ARG" not in text, "不得用未加引号的字符串变量构造参数（word-splitting / glob）"
     lines = [line.strip() for line in text.splitlines() if line.strip().startswith(f"run_sidecar {cmd} ")]
     assert len(lines) == 1, f"{cmd} 分支应恰有一次 sidecar 调用，实际 {len(lines)}"
-    assert 'exec "$SIDECAR_BIN" "$@" --username "$PG_USERNAME"' in text
-    assert 'exec "$SIDECAR_BIN" "$@"' in text
+    assert 'exec "$SIDECAR_BIN" "$@" --database "$PG_DATABASE" --username "$PG_USERNAME"' in text
+    assert 'exec "$SIDECAR_BIN" "$@" --database "$PG_DATABASE"' in text
 
 
 def test_bat_username_defaults_to_postgres_without_flag() -> None:
@@ -178,6 +188,67 @@ def test_readme_documents_username_env_for_both_platforms() -> None:
     assert "--username" in readme
 
 
+# --------------------------------------------------------------------------- #
+# 业务库名透传（D07-005：dump / restore / maintenance-shell 必须显式指定）
+# --------------------------------------------------------------------------- #
+_DATABASE_COMMANDS = ("dump", "restore", "maintenance-shell")
+
+
+@pytest.mark.parametrize("cmd", _DATABASE_COMMANDS)
+def test_bat_forwards_database_for_maintenance_commands(cmd: str) -> None:
+    """三个维护分支都必须以加引号的 ``--database`` 透传业务库名。"""
+    block = _bat_block(_read(BAT_PATH), cmd)
+    assert '--database "%PG_DATABASE%"' in block, f"{cmd} 分支未透传 --database"
+
+
+def test_bat_database_has_no_silent_default_and_rejects_misuse() -> None:
+    """库名只来自环境变量；无内置默认值，并拒绝维护库/测试库/非法标识符。"""
+    text = _read(BAT_PATH)
+    assert 'set "PG_DATABASE=%QTRADING_PG_DATABASE%"' in text
+    assert 'set "PG_DATABASE=qtrading"' not in text, "不得静默回落默认库"
+    assert "if defined PG_DATABASE_REQUIRED call :validate_database" in text
+    assert ":validate_database" in text
+    assert "business database name is required" in text
+    assert 'findstr /r /x "[A-Za-z_][A-Za-z0-9_]*"' in text
+    assert 'findstr /i /r /x "postgres template0 template1"' in text
+    assert 'findstr /i /r /x "test test_.* .*_test"' in text
+    assert "%DATABASE_ARG%" not in text, "不得用未加引号的字符串变量构造参数"
+
+
+@pytest.mark.parametrize("cmd", _DATABASE_COMMANDS)
+def test_sh_requires_database_for_maintenance_commands(cmd: str) -> None:
+    """三个维护分支调用 sidecar 前必须先通过 require_database 守卫。"""
+    block = _sh_block(_read(SH_PATH), cmd)
+    assert "require_database" in block, f"{cmd} 分支缺少库名守卫"
+    assert f"run_sidecar {cmd} " in block
+
+
+def test_sh_database_sources_and_no_default() -> None:
+    """库名来源：前置 ``--database`` > ``QTRADING_PG_DATABASE``；无内置默认值。"""
+    text = _read(SH_PATH)
+    assert f'PG_DATABASE="${{{_PG_DATABASE_ENV}:-}}"' in text
+    assert '--database "$PG_DATABASE"' in text
+    assert "        --database)" in text
+    assert "        --database=*)" in text
+    assert "'' | *[!A-Za-z0-9_]* | [!A-Za-z_]*)" in text
+    assert "postgres | template0 | template1)" in text
+    assert "test | test_* | *_test)" in text
+    assert "business database name is required" in text
+    assert 'PG_DATABASE="${QTRADING_PG_DATABASE:-qtrading}"' not in text, "不得静默回落默认库"
+
+
+def test_readme_splits_upgrade_rollback_and_custom_database() -> None:
+    """README 必须分流升级/回退/自定义库，并说明库名来源与误用拒绝。"""
+    readme = _read(README_PATH)
+    assert _PG_DATABASE_ENV in readme
+    assert "--database" in readme
+    assert "embedded_pg_database" in readme
+    assert "业务库名（必填）" in readme
+    assert "升级 / 回退 / 自定义库分流" in readme
+    assert "postgres" in readme and "template0" in readme and "template1" in readme
+    assert "test_*" in readme and "*_test" in readme
+
+
 def _stage_script_tree(tmp_path: Path) -> Path:
     """搭最小安装布局：临时脚本副本 + 打印参数的 stub sidecar（exec 后输出 argv）。"""
     maint_dir = tmp_path / "app" / "resources" / "maintenance"
@@ -193,10 +264,18 @@ def _stage_script_tree(tmp_path: Path) -> Path:
     return script
 
 
-def _run_sh(script: Path, args: list[str], tmp_path: Path, username: str | None) -> subprocess.CompletedProcess[str]:
-    env = {key: value for key, value in os.environ.items() if key != _PG_USERNAME_ENV}
+def _run_sh(
+    script: Path,
+    args: list[str],
+    tmp_path: Path,
+    username: str | None,
+    database: str | None = "qtrading",
+) -> subprocess.CompletedProcess[str]:
+    env = {key: value for key, value in os.environ.items() if key not in (_PG_USERNAME_ENV, _PG_DATABASE_ENV)}
     if username is not None:
         env[_PG_USERNAME_ENV] = username
+    if database is not None:
+        env[_PG_DATABASE_ENV] = database
     return subprocess.run(
         ["sh", str(script), *args], capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=60
     )
@@ -271,3 +350,107 @@ def test_sh_prefix_flag_value_is_single_argv(tmp_path: Path) -> None:
     assert proc.returncode != 0
     assert proc.stdout == ""
     assert "invalid username" in proc.stderr
+
+
+# --------------------------------------------------------------------------- #
+# 业务库名透传（执行型，D07-005）
+# --------------------------------------------------------------------------- #
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+@pytest.mark.parametrize("cmd", _DATABASE_COMMANDS)
+def test_sh_executed_database_forwarding(tmp_path: Path, cmd: str) -> None:
+    """自定义库名必须以独立 argv 透传给三个维护命令。"""
+    script = _stage_script_tree(tmp_path)
+    extra = [str(tmp_path / "backup.dump")] if cmd in ("dump", "restore") else []
+
+    proc = _run_sh(script, [cmd, *extra], tmp_path, None, database="stock_db")
+    assert proc.returncode == 0, proc.stderr
+
+    received = proc.stdout.splitlines()
+    assert received[0] == cmd
+    assert "--database" in received
+    assert received[received.index("--database") + 1] == "stock_db"
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+def test_sh_database_prefix_flag_overrides_env(tmp_path: Path) -> None:
+    """前置 ``--database`` 优先于 ``QTRADING_PG_DATABASE``。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(
+        script,
+        ["--database", "stock_db", "dump", str(tmp_path / "backup.dump")],
+        tmp_path,
+        None,
+        database="other_db",
+    )
+    assert proc.returncode == 0, proc.stderr
+    received = proc.stdout.splitlines()
+    assert received[received.index("--database") + 1] == "stock_db"
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+@pytest.mark.parametrize("cmd", _DATABASE_COMMANDS)
+def test_sh_rejects_missing_database_before_sidecar(tmp_path: Path, cmd: str) -> None:
+    """未提供库名必须失败且不得调用 sidecar（不静默回落 qtrading）。"""
+    script = _stage_script_tree(tmp_path)
+    extra = [str(tmp_path / "backup.dump")] if cmd in ("dump", "restore") else []
+    proc = _run_sh(script, [cmd, *extra], tmp_path, None, database=None)
+    assert proc.returncode != 0
+    assert proc.stdout == "", "缺少库名不得调用 sidecar"
+    assert "business database name is required" in proc.stderr
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+def test_sh_rejects_empty_prefixed_database(tmp_path: Path) -> None:
+    """``--database=`` 空值必须在调用 sidecar 前拒绝。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, ["--database=", "dump", str(tmp_path / "backup.dump")], tmp_path, None, database=None)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+    assert "business database name is required" in proc.stderr
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+@pytest.mark.parametrize(
+    "database",
+    ["", "bad name", "a;drop", "1abc", "a-b", "x" * 64],
+)
+def test_sh_rejects_invalid_database_before_sidecar(tmp_path: Path, database: str) -> None:
+    """空/非法库名必须被标识符白名单拒绝，且不得调用 sidecar。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, ["dump", str(tmp_path / "backup.dump")], tmp_path, None, database=database)
+    assert proc.returncode != 0
+    assert proc.stdout == "", "非法库名不得调用 sidecar"
+    assert "invalid database" in proc.stderr or "business database name is required" in proc.stderr
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+@pytest.mark.parametrize("database", ["postgres", "template0", "template1"])
+def test_sh_rejects_maintenance_database(tmp_path: Path, database: str) -> None:
+    """维护库不是业务数据，必须在调用 sidecar 前拒绝并给出用法。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, ["dump", str(tmp_path / "backup.dump")], tmp_path, None, database=database)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+    assert "not maintenance database" in proc.stderr
+    assert "embedded_pg_database" in proc.stderr
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+@pytest.mark.parametrize("database", ["test", "test_astock", "my_test"])
+def test_sh_rejects_test_database(tmp_path: Path, database: str) -> None:
+    """测试库必须被拒绝，避免生产维护流程误碰测试数据。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, ["dump", str(tmp_path / "backup.dump")], tmp_path, None, database=database)
+    assert proc.returncode != 0
+    assert proc.stdout == ""
+    assert "test database" in proc.stderr
+
+
+@pytest.mark.skipif(not _SH_AVAILABLE, reason="POSIX sh 不可用（Windows CI 仅做静态断言）")
+@pytest.mark.parametrize("cmd", ["status", "doctor", "version"])
+def test_sh_non_database_commands_do_not_require_database(tmp_path: Path, cmd: str) -> None:
+    """status / doctor / version 不访问业务库，无库名也应正常调用 sidecar 且不透传 --database。"""
+    script = _stage_script_tree(tmp_path)
+    proc = _run_sh(script, [cmd], tmp_path, None, database=None)
+    assert proc.returncode == 0, proc.stderr
+    assert "--database" not in proc.stdout.splitlines()
