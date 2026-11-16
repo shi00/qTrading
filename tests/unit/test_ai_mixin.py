@@ -2118,7 +2118,7 @@ class TestNewsTaskCleanupScope:
             ),
         ):
             mock_ai.return_value.is_cloud_available.return_value = True
-            with pytest.raises(RuntimeError):
+            with pytest.raises(RuntimeError, match="prefetch down"):
                 await s.run_ai_analysis(candidates, context)
 
         # 取消信号已被投递（依赖清理协程 await 被取消任务才可观测），且任务已终止
