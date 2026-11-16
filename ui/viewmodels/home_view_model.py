@@ -91,6 +91,10 @@ class HomeState:
     # 有效股票代码集合 (6 位 symbol, 源自 stock_basic), 供新闻「查看个股」链接
     # 校验 (UX-09 MINOR-03); 为空表示尚未加载或加载失败, 此时不生成任何链接。
     valid_stock_codes: frozenset[str] = frozenset()
+    # 完整股票身份集合 (``CODE.EXCHANGE``, 源自同一 stock_basic 映射), 供新闻带
+    # 交易所前缀的「查看个股」链接校验 (D18-005/M27-08); 为空表示尚未加载或加载
+    # 失败, 此时带前缀候选不生成链接 (R21: 宁少链接不伪造)。
+    valid_stock_ts_codes: frozenset[str] = frozenset()
     market_indices: tuple[MarketIndexRow, ...] = ()
     market_hsgt: HsgtRow = field(default_factory=HsgtRow)
     market_hot_concepts: tuple[HotConceptRow, ...] = ()
@@ -136,7 +140,10 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         # 有效股票代码集合缓存 (UX-09 MINOR-03): None=未加载; 加载成功后缓存
         # (stock_basic 每日同步, 变更频率低), 避免每次刷新重复读库。
+        # D18-005: 同一映射的完整 ts_code 集合与 symbol 集合同源缓存/同时写回,
+        # 避免新闻带交易所前缀的合法引用因缺少宿主身份集合而无法生成链接。
         self._valid_stock_codes: frozenset[str] | None = None
+        self._valid_stock_ts_codes: frozenset[str] | None = None
 
         # Concurrency Control (UIR-F04-003)
         # 两个独立代次: 新闻写回 (refresh/pagination) 与全量加载所有权
@@ -174,6 +181,11 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         symbol→ts_code 映射)。惰性加载 + 实例级缓存 (stock_basic 每日同步, 集合变更
         频率低); async 原生 DB 访问, 不阻塞 UI 主线程 (R16)。
 
+        D18-005: 同一次映射同时产出 ``valid_stock_codes`` (symbol) 与
+        ``valid_stock_ts_codes`` (``CODE.EXCHANGE`` 完整身份), 两者在同一次
+        ``_set_state`` 原子写回。带交易所前缀的新闻引用必须靠完整身份集合校验,
+        否则合法的 ``SZ000001`` 无链接、``SH000001`` 指数又不得回落裸 symbol。
+
         DB 读取失败时不缓存失败结果 (下次刷新重试), 并返回空集合——链接降级为不展示,
         宁可少展示也不生成未经校验的错误链接 (R21 精神: 不伪造业务合法值)。
         """
@@ -192,7 +204,12 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             logger.debug("[HomeVM] Error loading valid stock codes traceback", exc_info=True)
             return frozenset()
         self._valid_stock_codes = frozenset(code_map.keys()) if code_map else frozenset()
-        self._set_state(valid_stock_codes=self._valid_stock_codes)
+        # 同一映射的 values 即权威 ts_code; frozenset 天然去重, 不猜测/拼装交易所。
+        self._valid_stock_ts_codes = frozenset(code_map.values()) if code_map else frozenset()
+        self._set_state(
+            valid_stock_codes=self._valid_stock_codes,
+            valid_stock_ts_codes=self._valid_stock_ts_codes,
+        )
         return self._valid_stock_codes
 
     def _invoke_single_subscriber(self, cb: Callable[[HomeState], None], snap: HomeState) -> None:
