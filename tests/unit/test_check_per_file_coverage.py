@@ -43,12 +43,13 @@ class TestLoadConfig:
 
     def test_returns_layered_thresholds_sorted_by_length_desc(self):
         _, layered, _ = load_config()
-        # 四个分层路径
         prefixes = [p for p, _ in layered]
-        assert set(prefixes) == {"services/", "strategies/", "data/", "ui/"}
-        # 按长度降序：strategies/ (11) > services/ (9) > ui/ (3) == data/ (5)
-        # strategies/ 最长，应排首位
-        assert prefixes[0] == "strategies/"
+        # 目录分层 + 文件级条目（2026-11-16 Agent 特性登记平台性覆盖来源例外）
+        assert {"services/", "strategies/", "data/", "ui/"} <= set(prefixes)
+        # 目录分层按长度降序居末：strategies/ (11) > services/ (9) > data/ (5) > ui/ (3)
+        assert prefixes[-4:] == ["strategies/", "services/", "data/", "ui/"]
+        # 其余为文件级条目（精确路径匹配，长度均大于目录前缀）
+        assert all(prefix.endswith(".py") for prefix in prefixes[:-4])
 
     def test_returns_enforce_layered_flag(self):
         _, _, enforce = load_config()
