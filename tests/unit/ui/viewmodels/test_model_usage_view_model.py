@@ -6,7 +6,7 @@
 - set_filter 重置分页、清空展开与旧结果并统一异步重载（F35）；非法 origin 显式失败；
 - F35 请求代次隔离：两个 load 逆序完成保留最新请求结果；旧代次失败降级不覆盖；
   在途展开响应在筛选变化后不回填；重载在途时翻页 no-op（旧 total 路径已被统一重载取代）；
-- next/prev 分页（50/页，边界 no-op）；
+- next/prev 分页（50/页，边界 no-op）；D18-007 总页数由记录数换算（0/1/50/51/100 条）；
 - D16-004 页身份：翻页在途 / 失败不可导出（当前页），成功 CSV 页号与 invocation IDs
   同源，前后翻页清空旧页行与展开、迟到展开不回填错页；
 - D16-005 预算草稿编辑身份：在途加载 / 过滤 / 翻页重载不覆盖未保存草稿，
@@ -61,6 +61,7 @@ from ui.viewmodels.model_usage_view_model import (
     UsageFilters,
     _write_csv_text,
     month_pricing_status,
+    total_page_count,
 )
 from utils.thread_pool import TaskType
 
@@ -193,6 +194,24 @@ async def test_load_and_month_summary_propagate_pricing_integrity():
 def test_month_pricing_status_distinguishes_free_partial_and_unknown(summary, expected):
     """三态判定（R21）：免费 0 可显示，未计价 0 不得伪装为免费/已知。"""
     assert month_pricing_status(summary) == expected
+
+
+@pytest.mark.parametrize(
+    ("total_records", "expected_pages"),
+    [
+        (0, 1),
+        (1, 1),
+        (PAGE_SIZE - 1, 1),
+        (PAGE_SIZE, 1),
+        (PAGE_SIZE + 1, 2),
+        (2 * PAGE_SIZE, 2),
+        (2 * PAGE_SIZE + 1, 3),
+        (100, 2),
+    ],
+)
+def test_total_page_count_derives_pages_from_record_count(total_records, expected_pages):
+    """D18-007：``total`` 为记录数，总页数按 ceil 换算，空结果至少 1 页。"""
+    assert total_page_count(total_records) == expected_pages
 
 
 @pytest.mark.asyncio

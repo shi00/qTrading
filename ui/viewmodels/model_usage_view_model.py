@@ -65,6 +65,17 @@ if TYPE_CHECKING:
 #: 分页大小（§11.1「分页 50 条」）。
 PAGE_SIZE = 50
 
+
+def total_page_count(total_records: int) -> int:
+    """记录总数 → 总页数（D18-007）：``max(1, ceil(total_records / PAGE_SIZE))``。
+
+    ``ModelUsageState.total`` 是同一过滤口径的**记录数**（DAO ``COUNT(*)``），不是
+    页码总数；分页文案 / 翻页边界须经本函数换算，避免把记录数直接显示为总页数。
+    空结果也至少显示 1 页（不展示「第 1 / 0 页」）。
+    """
+    return max(1, (total_records + PAGE_SIZE - 1) // PAGE_SIZE)
+
+
 ORIGIN_TEST = "test"
 ORIGIN_BUSINESS = "business"
 
