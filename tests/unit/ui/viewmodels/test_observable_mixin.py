@@ -551,6 +551,7 @@ class TestCrossThreadNotification:
         vm.subscribe(lambda s: snapshots.append(s))
         vm._set_state(name="before")
         assert len(snapshots) == 1
+        state_before_dispose = vm.state
 
         # 当前 loop 已在 asyncio pytest fixture 中运行；
         # 模拟：VM disposed，然后工作线程尝试触发 _notify
@@ -569,10 +570,15 @@ class TestCrossThreadNotification:
 
         t = threading.Thread(target=worker_update, daemon=True)
         t.start()
-        assert t.join(timeout=2.0) is None, "worker 未在 2s 内完成"
+        # join(timeout) 无论线程结束还是超时都返回 None，无法证明线程已结束；
+        # 必须以 is_alive() 判定，卡死 worker 才会让本用例失败。
+        t.join(timeout=2.0)
+        assert not t.is_alive(), "worker 未在 2s 内结束（疑似卡死，可能跨测试残留）"
         assert len(worker_errors) == 0, f"worker _set_state 不应抛异常: {worker_errors[0]!r}"
-        # state 仍为被 disposed 后重置的初始值（DefaultVM dispose 未单独替换 state）
-        # 但 snapshots 已清空（dispose cleared subscribers），因此 notify 时也无可通知对象
+        # disposed 短路：state 对象与值均未被 worker 修改
+        assert vm.state is state_before_dispose
+        assert vm.state.name == "before"
+        # snapshots 已清空（dispose cleared subscribers），notify 时无可通知对象
         assert len(vm._subscribers) == 0
 
     @pytest.mark.asyncio
