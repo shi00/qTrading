@@ -4345,39 +4345,25 @@ def validate_history_query(query: HistoryQuery) -> None:
     if query.cursor is not None:
         if not isinstance(query.cursor, str) or _HISTORY_CURSOR_RE.fullmatch(query.cursor) is None:
             _fail("invalid_cursor", "$.cursor")
-    if query.round_selection.kind == "all_rounds":
-        decode_history_round_selection({"kind": "all_rounds"}, "$.round_selection")
-    else:
-        decode_history_round_selection(
-            {
-                "kind": "exact",
-                "execution_id": query.round_selection.execution_id,
-                "round_id": query.round_selection.round_id,
-            },
-            "$.round_selection",
-        )
+    # 复用 wire 严格解码做内存对象复核：kind 原样透传（不做 else 兜底），
+    # 未知 kind 即使携合法 ID 也在受理阶段拒绝（D15：不放大搜索范围）。
+    round_selection_value: dict[str, object] = {"kind": query.round_selection.kind}
+    if query.round_selection.kind == "exact":
+        round_selection_value["execution_id"] = query.round_selection.execution_id
+        round_selection_value["round_id"] = query.round_selection.round_id
+    decode_history_round_selection(round_selection_value, "$.round_selection")
     if query.agent_filter is not None:
         agent_filter = query.agent_filter
+        agent_filter_value: dict[str, object] = {"kind": agent_filter.kind}
         if agent_filter.kind == "role_identity":
-            decode_history_agent_filter(
-                {
-                    "kind": "role_identity",
-                    "role_id": agent_filter.role_id,
-                    "version_selection": agent_filter.version_selection,
-                    "role_version": agent_filter.role_version,
-                },
-                "$.agent_filter",
-            )
-        else:
-            decode_history_agent_filter(
-                {
-                    "kind": "execution_agent",
-                    "execution_id": agent_filter.execution_id,
-                    "node_id": agent_filter.node_id,
-                    "round_id": agent_filter.round_id,
-                },
-                "$.agent_filter",
-            )
+            agent_filter_value["role_id"] = agent_filter.role_id
+            agent_filter_value["version_selection"] = agent_filter.version_selection
+            agent_filter_value["role_version"] = agent_filter.role_version
+        elif agent_filter.kind == "execution_agent":
+            agent_filter_value["execution_id"] = agent_filter.execution_id
+            agent_filter_value["node_id"] = agent_filter.node_id
+            agent_filter_value["round_id"] = agent_filter.round_id
+        decode_history_agent_filter(agent_filter_value, "$.agent_filter")
     # R02 范围规则（L406）
     if query.scope == "all_saved":
         if query.session_id is not None or query.child_target is not None:

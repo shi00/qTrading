@@ -185,6 +185,44 @@ class TestAgentFilter:
             decode_history_agent_filter({"kind": "by_name", "name": "模型A"})
 
 
+class TestMemoryKindWhitelist:
+    """D15：内存直接构造 HistoryQuery 的 kind 亦按严格白名单拒绝（无 else 兜底）。"""
+
+    def test_unknown_round_selection_kind_rejected_even_with_valid_ids(self) -> None:
+        bogus = HistoryRoundSelection(kind="latest", execution_id="exec-leaf", round_id="round-1")
+        query = base_query(session_id="s-1", round_selection=bogus)
+        with pytest.raises(AgentValidationError) as exc:
+            validate_history_query(query)
+        assert exc.value.code == "invalid_round_selection_kind"
+
+    def test_unknown_agent_filter_kind_rejected_even_with_valid_address(self) -> None:
+        bogus = HistoryAgentFilter(kind="by_name", execution_id="exec-1", node_id="root", round_id="round-1")
+        query = base_query(session_id="s-1", agent_filter=bogus)
+        with pytest.raises(AgentValidationError) as exc:
+            validate_history_query(query)
+        assert exc.value.code == "invalid_agent_filter_kind"
+
+    def test_known_kinds_accepted(self) -> None:
+        validate_history_query(base_query(session_id="s-1"))
+        validate_history_query(base_query(session_id="s-1", round_selection=EXACT_ROUND))
+        validate_history_query(
+            base_query(
+                session_id="s-1",
+                agent_filter=HistoryAgentFilter(
+                    kind="role_identity", role_id="role-1", version_selection="all_versions"
+                ),
+            )
+        )
+        validate_history_query(
+            base_query(
+                session_id="s-1",
+                agent_filter=HistoryAgentFilter(
+                    kind="execution_agent", execution_id="exec-1", node_id="root", round_id="round-1"
+                ),
+            )
+        )
+
+
 class TestScopeRules:
     def test_all_saved_rejects_session_target(self) -> None:
         query = base_query(scope="all_saved", session_id="s-1")
