@@ -67,7 +67,7 @@ from fastmcp import Client
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 
 from core.agent_types import AgentErrorCode, AgentServiceError, MCPTransportKind
-from services.agent_service.mcp import MCPServerConfig, MCPToolDescriptor
+from services.agent_service.mcp import MCPCallNotDispatched, MCPServerConfig, MCPToolDescriptor
 from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 from utils.sanitizers import DataSanitizer
 
@@ -364,13 +364,14 @@ class MCPSendGate:
     def before_send(self, operation: str, *, deadline_s: int) -> MCPDeadline:
         """计数，并为本次 operation 新建 deadline（不从连接期继承起点）。"""
         self._sends += 1
+        # 两处拒绝都发生在交给传输层之前：以 MCPCallNotDispatched 明确「效果确定未发生」（I15）。
         if not self._alive():
-            raise AgentServiceError(
+            raise MCPCallNotDispatched(
                 AgentErrorCode.CONFIG_UNAVAILABLE, "mcp session is lost; refusing to send", self._identity
             )
         deadline = self._deadline_factory(deadline_s)
         if deadline.expired():
-            raise AgentServiceError(
+            raise MCPCallNotDispatched(
                 AgentErrorCode.POLICY_DENIED, f"mcp deadline exceeded before send: {operation}", self._identity
             )
         return deadline
