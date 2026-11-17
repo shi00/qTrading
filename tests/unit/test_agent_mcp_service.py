@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,7 @@ from core.agent_types import (
     sha256_hex,
 )
 from services.agent_service.mcp import (
+    MCPClientFactoryPort,
     MCPConnectionTestReceipt,
     MCPImplementationProbe,
     MCPServerConfig,
@@ -72,9 +75,9 @@ def _budget() -> MCPBudgetProfile:
     )
 
 
-def _audit() -> MCPReadOnlyAudit:
+def _audit(identity: MCPServiceIdentity | None = None) -> MCPReadOnlyAudit:
     return MCPReadOnlyAudit(
-        service=_identity(),
+        service=identity or _identity(),
         tool_scope=("read_file",),
         implementation_fingerprint=_FINGERPRINT,
         evidence_source="local-executable-inspection",
@@ -382,3 +385,137 @@ class TestNoAutoReconnectAndDisconnect:
         # 探针端口仅声明形状：未实现真实本机载荷核定，禁止声称已验证。
         assert hasattr(MCPImplementationProbe, "probe")
         assert MCP_DEFAULT_DEADLINE_S == 30
+
+
+async def _wait_until(predicate: Callable[[], bool], *, attempts: int = 200) -> None:
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition was not reached")
+
+
+class _CountingFactory:
+    """open 首个 await 即让出，以便并发调用真正交错；记录实际 open 次数与存活 client。"""
+
+    def __init__(self, *, delay: float = 0.0, fail_times: int = 0) -> None:
+        self.delay = delay
+        self.fail_times = fail_times
+        self.opened: list[MCPServerConfig] = []
+        self.sessions: list[_FakeSession] = []
+
+    async def open(self, config: MCPServerConfig) -> _FakeSession:
+        self.opened.append(config)
+        await asyncio.sleep(self.delay)
+        if self.fail_times:
+            self.fail_times -= 1
+            raise RuntimeError("open failed")
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        self.sessions.append(session)
+        return session
+
+    def live(self) -> list[_FakeSession]:
+        return [session for session in self.sessions if not session.closed]
+
+
+class _GatedFactory:
+    """按服务身份/版本分闸的 open：用于验证不同身份互不阻塞。"""
+
+    def __init__(self) -> None:
+        self.opened: list[MCPServerConfig] = []
+        self.sessions: list[_FakeSession] = []
+        self.gates: dict[str, asyncio.Event] = {}
+
+    def gate(self, key: str) -> asyncio.Event:
+        return self.gates.setdefault(key, asyncio.Event())
+
+    async def open(self, config: MCPServerConfig) -> _FakeSession:
+        self.opened.append(config)
+        await self.gate(config.identity.stable_key()).wait()
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        self.sessions.append(session)
+        return session
+
+
+def _factory_manager(factory: MCPClientFactoryPort) -> tuple[SharedMCPConnectionManager, _FakeStore]:
+    store = _FakeStore()
+    manager = SharedMCPConnectionManager(store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT))
+    return manager, store
+
+
+class TestConnectSingleFlight:
+    @pytest.mark.asyncio
+    async def test_100_concurrent_connects_open_once_with_single_live_owner(self) -> None:
+        factory = _CountingFactory()
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+
+        await asyncio.gather(*(manager.connect(_identity()) for _ in range(100)))
+
+        assert len(factory.opened) == 1
+        assert len(factory.live()) == 1
+        assert manager.is_connected(_identity()) is True
+        assert manager.session(_identity()) is factory.live()[0]
+
+        await manager.connect(_identity())
+        assert len(factory.opened) == 1  # 已存活 owner 不再 open
+
+    @pytest.mark.asyncio
+    async def test_failed_open_is_shared_and_leaves_no_owner(self) -> None:
+        factory = _CountingFactory(fail_times=1)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+
+        results = await asyncio.gather(*(manager.connect(_identity()) for _ in range(10)), return_exceptions=True)
+
+        assert len(factory.opened) == 1  # 失败也只尝试一次，等待者共享该结果
+        assert all(isinstance(item, RuntimeError) for item in results)
+        assert manager.is_connected(_identity()) is False
+        assert factory.live() == []
+
+        await manager.connect(_identity())  # 失败后不留残留 single-flight 状态
+        assert len(factory.opened) == 2
+        assert len(factory.live()) == 1
+
+    @pytest.mark.asyncio
+    async def test_cancelled_waiter_does_not_abort_shared_connect(self) -> None:
+        factory = _CountingFactory(delay=0.01)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+
+        leader = asyncio.create_task(manager.connect(_identity()))
+        await _wait_until(lambda: len(factory.opened) == 1)
+        waiter = asyncio.create_task(manager.connect(_identity()))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await waiter
+        assert isinstance(excinfo.value, asyncio.CancelledError)
+        assert waiter.cancelled() is True
+        assert manager.is_connected(_identity()) is False  # 取消单个等待者不提前登记
+
+        await asyncio.wait_for(leader, timeout=1.0)
+        assert len(factory.opened) == 1
+        assert len(factory.live()) == 1
+        assert manager.session(_identity()) is factory.live()[0]
+
+    @pytest.mark.asyncio
+    async def test_different_identities_do_not_block_each_other(self) -> None:
+        factory = _GatedFactory()
+        manager, store = _factory_manager(factory)
+        other = MCPServiceIdentity(service_id="svc-remote-tools", config_version=1)
+        await store.save(_config())
+        await store.save(_config(identity=other, audit=_audit(other)))
+        factory.gate(other.stable_key()).set()
+
+        blocked = asyncio.create_task(manager.connect(_identity()))
+        await _wait_until(lambda: len(factory.opened) == 1)
+
+        await asyncio.wait_for(manager.connect(other), timeout=1.0)
+        assert blocked.done() is False  # 前一身份仍被自身 open 阻塞
+
+        factory.gate(_identity().stable_key()).set()
+        await asyncio.wait_for(blocked, timeout=1.0)
+        assert len(factory.opened) == 2
+        assert manager.is_connected(_identity()) is True
+        assert manager.is_connected(other) is True
