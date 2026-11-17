@@ -647,21 +647,52 @@ async def run_leaf_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     return await execute_leaf_step(payload)
 
 
-#: 叶 workflow 的失败状态（未判定异常/恢复耗尽）：只报通用失败码，不泄漏消息（R9）。
-_LEAF_FAILED_STATUSES: Final[frozenset[str]] = frozenset(
+#: 需要读取叶执行 step 落盘记录的原生状态（原生状态本身不足以判定实际退出与成果）。
+_LEAF_EVIDENCE_STATUSES: Final[frozenset[str]] = frozenset(
     {
         WorkflowStatusString.ERROR.value,
         WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value,
+        WorkflowStatusString.CANCELLED.value,
     }
 )
 
 
-def _terminal_outcome(node_id: str, *, state: str, output: object) -> NodeOutcome | None:
+async def _leaf_step_evidence(workflow_id: str) -> tuple[bool, object]:
+    """读取叶执行 step 的落盘记录：``(已有执行记录, 已落盘成果)``。
+
+    DBOS 默认不抢占在途 step（``preemptible=False``）：取消可能先落到工作流状态，
+    而在途 IO 结束后仍会把 ``agent_leaf_execute`` 的成果写入 step 记录。故只能在
+    step 落盘后断言「实际退出」，不得据原生状态冒充（R04）。
+    """
+
+    for step in await DBOS.list_workflow_steps_async(workflow_id):
+        if step["function_name"] == LEAF_EXECUTE_STEP_NAME:
+            return True, step["output"]
+    return False, None
+
+
+def _terminal_outcome(
+    node_id: str,
+    *,
+    state: str,
+    output: object,
+    executed: bool = False,
+    step_output: object = None,
+) -> NodeOutcome | None:
     """把子 workflow 状态投影为叶终态事实；非终态返回 ``None``（不伪造结论）。
 
+    原生状态、实际退出与成果覆盖分开核对，互不冒充（R04）：
+
+    - ``state`` 为 DBOS 原生状态，本身不等于业务结论；
+    - ``executed`` 表示叶执行 step 已有落盘记录（实际 IO 已结束并有可核对结果）；
+    - ``step_output`` 为已落盘成果——取消/工作流级错误后到达的成果仍按真实成果
+      投影（含 ``partial``），不被 ``ended``/``failed`` 覆盖。
+
     - ``SUCCESS``：返回值必须是本节点的封闭终态 wire（身份核验）；
+    - 有落盘成果：直接投影该成果；
     - ``ERROR`` / 恢复耗尽：``failed``（通用错误码，明细留在 DBOS 状态，R9）；
-    - ``CANCELLED``：``ended``（外部终止，不当作成功或业务失败）；
+    - ``CANCELLED``：已有执行记录但无成果（step 报错）→ ``failed``；无任何执行
+      记录（如启动隔离取消）→ ``ended``，成果覆盖未知，不用空成果冒充；
     - 其余（PENDING/ENQUEUED/DELAYED）：非终态，不参与收敛。
     """
 
@@ -670,9 +701,18 @@ def _terminal_outcome(node_id: str, *, state: str, output: object) -> NodeOutcom
         if outcome.node_id != node_id:
             _fail("outcome_identity_mismatch", f"$.children[{node_id}].output.node_id")
         return outcome
-    if state in _LEAF_FAILED_STATUSES:
+    if state in _LEAF_EVIDENCE_STATUSES and step_output is not None:
+        outcome = decode_node_outcome(step_output, f"$.children[{node_id}].step_output")
+        if outcome.node_id != node_id:
+            _fail("outcome_identity_mismatch", f"$.children[{node_id}].step_output.node_id")
+        return outcome
+    if state == WorkflowStatusString.ERROR.value:
         return NodeOutcome(node_id=node_id, state="failed", error_code="leaf_workflow_error")
+    if state == WorkflowStatusString.MAX_RECOVERY_ATTEMPTS_EXCEEDED.value:
+        return NodeOutcome(node_id=node_id, state="failed", error_code="leaf_workflow_recovery_exhausted")
     if state == WorkflowStatusString.CANCELLED.value:
+        if executed:
+            return NodeOutcome(node_id=node_id, state="failed", error_code="leaf_workflow_error")
         return NodeOutcome(node_id=node_id, state="ended", error_code="leaf_workflow_cancelled")
     return None
 
@@ -687,6 +727,8 @@ async def observe_leaf_children(children: list[dict[str, str]], slice_seconds: f
     """
 
     deadline = time.monotonic() + max(slice_seconds, 0.0)
+    # 每个工作流在本 slice 内只读一次执行记录（实际退出/成果覆盖证据）。
+    evidence: dict[str, tuple[bool, object]] = {}
     while True:
         facts: list[dict[str, Any]] = []
         for child in children:
@@ -695,7 +737,20 @@ async def observe_leaf_children(children: list[dict[str, str]], slice_seconds: f
             status: WorkflowStatus | None = await DBOS.get_workflow_status_async(workflow_id)
             if status is None:
                 _fail("unknown_leaf_execution", f"$.children[{node_id}]")
-            outcome = _terminal_outcome(node_id, state=status.status, output=status.output)
+            executed, step_output = False, None
+            if status.status in _LEAF_EVIDENCE_STATUSES:
+                cached = evidence.get(workflow_id)
+                if cached is None:
+                    cached = await _leaf_step_evidence(workflow_id)
+                    evidence[workflow_id] = cached
+                executed, step_output = cached
+            outcome = _terminal_outcome(
+                node_id,
+                state=status.status,
+                output=status.output,
+                executed=executed,
+                step_output=step_output,
+            )
             if outcome is not None:
                 facts.append(outcome.to_wire())
         if facts or time.monotonic() >= deadline:
