@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
@@ -105,6 +106,7 @@ from core.model_management_types import (
     ChatTurnSettlementState,
     ChatTurnTransportState,
     ExecutionSnapshot,
+    FunctionToolSpec,
     InferenceAdapter,
     InferenceRequest,
     NormalizedLLMUsage,
@@ -1912,7 +1914,8 @@ class _TurnIdentity:
 
     ``payload`` 为预留估算投影（F19 金额估算输入，非出站形状）：旧入口原样
     携带 InferenceRequest.payload；chat 入口经 :func:`_chat_estimation_payload`
-    投影 instructions / messages 文本与 max_output_tokens。
+    投影完整输入（instructions / 消息正文 / 历史工具调用参数 / tools 与
+    output_tools schema / output schema / max_output_tokens）。
     """
 
     invocation_id: str
@@ -2123,21 +2126,81 @@ def _legacy_invoke(
     return _invoke
 
 
+#: llm_tokens 预留估算的输入投影键（M09）：消息正文 + 历史工具调用参数 +
+#: tools / output_tools schema + output schema 全部计入。漏项会让预留金额系统性
+#: 偏低，而真实 usage 只能在派发后结算，补不回派发前的少估。
+_LLM_INPUT_PROJECTION_KEYS: Final[tuple[str, ...]] = (
+    "system_prompt",
+    "prompt",
+    "tool_calls_text",
+    "tools_schema",
+    "output_tools_schema",
+    "output_schema",
+)
+
+#: 预留估算不可估信号键（M09 / R21）：存在桥层无尺寸 / 计费语义的输入（图片
+#: part）时，投影无法覆盖实际完整输入 → 显式不可估，不以偏低数值冒充估算。
+_ESTIMATION_UNESTIMABLE_KEY: Final[str] = "unestimable_input"
+
+
+def _serialize_tool_specs(specs: tuple[FunctionToolSpec, ...]) -> str:
+    """工具规范序列化（估算投影用）：按工具名稳定排序的 JSON，覆盖 description
+    与完整 ``json_schema``（出站 tools 的真实计费输入）。"""
+    if not specs:
+        return ""
+    payload = [
+        {
+            "name": spec.name,
+            "description": spec.description,
+            "json_schema": spec.json_schema,
+            "schema_version": spec.schema_version,
+            "output_tool": spec.output_tool,
+        }
+        for spec in sorted(specs, key=lambda item: item.name)
+    ]
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _chat_estimation_payload(request: ChatTurnRequest) -> dict[str, Any]:
-    """chat 回合的预留估算投影（F19 金额估算输入，非出站形状）：``instructions``
-    与 ``messages`` 文本 part 拼接 + ``max_output_tokens``——键口径与
-    :func:`_estimate_reservation_amount` 的 llm_tokens 估算对齐（system_prompt /
-    prompt / max_tokens）；图片 part 不参与估算（桥层无二进制解析语义）。"""
+    """chat 回合的预留估算投影（F19 金额估算输入，非出站形状）。
+
+    M09：投影必须覆盖实际完整输入——``instructions`` + 消息正文 + 历史工具调用
+    参数（``assistant_tool_calls`` 的 name / arguments_json）+ ``tools`` /
+    ``output_tools`` schema + ``output_schema``（出站 response_format）+
+    ``max_output_tokens``；键口径与 :func:`_estimate_reservation_amount` 的
+    llm_tokens 估算对齐。只估算正文会让预留金额系统性偏低（供应商硬额可能在
+    usage 结算前即被超出，而结算补不回少估）。
+
+    图片 part 在桥层无二进制解析 / 计费语义 → 标
+    ``unestimable_input``，估算显式返回不可估（R21），不以正文估算冒充完整输入。
+    """
     prompt_parts: list[str] = []
+    tool_calls: list[str] = []
+    has_image = False
     for message in request.messages:
         for part in message.content_parts:
             if isinstance(part, TextContentPart):
                 prompt_parts.append(part.text)
-    return {
+            else:
+                has_image = True
+        for call in message.assistant_tool_calls:
+            tool_calls.append(f"{call.name}:{call.arguments_json}")
+    payload: dict[str, Any] = {
         "system_prompt": "\n".join(request.instructions),
         "prompt": "\n".join(prompt_parts),
+        "tool_calls_text": "\n".join(tool_calls),
+        "tools_schema": _serialize_tool_specs(request.tools),
+        "output_tools_schema": _serialize_tool_specs(request.output_tools),
+        "output_schema": (
+            json.dumps(request.output_schema, ensure_ascii=False, sort_keys=True, default=str)
+            if request.output_schema is not None
+            else ""
+        ),
         "max_tokens": request.max_output_tokens,
     }
+    if has_image:
+        payload[_ESTIMATION_UNESTIMABLE_KEY] = True
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -2279,19 +2342,22 @@ def _estimate_reservation_amount(
 
     dispatch 不持有请求 payload，单次金额只能在执行侧逐候选估算；估算口径与
     结算同源（``compute_cost_cny``，不可计价一律 ``None``）：
-    - ``llm_tokens``：输入 = ``system_prompt`` + ``prompt`` 的 token 估算；输出
-      取 payload ``max_tokens``（未声明时按 ``OUTPUT_RESERVE_TOKENS`` 保守预留）；
+    - ``llm_tokens``：输入 = ``_LLM_INPUT_PROJECTION_KEYS`` 各投影键的 token 估算
+      之和（正文字段 + 历史工具调用参数 + tools/output_tools schema + output
+      schema）；输出取 payload ``max_tokens``（未声明时按
+      ``OUTPUT_RESERVE_TOKENS`` 保守预留）；
     - ``encoder_input_tokens``：payload ``texts`` 逐条 token 估算求和；
-    - 计价快照缺失 / ``mode`` 非 ``estimate_cost`` / 单价或用量不可得 → ``None``
-      （R21：未知成本不以 0 占位）。D13-005：限额已配置时 ``None`` 由调用方按
+    - 计价快照缺失 / ``mode`` 非 ``estimate_cost`` / 单价或用量不可得 / 投影标
+      ``unestimable_input``（存在无计费语义的输入）→ ``None``（R21：未知成本不
+      以 0 或正文估算冒充）。D13-005：限额已配置时 ``None`` 由调用方按
       fail-closed 拒绝（不静默降级 usage_only 绕过预算门）。
     """
     if pricing is None or pricing.mode != "estimate_cost":
         return None
     if pricing.pricing_unit == "llm_tokens":
-        input_tokens = _estimate_tokens(payload.get("system_prompt"), model) + _estimate_tokens(
-            payload.get("prompt"), model
-        )
+        if payload.get(_ESTIMATION_UNESTIMABLE_KEY):
+            return None
+        input_tokens = sum(_estimate_tokens(payload.get(key), model) for key in _LLM_INPUT_PROJECTION_KEYS)
         if input_tokens <= 0:
             return None
         raw_max_tokens = payload.get("max_tokens")

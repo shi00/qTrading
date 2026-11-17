@@ -42,11 +42,17 @@ from core.errors import AIContentRefusedError
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
+    AssistantToolCall,
     AttemptContext,
+    ChatMessage,
+    ChatTurnRequest,
     ExecutionSnapshot,
+    FunctionToolSpec,
+    ImageContentPart,
     InferenceRequest,
     NormalizedLLMUsage,
     ResolvedConnection,
+    TextContentPart,
     ValidatedBusinessOutput,
 )
 from core.model_management_types import PersistenceOutcome
@@ -58,6 +64,7 @@ from services.ai_service.scenario_executor import (
     _CANCEL_CLEANUP_TIMEOUT_S,
     _LOOP_STATE_KEY,
     _LoopState,
+    _chat_estimation_payload,
     _classify_adapter_failure,
     _estimate_reservation_amount,
 )
@@ -2472,6 +2479,101 @@ class TestReservationAmountEstimation:
         assert _estimate_reservation_amount(self._pricing(), {}, model="m") is None
         encoder = self._pricing(pricing_unit="encoder_input_tokens", encoder_price_per_m=Decimal("1.00"))
         assert _estimate_reservation_amount(encoder, {"prompt": "x"}, model="m") is None
+
+    def test_llm_tokens_counts_schema_and_tool_call_arguments(self, monkeypatch):
+        """M09：正文不变仅扩大 tools schema / 历史工具参数 → 估算随之增大。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: len(text or ""),
+        )
+        body = {"system_prompt": "系统提示", "prompt": "研究问题", "max_tokens": 100}
+        tight = {
+            **body,
+            "tool_calls_text": "search:{}",
+            "tools_schema": '{"name": "search"}',
+            "output_schema": '{"type": "object"}',
+        }
+        wide = {
+            **body,
+            "tool_calls_text": 'search:{"query": "' + "q" * 400 + '"}',
+            "tools_schema": '{"name": "search", "description": "' + "d" * 400 + '"}',
+            "output_schema": '{"type": "object", "properties": {"score": {"type": "number"}}}',
+        }
+        tight_amount = _estimate_reservation_amount(self._pricing(), tight, model="m")
+        wide_amount = _estimate_reservation_amount(self._pricing(), wide, model="m")
+        assert tight_amount is not None and wide_amount is not None
+        assert Decimal(wide_amount) > Decimal(tight_amount)
+
+    def test_unestimable_projection_returns_none(self, monkeypatch):
+        """M09 / R21：投影标记不可估（图片等无计费语义输入）→ 不产生数值。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: len(text or ""),
+        )
+        payload = {"system_prompt": "系统提示", "prompt": "研究问题", "unestimable_input": True}
+        assert _estimate_reservation_amount(self._pricing(), payload, model="m") is None
+
+    def test_chat_estimation_payload_covers_full_projection(self):
+        """M09：chat 投影字段齐全——正文 + 历史工具参数 + tools/output_tools
+        schema + output schema + max_output_tokens。"""
+        request = ChatTurnRequest(
+            model_call_id="mc-m09",
+            messages=(
+                ChatMessage(role="user", content_parts=(TextContentPart(text="研究问题"),)),
+                ChatMessage(
+                    role="assistant",
+                    content_parts=(),
+                    assistant_tool_calls=(AssistantToolCall(call_id="c1", name="search", arguments_json='{"q": "x"}'),),
+                ),
+                ChatMessage(role="tool", content_parts=(TextContentPart(text="工具结果"),), tool_call_id="c1"),
+            ),
+            instructions=("系统提示",),
+            tools=(
+                FunctionToolSpec(
+                    name="search", description="检索", json_schema={"type": "object"}, schema_version="v1"
+                ),
+            ),
+            output_schema={"type": "object", "properties": {"score": {"type": "number"}}},
+            frozen_params={},
+            max_output_tokens=256,
+            deadline=0.0,
+            output_tools=(
+                FunctionToolSpec(
+                    name="final",
+                    description="结构 final",
+                    json_schema={"type": "object"},
+                    schema_version="v1",
+                    output_tool=True,
+                ),
+            ),
+        )
+        payload = _chat_estimation_payload(request)
+        assert payload["system_prompt"] == "系统提示"
+        assert payload["prompt"] == "研究问题\n工具结果"
+        assert "search" in payload["tool_calls_text"] and '{"q": "x"}' in payload["tool_calls_text"]
+        assert "检索" in payload["tools_schema"]
+        assert "final" in payload["output_tools_schema"]
+        assert "score" in payload["output_schema"]
+        assert payload["max_tokens"] == 256
+        assert "unestimable_input" not in payload
+
+    def test_chat_estimation_payload_marks_image_unestimable(self):
+        """M09 / R21：图片 part 无桥层计费语义 → 投影显式标记不可估。"""
+        request = ChatTurnRequest(
+            model_call_id="mc-m09-img",
+            messages=(
+                ChatMessage(role="user", content_parts=(ImageContentPart(mime="image/png", binary_ref="bin-1"),)),
+            ),
+            instructions=(),
+            tools=(),
+            output_schema=None,
+            frozen_params={},
+            max_output_tokens=None,
+            deadline=0.0,
+        )
+        payload = _chat_estimation_payload(request)
+        assert payload["unestimable_input"] is True
+        assert _estimate_reservation_amount(self._pricing(), payload, model="m") is None
 
 
 class TestC12TenacityRetryContract:
