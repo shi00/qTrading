@@ -23,6 +23,7 @@ from typing import Any
 
 import flet as ft
 
+from ui.agent_decision_arbiter import submit_decision
 from ui.components.flet_type_helpers import (
     get_control_attr,
     safe_controls,
@@ -37,9 +38,15 @@ from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS, Eid
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
+from ui.viewmodels.research_observer_view_model import (
+    LOCAL_DESKTOP_USER_SCOPE,
+    resolve_agent_research_service,
+    shared_research_observer,
+)
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
+from ui.views.research_observer_panel import ResearchObserverPanel
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
 from ui.views.task_center_view import TaskCenterView
@@ -372,7 +379,7 @@ def _build_nav_badge_icon(icon: ft.IconData, running_count: int) -> ft.Stack:
 
 
 @ft.component
-def AppLayout() -> ft.Container:
+def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     """主应用布局 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
@@ -381,6 +388,13 @@ def AppLayout() -> ft.Container:
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 子视图直接函数调用消费 (无 use_ref cache), 每次重渲染重新构造
     - 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
+
+    P02（检视）: 壳层公共区挂非模态研究观察层 + 统一必要决定。
+    - ``agent_wiring`` 为 P01 组合根接线结果（结构与 app.agent_wiring.AgentWiring 一致，
+      UI 不 import app 层）；未接线/未就绪时观察层如实显示不可用（R21）。
+    - 七项业务导航不变；导航点击 / Ctrl+1—7 只收起观察层：不清稿、不停止/取消研究。
+    - 答复提交唯一路径：仲裁层（``ui.agent_decision_arbiter``）→ 共享 VM →
+      ``agent_wiring.service``（facade），UI 不直连 DAO。
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
     ft.use_state(get_observable_state)
@@ -391,7 +405,62 @@ def AppLayout() -> ft.Container:
     # --- Phase 6.1 FR-UX-006: nav_tasks 运行中任务数角标 (TaskManager.subscribe 驱动) ---
     nav_badge_state, _ = use_viewmodel(factory=NavBadgeViewModel)
 
+    # --- P02: 壳层公共研究观察层（跨页共享 VM；观察不控制执行） ---
+    research_service, research_unavailable_key = resolve_agent_research_service(agent_wiring)
+    research_state, research_vm = use_viewmodel(
+        factory=lambda: shared_research_observer(
+            research_service,
+            user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
+            unavailable_reason_key=research_unavailable_key,
+        )
+    )
+    research_open, set_research_open = ft.use_state(False)
+    decision_notice: str | None = None
+    decision_notice, set_decision_notice = ft.use_state(lambda: decision_notice)
+    # 跨 effect/事件闭包读取最新可见性（导航订阅是 mount 期闭包，避免 stale 快照）；
+    # use_ref 仅允许 None 初始值，这里存可见性布尔快照。
+    research_open_ref: Any = ft.use_ref(None)
+    research_open_ref.current = research_open
+
+    def _collapse_research() -> None:
+        """只收起观察层：不清空草稿、不停止/取消研究（观察不控制执行）。"""
+        if research_open_ref.current:
+            research_open_ref.current = False
+            set_research_open(False)
+
+    def _toggle_research(_e: ft.ControlEvent | None = None) -> None:
+        opening = not bool(research_open_ref.current)
+        research_open_ref.current = opening
+        set_research_open(opening)
+        if not opening:
+            return
+        set_decision_notice(None)
+        _refresh_research()
+
+    def _refresh_research() -> None:
+        """只读刷新观察层（不停止/取消任何研究）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.refresh)
+
+    def _on_draft_change(decision_id: str, text: str) -> None:
+        research_vm.set_answer_draft(decision_id, text)
+
+    def _submit_decision(decision_id: str) -> None:
+        """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。"""
+        page = _get_page()
+        if page is None:
+            return
+        refusal = submit_decision(
+            page=page,
+            vm=research_vm,
+            owner="research_observer",
+            decision_id=decision_id,
+        )
+        set_decision_notice(I18n.get(refusal) if refusal is not None else None)
+
     # --- Pure UI state ---
+
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
     nav_collapsed, set_nav_collapsed = ft.use_state(False)
     # APP-F1: current_tab 跨渲染镜像 ref —— use_effect(dependencies=[]) 的长期订阅
@@ -432,6 +501,8 @@ def AppLayout() -> ft.Container:
             current_tab_ref.current = new_tab
 
     def _on_nav_change(e: ft.ControlEvent) -> None:
+        # P02: 业务导航（含当前业务项）只收起观察层，不清稿、不控制执行
+        _collapse_research()
         selected = get_control_attr(e.control, ft.NavigationRail, "selected_index")
         if selected == int(current_tab):
             return
@@ -457,6 +528,8 @@ def AppLayout() -> ft.Container:
         if page is None:
             return
         if action.startswith(SHORTCUT_TAB_PREFIX):
+            # P02: Ctrl+1—7（含当前业务项）只收起观察层，不清稿、不控制执行
+            _collapse_research()
             target = int(action[len(SHORTCUT_TAB_PREFIX) :])
             page.run_task(_do_tab_switch, target)
         elif action == SHORTCUT_FOCUS_NAV:
@@ -528,6 +601,8 @@ def AppLayout() -> ft.Container:
             再导航回初始 tab」误判 same-tab 吞掉), 须经 current_tab_ref 读最新
             值 (APP-F1); state 写入保持函数式更新。
         """
+        # 业务导航（含深链）一律先收起观察层：不清稿、不停止/取消研究
+        _collapse_research()
         # F13: 每次 backtest 导航递增透传请求序号 (函数式更新, 防闭包 stale 快照)。
         # 置于 same-tab 早返回之前 —— 即使回测页已挂载或当前 tab 相同, 新序号仍触发
         # BacktestView 消费 pending prefill (常驻页不重新 mount, 仅靠序号驱动)。
@@ -665,6 +740,15 @@ def AppLayout() -> ft.Container:
                     fit=ft.BoxFit.CONTAIN,
                 ),
                 brand_text,
+                # P02: 公共区研究入口（不新增第八业务导航；展开非模态观察层）
+                ft.IconButton(
+                    icon=ft.Icons.SCIENCE_OUTLINED,
+                    selected=research_open,
+                    selected_icon=ft.Icons.SCIENCE,
+                    icon_size=AppStyles.FONT_SIZE_HEADLINE,
+                    tooltip=I18n.get("agent_research_toggle"),
+                    on_click=safe_on_click(_toggle_research),
+                ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=5,
@@ -698,34 +782,70 @@ def AppLayout() -> ft.Container:
         bgcolor=AppColors.BACKGROUND,
     )
 
+    # P02: 非模态研究观察层（展开时占用右侧公共区；业务页仍常驻，不销毁现场）
+    research_panel = (
+        ResearchObserverPanel(
+            state=research_state,
+            notice=decision_notice,
+            on_close=lambda: _toggle_research(None),
+            on_refresh=_refresh_research,
+            on_draft_change=_on_draft_change,
+            on_submit=_submit_decision,
+        )
+        if research_open
+        else None
+    )
+
     # --- SEC-03 状态栏指示器: 底部轻量「本会话外发 N 次」---
     # 数据源 egress_status_state.count（内存读, 无阻塞, R16）; 会话计数进程内单调、重启归零。
-    status_bar_egress = ft.Container(
-        content=ft.Row(
-            [
-                ft.Icon(
-                    ft.Icons.SHIELD,
-                    size=AppStyles.FONT_SIZE_BODY_SM,
-                    color=AppColors.TEXT_HINT,
-                ),
-                ft.Text(
-                    I18n.get("egress_session_indicator").format(count=egress_status_state.count),
-                    size=AppStyles.FONT_SIZE_CAPTION,
-                    color=AppColors.TEXT_HINT,
-                ),
-            ],
-            spacing=6,
+    status_bar_items: list[ft.Control] = [
+        ft.Icon(
+            ft.Icons.SHIELD,
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_HINT,
         ),
+        ft.Text(
+            I18n.get("egress_session_indicator").format(count=egress_status_state.count),
+            size=AppStyles.FONT_SIZE_CAPTION,
+            color=AppColors.TEXT_HINT,
+        ),
+    ]
+    if research_state.pending_count > 0:
+        # P02/F31: 持续待处理指示（非抢焦点；显式点击打开观察层）
+        status_bar_items.append(ft.Container(expand=True))
+        status_bar_items.append(
+            ft.TextButton(
+                content=ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.NOTIFICATIONS_OUTLINED,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.ERROR,
+                        ),
+                        ft.Text(
+                            I18n.get("agent_research_pending_fmt").format(count=research_state.pending_count),
+                            size=AppStyles.FONT_SIZE_CAPTION,
+                            color=AppColors.ERROR,
+                        ),
+                    ],
+                    spacing=AppStyles.SPACING_XS,
+                ),
+                tooltip=I18n.get("agent_research_toggle"),
+                on_click=safe_on_click(_toggle_research),
+            )
+        )
+    status_bar_egress = ft.Container(
+        content=ft.Row(status_bar_items, spacing=6),
         padding=ft.Padding.only(left=16, right=16, top=6, bottom=6),
         bgcolor=AppColors.SURFACE,
         border=ft.Border(top=ft.BorderSide(1, AppColors.BORDER)),
     )
 
+    body_controls: list[ft.Control] = [nav_rail, ft.VerticalDivider(width=1), body]
+    if research_panel is not None:
+        body_controls.append(research_panel)
     body_region = ft.Container(
-        content=ft.Row(
-            [nav_rail, ft.VerticalDivider(width=1), body],
-            expand=True,
-        ),
+        content=ft.Row(safe_controls(body_controls), expand=True),
         expand=True,
     )
 

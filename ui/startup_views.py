@@ -800,7 +800,9 @@ def StartupView(
     if state == StartupState.READY:
         from ui.app_layout import AppLayout
 
-        return AppLayout()
+        # P02: 壳层公共研究观察层需要 P01 组合根接线（facade/宿主就绪门闩）；
+        # 未接线/未就绪时 AppLayout 如实显示不可用（R21），不阻断业务页。
+        return AppLayout(agent_wiring=getattr(controller, "agent_wiring", None))
     if state == StartupState.NEED_ONBOARDING:
         return _build_onboarding_view(controller.onboarding_complete)
     if state == StartupState.INIT_FAILED:

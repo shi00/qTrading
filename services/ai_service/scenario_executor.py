@@ -66,6 +66,13 @@ usage → 结算），入口差异经 :class:`_AttemptPolicy` 参数化：
 - **协议失败**：断流 / 缺 finish / 畸形闭合参数经适配器层
   ``ModelTurnProtocolError`` 呈现为确认失败（B-02-1 已实现协议侧），不因迭代
   耗尽成功（§6.4-4）；取消传播边界沿共享 F19 受限清理后 re-raise（R2）。
+- **M07 资料核权（逐实际 attempt）**：binding 携带 ``data_consent``（受理冻结
+  operation/资料上下文）时，每次实际尝试（含同候选重试与后续备用候选）在预留
+  / 派发 / 外发之前以该 attempt 的准确 ``attempt_id`` 重建请求并调资料 owner
+  ``authorize_data_attempt``——连接授权 + 绑定一致核 + 源 claim 串成同一门；
+  deny / unknown / owner 能力缺失 / 核权异常一律零出站（不进 reserve、不
+  mark_dispatched、不外发），原因随候选决策记录（R21 不静默）并中断遍历。
+  未携带该键时不改变既有链路（旧直推入口政策不变）。
 """
 
 from __future__ import annotations
@@ -79,6 +86,11 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, cast
 
+from core.agent_types import (
+    DataAttemptAuthorization,
+    DataAttemptOutcome,
+    validate_data_attempt_authorization,
+)
 from core.errors import AIContentRefusedError
 from core.model_management_types import (
     AdapterResponse,
@@ -155,6 +167,11 @@ _CANCEL_CLEANUP_MARGIN_S: Final[float] = 1.0
 # F19：取消终态错误码（与超时 / 失败 / 仍运行可区分的账本事实）
 _CANCELLED_ERROR_CODE: Final[str] = "CANCELLED"
 
+# M08：终态状态序（单调守卫）——同一 attempt 的终态写回只允许「不更低」的事实：
+# 重复写同序经 DAO revision 水位幂等，过期（更低序）结果零覆盖并记录忽略原因
+# （R21 不静默）。成功事实一旦落账，迟到的失败 / 取消写回不得将其回退。
+_TERMINAL_STATUS_RANK: Final[Mapping[str, int]] = {"cancelled": 0, "failed": 1, "succeeded": 2}
+
 
 def _cancel_cleanup_budget(recorder: Any) -> float:
     """取消边界清理预算（秒，F19-003）：≥ recorder 落账内部超时 + 余量。
@@ -178,6 +195,67 @@ def _default_local_only_mode_reader() -> bool:
     from utils.config_handler import ConfigHandler
 
     return ConfigHandler.is_ai_local_only_mode()
+
+
+#: 资料核权上下文键（M07，``execute_chat_turn`` 的 binding 可选键 ``data_consent``）：
+#: 受理冻结操作/资料上下文，逐实际 attempt 以真实 ``attempt_id`` 重建核权请求。
+#: 全部键必填——缺键即入口 fail-closed（不静默降级为「无资料约束」）。
+_DATA_CONSENT_BINDING_KEYS: Final[tuple[str, ...]] = (
+    "user_scope",
+    "operation_id",
+    "consent_id",
+    "expected_consent_revision",
+    "connection_id",
+    "connection_revision",
+    "security_revision",
+    "credential_version",
+    "purpose",
+    "target_fingerprint",
+    "scope_version",
+    "source_selections",
+    "source_scope_digest",
+    "owner_epoch",
+    "run_epoch",
+)
+
+
+def _parse_data_consent_binding(raw: object, invocation_id: str) -> DataAttemptAuthorization:
+    """binding ``data_consent`` → 核权请求模板（M07）。
+
+    模板随受理冻结操作/资料上下文（operation / consent / 绑定连接复合引用 /
+    安全修订 / 源选择与摘要 / 代次）；``attempt_id`` 为占位——真实 attempt 在
+    派发前逐次重建（每次实际尝试独立核权，不复用外层一次许可）。入口即校验
+    上下文自洽（含 ``source_scope_digest`` 新鲜重算，不信调用方摘要），脏上下文
+    fail-closed（``ValueError`` 子类，零副作用）。
+    """
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("binding 'data_consent' must be a mapping with the frozen operation context")
+    missing = [key for key in _DATA_CONSENT_BINDING_KEYS if key not in raw]
+    if missing:
+        raise ValueError(f"binding 'data_consent' missing keys: {', '.join(missing)}")
+    selections = raw["source_selections"]
+    template = DataAttemptAuthorization(
+        user_scope=raw["user_scope"],
+        operation_id=raw["operation_id"],
+        # 占位身份：入口只校验上下文自洽；真实 attempt_id 在 _attempt_once 逐次注入。
+        attempt_id=invocation_id,
+        consent_id=raw["consent_id"],
+        expected_consent_revision=raw["expected_consent_revision"],
+        connection_id=raw["connection_id"],
+        connection_revision=raw["connection_revision"],
+        security_revision=raw["security_revision"],
+        credential_version=raw["credential_version"],
+        purpose=raw["purpose"],
+        target_fingerprint=raw["target_fingerprint"],
+        scope_version=raw["scope_version"],
+        source_selections=tuple(selections) if isinstance(selections, list | tuple) else selections,
+        source_scope_digest=raw["source_scope_digest"],
+        owner_epoch=raw["owner_epoch"],
+        run_epoch=raw["run_epoch"],
+    )
+    validate_data_attempt_authorization(template)
+    return template
 
 
 @dataclass(slots=True)
@@ -347,9 +425,10 @@ class ScenarioExecutor:
 
         - **入口协议**（HANDOFF §6.1）：``binding`` 为受理冻结模型绑定（无秘密
           mapping，必需 ``scenario_id`` / ``task_id``，缺失 fail-closed 零副作用）；
-          invocation 身份取 ``model_call_id``（一回合一 invocation，model_call →
-          invocation → attempt 稳定关联）；``on_event`` 可等待（真实 delta 有界
-          事件，背压经 await 透传）；
+          可选 ``data_consent`` 为冻结 operation/资料上下文（M07：逐实际 attempt
+          派发前新鲜核权，见模块契约）；invocation 身份取 ``model_call_id``
+          （一回合一 invocation，model_call → invocation → attempt 稳定关联）；
+          ``on_event`` 可等待（真实 delta 有界事件，背压经 await 透传）；
         - **聊天适配器**：经 :class:`core.model_management_types.ChatInferenceAdapter`
           协议（``invoke_chat``）执行——非聊天适配器（FinBERT 等）派发前淘汰
           （rejected，零预留副作用）；``stream=True``、``response_format=output_schema``
@@ -381,6 +460,14 @@ class ScenarioExecutor:
             deadline=request.deadline,
             run_id=None,
             payload=_chat_estimation_payload(request),
+        )
+        # M07：受理冻结资料/操作上下文（可选键）。声明即逐实际 attempt 新鲜核权；
+        # 未声明不改变既有链路（旧直推入口与未接线调用方政策不变）。
+        raw_data_consent = binding.get("data_consent")
+        data_authorization = (
+            _parse_data_consent_binding(raw_data_consent, identity.invocation_id)
+            if raw_data_consent is not None
+            else None
         )
         exposure = _ChatStreamExposure()
 
@@ -419,6 +506,8 @@ class ScenarioExecutor:
             finalize=self._finalize_chat,
             on_adapter_failure=_on_chat_failure,
             adapter_check=_chat_adapter_check,
+            capability_check=_chat_capability_check(request),
+            data_authorization=data_authorization,
         )
         result = await self._execute_traversal(identity, snapshot, policy)
         candidate = result.candidate
@@ -728,6 +817,15 @@ class ScenarioExecutor:
         if ineligibility is not None:
             return _CandidateAdmission(decision=_decision(connection.connection_id, "rejected", ineligibility))
 
+        # 请求级必需能力核验（M06，仅 chat 入口）：按请求必需能力（stream /
+        # tools）与该连接冻结证据的 revision 核验——unknown / unsupported /
+        # 证据版本过期一律派发前淘汰（零预留副作用），不按模型故障重试、不进
+        # 冷却；旧直推入口不设此检查（既有政策不变）。
+        if policy.capability_check is not None:
+            capability_reason = policy.capability_check(connection, context.eligibility_by_id[connection.connection_id])
+            if capability_reason is not None:
+                return _CandidateAdmission(decision=_decision(connection.connection_id, "rejected", capability_reason))
+
         # R01-D1 local-only 政策门控（候选层强制，SEC-03 语义）：仅本地模式下需
         # 外发的适配器候选（adapter_kind_requires_egress）派发前一律拒绝——不进
         # 授权链，零授权 / 零派发 / 零外发副作用；设备内本地 kind（gguf_*）不受
@@ -816,8 +914,9 @@ class ScenarioExecutor:
 
         预留 → 派发绑定 → 授权 → attempt 登记 → 执行（``policy.invoke``）→
         usage 观察 → 收敛（``policy.finalize`` / ``policy.on_adapter_failure``）
-        共享；出口统一投影结算事实（``settlement_state``）与最后真实 attempt
-        身份（ChatTurnOutcome 承载，旧入口不消费）。
+        共享；出口统一投影**响应来源 attempt** 的结算事实（``settlement_state``）
+        与身份（ChatTurnOutcome 承载，旧入口不消费）——M08：不再用最后一次尝试
+        顶替来源 attempt；无 attempt 的失败（如 deadline 耗尽）保持 ``None``。
         """
         trail = _AttemptTrail()
         outcome = await self._candidate_attempts(
@@ -837,8 +936,7 @@ class ScenarioExecutor:
         )
         return replace(
             outcome,
-            settlement_state=_settlement_state(trail.ledger),
-            attempt_id=outcome.attempt_id if outcome.attempt_id is not None else trail.attempt_id,
+            settlement_state=_settlement_state(trail.ledger_for(outcome.attempt_id)),
         )
 
     async def _candidate_attempts(
@@ -897,6 +995,10 @@ class ScenarioExecutor:
         # - 终止类：内容拒绝等非瞬态失败经 retry 策略判 False → 原样重抛（不重试、
         #   不换候选绕过）；取消（R2）永不重试、清理后 re-raise。
         attempt_counter = 0
+        # M08：最近一次真实尝试身份（来源 attempt 记录）——重试循环外抛后的失败
+        # 收敛只引用该 attempt，不借用「当前」状态；deadline 耗尽等无 attempt
+        # 事实的失败保持 None（契约：零出站失败 attempt_id=None）。
+        last_attempt_id: str | None = None
 
         def _should_retry_transient(retry_state: RetryCallState) -> bool:
             raw = retry_state.outcome.exception() if retry_state.outcome is not None else None
@@ -920,7 +1022,7 @@ class ScenarioExecutor:
         )
 
         async def _attempt_once() -> _CandidateOutcome:
-            nonlocal last_reason, attempt_counter
+            nonlocal last_reason, attempt_counter, last_attempt_id
             # F18：每次真实尝试独立身份——独立 attempt / reservation 与递增
             # retry_index（外部重试 = 新的真实调用 = 新账目事实）；同一次写账的
             # 持久化重放沿用该次身份，由 DAO 幂等（ON CONFLICT DO NOTHING /
@@ -932,7 +1034,7 @@ class ScenarioExecutor:
                 raise _DeadlineExhaustedError()
 
             attempt_id = uuid.uuid4().hex
-            trail.attempt_id = attempt_id
+            last_attempt_id = attempt_id
             reservation_token = uuid.uuid4().hex
             # F34：尝试起点计时（预留 / 派发 / 授权 / 执行全程计入尝试耗时），
             # 终态构造时点为终点——duration_ms 不再恒 None（R21：未知留 None，
@@ -943,10 +1045,36 @@ class ScenarioExecutor:
             # 终态（含取消清理）一律携带本份（copy 增量），不依赖事后重算；
             # security_revision 于 authorize 线性化点就位。
             attempt_metadata = _metadata(identity, cand, connection, None, 0, pricing, retry_index, month=month)
-            # F19：单次尝试的终态收敛状态（取消边界清理依据）
-            ledger = trail.ledger = _AttemptLedgerState()
+            # F19：单次尝试的终态收敛状态（取消边界清理依据；M08：按 attempt
+            # 身份登记进轨迹，出口按来源 attempt 取，不再单槽顶替）
+            ledger = trail.register(attempt_id)
             # F19②：外发事实起点——adapter.invoke 开始后消费不可证明（收费未知语义分界）
             outbound_started = False
+
+            # M07：资料核权门（逐实际 attempt，先于一切账目副作用）。每次实际尝试
+            # （含同候选重试与后续备用候选）以该 attempt 的准确 operation/资料上下文
+            # 新鲜核权——资料 owner 许可（authorize_data_attempt 内含连接授权 +
+            # 绑定一致核 + 源 claim 单胜者）不通过即零出站：不进 reserve、不
+            # mark_dispatched、不外发；拒绝原因随候选决策记录（R21 不静默）。
+            # 许可为 operation 级事实，切换候选无济 → halt（首次失败后撤用，后续
+            # 重试/备用同样零出站）。
+            if policy.data_authorization is not None:
+                denial = await self._authorize_data_attempt(policy.data_authorization, attempt_id)
+                if denial is not None:
+                    last_reason = denial
+                    logger.warning(
+                        "[ScenarioExecutor] data consent gate denied attempt, zero outbound (task=%s, reason=%s)",
+                        identity.task_id,
+                        denial,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=denial,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
 
             try:
                 # F16 逐实际尝试原子预留（每次真实尝试独立预留，预留 ↔ attempt 生命
@@ -1075,8 +1203,11 @@ class ScenarioExecutor:
                             duration_ms=_elapsed_ms(clock, attempt_started_at),
                         )
                     # C12：原自管循环 break 语义等价——结束本候选，返回失败终态
-                    # （不重试；Tenacity 对成功返回值直接透传）
-                    return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
+                    # （不重试；Tenacity 对成功返回值直接透传）。M08：携带该次
+                    # 尝试身份（本尝试已预留/派发，出口不得顶替为其他 attempt）。
+                    return _CandidateOutcome(
+                        status="failed", reason=last_reason, outputs=(), usages=(), attempt_id=attempt_id
+                    )
                 effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
 
                 # D13-002：在许可线性化点为本次 attempt 签发外发确认许可（纯绑定，零 IO），
@@ -1254,10 +1385,43 @@ class ScenarioExecutor:
             # R2：清理已在 _attempt_once 的取消边界完成，此处仅放行传播
             raise
         except _DeadlineExhaustedError:
+            # M08：deadline 耗尽未产生本次 attempt（检查先于 attempt 身份建立），
+            # attempt_id 保持 None——不得借用上一个已结束尝试（契约：零出站失败
+            # attempt_id=None，结算事实无账目投影）。
             return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
         except Exception as e:
             last_reason = f"adapter error: {type(e).__name__}"
-            return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
+            # M08：来源 attempt = 触发该异常的真实尝试（非「当前」遍历状态）。
+            return _CandidateOutcome(
+                status="failed", reason=last_reason, outputs=(), usages=(), attempt_id=last_attempt_id
+            )
+
+    async def _authorize_data_attempt(self, template: DataAttemptAuthorization, attempt_id: str) -> str | None:
+        """资料核权门（M07）：返回 ``None``=放行，否则脱敏原因码（零出站）。
+
+        以该实际尝试的 ``attempt_id`` 重建请求（operation / 许可 / 绑定连接 /
+        源选择随受理冻结模板），交资料 owner 新鲜核权——连接授权、绑定一致核、
+        源 claim 在同一门内完成，不复用外层一次许可。owner 能力缺失 / 核权异常 /
+        deny / unknown 一律 fail-closed（unknown 不当 allow），原因仅含稳定码与
+        脱敏原因（R9/R21）。
+        """
+
+        request = replace(template, attempt_id=attempt_id)
+        authorize = getattr(self._config_service, "authorize_data_attempt", None)
+        if authorize is None:
+            return "data authorization unavailable: owner capability missing"
+        try:
+            receipt = await authorize(request)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return f"data authorization failed: {type(e).__name__}"
+        outcome = getattr(receipt, "outcome", None)
+        if outcome is DataAttemptOutcome.ALLOW:
+            return None
+        reason = getattr(receipt, "reason", None)
+        suffix = f": {reason}" if isinstance(reason, str) and reason else ""
+        return f"data authorization {getattr(outcome, 'value', 'unknown')}{suffix}"
 
     async def _finalize_chat(self, response: Any, scope: _AttemptScope, duration_ms: float) -> _CandidateOutcome:
         """chat 入口成功响应收敛（B-02-3）：拒绝处置 + 终态落账 + response 承载。
@@ -1368,13 +1532,28 @@ class ScenarioExecutor:
         完成（清 pending），此后取消无需再收敛该尝试。``submitted`` 标记终态
         已提交（B-02-3 结算事实投影依据：concluded → settled / submitted 未
         concluded → deferred）。
+
+        M08：写回目标恒为该记录自带的来源 attempt（``ledger`` 为该 attempt 的
+        结算状态）。已持久化事实的状态序单调（``_TERMINAL_STATUS_RANK``）：
+        重复（同序）经 DAO revision 水位幂等；迟到 / 乱序（更低序）结果零覆盖，
+        仅记录忽略原因（R21 不静默），不得把已成功的尝试改回失败 / 取消。
         """
+        rank = _TERMINAL_STATUS_RANK.get(str(getattr(record, "status", "")), 0)
+        if ledger.committed_rank is not None and rank < ledger.committed_rank:
+            logger.info(
+                "[ScenarioExecutor] stale terminal write ignored (attempt=%s..., status=%s < committed_rank=%d)",
+                str(getattr(record, "attempt_id", ""))[:8],
+                getattr(record, "status", "?"),
+                ledger.committed_rank,
+            )
+            return
         ledger.pending = record
         ledger.submitted = True
         outcome = await self._recorder.submit_terminal(record)
         if outcome.persisted:
             ledger.concluded = True
             ledger.pending = None
+            ledger.committed_rank = rank if ledger.committed_rank is None else max(ledger.committed_rank, rank)
         else:
             logger.info("[ScenarioExecutor] terminal not persisted (%s)", outcome.error_code)
 
@@ -1480,19 +1659,28 @@ def _resolve_connection(raw: Mapping[str, Any]) -> tuple[ResolvedConnection, _Co
     必需字段（connection_id / connection_revision / adapter_kind / model）缺失即抛
     KeyError / ValueError（缺失不伪装，R21 邻域语义），由调用方降级 rejected。
 
-    F26 资格证据（``enabled`` / ``capabilities``）随同一解析点提取，不再丢弃：
-    防御性解析（非 Mapping / 缺 ``support`` 键的证据条目按无证据处理，视为
-    unknown，不门控）；``enabled`` 缺键取 schema 默认 True（与改动前行为一致）。
+    F26 资格证据（``enabled`` / ``capabilities``）随同一解析点提取，不再丢弃；
+    证据条目完整解析 ``support`` / ``source`` / ``connection_revision``（M06：
+    旧实现只保 support 丢掉证据版本，无法识别过期证据）。防御性解析（非
+    Mapping / 缺 ``support`` 键的条目按无证据处理，视为 unknown，不门控）；
+    ``enabled`` 缺键取 schema 默认 True（与改动前行为一致）。
     """
     adapter_kind = str(raw["adapter_kind"])
     if adapter_kind not in ("litellm_chat", "gguf_chat", "gguf_sentiment"):
         raise ValueError(f"unknown adapter_kind: {adapter_kind}")
-    capabilities: dict[str, str] = {}
+    capabilities: dict[str, _CapabilityEvidence] = {}
     capabilities_raw = raw.get("capabilities")
     if isinstance(capabilities_raw, Mapping):
         for evidence_task_id, evidence in capabilities_raw.items():
-            if isinstance(evidence, Mapping) and evidence.get("support") is not None:
-                capabilities[str(evidence_task_id)] = str(evidence["support"])
+            if not isinstance(evidence, Mapping) or evidence.get("support") is None:
+                continue
+            revision = evidence.get("connection_revision")
+            revision_valid = isinstance(revision, int) and not isinstance(revision, bool)
+            capabilities[str(evidence_task_id)] = _CapabilityEvidence(
+                support=str(evidence["support"]),
+                source=str(evidence["source"]) if evidence.get("source") is not None else None,
+                connection_revision=revision if revision_valid else None,
+            )
     resolved = ResolvedConnection(
         connection_id=str(raw["connection_id"]),
         connection_revision=int(raw["connection_revision"]),
@@ -1518,9 +1706,55 @@ def _ineligibility_reason(eligibility: _ConnectionEligibility, task_id: str) -> 
     """
     if not eligibility.enabled:
         return "connection disabled in snapshot"
-    if eligibility.capabilities.get(task_id) == "unsupported":
+    evidence = eligibility.capabilities.get(task_id)
+    if evidence is not None and evidence.support == "unsupported":
         return f"connection unsupported for task {task_id}"
     return None
+
+
+#: chat 入口请求必需能力（M06）：固定框架始终按 ``stream=True`` 调用；请求携带
+#: 任何工具（含结构 final 工具）时还要求工具能力。证据键与任务名同源约定
+#: （``CapabilityEvidenceConfig`` 的 capabilities 映射可按能力名承载）。
+_CHAT_STREAM_CAPABILITY: Final[str] = "stream"
+_CHAT_TOOLS_CAPABILITY: Final[str] = "tools"
+
+
+def _required_chat_capabilities(request: ChatTurnRequest) -> tuple[str, ...]:
+    """请求必需能力投影（M06）：stream 恒定必需，工具存在时必须工具能力。"""
+    required = [_CHAT_STREAM_CAPABILITY]
+    if request.tools or request.output_tools:
+        required.append(_CHAT_TOOLS_CAPABILITY)
+    return tuple(required)
+
+
+def _chat_capability_check(
+    request: ChatTurnRequest,
+) -> Callable[[ResolvedConnection, _ConnectionEligibility], str | None]:
+    """chat 准入的请求必需能力 / 证据版本核验（M06）。
+
+    真实 Profile 的能力事实来自连接冻结证据：必需能力必须为 ``supported`` 且
+    证据记录的 ``connection_revision`` 与派发连接一致（缺失版本视为未知 →
+    过期）。unknown / unsupported / 旧证据 → 返回拒绝原因（派发前淘汰、零
+    预留副作用），与模型故障重试语义严格区分。
+    """
+    required = _required_chat_capabilities(request)
+
+    def _check(connection: ResolvedConnection, eligibility: _ConnectionEligibility) -> str | None:
+        for capability in required:
+            evidence = eligibility.capabilities.get(capability)
+            if evidence is None:
+                return f"chat requires confirmed {capability} capability (no evidence)"
+            if evidence.connection_revision != connection.connection_revision:
+                return (
+                    f"chat requires {capability} evidence at connection revision "
+                    f"{connection.connection_revision} (stale evidence: "
+                    f"{'unknown revision' if evidence.connection_revision is None else evidence.connection_revision})"
+                )
+            if evidence.support != "supported":
+                return f"chat requires supported {capability} capability (evidence: {evidence.support})"
+        return None
+
+    return _check
 
 
 # F27 适配器异常分类（终止判定先于重试判定的判据正本；映射表式，不散落 if-else）
@@ -1615,15 +1849,29 @@ def _route_fallback_enabled(route: Mapping[str, Any] | None) -> bool | None:
 
 
 @dataclass(frozen=True, slots=True)
-class _ConnectionEligibility:
-    """冻结连接资格证据（F26）：快照连接映射的启用状态 + 任务能力支持状态。
+class _CapabilityEvidence:
+    """单条能力证据（M06）：支持状态 + 来源 + 采集时的连接版本。
 
-    仅承载解析后的「已确认」资格事实：``enabled=False`` 或任务能力
+    ``connection_revision`` 为 None 表示证据未记录版本（未知 → 不可证明与
+    当前连接同版，按过期处理）。
+    """
+
+    support: str
+    source: str | None
+    connection_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionEligibility:
+    """冻结连接资格证据（F26）：快照连接映射的启用状态 + 能力支持证据。
+
+    资格门控仍只认「已确认」事实：``enabled=False`` 或任务能力
     ``support == "unsupported"`` 才构成派发门控；无证据即 unknown 语义（不门控）。
+    chat 入口另行按请求必需能力与证据版本核验（见 ``_chat_capability_check``）。
     """
 
     enabled: bool
-    capabilities: Mapping[str, str]
+    capabilities: Mapping[str, _CapabilityEvidence]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1715,12 +1963,20 @@ class _AttemptPolicy:
       返回 None 走共享默认（F27 退避重试 / 切换候选）；
     - ``adapter_check``：准入期附加协议检查（chat：invoke_chat 存在性）；
       返回拒绝原因或 None。
+    - ``capability_check``：准入期请求必需能力核验（M06，仅 chat 入口使用）——
+      按连接冻结证据核验请求必需能力与证据 revision；返回拒绝原因或 None。
+    - ``data_authorization``：资料核权模板（M07，仅 chat 入口在 binding 携带
+      ``data_consent`` 时设置）——每个实际 attempt 在预留/派发/外发前以该
+      attempt 的 ``attempt_id`` 重建请求并新鲜核权（资料 owner 许可内含连接
+      授权 + 绑定核 + 源 claim 单胜者）；拒绝/未知/异常一律零出站。
     """
 
     invoke: Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
     finalize: Callable[[Any, _AttemptScope, float], Awaitable[_CandidateOutcome]]
     on_adapter_failure: Callable[[Exception, _AttemptScope], Awaitable[_CandidateOutcome | None]] | None = None
     adapter_check: Callable[[_EntryAdapter, ResolvedConnection], str | None] | None = None
+    capability_check: Callable[[ResolvedConnection, _ConnectionEligibility], str | None] | None = None
+    data_authorization: DataAttemptAuthorization | None = None
 
 
 @dataclass(slots=True)
@@ -1740,13 +1996,28 @@ class _ChatStreamExposure:
 
 @dataclass(slots=True)
 class _AttemptTrail:
-    """单候选内逐尝试轨迹（_run_candidate 出口统一投影结算事实与 attempt 身份）。
+    """单候选内逐尝试轨迹，按「响应来源 attempt」登记（检视 M08）。
 
-    ``ledger`` / ``attempt_id`` 随每次真实尝试刷新；出口取最后一次尝试投影。
+    旧实现只有「最后一次尝试」单槽（``attempt_id`` / ``ledger``），出口与终态
+    写回都借此顶替来源 attempt：跨候选 / 跨调用时会把零出站失败的
+    ``ChatTurnOutcome.attempt_id`` 错挂到上一个已结束的尝试（与契约「零出站
+    失败 attempt_id=None」冲突），也会让结算事实投影错位。现以 attempt_id
+    为键逐次登记，出口只取响应来源 attempt 的事实，不再有「当前 attempt」顶替。
     """
 
-    ledger: _AttemptLedgerState | None = None
-    attempt_id: str | None = None
+    ledgers: dict[str, _AttemptLedgerState] = field(default_factory=dict)
+
+    def register(self, attempt_id: str) -> _AttemptLedgerState:
+        """登记一次真实尝试的结算状态（逐尝试新建，无共享可变态）。"""
+        ledger = _AttemptLedgerState()
+        self.ledgers[attempt_id] = ledger
+        return ledger
+
+    def ledger_for(self, attempt_id: str | None) -> _AttemptLedgerState | None:
+        """响应来源 attempt 的结算状态；``None``（无 attempt）→ 无账目事实。"""
+        if attempt_id is None:
+            return None
+        return self.ledgers.get(attempt_id)
 
 
 def _settlement_state(ledger: _AttemptLedgerState | None) -> ChatTurnSettlementState | None:
@@ -1907,12 +2178,15 @@ class _AttemptLedgerState:
     已持久化，此后取消无需再收敛该尝试（与 pending 互斥维护：持久化即清空）；
     ``submitted``（B-02-3）：终态已提交（持久化未确认时由 F20 重放队列承接）——
     结算事实投影依据（concluded → settled / submitted 未 concluded → deferred /
-    均无 → 无账目事实）。
+    均无 → 无账目事实）；``committed_rank``（M08）：已持久化终态的状态序
+    （见 ``_TERMINAL_STATUS_RANK``，单调不减），用于让重复 / 乱序的迟到写回
+    幂等且不覆盖较新事实。
     """
 
     pending: Any = None
     concluded: bool = False
     submitted: bool = False
+    committed_rank: int | None = None
 
 
 def _observation_from(
