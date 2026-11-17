@@ -44,6 +44,8 @@ class _Native:
     workflow_id: str
     status: str
     queue_name: str | None = None
+    parent_workflow_id: str | None = None
+    name: str | None = None
 
 
 class _FakeClient:
@@ -61,6 +63,10 @@ class _FakeClient:
         self.cancel_effect = True
         self.list_ignores_offset = False
 
+    @staticmethod
+    def _name(item: _Native) -> str:
+        return item.name if item.name is not None else item.workflow_id.split(":", 1)[0]
+
     async def list_workflows_async(self, **kwargs: Any) -> list[Any]:
         self.list_calls.append(kwargs)
         if "workflow_ids" in kwargs:
@@ -77,6 +83,14 @@ class _FakeClient:
         if status_filter is not None:
             allowed = {status_filter} if isinstance(status_filter, str) else set(status_filter)
             items = [item for item in items if item.status in allowed]
+        name_filter = kwargs.get("name")
+        if name_filter is not None:
+            allowed_names = {name_filter} if isinstance(name_filter, str) else set(name_filter)
+            items = [item for item in items if self._name(item) in allowed_names]
+        parent_filter = kwargs.get("parent_workflow_id")
+        if parent_filter is not None:
+            allowed_parents = {parent_filter} if isinstance(parent_filter, str) else set(parent_filter)
+            items = [item for item in items if item.parent_workflow_id in allowed_parents]
         return [_Native(workflow_id=item.workflow_id, status=item.status) for item in items[offset : offset + limit]]
 
     async def cancel_workflows_async(self, workflow_ids: list[str], *, cancel_children: bool = False) -> None:
@@ -380,6 +394,83 @@ class TestManualRecovery:
         )
         assert receipt.ready is False
         assert receipt.blocking_reasons == ("no_granted_execution",)
+        assert client.resumed == []
+
+    async def test_resolves_necessary_leaves_before_root(self) -> None:
+        """R03：必要叶（中断未结案）先于 root 复接；成功/失败叶与未选研究不动。"""
+
+        client = _FakeClient(
+            [
+                _Native("agent_research:a", "CANCELLED"),
+                _Native("agent_leaf:a:r1:n1", "CANCELLED", parent_workflow_id="agent_research:a"),
+                _Native("agent_leaf:a:r1:n2", "ENQUEUED", parent_workflow_id="agent_research:a"),
+                _Native("agent_leaf:a:r1:n3", "SUCCESS", parent_workflow_id="agent_research:a"),
+                _Native("agent_leaf:a:r1:n4", "ERROR", parent_workflow_id="agent_research:a"),
+                _Native("agent_leaf:b:r1:n1", "CANCELLED", parent_workflow_id="agent_research:b"),
+            ]
+        )
+        registry = _FakeRegistry(
+            grant=RecoveryGrantFact(
+                user_scope="user-1",
+                owner_epoch=9,
+                run_epoch=9,
+                granted_execution_ids=("exec-a",),
+                workflow_ids=("agent_research:a",),
+                blocked=(),
+            )
+        )
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-a",),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is True
+        # 必要叶（取消/在途）先复接，root 最后；成功叶与已定失败叶不重跑
+        assert client.resumed == ["agent_leaf:a:r1:n1", "agent_leaf:a:r1:n2", "agent_research:a"]
+        # 未选研究（B）不被列举、不被扩入
+        assert {"agent_leaf:b:r1:n1", "agent_research:b"}.isdisjoint(client.resumed)
+        leaf_listing = [call for call in client.list_calls if call.get("parent_workflow_id") == "agent_research:a"]
+        assert leaf_listing
+        assert set(leaf_listing[0]["status"]) == {
+            "PENDING",
+            "ENQUEUED",
+            "DELAYED",
+            "CANCELLED",
+        }
+
+    async def test_leaf_resolution_failure_blocks_without_partial_resume(self) -> None:
+        client = _FakeClient([_Native("agent_leaf:a:r1:n1", "CANCELLED", parent_workflow_id="agent_research:a")])
+        client.list_error = RuntimeError("leaf listing broken")
+        registry = _FakeRegistry(
+            grant=RecoveryGrantFact(
+                user_scope="user-1",
+                owner_epoch=9,
+                run_epoch=9,
+                granted_execution_ids=("exec-a",),
+                workflow_ids=("agent_research:a",),
+                blocked=(),
+            )
+        )
+
+        receipt = await resume_selected_workflows(
+            user_scope="user-1",
+            execution_ids=("exec-a",),
+            owner_epoch=9,
+            run_epoch=9,
+            application_version=_VERSION,
+            client=client,
+            registry=registry,
+        )
+
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == ("leaf_resolution_failed", "leaf_resolution_failed:RuntimeError")
+        assert receipt.resumed_workflow_ids == ()
         assert client.resumed == []
 
     async def test_resume_failure_marks_not_ready(self) -> None:

@@ -462,8 +462,9 @@ class TestRecoveryGrant:
         resumed: list[str] = []
 
         class _Client:
-            async def list_workflows_async(self, **kwargs: Any) -> list[Any]:  # pragma: no cover - 未使用
-                raise AssertionError("list not expected")
+            async def list_workflows_async(self, **kwargs: Any) -> list[Any]:
+                # 必要叶解析：本用例无直属叶执行行，返回空集合（不扩入其他研究）
+                return []
 
             async def cancel_workflows_async(self, workflow_ids: list[str], **kwargs: Any) -> None:
                 raise AssertionError("cancel not expected")

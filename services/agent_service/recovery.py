@@ -8,8 +8,9 @@
   全部成功。任一环节失败/未知都返回 ``ready=False`` 且不进入 launch（
   ``listen_queues([])`` 不是禁用默认恢复的开关，HANDOFF §8.4）。
 - **手动恢复**：只对用户明确选择的精确集合授予本进程 ``owner_epoch``/
-  ``run_epoch`` 并逐个 ``resume``；A 不动 B，用户终止不复活，不可恢复终态明确
-  拒绝（``blocked``），不静默跳过。
+  ``run_epoch``；随后由本模块**解析必要叶**（已授予 root 的直属、中断未结案的
+  叶 workflow），先复接叶再复接 root；A 不动 B，成功叶零重做，用户终止不复活，
+  不可恢复终态明确拒绝（``blocked``），不静默跳过。
 
 明确不做：
 
@@ -47,6 +48,7 @@ from services.agent_service.runtime import (
     assemble_agent_runtime,
     launch_agent_runtime,
 )
+from services.agent_service.workflows import LEAF_WORKFLOW_NAME, RESEARCH_WORKFLOW_NAME
 
 #: 启动隔离的「在途」原生状态（HANDOFF §8.4 第 3 条：PENDING/ENQUEUED/DELAYED）。
 STARTUP_ACTIVE_STATUSES: Final[tuple[str, ...]] = (
@@ -57,7 +59,17 @@ STARTUP_ACTIVE_STATUSES: Final[tuple[str, ...]] = (
 
 #: 原生终态（取消复查只需确认不再处于在途状态）。
 #: 应用自有 workflow 名（D-02 发布名；隔离按名 + 应用版本过滤）。
-STARTUP_WORKFLOW_NAMES: Final[tuple[str, ...]] = ("agent_research", "agent_leaf")
+STARTUP_WORKFLOW_NAMES: Final[tuple[str, ...]] = (RESEARCH_WORKFLOW_NAME, LEAF_WORKFLOW_NAME)
+
+#: 手动恢复须随 root 一并复接的叶子原生状态：中断未结案（在途或已取消）。
+#: ``SUCCESS`` 叶零重做；``ERROR`` / ``MAX_RECOVERY_ATTEMPTS_EXCEEDED`` 叶已是
+#: 已投影失败成果（R04），重跑会重复业务副作用，故均不纳入必要叶集合。
+RECOVERY_RESUMABLE_LEAF_STATUSES: Final[tuple[str, ...]] = (
+    WorkflowStatusString.PENDING.value,
+    WorkflowStatusString.ENQUEUED.value,
+    WorkflowStatusString.DELAYED.value,
+    WorkflowStatusString.CANCELLED.value,
+)
 
 #: 分页/批量上限（固定集合后再取消的关键：先读满全部分页）。
 ISOLATION_PAGE_SIZE: Final[int] = 100
@@ -123,6 +135,7 @@ class WorkflowControlClient(Protocol):
         name: str | list[str] | None = None,
         application_name: str | list[str] | None = None,
         app_version: str | list[str] | None = None,
+        parent_workflow_id: str | list[str] | None = None,
         limit: int | None = None,
         offset: int | None = None,
         load_input: bool = True,
@@ -320,10 +333,16 @@ async def resume_selected_workflows(
     """手动恢复用户明确选择的精确集合（HANDOFF §8.4 第 5 条）。
 
     先由 DAO 事务核定（不可恢复终态/未核状态/用户终止/无活动轮/版本不兼容/
-    未收口 operation/代次不前进 → ``blocked``，其 workflow 不返回），再逐个
-    ``resume`` 返回的精确原生集合；未选集合（B）与用户终止轮次保持隔离。
-    单个 resume 失败如实进 ``resume_failures`` 并使 ``ready=False``；全部候选被拒
-    （零授予）同样 ``ready=False``（不把「什么都没恢复」当恢复成功）。
+    未收口 operation/代次不前进 → ``blocked``，其 workflow 不返回）；再按已授予
+    root 解析**必要叶**（直属、``RECOVERY_RESUMABLE_LEAF_STATUSES`` 内、未结案
+    的叶 workflow）。叶先于 root 复接：避免父先运行、其尚未落盘的观察把仍处
+    取消态的叶记为已取消（``ended``）而永久阻塞后继；已落盘的观察记录仍按
+    DBOS 重放语义还原，本函数不伪造也不改写。成功叶与已定失败叶不重跑
+    （零重做）。未选集合（B）不列举、不扩入。
+
+    单个 resume 失败如实进 ``resume_failures`` 并使 ``ready=False``；必要叶列举
+    失败视为「无法证明必要全集」，不部分恢复（``leaf_resolution_failed``）；
+    全部候选被拒（零授予）同样 ``ready=False``（不把「什么都没恢复」当恢复成功）。
     """
 
     grant = await registry.grant_recovery_epoch(
@@ -335,18 +354,34 @@ async def resume_selected_workflows(
             application_version=application_version,
         )
     )
+    blocking_reasons: list[str] = []
+    if not grant.granted_execution_ids:
+        blocking_reasons.append("no_granted_execution")
+        necessary_leaf_ids: tuple[str, ...] = ()
+    else:
+        try:
+            necessary_leaf_ids = await _list_necessary_leaf_ids(client, grant.workflow_ids)
+        except Exception as exc:  # 必要叶全集不可证明：不部分恢复（否则中断叶仍留取消态）
+            return ManualRecoveryReceipt(
+                user_scope=user_scope,
+                owner_epoch=owner_epoch,
+                run_epoch=run_epoch,
+                granted_execution_ids=grant.granted_execution_ids,
+                resumed_workflow_ids=(),
+                blocked=grant.blocked,
+                resume_failures=(),
+                blocking_reasons=("leaf_resolution_failed", f"leaf_resolution_failed:{type(exc).__name__}"),
+                ready=False,
+            )
     resumed: list[str] = []
     failures: list[tuple[str, str]] = []
-    for workflow_id in grant.workflow_ids:
+    for workflow_id in _ordered_resume_ids(necessary_leaf_ids, grant.workflow_ids):
         try:
             await client.resume_workflows_async([workflow_id])
         except Exception as exc:
             failures.append((workflow_id, type(exc).__name__))
         else:
             resumed.append(workflow_id)
-    blocking_reasons: list[str] = []
-    if not grant.granted_execution_ids:
-        blocking_reasons.append("no_granted_execution")
     return ManualRecoveryReceipt(
         user_scope=user_scope,
         owner_epoch=owner_epoch,
@@ -711,6 +746,53 @@ async def _list_states_by_id(client: WorkflowControlClient, workflow_ids: Sequen
     return states
 
 
+async def _list_necessary_leaf_ids(client: WorkflowControlClient, root_workflow_ids: Sequence[str]) -> tuple[str, ...]:
+    """解析每个已授予 root 的「必要叶」原生 ID（HANDOFF §8.4 第 5 条）。
+
+    必要叶 = 该 root 直属（``parent_workflow_id``）、名为叶 workflow、且处于
+    ``RECOVERY_RESUMABLE_LEAF_STATUSES``（中断未结案）的子执行。成功叶零重做，
+    已定失败叶（``ERROR``/恢复耗尽）保留其失败成果，均不纳入。只列举已授予
+    root 的直属子代，未选研究不被扩入。分页读满后返回稳定排序集合；列举异常
+    冒泡给调用方（无法证明全集时不得部分恢复，``CancelledError`` 继续传播）。
+    """
+
+    leaf_ids: set[str] = set()
+    for root_id in root_workflow_ids:
+        offset = 0
+        while True:
+            page = await client.list_workflows_async(
+                parent_workflow_id=root_id,
+                name=LEAF_WORKFLOW_NAME,
+                status=list(RECOVERY_RESUMABLE_LEAF_STATUSES),
+                limit=ISOLATION_PAGE_SIZE,
+                offset=offset,
+                load_input=False,
+                load_output=False,
+            )
+            for item in page:
+                leaf_ids.add(item.workflow_id)
+            if len(page) < ISOLATION_PAGE_SIZE:
+                break
+            offset += len(page)
+    return tuple(sorted(leaf_ids))
+
+
+def _ordered_resume_ids(necessary_leaf_ids: Sequence[str], root_workflow_ids: Sequence[str]) -> tuple[str, ...]:
+    """复接顺序：必要叶先、root 后（去重保序）。
+
+    叶须先回到在途，父重放时未落盘的观察步才不会把「刚取消、尚未复接」的叶
+    记成已取消（``ended``）而阻塞其后继。
+    """
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for workflow_id in (*necessary_leaf_ids, *root_workflow_ids):
+        if workflow_id not in seen:
+            seen.add(workflow_id)
+            ordered.append(workflow_id)
+    return tuple(ordered)
+
+
 def _receipt(
     command_id: str,
     user_scope: str,
@@ -805,6 +887,7 @@ __all__ = [
     "ABSENT_NATIVE_STATE",
     "INSTANCE_LOCK_KEY",
     "ISOLATION_PAGE_SIZE",
+    "RECOVERY_RESUMABLE_LEAF_STATUSES",
     "STARTUP_ACTIVE_STATUSES",
     "STARTUP_WORKFLOW_NAMES",
     "AdvisoryLockInstanceGuard",
