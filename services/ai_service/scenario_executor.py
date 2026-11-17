@@ -20,8 +20,15 @@
   失败尝试即时提交 failed 终态（结算该次预留 + 记失败事实，R21 不静默）；
 - **D5 降级**：有限额费用型在预留被拒（余额不足 / owner 失权）或账本不可用
   （try_reserve / mark_dispatched persisted=False）时零出站；usage_only 预留
-  或落账不可用时允许进程内一次性派发身份；失败候选收敛错误提交终态
-  （§6.2 步骤 5，F16：终态携带预留 ID 经 F22 转换 / F23 背书收敛预留）；
+  或落账不可用时允许进程内一次性派发身份（**仅旧直推链**；Agent 聊天回合见
+  下条严格策略）；失败候选收敛错误提交终态（§6.2 步骤 5，F16：终态携带预留
+  ID 经 F22 转换 / F23 背书收敛预留）；
+- **M08 必需登记严格（Agent 聊天回合，``execute_chat_turn``）**：reserve /
+  mark_dispatched / begin_attempt 任一登记未确认（persisted=False 或无有效
+  预留）即零出站并中断候选遍历（不外发、不换候选 / 不重试绕过）；begin 后续
+  成功不得补放行此前 unknown 的必需登记（前置登记失败即已收敛，不进入 begin）；
+  原因随候选决策记录并告警（R21 不静默）。旧直推入口 ``execute`` 既有
+  usage_only 降级行为不变；
 - **R2**：CancelledError 始终传播，不包装为失败；取消传播边界先经受限清理
   （F19）：尽力提交 cancelled 终态或幂等重提交在途终态（短超时，提交失败仅记
   日志）后 re-raise——attempt 不再永久停留 dispatched；外发已开始的取消按
@@ -510,6 +517,9 @@ class ScenarioExecutor:
             adapter_check=_chat_adapter_check,
             capability_check=_chat_capability_check(request),
             data_authorization=data_authorization,
+            # M08：Agent 聊天回合严格路径——必需登记（reserve / mark_dispatched /
+            # begin_attempt）逐项 fail-closed，不回退进程内派发身份。
+            strict_required_registration=True,
         )
         result = await self._execute_traversal(identity, snapshot, policy)
         candidate = result.candidate
@@ -1142,7 +1152,28 @@ class ScenarioExecutor:
                         usages=(),
                         halt_candidates=True,
                     )
-                # usage_only：预留未持久化 → 降级进程内派发身份（reservation_id=None）
+                elif policy.strict_required_registration:
+                    # M08：Agent 严格路径——usage_only（无金额上限）同样要求预留
+                    # 登记逐项确认。账本不可用 / 超时 / owner 失权 → 必需登记
+                    # unknown，零出站且不回退进程内派发身份；此后 begin 即使成功
+                    # 也不补放行本次未确认的登记（本分支先于 begin 收敛）。
+                    reason = f"required budget reservation unavailable: {reserve_outcome.error_code}"
+                    logger.warning(
+                        "[ScenarioExecutor] required budget reservation failed (%s), zero outbound (task=%s)",
+                        reserve_outcome.error_code,
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                        attempt_id=attempt_id,
+                    )
+                # 旧直推链（非 Agent）：usage_only 预留未持久化 → 维持既有降级
+                # 进程内派发身份（reservation_id=None）
 
                 # 派发绑定（D5）：预留 reserved→dispatched（F23：错误预留 ID /
                 # owner 失权 rowcount=0）；有限额费用型 persisted=False 时禁止派发
@@ -1162,6 +1193,25 @@ class ScenarioExecutor:
                         outputs=(),
                         usages=(),
                         halt_candidates=True,
+                    )
+                if not dispatch_outcome.persisted and policy.strict_required_registration:
+                    # M08：Agent 严格路径——usage_only 的派发绑定同样属必需登记，
+                    # 未确认（账本不可用 / 超时 / owner 失权）即零出站，不因后续
+                    # begin 成功补放行；预留留 reserved 由 F23 租约自愈。
+                    reason = f"required dispatch binding unavailable: {dispatch_outcome.error_code}"
+                    logger.warning(
+                        "[ScenarioExecutor] required dispatch binding failed (%s), zero outbound (task=%s)",
+                        dispatch_outcome.error_code,
+                        identity.task_id,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                        attempt_id=attempt_id,
                     )
 
                 # D13-002：外发确认按真实执行位置区分——litellm_chat 出站需 SEC-01 许可，
@@ -2004,6 +2054,9 @@ class _AttemptPolicy:
       ``data_consent`` 时设置）——每个实际 attempt 在预留/派发/外发前以该
       attempt 的 ``attempt_id`` 重建请求并新鲜核权（资料 owner 许可内含连接
       授权 + 绑定核 + 源 claim 单胜者）；拒绝/未知/异常一律零出站。
+    - ``strict_required_registration``：Agent 聊天回合必需登记严格策略（M08）——
+      reserve / mark_dispatched / begin_attempt 任一未确认即零出站；默认 False
+      保持旧直推链既有 usage_only 降级行为不变。
     """
 
     invoke: Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
@@ -2012,6 +2065,7 @@ class _AttemptPolicy:
     adapter_check: Callable[[_EntryAdapter, ResolvedConnection], str | None] | None = None
     capability_check: Callable[[ResolvedConnection, _ConnectionEligibility], str | None] | None = None
     data_authorization: DataAttemptAuthorization | None = None
+    strict_required_registration: bool = False
 
 
 @dataclass(slots=True)

@@ -1136,16 +1136,30 @@ class ModelConfigurationService:
         REVISION_CONFLICT），本方法预检与 CAS 间的状态漂移由 revision 相等性
         传递保证（revision 变化必然伴随状态迁移）。
 
+        重放顺序（检视 M15）：先按原命令身份（同键同完整输入）查回原回执并
+        直接返回（零新增事实），再做状态迁移预检——批准已提交但回执丢失时，
+        同命令重传不得被「仅 pending 可批准」预检拒绝；同键异输入
+        ``INPUT_CONFLICT``；不同命令再批终态仍 ``POLICY_DENIED``。
+
         Raises:
             AgentServiceError: INPUT_INVALID（更新目标不存在）/ POLICY_DENIED
                 （owner 状态机拒绝）/ 其余 DAO 事务错误码透传。
         """
         dao = self._resolve_agent_dao()
         try:
-            derive_data_consent_command_identity(command)
+            identity_info = derive_data_consent_command_identity(command)
         except AgentValidationError as exc:
             raise self._translate_validation(exc) from exc
         identity = f"{command.command.user_scope}/{command.consent_id}"
+        # 原命令同输入重放优先于迁移预检：回执丢失的重传必须查回原回执。
+        replayed = await dao.read_data_consent_save_replay(
+            command.command.user_scope,
+            command.consent_id,
+            command_id=command.command.command_id,
+            input_digest=identity_info.input_digest,
+        )
+        if replayed is not None:
+            return replayed
         if command.command.expected_revision >= 1:
             current = await dao.read_data_consent_decision(command.command.user_scope, command.consent_id)
             if current is None:

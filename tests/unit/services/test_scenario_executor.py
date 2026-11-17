@@ -1394,6 +1394,22 @@ class TestInvocationAndReservation:
         assert dispatch_kwargs["owner_session_id"]
 
     @pytest.mark.asyncio
+    async def test_usage_only_dispatch_unknown_legacy_degrades(self):
+        """M08：旧直推链 usage_only 派发绑定未确认仍维持既有降级（不套用 Agent 严格策略）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.mark_dispatched = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        adapter.invoke.assert_awaited_once()
+        recorder.begin_attempt.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_reservation_id_flows_through_attempt_row_and_terminal(self):
         """费用型成功链路：预留 ID 贯穿 mark_dispatched → attempt_row → 终态（F22/F23）。"""
         adapter = _adapter_ok()
