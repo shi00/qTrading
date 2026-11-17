@@ -1,7 +1,11 @@
 """业务来源登记服务（E-01）：时点（PIT）与显式选择集合门，不复制 DAO 事务。
 
-- 历史决策/事后解释用途：来源可得时点必须已知且不晚于决策 cutoff，否则
+- 历史决策/事后解释用途：来源可得时点必须已知且早于决策 cutoff，否则
   ``POLICY_DENIED``，且不触达数据库（零登记/零使用，R24）；
+- 日终研究用途：冻结日终界同样参与准入——披露于日终 17:00 之后的资料不得按
+  当日可见登记（顺延到下一可用交易日后再登记），故此处直接拒绝（R24）；
+- 截止界为**排他**边界：恰在截止时刻（含过去日的午夜界）的披露归入下一区间，
+  不可见；可得时点未知不按按时披露处理，单独给出可审计拒绝（R21）；
 - 仅显式选择集合进入登记；未选集合只用于冲突校验，绝不落库（D2）；
 - 空选择直接返回空回执（概念问答可无来源）。
 """
@@ -14,6 +18,7 @@ from typing import Protocol
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    BusinessSourceItem,
     BusinessSourceRegistrationReceipt,
     BusinessSourceRegistrationRequest,
     Purpose,
@@ -21,8 +26,10 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 
-#: 需要时点门（cutoff 前可得）的用途。
-_PIT_PURPOSES = frozenset({Purpose.HISTORICAL_DECISION, Purpose.POST_HOC_EXPLANATION})
+#: 需在准入时核截止界的用途：历史/事后解释按决策 cutoff，日终研究按日终冻结界
+#: （当日日终前披露才可见）；两种截止界的语义分离另由裁决项处理，此处统一按
+#: 「早于截止才可见」的排他边界判定。
+_CUTOFF_PURPOSES = frozenset({Purpose.HISTORICAL_DECISION, Purpose.POST_HOC_EXPLANATION, Purpose.END_OF_DAY_RESEARCH})
 
 
 class BusinessSourceRegistrar(Protocol):
@@ -56,13 +63,7 @@ class BusinessSourceService:
                 )
         if cutoff is not None:
             for item in request.selected:
-                available_at = _parse_timestamp(item.source.available_at, identity)
-                if available_at is None or available_at > cutoff:
-                    raise AgentServiceError(
-                        AgentErrorCode.POLICY_DENIED,
-                        "source not available at decision cutoff",
-                        f"{identity}/{item.source.source_id}@{item.source.version}",
-                    )
+                _ensure_visible_at(item, cutoff, identity)
         return await self._dao.register_business_sources(
             BusinessSourceRegistrationRequest(
                 user_scope=request.user_scope,
@@ -74,8 +75,27 @@ class BusinessSourceService:
         )
 
 
+def _ensure_visible_at(item: BusinessSourceItem, cutoff: datetime, identity: str) -> None:
+    """截止界准入：可得时点未知或恰在/晚于截止（排他）时拒绝登记。"""
+
+    available_at = _parse_timestamp(item.source.available_at, identity)
+    if available_at is None:
+        # 时点未知不能按「按时披露」放行（R21），单独给出可审计原因。
+        raise AgentServiceError(
+            AgentErrorCode.POLICY_DENIED,
+            "source availability time unknown at decision cutoff",
+            f"{identity}/{item.source.source_id}@{item.source.version}",
+        )
+    if available_at >= cutoff:
+        raise AgentServiceError(
+            AgentErrorCode.POLICY_DENIED,
+            "source disclosed at or after the decision cutoff",
+            f"{identity}/{item.source.source_id}@{item.source.version}",
+        )
+
+
 def _decision_cutoff(request: SourceRegistrationRequest, identity: str) -> datetime | None:
-    if request.purpose in _PIT_PURPOSES:
+    if request.purpose in _CUTOFF_PURPOSES:
         if request.decision_cutoff is None or request.decision_cutoff == "":
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, "decision_cutoff is required for this purpose", identity
@@ -83,7 +103,7 @@ def _decision_cutoff(request: SourceRegistrationRequest, identity: str) -> datet
         cutoff = _parse_timestamp(request.decision_cutoff, identity)
         assert cutoff is not None
         return cutoff
-    # 非时点用途：cutoff 仅记录（由受理 manifest 承载），不参与来源准入。
+    # 无截止界的用途（概念问答）：cutoff 仅记录（由受理 manifest 承载），不参与来源准入。
     _parse_timestamp(request.decision_cutoff, identity)
     return None
 
