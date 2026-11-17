@@ -16,8 +16,10 @@
 - 消费完成事实后**立即**启动新就绪叶（A/B→C、B→D 时 B 结束即启 D，不按固定
   批次 gather）；
 - 失败/终止/``partial`` 只阻相关后继（不借成功兄弟补答案），独立分支继续；
-- ``paused``/``waiting_*``/``unknown``/``closed_unknown`` 等不自动结束父：不伪造
-  终态、不启动后继、父不收敛（未知不等于失败或成功）；
+- ``paused``/``waiting_*``/``unknown`` 等不自动结束父：不伪造终态、不启动后继、
+  父不收敛（未知不等于失败或成功）；``closed_unknown`` 是**不可恢复终态**（F10）：
+  执行已结束但结果未知，按结案收口（全部叶结案后可收敛、迟到事实不复活），
+  单独列入汇总不并入失败，并阻其下游（未知结果不能作为适用成功前置）；
 - 汇总只报叶事实（``leaves_all_succeeded``），**不以成功叶数量代替目标完整完成**；
   目标覆盖与收敛结论由服务层按 F04 保存。
 
@@ -95,7 +97,12 @@ _NODE_OUTCOME_KEYS: Final = frozenset({"node_id", "state", "error_code", "artifa
 #: 叶状态语义分类（值域 = 冻结的 display_state 15 值，不自造词表）。
 _SUCCESS_STATES: Final[frozenset[str]] = frozenset({"complete"})
 _BLOCKING_STATES: Final[frozenset[str]] = frozenset({"failed", "withdrawn", "ended", "partial"})
-_NON_TERMINAL_STATES: Final[frozenset[str]] = DISPLAY_STATES - _SUCCESS_STATES - _BLOCKING_STATES
+#: 已结案但结果未知（不可恢复终态，F10 / ``NON_RECOVERABLE_DISPLAY_STATES``）。
+#: 执行已结束、成果不可知：必须收口为终态（不保持可恢复占位、迟到事实不复活），
+#: 但不得当作适用成功前置，故与阻塞态一样阻其下游；汇总单独列出，不与失败混同。
+_CLOSED_UNKNOWN_STATES: Final[frozenset[str]] = frozenset({"closed_unknown"})
+_TERMINAL_STATES: Final[frozenset[str]] = _SUCCESS_STATES | _BLOCKING_STATES | _CLOSED_UNKNOWN_STATES
+_NON_TERMINAL_STATES: Final[frozenset[str]] = DISPLAY_STATES - _TERMINAL_STATES
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +319,11 @@ class PlanRunSummary:
 
     ``leaves_all_succeeded`` 只说明全部叶``complete``，**不代表目标已覆盖**；
     目标覆盖/收敛结论由服务层按 F04 保存（不以成功叶数量代替）。
-    ``blocked`` 为上游失败/终止/partial 导致未启动的节点，``block_reasons``
-    给出 ``(node_id, 原因)`` 供保存受阻原因。``pending`` 为非终态节点
-    （暂停/等待/未知等），非空中则 ``converged`` 为 False。
+    ``blocked`` 为上游失败/终止/partial/``closed_unknown`` 导致未启动的节点，
+    ``block_reasons`` 给出 ``(node_id, 原因)`` 供保存受阻原因。``pending`` 为非
+    终态节点（暂停/等待/``unknown`` 等），非空中则 ``converged`` 为 False。
+    ``closed_unknown`` 为已结束但结果未知的结案叶（不可恢复终态）：单独列出，
+    不并入 ``failed``/``ended``，也不进入 ``pending``（F10）。
     """
 
     succeeded: tuple[str, ...]
@@ -322,6 +331,7 @@ class PlanRunSummary:
     withdrawn: tuple[str, ...]
     ended: tuple[str, ...]
     partial: tuple[str, ...]
+    closed_unknown: tuple[str, ...]
     blocked: tuple[str, ...]
     pending: tuple[str, ...]
     block_reasons: tuple[tuple[str, str], ...]
@@ -337,6 +347,7 @@ class PlanRunSummary:
             "withdrawn": list(self.withdrawn),
             "ended": list(self.ended),
             "partial": list(self.partial),
+            "closed_unknown": list(self.closed_unknown),
             "blocked": list(self.blocked),
             "pending": list(self.pending),
             "block_reasons": [[node_id, reason] for node_id, reason in self.block_reasons],
@@ -354,8 +365,9 @@ class PlanRunSummary:
 class LeafDagScheduler:
     """一层叶 DAG 调度状态机（依赖已通过派发前校验，见 ``validate_plan_spec_proposal``）。
 
-    只依据叶终态事实推进：前置全部 ``complete`` 才就绪；失败/终止/partial 使
-    下游阻塞并逐层传播；非终态（暂停/等待/未知）保持 pending，不伪造结论。
+    只依据叶终态事实推进：前置全部 ``complete`` 才就绪；失败/终止/partial/
+    ``closed_unknown`` 使下游阻塞并逐层传播（未知结果不能作为成功前置）；
+    非终态（暂停/等待/``unknown``）保持 pending，不伪造结论。
     """
 
     def __init__(self, plan: PlanSpecProposal) -> None:
@@ -422,20 +434,21 @@ class LeafDagScheduler:
     def record(self, outcome: NodeOutcome) -> None:
         """登记叶终态事实；非成功终态递归阻塞其下游。
 
-        终态单调（同类 F07「迟到 running 不覆终态」）：已登记成功/阻塞终态后
-        再记任何事实都属冲突（迟到/重复事实不得把收敛翻回未收敛）。
+        终态单调（同类 F07「迟到 running 不覆终态」）：已登记成功/阻塞/结案未知
+        终态后再记任何事实都属冲突（迟到/重复事实不得把收敛翻回未收敛，也不得
+        复活已结案的 ``closed_unknown``，F10）。
         """
 
         self.node(outcome.node_id)
-        if outcome.state not in _SUCCESS_STATES | _BLOCKING_STATES | _NON_TERMINAL_STATES:
+        if outcome.state not in _TERMINAL_STATES | _NON_TERMINAL_STATES:
             _fail("invalid_display_state", f"$.outcomes[{outcome.node_id}].state")
         existing = self._outcomes.get(outcome.node_id)
-        if existing is not None and existing.state in _SUCCESS_STATES | _BLOCKING_STATES:
+        if existing is not None and existing.state in _TERMINAL_STATES:
             if existing == outcome:
                 return  # 幂等：同一终态事实重复登记（观察重投）不视为冲突
             _fail("node_outcome_conflict", f"$.outcomes[{outcome.node_id}]")
         self._outcomes[outcome.node_id] = outcome
-        if outcome.state in _BLOCKING_STATES:
+        if outcome.state in _BLOCKING_STATES | _CLOSED_UNKNOWN_STATES:
             self._block_dependents(outcome.node_id, f"upstream_{outcome.state}:{outcome.node_id}")
 
     def _block_dependents(self, node_id: str, reason: str) -> None:
@@ -446,11 +459,11 @@ class LeafDagScheduler:
             self._block_dependents(dependent, f"blocked_by:{dependent}")
 
     def converged(self) -> bool:
-        """全部节点均已有成功/阻塞终态（非终态既不算收敛也不算终态）。"""
+        """全部节点均已有终态或阻塞（非终态既不算收敛也不算终态）。"""
 
         return all(
             node_id in self._blocked
-            or (node_id in self._outcomes and self._outcomes[node_id].state in _SUCCESS_STATES | _BLOCKING_STATES)
+            or (node_id in self._outcomes and self._outcomes[node_id].state in _TERMINAL_STATES)
             for node_id in self._order
         )
 
@@ -466,7 +479,8 @@ class LeafDagScheduler:
 
         succeeded = _state_ids("complete")
         blocked = tuple(node_id for node_id in self._order if node_id in self._blocked)
-        # 非终态事实（暂停/等待/未知）仍属 pending：不参与收敛、不启动后继。
+        # 非终态事实（暂停/等待/unknown）仍属 pending：不参与收敛、不启动后继；
+        # closed_unknown 为不可恢复终态，单列于 closed_unknown、不保持可恢复占位。
         pending = tuple(
             node_id
             for node_id in self._order
@@ -479,6 +493,7 @@ class LeafDagScheduler:
             withdrawn=_state_ids("withdrawn"),
             ended=_state_ids("ended"),
             partial=_state_ids("partial"),
+            closed_unknown=_state_ids("closed_unknown"),
             blocked=blocked,
             pending=pending,
             block_reasons=tuple((node_id, self._blocked[node_id]) for node_id in blocked),
@@ -541,7 +556,8 @@ async def drive_leaf_dag(
     为重试轮冻结的旧轮成功前置（计划外节点，不重做、不重计费用）。``start_leaf``
     须把「已判定的业务失败」作为 ``NodeOutcome(state="failed")`` 返回；未判定
     异常与 ``CancelledError`` 向上传播（不伪造 failed、不吞取消，R2/R21）。
-    非终态结果（暂停/等待/未知）使本次推进在没有可运行叶时结束且不收敛。
+    非终态结果（暂停/等待/``unknown``）使本次推进在没有可运行叶时结束且不收敛；
+    ``closed_unknown`` 为不可恢复终态，按结案收口并阻其下游（F10）。
 
     观察预算（``idle_observation_limit`` 个连续无进展切片）耗尽**不是父终态**：
     提供 ``wait_checkpoint``（生产为 DBOS 持久等待）时，本函数持久等待后开启新
