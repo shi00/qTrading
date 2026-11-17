@@ -1714,7 +1714,9 @@ class AgentDao(BaseDao):
         - revision 不符且内容不同 → ``REVISION_CONFLICT``；内容相同返回幂等回执；
         - 非法阶段迁移 → ``INPUT_INVALID``（``unknown``/终态为吸收态）；
         - 首次落库写 artifact_id/version，后续身份不一致 → ``INPUT_CONFLICT``；
-        - 坏行（已存 manifest 不可解码）→ ``OPERATION_UNKNOWN``，不静默覆盖。
+        - 坏行（已存 manifest 不可解码）→ ``OPERATION_UNKNOWN``，不静默覆盖；
+        - 所属会话已删除 fence → 新阶段事实 ``POLICY_DENIED``（D08；幂等重放
+          仍在版本分支先返回原回执）。
         """
 
         self._check_engine()
@@ -1792,6 +1794,15 @@ class AgentDao(BaseDao):
                     )
                 raise AgentServiceError(
                     AgentErrorCode.REVISION_CONFLICT, "delivery revision changed concurrently", identity
+                )
+            # 3b. 删除 fence 门（D08）：幂等重放已在版本分支返回原回执；新阶段
+            #     事实不得写入清理后保留会话。
+            if row.session_id is not None:
+                await self._assert_session_not_cleanup_fenced(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=row.session_id,
+                    identity=identity,
                 )
             if previous is not None:
                 try:
@@ -2252,6 +2263,7 @@ class AgentDao(BaseDao):
         所属轮次与执行终止态；非法选项/版本不符 → ``INPUT_INVALID``，过期/
         执行终止/轮次已被替代或停轮 → ``POLICY_DENIED``，均在写答复命令与推进
         CAS 之前拒绝（零新事实）。重放路径只读原事实回执，不按当前状态重判。
+        所属会话已删除 fence → 首生效新答复 ``POLICY_DENIED``（D08）。
         """
 
         self._check_engine()
@@ -2329,6 +2341,14 @@ class AgentDao(BaseDao):
                 expires_at=decision_row.expires_at,
                 identity=identity,
                 action="answer save",
+            )
+            # 3b. 删除 fence 门（D08）：命令键重放已在步骤 2 返回原事实；新键
+            #     答复不得写入清理后保留会话（首生效前拦，零新命令）。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=request.user_scope,
+                session_id=decision_row.session_id,
+                identity=identity,
             )
             # 4. 先插 answer 命令（answer_command_id FK 非延迟，须先建命令行）。
             occurred = datetime.now(UTC)
@@ -3566,7 +3586,7 @@ class AgentDao(BaseDao):
         Raises:
             AgentServiceError: INPUT_INVALID（会话/执行/轮缺失、身份不一致、
                 载荷非规范 JSON、正文互斥破坏）/ INPUT_CONFLICT（同事件身份异
-                载荷）/ PERSISTENCE_UNAVAILABLE（其余约束失败）。
+                载荷）/ POLICY_DENIED（会话已删除 fence，新事件拒绝）/ PERSISTENCE_UNAVAILABLE（其余约束失败）。
         """
 
         self._check_engine()
@@ -3645,6 +3665,25 @@ class AgentDao(BaseDao):
                         "round does not belong to execution",
                         identity_str,
                     )
+            # 3b. 删除 fence 门（D08）：先辨既有事件身份——同身份重放/异输入冲突
+            #     走下方插入冲突原路径（历史重放语义不变）；仅新事件拒绝写入清理
+            #     后保留会话。门禁为只读共享锁，置于 execution→session 两把行锁之后。
+            existing_event = (
+                await conn.execute(
+                    sa.select(AgentMessage.message_id).where(
+                        AgentMessage.user_scope == request.user_scope,
+                        AgentMessage.session_id == request.session_id,
+                        AgentMessage.event_id == event_id,
+                    )
+                )
+            ).first()
+            if existing_event is None:
+                await self._assert_session_not_cleanup_fenced(
+                    conn,
+                    user_scope=request.user_scope,
+                    session_id=request.session_id,
+                    identity=identity_str,
+                )
             # 3. 水位分配（行锁内单调 +1）。
             new_session_seq = session_row.event_seq + 1
             new_execution_seq = execution_row.event_seq + 1 if execution_row is not None else None
@@ -7946,7 +7985,8 @@ class AgentDao(BaseDao):
 
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
-                OPERATION_UNKNOWN。
+                OPERATION_UNKNOWN / POLICY_DENIED（branch 源会话已删除 fence，
+                拒绝新建派生会话，D08）。
         """
 
         self._check_engine()
@@ -8044,6 +8084,14 @@ class AgentDao(BaseDao):
                         identity=identity,
                     )
                     parent_session_id = source.session_id
+                    # 删除 fence 门（D08）：命令键重放已在步骤 1 返回原回执；新派生
+                    # 会话不得引用已清理源会话（源会话正文已按 §10.5 清除）。
+                    await self._assert_session_not_cleanup_fenced(
+                        conn,
+                        user_scope=user_scope,
+                        session_id=source.session_id,
+                        identity=identity,
+                    )
                     # 冻结键集：只引用身份/版本/截点，不含正文（清理后不留内容）。
                     branch_metadata = {
                         "schema_version": 1,
@@ -8745,7 +8793,8 @@ class AgentDao(BaseDao):
         """以预期版 CAS 追加不可变计划提案版本（单事务，冲突零新事实）。
 
         同 content 重写不增版（返回当前版）；``expected_revision`` 落后于 head
-        → ``REVISION_CONFLICT``；执行行不存在/跨用户 → ``INPUT_INVALID``。
+        → ``REVISION_CONFLICT``；执行行不存在/跨用户 → ``INPUT_INVALID``；
+        执行所属会话已删除 fence → 新提案 ``POLICY_DENIED``（D08）。
         """
 
         self._check_engine()
@@ -8761,7 +8810,7 @@ class AgentDao(BaseDao):
         async with engine.begin() as conn:
             execution_row = (
                 await conn.execute(
-                    sa.select(AgentExecution.execution_id)
+                    sa.select(AgentExecution.execution_id, AgentExecution.session_id)
                     .where(
                         AgentExecution.user_scope == user_scope,
                         AgentExecution.execution_id == execution_id,
@@ -8793,6 +8842,15 @@ class AgentDao(BaseDao):
                 if head.items == item_tuple:
                     return head
             new_revision = expected_revision + 1
+            # 3b. 删除 fence 门（D08）：同内容重放已在 head 返回；新提案版本不得
+            #     写入清理后保留会话所属执行。
+            if execution_row.session_id is not None:
+                await self._assert_session_not_cleanup_fenced(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=execution_row.session_id,
+                    identity=identity,
+                )
             proposal = PlanProposal(execution_id=execution_id, plan_revision=new_revision, items=item_tuple)
             await conn.execute(
                 sa.insert(AgentAssetVersion).values(
