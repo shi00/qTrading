@@ -737,7 +737,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         blocks: list[str] = []
         limitations: list[dict[str, str]] = []
         total_rows = 0
-        total_chars = 0
+        frozen_chars = 0
         read_sheets: list[str] = []
         partial_sheet: str | None = None
         partial_last_row: int = 0
@@ -748,6 +748,10 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             formula_sheet = formulas[sheet_name]
             cached_sheet = cached[sheet_name]
             rows: list[dict[str, Any]] = []
+            # 单表冻结块（``json_doc`` 规范 JSON）的空表长度：块长 = 本值 + 各行规范文本
+            # 长度 + 行间逗号，与 ``len(block)`` 同一口径（码点）。
+            sheet_base_chars = len(json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": []}))
+            rows_chars = 0
             row_number = 0
             last_completed_row = 0
             for formula_row, cached_row in zip(formula_sheet.iter_rows(), cached_sheet.iter_rows(), strict=False):
@@ -799,7 +803,6 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                         getattr(formula_cell, "number_format", None),
                     )
                     payload = _typed_scalar(cached_cell.value if formula_text else formula_value)
-                    total_chars += len(str(payload.get("lexeme")))
                     cells.append(
                         {
                             "cell": cell_ref,
@@ -808,19 +811,27 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                             "xlsx_cell_meta": meta,
                         }
                     )
-                budget.enforce_codepoints(total_chars)
+                # 字符预算计「冻结完整表示」：整行规范 JSON（含公式文本、缓存表示、
+                # 单元格引用与分隔符），不是只计词法单元。与 MAX_RESULT_BYTES 的
+                # 传输字节闸门相互独立，谁都不能替代谁。
+                row_doc = json_doc({"row": row_number, "cells": cells})
+                rows_chars += len(row_doc) + (1 if rows else 0)
+                budget.enforce_codepoints(frozen_chars + sheet_base_chars + rows_chars)
                 rows.append({"row": row_number, "cells": cells})
                 last_completed_row = row_number
+            block = json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows})
             if partial_sheet is not None:
                 if rows_axis and rows:
                     # rows 轴：已完成行是真实已读内容，必须与 read_ranges 的前缀一致地投递。
-                    blocks.append(json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows}))
+                    blocks.append(block)
+                    frozen_chars += len(block)
                 else:
                     # sheets 轴/all：整表记未读，不投递半表内容；统计只计已投递行。
                     total_rows -= len(rows)
                 break
             read_sheets.append(sheet_name)
-            blocks.append(json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows}))
+            blocks.append(block)
+            frozen_chars += len(block)
 
         read_ranges, unread_ranges = _xlsx_read_unread_atoms(
             selection,
@@ -846,7 +857,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 source_bytes=len(data),
                 sheets=len(read_sheets),
                 rows=total_rows,
-                chars=total_chars,
+                chars=frozen_chars,
             ),
             read_ranges=read_ranges,
             unread_ranges=unread_ranges,

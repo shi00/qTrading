@@ -333,6 +333,20 @@ def _xlsx_cells(parsed: Any) -> dict[str, dict[str, Any]]:
     return {cell["cell"]: cell for row in block["rows"] for cell in row["cells"]}
 
 
+def _xlsx_single_cell(value: str, *, formula: str | None = None) -> bytes:
+    """单行单单元格的最小样本（用于字符预算边界与长公式/短缓存场景）。"""
+
+    if formula is None:
+        cell = f'<c r="A1" t="inlineStr"><is><t>{value}</t></is></c>'
+    else:
+        cell = f'<c r="A1"><f>{formula}</f><v>{value}</v></c>'
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<worksheet {_NS}><sheetData><row r="1">{cell}</row></sheetData></worksheet>'
+    )
+    return _rewrite_xlsx(_xlsx_bytes(), replace={"xl/worksheets/sheet1.xml": sheet.encode("utf-8")})
+
+
 class TestXlsxExtraction:
     def test_dual_representation_and_cache_applicability(self) -> None:
         parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes())
@@ -366,6 +380,55 @@ class TestXlsxExtraction:
         assert cells["E2"]["xlsx_cell_meta"]["cache_missing_reason"] == "cache_error"
         assert cells["F2"]["xlsx_cell_meta"]["cache_present"] is True
         assert cells["F2"]["xlsx_cell_meta"]["cache_raw_type"] == "string"
+
+    def test_chars_count_frozen_representation_not_lexeme_only(self) -> None:
+        # I19：字符预算与 stats.chars 必须按投递的冻结完整表示（码点）计，而不是只计词法单元。
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes(sheets=2))
+        assert parsed.stats["chars"] == sum(len(block) for block in parsed.blocks)
+        lexeme_total = sum(
+            len(str(cell["value"]["lexeme"]))
+            for block in parsed.blocks
+            for row in json.loads(block)["rows"]
+            for cell in row["cells"]
+        )
+        chars = parsed.stats["chars"]
+        assert chars is not None
+        assert chars > lexeme_total
+
+    def test_long_formula_with_short_cache_counts_formula_text(self) -> None:
+        formula = "=" + "1+" * 400 + "1"
+        data = _xlsx_single_cell("1", formula=formula)
+        parsed = _parse(AttachmentKind.XLSX, data)
+        assert formula in parsed.blocks[0]
+        assert parsed.stats["chars"] == len(parsed.blocks[0])
+        lexeme_total = sum(len(str(cell["value"]["lexeme"])) for cell in _xlsx_cells(parsed).values())
+        # 只计词法时该预算会「通过」，按完整表示必须拒绝（公式文本参与计数）。
+        code = _limit_of(
+            data,
+            Selection(kind="all"),
+            AttachmentBudget(max_codepoints=lexeme_total + 10),
+            AttachmentKind.XLSX,
+        )
+        assert code == "attachment_codepoints_exceeded"
+
+    def test_codepoints_limit_boundary_on_frozen_representation(self) -> None:
+        base = len(_parse(AttachmentKind.XLSX, _xlsx_single_cell("")).blocks[0])
+        exact = _parse(AttachmentKind.XLSX, _xlsx_single_cell("x" * (100_000 - base)))
+        assert exact.stats["chars"] == 100_000
+        assert sum(len(block) for block in exact.blocks) == 100_000
+        over = _xlsx_single_cell("x" * (100_001 - base))
+        assert _limit_of(over, Selection(kind="all"), AttachmentBudget(), AttachmentKind.XLSX) == (
+            "attachment_codepoints_exceeded"
+        )
+
+    def test_whitespace_and_newline_escaping_participate_in_codepoint_count(self) -> None:
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_single_cell(" a \n b "))
+        block = parsed.blocks[0]
+        assert parsed.stats["chars"] == len(block)
+        assert "\\n" in block
+        chars = parsed.stats["chars"]
+        assert chars is not None
+        assert chars > len(" a \n b ")
 
     def test_sheet_limit_exact_passes_and_plus_one_rejected(self) -> None:
         data = _xlsx_bytes(sheets=2)
