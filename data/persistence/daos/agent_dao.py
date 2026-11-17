@@ -586,7 +586,7 @@ class AgentDao(BaseDao):
         Raises:
             AgentServiceError: INPUT_INVALID（目标会话不存在）/ INPUT_CONFLICT
                 （同身份异输入或同命令键异输入）/ OPERATION_UNKNOWN（原回执
-                不可得）。
+                不可得）/ POLICY_DENIED（目标会话已删除 fence，新键受理拒绝）。
         """
 
         self._check_engine()
@@ -667,6 +667,15 @@ class AgentDao(BaseDao):
                     "same command key with different input",
                     f"{request.user_scope}/{request.session_id}/{request.client_command_id}",
                 )
+
+            # 3b. 删除 fence 门（D08）：意图/命令键重放已查回原回执；新键受理不得
+            #     写入清理后保留会话（新消息正文 + 源资产 + 谱系边）。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=request.user_scope,
+                session_id=request.session_id,
+                identity=_identity_str(request),
+            )
 
             # 4. 序号分配（持锁下 max+1，起点 1：首条消息 session_seq=1，检视 D01）。
             session_seq = (
@@ -5688,7 +5697,16 @@ class AgentDao(BaseDao):
                     claimed_at=_wire_time(slot_row.claimed_at),
                 )
 
-            # 4. 最严限额核定（开放容量谓词：unknown 在途不放空；§9.11 事务内
+            # 4. 删除 fence 门（D08）：同类票据重放已返回原票据；新票据不得引用
+            #    清理后保留会话（execution.deletion_fenced 只挡对象级，不代替本门）。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=request.user_scope,
+                session_id=execution_row.session_id,
+                identity=identity,
+            )
+
+            # 5. 最严限额核定（开放容量谓词：unknown 在途不放空；§9.11 事务内
             #    只查每会话 1 总/每总 3 叶，全局与每计划预算由运行宿主/计划验证承载）。
             open_predicate = sa.or_(
                 AgentResourceSlot.released_at.is_(None),
@@ -5730,7 +5748,7 @@ class AgentDao(BaseDao):
                 if tree_open_leaf >= 3:
                     raise _budget_blocked(identity, "per-root leaf slot limit (3) reached")
 
-            # 5. 落票据（guard 行锁下无竞争；owner_epoch 为调用方运行身份）。
+            # 6. 落票据（guard 行锁下无竞争；owner_epoch 为调用方运行身份）。
             #    跨用户域 slot_id 撞单列全局 PK 时转 INPUT_CONFLICT（检视闭环 m-3：
             #    数据库失败明确分类，不裸 IntegrityError；accept_request 先例）。
             now = datetime.now(UTC)
@@ -6758,9 +6776,11 @@ class AgentDao(BaseDao):
         单事务行锁下逐项核：存在、非不可恢复终态、非未核状态（unknown/ending）、
         非用户终止、有活动当前轮、轮代码版本与 ``application_version`` 一致
         （兼容矩阵）、旧执行无未收口 operation（§8.5 unknown 先核原 operation）、
-        新 epoch 严格大于现值（单调，R22）；合格项写 ``owner_epoch`` 并重开
-        ``dispatch_closed``，其有效轮写 ``run_epoch``。不合格项进入 ``blocked``
-        （明确拒绝，不静默跳过），对应原生集合不返回，故不会被 resume。
+        新 epoch 严格大于现值（单调，R22）；所属会话已提交删除 fence 的执行以
+        ``deletion_fenced`` 拒绝（D08/D28，不复活已清理内容）；合格项写
+        ``owner_epoch`` 并重开 ``dispatch_closed``，其有效轮写 ``run_epoch``。
+        不合格项进入 ``blocked``（明确拒绝，不静默跳过），对应原生集合不返回，
+        故不会被 resume。
 
         Raises:
             AgentServiceError: INPUT_INVALID（入参非法/空集合/epoch 非正/版本空）。
@@ -6787,6 +6807,7 @@ class AgentDao(BaseDao):
                 await conn.execute(
                     sa.select(
                         AgentExecution.execution_id,
+                        AgentExecution.session_id,
                         AgentExecution.display_state,
                         AgentExecution.owner_epoch,
                         AgentRound.round_id,
@@ -6823,10 +6844,16 @@ class AgentDao(BaseDao):
                 ).all()
             }
             by_id = {row.execution_id: row for row in rows}
+            # 删除 fence 门（D08/D28 恢复子项）：清理后保留会话的执行不得被恢复
+            # 授予新代次（恢复会重开派发并复活已清理内容）。
+            fenced_sessions, _ = await self._cleanup_fenced_identities(conn, user_scope=request.user_scope)
             for execution_id in execution_ids:
                 row = by_id.get(execution_id)
                 if row is None:
                     blocked.append((execution_id, "not_found"))
+                    continue
+                if row.session_id in fenced_sessions:
+                    blocked.append((execution_id, "deletion_fenced"))
                     continue
                 if row.display_state in NON_RECOVERABLE_DISPLAY_STATES:
                     blocked.append((execution_id, "already_terminal"))
@@ -7584,6 +7611,58 @@ class AgentDao(BaseDao):
             prior_error_category=None if error is None else str(error),
         )
 
+    async def _cleanup_fenced_identities(
+        self, conn: AsyncConnection, *, user_scope: str
+    ) -> tuple[frozenset[str], frozenset[tuple[str, str]]]:
+        """已提交 fence 的清理集合（D08 唯一门禁源）：会话集 + 资产版本键集。
+
+        ``FOR SHARE`` 锁住 fence 作业行，与 ``commit_cleanup_fence`` 的 UPDATE 互斥：
+        新写入事务与 fence 提交只能一方先提交，避免「读时未见 fence、写后 fence 才落」。
+        坏载形不当作「未清理」放行（fail-closed ``PERSISTENCE_UNAVAILABLE``）。
+        """
+
+        rows = (
+            (
+                await conn.execute(
+                    sa.select(AgentCleanupJob.exact_identity_set)
+                    .where(
+                        AgentCleanupJob.user_scope == user_scope,
+                        AgentCleanupJob.fence_committed.is_(True),
+                    )
+                    .with_for_update(read=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        sessions: set[str] = set()
+        assets: set[tuple[str, str]] = set()
+        for value in rows:
+            try:
+                identities = decode_cleanup_identity_set(value)
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                    f"cleanup identity set invalid: {exc.code}",
+                    f"{user_scope}/cleanup-fence",
+                ) from exc
+            sessions.update(identities.session_ids)
+            assets.update(identities.asset_keys)
+        return frozenset(sessions), frozenset(assets)
+
+    async def _assert_session_not_cleanup_fenced(
+        self, conn: AsyncConnection, *, user_scope: str, session_id: str, identity: str
+    ) -> None:
+        """清理后保留会话不得接受新正文/新引用/恢复写入（D08）。"""
+
+        fenced_sessions, _ = await self._cleanup_fenced_identities(conn, user_scope=user_scope)
+        if session_id in fenced_sessions:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                "target session is deletion fenced; new content rejected",
+                identity,
+            )
+
     # ------------------------------------------------------------------
     # F-03-1：本地草稿可靠保存（§4.2 save_draft / §9.3 / §9.13）
     # ------------------------------------------------------------------
@@ -7612,7 +7691,8 @@ class AgentDao(BaseDao):
         CAS 串行化。
 
         Raises:
-            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT。
+            AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
+                POLICY_DENIED（目标会话已删除 fence，新键写稿拒绝）。
         """
 
         self._check_engine()
@@ -7684,6 +7764,15 @@ class AgentDao(BaseDao):
                         f"stored draft receipt invalid: {exc.code}",
                         identity,
                     ) from exc
+
+            # 2b. 删除 fence 门（D08）：命令键重放已查回原回执；新键不得向清理后
+            #     保留会话写新草稿正文。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=user_scope,
+                session_id=command.session_id,
+                identity=identity,
+            )
 
             # 3. CAS：预期版必须等于当前草稿版。
             if session_row.draft_revision != command.expected_draft_revision:
@@ -7766,6 +7855,16 @@ class AgentDao(BaseDao):
         调用方须在同一显式事务内调用（失败即整体回滚，不留下半套边）。
         """
 
+        if source_refs:
+            # 删除 fence 门（D08）：清理集合内的资产不得被新草稿引用（新引用竞争）
+            _, fenced_assets = await self._cleanup_fenced_identities(conn, user_scope=user_scope)
+            for ref in source_refs:
+                if (ref.source_id, ref.source_version) in fenced_assets:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "referenced source version is deletion fenced; new references rejected",
+                        identity,
+                    )
         await conn.execute(
             sa.delete(AgentSourceLink).where(
                 AgentSourceLink.user_scope == user_scope,
@@ -8198,7 +8297,7 @@ class AgentDao(BaseDao):
 
         Raises:
             AgentServiceError: INPUT_INVALID / INPUT_CONFLICT / REVISION_CONFLICT /
-                OPERATION_UNKNOWN。
+                OPERATION_UNKNOWN / POLICY_DENIED（目标会话已删除 fence，移入拒绝）。
         """
 
         self._check_engine()
@@ -8268,6 +8367,14 @@ class AgentDao(BaseDao):
                         f"stored draft transfer receipt invalid: {exc.code}",
                         identity,
                     ) from exc
+
+            # 2b. 删除 fence 门（D08）：清理后保留会话不得接受移入正文。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=user_scope,
+                session_id=command.target_session_id,
+                identity=identity,
+            )
 
             # 3. 目标必须存在、未归档，且为无稿/空稿。
             target = sessions.get(command.target_session_id)
