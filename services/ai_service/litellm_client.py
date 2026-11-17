@@ -1610,9 +1610,16 @@ class LiteLLMClient:
                             refusal_parts.append(refusal_delta)
                         for tc in getattr(delta, "tool_calls", None) or []:
                             index = int(tc.index)
-                            state = calls.setdefault(index, {"call_id": None, "name": "", "fragments": []})
+                            state = calls.setdefault(
+                                index, {"call_id": None, "name": "", "fragments": [], "emitted": 0}
+                            )
                             tc_id = getattr(tc, "id", None)
                             if tc_id:
+                                # M04：SDK 语义 tool_call_id 非增量（ToolCallPartDelta
+                                # docstring：只能替换 None，非匹配值即错误）——同 index
+                                # 出现不同 id 即身份漂移，fail-closed 不猜。
+                                if state["call_id"] is not None and tc_id != state["call_id"]:
+                                    raise ModelTurnProtocolError("invalid_field", f"$.stream.tool_calls[{index}].id")
                                 state["call_id"] = tc_id
                             function = getattr(tc, "function", None)
                             name_part = getattr(function, "name", None) if function is not None else None
@@ -1621,20 +1628,23 @@ class LiteLLMClient:
                             fragment = getattr(function, "arguments", None) if function is not None else None
                             if fragment:
                                 state["fragments"].append(fragment)
-                                # 稳定 call_id 聚合：id/name 已知才产出 delta 事件（leading
-                                # 分片缺 id 时静默累积，闭合处强制核验）
-                                if state["call_id"] and state["name"]:
-                                    sequence += 1
-                                    await _emit(
-                                        ChatStreamEvent(
-                                            sequence=sequence,
-                                            kind="tool_call_delta",
-                                            call_index=index,
-                                            call_id=state["call_id"],
-                                            name=state["name"],
-                                            arguments_fragment=fragment,
-                                        )
+                            # M04：id/name 齐备后一次性补发此前缓冲的全部分片（含身份
+                            # 未齐时的 leading 分片），保证「增量拼接 == 闭合事实」；
+                            # 此后逐片续发，闭合事件与增量的累积内容逐字节一致。
+                            if state["call_id"] and state["name"] and len(state["fragments"]) > state["emitted"]:
+                                pending = "".join(state["fragments"][state["emitted"] :])
+                                state["emitted"] = len(state["fragments"])
+                                sequence += 1
+                                await _emit(
+                                    ChatStreamEvent(
+                                        sequence=sequence,
+                                        kind="tool_call_delta",
+                                        call_index=index,
+                                        call_id=state["call_id"],
+                                        name=state["name"],
+                                        arguments_fragment=pending,
                                     )
+                                )
                     finish_raw = getattr(choice, "finish_reason", None)
                     if finish_raw is not None and finish_buffered is None:
                         finish_buffered = finish_raw

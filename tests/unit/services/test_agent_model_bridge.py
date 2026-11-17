@@ -18,7 +18,7 @@
 import asyncio
 import dataclasses
 import json
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,6 +34,7 @@ from core.model_management_types import (
     TextContentPart,
 )
 from pydantic_ai import UnexpectedModelBehavior
+from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import (
     BinaryContent,
     ModelRequest,
@@ -660,6 +661,194 @@ class TestStreamPath:
         assert isinstance(tool_calls[0].args, str)
         assert json.loads(tool_calls[0].args) == {"q": 1}
         assert tool_calls[0].tool_call_id == "c1"
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_call_fragmented_name_appends_suffix(self):
+        """M04：分片名称按 SDK 增量语义续拼——已建 part 后的累积名取其前缀差。"""
+
+        events = (
+            ChatStreamEvent(
+                sequence=1,
+                kind="tool_call_delta",
+                call_index=0,
+                call_id="c1",
+                name="get_",
+                arguments_fragment='{"a',
+            ),
+            ChatStreamEvent(
+                sequence=2,
+                kind="tool_call_delta",
+                call_index=0,
+                call_id="c1",
+                name="get_quote",
+                arguments_fragment='": 1}',
+            ),
+            ChatStreamEvent(
+                sequence=3,
+                kind="tool_call_closed",
+                call_index=0,
+                call_id="c1",
+                name="get_quote",
+                closed_arguments_json='{"a": 1}',
+            ),
+            ChatStreamEvent(sequence=4, kind="finish", finish_reason="tool_calls"),
+        )
+        executor = _FakeExecutor(_succeeded_outcome(model_call_id="mc-f"), events=events)
+        model = _gateway(executor)
+        async with model.request_stream(
+            [ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params()
+        ) as streamed:
+            async for _event in streamed:
+                pass
+            response = streamed.get()
+        tool_calls = [p for p in response.parts if isinstance(p, ToolCallPart)]
+        assert len(tool_calls) == 1
+        assert tool_calls[0].tool_name == "get_quote"
+        assert tool_calls[0].args == '{"a": 1}'
+        assert tool_calls[0].tool_call_id == "c1"
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_call_late_conflicting_id_rejected(self):
+        """M04：已建 part 后晚到不同 id = 身份漂移，fail-closed（不静默忽略）。"""
+
+        events = (
+            ChatStreamEvent(
+                sequence=1, kind="tool_call_delta", call_index=0, call_id="c1", name="search", arguments_fragment="{"
+            ),
+            ChatStreamEvent(
+                sequence=2, kind="tool_call_delta", call_index=0, call_id="c2", name="search", arguments_fragment="}"
+            ),
+            ChatStreamEvent(sequence=3, kind="finish", finish_reason="tool_calls"),
+        )
+        executor = _FakeExecutor(_succeeded_outcome(model_call_id="mc-d"), events=events)
+        model = _gateway(executor)
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            async with model.request_stream(
+                [ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params()
+            ) as streamed:
+                async for _event in streamed:
+                    pass
+        assert excinfo.value.code == "invalid_field"
+        assert excinfo.value.field_path == "$.tool_call_id"
+        assert len(executor.calls) == 1  # noqa: weak-assertion 派发次数即本用例事实：无重发路径
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_call_closed_mismatch_rejected(self):
+        """M04：闭合完整参数与增量和不等时不静默采用任一方——协议失败。"""
+
+        events = (
+            ChatStreamEvent(
+                sequence=1,
+                kind="tool_call_delta",
+                call_index=0,
+                call_id="c1",
+                name="search",
+                arguments_fragment='{"q": 1}',
+            ),
+            ChatStreamEvent(
+                sequence=2,
+                kind="tool_call_closed",
+                call_index=0,
+                call_id="c1",
+                name="search",
+                closed_arguments_json='{"q": 2}',
+            ),
+            ChatStreamEvent(sequence=3, kind="finish", finish_reason="tool_calls"),
+        )
+        executor = _FakeExecutor(_succeeded_outcome(model_call_id="mc-c"), events=events)
+        model = _gateway(executor)
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            async with model.request_stream(
+                [ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params()
+            ) as streamed:
+                async for _event in streamed:
+                    pass
+        assert excinfo.value.field_path == "$.closed_arguments_json"
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_call_incremental_equals_sdk_aggregation(self):
+        """M04：交错 + 分片名 + 晚 id 的桥层最终 part 与锁定版 SDK 逐项聚合一致。"""
+
+        events = (
+            ChatStreamEvent(
+                sequence=1,
+                kind="tool_call_delta",
+                call_index=0,
+                call_id="c0",
+                name="get_",
+                arguments_fragment='{"a',
+            ),
+            ChatStreamEvent(
+                sequence=2,
+                kind="tool_call_delta",
+                call_index=1,
+                call_id="c1",
+                name="lookup",
+                arguments_fragment='{"b": 2}',
+            ),
+            ChatStreamEvent(
+                sequence=3,
+                kind="tool_call_delta",
+                call_index=0,
+                call_id="c0",
+                name="get_quote",
+                arguments_fragment='": 1}',
+            ),
+            ChatStreamEvent(
+                sequence=4,
+                kind="tool_call_closed",
+                call_index=0,
+                call_id="c0",
+                name="get_quote",
+                closed_arguments_json='{"a": 1}',
+            ),
+            ChatStreamEvent(
+                sequence=5,
+                kind="tool_call_closed",
+                call_index=1,
+                call_id="c1",
+                name="lookup",
+                closed_arguments_json='{"b": 2}',
+            ),
+            ChatStreamEvent(sequence=6, kind="finish", finish_reason="tool_calls"),
+        )
+        executor = _FakeExecutor(_succeeded_outcome(model_call_id="mc-r"), events=events)
+        model = _gateway(executor)
+        async with model.request_stream(
+            [ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params()
+        ) as streamed:
+            async for _event in streamed:
+                pass
+            response = streamed.get()
+
+        reference = ModelResponsePartsManager(model_request_parameters=_params())
+        reference.handle_tool_call_delta(vendor_part_id=("ref", 0), tool_name="get_", args='{"a', tool_call_id="c0")
+        reference.handle_tool_call_delta(
+            vendor_part_id=("ref", 1), tool_name="lookup", args='{"b": 2}', tool_call_id="c1"
+        )
+        reference.handle_tool_call_delta(vendor_part_id=("ref", 0), tool_name="quote", args='": 1}', tool_call_id=None)
+        bridge_parts = [p for p in response.parts if isinstance(p, ToolCallPart)]
+        reference_parts = [p for p in reference.get_parts() if isinstance(p, ToolCallPart)]
+        assert [(p.tool_name, p.args, p.tool_call_id) for p in bridge_parts] == [
+            (p.tool_name, p.args, p.tool_call_id) for p in reference_parts
+        ]
+        assert [p.tool_name for p in bridge_parts] == ["get_quote", "lookup"]
+
+    @pytest.mark.asyncio
+    async def test_stream_unknown_event_kind_rejected(self):
+        """M04：未知流事件形态显式拒绝（不产出 part、不重发请求）。"""
+
+        events = (ChatStreamEvent(sequence=1, kind=cast(Any, "bogus"), text_delta="x"),)
+        executor = _FakeExecutor(_succeeded_outcome(model_call_id="mc-u"), events=events)
+        model = _gateway(executor)
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            async with model.request_stream(
+                [ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params()
+            ) as streamed:
+                async for _event in streamed:
+                    pass
+        assert excinfo.value.code == "unknown_part"
+        assert len(executor.calls) == 1  # noqa: weak-assertion 派发次数即本用例事实：无重发路径
 
     @pytest.mark.asyncio
     async def test_stream_cancel_joins_producer(self):

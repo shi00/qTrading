@@ -179,6 +179,11 @@ def _usage_chunk(usage: Any) -> Any:
     return SimpleNamespace(choices=[], usage=usage)
 
 
+def _finish_chunk(finish_reason: str = "tool_calls") -> Any:
+    delta = SimpleNamespace(content=None, refusal=None, tool_calls=None)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)], usage=None)
+
+
 def _events_from(on_event_calls: list[ChatStreamEvent]) -> Any:
     async def _on_event(event: ChatStreamEvent) -> None:
         on_event_calls.append(event)
@@ -550,6 +555,100 @@ class TestInvokeChatConnectionStream:
                     on_event=_events_from(events),
                 )
         assert excinfo.value.code == "invalid_arguments_json"
+        assert all(e.kind != "tool_call_closed" for e in events)
+
+    async def test_stream_buffered_fragment_replayed_when_identity_known(self):
+        """M04：身份未齐时的 leading 分片在 id/name 齐备后整段补发一次，
+        增量拼接 == 闭合事实（早期参数不丢）。"""
+
+        request = _chat_request()
+        chunks = [
+            _tool_delta(0, None, None, '{"sym'),
+            _tool_delta(0, "call_1", "get_quote", 'bol":"600519"}'),
+            _finish_chunk(),
+        ]
+        events: list[ChatStreamEvent] = []
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=_stream_chunks(chunks))):
+            result = await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=True, on_event=_events_from(events)
+            )
+        deltas = [e for e in events if e.kind == "tool_call_delta"]
+        assert [(e.call_id, e.name, e.arguments_fragment) for e in deltas] == [
+            ("call_1", "get_quote", '{"symbol":"600519"}')
+        ]
+        closed = [e for e in events if e.kind == "tool_call_closed"]
+        assert len(closed) == 1
+        assert closed[0].closed_arguments_json == "".join(e.arguments_fragment or "" for e in deltas)
+        assert result.tool_calls == (
+            AssistantToolCall(call_id="call_1", name="get_quote", arguments_json='{"symbol":"600519"}'),
+        )
+
+    async def test_stream_fragmented_tool_name_accumulates(self):
+        """M04：分片名称按 SDK 语义增量拼接（同名 id 重复出现不算漂移）。"""
+
+        request = _chat_request()
+        chunks = [
+            _tool_delta(0, "call_1", "get_", "{"),
+            _tool_delta(0, "call_1", "quote", "}"),
+            _finish_chunk(),
+        ]
+        events: list[ChatStreamEvent] = []
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=_stream_chunks(chunks))):
+            result = await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=True, on_event=_events_from(events)
+            )
+        deltas = [e for e in events if e.kind == "tool_call_delta"]
+        assert [e.name for e in deltas] == ["get_", "get_quote"]
+        assert result.tool_calls == (AssistantToolCall(call_id="call_1", name="get_quote", arguments_json="{}"),)
+
+    async def test_stream_interleaved_tool_call_indices(self):
+        """M04：交错调用按 index 各自累积，closed 按 index 序派发，互不串流。"""
+
+        request = _chat_request()
+        chunks = [
+            _tool_delta(0, "c0", "alpha", '{"a": 1'),
+            _tool_delta(1, "c1", "beta", '{"b": 2}'),
+            _tool_delta(0, None, None, "}"),
+            _finish_chunk(),
+        ]
+        events: list[ChatStreamEvent] = []
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=_stream_chunks(chunks))):
+            result = await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=True, on_event=_events_from(events)
+            )
+        assert [e.call_index for e in events if e.kind == "tool_call_delta"] == [0, 1, 0]
+        closed = [e for e in events if e.kind == "tool_call_closed"]
+        assert [(e.call_index, e.call_id, e.closed_arguments_json) for e in closed] == [
+            (0, "c0", '{"a": 1}'),
+            (1, "c1", '{"b": 2}'),
+        ]
+        assert result.tool_calls == (
+            AssistantToolCall(call_id="c0", name="alpha", arguments_json='{"a": 1}'),
+            AssistantToolCall(call_id="c1", name="beta", arguments_json='{"b": 2}'),
+        )
+
+    async def test_stream_late_conflicting_tool_call_id_fails_closed(self):
+        """M04：同 index 晚到不同 id = 身份漂移，fail-closed（不猜、不静默改写）。"""
+
+        request = _chat_request()
+        chunks = [
+            _tool_delta(0, "call_1", "get_quote", "{"),
+            _tool_delta(0, "call_2", None, "}"),
+            _finish_chunk(),
+        ]
+        events: list[ChatStreamEvent] = []
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=_stream_chunks(chunks))):
+            with pytest.raises(ModelTurnProtocolError) as excinfo:
+                await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                    request,
+                    _connection(),
+                    request.deadline,
+                    _attempt_context(),
+                    stream=True,
+                    on_event=_events_from(events),
+                )
+        assert excinfo.value.code == "invalid_field"
+        assert excinfo.value.field_path == "$.stream.tool_calls[0].id"
         assert all(e.kind != "tool_call_closed" for e in events)
 
     async def test_stream_refusal_maps_to_refused(self):

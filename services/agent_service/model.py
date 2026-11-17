@@ -587,31 +587,54 @@ class GatewayStreamedResponse(StreamedResponse):
                     for event in self._parts_manager.handle_text_delta(vendor_part_id=None, content=item.text_delta):
                         yield event
                 case "tool_call_delta":
-                    # SDK 语义：tool_name / tool_call_id 为建件事实（tool_name
-                    # 是增量拼接），仅在建件时携带；后续分片传 None 避免重复
-                    # 拼接（重复名缺陷），args 增量始终承载
+                    # M04：SDK 语义（锁定版 ToolCallPartDelta.apply）——tool_name 是
+                    # 增量拼接，tool_call_id 非增量（只能替换 None，非匹配值即错误）。
+                    # 已建 part 后：名称按「累积名 - 既有名」后缀续拼（对齐 SDK 最终
+                    # 聚合），id 相同不再重复携带、不同即身份漂移 fail-closed。
                     vendor_id = (_TOOL_VENDOR_PREFIX, item.call_index)
                     existing = self._parts_manager.get_part_by_vendor_id(vendor_id)
+                    tool_name = item.name
+                    tool_call_id = item.call_id
+                    if existing is not None:
+                        existing_name = getattr(existing, "tool_name", None)
+                        if not isinstance(existing_name, str):
+                            raise ModelTurnProtocolError("invalid_field", "$.tool_name")
+                        if item.call_id != getattr(existing, "tool_call_id", None):
+                            raise ModelTurnProtocolError("invalid_field", "$.tool_call_id")
+                        tool_call_id = None
+                        if not item.name or not item.name.startswith(existing_name):
+                            raise ModelTurnProtocolError("invalid_field", "$.tool_name")
+                        tool_name = item.name[len(existing_name) :] or None
                     event = self._parts_manager.handle_tool_call_delta(
                         vendor_part_id=vendor_id,
-                        tool_name=None if existing is not None else item.name,
+                        tool_name=tool_name,
                         args=item.arguments_fragment,
-                        tool_call_id=None if existing is not None else item.call_id,
+                        tool_call_id=tool_call_id,
                     )
                     if event is not None:
                         yield event
                 case "tool_call_closed":
-                    # 闭合 JSON 经增量片段累积承载（适配器契约：closed == 片段
-                    # 拼接，B-02-1 _consume_chat_stream 校验）；仅当无任何片段
-                    # 时按闭合参数整块建件
+                    # M04：闭合事件是完整事实——已建 part 时逐项核验名称 / id /
+                    # 参数（增量拼接必须等于闭合事实，不一致即协议失败，不静默
+                    # 采用任一方）；从未建 part（身份齐备前无增量事件）时整块建件。
                     vendor_id = (_TOOL_VENDOR_PREFIX, item.call_index)
-                    if self._parts_manager.get_part_by_vendor_id(vendor_id) is None:
+                    if item.closed_arguments_json is None or not item.name or not item.call_id:
+                        raise ModelTurnProtocolError("invalid_field", "$.tool_call_closed")
+                    existing = self._parts_manager.get_part_by_vendor_id(vendor_id)
+                    if existing is None:
                         yield self._parts_manager.handle_tool_call_part(
                             vendor_part_id=vendor_id,
-                            tool_name=item.name or "",
+                            tool_name=item.name,
                             args=item.closed_arguments_json,
                             tool_call_id=item.call_id,
                         )
+                    else:
+                        if getattr(existing, "tool_name", None) != item.name:
+                            raise ModelTurnProtocolError("invalid_field", "$.tool_name")
+                        if getattr(existing, "tool_call_id", None) != item.call_id:
+                            raise ModelTurnProtocolError("invalid_field", "$.tool_call_id")
+                        if getattr(existing, "args", None) != item.closed_arguments_json:
+                            raise ModelTurnProtocolError("invalid_field", "$.closed_arguments_json")
                 case "finish":
                     # §6.4-4 分别确认：finish（协议事实，缺失即协议错误）/
                     # usage（缺失保 None → unmeasured 标记）/ 流关闭（通道
