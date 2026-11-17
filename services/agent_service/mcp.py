@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,7 +42,7 @@ from core.agent_types import (
 from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 
 # ---------------------------------------------------------------------------
-# 传输配置（stdio 绝对可执行/不经 shell；HTTP 无内嵌凭据；SSE 需显式核准）
+# 传输配置（stdio 绝对可执行/cwd 必填/不经 shell；HTTP 显式风险确认 + Header 安全引用）
 # ---------------------------------------------------------------------------
 
 
@@ -55,20 +56,82 @@ class MCPTransportConfig:
     args: tuple[str, ...] = ()
     #: stdio：已核安全引用后的最小环境（键值对，保序）；不含应用环境副本。
     env: tuple[tuple[str, str], ...] = ()
-    #: stdio：绝对工作目录。
+    #: stdio：绝对工作目录（必填：不使用应用自身 cwd 解析资源）。
     cwd: str | None = None
     #: streamable_http / sse：目标 URL（不得内嵌用户名/密码）。
     url: str | None = None
     #: SSE 仅作显式兼容：须用户显式核准该传输。
     sse_compat_approved: bool = False
+    #: HTTP：附加请求头（名称, 安全引用）。值只能是 ``env:VAR`` / ``keyring:item``，
+    #: 明文秘密（含 ``Authorization: Bearer <明文>``）一律拒绝。
+    headers: tuple[tuple[str, str], ...] = ()
+    #: HTTP：显式风险确认（无内嵌凭据、Header 仅安全引用、不注入明文 Authorization）。
+    http_risk_approved: bool = False
+
+
+#: HTTP 附加 Header 允许的安全引用 scheme（其余一律视为明文/未知 scheme）。
+_HEADER_REF_SCHEMES: tuple[str, ...] = ("env:", "keyring:")
+#: HTTP Header 名称合法字符（RFC 9110 token）。
+_HEADER_NAME_CHARS = frozenset("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz")
+#: 客户端/SDK 自行管理或可被用于请求走私的 Header：配置侧不得注入。
+_FORBIDDEN_HTTP_HEADERS: frozenset[str] = frozenset(
+    {
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "proxy-connection",
+        "cookie",
+        "set-cookie",
+        "proxy-authorization",
+        "last-event-id",
+        "te",
+        "trailer",
+        "upgrade",
+    }
+)
 
 
 def _fail_transport(message: str, path: str = "$.mcp.transport") -> NoReturn:
     raise AgentValidationError("invalid_transport", f"{path}: {message}")
 
 
+def _valid_header_ref(value: str) -> bool:
+    """Header 值只能是安全引用：``env:NAME`` / ``keyring:item``（非空、无控制字符）。"""
+
+    for scheme in _HEADER_REF_SCHEMES:
+        if value.startswith(scheme):
+            name = value[len(scheme) :]
+            return bool(name) and name == name.strip() and all(ch.isprintable() for ch in name)
+    return False
+
+
+def _validate_http_headers(headers: tuple[tuple[str, str], ...], path: str) -> None:
+    """Header 白名单 + 安全引用：禁凭据/走私类 Header，禁明文值，禁重复名。"""
+
+    seen: set[str] = set()
+    for pair in headers:
+        if not isinstance(pair, tuple) or len(pair) != 2 or not all(isinstance(part, str) and part for part in pair):
+            _fail_transport("http headers must be non-empty string pairs", f"{path}.headers")
+        name, value = pair
+        lowered = name.lower()
+        if not lowered or any(ch not in _HEADER_NAME_CHARS for ch in lowered):
+            _fail_transport("http header name is not a valid token", f"{path}.headers")
+        if lowered in _FORBIDDEN_HTTP_HEADERS:
+            _fail_transport(f"http header not configurable: {lowered}", f"{path}.headers")
+        if lowered in seen:
+            _fail_transport("duplicate http header name", f"{path}.headers")
+        seen.add(lowered)
+        if not _valid_header_ref(value):
+            _fail_transport("http header value must be a secure reference (env: / keyring:)", f"{path}.headers")
+
+
 def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.transport") -> None:
-    """传输配置校验：只接受合同内形状，不做 shell 展开或隐式协议互换。"""
+    """传输配置校验：只接受合同内形状，不做 shell 展开或隐式协议互换。
+
+    静态可判定项在此一次查清（cwd 必填/绝对、可执行文件存在且可执行、Header 安全引用、
+    HTTP 风险显式确认）；OS 仍可能拒绝启动坏程序，故本函数不主张「必成功启动」。
+    """
 
     if not isinstance(config.kind, MCPTransportKind):
         _fail_transport("unknown transport kind", path)
@@ -82,10 +145,19 @@ def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.tra
             _fail_transport("stdio requires an executable command", f"{path}.command")
         if not Path(config.command).is_absolute():
             _fail_transport("stdio command must be an absolute path", f"{path}.command")
+        command_path = Path(config.command)
+        if not command_path.is_file():
+            _fail_transport("stdio command must be an existing file", f"{path}.command")
+        if not os.access(command_path, os.X_OK):
+            _fail_transport("stdio command is not executable", f"{path}.command")
         if config.url is not None:
             _fail_transport("stdio must not carry a url", f"{path}.url")
-        if config.cwd is not None and not Path(config.cwd).is_absolute():
+        if not isinstance(config.cwd, str) or not config.cwd:
+            _fail_transport("stdio requires a working directory", f"{path}.cwd")
+        if not Path(config.cwd).is_absolute():
             _fail_transport("stdio cwd must be an absolute path", f"{path}.cwd")
+        if config.headers or config.http_risk_approved:
+            _fail_transport("stdio must not carry http-only fields", path)
         for arg in config.args:
             if not isinstance(arg, str):
                 _fail_transport("stdio args must be strings", f"{path}.args")
@@ -103,6 +175,9 @@ def validate_transport_config(config: MCPTransportConfig, path: str = "$.mcp.tra
         _fail_transport("url must not embed credentials", f"{path}.url")
     if config.kind is MCPTransportKind.SSE and not config.sse_compat_approved:
         raise AgentValidationError("sse_not_approved", f"{path}.sse_compat_approved")
+    _validate_http_headers(config.headers, path)
+    if not config.http_risk_approved:
+        raise AgentValidationError("http_not_approved", f"{path}.http_risk_approved")
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +210,27 @@ class MCPServerConfig:
     connect_deadline_s: int = MCP_DEFAULT_DEADLINE_S
     tool_deadline_s: int = MCP_DEFAULT_DEADLINE_S
     audit: MCPReadOnlyAudit | None = None
+
+
+def validate_mcp_server_config(config: MCPServerConfig, path: str = "$.mcp") -> None:
+    """服务配置完整校验：保存与启连点**共用同一入口**，不信任已存储值（I18）。
+
+    覆盖身份/显示名（拒绝空白与控制字符）、传输合同（cwd/可执行/HTTP 风险确认/
+    Header 安全引用）、期限、审核绑定（审核记录必须属于同一服务身份）。
+    预算冻结属准入判定（``CAPABILITY_UNVERIFIED``），不在此函数内。
+    """
+
+    config.identity.stable_key()
+    require_identity(config.display_name, f"{path}.display_name")
+    if not config.display_name.strip() or any(ord(ch) < 32 or ord(ch) == 127 for ch in config.display_name):
+        raise AgentValidationError("invalid_display_name", f"{path}.display_name")
+    validate_transport_config(config.transport, f"{path}.transport")
+    validate_mcp_deadline(config.connect_deadline_s, f"{path}.connect_deadline_s")
+    validate_mcp_deadline(config.tool_deadline_s, f"{path}.tool_deadline_s")
+    if config.audit is not None:
+        encode_mcp_read_only_audit(config.audit)
+        if config.audit.service != config.identity:
+            raise AgentValidationError("invalid_audit_binding", f"{path}.audit.service")
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,26 +349,23 @@ class SharedMCPConnectionManager:
 
         identity = config.identity
         label = _identity_text(identity)
+        self._admit_config(config, label)
+        await self._store.save(config)
+        return MCPConfigSaveReceipt(identity=identity, connections_opened=0)
+
+    @staticmethod
+    def _admit_config(config: MCPServerConfig, label: str) -> None:
+        """合同 + 预算准入：保存与**每次加载后**的启连点共用（I18，不信任存储值）。"""
+
         try:
-            validate_transport_config(config.transport)
-            require_identity(config.display_name, "$.mcp.display_name")
-            validate_mcp_deadline(config.connect_deadline_s, "$.mcp.connect_deadline_s")
-            validate_mcp_deadline(config.tool_deadline_s, "$.mcp.tool_deadline_s")
-            if config.audit is not None:
-                encode_mcp_read_only_audit(config.audit)
+            validate_mcp_server_config(config)
         except AgentValidationError as exc:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid mcp config: {exc.code}", label) from exc
-        if config.audit is not None and config.audit.service != identity:
-            raise AgentServiceError(
-                AgentErrorCode.INPUT_INVALID, "read-only audit is bound to another service version", label
-            )
         if not config.budget.is_admitted():
             unfrozen = ",".join(config.budget.unfrozen_fields())
             raise AgentServiceError(
                 AgentErrorCode.CAPABILITY_UNVERIFIED, f"mcp receive budgets not frozen: {unfrozen}", label
             )
-        await self._store.save(config)
-        return MCPConfigSaveReceipt(identity=identity, connections_opened=0)
 
     # -- 显式测试 -----------------------------------------------------------
 
@@ -563,8 +656,13 @@ class SharedMCPConnectionManager:
         return remaining
 
     async def _require_config(self, identity: MCPServiceIdentity) -> MCPServerConfig:
+        """加载配置并在使用点重核：存储值一律不信任（I18）。"""
+
         label = _identity_text(identity)
         config = await self._store.load(identity)
         if config is None:
             raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp service config not found", label)
+        if config.identity != identity:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp config identity mismatch", label)
+        self._admit_config(config, label)
         return config

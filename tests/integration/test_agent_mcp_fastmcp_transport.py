@@ -83,6 +83,7 @@ def _config(script: Path, *, connect_deadline_s: int = 30, tool_deadline_s: int 
             kind=MCPTransportKind.STDIO,
             command=sys.executable,
             args=(str(script),),
+            cwd=str(script.parent),
         ),
         budget=_budget(),
         connect_deadline_s=connect_deadline_s,

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 import time
 from typing import Any
 
@@ -65,7 +67,9 @@ def _config(budget: MCPBudgetProfile | None = None, *, deadline_s: int = 30) -> 
     return MCPServerConfig(
         identity=_IDENTITY,
         display_name="本地文件服务",
-        transport=MCPTransportConfig(kind=MCPTransportKind.STDIO, command="C:\\tool.exe"),
+        transport=MCPTransportConfig(
+            kind=MCPTransportKind.STDIO, command=sys.executable, cwd=os.path.dirname(sys.executable)
+        ),
         budget=budget or _budget(),
         tool_deadline_s=deadline_s,
         audit=MCPReadOnlyAudit(
