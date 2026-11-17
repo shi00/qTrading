@@ -42,6 +42,7 @@ from pydantic_ai.messages import (
     PartStartEvent,
     RetryPromptPart,
     SystemPromptPart,
+    TextContent,
     TextPart,
     TextPartDelta,
     ThinkingPart,
@@ -385,6 +386,48 @@ class TestBuildChatTurnRequest:
                 tool_schema_version="v1",
             )
         assert excinfo.value.code == "unknown_part"
+
+    @pytest.mark.asyncio
+    async def test_mixed_str_and_text_content_preserved_in_order(self):
+        # §6.3：UserContent 允许裸 str 与 TextContent 混合；中文 / CRLF / 空段 "" 原样保序
+        request = build_chat_turn_request(
+            [
+                ModelRequest(
+                    parts=[
+                        UserPromptPart(
+                            content=[
+                                "第一段\r\n含中文",
+                                TextContent("第二段\r\n"),
+                                "",
+                                TextContent("末段"),
+                            ]
+                        )
+                    ]
+                )
+            ],
+            _settings(),
+            _params(),
+            tool_schema_version="v1",
+        )
+        assert [m.role for m in request.messages] == ["user"]
+        part = request.messages[0].content_parts[0]
+        assert isinstance(part, TextContentPart)
+        # 空段保留位置（不跳过/不合并），CRLF 与中文不做归一
+        assert part.text == "第一段\r\n含中文\n第二段\r\n\n\n末段"
+
+    @pytest.mark.asyncio
+    async def test_mixed_sequence_with_binary_rejected_zero_outbound(self):
+        # 未知二进制混在文本序列中仍整体拒绝（fail-closed，不降级为文本/图片）
+        image = BinaryContent(data=b"png", media_type="image/png")
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            build_chat_turn_request(
+                [ModelRequest(parts=[UserPromptPart(content=["说明", image])])],
+                _settings(),
+                _params(),
+                tool_schema_version="v1",
+            )
+        assert excinfo.value.code == "unknown_part"
+        assert excinfo.value.field_path.endswith("user_prompt.content[1].BinaryContent")
 
     @pytest.mark.asyncio
     async def test_missing_timeout_rejected(self):
