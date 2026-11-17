@@ -2632,8 +2632,11 @@ def encode_research_event(event: ResearchEvent) -> dict[str, Any]:
 def decode_research_event(value: object, path: str) -> ResearchEvent:
     """严格解码事件包络（全键必填禁额外键；JSONB 重排键重读保同身份）。
 
-    执行事件身份一致性需原生事件 ID（不在包络 wire 内），由调用方以
-    :func:`validate_event_identity` 复核；本解码只做结构层。
+    身份组合与 :func:`validate_research_event` 同判据（检视 R19）：执行事件必须
+    同时有 round/node/execution_seq，纯 session 事件不得携任一执行身份；载荷必须
+    是可解析规范 JSON（重复键/非有限数/坏语法一律拒绝）。event_id 与原生事件 ID
+    的组合派生一致性需原生事件 ID（不在包络 wire 内），仍由调用方以
+    :func:`validate_event_identity` 复核。
     """
 
     if not isinstance(value, dict):
@@ -2659,16 +2662,35 @@ def decode_research_event(value: object, path: str) -> ResearchEvent:
         _fail("invalid_revision", f"{path}.input_revision")
     execution_id = value["execution_id"]
     execution_seq = value["execution_seq"]
+    round_id = None if value["round_id"] is None else _require_str(value["round_id"], f"{path}.round_id")
+    node_id = None if value["node_id"] is None else _require_str(value["node_id"], f"{path}.node_id")
     if execution_id is not None:
+        # 执行事件必须同时有 round/node（§9.6；与 validate_research_event 一致）。
+        if round_id is None:
+            _fail("identity_mismatch", f"{path}.round_id")
+        if node_id is None:
+            _fail("identity_mismatch", f"{path}.node_id")
         if execution_seq is None:
             _fail("identity_mismatch", f"{path}.execution_seq")
-    elif execution_seq is not None:
-        _fail("identity_mismatch", f"{path}.execution_seq")
+    else:
+        # 纯 session 事件不得携带执行身份（round/node/execution_seq 同缺）。
+        if round_id is not None:
+            _fail("identity_mismatch", f"{path}.round_id")
+        if node_id is not None:
+            _fail("identity_mismatch", f"{path}.node_id")
+        if execution_seq is not None:
+            _fail("identity_mismatch", f"{path}.execution_seq")
     execution_seq_v = None
     if execution_seq is not None:
         if isinstance(execution_seq, bool) or not isinstance(execution_seq, int) or execution_seq < 1:
             _fail("invalid_revision", f"{path}.execution_seq")
         execution_seq_v = execution_seq
+    payload_canonical_json = _require_str(value["payload_canonical_json"], f"{path}.payload_canonical_json")
+    # 载荷 JSONB 重读必须可解析为规范 JSON（坏 JSON 不冒认合法事件，R21）。
+    try:
+        decode_json_doc(payload_canonical_json)
+    except AgentValidationError:
+        _fail("invalid_json", f"{path}.payload_canonical_json")
     native_fact_ref = value["native_fact_ref"]
     if native_fact_ref is not None:
         native_fact_ref = _require_str(native_fact_ref, f"{path}.native_fact_ref")
@@ -2678,8 +2700,8 @@ def decode_research_event(value: object, path: str) -> ResearchEvent:
         user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
         session_id=_require_str(value["session_id"], f"{path}.session_id"),
         execution_id=None if execution_id is None else _require_str(execution_id, f"{path}.execution_id"),
-        node_id=None if value["node_id"] is None else _require_str(value["node_id"], f"{path}.node_id"),
-        round_id=None if value["round_id"] is None else _require_str(value["round_id"], f"{path}.round_id"),
+        node_id=node_id,
+        round_id=round_id,
         input_revision=input_revision,
         session_seq=session_seq,
         execution_seq=execution_seq_v,
@@ -2689,7 +2711,7 @@ def decode_research_event(value: object, path: str) -> ResearchEvent:
         subject_id=_require_str(value["subject_id"], f"{path}.subject_id"),
         subject_revision=subject_revision,
         payload_kind=_require_str(value["payload_kind"], f"{path}.payload_kind"),
-        payload_canonical_json=_require_str(value["payload_canonical_json"], f"{path}.payload_canonical_json"),
+        payload_canonical_json=payload_canonical_json,
         native_fact_ref=native_fact_ref,
     )
 
@@ -4014,13 +4036,67 @@ def _decode_tuple_of(
     return tuple(decode_item(item, f"{path}[{index}]") for index, item in enumerate(value))
 
 
+def _validate_snapshot_object_graph(snapshot: ResearchSnapshot, path: str) -> None:
+    """快照对象图身份一致性（identity ↔ execution/nodes/messages/decisions/operations）。
+
+    producer 只按 identity 读取对象图；wire 重读时任一子行身份与 identity 分叉即
+    「对象身份错误」（同一快照描述两个不同会话/执行），不静默接受。同源重复投影
+    （revision/执行水位/goal_coverage/updated_at）分叉同样拒绝——它们由同一行派生，
+    不一致即证明子行并非 identity 指向的对象（检视 R19）。
+    """
+
+    identity = snapshot.identity
+    execution = snapshot.execution
+    if (
+        execution.user_scope != identity.user_scope
+        or execution.session_id != identity.session_id
+        or execution.execution_id != identity.execution_id
+        or execution.node_id != identity.node_id
+    ):
+        _fail("identity_mismatch", f"{path}.execution")
+    if identity.round_id is None and execution.current_round_id is not None:
+        _fail("identity_mismatch", f"{path}.execution.current_round_id")
+    if snapshot.revision != execution.revision:
+        _fail("identity_mismatch", f"{path}.revision")
+    if snapshot.execution_watermark != execution.event_seq:
+        _fail("identity_mismatch", f"{path}.execution_watermark")
+    if snapshot.goal_coverage != execution.goal_coverage:
+        _fail("identity_mismatch", f"{path}.goal_coverage")
+    if snapshot.updated_at != execution.updated_at:
+        _fail("identity_mismatch", f"{path}.updated_at")
+    for index, node in enumerate(snapshot.nodes):
+        if (
+            node.user_scope != identity.user_scope
+            or node.session_id != identity.session_id
+            or node.parent_execution_id != identity.execution_id
+        ):
+            _fail("identity_mismatch", f"{path}.nodes[{index}]")
+    for index, item in enumerate(snapshot.messages_page.items):
+        if item.session_id != identity.session_id:
+            _fail("identity_mismatch", f"{path}.messages_page.items[{index}]")
+        if item.execution_id is not None and item.execution_id != identity.execution_id:
+            _fail("identity_mismatch", f"{path}.messages_page.items[{index}]")
+        if identity.round_id is not None and item.round_id is not None and item.round_id != identity.round_id:
+            _fail("identity_mismatch", f"{path}.messages_page.items[{index}]")
+    for index, decision in enumerate(snapshot.decisions):
+        if decision.session_id != identity.session_id or decision.execution_id != identity.execution_id:
+            _fail("identity_mismatch", f"{path}.decisions[{index}]")
+    for index, operation in enumerate(snapshot.operation_summaries):
+        if operation.execution_id != identity.execution_id:
+            _fail("identity_mismatch", f"{path}.operation_summaries[{index}]")
+
+
 def decode_research_snapshot(value: object, path: str = "$.snapshot") -> ResearchSnapshot:
-    """严格解码执行快照（19 键全必填禁额外键；嵌套递归 strict）。"""
+    """严格解码执行快照（19 键全必填禁额外键；嵌套递归 strict）。
+
+    解码后核对对象图身份一致性（identity 与执行/叶/消息/决定/操作子行同一对象，
+    检视 R19），分叉即拒绝。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _RESEARCH_SNAPSHOT_KEYS, path)
-    return ResearchSnapshot(
+    snapshot = ResearchSnapshot(
         identity=decode_snapshot_identity(value["identity"], f"{path}.identity"),
         revision=cast(int, require_revision(value["revision"], f"{path}.revision")),
         execution_watermark=_nonneg_int(value["execution_watermark"], f"{path}.execution_watermark"),
@@ -4045,6 +4121,8 @@ def decode_research_snapshot(value: object, path: str = "$.snapshot") -> Researc
         read_marks=_decode_tuple_of(value["read_marks"], f"{path}.read_marks", decode_read_mark_entry),
         observation=decode_observation(value["observation"], f"{path}.observation"),
     )
+    _validate_snapshot_object_graph(snapshot, path)
+    return snapshot
 
 
 # ---------------------------------------------------------------------------

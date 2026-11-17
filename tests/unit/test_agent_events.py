@@ -168,6 +168,70 @@ class TestResearchEventCodec:
         _reject(lambda: decode_research_event({**wire, "subject_revision": 0}, "$"), code="invalid_revision")
         _reject(lambda: decode_research_event({**wire, "occurred_at": "2026-06-01"}, "$"), code="invalid_timestamp")
 
+    def test_execution_event_requires_round_and_node(self) -> None:
+        """解码与 validator 同判据：执行事件缺 round/node 必须拒绝（检视 R19）。"""
+
+        wire = encode_research_event(_event())
+        _reject(lambda: decode_research_event({**wire, "round_id": None}, "$"), code="identity_mismatch")
+        _reject(lambda: decode_research_event({**wire, "node_id": None}, "$"), code="identity_mismatch")
+
+    def test_session_event_rejects_execution_identity(self) -> None:
+        """纯 session 事件携 round/node/execution_seq 必须拒绝（validator 同判据）。"""
+
+        wire = encode_research_event(_session_event())
+        _reject(lambda: decode_research_event({**wire, "round_id": _ROUND}, "$"), code="identity_mismatch")
+        _reject(lambda: decode_research_event({**wire, "node_id": _NODE}, "$"), code="identity_mismatch")
+        _reject(lambda: decode_research_event({**wire, "execution_seq": 1}, "$"), code="identity_mismatch")
+
+    def test_payload_must_be_decodeable_json(self) -> None:
+        """坏载荷（坏语法/重复键/非有限数）必须拒绝，不冒认合法事件（R21）。"""
+
+        wire = encode_research_event(_event())
+        _reject(lambda: decode_research_event({**wire, "payload_canonical_json": "{broken"}, "$"), code="invalid_json")
+        _reject(
+            lambda: decode_research_event({**wire, "payload_canonical_json": '{"a":1,"a":2}'}, "$"),
+            code="invalid_json",
+        )
+        _reject(
+            lambda: decode_research_event({**wire, "payload_canonical_json": '{"a":NaN}'}, "$"),
+            code="invalid_json",
+        )
+
+    def test_real_revision_event_roundtrip(self) -> None:
+        """真实修订 M2 事件（纯 session 公开消息）往返不回归（检视 R19）。
+
+        生产行形态（``revise_queued``）：execution/round/node/execution_seq 全 None，
+        载荷为 public_message 结构；收紧后仍必须可编码、可解码、再编码稳定。
+        """
+
+        message_id = "user_message_revise_1"
+        wire = encode_research_event(
+            _session_event(
+                event_kind=EventKind.PUBLIC_MESSAGE_SAVED,
+                subject_id=message_id,
+                payload_kind="public_message",
+                payload_canonical_json=json_doc(
+                    {
+                        "schema_version": 1,
+                        "message_id": message_id,
+                        "role": "user",
+                        "source_id": "message_source_revise_1",
+                        "source_version": "1",
+                    }
+                ),
+            )
+        )
+        decoded = decode_research_event(decode_json_doc(json_doc(wire)), "$")
+        validate_research_event(decoded)
+        assert decoded.execution_id is None
+        assert decoded.round_id is None
+        assert decoded.node_id is None
+        assert decoded.execution_seq is None
+        payload = decode_json_doc(decoded.payload_canonical_json)
+        assert isinstance(payload, dict)
+        assert payload["message_id"] == message_id
+        assert json_doc(encode_research_event(decoded)) == json_doc(wire)
+
 
 class TestValidateResearchEvent:
     def test_valid_execution_event(self) -> None:

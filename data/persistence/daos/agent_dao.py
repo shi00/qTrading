@@ -2705,6 +2705,9 @@ class AgentDao(BaseDao):
             event_id = stable_id("event", [request.user_scope, request.session_id, message_id])
 
             # 6. M2 修订消息（纯 session 公开消息，role=user，正文即源）。
+            #    纯 session 事件不得携执行身份（event codec 同判据，检视 R19）：
+            #    execution/round/node 全 None，执行关联由源谱系边承载（node 身份
+            #    仍冻结在 revise 命令输入摘要内）。
             await conn.execute(
                 sa.insert(AgentMessage).values(
                     user_scope=request.user_scope,
@@ -2712,7 +2715,7 @@ class AgentDao(BaseDao):
                     session_id=request.session_id,
                     execution_id=None,
                     round_id=None,
-                    node_id=request.node_id,
+                    node_id=None,
                     event_id=event_id,
                     session_seq=session_seq,
                     execution_seq=None,

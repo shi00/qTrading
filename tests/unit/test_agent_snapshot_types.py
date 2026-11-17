@@ -936,6 +936,7 @@ def test_research_snapshot_decode_roundtrip() -> None:
             _execution_wire(
                 execution_id="execution_leaf_1",
                 execution_kind="leaf",
+                parent_execution_id="execution_root_1",
                 source_module=None,
                 business_request_id=None,
                 intent_digest=None,
@@ -965,6 +966,114 @@ def test_research_snapshot_value_guards() -> None:
     _reject(decode_research_snapshot, _snapshot_wire(execution_watermark=-1), "invalid_range", "$.execution_watermark")
     _reject(decode_research_snapshot, _snapshot_wire(frozen_scope="not-json"), "invalid_json", "$.frozen_scope")
     _reject(decode_research_snapshot, _snapshot_wire(updated_at="2026-11-12"), "invalid_timestamp", "$.updated_at")
+
+
+def test_research_snapshot_object_identity_guards() -> None:
+    """identity 与对象图子行分叉必须拒绝（检视 R19：错对象身份不得静默接受）。"""
+
+    # execution 行与 identity 不同对象（跨执行/跨会话/跨节点）。
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(execution=_execution_wire(execution_id="execution_other")),
+        "identity_mismatch",
+        "$.execution",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(execution=_execution_wire(session_id="session_other")),
+        "identity_mismatch",
+        "$.execution",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(execution=_execution_wire(node_id="node_other")),
+        "identity_mismatch",
+        "$.execution",
+    )
+    # identity 无 round（queued）时 execution 不得已归轮。
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(identity=_identity_wire(round_id=None, input_revision=None, workflow_id=None, run_epoch=None)),
+        "identity_mismatch",
+        "$.execution.current_round_id",
+    )
+    # 同源重复投影分叉（revision/执行水位/覆盖/更新时间）。
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(execution=_execution_wire(revision=4)),
+        "identity_mismatch",
+        "$.revision",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(execution=_execution_wire(event_seq=8)),
+        "identity_mismatch",
+        "$.execution_watermark",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(execution=_execution_wire(goal_coverage="partial")),
+        "identity_mismatch",
+        "$.goal_coverage",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(execution=_execution_wire(updated_at=_ts(3))),
+        "identity_mismatch",
+        "$.updated_at",
+    )
+    # 一层叶子必须挂在本执行下。
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(nodes=[_execution_wire(execution_kind="leaf", parent_execution_id="execution_other")]),
+        "identity_mismatch",
+        "$.nodes[0]",
+    )
+    # 消息/决定/操作子行必须属于该会话与执行（及选定轮）。
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(
+            messages_page={"items": [_message_wire(session_id="session_other")], "has_more": False, "next_cursor": None}
+        ),
+        "identity_mismatch",
+        "$.messages_page.items[0]",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(
+            messages_page={
+                "items": [_message_wire(execution_id="execution_other", round_id="round_1", execution_seq=1)],
+                "has_more": False,
+                "next_cursor": None,
+            }
+        ),
+        "identity_mismatch",
+        "$.messages_page.items[0]",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(
+            messages_page={
+                "items": [_message_wire(execution_id="execution_root_1", round_id="round_other", execution_seq=1)],
+                "has_more": False,
+                "next_cursor": None,
+            }
+        ),
+        "identity_mismatch",
+        "$.messages_page.items[0]",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(decisions=[_decision_wire(execution_id="execution_other")]),
+        "identity_mismatch",
+        "$.decisions[0]",
+    )
+    _reject(
+        decode_research_snapshot,
+        _snapshot_wire(operation_summaries=[_operation_wire(execution_id="execution_other")]),
+        "identity_mismatch",
+        "$.operation_summaries[0]",
+    )
 
 
 def test_research_snapshot_missing_and_unknown_keys() -> None:

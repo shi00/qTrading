@@ -36,6 +36,7 @@ from core.agent_types import (
     ConsumeAnswerRequest,
     ConsumptionState,
     DeliveryState,
+    EventReadQuery,
     GrantRevisionRequest,
     MarkAnswerDeliveredRequest,
     Mode,
@@ -44,6 +45,8 @@ from core.agent_types import (
     ReviseQueuedRequest,
     SaveAnswerRequest,
     ToolGrantState,
+    decode_research_event,
+    encode_research_event,
     frozen_command_input_digest,
     json_doc,
     sha256_hex,
@@ -808,6 +811,9 @@ class TestReviseQueued:
                         AgentMessage.role,
                         AgentMessage.body_text,
                         AgentMessage.execution_id,
+                        AgentMessage.round_id,
+                        AgentMessage.node_id,
+                        AgentMessage.execution_seq,
                     ).where(AgentMessage.message_id == rev.message_id)
                 )
             ).one()
@@ -853,6 +859,8 @@ class TestReviseQueued:
         assert m2.session_seq == 2 and m2.role == "user"
         assert m2.body_text == "改为研究两家公司"
         assert m2.execution_id is None  # 修订消息纯 session 事件（无 round，§9.6）
+        # 纯 session 事件不得携 node 身份（检视 R19：与事件 codec 同判据）。
+        assert m2.round_id is None and m2.node_id is None and m2.execution_seq is None
         assert cmd.command_kind == "revise" and cmd.input_revision == 2
         assert cmd.target_id == receipt.execution_id and cmd.expected_revision == 1
         assert exec_revision == 2
@@ -863,6 +871,28 @@ class TestReviseQueued:
         assert await _count(engine, "agent_asset_version") == 2
         assert await _count(engine, "agent_message") == 2
         await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_event_read_roundtrip_not_regressed(self, real_embedded_pg: ConnectionInfo) -> None:
+        """真实受理→修订→read_events 往返：修订事件为纯 session 事件且可解码。
+
+        收紧 event codec（检视 R19）后，真实修订 M2 行必须仍满足包络身份规则并
+        可往返重编码（不把合法生产事实误拒）。
+        """
+
+        dao, receipt = await _accept_only(real_embedded_pg)
+        rev = await dao.revise_queued(_revise_request(receipt))
+
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=0))
+        assert len(page.events) == 2
+        revise_event = next(e for e in page.events if e.subject_id == rev.message_id)
+        assert revise_event.execution_id is None
+        assert revise_event.round_id is None
+        assert revise_event.node_id is None
+        assert revise_event.execution_seq is None
+        assert json_doc(encode_research_event(decode_research_event(encode_research_event(revise_event), "$"))) == (
+            json_doc(encode_research_event(revise_event))
+        )
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_revise_stale_revision_conflicts_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
