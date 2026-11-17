@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any
 
@@ -25,6 +26,7 @@ from core.agent_types import (
 )
 from services.agent_service.mcp import (
     MCPBudgetGuard,
+    MCPCallNotDispatched,
     MCPServerConfig,
     MCPToolDescriptor,
     MCPTransportConfig,
@@ -344,6 +346,8 @@ class TestDispatchEffects:
         outcome = await dispatcher.call(_request())
         assert outcome.state is ToolCallState.UNKNOWN
         assert outcome.result is None
+        # 已有的 UNKNOWN（结果不可编码）不得被后续分类覆盖为 FAILED。
+        assert outcome.operation_id == "op-1"
         assert [call[0] for call in session.calls] == ["read_file"]
 
     @pytest.mark.asyncio
@@ -371,14 +375,51 @@ class TestDispatchEffects:
         assert outcome.result is None
 
     @pytest.mark.asyncio
-    async def test_transport_value_error_is_reported_failed(self) -> None:
-        """非超时/断线的传输异常标 FAILED（确证未完成派发效果不得标 unknown）。"""
+    async def test_refused_before_send_is_failed_with_original_operation(self) -> None:
+        """端口在出站前显式拒绝（会话失效/发送前 deadline 已过）：效果确定未发生 → FAILED。"""
+
+        session = _Session(raises=MCPCallNotDispatched(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp session is lost", "svc"))
+        dispatcher, session, _grants, manager = await _dispatcher(session=session)
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.FAILED
+        assert outcome.result is None
+        assert outcome.operation_id == "op-1"
+        assert [call[0] for call in session.calls] == ["read_file"]
+        assert manager.in_flight_operations(_IDENTITY) == ()
+
+    @pytest.mark.asyncio
+    async def test_protocol_decode_failure_after_dispatch_is_unknown_with_original_operation(self) -> None:
+        """已派发后协议/解码失败不构成「确定未执行」的证据：保持 UNKNOWN 且保留原 operation。"""
+
+        session = _Session(raises=json.JSONDecodeError("Expecting value", "", 0))
+        dispatcher, session, _grants, _manager = await _dispatcher(session=session)
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.UNKNOWN
+        assert outcome.result is None
+        assert outcome.operation_id == "op-1"
+        assert [call[0] for call in session.calls] == ["read_file"]
+
+    @pytest.mark.asyncio
+    async def test_server_error_response_after_dispatch_is_unknown(self) -> None:
+        """服务端明确错误响应（JSON-RPC error）证明请求已达服务端，但不证明零副作用：UNKNOWN。"""
+
+        session = _Session(raises=RuntimeError("jsonrpc -32603 internal error"))
+        dispatcher, session, _grants, _manager = await _dispatcher(session=session)
+        outcome = await dispatcher.call(_request())
+        assert outcome.state is ToolCallState.UNKNOWN
+        assert outcome.result is None
+        assert outcome.operation_id == "op-1"
+
+    @pytest.mark.asyncio
+    async def test_general_transport_error_after_dispatch_is_unknown(self) -> None:
+        """泛化传输异常不得标 FAILED（无确证即后效未知），保留原 operation 不误导重发。"""
 
         session = _Session(raises=ValueError("bad arguments"))
         dispatcher, session, _grants, _manager = await _dispatcher(session=session)
         outcome = await dispatcher.call(_request())
-        assert outcome.state is ToolCallState.FAILED
+        assert outcome.state is ToolCallState.UNKNOWN
         assert outcome.result is None
+        assert outcome.operation_id == "op-1"
         assert [call[0] for call in session.calls] == ["read_file"]
 
     @pytest.mark.asyncio

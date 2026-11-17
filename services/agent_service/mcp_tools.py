@@ -7,7 +7,9 @@
 目录、审核范围与 schema 以连接 owner 启连时冻结的发现结果为准，请求自报仅用于比对：
 换目录、审核外工具、schema 漂移、旧代次一律在 claim 前拒绝（零预留/零执行/零外发）。
 
-派发后超时/断线无确证记 ``UNKNOWN`` 且不自动重试；取消继续传播并释放归属。
+派发后超时/断线/协议解码失败/服务端错误响应均无确证，记 ``UNKNOWN`` 且不自动重试；
+只有端口在出站前显式拒绝（``MCPCallNotDispatched``）才判 ``FAILED``（效果确定未发生）。
+取消继续传播并释放归属。
 真实 jsonschema 适配器与每 send 目的地门仍 needs-spike，不在本轮宣称已验证。
 """
 
@@ -27,6 +29,7 @@ from core.agent_types import (
     resolve_tool_allowlist,
 )
 from services.agent_service.mcp import (
+    MCPCallNotDispatched,
     MCPClientSessionPort,
     MCPToolDescriptor,
     SharedMCPConnectionManager,
@@ -186,11 +189,16 @@ class MCPToolDispatcher:
                 )
         except asyncio.CancelledError:
             raise
+        except MCPCallNotDispatched:
+            # 出站前即被拒绝（会话已失效 / 发送前 deadline 已过）：效果确定未发生，判 FAILED（可安全重试）。
+            return ToolCallOutcome(ToolCallState.FAILED, None, request.operation_id)
         except (TimeoutError, ConnectionError):
             # 已派发但无确证：unknown，原 operation 不自动重发。
             return ToolCallOutcome(ToolCallState.UNKNOWN, None, request.operation_id)
         except Exception:
-            return ToolCallOutcome(ToolCallState.FAILED, None, request.operation_id)
+            # 已派发后的协议/解码失败、服务端错误响应等：均不构成「确定未执行」的证据，
+            # 一律保持 unknown 并保留原 operation 身份，避免调用方把「后效未知」当作「确定失败」重发（I15）。
+            return ToolCallOutcome(ToolCallState.UNKNOWN, None, request.operation_id)
         try:
             encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
             size = len(encoded.encode("utf-8"))
