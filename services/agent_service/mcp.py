@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
@@ -22,6 +24,7 @@ from urllib.parse import urlsplit
 
 from core.agent_types import (
     MCP_DEFAULT_DEADLINE_S,
+    MCP_MIN_DEADLINE_S,
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
@@ -35,7 +38,7 @@ from core.agent_types import (
     sha256_hex,
     validate_mcp_deadline,
 )
-from services.agent_service.mcp_budget import MCPBudgetGuard
+from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 
 # ---------------------------------------------------------------------------
 # 传输配置（stdio 绝对可执行/不经 shell；HTTP 无内嵌凭据；SSE 需显式核准）
@@ -207,10 +210,13 @@ class SharedMCPConnectionManager:
         store: MCPConfigStorePort,
         factory: MCPClientFactoryPort,
         probe: MCPImplementationProbe,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
         self._factory = factory
         self._probe = probe
+        #: 启连总期限的单调时钟（可注入以便确定性测试；不得回退到墙钟）。
+        self._monotonic = monotonic
         self._sessions: dict[str, MCPClientSessionPort] = {}
         self._configs: dict[str, MCPServerConfig] = {}
         self._guards: dict[str, MCPBudgetGuard] = {}
@@ -257,12 +263,19 @@ class SharedMCPConnectionManager:
     # -- 显式测试 -----------------------------------------------------------
 
     async def connection_test(self, identity: MCPServiceIdentity) -> MCPConnectionTestReceipt:
-        """用户显式连接测试：只初始化/鉴权/发现，0 研究工具调用，结束必关闭。"""
+        """用户显式连接测试：只初始化/鉴权/发现，0 研究工具调用，结束必关闭。
+
+        启动/初始化/鉴权（``open``）与发现（``list_tools``）共用**同一**总期限：
+        总预算自 open 起按单调时钟计，发现阶段只拿到剩余额度，故两段串联不会
+        各得一个完整 ``connect_deadline_s``（I13）。预算耗尽即以明确错误码拒绝。
+        """
 
         config = await self._require_config(identity)
+        label = _identity_text(identity)
+        deadline = self._start_connect_deadline(config)
         session = await self._factory.open(config)
         try:
-            tools = await session.list_tools(deadline_s=config.connect_deadline_s)
+            tools = await session.list_tools(deadline_s=self._remaining_deadline_s(deadline, "discovery", label))
         finally:
             await session.aclose()
         return MCPConnectionTestReceipt(
@@ -281,6 +294,8 @@ class SharedMCPConnectionManager:
         按身份/版本 single-flight：同一 key 的并发调用共享同一次准入/open/发现，
         实际 open 与存活 owner 各至多 1；单个调用者被取消不中断他人的等待。
         启连时由连接 owner 完成一次发现并冻结目录；发现失败不登记连接（关闭会话）。
+        总期限（启动/初始化/鉴权/发现）由该次实际启连持有，并发等待者共享同一预算，
+        不会各自获得一份新的 ``connect_deadline_s``（I13）。
         重连前必须先确认上次关闭已实际退出，未确认则重试关闭，仍失败即显式拒绝（I17）。
         """
 
@@ -321,9 +336,10 @@ class SharedMCPConnectionManager:
                 label,
             )
         guard = MCPBudgetGuard(config.budget, identity=label)
+        deadline = self._start_connect_deadline(config)
         session = await self._factory.open(config)
         try:
-            tools = await session.list_tools(deadline_s=config.connect_deadline_s)
+            tools = await session.list_tools(deadline_s=self._remaining_deadline_s(deadline, "discovery", label))
         except BaseException:
             await self._close_quietly(label, session)
             raise
@@ -509,6 +525,28 @@ class SharedMCPConnectionManager:
                 "previous mcp session close is unconfirmed",
                 label,
             ) from exc
+
+    def _start_connect_deadline(self, config: MCPServerConfig) -> MCPDeadline:
+        """启连总期限：open（启动/初始化/鉴权）与发现共用同一单调时钟起点。"""
+
+        return MCPDeadline(seconds=config.connect_deadline_s, monotonic=self._monotonic)
+
+    @staticmethod
+    def _remaining_deadline_s(deadline: MCPDeadline, stage: str, label: str) -> int:
+        """阶段预算 = 总预算剩余（整秒向下取整，绝不超出总期限）；耗尽即拒绝进入该阶段。
+
+        端口以整秒表达 deadline，故剩余不足 1 秒时视为已耗尽：宁可显式拒绝，
+        也不允许某阶段再吃掉一个完整 ``connect_deadline_s``（I13）。
+        """
+
+        remaining = int(deadline.remaining())
+        if remaining < MCP_MIN_DEADLINE_S:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED,
+                f"mcp connect deadline exceeded before {stage}",
+                label,
+            )
+        return remaining
 
     async def _require_config(self, identity: MCPServiceIdentity) -> MCPServerConfig:
         label = _identity_text(identity)

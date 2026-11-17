@@ -5,7 +5,8 @@
 - 保存配置 0 连接、0 工具发现；
 - 连接测试只初始化/发现：0 研究工具调用、不落权限、结束关闭；
 - 研究启连前必须预算冻结 + 只读审核绑定实际实现；证据不足拒启；
-- 无自动重连：断线后不自动重新 open；显式 disconnect 在有在途调用时被拒。
+- 无自动重连：断线后不自动重新 open；显式 disconnect 在有在途调用时被拒；
+- 启连总期限：open（启动/初始化/鉴权）与发现共用同一预算，发现只拿剩余额度。
 """
 
 from __future__ import annotations
@@ -568,6 +569,180 @@ class TestCloseConfirmation:
         await manager.connect(_identity())
         assert len(factory.opened) == 2
         assert first.close_calls == 1  # 无未确认资源，重连不再重复关闭旧句柄
+
+
+class TestConnectTotalDeadline:
+    """I13：启动/初始化/鉴权/发现共用同一总期限，发现只拿剩余额度。"""
+
+    @pytest.mark.asyncio
+    async def test_discovery_is_capped_by_remaining_budget(self) -> None:
+        # open 6 秒 + 发现 6 秒：各自 < 10 秒，合计 12 秒 > 总期限 10 秒。
+        manager, store, _factory, session, _clock = _deadline_manager(open_s=6, work_s=6)
+        await store.save(_config(connect_deadline_s=10))
+
+        with pytest.raises(TimeoutError) as excinfo:
+            await manager.connection_test(_identity())
+
+        assert "exceeded granted budget" in str(excinfo.value)
+        assert session.list_budgets == [4]  # 只拿到剩余 4 秒，不是又一个完整 10 秒
+        assert session.closed is True  # 超时后仍收尾关闭
+
+    @pytest.mark.asyncio
+    async def test_total_budget_exactly_at_limit_succeeds(self) -> None:
+        manager, store, _factory, session, _clock = _deadline_manager(open_s=6, work_s=4)
+        await store.save(_config(connect_deadline_s=10))
+
+        receipt = await manager.connection_test(_identity())
+
+        assert receipt.tool_names == ("read_file",)
+        assert session.list_budgets == [4]  # 发现恰好用满剩余额度，总耗时等于总期限
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_total_budget_over_by_one_millisecond_is_rejected(self) -> None:
+        # open 用掉 6.001 秒：剩余 3.999 秒，整秒预算只余 3 秒，4 秒的发现必然超限。
+        manager, store, _factory, session, _clock = _deadline_manager(open_s=6.001, work_s=4)
+        await store.save(_config(connect_deadline_s=10))
+
+        with pytest.raises(TimeoutError) as excinfo:
+            await manager.connection_test(_identity())
+
+        assert "exceeded granted budget" in str(excinfo.value)
+        assert session.list_budgets == [3]
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_exhausted_budget_rejects_before_discovery_and_closes(self) -> None:
+        # open 超出总期限 1 毫秒：发现阶段根本不得进入，且已开出的句柄必须关闭。
+        manager, store, _factory, session, _clock = _deadline_manager(open_s=10.001, work_s=1)
+        await store.save(_config(connect_deadline_s=10))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connection_test(_identity())
+
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "deadline exceeded before discovery" in exc.value.sanitized_message
+        assert session.list_budgets == []
+        assert session.closed is True
+
+    @pytest.mark.asyncio
+    async def test_connect_exhausted_budget_leaves_no_owner_or_handle(self) -> None:
+        manager, store, _factory, session, _clock = _deadline_manager(open_s=10.001, work_s=1)
+        await store.save(_config(connect_deadline_s=10))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert session.closed is True
+        assert manager.is_connected(_identity()) is False
+
+        # 句柄已确认退出：再次启连先走到总期限检查，而不是「上次关闭未确认」。
+        with pytest.raises(AgentServiceError) as retry:
+            await manager.connect(_identity())
+        assert retry.value.code is AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio
+    async def test_concurrent_waiters_share_one_total_budget(self) -> None:
+        clock = _FakeClock()
+        factory = _GatedTimedFactory(clock)
+        store = _FakeStore()
+        manager = SharedMCPConnectionManager(
+            store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT), monotonic=clock
+        )
+        await store.save(_config(connect_deadline_s=10))
+
+        leader = asyncio.create_task(manager.connect(_identity()))
+        await _wait_until(lambda: len(factory.opened) == 1)
+        waiter = asyncio.create_task(manager.connect(_identity()))
+        await asyncio.sleep(0)
+
+        clock.advance(10.001)  # 共享启连的 open 期间耗尽总预算
+        factory.gate.set()
+        results = await asyncio.gather(leader, waiter, return_exceptions=True)
+
+        assert len(factory.opened) == 1  # 等待者不新开连接
+        errors = [item for item in results if isinstance(item, AgentServiceError)]
+        assert len(errors) == 2
+        assert all(item.code is AgentErrorCode.POLICY_DENIED for item in errors)  # 共享同一总预算
+        assert factory.sessions[0].closed is True
+        assert manager.is_connected(_identity()) is False
+
+
+class _FakeClock:
+    """可推进的单调时钟：超时用例不依赖真实 sleep，保证确定性。"""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _TimedSession:
+    """发现阶段按被授予的整秒预算判定；工作耗时超预算即抛 ``TimeoutError``（同真实实现）。"""
+
+    def __init__(self, clock: _FakeClock, work_s: float) -> None:
+        self._clock = clock
+        self._work_s = work_s
+        self.list_budgets: list[int] = []
+        self.closed = False
+
+    async def list_tools(self, *, deadline_s: int) -> tuple[MCPToolDescriptor, ...]:
+        self.list_budgets.append(deadline_s)
+        if self._work_s > deadline_s:
+            raise TimeoutError("list_tools exceeded granted budget")
+        self._clock.advance(self._work_s)
+        return (MCPToolDescriptor("read_file", _SCHEMA),)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], *, deadline_s: int) -> dict[str, Any]:
+        raise AssertionError("connection test/discovery must not call research tools")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _TimedFactory:
+    def __init__(self, clock: _FakeClock, *, open_s: float, session: _TimedSession) -> None:
+        self._clock = clock
+        self._open_s = open_s
+        self._session = session
+        self.opened: list[MCPServerConfig] = []
+
+    async def open(self, config: MCPServerConfig) -> _TimedSession:
+        self.opened.append(config)
+        self._clock.advance(self._open_s)  # 启动/初始化/鉴权耗时
+        return self._session
+
+
+class _GatedTimedFactory:
+    """按闸门阻塞 open，用于验证并发等待者共享同一次启连及其总预算。"""
+
+    def __init__(self, clock: _FakeClock) -> None:
+        self._clock = clock
+        self.opened: list[MCPServerConfig] = []
+        self.sessions: list[_TimedSession] = []
+        self.gate = asyncio.Event()
+
+    async def open(self, config: MCPServerConfig) -> _TimedSession:
+        self.opened.append(config)
+        await self.gate.wait()
+        session = _TimedSession(self._clock, 1.0)
+        self.sessions.append(session)
+        return session
+
+
+def _deadline_manager(
+    *, open_s: float, work_s: float
+) -> tuple[SharedMCPConnectionManager, _FakeStore, _TimedFactory, _TimedSession, _FakeClock]:
+    clock = _FakeClock()
+    session = _TimedSession(clock, work_s)
+    factory = _TimedFactory(clock, open_s=open_s, session=session)
+    store = _FakeStore()
+    manager = SharedMCPConnectionManager(store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT), monotonic=clock)
+    return manager, store, factory, session, clock
 
 
 class TestConnectSingleFlight:
