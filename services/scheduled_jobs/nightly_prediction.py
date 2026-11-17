@@ -96,7 +96,9 @@ async def _prediction_logic(
         if not analysis_trade_date:
             raise RuntimeError("Nightly prediction context missing trade_date; refusing to save results")
 
-        run_id = uuid.uuid4().hex[:16]
+        # F34/AC23：沿用批次预存的调用身份作运行身份（与模型账本费用链同源可回查）；
+        # AI 未运行时无身份，仍按原方式生成（不伪造批次身份）。
+        run_id = context.get("_ai_operation_id") or uuid.uuid4().hex[:16]
         # R.3.1: 存储 i18n key (非 identifier)。
         # 这里有意使用 "strategy_ai_nightly_name" 而非 AISelectionStrategy.name_key
         # (= "strategy_ai_active_name")：夜间定时预测与用户交互式 AI 选股是两个
