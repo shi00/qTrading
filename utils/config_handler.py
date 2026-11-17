@@ -323,6 +323,18 @@ class ConfigHandler:
         return llm.save_ai_tuning_and_prompts(max_candidates, min_turnover, local_only, ai_prompt, news_prompt)
 
     @staticmethod
+    def get_ai_role_prompt_append(role_key: str) -> str:
+        return llm.get_ai_role_prompt_append(role_key)
+
+    @staticmethod
+    def get_ai_role_prompt_version(role_key: str) -> str:
+        return llm.get_ai_role_prompt_version(role_key)
+
+    @staticmethod
+    def save_ai_role_prompts(appends: dict[str, str], versions: dict[str, str]) -> bool:
+        return llm.save_ai_role_prompts(appends, versions)
+
+    @staticmethod
     def get_strategy_presets(strategy_key: str) -> dict[str, dict]:
         return llm.get_strategy_presets(strategy_key)
 

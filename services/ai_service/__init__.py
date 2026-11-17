@@ -106,6 +106,7 @@ from utils.sanitizers import DataSanitizer as DataSanitizer
 from utils.singleton_registry import register_singleton
 
 if TYPE_CHECKING:
+    from core.model_management_types import StockAgentCall
     from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 logger = logging.getLogger(__name__)
@@ -515,6 +516,7 @@ class AIService:
         history_labels: list[str] | None = None,
         learning_strategy_name: str | None = None,
         scenario_dispatch: "ScenarioDispatch | None" = None,
+        agent_call: "StockAgentCall | None" = None,
     ) -> dict | None:
         """委托 StockAnalysisService.analyze_stock（保留显式签名）。"""
         self._ensure_subservices()
@@ -539,6 +541,7 @@ class AIService:
             history_labels=history_labels,
             learning_strategy_name=learning_strategy_name,
             scenario_dispatch=scenario_dispatch,
+            agent_call=agent_call,
         )
 
     # ------------------------------------------------------------------

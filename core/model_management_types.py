@@ -13,6 +13,8 @@ stdlib，符合 CLAUDE.md §4.2「多层引用的基础设施提升到 core」�
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
@@ -713,6 +715,7 @@ class ChatTurnRequest:
     tools: tuple[FunctionToolSpec, ...]
     output_schema: Mapping[str, Any] | None
     frozen_params: Mapping[str, Any]
+
     max_output_tokens: int | None
     deadline: float
     output_tools: tuple[FunctionToolSpec, ...] = ()
@@ -916,3 +919,114 @@ class ChatTurnOutcome:
             # 拒绝回合（完整 response）与分片后失败（partial_text）互斥——两者
             # 不得同时伪装「既完整又部分」的矛盾终态
             raise _invalid("invalid_field", "$.response")
+
+
+# ---------------------------------------------------------------------------
+# 股票分析调用身份（设计正本 F34 / AC23 / AC38，DD-F34）
+# ---------------------------------------------------------------------------
+
+
+def _require_identity_text(value: object, path: str) -> str:
+    """身份字段口径：非空文本（去首尾空白后），空/非文本显式拒绝（不伪造身份，R21）。"""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{path} must be non-empty text")
+    return value.strip()
+
+
+def _stock_call_id(operation_id: str, turn_id: str | None, ts_code: str) -> str:
+    """每股调用身份：operation + 轮次 + 股票代码的顺序化 sha256（同批同股稳定）。"""
+
+    payload = "\x1f".join([operation_id, turn_id or "", ts_code])
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"stock_call_{digest[:32]}"
+
+
+@dataclass(frozen=True, slots=True)
+class StockAgentBatchIdentity:
+    """一次股票分析批次预存的稳定身份（F34/AC23）。
+
+    批次入口（``AIStrategyMixin.run_ai_analysis`` / 夜间任务）在首次派发前分配
+    一次并整批复用，保证「原批次预存稳定身份」：同一批次内同股重试沿用同一
+    ``operation_id``（费用/研究链可回查），每股经 :meth:`for_stock` 派生唯一调用
+    身份。``session_id`` / ``turn_id`` 为主会话与轮次引用：调用方已知 Agent 会话时
+    透传，未知保持 ``None``（不伪造，R21）。
+    """
+
+    operation_id: str
+    strategy_key: str | None = None
+    session_id: str | None = None
+    turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "operation_id", _require_identity_text(self.operation_id, "$.operation_id"))
+
+    def for_stock(self, ts_code: str, *, new_turn: bool = False) -> StockAgentCall:
+        """派生单股调用身份；``new_turn=True`` 表示重试等新轮次（仍关联原操作）。"""
+
+        code = _require_identity_text(ts_code, "$.ts_code")
+        turn_id = uuid.uuid4().hex if new_turn else self.turn_id
+        return StockAgentCall(
+            operation_id=self.operation_id,
+            call_id=_stock_call_id(self.operation_id, turn_id, code),
+            ts_code=code,
+            strategy_key=self.strategy_key,
+            session_id=self.session_id,
+            turn_id=turn_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StockAgentCall:
+    """单股分析调用身份（F34）：两层 ``analyze_stock`` 以 keyword-only ``agent_call`` 透传。
+
+    ``call_id`` 同时作为统一调度链的 ``invocation_id``（研究/费用链同源），
+    ``operation_id`` 作为请求 ``run_id``（批次级关联）；``as_metadata()`` 为落库
+    投影（写入 ``execution_metadata`` 程序字段），失败路径同样保留身份（R21）。
+    """
+
+    operation_id: str
+    call_id: str
+    ts_code: str
+    strategy_key: str | None = None
+    session_id: str | None = None
+    turn_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "operation_id", _require_identity_text(self.operation_id, "$.operation_id"))
+        object.__setattr__(self, "call_id", _require_identity_text(self.call_id, "$.call_id"))
+        object.__setattr__(self, "ts_code", _require_identity_text(self.ts_code, "$.ts_code"))
+
+    def as_metadata(self) -> dict[str, str | None]:
+        """只读投影（落库/结果行共用）：键名稳定，值缺失保持 ``None``（不伪装）。"""
+
+        return {
+            "operation_id": self.operation_id,
+            "call_id": self.call_id,
+            "ts_code": self.ts_code,
+            "strategy_key": self.strategy_key,
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+        }
+
+
+def new_stock_agent_batch(
+    *,
+    strategy_key: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    operation_id: str | None = None,
+) -> StockAgentBatchIdentity:
+    """批次入口分配稳定身份：``operation_id`` 沿用调用方已存身份或新分配一次。"""
+
+    resolved_operation = (
+        _require_identity_text(operation_id, "$.operation_id")
+        if operation_id is not None
+        else f"stock_batch_{uuid.uuid4().hex}"
+    )
+    return StockAgentBatchIdentity(
+        operation_id=resolved_operation,
+        strategy_key=strategy_key,
+        session_id=session_id,
+        turn_id=turn_id if turn_id is not None else uuid.uuid4().hex,
+    )

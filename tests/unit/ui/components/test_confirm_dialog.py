@@ -302,8 +302,8 @@ class TestDestructiveCallSites:
         assert _confirm_dialog_destructive_flags("ui/views/watchlist_view.py") == [True]
 
     def test_ai_brain_prompt_resets_are_destructive(self):
-        """重置 AI / 新闻提示词 (覆盖用户自定义内容) 两处均须 destructive=True。"""
-        assert _confirm_dialog_destructive_flags("ui/views/settings_tabs/ai_brain_tab.py") == [True, True]
+        """重置 AI / 新闻提示词与角色追加 (覆盖用户自定义内容) 三处均须 destructive=True。"""
+        assert _confirm_dialog_destructive_flags("ui/views/settings_tabs/ai_brain_tab.py") == [True, True, True]
 
     def test_non_destructive_call_sites_keep_default(self):
         """非破坏性确认 (AI 外发确认 / 不可计价"继续" / 线程池保存确认) 保持默认 → 非危险色。"""

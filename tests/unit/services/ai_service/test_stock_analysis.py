@@ -194,3 +194,138 @@ class TestLegacyChainBoundary:
         assert result["model"] == "qwen/qwen-max"
         assert result["usage"]["total_tokens"] == 15
         assert result["cost"] == 0.002
+
+
+class TestStockAgentCallIdentity:
+    """F34/AC23：批次预存身份 + 两层 analyze_stock 透传的单股调用身份。"""
+
+    def test_same_batch_same_stock_is_stable_and_unique_per_stock(self):
+        from core.model_management_types import new_stock_agent_batch
+
+        batch = new_stock_agent_batch(strategy_key="oversold", session_id="s-1", turn_id="t-1")
+        a1 = batch.for_stock("000001.SZ")
+        a2 = batch.for_stock("000001.SZ")
+        b = batch.for_stock("000002.SZ")
+        assert a1.call_id == a2.call_id  # 同批同股稳定（研究/费用链可回查）
+        assert a1.call_id != b.call_id  # 每股唯一
+        assert {a1.operation_id, b.operation_id} == {batch.operation_id}
+        assert a1.session_id == "s-1" and a1.turn_id == "t-1"
+
+    def test_new_turn_keeps_operation_and_creates_new_call(self):
+        from core.model_management_types import new_stock_agent_batch
+
+        batch = new_stock_agent_batch(strategy_key="oversold", turn_id="t-1")
+        original = batch.for_stock("000001.SZ")
+        retry = batch.for_stock("000001.SZ", new_turn=True)
+        assert retry.operation_id == original.operation_id  # 关联原批次/原股
+        assert retry.call_id != original.call_id  # 新轮次 = 新调用身份
+        assert retry.turn_id != original.turn_id
+
+    def test_missing_identity_rejected(self):
+        from core.model_management_types import StockAgentCall, new_stock_agent_batch
+
+        batch = new_stock_agent_batch()
+        with pytest.raises(ValueError, match=r"\$\.ts_code"):
+            batch.for_stock("  ")
+        with pytest.raises(ValueError, match=r"\$\.operation_id"):
+            StockAgentCall(operation_id="", call_id="c", ts_code="000001.SZ")
+
+    def test_metadata_projection_keys_are_stable(self):
+        from core.model_management_types import new_stock_agent_batch
+
+        call = new_stock_agent_batch(strategy_key="k", session_id="s", turn_id="t").for_stock("000001.SZ")
+        meta = call.as_metadata()
+        assert meta == {
+            "operation_id": call.operation_id,
+            "call_id": call.call_id,
+            "ts_code": "000001.SZ",
+            "strategy_key": "k",
+            "session_id": "s",
+            "turn_id": "t",
+        }
+
+    def test_execution_metadata_carries_identity_and_omits_when_absent(self):
+        from unittest.mock import MagicMock
+
+        from core.model_management_types import new_stock_agent_batch
+        from services.ai_service.stock_analysis import StockAnalysisService
+
+        dispatch = MagicMock()
+        dispatch.route_revision = 3
+        dispatch.snapshot.config_revision = 7
+        call = new_stock_agent_batch(session_id="s", turn_id="t").for_stock("000001.SZ")
+
+        with_identity = StockAnalysisService._scenario_execution_metadata(
+            call.call_id, dispatch, None, None, "unavailable", "failed", agent_call=call
+        )
+        assert with_identity["invocation_id"] == call.call_id
+        assert with_identity["stock_agent_call"] == call.as_metadata()
+
+        without_identity = StockAnalysisService._scenario_execution_metadata(
+            "inv-x", dispatch, None, None, "unavailable", "failed"
+        )
+        assert "stock_agent_call" not in without_identity  # 旧兼容调用不伪造身份（R21）
+
+    def test_attach_agent_call_keeps_identity_on_failure_result(self):
+        from services.ai_service.stock_analysis import StockAnalysisService
+
+        call = _call()
+        failure = {"error": "Analysis timeout", "score": None, "ai_status": "failed"}
+        result = StockAnalysisService._attach_agent_call(failure, call)
+        assert isinstance(result, dict)
+        assert result is failure
+        assert result["stock_agent_call"] == call.as_metadata()
+        # 无身份不写键
+        without_identity = StockAnalysisService._attach_agent_call(
+            {"error": "Analysis timeout", "score": None, "ai_status": "failed"}, None
+        )
+        assert isinstance(without_identity, dict)
+        assert "stock_agent_call" not in without_identity
+
+
+@pytest.mark.asyncio
+async def test_execute_scenario_analysis_uses_call_identity_for_invocation_and_run_id():
+    """新链：call_id → invocation_id、operation_id → request.run_id（研究/费用链同源）。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core.model_management_types import CandidateDecision, ScenarioExecutionResult
+    from services.ai_service.scenario_executor import ScenarioOutput
+    from services.ai_service.stock_analysis import StockAnalysisService
+
+    call = _call()
+    exec_result = ScenarioExecutionResult(
+        scenario_id="stock_analysis",
+        invocation_id=call.call_id,
+        status="succeeded",
+        outputs=(ScenarioOutput(output={"score": 80, "confidence": 60}, metadata={"actual_model": "m-1"}),),
+        candidate_decisions=(
+            CandidateDecision(
+                task_id="analysis", candidate_index=0, connection_id="conn-1", decision="succeeded", reason="ok"
+            ),
+        ),
+        actual_usage=(),
+    )
+    dispatch = MagicMock()
+    dispatch.route_revision = 3
+    dispatch.total_timeout_seconds = 30.0
+    dispatch.snapshot.config_revision = 7
+    dispatch.executor.execute = AsyncMock(return_value=exec_result)
+    service = StockAnalysisService(MagicMock())
+
+    result = await service._execute_scenario_analysis(
+        dispatch=dispatch,
+        messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "u"}],
+        learning_meta=None,
+        agent_call=call,
+    )
+
+    request = dispatch.executor.execute.call_args[0][0]
+    assert request.invocation_id == call.call_id
+    assert request.run_id == call.operation_id
+    assert result["execution_metadata"]["stock_agent_call"] == call.as_metadata()
+
+
+def _call():
+    from core.model_management_types import new_stock_agent_batch
+
+    return new_stock_agent_batch(session_id="s-1", turn_id="t-1").for_stock("000001.SZ")

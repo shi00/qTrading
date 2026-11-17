@@ -4085,3 +4085,138 @@ class TestAIServiceResponseSchema:
 
         monkeypatch.setattr(ai_service, "litellm", None)
         assert _check_response_schema_support("deepseek-v4-pro") is False
+
+
+class TestAnalyzeStockAgentCallIdentity:
+    """F34/AC23：两层 analyze_stock 透传单股调用身份（新链与旧链失败均保留）。"""
+
+    @staticmethod
+    def _call():
+        from core.model_management_types import new_stock_agent_batch
+
+        return new_stock_agent_batch(session_id="sess-1", turn_id="turn-1").for_stock("000001.SZ")
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_new_chain_uses_identity_for_invocation_and_execution_metadata(self, mock_ch):
+        from core.model_management_types import CandidateDecision, ScenarioExecutionResult
+        from services.ai_service.scenario_dispatch import ScenarioDispatch
+        from services.ai_service.scenario_executor import ScenarioOutput
+
+        mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=True)
+        call = self._call()
+        exec_result = ScenarioExecutionResult(
+            scenario_id="stock_analysis",
+            invocation_id=call.call_id,
+            status="succeeded",
+            outputs=(ScenarioOutput(output={"score": 80}, metadata={"actual_model": "m-1"}),),
+            candidate_decisions=(
+                CandidateDecision(
+                    task_id="analysis", candidate_index=0, connection_id="conn-1", decision="succeeded", reason="ok"
+                ),
+            ),
+            actual_usage=(),
+        )
+        executor = MagicMock()
+        executor.execute = AsyncMock(return_value=exec_result)
+        snapshot = MagicMock()
+        snapshot.config_revision = 7
+        dispatch = ScenarioDispatch(
+            executor=executor, snapshot=snapshot, route_revision=3, total_timeout_seconds=120.0, task_routes={}
+        )
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=dispatch),
+            ),
+            patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                history_context="",
+                include_learning_context=False,
+                strategy_key="oversold",
+                agent_call=call,
+            )
+
+        request = executor.execute.call_args[0][0]
+        assert request.invocation_id == call.call_id  # 费用链按每股调用身份回查
+        assert request.run_id == call.operation_id  # 批次级关联
+        assert result["execution_metadata"]["stock_agent_call"] == call.as_metadata()
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_legacy_chain_failure_result_keeps_identity(self, mock_ch):
+        """旧链（无分派）失败 dict 仍携带身份（R21：不丢「已发起」事实）。"""
+        mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=True)
+        svc._chat_completion_with_failover = AsyncMock(side_effect=RuntimeError("provider down"))
+        call = self._call()
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=None),
+            ),
+            patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                history_context="",
+                include_learning_context=False,
+                strategy_key="oversold",
+                agent_call=call,
+            )
+
+        assert result["ai_status"] == "failed"
+        assert result["score"] is None
+        assert result["stock_agent_call"] == call.as_metadata()
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_legacy_chain_success_keeps_identity(self, mock_ch):
+        mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=True)
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={
+                "conclusion_label": "watchlist",
+                "score": 60,
+                "confidence": 50,
+                "uncertainty_factors": "无",
+                "thinking": "思考",
+                "summary": "观察",
+            }
+        )
+        call = self._call()
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=None),
+            ),
+            patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                history_context="",
+                include_learning_context=False,
+                strategy_key="oversold",
+                agent_call=call,
+            )
+
+        assert result["score"] == 60
+        assert result["stock_agent_call"] == call.as_metadata()

@@ -40,11 +40,14 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.ai_brain_settings_view_model import (
+    ROLE_PROMPT_VARIABLES,
+    ROLE_VERSION_UNSAVED_KEY,
     SAVE_ERROR,
     SAVE_SAVING,
     SAVE_STALE,
     SAVE_SUCCESS,
     AIBrainSettingsViewModel,
+    RolePromptState,
 )
 from ui.viewmodels.egress_audit_view_model import EgressAggRow, EgressAuditViewModel
 from ui.viewmodels.model_connections_view_model import (
@@ -320,6 +323,9 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     # P1-4 批次 2: ConfirmDialog open_state (消费方驱动, 无 dirty state 检测 §0.5.11.1 #78)
     reset_ai_dialog_open, set_reset_ai_dialog_open = ft.use_state(False)
     reset_news_dialog_open, set_reset_news_dialog_open = ft.use_state(False)
+    # F35 / J26: 研究角色区域 UI 临时状态（教程展开 / 恢复确认目标角色）。
+    open_role_tutorial, set_open_role_tutorial = ft.use_state("")
+    reset_role_dialog, set_reset_role_dialog = ft.use_state("")
 
     # --- 异步保存 (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_save_ai_settings() -> None:
@@ -335,12 +341,20 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             return
         if not _validate_prompt_or_warn(ai_settings_state.news_prompt_value, show_snack_callback):
             return
+        # F35: 角色追加内容同样做长度/注入校验；未知变量由 VM 校验（保留草稿报错）。
+        for role in ai_settings_state.role_prompts:
+            if not _validate_prompt_or_warn(role.append_value, show_snack_callback):
+                return
 
         try:
             await ai_settings_vm.save_ai_settings()
             current_state = ai_settings_vm.state
             if current_state.save_state == SAVE_ERROR:
-                show_snack_callback(I18n.get("settings_save_failed"), color=AppColors.ERROR)
+                if current_state.warning_message:
+                    # 字段级错误（未知变量/空变量）如实提示，不降级为泛化失败。
+                    show_snack_callback(I18n.get(current_state.warning_message), color=AppColors.ERROR)
+                else:
+                    show_snack_callback(I18n.get("settings_save_failed"), color=AppColors.ERROR)
             elif current_state.save_state == SAVE_STALE:
                 # F05: 发起保存后草稿又被编辑 —— 明确提示当前草稿仍有未保存修改。
                 show_snack_callback(I18n.get(current_state.warning_message), color=AppColors.WARNING)
@@ -401,6 +415,21 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     def _do_cancel_reset_news_prompt() -> None:
         """ConfirmDialog on_cancel: 关闭对话框, 不执行重置。"""
         set_reset_news_dialog_open(False)
+
+    def _on_reset_role_prompt(role_key: str) -> None:
+        """打开角色恢复确认（明确将清空该角色追加内容）。"""
+        set_reset_role_dialog(role_key)
+
+    def _do_confirm_reset_role_prompt() -> None:
+        """确认恢复：仅清空目标角色的追加草稿，其他角色/业务 Prompt 不变。"""
+        if reset_role_dialog:
+            ai_settings_vm.reset_role_append(reset_role_dialog)
+            show_snack_callback(I18n.get("settings_snack_role_reset"))
+        set_reset_role_dialog("")
+
+    def _do_cancel_reset_role_prompt() -> None:
+        """取消恢复：草稿保持不变。"""
+        set_reset_role_dialog("")
 
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     ai_max_candidates_input = ft.TextField(
@@ -637,6 +666,169 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         ),
     )
 
+    # --- F35 / J26: 研究角色 Prompt（默认只读 + 追加 + 来源/版本 + 合成预览 + 教程） ---
+    role_vars_legend = ", ".join(f"{{{name}}}={sample}" for name, sample in ROLE_PROMPT_VARIABLES.items())
+
+    def _make_role_append_handler(role_key: str) -> Callable[[ft.ControlEvent], None]:
+        def _handler(e: ft.ControlEvent) -> None:
+            ai_settings_vm.set_role_append(role_key, str(get_control_value(e.control, ft.TextField)))
+
+        return _handler
+
+    def _make_role_reset_handler(role_key: str) -> Callable[[ft.ControlEvent], None]:
+        def _handler(_e: ft.ControlEvent) -> None:
+            _on_reset_role_prompt(role_key)
+
+        return _handler
+
+    def _build_role_section(role: RolePromptState) -> ft.Column:
+        """单个角色：只读默认正文 + 追加区 + 来源/版本 + 合成预览 + 教程。"""
+        tutorial_visible = open_role_tutorial == role.role_key
+
+        def _toggle_tutorial(_e: ft.ControlEvent) -> None:
+            set_open_role_tutorial("" if tutorial_visible else role.role_key)
+
+        meta_text = I18n.get("settings_ai_role_meta").format(
+            source=I18n.get(role.source_key),
+            default_version=role.default_version,
+            saved_version=role.saved_version or I18n.get(ROLE_VERSION_UNSAVED_KEY),
+            draft_version=role.draft_version,
+        )
+        error_control = (
+            ft.Text(
+                I18n.get(role.variable_error_key),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.ERROR,
+            )
+            if role.variable_error_key
+            else ft.Container()
+        )
+        tutorial_panel = (
+            ft.Container(
+                content=ft.Text(
+                    I18n.get(role.tutorial_key),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+                padding=10,
+                border=ft.Border.all(1, AppColors.BORDER),
+                border_radius=8,
+            )
+            if tutorial_visible
+            else ft.Container()
+        )
+        default_field = ft.TextField(
+            label=I18n.get("settings_ai_role_default_label"),
+            value=role.default_prompt,
+            read_only=True,
+            multiline=True,
+            min_lines=4,
+            max_lines=10,
+            text_size=AppStyles.FONT_SIZE_BODY_SM,
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+        )
+        append_field = ft.TextField(
+            label=I18n.get("settings_ai_role_append_label"),
+            value=role.append_value,
+            multiline=True,
+            min_lines=2,
+            max_lines=8,
+            text_size=AppStyles.FONT_SIZE_BODY_SM,
+            hint_text=I18n.get("settings_ai_role_append_hint"),
+            on_change=safe_on_change(_make_role_append_handler(role.role_key)),
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+        )
+        preview_field = ft.TextField(
+            label=I18n.get("settings_ai_role_preview_label"),
+            value=role.preview,
+            read_only=True,
+            multiline=True,
+            min_lines=4,
+            max_lines=12,
+            text_size=AppStyles.FONT_SIZE_BODY_SM,
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+        )
+        return ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Text(
+                            I18n.get(role.name_key),
+                            size=AppStyles.FONT_SIZE_BODY,
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.TEXT_PRIMARY,
+                        ),
+                        ft.Row(
+                            [
+                                ft.TextButton(
+                                    content=I18n.get("settings_ai_role_tutorial_toggle"),
+                                    icon=ft.Icons.MENU_BOOK,
+                                    on_click=safe_on_click(_toggle_tutorial),
+                                ),
+                                ft.TextButton(
+                                    content=I18n.get("settings_ai_role_reset_button"),
+                                    icon=ft.Icons.RESTORE,
+                                    on_click=safe_on_click(_make_role_reset_handler(role.role_key)),
+                                ),
+                            ],
+                            spacing=4,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Text(
+                    meta_text,
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
+                tutorial_panel,
+                default_field,
+                append_field,
+                error_control,
+                preview_field,
+                ft.Text(
+                    I18n.get("settings_ai_role_vars_legend").format(vars=role_vars_legend),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
+            ],
+            spacing=8,
+        )
+
+    role_sections = [_build_role_section(role) for role in ai_settings_state.role_prompts]
+    card_role_prompts = DashboardCard(
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        SectionHeader(I18n.get("settings_ai_role_section"), title_key="settings_ai_role_section"),
+                        ft.Icon(ft.Icons.BADGE_OUTLINED, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.PRIMARY),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Text(
+                    I18n.get("settings_ai_role_section_desc"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+                ft.Text(
+                    I18n.get("settings_ai_role_scope_hint"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
+                ft.Divider(height=20, color=AppColors.BORDER),
+                *role_sections,
+            ],
+            spacing=10,
+        ),
+    )
+
     # --- SEC-03 第二步: 「仅本地模式」开关卡片 (禁用全部云端 LLM, 数据不出本机) ---
     # 开关仅更新 VM state (ai_local_only_mode), 点「保存 AI 设置」时随 save_ai_settings 持久化。
     def _on_local_only_toggle(e: ft.ControlEvent) -> None:
@@ -797,6 +989,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         if is_success
         else I18n.get(ai_settings_state.warning_message)
         if is_stale
+        else I18n.get(ai_settings_state.warning_message)
+        if is_error and ai_settings_state.warning_message
         else I18n.get("sys_snack_save_err")
         if is_error
         else ""
@@ -824,6 +1018,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 card_data_boundary,
                 card_tuning,
                 card_prompt,
+                card_role_prompts,
                 card_local_only,
                 card_egress,
                 ft.Container(
@@ -856,6 +1051,28 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                     confirm_text=I18n.get("common_confirm"),
                     cancel_text=I18n.get("common_cancel"),
                     # 重置新闻提示词会覆盖用户自定义内容 → 危险色 (MINOR-05)
+                    destructive=True,
+                ),
+                # F35 / J26: 角色恢复确认（仅清空所选角色追加内容，其他角色不受影响）。
+                ConfirmDialog(
+                    open_state=bool(reset_role_dialog),
+                    title=I18n.get("settings_ai_role_reset_title"),
+                    body=I18n.get("settings_ai_role_reset_body").format(
+                        role=I18n.get(
+                            next(
+                                (
+                                    role.name_key
+                                    for role in ai_settings_state.role_prompts
+                                    if role.role_key == reset_role_dialog
+                                ),
+                                "settings_ai_role_name_main",
+                            )
+                        )
+                    ),
+                    on_confirm=_do_confirm_reset_role_prompt,
+                    on_cancel=_do_cancel_reset_role_prompt,
+                    confirm_text=I18n.get("common_confirm"),
+                    cancel_text=I18n.get("common_cancel"),
                     destructive=True,
                 ),
             ],
