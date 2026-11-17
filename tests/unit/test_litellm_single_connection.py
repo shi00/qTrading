@@ -24,6 +24,7 @@ import httpx
 import pytest
 
 from services.ai_service.litellm_client import LiteLLMClient
+from core.errors import AIProviderParamsRejectedError
 from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
@@ -553,6 +554,132 @@ class TestSingleConnectionNoHiddenRetry:
             resolve_credential("keyring:model-connection-leak")
         assert "sk-super-secret-value" not in str(excinfo.value)
         assert os.environ.get("QTR_NO_RETRY_KEY") != "sk-test-local-endpoint"
+
+
+# ---------------------------------------------------------------------------
+# M20：严格出站（禁删参 / 禁隐式重发）
+# ---------------------------------------------------------------------------
+class TestStrictNoDropNoResend:
+    """锁定 SDK 的 422 删参重发分支必须在 Agent 出口不可达（M20）。
+
+    证据口径：真实锁定 litellm + 受控端点（返回 FastAPI 形态 422，报错参数名在
+    ``detail[*].loc`` 中，正是 SDK 删参重发分支的触发条件），断言出站恰 1 次、
+    首包参数原样、错误含 attempt 身份，且全局 ``litellm.drop_params`` 未被切换。
+    """
+
+    async def test_422_refused_without_hidden_resend(self, monkeypatch: pytest.MonkeyPatch, real_litellm):
+        monkeypatch.setenv("QTR_STRICT_422_KEY", "sk-test-local-endpoint")
+        for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(var, raising=False)
+        # 还原运行时全局（_ensure_litellm_loaded 首次加载时置 True，旧链依赖该兜底）
+        real_litellm.drop_params = True
+
+        request_count = 0
+        bodies: list[bytes] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            nonlocal request_count
+            request_count += 1
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = 0
+            for line in head.decode("latin-1").split("\r\n"):
+                if line.lower().startswith("content-length:"):
+                    length = int(line.split(":", 1)[1].strip())
+            bodies.append(await reader.readexactly(length) if length else b"")
+            detail = json.dumps({"detail": [{"loc": ["body", "max_tokens"], "msg": "extra fields not permitted"}]})
+            body = json.dumps(
+                {"error": {"message": detail, "type": "invalid_request_error", "param": None, "code": None}}
+            ).encode()
+            writer.write(
+                b"HTTP/1.1 422 Unprocessable Entity\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        conn = _connection(
+            provider="openai",
+            model="research-model",
+            api_base=f"http://127.0.0.1:{port}/v1",
+            credential_ref="env:QTR_STRICT_422_KEY",
+        )
+        client = LiteLLMClient(MagicMock())
+        request = _request(deadline=asyncio.get_running_loop().time() + 30.0)
+        try:
+            with pytest.raises(AIProviderParamsRejectedError) as excinfo:
+                await asyncio.wait_for(
+                    client.invoke_single_connection(request, conn, request.deadline, _attempt_context()),
+                    timeout=25.0,
+                )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        # 出站一次：SDK 的删参重发（同 attempt 第二次 send）未发生
+        assert request_count == 1, f"expected exactly 1 outbound request, got {request_count}"
+        # 首包参数原样：未删参（max_tokens / temperature / messages 均按请求发送）
+        sent = json.loads(bodies[0])
+        assert sent["model"] == "research-model"
+        assert sent["max_tokens"] == 128
+        assert sent["temperature"] == pytest.approx(0.2)
+        assert sent["messages"][-1]["content"] == "hello"
+        # 原 attempt 可核：错误身份携带 attempt / invocation
+        assert "att-1" in str(excinfo.value)
+        assert "inv-1" in str(excinfo.value)
+        # 旧链不回退：全局 drop_params 未在本次调用中被临时切换
+        assert real_litellm.drop_params is True
+
+    async def test_openai_family_injects_strict_client(self, monkeypatch: pytest.MonkeyPatch):
+        """OpenAI 系连接按调用注入独立 client（禁删参策略的作用点）。"""
+        monkeypatch.setenv("QTR_STRICT_INJECT_KEY", "sk-inject")
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            conn = _connection(
+                provider="openai",
+                model="research-model",
+                api_base="https://api.example.com/v1",
+                credential_ref="env:QTR_STRICT_INJECT_KEY",
+            )
+            request = _request()
+            await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, conn, request.deadline, _attempt_context()
+            )
+
+        kwargs = mock_ac.await_args.kwargs
+        assert kwargs["client"] is not None
+        assert kwargs["drop_params"] is False
+        assert kwargs["num_retries"] == 0
+
+    async def test_native_provider_keeps_default_call_shape(self, monkeypatch: pytest.MonkeyPatch):
+        """原生 SDK provider（anthropic）无 422 删参分支，不注入 client（行为不变）。"""
+        monkeypatch.setenv("QTR_STRICT_NATIVE_KEY", "sk-native")
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            conn = _connection(
+                provider="anthropic",
+                model="claude-3-5-sonnet",
+                api_base="https://api.anthropic.com",
+                credential_ref="env:QTR_STRICT_NATIVE_KEY",
+            )
+            request = _request()
+            await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, conn, request.deadline, _attempt_context()
+            )
+
+        kwargs = mock_ac.await_args.kwargs
+        assert "client" not in kwargs
+        assert kwargs["drop_params"] is False
 
 
 # ---------------------------------------------------------------------------
