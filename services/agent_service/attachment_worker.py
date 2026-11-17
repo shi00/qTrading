@@ -5,8 +5,9 @@
   也提供纯解析函数供单元测试直接调用；
 - 解析只读取显式选择范围；未选范围不解析、不计数；超限明确拒绝或按超时返回
   真实已读/未读（不截断冒完整）；
-- XLSX 使用同一不可变 snapshot 字节的两次独立只读打开（``data_only=False`` /
-  ``data_only=True``），按 ``(sheet, coordinate)`` 配对公式与缓存，并有界探测
+- XLSX 先做容器级前置预算与 workbook 元数据结构门（zip 条目数/声明解压量/
+  sharedStrings 尺寸等），通过后才创建公式与缓存两个只读视图（共享同一
+  sharedStrings 解析），按 ``(sheet, coordinate)`` 配对公式与缓存，并有界探测
   worksheet XML 区分缓存不存在/存在但空/错误/类型不可核；
 - PDF / PNG / JPEG 解析依赖（pypdf / Pillow）已按 Q5/Q3 裁决纳入正式依赖；
   结构不可读仍明确 ``invalid_structure``，不伪造解码结果。
@@ -21,9 +22,11 @@ import itertools
 import json
 import sys
 import time
+import unicodedata
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time
+from pathlib import PurePosixPath
 from typing import Any, Final
 from xml.etree import ElementTree
 
@@ -323,53 +326,168 @@ def _parse_json(data: bytes, selection: Selection, budget: AttachmentBudget) -> 
 MAX_SHEET_XML_BYTES: Final = 64 * 1024 * 1024
 #: XML 探测扫描的单元格上限（超过后其余单元格缓存保持 unknown）。
 MAX_PROBED_CELLS: Final = 200_000
+#: XLSX 容器前置预算（I08）：在 openpyxl 分配前按中央目录声明值拒绝解压炸弹。
+MAX_XLSX_ENTRIES: Final = 4_096
+MAX_XLSX_ENTRY_BYTES: Final = 64 * 1024 * 1024
+MAX_XLSX_TOTAL_BYTES: Final = 256 * 1024 * 1024
+MAX_XLSX_METADATA_BYTES: Final = 8 * 1024 * 1024
+MAX_XLSX_SHARED_STRINGS_BYTES: Final = 32 * 1024 * 1024
+MAX_XLSX_STYLES_BYTES: Final = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class XlsxMetadata:
+    """容器预检得到的 workbook 元数据（只在预算门通过后解析一次）。"""
+
+    sheet_paths: dict[str, str]
+    date_epoch: str
+
+
+def _xlsx_entry_key(name: str) -> str:
+    """规范化条目名（NFKC + casefold），用于识别大小写/兼容字符变体重名。"""
+
+    return "/".join(unicodedata.normalize("NFKC", part).casefold() for part in PurePosixPath(name).parts)
+
+
+def _check_xlsx_entry_name(name: str) -> str:
+    """拒绝绝对路径、盘符、反斜杠、父目录与空组件；返回规范化的 POSIX 名。"""
+
+    if not name or "\x00" in name or "\\" in name:
+        raise AttachmentParseError("invalid_structure", "XLSX container has unsafe entry names")
+    pure = PurePosixPath(name)
+    if pure.is_absolute() or pure.drive or pure.root:
+        raise AttachmentParseError("invalid_structure", "XLSX container has unsafe entry names")
+    if any(part in {"..", ""} for part in pure.parts):
+        raise AttachmentParseError("invalid_structure", "XLSX container has unsafe entry names")
+    first = pure.parts[0]
+    # zipfile 会把反斜杠归一化为 "/"，故 "C:/x" 需按盘符前缀拒绝（与 skill 包预检一致）。
+    if len(first) == 2 and first[1] == ":" and first[0].isalpha():
+        raise AttachmentParseError("invalid_structure", "XLSX container has unsafe entry names")
+    return "/".join(pure.parts)
+
+
+def _reject_xlsx_xml_entities(payload: bytes) -> None:
+    """元数据解析前拒绝 DTD/实体声明（与 worksheet 探测的实体门一致）。"""
+
+    if b"<!DOCTYPE" in payload or b"<!ENTITY" in payload:
+        raise AttachmentParseError("invalid_structure", "XLSX XML entities are rejected")
+
+
+def _read_xlsx_part(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
+    """有界读取元数据项：声明尺寸与实读字节均不超过限额。"""
+
+    try:
+        info = archive.getinfo(name)
+    except KeyError as exc:
+        raise AttachmentParseError("invalid_structure", "XLSX workbook metadata is missing or unreadable") from exc
+    if info.file_size > limit:
+        raise AttachmentParseError("invalid_structure", "XLSX metadata part exceeds the preflight limit")
+    try:
+        with archive.open(info) as handle:
+            payload = handle.read(limit + 1)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise AttachmentParseError("invalid_structure", "XLSX workbook metadata is unreadable") from exc
+    if len(payload) > limit:
+        raise AttachmentParseError("invalid_structure", "XLSX metadata part exceeds the preflight limit")
+    return payload
+
+
+def _inspect_xlsx_container(data: bytes) -> XlsxMetadata:
+    """在 openpyxl 分配前完成容器预算与结构门（I08）。
+
+    仅读中央目录声明值与 workbook 元数据；任一超限/异常结构在展开 worksheet
+    之前以 ``invalid_structure`` 拒绝，失败路径不落盘、不产生临时文件。
+    """
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise AttachmentParseError("invalid_structure", "XLSX is not a ZIP container") from exc
+    with archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_XLSX_ENTRIES:
+            raise AttachmentParseError("invalid_structure", "XLSX container entry count exceeds the limit")
+        by_name: dict[str, zipfile.ZipInfo] = {}
+        seen: set[str] = set()
+        total_declared = 0
+        for info in infos:
+            name = _check_xlsx_entry_name(info.filename)
+            key = _xlsx_entry_key(name)
+            if key in seen:
+                raise AttachmentParseError("invalid_structure", "XLSX container has duplicate entry names")
+            seen.add(key)
+            if info.flag_bits & 0x1:
+                raise AttachmentParseError("invalid_structure", "XLSX container has encrypted entries")
+            mode = info.external_attr >> 16
+            if mode and (mode & 0o170000) == 0o120000:
+                raise AttachmentParseError("invalid_structure", "XLSX container has symbolic link entries")
+            if info.file_size > MAX_XLSX_ENTRY_BYTES:
+                raise AttachmentParseError("invalid_structure", "XLSX entry expands beyond the per-entry limit")
+            total_declared += info.file_size
+            if total_declared > MAX_XLSX_TOTAL_BYTES:
+                raise AttachmentParseError("invalid_structure", "XLSX entries expand beyond the total limit")
+            by_name[name] = info
+
+        if "[Content_Types].xml" not in by_name:
+            raise AttachmentParseError("invalid_structure", "XLSX workbook metadata is missing or unreadable")
+        content_types = by_name["[Content_Types].xml"]
+        if content_types.file_size > MAX_XLSX_METADATA_BYTES:
+            raise AttachmentParseError("invalid_structure", "XLSX metadata part exceeds the preflight limit")
+        shared_strings = by_name.get("xl/sharedStrings.xml")
+        if shared_strings is not None and shared_strings.file_size > MAX_XLSX_SHARED_STRINGS_BYTES:
+            raise AttachmentParseError("invalid_structure", "XLSX shared strings part exceeds the preflight limit")
+        styles = by_name.get("xl/styles.xml")
+        if styles is not None and styles.file_size > MAX_XLSX_STYLES_BYTES:
+            raise AttachmentParseError("invalid_structure", "XLSX styles part exceeds the preflight limit")
+
+        workbook_bytes = _read_xlsx_part(archive, "xl/workbook.xml", MAX_XLSX_METADATA_BYTES)
+        rels_bytes = _read_xlsx_part(archive, "xl/_rels/workbook.xml.rels", MAX_XLSX_METADATA_BYTES)
+        _reject_xlsx_xml_entities(workbook_bytes)
+        _reject_xlsx_xml_entities(rels_bytes)
+        try:
+            workbook = ElementTree.fromstring(workbook_bytes)
+            rels = ElementTree.fromstring(rels_bytes)
+        except ElementTree.ParseError as exc:
+            raise AttachmentParseError("invalid_structure", "XLSX workbook metadata is unreadable") from exc
+
+    props = workbook.find(f"{_NS_MAIN}workbookPr")
+    date_epoch = "1904" if props is not None and props.get("date1904") in {"1", "true"} else "1900"
+    targets = {
+        rel.get("Id"): (rel.get("Target", ""), rel.get("Type", "")) for rel in rels.findall(f"{_NS_REL}Relationship")
+    }
+    sheet_paths: dict[str, str] = {}
+    for sheet in workbook.findall(f"{_NS_MAIN}sheets/{_NS_MAIN}sheet"):
+        name = sheet.get("name", "")
+        rel_id = sheet.get(f"{_NS_OFFICE_REL}id", "")
+        target, rel_type = targets.get(rel_id, ("", ""))
+        # 图表页不能按 worksheet API 迭代；在结构门拒绝而不是后续 AttributeError。
+        if not name or not target or rel_type.endswith("/chartsheet"):
+            continue
+        normalized = target.lstrip("/")
+        if not normalized.startswith("xl/"):
+            normalized = f"xl/{normalized}"
+        pure = PurePosixPath(normalized)
+        if pure.is_absolute() or any(part in {"..", ""} for part in pure.parts):
+            raise AttachmentParseError("invalid_structure", "XLSX sheet relationship target is unsafe")
+        normalized = "/".join(pure.parts)
+        if normalized not in by_name:
+            continue
+        sheet_paths[name] = normalized
+    return XlsxMetadata(sheet_paths=sheet_paths, date_epoch=date_epoch)
 
 
 class XlsxCacheProbe:
     """有界读取 worksheet XML，区分缓存缺失/存在但空/错误/类型不可核（§10.4）。"""
 
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, metadata: XlsxMetadata) -> None:
         self._zip = zipfile.ZipFile(io.BytesIO(data))
-        self._sheet_paths = self._map_sheets()
+        self._sheet_paths = dict(metadata.sheet_paths)
         self._cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._probed_cells = 0
-        self.date_epoch = self._date_epoch()
+        self.date_epoch = metadata.date_epoch
 
     def close(self) -> None:
         self._zip.close()
-
-    def _date_epoch(self) -> str:
-        try:
-            with self._zip.open("xl/workbook.xml") as handle:
-                root = ElementTree.parse(handle).getroot()
-        except (KeyError, ElementTree.ParseError):
-            return "1900"
-        props = root.find(f"{_NS_MAIN}workbookPr")
-        if props is not None and props.get("date1904") in {"1", "true"}:
-            return "1904"
-        return "1900"
-
-    def _map_sheets(self) -> dict[str, str]:
-        try:
-            with self._zip.open("xl/workbook.xml") as handle:
-                workbook = ElementTree.parse(handle).getroot()
-            with self._zip.open("xl/_rels/workbook.xml.rels") as handle:
-                rels = ElementTree.parse(handle).getroot()
-        except (KeyError, ElementTree.ParseError) as exc:
-            raise AttachmentParseError("invalid_structure", "XLSX workbook structure is unreadable") from exc
-        targets = {rel.get("Id"): rel.get("Target", "") for rel in rels.findall(f"{_NS_REL}Relationship")}
-        paths: dict[str, str] = {}
-        for sheet in workbook.findall(f"{_NS_MAIN}sheets/{_NS_MAIN}sheet"):
-            name = sheet.get("name", "")
-            rel_id = sheet.get(f"{_NS_OFFICE_REL}id", "")
-            target = targets.get(rel_id, "")
-            if not name or not target:
-                continue
-            normalized = target.lstrip("/")
-            if not normalized.startswith("xl/"):
-                normalized = f"xl/{normalized}"
-            paths[name] = normalized
-        return paths
 
     def probe(self, sheet: str, cell: str) -> dict[str, Any] | None:
         """返回 ``{"t":..., "has_v":..., "v_text":...}``；结构不可读/超界返回 None。"""
@@ -538,46 +656,83 @@ def _cache_meta(
 
 
 def _load_openpyxl(data: bytes) -> tuple[Any, Any]:
+    """打开公式与缓存两个只读视图；sharedStrings 只解析一次并在两者间复用（I08）。"""
+
     try:
-        from openpyxl import load_workbook  # 延迟导入：缺失时不阻断其它格式
+        from openpyxl.reader.excel import ExcelReader  # 延迟导入：缺失时不阻断其它格式
+        from openpyxl.styles.stylesheet import apply_stylesheet
     except ImportError as exc:
         raise AttachmentParseError("parser_dependency_missing", "openpyxl is not installed") from exc
+
+    def _open_view(*, data_only: bool, shared_strings: list[Any] | None) -> tuple[Any, list[Any]]:
+        # 复用 ExcelReader.read() 的同一读取顺序，但共享表只解析一次（第二次注入结果）。
+        reader = ExcelReader(io.BytesIO(data), read_only=True, data_only=data_only, keep_links=False)
+        try:
+            reader.read_manifest()
+            if shared_strings is None:
+                reader.read_strings()
+                strings = reader.shared_strings
+            else:
+                reader.shared_strings = shared_strings
+                strings = shared_strings
+            reader.read_workbook()
+            reader.read_properties()
+            reader.read_custom()
+            reader.read_theme()
+            apply_stylesheet(reader.archive, reader.wb)
+            reader.read_worksheets()
+            reader.parser.assign_names()
+        except Exception:
+            reader.archive.close()
+            raise
+        return reader.wb, strings
+
     try:
-        formulas = load_workbook(io.BytesIO(data), read_only=True, data_only=False, keep_links=False)
-        cached = load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
+        formulas, strings = _open_view(data_only=False, shared_strings=None)
+        try:
+            cached, _ = _open_view(data_only=True, shared_strings=strings)
+        except Exception:
+            formulas.close()
+            raise
+    except AttachmentParseError:
+        raise
     except Exception as exc:  # 第三方解析异常统一转译，不吞
         raise AttachmentParseError("invalid_structure", "XLSX workbook is unreadable") from exc
     return formulas, cached
 
 
+def _select_xlsx_sheets(selection: Selection, sheet_names: list[str]) -> list[str]:
+    """在展开/分配前完成工作表结构门（不存在的表名直接拒绝）。"""
+
+    if selection.kind == "all":
+        return sheet_names
+    selected_sheets: list[str] = []
+    for atom in selection.ranges:
+        if isinstance(atom, SheetsRange):
+            for name in atom.names:
+                if name not in sheet_names:
+                    raise AttachmentParseError("invalid_selection", "sheet name does not exist in source")
+                if name not in selected_sheets:
+                    selected_sheets.append(name)
+        else:
+            assert isinstance(atom, RowsRange)
+            if atom.sheet is None or atom.sheet not in sheet_names:
+                raise AttachmentParseError("invalid_selection", "XLSX rows must name an existing sheet")
+            if atom.sheet not in selected_sheets:
+                selected_sheets.append(atom.sheet)
+    return selected_sheets
+
+
 def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, deadline: float) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (SheetsRange, RowsRange))
     _check_no_overlap(selection, RowsRange)
-    if not zipfile.is_zipfile(io.BytesIO(data)):
-        raise AttachmentParseError("invalid_structure", "XLSX is not a ZIP container")
+    metadata = _inspect_xlsx_container(data)
+    selected_sheets = _select_xlsx_sheets(selection, list(metadata.sheet_paths))
+    budget.enforce_sheets(len(selected_sheets))
     formulas, cached = _load_openpyxl(data)
     probe: XlsxCacheProbe | None = None
     try:
-        probe = XlsxCacheProbe(data)
-        sheet_names = list(formulas.sheetnames)
-        if selection.kind == "all":
-            selected_sheets = sheet_names
-        else:
-            selected_sheets = []
-            for atom in selection.ranges:
-                if isinstance(atom, SheetsRange):
-                    for name in atom.names:
-                        if name not in sheet_names:
-                            raise AttachmentParseError("invalid_selection", "sheet name does not exist in source")
-                        if name not in selected_sheets:
-                            selected_sheets.append(name)
-                else:
-                    assert isinstance(atom, RowsRange)
-                    if atom.sheet is None or atom.sheet not in sheet_names:
-                        raise AttachmentParseError("invalid_selection", "XLSX rows must name an existing sheet")
-                    if atom.sheet not in selected_sheets:
-                        selected_sheets.append(atom.sheet)
-        budget.enforce_sheets(len(selected_sheets))
+        probe = XlsxCacheProbe(data, metadata)
 
         blocks: list[str] = []
         limitations: list[dict[str, str]] = []

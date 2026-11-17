@@ -10,11 +10,14 @@ import hashlib
 import io
 import json
 import sys
+import tempfile
 import time
 import zipfile
 from typing import Any
 
 import pytest
+
+import services.agent_service.attachment_worker as attachment_worker
 
 from core.agent_types import (
     AllAtom,
@@ -268,7 +271,10 @@ _SHEET2 = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet {_NS}><sheetData><row r="1"><c r="A1"><v>9</v></c></row></sheetData></worksheet>"""
 
 
-def _xlsx_bytes(*, sheets: int = 1, date1904: bool = True) -> bytes:
+_SHARED_STRINGS = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst {_NS}><si><t>shared</t></si></sst>'
+
+
+def _xlsx_bytes(*, sheets: int = 1, date1904: bool = True, shared_strings: str | None = None) -> bytes:
     sheet_entries = "".join(
         f'<sheet name="S{index}" sheetId="{index}" r:id="rId{index}"/>' for index in range(1, sheets + 1)
     )
@@ -282,15 +288,43 @@ def _xlsx_bytes(*, sheets: int = 1, date1904: bool = True) -> bytes:
     )
     workbook_rels = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships {_REL_NS}>{rels}</Relationships>"""
+    content_types = _CONTENT_TYPES
+    if shared_strings is not None:
+        content_types = _CONTENT_TYPES.replace(
+            "</Types>",
+            '<Override PartName="/xl/sharedStrings.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
+            "</Types>",
+        )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        archive.writestr("[Content_Types].xml", content_types)
         archive.writestr("_rels/.rels", _ROOT_RELS)
         archive.writestr("xl/workbook.xml", workbook)
         archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
         archive.writestr("xl/worksheets/sheet1.xml", _SHEET1)
         if sheets > 1:
             archive.writestr("xl/worksheets/sheet2.xml", _SHEET2)
+        if shared_strings is not None:
+            archive.writestr("xl/sharedStrings.xml", shared_strings)
+    return buffer.getvalue()
+
+
+def _rewrite_xlsx(
+    data: bytes,
+    *,
+    drop: frozenset[str] = frozenset(),
+    replace: dict[str, bytes] | None = None,
+) -> bytes:
+    """按条目改写容器（用于构造缺失/损坏/异常结构的最小样本）。"""
+
+    replacements = replace or {}
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            if info.filename in drop:
+                continue
+            target.writestr(info, replacements.get(info.filename, source.read(info)))
     return buffer.getvalue()
 
 
@@ -438,6 +472,109 @@ class TestXlsxExtraction:
         with pytest.raises(AttachmentParseError) as exc:
             _parse_expired(AttachmentKind.XLSX, _xlsx_bytes())
         assert exc.value.code == "attachment_time_exceeded"
+
+
+# ---------------------------------------------------------------------------
+# XLSX 容器前置预算与结构门（I08）
+# ---------------------------------------------------------------------------
+
+
+def _assert_rejected_before_load(
+    monkeypatch: pytest.MonkeyPatch,
+    data: bytes,
+    *,
+    selection: Selection | None = None,
+    code: str = "invalid_structure",
+) -> None:
+    """断言拒绝发生在 openpyxl 分配/展开之前（加载函数一次都未被调用）。"""
+
+    calls: list[bytes] = []
+
+    def _forbidden(payload: bytes) -> tuple[Any, Any]:
+        calls.append(payload)
+        raise AssertionError("openpyxl load must not run before the XLSX preflight gate")
+
+    monkeypatch.setattr(attachment_worker, "_load_openpyxl", _forbidden)
+    with pytest.raises(AttachmentParseError) as exc:
+        _parse(AttachmentKind.XLSX, data, selection)
+    assert exc.value.code == code
+    assert calls == []
+
+
+class TestXlsxPreflightBudget:
+    def test_entry_count_limit_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(attachment_worker, "MAX_XLSX_ENTRIES", 3)
+        _assert_rejected_before_load(monkeypatch, _xlsx_bytes())
+
+    def test_total_expanded_limit_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(attachment_worker, "MAX_XLSX_TOTAL_BYTES", 64)
+        _assert_rejected_before_load(monkeypatch, _xlsx_bytes())
+
+    def test_single_entry_limit_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(attachment_worker, "MAX_XLSX_ENTRY_BYTES", 100)
+        _assert_rejected_before_load(monkeypatch, _xlsx_bytes())
+
+    def test_malicious_shared_strings_size_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(attachment_worker, "MAX_XLSX_SHARED_STRINGS_BYTES", 8)
+        data = _xlsx_bytes(shared_strings=_SHARED_STRINGS + " " * 64)
+        _assert_rejected_before_load(monkeypatch, data)
+
+    def test_missing_workbook_metadata_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _rewrite_xlsx(_xlsx_bytes(), drop=frozenset({"xl/_rels/workbook.xml.rels"}))
+        _assert_rejected_before_load(monkeypatch, data)
+
+    def test_unreadable_workbook_metadata_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _rewrite_xlsx(_xlsx_bytes(), replace={"xl/workbook.xml": b"<not-xml"})
+        _assert_rejected_before_load(monkeypatch, data)
+
+    def test_duplicate_case_variant_entry_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _rewrite_xlsx(_xlsx_bytes())
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                target.writestr(info, source.read(info))
+            target.writestr("XL/WORKBOOK.XML", b"<workbook/>")
+        _assert_rejected_before_load(monkeypatch, buffer.getvalue())
+
+    def test_symlink_entry_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _rewrite_xlsx(_xlsx_bytes())
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                target.writestr(info, source.read(info))
+            link = zipfile.ZipInfo("xl/link.xml")
+            link.external_attr = 0o120777 << 16
+            target.writestr(link, "xl/workbook.xml")
+        _assert_rejected_before_load(monkeypatch, buffer.getvalue())
+
+    def test_unknown_sheet_rejected_before_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        selection = Selection(kind="limited", ranges=(SheetsRange(kind="sheets", names=("Nope",)),))
+        _assert_rejected_before_load(monkeypatch, _xlsx_bytes(), selection=selection, code="invalid_selection")
+
+    def test_preflight_rejection_leaves_no_temp_files(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        monkeypatch.setattr(attachment_worker, "MAX_XLSX_ENTRIES", 3)
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, _xlsx_bytes())
+        assert exc.value.code == "invalid_structure"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_shared_strings_parsed_once_for_both_views(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from openpyxl.reader import excel as openpyxl_excel
+
+        calls: list[int] = []
+        # openpyxl 在 excel 模块内以模块级名字引用该函数；经模块字典取原实现避免私有属性告警。
+        original = vars(openpyxl_excel)["read_string_table"]
+
+        def _counting(xml_source: Any) -> Any:
+            calls.append(1)
+            return original(xml_source)
+
+        monkeypatch.setattr(openpyxl_excel, "read_string_table", _counting)
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes(shared_strings=_SHARED_STRINGS))
+        assert parsed.read_state is ReadState.READY
+        assert parsed.stats["rows"] == 3
+        assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
