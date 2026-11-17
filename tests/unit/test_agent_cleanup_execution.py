@@ -2,10 +2,13 @@
 
 覆盖：确认→预检→删除→tombstone→verified 顺序与参数；缺失原生目标不删除；
 逐域非 0 进入 retry_pending；tombstone 失败保留原集合并提取 SQLSTATE；
-已 verified 零副作用；retry_pending 复用原集合；空原生集合按九域可核零验证。
+已 verified 零副作用；retry_pending 复用原集合；空原生集合按九域可核零验证；
+副作用前落删除尝试阶段、取消/崩溃后沿原 job 收尾（M14）。
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
@@ -83,13 +86,27 @@ class _Dao:
     def __init__(
         self,
         *,
-        tombstone_error: Exception | None = None,
+        tombstone_error: BaseException | None = None,
         fail_categories: frozenset[str] = frozenset(),
+        verified_crash: BaseException | None = None,
+        fail_stages: frozenset[str] = frozenset(),
     ) -> None:
         self.phases: list[dict[str, object]] = []
+        self.stages: list[dict[str, object]] = []
         self.tombstones: list[tuple[str, tuple[str, ...], tuple[tuple[str, str], ...]]] = []
         self._tombstone_error = tombstone_error
         self._fail_categories = fail_categories
+        self._verified_crash = verified_crash
+        self._fail_stages = fail_stages
+
+    async def save_cleanup_attempt_stage(self, user_scope: str, cleanup_job_id: str, *, stage: str) -> None:
+        if stage in self._fail_stages:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"attempt stage write rejected: {stage}",
+                f"{user_scope}/{cleanup_job_id}",
+            )
+        self.stages.append({"user_scope": user_scope, "cleanup_job_id": cleanup_job_id, "stage": stage})
 
     async def save_cleanup_phase(
         self,
@@ -108,6 +125,8 @@ class _Dao:
                 f"phase write rejected: {error_category}",
                 f"{user_scope}/{cleanup_job_id}",
             )
+        if phase is CleanupPhase.VERIFIED and self._verified_crash is not None:
+            raise self._verified_crash
         self.phases.append(
             {
                 "user_scope": user_scope,
@@ -439,6 +458,7 @@ class TestCleanupExecutionReplays:
         assert receipt.phase is CleanupPhase.VERIFIED
         assert executor.calls == []
         assert dao.phases == []
+        assert dao.stages == []
         assert dao.tombstones == []
 
     @pytest.mark.asyncio
@@ -451,3 +471,113 @@ class TestCleanupExecutionReplays:
         assert [call[1] for call in executor.calls] == [("wf-a", "wf-b"), ("wf-a", "wf-b")]
         assert dao.tombstones[0][1:] == (("session-1", "session-2"), (("asset-a", "1"), ("asset-b", "2")))
         assert receipt.phase is CleanupPhase.VERIFIED
+
+
+class TestCleanupAttemptStageResume:
+    """M14：副作用前落准确尝试阶段，取消/崩溃后沿原 job 收尾，首次缺失仍拒。"""
+
+    @pytest.mark.asyncio
+    async def test_stage_write_precedes_delete(self) -> None:
+        """删除副作用前必须已落阶段；阶段写不进去则一行都不删。"""
+
+        record = _record()
+        dao = _Dao(fail_stages=frozenset({"cleanup_native_delete_started"}))
+        service, _, _, executor = _service(record, dao=dao)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "cleanup_native_delete_started" in str(exc.value)
+        assert [call[0] for call in executor.calls] == ["preflight"]
+        assert dao.stages == []
+        assert dao.tombstones == []
+
+    @pytest.mark.asyncio
+    async def test_stage_write_precedes_tombstone(self) -> None:
+        """原生两域删净后先落「待 tombstone」阶段；阶段写不进去则不做应用域改写。"""
+
+        record = _record()
+        dao = _Dao(fail_stages=frozenset({"cleanup_native_deleted_tombstone_pending"}))
+        service, _, _, executor = _service(record, dao=dao)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "cleanup_native_deleted_tombstone_pending" in str(exc.value)
+        assert [call[0] for call in executor.calls] == ["preflight", "delete"]
+        assert [entry["stage"] for entry in dao.stages] == ["cleanup_native_delete_started"]
+        assert dao.tombstones == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_between_delete_and_tombstone_resumes_original_job(self) -> None:
+        """删除完成→tombstone 之间取消：取消不被吞没，重试据阶段续跑至 verified。"""
+
+        record = _record()
+        dao = _Dao(tombstone_error=asyncio.CancelledError("cancel-after-delete"))
+        service, _, _, _ = _service(record, dao=dao)
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert str(exc.value) == "cancel-after-delete"
+        assert dao.phases == []
+        assert [entry["stage"] for entry in dao.stages] == [
+            "cleanup_native_delete_started",
+            "cleanup_native_deleted_tombstone_pending",
+        ]
+        retry = _record(
+            phase=CleanupPhase.PREPARED,
+            fence_committed=True,
+            prior_error_category=str(dao.stages[-1]["stage"]),
+        )
+        service2, _, dao2, executor2 = _service(retry, executor=_Executor(missing=("wf-a",)))
+
+        receipt = await service2.confirm_and_execute(_command(retry), _precondition())
+
+        assert receipt.phase is CleanupPhase.VERIFIED
+        assert [call[0] for call in executor2.calls] == ["preflight", "delete"]
+        assert dao2.tombstones[0][0] == "owner-1"
+
+    @pytest.mark.asyncio
+    async def test_crash_between_tombstone_and_verified_resumes(self) -> None:
+        """tombstone 完成→verified 之间硬崩：阶段仍在，重试可续并完成 verified。"""
+
+        record = _record()
+        dao = _Dao(verified_crash=asyncio.CancelledError("cancel-after-tombstone"))
+        service, _, _, _ = _service(record, dao=dao)
+
+        with pytest.raises(asyncio.CancelledError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert str(exc.value) == "cancel-after-tombstone"
+        assert dao.tombstones[0][0] == "owner-1"
+        assert dao.phases == []
+        retry = _record(
+            phase=CleanupPhase.PREPARED,
+            fence_committed=True,
+            prior_error_category="cleanup_native_deleted_tombstone_pending",
+        )
+        service2, _, dao2, _ = _service(retry, executor=_Executor(missing=("wf-a", "wf-b")))
+
+        receipt = await service2.confirm_and_execute(_command(retry), _precondition())
+
+        assert receipt.phase is CleanupPhase.VERIFIED
+        assert dao2.phases[-1]["phase"] is CleanupPhase.VERIFIED
+
+    @pytest.mark.asyncio
+    async def test_first_missing_with_fence_still_refuses(self) -> None:
+        """真首次缺失（无任何尝试阶段）即使 fence 已提交也拒绝，且不落阶段。"""
+
+        record = _record(phase=CleanupPhase.PREPARED, fence_committed=True)
+        dao = _Dao()
+        service, _, _, executor = _service(record, dao=dao, executor=_Executor(missing=("wf-a",)))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await service.confirm_and_execute(_command(record), _precondition())
+
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert [call[0] for call in executor.calls] == ["preflight"]
+        assert dao.stages == []
+        assert dao.phases[0]["error_category"] == "native_target_missing"
