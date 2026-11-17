@@ -91,6 +91,10 @@ DEFAULT_VERIFY_TIMEOUT = 10.0
 DEFAULT_LOCAL_MAX_TOKENS = 256
 # 错误消息截断长度
 ERROR_MESSAGE_TRUNCATE_LEN = 100
+# M17：真流收尾关流的最短宽限（秒）。deadline 已耗尽时若按剩余预算（≤0）关流，
+# 关闭动作会被立即取消（真实流漏关）；无界宽限则收尾可无限挂起。该宽限只作用于
+# 关流阶段，不延长任何读取 / 背压 / on_event 预算。
+_STREAM_CLOSE_GRACE_S: Final[float] = 1.0
 
 # R16: LiteLLM 是重库（首次 import 可达 18s+），改为惰性加载，避免 import ai_service
 # 时同步阻塞 UI 主循环。模块级符号 (litellm/acompletion/LITELLM_AVAILABLE) 保留以兼容
@@ -166,6 +170,39 @@ async def _audit_egress_outcome(
         raise  # R2: 必须传播
     except Exception:
         pass  # 审计失败不阻断 AI 主流程
+
+
+async def _close_chat_stream(stream: Any, deadline: float) -> None:
+    """关闭真实流并做有界收尾（M17）：预算耗尽 / 取消 / 异常路径均不得漏关。
+
+    - 优先异步 ``aclose``（LiteLLM ``CustomStreamWrapper`` 实现且幂等），回落同步
+      ``close``；没有关闭接口时直接返回；
+    - 关闭等待受同一绝对预算的剩余量约束，预算已耗尽时取 ``_STREAM_CLOSE_GRACE_S``
+      最短宽限——零宽限会漏关，无界宽限会挂死收尾；
+    - 关闭失败只降级为 warning（R9 脱敏），不改变主流程结果；
+    - ``asyncio.CancelledError`` 始终传播（R2）。
+    """
+    if stream is None:
+        return
+
+    import services.ai_service as _ai
+
+    close_budget = max(deadline - asyncio.get_running_loop().time(), _STREAM_CLOSE_GRACE_S)
+    try:
+        closer = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+        if not callable(closer):
+            return
+        outcome = closer()
+        if isawaitable(outcome):
+            await asyncio.wait_for(outcome, timeout=close_budget)
+    except asyncio.CancelledError:
+        raise  # R2: 必须传播
+    except Exception as close_err:
+        logger.warning(
+            "[AIService] ChatTurn | Failed to close provider stream within %.2fs: %s",
+            close_budget,
+            _ai.DataSanitizer.sanitize_error(close_err),
+        )
 
 
 def normalize_litellm_usage(usage: Any) -> NormalizedLLMUsage | None:
@@ -1340,7 +1377,9 @@ class LiteLLMClient:
             ValueError: adapter_kind 非 litellm_chat / credential 租约失配（F06）/
                 frozen_params 键非法或占用保留键 / 跨部署 fallback 或部署级
                 auto_router 命中（M17，零出站拒绝）。
-            TimeoutError: dispatch 前 deadline 已耗尽（含凭据解析后复查）。
+            TimeoutError: dispatch 前 deadline 已耗尽（含凭据解析后复查）；或流消费
+                期间同一绝对预算耗尽（读取 / on_event 背压 / 关流任一阶段）——真实
+                流已关闭，usage 不伪造、由上层按 unknown 结算（M17，R21）。
             RuntimeError: litellm 不可用。
         """
         request.ensure_valid()
@@ -1479,7 +1518,7 @@ class LiteLLMClient:
                     api_version=api_version,
                 ) as strict_guard:
                     if stream:
-                        chat_response = await self._consume_chat_stream(request_params, on_event)
+                        chat_response = await self._consume_chat_stream(request_params, on_event, deadline)
                     else:
                         chat_response = _interpret_chat_response(await _ai.acompletion(**request_params))
         except asyncio.CancelledError:
@@ -1504,16 +1543,25 @@ class LiteLLMClient:
         self,
         request_params: dict,
         on_event: ChatStreamEventHandler | None,
+        deadline: float,
     ) -> ChatTurnResponse:
         """消费真流 chunk（§6.4）：真实 delta 逐事件产出，finish/usage 分步确认。
 
         聚合状态按 choice/tool index 与稳定 call_id 承载；``tool_call_closed`` 仅在
         累积分片闭合且校验通过后产出；流耗尽而无结束标记即协议失败。本方法只在
         ``invoke_chat_connection`` 的审计 try 块内被调用（取消/失败审计由其承载）。
+
+        M17（同一绝对预算）：``deadline``（loop.time() 口径的单调截止值）环绕本次
+        流的全部阶段——建立流、逐 chunk 读取、``on_event`` 等待（有界通道背压）与
+        收尾关流；任一阶段耗尽即关闭真实流并抛 ``TimeoutError``，不无限挂起、不
+        漏关。费用不伪造：超时不产出 usage，由上层按 unknown 结算（R21）。LiteLLM
+        的可选最大流时长（``LITELLM_MAX_STREAMING_DURATION_SECONDS``，默认 None）
+        仅在 chunk 到达时检查，不消费本应用单调 deadline，不能替代本预算。
         """
 
         import services.ai_service as _ai
 
+        loop = asyncio.get_running_loop()
         sequence = 0
         calls: dict[int, dict] = {}
         text_parts: list[str] = []
@@ -1528,92 +1576,116 @@ class LiteLLMClient:
                 if isawaitable(outcome):
                     await outcome
 
-        stream_response = await _ai.acompletion(**request_params)
-        async for chunk in stream_response:
-            usage_raw = getattr(chunk, "usage", None)
-            if usage_raw is not None:
-                usage = normalize_litellm_usage(usage_raw) or usage
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue  # usage 终块（choices 为空）仅承载 usage
-            choice = choices[0]  # 本链恒 n=1；多 choice 非聊天回合出口契约
-            delta = getattr(choice, "delta", None)
-            if delta is not None:
-                content = getattr(delta, "content", None)
-                if isinstance(content, str) and content:
-                    text_parts.append(content)
-                    sequence += 1
-                    await _emit(ChatStreamEvent(sequence=sequence, kind="text", text_delta=content))
-                refusal_delta = getattr(delta, "refusal", None)
-                if isinstance(refusal_delta, str) and refusal_delta:
-                    refusal_parts.append(refusal_delta)
-                for tc in getattr(delta, "tool_calls", None) or []:
-                    index = int(tc.index)
-                    state = calls.setdefault(index, {"call_id": None, "name": "", "fragments": []})
-                    tc_id = getattr(tc, "id", None)
-                    if tc_id:
-                        state["call_id"] = tc_id
-                    function = getattr(tc, "function", None)
-                    name_part = getattr(function, "name", None) if function is not None else None
-                    if name_part:
-                        state["name"] += name_part
-                    fragment = getattr(function, "arguments", None) if function is not None else None
-                    if fragment:
-                        state["fragments"].append(fragment)
-                        # 稳定 call_id 聚合：id/name 已知才产出 delta 事件（leading
-                        # 分片缺 id 时静默累积，闭合处强制核验）
-                        if state["call_id"] and state["name"]:
+        stream_response: Any = None
+        deadline_guard = asyncio.timeout_at(deadline)
+        try:
+            async with deadline_guard:
+                stream_response = await _ai.acompletion(**request_params)
+                iterator = stream_response.__aiter__()
+                while True:
+                    # 持续小片下迭代可能长时间不产生等待点（事件循环得不到空转机会），
+                    # 逐分片显式核对同一绝对预算，避免超时回调永远得不到执行。
+                    if loop.time() >= deadline:
+                        raise TimeoutError("Chat stream deadline exhausted.")
+                    try:
+                        chunk = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    usage_raw = getattr(chunk, "usage", None)
+                    if usage_raw is not None:
+                        usage = normalize_litellm_usage(usage_raw) or usage
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue  # usage 终块（choices 为空）仅承载 usage
+                    choice = choices[0]  # 本链恒 n=1；多 choice 非聊天回合出口契约
+                    delta = getattr(choice, "delta", None)
+                    if delta is not None:
+                        content = getattr(delta, "content", None)
+                        if isinstance(content, str) and content:
+                            text_parts.append(content)
+                            sequence += 1
+                            await _emit(ChatStreamEvent(sequence=sequence, kind="text", text_delta=content))
+                        refusal_delta = getattr(delta, "refusal", None)
+                        if isinstance(refusal_delta, str) and refusal_delta:
+                            refusal_parts.append(refusal_delta)
+                        for tc in getattr(delta, "tool_calls", None) or []:
+                            index = int(tc.index)
+                            state = calls.setdefault(index, {"call_id": None, "name": "", "fragments": []})
+                            tc_id = getattr(tc, "id", None)
+                            if tc_id:
+                                state["call_id"] = tc_id
+                            function = getattr(tc, "function", None)
+                            name_part = getattr(function, "name", None) if function is not None else None
+                            if name_part:
+                                state["name"] += name_part
+                            fragment = getattr(function, "arguments", None) if function is not None else None
+                            if fragment:
+                                state["fragments"].append(fragment)
+                                # 稳定 call_id 聚合：id/name 已知才产出 delta 事件（leading
+                                # 分片缺 id 时静默累积，闭合处强制核验）
+                                if state["call_id"] and state["name"]:
+                                    sequence += 1
+                                    await _emit(
+                                        ChatStreamEvent(
+                                            sequence=sequence,
+                                            kind="tool_call_delta",
+                                            call_index=index,
+                                            call_id=state["call_id"],
+                                            name=state["name"],
+                                            arguments_fragment=fragment,
+                                        )
+                                    )
+                    finish_raw = getattr(choice, "finish_reason", None)
+                    if finish_raw is not None and finish_buffered is None:
+                        finish_buffered = finish_raw
+                        # 闭合事件：按 index 序派发，参数闭合且校验通过才产出（§6.4-2）
+                        for call_index in sorted(calls):
+                            state = calls[call_index]
+                            if not state["call_id"] or not state["name"]:
+                                raise ModelTurnProtocolError("invalid_field", f"$.stream.tool_calls[{call_index}]")
+                            closed_json = "".join(state["fragments"])
+                            validate_closed_tool_arguments(closed_json)
                             sequence += 1
                             await _emit(
                                 ChatStreamEvent(
                                     sequence=sequence,
-                                    kind="tool_call_delta",
-                                    call_index=index,
+                                    kind="tool_call_closed",
+                                    call_index=call_index,
                                     call_id=state["call_id"],
                                     name=state["name"],
-                                    arguments_fragment=fragment,
+                                    closed_arguments_json=closed_json,
                                 )
                             )
-            finish_raw = getattr(choice, "finish_reason", None)
-            if finish_raw is not None and finish_buffered is None:
-                finish_buffered = finish_raw
-                # 闭合事件：按 index 序派发，参数闭合且校验通过才产出（§6.4-2）
-                for call_index in sorted(calls):
-                    state = calls[call_index]
-                    if not state["call_id"] or not state["name"]:
-                        raise ModelTurnProtocolError("invalid_field", f"$.stream.tool_calls[{call_index}]")
-                    closed_json = "".join(state["fragments"])
-                    validate_closed_tool_arguments(closed_json)
-                    sequence += 1
-                    await _emit(
-                        ChatStreamEvent(
-                            sequence=sequence,
-                            kind="tool_call_closed",
-                            call_index=call_index,
-                            call_id=state["call_id"],
-                            name=state["name"],
-                            closed_arguments_json=closed_json,
-                        )
+
+                # 断流：缺结束标记不得因迭代耗尽而成功（§6.4-4）
+                if finish_buffered is None:
+                    raise ModelTurnProtocolError("missing_finish", "$.stream")
+                finish_reason = _map_chat_finish_reason(finish_buffered)
+                refusal_text = "".join(refusal_parts)
+                if finish_reason == "refused" and not refusal_text:
+                    refusal_text = "content_filter"  # provider 信号原文，ensure_valid 要求非空
+
+                tool_calls = tuple(
+                    AssistantToolCall(
+                        call_id=calls[index]["call_id"],
+                        name=calls[index]["name"],
+                        arguments_json="".join(calls[index]["fragments"]),
                     )
-
-        # 断流：缺结束标记不得因迭代耗尽而成功（§6.4-4）
-        if finish_buffered is None:
-            raise ModelTurnProtocolError("missing_finish", "$.stream")
-        finish_reason = _map_chat_finish_reason(finish_buffered)
-        refusal_text = "".join(refusal_parts)
-        if finish_reason == "refused" and not refusal_text:
-            refusal_text = "content_filter"  # provider 信号原文，ensure_valid 要求非空
-
-        tool_calls = tuple(
-            AssistantToolCall(
-                call_id=calls[index]["call_id"],
-                name=calls[index]["name"],
-                arguments_json="".join(calls[index]["fragments"]),
-            )
-            for index in sorted(calls)
-        )
-        sequence += 1
-        await _emit(ChatStreamEvent(sequence=sequence, kind="finish", finish_reason=finish_reason, usage=usage))
+                    for index in sorted(calls)
+                )
+                sequence += 1
+                await _emit(ChatStreamEvent(sequence=sequence, kind="finish", finish_reason=finish_reason, usage=usage))
+        except TimeoutError:
+            # 仅本预算耗尽才改写成流收尾语义；provider 自身 TimeoutError 原样传播
+            # （两条路径都会经 finally 关闭真实流，不得漏关）。
+            if not deadline_guard.expired() and loop.time() < deadline:
+                raise
+            raise TimeoutError(
+                f"Chat stream deadline exhausted after {sequence} event(s); "
+                "stream closed and usage left unknown (no usage fabricated)."
+            ) from None
+        finally:
+            await _close_chat_stream(stream_response, deadline)
 
         chat_response = ChatTurnResponse(
             text="".join(text_parts) if text_parts else None,

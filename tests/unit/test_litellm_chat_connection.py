@@ -186,6 +186,36 @@ def _events_from(on_event_calls: list[ChatStreamEvent]) -> Any:
     return _on_event
 
 
+class _TrackedStream:
+    """可计数关闭的真流替身（M17）：逐 chunk 产出，``aclose`` 次数可断言。
+
+    不用 async generator 是因为其 ``aclose`` 可能被解释器终结器再次触发，无法
+    证明「恰一次显式关闭」；用显式异步迭代器把关闭责任只留在被测代码。
+    """
+
+    def __init__(self, chunks: list[Any], *, chunk_delay: float = 0.0) -> None:
+        self._chunks = list(chunks)
+        self._chunk_delay = chunk_delay
+        self._index = 0
+        self.close_calls = 0
+        self.model = "gpt-4o-mini-2024"
+
+    def __aiter__(self) -> _TrackedStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        if self._index >= len(self._chunks):
+            raise StopAsyncIteration
+        chunk = self._chunks[self._index]
+        self._index += 1
+        if self._chunk_delay:
+            await asyncio.sleep(self._chunk_delay)
+        return chunk
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
 # ---------------------------------------------------------------------------
 # 非流式：出口映射 + 响应组装
 # ---------------------------------------------------------------------------
@@ -550,6 +580,111 @@ class TestInvokeChatConnectionStream:
                 )
         assert excinfo.type is asyncio.CancelledError
         assert audit.await_args.kwargs["status"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# M17：同一绝对 deadline 环绕读取 / 背压 / on_event / 关流
+# ---------------------------------------------------------------------------
+class TestInvokeChatConnectionStreamDeadline:
+    async def test_continuous_small_chunks_bounded_by_same_absolute_budget(self):
+        """持续小片：逐片检查同一绝对预算，超时收尾并关闭真实流（恰一次）。"""
+
+        request = _chat_request(deadline=asyncio.get_running_loop().time() + 0.5)
+        stream = _TrackedStream([_text_delta("片")] * 200, chunk_delay=0.01)
+        events: list[ChatStreamEvent] = []
+        audit = AsyncMock()
+        with (
+            patch("services.ai_service.acompletion", AsyncMock(return_value=stream)),
+            patch("services.ai_service.litellm_client._audit_egress_outcome", audit),
+        ):
+            with pytest.raises(TimeoutError, match="usage left unknown"):
+                await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                    request,
+                    _connection(),
+                    request.deadline,
+                    _attempt_context(),
+                    stream=True,
+                    on_event=_events_from(events),
+                )
+        assert stream.close_calls == 1
+        # 费用不伪造（R21）：超时不产出 finish，也不回填任何 usage
+        assert all(e.kind != "finish" for e in events)
+        assert all(e.usage is None for e in events)
+        assert audit.await_args.kwargs["status"] == "failed"
+        assert audit.await_args.kwargs["error_category"] == "timeout"
+
+    async def test_slow_on_event_handler_bounded_by_same_absolute_budget(self):
+        """慢 on_event：处理等待同受绝对预算约束，超时收尾并关闭真实流。"""
+
+        request = _chat_request(deadline=asyncio.get_running_loop().time() + 0.5)
+        stream = _TrackedStream([_text_delta("慢")])
+        events: list[ChatStreamEvent] = []
+
+        async def _slow_handler(event: ChatStreamEvent) -> None:
+            events.append(event)
+            await asyncio.sleep(1.0)
+
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=stream)):
+            with pytest.raises(TimeoutError, match="usage left unknown"):
+                await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                    request,
+                    _connection(),
+                    request.deadline,
+                    _attempt_context(),
+                    stream=True,
+                    on_event=_slow_handler,
+                )
+        assert stream.close_calls == 1
+        assert [e.kind for e in events] == ["text"]
+
+    async def test_full_channel_backpressure_bounded_by_same_absolute_budget(self):
+        """通道满：on_event await 永不返回也不得无限挂起，超时收尾并关流。"""
+
+        request = _chat_request(deadline=asyncio.get_running_loop().time() + 0.5)
+        stream = _TrackedStream([_text_delta("满")])
+        events: list[ChatStreamEvent] = []
+        never_set = asyncio.Event()
+
+        async def _blocked_handler(event: ChatStreamEvent) -> None:
+            events.append(event)
+            await never_set.wait()  # 有界通道满：生产侧 put 阻塞
+
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=stream)):
+            with pytest.raises(TimeoutError, match="usage left unknown"):
+                await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                    request,
+                    _connection(),
+                    request.deadline,
+                    _attempt_context(),
+                    stream=True,
+                    on_event=_blocked_handler,
+                )
+        assert stream.close_calls == 1
+        assert [e.kind for e in events] == ["text"]
+
+    async def test_normal_stream_closes_once_and_keeps_usage(self):
+        """正常路径不改变：完整流返回成功响应，真实流仍收尾关闭恰一次。"""
+
+        request = _chat_request()
+        chunks = [
+            _text_delta("好"),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=None, refusal=None, tool_calls=None), finish_reason="stop"
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+        stream = _TrackedStream(chunks)
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=stream)):
+            result = await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=True
+            )
+        assert result.finish_reason == "final"
+        assert result.text == "好"
+        assert stream.close_calls == 1
 
 
 # ---------------------------------------------------------------------------
