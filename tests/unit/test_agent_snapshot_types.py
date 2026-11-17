@@ -275,7 +275,7 @@ def _source_read_wire(**over: Any) -> dict[str, Any]:
         "link_id": "link_l1",
         "source_id": "source_s1",
         "source_version": "v1",
-        "source_kind": "source",
+        "source_kind": "user_message",
         "display_name": "daily_quotes.csv",
         "digest": "e" * 64,
         "read_state": "ready",
@@ -831,6 +831,13 @@ def test_source_read_summary_decode_roundtrip() -> None:
 
 def test_source_read_summary_value_guards() -> None:
     _reject(decode_source_read_summary, _source_read_wire(source_kind="file"), "invalid_source_kind", "$.source_kind")
+    # asset_kind 的 "source" 不是 SourceKind，禁止冒充通用来源（检视 D30）。
+    _reject(decode_source_read_summary, _source_read_wire(source_kind="source"), "invalid_source_kind", "$.source_kind")
+    assert decode_source_read_summary(_source_read_wire(source_kind="business_snapshot"), "$").source_kind == (
+        "business_snapshot"
+    )
+    # 已清理资产的类别不可知：显式 None（R21），不猜默认值
+    assert decode_source_read_summary(_source_read_wire(source_kind=None), "$").source_kind is None
     _reject(decode_source_read_summary, _source_read_wire(read_state="done"), "invalid_read_state", "$.read_state")
     _reject(
         decode_source_read_summary,

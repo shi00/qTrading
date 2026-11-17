@@ -158,6 +158,7 @@ from core.agent_types import (
     SourceClaimRequest,
     SourceConsumerRef,
     SourceConsumersPage,
+    SourceKind,
     SourceRead,
     SourceReadQuery,
     SourceReadSummary,
@@ -4145,7 +4146,12 @@ class AgentDao(BaseDao):
             ) from exc
 
     def _source_read_summary_from_row(self, row: Any, identity_str: str) -> SourceReadSummary:
-        """agent_source_link join agent_asset_version 行 → SourceReadSummary。"""
+        """agent_source_link join agent_asset_version 行 → SourceReadSummary。
+
+        来源类别只从资产元数据显式事实派生（``source_ref.source_kind`` 优先，
+        ``user_message_origin`` 次之），缺失即 ``OPERATION_UNKNOWN``；不回落
+        ``asset_kind``（恒 ``source``，会把真实类别伪装成通用来源，R21，检视 D30）。
+        """
 
         try:
             return decode_source_read_summary(
@@ -4153,7 +4159,9 @@ class AgentDao(BaseDao):
                     "link_id": row.link_id,
                     "source_id": row.source_id,
                     "source_version": row.source_version,
-                    "source_kind": row.asset_kind,
+                    "source_kind": self._source_kind_from_metadata(
+                        row.metadata_payload, tombstoned=bool(row.tombstoned), identity_str=identity_str
+                    ),
                     "display_name": row.display_name,
                     "digest": row.digest,
                     "read_state": row.read_state,
@@ -4177,6 +4185,35 @@ class AgentDao(BaseDao):
                 identity_str,
             ) from exc
 
+    @staticmethod
+    def _source_kind_from_metadata(metadata: object, *, tombstoned: bool, identity_str: str) -> str | None:
+        """资产元数据 → 来源类别（严格；无显式事实即拒绝，不猜默认值）。
+
+        已清理（``tombstoned``）资产的元数据按 §10.7 被删除，类别不可知，
+        以 ``None`` 显式表示未知（R21），保持清理后的历史快照仍可读取。
+        """
+
+        if isinstance(metadata, dict):
+            source_ref = metadata.get("source_ref")
+            if isinstance(source_ref, dict):
+                try:
+                    return decode_source_ref(source_ref, "$.metadata.source_ref").source_kind.value
+                except (AgentValidationError, ValueError) as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        f"source metadata source_kind is invalid: {type(exc).__name__}",
+                        identity_str,
+                    ) from exc
+            if isinstance(metadata.get("user_message_origin"), dict):
+                return SourceKind.USER_MESSAGE.value
+        if tombstoned:
+            return None
+        raise AgentServiceError(
+            AgentErrorCode.OPERATION_UNKNOWN,
+            "source kind cannot be derived from asset metadata",
+            identity_str,
+        )
+
     def _read_mark_entry_from_row(self, row: Any, identity_str: str) -> ReadMarkEntry:
         try:
             return decode_read_mark_entry(
@@ -4198,6 +4235,42 @@ class AgentDao(BaseDao):
                 identity_str,
             ) from exc
 
+    async def _authoritative_input_command(
+        self, conn: AsyncConnection, *, user_scope: str, execution_id: str, identity: str
+    ) -> tuple[int, Any]:
+        """该 execution 的权威输入版与冻结 manifest（受理/修订单 input_revision 最大者）。
+
+        与 ``bind_actual_input`` 的权威版口径一致；缺失即 ``OPERATION_UNKNOWN``
+        （受理必写 command，缺失说明事实不可读，不冒充无限制，R21，检视 D30）。
+        """
+
+        row = (
+            await conn.execute(
+                sa.select(AgentCommand.input_revision, AgentCommand.request_payload)
+                .where(
+                    AgentCommand.user_scope == user_scope,
+                    AgentCommand.execution_id == execution_id,
+                    AgentCommand.input_revision.is_not(None),
+                )
+                .order_by(
+                    AgentCommand.input_revision.desc(),
+                    AgentCommand.created_at.desc(),
+                    AgentCommand.command_record_id.desc(),
+                )
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "authoritative accepted manifest unavailable",
+                identity,
+            )
+        revision = _require_int_field(row.input_revision, "input_revision", identity, 1)
+        # 清理（§10.7）会清空 request_payload：冻结范围随之为 None（与清理后的
+        # round 行为一致），不把缺失读成「无限制」以外的伪造结构。
+        return revision, row.request_payload
+
     async def get_execution_snapshot(
         self,
         execution_id: str,
@@ -4213,13 +4286,16 @@ class AgentDao(BaseDao):
         - 受理校验：execution_id/user_scope 非空、limit 1..50、游标语法（复用
           validate_session_read_query 冻结合同）；execution 不在用户域 → INPUT_INVALID；
         - round 语义：round_id 指定则须属该 execution（错配 INPUT_INVALID）；
-          未指定时取 execution.current_round_id（queued 无 round → identity 全 None 组，
-          frozen_scope/actual_input None）；
+          未指定时取 execution.current_round_id；
+        - queued（无 round）语义：``frozen_scope`` 回落该 execution 权威受理/修订
+          命令的 manifest（input_revision 最大者，缺失 OPERATION_UNKNOWN）；
+          ``actual_input`` 保持 None（首次派发尚未发生，不伪造空对象，DD §4.3）；
         - 单事务 REPEATABLE READ 截点：identity（round↔workflow 耦合）/revision/
           双水位（execution.event_seq + session.event_seq）/execution 摘要 /一层
           叶子 nodes（parent_execution_id）/消息成果分页（session 域内按 execution
-          [+round] 过滤）/source_reads（source_link join asset_version）/decisions/
-          operation_summaries/usage（cost_state 恒 unknown，R21 不填 0）/read_marks/
+          [+round] 过滤）/source_reads（source_link join asset_version，按选定
+          输入版/轮次过滤）/decisions/operation_summaries（按 round 过滤）/
+          usage（cost_state 恒 unknown，R21 不填 0）/read_marks/
           observation.reliable=True（一致截点读出，不冒认可靠）；
         - limitations 恒空元组：本读取面未核定到条目 ≠「无限制」承诺（脱敏限制
           记录随来源/清理任务接入后扩展，工程裁决留痕）。
@@ -4299,6 +4375,22 @@ class AgentDao(BaseDao):
                             AgentErrorCode.INPUT_INVALID, "target round not in execution", identity_str
                         )
 
+                # queued（无 round）：frozen_scope 回落权威受理/修订 manifest；
+                # effective_input_revision 用于圈定本输入版源边（检视 D30）。
+                accepted_manifest: Any | None = None
+                effective_input_revision: int
+                if round_row is not None:
+                    effective_input_revision = _require_int_field(
+                        round_row.input_revision, "input_revision", identity_str, 1
+                    )
+                else:
+                    effective_input_revision, accepted_manifest = await self._authoritative_input_command(
+                        conn,
+                        user_scope=user_scope,
+                        execution_id=execution_id,
+                        identity=identity_str,
+                    )
+
                 try:
                     if round_row is not None:
                         identity = decode_snapshot_identity(
@@ -4368,8 +4460,23 @@ class AgentDao(BaseDao):
                     identity_str=identity_str,
                 )
 
-                # source_reads：本执行消费的来源边 join asset_version 元数据（§4.3）。
+                # source_reads：本执行选定输入版（有 round 时含该轮直接消费边）的
+                # 来源边 join asset_version 元数据（§4.3；不混入其它输入版，检视 D30）。
                 # Core 连接下统一显式列选择（实体选择行为不确定，见 C-03-1 教训）。
+                source_scope = [
+                    sa.and_(
+                        AgentSourceLink.consumer_kind == "execution",
+                        AgentSourceLink.consumer_id == execution_id,
+                        AgentSourceLink.consumer_version == str(effective_input_revision),
+                    )
+                ]
+                if round_row is not None:
+                    source_scope.append(
+                        sa.and_(
+                            AgentSourceLink.consumer_kind == "round",
+                            AgentSourceLink.consumer_id == round_row.round_id,
+                        )
+                    )
                 source_rows = (
                     await conn.execute(
                         sa.select(
@@ -4384,6 +4491,7 @@ class AgentDao(BaseDao):
                             AgentSourceLink.relation_kind,
                             AgentSourceLink.disabled_inherited,
                             AgentAssetVersion.asset_kind,
+                            AgentAssetVersion.metadata_payload,
                             AgentAssetVersion.display_name,
                             AgentAssetVersion.digest,
                             AgentAssetVersion.read_state,
@@ -4402,8 +4510,7 @@ class AgentDao(BaseDao):
                         )
                         .where(
                             AgentSourceLink.user_scope == user_scope,
-                            AgentSourceLink.consumer_kind == "execution",
-                            AgentSourceLink.consumer_id == execution_id,
+                            sa.or_(*source_scope),
                         )
                         .order_by(AgentSourceLink.link_id.asc())
                     )
@@ -4419,13 +4526,20 @@ class AgentDao(BaseDao):
                     identity_str=identity_str,
                 )
 
+                operation_conditions = [
+                    AgentOperation.user_scope == user_scope,
+                    AgentOperation.execution_id == execution_id,
+                ]
+                if round_row is not None:
+                    # 选定轮次快照只含该轮操作（不混入同执行其它轮，检视 D30）。
+                    operation_conditions.append(AgentOperation.round_id == round_row.round_id)
+                else:
+                    # 无 round（queued）只含未归轮的执行级操作，不混入既有轮次。
+                    operation_conditions.append(AgentOperation.round_id.is_(None))
                 operation_rows = (
                     await conn.execute(
                         sa.select(AgentOperation)
-                        .where(
-                            AgentOperation.user_scope == user_scope,
-                            AgentOperation.execution_id == execution_id,
-                        )
+                        .where(*operation_conditions)
                         .order_by(
                             AgentOperation.created_at.asc(),
                             AgentOperation.operation_id.asc(),
@@ -4462,7 +4576,7 @@ class AgentDao(BaseDao):
             nodes=nodes,
             frozen_scope=json_doc(round_row.frozen_manifest)
             if round_row is not None and round_row.frozen_manifest is not None
-            else None,
+            else (json_doc(accepted_manifest) if accepted_manifest is not None else None),
             actual_input=json_doc(round_row.actual_input)
             if round_row is not None and round_row.actual_input is not None
             else None,

@@ -8,8 +8,10 @@
   asset_version 元数据）/ decisions / operation_summaries / usage（cost_state
   恒 unknown）/ goal_coverage / read_marks / observation.reliable；
 - 行级严格解码 fail-closed OPERATION_UNKNOWN（R21）；
-- queued 执行无 round：identity 全 None 组，frozen_scope/actual_input None；
-- 目标 round 过滤：round 不属该 execution → INPUT_INVALID。
+- queued 执行无 round：identity 全 None 组，frozen_scope 回落受理 manifest、
+  actual_input None（未派发不伪造）、来源类别为 user_message；
+- 目标 round 过滤：round 不属该 execution → INPUT_INVALID；operations 与
+  source_reads 按该轮/输入版圈定，不混入其它轮。
 
 依赖 ``real_embedded_pg`` fixture（临时目录隔离，符合隔离本地验证授权）。
 """
@@ -27,19 +29,31 @@ from alembic import command
 from sqlalchemy import insert, text
 
 from core.agent_types import (
+    AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
+    BusinessSourceItem,
+    BusinessSourceRegistrationRequest,
     EventKind,
     MessageRole,
+    Mode,
+    Purpose,
+    ReadState,
     RecordEventRequest,
+    Selection,
+    SourceKind,
+    SourceLocator,
+    SourceRef,
+    SourceVersionRef,
+    VerificationState,
     decode_research_snapshot,
     json_doc,
+    stable_id,
     to_wire_dict,
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.models import (
     AgentArtifact,
-    AgentAssetVersion,
     AgentDecision,
     AgentExecution,
     AgentMessage,
@@ -47,7 +61,6 @@ from data.persistence.models import (
     AgentReadMark,
     AgentRound,
     AgentSession,
-    AgentSourceLink,
 )
 from tests._helpers import create_test_engine, make_alembic_cfg
 
@@ -72,6 +85,11 @@ async def _setup(url: str) -> AgentDao:
     cfg = make_alembic_cfg(url)
     await asyncio.to_thread(command.upgrade, cfg, "head")
     return AgentDao(create_test_engine(url))
+
+
+async def _seed_session(dao: AgentDao, session_id: str = "s-snap") -> None:
+    async with dao.engine.begin() as conn:
+        await conn.execute(insert(AgentSession).values(user_scope=USER_SCOPE, session_id=session_id, title="快照会话"))
 
 
 async def _seed_chain(
@@ -197,8 +215,60 @@ async def _seed_artifact(dao: AgentDao, artifact_id: str, execution_id: str, rou
         )
 
 
+def _business_source(source_id: str, version: str, kind: SourceKind) -> SourceRef:
+    """业务来源（真实登记路径造数：metadata.source_ref 携带真实 SourceKind）。"""
+
+    return SourceRef(
+        user_scope=USER_SCOPE,
+        source_id=source_id,
+        version=version,
+        digest="d" * 64,
+        source_kind=kind,
+        display_name=f"来源 {source_id}",
+        object_ref=None,
+        locator=SourceLocator(
+            locator_kind="source_range",
+            origin_ref=SourceVersionRef(
+                source_kind=kind,
+                source_id=source_id,
+                source_version=version,
+                source_digest="d" * 64,
+            ),
+            selection=Selection(kind="all"),
+        ),
+        available_at=None,
+        period=None,
+        unit_note=None,
+        read_state=ReadState.READY,
+        missing_reason=None,
+        provenance_refs=(),
+    )
+
+
+async def _register_source(
+    dao: AgentDao,
+    *,
+    execution_id: str,
+    source_id: str,
+    version: str,
+    consumer_kind: str = "execution",
+    consumer_id: str | None = None,
+    consumer_version: str,
+) -> None:
+    source = _business_source(source_id, version, SourceKind.BUSINESS_SNAPSHOT)
+    await dao.register_business_sources(
+        BusinessSourceRegistrationRequest(
+            user_scope=USER_SCOPE,
+            consumer_kind=consumer_kind,
+            consumer_id=consumer_id if consumer_id is not None else execution_id,
+            consumer_version=consumer_version,
+            items=(BusinessSourceItem(source=source, verification=VerificationState.UNVERIFIED),),
+        )
+    )
+
+
 async def _seed_snapshot_extras(dao: AgentDao, execution_id: str, round_id: str) -> None:
-    """decision/operation/asset_version+source_link/read_mark 各一行。"""
+    """decision/operation/业务来源+source_link/read_mark 各一行。"""
 
     async with dao.engine.begin() as conn:
         await conn.execute(
@@ -233,33 +303,6 @@ async def _seed_snapshot_extras(dao: AgentDao, execution_id: str, round_id: str)
             )
         )
         await conn.execute(
-            insert(AgentAssetVersion).values(
-                user_scope=USER_SCOPE,
-                asset_id="asset-snap",
-                asset_version="v1",
-                asset_kind="source",
-                display_name="快照来源",
-                digest="d" * 64,
-                read_state="ready",
-                verification_state="unverified",
-            )
-        )
-        await conn.execute(
-            insert(AgentSourceLink).values(
-                user_scope=USER_SCOPE,
-                link_id="link-snap",
-                source_id="asset-snap",
-                source_version="v1",
-                consumer_kind="execution",
-                consumer_id=execution_id,
-                consumer_version="1",
-                execution_id=execution_id,
-                locator_payload={"locator": "rows[0:10]"},
-                relation_kind="input",
-                disabled_inherited=False,
-            )
-        )
-        await conn.execute(
             insert(AgentReadMark).values(
                 user_scope=USER_SCOPE,
                 marker_id="mark-snap",
@@ -271,6 +314,14 @@ async def _seed_snapshot_extras(dao: AgentDao, execution_id: str, round_id: str)
                 postponed_through_seq=5,
             )
         )
+    # 来源走真实登记事务（asset metadata.source_ref 携带 business_snapshot）。
+    await _register_source(
+        dao,
+        execution_id=execution_id,
+        source_id="asset-snap",
+        version="v1",
+        consumer_version="1",
+    )
 
 
 def _code_of(excinfo: pytest.ExceptionInfo[AgentServiceError]) -> AgentErrorCode:
@@ -314,20 +365,22 @@ class TestGetExecutionSnapshotBasics:
         assert [m.message_id for m in snap.messages_page.items] == ["m-m1"]
         assert snap.messages_page.has_more is False
         assert [a.artifact_id for a in snap.artifacts_page.items] == ["art-snap"]
-        # source_reads：join 元数据
+        # source_reads：join 元数据，类别来自真实登记元数据（非 asset_kind）
         assert len(snap.source_reads) == 1
         src = snap.source_reads[0]
-        assert src.link_id == "link-snap"
+        expected_source = _business_source("asset-snap", "v1", SourceKind.BUSINESS_SNAPSHOT)
+        assert src.link_id == stable_id("source_link", [USER_SCOPE, "asset-snap", "v1", "execution", execution_id, "1"])
         assert src.source_id == "asset-snap"
-        assert src.source_kind == "source"
-        assert src.display_name == "快照来源"
+        assert src.source_kind == "business_snapshot"
+        assert src.display_name == expected_source.display_name
         assert src.read_state.value == "ready"
         assert src.verification_state.value == "unverified"
         assert src.consumer_kind == "execution"
-        assert src.relation_kind == "input"
+        assert src.consumer_version == "1"
+        assert src.relation_kind == "accepted_input"
         assert src.disabled_inherited is False
         assert src.tombstoned is False
-        assert src.locator_payload == json_doc({"locator": "rows[0:10]"})
+        assert src.locator_payload == json_doc(to_wire_dict(expected_source.locator))
         assert src.claim_ref is None
         # decisions / operations
         assert [d.decision_id for d in snap.decisions] == ["dec-snap"]
@@ -357,21 +410,72 @@ class TestGetExecutionSnapshotBasics:
         wire = to_wire_dict(snap)
         assert json_doc(wire) == json_doc(to_wire_dict(decode_research_snapshot(wire)))
 
-    async def test_queued_execution_without_round(self, real_embedded_pg) -> None:
+    async def test_queued_execution_falls_back_to_accepted_manifest(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
-        session_id, execution_id, _ = await _seed_chain(dao, with_round=False)
-        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+        await _seed_session(dao)
+        manifest = json_doc({"scope": "daily", "universe": "all"})
+        receipt = await dao.accept_request(
+            AcceptRequest(
+                user_scope=USER_SCOPE,
+                session_id="s-snap",
+                source_module="ui",
+                business_request_id="req-queued",
+                client_command_id="cmd-queued",
+                expected_revision=0,
+                node_id="root",
+                workflow_id="wf-queued",
+                mode=Mode.EXECUTE,
+                purpose=Purpose.END_OF_DAY_RESEARCH,
+                text="研究今日行情",
+                manifest_payload=manifest,
+                source_display_name="用户消息",
+            )
+        )
+
+        snap = await dao.get_execution_snapshot(receipt.execution_id, user_scope=USER_SCOPE)
+
         assert snap.identity.round_id is None
         assert snap.identity.input_revision is None
         assert snap.identity.workflow_id is None
         assert snap.identity.run_epoch is None
-        assert snap.frozen_scope is None
+        # queued：冻结范围取受理 manifest；实际前序尚未发生，不伪造（R21）
+        assert snap.frozen_scope == manifest
         assert snap.actual_input is None
         assert snap.execution.display_state == "queued"
         assert snap.messages_page.items == ()
         assert snap.artifacts_page.items == ()
         assert snap.decisions == ()
         assert snap.operation_summaries == ()
+        # 受理源边：真实类别 user_message（不是通用 asset_kind）
+        assert len(snap.source_reads) == 1
+        source = snap.source_reads[0]
+        assert source.source_kind == "user_message"
+        assert source.consumer_kind == "execution"
+        assert source.consumer_version == "1"
+        assert source.relation_kind == "accepted_input"
+
+    async def test_tombstoned_source_stays_readable(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert round_id is not None
+        await _seed_snapshot_extras(dao, execution_id, round_id)
+        await dao.tombstone_cleanup_text(USER_SCOPE, asset_keys=[("asset-snap", "v1")])
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert len(snap.source_reads) == 1
+        src = snap.source_reads[0]
+        # 清理删除元数据后类别不可知：显式 None，不回落 asset_kind（R21）
+        assert src.source_kind is None
+        assert src.tombstoned is True
+        assert src.locator_payload is None
+
+    async def test_queued_execution_without_manifest_fails_closed(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, _ = await _seed_chain(dao, with_round=False)
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+        assert _code_of(exc) == AgentErrorCode.OPERATION_UNKNOWN
 
     async def test_missing_execution_invalid(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
@@ -422,6 +526,75 @@ class TestRoundTarget:
         assert snap.identity.round_id == "round-2"
         assert snap.identity.input_revision == 2
         assert [m.message_id for m in snap.messages_page.items] == ["m-m2"]
+
+    async def test_round_target_filters_operations_and_sources(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_chain(dao)
+        assert session_id == "s-snap"
+        assert round_id is not None
+        await _seed_snapshot_extras(dao, execution_id, round_id)
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                insert(AgentRound).values(
+                    user_scope=USER_SCOPE,
+                    round_id="round-2",
+                    execution_id=execution_id,
+                    round_number=2,
+                    workflow_id="wf-snap-2",
+                    workflow_code_version="wcv-1",
+                    run_epoch=1,
+                    input_revision=2,
+                    plan_revision=1,
+                    goal_coverage="unknown",
+                    final_saved=False,
+                    convergence_confirmed=False,
+                    active_round=False,
+                )
+            )
+            await conn.execute(
+                insert(AgentOperation).values(
+                    user_scope=USER_SCOPE,
+                    operation_id="op-round-2",
+                    session_id="s-snap",
+                    execution_id=execution_id,
+                    round_id="round-2",
+                    tool_call_id="tc-2",
+                    owner_epoch=1,
+                    run_epoch=1,
+                    phase="dispatched",
+                    effect_state="dispatched",
+                    io_state="open",
+                    grant_id="grant-2",
+                    grant_revision=1,
+                    active_ms=10,
+                    elapsed_ms=20,
+                )
+            )
+        await _register_source(
+            dao,
+            execution_id=execution_id,
+            source_id="asset-r2",
+            version="v1",
+            consumer_version="2",
+        )
+        await _register_source(
+            dao,
+            execution_id=execution_id,
+            source_id="asset-round",
+            version="v1",
+            consumer_kind="round",
+            consumer_id="round-2",
+            consumer_version="1",
+        )
+
+        snap_round1 = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE, round_id=round_id)
+        assert [op.operation_id for op in snap_round1.operation_summaries] == ["op-snap"]
+        assert [s.source_id for s in snap_round1.source_reads] == ["asset-snap"]
+
+        snap_round2 = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE, round_id="round-2")
+        assert [op.operation_id for op in snap_round2.operation_summaries] == ["op-round-2"]
+        # 该轮直接消费边（consumer_kind=round）与输入版 2 的源边同屏，不混入版本 1
+        assert sorted(s.source_id for s in snap_round2.source_reads) == ["asset-r2", "asset-round"]
 
     async def test_limit_bounds_and_bad_cursor(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)

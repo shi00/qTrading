@@ -2880,6 +2880,9 @@ ASSET_KINDS: Final[frozenset[str]] = frozenset(
     {"source", "skill", "role", "prompt", "mcp_schema", "plan", "comparison_manifest", "summary"}
 )
 
+#: 来源类别 6 值（§3.1 SourceKind wire 拼写；source_reads.source_kind 的合法值集）。
+SOURCE_KINDS: Final[frozenset[str]] = frozenset(kind.value for kind in SourceKind)
+
 #: 来源谱系消费方类别 6 值（§9.10 CHECK consumer_kind）。
 SOURCE_CONSUMER_KINDS: Final[frozenset[str]] = frozenset(
     {"draft", "execution", "round", "message", "artifact", "asset"}
@@ -3651,7 +3654,8 @@ class SourceReadSummary:
     link_id: str
     source_id: str
     source_version: str
-    source_kind: str
+    #: 来源类别；已清理（tombstoned）资产元数据被删除时为 None（未知，不猜默认值）。
+    source_kind: str | None
     display_name: str
     digest: str
     read_state: ReadState
@@ -3693,7 +3697,7 @@ _SOURCE_READ_SUMMARY_KEYS: Final = frozenset(
 
 
 def decode_source_read_summary(value: object, path: str = "$.source_read") -> SourceReadSummary:
-    """严格解码来源读取摘要（18 键全必填；值集与 §9.10 CHECK 同步）。"""
+    """严格解码来源读取摘要（18 键全必填；source_kind 为 SourceKind 或清理后的 None）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
@@ -3702,7 +3706,9 @@ def decode_source_read_summary(value: object, path: str = "$.source_read") -> So
         link_id=_require_str(value["link_id"], f"{path}.link_id"),
         source_id=_require_str(value["source_id"], f"{path}.source_id"),
         source_version=_require_str(value["source_version"], f"{path}.source_version"),
-        source_kind=_require_choice(value["source_kind"], ASSET_KINDS, f"{path}.source_kind", "invalid_source_kind"),
+        source_kind=None
+        if value["source_kind"] is None
+        else _require_choice(value["source_kind"], SOURCE_KINDS, f"{path}.source_kind", "invalid_source_kind"),
         display_name=_require_str(value["display_name"], f"{path}.display_name"),
         digest=_require_digest(value["digest"], f"{path}.digest"),
         read_state=_require_enum(value["read_state"], ReadState, f"{path}.read_state", "invalid_read_state"),
