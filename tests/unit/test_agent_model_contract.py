@@ -133,6 +133,14 @@ class TestChatMessage:
         msg = ChatMessage(role="tool", content_parts=(text_part("结果"),), tool_call_id="call-1")
         validate_chat_message(msg)
 
+    def test_tool_role_empty_results_distinguishable(self) -> None:
+        # 工具无返回 = 空 parts；返回空文本 = 空文本分型——两者均合法且可辨
+        no_return = ChatMessage(role="tool", content_parts=(), tool_call_id="call-1")
+        validate_chat_message(no_return)
+        empty_text = ChatMessage(role="tool", content_parts=(TextContentPart(text=""),), tool_call_id="call-1")
+        validate_chat_message(empty_text)
+        assert no_return.content_parts != empty_text.content_parts
+
     def test_system_rejects_tool_calls(self) -> None:
         msg = ChatMessage(
             role="system",

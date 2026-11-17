@@ -286,6 +286,35 @@ class TestBuildChatTurnRequest:
         assert request.messages[3].tool_call_id == "c1"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("content", "expected_parts"),
+        [
+            (None, ()),
+            ("", (TextContentPart(text=""),)),
+            (False, (TextContentPart(text="false"),)),
+            (0, (TextContentPart(text="0"),)),
+        ],
+        ids=["none", "empty-str", "false", "zero"],
+    )
+    async def test_tool_return_empty_values_roundtrip_keep_call_id(
+        self, content: Any, expected_parts: tuple[TextContentPart, ...]
+    ) -> None:
+        """M03：无返回（None → 空 parts）与空串/False/0 分别往返且保 tool_call_id。
+
+        ``build_chat_turn_request`` 末尾 ``ensure_valid()`` 即核心校验通过证明。
+        """
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[ToolReturnPart(tool_name="t", content=content, tool_call_id="c1")])],
+            _settings(),
+            _params(),
+            tool_schema_version="v1",
+        )
+        tool_message = request.messages[0]
+        assert tool_message.role == "tool"
+        assert tool_message.tool_call_id == "c1"
+        assert tool_message.content_parts == expected_parts
+
+    @pytest.mark.asyncio
     async def test_tool_mapping_and_output_schema(self):
         params = _params(
             function_tools=[_tool("search")],

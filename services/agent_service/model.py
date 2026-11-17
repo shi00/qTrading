@@ -131,15 +131,16 @@ def _tool_args_to_json(args: str | Mapping[str, Any]) -> str:
     return json.dumps(args, ensure_ascii=False, sort_keys=True)
 
 
-def _content_to_text(content: Any, path: str) -> str:
+def _content_to_text(content: Any, path: str) -> str | None:
     """ToolReturnPart.content（str | 任意 JSON 值）→ 文本投影。
 
     str 原样；Mapping / Sequence（非 str/bytes）按 JSON 序列化；标量
     （bool/int/float）文本化；其余类型明确拒绝（不裁剪，R21）。``None`` →
-    ""（工具执行成功无返回的合法形态——空不是缺失）。
+    ``None``（工具执行成功**无返回**的合法形态——与空串 ``""``「返回了空文本」
+    是不同事实，由 ``_tool_content_parts`` 分别承载）。
     """
     if content is None:
-        return ""
+        return None
     if isinstance(content, str):
         return content
     if isinstance(content, Mapping | Sequence) and not isinstance(content, (str, bytes)):
@@ -147,6 +148,17 @@ def _content_to_text(content: Any, path: str) -> str:
     if isinstance(content, bool | int | float):
         return json.dumps(content)
     raise _reject_part(content, f"{path}.tool_return.content")
+
+
+def _tool_content_parts(text: str | None) -> tuple[TextContentPart, ...]:
+    """工具结果文本 → content_parts：``None``（无返回）→ 空 parts；``""`` → 空文本分型。
+
+    两者分别可辨（无返回 vs 返回空文本），且均不经用户空正文校验规则——
+    tool 消息的事实由 ``tool_call_id`` 关联，不因空值丢调用 ID。
+    """
+    if text is None:
+        return ()
+    return (TextContentPart(text=text),)
 
 
 def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], list[ChatMessage]]:
@@ -196,7 +208,7 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                 messages.append(
                     ChatMessage(
                         role="tool",
-                        content_parts=(TextContentPart(text=_content_to_text(content, part_path)),),
+                        content_parts=_tool_content_parts(_content_to_text(content, part_path)),
                         tool_call_id=call_id,
                         metadata={"tool_name": name} if name else {},
                     )
@@ -207,13 +219,15 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                     messages.append(
                         ChatMessage(
                             role="tool",
-                            content_parts=(TextContentPart(text=text),),
+                            content_parts=_tool_content_parts(text),
                             tool_call_id=call_id,
                             metadata={"tool_name": name} if name else {},
                         )
                     )
                 else:
-                    messages.append(ChatMessage(role="user", content_parts=(TextContentPart(text=text),)))
+                    # 无 tool_call_id 的重试反馈映射为用户文本；空值不抬升为空 parts
+                    # （用户空正文仍按原规则拒绝，不放宽）
+                    messages.append(ChatMessage(role="user", content_parts=(TextContentPart(text=text or ""),)))
             case _:
                 raise _reject_part(part, part_path)
     return instructions, messages
