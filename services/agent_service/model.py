@@ -154,9 +154,10 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
 
     - SystemPromptPart → instructions（保序追加，§6.3「SystemPromptPart/
       instructions 保持顺序」）；
-    - UserPromptPart：str 与 TextContent 按文本处理（不能非 str 一律当图片，
-      §6.3）；BinaryContent（PNG/JPEG binary 引用）随 E-02 附件装配接入——
-      当前明确拒绝（zero outbound，NOTE(lazy) 见模块尾）；
+    - UserPromptPart：str 与 TextContent（含两者混合序列）按文本处理（不能
+      非 str 一律当图片，§6.3）；序列内条目原样保序（中文/CRLF/空段 "" 不做
+      归一或丢弃）；BinaryContent（PNG/JPEG binary 引用）随 E-02 附件装配
+      接入——当前明确拒绝（zero outbound，NOTE(lazy) 见模块尾）；
     - ToolReturnPart / RetryPromptPart：tool_call_id 严格配对映射为 tool 角色；
       RetryPromptPart 无 tool_call_id（输出校验重试反馈）映射为 user 文本；
     - 未知 part：ModelTurnProtocolError（zero outbound，不裁剪 R21）。
@@ -178,13 +179,18 @@ def _map_request_parts(message: ModelRequest, path: str) -> tuple[list[str], lis
                     # 投递：按出现顺序取文本，元数据（origin 等）留在服务侧，不出站。
                     texts: list[str] = []
                     for sub_index, item in enumerate(content):
-                        if not isinstance(item, TextContent):
+                        if isinstance(item, str):
+                            # §6.3：UserContent 含裸 str，与 TextContent 同等按文本处理；
+                            # 空段 "" 也按位置保留（不跳过、不合并、不重排）。
+                            texts.append(item)
+                        elif isinstance(item, TextContent):
+                            texts.append(item.content)
+                        else:
                             # BinaryContent 等非文本内容：明确拒绝，不静默降级为图片
                             kind = getattr(item, "part_kind", type(item).__name__)
                             raise ModelTurnProtocolError(
                                 "unknown_part", f"{part_path}.user_prompt.content[{sub_index}].{kind}"
                             )
-                        texts.append(item.content)
                     text = "\n".join(texts)
                 else:
                     # BinaryContent 等非文本内容：明确拒绝，不静默降级为图片
