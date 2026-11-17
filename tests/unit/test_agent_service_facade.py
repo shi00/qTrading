@@ -7,6 +7,7 @@ DAO 事务语义由集成测试覆盖。
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -30,21 +31,27 @@ from core.agent_types import (
     DraftTransferSourceKind,
     EventPage,
     EventReadQuery,
+    HistoryQuery,
+    HistoryRoundSelection,
     Mode,
     Purpose,
+    ReadMarkCommand,
     ResearchSnapshot,
+    ReviseQueuedRequest,
+    SaveAnswerRequest,
     SendableOwner,
     SessionRead,
     SessionReadQuery,
     SessionAction,
     SessionChangeCommand,
+    SourceStopCommand,
     SubmissionReceipt,
     derive_draft_transfer_id,
     draft_transfer_payload_digest,
     json_doc,
 )
 from data.persistence.daos.agent_dao import AgentDao
-from services.agent_service.service import AgentService
+from services.agent_service.service import AgentService, WaitResult
 
 _REF = CommandRef(
     user_scope="u1",
@@ -231,6 +238,11 @@ class _FakeDao:
         self.events = object()
         self.observed = object()
         self.receipt = _SUBMISSION_RECEIPT
+        self.revision_receipt = object()
+        self.answer_receipt = object()
+        self.history = object()
+        self.stop_receipt = object()
+        self.read_mark_receipt = object()
 
     async def accept_request(self, request: AcceptRequest) -> SubmissionReceipt:
         self.calls.append(("accept_request", (request,), {}))
@@ -293,6 +305,36 @@ class _FakeDao:
     def observe_session_events(self, session_id: str, **kwargs: Any) -> Any:
         self.calls.append(("observe_session_events", (session_id,), dict(kwargs)))
         return self.observed
+
+    async def revise_queued(self, request: ReviseQueuedRequest) -> Any:
+        self.calls.append(("revise_queued", (request,), {}))
+        if self.error is not None:
+            raise self.error
+        return self.revision_receipt
+
+    async def save_answer(self, request: SaveAnswerRequest) -> Any:
+        self.calls.append(("save_answer", (request,), {}))
+        if self.error is not None:
+            raise self.error
+        return self.answer_receipt
+
+    async def search_history(self, query: HistoryQuery, *, user_scope: str) -> Any:
+        self.calls.append(("search_history", (query,), {"user_scope": user_scope}))
+        if self.error is not None:
+            raise self.error
+        return self.history
+
+    async def stop_source_use(self, request: SourceStopCommand) -> Any:
+        self.calls.append(("stop_source_use", (request,), {}))
+        if self.error is not None:
+            raise self.error
+        return self.stop_receipt
+
+    async def save_read_mark_max(self, command: ReadMarkCommand) -> Any:
+        self.calls.append(("save_read_mark_max", (command,), {}))
+        if self.error is not None:
+            raise self.error
+        return self.read_mark_receipt
 
 
 def _service(fake: _FakeDao) -> AgentService:
@@ -615,3 +657,266 @@ class TestErrorPropagation:
         with pytest.raises(AgentServiceError) as excinfo:
             await _service(fake).read_command(_REF, user_scope="u1")
         assert excinfo.value is fake.error
+
+
+def _revise_request(**overrides: Any) -> ReviseQueuedRequest:
+    values: dict[str, Any] = {
+        "user_scope": "u1",
+        "session_id": "s1",
+        "execution_id": "execution-1",
+        "client_command_id": "client-revise-1",
+        "expected_execution_revision": 1,
+        "node_id": "root",
+        "text": "修订后的问题",
+        "manifest_payload": json_doc({"schema_version": 1, "text": "修订后的问题"}),
+        "source_display_name": "用户消息",
+    }
+    values.update(overrides)
+    return ReviseQueuedRequest(**values)
+
+
+def _answer_request(**overrides: Any) -> SaveAnswerRequest:
+    values: dict[str, Any] = {
+        "user_scope": "u1",
+        "decision_id": "decision-1",
+        "client_command_id": "client-answer-1",
+        "expected_decision_revision": 1,
+        "answer_payload": json_doc({"schema_version": 1, "choice": "a"}),
+    }
+    values.update(overrides)
+    return SaveAnswerRequest(**values)
+
+
+def _history_query(**overrides: Any) -> HistoryQuery:
+    values: dict[str, Any] = {
+        "scope": "all_saved",
+        "round_selection": HistoryRoundSelection(kind="all_rounds"),
+        "query_text": "",
+        "time_basis": "created",
+        "sort": "newest_first",
+    }
+    values.update(overrides)
+    return HistoryQuery(**values)
+
+
+def _stop_command(**overrides: Any) -> SourceStopCommand:
+    values: dict[str, Any] = {
+        "user_scope": "u1",
+        "source_id": "source-1",
+        "source_version": "1",
+        "command_id": "client-stop-1",
+    }
+    values.update(overrides)
+    return SourceStopCommand(**values)
+
+
+def _read_mark(**overrides: Any) -> ReadMarkCommand:
+    values: dict[str, Any] = {
+        "user_scope": "u1",
+        "session_id": "s1",
+        "command_id": "client-read-1",
+        "message_ids": ("msg-1",),
+        "artifact_refs": (),
+        "observed_through_seq": None,
+        "observation_scope_digest": None,
+    }
+    values.update(overrides)
+    return ReadMarkCommand(**values)
+
+
+def _snapshot(display_state: str) -> ResearchSnapshot:
+    return cast(
+        ResearchSnapshot,
+        SimpleNamespace(
+            identity=SimpleNamespace(session_id="s1"),
+            execution=SimpleNamespace(display_state=display_state),
+        ),
+    )
+
+
+class TestControlAndAnswer:
+    """统一合同写入口：委托原 DAO 事务，重放返回原回执（不伪造新事实）。"""
+
+    @pytest.mark.asyncio
+    async def test_control_delegates_revise_queued(self) -> None:
+        fake = _FakeDao()
+        request = _revise_request()
+        assert await _service(fake).control(request) is fake.revision_receipt
+        assert fake.calls == [("revise_queued", (request,), {})]
+
+    @pytest.mark.asyncio
+    async def test_answer_delegates_save_answer(self) -> None:
+        fake = _FakeDao()
+        request = _answer_request()
+        assert await _service(fake).answer(request) is fake.answer_receipt
+        assert fake.calls == [("save_answer", (request,), {})]
+
+    @pytest.mark.asyncio
+    async def test_control_replay_returns_original_receipt(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        request = _revise_request()
+        first = await service.control(request)
+        second = await service.control(request)
+        assert first is second is fake.revision_receipt
+        assert [call[0] for call in fake.calls] == ["revise_queued", "revise_queued"]
+
+    @pytest.mark.asyncio
+    async def test_answer_dao_conflict_propagates_unwrapped(self) -> None:
+        fake = _FakeDao()
+        fake.error = AgentServiceError(AgentErrorCode.INPUT_CONFLICT, "same key different input", "u1/decision-1")
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).answer(_answer_request())
+        assert excinfo.value is fake.error
+
+    @pytest.mark.asyncio
+    async def test_control_and_answer_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        for coroutine in (
+            service.control(_revise_request()),
+            service.answer(_answer_request()),
+        ):
+            with pytest.raises(AgentServiceError) as excinfo:
+                await coroutine
+            assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+class TestSearch:
+    @pytest.mark.asyncio
+    async def test_search_delegates_with_caller_scope(self) -> None:
+        fake = _FakeDao()
+        query = _history_query()
+        assert await _service(fake).search(query, user_scope="u1") is fake.history
+        assert fake.calls == [("search_history", (query,), {"user_scope": "u1"})]
+
+    @pytest.mark.asyncio
+    async def test_invalid_scope_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).search(_history_query(scope="other"), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.scope" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_missing_user_scope_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).search(_history_query(), user_scope="")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.user_scope" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_search_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.search(_history_query(), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+class TestStopUsingAndMarkRead:
+    @pytest.mark.asyncio
+    async def test_stop_using_delegates(self) -> None:
+        fake = _FakeDao()
+        command = _stop_command()
+        assert await _service(fake).stop_using(command) is fake.stop_receipt
+        assert fake.calls == [("stop_source_use", (command,), {})]
+
+    @pytest.mark.asyncio
+    async def test_stop_using_replay_returns_original_receipt(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        command = _stop_command()
+        first = await service.stop_using(command)
+        second = await service.stop_using(command)
+        assert first is second is fake.stop_receipt
+
+    @pytest.mark.asyncio
+    async def test_mark_read_delegates(self) -> None:
+        fake = _FakeDao()
+        command = _read_mark()
+        assert await _service(fake).mark_read(command) is fake.read_mark_receipt
+        assert fake.calls == [("save_read_mark_max", (command,), {})]
+
+    @pytest.mark.asyncio
+    async def test_mark_read_scope_pair_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).mark_read(_read_mark(observed_through_seq=3))
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.observed_through_seq" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_stop_using_and_mark_read_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        for coroutine in (
+            service.stop_using(_stop_command()),
+            service.mark_read(_read_mark()),
+        ):
+            with pytest.raises(AgentServiceError) as excinfo:
+                await coroutine
+            assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
+
+
+class TestWaitResult:
+    """只读等待：收敛/超时如实分列，超时不伪造成果，零持久化。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_converged_snapshot(self) -> None:
+        fake = _FakeDao()
+        snapshot = _snapshot("complete")
+        fake.snapshot = snapshot
+        fake.events = EventPage(events=(), last_seq=7, has_more=False)
+        result = await _service(fake).wait_result("execution-1", user_scope="u1", timeout_s=1, poll_interval_s=0.01)
+        assert isinstance(result, WaitResult)
+        assert result.converged is True
+        assert result.timed_out is False
+        assert result.display_state == "complete"
+        assert result.snapshot is snapshot
+        assert result.events == ()
+        event_call = next(call for call in fake.calls if call[0] == "read_events")
+        assert event_call[1][0].session_id == "s1"
+        assert event_call[1][0].after_seq == 0
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_unconverged_fact_without_write(self) -> None:
+        fake = _FakeDao()
+        snapshot = _snapshot("running")
+        fake.snapshot = snapshot
+        fake.events = EventPage(events=(), last_seq=0, has_more=False)
+        result = await _service(fake).wait_result("execution-1", user_scope="u1", timeout_s=0.05, poll_interval_s=0.01)
+        assert result.converged is False
+        assert result.timed_out is True
+        assert result.display_state == "running"
+        assert result.snapshot is snapshot
+        assert {call[0] for call in fake.calls} == {"get_execution_snapshot", "read_events"}
+
+    @pytest.mark.asyncio
+    async def test_invalid_timeout_rejected_before_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).wait_result("execution-1", user_scope="u1", timeout_s=0)
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert "$.timeout_s" in excinfo.value.sanitized_message
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_wait_result_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.wait_result("execution-1", user_scope="u1", timeout_s=1)
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []

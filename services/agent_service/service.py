@@ -9,9 +9,12 @@
 - ``read_session`` / ``get_snapshot`` / ``read_events`` / ``observe_session`` 为
   §4.1/§4.2 读取入口，直接复用 C-03 一致读取截点与观察实现；
 - ``read_delivery`` 查回原交付 manifest 与当前修订（§10.5 unknown/中断核对）；
-- ``submit`` / ``control`` / ``answer`` / ``search`` / ``deliver_artifact`` 等写路径
-  依赖原生 root workflow 派发（E-04 计划 + DBOS launch，当前受 Q5 阻塞），
-  未就绪前不提供占位实现，避免把「未派发」伪装成「已受理」。
+- ``control`` / ``answer`` / ``search`` / ``stop_using`` / ``mark_read`` 为 §4.1
+  统一合同写入口，一律委托既有 DAO 事务；``wait_result`` 为只读等待（组合快照与
+  事件，零持久化），超时返回「未收敛」事实而不伪造成果；
+- ``submit`` / ``deliver_artifact`` 等写路径中，原生 root workflow 派发依赖
+  Runtime（E-04 计划 + DBOS launch，当前受 Q5 阻塞）；``submit`` 只提交受理
+  事务，未就绪前不提供占位派发实现，避免把「未派发」伪装成「已派发」。
 - ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付；
 - ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）与
   修订/分支的因果前缀保存（revise 改 ``causal_head_ref``；branch 新建会话并引用
@@ -25,13 +28,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from core.agent_types import (
+    NON_RECOVERABLE_DISPLAY_STATES,
     AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
+    AnswerReceipt,
     ArtifactRead,
     ArtifactReadQuery,
     CommandReceipt,
@@ -43,22 +50,58 @@ from core.agent_types import (
     DraftTransferReceipt,
     EventPage,
     EventReadQuery,
+    HistoryPage,
+    HistoryQuery,
     OperationRead,
     OperationReadQuery,
+    ReadMarkCommand,
+    ReadMarkReceipt,
     ResearchEvent,
     ResearchSnapshot,
+    RevisionReceipt,
+    ReviseQueuedRequest,
+    SaveAnswerRequest,
     SessionRead,
     SessionReadQuery,
     SessionChangeCommand,
     SourceRead,
     SourceReadQuery,
+    SourceStopCommand,
+    SourceStopReceipt,
     SubmissionReceipt,
     derive_accept_identity,
     validate_draft_save_command,
     validate_draft_transfer_command,
+    validate_history_query,
+    validate_read_mark_command,
     validate_session_change_command,
 )
 from data.persistence.daos.agent_dao import AgentDao
+
+
+@dataclass(frozen=True, slots=True)
+class WaitResult:
+    """``wait_result`` 观察结果：收敛与否如实分列，超时不伪造成果（R21）。
+
+    ``snapshot`` 恒为最后一次一致读取的事实（超时也返回该事实，调用方据此区分
+    「还没结果」与「读失败」）；``events`` 为本次等待窗口内追平的事件增量，
+    不带持久化副作用。
+    """
+
+    execution_id: str
+    display_state: str
+    converged: bool
+    timed_out: bool
+    elapsed_ms: int
+    snapshot: ResearchSnapshot
+    events: tuple[ResearchEvent, ...]
+
+
+def _require_positive_seconds(value: object, path: str, identity: str) -> None:
+    """等待参数边界校验：布尔/非数值/非正数一律 ``INPUT_INVALID``。"""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid_range: {path}", identity)
 
 
 class AgentService:
@@ -174,6 +217,102 @@ class AgentService:
             poll_interval_s=poll_interval_s,
         )
 
+    async def search(self, query: HistoryQuery, *, user_scope: str) -> HistoryPage:
+        """历史搜索（§4.2 ``search``）：返回原查询页，不借当前表单重推范围。
+
+        边界整份校验（R02 范围/值集/游标语法），失败为 ``INPUT_INVALID`` 且不
+        触达 DAO；``user_scope`` 必填并作为用户域唯一来源（与 query 内 scope 分列，
+        不互相顶替）。游标失效、覆盖域修订等原样由 DAO 抛类型化错误，不把读取
+        失败读成「无命中」（R21）。
+        """
+
+        self._require_open("search")
+        if not isinstance(user_scope, str) or not user_scope:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "invalid_type: $.user_scope",
+                "history",
+            )
+        try:
+            validate_history_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                f"{user_scope}/history",
+            ) from exc
+        return await self._dao.search_history(query, user_scope=user_scope)
+
+    async def wait_result(
+        self,
+        execution_id: str,
+        *,
+        user_scope: str,
+        timeout_s: float,
+        poll_interval_s: float = 0.5,
+        limit: int = 50,
+        after_seq: int = 0,
+    ) -> WaitResult:
+        """只读等待收敛（§4.1 ``wait_result``）：组合快照与事件，零持久化。
+
+        每次轮询以 ``get_execution_snapshot`` 取一致截点、以 ``read_events`` 追平
+        会话事件增量；``display_state`` 进入终态集（``NON_RECOVERABLE_DISPLAY_STATES``）
+        才算收敛。到达调用方给定的 ``timeout_s`` 仍未收敛时返回 ``converged=False``/
+        ``timed_out=True`` 与最后一次快照事实，**不伪造结果、不写任何事实**（R21）。
+        等待用 ``asyncio.sleep`` 让出事件循环；取消按 ``CancelledError`` 原样传播
+        （R2），不转译成 ACK/空结果。
+        """
+
+        self._require_open("wait_result")
+        _require_positive_seconds(timeout_s, "$.timeout_s", execution_id)
+        _require_positive_seconds(poll_interval_s, "$.poll_interval_s", execution_id)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + timeout_s
+        cursor = after_seq
+        observed: list[ResearchEvent] = []
+        while True:
+            snapshot = await self._dao.get_execution_snapshot(
+                execution_id,
+                user_scope=user_scope,
+                limit=limit,
+            )
+            page = await self._dao.read_events(
+                EventReadQuery(
+                    user_scope=user_scope,
+                    session_id=snapshot.identity.session_id,
+                    after_seq=cursor,
+                    limit=limit,
+                )
+            )
+            observed.extend(page.events)
+            cursor = page.last_seq
+            state = snapshot.execution.display_state
+            converged = state in NON_RECOVERABLE_DISPLAY_STATES
+            elapsed_ms = int((loop.time() - started) * 1000)
+            if converged:
+                return WaitResult(
+                    execution_id=execution_id,
+                    display_state=state,
+                    converged=True,
+                    timed_out=False,
+                    elapsed_ms=elapsed_ms,
+                    snapshot=snapshot,
+                    events=tuple(observed),
+                )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return WaitResult(
+                    execution_id=execution_id,
+                    display_state=state,
+                    converged=False,
+                    timed_out=True,
+                    elapsed_ms=elapsed_ms,
+                    snapshot=snapshot,
+                    events=tuple(observed),
+                )
+            await asyncio.sleep(min(poll_interval_s, remaining))
+
     # ------------------------------------------------------------------
     # 写入面（受理）
     # ------------------------------------------------------------------
@@ -216,6 +355,67 @@ class AgentService:
                 identity,
             )
         return await self._dao.accept_request(request)
+
+    async def control(self, request: ReviseQueuedRequest) -> RevisionReceipt:
+        """控制入口（§4.1 ``control``）：只按既有类型能力暴露「排队期修订」。
+
+        当前落库的控制命令族仅有 ``revise_queued``（SQ-07），故本入口只转交该
+        类型，不臆造取消/暂停等未落库命令。同一入口兼「投递 + 查回」：同命令键
+        同完整输入（正文/manifest/期望版/node 摘要相等）时由 DAO 事务查回**原
+        回执**（零新行、不重发）；同键异输入 → ``INPUT_CONFLICT``；已派发或非
+        ``queued`` → ``REVISION_CONFLICT``，均不以当前状态重推。
+
+        原生投递接续归 Runtime（submit 回执 ``workflow_id`` 后的 launch，E-04/Q5）；
+        本入口不派发、不越权推进。
+        """
+
+        self._require_open("control")
+        return await self._dao.revise_queued(request)
+
+    async def answer(self, request: SaveAnswerRequest) -> AnswerReceipt:
+        """答复入口（§4.1 ``answer``）：委托答复线性化事务，回执三态分列。
+
+        保存成功不代表已投递/已消费（INV-06）。同一入口兼「投递 + 查回」：同
+        命令键同规范输入且决定已指向该命令 → DAO 查回**原回执**（零新行、不按
+        当前状态重判）；同键异输入 → ``INPUT_CONFLICT``；决定已被其他命令应答
+        或预期版不符 → ``REVISION_CONFLICT``。原生 send 后的投递核定与消费事实
+        归 Runtime 路径，本入口不代做。
+        """
+
+        self._require_open("answer")
+        return await self._dao.save_answer(request)
+
+    async def stop_using(self, request: SourceStopCommand) -> SourceStopReceipt:
+        """停止使用来源入口（§4.1 ``stop_using``）：委托源禁用事务，零新出站。
+
+        DAO 层幂等键为**源身份**（source_id + source_version）：已禁用重放返回
+        原事实 ``already_disabled=True``（零新事实、不复活）；``command_id`` 仅
+        审计透传，命令键查重/同键异输入冲突由后续命令落库路径承载（本层不伪称
+        已完成命令键去重）。禁用先胜：只改当前可用性投影，不改冻结事实。
+        """
+
+        self._require_open("stop_using")
+        return await self._dao.stop_source_use(request)
+
+    async def mark_read(self, command: ReadMarkCommand) -> ReadMarkReceipt:
+        """已读标记入口（§4.1 ``mark_read``）：委托 GREATEST/并集合并事务。
+
+        边界整份校验（水位与 scope digest 同给同缺、身份为字符串），失败为
+        ``INPUT_INVALID`` 且不触达 DAO；merge 天然幂等，本次无状态变化即重放
+        （``replayed=True``），不全局清零、不回退水位（R22）。
+        """
+
+        self._require_open("mark_read")
+        identity = f"{command.user_scope}/{command.session_id}/{command.command_id}"
+        try:
+            validate_read_mark_command(command)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                identity,
+            ) from exc
+        return await self._dao.save_read_mark_max(command)
 
     async def save_draft(self, command: DraftSaveCommand) -> DraftReceipt:
         """本地自动草稿保存（§4.2 ``save_draft``）：可靠 draft revision，不发送。
