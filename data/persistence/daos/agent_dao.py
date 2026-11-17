@@ -260,6 +260,21 @@ _AGENT_EVENT_CHANNEL: Final = "agent_events"
 #: user_scope='' 哨兵行，claim 事务内 ON CONFLICT DO NOTHING 幂等预置）。
 _RESOURCE_GUARD_SLOT_ID: Final = "global_guard"
 
+#: 全局上限（检视 D27，§9.13 / D05）：「全局 2 个推进中的总执行、4 个 subagent」。
+#: 与每会话 1 总 / 每总 3 叶同时生效，任一超限即拒。
+_RESOURCE_GLOBAL_TOTAL_LIMIT: Final = 2
+_RESOURCE_GLOBAL_LEAF_LIMIT: Final = 4
+
+#: 全局开放票据计数：跨 user_scope（guard 行 slot_kind='global_guard' 天然不计入），
+#: 开放谓词与树计数一致（released_at IS NULL OR release_verified=false，
+#: unknown 在途不放空）。参数化文本 SQL（R4：绑定参数，无拼接）。
+_RESOURCE_GLOBAL_OPEN_TICKET_SQL: Final = """
+SELECT count(*)
+FROM agent_resource_slot
+WHERE slot_kind = :open_kind
+  AND (released_at IS NULL OR release_verified = false)
+"""
+
 #: 每总（同 root 树）活跃叶子计数：先向上递归定 root，再向下收集整树开放叶子。
 #: 开放谓词 = released_at IS NULL OR release_verified=false（unknown 在途不放空）。
 #: 参数化文本 SQL（R4：绑定参数，无拼接）。
@@ -6312,16 +6327,22 @@ class AgentDao(BaseDao):
 
         - 全局仲裁：预置单例 guard 行（user_scope=''、slot_kind=global_guard、
           execution_id NULL）后 ``FOR UPDATE``，所有认领串行化（不靠数量缓存准入）；
+          **锁序**：guard 行锁 → 目标 execution 行锁 → 票据行锁，任何时刻只按此
+          单向序取锁；数量统计为普通快照读（不加 ``FOR UPDATE``），不引入新的
+          锁序边，故不重引入死锁；
         - 最严限额（开放容量谓词 = ``released_at IS NULL OR release_verified=false``，
-          unknown 在途不放空）：**事务内检查每会话 1 总占位与每总（同 root 树）
-          3 活跃叶子**（§9.11「事务同时检查每会话1/每总3，不靠数量缓存准入」）；
-          全局 2 总/4 叶为预分配预算（运行宿主准入承载，D-01/C-05），每计划
-          20 叶为计划级验证（D-02 原生 DAG），均不在本票据事务重复检查；
-          超限 ``BUDGET_BLOCKED``（不伪失败）；
+          unknown 在途不放空），guard 行锁内同一事务同时核定，任一超限即拒：
+          ① **全局** 开放总执行票据 ≥2（跨 user_scope，§9.13 D05「全局 2 个
+          推进中的总执行」）→ 拒新总票；② 全局开放叶子票据 ≥4（同 D05
+          「4 个 subagent」）→ 拒新叶票；③ 每会话 1 总占位；④ 每总（同 root 树）
+          3 活跃叶子（§9.11「事务同时检查每会话1/每总3，不靠数量缓存准入」）。
+          拒因为 ``BUDGET_BLOCKED`` 并区分受阻限额（global / session / per-root）。
+          每计划 20 叶仍为计划级验证（D-02 原生 DAG），不在本票据事务重复检查；
         - 幂等重放：同 slot_id 同输入（kind/execution/node/round/owner_epoch/
-          run_epoch）且票据未确认释放 → 返回原票据零新事实；异输入
-          ``INPUT_CONFLICT``；已确认释放（release_verified=true）的 slot_id 不得
-          复用（零复活）；重放只读原事实，不因执行 dispatch 已关闭重判；
+          run_epoch）且票据未确认释放 → 返回原票据零新事实（**不重新计数**，故
+          恢复重放不会把在途票据重复计入而误拒）；异输入 ``INPUT_CONFLICT``；
+          已确认释放（release_verified=true）的 slot_id 不得复用（零复活）；
+          重放只读原事实，不因执行 dispatch 已关闭重判；
         - fence：目标 execution ``deletion_fenced`` → ``POLICY_DENIED``（引用 vs
           清理单胜者，fence 后拒绝新引用）；
         - 权威身份/代次（检视 D21）：同一 execution 行锁、同一事务内读当前
@@ -6532,13 +6553,27 @@ class AgentDao(BaseDao):
                 identity=identity,
             )
 
-            # 5. 最严限额核定（开放容量谓词：unknown 在途不放空；§9.11 事务内
-            #    只查每会话 1 总/每总 3 叶，全局与每计划预算由运行宿主/计划验证承载）。
+            # 5. 最严限额核定（开放容量谓词：unknown 在途不放空；§9.11 +
+            #    §9.13/D05）。guard 行锁内统计-判定-写入为单一序化点：跨入口/
+            #    会话/恢复的并发认领不会同时通过（计数读不加锁，无新锁序边）。
             open_predicate = sa.or_(
                 AgentResourceSlot.released_at.is_(None),
                 AgentResourceSlot.release_verified.is_(False),
             )
+            global_open = (
+                await conn.execute(
+                    sa.text(_RESOURCE_GLOBAL_OPEN_TICKET_SQL).bindparams(
+                        open_kind=request.slot_kind.value,
+                    )
+                )
+            ).scalar_one()
             if request.slot_kind is ResourceSlotKind.TOTAL:
+                # 全局 2 个推进中的总执行（跨 user_scope；guard 行不计入）。
+                if global_open >= _RESOURCE_GLOBAL_TOTAL_LIMIT:
+                    raise _budget_blocked(
+                        identity,
+                        f"global total slot limit ({_RESOURCE_GLOBAL_TOTAL_LIMIT}) reached",
+                    )
                 # 每会话 1 总占位。
                 session_open_total = (
                     await conn.execute(
@@ -6562,6 +6597,12 @@ class AgentDao(BaseDao):
                 if session_open_total >= 1:
                     raise _budget_blocked(identity, "session total slot limit (1) reached")
             else:
+                # 全局 4 个 subagent（跨 user_scope；guard 行不计入）。
+                if global_open >= _RESOURCE_GLOBAL_LEAF_LIMIT:
+                    raise _budget_blocked(
+                        identity,
+                        f"global leaf slot limit ({_RESOURCE_GLOBAL_LEAF_LIMIT}) reached",
+                    )
                 # 每总（同 root 树）3 实际活跃叶子（递归 CTE 定 root 后计整树）。
                 tree_open_leaf = (
                     await conn.execute(

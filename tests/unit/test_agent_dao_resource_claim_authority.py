@@ -7,7 +7,9 @@
 - 旧 owner_epoch（恢复竞争中的旧代次）与错节点拒绝（``POLICY_DENIED``）；
 - 请求轮必须属于本 execution；execution 有当前轮时历史轮不可领新票；
 - ``dispatch_closed`` 后拒绝新票，既有同票重放仍返回原票据；
-- 票据 ``run_epoch`` 取所属轮次 ``agent_round.run_epoch``，且参与重放同票判定。
+- 票据 ``run_epoch`` 取所属轮次 ``agent_round.run_epoch``，且参与重放同票判定；
+- 全局上限（检视 D27）：guard 行锁内跨 user_scope 统计开放票据，全局 2 总/4 叶
+  与每会话 1 总/每总 3 叶同时生效，受阻原因可区分；同票重放不重新计数。
 
 真实行锁竞争由 sidecar PG 集成测试
 （``tests/integration/test_agent_dao_resource.py``）覆盖；本文件用 capture conn
@@ -63,6 +65,8 @@ class _ClaimConn:
         slot_row: Any = None,
         open_total: int = 0,
         open_leaf: int = 0,
+        open_global_total: int = 0,
+        open_global_leaf: int = 0,
         fenced_sessions: list[str] | None = None,
     ) -> None:
         self.execution = execution
@@ -70,6 +74,8 @@ class _ClaimConn:
         self.slot_row = slot_row
         self.open_total = open_total
         self.open_leaf = open_leaf
+        self.open_global_total = open_global_total
+        self.open_global_leaf = open_global_leaf
         self.fenced_sessions = [] if fenced_sessions is None else fenced_sessions
         self.statements: list[str] = []
         self.insert_values: list[dict[str, Any]] = []
@@ -87,6 +93,10 @@ class _ClaimConn:
         if "FROM agent_round" in sql:
             return _Result(first=self.round_row)
         if "FROM agent_resource_slot" in sql:
+            if ":open_kind" in sql:
+                # 全局开放票据计数（文本 SQL，按绑定的 open_kind 分派）。
+                kind = statement.compile().params.get("open_kind")
+                return _Result(rows=[self.open_global_total if kind == "total" else self.open_global_leaf])
             if "WITH RECURSIVE" in sql:
                 return _Result(rows=[self.open_leaf])
             if "JOIN agent_execution" in sql:
@@ -257,6 +267,64 @@ class TestClaimRunEpoch:
         ticket = await _dao(conn).claim_resource(_request(round_id=None))
         assert ticket.run_epoch == 0
         assert conn._ticket_inserts()[0]["run_epoch"] == 0
+
+
+class TestClaimGlobalLimits:
+    """检视 D27：全局 2 总/4 叶在 DAO 事务内仲裁，不再由运行宿主承载。"""
+
+    async def test_global_total_limit_blocks_third_ticket(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round(), open_global_total=2)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_resource(_request())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "global total" in exc.value.sanitized_message
+        assert conn._ticket_inserts() == []
+
+    async def test_global_leaf_limit_blocks_before_per_root_limit(self) -> None:
+        conn = _ClaimConn(
+            execution=_execution(execution_kind="leaf", node_id="node-a"),
+            round_row=_round(),
+            open_global_leaf=4,
+            open_leaf=1,  # 每总 1 < 3：受阻原因必须指向全局而非每总
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_resource(_request(node_id="node-a", slot_kind=ResourceSlotKind.LEAF))
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "global leaf" in exc.value.sanitized_message
+        # 全局计数先判即拒：每总树计数（递归 CTE）不会被触及。
+        assert conn._index_of(":open_kind") >= 0
+        assert "WITH RECURSIVE" not in "".join(conn.statements)
+        assert conn._ticket_inserts() == []
+
+    async def test_global_under_limit_still_enforces_session_limit(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round(), open_global_total=1, open_total=1)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_resource(_request())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "session total" in exc.value.sanitized_message
+
+    async def test_global_count_is_cross_scope_open_predicate(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round())
+        await _dao(conn).claim_resource(_request())
+        global_sql = conn.statements[conn._index_of(":open_kind")]
+        assert "slot_kind = :open_kind" in global_sql
+        assert "released_at IS NULL" in global_sql
+        assert "release_verified = false" in global_sql
+        # 全局仲裁跨用户域：不带 user_scope 过滤，也不额外加锁（无新锁序边）。
+        assert "user_scope" not in global_sql
+        assert "FOR UPDATE" not in global_sql
+        # 计数在 guard/execution 行锁之后、票据落库之前。
+        assert conn._index_of("agent_resource_slot.slot_id") < conn._index_of(":open_kind")
+        insert_indexes = [i for i, sql in enumerate(conn.statements) if "INSERT INTO agent_resource_slot" in sql]
+        assert conn._index_of(":open_kind") < insert_indexes[-1]
+
+    async def test_replay_at_global_limit_returns_original_without_recount(self) -> None:
+        # 恢复/重放竞争：全局已满时同票重放仍返回原票据，不重新计数直接拒。
+        conn = _ClaimConn(execution=_execution(), round_row=_round(), slot_row=_slot(), open_global_total=2)
+        ticket = await _dao(conn).claim_resource(_request())
+        assert ticket.slot_id == "slot-1"
+        assert ":open_kind" not in "".join(conn.statements)
+        assert conn._ticket_inserts() == []
 
 
 class TestClaimAuthorityLockShape:

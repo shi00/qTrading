@@ -2,9 +2,9 @@
 
 真实 embedded PG 上的事务语义验证：
 
-- ``claim_resource``：guard 单例行预置+行锁串行、事务内最严限额（§9.11 只查
-  每会话 1 总/每总 3 叶；全局 2 总/4 叶为预分配预算由运行宿主准入承载、
-  每计划 20 叶为计划级验证 D-02，均不在票据事务重复检查）、幂等重放、
+- ``claim_resource``：guard 单例行预置+行锁串行、事务内最严限额（§9.11 + §9.13：
+  全局 2 总/4 叶与每会话 1 总/每总 3 叶同时生效，跨 user_scope 的开放票据都计入；
+  每计划 20 叶为计划级验证 D-02，不在票据事务重复检查）、幂等重放、
   slot_id 复用拒绝、fence 拒绝、kind 与执行类别核验；执行行锁内权威身份/
   代次门（检视 D21：旧 owner_epoch/错节点/历史轮/dispatch 关闭拒绝新票，
   run_epoch 取所属轮次权威值）；
@@ -378,16 +378,74 @@ class TestClaimResource:
         _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
         assert "session total" in excinfo.value.sanitized_message
 
-    async def test_session_total_limit_independent_across_sessions(self, real_embedded_pg: ConnectionInfo) -> None:
+    async def test_global_total_limit_two_across_sessions_and_scopes(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视 D27：全局 2 总为 DAO 内硬上限（跨 user_scope），第 3 个总被拒。"""
+
         dao = await _setup(real_embedded_pg.url)
         for index in range(1, 4):
             await _seed_session(dao, "u1", f"s{index}")
             await _seed_execution(dao, "u1", f"s{index}", f"root-{index}", "root", "root")
-        # 每会话 1：三个不同会话各 1 总占位均放行（全局 2 总为预分配预算，
-        # 由运行宿主准入承载——§9.11 事务内只查每会话 1/每总 3）
+        await _seed_session(dao, "u2", "s2u")
+        await _seed_execution(dao, "u2", "s2u", "root-u2", "root", "root")
+
+        # 每会话各 1 总本可并存，但全局只容 2 个推进中的总执行。
         await dao.claim_resource(_total_request(execution_id="root-1", slot_id="slot-g1"))
         await dao.claim_resource(_total_request(execution_id="root-2", slot_id="slot-g2"))
-        await dao.claim_resource(_total_request(execution_id="root-3", slot_id="slot-g3"))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(execution_id="root-3", slot_id="slot-g3"))
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "global total" in excinfo.value.sanitized_message
+
+        # 跨用户域同样受全局上限约束（guard 是全局哨兵，非按域计数）。
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(user_scope="u2", execution_id="root-u2", slot_id="slot-g-u2"))
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "global total" in excinfo.value.sanitized_message
+
+        # 同票重放不重新计数：全局已满仍返回原票据（恢复竞争不误拒）。
+        replay = await dao.claim_resource(_total_request(execution_id="root-1", slot_id="slot-g1"))
+        assert replay.slot_id == "slot-g1"
+
+        # 已确认释放才降占用：verified 释放后第 3 个总放行。
+        await dao.release_resource(
+            ResourceReleaseRequest(
+                user_scope="u1",
+                slot_id="slot-g1",
+                execution_id="root-1",
+                node_id="root",
+                owner_epoch=1,
+                exit_verified=True,
+            )
+        )
+        ticket = await dao.claim_resource(_total_request(execution_id="root-3", slot_id="slot-g3"))
+        assert ticket.slot_id == "slot-g3"
+
+    async def test_global_total_limit_counts_unknown_in_flight(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视 D27：未知退出（released_at 已记但 release_verified=false）不放空全局容量。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        for index in range(1, 4):
+            await _seed_session(dao, "u1", f"s{index}")
+            await _seed_execution(dao, "u1", f"s{index}", f"root-{index}", "root", "root")
+
+        await dao.claim_resource(_total_request(execution_id="root-1", slot_id="slot-k1"))
+        await dao.claim_resource(_total_request(execution_id="root-2", slot_id="slot-k2"))
+        # 尾段未知释放：容量保留。
+        await dao.release_resource(
+            ResourceReleaseRequest(
+                user_scope="u1",
+                slot_id="slot-k1",
+                execution_id="root-1",
+                node_id="root",
+                owner_epoch=1,
+                exit_verified=False,
+            )
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(execution_id="root-3", slot_id="slot-k3"))
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "global total" in excinfo.value.sanitized_message
 
     async def test_unverified_release_keeps_capacity_verified_frees(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
@@ -588,11 +646,158 @@ class TestLeafLimits:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
         await self._seed_root_with_leaves(dao, "root-a", 3)
-        # 另一 root 的叶子不受 root-a 树影响（每总 3 按树独立核定）
+        # 另一 root 的叶子不受 root-a 树影响（每总 3 按树独立核定；全局 3 < 4 仍有余量）
         await _seed_execution(dao, "u1", "s1", "root-b", "root", "root")
         await _seed_execution(dao, "u1", "s1", "root-b-leaf-0", "leaf", "node-b0", parent_execution_id="root-b")
         ticket = await dao.claim_resource(_leaf_request(execution_id="root-b-leaf-0", node_id="node-b0"))
         assert ticket.execution_id == "root-b-leaf-0"
+
+
+# ------------------------------------------------------------------
+# 全局上限（检视 D27：全局 2 总 / 4 叶，跨 user_scope）
+# ------------------------------------------------------------------
+
+
+class TestGlobalLimits:
+    async def _seed_tree_executions(
+        self,
+        dao: AgentDao,
+        root_id: str,
+        leaf_count: int,
+        *,
+        user_scope: str = "u1",
+        session_id: str = "s1",
+    ) -> None:
+        """只建 root/leaf 执行行（票据由 claim 真实产生，避免预置行重复计数）。"""
+
+        await _seed_execution(dao, user_scope, session_id, root_id, "root", "root")
+        for index in range(leaf_count):
+            await _seed_execution(
+                dao,
+                user_scope,
+                session_id,
+                f"{root_id}-leaf-{index}",
+                "leaf",
+                f"node-{index}",
+                parent_execution_id=root_id,
+            )
+
+    async def _claim_leaves(self, dao: AgentDao, root_id: str, count: int, *, user_scope: str = "u1") -> None:
+        for index in range(count):
+            await dao.claim_resource(
+                _leaf_request(
+                    user_scope=user_scope,
+                    execution_id=f"{root_id}-leaf-{index}",
+                    node_id=f"node-{index}",
+                    slot_id=f"slot-gl-{user_scope}-{root_id}-{index}",
+                )
+            )
+
+    async def test_global_leaf_limit_four_across_trees(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await self._seed_tree_executions(dao, "root-a", 2)
+        await self._seed_tree_executions(dao, "root-b", 2)
+        await self._seed_tree_executions(dao, "root-c", 1)
+        # 两棵树各 2 叶：每总 2 < 3，全局恰好 4 占满。
+        await self._claim_leaves(dao, "root-a", 2)
+        await self._claim_leaves(dao, "root-b", 2)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(
+                _leaf_request(execution_id="root-c-leaf-0", node_id="node-0", slot_id="slot-gl-c0")
+            )
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "global leaf" in excinfo.value.sanitized_message
+
+    async def test_global_leaf_limit_spans_user_scopes(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_session(dao, "u2", "s2")
+        await self._seed_tree_executions(dao, "root-a", 2, user_scope="u1", session_id="s1")
+        await self._seed_tree_executions(dao, "root-u", 2, user_scope="u2", session_id="s2")
+        await self._seed_tree_executions(dao, "root-u2", 1, user_scope="u2", session_id="s2")
+        await self._claim_leaves(dao, "root-a", 2, user_scope="u1")
+        await self._claim_leaves(dao, "root-u", 2, user_scope="u2")
+
+        # 另一用户域的第 5 个叶同样被全局上限拒绝（每总仅 2 未触发树内限额）。
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(
+                _leaf_request(user_scope="u2", execution_id="root-u2-leaf-0", node_id="node-0", slot_id="slot-u2-c0")
+            )
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "global leaf" in excinfo.value.sanitized_message
+
+    async def test_global_leaf_unknown_in_flight_keeps_capacity(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await self._seed_tree_executions(dao, "root-a", 2)
+        await self._seed_tree_executions(dao, "root-b", 2)
+        await self._seed_tree_executions(dao, "root-c", 1)
+
+        await dao.claim_resource(
+            _leaf_request(execution_id="root-a-leaf-0", node_id="node-0", slot_id="slot-unknown-a0")
+        )
+        # 尾段未知释放：released_at 已记但退出未确认，全局占用不释放。
+        await dao.release_resource(
+            ResourceReleaseRequest(
+                user_scope="u1",
+                slot_id="slot-unknown-a0",
+                execution_id="root-a-leaf-0",
+                node_id="node-0",
+                owner_epoch=1,
+                exit_verified=False,
+            )
+        )
+        await dao.claim_resource(
+            _leaf_request(execution_id="root-a-leaf-1", node_id="node-1", slot_id="slot-unknown-a1")
+        )
+        await self._claim_leaves(dao, "root-b", 2)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(
+                _leaf_request(execution_id="root-c-leaf-0", node_id="node-0", slot_id="slot-unknown-c0")
+            )
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "global leaf" in excinfo.value.sanitized_message
+
+        # 用户保未知结案（verified 升级）后容量释放，第 5 个叶放行。
+        await dao.release_resource(
+            ResourceReleaseRequest(
+                user_scope="u1",
+                slot_id="slot-unknown-a0",
+                execution_id="root-a-leaf-0",
+                node_id="node-0",
+                owner_epoch=1,
+                exit_verified=True,
+            )
+        )
+        ticket = await dao.claim_resource(
+            _leaf_request(execution_id="root-c-leaf-0", node_id="node-0", slot_id="slot-unknown-c1")
+        )
+        assert ticket.execution_id == "root-c-leaf-0"
+
+    async def test_concurrent_global_total_claim_two_winners(self, real_embedded_pg: ConnectionInfo) -> None:
+        """guard 行锁序化：三会话并发认领总票恰两胜（全局 2），败者 BUDGET_BLOCKED。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        for index in range(1, 4):
+            await _seed_session(dao, "u1", f"s{index}")
+            await _seed_execution(dao, "u1", f"s{index}", f"root-{index}", "root", "root")
+
+        results = await asyncio.gather(
+            *(
+                dao.claim_resource(_total_request(execution_id=f"root-{index}", slot_id=f"slot-gc{index}"))
+                for index in range(1, 4)
+            ),
+            return_exceptions=True,
+        )
+        outcomes = sorted(
+            "ok"
+            if isinstance(r, ResourceTicket)
+            else ("budget" if isinstance(r, AgentServiceError) and r.code == AgentErrorCode.BUDGET_BLOCKED else "other")
+            for r in results
+        )
+        assert outcomes == ["budget", "ok", "ok"], f"expect exactly two winners, got {outcomes}"
 
 
 # ------------------------------------------------------------------

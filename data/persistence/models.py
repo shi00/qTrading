@@ -2175,8 +2175,9 @@ class AgentSourceLink(Base):
 class AgentResourceSlot(Base):
     """资源票据（§9.11）：预分配全局 2 总/4 叶与一个 global_guard。
 
-    事务同时检查每会话 1/每总 3，不靠数量缓存准入。release_verified 表示真实退出
-    已确认；unknown 在途不放空（开放活动区间尾段未知不增剩余额度）。
+    事务同时检查全局 2 总/4 叶与每会话 1 总/每总 3 叶（检视 D27），不靠数量缓存
+    准入。release_verified 表示真实退出已确认；unknown 在途不放空（开放活动区间
+    尾段未知不增剩余额度）。
     """
 
     __tablename__ = "agent_resource_slot"
