@@ -2410,6 +2410,8 @@ def validate_data_consent_claim(
         _fail("identity_mismatch", "$.claim.consent_revision")
     if claim.operation_id != authorization.operation_id or claim.attempt_id != authorization.attempt_id:
         _fail("identity_mismatch", "$.claim.operation_id")
+    if claim.owner_epoch != authorization.owner_epoch or claim.run_epoch != authorization.run_epoch:
+        _fail("identity_mismatch", "$.claim.owner_epoch")
     if (
         claim.purpose != authorization.purpose
         or claim.target_fingerprint != authorization.target_fingerprint

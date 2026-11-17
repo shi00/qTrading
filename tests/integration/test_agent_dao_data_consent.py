@@ -301,14 +301,25 @@ def _claim(consent_revision: int = 1, attempt_id: str = "attempt-1") -> DataCons
     )
 
 
-async def _seed_operation(dao: AgentDao, user_scope: str = USER_SCOPE, operation_id: str = "op-1") -> None:
+async def _seed_operation(
+    dao: AgentDao,
+    user_scope: str = USER_SCOPE,
+    operation_id: str = "op-1",
+    *,
+    execution_id: str | None = None,
+    round_id: str | None = None,
+    owner_epoch: int = 1,
+    run_epoch: int = 1,
+) -> None:
     async with dao.engine.begin() as conn:
         await conn.execute(
             insert(AgentOperation).values(
                 user_scope=user_scope,
                 operation_id=operation_id,
-                owner_epoch=1,
-                run_epoch=1,
+                execution_id=execution_id,
+                round_id=round_id,
+                owner_epoch=owner_epoch,
+                run_epoch=run_epoch,
                 phase="prepared",
                 effect_state="not_dispatched",
                 io_state="not_started",
@@ -682,7 +693,7 @@ class TestClaimDataConsent:
         dao = await _setup(real_embedded_pg.url)
         session_id, execution_id, round_id = await _seed_research_chain(dao)
         await self._approved_consent(dao, session_id, execution_id, round_id)
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         fact = await dao.claim_data_consent(_authorization(), _claim())
         assert fact.replayed is False
         assert fact.claim.outcome is DataAttemptOutcome.ALLOW
@@ -703,7 +714,7 @@ class TestClaimDataConsent:
         dao = await _setup(real_embedded_pg.url)
         session_id, execution_id, round_id = await _seed_research_chain(dao)
         await self._approved_consent(dao, session_id, execution_id, round_id)
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         first = await dao.claim_data_consent(_authorization(), _claim())
         second = await dao.claim_data_consent(_authorization(), _claim())
         assert first.replayed is False
@@ -723,7 +734,7 @@ class TestClaimDataConsent:
         dao = await _setup(real_embedded_pg.url)
         session_id, execution_id, round_id = await _seed_research_chain(dao)
         await self._approved_consent(dao, session_id, execution_id, round_id)
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         await dao.claim_data_consent(_authorization(), _claim())
         with pytest.raises(AgentServiceError) as exc:
             await dao.claim_data_consent(
@@ -736,7 +747,7 @@ class TestClaimDataConsent:
         dao = await _setup(real_embedded_pg.url)
         session_id, execution_id, round_id = await _seed_research_chain(dao)
         await self._approved_consent(dao, session_id, execution_id, round_id)
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         # 撤销先胜：claim 复核在 decision 行锁下，revoked 状态拒绝新 claim
         await dao.revoke_data_consent_decision(_revoke_command(1))
         with pytest.raises(AgentServiceError) as exc:
@@ -748,7 +759,7 @@ class TestClaimDataConsent:
         dao = await _setup(real_embedded_pg.url)
         session_id, execution_id, round_id = await _seed_research_chain(dao)
         await self._approved_consent(dao, session_id, execution_id, round_id)
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         # 绑定推进到 revision 2 后，旧版核权（expected=1）拒绝
         await dao.save_data_consent_decision(
             _save_command(
@@ -789,7 +800,7 @@ class TestClaimDataConsent:
                 expected_revision=0,
             )
         )
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         with pytest.raises(AgentServiceError) as exc:
             await dao.claim_data_consent(_authorization(), _claim())
         assert _code_of(exc) == AgentErrorCode.POLICY_DENIED

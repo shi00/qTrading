@@ -108,7 +108,7 @@ class TestOwnerDataConsentEndToEnd:
         assert read.state is DataConsentState.APPROVED
         assert read.consent_revision == 2
 
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         receipt = await service.authorize_data_attempt(_authorization(consent_revision=2))
         assert receipt.outcome is DataAttemptOutcome.ALLOW
         assert receipt.consent_revision == 2
@@ -141,7 +141,7 @@ class TestOwnerDataConsentEndToEnd:
         receipt_cmd = await service.revoke_data_consent(_revoke_command(2))
         assert receipt_cmd.current_revision == 3
 
-        await _seed_operation(dao)
+        await _seed_operation(dao, execution_id=execution_id, round_id=round_id)
         receipt = await service.authorize_data_attempt(_authorization(consent_revision=2))
         assert receipt.outcome is DataAttemptOutcome.DENY
         assert receipt.reason == "state_not_approved"
