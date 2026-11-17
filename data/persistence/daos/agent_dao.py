@@ -34,6 +34,8 @@ from typing import Any, Final
 from collections.abc import AsyncIterator, Sequence
 
 import sqlalchemy as sa
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import Draft202012Validator, validator_for
 from sqlalchemy.dialects import postgresql as sa_pg
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -392,6 +394,47 @@ def _wire_to_dt(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+
+
+def _parse_answer_payload(answer_payload: CanonicalJson, identity: str) -> dict[str, Any]:
+    """答复载荷解码（检视 D06）：必须是 JSON 对象，非法 JSON/非对象 → INPUT_INVALID。"""
+
+    try:
+        payload = json.loads(answer_payload)
+    except (TypeError, ValueError) as exc:
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "answer payload is not valid JSON", identity) from exc
+    if not isinstance(payload, dict):
+        raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "answer payload must be a JSON object", identity)
+    return payload
+
+
+def _validate_answer_against_question_schema(payload: Any, answer_schema: Any, identity: str) -> None:
+    """按原问题 ``answer_schema`` 核答复（检视 D06）。
+
+    原问题未申报 schema → 不施加额外约束；申报但不可解释（非对象/非法 JSON
+    Schema）→ ``POLICY_DENIED``，不把不可解释当无约束（R21）；答复违背 schema
+    （版本、选项集/枚举、必填等）→ ``INPUT_INVALID``。任何拒绝都发生在写事实前，
+    过期/非法选项零新答复与零新消费。
+    """
+
+    if answer_schema is None:
+        return
+    if not isinstance(answer_schema, dict):
+        raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "original answer schema cannot be interpreted", identity)
+    validator_cls = validator_for(answer_schema, default=Draft202012Validator)
+    try:
+        validator_cls.check_schema(answer_schema)
+    except SchemaError as exc:
+        raise AgentServiceError(
+            AgentErrorCode.POLICY_DENIED, "original answer schema cannot be interpreted", identity
+        ) from exc
+    for error in validator_cls(answer_schema).iter_errors(payload):
+        json_path = getattr(error, "json_path", "$")
+        raise AgentServiceError(
+            AgentErrorCode.INPUT_INVALID,
+            f"answer payload violates original schema at {json_path}",
+            identity,
+        )
 
 
 def _event_from_row(row: Any) -> Any:
@@ -2124,6 +2167,64 @@ class AgentDao(BaseDao):
                 session_seq=session_seq,
             )
 
+    async def _assert_question_answerable(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        execution_id: str,
+        round_id: str,
+        expires_at: datetime | None,
+        identity: str,
+        action: str,
+    ) -> None:
+        """首生效前新鲜核原问题（检视 D06）：过期/终止/旧轮一律拒绝，零新事实。
+
+        只做普通读，不新增行锁边（沿用 decision → command 锁序）：过期按
+        ``expires_at <= now``；终止取执行 ``NON_RECOVERABLE_DISPLAY_STATES`` 与
+        轮 ``stop_reason``；旧轮取 ``execution.current_round_id`` 与
+        ``round.active_round``。执行/轮事实缺失 → ``OPERATION_UNKNOWN``（不冒充
+        可答复）。
+        """
+
+        occurred = datetime.now(UTC)
+        if expires_at is not None and occurred >= expires_at:
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, f"{action} rejected: question expired", identity)
+        exec_row = (
+            await conn.execute(
+                sa.select(AgentExecution.current_round_id, AgentExecution.display_state).where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.execution_id == execution_id,
+                )
+            )
+        ).first()
+        if exec_row is None:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "original question execution unavailable", identity
+            )
+        if exec_row.display_state in NON_RECOVERABLE_DISPLAY_STATES:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED, f"{action} rejected: execution is terminated", identity
+            )
+        if exec_row.current_round_id != round_id:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED, f"{action} rejected: question belongs to a superseded round", identity
+            )
+        round_row = (
+            await conn.execute(
+                sa.select(AgentRound.active_round, AgentRound.stop_reason).where(
+                    AgentRound.user_scope == user_scope,
+                    AgentRound.round_id == round_id,
+                )
+            )
+        ).first()
+        if round_row is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "original question round unavailable", identity)
+        if not round_row.active_round or round_row.stop_reason is not None:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED, f"{action} rejected: question round is no longer active", identity
+            )
+
     async def save_answer(self, request: SaveAnswerRequest) -> AnswerReceipt:
         """答复保存（SQ-03/§5.3 答复线性化点）：decision.answer_command_id CAS
         （NULL→set 单胜者）+ 同事务插 agent_command(kind='answer', 待投递事实)。
@@ -2131,6 +2232,11 @@ class AgentDao(BaseDao):
         幂等（§9.13）：同命令键同规范输入且决定已指向该命令 → 查回原事实零新行；
         同命令键异输入 → ``INPUT_CONFLICT``；决定已被其他命令应答或预期版不符
         → ``REVISION_CONFLICT``。锁序（§5.4 第 2 条）：decision → command。
+
+        首生效新鲜核原问题（检视 D06）：同事务读原决定的答复 schema、期限、
+        所属轮次与执行终止态；非法选项/版本不符 → ``INPUT_INVALID``，过期/
+        执行终止/轮次已被替代或停轮 → ``POLICY_DENIED``，均在写答复命令与推进
+        CAS 之前拒绝（零新事实）。重放路径只读原事实回执，不按当前状态重判。
         """
 
         self._check_engine()
@@ -2154,6 +2260,8 @@ class AgentDao(BaseDao):
                         AgentDecision.round_id,
                         AgentDecision.revision,
                         AgentDecision.answer_command_id,
+                        AgentDecision.expires_at,
+                        AgentDecision.answer_schema,
                     )
                     .where(
                         AgentDecision.user_scope == request.user_scope,
@@ -2194,7 +2302,20 @@ class AgentDao(BaseDao):
                     "same answer command key with different input",
                     identity,
                 )
-            # 3. 先插 answer 命令（answer_command_id FK 非延迟，须先建命令行）。
+            # 3. 首生效新鲜核原问题（检视 D06）：答复 schema/选项集、过期、当前轮、
+            #    终止。任一不满足即拒绝，零新答复命令、零 CAS 推进。
+            answer_payload = _parse_answer_payload(request.answer_payload, identity)
+            _validate_answer_against_question_schema(answer_payload, decision_row.answer_schema, identity)
+            await self._assert_question_answerable(
+                conn,
+                user_scope=request.user_scope,
+                execution_id=decision_row.execution_id,
+                round_id=decision_row.round_id,
+                expires_at=decision_row.expires_at,
+                identity=identity,
+                action="answer save",
+            )
+            # 4. 先插 answer 命令（answer_command_id FK 非延迟，须先建命令行）。
             occurred = datetime.now(UTC)
             await conn.execute(
                 sa.insert(AgentCommand).values(
@@ -2209,14 +2330,14 @@ class AgentDao(BaseDao):
                     expected_revision=request.expected_decision_revision,
                     input_revision=None,
                     input_digest=answer_digest,
-                    request_payload=json.loads(request.answer_payload),
+                    request_payload=answer_payload,
                     commit_state=CommitState.COMMITTED.value,
                     delivery_state=DeliveryState.NOT_DELIVERED.value,
                     consumption_state=ConsumptionState.NOT_CONSUMED.value,
                     verified_at=occurred,
                 )
             )
-            # 4. CAS：answer_command_id NULL→set + 预期版（§5.3「核预期版」）。
+            # 5. CAS：answer_command_id NULL→set + 预期版（§5.3「核预期版」）。
             cas_result = await conn.execute(
                 sa.update(AgentDecision)
                 .where(
@@ -2351,6 +2472,11 @@ class AgentDao(BaseDao):
 
         锁序（§5.4 第 2 条）：decision（经 answer_command_id 反查）→ command。
         消费与投递是不同事实（INV-06）；消费不核投递状态。
+
+        首生效新鲜核原问题（检视 D06）：同事务读原决定的答复 schema、期限、所属
+        轮次与执行终止态，并按原答复载荷核选项集；非法选项 → ``INPUT_INVALID``，
+        过期/终止/旧轮 → ``POLICY_DENIED``，均在写 consumed 事实前拒绝（零新消费）。
+        已消费重放只读原事实，不按当前状态重判。
         """
 
         self._check_engine()
@@ -2363,7 +2489,14 @@ class AgentDao(BaseDao):
             # 1. decision 行锁（经 answer_command_id 反查，保持 decision → command 序）。
             decision_row = (
                 await conn.execute(
-                    sa.select(AgentDecision.decision_id, AgentDecision.answer_consumed_at)
+                    sa.select(
+                        AgentDecision.decision_id,
+                        AgentDecision.execution_id,
+                        AgentDecision.round_id,
+                        AgentDecision.answer_consumed_at,
+                        AgentDecision.expires_at,
+                        AgentDecision.answer_schema,
+                    )
                     .where(
                         AgentDecision.user_scope == request.user_scope,
                         AgentDecision.answer_command_id == request.command_record_id,
@@ -2373,7 +2506,11 @@ class AgentDao(BaseDao):
             ).first()
             cmd_row = (
                 await conn.execute(
-                    sa.select(AgentCommand.consumption_state, AgentCommand.consumed_at)
+                    sa.select(
+                        AgentCommand.consumption_state,
+                        AgentCommand.consumed_at,
+                        AgentCommand.request_payload,
+                    )
                     .where(
                         AgentCommand.user_scope == request.user_scope,
                         AgentCommand.command_record_id == request.command_record_id,
@@ -2405,6 +2542,18 @@ class AgentDao(BaseDao):
                     "consumption state cannot be asserted as consumed",
                     identity,
                 )
+            # 2. 首生效新鲜核原问题（检视 D06）：原答复仍满足原 schema，问题未过期、
+            #    未终止、未被新轮替代；任一不满足 → 零新消费。
+            _validate_answer_against_question_schema(cmd_row.request_payload, decision_row.answer_schema, identity)
+            await self._assert_question_answerable(
+                conn,
+                user_scope=request.user_scope,
+                execution_id=decision_row.execution_id,
+                round_id=decision_row.round_id,
+                expires_at=decision_row.expires_at,
+                identity=identity,
+                action="answer consume",
+            )
             await conn.execute(
                 sa.update(AgentCommand)
                 .where(
