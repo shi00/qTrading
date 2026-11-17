@@ -8,6 +8,13 @@
 - stdio：``StdioTransport(绝对 command, args, 最小环境, cwd, log_file=<有界排空器>)``，
   不经 shell；``log_file`` 接受一个 OS 管道写端，由后台线程持续读取子进程 stderr
   （FD 级，避免管道不读导致阻塞），逐行先脱敏再进入有界内存缓冲，**不落盘**。
+- stdio 环境（I42）：锁定版 SDK 的 ``mcp.client.stdio.stdio_client`` 以
+  ``get_default_environment() | (server.env or {})`` 生成子进程环境（源码实证：
+  ``mcp/client/stdio.py`` 的 ``stdio_client`` → ``_create_platform_compatible_process``），
+  即**不复制父进程完整 ``os.environ``**，只继承一份固定的非秘密 OS 清单（Windows 12 键 /
+  POSIX 6 键）。本模块仍**显式覆盖**该清单的全部键，使子进程环境完全由本模块决定
+  （SDK 若调整默认清单也不会引入新的隐式继承），且 ``TEMP`` / ``TMP`` 强制指向本次连接
+  专属受管目录（非应用/用户临时目录），关闭或连接失败时删除，不留残留。
 - streamable_http / sse：``StreamableHttpTransport`` / ``SSETransport``，只用已冻结
   的 URL；SSE 仍须显式核准（由 ``validate_transport_config`` 保证）。两条 HTTP 传输
   都注入显式 ``httpx_client_factory``（见下），不依赖 SDK 默认 client。
@@ -55,11 +62,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 import threading
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx2
@@ -74,8 +84,84 @@ from utils.sanitizers import DataSanitizer
 if TYPE_CHECKING:
     from typing import TextIO
 
-#: 子进程最小 OS 基线（Windows 缺少这些值会导致解释器无法启动）；不含应用环境副本。
-_OS_BASELINE_KEYS: tuple[str, ...] = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "TEMP", "TMP")
+#: 子进程显式环境基线（覆盖 SDK ``get_default_environment()`` 在 Windows / POSIX 的
+#: 全部可注入键）：只为进程启动所必需的 OS 非秘密变量，不含应用秘密副本。
+_OS_BASELINE_KEYS: tuple[str, ...] = (
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "USERPROFILE",
+    "USERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOME",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "USER",
+)
+
+#: 子进程临时目录键：强制指向本次连接专属受管目录，不继承应用/用户临时目录。
+_STDIO_TEMP_KEYS: tuple[str, ...] = ("TEMP", "TMP")
+#: 受管专属临时目录名前缀（``mkdtemp`` 追加随机后缀，天然保证唯一、无竞争）。
+_STDIO_TEMP_PREFIX = "astock-mcp-stdio-"
+
+
+def _build_stdio_env(
+    configured: tuple[tuple[str, str], ...],
+    *,
+    temp_dir: Path,
+) -> dict[str, str]:
+    """显式白名单基线 + 配置项 + 强制受管 ``TEMP`` / ``TMP``。
+
+    基线只取 :data:`_OS_BASELINE_KEYS` 中实际存在的键（不含应用秘密副本）；
+    ``TEMP`` / ``TMP`` 最后写入，配置项不得把子进程临时目录指回应用目录。
+    """
+    env = {key: os.environ[key] for key in _OS_BASELINE_KEYS if key in os.environ}
+    env.update(configured)
+    env.update({key: str(temp_dir) for key in _STDIO_TEMP_KEYS})
+    return env
+
+
+class _ManagedStdioEnvironment:
+    """stdio 子进程环境：显式基线 + 本次连接专属 ``TEMP`` / ``TMP`` 受管目录。
+
+    目录由 ``mkdtemp`` 创建（owner 为当前进程用户，POSIX 权限收紧到 0o700，
+    Windows ACL 由用户配置目录继承），每次连接一个、天然并发安全；连接失败与
+    正常关闭都调用 :meth:`cleanup`，可重复调用且不抛异常。
+    """
+
+    def __init__(self, env: dict[str, str], temp_dir: Path) -> None:
+        self._env = env
+        self._temp_dir = temp_dir
+
+    @property
+    def env(self) -> dict[str, str]:
+        """交给 SDK 的完整子进程环境（键集合完全由本模块决定）。"""
+        return dict(self._env)
+
+    @property
+    def temp_dir(self) -> Path:
+        """本次连接的受管临时目录。"""
+        return self._temp_dir
+
+    @classmethod
+    def create(cls, configured: tuple[tuple[str, str], ...]) -> _ManagedStdioEnvironment:
+        """创建专属临时目录并构造环境；目录创建失败直接抛出（不静默降级）。"""
+        temp_dir = Path(tempfile.mkdtemp(prefix=_STDIO_TEMP_PREFIX))
+        with suppress(OSError):
+            os.chmod(temp_dir, 0o700)
+        return cls(_build_stdio_env(configured, temp_dir=temp_dir), temp_dir)
+
+    def cleanup(self) -> None:
+        """删除专属目录（幂等；已删除/不可删均不抛异常）。"""
+        shutil.rmtree(self._temp_dir, ignore_errors=True)
+
 
 #: stderr 诊断尾部保留字节上限（内存缓冲与公开属性共用同一上限）。
 _STDERR_TAIL_BYTES = 4096
@@ -222,6 +308,12 @@ def _discard_drain(drain: _SanitizedStderrDrain | None) -> None:
         return
     drain.close()
     drain.clear()
+
+
+def _discard_stdio_env(stdio_env: _ManagedStdioEnvironment | None) -> None:
+    """连接受阻/失败时删除受管临时目录，不留残留。"""
+    if stdio_env is not None:
+        stdio_env.cleanup()
 
 
 #: 目标与冻结值不一致（含内嵌 userinfo）时的诊断标签。
@@ -389,6 +481,7 @@ class FastMCPSession:
         diagnostics: MCPSessionDiagnostics,
         stderr_drain: _SanitizedStderrDrain | None,
         on_close: Callable[[], None],
+        stdio_env: _ManagedStdioEnvironment | None = None,
     ) -> None:
         self._client = client
         self._config = config
@@ -397,6 +490,7 @@ class FastMCPSession:
         self._diagnostics = diagnostics
         self._stderr_drain = stderr_drain
         self._on_close = on_close
+        self._stdio_env = stdio_env
         self._closed = False
         self._stderr_drain_closed = False
 
@@ -466,6 +560,9 @@ class FastMCPSession:
                     finally:
                         # 属性已持有有界脱敏副本；清空内存缓冲，不留运行期留存。
                         drain.clear()
+            if self._stdio_env is not None:
+                # 退出尝试后即删专属临时目录（幂等）：失败重试也不留残留。
+                self._stdio_env.cleanup()
         # 只有实际退出成功才标记已关闭：失败/取消后的再次 aclose 仍会真正重试退出（I17）。
         self._closed = True
 
@@ -501,8 +598,25 @@ class FastMCPClientFactory:
         label = config.identity.stable_key()
         # 诊断先于 client 构造：HTTP 目标核验在传输层记录，须与连接期共用同一实例。
         diagnostics = MCPSessionDiagnostics()
-        drain = _SanitizedStderrDrain() if config.transport.kind is MCPTransportKind.STDIO else None
-        transport = self._transport(config, drain, diagnostics=diagnostics, label=label)
+        is_stdio = config.transport.kind is MCPTransportKind.STDIO
+        drain = _SanitizedStderrDrain() if is_stdio else None
+        stdio_env: _ManagedStdioEnvironment | None = None
+        try:
+            if is_stdio:
+                stdio_env = _ManagedStdioEnvironment.create(config.transport.env)
+            transport = self._transport(config, drain, stdio_env=stdio_env, diagnostics=diagnostics, label=label)
+        except Exception as exc:
+            _discard_drain(drain)
+            _discard_stdio_env(stdio_env)
+            raise AgentServiceError(
+                AgentErrorCode.CONFIG_UNAVAILABLE,
+                f"mcp transport setup failed: {type(exc).__name__}",
+                label,
+            ) from exc
+        except BaseException:
+            _discard_drain(drain)
+            _discard_stdio_env(stdio_env)
+            raise
         client: Client[Any] = Client(
             transport,
             timeout=config.tool_deadline_s,
@@ -512,6 +626,7 @@ class FastMCPClientFactory:
             await client.__aenter__()
         except Exception as exc:
             _discard_drain(drain)
+            _discard_stdio_env(stdio_env)
             raise AgentServiceError(
                 AgentErrorCode.CONFIG_UNAVAILABLE,
                 f"mcp connection failed: {type(exc).__name__}",
@@ -520,6 +635,7 @@ class FastMCPClientFactory:
         except BaseException:
             # 取消/键盘中断等不转译，但必须收尾排空器（不吞 CancelledError）。
             _discard_drain(drain)
+            _discard_stdio_env(stdio_env)
             raise
         closed = False
 
@@ -542,6 +658,7 @@ class FastMCPClientFactory:
             diagnostics=diagnostics,
             stderr_drain=drain,
             on_close=_mark_closed,
+            stdio_env=stdio_env,
         )
 
     # -- 内部 ---------------------------------------------------------------
@@ -551,6 +668,7 @@ class FastMCPClientFactory:
         config: MCPServerConfig,
         drain: _SanitizedStderrDrain | None,
         *,
+        stdio_env: _ManagedStdioEnvironment | None = None,
         diagnostics: MCPSessionDiagnostics,
         label: str,
     ) -> Any:
@@ -559,10 +677,11 @@ class FastMCPClientFactory:
             command = transport.command
             assert command is not None
             assert drain is not None
+            assert stdio_env is not None
             return StdioTransport(
                 command=command,
                 args=list(transport.args),
-                env=self._build_env(transport.env),
+                env=stdio_env.env,
                 cwd=transport.cwd,
                 keep_alive=False,
                 log_file=cast("TextIO", drain),
@@ -572,11 +691,3 @@ class FastMCPClientFactory:
         if transport.kind is MCPTransportKind.STREAMABLE_HTTP:
             return StreamableHttpTransport(transport.url, httpx_client_factory=factory)
         return SSETransport(transport.url, httpx_client_factory=factory)
-
-    @staticmethod
-    def _build_env(configured: tuple[tuple[str, str], ...]) -> dict[str, str]:
-        """最小 OS 基线 + 显式配置项（保序）；不复制应用环境。"""
-
-        env = {key: os.environ[key] for key in _OS_BASELINE_KEYS if key in os.environ}
-        env.update(configured)
-        return env
