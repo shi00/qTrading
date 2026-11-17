@@ -1111,18 +1111,20 @@ class AgentDao(BaseDao):
                 missing_reason=missing_reason,
             )
 
-    @staticmethod
     async def _assert_source_registered(
-        conn: AsyncConnection, *, query: SourceReadQuery, user_scope: str, identity: str
+        self, conn: AsyncConnection, *, query: SourceReadQuery, user_scope: str, identity: str
     ) -> None:
         """核对来源已登记到请求上下文（§4.2：草稿 revision 或已受理执行输入版）。
 
         - 草稿上下文：须存在**会话内**谱系边（``session_id`` 非空），且该会话
           当前 ``agent_session.draft_revision`` 等于请求修订——查询未携会话 id，
           故以「来源所属会话的草稿修订」定位，避免同域不同会话的草稿互认；
-        - 执行上下文：须存在 ``consumer_kind='execution'`` 且 ``execution_id``
-          一致的谱系边；给出 ``round_id`` 时再核该轮次属于此执行且
-          ``input_revision`` 与轮次一致。
+        - 执行上下文：须存在 ``consumer_kind='execution'``、``execution_id``
+          一致且 ``consumer_version`` 等于**本次查询输入版**的谱系边（源边
+          ``consumer_version`` 承载源所属输入版，检视 D13）；输入版按指定轮次
+          核 ``input_revision``，未指定轮次时取执行当前轮/权威受理 manifest
+          （与 ``get_execution_snapshot`` 同口径）。同一执行的旧版源集不得借给
+          新版查询（检视 D12）。
 
         未登记（或轮次/版本不符）→ ``INPUT_INVALID``：不因「同用户域有该来源版本」
         就放行未进入该请求的资料。
@@ -1162,30 +1164,71 @@ class AgentDao(BaseDao):
                 AgentSourceLink.execution_id == query.execution_id,
                 AgentSourceLink.consumer_id == query.execution_id,
             )
-            if query.round_id is not None:
-                round_row = (
-                    await conn.execute(
-                        sa.select(AgentRound.round_id, AgentRound.execution_id, AgentRound.input_revision).where(
-                            AgentRound.user_scope == user_scope,
-                            AgentRound.round_id == query.round_id,
-                        )
-                    )
-                ).first()
-                if round_row is None or round_row.execution_id != query.execution_id:
-                    raise AgentServiceError(
-                        AgentErrorCode.INPUT_INVALID,
-                        "round does not belong to requested execution",
-                        identity,
-                    )
-                if query.input_revision is not None and round_row.input_revision != query.input_revision:
-                    raise AgentServiceError(
-                        AgentErrorCode.INPUT_INVALID, "input_revision does not match requested round", identity
-                    )
+            input_version = await self._resolve_execution_input_version(
+                conn, query=query, user_scope=user_scope, identity=identity
+            )
+            # 源边 consumer_version 承载源所属执行输入版（检视 D13）；只认本次
+            # 查询的准确输入版成员，旧版源集不借给新版查询（检视 D12）。
+            conditions += (AgentSourceLink.consumer_version == str(input_version),)
             link = (await conn.execute(sa.select(AgentSourceLink.link_id).where(*conditions).limit(1))).first()
         if link is None:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_INVALID, "source is not registered to requested context", identity
             )
+
+    async def _resolve_execution_input_version(
+        self, conn: AsyncConnection, *, query: SourceReadQuery, user_scope: str, identity: str
+    ) -> int:
+        """本次查询所属执行输入版（与 ``bind_actual_input`` / D30 同口径）。
+
+        - 指定轮次：核该轮属于此执行且与声明的 ``input_revision`` 一致，取轮次
+          输入版；
+        - 未指定轮次：取执行当前轮；无当前轮（queued）时回落该执行权威受理/修订
+          manifest（``input_revision`` 最大者），不以任意历史源边版本冒充。
+
+        轮次错配 → ``INPUT_INVALID``；权威 manifest 缺失 → ``OPERATION_UNKNOWN``
+        （受理必写命令，缺失即事实不可读，不冒充无限制，R21）。
+        """
+
+        round_id = query.round_id
+        execution_id = query.execution_id
+        assert execution_id is not None  # encode_source_read_query 保证执行上下文必携 execution_id
+        if round_id is None:
+            execution_row = (
+                await conn.execute(
+                    sa.select(AgentExecution.current_round_id).where(
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.execution_id == execution_id,
+                    )
+                )
+            ).first()
+            if execution_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution not found in user scope", identity)
+            round_id = execution_row.current_round_id
+        if round_id is not None:
+            round_row = (
+                await conn.execute(
+                    sa.select(AgentRound.round_id, AgentRound.execution_id, AgentRound.input_revision).where(
+                        AgentRound.user_scope == user_scope,
+                        AgentRound.round_id == round_id,
+                    )
+                )
+            ).first()
+            if round_row is None or round_row.execution_id != execution_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "round does not belong to requested execution",
+                    identity,
+                )
+            if query.input_revision is not None and round_row.input_revision != query.input_revision:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID, "input_revision does not match requested round", identity
+                )
+            return _require_int_field(round_row.input_revision, "input_revision", identity, 1)
+        revision, _manifest = await self._authoritative_input_command(
+            conn, user_scope=user_scope, execution_id=execution_id, identity=identity
+        )
+        return revision
 
     def _decode_source_asset_row(
         self, row: Any, *, user_scope: str, identity: str
