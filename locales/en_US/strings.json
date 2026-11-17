@@ -678,6 +678,7 @@
     "llm_err_content_policy": "Content policy violation, request rejected",
     "llm_err_insufficient_quota": "Insufficient quota, please top up your account",
     "llm_err_unknown": "Connection failed, please check logs for details",
+    "llm_err_params_rejected": "Provider rejected the request parameters (HTTP 422); attempt stopped without dropping parameters or resending. Please check model parameters.",
     "llm_context": "Context",
     "llm_provider_deepseek": "DeepSeek",
     "llm_provider_qwen": "Alibaba Qwen",

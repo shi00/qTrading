@@ -23,13 +23,20 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from inspect import isawaitable
 from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import urlparse
 
 import httpx
 
-from core.errors import AIConfigError, AIContentRefusedError, AIPolicyNotAcknowledgedError
+from core.errors import (
+    AIConfigError,
+    AIContentRefusedError,
+    AIPolicyNotAcknowledgedError,
+    AIProviderParamsRejectedError,
+)
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
@@ -305,6 +312,147 @@ def _ensure_litellm_loaded() -> bool:
             _ai.DataSanitizer.sanitize_error(exc),
         )
         return False
+
+
+# === Agent 出口严格出站（检视 M20：禁删参 / 禁隐式重发）===
+# 锁定 LiteLLM 的 OpenAI 系处理器（llms/openai/openai.py 的 acompletion / streaming）
+# 在收到 HTTP 422 时，只要 ``litellm.drop_params is True``（本模块加载时置 True，
+# 旧链依赖该全局兜底）就会删去报错参数并在**同一 attempt 内**再发一次（``range(2)``）；
+# per-call ``drop_params=False`` 无法覆盖（条件是「全局 OR 调用」），``num_retries=0``
+# 也不作用于该分支。Agent 出口要求该策略可核（不临时切全局造成与旧链竞态），故对
+# 端点/凭据显式可镜像的 OpenAI 系连接按调用注入独立 OpenAI SDK client，并在首个
+# 422 响应处直接中止：参数原样（不删参）、出站一次（不隐重发）。
+_STRICT_422_PREFIXES: Final[frozenset[str]] = frozenset({"openai", "deepseek"})
+_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class _StrictParamRefusal(Exception):
+    """内部哨兵：出站首个 422 被严格策略中止（不进入 SDK 删参重发分支）。"""
+
+
+class _StrictNoDropResendGuard:
+    """单次尝试的 422 严格守卫（M20）：记录首个 422 并中止该次 httpx 请求。
+
+    httpx response 钩子抛出的异常会被 OpenAI SDK 归为连接错误（不携带状态码），
+    故由 :func:`_strict_params_policy_error` 依据 ``rejected_status`` 重新给出
+    策略异常，保证错误语义与 attempt 身份可核。
+    """
+
+    __slots__ = ("rejected_status",)
+
+    def __init__(self) -> None:
+        self.rejected_status: int | None = None
+
+    async def on_response(self, response: httpx.Response) -> None:
+        # httpx.AsyncClient 会 await 响应钩子，故必须是协程；在 SDK 解析 422 前抛错，
+        # 使 LiteLLM 的删参重发分支（except openai.UnprocessableEntityError）不可达。
+        if response.status_code == 422 and self.rejected_status is None:
+            self.rejected_status = response.status_code
+            raise _StrictParamRefusal("HTTP 422 refused before LiteLLM drop_params resend")
+
+
+def _build_strict_guard_client(
+    *,
+    provider: str,
+    litellm_model: str,
+    api_base: str | None,
+    api_key: str | None,
+    api_version: str | None,
+    timeout: httpx.Timeout,
+    guard: _StrictNoDropResendGuard,
+) -> Any | None:
+    """按连接构造带 422 拒绝钩子的 per-call OpenAI SDK client（Agent 出口专用）。
+
+    返回 ``None`` 时保持既有调用形态（不注入 client）：
+    - 原生 SDK 实现（anthropic / gemini / mistral）无 422 删参分支，422 直接上抛；
+    - 端点或凭据未显式给出（依赖 LiteLLM 自身默认值/环境变量解析）时无法等价镜像，
+      注入会改变既有端点解析行为，故不注入（不伪装已覆盖该形态）。
+    """
+    prefix = litellm_model.split("/", 1)[0]
+    if provider != "azure" and prefix not in _STRICT_422_PREFIXES:
+        return None
+    if not (api_base and api_key):
+        return None
+    # 端点/代理语义与既有链路一致：本机端点强制直连，其余按 NO_PROXY 白名单决策
+    # （httpx client 在此显式构造，不能依赖 litellm_env_context 写入后的 env 默认值）。
+    from utils.proxy_manager import ProxyManager
+
+    host = (urlparse(api_base).hostname or "").lower()
+    proxy_kwargs = {"trust_env": False} if host in _LOOPBACK_HOSTS else ProxyManager.get_httpx_proxy_kwargs(host)
+    http_client = httpx.AsyncClient(event_hooks={"response": [guard.on_response]}, timeout=timeout, **proxy_kwargs)
+    if provider == "azure":
+        from openai import AsyncAzureOpenAI
+
+        return AsyncAzureOpenAI(
+            azure_endpoint=api_base,
+            api_version=api_version,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=0,  # 与 per-call num_retries=0 同义：无 SDK 隐藏重试
+            http_client=http_client,
+        )
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(
+        base_url=api_base,
+        api_key=api_key,
+        timeout=timeout,
+        max_retries=0,
+        http_client=http_client,
+    )
+
+
+@asynccontextmanager
+async def _strict_egress_dispatch(
+    request_params: dict,
+    *,
+    provider: str,
+    litellm_model: str,
+    api_version: str | None,
+) -> AsyncIterator[_StrictNoDropResendGuard]:
+    """在一次尝试内注入严格守卫 client，并在尝试结束时关闭其连接。
+
+    注入的 ``client`` 键覆盖 LiteLLM 的默认客户端，端点/凭据与本次连接声明一致；
+    代理按目标 host 显式决策（不依赖 ``ProxyManager.litellm_env_context()`` 写入的
+    env 默认值，避免本机端点被环境代理劫持）。
+    """
+    guard = _StrictNoDropResendGuard()
+    client = _build_strict_guard_client(
+        provider=provider,
+        litellm_model=litellm_model,
+        api_base=request_params.get("api_base"),
+        api_key=request_params.get("api_key"),
+        api_version=api_version,
+        timeout=request_params["timeout"],
+        guard=guard,
+    )
+    if client is not None:
+        request_params["client"] = client
+    try:
+        yield guard
+    finally:
+        if client is not None:
+            await client.close()
+
+
+def _strict_params_policy_error(
+    guard: _StrictNoDropResendGuard | None,
+    attempt_context: AttemptContext,
+) -> AIProviderParamsRejectedError | None:
+    """首个 422 被严格中止时给出带 attempt 身份的策略异常（否则 ``None``）。
+
+    消息只含状态码与 attempt / invocation 身份（R9：不含凭据与请求正文）。
+    """
+    if guard is None or guard.rejected_status is None:
+        return None
+    return AIProviderParamsRejectedError(
+        detail=(
+            f"Provider rejected request parameters with HTTP {guard.rejected_status}; "
+            "strict Agent egress stopped before LiteLLM drop_params resend "
+            f"(attempt_id={getattr(attempt_context, 'attempt_id', None)}, "
+            f"invocation_id={getattr(attempt_context, 'invocation_id', None)})"
+        )
+    )
 
 
 def _check_reasoning_support(model: str) -> bool:
@@ -861,7 +1009,8 @@ class LiteLLMClient:
         """统一单连接云端推理（S2，ADR-0014 §6.1/§6.2）：只执行当前目标。
 
         - 不读全局配置、不走 Router、不做候选切换/重试（``num_retries=0``）；
-          Tenacity 重试与冷却归 S3 ScenarioExecutor；
+          Tenacity 重试与冷却归 S3 ScenarioExecutor；provider 以 HTTP 422 拒绝参数时
+          严格出站直接失败（M20：禁删参 / 禁隐式重发，见 :func:`_strict_egress_dispatch`）；
         - model 前缀按 provider 的 ``litellm_prefix`` 拼接（azure 走
           ``azure/<deployment>``），api_base 取连接定义；
         - 凭据经 ``resolve_credential`` 三形态解析（keyring 读取为同步 IO，
@@ -883,6 +1032,8 @@ class LiteLLMClient:
             AIContentRefusedError: F27 云响应内容安全拒绝（``message.refusal`` /
                 ``finish_reason == "content_filter"``）提炼为策略终态——Executor
                 据此终止整个候选遍历，禁止重试与换候选绕过（覆盖边界见提取点注释）。
+            AIProviderParamsRejectedError: provider 以 HTTP 422 拒绝请求参数（M20：
+                严格出站中止，未删参、未重发；detail 含 attempt 身份）。
             ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法 /
                 版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）。
             TimeoutError: dispatch 前 deadline 已耗尽。
@@ -977,6 +1128,7 @@ class LiteLLMClient:
             "messages": messages,
             "model": litellm_model,
             "num_retries": 0,  # §6.2：单连接无 SDK 隐藏重试，重试/冷却归 Executor
+            "drop_params": False,  # M20：声明禁静默丢参（真正阻断见 _strict_egress_dispatch）
             "timeout": httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT),
         }
         if api_version is not None:
@@ -1015,9 +1167,16 @@ class LiteLLMClient:
         # 记录范围覆盖 dispatch + 响应解释全段：任一环节失败都回写 failed，避免
         # 「已出站但无审计」或「失败被记成 sent」。异常解释与结果记录都在同一
         # try/except 内完成，保证每次尝试恰一条记录（无意图+结果双记）。
+        strict_guard: _StrictNoDropResendGuard | None = None
         try:
             with ProxyManager.litellm_env_context():
-                response = await _ai.acompletion(**request_params)
+                async with _strict_egress_dispatch(
+                    request_params,
+                    provider=provider,
+                    litellm_model=litellm_model,
+                    api_version=api_version,
+                ) as strict_guard:
+                    response = await _ai.acompletion(**request_params)
 
             # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
             # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
@@ -1052,13 +1211,18 @@ class LiteLLMClient:
             await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
             raise  # R2: 必须传播
         except Exception as exc:
+            # M20：首个 422 被严格中止 → 以携带 attempt 身份的策略异常失败
+            # （不重试同一连接、参数原样未删）。审计记账随策略异常分类码。
+            policy_exc = _strict_params_policy_error(strict_guard, attempt_context)
             # 内容拒绝经 AppError.to_error_info 直接给出 content_policy 分类码；
             # 其余按 llm 语境分类（timeout / network / auth_failed / server_error ...）。
             await _audit_egress_outcome(
                 status="failed",
-                error_category=classify_error(exc, context="llm").get("code"),
+                error_category=classify_error(policy_exc or exc, context="llm").get("code"),
                 **audit_kwargs,
             )
+            if policy_exc is not None:
+                raise policy_exc from exc
             raise
 
         await _audit_egress_outcome(status="sent", **audit_kwargs)
@@ -1086,8 +1250,9 @@ class LiteLLMClient:
 
         与 :meth:`invoke_single_connection`（旧链单 prompt 出口）并列：接受完整
         ``messages`` / ``tools`` / ``response_format`` / ``stream``，``num_retries=0``
-        且 per-call ``drop_params=False``（SDK 全局 ``drop_params=True`` 被本次调用
-        覆盖——聊天出站禁静默丢参数，§6.1）；**不做路由和业务 final 校验**（候选
+        且 per-call ``drop_params=False``；SDK 全局 ``drop_params=True`` 下的 422 删参
+        重发由 :func:`_strict_egress_dispatch` 在首个 422 处中止（M20：出站一次、
+        参数不删、错误含 attempt 身份）；**不做路由和业务 final 校验**（候选
         策略与结算归 Executor / Recorder）。
 
         - 门控与预算复用旧链同源语义：SEC-01 知情确认（零出站）、惰性加载、
@@ -1199,7 +1364,7 @@ class LiteLLMClient:
             "messages": litellm_messages,
             "model": litellm_model,
             "num_retries": 0,  # §6.1：单连接无 SDK 隐藏重试
-            "drop_params": False,  # §6.1：聊天出站禁静默丢参数（覆盖 SDK 全局 True）
+            "drop_params": False,  # M20：声明禁静默丢参（真正阻断见 _strict_egress_dispatch）
             "timeout": httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT),
         }
         if api_version is not None:
@@ -1240,21 +1405,32 @@ class LiteLLMClient:
 
         from utils.proxy_manager import ProxyManager
 
+        strict_guard: _StrictNoDropResendGuard | None = None
         try:
             with ProxyManager.litellm_env_context():
-                if stream:
-                    chat_response = await self._consume_chat_stream(request_params, on_event)
-                else:
-                    chat_response = _interpret_chat_response(await _ai.acompletion(**request_params))
+                async with _strict_egress_dispatch(
+                    request_params,
+                    provider=provider,
+                    litellm_model=litellm_model,
+                    api_version=api_version,
+                ) as strict_guard:
+                    if stream:
+                        chat_response = await self._consume_chat_stream(request_params, on_event)
+                    else:
+                        chat_response = _interpret_chat_response(await _ai.acompletion(**request_params))
         except asyncio.CancelledError:
             await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
             raise  # R2: 必须传播
         except Exception as exc:
+            # M20：首个 422 被严格中止 → 以携带 attempt 身份的策略异常失败。
+            policy_exc = _strict_params_policy_error(strict_guard, attempt_context)
             await _audit_egress_outcome(
                 status="failed",
-                error_category=classify_error(exc, context="llm").get("code"),
+                error_category=classify_error(policy_exc or exc, context="llm").get("code"),
                 **audit_kwargs,
             )
+            if policy_exc is not None:
+                raise policy_exc from exc
             raise
 
         await _audit_egress_outcome(status="sent", **audit_kwargs)
@@ -2063,6 +2239,7 @@ _CHAT_RESERVED_PARAM_KEYS: Final[frozenset[str]] = frozenset(
         "tools",
         "num_retries",
         "drop_params",
+        "client",
         "timeout",
         "stream",
         "stream_options",
