@@ -214,6 +214,36 @@ class TestClaimResource:
             assert row[2] == 1
         await engine.dispose()
 
+    async def test_claim_operation_refs_jsonb_round_trip(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+
+        request = ResourceClaimRequest(
+            user_scope="u1",
+            slot_id="slot-refs",
+            slot_kind=ResourceSlotKind.TOTAL,
+            execution_id="root-1",
+            node_id="root",
+            round_id=None,
+            owner_epoch=1,
+            operation_refs='{"operation_id":"op-1","tool_call_id":"tc-1"}',
+        )
+        await dao.claim_resource(request)
+
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            refs = (
+                await conn.execute(
+                    text(
+                        "SELECT operation_refs FROM agent_resource_slot "
+                        "WHERE user_scope = 'u1' AND slot_id = 'slot-refs'"
+                    )
+                )
+            ).scalar_one()
+            assert refs == {"operation_id": "op-1", "tool_call_id": "tc-1"}
+        await engine.dispose()
+
     async def test_claim_replay_same_input_returns_original_ticket(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")

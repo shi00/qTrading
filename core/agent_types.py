@@ -4646,6 +4646,9 @@ class ResourceClaimRequest:
 
     ``slot_id`` 由调用方按稳定身份派生（stable_id），同 slot_id 同输入为幂等重放，
     异输入为 ``INPUT_CONFLICT``；已释出票据的 slot_id 不得复用（零复活）。
+
+    ``operation_refs`` 唯一载形为 CanonicalJson 规范 JSON 对象文本（非 dict、
+    非非规范形态）；``None`` 表示无引用。DAO 落 JSONB 前解析为对象。
     """
 
     user_scope: str
@@ -4860,8 +4863,18 @@ def validate_resource_claim_request(request: ResourceClaimRequest) -> None:
         _require_str(request.round_id, "$.round_id")
     _require_p(request.owner_epoch, "$.owner_epoch")
     if request.operation_refs is not None:
-        if not isinstance(request.operation_refs, dict):
+        # 唯一载形：CanonicalJson 规范 JSON **对象**文本（§3.1）。字符串以外的
+        # 载形（含结构化 dict）一律拒绝，避免 wire 与 JSONB 两套表示分叉。
+        if not isinstance(request.operation_refs, str):
             _fail("invalid_type", "$.operation_refs")
+        try:
+            refs = decode_json_doc(request.operation_refs)
+        except AgentValidationError:
+            _fail("invalid_json", "$.operation_refs")
+        if not isinstance(refs, dict):
+            _fail("invalid_type", "$.operation_refs")
+        if json_doc(refs) != request.operation_refs:
+            _fail("invalid_json", "$.operation_refs")
 
 
 def validate_read_mark_command(command: ReadMarkCommand) -> None:

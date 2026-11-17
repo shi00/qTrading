@@ -12,6 +12,7 @@
 """
 
 import dataclasses
+import json
 
 import pytest
 
@@ -123,8 +124,57 @@ class TestValidateResourceClaimRequest:
             "$.operation_refs",
         )
 
-    def test_operation_refs_dict_accepted(self) -> None:
-        validate_resource_claim_request(_claim_request(operation_refs={"operation_id": "op-1"}))
+    def test_operation_refs_dict_rejected(self) -> None:
+        # 唯一载形为 CanonicalJson 文本；结构化 dict 不再被接受（载形分叉负面用例）。
+        _reject(
+            lambda: validate_resource_claim_request(_claim_request(operation_refs={"operation_id": "op-1"})),
+            "invalid_type",
+            "$.operation_refs",
+        )
+
+    def test_operation_refs_non_empty_canonical_text_accepted(self) -> None:
+        validate_resource_claim_request(_claim_request(operation_refs='{"operation_id":"op-1","tool_call_id":"tc-1"}'))
+
+    def test_operation_refs_nested_canonical_text_accepted(self) -> None:
+        validate_resource_claim_request(_claim_request(operation_refs='{"a":{"b":1},"c":[true,null]}'))
+
+    def test_operation_refs_empty_object_accepted(self) -> None:
+        validate_resource_claim_request(_claim_request(operation_refs="{}"))
+
+    def test_operation_refs_round_trip_jsonb_object(self) -> None:
+        # wire（CanonicalJson 文本）→ JSONB 对象：解析与原规范字节互复原。
+        request = _claim_request(operation_refs='{"operation_id":"op-1","tool_call_id":"tc-1"}')
+        validate_resource_claim_request(request)
+        assert request.operation_refs is not None
+        decoded = json.loads(request.operation_refs)
+        assert decoded == {"operation_id": "op-1", "tool_call_id": "tc-1"}
+        assert json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")) == request.operation_refs
+
+    @pytest.mark.parametrize("refs", ['["op-1"]', '"op-1"', "1", "null", "true"])
+    def test_operation_refs_non_object_text_rejected(self, refs: str) -> None:
+        _reject(
+            lambda: validate_resource_claim_request(_claim_request(operation_refs=refs)),
+            "invalid_type",
+            "$.operation_refs",
+        )
+
+    @pytest.mark.parametrize(
+        "refs",
+        [
+            "{bad",  # 坏 JSON
+            '{"n":NaN}',  # 非有限数
+            '{"a":1,"a":1}',  # 重复键
+            '{"a": 1}',  # 空白非规范
+            '{"b":1,"a":2}',  # 键序非规范
+            '{"n":1.50}',  # 数值词法非规范
+        ],
+    )
+    def test_operation_refs_non_canonical_text_rejected(self, refs: str) -> None:
+        _reject(
+            lambda: validate_resource_claim_request(_claim_request(operation_refs=refs)),
+            "invalid_json",
+            "$.operation_refs",
+        )
 
     def test_empty_execution_id_rejected(self) -> None:
         _reject(

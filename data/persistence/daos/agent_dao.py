@@ -5452,7 +5452,11 @@ class AgentDao(BaseDao):
                         run_epoch=0,
                         claimed_at=now,
                         release_verified=False,
-                        operation_refs=request.operation_refs,
+                        # 唯一载形为 CanonicalJson 文本，JSONB 列只收解析后的对象；
+                        # validate_resource_claim_request 已保证其为规范 JSON 对象。
+                        operation_refs=(
+                            json.loads(request.operation_refs) if request.operation_refs is not None else None
+                        ),
                     )
                 )
             except IntegrityError as exc:
