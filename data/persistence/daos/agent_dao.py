@@ -3298,6 +3298,9 @@ class AgentDao(BaseDao):
           正文比较）。``occurred_at`` 为冻结事件事实时刻，重放须与首次一致；不同
           即异输入冲突，原事实不变，不静默改用请求时刻。
         - 执行事件必须同时有 round/node（§9.6），round 须归属该 execution；
+        - 锁序（§5.4 第 4 条）：执行事件先持 execution 行锁，再锁其 session，
+          与 ``bind_actual_input`` / ``revise_queued`` 同序（检视 D04：统一
+          execution → session，双连接不再成环死锁）；纯 session 事件只锁 session；
         - ``body_text``/``body_ref`` 互斥（§9.6）；committed_at 取库时钟。
 
         Raises:
@@ -3337,22 +3340,10 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            # 1. session 行锁（水位单调 + session_seq 分配串行化）。
-            session_row = (
-                await conn.execute(
-                    sa.select(AgentSession.event_seq)
-                    .where(
-                        AgentSession.user_scope == request.user_scope,
-                        AgentSession.session_id == request.session_id,
-                    )
-                    .with_for_update()
-                )
-            ).first()
-            if session_row is None:
-                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session does not exist", identity_str)
             execution_row = None
             if request.execution_id is not None:
-                # 2. execution 行锁 + 轮归属核定（§9.6 node 与 round 所属 execution 核定）。
+                # 1. execution 行锁（统一锁序 execution → session，检视 D04：与
+                #    bind_actual_input / revise_queued 同序，避免双连接持锁互等成环）。
                 execution_row = (
                     await conn.execute(
                         sa.select(AgentExecution.event_seq)
@@ -3365,6 +3356,21 @@ class AgentDao(BaseDao):
                 ).first()
                 if execution_row is None:
                     raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution does not exist", identity_str)
+            # 2. session 行锁（水位单调 + session_seq 分配串行化）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq)
+                    .where(
+                        AgentSession.user_scope == request.user_scope,
+                        AgentSession.session_id == request.session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session does not exist", identity_str)
+            if request.execution_id is not None:
+                # 3. 轮归属核定（§9.6 node 与 round 所属 execution 核定）。
                 round_row = (
                     await conn.execute(
                         sa.select(AgentRound.execution_id).where(

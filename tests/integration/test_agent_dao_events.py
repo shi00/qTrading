@@ -379,6 +379,58 @@ class TestExecutionEvents:
         assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
 
 
+class TestRecordEventLockOrder:
+    """检视 D04：执行事件统一锁序 execution → session（与 bind_actual_input /
+    revise_queued 同序），双连接不得持锁互等成环。"""
+
+    async def test_execution_event_blocks_on_execution_before_taking_session(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_execution_chain(dao)
+
+        blocker = create_test_engine(real_embedded_pg.url)
+        exec_conn = await blocker.connect()
+        session_conn = await blocker.connect()
+        try:
+            # 外部连接先持 execution 行锁（模拟并发 bind/revise 的在途事务）。
+            await exec_conn.execute(
+                text("SELECT execution_id FROM agent_execution WHERE user_scope = :u AND execution_id = :e FOR UPDATE"),
+                {"u": USER_SCOPE, "e": execution_id},
+            )
+            task = asyncio.create_task(
+                dao.record_event(_execution_request(session_id, execution_id, round_id=round_id))
+            )
+            await asyncio.sleep(1.0)
+            assert not task.done()  # 必须阻塞在 execution 行锁上
+            # 关键：record_event 未持 session 行锁——旧 session→execution 序会先取
+            # session，与持 execution 的连接互等成环；新序下第三连接可立即锁 session。
+            await asyncio.wait_for(
+                session_conn.execute(
+                    text("SELECT session_id FROM agent_session WHERE user_scope = :u AND session_id = :s FOR UPDATE"),
+                    {"u": USER_SCOPE, "s": session_id},
+                ),
+                timeout=2.0,
+            )
+            await session_conn.rollback()
+            await exec_conn.rollback()  # 释放 execution 行锁后 record_event 完成
+            fact = await asyncio.wait_for(task, timeout=5.0)
+            assert fact.replayed is False
+            assert fact.execution_seq == 1
+            assert fact.session_event_seq == 1
+            async with dao.engine.connect() as conn:
+                count = (
+                    await conn.execute(
+                        sa.select(sa.func.count())
+                        .select_from(AgentMessage)
+                        .where(AgentMessage.user_scope == USER_SCOPE, AgentMessage.session_id == session_id)
+                    )
+                ).scalar_one()
+                assert count == 1  # 不重不漏
+        finally:
+            await session_conn.close()
+            await exec_conn.close()
+            await blocker.dispose()
+
+
 class TestReadEvents:
     async def test_paging_and_monotonic_order(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
