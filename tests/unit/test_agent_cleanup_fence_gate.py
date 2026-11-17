@@ -258,7 +258,7 @@ class TestSaveDraftFenceGate:
     async def test_new_key_rejected_when_session_fenced(self) -> None:
         conn = _FenceConn(
             fence_rows=[_fenced(["s1"])],
-            session_first=SimpleNamespace(draft_revision=1),
+            session_first=SimpleNamespace(draft_revision=1, event_seq=0),
         )
         with pytest.raises(AgentServiceError) as exc:
             await _dao(conn).save_draft(_draft_command())
@@ -281,7 +281,7 @@ class TestSaveDraftFenceGate:
         )
         conn = _FenceConn(
             fence_rows=[_fenced(["s1"])],
-            session_first=SimpleNamespace(draft_revision=1),
+            session_first=SimpleNamespace(draft_revision=1, event_seq=0),
             command_row=SimpleNamespace(
                 input_digest=draft_save_input_digest(command),
                 receipt_payload=encode_draft_receipt(receipt),

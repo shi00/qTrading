@@ -3861,6 +3861,90 @@ class AgentDao(BaseDao):
                 replayed=False,
             )
 
+    async def _append_session_event(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_id: str,
+        message_id: str,
+        event_id: str,
+        event_kind: EventKind,
+        payload_kind: str,
+        subject_id: str,
+        subject_revision: int,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+        session_event_seq: int,
+    ) -> bool:
+        """事务内追加纯 session 可靠事件（检视 D29：让写入族成为唯一可靠事件生产者）。
+
+        - 调用方必须**已在本事务持有该 session 行锁**（``FOR UPDATE``）并已通过
+          D08 清理 fence 门；本助手不重复取 session 锁、不重复查 fence（同一事务内
+          门禁结论不变，避免额外 ``FOR SHARE`` 与重复查询）；
+        - 水位 ``session_seq = session.event_seq + 1``，写回 ``GREATEST`` 保持单调（R22）；
+        - ``event_id`` 由调用方按既有身份规则派生；同 (session, event_id) 已存在即
+          视为重放，返回 ``False`` 且不写第二条事件（崩溃重放不漏投、不重复）；
+        - 纯 session 事件不携执行身份（§9.6 执行事件必须 round/node/execution_seq
+          同存；本族写入无轮次），执行归属放载荷字段；
+        - 同事务 ``pg_notify`` 只唤醒观察者读取，事实仍是本事务落库的事件行。
+
+        Returns:
+            bool: 是否新增事件行（``False`` = 既有同身份事件，未新增）。
+        """
+
+        existing = (
+            await conn.execute(
+                sa.select(AgentMessage.message_id).where(
+                    AgentMessage.user_scope == user_scope,
+                    AgentMessage.session_id == session_id,
+                    AgentMessage.event_id == event_id,
+                )
+            )
+        ).first()
+        if existing is not None:
+            return False
+        new_session_seq = session_event_seq + 1
+        await conn.execute(
+            sa.insert(AgentMessage).values(
+                user_scope=user_scope,
+                message_id=message_id,
+                session_id=session_id,
+                execution_id=None,
+                round_id=None,
+                node_id=None,
+                event_id=event_id,
+                session_seq=new_session_seq,
+                execution_seq=None,
+                event_kind=event_kind.value,
+                payload_kind=payload_kind,
+                subject_id=subject_id,
+                subject_revision=subject_revision,
+                role=None,
+                payload=payload,
+                occurred_at=occurred_at,
+                committed_at=occurred_at,
+            )
+        )
+        await conn.execute(
+            sa.update(AgentSession)
+            .where(
+                AgentSession.user_scope == user_scope,
+                AgentSession.session_id == session_id,
+            )
+            .values(
+                event_seq=sa.func.greatest(AgentSession.event_seq, new_session_seq),
+                updated_at=occurred_at,
+            )
+        )
+        await conn.execute(
+            sa.text("SELECT pg_notify(:channel, :payload)").bindparams(
+                sa.bindparam("channel", _AGENT_EVENT_CHANNEL),
+                sa.bindparam("payload", json_doc({"user_scope": user_scope, "session_id": session_id})),
+            )
+        )
+        return True
+
     async def read_events(self, query: EventReadQuery) -> EventPage:
         """可靠事件按序读取（§4.5 追平/补齐）：after_seq 起升序分页。
 
@@ -7784,7 +7868,10 @@ class AgentDao(BaseDao):
           指纹不因草稿变更静默漏页（§4.2 修订游标失效、§9.3）；
         - 草稿载荷只含引用（凭据/有效批准由 codec 拒绝），清理语义归 E-06；
         - 载荷 ``source_refs`` 在同事务登记为本会话草稿谱系边（当前集合，F-03-4）；
-          引用未受管源版本 → ``INPUT_INVALID`` 整体回滚。
+          引用未受管源版本 → ``INPUT_INVALID`` 整体回滚；
+        - 提交后同事务追加 ``draft_saved`` 可靠事件（检视 D29）：观察侧
+          ``read_events`` / ``observe_session_events`` 提交即可按 ``after_seq``
+          追平；同命令键重放返回原回执、不重复写事件。
 
         转移 fence（``draft_transfer_ref``，F-03-3）：成功移入会把源草稿清空并
         留下不可发送恢复记录；本方法保存**新草稿**时同事务清空该 fence——新版本
@@ -7814,10 +7901,11 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            # 1. 会话行锁（草稿 CAS 与命令幂等的线性化点）。
+            # 1. 会话行锁（草稿 CAS 与命令幂等的线性化点；event_seq 同锁内读取，
+            #    供步骤 4 同事务事件分配水位，检视 D29）。
             session_row = (
                 await conn.execute(
-                    sa.select(AgentSession.draft_revision)
+                    sa.select(AgentSession.draft_revision, AgentSession.event_seq)
                     .where(
                         AgentSession.user_scope == user_scope,
                         AgentSession.session_id == command.session_id,
@@ -7933,6 +8021,39 @@ class AgentDao(BaseDao):
                     receipt_payload=encode_draft_receipt(receipt),
                     verified_at=now,
                 )
+            )
+            # 4. 同事务可靠事件（检视 D29）：draft_saved 与草稿/命令事实同提交，
+            #    观察侧（read_events / observe_session_events）提交后按 after_seq
+            #    即可追平，不再只靠轮询快照；同命令键重放已在步骤 2 返回原回执，
+            #    不写第二条事件（同命令键同 event_id，幂等）。D08 门禁已在步骤 2b
+            #    以同事务 FOR SHARE 通过，此处不重复查 fence。
+            await self._append_session_event(
+                conn,
+                user_scope=user_scope,
+                session_id=command.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [user_scope, command.session_id, "draft_saved", command.command.command_id],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=f"draft_saved:{command.command.command_id}",
+                ),
+                event_kind=EventKind.DRAFT_SAVED,
+                payload_kind="draft_saved",
+                subject_id=command.session_id,
+                subject_revision=next_revision,
+                payload={
+                    "schema_version": 1,
+                    "session_id": command.session_id,
+                    "draft_revision": next_revision,
+                    "command_record_id": command_record_id,
+                    "input_digest": digest,
+                },
+                occurred_at=now,
+                session_event_seq=int(session_row.event_seq),
             )
             return receipt
 
@@ -8858,6 +8979,9 @@ class AgentDao(BaseDao):
         同 content 重写不增版（返回当前版）；``expected_revision`` 落后于 head
         → ``REVISION_CONFLICT``；执行行不存在/跨用户 → ``INPUT_INVALID``；
         执行所属会话已删除 fence → 新提案 ``POLICY_DENIED``（D08）。
+        新版本同事务追加 ``artifact_saved`` 可靠事件（检视 D29，载荷
+        ``payload_kind=plan_proposal``），观察侧提交即可按 ``after_seq`` 追平；
+        同内容重写不写事件。
         """
 
         self._check_engine()
@@ -8915,6 +9039,8 @@ class AgentDao(BaseDao):
                     identity=identity,
                 )
             proposal = PlanProposal(execution_id=execution_id, plan_revision=new_revision, items=item_tuple)
+            now = datetime.now(UTC)
+            digest = plan_proposal_digest(proposal)
             await conn.execute(
                 sa.insert(AgentAssetVersion).values(
                     user_scope=user_scope,
@@ -8922,7 +9048,7 @@ class AgentDao(BaseDao):
                     asset_version=str(new_revision),
                     asset_kind="plan",
                     display_name=f"plan r{new_revision}",
-                    digest=plan_proposal_digest(proposal),
+                    digest=digest,
                     metadata_payload={
                         "plan_store_version": PLAN_STORE_VERSION,
                         "plan_revision": new_revision,
@@ -8933,6 +9059,56 @@ class AgentDao(BaseDao):
                     verification_state="unverified",
                 )
             )
+            # 4. 同事务可靠事件（检视 D29）：提案版本与事件同提交，观察侧可按
+            #    after_seq 追平。锁序沿用 execution → session（D04）：此处 session
+            #    行锁在 execution 行锁之后取得，不成环；D08 门禁已在上方同事务通过。
+            #    同内容重写已在 head 返回，不增版也不写事件（幂等）。
+            if execution_row.session_id is not None:
+                session_row = (
+                    await conn.execute(
+                        sa.select(AgentSession.event_seq)
+                        .where(
+                            AgentSession.user_scope == user_scope,
+                            AgentSession.session_id == execution_row.session_id,
+                        )
+                        .with_for_update()
+                    )
+                ).first()
+                if session_row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "execution session does not exist",
+                        identity,
+                    )
+                await self._append_session_event(
+                    conn,
+                    user_scope=user_scope,
+                    session_id=execution_row.session_id,
+                    message_id=stable_id(
+                        "event_message",
+                        [user_scope, execution_id, "plan_proposal_saved", str(new_revision)],
+                    ),
+                    event_id=derive_event_identity(
+                        execution_id=None,
+                        round_id=None,
+                        node_id=None,
+                        native_event_id=f"plan_proposal_saved:{execution_id}:{new_revision}",
+                    ),
+                    event_kind=EventKind.ARTIFACT_SAVED,
+                    payload_kind="plan_proposal",
+                    subject_id=asset_id,
+                    subject_revision=new_revision,
+                    payload={
+                        "schema_version": 1,
+                        "execution_id": execution_id,
+                        "asset_id": asset_id,
+                        "plan_revision": new_revision,
+                        "item_count": len(item_tuple),
+                        "digest": digest,
+                    },
+                    occurred_at=now,
+                    session_event_seq=int(session_row.event_seq),
+                )
         return proposal
 
     async def register_skill_asset(self, request: SkillAssetRegistration) -> SkillAssetReceipt:
