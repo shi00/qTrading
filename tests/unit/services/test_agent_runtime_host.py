@@ -9,6 +9,8 @@
 - Datasource/Client 契约：Datasource 注入 runtime_engine+run_migrations=False；
   Client 注入 control_engine+禁监听+禁无限连接重试
 - close() 顺序：DBOS.destroy → Client.destroy → 双引擎 dispose
+- 失败收口（检视 R08）：任一后续阶段失败按已取得对象逆序收口（Client → DBOS →
+  双引擎），原始异常不被清理异常掩盖；失败后可再次组装
 
 真实 PG 行为见 ``tests/integration/test_agent_runtime_host.py``。
 owner-loop 桥（§8.2）与 launch 启动隔离（§8.4 needs-spike）不在本片范围。
@@ -214,6 +216,161 @@ class TestAssemblyContract:
         ]
 
 
+class _FailureSeams:
+    """失败路径 seam 记录器：可配置各阶段抛错及清理自身失败。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.control_engine_error: BaseException | None = None
+        self.datasource_error: BaseException | None = None
+        self.client_error: BaseException | None = None
+        self.dbos_destroy_error: BaseException | None = None
+        self.dispose_errors: set[int] = set()
+
+    def run_migrations(self, url: str) -> None:
+        self.calls.append("migrations")
+
+    def create_engine(self, url: str, **kwargs: Any) -> _FakeFailureEngine:
+        size = kwargs["pool_size"]
+        assert isinstance(size, int)
+        if size == runtime_mod.CONTROL_ENGINE_POOL_SIZE and self.control_engine_error is not None:
+            raise self.control_engine_error
+        self.calls.append(f"engine:{size}")
+        return _FakeFailureEngine(self, size)
+
+    def create_datasource(self, **kwargs: Any) -> object:
+        self.calls.append("datasource")
+        if self.datasource_error is not None:
+            raise self.datasource_error
+        return object()
+
+    def create_client(self, **kwargs: Any) -> _FakeFailureClient:
+        self.calls.append("client")
+        if self.client_error is not None:
+            raise self.client_error
+        return _FakeFailureClient(self)
+
+
+class _FakeFailureEngine:
+    def __init__(self, seams: _FailureSeams, size: int) -> None:
+        self._seams = seams
+        self._size = size
+
+    def dispose(self) -> None:
+        self._seams.calls.append(f"dispose:{self._size}")
+        if self._size in self._seams.dispose_errors:
+            raise RuntimeError(f"dispose failed: {self._size}")
+
+
+class _FakeFailureClient:
+    def __init__(self, seams: _FailureSeams) -> None:
+        self._seams = seams
+
+    def destroy(self) -> None:
+        self._seams.calls.append("client_destroy")
+
+
+@pytest.fixture()
+def failure_seams(monkeypatch: pytest.MonkeyPatch) -> _FailureSeams:
+    seams = _FailureSeams()
+    monkeypatch.setattr(runtime_mod, "run_agent_runtime_migrations", seams.run_migrations)
+    monkeypatch.setattr(runtime_mod, "_create_engine", seams.create_engine)
+
+    class _FakeDBOS:
+        def __init__(self, *, config: dict[str, Any]) -> None:
+            seams.calls.append("dbos")
+
+        @staticmethod
+        def destroy() -> None:
+            seams.calls.append("dbos_destroy")
+            if seams.dbos_destroy_error is not None:
+                raise seams.dbos_destroy_error
+
+    class _FakeDatasourceClass:
+        create = staticmethod(seams.create_datasource)
+
+    monkeypatch.setattr(runtime_mod, "DBOS", _FakeDBOS)
+    monkeypatch.setattr(runtime_mod, "SQLAlchemyDatasource", _FakeDatasourceClass)
+    monkeypatch.setattr(runtime_mod, "DBOSClient", seams.create_client)
+    return seams
+
+
+class TestAssemblyFailureCleanup:
+    """检视 R08：后续阶段失败按已取得对象逆序收口，且可再次组装。"""
+
+    def test_control_engine_failure_disposes_runtime_engine(self, failure_seams: _FailureSeams) -> None:
+        failure_seams.control_engine_error = RuntimeError("control init failed")
+        with pytest.raises(RuntimeError, match="control init failed"):
+            assemble_agent_runtime(_settings())
+        assert failure_seams.calls == ["migrations", "engine:4", "dispose:4"]
+
+    def test_datasource_failure_destroys_dbos_and_disposes_engines(self, failure_seams: _FailureSeams) -> None:
+        boom = RuntimeError("verify failed")
+        failure_seams.datasource_error = boom
+        with pytest.raises(RuntimeError) as exc_info:
+            assemble_agent_runtime(_settings())
+        assert exc_info.value is boom  # 原始异常不被清理掩盖
+        assert failure_seams.calls == [
+            "migrations",
+            "engine:4",
+            "engine:2",
+            "dbos",
+            "datasource",
+            "dbos_destroy",
+            "dispose:2",
+            "dispose:4",
+        ]
+
+    def test_client_failure_destroys_dbos_and_disposes_engines(self, failure_seams: _FailureSeams) -> None:
+        boom = ConnectionError("system db unreachable")
+        failure_seams.client_error = boom
+        with pytest.raises(ConnectionError) as exc_info:
+            assemble_agent_runtime(_settings())
+        assert exc_info.value is boom
+        assert failure_seams.calls == [
+            "migrations",
+            "engine:4",
+            "engine:2",
+            "dbos",
+            "datasource",
+            "client",
+            "dbos_destroy",
+            "dispose:2",
+            "dispose:4",
+        ]
+        assert "client_destroy" not in failure_seams.calls  # 构造失败即无对象可收口
+
+    def test_cleanup_errors_do_not_mask_original_error(self, failure_seams: _FailureSeams) -> None:
+        failure_seams.datasource_error = RuntimeError("verify failed")
+        failure_seams.dbos_destroy_error = RuntimeError("destroy failed")
+        failure_seams.dispose_errors.add(runtime_mod.CONTROL_ENGINE_POOL_SIZE)
+        with pytest.raises(RuntimeError, match="^verify failed$"):
+            assemble_agent_runtime(_settings())
+        # 清理自身失败后仍继续收口 runtime 引擎
+        assert failure_seams.calls == [
+            "migrations",
+            "engine:4",
+            "engine:2",
+            "dbos",
+            "datasource",
+            "dbos_destroy",
+            "dispose:2",
+            "dispose:4",
+        ]
+
+    def test_reassembly_after_failed_attempt(self, failure_seams: _FailureSeams) -> None:
+        failure_seams.datasource_error = RuntimeError("verify failed")
+        with pytest.raises(RuntimeError) as exc_info:
+            assemble_agent_runtime(_settings())
+        assert str(exc_info.value) == "verify failed"
+        failure_seams.datasource_error = None
+        handle = assemble_agent_runtime(_settings())
+        assert handle.launched is False
+        assert failure_seams.calls.count("dbos") == 2  # 第二次为全新组装，不复用失败实例
+        assert failure_seams.calls.count("dbos_destroy") == 1
+        assert failure_seams.calls[-3:] == ["dbos", "datasource", "client"]
+
+
 class _CloseFakes:
     """关闭门闩测试替身：派发门闩/桥/事实端口/宿主关闭均记录调用顺序。"""
 
@@ -229,6 +386,9 @@ class _CloseFakes:
         self.closed = False
         self.frozen = False
         self.on_save: Callable[[], None] | None = None
+        #: 保存事实暂停点：置位后 ``save_end_or_unknown`` 停在 await，用于并发测试。
+        self.save_gate: asyncio.Event | None = None
+        self.save_entered = asyncio.Event()
 
     def freeze_submissions(self) -> bool:
         self.calls.append("bridge_freeze")
@@ -251,6 +411,9 @@ class _CloseFakes:
 
     async def save_end_or_unknown(self, command: Any) -> Any:
         self.calls.append("save_facts")
+        self.save_entered.set()
+        if self.save_gate is not None:
+            await self.save_gate.wait()
         if self.on_save is not None:
             self.on_save()
         if self.sink_error is not None:
@@ -409,6 +572,61 @@ class TestPrepareCloseLatch:
         assert second.ready is False
         assert second.blocking_reasons == (runtime_mod.CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH,)
         assert second.command.close_command_id == "close-1"  # 返回原关闭命令身份
+
+    async def test_cross_scope_same_command_id_is_not_reused(self) -> None:
+        """跨 user_scope 同 command ID 不得复用旧回执（检视 R10：完整身份比较）。"""
+        fakes = _CloseFakes()
+        runtime = _runtime(fakes)
+        first = await runtime.prepare_close(_command())
+        assert first.ready is True
+        cross_scope = runtime_mod.CloseCommandIdentity(user_scope="user-2", close_command_id="close-1")
+        second = await runtime.prepare_close(cross_scope)
+        assert second.ready is False
+        assert second.blocking_reasons == (runtime_mod.CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH,)
+        assert second.command == first.command  # 返回原关闭命令完整身份
+        assert fakes.calls.count("handle_close") == 1  # 不重复关闭
+
+    async def test_concurrent_same_identity_shares_single_close_chain(self) -> None:
+        """并发同身份调用共享一条关闭链（检视 R10：不重复保存/关闭）。"""
+        fakes = _CloseFakes()
+        fakes.save_gate = asyncio.Event()
+        runtime = _runtime(fakes)
+        first_task = asyncio.create_task(runtime.prepare_close(_command()))
+        await fakes.save_entered.wait()
+        second_task = asyncio.create_task(runtime.prepare_close(_command()))
+        await asyncio.sleep(0)
+        assert not second_task.done()  # 等待同一条关闭链，不另起一条
+        fakes.save_gate.set()
+        first = await first_task
+        second = await second_task
+        assert first.ready is True
+        assert second is first
+        assert fakes.calls.count("bridge_freeze") == 1
+        assert fakes.calls.count("save_facts") == 1
+        assert fakes.calls.count("handle_close") == 1
+
+    async def test_concurrent_other_identity_rejected_without_second_chain(self) -> None:
+        """关闭链在途时异身份（含跨域同键）不得搭便车（检视 R10）。"""
+        fakes = _CloseFakes()
+        fakes.save_gate = asyncio.Event()
+        runtime = _runtime(fakes)
+        first_task = asyncio.create_task(runtime.prepare_close(_command()))
+        await fakes.save_entered.wait()
+
+        other = runtime_mod.CloseCommandIdentity(user_scope="user-1", close_command_id="close-2")
+        cross_scope = runtime_mod.CloseCommandIdentity(user_scope="user-2", close_command_id="close-1")
+        for command in (other, cross_scope):
+            blocked = await runtime.prepare_close(command)
+            assert blocked.ready is False
+            assert blocked.blocking_reasons == (runtime_mod.CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH,)
+            assert blocked.command == _command()  # 返回进行中原关闭命令身份
+
+        fakes.save_gate.set()
+        first = await first_task
+        assert first.ready is True
+        assert fakes.calls.count("bridge_freeze") == 1
+        assert fakes.calls.count("save_facts") == 1
+        assert fakes.calls.count("handle_close") == 1
 
     async def test_cancelled_error_propagates(self) -> None:
         fakes = _CloseFakes()
