@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from services.agent_service.runtime import (
+    BridgeSubmissionsClosedError,
     ChannelClosedError,
     OwnerLoopBridge,
     OwnerStreamChannel,
@@ -412,6 +413,73 @@ def test_cancelled_operation_notifies_observers(
     owner.loop.call_soon_threadsafe(release.set)
     # 原 IO 已被取消：结果未产出（unknown/取消路径不伪造产出，R21）
     assert work.outcomes == []
+
+
+# ---------------------------------------------------------------------------
+# 提交冻结与在途集合（检视 R09）
+# ---------------------------------------------------------------------------
+
+
+def test_inflight_count_covers_submitted_but_not_started(
+    loops: tuple[_LoopThread, _LoopThread],
+) -> None:
+    """已提交未起跑的 operation 计入在途；冻结后拒绝新提交，原提交仍完成（R09）。"""
+    owner, _foreign = loops
+    bridge = _make_bridge(owner.loop)
+    loop_entered = threading.Event()
+    release_loop = threading.Event()
+
+    def hold_owner_loop() -> None:
+        loop_entered.set()
+        release_loop.wait(10)
+
+    async def factory() -> int:
+        return 7
+
+    owner.loop.call_soon_threadsafe(hold_owner_loop)
+    assert loop_entered.wait(timeout=10), "owner loop did not enter hold callback"
+    try:
+        bridge.start_operation("op-1", factory)
+        # owner 循环被占住：提交尚未起跑，仍必须计入在途（否则关闭门闩会误判 ready）
+        assert bridge.inflight_task_count() == 1
+        assert bridge.freeze_submissions() is True
+        assert bridge.freeze_submissions() is False  # 幂等
+        with pytest.raises(BridgeSubmissionsClosedError) as excinfo:
+            bridge.start_operation("op-2", factory)
+        assert "submissions are closed" in str(excinfo.value)
+    finally:
+        release_loop.set()
+    # 冻结只拒绝新提交：原提交仍按契约完成，结算后在途集合归零
+    assert owner.submit(bridge.observe_operation("op-1")) == 7
+    owner.submit(_assert_inflight_zero(bridge))
+
+
+async def _assert_inflight_zero(bridge: OwnerLoopBridge) -> None:
+    assert bridge.inflight_task_count() == 0
+
+
+def test_frozen_bridge_rejects_new_run_owner(
+    loops: tuple[_LoopThread, _LoopThread],
+) -> None:
+    """冻结后 run_owner 明确拒绝且 factory 零执行（ready 后不得再起跑 IO）。"""
+    owner, foreign = loops
+    bridge = _make_bridge(owner.loop)
+    calls: list[int] = []
+
+    async def factory() -> int:
+        calls.append(1)
+        return 1
+
+    assert bridge.freeze_submissions() is True
+
+    async def scenario() -> None:
+        with pytest.raises(BridgeSubmissionsClosedError) as excinfo:
+            await bridge.run_owner(factory)
+        assert "submissions are closed" in str(excinfo.value)
+
+    foreign.submit(scenario())
+    assert calls == []
+    owner.submit(_assert_inflight_zero(bridge))
 
 
 # ---------------------------------------------------------------------------

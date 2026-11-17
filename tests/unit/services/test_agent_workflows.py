@@ -18,12 +18,15 @@ from collections.abc import Callable
 import pytest
 
 from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal
+from dbos import DBOS
 from services.agent_service.workflows import (
+    LEAF_EXECUTE_STEP_NAME,
     LeafDagScheduler,
     LeafExecutionContext,
     LeafRuntimeRegistry,
     NodeOutcome,
     PlanRunSummary,
+    _leaf_step_evidence,
     _terminal_outcome,
     build_leaf_payload,
     build_research_payload,
@@ -34,6 +37,7 @@ from services.agent_service.workflows import (
     decode_research_payload,
     drive_leaf_dag,
     leaf_workflow_id,
+    observe_leaf_children,
 )
 
 pytestmark = pytest.mark.unit
@@ -476,17 +480,139 @@ def test_terminal_outcome_rejects_foreign_node() -> None:
     assert excinfo.value.code == "outcome_identity_mismatch"
 
 
-@pytest.mark.parametrize("state", ["ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"])
-def test_terminal_outcome_maps_failure_statuses(state: str) -> None:
-    """未判定异常/恢复耗尽 → failed 通用错误码（明细留在 DBOS 状态，R9）。"""
+@pytest.mark.parametrize(
+    ("state", "error_code"),
+    [
+        ("ERROR", "leaf_workflow_error"),
+        ("MAX_RECOVERY_ATTEMPTS_EXCEEDED", "leaf_workflow_recovery_exhausted"),
+    ],
+)
+def test_terminal_outcome_maps_failure_statuses(state: str, error_code: str) -> None:
+    """未判定异常/恢复耗尽 → failed 通用错误码；原生状态分别标注（明细留 DBOS，R9）。"""
     outcome = _terminal_outcome("a", state=state, output=None)
+    assert outcome == NodeOutcome(node_id="a", state="failed", error_code=error_code)
+
+
+def test_terminal_outcome_maps_cancelled_without_execution_to_ended() -> None:
+    """无任何执行记录的取消（如启动隔离取消）→ ended；不伪装业务失败或空成果。"""
+    outcome = _terminal_outcome("a", state="CANCELLED", output=None)
+    assert outcome == NodeOutcome(node_id="a", state="ended", error_code="leaf_workflow_cancelled")
+
+
+def test_terminal_outcome_projects_outcome_recorded_after_cancel() -> None:
+    """取消时 IO 在途、随后落盘的真实成果优先投影，不被 ended 覆盖。"""
+    outcome = _terminal_outcome(
+        "a",
+        state="CANCELLED",
+        output=None,
+        executed=True,
+        step_output=_outcome("a", artifact_ref="art-1").to_wire(),
+    )
+    assert outcome == _outcome("a", artifact_ref="art-1")
+
+
+def test_terminal_outcome_projects_partial_outcome_on_error() -> None:
+    """工作流级错误但叶执行已产出部分成果 → 投影 partial（不伪装成 failed）。"""
+    outcome = _terminal_outcome(
+        "a",
+        state="ERROR",
+        output=None,
+        executed=True,
+        step_output=_outcome("a", state="partial", artifact_ref="art-2").to_wire(),
+    )
+    assert outcome == _outcome("a", state="partial", artifact_ref="art-2")
+
+
+def test_terminal_outcome_rejects_foreign_step_outcome() -> None:
+    """落盘成果的节点身份与观察目标不一致即拒绝（不错记成果）。"""
+    with pytest.raises(AgentValidationError) as excinfo:
+        _terminal_outcome(
+            "a",
+            state="CANCELLED",
+            output=None,
+            executed=True,
+            step_output=_outcome("b").to_wire(),
+        )
+    assert excinfo.value.code == "outcome_identity_mismatch"
+
+
+def test_terminal_outcome_cancelled_after_failed_step_is_failed() -> None:
+    """已有执行记录但无成果（step 报错）→ failed，不把实际失败报成 ended。"""
+    outcome = _terminal_outcome("a", state="CANCELLED", output=None, executed=True)
     assert outcome == NodeOutcome(node_id="a", state="failed", error_code="leaf_workflow_error")
 
 
-def test_terminal_outcome_maps_cancelled_to_ended() -> None:
-    """外部取消 → ended（不当作成功，也不伪装业务失败）。"""
-    outcome = _terminal_outcome("a", state="CANCELLED", output=None)
-    assert outcome == NodeOutcome(node_id="a", state="ended", error_code="leaf_workflow_cancelled")
+def test_leaf_step_evidence_reads_execute_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """只认叶执行 step 的落盘记录；其它 step 不当作成果。"""
+
+    async def fake_steps(workflow_id: str) -> list[dict[str, object]]:
+        assert workflow_id == "wf:a"
+        return [
+            {"function_name": "other", "output": {"ignored": True}},
+            {"function_name": LEAF_EXECUTE_STEP_NAME, "output": _outcome("a", state="partial").to_wire()},
+        ]
+
+    monkeypatch.setattr(DBOS, "list_workflow_steps_async", fake_steps)
+    assert asyncio.run(_leaf_step_evidence("wf:a")) == (True, _outcome("a", state="partial").to_wire())
+
+
+def test_leaf_step_evidence_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无任何 step 落盘（未执行/在途）→ 实际退出与成果覆盖均未知。"""
+
+    async def fake_steps(workflow_id: str) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr(DBOS, "list_workflow_steps_async", fake_steps)
+    assert asyncio.run(_leaf_step_evidence("wf:a")) == (False, None)
+
+
+def test_observe_projects_recorded_outcome_after_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """观察链路：取消时 IO 在途但执行记录已落盘，投影真实成果而非合成 ended。"""
+
+    class _Status:
+        status = "CANCELLED"
+        output = None
+
+    async def fake_status(workflow_id: str) -> _Status:
+        return _Status()
+
+    async def fake_steps(workflow_id: str) -> list[dict[str, object]]:
+        return [{"function_name": LEAF_EXECUTE_STEP_NAME, "output": _outcome("a", artifact_ref="art-9").to_wire()}]
+
+    monkeypatch.setattr(DBOS, "get_workflow_status_async", fake_status)
+    monkeypatch.setattr(DBOS, "list_workflow_steps_async", fake_steps)
+    wires = asyncio.run(observe_leaf_children([{"node_id": "a", "workflow_id": "wf:a"}], 0.0))
+    assert wires == [_outcome("a", artifact_ref="art-9").to_wire()]
+
+
+def test_observe_reports_cancelled_without_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """观察链路：无执行记录的取消（启动隔离取消）→ ended，不宣称成果。"""
+
+    class _Status:
+        status = "CANCELLED"
+        output = None
+
+    async def fake_status(workflow_id: str) -> _Status:
+        return _Status()
+
+    async def fake_steps(workflow_id: str) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr(DBOS, "get_workflow_status_async", fake_status)
+    monkeypatch.setattr(DBOS, "list_workflow_steps_async", fake_steps)
+    wires = asyncio.run(
+        observe_leaf_children(
+            [
+                {"node_id": "a", "workflow_id": "wf:x"},
+                {"node_id": "b", "workflow_id": "wf:x"},
+            ],
+            0.0,
+        )
+    )
+    assert wires == [
+        NodeOutcome(node_id="a", state="ended", error_code="leaf_workflow_cancelled").to_wire(),
+        NodeOutcome(node_id="b", state="ended", error_code="leaf_workflow_cancelled").to_wire(),
+    ]
 
 
 @pytest.mark.parametrize("state", ["PENDING", "ENQUEUED", "DELAYED"])
