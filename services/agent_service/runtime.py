@@ -743,6 +743,11 @@ class CloseCommandIdentity:
     close_command_id: str
 
 
+def _same_close_identity(left: CloseCommandIdentity, right: CloseCommandIdentity) -> bool:
+    """完整身份比较（user_scope + close_command_id；跨域同 command ID 不相等）。"""
+    return left.user_scope == right.user_scope and left.close_command_id == right.close_command_id
+
+
 @dataclass(frozen=True)
 class CloseFactOutcome:
     """结束/unknown 保存结果（``unknown_associations`` 为仍需保留的未知关联）。"""
@@ -859,9 +864,18 @@ class AgentRuntime:
         #: 唯一执行锁：就绪关闭完成后释放，供同进程数据库切换/重启带内接管。
         self._instance_guard = instance_guard
         self._receipt: CloseReadinessReceipt | None = None
+        #: 进行中的关闭链（同一时刻至多一条；并发调用共享其结果，检视 R10）。
+        self._close_task: asyncio.Task[CloseReadinessReceipt] | None = None
+        #: 进行中关闭链的原命令完整身份（异身份并发调用不得复用他人关闭链）。
+        self._close_chain_command: CloseCommandIdentity | None = None
 
     async def prepare_close(self, command: CloseCommandIdentity) -> CloseReadinessReceipt:
-        """关闭前置门闩（幂等；``ready=True`` 后按原身份重试返回原回执）。
+        """关闭前置门闩（幂等；``ready=True`` 后按原完整身份重试返回原回执）。
+
+        身份为 ``(user_scope, close_command_id)`` 全量比较：跨 user_scope 的同
+        command ID 不得复用旧回执或他人进行中的关闭链（检视 R10）。并发调用经
+        单条关闭链串行执行阶段——同身份调用共享该链结果，异身份调用立即得到
+        身份不匹配回执，不重复保存事实/关闭资源。
 
         ``CancelledError`` 继续传播（R2）；普通异常转成阻塞原因并保持资源
         可用（可重试），不进入清理/强退路径。
@@ -870,8 +884,8 @@ class AgentRuntime:
         if not command.user_scope or not command.close_command_id:
             raise ValueError("close command identity must be non-empty")
         if self._receipt is not None and self._receipt.ready:
-            if command.close_command_id == self._receipt.command.close_command_id:
-                # 原关闭已完成：按原身份重试返回原回执（不重复 destroy）
+            if _same_close_identity(command, self._receipt.command):
+                # 原关闭已完成：按原完整身份重试返回原回执（不重复 destroy）
                 return self._receipt
             # 不同身份不得复用旧回执冒充本次关闭（返回原身份与显式阻塞码）
             return self._make_receipt(
@@ -881,6 +895,29 @@ class AgentRuntime:
                 inflight=0,
                 residual=self._receipt.residual_io,
             )
+
+        task = self._close_task
+        if task is not None and not task.done():
+            # 已有关闭链在途：同身份并发调用共享该链（取消只撤 waiter）；异身份
+            # （含跨 user_scope 同 command ID）不得搭便车，立即返回身份不匹配。
+            chain_command = self._close_chain_command
+            if chain_command is None or not _same_close_identity(command, chain_command):
+                return self._make_receipt(
+                    chain_command or command,
+                    reasons=[CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH],
+                    unknown=(),
+                    inflight=self._bridge.inflight_task_count(),
+                )
+            return await asyncio.shield(task)
+
+        # 新建关闭链：同步登记（此前无 await，故并发调用不会各自建链）。
+        task = asyncio.create_task(self._run_close_chain(command))
+        self._close_task = task
+        self._close_chain_command = command
+        return await asyncio.shield(task)
+
+    async def _run_close_chain(self, command: CloseCommandIdentity) -> CloseReadinessReceipt:
+        """关闭链主体（单条串行；就绪回执在此落定，供并发同身份调用共享）。"""
 
         reasons: list[str] = []
         # 冻结新提交先于在途核验：冻结与提交在桥内同一把锁上串行，故此处读到的

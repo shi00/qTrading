@@ -386,6 +386,9 @@ class _CloseFakes:
         self.closed = False
         self.frozen = False
         self.on_save: Callable[[], None] | None = None
+        #: 保存事实暂停点：置位后 ``save_end_or_unknown`` 停在 await，用于并发测试。
+        self.save_gate: asyncio.Event | None = None
+        self.save_entered = asyncio.Event()
 
     def freeze_submissions(self) -> bool:
         self.calls.append("bridge_freeze")
@@ -408,6 +411,9 @@ class _CloseFakes:
 
     async def save_end_or_unknown(self, command: Any) -> Any:
         self.calls.append("save_facts")
+        self.save_entered.set()
+        if self.save_gate is not None:
+            await self.save_gate.wait()
         if self.on_save is not None:
             self.on_save()
         if self.sink_error is not None:
@@ -566,6 +572,61 @@ class TestPrepareCloseLatch:
         assert second.ready is False
         assert second.blocking_reasons == (runtime_mod.CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH,)
         assert second.command.close_command_id == "close-1"  # 返回原关闭命令身份
+
+    async def test_cross_scope_same_command_id_is_not_reused(self) -> None:
+        """跨 user_scope 同 command ID 不得复用旧回执（检视 R10：完整身份比较）。"""
+        fakes = _CloseFakes()
+        runtime = _runtime(fakes)
+        first = await runtime.prepare_close(_command())
+        assert first.ready is True
+        cross_scope = runtime_mod.CloseCommandIdentity(user_scope="user-2", close_command_id="close-1")
+        second = await runtime.prepare_close(cross_scope)
+        assert second.ready is False
+        assert second.blocking_reasons == (runtime_mod.CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH,)
+        assert second.command == first.command  # 返回原关闭命令完整身份
+        assert fakes.calls.count("handle_close") == 1  # 不重复关闭
+
+    async def test_concurrent_same_identity_shares_single_close_chain(self) -> None:
+        """并发同身份调用共享一条关闭链（检视 R10：不重复保存/关闭）。"""
+        fakes = _CloseFakes()
+        fakes.save_gate = asyncio.Event()
+        runtime = _runtime(fakes)
+        first_task = asyncio.create_task(runtime.prepare_close(_command()))
+        await fakes.save_entered.wait()
+        second_task = asyncio.create_task(runtime.prepare_close(_command()))
+        await asyncio.sleep(0)
+        assert not second_task.done()  # 等待同一条关闭链，不另起一条
+        fakes.save_gate.set()
+        first = await first_task
+        second = await second_task
+        assert first.ready is True
+        assert second is first
+        assert fakes.calls.count("bridge_freeze") == 1
+        assert fakes.calls.count("save_facts") == 1
+        assert fakes.calls.count("handle_close") == 1
+
+    async def test_concurrent_other_identity_rejected_without_second_chain(self) -> None:
+        """关闭链在途时异身份（含跨域同键）不得搭便车（检视 R10）。"""
+        fakes = _CloseFakes()
+        fakes.save_gate = asyncio.Event()
+        runtime = _runtime(fakes)
+        first_task = asyncio.create_task(runtime.prepare_close(_command()))
+        await fakes.save_entered.wait()
+
+        other = runtime_mod.CloseCommandIdentity(user_scope="user-1", close_command_id="close-2")
+        cross_scope = runtime_mod.CloseCommandIdentity(user_scope="user-2", close_command_id="close-1")
+        for command in (other, cross_scope):
+            blocked = await runtime.prepare_close(command)
+            assert blocked.ready is False
+            assert blocked.blocking_reasons == (runtime_mod.CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH,)
+            assert blocked.command == _command()  # 返回进行中原关闭命令身份
+
+        fakes.save_gate.set()
+        first = await first_task
+        assert first.ready is True
+        assert fakes.calls.count("bridge_freeze") == 1
+        assert fakes.calls.count("save_facts") == 1
+        assert fakes.calls.count("handle_close") == 1
 
     async def test_cancelled_error_propagates(self) -> None:
         fakes = _CloseFakes()

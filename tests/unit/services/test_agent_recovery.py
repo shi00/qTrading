@@ -73,6 +73,10 @@ class _FakeClient:
         limit = kwargs.get("limit", ISOLATION_PAGE_SIZE)
         offset = 0 if self.list_ignores_offset else kwargs.get("offset", 0)
         items = sorted(self._active.values(), key=lambda item: item.workflow_id)
+        status_filter = kwargs.get("status")
+        if status_filter is not None:
+            allowed = {status_filter} if isinstance(status_filter, str) else set(status_filter)
+            items = [item for item in items if item.status in allowed]
         return [_Native(workflow_id=item.workflow_id, status=item.status) for item in items[offset : offset + limit]]
 
     async def cancel_workflows_async(self, workflow_ids: list[str], *, cancel_children: bool = False) -> None:
@@ -202,6 +206,48 @@ class TestStartupIsolation:
         assert registry.calls[:3] == ["list", "save", "fence"]
         assert registry.saved_records[0].snapshot
         assert registry.fence_requests[0].workflow_ids == ("agent_research:registered-1",)
+
+    async def test_registered_terminal_native_state_is_read_back_not_absent(self) -> None:
+        """R15：登记项原生已终态（被在途过滤）时按登记 ID 补读，不得虚报不存在。"""
+
+        client = _FakeClient(
+            [
+                _Native("agent_research:done-1", "SUCCESS"),
+                _Native("agent_research:stopped-1", "CANCELLED"),
+                _Native("agent_leaf:a", "PENDING"),
+            ]
+        )
+        registry = _FakeRegistry(
+            registered=(
+                _execution("exec-1", "agent_research:done-1"),
+                _execution("exec-2", "agent_research:stopped-1"),
+                _execution("exec-3", "agent_research:gone-1"),
+            )
+        )
+
+        receipt = await _isolate(client, registry)
+
+        original = dict(receipt.original_states)
+        assert original["agent_research:done-1"] == "SUCCESS"
+        assert original["agent_research:stopped-1"] == "CANCELLED"
+        assert original["agent_leaf:a"] == "PENDING"
+        # 补读仍未查回原生行才记 absent：缺失 ≠ 过滤未命中
+        assert original["agent_research:gone-1"] == ABSENT_NATIVE_STATE
+        assert receipt.ready is True
+
+    async def test_registered_state_read_failure_blocks_without_cancel(self) -> None:
+        """R15 负例：补读失败即无法证明登记项已结案，不得取消/launch。"""
+
+        client = _FakeClient([_Native("agent_research:stopped-1", "CANCELLED")])
+        client.verify_error = RuntimeError("by-id read broken")
+        registry = _FakeRegistry(registered=(_execution("exec-1", "agent_research:stopped-1"),))
+
+        receipt = await _isolate(client, registry)
+
+        assert receipt.ready is False
+        assert "registered_state_read_failed" in receipt.blocking_reasons
+        assert client.cancelled == []
+        assert registry.calls == ["list"]
 
     async def test_empty_snapshot_is_ready_without_cancel(self) -> None:
         client = _FakeClient([])
