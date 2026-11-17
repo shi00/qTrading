@@ -538,6 +538,94 @@ class TestXlsxExtraction:
 
 
 # ---------------------------------------------------------------------------
+# XLSX 行选择按实际迭代坐标核定（I20）
+# ---------------------------------------------------------------------------
+
+
+def _xlsx_sheet1(rows_xml: str, *, dimension: str | None = None) -> bytes:
+    """以自定义 sheet1.xml 构造最小样本（可声明与实际内容不符的 dimension）。"""
+
+    dimension_tag = f'<dimension ref="{dimension}"/>' if dimension is not None else ""
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f"<worksheet {_NS}>{dimension_tag}<sheetData>{rows_xml}</sheetData></worksheet>"
+    )
+    return _rewrite_xlsx(_xlsx_bytes(), replace={"xl/worksheets/sheet1.xml": sheet.encode("utf-8")})
+
+
+def _three_rows() -> str:
+    return "".join(f'<row r="{index}"><c r="A{index}"><v>{index}</v></c></row>' for index in range(1, 4))
+
+
+class TestXlsxRowExtentCertification:
+    def test_fully_out_of_range_rows_are_unread_not_full(self) -> None:
+        # I20：请求范围完全越界时不得回报 READY/full（原样回报 RowsRange）。
+        atom = RowsRange(kind="rows", sheet="S1", start=10, end=12)
+        selection = Selection(kind="limited", ranges=(atom,))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes(), selection)
+        assert parsed.read_state is ReadState.UNREAD
+        assert parsed.coverage == "limited"
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == [to_wire_dict(atom)]
+        assert parsed.blocks == []
+        assert parsed.stats["rows"] == 0
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_partially_out_of_range_rows_read_only_actual_rows(self) -> None:
+        # 部分越界：已读为实际存在的行，其余记未读。
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet="S1", start=2, end=9),))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes(), selection)
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.coverage == "limited"
+        assert parsed.read_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=2, end=3))]
+        assert parsed.unread_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=4, end=9))]
+        block = json.loads(parsed.blocks[0])
+        assert [row["row"] for row in block["rows"]] == [2, 3]
+        assert parsed.stats["rows"] == 2
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_empty_sheet_rows_selection_is_unread(self) -> None:
+        # 空表：请求的行一个都不存在，全部记未读，不伪 READY/full。
+        data = _xlsx_sheet1("", dimension="A1:A3")
+        atom = RowsRange(kind="rows", sheet="S1", start=1, end=2)
+        selection = Selection(kind="limited", ranges=(atom,))
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_state is ReadState.UNREAD
+        assert parsed.coverage == "limited"
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == [to_wire_dict(atom)]
+        assert parsed.blocks == []
+        assert parsed.stats["rows"] == 0
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_dimension_larger_than_content_does_not_fake_full(self) -> None:
+        # dimension 声明 A1:A100 但实际只有 3 行：不得按声明补空行冒充已读。
+        data = _xlsx_sheet1(_three_rows(), dimension="A1:A100")
+        selection = Selection(kind="limited", ranges=(RowsRange(kind="rows", sheet="S1", start=1, end=5),))
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.read_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=1, end=3))]
+        assert parsed.unread_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=4, end=5))]
+        assert parsed.stats["rows"] == 3
+        all_parsed = _parse(AttachmentKind.XLSX, data)
+        assert all_parsed.read_state is ReadState.READY
+        assert all_parsed.stats["rows"] == 3
+        assert [row["row"] for row in json.loads(all_parsed.blocks[0])["rows"]] == [1, 2, 3]
+
+    def test_in_range_rows_selection_stays_ready_full(self) -> None:
+        # 正常范围：实际端点均存在，仍为 READY/full。
+        atom = RowsRange(kind="rows", sheet="S1", start=1, end=2)
+        selection = Selection(kind="limited", ranges=(atom,))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes(), selection)
+        assert parsed.read_state is ReadState.READY
+        assert parsed.coverage == "full"
+        assert parsed.read_ranges == [to_wire_dict(atom)]
+        assert parsed.unread_ranges == []
+        assert parsed.stats["rows"] == 2
+        _assert_selected_range_contract(selection, parsed)
+
+
+# ---------------------------------------------------------------------------
 # XLSX 容器前置预算与结构门（I08）
 # ---------------------------------------------------------------------------
 

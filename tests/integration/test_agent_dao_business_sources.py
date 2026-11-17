@@ -132,7 +132,7 @@ def _dao_request(*items: BusinessSourceItem, consumer_kind: str = "execution", c
 def _service_request(
     *items: BusinessSourceItem,
     purpose: Purpose = Purpose.END_OF_DAY_RESEARCH,
-    cutoff: str | None = None,
+    cutoff: str | None = "2026-01-01T00:00:00.000000Z",
     unselected: tuple[BusinessSourceItem, ...] = (),
 ):
     return SourceRegistrationRequest(
@@ -251,10 +251,24 @@ class TestBusinessSourceRegistration:
         assert await _count(dao, AgentSourceLink) == 0
 
     @pytest.mark.asyncio
-    async def test_end_of_day_research_keeps_null_available_at(self, real_embedded_pg: ConnectionInfo) -> None:
+    async def test_end_of_day_research_rejects_unknown_available_at_with_zero_rows(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_execution(dao)
-        await BusinessSourceService(dao).register(_service_request(_item(_source(available_at=None))))
+        with pytest.raises(AgentServiceError) as exc:
+            await BusinessSourceService(dao).register(_service_request(_item(_source(available_at=None))))
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert await _count(dao, AgentAssetVersion) == 0
+        assert await _count(dao, AgentSourceLink) == 0
+
+    @pytest.mark.asyncio
+    async def test_concept_purpose_keeps_null_available_at(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_execution(dao)
+        await BusinessSourceService(dao).register(
+            _service_request(_item(_source(available_at=None)), purpose=Purpose.CONCEPT, cutoff=None)
+        )
         async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 测试断言读取
             available_at = (
                 await conn.execute(

@@ -64,7 +64,11 @@ def _config() -> MCPServerConfig:
     return MCPServerConfig(
         identity=MCPServiceIdentity(service_id="svc-test", config_version=1),
         display_name="svc-test",
-        transport=MCPTransportConfig(kind=MCPTransportKind.STDIO, command=str(Path(sys.executable))),
+        transport=MCPTransportConfig(
+            kind=MCPTransportKind.STDIO,
+            command=str(Path(sys.executable)),
+            cwd=str(Path(sys.executable).parent),
+        ),
         budget=_profile(),
     )
 
@@ -217,7 +221,9 @@ class TestManagedTempDirectory:
             stdio_env: _ManagedStdioEnvironment | None,
             diagnostics: MCPSessionDiagnostics,
             label: str,
+            headers: dict[str, str] | None = None,
         ) -> Any:
+            del headers
             raise RuntimeError("transport boom")
 
         monkeypatch.setattr(_ManagedStdioEnvironment, "create", classmethod(_capture_create))
