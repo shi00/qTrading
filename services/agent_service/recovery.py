@@ -163,10 +163,10 @@ async def run_startup_isolation(
 ) -> StartupIsolationReceipt:
     """执行启动隔离（HANDOFF §8.4 第 2-3 条），返回不可变回执。
 
-    顺序固定：读登记集合 → 原生分页快照（读满才停）→ 固定并保存隔离命令与
-    原状态 → 关闭应用派发门闩 → 精确取消 → 复查。任一步普通异常即
-    ``ready=False`` 并停止后续步骤（不取消、不 launch）；``CancelledError``
-    继续传播（R2）。
+    顺序固定：读登记集合 → 原生分页快照（读满才停）→ 按登记 ID 补读被过滤
+    的终态项 → 固定并保存隔离命令与原状态 → 关闭应用派发门闩 → 精确取消 →
+    复查。任一步普通异常即 ``ready=False`` 并停止后续步骤（不取消、不 launch）；
+    ``CancelledError`` 继续传播（R2）。
 
     Args:
         user_scope: 用户域（与 DAO 同域校验）。
@@ -209,6 +209,17 @@ async def run_startup_isolation(
         )
     except Exception as exc:  # 分页失败：集合不完整（§8.4 第 3 条）
         return _blocked_receipt(command_id, user_scope, "native_listing_failed", exc)
+
+    # 在途列举按名/版本/在途状态过滤，登记项若已处于终态不会被列入。仅凭该列举
+    # 就把它们记为「无原生行」会虚报不存在，故按登记 ID 补读一次，让原状态如实
+    # 区分「原生行缺失」与「过滤未命中（终态已结案）」。
+    filtered_registered = tuple(item for item in registered_ids if item not in native_states)
+    if filtered_registered:
+        try:
+            terminal_states = await _list_states_by_id(client, filtered_registered)
+        except Exception as exc:  # 补读失败：无法证明登记项已结案，不取消/不 launch
+            return _blocked_receipt(command_id, user_scope, "registered_state_read_failed", exc)
+        native_states = {**terminal_states, **native_states}
 
     snapshot_ids = tuple(sorted(set(native_states) | set(registered_ids)))
     original_states = tuple(
