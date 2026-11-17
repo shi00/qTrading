@@ -3765,6 +3765,9 @@ class AgentDao(BaseDao):
         - 摘要新鲜重算（不信调用方 digest）+ claim 与请求一致性（core 校验）；
         - 同 (operation_id, attempt_id) 同 claim → 重放返回原事实（W 崩溃恢复）；
           异 claim → ``INPUT_CONFLICT``；
+        - 认领事务内由 operation 反查权威 execution/round/owner_epoch/run_epoch，
+          与许可绑定的 execution/round 及 claim 声明的代次逐项核对（检视 M19）：
+          借用其他轮/代次的合法 operation 不得落 claim（``POLICY_DENIED``，零写）；
         - 复核不过（撤销先胜 / revision 推进 / 期限届满）→ ``POLICY_DENIED``（脱敏
           原因码）；claim 先胜保真实在途，后续 attempt 必须再核（§5.4 第 6 条）；
         - operation 行缺失 → ``INPUT_INVALID``（调用方违反先备后派发契约）；
@@ -3801,7 +3804,13 @@ class AgentDao(BaseDao):
             # 2. operation 行锁（claim 追加目标；缺失=先备后派发契约被违反）。
             operation_row = (
                 await conn.execute(
-                    sa.select(AgentOperation.data_consent_claims)
+                    sa.select(
+                        AgentOperation.data_consent_claims,
+                        AgentOperation.execution_id,
+                        AgentOperation.round_id,
+                        AgentOperation.owner_epoch,
+                        AgentOperation.run_epoch,
+                    )
                     .where(
                         AgentOperation.user_scope == authorization.user_scope,
                         AgentOperation.operation_id == authorization.operation_id,
@@ -3828,6 +3837,28 @@ class AgentDao(BaseDao):
                         "same attempt claim with different input",
                         identity_str,
                     )
+            # 3b. 轮归属/代次核定（检视 M19）：operation 是本次核权事实的唯一权威
+            #     归属来源，必须属于许可绑定的准确 execution/round，且 owner/run
+            #     代次与 claim 声明一致；否则 deny 且零写（不落 claim、不产生许可
+            #     事实），借用其他轮/旧代次的 operation 不得补轮归属。
+            if operation_row.execution_id != binding.execution_id or operation_row.round_id != binding.round_id:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "operation_scope_mismatch",
+                    identity_str,
+                )
+            if operation_row.owner_epoch != authorization.owner_epoch:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "operation_owner_epoch_mismatch",
+                    identity_str,
+                )
+            if operation_row.run_epoch != authorization.run_epoch:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "operation_run_epoch_mismatch",
+                    identity_str,
+                )
             # 4. 行锁下单胜者复核（撤销先胜零新 claim）。
             now = datetime.now(UTC)
             deny_reason = evaluate_data_attempt(binding, authorization, now, recomputed_digest=recomputed_digest)
