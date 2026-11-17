@@ -3,7 +3,9 @@
 覆盖：
 - 就绪判定：仅「全部前置成功（complete）」的未启动叶就绪；失败/终止/partial
   只阻相关后继、独立分支继续（不借成功兄弟补答案）；
-- 暂停/等待/未知效果不自动结束父（不伪造终态、不启动后继）；
+- 暂停/等待/unknown 效果不自动结束父（不伪造终态、不启动后继）；
+- ``closed_unknown`` 为不可恢复终态（F10）：结案收口不保持可恢复占位、单独汇总、
+  阻其下游、迟到事实不复活；
 - 汇总区分叶事实与目标完成（``leaves_all_succeeded`` 不等于目标已覆盖）；
 - 事件驱动推进：B 结束即启动 D，不按固定批次 gather；
 - 观察预算耗尽经持久等待接续：超预算完成的长叶仍推进后继且后继只启动一次；
@@ -193,16 +195,70 @@ def test_waiting_states_are_non_terminal(state: str) -> None:
     assert scheduler.summary().pending == ("a", "b")
 
 
-def test_unknown_and_closed_unknown_do_not_converge() -> None:
-    """unknown / closed_unknown 效果未知，不自动结束本次执行。"""
+def test_unknown_keeps_pending_while_closed_unknown_converges() -> None:
+    """unknown 效果未知，不自动结束本次执行；closed_unknown 已结案才算收敛（F10）。"""
     scheduler = LeafDagScheduler(_plan(_node("a")))
     scheduler.start("a")
     scheduler.record(_outcome("a", "unknown"))
     assert scheduler.converged() is False
+    assert scheduler.summary().pending == ("a",)
     scheduler_two = LeafDagScheduler(_plan(_node("b")))
     scheduler_two.start("b")
     scheduler_two.record(_outcome("b", "closed_unknown"))
-    assert scheduler_two.converged() is False
+    assert scheduler_two.converged() is True
+    assert scheduler_two.summary().pending == ()
+
+
+def test_closed_unknown_is_terminal_but_not_success_or_failure() -> None:
+    """closed_unknown 收口为终态：单列汇总、不并入 failed/ended/pending（F10）。"""
+    scheduler = LeafDagScheduler(_plan(_node("a"), _node("b")))
+    scheduler.start("a")
+    scheduler.start("b")
+    scheduler.record(_outcome("a", "closed_unknown", error_code="outcome_unknown", artifact_ref="artifact_a_1"))
+    scheduler.record(_outcome("b"))
+    summary = scheduler.summary()
+    assert summary.closed_unknown == ("a",)
+    assert summary.failed == ()
+    assert summary.ended == ()
+    assert summary.pending == ()
+    assert summary.succeeded == ("b",)
+    assert summary.leaves_all_succeeded is False
+    assert summary.converged is True
+    assert summary.to_wire()["closed_unknown"] == ["a"]
+    # 未知关联保留：结案叶的成果引用仍随事实回报，不被丢弃或改写。
+    assert summary.outcomes[0] == _outcome(
+        "a", "closed_unknown", error_code="outcome_unknown", artifact_ref="artifact_a_1"
+    )
+
+
+def test_closed_unknown_blocks_dependents_with_unknown_reason() -> None:
+    """closed_unknown 不是适用成功前置：后继阻塞并保留上游未知关联。"""
+    scheduler = LeafDagScheduler(_plan(_node("a"), _node("b", ("a",)), _node("c", ("b",))))
+    scheduler.start("a")
+    scheduler.record(_outcome("a", "closed_unknown"))
+    assert scheduler.ready() == ()
+    summary = scheduler.summary()
+    assert summary.blocked == ("b", "c")
+    assert summary.block_reasons[0] == ("b", "upstream_closed_unknown:a")
+    assert summary.converged is True
+
+
+def test_late_fact_does_not_resurrect_closed_unknown() -> None:
+    """迟到事实不得复活已结案的 closed_unknown：同一事实幂等、其余冲突。"""
+    scheduler = LeafDagScheduler(_plan(_node("a")))
+    scheduler.start("a")
+    scheduler.record(_outcome("a", "closed_unknown"))
+    scheduler.record(_outcome("a", "closed_unknown"))  # 观察重投幂等
+    with pytest.raises(AgentValidationError) as excinfo:
+        scheduler.record(_outcome("a", "complete"))
+    assert excinfo.value.code == "node_outcome_conflict"
+    with pytest.raises(AgentValidationError) as excinfo_running:
+        scheduler.record(_outcome("a", "running"))
+    assert excinfo_running.value.code == "node_outcome_conflict"
+    summary = scheduler.summary()
+    assert summary.closed_unknown == ("a",)
+    assert summary.succeeded == ()
+    assert summary.pending == ()
 
 
 def test_start_requires_ready_node() -> None:
@@ -312,6 +368,28 @@ def test_drive_non_terminal_leaf_does_not_fabricate_completion() -> None:
     assert summary.pending == ("a", "b")
     assert summary.converged is False
     assert summary.succeeded == ()
+
+
+def test_drive_closed_unknown_closes_branch_without_starting_successor() -> None:
+    """叶结案未知：驱动按结案收口、不启动后继、不伪造成功/失败（F10）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    harness = _DagHarness()
+    harness.states["a"] = "closed_unknown"
+
+    async def scenario() -> PlanRunSummary:
+        task = asyncio.ensure_future(drive_leaf_dag(plan, harness.start, harness.observe))
+        await _wait_until(lambda: harness.started == ["a"])
+        harness.gate("a").set()
+        return await task
+
+    summary = asyncio.run(scenario())
+    assert harness.started == ["a"]
+    assert summary.closed_unknown == ("a",)
+    assert summary.blocked == ("b",)
+    assert summary.pending == ()
+    assert summary.failed == ()
+    assert summary.succeeded == ()
+    assert summary.converged is True
 
 
 def test_drive_propagates_cancellation() -> None:
