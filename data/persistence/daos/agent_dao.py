@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from collections.abc import AsyncIterator, Sequence
@@ -147,6 +147,7 @@ from core.agent_types import (
     SOURCE_COVERAGES,
     SOURCE_REGISTRATION_CONSUMER_KINDS,
     SaveAnswerRequest,
+    Selection,
     SelectedRange,
     SessionChangeCommand,
     SessionAction,
@@ -162,6 +163,7 @@ from core.agent_types import (
     SourceConsumerRef,
     SourceConsumersPage,
     SourceKind,
+    SourceLocator,
     SourceRead,
     SourceReadQuery,
     SourceReadSummary,
@@ -313,6 +315,25 @@ SET disabled_inherited = true
 WHERE user_scope = :user_scope
     AND (source_id, source_version) IN (SELECT source_id, source_version FROM closure)
 """
+
+
+@dataclass(frozen=True, slots=True)
+class _FrozenSourceFacts:
+    """来源登记时的冻结事实（检视 D10/D11），与当前可用性投影分离。
+
+    - 冻结事实：来源版本/摘要/类别/定位/正文（``user_message_origin`` 沿消息
+      owner 读取，资产表不复制第二份私人正文）——一经登记不可被 stop 改写；
+    - 当前投影：``agent_asset_version.read_state`` / ``disabled_at`` /
+      ``disabled_revision`` / ``cleaned_at`` / ``tombstoned``——stop 只改这里。
+
+    历史读取用冻结事实，研究是否可用看当前投影（``SourceRead.read_state`` /
+    ``available`` / ``missing_reason``），不以投影差异判定冻结事实为坏元数据。
+    """
+
+    source: SourceRef
+    verification: VerificationState
+    metadata: dict[str, Any]
+    body_text: str | None
 
 
 # E-06 九类原生目标位于**运行库**（dbos / agent_ds，独立逻辑库），不属业务库；
@@ -1011,13 +1032,18 @@ class AgentDao(BaseDao):
 
         - 查询与已存版本三方对齐（source_id/version/digest/locator）：摘要或定位
           不一致 → ``REVISION_CONFLICT``，绝不静默换成最新/相近版本（§3.3）；
-        - 已存元数据自相矛盾（坏 ``source_ref``/核验态不一致/坏 coverage/facts）→
-          ``OPERATION_UNKNOWN``（fail-closed，R21）；
+        - **冻结事实与当前投影分开**（检视 D10/D11）：来源类别按资产元数据分支——
+          ``source_ref``（业务/附件来源）或 ``user_message_origin``（个人消息来源，
+          沿消息 owner 读回正文并核版本/摘要，资产表不复制第二份私人正文）；冻结
+          事实与行内投影列不一致不算坏元数据，``stop_source_use`` 只改投影；
+        - 已存冻结事实自相矛盾（坏 ``source_ref``/核验态不一致/消息身份或摘要不符/
+          坏 coverage/facts）→ ``OPERATION_UNKNOWN``（fail-closed，R21）；
         - 正文取 ``body_text`` 或 ``body_ref`` 载荷，核 owner 三元组/编码/长度/
           SHA-256 后重建；缺失或损坏 → ``PERSISTENCE_UNAVAILABLE``，不回退摘要
           （§9.10.1）；
-        - 未准备表示返回行内 ``read_state`` 与明确原因（不伪造空成功）；禁用/
-          清理后 ``available=False``，已存原因优先。
+        - 未准备表示返回行内 ``read_state`` 与明确原因（不伪造空成功）；已停止来源
+          仍返回冻结正文，当前状态显式标注（``read_state=disabled`` /
+          ``available=False`` / ``missing_reason``），研究是否可用由调用方按投影判定。
         """
 
         self._check_engine()
@@ -1037,11 +1063,13 @@ class AgentDao(BaseDao):
                         AgentAssetVersion.asset_id,
                         AgentAssetVersion.asset_version,
                         AgentAssetVersion.digest,
+                        AgentAssetVersion.display_name,
                         AgentAssetVersion.metadata_payload,
                         AgentAssetVersion.read_state,
                         AgentAssetVersion.verification_state,
                         AgentAssetVersion.body_text,
                         AgentAssetVersion.body_ref,
+                        AgentAssetVersion.available_at,
                         AgentAssetVersion.disabled_at,
                         AgentAssetVersion.cleaned_at,
                         AgentAssetVersion.tombstoned,
@@ -1059,9 +1087,8 @@ class AgentDao(BaseDao):
                 )
             if row.digest != query.digest:
                 raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "source digest mismatch", identity)
-            source_ref, verification, metadata = self._decode_source_asset_row(
-                row, user_scope=user_scope, identity=identity
-            )
+            facts = await self._resolve_frozen_source_facts(conn, row=row, user_scope=user_scope, identity=identity)
+            source_ref = facts.source
             if source_ref.locator != query.locator:
                 raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "source locator mismatch", identity)
             try:
@@ -1073,43 +1100,58 @@ class AgentDao(BaseDao):
                     identity,
                 ) from exc
             await self._assert_source_registered(conn, query=query, user_scope=user_scope, identity=identity)
-            body_text: str | None = None
-            # 未读/未知态没有可信表示（不外泄矛盾正文）；禁用/不可得≠清理，
-            # 已保存正文仍按原样返回并由 available/原因标注当前依据状态（§9.7）。
-            if read_state not in (ReadState.UNREAD, ReadState.UNKNOWN):
-                body_text = row.body_text
-                if body_text is None and row.body_ref is not None:
-                    body_text = await self._read_body_text(
-                        conn,
-                        user_scope=user_scope,
-                        body_ref=row.body_ref,
-                        identity=identity,
-                        owner=("asset", query.source_id, query.version),
-                    )
+            body_text = facts.body_text
+            # 未读/未知态没有可信表示（不外泄矛盾正文）；停止使用（disabled）≠清理，
+            # 冻结正文仍按原样返回并由投影列标注当前依据状态（§9.7，检视 D11）。
+            if read_state in (ReadState.UNREAD, ReadState.UNKNOWN):
+                body_text = None
+            elif body_text is None and row.body_ref is not None:
+                body_text = await self._read_body_text(
+                    conn,
+                    user_scope=user_scope,
+                    body_ref=row.body_ref,
+                    identity=identity,
+                    owner=("asset", query.source_id, query.version),
+                )
             missing_reason = source_ref.missing_reason
-            available = (
-                not row.tombstoned
-                and row.disabled_at is None
-                and row.cleaned_at is None
-                and read_state is not ReadState.UNAVAILABLE
+            available, missing_reason = self._source_projection(
+                row, read_state, body_text=body_text, frozen_reason=missing_reason
             )
-            if not available and missing_reason is None:
-                missing_reason = "source_unavailable"
-            elif body_text is None and missing_reason is None:
-                missing_reason = "representation_not_available"
             return SourceRead(
                 source=source_ref,
-                selected_range=self._source_selected_range(metadata, source_ref, identity),
+                selected_range=self._source_selected_range(facts.metadata, source_ref, identity),
                 read_state=read_state,
                 body_text=body_text,
-                structured_blocks=self._source_blocks(metadata, identity),
-                facts=self._source_facts(metadata, identity),
-                coverage=self._source_coverage(metadata, identity),
-                verification=verification,
-                limitations=self._source_limitations(metadata, identity),
+                structured_blocks=self._source_blocks(facts.metadata, identity),
+                facts=self._source_facts(facts.metadata, identity),
+                coverage=self._source_coverage(facts.metadata, identity),
+                verification=facts.verification,
+                limitations=self._source_limitations(facts.metadata, identity),
                 available=available,
                 missing_reason=missing_reason,
             )
+
+    @staticmethod
+    def _source_projection(
+        row: Any, read_state: ReadState, *, body_text: str | None, frozen_reason: str | None
+    ) -> tuple[bool, str | None]:
+        """当前可用性投影（检视 D11）：与冻结事实分开标注，不改写历史。
+
+        投影 = 行内 ``read_state`` / ``disabled_at`` / ``cleaned_at`` / ``tombstoned``；
+        ``stop_source_use`` 只改这里。禁用是正常生命周期，不是坏元数据——已停止来源
+        仍返回冻结正文，以 ``source_disabled`` 显式标注当前不可用于新研究。
+        """
+
+        disabled = row.disabled_at is not None or read_state is ReadState.DISABLED
+        available = (
+            not row.tombstoned and not disabled and row.cleaned_at is None and read_state is not ReadState.UNAVAILABLE
+        )
+        missing_reason = frozen_reason
+        if not available and missing_reason is None:
+            missing_reason = "source_disabled" if disabled else "source_unavailable"
+        elif body_text is None and missing_reason is None:
+            missing_reason = "representation_not_available"
+        return available, missing_reason
 
     async def _assert_source_registered(
         self, conn: AsyncConnection, *, query: SourceReadQuery, user_scope: str, identity: str
@@ -1230,20 +1272,173 @@ class AgentDao(BaseDao):
         )
         return revision
 
+    @staticmethod
+    def _require_source_metadata(metadata: object, identity: str) -> dict[str, Any]:
+        """来源资产元数据外观校验（schema_version=1），坏元数据 fail-closed。"""
+
+        if not isinstance(metadata, dict):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is unreadable", identity)
+        schema_version = metadata.get("schema_version")
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool) or schema_version != 1:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is unreadable", identity)
+        return metadata
+
+    async def _resolve_frozen_source_facts(
+        self, conn: AsyncConnection, *, row: Any, user_scope: str, identity: str
+    ) -> _FrozenSourceFacts:
+        """按来源类别解析冻结事实（检视 D10）：``source_ref`` 或 ``user_message_origin``。
+
+        类别识别与 :meth:`_source_kind_from_metadata` 同口径（``source_ref`` 优先、
+        ``user_message_origin`` 次之）；两者都无显式事实即 ``OPERATION_UNKNOWN``，
+        不回落 ``asset_kind``（恒 ``source``，会把类别伪造成通用来源，R21）。
+        """
+
+        metadata = self._require_source_metadata(row.metadata_payload, identity)
+        if isinstance(metadata.get("source_ref"), dict):
+            source_ref, verification, metadata = self._decode_source_asset_row(
+                row, user_scope=user_scope, identity=identity
+            )
+            return _FrozenSourceFacts(
+                source=source_ref, verification=verification, metadata=metadata, body_text=row.body_text
+            )
+        origin = metadata.get("user_message_origin")
+        if isinstance(origin, dict):
+            return await self._resolve_user_message_origin(
+                conn, row=row, metadata=metadata, origin=origin, user_scope=user_scope, identity=identity
+            )
+        raise AgentServiceError(
+            AgentErrorCode.OPERATION_UNKNOWN, "source kind cannot be derived from asset metadata", identity
+        )
+
+    async def _resolve_user_message_origin(
+        self,
+        conn: AsyncConnection,
+        *,
+        row: Any,
+        metadata: dict[str, Any],
+        origin: dict[str, Any],
+        user_scope: str,
+        identity: str,
+    ) -> _FrozenSourceFacts:
+        """``user_message_origin`` 来源：沿消息 owner 读回正文并核版本/摘要（检视 D10）。
+
+        - 资产只持封闭来源描述（session/message/version），**不复制第二份私人正文**；
+          正文取 ``agent_message.body_text``，或经 ``agent_body_payload``（owner=
+          message v1）解码 ``body_ref``，缺失 → ``PERSISTENCE_UNAVAILABLE``；
+        - 消息身份/会话/角色/载荷互指不符，或正文 SHA-256 ≠ 冻结摘要 →
+          ``OPERATION_UNKNOWN``（冻结事实自相矛盾，不返回空成功，R21）；
+        - 消息来源受理即内联正文，冻结读取态恒为 ``ready``；当前投影只允许
+          ``ready``（停用前）或 ``disabled``（stop 的唯一改写）。
+        """
+
+        session_id = origin.get("session_id")
+        message_id = origin.get("message_id")
+        message_version = origin.get("message_version")
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or not isinstance(message_id, str)
+            or not message_id
+            or not isinstance(message_version, str)
+            or not message_version
+        ):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "user message origin is unreadable", identity)
+        # 消息来源版本与不可变消息版本同源冻结（受理恒 "1"，§3.3.2）；投影列只承载
+        # 当前可用性，不能反过来定义来源版本。
+        if message_version != row.asset_version:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "user message origin version is inconsistent", identity
+            )
+        message = (
+            await conn.execute(
+                sa.select(
+                    AgentMessage.session_id,
+                    AgentMessage.role,
+                    AgentMessage.body_text,
+                    AgentMessage.body_ref,
+                    AgentMessage.payload,
+                ).where(
+                    AgentMessage.user_scope == user_scope,
+                    AgentMessage.message_id == message_id,
+                )
+            )
+        ).first()
+        if message is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "user message origin is missing", identity)
+        if message.session_id != session_id or message.role != "user":
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "user message origin is inconsistent", identity)
+        payload = message.payload
+        if payload is not None and (
+            not isinstance(payload, dict)
+            or payload.get("message_id") != message_id
+            or payload.get("role") != "user"
+            or payload.get("source_id") != row.asset_id
+            or payload.get("source_version") != row.asset_version
+        ):
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "user message origin is inconsistent", identity)
+        body_text = message.body_text
+        if body_text is None and message.body_ref is not None:
+            body_text = await self._read_body_text(
+                conn,
+                user_scope=user_scope,
+                body_ref=message.body_ref,
+                identity=identity,
+                owner=("message", message_id, "1"),
+            )
+        if body_text is None:
+            raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "user message body is missing", identity)
+        if sha256_hex(body_text) != row.digest:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "user message body digest mismatch", identity)
+        try:
+            verification = VerificationState(row.verification_state)
+        except ValueError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                f"unreadable source verification_state: {type(exc).__name__}",
+                identity,
+            ) from exc
+        if row.read_state not in (ReadState.READY.value, ReadState.DISABLED.value):
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "user message origin read_state is inconsistent", identity
+            )
+        source_ref = SourceRef(
+            user_scope=user_scope,
+            source_id=row.asset_id,
+            version=row.asset_version,
+            digest=row.digest,
+            source_kind=SourceKind.USER_MESSAGE,
+            display_name=row.display_name,
+            object_ref=None,
+            locator=SourceLocator(
+                locator_kind="source_range",
+                origin_ref=SourceVersionRef(
+                    source_kind=SourceKind.USER_MESSAGE,
+                    source_id=row.asset_id,
+                    source_version=row.asset_version,
+                    source_digest=row.digest,
+                ),
+                selection=Selection(kind="all"),
+            ),
+            available_at=self._opt_wire_time(row.available_at),
+            period=None,
+            unit_note=None,
+            read_state=ReadState.READY,
+            missing_reason=None,
+            provenance_refs=(),
+        )
+        return _FrozenSourceFacts(source=source_ref, verification=verification, metadata=metadata, body_text=body_text)
+
     def _decode_source_asset_row(
         self, row: Any, *, user_scope: str, identity: str
     ) -> tuple[SourceRef, VerificationState, dict[str, Any]]:
-        """严格解码来源资产行元数据；任何自相矛盾按 ``OPERATION_UNKNOWN`` 拒绝。"""
+        """严格解码 ``source_ref`` 类来源的冻结事实；任何自相矛盾按 ``OPERATION_UNKNOWN`` 拒绝。
 
-        metadata = row.metadata_payload
-        schema_version = metadata.get("schema_version") if isinstance(metadata, dict) else None
-        if (
-            not isinstance(metadata, dict)
-            or not isinstance(schema_version, int)
-            or isinstance(schema_version, bool)
-            or schema_version != 1
-        ):
-            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is unreadable", identity)
+        只核冻结事实之间的一致性（身份/摘要/定位/核验态）；**不核**冻结
+        ``source_ref.read_state`` 与当前投影列 ``row.read_state`` 相等——stop 只改
+        投影，冻结事实不可被改写（检视 D11）。
+        """
+
+        metadata = self._require_source_metadata(row.metadata_payload, identity)
         try:
             source_ref = decode_source_ref(metadata.get("source_ref"), "$.metadata.source_ref")
             verification = VerificationState(row.verification_state)
@@ -1257,7 +1452,6 @@ class AgentDao(BaseDao):
             or (source_ref.source_id, source_ref.version) != (row.asset_id, row.asset_version)
             or source_ref.digest != row.digest
             or source_ref.locator.origin_ref.source_digest != row.digest
-            or source_ref.read_state.value != row.read_state
             or metadata_verification is not verification
         ):
             raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "source metadata is inconsistent", identity)
@@ -6499,6 +6693,10 @@ class AgentDao(BaseDao):
         - 禁用落定：``read_state='disabled'``、``disabled_at=now``、
           ``disabled_revision=GREATEST(旧值, revision+1)``、行 revision 单调 +1
           （零复活：阅读/复制/改名不解除禁用，无恢复路径）；
+        - **只改当前可用性投影，不改冻结事实**（检视 D11）：来源版本/摘要/类别/
+          定位与元数据 ``source_ref``（或 ``user_message_origin`` 所指向的消息正文）
+          保持不变；历史读取仍返回冻结事实并显式标注 ``source_disabled``，新研究由
+          ``claim_source_versions`` 按投影拒绝（禁用先胜零受影响新出站）；
         - 已知派生闭包：按 source/version 递归收集 consumer_kind='asset' 的派生
           链（FK 保证已知边完整），闭包内全部 source_link ``disabled_inherited=true``
           （禁用源及其已知派生；闭包未知不等于空关联——派发方按 claim 共同仲裁

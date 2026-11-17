@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
@@ -29,10 +30,18 @@ from sqlalchemy import insert, text
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    BusinessSourceItem,
+    BusinessSourceRegistrationRequest,
+    ReadState,
+    Selection,
     SourceClaimRequest,
     SourceKind,
+    SourceLocator,
+    SourceReadQuery,
+    SourceRef,
     SourceStopCommand,
     SourceVersionRef,
+    VerificationState,
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
@@ -40,6 +49,7 @@ from data.persistence.models import (
     AgentAssetVersion,
     AgentExecution,
     AgentOperation,
+    AgentRound,
     AgentSession,
     AgentSourceLink,
 )
@@ -455,3 +465,110 @@ class TestClaimSourceVersions:
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.claim_source_versions(_claim("claim-1", ()))
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+
+# ------------------------------------------------------------------
+# 检视 D11：stop 只改当前投影，冻结事实历史可读
+# ------------------------------------------------------------------
+
+
+def _business_ref() -> SourceRef:
+    digest = "c" * 64
+    return SourceRef(
+        user_scope="u1",
+        source_id="src-1",
+        version="1",
+        digest=digest,
+        source_kind=SourceKind.ATTACHMENT,
+        display_name="附件.pdf",
+        object_ref=None,
+        locator=SourceLocator(
+            locator_kind="source_range",
+            origin_ref=SourceVersionRef(
+                source_kind=SourceKind.ATTACHMENT,
+                source_id="src-1",
+                source_version="1",
+                source_digest=digest,
+            ),
+            selection=Selection(kind="all"),
+        ),
+        available_at="2026-11-01T00:00:00.000000Z",
+        period=None,
+        unit_note=None,
+        read_state=ReadState.READY,
+        missing_reason=None,
+        provenance_refs=(),
+    )
+
+
+async def _seed_round(dao: AgentDao, *, execution_id: str = "e1", round_id: str = "round-1") -> None:
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造读取前置轮次
+        await conn.execute(
+            insert(AgentRound).values(
+                user_scope="u1",
+                round_id=round_id,
+                execution_id=execution_id,
+                round_number=1,
+                workflow_id=f"wf-{round_id}",
+                workflow_code_version="wcv-1",
+                run_epoch=1,
+                input_revision=1,
+                plan_revision=1,
+                goal_coverage="unknown",
+                final_saved=False,
+                convergence_confirmed=False,
+                active_round=True,
+            )
+        )
+
+
+class TestStopKeepsFrozenSourceFacts:
+    """真实登记 → 禁用 → 读取：历史返回冻结事实，当前状态显式 stopped。"""
+
+    async def test_read_after_stop_returns_frozen_facts(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "e1", "root", "root")
+        await _seed_round(dao)
+        ref = _business_ref()
+        await dao.register_business_sources(
+            BusinessSourceRegistrationRequest(
+                user_scope="u1",
+                consumer_kind="execution",
+                consumer_id="e1",
+                consumer_version="1",
+                items=(BusinessSourceItem(source=ref, verification=VerificationState.PROGRAM_VERIFIED),),
+            )
+        )
+
+        receipt = await dao.stop_source_use(_stop())
+        assert receipt.already_disabled is False
+
+        read = await dao.read_source(
+            SourceReadQuery(
+                source_id="src-1",
+                version="1",
+                digest=ref.digest,
+                locator=ref.locator,
+                draft_revision=None,
+                execution_id="e1",
+                round_id="round-1",
+                input_revision=1,
+            ),
+            user_scope="u1",
+        )
+
+        # 冻结事实（版本/摘要/类别/定位/核验）原样返回，不被 stop 改写
+        assert read.source == ref
+        assert read.verification is VerificationState.PROGRAM_VERIFIED
+        # 当前投影显式标注停止；不是坏元数据
+        assert read.read_state is ReadState.DISABLED
+        assert read.available is False
+        assert read.missing_reason == "source_disabled"
+
+        # 停止后新研究仍被拒绝（既有判定不回归）
+        await _seed_operation(dao, "u1", "op-1")
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_source_versions(_claim("claim-after-stop", (_ref("src-1"),)))
+        _expect_error(excinfo, AgentErrorCode.SOURCE_DISABLED)
+        await dao.engine.dispose()  # type: ignore[union-attr]

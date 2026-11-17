@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -28,23 +29,31 @@ from alembic import command
 from sqlalchemy import text
 
 from core.agent_types import (
+    AcceptRequest,
     AgentErrorCode,
     AgentServiceError,
+    BusinessSourceItem,
+    BusinessSourceRegistrationRequest,
     CommandRef,
     DraftPayload,
     DraftSaveCommand,
     FactValue,
     Mode,
+    Purpose,
     ReadState,
     Selection,
+    SourceClaimRequest,
     SourceKind,
     SourceLocator,
     SourceReadQuery,
     SourceRef,
+    SourceStopCommand,
     SourceVersionRef,
     VerificationState,
+    derive_accept_identity,
     encode_fact_value,
     encode_source_ref,
+    json_doc,
     sha256_hex,
 )
 from data.persistence.daos.agent_dao import AgentDao
@@ -53,6 +62,8 @@ from data.persistence.models import (
     AgentAssetVersion,
     AgentBodyPayload,
     AgentExecution,
+    AgentMessage,
+    AgentOperation,
     AgentRound,
     AgentSession,
     AgentSourceLink,
@@ -653,4 +664,296 @@ class TestReadSourceIdentityAndFailures:
             with pytest.raises(AgentServiceError) as excinfo:
                 await dao.read_source(_query(), user_scope="u1")
             assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE, tamper
-            await dao.engine.dispose()  # type: ignore[union-attr]
+
+
+def _accept_request(*, text: str = "研究三家公司", command_id: str = "client-msg-1") -> AcceptRequest:
+    return AcceptRequest(
+        user_scope="u1",
+        session_id="s1",
+        source_module="ui",
+        business_request_id="req-msg-1",
+        client_command_id=command_id,
+        expected_revision=0,
+        node_id="root",
+        workflow_id="wf-1",
+        mode=Mode.DISCUSS,
+        purpose=Purpose.CONCEPT,
+        text=text,
+        manifest_payload=json_doc(
+            {
+                "schema_version": 1,
+                "source_module": "ui",
+                "business_request_id": "req-msg-1",
+                "mode": "discuss",
+                "purpose": "concept",
+                "text": text,
+            }
+        ),
+        source_display_name="用户消息",
+    )
+
+
+def _origin_query(identity: Any, *, execution_id: str) -> SourceReadQuery:
+    """消息来源读取：定位为 ``user_message`` 类源版 + 全选，执行上下文读取。"""
+
+    return SourceReadQuery(
+        source_id=identity.source_id,
+        version=identity.source_version,
+        digest=identity.source_digest,
+        locator=SourceLocator(
+            locator_kind="source_range",
+            origin_ref=SourceVersionRef(
+                source_kind=SourceKind.USER_MESSAGE,
+                source_id=identity.source_id,
+                source_version=identity.source_version,
+                source_digest=identity.source_digest,
+            ),
+            selection=Selection(kind="all"),
+        ),
+        draft_revision=None,
+        execution_id=execution_id,
+    )
+
+
+async def _accept(dao: AgentDao, request: AcceptRequest) -> Any:
+    receipt = await dao.accept_request(request)
+    return derive_accept_identity(request), receipt
+
+
+class TestUserMessageOriginSource:
+    """D10/D11 真实链路：受理 → 读回正文 → 禁用 → 历史可读 / 研究不可用。"""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_accepted_message_source_reads_owner_body(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        request = _accept_request()
+        identity, receipt = await _accept(dao, request)
+
+        read = await dao.read_source(_origin_query(identity, execution_id=receipt.execution_id), user_scope="u1")
+
+        assert read.body_text == request.text
+        assert read.source.source_kind is SourceKind.USER_MESSAGE
+        assert read.source.read_state is ReadState.READY
+        assert read.read_state is ReadState.READY
+        assert read.verification is VerificationState.PROGRAM_VERIFIED
+        assert read.available is True
+        assert read.missing_reason is None
+
+        # 资产表不复制第二份私人正文（正文仍由 message 行拥有）
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]
+            asset = (
+                await conn.execute(
+                    sa.select(
+                        AgentAssetVersion.metadata_payload,
+                        AgentAssetVersion.body_text,
+                        AgentAssetVersion.body_ref,
+                    ).where(
+                        AgentAssetVersion.user_scope == "u1",
+                        AgentAssetVersion.asset_id == identity.source_id,
+                    )
+                )
+            ).one()
+        assert asset.body_text is None
+        assert asset.body_ref is None
+        assert "source_ref" not in asset.metadata_payload
+        assert asset.metadata_payload["user_message_origin"]["message_id"] == identity.message_id
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_message_source_body_ref_path_decoded(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        request = _accept_request()
+        identity, receipt = await _accept(dao, request)
+
+        raw = request.text.encode("utf-8")
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                sa.update(AgentMessage)
+                .where(
+                    AgentMessage.user_scope == "u1",
+                    AgentMessage.message_id == identity.message_id,
+                )
+                .values(body_text=None, body_ref="body-user-1")
+            )
+            await conn.execute(
+                sa.insert(AgentBodyPayload).values(
+                    user_scope="u1",
+                    body_ref="body-user-1",
+                    owner_kind="message",
+                    owner_id=identity.message_id,
+                    owner_version="1",
+                    message_id=identity.message_id,
+                    encoding="utf-8",
+                    payload_bytes=raw,
+                    byte_length=len(raw),
+                    payload_digest=sha256_hex(raw),
+                )
+            )
+
+        read = await dao.read_source(_origin_query(identity, execution_id=receipt.execution_id), user_scope="u1")
+
+        assert read.body_text == request.text
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stop_keeps_frozen_body_and_blocks_new_research(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        request = _accept_request()
+        identity, receipt = await _accept(dao, request)
+
+        await dao.stop_source_use(
+            SourceStopCommand(
+                user_scope="u1",
+                source_id=identity.source_id,
+                source_version=identity.source_version,
+                command_id="cmd-stop-1",
+            )
+        )
+        read = await dao.read_source(_origin_query(identity, execution_id=receipt.execution_id), user_scope="u1")
+
+        # 历史读取仍返回冻结事实；当前状态显式标注 stopped/disabled，而非坏元数据
+        assert read.body_text == request.text
+        assert read.source.read_state is ReadState.READY
+        assert read.read_state is ReadState.DISABLED
+        assert read.available is False
+        assert read.missing_reason == "source_disabled"
+
+        # 研究不可用：新认领按投影拒绝（沿用既有判定，D09 fence 不回归）
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            await conn.execute(
+                sa.insert(AgentOperation).values(
+                    user_scope="u1",
+                    operation_id="op-1",
+                    owner_epoch=1,
+                    run_epoch=1,
+                    phase="prepared",
+                    effect_state="not_dispatched",
+                    io_state="unknown",
+                )
+            )
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_source_versions(
+                SourceClaimRequest(
+                    user_scope="u1",
+                    claim_ref="claim-after-stop",
+                    operation_id="op-1",
+                    sources=(
+                        SourceVersionRef(
+                            source_kind=SourceKind.USER_MESSAGE,
+                            source_id=identity.source_id,
+                            source_version=identity.source_version,
+                            source_digest=identity.source_digest,
+                        ),
+                    ),
+                )
+            )
+        assert excinfo.value.code is AgentErrorCode.SOURCE_DISABLED
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.parametrize(
+        ("tamper", "expected"),
+        [
+            ("body", AgentErrorCode.OPERATION_UNKNOWN),
+            ("version", AgentErrorCode.OPERATION_UNKNOWN),
+            ("message_missing", AgentErrorCode.OPERATION_UNKNOWN),
+            ("cleanup", AgentErrorCode.PERSISTENCE_UNAVAILABLE),
+        ],
+    )
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_origin_inconsistency_fails_explicitly(
+        self, real_embedded_pg: ConnectionInfo, tamper: str, expected: AgentErrorCode
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        request = _accept_request()
+        identity, receipt = await _accept(dao, request)
+
+        if tamper == "body":
+            async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+                await conn.execute(
+                    sa.update(AgentMessage)
+                    .where(AgentMessage.user_scope == "u1", AgentMessage.message_id == identity.message_id)
+                    .values(body_text="被改写的正文")
+                )
+        elif tamper == "version":
+            async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+                await conn.execute(
+                    sa.update(AgentAssetVersion)
+                    .where(
+                        AgentAssetVersion.user_scope == "u1",
+                        AgentAssetVersion.asset_id == identity.source_id,
+                    )
+                    .values(
+                        metadata_payload={
+                            "schema_version": 1,
+                            "user_message_origin": {
+                                "session_id": "s1",
+                                "message_id": identity.message_id,
+                                "message_version": "2",
+                            },
+                        }
+                    )
+                )
+        elif tamper == "message_missing":
+            async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+                await conn.execute(
+                    sa.delete(AgentMessage).where(
+                        AgentMessage.user_scope == "u1", AgentMessage.message_id == identity.message_id
+                    )
+                )
+        else:
+            await dao.tombstone_cleanup_text("u1", session_ids=("s1",))
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(_origin_query(identity, execution_id=receipt.execution_id), user_scope="u1")
+        assert excinfo.value.code is expected
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+
+class TestRegisteredSourceStopProjection:
+    """D11 真实登记链路：业务来源登记 → 禁用 → 读取返回冻结事实、投影标注停止。"""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stop_keeps_registered_source_readable(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_execution(dao)
+        await dao.register_business_sources(
+            BusinessSourceRegistrationRequest(
+                user_scope="u1",
+                consumer_kind="execution",
+                consumer_id="exec-1",
+                consumer_version="1",
+                items=(
+                    BusinessSourceItem(
+                        source=_source_ref(),
+                        verification=VerificationState.PROGRAM_VERIFIED,
+                    ),
+                ),
+            )
+        )
+        query = _query(draft_revision=None, execution_id="exec-1", round_id="round-1", input_revision=1)
+        before = await dao.read_source(query, user_scope="u1")
+        assert before.read_state is ReadState.READY
+        assert before.available is True
+
+        await dao.stop_source_use(
+            SourceStopCommand(
+                user_scope="u1",
+                source_id="src-1",
+                source_version="v1",
+                command_id="cmd-stop-2",
+            )
+        )
+        after = await dao.read_source(query, user_scope="u1")
+
+        # 冻结事实不变（来源版本/摘要/类别/定位），当前投影显式标注停止
+        assert after.source == before.source
+        assert after.source.read_state is ReadState.READY
+        assert after.read_state is ReadState.DISABLED
+        assert after.available is False
+        assert after.missing_reason == "source_disabled"
+        await dao.engine.dispose()  # type: ignore[union-attr]
