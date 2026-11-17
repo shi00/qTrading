@@ -85,6 +85,7 @@ from core.agent_types import (
     DeliveryState,
     decode_delivery_manifest,
     encode_delivery_manifest,
+    validate_cleanup_phase_write,
     validate_delivery_transition,
     DispatchCloseFact,
     DispatchCloseRequest,
@@ -7710,11 +7711,22 @@ class AgentDao(BaseDao):
 
         阶段单调（R22 语义）：已 ``verified`` 的作业拒绝任何非 ``verified`` 写入，
         防止 ``retry_pending`` 覆盖完成态、留下不清的 ``verified_at``。
+
+        写入前严格核验计数与 ``complete`` 一致性（D31）：``verified`` 必须
+        ``complete=True`` 且覆盖全部九域（含应用 Datasource 输出正文域）并逐域
+        严格为 0；``bool`` 不得冒充 ``0``；缺域/非零/``complete=False`` 一律
+        ``INPUT_INVALID``，不落库。
         """
 
         self._check_engine()
-        engine = self._require_async_engine()
         label = f"{user_scope}/{cleanup_job_id}"
+        try:
+            validate_cleanup_phase_write(phase, verified_counts, complete=complete)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID, f"cleanup phase write invalid: {exc.code}", label
+            ) from exc
+        engine = self._require_async_engine()
         values: dict[str, Any] = {
             "phase": phase.value,
             "verified_counts": verified_counts,

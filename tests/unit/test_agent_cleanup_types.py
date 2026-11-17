@@ -13,6 +13,7 @@ from core.agent_types import (
     CLEANUP_MAX_BATCH_IDS,
     CLEANUP_NATIVE_TARGETS,
     CLEANUP_TOMBSTONE,
+    CLEANUP_VERIFIED_DOMAINS,
     AgentValidationError,
     CleanupAdmission,
     CleanupIdentitySet,
@@ -26,6 +27,7 @@ from core.agent_types import (
     normalize_cleanup_asset_keys,
     normalize_cleanup_ids,
     tombstone_text,
+    validate_cleanup_phase_write,
 )
 
 
@@ -124,6 +126,85 @@ class TestStateMachine:
         )
         assert state.can_delete() is True
         assert state.exact_ids == ("a", "b")
+
+    def test_can_mark_verified_rejects_bool_as_zero(self) -> None:
+        """``bool`` 是 ``int`` 子类且 ``False == 0``，不得冒充已清零（D31）。"""
+
+        state = CleanupState(phase=CleanupPhase.PREPARED, fence_committed=True)
+        counts: dict[str, object] = dict.fromkeys(CLEANUP_VERIFIED_DOMAINS, 0)
+        counts["dbos.streams"] = False
+        assert state.can_mark_verified(counts) is False
+
+
+def _zeros(overrides: dict[str, object] | None = None) -> dict[str, object]:
+    counts: dict[str, object] = dict.fromkeys(CLEANUP_VERIFIED_DOMAINS, 0)
+    counts.update(overrides or {})
+    return counts
+
+
+class TestCleanupVerificationWrite:
+    """D31：verified 写入必须九域齐备零值且 complete 一致。"""
+
+    def test_verified_domains_cover_nine_native_targets_including_application(self) -> None:
+        assert tuple(table for table, _key in CLEANUP_NATIVE_TARGETS) == CLEANUP_VERIFIED_DOMAINS
+        assert len(CLEANUP_VERIFIED_DOMAINS) == 9
+        assert "agent_ds.datasource_outputs" in CLEANUP_VERIFIED_DOMAINS
+
+    def test_all_zero_with_complete_true_is_accepted(self) -> None:
+        validate_cleanup_phase_write(CleanupPhase.VERIFIED, _zeros(), complete=True)
+
+    def test_all_zero_with_complete_false_is_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(CleanupPhase.VERIFIED, _zeros(), complete=False)
+        assert exc.value.code == "invalid_cleanup_state"
+
+    def test_missing_domain_is_rejected(self) -> None:
+        counts = _zeros()
+        del counts["agent_ds.datasource_outputs"]
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(CleanupPhase.VERIFIED, counts, complete=True)
+        assert exc.value.code == "missing_field"
+        assert "agent_ds.datasource_outputs" in exc.value.field_path
+
+    def test_missing_counts_is_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(CleanupPhase.VERIFIED, None, complete=True)
+        assert exc.value.code == "missing_field"
+
+    def test_unknown_domain_is_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(CleanupPhase.VERIFIED, _zeros({"extra.domain": 0}), complete=True)
+        assert exc.value.code == "unknown_field"
+
+    @pytest.mark.parametrize("bad", [False, True, 0.0, "0", None])
+    def test_non_strict_int_count_is_rejected(self, bad: object) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(CleanupPhase.VERIFIED, _zeros({"dbos.streams": bad}), complete=True)
+        assert exc.value.code == "invalid_type"
+
+    def test_non_zero_count_with_complete_true_is_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(
+                CleanupPhase.VERIFIED, _zeros({"agent_ds.datasource_outputs": 1}), complete=True
+            )
+        assert exc.value.code == "invalid_range"
+
+    def test_retry_pending_allows_non_zero_and_partial_counts(self) -> None:
+        validate_cleanup_phase_write(
+            CleanupPhase.RETRY_PENDING,
+            {"dbos.workflow_status": 2, "agent_ds.datasource_outputs": 0},
+            complete=False,
+        )
+
+    def test_retry_pending_with_complete_true_is_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(CleanupPhase.RETRY_PENDING, _zeros(), complete=True)
+        assert exc.value.code == "invalid_cleanup_state"
+
+    def test_retry_pending_rejects_bool_count(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            validate_cleanup_phase_write(CleanupPhase.RETRY_PENDING, {"dbos.streams": False}, complete=False)
+        assert exc.value.code == "invalid_type"
 
 
 class TestTombstone:

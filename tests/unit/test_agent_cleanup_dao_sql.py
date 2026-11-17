@@ -22,6 +22,7 @@ from core.agent_types import (
     CLEANUP_TOMBSTONE_DIGEST,
     AgentErrorCode,
     AgentServiceError,
+    CleanupPhase,
     sha256_hex,
 )
 from data.persistence.agent_runtime_store import (
@@ -209,3 +210,81 @@ class TestCleanupTombstoneContract:
             "agent_source_link",
         }
         assert all(count == 0 for count in touched.values())
+
+
+class TestCleanupPhaseWriteValidation:
+    """D31：落库前严格核验，缺域/非零/bool/complete 矛盾一律 INPUT_INVALID。"""
+
+    def _dao(self) -> AgentDao:
+        # 未初始化引擎也可校验入参：校验发生在使用引擎之前。
+        return AgentDao(object())
+
+    @staticmethod
+    def _zeros() -> dict[str, int]:
+        return {table: 0 for table, _key in CLEANUP_NATIVE_TARGETS}
+
+    async def _rejected(self, **kwargs: object) -> AgentServiceError:
+        with pytest.raises(AgentServiceError) as exc:
+            await self._dao().save_cleanup_phase("u", "job-1", **kwargs)  # type: ignore[arg-type]  # 测试受控入参
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        return exc.value
+
+    @pytest.mark.asyncio
+    async def test_verified_without_counts_rejected(self) -> None:
+        await self._rejected(phase=CleanupPhase.VERIFIED, complete=True)
+
+    @pytest.mark.asyncio
+    async def test_verified_with_missing_domain_rejected(self) -> None:
+        counts = self._zeros()
+        del counts["agent_ds.datasource_outputs"]
+        await self._rejected(phase=CleanupPhase.VERIFIED, verified_counts=counts, complete=True)
+
+    @pytest.mark.asyncio
+    async def test_verified_with_bool_count_rejected(self) -> None:
+        counts = self._zeros()
+        counts["dbos.streams"] = False
+        await self._rejected(phase=CleanupPhase.VERIFIED, verified_counts=counts, complete=True)
+
+    @pytest.mark.asyncio
+    async def test_verified_with_non_zero_count_rejected(self) -> None:
+        counts = self._zeros()
+        counts["agent_ds.datasource_outputs"] = 1
+        await self._rejected(phase=CleanupPhase.VERIFIED, verified_counts=counts, complete=True)
+
+    @pytest.mark.asyncio
+    async def test_verified_with_complete_false_rejected(self) -> None:
+        await self._rejected(phase=CleanupPhase.VERIFIED, verified_counts=self._zeros(), complete=False)
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_with_complete_true_rejected(self) -> None:
+        await self._rejected(phase=CleanupPhase.RETRY_PENDING, verified_counts=self._zeros(), complete=True)
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_with_bool_count_rejected(self) -> None:
+        await self._rejected(
+            phase=CleanupPhase.RETRY_PENDING,
+            verified_counts={"dbos.workflow_status": False},
+            complete=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_valid_verified_reaches_engine_requirement(self) -> None:
+        """校验通过后才触达引擎要求（本单测无真实引擎，证明未被入参校验拦下）。"""
+
+        with pytest.raises(AgentServiceError) as exc:
+            await self._dao().save_cleanup_phase(
+                "u", "job-1", phase=CleanupPhase.VERIFIED, verified_counts=self._zeros(), complete=True
+            )
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_retry_pending_non_zero_partial_counts_reaches_engine_requirement(self) -> None:
+        with pytest.raises(AgentServiceError) as exc:
+            await self._dao().save_cleanup_phase(
+                "u",
+                "job-1",
+                phase=CleanupPhase.RETRY_PENDING,
+                verified_counts={"dbos.workflow_status": 2},
+                complete=False,
+            )
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE

@@ -26,6 +26,7 @@ from alembic import command
 from sqlalchemy import text
 
 from core.agent_types import (
+    CLEANUP_NATIVE_TARGETS,
     AgentErrorCode,
     AgentServiceError,
     CleanupJobRecord,
@@ -52,6 +53,12 @@ _RESET_APP_SCHEMA = (
     text("DROP SCHEMA IF EXISTS public CASCADE"),
     text("CREATE SCHEMA public"),
 )
+
+
+def _zeros() -> dict[str, int]:
+    """九域齐备零计数（含应用 Datasource 输出正文域）：verified 写入的完整依据。"""
+
+    return {table: 0 for table, _key in CLEANUP_NATIVE_TARGETS}
 
 
 def _precondition(**overrides: bool) -> CleanupPrecondition:
@@ -186,11 +193,13 @@ async def test_verified_requires_fence_and_persists_counts(dao: AgentDao) -> Non
     await dao.save_cleanup_job(_record(job_id))
 
     with pytest.raises(AgentServiceError) as exc:
-        await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, complete=True)
+        await dao.save_cleanup_phase(
+            _USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=_zeros(), complete=True
+        )
     assert exc.value.code is AgentErrorCode.INPUT_INVALID
 
     await dao.commit_cleanup_fence(_record(job_id))
-    zeros = {table: 0 for table in ("dbos.workflow_status", "dbos.streams")}
+    zeros = _zeros()
     await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=zeros, complete=True)
 
     async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 集成测试直读核验
@@ -253,7 +262,9 @@ async def test_cleanup_service_confirm_commits_fence_once_on_real_store(dao: Age
     assert second.replayed is True
     assert second.exact_ids == ("wf-a", "wf-b")
 
-    await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, complete=True)
+    await dao.save_cleanup_phase(
+        _USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=_zeros(), complete=True
+    )
     verified = await service.confirm(command, _precondition())
     assert verified.replayed is True
     assert verified.phase is CleanupPhase.VERIFIED
@@ -270,7 +281,7 @@ async def test_verified_phase_is_terminal_and_cannot_regress(dao: AgentDao) -> N
     job_id = _job_id()
     await dao.save_cleanup_job(_record(job_id))
     await dao.commit_cleanup_fence(_record(job_id))
-    zeros = {table: 0 for table in ("dbos.workflow_status", "dbos.streams")}
+    zeros = _zeros()
     await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=zeros, complete=True)
 
     with pytest.raises(AgentServiceError) as exc:
@@ -303,7 +314,7 @@ async def test_fence_write_rejected_after_verified(dao: AgentDao) -> None:
     job_id = _job_id()
     await dao.save_cleanup_job(_record(job_id))
     await dao.commit_cleanup_fence(_record(job_id))
-    zeros = {table: 0 for table in ("dbos.workflow_status", "dbos.streams")}
+    zeros = _zeros()
     await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=zeros, complete=True)
 
     with pytest.raises(AgentServiceError) as exc:
@@ -407,7 +418,7 @@ async def test_verified_keeps_content_manifest(dao: AgentDao) -> None:
     job_id = _job_id()
     await dao.save_cleanup_job(_record(job_id), content_manifest={"body_refs": ["body-keep"]})
     await dao.commit_cleanup_fence(_record(job_id))
-    zeros = {table: 0 for table in ("dbos.workflow_status", "dbos.streams")}
+    zeros = _zeros()
     await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.VERIFIED, verified_counts=zeros, complete=True)
 
     async with dao.engine.connect() as conn:  # type: ignore[union-attr]  # 集成测试直读核验

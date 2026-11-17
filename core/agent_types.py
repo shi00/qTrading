@@ -6623,6 +6623,71 @@ def normalize_cleanup_ids(ids: Iterable[object]) -> tuple[str, ...]:
     return tuple(sorted(normalized))
 
 
+#: ``verified`` 阶段必须覆盖的计数域：九类原生目标，其中 ``agent_ds.datasource_outputs``
+#: 为应用 Datasource 输出正文域。缺任一域（含应用正文域）都不得置 verified/complete。
+CLEANUP_VERIFIED_DOMAINS: Final[tuple[str, ...]] = tuple(table for table, _key in CLEANUP_NATIVE_TARGETS)
+
+
+def _is_strict_count(value: object) -> bool:
+    """计数必须是严格 int：``bool`` 是 ``int`` 子类，``False == 0`` 不得冒充已清零。"""
+
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def validate_cleanup_phase_write(
+    phase: CleanupPhase,
+    verified_counts: Mapping[str, object] | None,
+    *,
+    complete: bool,
+) -> None:
+    """核验清理阶段写入的计数与 ``complete`` 一致性（D31 / §9.11 / §10.7）。
+
+    - 任一计数域必须是严格 int（``bool`` 拒绝，因 ``False == 0`` 会冒充已清零）；
+    - ``verified``：必须 ``complete=True``，覆盖全部九域（含应用 Datasource 输出
+      正文域）且逐域严格为 0；缺域/额外域/非零/``complete=False`` 一律拒绝；
+    - 其他阶段：必须 ``complete=False``；计数可缺省或部分（重试允许非零），但出现
+      时必须为非负严格 int。
+    """
+
+    if not isinstance(phase, CleanupPhase):
+        _fail("invalid_type", "$.cleanup.phase")
+    if phase is CleanupPhase.VERIFIED:
+        if complete is not True:
+            _fail("invalid_cleanup_state", "$.cleanup.complete")
+        if not isinstance(verified_counts, Mapping):
+            _fail("missing_field", "$.cleanup.verified_counts")
+        keys = set(verified_counts.keys())
+        if not all(isinstance(key, str) and key for key in keys):
+            _fail("invalid_type", "$.cleanup.verified_counts")
+        required = frozenset(CLEANUP_VERIFIED_DOMAINS)
+        missing = sorted(required - keys)
+        if missing:
+            _fail("missing_field", f"$.cleanup.verified_counts.{missing[0]}")
+        extra = sorted(keys - required)
+        if extra:
+            _fail("unknown_field", f"$.cleanup.verified_counts.{extra[0]}")
+        for table in CLEANUP_VERIFIED_DOMAINS:
+            value = verified_counts[table]
+            if isinstance(value, bool) or not isinstance(value, int):
+                _fail("invalid_type", f"$.cleanup.verified_counts.{table}")
+            if value != 0:
+                _fail("invalid_range", f"$.cleanup.verified_counts.{table}")
+        return
+    if complete is not False:
+        _fail("invalid_cleanup_state", "$.cleanup.complete")
+    if verified_counts is None:
+        return
+    if not isinstance(verified_counts, Mapping):
+        _fail("invalid_type", "$.cleanup.verified_counts")
+    for key, value in verified_counts.items():
+        if not isinstance(key, str) or not key:
+            _fail("invalid_type", "$.cleanup.verified_counts")
+        if isinstance(value, bool) or not isinstance(value, int):
+            _fail("invalid_type", f"$.cleanup.verified_counts.{key}")
+        if value < 0:
+            _fail("invalid_range", f"$.cleanup.verified_counts.{key}")
+
+
 @dataclass(frozen=True, slots=True)
 class CleanupState:
     """清理作业状态：fence 提交后才允许删除；九域全部查 0 才 verified。"""
@@ -6634,10 +6699,14 @@ class CleanupState:
     def can_delete(self) -> bool:
         return self.fence_committed and self.phase is not CleanupPhase.VERIFIED
 
-    def can_mark_verified(self, verified_counts: Mapping[str, int]) -> bool:
+    def can_mark_verified(self, verified_counts: Mapping[str, object]) -> bool:
         if not self.fence_committed:
             return False
-        return all(verified_counts.get(table) == 0 for table, _key in CLEANUP_NATIVE_TARGETS)
+        for table, _key in CLEANUP_NATIVE_TARGETS:
+            value = verified_counts.get(table)
+            if not _is_strict_count(value) or value != 0:
+                return False
+        return True
 
 
 def tombstone_text(original: str | None) -> str:
