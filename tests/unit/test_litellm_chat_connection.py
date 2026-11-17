@@ -374,6 +374,21 @@ class TestInvokeChatConnectionNonStream:
         assert result.refusal == "无法协助该请求"
         result.ensure_valid()
 
+    async def test_mixed_text_and_refusal_with_stop_maps_to_refused(self):
+        """M05 非流对照：混文本 + refusal 文本 + finish=stop 仍是拒绝（拒绝优先于
+        finish 原值），不得映射 final 记成功。"""
+
+        request = _chat_request()
+        response = _nonstream_response(content="以下是部分回答", finish_reason="stop", refusal="无法协助该请求")
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=response)):
+            result = await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=False
+            )
+        assert result.finish_reason == "refused"
+        assert result.refusal == "无法协助该请求"
+        assert result.text == "以下是部分回答"
+        result.ensure_valid()
+
     async def test_content_filter_without_refusal_text(self):
         """finish=content_filter 而无 refusal 文本 → refusal 取 provider 信号原文。"""
 
@@ -558,6 +573,60 @@ class TestInvokeChatConnectionStream:
         assert result.finish_reason == "refused"
         assert result.refusal == "无法协助"
         assert result.text is None
+        result.ensure_valid()
+
+    async def test_stream_pure_refusal_with_stop_maps_to_refused(self):
+        """M05：纯拒绝（refusal 文本）以 stop 结束 → finish refused（拒绝优先于
+        finish 原值），不得映射 final 被 Executor 记 succeeded。"""
+
+        request = _chat_request()
+        refusal_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=None, refusal="无法协助", tool_calls=None),
+                    finish_reason="stop",
+                )
+            ],
+            usage=None,
+        )
+        events: list[ChatStreamEvent] = []
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=_stream_chunks([refusal_chunk]))):
+            result = await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=True, on_event=_events_from(events)
+            )
+        assert result.finish_reason == "refused"
+        assert result.refusal == "无法协助"
+        assert result.text is None
+        assert events[-1].kind == "finish"
+        assert events[-1].finish_reason == "refused"
+        result.ensure_valid()
+
+    async def test_stream_mixed_text_and_refusal_with_stop_maps_to_refused(self):
+        """M05：混文本 + refusal 且以 stop 结束 → finish refused（与非流同序），
+        已产出文本原样保留，不得记成功、不得凭「输出非法」换候选绕过拒绝。"""
+
+        request = _chat_request()
+        chunks = [
+            _text_delta("以下是部分回答"),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=None, refusal="无法协助", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+        events: list[ChatStreamEvent] = []
+        with patch("services.ai_service.acompletion", AsyncMock(return_value=_stream_chunks(chunks))):
+            result = await LiteLLMClient(MagicMock()).invoke_chat_connection(
+                request, _connection(), request.deadline, _attempt_context(), stream=True, on_event=_events_from(events)
+            )
+        assert result.finish_reason == "refused"
+        assert result.refusal == "无法协助"
+        assert result.text == "以下是部分回答"
+        assert events[-1].finish_reason == "refused"
         result.ensure_valid()
 
     async def test_cancelled_error_propagates_during_stream(self):

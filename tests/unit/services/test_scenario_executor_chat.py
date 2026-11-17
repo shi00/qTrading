@@ -632,6 +632,53 @@ class TestChatRefusal:
         assert terminal.status == "failed"
         assert terminal.usage is usage
 
+    @pytest.mark.asyncio
+    async def test_mixed_text_refusal_halts_without_candidate_switch(self):
+        """M05：混文本 + 拒绝回合（流式解释产出 finish=refused）仍 failed + halt——
+        不因已有文本被当作成功，也不得换候选绕过拒绝。"""
+
+        usage = _usage()
+        refused = ChatTurnResponse(
+            text="以下是部分回答",
+            finish_reason="refused",
+            actual_model="glm-4-air",
+            usage_observed=True,
+            usage=usage,
+            transport_state="ok",
+            refusal="无法协助",
+        )
+        adapter = _ScriptedChatAdapter(
+            [
+                (
+                    (
+                        _text_event(1, "以下是部分回答"),
+                        ChatStreamEvent(sequence=2, kind="finish", finish_reason="refused", usage=usage),
+                    ),
+                    None,
+                    refused,
+                ),
+                ((), None, _chat_ok_response()),  # 第二候选不得派发
+            ]
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            binding=_binding(),
+        )
+        assert outcome.status == "failed"
+        assert outcome.transport_state == "ok"
+        assert outcome.response is refused
+        assert outcome.error_code == "CONTENT_REFUSED"
+        assert len(adapter.invoke_calls) == 1
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "failed"
+        assert terminal.usage is usage
+
 
 class TestChatCancelPropagation:
     @pytest.mark.asyncio
