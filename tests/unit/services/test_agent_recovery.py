@@ -1013,6 +1013,35 @@ class TestAdvisoryLockAcquireSerialization:
         assert len(created) == 2
 
 
+class TestInstanceGuardConnectionBudget:
+    """检视 R12：实例锁连接计入运行期增量 7 条预算，且不得额外溢出/共享池。"""
+
+    async def test_guard_engine_is_single_non_overflowing_connection(self, monkeypatch: Any) -> None:
+        from services.agent_service import recovery
+        from services.agent_service.runtime import (
+            AGENT_RUNTIME_CONNECTION_BUDGET,
+            INSTANCE_GUARD_CONNECTION_RESERVE,
+        )
+
+        connection, engine, _created = _install_lock_fakes(monkeypatch)
+        captured: dict[str, Any] = {}
+
+        def _capturing_create_engine(*args: Any, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return engine
+
+        monkeypatch.setattr(recovery.sa, "create_engine", _capturing_create_engine)
+        guard = recovery.AdvisoryLockInstanceGuard("postgresql+psycopg://u@host/db", blocking_runner=_direct_blocking)
+        assert (await guard.acquire()).acquired is True
+        # 独立单连接：pool 1 且禁 overflow，故不会把「7 条」放大成 8 条
+        assert captured["pool_size"] == INSTANCE_GUARD_CONNECTION_RESERVE == 1
+        assert captured["max_overflow"] == 0
+        assert captured["connect_args"]["application_name"] == "qtrading_agent_instance_guard"
+        assert AGENT_RUNTIME_CONNECTION_BUDGET == 7
+        guard.release()
+        assert connection.closed == 1
+
+
 def test_startup_workflow_names_match_published_constants() -> None:
     """启动隔离列举名须与 D-02 发布 workflow 名一致（防硬编码漂移）。"""
 

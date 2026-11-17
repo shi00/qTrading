@@ -2,8 +2,9 @@
 
 通过模块级 seam 注入验证组装契约，无真实 DB：
 - 组装顺序：双迁移成功后才创建引擎/DBOS/Datasource/Client；迁移失败全部不建
-- 引擎预算：runtime 4/overflow 0/timeout 3/hide_parameters；control 2；双引擎均
-  psycopg application_name 标识
+- 引擎预算：runtime 4/overflow 0/timeout 3/hide_parameters；control 1；双引擎均
+  psycopg application_name 标识；运行期增量 7 = 4 运行 + 1 LISTEN + 1 控制 + 1 实例锁
+  （检视 R12）
 - DBOS 配置：run_migrations=False、enable_otlp=False、max_executor_threads=4、
   use_listen_notify=True、sharding=False、真实 application_version、每进程 executor_id
 - Datasource/Client 契约：Datasource 注入 runtime_engine+run_migrations=False；
@@ -116,9 +117,16 @@ class TestAssemblyContract:
 
     def test_order_and_budgets(self, host: _RecordingHost) -> None:
         handle = assemble_agent_runtime(_settings())
-        assert host.calls == ["migrations", "engine:4", "engine:2", "dbos", "datasource", "client"]
+        assert host.calls == [
+            "migrations",
+            f"engine:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+            f"engine:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
+            "dbos",
+            "datasource",
+            "client",
+        ]
 
-        runtime_kwargs = host.engines[4]
+        runtime_kwargs = host.engines[runtime_mod.RUNTIME_ENGINE_POOL_SIZE]
         assert runtime_kwargs["max_overflow"] == 0
         assert runtime_kwargs["pool_timeout"] == 3
         assert runtime_kwargs["hide_parameters"] is True
@@ -126,7 +134,7 @@ class TestAssemblyContract:
         runtime_options = runtime_kwargs["connect_args"]["options"]
         assert "statement_timeout=30000" in runtime_options
         assert "idle_in_transaction_session_timeout=60000" in runtime_options
-        control_kwargs = host.engines[2]
+        control_kwargs = host.engines[runtime_mod.CONTROL_ENGINE_POOL_SIZE]
         assert control_kwargs["max_overflow"] == 0
         assert control_kwargs["hide_parameters"] is True
         assert "statement_timeout=30000" in control_kwargs["connect_args"]["options"]
@@ -152,6 +160,22 @@ class TestAssemblyContract:
         assert host.client_kwargs["retry_connection_errors"] is False
         # 应用稳定名（检视 F2：HANDOFF §8.3 固定签名，§8.4 归属过滤依据）
         assert host.client_kwargs["application_name"] == "qtrading-agent-runtime"
+
+    def test_connection_budget_includes_instance_guard(self) -> None:
+        """检视 R12：运行期增量 7 条 = 4 运行池 + 1 脱池 LISTEN + 1 控制池 + 1 实例锁。
+
+        实例锁为独立第 4 类所有权（独立引擎单连接），不得靠注释并入 LISTEN 或
+        控制池；任一项为 0/负数或合计偏离 7 都说明预算被悄悄放大。
+        """
+        ledger = {
+            "runtime_pool": runtime_mod.RUNTIME_ENGINE_POOL_SIZE,
+            "dbos_listen": runtime_mod.DBOS_LISTEN_CONNECTION_RESERVE,
+            "control_pool": runtime_mod.CONTROL_ENGINE_POOL_SIZE,
+            "instance_guard": runtime_mod.INSTANCE_GUARD_CONNECTION_RESERVE,
+        }
+        assert ledger == {"runtime_pool": 4, "dbos_listen": 1, "control_pool": 1, "instance_guard": 1}
+        assert min(ledger.values()) >= 1
+        assert sum(ledger.values()) == runtime_mod.AGENT_RUNTIME_CONNECTION_BUDGET == 7
 
     def test_settings_default_executor_id_is_per_process(self, host: _RecordingHost) -> None:
         """executor_id 缺省为每进程唯一 epoch（HANDOFF §8.4 第 4 条）。"""
@@ -204,15 +228,15 @@ class TestAssemblyContract:
         handle.close()  # 幂等：仅关闭一次
         assert host.calls == [
             "migrations",
-            "engine:4",
-            "engine:2",
+            f"engine:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+            f"engine:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
             "dbos",
             "datasource",
             "client",
             "dbos_destroy",
             "client_destroy",
-            "dispose:4",
-            "dispose:2",
+            f"dispose:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+            f"dispose:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
         ]
 
 
@@ -302,7 +326,11 @@ class TestAssemblyFailureCleanup:
         failure_seams.control_engine_error = RuntimeError("control init failed")
         with pytest.raises(RuntimeError, match="control init failed"):
             assemble_agent_runtime(_settings())
-        assert failure_seams.calls == ["migrations", "engine:4", "dispose:4"]
+        assert failure_seams.calls == [
+            "migrations",
+            f"engine:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+            f"dispose:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+        ]
 
     def test_datasource_failure_destroys_dbos_and_disposes_engines(self, failure_seams: _FailureSeams) -> None:
         boom = RuntimeError("verify failed")
@@ -312,13 +340,13 @@ class TestAssemblyFailureCleanup:
         assert exc_info.value is boom  # 原始异常不被清理掩盖
         assert failure_seams.calls == [
             "migrations",
-            "engine:4",
-            "engine:2",
+            f"engine:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+            f"engine:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
             "dbos",
             "datasource",
             "dbos_destroy",
-            "dispose:2",
-            "dispose:4",
+            f"dispose:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
+            f"dispose:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
         ]
 
     def test_client_failure_destroys_dbos_and_disposes_engines(self, failure_seams: _FailureSeams) -> None:
@@ -329,14 +357,14 @@ class TestAssemblyFailureCleanup:
         assert exc_info.value is boom
         assert failure_seams.calls == [
             "migrations",
-            "engine:4",
-            "engine:2",
+            f"engine:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+            f"engine:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
             "dbos",
             "datasource",
             "client",
             "dbos_destroy",
-            "dispose:2",
-            "dispose:4",
+            f"dispose:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
+            f"dispose:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
         ]
         assert "client_destroy" not in failure_seams.calls  # 构造失败即无对象可收口
 
@@ -349,13 +377,13 @@ class TestAssemblyFailureCleanup:
         # 清理自身失败后仍继续收口 runtime 引擎
         assert failure_seams.calls == [
             "migrations",
-            "engine:4",
-            "engine:2",
+            f"engine:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
+            f"engine:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
             "dbos",
             "datasource",
             "dbos_destroy",
-            "dispose:2",
-            "dispose:4",
+            f"dispose:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
+            f"dispose:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
         ]
 
     def test_reassembly_after_failed_attempt(self, failure_seams: _FailureSeams) -> None:

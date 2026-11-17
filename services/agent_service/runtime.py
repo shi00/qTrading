@@ -6,7 +6,8 @@
       运行角色最小授权+版本守卫，独立迁移引擎 ≤2 连接，先于任何宿主对象；中间失败
       不 launch/不建对象/保历史与原迁移状态）；
    2. ``runtime_engine``（pool 4 / overflow 0 / timeout 3 / hide_parameters，psycopg 同步）
-      与 ``control_engine``（pool 2，禁额外监听）；
+      与 ``control_engine``（pool 1，禁额外监听；运行期增量连接合计 7 条，见
+      ``AGENT_RUNTIME_CONNECTION_BUDGET``）；
    3. ``DBOS(config)``：注入 runtime_engine、``run_migrations=False``（launch 改为验证
       模式）、``enable_otlp=False``、``max_executor_threads=4``、``use_listen_notify=True``、
       ``sharding=False``、真实 ``application_version``、每进程唯一 ``executor_id``；
@@ -49,8 +50,19 @@ from data.persistence.agent_migrator import (
 
 # 设计冻结值（HANDOFF §8.1 第 6/7 条、§8.3）：连接预算与线程/监听配置。
 RUNTIME_DB_NAME = "qtrading-agent-runtime"
-RUNTIME_ENGINE_POOL_SIZE = 4
-CONTROL_ENGINE_POOL_SIZE = 2
+#: 运行期增量连接上限（HANDOFF §8.1/§8.3：唯一 Agent 实例最多 7 条）。
+#: 组成（检视 R12）：4 运行池 + 1 脱池 LISTEN + 1 控制池 + 1 实例锁 = 7；四类
+#: 所有权各自独立，不靠注释把实例锁并进 LISTEN 或控制池。
+AGENT_RUNTIME_CONNECTION_BUDGET: Final[int] = 7
+RUNTIME_ENGINE_POOL_SIZE: Final[int] = 4
+#: DBOS 脱池 LISTEN 保留 1 条（SDK 以 ``raw_connection()+detach()`` 长期占用，
+#: 不占 runtime 池配额，故必须在预算内单列）。
+DBOS_LISTEN_CONNECTION_RESERVE: Final[int] = 1
+#: 控制池 1 条（DBOSClient 与清理共享；实例锁另占独立 1 条，见 recovery.py）。
+CONTROL_ENGINE_POOL_SIZE: Final[int] = 1
+#: 实例锁独立单连接保留 1 条（``recovery.AdvisoryLockInstanceGuard`` 持有会话级
+#: advisory lock，独立引擎单连接，不与其他池共享）。
+INSTANCE_GUARD_CONNECTION_RESERVE: Final[int] = 1
 DBOS_MAX_EXECUTOR_THREADS = 4
 DBOS_SCHEMA = "dbos"
 AGENT_DS_SCHEMA = "agent_ds"
@@ -250,7 +262,10 @@ def _create_runtime_engine(url: str) -> sa.Engine:
 
 
 def _create_control_engine(url: str) -> sa.Engine:
-    """control 引擎：pool 2 / overflow 0 / hide_parameters（§8.1 第 7 条，禁额外监听）。
+    """control 引擎：pool 1 / overflow 0 / hide_parameters（§8.1 第 7 条，禁额外监听）。
+
+    1 条而非 HANDOFF §8.1 的 2 条：7 条运行期增量预算须容纳 §8.4 的独立实例锁
+    连接（检视 R12），故控制面 2 条中 1 条由实例锁占用、控制池保留 1 条。
 
     会话级超时同 runtime 引擎（``_ENGINE_SESSION_OPTIONS``）。
     """

@@ -41,6 +41,7 @@ from core.agent_types import (
     stable_id,
 )
 from services.agent_service.runtime import (
+    INSTANCE_GUARD_CONNECTION_RESERVE,
     RUNTIME_DB_NAME,
     AgentRuntimeSettings,
     InstanceGuard,
@@ -410,8 +411,11 @@ class AdvisoryLockInstanceGuard:
     自动释放锁，故 ``pg_try_advisory_lock`` 成功即同时证明「获得唯一执行权」
     与「旧写者已退出/可安全接管」（不是用 CANCELLED 冒充退出，§8.6）。
 
-    连接预算（§8.1「4+1+2 及原应用池」）：本持久连接即其中 ``+1``（实例锁），
-    不新增第 8 条；连接仅在启动后常驻、关闭就绪后 release。
+    连接预算（HANDOFF §8.1「4+1+2=7」与 §8.4 唯一执行锁，检视 R12）：运行期增量
+    共 7 条 = 运行池 4 + 脱池 LISTEN 1 + 控制池 1 + **本实例锁 1**。本锁是独立
+    第 4 类所有权（独立引擎、独立单连接），不并入 LISTEN 或控制池；早前「实例锁
+    即 4+1+2 中的 +1」属把两类连接混记，已按实际所有权拆开。连接仅在启动后
+    常驻、关闭就绪后 release。
     """
 
     def __init__(self, system_database_url: str, *, blocking_runner: BlockingRunner | None = None) -> None:
@@ -445,7 +449,7 @@ class AdvisoryLockInstanceGuard:
         def _try_lock() -> bool:
             self._engine = sa.create_engine(
                 _sync_database_url(self._system_database_url),
-                pool_size=1,
+                pool_size=INSTANCE_GUARD_CONNECTION_RESERVE,
                 max_overflow=0,
                 pool_timeout=3,
                 connect_args={"application_name": "qtrading_agent_instance_guard"},
