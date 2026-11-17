@@ -1722,6 +1722,11 @@ class AcceptRequest:
     text: str
     manifest_payload: CanonicalJson
     source_display_name: str
+    #: F37 多模型比较组/路引用（既有列，无新表列）：同组各路共用一个 manifest，
+    #: ``comparison_group_ref`` 关联共同冻结输入，``comparison_lane_ref`` 为本路
+    #: 稳定身份（按所选连接身份派生，不随排队时点变化）。
+    comparison_group_ref: str | None = None
+    comparison_lane_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1771,6 +1776,12 @@ def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
     if not isinstance(request.manifest_payload, str) or request.manifest_payload == "":
         _fail("invalid_value", "$.manifest_payload")
     _require_str(request.source_display_name, "$.source_display_name")
+    # F37：组/路引用同给同缺（孤立引用无法判定共同输入或本路身份）。
+    if (request.comparison_group_ref is None) != (request.comparison_lane_ref is None):
+        _fail("invalid_comparison_refs", "$.comparison_group_ref")
+    if request.comparison_group_ref is not None:
+        _require_str(request.comparison_group_ref, "$.comparison_group_ref")
+        _require_str(request.comparison_lane_ref, "$.comparison_lane_ref")
 
     command_record_id = stable_id("command", [user_scope, session_id, request.client_command_id])
     message_id = stable_id("user_message", [user_scope, session_id, command_record_id])
