@@ -97,10 +97,12 @@ class _Session:
     def __init__(
         self,
         *,
+        tools: tuple[MCPToolDescriptor, ...] | None = None,
         raises: BaseException | None = None,
         result: dict[str, Any] | None = None,
         delay: float = 0.0,
     ) -> None:
+        self.tools = tools if tools is not None else (MCPToolDescriptor("read_file", _SCHEMA),)
         self.raises = raises
         self.result = result if result is not None else {"content": [{"type": "text", "text": "ok"}]}
         self.delay = delay
@@ -108,7 +110,7 @@ class _Session:
         self.closed = False
 
     async def list_tools(self, *, deadline_s: int) -> tuple[MCPToolDescriptor, ...]:
-        return (MCPToolDescriptor("read_file", _SCHEMA),)
+        return self.tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any], *, deadline_s: int) -> dict[str, Any]:
         self.calls.append((name, arguments, deadline_s))
@@ -169,6 +171,8 @@ async def _dispatcher(
 
 
 def _request(**overrides: object) -> ToolCallRequest:
+    """测试用请求；每个用例新建 manager，首次启连代次恒为 1（旧代次用显式覆盖）。"""
+
     values: dict[str, object] = {
         "identity": _IDENTITY,
         "tool_name": "read_file",
@@ -178,6 +182,7 @@ def _request(**overrides: object) -> ToolCallRequest:
         "request_tools": ("read_file",),
         "permission_tools": ("read_file",),
         "operation_id": "op-1",
+        "connection_generation": 1,
     }
     values.update(overrides)
     return ToolCallRequest(**values)  # type: ignore[arg-type]  # 测试构造受控覆盖
@@ -210,6 +215,67 @@ class TestDispatchRefusals:
         assert session.calls == []
 
     @pytest.mark.asyncio
+    async def test_swapped_catalog_is_refused_with_zero_claim(self) -> None:
+        """请求自报目录与连接冻结目录不一致：claim 前拒绝，零预留/零执行/零外发。"""
+
+        dispatcher, session, grants, _manager = await _dispatcher()
+        swapped = (MCPToolDescriptor("delete_file", _SCHEMA),)
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(
+                _request(
+                    catalog=swapped,
+                    role_tools=("delete_file",),
+                    request_tools=("delete_file",),
+                    permission_tools=("delete_file",),
+                )
+            )
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "catalog" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_schema_drift_is_refused_with_zero_claim(self) -> None:
+        dispatcher, session, grants, _manager = await _dispatcher()
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request(catalog=(MCPToolDescriptor("read_file", _EMPTY_SCHEMA),)))
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "schema" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_tool_outside_audit_scope_is_refused_with_zero_claim(self) -> None:
+        session = _Session(
+            tools=(MCPToolDescriptor("read_file", _SCHEMA), MCPToolDescriptor("write_file", _SCHEMA)),
+        )
+        dispatcher, session, grants, _manager = await _dispatcher(session=session)
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(
+                _request(
+                    tool_name="write_file",
+                    catalog=session.tools,
+                    role_tools=("write_file",),
+                    request_tools=("write_file",),
+                    permission_tools=("write_file",),
+                )
+            )
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "scope" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_stale_connection_generation_is_refused_with_zero_claim(self) -> None:
+        dispatcher, session, grants, _manager = await _dispatcher()
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request(connection_generation=0))
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "generation" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
     async def test_revoked_before_dispatch_has_zero_effect(self) -> None:
         dispatcher, session, _grants, _manager = await _dispatcher(verdict=ToolDispatchVerdict.REVOKED)
         with pytest.raises(AgentServiceError) as exc:
@@ -233,6 +299,7 @@ class TestDispatchEffects:
         outcome = await dispatcher.call(_request())
         assert outcome.state is ToolCallState.COMPLETED
         assert outcome.result == {"content": [{"type": "text", "text": "ok"}]}
+        assert _grants.claims == [("read_file", "op-1")]
         assert len(session.calls) == 1
         assert session.calls[0][0] == "read_file"
         assert session.calls[0][2] == 30

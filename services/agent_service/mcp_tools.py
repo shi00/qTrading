@@ -1,7 +1,11 @@
 """显式 MCP 工具调用门（E-02 / 详细设计 F15、HANDOFF §9）。
 
-顺序：参数闭合 → 完整 schema 校验（端口）→ 服务/角色/请求/新鲜许可交集 →
-授权 claim（撤销先胜）→ 登记在途 → 单一 deadline 调用 → 结果并入预算 → 配对返回。
+顺序：连接代次/冻结目录/schema/只读审核范围核验 → 参数闭合 → 完整 schema 校验（端口）→
+服务/角色/请求/新鲜许可交集 → 授权 claim（撤销先胜）→ 登记在途 → 单一 deadline 调用 →
+结果并入预算 → 配对返回。
+
+目录、审核范围与 schema 以连接 owner 启连时冻结的发现结果为准，请求自报仅用于比对：
+换目录、审核外工具、schema 漂移、旧代次一律在 claim 前拒绝（零预留/零执行/零外发）。
 
 派发后超时/断线无确证记 ``UNKNOWN`` 且不自动重试；取消继续传播并释放归属。
 真实 jsonschema 适配器与每 send 目的地门仍 needs-spike，不在本轮宣称已验证。
@@ -73,7 +77,7 @@ class ToolGrantPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ToolCallRequest:
-    """一次显式工具调用请求（工具来自本次连接已发现的目录）。"""
+    """一次显式工具调用请求：``catalog``/``connection_generation`` 必须能对上连接冻结态。"""
 
     identity: MCPServiceIdentity
     tool_name: str
@@ -83,6 +87,8 @@ class ToolCallRequest:
     request_tools: tuple[str, ...]
     permission_tools: tuple[str, ...]
     operation_id: str
+    #: 请求构建时的连接代次；与当前连接冻结代次不符即拒绝（旧目录不可复用）。
+    connection_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +116,27 @@ class MCPToolDispatcher:
 
     async def call(self, request: ToolCallRequest) -> ToolCallOutcome:
         label = request.identity.stable_key()
-        descriptor = next((item for item in request.catalog if item.name == request.tool_name), None)
+        frozen = self._manager.frozen_catalog(request.identity)
+        if request.connection_generation != self._manager.connection_generation(request.identity):
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "tool catalog generation is stale", label)
+        frozen_names = tuple(sorted(item.name for item in frozen))
+        claimed_names = tuple(sorted(item.name for item in request.catalog))
+        if claimed_names != frozen_names:
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED, "tool catalog differs from the frozen connection catalog", label
+            )
+        frozen_schema = {item.name: item.schema_json for item in frozen}
+        if any(item.schema_json != frozen_schema[item.name] for item in request.catalog):
+            raise AgentServiceError(
+                AgentErrorCode.POLICY_DENIED, "tool schema drifted from the frozen discovery", label
+            )
+        descriptor = next((item for item in frozen if item.name == request.tool_name), None)
         if descriptor is None:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool is not in the discovered catalog", label)
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "tool is not in the frozen connection catalog", label)
+        if request.tool_name not in self._manager.audit_tool_scope(request.identity):
+            raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "tool is outside the reviewed read-only scope", label)
         allowed = resolve_tool_allowlist(
-            service_tools=(item.name for item in request.catalog),
+            service_tools=frozen_names,
             role_tools=request.role_tools,
             request_tools=request.request_tools,
             permission_tools=request.permission_tools,

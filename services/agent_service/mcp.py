@@ -2,6 +2,8 @@
 
 本模块只承载**静态可验证**的准入合同：保存不启连、连接测试只发现（0 研究工具
 调用）、预算与只读审核证据不足拒启、显式断开且在途时拒停、断线不自动重连。
+研究启连时由连接 owner 完成一次发现并**冻结工具目录 + 连接代次**，工具调用门据此
+服务端核验目录/审核范围/schema，不采信请求自报（I04）。
 
 真实 FastMCP 传输适配见 :mod:`services.agent_service.mcp_fastmcp`（E-02-5 实证：
 stdio 插入点、逐 send 门、FD 级 stderr、四诊断通道）。仍为残留：HTTP/SSE 的真实
@@ -215,6 +217,10 @@ class SharedMCPConnectionManager:
         self._in_flight: dict[str, set[str]] = {}
         #: 同一身份/版本的启连只 open 一次；其余调用者等待并共享该结果。
         self._connecting: dict[str, asyncio.Task[None]] = {}
+        #: 连接 owner 在启连时冻结的发现目录与连接代次（单调递增，不复用）。
+        self._catalogs: dict[str, tuple[MCPToolDescriptor, ...]] = {}
+        self._generations: dict[str, int] = {}
+        self._generation_seq = 0
 
     # -- 配置 ---------------------------------------------------------------
 
@@ -268,8 +274,9 @@ class SharedMCPConnectionManager:
     async def connect(self, identity: MCPServiceIdentity) -> None:
         """用户显式启连：预算全冻结 + 只读审核绑定当前实现，才允许建立共享连接。
 
-        按身份/版本 single-flight：同一 key 的并发调用共享同一次准入与 open，
+        按身份/版本 single-flight：同一 key 的并发调用共享同一次准入/open/发现，
         实际 open 与存活 owner 各至多 1；单个调用者被取消不中断他人的等待。
+        启连时由连接 owner 完成一次发现并冻结目录；发现失败不登记连接（关闭会话）。
         """
 
         label = _identity_text(identity)
@@ -291,7 +298,7 @@ class SharedMCPConnectionManager:
         await asyncio.shield(pending)
 
     async def _open_shared(self, identity: MCPServiceIdentity, label: str) -> None:
-        """single-flight 的实际启连：准入通过才 open，并在同一同步段内登记归属。"""
+        """single-flight 的实际启连：准入通过才 open，发现成功后才在同一同步段登记归属。"""
 
         config = await self._require_config(identity)
         if not config.budget.is_admitted():
@@ -309,12 +316,20 @@ class SharedMCPConnectionManager:
             )
         guard = MCPBudgetGuard(config.budget, identity=label)
         session = await self._factory.open(config)
+        try:
+            tools = await session.list_tools(deadline_s=config.connect_deadline_s)
+        except BaseException:
+            await session.aclose()
+            raise
         if label in self._sessions:  # 已有 owner：回收本次 client，绝不覆盖
             await session.aclose()
             return
         self._sessions[label] = session
         self._configs[label] = config
         self._guards[label] = guard
+        self._catalogs[label] = tuple(tools)
+        self._generation_seq += 1
+        self._generations[label] = self._generation_seq
 
     async def disconnect(self, identity: MCPServiceIdentity) -> None:
         """显式断开：有在途调用默认拒停（用户先暂停并核实际退出）。"""
@@ -328,6 +343,8 @@ class SharedMCPConnectionManager:
         self._configs.pop(label, None)
         self._guards.pop(label, None)
         self._in_flight.pop(label, None)
+        self._catalogs.pop(label, None)
+        self._generations.pop(label, None)
 
     def is_connected(self, identity: MCPServiceIdentity) -> bool:
         return _identity_text(identity) in self._sessions
@@ -355,6 +372,33 @@ class SharedMCPConnectionManager:
             raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
         return guard
 
+    def frozen_catalog(self, identity: MCPServiceIdentity) -> tuple[MCPToolDescriptor, ...]:
+        """启连时冻结的发现目录；未启连即拒绝（调用门以此为准，不采信请求自报）。"""
+
+        label = _identity_text(identity)
+        tools = self._catalogs.get(label)
+        if tools is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
+        return tools
+
+    def connection_generation(self, identity: MCPServiceIdentity) -> int:
+        """当前连接的冻结目录代次；显式重连后单调递增，旧代次请求不可复用。"""
+
+        label = _identity_text(identity)
+        generation = self._generations.get(label)
+        if generation is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
+        return generation
+
+    def audit_tool_scope(self, identity: MCPServiceIdentity) -> tuple[str, ...]:
+        """启连时已通过只读审核的工具范围（审核记录随配置冻结）。"""
+
+        label = _identity_text(identity)
+        config = self._configs.get(label)
+        if config is None or config.audit is None:
+            raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
+        return config.audit.tool_scope
+
     def mark_session_lost(self, identity: MCPServiceIdentity) -> None:
         """断线明示：移除会话，不自动重连/重启。"""
 
@@ -362,6 +406,8 @@ class SharedMCPConnectionManager:
         self._sessions.pop(label, None)
         self._configs.pop(label, None)
         self._guards.pop(label, None)
+        self._catalogs.pop(label, None)
+        self._generations.pop(label, None)
 
     # -- 在途归属 -----------------------------------------------------------
 

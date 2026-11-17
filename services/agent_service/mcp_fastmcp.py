@@ -5,9 +5,9 @@
 - :class:`FastMCPClientFactory` 实现 ``MCPClientSessionPort`` / ``MCPClientFactoryPort``
   （:mod:`services.agent_service.mcp`），由共享连接管理器在**用户显式启连/测试**
   时调用；保存配置与普通读取不触发任何进程/网络。
-- stdio：``StdioTransport(绝对 command, args, 最小环境, cwd, log_file=<临时文件>)``，
-  不经 shell；``log_file`` 把子进程 stderr 重定向到文件描述符（FD 级），避免
-  管道不读导致阻塞。
+- stdio：``StdioTransport(绝对 command, args, 最小环境, cwd, log_file=<有界排空器>)``，
+  不经 shell；``log_file`` 接受一个 OS 管道写端，由后台线程持续读取子进程 stderr
+  （FD 级，避免管道不读导致阻塞），逐行先脱敏再进入有界内存缓冲，**不落盘**。
 - streamable_http / sse：``StreamableHttpTransport`` / ``SSETransport``，只用已冻结
   的 URL；SSE 仍须显式核准（由 ``validate_transport_config`` 保证）。
 
@@ -18,7 +18,7 @@
 
 四诊断通道
 ----------
-:class:`MCPSessionDiagnostics` 固定四路：``stderr_tail``（FD 级尾部）、
+:class:`MCPSessionDiagnostics` 固定四路：``stderr_tail``（FD 级、有界且已脱敏的尾部）、
 ``last_error``（最后一次错误类别）、``protocol_errors``（按序记录）、
 ``exit_status``（**经 FastMCP 托管进程时不可观测，保持 None「未知」而不是 0**）。
 
@@ -34,11 +34,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import tempfile
+import threading
+from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fastmcp import Client
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
@@ -46,12 +47,22 @@ from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHt
 from core.agent_types import AgentErrorCode, AgentServiceError, MCPTransportKind
 from services.agent_service.mcp import MCPServerConfig, MCPToolDescriptor
 from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
+from utils.sanitizers import DataSanitizer
+
+if TYPE_CHECKING:
+    from typing import TextIO
 
 #: 子进程最小 OS 基线（Windows 缺少这些值会导致解释器无法启动）；不含应用环境副本。
 _OS_BASELINE_KEYS: tuple[str, ...] = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "TEMP", "TMP")
 
-#: stderr 尾部保留字节（只读尾部，不把整份日志读入内存）。
+#: stderr 诊断尾部保留字节上限（内存缓冲与公开属性共用同一上限）。
 _STDERR_TAIL_BYTES = 4096
+#: 单行保留字节上限；超长行截断并丢弃该行剩余部分。
+_STDERR_LINE_BYTES = 2048
+#: 关闭时等待 drain 线程收到 EOF 的上限。
+_STDERR_DRAIN_JOIN_TIMEOUT_S = 2.0
+#: 超长行截断标记。
+_STDERR_TRUNCATED_MARKER = "…[truncated]"
 
 
 @dataclass
@@ -66,6 +77,129 @@ class MCPSessionDiagnostics:
     def record(self, error: str) -> None:
         self.last_error = error
         self.protocol_errors.append(error)
+
+
+class _SanitizedStderrDrain:
+    """有界、先脱敏的 stderr 排空器（取代无界落盘日志文件）。
+
+    子进程 stderr 写入 OS 管道写端（``log_file`` 文件对象），后台守护线程持续
+    读取：每行先经 :class:`DataSanitizer` 脱敏，再进入受 ``max_bytes`` 约束的
+    内存缓冲；超长行截断并丢弃剩余部分，超额时丢弃最旧行。任何内容都不落盘；
+    关闭时冻结尾部并清空缓冲（运行期留存归零）。
+    """
+
+    def __init__(
+        self,
+        *,
+        max_bytes: int = _STDERR_TAIL_BYTES,
+        max_line_bytes: int = _STDERR_LINE_BYTES,
+    ) -> None:
+        self._max_bytes = max_bytes
+        self._max_line_bytes = max_line_bytes
+        read_fd, write_fd = os.pipe()
+        self._reader = os.fdopen(read_fd, "rb")
+        self._writer = os.fdopen(write_fd, "wb", buffering=0)
+        self._lines: deque[str] = deque()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self._closing = False
+        self._thread = threading.Thread(target=self._pump, name="mcp-stderr-drain", daemon=True)
+        self._thread.start()
+
+    # -- 子进程 stderr 目标（file-like） ---------------------------------
+
+    def fileno(self) -> int:
+        """返回管道写端 FD（交给 ``subprocess`` 的 ``stderr``）。"""
+        return self._writer.fileno()
+
+    def write(self, text: str) -> int:
+        """兼容 TextIO 接口：与后台线程同路径脱敏并入有界缓冲。"""
+        self._store(text.encode("utf-8", errors="replace"))
+        return len(text)
+
+    def flush(self) -> None:
+        """无缓冲需要刷新（脱敏在写入时已完成）。"""
+
+    # -- 生命周期与读取 ---------------------------------------------------
+
+    def close(self) -> None:
+        """关闭写端等 EOF、冻结尾部；可重复调用，不抛异常。"""
+        with suppress(OSError, ValueError):
+            self._writer.close()
+        if self._thread.is_alive():
+            self._thread.join(timeout=_STDERR_DRAIN_JOIN_TIMEOUT_S)
+        with self._lock:
+            self._closing = True
+        with suppress(OSError, ValueError):
+            self._reader.close()
+
+    def tail(self) -> str:
+        """返回已脱敏、有界的尾部（字节总量不超过 ``max_bytes``）。"""
+        with self._lock:
+            return "\n".join(self._lines)
+
+    def clear(self) -> None:
+        """清空内存缓冲（关闭后调用，消除运行期留存）。"""
+        with self._lock:
+            self._lines.clear()
+            self._bytes = 0
+
+    @property
+    def retained_bytes(self) -> int:
+        """当前内存缓冲占用字节数（有界性断言用）。"""
+        with self._lock:
+            return self._bytes
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                line = self._reader.readline(self._max_line_bytes)
+            except (OSError, ValueError):
+                return
+            if not line:
+                return
+            if len(line) >= self._max_line_bytes and not line.endswith(b"\n"):
+                self._store(line, truncated=True)
+                if not self._skip_overlong_remainder():
+                    return
+                continue
+            self._store(line)
+
+    def _skip_overlong_remainder(self) -> bool:
+        """丢弃超长行剩余字节直到换行；返回 False 表示流已结束。"""
+        while True:
+            try:
+                rest = self._reader.readline(self._max_line_bytes)
+            except (OSError, ValueError):
+                return False
+            if not rest:
+                return False
+            if rest.endswith(b"\n"):
+                return True
+
+    def _store(self, raw: bytes, *, truncated: bool = False) -> None:
+        text = DataSanitizer.sanitize_error(raw.decode("utf-8", errors="replace")).rstrip("\r\n")
+        if truncated:
+            text = f"{text}{_STDERR_TRUNCATED_MARKER}"
+        encoded = text.encode("utf-8")
+        if len(encoded) > self._max_bytes:
+            text = encoded[: self._max_bytes].decode("utf-8", errors="ignore")
+            encoded = text.encode("utf-8")
+        with self._lock:
+            if self._closing:
+                return
+            self._lines.append(text)
+            self._bytes += len(encoded) + 1
+            while self._bytes > self._max_bytes and len(self._lines) > 1:
+                self._bytes -= len(self._lines.popleft().encode("utf-8")) + 1
+
+
+def _discard_drain(drain: _SanitizedStderrDrain | None) -> None:
+    """连接受阻/失败时收尾排空器：关管道并清空缓冲，不留运行期留存。"""
+    if drain is None:
+        return
+    drain.close()
+    drain.clear()
 
 
 class MCPSendGate:
@@ -110,7 +244,7 @@ class FastMCPSession:
         guard: MCPBudgetGuard,
         gate: MCPSendGate,
         diagnostics: MCPSessionDiagnostics,
-        stderr_path: Path | None,
+        stderr_drain: _SanitizedStderrDrain | None,
         on_close: Callable[[], None],
     ) -> None:
         self._client = client
@@ -118,7 +252,7 @@ class FastMCPSession:
         self._guard = guard
         self._gate = gate
         self._diagnostics = diagnostics
-        self._stderr_path = stderr_path
+        self._stderr_drain = stderr_drain
         self._on_close = on_close
         self._closed = False
 
@@ -178,9 +312,14 @@ class FastMCPSession:
             await self._client.__aexit__(None, None, None)
         finally:
             self._on_close()
-            self._diagnostics.stderr_tail = _read_tail(self._stderr_path)
-            if self._stderr_path is not None:
-                self._stderr_path.unlink(missing_ok=True)
+            drain = self._stderr_drain
+            if drain is not None:
+                drain.close()
+                try:
+                    self._diagnostics.stderr_tail = drain.tail()
+                finally:
+                    # 属性已持有有界脱敏副本；清空内存缓冲，不留运行期留存。
+                    drain.clear()
 
 
 def _result_payload(result: Any) -> dict[str, Any]:
@@ -199,33 +338,21 @@ def _result_payload(result: Any) -> dict[str, Any]:
     return {"content": blocks}
 
 
-def _read_tail(path: Path | None) -> str:
-    if path is None or not path.exists():
-        return ""
-    with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        size = handle.tell()
-        handle.seek(max(0, size - _STDERR_TAIL_BYTES))
-        return handle.read().decode("utf-8", errors="replace")
-
-
 class FastMCPClientFactory:
     """``MCPClientFactoryPort`` 真实实现（仅在显式启连/测试时被调用）。"""
 
     def __init__(
         self,
         *,
-        stderr_dir: str | Path | None = None,
         deadline_factory: Callable[[int], MCPDeadline] | None = None,
     ) -> None:
-        self._stderr_dir = Path(stderr_dir) if stderr_dir is not None else Path(tempfile.gettempdir())
         self._deadline_factory = deadline_factory or (lambda seconds: MCPDeadline(seconds=seconds))
 
     async def open(self, config: MCPServerConfig) -> FastMCPSession:
         """建立真实连接（仅显式启连/测试调用）；失败映射为 ``CONFIG_UNAVAILABLE``。"""
         label = config.identity.stable_key()
-        stderr_path = self._new_stderr_path(label) if config.transport.kind is MCPTransportKind.STDIO else None
-        transport = self._transport(config, stderr_path)
+        drain = _SanitizedStderrDrain() if config.transport.kind is MCPTransportKind.STDIO else None
+        transport = self._transport(config, drain)
         client: Client[Any] = Client(
             transport,
             timeout=config.tool_deadline_s,
@@ -234,13 +361,16 @@ class FastMCPClientFactory:
         try:
             await client.__aenter__()
         except Exception as exc:
-            if stderr_path is not None:
-                stderr_path.unlink(missing_ok=True)
+            _discard_drain(drain)
             raise AgentServiceError(
                 AgentErrorCode.CONFIG_UNAVAILABLE,
                 f"mcp connection failed: {type(exc).__name__}",
                 label,
             ) from exc
+        except BaseException:
+            # 取消/键盘中断等不转译，但必须收尾排空器（不吞 CancelledError）。
+            _discard_drain(drain)
+            raise
         closed = False
 
         def _mark_closed() -> None:
@@ -261,31 +391,25 @@ class FastMCPClientFactory:
                 identity=label,
             ),
             diagnostics=diagnostics,
-            stderr_path=stderr_path,
+            stderr_drain=drain,
             on_close=_mark_closed,
         )
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _new_stderr_path(self, label: str) -> Path:
-        safe = label.replace("/", "_").replace(":", "_").replace("\\", "_")[:80]
-        with tempfile.NamedTemporaryFile(
-            prefix=f"qtrading-mcp-{safe}-", suffix=".log", dir=str(self._stderr_dir), delete=False
-        ) as handle:
-            return Path(handle.name)
-
-    def _transport(self, config: MCPServerConfig, stderr_path: Path | None) -> Any:
+    def _transport(self, config: MCPServerConfig, drain: _SanitizedStderrDrain | None) -> Any:
         transport = config.transport
         if transport.kind is MCPTransportKind.STDIO:
             command = transport.command
             assert command is not None
+            assert drain is not None
             return StdioTransport(
                 command=command,
                 args=list(transport.args),
                 env=self._build_env(transport.env),
                 cwd=transport.cwd,
                 keep_alive=False,
-                log_file=stderr_path,
+                log_file=cast("TextIO", drain),
             )
         assert transport.url is not None
         if transport.kind is MCPTransportKind.STREAMABLE_HTTP:
