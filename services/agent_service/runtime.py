@@ -344,6 +344,10 @@ _T = TypeVar("_T")
 
 OperationState = Literal["in_flight", "completed", "failed", "cancelled"]
 
+#: 已结算 operation 条目的默认保留上限（检视 R17）：超出即按登记顺序淘汰最旧
+#: 已结算条目并释放其 cf/结果/异常引用；在途条目不淘汰（数量由真实并发决定）。
+_SETTLED_OPERATION_CACHE_LIMIT: Final = 256
+
 #: 流通道内部哨兵：仅表示「关闭唤醒」，不是队列项（``OwnerStreamChannel``）
 _WAIT_CLOSED: Final[object] = object()
 
@@ -357,6 +361,20 @@ class UnknownOperationError(RuntimeError):
     def __init__(self, operation_id: str) -> None:
         super().__init__(f"operation not registered: {operation_id}")
         self.operation_id = operation_id
+
+
+class OperationEvictedError(UnknownOperationError):
+    """该稳定身份曾完成登记，但进程内条目已被有界缓存淘汰（检视 R17）。
+
+    结果/异常引用已随条目释放，故不冒充原回执：调用方须按持久 operation 身份
+    回读原事实，不得据内存缓存重发 IO（零新 IO）。继承 ``UnknownOperationError``
+    以便「进程内已无该事实」的调用方统一分支，同时保留明确区分。
+    """
+
+    def __init__(self, operation_id: str, state: OperationState) -> None:
+        RuntimeError.__init__(self, f"operation registration evicted ({state}): {operation_id}")
+        self.operation_id = operation_id
+        self.state = state
 
 
 class ChannelClosedError(RuntimeError):
@@ -416,12 +434,28 @@ class OwnerLoopBridge:
     稳定 operation（§8.2 段 2）：``start_operation`` 以稳定身份幂等登记在途/
     完成任务，重复观察连接原任务；观察者取消只撤观察者；明确终止另走控制命令。
     进程内登记不代替持久 operation 及 owner fence——重启不据内存缓存重发。
+
+    有界保留（检视 R17）：已结算条目按登记顺序最多保留 ``settled_cache_limit``
+    条，超出淘汰并释放其 ``cf``/结果/异常引用（在途条目不淘汰）。被淘汰身份保留
+    紧凑 tombstone，重复 start/observe 抛 ``OperationEvictedError``（零新 IO）；
+    tombstone 同样有界，更早身份等同从未登记，须由调用方按持久 operation 回读。
     """
 
-    def __init__(self, owner_loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        owner_loop: asyncio.AbstractEventLoop,
+        *,
+        settled_cache_limit: int = _SETTLED_OPERATION_CACHE_LIMIT,
+    ) -> None:
+        if settled_cache_limit < 1:
+            raise ValueError("settled_cache_limit must be >= 1")
         self._owner_loop = owner_loop
         self._tasks: set[asyncio.Task[Any]] = set()
         self._operations: dict[str, _OperationEntry] = {}
+        #: 已结算 operation 的保留上限（见类文档「有界保留」）。
+        self._settled_cache_limit = settled_cache_limit
+        #: 被淘汰身份的紧凑终态（有界；不持 cf/结果/异常引用）。
+        self._evicted_operations: dict[str, OperationState] = {}
         self._registry_lock = threading.Lock()
         #: 已提交但尚未在 owner 循环起跑的提交数（与 ``_tasks`` 共同构成在途集合；
         #: 受 ``_registry_lock`` 保护，关闭门闩据此判定「已提交/在途」是否为 0）。
@@ -469,10 +503,15 @@ class OwnerLoopBridge:
 
         Raises:
             UnknownOperationError: 该身份未登记。
+            OperationEvictedError: 该身份曾被登记，但条目已被有界缓存淘汰
+                （结果/异常已释放，须回读持久 operation 事实）。
         """
         with self._registry_lock:
             entry = self._operations.get(operation_id)
+            evicted_state = None if entry is not None else self._evicted_operations.get(operation_id)
         if entry is None:
+            if evicted_state is not None:
+                raise OperationEvictedError(operation_id, evicted_state)
             raise UnknownOperationError(operation_id)
         return await asyncio.shield(self._wrap_concurrent(entry.cf))
 
@@ -485,15 +524,20 @@ class OwnerLoopBridge:
 
         同身份已登记（在途/已完成/失败/取消）时返回原登记快照，不重复执行
         factory（同键同规范输入查原事实）；观察经 ``observe_operation`` 连接
-        原任务。
+        原任务。登记已因有界缓存淘汰时抛 ``OperationEvictedError``，不重发
+        factory（零新 IO，须回读持久 operation 事实）。
 
         Raises:
             BridgeSubmissionsClosedError: 新身份在提交冻结后拒绝（已登记身份仍
                 返回原快照，供关闭期间的观察连接）。
+            OperationEvictedError: 该身份曾被登记，但条目已被有界缓存淘汰。
         """
         with self._registry_lock:
             entry = self._operations.get(operation_id)
             if entry is None:
+                evicted_state = self._evicted_operations.get(operation_id)
+                if evicted_state is not None:
+                    raise OperationEvictedError(operation_id, evicted_state)
                 if self._submissions_frozen:
                     raise BridgeSubmissionsClosedError()
                 self._pending_submissions += 1
@@ -506,6 +550,7 @@ class OwnerLoopBridge:
                     raise
                 entry = _OperationEntry(operation_id=operation_id, cf=cf)
                 self._operations[operation_id] = entry
+                self._prune_settled_locked()
         return OperationHandle(operation_id=operation_id, state=entry.state)
 
     def freeze_submissions(self) -> bool:
@@ -587,6 +632,38 @@ class OwnerLoopBridge:
             entry = self._operations.get(operation_id)
             if entry is not None:
                 entry.state = state
+            self._prune_settled_locked()
+
+    def _prune_settled_locked(self) -> None:
+        """淘汰最旧的已结算条目，保持在途条目与有界内存（检视 R17）。
+
+        调用方须持有 ``_registry_lock``。只淘汰已结算（completed/failed/cancelled）
+        条目：在途条目的结果/异常尚未产出，淘汰会让 ``start_operation`` 重发 IO。
+        淘汰时其 ``cf``（连同结果/异常引用）随条目一起释放，身份以紧凑 tombstone
+        保留（``OperationEvictedError``，零新 IO）。
+        """
+        settled = sum(1 for entry in self._operations.values() if entry.state != "in_flight")
+        if settled <= self._settled_cache_limit:
+            return
+        for operation_id in list(self._operations):
+            if settled <= self._settled_cache_limit:
+                break
+            entry = self._operations[operation_id]
+            if entry.state == "in_flight":
+                continue
+            del self._operations[operation_id]
+            self._remember_tombstone_locked(operation_id, entry.state)
+            settled -= 1
+
+    def _remember_tombstone_locked(self, operation_id: str, state: OperationState) -> None:
+        """登记被淘汰身份的紧凑终态（有界：超出上限按登记顺序丢弃最旧项）。
+
+        被丢弃的身份等同「从未登记」——持久 operation 去重/回读是调用方责任
+        （进程内登记不代替持久 operation，§8.2 段 2）。
+        """
+        self._evicted_operations[operation_id] = state
+        while len(self._evicted_operations) > self._settled_cache_limit:
+            del self._evicted_operations[next(iter(self._evicted_operations))]
 
     @staticmethod
     def _wrap_concurrent(cf: concurrent.futures.Future[Any]) -> asyncio.Future[Any]:
@@ -1056,6 +1133,7 @@ __all__ = [
     "CloseFactSink",
     "CloseReadinessReceipt",
     "DispatchGate",
+    "OperationEvictedError",
     "OperationHandle",
     "OperationState",
     "OwnerLoopBridge",

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Coroutine, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from typing import Any
 
 import pytest
@@ -27,6 +27,7 @@ import pytest
 from services.agent_service.runtime import (
     BridgeSubmissionsClosedError,
     ChannelClosedError,
+    OperationEvictedError,
     OwnerLoopBridge,
     OwnerStreamChannel,
     UnknownOperationError,
@@ -413,6 +414,129 @@ def test_cancelled_operation_notifies_observers(
     owner.loop.call_soon_threadsafe(release.set)
     # 原 IO 已被取消：结果未产出（unknown/取消路径不伪造产出，R21）
     assert work.outcomes == []
+
+
+# ---------------------------------------------------------------------------
+# operation 登记的有界缓存（检视 R17）
+# ---------------------------------------------------------------------------
+
+
+def _value_factory(value: int) -> Callable[[], Coroutine[Any, Any, int]]:
+    async def factory() -> int:
+        return value
+
+    return factory
+
+
+def test_settled_operation_cache_is_bounded(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """已结算条目超上限即淘汰最旧项；淘汰后重复观察明确拒绝且零新 IO。"""
+    owner, foreign = loops
+    bridge = OwnerLoopBridge(owner.loop, settled_cache_limit=2)
+    calls: list[str] = []
+
+    def make_factory(tag: str) -> Callable[[], Coroutine[Any, Any, str]]:
+        async def factory() -> str:
+            calls.append(tag)
+            return tag
+
+        return factory
+
+    async def scenario() -> None:
+        for tag in ("op-1", "op-2", "op-3"):
+            bridge.start_operation(tag, make_factory(tag))
+            assert await bridge.observe_operation(tag) == tag
+        # 上限 2：最旧的 op-1 被淘汰（cf/结果引用释放），登记集合有界
+        assert set(bridge._operations) == {"op-2", "op-3"}
+        assert len(bridge._operations) == 2
+        calls_before = list(calls)
+        with pytest.raises(OperationEvictedError) as excinfo:
+            await bridge.observe_operation("op-1")
+        assert excinfo.value.operation_id == "op-1"
+        assert excinfo.value.state == "completed"
+        # 淘汰不等于「未登记」：语义可统一分支，但保留明确区分
+        assert isinstance(excinfo.value, UnknownOperationError)
+        assert calls == calls_before
+
+    foreign.submit(scenario())
+    assert calls == ["op-1", "op-2", "op-3"]
+
+
+def test_start_after_eviction_rejects_without_new_io(
+    loops: tuple[_LoopThread, _LoopThread],
+) -> None:
+    """淘汰后以同身份重新 start：明确拒绝且 factory 零再执行（不重发 IO）。"""
+    owner, foreign = loops
+    bridge = OwnerLoopBridge(owner.loop, settled_cache_limit=1)
+    calls: list[str] = []
+
+    def make_factory(tag: str) -> Callable[[], Coroutine[Any, Any, str]]:
+        async def factory() -> str:
+            calls.append(tag)
+            return tag
+
+        return factory
+
+    async def scenario() -> None:
+        bridge.start_operation("op-a", make_factory("a"))
+        assert await bridge.observe_operation("op-a") == "a"
+        bridge.start_operation("op-b", make_factory("b"))
+        assert await bridge.observe_operation("op-b") == "b"  # op-a 被淘汰
+        with pytest.raises(OperationEvictedError) as excinfo:
+            bridge.start_operation("op-a", make_factory("a"))
+        assert excinfo.value.state == "completed"
+        assert calls == ["a", "b"]
+
+    foreign.submit(scenario())
+    assert calls == ["a", "b"]
+
+
+def test_in_flight_operation_not_evicted(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """在途条目不淘汰：超限只淘汰最旧已结算项，在途仍可观察。"""
+    owner, foreign = loops
+    bridge = OwnerLoopBridge(owner.loop, settled_cache_limit=1)
+    release = owner.submit(_make_event())
+    work = _BlockedWork()
+    work.bind(release)
+
+    async def scenario() -> None:
+        bridge.start_operation("op-running", work)
+        await _wait_thread_event(work.started)
+        bridge.start_operation("op-done", _value_factory(3))
+        assert await bridge.observe_operation("op-done") == 3
+        # 已结算数 1 == 上限：在途项保留
+        assert "op-running" in bridge._operations
+        bridge.start_operation("op-done-2", _value_factory(4))
+        assert await bridge.observe_operation("op-done-2") == 4
+        # 已结算超限：淘汰最旧已结算项，在途项不受影响
+        assert "op-running" in bridge._operations
+        assert "op-done" not in bridge._operations
+
+    foreign.submit(scenario())
+    owner.loop.call_soon_threadsafe(release.set)
+    assert work.finished.wait(timeout=10)
+
+
+def test_evicted_tombstones_are_bounded(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """被淘汰身份的 tombstone 同样有界（不随 operation 数量无界增长）。"""
+    owner, foreign = loops
+    bridge = OwnerLoopBridge(owner.loop, settled_cache_limit=1)
+
+    async def scenario() -> None:
+        for tag in ("op-a", "op-b", "op-c"):
+            bridge.start_operation(tag, _value_factory(1))
+            assert await bridge.observe_operation(tag) == 1
+        assert list(bridge._evicted_operations) == ["op-b"]
+        assert len(bridge._evicted_operations) == 1
+
+    foreign.submit(scenario())
+
+
+def test_settled_cache_limit_must_be_positive(loops: tuple[_LoopThread, _LoopThread]) -> None:
+    """非法上限明确拒绝（不静默退化为无界或无缓存）。"""
+    owner, _foreign = loops
+    with pytest.raises(ValueError) as excinfo:
+        OwnerLoopBridge(owner.loop, settled_cache_limit=0)
+    assert "settled_cache_limit" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
