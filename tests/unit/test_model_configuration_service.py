@@ -41,6 +41,7 @@ from core.agent_types import (
     DataConsentState,
     DeliveryState,
     decode_data_consent_binding,
+    derive_data_consent_command_identity,
     local_target_fingerprint,
     sha256_hex,
 )
@@ -2061,9 +2062,11 @@ def _r4_command_ref(expected_revision: int, command_id: str = "consent-cmd-1") -
     )
 
 
-def _r4_save_command(binding: DataConsentBinding, expected_revision: int = 0) -> DataConsentCommand:
+def _r4_save_command(
+    binding: DataConsentBinding, expected_revision: int = 0, command_id: str = "consent-cmd-1"
+) -> DataConsentCommand:
     return DataConsentCommand(
-        command=_r4_command_ref(expected_revision),
+        command=_r4_command_ref(expected_revision, command_id),
         consent_id=_R4_CONSENT_ID,
         session_id="s-1",
         execution_id="exec-1",
@@ -2104,6 +2107,7 @@ class _FakeAgentDao:
 
     def __init__(self) -> None:
         self.bindings: dict[tuple[str, str], DataConsentBinding] = {}
+        self.commands: dict[tuple[str, str, str], tuple[str, DataConsentBinding | None]] = {}
         self.save_calls: list[DataConsentCommand] = []
         self.revoke_calls: list[DataConsentRevokeCommand] = []
         self.claims: list[tuple[DataAttemptAuthorization, DataConsentClaim]] = []
@@ -2112,8 +2116,34 @@ class _FakeAgentDao:
     async def read_data_consent_decision(self, user_scope: str, consent_id: str) -> DataConsentBinding | None:
         return self.bindings.get((user_scope, consent_id))
 
+    async def read_data_consent_save_replay(
+        self, user_scope: str, consent_id: str, *, command_id: str, input_digest: str
+    ) -> DataConsentBinding | None:
+        record = self.commands.get((user_scope, consent_id, command_id))
+        if record is None:
+            return None
+        stored_digest, stored_binding = record
+        if stored_digest != input_digest:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_CONFLICT,
+                "same data consent command key with different input",
+                f"{user_scope}/{consent_id}",
+            )
+        if stored_binding is None:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "original data consent save receipt unavailable",
+                f"{user_scope}/{consent_id}",
+            )
+        return stored_binding
+
     async def save_data_consent_decision(self, command: DataConsentCommand) -> DataConsentBinding:
         self.save_calls.append(command)
+        identity = derive_data_consent_command_identity(command)
+        self.commands[(command.command.user_scope, command.consent_id, command.command.command_id)] = (
+            identity.input_digest,
+            command.binding,
+        )
         self.bindings[(command.command.user_scope, command.consent_id)] = command.binding
         return command.binding
 
@@ -2199,6 +2229,48 @@ class TestR04DataConsentOwnerStateMachine:
         with pytest.raises(AgentServiceError) as exc:
             await svc.save_data_consent(_r4_save_command(_r4_binding(consent_revision=2), expected_revision=1))
         assert exc.value.code == AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio
+    async def test_save_replay_after_approved_returns_original_receipt(self, r4_service):
+        """M15：批准提交后回执丢失，同命令同输入重传查回原回执，零新增事实。"""
+        svc, fake = r4_service
+        await svc.save_data_consent(_r4_save_command(_r4_binding(state="pending"), command_id="create-1"))
+        approve = _r4_save_command(_r4_binding(consent_revision=2), expected_revision=1, command_id="approve-1")
+        first = await svc.save_data_consent(approve)
+        assert first.state is DataConsentState.APPROVED
+        replayed = await svc.save_data_consent(approve)
+        assert replayed == first
+        assert len(fake.save_calls) == 2  # 重放不再进入 DAO 写事务
+
+    @pytest.mark.asyncio
+    async def test_save_replay_same_key_different_input_conflicts(self, r4_service):
+        """M15：同命令键异输入 → INPUT_CONFLICT，零写。"""
+        svc, fake = r4_service
+        await svc.save_data_consent(_r4_save_command(_r4_binding(state="pending"), command_id="create-1"))
+        approve = _r4_save_command(_r4_binding(consent_revision=2), expected_revision=1, command_id="approve-1")
+        await svc.save_data_consent(approve)
+        changed = _r4_save_command(
+            _r4_binding(consent_revision=2, expires_at="2031-01-01T00:00:00.000000Z"),
+            expected_revision=1,
+            command_id="approve-1",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.save_data_consent(changed)
+        assert exc.value.code == AgentErrorCode.INPUT_CONFLICT
+        assert len(fake.save_calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_save_new_command_reapprove_terminal_denied(self, r4_service):
+        """M15：不同命令再批已批准终态仍拒绝（重放修复不放宽终态约束）。"""
+        svc, fake = r4_service
+        await svc.save_data_consent(_r4_save_command(_r4_binding(state="pending"), command_id="create-1"))
+        approve = _r4_save_command(_r4_binding(consent_revision=2), expected_revision=1, command_id="approve-1")
+        await svc.save_data_consent(approve)
+        again = _r4_save_command(_r4_binding(consent_revision=2), expected_revision=1, command_id="approve-2")
+        with pytest.raises(AgentServiceError) as exc:
+            await svc.save_data_consent(again)
+        assert exc.value.code == AgentErrorCode.POLICY_DENIED
+        assert len(fake.save_calls) == 2
 
     @pytest.mark.asyncio
     async def test_read_existing_and_missing(self, r4_service):
