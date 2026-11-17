@@ -14,7 +14,8 @@
 逐 send 门
 ----------
 :class:`MCPSendGate` 在**每次**出站 SDK 请求（``list_tools`` / ``call_tool``）前
-检查会话是否仍存活与单一 deadline 是否已过；断线后拒绝发送，不自动重连。
+检查会话是否仍存活，并为**本次 operation** 新建独立 deadline（不复用连接期起点，
+故闲置后新调用不会因旧 deadline 过时而拒绝）；断线后拒绝发送，不自动重连。
 
 四诊断通道
 ----------
@@ -203,17 +204,17 @@ def _discard_drain(drain: _SanitizedStderrDrain | None) -> None:
 
 
 class MCPSendGate:
-    """每次出站请求前的门：会话存活 + 单一 deadline 未过；记录出站次数。"""
+    """每次出站请求前的门：会话存活 + 本次 operation 独立 deadline；记录出站次数。"""
 
     def __init__(
         self,
         *,
         alive: Callable[[], bool],
-        deadline: MCPDeadline,
+        deadline_factory: Callable[[int], MCPDeadline],
         identity: str,
     ) -> None:
         self._alive = alive
-        self._deadline = deadline
+        self._deadline_factory = deadline_factory
         self._identity = identity
         self._sends = 0
 
@@ -221,16 +222,19 @@ class MCPSendGate:
     def sends(self) -> int:
         return self._sends
 
-    def before_send(self, operation: str) -> None:
+    def before_send(self, operation: str, *, deadline_s: int) -> MCPDeadline:
+        """计数，并为本次 operation 新建 deadline（不从连接期继承起点）。"""
         self._sends += 1
         if not self._alive():
             raise AgentServiceError(
                 AgentErrorCode.CONFIG_UNAVAILABLE, "mcp session is lost; refusing to send", self._identity
             )
-        if self._deadline.expired():
+        deadline = self._deadline_factory(deadline_s)
+        if deadline.expired():
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED, f"mcp deadline exceeded before send: {operation}", self._identity
             )
+        return deadline
 
 
 class FastMCPSession:
@@ -265,9 +269,9 @@ class FastMCPSession:
         return self._gate
 
     async def list_tools(self, *, deadline_s: int) -> tuple[MCPToolDescriptor, ...]:
-        self._gate.before_send("list_tools")
+        deadline = self._gate.before_send("list_tools", deadline_s=deadline_s)
         try:
-            async with asyncio.timeout(deadline_s):
+            async with asyncio.timeout(deadline.remaining()):
                 tools = await self._client.list_tools()
         except TimeoutError:
             self._diagnostics.record("list_tools_timeout")
@@ -287,9 +291,9 @@ class FastMCPSession:
         return tuple(descriptors)
 
     async def call_tool(self, name: str, arguments: dict[str, Any], *, deadline_s: int) -> dict[str, Any]:
-        self._gate.before_send("call_tool")
+        deadline = self._gate.before_send("call_tool", deadline_s=deadline_s)
         try:
-            async with asyncio.timeout(deadline_s):
+            async with asyncio.timeout(deadline.remaining()):
                 result = await self._client.call_tool(name, arguments)
         except TimeoutError:
             self._diagnostics.record("call_tool_timeout")
@@ -387,7 +391,7 @@ class FastMCPClientFactory:
             guard=MCPBudgetGuard(config.budget, identity=label),
             gate=MCPSendGate(
                 alive=_alive,
-                deadline=self._deadline_factory(config.tool_deadline_s),
+                deadline_factory=self._deadline_factory,
                 identity=label,
             ),
             diagnostics=diagnostics,

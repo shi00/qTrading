@@ -67,7 +67,11 @@ def _session(drain: _SanitizedStderrDrain, client: _FakeClient) -> FastMCPSessio
         cast(Any, client),
         config=_config(),
         guard=MCPBudgetGuard(_profile(), identity="svc-test"),
-        gate=MCPSendGate(alive=lambda: True, deadline=MCPDeadline(seconds=10), identity="svc-test"),
+        gate=MCPSendGate(
+            alive=lambda: True,
+            deadline_factory=lambda seconds: MCPDeadline(seconds=seconds),
+            identity="svc-test",
+        ),
         diagnostics=MCPSessionDiagnostics(),
         stderr_drain=drain,
         on_close=lambda: None,
