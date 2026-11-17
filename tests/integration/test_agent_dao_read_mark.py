@@ -5,6 +5,9 @@
 - ``save_read_mark_max``：session marker GREATEST 水位（乱序最终取 max）、精确
   已读身份并集合并（不全局清零）、无变化重放（merge 天然幂等）、会话不存在
   INPUT_INVALID；
+- 精确身份归属与可靠上界（检视 D14）：同会话消息/该会话成果可标，他会话消息、
+  伪造成果引用、未来水位一律 INPUT_INVALID 且不落行；观测范围 digest 与已落库
+  摘要不一致同样拒绝；
 - ``begin_decision_batch``：global marker 行锁下 batch_seq 单调递增；
 - ``postpone_decision_batch``：postponed_through_seq GREATEST 合并、乱序不回退
   不延期限、无批次 INPUT_INVALID（AC33：稍后仅现批次、乱序不造批次）。
@@ -17,8 +20,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
+import sqlalchemy as sa
 from alembic import command
 from sqlalchemy import insert, text
 
@@ -29,7 +34,14 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentSession
+from data.persistence.models import (
+    AgentArtifact,
+    AgentExecution,
+    AgentMessage,
+    AgentReadMark,
+    AgentRound,
+    AgentSession,
+)
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -54,10 +66,118 @@ async def _setup(url: str) -> AgentDao:
     return AgentDao(create_test_engine(url))
 
 
-async def _seed_session(dao: AgentDao, user_scope: str, session_id: str) -> None:
+async def _seed_session(dao: AgentDao, user_scope: str, session_id: str, *, event_seq: int = 0) -> None:
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造前置会话
         await conn.execute(
-            insert(AgentSession).values(user_scope=user_scope, session_id=session_id, title=f"session {session_id}")
+            insert(AgentSession).values(
+                user_scope=user_scope,
+                session_id=session_id,
+                title=f"session {session_id}",
+                event_seq=event_seq,
+            )
+        )
+
+
+async def _seed_message(
+    dao: AgentDao,
+    *,
+    message_id: str,
+    session_id: str = "s1",
+    session_seq: int = 1,
+    user_scope: str = "u1",
+) -> None:
+    moment = datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+        await conn.execute(
+            insert(AgentMessage).values(
+                user_scope=user_scope,
+                message_id=message_id,
+                session_id=session_id,
+                event_id=f"evt-{message_id}",
+                session_seq=session_seq,
+                event_kind="public_message_saved",
+                payload_kind="public_message",
+                subject_id=message_id,
+                subject_revision=1,
+                occurred_at=moment,
+                committed_at=moment,
+            )
+        )
+
+
+async def _seed_artifact(
+    dao: AgentDao,
+    *,
+    artifact_id: str,
+    version: int,
+    session_id: str = "s1",
+    user_scope: str = "u1",
+) -> None:
+    execution_id = f"exec-{session_id}"
+    round_id = f"round-{session_id}"
+    moment = datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+        existing = (
+            await conn.execute(
+                sa.select(AgentExecution.execution_id).where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.execution_id == execution_id,
+                )
+            )
+        ).first()
+        if existing is None:
+            await conn.execute(
+                insert(AgentExecution).values(
+                    user_scope=user_scope,
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    execution_kind="root",
+                    node_id="root",
+                    display_state="queued",
+                    goal_coverage="unknown",
+                    source_module="ui",
+                    business_request_id=f"req-{execution_id}",
+                    intent_digest="a" * 64,
+                )
+            )
+            await conn.execute(
+                insert(AgentRound).values(
+                    user_scope=user_scope,
+                    round_id=round_id,
+                    execution_id=execution_id,
+                    round_number=1,
+                    workflow_id=f"wf-{round_id}",
+                    workflow_code_version="wcv-1",
+                    run_epoch=1,
+                    input_revision=1,
+                    plan_revision=1,
+                    goal_coverage="unknown",
+                    final_saved=False,
+                    convergence_confirmed=False,
+                    active_round=True,
+                )
+            )
+        await conn.execute(
+            insert(AgentArtifact).values(
+                user_scope=user_scope,
+                artifact_id=artifact_id,
+                artifact_version=version,
+                session_id=session_id,
+                execution_id=execution_id,
+                round_id=round_id,
+                artifact_kind="plan",
+                input_revision=1,
+                actual_input_digest="b" * 64,
+                actual_model_ref="model/main",
+                result_digest="d" * 64,
+                source_available_state="current",
+                summary="成果摘要",
+                body_text="成果正文",
+                result_payload={"evidence": ["src-1"]},
+                published_at=moment,
+                created_at=moment,
+                updated_at=moment,
+            )
         )
 
 
@@ -111,6 +231,9 @@ class TestSaveReadMark:
     async def test_exact_ids_merge_and_persist(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
+        await _seed_message(dao, message_id="m-1", session_seq=1)
+        await _seed_message(dao, message_id="m-2", session_seq=2)
+        await _seed_artifact(dao, artifact_id="a-1", version=2)
         receipt = await dao.save_read_mark_max(_mark(message_ids=("m-2", "m-1"), artifact_refs=("a-1@2",)))
         assert receipt.last_seq == 0
         assert receipt.read_target_count == 3
@@ -121,9 +244,93 @@ class TestSaveReadMark:
         assert targets["message_ids"] == ["m-1", "m-2"]
         assert targets["artifact_refs"] == ["a-1@2"]
 
-    async def test_watermark_greatest_out_of_order(self, real_embedded_pg: ConnectionInfo) -> None:
+    async def test_snapshot_projection_round_trip(self, real_embedded_pg: ConnectionInfo) -> None:
+        """保存→快照投影往返得到真实精确 ID（检视 D14）。"""
+
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
+        await _seed_message(dao, message_id="m-1", session_seq=1)
+        await _seed_artifact(dao, artifact_id="a-1", version=2)
+        await dao.save_read_mark_max(_mark(message_ids=("m-1",), artifact_refs=("a-1@2",)))
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    sa.select(AgentReadMark).where(
+                        AgentReadMark.user_scope == "u1",
+                        AgentReadMark.marker_kind == "session",
+                    )
+                )
+            ).all()
+        await engine.dispose()
+        assert len(rows) == 1
+        entry = dao._read_mark_entry_from_row(rows[0], "u1/s1/read")
+        assert entry.read_targets == ("m-1", "a-1@2")
+        assert entry.marker_kind == "session"
+
+    async def test_other_session_message_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视 D14：他会话消息不得并入本会话已读并集。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_session(dao, "u1", "s2")
+        await _seed_message(dao, message_id="m-2", session_id="s2", session_seq=1)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_read_mark_max(_mark(message_ids=("m-2",)))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+        # 拒绝先于写事实：marker 行不存在
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            count = (
+                await conn.execute(
+                    text("SELECT count(*) FROM agent_read_mark WHERE user_scope = 'u1' AND marker_kind = 'session'")
+                )
+            ).scalar_one()
+            assert count == 0
+        await engine.dispose()
+
+    async def test_forged_artifact_ref_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视 D14：他会话/不存在的成果引用不得写成已读。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_artifact(dao, artifact_id="a-1", version=1)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_read_mark_max(_mark(artifact_refs=("a-1@2",)))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+    async def test_future_watermark_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视 D14：超过会话可靠事件水位的未来水位不得写成已读。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1", event_seq=5)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_read_mark_max(_mark(observed_through_seq=6))
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+    async def test_scope_digest_bound_to_persisted_watermark(self, real_embedded_pg: ConnectionInfo) -> None:
+        """检视 D14：同一 marker 只承载单一观测范围摘要，digest 变化即拒绝。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1", event_seq=100)
+        await dao.save_read_mark_max(_mark(observed_through_seq=42))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.save_read_mark_max(
+                ReadMarkCommand(
+                    user_scope="u1",
+                    session_id="s1",
+                    command_id="cmd-2",
+                    message_ids=(),
+                    artifact_refs=(),
+                    observed_through_seq=43,
+                    observation_scope_digest="e" * 64,
+                )
+            )
+        _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+    async def test_watermark_greatest_out_of_order(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1", event_seq=42)
         first = await dao.save_read_mark_max(_mark(observed_through_seq=42))
         assert first.last_seq == 42
         # 乱序写入：最终取最大值（R22），无变化即重放
@@ -134,6 +341,9 @@ class TestSaveReadMark:
     async def test_union_merge_keeps_previous_targets(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
+        await _seed_message(dao, message_id="m-1", session_seq=1)
+        await _seed_message(dao, message_id="m-2", session_seq=2)
+        await _seed_artifact(dao, artifact_id="a-1", version=1)
         await dao.save_read_mark_max(_mark(message_ids=("m-1",), command_id="cmd-a"))
         second = await dao.save_read_mark_max(
             _mark(message_ids=("m-1", "m-2"), artifact_refs=("a-1@1",), command_id="cmd-b")
@@ -249,6 +459,7 @@ class TestDecisionBatch:
     async def test_batch_and_session_marks_coexist(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
+        await _seed_message(dao, message_id="m-1", session_seq=1)
         await dao.begin_decision_batch(user_scope="u1")
         await dao.save_read_mark_max(_mark(message_ids=("m-1",)))
         # 两类 marker 行独立共存（global 行 session_id NULL）

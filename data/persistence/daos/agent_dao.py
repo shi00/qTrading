@@ -4688,6 +4688,31 @@ class AgentDao(BaseDao):
             identity_str,
         )
 
+    @staticmethod
+    def _read_targets_from_jsonb(value: Any) -> list[str] | None:
+        """read_targets JSONB → 精确已读 ID 扁平列表（检视 D14）。
+
+        落库载形为 ``{"message_ids": [...], "artifact_refs": [...]}``；直接
+        ``list(dict)`` 只会得到字段名，故必须按键取值拼接。兼容旧的扁平字符串
+        数组载形；其余形状抛 ``ValueError`` 由调用方转译为不可读事实。
+        """
+
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            collected: list[str] = []
+            for key in ("message_ids", "artifact_refs"):
+                items = value.get(key)
+                if items is None:
+                    continue
+                if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+                    raise ValueError(f"read_targets.{key} is not a string array")
+                collected.extend(items)
+            return collected
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return list(value)
+        raise ValueError("read_targets is neither an identity dict nor a string array")
+
     def _read_mark_entry_from_row(self, row: Any, identity_str: str) -> ReadMarkEntry:
         try:
             return decode_read_mark_entry(
@@ -4699,7 +4724,7 @@ class AgentDao(BaseDao):
                     "batch_seq": row.batch_seq,
                     "postponed_through_seq": row.postponed_through_seq,
                     "session_id": row.session_id,
-                    "read_targets": list(row.read_targets) if row.read_targets is not None else None,
+                    "read_targets": self._read_targets_from_jsonb(row.read_targets),
                 }
             )
         except (AgentValidationError, ValueError) as exc:
@@ -6547,6 +6572,86 @@ class AgentDao(BaseDao):
     def _read_mark_id(user_scope: str, marker_kind: str, target_id: str) -> str:
         return stable_id("read_mark", [user_scope, marker_kind, target_id])
 
+    async def _assert_read_targets_owned(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        session_id: str,
+        message_ids: tuple[str, ...],
+        artifact_refs: tuple[str, ...],
+        identity: str,
+    ) -> None:
+        """已读精确身份归属核对（检视 D14）：消息须属于目标会话，成果引用须由该
+        会话产生；他会话消息/伪造目标 ``INPUT_INVALID``，拒绝先于任何写事实。
+
+        ``artifact_refs`` 载形为 ``<artifact_id>@<version>``（非规范载形即拒绝，
+        不猜测版本）；归属按 (artifact_id, artifact_version) 严格比对。
+        """
+
+        if message_ids:
+            wanted_messages = sorted(set(message_ids))
+            rows = (
+                await conn.execute(
+                    sa.select(AgentMessage.message_id).where(
+                        AgentMessage.user_scope == user_scope,
+                        AgentMessage.session_id == session_id,
+                        AgentMessage.message_id.in_(wanted_messages),
+                    )
+                )
+            ).all()
+            found_messages = {str(row[0]) for row in rows}
+            missing_messages = [mid for mid in wanted_messages if mid not in found_messages]
+            if missing_messages:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "message ids do not belong to target session: "
+                    + ", ".join(missing_messages[:5])
+                    + (f" (+{len(missing_messages) - 5} more)" if len(missing_messages) > 5 else ""),
+                    identity,
+                )
+
+        if artifact_refs:
+            wanted_artifacts: list[tuple[str, int]] = []
+            for ref in sorted(set(artifact_refs)):
+                artifact_id, sep, version_text = ref.rpartition("@")
+                if (
+                    not sep
+                    or not artifact_id
+                    or not version_text.isdigit()
+                    or str(int(version_text)) != version_text
+                    or int(version_text) < 1
+                ):
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        f"artifact ref is not '<artifact_id>@<version>': {ref}",
+                        identity,
+                    )
+                wanted_artifacts.append((artifact_id, int(version_text)))
+            rows = (
+                await conn.execute(
+                    sa.select(AgentArtifact.artifact_id, AgentArtifact.artifact_version).where(
+                        AgentArtifact.user_scope == user_scope,
+                        AgentArtifact.session_id == session_id,
+                        AgentArtifact.artifact_id.in_([artifact_id for artifact_id, _ in wanted_artifacts]),
+                    )
+                )
+            ).all()
+            found_artifacts = {(str(row[0]), int(row[1])) for row in rows}
+            missing_artifacts = [
+                f"{artifact_id}@{version}"
+                for artifact_id, version in wanted_artifacts
+                if (artifact_id, version) not in found_artifacts
+            ]
+            if missing_artifacts:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "artifact refs were not produced by target session: "
+                    + ", ".join(missing_artifacts[:5])
+                    + (f" (+{len(missing_artifacts) - 5} more)" if len(missing_artifacts) > 5 else ""),
+                    identity,
+                )
+
     async def save_read_mark_max(self, command: ReadMarkCommand) -> ReadMarkReceipt:
         """已读标记事务（§4.2 L436/§9.11）：会话 marker 行锁下 GREATEST 水位与
         精确已读身份并集合并，**单个显式事务**。
@@ -6554,6 +6659,15 @@ class AgentDao(BaseDao):
         - ``marker_kind='session'``、target_id=session_id：last_seq 仅随
           observed_through_seq（与 observation_scope_digest 成对）GREATEST 推进；
           read_targets 为精确已读消息/成果身份并集（不含正文），不全局清零；
+        - 精确身份归属（检视 D14）：message_ids 必须属于目标会话，artifact_refs
+          （``<artifact_id>@<version>``）必须由该会话产生；他会话/伪造目标
+          ``INPUT_INVALID``，不并入并集；
+        - 可靠上界（检视 D14）：observed_through_seq 不得超过会话已提交事件水位
+          （``agent_session.event_seq``），未来水位不得写成已读；
+        - 观测范围（检视 D14）：项目内尚无 ``observation_scope_digest`` 的权威
+          计算口径，故不臆造摘要，改为把调用方 digest 与已落库摘要绑定核对——
+          同一 marker 只承载单一观测范围，digest 不一致即 ``INPUT_INVALID``
+          （不静默忽略、不把两个范围压进同一水位）；
         - merge 天然幂等（GREATEST + 并集）：本次无任何状态变化即视为重放
           （replayed=True）；同项重复标记不产生新事实；
         - 会话不存在 ``INPUT_INVALID``（严格读；FK 同样拦截）。
@@ -6575,10 +6689,10 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            # 1. 目标会话存在性（用户域严格校验）。
+            # 1. 目标会话存在性（用户域严格校验）+ 可靠事件水位上界。
             session_row = (
                 await conn.execute(
-                    sa.select(AgentSession.session_id).where(
+                    sa.select(AgentSession.session_id, AgentSession.event_seq).where(
                         AgentSession.user_scope == command.user_scope,
                         AgentSession.session_id == command.session_id,
                     )
@@ -6590,7 +6704,24 @@ class AgentDao(BaseDao):
                     "target session does not exist in user scope",
                     identity,
                 )
-            # 2. session marker 行锁（UNIQUE(user_scope,marker_kind,target_id)）。
+            # 2. 精确身份归属（检视 D14）：他不属于本会话的消息/成果不得并入并集。
+            await self._assert_read_targets_owned(
+                conn,
+                user_scope=command.user_scope,
+                session_id=command.session_id,
+                message_ids=command.message_ids,
+                artifact_refs=command.artifact_refs,
+                identity=identity,
+            )
+            # 3. 可靠上界（检视 D14）：未来水位不得写成已读。
+            if command.observed_through_seq is not None and command.observed_through_seq > session_row.event_seq:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "observed_through_seq exceeds the session's committed event watermark "
+                    f"({command.observed_through_seq} > {session_row.event_seq})",
+                    identity,
+                )
+            # 4. session marker 行锁（UNIQUE(user_scope,marker_kind,target_id)）。
             marker_id = self._read_mark_id(command.user_scope, "session", command.session_id)
             marker_row = (
                 await conn.execute(
@@ -6613,15 +6744,35 @@ class AgentDao(BaseDao):
             existing_targets: dict = (
                 dict(marker_row.read_targets) if marker_row is not None and marker_row.read_targets else {}
             )
-            merged_messages = sorted(set(existing_targets.get("message_ids", [])) | set(command.message_ids))
-            merged_artifacts = sorted(set(existing_targets.get("artifact_refs", [])) | set(command.artifact_refs))
-            changed = marker_row is None or (
-                landed_seq != marker_row.last_seq
-                or merged_messages != list(existing_targets.get("message_ids", []))
-                or merged_artifacts != list(existing_targets.get("artifact_refs", []))
+            # 5. 观测范围绑定（检视 D14）：同一 marker 只承载单一观测范围摘要。
+            stored_digest = existing_targets.get("observation_scope_digest")
+            scope_digest = stored_digest
+            if command.observation_scope_digest is not None:
+                if stored_digest is not None and stored_digest != command.observation_scope_digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "observation scope digest differs from the persisted read watermark scope",
+                        identity,
+                    )
+                # 仅当水位不前推（全新行 / 本期水位不低于已落库水位）时才把 digest
+                # 归到该水位上；过时水位的范围不得冒充已落库更高水位的范围。
+                if marker_row is None or command.observed_through_seq >= marker_row.last_seq:
+                    scope_digest = command.observation_scope_digest
+            existing_messages = list(existing_targets.get("message_ids", []))
+            existing_artifacts = list(existing_targets.get("artifact_refs", []))
+            merged_messages = sorted(set(existing_messages) | set(command.message_ids))
+            merged_artifacts = sorted(set(existing_artifacts) | set(command.artifact_refs))
+            merged_targets: dict = {"message_ids": merged_messages, "artifact_refs": merged_artifacts}
+            if scope_digest is not None:
+                merged_targets["observation_scope_digest"] = scope_digest
+            changed = (
+                marker_row is None
+                or landed_seq != marker_row.last_seq
+                or merged_messages != existing_messages
+                or merged_artifacts != existing_artifacts
+                or scope_digest != stored_digest
             )
             if changed:
-                merged_targets = {"message_ids": merged_messages, "artifact_refs": merged_artifacts}
                 values: dict = {
                     "last_seq": landed_seq,
                     "read_targets": merged_targets,
