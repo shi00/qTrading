@@ -66,6 +66,13 @@ usage → 结算），入口差异经 :class:`_AttemptPolicy` 参数化：
 - **协议失败**：断流 / 缺 finish / 畸形闭合参数经适配器层
   ``ModelTurnProtocolError`` 呈现为确认失败（B-02-1 已实现协议侧），不因迭代
   耗尽成功（§6.4-4）；取消传播边界沿共享 F19 受限清理后 re-raise（R2）。
+- **M07 资料核权（逐实际 attempt）**：binding 携带 ``data_consent``（受理冻结
+  operation/资料上下文）时，每次实际尝试（含同候选重试与后续备用候选）在预留
+  / 派发 / 外发之前以该 attempt 的准确 ``attempt_id`` 重建请求并调资料 owner
+  ``authorize_data_attempt``——连接授权 + 绑定一致核 + 源 claim 串成同一门；
+  deny / unknown / owner 能力缺失 / 核权异常一律零出站（不进 reserve、不
+  mark_dispatched、不外发），原因随候选决策记录（R21 不静默）并中断遍历。
+  未携带该键时不改变既有链路（旧直推入口政策不变）。
 """
 
 from __future__ import annotations
@@ -79,6 +86,11 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, cast
 
+from core.agent_types import (
+    DataAttemptAuthorization,
+    DataAttemptOutcome,
+    validate_data_attempt_authorization,
+)
 from core.errors import AIContentRefusedError
 from core.model_management_types import (
     AdapterResponse,
@@ -178,6 +190,67 @@ def _default_local_only_mode_reader() -> bool:
     from utils.config_handler import ConfigHandler
 
     return ConfigHandler.is_ai_local_only_mode()
+
+
+#: 资料核权上下文键（M07，``execute_chat_turn`` 的 binding 可选键 ``data_consent``）：
+#: 受理冻结操作/资料上下文，逐实际 attempt 以真实 ``attempt_id`` 重建核权请求。
+#: 全部键必填——缺键即入口 fail-closed（不静默降级为「无资料约束」）。
+_DATA_CONSENT_BINDING_KEYS: Final[tuple[str, ...]] = (
+    "user_scope",
+    "operation_id",
+    "consent_id",
+    "expected_consent_revision",
+    "connection_id",
+    "connection_revision",
+    "security_revision",
+    "credential_version",
+    "purpose",
+    "target_fingerprint",
+    "scope_version",
+    "source_selections",
+    "source_scope_digest",
+    "owner_epoch",
+    "run_epoch",
+)
+
+
+def _parse_data_consent_binding(raw: object, invocation_id: str) -> DataAttemptAuthorization:
+    """binding ``data_consent`` → 核权请求模板（M07）。
+
+    模板随受理冻结操作/资料上下文（operation / consent / 绑定连接复合引用 /
+    安全修订 / 源选择与摘要 / 代次）；``attempt_id`` 为占位——真实 attempt 在
+    派发前逐次重建（每次实际尝试独立核权，不复用外层一次许可）。入口即校验
+    上下文自洽（含 ``source_scope_digest`` 新鲜重算，不信调用方摘要），脏上下文
+    fail-closed（``ValueError`` 子类，零副作用）。
+    """
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("binding 'data_consent' must be a mapping with the frozen operation context")
+    missing = [key for key in _DATA_CONSENT_BINDING_KEYS if key not in raw]
+    if missing:
+        raise ValueError(f"binding 'data_consent' missing keys: {', '.join(missing)}")
+    selections = raw["source_selections"]
+    template = DataAttemptAuthorization(
+        user_scope=raw["user_scope"],
+        operation_id=raw["operation_id"],
+        # 占位身份：入口只校验上下文自洽；真实 attempt_id 在 _attempt_once 逐次注入。
+        attempt_id=invocation_id,
+        consent_id=raw["consent_id"],
+        expected_consent_revision=raw["expected_consent_revision"],
+        connection_id=raw["connection_id"],
+        connection_revision=raw["connection_revision"],
+        security_revision=raw["security_revision"],
+        credential_version=raw["credential_version"],
+        purpose=raw["purpose"],
+        target_fingerprint=raw["target_fingerprint"],
+        scope_version=raw["scope_version"],
+        source_selections=tuple(selections) if isinstance(selections, list | tuple) else selections,
+        source_scope_digest=raw["source_scope_digest"],
+        owner_epoch=raw["owner_epoch"],
+        run_epoch=raw["run_epoch"],
+    )
+    validate_data_attempt_authorization(template)
+    return template
 
 
 @dataclass(slots=True)
@@ -347,9 +420,10 @@ class ScenarioExecutor:
 
         - **入口协议**（HANDOFF §6.1）：``binding`` 为受理冻结模型绑定（无秘密
           mapping，必需 ``scenario_id`` / ``task_id``，缺失 fail-closed 零副作用）；
-          invocation 身份取 ``model_call_id``（一回合一 invocation，model_call →
-          invocation → attempt 稳定关联）；``on_event`` 可等待（真实 delta 有界
-          事件，背压经 await 透传）；
+          可选 ``data_consent`` 为冻结 operation/资料上下文（M07：逐实际 attempt
+          派发前新鲜核权，见模块契约）；invocation 身份取 ``model_call_id``
+          （一回合一 invocation，model_call → invocation → attempt 稳定关联）；
+          ``on_event`` 可等待（真实 delta 有界事件，背压经 await 透传）；
         - **聊天适配器**：经 :class:`core.model_management_types.ChatInferenceAdapter`
           协议（``invoke_chat``）执行——非聊天适配器（FinBERT 等）派发前淘汰
           （rejected，零预留副作用）；``stream=True``、``response_format=output_schema``
@@ -381,6 +455,14 @@ class ScenarioExecutor:
             deadline=request.deadline,
             run_id=None,
             payload=_chat_estimation_payload(request),
+        )
+        # M07：受理冻结资料/操作上下文（可选键）。声明即逐实际 attempt 新鲜核权；
+        # 未声明不改变既有链路（旧直推入口与未接线调用方政策不变）。
+        raw_data_consent = binding.get("data_consent")
+        data_authorization = (
+            _parse_data_consent_binding(raw_data_consent, identity.invocation_id)
+            if raw_data_consent is not None
+            else None
         )
         exposure = _ChatStreamExposure()
 
@@ -420,6 +502,7 @@ class ScenarioExecutor:
             on_adapter_failure=_on_chat_failure,
             adapter_check=_chat_adapter_check,
             capability_check=_chat_capability_check(request),
+            data_authorization=data_authorization,
         )
         result = await self._execute_traversal(identity, snapshot, policy)
         candidate = result.candidate
@@ -958,6 +1041,31 @@ class ScenarioExecutor:
             # F19②：外发事实起点——adapter.invoke 开始后消费不可证明（收费未知语义分界）
             outbound_started = False
 
+            # M07：资料核权门（逐实际 attempt，先于一切账目副作用）。每次实际尝试
+            # （含同候选重试与后续备用候选）以该 attempt 的准确 operation/资料上下文
+            # 新鲜核权——资料 owner 许可（authorize_data_attempt 内含连接授权 +
+            # 绑定一致核 + 源 claim 单胜者）不通过即零出站：不进 reserve、不
+            # mark_dispatched、不外发；拒绝原因随候选决策记录（R21 不静默）。
+            # 许可为 operation 级事实，切换候选无济 → halt（首次失败后撤用，后续
+            # 重试/备用同样零出站）。
+            if policy.data_authorization is not None:
+                denial = await self._authorize_data_attempt(policy.data_authorization, attempt_id)
+                if denial is not None:
+                    last_reason = denial
+                    logger.warning(
+                        "[ScenarioExecutor] data consent gate denied attempt, zero outbound (task=%s, reason=%s)",
+                        identity.task_id,
+                        denial,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=denial,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
+
             try:
                 # F16 逐实际尝试原子预留（每次真实尝试独立预留，预留 ↔ attempt 生命
                 # 周期对齐：该次终态同事务结算该次预留）：限额候选携带执行侧估算
@@ -1268,6 +1376,33 @@ class ScenarioExecutor:
         except Exception as e:
             last_reason = f"adapter error: {type(e).__name__}"
             return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
+
+    async def _authorize_data_attempt(self, template: DataAttemptAuthorization, attempt_id: str) -> str | None:
+        """资料核权门（M07）：返回 ``None``=放行，否则脱敏原因码（零出站）。
+
+        以该实际尝试的 ``attempt_id`` 重建请求（operation / 许可 / 绑定连接 /
+        源选择随受理冻结模板），交资料 owner 新鲜核权——连接授权、绑定一致核、
+        源 claim 在同一门内完成，不复用外层一次许可。owner 能力缺失 / 核权异常 /
+        deny / unknown 一律 fail-closed（unknown 不当 allow），原因仅含稳定码与
+        脱敏原因（R9/R21）。
+        """
+
+        request = replace(template, attempt_id=attempt_id)
+        authorize = getattr(self._config_service, "authorize_data_attempt", None)
+        if authorize is None:
+            return "data authorization unavailable: owner capability missing"
+        try:
+            receipt = await authorize(request)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            return f"data authorization failed: {type(e).__name__}"
+        outcome = getattr(receipt, "outcome", None)
+        if outcome is DataAttemptOutcome.ALLOW:
+            return None
+        reason = getattr(receipt, "reason", None)
+        suffix = f": {reason}" if isinstance(reason, str) and reason else ""
+        return f"data authorization {getattr(outcome, 'value', 'unknown')}{suffix}"
 
     async def _finalize_chat(self, response: Any, scope: _AttemptScope, duration_ms: float) -> _CandidateOutcome:
         """chat 入口成功响应收敛（B-02-3）：拒绝处置 + 终态落账 + response 承载。
@@ -1796,6 +1931,10 @@ class _AttemptPolicy:
       返回拒绝原因或 None。
     - ``capability_check``：准入期请求必需能力核验（M06，仅 chat 入口使用）——
       按连接冻结证据核验请求必需能力与证据 revision；返回拒绝原因或 None。
+    - ``data_authorization``：资料核权模板（M07，仅 chat 入口在 binding 携带
+      ``data_consent`` 时设置）——每个实际 attempt 在预留/派发/外发前以该
+      attempt 的 ``attempt_id`` 重建请求并新鲜核权（资料 owner 许可内含连接
+      授权 + 绑定核 + 源 claim 单胜者）；拒绝/未知/异常一律零出站。
     """
 
     invoke: Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
@@ -1803,6 +1942,7 @@ class _AttemptPolicy:
     on_adapter_failure: Callable[[Exception, _AttemptScope], Awaitable[_CandidateOutcome | None]] | None = None
     adapter_check: Callable[[_EntryAdapter, ResolvedConnection], str | None] | None = None
     capability_check: Callable[[ResolvedConnection, _ConnectionEligibility], str | None] | None = None
+    data_authorization: DataAttemptAuthorization | None = None
 
 
 @dataclass(slots=True)

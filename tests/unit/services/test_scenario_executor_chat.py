@@ -24,11 +24,17 @@
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from core.agent_types import (
+    DataAttemptOutcome,
+    DataAttemptReceipt,
+    data_consent_source_scope_digest,
+)
 from core.model_management_types import (
     ChatMessage,
     ChatStreamEvent,
@@ -778,3 +784,229 @@ class TestChatCapabilityAdmission:
         )
         assert outcome.status == "succeeded"
         assert len(adapter.invoke_calls) == 1
+
+
+def _data_consent(**overrides: Any) -> dict[str, Any]:
+    """binding ``data_consent``（M07：受理冻结 operation/资料上下文）。"""
+    values: dict[str, Any] = {
+        "user_scope": "user-1",
+        "operation_id": "op-1",
+        "consent_id": "dec-consent-1",
+        "expected_consent_revision": 2,
+        "connection_id": "conn-remote",
+        "connection_revision": 1,
+        "security_revision": 1,
+        "credential_version": "v1",
+        "purpose": "sentiment",
+        "target_fingerprint": "fp-1",
+        "scope_version": 1,
+        "source_selections": (),
+        "source_scope_digest": data_consent_source_scope_digest(()),
+        "owner_epoch": 1,
+        "run_epoch": 1,
+    }
+    values.update(overrides)
+    return values
+
+
+def _data_receipt(outcome: DataAttemptOutcome, reason: str | None = None) -> DataAttemptReceipt:
+    return DataAttemptReceipt(
+        outcome=outcome,
+        operation_id="op-1",
+        attempt_id="att-gate",
+        consent_id="dec-consent-1",
+        consent_revision=2,
+        binding=None,
+        reason=reason,
+        authorized_at="2026-10-16T00:00:00.000000Z",
+    )
+
+
+class TestChatDataConsentGate:
+    """检视 M07：每个实际 attempt（含同候选重试与后续候选）在预留/派发/外发前
+    以该 attempt 的准确 operation/资料上下文新鲜核权；许可不通过即零出站。"""
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_allowed_and_dispatched(self):
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        authorize = AsyncMock(return_value=_data_receipt(DataAttemptOutcome.ALLOW))
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),
+        )
+
+        assert outcome.status == "succeeded"
+        assert len(adapter.invoke_calls) == 1
+        assert authorize.await_args is not None
+        request = authorize.await_args.args[0]
+        # 该 attempt 的准确上下文：操作身份随受理冻结，attempt 身份为本次真实尝试
+        assert request.operation_id == "op-1"
+        assert request.consent_id == "dec-consent-1"
+        assert request.attempt_id == adapter.invoke_calls[0]["attempt_id"]
+        assert request.attempt_id != "mc-1"
+
+    @pytest.mark.asyncio
+    async def test_retry_after_failure_rechecks_and_zero_outbound_when_revoked(self):
+        """首次失败后许可撤用：重试前新鲜核权 deny → 零出站（不进 reserve /
+        不 mark_dispatched / 不外发），原因随决策记录（R21）。"""
+        adapter = _ScriptedChatAdapter(
+            [
+                ((), TimeoutError("upstream timed out"), None),
+                ((), None, _chat_ok_response()),
+            ]
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        authorize = AsyncMock(
+            side_effect=[
+                _data_receipt(DataAttemptOutcome.ALLOW),
+                _data_receipt(DataAttemptOutcome.DENY, "state_not_approved"),
+            ]
+        )
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),
+        )
+
+        assert outcome.status == "failed"
+        assert "data authorization deny: state_not_approved" in (outcome.error_code or "")
+        assert len(adapter.invoke_calls) == 1  # 重试零出站
+        assert authorize.await_count == 2  # 每次实际尝试独立核权
+        assert recorder.try_reserve.await_count == 1  # 第二次未进入预留
+
+    @pytest.mark.asyncio
+    async def test_fallback_candidate_zero_outbound_when_denied(self):
+        """换候选同样核权：备用候选上下文不获许可 → 零出站并 halt。"""
+        adapter = _ScriptedChatAdapter(
+            [
+                ((), RuntimeError("upstream broken"), None),
+                ((), None, _chat_ok_response()),
+            ]
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        authorize = AsyncMock(
+            side_effect=[
+                _data_receipt(DataAttemptOutcome.ALLOW),
+                _data_receipt(DataAttemptOutcome.DENY, "consent_not_found"),
+            ]
+        )
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            binding=_binding(data_consent=_data_consent()),
+        )
+
+        assert outcome.status == "failed"
+        assert "data authorization deny: consent_not_found" in (outcome.error_code or "")
+        assert len(adapter.invoke_calls) == 1  # 备用候选零出站
+        assert authorize.await_count == 2
+        assert recorder.try_reserve.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_each_attempt_carries_distinct_attempt_identity(self):
+        """同候选重试：两次实际尝试以各自 attempt 身份分别核权（不复用外层一次）。"""
+        adapter = _ScriptedChatAdapter(
+            [
+                ((), TimeoutError("upstream timed out"), None),
+                ((), None, _chat_ok_response()),
+            ]
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        authorize = AsyncMock(
+            side_effect=[
+                _data_receipt(DataAttemptOutcome.ALLOW),
+                _data_receipt(DataAttemptOutcome.ALLOW),
+            ]
+        )
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),
+        )
+
+        assert outcome.status == "succeeded"
+        assert len(adapter.invoke_calls) == 2
+        requests = [call.args[0] for call in authorize.await_args_list]
+        assert len(requests) == 2
+        assert requests[0].attempt_id == adapter.invoke_calls[0]["attempt_id"]
+        assert requests[1].attempt_id == adapter.invoke_calls[1]["attempt_id"]
+        assert requests[0].attempt_id != requests[1].attempt_id
+        # operation / 许可上下文随受理冻结（同一 operation，不同 attempt）
+        assert {r.operation_id for r in requests} == {"op-1"}
+        assert {r.consent_id for r in requests} == {"dec-consent-1"}
+
+    @pytest.mark.asyncio
+    async def test_unknown_outcome_fails_closed(self):
+        """owner 回执 unknown（不可靠重读）不当 allow → 零出站。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        authorize = AsyncMock(return_value=_data_receipt(DataAttemptOutcome.UNKNOWN, "consent_unreadable"))
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),
+        )
+
+        assert outcome.status == "failed"
+        assert "data authorization unknown: consent_unreadable" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_owner_capability_fails_closed(self):
+        """资料 owner 能力缺失 → 门不可评估即 fail-closed（零出站）。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        executor._config_service = SimpleNamespace(authorize_attempt=AsyncMock())
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),
+        )
+
+        assert outcome.status == "failed"
+        assert "data authorization unavailable" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_incomplete_context_fails_closed_at_entry(self):
+        """资料上下文缺键：入口 fail-closed（ValueError），零副作用。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        consent = _data_consent()
+        consent.pop("consent_id")
+
+        with pytest.raises(ValueError) as excinfo:
+            await executor.execute_chat_turn(
+                _chat_request(),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                binding=_binding(data_consent=consent),
+            )
+        assert "consent_id" in str(excinfo.value)
+        recorder.ensure_invocation.assert_not_awaited()
+        assert adapter.invoke_calls == []
