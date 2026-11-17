@@ -326,6 +326,8 @@ def _parse_json(data: bytes, selection: Selection, budget: AttachmentBudget) -> 
 MAX_SHEET_XML_BYTES: Final = 64 * 1024 * 1024
 #: XML 探测扫描的单元格上限（超过后其余单元格缓存保持 unknown）。
 MAX_PROBED_CELLS: Final = 200_000
+#: 实际行范围核定的行元素扫描上限（Excel 单表最大行数为 1,048,576）。
+MAX_PROBED_ROWS: Final = 1_048_576
 #: XLSX 容器前置预算（I08）：在 openpyxl 分配前按中央目录声明值拒绝解压炸弹。
 MAX_XLSX_ENTRIES: Final = 4_096
 MAX_XLSX_ENTRY_BYTES: Final = 64 * 1024 * 1024
@@ -483,6 +485,7 @@ class XlsxCacheProbe:
         self._zip = zipfile.ZipFile(io.BytesIO(data))
         self._sheet_paths = dict(metadata.sheet_paths)
         self._cache: dict[tuple[str, str], dict[str, Any] | None] = {}
+        self._row_extents: dict[str, int | None] = {}
         self._probed_cells = 0
         self.date_epoch = metadata.date_epoch
 
@@ -536,6 +539,48 @@ class XlsxCacheProbe:
             return
         for cell in pending:
             self._cache[(sheet, cell)] = found.get(cell)
+
+    def row_extent(self, sheet: str) -> int | None:
+        """返回工作表实际存在的最大物理行号；结构不可读/超界返回 None（未知）。
+
+        以 worksheet XML 的 ``<row>`` 元素为准，不信任 ``<dimension>`` 声明：
+        声明可能大于实际内容（openpyxl 会按声明补空行）或小于实际内容
+        （openpyxl 会按声明提前截断）。无法核定时返回 None，调用方必须按
+        未读/部分真实上报，不得据此宣称完整读取（I20）。
+        """
+
+        if sheet in self._row_extents:
+            return self._row_extents[sheet]
+        path = self._sheet_paths.get(sheet)
+        extent: int | None = None
+        if path is not None:
+            try:
+                info = self._zip.getinfo(path)
+                if info.file_size > MAX_SHEET_XML_BYTES:
+                    raise KeyError(path)
+                with self._zip.open(path) as handle:
+                    head = handle.read(8192)
+                    if b"<!DOCTYPE" in head or b"<!ENTITY" in head:
+                        raise AttachmentParseError("invalid_structure", "XLSX XML entities are rejected")
+                    handle.seek(0)
+                    best = 0
+                    current = 0
+                    scanned = 0
+                    for _event, element in ElementTree.iterparse(handle, events=("end",)):
+                        if element.tag != f"{_NS_MAIN}row":
+                            continue
+                        ref = element.get("r")
+                        current = int(ref) if ref and ref.isdigit() else current + 1
+                        best = max(best, current)
+                        scanned += 1
+                        element.clear()
+                        if scanned > MAX_PROBED_ROWS:
+                            raise KeyError(path)
+                    extent = best
+            except (KeyError, zipfile.BadZipFile, ElementTree.ParseError, OSError):
+                extent = None
+        self._row_extents[sheet] = extent
+        return extent
 
     def _scan_sheet(self, path: str, targets: set[str]) -> dict[str, dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
@@ -739,12 +784,15 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         total_rows = 0
         frozen_chars = 0
         read_sheets: list[str] = []
+        row_read_ends: dict[str, int] = {}
+        unverified_sheets: set[str] = set()
         partial_sheet: str | None = None
         partial_last_row: int = 0
         rows_axis = selection.kind == "limited" and isinstance(selection.ranges[0], RowsRange)
 
         for sheet_name in selected_sheets:
             target_rows = _xlsx_row_range(selection, sheet_name)
+            extent = probe.row_extent(sheet_name)
             formula_sheet = formulas[sheet_name]
             cached_sheet = cached[sheet_name]
             rows: list[dict[str, Any]] = []
@@ -754,13 +802,24 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             rows_chars = 0
             row_number = 0
             last_completed_row = 0
-            for formula_row, cached_row in zip(formula_sheet.iter_rows(), cached_sheet.iter_rows(), strict=False):
+            timed_out = False
+            if extent is None:
+                # 实际行范围无法核定：按未读上报，不把未知伪装成完整读取（R21/I20）。
+                unverified_sheets.add(sheet_name)
+                limitations.append(_limitation("sheet_extent_unverified", "工作表实际行范围无法核定，所选范围记为未读"))
+                continue
+            # 只迭代到 XML 实测的最大物理行，不信任 <dimension> 声明：声明大于实际时
+            # openpyxl 会补空行，声明小于实际时会提前截断，两者都会让已读范围失真。
+            formula_rows = formula_sheet.iter_rows(max_row=extent) if extent > 0 else ()
+            cached_rows = cached_sheet.iter_rows(max_row=extent) if extent > 0 else ()
+            for formula_row, cached_row in zip(formula_rows, cached_rows, strict=False):
                 first_cell = formula_row[0] if formula_row else None
                 physical_row = getattr(first_cell, "row", None)
                 row_number = physical_row if isinstance(physical_row, int) else row_number + 1
                 if target_rows is not None and not (target_rows[0] <= row_number <= target_rows[1]):
                     continue
                 if time.monotonic() > deadline:
+                    timed_out = True
                     partial_sheet = sheet_name
                     partial_last_row = last_completed_row
                     limitations.append(
@@ -820,7 +879,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 rows.append({"row": row_number, "cells": cells})
                 last_completed_row = row_number
             block = json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows})
-            if partial_sheet is not None:
+            if timed_out:
                 if rows_axis and rows:
                     # rows 轴：已完成行是真实已读内容，必须与 read_ranges 的前缀一致地投递。
                     blocks.append(block)
@@ -829,6 +888,20 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                     # sheets 轴/all：整表记未读，不投递半表内容；统计只计已投递行。
                     total_rows -= len(rows)
                 break
+            if rows_axis:
+                assert target_rows is not None
+                # 已读区间以实际迭代到的行为准（而非原样回报选择范围）。
+                read_end = min(target_rows[1], extent)
+                if read_end < target_rows[1]:
+                    limitations.append(
+                        _limitation("rows_out_of_range", "所选行范围超出工作表实际内容，越界部分记为未读")
+                    )
+                if read_end >= target_rows[0]:
+                    row_read_ends[sheet_name] = read_end
+                    read_sheets.append(sheet_name)
+                    blocks.append(block)
+                    frozen_chars += len(block)
+                continue
             read_sheets.append(sheet_name)
             blocks.append(block)
             frozen_chars += len(block)
@@ -836,12 +909,14 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         read_ranges, unread_ranges = _xlsx_read_unread_atoms(
             selection,
             read_sheets=read_sheets,
+            row_read_ends=row_read_ends,
+            unverified_sheets=unverified_sheets,
             partial_sheet=partial_sheet,
             partial_last_row=partial_last_row,
         )
-        if partial_sheet is not None:
-            read_state = ReadState.PARTIAL
+        if unread_ranges:
             coverage = "limited"
+            read_state = ReadState.PARTIAL if (read_ranges or partial_sheet is not None) else ReadState.UNREAD
         else:
             read_state = ReadState.READY
             coverage = "full"
@@ -873,18 +948,23 @@ def _xlsx_read_unread_atoms(
     selection: Selection,
     *,
     read_sheets: list[str],
+    row_read_ends: dict[str, int],
+    unverified_sheets: set[str],
     partial_sheet: str | None,
     partial_last_row: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """按选择轴生成契约合法的已读/未读原子（§3.3.1 / D06）。
+    """按选择轴与实际迭代结果生成契约合法的已读/未读原子（§3.3.1 / D06）。
 
     - ``selection=all``：只允许空或恰一个 ``all`` 原子；无法表达部分读取，
-      故超时时明确拒绝（不把截断伪装成完整读取）。
+      故超时或行范围不可核定都明确拒绝（不把截断/未知伪装成完整读取）。
     - ``selection=sheets``：粒度为整表；未完成的表记未读（保守，不冒充已读）。
-    - ``selection=rows``：按每段准确行区间切分已完成前缀与剩余未读。
+    - ``selection=rows``：已读区间按实际迭代到的行核定（``row_read_ends``），
+      请求范围越界部分记未读；行范围不可核定的表整表记未读。
     """
 
     if selection.kind == "all":
+        if unverified_sheets:
+            raise AttachmentParseError("invalid_structure", "XLSX sheet extent cannot be verified")
         if partial_sheet is None:
             return [to_wire_dict(AllAtom())], []
         raise AttachmentParseError(
@@ -913,18 +993,32 @@ def _xlsx_read_unread_atoms(
             continue
         assert isinstance(atom, RowsRange)
         assert atom.sheet is not None
-        if partial_sheet is None or atom.sheet in read_sheets:
-            read_atoms.append(to_wire_dict(atom))
-            continue
-        if atom.sheet == partial_sheet and partial_last_row >= atom.start:
-            read_end = min(atom.end, partial_last_row)
-            read_atoms.append(to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=atom.start, end=read_end)))
-            if read_end < atom.end:
-                unread_atoms.append(
-                    to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=read_end + 1, end=atom.end))
-                )
-        else:
+        if atom.sheet in unverified_sheets:
             unread_atoms.append(to_wire_dict(atom))
+            continue
+        if atom.sheet == partial_sheet:
+            read_end = min(atom.end, partial_last_row)
+            if partial_last_row >= atom.start:
+                read_atoms.append(
+                    to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=atom.start, end=read_end))
+                )
+                if read_end < atom.end:
+                    unread_atoms.append(
+                        to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=read_end + 1, end=atom.end))
+                    )
+            else:
+                unread_atoms.append(to_wire_dict(atom))
+            continue
+        read_end = row_read_ends.get(atom.sheet)
+        if read_end is None or read_end < atom.start:
+            unread_atoms.append(to_wire_dict(atom))
+            continue
+        clipped_end = min(atom.end, read_end)
+        read_atoms.append(to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=atom.start, end=clipped_end)))
+        if clipped_end < atom.end:
+            unread_atoms.append(
+                to_wire_dict(RowsRange(kind="rows", sheet=atom.sheet, start=clipped_end + 1, end=atom.end))
+            )
     return read_atoms, unread_atoms
 
 
