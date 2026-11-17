@@ -244,6 +244,9 @@ class InitResult(TypedDict):
     # D02-F04: 本会话持有的调度组合结果（失败可重试时由调用方显式回传复用；
     # 组装前失败为 None）。
     scheduling_services: NotRequired[dict[str, Any] | None]
+    # P01（DD §7.4/§10.6）：本会话的 Agent 接线（facade + 共享桥 + 宿主/关闭前置）；
+    # 接线失败或未执行时为 None（零派发）。
+    agent_wiring: NotRequired[Any]
 
 
 async def initialize_services(
@@ -442,6 +445,26 @@ async def initialize_services(
             "[Bootstrap] AI usage owner recovery skipped (%s): %s",
         )
 
+    # P01（DD §7.4/§10.6）：Agent 生产接线——facade（共享引擎/账本）+ 共享桥 +
+    # 宿主组装/启动隔离（needs-spike 前不 launch）+ 关闭前置。放在所有关键启动步骤
+    # 成功之后，接线失败一律降级为零派发，不阻断既有业务启动；CancelledError 继续
+    # 传播（R2）。
+    agent_wiring: Any | None = None
+    try:
+        from app.agent_wiring import wire_agent_runtime
+
+        agent_wiring = await wire_agent_runtime(cache_manager)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log_classified(
+            logger,
+            e,
+            "general",
+            "[Bootstrap] Agent runtime wiring skipped (%s): %s",
+            exc_info=True,
+        )
+
     # review01-A9: 不再由本模块写模块级 flag；调用方（StartupController per-session 实例）
     # 根据 result["success"] 自行置位 _services_initialized。
     return {
@@ -453,6 +476,7 @@ async def initialize_services(
         "auto_probe_task": auto_probe_task,
         "partial_state": {"db_initialized": True, "task_manager_initialized": True},
         "scheduling_services": scheduling_services,
+        "agent_wiring": agent_wiring,
     }
 
 
