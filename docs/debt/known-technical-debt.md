@@ -72,6 +72,7 @@
 | P2-AgentMCP-Residual-Risks | 共享 MCP 残余：错误分类只覆盖 Timeout/Connection（其余异常标 FAILED 可诱导重试）；连接不复核载入配置的审核身份与工具范围；connection_test 可能关闭既有共享会话；目录/接收/解码/schema 四族计量无服务路径调用点；retention 无释放；`_in_flight` 按 operation_id 去重不足以隔离并发；`mark_session_lost` 不关会话不清在途；`disconnect` 异常路径残留 config/guard；`call` 在 claim 后才取会话 | P2 | ① 真实 FastMCP transport/预算数值冻结（E-02-5 spike）落地前须逐条收敛；② 或 F-04 接线出现重复调用/误重试/连接误关时 |
 | P3-AgentSource-Residual-Risks | E-01 残余：父进程范围复核缺「伪造越界/重叠 selected_range 被拒」负向用例；worker 自身 deadline 与父进程 communicate 超时同值（竞态下父进程常先 kill）；超时 limitation 硬编码「30 秒」与实际可注入超时不符；header 恰 64KiB 的 off-by-one；`_json_safe` 将 NaN→null/Decimal→字符串后求摘要（理论上与 None 同摘要） | P3 | ① 附件 worker 接入 F 系列真实链路前；② 或出现部分结果丢失/超时文案与配置不一致的报告时；③ 或扩到新解析格式需复用 `_json_safe` 摘要时 |
 | P3-AgentDelivery-Resume-NotImplemented | Agent 交付中断后的续接与残留清理未实现：中断后沿原 manifest 续接、认领前后目标身份/摘要查回与补存成功回执（HANDOFF §10.2 L581-583）、按成果维度查原 `unknown`、unknown/取消后残留清理 | P3 | ① 交付 UI（F-05）上线前须至少支持「按 `read_delivery` 查回 + 明确重导为新的 delivery」；② 或出现中断后用户重复导出/覆盖旧目标的事故时 |
+| P3-AgentSearch-IndexPlan | 历史搜索/指纹在真实数据量下的执行计划与延迟未经隔离 PG 实测，GIN 表达式索引（`to_tsvector('simple')`）与 `ILIKE` 查询的匹配方式未验证 | P3 | 验收阶段以获准隔离 PG 在 D10 规模（1000 主会话/10 万公开消息/单会话 1 万条）实测计划/延迟/峰值，P95 超 2 秒或未走索引即升级 |
 
 ## 技术债清单
 
@@ -783,6 +784,22 @@ E-06 里程碑独立检视（基线 `e0e8c651a^..` 与增量 `e627fd4fb..c320374
 **期望的最终解法**
 
 ① 逐项冻结哪些摘要属幂等/身份必需，其余保持 tombstone；② 若出现磁盘计量偏差，改为「按集合内 owner 全量（含历史 body_ref 快照）回收」，不得使用 LIKE/前缀/全表删除；③ 运行库 handle 接入清理链路时补引擎 dispose 登记；⑤ 原生清理执行器接入生产装配前，preflight 增加逐 ID 归属（user_scope/session/execution）、终态（原生状态可终止）、集合外引用（不得被集合外尚未清理的事实引用）与 writer 已退出校验，缺失即拒绝而非按已清处理。
+
+### Agent 运行时历史搜索与指纹查询（D32）
+
+#### P3-AgentSearch-IndexPlan：历史搜索/指纹在真实数据量下的执行计划与延迟未实测（检视 D32）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentSearch-IndexPlan** | `agent_message` 的 `idx_agent_message_search` 是 `to_tsvector('simple', search_text)` 的 GIN 表达式索引，而查询走 `ILIKE`；指纹全量成员比对与部分快照查询无分页；真实计划/延迟/峰值均未在隔离 PG 上实测 | 验收阶段以获准隔离 PG 在 D10 规模（1000 主会话/10 万公开消息/单会话 1 万条）实测计划/延迟/峰值，P95 超 2 秒或未走索引即升级 |
+
+**产生背景与现状**
+
+PR #2281 检视 D32 指出：模型里存在 GIN 索引，不等于查询走索引。`idx_agent_message_search` 是表达式索引（`to_tsvector('simple', search_text)`），只对匹配该表达式或等价全文谓词（`@@`/`to_tsvector(...)`）的查询生效；对 `ILIKE '%关键词%'` 不生效，前缀通配的 `ILIKE` 也无法使用普通 B-tree。指纹查询走全量成员比对、部分快照查询当前无分页上限，但真实数据量下的执行计划、延迟与内存峰值都没有实测数据，因此「是否超过 2 秒」既不能断言也不能否认。用户裁决：D32 延后，不在 PR #2281 修复范围。
+
+**期望的最终解法**
+
+在获准的隔离 PG 上以 D10 规模数据（1000 主会话 / 10 万公开消息 / 单会话 1 万条）实测：① 搜索与指纹查询的 `EXPLAIN (ANALYZE, BUFFERS)` 计划是否命中索引（含表达式索引与 ILIKE 的匹配关系）；② P95 延迟与内存峰值；③ 部分快照/指纹是否需要分页上限。不得以「模型里已有 GIN 索引」代证性能，也不得以未实测的估计代替结论。upgrade 触发条件同上。
 
 ## 已接受的权衡（Accepted Tradeoffs）
 
