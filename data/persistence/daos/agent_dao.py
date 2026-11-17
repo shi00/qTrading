@@ -3806,6 +3806,60 @@ class AgentDao(BaseDao):
             return None
         return decode_data_consent_binding(row.data_consent_payload, "$")
 
+    async def read_data_consent_save_replay(
+        self, user_scope: str, consent_id: str, *, command_id: str, input_digest: str
+    ) -> DataConsentBinding | None:
+        """按原命令身份查回保存回执（重放判定先于状态迁移预检，检视 M15）。
+
+        批准提交后回执丢失时，同命令同输入重传必须返回原回执，而不是被
+        「仅 pending 可批准」的状态预检拒绝（否则永远到不了本 DAO 写事务内的
+        同键查重）。本方法只读、零新增事实：
+
+        - 命令行不存在 → ``None``（调用方按新迁移继续走状态预检）；
+        - 同命令键同输入 → 原回执绑定（重放）；
+        - 同命令键异输入 → ``INPUT_CONFLICT``（零写）；
+        - 原回执缺失或不可可靠重读 → ``OPERATION_UNKNOWN``（R21 fail-closed）。
+
+        写事务内 :meth:`save_data_consent_decision` 的同键查重仍是权威判定，
+        本方法与其判定语义保持一致，不新增放宽路径。
+        """
+
+        self._check_engine()
+        identity_str = f"{user_scope}/{consent_id}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
+        if not isinstance(consent_id, str) or consent_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "consent_id must be non-empty text", identity_str)
+        if not isinstance(command_id, str) or command_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command_id must be non-empty text", identity_str)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentCommand.target_id == consent_id,
+                        AgentCommand.client_command_id == command_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        if row.input_digest != input_digest:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_CONFLICT,
+                "same data consent command key with different input",
+                identity_str,
+            )
+        if row.receipt_payload is None:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "original data consent save receipt unavailable",
+                identity_str,
+            )
+        return decode_data_consent_binding(row.receipt_payload, "$")
+
     async def claim_data_consent(
         self, authorization: DataAttemptAuthorization, claim: DataConsentClaim
     ) -> DataConsentClaimFact:
