@@ -13,7 +13,7 @@ from typing import Any, cast
 import pytest
 
 from core.agent_types import AgentErrorCode, AgentServiceError, MCPBudgetProfile, MCPServiceIdentity, MCPTransportKind
-from services.agent_service.mcp import MCPServerConfig, MCPTransportConfig
+from services.agent_service.mcp import MCPCallNotDispatched, MCPServerConfig, MCPTransportConfig
 from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 from services.agent_service.mcp_fastmcp import FastMCPSession, MCPSendGate, MCPSessionDiagnostics
 
@@ -133,5 +133,29 @@ class TestPerOperationDeadline:
             await session.call_tool("echo", {"text": "x"}, deadline_s=30)
 
         assert error.value.code is AgentErrorCode.POLICY_DENIED
+        # 发送前拒绝必须带「效果确定未发生」证据，调用门据此判 FAILED（I15）。
+        assert isinstance(error.value, MCPCallNotDispatched)
         assert client.calls == []
         assert session.gate.sends == 1
+
+    async def test_lost_session_refusal_is_not_dispatched(self) -> None:
+        client = _FakeCallClient()
+        session = FastMCPSession(
+            cast(Any, client),
+            config=_config(),
+            guard=MCPBudgetGuard(_profile(), identity="svc-test"),
+            gate=MCPSendGate(
+                alive=lambda: False,
+                deadline_factory=lambda seconds: MCPDeadline(seconds=seconds),
+                identity="svc-test",
+            ),
+            diagnostics=MCPSessionDiagnostics(),
+            stderr_drain=None,
+            on_close=lambda: None,
+        )
+
+        with pytest.raises(MCPCallNotDispatched) as error:
+            await session.call_tool("echo", {"text": "x"}, deadline_s=30)
+
+        assert error.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert client.calls == []
