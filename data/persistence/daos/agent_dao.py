@@ -5518,16 +5518,6 @@ class AgentDao(BaseDao):
         # 独立 LISTEN 连接（asyncpg 直连；驱动去掉 SQLAlchemy 方言段）。
         import asyncpg
 
-        listen_url = sa.engine.make_url(self.engine.url.render_as_string(hide_password=False)).set(
-            drivername="postgresql"
-        )
-        listen_conn: asyncpg.Connection = await asyncpg.connect(
-            host=listen_url.host,
-            port=listen_url.port,
-            user=listen_url.username,
-            password=listen_url.password,
-            database=listen_url.database,
-        )
         notify_queue: asyncio.Queue[None] = asyncio.Queue(maxsize=16)
 
         def _on_notify(_conn: asyncpg.Connection, _pid: int, _channel: str, _payload: str | None) -> None:
@@ -5535,19 +5525,54 @@ class AgentDao(BaseDao):
             with contextlib.suppress(asyncio.QueueFull):
                 notify_queue.put_nowait(None)
 
-        # asyncpg ≥0.29 起 add_listener/remove_listener 为协程，必须 await
-        # （否则 LISTEN 从未注册、退订从未执行，监听静默退化为轮询——检视警告暴露）
-        await listen_conn.add_listener(_AGENT_EVENT_CHANNEL, _on_notify)
-        # 注册与确认阶段任一失败须关闭独立连接（检视 m-3：try/finally 前置窗口泄漏）；
-        # BaseException + raise 保证 CancelledError 传播（R2，不吞没）
+        listen_conn: asyncpg.Connection | None = None
+        listen_registered = False
+        listen_closed = False
+
+        async def _release_listen_conn() -> None:
+            """关闭独立 LISTEN 连接恰好一次（检视 D24：取得连接即纳入保护）。
+
+            幂等：``listen_closed`` 先置位，重复调用直接返回，不双关；未注册监听
+            时只 close 不退订；退订/关闭的普通异常不替换原始异常（原异常优先），
+            ``CancelledError`` 照常传播（R2：不吞没）。
+            """
+            nonlocal listen_closed
+            conn = listen_conn
+            if listen_closed or conn is None:
+                return
+            listen_closed = True
+            try:
+                if listen_registered:
+                    # 连接已失效时退订失败按普通异常处理，不掩盖原异常
+                    with contextlib.suppress(Exception):
+                        await conn.remove_listener(_AGENT_EVENT_CHANNEL, _on_notify)
+            finally:
+                # 关闭失败记录为普通异常并被抑制，保证原异常优先（不替换）
+                with contextlib.suppress(Exception):
+                    await conn.close()
+
+        # 资源保护从「取得连接」那一刻起生效：connect/add_listener/确认语句/
+        # 受理校验/事件迭代任一阶段失败或取消都经 finally 关闭恰好一次
+        # （检视 D24：注册前窗口与 close 自身失败不可泄漏/不可掩盖原异常）。
         try:
+            listen_url = sa.engine.make_url(self.engine.url.render_as_string(hide_password=False)).set(
+                drivername="postgresql"
+            )
+            active_conn: asyncpg.Connection = await asyncpg.connect(
+                host=listen_url.host,
+                port=listen_url.port,
+                user=listen_url.username,
+                password=listen_url.password,
+                database=listen_url.database,
+            )
+            listen_conn = active_conn
+            # asyncpg ≥0.29 起 add_listener/remove_listener 为协程，必须 await
+            # （否则 LISTEN 从未注册、退订从未执行，监听静默退化为轮询——检视警告暴露）
+            await active_conn.add_listener(_AGENT_EVENT_CHANNEL, _on_notify)
+            listen_registered = True
             # LISTEN 注册即生效（asyncpg autocommit）；再执行一条语句确认会话可用（L532 确认生效）
-            await listen_conn.execute("SELECT 1")
-        except BaseException:
-            await listen_conn.close()
-            raise
-        last_seq = after_seq
-        try:
+            await active_conn.execute("SELECT 1")
+            last_seq = after_seq
             # 受理校验（用户域）：不返回空成功
             async with self.engine.connect() as conn:
                 await self._history_session_exists(conn, user_scope, session_id)
@@ -5576,11 +5601,8 @@ class AgentDao(BaseDao):
                     pass
         finally:
             # 退订只关闭本 observer（LISTEN 连接关闭），不影响其他监听者；
-            # remove_listener 为协程须 await；连接已失效时退订失败按普通异常
-            # 处理不掩盖原异常（Exception 不含 CancelledError，R2 不吞没）
-            with contextlib.suppress(Exception):
-                await listen_conn.remove_listener(_AGENT_EVENT_CHANNEL, _on_notify)
-            await listen_conn.close()
+            # 调用方 break 后 aclose / 取消 / 生成器收尾均走到此清理
+            await _release_listen_conn()
 
     # ------------------------------------------------------------------
     # C-04-2：资源票据与执行累计计数（§5.4 锁序第 1 条/§5.5/§9.11）
