@@ -624,6 +624,7 @@ class ChatMessage:
 
     tool-only content=None 合法：assistant 消息 ``content_parts`` 为空且仅含
     ``assistant_tool_calls``；tool 消息必须携带 ``tool_call_id`` 严格配对。
+    tool 消息 ``content_parts`` 为空表示工具无返回，空文本分型表示返回空文本。
     """
 
     role: Literal["system", "user", "assistant", "tool"]
@@ -650,7 +651,9 @@ def validate_chat_message(message: ChatMessage) -> None:
     for index, part in enumerate(message.content_parts):
         path = f"$.content_parts[{index}]"
         if isinstance(part, TextContentPart):
-            if not part.text:
+            # 空文本仅工具结果合法（「返回空文本」；「无返回」用空 parts 表达），
+            # 用户/系统/助手空正文仍拒绝
+            if not part.text and message.role != "tool":
                 raise _invalid("invalid_part", path)
         elif isinstance(part, ImageContentPart):
             if part.mime not in IMAGE_MIME_TYPES or not part.binary_ref:

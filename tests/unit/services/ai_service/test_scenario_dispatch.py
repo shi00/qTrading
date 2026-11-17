@@ -11,10 +11,15 @@
 - D13-001 路由策略完整性：主路由经共享构造冻结 transient_retries /
   fallback_enabled / total_timeout_seconds；0 重试 / 禁用 fallback 原值保留；
   缺字段 / 非法值 / 旧版三键路由 → RoutePolicyIncompleteError 显式失败；
+- M16 深冻结：路由条目 / 候选 / 预算政策快照嵌套写一律 TypeError，拒绝后旧受理
+  候选与预算不变；读取投影、dict() / deepcopy / json 序列化保持兼容；
 - R1：services 层不 import app，调度服务经注册点注入（bootstrap app→services）。
 """
 
+import copy
+import json
 import uuid
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -207,6 +212,32 @@ async def test_dispatch_fee_candidates_with_monthly_limit(monkeypatch):
     assert route["candidates"][0]["budget_policy_snapshot"] is not None
 
 
+async def test_dispatch_route_entry_rejects_nested_writes(monkeypatch):
+    """M16：已受理快照的嵌套写被拒绝，旧受理候选 / 预算保持不变。
+
+    外层 ``ExecutionSnapshot`` 仅为 frozen dataclass（只封属性重绑定）；若路由
+    条目仍是普通 dict，消费方可改写同一次请求的候选预算。此用例锚定冻结契约。
+    """
+    mm = _mm_snapshot()
+    mm.usage_policy = {"monthly_cny_limit": "50.00"}
+    _patch_env(monkeypatch, mm, {"executor": MagicMock()})
+
+    dispatch = await scenario_dispatch.resolve_executor(_SCENARIO_ID)
+
+    assert dispatch is not None
+    route: Any = dispatch.snapshot.routes[0]
+    cand = route["candidates"][0]
+    with pytest.raises(TypeError, match="read-only"):
+        route["transient_retries"] = 2
+    with pytest.raises(TypeError, match="read-only"):
+        cand["budget_limit_cny"] = "0.00"
+    with pytest.raises(TypeError, match="read-only"):
+        cand["budget_policy_snapshot"]["monthly_cny_limit"] = "0.00"
+    # 拒绝后旧受理候选 / 预算原值不变（无部分修改）
+    assert route["candidates"][0]["budget_limit_cny"] == "50.00"
+    assert dict(route["candidates"][0]["budget_policy_snapshot"]) == {"monthly_cny_limit": "50.00"}
+
+
 async def test_dispatch_freezes_zero_retries_and_fallback_disabled(monkeypatch):
     """D13-001：用户保存的 0 重试 / 禁用备用策略必须进入冻结快照（不得丢键）。"""
     mm = _mm_snapshot(transient_retries=0, fallback_enabled=False)
@@ -305,6 +336,119 @@ def test_build_route_snapshot_whitelists_executable_fields():
     assert built["transient_retries"] == 0
     assert built["fallback_enabled"] is False
     assert built["total_timeout_seconds"] == 30.0
+
+
+def _budget_candidates() -> tuple[dict, ...]:
+    """单候选 + 嵌套预算政策快照（M16：嵌套写用例的最小形态）。"""
+    return (
+        {
+            "candidate_index": 0,
+            "task_id": _SCENARIO_ID,
+            "connection_id": "conn-1",
+            "budget_limit_cny": "50.00",
+            "budget_policy_snapshot": {"monthly_cny_limit": "50.00"},
+            "target_fingerprint": "https://api.example.com:443/v1",
+            "purpose": _SCENARIO_ID,
+            "nested_list": ["x", {"y": 1}],
+        },
+    )
+
+
+def test_route_entry_rejects_nested_writes_and_keeps_inputs():
+    """M16：转换产物与输入同等深冻结——嵌套 dict / list 写一律拒绝，输入不被改动。"""
+    candidates = _budget_candidates()
+    built = scenario_dispatch.build_route_snapshot(
+        {
+            "scenario_id": _SCENARIO_ID,
+            "route_revision": 3,
+            "transient_retries": 1,
+            "fallback_enabled": True,
+            "total_timeout_seconds": 30,
+        },
+        scenario_id=_SCENARIO_ID,
+        candidates=candidates,
+    )
+
+    cand = built["candidates"][0]
+    with pytest.raises(TypeError, match="read-only"):
+        built["scenario_id"] = "other"
+    with pytest.raises(TypeError, match="read-only"):
+        built["transient_retries"] = 2
+    with pytest.raises(TypeError, match="read-only"):
+        cand["budget_limit_cny"] = "0.00"
+    with pytest.raises(TypeError, match="read-only"):
+        cand["budget_policy_snapshot"]["monthly_cny_limit"] = "0.00"
+    with pytest.raises(TypeError, match="read-only"):
+        cand["nested_list"][1]["y"] = 2
+
+    # 拒绝后旧受理候选 / 预算不变（冻结为深拷贝：快照与输入脱钩，无部分修改）
+    assert candidates[0]["budget_limit_cny"] == "50.00"
+    assert candidates[0]["budget_policy_snapshot"] == {"monthly_cny_limit": "50.00"}
+    assert candidates[0]["nested_list"] == ["x", {"y": 1}]
+    assert built["candidates"][0]["budget_limit_cny"] == "50.00"
+    assert built["candidates"][0]["budget_policy_snapshot"]["monthly_cny_limit"] == "50.00"
+
+
+def test_route_entry_reads_and_serialization_compatible():
+    """正常读取投影可用：get / 索引 / 切片 / dict() / deepcopy / json 序列化。"""
+    built = scenario_dispatch.build_route_snapshot(
+        {
+            "scenario_id": _SCENARIO_ID,
+            "route_revision": 3,
+            "transient_retries": 0,
+            "fallback_enabled": False,
+            "total_timeout_seconds": 45,
+        },
+        scenario_id=_SCENARIO_ID,
+        candidates=_budget_candidates(),
+    )
+
+    assert built.get("scenario_id") == _SCENARIO_ID
+    assert built["candidates"][0]["purpose"] == _SCENARIO_ID
+    assert len(built["candidates"][:1]) == 1
+    # Executor 消费形态：dict() 投影（_budget_policy_snapshot）/ deepcopy / 落账 json
+    assert dict(built["candidates"][0]["budget_policy_snapshot"]) == {"monthly_cny_limit": "50.00"}
+    assert copy.deepcopy(built)["candidates"][0]["budget_policy_snapshot"] == {"monthly_cny_limit": "50.00"}
+    assert json.loads(json.dumps(dict(built)))["candidates"][0]["budget_limit_cny"] == "50.00"
+    assert built["candidates"][0]["nested_list"] == ("x", {"y": 1})
+
+
+def test_build_route_snapshot_accepts_frozen_route_for_subroute():
+    """旧链兼容：从已冻结主路由条目重建子路由（news_classifier dedicated 路径）。"""
+    base = scenario_dispatch.build_route_snapshot(
+        {
+            "scenario_id": _SCENARIO_ID,
+            "route_revision": 3,
+            "transient_retries": 1,
+            "fallback_enabled": True,
+            "total_timeout_seconds": 30,
+        },
+        scenario_id=_SCENARIO_ID,
+        candidates=_budget_candidates(),
+    )
+    base_budget = base["candidates"][0]
+
+    sub = scenario_dispatch.build_route_snapshot(
+        base,
+        scenario_id=_SCENARIO_ID,
+        candidates=(
+            {
+                "candidate_index": 0,
+                "task_id": "sentiment",
+                "connection_id": "conn-1",
+                "budget_limit_cny": base_budget["budget_limit_cny"],
+                "budget_policy_snapshot": base_budget["budget_policy_snapshot"],
+                "purpose": _SCENARIO_ID,
+            },
+        ),
+    )
+
+    assert sub["route_revision"] == base["route_revision"]
+    assert sub["transient_retries"] == 1
+    assert sub["candidates"][0]["budget_policy_snapshot"] == {"monthly_cny_limit": "50.00"}
+    with pytest.raises(TypeError, match="read-only"):
+        sub["candidates"][0]["budget_policy_snapshot"]["monthly_cny_limit"] = "0.00"
+    assert base["candidates"][0]["budget_policy_snapshot"]["monthly_cny_limit"] == "50.00"
 
 
 async def test_provider_injection_roundtrip():
