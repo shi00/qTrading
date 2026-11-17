@@ -11,6 +11,7 @@ stdio 插入点、逐 send 门、FD 级 stderr、四诊断通道）。仍为残�
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,7 +197,7 @@ def catalog_digest(tools: tuple[MCPToolDescriptor, ...]) -> str:
 
 
 class SharedMCPConnectionManager:
-    """同一服务身份/配置版本共享一个连接；观察者退出不关持有者连接。"""
+    """同一服务身份/配置版本共享一个连接；并发启连 single-flight，观察者退出不关持有者连接。"""
 
     def __init__(
         self,
@@ -212,6 +213,8 @@ class SharedMCPConnectionManager:
         self._configs: dict[str, MCPServerConfig] = {}
         self._guards: dict[str, MCPBudgetGuard] = {}
         self._in_flight: dict[str, set[str]] = {}
+        #: 同一身份/版本的启连只 open 一次；其余调用者等待并共享该结果。
+        self._connecting: dict[str, asyncio.Task[None]] = {}
 
     # -- 配置 ---------------------------------------------------------------
 
@@ -263,12 +266,33 @@ class SharedMCPConnectionManager:
     # -- 显式启连与断开 -----------------------------------------------------
 
     async def connect(self, identity: MCPServiceIdentity) -> None:
-        """用户显式启连：预算全冻结 + 只读审核绑定当前实现，才允许建立共享连接。"""
+        """用户显式启连：预算全冻结 + 只读审核绑定当前实现，才允许建立共享连接。
+
+        按身份/版本 single-flight：同一 key 的并发调用共享同一次准入与 open，
+        实际 open 与存活 owner 各至多 1；单个调用者被取消不中断他人的等待。
+        """
 
         label = _identity_text(identity)
         key = label
         if key in self._sessions:
             return
+        pending = self._connecting.get(key)
+        if pending is None:
+            pending = asyncio.create_task(self._open_shared(identity, label))
+            self._connecting[key] = pending
+
+            def _finish(task: asyncio.Task[None]) -> None:
+                if self._connecting.get(key) is task:
+                    self._connecting.pop(key, None)
+                if not task.cancelled():
+                    task.exception()  # 消费异常，避免无人等待时告警；等待者仍会收到该异常。
+
+            pending.add_done_callback(_finish)
+        await asyncio.shield(pending)
+
+    async def _open_shared(self, identity: MCPServiceIdentity, label: str) -> None:
+        """single-flight 的实际启连：准入通过才 open，并在同一同步段内登记归属。"""
+
         config = await self._require_config(identity)
         if not config.budget.is_admitted():
             unfrozen = ",".join(config.budget.unfrozen_fields())
@@ -283,9 +307,14 @@ class SharedMCPConnectionManager:
                 f"read-only audit refused: {admission.reason}",
                 label,
             )
-        self._sessions[key] = await self._factory.open(config)
-        self._configs[key] = config
-        self._guards[key] = MCPBudgetGuard(config.budget, identity=label)
+        guard = MCPBudgetGuard(config.budget, identity=label)
+        session = await self._factory.open(config)
+        if label in self._sessions:  # 已有 owner：回收本次 client，绝不覆盖
+            await session.aclose()
+            return
+        self._sessions[label] = session
+        self._configs[label] = config
+        self._guards[label] = guard
 
     async def disconnect(self, identity: MCPServiceIdentity) -> None:
         """显式断开：有在途调用默认拒停（用户先暂停并核实际退出）。"""
