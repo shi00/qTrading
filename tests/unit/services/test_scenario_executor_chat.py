@@ -24,7 +24,7 @@
 
 import asyncio
 import inspect
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -40,6 +40,7 @@ from core.model_management_types import (
     ResolvedConnection,
     TextContentPart,
 )
+from services.ai_service.litellm_client import LiteLLMChatAdapter, LiteLLMClient
 from services.ai_service.scenario_executor import ScenarioExecutor
 from services.ai_service.usage_recorder import ReservationOutcome
 
@@ -206,10 +207,6 @@ class _ScriptedChatAdapter:
         self.script = list(script)
         self.invoke_calls: list[dict[str, Any]] = []
 
-    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        # 组装期协议校验要求 invoke 存在；chat 入口经 invoke_chat 派发，旧出口不触达
-        raise AssertionError("legacy invoke must not be reached from chat entry")
-
     async def invoke_chat(
         self, request, connection, deadline, attempt_context, *, stream=True, response_format=None, on_event=None
     ) -> ChatTurnResponse:
@@ -241,9 +238,6 @@ class _HangingChatAdapter:
     def __init__(self) -> None:
         self.invoke_calls: list[str] = []
         self.started = asyncio.Event()
-
-    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("legacy invoke must not be reached from chat entry")
 
     async def invoke_chat(self, request, connection, deadline, attempt_context, **kwargs) -> ChatTurnResponse:
         self.invoke_calls.append(attempt_context.attempt_id)
@@ -612,3 +606,51 @@ class TestChatAdapterProtocolGate:
         assert adapter.invoked is False
         recorder.try_reserve.assert_not_awaited()
         recorder.begin_attempt.assert_not_awaited()
+
+
+class TestRealLiteLLMChatAdapterWiring:
+    """检视 M01：真实 ``LiteLLMChatAdapter`` 可直接注册并服务聊天入口，零旧 invoke。"""
+
+    @pytest.mark.asyncio
+    async def test_real_adapter_registers_and_serves_chat_without_legacy_invoke(self):
+        usage = _usage()
+
+        class _FakeLiteLLMClient:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.legacy_calls = 0
+
+            async def invoke_chat_connection(
+                self,
+                request,
+                connection,
+                deadline,
+                attempt_context,
+                *,
+                stream=True,
+                response_format=None,
+                on_event=None,
+            ) -> ChatTurnResponse:
+                self.chat_calls += 1
+                return _chat_ok_response(usage=usage)
+
+            async def invoke_single_connection(self, *args: Any, **kwargs: Any) -> Any:
+                self.legacy_calls += 1
+                raise AssertionError("legacy invoke must not be reached from chat entry")
+
+        client = _FakeLiteLLMClient()
+        adapter = LiteLLMChatAdapter(cast(LiteLLMClient, client))
+        recorder = _recorder_mock()
+        # 真实适配器（新协议 invoke_chat）注册不再被旧协议强制 invoke 误杀
+        executor = _executor(adapter, recorder)
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+
+        assert outcome.status == "succeeded"
+        assert outcome.transport_state == "ok"
+        assert client.chat_calls == 1
+        assert client.legacy_calls == 0  # 聊天入口零旧 invoke 触达

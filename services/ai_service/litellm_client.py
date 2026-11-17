@@ -2196,16 +2196,33 @@ def _interpret_chat_response(response: Any) -> ChatTurnResponse:
 
 
 class LiteLLMChatAdapter:
-    """``litellm_chat`` 聊天回合适配器（B-02-1，HANDOFF §6.1）。
+    """``litellm_chat`` 适配器（B-02-1 / 检视 M01，HANDOFF §6.1）。
 
-    实现 :class:`core.model_management_types.ChatInferenceAdapter` 结构化协议
-    （无需显式继承）：``invoke_chat`` 薄委托 :meth:`LiteLLMClient.invoke_chat_connection`
-    单连接入口，参数原样透传；组装能力核验（FinBERT 等非聊天适配器不接该协议）
-    由组装方按 adapter_kind 装配承载。真流默认开启（§6.4）。
+    同时满足两个入口协议（新旧入口分别校验、不混协议）：
+    ``invoke_chat`` 薄委托 :meth:`LiteLLMClient.invoke_chat_connection`（聊天回合
+    新入口，:class:`core.model_management_types.ChatInferenceAdapter`）；
+    ``invoke`` 薄委托 :meth:`LiteLLMClient.invoke_single_connection`（旧链单 prompt
+    入口，:class:`core.model_management_types.InferenceAdapter`）。聊天入口只调用
+    ``invoke_chat``，零旧 ``invoke`` 触达。组装能力核验（FinBERT 等非聊天适配器
+    不接聊天协议）由组装方按 adapter_kind 装配承载。真流默认开启（§6.4）。
     """
 
     def __init__(self, client: LiteLLMClient) -> None:
         self._client = client
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        return await self._client.invoke_single_connection(
+            request,
+            resolved_connection,
+            deadline,
+            attempt_context,
+        )
 
     async def invoke_chat(
         self,

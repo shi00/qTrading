@@ -100,7 +100,7 @@ from core.model_management_types import (
     ScenarioExecutionResult,
     TextContentPart,
     adapter_kind_requires_egress,
-    ensure_inference_adapter,
+    ensure_registered_adapter,
 )
 from services.ai_service.connection_pricing import (
     ConnectionPricing,
@@ -116,6 +116,10 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
+
+# 可注册适配器并集（检视 M01）：新旧入口协议分别校验——旧入口要求 ``.invoke``，
+# chat 入口要求 ``.invoke_chat``；组装期只拒绝两者皆缺的对象。
+_EntryAdapter = InferenceAdapter | ChatInferenceAdapter
 
 # 重试退避（秒）：首次 1s、第二次 2s（方案 D7），随 retry_index 指数递增至封顶
 _RETRY_BACKOFF_BASE_S: Final[float] = 1.0
@@ -193,7 +197,7 @@ class ScenarioExecutor:
         config_service: Any,
         recorder: Any,
         compatibility: Any,
-        adapters: Mapping[str, InferenceAdapter],
+        adapters: Mapping[str, _EntryAdapter],
         clock: Callable[[], float] | None = None,
         retry_attempts: int = 1,
         retry_max_attempts: int = 2,
@@ -203,11 +207,12 @@ class ScenarioExecutor:
         self._config_service = config_service
         self._recorder = recorder
         self._compatibility = compatibility
-        # 检视 F02：注入点逐项协议校验——错误形状 adapter 在组装期 TypeError 快速失败，
-        # 而非执行期 adapter.invoke AttributeError 被误判为模型故障重试。
-        self._adapters: dict[str, InferenceAdapter] = {}
+        # 检视 M01：组装期只校验「满足至少一个入口协议」——旧入口（.invoke）与
+        # 新入口（.invoke_chat）由各自执行路径派发前分别复核；错误形状（两者皆缺）
+        # 仍在组装期 TypeError 快速失败，不为测试替身放宽。
+        self._adapters: dict[str, _EntryAdapter] = {}
         for kind, adapter in adapters.items():
-            ensure_inference_adapter(kind, adapter)
+            ensure_registered_adapter(kind, adapter)
             self._adapters[kind] = adapter
         self._clock = clock
         # F19-003：清理预算按 recorder 落账内部超时推导（不得先于落账被掐断）
@@ -310,6 +315,7 @@ class ScenarioExecutor:
             invoke=_legacy_invoke(request),
             finalize=_finalize_legacy,
             on_adapter_failure=None,
+            adapter_check=_legacy_adapter_check,
         )
         result = await self._execute_traversal(identity, snapshot, policy)
         return ScenarioExecutionResult(
@@ -379,7 +385,7 @@ class ScenarioExecutor:
         exposure = _ChatStreamExposure()
 
         async def _invoke_chat(
-            adapter: InferenceAdapter, connection: ResolvedConnection, attempt_context: AttemptContext
+            adapter: _EntryAdapter, connection: ResolvedConnection, attempt_context: AttemptContext
         ) -> ChatTurnResponse:
             # 准入已核 invoke_chat 存在性（_chat_adapter_check）；协议结构化cast
             return await cast(ChatInferenceAdapter, adapter).invoke_chat(
@@ -1711,10 +1717,10 @@ class _AttemptPolicy:
       返回拒绝原因或 None。
     """
 
-    invoke: Callable[[InferenceAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
+    invoke: Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
     finalize: Callable[[Any, _AttemptScope, float], Awaitable[_CandidateOutcome]]
     on_adapter_failure: Callable[[Exception, _AttemptScope], Awaitable[_CandidateOutcome | None]] | None = None
-    adapter_check: Callable[[InferenceAdapter, ResolvedConnection], str | None] | None = None
+    adapter_check: Callable[[_EntryAdapter, ResolvedConnection], str | None] | None = None
 
 
 @dataclass(slots=True)
@@ -1785,7 +1791,7 @@ def _make_tracked_event(
     return _tracked
 
 
-def _chat_adapter_check(adapter: InferenceAdapter, connection: ResolvedConnection) -> str | None:
+def _chat_adapter_check(adapter: _EntryAdapter, connection: ResolvedConnection) -> str | None:
     """chat 入口准入附加检查（HANDOFF §6.1）：非聊天适配器（FinBERT 等）不接
     ChatInferenceAdapter 协议——派发前淘汰（零预留副作用）。"""
     if not callable(getattr(adapter, "invoke_chat", None)):
@@ -1793,16 +1799,23 @@ def _chat_adapter_check(adapter: InferenceAdapter, connection: ResolvedConnectio
     return None
 
 
+def _legacy_adapter_check(adapter: _EntryAdapter, connection: ResolvedConnection) -> str | None:
+    """旧入口准入附加检查（检视 M01）：仅实现聊天协议的适配器不得走旧入口——
+    派发前淘汰（零预留副作用），不以执行期 AttributeError 呈现。"""
+    if not callable(getattr(adapter, "invoke", None)):
+        return f"no legacy invoke adapter for kind {connection.adapter_kind}"
+    return None
+
+
 def _legacy_invoke(
     request: InferenceRequest,
-) -> Callable[[InferenceAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]:
+) -> Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]:
     """旧链适配器调用形态（共享执行段参数化，HANDOFF §6.1）：单 prompt 出口，
-    校验收敛经 ``validate_output``（入口行为不变）。"""
+    校验收敛经 ``validate_output``（入口行为不变）。``.invoke`` 存在性已由
+    :func:`_legacy_adapter_check` 在准入期核验（零预留淘汰）。"""
 
-    async def _invoke(
-        adapter: InferenceAdapter, connection: ResolvedConnection, attempt_context: AttemptContext
-    ) -> Any:
-        return await adapter.invoke(request, connection, request.deadline, attempt_context)
+    async def _invoke(adapter: _EntryAdapter, connection: ResolvedConnection, attempt_context: AttemptContext) -> Any:
+        return await cast(InferenceAdapter, adapter).invoke(request, connection, request.deadline, attempt_context)
 
     return _invoke
 

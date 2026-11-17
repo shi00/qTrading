@@ -277,11 +277,13 @@ class AdapterResponse:
 
 
 class InferenceAdapter(Protocol):
-    """统一推理适配器协议（§6.1，检视 F02）：ScenarioExecutor 消费的唯一适配器形状。
+    """统一推理适配器协议（§6.1，检视 F02）：旧入口（单 prompt）适配器形状。
 
     结构化协议（无需显式继承）：组装方（app 组合根 / 测试替身）只需提供带
-    ``invoke`` 方法的对象即可；注册裸函数为适配器即违反本协议，由
-    :func:`ensure_inference_adapter` 在组装期拒绝（而非执行期 AttributeError）。
+    ``invoke`` 方法的对象即可；聊天入口使用并列的 :class:`ChatInferenceAdapter`
+    （``invoke_chat``），两协议分别校验（检视 M01）。组装期由
+    :func:`ensure_registered_adapter` 只拒绝两者皆缺的对象，旧入口派发前由
+    :func:`ensure_inference_adapter` 复核（而非执行期 AttributeError）。
     """
 
     async def invoke(
@@ -294,10 +296,10 @@ class InferenceAdapter(Protocol):
 
 
 def ensure_inference_adapter(kind: str, adapter: object) -> None:
-    """组装期协议校验（检视 F02）：``adapter`` 缺可调用 ``.invoke`` 即 TypeError。
+    """旧入口协议校验（检视 F02）：``adapter`` 缺可调用 ``.invoke`` 即 TypeError。
 
-    供适配器工厂（bootstrap 组合根）与 ScenarioExecutor 注入点共用同一校验语义，
-    杜绝「函数 / 对象」两种隐式调用规则并存。
+    供旧入口（单 prompt 推理）在派发前校验；聊天入口使用 ``.invoke_chat``，
+    两入口协议分别校验、不互相混用（检视 M01）。
 
     Raises:
         TypeError: 适配器不满足 :class:`InferenceAdapter` 协议。
@@ -306,6 +308,28 @@ def ensure_inference_adapter(kind: str, adapter: object) -> None:
         raise TypeError(
             f"adapter for kind {kind!r} violates InferenceAdapter protocol "
             f"(missing callable .invoke): {type(adapter).__name__}"
+        )
+
+
+def ensure_registered_adapter(kind: str, adapter: object) -> None:
+    """组装期注册校验（检视 M01）：满足任一入口协议即可注册，两协议皆缺即 TypeError。
+
+    新旧入口协议分别校验：旧入口（:class:`InferenceAdapter`，``.invoke``）与新
+    入口（:class:`ChatInferenceAdapter`，``.invoke_chat``）由各自执行路径在派发前
+    复核（零预留副作用淘汰不具备该入口协议的适配器）。组装期只拒绝两种协议都
+    不满足的对象，避免「聊天适配器只有 invoke_chat」被旧协议校验误杀，也避免
+    错误形状对象流入执行期 AttributeError。
+
+    Raises:
+        TypeError: 适配器既不满足 :class:`InferenceAdapter` 也不满足
+            :class:`ChatInferenceAdapter` 协议。
+    """
+    has_legacy_invoke = callable(getattr(adapter, "invoke", None))
+    has_chat_invoke = callable(getattr(adapter, "invoke_chat", None))
+    if not (has_legacy_invoke or has_chat_invoke):
+        raise TypeError(
+            f"adapter for kind {kind!r} violates adapter protocol "
+            f"(missing callable .invoke / .invoke_chat): {type(adapter).__name__}"
         )
 
 

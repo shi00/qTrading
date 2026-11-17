@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import logging
 import os
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
@@ -17,13 +18,22 @@ from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.scheduler_service import SchedulerService
 from core.i18n import I18n
-from core.model_management_types import InferenceAdapter, ensure_inference_adapter
+from core.model_management_types import InferenceAdapter, ensure_registered_adapter
 
 # review01-A3: EmbeddedPgStartupScenario 下沉到 core.startup_types（纯类型），此处 re-export 兼容旧引用
 from core.startup_types import EmbeddedPgStartupScenario
 
 if TYPE_CHECKING:
-    from core.model_management_types import AdapterResponse, AttemptContext, InferenceRequest, ResolvedConnection
+    from core.model_management_types import (
+        AdapterResponse,
+        AttemptContext,
+        ChatStreamEventHandler,
+        ChatTurnRequest,
+        ChatTurnResponse,
+        InferenceRequest,
+        ResolvedConnection,
+    )
+    from services.ai_service.litellm_client import LiteLLMChatAdapter
     from utils.config_models import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -57,7 +67,18 @@ def _ai_usage_dao_provider() -> Any:
 
 
 class _LiteLLMChatAdapter:
-    """``litellm_chat`` 适配器（D7）：薄委托 AIService 单连接入口，惰性解析单例。"""
+    """``litellm_chat`` 适配器（D7 / 检视 M01）：薄委托真实
+    :class:`services.ai_service.litellm_client.LiteLLMChatAdapter`，惰性解析单例。
+
+    同时暴露旧入口 ``invoke``（单 prompt）与聊天入口 ``invoke_chat``（完整回合）；
+    聊天入口只触达 ``invoke_chat``，零旧 ``invoke``——两协议分别校验、不混用。
+    """
+
+    def _adapter(self) -> LiteLLMChatAdapter:
+        from services.ai_service import AIService
+        from services.ai_service.litellm_client import LiteLLMChatAdapter
+
+        return LiteLLMChatAdapter(AIService()._litellm)
 
     async def invoke(
         self,
@@ -66,10 +87,27 @@ class _LiteLLMChatAdapter:
         deadline: float,
         attempt_context: AttemptContext,
     ) -> AdapterResponse:
-        from services.ai_service import AIService
+        return await self._adapter().invoke(request, resolved_connection, deadline, attempt_context)
 
-        return await AIService()._litellm.invoke_single_connection(
-            request, resolved_connection, deadline, attempt_context
+    async def invoke_chat(
+        self,
+        request: ChatTurnRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+        *,
+        stream: bool = True,
+        response_format: Mapping[str, Any] | None = None,
+        on_event: ChatStreamEventHandler | None = None,
+    ) -> ChatTurnResponse:
+        return await self._adapter().invoke_chat(
+            request,
+            resolved_connection,
+            deadline,
+            attempt_context,
+            stream=stream,
+            response_format=response_format,
+            on_event=on_event,
         )
 
 
@@ -110,11 +148,13 @@ class _GGUFSentimentAdapter:
 
 
 def _build_default_adapters() -> dict[str, InferenceAdapter]:
-    """适配器协议注入（D7）：litellm 单连接 / 本地 GGUF 统一 invoke（检视 F02）。
+    """适配器协议注入（D7 / 检视 M01）：litellm / 本地 GGUF 按入口协议组装。
 
-    统一为 :class:`InferenceAdapter` 对象协议（可调用 ``.invoke``），组装边界逐项
-    校验——不再存在「函数 / 对象」两种隐式调用规则并存，错误形状在组装期
-    TypeError 快速失败，而非执行期 AttributeError 被误判为模型故障重试。
+    组装期只校验「满足至少一个入口协议」（旧入口 ``.invoke`` / 聊天入口
+    ``.invoke_chat``，见 :func:`core.model_management_types.ensure_registered_adapter`），
+    由各执行路径派发前分别复核；两者皆缺的错误形状仍在组装期 TypeError 快速
+    失败，而非执行期 AttributeError 被误判为模型故障重试。``litellm_chat`` 同时
+    暴露两协议（聊天入口零旧 ``invoke`` 触达）。
     """
     adapters: dict[str, InferenceAdapter] = {
         "litellm_chat": _LiteLLMChatAdapter(),
@@ -122,7 +162,7 @@ def _build_default_adapters() -> dict[str, InferenceAdapter]:
         "gguf_sentiment": _GGUFSentimentAdapter(),
     }
     for kind, adapter in adapters.items():
-        ensure_inference_adapter(kind, adapter)
+        ensure_registered_adapter(kind, adapter)
     return adapters
 
 
