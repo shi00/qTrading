@@ -40,6 +40,21 @@ class _FakeClient:
         return False
 
 
+class _RetryClient:
+    """首次退出失败、后续成功：用于验证失败后不把会话标记为已关闭。"""
+
+    def __init__(self, *, failures: int) -> None:
+        self.failures = failures
+        self.exit_calls = 0
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self.exit_calls += 1
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("client close failed")
+        return False
+
+
 def _profile() -> MCPBudgetProfile:
     return MCPBudgetProfile(
         receive_bytes=10_000,
@@ -62,7 +77,7 @@ def _config() -> MCPServerConfig:
     )
 
 
-def _session(drain: _SanitizedStderrDrain, client: _FakeClient) -> FastMCPSession:
+def _session(drain: _SanitizedStderrDrain, client: Any) -> FastMCPSession:
     return FastMCPSession(
         cast(Any, client),
         config=_config(),
@@ -127,6 +142,21 @@ class TestSessionStderrLifecycle:
         assert "shutdown" in session.diagnostics.stderr_tail
         assert _SECRET not in session.diagnostics.stderr_tail
         assert drain.retained_bytes == 0
+
+    async def test_failed_close_is_retried_instead_of_reporting_closed(self) -> None:
+        drain = _SanitizedStderrDrain()
+        client = _RetryClient(failures=1)
+        session = _session(drain, client)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await session.aclose()
+        assert "client close failed" in str(excinfo.value)
+        assert client.exit_calls == 1
+
+        await session.aclose()
+        assert client.exit_calls == 2  # 失败后未标记已关闭，重试真正退出
+        await session.aclose()
+        assert client.exit_calls == 2  # 确认退出后才短路
 
     async def test_close_failure_still_sanitizes_and_clears_runtime_retention(self) -> None:
         drain = _SanitizedStderrDrain()

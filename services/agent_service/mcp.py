@@ -217,6 +217,10 @@ class SharedMCPConnectionManager:
         self._in_flight: dict[str, set[str]] = {}
         #: 同一身份/版本的启连只 open 一次；其余调用者等待并共享该结果。
         self._connecting: dict[str, asyncio.Task[None]] = {}
+        #: 关闭未确认的会话句柄（closing/unknown）：实际退出后才移除，不得先丢后关（I17）。
+        self._closing: dict[str, list[MCPClientSessionPort]] = {}
+        #: 同一身份的关闭 single-flight：并发断开/重连不会对同一句柄重复关闭。
+        self._closing_tasks: dict[str, asyncio.Task[None]] = {}
         #: 连接 owner 在启连时冻结的发现目录与连接代次（单调递增，不复用）。
         self._catalogs: dict[str, tuple[MCPToolDescriptor, ...]] = {}
         self._generations: dict[str, int] = {}
@@ -277,12 +281,14 @@ class SharedMCPConnectionManager:
         按身份/版本 single-flight：同一 key 的并发调用共享同一次准入/open/发现，
         实际 open 与存活 owner 各至多 1；单个调用者被取消不中断他人的等待。
         启连时由连接 owner 完成一次发现并冻结目录；发现失败不登记连接（关闭会话）。
+        重连前必须先确认上次关闭已实际退出，未确认则重试关闭，仍失败即显式拒绝（I17）。
         """
 
         label = _identity_text(identity)
         key = label
         if key in self._sessions:
             return
+        await self._confirm_previous_close(label)
         pending = self._connecting.get(key)
         if pending is None:
             pending = asyncio.create_task(self._open_shared(identity, label))
@@ -319,10 +325,10 @@ class SharedMCPConnectionManager:
         try:
             tools = await session.list_tools(deadline_s=config.connect_deadline_s)
         except BaseException:
-            await session.aclose()
+            await self._close_quietly(label, session)
             raise
         if label in self._sessions:  # 已有 owner：回收本次 client，绝不覆盖
-            await session.aclose()
+            await self._close_quietly(label, session)
             return
         self._sessions[label] = session
         self._configs[label] = config
@@ -332,19 +338,17 @@ class SharedMCPConnectionManager:
         self._generations[label] = self._generation_seq
 
     async def disconnect(self, identity: MCPServiceIdentity) -> None:
-        """显式断开：有在途调用默认拒停（用户先暂停并核实际退出）。"""
+        """显式断开：有在途调用默认拒停；句柄只在确认退出后移除（失败/取消保留待重试）。"""
 
         label = _identity_text(identity)
         if self._in_flight.get(label):
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "connection still has in-flight operations", label)
-        session = self._sessions.pop(label, None)
-        if session is not None:
-            await session.aclose()
-        self._configs.pop(label, None)
-        self._guards.pop(label, None)
         self._in_flight.pop(label, None)
-        self._catalogs.pop(label, None)
-        self._generations.pop(label, None)
+        session = self._sessions.pop(label, None)
+        self._forget_connection_state(label)
+        if session is not None:
+            self._track_closing(label, session)
+        await self._request_close(label)
 
     def is_connected(self, identity: MCPServiceIdentity) -> bool:
         return _identity_text(identity) in self._sessions
@@ -399,15 +403,15 @@ class SharedMCPConnectionManager:
             raise AgentServiceError(AgentErrorCode.CONFIG_UNAVAILABLE, "mcp connection is not established", label)
         return config.audit.tool_scope
 
-    def mark_session_lost(self, identity: MCPServiceIdentity) -> None:
-        """断线明示：移除会话，不自动重连/重启。"""
+    async def mark_session_lost(self, identity: MCPServiceIdentity) -> None:
+        """断线明示：保留真实句柄并尝试关闭，不自动重连/重启；关闭未确认则保留待上报。"""
 
         label = _identity_text(identity)
-        self._sessions.pop(label, None)
-        self._configs.pop(label, None)
-        self._guards.pop(label, None)
-        self._catalogs.pop(label, None)
-        self._generations.pop(label, None)
+        session = self._sessions.pop(label, None)
+        self._forget_connection_state(label)
+        if session is not None:
+            self._track_closing(label, session)
+        await self._request_close(label)
 
     # -- 在途归属 -----------------------------------------------------------
 
@@ -429,6 +433,82 @@ class SharedMCPConnectionManager:
         return tuple(sorted(self._in_flight.get(_identity_text(identity), set())))
 
     # -- 内部 ---------------------------------------------------------------
+
+    def _forget_connection_state(self, label: str) -> None:
+        """连接不再可用：清 config/guard/catalog/generation；会话句柄另行保留。"""
+
+        self._configs.pop(label, None)
+        self._guards.pop(label, None)
+        self._catalogs.pop(label, None)
+        self._generations.pop(label, None)
+
+    def _track_closing(self, label: str, session: MCPClientSessionPort) -> None:
+        """登记关闭未确认句柄（closing/unknown）：保留准确引用直到实际退出。"""
+
+        handles = self._closing.setdefault(label, [])
+        if not any(handle is session for handle in handles):
+            handles.append(session)
+
+    async def _request_close(self, label: str) -> None:
+        """关闭 single-flight：同一身份只跑一次关闭；失败保留句柄，等待者共享异常。"""
+
+        if not self._closing.get(label):
+            return
+        pending = self._closing_tasks.get(label)
+        if pending is None:
+            pending = asyncio.create_task(self._close_tracked(label))
+            self._closing_tasks[label] = pending
+
+            def _finish(task: asyncio.Task[None]) -> None:
+                if self._closing_tasks.get(label) is task:
+                    self._closing_tasks.pop(label, None)
+                if not task.cancelled():
+                    task.exception()  # 消费异常，避免无人等待时告警；等待者仍会收到该异常。
+
+            pending.add_done_callback(_finish)
+        await asyncio.shield(pending)
+
+    async def _close_tracked(self, label: str) -> None:
+        """逐个关闭已登记句柄，仅实际退出成功后移除；失败/取消保留其余句柄。"""
+
+        while True:
+            handles = self._closing.get(label)
+            if not handles:
+                self._closing.pop(label, None)
+                return
+            session = handles[0]
+            await session.aclose()
+            remaining = self._closing.get(label)
+            if remaining is not None:
+                remaining[:] = [handle for handle in remaining if handle is not session]
+
+    async def _close_quietly(self, label: str, session: MCPClientSessionPort) -> None:
+        """关闭不登记会话；失败时保留句柄，交由重连前确认/上报（不伪装已关闭）。"""
+
+        self._track_closing(label, session)
+        try:
+            await self._request_close(label)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 句柄仍在 _closing：下一次 connect 必须先确认退出，否则显式拒绝（I17/R21）。
+            return
+
+    async def _confirm_previous_close(self, label: str) -> None:
+        """启连前确认上次关闭已实际退出；未确认则重试关闭，仍失败即显式拒绝（I17/R21）。"""
+
+        if not self._closing.get(label):
+            return
+        try:
+            await self._request_close(label)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "previous mcp session close is unconfirmed",
+                label,
+            ) from exc
 
     async def _require_config(self, identity: MCPServiceIdentity) -> MCPServerConfig:
         label = _identity_text(identity)
