@@ -1,8 +1,13 @@
 """清理执行编排（E-06-3b / 详细设计 §10.7）。
 
 流程冻结：确认（原预览/修订 + 准入 + fence）→ 首次预检（查不到不是已清）→
-公开系统删除 + Datasource DML + 九域查回 → 应用域 NOT NULL tombstone →
-九域全 0 才 ``verified``；任一步失败保留原集合转 ``retry_pending``。
+落删除尝试阶段 → 公开系统删除 + Datasource DML + 九域查回 → 落 tombstone
+待办阶段 → 应用域 NOT NULL tombstone → 九域全 0 才 ``verified``；任一步失败
+保留原集合转 ``retry_pending``。
+
+尝试阶段在副作用前落库（M14）：删除完成到 ``tombstone/verified`` 之间取消、
+硬崩或服务异常时，下一次重试据此识别「已尝试删除」并沿原 job 收尾，不把
+已删净的主键域误判为首次缺失。
 
 不做：递归扩集合、绕过 fence 删除、把「查不到」当「已清除」、把缺失计数当 0。
 """
@@ -11,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
 
 from core.agent_types import (
     AgentErrorCode,
@@ -27,8 +32,20 @@ from services.agent_service.cleanup import (
 )
 from services.agent_service.cleanup_native import NativeCleanupResult, NativePreflight
 
-_RETRY_AFTER_DELETION_CATEGORIES: frozenset[str] = frozenset({"cleanup_execution_failed", "native_rows_remaining"})
-# 上次失败发生在删除尝试之后 → §10.7 允许重试时原生行已缺失。
+#: 删除副作用前落库的准确尝试阶段（持久化于既有 ``error_category`` 列，无 schema 变更）：
+#: 「两主键域删除尝试已开始」→「原生两域已删净、待应用域 tombstone」。
+_DELETE_STARTED_STAGE: Final = "cleanup_native_delete_started"
+_TOMBSTONE_PENDING_STAGE: Final = "cleanup_native_deleted_tombstone_pending"
+
+_RETRY_AFTER_DELETION_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "cleanup_execution_failed",
+        "native_rows_remaining",
+        _DELETE_STARTED_STAGE,
+        _TOMBSTONE_PENDING_STAGE,
+    }
+)
+# 上次失败/中断发生在删除尝试之后 → §10.7 允许重试时原生行已缺失。
 
 
 class NativeCleanupPort(Protocol):
@@ -52,6 +69,14 @@ class CleanupExecutionDaoPort(Protocol):
         complete: bool = False,
         error_category: str | None = None,
         sqlstate: str | None = None,
+    ) -> None: ...
+
+    async def save_cleanup_attempt_stage(
+        self,
+        user_scope: str,
+        cleanup_job_id: str,
+        *,
+        stage: str,
     ) -> None: ...
 
     async def tombstone_cleanup_text(
@@ -105,9 +130,9 @@ class CleanupExecutionService:
             preflight = await self._executor.preflight(record.exact_ids)
             if preflight.missing_ids:
                 # §10.7：只有「已有可靠 prepared 且 fence 持续」的**重试**允许原生行已缺失。
-                # 判据是上次失败发生在删除尝试之后（cleanup_execution_failed / rows_remaining）；
-                # 预检阶段缺失（native_target_missing）与首次确认一律拒绝，不以「查不到」
-                # 冒充「已清理」。
+                # 判据是上次失败/中断发生在删除尝试之后（cleanup_execution_failed /
+                # rows_remaining / 已落库的删除尝试阶段）；预检阶段缺失
+                # （native_target_missing）与首次确认一律拒绝，不以「查不到」冒充「已清理」。
                 retry_after_prepared = (
                     record.fence_committed
                     and bool(record.exact_ids)
@@ -123,6 +148,14 @@ class CleanupExecutionService:
             # cleanup_preflight_failed，绝不并入 cleanup_execution_failed。
             await self._mark_retry(record.user_scope, record.cleanup_job_id, "cleanup_preflight_failed", exc)
             raise
+
+        # 副作用前先落「删除尝试已开始」阶段（M14）：两主键域（公开系统 + Datasource）
+        # 尚未删除，下一步是删除并逐域查回。此后取消/硬崩/服务异常，重试据既有
+        # 阶段沿原 job 收尾，不把已删净的主键域误判为首次缺失。写入失败即中止：
+        # 本次未删除任何行，保留原阶段与类别，不冒充「已尝试删除」。
+        await self._dao.save_cleanup_attempt_stage(
+            record.user_scope, record.cleanup_job_id, stage=_DELETE_STARTED_STAGE
+        )
 
         try:
             deletion = await self._executor.delete(record.exact_ids)
@@ -146,6 +179,12 @@ class CleanupExecutionService:
                     deletion.verified_counts,
                     {},
                 )
+            # 原生两主键域已删净（九域查回全 0），下一步只剩应用域 tombstone 与
+            # verified。先落该阶段：删除完成到 tombstone/verified 之间取消/崩溃后，
+            # 重试仍能识别「删除已完成」并沿原 job 收尾。
+            await self._dao.save_cleanup_attempt_stage(
+                record.user_scope, record.cleanup_job_id, stage=_TOMBSTONE_PENDING_STAGE
+            )
             tombstoned = await self._dao.tombstone_cleanup_text(
                 record.user_scope,
                 session_ids=record.session_ids,
