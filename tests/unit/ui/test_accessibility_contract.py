@@ -94,8 +94,33 @@ def _is_call_named(node: ast.AST, attr_name: str) -> bool:
     return isinstance(func, ast.Name) and func.id == attr_name
 
 
+def _is_statically_empty_name(node: ast.AST) -> bool:
+    """检测可访问名称表达式是否**静态可确定为空**.
+
+    仅识别可确定的空值, 避免对动态表达式误报:
+    - ``None`` 常量
+    - 空串 / 纯空白字符串常量
+    - 不含占位符的空 f-string (如 ``f""`` / ``f"   "``)
+
+    变量引用 / 函数调用 (如 ``I18n.get(...)``) / 含占位符的 f-string /
+    条件表达式等动态值无法静态确认, 返回 False (保守放行).
+    """
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return True
+        return isinstance(node.value, str) and not node.value.strip()
+    if isinstance(node, ast.JoinedStr):
+        if any(isinstance(value, ast.FormattedValue) for value in node.values):
+            return False
+        joined = "".join(
+            value.value for value in node.values if isinstance(value, ast.Constant) and isinstance(value.value, str)
+        )
+        return not joined.strip()
+    return False
+
+
 class _IconButtonVisitor(ast.NodeVisitor):
-    """扫描 ft.IconButton(...) 调用, 检查是否含 tooltip= 关键字参数."""
+    """扫描 ft.IconButton(...) 调用, 检查 tooltip= 是否为有效非空名称."""
 
     def __init__(self) -> None:
         self.violations: list[AccessibilityViolation] = []
@@ -113,14 +138,24 @@ class _IconButtonVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, "IconButton"):
-            has_tooltip = any(kw.arg == "tooltip" for kw in node.keywords)
-            if not has_tooltip:
+            tooltip_kw = next((kw for kw in node.keywords if kw.arg == "tooltip"), None)
+            if tooltip_kw is None:
                 self.violations.append(
                     AccessibilityViolation(
                         file="",  # 由调用方填充
                         line=node.lineno,
                         violation_type="missing_tooltip",
                         detail=f"ft.IconButton(...) at line {node.lineno} 缺 tooltip 参数",
+                        func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
+                    )
+                )
+            elif _is_statically_empty_name(tooltip_kw.value):
+                self.violations.append(
+                    AccessibilityViolation(
+                        file="",  # 由调用方填充
+                        line=node.lineno,
+                        violation_type="missing_tooltip",
+                        detail=f"ft.IconButton(...) at line {node.lineno} tooltip 为空值",
                         func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
                     )
                 )
@@ -147,7 +182,7 @@ class _AlertDialogVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, "AlertDialog"):
             func_name = self._func_stack[-1] if self._func_stack else "<MODULE>"
-            # title 检查: 关键字必须存在且非空 Container
+            # title 检查: 关键字必须存在, 且非静态空值 / 非空 Container
             title_kw = next((kw for kw in node.keywords if kw.arg == "title"), None)
             if title_kw is None:
                 self.violations.append(
@@ -156,6 +191,16 @@ class _AlertDialogVisitor(ast.NodeVisitor):
                         line=node.lineno,
                         violation_type="missing_title",
                         detail=f"ft.AlertDialog(...) at line {node.lineno} 缺 title 参数",
+                        func_name=func_name,
+                    )
+                )
+            elif _is_statically_empty_name(title_kw.value):
+                self.violations.append(
+                    AccessibilityViolation(
+                        file="",
+                        line=node.lineno,
+                        violation_type="missing_title",
+                        detail=f"ft.AlertDialog(...) at line {node.lineno} title 为空值",
                         func_name=func_name,
                     )
                 )
@@ -253,11 +298,12 @@ class _AlertDialogVisitor(ast.NodeVisitor):
 
 
 class _KeywordPresenceVisitor(ast.NodeVisitor):
-    """扫描指定控件调用, 检查语义名称关键字参数是否至少存在一个 (F08).
+    """扫描指定控件调用, 检查语义名称关键字参数是否至少有一个非空值 (F08).
 
     用于 TextField (label/tooltip) 与 Checkbox (label/semantics_label/tooltip)
     的可访问名称契约: hint_text/placeholder 不被屏幕阅读器视为标签, 控件自身
-    必须携带可访问名称. func_name 栈语义与 _IconButtonVisitor 一致.
+    必须携带可访问名称; 显式 None / 空串 / 纯空白不算有效名称. func_name 栈
+    语义与 _IconButtonVisitor 一致.
     """
 
     def __init__(self, control_name: str, accepted_kwargs: tuple[str, ...]) -> None:
@@ -278,15 +324,21 @@ class _KeywordPresenceVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         if _is_call_named(node, self.control_name):
-            has_name = any(kw.arg in self.accepted_kwargs for kw in node.keywords)
+            name_kwargs = [kw for kw in node.keywords if kw.arg in self.accepted_kwargs]
+            has_name = any(not _is_statically_empty_name(kw.value) for kw in name_kwargs)
             if not has_name:
                 kwargs_desc = "/".join(self.accepted_kwargs)
+                if name_kwargs:
+                    empty_desc = "/".join(kw.arg for kw in name_kwargs if kw.arg is not None)
+                    detail = f"ft.{self.control_name}(...) at line {node.lineno} {empty_desc} 为空值"
+                else:
+                    detail = f"ft.{self.control_name}(...) at line {node.lineno} 缺 {kwargs_desc} 参数"
                 self.violations.append(
                     AccessibilityViolation(
                         file="",  # 由调用方填充
                         line=node.lineno,
                         violation_type="missing_label",
-                        detail=f"ft.{self.control_name}(...) at line {node.lineno} 缺 {kwargs_desc} 参数",
+                        detail=detail,
                         func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
                     )
                 )
@@ -298,18 +350,32 @@ class _KeywordPresenceVisitor(ast.NodeVisitor):
 # ============================================================================
 
 
+class AccessibilityScanError(RuntimeError):
+    """扫描失败 (读取/解析错误), 绝不折算为 "零违规" (D21-UIB-003)."""
+
+
 def _collect_ui_python_files() -> list[Path]:
     """收集 ui/ 目录下所有 .py 文件 (递归, 排除 __init__.py)."""
     return sorted(p for p in UI_DIR.rglob("*.py") if p.name != "__init__.py")
 
 
 def _scan_file(path: Path) -> list[AccessibilityViolation]:
-    """扫描单个文件, 返回所有违规记录 (含 file 字段)."""
-    raw = path.read_text(encoding="utf-8")
+    """扫描单个文件, 返回所有违规记录 (含 file 字段).
+
+    fail closed: 读取或解析失败抛出 ``AccessibilityScanError``, 携带相对路径与定位信息,
+    使 "未被检查" 与 "检查通过且零违规" 可区分. 其余异常不吞没.
+    """
+    rel = path.relative_to(UI_DIR).as_posix()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        msg = f"{rel}: 无法读取源码 ({type(exc).__name__}); 可访问性契约未检查"
+        raise AccessibilityScanError(msg) from exc
     try:
         tree = ast.parse(raw, filename=str(path))
-    except SyntaxError:
-        return []
+    except SyntaxError as exc:
+        msg = f"{rel}:{exc.lineno}:{exc.offset}: SyntaxError ({exc.msg}); 可访问性契约未检查"
+        raise AccessibilityScanError(msg) from exc
     icon_v = _IconButtonVisitor()
     dialog_v = _AlertDialogVisitor()
     text_v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
@@ -318,17 +384,32 @@ def _scan_file(path: Path) -> list[AccessibilityViolation]:
     dialog_v.visit(tree)
     text_v.visit(tree)
     checkbox_v.visit(tree)
-    rel = str(path.relative_to(UI_DIR)).replace("\\", "/")
     for v in icon_v.violations + dialog_v.violations + text_v.violations + checkbox_v.violations:
         v.file = rel
     return icon_v.violations + dialog_v.violations + text_v.violations + checkbox_v.violations
 
 
 def _scan_all() -> list[AccessibilityViolation]:
-    """扫描 ui/ 下所有 .py 文件, 聚合违规记录."""
+    """扫描 ui/ 下所有 .py 文件, 聚合违规记录.
+
+    fail closed: 空扫描根或任一文件扫描失败时抛出 ``AccessibilityScanError``,
+    不返回部分结果, 也不把失败折算为零违规.
+    """
+    if not UI_DIR.is_dir():
+        raise AccessibilityScanError(f"扫描根不存在: {UI_DIR}; 可访问性契约未检查")
+    paths = _collect_ui_python_files()
+    if not paths:
+        raise AccessibilityScanError(f"扫描根下无可扫描 .py 文件: {UI_DIR}; 可访问性契约未检查")
     result: list[AccessibilityViolation] = []
-    for path in _collect_ui_python_files():
-        result.extend(_scan_file(path))
+    errors: list[AccessibilityScanError] = []
+    for path in paths:
+        try:
+            result.extend(_scan_file(path))
+        except AccessibilityScanError as exc:
+            errors.append(exc)
+    if errors:
+        message = f"{len(errors)} 个文件扫描失败, 可访问性契约未检查:\n" + "\n".join(f"  {e}" for e in errors)
+        raise AccessibilityScanError(message) from errors[0]
     return result
 
 
@@ -632,6 +713,118 @@ dlg = ft.AlertDialog(
         assert len(v.violations) == 1
 
 
+class TestEmptyAccessibleName:
+    """显式空名称不算有效可访问名称 (D21-UIB-002).
+
+    仅静态可确定为空的值 (None / 空串 / 纯空白 / 无占位符空 f-string) 判违规;
+    变量、I18n 调用、含占位符 f-string、条件表达式等动态值保守放行.
+    """
+
+    @pytest.mark.parametrize("empty_value", ["None", "''", "'   '", 'f""', 'f"   "'])
+    def test_iconbutton_rejects_static_empty_tooltip(self, empty_value):
+        """IconButton 的 tooltip=None/空串/空白/空 f-string 均判违规."""
+        source = f"import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD, tooltip={empty_value})\n"
+        tree = ast.parse(source)
+        v = _IconButtonVisitor()
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_tooltip"
+        assert v.violations[0].line == 2
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        ["label=None", "label=''", "label='   '", "tooltip=' '", 'tooltip=f""'],
+    )
+    def test_textfield_rejects_static_empty_name(self, kwargs):
+        """TextField 唯一的名称参数为静态空值时判违规."""
+        source = f"import flet as ft\nx = ft.TextField({kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_label"
+        assert v.violations[0].line == 2
+        assert "为空值" in v.violations[0].detail
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        ["label=None", "semantics_label=''", "tooltip='   '", "semantics_label=f''"],
+    )
+    def test_checkbox_rejects_static_empty_name(self, kwargs):
+        """Checkbox 唯一的名称参数为静态空值时判违规."""
+        source = f"import flet as ft\nx = ft.Checkbox(value=False, {kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("Checkbox", ("label", "semantics_label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_label"
+        assert v.violations[0].line == 2
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            "label=None, tooltip='search'",
+            "label='', tooltip='search'",
+            "label='search', tooltip='   '",
+        ],
+    )
+    def test_one_valid_name_is_enough(self, kwargs):
+        """任一名称参数非空即满足门禁 (混有空值与有效值不误报)."""
+        source = f"import flet as ft\nx = ft.TextField({kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 0
+
+    @pytest.mark.parametrize("empty_value", ["None", "''", "'   '", 'f""'])
+    def test_alertdialog_rejects_static_empty_title(self, empty_value):
+        """AlertDialog 的 title 为静态空值时判 missing_title."""
+        source = f"import flet as ft\ndlg = ft.AlertDialog(title={empty_value}, actions=[])\n"
+        tree = ast.parse(source)
+        v = _AlertDialogVisitor()
+        v.visit(tree)
+        title_violations = [x for x in v.violations if x.violation_type == "missing_title"]
+        assert len(title_violations) == 1
+        assert title_violations[0].line == 2
+        assert "为空值" in title_violations[0].detail
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            "tooltip=I18n.get('common_search')",
+            "tooltip=dynamic_tooltip",
+            "tooltip=f'{label_text}'",
+            "label='' if condition else 'fallback'",
+        ],
+    )
+    def test_dynamic_name_not_reported(self, kwargs):
+        """动态名称表达式无法静态确认, 保守放行 (不误报)."""
+        source = f"import flet as ft\nx = ft.TextField({kwargs})\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 0
+
+    def test_dynamic_tooltip_not_reported(self):
+        """IconButton 的动态 tooltip (函数调用 / 变量) 保守放行."""
+        for kwargs in ("tooltip=I18n.get('common_add')", "tooltip=tooltip_text"):
+            source = f"import flet as ft\nx = ft.IconButton({kwargs})\n"
+            tree = ast.parse(source)
+            v = _IconButtonVisitor()
+            v.visit(tree)
+            assert len(v.violations) == 0
+
+    def test_dynamic_alertdialog_title_not_reported(self):
+        """AlertDialog 的动态 title (I18n / 调用 / 条件表达式) 保守放行."""
+        for title in ("I18n.get('title')", "build_title()", "'a' if flag else 'b'"):
+            source = f"import flet as ft\ndlg = ft.AlertDialog(title={title}, actions=[])\n"
+            tree = ast.parse(source)
+            v = _AlertDialogVisitor()
+            v.visit(tree)
+            title_violations = [x for x in v.violations if x.violation_type == "missing_title"]
+            assert len(title_violations) == 0
+
+
 class TestFuncNameResolution:
     """func_name 跟踪机制对抗性测试.
 
@@ -749,3 +942,128 @@ def _build_upgrade_in_progress_dialog():
             if x.violation_type == "missing_close" and (x.file, x.func_name, x.violation_type) not in ALLOWED_VIOLATIONS
         ]
         assert len(close_violations) == 0, "白名单应按 func_name 豁免, 不受行号偏移影响"
+
+
+# ============================================================================
+# 测试: 扫描失败必须 fail closed (D21-UIB-003)
+# ============================================================================
+
+
+class TestScannerFailClosed:
+    """解析/读取失败不得折算为零违规, 必须显式失败."""
+
+    @staticmethod
+    def _isolate_scan_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """把扫描根指向受控临时目录, 隔离真实 ui/."""
+        root = tmp_path / "ui"
+        root.mkdir()
+        monkeypatch.setitem(globals(), "UI_DIR", root)
+        return root
+
+    def test_syntax_error_fails_scan_with_path_and_line(self, tmp_path, monkeypatch):
+        """坏源码必须使扫描失败, 并定位到相对路径与行号."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "broken.py").write_text("import flet as ft\ndef broken(:\n    pass\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        message = str(excinfo.value)
+        assert "broken.py" in message
+        assert ":2:" in message
+        assert "未检查" in message
+
+    def test_scan_file_preserves_syntax_error_cause(self, tmp_path, monkeypatch):
+        """单文件扫描直接抛错并保留 SyntaxError 作为 cause (定位到行/列)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        broken = root / "broken.py"
+        broken.write_text("x = (\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_file(broken)
+
+        assert "broken.py:1:" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, SyntaxError)
+
+    def test_all_parse_errors_are_reported(self, tmp_path, monkeypatch):
+        """聚合全部解析失败, 不只报告第一个坏文件."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "broken_a.py").write_text("x = (\n", encoding="utf-8")
+        (root / "broken_b.py").write_text("y = )\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        message = str(excinfo.value)
+        assert "broken_a.py" in message
+        assert "broken_b.py" in message
+        assert "2 个文件扫描失败" in message
+
+    def test_parse_error_not_masked_by_other_violations(self, tmp_path, monkeypatch):
+        """存在真实违规文件时, 坏源码仍必须使扫描整体失败 (不返回部分结果)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "app.py").write_text("import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD)\n", encoding="utf-8")
+        (root / "broken.py").write_text("x = (\n", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+        assert "broken.py" in str(excinfo.value)
+
+    def test_clean_file_returns_no_violations(self, tmp_path, monkeypatch):
+        """合法零违规文件返回空集合 (与 "未检查" 区分)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "clean.py").write_text(
+            "import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD, tooltip='add')\n", encoding="utf-8"
+        )
+
+        assert _scan_all() == []
+
+    def test_empty_file_is_clean(self, tmp_path, monkeypatch):
+        """空文件可正常解析, 视为零违规而非扫描失败."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "empty.py").write_text("", encoding="utf-8")
+
+        assert _scan_all() == []
+
+    def test_violation_still_reported_after_refactor(self, tmp_path, monkeypatch):
+        """正常扫描路径保留违规记录 (含相对路径)."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "app.py").write_text("import flet as ft\nx = ft.IconButton(icon=ft.Icons.ADD)\n", encoding="utf-8")
+
+        violations = _scan_all()
+
+        assert len(violations) == 1
+        assert violations[0].file == "app.py"
+        assert violations[0].violation_type == "missing_tooltip"
+        assert violations[0].line == 2
+
+    def test_undecodable_file_fails_closed(self, tmp_path, monkeypatch):
+        """非 UTF-8 文件必须失败并给出文件路径, 不得折算为零违规."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        latin1 = root / "latin1.py"
+        latin1.write_bytes(b"import flet as ft\nx = '\xff\xfe'\n")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_file(latin1)
+
+        assert "latin1.py" in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+
+    def test_missing_scan_root_fails_closed(self, tmp_path, monkeypatch):
+        """扫描根不存在时失败, 不因空扫描结果而放行."""
+        monkeypatch.setitem(globals(), "UI_DIR", tmp_path / "missing")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        assert "扫描根不存在" in str(excinfo.value)
+
+    def test_root_without_python_files_fails_closed(self, tmp_path, monkeypatch):
+        """扫描根下无 .py 文件时失败, 不产生空扫描即合规的假象."""
+        root = self._isolate_scan_root(tmp_path, monkeypatch)
+        (root / "__init__.py").write_text("", encoding="utf-8")
+
+        with pytest.raises(AccessibilityScanError) as excinfo:
+            _scan_all()
+
+        assert "无可扫描 .py 文件" in str(excinfo.value)

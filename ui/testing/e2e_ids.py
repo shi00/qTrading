@@ -194,7 +194,23 @@ class _DataIds:
     # tables_loaded=True + table_columns 非空 + is_loading=False 时渲染.
     # 切表时 reset_table_state 清空 table_columns → 信号先消失, 加载完成后再现,
     # 让 E2E 可以等待真实加载完成而非固定 sleep.
+    # D21-OTHER-006: 本通用信号只证明「某张表已加载」，切表未生效时旧 ready 仍可见，
+    # 不能证明「当前加载的是目标表」；需身份确认时用 ``table_ready(table_name)``。
     TABLE_READY: Eid = ("e2e.data.table_ready", AnchorKind.LABEL)
+
+    _TABLE_READY_PREFIX = "e2e.data.table_ready"
+
+    @staticmethod
+    def table_ready(table_name: str) -> Eid:
+        """生成「指定表 schema 已就绪」anchor (LABEL, 仅做存在性探测)。
+
+        D21-OTHER-006: identifier 携带表名，只有该表 schema 真正加载完成才会渲染。
+        `DataPage.select_table` 等待它，从而在「切表未生效、上一张表的通用 ready
+        仍可见」时超时失败，而非静默假成功。
+
+        Precondition: table_name 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        """
+        return (f"{_DataIds._TABLE_READY_PREFIX}.{table_name}", AnchorKind.LABEL)
 
 
 class _BacktestIds:

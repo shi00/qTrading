@@ -110,9 +110,10 @@ from services.ai_service.connection_pricing import (
 )
 from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS, _estimate_tokens
 from tenacity import AsyncRetrying, RetryCallState, stop_after_attempt
-from utils.loop_local import get_loop_local
+from utils.egress_ack import bind_egress_ack_permit
 from utils.error_classifier import classify_error
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
 
@@ -1002,6 +1003,10 @@ class ScenarioExecutor:
                         halt_candidates=True,
                     )
 
+                # D13-002：外发确认按真实执行位置区分——litellm_chat 出站需 SEC-01 许可，
+                # gguf_* 设备内本地模型不外发不签发。
+                requires_egress = adapter_kind_requires_egress(connection.adapter_kind)
+
                 # 许可线性化（§4.3 / 方案 §6.2 步骤 3「再逐次调用 authorize_attempt」）：
                 # 每次尝试单独授权，不预发下一次重试的许可；失败即拒绝切换，不重试。
                 # F06：credential_version 传快照冻结连接的实际执行版本（与下方
@@ -1019,7 +1024,7 @@ class ScenarioExecutor:
                         snapshot.security_scope_version,
                         connection.credential_version,
                         attempt_id,
-                        requires_egress_grant=adapter_kind_requires_egress(connection.adapter_kind),
+                        requires_egress_grant=requires_egress,
                     )
                 except Exception as e:
                     reason = f"authorize failed: {type(e).__name__}"
@@ -1068,6 +1073,26 @@ class ScenarioExecutor:
                     return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
                 effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
 
+                # D13-002：在许可线性化点为本次 attempt 签发外发确认许可（纯绑定，零 IO），
+                # 绑定 attempt / invocation / owner / 连接 / provider / 模型 / 目标 / 有效期；
+                # 云适配器在凭据解析前校验，禁止跨 attempt / 跨会话复用（缺许可 fail-closed）。
+                attempt_context = AttemptContext(
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                    invocation_id=identity.invocation_id,
+                    attempt_id=attempt_id,
+                )
+                if requires_egress:
+                    attempt_context = replace(
+                        attempt_context,
+                        egress_permit=bind_egress_ack_permit(
+                            attempt_context=attempt_context,
+                            resolved_connection=effective_connection,
+                            now=clock(),
+                            deadline=identity.deadline,
+                        ),
+                    )
+
                 # 真正进入适配器执行前建立实际尝试记录（§6.2 步骤 4）。F18：每次真实
                 # 尝试独立 attempt 行（携带该次 retry_index）；同一次写账的持久化重放
                 # 沿用该次身份（幂等，不重建）。F16：owner 齐传启用 F23 身份强门；
@@ -1114,12 +1139,6 @@ class ScenarioExecutor:
                         attempt_id=attempt_id,
                     )
 
-                attempt_context = AttemptContext(
-                    owner_session_id=owner_session_id,
-                    owner_epoch=owner_epoch,
-                    invocation_id=identity.invocation_id,
-                    attempt_id=attempt_id,
-                )
                 # F19②：外发事实起点（await 表达式即视为外发已发起，此后取消时
                 # 无法证明是否已被上游消费）
                 outbound_started = True

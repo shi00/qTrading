@@ -1,5 +1,7 @@
+import ast
 import importlib
 import inspect
+import textwrap
 import types
 from pathlib import Path
 from unittest.mock import patch
@@ -400,35 +402,172 @@ class TestSemanticColorsAnnotation:
 # ============================================================================
 
 
+def _theme_module_ast(source: str | None = None) -> ast.Module:
+    """解析 ui/theme.py (或合成源码) 的 AST。"""
+    if source is None:
+        source = Path(inspect.getsourcefile(AppColors)).read_text(encoding="utf-8")
+    return ast.parse(source)
+
+
+def _find_top_level_class(module: ast.Module, class_name: str) -> ast.ClassDef:
+    """定位模块顶层的指定类 (不递归, 避免命中嵌套或继承的同名类)。"""
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return node
+    raise AssertionError(f"未找到顶层类 {class_name}")
+
+
+def _iter_target_names(target: ast.expr) -> list[str]:
+    """展开赋值目标的属性名 (支持元组/列表解包)。"""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for element in target.elts:
+            names.extend(_iter_target_names(element))
+        return names
+    return []
+
+
+def _class_assignments(class_node: ast.ClassDef) -> list[tuple[str, ast.expr, int]]:
+    """收集类体内全部赋值 (含 AnnAssign), 按源码顺序返回 (名称, 值节点, 行号)。
+
+    同名多次赋值会全部保留以供重复定义检测; 仅有注解无值的 AnnAssign 不构成定义。
+    """
+    assignments: list[tuple[str, ast.expr, int]] = []
+    for node in class_node.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                assignments.extend((name, node.value, node.lineno) for name in _iter_target_names(target))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.extend((name, node.value, node.lineno) for name in _iter_target_names(node.target))
+    return assignments
+
+
+def _flet_import_aliases(module: ast.Module) -> tuple[set[str], set[str]]:
+    """返回 (flet 模块名/别名集合, 直接导入的 Colors 名称集合), 供 ft.Colors 识别使用。"""
+    flet_names = {"flet"}
+    colors_names: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "flet":
+                    flet_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "flet":
+            for alias in node.names:
+                if alias.name == "Colors":
+                    colors_names.add(alias.asname or alias.name)
+    return flet_names, colors_names
+
+
+def _is_ft_colors_ref(value: ast.expr, flet_names: set[str], colors_names: set[str]) -> bool:
+    """判断右值是否为 flet.Colors.X 引用 (支持 import 别名)。"""
+    if not isinstance(value, ast.Attribute):
+        return False
+    base = value.value
+    if isinstance(base, ast.Attribute) and base.attr == "Colors" and isinstance(base.value, ast.Name):
+        return base.value.id in flet_names
+    return isinstance(base, ast.Name) and base.id in colors_names
+
+
+def _is_hex_literal(value: ast.expr) -> bool:
+    """判断右值是否为 hex 颜色字面量。"""
+    return isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value.startswith("#")
+
+
+def _layer_attr_names(
+    assignments: list[tuple[str, ast.expr, int]],
+    flet_names: set[str],
+    colors_names: set[str],
+) -> tuple[set[str], set[str]]:
+    """按赋值右值的静态形态划分 Layer 1 (ft.Colors.X) / Layer 2 (hex 字面量)。"""
+    layer1 = {name for name, value, _ in assignments if _is_ft_colors_ref(value, flet_names, colors_names)}
+    layer2 = {name for name, value, _ in assignments if _is_hex_literal(value)}
+    return layer1, layer2
+
+
+def _duplicate_definitions(assignments: list[tuple[str, ast.expr, int]]) -> dict[str, list[int]]:
+    """返回类体内被多次赋值的属性名及各次赋值行号 (含跨层与同层重复)。"""
+    lines_by_name: dict[str, list[int]] = {}
+    for name, _, lineno in assignments:
+        lines_by_name.setdefault(name, []).append(lineno)
+    return {name: lines for name, lines in lines_by_name.items() if len(lines) > 1}
+
+
+def _module_level_overrides(module: ast.Module, class_name: str, class_attrs: set[str]) -> list[tuple[str, int]]:
+    """检测模块顶层对已有类属性的覆盖赋值 (AppColors.X = ... 或 setattr(AppColors, "X", ...))。
+
+    只扫描模块顶层语句: 类方法内的 setattr (如 load_theme 的主题切换) 属运行时赋值,
+    不是定义重复, 不计入。
+    """
+    overrides: list[tuple[str, int]] = []
+
+    def add_attribute_target(target: ast.expr, lineno: int) -> None:
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == class_name
+            and target.attr in class_attrs
+        ):
+            overrides.append((target.attr, lineno))
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                add_attribute_target(element, lineno)
+
+    for node in module.body:
+        if isinstance(node, ast.ClassDef):
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                add_attribute_target(target, node.lineno)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            add_attribute_target(node.target, node.lineno)
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            if (
+                isinstance(call.func, ast.Name)
+                and call.func.id == "setattr"
+                and len(call.args) >= 2
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id == class_name
+                and isinstance(call.args[1], ast.Constant)
+                and isinstance(call.args[1].value, str)
+                and call.args[1].value in class_attrs
+            ):
+                overrides.append((call.args[1].value, node.lineno))
+    return overrides
+
+
 class TestLayer1Layer2NameSeparation:
     """Layer 1 语义 token (ft.Colors.X 引用) 与 Layer 2 业务色 (hex) 不得同名。
 
-    Layer 1 token 是 ft.Colors.X 引用 (随主题自动切换), Layer 2 业务色是 hex 字符串
-    (load_theme 手动切换). 同名会引发混淆: AppColors.X 到底是 Layer 1 还是 Layer 2?
+    运行时 dir()/getattr 只见最后一次赋值, 无法发现同名覆盖; 因此改为按 AST 静态扫描
+    AppColors 类体的全部赋值目标: 重复定义本身即失败 (即使运行时最后值合法)。
     """
 
-    def _classify_appcolors_attrs(self) -> tuple[set[str], set[str]]:
-        """分类 AppColors 类属性: Layer 1 (ft.Colors.X) / Layer 2 (hex string)."""
-        layer1: set[str] = set()
-        layer2: set[str] = set()
-        for name in dir(AppColors):
-            if name.startswith("_"):
-                continue
-            value = getattr(AppColors, name)
-            # 跳过方法/类型/模块
-            if callable(value) or not isinstance(value, str):
-                continue
-            # ft.Colors.X 在 Flet 中是 str (常量化), 但语义上是 Layer 1 引用
-            # 通过值是否在 ft.Colors 中来判断
-            if hasattr(ft.Colors, name) and getattr(ft.Colors, name) == value:
-                layer1.add(name)
-            elif value.startswith("#"):
-                layer2.add(name)
-        return layer1, layer2
+    def test_appcolors_has_no_duplicate_attr_definitions(self):
+        """AppColors 类体不得重复赋值同一属性 (同名覆盖会静默丢弃前值)。"""
+        class_node = _find_top_level_class(_theme_module_ast(), "AppColors")
+        assignments = _class_assignments(class_node)
+        assert assignments, "AppColors 类体赋值扫描为空, 检测失效"
+        duplicates = _duplicate_definitions(assignments)
+        assert not duplicates, f"AppColors 存在重复属性定义 (属性 -> 行号): {duplicates}"
+
+    def test_appcolors_has_no_module_level_overrides(self):
+        """类定义后不得在模块顶层再次给 AppColors 已有属性赋值或 setattr。"""
+        module = _theme_module_ast()
+        class_node = _find_top_level_class(module, "AppColors")
+        class_attrs = {name for name, _, _ in _class_assignments(class_node)}
+        overrides = _module_level_overrides(module, "AppColors", class_attrs)
+        assert not overrides, f"AppColors 存在模块顶层覆盖赋值 (属性, 行号): {overrides}"
 
     def test_layer1_layer2_no_name_overlap(self):
         """Layer 1 token 名与 Layer 2 业务色名不得重叠 (同名禁止)。"""
-        layer1, layer2 = self._classify_appcolors_attrs()
+        module = _theme_module_ast()
+        class_node = _find_top_level_class(module, "AppColors")
+        flet_names, colors_names = _flet_import_aliases(module)
+        layer1, layer2 = _layer_attr_names(_class_assignments(class_node), flet_names, colors_names)
+        assert layer1 and layer2, "真实 AppColors 两层集合不得为空 (否则分类逻辑失效)"
         overlap = layer1 & layer2
         assert not overlap, (
             f"Layer 1 / Layer 2 同名禁止违反: {overlap} 既在 Layer 1 (ft.Colors.X) 又在 Layer 2 (hex string) 中定义"
@@ -436,7 +575,11 @@ class TestLayer1Layer2NameSeparation:
 
     def test_layer2_business_colors_in_custom_presets(self):
         """Layer 2 业务色必须在 4 主题 CUSTOM_COLOR_PRESETS 中均有定义 (随主题切换)."""
-        _, layer2 = self._classify_appcolors_attrs()
+        module = _theme_module_ast()
+        class_node = _find_top_level_class(module, "AppColors")
+        flet_names, colors_names = _flet_import_aliases(module)
+        _, layer2 = _layer_attr_names(_class_assignments(class_node), flet_names, colors_names)
+        assert layer2, "Layer 2 赋值扫描为空, 检测失效"
         # 排除 TABLE_GRID_V/TABLE_GRID_H 等别名 (load_theme 中手动同步)
         aliases = {"TABLE_GRID_V", "TABLE_GRID_H"}
         layer2_non_alias = layer2 - aliases
@@ -444,6 +587,108 @@ class TestLayer1Layer2NameSeparation:
             preset_keys = set(CUSTOM_COLOR_PRESETS[theme].keys())
             missing = layer2_non_alias - preset_keys
             assert not missing, f"{theme} 主题 CUSTOM_COLOR_PRESETS 缺少 Layer 2 业务色: {missing}"
+
+    def test_same_name_in_both_layers_fails_even_if_last_value_valid(self):
+        """合成负例: 先 Layer 1 后 Layer 2 同名, 运行时最后值合法也必须失败。"""
+        module = _theme_module_ast(
+            textwrap.dedent(
+                """
+                import flet as ft
+
+                class AppColors:
+                    PRIMARY = ft.Colors.PRIMARY
+                    PRIMARY = "#FF0000"
+                """
+            )
+        )
+        class_node = _find_top_level_class(module, "AppColors")
+        assignments = _class_assignments(class_node)
+        flet_names, colors_names = _flet_import_aliases(module)
+
+        # 运行时最后一次赋值是合法 hex, 单看值无法发现问题
+        assert _is_hex_literal(assignments[-1][1])
+
+        assert "PRIMARY" in _duplicate_definitions(assignments)
+        layer1, layer2 = _layer_attr_names(assignments, flet_names, colors_names)
+        assert layer1 & layer2 == {"PRIMARY"}
+
+    def test_same_name_twice_in_same_layer_fails(self):
+        """合成负例: 同层重复赋值同样静默覆盖, 必须失败。"""
+        module = _theme_module_ast(
+            textwrap.dedent(
+                """
+                class AppColors:
+                    UP_RED = "#FF0000"
+                    UP_RED = "#00FF00"
+                """
+            )
+        )
+        assignments = _class_assignments(_find_top_level_class(module, "AppColors"))
+        assert "UP_RED" in _duplicate_definitions(assignments)
+
+    def test_module_level_override_detected(self):
+        """合成负例: 类体定义后再在模块顶层覆盖同名属性 (赋值/setattr) 必须被识别。"""
+        module = _theme_module_ast(
+            textwrap.dedent(
+                """
+                class AppColors:
+                    UP_RED = "#FF0000"
+                    DOWN_GREEN = "#00FF00"
+
+                AppColors.UP_RED = "#00FF00"
+                setattr(AppColors, "DOWN_GREEN", "#0000FF")
+                """
+            )
+        )
+        class_node = _find_top_level_class(module, "AppColors")
+        class_attrs = {name for name, _, _ in _class_assignments(class_node)}
+        overrides = _module_level_overrides(module, "AppColors", class_attrs)
+        assert {name for name, _ in overrides} == {"UP_RED", "DOWN_GREEN"}
+
+    def test_inherited_same_name_is_not_a_duplicate(self):
+        """合成正例: 基类与子类各自定义同名属性不属同一类体重复, 不应误报。"""
+        module = _theme_module_ast(
+            textwrap.dedent(
+                """
+                import flet as ft
+
+                class BaseColors:
+                    PRIMARY = ft.Colors.PRIMARY
+
+                class AppColors(BaseColors):
+                    PRIMARY = "#FF0000"
+                """
+            )
+        )
+        class_node = _find_top_level_class(module, "AppColors")
+        assignments = _class_assignments(class_node)
+        flet_names, colors_names = _flet_import_aliases(module)
+        assert _duplicate_definitions(assignments) == {}
+        layer1, layer2 = _layer_attr_names(assignments, flet_names, colors_names)
+        assert layer1 & layer2 == set()
+
+    def test_import_aliases_and_attribute_alias_do_not_misclassify(self):
+        """合成正例: import 别名可识别 Layer 1; 属性别名不应被误判为第二层定义。"""
+        module = _theme_module_ast(
+            textwrap.dedent(
+                """
+                import flet as f
+                from flet import Colors as C
+
+                class AppColors:
+                    SURFACE = f.Colors.SURFACE
+                    PRIMARY = C.PRIMARY
+                    BACKGROUND = SURFACE
+                """
+            )
+        )
+        class_node = _find_top_level_class(module, "AppColors")
+        assignments = _class_assignments(class_node)
+        flet_names, colors_names = _flet_import_aliases(module)
+        layer1, layer2 = _layer_attr_names(assignments, flet_names, colors_names)
+        assert layer1 == {"SURFACE", "PRIMARY"}
+        assert layer2 == set()
+        assert _duplicate_definitions(assignments) == {}
 
 
 class TestAppColorsTokenValidity:

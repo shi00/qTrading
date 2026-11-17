@@ -14,6 +14,7 @@ from core.prompt_base import (
     CONCLUSION_LABELS,
     RECOMMENDATION_TO_CONCLUSION_LABEL,
 )
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,118 @@ VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "ne
 _FREE_TEXT_MAX_LEN = 1000
 _FREE_TEXT_FIELDS = ("summary", "thinking", "ai_reason", "uncertainty_factors")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# R9: 畸形模型字段原值可能夹带个人信息/密钥，日志摘要先脱敏再截断。
+_LOG_VALUE_MAX_LEN = 120
+
+
+def _sanitize_logged_value(value: object) -> str:
+    """R9：把模型字段原值转为可安全入日志的摘要（类型 + 脱敏后 repr，超长截断）。
+
+    先脱敏再截断，避免截断把已注册 secret 切成半截绕过精确替换。
+    """
+    sanitized = DataSanitizer.sanitize_error(repr(value))
+    if len(sanitized) > _LOG_VALUE_MAX_LEN:
+        sanitized = f"{sanitized[:_LOG_VALUE_MAX_LEN]}...(truncated)"
+    return f"{type(value).__name__} {sanitized}"
+
+
+# ---------------------------------------------------------------------------
+# 个股分析输出契约（D13-008 / P2-REV06-LLMOutput-SchemaValidation）
+# ---------------------------------------------------------------------------
+# 必需键：与 ``core/prompt_base._UNIVERSAL_RULES``【输出格式】「JSON 必须严格包含
+# 以下键名」逐键对齐。缺任一键的响应（典型来源：输出被 max_tokens 截断后爬虫式
+# 抢救出部分 JSON、或模型幻觉出别名字段）不得被当作有效分析结论。
+ANALYSIS_REQUIRED_FIELDS: tuple[str, ...] = (
+    CONCLUSION_LABEL_FIELD,
+    "score",
+    "confidence",
+    "uncertainty_factors",
+    "thinking",
+    "summary",
+)
+# 可选键：v0 提示词/旧模型返回的读兼容字段（recommendation 为结论别名，
+# ai_reason 为旧理由文本）。出现时合法，不出现也不违规。
+ANALYSIS_OPTIONAL_FIELDS: tuple[str, ...] = ("recommendation", "ai_reason")
+# litellm 适配层合并的计量/溯源元数据键（系统写入，非模型输出）：未知键策略必须
+# 保留它们，否则 _accumulate_usage 的真实 usage/cost/model 计量会被丢弃（R21）。
+ANALYSIS_METADATA_FIELDS: tuple[str, ...] = ("model", "usage", "cost", "reasoning_content")
+ANALYSIS_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    ANALYSIS_REQUIRED_FIELDS + ANALYSIS_OPTIONAL_FIELDS + ANALYSIS_METADATA_FIELDS
+)
+
+
+def _is_numeric(value: object) -> bool:
+    """数值口径校验：bool 是 int 子类，但 True/False 不是模型给出的分数。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return False
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def validate_analysis_output_contract(response: dict) -> str | None:
+    """校验个股分析响应是否满足 prompt 输出契约（不可信模型输入的边界）。
+
+    返回违规原因（``None`` 表示通过）。策略：
+
+    - **必需键**：结论/评分/置信度/不确定性/推理/摘要六键必须存在
+      （``conclusion_label`` 允许由 v0 别名 ``recommendation`` 替代，读兼容）；
+    - **类型**：``score``/``confidence`` 必须可转数值（bool 拒绝），结论字段必须
+      是枚举值，``thinking``/``summary`` 必须是字符串，``uncertainty_factors``
+      必须是字符串或列表；
+    - **未知键**：不在本函数拒绝，由 :func:`discard_unknown_analysis_fields` 忽略
+      并记录（避免幻觉键污染下游，同时不因无关附加键丢弃整条有效分析）。
+
+    取值范围（如 score 越界）不在此判定：由 :func:`validate_ai_analysis_response`
+    按 R21 置 None，下游按「未打分」处理，不把失控值伪装成业务结论。
+    """
+    if not isinstance(response, dict):
+        return "non-dict payload"
+
+    missing = [field for field in ANALYSIS_REQUIRED_FIELDS if field not in response]
+    if CONCLUSION_LABEL_FIELD in missing and "recommendation" in response:
+        missing.remove(CONCLUSION_LABEL_FIELD)
+    if missing:
+        return "missing required keys: " + ", ".join(missing)
+
+    for field in ("score", "confidence"):
+        if not _is_numeric(response[field]):
+            return f"{field} is not numeric (type={type(response[field]).__name__})"
+
+    raw_label = response.get(CONCLUSION_LABEL_FIELD)
+    if raw_label is None:
+        recommendation = response.get("recommendation")
+        if (
+            not isinstance(recommendation, str)
+            or recommendation.lower().strip() not in RECOMMENDATION_TO_CONCLUSION_LABEL
+        ):
+            return "missing valid conclusion_label/recommendation"
+    elif not isinstance(raw_label, str) or raw_label.lower().strip() not in CONCLUSION_LABELS:
+        return f"invalid conclusion_label (type={type(raw_label).__name__})"
+
+    uncertainty = response["uncertainty_factors"]
+    if not isinstance(uncertainty, (str, list)):
+        return f"uncertainty_factors must be str or list (type={type(uncertainty).__name__})"
+
+    for field in ("thinking", "summary"):
+        if not isinstance(response[field], str):
+            return f"{field} must be str (type={type(response[field]).__name__})"
+
+    return None
+
+
+def discard_unknown_analysis_fields(response: dict) -> list[str]:
+    """移除契约外键（未知键策略：忽略并记录），返回被移除的键名。
+
+    模型幻觉出的键（如 ``reason``、伪造的 ``ai_status``/``error`` 程序字段）不得
+    透传到结果行/UI；litellm 计量元数据键（``ANALYSIS_METADATA_FIELDS``）保留。
+    """
+    unknown = [key for key in response if key not in ANALYSIS_ALLOWED_FIELDS]
+    for key in unknown:
+        response.pop(key, None)
+    return unknown
 
 
 def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
@@ -79,13 +192,16 @@ def validate_ai_analysis_response(response: dict) -> dict:
                 score = float(score)
             except (ValueError, TypeError):
                 # R21：不可解析的分数不是"0 分否决"，置 None 让下游按"未打分"处理。
-                logger.warning("[AIService] Output validation: invalid score type: %s", score)
+                logger.warning("[AIService] Output validation: invalid score type: %s", _sanitize_logged_value(score))
                 response["score"] = None
             else:
                 if not math.isfinite(score) or not (0 <= score <= 100):
                     # R21：越界/非有限评分是模型失控信号，不是"极端看好/看空"。钳位会把违规
                     # 输出变成最强买入/否决信号，与不可解析分支同样置 None 交由下游按"未打分"。
-                    logger.warning("[AIService] Output validation: score not finite/in range [0,100]: %s", score)
+                    logger.warning(
+                        "[AIService] Output validation: score not finite/in range [0,100]: %s",
+                        _sanitize_logged_value(score),
+                    )
                     response["score"] = None
                 else:
                     response["score"] = score
@@ -107,7 +223,9 @@ def validate_ai_analysis_response(response: dict) -> dict:
         try:
             confidence = float(raw_confidence)
         except (ValueError, TypeError):
-            logger.warning("[AIService] Output validation: invalid confidence type: %s", raw_confidence)
+            logger.warning(
+                "[AIService] Output validation: invalid confidence type: %s", _sanitize_logged_value(raw_confidence)
+            )
             response["confidence"] = None
         else:
             if not math.isfinite(confidence):
@@ -130,7 +248,9 @@ def validate_ai_analysis_response(response: dict) -> dict:
         if rec_lower not in VALID_RECOMMENDATIONS:
             # R21：不认识的推荐值是模型失控/新词，不是"中性"结论。置 None 交由
             # 下游按"未给出建议"处理，不把"模型说了句听不懂的话"伪装成业务结论。
-            logger.warning("[AIService] Output validation: unexpected recommendation: %s", recommendation)
+            logger.warning(
+                "[AIService] Output validation: unexpected recommendation: %s", _sanitize_logged_value(recommendation)
+            )
             response["recommendation"] = None
         else:
             response["recommendation"] = rec_lower
@@ -147,7 +267,9 @@ def validate_ai_analysis_response(response: dict) -> dict:
         if label_lower in CONCLUSION_LABELS:
             response[CONCLUSION_LABEL_FIELD] = label_lower
         else:
-            logger.warning("[AIService] Output validation: unexpected conclusion_label: %s", raw_label)
+            logger.warning(
+                "[AIService] Output validation: unexpected conclusion_label: %s", _sanitize_logged_value(raw_label)
+            )
             response[CONCLUSION_LABEL_FIELD] = None
 
     # SEC-002: sanitize free-text fields (length limit + control-char cleaning)

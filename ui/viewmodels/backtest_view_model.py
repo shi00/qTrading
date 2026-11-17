@@ -21,7 +21,7 @@ from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TERMINAL_STATUSES, AppTask, TaskManager, TaskStatus
-from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning, WarningCategory
+from strategies.backtest.config import BacktestConfig, BacktestResult, BacktestStatus, DataWarning, WarningCategory
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -276,6 +276,27 @@ def _has_delisting_asof_approximation(data_warnings: Sequence[str | DataWarning]
     for w in data_warnings or ():
         if isinstance(w, DataWarning):
             if w.warning_type == _DELISTING_ASOF_WARNING_TYPE:
+                return True
+        elif isinstance(w, str) and w.startswith(prefix):
+            return True
+    return False
+
+
+# D12-002 / R24 当期近似的告警类型（与 strategies.backtest.config.DataWarning.warning_type 一致）。
+_ST_ASOF_WARNING_TYPE = "st_asof_approximation"
+
+
+def _has_st_asof_approximation(data_warnings: Sequence[str | DataWarning]) -> bool:
+    """R24/D12-002：判定回测结果是否标注了 ST 排除口径的「当期近似」。
+
+    兼容结构化 ``DataWarning``（引擎实时产出）与经持久化 round-trip 的无类型字符串
+    ``"[st_asof_approximation] ..."``（``DataWarning.__str__`` 前缀），二者等价。
+    命中时 VM 以 caveat 通道在结果区显式标注「部分标的历史 ST 状态未知」，不升级可信度级别。
+    """
+    prefix = f"[{_ST_ASOF_WARNING_TYPE}]"
+    for w in data_warnings or ():
+        if isinstance(w, DataWarning):
+            if w.warning_type == _ST_ASOF_WARNING_TYPE:
                 return True
         elif isinstance(w, str) and w.startswith(prefix):
             return True
@@ -815,6 +836,31 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 if not self._owns_run(run_token):
                     return None
 
+                # D12-005: 引擎/服务返回显式取消终态时，不得映射为「已完成」
+                # （不写 metrics/run_id，也不伪造成功文案）；与 CancelledError 路径
+                # 一致落取消状态，并标记该运行不得被迟到回调复活（R21）。
+                if result.status == BacktestStatus.CANCELLED:
+                    if self._claim_run_terminal(run_token):
+                        self._cancelled_run_id = run_token
+                        self._set_state(
+                            is_running=False,
+                            progress=0.0,
+                            progress_message=None,
+                            status_message=Message("backtest_cancelled"),
+                            status_color="warning",
+                            nav_dates=(),
+                            benchmark_curve=(),
+                            ic_dates=(),
+                            strategy_name=None,
+                            benchmark_name=None,
+                            credibility_level="ok",
+                            warnings=(),
+                            skipped_order_count=0,
+                            failed_date_count=0,
+                            caveats=(),
+                        )
+                    return None
+
                 # 透传净值横轴日期与 IC 横轴日期; 构造基准相对净值曲线 (同起点锚定)
                 nav_ns = result.nav_curve
                 nav_dates = _to_date_strings(nav_ns["trade_date"].to_list() if not nav_ns.is_empty() else None)
@@ -843,6 +889,11 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 # 标的时产出 delisting_asof_approximation 告警，此处显式在结果中标注该口径近似。
                 if _has_delisting_asof_approximation(result.data_warnings):
                     caveat_msgs.append(Message("backtest_caveat_delisting_asof_approximation"))
+                # D12-002 / R21+R24: ST 排除口径（is_st）在 name-history 无覆盖时为未知（不回退
+                # 当前名称冒充历史取值），引擎产出 st_asof_approximation 告警，此处显式标注
+                # 「部分标的历史 ST 状态未知、未参与 ST 过滤」。
+                if _has_st_asof_approximation(result.data_warnings):
+                    caveat_msgs.append(Message("backtest_caveat_st_asof_approximation"))
                 caveats = tuple(caveat_msgs)
 
                 # 成功终态: 复位运行归属 + is_running=False + progress=1.0 + 拆解后渲染字段 (D11)

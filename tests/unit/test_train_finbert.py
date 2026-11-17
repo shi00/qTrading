@@ -128,7 +128,7 @@ def test_validate_corpus_dir_accepts_split_val_fallback(tmp_path: Path) -> None:
     """dev 文件优先 split_dev.jsonl，缺失时回退 split_val.jsonl（现网语料命名）。"""
     corpus_dir = _make_corpus_dir(tmp_path, dev_name="split_val.jsonl")
     splits = tf.validate_corpus_dir(corpus_dir)
-    assert set(splits) == {"train", "dev", "test"}
+    assert set(splits) == {"train", "dev", "test", "exclusivity"}
     assert len(splits["train"]) == 3
     assert len(splits["dev"]) == 2
     assert len(splits["test"]) == 1
@@ -148,6 +148,48 @@ def test_validate_corpus_dir_reports_label_distribution(tmp_path: Path) -> None:
     corpus_dir = _make_corpus_dir(tmp_path)
     splits = tf.validate_corpus_dir(corpus_dir, with_distribution=True)
     assert splits["train_distribution"] == {"利空": 1, "中性": 1, "利好": 1}
+
+
+def test_validate_corpus_dir_reports_unverified_samples_when_metadata_missing(tmp_path: Path) -> None:
+    """无 id / 事件键的样本被互斥检查跳过，必须计入 unverified 并明示「未做对应检查」。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    coverage = tf.validate_corpus_dir(corpus_dir)["exclusivity"]
+    assert coverage["total_rows"] == 6
+    assert coverage["splits"]["train"] == {"rows": 3, "id": 0, "ts_code": 0, "publish_time": 0, "event_key": 0}
+    assert coverage["unverified_id"] == 6
+    assert coverage["unverified_event_key"] == 6
+    assert "未做对应检查" in coverage["declaration"]
+    assert "不构成" in coverage["declaration"]
+
+
+def test_validate_corpus_dir_reports_full_metadata_coverage_without_claiming_full_exclusion(tmp_path: Path) -> None:
+    """元数据齐备时覆盖计数为全量，但仍不得宣称「泄漏已全部排除」（近重复检查缺失）。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    _write_split(
+        corpus_dir / "split_train.jsonl",
+        [
+            {"text": "回购利好", "label": "利好", "id": "a:1", "ts_code": "600000.SH", "publish_time": "t1"},
+            {"text": "减持利空", "label": "利空", "id": "a:2", "ts_code": "600000.SH", "publish_time": "t2"},
+            {"text": "例行公告", "label": "中性", "id": "a:3", "ts_code": "600000.SH", "publish_time": "t3"},
+        ],
+    )
+    _write_split(
+        corpus_dir / "split_val.jsonl",
+        [
+            {"text": "中标重大合同", "label": "利好", "id": "b:1", "ts_code": "600000.SH", "publish_time": "t4"},
+            {"text": "立案调查", "label": "利空", "id": "b:2", "ts_code": "600000.SH", "publish_time": "t5"},
+        ],
+    )
+    _write_split(
+        corpus_dir / "split_test.jsonl",
+        [{"text": "业绩预亏", "label": "利空", "id": "c:1", "ts_code": "600519.SH", "publish_time": "t6"}],
+    )
+    coverage = tf.validate_corpus_dir(corpus_dir)["exclusivity"]
+    assert coverage["unverified_id"] == 0
+    assert coverage["unverified_event_key"] == 0
+    assert coverage["covered_event_key"] == 6
+    assert "覆盖全部 6 条样本" in coverage["declaration"]
+    assert "不构成" in coverage["declaration"]
 
 
 # --------------------------------------------------------------------------- #
@@ -515,6 +557,16 @@ def test_build_training_plan_shape(tmp_path: Path) -> None:
     assert plan["hyperparams"]["max_length"] == 64
     assert plan["out_dir"] == str(tmp_path / "out")
     assert Path(plan["best_dir"]).name == "best"
+
+
+def test_build_training_plan_exposes_exclusivity_coverage(tmp_path: Path) -> None:
+    """训练计划（dry-run / 真实训练共用）须携带覆盖声明，缺元数据时明示未校验。"""
+    args = tf._parse_args(_base_args(tmp_path))
+    plan = tf.build_training_plan(args)
+    coverage = plan["exclusivity"]
+    assert coverage["unverified_id"] == 6
+    assert coverage["unverified_event_key"] == 6
+    assert "未做对应检查" in coverage["declaration"]
 
 
 def test_main_dry_run_prints_plan_without_training(

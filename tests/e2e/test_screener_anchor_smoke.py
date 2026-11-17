@@ -9,6 +9,7 @@
 
 import pytest
 
+from tests.e2e.helpers.anchor_label import LABEL_INDEPENDENCE_JS, assert_label_independent
 from tests.e2e.helpers.anchor_page import AnchorPage
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.pages import ScreenerPage
@@ -39,19 +40,10 @@ async def test_screener_anchor_dom_present(e2e_page: FletPage):
     await ap.expect_visible(EIDS.SCREENER.STRATEGY_DROPDOWN, timeout_ms=15000)
     assert await ap.count(EIDS.SCREENER.STRATEGY_DROPDOWN) == 1
 
-    # Task 1.3 DoD ⑤: container=True 生效——父节点 aria-label 不含子 EID
-    # 若 container=True 失效，父容器会合并子 label，导致外层节点 aria-label 含 EID
-    parent_has_eid = await e2e_page.page.evaluate(
-        """(eid) => {
-            const el = document.querySelector(`flt-semantics[aria-label="${eid}"]`);
-            if (!el || !el.parentElement) return false;
-            const parent = el.parentElement;
-            const parentLabel = parent.getAttribute('aria-label') || '';
-            return parentLabel.includes(eid);
-        }""",
-        EIDS.SCREENER.RUN_BUTTON[0],
-    )
-    assert not parent_has_eid, "container=True 未生效：父节点 aria-label 含子 EID，anchor 独立性被破坏"
+    # Task 1.3 DoD ⑤: container=True 生效——identifier 节点自身 aria-label 独立，
+    # 且父节点未合并子 EID。目标/父节点缺失必须显式失败，不能用否定断言兜底。
+    snapshot = await e2e_page.page.evaluate(LABEL_INDEPENDENCE_JS, EIDS.SCREENER.RUN_BUTTON[0])
+    assert_label_independent(snapshot, EIDS.SCREENER.RUN_BUTTON[0])
 
 
 async def test_screener_anchor_click_strategy_dropdown_opens(e2e_page: FletPage):

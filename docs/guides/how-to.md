@@ -131,6 +131,10 @@
 - 应用必须完全退出（sidecar 会获取 PGDATA 锁，运行中无法维护）
 - sidecar binary 位于 `sidecars/qtrading-pg-sidecar[.exe]`
 - 数据目录默认在 `<app data>/postgres/16/data`（可通过 `AppConfig.embedded_pg_data_root` 自定义）
+- **业务库名必填**：`dump` / `restore` / `maintenance-shell` 必须显式传 `--database <库名>`，取值须与 `AppConfig.embedded_pg_database` 一致（默认 `qtrading`）。D07-005 起 sidecar 不再提供默认库：静默回落会让自定义库部署的备份/恢复落到错误库。`status` / `doctor` / `stop` / `version` 不需要库名。
+  - **升级**：升级前按当前配置库名 `dump`；**回退**：`restore` 必须带与备份时相同的库名；若升级改了 `embedded_pg_database`，先把配置改回备份库名再恢复（恢复到新库名不会被应用读取，只会造成“已回退”假象）。
+  - **自定义库**：每条维护命令都带同一自定义库名，不要用 `qtrading`；跨库改名需经 `maintenance-shell` 的 psql 导入/导出，脚本不做重写。
+  - 安装包维护脚本会额外拒绝维护库（`postgres` / `template0` / `template1`）与测试库（`test` / `test_*` / `*_test`），并给出用法提示；详见 `resources/maintenance/README-maintenance.md`「业务库名（必填）」。
 
 #### 9.2 诊断（doctor）
 
@@ -149,19 +153,20 @@ exit code 只有两种取值（doctor 是只读诊断，不获取维护锁）：
 #### 9.3 备份（dump）
 
 ```bash
-sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --output <备份文件路径>
+sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --database <库名> --output <备份文件路径>
 ```
 
 输出 PostgreSQL custom format 备份文件，可用 `pg_restore` 工具恢复。
 
 **停止失败按硬失败处理（D16-R01）**：离线备份会启动临时实例；备份完成后若临时实例无法被**证明**已停止（分级停止 smart/fast/kill 全部失败，crate 的 Drop 只是 best-effort、不作为停止依据），命令返回 exit 20。此时已完成的备份仍会原子改名为 `--output` 指定路径保留（不删除唯一备份成果），但命令**不报告成功**——残留 postgres 可能仍占用数据目录，请先确认并停止残留进程后再依赖该备份。
+- **实例状态判定（D07-002）**：`postmaster.pid` 存在不等于可离线。仅当 PID 已不存在（可证明 stale）时，dump 才在维护锁内**重读**状态并清理 pid 文件、启动临时实例；以下情形返回 exit 50、**保留 `postmaster.pid`**、不启动第二实例：PID 仍存活但无法证明属于本 PGDATA（如 sidecar 崩溃后残留的孤儿 postgres）、`postmaster.pid` 端口缺失/为 `0`/非法、pid 文件存在但无法解析。在线备份前同样先校验 PID 归属与端口可信，端口不可信时**不回退**任何配置端口。
 - **不覆盖旧备份**：最终输出文件已存在时 dump 拒绝执行（exit 30），请改用新的输出路径或自行移走旧文件。
 - **并发与临时文件**：同一输出路径的并发 dump 由输出级排他锁互斥（冲突方 exit 30；不同输出可并行）；在线 dump 不占 PGDATA 维护锁。临时文件使用本次任务唯一的 `<output>.<pid>-<时间戳>.partial`，成功后原子改名为最终文件；失败/中断只清理或遗留本任务临时文件，不会删除其他任务的临时文件。
 
 #### 9.4 恢复（restore）
 
 ```bash
-sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份文件路径> [--target-data-dir <新数据目录>]
+sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --database <库名> --input <备份文件路径> [--target-data-dir <新数据目录>]
 ```
 
 **重要**：sidecar 采用原子切换策略 — 先恢复到新目录再切换，全程不原地覆盖写入，避免恢复中途失败破坏原数据。按是否指定 `--target-data-dir` 分两种模式：
@@ -193,13 +198,13 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 #### 9.5 维护实例（maintenance-shell）
 
 ```bash
-sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
+sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录> --database <库名>
 ```
 
-**交互式生命周期命令**：持维护锁启动临时维护实例（主实例/sidecar 运行中会拒绝，exit 50；数据目录未初始化 exit 40；其余退出码见 9.6），实例存活期间可用 psql 反复连接、执行多条命令，结束后 sidecar 优雅停止实例并退出。临时实例就绪后 **stdout 输出一行 JSON**（与 doctor/status 同为机器可解析协议）：`psql_path` 为内置 psql 可执行文件路径，`connection_string_redacted` 为脱敏连接串（形如 `postgresql://postgres:***@127.0.0.1:<随机端口>/qtrading`，密码段固定 `***`，不输出明文密码）；连接提示、psql 命令行、密码文件位置与「按 Enter 结束」等交互信息一律走 stderr。**旧读者迁移**：本命令曾为「stdout 无输出」，依赖该旧行为的脚本须改为解析上述 JSON 字段。启动到结束的时序如下（与 sidecar 实现一致）：
+**交互式生命周期命令**：持维护锁启动临时维护实例（主实例/sidecar 运行中会拒绝，exit 50；数据目录未初始化 exit 40；其余退出码见 9.6），实例存活期间可用 psql 反复连接、执行多条命令，结束后 sidecar 优雅停止实例并退出。临时实例就绪后 **stdout 输出一行 JSON**（与 doctor/status 同为机器可解析协议）：`psql_path` 为内置 psql 可执行文件路径，`connection_string_redacted` 为脱敏连接串（形如 `postgresql://postgres:***@127.0.0.1:<随机端口>/<库名>`，库名取 `--database` 传入值，密码段固定 `***`，不输出明文密码）；连接提示、psql 命令行、密码文件位置与「按 Enter 结束」等交互信息一律走 stderr。**旧读者迁移**：本命令曾为「stdout 无输出」，依赖该旧行为的脚本须改为解析上述 JSON 字段。启动到结束的时序如下（与 sidecar 实现一致）：
 
 1. **就绪后才输出连接信息**：随机分配端口启动临时实例，内部先以 psql `select 1` 探测就绪（探测窗口约 30 秒，失败 exit 12），探测通过后才向 stdout 输出上述单行 JSON，并向 stderr 打印提示——**输出出现时实例已可连接**；若 stdout 不可写（管道断裂等），sidecar 停止临时实例并以 exit 13 退出。
-2. **提示全部走 stderr**：包含脱敏连接串（`postgresql://postgres:***@127.0.0.1:<port>/qtrading`，端口为本次随机分配）、完整 psql 命令行、密码文件位置（密码不打印明文，密码文件保护方式见 9.8），以及「完成后按 Enter 结束」提示。
+2. **提示全部走 stderr**：包含脱敏连接串（`postgresql://postgres:***@127.0.0.1:<port>/<库名>`，端口为本次随机分配，库名取 `--database`）、完整 psql 命令行、密码文件位置（密码不打印明文，密码文件保护方式见 9.8），以及「完成后按 Enter 结束」提示。
 3. **交互使用**：按提示中的 psql 命令行连接实例，或使用 stdout JSON 中的 `psql_path` 与 `connection_string_redacted`；存活期间可执行多条命令（可多次启动 psql 会话）。
 4. **结束（Enter / EOF）**：等待 stdin 出现换行（终端按 **Enter**）后结束；stdin 到达 **EOF**（管道写端关闭、重定向空输入等非交互场景）或读取错误时同样立即结束，避免永久挂起。随后临时实例被优雅停止——**sidecar 进程退出即实例已停止**；连接信息须在进程存活期间从 stdout 读取该行 JSON（进程退出后 stdout 已关闭，退出后再连接无效）。若分级停止无法**证明**实例已退出，sidecar 返回 exit 20 且**不打印「维护实例已停止」**（D16-R01）：此时不得视为维护成功，请先确认残留 postgres 后再重启应用。
 
@@ -221,7 +226,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止 smart/fast/kill 后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；临时实例（dump 离线 / restore / maintenance-shell / reset-password）停止结果不可证明时按硬失败传播：不报告维护成功，restore 禁止切换并保留恢复目录，dump 保留已完成备份；PG 未运行时 stop 幂等成功返回 0 | stop / run / dump / restore / maintenance-shell / reset-password |
 | 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败、dump 输出已存在或另一任务占用同一输出等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
-| 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
+| 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码；dump 的实例状态判定亦复用此码：活 PID 但归属/端口不可信、pid 文件无法解析时拒绝并保留 pid 文件）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
 | 60 | `POSTGRES_DIED` | 监督期间 postgres 意外退出（sidecar 不自动重启） | run |
 
 > doctor 只返回 0/2 两种退出码（见 9.2），上表其余退出码不会由 doctor 返回。

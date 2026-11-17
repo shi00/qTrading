@@ -19,7 +19,7 @@ Usage:
     # 只读统计，不发网络请求、不写库
     python scripts/collect_corpus.py --db data/corpus/news_corpus.db --stats-only
 
-退出码：成功 0；参数 / IO 异常 1。
+退出码：成功 0；参数 / IO 异常或任一请求失败（请求异常或解析失败）1。
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ from data.external.news_sources.corpus import CorpusStore  # noqa: E402 - sys.pa
 from data.external.news_sources.registry import (  # noqa: E402 - sys.path 注入后导入
     DEFAULT_RATE_LIMIT_SECONDS,
     CollectParams,
+    EnvelopeError,
     SourcePlugin,
     all_plugins,
     get_plugin,
@@ -114,13 +115,20 @@ async def _collect_source(
     cooldown_seconds: float,
     dry_run: bool,
 ) -> dict[str, Any]:
-    """采集并入库单个源；返回该源汇总（含熔断消耗统计）。"""
+    """采集并入库单个源；返回该源汇总（含熔断消耗统计）。
+
+    计数口径：``ok_requests`` 仅统计「HTTP 成功且响应通过必需 envelope 校验」的请求；
+    ``empty_responses`` 是其中解析为 0 条的**真实合法空**；``parse_failed`` 为 envelope 不符或
+    解析抛错的请求（同时计入 ``failed_requests`` 并喂给熔断器，绝不当作成功 / 真实空）。
+    """
     queries = plugin.build_queries(params)
     summary: dict[str, Any] = {
         "source": plugin.name,
         "queries": len(queries),
         "ok_requests": 0,
         "failed_requests": 0,
+        "parse_failed": 0,
+        "empty_responses": 0,
         "skipped_queries": 0,
         "circuit_opened": False,
         "inserted": 0,
@@ -146,12 +154,26 @@ async def _collect_source(
                 breaker.record_failure(exc)
                 summary["failed_requests"] += 1
             else:
-                breaker.record_success()
-                summary["ok_requests"] += 1
-                kept, proc_stats = _process_docs(plugin.parse(raw, query), plugin, indexes)
-                for key, value in proc_stats.items():
-                    summary[key] += value
-                summary["inserted"] += len(kept) if dry_run else store.add_documents(kept)
+                try:
+                    outcome = plugin.parse_page(raw, query)
+                except Exception as exc:  # noqa: BLE001  CancelledError 属 BaseException，不在此捕获（R2）
+                    breaker.record_failure(exc)
+                    summary["failed_requests"] += 1
+                    summary["parse_failed"] += 1
+                else:
+                    if outcome.status == "invalid":
+                        breaker.record_failure(EnvelopeError(f"响应不符合必需 envelope（类型 {type(raw).__name__}）"))
+                        summary["failed_requests"] += 1
+                        summary["parse_failed"] += 1
+                    else:
+                        breaker.record_success()
+                        summary["ok_requests"] += 1
+                        if outcome.status == "valid_empty":
+                            summary["empty_responses"] += 1
+                        kept, proc_stats = _process_docs(outcome.docs, plugin, indexes)
+                        for key, value in proc_stats.items():
+                            summary[key] += value
+                        summary["inserted"] += len(kept) if dry_run else store.add_documents(kept)
             if index < len(queries) - 1:
                 await _rate_limit_sleep(rate_limit)
     return summary
@@ -232,6 +254,8 @@ async def _run(args: argparse.Namespace, plugins: list[SourcePlugin]) -> int:
         indexes = _seed_indexes(store)
 
         print(f"开始采集（dry-run={args.dry_run}，限速 {args.rate_limit}s/请求）: {sources}")
+        failed_requests = 0
+        parse_failures = 0
         for plugin in plugins:
             summary = await _collect_source(
                 plugin,
@@ -243,10 +267,13 @@ async def _run(args: argparse.Namespace, plugins: list[SourcePlugin]) -> int:
                 cooldown_seconds=args.cooldown,
                 dry_run=args.dry_run,
             )
+            failed_requests += summary["failed_requests"]
+            parse_failures += summary["parse_failed"]
             circuit = "，已熔断跳过剩余请求" if summary["circuit_opened"] else ""
             print(
-                f"[{summary['source']}] 请求 {summary['ok_requests']} 成功 / {summary['failed_requests']} 失败"
-                f"{circuit}；保留 {summary['kept']}（空 {summary['dropped_empty']}、例行 {summary['dropped_routine']}、"
+                f"[{summary['source']}] 请求成功 {summary['ok_requests']}（空页 {summary['empty_responses']}）"
+                f" / 失败 {summary['failed_requests']}（解析失败 {summary['parse_failed']}）{circuit}；"
+                f"保留 {summary['kept']}（清洗为空 {summary['dropped_empty']}、例行 {summary['dropped_routine']}、"
                 f"近重复 {summary['dropped_dup']}）；入库 {summary['inserted']}"
             )
 
@@ -254,6 +281,12 @@ async def _run(args: argparse.Namespace, plugins: list[SourcePlugin]) -> int:
             _print_stats(store)
         else:
             print("dry-run：未写入语料库")
+        if failed_requests:
+            print(
+                f"错误：{failed_requests} 个请求失败（其中解析失败 {parse_failures}；解析失败不计为成功、未入库）",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 

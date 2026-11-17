@@ -191,6 +191,10 @@ pub fn doctor_json(data_dir: &Path) -> serde_json::Value {
     })
 }
 
+/// 集成测试使用的业务库名（与 `run` 默认库一致；维护命令已不提供默认库，
+/// 必须显式传 --database，D07-005）。
+pub const TEST_DATABASE: &str = "qtrading";
+
 /// 执行 `dump` 命令，返回 exit code。
 #[allow(dead_code)]
 pub fn dump_sidecar(data_dir: &Path, output_path: &Path) -> u8 {
@@ -198,6 +202,8 @@ pub fn dump_sidecar(data_dir: &Path, output_path: &Path) -> u8 {
         .arg("dump")
         .arg("--data-dir")
         .arg(data_dir)
+        .arg("--database")
+        .arg(TEST_DATABASE)
         .arg("--output")
         .arg(output_path)
         .output()
@@ -212,6 +218,8 @@ pub fn dump_sidecar_with_stderr(data_dir: &Path, output_path: &Path) -> (u8, Str
         .arg("dump")
         .arg("--data-dir")
         .arg(data_dir)
+        .arg("--database")
+        .arg(TEST_DATABASE)
         .arg("--output")
         .arg(output_path)
         .output()
@@ -229,6 +237,8 @@ pub fn restore_sidecar(data_dir: &Path, input_path: &Path) -> u8 {
         .arg("restore")
         .arg("--data-dir")
         .arg(data_dir)
+        .arg("--database")
+        .arg(TEST_DATABASE)
         .arg("--input")
         .arg(input_path)
         .output()
@@ -243,6 +253,8 @@ pub fn restore_sidecar_with_output(data_dir: &Path, input_path: &Path) -> (u8, S
         .arg("restore")
         .arg("--data-dir")
         .arg(data_dir)
+        .arg("--database")
+        .arg(TEST_DATABASE)
         .arg("--input")
         .arg(input_path)
         .output()
@@ -261,6 +273,8 @@ pub fn restore_sidecar_with_stderr(data_dir: &Path, input_path: &Path) -> (u8, S
         .arg("restore")
         .arg("--data-dir")
         .arg(data_dir)
+        .arg("--database")
+        .arg(TEST_DATABASE)
         .arg("--input")
         .arg(input_path)
         .output()

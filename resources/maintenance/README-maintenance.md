@@ -25,6 +25,7 @@
 
 ```cmd
 cd "<安装目录>\resources\maintenance"
+set QTRADING_PG_DATABASE=<库名>
 qtrading-db-maintenance.bat <command> [args]
 ```
 
@@ -32,8 +33,11 @@ qtrading-db-maintenance.bat <command> [args]
 
 ```bash
 cd "<安装目录>/resources/maintenance"
-./qtrading-db-maintenance.sh <command> [args]
+./qtrading-db-maintenance.sh --database <库名> <command> [args]
+# 或：export QTRADING_PG_DATABASE=<库名>
 ```
+
+> `<库名>` 必须与应用配置 `embedded_pg_database` 一致（默认 `qtrading`），详见「业务库名（必填）」。
 
 ## 命令列表
 
@@ -41,10 +45,10 @@ cd "<安装目录>/resources/maintenance"
 |------|------|------|
 | `status` | 查询 embedded PostgreSQL 状态（state.json + postmaster.pid 活性 + 锁探测） | 无 |
 | `doctor` | 诊断数据目录/版本/锁/上次异常退出，输出 doctor JSON | 无 |
-| `dump <file>` | 备份数据库到文件（PostgreSQL custom format；运行中实例直连，离线时启动临时实例）；stdout 无输出，完成提示（`备份完成：<输出路径>`）走 stderr | 输出文件路径 |
-| `restore <file>` | 从备份文件恢复；默认采用原子切换（成功后替换当前数据目录，原目录改名为 `.bak-<时间戳>` 保留），详见「安全注意事项」第 2 条；成功后向 stdout 输出一行目标数据目录路径 | 输入文件路径 |
+| `dump <file>` | 备份**指定业务库**到文件（PostgreSQL custom format；运行中实例直连，离线时启动临时实例）；stdout 无输出，完成提示（`备份完成：<输出路径>`）走 stderr | `--database <库名>`（必填）、输出文件路径 |
+| `restore <file>` | 从备份文件恢复**指定业务库**；默认采用原子切换（成功后替换当前数据目录，原目录改名为 `.bak-<时间戳>` 保留），详见「安全注意事项」第 2 条；成功后向 stdout 输出一行目标数据目录路径 | `--database <库名>`（必填）、输入文件路径 |
 | `stop` | 停止运行中的 PostgreSQL（分级停止：smart 25s → fast 5s → kill） | 无 |
-| `maintenance-shell` | 启动临时维护实例，在 stdout 输出单行 JSON（`psql_path` 与 `connection_string_redacted`，密码段固定 `***`）；连接提示、按 Enter 结束等交互信息走 stderr | 无 |
+| `maintenance-shell` | 启动临时维护实例，在 stdout 输出单行 JSON（`psql_path` 与 `connection_string_redacted`，密码段固定 `***`）；连接串/psql 提示中的库名取 `--database` 传入值 | `--database <库名>`（必填） |
 | `version` | 显示 sidecar 版本与构建元数据 | 无 |
 | `help` | 显示帮助 | 无 |
 
@@ -56,7 +60,7 @@ cd "<安装目录>/resources/maintenance"
 
 - **`dump`**：stdout 无输出；备份完成时 stderr 打印 `备份完成：<输出路径>`。
 - **`restore`**：成功后 stdout 输出一行目标数据目录（绝对路径，分隔符统一为 `/`，Windows 的 `\` 亦归一化）；默认原子切换时报告当前数据目录，显式 `--target-data-dir` 时报告该目标目录。失败时不输出该行——含临时实例停止结果不可证明的情形（恢复成功为 exit 20；恢复同时失败则保留原错误码，如 exit 30；均不切换、不清理、不报告成功，见「安全注意事项」第 2 条）。
-- **`maintenance-shell`**：临时实例就绪后 stdout 输出一行 JSON，字段为 `psql_path`（内置 psql 可执行文件路径）与 `connection_string_redacted`（形如 `postgresql://postgres:***@127.0.0.1:<随机端口>/qtrading`，密码段固定 `***`，不输出明文密码）；连接串、psql 命令行、密码文件位置及按 Enter 结束等提示均走 stderr。按 Enter 或 stdin 到达 EOF 后停止实例并退出。
+- **`maintenance-shell`**：临时实例就绪后 stdout 输出一行 JSON，字段为 `psql_path`（内置 psql 可执行文件路径）与 `connection_string_redacted`（形如 `postgresql://postgres:***@127.0.0.1:<随机端口>/<库名>`，库名取 `--database` 传入值，密码段固定 `***`，不输出明文密码）；连接串、psql 命令行、密码文件位置及按 Enter 结束等提示均走 stderr。按 Enter 或 stdin 到达 EOF 后停止实例并退出。
 
 失败时按 sidecar 退出码语义返回：2 参数错误、10 binaries 安装失败、11 initdb 失败、12 临时实例启动失败、13 `maintenance-shell` JSON 输出失败、16 密码文件不可用、20 停止失败（临时实例停止结果不可证明）、30 备份/恢复失败、40 数据目录异常、50 维护锁冲突或该 PGDATA 存在活实例（具体以各命令实际执行路径为准）。旧版本文档曾描述 `maintenance-shell` 的 stdout 无输出，依赖该旧行为的脚本需改为解析上述 JSON。
 
@@ -77,6 +81,31 @@ cd "<安装目录>/resources/maintenance"
 ```
 
 > 若曾在应用配置中自定义 `embedded_pg_data_root`（数据目录）或 `embedded_pg_log_dir`（日志目录），脚本的上述默认路径不再适用：`status` 会指向空目录并显示 `not_initialized`，`doctor` 会报 `initialized: false`（`state_file: missing`），`restore` 也会作用在错误目录。此时一律直接调用 sidecar binary 并显式传 `--data-dir`。内置 PostgreSQL 主版本以安装包随附的 sidecar 为准（当前默认 `16`），升级主版本后路径中的版本号需相应调整。
+
+## 业务库名（必填）
+
+`dump` / `restore` / `maintenance-shell` 必须显式指定业务库名（sidecar `--database`）。脚本**不内置默认库名**，也不会静默回落到 `qtrading`：否则自定义 `embedded_pg_database` 的部署会把备份/恢复作用到错误库——轻则得到空备份，重则把旧备份写进非应用库却误以为已回退。
+
+取值必须与应用配置 `embedded_pg_database` 一致：
+
+- **默认部署**：`embedded_pg_database = qtrading`
+- **自定义部署**：填写应用配置中的 `embedded_pg_database`（设置界面 / 配置文件），不要凭安装包默认值猜测
+- **Linux / macOS**：`--database <库名>` 或 `export QTRADING_PG_DATABASE=<库名>`（前置参数优先）
+- **Windows**：`set QTRADING_PG_DATABASE=<库名>`
+
+`status` / `doctor` / `stop` / `version` 不访问业务库，无需提供库名。
+
+脚本与 sidecar 分层校验：脚本先校验必填、安全标识符、维护库/测试库误用，sidecar 再对库名做标识符白名单校验（`[A-Za-z_][A-Za-z0-9_]*`，长度 ≤ 63）。脚本拒绝以下误用：
+
+- 维护库 `postgres` / `template0` / `template1`：不承载业务数据，误用会得到空备份或恢复失败
+- 测试库 `test` / `test_*` / `*_test`（含测试配置常用的 `test_astock`）：避免生产维护流程误碰测试数据
+
+### 升级 / 回退 / 自定义库分流
+
+1. **升级前保护**：按当前配置库名执行 `dump` 建立备份。Linux/macOS：`--database qtrading dump <备份文件>`；Windows：先 `set QTRADING_PG_DATABASE=qtrading`，再 `dump <备份文件>`（自定义库换成实际库名）。
+2. **升级后回退**：`restore` 必须带**与备份时相同**的库名。若升级过程修改了 `embedded_pg_database`，先把应用配置改回备份库名再 `restore`；恢复到升级后的新库名不会被应用读取，只会造成“回退已成功”的假象。恢复后保留 `.bak-*` 目录作为回滚点，确认应用可启动且数据正确后再清理。
+3. **自定义库日常维护**：每次 `dump` / `restore` / `maintenance-shell` 都带同一个自定义库名；不要使用 `qtrading`，否则备份为空/恢复落空。
+4. **跨库改名/导入**：脚本不做库名重写。需要把数据导入另一库名时，先 `maintenance-shell` 用 psql 导出/导入，或显式创建目标库后 `restore` 并通过应用配置指向它；不要仅改 `--database` 就期待原库数据被“搬走”。
 
 ## 超级用户名
 
@@ -105,6 +134,7 @@ cd "<安装目录>/resources/maintenance"
 | `doctor` 报告 `state_file: corrupted` | state.json 损坏（异常退出/磁盘错误） | 按 doctor 输出指引修复，必要时从备份恢复 |
 | `stop` / `restore` / `maintenance-shell` / `reset-password` 返回 exit 50 | 维护锁被持有（qTrading 或另一维护进程正在使用该 PGDATA），或该 PGDATA 仍有活实例（如 sidecar 崩溃/被 kill 后残留的孤儿 postgres） | 先正常关闭 qTrading（必要时先 `stop`）再试；若应用已关闭仍返回 50，按 sidecar 提示执行 `stop --data-dir <数据目录>` 确认实例已停止后重试；若为残留的维护进程/维护实例，结束该进程后重试 |
 | `dump`/`restore` 等返回 exit 16，报「密码文件缺失…走 reset-password 流程」 | `runtime/password` 缺失、为空或不可解密（跨机器/账号复制后 DPAPI 无法解密）；数据目录本身未必损坏 | 先 `doctor` 确认 `issues` 无数据损坏项，再按 `docs/guides/how-to.md` §9.9 走 reset-password 分流（注意：此时 `dump` 补做备份也不可用，恢复只能依赖既有备份文件） |
+| `dump` / `restore` / `maintenance-shell` 报「business database name is required」或「invalid database」 | 未提供 `--database` / `QTRADING_PG_DATABASE`，或库名不是安全标识符 | 按「业务库名（必填）」传入与应用配置 `embedded_pg_database` 一致的库名（默认 `qtrading`）；`status` / `doctor` / `stop` / `version` 不需要库名 |
 | `dump` / `restore` 返回 exit 30 | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、数据目录未初始化（`dump` 无可备份数据）、`--target-data-dir` 目标非空、`pg_dump`/`pg_restore` 失败、恢复目录切换失败 | 核对输入文件路径与完整性；`.partial` 仅在未保留为备份成果时清理；恢复临时目录仅在**临时实例停止已证明**时自动清理，停止未证明（含恢复本身失败）时保留目录且仍返回原错误码，切换阶段失败的保留物处理见「安全注意事项」第 2 条 |
 | `restore` 返回 exit 20 | 恢复数据已写入但临时实例停止结果不可证明（停止状态未确认） | 不切换、不清理、不报告成功；`.restore-*` 目录保留且是唯一恢复成果，不得手动删除——先确认无 postgres 进程占用，再按 `docs/guides/how-to.md` §9.9.2 评估恢复使用或后续处理 |
 | 应用启动时 sidecar `run` 返回 exit 40 / `doctor` `issues` 报 pg_control/WAL 损坏、关键文件缺失 | 数据目录损坏 | 按 `docs/guides/how-to.md` §9.9.2 恢复路径处理：先确认备份文件与 `.bak-*`/`.restore-*` 目录等恢复点，再执行 restore；若密码文件同时不可用且无法 reset-password，则无自动恢复路径——移走损坏目录后由应用全新初始化，库内数据不可恢复 |

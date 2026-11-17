@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
+from data.domain_services.trade_calendar_service import CalendarCoverage
 from strategies.backtest.data_provider import BacktestDataProvider
 
 pytestmark = pytest.mark.unit
@@ -24,16 +25,16 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _autouse_mock_trade_calendar(monkeypatch) -> AsyncMock:
-    """D3-M2: preload_range 会调用 TradeCalendarService.get_trade_dates 计算区间"全市场交易日"全集。
+    """D3-M2: preload_range 会调用 TradeCalendarService 计算区间"全市场交易日"全集。
 
     默认兜底 patch 为返回与 screening_data 覆盖一致的交易日（20240102/20240103 → 无缺口 → GOLD），
     避免走真实日历（API/offline 依赖 DB）导致既有 preload 断言不稳定。
-    用例可按需通过返回值 AsyncMock 覆写（如抛异常）。autouse 作用于全模块，非 preload 用例不受影响。
+    用例可按需通过返回值 AsyncMock 覆写（如抛异常、覆盖未知）。autouse 作用于全模块。
     """
     from data.domain_services.trade_calendar_service import TradeCalendarService
 
-    mock = AsyncMock(return_value=[date(2024, 1, 2), date(2024, 1, 3)])
-    monkeypatch.setattr(TradeCalendarService, "get_trade_dates", mock)
+    mock = AsyncMock(return_value=CalendarCoverage(dates=[date(2024, 1, 2), date(2024, 1, 3)], complete=True))
+    monkeypatch.setattr(TradeCalendarService, "get_trade_dates_with_coverage", mock)
     return mock
 
 
@@ -943,13 +944,16 @@ class TestBacktestQualityProxy:
         from data.persistence.quality_gate import QualityTier
 
         # 日历给出 5 个交易日；daily_quotes 轻量覆盖查询仅覆盖其中 3 个 → 缺 2 个
-        _autouse_mock_trade_calendar.return_value = [
-            date(2024, 1, 2),
-            date(2024, 1, 3),
-            date(2024, 1, 4),
-            date(2024, 1, 5),
-            date(2024, 1, 8),
-        ]
+        _autouse_mock_trade_calendar.return_value = CalendarCoverage(
+            dates=[
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+                date(2024, 1, 4),
+                date(2024, 1, 5),
+                date(2024, 1, 8),
+            ],
+            complete=True,
+        )
         cache = MagicMock()
         cache.quote_dao.get_quote_trade_dates = AsyncMock(
             return_value={date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)}
@@ -971,6 +975,83 @@ class TestBacktestQualityProxy:
         cache.quote_dao.get_quote_trade_dates.assert_awaited_once_with(date(2024, 1, 1), date(2025, 2, 4))
         # UIR-F11-005: 覆盖核实成功且有真实缺口 → 只报缺口，不得叠加「未核实」
         assert not any(w.startswith("[range_quality_coverage_unverified]") for w in provider.range_preload_warnings)
+
+    @pytest.mark.asyncio
+    async def test_internal_calendar_gap_against_quotes_is_reported(self, _autouse_mock_trade_calendar) -> None:
+        """D10-002: 交易日历补齐内部缺日 B 后，quotes 仅 A/C → 缺口 1/3 必须可见。
+
+        修复前日历只返回 DB 命中的 {A,C}，与 quotes 同集 → 误判「无缺口」。
+        """
+        from data.persistence.quality_gate import QualityTier
+
+        _autouse_mock_trade_calendar.return_value = CalendarCoverage(
+            dates=[date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+            complete=True,
+        )
+        cache = MagicMock()
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(return_value=[date(2024, 1, 2), date(2024, 1, 4)])
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 4))
+
+        assert any(
+            w.startswith("[range_quality_gaps]") and "1 of 3" in w and "20240103" in w
+            for w in provider.range_preload_warnings
+        )
+        assert provider._quality_proxy._scan_missing_dates == frozenset({"20240103"})
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
+        assert not any(w.startswith("[range_quality_coverage_unverified]") for w in provider.range_preload_warnings)
+
+    @pytest.mark.asyncio
+    async def test_incomplete_calendar_coverage_marks_unverified(self, _autouse_mock_trade_calendar) -> None:
+        """D10-002/R21: 日历内部/尾端缺日无法判定 → 显式「覆盖未核实」，绝不无告警。
+
+        残缺的期望交易日全集与 quotes 同集时不得当作「无缺口」。
+        """
+        from data.persistence.quality_gate import QualityTier
+
+        _autouse_mock_trade_calendar.return_value = CalendarCoverage(
+            dates=[date(2024, 1, 2)],
+            complete=False,
+            unresolved_days=(date(2024, 1, 3),),
+        )
+        cache = MagicMock()
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(return_value=[date(2024, 1, 2)])
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        unverified = [w for w in provider.range_preload_warnings if w.startswith("[range_quality_coverage_unverified]")]
+        assert len(unverified) == 1
+        assert "1 个自然日无法判定" in unverified[0]
+        assert "区间缺口状态未知" in unverified[0]
+        assert not any(w.startswith("[range_quality_gaps]") for w in provider.range_preload_warnings)
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
 
     @pytest.mark.asyncio
     async def test_wide_range_coverage_query_failure_keeps_default_gold(self) -> None:
@@ -1779,6 +1860,154 @@ class TestBacktestDelistingAsOfApproximation:
         assert provider.delisting_flag_seen is True
 
 
+class TestBacktestStAsOfUnknown:
+    """D12-002 / R21+R24：历史 ST 状态未知（名称回退当前快照）的检测与重置语义。
+
+    覆盖「当前/历史 ST 两向 × name-history 覆盖齐/缺」四组；单日（逐日降级）与区间预载
+    （build_context 切片）两条路径必须一致：前者经 ``get_screening_data``，后者经
+    ``get_fundamental_screening_data_range`` 预载，检测点同为 ``_build_historical_screening_context``。
+    仅在覆盖缺失（st_name_source='current_snapshot'）时置位——此时 SQL 已把 is_st 置为 NULL
+    （未知，不回退当前名称布尔值），由 engine 产出 ``st_asof_approximation`` 声明当期近似。
+    """
+
+    _AUX = (
+        ("quote_dao", "get_northbound"),
+        ("market_dao", "get_moneyflow_hsgt"),
+        ("quote_dao", "get_moneyflow"),
+        ("quote_dao", "get_top_list"),
+        ("quote_dao", "get_block_trade"),
+    )
+
+    def _make_daily_cache(self, screening_data: pd.DataFrame) -> MagicMock:
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=screening_data)
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        for dao_name, method in self._AUX:
+            setattr(getattr(cache, dao_name), method, AsyncMock(return_value=pd.DataFrame()))
+        return cache
+
+    def _make_range_cache(self, range_df: pd.DataFrame) -> MagicMock:
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=range_df)
+        for dao_name, method in self._AUX:
+            setattr(getattr(cache, dao_name), f"{method}_range", AsyncMock(return_value=pd.DataFrame()))
+        return cache
+
+    @staticmethod
+    def _screening_df(*, is_st: bool | None, st_name_source: str, is_st_current_snapshot: bool | None) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240102"],
+                "close": [10.0],
+                "is_tradable": [True],
+                "is_st": [is_st],
+                "st_name_source": [st_name_source],
+                "is_st_current_snapshot": [is_st_current_snapshot],
+            }
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("is_st", "st_name_source", "is_st_current_snapshot", "expected"),
+        [
+            # 覆盖齐 + 历史 ST（is_st=True）：as-of 已知，不属近似。
+            (True, "history", True, False),
+            # 覆盖齐 + 历史非 ST（is_st=False）：as-of 已知，不属近似。
+            (False, "history", False, False),
+            # 覆盖缺 + 当前名称 ST（is_st 未知）：历史候选不得按当前名称排除，须声明近似。
+            (None, "current_snapshot", True, True),
+            # 覆盖缺 + 当前名称非 ST（is_st 未知）：同样不得当作非 ST，须声明近似。
+            (None, "current_snapshot", False, True),
+        ],
+    )
+    async def test_daily_path_flag(
+        self,
+        is_st: bool | None,
+        st_name_source: str,
+        is_st_current_snapshot: bool | None,
+        expected: bool,
+    ) -> None:
+        """四组：当前/历史 ST 两向 × 覆盖齐/缺（单日逐日降级路径）。"""
+        cache = self._make_daily_cache(
+            self._screening_df(
+                is_st=is_st,
+                st_name_source=st_name_source,
+                is_st_current_snapshot=is_st_current_snapshot,
+            )
+        )
+        provider = BacktestDataProvider(cache)
+        assert provider.st_name_fallback_seen is False
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.st_name_fallback_seen is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("is_st", "st_name_source", "is_st_current_snapshot", "expected"),
+        [
+            (True, "history", True, False),
+            (False, "history", False, False),
+            (None, "current_snapshot", True, True),
+            (None, "current_snapshot", False, True),
+        ],
+    )
+    async def test_range_preload_path_matches_daily(
+        self,
+        is_st: bool | None,
+        st_name_source: str,
+        is_st_current_snapshot: bool | None,
+        expected: bool,
+    ) -> None:
+        """单日/预载一致：区间预载 + build_context 切片与逐日路径结果相同。"""
+        cache = self._make_range_cache(
+            self._screening_df(
+                is_st=is_st,
+                st_name_source=st_name_source,
+                is_st_current_snapshot=is_st_current_snapshot,
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 2))
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.st_name_fallback_seen is expected
+
+    @pytest.mark.asyncio
+    async def test_flag_false_when_column_missing(self) -> None:
+        """旧数据源无 st_name_source 列时不置位（保持向后兼容，不制造噪音）。"""
+        cache = self._make_daily_cache(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                    "is_st": [False],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.st_name_fallback_seen is False
+
+    @pytest.mark.asyncio
+    async def test_preload_range_resets_flag(self) -> None:
+        """preload_range 起始重置 flag，避免跨多次回测残留旧状态。"""
+        cache = self._make_range_cache(pd.DataFrame())
+        provider = BacktestDataProvider(cache)
+        provider._saw_st_name_fallback = True
+
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider.st_name_fallback_seen is False
+
+
 class TestDefaultHistoryContext:
     """UIR-F11-001: 未注入 data_processor 时默认装配最小历史数据上下文（cache + 日历）。"""
 
@@ -1832,3 +2061,100 @@ class TestDefaultHistoryContext:
         dp = context.get("data_processor")
         assert dp.cache is cache
         assert dp.trade_calendar is provider.history_context.trade_calendar
+
+
+class TestTableFailureIdentity:
+    """D12-001：逐表保留失败身份，区分「DB 失败」与「合法稀疏空日」。"""
+
+    def _make_cache(self) -> MagicMock:
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True], "close": [10.0]})
+        )
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True], "roe": [12.0]})
+        )
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_required_screening_query_failure_marks_failure(self) -> None:
+        cache = self._make_cache()
+        cache.screener_dao.get_screening_data = AsyncMock(side_effect=RuntimeError("DB read failed"))
+
+        provider = BacktestDataProvider(cache)
+        context = await provider.build_context(date(2024, 1, 2))
+
+        diagnostics = context.get("_diagnostics", {})
+        assert "screening_data" in diagnostics["required_failures"]
+        assert "DB read failed" in diagnostics["required_failures"]["screening_data"]
+        assert diagnostics["table_status"]["screening_data"]["ready"] is False
+
+    @pytest.mark.asyncio
+    async def test_required_screening_legit_empty_is_not_failure(self) -> None:
+        cache = self._make_cache()
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        context = await provider.build_context(date(2024, 1, 2))
+
+        diagnostics = context.get("_diagnostics", {})
+        assert diagnostics["required_failures"] == {}
+        assert diagnostics["table_status"]["screening_data"] == {"ready": False, "rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_aux_legit_empty_is_not_failure(self) -> None:
+        """龙虎榜等低频表合法空日：ready=True/rows=0，不产生降级告警。"""
+        cache = self._make_cache()
+        provider = BacktestDataProvider(cache)
+
+        context = await provider.build_context(date(2024, 1, 2))
+
+        status = context.get("_diagnostics", {})["table_status"]["top_list"]
+        assert status["ready"] is True
+        assert status["rows"] == 0
+        assert "failed" not in status
+        assert provider.range_preload_warnings == []
+
+    @pytest.mark.asyncio
+    async def test_aux_daily_failure_marks_failed_and_warns_once(self) -> None:
+        cache = self._make_cache()
+        cache.quote_dao.get_top_list = AsyncMock(side_effect=RuntimeError("read timeout"))
+
+        provider = BacktestDataProvider(cache)
+        context = await provider.build_context(date(2024, 1, 2))
+        await provider.build_context(date(2024, 1, 3))
+
+        status = context.get("_diagnostics", {})["table_status"]["top_list"]
+        assert status["failed"] is True
+        assert "read timeout" in status["error"]
+        warnings = [w for w in provider.range_preload_warnings if "top_list" in w]
+        assert len(warnings) == 1
+        assert "read timeout" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_preloaded_failure_falls_back_and_marks_required_failure(self) -> None:
+        """预载失败（_preloaded[key]=None）→ 逐日重试仍失败时保留失败身份。"""
+        cache = self._make_cache()
+        cache.screener_dao.get_screening_data = AsyncMock(side_effect=RuntimeError("daily retry failed"))
+
+        provider = BacktestDataProvider(cache)
+        provider._preloaded = {
+            "screening_data": None,
+            "fundamental_screening_data": None,
+            "northbound_data": None,
+            "northbound_flow_data": None,
+            "moneyflow_data": None,
+            "top_list": None,
+            "block_trade": None,
+        }
+
+        context = await provider.build_context(date(2024, 1, 2))
+
+        failures = context.get("_diagnostics", {})["required_failures"]
+        assert "screening_data" in failures
+        assert "daily retry failed" in failures["screening_data"]

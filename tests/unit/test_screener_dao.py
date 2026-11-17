@@ -1265,7 +1265,7 @@ class TestScreenerDaoStockNameHistory:
         assert "stock_name_history" in sql
         assert "COALESCE(nh.name, b.name) AS name" in sql
         assert "AS is_st" in sql
-        assert "UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%'" in sql
+        assert "UPPER(nh.name) LIKE '%ST%'" in sql
 
     def test_daily_name_lateral_asof_uses_param5(self):
         """单日版 name-history LATERAL 以 $5 为 as-of，且先于 suspend_d JOIN。"""
@@ -1281,7 +1281,7 @@ class TestScreenerDaoStockNameHistory:
         assert "stock_name_history" in sql
         assert "COALESCE(nh.name, b.name) AS name" in sql
         assert "AS is_st" in sql
-        assert "UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%'" in sql
+        assert "UPPER(nh.name) LIKE '%ST%'" in sql
 
     def test_range_name_lateral_asof_uses_cal_date(self):
         """区间版 name-history LATERAL 按 cal.cal_date 逐交易日 as-of，先于 suspend_d JOIN。"""
@@ -1358,16 +1358,45 @@ class TestScreenerDaoExcludeSt:
             assert "COALESCE(nh.name, b.name) AS name" in sql
 
     def test_is_st_upper_derived_column(self):
-        """is_st 派生列采用 UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%'。
+        """is_st 派生列在 name-history 命中时取 UPPER(nh.name) LIKE '%ST%'（D12-002 三态）。
 
         UPPER 覆盖 *ST/S*ST，其 ST 名称匹配方式与 utils.limit_status.get_limit_pct 的 ST 识别一致；
-        COALESCE 双回退：有 as-of 记录用历史名判定，无记录回退当前名称，空表不误判全市场非 ST。
+        无 as-of 覆盖行时返回 NULL（未知），不得回退当前名称冒充历史取值（R21）。
         注意 is_st 为全板块名称标记，不等价于 get_limit_pct 的涨跌停幅度（后者 ST→5% 仅限主板，
         创业板/科创板 ST 仍为 20%），限幅判定须经 utils.limit_status.get_limit_pct 按板块区分。
         """
         dao = ScreenerDao(MagicMock())
         for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
-            assert "CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st" in sql
+            assert "CASE WHEN nh.name IS NOT NULL THEN (UPPER(nh.name) LIKE '%ST%') ELSE NULL END AS is_st" in sql
+            assert "CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END" not in sql
+
+    def test_st_name_source_column_exposed(self):
+        """D12-002: SQL 必须透出 ST 判定的名称来源（history / current_snapshot）。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "CASE WHEN nh.name IS NOT NULL THEN 'history' ELSE 'current_snapshot' END AS st_name_source" in sql
+
+    def test_is_st_current_snapshot_column_exposed(self):
+        """D12-002: 当前快照名称标记单独成列，供实盘 as_of=当前快照时补齐 is_st（回测不得使用）。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert (
+                "CASE WHEN b.name IS NOT NULL THEN (UPPER(b.name) LIKE '%ST%') ELSE NULL END"
+                " AS is_st_current_snapshot" in sql
+            )
+
+    def test_st_columns_identical_between_daily_and_range(self):
+        """D12-002: 单日与区间模板的 ST 三列必须同源（同一 _st_columns_sql 正本，逐字节一致）。"""
+        dao = ScreenerDao(MagicMock())
+        daily = dao._build_screening_sql()
+        range_sql = dao._build_screening_sql_range()
+
+        def _st_block(sql: str) -> str:
+            start = sql.index("CASE WHEN nh.name IS NOT NULL THEN (UPPER(nh.name) LIKE '%ST%')")
+            end = sql.index("AS is_st_current_snapshot", start) + len("AS is_st_current_snapshot")
+            return sql[start:end]
+
+        assert _st_block(daily) == _st_block(range_sql)
 
 
 class TestScreenerDaoDelistingFlag:

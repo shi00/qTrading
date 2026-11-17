@@ -109,9 +109,10 @@ class TestApplyExcludeSt:
         assert _StubStrategy().exclude_st is True
 
     def test_null_is_st_not_excluded_not_counted(self):
-        """NULL is_st（stock_basic.name 可空）按「非 ST」处理：不排除且不计数。
+        """NULL is_st 为未知（D12-002：name-history 无覆盖/name 可空）：不排除且不计数。
 
-        ``fill_null(False)`` 防护：避免 NULL 行被 ``~pl.col()`` 过滤掉造成静默漏股。
+        ``fill_null(False)`` 防护：避免 NULL 行被 ``~pl.col()`` 过滤掉造成静默漏股
+        （历史回放中的该未知由回测结果 st_asof_approximation 声明，R24）。
         """
         s = _StubStrategy()
         lf = _make_lf(st_flags=[False, None, True])
@@ -119,9 +120,77 @@ class TestApplyExcludeSt:
         result = s._apply_exclude_st(lf, ctx).collect()
         assert len(result) == 2
         assert "000002.SZ" in result["ts_code"].to_list()
-        warnings = ctx.get("warnings", [])
-        assert len(warnings) == 1
-        assert warnings[0].params == {"count": 1}
+
+    def test_all_null_is_st_string_inference_not_crash(self):
+        """D12-002 dtype 健壮性：is_st 全 NULL 时 pandas object 列经 pl.from_pandas
+        被推断为 String，直接作谓词会抛 "filter predicate must be of type Boolean, got
+        String"（E2E 回测 flow 曾因此挂死）。显式 cast 后应保留全部行且不计数。"""
+        s = _StubStrategy()
+        # 模拟 E2E 场景：DB 全 NULL → pd.DataFrame object 列全 None → pl.from_pandas → String
+        pdf = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600001.SS"],
+                "name": ["平安银行", "万科A", "*ST 某某"],
+                "close": [10.0, 20.0, 5.0],
+                "is_st": [None, None, None],
+            }
+        )
+        lf = pl.from_pandas(pdf).lazy()
+        assert lf.collect_schema()["is_st"] == pl.String  # 复现 dtype 推断前提
+        ctx: dict = {}
+        result = s._apply_exclude_st(lf, ctx).collect()
+        assert len(result) == 3  # NULL=未知：全保留
+        assert ctx.get("warnings", []) == []  # 不计数
+
+    def test_string_typed_is_st_flags_still_excluded(self):
+        """is_st 非 Boolean dtype（全 NULL object 列被推断为 String）时跳过排除：
+        无任何已知布尔值 → 无可排除行，全部保留且不计数（polars 不支持
+        String→Boolean cast，fail-safe 与 NULL=未知语义一致）。"""
+        s = _StubStrategy()
+        pdf = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "600001.SS"],
+                "name": ["平安银行", "*ST 某某"],
+                "close": [10.0, 5.0],
+                "is_st": ["false", "true"],
+            }
+        )
+        lf = pl.from_pandas(pdf).lazy()
+        ctx: dict = {}
+        result = s._apply_exclude_st(lf, ctx).collect()
+        assert len(result) == 2  # 非 Boolean dtype：视为全未知，全保留
+        assert ctx.get("warnings", []) == []
+
+    def test_unknown_asof_st_not_excluded_by_current_snapshot_flag(self):
+        """D12-002: as-of ST 未知（is_st=NULL）的历史候选不得按当前名称标记被排除。
+
+        覆盖缺 + 当前名称含 ST 时，旧口径（COALESCE 回退当前名称）会得到 is_st=True 而把
+        该历史候选整体剔除（前视/幸存者偏差）；新口径 is_st 为 NULL → 保留且不计数，
+        近似由回测结果 st_asof_approximation 声明。
+        """
+        rows = [
+            {
+                "ts_code": "000001.SZ",
+                "name": "平安银行",
+                "close": 10.0,
+                "is_st": False,
+                "st_name_source": "history",
+                "is_st_current_snapshot": False,
+            },
+            {
+                "ts_code": "600002.SS",
+                "name": "*ST 某某",
+                "close": 5.0,
+                "is_st": None,
+                "st_name_source": "current_snapshot",
+                "is_st_current_snapshot": True,
+            },
+        ]
+        s = _StubStrategy()
+        ctx: dict = {}
+        result = s._apply_exclude_st(pl.DataFrame(rows).lazy(), ctx).collect()
+        assert result["ts_code"].to_list() == ["000001.SZ", "600002.SS"]
+        assert ctx.get("warnings") is None
 
 
 def _make_delisting_lf(delisting_flags: list[bool | None] | None = None) -> pl.LazyFrame:

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
-from typing import ClassVar, Literal
+from typing import ClassVar, Final, Literal
 
 import polars as pl
 
@@ -48,6 +48,9 @@ class DataWarning:
         # R24 当期近似：区间回放的退市整理期排除口径使用当前名称/delist_date 快照，
         # name-history 缺覆盖时可能存在前视（screener_dao._delisting_flag_expr）。
         "delisting_asof_approximation",
+        # D12-002 / R24：区间回放的 ST 排除口径对 name-history 无覆盖标的为**未知**
+        # （is_st=NULL，不回退当前名称冒充历史取值），结果须显式声明该口径为当期近似。
+        "st_asof_approximation",
         # UIR-X01-105 / R21：复权因子未知（adj_factor 全空或基准为 0）。
         # 未知 ≠ 合法的恒等复权：这些标的的复权价不可信（撮合层拒绝成交、IC 排除），
         # 结果必须标注，不得静默把未复权价当复权价使用。
@@ -148,6 +151,8 @@ class WarningCategory:
         "range_preload_error": "performance_path",
         "trade_dates_truncated": "data_quality",
         "delisting_asof_approximation": "asof_approximation",
+        # D12-002：历史 ST 判定未知（name-history 无覆盖）→ 方法学声明，不升级可信度级别。
+        "st_asof_approximation": "asof_approximation",
         # UIR-X01-105：复权因子未知 → data_quality（未知按不可信处理，R21 fail-closed）。
         "qfq_adjustment_unknown": "data_quality",
     }
@@ -338,6 +343,18 @@ class BacktestConfig:
         )
 
 
+class BacktestStatus:
+    """回测运行终态（D12-005）。
+
+    取消必须是**显式终态**：引擎在检测到取消后返回 ``CANCELLED`` 结果，
+    服务层拒绝持久化，UI 映射为取消而非完成。缺省值仅用于兼容既有构造点，
+    成功路径必须由引擎显式产出 ``COMPLETED`` 语义（取消不得伪装成完成）。
+    """
+
+    COMPLETED: Final = "COMPLETED"
+    CANCELLED: Final = "CANCELLED"
+
+
 @dataclass(frozen=True)
 class BacktestResult:
     """回测结果（不可变，确保回测可复现）"""
@@ -385,6 +402,11 @@ class BacktestResult:
     delist_liquidation_count: int = 0
     delist_loss_amount: float = 0.0
 
+    # D12-005: 运行终态。默认 COMPLETED 仅为兼容既有构造点；取消路径由引擎/服务
+    # 显式置为 CANCELLED，消费方（服务持久化、UI 映射）必须以此判据区分，
+    # 禁止把取消结果当成功样本落库或展示为「已完成」。
+    status: Literal["COMPLETED", "CANCELLED"] = BacktestStatus.COMPLETED
+
     def with_warnings(self, warnings: list[str | DataWarning] | tuple[str | DataWarning, ...]) -> BacktestResult:
         warnings_tuple = tuple(warnings) if isinstance(warnings, list) else warnings
         return BacktestResult(
@@ -410,7 +432,18 @@ class BacktestResult:
             delist_loss_amount=self.delist_loss_amount,
             has_real_score=self.has_real_score,
             real_score_ratio=self.real_score_ratio,
+            status=self.status,
         )
+
+    def as_cancelled(self) -> BacktestResult:
+        """返回同一结果的显式取消终态副本（D12-005）。
+
+        取消检查在持久化前再次生效时使用：结果内容即使已算出，也不得被当作
+        可比较的成功样本落库；调用方据此跳过持久化并在 UI 映射为「已取消」。
+        """
+        if self.status == BacktestStatus.CANCELLED:
+            return self
+        return replace(self, status=BacktestStatus.CANCELLED)
 
     def to_persist_dict(self) -> dict:
         """生成持久化所需的字典（不含 app_version，由调用方补充）。

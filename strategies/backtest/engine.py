@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
+from bisect import bisect_right
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from itertools import pairwise
@@ -21,7 +22,7 @@ from core.i18n import Message
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
-from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning, WarningCategory
+from strategies.backtest.config import BacktestConfig, BacktestResult, BacktestStatus, DataWarning, WarningCategory
 from strategies.backtest.data_provider import BacktestDataProvider
 from strategies.backtest.metrics import BacktestMetrics
 from strategies.backtest.portfolio import PortfolioSimulator
@@ -143,6 +144,12 @@ class VectorBacktestEngine:
         if errors:
             raise ValueError(f"Invalid backtest config: {errors}")
 
+        # D12-005: 取消是显式终态，不是「正常完成」。无进展取消直接在取数前短路，
+        # 避免继续加载行情/撮合并把空信号结果伪装成一次成功的回测。
+        if cancel_check is not None and cancel_check():
+            logger.info("[VectorBacktestEngine] Backtest cancelled before run (run_id=%s)", run_id)
+            return self._cancelled_result(strategy, params, run_id, start_time)
+
         # UIR-F11-001: 运行前校验历史数据上下文能力（cache / trade_calendar）。
         # 缺失时明确拒绝，而非让策略在历史窗口取数前抛 AttributeError 或静默空信号。
         self.data_provider.validate_history_capabilities()
@@ -175,6 +182,17 @@ class VectorBacktestEngine:
             failed_signal_dates,
             cancel_check,
         )
+
+        # D12-005: _generate_signals 在检测到取消时仅 break（协程需正常返回以完成
+        # 清理），此处再次确认取消标志：已取消的运行必须返回 CANCELLED 终态，
+        # 不得继续进入行情加载/撮合，更不能被服务层当作完整结果持久化。
+        if cancel_check is not None and cancel_check():
+            logger.info(
+                "[VectorBacktestEngine] Backtest cancelled after signal generation (run_id=%s, signals=%s)",
+                run_id,
+                signals.height,
+            )
+            return self._cancelled_result(strategy, params, run_id, start_time, failed_signal_dates)
 
         # D4-9: 信号非空时仅加载信号涉及标的；空信号回退全市场（等价旧行为，兼容无信号路径）。
         target_codes = signals["ts_code"].unique().to_list() if not signals.is_empty() else None
@@ -300,6 +318,26 @@ class VectorBacktestEngine:
                 )
             )
 
+        # D12-002 / R21+R24：票池内存在 as-of ST 状态未知的标的（name-history 无覆盖，
+        # st_name_source='current_snapshot'，is_st=NULL 而非回退当前名称的布尔值）时，ST 排除
+        # 口径对这批标的不可判定，必须在结果中显式标注为「当期近似」，不得让「未知」被静默
+        # 当作非 ST 或 ST 处理。category=asof_approximation（方法学声明，不升级可信度级别）。
+        if self.data_provider.st_name_fallback_seen:
+            all_warnings.append(
+                DataWarning(
+                    warning_type="st_asof_approximation",
+                    start_date=str(trade_dates[0]),
+                    end_date=str(trade_dates[-1]),
+                    affected_stock_count=0,
+                    error_message=(
+                        "ST 排除口径为「当期近似」（R24）：区间回放中部分标的的 as-of 名称无 "
+                        "name-history 覆盖，其历史 ST 状态未知（is_st 保持未知，不以当前名称冒充）。"
+                        "这些标的未被 ST 过滤剔除，是否属风险警示股无法按当时信息判定。"
+                    ),
+                    category=WarningCategory.ASOF_APPROXIMATION,
+                )
+            )
+
         # D5-M2: 净值归零（爆仓）检测——不是数值噪声，必须让爆仓在 UI 可见。
         # daily_returns 已把爆仓日转为 null（无定义）供 drop_nulls 剔除，此处显式追加
         # DataWarning 进入 unreliable 判定，避免波动率低估/夏普被高估被静默掩盖。
@@ -351,6 +389,42 @@ class VectorBacktestEngine:
             delist_loss_amount=delist_stats["delist_loss_amount"],
             has_real_score=has_real_score,
             real_score_ratio=real_score_ratio,
+            status=BacktestStatus.COMPLETED,
+        )
+
+    def _cancelled_result(
+        self,
+        strategy: BaseStrategy,
+        params: dict | None,
+        run_id: str,
+        start_time: float,
+        failed_signal_dates: list[dict] | None = None,
+    ) -> BacktestResult:
+        """构造显式取消终态结果（D12-005，不进入完成保存路径）。
+
+        取消时只保留运行身份与已发生的失败交易日摘要，净值/指标/持仓等完成态
+        字段一律为空：这些字段在没有完整模拟时没有业务含义，填充任何数值都会
+        被下游误读为「一次完成的回测」。状态由 ``status=CANCELLED`` 承载。
+        """
+        return BacktestResult(
+            config=self.config,
+            strategy_name=strategy.name,
+            params_snapshot=params or {},
+            nav_curve=pl.DataFrame(),
+            daily_returns=pl.Series([], dtype=pl.Float64),
+            benchmark_returns=pl.Series([], dtype=pl.Float64),
+            trades=pl.DataFrame(),
+            positions=pl.DataFrame(),
+            skipped_orders=pl.DataFrame(),
+            metrics={},
+            ic_series=pl.Series([], dtype=pl.Float64),
+            period_stats=pl.DataFrame(),
+            data_warnings=(),
+            failed_signal_dates=tuple(failed_signal_dates or ()),
+            run_id=run_id,
+            executed_at=get_now(),
+            duration_ms=int((time.perf_counter() - start_time) * 1000),
+            status=BacktestStatus.CANCELLED,
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -981,16 +1055,13 @@ class VectorBacktestEngine:
         signals_by_date = dict(signals.partition_by("execution_date", as_dict=True)) if not signals.is_empty() else {}
         quotes_by_date = dict(quotes_df.partition_by("trade_date", as_dict=True)) if not quotes_df.is_empty() else {}
 
+        # D12-006: 调仓日集合由唯一调仓计划推导，与 IC 持有期退出日同源。
+        rebalance_days = set(self._build_rebalance_plan(trade_dates, signals_by_date, self.config.rebalance_freq))
+
         for exec_date in trade_dates:
             day_signals = signals_by_date.get((exec_date,), signals.clear())
             day_quotes = quotes_by_date.get((exec_date,), quotes_df.clear())
-            is_rebalance = self._is_rebalance_day(
-                exec_date,
-                trade_dates,
-                signals_by_date,
-                self.config.rebalance_freq,
-            )
-            simulator.process_day(exec_date, day_signals, day_quotes, is_rebalance)
+            simulator.process_day(exec_date, day_signals, day_quotes, exec_date in rebalance_days)
 
         if delist_stats is not None:
             delist_stats["delist_liquidation_count"] = simulator.delist_liquidation_count
@@ -1011,6 +1082,9 @@ class VectorBacktestEngine:
         1. 根据 rebalance_freq 确定持有期
         2. forward_return = 执行价到下一次调仓执行价的收益
         3. 使用复权价格计算收益（qfq_close）
+        4. 下一次调仓日由与撮合层同一调仓计划（``_build_rebalance_plan``）推导：
+           ``signal`` 频率只取实际有信号的执行日，不再退化为「次交易日」；
+           区间内无后续调仓日的信号按截尾跳过。
 
         返回 ``(ic_values, ic_dates, ic_sample_sizes)``，``ic_dates[i]`` 为
         ``ic_values[i]`` 对应的信号日期（即 ``trade_dates[i]``，非执行日期），
@@ -1036,6 +1110,13 @@ class VectorBacktestEngine:
             if not signals.is_empty()
             else {}
         )
+        # D12-006: 执行日分区与撮合层一致（signal 频率的调仓日集合即实际有信号的执行日）。
+        signals_by_exec_date = dict(signals.partition_by("execution_date", as_dict=True))
+        rebalance_plan = self._build_rebalance_plan(
+            trade_dates,
+            signals_by_exec_date,
+            self.config.rebalance_freq,
+        )
 
         ic_values = []
         ic_dates = []
@@ -1053,7 +1134,7 @@ class VectorBacktestEngine:
             if execution_quotes is None:
                 continue
 
-            next_rebalance_date = self._get_next_rebalance_date(execution_date, trade_dates, self.config.rebalance_freq)
+            next_rebalance_date = self._next_rebalance_date_in_plan(rebalance_plan, execution_date)
 
             if next_rebalance_date is None:
                 continue
@@ -1097,32 +1178,46 @@ class VectorBacktestEngine:
         assert len(ic_values) == len(ic_dates)
         return pl.Series(ic_values, dtype=pl.Float64), ic_dates, ic_sample_sizes
 
+    def _build_rebalance_plan(
+        self,
+        trade_dates: list[date],
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] | None,
+        rebalance_freq: str,
+    ) -> list[date]:
+        """按与撮合层相同的判定口径（``_is_rebalance_day``）生成调仓执行日序列。
+
+        D12-006：调仓日集合是唯一来源——撮合层按该集合判定 ``is_rebalance``，
+        IC 持有期退出日也在同一集合上取「下一个」，避免二者各自推导导致口径漂移。
+        ``signal`` 频率必须传入按 ``execution_date`` 分区的信号：该频率只在
+        **实际有信号的执行日**调仓，无信号日不构成调仓日。
+        """
+        by_date = signals_by_date or {}
+        return [
+            exec_date
+            for exec_date in trade_dates
+            if self._is_rebalance_day(exec_date, trade_dates, by_date, rebalance_freq)
+        ]
+
+    @staticmethod
+    def _next_rebalance_date_in_plan(rebalance_plan: list[date], execution_date: date) -> date | None:
+        """返回调仓计划中严格晚于 ``execution_date`` 的第一个调仓日；无后续返回 None（截尾）。"""
+        idx = bisect_right(rebalance_plan, execution_date)
+        return rebalance_plan[idx] if idx < len(rebalance_plan) else None
+
     def _get_next_rebalance_date(
         self,
         execution_date: date,
         trade_dates: list[date],
         rebalance_freq: str,
+        signals_by_date: dict[tuple[date, ...], pl.DataFrame] | None = None,
     ) -> date | None:
-        try:
-            current_idx = trade_dates.index(execution_date)
-        except ValueError:
-            return None
+        """返回 ``execution_date`` 之后的下一个实际调仓执行日。
 
-        if rebalance_freq in ("daily", "signal"):
-            next_idx = current_idx + 1
-            if next_idx >= len(trade_dates):
-                return None
-            return trade_dates[next_idx]
-
-        for j in range(current_idx + 1, len(trade_dates)):
-            candidate = trade_dates[j]
-            prev_date = trade_dates[j - 1]
-            if rebalance_freq == "weekly" and candidate.isocalendar()[1] != prev_date.isocalendar()[1]:
-                return candidate
-            if rebalance_freq == "monthly" and candidate.month != prev_date.month:
-                return candidate
-
-        return None
+        ``signal`` 频率需传入按 ``execution_date`` 分区的信号；未传时该频率没有
+        可判定的调仓日（返回 None），不得退化为「次交易日」近似。
+        """
+        plan = self._build_rebalance_plan(trade_dates, signals_by_date, rebalance_freq)
+        return self._next_rebalance_date_in_plan(plan, execution_date)
 
     def _calc_benchmark_returns(
         self,

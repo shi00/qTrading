@@ -161,6 +161,13 @@ class BacktestDataProvider:
         # D3-M4: 本次回测区间预载的降级警告（区间超限 / 范围预载失败 / 护栏超限），
         # 由 engine 在组装 BacktestResult.data_warnings 时并入，让「走了慢路径」在 UI 可见。
         self._range_preload_warnings: list[str] = []
+        # D12-001：逐表失败身份。必需表（screening_data / fundamental_screening_data）取数
+        # 失败必须与「合法为空」区分：错误文本经本 dict 记入 context["_diagnostics"]
+        # ["required_failures"]，由 BacktestStrategyAdapter 转成显式错误（既有失败日通道），
+        # 不再被折叠成正常空信号（R21）。按 build_context 调用逐日重置，避免跨日残留。
+        self._required_fetch_errors: dict[str, str] = {}
+        # D12-001：可选辅助表逐日取数失败只发一次降级告警（去重，避免逐日刷屏）。
+        self._aux_failure_warned: set[str] = set()
         # R24 当期近似：回测票池的退市整理期排除口径（is_delisting，见
         # screener_dao._delisting_flag_expr）在区间回放时以**当前**名称/delist_date 快照
         # 参与历史计算，name-history 缺覆盖时可能前视。此处记录本次回测是否在票池内实际
@@ -168,6 +175,12 @@ class BacktestDataProvider:
         # 仅在近似「已生效」时由 engine 产出 delisting_asof_approximation 告警并在结果中
         # 标注（R24「显式声明并在结果中标注」）。
         self._saw_delisting_flagged = False
+        # D12-002 / R21+R24：回测票池的 ST 判定（is_st，见 screener_dao._st_columns_sql）在
+        # name-history 无 as-of 覆盖行时为 NULL（未知），不再回退当前名称冒充历史取值。
+        # 此处记录本次回测是否出现过「名称来源=当前快照」的行（st_name_source=
+        # 'current_snapshot'）：即历史 ST 状态**未知**、无法按 as-of 判定的标的确实存在，
+        # 由 engine 在结果中显式声明「历史 ST 判定为当期近似」（R24）。
+        self._saw_st_name_fallback = False
 
     @property
     def history_context(self) -> Any:
@@ -187,6 +200,16 @@ class BacktestDataProvider:
         当期近似（可能前视）」在回测结果中可见；全程无退市标记标的时为 False，不产生噪音。
         """
         return self._saw_delisting_flagged
+
+    @property
+    def st_name_fallback_seen(self) -> bool:
+        """本次回测票池内是否存在 as-of ST 状态未知（名称回退当前快照）的标的（D12-002）。
+
+        为 True 时 engine 产出 ``st_asof_approximation`` 告警，让「历史 ST 判定为当期近似
+        （name-history 缺覆盖）」在回测结果中可见；全程 name-history 覆盖完整时为 False，
+        不产生噪音。
+        """
+        return self._saw_st_name_fallback
 
     def validate_history_capabilities(self) -> None:
         """运行前校验历史数据上下文具备策略所需的最小能力（UIR-F11-001）。
@@ -211,9 +234,13 @@ class BacktestDataProvider:
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
         # R24：每次回测（区间预载入口）重置退市标记观测，避免跨多次运行残留旧状态。
         self._saw_delisting_flagged = False
+        # D12-002：同上，重置「历史 ST 状态未知」观测。
+        self._saw_st_name_fallback = False
         # 每次预载重置区间质量代理与降级警告列表，避免跨多次 preload_range 调用累积旧状态
         # （含区间超限早退路径：无论是否预载，本次评测都以全新状态开始，不残留上次区间判定）。
         self._range_preload_warnings = []
+        self._aux_failure_warned = set()
+        self._required_fetch_errors = {}
         self._quality_proxy = _BacktestQualityProxy(delegate=self._history_context)
         # 兼容处理输入参数类型并转为 date 对象
         from datetime import datetime
@@ -294,11 +321,11 @@ class BacktestDataProvider:
                 self.cache.screener_dao.get_fundamental_screening_data_range(
                     start_str, end_str, max_rows=screening_guard_rows
                 ),
-                self.cache.quote_dao.get_northbound_range(start_str, end_str),
-                self.cache.market_dao.get_moneyflow_hsgt_range(start_str, end_str),
-                self.cache.quote_dao.get_moneyflow_range(start_str, end_str),
-                self.cache.quote_dao.get_top_list_range(start_str, end_str),
-                self.cache.quote_dao.get_block_trade_range(start_str, end_str),
+                self.cache.quote_dao.get_northbound_range(start_str, end_str, suppress_errors=False),
+                self.cache.market_dao.get_moneyflow_hsgt_range(start_str, end_str, suppress_errors=False),
+                self.cache.quote_dao.get_moneyflow_range(start_str, end_str, suppress_errors=False),
+                self.cache.quote_dao.get_top_list_range(start_str, end_str, suppress_errors=False),
+                self.cache.quote_dao.get_block_trade_range(start_str, end_str, suppress_errors=False),
                 return_exceptions=True,
             )
             # DS-05: screening_data 由 fundamental_screening_data 派生（同模板唯差
@@ -399,6 +426,9 @@ class BacktestDataProvider:
         - ``covered_dates``：screening_data 实际覆盖的日期键集合（"YYYYMMDD"）。为 None 时
           退化为一次轻量 ``SELECT DISTINCT trade_date``（daily_quotes），以 O(交易日数) 量级
           独立评估覆盖，与 preload_range 的 OOM 护栏解耦。
+        - 交易日历按自然日核对覆盖（D10-002）：区间内存在无法判定开/休的自然日时，
+          期望交易日全集本身不完整，写入 ``[range_quality_coverage_unverified]`` 告警
+          （R21）后返回，不得把残缺全集与行情覆盖同集误判为「无缺口」。
         - 交易日历查询失败 / 轻量覆盖查询失败时保持默认 GOLD 代理，并写入
           ``[range_quality_coverage_unverified]`` 告警（R21 fail-closed）：覆盖状态**未知**，
           既不得伪装成「无缺口」，也不得伪造成「有缺口」；该信号经 engine 并入
@@ -413,8 +443,8 @@ class BacktestDataProvider:
         from data.domain_services.trade_calendar_service import TradeCalendarService
 
         try:
-            cal_dates = await TradeCalendarService(self.cache, None).get_trade_dates(start_date, end_date)
-            expected_dates = {d.strftime("%Y%m%d") for d in cal_dates}
+            coverage = await TradeCalendarService(self.cache, None).get_trade_dates_with_coverage(start_date, end_date)
+            expected_dates = {d.strftime("%Y%m%d") for d in coverage.dates}
         except asyncio.CancelledError:
             raise
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出交易日历查询异常. upgrade: 策略层重构时统一走 classify_error.
@@ -430,6 +460,17 @@ class BacktestDataProvider:
                 f"[{_RANGE_QUALITY_UNVERIFIED_TYPE}] {start_str}-{end_str}: "
                 f"交易日历查询失败（{DataSanitizer.sanitize_error(e)}），无法核对区间覆盖；"
                 "区间缺口状态未知（未核实）。"
+            )
+            return
+
+        if not coverage.complete:
+            # D10-002 / R21: 区间内仍有自然日无法判定开/休（日历内部或缺尾端），
+            # 期望交易日全集残缺，缺口求差不可信 → 显式标注覆盖未核实。
+            unresolved = len(coverage.unresolved_days)
+            detail = f"（{unresolved} 个自然日无法判定）" if unresolved else ""
+            self._range_preload_warnings.append(
+                f"[{_RANGE_QUALITY_UNVERIFIED_TYPE}] {start_str}-{end_str}: "
+                f"交易日历自然日覆盖未核实{detail}，区间缺口状态未知（未核实）。"
             )
             return
 
@@ -534,7 +575,12 @@ class BacktestDataProvider:
             "base_complete": False,
             "strategy_ready": False,
             "table_status": {},
+            # D12-001 / R21：必需表「取数失败」身份（≠ 合法为空）。由 adapter 转成
+            # 显式错误，进入 engine 既有 failed_signal_dates / fail_fast 通道。
+            "required_failures": {},
         }
+        # 逐日重置上一次 build_context 的失败记录，避免跨日残留（同一 provider 实例复用）。
+        self._required_fetch_errors = {}
 
         trade_date_str = self._normalize_trade_date(trade_date)
         preloaded = getattr(self, "_preloaded", None)
@@ -544,6 +590,7 @@ class BacktestDataProvider:
             screening_data = preloaded["screening_data"].get(trade_date_str, pd.DataFrame())
         else:
             screening_data = await self._get_screening_data(trade_date_str)
+            self._record_required_failure(diagnostics, "screening_data", screening_data)
 
         # R24 当期近似：票池内出现退市整理期标记标的（is_delisting=True）时置位，供 engine
         # 在回测结果中标注「退市排除口径为当期近似，name-history 缺覆盖时可能前视」。
@@ -557,6 +604,19 @@ class BacktestDataProvider:
             and bool(screening_data["is_delisting"].astype("boolean").fillna(False).any())
         ):
             self._saw_delisting_flagged = True
+
+        # D12-002 / R21+R24：票池内出现「ST 判定名称来源=当前快照」（st_name_source=
+        # 'current_snapshot'）的行，说明该标的 as-of 名称无 name-history 覆盖、历史 ST 状态
+        # **未知**——SQL 已返回 is_st=NULL（不得当作非 ST，也不得用当前名称冒充历史取值）。
+        # 同样在 is_tradable 过滤前检测：口径生效与标的是否停牌无关；逐日检测（区间预载与
+        # 逐日降级两条路径均经本方法）保证单日/预载一致。
+        if (
+            screening_data is not None
+            and not screening_data.empty
+            and "st_name_source" in screening_data.columns
+            and bool(screening_data["st_name_source"].astype("string").fillna("").eq("current_snapshot").any())
+        ):
+            self._saw_st_name_fallback = True
 
         if screening_data is not None and not screening_data.empty and "is_tradable" in screening_data.columns:
             suspended_count = int((~screening_data["is_tradable"]).sum())
@@ -584,6 +644,7 @@ class BacktestDataProvider:
             fundamental_data = preloaded["fundamental_screening_data"].get(trade_date_str, pd.DataFrame())
         else:
             fundamental_data = await self._get_fundamental_screening_data(trade_date_str)
+            self._record_required_failure(diagnostics, "fundamental_screening_data", fundamental_data)
 
         if fundamental_data is not None and not fundamental_data.empty:
             if "is_tradable" in fundamental_data.columns:
@@ -616,26 +677,62 @@ class BacktestDataProvider:
                 if preloaded and key in preloaded and preloaded[key] is not None:
                     data = preloaded[key].get(trade_date_str, pd.DataFrame())
                 else:
-                    data = await fetch_func(trade_date=trade_date_str)
+                    # D12-001 / R21：回测路径要求取数失败传播，不得被 BaseDao 默认
+                    # suppress_errors=True 吞成空表——「DB 失败」与「合法稀疏空日」必须可区分。
+                    data = await fetch_func(trade_date=trade_date_str, suppress_errors=False)
 
                 if data is not None:
                     context[key] = data
                     is_empty = hasattr(data, "empty") and data.empty
                     diagnostics["table_status"][key] = {"ready": True, "rows": len(data) if not is_empty else 0}
                 else:
-                    diagnostics["table_status"][key] = {"ready": False, "rows": 0}
+                    diagnostics["table_status"][key] = {"ready": False, "rows": 0, "failed": True}
                     all_aux_ready = False
+                    self._record_aux_failure(key, "data unavailable (query returned None)")
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出历史筛选上下文构建异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 sanitized_msg = DataSanitizer.sanitize_error(e)
                 logger.warning("[BacktestDataProvider] Failed to fetch %s: %s", key, sanitized_msg)
-                diagnostics["table_status"][key] = {"ready": False, "rows": 0, "error": sanitized_msg}
+                diagnostics["table_status"][key] = {
+                    "ready": False,
+                    "rows": 0,
+                    "error": sanitized_msg,
+                    "failed": True,
+                }
                 all_aux_ready = False
+                self._record_aux_failure(key, sanitized_msg)
 
         diagnostics["strategy_ready"] = base_complete and all_aux_ready
         context["_diagnostics"] = diagnostics
 
         return context
+
+    def _record_required_failure(self, diagnostics: dict, key: str, data: pd.DataFrame | None) -> None:
+        """D12-001 / R21：记录必需表取数失败身份（仅失败，不含合法为空）。
+
+        ``data is None`` 表示查询抛错（错误文本由 ``_get_*`` 写入
+        ``_required_fetch_errors``）或返回 None——两者都不等于「当日无数据」，
+        必须保留为失败，交由 adapter 产出显式错误而非空信号。
+        """
+        error = self._required_fetch_errors.get(key)
+        if error is None and data is None:
+            error = "data unavailable (query returned None)"
+        if error is not None:
+            diagnostics["required_failures"][key] = error
+
+    def _record_aux_failure(self, key: str, error: str) -> None:
+        """D12-001：可选辅助表取数失败并入既有降级告警通道（逐表去重）。
+
+        失败 ≠ 合法稀疏空日：空表不进入本方法，故不会把龙虎榜等低频表的正常空值
+        升级为质量告警。告警经 ``range_preload_warnings`` 由 engine 并入
+        ``BacktestResult.data_warnings``，保留表名与原因。
+        """
+        if key in self._aux_failure_warned:
+            return
+        self._aux_failure_warned.add(key)
+        self._range_preload_warnings.append(
+            f"range_preload_failed:{key}: {error}. Daily fetch failed; table unavailable."
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_screening_data(self, trade_date: str) -> pd.DataFrame | None:
@@ -658,11 +755,15 @@ class BacktestDataProvider:
             return await self.cache.screener_dao.get_screening_data(trade_date)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
+            sanitized_msg = DataSanitizer.sanitize_error(e)
             logger.warning(
                 "[BacktestDataProvider] Failed to get screening_data for %s: %s",
                 trade_date,
-                DataSanitizer.sanitize_error(e),
+                sanitized_msg,
             )
+            # D12-001 / R21：保留失败原因，供 _build_historical_screening_context
+            # 写入 required_failures（失败不得折叠成空表）。
+            self._required_fetch_errors["screening_data"] = sanitized_msg
             return None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -683,11 +784,13 @@ class BacktestDataProvider:
             return await self.cache.screener_dao.get_fundamental_screening_data(trade_date)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出基本面筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
+            sanitized_msg = DataSanitizer.sanitize_error(e)
             logger.warning(
                 "[BacktestDataProvider] Failed to get fundamental_data for %s: %s",
                 trade_date,
-                DataSanitizer.sanitize_error(e),
+                sanitized_msg,
             )
+            self._required_fetch_errors["fundamental_screening_data"] = sanitized_msg
             return None
 
     @staticmethod

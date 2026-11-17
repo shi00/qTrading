@@ -87,9 +87,11 @@ from tests.integration._db_config import (
     TEST_DB_NAME,
     TEST_DB_PASSWORD,
     TEST_DB_PORT,
+    TEST_DB_RUN_OWNED,
     TEST_DB_URL,
     TEST_DB_USER,
-    _xdist_worker,
+    drop_test_db_if_owned,
+    ensure_test_db_state,
 )
 
 
@@ -99,29 +101,16 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
-_DDL_CREATE_DB = "CREATE DATABASE %I"
-_DDL_DROP_DB = "DROP DATABASE IF EXISTS %I WITH (FORCE)"
-
-
-async def _execute_quoted_ddl(conn: asyncpg.Connection, template: str) -> None:
-    """以服务端 ``format(%I, ...)`` 引用库名执行 DDL，消除源码级 SQL 拼接（R4）。
-
-    ``CREATE/DROP DATABASE`` 的目标是标识符，无法用 ``$1`` 参数绑定；此前用
-    f-string 拼库名属于 R4 禁止形态。改由常量模板 + ``format($1::text, $2::text)``
-    生成 DDL：模板为常量，库名经 PostgreSQL ``%I`` 转义（并受 ``_db_config`` 的
-    字符集白名单约束），源码中不再出现 f-string/拼接 SQL。
-    """
-    ddl = await conn.fetchval("SELECT format($1::text, $2::text)", template, TEST_DB_NAME)
-    await conn.execute(ddl)
-
-
 async def _drop_test_db():
-    """清理测试 DB（由 ``pytest_sessionfinish`` 调用）。
+    """清理本次 run 独占的测试 DB（由 ``pytest_sessionfinish`` 调用）。
 
-    与 ``_ensure_test_db`` 的 clean slate DROP 不同，本函数仅在 session 正常
-    结束时清理，避免本地开发环境 DB 残留积累。CI 环境中 PostgreSQL 服务每次
-    run 重启，DB 本就不残留，此函数为 no-op（DROP IF EXISTS）。
+    显式 ``TEST_DB_NAME`` 且未开启 ``TEST_DB_ALLOW_REBUILD`` 时视为外部共享
+    目标，直接跳过（不建立连接）；只有默认 run 独占名或显式声明独占时才
+    DROP，避免会话 A 退出删除会话 B 正在使用的库。
     """
+    if not TEST_DB_RUN_OWNED:
+        logger.info("[test-db] skip cleanup for non-owned target: %s", TEST_DB_NAME)
+        return
     conn = await asyncpg.connect(
         host=TEST_DB_HOST,
         port=TEST_DB_PORT,
@@ -131,26 +120,19 @@ async def _drop_test_db():
         timeout=5.0,
     )
     try:
-        await _execute_quoted_ddl(conn, _DDL_DROP_DB)
+        await drop_test_db_if_owned(conn)
     finally:
         await conn.close()
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Session 结束时清理测试 DB（仅 xdist worker，sync hook）。
+    """Session 结束时清理本次 run 独占的测试 DB（sync hook）。
 
-    原清理逻辑在 ``_session_db_setup`` teardown 中（已移除，因其跨 loop_scope
-    依赖导致 teardown 提前执行）。本 hook 在 session 正常结束后清理，避免
-    本地开发环境 DB 残留积累。
-
-    实现要点：
-    - 仅在 xdist worker 中执行（``_xdist_worker`` 非空）；非 xdist 模式
-      （本地单进程）由 clean slate 在下次 run 时处理。
-    - 用 ``asyncio.run()`` 在新 loop 中运行 asyncpg 清理（sessionfinish 时
-      pytest-asyncio 的 loop 已关闭，需创建新 loop）。
-    - 清理失败不阻断 session 退出（不影响测试结果报告）。
+    仅当本进程实际调用过 ``_ensure_test_db``（``_test_db_clean_slate_done``）
+    才清理：xdist controller 从不建库，跳过可避免无意义的连接；非 xdist
+    单进程会话则在此清理，防止 run-id 命名导致本地库累积。
     """
-    if not _xdist_worker:
+    if not _test_db_clean_slate_done:
         return
     try:
         asyncio.run(_drop_test_db())
@@ -165,8 +147,8 @@ async def _ensure_test_db():
     """幂等确保测试 DB 存在，支持自愈（根因修复）。
 
     行为：
-    - 首次调用：clean slate (DROP+CREATE)，确保起始状态干净（防止上次 session 残留
-      数据/schema 干扰），设置 ``_test_db_clean_slate_done`` 标志。
+    - 首次调用：run 独占目标执行 clean slate (DROP+CREATE)，确保起始状态干净；
+      显式外部目标只 CREATE IF NOT EXISTS，绝不 DROP。
     - 后续调用：检查 DB 存在性，存在则跳过，不存在则 CREATE（自愈）。
 
     根因修复：原实现使用 ``_test_db_initialized`` 全局标志，首次成功后任何调用
@@ -177,6 +159,9 @@ async def _ensure_test_db():
     Cross loop_scope 安全：``_session_db_setup``（session-scoped + session loop_scope）
     与 ``test_engine``（function loop_scope）的跨 loop_scope 依赖是 teardown 提前
     执行的直接原因，已通过移除 ``_session_db_setup`` 消除（见 ``test_engine`` 注释）。
+
+    命名/所有权决策见 ``tests/integration/_db_config.py``（D21-OTHER-002）：
+    默认名含 run-id + worker，DROP 仅限本次 run 独占目标。
     """
     global _test_db_clean_slate_done
     conn = await asyncpg.connect(
@@ -188,16 +173,8 @@ async def _ensure_test_db():
         timeout=5.0,
     )
     try:
-        if not _test_db_clean_slate_done:
-            # 首次调用：clean slate 防止上次 session 残留
-            await _execute_quoted_ddl(conn, _DDL_DROP_DB)
-            await _execute_quoted_ddl(conn, _DDL_CREATE_DB)
-            _test_db_clean_slate_done = True
-        else:
-            # 后续调用：自愈检查，DB 不存在则重建
-            exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", TEST_DB_NAME)
-            if not exists:
-                await _execute_quoted_ddl(conn, _DDL_CREATE_DB)
+        await ensure_test_db_state(conn, clean_slate=not _test_db_clean_slate_done)
+        _test_db_clean_slate_done = True
     finally:
         await conn.close()
 
@@ -571,6 +548,9 @@ _ISOLATED_DB_FIXTURES = frozenset(
         "db_via_init_db",
         "db_via_alembic",
         "real_embedded_pg",
+        # 自带隔离库（CREATE/DROP 两个独立 DB），不依赖 test_engine/TEST_DB schema；
+        # 以此声明替代 no_db marker，避免绕过 schema 就绪契约（D21-OTHER-010）。
+        "pg_targets",
     }
 )
 

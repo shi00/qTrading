@@ -23,7 +23,6 @@
 
 import pytest
 
-from tests.e2e.helpers.app_launcher import PROJECT_ROOT
 from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
 
@@ -37,18 +36,17 @@ pytestmark = [
 ]
 
 
-def _read_app_log() -> str:
-    """读取 e2e-flet-app.log 全文用于断言诊断。
+def _read_app_log(app) -> str:
+    """读取本实例 e2e app stdout 日志全文用于断言诊断。
 
     R9: 日志可能含 DB 连接串（已由 ConfigHandler/EmbeddedPostgresService 注册为 secret
     并经 DataSanitizer 脱敏），此处只读取用于断言失败诊断，不回显到 CI 控制台
     （断言消息仅截取尾部 2000 字符）。
     """
-    log_path = PROJECT_ROOT / "logs" / "e2e-flet-app.log"
-    return log_path.read_text(encoding="utf-8", errors="replace")
+    return app.logs.stdout_path.read_text(encoding="utf-8", errors="replace")
 
 
-async def test_sidecar_real_smoke_ready_migration_main_ui(embedded_real_flet_page) -> None:
+async def test_sidecar_real_smoke_ready_migration_main_ui(embedded_real_flet_page, embedded_real_flet_app) -> None:
     """E2E: 真实 sidecar smoke — ready → migration → 主界面渲染完整路径。
 
     验证：
@@ -56,22 +54,22 @@ async def test_sidecar_real_smoke_ready_migration_main_ui(embedded_real_flet_pag
     2. sidecar ready 事件被 Python 解析（日志含 ``[Bootstrap] embedded postgres ready on 127.0.0.1:``）
     3. DB 迁移完成（日志含 ``[TaskManager] init_db``）
 
-    失败诊断：断言失败时附加 e2e-flet-app.log 尾部 2000 字符，CI 上传 logs/ + e2e-artifacts/ 为 artifact。
+    失败诊断：断言失败时附加本实例 stdout 日志尾部 2000 字符，CI 上传 logs/ + e2e-artifacts/ 为 artifact。
     """
     # 1. 验证主界面渲染（导航栏可见）— 超时设为 NAV（slow marker 会自动倍率 2.5x）
     screener_label = I18n.get("nav_screener")
     await embedded_real_flet_page.expect_text(screener_label, timeout_ms=TIMEOUTS.NAV)
 
     # 2. 验证 sidecar ready 事件被 Python _stdout_reader_task 解析
-    log_content = _read_app_log()
+    log_content = _read_app_log(embedded_real_flet_app)
     ready_marker = "[Bootstrap] embedded postgres ready on 127.0.0.1:"
     assert ready_marker in log_content, (
         f"sidecar ready 事件未被 Python 解析（日志未含 '{ready_marker}'）。"
-        f"e2e-flet-app.log 尾部 2000 字符:\n{log_content[-2000:]}"
+        f"本实例日志尾部 2000 字符:\n{log_content[-2000:]}"
     )
 
     # 3. 验证 DB 迁移完成
     migration_marker = "[TaskManager] init_db"
     assert migration_marker in log_content, (
-        f"DB 迁移未完成（日志未含 '{migration_marker}'）。e2e-flet-app.log 尾部 2000 字符:\n{log_content[-2000:]}"
+        f"DB 迁移未完成（日志未含 '{migration_marker}'）。本实例日志尾部 2000 字符:\n{log_content[-2000:]}"
     )

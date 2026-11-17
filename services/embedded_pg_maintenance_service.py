@@ -14,6 +14,8 @@
   维护命令必须与 ``run --username`` 一致，否则角色认证/改密作用于错误角色；默认配置不传该参数，
   兼容不支持 ``--username`` 的旧 sidecar）。dump/restore/maintenance-shell 与 reset-password
   均由同一实现透传（M21 / M23）
+- 业务库名 ``--database`` 始终由 ``embedded_pg_database`` 显式透传给 dump/restore/maintenance-shell
+  （D07-005：sidecar 维护命令不设默认库，避免自定义库部署备份/恢复落空）
 - exit code 语义正本为 ``sidecars/qtrading-pg-sidecar/src/exit_codes.rs`` 与 how-to §9.6；
   doctor 只返回 0/2，任何非 0 退出（含 20 STOP_FAILED）均按失败处理
 """
@@ -21,13 +23,16 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,11 +67,46 @@ SIDECAR_DEFAULT_USERNAME = "postgres"
 # Windows 下主程序为 GUI（windowed）进程，拉起 console 子系统的 sidecar CLI 时若不带
 # CREATE_NO_WINDOW 会弹出可见控制台窗口（备份/恢复/doctor 期间黑窗）；开发模式从终端
 # 运行时子进程继承终端控制台不弹窗，故仅打包安装版暴露。POSIX 平台传 0。
-_SIDECAR_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+# D07-007: 另加 CREATE_NEW_PROCESS_GROUP，使取消可经 taskkill /T 精确作用于 sidecar 树，
+# 不波及 qTrading 自身的控制台进程组。
+_SIDECAR_CREATION_FLAGS = (
+    subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+)
+
+# D07-007: 取消必须证明 sidecar wrapper 与其 pg_dump/pg_restore 子进程都已退出。
+# 先给 SIGTERM 宽限期，未退出再整组强杀；两段都失败即「未知/仍可能运行」，不得报告已取消。
+# 上限（3.0 + 1.5s）需留在关机看门狗预算内（默认 10s / 25s）。
+_CANCEL_GRACE_S = 3.0
+_CANCEL_KILL_GRACE_S = 1.5
+_TASKKILL_TIMEOUT_S = 5.0
 
 
 class EmbeddedPgMaintenanceError(RuntimeError):
     """sidecar 维护命令失败（非 0 退出 / JSON 解析失败 / schema 不匹配）。"""
+
+
+class EmbeddedPgMaintenanceCancelledError(EmbeddedPgMaintenanceError):
+    """在途可取消命令已取消，且已证明产物未生成或不完整（非业务失败）。"""
+
+
+class EmbeddedPgMaintenanceCancelUnprovenError(EmbeddedPgMaintenanceError):
+    """已请求取消但无法证明 sidecar 进程树已停止：状态未知，pg 子进程可能仍在运行。"""
+
+
+class CancelStatus(enum.Enum):
+    """``request_cancel()`` 的可核对结果（替代布尔值，区分已证明与未知）。"""
+
+    NO_ACTIVE = "no_active"
+    """无可取消的在途命令（含 Popen 前的预留期）。"""
+
+    CANCELLED = "cancelled"
+    """已证明 sidecar 及其 pg 子进程退出。"""
+
+    ALREADY_EXITED = "already_exited"
+    """终止信号未能送达——命令已在送达前自然结束（退出码由工作线程按业务语义分类）。"""
+
+    UNPROVEN = "unproven"
+    """宽限期内无法证明进程树停止，可能仍在运行。"""
 
 
 def _coerce_runtime_port(value: object) -> int | None:
@@ -78,6 +118,114 @@ def _coerce_runtime_port(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value if 0 < value <= 65535 else None
+
+
+def _wait_process_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
+    """在 ``timeout`` 内证明单进程已退出（仅 Windows 树终止后的 wrapper 证明用）。
+
+    ``Popen.wait()`` 在另一线程持有 waitpid 锁时可能立即返回 ``None``，因此以
+    ``poll()`` 是否给出退出码作为唯一判据，并在剩余时间内小步重试。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if proc.poll() is not None:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            proc.wait(timeout=min(remaining, 0.1))
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError:
+            # 进程已被回收（竞态窗口），等待目的已达成
+            return True
+
+
+def _resolve_pgid(proc: subprocess.Popen[str]) -> int:
+    """sidecar 以独立 session 启动，pg 子进程继承同一进程组（组 id == 启动时 pid）。"""
+    try:
+        return os.getpgid(proc.pid)
+    except OSError:
+        # wrapper 已退出但进程组可能仍被 pg 子进程持有——沿用启动时的组 id
+        return proc.pid
+
+
+def _process_group_alive(proc: subprocess.Popen[str]) -> bool:
+    """POSIX：进程组内是否仍有任何进程（含已忽略 SIGTERM 的 pg_dump 子进程）。"""
+    pgid = _resolve_pgid(proc)
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # EPERM：组仍存在但无权探测，保守视为存活
+        return True
+    return True
+
+
+def _wait_process_tree_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
+    """在 ``timeout`` 内证明整棵 sidecar 进程树已退出。
+
+    POSIX 以「进程组为空」为判据——仅 wrapper 退出不足以证明，忽略 SIGTERM 的
+    pg_dump/pg_restore 会成为孤儿继续写目标文件；Windows 以 taskkill /T 后 wrapper
+    退出为判据（taskkill 返回成功表示整树已终止）。
+    """
+    if os.name == "nt":
+        return _wait_process_exit(proc, timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        if not _process_group_alive(proc):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        # 回收 wrapper，避免僵尸进程让进程组长期「存活」
+        try:
+            proc.poll()
+        except OSError:
+            pass
+        time.sleep(min(remaining, 0.05))
+
+
+def _signal_process_tree(proc: subprocess.Popen[str], *, force: bool) -> bool:
+    """向 sidecar wrapper 及其 pg 子进程发送终止信号，返回是否送达存活的进程树。
+
+    - POSIX：sidecar 以 ``start_new_session=True`` 启动，pg_dump/pg_restore 继承同一进程组，
+      ``killpg`` 使取消到达真正的 pg 子进程（仅 terminate wrapper 会留下孤儿）。
+    - Windows：无信号语义，使用 ``taskkill /T /F`` 终止整棵进程树。
+    """
+    if os.name == "nt":
+        # Windows 无 graceful 信号；console 子进程也不响应 WM_CLOSE，直接整树强制终止。
+        args = ["taskkill", "/PID", str(proc.pid), "/T", "/F"]
+        try:
+            completed = subprocess.run(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_TASKKILL_TIMEOUT_S,
+                creationflags=_SIDECAR_CREATION_FLAGS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return completed.returncode == 0
+    try:
+        pgid = _resolve_pgid(proc)
+        if pgid != proc.pid:
+            # 防御：未成为进程组组长（或 pid 已被复用）时不得 killpg，避免误杀；
+            # 仅当 wrapper 仍存活时才退化为单进程终止。
+            if proc.poll() is None:
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+                return True
+            return False
+        os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+        return True
+    except OSError:
+        # 进程组已不存在：命令已自然结束
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +349,9 @@ class EmbeddedPgMaintenanceService:
             # D16-F06: 单任务预留位。必须在 Popen 之前置位，确保并发第二个 dump
             # 在启动子进程前即被拒绝（旧实现先 Popen 后检查，被拒子进程已可能触碰输出文件）。
             self._dump_task_reserved = False
+            # D07-007: 本次可取消命令是否已收到取消请求（工作线程据此把退出归类为取消，
+            # 而非按负退出码误报 unknown_error）；每次启动新的可取消命令时重置。
+            self._cancel_requested = False
             self._initialized = True
 
     @classmethod
@@ -248,18 +399,60 @@ class EmbeddedPgMaintenanceService:
 
         Raises:
             EmbeddedPgMaintenanceError: dump 失败（exit != 0）
+            EmbeddedPgMaintenanceCancelledError: 已取消且产物未生成/不完整（非失败）
+            EmbeddedPgMaintenanceCancelUnprovenError: 已请求取消但无法证明进程树停止
             asyncio.CancelledError: R2 透传
         """
         argv = await asyncio.to_thread(self._build_dump_argv, output_path)
         # CON-04: dump 是可安全中断的备份类命令，注册句柄供 request_cancel() 停机终止
-        exit_code, _stdout, stderr = await self._run_sidecar(
-            argv, cancel_allowed=True
-        )  # 仅需 exit_code/stderr 判定失败，stdout 忽略（_stdout 下划线已豁免 RUF059）
+        try:
+            exit_code, _stdout, stderr = await self._run_sidecar(
+                argv, cancel_allowed=True
+            )  # 仅需 exit_code/stderr 判定失败，stdout 忽略（_stdout 下划线已豁免 RUF059）
+        except EmbeddedPgMaintenanceCancelledError:
+            # D07-007: 取消后必须校验目标完整性，不得把半成品或负退出码当业务失败/成功
+            return self._resolve_cancelled_dump(Path(output_path))
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "dump")
         path = Path(output_path)
         file_size = path.stat().st_size if path.exists() else 0  # noqa: ASYNC240  # dump 完成后一次性 stat/exists 探测（非交互热路径）
         return DumpResult(output_path=str(output_path), file_size=file_size, exit_code=exit_code)
+
+    def _resolve_cancelled_dump(self, output_path: Path) -> DumpResult:
+        """取消后判定 dump 产物的可报告状态（D07-007）。
+
+        sidecar 先写唯一 ``.partial`` 再原子改名为最终文件，因此：
+        - 最终文件不存在 → 取消成功，且未留下可用/半成品备份；
+        - 最终文件存在且非空 → 改名已完成，备份在取消生效前已完整生成，按完成返回；
+        - 最终文件存在但为 0 字节 → 不是完整备份，取消按「不完整」报告，不得当成功。
+
+        Raises:
+            EmbeddedPgMaintenanceCancelledError: 无产物或产物不完整
+            EmbeddedPgMaintenanceCancelUnprovenError: 无法确认产物状态（stat 失败）
+        """
+        try:
+            size = output_path.stat().st_size  # 取消后一次性探测（非交互热路径）
+        except FileNotFoundError:
+            logger.info(
+                "[embedded_pg_maintenance] dump cancelled; no output file produced: %s",
+                DataSanitizer.sanitize_error(str(output_path)),  # R9: 路径可能含用户名等敏感信息
+            )
+            raise EmbeddedPgMaintenanceCancelledError("备份已取消，未生成备份文件") from None
+        except OSError as exc:
+            # R9: 路径与 OS 原因经脱敏后再进入日志/异常消息
+            logger.warning(
+                "[embedded_pg_maintenance] dump cancelled but output state unknown: %s (%s)",
+                DataSanitizer.sanitize_error(str(output_path)),
+                DataSanitizer.sanitize_error(exc),
+            )
+            raise EmbeddedPgMaintenanceCancelUnprovenError("备份已取消，但无法确认输出文件状态") from exc
+        if size > 0:
+            logger.info(
+                "[embedded_pg_maintenance] dump completed before cancellation took effect: %s",
+                DataSanitizer.sanitize_error(str(output_path)),
+            )
+            return DumpResult(output_path=str(output_path), file_size=size, exit_code=0)
+        raise EmbeddedPgMaintenanceCancelledError("备份已取消，但输出文件存在且不完整（0 字节），请删除后重试")
 
     @log_async_operation(
         operation_name="embedded_pg_restore",
@@ -459,8 +652,21 @@ class EmbeddedPgMaintenanceService:
         return argv
 
     def _build_maintenance_shell_argv(self) -> list[str]:
+        """maintenance-shell argv：库名取 ``embedded_pg_database``。
+
+        D07-005：sidecar 已不提供默认库名，连接串/psql 提示须显示应用实际业务库，
+        否则自定义库部署会按 qtrading 连接空库。
+        """
         sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
-        return [sidecar_path, "maintenance-shell", "--data-dir", data_dir, *self._username_args()]
+        return [
+            sidecar_path,
+            "maintenance-shell",
+            "--data-dir",
+            data_dir,
+            "--database",
+            self._get_database_name(),
+            *self._username_args(),
+        ]
 
     def _build_reset_password_argv(self) -> list[str]:
         """reset-password argv：自定义超级用户名必须透传，否则 ALTER USER 作用于不存在的角色。"""
@@ -474,11 +680,11 @@ class EmbeddedPgMaintenanceService:
 
         通过 ThreadPoolManager 提交同步 subprocess（R16: 不阻塞事件循环）。
         - 用 Popen 而非 run：暴露进程句柄供 ``request_cancel()`` 终止在途 dump（CON-04）。
-          注：terminate 为硬杀（sidecar 未装信号处理器，Windows 即 TerminateProcess），且仅
-          终止 sidecar 包装进程——在线路径下孤儿 pg_dump 可能继续写 .partial，直到其自然
-          结束 / Step 8 停止 PG / 进程退出回收；dump 中断残留 .partial 由 sidecar doctor
-          dump_partials 检测（不自动清理，见技术债 P3-CON04）。
-        - TimeoutExpired 时 kill 子进程（subprocess.run 超时不杀进程会泄漏）。
+          D07-007: 进程以独立进程组（POSIX ``start_new_session`` / Windows
+          ``CREATE_NEW_PROCESS_GROUP``）启动，使取消信号能到达 sidecar 内部再拉起的
+          pg_dump/pg_restore，而不是只杀 wrapper 留下孤儿写目标文件。
+        - TimeoutExpired 时 kill 子进程（subprocess.run 超时不杀进程会泄漏）；若此前已请求
+          取消，则报告「状态未知/仍可能运行」，不按普通超时或成功处理。
         - ``cancel_allowed=True`` 仅 dump 类可安全中断操作（restore 拒绝取消，数据一致性优先）。
         - ``cancel_allowed=True`` 时先在锁内预留单任务状态，再启动子进程；第二个并发调用
           在 Popen 之前即被拒绝，任何情况下（含 Popen 抛错）都会在 ``finally`` 释放预留位。
@@ -494,6 +700,8 @@ class EmbeddedPgMaintenanceService:
                     if self._active_proc is not None or self._dump_task_reserved:
                         raise EmbeddedPgMaintenanceError("已有备份任务在进行中，请先完成后再试")
                     self._dump_task_reserved = True
+                    # D07-007: 新命令开始即清除上一次的取消标记，避免把后续退出误判为取消
+                    self._cancel_requested = False
                     reserved = True
             try:
                 proc = subprocess.Popen(
@@ -508,6 +716,8 @@ class EmbeddedPgMaintenanceService:
                     encoding="utf-8",
                     errors="replace",
                     creationflags=_SIDECAR_CREATION_FLAGS,
+                    # D07-007: 独立进程组，取消时整组终止（Windows 下该参数被忽略）
+                    start_new_session=os.name != "nt",
                 )
                 if reserved:
                     with self._lock:
@@ -516,7 +726,6 @@ class EmbeddedPgMaintenanceService:
                         registered = True
                 try:
                     stdout, stderr = proc.communicate(timeout=3600)
-                    return proc.returncode, stdout, stderr
                 except subprocess.TimeoutExpired as exc:
                     # review03-C19: 超时经业务异常包装；同时 kill 子进程回收输出，避免泄漏。
                     # kill/communicate 合并容错：进程在超时与 kill 竞态窗口自然退出时，
@@ -526,6 +735,16 @@ class EmbeddedPgMaintenanceService:
                         proc.communicate()
                     except OSError:
                         pass  # 进程已被回收，忽略输出回收异常
+                    if self._cancellation_requested(registered):
+                        # D07-007: 已请求取消但 3600s 内仍未退出——状态未知，不得报超时/成功
+                        logger.error(
+                            "[embedded_pg_maintenance] cancel unproven: sidecar still running after timeout: %s",
+                            DataSanitizer.sanitize_error(str(argv[:2])),
+                        )
+                        raise EmbeddedPgMaintenanceCancelUnprovenError(
+                            "取消未完成：无法证明 sidecar/pg 子进程已停止，进程可能仍在运行；"
+                            "请确认备份目标未被继续写入并检查残留进程"
+                        ) from exc
                     severity = classify_severity(exc, "general")
                     logger.log(
                         logging.WARNING if severity == "recoverable" else logging.ERROR,
@@ -536,6 +755,24 @@ class EmbeddedPgMaintenanceService:
                     raise EmbeddedPgMaintenanceError(
                         f"sidecar 命令超时（3600s）: {argv[0] if argv else 'sidecar'}"
                     ) from exc
+                if self._cancellation_requested(registered):
+                    # D07-007: 取消后 wrapper 的负退出码不代表业务失败；但「已取消」也必须
+                    # 以整棵进程树停止为前提——忽略 SIGTERM 的 pg 子进程仍存活时只能报未知。
+                    # 宽限窗口覆盖 request_cancel() 的 SIGTERM + 强杀两段等待。
+                    if os.name != "nt" and not _wait_process_tree_exit(proc, _CANCEL_GRACE_S + _CANCEL_KILL_GRACE_S):
+                        logger.error(
+                            "[embedded_pg_maintenance] cancel unproven after wrapper exit: %s",
+                            DataSanitizer.sanitize_error(str(argv[:2])),
+                        )
+                        raise EmbeddedPgMaintenanceCancelUnprovenError(
+                            "取消未完成：sidecar 已退出但 pg 子进程可能仍在运行，请检查残留进程"
+                        )
+                    logger.info(
+                        "[embedded_pg_maintenance] sidecar command cancelled: %s",
+                        DataSanitizer.sanitize_error(str(argv[:2])),
+                    )
+                    raise EmbeddedPgMaintenanceCancelledError(f"{argv[1] if len(argv) > 1 else 'sidecar'} 已被取消")
+                return proc.returncode, stdout, stderr
             finally:
                 with self._lock:
                     if registered:
@@ -546,34 +783,60 @@ class EmbeddedPgMaintenanceService:
 
         return await ThreadPoolManager().run_async(TaskType.IO, _run)
 
-    def request_cancel(self) -> bool:
-        """请求终止在途的可取消 sidecar 命令（当前仅 dump）。返回是否已发起终止。
+    def _cancellation_requested(self, registered: bool) -> bool:
+        """工作线程读取取消标记（仅对已登记句柄的可取消命令生效）。"""
+        if not registered:
+            return False
+        with self._lock:
+            return self._cancel_requested
 
-        同步、非阻塞方法（非协程，禁止 await；terminate 为瞬时 syscall，可在事件循环线程调用）。
-        无活动命令或 restore/doctor/shell 命令返回 False。
-        注：``_run_sidecar`` 的 Popen 前预留期尚无进程句柄可终止，此时返回 False；
-        子进程启动后可再次调用以终止（预留期极短，见 ``_run_sidecar`` 实现）。
-        注：terminate 仅终止 sidecar 包装进程——在线路径下孤儿 pg_dump 可能继续写 .partial，
-        由进程退出 / Step 8 停止 PG / OS 进程树清理兜底（见技术债 P3-CON04）。
-        terminate 在锁内调用（与非阻塞 syscall 串行化，消除 stale-PID 竞态窗口）；
-        OSError 表示进程已在竞态窗口自然退出，视为已终止。
+    def request_cancel(self, *, timeout: float = _CANCEL_GRACE_S) -> CancelStatus:
+        """终止在途可取消 sidecar 命令的整棵进程树，并证明其已停止（当前仅 dump）。
+
+        同步方法，会阻塞至多 ``timeout + _CANCEL_KILL_GRACE_S`` 秒（D07-007：仅当能证明
+        sidecar wrapper 与 pg 子进程都已退出才返回 ``CANCELLED``）；必须在工作线程调用
+        （shutdown Step 6 已通过 ``asyncio.to_thread`` 调用），不得在事件循环线程调用。
+        无活动命令或 restore/doctor/shell 命令返回 ``NO_ACTIVE``。
+        注：``_run_sidecar`` 的 Popen 前预留期尚无进程句柄可终止，此时返回 ``NO_ACTIVE``；
+        子进程启动后可再次调用（预留期极短，见 ``_run_sidecar`` 实现）。
+        取消信号经独立进程组送达 sidecar 内部拉起的 pg_dump/pg_restore（POSIX ``killpg``、
+        Windows ``taskkill /T /F``）；仅 terminate wrapper 会留下继续写目标的孤儿进程。
+        ``UNPROVEN`` 表示宽限期内无法证明停止，进程可能仍在运行——调用方不得当作已取消。
         """
         with self._lock:
             proc = self._active_proc
             if proc is None:
-                return False
-            try:
-                proc.terminate()
-            except OSError:
-                # 进程已自然退出，视为已终止；日志在锁外打印（避免锁内 IO）
-                already_exited = True
-            else:
-                already_exited = False
-        if already_exited:
+                return CancelStatus.NO_ACTIVE
+            self._cancel_requested = True
+            # 锁内发送首个终止信号：与 finally 清空句柄串行化，消除 stale-PID（pid 复用）窗口
+            signalled = _signal_process_tree(proc, force=False)
+        if not signalled:
+            # 进程组已不存在：命令在信号送达前已自然结束，退出码交由工作线程分类
+            with self._lock:
+                self._cancel_requested = False
             logger.info("[embedded_pg_maintenance] request_cancel: active sidecar command already exited")
-        else:
-            logger.info("[embedded_pg_maintenance] request_cancel: terminating active sidecar command")
-        return True
+            return CancelStatus.ALREADY_EXITED
+        # 以「进程组为空」为停止判据（wrapper 退出不等于 pg 子进程退出）
+        if _wait_process_tree_exit(proc, timeout):
+            logger.info(
+                "[embedded_pg_maintenance] request_cancel: process tree terminated (pid=%s)",
+                proc.pid,
+            )
+            return CancelStatus.CANCELLED
+        # pg 子进程可能忽略 SIGTERM：整组强杀后再给一个短的退出证明窗口
+        _signal_process_tree(proc, force=True)
+        if _wait_process_tree_exit(proc, _CANCEL_KILL_GRACE_S):
+            logger.info(
+                "[embedded_pg_maintenance] request_cancel: process tree force-killed (pid=%s)",
+                proc.pid,
+            )
+            return CancelStatus.CANCELLED
+        logger.warning(
+            "[embedded_pg_maintenance] request_cancel: cannot prove process tree stopped (pid=%s); "
+            "pg child may still be running",
+            proc.pid,
+        )
+        return CancelStatus.UNPROVEN
 
     @classmethod
     def has_active_operation(cls) -> bool:

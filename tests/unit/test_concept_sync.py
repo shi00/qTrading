@@ -165,7 +165,10 @@ class TestAKShareConceptSync:
 
     @pytest.mark.asyncio
     async def test_partially_resolved_board_not_marked_for_replacement(self):
-        """review09-24 MAJOR-06: 部分代码未解析的板块不做删除（仅 upsert），避免误删有效旧成分"""
+        """review09-24 MAJOR-06: 部分代码未解析的板块不做删除（仅 upsert），避免误删有效旧成分。
+
+        D09-001：部分未解析属软失败，必须登记缺口并把终态降为 partial（不得报 success）。
+        """
         ctx = _make_ctx()
         ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=2)
         df_cons = pd.DataFrame({"代码": ["000001", "999999"], "名称": ["平安银行", "未知"]})
@@ -177,13 +180,46 @@ class TestAKShareConceptSync:
         strategy = AKShareConceptSyncStrategy(ctx)
         result = await strategy.run()
 
-        assert result.status == SyncStatus.SUCCESS.value
+        assert result.status == SyncStatus.PARTIAL.value
         kwargs = ctx.cache.stock_dao.overwrite_em_concepts.call_args.kwargs
         assert kwargs["replace_board_codes"] == []  # 两板块均有未解析码 → 均不删除
+        assert any("partial_codes_unresolved" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_mixed_success_and_empty_board_persists_only_success(self):
+        """D09-001: A 成功 / B 空成分 → 只存 A、B 旧行保留（不删）、终态 partial。
+
+        「旧成分保留」不等于「刷新成功」：B 必须以软失败身份登记，否则门面会把
+        本次运行判为完整成功并推进水位，当日不再重试 B。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=2)
+
+        async def _constituents_by_board(board_name):
+            if board_name == "光伏":
+                return pd.DataFrame()
+            return _make_constituents_df()
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(side_effect=_constituents_by_board)
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.PARTIAL.value
+        kwargs = ctx.cache.stock_dao.overwrite_em_concepts.call_args.kwargs
+        assert kwargs["replace_board_codes"] == ["BK0123"]  # 仅成功板块可删除-重建
+        records = ctx.cache.stock_dao.overwrite_em_concepts.call_args.args[0]
+        assert {r["concept_name"] for r in records} == {"锂电池"}  # 空板块不落库、旧行保留
+        assert any("光伏" in e and "empty_constituents" in e for e in result.errors)
 
     @pytest.mark.asyncio
     async def test_empty_constituents_board_skipped_no_record(self):
-        """review09-24 MAJOR-06 / R21: 空成分响应视为不确定，不产生记录、不删除旧行"""
+        """review09-24 MAJOR-06 / R21: 空成分响应视为不确定，不产生记录、不删除旧行。
+
+        D09-001：空成分是软失败，全部板块空 → 零记录 → 终态 failed（不得报 success）。
+        """
         ctx = _make_ctx()
         ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
@@ -194,12 +230,16 @@ class TestAKShareConceptSync:
         strategy = AKShareConceptSyncStrategy(ctx)
         result = await strategy.run()
 
-        assert result.status == SyncStatus.SUCCESS.value
+        assert result.status == SyncStatus.FAILED.value
         ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
+        assert any("empty_constituents" in e for e in result.errors)
 
     @pytest.mark.asyncio
     async def test_all_codes_unresolved_board_skipped_no_record(self):
-        """review09-24 MAJOR-06 / R21: 板块全部代码未解析时不产生记录、不删除旧行"""
+        """review09-24 MAJOR-06 / R21: 板块全部代码未解析时不产生记录、不删除旧行。
+
+        D09-001：全未解析属软失败且缺口类型须与「部分未解析」可辨，零记录终态 failed。
+        """
         ctx = _make_ctx()
         ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
         df_cons = pd.DataFrame({"代码": ["999999"], "名称": ["未知"]})
@@ -211,13 +251,18 @@ class TestAKShareConceptSync:
         strategy = AKShareConceptSyncStrategy(ctx)
         result = await strategy.run()
 
-        assert result.status == SyncStatus.SUCCESS.value
+        assert result.status == SyncStatus.FAILED.value
         ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
+        assert any("all_codes_unresolved" in e for e in result.errors)
+        assert not any("partial_codes_unresolved" in e for e in result.errors)
 
     @pytest.mark.asyncio
     async def test_unknown_code_skipped_with_warning(self):
         """review08 D2: 成分股代码在 stocks 表权威映射中缺失时，跳过该记录并记 warning，
-        不再用交易所前缀猜测 fallback .SZ。"""
+        不再用交易所前缀猜测 fallback .SZ。
+
+        D09-001：部分未解析是软失败 → 已落库记录保留 upsert-only，终态 partial。
+        """
         ctx = _make_ctx()
         ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=1)
         # 默认映射含 000001/600000；999999 未知
@@ -235,10 +280,11 @@ class TestAKShareConceptSync:
         strategy = AKShareConceptSyncStrategy(ctx)
         result = await strategy.run()
 
-        assert result.status == SyncStatus.SUCCESS.value
+        assert result.status == SyncStatus.PARTIAL.value
         assert result.added == 1  # 仅 000001 入库
         assert result.skipped == 1
         assert any("999999" in w for w in result.warnings)
+        assert any("partial_codes_unresolved" in e for e in result.errors)
         records = ctx.cache.stock_dao.overwrite_em_concepts.call_args.args[0]
         assert all("999999.SZ" not in r["ts_code"] for r in records)  # 无 fallback 猜测
 
@@ -286,6 +332,7 @@ class TestAKShareConceptSync:
 
     @pytest.mark.asyncio
     async def test_empty_concept_list(self):
+        """D09-001: 空板块列表是软失败——零刷新不得报 success（否则水位推进、跳过重试）。"""
         ctx = _make_ctx()
         ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
@@ -296,8 +343,9 @@ class TestAKShareConceptSync:
         strategy = AKShareConceptSyncStrategy(ctx)
         result = await strategy.run()
 
-        assert result.status == SyncStatus.SUCCESS.value
+        assert result.status == SyncStatus.FAILED.value
         assert result.added == 0
+        assert any("Empty concept board list" in e for e in result.errors)
         ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
 
     @pytest.mark.asyncio

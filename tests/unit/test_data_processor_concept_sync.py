@@ -12,6 +12,7 @@ Covers:
 import asyncio
 import threading
 
+import pandas as pd
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -209,6 +210,42 @@ class TestRunConceptSync:
         assert result.sources["akshare"] == "success"
         assert result.is_complete is True
         assert result.added == 3
+
+    @pytest.mark.asyncio
+    async def test_soft_failure_propagates_to_failed_sources(self):
+        """D09-001: AKShare 软失败（板块空成分）→ akshare 记 failed_sources、is_complete=False。
+
+        真实策略参与（只打桩 AKShare 客户端）：旧成分保留但「未刷新」必须传播为失败身份，
+        使调度器不推进当日水位并在下次触发时重试。
+        """
+        dp = _make_dp()
+        dp.clear_cancel()
+        dp.context.cache.stock_dao.get_ts_code_map = AsyncMock(
+            return_value={"000001": "000001.SZ", "600000": "600000.SH"}
+        )
+        dp.context.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=2)
+
+        boards = pd.DataFrame({"板块名称": ["锂电池", "光伏"], "板块代码": ["BK0123", "BK0456"]})
+        constituents = pd.DataFrame({"代码": ["000001", "600000"], "名称": ["平安银行", "浦发银行"]})
+
+        def _constituents_by_board(board_name):
+            return pd.DataFrame() if board_name == "光伏" else constituents
+
+        with (
+            patch("data.sync.concept_sync.AkshareConceptClient") as MockClient,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
+        ):
+            MockClient.return_value.get_concept_list = AsyncMock(return_value=boards)
+            MockClient.return_value.get_concept_constituents = AsyncMock(side_effect=_constituents_by_board)
+            MockLimitList.return_value.run = AsyncMock(return_value=SyncResult(status="success"))
+
+            result = await dp.run_concept_sync()
+
+        assert result.sources["akshare"] == "partial"
+        assert result.sources["limit_list"] == "success"
+        assert result.failed_sources == ["akshare"]
+        assert result.is_complete is False
+        assert any("光伏" in e for e in result.errors)
 
     @pytest.mark.asyncio
     async def test_partial_source_not_complete(self):

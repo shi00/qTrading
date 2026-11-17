@@ -4293,3 +4293,94 @@ class TestRealInterleaving:
         assert entry_order == ["g1", "h1", "g2"]
         for task in (g1, g2, h1):
             assert task.status == TaskStatus.COMPLETED
+
+
+class TestTaskManagerAdmissionGate:
+    """D03-001: 停机准入闸门——关闭后拒绝业务提交，延迟 _enqueue 释放本 owner。
+
+    覆盖：submit 即拒绝（无键残留）、已投递未 tick 的 _enqueue 拒绝启动 runner、
+    重启代际拒绝旧闭包、最后状态持久化通道不受闸门影响。
+    """
+
+    @pytest.mark.asyncio
+    async def test_close_admission_rejects_submit_without_key_residue(self):
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        mgr.close_admission()
+
+        factory = MagicMock()
+        assert mgr.submit_task("late", "System", factory, unique_key="late_key") is None
+        assert "late_key" not in mgr._active_keys
+        factory.assert_not_called()
+        assert mgr._get_active_task_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_enqueue_after_close_releases_owner_and_skips_runner(self):
+        """submit 已返回、loop 尚未 tick 时停机：callback 被拒，键无残留、计数归零。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        calls: list[str] = []
+
+        def factory(task_id: str, **_kwargs):
+            calls.append(task_id)
+            return asyncio.sleep(0)
+
+        task_id = mgr.submit_task("queued_then_shutdown", "System", factory, unique_key="k1")
+        assert isinstance(task_id, str)
+        assert mgr._active_keys["k1"] == task_id
+
+        mgr.close_admission()  # 在事件循环 tick 前关闭准入
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert calls == [], "准入关闭后不得再启动业务 runner"
+        assert task_id not in mgr._tasks
+        assert "k1" not in mgr._active_keys, "被拒 callback 必须释放本 owner 的占位"
+        assert mgr._get_active_task_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_reopen_rejects_stale_enqueue_and_allows_new_submissions(self):
+        """重启语义：reopen 换代后旧代际闭包被拒，新代际提交正常。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        stale_factory = MagicMock()
+        stale_id = mgr.submit_task("stale", "System", stale_factory, unique_key="stale")
+        assert isinstance(stale_id, str)
+
+        mgr.close_admission()
+        mgr.reopen_admission()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert stale_factory.call_count == 0
+        assert stale_id not in mgr._tasks
+        assert "stale" not in mgr._active_keys
+
+        fresh_called = asyncio.Event()
+
+        async def _fresh():
+            fresh_called.set()
+
+        fresh_id = mgr.submit_task("fresh", "System", lambda **_kw: _fresh(), unique_key="fresh")
+        assert isinstance(fresh_id, str)
+        await asyncio.wait_for(fresh_called.wait(), timeout=1.0)
+        assert "fresh" not in mgr._active_keys  # 正常结束后释放占位
+
+    def test_close_admission_keeps_final_persistence_channel(self):
+        """闸门只约束业务提交：最后状态持久化通道仍可排队落库。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        task = AppTask(name="final", status=TaskStatus.RUNNING)
+        mgr._tasks[task.id] = task
+
+        mgr.close_admission()
+
+        mgr._schedule_coro = MagicMock(return_value=True)
+        mgr._persist_task(task)
+        assert mgr._schedule_coro.call_count == 1
+        persist_args = mgr._schedule_coro.call_args
+        assert asyncio.iscoroutine(persist_args.args[0])
+        assert callable(persist_args.kwargs.get("on_drop"))
+        assert mgr._persist_pending_count == 1
+        # 关闭未执行的持久化协程，避免 "coroutine was never awaited"
+        mgr._schedule_coro.call_args.args[0].close()

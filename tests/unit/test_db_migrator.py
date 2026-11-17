@@ -1,4 +1,5 @@
 import asyncio
+import threading
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -755,3 +756,75 @@ class TestRunAlembicUpgradeCancelledError:
                 # Verify warning was logged
                 mock_logger.warning.assert_called_once()
                 assert "cancelled" in mock_logger.warning.call_args[0][0].lower()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_does_not_release_lock_held_by_inflight_worker(self):
+        """取消 await 时 worker 线程可能仍在迁移：进程内锁必须继续被持有。"""
+        mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
+        started = threading.Event()
+        release = threading.Event()
+
+        def _hold_lock() -> None:
+            with DatabaseMigrator._alembic_lock:
+                started.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=_hold_lock, daemon=True)
+        holder.start()
+        assert started.wait(5), "lock holder thread did not start"
+
+        try:
+            with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
+                mock_tp.return_value.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+                with pytest.raises(asyncio.CancelledError):
+                    await DatabaseMigrator._run_alembic_upgrade(mock_engine)
+
+            # 取消路径不得强行释放他人持有的锁（否则同进程可再次发起迁移）。
+            assert DatabaseMigrator._alembic_lock.locked() is True
+        finally:
+            release.set()
+            holder.join(5)
+
+        assert DatabaseMigrator._alembic_lock.locked() is False
+
+    @pytest.mark.asyncio
+    async def test_cancellation_after_worker_completion_releases_lock(self):
+        """worker 已完成（finally 已释放锁）后再取消：锁为未持有态。"""
+        mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
+
+        async def _run_then_cancel(_task_type, func):
+            func()
+            raise asyncio.CancelledError()
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
+            mock_tp.return_value.run_async = _run_then_cancel
+            with patch("data.persistence.db_migrator.command.upgrade"):
+                with pytest.raises(asyncio.CancelledError):
+                    await DatabaseMigrator._run_alembic_upgrade(mock_engine)
+
+        assert DatabaseMigrator._alembic_lock.locked() is False
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_post_verification_is_not_classified(self):
+        """校验阶段被取消时，CancelledError 不得进入 SQL 异常分类/日志降级路径。"""
+        mock_engine = MagicMock()
+        mock_engine.url = "postgresql+asyncpg://user:pass@localhost:5432/test_db"
+
+        async def _run_func(_task_type, func):
+            func()
+
+        with patch("data.persistence.db_migrator.ThreadPoolManager") as mock_tp:
+            mock_tp.return_value.run_async = _run_func
+            with patch("data.persistence.db_migrator.command.upgrade"):
+                with patch.object(
+                    DatabaseMigrator,
+                    "_get_current_revision",
+                    AsyncMock(side_effect=asyncio.CancelledError()),
+                ):
+                    with patch("data.persistence.db_migrator.log_classified") as mock_log_classified:
+                        with pytest.raises(asyncio.CancelledError):
+                            await DatabaseMigrator._run_alembic_upgrade(mock_engine)
+
+        mock_log_classified.assert_not_called()

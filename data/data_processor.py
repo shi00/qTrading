@@ -1313,7 +1313,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """Prepare context for screening execution.
 
         ``exclude_st``（默认 True）：在 is_tradable 行过滤之后、screening_data 定稿前，
-        依据 SQL 派生列 is_st（as-of 名称含 ST/*ST）剔除风险警示股。ST 排除为何须在数据层
+        依据 SQL 派生列 is_st（as-of 名称含 ST/*ST）剔除风险警示股。is_st 为三态：name-history
+        无 as-of 覆盖行时为 NULL（未知，D12-002）；本方法仅供**实盘**入口（as_of=最新交易日/
+        当前快照，当期名称即 as-of 名称，无前视），故用 is_st_current_snapshot 补齐 NULL 后过滤，
+        实盘口径与旧行为一致；历史回放一律经 BacktestDataProvider，保留 NULL 未知并由回测结果
+        声明当期近似（R24）。ST 排除为何须在数据层
         行过滤而非 SQL WHERE：get_screening_data / get_fundamental_screening_data 透传方法
         保持签名与行为不变（回测 data_provider 直接调用它们，必须拿到含 ST 的完整数据），
         排除仅作用于选股上下文。fundamental_screening_data 不受本参数影响（由
@@ -1381,11 +1385,18 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             )
 
         # DS-02: ST 风险警示股排除（数据层行过滤，默认开启）。is_st 为 SQL 派生列
-        # （as-of 名称 UPPER LIKE '%ST%'）；无该列（结构缺失/空表）时跳过并告警，保底回退不剔除。
+        # （三态：as-of 名称 UPPER LIKE '%ST%'；name-history 缺覆盖行为 NULL 未知，D12-002）。
+        # 实盘 as_of=当前快照，当期名称即 as-of 名称（无前视），故用 is_st_current_snapshot
+        # 补齐 NULL——实盘口径与旧行为一致；回测路径不经本方法，NULL 保持未知。
+        # 无该列（结构缺失/空表）时跳过并告警，保底回退不剔除。
         if exclude_st and screening_data is not None and not screening_data.empty and "is_st" in screening_data.columns:
-            st_count = int(screening_data["is_st"].sum())
+            st_flags = screening_data["is_st"]
+            if "is_st_current_snapshot" in screening_data.columns:
+                st_flags = st_flags.where(st_flags.notna(), screening_data["is_st_current_snapshot"])
+            st_flags = st_flags.fillna(False).astype(bool)
+            st_count = int(st_flags.sum())
             if st_count > 0:
-                screening_data = screening_data[~screening_data["is_st"]].copy()
+                screening_data = screening_data[~st_flags].copy()
                 diagnostics["st_excluded"] = st_count
         elif (
             exclude_st

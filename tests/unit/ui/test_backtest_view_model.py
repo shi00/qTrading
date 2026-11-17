@@ -16,7 +16,7 @@ import pytest
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from services.backtest_service import BacktestService
 from services.task_manager import AppTask, TaskManager, TaskStatus
-from strategies.backtest.config import BacktestConfig, DataWarning
+from strategies.backtest.config import BacktestConfig, BacktestStatus, DataWarning
 from strategies.backtest.engine import VectorBacktestEngine
 from ui.viewmodels import Message
 from ui.viewmodels.backtest_view_model import (
@@ -541,6 +541,22 @@ class TestBacktestViewModelRunBacktest:
         await captured["factory"](task_id="task_credibility")
         return vm
 
+    @pytest.mark.asyncio
+    async def test_cancelled_result_maps_to_cancelled_not_completed(self):
+        """D12-005: 服务返回 CANCELLED 终态 → UI 落取消态，且不写成功结果字段。"""
+        result = self._result_with(status=BacktestStatus.CANCELLED)
+
+        vm = await self._exec_backtest(result)
+
+        assert vm.state.is_running is False
+        assert vm.state.status_color == "warning"
+        assert vm.state.status_message == Message("backtest_cancelled")
+        assert vm.state.metrics == ()
+        assert vm.state.run_id is None
+        assert vm.state.nav_dates == ()
+        assert vm.state.trades == ()
+        assert vm.state.caveats == ()
+
     async def _exec_backtest_with_strategy(self, strategy_obj: Any, result: Any = None) -> BacktestViewModel:
         """运行一次成功的回测, 使用指定策略对象 (BIZ-04: 控制 supports_ai)."""
         vm = BacktestViewModel()
@@ -625,6 +641,48 @@ class TestBacktestViewModelRunBacktest:
 
         assert vm.state.caveats == (Message("backtest_caveat_delisting_asof_approximation"),)
         assert vm.state.credibility_level == "ok"
+
+    @pytest.mark.asyncio
+    async def test_st_asof_approximation_emits_caveat_without_level_upgrade(self):
+        """D12-002/R24: 历史 ST 状态未知 → caveat 呈现，且不升级可信度级别。"""
+        result = self._result_with(
+            data_warnings=(
+                DataWarning(
+                    warning_type="st_asof_approximation",
+                    start_date="2024-01-01",
+                    end_date="2024-12-31",
+                    affected_stock_count=0,
+                    error_message="口径近似",
+                ),
+            )
+        )
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=False), result=result)
+
+        assert vm.state.caveats == (Message("backtest_caveat_st_asof_approximation"),)
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == ()
+
+    @pytest.mark.asyncio
+    async def test_st_asof_approximation_legacy_str_emits_caveat(self):
+        """D12-002/R24: 持久化 round-trip 的 '[st_asof_approximation] ...' 字符串同样在结果中标注。"""
+        result = self._result_with(data_warnings=("[st_asof_approximation] 2024-01-01-2024-12-31: 口径近似",))
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=False), result=result)
+
+        assert vm.state.caveats == (Message("backtest_caveat_st_asof_approximation"),)
+        assert vm.state.credibility_level == "ok"
+
+    @pytest.mark.asyncio
+    async def test_delisting_and_st_approximation_both_caveats(self):
+        """D12-002 + R24: 退市与 ST 两类口径近似可叠加呈现。"""
+        result = self._result_with(
+            data_warnings=("[delisting_asof_approximation] 2024-01-01: x", "[st_asof_approximation] 2024-01-01: y")
+        )
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=False), result=result)
+
+        assert vm.state.caveats == (
+            Message("backtest_caveat_delisting_asof_approximation"),
+            Message("backtest_caveat_st_asof_approximation"),
+        )
 
     @pytest.mark.asyncio
     async def test_ai_disabled_and_delisting_approximation_both_caveats(self):

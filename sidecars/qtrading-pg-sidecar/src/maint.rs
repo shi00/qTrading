@@ -8,7 +8,7 @@
 //!
 //! 恢复后 schema 停留于备份时点；Alembic 补平由 app 下次启动的既有迁移流程负责（Phase 2+，§12.2 step 7）。
 
-use crate::cli::{self, DEFAULT_DATABASE};
+use crate::cli;
 use crate::commands::state_file_condition;
 use crate::exit_codes;
 use crate::lockfile::{AcquireError, MaintenanceLock};
@@ -916,6 +916,117 @@ async fn stop_failed_start_instance(layout: &Layout) -> (bool, Option<pgbin::Sto
     (outcome.stopped, outcome.failure)
 }
 
+// ---- dump 实例状态判定（D07-002） ----
+//
+// `postmaster.pid` 存在不等于存在可用实例，活 PID 也不等于端口可信：
+// - 文件缺失 → 无 PID，可离线；
+// - PID 已不存在（含僵尸）→ 死 PID，pid 文件可证明 stale；
+// - PID 存活且身份可证明、端口可信 → 在线；
+// - PID 存活但身份不可证明 / 端口缺失、为 0、非法 / pid 文件存在却无法解析 → 拒绝，
+//   保留 pid 文件（stop/restore 仍需这条线索），绝不在活实例上启动第二实例。
+
+#[derive(Debug, PartialEq, Eq)]
+enum DumpInstanceState {
+    /// 可离线备份；`clear_stale_pid` 表示 pid 文件可证明为 stale（PID 已不存在）。
+    Offline { clear_stale_pid: bool },
+    /// 在线备份（PID 归属已证明，端口可信）。
+    Online { port: u16 },
+    /// 无法安全判定 → 拒绝；`String` 为面向用户的原因。
+    Refuse(String),
+}
+
+/// 是否存在 `postmaster.pid` 条目（含空文件、不可解析/非 UTF-8 内容）。
+fn pid_file_present(data_dir: &Path) -> bool {
+    std::fs::symlink_metadata(data_dir.join("postmaster.pid")).is_ok()
+}
+
+/// 判定 dump 应走在线、离线还是拒绝（只读，不修改 pid 文件、不发送信号）。
+fn classify_dump_instance(layout: &Layout) -> DumpInstanceState {
+    let Some(info) = pgbin::read_postmaster_pid(&layout.data_dir) else {
+        // 文件存在但首行不是合法 PID：无法证伪活实例，不能当作「无 PID」直接清理。
+        return if pid_file_present(&layout.data_dir) {
+            DumpInstanceState::Refuse(
+                "postmaster.pid 存在但无法解析（PID 行缺失或非数字）。dump 不会删除无法证明 stale \
+                 的 pid 文件；请先用 doctor 确认实例状态，确认无 postgres 运行后人工移走该文件再重试"
+                    .into(),
+            )
+        } else {
+            DumpInstanceState::Offline {
+                clear_stale_pid: false,
+            }
+        };
+    };
+    if !pgbin::process_alive(info.pid) {
+        return DumpInstanceState::Offline {
+            clear_stale_pid: true,
+        };
+    }
+    match process_identity::capture_cluster_identity_from_info(
+        &layout.data_dir,
+        &layout.install_dir,
+        &info,
+    ) {
+        // 存活探测与身份读取之间进程已退出（含僵尸）：可证明 stale。
+        Err(e) if e.is_not_running() => DumpInstanceState::Offline {
+            clear_stale_pid: true,
+        },
+        Err(e) => DumpInstanceState::Refuse(format!(
+            "PID {} 存活但无法证明其属于 {}（{e}）。stop 对无法证明归属的 PID 同样拒绝，\
+             请先人工确认该进程归属后再重试",
+            info.pid,
+            layout.data_dir.display()
+        )),
+        Ok(_) => classify_proven_online(layout, &info),
+    }
+}
+
+/// 身份已证明（PID 归属成立）后的端口分流：可信端口 → Online；
+/// 端口缺失 / 为 0 / 非法 → Refuse（不回退任何配置端口，也不在活实例上起第二实例）。
+fn classify_proven_online(layout: &Layout, info: &pgbin::PostmasterInfo) -> DumpInstanceState {
+    match runtime_port(Some(info), true) {
+        Some(port) => DumpInstanceState::Online { port },
+        None => DumpInstanceState::Refuse(format!(
+            "PID {} 存活且身份可证明，但 postmaster.pid 未记录可信端口（原始值 {:?}）。\
+             请先执行 `qtrading-pg-sidecar stop --data-dir {}` 后重试",
+            info.pid,
+            info.port,
+            layout.data_dir.display()
+        )),
+    }
+}
+
+/// 拒绝在活实例（或无法判定的状态）上备份：保留 pid 文件，返回 `LOCK_CONFLICT`。
+fn refuse_dump(layout: &Layout, reason: &str) -> u8 {
+    eprintln!(
+        "[sidecar] 拒绝备份：{reason}。postmaster.pid 未被修改（{}），\
+         也不会在活实例上启动第二实例。",
+        layout.data_dir.display()
+    );
+    exit_codes::LOCK_CONFLICT
+}
+
+/// 离线 dump 前置准备（调用方必须已持有维护锁）：锁内重读状态，只清理可证明 stale 的 pid 文件。
+fn prepare_offline_dump(layout: &Layout) -> Result<(), u8> {
+    match classify_dump_instance(layout) {
+        DumpInstanceState::Offline { clear_stale_pid } => {
+            if clear_stale_pid {
+                tracing::warn!("stale postmaster.pid removed before offline dump");
+                let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
+            }
+            Ok(())
+        }
+        DumpInstanceState::Online { .. } => Err(refuse_dump(
+            layout,
+            &format!(
+                "维护锁内重读发现 PostgreSQL 实例在运行（判定离线期间状态已变化），\
+                 离线备份的前提已不成立。请先执行 `qtrading-pg-sidecar stop --data-dir {}` 后重试",
+                layout.data_dir.display()
+            ),
+        )),
+        DumpInstanceState::Refuse(reason) => Err(refuse_dump(layout, &reason)),
+    }
+}
+
 // ---- dump ----
 
 pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
@@ -950,15 +1061,10 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
     // 唯一 create_new 路径保证并发任务不会共用同一临时文件；清理只删除本任务文件。
     let mut partial = PartialGuard::new(claim_unique_partial(output)?);
 
-    // 运行中实例：SQL 级直连，不占维护锁（§13.3 AI-28）；离线：持锁起临时实例
-    let pm = pgbin::read_postmaster_pid(&layout.data_dir);
-    let online_port = pm
-        .as_ref()
-        .filter(|i| pgbin::process_alive(i.pid))
-        .and_then(|i| i.port);
-
-    let result = match online_port {
-        Some(port) => {
+    // 运行中实例：先证明 PID 归属与端口可信，再走 SQL 级直连（不占维护锁，§13.3 AI-28）；
+    // 离线：持锁后**重读**状态，只清理可证明 stale 的 pid 文件，再起临时实例（D07-002）。
+    let result = match classify_dump_instance(&layout) {
+        DumpInstanceState::Online { port } => {
             tracing::info!("dump via running instance on port {port}");
             run_pg_dump(
                 &layout.install_dir,
@@ -970,11 +1076,10 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
             )
             .await
         }
-        None => {
+        DumpInstanceState::Refuse(reason) => Err(refuse_dump(&layout, &reason)),
+        DumpInstanceState::Offline { .. } => {
             let _lock = acquire_lock(&layout)?;
-            if pm.is_some() {
-                let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
-            }
+            prepare_offline_dump(&layout)?;
             setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
             let instance = TempInstance::start(layout.clone(), &args.username, &password)
                 .await
@@ -1863,20 +1968,27 @@ struct MaintenanceShellJson {
     connection_string_redacted: String,
 }
 
-fn maintenance_shell_json(install_dir: &Path, port: u16, username: &str) -> MaintenanceShellJson {
+fn maintenance_shell_json(
+    install_dir: &Path,
+    port: u16,
+    username: &str,
+    database: &str,
+) -> MaintenanceShellJson {
     MaintenanceShellJson {
         psql_path: pgbin::tool_path(install_dir, "psql")
             .to_string_lossy()
             .into_owned(),
-        // 用户名须与实际临时实例一致，否则自定义用户名部署下 stdout 连接串显示错误角色
+        // 用户名/库名须与实际临时实例一致，否则自定义部署下 stdout 连接串显示错误角色/库
         connection_string_redacted: format!(
-            "postgresql://{username}:***@{LISTEN_LOCAL}:{port}/{DEFAULT_DATABASE}"
+            "postgresql://{username}:***@{LISTEN_LOCAL}:{port}/{database}"
         ),
     }
 }
 
 pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8> {
     logging::init(None);
+    // D07-005：库名会进入连接串/psql 提示，先校验再获取维护锁（不在错误输入上产生副作用）
+    validate_database_name(&args.database)?;
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
 
     let _lock = acquire_lock(&layout)?;
@@ -1894,10 +2006,11 @@ pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
     let username = args.username.as_str();
+    let database = args.database.as_str();
     let instance = TempInstance::start(layout.clone(), username, &password)
         .await
         .map_err(|e| e.code)?;
-    let info = maintenance_shell_json(&layout.install_dir, instance.port, username);
+    let info = maintenance_shell_json(&layout.install_dir, instance.port, username, database);
     if let Err(e) = protocol::print_json_line(&info) {
         // stdout 管道不可用：无法向调用方交付连接信息，停止临时实例后失败退出。
         eprintln!("[sidecar] maintenance-shell JSON 输出失败: {e}");
@@ -1909,11 +2022,11 @@ pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8
     let psql_path = pgbin::tool_path(&layout.install_dir, "psql");
     eprintln!("[sidecar] 维护实例已启动：");
     eprintln!(
-        "  连接（脱敏）: postgresql://{username}:***@{LISTEN_LOCAL}:{}/{DEFAULT_DATABASE}",
+        "  连接（脱敏）: postgresql://{username}:***@{LISTEN_LOCAL}:{}/{database}",
         instance.port
     );
     eprintln!(
-        "  psql: {} -h {LISTEN_LOCAL} -p {} -U {username} -d {DEFAULT_DATABASE}",
+        "  psql: {} -h {LISTEN_LOCAL} -p {} -U {username} -d {database}",
         psql_path.display(),
         instance.port
     );
@@ -2157,6 +2270,7 @@ impl Drop for HbaRestoreGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::DEFAULT_DATABASE;
     use crate::cli::DEFAULT_USERNAME;
 
     fn unique_tmp(name: &str) -> PathBuf {
@@ -2473,6 +2587,270 @@ mod tests {
             "其他任务的 partial 不得被删除"
         );
         assert!(!output.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- D07-002: dump 不得把活 PID / 不可信端口当作离线 ----
+
+    fn dump_args(data_dir: PathBuf, output: PathBuf) -> cli::DumpArgs {
+        cli::DumpArgs {
+            data_dir,
+            output,
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        }
+    }
+
+    fn write_pidfile_raw(data_dir: &Path, content: &str) {
+        std::fs::create_dir_all(data_dir).unwrap();
+        std::fs::write(data_dir.join("postmaster.pid"), content).unwrap();
+    }
+
+    /// 让 `install_dir/bin/postgres` 指向当前测试进程，使本进程可被证明为该 PGDATA 的 postmaster。
+    #[cfg(unix)]
+    fn link_install_postgres(install_dir: &Path) {
+        std::fs::create_dir_all(install_dir.join("bin")).unwrap();
+        std::os::unix::fs::symlink(
+            std::env::current_exe().unwrap(),
+            install_dir.join("bin/postgres"),
+        )
+        .unwrap();
+    }
+
+    /// 断言 dump 被拒绝且 pid 文件逐字节不变、未创建任何启动痕迹（未尝试第二实例）。
+    async fn assert_dump_refused_keeping_pidfile(dir: &Path, data_dir: &Path, content: &str) {
+        let layout = Layout::from_data_dir(data_dir, None, None, None);
+        assert_eq!(
+            dump(dump_args(data_dir.to_path_buf(), dir.join("out.dump"))).await,
+            Err(exit_codes::LOCK_CONFLICT)
+        );
+        assert_eq!(
+            std::fs::read(data_dir.join("postmaster.pid")).unwrap(),
+            content.as_bytes(),
+            "拒绝时不得删除/改写 postmaster.pid"
+        );
+        assert!(!data_dir.join("start.log").exists(), "不得尝试启动临时实例");
+        assert!(
+            !layout.install_dir.join("bin/initdb").exists(),
+            "不得解压/准备第二实例的 binaries"
+        );
+        assert!(!dir.join("out.dump").exists());
+        assert!(
+            std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".partial")),
+            "拒绝时不得残留 .partial"
+        );
+    }
+
+    /// 截断为三行的 postmaster.pid（缺端口）+ 活 PID → 拒绝，不清 pid 文件。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dump_refuses_alive_instance_with_truncated_pidfile() {
+        let dir = unique_tmp("dump-live-truncated");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        link_install_postgres(&layout.install_dir);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        let content = format!(
+            "{}\n{}\n1234567890\n",
+            std::process::id(),
+            data_dir.display()
+        );
+        write_pidfile_raw(&data_dir, &content);
+
+        assert_dump_refused_keeping_pidfile(&dir, &data_dir, &content).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端口行非法（非数字）→ 拒绝，不回退任何配置端口。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dump_refuses_alive_instance_with_bad_port_line() {
+        let dir = unique_tmp("dump-live-badport");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        link_install_postgres(&layout.install_dir);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        let content = format!(
+            "{}\n{}\n1234567890\nnot-a-port\n/tmp\n127.0.0.1\n",
+            std::process::id(),
+            data_dir.display()
+        );
+        write_pidfile_raw(&data_dir, &content);
+
+        assert_dump_refused_keeping_pidfile(&dir, &data_dir, &content).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端口为 0 → 语义等同「端口未知」，拒绝而非当作在线。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dump_refuses_alive_instance_with_port_zero() {
+        let dir = unique_tmp("dump-live-port0");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        link_install_postgres(&layout.install_dir);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        let content = format!(
+            "{}\n{}\n1234567890\n0\n/tmp\n127.0.0.1\n",
+            std::process::id(),
+            data_dir.display()
+        );
+        write_pidfile_raw(&data_dir, &content);
+
+        assert_dump_refused_keeping_pidfile(&dir, &data_dir, &content).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pid 文件存在但无法解析 → fail closed，不当作「无 PID」直接离线。
+    #[tokio::test]
+    async fn dump_refuses_unparsable_pidfile() {
+        let dir = unique_tmp("dump-unparsable-pid");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        let content = "not-a-pid\nsomewhere\n1234567890\n";
+        write_pidfile_raw(&data_dir, content);
+
+        assert_dump_refused_keeping_pidfile(&dir, &data_dir, content).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 分类：无 PID / 死 PID / 不可解析 / 活但证据不足 的区分。
+    #[test]
+    fn classify_dump_instance_distinguishes_pid_states() {
+        let dir = unique_tmp("dump-classify");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+
+        assert_eq!(
+            classify_dump_instance(&layout),
+            DumpInstanceState::Offline {
+                clear_stale_pid: false
+            },
+            "无 pid 文件 → 离线"
+        );
+
+        write_postmaster_pid(&data_dir, 4_000_000, 1_234_567_890);
+        assert_eq!(
+            classify_dump_instance(&layout),
+            DumpInstanceState::Offline {
+                clear_stale_pid: true
+            },
+            "死 PID → 可信 stale"
+        );
+
+        write_pidfile_raw(&data_dir, "garbage\n");
+        assert!(
+            matches!(
+                classify_dump_instance(&layout),
+                DumpInstanceState::Refuse(_)
+            ),
+            "不可解析 pid 文件 → 拒绝"
+        );
+
+        write_postmaster_pid(&data_dir, std::process::id(), 1_234_567_890);
+        assert!(
+            matches!(
+                classify_dump_instance(&layout),
+                DumpInstanceState::Refuse(_)
+            ),
+            "活 PID 但无法证明归属（install 无可执行文件）→ 拒绝"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 分类：活且可证明归属时，只有可信端口才允许在线；缺端口/0/非法端口一律拒绝。
+    ///
+    /// 注：单测进程自身无法证明归属（可执行文件/工作目录均非该安装的 postgres），
+    /// 故「身份不可证明的活 PID → Refuse」经 classify_dump_instance 断言；
+    /// 「身份已证明后的端口分流」经 classify_proven_online 直接验证。
+    /// （身份证明依赖 unix 专属测试辅助 link_install_postgres，故本测试仅 unix。）
+    #[cfg(unix)]
+    #[test]
+    fn classify_dump_instance_requires_trusted_port_for_online() {
+        let dir = unique_tmp("dump-classify-port");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        link_install_postgres(&layout.install_dir);
+        let pid = std::process::id();
+        let row = |port: &str| {
+            format!(
+                "{pid}\n{}\n1234567890\n{port}\n/tmp\n127.0.0.1\n",
+                data_dir.display()
+            )
+        };
+
+        // 活 PID 但身份不可证明（假启动时刻 + 非本安装可执行文件）→ Refuse，
+        // 不得当作离线，也不得当作在线（D07-002 fail-closed）。
+        write_pidfile_raw(&data_dir, &row("55432"));
+        assert!(
+            matches!(
+                classify_dump_instance(&layout),
+                DumpInstanceState::Refuse(_)
+            ),
+            "身份不可证明的活 PID 必须 Refuse"
+        );
+
+        // 身份已证明后的端口分流：可信端口 → Online；0/非法/缺失 → Refuse。
+        let info_with_port = |port: &str| {
+            write_pidfile_raw(&data_dir, &row(port));
+            pgbin::read_postmaster_pid(&data_dir).expect("pid 文件应可解析")
+        };
+        assert_eq!(
+            classify_proven_online(&layout, &info_with_port("55432")),
+            DumpInstanceState::Online { port: 55432 }
+        );
+        for port in ["0", "not-a-port", ""] {
+            assert!(
+                matches!(
+                    classify_proven_online(&layout, &info_with_port(port)),
+                    DumpInstanceState::Refuse(_)
+                ),
+                "端口 {port:?} 不可信时不得走在线/离线"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 锁内准备只清理可证明 stale 的 pid 文件；活但证据不足时保留（供 stop/restore 使用）。
+    #[test]
+    fn prepare_offline_dump_clears_only_provably_stale_pidfile() {
+        let dir = unique_tmp("dump-offline-prepare");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+
+        write_postmaster_pid(&data_dir, 4_000_000, 1_234_567_890);
+        assert_eq!(prepare_offline_dump(&layout), Ok(()));
+        assert!(
+            !data_dir.join("postmaster.pid").exists(),
+            "死 PID 的 stale 文件应被清理"
+        );
+
+        let content = format!(
+            "{}\n{}\n1234567890\n55432\n/tmp\n127.0.0.1\n",
+            std::process::id(),
+            data_dir.display()
+        );
+        write_pidfile_raw(&data_dir, &content);
+        assert_eq!(
+            prepare_offline_dump(&layout),
+            Err(exit_codes::LOCK_CONFLICT)
+        );
+        assert_eq!(
+            std::fs::read(data_dir.join("postmaster.pid")).unwrap(),
+            content.as_bytes(),
+            "活但证据不足时不得清理 pid 文件"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3411,7 +3789,12 @@ mod tests {
     /// maintenance-shell stdout 契约：psql 路径 + 脱敏连接串（密码段固定 `***`）。
     #[test]
     fn maintenance_shell_json_redacts_password() {
-        let info = maintenance_shell_json(Path::new("/x/install"), 55432, DEFAULT_USERNAME);
+        let info = maintenance_shell_json(
+            Path::new("/x/install"),
+            55432,
+            DEFAULT_USERNAME,
+            DEFAULT_DATABASE,
+        );
         let v = serde_json::to_value(&info).unwrap();
         assert!(v["psql_path"].as_str().unwrap().contains("psql"));
         assert_eq!(
@@ -3422,12 +3805,12 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(":***@"));
-        // 自定义用户名部署：stdout 连接串须与实际实例角色一致（M21 × M19 合并适配）
-        let info = maintenance_shell_json(Path::new("/x/install"), 55432, "qtrading");
+        // 自定义用户名/库名部署：stdout 连接串须与实际实例角色/库一致
+        let info = maintenance_shell_json(Path::new("/x/install"), 55432, "qtrading", "stock_db");
         let v = serde_json::to_value(&info).unwrap();
         assert_eq!(
             v["connection_string_redacted"],
-            "postgresql://qtrading:***@127.0.0.1:55432/qtrading"
+            "postgresql://qtrading:***@127.0.0.1:55432/stock_db"
         );
     }
 
@@ -3754,6 +4137,7 @@ mod tests {
         let data_dir = dir.join("postgres/16/data");
         let args = cli::MaintenanceShellArgs {
             data_dir,
+            database: DEFAULT_DATABASE.to_string(),
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(
@@ -3774,6 +4158,7 @@ mod tests {
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
         let args = cli::MaintenanceShellArgs {
             data_dir,
+            database: DEFAULT_DATABASE.to_string(),
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(
@@ -3781,6 +4166,33 @@ mod tests {
             Err(exit_codes::LOCK_CONFLICT)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `maintenance-shell` 非法/空库名 → 参数错误，且不获取维护锁、不启动实例（D07-005）。
+    #[tokio::test]
+    async fn maintenance_shell_rejects_invalid_database_before_side_effects() {
+        for bad in ["", "bad name", "a;drop"] {
+            let dir = unique_tmp("shell-baddb");
+            let data_dir = dir.join("postgres/16/data");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
+            let layout = Layout::from_data_dir(&data_dir, None, None, None);
+            let args = cli::MaintenanceShellArgs {
+                data_dir,
+                database: bad.to_string(),
+                username: DEFAULT_USERNAME.to_string(),
+            };
+            assert_eq!(
+                maintenance_shell(args).await,
+                Err(exit_codes::ARGUMENT_ERROR),
+                "{bad:?} 应被拒绝"
+            );
+            assert!(
+                !MaintenanceLock::is_held(&layout.lock_file),
+                "非法库名不得获取维护锁"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     // ---- P3-Rust-Coverage-D38: 补充 doctor 残留物报告与边界分支 ----

@@ -11,7 +11,7 @@ import asyncio
 import datetime
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -21,6 +21,7 @@ from data.constants import (
     HEALTH_THRESHOLD_BREADTH,
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_MARKET_LAG_DAYS,
+    MARKET_CLOSE_HOUR,
     SYNC_RESULT_EMPTY,
     TIER_FINANCIAL_FRESHNESS_DAYS,
     TIER_FIN_FRESH_RATIO_GOLD,
@@ -59,6 +60,28 @@ _STOCK_BASIC_STALE_DAYS = 30
 _TRADE_CAL_FUTURE_DAYS = 30
 # DAT-13: index_daily 最新交易日滞后该天数视为陈旧
 _INDEX_STALE_DAYS = 7
+
+
+def _normalize_calendar_dates(
+    values: Iterable[datetime.date | datetime.datetime | str | None] | None,
+) -> list[datetime.date]:
+    """将日期样值（date/datetime/YYYYMMDD 串）归一为升序 date 列表，非法值丢弃。
+
+    交易日历与行情日期在生产中均为 date，但调用方/替身可能混入字符串；
+    统一归一可避免 date 与 str 比较抛 TypeError，也让「集合合并 + 计数」口径一致。
+    """
+    normalized: set[datetime.date] = set()
+    for value in values if values is not None else ():
+        try:
+            if isinstance(value, datetime.datetime):
+                normalized.add(value.date())
+            elif isinstance(value, datetime.date):
+                normalized.add(value)
+            elif value is not None:
+                normalized.add(parse_date(str(value)).date())
+        except (ValueError, TypeError):
+            continue
+    return sorted(normalized)
 
 
 def _compute_tier(
@@ -397,6 +420,40 @@ class HealthCheckMixin:
             self._quality_tier = 1
 
     @log_async_operation(
+        operation_name="probe_api_trade_calendar",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
+    async def _probe_api_trade_calendar(
+        self,
+        start_date: datetime.date,
+        end_date: datetime.date,
+    ) -> set[datetime.date] | None:
+        """探测 Tushare 官方交易日历在 [start_date, end_date] 内的开市日集合。
+
+        Returns:
+            官方开市日集合（空集合表示区间内确无开市日，属已知结果）；
+            API 不可得 / 响应结构异常时返回 None（未知），由调用方保留本地日历，
+            不臆断官方已与本地一致（R21：未知 ≠ 已知为空）。
+        """
+        tc = getattr(self, "api", None)
+        if tc is None:
+            from data.external.tushare_client import TushareClient
+
+            tc = TushareClient()
+        api_cal_df = await tc.get_trade_cal(
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+            is_open=1,
+        )
+        if api_cal_df is None or "cal_date" not in api_cal_df.columns:
+            return None
+        # 防御性裁剪到请求区间，避免服务端忽略区间时把区间外开市日计入滞后。
+        api_dates = [
+            d for d in _normalize_calendar_dates(api_cal_df["cal_date"].tolist()) if start_date <= d <= end_date
+        ]
+        return set(api_dates)
+
+    @log_async_operation(
         operation_name="check_data_health",
         log_result=True,
         threshold_ms=PerfThreshold.DB_BULK_IO,
@@ -433,66 +490,62 @@ class HealthCheckMixin:
             else:
                 start_date = all_dates[0] if all_dates else (end_date_obj - datetime.timedelta(days=365 * years)).date()
 
-            official_dates = await self.trade_calendar.get_trade_dates(start_date, end_date)
+            official_dates = _normalize_calendar_dates(await self.trade_calendar.get_trade_dates(start_date, end_date))
 
             if not official_dates:
                 return {"status": "red", "msg": I18n.get("health_err_calendar")}
 
-            api_latest_official = None
-            try:
-                tc = getattr(self, "api", None)
-                if tc is None:
-                    from data.external.tushare_client import TushareClient
+            # P1-7: 官方日历交叉校验。探测上界取「按墙上时钟已收盘的最近自然日」：
+            # 开市前不得把当日计入缺口，否则当日行情尚未落库即被误报 lag。
+            now_dt = get_now()
+            probe_end = now_dt.date()
+            if now_dt.hour < MARKET_CLOSE_HOUR:
+                probe_end -= datetime.timedelta(days=1)
 
-                    tc = TushareClient()
-                api_cal_df = await tc.trade_cal(  # type: ignore[attr-defined]
-                    start_date=end_date_obj.strftime("%Y%m%d"),
-                    end_date=end_date_obj.strftime("%Y%m%d"),
-                    is_open="1",
-                )
-                if api_cal_df is not None and not api_cal_df.empty:
-                    api_latest = sorted(api_cal_df["cal_date"].tolist())[-1]
-                    if isinstance(api_latest, str):
-                        api_latest_official = api_latest
-                        if api_latest > str(official_dates[-1]):
-                            logger.warning(
-                                "[DataProcessor] Health | Local trade_cal latest=%s, "
-                                "API latest=%s. Local calendar may be stale. Using API as gold standard.",
-                                official_dates[-1],
-                                api_latest,
-                            )
-            except Exception as e:
-                logger.debug("[DataProcessor] Health | API trade_cal cross-check skipped: %s", e)
+            api_open_dates: set[datetime.date] | None = None
+            # 本地日历落后于已收盘自然日时，官方日历不可得 → 滞后量未知（R21：
+            # 已知不可信信号须在 reasons 暴露，不得静默渲染为「无问题」）。
+            cross_check_unknown = False
+            if official_dates[-1] < probe_end:
+                try:
+                    api_open_dates = await self._probe_api_trade_calendar(official_dates[-1], probe_end)
+                    cross_check_unknown = api_open_dates is None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    cross_check_unknown = True
+                    logger.warning(
+                        "[DataProcessor] Health | API trade_cal cross-check unavailable: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
 
-            local_dates = await self.cache.quote_dao.get_cached_trade_dates()
+            local_dates = _normalize_calendar_dates(await self.cache.quote_dao.get_cached_trade_dates())
 
             # 1. Market Health
-            last_local = sorted(list(local_dates))[-1] if local_dates else None
+            last_local = local_dates[-1] if local_dates else None
 
             # P1-7 fix: Use API trade_cal as gold standard for lag calculation
             # when available, to avoid both trade_cal and daily_quotes being
             # stale simultaneously and falsely reporting "no lag".
+            # 仅当拿到完整官方开市日集合时才合并计数；API 不可得时保留本地日历
+            # （扩展量未知，不臆造已同步，也不因此误报无滞后之外的结论）。
             gold_standard_dates = official_dates
-            if api_latest_official and isinstance(api_latest_official, str):
-                try:
-                    api_latest_date = parse_date(api_latest_official).date()
-                    local_latest_str = str(official_dates[-1]) if official_dates else ""
-                    if local_latest_str and api_latest_official > local_latest_str:
-                        gold_standard_dates = [*official_dates, api_latest_date]
-                        logger.info(
-                            "[DataProcessor] Health | P1-7: API extends official dates from %s to %s",
-                            local_latest_str,
-                            api_latest_official,
-                        )
-                except (ValueError, TypeError):
-                    pass
+            if api_open_dates:
+                merged_official = sorted(set(official_dates) | api_open_dates)
+                if merged_official[-1] > official_dates[-1]:
+                    logger.warning(
+                        "[DataProcessor] Health | Local trade_cal latest=%s, "
+                        "API latest=%s. Local calendar may be stale. Using API as gold standard.",
+                        official_dates[-1],
+                        merged_official[-1],
+                    )
+                gold_standard_dates = merged_official
 
             lag_days = 0
-            if gold_standard_dates and (last_local is None or gold_standard_dates[-1] > last_local):
-                if local_dates and last_local:
-                    lag_days = len([d for d in gold_standard_dates if d > last_local])
-                else:
-                    lag_days = len(gold_standard_dates)
+            if last_local is None:
+                lag_days = len(gold_standard_dates)
+            else:
+                lag_days = len([d for d in gold_standard_dates if d > last_local])
 
             # 1.5 Concept Health
             try:
@@ -511,6 +564,9 @@ class HealthCheckMixin:
             # Scorecard construction
             status = "green"
             reasons = []
+
+            if cross_check_unknown:
+                reasons.append("official trade calendar cross-check unavailable; market lag may be understated")
 
             if lag_days > 0:
                 status = "yellow"
@@ -709,7 +765,7 @@ class HealthCheckMixin:
             status_msg += f" | {I18n.get('health_concepts_count', count=concept_count)}"
 
             # Construction of Market Info with None safety
-            latest_official = official_dates[-1] if official_dates else "N/A"
+            latest_official = gold_standard_dates[-1] if gold_standard_dates else "N/A"
             market_info = {
                 "latest_local": last_local if last_local else "N/A",
                 "latest_official": latest_official,

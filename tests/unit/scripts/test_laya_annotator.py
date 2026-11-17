@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import laya_annotator  # noqa: E402 - sys.path 注入后导入
+import train_finbert  # noqa: E402 - sys.path 注入后导入
 from data.external.news_sources.corpus import CorpusStore  # noqa: E402 - sys.path 注入后导入
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -201,8 +203,17 @@ def _make_store(tmp_path: Path, docs: list[dict[str, Any]]) -> CorpusStore:
     return store
 
 
-def _doc(source: str, source_id: str, text: str, *, ts_code: str | None = None) -> dict[str, Any]:
-    return {"source": source, "source_id": source_id, "source_kind": "news", "text": text, "ts_code": ts_code}
+def _doc(
+    source: str, source_id: str, text: str, *, ts_code: str | None = None, publish_time: datetime | None = None
+) -> dict[str, Any]:
+    return {
+        "source": source,
+        "source_id": source_id,
+        "source_kind": "news",
+        "text": text,
+        "ts_code": ts_code,
+        "publish_time": publish_time,
+    }
 
 
 def test_sample_review_set_respects_count_and_sources(tmp_path: Path):
@@ -218,7 +229,7 @@ def test_sample_review_set_respects_count_and_sources(tmp_path: Path):
     sources = {s["source"] for s in samples}
     assert {"sina_7x24", "sina_stock", "cninfo"} <= sources
     for s in samples:
-        assert set(s) == {"source", "source_id", "text", "ts_code"}
+        assert set(s) == {"id", "source", "source_id", "text", "ts_code", "publish_time"}
 
 
 def test_sample_review_set_reproducible_with_seed(tmp_path: Path):
@@ -259,6 +270,17 @@ def test_sample_review_set_preserves_none_ts_code(tmp_path: Path):
     with store:
         samples = laya_annotator.sample_review_set(store, n=1, seed=1)
     assert samples[0]["ts_code"] is None
+
+
+def test_sample_review_set_preserves_event_metadata_and_stable_id(tmp_path: Path):
+    """抽检记录透传 publish_time 与稳定 id，供 split / 训练侧事件互斥检查消费。"""
+    docs = [_doc("sina_7x24", "n0", "快讯", ts_code="600000.SH", publish_time=datetime(2026, 8, 20, 10, 0))]
+    store = _make_store(tmp_path, docs)
+    with store:
+        samples = laya_annotator.sample_review_set(store, n=1, seed=1)
+    assert samples[0]["id"] == "sina_7x24:n0"
+    assert samples[0]["ts_code"] == "600000.SH"
+    assert samples[0]["publish_time"] == "2026-08-20T10:00:00"
 
 
 def test_sample_review_set_tops_up_when_source_has_fewer_docs(tmp_path: Path):
@@ -513,7 +535,14 @@ class _FakeStore:
         return None
 
     def iter_documents(self) -> Any:
-        return iter(self._docs)
+        # 与 CorpusStore.iter_documents 落库语义对齐：publish_time 以 ISO 字符串返回
+        return (
+            {
+                **doc,
+                "publish_time": doc["publish_time"].isoformat() if doc.get("publish_time") is not None else None,
+            }
+            for doc in self._docs
+        )
 
 
 def test_main_sample_writes_review_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -566,3 +595,103 @@ def test_main_sample_rejects_non_positive_n(tmp_path: Path, capsys: pytest.Captu
         )
     assert exc_info.value.code == 2
     assert "正整数" in capsys.readouterr().err
+
+
+# ------------------------------------------------- annotate → split → validate 闭环
+
+
+def _annotate_args(tmp_path: Path, out: Path) -> list[str]:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir(exist_ok=True)
+    return [
+        "annotate",
+        "--db",
+        str(tmp_path / "corpus.db"),
+        "--model",
+        str(model_dir),
+        "--batch-size",
+        "2",
+        "--out",
+        str(out),
+    ]
+
+
+def _run_annotate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, docs: list[dict[str, Any]], out: Path) -> int:
+    answers = [
+        _answer("利好", {"利好": 0.7, "中性": 0.2, "利空": 0.1}),
+        _answer("中性", {"利好": 0.1, "中性": 0.8, "利空": 0.1}),
+        _answer("利空", {"利好": 0.05, "中性": 0.05, "利空": 0.9}),
+    ][: len(docs)]
+    monkeypatch.setattr(laya_annotator, "CorpusStore", lambda _path: _FakeStore(docs))
+    monkeypatch.setattr(laya_annotator, "load_agent", lambda _path: _FakeAgent(answers))
+    return laya_annotator.main(_annotate_args(tmp_path, out))
+
+
+def _write_split(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+
+
+def test_main_annotate_preserves_identity_and_event_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """annotate 输出必须带稳定 id 与 ts_code/publish_time；缺失字段写 null 并明示未校验。"""
+    docs = [
+        _doc("sina_7x24", "n0", "快讯一", ts_code="600000.SH", publish_time=datetime(2026, 8, 20, 10, 0)),
+        _doc("cninfo", "a0", "公告一"),  # 事件元数据缺失
+    ]
+    out = tmp_path / "annotated.jsonl"
+    assert _run_annotate(tmp_path, monkeypatch, docs, out) == 0
+    records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert records[0] == {
+        "id": "sina_7x24:n0",
+        "source": "sina_7x24",
+        "source_id": "n0",
+        "text": "快讯一",
+        "ts_code": "600000.SH",
+        "publish_time": "2026-08-20T10:00:00",
+        "label": "利好",
+        "confidence": pytest.approx(0.7),
+    }
+    assert records[1]["id"] == "cninfo:a0"
+    assert records[1]["ts_code"] is None
+    assert records[1]["publish_time"] is None
+    printed = capsys.readouterr().out
+    assert "事件元数据缺失" in printed
+    assert "无法参与事件分组互斥检查" in printed
+
+
+def test_annotated_event_metadata_reaches_trainer_exclusivity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """annotate 产物进入 split 后，同事件不同文本跨集合必须被训练侧拒绝（接口闭环）。"""
+    docs = [
+        _doc("sina_7x24", "n0", "回购利好", ts_code="600000.SH", publish_time=datetime(2026, 8, 20, 10, 0)),
+        _doc("sina_stock", "s0", "中标重大合同", ts_code="600000.SH", publish_time=datetime(2026, 8, 20, 10, 0)),
+        _doc("cninfo", "a0", "业绩预亏", ts_code="000001.SZ", publish_time=datetime(2026, 8, 21, 10, 0)),
+    ]
+    out = tmp_path / "annotated.jsonl"
+    assert _run_annotate(tmp_path, monkeypatch, docs, out) == 0
+    records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    corpus_dir = tmp_path / "split"
+    corpus_dir.mkdir()
+    _write_split(corpus_dir / "split_train.jsonl", [records[0]])
+    _write_split(corpus_dir / "split_val.jsonl", [records[1]])
+    _write_split(corpus_dir / "split_test.jsonl", [records[2]])
+    with pytest.raises(ValueError, match="事件分组泄漏"):
+        train_finbert.validate_corpus_dir(corpus_dir)
+
+
+def test_annotated_missing_event_metadata_marked_unverified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """代码/时间缺失时训练侧不得自称已排除：覆盖报告须明示这些样本未做对应检查。"""
+    docs = [_doc("sina_7x24", f"n{i}", f"快讯{i}") for i in range(3)]
+    out = tmp_path / "annotated.jsonl"
+    assert _run_annotate(tmp_path, monkeypatch, docs, out) == 0
+    records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    corpus_dir = tmp_path / "split"
+    corpus_dir.mkdir()
+    _write_split(corpus_dir / "split_train.jsonl", records[:2])
+    _write_split(corpus_dir / "split_val.jsonl", records[2:])
+    _write_split(corpus_dir / "split_test.jsonl", [{"text": "业绩预亏", "label": "利空"}])
+    splits = train_finbert.validate_corpus_dir(corpus_dir)
+    coverage = splits["exclusivity"]
+    assert coverage["unverified_event_key"] == 4
+    assert "未做对应检查" in coverage["declaration"]
+    assert "不构成" in coverage["declaration"]

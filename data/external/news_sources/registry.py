@@ -5,6 +5,8 @@
 - :meth:`SourcePlugin.build_queries`：按源构造请求单元（含分页 / 日期 / 符号展开）；
 - :meth:`SourcePlugin.client_kwargs`：``httpx.AsyncClient`` 的 kwargs（代理 + UA + 超时）；
 - :meth:`SourcePlugin.request`：发单次请求，返回**原始**响应（JSON dict / HTML 文本）；
+- :meth:`SourcePlugin.has_expected_envelope`：校验该源必需的响应骨架（区分真实空与解析失败）；
+- :meth:`SourcePlugin.parse_page`：先校验 envelope 再解析，返回带状态的 :class:`ParseOutcome`；
 - :meth:`SourcePlugin.parse`：原始响应 → 归一化文档列表。
 
 插件并声明 ``source_kind``（news / announcement）、``text_kind``（flash / title，决定是否截断
@@ -16,7 +18,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import httpx
 
@@ -27,6 +29,24 @@ DEFAULT_RATE_LIMIT_SECONDS = 2.5
 
 SOURCE_KIND_NEWS = "news"
 SOURCE_KIND_ANNOUNCEMENT = "announcement"
+
+# 单页解析状态：有效数据 / 真实合法空 / 解析失败（envelope 不符或解析抛错，不得计为成功）
+ParseStatus = Literal["ok", "valid_empty", "invalid"]
+
+
+@dataclass(frozen=True)
+class ParseOutcome:
+    """单页解析结果：把「真实空」与「解析失败」分开，供采集器选择计数与熔断路径。"""
+
+    docs: list[dict[str, Any]]
+    status: ParseStatus
+
+
+class EnvelopeError(Exception):
+    """响应结构不符合该源必需 envelope（HTTP 200 拦截页 / 登录页 / schema 漂移）。
+
+    消息只含响应类型，不回显响应内容（避免把整页 HTML 写入日志）。
+    """
 
 
 @dataclass(frozen=True)
@@ -80,6 +100,21 @@ class SourcePlugin(ABC):
     def parse(self, raw: Any, query: CollectQuery) -> list[dict[str, Any]]:
         """原始响应 → 归一化文档列表。"""
 
+    @abstractmethod
+    def has_expected_envelope(self, raw: Any) -> bool:
+        """响应是否具备该源必需的 envelope 结构（区分「真实空」与「解析失败」）。"""
+
+    def parse_page(self, raw: Any, query: CollectQuery) -> ParseOutcome:
+        """先校验必需 envelope 再解析，返回带状态的单页结果。
+
+        envelope 不符（登录 / 拦截 HTML、wrong-type、缺必需字段）直接返回 ``invalid``，**不调用**
+        :meth:`parse`、不计为成功；envelope 合法但解析出 0 条为 ``valid_empty``（真实空）。
+        """
+        if not self.has_expected_envelope(raw):
+            return ParseOutcome([], "invalid")
+        docs = self.parse(raw, query)
+        return ParseOutcome(docs, "ok" if docs else "valid_empty")
+
 
 class Sina7x24Plugin(SourcePlugin):
     """新浪财经 7x24 快讯（快讯正文，截断 120 字）。"""
@@ -103,6 +138,9 @@ class Sina7x24Plugin(SourcePlugin):
         docs, _ = sina_7x24.parse_feed_payload(raw)
         return docs
 
+    def has_expected_envelope(self, raw: Any) -> bool:
+        return sina_7x24.has_expected_envelope(raw)
+
 
 class SinaStockPlugin(SourcePlugin):
     """新浪个股新闻（标题，原样保留）；需显式提供 symbol 清单。"""
@@ -124,6 +162,9 @@ class SinaStockPlugin(SourcePlugin):
 
     def parse(self, raw: Any, query: CollectQuery) -> list[dict[str, Any]]:
         return sina_stock.parse_news_list(raw, symbol=query.symbol or None)
+
+    def has_expected_envelope(self, raw: Any) -> bool:
+        return sina_stock.has_expected_envelope(raw)
 
 
 class CninfoPlugin(SourcePlugin):
@@ -168,6 +209,9 @@ class CninfoPlugin(SourcePlugin):
     def parse(self, raw: Any, query: CollectQuery) -> list[dict[str, Any]]:
         docs, _ = cninfo.parse_announcement_payload(raw)
         return docs
+
+    def has_expected_envelope(self, raw: Any) -> bool:
+        return cninfo.has_expected_envelope(raw)
 
 
 _PLUGIN_TYPES: tuple[type[SourcePlugin], ...] = (Sina7x24Plugin, SinaStockPlugin, CninfoPlugin)

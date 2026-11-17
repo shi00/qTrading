@@ -51,6 +51,11 @@ _CLEANUP_STEPS = [
 # 避免阻塞整个 shutdown。30s 是平衡值——无限等待会卡死退出，立即 SIGKILL 需崩溃恢复。
 _STEP8_PG_STOP_TIMEOUT_S = 30.0
 
+# D03-001: Step 0 取消并 drain 在途 misfire 补跑任务的超时（秒）。补跑任务被取消后
+# 通常在首个 await 立即退出；预算 0.5s 使 Step 0 子预算合计
+# 0.5 + 1.5(registered) + 1.0(persist) + 2.5(join) = 5.5s < 6.0s 默认预算，保留 0.5s 抖动余量。
+_STEP0_MISFIRE_DRAIN_TIMEOUT_S = 0.5
+
 
 class ShutdownCoordinator:
     """
@@ -426,6 +431,16 @@ class ShutdownCoordinator:
     async def _step0_cancel_tasks(self):
         logger.info("[Shutdown] Step 0: Cancelling managed tasks...")
 
+        # D03-001: 业务准入必须先于取消快照关闭，顺序为
+        # 停调度触发 → 取消并 drain misfire 补跑 → 关闭 TaskManager 准入 →
+        # cancel/join 已接纳任务。否则 misfire 补跑可在取消快照之后 await 交易日历
+        # 并 submit_task 启动新 runner，与 flush / dispose / 线程池 / PG 关闭交错。
+        from utils.scheduler_service import SchedulerService  # lazy-import: 关机步骤按需加载
+
+        if SchedulerService._instance is not None:
+            logger.info("[Shutdown]   - Scheduler (stop triggers + drain misfire recovery)")
+            await SchedulerService._instance.stop_async(drain_timeout=_STEP0_MISFIRE_DRAIN_TIMEOUT_S)
+
         # Phase 2A.1 Task 2A.1.9：先取消 ShutdownCoordinator 注册的 fire-and-forget
         # 任务（如启动期 auto probe），再取消 TaskManager 的任务。注册任务通常为
         # 网络 IO，先取消可释放连接池资源给后续 DB flush 步骤使用。
@@ -441,17 +456,23 @@ class ShutdownCoordinator:
                 # 用 asyncio.wait（而非 gather(return_exceptions=True)）等待 drain：
                 # wait 不会重新抛出任务异常，符合"不传播 CancelledError 到 _step0"
                 # 的需求，且不违反 R2（未用 except 吞没 CancelledError）。
-                # CON-03: timeout 调谐为 1.5s，配合 TaskManager 的 2.5s join + 1.0s persist，
-                # 子超时之和 5.0s 严格小于 Step 0 的 6.0s 默认预算，预留 1.0s 抖动余量。
+                # CON-03: timeout 调谐为 1.5s，配合 TaskManager 的 2.5s join + 1.0s persist
+                # 与 D03-001 misfire drain 0.5s，子超时之和 5.5s 严格小于 Step 0 的 6.0s
+                # 默认预算，预留 0.5s 抖动余量。
                 await asyncio.wait(pending, timeout=1.5)
             self._registered_tasks.clear()
 
         from services.task_manager import TaskManager  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
 
         if TaskManager._instance is not None:
+            # D03-001: 在取消快照前关闭业务提交准入——此后 submit_task 一律返回 None
+            # （不登记 unique_key 占位），已投递未 tick 的 _enqueue 在准入边界二次检查处
+            # 释放本 owner 并拒绝启动 runner。最后状态持久化通道（_persist_task* /
+            # flush_persistence）不受闸门影响，Step 2 仍可完成落账。
+            TaskManager._instance.close_admission()
             # CON-03: TaskManager.cancel_all_running_async 默认使用校准后的 join_timeout=2.5, persist_timeout=1.0，
-            # 配合 registered_tasks 的 1.5s，内部子超时之和 5.0s < Step 0 的 6.0s 默认预算，
-            # 预留 1.0s 充裕抖动余量。此处无参调用以完全兼容存量零参数 mock。
+            # 配合 registered_tasks 的 1.5s 与 D03-001 misfire drain 的 0.5s，内部子超时之和
+            # 5.5s < Step 0 的 6.0s 默认预算，预留 0.5s 抖动余量。此处无参调用以完全兼容存量零参数 mock。
             await TaskManager._instance.cancel_all_running_async()
 
     async def _step1_stop_services(self):

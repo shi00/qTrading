@@ -124,6 +124,9 @@ _HIDDEN_COLS = frozenset(
         "review_status",
         "created_at",
         "is_st",  # SC-01: 内部过滤列（排除后恒为 False），不进结果表
+        # D12-002: ST 判定来源/当前快照标记（内部口径列），不进结果表。
+        "st_name_source",
+        "is_st_current_snapshot",
         "is_delisting",  # G2: 内部过滤列（排除后恒为 False），不进结果表
         "t1_price",
         "t5_price",
@@ -572,7 +575,7 @@ def build_param_control(
     on_update: typing.Callable[[str, typing.Any], None],
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
-    prompt_error: str = "",
+    prompt_error: Message | None = None,
     param_error: Message | None = None,
 ) -> ft.Control | None:
     """构建单个策略参数控件 (D15: 从 ScreenerView._build_param_control 提取, props 化)."""
@@ -664,13 +667,15 @@ def build_param_control(
             },
             text_size=AppStyles.FONT_SIZE_BODY_SM,
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
-            error=(prompt_error or None)
-            if p_name == "ai_system_prompt"
-            else None,  # D19: AI prompt 校验失败 inline 错误
+            # D19/ADD-UI-004: inline 错误按当前 locale 渲染; Message 保持 key+params,
+            # 常驻页切语言后重渲染即重译 (不保存已翻译字符串).
+            error=(_render_status_message(prompt_error) or None) if p_name == "ai_system_prompt" else None,
             on_change=lambda e, n=p_name: on_update(n, e.control.value if e and e.control else ""),
         )
         if p_name == "ai_system_prompt":
-            ctrl.label = None
+            # 保留构造函数设置的持久 label: 字段自身须有可访问名称
+            # (docs/flet/accessibility-baseline.md §2.1), 故不再清空 label,
+            # 也不再重复渲染同文视觉标题; 保存/重置入口单独成行且保留。
             # 面板仅在选中策略时渲染 (build_params_panel 先判空), 此处 selected_strategy 必非 None;
             # or "" 仅为消除 pyright str|None→str 告警 (D15 props 化后参数类型为 str | None).
             strat = selected_strategy or ""
@@ -679,7 +684,6 @@ def build_param_control(
                     [
                         ft.Row(
                             [
-                                ft.Text(label, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
                                 ft.Container(expand=True),
                                 ft.TextButton(
                                     content=I18n.get("ai_save_prompt"),
@@ -716,7 +720,7 @@ def build_params_panel(
     on_update: typing.Callable[[str, typing.Any], None],
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
-    prompt_error: str = "",
+    prompt_error: Message | None = None,
     param_errors: typing.Mapping[str, Message] | None = None,
 ) -> list[ft.Control]:
     """构建策略参数面板 (D15: 从 ScreenerView._build_params_panel 提取, props 化)."""
@@ -1416,14 +1420,14 @@ async def _execute_load_history_for_date(
     strategy_name: str | None,
     run_id: str | None,
 ) -> None:
-    """加载指定日期的历史选股结果."""
+    """加载指定日期的历史选股结果.
+
+    ADD-UI-002: 不在 await 之前预提交「查看历史」身份标签。身份标签（日期 / 策略 / run）
+    只由 ``load_history_data`` 在数据快照成功提交时与行/分页/警告同帧落库；请求失败或
+    取消时保持上一次完整结果的身份，避免顶部标签标 B、表格/警告仍是 A 的持续失配。
+    """
     if isinstance(trade_date, (datetime.date, datetime.datetime)):
-        display = trade_date.strftime("%Y-%m-%d")
-        trade_date = display
-    else:
-        ts = str(trade_date)
-        display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
-    vm.set_history_viewing_status(display, strategy_name=strategy_name, run_id=run_id)
+        trade_date = trade_date.strftime("%Y-%m-%d")
     try:
         await vm.load_history_data(trade_date, strategy_name, run_id)
     except asyncio.CancelledError:
@@ -1488,26 +1492,28 @@ async def _execute_save_prompt(
     vm: ScreenerViewModel,
     page: ft.Page | None,
     strat: str,
-    set_prompt_error: typing.Callable[[str], None],
+    set_prompt_error: typing.Callable[[Message | None], None],
 ) -> None:
-    """保存 AI Prompt."""
+    """保存 AI Prompt.
+
+    ADD-UI-004: 失败时回传 ``Message(key, params)`` 而非已翻译字符串, 由 View 在
+    渲染期按当前 locale 翻译; 生产页常驻, 切语言后错误提示随之重译且 ``{max}`` 参数保留。
+    """
     try:
         prompt_val = (vm.state.strategy_params).get("ai_system_prompt", "") or ""
         success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
         if page is None:
             return
         if success:
-            set_prompt_error("")
+            set_prompt_error(None)
             UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
             _show_toast(page, I18n.get("ai_settings_saved"), "success")
         else:
             from utils.prompt_guard import MAX_PROMPT_LENGTH
 
             assert error_key is not None
-            msg = I18n.get(error_key, error_key)
-            if error_key == "prompt_err_length":
-                msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-            set_prompt_error(msg)
+            params = {"max": MAX_PROMPT_LENGTH} if error_key == "prompt_err_length" else {}
+            set_prompt_error(Message(error_key, params))
     except asyncio.CancelledError:
         raise
     except Exception as ex:
@@ -1560,13 +1566,13 @@ def _handle_update_param(
     vm: ScreenerViewModel,
     name: str,
     value: typing.Any,
-    prompt_err: str,
-    set_err: typing.Callable[[str], None],
+    prompt_err: Message | None,
+    set_err: typing.Callable[[Message | None], None],
 ) -> None:
     """策略参数更新处理."""
     vm.set_strategy_param(name, value)
     if name == "ai_system_prompt" and prompt_err:
-        set_err("")
+        set_err(None)
 
 
 def _sync_file_picker_service(page: ft.Page | None, picker: ft.FilePicker | None, attach: bool) -> None:
@@ -1625,12 +1631,19 @@ def _resolve_table_data(
 # CRITICAL-01: 分区标题只表达 AI 处理状态, 不作投资判断。"analyzed"(score>0) 分区原用
 # 「AI 推荐」+ SUCCESS 对勾, 会被误读为买入建议; 现改中性文案 + 中性色, 投资判断交由每行
 # ai_score 数值承载 (不依赖分区颜色暗示)。
+# D19-001: 颜色位保存 AppColors 语义属性名 (非导入期 Hex 快照), 渲染时经
+# _resolve_section_color 取当期主题色, 主题热切换后分区图标随之更新.
 _SECTION_META: tuple[tuple[str, typing.Any, str, str], ...] = (
-    # (i18n key, 图标名, 图标色, 分区标签)
-    ("screener_section_recommended", ft.Icons.ANALYTICS, AppColors.TEXT_SECONDARY, "recommended"),
-    ("screener_section_excluded", ft.Icons.DO_NOT_DISTURB, AppColors.WARNING, "excluded"),
-    ("screener_section_failed", ft.Icons.ERROR_OUTLINE, AppColors.ERROR, "failed"),
+    # (i18n key, 图标名, AppColors 语义属性名, 分区标签)
+    ("screener_section_recommended", ft.Icons.ANALYTICS, "TEXT_SECONDARY", "recommended"),
+    ("screener_section_excluded", ft.Icons.DO_NOT_DISTURB, "WARNING", "excluded"),
+    ("screener_section_failed", ft.Icons.ERROR_OUTLINE, "ERROR", "failed"),
 )
+
+
+def _resolve_section_color(section_color: str) -> str:
+    """解析分区语义色名到当期主题色 (D19-001: 不固化导入期快照)."""
+    return getattr(AppColors, section_color)
 
 
 def _build_screener_sections_card(
@@ -1642,7 +1655,7 @@ def _build_screener_sections_card(
     sort_col: str | None,
     sort_asc: bool,
     on_virtual_sort: typing.Callable[[str, bool], None],
-    on_row_click: typing.Callable[[dict], None],
+    on_row_click: typing.Callable[[dict], None] | None,
     on_section_change: typing.Callable[[ft.ControlEvent], None],
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
@@ -1663,7 +1676,7 @@ def _build_screener_sections_card(
             ft.Segment(
                 value=meta[3],
                 label=ft.Text(I18n.get(meta[0]).format(count=section_counts[index])),
-                icon=ft.Icon(meta[1], color=meta[2]),
+                icon=ft.Icon(meta[1], color=_resolve_section_color(meta[2])),
             )
             for index, meta in enumerate(_SECTION_META)
         ],
@@ -1725,7 +1738,7 @@ def _build_screener_params_sidebar(
     vm: ScreenerViewModel,
     *,
     handlers: dict[str, typing.Any],
-    prompt_error: str,
+    prompt_error: Message | None,
     param_errors: typing.Mapping[str, Message] | None = None,
 ) -> ft.Control | None:
     """构建左侧策略参数侧栏 (MAJOR-07)。
@@ -2004,13 +2017,18 @@ def _build_screener_table_card(
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
     is_realtime: bool,
+    interaction_disabled: bool = False,
 ) -> ft.Container:
     """构建表格卡片区 (D7-3: AI 三分区 + 统一分页栏/空态).
 
     REALTIME 模式按 ai_status 渲染 recommended/excluded/failed 三分区;
     HISTORY 模式的历史记录无 ai_status 列 (ScreeningHistory 表无该字段),
     无法按 AI 三态分区, 渲染单一结果表, 避免全部行误入「分析失败」分区误导用户。
+
+    ADD-UI-002: ``interaction_disabled`` 为历史加载中 —— 表格仍展示上一次完整结果
+    (身份不预提交), 但禁用行点击/分页/页大小交互, 防止把在途目标误当作已显示结果操作。
     """
+    row_click = None if interaction_disabled else on_row_click
     page_no = state.page_no
     total_pages = state.total_pages
 
@@ -2021,7 +2039,7 @@ def _build_screener_table_card(
                     ft.Icons.CHEVRON_LEFT,
                     on_click=safe_on_click(on_prev_page),
                     icon_color=AppColors.PRIMARY,
-                    disabled=page_no <= 1,
+                    disabled=interaction_disabled or page_no <= 1,
                     tooltip=I18n.get("screener_page_prev"),
                 ),
                 ft.Text(
@@ -2032,7 +2050,7 @@ def _build_screener_table_card(
                     ft.Icons.CHEVRON_RIGHT,
                     on_click=safe_on_click(on_next_page),
                     icon_color=AppColors.PRIMARY,
-                    disabled=page_no >= total_pages,
+                    disabled=interaction_disabled or page_no >= total_pages,
                     tooltip=I18n.get("screener_page_next"),
                 ),
                 ft.Container(width=20),
@@ -2043,6 +2061,7 @@ def _build_screener_table_card(
                     width=AppStyles.CONTROL_WIDTH_SM,
                     dense=True,
                     text_size=AppStyles.FONT_SIZE_BODY,
+                    disabled=interaction_disabled,
                     on_select=safe_on_select(on_page_size_change),
                 ),
             ]
@@ -2092,7 +2111,7 @@ def _build_screener_table_card(
                     sort_col=state.sort_column,
                     sort_asc=state.sort_ascending,
                     on_virtual_sort=on_virtual_sort,
-                    on_row_click=on_row_click,
+                    on_row_click=row_click,
                     on_section_change=on_section_change,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
@@ -2111,12 +2130,12 @@ def _build_screener_table_card(
                         sort_col=state.sort_column,
                         sort_asc=state.sort_ascending,
                         on_sort=on_virtual_sort,
-                        on_row_click=on_row_click,
+                        on_row_click=row_click,
                         col_anchor=EIDS.SCREENER.column_header,
                         row_anchor=(
                             lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None
                         ),
-                        on_row_detail=on_row_click,
+                        on_row_detail=row_click,
                         detail_anchor=(
                             lambda row: EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
                         ),
@@ -2391,7 +2410,10 @@ def ScreenerView(
 
     detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
     pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
-    prompt_error, set_prompt_error = ft.use_state("")
+    # ADD-UI-004: prompt 错误保存为 Message(key+params), 渲染期按当前 locale 翻译;
+    # 不保存译文, 常驻页切语言后自动重译 (None 表示无错误).
+    prompt_error: Message | None = None
+    prompt_error, set_prompt_error = ft.use_state(prompt_error)
     desc_timer_ref = ft.use_ref(lambda: None)
     table_memo_ref = ft.use_ref(lambda: typing.cast(tuple | None, None))
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
@@ -2695,6 +2717,8 @@ def ScreenerView(
         on_load_col_widths=lambda: vm.get_col_widths(_VT_COL_WIDTHS_KEY),
         on_persist_col_widths=lambda widths: vm.persist_col_widths(_VT_COL_WIDTHS_KEY, widths),
         is_realtime=is_realtime,
+        # ADD-UI-002: HISTORY 加载中仅锁定表格/分页交互, 仍展示上一次完整结果 (身份不预提交)。
+        interaction_disabled=state.mode == "HISTORY" and state.loading,
     )
 
     log_card = _build_screener_log_card(

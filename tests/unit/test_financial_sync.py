@@ -2489,10 +2489,10 @@ class _FakeAppStateStore:
     async def get(self, engine, key):
         return self.values.get(key)
 
-    async def set(self, engine, key, value):
+    async def set(self, engine, key, value, **kwargs):
         self.values[key] = value
 
-    async def set_max(self, engine, key, value):
+    async def set_max(self, engine, key, value, **kwargs):
         self.max_writes.append((key, value))
         current = self.values.get(key)
         if current is None or current < value:

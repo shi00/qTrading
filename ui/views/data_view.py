@@ -650,6 +650,25 @@ def TableViewerTab(
             default_filename = f"{state.current_table}{suffix}_{timestamp}.{ext}"
             if file_picker is None:
                 return
+            page = _get_page()
+            is_web = page is not None and page.web
+            if is_web:
+                # Web: Flet 1.1.0 FilePicker.save_file 要求 src_bytes, 否则在 Python 端
+                # 抛 ValueError。由 VM 在线程池序列化本次已取得的 df (R16), 浏览器返回
+                # 值不是本机可写路径, 因此不做写盘/「打开文件夹」。
+                src_bytes = await vm.export_data_bytes(df, format_)
+                await file_picker.save_file(
+                    dialog_title=I18n.get("data_export_save_title"),
+                    file_name=default_filename,
+                    allowed_extensions=[ext],
+                    src_bytes=src_bytes,
+                )
+                if page is not None:
+                    _show_toast(page, I18n.get("data_export_success", file=default_filename), "success")
+                    # Phase 6.3 (FR-UX-006): 截断警告 toast (导出全部且达到上限)
+                    if not current_page and len(df) >= MAX_EXPORT_ROWS:
+                        _show_toast(page, I18n.get("data_export_truncated_warning"), "warning")
+                return
             filepath = await file_picker.save_file(
                 dialog_title=I18n.get("data_export_save_title"),
                 file_name=default_filename,
@@ -663,7 +682,6 @@ def TableViewerTab(
                         await vm.write_excel(df, filepath)
                     filename = os.path.basename(filepath)
                     msg = I18n.get("data_export_success", file=filename)
-                    page = _get_page()
                     if page is not None:
                         # P2-10: 导出成功 toast 附"打开文件夹" action
                         _show_toast(
@@ -1016,6 +1034,16 @@ def TableViewerTab(
                 ft.Text(" ", size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TRANSPARENT),
             )
         )
+    if table_ready and state.current_table:
+        # D21-OTHER-006: 表身份就绪信号 (identifier 携带当前表名). 通用 TABLE_READY
+        # 只要「某张表已加载」即可见，切表未生效时旧 ready 仍在 → E2E 假成功;
+        # 调用方等待本 anchor 才能确认目标表 schema 已落地.
+        controls.append(
+            anchored(
+                EIDS.DATA.table_ready(state.current_table),
+                ft.Text(" ", size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TRANSPARENT),
+            )
+        )
     return ft.Column(
         controls,
         expand=True,
@@ -1160,6 +1188,9 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
         italic=True,
     )
 
+    # ADD-UI-005: 执行按钮是唯一入口。Flet 1.1.0 的 Page.on_keyboard_event 不携带
+    # 焦点目标，CodeEditor 也无 on_submit/按键事件，无法做到「编辑器聚焦时 Ctrl+Enter
+    # 执行」的焦点守卫；文案不得再宣称该快捷键。
     btn_run = ft.Button(
         I18n.get("data_sql_execute"),
         icon=ft.Icons.PLAY_ARROW,

@@ -126,7 +126,9 @@ def filter_exclude_st(
     与 ``PolarsBaseStrategy._apply_exclude_st``（LazyFrame 形态）语义一致：
     - ``context["exclude_st"]`` 运行时覆盖（UI 开关），缺省回退 ``default_exclude``；
     - 无 ``is_st`` 列（旧数据源/测试构造）时原样返回，保持向后兼容；
-    - NULL is_st（stock_basic.name 可空）按「非 ST」处理：不排除且不计数；
+    - NULL is_st 为**未知**（D12-002：name-history 无 as-of 覆盖，或 name 可空）：不排除且
+      不计数，不得当作「非 ST」宣称已判定；历史回放中的该未知由回测结果
+      ``st_asof_approximation`` 显式声明（R24）；
     - 返回 (过滤后 df, 排除数量)；排除数量为 0 或未启用时由调用方决定是否上报 D3-4 warnings。
     """
     exclude = context.get("exclude_st", default_exclude)

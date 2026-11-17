@@ -55,7 +55,7 @@ from services.local_model_manager import (
     LocalInferenceTimeoutError,
     LocalModelManager,
 )
-from utils.egress_ack import is_egress_acknowledged
+from utils.egress_ack import is_egress_acknowledged, verify_egress_ack_permit
 from utils.egress_audit import destination_host_from_url
 from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -869,7 +869,9 @@ class LiteLLMClient:
         - deadline 为单调时钟截止值（loop.time() 口径）：剩余预算裁剪 httpx
           总超时，dispatch 前耗尽抛 ``TimeoutError``（零出站）；
         - usage 经 ``normalize_litellm_usage`` 归一化为五字段（MM-08）；
-        - ``attempt_context`` 归 S3 Executor 落账语义，本方法不消费；
+        - ``attempt_context.egress_permit``（D13-002）：本次尝试的外发确认许可，由
+          S3 Executor 在许可线性化点绑定 attempt / 连接 / 目标 / 有效期；缺失或与
+          本次上下文不符即零出站拒绝，禁止跨 attempt / 跨会话复用。
         - ``asyncio.CancelledError`` 始终传播（R2），不包装。
 
         Raises:
@@ -891,28 +893,28 @@ class LiteLLMClient:
                 f"invoke_single_connection requires adapter_kind='litellm_chat', got {resolved_connection.adapter_kind!r}"
             )
 
-        # SEC-01（R06-D3）：统一链云出口知情确认门控，置于凭据解析 / litellm 加载 /
-        # 网络之前（零 keyring 读、零 import、零出站的最早 fail-closed 点）。异常与
-        # i18n key 与旧链门控（_chat_completion / _router_failover）同源，语义为
+        # SEC-01（R06-D3 / D13-002）：统一链云出口知情确认门控，置于凭据解析 /
+        # litellm 加载 / 网络之前（零 keyring 读、零 import、零出站的最早 fail-closed 点）。
+        # 判定对象不再是进程级「当前全局主 provider」，而是本次尝试的许可：
+        # attempt / invocation / owner / 连接 / provider / 模型 / 目标 / scope_version /
+        # 有效期全部匹配，且按实际 provider 现场复查用户确认（撤销即时生效）。许可
+        # 缺失 / 跨 attempt / 跨会话 / 换目标 / 过期一律拒绝，不放宽既有二次确认。
+        # 异常与 i18n key 与旧链门控（_chat_completion / _router_failover）同源，语义为
         # 非可重试策略阻断（调用方按策略拒绝降级，不重试不切换可修复语义）。
-        if not is_egress_acknowledged():
-            logger.warning(
-                "[AIService] UnifiedChain | Egress policy not acknowledged — refusing "
-                "cloud inference for scenario '%s' (no external requests initiated)",
-                request.scenario_id,
-            )
-            raise AIPolicyNotAcknowledgedError(
-                Message("ai_external_acknowledgment_prompt"),
-                detail="Unified chain cloud egress requires user acknowledgment (SEC-01); "
-                "no external request was initiated.",
-            )
+        loop = asyncio.get_running_loop()
+        verify_egress_ack_permit(
+            getattr(attempt_context, "egress_permit", None),
+            attempt_context=attempt_context,
+            resolved_connection=resolved_connection,
+            invocation_id=request.invocation_id,
+            now=loop.time(),
+        )
 
         import services.ai_service as _ai
 
         if not _ai._ensure_litellm_loaded():
             raise RuntimeError("LiteLLM not installed, cloud LLM features disabled")
 
-        loop = asyncio.get_running_loop()
         remaining = deadline - loop.time()
         if remaining <= 0:
             raise TimeoutError("Deadline exhausted before cloud inference dispatch.")

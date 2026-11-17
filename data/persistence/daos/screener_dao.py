@@ -146,19 +146,47 @@ def _delisting_flag_expr(as_of: str) -> str:
     )
 
 
-# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__、__STOCK_ALIVE_CONDITION__
-# 与 __DELISTING_FLAG__ 为唯一可变点，分别由 _build_screening_sql/_build_screening_sql_range
-# 按 require_close 布尔与 PIT 时点（DAT-01）替换为模块受控片段（无用户输入），避免
-# f-string 拼 SQL 模式。
+def _st_columns_sql() -> str:
+    """ST 判定派生列（唯一正本，单日与区间模板共用；D12-002）。
+
+    - ``is_st``：**三态**。仅当 name-history 命中 as-of 名称时取 TRUE/FALSE；无覆盖行
+      （``nh.name IS NULL``）时为 NULL（**未知**），不得回退当前名称后冒充 as-of 取值
+      （R21：未知既不是「非 ST」也不是「ST」）。
+    - ``st_name_source``：该行 ST 判定所依据的名称来源（``history`` / ``current_snapshot``），
+      把「历史覆盖 / 回退当前快照」透出给消费方，禁止把 fallback 当成时点已知。
+    - ``is_st_current_snapshot``：仅由 ``stock_basic.name``（当前快照）派生的名称标记。
+      只允许在**实盘** as_of=当前快照（无前视）时由 ``DataProcessor`` 用它补齐 ``is_st``；
+      历史回放（回测）不得使用，否则即 R24 禁止的「当前快照参与历史计算」。
+    """
+    return (
+        "CASE WHEN nh.name IS NOT NULL THEN (UPPER(nh.name) LIKE '%ST%') ELSE NULL END AS is_st,\n"
+        "                     CASE WHEN nh.name IS NOT NULL THEN 'history' ELSE 'current_snapshot' END"
+        " AS st_name_source,\n"
+        "                     CASE WHEN b.name IS NOT NULL THEN (UPPER(b.name) LIKE '%ST%') ELSE NULL END"
+        " AS is_st_current_snapshot"
+    )
+
+
+# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__、__STOCK_ALIVE_CONDITION__、
+# __ST_COLUMNS__ 与 __DELISTING_FLAG__ 为唯一可变点，分别由
+# _build_screening_sql/_build_screening_sql_range 按 require_close 布尔与 PIT 时点（DAT-01）
+# 替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
 # __STOCK_ALIVE_CONDITION__ 必须经 stock_alive_condition() 渲染（唯一正本），禁止内联复制。
 # __DELISTING_FLAG__ 必须经 _delisting_flag_expr() 渲染（唯一正本），禁止内联复制。
+# __ST_COLUMNS__ 必须经 _st_columns_sql() 渲染（唯一正本），禁止内联复制。
 # DS-02（ST 时点还原链路）：name 列经 name-history LATERAL JOIN 按 as-of 时点还原历史名称
 # （无历史记录时 COALESCE 回退当前名称 stock_basic.name，防空表把全市场误判为非 ST）；
-# 新增派生列 is_st（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST；其 ST 名称匹配方式与
-# utils.limit_status.get_limit_pct 的 ST 识别一致），供数据层行过滤排除风险警示股（P2）。
+# 新增派生列 is_st（三态，见 _st_columns_sql：历史命中取 UPPER(name) LIKE '%ST%'，覆盖缺为
+# NULL 未知；覆盖 *ST/S*ST，其 ST 名称匹配方式与 utils.limit_status.get_limit_pct 的 ST
+# 识别一致），供数据层行过滤排除风险警示股（P2）。
 # 注意：is_st 是**全板块**的名称标记，不等价于 get_limit_pct 的涨跌停幅度——后者 ST→5% 仅限
 # 主板（.SH/.SZ），创业板/科创板 ST 仍为 20%、北交所 ST 为 30%；限幅判定须经 get_limit_pct
 # 按板块区分，禁止以 is_st 直接推涨跌停幅度（as-of 名称涨跌停判定走 StockNameHistoryDao）。
+# D12-002（历史 ST 未知口径）：无 name-history 覆盖行时 is_st 为 NULL（未知），不得回退当前
+# 名称的布尔值——否则「当前 ST、历史非 ST」的标的会在全部历史日期被排除（反向同理），且结果
+# 无任何近似声明。st_name_source 把来源透出给 data_provider，由 engine 在历史回放结果中显式
+# 标注当期近似（R24）；实盘 as_of=当前快照，DataProcessor 以 is_st_current_snapshot 补齐 is_st，
+# 实盘口径不变。
 # 新增派生列 is_delisting（名称含「退」或 delist_date 落在 as-of 后 N 天窗口内），供数据层
 # 行过滤排除退市整理期股票（选股池可推荐性）；与 stock_alive_condition 的「数据可见性」
 # 判定分离——退市整理期内确有行情（可见），但不适合推荐（不可推荐），两语义不得混用。
@@ -166,7 +194,7 @@ def _delisting_flag_expr(as_of: str) -> str:
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
                      COALESCE(nh.name, b.name) AS name,
-                     CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
+                     __ST_COLUMNS__,
                      __DELISTING_FLAG__ AS is_delisting,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
@@ -268,7 +296,7 @@ _SCREENING_SQL_TEMPLATE = """
 _SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
                      COALESCE(nh.name, b.name) AS name,
-                     CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
+                     __ST_COLUMNS__,
                      __DELISTING_FLAG__ AS is_delisting,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
@@ -635,7 +663,9 @@ class ScreenerDao(BaseDao):
         sql = sql.replace("__STOCK_ALIVE_CONDITION__", stock_alive_condition(alias="b.", as_of="$5"))
         # review09-24-dim01-major01: is_delisting 派生列经 _delisting_flag_expr 唯一正本渲染，
         # as-of 复用既有 $5（恒等于 trade_date），不新增参数位。
-        return sql.replace("__DELISTING_FLAG__", _delisting_flag_expr("$5"))
+        sql = sql.replace("__DELISTING_FLAG__", _delisting_flag_expr("$5"))
+        # D12-002: is_st 三态 + 名称来源列经 _st_columns_sql 唯一正本渲染（无用户输入）。
+        return sql.replace("__ST_COLUMNS__", _st_columns_sql())
 
     async def get_screening_data(self, trade_date: str | datetime.date | None = None):
         # DS-05: screening ⊂ fundamental（同模板唯差 close 条件），由全集内存派生，
@@ -665,7 +695,9 @@ class ScreenerDao(BaseDao):
         )
         # review09-24-dim01-major01: is_delisting 派生列 as-of 用 cal.cal_date（逐交易日 PIT），
         # 与 name-history 财务等 LATERAL 子查询同模式，不得复用单日版 $5。
-        return sql.replace("__DELISTING_FLAG__", _delisting_flag_expr("cal.cal_date"))
+        sql = sql.replace("__DELISTING_FLAG__", _delisting_flag_expr("cal.cal_date"))
+        # D12-002: is_st 三态 + 名称来源列（与单日版同一正本，as-of 由 LATERAL 条件承载）。
+        return sql.replace("__ST_COLUMNS__", _st_columns_sql())
 
     async def get_screening_data_range(self, start_date: str, end_date: str, max_rows: int | None = None):
         # DS-05: 同 get_screening_data，由区间全集派生，消除 preload_range 双份 150 万行

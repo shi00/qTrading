@@ -18,6 +18,22 @@ from data.domain_services.trade_calendar_service import TradeCalendarService, _L
 pytestmark = pytest.mark.unit
 
 
+def _full_calendar_df(start: datetime.date, end: datetime.date, *, closed: tuple = ()) -> pd.DataFrame:
+    """构造完整的自然日日历（每个自然日一行，含 is_open=0 休市行）。
+
+    D10-002：完整日历的判据是「每个自然日都有行」，缺行即数据缺口；测试夹具按
+    周末/显式休市日置 is_open=0，生产代码只读行内 is_open，不按 weekday 推断。
+    """
+    closed_set = set(closed)
+    days = [start + datetime.timedelta(days=i) for i in range((end - start).days + 1)]
+    return pd.DataFrame(
+        {
+            "cal_date": days,
+            "is_open": [0 if (day.weekday() >= 5 or day in closed_set) else 1 for day in days],
+        }
+    )
+
+
 def _make_service(cache_return=None, api_return=None, offline_return=None, cache_return_no_filter=None):
     mock_cache = MagicMock()
     mock_cache.stock_dao = MagicMock()
@@ -161,17 +177,38 @@ class TestEnsureCalendarRange:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_already_covered(self):
-        svc = _make_service()
-        svc._cache.get_trade_cal_range = AsyncMock(
-            return_value=(datetime.date(2024, 1, 1), datetime.date(2024, 12, 31))
-        )
+    async def test_already_covered_by_full_natural_days(self):
+        """D10-002: 每个自然日都有日历行（含休市行）才算覆盖，且不触发 API。"""
+        svc = _make_service(cache_return=_full_calendar_df(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30)))
         result = await svc.ensure_calendar_range("20240601", "20240630")
         assert result is True
+        svc._api.get_trade_cal.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_internal_gap_only_backfills_missing_segment(self):
+        """D10-002: 区间中间缺行时只补缺失段，不整段重拉。"""
+        full = _full_calendar_df(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
+        gap_days = {datetime.date(2024, 6, 12), datetime.date(2024, 6, 13)}
+        db_df = full[~full["cal_date"].isin(gap_days)]
+        gap_df = _full_calendar_df(datetime.date(2024, 6, 12), datetime.date(2024, 6, 13))
+        svc = _make_service(cache_return=db_df, api_return=gap_df)
+
+        result = await svc.ensure_calendar_range("20240601", "20240630")
+
+        assert result is True
+        svc._api.get_trade_cal.assert_awaited_once_with(start_date="20240612", end_date="20240613")
+
+    @pytest.mark.asyncio
+    async def test_partial_api_df_returns_false(self):
+        """D10-002: API 返回非空但未覆盖全部自然日 → 不得宣称批量同步完成。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(api_return=df)
+        result = await svc.ensure_calendar_range("20240601", "20240630")
+        assert result is False
 
     @pytest.mark.asyncio
     async def test_api_fills_range(self):
-        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        df = _full_calendar_df(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
         svc = _make_service(api_return=df)
         result = await svc.ensure_calendar_range("20240601", "20240630")
         assert result is True
@@ -179,7 +216,7 @@ class TestEnsureCalendarRange:
     @pytest.mark.asyncio
     async def test_persist_success_returns_true_and_logs_bulk_synced(self, caplog):
         """保存成功后返回 True，且只在真正落库后打印 Bulk synced。"""
-        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        df = _full_calendar_df(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
         svc = _make_service(api_return=df)
         with caplog.at_level(logging.INFO, logger="data.domain_services.trade_calendar_service"):
             result = await svc.ensure_calendar_range("20240601", "20240630")
@@ -190,7 +227,7 @@ class TestEnsureCalendarRange:
     @pytest.mark.asyncio
     async def test_persist_failure_returns_false_without_bulk_synced_log(self, caplog):
         """RS-F02: 保存失败时必须返回 False，且不得打印 Bulk synced（避免初始化中止分支被绕过）。"""
-        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        df = _full_calendar_df(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
         svc = _make_service(api_return=df)
         svc._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=RuntimeError("DB write failed"))
         with caplog.at_level(logging.INFO, logger="data.domain_services.trade_calendar_service"):
@@ -204,7 +241,7 @@ class TestEnsureCalendarRange:
     @pytest.mark.asyncio
     async def test_persist_cancelled_error_propagates(self, caplog):
         """R2: 持久化过程中的 CancelledError 必须向上传播，不得被 bool 处理吞没。"""
-        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        df = _full_calendar_df(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
         svc = _make_service(api_return=df)
         svc._cache.stock_dao.save_trade_cal = AsyncMock(side_effect=asyncio.CancelledError)
         with caplog.at_level(logging.INFO, logger="data.domain_services.trade_calendar_service"):
@@ -231,7 +268,7 @@ class TestEnsureCalendarRange:
     @pytest.mark.asyncio
     async def test_api_receives_yyyymmdd_string(self):
         """M13-F1: 批量补齐调用点显式归一化 date → YYYYMMDD 字符串。"""
-        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        df = _full_calendar_df(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
         svc = _make_service(api_return=df)
         result = await svc.ensure_calendar_range(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
         assert result is True
@@ -378,13 +415,27 @@ class TestGetTradeDates:
         assert len(result) == 1
 
     @pytest.mark.asyncio
+    async def test_internal_gap_filled_from_api(self):
+        """D10-002: 内部缺日（B）必须补出，不得因 DB 命中首尾而返回残缺集合。"""
+        df = pd.DataFrame({"cal_date": ["20240612", "20240614"], "is_open": [1, 1]})
+        svc = _make_service(cache_return=df)
+        api_df = pd.DataFrame({"cal_date": ["20240613"], "is_open": [1]})
+        svc._api.get_trade_cal = AsyncMock(return_value=api_df)
+
+        result = await svc.get_trade_dates("20240612", "20240614")
+
+        assert result == [datetime.date(2024, 6, 12), datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)]
+        # 只补缺失自然日 06-13，不重拉已覆盖首尾
+        svc._api.get_trade_cal.assert_awaited_once_with(start_date="20240613", end_date="20240613")
+
+    @pytest.mark.asyncio
     async def test_db_data_incomplete_fallback(self):
         df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
         svc = _make_service(cache_return=df)
-        api_df = pd.DataFrame({"cal_date": ["20240614", "20240615", "20240616"], "is_open": [1, 1, 1]})
+        api_df = pd.DataFrame({"cal_date": ["20240614", "20240617"], "is_open": [1, 1]})
         svc._api.get_trade_cal = AsyncMock(return_value=api_df)
-        result = await svc.get_trade_dates("20240101", "20240630")
-        assert len(result) >= 1
+        result = await svc.get_trade_dates("20240614", "20240617")
+        assert result == [datetime.date(2024, 6, 14), datetime.date(2024, 6, 17)]
 
     @pytest.mark.asyncio
     async def test_exception_falls_to_offline(self):
@@ -417,19 +468,27 @@ _AS_OF_HISTORY = [
     datetime.date(2026, 11, 2),
 ]
 
+_HISTORY_START = datetime.date(2026, 10, 8)
+_HISTORY_END = datetime.date(2026, 11, 2)
+
+
+def _history_full_df() -> pd.DataFrame:
+    """完整自然日历史（含周末 is_open=0 行），DB 覆盖 10-08 至 11-02 的每一天。"""
+    return _full_calendar_df(_HISTORY_START, _HISTORY_END)
+
 
 def _history_df() -> pd.DataFrame:
-    """足够历史交易日（18 条），但最大行日期 = as_of（2026-11-02）。"""
+    """离散交易日历史（18 条，缺周末行）——模拟历史遗留的缺行日历。"""
     return pd.DataFrame({"cal_date": _AS_OF_HISTORY, "is_open": [1] * len(_AS_OF_HISTORY)})
 
 
 class TestGetTradeDatesCoverage:
-    """RS-F03：尾段覆盖校验必须优先于「总条数达标」早返。"""
+    """D10-002 / RS-F03：内部缺日与尾段缺日都必须补数，未知必须显式可见。"""
 
     @pytest.mark.asyncio
     async def test_missing_tail_filled_from_offline(self):
-        """DB 够密但最大日=as_of → 只补尾段（API/离线），不得早返丢未来交易日。"""
-        svc = _make_service(cache_return=_history_df())
+        """DB 每个自然日都有行但只到 as_of → 只补尾段，不得早返丢未来交易日。"""
+        svc = _make_service(cache_return=_history_full_df())
         svc._api.get_trade_cal = AsyncMock(return_value=None)
         svc._offline = MagicMock()
         svc._offline.get_trade_dates = MagicMock(
@@ -437,48 +496,98 @@ class TestGetTradeDatesCoverage:
         )
         svc._offline.is_trading_day = MagicMock(return_value=True)
 
-        result = await svc.get_trade_dates("20261004", "20261112")
+        coverage = await svc.get_trade_dates_with_coverage("20261008", "20261112")
 
         expected = sorted([*_AS_OF_HISTORY, *(datetime.date(2026, 11, d) for d in (3, 4, 5, 6, 9))])
-        assert result == expected
+        assert coverage.dates == expected
+        assert coverage.complete is True
         # 仅补缺失尾段，不重复拉取已覆盖历史（请求放大成本）
         svc._api.get_trade_cal.assert_awaited_once_with(start_date="20261103", end_date="20261112")
         svc._offline.get_trade_dates.assert_called_once_with(datetime.date(2026, 11, 3), datetime.date(2026, 11, 12))
 
     @pytest.mark.asyncio
-    async def test_full_tail_coverage_skips_backfill_including_holiday_end(self):
-        """原始日历已覆盖到请求 end（end 本身可为休市日）→ 不触发补齐。"""
+    async def test_internal_missing_trading_day_is_filled(self):
+        """A/B/C 全开市而 DB 仅 A/C：缺 B 行时补出 B，返回完整交易日集合。"""
+        full = _history_full_df()
+        gap_day = datetime.date(2026, 10, 21)
+        db_df = full[full["cal_date"] != gap_day]
+        svc = _make_service(cache_return=db_df)
+        svc._api.get_trade_cal = AsyncMock(return_value=pd.DataFrame({"cal_date": [gap_day], "is_open": [1]}))
+        svc._offline = MagicMock()
+
+        coverage = await svc.get_trade_dates_with_coverage("20261008", "20261102")
+
+        assert gap_day in coverage.dates
+        assert coverage.complete is True
+        svc._api.get_trade_cal.assert_awaited_once_with(start_date="20261021", end_date="20261021")
+
+    @pytest.mark.asyncio
+    async def test_long_holiday_gap_resolved_by_closed_rows(self):
+        """长假缺行由 API 的 is_open=0 行补齐：确定休市，不算缺口、不进入交易日。"""
+        start = datetime.date(2026, 9, 28)
+        end = datetime.date(2026, 10, 9)
+        holiday = tuple(datetime.date(2026, 10, d) for d in range(1, 8))
+        full = _full_calendar_df(start, end, closed=holiday)
+        db_df = full[~full["cal_date"].isin(holiday)]
+        holiday_df = _full_calendar_df(holiday[0], holiday[-1], closed=holiday)
+        svc = _make_service(cache_return=db_df, api_return=holiday_df)
+        svc._offline = MagicMock()
+
+        coverage = await svc.get_trade_dates_with_coverage(start, end)
+
+        assert coverage.complete is True
+        assert not set(holiday) & set(coverage.dates)
+        assert coverage.dates == sorted(day for day in full[full["is_open"] == 1]["cal_date"])
+        svc._api.get_trade_cal.assert_awaited_once_with(start_date="20261001", end_date="20261007")
+
+    @pytest.mark.asyncio
+    async def test_full_natural_day_coverage_skips_backfill_including_holiday_end(self):
+        """原始日历每个自然日都有行（end 本身可为休市日）→ 不触发补齐。"""
         holiday_end = datetime.date(2026, 11, 7)  # 周六休市
-        db_df = pd.DataFrame(
-            {
-                "cal_date": [*_AS_OF_HISTORY, datetime.date(2026, 11, 6), holiday_end],
-                "is_open": [1] * len(_AS_OF_HISTORY) + [1, 0],
-            }
-        )
+        db_df = _full_calendar_df(_HISTORY_START, holiday_end)
         svc = _make_service(cache_return=db_df)
         svc._offline = MagicMock()
 
-        result = await svc.get_trade_dates("20261004", "20261107")
+        coverage = await svc.get_trade_dates_with_coverage("20261008", "20261107")
 
-        assert result == sorted([*_AS_OF_HISTORY, datetime.date(2026, 11, 6)])
-        svc._api.get_trade_cal.assert_not_awaited()  # 未触发 API 补齐
-        svc._offline.get_trade_dates.assert_not_called()  # 未触发离线补齐
-        # 不得以「最后开市日 == end_date」作判据：最后开市日 11-06 != 休市 end 11-07
-        assert datetime.date(2026, 11, 7) not in result
+        assert coverage.dates == sorted([*_AS_OF_HISTORY, *(datetime.date(2026, 11, d) for d in (3, 4, 5, 6))])
+        assert coverage.complete is True
+        svc._api.get_trade_cal.assert_not_awaited()
+        svc._offline.get_trade_dates.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unresolvable_tail_returns_partial_without_guessing(self):
-        """离线超出可信区间且 API 不可得 → 返回已覆盖部分，不猜测未来交易日。"""
-        svc = _make_service(cache_return=_history_df())
+    async def test_unresolvable_tail_returns_partial_and_marks_unknown(self):
+        """离线超出可信区间且 API 不可得 → 返回已确定部分，并显式标记覆盖未知。"""
+        svc = _make_service(cache_return=_history_full_df())
         svc._api.get_trade_cal = AsyncMock(return_value=None)
         svc._offline = MagicMock()
         svc._offline.get_trade_dates = MagicMock(return_value=[])
         svc._offline.is_trading_day = MagicMock(return_value=None)
 
-        result = await svc.get_trade_dates("20261004", "20261112")
+        coverage = await svc.get_trade_dates_with_coverage("20261008", "20261112")
 
-        assert result == _AS_OF_HISTORY
-        assert datetime.date(2026, 11, 3) not in result
+        assert coverage.dates == _AS_OF_HISTORY
+        assert coverage.complete is False
+        assert datetime.date(2026, 11, 3) in coverage.unresolved_days
+        assert datetime.date(2026, 11, 3) not in coverage.dates
+
+    @pytest.mark.asyncio
+    async def test_leading_gap_is_also_checked(self):
+        """区间首端缺行同样是缺口（不得只看尾端/密度）：主动补出。"""
+        start = datetime.date(2026, 10, 1)
+        end = datetime.date(2026, 10, 9)
+        db_df = _full_calendar_df(_HISTORY_START, _HISTORY_END)
+        national_day = tuple(datetime.date(2026, 10, d) for d in range(1, 8))
+        leading = _full_calendar_df(start, datetime.date(2026, 10, 7), closed=national_day)
+        svc = _make_service(cache_return=db_df, api_return=leading)
+        svc._offline = MagicMock()
+
+        coverage = await svc.get_trade_dates_with_coverage(start, end)
+
+        assert coverage.complete is True
+        assert datetime.date(2026, 10, 1) not in coverage.dates  # 国庆休市
+        assert datetime.date(2026, 10, 8) in coverage.dates
+        svc._api.get_trade_cal.assert_awaited_once_with(start_date="20261001", end_date="20261007")
 
 
 class TestCountTradeDays:

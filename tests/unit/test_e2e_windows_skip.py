@@ -22,15 +22,20 @@ pytestmark = pytest.mark.unit
 class _MockMarker:
     """Minimal mock of pytest Mark for skipif/slow/e2e markers."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, **kwargs) -> None:
         self.name = name
+        self.kwargs = kwargs
 
 
 class _MockItem:
     """Minimal mock of pytest.Item with mutable own_markers list."""
 
-    def __init__(self, marker_names: list[str]) -> None:
-        self.own_markers: list[_MockMarker] = [_MockMarker(name) for name in marker_names]
+    def __init__(self, markers: list[_MockMarker] | list[str]) -> None:
+        self.own_markers: list[_MockMarker] = [m if isinstance(m, _MockMarker) else _MockMarker(m) for m in markers]
+
+
+_WINDOWS_REASON = "Windows E2E skipif revalidation"
+_EMBEDDED_REASON = "embedded 模式下 wizard database 步骤无外部 DB 表单"
 
 
 def _mock_config(run_windows_skip: bool) -> MagicMock:
@@ -46,7 +51,7 @@ class TestStripWindowsSkipif:
     def test_no_op_when_flag_not_set(self) -> None:
         """Without --run-windows-skip, skipif markers must be preserved."""
         config = _mock_config(run_windows_skip=False)
-        items = [_MockItem(["skipif"]), _MockItem([])]
+        items = [_MockItem([_MockMarker("skipif", reason=_WINDOWS_REASON)]), _MockItem([])]
 
         result = strip_windows_skipif(config, items)
 
@@ -54,10 +59,10 @@ class TestStripWindowsSkipif:
         assert len(items[0].own_markers) == 1
         assert items[0].own_markers[0].name == "skipif"
 
-    def test_removes_skipif_when_flag_set(self) -> None:
-        """With --run-windows-skip, skipif markers must be removed."""
+    def test_removes_windows_skipif_when_flag_set(self) -> None:
+        """With --run-windows-skip, Windows-reason skipif markers must be removed."""
         config = _mock_config(run_windows_skip=True)
-        items = [_MockItem(["skipif"]), _MockItem([])]
+        items = [_MockItem([_MockMarker("skipif", reason=_WINDOWS_REASON)]), _MockItem([])]
 
         result = strip_windows_skipif(config, items)
 
@@ -65,10 +70,20 @@ class TestStripWindowsSkipif:
         assert len(items[0].own_markers) == 0
         assert len(items[1].own_markers) == 0
 
+    def test_preserves_non_windows_skipif_when_flag_set(self) -> None:
+        """Mode/dependency skipif (no Windows reason) must stay effective."""
+        config = _mock_config(run_windows_skip=True)
+        item = _MockItem([_MockMarker("skipif", reason=_EMBEDDED_REASON), "e2e"])
+
+        result = strip_windows_skipif(config, [item])
+
+        assert result == 0
+        assert [m.name for m in item.own_markers] == ["skipif", "e2e"]
+
     def test_only_removes_skipif_not_other_markers(self) -> None:
         """With --run-windows-skip, only skipif markers removed; slow/e2e preserved."""
         config = _mock_config(run_windows_skip=True)
-        items = [_MockItem(["skipif", "slow", "e2e"])]
+        items = [_MockItem([_MockMarker("skipif", reason=_WINDOWS_REASON), "slow", "e2e"])]
 
         result = strip_windows_skipif(config, items)
 
@@ -86,25 +101,45 @@ class TestStripWindowsSkipif:
         assert result == 0
         assert len(items[0].own_markers) == 1
 
-    def test_removes_multiple_skipif_markers_on_same_item(self) -> None:
-        """With --run-windows-skip, all skipif markers on same item are removed (counted once)."""
+    def test_removes_multiple_windows_skipif_markers_on_same_item(self) -> None:
+        """With --run-windows-skip, Windows skipif markers are removed (counted once per item)."""
         config = _mock_config(run_windows_skip=True)
-        # 同一 item 上 2 个 skipif markers（模拟 win32 + py_version 双条件）
-        item = _MockItem(["skipif", "skipif", "e2e"])
+        item = _MockItem(
+            [
+                _MockMarker("skipif", reason=_WINDOWS_REASON),
+                _MockMarker("skipif", reason=_WINDOWS_REASON),
+                "e2e",
+            ]
+        )
 
         result = strip_windows_skipif(config, [item])
 
         # 返回值按 item 计数（非按 marker 计数）：1 个 item 被 un-skip
         assert result == 1
-        # 所有 skipif markers 被移除，仅保留 e2e
+        # 所有 Windows skipif markers 被移除，仅保留 e2e
         assert len(item.own_markers) == 1
         assert item.own_markers[0].name == "e2e"
 
-    def test_simulate_8_win_e2e_skip_cases(self) -> None:
-        """Simulate the 8 Windows E2E skipif use cases: all have skipif, all un-skipped."""
+    def test_mixed_skipif_keeps_non_windows_condition(self) -> None:
+        """同一 item 上 Windows 与模式 skipif 共存时，仅撤除 Windows 条件."""
         config = _mock_config(run_windows_skip=True)
-        # 8 items each with skipif (mirrors the 8 Windows E2E skipif use cases)
-        items = [_MockItem(["skipif", "e2e"]) for _ in range(8)]
+        item = _MockItem(
+            [
+                _MockMarker("skipif", reason=_WINDOWS_REASON),
+                _MockMarker("skipif", reason=_EMBEDDED_REASON),
+                "e2e",
+            ]
+        )
+
+        result = strip_windows_skipif(config, [item])
+
+        assert result == 1
+        assert [m.kwargs.get("reason") for m in item.own_markers] == [_EMBEDDED_REASON, None]
+
+    def test_simulate_8_win_e2e_skip_cases(self) -> None:
+        """Simulate the 8 Windows E2E skipif use cases: all have Windows skipif, all un-skipped."""
+        config = _mock_config(run_windows_skip=True)
+        items = [_MockItem([_MockMarker("skipif", reason=_WINDOWS_REASON), "e2e"]) for _ in range(8)]
 
         result = strip_windows_skipif(config, items)
 

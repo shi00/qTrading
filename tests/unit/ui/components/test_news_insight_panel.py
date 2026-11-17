@@ -24,10 +24,13 @@ from ui.components.news_insight_panel import (
     _build_evidence_phase_body,
     _build_ready,
     coverage_source_label_key,
+    dropped_reason_label_key,
+    events_dropped_warning_text,
     risk_level_label_key,
     severity_color,
     source_status_label_key,
 )
+from ui.theme import AppColors, ThemeName
 
 if TYPE_CHECKING:
     from ui.viewmodels.news_insight_types import RiskEvent
@@ -58,23 +61,25 @@ def test_risk_level_label_key(level, expected):
 
 
 @pytest.mark.parametrize(
-    ("severity", "expected"),
+    ("severity", "expected_token"),
     [
-        ("critical", "#F44336"),  # AppColors.ERROR 由 UP_RED 派生同值，断言同 token 即可
-        ("high", "#F44336"),
-        ("medium", "#FFAB00"),
-        ("low", None),  # fallback 中性
-        (None, None),
+        ("critical", "ERROR"),
+        ("high", "UP_RED"),
+        ("medium", "WARNING"),
+        ("low", "TEXT_SECONDARY"),  # fallback 中性
+        (None, "TEXT_SECONDARY"),
+        ("other", "TEXT_SECONDARY"),  # 未知严重度
     ],
 )
-def test_severity_color(severity, expected):
-    from ui.theme import AppColors
+@pytest.mark.parametrize("theme_name", [ThemeName.DARK, ThemeName.LIGHT])
+def test_severity_color(severity, expected_token, theme_name):
+    """每种严重度精确映射单一 AppColors token，而非三态共用集合。
 
-    color = severity_color(severity)
-    if expected is None:
-        assert color == AppColors.TEXT_SECONDARY
-    else:
-        assert color in (AppColors.ERROR, AppColors.UP_RED, AppColors.WARNING)
+    期望值按 token 属性名在当前主题下解析，避免导入期固化 Hex（Layer 2 颜色
+    随主题切换，Layer 1 为 Flet 语义 token）。
+    """
+    AppColors.load_theme(theme_name)
+    assert severity_color(severity) == getattr(AppColors, expected_token)
 
 
 @pytest.mark.parametrize(
@@ -250,6 +255,54 @@ def test_build_ready_missing_exec_metadata_shows_unrecorded():
     joined = "\n".join(_iter_text_values(_build_ready(state, ft.Column())))
     assert I18n.get("news_insight_exec_meta") in joined
     assert I18n.get("news_insight_exec_meta_unknown") in joined
+
+
+def test_dropped_reason_label_key_known_and_unknown():
+    """受控 reason 代码映射 i18n；未知代码回退通用文案（不展示未受控原文）。"""
+    assert dropped_reason_label_key("no_valid_evidence_quote") == "news_insight_drop_reason_no_valid_evidence_quote"
+    assert dropped_reason_label_key("free_text_quote") == "news_insight_drop_reason_unknown"
+
+
+def test_events_dropped_warning_text_unknown_and_zero_are_empty():
+    """D14-002/R21：未记录（None）与已校验无剔除（0）都不得渲染剔除警示。"""
+    assert events_dropped_warning_text(NewsInsightState(phase="ready", ts_code="000001.SZ")) == ""
+    assert (
+        events_dropped_warning_text(
+            NewsInsightState(phase="ready", ts_code="000001.SZ", events_dropped_count=0, events_dropped_reasons=())
+        )
+        == ""
+    )
+
+
+def test_events_dropped_warning_text_shows_count_and_reason_label():
+    state = NewsInsightState(
+        phase="ready",
+        ts_code="000001.SZ",
+        events_dropped_count=2,
+        events_dropped_reasons=("no_valid_evidence_quote",),
+    )
+    text = events_dropped_warning_text(state)
+    assert "2" in text
+    assert I18n.get("news_insight_drop_reason_no_valid_evidence_quote") in text
+    # 只展示受控原因标签，不回显原始代码或未校验事实/引用
+    assert "no_valid_evidence_quote" not in text
+    assert "未经校验" not in text
+
+
+def test_build_ready_renders_events_dropped_warning():
+    """D14-002：部分坏引用时 ready 态显式警示（首显与复用同一条渲染路径）。"""
+    state = NewsInsightState(
+        phase="ready",
+        ts_code="000001.SZ",
+        risk_level="high",
+        events_dropped_count=1,
+        events_dropped_reasons=("no_valid_evidence_quote",),
+    )
+    joined = "\n".join(_iter_text_values(_build_ready(state, ft.Column())))
+    expected = events_dropped_warning_text(state)
+    assert expected
+    assert expected in joined
+    assert I18n.get("news_insight_drop_reason_no_valid_evidence_quote") in joined
 
 
 def _iter_text_values(control) -> list:

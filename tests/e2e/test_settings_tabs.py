@@ -195,7 +195,6 @@ async def test_model_management_usage_tab(e2e_page):
     await mp.expect_usage_view()
 
 
-@pytest.mark.network
 @pytest.mark.mutates_config
 async def test_tushare_token_validate_and_save(e2e_page):
     """Tushare Token 验证失败流程 E2E.
@@ -211,10 +210,12 @@ async def test_tushare_token_validate_and_save(e2e_page):
     verify_token 调外部 Tushare API 失败, VM 更新面板级 state.status_message,
     View 直接渲染翻译文本 (不走 toast, 可见).
 
-    mock 策略: TushareConfigPanelViewModel.verify_token 调 ts.pro_api(token).trade_cal(),
-    'e2e-dummy-token' 触发 Tushare 服务器 401/403 或网络异常, classify_error(context="token")
-    返回 wizard_err_token_* 错误 key, get_error_message 返回翻译文本,
-    VM 用 _raw_message 包装, View 渲染显示翻译文本.
+    mock 策略: Flet 子进程内的 Python 请求无法被 Playwright page.route 拦截,
+    故由 conftest.py 注入 ``TUSHARE_VERIFY_FAKE=network``, 让
+    TushareConfigPanelViewModel.verify_token 走确定性假边界并抛出连接错误
+    (D21-OTHER-003), classify_error(context="token") 返回
+    ``wizard_err_token_network``, VM 用 _raw_message 包装, View 渲染翻译文本.
+    本用例不依赖真实网络与 Tushare 配额.
 
     PR-3: tab 切换迁移到 SettingsPage anchor 操作。
     """
@@ -228,14 +229,14 @@ async def test_tushare_token_validate_and_save(e2e_page):
     await e2e_page.expect_text(verify_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
 
     # Token 已由 env var TS_TOKEN=e2e-dummy-token 预填, 直接点击验证
-    # verify_token 调外部 Tushare API 失败, 面板级 status 显示翻译错误文本
+    # 子进程内 fake 边界立即抛连接错误, 面板级 status 显示翻译错误文本
     # PR669: verify_button 已 anchor 化, 改用 AnchorPage INTERACTIVE 路径点击,
     # 规避 CanvasKit 下 click_button fallback 点击偶发不触发 Flutter 回调的坑.
     await sp.click_tushare_verify(timeout_ms=TIMEOUTS.INTERACTION)
 
     # verify_token 失败路径: classify_error(context="token") → wizard_err_token_*
     # get_error_message 返回翻译文本, VM 用 _raw_message 包装, View 渲染翻译文本.
-    # Tushare API 调用可能因网络环境触发 timeout (默认 30s), 用 60s 超时兼容.
+    # fake 边界无真实网络等待, 保留较宽超时仅吸收 CanvasKit 重渲染抖动.
     possible_errors = [
         I18n.get("wizard_err_token_invalid"),
         I18n.get("wizard_err_token_network"),

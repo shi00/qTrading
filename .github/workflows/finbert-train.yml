@@ -310,7 +310,9 @@ jobs:
 
       # 一致性 Gate（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%）。
       # 发布产物为 f16（f16-only，可选 q8 对照件不使用）；参考模型为训练产物 best
-      #（微调后编码器）；--head 使用训练好的分类头。
+      #（微调后编码器）；--head 使用训练好的分类头。--training-model 指向同一 best：
+      # 逐张量核对 head.npz 的 classifier/pooler 与训练权重同源（D15-002），错轮次头 /
+      # linear 漏 pooler 直接 FAIL；缺失时发布结论为 NOT_APPLICABLE（不得发布合格）。
       # 退出码 0=PASS / 1=FAIL；FAIL 时本步骤失败 → 发布 artifact 上传与
       # 发布 job（publish-release）均不执行。
       - name: Consistency gate (verify_finbert_gguf.py --head)
@@ -321,6 +323,7 @@ jobs:
             --reference-model stage_b_out/best \
             --f16-gguf stage_b_out/finbert2-news-f16.gguf \
             --head stage_b_out/head.npz \
+            --training-model stage_b_out/best \
             --report stage_b_out/finbert2-news-f16.verify.json
 
       # 效果硬门槛（FT-02）：与**最近一次已发布 Release**（tag `finbert-gguf-v*`，按

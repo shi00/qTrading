@@ -4,6 +4,7 @@
 VM 是独立类，消费方直接实例化以调用 commands。
 """
 
+import sys
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -632,6 +633,85 @@ class TestVerifyToken:
         assert result is False
         assert vm.state.status_type == "error"
         assert vm.state.is_verifying is False
+
+
+# --- verify_token: E2E 假验证边界（D21-OTHER-003） ---
+
+
+class _ForbiddenTushareModule:
+    """伪 tushare：任何属性访问即失败，证明 fake 边界未触达 SDK/网络。"""
+
+    def __getattr__(self, name: str) -> None:
+        raise AssertionError(f"E2E fake 边界不得访问 tushare.{name}")
+
+
+class _ForbiddenRequestsModule:
+    """伪 requests：任何属性访问即失败，证明 fake 边界零 HTTP 外发。"""
+
+    def __getattr__(self, name: str) -> None:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        raise AssertionError(f"E2E fake 边界不得访问 requests.{name}")
+
+
+class TestE2EFakeVerifyBoundary:
+    """E2E 子进程边界：E2E_TESTING + TUSHARE_VERIFY_FAKE 时走确定性 fake，零外发。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("scenario", "expected_message_key"),
+        [
+            ("network", "wizard_err_token_network"),
+            ("timeout", "wizard_err_token_timeout"),
+            ("invalid", "wizard_err_token_invalid"),
+        ],
+        ids=["network", "timeout", "invalid"],
+    )
+    async def test_e2e_fake_verify_is_deterministic_without_network(
+        self,
+        mock_config_handler,
+        mock_thread_pool,
+        monkeypatch,
+        scenario,
+        expected_message_key,
+    ):
+        """伪 tushare/requests 均不可访问，错误态由 fake 确定性驱动（无真实网络/配额）。"""
+        monkeypatch.setenv("E2E_TESTING", "true")
+        monkeypatch.setenv("TUSHARE_VERIFY_FAKE", scenario)
+        monkeypatch.setitem(sys.modules, "tushare", _ForbiddenTushareModule())
+        monkeypatch.setitem(sys.modules, "requests", _ForbiddenRequestsModule())
+
+        vm = _make_vm(mock_config_handler)
+        vm.update_token("e2e-dummy-token")
+        result = await vm.verify_token()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == expected_message_key
+        assert vm.state.is_verifying is False
+        # 探活阶段失败：不得写入 keyring / 激活共享 client / 触发成功回调
+        mock_config_handler.save_token.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fake_env_ignored_outside_e2e_mode(self, mock_config_handler, mock_thread_pool, monkeypatch):
+        """仅设置 TUSHARE_VERIFY_FAKE 而未进入 E2E 模式时，生产路径仍调真实探活。"""
+        monkeypatch.setenv("TUSHARE_VERIFY_FAKE", "network")
+        monkeypatch.delenv("E2E_TESTING", raising=False)
+        mock_pro = _make_mock_pro_api()
+        mock_client = MagicMock()
+        mock_client.set_token_async = AsyncMock(return_value=False)
+
+        with (
+            patch("tushare.pro_api", return_value=mock_pro),
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+        ):
+            vm = _make_vm(mock_config_handler)
+            vm.update_token("valid_token")
+            result = await vm.verify_token()
+
+        assert result is True
+        mock_pro.trade_cal.assert_called_once_with(exchange="SSE", start_date="20250101", end_date="20250101")
 
 
 # --- verify_token: SaveOutcome 四态穷举 (VMCONFIG-F04) ---

@@ -292,6 +292,19 @@ def parse_feed_payload(payload: object) -> tuple[list[dict[str, Any]], dict[str,
     return docs, page_info if isinstance(page_info, dict) else {}
 
 
+def has_expected_envelope(payload: object) -> bool:
+    """是否为该源必需的 envelope：``result.data.feed`` 含 ``list`` 字段（数组或 ``null``）。
+
+    ``list`` 为空数组 / ``null`` 属**真实合法空**；缺少任一层级、缺 ``list`` 或 ``list`` 为
+    其他类型（拦截页、wrong-type、schema 漂移）返回 ``False``，调用方据此判为解析失败。
+    """
+    feed = _extract_feed(payload)
+    if "list" not in feed:
+        return False
+    raw_list = feed.get("list")
+    return raw_list is None or isinstance(raw_list, list)
+
+
 @log_async_operation(operation_name="sina_7x24_fetch_page", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
 async def fetch_page(
     client: httpx.AsyncClient,

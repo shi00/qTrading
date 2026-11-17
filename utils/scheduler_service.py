@@ -11,8 +11,9 @@ import asyncio
 import datetime
 import logging
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -209,6 +210,11 @@ class SchedulerService:
             # F1 (OSS 检视): 持引用补偿任务，防止事件循环弱引用下任务被 GC 静默丢失
             # （_on_job_missed 创建的 create_task 在无强引用时可能中途被回收）。
             self._catchup_tasks: set[asyncio.Task] = set()
+            # D03-001: misfire 补跑准入与运行代际。stop()/stop_async() 关闭准入并递增
+            # 代际——停机后到达的 listener 回调不再投递补跑；上一代际已创建、尚未启动的
+            # 补跑协程由 _run_misfire_guarded 拒绝（重启只接受新代际 callback）。
+            self._accepting_misfire = True
+            self._run_generation = 0
             self._initialized = True
             logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
 
@@ -314,6 +320,11 @@ class SchedulerService:
 
         self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         self.scheduler.add_listener(self._on_job_error, EVENT_JOB_ERROR)
+
+        # D03-001: 每次启动即新一轮运行代际（重启）：递增代际并重新开放 misfire 准入，
+        # 上一代际遗留的补跑 callback 在新代际下被拒绝。
+        self._run_generation += 1
+        self._accepting_misfire = True
 
         try:
             self.scheduler.start()
@@ -437,6 +448,14 @@ class SchedulerService:
             job_id,
             run_time,
         )
+        # D03-001: 停机准入。stop()/stop_async() 关闭后到达的 misfire 回调不得再
+        # 投递补跑（否则补跑会在 TaskManager 取消快照之后 submit_task 启动新 runner）。
+        if not self._accepting_misfire:
+            logger.info(
+                "[Scheduler] Ignoring misfire for '%s': scheduler admission closed during shutdown.",
+                job_id,
+            )
+            return
         # _on_job_missed 为 APScheduler listener 回调；AsyncIOScheduler 的 listener
         # 在事件循环线程执行，可直接获取 running loop 调度异步补跑协程。
         # 无运行 loop 时记录 debug 后返回，不得抛到 APScheduler 线程。
@@ -468,7 +487,9 @@ class SchedulerService:
             coro = self._catch_up_missed_updates(include_today=True, bypass_backoff=True)
 
         try:
-            task = loop.create_task(coro)
+            # D03-001: 补跑协程交由代际守卫持有——停机在「创建任务」与「首次执行」
+            # 之间关闭准入时，守卫在看到代际已推进后拒绝执行并 close 协程。
+            task = loop.create_task(self._run_misfire_guarded(coro, self._run_generation))
         except RuntimeError:
             # loop 已关闭等竞态：协程未被执行，必须 close 避免 "coroutine was never awaited"。
             coro.close()
@@ -478,6 +499,23 @@ class SchedulerService:
         # 完成，否则补跑任务可能在执行中途被 GC 静默丢弃（漏跑且无日志）。
         self._catchup_tasks.add(task)
         task.add_done_callback(self._on_misfire_task_done)
+
+    async def _run_misfire_guarded(self, coro: Coroutine[Any, Any, Any], generation: int) -> None:
+        """D03-001: misfire 补跑代际守卫。
+
+        停机/重启由 stop()/start() 递增 ``_run_generation``：上一代际创建、尚未启动的
+        补跑协程在此被拒绝（显式 ``close`` 避免 "coroutine was never awaited"），
+        重启后只接受新代际的 callback。R2：不捕获 ``CancelledError``。
+        """
+        if generation != self._run_generation:
+            coro.close()
+            logger.info(
+                "[Scheduler] Discarding misfire recovery from stale generation %s (current=%s).",
+                generation,
+                self._run_generation,
+            )
+            return
+        await coro
 
     def _on_misfire_task_done(self, task: asyncio.Task) -> None:
         """misfire 补跑任务完成回调：释放强引用并消费异常（R2/R9）。
@@ -519,10 +557,58 @@ class SchedulerService:
     def stop(self):
         """Stop the scheduler"""
         logger.info("Stopping scheduler... (running=%s)", self.scheduler.running)
+        # D03-001: 先关闭 misfire 准入并换代，再停触发——停机后到达的 listener 回调
+        # 不再投递补跑；在途补跑任务在此取消，由 stop_async / drain_catchup_tasks
+        # 等待其真正退出（本方法为同步路径，仅发出取消请求）。
+        self._accepting_misfire = False
+        self._run_generation += 1
+        self._cancel_catchup_tasks()
         if self.scheduler.running:
             self._safe_shutdown_scheduler(self.scheduler, context="stop")
         else:
             logger.info("Scheduler was not running.")
+
+    def _cancel_catchup_tasks(self) -> None:
+        """D03-001: 对在途 misfire 补跑任务发出取消请求（不等待退出）。"""
+        for task in list(self._catchup_tasks):
+            if not task.done():
+                task.cancel()
+
+    async def stop_async(self, *, drain_timeout: float = 2.0) -> None:
+        """D03-001: 异步停机协议——停触发 → 取消并 drain misfire 补跑任务。
+
+        与 ``stop()`` 的差异：除关闭准入门、停触发与发出取消外，等待
+        ``_catchup_tasks`` 中已取消的补跑任务真正退出，避免其在停机后继续 await
+        交易日历并 ``submit_task`` 接纳新任务。完整停机序：
+        停触发 → 取消并 drain misfire（本方法）→ TaskManager 关闭准入并
+        cancel/join 已接纳任务 → flush 持久化 → dispose engine（ShutdownCoordinator）。
+        R2：不捕获 ``asyncio.CancelledError``，外层取消直接向上传播。
+        """
+        self.stop()
+        await self.drain_catchup_tasks(timeout=drain_timeout)
+
+    async def drain_catchup_tasks(self, *, timeout: float = 2.0) -> None:
+        """D03-001: 取消并等待在途 misfire 补跑任务退出（有界等待）。
+
+        已取消任务的 ``done_callback`` 会自行从集合移除；超时未退出的任务保留强引用，
+        待其自然完成后由回调清理。超时只告警（不抛），由 Step 0 预算兜底。
+        """
+        pending = [t for t in self._catchup_tasks if not t.done()]
+        if not pending:
+            self._catchup_tasks.clear()
+            return
+        logger.info("[Scheduler] Draining %s misfire recovery task(s)...", len(pending))
+        for task in pending:
+            task.cancel()
+        done, not_done = await asyncio.wait(pending, timeout=timeout)
+        for task in done:
+            self._catchup_tasks.discard(task)
+        if not_done:
+            logger.warning(
+                "[Scheduler] %s misfire recovery task(s) did not exit within %.1fs after cancellation",
+                len(not_done),
+                timeout,
+            )
 
     def _check_config_sync(self) -> dict:
         """Synchronously check config (runs in thread pool)"""

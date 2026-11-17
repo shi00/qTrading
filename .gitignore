@@ -193,6 +193,9 @@ docs/plans/archive/
 /reviews/
 /docs/reviews/findings/
 
+# 8.1 AI 助手/检视流水线上传暂存目录（检视报告与证据文件，禁止入库）
+.uploads/
+
 # 9. Static analysis reports (auto-generated, not source code)
 pyright_report.txt
 

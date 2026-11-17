@@ -267,7 +267,9 @@ def _make_health_check_host(
     trade_calendar.get_trade_dates = AsyncMock(side_effect=[[], list(official_dates)])
 
     api = MagicMock()
-    api.trade_cal = AsyncMock(return_value=api_cal_df)
+    # D09-003：交叉校验改调 TushareClient.get_trade_cal（is_open=1 探测开市日），
+    # 旧接口名 trade_cal 不再被调用；mock 名不匹配会令探测降级为未知（lag=1）。
+    api.get_trade_cal = AsyncMock(return_value=api_cal_df)
 
     return _StubHealthHost(cache=cache, trade_calendar=trade_calendar, api=api)
 

@@ -179,13 +179,44 @@ class ResolvedConnection:
 
 
 @dataclass(frozen=True, slots=True)
+class EgressAckPermit:
+    """单次外发确认许可（SEC-01，D13-002）：把确认判定绑定到本次尝试 / 连接 / 目标。
+
+    进程级 ``{provider: scope_version}`` 确认记录本身是用户持久同意，不含「哪一次
+    尝试」。本类型由 S3 Executor 在许可线性化点签发（``utils.egress_ack``
+    ``bind_egress_ack_permit``），随 ``AttemptContext`` 传到云适配器，在凭据解析 /
+    网络之前校验：attempt / invocation / owner / 连接 / provider / 模型 / 目标 /
+    scope_version / 有效期全部匹配才允许出站，禁止跨 attempt、跨会话或换目标复用
+    （缺上下文 fail-closed）。``expires_at`` 为单调时钟口径（``loop.time()``）。
+    """
+
+    attempt_id: str
+    invocation_id: str
+    owner_session_id: str
+    owner_epoch: int
+    connection_id: str
+    provider: str
+    model: str
+    target_fingerprint: str | None
+    scope_version: int
+    issued_at: float
+    expires_at: float
+
+
+@dataclass(frozen=True, slots=True)
 class AttemptContext:
-    """尝试归属上下文：owner 隔离与租约恢复的最小身份（§9.2）。"""
+    """尝试归属上下文：owner 隔离与租约恢复的最小身份（§9.2）。
+
+    ``egress_permit``（D13-002）：本次尝试的外发确认许可。云适配器在出站前校验
+    该许可与 ``attempt_id`` / ``invocation_id`` / owner / 连接 / 目标一致；
+    ``None`` 表示未绑定（本地模型路径或未签发），云出口据此 fail-closed 拒绝。
+    """
 
     owner_session_id: str
     owner_epoch: int
     invocation_id: str
     attempt_id: str
+    egress_permit: EgressAckPermit | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -110,22 +110,33 @@ async def test_table_viewer_filter(e2e_page):
 
 
 async def test_table_viewer_switch(e2e_page):
-    """D5: 数据浏览切换表后数据更新。"""
+    """D5: 数据浏览切换表后数据与表结构都真正更新。
+
+    D21-OTHER-006: 两张种子表都含 ``000001.SZ``，仅断言该代码无法区分「切换未生效、
+    仍停在 daily_quotes」。故以两表互斥的列头做身份断言（列头取自种子 schema）：
+    - daily_quotes 独有 ``trade_date``（stock_basic 无此列）；
+    - stock_basic 独有 ``industry``（daily_quotes 无此列）。
+    切前/切后互为正反断言，选择未落地时后一组断言必然失败。
+    """
     dp = DataPage(e2e_page)
     await dp.open()
     await dp.expect_explorer_tab()
 
-    # 选择 daily_quotes 表 + 查询（通过 anchor）
-    # PR-478: select_table 内部已通过 TABLE_READY EID 等待 schema 加载完成
+    # 选择 daily_quotes 表 + 查询（通过 anchor；select_table 等待目标表专属就绪锚点）
     await dp.select_table("daily_quotes", timeout_ms=TIMEOUTS.TITLE)
     await dp.click_query(timeout_ms=TIMEOUTS.TITLE)
 
+    # daily_quotes 身份：trade_date 列头出现，stock_basic 的 industry 列头不在
+    await e2e_page.expect_text("trade_date", timeout_ms=TIMEOUTS.TITLE)
     await e2e_page.expect_text("000001.SZ", timeout_ms=TIMEOUTS.NAV)
+    await e2e_page.expect_text_gone("industry", timeout_ms=TIMEOUTS.TITLE)
 
-    # 切换到 stock_basic 表（通过 anchor；select_table 内置等待表结构加载完成）
+    # 切换到 stock_basic 表（通过 anchor；select_table 等待目标表专属就绪锚点）
     await dp.select_table("stock_basic", timeout_ms=TIMEOUTS.TITLE)
 
     await dp.click_query(timeout_ms=TIMEOUTS.TITLE)
 
-    # 验证 stock_basic 表数据
+    # stock_basic 身份：industry 列头出现，daily_quotes 的 trade_date 列头不再在
+    await e2e_page.expect_text("industry", timeout_ms=TIMEOUTS.TITLE)
     await e2e_page.expect_text("000001.SZ", timeout_ms=TIMEOUTS.NAV)
+    await e2e_page.expect_text_gone("trade_date", timeout_ms=TIMEOUTS.TITLE)
