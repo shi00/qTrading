@@ -116,6 +116,7 @@ from core.model_management_types import (
     FunctionToolSpec,
     InferenceAdapter,
     InferenceRequest,
+    ModelTurnProtocolError,
     NormalizedLLMUsage,
     ResolvedConnection,
     ScenarioExecutionResult,
@@ -440,8 +441,10 @@ class ScenarioExecutor:
           ``on_event`` 可等待（真实 delta 有界事件，背压经 await 透传）；
         - **聊天适配器**：经 :class:`core.model_management_types.ChatInferenceAdapter`
           协议（``invoke_chat``）执行——非聊天适配器（FinBERT 等）派发前淘汰
-          （rejected，零预留副作用）；``stream=True``、``response_format=output_schema``
-          原样透传，路由与业务 final 校验不在本入口（§6.1，由调用方承载）；
+          （rejected，零预留副作用）；``stream=True``；``response_format`` 按
+          ``request.output_mode`` 生成真实封装（native → OpenAI ``json_schema``
+          封装，text/tool/prompted → 无），不把裸 schema 透传给 LiteLLM，路由与
+          业务 final 校验不在本入口（§6.1，由调用方承载）；
         - **§6.4-5**：任一真实事件送达调用方后失败——保 partial/unknown 及原
           attempt，不重试不换候选（不换模型拼接）；未公开分片前沿冻结候选策略；
         - **拒绝不换候选规避**（DD §10.1）：refused 完整回合以 failed 终态 +
@@ -490,7 +493,7 @@ class ScenarioExecutor:
                 request.deadline,
                 attempt_context,
                 stream=True,
-                response_format=request.output_schema,
+                response_format=_chat_response_format(request),
                 on_event=_make_tracked_event(exposure, on_event),
             )
 
@@ -2178,6 +2181,41 @@ def _legacy_invoke(
         return await cast(InferenceAdapter, adapter).invoke(request, connection, request.deadline, attempt_context)
 
     return _invoke
+
+
+#: native 结构化输出的 json_schema 名（与固定 SDK ``openai._map_json_schema``
+#: 的 ``DEFAULT_OUTPUT_TOOL_NAME`` 同值）：OpenAI chat completions 的
+#: ``response_format.json_schema.name`` 为必填字段。
+_NATIVE_OUTPUT_SCHEMA_NAME: Final[str] = "final_result"
+
+
+def _chat_response_format(request: ChatTurnRequest) -> Mapping[str, Any] | None:
+    """按 ``output_mode`` 生成真实出站 ``response_format``（固定 SDK 语义）。
+
+    - ``text`` / ``tool``：无供应商结构化约束（tool 模式的结构 final 经
+      output tool 承载）→ ``None``；
+    - ``native``：OpenAI chat completions 原生 ``json_schema`` 封装（与 SDK
+      ``OpenAIChatModel._map_json_schema`` 同形：``type`` + ``json_schema.name``
+      + ``json_schema.schema``）。LiteLLM（锁定版 ``type_to_response_format_param``
+      的 dict 分支）对 dict **原样透传、不补封装**，裸 schema 直传会被供应商当作
+      非法 response_format 或静默忽略，故封装必须在桥层生成；
+    - ``prompted``：schema 已由 SDK 注入 instructions，出站不得再发原生封装
+      （否则越权改变输出模式语义）。
+
+    ``request.ensure_valid`` 已拒绝模式与 schema 不自洽的请求；此处仅保留
+    native 缺 schema 的防御性 fail-closed。
+    """
+    if request.output_mode != "native":
+        return None
+    if request.output_schema is None:
+        raise ModelTurnProtocolError("invalid_field", "$.output_schema")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": _NATIVE_OUTPUT_SCHEMA_NAME,
+            "schema": dict(request.output_schema),
+        },
+    }
 
 
 #: llm_tokens 预留估算的输入投影键（M09）：消息正文 + 历史工具调用参数 +

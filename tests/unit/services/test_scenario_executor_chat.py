@@ -4,7 +4,8 @@
 - 成功链路：真实流事件在 final 前经 on_event 可等待送达（SQ-02「实际 delta
   有界事件」）；ChatTurnOutcome 契约：transport=ok / settlement=settled /
   model_call → invocation → attempt 身份关联；adapter 收到 stream=True /
-  response_format=output_schema；用量观察 + succeeded 终态；
+  response_format 按 output_mode 生成（native → 真实 json_schema 封装；tool /
+  prompted / text → 无）；用量观察 + succeeded 终态；
 - binding 契约（受理冻结模型绑定）：scenario_id / task_id 缺失 fail-closed
   （ValueError，零副作用——不建立 invocation、不派发）；
 - 必需登记失败零出站（SQ-02）：begin_attempt persisted=False → invoke_chat 零
@@ -38,12 +39,14 @@ from core.agent_types import (
 )
 from core.model_management_types import (
     ChatMessage,
+    ChatOutputMode,
     ChatStreamEvent,
     ChatTurnRequest,
     ChatTurnResponse,
     ExecutionSnapshot,
     FunctionToolSpec,
     NormalizedLLMUsage,
+    ModelTurnProtocolError,
     PersistenceOutcome,
     ResolvedConnection,
     TextContentPart,
@@ -137,7 +140,13 @@ def _binding(**overrides: Any) -> dict[str, Any]:
     return {"scenario_id": "news_sentiment", "task_id": "sentiment", **overrides}
 
 
-def _chat_request(model_call_id: str = "mc-1", output_schema: dict[str, Any] | None = None) -> ChatTurnRequest:
+def _chat_request(
+    model_call_id: str = "mc-1",
+    output_schema: dict[str, Any] | None = None,
+    *,
+    output_mode: ChatOutputMode = "text",
+    output_tools: tuple[FunctionToolSpec, ...] = (),
+) -> ChatTurnRequest:
     return ChatTurnRequest(
         model_call_id=model_call_id,
         messages=(ChatMessage(role="user", content_parts=(TextContentPart(text="研究问题"),)),),
@@ -147,6 +156,8 @@ def _chat_request(model_call_id: str = "mc-1", output_schema: dict[str, Any] | N
         frozen_params={},
         max_output_tokens=256,
         deadline=asyncio.get_running_loop().time() + _REQUEST_DEADLINE_BUDGET_S,
+        output_mode=output_mode,
+        output_tools=output_tools,
     )
 
 
@@ -163,7 +174,7 @@ def _usage() -> NormalizedLLMUsage:
 def _chat_ok_response(text: str = "ok", usage: NormalizedLLMUsage | None = None) -> ChatTurnResponse:
     return ChatTurnResponse(
         text=text,
-        finish_reason="stop",
+        finish_reason="final",
         actual_model="glm-4-air",
         usage_observed=usage is not None,
         usage=usage,
@@ -241,6 +252,7 @@ class _ScriptedChatAdapter:
                 "stream": stream,
                 "response_format": response_format,
                 "model_call_id": request.model_call_id,
+                "request": request,
             }
         )
         events, error, response = self.script.pop(0)
@@ -275,7 +287,7 @@ class TestChatSuccessPath:
         usage = _usage()
         events = (
             _text_event(1, "ab"),
-            ChatStreamEvent(sequence=2, kind="finish", finish_reason="stop", usage=usage),
+            ChatStreamEvent(sequence=2, kind="finish", finish_reason="final", usage=usage),
         )
         adapter = _ScriptedChatAdapter([(events, None, _chat_ok_response(usage=usage))])
         recorder = _recorder_mock()
@@ -286,7 +298,7 @@ class TestChatSuccessPath:
             seen.append(event)
 
         outcome = await executor.execute_chat_turn(
-            _chat_request(output_schema={"type": "object"}),
+            _chat_request(output_schema={"type": "object"}, output_mode="native"),
             _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
             binding=_binding(),
             on_event=on_event,
@@ -297,7 +309,7 @@ class TestChatSuccessPath:
         assert outcome.settlement_state == "settled"
         assert outcome.error_code is None
         assert outcome.partial_text is None
-        assert outcome.response is not None and outcome.response.finish_reason == "stop"
+        assert outcome.response is not None and outcome.response.finish_reason == "final"
         # 身份关联：model_call → invocation（一回合一 invocation）→ 实际 attempt
         assert outcome.model_call_id == "mc-1"
         assert outcome.invocation_id == "mc-1"
@@ -305,10 +317,14 @@ class TestChatSuccessPath:
         # SQ-02：真实 delta 在 final 前经 on_event 送达
         assert [e.text_delta for e in seen if e.kind == "text"] == ["ab"]
         assert seen[-1].kind == "finish"
-        # 出口参数透传：stream=True / response_format=output_schema
+        # 出口参数透传：stream=True / native 模式的真实 json_schema 封装（M18：
+        # 不把裸 schema dict 透传给 LiteLLM）
         call = adapter.invoke_calls[0]
         assert call["stream"] is True
-        assert call["response_format"] == {"type": "object"}
+        assert call["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "final_result", "schema": {"type": "object"}},
+        }
         # F16 父请求：invocation 取 model_call_id
         recorder.ensure_invocation.assert_awaited_once()
         assert recorder.ensure_invocation.await_args.kwargs["invocation_id"] == "mc-1"
@@ -366,6 +382,116 @@ class TestChatSuccessPath:
         assert outcome.status == "succeeded"
         assert outcome.transport_state == "ok"
         assert outcome.settlement_state == "deferred"
+
+
+class TestChatOutputModeWiring:
+    """检视 M18：``output_mode`` 随请求保留，并按固定 SDK 语义决定出站形态。
+
+    - native → OpenAI ``json_schema`` 原生封装（LiteLLM 对 dict 原样透传，不补
+      封装，裸 schema 直传无效）；
+    - tool / prompted / text → 无 ``response_format``（tool 经 output tool，prompted
+      经 instructions 承载 schema）；
+    - 模式与 schema 不自洽 → 入口 fail-closed（零出站，R21 不伪装）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_native_mode_builds_provider_json_schema_wrapper(self):
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        executor = _executor(adapter, _recorder_mock())
+        outcome = await executor.execute_chat_turn(
+            _chat_request(
+                output_schema={"type": "object", "properties": {"x": {"type": "string"}}}, output_mode="native"
+            ),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+        assert outcome.status == "succeeded"
+        call = adapter.invoke_calls[0]
+        assert call["request"].output_mode == "native"
+        assert call["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "final_result",
+                "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_tool_mode_sends_output_tool_without_response_format(self):
+        output_tool = FunctionToolSpec(
+            name="final_result",
+            description="结构 final",
+            json_schema={"type": "object"},
+            schema_version="v1",
+            output_tool=True,
+        )
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        executor = _executor(adapter, _recorder_mock())
+        outcome = await executor.execute_chat_turn(
+            _chat_request(output_mode="tool", output_tools=(output_tool,)),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+        assert outcome.status == "succeeded"
+        call = adapter.invoke_calls[0]
+        assert call["request"].output_mode == "tool"
+        assert [tool.name for tool in call["request"].output_tools] == ["final_result"]
+        assert call["response_format"] is None
+
+    @pytest.mark.asyncio
+    async def test_prompted_mode_sends_schema_in_instructions_not_response_format(self):
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        executor = _executor(adapter, _recorder_mock())
+        outcome = await executor.execute_chat_turn(
+            _chat_request(output_schema={"type": "object"}, output_mode="prompted"),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+        assert outcome.status == "succeeded"
+        call = adapter.invoke_calls[0]
+        assert call["request"].output_mode == "prompted"
+        assert call["response_format"] is None
+
+    @pytest.mark.asyncio
+    async def test_text_mode_sends_no_response_format(self):
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        executor = _executor(adapter, _recorder_mock())
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+        assert outcome.status == "succeeded"
+        assert adapter.invoke_calls[0]["response_format"] is None
+
+    @pytest.mark.asyncio
+    async def test_native_without_schema_fails_closed_before_dispatch(self):
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            await executor.execute_chat_turn(
+                _chat_request(output_mode="native"),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                binding=_binding(),
+            )
+        assert excinfo.value.code == "invalid_field"
+        assert excinfo.value.field_path == "$.output_schema"
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tool_mode_without_output_tools_fails_closed(self):
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        executor = _executor(adapter, _recorder_mock())
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            await executor.execute_chat_turn(
+                _chat_request(output_mode="tool"),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                binding=_binding(),
+            )
+        assert excinfo.value.field_path == "$.output_tools"
+        assert adapter.invoke_calls == []
 
 
 class TestChatBindingContract:

@@ -43,8 +43,10 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar, Final, Protocol, cast
 
 from core.model_management_types import (
+    CHAT_OUTPUT_MODES,
     AssistantToolCall,
     ChatMessage,
+    ChatOutputMode,
     ChatStreamEvent,
     ChatTurnOutcome,
     ChatTurnRequest,
@@ -329,16 +331,22 @@ def build_chat_turn_request(
     - 工具：``function_tools`` → 权限工具，``output_tools`` → 结构 final
       （output_tool=True）；``output_object``（native/prompted 模式）→
       ``output_schema``；
+    - 输出模式：``model_request_parameters.output_mode`` 原样落 ``output_mode``
+      （text/tool/native/prompted）；其余 SDK 模式（auto/image/遗留
+      tool_or_text）明确拒绝，不静默降级；
     - 冻结：``frozen_params`` 全量透传（timeout 消费为 deadline）、
       ``max_output_tokens`` 取 ``max_tokens``、deadline 取单调时钟换算；
     - ``model_call_id`` 缺省生成（uuid4 hex，一回合一身份）。
 
     Raises:
         ModelTurnProtocolError: 未识别 part / 非法 tool_call_id / timeout 缺失
-            或畸形 / schema 版本缺失（zero outbound，R21）。
+            或畸形 / schema 版本缺失 / 不支持的 output_mode（zero outbound，R21）。
     """
     if not tool_schema_version:
         raise ModelTurnProtocolError("invalid_field", "$.tool_schema_version")
+    output_mode = model_request_parameters.output_mode
+    if output_mode not in CHAT_OUTPUT_MODES:
+        raise ModelTurnProtocolError("invalid_field", "$.output_mode")
     instructions: list[str] = []
     chat_messages: list[ChatMessage] = []
     for index, message in enumerate(messages):
@@ -377,6 +385,7 @@ def build_chat_turn_request(
         frozen_params=_frozen_params(model_settings),
         max_output_tokens=model_settings.get("max_tokens"),
         deadline=_deadline_from_settings(model_settings),
+        output_mode=cast("ChatOutputMode", output_mode),
     )
     request.ensure_valid()
     return request
@@ -792,9 +801,15 @@ class GatewayModel(Model):
             channel.close(outcome=outcome)
 
     def _response_from_outcome(self, outcome: ChatTurnOutcome) -> ModelResponse:
-        """ChatTurnOutcome → ModelResponse（拒绝保真、失败如实抛出）。"""
+        """ChatTurnOutcome → ModelResponse（拒绝保真、失败如实抛出）。
+
+        畸形响应（缺必需字段 / finish_reason 越出核心词汇 / tool_calls 与
+        finish 不自洽等）先经 ``ChatTurnResponse.ensure_valid`` 明确拒绝，不以
+        部分字段拼装成功响应（R21 不伪装）。
+        """
         if outcome.status == "succeeded" and outcome.response is not None:
             response = outcome.response
+            response.ensure_valid()
             finish = map_finish_reason(response.finish_reason)
             if finish == "content_filter":
                 # 拒绝保真（§6.3）：拒绝语义与原文一次转出——SDK 惯例以

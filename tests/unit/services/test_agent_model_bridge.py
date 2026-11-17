@@ -4,7 +4,8 @@
 - §6.3 SDK 消息 → ChatTurnRequest 一次投影：SystemPromptPart/instructions 保序、
   user 文本（str 与 TextContent）、assistant 历史（TextPart/ToolCallPart/
   ThinkingPart 跳过）、ToolReturnPart/RetryPromptPart tool_call_id 严格配对、
-  工具白名单五元组（function_tools/output_tools/output_object）；
+  工具白名单五元组（function_tools/output_tools/output_object）、
+  ``output_mode`` 原样保留且不支持模式明确拒绝（M18）；
 - 未识别 part 明确拒绝（zero outbound，R21 不裁剪）：未知请求 part、未知
   响应 part、BinaryContent 用户内容、timeout 缺失 / 畸形；
 - 拒绝保真（§6.3）：refused 回合 UnexpectedModelBehavior 携带 refusal 原文；
@@ -317,11 +318,11 @@ class TestBuildChatTurnRequest:
         assert tool_message.content_parts == expected_parts
 
     @pytest.mark.asyncio
-    async def test_tool_mapping_and_output_schema(self):
+    async def test_tool_mapping_and_output_mode(self):
         params = _params(
+            output_mode="tool",
             function_tools=[_tool("search")],
             output_tools=[_tool("final_result")],
-            output_object=_output_object(),
         )
         request = build_chat_turn_request(
             [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v2"
@@ -331,7 +332,42 @@ class TestBuildChatTurnRequest:
         assert [t.name for t in by_function] == ["search"]
         assert [t.name for t in by_output] == ["final_result"]
         assert all(t.schema_version == "v2" for t in request.tools)
+        # M18：工具模式随请求保留，结构 final 经 output tool 承载（无 output_schema）
+        assert request.output_mode == "tool"
+        assert request.output_schema is None
+
+    @pytest.mark.asyncio
+    async def test_native_output_mode_preserved_with_schema(self):
+        """M18：native 模式与 output_object schema 一并落 ChatTurnRequest。"""
+        params = _params(output_mode="native", output_object=_output_object())
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v1"
+        )
+        assert request.output_mode == "native"
         assert request.output_schema == {"type": "object"}
+        assert request.output_tools == ()
+
+    @pytest.mark.asyncio
+    async def test_prompted_output_mode_preserved_with_schema(self):
+        """M18：prompted 模式随请求保留——schema 经 SDK 注入 instructions 承载。"""
+        params = _params(output_mode="prompted", output_object=_output_object())
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v1"
+        )
+        assert request.output_mode == "prompted"
+        assert request.output_schema == {"type": "object"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("output_mode", ["auto", "image", "tool_or_text"])
+    async def test_unsupported_output_mode_rejected(self, output_mode: str):
+        """M18：桥层不支持的 SDK 模式明确拒绝（不静默降级为 text/tool）。"""
+        params = _params(output_mode=cast(Any, output_mode), output_tools=[_tool("final_result")])
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            build_chat_turn_request(
+                [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v1"
+            )
+        assert excinfo.value.code == "invalid_field"
+        assert excinfo.value.field_path == "$.output_mode"
 
     @pytest.mark.asyncio
     async def test_frozen_params_and_deadline(self):
@@ -450,6 +486,66 @@ class TestBuildChatTurnRequest:
 
 
 # ---------------------------------------------------------------------------
+# 固定 SDK 输出模式语义（M18：防版本漂移，锁步 pydantic-ai 2.66）
+# ---------------------------------------------------------------------------
+
+
+class TestSdkOutputModeSemantics:
+    """M18：锁定版 SDK 的三种结构化输出模式真实封装语义。
+
+    源码依据（``pydantic_ai.models.Model.prepare_request``）：mode != tool 清空
+    output_tools、mode ∉ {native, prompted} 清空 output_object、prompted/native
+    追加 prompted 输出指令到 instruction_parts、native 需 profile 声明
+    ``supports_json_schema_output``。桥层只搬运事实，不重造这些语义。
+    """
+
+    def _model(self, **kwargs: Any) -> GatewayModel:
+        return GatewayModel(
+            _FakeExecutor(), _binding(), MagicMock(spec=ExecutionSnapshot), tool_schema_version="v1", **kwargs
+        )
+
+    @pytest.mark.asyncio
+    async def test_prompted_prepare_request_injects_schema_into_instructions(self):
+        params = _params(output_mode="prompted", output_object=_output_object())
+        _settings_out, prepared = self._model().prepare_request(_settings(), params)
+        assert prepared.output_mode == "prompted"
+        assert prepared.output_tools == []  # SDK：tool 之外的模式清空 output_tools
+        assert prepared.prompted_output_instructions  # schema 指令来源
+        request = build_chat_turn_request(
+            [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), prepared, tool_schema_version="v1"
+        )
+        assert request.output_mode == "prompted"
+        assert request.output_schema == {"type": "object"}
+        # schema 经 instructions 承载（不是 response_format）
+        assert any("final_result" in text for text in request.instructions)
+
+    @pytest.mark.asyncio
+    async def test_native_prepare_request_requires_profile_capability(self):
+        """native 模式在未声明 ``supports_json_schema_output`` 的连接上被 SDK 拒绝。"""
+        from pydantic_ai import UserError
+
+        params = _params(output_mode="native", output_object=_output_object())
+        with pytest.raises(UserError) as excinfo:
+            self._model().prepare_request(_settings(), params)
+        assert "Native structured output is not supported" in str(excinfo.value)
+        # 连接证据声明支持后正常放行，且 output_object 保留
+        _settings_out, prepared = self._model(profile=ModelProfile(supports_json_schema_output=True)).prepare_request(
+            _settings(), params
+        )
+        assert prepared.output_mode == "native"
+        assert prepared.output_object is not None
+        assert prepared.output_tools == []
+
+    @pytest.mark.asyncio
+    async def test_tool_prepare_request_keeps_output_tools_only(self):
+        params = _params(output_mode="tool", output_tools=[_tool("final_result")], output_object=_output_object())
+        _settings_out, prepared = self._model().prepare_request(_settings(), params)
+        assert prepared.output_mode == "tool"
+        assert [t.name for t in prepared.output_tools] == ["final_result"]
+        assert prepared.output_object is None  # SDK：tool 模式清空 output_object
+
+
+# ---------------------------------------------------------------------------
 # §6.3 转出：finish / usage / 拒绝保真
 # ---------------------------------------------------------------------------
 
@@ -513,6 +609,29 @@ class TestOutcomeMapping:
         with pytest.raises(UnexpectedModelBehavior) as excinfo:
             await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
         assert "attempt registration unavailable" in excinfo.value.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("overrides", "expected_code", "expected_path"),
+        [
+            # provider 词汇（stop）越出核心 finish_reason 词表
+            ({"finish_reason": "stop"}, "invalid_finish", "$.finish_reason"),
+            # finish=tool_calls 但无工具调用（缺必需事实）
+            ({"finish_reason": "tool_calls"}, "invalid_field", "$.tool_calls"),
+            # usage_observed=True 但 usage 缺失（缺必需字段）
+            ({"usage": None}, "invalid_field", "$.usage"),
+        ],
+        ids=["provider-vocab", "tool-calls-missing", "usage-missing"],
+    )
+    async def test_malformed_response_fails_closed(self, overrides, expected_code, expected_path):
+        """M18/R21：畸形响应（缺必需字段 / 错误封装词汇）明确拒绝，不拼装成功。"""
+        bad = _ok_response(**overrides)
+        executor = _FakeExecutor(_succeeded_outcome(response=bad))
+        model = _gateway(executor)
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
+        assert excinfo.value.code == expected_code
+        assert excinfo.value.field_path == expected_path
 
 
 # ---------------------------------------------------------------------------

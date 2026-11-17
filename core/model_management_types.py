@@ -540,6 +540,14 @@ class SyntheticTestConsent:
 
 FINISH_REASONS: Final[tuple[str, ...]] = ("final", "tool_calls", "refused", "length", "error")
 FinishReason = Literal["final", "tool_calls", "refused", "length", "error"]
+
+#: 结构化输出模式（固定 SDK ``ModelRequestParameters.output_mode`` 的受支持子集，
+#: SDK 源码 ``pydantic_ai.models.ModelRequestParameters``）：``tool`` 经 output
+#: tool 承载、``native`` 经供应商原生 json_schema 响应格式承载、``prompted`` 经
+#: 提示指令承载、``text`` 无结构化约束。其余 SDK 模式（``auto`` / ``image`` /
+#: 遗留 ``tool_or_text``）不进入公开桥——桥层不支持即明确拒绝，不静默降级。
+CHAT_OUTPUT_MODES: Final[tuple[str, ...]] = ("text", "tool", "native", "prompted")
+ChatOutputMode = Literal["text", "tool", "native", "prompted"]
 CHAT_ROLES: Final[tuple[str, ...]] = ("system", "user", "assistant", "tool")
 #: 已选图片分型白名单：仅 PNG/JPEG（§10.1 ContentPart）。
 IMAGE_MIME_TYPES: Final[tuple[str, ...]] = ("image/png", "image/jpeg")
@@ -694,7 +702,9 @@ class ChatTurnRequest:
 
     ``instructions`` 为 SystemPromptPart/instructions 保序序列；``output_tools``
     为结构 final；``frozen_params`` 为受理冻结的采样参数；``deadline`` 为单调
-    时钟截止值（沿 InferenceRequest 语义）。
+    时钟截止值（沿 InferenceRequest 语义）；``output_mode`` 为结构化输出的出站
+    承载模式（见 :data:`CHAT_OUTPUT_MODES`）——模式与 schema 必须自洽，桥层据此
+    生成供应商真实封装（native 不得把裸 schema 当 response_format 透传）。
     """
 
     model_call_id: str
@@ -706,10 +716,23 @@ class ChatTurnRequest:
     max_output_tokens: int | None
     deadline: float
     output_tools: tuple[FunctionToolSpec, ...] = ()
+    output_mode: ChatOutputMode = "text"
 
     def ensure_valid(self) -> None:
         if not self.model_call_id:
             raise _invalid("invalid_field", "$.model_call_id")
+        if self.output_mode not in CHAT_OUTPUT_MODES:
+            raise _invalid("invalid_field", "$.output_mode")
+        if self.output_mode in ("native", "prompted") and self.output_schema is None:
+            # native/prompted 都必须有结构化对象；缺失即请求自相矛盾（fail-closed，
+            # 不以无约束文本冒充结构化回合，R21）
+            raise _invalid("invalid_field", "$.output_schema")
+        if self.output_mode == "tool" and not any(spec.output_tool for spec in (*self.tools, *self.output_tools)):
+            # tool 模式的结构 final 只能经 output tool 承载；无结构工具即无出站约束
+            raise _invalid("invalid_field", "$.output_tools")
+        if self.output_mode == "text" and self.output_schema is not None:
+            # text 模式无结构化约束——携带 schema 会被静默丢弃，必须显式声明模式
+            raise _invalid("invalid_field", "$.output_schema")
         if not self.messages:
             raise _invalid("invalid_field", "$.messages")
         for index, message in enumerate(self.messages):

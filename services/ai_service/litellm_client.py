@@ -1344,7 +1344,10 @@ class LiteLLMClient:
 
         与 :meth:`invoke_single_connection`（旧链单 prompt 出口）并列：接受完整
         ``messages`` / ``tools`` / ``response_format`` / ``stream``，``num_retries=0``
-        且 per-call ``drop_params=False``；SDK 全局 ``drop_params=True`` 下的 422 删参
+        且 per-call ``drop_params=False``；``response_format`` 必须是调用方已生成的
+        供应商完整形态——native 结构化输出的 ``json_schema`` 封装由 Executor 按
+        ``ChatTurnRequest.output_mode`` 生成（LiteLLM 锁定版对 dict 原样透传，不会
+        补封装，裸 schema 直传无效，M18）；SDK 全局 ``drop_params=True`` 下的 422 删参
         重发由 :func:`_strict_egress_dispatch` 在首个 422 处中止（M20：出站一次、
         参数不删、错误含 attempt 身份）；**不做路由和业务 final 校验**（候选
         策略与结算归 Executor / Recorder）；M17：全局跨部署 fallback 或部署级
