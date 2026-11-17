@@ -1660,8 +1660,15 @@ class LiteLLMClient:
                 # 断流：缺结束标记不得因迭代耗尽而成功（§6.4-4）
                 if finish_buffered is None:
                     raise ModelTurnProtocolError("missing_finish", "$.stream")
-                finish_reason = _map_chat_finish_reason(finish_buffered)
+                # M05：拒绝优先与非流式 :func:`_interpret_chat_response` 同序——观测到
+                # refusal 文本即终态 ``refused``，先于 finish 原值解释。纯拒绝、混文本+
+                # 拒绝、以 ``stop`` 结束的拒绝都不得被映射成 ``final``（否则 Executor
+                # 记 succeeded 并可按输出非法类换候选绕过拒绝）。
                 refusal_text = "".join(refusal_parts)
+                has_refusal = bool(refusal_text.strip())
+                if not has_refusal:
+                    refusal_text = ""
+                finish_reason = "refused" if has_refusal else _map_chat_finish_reason(finish_buffered)
                 if finish_reason == "refused" and not refusal_text:
                     refusal_text = "content_filter"  # provider 信号原文，ensure_valid 要求非空
 
