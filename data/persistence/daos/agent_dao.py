@@ -6107,6 +6107,12 @@ class AgentDao(BaseDao):
         - 新鲜重读（预检查/旧快照不是派发权）：任一 source 行已禁用，或作为已知
           派生闭包成员被 ``disabled_inherited`` 覆盖 → ``SOURCE_DISABLED``
           （禁用先胜零受影响新出站）；
+        - 清理事实（D09）：源行锁内同时读 ``tombstoned`` / ``cleaned_at`` /
+          ``digest``；已清理资产即使 ``read_state`` 仍为 ready、``disabled_revision``
+          被保留，也按清理合同拒绝新认领 → ``POLICY_DENIED``（与 D08 清理 fence
+          门同码）。清理执行路径不调用本方法，故不会自锁；权威事实是同一条
+          ``agent_asset_version`` 行的 ``FOR UPDATE`` 锁，任意清理写入与本方法
+          串行化，先认领者保有原事实；
         - 认领持久化：operation.data_consent_claims 追加 ``kind=source_revision``
           条目绑定各源 disabled_revision（claim 先胜保原 operation 认领与在途）；
         - 幂等：同 claim_ref 同输入返回原事实（replayed=True，claim 已生效不被
@@ -6114,7 +6120,7 @@ class AgentDao(BaseDao):
         - 重复 claim 只返回原事实，不生成第二操作。
 
         Raises:
-            AgentServiceError: INPUT_INVALID / SOURCE_DISABLED。
+            AgentServiceError: INPUT_INVALID / SOURCE_DISABLED / POLICY_DENIED。
         """
 
         self._check_engine()
@@ -6134,12 +6140,16 @@ class AgentDao(BaseDao):
         async with engine.begin() as conn:
             bindings: list[SourceClaimBinding] = []
             disabled_hits: list[str] = []
+            cleaned_hits: list[str] = []
             for source in ordered:
                 asset_row = (
                     await conn.execute(
                         sa.select(
                             AgentAssetVersion.disabled_revision,
                             AgentAssetVersion.read_state,
+                            AgentAssetVersion.digest,
+                            AgentAssetVersion.cleaned_at,
+                            AgentAssetVersion.tombstoned,
                         )
                         .where(
                             AgentAssetVersion.user_scope == request.user_scope,
@@ -6183,6 +6193,12 @@ class AgentDao(BaseDao):
                         )
                     )
                 ).scalar_one()
+                # 清理事实优先于禁用：内容已被清理核销（更强事实），统一报
+                # POLICY_DENIED，避免把「已清理」读成「只是禁用」。
+                cleanup_fact = self._source_cleanup_fact(asset_row)
+                if cleanup_fact is not None:
+                    cleaned_hits.append(f"{source.source_id}@{source.source_version}({cleanup_fact})")
+                    continue
                 if asset_row.disabled_revision > 0 or asset_row.read_state == "disabled" or inherited > 0:
                     disabled_hits.append(f"{source.source_id}@{source.source_version}")
                     continue
@@ -6242,6 +6258,14 @@ class AgentDao(BaseDao):
                     "same claim_ref with different source binding",
                     identity,
                 )
+            if cleaned_hits:
+                # D09：已清理源版本不得产生新认领。重放分支已在上方返回原事实，
+                # 故历史 claim 不因清理被判成新拒绝。
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "cleaned source cannot be newly claimed: " + ",".join(sorted(cleaned_hits)),
+                    identity,
+                )
             if disabled_hits:
                 raise AgentServiceError(
                     AgentErrorCode.SOURCE_DISABLED,
@@ -6276,6 +6300,23 @@ class AgentDao(BaseDao):
                 )
             )
             return SourceClaimFact(claim_ref=request.claim_ref, bindings=tuple(bindings), replayed=False)
+
+    @staticmethod
+    def _source_cleanup_fact(asset_row: Any) -> str | None:
+        """源资产版本的清理事实（D09）：命中返回事实标签，未清理返回 ``None``。
+
+        三事实任一成立即视为已清理（清理只替换文本/摘要并置 ``tombstoned``，
+        保留 ``read_state`` / ``disabled_revision``，故不能只按禁用状态判定）：
+        ``tombstoned``、``cleaned_at`` 非空、``digest`` 已换固定 tombstone 摘要。
+        """
+
+        if bool(asset_row.tombstoned):
+            return "tombstoned"
+        if asset_row.cleaned_at is not None:
+            return "cleaned"
+        if asset_row.digest == CLEANUP_TOMBSTONE_DIGEST:
+            return "tombstoned_digest"
+        return None
 
     async def list_source_consumers(
         self, *, user_scope: str, source_id: str, source_version: str
