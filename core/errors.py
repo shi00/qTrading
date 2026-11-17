@@ -191,3 +191,28 @@ class AIContentRefusedError(AppError):
             ),
             detail,
         )
+
+
+class AIProviderParamsRejectedError(AppError):
+    """provider 以 HTTP 422 拒绝请求参数（检视 M20：Agent 出口严格出站）。
+
+    锁定 LiteLLM 的 OpenAI 系处理器在收到 422 且全局 ``litellm.drop_params`` 为
+    ``True`` 时会删去报错参数并在同一 attempt 内重发（per-call ``drop_params=False``
+    无法覆盖）。Agent 出口要求「禁删参 / 禁隐式重发」可核，故在首个 422 响应处
+    中止本次尝试并以本异常失败——错误消息携带 attempt 身份，参数保持原样发送
+    （不删参、不重发）。
+
+    ``retryable=False`` 经 ``classify_error`` 透传为 ``should_retry=False``：
+    参数不被接受属不重试可切换类，重试同一连接只会重复同一失败。
+    """
+
+    def __init__(self, detail: str = "") -> None:
+        self.message = Message("llm_err_params_rejected")
+        super().__init__(
+            ErrorInfo(
+                code="provider_params_rejected",
+                message_key=self.message.key,
+                format_args=dict(self.message.params),
+            ),
+            detail,
+        )

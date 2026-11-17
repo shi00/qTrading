@@ -53,6 +53,7 @@ from core.model_management_types import (
 from data.persistence import engine_provider
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.model_configuration_service import (
+    ConnectionRevisionChangedError,
     ModelConfigurationService,
     _FrozenMapping,
     _freeze_value,
@@ -400,6 +401,100 @@ class TestEgressGrantAndAuthorize:
             attempt_id="att-1",
         )
         assert permit.security_revision == 1
+
+    @pytest.mark.asyncio
+    async def test_frozen_connection_revision_exact_match_permits(self, service):
+        """M15：按受理冻结的连接 ID + revision 精确授权（同版本才发放许可）。"""
+        mm = _load_mm()
+        conn = _base_connection(CONN_A, "https://api.deepseek.com")
+        conn["connection_revision"] = 3
+        mm["connections"] = [conn]
+        await service.save_draft(mm, mm["config_revision"], "op-rv0")
+        outcome = await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-rv1",
+        )
+        assert outcome.status == "committed"
+
+        permit = await service.authorize_attempt(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            credential_version=None,
+            attempt_id="att-rv1",
+            connection_revision=3,
+        )
+        assert permit.connection_id == CONN_A
+
+    @pytest.mark.asyncio
+    async def test_same_connection_revision_switch_is_transient(self, service, isolated_config):
+        """M15：同 ID 版本切换瞬间是瞬态竞态，不得用当前连接顶替冻结版本。"""
+        mm = _load_mm()
+        conn = _base_connection(CONN_A, "https://api.deepseek.com")
+        conn["connection_revision"] = 3
+        mm["connections"] = [conn]
+        await service.save_draft(mm, mm["config_revision"], "op-rv2")
+        await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-rv3",
+        )
+        # 模拟同 ID 连接被替换：磁盘事实源已切到新版本
+        raw = _read_raw(isolated_config)
+        raw["model_management"]["connections"][0]["connection_revision"] = 4
+        _write_raw(isolated_config, raw)
+
+        with pytest.raises(ConnectionRevisionChangedError) as exc_info:
+            await service.authorize_attempt(
+                connection_id=CONN_A,
+                target_fingerprint="https://api.deepseek.com:443",
+                purpose="stock_analysis",
+                scope_version=1,
+                credential_version=None,
+                attempt_id="att-rv2",
+                connection_revision=3,
+            )
+        assert exc_info.value.frozen_revision == 3
+        assert exc_info.value.actual_revision == 4
+
+    @pytest.mark.asyncio
+    async def test_legacy_unknown_revision_policy_not_inherited_by_strict(self, service, isolated_config):
+        """M15：未冻结版本（None）维持旧链宽松政策，严格路径不受其影响。"""
+        mm = _load_mm()
+        conn = _base_connection(CONN_A, "https://api.deepseek.com")
+        conn["connection_revision"] = 3
+        mm["connections"] = [conn]
+        await service.save_draft(mm, mm["config_revision"], "op-rv4")
+        await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-rv5",
+        )
+        raw = _read_raw(isolated_config)
+        raw["model_management"]["connections"][0]["connection_revision"] = 4
+        _write_raw(isolated_config, raw)
+
+        # 旧直推链路不冻结版本：维持既有行为（不因未知版本拒绝）
+        permit = await service.authorize_attempt(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            credential_version=None,
+            attempt_id="att-rv3",
+        )
+        assert permit.connection_id == CONN_A
 
     @pytest.mark.asyncio
     async def test_authorize_without_matching_grant_rejects(self, service):
@@ -2050,7 +2145,10 @@ def r4_service(isolated_config):
     """独立配置 + 真实连接（本地 gguf 路径）+ 注入 FakeAgentDao 的服务实例。"""
     cfg_mod.ConfigHandler.ensure_defaults()
     mm = _load_mm()
-    mm["connections"] = [_base_connection(_R4_CONN, "", adapter_kind="gguf_chat")]
+    conn = _base_connection(_R4_CONN, "", adapter_kind="gguf_chat")
+    # M15：绑定/核权请求冻结 connection_revision=2，配置须为同一真实版本
+    conn["connection_revision"] = 2
+    mm["connections"] = [conn]
     _write_raw(isolated_config, {"model_management": mm})
     fake = _FakeAgentDao()
     return ModelConfigurationService(agent_dao=fake), fake
@@ -2140,6 +2238,21 @@ class TestR04AuthorizeDataAttempt:
         assert authorization is not None
 
     @pytest.mark.asyncio
+    async def test_revision_switch_midflight_is_transient_unknown(self, r4_service, isolated_config):
+        """M15：同 ID 连接版本切换 → unknown 瞬态（可重试），不误报策略 deny。"""
+        svc, fake = r4_service
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = _r4_binding()
+        raw = _read_raw(isolated_config)
+        raw["model_management"]["connections"][0]["connection_revision"] = 3
+        _write_raw(isolated_config, raw)
+
+        receipt = await svc.authorize_data_attempt(_r4_authorization())
+        assert receipt.outcome is DataAttemptOutcome.UNKNOWN
+        assert receipt.reason == "connection_revision_transient"
+        assert receipt.binding is not None
+        assert fake.claims == []
+
+    @pytest.mark.asyncio
     async def test_consent_not_found_deny(self, r4_service):
         svc, _ = r4_service
         receipt = await svc.authorize_data_attempt(_r4_authorization())
@@ -2164,7 +2277,9 @@ class TestR04AuthorizeDataAttempt:
         """云端路径（requires_egress_grant=True）无 grant → deny connection_denied。"""
         cfg_mod.ConfigHandler.ensure_defaults()
         mm = _load_mm()
-        mm["connections"] = [_base_connection(_R4_CONN, "https://api.example.com")]
+        conn = _base_connection(_R4_CONN, "https://api.example.com")
+        conn["connection_revision"] = 2  # M15：与冻结核权请求同版本
+        mm["connections"] = [conn]
         _write_raw(isolated_config, {"model_management": mm})
         fake = _FakeAgentDao()
         svc = ModelConfigurationService(agent_dao=fake)

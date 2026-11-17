@@ -557,6 +557,7 @@
     "llm_err_content_policy": "内容违规，请求被拒绝",
     "llm_err_insufficient_quota": "账户余额不足，请充值后重试",
     "llm_err_unknown": "连接失败，请查看日志获取详细信息",
+    "llm_err_params_rejected": "供应商拒绝了请求参数（HTTP 422），已停止本次尝试（未删参重发），请检查模型参数",
     "llm_context": "上下文",
     "llm_provider_deepseek": "DeepSeek",
     "llm_provider_qwen": "通义千问",
