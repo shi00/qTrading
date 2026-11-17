@@ -8,6 +8,9 @@
 - ``read_command`` 查命令保存/投递/消费原事实（§4.2，不生成新决定）；
 - ``read_session`` / ``get_snapshot`` / ``read_events`` / ``observe_session`` 为
   §4.1/§4.2 读取入口，直接复用 C-03 一致读取截点与观察实现；
+- ``read_cost_projection`` 以 operation 行的 ``invocation_id`` / ``attempt_refs``
+  引用原模型调度账本只读投影费用（0 / 已知金额 / 预留 / 未计价 / 读取失败分列，
+  不写库、不估算补齐）；
 - ``read_delivery`` 查回原交付 manifest 与当前修订（§10.5 unknown/中断核对）；
 - ``control`` / ``answer`` / ``search`` / ``stop_using`` / ``mark_read`` 为 §4.1
   统一合同写入口，一律委托既有 DAO 事务；``wait_result`` 为只读等待（组合快照与
@@ -29,8 +32,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from core.agent_types import (
     NON_RECOVERABLE_DISPLAY_STATES,
@@ -43,6 +48,7 @@ from core.agent_types import (
     ArtifactReadQuery,
     CommandReceipt,
     CommandRef,
+    CostProjection,
     DeliveryRead,
     DraftReceipt,
     DraftSaveCommand,
@@ -78,6 +84,7 @@ from core.agent_types import (
     decode_json_doc,
 )
 from data.persistence.daos.agent_dao import AgentDao
+from data.persistence.daos.ai_usage_dao import AIUsageDao
 from services.agent_service.comparison import (
     STOP_REASON_USER_ENDED_GROUP,
     ComparisonGroupStopPlan,
@@ -96,6 +103,7 @@ from services.agent_service.comparison import (
     observations_from_executions,
     plan_group_stop,
 )
+from utils.error_classifier import classify_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +131,70 @@ def _require_positive_seconds(value: object, path: str, identity: str) -> None:
         raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid_range: {path}", identity)
 
 
+def _dedupe_cost_refs(values: Sequence[str], path: str) -> tuple[str, ...]:
+    """费用投影引用入参：非空文本、去重保序；空串/非文本 → ``INPUT_INVALID``。"""
+
+    refs: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or value == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid_ref: {path}[{index}]", "cost_projection")
+        refs.append(value)
+    return tuple(dict.fromkeys(refs))
+
+
+def _projected_cost(value: object) -> Decimal | None:
+    """账本金额读数 → Decimal；``None``/布尔/坏值/非有限/负值 → ``None``（未知）。
+
+    坏值不按 0 处理：把不可解析的存量垃圾读成「免费」即伪装缺失（R21），
+    归入未计价列由调用方呈现为未知成本。
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return None
+    if not amount.is_finite() or amount < 0:
+        return None
+    return amount
+
+
+def _projected_tokens(value: object) -> int:
+    """未计价用量规模读数：非非负整数一律 0（仅规模参考，不参与金额判定）。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _failed_cost_projection(
+    ledger_refs: tuple[str, ...], attempt_refs: tuple[str, ...], read_error: str
+) -> CostProjection:
+    """读取失败投影：只保引用与失败态，金额/计数不倒推为 0（R21）。"""
+
+    return CostProjection(
+        read_state="failed",
+        read_error=read_error,
+        ledger_refs=ledger_refs,
+        attempt_refs=attempt_refs,
+        zero_cost_attempts=0,
+        known_cny=None,
+        reserved_cny=None,
+        unpriced_attempts=0,
+        unpriced_input_tokens=0,
+        unpriced_output_tokens=0,
+    )
+
+
 class AgentService:
     """统一受理/查询 facade（DD §4.1）。构造后由应用组合根持有同一实例。"""
 
-    def __init__(self, dao: AgentDao) -> None:
+    def __init__(self, dao: AgentDao, usage_dao: AIUsageDao | None = None) -> None:
+        """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。"""
+
         self._dao = dao
+        self._usage_dao = usage_dao
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -170,6 +237,79 @@ class AgentService:
             round_id=round_id,
             message_cursor=message_cursor,
             artifact_cursor=artifact_cursor,
+        )
+
+    async def read_cost_projection(
+        self,
+        *,
+        ledger_refs: Sequence[str],
+        attempt_refs: Sequence[str] = (),
+    ) -> CostProjection:
+        """执行费用的只读投影（§4.3 usage 费用面；ADR-0014 引用原账本）。
+
+        ``ledger_refs`` 为原账本 invocation_id（operation 行的 ``invocation_id``），
+        ``attempt_refs`` 为调用方已知的 attempt 引用；二者去重保序回传。只读：
+        仅调用账本读取方法，零写入、零估算补齐、零预留/结算状态推进。
+
+        五态分别保真（见 :class:`CostProjection`）：读取失败返回
+        ``read_state="failed"`` 且金额不倒推为 0；无已计价 attempt 时
+        ``known_cny`` 为 ``None``（未知）而非 ``Decimal("0")``。引用存在但账本
+        无行按未计价（未知成本）计入，不丢引用。``CancelledError`` 继续传播（R2）。
+        """
+
+        self._require_open("read_cost_projection")
+        ledger = _dedupe_cost_refs(ledger_refs, "ledger_refs")
+        declared_attempts = _dedupe_cost_refs(attempt_refs, "attempt_refs")
+        usage_dao = self._usage_dao
+        if usage_dao is None:
+            return _failed_cost_projection(ledger, declared_attempts, "ledger_unavailable")
+        try:
+            rows: list[dict[str, Any]] = []
+            for ref in ledger:
+                rows.extend(await usage_dao.read_request_attempts(invocation_id=ref))
+            reserved = await usage_dao.read_active_reserved_cny(invocation_ids=ledger) if ledger else {}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error_code = str(classify_error(exc, context="general").get("code", type(exc).__name__))
+            return _failed_cost_projection(ledger, declared_attempts, error_code)
+
+        observed: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            attempt_id = row.get("attempt_id")
+            if isinstance(attempt_id, str) and attempt_id:
+                observed.setdefault(attempt_id, row)
+        # 引用完整：调用方声明的引用 + 账本实读 attempt，去重保序。
+        attempt_ids = tuple(dict.fromkeys((*declared_attempts, *observed)))
+
+        known: Decimal | None = None
+        zero_cost_attempts = 0
+        unpriced_attempts = sum(1 for ref in declared_attempts if ref not in observed)
+        unpriced_input_tokens = 0
+        unpriced_output_tokens = 0
+        for row in observed.values():
+            amount = _projected_cost(row.get("cost_cny"))
+            if amount is None:
+                unpriced_attempts += 1
+                unpriced_input_tokens += _projected_tokens(row.get("input_total_tokens"))
+                unpriced_output_tokens += _projected_tokens(row.get("output_tokens"))
+                continue
+            known = amount if known is None else known + amount
+            if amount == 0:
+                zero_cost_attempts += 1
+
+        reserved_cny = sum(reserved.values(), Decimal("0")) if ledger else None
+        return CostProjection(
+            read_state="ok",
+            read_error=None,
+            ledger_refs=ledger,
+            attempt_refs=attempt_ids,
+            zero_cost_attempts=zero_cost_attempts,
+            known_cny=known,
+            reserved_cny=reserved_cny,
+            unpriced_attempts=unpriced_attempts,
+            unpriced_input_tokens=unpriced_input_tokens,
+            unpriced_output_tokens=unpriced_output_tokens,
         )
 
     async def read_events(self, query: EventReadQuery) -> EventPage:

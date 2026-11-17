@@ -320,6 +320,8 @@ def _operation_wire(**over: Any) -> dict[str, Any]:
         "verified_at": _ts(2),
         "artifact_id": None,
         "artifact_version": None,
+        "invocation_id": None,
+        "attempt_refs": None,
     }
     base.update(over)
     return base
@@ -880,6 +882,23 @@ def test_operation_summary_value_guards() -> None:
         "$.artifact_version",
     )
     _reject(decode_operation_summary, _operation_wire(active_ms=-1), "invalid_range", "$.active_ms")
+    _reject(
+        decode_operation_summary,
+        _operation_wire(attempt_refs={"attempt": "a1"}),
+        "invalid_identity",
+        "$.attempt_refs",
+    )
+
+
+def test_operation_summary_ledger_refs_projected_and_roundtrip() -> None:
+    """费用引用列（ADR-0014）：invocation_id + attempt_refs 原样承载，不臆造结构。"""
+
+    refs = json_doc({"attempt": ["attempt-a1"]})
+    wire = _operation_wire(invocation_id="inv-1", attempt_refs=refs)
+    summary = decode_operation_summary(decode_json_doc(json_doc(wire)), "$")
+    assert summary.invocation_id == "inv-1"
+    assert summary.attempt_refs == refs
+    assert to_wire_dict(summary) == wire
 
 
 def test_usage_summary_decode_and_fixed_cost_state() -> None:

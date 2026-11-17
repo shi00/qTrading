@@ -1765,3 +1765,45 @@ class TestCloseUsageWindowsF33:
         assert "usage_window_expires_at IS NULL OR usage_window_expires_at <= (now() AT TIME ZONE 'UTC')" in sql
         # 批量语义：不带逐项 attempt 过滤（Recorder 确认关闭后才移除内存扫描项）
         assert "attempt_id = :attempt_id" not in sql
+
+
+class TestReadActiveReservedCny:
+    """费用投影「预留中」列（检视 R14）：逐 invocation 只读汇总活跃预留。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_ids_skips_query(self):
+        conn = _CaptureConn(results=[])
+        dao = _dao(conn)
+        assert await dao.read_active_reserved_cny(invocation_ids=[]) == {}
+        assert conn.calls == []  # 零引用不触库
+
+    @pytest.mark.asyncio
+    async def test_groups_active_reserved_by_invocation(self):
+        conn = _CaptureConn(results=[[("inv-1", Decimal("1.25")), ("inv-2", Decimal("0"))]])
+        dao = _dao(conn)
+        got = await dao.read_active_reserved_cny(invocation_ids=["inv-1", "inv-2"])
+
+        assert got == {"inv-1": Decimal("1.25"), "inv-2": Decimal("0")}
+        sql, params = conn.calls[0]
+        assert "jsonb_array_elements" in sql and "ai_invocation" in sql
+        assert params["invocation_ids"] == ["inv-1", "inv-2"]
+        # 活跃三态与预算门同口径（settled / released 不占用）
+        assert set(params["states"]) == {"reserved", "dispatched", "held_unconfirmed"}
+
+    @pytest.mark.asyncio
+    async def test_non_negative_guard_applied_before_sum(self):
+        """存量垃圾金额在 SQL 内先过滤再 SUM（非负小数正则 + 上限），不 crash 不抵消。"""
+        conn = _CaptureConn(results=[[("inv-1", Decimal("0"))]])
+        dao = _dao(conn)
+        await dao.read_active_reserved_cny(invocation_ids=["inv-1"])
+
+        sql = conn.calls[0][0]
+        assert "~ '^[0-9]+" in sql
+        assert "1e15" in sql
+        assert "CASE" in sql
+
+    @pytest.mark.asyncio
+    async def test_negative_sum_degrades_to_fact_zero(self):
+        conn = _CaptureConn(results=[[("inv-1", Decimal("-1"))]])
+        dao = _dao(conn)
+        assert await dao.read_active_reserved_cny(invocation_ids=["inv-1"]) == {"inv-1": Decimal("0")}
