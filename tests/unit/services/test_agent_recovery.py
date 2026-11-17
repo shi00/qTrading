@@ -532,6 +532,164 @@ class TestStartupOrchestration:
         assert handle.closed == 1
         assert guard.released == 1
 
+    async def test_cancel_during_assemble_waits_worker_exit_then_closes_handle(self) -> None:
+        """R06：取消落在组装等待点时，仍在跑的同步组装不得被遗弃（无主宿主）。"""
+
+        from services.agent_service.recovery import start_agent_runtime
+
+        handle = _FakeHandle(_FakeClient([]))
+        guard = _FakeGuard()
+        launched: list[Any] = []
+        assemble_calls: list[str] = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        def _assemble(_settings: Any) -> Any:
+            assemble_calls.append("assembled")
+            return handle
+
+        async def _delayed_runner(fn: Any) -> Any:
+            started.set()
+            await release.wait()
+            return fn()
+
+        task = asyncio.create_task(
+            start_agent_runtime(
+                self._settings(),
+                user_scope="user-1",
+                isolation_id="startup-1",
+                registry=_FakeRegistry(),
+                assemble_func=_assemble,
+                launch_func=launched.append,
+                instance_guard=guard,
+                blocking_runner=_delayed_runner,
+            )
+        )
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        # worker 未真实退出前不得传播取消（否则组装产物成为无主资源）
+        assert task.done() is False
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert assemble_calls == ["assembled"]
+        assert handle.closed == 1
+        assert guard.released == 1
+        assert launched == []
+
+    async def test_cancel_during_launch_closes_launched_handle(self) -> None:
+        """R06：launch 已真实执行完时传播取消前仍须关闭宿主并释放实例锁。"""
+
+        from services.agent_service.recovery import start_agent_runtime
+
+        handle = _FakeHandle(_FakeClient([]))
+        guard = _FakeGuard()
+        launched: list[Any] = []
+        launch_started = asyncio.Event()
+        launch_gate = asyncio.Event()
+        calls = 0
+
+        async def _delayed_runner(fn: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # 第二个同步段是 launch：在此制造取消窗口
+                launch_started.set()
+                await launch_gate.wait()
+            return fn()
+
+        task = asyncio.create_task(
+            start_agent_runtime(
+                self._settings(),
+                user_scope="user-1",
+                isolation_id="startup-1",
+                registry=_FakeRegistry(),
+                assemble_func=lambda _settings: handle,
+                launch_func=launched.append,
+                instance_guard=guard,
+                blocking_runner=_delayed_runner,
+            )
+        )
+        await launch_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        launch_gate.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert launched == [handle]
+        assert handle.closed == 1
+        assert guard.released == 1
+
+
+class _FakeLockScalar:
+    def __init__(self, value: bool) -> None:
+        self._value = value
+
+    def scalar(self) -> bool:
+        return self._value
+
+
+class _FakeLockConnection:
+    def __init__(self, acquired: bool) -> None:
+        self.acquired = acquired
+        self.closed = 0
+
+    def execute(self, statement: Any, parameters: Any) -> _FakeLockScalar:
+        return _FakeLockScalar(self.acquired)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class _FakeLockEngine:
+    def __init__(self, connection: _FakeLockConnection) -> None:
+        self._connection = connection
+        self.disposed = 0
+
+    def connect(self) -> _FakeLockConnection:
+        return self._connection
+
+    def dispose(self) -> None:
+        self.disposed += 1
+
+
+class TestAdvisoryLockCancellation:
+    """R06：拿锁等待被取消时，仍须等同步 worker 退出并释放连接（会话锁随之释放）。"""
+
+    async def test_cancelled_acquire_waits_worker_then_releases_connection(self, monkeypatch: Any) -> None:
+        from services.agent_service import recovery
+
+        connection = _FakeLockConnection(acquired=True)
+        engine = _FakeLockEngine(connection)
+
+        def _fake_create_engine(*args: Any, **kwargs: Any) -> _FakeLockEngine:
+            return engine
+
+        monkeypatch.setattr(recovery.sa, "create_engine", _fake_create_engine)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _delayed_runner(fn: Any) -> Any:
+            started.set()
+            await release.wait()
+            return fn()
+
+        guard = recovery.AdvisoryLockInstanceGuard("postgresql+psycopg://u@host/db", blocking_runner=_delayed_runner)
+        task = asyncio.create_task(guard.acquire())
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert connection.closed == 1
+        assert engine.disposed == 1
+
 
 def test_startup_workflow_names_match_published_constants() -> None:
     """启动隔离列举名须与 D-02 发布 workflow 名一致（防硬编码漂移）。"""

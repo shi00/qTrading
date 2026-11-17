@@ -393,11 +393,15 @@ class AdvisoryLockInstanceGuard:
             )
 
         try:
-            acquired = bool(await self._blocking_runner(_try_lock))
+            outcome = await _run_owned_blocking(self._blocking_runner, _try_lock)
         except Exception as exc:  # 锁服务不可达：不得假设可安全接管
             self.release()
             return InstanceGuardEvidence(acquired=False, prior_writer_exited=False, detail=type(exc).__name__)
-        if not acquired:
+        if outcome.cancel is not None:
+            # 拿锁线程已真实退出：先释放它可能建立的连接（会话锁随之释放）再传播取消（R06）
+            self.release()
+            raise outcome.cancel
+        if not bool(outcome.value):
             self.release()
             return InstanceGuardEvidence(acquired=False, prior_writer_exited=False, detail="lock-held")
         return InstanceGuardEvidence(acquired=True, prior_writer_exited=True, detail="acquired")
@@ -420,6 +424,57 @@ async def _default_blocking_runner(fn: Callable[[], Any]) -> Any:
     from utils.thread_pool import TaskType, ThreadPoolManager
 
     return await ThreadPoolManager().run_async(TaskType.IO, fn)
+
+
+@dataclass(frozen=True)
+class _OwnedBlockingResult:
+    """同步阻塞段结果：``cancel`` 非空即等待方被取消，且 ``value`` 所属 worker 已真实退出。"""
+
+    value: Any = None
+    cancel: BaseException | None = None
+
+
+async def _run_owned_blocking(runner: BlockingRunner, fn: Callable[[], Any]) -> _OwnedBlockingResult:
+    """线程池执行同步段；取消时先等 worker 真实退出并带回其产物（R06）。
+
+    ``ThreadPoolManager.run_async`` 的取消只取消等待、不停止 worker（executor 固有
+    语义）。直接 ``await runner(...)`` 会让宿主编排立即进入清理，而仍在拿锁/组装的
+    线程稍后产出无主资源。这里把等待包成独立 task：取消到达后继续等到 worker 真实
+    退出，再把「产物 + 取消」一同交还调用方；调用方须先收口 ``value`` 再
+    ``raise cancel``（R2：取消不得被吞）。
+    """
+
+    worker = asyncio.ensure_future(runner(fn))
+    try:
+        return _OwnedBlockingResult(value=await asyncio.shield(worker))
+    except asyncio.CancelledError as cancel:
+        await _wait_worker_exit(worker)
+        return _OwnedBlockingResult(value=_worker_value(worker), cancel=cancel)
+
+
+async def _wait_worker_exit(worker: asyncio.Future[Any]) -> None:
+    """等待 worker 退出；后续取消不打断等待，结果/异常一律消费。"""
+
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            continue
+        except Exception:  # worker 自身失败：退出即达成目的，原因由调用方另行处理
+            break
+    if not worker.cancelled():
+        worker.exception()  # 消费异常，避免 "Task exception was never retrieved"
+
+
+def _worker_value(worker: asyncio.Future[Any]) -> Any:
+    """取已退出 worker 的返回值；取消/失败一律 ``None``（调用方按无产物收口）。"""
+
+    if worker.cancelled():
+        return None
+    try:
+        return worker.result()
+    except Exception:
+        return None
 
 
 def _sync_database_url(url: str) -> str:
@@ -466,8 +521,10 @@ async def start_agent_runtime(
     - 隔离就绪：``launch`` 一次（``listen_queues([])`` 由 launch 入口负责）。
 
     组装/launch/宿主关闭均经 ``blocking_runner``（默认 ThreadPoolManager.IO，
-    HANDOFF §10.6：受管线程，不堵 UI）。``CancelledError`` 继续传播，传播前
-    释放已组装宿主与实例锁（R2：不吞取消、不留资源）。
+    HANDOFF §10.6：受管线程，不堵 UI）。``CancelledError`` 继续传播，但**先等在途
+    同步 worker 真实退出并收口其产物**（取消只取消等待、不停止线程，R06）：拿锁被
+    取消即释放连接、组装被取消即关闭已产出宿主、launch 被取消即关闭宿主，再传播
+    取消（R2：不吞取消、不留无主资源）。
     """
 
     if not isinstance(settings, AgentRuntimeSettings):
@@ -477,7 +534,12 @@ async def start_agent_runtime(
     runner = blocking_runner or _default_blocking_runner
     guard = instance_guard or AdvisoryLockInstanceGuard(settings.system_database_url, blocking_runner=runner)
 
-    evidence = await guard.acquire()
+    try:
+        evidence = await guard.acquire()
+    except asyncio.CancelledError:
+        # 拿锁等待被取消：acquire 已等在途 worker 退出，这里保底释放连接（R06）
+        guard.release()
+        raise
     if not evidence.acquired or not evidence.prior_writer_exited:
         guard.release()
         return StartupOutcome(
@@ -492,11 +554,29 @@ async def start_agent_runtime(
             pass
         guard.release()
 
+    async def _abort(handle: Any) -> None:
+        """收口已组装宿主（含实例锁）；后续取消不打断收口（R06）。"""
+
+        try:
+            outcome = await _run_owned_blocking(runner, lambda: _abort_handle(handle))
+        except Exception:  # 收口兜底：不得掩盖原始取消/失败原因（R2 只约束 CancelledError）
+            return
+        if outcome.cancel is not None:
+            raise outcome.cancel
+
     try:
-        handle = await runner(lambda: assemble(settings))
+        assembled = await _run_owned_blocking(runner, lambda: assemble(settings))
     except Exception as exc:  # 组装失败：不隔离、不 launch（0 派发）
         guard.release()
         return StartupOutcome(handle=None, isolation=None, failure=f"assemble_failed:{type(exc).__name__}")
+    if assembled.cancel is not None:
+        # 同步组装已真实退出：先收口其产物再传播取消，不留无主宿主（R06）
+        if assembled.value is None:
+            guard.release()
+        else:
+            await _abort(assembled.value)
+        raise assembled.cancel
+    handle = assembled.value
 
     try:
         receipt = await run_startup_isolation(
@@ -509,20 +589,21 @@ async def start_agent_runtime(
             app_version=settings.application_version,
         )
     except asyncio.CancelledError:
-        await runner(lambda: _abort_handle(handle))
+        await _abort(handle)
         raise
     if not receipt.ready:
-        await runner(lambda: _abort_handle(handle))
+        await _abort(handle)
         return StartupOutcome(handle=None, isolation=receipt, failure=None)
 
     try:
-        await runner(lambda: launch(handle))
-    except asyncio.CancelledError:
-        await runner(lambda: _abort_handle(handle))
-        raise
+        launched = await _run_owned_blocking(runner, lambda: launch(handle))
     except Exception as exc:
-        await runner(lambda: _abort_handle(handle))
+        await _abort(handle)
         return StartupOutcome(handle=None, isolation=receipt, failure=f"launch_failed:{type(exc).__name__}")
+    if launched.cancel is not None:
+        # launch 已真实执行完：关闭宿主再传播取消，不留下已 launch 的宿主（R06）
+        await _abort(handle)
+        raise launched.cancel
     return StartupOutcome(handle=handle, isolation=receipt, failure=None, instance_guard=guard)
 
 
