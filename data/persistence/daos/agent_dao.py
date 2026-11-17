@@ -5103,6 +5103,44 @@ class AgentDao(BaseDao):
 
     _HISTORY_SUMMARY_MAX_CHARS: Final = 200
 
+    #: type_filter=main 的权威执行类型：root（检视 D17）。会话级消息（execution_id
+    #: 为 NULL，无所属执行）同归 main——它们不属于任何 child 执行。
+    _HISTORY_MAIN_EXECUTION_KINDS: Final = ("root",)
+    #: type_filter=child 的权威执行类型：叶与比较路（一层子执行）。
+    _HISTORY_CHILD_EXECUTION_KINDS: Final = ("leaf", "comparison_lane")
+
+    @staticmethod
+    def _history_execution_kind_predicate(
+        execution_id_column: sa.ColumnElement[Any],
+        *,
+        user_scope: str,
+        kinds: tuple[str, ...],
+        null_counts_as_match: bool = False,
+    ) -> sa.ColumnElement[bool]:
+        """按 ``agent_execution.execution_kind`` 判定 main/child（检视 D17）。
+
+        权威类型只在 ``agent_execution.execution_kind``（表约束限定
+        root/leaf/comparison_lane），不得再用 ``execution_id IS NULL`` 代替：
+        root 执行的消息带 execution_id，旧口径会把它们算成 child；而成果的
+        execution_id 为 NOT NULL，旧口径下 main 永远搜不到成果。
+
+        用相关 ``EXISTS`` 子查询而非 JOIN：同表多行（消息多轮/多节点）不会因
+        连接放大结果。``null_counts_as_match`` 仅对可空的
+        ``agent_message.execution_id`` 生效（无执行的会话级消息归 main）；成果
+        列 NOT NULL，调用方不置该开关（NULL 不匹配任何类型）。
+        """
+
+        exists_kind = sa.exists().where(
+            sa.and_(
+                AgentExecution.user_scope == user_scope,
+                AgentExecution.execution_id == execution_id_column,
+                AgentExecution.execution_kind.in_(kinds),
+            )
+        )
+        if null_counts_as_match:
+            return sa.or_(execution_id_column.is_(None), exists_kind)
+        return exists_kind
+
     async def _history_session_exists(self, conn: AsyncConnection, user_scope: str, session_id: str) -> None:
         row = (
             await conn.execute(
@@ -5288,10 +5326,17 @@ class AgentDao(BaseDao):
           比对由服务层承载）；
         - 扫描：消息与成果 UNION 前分别过滤后统一排序（sort_moment + 锚 ID keyset，
           newest_first DESC/oldest_first ASC）；query_text 占位 LIKE（C-03-4 全文
-          索引接入前）；type_filter main=会话级（execution_id IS NULL）/child=执行内；
-          state_filter 作用于 execution.display_state（值集未冻结，留痕）；date 窗口
-          作用于 time_basis 对应列；agent_filter execution_agent 按执行三元组限定
-          （role_identity 由消息 role_id 承载，成果不命中——里程碑检视复核点）；
+          索引接入前）；type_filter **按权威 ``agent_execution.execution_kind``**
+          判定（检视 D17）：main = ``root`` 执行 + 会话级消息（无 execution_id），
+          child = ``leaf`` / ``comparison_lane``；消息与成果同口径（成果
+          execution_id 为 NOT NULL，不得以 IS NULL 判 main）；关联走相关 EXISTS
+          子查询，不 JOIN 放大行数；state_filter 作用于
+          execution.display_state（值集未冻结，留痕）；date 窗口
+          作用于 time_basis 对应列；agent_filter execution_agent 按执行三元组限定；
+          **role_identity 只约束消息**（消息 role_id/role_version）——成果的
+          「产生时角色」在持久化层无权威来源（计划持久化形态 PlanProposal 无
+          role_key，frozen_manifest/actual_input 为调用方任意 JSON），故成果不按
+          角色过滤、按 execution_kind 类型保留并在命中中如实可见，不静默排空；
         - 摘要不复制完整正文：summary_text 截断 200 字符（正文经准确地址按需读取）；
         - fingerprint：覆盖域成员/水位 CanonicalJson 后 sha256（每次读取即时计算）。
         """
@@ -5457,9 +5502,23 @@ class AgentDao(BaseDao):
                         AgentMessage.round_id == query.round_selection.round_id,
                     )
                 if query.type_filter == "main":
-                    message_stmt = message_stmt.where(AgentMessage.execution_id.is_(None))
+                    # 权威类型：root 执行的消息 + 会话级消息（无 execution_id）
+                    message_stmt = message_stmt.where(
+                        self._history_execution_kind_predicate(
+                            AgentMessage.execution_id,
+                            user_scope=user_scope,
+                            kinds=self._HISTORY_MAIN_EXECUTION_KINDS,
+                            null_counts_as_match=True,
+                        )
+                    )
                 elif query.type_filter == "child":
-                    message_stmt = message_stmt.where(AgentMessage.execution_id.is_not(None))
+                    message_stmt = message_stmt.where(
+                        self._history_execution_kind_predicate(
+                            AgentMessage.execution_id,
+                            user_scope=user_scope,
+                            kinds=self._HISTORY_CHILD_EXECUTION_KINDS,
+                        )
+                    )
                 if query.message_role_filter is not None:
                     message_stmt = message_stmt.where(AgentMessage.role == query.message_role_filter)
                 agent_filter = query.agent_filter
@@ -5553,15 +5612,33 @@ class AgentDao(BaseDao):
                         AgentArtifact.execution_id == query.round_selection.execution_id,
                         AgentArtifact.round_id == query.round_selection.round_id,
                     )
-                if query.type_filter in ("main", "child"):
-                    wanted = query.type_filter == "main"
+                if query.type_filter is not None:
+                    # 成果与消息同口径（检视 D17）：execution_id 为 NOT NULL，不得
+                    # 再以 IS NULL 判 main（恒假、main 下零成果），改按权威类型。
                     artifact_stmt = artifact_stmt.where(
-                        AgentArtifact.execution_id.is_(None) if wanted else AgentArtifact.execution_id.is_not(None)
+                        self._history_execution_kind_predicate(
+                            AgentArtifact.execution_id,
+                            user_scope=user_scope,
+                            kinds=(
+                                self._HISTORY_MAIN_EXECUTION_KINDS
+                                if query.type_filter == "main"
+                                else self._HISTORY_CHILD_EXECUTION_KINDS
+                            ),
+                        )
                     )
-                if agent_filter is not None and agent_filter.kind == "role_identity":
-                    # role_identity 以消息 role_id 承载，成果不命中（里程碑检视复核点）
-                    artifact_stmt = artifact_stmt.where(sa.literal(False))
-                elif agent_filter is not None:
+                if agent_filter is not None and agent_filter.kind == "execution_agent":
+                    # role_identity 不应用于成果：成果的「产生时角色」在持久化层无
+                    # 权威来源（检视 D17），不得静默排空成果。证据：
+                    # - agent_artifact 无 role 列，唯一链是 round → 计划；
+                    # - 计划的持久化形态 agent_asset_version.body_text 为
+                    #   PlanProposal（items 键仅 id/content/status/active_form/
+                    #   parent_id/depends_on），不含 role_key；
+                    # - round.frozen_manifest/actual_input 为调用方 CanonicalJson，
+                    #   仓库内无构造 role 的写入点，形状不构成权威契约；
+                    # - 带 role_key 的 PlanNodeSpec wire 只进 DBOS 工作流载荷，
+                    #   不落 agent_* 表。
+                    # 故角色筛选只约束消息（role_id/role_version 仅消息有），成果
+                    # 按 execution_kind 类型保留并在命中中可见。
                     artifact_stmt = artifact_stmt.where(
                         AgentArtifact.execution_id == agent_filter.execution_id,
                         AgentArtifact.round_id == agent_filter.round_id,

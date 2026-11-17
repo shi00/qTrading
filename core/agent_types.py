@@ -4140,7 +4140,9 @@ def decode_research_snapshot(value: object, path: str = "$.snapshot") -> Researc
 #: - round_selection 必填：all_rounds 或 exact{execution_id, round_id}；
 #: - agent_filter 两 kind 不互换：role_identity{role_id, version_selection,
 #:   role_version?} / execution_agent{execution_id, node_id, round_id}；
-#: - type_filter 仅为 main/child；message_role_filter 仅为 user/assistant/tool/
+#: - type_filter 仅为 main/child（main=root 执行 + 会话级消息；child=leaf/
+#:   comparison_lane，一律按 ``agent_execution.execution_kind`` 权威判定，不以
+#:   execution_id 是否为空代替，检视 D17）；message_role_filter 仅为 user/assistant/tool/
 #:   public_status；state_filter 值集未冻结（strict str，留痕不臆造）；
 #: - time_basis=created/updated/message；sort=oldest_first/newest_first（方向独立
 #:   维度，工程冻结）；

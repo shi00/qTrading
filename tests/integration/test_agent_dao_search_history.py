@@ -5,8 +5,9 @@
 - 三范围扫描：all_saved（全用户域）/current_session（限定主会话）/
   current_child（限定准确叶，parent/node_id 身份错配 INPUT_INVALID）；
 - 过滤：query_text 占位 LIKE（C-03-4 全文索引前）、message_role_filter、
-  type_filter（main=会话级消息/child=执行内）、round_selection exact、
-  agent_filter execution_agent、date 窗口（time_basis 列映射）；
+  type_filter（按 agent_execution.execution_kind：main=root+会话级消息/
+  child=leaf+comparison_lane，消息与成果同口径）、round_selection exact、
+  agent_filter execution_agent/role_identity、date 窗口（time_basis 列映射）；
 - 排序与游标：sort_moment + 锚 ID keyset（newest_first DESC/oldest_first ASC），
   fixed_upper_bound 首读生成、游标继承续读；游标内查询摘要绑定规范查询
   （换筛选/换范围复用即 REVISION_CONFLICT）；limit 与游标不入 digest；
@@ -80,19 +81,25 @@ async def _seed_execution(
     *,
     node_id: str = "root",
     parent_execution_id: str | None = None,
+    execution_kind: str | None = None,
 ) -> None:
+    kind = execution_kind or ("leaf" if parent_execution_id else "root")
     values: dict = {
         "user_scope": USER_SCOPE,
         "execution_id": execution_id,
         "session_id": session_id,
-        "execution_kind": "leaf" if parent_execution_id else "root",
+        "execution_kind": kind,
         "node_id": node_id,
         "display_state": "queued",
         "goal_coverage": "unknown",
     }
     if parent_execution_id:
         values["parent_execution_id"] = parent_execution_id
+    if kind == "leaf":
+        # 叶必须为 NULL 意图键（CheckConstraint intent_keys）
+        assert parent_execution_id is not None
     else:
+        # root / comparison_lane 必须带意图键（CheckConstraint intent_keys）
         values["source_module"] = "ui"
         values["business_request_id"] = f"req-{execution_id}"
         values["intent_digest"] = "a" * 64
@@ -132,6 +139,8 @@ async def _seed_message(
     body_text: str = "默认正文",
     occurred_at: str = "2026-06-01T12:00:00.000000Z",
     node_id: str | None = None,
+    role_id: str | None = None,
+    role_version: str | None = None,
 ) -> int:
     request = RecordEventRequest(
         user_scope=USER_SCOPE,
@@ -148,6 +157,8 @@ async def _seed_message(
         round_id=round_id,
         node_id=node_id if node_id is not None else ("root" if execution_id else None),
         role=role,
+        role_id=role_id,
+        role_version=role_version,
         body_text=body_text,
         search_text=body_text,
     )
@@ -312,21 +323,86 @@ class TestFilters:
         assert [hit.message_id for hit in message_hits] == ["m-u1"]
         assert any(hit.hit_kind == "artifact" and hit.artifact_id == "art-a" for hit in page.hits)
 
-    async def test_type_filter_main_child(self, real_embedded_pg) -> None:
+    async def test_type_filter_follows_authoritative_execution_kind_matrix(self, real_embedded_pg) -> None:
+        """检视 D17：main/child 按执行权威类型，消息与成果同口径。
+
+        矩阵：root / leaf / comparison_lane × 消息 / 成果 × main / child。
+        main = root 执行 + 会话级消息（无 execution_id）；child = leaf 与
+        comparison_lane；成果 execution_id 为 NOT NULL 也不得在 main 下消失。
+        """
+
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "s-a")
-        await _seed_execution(dao, "exec-a", "s-a")
-        await _seed_round(dao, "round-a", "exec-a")
-        await _seed_message(dao, "s-a", "main1", body_text="会话级")
-        await _seed_message(dao, "s-a", "child1", execution_id="exec-a", round_id="round-a", body_text="执行内")
+        await _seed_execution(dao, "exec-root", "s-a", node_id="root")
+        await _seed_execution(dao, "exec-leaf", "s-a", node_id="leaf", parent_execution_id="exec-root")
+        await _seed_execution(
+            dao, "exec-lane", "s-a", node_id="lane", parent_execution_id="exec-root", execution_kind="comparison_lane"
+        )
+        await _seed_round(dao, "round-root", "exec-root")
+        await _seed_round(dao, "round-leaf", "exec-leaf")
+        await _seed_round(dao, "round-lane", "exec-lane")
+        await _seed_message(dao, "s-a", "session", body_text="会话级")
+        await _seed_message(dao, "s-a", "root", execution_id="exec-root", round_id="round-root", body_text="根执行")
+        await _seed_message(
+            dao, "s-a", "leaf", execution_id="exec-leaf", round_id="round-leaf", node_id="leaf", body_text="叶执行"
+        )
+        await _seed_message(
+            dao, "s-a", "lane", execution_id="exec-lane", round_id="round-lane", node_id="lane", body_text="比较路"
+        )
+        await _seed_artifact(dao, "art-root", "s-a", "exec-root", "round-root")
+        await _seed_artifact(dao, "art-leaf", "s-a", "exec-leaf", "round-leaf")
+        await _seed_artifact(dao, "art-lane", "s-a", "exec-lane", "round-lane")
+
         page_main = await dao.search_history(
             _q(scope="current_session", session_id="s-a", type_filter="main"), user_scope=USER_SCOPE
         )
-        assert [hit.message_id for hit in page_main.hits] == ["m-main1"]
+        assert {hit.message_id for hit in page_main.hits if hit.hit_kind == "message"} == {"m-session", "m-root"}
+        assert {hit.artifact_id for hit in page_main.hits if hit.hit_kind == "artifact"} == {"art-root"}
+
         page_child = await dao.search_history(
             _q(scope="current_session", session_id="s-a", type_filter="child"), user_scope=USER_SCOPE
         )
-        assert [hit.message_id for hit in page_child.hits] == ["m-child1"]
+        assert {hit.message_id for hit in page_child.hits if hit.hit_kind == "message"} == {"m-leaf", "m-lane"}
+        assert {hit.artifact_id for hit in page_child.hits if hit.hit_kind == "artifact"} == {"art-leaf", "art-lane"}
+
+    async def test_role_identity_filters_messages_only_artifacts_stay_visible(self, real_embedded_pg) -> None:
+        """检视 D17：成果无权威「产生时角色」，不得静默排空（literal(False) 已移除）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-root", "s-a", node_id="root")
+        await _seed_execution(dao, "exec-leaf", "s-a", node_id="leaf", parent_execution_id="exec-root")
+        await _seed_round(dao, "round-root", "exec-root")
+        await _seed_round(dao, "round-leaf", "exec-leaf")
+        await _seed_message(
+            dao,
+            "s-a",
+            "with-role",
+            execution_id="exec-root",
+            round_id="round-root",
+            role_id="role-1",
+            role_version="1",
+            body_text="带角色身份",
+        )
+        await _seed_message(
+            dao, "s-a", "no-role", execution_id="exec-leaf", round_id="round-leaf", node_id="leaf", body_text="无角色"
+        )
+        await _seed_artifact(dao, "art-leaf", "s-a", "exec-leaf", "round-leaf")
+
+        role_filter = HistoryAgentFilter(kind="role_identity", role_id="role-1", version_selection="all_versions")
+        # 命中：消息按 role_id 过滤，成果保留（角色维度只约束消息）
+        page = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", agent_filter=role_filter), user_scope=USER_SCOPE
+        )
+        assert [hit.message_id for hit in page.hits if hit.hit_kind == "message"] == ["m-with-role"]
+        assert [hit.artifact_id for hit in page.hits if hit.hit_kind == "artifact"] == ["art-leaf"]
+        # 不命中：无同角色消息，但成果不得被排空
+        page_child = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", type_filter="child", agent_filter=role_filter),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit for hit in page_child.hits if hit.hit_kind == "message"] == []
+        assert [hit.artifact_id for hit in page_child.hits if hit.hit_kind == "artifact"] == ["art-leaf"]
 
     async def test_round_selection_exact(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
