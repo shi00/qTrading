@@ -8,9 +8,11 @@
   type_filter（按 agent_execution.execution_kind：main=root+会话级消息/
   child=leaf+comparison_lane，消息与成果同口径）、round_selection exact、
   agent_filter execution_agent/role_identity、date 窗口（time_basis 列映射）；
-- 排序与游标：sort_moment + 锚 ID keyset（newest_first DESC/oldest_first ASC），
-  fixed_upper_bound 首读生成、游标继承续读；游标内查询摘要绑定规范查询
-  （换筛选/换范围复用即 REVISION_CONFLICT）；limit 与游标不入 digest；
+- 排序与游标：全序键 (sort_moment, hit_kind, anchor_id, artifact_version)
+  四分量同向 keyset（newest_first DESC/oldest_first ASC；同 artifact_id 多版本
+  同时间按版本续读，不重不漏），fixed_upper_bound 首读生成、游标继承续读；
+  游标内查询摘要绑定规范查询（换筛选/换范围复用即 REVISION_CONFLICT）；limit
+  与游标不入 digest；
 - 标题与完整公开表示（检视 D18）：中文会话标题按 ILIKE 子串命中（未清理会话）、
   成果 ``body_ref`` 载荷公开正文（含尾词）可搜、未公开/已清理成果显式排除、
   公开消息缺 ``search_text`` 投影时 OPERATION_UNKNOWN（不返回准确空页）；
@@ -183,6 +185,7 @@ async def _seed_artifact(
     round_id: str,
     *,
     summary: str = "成果摘要",
+    artifact_version: int = 1,
     created_at: datetime | None = None,
     input_revision: int = 1,
     body_text: object = _UNSET,
@@ -194,14 +197,14 @@ async def _seed_artifact(
     """种一个成果行；``body_ref_text`` 给出时同事务写 ``agent_body_payload``。
 
     ``body_text``/``published_at`` 用 ``_UNSET`` 区分「取默认值」与显式 ``None``
-    （互斥正文 / 未公开原件）。
+    （互斥正文 / 未公开原件）；``artifact_version`` 支持同 ID 多版本（复合 PK）。
     """
 
     moment = created_at or datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
     values: dict[str, object] = {
         "user_scope": USER_SCOPE,
         "artifact_id": artifact_id,
-        "artifact_version": 1,
+        "artifact_version": artifact_version,
         "session_id": session_id,
         "execution_id": execution_id,
         "round_id": round_id,
@@ -230,9 +233,9 @@ async def _seed_artifact(
                     body_ref=body_ref,
                     owner_kind="artifact",
                     owner_id=artifact_id,
-                    owner_version="1",
+                    owner_version=str(artifact_version),
                     artifact_id=artifact_id,
-                    artifact_version=1,
+                    artifact_version=artifact_version,
                     encoding="utf-8",
                     block_ordinal=0,
                     payload_bytes=data,
@@ -542,7 +545,7 @@ class TestDateBoundsAndStateFilter:
 
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "s-a")
-        bad_cursor = f"h:{'a' * 64}:9999-99-99T12:00:00.000000Z:9999-99-99T12:00:00.000000Z:anchor"
+        bad_cursor = f"h:{'a' * 64}:9999-99-99T12:00:00.000000Z:9999-99-99T12:00:00.000000Z:message:anchor:0"
         with pytest.raises(AgentServiceError) as exc:
             await dao.search_history(
                 _q(scope="current_session", session_id="s-a", cursor=bad_cursor), user_scope=USER_SCOPE
@@ -671,6 +674,106 @@ class TestPagingAndFingerprint:
         assert len(summary) < len(long_body)
 
 
+class TestFullOrderKeysetPaging:
+    """检视 D19：全序键 (sort_moment, hit_kind, anchor_id, artifact_version)。
+
+    同 ID 多版本同 ``sort_moment`` 时，``limit`` 翻页必须覆盖全部版本且不重复；
+    消息与成果同刻混排顺序稳定可复现；锚行按完整键唯一命中。
+    """
+
+    async def _seed_exec_tree(self, dao: AgentDao) -> None:
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+
+    async def test_multi_version_same_moment_pages_cover_all_versions(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await self._seed_exec_tree(dao)
+        same_moment = datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+        for version in (1, 2, 3):
+            await _seed_artifact(
+                dao,
+                "art-multi",
+                "s-a",
+                "exec-a",
+                "round-a",
+                created_at=same_moment,
+                artifact_version=version,
+            )
+
+        seen: list[tuple[str, int | None]] = []
+        cursor: str | None = None
+        for _ in range(10):
+            page = await dao.search_history(
+                _q(scope="current_session", session_id="s-a", limit=1, cursor=cursor), user_scope=USER_SCOPE
+            )
+            seen.extend((hit.artifact_id or "", hit.artifact_version) for hit in page.hits)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+
+        # 三个版本全部覆盖、无重复，newest_first 按版本降序
+        assert seen == [("art-multi", 3), ("art-multi", 2), ("art-multi", 1)]
+
+    async def test_message_and_artifact_same_moment_stable_full_order(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await self._seed_exec_tree(dao)
+        await _seed_message(
+            dao,
+            "s-a",
+            "same-moment",
+            execution_id="exec-a",
+            round_id="round-a",
+            body_text="同刻消息",
+            occurred_at="2026-06-02T08:00:00.000000Z",
+        )
+        await _seed_artifact(
+            dao, "art-same", "s-a", "exec-a", "round-a", created_at=datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+        )
+
+        newest = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", limit=10), user_scope=USER_SCOPE
+        )
+        # newest_first：同刻 hit_kind DESC（message 先于 artifact），可复现
+        assert [hit.hit_kind for hit in newest.hits] == ["message", "artifact"]
+
+        oldest = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", sort="oldest_first", limit=10),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit.hit_kind for hit in oldest.hits] == ["artifact", "message"]
+
+        # limit=1 逐页推进不重不漏
+        first = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", limit=1), user_scope=USER_SCOPE
+        )
+        second = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", limit=1, cursor=first.next_cursor),
+            user_scope=USER_SCOPE,
+        )
+        assert [first.hits[0].hit_kind, second.hits[0].hit_kind] == ["message", "artifact"]
+        assert second.next_cursor is None
+
+    async def test_artifact_anchor_must_match_version(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await self._seed_exec_tree(dao)
+        same_moment = datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+        for version in (1, 2):
+            await _seed_artifact(
+                dao, "art-multi", "s-a", "exec-a", "round-a", created_at=same_moment, artifact_version=version
+            )
+
+        first = await dao.search_history(_q(scope="current_session", session_id="s-a", limit=1), user_scope=USER_SCOPE)
+        digest, upper, sort_moment, _kind, _anchor, _version = parse_history_cursor(first.next_cursor or "")
+        # 同锚 ID 但版本不存在：锚行不唯一命中即覆盖域已修订（不放行错位游标）
+        bad_cursor = f"h:{digest}:{upper}:{sort_moment}:artifact:art-multi:99"
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", limit=1, cursor=bad_cursor), user_scope=USER_SCOPE
+            )
+        assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
+
+
 class TestCursorQueryBinding:
     """检视 D16：游标绑定规范查询身份，换筛选/换范围复用必须被拒。"""
 
@@ -745,9 +848,9 @@ class TestCursorUpperBoundAndLiveness:
         page1 = await dao.search_history(query, user_scope=USER_SCOPE)
         assert [hit.message_id for hit in page1.hits] == ["m-u1", "m-u2"]
         cursor_value = page1.next_cursor or ""
-        digest, _upper, sort_moment, anchor = parse_history_cursor(cursor_value)
+        digest, _upper, sort_moment, hit_kind, anchor, version = parse_history_cursor(cursor_value)
         early_upper = "2026-06-02T12:00:00.000000Z"
-        narrowed_cursor = f"h:{digest}:{early_upper}:{sort_moment}:{anchor}"
+        narrowed_cursor = f"h:{digest}:{early_upper}:{sort_moment}:{hit_kind}:{anchor}:{version}"
         # 续读前新增更晚数据；游标上界不让位于「当前时刻」
         await _seed_message(dao, "s-a", "u4", body_text="消息4", occurred_at="2026-06-04T12:00:00.000000Z")
         page2 = await dao.search_history(

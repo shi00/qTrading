@@ -5400,18 +5400,87 @@ class AgentDao(BaseDao):
                 identity_str,
             )
 
+    @staticmethod
+    def _history_keyset_predicate(
+        moment_col: sa.ColumnElement[Any],
+        *,
+        anchor_col: sa.ColumnElement[Any],
+        branch_kind: str,
+        version_col: sa.ColumnElement[Any] | None,
+        cursor_moment: datetime,
+        cursor_kind: str,
+        cursor_anchor: str,
+        cursor_version: int,
+        newest_first: bool,
+    ) -> sa.ColumnElement[bool]:
+        """全序键 ``(sort_moment, hit_kind, anchor_id, artifact_version)`` 的 keyset 续读。
+
+        UNION 的 ORDER BY 与本谓词共用同一套分量（检视 D19）：只按
+        ``(sort_moment, anchor_id)`` 比较时，同 ``artifact_id`` 多版本同时间会因
+        ``limit`` 截断后的严格比较被整体跳过。
+
+        - ``branch_kind`` 为该分支的命中类型常量（消息 ``message`` / 成果
+          ``artifact``）：与游标类型只差在常量上，故在 Python 侧比较并在
+          「同秒但类型不同」时直接决定整批同刻行是否续读（与 DESC/ASC 的
+          文本排序方向一致）；
+        - ``version_col`` 为 None 表示该分支同 ``(sort_moment, anchor_col)``
+          至多一行（消息的 ``message_id`` 唯一），无需版本分量；成果分支必须
+          传 ``artifact_version``，同锚 ID 多版本按版本续读，不重不漏。
+        """
+
+        if newest_first:
+            # 续读行：键元组严格小于游标键元组
+            terms: list[sa.ColumnElement[bool]] = [moment_col < cursor_moment]
+            if branch_kind < cursor_kind:
+                terms.append(moment_col == cursor_moment)
+            elif branch_kind == cursor_kind:
+                terms.append(sa.and_(moment_col == cursor_moment, anchor_col < cursor_anchor))
+                if version_col is not None:
+                    terms.append(
+                        sa.and_(
+                            moment_col == cursor_moment,
+                            anchor_col == cursor_anchor,
+                            version_col < cursor_version,
+                        )
+                    )
+        else:
+            # 续读行：键元组严格大于游标键元组
+            terms = [moment_col > cursor_moment]
+            if branch_kind > cursor_kind:
+                terms.append(moment_col == cursor_moment)
+            elif branch_kind == cursor_kind:
+                terms.append(sa.and_(moment_col == cursor_moment, anchor_col > cursor_anchor))
+                if version_col is not None:
+                    terms.append(
+                        sa.and_(
+                            moment_col == cursor_moment,
+                            anchor_col == cursor_anchor,
+                            version_col > cursor_version,
+                        )
+                    )
+        return sa.or_(*terms)
+
     async def search_history(self, query: HistoryQuery, *, user_scope: str) -> HistoryPage:
         """历史搜索（§4.2 R02 read_history + §9.13）：固定上界内规范扫描。
 
         - 受理校验：validate_history_query（R02 三范围/值集/游标语法）→ INPUT_INVALID；
-        - 游标翻页：``h:{查询摘要}:{上界ts}:{排序键ts}:{锚ID}``——摘要绑定规范查询
+        - 游标翻页：``h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}``——
+          摘要绑定规范查询
           （续读必须同一筛选/范围，换筛选/换 scope 复用即 REVISION_CONFLICT，
           校验先于任何扫描/命中）；上界绑定翻页（续读复用首读上界，不因数据增长
-          漏复检）；锚行缺失视为覆盖域已被修订 → REVISION_CONFLICT（R02，成员
+          漏复检）；命中类型/版本是排序键的后两段（见下），锚行按完整键定位
+          （成果必须带 ``artifact_version``，同锚 ID 多版本不歧义）；锚行缺失视为
+          覆盖域已被修订 → REVISION_CONFLICT（R02，成员
           变化只经 revision_fingerprint 漂移呈现，不阻断同查询续翻；端到端指纹
           比对由服务层承载）；
-        - 扫描：消息与成果 UNION 前分别过滤后统一排序（sort_moment + 锚 ID keyset，
-          newest_first DESC/oldest_first ASC）；type_filter **按权威
+        - 扫描：消息与成果 UNION 前分别过滤后统一按全序键
+          ``(sort_moment, hit_kind, anchor_id, artifact_version)`` 排序
+          （newest_first 四个分量同时 DESC / oldest_first 同时 ASC）：消息侧
+          ``hit_kind='message'``、``anchor_id=message_id``、版本取常量 0（消息无
+          版本）；成果侧 ``hit_kind='artifact'``、``anchor_id=artifact_id``、版本
+          ``artifact_version``。两分支的 keyset 续读谓词与 UNION 的 ORDER BY 使用
+          同一套全序键（检视 D19）：同 ``artifact_id`` 多版本同 ``sort_moment``
+          时按版本继续，既不重复也不跳过；type_filter **按权威
           ``agent_execution.execution_kind``**
           判定（检视 D17）：main = ``root`` 执行 + 会话级消息（无 execution_id），
           child = ``leaf`` / ``comparison_lane``；消息与成果同口径（成果
@@ -5459,8 +5528,12 @@ class AgentDao(BaseDao):
         cursor_bound: datetime | None = None
         cursor_sort_moment: datetime | None = None
         cursor_anchor: str | None = None
+        cursor_kind: str | None = None
+        cursor_version = 0
         if query.cursor is not None:
-            cursor_digest, upper_text, sort_text, anchor_id = parse_history_cursor(query.cursor)
+            cursor_digest, upper_text, sort_text, cursor_kind, anchor_id, cursor_version = parse_history_cursor(
+                query.cursor
+            )
             try:
                 cursor_bound = datetime.strptime(upper_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
                 cursor_sort_moment = datetime.strptime(sort_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
@@ -5538,25 +5611,23 @@ class AgentDao(BaseDao):
                         raise AgentServiceError(code, "exact round not found in user scope", identity_str)
 
                 # ---- 锚行核对（翻页）----
-                # 两表独立 EXISTS（CROSS JOIN 空 artifact 表会使 or_ 组合恒空）
+                # 按游标命中类型定位唯一行：消息以 message_id，成果以
+                # (artifact_id, artifact_version)——同 ID 多版本必须用完整键核对，
+                # 否则低版本存在即可让高版本游标「看起来有锚」（检视 D19）。
                 if cursor_anchor is not None:
-                    message_anchor = (
-                        await conn.execute(
-                            sa.select(sa.literal(1)).where(
-                                AgentMessage.user_scope == user_scope,
-                                AgentMessage.message_id == cursor_anchor,
-                            )
+                    if cursor_kind == "message":
+                        anchor_stmt = sa.select(sa.literal(1)).where(
+                            AgentMessage.user_scope == user_scope,
+                            AgentMessage.message_id == cursor_anchor,
                         )
-                    ).first()
-                    artifact_anchor = (
-                        await conn.execute(
-                            sa.select(sa.literal(1)).where(
-                                AgentArtifact.user_scope == user_scope,
-                                AgentArtifact.artifact_id == cursor_anchor,
-                            )
+                    else:
+                        anchor_stmt = sa.select(sa.literal(1)).where(
+                            AgentArtifact.user_scope == user_scope,
+                            AgentArtifact.artifact_id == cursor_anchor,
+                            AgentArtifact.artifact_version == cursor_version,
                         )
-                    ).first()
-                    if message_anchor is None and artifact_anchor is None:
+                    anchor_row = (await conn.execute(anchor_stmt)).first()
+                    if anchor_row is None:
                         raise AgentServiceError(
                             AgentErrorCode.REVISION_CONFLICT,
                             "history cursor anchor no longer exists; coverage was revised",
@@ -5583,6 +5654,7 @@ class AgentDao(BaseDao):
                     AgentMessage.payload_kind.label("payload_kind"),
                     sa.literal(None).label("artifact_kind"),
                     sa.literal(None).label("artifact_version"),
+                    sa.literal(0).label("sort_version"),
                     AgentMessage.body_text.label("summary_source"),
                     sa.literal(None).label("summary"),
                 ]
@@ -5666,22 +5738,20 @@ class AgentDao(BaseDao):
                         )
                     )
                 if cursor_sort_moment is not None and cursor_anchor is not None:
-                    if query.sort == "newest_first":
-                        message_stmt = message_stmt.where(
-                            sa.tuple_(message_moment, AgentMessage.message_id)
-                            < sa.tuple_(
-                                sa.bindparam("h_m_moment", cursor_sort_moment),
-                                sa.bindparam("h_m_anchor", cursor_anchor),
-                            )
+                    assert cursor_kind is not None  # 有游标必有命中类型（parse_history_cursor 返回）
+                    message_stmt = message_stmt.where(
+                        self._history_keyset_predicate(
+                            message_moment,
+                            anchor_col=AgentMessage.message_id,
+                            branch_kind="message",
+                            version_col=None,
+                            cursor_moment=cursor_sort_moment,
+                            cursor_kind=cursor_kind,
+                            cursor_anchor=cursor_anchor,
+                            cursor_version=cursor_version,
+                            newest_first=query.sort == "newest_first",
                         )
-                    else:
-                        message_stmt = message_stmt.where(
-                            sa.tuple_(message_moment, AgentMessage.message_id)
-                            > sa.tuple_(
-                                sa.bindparam("h_m_moment", cursor_sort_moment),
-                                sa.bindparam("h_m_anchor", cursor_anchor),
-                            )
-                        )
+                    )
 
                 # ---- 成果分支 ----
                 artifact_moment = (
@@ -5703,6 +5773,7 @@ class AgentDao(BaseDao):
                     sa.literal(None).label("payload_kind"),
                     AgentArtifact.artifact_kind.label("artifact_kind"),
                     AgentArtifact.artifact_version.label("artifact_version"),
+                    AgentArtifact.artifact_version.label("sort_version"),
                     sa.literal(None).label("summary_source"),
                     AgentArtifact.summary.label("summary"),
                 ]
@@ -5788,28 +5859,36 @@ class AgentDao(BaseDao):
                 if day_to_excl is not None:
                     artifact_stmt = artifact_stmt.where(artifact_moment < day_to_excl)
                 if cursor_sort_moment is not None and cursor_anchor is not None:
-                    if query.sort == "newest_first":
-                        artifact_stmt = artifact_stmt.where(
-                            sa.tuple_(artifact_moment, AgentArtifact.artifact_id)
-                            < sa.tuple_(
-                                sa.bindparam("h_a_moment", cursor_sort_moment),
-                                sa.bindparam("h_a_anchor", cursor_anchor),
-                            )
+                    assert cursor_kind is not None  # 有游标必有命中类型（parse_history_cursor 返回）
+                    artifact_stmt = artifact_stmt.where(
+                        self._history_keyset_predicate(
+                            artifact_moment,
+                            anchor_col=AgentArtifact.artifact_id,
+                            branch_kind="artifact",
+                            version_col=AgentArtifact.artifact_version,
+                            cursor_moment=cursor_sort_moment,
+                            cursor_kind=cursor_kind,
+                            cursor_anchor=cursor_anchor,
+                            cursor_version=cursor_version,
+                            newest_first=query.sort == "newest_first",
                         )
-                    else:
-                        artifact_stmt = artifact_stmt.where(
-                            sa.tuple_(artifact_moment, AgentArtifact.artifact_id)
-                            > sa.tuple_(
-                                sa.bindparam("h_a_moment", cursor_sort_moment),
-                                sa.bindparam("h_a_anchor", cursor_anchor),
-                            )
-                        )
+                    )
 
                 # ---- 统一排序 ----
+                # 全序键 (sort_moment, hit_kind, anchor_id, artifact_version)：四个
+                # 分量同向（检视 D19）。只按 (sort_moment, anchor_id) 排序时，
+                # 同 artifact_id 多版本同时间无法区分，limit 截断后续读严格比较
+                # 会整体跳过其余合法版本。
                 union_sub = sa.union_all(message_stmt.self_group(), artifact_stmt.self_group()).subquery()
                 sort_moment_col = union_sub.c.sort_moment
                 anchor_col = union_sub.c.anchor_id
-                direction = sort_moment_col.desc() if query.sort == "newest_first" else sort_moment_col.asc()
+                kind_col = union_sub.c.hit_kind
+                version_sort_col = union_sub.c.sort_version
+                newest_first = query.sort == "newest_first"
+                direction = sort_moment_col.desc() if newest_first else sort_moment_col.asc()
+                kind_direction = kind_col.desc() if newest_first else kind_col.asc()
+                anchor_direction = anchor_col.desc() if newest_first else anchor_col.asc()
+                version_direction = version_sort_col.desc() if newest_first else version_sort_col.asc()
                 union_stmt = sa.select(
                     union_sub.c.sort_moment,
                     union_sub.c.created_at,
@@ -5824,9 +5903,10 @@ class AgentDao(BaseDao):
                     union_sub.c.payload_kind,
                     union_sub.c.artifact_kind,
                     union_sub.c.artifact_version,
+                    union_sub.c.sort_version,
                     union_sub.c.summary_source,
                     union_sub.c.summary,
-                ).order_by(direction, anchor_col.desc() if query.sort == "newest_first" else anchor_col.asc())
+                ).order_by(direction, kind_direction, anchor_direction, version_direction)
                 try:
                     union_rows = (await conn.execute(union_stmt.limit(query.limit + 1))).all()
                 except DBAPIError as exc:
@@ -5847,7 +5927,11 @@ class AgentDao(BaseDao):
         next_cursor: str | None = None
         if has_more and union_rows:
             last = union_rows[-1]
-            next_cursor = f"h:{query_digest}:{upper_wire}:{_wire_time(last.sort_moment)}:{last.anchor_id}"
+            # 游标携带完整全序键：命中类型与版本使同锚 ID 多版本/同刻混排可定位
+            next_cursor = (
+                f"h:{query_digest}:{upper_wire}:{_wire_time(last.sort_moment)}:"
+                f"{last.hit_kind}:{last.anchor_id}:{last.sort_version}"
+            )
         return HistoryPage(
             query_digest=query_digest,
             fixed_upper_bound=upper_wire,

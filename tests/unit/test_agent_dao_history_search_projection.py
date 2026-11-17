@@ -272,11 +272,56 @@ class TestExistingFiltersNotBypassed:
     async def test_query_text_keeps_cursor_keyset(self) -> None:
         base = _query(query_text="回撤", limit=2)
         digest = compute_history_query_digest(base)
-        cursor = f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:anchor-1"
+        cursor = f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:artifact:anchor-1:2"
         sql = await _union_sql(query_text="回撤", limit=2, cursor=cursor, anchor_exists=True)
-        assert "(agent_message.created_at, agent_message.message_id) <" in sql
-        assert "(agent_artifact.created_at, agent_artifact.artifact_id) <" in sql
+        # 成果分支 keyset 带版本分量（检视 D19：同 ID 多版本同时间不跳过）
+        assert "agent_artifact.artifact_id < 'anchor-1'" in sql
+        assert "agent_artifact.artifact_version < 2" in sql
         assert "'anchor-1'" in sql
+
+    @pytest.mark.asyncio
+    async def test_message_cursor_keyset_uses_full_order_without_version(self) -> None:
+        digest = compute_history_query_digest(_query(query_text="回撤", limit=2))
+        cursor = f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:message:anchor-1:0"
+        sql = await _union_sql(query_text="回撤", limit=2, cursor=cursor, anchor_exists=True)
+        # 消息分支按 message_id 续读；消息无版本，不生成版本比较
+        assert "agent_message.message_id < 'anchor-1'" in sql
+        assert "0 <" not in sql
+        # 同刻成果（类型 'artifact' < 'message'）在 newest_first 中排在其后整体续读
+        assert "agent_artifact.created_at = '2026-06-30" in sql
+        assert "agent_artifact.artifact_id <" not in sql
+
+    @pytest.mark.asyncio
+    async def test_artifact_anchor_requires_exact_version(self) -> None:
+        """锚行按完整键唯一命中：同锚 ID 但版本不同不得放行（检视 D19）。"""
+
+        digest = compute_history_query_digest(_query(limit=2))
+        cursor = f"h:{digest}:2026-07-01T00:00:00.000000Z:2026-06-30T00:00:00.000000Z:artifact:anchor-1:2"
+        conn = _HistoryConn()
+        dao = _dao(conn)
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(_query(limit=2, cursor=cursor), user_scope="u1")
+        assert exc.value.code == AgentErrorCode.REVISION_CONFLICT
+        anchor_sql = next(
+            _literal_sql(stmt)
+            for stmt in conn.statements
+            if "agent_artifact.artifact_id = 'anchor-1'" in _literal_sql(stmt)
+        )
+        assert "agent_artifact.artifact_version = 2" in anchor_sql
+        assert "agent_message" not in anchor_sql
+
+    @pytest.mark.asyncio
+    async def test_union_orders_by_full_total_key(self) -> None:
+        """UNION 排序与两分支 keyset 共用全序键（检视 D19）。"""
+
+        sql = await _union_sql()
+        order_clause = sql.split("ORDER BY", 1)[1]
+        for column in ("sort_moment", "hit_kind", "anchor_id", "sort_version"):
+            assert column in order_clause
+        assert order_clause.count("DESC") == 4
+        oldest = await _union_sql(sort="oldest_first")
+        oldest_order = oldest.split("ORDER BY", 1)[1]
+        assert "DESC" not in oldest_order
 
     @pytest.mark.asyncio
     async def test_query_text_keeps_agent_role_identity_filter(self) -> None:

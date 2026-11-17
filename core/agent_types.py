@@ -4148,8 +4148,9 @@ def decode_research_snapshot(value: object, path: str = "$.snapshot") -> Researc
 #:   维度，工程冻结）；
 #: - 全部条件、空值含义、版本选择、规范关键词和准确祖先进入 query_digest；
 #: - HistoryPage 修订指纹为 sha256 摘要（覆盖域成员/水位经 DAO CanonicalJson
-#:   组装后哈希）；游标 h:{查询摘要}:{上界ts}:{排序键ts}:{锚ID}（摘要绑定规范
-#:   查询身份、上界绑定翻页；换筛选/换范围复用游标由 DAO 拒绝）。
+#:   组装后哈希）；游标 h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}
+#:   （摘要绑定规范查询身份、上界绑定翻页；命中类型与版本承载历史搜索全序键的
+#:   后两段，见 DAO ``search_history``；换筛选/换范围复用游标由 DAO 拒绝）。
 
 HISTORY_SCOPES: Final[frozenset[str]] = frozenset({"all_saved", "current_session", "current_child"})
 ROUND_SELECTION_KINDS: Final[frozenset[str]] = frozenset({"all_rounds", "exact"})
@@ -4164,7 +4165,7 @@ HISTORY_HIT_KINDS: Final[frozenset[str]] = frozenset({"message", "artifact"})
 _DATE_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
 _HISTORY_CURSOR_RE: Final = re.compile(
     r"h:([0-9a-f]{64}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):"
-    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):([^:\s]+)"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):(message|artifact):([^:\s]+):(0|[1-9][0-9]*)"
 )
 
 
@@ -4348,6 +4349,8 @@ def validate_history_query(query: HistoryQuery) -> None:
     if query.cursor is not None:
         if not isinstance(query.cursor, str) or _HISTORY_CURSOR_RE.fullmatch(query.cursor) is None:
             _fail("invalid_cursor", "$.cursor")
+        # 正则放过任意非负版本号，语义收紧（命中类型/版本配对）在同源解析里做
+        parse_history_cursor(query.cursor)
     # 复用 wire 严格解码做内存对象复核：kind 原样透传（不做 else 兜底），
     # 未知 kind 即使携合法 ID 也在受理阶段拒绝（D15：不放大搜索范围）。
     round_selection_value: dict[str, object] = {"kind": query.round_selection.kind}
@@ -4485,18 +4488,28 @@ def compute_history_query_digest(query: HistoryQuery) -> str:
     return sha256_hex(normalize_history_query(query))
 
 
-def parse_history_cursor(cursor: str) -> tuple[str, str, str, str]:
-    """游标 ``h:{查询摘要}:{上界ts}:{排序键ts}:{锚ID}`` → (摘要, 固定上界, 排序键, 锚 ID)。
+def parse_history_cursor(cursor: str) -> tuple[str, str, str, str, str, int]:
+    """游标 ``h:{摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}`` → 六段。
 
+    返回 (查询摘要, 固定上界, 排序键时刻, 命中类型, 锚 ID, 版本)，其中命中类型为
+    ``message`` / ``artifact``，版本对消息固定为 0、对成果为该成果版本号（>=1）。
     语法已由 validate_history_query 冻结；摘要绑定规范查询身份（DAO 续读前
     必须与当前查询摘要比对，不一致即拒绝换筛选复用），上界供 DAO 组装
-    keyset 续读。
+    keyset 续读；命中类型与版本是历史搜索全序键
+    ``(sort_moment, hit_kind, anchor_id, artifact_version)`` 的后两段，DAO 续读
+    必须用同一套分量比较，否则同 ID 多版本同时间会重复或漏页。
     """
 
     match = _HISTORY_CURSOR_RE.fullmatch(cursor)
     if match is None:
         _fail("invalid_cursor", "$.cursor")
-    return match.group(1), match.group(2), match.group(3), match.group(4)
+    hit_kind = match.group(4)
+    version = int(match.group(6))
+    # 正则放过任意非负整数，语义在此收紧：消息无版本（恒 0）、成果版本 >= 1，
+    # 组合不成立即拒绝（不留可解析但语义错位的游标）。
+    if (hit_kind == "message") != (version == 0):
+        _fail("invalid_cursor", "$.cursor")
+    return match.group(1), match.group(2), match.group(3), hit_kind, match.group(5), version
 
 
 @dataclass(frozen=True, slots=True)
@@ -4611,8 +4624,11 @@ def decode_history_page(value: object, path: str = "$.history_page") -> HistoryP
         _fail("invalid_type", f"{path}.hits")
     hits = tuple(decode_history_hit(item, f"{path}.hits[{index}]") for index, item in enumerate(hits_value))
     next_cursor = _opt_str(value["next_cursor"], f"{path}.next_cursor")
-    if next_cursor is not None and _HISTORY_CURSOR_RE.fullmatch(next_cursor) is None:
-        _fail("invalid_cursor", f"{path}.next_cursor")
+    if next_cursor is not None:
+        try:
+            parse_history_cursor(next_cursor)
+        except AgentValidationError:
+            _fail("invalid_cursor", f"{path}.next_cursor")
     return HistoryPage(
         query_digest=_require_digest(value["query_digest"], f"{path}.query_digest"),
         fixed_upper_bound=_require_utc_timestamp(value["fixed_upper_bound"], f"{path}.fixed_upper_bound"),
