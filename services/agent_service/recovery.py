@@ -488,12 +488,20 @@ def _sync_database_url(url: str) -> str:
 
 @dataclass(frozen=True)
 class StartupOutcome:
-    """启动编排结果：``handle`` 仅在隔离``ready=True``并 launch 后非空。"""
+    """启动编排结果：``handle`` 仅在隔离``ready=True``并 launch 后非空。
+
+    ``unclosed_handle`` 仅在**关闭失败**时非空：此时唯一执行锁保持持有
+    （``instance_guard`` 非空）且 ``failure`` 含 ``close_failed:<异常类型>``；
+    调用方须用该句柄重试 ``close()``（按资源粒度幂等，只补未完成项），全部
+    关闭后再释放锁。锁未释放期间新的启动必须被阻止，不得由新实例接管可能
+    仍存活的旧宿主资源。
+    """
 
     handle: Any
     isolation: StartupIsolationReceipt | None
     failure: str | None
     instance_guard: Any = None
+    unclosed_handle: Any = None
 
 
 async def start_agent_runtime(
@@ -525,6 +533,11 @@ async def start_agent_runtime(
     同步 worker 真实退出并收口其产物**（取消只取消等待、不停止线程，R06）：拿锁被
     取消即释放连接、组装被取消即关闭已产出宿主、launch 被取消即关闭宿主，再传播
     取消（R2：不吞取消、不留无主资源）。
+
+    **关闭失败一律保锁**：隔离未就绪/launch 失败时若 ``handle.close()`` 失败
+    （如 ``DBOS.destroy`` 中途失败），不释放唯一执行锁，并保留句柄于
+    ``unclosed_handle`` 供调用方重试关闭；取消路径同样保锁（句柄无法随结果
+    返回，锁即阻塞事实），确保旧宿主资源未收口时新实例不得接管。
     """
 
     if not isinstance(settings, AgentRuntimeSettings):
@@ -546,23 +559,51 @@ async def start_agent_runtime(
             handle=None, isolation=None, failure=f"instance_guard_blocked:{evidence.detail}", instance_guard=None
         )
 
-    def _abort_handle(handle: Any) -> None:
+    def _abort_handle(handle: Any) -> str | None:
+        """关闭未上线的宿主：只有确认关闭成功才释放唯一执行锁。
+
+        返回 ``None`` 表示已全部关闭并释放锁；返回异常类型名表示关闭失败——
+        此时**保锁**（旧宿主资源可能仍存活，新实例不得接管），由调用方保留
+        句柄重试 ``close()``（``AgentRuntimeHandle.close`` 按资源粒度幂等）。
+        """
+
         try:
             handle.close()
-        # 清理兜底：保留原始失败原因
-        except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
-            pass
+        except Exception as exc:  # 关闭失败：保锁、保句柄、报告阻塞事实（可重试）
+            return type(exc).__name__
         guard.release()
+        return None
 
-    async def _abort(handle: Any) -> None:
-        """收口已组装宿主（含实例锁）；后续取消不打断收口（R06）。"""
+    def _aborted_outcome(
+        receipt: StartupIsolationReceipt, failure: str | None, close_failure: str | None
+    ) -> StartupOutcome:
+        """未 launch 的收口结果：关闭失败时不丢句柄/不丢锁（可重试关闭）。"""
+
+        if close_failure is None:
+            return StartupOutcome(handle=None, isolation=receipt, failure=failure)
+        prefix = f"{failure};" if failure else ""
+        return StartupOutcome(
+            handle=None,
+            isolation=receipt,
+            failure=f"{prefix}close_failed:{close_failure}",
+            instance_guard=guard,
+            unclosed_handle=handle,
+        )
+
+    async def _abort(handle: Any) -> str | None:
+        """收口已组装宿主（含实例锁）；取消不打断收口，关闭失败保锁（R06/R07）。
+
+        返回 ``None`` 表示已全部关闭并释放锁；返回异常类型名表示关闭失败（保锁、
+        由调用方保留句柄重试关闭）。取消已到达时先等 worker 真实退出，再传播取消。
+        """
 
         try:
             outcome = await _run_owned_blocking(runner, lambda: _abort_handle(handle))
-        except Exception:  # 收口兜底：不得掩盖原始取消/失败原因（R2 只约束 CancelledError）
-            return
+        except Exception as exc:  # 收口兜底：按关闭失败保锁，不掩盖原始取消/失败原因（R2）
+            return type(exc).__name__
         if outcome.cancel is not None:
             raise outcome.cancel
+        return outcome.value
 
     try:
         assembled = await _run_owned_blocking(runner, lambda: assemble(settings))
@@ -589,17 +630,18 @@ async def start_agent_runtime(
             app_version=settings.application_version,
         )
     except asyncio.CancelledError:
+        # 取消继续传播（R2）；关闭失败时保锁（锁即阻塞事实，新实例不得接管）
         await _abort(handle)
         raise
     if not receipt.ready:
-        await _abort(handle)
-        return StartupOutcome(handle=None, isolation=receipt, failure=None)
+        close_failure = await _abort(handle)
+        return _aborted_outcome(receipt, None, close_failure)
 
     try:
         launched = await _run_owned_blocking(runner, lambda: launch(handle))
     except Exception as exc:
-        await _abort(handle)
-        return StartupOutcome(handle=None, isolation=receipt, failure=f"launch_failed:{type(exc).__name__}")
+        close_failure = await _abort(handle)
+        return _aborted_outcome(receipt, f"launch_failed:{type(exc).__name__}", close_failure)
     if launched.cancel is not None:
         # launch 已真实执行完：关闭宿主再传播取消，不留下已 launch 的宿主（R06）
         await _abort(handle)
