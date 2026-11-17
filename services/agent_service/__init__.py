@@ -45,7 +45,7 @@ from services.agent_service.runtime import (
     assemble_agent_runtime,
     launch_agent_runtime,
 )
-from services.agent_service.service import AgentService
+from services.agent_service.service import AgentService, WaitResult
 from services.agent_service.sources import BusinessSourceService
 
 __all__ = [
@@ -75,6 +75,7 @@ __all__ = [
     "StartupIsolationReceipt",
     "StartupOutcome",
     "SubprocessAttachmentWorker",
+    "WaitResult",
     "assemble_agent_runtime",
     "build_plan_store",
     "build_planning_capability",
