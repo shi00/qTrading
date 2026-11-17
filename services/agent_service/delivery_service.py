@@ -1,14 +1,17 @@
 """成果交付编排（E-05-4b / DD SQ-09 / 详细设计 §10.5 / HANDOFF §10.2）。
 
 可靠顺序冻结（每步事实未保存即不进入下一阶段）：
-读全成果 → 保存 ``manifest_saved`` → 渲染 → 专属同卷暂存（核回读摘要）→
-保存 ``staged`` → 逐字段回读 → 保存 ``validated`` → 新鲜核原来源状态 →
+读全成果 → 保存 ``manifest_saved``（历史状态）→ 新鲜核定本次来源状态 →
+渲染（历史/本次状态分列，三格式同口径）→ 专属同卷暂存（核回读摘要）→
+保存 ``staged`` → 逐字段回读 → 保存 ``validated`` → 发布前复核状态未变 →
 保存 ``publish_claimed`` → 原子替换并核回目标身份/摘要 → 保存 ``published_confirmed``；
-发布效果不可确证 → ``unknown``（禁止自动重试）。
+状态在渲染/暂存期间变化则按最新状态重渲染、重暂存、重回读（有限次），
+发布前再变即停在发布前；发布效果不可确证 → ``unknown``（禁止自动重试）。
 
 禁用：重跑研究/工具、把暂存或未确认替换当成功、取消先胜后仍发布、
-``unknown``/终态后再写入、发布前失败删除或覆盖旧目标、在事件循环线程直接做
-渲染与文件工作（R16，须经 ``run_blocking``）。
+``unknown``/终态后再写入、发布前失败删除或覆盖旧目标、把成果保存时的历史
+状态冒充当次可交付状态、在事件循环线程直接做渲染与文件工作（R16，须经
+``run_blocking``）。
 """
 
 from __future__ import annotations
@@ -19,7 +22,6 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from core.agent_types import (
-    DELIVERY_SOURCE_STATES,
     AgentErrorCode,
     AgentServiceError,
     AgentValidationError,
@@ -27,11 +29,13 @@ from core.agent_types import (
     ArtifactRead,
     ArtifactReadQuery,
     CommandRef,
+    DeliveryField,
     DeliveryManifest,
     DeliveryPhaseReceipt,
     DeliveryReceipt,
     DeliveryTarget,
     build_delivery_fields,
+    canonical_delivery_source_state,
     sha256_hex,
     validate_artifact_delivery_command,
 )
@@ -54,6 +58,12 @@ _UNVERIFIED_CODE = "delivery_publish_unverified"
 _RECEIPT_SAVE_FAILED = "delivery_receipt_save_failed"
 #: 发布前新鲜核原来源状态失败（成果已不可读）时的错误码前缀。
 _SOURCE_RECHECK_FAILED = "delivery_source_recheck_failed"
+#: 渲染/暂存期间来源状态反复变化时的错误码（状态不稳定即停止发布）。
+_SOURCE_STATE_UNSTABLE = "delivery_source_state_unstable"
+#: 发布前复核发现状态已变（阶段机不允许回写已验证输出摘要）时的错误码。
+_SOURCE_STATE_CHANGED = "delivery_source_state_changed"
+#: 状态变化时重做渲染/暂存/回读的有限次数（超出即按不稳定停止）。
+_SOURCE_STATE_ATTEMPTS = 3
 
 #: 发布认领后禁止重试的下一步说明（可核原交付后再决定）。
 _UNKNOWN_NEXT_ACTION = "查原交付回执与目标文件身份；确认前不得再次导出"
@@ -62,14 +72,25 @@ _UNKNOWN_NEXT_ACTION = "查原交付回执与目标文件身份；确认前不�
 def _manifest_source_state(value: object) -> str:
     """原来源当前状态 → manifest 词表；库内其他取值按 ``unknown`` 记录，不臆测。
 
-    ``agent_artifact.source_available_state`` 是自由文本列（当前核定），manifest
-    只接受 ``DELIVERY_SOURCE_STATES``；非标准取值不得改写原核验事实，也不得
-    伪装成 ``available``。
+    ``agent_artifact.source_available_state`` 是自由文本列（成果保存时核定），
+    manifest 只接受 ``DELIVERY_SOURCE_STATES``；非标准取值不得改写原核验事实，
+    也不得伪装成 ``available``。
     """
 
-    if isinstance(value, str) and value in DELIVERY_SOURCE_STATES:
-        return value
-    return "unknown"
+    return canonical_delivery_source_state(value)
+
+
+def _current_source_state(value: object) -> str:
+    """本次交付核定状态：``available`` 只说明保存时记录可用，不能证明当前可交付。
+
+    ``read_artifact`` 回读的是成果行保存时记录的投影，真实 DAO 并未新鲜复核
+    全部上游来源；因此回读为 ``available`` 时按 ``unknown`` 显式标注（R21，
+    不把历史允许导出冒充当次可交付）。明确受限的 ``unavailable`` / ``disabled``
+    / ``unknown`` 如实采用，不升级为可用。
+    """
+
+    state = _manifest_source_state(value)
+    return "unknown" if state == "available" else state
 
 
 class DeliveryArtifactPort(Protocol):
@@ -237,50 +258,96 @@ class DeliveryCommandService:
             format_rule_version=command.format_rule_version,
             target=command.target,
         )
-        state = _manifest_source_state(read.source_available_state)
+        history_state = _manifest_source_state(read.source_available_state)
         revision = command.expected_delivery_revision
 
         saved = await self._save(
-            base.build(phase="manifest_saved", source_state=state, verified_at=self._clock()),
+            base.build(phase="manifest_saved", source_state=history_state, verified_at=self._clock()),
             user_scope=user_scope,
             context=context,
             expected_revision=revision,
         )
         revision = saved.revision
 
-        try:
-            fields = await self._run_blocking(build_delivery_fields, read, body_text=body_text)
-            rendered = await self._run_blocking(render_delivery, fields, command.format)
-        except (AgentValidationError, DeliveryRenderError) as exc:
-            return self._failed(base, context, rendered=None, phase="manifest_saved", error_code=exc.code)
+        # 本次状态在渲染前新鲜核定；文件分列历史（成果保存时）与本次状态，互不冒充。
+        state = history_state
+        fields: tuple[DeliveryField, ...] | None = None
+        rendered: RenderedDelivery | None = None
+        staged: StagedFile | None = None
+        for attempt in range(_SOURCE_STATE_ATTEMPTS):
+            try:
+                state = await self._read_current_source_state(read, context, user_scope=user_scope)
+            except AgentServiceError as exc:
+                return self._failed(
+                    base,
+                    context,
+                    rendered=None,
+                    phase="manifest_saved",
+                    error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
+                )
+            try:
+                fields = await self._run_blocking(
+                    build_delivery_fields, read, body_text=body_text, current_source_state=state
+                )
+                rendered = await self._run_blocking(render_delivery, fields, command.format)
+            except (AgentValidationError, DeliveryRenderError) as exc:
+                return self._failed(base, context, rendered=None, phase="manifest_saved", error_code=exc.code)
+            digest = rendered.digest
+            size = len(rendered.content)
+            try:
+                candidate = await self._run_blocking(
+                    self._store.stage,
+                    target=command.target,
+                    content=rendered.content,
+                    expected_digest=digest,
+                    name_hint=_stage_name_hint(command.delivery_id),
+                )
+            except DeliveryFileError as exc:
+                # 暂存未落库：回执与已存 manifest 一致（manifest_saved 无输出摘要）。
+                return self._failed(base, context, rendered=None, phase="manifest_saved", error_code=exc.code)
+            except OSError:
+                return self._failed(
+                    base, context, rendered=None, phase="manifest_saved", error_code="delivery_local_io_error"
+                )
+            if candidate.digest != digest:
+                cleaned = await self._discard(candidate)
+                return self._failed(
+                    base,
+                    context,
+                    rendered=None,
+                    phase="manifest_saved",
+                    error_code="delivery_stage_readback_failed",
+                    staged_cleaned=cleaned,
+                )
+            try:
+                confirmed = await self._read_current_source_state(read, context, user_scope=user_scope)
+            except AgentServiceError as exc:
+                cleaned = await self._discard(candidate)
+                return self._failed(
+                    base,
+                    context,
+                    rendered=None,
+                    phase="manifest_saved",
+                    error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
+                    staged_cleaned=cleaned,
+                )
+            if confirmed == state:
+                staged = candidate
+                break
+            # 渲染/暂存期间状态已变：废弃本次输出，按最新状态重渲染、重暂存、重回读。
+            cleaned = await self._discard(candidate)
+            if attempt == _SOURCE_STATE_ATTEMPTS - 1:
+                return self._failed(
+                    base,
+                    context,
+                    rendered=None,
+                    phase="manifest_saved",
+                    error_code=_SOURCE_STATE_UNSTABLE,
+                    staged_cleaned=cleaned,
+                )
+        assert staged is not None and fields is not None and rendered is not None
         digest = rendered.digest
         size = len(rendered.content)
-
-        try:
-            staged = await self._run_blocking(
-                self._store.stage,
-                target=command.target,
-                content=rendered.content,
-                expected_digest=digest,
-                name_hint=_stage_name_hint(command.delivery_id),
-            )
-        except DeliveryFileError as exc:
-            # 暂存未落库：回执与已存 manifest 一致（manifest_saved 无输出摘要）。
-            return self._failed(base, context, rendered=None, phase="manifest_saved", error_code=exc.code)
-        except OSError:
-            return self._failed(
-                base, context, rendered=None, phase="manifest_saved", error_code="delivery_local_io_error"
-            )
-        if staged.digest != digest:
-            cleaned = await self._discard(staged)
-            return self._failed(
-                base,
-                context,
-                rendered=None,
-                phase="manifest_saved",
-                error_code="delivery_stage_readback_failed",
-                staged_cleaned=cleaned,
-            )
 
         try:
             staged_saved = await self._save(
@@ -322,27 +389,6 @@ class DeliveryCommandService:
         )
         revision = validated.revision
 
-        try:
-            fresh = await self._artifacts.read_artifact(
-                ArtifactReadQuery(
-                    artifact_id=read.artifact_id,
-                    artifact_version=read.artifact_version,
-                    execution_id=context.execution_id,
-                    round_id=context.round_id,
-                    limit=1,
-                ),
-                user_scope=user_scope,
-            )
-        except AgentServiceError as exc:
-            return self._failed(
-                base,
-                context,
-                rendered=rendered,
-                phase="validated",
-                error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
-            )
-        state = _manifest_source_state(fresh.source_available_state)
-
         if cancel_requested is not None and cancel_requested():
             cancelled = await self._save(
                 base.build(
@@ -368,6 +414,26 @@ class DeliveryCommandService:
                     error_code=None,
                 ),
                 staged_cleaned=cleaned,
+            )
+
+        try:
+            claimed_state = await self._read_current_source_state(read, context, user_scope=user_scope)
+        except AgentServiceError as exc:
+            return self._failed(
+                base,
+                context,
+                rendered=rendered,
+                phase="validated",
+                error_code=f"{_SOURCE_RECHECK_FAILED}:{exc.code}",
+            )
+        if claimed_state != state:
+            # 阶段机不允许 validated 后回写已验证输出摘要；发布旧状态文件即伪当前状态。
+            return self._failed(
+                base,
+                context,
+                rendered=rendered,
+                phase="validated",
+                error_code=_SOURCE_STATE_CHANGED,
             )
 
         try:
@@ -515,6 +581,32 @@ class DeliveryCommandService:
             cursor = read.next_cursor
         body_text = "".join(parts) if first.body_available and parts else None
         return first, body_text
+
+    async def _read_current_source_state(
+        self,
+        read: ArtifactRead,
+        context: DeliveryContext,
+        *,
+        user_scope: str,
+    ) -> str:
+        """新鲜读取本次来源状态；读取失败上抛，由调用点转成发布前失败。
+
+        生产 DAO 的 ``read_artifact`` 只回读成果行保存时记录的投影，并不新鲜
+        复核全部上游来源；回读为 ``available`` 时按 ``unknown`` 记录（见
+        :func:`_current_source_state`），明确受限状态如实采用。
+        """
+
+        fresh = await self._artifacts.read_artifact(
+            ArtifactReadQuery(
+                artifact_id=read.artifact_id,
+                artifact_version=read.artifact_version,
+                execution_id=context.execution_id,
+                round_id=context.round_id,
+                limit=1,
+            ),
+            user_scope=user_scope,
+        )
+        return _current_source_state(fresh.source_available_state)
 
     async def _save(
         self,

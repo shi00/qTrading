@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from core.agent_types import (
     derive_delivery_id,
     encode_delivery_manifest,
     encode_delivery_receipt,
+    sha256_hex,
     validate_delivery_transition,
 )
 from services.agent_service import delivery_service as delivery_service_module
@@ -147,15 +149,25 @@ def _context() -> DeliveryContext:
 class FakeArtifacts:
     """分页成果读取：正文按游标顺序取页，``limit=1`` 走「新鲜核来源」分支。"""
 
-    def __init__(self, pages: list[ArtifactRead], *, fresh: ArtifactRead | None = None) -> None:
+    def __init__(
+        self,
+        pages: list[ArtifactRead],
+        *,
+        fresh: ArtifactRead | None = None,
+        fresh_states: list[str] | None = None,
+    ) -> None:
         self.pages = pages
         self.fresh = fresh
+        self.fresh_states = list(fresh_states) if fresh_states is not None else None
         self.queries: list[ArtifactReadQuery] = []
         self._page_index = 0
 
     async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> ArtifactRead:
         self.queries.append(query)
         if query.limit == 1:
+            if self.fresh_states is not None:
+                state = self.fresh_states.pop(0) if len(self.fresh_states) > 1 else self.fresh_states[0]
+                return replace(self.pages[0], source_available_state=state)
             return self.fresh if self.fresh is not None else self.pages[0]
         if query.body_cursor is None:
             self._page_index = 0
@@ -313,11 +325,13 @@ class TestHappyPath:
         assert [manifest.delivery_id for manifest in dao.saved] == [_command().delivery_id] * 5
 
         staged, claimed, confirmed = dao.saved[1], dao.saved[3], dao.saved[4]
+        assert dao.saved[0].source_state == "available"  # 历史（成果保存时核定）
+        assert staged.source_state == "unknown"  # 本次：DAO 不能新鲜核全部来源即显式 unknown
         assert staged.staged_path == str(_STAGED_PATH)
         assert staged.output_digest == confirmed.output_digest
         assert staged.output_bytes == len(store.staged_contents[0])
         assert confirmed.staged_path is None
-        assert claimed.source_state == "available"
+        assert claimed.source_state == "unknown"
         assert confirmed.artifact_digest == "b" * 64
         assert confirmed.verified_at == _CLOCK
 
@@ -346,6 +360,8 @@ class TestHappyPath:
         index = {field.path: field for field in fields}
         assert index["metadata:artifact_id"].value_text == "art-1"
         assert index["metadata:artifact_version"].value_text == "2"
+        assert index["metadata:source_available_state"].value_text == "available"
+        assert index["metadata:current_source_state"].value_text == "unknown"
         assert index["body:"].value_text == "成果正文"
         assert index["payload:/s"].value_text == "00123"
         assert index["payload:/n/1"].value_type == "null"
@@ -616,16 +632,15 @@ class TestCancelAndUnknown:
 
 
 class TestFreshSourceState:
-    async def test_source_state_is_refreshed_before_publish_claim(self) -> None:
-        artifacts = FakeArtifacts([_read()], fresh=_read(source_available_state="unknown"))
-        dao = FakePhaseDao()
+    async def test_file_splits_historical_and_current_state(self) -> None:
+        store = FakeStore()
+        artifacts = FakeArtifacts([_read()])
 
-        await _service(artifacts=artifacts, dao=dao, store=FakeStore()).deliver(_command(), _context())
+        await _service(artifacts=artifacts, dao=FakePhaseDao(), store=store).deliver(_command(), _context())
 
-        assert [query.artifact_id for query in artifacts.fresh_queries] == ["art-1"]
-        assert dao.saved[0].source_state == "available"
-        assert dao.saved[3].source_state == "unknown"
-        assert dao.saved[4].source_state == "unknown"
+        index = {field.path: field for field in read_delivery_fields(store.staged_contents[0], "md")}
+        assert index["metadata:source_available_state"].value_text == "available"
+        assert index["metadata:current_source_state"].value_text == "unknown"
 
     async def test_non_standard_source_state_is_recorded_as_unknown(self) -> None:
         dao = FakePhaseDao()
@@ -635,7 +650,7 @@ class TestFreshSourceState:
 
         assert [manifest.source_state for manifest in dao.saved] == ["unknown"] * 5
 
-    async def test_source_recheck_failure_blocks_publication(self) -> None:
+    async def test_source_recheck_failure_blocks_publication_before_rendering(self) -> None:
         class BrokenFresh(FakeArtifacts):
             async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> ArtifactRead:
                 if query.limit == 1:
@@ -649,11 +664,71 @@ class TestFreshSourceState:
 
         outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(_command(), _context())
 
+        assert dao.phases == ["manifest_saved"]
+        assert store.staged_contents == []
+        assert store.published == []
+        assert outcome.receipt.phase == "manifest_saved"
+        assert outcome.receipt.error_code is not None
+        assert outcome.receipt.error_code.startswith("delivery_source_recheck_failed:")
+
+    @pytest.mark.parametrize("format_name", ["md", "csv", "xlsx"])
+    async def test_disabled_state_is_rendered_consistently_in_all_formats(self, format_name: str) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts([_read()], fresh_states=["disabled"])
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(
+            _command(format=format_name), _context()
+        )
+
+        index = {field.path: field for field in read_delivery_fields(store.staged_contents[0], format_name)}
+        assert index["metadata:source_available_state"].value_text == "available"
+        assert index["metadata:current_source_state"].value_text == "disabled"
+        assert dao.saved[1].source_state == "disabled"
+        assert dao.saved[-1].output_digest == sha256_hex(store.staged_contents[0])
+        assert outcome.receipt.phase == "published_confirmed"
+
+    async def test_state_change_between_render_and_publish_rebuilds_file(self) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts([_read()], fresh_states=["available", "disabled", "disabled", "disabled"])
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(_command(), _context())
+
+        assert len(store.staged_contents) == 2
+        assert len(store.cancelled) == 1
+        index = {field.path: field for field in read_delivery_fields(store.staged_contents[-1], "md")}
+        assert index["metadata:source_available_state"].value_text == "available"
+        assert index["metadata:current_source_state"].value_text == "disabled"
+        assert dao.saved[1].output_digest == sha256_hex(store.staged_contents[-1])
+        assert dao.saved[-1].output_digest == sha256_hex(store.staged_contents[-1])
+        assert outcome.receipt.phase == "published_confirmed"
+
+    async def test_state_change_after_validation_stops_before_publish(self) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts([_read()], fresh_states=["available", "available", "disabled"])
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(_command(), _context())
+
         assert dao.phases == ["manifest_saved", "staged", "validated"]
         assert store.published == []
         assert outcome.receipt.phase == "validated"
-        assert outcome.receipt.error_code is not None
-        assert outcome.receipt.error_code.startswith("delivery_source_recheck_failed:")
+        assert outcome.receipt.error_code == "delivery_source_state_changed"
+        assert outcome.receipt.publish_effect == "not_attempted"
+
+    async def test_unstable_state_stops_before_staging_fact(self) -> None:
+        store = FakeStore()
+        dao = FakePhaseDao()
+        artifacts = FakeArtifacts([_read()], fresh_states=["available", "disabled"] * 3)
+
+        outcome = await _service(artifacts=artifacts, dao=dao, store=store).deliver(_command(), _context())
+
+        assert dao.phases == ["manifest_saved"]
+        assert store.published == []
+        assert len(store.cancelled) == 3
+        assert outcome.receipt.error_code == "delivery_source_state_unstable"
+        assert outcome.staged_cleaned is True
 
 
 class TestCsvAndXlsxFormats:

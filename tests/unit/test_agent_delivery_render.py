@@ -85,8 +85,18 @@ class TestBuildDeliveryFields:
         assert index["metadata:published_at"].value_text == ""
         assert index["metadata:cleaned_at"].value_type == "null"
         assert index["metadata:summary"].value_text == "成果摘要"
+        assert index["metadata:source_available_state"].value_text == "available"
+        assert index["metadata:current_source_state"].value_text == "unknown"
         assert index["body:"].value_type == "string"
         assert index["body:"].value_text == "成果正文"
+
+    def test_source_state_columns_are_split_and_canonical(self) -> None:
+        index = _by_path(
+            build_delivery_fields(_read(source_available_state="current"), current_source_state="disabled")
+        )
+
+        assert index["metadata:source_available_state"].value_text == "unknown"
+        assert index["metadata:current_source_state"].value_text == "disabled"
 
     def test_metadata_order_is_stable(self) -> None:
         fields = build_delivery_fields(_read())

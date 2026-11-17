@@ -7914,6 +7914,18 @@ DELIVERY_PHASES: Final[frozenset[str]] = frozenset(
 #: 交付时原来源当前状态（与读取时点分开；Release 前重新核验）。
 DELIVERY_SOURCE_STATES: Final[frozenset[str]] = frozenset({"available", "unavailable", "disabled", "unknown"})
 
+
+def canonical_delivery_source_state(value: object) -> str:
+    """来源状态统一词表口径：库内自由文本不在四值内时按 ``unknown``，不改写原事实。
+
+    ``agent_artifact.source_available_state`` 是自由文本列（成果保存时核定），
+    交付文件与 manifest 只接受 ``DELIVERY_SOURCE_STATES``；非标准取值既不得
+    伪装成 ``available``，也不得把历史取值冒充当次核定结果。
+    """
+
+    return value if isinstance(value, str) and value in DELIVERY_SOURCE_STATES else "unknown"
+
+
 #: 发布效果（未尝试 / 已发布 / 取消先胜 / 无法确证）。
 DELIVERY_PUBLISH_EFFECTS: Final[frozenset[str]] = frozenset(
     {"not_attempted", "published", "cancelled_before_publish", "unknown"}
@@ -8616,6 +8628,7 @@ _DELIVERY_METADATA_ORDER: Final[tuple[str, ...]] = (
     "actual_model_ref",
     "result_digest",
     "source_available_state",
+    "current_source_state",
     "summary",
     "published_at",
     "cleaned_at",
@@ -8813,12 +8826,18 @@ def validate_delivery_fields(fields: object) -> tuple[DeliveryField, ...]:
     return tuple(validated)
 
 
-def build_delivery_fields(read: object, *, body_text: str | None = None) -> tuple[DeliveryField, ...]:
+def build_delivery_fields(
+    read: object, *, body_text: str | None = None, current_source_state: str | None = None
+) -> tuple[DeliveryField, ...]:
     """把已保存成果版本转换为交付字段（完整正文 + 元数据 + 结构字段）。
 
     ``body_text`` 提供跨页组装后的完整正文；读取结果仍有 ``next_cursor`` 且
     未提供完整正文时拒绝（导出分页正文等同静默截断）。``result_payload`` 为
     ``None`` 表示未保存结构字段，与保存了空容器不同，不补造字段（R21）。
+
+    来源状态分列两列，不得混同：``source_available_state`` 是成果保存时记录
+    的历史状态；``current_source_state`` 是本次交付的核定状态，未显式提供时
+    按 ``unknown``（未核 ≠ 可用，R21）。两者都按统一词表口径规范化。
     """
 
     if not isinstance(read, ArtifactRead):
@@ -8841,7 +8860,8 @@ def build_delivery_fields(read: object, *, body_text: str | None = None) -> tupl
         "actual_input_digest": read.actual_input_digest,
         "actual_model_ref": read.actual_model_ref,
         "result_digest": read.result_digest,
-        "source_available_state": read.source_available_state,
+        "source_available_state": canonical_delivery_source_state(read.source_available_state),
+        "current_source_state": canonical_delivery_source_state(current_source_state),
         "summary": read.summary,
         "published_at": read.published_at,
         "cleaned_at": read.cleaned_at,
