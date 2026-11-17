@@ -75,8 +75,27 @@ from core.agent_types import (
     validate_history_query,
     validate_read_mark_command,
     validate_session_change_command,
+    decode_json_doc,
 )
 from data.persistence.daos.agent_dao import AgentDao
+from services.agent_service.comparison import (
+    STOP_REASON_USER_ENDED_GROUP,
+    ComparisonGroupStopPlan,
+    ComparisonGroupView,
+    ComparisonLaneObservation,
+    ComparisonLaneReceipt,
+    ComparisonReadQuery,
+    ComparisonSubmissionReceipt,
+    ComparisonSubmissionRequest,
+    FrozenComparisonGroup,
+    build_comparison_view,
+    build_lane_accept_request,
+    comparison_export_rows,
+    decode_comparison_manifest,
+    freeze_comparison_group,
+    observations_from_executions,
+    plan_group_stop,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,6 +331,146 @@ class AgentService:
                     events=tuple(observed),
                 )
             await asyncio.sleep(min(poll_interval_s, remaining))
+
+    # ------------------------------------------------------------------
+    # 多模型独立分析（F37/SQ-08）
+    # ------------------------------------------------------------------
+
+    async def submit_comparison(self, request: ComparisonSubmissionRequest) -> ComparisonSubmissionReceipt:
+        """受理一组多模型独立分析（F37）：共同输入一次冻结，逐路独立完整任务。
+
+        组内各路共享同一规范 manifest（相同正文/资料/用途/cutoff/历史前缀/角色
+        Prompt/Skills/MCP 范围/输出要求），各自使用所选具体连接（冻结 ID/revision，
+        运行期不得替换）。每路是 ``comparison_lane`` 独立总执行，按用户所选顺序
+        逐路排队；某一路受理失败如实记录该路错误码，不伪造已受理，不影响其他
+        路已保存事实。组受理成功不代表已派发或已消费（INV-06）。
+        """
+
+        self._require_open("submit_comparison")
+        try:
+            group = freeze_comparison_group(
+                user_scope=request.user_scope,
+                session_id=request.session_id,
+                source_module=request.source_module,
+                group_command_id=request.group_command_id,
+                shared=request.shared,
+                lanes=request.lanes,
+            )
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                f"{request.user_scope}/{request.session_id}",
+            ) from exc
+        receipts: list[ComparisonLaneReceipt] = []
+        for lane in group.lanes:
+            accept = build_lane_accept_request(
+                group,
+                lane,
+                expected_revision=request.expected_revision,
+                node_id=request.node_id,
+                workflow_id=request.workflow_id,
+                source_display_name=request.source_display_name,
+            )
+            try:
+                receipt = await self._dao.accept_request(accept)
+            except AgentServiceError as exc:
+                receipts.append(
+                    ComparisonLaneReceipt(
+                        lane_ref=lane.lane_ref,
+                        execution_id=None,
+                        command_record_id=None,
+                        commit_state=None,
+                        error_code=exc.code.value,
+                    )
+                )
+                continue
+            receipts.append(
+                ComparisonLaneReceipt(
+                    lane_ref=lane.lane_ref,
+                    execution_id=receipt.execution_id,
+                    command_record_id=receipt.command_record_id,
+                    commit_state=receipt.commit_state,
+                    error_code=None,
+                )
+            )
+        return ComparisonSubmissionReceipt(
+            group_ref=group.group_ref,
+            manifest_digest=group.manifest_digest,
+            lane_count=len(group.lanes),
+            lanes=tuple(receipts),
+        )
+
+    async def _load_comparison(self, query: ComparisonReadQuery) -> tuple[FrozenComparisonGroup, ComparisonGroupView]:
+        """读比较组共同 manifest + 会话内逐路事实并收敛（只读，零派发）。"""
+
+        self._require_open("read_comparison")
+        identity = f"{query.user_scope}/{query.session_id}/{query.group_ref}"
+        if not isinstance(query.user_scope, str) or query.user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
+        if not isinstance(query.session_id, str) or query.session_id == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session_id must be non-empty text", identity)
+        if not isinstance(query.group_ref, str) or query.group_ref == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "group_ref must be non-empty text", identity)
+        if isinstance(query.limit, bool) or not isinstance(query.limit, int) or not 1 <= query.limit <= 50:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "invalid_range: $.limit", identity)
+        payload = await self._dao.read_comparison_manifest(user_scope=query.user_scope, group_ref=query.group_ref)
+        if payload is None:
+            raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "comparison group not found", identity)
+        try:
+            group = decode_comparison_manifest(decode_json_doc(payload))
+        except (AgentValidationError, ValueError) as exc:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "comparison manifest unreadable", identity
+            ) from exc
+        if group.user_scope != query.user_scope or group.session_id != query.session_id:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "comparison group outside target session", identity)
+        session = await self._dao.get_session_read(
+            SessionReadQuery(session_id=query.session_id, limit=query.limit),
+            user_scope=query.user_scope,
+        )
+        observations = observations_from_executions(group, session.executions)
+        return group, build_comparison_view(group, observations)
+
+    async def read_comparison(self, query: ComparisonReadQuery) -> ComparisonGroupView:
+        """只读比较（F37）：按准确组身份查各路既有成果与状态，零模型/零新派发。
+
+        未知/未启动/结果未确认逐路如实保留，不伪造成功或失败（R21）；历史按组
+        找回，不按当前设置重推连接或共同输入。
+        """
+
+        _, view = await self._load_comparison(query)
+        return view
+
+    async def export_comparison(self, query: ComparisonReadQuery) -> tuple[dict[str, str], ...]:
+        """只读导出（沿 F26 原成果规则）：逐路原状态，不新增合并报告或模型调用。"""
+
+        view = await self.read_comparison(query)
+        return comparison_export_rows(view)
+
+    async def stop_comparison_group(
+        self,
+        query: ComparisonReadQuery,
+        *,
+        reason: str = STOP_REASON_USER_ENDED_GROUP,
+    ) -> ComparisonGroupStopPlan:
+        """组一致停止计划（F37）：未派发撤回、在途停新派发、已完成成果保留。
+
+        共同资料被停止使用时所有路共享同一冻结输入，故组内一致处理；在途未知
+        仍核实（不伪回滚）。本入口只读事实并产出动作计划，不写库、不派发。
+        """
+
+        group, view = await self._load_comparison(query)
+        observations = tuple(
+            ComparisonLaneObservation(
+                lane_ref=lane.lane_ref,
+                display_state=lane.display_state,
+                reliable_result=lane.reliable_result,
+                artifact_refs=lane.artifact_refs,
+            )
+            for lane in view.lanes
+        )
+        return plan_group_stop(group, observations, reason=reason)
 
     # ------------------------------------------------------------------
     # 写入面（受理）

@@ -753,6 +753,11 @@ class AgentDao(BaseDao):
             occurred_wire = occurred_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
             # 5. execution（root；显示态 queued / 目标覆盖 unknown 初始值，§5.1）。
+            # F37 多模型比较：各路是共同冻结输入的独立总执行（execution_kind=
+            # comparison_lane，携带组/路引用）；普通研究保持 root。
+            comparison_group_ref = request.comparison_group_ref
+            comparison_lane_ref = request.comparison_lane_ref
+            execution_kind = "comparison_lane" if comparison_group_ref is not None else "root"
             # 并发窗口防护：intent 唯一部分索引（跨 session 并发受理同一意图，
             # 各自持不同 session 行锁互不可见）——撞索引即并发首胜者已受理，
             # 按 INV-01 归 INPUT_CONFLICT（败者重传走步骤 2 查回原回执）。
@@ -762,10 +767,12 @@ class AgentDao(BaseDao):
                         user_scope=request.user_scope,
                         execution_id=execution_id,
                         session_id=request.session_id,
-                        execution_kind="root",
+                        execution_kind=execution_kind,
                         source_module=request.source_module,
                         business_request_id=request.business_request_id,
                         node_id=request.node_id,
+                        comparison_group_ref=comparison_group_ref,
+                        comparison_lane_ref=comparison_lane_ref,
                         display_state="queued",
                         goal_coverage="unknown",
                         intent_digest=identity.intent_digest,
@@ -1075,6 +1082,50 @@ class AgentDao(BaseDao):
     # ------------------------------------------------------------------
     # F-02-1：来源精确读取（§4.2 read_source）
     # ------------------------------------------------------------------
+
+    async def read_comparison_manifest(self, *, user_scope: str, group_ref: str) -> str | None:
+        """读取比较组共同冻结 manifest（F37/SQ-08）：只读，零派发/零模型调用。
+
+        组内各路受理时把**同一份**规范 manifest 存入命令 ``request_payload``；
+        本方法按 ``execution_kind=comparison_lane`` + ``comparison_group_ref``
+        任取其中一行的 manifest 并重新规范编码（键序无关，身份由其规范字节派生）。
+        组不存在返回 ``None``（由调用方按未知处理，不伪造空组）；坏载荷交由上层
+        ``OPERATION_UNKNOWN`` 判定，不在此层猜测。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{group_ref}"
+        if not isinstance(user_scope, str) or user_scope == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
+        if not isinstance(group_ref, str) or group_ref == "":
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "group_ref must be non-empty text", identity)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            payload = (
+                await conn.execute(
+                    sa.select(AgentCommand.request_payload)
+                    .select_from(AgentCommand)
+                    .join(
+                        AgentExecution,
+                        sa.and_(
+                            AgentExecution.user_scope == AgentCommand.user_scope,
+                            AgentExecution.execution_id == AgentCommand.execution_id,
+                        ),
+                    )
+                    .where(
+                        AgentCommand.user_scope == user_scope,
+                        AgentExecution.user_scope == user_scope,
+                        AgentExecution.comparison_group_ref == group_ref,
+                        AgentExecution.execution_kind == "comparison_lane",
+                    )
+                    .order_by(AgentCommand.created_at)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if payload is None:
+            return None
+        return json_doc(payload)
 
     async def read_source(self, query: SourceReadQuery, *, user_scope: str) -> SourceRead:
         """读**已准备**的来源选定表示（§4.2/§9.10）：只读，零解析、零扩大范围。
