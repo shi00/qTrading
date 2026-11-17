@@ -7573,9 +7573,13 @@ class AgentDao(BaseDao):
     async def save_cleanup_job(
         self, record: CleanupJobRecord, *, content_manifest: dict[str, object] | None = None
     ) -> bool:
-        """创建清理作业；同身份重放返回 False，异输入抛 ``INPUT_CONFLICT``。
+        """创建清理作业；同身份重放返回 False，异输入抛冲突（D26）。
 
-        身份 = (user_scope, cleanup_job_id, owner_ref, preview_digest, 固定集合)；
+        身份 = (user_scope, cleanup_job_id, owner_ref, preview_digest, 固定集合,
+        ``expected_revision``)；身份不同抛 ``INPUT_CONFLICT``，仅预期版不同抛
+        ``REVISION_CONFLICT``，两者均不改写已登记记录。``expected_revision`` 纳入
+        身份是因为 ``commit_cleanup_fence`` 按库内版本匹配：登记若接受新版，
+        fence 将永久拒绝该作业。
         ``content_manifest`` 同属 §9.11 固定集合，同身份重放时须逐值一致，否则
         拒绝（避免首个值被静默保留、后续调用方误以为自己的集合已生效）。
         """
@@ -7766,6 +7770,13 @@ class AgentDao(BaseDao):
     def _require_same_cleanup_identity(
         existing: CleanupJobRecord | None, record: CleanupJobRecord, cause: Exception
     ) -> None:
+        """同 job 重放的身份核对：身份集合 + 预期版均为不可变身份（D26）。
+
+        ``expected_revision`` 参与身份比较：同 job 仅改预期版不是幂等重放——登记时
+        若接受新版，``commit_cleanup_fence`` 仍按库内旧版匹配，fence 会永久拒绝该作业。
+        因此仅版本不同报 ``REVISION_CONFLICT``，且不改写已登记记录。
+        """
+
         label = f"{record.user_scope}/{record.cleanup_job_id}"
         if (
             existing is None
@@ -7775,6 +7786,12 @@ class AgentDao(BaseDao):
         ):
             raise AgentServiceError(
                 AgentErrorCode.INPUT_CONFLICT, "cleanup job already exists with different identity", label
+            ) from cause
+        if existing.expected_revision != record.expected_revision:
+            raise AgentServiceError(
+                AgentErrorCode.REVISION_CONFLICT,
+                "cleanup job already exists with different expected_revision",
+                label,
             ) from cause
 
     @staticmethod
