@@ -6,6 +6,8 @@
 - 30,000 UTF-16 单元分段：恰等通过、超一完整分条、非 BMP 不拆代理对；
 - MD / CSV(BOM UTF-8) / XLSX 三格式渲染后逐字段回读一致；
 - XLSX 公式单元格 0（``=SUM(...)`` 与 ``00123`` 均作为文本原样保留）；
+- CSV 文本保护：公式前缀/空白前缀/前导零/高精度数值/合法负数加前导 ``'`` 后
+  重开不按公式或数字解释，回读去掉恰好一个 ``'`` 即还原原值（可逆）；
 - 回读比对能发现篡改，渲染摘要确定且与格式绑定。
 """
 
@@ -252,6 +254,87 @@ class TestRenderRoundTrip:
         with pytest.raises(DeliveryRenderError) as error:
             render_delivery(self._fields(), "pdf")
         assert error.value.code == "invalid_format"
+
+
+class TestCsvTextProtection:
+    """CSV 无单元格格式位：用前导 ``'`` 把会被重解释的值钉成文本，且可逆还原。"""
+
+    _MARK = "'"
+
+    @staticmethod
+    def _fields(pairs: list[tuple[str, str]]) -> tuple[DeliveryField, ...]:
+        return tuple(
+            DeliveryField("payload", f"/{index}", value_type, text) for index, (value_type, text) in enumerate(pairs)
+        )
+
+    def test_formula_and_whitespace_prefixes_are_marked(self) -> None:
+        values = ["=SUM(A1:A2)", "+1+1", "-2+3", "@SUM(A1:A2)", " 前导空格", "\t制表符", "\r回车"]
+        fields = self._fields([("string", value) for value in values])
+        rendered = render_delivery(fields, "csv")
+        text = rendered.content.decode("utf-8-sig")
+
+        for value in values:
+            assert f'"{self._MARK}{value}"' in text
+        assert read_delivery_fields(rendered.content, "csv") == fields
+
+    def test_numeric_lexemes_and_leading_zeros_are_marked(self) -> None:
+        cases = [
+            ("string", "00123"),
+            ("string", "0x1F"),
+            ("float", "0.1234567890123456789"),
+            ("float", "1.50"),
+            ("float", "1e400"),
+            ("int", "12345678901234567890"),
+        ]
+        fields = self._fields(cases)
+        rendered = render_delivery(fields, "csv")
+        text = rendered.content.decode("utf-8-sig")
+
+        for _value_type, value in cases:
+            assert f'"{self._MARK}{value}"' in text
+        assert read_delivery_fields(rendered.content, "csv") == fields
+
+    def test_legal_negative_number_keeps_value_and_type(self) -> None:
+        fields = self._fields([("int", "-5")])
+        rendered = render_delivery(fields, "csv")
+
+        assert f'"{self._MARK}-5"' in rendered.content.decode("utf-8-sig")
+        readback = read_delivery_fields(rendered.content, "csv")
+        assert readback == fields
+        assert readback[0].value_type == "int"
+        assert readback[0].value_text == "-5"
+
+    def test_apostrophe_leading_value_is_doubled_and_restored(self) -> None:
+        fields = self._fields([("string", "'纯文本")])
+        rendered = render_delivery(fields, "csv")
+
+        assert f'"\'{self._MARK}纯文本"' in rendered.content.decode("utf-8-sig")
+        assert read_delivery_fields(rendered.content, "csv") == fields
+
+    def test_plain_text_is_not_marked(self) -> None:
+        fields = self._fields([("string", "普通文本"), ("string", "")])
+        rendered = render_delivery(fields, "csv")
+        text = rendered.content.decode("utf-8-sig")
+
+        assert f'"{self._MARK}普通文本"' not in text
+        assert '"普通文本"' in text
+        assert read_delivery_fields(rendered.content, "csv") == fields
+
+    def test_risky_values_survive_verification_in_all_formats(self) -> None:
+        fields = self._fields(
+            [
+                ("string", "=SUM(A1:A2)"),
+                ("string", "00123"),
+                ("float", "0.1234567890123456789"),
+                ("int", "-5"),
+                ("string", " 前导空格"),
+                ("string", "'已带前缀"),
+            ]
+        )
+        for format_name in ("md", "csv", "xlsx"):
+            rendered = render_delivery(fields, format_name)
+            verify_delivery_readback(fields, rendered.content, format_name)
+            assert read_delivery_fields(rendered.content, format_name) == fields
 
 
 class TestVerifyReadback:

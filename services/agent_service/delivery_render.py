@@ -3,6 +3,12 @@
 合同：
 - MD / CSV（BOM UTF-8）/ XLSX 三格式都从同一份 :class:`DeliveryField` 序列渲染，
   单元格全部为文本；``=SUM(...)`` 与 ``00123`` 原样保留，不能变成公式或数字；
+- CSV 没有单元格格式位，文本保护只能落在文本自身（RFC4180 全字段引号 +
+  前导标记转义），规则见 :func:`_encode_csv_value`：会被表格软件重解释的值
+  （公式前缀 ``= + - @``、空白前缀、数字词法）加一个前导 ``'``（表格软件的
+  文本前缀），重开不执行公式、不改写精度/前导零/合法负号；值本身以 ``'``
+  开头时再加一个 ``'``，回读时去掉恰好一个前导 ``'``，任何原值均可逆还原。
+  MD（纯文本围栏）与 XLSX（文本类型单元格 + 数字格式 ``@``）不需要该标记；
 - 长字段按 30,000 UTF-16 单元分段（``core.agent_types.split_utf16_chunks``），
   分段序号/总数入列，回读拼接即原值，不截断；
 - 回读（``read_delivery_fields``）是发布前 ``validated`` 阶段的事实来源：解析失败、
@@ -17,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import zipfile
 from collections.abc import Sequence
 from typing import cast
@@ -39,6 +46,12 @@ from core.agent_types import (
 _SECTION_TITLES = {"metadata": "元数据", "body": "正文", "payload": "结构字段"}
 _XLSX_SHEET = "delivery"
 _CSV_BOM = b"\xef\xbb\xbf"
+#: 表格软件的文本前缀：前导 ``'`` 让单元格按文本落盘，不按公式/数字解释。
+_CSV_TEXT_MARKER = "'"
+#: 会触发公式求值或被当作引用/运算符的起始字符（OWASP CSV 注入清单）。
+_CSV_FORMULA_PREFIXES = frozenset("=+-@")
+#: 会被表格软件吞成数字的完整数字词法（含前导零、正负号、指数、十六进制）。
+_CSV_NUMERIC_LEXEME = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|0[xX][0-9a-fA-F]+")
 
 
 class DeliveryRenderError(RuntimeError):
@@ -90,13 +103,49 @@ def _render_markdown(fields: Sequence[DeliveryField]) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
+def _csv_value_needs_text_marker(text: str) -> bool:
+    """值是否会被表格软件重解释：公式前缀、空白前缀或数字词法（改精度/前导零/类型）。"""
+
+    if text == "":
+        return False
+    if text[0] in _CSV_FORMULA_PREFIXES or text[0].isspace():
+        return True
+    return _CSV_NUMERIC_LEXEME.fullmatch(text) is not None
+
+
+def _encode_csv_value(text: str) -> str:
+    """给需保护的值加一个前导 ``'``；原值以 ``'`` 开头时再加一个（写成 ``''``）。
+
+    加固后表格软件重开仍按文本显示，不执行公式、不改写精度/前导零/合法负号；
+    与 :func:`_decode_csv_value` 严格互逆（去掉恰好一个前导 ``'``）。
+    """
+
+    if text.startswith(_CSV_TEXT_MARKER) or _csv_value_needs_text_marker(text):
+        return _CSV_TEXT_MARKER + text
+    return text
+
+
+def _decode_csv_value(text: str) -> str:
+    """回读还原：去掉恰好一个前导保护标记 ``'``（无标记即原值）。"""
+
+    if text.startswith(_CSV_TEXT_MARKER):
+        return text[1:]
+    return text
+
+
 def _render_csv(fields: Sequence[DeliveryField]) -> bytes:
     buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
+    writer = csv.writer(buffer, lineterminator="\n", quoting=csv.QUOTE_ALL)
     writer.writerow(DELIVERY_RENDER_COLUMNS)
     for field in fields:
         writer.writerow(
-            [field.path, field.value_type, str(field.chunk_index), str(field.chunk_count), field.value_text]
+            [
+                field.path,
+                field.value_type,
+                str(field.chunk_index),
+                str(field.chunk_count),
+                _encode_csv_value(field.value_text),
+            ]
         )
     return _CSV_BOM + buffer.getvalue().encode("utf-8")
 
@@ -214,7 +263,7 @@ def _read_csv(content: bytes) -> tuple[DeliveryField, ...]:
     for row in rows[1:]:
         if len(row) != len(DELIVERY_RENDER_COLUMNS):
             raise _invalid("CSV 行列数不符")
-        fields.append(_field_from_row(row[0], row[1], row[2], row[3], row[4]))
+        fields.append(_field_from_row(row[0], row[1], row[2], row[3], _decode_csv_value(row[4])))
     return tuple(fields)
 
 
