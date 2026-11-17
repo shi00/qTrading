@@ -71,12 +71,18 @@ OBSERVE_POLL_INTERVAL_SEC: Final[float] = 0.2
 OBSERVE_SLICE_SEC: Final[float] = 2.0
 
 #: 连续无进展观察预算（HANDOFF §8.3：观察超时只停观察、不取消执行）。
-#: 取值覆盖单叶长任务（多轮模型调用 + 工具）并留余量；预算耗尽时结束本次推进
-#: 批次（``converged=False``）由恢复机制重接观察，不伪造叶终态（§8.2 未知不等于
-#: 失败）。以「连续无进展观察次数」计量：该计数只来自被记录的 step 结果，重放
-#: 可确定复现，不引入墙钟依赖（不把超时升级为 workflow ERROR，避免恢复在同点
-#: 反复失败）。
+#: 取值覆盖单叶长任务（多轮模型调用 + 工具）并留余量；预算耗尽**不结束父**：
+#: 生产父 workflow 经 :func:`wait_next_observation_window` 转入 DBOS 持久等待后
+#: 开启新观察窗口（见 :func:`drive_leaf_dag`），超预算完成的长叶仍推进其后继，
+#: 不伪造叶终态（§8.2 未知不等于失败）。以「连续无进展观察次数」计量：该计数
+#: 只来自被记录的 step 结果，重放可确定复现，不引入墙钟依赖（不把超时升级为
+#: workflow ERROR，避免恢复在同点反复失败）。
 CHILD_OBSERVE_TIMEOUT_SEC: Final[float] = 900.0
+
+#: 观察预算耗尽后的持久等待间隔（DBOS 原生可恢复等待）：父 workflow 以
+#: ``DBOS.sleep_async`` 让出长叶期间的推进（恢复时已完成的 sleep 按记录跳过），
+#: 等待结束后重新观察，不把「叶子仍在运行」误记为父批次结束。
+IDLE_WAIT_INTERVAL_SEC: Final[float] = 60.0
 
 
 _PAYLOAD_VERSION_KEY: Final = "payload_version"
@@ -500,6 +506,25 @@ DBOS 内由单个观察 step 承载（其结果被记录），重放时按记录
 迭代次数，父体操作序号因此确定（B1）；无新事实时返回空字典。
 """
 
+LeafWaitCheckpoint = Callable[[], Awaitable[bool]]
+"""观察预算耗尽时的持久等待检查点（返回 ``True`` 继续新观察窗口）。
+
+生产实现为 :func:`wait_next_observation_window`（DBOS 持久 sleep，崩溃恢复时
+跳过已完成睡眠）；纯逻辑调用可不提供，此时预算耗尽即结束本批次。
+"""
+
+
+async def wait_next_observation_window(sleep: Callable[[float], Awaitable[None]] = DBOS.sleep_async) -> bool:
+    """观察预算耗尽后执行一次持久等待，返回 ``True`` 表示继续观察。
+
+    默认使用 ``DBOS.sleep_async``：它是 DBOS 原生可恢复等待（已完成睡眠在恢复
+    时被跳过），故父 workflow 崩溃重启后从记录点继续观察，而不是当作正常结束。
+    ``sleep`` 可注入以便单测核验等待间隔而不启动 DBOS 运行时。
+    """
+
+    await sleep(IDLE_WAIT_INTERVAL_SEC)
+    return True
+
 
 async def drive_leaf_dag(
     plan: PlanSpecProposal,
@@ -508,6 +533,7 @@ async def drive_leaf_dag(
     *,
     preserved: tuple[NodeOutcome, ...] = (),
     idle_observation_limit: int | None = None,
+    wait_checkpoint: LeafWaitCheckpoint | None = None,
 ) -> PlanRunSummary:
     """事件驱动推进一层叶 DAG，返回叶事实汇总。
 
@@ -516,6 +542,11 @@ async def drive_leaf_dag(
     须把「已判定的业务失败」作为 ``NodeOutcome(state="failed")`` 返回；未判定
     异常与 ``CancelledError`` 向上传播（不伪造 failed、不吞取消，R2/R21）。
     非终态结果（暂停/等待/未知）使本次推进在没有可运行叶时结束且不收敛。
+
+    观察预算（``idle_observation_limit`` 个连续无进展切片）耗尽**不是父终态**：
+    提供 ``wait_checkpoint``（生产为 DBOS 持久等待）时，本函数持久等待后开启新
+    观察窗口继续推进——超预算完成的长叶仍只启动一次后继（R02）；未提供时（纯
+    逻辑调用）按本批次无可恢复接续者结束并保持 ``converged=False``，不伪造终态。
 
     确定性（B1 重放面）：本循环只由**父协程顺序**发出启动/观察操作——不创建
     并发任务，不以真实时序决定操作顺序；完成集合由 ``observe_leaves`` 的
@@ -539,9 +570,14 @@ async def drive_leaf_dag(
         if not facts:
             idle_observations += 1
             if idle_observation_limit is not None and idle_observations >= idle_observation_limit:
-                # §8.3：预算耗尽只停观察，不取消子执行、不伪造终态；本次推进批次
-                # 以 converged=False 结束，由恢复机制重接观察。
-                break
+                if wait_checkpoint is None:
+                    # §8.3：无持久等待接续者时只停观察，不取消子执行、不伪造终态。
+                    break
+                # 预算耗尽：持久等待检查点后重开观察窗口（叶子仍在运行，父不结束）。
+                idle_observations = 0
+                if not await wait_checkpoint():
+                    break
+                continue
             continue
         idle_observations = 0
         for node_id, outcome in facts.items():
@@ -678,7 +714,9 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     - 返回 ``converged=False`` 的汇总（暂停/等待/决定/未知）**不等于研究结束**，
       父 workflow 结束只表示本推进批次结束；终态事实由服务层投影，不由本层升级。
     - 叶事实在叶执行内部保存（应用侧），父观察被取消/失败不丢失已完成叶成果。
-    - 观察超时只停观察（§8.3），异常上抛由恢复机制重接；不伪造叶终态。
+    - 观察预算耗尽转入 DBOS 持久等待（:func:`wait_next_observation_window`）后
+      继续观察；父不因超预算正常结束，超预算完成的长叶仍推进其后继（R02）。
+      观察异常上抛由恢复机制重接；不伪造叶终态。
     - 重放顺序（B1）：启动/观察操作全部由父协程按计划顺序发出，完成集合由
       ``agent_leaf_observe`` step 的记录还原；子 workflow ID 按身份固定
       （``leaf_workflow_id``）作为去重、观察复接与重试轮隔离。
@@ -718,6 +756,7 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         observe_leaves,
         preserved=preserved,
         idle_observation_limit=idle_limit,
+        wait_checkpoint=wait_next_observation_window,
     )
     return summary.to_wire()
 
@@ -861,6 +900,7 @@ def build_retry_payload(
 
 
 __all__ = [
+    "IDLE_WAIT_INTERVAL_SEC",
     "LEAF_EXECUTE_STEP_NAME",
     "LEAF_OBSERVE_STEP_NAME",
     "LEAF_WORKFLOW_NAME",
@@ -872,6 +912,7 @@ __all__ = [
     "LeafRunner",
     "LeafRuntimeRegistry",
     "LeafStart",
+    "LeafWaitCheckpoint",
     "NodeOutcome",
     "PlanRunSummary",
     "RetryScope",
@@ -888,4 +929,5 @@ __all__ = [
     "observe_leaf_children",
     "run_leaf_workflow",
     "run_research_workflow",
+    "wait_next_observation_window",
 ]

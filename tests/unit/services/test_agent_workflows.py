@@ -6,6 +6,7 @@
 - 暂停/等待/未知效果不自动结束父（不伪造终态、不启动后继）；
 - 汇总区分叶事实与目标完成（``leaves_all_succeeded`` 不等于目标已覆盖）；
 - 事件驱动推进：B 结束即启动 D，不按固定批次 gather；
+- 观察预算耗尽经持久等待接续：超预算完成的长叶仍推进后继且后继只启动一次；
 - 取消与未判定异常向上传播（R2/R21：不伪造 failed）；
 - 封闭 wire 与叶执行器登记的明确拒绝语义。
 """
@@ -19,6 +20,7 @@ import pytest
 
 from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal
 from services.agent_service.workflows import (
+    IDLE_WAIT_INTERVAL_SEC,
     LeafDagScheduler,
     LeafExecutionContext,
     LeafRuntimeRegistry,
@@ -34,6 +36,7 @@ from services.agent_service.workflows import (
     decode_research_payload,
     drive_leaf_dag,
     leaf_workflow_id,
+    wait_next_observation_window,
 )
 
 pytestmark = pytest.mark.unit
@@ -433,7 +436,7 @@ def test_drive_issues_start_and_observe_in_parent_order() -> None:
 
 
 def test_drive_observation_budget_only_stops_observation() -> None:
-    """连续无进展观察达预算即停观察：父以 converged=False 结束、不伪造叶终态（§8.3/R21）。"""
+    """未提供持久等待接续者时，达预算只停观察：converged=False、不伪造叶终态（§8.3/R21）。"""
     plan = _plan(_node("a"))
 
     async def start(node: PlanNodeSpec) -> str:
@@ -446,6 +449,100 @@ def test_drive_observation_budget_only_stops_observation() -> None:
     assert summary.converged is False
     assert summary.pending == ("a",)
     assert summary.succeeded == ()
+
+
+def test_drive_budget_exhaustion_resumes_with_persistent_wait() -> None:
+    """预算耗尽不结束父：持久等待后续观察，超预算完成的长叶仍推进后继且后继只启动一次（R02）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    started: list[str] = []
+    observation_rounds = 0
+    waits: list[int] = []
+
+    async def start(node: PlanNodeSpec) -> str:
+        started.append(node.node_id)
+        return f"wf:{node.node_id}"
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        nonlocal observation_rounds
+        observation_rounds += 1
+        node_ids = {node_id for node_id, _ in children}
+        if observation_rounds == 7 and "a" in node_ids:
+            return {"a": _outcome("a")}
+        if observation_rounds == 8 and "b" in node_ids:
+            return {"b": _outcome("b")}
+        return {}
+
+    async def wait_checkpoint() -> bool:
+        waits.append(observation_rounds)
+        return True
+
+    summary = asyncio.run(
+        drive_leaf_dag(
+            plan,
+            start,
+            observe,
+            idle_observation_limit=3,
+            wait_checkpoint=wait_checkpoint,
+        )
+    )
+    assert waits == [3, 6]  # 两个预算窗口耗尽各持久等待一次
+    assert started == ["a", "b"]  # B 只在 A 完成后启动一次，不依赖新消息或重提请求
+    assert summary.succeeded == ("a", "b")
+    assert summary.converged is True
+
+
+def test_drive_wait_checkpoint_can_end_batch_without_fake_terminal() -> None:
+    """负例：接续者拒绝继续时结束批次，保持 converged=False、不伪造终态（R21）。"""
+    plan = _plan(_node("a"))
+
+    async def start(node: PlanNodeSpec) -> str:
+        return "wf:a"
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        return {}
+
+    async def wait_checkpoint() -> bool:
+        return False
+
+    summary = asyncio.run(
+        drive_leaf_dag(plan, start, observe, idle_observation_limit=2, wait_checkpoint=wait_checkpoint)
+    )
+    assert summary.converged is False
+    assert summary.pending == ("a",)
+    assert summary.succeeded == ()
+
+
+def test_drive_wait_checkpoint_cancellation_propagates() -> None:
+    """取消在持久等待点继续传播（R2：不吞 CancelledError、不转成终态事实）。"""
+    plan = _plan(_node("a"))
+
+    async def start(node: PlanNodeSpec) -> str:
+        return "wf:a"
+
+    async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, NodeOutcome]:
+        return {}
+
+    calls: list[str] = []
+
+    async def wait_checkpoint() -> bool:
+        calls.append("wait")
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        asyncio.run(drive_leaf_dag(plan, start, observe, idle_observation_limit=1, wait_checkpoint=wait_checkpoint))
+    assert calls == ["wait"]  # 取消在持久等待点传出，未被吞并成终态事实
+    assert isinstance(excinfo.value, asyncio.CancelledError)
+
+
+def test_wait_next_observation_window_uses_durable_sleep_interval() -> None:
+    """持久等待检查点按固定间隔 sleep 一次并返回继续（DBOS 原生可恢复等待的间隔面）。"""
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    assert asyncio.run(wait_next_observation_window(sleep=fake_sleep)) is True
+    assert slept == [IDLE_WAIT_INTERVAL_SEC]
 
 
 def test_drive_rejects_outcome_for_unstarted_node() -> None:
