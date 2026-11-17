@@ -7390,6 +7390,7 @@ class AgentDao(BaseDao):
         """global marker 行锁公共路径：postpone_through=None 为新批次递增，
         否则为稍后水位 GREATEST 合并（R22）。"""
 
+        self._check_engine()
         identity = f"{user_scope}/global"
         _require_text_field(user_scope, "user_scope", identity)
         engine = self.engine

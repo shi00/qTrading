@@ -10,6 +10,7 @@
 AgentDao 事务方法族随 C-02/C-03/C-04 实现，本文件只锁注册与守卫基线。
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
@@ -83,6 +84,85 @@ class TestAgentDaoEngineGuard:
         with pytest.raises(EngineDisposedError, match="Engine disposed") as excinfo:
             await dao._read_db_select(sa.select(sa.literal(1)))
         assert "AgentDao" in str(excinfo.value)
+
+
+def _batch_engine(marker_row: object | None) -> tuple[MagicMock, MagicMock]:
+    """engine.begin() 风格的假引擎：select 返回指定 marker 行，记录 conn 调用。"""
+
+    proxy = MagicMock()
+    proxy.first.return_value = marker_row
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value=proxy)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=conn)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    engine = MagicMock(spec=AsyncEngine)
+    engine.begin = MagicMock(return_value=cm)
+    return engine, conn
+
+
+class TestAgentDaoDecisionBatchEngineGuard:
+    """R5（检视 D25）：决定批次入口在引擎不可用时零 DB 访问即拒绝。"""
+
+    @pytest.mark.asyncio
+    async def test_begin_decision_batch_uninitialized_rejected(self):
+        dao = AgentDao(None)
+        with pytest.raises(RuntimeError, match="Engine not initialized") as excinfo:
+            await dao.begin_decision_batch(user_scope="u1")
+        assert "AgentDao" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_begin_decision_batch_disposed_rejected_without_db_calls(self, monkeypatch):
+        engine, conn = _batch_engine(None)
+        monkeypatch.setattr(engine_provider, "is_disposed", lambda *args: True)
+        dao = AgentDao(engine)
+        with pytest.raises(EngineDisposedError, match="Engine disposed") as excinfo:
+            await dao.begin_decision_batch(user_scope="u1")
+        assert "AgentDao" in str(excinfo.value)
+        engine.begin.assert_not_called()
+        assert conn.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_postpone_decision_batch_uninitialized_rejected(self):
+        dao = AgentDao(None)
+        with pytest.raises(RuntimeError, match="Engine not initialized"):
+            await dao.postpone_decision_batch(user_scope="u1", through_batch_seq=0)
+
+    @pytest.mark.asyncio
+    async def test_postpone_decision_batch_disposed_rejected_without_db_calls(self, monkeypatch):
+        engine, conn = _batch_engine(None)
+        monkeypatch.setattr(engine_provider, "is_disposed", lambda *args: True)
+        dao = AgentDao(engine)
+        with pytest.raises(EngineDisposedError, match="Engine disposed"):
+            await dao.postpone_decision_batch(user_scope="u1", through_batch_seq=0)
+        engine.begin.assert_not_called()
+        assert conn.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_begin_decision_batch_increments_batch_seq(self):
+        # 正常路径不回归：无 marker 行时 insert 后 batch_seq 从 0 递增到 1。
+        engine, conn = _batch_engine(None)
+        dao = AgentDao(engine)
+        fact = await dao.begin_decision_batch(user_scope="u1")
+        assert fact.batch_seq == 1
+        assert fact.postponed_through_seq is None
+        assert fact.replayed is False
+        assert conn.execute.await_count == 2  # select 行锁 + insert
+
+    @pytest.mark.asyncio
+    async def test_postpone_decision_batch_greatest_merge(self):
+        # 正常路径不回归：暂缓水位取 GREATEST（前进则落库，乱序不回退）。
+        row = SimpleNamespace(batch_seq=3, postponed_through_seq=1)
+        engine, conn = _batch_engine(row)
+        dao = AgentDao(engine)
+        forward = await dao.postpone_decision_batch(user_scope="u1", through_batch_seq=2)
+        assert forward.batch_seq == 3
+        assert forward.postponed_through_seq == 2
+        assert forward.replayed is False
+        row.postponed_through_seq = forward.postponed_through_seq  # 模拟落库后的水位
+        stale = await dao.postpone_decision_batch(user_scope="u1", through_batch_seq=1)
+        assert stale.postponed_through_seq == 2
+        assert stale.replayed is True
 
 
 class TestBacktestDaoStrictRead:
