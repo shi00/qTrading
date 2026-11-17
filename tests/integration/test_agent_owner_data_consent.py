@@ -59,6 +59,8 @@ def isolated_owner_config(tmp_path):
                 "model": "local-model",
                 "api_base": None,
                 "billing": {"mode": "usage_only", "pricing_unit": "llm_tokens"},
+                # M15：核权请求冻结 connection_revision=2，配置须为同一真实版本
+                "connection_revision": 2,
             }
         ]
         raw["model_management"] = mm

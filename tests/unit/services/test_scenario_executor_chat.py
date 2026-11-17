@@ -852,6 +852,52 @@ class TestChatDataConsentGate:
         assert request.attempt_id != "mc-1"
 
     @pytest.mark.asyncio
+    async def test_authorize_attempt_uses_frozen_connection_revision(self):
+        """M15：Agent 严格准入按实际派发连接的冻结版本核权（不放宽为未知）。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        executor = _executor(adapter, _recorder_mock())
+        executor._config_service.authorize_data_attempt = AsyncMock(
+            return_value=_data_receipt(DataAttemptOutcome.ALLOW)
+        )
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(data_consent=_data_consent()),
+        )
+        assert outcome.status == "succeeded"
+        kwargs = executor._config_service.authorize_attempt.await_args.kwargs
+        assert kwargs["connection_revision"] == 1
+
+    @pytest.mark.asyncio
+    async def test_same_id_revision_standin_zero_outbound(self):
+        """M15：快照同 ID 替身版本 ≠ 操作冻结版本 → 瞬态拒绝，零出站不回退。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        authorize = AsyncMock(return_value=_data_receipt(DataAttemptOutcome.ALLOW))
+        executor._config_service.authorize_data_attempt = authorize
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"),),
+                (replace(_remote_conn(), connection_revision=2),),
+                capabilities={
+                    "stream": {"support": "supported", "source": "validation", "connection_revision": 2},
+                    "tools": {"support": "supported", "source": "validation", "connection_revision": 2},
+                },
+            ),
+            binding=_binding(data_consent=_data_consent()),  # 冻结 connection_revision=1
+        )
+
+        assert outcome.status == "failed"
+        assert "connection revision changed (transient)" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        authorize.assert_not_awaited()
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_retry_after_failure_rechecks_and_zero_outbound_when_revoked(self):
         """首次失败后许可撤用：重试前新鲜核权 deny → 零出站（不进 reserve /
         不 mark_dispatched / 不外发），原因随决策记录（R21）。"""
