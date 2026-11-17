@@ -292,6 +292,18 @@ class ChannelClosedError(RuntimeError):
     """流通道已关闭后的生产（终止路径唤醒阻塞写者，§8.2 段 3）。"""
 
 
+class BridgeSubmissionsClosedError(RuntimeError):
+    """桥提交已冻结：关闭前置门闩开始后拒绝新增 owner IO。
+
+    冻结只拒绝新提交；已提交（含尚未起跑）的 IO 仍按原契约完成，并由
+    ``inflight_task_count`` 计入关闭门闩，故 ``ready`` 回执之后不会再起跑新 IO
+    （检视 R09）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("owner loop bridge submissions are closed")
+
+
 @dataclass(frozen=True)
 class OperationHandle:
     """operation 登记快照（state 为 start 时点事实，非实时投影）。"""
@@ -340,6 +352,11 @@ class OwnerLoopBridge:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._operations: dict[str, _OperationEntry] = {}
         self._registry_lock = threading.Lock()
+        #: 已提交但尚未在 owner 循环起跑的提交数（与 ``_tasks`` 共同构成在途集合；
+        #: 受 ``_registry_lock`` 保护，关闭门闩据此判定「已提交/在途」是否为 0）。
+        self._pending_submissions = 0
+        #: 提交冻结标志（关闭前置门闩置位后拒绝新提交）。
+        self._submissions_frozen = False
 
     @classmethod
     def for_running_loop(cls) -> OwnerLoopBridge:
@@ -353,6 +370,9 @@ class OwnerLoopBridge:
 
         factory 在 owner 循环内被调用（owner 回调才创建实际 IO 任务）；本协程被
         取消时仅撤 waiter，owner 侧任务继续运行至完成。
+
+        Raises:
+            BridgeSubmissionsClosedError: 提交已冻结（关闭门闩开始后拒绝新 IO）。
         """
 
         # factory 必须在 owner 循环内调用（§8.2 段 1「owner 回调才创建实际 IO
@@ -361,7 +381,14 @@ class OwnerLoopBridge:
         async def _bootstrap() -> _T:
             return await self._managed(factory())
 
-        cf = asyncio.run_coroutine_threadsafe(_bootstrap(), self._owner_loop)
+        self._begin_submission()
+        coro = _bootstrap()
+        try:
+            cf = asyncio.run_coroutine_threadsafe(coro, self._owner_loop)
+        except BaseException:
+            coro.close()
+            self._end_pending_submission()
+            raise
         return await asyncio.shield(self._wrap_concurrent(cf))
 
     async def observe_operation(self, operation_id: str) -> Any:
@@ -388,31 +415,73 @@ class OwnerLoopBridge:
         同身份已登记（在途/已完成/失败/取消）时返回原登记快照，不重复执行
         factory（同键同规范输入查原事实）；观察经 ``observe_operation`` 连接
         原任务。
+
+        Raises:
+            BridgeSubmissionsClosedError: 新身份在提交冻结后拒绝（已登记身份仍
+                返回原快照，供关闭期间的观察连接）。
         """
         with self._registry_lock:
             entry = self._operations.get(operation_id)
             if entry is None:
-                cf = asyncio.run_coroutine_threadsafe(self._run_operation(operation_id, factory), self._owner_loop)
+                if self._submissions_frozen:
+                    raise BridgeSubmissionsClosedError()
+                self._pending_submissions += 1
+                coro = self._run_operation(operation_id, factory)
+                try:
+                    cf = asyncio.run_coroutine_threadsafe(coro, self._owner_loop)
+                except BaseException:
+                    coro.close()
+                    self._pending_submissions -= 1
+                    raise
                 entry = _OperationEntry(operation_id=operation_id, cf=cf)
                 self._operations[operation_id] = entry
         return OperationHandle(operation_id=operation_id, state=entry.state)
 
+    def freeze_submissions(self) -> bool:
+        """冻结新提交（关闭前置门闩第一步，幂等）。
+
+        返回是否为本次调用完成冻结（``False`` 表示此前已冻结）。冻结与提交在
+        ``_registry_lock`` 上串行，故冻结后读到的在途数已覆盖「已提交未起跑」；
+        冻结后 ``run_owner`` / ``start_operation`` 的新身份一律拒绝（检视 R09）。
+        """
+        with self._registry_lock:
+            if self._submissions_frozen:
+                return False
+            self._submissions_frozen = True
+            return True
+
     def inflight_task_count(self) -> int:
         """当前在途 owner 任务数（关闭门闩的「实际 IO 未收敛」判据）。
 
-        只统计桥登记的任务（``run_owner``/``start_operation`` 主体）；已完成任务
-        在 ``finally`` 中移除。须在 owner 循环上下文读取（与任务登记同线程）。
+        统计桥登记的任务（``run_owner``/``start_operation`` 主体）与已提交但
+        尚未在 owner 循环起跑的提交；已完成任务在 ``finally`` 中移除。须在
+        owner 循环上下文读取（与任务登记同线程）。
         """
 
-        return len(self._tasks)
+        with self._registry_lock:
+            pending = self._pending_submissions
+        return len(self._tasks) + pending
 
     # -- 内部 ---------------------------------------------------------------
+
+    def _begin_submission(self) -> None:
+        """登记一次提交（冻结后拒绝；与冻结同锁串行）。"""
+        with self._registry_lock:
+            if self._submissions_frozen:
+                raise BridgeSubmissionsClosedError()
+            self._pending_submissions += 1
+
+    def _end_pending_submission(self) -> None:
+        """提交已在 owner 循环起跑（任务入 ``_tasks`` 后调用，避免计数空窗）。"""
+        with self._registry_lock:
+            self._pending_submissions -= 1
 
     async def _managed(self, coro: Coroutine[Any, Any, _T]) -> _T:
         """run_owner 内层：登记在途任务强引用，结束移除。"""
         task = asyncio.current_task()
         assert task is not None
         self._tasks.add(task)
+        self._end_pending_submission()
         try:
             return await coro
         finally:
@@ -427,6 +496,7 @@ class OwnerLoopBridge:
         task = asyncio.current_task()
         assert task is not None
         self._tasks.add(task)
+        self._end_pending_submission()
         try:
             result = await factory()
         except asyncio.CancelledError:
@@ -646,8 +716,9 @@ class InstanceGuard(Protocol):
 class CloseReadinessReceipt:
     """关闭就绪回执（不可变）。
 
-    ``ready=True`` 须同时满足：派发已关闭、桥登记的在途 owner 任务为 0、
-    结束/unknown 已可靠保存、DBOS/Client 已关闭且运行库 Engine 已释放。
+    ``ready=True`` 须同时满足：派发已关闭、桥登记的在途 owner 任务为 0（含
+    已提交但尚未起跑的提交）、结束/unknown 已可靠保存、DBOS/Client 已关闭且
+    运行库 Engine 已释放。
     ``ready=False`` 时本类不触碰 Recorder/业务 Engine/内置 PG（由调用方保持
     旧配置与恢复能力，HANDOFF §8.5）。
     """
@@ -703,8 +774,9 @@ class AgentRuntime:
     **之前**调用 ``prepare_close``。不得仅注册为 ShutdownCoordinator 普通动态
     cleanup callback（协调器在 critical 回调失败后仍继续清理）。
 
-    关闭顺序（§8.5）：关派发 → 核 IO 退出 → 保存结束/unknown → DBOS/Client
-    关闭并释放运行库引擎 → 返回就绪回执。Recorder.aclose、业务引擎与内置 PG
+    关闭顺序（§8.5）：冻结桥提交 → 关派发 → 核 IO 退出 → 保存结束/unknown →
+    关闭前重核 IO 集合 → DBOS/Client 关闭并释放运行库引擎 → 返回就绪回执。
+    Recorder.aclose、业务引擎与内置 PG
     由调用方在就绪后按原协调顺序关闭，本类不触碰。
     """
 
@@ -755,6 +827,9 @@ class AgentRuntime:
             )
 
         reasons: list[str] = []
+        # 冻结新提交先于在途核验：冻结与提交在桥内同一把锁上串行，故此处读到的
+        # 在途数已覆盖「已提交未起跑」（检视 R09）。
+        self._bridge.freeze_submissions()
         if not self._dispatch_gate.close_dispatch():
             reasons.append(CLOSE_BLOCK_DISPATCH_NOT_CLOSED)
         inflight = self._bridge.inflight_task_count()
@@ -778,6 +853,24 @@ class AgentRuntime:
             return self._make_receipt(
                 command,
                 reasons=[CLOSE_BLOCK_FACTS_NOT_SAVED],
+                unknown=outcome.unknown_associations,
+                inflight=inflight,
+                residual=residual,
+            )
+
+        # 保存事实是 await 边界：期间可能有已提交任务在 owner 循环起跑。关闭资源
+        # 前重核在途集合（含新起跑与残余 IO），未收敛即不关闭、不报就绪（检视 R09）。
+        inflight = self._bridge.inflight_task_count()
+        residual = self._residual_io_probe() if self._residual_io_probe is not None else ()
+        recheck: list[str] = []
+        if inflight:
+            recheck.append(CLOSE_BLOCK_IO_IN_FLIGHT)
+        if residual:
+            recheck.append(f"{CLOSE_BLOCK_RESIDUAL_IO}:{','.join(residual)}")
+        if recheck:
+            return self._make_receipt(
+                command,
+                reasons=recheck,
                 unknown=outcome.unknown_associations,
                 inflight=inflight,
                 residual=residual,
@@ -847,6 +940,7 @@ __all__ = [
     "AgentRuntimeHandle",
     "AgentRuntimeMigrationError",
     "AgentRuntimeSettings",
+    "BridgeSubmissionsClosedError",
     "ChannelClosedError",
     "CloseBlockingRunner",
     "CloseCommandIdentity",

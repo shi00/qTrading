@@ -19,6 +19,7 @@ owner-loop 桥（§8.2）与 launch 启动隔离（§8.4 needs-spike）不在本
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
@@ -226,6 +227,14 @@ class _CloseFakes:
         self.close_error: BaseException | None = None
         self.residual: tuple[str, ...] = ()
         self.closed = False
+        self.frozen = False
+        self.on_save: Callable[[], None] | None = None
+
+    def freeze_submissions(self) -> bool:
+        self.calls.append("bridge_freeze")
+        frozen = not self.frozen
+        self.frozen = True
+        return frozen
 
     def close_dispatch(self) -> bool:
         self.calls.append("dispatch_close")
@@ -242,6 +251,8 @@ class _CloseFakes:
 
     async def save_end_or_unknown(self, command: Any) -> Any:
         self.calls.append("save_facts")
+        if self.on_save is not None:
+            self.on_save()
         if self.sink_error is not None:
             raise self.sink_error
         return runtime_mod.CloseFactOutcome(saved=self.saved, unknown_associations=self.unknown)
@@ -284,7 +295,7 @@ class TestPrepareCloseLatch:
         assert receipt.unknown_associations == ("operation-unknown-1",)
         assert receipt.inflight_task_count == 0
         assert receipt.command.close_command_id == "close-1"
-        assert fakes.calls == ["dispatch_close", "save_facts", "handle_close"]
+        assert fakes.calls == ["bridge_freeze", "dispatch_close", "save_facts", "handle_close"]
         assert receipt.checked_at.endswith("Z")
 
     async def test_dispatch_not_closed_blocks_before_any_other_step(self) -> None:
@@ -293,7 +304,7 @@ class TestPrepareCloseLatch:
         receipt = await _runtime(fakes).prepare_close(_command())
         assert receipt.ready is False
         assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_DISPATCH_NOT_CLOSED,)
-        assert fakes.calls == ["dispatch_close"]  # 不保存、不关闭
+        assert fakes.calls == ["bridge_freeze", "dispatch_close"]  # 不保存、不关闭
         assert receipt.unknown_associations == ()
 
     async def test_inflight_io_blocks_fact_save_and_close(self) -> None:
@@ -303,7 +314,28 @@ class TestPrepareCloseLatch:
         assert receipt.ready is False
         assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_IO_IN_FLIGHT,)
         assert receipt.inflight_task_count == 2
-        assert fakes.calls == ["dispatch_close"]
+        assert fakes.calls == ["bridge_freeze", "dispatch_close"]
+
+    async def test_freeze_submissions_precedes_dispatch_close(self) -> None:
+        """关闭门闩第一步即冻结桥提交（R09：ready 后不得再起跑新 IO）。"""
+        fakes = _CloseFakes()
+        await _runtime(fakes).prepare_close(_command())
+        assert fakes.frozen is True
+        assert fakes.calls[:2] == ["bridge_freeze", "dispatch_close"]
+
+    async def test_io_started_during_fact_save_blocks_close(self) -> None:
+        """保存事实 await 期间起跑的 IO 必须在关闭前重核、不得关闭资源（R09）。"""
+        fakes = _CloseFakes()
+
+        def _io_starts_during_save() -> None:
+            fakes.inflight = 1
+
+        fakes.on_save = _io_starts_during_save
+        receipt = await _runtime(fakes).prepare_close(_command())
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_IO_IN_FLIGHT,)
+        assert receipt.inflight_task_count == 1
+        assert "handle_close" not in fakes.calls
 
     async def test_unsaved_facts_block_close_and_keep_unknown(self) -> None:
         fakes = _CloseFakes()
@@ -357,7 +389,7 @@ class TestPrepareCloseLatch:
         assert receipt.ready is False
         assert receipt.blocking_reasons == (f"{runtime_mod.CLOSE_BLOCK_RESIDUAL_IO}:sdk_stream,mcp_worker",)
         assert receipt.residual_io == ("sdk_stream", "mcp_worker")
-        assert fakes.calls == ["dispatch_close"]
+        assert fakes.calls == ["bridge_freeze", "dispatch_close"]
 
     async def test_idempotent_retry_returns_original_receipt(self) -> None:
         fakes = _CloseFakes()
