@@ -42,6 +42,7 @@ from core.agent_types import (
     derive_data_consent_command_identity,
     derive_data_consent_revoke_identity,
     evaluate_data_attempt,
+    local_target_fingerprint,
     validate_data_attempt_authorization,
 )
 from core.model_management_types import (
@@ -814,6 +815,7 @@ class ModelConfigurationService:
         *,
         requires_egress_grant: bool = True,
         connection_revision: int | None = None,
+        local_target_user_scope: str | None = None,
     ) -> AttemptPermit:
         """逐次安全许可（MM-01/MM-02）：新鲜读取 security_state，撤销 / 缺失即拒绝。
 
@@ -838,6 +840,14 @@ class ModelConfigurationService:
         不产生外发）免 grant 匹配，但仍校验连接存在与凭据撤销。默认 ``True``
         （安全默认：未声明本地的调用一律要求外发授权）。空用途 / 外发缺目标
         一律拒绝（授权服务拒绝空身份是正确安全行为，不因本地路径放宽）。
+
+        M21：本地免 grant 路径不得信任调用方自报目标字符串。资料核权
+        （:meth:`authorize_data_attempt`）传入 ``local_target_user_scope`` 时，
+        按本次新鲜读取的冻结连接 ``connection_id + connection_revision`` 与
+        真实 ``adapter_kind`` 经 :func:`local_target_fingerprint` 重算本地目标，
+        与请求目标严格比对；非 ``gguf_chat``（含云端 kind）或未冻结版本一律
+        拒绝——云端绑定声明本地免 grant 不因此放宽，仍要求原 grant 策略。
+        ``None`` 表示旧直推本地链路（目标非 AR-09 本地目标），维持既有政策。
         """
 
         def _authorize() -> AttemptPermit:
@@ -883,6 +893,18 @@ class ModelConfigurationService:
                         f"无匹配外发授权（connection={connection_id}, purpose={purpose}, "
                         f"scope_version={scope_version}），拒绝发放许可"
                     )
+            elif local_target_user_scope is not None:
+                # M21：本地资料目标由 owner 按权威输入重算，不信任自报字符串。
+                adapter_kind = connection.get("adapter_kind")
+                if adapter_kind != "gguf_chat":
+                    raise PermissionError("本地资料目标仅限设备内聊天连接，拒绝发放许可")
+                if connection_revision is None:
+                    raise PermissionError("本地资料目标缺冻结连接版本，拒绝发放许可")
+                expected_target = local_target_fingerprint(
+                    local_target_user_scope, connection_id, connection_revision, adapter_kind
+                )
+                if target_fingerprint != expected_target:
+                    raise PermissionError("本地资料目标与冻结连接重算结果不符，拒绝发放许可")
 
             return AttemptPermit(
                 attempt_id=attempt_id,
@@ -1224,6 +1246,10 @@ class ModelConfigurationService:
           connection_revision`` 精确匹配（M15）：同 ID 版本切换瞬间 →
           unknown ``connection_revision_transient``（瞬态、可重试，零出站），
           其余授权拒绝（PermissionError）→ deny ``connection_denied``；
+        - 本地免 grant 路径的目标由 owner 重算（M21）：按冻结 ``connection_id +
+          connection_revision`` 与真实 ``adapter_kind`` 重算
+          :func:`local_target_fingerprint` 后与请求比对，伪摘要 / 错连接版 /
+          非聊天 kind 一律 deny（云端绑定声明本地亦不放宽）；
         - claim 阶段撤销先胜（POLICY_DENIED）→ deny（脱敏原因码透传）；claim
           INPUT_CONFLICT / operation 缺失（INPUT_INVALID）→ 原样抛出（调用方
           违反先备后派发 / attempt 身份契约，不是核权拒绝路径）；
@@ -1280,6 +1306,7 @@ class ModelConfigurationService:
                 request.attempt_id,
                 requires_egress_grant=binding.requires_egress_grant,
                 connection_revision=request.connection_revision,
+                local_target_user_scope=request.user_scope,
             )
         except ConnectionRevisionChangedError:
             return _receipt(

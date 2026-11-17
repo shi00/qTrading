@@ -1976,7 +1976,7 @@ class TestActivateFreshSetup:
 _R4_CONN = "33333333-3333-4333-8333-333333333333"
 _R4_USER_SCOPE = "synthetic-user"
 _R4_CONSENT_ID = "dec-consent-1"
-_R4_TARGET_FP = "local-model-v1:" + sha256_hex("synthetic-user|conn|gguf_chat")
+_R4_TARGET_FP = local_target_fingerprint(_R4_USER_SCOPE, _R4_CONN, 2, "gguf_chat")
 
 
 def _r4_source_item() -> dict:
@@ -2050,6 +2050,15 @@ def _r4_binding_payload(
 
 def _r4_binding(**overrides) -> DataConsentBinding:
     return decode_data_consent_binding(_r4_binding_payload(**overrides), "$")
+
+
+def _r4_payload_with_target(target: str, *, requires_egress_grant: bool = False) -> dict:
+    """M21：自洽（绑定内外一致）但目标字符串可任填的本地绑定 payload。"""
+    payload = _r4_binding_payload()
+    payload["requires_egress_grant"] = requires_egress_grant
+    payload["target_fingerprint"] = target
+    payload["connection_authorization_ref"]["target_fingerprint"] = target
+    return payload
 
 
 def _r4_command_ref(expected_revision: int, command_id: str = "consent-cmd-1") -> CommandRef:
@@ -2308,6 +2317,72 @@ class TestR04AuthorizeDataAttempt:
         assert claim.connection_authorization_ref.connection_id == _R4_CONN
         assert claim.outcome is DataAttemptOutcome.ALLOW
         assert authorization is not None
+
+    @pytest.mark.asyncio
+    async def test_forged_local_target_denied(self, r4_service):
+        """M21：自洽伪摘要（非规范拼接向量）→ deny 且零 claim。"""
+        svc, fake = r4_service
+        forged = "local-model-v1:" + sha256_hex("synthetic-user|conn|gguf_chat")
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = decode_data_consent_binding(
+            _r4_payload_with_target(forged), "$"
+        )
+        receipt = await svc.authorize_data_attempt(_r4_authorization(target_fingerprint=forged))
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "connection_denied"
+        assert fake.claims == []
+
+    @pytest.mark.asyncio
+    async def test_wrong_connection_revision_in_local_target_denied(self, r4_service):
+        """M21：目标按错连接版重算（rev=3，冻结/真实 rev=2）→ deny 且零 claim。"""
+        svc, fake = r4_service
+        stale = local_target_fingerprint(_R4_USER_SCOPE, _R4_CONN, 3, "gguf_chat")
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = decode_data_consent_binding(
+            _r4_payload_with_target(stale), "$"
+        )
+        receipt = await svc.authorize_data_attempt(_r4_authorization(target_fingerprint=stale))
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "connection_denied"
+        assert fake.claims == []
+
+    @pytest.mark.asyncio
+    async def test_non_chat_local_kind_denied(self, isolated_config):
+        """M21：非聊天本地 kind（gguf_sentiment）不得持有本地资料目标 → deny 零 claim。"""
+        cfg_mod.ConfigHandler.ensure_defaults()
+        mm = _load_mm()
+        conn = _base_connection(_R4_CONN, "", adapter_kind="gguf_sentiment")
+        conn["connection_revision"] = 2
+        mm["connections"] = [conn]
+        _write_raw(isolated_config, {"model_management": mm})
+        fake = _FakeAgentDao()
+        svc = ModelConfigurationService(agent_dao=fake)
+        target = local_target_fingerprint(_R4_USER_SCOPE, _R4_CONN, 2, "gguf_chat")
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = decode_data_consent_binding(
+            _r4_payload_with_target(target), "$"
+        )
+        receipt = await svc.authorize_data_attempt(_r4_authorization(target_fingerprint=target))
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "connection_denied"
+        assert fake.claims == []
+
+    @pytest.mark.asyncio
+    async def test_cloud_connection_local_exemption_not_relaxed(self, isolated_config):
+        """M21：云端连接声明本地免 grant 不放宽，仍按原策略 deny 且零 claim。"""
+        cfg_mod.ConfigHandler.ensure_defaults()
+        mm = _load_mm()
+        conn = _base_connection(_R4_CONN, "https://api.example.com")
+        conn["connection_revision"] = 2
+        mm["connections"] = [conn]
+        _write_raw(isolated_config, {"model_management": mm})
+        fake = _FakeAgentDao()
+        svc = ModelConfigurationService(agent_dao=fake)
+        target = "https://api.example.com:443"
+        fake.bindings[(_R4_USER_SCOPE, _R4_CONSENT_ID)] = decode_data_consent_binding(
+            _r4_payload_with_target(target), "$"
+        )
+        receipt = await svc.authorize_data_attempt(_r4_authorization(target_fingerprint=target))
+        assert receipt.outcome is DataAttemptOutcome.DENY
+        assert receipt.reason == "connection_denied"
+        assert fake.claims == []
 
     @pytest.mark.asyncio
     async def test_revision_switch_midflight_is_transient_unknown(self, r4_service, isolated_config):
