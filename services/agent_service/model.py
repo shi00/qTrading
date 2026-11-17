@@ -650,6 +650,12 @@ class GatewayModel(Model):
         self._binding = binding
         self._snapshot = snapshot
         self._tool_schema_version = tool_schema_version
+        # 请求绑定的真实 Profile（装配侧按连接证据解析后传入，含该证据的
+        # revision 事实）：原样承载，不在此重新解析 / 合并默认值。未提供 /
+        # 不可解析 → 空 Profile（无任何能力声明 = unknown），不猜（M06）。
+        self._bound_profile: ModelProfile = (
+            cast(ModelProfile, dict(profile)) if isinstance(profile, Mapping) else ModelProfile()
+        )
 
     # Model 抽象面 ---------------------------------------------------------
 
@@ -667,12 +673,14 @@ class GatewayModel(Model):
 
     @property
     def profile(self) -> ModelProfile:
-        # 无供应商解析机制的固定桥：显式默认 profile（supports_tools 等按
-        # DEFAULT_PROFILE 缺省语义），不触碰 genai-prices / provider 注册表
-        return ModelProfile()
+        """请求绑定的真实 Profile（不构造新默认值，M06）。
 
-    def _provider_model_profile(self) -> ModelProfile:
-        return ModelProfile()
+        桥层无供应商解析机制，能力事实来自受理时冻结的连接证据；装配侧把该
+        证据解析出的 Profile 经构造函数注入，本属性原样返回。未注入 → 空
+        Profile：不声明任何能力（unknown），既不乐观地假定 supports_tools，
+        也不以 DEFAULT_PROFILE 冒充已核验事实。
+        """
+        return self._bound_profile
 
     # 回合执行 -------------------------------------------------------------
 
