@@ -6318,11 +6318,21 @@ class AgentDao(BaseDao):
           全局 2 总/4 叶为预分配预算（运行宿主准入承载，D-01/C-05），每计划
           20 叶为计划级验证（D-02 原生 DAG），均不在本票据事务重复检查；
           超限 ``BUDGET_BLOCKED``（不伪失败）；
-        - 幂等重放：同 slot_id 同输入（kind/execution/node/round/owner_epoch）且
-          票据未确认释放 → 返回原票据零新事实；异输入 ``INPUT_CONFLICT``；
-          已确认释放（release_verified=true）的 slot_id 不得复用（零复活）；
+        - 幂等重放：同 slot_id 同输入（kind/execution/node/round/owner_epoch/
+          run_epoch）且票据未确认释放 → 返回原票据零新事实；异输入
+          ``INPUT_CONFLICT``；已确认释放（release_verified=true）的 slot_id 不得
+          复用（零复活）；重放只读原事实，不因执行 dispatch 已关闭重判；
         - fence：目标 execution ``deletion_fenced`` → ``POLICY_DENIED``（引用 vs
           清理单胜者，fence 后拒绝新引用）；
+        - 权威身份/代次（检视 D21）：同一 execution 行锁、同一事务内读当前
+          ``owner_epoch`` / ``node_id`` / ``dispatch_closed`` / ``current_round_id``
+          与所属轮次，**不再锁外或按请求自报**：旧 owner_epoch（含恢复竞争中的
+          旧代次）、错节点、非本执行轮次一律 ``POLICY_DENIED``（不冒充可认领）；
+        - 新票轮归属：execution 有 ``current_round_id`` 时请求轮必须与之一致
+          （历史轮不可领新票）；``dispatch_closed`` 为真时拒绝新票；二者的既有
+          同票重放仍返回原票据；
+        - ``run_epoch``：唯一权威来源为该轮 ``agent_round.run_epoch``（票据落库
+          与回执同取此值；无轮次绑定即无轮可派生，沿用 0 表示「无轮」）；
         - kind 与执行类别核验：total 限 root/comparison_lane，leaf 限 leaf；
           execution 缺失 ``INPUT_INVALID``。
 
@@ -6369,6 +6379,10 @@ class AgentDao(BaseDao):
                         AgentExecution.session_id,
                         AgentExecution.parent_execution_id,
                         AgentExecution.deletion_fenced,
+                        AgentExecution.owner_epoch,
+                        AgentExecution.node_id,
+                        AgentExecution.dispatch_closed,
+                        AgentExecution.current_round_id,
                     )
                     .where(
                         AgentExecution.user_scope == request.user_scope,
@@ -6404,6 +6418,42 @@ class AgentDao(BaseDao):
                         identity,
                     )
 
+            # 2.1 权威身份/代次（检视 D21）：execution 行锁内同一事务读取，不按
+            #     请求自报。旧 owner_epoch（恢复竞争中的旧代次）与错节点拿不到票。
+            if request.owner_epoch != execution_row.owner_epoch:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "ticket rejected: request owner epoch is stale",
+                    identity,
+                )
+            if request.node_id != execution_row.node_id:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "ticket rejected: ticket node does not match execution node",
+                    identity,
+                )
+
+            # 2.2 轮归属与权威代次：请求轮必须存在且属于本 execution；其
+            #     ``run_epoch`` 是本票据 ``run_epoch`` 的唯一权威来源（不取请求值、
+            #     不硬编码 0）。无轮次绑定（round_id 为空）即无轮可派生。
+            round_row = None
+            if request.round_id is not None:
+                round_row = (
+                    await conn.execute(
+                        sa.select(AgentRound.execution_id, AgentRound.run_epoch).where(
+                            AgentRound.user_scope == request.user_scope,
+                            AgentRound.round_id == request.round_id,
+                        )
+                    )
+                ).first()
+                if round_row is None or round_row.execution_id != request.execution_id:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "ticket rejected: round does not belong to target execution",
+                        identity,
+                    )
+            authoritative_run_epoch = round_row.run_epoch if round_row is not None else 0
+
             # 3. 幂等重放/复用拒绝（同 slot_id 异输入冲突；已确认释放不复用）。
             slot_row = (
                 await conn.execute(
@@ -6432,6 +6482,8 @@ class AgentDao(BaseDao):
                     and slot_row.node_id == request.node_id
                     and slot_row.round_id == request.round_id
                     and slot_row.owner_epoch == request.owner_epoch
+                    # 代次也是票据身份（检视 D21）：跨 run_epoch 不得当同票幂等复用。
+                    and slot_row.run_epoch == authoritative_run_epoch
                 )
                 if not same_input:
                     raise AgentServiceError(
@@ -6454,6 +6506,21 @@ class AgentDao(BaseDao):
                     owner_epoch=request.owner_epoch,
                     run_epoch=slot_row.run_epoch,
                     claimed_at=_wire_time(slot_row.claimed_at),
+                )
+
+            # 3.1 新票轮归属/派发关闸（检视 D21）：历史轮不可领新票；dispatch
+            #     已关闭后不再接受新票（既有同票重放已在上方返回原事实）。
+            if execution_row.current_round_id is not None and request.round_id != execution_row.current_round_id:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "new ticket rejected: round is not the current round of the execution",
+                    identity,
+                )
+            if execution_row.dispatch_closed:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "new ticket rejected: execution dispatch is closed",
+                    identity,
                 )
 
             # 4. 删除 fence 门（D08）：同类票据重放已返回原票据；新票据不得引用
@@ -6521,7 +6588,7 @@ class AgentDao(BaseDao):
                         node_id=request.node_id,
                         round_id=request.round_id,
                         owner_epoch=request.owner_epoch,
-                        run_epoch=0,
+                        run_epoch=authoritative_run_epoch,
                         claimed_at=now,
                         release_verified=False,
                         # 唯一载形为 CanonicalJson 文本，JSONB 列只收解析后的对象；
@@ -6544,7 +6611,7 @@ class AgentDao(BaseDao):
                 node_id=request.node_id,
                 round_id=request.round_id,
                 owner_epoch=request.owner_epoch,
-                run_epoch=0,
+                run_epoch=authoritative_run_epoch,
                 claimed_at=_wire_time(now),
             )
 

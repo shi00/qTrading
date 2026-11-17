@@ -347,6 +347,10 @@ class TestClaimResourceFenceGate:
                 session_id="s1",
                 parent_execution_id=None,
                 deletion_fenced=False,
+                owner_epoch=1,
+                node_id="root",
+                dispatch_closed=False,
+                current_round_id=None,
             ),
         )
         request = ResourceClaimRequest(

@@ -5,7 +5,9 @@
 - ``claim_resource``：guard 单例行预置+行锁串行、事务内最严限额（§9.11 只查
   每会话 1 总/每总 3 叶；全局 2 总/4 叶为预分配预算由运行宿主准入承载、
   每计划 20 叶为计划级验证 D-02，均不在票据事务重复检查）、幂等重放、
-  slot_id 复用拒绝、fence 拒绝、kind 与执行类别核验；
+  slot_id 复用拒绝、fence 拒绝、kind 与执行类别核验；执行行锁内权威身份/
+  代次门（检视 D21：旧 owner_epoch/错节点/历史轮/dispatch 关闭拒绝新票，
+  run_epoch 取所属轮次权威值）；
 - ``release_resource``：完整匹配（旧票不释新票）、exit_verified 分态
   （verified 释放容量 / unverified 容量保留不放空）、reserved→confirmed 升级；
 - ``record_usage_counters``：绝对累计 GREATEST 合并（R22 乱序最终取最大值）、
@@ -39,7 +41,7 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from data.persistence.models import AgentExecution, AgentResourceSlot, AgentSession
+from data.persistence.models import AgentExecution, AgentResourceSlot, AgentRound, AgentSession
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -82,6 +84,9 @@ async def _seed_execution(
     node_id: str,
     *,
     parent_execution_id: str | None = None,
+    owner_epoch: int = 1,
+    dispatch_closed: bool = False,
+    current_round_id: str | None = None,
 ) -> None:
     """直接构造 execution 行（测试前置；root/comparison_lane 须 intent 键）。"""
 
@@ -94,12 +99,42 @@ async def _seed_execution(
         "display_state": "queued",
         "goal_coverage": "unknown",
         "parent_execution_id": parent_execution_id,
+        "owner_epoch": owner_epoch,
+        "dispatch_closed": dispatch_closed,
+        "current_round_id": current_round_id,
     }
     if kind in ("root", "comparison_lane"):
         values["source_module"] = "ui"
         values["business_request_id"] = f"req-{execution_id}"
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造前置执行
         await conn.execute(insert(AgentExecution).values(**values))
+
+
+async def _seed_round(
+    dao: AgentDao,
+    user_scope: str,
+    round_id: str,
+    execution_id: str,
+    *,
+    run_epoch: int,
+    round_number: int = 1,
+) -> None:
+    """直接构造轮次行（测试前置；run_epoch 为票据代次的唯一权威来源）。"""
+
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造前置轮次
+        await conn.execute(
+            insert(AgentRound).values(
+                user_scope=user_scope,
+                round_id=round_id,
+                execution_id=execution_id,
+                round_number=round_number,
+                workflow_id=f"wf-{round_id}",
+                workflow_code_version="1.0.0",
+                run_epoch=run_epoch,
+                input_revision=1,
+                plan_revision=1,
+            )
+        )
 
 
 async def _seed_open_slot(
@@ -138,16 +173,22 @@ def _expect_error(excinfo: pytest.ExceptionInfo[AgentServiceError], code: AgentE
 
 
 def _total_request(
-    user_scope: str = "u1", execution_id: str = "root-1", slot_id: str | None = None
+    user_scope: str = "u1",
+    execution_id: str = "root-1",
+    slot_id: str | None = None,
+    *,
+    node_id: str = "root",
+    round_id: str | None = None,
+    owner_epoch: int = 1,
 ) -> ResourceClaimRequest:
     return ResourceClaimRequest(
         user_scope=user_scope,
         slot_id=slot_id or f"slot-{uuid.uuid4().hex[:12]}",
         slot_kind=ResourceSlotKind.TOTAL,
         execution_id=execution_id,
-        node_id="root",
-        round_id=None,
-        owner_epoch=1,
+        node_id=node_id,
+        round_id=round_id,
+        owner_epoch=owner_epoch,
         operation_refs=None,
     )
 
@@ -158,6 +199,7 @@ def _leaf_request(
     slot_id: str | None = None,
     *,
     node_id: str = "node-a",
+    round_id: str | None = None,
     owner_epoch: int = 1,
 ) -> ResourceClaimRequest:
     return ResourceClaimRequest(
@@ -166,7 +208,7 @@ def _leaf_request(
         slot_kind=ResourceSlotKind.LEAF,
         execution_id=execution_id,
         node_id=node_id,
-        round_id=None,
+        round_id=round_id,
         owner_epoch=owner_epoch,
         operation_refs=None,
     )
@@ -272,7 +314,7 @@ class TestClaimResource:
 
         # 同 slot_id 异 execution → 冲突（票据身份完整比对，先于限额核定）
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.claim_resource(_total_request(slot_id="slot-c", execution_id="lane-1"))
+            await dao.claim_resource(_total_request(slot_id="slot-c", execution_id="lane-1", node_id="lane"))
         _expect_error(excinfo, AgentErrorCode.INPUT_CONFLICT)
 
     async def test_claim_unknown_execution_invalid(self, real_embedded_pg: ConnectionInfo) -> None:
@@ -332,7 +374,7 @@ class TestClaimResource:
         await _seed_execution(dao, "u1", "s1", "lane-1", "comparison_lane", "lane")
         await dao.claim_resource(_total_request(execution_id="root-1", slot_id="slot-t1"))
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.claim_resource(_total_request(execution_id="lane-1", slot_id="slot-t2"))
+            await dao.claim_resource(_total_request(execution_id="lane-1", node_id="lane", slot_id="slot-t2"))
         _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
         assert "session total" in excinfo.value.sanitized_message
 
@@ -476,7 +518,7 @@ class TestClaimResource:
 
         results = await asyncio.gather(
             dao.claim_resource(_total_request(execution_id="root-1", slot_id="slot-c1")),
-            dao.claim_resource(_total_request(execution_id="lane-1", slot_id="slot-c2")),
+            dao.claim_resource(_total_request(execution_id="lane-1", node_id="lane", slot_id="slot-c2")),
             return_exceptions=True,
         )
         outcomes = sorted(
@@ -500,7 +542,9 @@ class TestClaimResource:
             )
         results = await asyncio.gather(
             *(
-                dao.claim_resource(_leaf_request(execution_id=f"root-a-leaf-{index}", slot_id=f"slot-l{index}"))
+                dao.claim_resource(
+                    _leaf_request(execution_id=f"root-a-leaf-{index}", node_id=f"n-{index}", slot_id=f"slot-l{index}")
+                )
                 for index in range(4)
             ),
             return_exceptions=True,
@@ -536,7 +580,7 @@ class TestLeafLimits:
         # 第 4 个同 root 叶子拒绝（每总 3）
         await _seed_execution(dao, "u1", "s1", "root-a-leaf-new", "leaf", "node-new", parent_execution_id="root-a")
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.claim_resource(_leaf_request(execution_id="root-a-leaf-new"))
+            await dao.claim_resource(_leaf_request(execution_id="root-a-leaf-new", node_id="node-new"))
         _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
         assert "per-root" in excinfo.value.sanitized_message
 
@@ -547,8 +591,145 @@ class TestLeafLimits:
         # 另一 root 的叶子不受 root-a 树影响（每总 3 按树独立核定）
         await _seed_execution(dao, "u1", "s1", "root-b", "root", "root")
         await _seed_execution(dao, "u1", "s1", "root-b-leaf-0", "leaf", "node-b0", parent_execution_id="root-b")
-        ticket = await dao.claim_resource(_leaf_request(execution_id="root-b-leaf-0"))
+        ticket = await dao.claim_resource(_leaf_request(execution_id="root-b-leaf-0", node_id="node-b0"))
         assert ticket.execution_id == "root-b-leaf-0"
+
+
+# ------------------------------------------------------------------
+# 权威身份/代次门（检视 D21）
+# ------------------------------------------------------------------
+
+
+async def _bind_current_round(dao: AgentDao, execution_id: str, round_id: str) -> None:
+    """轮次行建好后把 execution 的现行轮绑定到它（后置更新避免循环 FK 顺序问题）。"""
+
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造前置绑定
+        await conn.execute(
+            sa.update(AgentExecution)
+            .where(AgentExecution.user_scope == "u1", AgentExecution.execution_id == execution_id)
+            .values(current_round_id=round_id)
+        )
+
+
+class TestClaimAuthority:
+    async def test_stale_owner_epoch_rejected_current_epoch_claims(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root", owner_epoch=2)
+        await _seed_round(dao, "u1", "round-1", "root-1", run_epoch=2)
+        await _bind_current_round(dao, "root-1", "round-1")
+
+        # 旧 owner_epoch 拿不到新票（恢复竞争中的旧代次）。
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(slot_id="slot-stale", round_id="round-1", owner_epoch=1))
+        _expect_error(excinfo, AgentErrorCode.POLICY_DENIED)
+
+        ticket = await dao.claim_resource(_total_request(slot_id="slot-current", round_id="round-1", owner_epoch=2))
+        assert ticket.owner_epoch == 2
+        assert ticket.run_epoch == 2
+
+    async def test_node_mismatch_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(slot_id="slot-node", node_id="other-node"))
+        _expect_error(excinfo, AgentErrorCode.POLICY_DENIED)
+
+    async def test_round_of_other_execution_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        await _seed_execution(dao, "u1", "s1", "root-2", "root", "root")
+        await _seed_round(dao, "u1", "round-9", "root-2", run_epoch=1)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(slot_id="slot-wrong-round", round_id="round-9"))
+        _expect_error(excinfo, AgentErrorCode.POLICY_DENIED)
+
+    async def test_historical_round_cannot_claim_new_ticket(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        await _seed_round(dao, "u1", "round-1", "root-1", run_epoch=1, round_number=1)
+        await _seed_round(dao, "u1", "round-2", "root-1", run_epoch=2, round_number=2)
+        await _bind_current_round(dao, "root-1", "round-2")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(slot_id="slot-old-round", round_id="round-1"))
+        _expect_error(excinfo, AgentErrorCode.POLICY_DENIED)
+
+        ticket = await dao.claim_resource(_total_request(slot_id="slot-new-round", round_id="round-2"))
+        assert ticket.round_id == "round-2"
+        assert ticket.run_epoch == 2
+
+    async def test_dispatch_closed_rejects_new_ticket_but_replay_returns_original(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        await _seed_round(dao, "u1", "round-1", "root-1", run_epoch=5)
+        await _bind_current_round(dao, "root-1", "round-1")
+        first = await dao.claim_resource(_total_request(slot_id="slot-closed", round_id="round-1"))
+
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.user_scope == "u1", AgentExecution.execution_id == "root-1")
+                .values(dispatch_closed=True)
+            )
+        await engine.dispose()
+
+        # 同票重放返回原事实（零新容量），不受 dispatch 关闭影响。
+        replay = await dao.claim_resource(_total_request(slot_id="slot-closed", round_id="round-1"))
+        assert replay == first
+        # 关闭后新票拒绝。
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(slot_id="slot-closed-new", round_id="round-1"))
+        _expect_error(excinfo, AgentErrorCode.POLICY_DENIED)
+
+    async def test_run_epoch_taken_from_authoritative_round(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        await _seed_round(dao, "u1", "round-1", "root-1", run_epoch=9)
+        await _bind_current_round(dao, "root-1", "round-1")
+
+        ticket = await dao.claim_resource(_total_request(slot_id="slot-epoch", round_id="round-1"))
+        assert ticket.run_epoch == 9
+
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            stored = (
+                await conn.execute(
+                    text("SELECT run_epoch FROM agent_resource_slot WHERE user_scope = 'u1' AND slot_id = 'slot-epoch'")
+                )
+            ).scalar_one()
+            assert stored == 9
+        await engine.dispose()
+
+    async def test_different_run_epoch_not_idempotent(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+        await _seed_round(dao, "u1", "round-1", "root-1", run_epoch=1)
+        await _bind_current_round(dao, "root-1", "round-1")
+        await dao.claim_resource(_total_request(slot_id="slot-gen", round_id="round-1"))
+
+        # 轮代次推进后同一 slot 身份不再等价（跨代次不得当同票幂等复用）。
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentRound)
+                .where(AgentRound.user_scope == "u1", AgentRound.round_id == "round-1")
+                .values(run_epoch=2)
+            )
+        await engine.dispose()
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(slot_id="slot-gen", round_id="round-1"))
+        _expect_error(excinfo, AgentErrorCode.INPUT_CONFLICT)
 
 
 # ------------------------------------------------------------------
