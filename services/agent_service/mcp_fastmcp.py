@@ -76,8 +76,13 @@ import httpx2
 from fastmcp import Client
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 
-from core.agent_types import AgentErrorCode, AgentServiceError, MCPTransportKind
-from services.agent_service.mcp import MCPCallNotDispatched, MCPServerConfig, MCPToolDescriptor
+from core.agent_types import AgentErrorCode, AgentServiceError, AgentValidationError, MCPTransportKind
+from services.agent_service.mcp import (
+    MCPCallNotDispatched,
+    MCPServerConfig,
+    MCPToolDescriptor,
+    validate_mcp_server_config,
+)
 from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
 from utils.sanitizers import DataSanitizer
 
@@ -110,6 +115,31 @@ _OS_BASELINE_KEYS: tuple[str, ...] = (
 _STDIO_TEMP_KEYS: tuple[str, ...] = ("TEMP", "TMP")
 #: 受管专属临时目录名前缀（``mkdtemp`` 追加随机后缀，天然保证唯一、无竞争）。
 _STDIO_TEMP_PREFIX = "astock-mcp-stdio-"
+
+
+def _resolve_http_headers(headers: tuple[tuple[str, str], ...]) -> dict[str, str]:
+    """把 HTTP Header 的**安全引用**解析为实际值（``env:`` / ``keyring:``）。
+
+    只接受引用形态（明文值在配置校验阶段已拒绝），故本函数是唯一把秘密读入内存的
+    位置；解析失败只抛 ``ValueError``（消息仅含引用名，不含秘密，R9）。
+    """
+
+    resolved: dict[str, str] = {}
+    for name, ref in headers:
+        if ref.startswith("env:"):
+            var_name = ref[len("env:") :]
+            value = os.environ.get(var_name)
+            if not value:
+                raise ValueError(f"secure header reference not found: env:{var_name}")
+        else:
+            item = ref[len("keyring:") :]
+            import utils.config_handler as cfg
+
+            value = cfg.keyring.get_password(cfg.KEYRING_SERVICE_NAME, item)
+            if not value:
+                raise ValueError(f"secure header reference not found: keyring:{item}")
+        resolved[name] = value
+    return resolved
 
 
 def _build_stdio_env(
@@ -595,17 +625,41 @@ class FastMCPClientFactory:
         self._deadline_factory = deadline_factory or (lambda seconds: MCPDeadline(seconds=seconds))
 
     async def open(self, config: MCPServerConfig) -> FastMCPSession:
-        """建立真实连接（仅显式启连/测试调用）；失败映射为 ``CONFIG_UNAVAILABLE``。"""
+        """建立真实连接（仅显式启连/测试调用）；失败映射为 ``CONFIG_UNAVAILABLE``。
+
+        启连点**复用** ``validate_mcp_server_config``：配置可能由存储加载后被篡改，
+        未通过即零启连（不建临时目录、不建线程、不解析秘密、不创建子进程/网络连接）。
+        """
+
         label = config.identity.stable_key()
+        try:
+            validate_mcp_server_config(config)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"invalid mcp config: {exc.code}", label) from exc
         # 诊断先于 client 构造：HTTP 目标核验在传输层记录，须与连接期共用同一实例。
         diagnostics = MCPSessionDiagnostics()
         is_stdio = config.transport.kind is MCPTransportKind.STDIO
+        http_headers: dict[str, str] | None = None
+        if not is_stdio and config.transport.headers:
+            try:
+                http_headers = await asyncio.to_thread(_resolve_http_headers, config.transport.headers)
+            except ValueError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.CONFIG_UNAVAILABLE, "mcp secure header reference unavailable", label
+                ) from exc
         drain = _SanitizedStderrDrain() if is_stdio else None
         stdio_env: _ManagedStdioEnvironment | None = None
         try:
             if is_stdio:
                 stdio_env = _ManagedStdioEnvironment.create(config.transport.env)
-            transport = self._transport(config, drain, stdio_env=stdio_env, diagnostics=diagnostics, label=label)
+            transport = self._transport(
+                config,
+                drain,
+                stdio_env=stdio_env,
+                diagnostics=diagnostics,
+                label=label,
+                headers=http_headers,
+            )
         except Exception as exc:
             _discard_drain(drain)
             _discard_stdio_env(stdio_env)
@@ -672,6 +726,7 @@ class FastMCPClientFactory:
         stdio_env: _ManagedStdioEnvironment | None = None,
         diagnostics: MCPSessionDiagnostics,
         label: str,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         transport = config.transport
         if transport.kind is MCPTransportKind.STDIO:
@@ -690,5 +745,5 @@ class FastMCPClientFactory:
         assert transport.url is not None
         factory = _guarded_http_client(_ApprovedHTTPTarget.from_url(transport.url), diagnostics, label)
         if transport.kind is MCPTransportKind.STREAMABLE_HTTP:
-            return StreamableHttpTransport(transport.url, httpx_client_factory=factory)
-        return SSETransport(transport.url, httpx_client_factory=factory)
+            return StreamableHttpTransport(transport.url, headers=headers, httpx_client_factory=factory)
+        return SSETransport(transport.url, headers=headers, httpx_client_factory=factory)

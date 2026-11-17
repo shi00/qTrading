@@ -13,10 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -45,8 +44,9 @@ from services.agent_service.mcp import (
 
 _FINGERPRINT = sha256_hex(b"mcp-local-implementation")
 _SCHEMA = '{"type":"object","properties":{}}'
-# 平台中性绝对路径：夹具不得假设 Windows（Linux CI 上 "C:\\..." 非 os.path.isabs）
-_ABS_EXE = os.path.join(str(Path(tempfile.gettempdir())), "mcp-server.exe")
+# 平台中性的真实可执行文件与绝对 cwd：校验要求 command 存在且可执行、cwd 必填。
+_ABS_EXE = sys.executable
+_ABS_CWD = os.path.dirname(_ABS_EXE)
 
 
 def _identity(config_version: int = 1) -> MCPServiceIdentity:
@@ -57,8 +57,10 @@ def _transport(kind: MCPTransportKind = MCPTransportKind.STDIO, **overrides: obj
     values: dict[str, object] = {"kind": kind}
     if kind is MCPTransportKind.STDIO:
         values["command"] = _ABS_EXE
+        values["cwd"] = _ABS_CWD
     else:
         values["url"] = "https://mcp.example.test/tools"
+        values["http_risk_approved"] = True
     values.update(overrides)
     return MCPTransportConfig(**values)  # type: ignore[arg-type]  # 测试构造受控覆盖
 
@@ -188,7 +190,7 @@ class TestTransportConfig:
         assert exc.value.code == "invalid_transport"
 
     def test_stdio_rejects_http_url(self) -> None:
-        config = MCPTransportConfig(kind=MCPTransportKind.STDIO, command=_ABS_EXE, url="https://x.test")
+        config = MCPTransportConfig(kind=MCPTransportKind.STDIO, command=_ABS_EXE, cwd=_ABS_CWD, url="https://x.test")
         with pytest.raises(AgentValidationError) as exc:
             validate_transport_config(config)
         assert exc.value.code == "invalid_transport"

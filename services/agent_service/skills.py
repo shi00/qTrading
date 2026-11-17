@@ -12,7 +12,10 @@
   导入文本不赋权（F12「导入文本不赋权」）；
 - 同名判定去首尾空白且不区分大小写（NFKC + casefold）；
 - 包内脚本仅作为数据落盘，**从不执行**；
-- 版本目录不可覆盖；安装失败不留下部分目录，旧版本保持可读。
+- 版本目录不可覆盖；安装失败不留下部分目录，旧版本保持可读；
+- 预检/解析/暂存都在 worker 线程执行，并在分块边界检查合作取消标志（可中断）；
+- 发布前门与取消共用同一把锁：取消已置位则不执行 ``os.replace``（零迟到发布）；
+- waiter 取消/超时后确认 worker 退出，未确认则显式标 ``UNKNOWN``（不假装已停）。
 
 本模块不做网络访问，也不给项目根以外目录写权限（root 由应用组装传入）。
 """
@@ -26,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import unicodedata
 import uuid
@@ -132,6 +136,139 @@ class SkillImportStatus(Enum):
     UNCHANGED = "unchanged"
     UPDATE_REQUIRES_CONFIRMATION = "update_requires_confirmation"
     UPDATE = "update"
+
+
+class SkillOperationState(Enum):
+    """导入操作的结果事实：发布事实与 worker 退出事实分开记录，不把「不知道」当成功。"""
+
+    RUNNING = "running"
+    ABORTED = "aborted"
+    PUBLISHED = "published"
+    UNKNOWN = "unknown"
+
+
+class SkillOperationTicket:
+    """单次导入操作的票据：归属登记 + 合作取消 + 退出事实 + 发布前门。
+
+    合同：
+    - ``owner`` 登记谁发起本次预检/发布（身份 + 操作号），撤销只作用于本次操作；
+    - ``checkpoint()`` 由 worker 在分块/逐条目边界调用，取消已置位则中止长段
+      （ZIP 读取、摘要、暂存写入），使不可中断段变成可中断；
+    - ``publish()`` 是发布前门，与 ``cancel()`` 共用同一把锁：取消已置位时**不执行**
+      替换（零迟到发布）；替换成功后状态为 ``PUBLISHED``，供 waiter 判定是否需撤销；
+    - ``finish()`` 由 worker 退出时置位，``wait_exit()`` 供 waiter 在取消/超时后确认
+      退出；确认不到时由 waiter 显式标 ``UNKNOWN``，不假装已停。
+    """
+
+    def __init__(self, owner: str) -> None:
+        self._owner = owner
+        self._lock = threading.Lock()
+        self._cancel = threading.Event()
+        self._exited = threading.Event()
+        self._state = SkillOperationState.RUNNING
+        self._destination: Path | None = None
+        self._claimed: SkillVersionRef | None = None
+        self._workers_started = 0
+
+    @property
+    def owner(self) -> str:
+        return self._owner
+
+    @property
+    def state(self) -> SkillOperationState:
+        with self._lock:
+            return self._state
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    @property
+    def exited(self) -> bool:
+        """worker 是否已确认退出（退出事实，与发布事实独立）。"""
+
+        return self._exited.is_set()
+
+    @property
+    def published_destination(self) -> Path | None:
+        with self._lock:
+            return self._destination
+
+    def cancel(self) -> None:
+        """置位取消标志；与发布前门互斥，返回后替换要么已完成、要么不会再发生。"""
+
+        with self._lock:
+            self._cancel.set()
+
+    def claim(self, ref: SkillVersionRef) -> None:
+        """归属登记：本次操作拥有的版本目录（撤销只作用于此，不碰他人版本）。"""
+
+        with self._lock:
+            self._claimed = ref
+
+    @property
+    def claimed(self) -> SkillVersionRef | None:
+        with self._lock:
+            return self._claimed
+
+    def begin_worker(self) -> None:
+        """标记有新 worker 已提交：此前的退出事实作废，直到 ``finish()``。"""
+
+        with self._lock:
+            self._workers_started += 1
+            self._exited.clear()
+
+    @property
+    def worker_started(self) -> bool:
+        """是否提交过 worker（未提交时无需等待退出事实）。"""
+
+        return self._workers_started > 0
+
+    def checkpoint(self) -> None:
+        """worker 分块边界调用：取消已置位则中止本次操作。"""
+
+        if self._cancel.is_set():
+            raise AgentValidationError("skill_cancelled", "$.skill.cancelled")
+
+    def publish(self, replace: Callable[[], Path], *, destination: Path) -> Path:
+        """发布前门（原子）：取消已置位则跳过替换并抛错，绝不迟到发布。"""
+
+        with self._lock:
+            if self._cancel.is_set():
+                self._state = SkillOperationState.ABORTED
+                raise AgentValidationError("skill_cancelled", "$.skill.cancelled")
+            result = replace()
+            self._destination = destination
+            self._state = SkillOperationState.PUBLISHED
+            return result
+
+    def finish(self) -> None:
+        """worker 退出：置位退出事实；取消且无发布时把 RUNNING/UNKNOWN 收敛为 ``ABORTED``。"""
+
+        with self._lock:
+            if (
+                self._state in {SkillOperationState.RUNNING, SkillOperationState.UNKNOWN}
+                and self._destination is None
+                and self._cancel.is_set()
+            ):
+                self._state = SkillOperationState.ABORTED
+            self._exited.set()
+
+    def mark_aborted(self) -> None:
+        with self._lock:
+            self._state = SkillOperationState.ABORTED
+            self._destination = None
+
+    def mark_unknown(self) -> None:
+        """显式记录「无法确认 worker 已退出」，不把它当作已停或已发布。"""
+
+        with self._lock:
+            self._state = SkillOperationState.UNKNOWN
+
+    def wait_exit(self, timeout: float) -> bool:
+        """在 worker 线程等待退出事实（不得在事件循环线程直接调用）。"""
+
+        return self._exited.wait(timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,12 +427,14 @@ def inspect_skill_package(
     *,
     budget: SkillBudget = DEFAULT_SKILL_BUDGET,
     clock: Callable[[], float] = time.monotonic,
+    checkpoint: Callable[[], None] | None = None,
 ) -> SkillPackageInspection:
     """ZIP 四阈值预检 + 根 ``SKILL.md`` 布局校验，返回文件清单与摘要。
 
     对象数按「文件 + 全部隐含/显式目录（root 不计）」计；规范化后重名、
     文件与目录冲突都拒绝（F12「规范重名/重复路径」）。尺寸/时限在解压前与
-    逐块读取中双重计量。
+    逐块读取中双重计量；``checkpoint`` 在每个条目与每个读取块之前调用，
+    供合作取消中断长段。
     """
 
     if not isinstance(data, (bytes, bytearray)):
@@ -311,6 +450,8 @@ def inspect_skill_package(
         infos = archive.infolist()
         entries: list[tuple[str, bool]] = []
         for info in infos:
+            if checkpoint is not None:
+                checkpoint()
             name = _require_safe_entry_name(info.filename)
             if info.flag_bits & 0x1:
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
@@ -332,6 +473,8 @@ def inspect_skill_package(
             try:
                 with archive.open(info) as handle:
                     while True:
+                        if checkpoint is not None:
+                            checkpoint()
                         chunk = handle.read(_READ_CHUNK)
                         if not chunk:
                             break
@@ -362,8 +505,12 @@ def inspect_skill_directory(
     *,
     budget: SkillBudget = DEFAULT_SKILL_BUDGET,
     clock: Callable[[], float] = time.monotonic,
+    checkpoint: Callable[[], None] | None = None,
 ) -> SkillPackageInspection:
-    """本地目录预检：与 ZIP 统一计量；符号链接/特殊文件拒绝，读取按同句柄最终路径核验。"""
+    """本地目录预检：与 ZIP 统一计量；符号链接/特殊文件拒绝，读取按同句柄最终路径核验。
+
+    ``checkpoint`` 在每个目录/条目与每个读取块之前调用，供合作取消中断长段。
+    """
 
     from services.agent_service.skill_workspace import ReadOnlyWorkspace
 
@@ -374,6 +521,8 @@ def inspect_skill_directory(
     stack: list[tuple[str, str]] = [("", workspace.root)]
     while stack:
         prefix, directory = stack.pop()
+        if checkpoint is not None:
+            checkpoint()
         budget.enforce_elapsed(clock() - started)
         try:
             with os.scandir(directory) as iterator:
@@ -381,6 +530,8 @@ def inspect_skill_directory(
         except OSError as exc:
             raise AgentValidationError("invalid_skill_package", "$.skill.package") from exc
         for child in children:
+            if checkpoint is not None:
+                checkpoint()
             budget.enforce_elapsed(clock() - started)
             if child.is_symlink():
                 _fail("skill_path_escape", f"$.skill.package.entry[{child.name}]")
@@ -410,6 +561,8 @@ def inspect_skill_directory(
         payload = bytearray()
         size = 0
         for chunk in workspace.iter_bytes(rel, chunk_size=_READ_CHUNK):
+            if checkpoint is not None:
+                checkpoint()
             size += len(chunk)
             total += len(chunk)
             budget.enforce_expanded_bytes(total)
@@ -614,6 +767,13 @@ def _enforce_deadline(deadline: float | None, clock: Callable[[], float]) -> Non
         _fail("skill_time_exceeded", "$.skill.elapsed_s")
 
 
+def _replace_staging(staging: Path, destination: Path) -> Path:
+    """原子替换（发布前门内的唯一落点）：返回最终版本目录。"""
+
+    os.replace(staging, destination)
+    return destination
+
+
 def _write_version_manifest(staging: Path, inspection: SkillPackageInspection) -> None:
     payload = {
         "schema_version": 1,
@@ -672,8 +832,13 @@ class ManagedSkillStore:
         *,
         deadline: float | None = None,
         clock: Callable[[], float] = time.monotonic,
+        ticket: SkillOperationTicket | None = None,
     ) -> Path:
-        """预检后原子发布：目标版本已存在且内容相同视为幂等恢复，异内容拒绝。"""
+        """预检后原子发布：目标版本已存在且内容相同视为幂等恢复，异内容拒绝。
+
+        传入 ``ticket`` 时：暂存在分块边界检查合作取消，最后替换走发布前门
+        （取消已置位则不执行 ``os.replace``，不产生迟到/无主发布）。
+        """
 
         if inspection is None:
             inspection = inspect_skill_package(data)
@@ -686,9 +851,19 @@ class ManagedSkillStore:
         staging = self._root / ".staging" / f"{ref.skill_id}-{ref.version}-{uuid.uuid4().hex}"
         try:
             staging.mkdir(parents=True)
-            self._extract(data, inspection, staging, deadline=deadline, clock=clock)
+            self._extract(
+                data,
+                inspection,
+                staging,
+                deadline=deadline,
+                clock=clock,
+                checkpoint=ticket.checkpoint if ticket is not None else None,
+            )
             _write_version_manifest(staging, inspection)
-            os.replace(staging, destination)
+            if ticket is None:
+                os.replace(staging, destination)
+            else:
+                ticket.publish(lambda: _replace_staging(staging, destination), destination=destination)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -702,8 +877,12 @@ class ManagedSkillStore:
         *,
         deadline: float | None = None,
         clock: Callable[[], float] = time.monotonic,
+        ticket: SkillOperationTicket | None = None,
     ) -> Path:
-        """本地目录原子发布：逐文件回读校验摘要与字节数，失败清理暂存。"""
+        """本地目录原子发布：逐文件回读校验摘要与字节数，失败清理暂存。
+
+        传入 ``ticket`` 时：暂存在条目/分块边界检查合作取消，最后替换走发布前门。
+        """
 
         from services.agent_service.skill_workspace import ReadOnlyWorkspace
 
@@ -713,14 +892,19 @@ class ManagedSkillStore:
                 return destination
             _fail("skill_version_exists", f"$.skill.version[{ref.skill_id}@{ref.version}]")
         workspace = ReadOnlyWorkspace(root)
+        checkpoint = ticket.checkpoint if ticket is not None else None
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging = self._root / ".staging" / f"{ref.skill_id}-{ref.version}-{uuid.uuid4().hex}"
         try:
             staging.mkdir(parents=True)
             for directory in sorted(inspection.directories, key=lambda name: len(PurePosixPath(name).parts)):
+                if checkpoint is not None:
+                    checkpoint()
                 _enforce_deadline(deadline, clock)
                 staging.joinpath(*PurePosixPath(directory).parts).mkdir(parents=True, exist_ok=True)
             for entry in inspection.files:
+                if checkpoint is not None:
+                    checkpoint()
                 _enforce_deadline(deadline, clock)
                 target = staging.joinpath(*PurePosixPath(entry.name).parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -728,6 +912,8 @@ class ManagedSkillStore:
                 size = 0
                 with target.open("wb") as handle:
                     for chunk in workspace.iter_bytes(entry.name, chunk_size=_READ_CHUNK):
+                        if checkpoint is not None:
+                            checkpoint()
                         _enforce_deadline(deadline, clock)
                         size += len(chunk)
                         digest.update(chunk)
@@ -735,7 +921,10 @@ class ManagedSkillStore:
                 if size != entry.size or digest.hexdigest() != entry.sha256:
                     _fail("invalid_skill_package", f"$.skill.package.entry[{entry.name}]")
             _write_version_manifest(staging, inspection)
-            os.replace(staging, destination)
+            if ticket is None:
+                os.replace(staging, destination)
+            else:
+                ticket.publish(lambda: _replace_staging(staging, destination), destination=destination)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -762,10 +951,13 @@ class ManagedSkillStore:
         *,
         deadline: float | None,
         clock: Callable[[], float],
+        checkpoint: Callable[[], None] | None = None,
     ) -> None:
         expected = {entry.name: entry for entry in inspection.files}
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             for info in archive.infolist():
+                if checkpoint is not None:
+                    checkpoint()
                 _enforce_deadline(deadline, clock)
                 name = _require_safe_entry_name(info.filename)
                 if info.filename.endswith("/"):
@@ -779,6 +971,8 @@ class ManagedSkillStore:
                 payload = bytearray()
                 with archive.open(info) as source:
                     while True:
+                        if checkpoint is not None:
+                            checkpoint()
                         _enforce_deadline(deadline, clock)
                         chunk = source.read(_READ_CHUNK)
                         if not chunk:
@@ -877,21 +1071,43 @@ class SkillCatalogService:
         blocking_runner: Callable[..., Any] = _run_blocking,
         budget: SkillBudget = DEFAULT_SKILL_BUDGET,
         clock: Callable[[], float] = time.monotonic,
+        cancel_exit_timeout: float = 5.0,
+        operation_factory: Callable[[str], SkillOperationTicket] = SkillOperationTicket,
     ) -> None:
         self._store = store
         self._dao = dao
         self._run = blocking_runner
         self._budget = budget
         self._clock = clock
+        self._cancel_exit_timeout = cancel_exit_timeout
+        self._operation_factory = operation_factory
 
     async def import_package(self, request: SkillPackageImportRequest) -> SkillImportReceipt:
         """预检（ZIP/目录统一计量）→ 同名判定 → （发布 + 登记）。
 
         预检、前台解析与暂存共用同一 10 秒预算；解析与暂存都在受管线程执行，
         不在事件循环线程同步阻塞（R16）。同内容返回未变化；不同内容默认需确认。
+
+        取消语义：预检/解析/暂存经同一操作票据合作取消；waiter 取消或超时后等待
+        worker 退出（确认不到则显式标 ``UNKNOWN``）；已发生的替换按归属撤销，
+        保证「取消保旧、无迟到、无主发布」。
         """
 
         identity = f"{request.user_scope}/skill/{request.directory_name}"
+        ticket = self._operation_factory(f"{identity}#{uuid.uuid4().hex}")
+        try:
+            return await self._import_guarded(request, identity, ticket)
+        except asyncio.CancelledError:
+            # R2：取消必须上抛；上抛前置位合作取消并收尾（确认退出或标未知、撤销本次发布）。
+            await self._cancel_and_settle(ticket)
+            raise
+
+    async def _import_guarded(
+        self,
+        request: SkillPackageImportRequest,
+        identity: str,
+        ticket: SkillOperationTicket,
+    ) -> SkillImportReceipt:
         started = self._clock()
         deadline = started + self._budget.max_preflight_seconds
         try:
@@ -902,25 +1118,43 @@ class SkillCatalogService:
             if request.directory is not None and not os.path.isabs(request.directory):
                 _fail("invalid_skill_source", "$.skill.package")
             if request.data is not None:
-                inspection = await self._run(
-                    partial(inspect_skill_package, budget=self._budget, clock=self._clock),
+                inspection = await self._run_worker(
+                    ticket,
+                    partial(
+                        inspect_skill_package,
+                        budget=self._budget,
+                        clock=self._clock,
+                        checkpoint=ticket.checkpoint,
+                    ),
                     request.data,
                 )
             else:
-                inspection = await self._run(
-                    partial(inspect_skill_directory, budget=self._budget, clock=self._clock),
+                inspection = await self._run_worker(
+                    ticket,
+                    partial(
+                        inspect_skill_directory,
+                        budget=self._budget,
+                        clock=self._clock,
+                        checkpoint=ticket.checkpoint,
+                    ),
                     request.directory,
                 )
             remaining = deadline - self._clock()
             if remaining <= 0:
                 _fail("skill_time_exceeded", "$.skill.elapsed_s")
-            manifest = await asyncio.wait_for(
-                self._run(
-                    partial(parse_skill_manifest, directory_name=request.directory_name),
-                    inspection.manifest_text.encode("utf-8"),
-                ),
-                timeout=remaining,
-            )
+            try:
+                manifest = await asyncio.wait_for(
+                    self._run_worker(
+                        ticket,
+                        partial(parse_skill_manifest, directory_name=request.directory_name),
+                        inspection.manifest_text.encode("utf-8"),
+                    ),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                # waiter 超时：先置位合作取消，再确认 worker 退出（确认不到标 UNKNOWN）。
+                await self._cancel_and_settle(ticket)
+                raise
         except AgentValidationError as exc:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
         except TimeoutError as exc:
@@ -949,17 +1183,30 @@ class SkillCatalogService:
         if decision.status in {SkillImportStatus.UNCHANGED, SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION}:
             return receipt
         ref = SkillVersionRef(skill_id=skill_id, version=decision.next_version)
+        ticket.claim(ref)
         try:
             if request.data is not None:
-                await self._run(
-                    partial(self._store.publish_package, deadline=deadline, clock=self._clock),
+                await self._run_worker(
+                    ticket,
+                    partial(
+                        self._store.publish_package,
+                        deadline=deadline,
+                        clock=self._clock,
+                        ticket=ticket,
+                    ),
                     ref,
                     request.data,
                     inspection,
                 )
             else:
-                await self._run(
-                    partial(self._store.publish_directory, deadline=deadline, clock=self._clock),
+                await self._run_worker(
+                    ticket,
+                    partial(
+                        self._store.publish_directory,
+                        deadline=deadline,
+                        clock=self._clock,
+                        ticket=ticket,
+                    ),
                     ref,
                     request.directory,
                     inspection,
@@ -1014,6 +1261,48 @@ class SkillCatalogService:
         except AgentValidationError as exc:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
         return await self._dao.save_role_skill_assignment(assignment, user_scope=user_scope, display_name=display_name)
+
+    async def _run_worker(
+        self,
+        ticket: SkillOperationTicket,
+        func: Callable[..., Any],
+        *args: Any,
+    ) -> Any:
+        """在受管线程执行一段 worker，并记录其退出事实（供取消后的收尾观察）。"""
+
+        def worker(*inner: Any) -> Any:
+            try:
+                return func(*inner)
+            finally:
+                ticket.finish()
+
+        ticket.begin_worker()
+        return await self._run(worker, *args)
+
+    async def _cancel_and_settle(self, ticket: SkillOperationTicket) -> None:
+        """置位合作取消并收尾；收尾失败不得改变调用方正在传播的取消/超时事实。"""
+
+        ticket.cancel()
+        try:
+            await asyncio.shield(self._settle_cancelled(ticket))
+        except (Exception, asyncio.CancelledError):
+            # 收尾失败时事实保留在票据上（未确认退出即 UNKNOWN），不掩盖取消/超时。
+            pass
+
+    async def _settle_cancelled(self, ticket: SkillOperationTicket) -> None:
+        """取消/超时后的收尾：确认退出或显式标未知；本次已发布版本撤销（取消保旧）。"""
+
+        exited = True
+        if ticket.worker_started:
+            exited = await self._run(ticket.wait_exit, self._cancel_exit_timeout)
+        claimed = ticket.claimed
+        if ticket.published_destination is not None and claimed is not None:
+            # 替换已发生但登记不会再有：按归属撤销本次版本，旧版本不受影响。
+            await self._run(self._store.remove_version, claimed)
+            ticket.mark_aborted()
+        if not exited:
+            # 显式记录「worker 未确认退出」，不把它当作已停或已发布。
+            ticket.mark_unknown()
 
     async def _missing_dependencies(self, user_scope: str, dependencies: Sequence[str]) -> tuple[str, ...]:
         missing: list[str] = []
