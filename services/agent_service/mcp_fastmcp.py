@@ -255,6 +255,7 @@ class FastMCPSession:
         self._stderr_drain = stderr_drain
         self._on_close = on_close
         self._closed = False
+        self._stderr_drain_closed = False
 
     @property
     def diagnostics(self) -> MCPSessionDiagnostics:
@@ -307,19 +308,23 @@ class FastMCPSession:
     async def aclose(self) -> None:
         if self._closed:
             return
-        self._closed = True
         try:
             await self._client.__aexit__(None, None, None)
         finally:
+            # 关闭一经尝试即不再接受新发送；stderr 清理只做一次，失败重试不覆盖已冻结尾部。
             self._on_close()
-            drain = self._stderr_drain
-            if drain is not None:
-                drain.close()
-                try:
-                    self._diagnostics.stderr_tail = drain.tail()
-                finally:
-                    # 属性已持有有界脱敏副本；清空内存缓冲，不留运行期留存。
-                    drain.clear()
+            if not self._stderr_drain_closed:
+                self._stderr_drain_closed = True
+                drain = self._stderr_drain
+                if drain is not None:
+                    drain.close()
+                    try:
+                        self._diagnostics.stderr_tail = drain.tail()
+                    finally:
+                        # 属性已持有有界脱敏副本；清空内存缓冲，不留运行期留存。
+                        drain.clear()
+        # 只有实际退出成功才标记已关闭：失败/取消后的再次 aclose 仍会真正重试退出（I17）。
+        self._closed = True
 
 
 def _result_payload(result: Any) -> dict[str, Any]:

@@ -110,12 +110,22 @@ class _FakeStore:
 
 
 class _FakeSession:
-    def __init__(self, tools: tuple[MCPToolDescriptor, ...], *, fail_list: bool = False) -> None:
+    def __init__(
+        self,
+        tools: tuple[MCPToolDescriptor, ...],
+        *,
+        fail_list: bool = False,
+        close_failures: int = 0,
+        close_gate: asyncio.Event | None = None,
+    ) -> None:
         self.tools = tools
         self.fail_list = fail_list
         self.list_calls = 0
         self.call_calls: list[str] = []
         self.closed = False
+        self.close_calls = 0
+        self.close_failures = close_failures
+        self.close_gate = close_gate
 
     async def list_tools(self, *, deadline_s: int) -> tuple[MCPToolDescriptor, ...]:
         self.list_calls += 1
@@ -128,6 +138,12 @@ class _FakeSession:
         return {"content": []}
 
     async def aclose(self) -> None:
+        self.close_calls += 1
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        if self.close_failures:
+            self.close_failures -= 1
+            raise RuntimeError("client close failed")
         self.closed = True
 
 
@@ -375,9 +391,10 @@ class TestNoAutoReconnectAndDisconnect:
         await manager.save_config(_config())
         await manager.connect(_identity())
 
-        manager.mark_session_lost(_identity())
+        await manager.mark_session_lost(_identity())
 
         assert manager.is_connected(_identity()) is False
+        assert session.closed is True  # 失联也要确认实际退出后移除句柄
         assert factory.opened == 1
 
     @pytest.mark.asyncio
@@ -398,9 +415,18 @@ async def _wait_until(predicate: Callable[[], bool], *, attempts: int = 200) -> 
 class _CountingFactory:
     """open 首个 await 即让出，以便并发调用真正交错；记录实际 open 次数与存活 client。"""
 
-    def __init__(self, *, delay: float = 0.0, fail_times: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        delay: float = 0.0,
+        fail_times: int = 0,
+        close_failures: int = 0,
+        close_gate: asyncio.Event | None = None,
+    ) -> None:
         self.delay = delay
         self.fail_times = fail_times
+        self.close_failures = close_failures
+        self.close_gate = close_gate
         self.opened: list[MCPServerConfig] = []
         self.sessions: list[_FakeSession] = []
 
@@ -410,7 +436,14 @@ class _CountingFactory:
         if self.fail_times:
             self.fail_times -= 1
             raise RuntimeError("open failed")
-        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        session = _FakeSession(
+            (MCPToolDescriptor("read_file", _SCHEMA),),
+            close_failures=self.close_failures,
+            close_gate=self.close_gate,
+        )
+        # 关闭故障/闸门只作用于首个会话，便于验证关闭重试后的正常重连。
+        self.close_failures = 0
+        self.close_gate = None
         self.sessions.append(session)
         return session
 
@@ -441,6 +474,100 @@ def _factory_manager(factory: MCPClientFactoryPort) -> tuple[SharedMCPConnection
     store = _FakeStore()
     manager = SharedMCPConnectionManager(store=store, factory=factory, probe=_FakeProbe(_FINGERPRINT))
     return manager, store
+
+
+class TestCloseConfirmation:
+    """I17：closing/unknown 保留准确 handle；关闭未确认前重连不得绕过。"""
+
+    @pytest.mark.asyncio
+    async def test_close_failure_keeps_handle_and_reconnect_finishes_close(self) -> None:
+        factory = _CountingFactory(close_failures=1)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+        first = factory.sessions[0]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager.disconnect(_identity())
+        assert "client close failed" in str(excinfo.value)
+
+        assert first.close_calls == 1
+        assert first.closed is False  # 句柄保留，不得先 pop 后关
+        assert manager.is_connected(_identity()) is False
+        with pytest.raises(AgentServiceError) as exc:
+            manager.session(_identity())
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+        await manager.connect(_identity())
+        assert first.close_calls == 2
+        assert first.closed is True  # 重连前先完成关闭
+        assert len(factory.opened) == 2
+        assert manager.session(_identity()) is factory.sessions[1]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_disconnect_keeps_handle_until_close_confirmed(self) -> None:
+        gate = asyncio.Event()
+        factory = _CountingFactory(close_gate=gate)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+        first = factory.sessions[0]
+
+        closing = asyncio.create_task(manager.disconnect(_identity()))
+        await _wait_until(lambda: first.close_calls == 1)
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await closing
+        assert isinstance(excinfo.value, asyncio.CancelledError)
+
+        assert first.closed is False
+        assert manager.is_connected(_identity()) is False
+
+        gate.set()
+        await _wait_until(lambda: first.closed is True)  # 后台关闭确认退出后才移除句柄
+        await manager.connect(_identity())
+        assert len(factory.opened) == 2
+        assert manager.session(_identity()) is factory.sessions[1]
+
+    @pytest.mark.asyncio
+    async def test_reconnect_after_lost_refuses_when_close_remains_unconfirmed(self) -> None:
+        factory = _CountingFactory(close_failures=2)
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+        first = factory.sessions[0]
+
+        with pytest.raises(RuntimeError) as lost_exc:
+            await manager.mark_session_lost(_identity())
+        assert "client close failed" in str(lost_exc.value)
+        assert first.closed is False
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+        assert exc.value.code is AgentErrorCode.OPERATION_UNKNOWN
+        assert "close is unconfirmed" in exc.value.sanitized_message
+        assert first.close_calls == 2  # 重连前重试关闭，不直接 open
+        assert len(factory.opened) == 1
+
+    @pytest.mark.asyncio
+    async def test_normal_disconnect_removes_handle_only_after_confirmed_exit(self) -> None:
+        factory = _CountingFactory()
+        manager, store = _factory_manager(factory)
+        await store.save(_config())
+        await manager.connect(_identity())
+        first = factory.sessions[0]
+
+        await manager.disconnect(_identity())
+
+        assert first.close_calls == 1
+        assert first.closed is True
+        with pytest.raises(AgentServiceError) as exc:
+            manager.session(_identity())
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
+        await manager.connect(_identity())
+        assert len(factory.opened) == 2
+        assert first.close_calls == 1  # 无未确认资源，重连不再重复关闭旧句柄
 
 
 class TestConnectSingleFlight:
