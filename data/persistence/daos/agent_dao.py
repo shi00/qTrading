@@ -8690,6 +8690,39 @@ class AgentDao(BaseDao):
                     AgentErrorCode.INPUT_INVALID, "cleanup fence target missing, drifted, or already verified", label
                 )
 
+    async def save_cleanup_attempt_stage(self, user_scope: str, cleanup_job_id: str, *, stage: str) -> None:
+        """落「删除尝试阶段」（§10.7 / M14）：只更新 ``error_category`` 载体，不改阶段/计数。
+
+        副作用前调用，供崩溃/取消/服务异常后的重试识别「已尝试删除」并沿原 job
+        收尾，不把已删净的主键域误判为首次缺失。与 ``save_cleanup_phase`` 同一
+        单调/终态约束（R22 语义）：要求 fence 已提交且未 ``verified``，否则拒绝，
+        不把阶段回退或写进完成态。
+        """
+
+        self._check_engine()
+        label = f"{user_scope}/{cleanup_job_id}"
+        if not stage:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "cleanup attempt stage is required", label)
+        engine = self._require_async_engine()
+        statement = (
+            sa.update(AgentCleanupJob)
+            .where(
+                AgentCleanupJob.user_scope == user_scope,
+                AgentCleanupJob.cleanup_job_id == cleanup_job_id,
+                AgentCleanupJob.phase != CleanupPhase.VERIFIED.value,
+                AgentCleanupJob.fence_committed.is_(True),
+            )
+            .values(error_category=stage)
+        )
+        async with engine.begin() as conn:
+            result = await conn.execute(statement)
+            if int(result.rowcount or 0) == 0:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "cleanup job phase target missing, fence absent, or already verified",
+                    label,
+                )
+
     async def save_cleanup_phase(
         self,
         user_scope: str,

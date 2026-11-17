@@ -11,11 +11,13 @@ from pathlib import Path
 import pytest
 
 from core.agent_types import DeliveryTarget
+from services.agent_service import delivery as delivery_module
 from services.agent_service.delivery import (
     DeliveryFileError,
     DeliveryUnknownError,
     WindowsManagedFileStore,
     _file_identity,
+    _GuardedFile,
 )
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows 目标保护仅在 win32 验证")
@@ -119,13 +121,17 @@ class TestTargetRaceProtection:
         target_path = tmp_path / "unverified.md"
         store = _store()
         staged = store.stage(target=_target(target_path), content=_CONTENT, expected_digest=_DIGEST)
-        real_replace = os.replace
+        real_snapshot = delivery_module._snapshot
+        calls = {"count": 0}
 
-        def replace_then_tamper(source: object, destination: object) -> None:
-            real_replace(source, destination)
-            Path(destination).write_bytes(b"external-after-publish")
+        def snapshot_then_tamper(path: Path, *, with_digest: bool = True) -> object:
+            # 发布句柄关闭后、发布后确证读取之前被外部改写：只能 unknown。
+            calls["count"] += 1
+            if calls["count"] == 2:
+                Path(path).write_bytes(b"external-after-publish")
+            return real_snapshot(path, with_digest=with_digest)
 
-        monkeypatch.setattr("services.agent_service.delivery.os.replace", replace_then_tamper)
+        monkeypatch.setattr(delivery_module, "_snapshot", snapshot_then_tamper)
         with pytest.raises(DeliveryUnknownError) as exc:
             store.publish(target=_target(target_path), staged=staged)
         assert exc.value.code == "delivery_publish_unverified"
@@ -134,37 +140,45 @@ class TestTargetRaceProtection:
     def test_target_written_by_other_file_is_unknown_despite_same_content(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """替换窗口内被外部写入同内容新文件：文件身份不符即不可确证（不得报成功）。"""
+        """移入窗口内被外部写入同内容新文件：文件身份不符即不可确证（不得报成功）。"""
 
         target_path = tmp_path / "identity.md"
         store = _store()
         staged = store.stage(target=_target(target_path), content=_CONTENT, expected_digest=_DIGEST)
+        real_move = _GuardedFile.move_to
 
-        def copy_instead_of_move(source: object, destination: object) -> None:
-            Path(source).unlink()
-            Path(destination).write_bytes(_CONTENT)
+        def copy_instead_of_move(mover: _GuardedFile, destination: Path) -> None:
+            real_move(mover, destination)
+            if Path(destination) == target_path:
+                # 模拟「内容相同但不是本交付文件」：换成新文件（新文件 ID）。
+                os.close(mover._fd)
+                Path(destination).unlink()
+                Path(destination).write_bytes(_CONTENT)
 
-        monkeypatch.setattr("services.agent_service.delivery.os.replace", copy_instead_of_move)
+        monkeypatch.setattr(_GuardedFile, "move_to", copy_instead_of_move)
         with pytest.raises(DeliveryUnknownError) as exc:
             store.publish(target=_target(target_path), staged=staged)
         assert exc.value.code == "delivery_publish_unverified"
         assert target_path.read_bytes() == _CONTENT
 
-    def test_replace_oserror_is_unknown_even_with_identical_target(
+    def test_publish_oserror_is_unknown_even_with_identical_target(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``os.replace`` 抛错且目标已是同内容：不得凭内容判成功，只能 unknown。"""
+        """移入失败且目标已是同内容：不得凭内容判成功，只能 unknown。"""
 
         target_path = tmp_path / "same.md"
         target_path.write_bytes(_CONTENT)
         store = _store()
         target = _target(target_path, existing=True, digest=_DIGEST, confirmed=True)
         staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        real_move = _GuardedFile.move_to
 
-        def refuse_replace(source: object, destination: object) -> None:
-            raise OSError("file is locked")
+        def refuse_move(mover: _GuardedFile, destination: Path) -> None:
+            if Path(destination) == target_path and mover._path == staged.path:
+                raise OSError("file is locked")
+            real_move(mover, destination)
 
-        monkeypatch.setattr("services.agent_service.delivery.os.replace", refuse_replace)
+        monkeypatch.setattr(_GuardedFile, "move_to", refuse_move)
         with pytest.raises(DeliveryUnknownError) as exc:
             store.publish(target=target, staged=staged)
         assert exc.value.code == "delivery_publish_unverified"
@@ -200,6 +214,31 @@ class TestTargetRaceProtection:
             assert exc.value.code == "delivery_target_reparse"
         finally:
             os.rmdir(junction)
+
+
+class TestExclusiveOverwriteCondition:
+    """独占句柄作为覆盖条件：目标被他人持有时不得覆盖，暂存被持有时不得删除。"""
+
+    def test_target_held_by_another_handle_is_refused(self, tmp_path: Path) -> None:
+        target_path = tmp_path / "held.csv"
+        target_path.write_bytes(b"old")
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        store = _store()
+        target = _target(target_path, existing=True, digest=old_digest, confirmed=True)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        with _GuardedFile.open_exclusive(target_path):
+            with pytest.raises(DeliveryFileError) as exc:
+                store.publish(target=target, staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_path.read_bytes() == b"old"
+        assert staged.path.exists()
+
+    def test_cancel_refused_while_staged_is_exclusively_held(self, tmp_path: Path) -> None:
+        store = _store()
+        staged = store.stage(target=_target(tmp_path / "busy.md"), content=_CONTENT, expected_digest=_DIGEST)
+        with _GuardedFile.open_exclusive(staged.path):
+            assert store.cancel(staged) is False
+        assert staged.path.exists()
 
 
 class TestStagingSafety:

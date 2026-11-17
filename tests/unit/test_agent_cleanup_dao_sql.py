@@ -5,7 +5,8 @@
   ``ANY(:ids)`` 展参、无 LIKE/前缀；Datasource 删除只命中常量表；
 - 执行器顺序（公开系统删除 → Datasource DML → 逐域查回）、显式不递归子工作流、
   空集合零副作用、超 200/空 ID 在触达客户端与存储前拒绝；
-- 应用域 tombstone 的入参边界（空 user_scope、非法资产键、超 200）。
+- 应用域 tombstone 的入参边界（空 user_scope、非法资产键、超 200）；
+- 删除尝试阶段只写 ``error_category`` 且要求 fence 已提交、未 verified（M14）。
 
 真实九类删除/集合外不变/NOT NULL tombstone 由 ``tests/integration/test_agent_dao_cleanup.py``
 （真 sidecar PG）验证，本文件不冒充集成证据。
@@ -13,7 +14,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from core.agent_types import (
     CLEANUP_MAX_BATCH_IDS,
@@ -287,4 +292,69 @@ class TestCleanupPhaseWriteValidation:
                 verified_counts={"dbos.workflow_status": 2},
                 complete=False,
             )
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+
+
+class _StageResult:
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
+class _StageConn:
+    def __init__(self, rowcount: int = 1) -> None:
+        self.rowcount = rowcount
+        self.statements: list[str] = []
+
+    async def execute(self, statement: Any, params: Any = None) -> _StageResult:
+        self.statements.append(str(statement))
+        return _StageResult(self.rowcount)
+
+
+class TestCleanupAttemptStageWrite:
+    """M14：删除尝试阶段只经 ``error_category`` 承载，且要求 fence 已提交、未 verified。"""
+
+    def _dao(self, conn: _StageConn) -> AgentDao:
+        engine = MagicMock(spec=AsyncEngine)
+        for name in ("begin", "connect"):
+            cm = MagicMock()
+            cm.__aenter__ = AsyncMock(return_value=conn)
+            cm.__aexit__ = AsyncMock(return_value=False)
+            setattr(engine, name, MagicMock(return_value=cm))
+        return AgentDao(engine)
+
+    @pytest.mark.asyncio
+    async def test_stage_write_targets_error_category_under_fence_and_unverified(self) -> None:
+        conn = _StageConn()
+        await self._dao(conn).save_cleanup_attempt_stage("u", "job-1", stage="cleanup_native_delete_started")
+
+        assert len(conn.statements) == 1
+        sql = conn.statements[0]
+        assert sql.startswith("UPDATE agent_cleanup_job")
+        assert "error_category=" in sql
+        assert "fence_committed IS true" in sql
+        assert "phase !=" in sql
+        # 阶段写入不得改写阶段/计数（单调与诊断事实由既有列各自承载）。
+        assert "verified_counts" not in sql
+        assert "phase=" not in sql
+
+    @pytest.mark.asyncio
+    async def test_stage_write_rejected_when_target_missing_or_verified(self) -> None:
+        with pytest.raises(AgentServiceError) as exc:
+            await self._dao(_StageConn(rowcount=0)).save_cleanup_attempt_stage(
+                "u", "job-1", stage="cleanup_native_delete_started"
+            )
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "already verified" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_blank_stage_rejected_before_engine_requirement(self) -> None:
+        with pytest.raises(AgentServiceError) as exc:
+            await AgentDao(object()).save_cleanup_attempt_stage("u", "job-1", stage="")
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert "attempt stage" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_valid_stage_reaches_engine_requirement(self) -> None:
+        with pytest.raises(AgentServiceError) as exc:
+            await AgentDao(object()).save_cleanup_attempt_stage("u", "job-1", stage="cleanup_native_delete_started")
         assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
