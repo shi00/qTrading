@@ -143,11 +143,11 @@ execnet==2.1.2
     # via pytest-xdist
 fastapi==0.162.0
     # via astockscreener (pyproject.toml)
-fastmcp==4.1.6
+fastmcp==4.2.0
     # via
     #   astockscreener (pyproject.toml)
     #   flet-mcp
-fastmcp-slim==4.1.6
+fastmcp-slim==4.2.0
     # via fastmcp
 fastuuid==0.14.0
     # via litellm
@@ -273,6 +273,7 @@ jsonref==1.1.0
 jsonschema==4.26.0
     # via
     #   astockscreener (pyproject.toml)
+    #   fastmcp-slim
     #   litellm
     #   mcp
 jsonschema-path==0.5.0
@@ -659,7 +660,7 @@ tzdata==2026.6
     #   tzlocal
 tzlocal==5.4.5
     # via apscheduler
-uncalled-for==0.6.0
+uncalled-for==0.6.1
     # via fastmcp-slim
 urllib3==2.8.0
     # via

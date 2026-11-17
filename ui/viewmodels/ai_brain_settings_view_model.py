@@ -30,11 +30,14 @@ ViewModel（ModelConnectionsViewModel / ModelRoutesViewModel / ModelUsageViewMod
 """
 
 import asyncio
+import hashlib
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
+from utils.config_models import ROLE_PROMPT_DEFAULTS
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -59,6 +62,115 @@ SAVE_STALE = "stale"
 # F05: 保存完成时草稿版本已前移的 i18n key（VM 只产出 key，View 按 locale 渲染）。
 SAVED_STALE_MESSAGE_KEY = "settings_ai_saved_stale"
 
+# --- F35 / J26 研究角色 Prompt（默认正文只读 + 追加） ---
+ROLE_MAIN = "main"
+ROLE_SUB = "sub"
+ROLE_PROMPT_ORDER: tuple[str, ...] = (ROLE_MAIN, ROLE_SUB)
+
+#: 角色展示名 i18n key（字面量供静态 i18n 键完整性扫描识别）。
+ROLE_PROMPT_NAME_KEYS: dict[str, str] = {
+    ROLE_MAIN: "settings_ai_role_name_main",
+    ROLE_SUB: "settings_ai_role_name_sub",
+}
+#: 角色教程 i18n key。
+ROLE_PROMPT_TUTORIAL_KEYS: dict[str, str] = {
+    ROLE_MAIN: "settings_ai_role_tutorial_main",
+    ROLE_SUB: "settings_ai_role_tutorial_sub",
+}
+
+ROLE_SOURCE_DEFAULT_KEY = "settings_ai_role_source_default"
+ROLE_SOURCE_APPEND_KEY = "settings_ai_role_source_default_append"
+ROLE_VERSION_UNSAVED_KEY = "settings_ai_role_version_unsaved"
+ROLE_VAR_UNKNOWN_KEY = "settings_ai_role_var_unknown"
+ROLE_VAR_EMPTY_KEY = "settings_ai_role_var_empty"
+
+#: 合成预览可替换变量及示例值（仅 UI 核对用，不调用模型、不代表真实取数）。
+#: 示例值保持语言中立，避免 VM 感知 locale（文案由 View 经 i18n 渲染）。
+ROLE_PROMPT_VARIABLES: dict[str, str] = {
+    "stock_name": "Sample Stock",
+    "stock_code": "600000.SH",
+    "industry": "Sample Industry",
+    "trade_date": "2026-11-17",
+}
+
+_ROLE_VAR_PATTERN = re.compile(r"\{([^{}]*)\}")
+
+
+def _coerce_str(value: object) -> str:
+    """配置读值归一：非字符串一律按空串（缺键不伪造内容）。"""
+    return value if isinstance(value, str) else ""
+
+
+def _replace_role_variables(text: str) -> tuple[str, str]:
+    """替换已知变量；未知/空变量保留原占位符并返回错误 i18n key（不静默替换）。"""
+    error_key = ""
+
+    def _substitute(match: re.Match[str]) -> str:
+        nonlocal error_key
+        name = match.group(1).strip()
+        if not name:
+            error_key = ROLE_VAR_EMPTY_KEY
+            return match.group(0)
+        if name not in ROLE_PROMPT_VARIABLES:
+            error_key = ROLE_VAR_UNKNOWN_KEY
+            return match.group(0)
+        return ROLE_PROMPT_VARIABLES[name]
+
+    return _ROLE_VAR_PATTERN.sub(_substitute, text), error_key
+
+
+def _compose_role_prompt(default_prompt: str, append_value: str) -> tuple[str, str]:
+    """合成预览 = 默认正文 + 追加内容 + 变量替换；返回 (预览, 错误 i18n key)。"""
+    default_preview, error_key = _replace_role_variables(default_prompt)
+    append = append_value.strip()
+    if not append:
+        return default_preview, error_key
+    append_preview, append_error = _replace_role_variables(append)
+    if append_error:
+        error_key = append_error
+    return f"{default_preview}\n\n{append_preview}", error_key
+
+
+def _prompt_version(text: str) -> str:
+    """内容版本：合成内容指纹（短哈希），用于「来源/版本」与旧请求绑定核对。"""
+    return f"v-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
+
+
+@dataclass(frozen=True)
+class RolePromptState:
+    """单个研究角色的 Prompt 视图状态（默认只读 + 追加 + 合成预览）。"""
+
+    role_key: str
+    name_key: str
+    tutorial_key: str
+    default_prompt: str
+    default_version: str
+    append_value: str
+    saved_version: str
+    draft_version: str
+    preview: str
+    source_key: str
+    variable_error_key: str = ""
+
+
+def _build_role_prompt_state(role_key: str, append_value: str, saved_version: str) -> RolePromptState:
+    default_prompt, default_version = ROLE_PROMPT_DEFAULTS[role_key]
+    append = _coerce_str(append_value)
+    preview, error_key = _compose_role_prompt(default_prompt, append)
+    return RolePromptState(
+        role_key=role_key,
+        name_key=ROLE_PROMPT_NAME_KEYS[role_key],
+        tutorial_key=ROLE_PROMPT_TUTORIAL_KEYS[role_key],
+        default_prompt=default_prompt,
+        default_version=default_version,
+        append_value=append,
+        saved_version=_coerce_str(saved_version),
+        draft_version=_prompt_version(preview),
+        preview=preview,
+        source_key=ROLE_SOURCE_APPEND_KEY if append.strip() else ROLE_SOURCE_DEFAULT_KEY,
+        variable_error_key=error_key,
+    )
+
 
 @dataclass(frozen=True)
 class AIBrainSettingsState:
@@ -77,6 +189,8 @@ class AIBrainSettingsState:
     draft_revision: int = 0
     # F05: 最近一次成功保存所确认的草稿版本（draft_revision != saved_revision 即当前草稿有未保存修改）。
     saved_revision: int = 0
+    # F35 / J26: 主/子研究角色 Prompt（默认只读 + 追加 + 合成预览）。
+    role_prompts: tuple[RolePromptState, ...] = ()
 
 
 class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
@@ -96,13 +210,28 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     def __init__(self) -> None:
         self._state = AIBrainSettingsState()
+        #: 已落盘的角色追加（用于判断本次保存是否需要写入角色配置）。
+        self._saved_role_appends: dict[str, str] = {}
         self._init_mixin_fields()
         self._load_config_to_state()
 
     # --- Config loading ---
 
+    def _load_role_prompt_states(self) -> tuple[tuple[RolePromptState, ...], dict[str, str]]:
+        """从原 Prompt 配置源加载角色追加与已绑定版本（缺键按默认，不伪造内容）。"""
+        states: list[RolePromptState] = []
+        saved_appends: dict[str, str] = {}
+        for role_key in ROLE_PROMPT_ORDER:
+            append = _coerce_str(ConfigHandler.get_ai_role_prompt_append(role_key))
+            version = _coerce_str(ConfigHandler.get_ai_role_prompt_version(role_key))
+            states.append(_build_role_prompt_state(role_key, append, version))
+            saved_appends[role_key] = append
+        return tuple(states), saved_appends
+
     def _load_config_to_state(self) -> None:
         """从 ConfigHandler 加载本页仍负责的配置到 state（同步, 仅在 __init__ 调用一次）。"""
+        role_prompts, saved_appends = self._load_role_prompt_states()
+        self._saved_role_appends = saved_appends
         self._state = AIBrainSettingsState(
             max_candidates_value=str(ConfigHandler.get_ai_max_candidates()),
             min_turnover_value=str(ConfigHandler.get_strategy_min_turnover()),
@@ -110,11 +239,12 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             news_prompt_value=ConfigHandler.get_ai_news_prompt(),
             save_state=SAVE_IDLE,
             ai_local_only_mode=ConfigHandler.is_ai_local_only_mode(),
+            role_prompts=role_prompts,
         )
 
     # --- Update commands (View 通过 set_* 更新本地 state) ---
 
-    def _apply_draft_edit(self, **changes: str | bool) -> None:
+    def _apply_draft_edit(self, **changes: object) -> None:
         """应用本页草稿编辑：递增编辑版本并复位保存反馈。
 
         - 仅字段值实际变化时递增 ``draft_revision``（同值重复 set 不制造脏状态）；
@@ -146,6 +276,26 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     def set_ai_local_only_mode(self, value: bool) -> None:
         self._apply_draft_edit(ai_local_only_mode=bool(value))
+
+    # --- 研究角色 Prompt 命令（F35 / J26） ---
+
+    def set_role_append(self, role_key: str, value: str) -> None:
+        """更新角色追加草稿并即时重算合成预览（未知变量保留草稿并标记字段错误）。"""
+        updated = tuple(
+            _build_role_prompt_state(role_key, value, role.saved_version) if role.role_key == role_key else role
+            for role in self._state.role_prompts
+        )
+        self._apply_draft_edit(role_prompts=updated)
+
+    def reset_role_append(self, role_key: str) -> None:
+        """恢复默认仅清空目标角色的追加内容，不影响其他角色（取消/保存由用户决定）。"""
+        self.set_role_append(role_key, "")
+
+    def get_role_prompt(self, role_key: str) -> RolePromptState | None:
+        for role in self._state.role_prompts:
+            if role.role_key == role_key:
+                return role
+        return None
 
     # --- 验证 (阶段 1) ---
 
@@ -211,6 +361,16 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             logger.warning("[AIBrainSettingsVM] validation failed: %s", err_key)
             return False
 
+        # F35 / J26: 角色追加含未知/空变量时保留草稿并报字段错误，不猜值、不静默替换。
+        role_error_key = next(
+            (role.variable_error_key for role in self._state.role_prompts if role.variable_error_key),
+            "",
+        )
+        if role_error_key:
+            self._set_state(save_state=SAVE_ERROR, warning_message=role_error_key)
+            logger.warning("[AIBrainSettingsVM] role prompt validation failed: %s", role_error_key)
+            return False
+
         # ========== 阶段 2: 持久化 ==========
         self._set_state(save_state=SAVE_SAVING, warning_message="")
         # F05: 与读取草稿值同一同步段捕获发起版本（await 之前，set_* 无法插入）。
@@ -222,13 +382,28 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             news_prompt = self._state.news_prompt_value
             local_only = self._state.ai_local_only_mode
 
+            # F35: 与读取草稿值同一同步段捕获角色追加与版本（await 之前捕获，
+            # 保存完成时按发起值确认，不把保存后又编辑的追加伪装为已绑定）。
+            captured_role_appends = {role.role_key: role.append_value for role in self._state.role_prompts}
+            captured_role_versions = {
+                role.role_key: role.draft_version
+                for role in self._state.role_prompts
+                if role.append_value != self._saved_role_appends.get(role.role_key, "")
+            }
+
             def _save_configs_sync() -> bool:
                 """调优参数 + prompts 单次原子保存, 在 IO 线程池执行 (R16, T3)。
 
                 任一 prompt 校验失败或 save_config 失败时整体未提交,
                 不存在部分成功 (R21 邻域: 部分成功不得伪装成已保存)。
+                角色追加仅在确有变化时原子写入（默认/其他业务 Prompt 不受影响）。
                 """
-                return ConfigHandler.save_ai_tuning_and_prompts(max_cand, min_turn, local_only, ai_prompt, news_prompt)
+                if not ConfigHandler.save_ai_tuning_and_prompts(max_cand, min_turn, local_only, ai_prompt, news_prompt):
+                    return False
+                if not captured_role_versions:
+                    return True
+                changed_appends = {role_key: captured_role_appends[role_key] for role_key in captured_role_versions}
+                return ConfigHandler.save_ai_role_prompts(changed_appends, captured_role_versions)
 
             # UIB-AIBRAIN-01: 持久化放入独立 task 并经 shield 等待——外层取消只
             # 终止等待，写盘线程继续执行至真正终结；取消时挂完成回调收束占用
@@ -262,14 +437,23 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
             if self._state.draft_revision != captured_revision:
                 # 发起后草稿又被编辑：仅确认已落盘的发起版本，当前草稿仍待保存。
+                # 角色绑定版本只记录本次已落盘的发起值（旧请求绑定不变）。
+                self._saved_role_appends.update(
+                    {role_key: captured_role_appends[role_key] for role_key in captured_role_versions}
+                )
                 self._set_state(
+                    role_prompts=self._apply_saved_role_versions(captured_role_versions),
                     save_state=SAVE_STALE,
                     saved_revision=captured_revision,
                     warning_message=SAVED_STALE_MESSAGE_KEY,
                 )
                 return True
 
+            self._saved_role_appends.update(
+                {role_key: captured_role_appends[role_key] for role_key in captured_role_versions}
+            )
             self._set_state(
+                role_prompts=self._apply_saved_role_versions(captured_role_versions),
                 save_state=SAVE_SUCCESS,
                 saved_revision=captured_revision,
                 warning_message="",
@@ -298,6 +482,13 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 )
             self._set_state(save_state=SAVE_ERROR, warning_message="")
             return False
+
+    def _apply_saved_role_versions(self, versions: dict[str, str]) -> tuple[RolePromptState, ...]:
+        """把本次已落盘的角色绑定版本写回 state；未参与本次保存的角色保持原绑定。"""
+        return tuple(
+            replace(role, saved_version=versions[role.role_key]) if role.role_key in versions else role
+            for role in self._state.role_prompts
+        )
 
     def _finalize_cancelled_save_persist(self, persist_task: "asyncio.Future[bool]", captured_revision: int) -> None:
         """取消路径的持久化完成回调：收束保存占用为非 saving 状态 (UIB-AIBRAIN-01)。

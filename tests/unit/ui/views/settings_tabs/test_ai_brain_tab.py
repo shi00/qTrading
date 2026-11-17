@@ -586,10 +586,17 @@ class TestAIBrainTabMount:
         assert len(save_btns) == 1
 
     def test_render_includes_reset_prompt_buttons(self, ai_brain_tab_env) -> None:
-        """渲染含 2 个 ft.TextButton (reset_ai_prompt / reset_news_prompt)。"""
+        """渲染含 2 个「恢复默认提示词」按钮 (reset_ai_prompt / reset_news_prompt)。
+
+        F35 / J26 另新增角色教程与角色恢复按钮，故此处按文案精确计数，
+        不锁定 TextButton 总数。
+        """
         buttons = _get_buttons(ai_brain_tab_env)
         text_btns = [b for b in buttons if isinstance(b, ft.TextButton)]
-        assert len(text_btns) == 2
+        reset_btns = [b for b in text_btns if b.content == "i18n[settings_reset_prompt]"]
+        assert len(reset_btns) == 2
+        role_reset_btns = [b for b in text_btns if b.content == "i18n[settings_ai_role_reset_button]"]
+        assert len(role_reset_btns) == 2
 
     def test_unmount_triggers_vm_dispose(self, ai_brain_tab_env) -> None:
         """卸载后内部 VM (3 模型管理 + 数据出口) dispose 被调用 (use_viewmodel dispose_on_unmount)。"""
