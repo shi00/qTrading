@@ -581,3 +581,177 @@ class TestThreadPoolOffloadContract:
         assert mock_thread_pool.run_async.call_count >= 1
         args, _ = mock_thread_pool.run_async.call_args
         assert args[0] is TaskType.IO
+
+
+# --- F35 / J26: 研究角色 Prompt（默认只读 + 追加 + 变量合成预览） ---
+
+
+def _set_role_config(
+    mock_config_handler, appends: dict[str, str] | None = None, versions: dict[str, str] | None = None
+):
+    appends = appends or {}
+    versions = versions or {}
+    mock_config_handler.get_ai_role_prompt_append.side_effect = lambda key: appends.get(key, "")
+    mock_config_handler.get_ai_role_prompt_version.side_effect = lambda key: versions.get(key, "")
+    mock_config_handler.save_ai_role_prompts.return_value = True
+
+
+class TestRolePromptDefaultsAndAppend:
+    """默认正文只读展示 + 追加默认空 + 来源/版本 + 合成预览。"""
+
+    def test_defaults_are_read_only_and_append_empty(self, mock_config_handler):
+        from ui.viewmodels.ai_brain_settings_view_model import (
+            ROLE_MAIN,
+            ROLE_SOURCE_DEFAULT_KEY,
+            ROLE_SUB,
+            ROLE_PROMPT_ORDER,
+        )
+        from utils.config_models import ROLE_PROMPT_DEFAULTS
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+
+        assert tuple(role.role_key for role in vm.state.role_prompts) == ROLE_PROMPT_ORDER
+        for role in vm.state.role_prompts:
+            default_prompt, default_version = ROLE_PROMPT_DEFAULTS[role.role_key]
+            assert role.default_prompt == default_prompt
+            assert role.default_version == default_version
+            assert role.append_value == ""
+            assert role.saved_version == ""
+            assert role.source_key == ROLE_SOURCE_DEFAULT_KEY
+            assert role.variable_error_key == ""
+            assert role.preview == default_prompt
+        assert vm.get_role_prompt(ROLE_MAIN) is not None
+        assert vm.get_role_prompt(ROLE_SUB) is not None
+        assert vm.get_role_prompt("unknown") is None
+
+    def test_append_updates_preview_source_and_draft_version(self, mock_config_handler):
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN, ROLE_SOURCE_APPEND_KEY
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        before = vm.get_role_prompt(ROLE_MAIN)
+
+        vm.set_role_append(ROLE_MAIN, "优先解释行业景气度")
+
+        role = vm.get_role_prompt(ROLE_MAIN)
+        assert role is not None and before is not None
+        assert role.append_value == "优先解释行业景气度"
+        assert role.source_key == ROLE_SOURCE_APPEND_KEY
+        assert role.preview == f"{role.default_prompt}\n\n优先解释行业景气度"
+        assert role.draft_version != before.draft_version
+        # 追加以草稿形式存在，保存前不写盘
+        mock_config_handler.save_ai_role_prompts.assert_not_called()
+
+    def test_known_variable_is_substituted_in_preview(self, mock_config_handler):
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        vm.set_role_append(ROLE_MAIN, "关注 {stock_name}（{industry}）")
+
+        role = vm.get_role_prompt(ROLE_MAIN)
+        assert role is not None
+        assert role.variable_error_key == ""
+        assert "Sample Stock" in role.preview
+        assert "Sample Industry" in role.preview
+        assert "{stock_name}" not in role.preview
+
+    def test_unknown_variable_keeps_draft_and_reports_error(self, mock_config_handler, mock_thread_pool):
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN, ROLE_VAR_UNKNOWN_KEY
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        vm.set_role_append(ROLE_MAIN, "关注 {unknown_var}")
+
+        role = vm.get_role_prompt(ROLE_MAIN)
+        assert role is not None
+        assert role.append_value == "关注 {unknown_var}"  # 不清稿
+        assert role.variable_error_key == ROLE_VAR_UNKNOWN_KEY
+        assert "{unknown_var}" in role.preview  # 不静默替换
+
+    @pytest.mark.asyncio
+    async def test_unknown_variable_blocks_save_and_keeps_draft(self, mock_config_handler, mock_thread_pool):
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN, ROLE_VAR_UNKNOWN_KEY
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        vm.set_role_append(ROLE_MAIN, "关注 {unknown_var}")
+
+        result = await vm.save_ai_settings()
+
+        assert result is False
+        assert vm.state.save_state == SAVE_ERROR
+        assert vm.state.warning_message == ROLE_VAR_UNKNOWN_KEY
+        assert vm.get_role_prompt(ROLE_MAIN).append_value == "关注 {unknown_var}"
+        mock_config_handler.save_ai_tuning_and_prompts.assert_not_called()
+        mock_config_handler.save_ai_role_prompts.assert_not_called()
+
+    def test_empty_variable_reports_error(self, mock_config_handler):
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_SUB, ROLE_VAR_EMPTY_KEY
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        vm.set_role_append(ROLE_SUB, "空引用 {}")
+
+        role = vm.get_role_prompt(ROLE_SUB)
+        assert role is not None
+        assert role.variable_error_key == ROLE_VAR_EMPTY_KEY
+        assert role.append_value == "空引用 {}"
+        assert role.preview.endswith("空引用 {}")
+
+    def test_reset_only_clears_target_role_append(self, mock_config_handler):
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN, ROLE_SUB
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        vm.set_role_append(ROLE_MAIN, "main append")
+        vm.set_role_append(ROLE_SUB, "sub append")
+
+        vm.reset_role_append(ROLE_MAIN)
+
+        assert vm.get_role_prompt(ROLE_MAIN).append_value == ""
+        assert vm.get_role_prompt(ROLE_SUB).append_value == "sub append"
+
+    @pytest.mark.asyncio
+    async def test_save_persists_only_changed_role_append_with_version(self, mock_config_handler, mock_thread_pool):
+        from ui.viewmodels.ai_brain_settings_view_model import ROLE_MAIN
+
+        _set_role_config(mock_config_handler)
+        vm = _make_vm(mock_config_handler)
+        vm.set_role_append(ROLE_MAIN, "main append")
+
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            result = await vm.save_ai_settings()
+
+        assert result is True
+        appends, versions = mock_config_handler.save_ai_role_prompts.call_args.args
+        assert appends == {ROLE_MAIN: "main append"}
+        assert versions[ROLE_MAIN].startswith("v-")
+        role = vm.get_role_prompt(ROLE_MAIN)
+        assert role is not None
+        assert role.saved_version == versions[ROLE_MAIN]
+        # 保存成功后再次保存不重复写角色配置
+        mock_config_handler.save_ai_role_prompts.reset_mock()
+        with patch("services.ai_service.AIService") as mock_ai_svc:
+            mock_ai_svc.return_value.reload_config = AsyncMock()
+            assert await vm.save_ai_settings() is True
+        mock_config_handler.save_ai_role_prompts.assert_not_called()
+
+    def test_upgrade_preserves_user_append_and_old_bound_version(self, mock_config_handler, monkeypatch):
+        """升级默认正文：保留用户追加与旧请求绑定版本，不自动重新归类/清空。"""
+        import ui.viewmodels.ai_brain_settings_view_model as vm_mod
+
+        _set_role_config(mock_config_handler, {"main": "keep me"}, {"main": "v-old-binding"})
+        monkeypatch.setitem(vm_mod.ROLE_PROMPT_DEFAULTS, "main", ("NEW DEFAULT BODY", "default-v2"))
+
+        vm = _make_vm(mock_config_handler)
+
+        role = vm.get_role_prompt("main")
+        assert role is not None
+        assert role.append_value == "keep me"
+        assert role.saved_version == "v-old-binding"
+        assert role.default_prompt == "NEW DEFAULT BODY"
+        assert role.default_version == "default-v2"
+        assert role.preview == "NEW DEFAULT BODY\n\nkeep me"

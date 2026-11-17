@@ -414,6 +414,57 @@ def save_ai_tuning_and_prompts(
     return cfg.ConfigHandler.save_config(payload)
 
 
+# --- F35 / J26 研究角色 Prompt（默认正文只读，用户自定义为「追加」） ---
+
+
+def _role_prompt_append_key(role_key: str) -> str:
+    return f"ai_role_prompt_append_{role_key}"
+
+
+def _role_prompt_version_key(role_key: str) -> str:
+    return f"ai_role_prompt_version_{role_key}"
+
+
+def get_ai_role_prompt_append(role_key: str) -> str:
+    """读取角色追加内容；缺键/非字符串一律按「空追加」处理（R21：不伪造内容）。"""
+    config = cfg.ConfigHandler.load_config()
+    value = config.get(_role_prompt_append_key(role_key), "")
+    return value if isinstance(value, str) else ""
+
+
+def get_ai_role_prompt_version(role_key: str) -> str:
+    """读取该角色最近一次保存绑定的版本；缺键/非字符串按「未保存」处理。"""
+    config = cfg.ConfigHandler.load_config()
+    value = config.get(_role_prompt_version_key(role_key), "")
+    return value if isinstance(value, str) else ""
+
+
+def save_ai_role_prompts(appends: dict[str, str], versions: dict[str, str]) -> bool:
+    """原子保存各研究角色的追加内容与绑定版本（F35 / J26）。
+
+    - 追加内容为「默认正文之后的追加」，不替换固定安全规则与输出契约；
+    - 非空追加沿用 ``validate_prompt`` + ``sanitize_prompt`` 语义，任一校验失败
+      返回 False 且整体未提交（不写部分角色）；
+    - ``versions`` 为该角色本次保存的绑定版本（新请求绑定；旧请求保持原版本）。
+    """
+    from utils.prompt_guard import sanitize_prompt, validate_prompt
+
+    payload: dict[str, object] = {}
+    for role_key, append in appends.items():
+        if not isinstance(role_key, str) or not isinstance(append, str):
+            return False
+        if append:
+            is_valid, _ = validate_prompt(append)
+            if not is_valid:
+                return False
+            append = sanitize_prompt(append)
+        payload[_role_prompt_append_key(role_key)] = append
+        payload[_role_prompt_version_key(role_key)] = versions.get(role_key, "")
+    if not payload:
+        return True
+    return cfg.ConfigHandler.save_config(payload)
+
+
 def get_strategy_presets(strategy_key: str) -> dict[str, dict]:
     """获取策略的已保存参数预设 (Task 4.1).
 

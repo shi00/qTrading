@@ -5575,3 +5575,54 @@ class TestUnpricedUsageGuards:
             mock_cls.return_value = mock_tracker
             await s._track_cost(None)
         mock_tracker.add_unpriced.assert_not_awaited()
+
+
+class TestStockAgentCallIdentity:
+    """F34/AC23：批次入口预存稳定身份，逐股唯一透传两层 analyze_stock。"""
+
+    @pytest.mark.asyncio
+    async def test_batch_identity_allocated_before_dispatch_and_threaded_per_stock(self):
+        s = ConcreteStrategy()
+        dp = _make_mock_dp(is_cancelled=False)
+        codes = ["000001.SZ", "000002.SZ"]
+        candidates = pd.DataFrame({"ts_code": codes, "name": codes, "close": [10.0, 20.0]})
+        context = {"data_processor": dp, "agent_session_id": "sess-1", "agent_turn_id": "turn-1"}
+        calls: list = []
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            calls.append((stock_info.get("ts_code"), kwargs.get("agent_call")))
+            return {"score": 80, "summary": "ok", "confidence": 0.6}
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=1),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker"),
+            patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        # 批次身份一次分配并写回 context（落库方以同一 run_id 关联费用链）
+        operation_id = context["_ai_operation_id"]
+        assert operation_id
+        assert s._last_stock_agent_batch is not None
+        assert s._last_stock_agent_batch.operation_id == operation_id
+        # 每股唯一调用身份，且共享批次操作身份与主会话/轮次
+        assert [code for code, _ in calls] == codes
+        call_by_code = {code: call for code, call in calls}
+        assert all(call is not None for call in call_by_code.values())
+        assert call_by_code["000001.SZ"].operation_id == operation_id  # type: ignore[union-attr]
+        assert call_by_code["000002.SZ"].operation_id == operation_id  # type: ignore[union-attr]
+        assert call_by_code["000001.SZ"].call_id != call_by_code["000002.SZ"].call_id  # type: ignore[union-attr]
+        assert call_by_code["000001.SZ"].session_id == "sess-1"  # type: ignore[union-attr]
+        assert call_by_code["000001.SZ"].turn_id == "turn-1"  # type: ignore[union-attr]
+        # 结果行携带同一身份投影（失败/成功行均保留，R21）
+        assert set(result["stock_agent_call"].apply(lambda m: m["call_id"])) == {
+            call_by_code[code].call_id
+            for code in codes  # type: ignore[union-attr]
+        }

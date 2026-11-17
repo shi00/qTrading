@@ -100,6 +100,56 @@ class TestSaveAiTuningAndPrompts:
         assert payload["ai_news_prompt"] == ""
 
 
+class TestSaveAiRolePrompts:
+    """F35 / J26: 研究角色追加与绑定版本的单次原子保存契约。"""
+
+    def test_all_success_single_save(self):
+        with (
+            patch.object(llm_mod.cfg.ConfigHandler, "save_config", return_value=True) as mock_save,
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", side_effect=lambda p: p),
+        ):
+            result = llm_mod.save_ai_role_prompts({"main": "append"}, {"main": "v-abc"})
+
+        assert result is True
+        mock_save.assert_called_once_with(
+            {
+                "ai_role_prompt_append_main": "append",
+                "ai_role_prompt_version_main": "v-abc",
+            }
+        )
+
+    def test_invalid_append_no_write_at_all(self):
+        with (
+            patch.object(llm_mod.cfg.ConfigHandler, "save_config", return_value=True) as mock_save,
+            patch("utils.prompt_guard.validate_prompt", return_value=(False, "prompt_err_injection")),
+        ):
+            result = llm_mod.save_ai_role_prompts({"main": "bad", "sub": "ok"}, {"main": "v1", "sub": "v2"})
+
+        assert result is False
+        mock_save.assert_not_called()
+
+    def test_empty_appends_skip_validation_and_write(self):
+        with (
+            patch.object(llm_mod.cfg.ConfigHandler, "save_config", return_value=True) as mock_save,
+            patch("utils.prompt_guard.validate_prompt") as mock_validate,
+        ):
+            result = llm_mod.save_ai_role_prompts({"main": ""}, {"main": ""})
+
+        assert result is True
+        mock_validate.assert_not_called()
+        assert mock_save.call_args.args[0]["ai_role_prompt_append_main"] == ""
+
+    def test_getters_ignore_non_string_values(self):
+        with patch.object(
+            llm_mod.cfg.ConfigHandler,
+            "load_config",
+            return_value={"ai_role_prompt_append_main": 123, "ai_role_prompt_version_main": None},
+        ):
+            assert llm_mod.get_ai_role_prompt_append("main") == ""
+            assert llm_mod.get_ai_role_prompt_version("main") == ""
+
+
 class TestConfigHandlerDelegation:
     """ConfigHandler.save_ai_tuning_and_prompts 委托 utils.config.llm 同名函数。"""
 

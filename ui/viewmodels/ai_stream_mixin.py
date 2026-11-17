@@ -1095,7 +1095,10 @@ class AIStreamMixin:
                             )
                         import uuid as _uuid
 
-                        run_id = _uuid.uuid4().hex[:16]
+                        # F34/AC23：沿用批次预存的调用身份作运行身份，使落库结果与
+                        # 模型账本费用链（run_id/invocation_id）同源可回查；无身份
+                        # （AI 未运行等）仍按原方式生成（不伪造批次身份）。
+                        run_id = context.get("_ai_operation_id") or _uuid.uuid4().hex[:16]
                         try:
                             saved = await self.review_mgr.save_results(
                                 strategy.name_key,

@@ -49,6 +49,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import from_utc_to_cst
 
 if TYPE_CHECKING:
+    from core.model_management_types import StockAgentCall
     from services.ai_service import AIService
     from services.ai_service.scenario_dispatch import ScenarioDispatch
 
@@ -195,6 +196,18 @@ class StockAnalysisService:
     def __init__(self, service: AIService) -> None:
         self._service = service
 
+    @staticmethod
+    def _attach_agent_call(result: dict | None, agent_call: StockAgentCall | None) -> dict | None:
+        """结果边界附加调用身份（F34）：失败/不支持路径同样保留（R21，不丢身份）。
+
+        身份是程序字段（模型输出中同名键已在输出契约外被丢弃），不参与股票 final
+        校验；``None`` 身份不写键（旧兼容调用不伪造身份）。
+        """
+
+        if agent_call is not None and isinstance(result, dict):
+            result["stock_agent_call"] = agent_call.as_metadata()
+        return result
+
     @log_async_operation(
         operation_name="analyze_stock",
         log_args=False,
@@ -223,6 +236,7 @@ class StockAnalysisService:
         history_labels: list[str] | None = None,
         learning_strategy_name: str | None = None,
         scenario_dispatch: ScenarioDispatch | None = None,
+        agent_call: StockAgentCall | None = None,
     ) -> dict | None:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
@@ -236,6 +250,13 @@ class StockAnalysisService:
         ``learning_strategy_name``：调用方策略的 ``name_key``，非空时仅取同策略的
         few-shot 学习样本（与 save_results 写入的 strategy_name 口径对齐），避免在
         独立单股分析路径兜底预取时跨策略混用（与批量预取路径 D4-M3 一致）。
+
+        ``agent_call``（F34/AC23）：批次入口预存的单股调用身份（keyword-only 透传）。
+        有身份时统一调度链以 ``call_id`` 作 ``invocation_id``、``operation_id`` 作
+        ``run_id``（研究/费用链同源，可由主会话/轮次关联查回），身份随结果
+        ``stock_agent_call`` 程序字段返回——失败/不支持/预算拦截路径同样保留
+        （R21：不把「已发起但未完成」伪装成「无此调用」）。``None`` 为旧兼容调用
+        （一次调用一个新意图），不以内部临时身份冒充幂等。
 
         ⚠️ Backtest safety: When called in a backtest context, ``history_context``
         MUST be pre-fetched via ``AIStrategyMixin.run_ai_analysis()`` so that the
@@ -265,24 +286,30 @@ class StockAnalysisService:
                 if _ai.ConfigHandler.is_ai_local_only_mode()
                 else "ai_not_configured"
             )
-            return {
-                "ai_status": "unsupported",
-                "score": None,
-                "confidence": None,
-                "error": I18n.get(reason_key),
-            }
+            return self._attach_agent_call(
+                {
+                    "ai_status": "unsupported",
+                    "score": None,
+                    "confidence": None,
+                    "error": I18n.get(reason_key),
+                },
+                agent_call,
+            )
 
         # R01-D1：新链 local-only 补位——深度分析仅云端路径（MAJOR-04，本地模型不
         # 参与该路径），仅本地模式下云端候选将由 Executor 候选层政策拒绝，此处直接
         # 返回与旧链分支同款显式 unsupported（同 reason_key），不把能力边界伪装成
         # 执行失败（R21）。分层：场景语义在此呈现，安全强制由候选层门控兜底。
         if dispatch is not None and _ai.ConfigHandler.is_ai_local_only_mode():
-            return {
-                "ai_status": "unsupported",
-                "score": None,
-                "confidence": None,
-                "error": I18n.get("ai_local_only_deep_analysis_unsupported"),
-            }
+            return self._attach_agent_call(
+                {
+                    "ai_status": "unsupported",
+                    "score": None,
+                    "confidence": None,
+                    "error": I18n.get("ai_local_only_deep_analysis_unsupported"),
+                },
+                agent_call,
+            )
 
         # Build Prompt
 
@@ -650,7 +677,7 @@ class StockAnalysisService:
                 "llm",
                 "[AIService] Token budget unavailable (%s: %s)",
             )
-            return {"error": str(e), "score": None, "ai_status": "failed"}
+            return self._attach_agent_call({"error": str(e), "score": None, "ai_status": "failed"}, agent_call)
         # 预算裁剪 tokenizer：统一链按连接模型（与预算窗口同源），旧链按生效配置模型。
         if dispatch is not None:
             _model, _ = _unified_connection_budget_basis(dispatch)
@@ -770,6 +797,7 @@ class StockAnalysisService:
                     dispatch=dispatch,
                     messages=messages,
                     learning_meta=learning_meta,
+                    agent_call=agent_call,
                 )
             # P1-12: Analyze Stock uses Cloud with failover by default
             res = await self._service._chat_completion_with_failover(
@@ -779,29 +807,35 @@ class StockAnalysisService:
                 on_chunk=on_chunk,
             )
             if not isinstance(res, dict):
-                return validate_ai_analysis_response(res)
+                return self._attach_agent_call(validate_ai_analysis_response(res), agent_call)
             result = _finalize_legacy_analysis_output(res)
             if learning_meta is not None:
                 # D4-M3 可追溯：随该股结果回传注入元数据，供 _build_result_row 逐行携带落库。
                 # 契约校验后再附加，避免被未知键策略当作模型输出丢弃。
                 result["learning_context_meta"] = learning_meta
-            return result
+            return self._attach_agent_call(result, agent_call)
 
         except AIServiceUnavailableError as ae:
             logger.error("[AIService] Analyze | ❌ All providers failed: %s", _ai.DataSanitizer.sanitize_error(ae))
             logger.debug("[AIService] Analyze | All providers failed traceback:", exc_info=True)
-            return {"error": "All LLM providers unavailable", "score": None, "ai_status": "failed"}
+            return self._attach_agent_call(
+                {"error": "All LLM providers unavailable", "score": None, "ai_status": "failed"}, agent_call
+            )
         except (TimeoutError, httpx.TimeoutException) as te:
             logger.error("[AIService] Analyze | ❌ Timeout (120s exceeded): %s", type(te).__name__)
             logger.debug("[AIService] Analyze | Timeout traceback:", exc_info=True)
-            return {"error": "Analysis timeout", "score": None, "ai_status": "failed"}
+            return self._attach_agent_call(
+                {"error": "Analysis timeout", "score": None, "ai_status": "failed"}, agent_call
+            )
         except LocalInferenceTimeoutError as lite:
             logger.error(
                 "[AIService] Analyze | ❌ Local model inference timeout: %s",
                 _ai.DataSanitizer.sanitize_error(lite),
                 exc_info=True,
             )
-            return {"error": "Local model timeout", "score": None, "ai_status": "failed"}
+            return self._attach_agent_call(
+                {"error": "Local model timeout", "score": None, "ai_status": "failed"}, agent_call
+            )
         except Exception as e:
             log_classified(
                 logger,
@@ -811,7 +845,9 @@ class StockAnalysisService:
                 exc_info=True,
             )
             logger.debug("[AIService] Analyze | Top-level failure traceback:", exc_info=True)
-            return {"error": _ai.DataSanitizer.sanitize_error(e), "score": None, "ai_status": "failed"}
+            return self._attach_agent_call(
+                {"error": _ai.DataSanitizer.sanitize_error(e), "score": None, "ai_status": "failed"}, agent_call
+            )
 
     # ------------------------------------------------------------------
     # S4 统一场景链（§8.2）
@@ -823,6 +859,7 @@ class StockAnalysisService:
         dispatch: ScenarioDispatch,
         messages: list[dict],
         learning_meta: dict | None,
+        agent_call: StockAgentCall | None = None,
     ) -> dict:
         """S4 新链（s4_plan §3.1/§3.2）：Executor 统一请求 + 程序状态覆写 + R21 失败语义。
 
@@ -832,13 +869,17 @@ class StockAnalysisService:
           截断/坏 JSON 不得当有效），再复用 validate_ai_analysis_response 归一化；
         - 程序状态覆写：``execution_metadata`` 整体由程序构造（§3.3 字段清单），
           模型输出中同名键丢弃；
+        - 调用身份（F34）：有 ``agent_call`` 时 ``invocation_id`` 取 ``call_id``、
+          请求 ``run_id`` 取 ``operation_id``——逐股唯一研究/费用链，账本
+          invocation/attempt 与批次 `run_id` 同源可回查；执行/失败/成功路径的
+          ``execution_metadata`` 均携带身份键（R21 不丢身份）；
         - 全部候选失败 → ai_status ∈ {failed, unavailable, budget_blocked, policy_blocked}，
           score/confidence 保持 None（R21）；CancelledError 裸传播（R2）。
         """
         import services.ai_service as _ai
 
         loop = asyncio.get_running_loop()
-        invocation_id = uuid.uuid4().hex
+        invocation_id = agent_call.call_id if agent_call is not None else uuid.uuid4().hex
         system_texts = [m["content"] for m in messages if m["role"] == "system"]
         user_content = next((m["content"] for m in messages if m["role"] == "user"), "")
         request = InferenceRequest(
@@ -851,6 +892,7 @@ class StockAnalysisService:
                 "json_mode": True,
             },
             deadline=loop.time() + dispatch.total_timeout_seconds,
+            run_id=agent_call.operation_id if agent_call is not None else None,
         )
         try:
             exec_result = await dispatch.executor.execute(request, dispatch.snapshot, _validate_analysis_output)
@@ -870,7 +912,7 @@ class StockAnalysisService:
                 "confidence": None,
                 "ai_status": "failed",
                 "execution_metadata": self._scenario_execution_metadata(
-                    invocation_id, dispatch, None, None, "unavailable", "failed"
+                    invocation_id, dispatch, None, None, "unavailable", "failed", agent_call=agent_call
                 ),
             }
 
@@ -882,7 +924,7 @@ class StockAnalysisService:
                 "confidence": None,
                 "ai_status": _scenario_ai_status(reason),
                 "execution_metadata": self._scenario_execution_metadata(
-                    invocation_id, dispatch, None, None, "unavailable", "failed"
+                    invocation_id, dispatch, None, None, "unavailable", "failed", agent_call=agent_call
                 ),
             }
 
@@ -905,6 +947,7 @@ class StockAnalysisService:
             meta,
             "reported" if exec_result.actual_usage else "unavailable",
             "succeeded",
+            agent_call=agent_call,
         )
         logger.debug(
             "[AIService] Analyze | Scenario ✅ score=%s conf=%s model=%s",
@@ -922,10 +965,17 @@ class StockAnalysisService:
         meta: dict | None,
         usage_status: str,
         ai_status: str,
+        *,
+        agent_call: StockAgentCall | None = None,
     ) -> dict:
-        """execution_metadata 程序字段（s4_plan §3.3）：模型输出不可覆写。"""
+        """execution_metadata 程序字段（s4_plan §3.3）：模型输出不可覆写。
+
+        有调用身份时追加 ``stock_agent_call`` 身份投影（F34）：执行/失败/成功同一
+        投影，便于按主会话/轮次与批次 ``run_id`` 关联回查；无身份不写键（旧兼容
+        调用不伪造身份，R21）。
+        """
         meta = meta or {}
-        return {
+        program_fields: dict = {
             "invocation_id": invocation_id,
             "route_revision": dispatch.route_revision,
             "connection_id": connection_id,
@@ -935,3 +985,6 @@ class StockAnalysisService:
             "ai_status": ai_status,
             "config_revision": dispatch.snapshot.config_revision,
         }
+        if agent_call is not None:
+            program_fields["stock_agent_call"] = agent_call.as_metadata()
+        return program_fields
