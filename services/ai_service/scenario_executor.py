@@ -1059,6 +1059,31 @@ class ScenarioExecutor:
             # 许可为 operation 级事实，切换候选无济 → halt（首次失败后撤用，后续
             # 重试/备用同样零出站）。
             if policy.data_authorization is not None:
+                # M15：操作冻结的连接版本不得被快照里的同 ID 替身顶替——同一
+                # 连接 ID 版本不等即版本切换瞬间的瞬态竞态，零出站并中断遍历
+                # （不回退到其他候选），不得按策略拒绝或按当前版本放行。
+                frozen = policy.data_authorization
+                if (
+                    connection.connection_id == frozen.connection_id
+                    and connection.connection_revision != frozen.connection_revision
+                ):
+                    last_reason = "connection revision changed (transient)"
+                    logger.warning(
+                        "[ScenarioExecutor] frozen connection revision mismatch, zero outbound "
+                        "(task=%s, connection=%s, frozen=%s, snapshot=%s)",
+                        identity.task_id,
+                        connection.connection_id,
+                        frozen.connection_revision,
+                        connection.connection_revision,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=last_reason,
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
                 denial = await self._authorize_data_attempt(policy.data_authorization, attempt_id)
                 if denial is not None:
                     last_reason = denial
@@ -1150,6 +1175,12 @@ class ScenarioExecutor:
                 # gguf_* 设备内本地模型不外发免 grant，凭据撤销等安全检查保留）。
                 # R2：CancelledError 不被 except Exception 捕获（BaseException），
                 # 直接传播至本迭代取消边界。
+                # M15：Agent 严格准入按本 attempt 实际派发连接的冻结版本核权（同 ID
+                # 已在上方与操作冻结版本比对）；旧直推链路（无资料/操作冻结上下文）
+                # 传 None，维持「未知版本不参与比对」的既有政策，不放宽也不加严。
+                strict_connection_revision = (
+                    connection.connection_revision if policy.data_authorization is not None else None
+                )
                 try:
                     permit = await self._config_service.authorize_attempt(
                         connection.connection_id,
@@ -1159,6 +1190,7 @@ class ScenarioExecutor:
                         connection.credential_version,
                         attempt_id,
                         requires_egress_grant=requires_egress,
+                        connection_revision=strict_connection_revision,
                     )
                 except Exception as e:
                     reason = f"authorize failed: {type(e).__name__}"

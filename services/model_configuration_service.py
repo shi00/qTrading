@@ -226,6 +226,26 @@ def _fresh_seal_baseline_is_zero(record: Mapping[str, Any]) -> bool:
     )
 
 
+class ConnectionRevisionChangedError(Exception):
+    """冻结连接版本与新鲜快照不一致（M15）：同 ID 版本切换瞬间的瞬态拒绝。
+
+    操作在受理时冻结 ``connection_id + connection_revision``；新鲜读取若发现
+    同一连接 ID 已是另一版本，说明该连接正被替换，冻结对象本次不可用。这是
+    竞态而非策略事实：调用方不得映射为策略拒绝（DENY），零出站后可由上层
+    重试取得稳定快照。显式继承 ``Exception`` 而非 ``PermissionError``——避免
+    既有 ``except PermissionError`` 分支将其误归为非瞬态策略拒绝。
+    """
+
+    def __init__(self, connection_id: str, frozen_revision: int, actual_revision: Any) -> None:
+        super().__init__(
+            f"连接版本已切换（瞬态）：connection={connection_id}, "
+            f"frozen_revision={frozen_revision}, actual_revision={actual_revision}"
+        )
+        self.connection_id = connection_id
+        self.frozen_revision = frozen_revision
+        self.actual_revision = actual_revision
+
+
 class ModelConfigurationService:
     """统一模型配置 / 凭据 / 授权应用服务（非单例，DI 组装）。"""
 
@@ -793,11 +813,19 @@ class ModelConfigurationService:
         attempt_id: str,
         *,
         requires_egress_grant: bool = True,
+        connection_revision: int | None = None,
     ) -> AttemptPermit:
         """逐次安全许可（MM-01/MM-02）：新鲜读取 security_state，撤销 / 缺失即拒绝。
 
         许可取得是尝试开始的线性化点；安全状态读取 / 校验失败禁止发放许可，
         不用旧缓存、默认值或冻结快照放行。
+
+        M15：``connection_revision`` 为操作受理时冻结的连接版本。传入即按
+        ``connection_id + connection_revision`` 精确授权——新鲜快照里同 ID 连接
+        已是另一版本（替换瞬间）时抛 :class:`ConnectionRevisionChangedError`
+        （瞬态拒绝，零许可），不得改用当前版本或快照里的替身连接顶替。
+        ``None`` 表示调用方未冻结版本（旧直推链路），维持既有「未知版本不参与
+        比对」政策；该宽松口径不得外推到 Agent 严格准入。
 
         F06：凭据版本撤销校验绑定**实际执行对象**——``credential_version`` 为
         快照冻结连接的版本（出站解析 ``credential_ref`` 即由该版本派生），而非
@@ -820,6 +848,13 @@ class ModelConfigurationService:
             connection = next((c for c in mm["connections"] if c["connection_id"] == connection_id), None)
             if connection is None:
                 raise PermissionError(f"连接不存在: {connection_id}")
+
+            # M15：操作冻结版本精确匹配——同 ID 版本切换是瞬态竞态，不得以当前
+            # 连接（或快照替身）顶替冻结对象，也不得误报为策略拒绝。
+            if connection_revision is not None and connection.get("connection_revision") != connection_revision:
+                raise ConnectionRevisionChangedError(
+                    connection_id, connection_revision, connection.get("connection_revision")
+                )
 
             # 凭据版本撤销立即阻止新许可（MM-02）：校验对象为实际执行版本（F06）
             if credential_version is not None:
@@ -1171,8 +1206,10 @@ class ModelConfigurationService:
           请求自带摘要与重算不一致 → INPUT_INVALID（调用方输入不自洽，不是核权
           拒绝）；授权判定一律使用重算值；
         - 连接核权按绑定 ``requires_egress_grant`` 参数化（本地免外发路径显式
-          false，仍核连接存在与凭据撤销）；PermissionError → deny
-          ``connection_denied``；
+          false，仍核连接存在与凭据撤销）；按受理冻结的 ``connection_id +
+          connection_revision`` 精确匹配（M15）：同 ID 版本切换瞬间 →
+          unknown ``connection_revision_transient``（瞬态、可重试，零出站），
+          其余授权拒绝（PermissionError）→ deny ``connection_denied``；
         - claim 阶段撤销先胜（POLICY_DENIED）→ deny（脱敏原因码透传）；claim
           INPUT_CONFLICT / operation 缺失（INPUT_INVALID）→ 原样抛出（调用方
           违反先备后派发 / attempt 身份契约，不是核权拒绝路径）；
@@ -1217,6 +1254,8 @@ class ModelConfigurationService:
             return _receipt(DataAttemptOutcome.DENY, reason="consent_not_found")
 
         # §10.2 L1774 第 2 步：既有 authorize_attempt 新鲜核连接/凭据撤销。
+        # M15：按受理冻结的连接 ID + revision 精确授权；同 ID 版本切换瞬间是
+        # 瞬态竞态（可重试），回执 unknown 而非策略 deny，零出站不外推旧链回退。
         try:
             permit = await self.authorize_attempt(
                 request.connection_id,
@@ -1226,6 +1265,14 @@ class ModelConfigurationService:
                 request.credential_version,
                 request.attempt_id,
                 requires_egress_grant=binding.requires_egress_grant,
+                connection_revision=request.connection_revision,
+            )
+        except ConnectionRevisionChangedError:
+            return _receipt(
+                DataAttemptOutcome.UNKNOWN,
+                binding=binding,
+                revision=binding.consent_revision,
+                reason="connection_revision_transient",
             )
         except PermissionError:
             return _receipt(
