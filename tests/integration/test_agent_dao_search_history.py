@@ -11,6 +11,9 @@
 - 排序与游标：sort_moment + 锚 ID keyset（newest_first DESC/oldest_first ASC），
   fixed_upper_bound 首读生成、游标继承续读；游标内查询摘要绑定规范查询
   （换筛选/换范围复用即 REVISION_CONFLICT）；limit 与游标不入 digest；
+- 标题与完整公开表示（检视 D18）：中文会话标题按 ILIKE 子串命中（未清理会话）、
+  成果 ``body_ref`` 载荷公开正文（含尾词）可搜、未公开/已清理成果显式排除、
+  公开消息缺 ``search_text`` 投影时 OPERATION_UNKNOWN（不返回准确空页）；
 - HistoryPage：query_digest/revision_fingerprint（水位变化则指纹变化；all_saved
   展开 execution 成员）/无命中空页 / REVISION_CONFLICT（翻页时覆盖域成员消失）。
 
@@ -31,6 +34,7 @@ from sqlalchemy import insert, text
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    CLEANUP_TOMBSTONE,
     EventKind,
     HistoryAgentFilter,
     HistoryChildTarget,
@@ -41,15 +45,19 @@ from core.agent_types import (
     compute_history_query_digest,
     json_doc,
     parse_history_cursor,
+    sha256_hex,
 )
 from data.persistence.daos.agent_dao import AgentDao
-from data.persistence.models import AgentArtifact, AgentExecution, AgentRound, AgentSession
+from data.persistence.models import AgentArtifact, AgentBodyPayload, AgentExecution, AgentRound, AgentSession
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
 
 USER_SCOPE = "synthetic-user"
 OTHER_SCOPE = "other-user"
+
+#: 可选参数「未给出」哨兵（None 是有效取值：未公开/无内联正文/无投影）
+_UNSET: object = object()
 
 
 async def _reset_schema(url: str) -> None:
@@ -137,6 +145,7 @@ async def _seed_message(
     round_id: str | None = None,
     role: MessageRole = MessageRole.ASSISTANT,
     body_text: str = "默认正文",
+    search_text: object = _UNSET,
     occurred_at: str = "2026-06-01T12:00:00.000000Z",
     node_id: str | None = None,
     role_id: str | None = None,
@@ -160,7 +169,7 @@ async def _seed_message(
         role_id=role_id,
         role_version=role_version,
         body_text=body_text,
-        search_text=body_text,
+        search_text=body_text if search_text is _UNSET else search_text,  # pyright: ignore[reportArgumentType]
     )
     fact = await dao.record_event(request)
     return fact.session_seq
@@ -176,30 +185,62 @@ async def _seed_artifact(
     summary: str = "成果摘要",
     created_at: datetime | None = None,
     input_revision: int = 1,
+    body_text: object = _UNSET,
+    body_ref: str | None = None,
+    body_ref_text: str | None = None,
+    published_at: object = _UNSET,
+    cleaned_at: datetime | None = None,
 ) -> None:
+    """种一个成果行；``body_ref_text`` 给出时同事务写 ``agent_body_payload``。
+
+    ``body_text``/``published_at`` 用 ``_UNSET`` 区分「取默认值」与显式 ``None``
+    （互斥正文 / 未公开原件）。
+    """
+
     moment = created_at or datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+    values: dict[str, object] = {
+        "user_scope": USER_SCOPE,
+        "artifact_id": artifact_id,
+        "artifact_version": 1,
+        "session_id": session_id,
+        "execution_id": execution_id,
+        "round_id": round_id,
+        "artifact_kind": "plan",
+        "input_revision": input_revision,
+        "actual_input_digest": "b" * 64,
+        "actual_model_ref": "model/main",
+        "result_digest": "c" * 64,
+        "source_available_state": "unknown",
+        "published_at": moment if published_at is _UNSET else published_at,
+        "created_at": moment,
+        "updated_at": moment,
+        "summary": summary,
+        "body_text": f"成果正文 {artifact_id}" if body_text is _UNSET else body_text,
+        "body_ref": body_ref,
+        "cleaned_at": cleaned_at,
+    }
     async with dao.engine.begin() as conn:
-        await conn.execute(
-            insert(AgentArtifact).values(
-                user_scope=USER_SCOPE,
-                artifact_id=artifact_id,
-                artifact_version=1,
-                session_id=session_id,
-                execution_id=execution_id,
-                round_id=round_id,
-                artifact_kind="plan",
-                input_revision=input_revision,
-                actual_input_digest="b" * 64,
-                actual_model_ref="model/main",
-                result_digest="c" * 64,
-                source_available_state="unknown",
-                published_at=moment,
-                created_at=moment,
-                updated_at=moment,
-                summary=summary,
-                body_text=f"成果正文 {artifact_id}",
+        if body_ref is not None and body_ref_text is not None:
+            data = body_ref_text.encode("utf-8")
+            # body_ref ↔ agent_body_payload 的双向 FK 为 DEFERRABLE：载荷与成果行
+            # 必须同事务写入（分别提交会在提交时被延迟约束拒绝）。
+            await conn.execute(
+                insert(AgentBodyPayload).values(
+                    user_scope=USER_SCOPE,
+                    body_ref=body_ref,
+                    owner_kind="artifact",
+                    owner_id=artifact_id,
+                    owner_version="1",
+                    artifact_id=artifact_id,
+                    artifact_version=1,
+                    encoding="utf-8",
+                    block_ordinal=0,
+                    payload_bytes=data,
+                    byte_length=len(data),
+                    payload_digest=sha256_hex(data),
+                )
             )
-        )
+        await conn.execute(insert(AgentArtifact).values(**values))
 
 
 def _code_of(excinfo: pytest.ExceptionInfo[AgentServiceError]) -> AgentErrorCode:
@@ -796,3 +837,170 @@ class TestAllSavedExecutionFingerprint:
             )
         page2 = await dao.search_history(query, user_scope=USER_SCOPE)
         assert page1.revision_fingerprint != page2.revision_fingerprint
+
+
+class TestTitleAndPublicBodySearch:
+    """检视 D18：会话标题与完整公开表示（body_ref 载荷）可搜。
+
+    中文标题按 ILIKE 子串命中（不依赖分词）；已清理会话/成果与未公开成果显式
+    排除；公开消息缺 ``search_text`` 投影时明确失败而不是返回准确空页；关键词
+    分支不得覆盖既有 type/role 过滤与游标 keyset。
+    """
+
+    async def test_chinese_session_title_makes_session_hits_visible(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-title", title="新能源回撤复盘")
+        await _seed_session(dao, "s-other", title="无关会话")
+        await _seed_message(dao, "s-title", "t1", body_text="正文不含关键词")
+        await _seed_message(dao, "s-other", "o1", body_text="正文不含关键词")
+
+        page = await dao.search_history(_q(query_text="新能源"), user_scope=USER_SCOPE)
+
+        # 标题命中的会话在范围内的消息如实可见，命中身份仍是既有 message
+        assert [hit.message_id for hit in page.hits] == ["m-t1"]
+        assert page.hits[0].hit_kind == "message"
+
+    async def test_cleaned_session_title_is_not_searchable(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-cleaned", title="将被清理的会话")
+        await _seed_message(dao, "s-cleaned", "c1", body_text="正文不含关键词")
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE agent_session SET title = :title, cleaned_at = now() "
+                    "WHERE user_scope = :u AND session_id = 's-cleaned'"
+                ),
+                {"title": CLEANUP_TOMBSTONE, "u": USER_SCOPE},
+            )
+
+        page = await dao.search_history(_q(query_text=CLEANUP_TOMBSTONE), user_scope=USER_SCOPE)
+
+        # 清理把标题改写为 tombstone：不得经标题重新暴露已清理会话
+        assert page.hits == ()
+
+    async def test_artifact_body_ref_tail_term_searchable(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        await _seed_artifact(
+            dao,
+            "art-body",
+            "s-a",
+            "exec-a",
+            "round-a",
+            summary="摘要不含关键词",
+            body_text=None,
+            body_ref="ref-art-body",
+            body_ref_text="开头叙述……尾部是阶段性结论词",
+        )
+
+        page = await dao.search_history(_q(query_text="阶段性结论词"), user_scope=USER_SCOPE)
+
+        assert [hit.artifact_id for hit in page.hits] == ["art-body"]
+        assert page.hits[0].hit_kind == "artifact"
+
+    async def test_unpublished_and_cleaned_artifacts_excluded_from_keyword_hits(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        moment = datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+        await _seed_artifact(dao, "art-pub", "s-a", "exec-a", "round-a", body_text="命中词正文")
+        await _seed_artifact(dao, "art-unpub", "s-a", "exec-a", "round-a", body_text="命中词正文", published_at=None)
+        await _seed_artifact(
+            dao,
+            "art-cleaned",
+            "s-a",
+            "exec-a",
+            "round-a",
+            body_text="命中词正文",
+            cleaned_at=moment,
+        )
+
+        page = await dao.search_history(_q(query_text="命中词"), user_scope=USER_SCOPE)
+
+        # 未公开与已清理原件显式排除：只剩已公开且未清理的成果
+        assert [hit.artifact_id for hit in page.hits] == ["art-pub"]
+
+    async def test_missing_search_projection_fails_instead_of_empty_page(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        # 公开消息已有正文却缺公开文本投影（search_text=None）：搜索会漏结果
+        await _seed_message(dao, "s-a", "noproj", body_text="缺投影的公开正文", search_text=None)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", query_text="缺投影"), user_scope=USER_SCOPE
+            )
+
+        assert _code_of(exc) == AgentErrorCode.OPERATION_UNKNOWN
+
+    async def test_query_text_keeps_type_filter_and_cursor(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-root", "s-a", node_id="root")
+        await _seed_execution(dao, "exec-leaf", "s-a", node_id="leaf", parent_execution_id="exec-root")
+        await _seed_round(dao, "round-leaf", "exec-leaf")
+        await _seed_message(dao, "s-a", "session-kw", body_text="关键词甲")
+        await _seed_message(
+            dao,
+            "s-a",
+            "leaf1",
+            execution_id="exec-leaf",
+            round_id="round-leaf",
+            node_id="leaf",
+            body_text="关键词乙",
+            occurred_at="2026-06-01T12:00:01.000000Z",
+        )
+        await _seed_message(
+            dao,
+            "s-a",
+            "leaf2",
+            execution_id="exec-leaf",
+            round_id="round-leaf",
+            node_id="leaf",
+            body_text="关键词丙",
+            occurred_at="2026-06-01T12:00:02.000000Z",
+        )
+
+        page = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                query_text="关键词",
+                time_basis="message",
+                type_filter="child",
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert {hit.message_id for hit in page.hits} == {"m-leaf1", "m-leaf2"}
+
+        first = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                query_text="关键词",
+                time_basis="message",
+                type_filter="child",
+                limit=1,
+            ),
+            user_scope=USER_SCOPE,
+        )
+        cursor_value = first.next_cursor or ""
+        assert cursor_value.startswith("h:")
+        second = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                query_text="关键词",
+                time_basis="message",
+                type_filter="child",
+                limit=1,
+                cursor=cursor_value,
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert len(first.hits) == 1 and len(second.hits) == 1
+        assert {first.hits[0].message_id, second.hits[0].message_id} == {"m-leaf1", "m-leaf2"}
+        assert second.next_cursor is None

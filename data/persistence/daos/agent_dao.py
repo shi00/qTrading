@@ -37,7 +37,7 @@ import sqlalchemy as sa
 from jsonschema.exceptions import SchemaError
 from jsonschema.validators import Draft202012Validator, validator_for
 from sqlalchemy.dialects import postgresql as sa_pg
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from core.agent_types import (
@@ -5314,6 +5314,92 @@ class AgentDao(BaseDao):
             ) from exc
         return day_from, day_to_excl
 
+    @staticmethod
+    def _history_like_pattern(query_text: str) -> str:
+        """query_text → LIKE 子串模式（通配符按字面量转义；各分支共用同一语义）。"""
+
+        escaped = query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{escaped}%"
+
+    @staticmethod
+    def _history_session_title_predicate(
+        session_id_column: sa.ColumnElement[Any], *, user_scope: str, pattern: str
+    ) -> sa.ColumnElement[bool]:
+        """会话标题命中（检视 D18）：标题可搜，中文按 ILIKE 子串（不依赖分词）。
+
+        相关 EXISTS（不 JOIN 放大行数）：同一 user_scope、``session_id`` 相同、
+        且会话未被清理（``cleaned_at IS NULL``，清理会把标题改写为 tombstone，
+        不排除即把已清理会话重新暴露）的标题命中时，该会话在范围内的消息/成果
+        同为命中，命中身份仍是既有 ``message`` / ``artifact``（不新增 hit 类型）。
+        """
+
+        return sa.exists().where(
+            sa.and_(
+                AgentSession.user_scope == user_scope,
+                AgentSession.session_id == session_id_column,
+                AgentSession.cleaned_at.is_(None),
+                AgentSession.title.ilike(pattern, escape="\\"),
+            )
+        )
+
+    @staticmethod
+    def _history_artifact_body_predicate(pattern: str) -> sa.ColumnElement[bool]:
+        """成果 ``body_ref`` 载荷公开正文命中（检视 D18：完整公开表示，含尾词）。
+
+        正文在 ``agent_body_payload.payload_bytes``（单块 BYTEA；``encoding`` 由表
+        CHECK 固定 utf-8，故解码字符集为常量）。按 ``user_scope + body_ref`` 相关
+        EXISTS 在库内解码后 ILIKE，不把大文本拉到 Python；载荷声明 utf-8 而字节
+        不可解码时 SQLSTATE 22021 由 ``search_history`` 转为 OPERATION_UNKNOWN
+        （显式失败，不返回残缺页）。
+        """
+
+        body_text_expr = sa.func.convert_from(AgentBodyPayload.payload_bytes, sa.text("'UTF8'"))
+        return sa.exists().where(
+            sa.and_(
+                AgentBodyPayload.user_scope == AgentArtifact.user_scope,
+                AgentBodyPayload.body_ref == AgentArtifact.body_ref,
+                body_text_expr.ilike(pattern, escape="\\"),
+            )
+        )
+
+    async def _history_require_search_projection(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        message_filters: Sequence[sa.ColumnElement[bool]],
+        identity_str: str,
+    ) -> None:
+        """关键词搜索的投影完整性核对（检视 D18）：缺投影显式失败而非准确空页。
+
+        判据：候选范围内（与本查询命中同一 scope/round/child/type/role/agent/
+        state/date/固定上界，不含关键词与游标）存在公开消息
+        （``event_kind='public_message_saved'``）且已有公开正文（``body_text`` 或
+        ``body_ref`` 非空）而 ``search_text IS NULL``——该消息的公开正文没进入
+        可检索投影，继续搜索会得到「看起来准确」的残缺页，故抛
+        ``OPERATION_UNKNOWN``。其他事件类型的 ``body_text`` 可能含未公开正文
+        （``search_text`` 由调用方按公开性判定），不在此判据内。
+        """
+
+        missing = (
+            await conn.execute(
+                sa.select(sa.literal(1))
+                .where(
+                    *message_filters,
+                    AgentMessage.event_kind == "public_message_saved",
+                    AgentMessage.search_text.is_(None),
+                    sa.or_(AgentMessage.body_text.is_not(None), AgentMessage.body_ref.is_not(None)),
+                )
+                .limit(1)
+            )
+        ).first()
+        if missing is not None:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "search projection missing: public message has body but no searchable text",
+                identity_str,
+            )
+
     async def search_history(self, query: HistoryQuery, *, user_scope: str) -> HistoryPage:
         """历史搜索（§4.2 R02 read_history + §9.13）：固定上界内规范扫描。
 
@@ -5325,8 +5411,8 @@ class AgentDao(BaseDao):
           变化只经 revision_fingerprint 漂移呈现，不阻断同查询续翻；端到端指纹
           比对由服务层承载）；
         - 扫描：消息与成果 UNION 前分别过滤后统一排序（sort_moment + 锚 ID keyset，
-          newest_first DESC/oldest_first ASC）；query_text 占位 LIKE（C-03-4 全文
-          索引接入前）；type_filter **按权威 ``agent_execution.execution_kind``**
+          newest_first DESC/oldest_first ASC）；type_filter **按权威
+          ``agent_execution.execution_kind``**
           判定（检视 D17）：main = ``root`` 执行 + 会话级消息（无 execution_id），
           child = ``leaf`` / ``comparison_lane``；消息与成果同口径（成果
           execution_id 为 NOT NULL，不得以 IS NULL 判 main）；关联走相关 EXISTS
@@ -5337,6 +5423,23 @@ class AgentDao(BaseDao):
           「产生时角色」在持久化层无权威来源（计划持久化形态 PlanProposal 无
           role_key，frozen_manifest/actual_input 为调用方任意 JSON），故成果不按
           角色过滤、按 execution_kind 类型保留并在命中中如实可见，不静默排空；
+        - query_text 语义（检视 D18：标题与完整公开表示可搜）：
+          ① 消息：``search_text``（公开文本投影）ILIKE 子串（含尾词）；
+          ② 会话标题：同一 user_scope、未清理（``agent_session.cleaned_at IS NULL``）
+          的会话标题 ILIKE 命中时，该会话在本查询范围内的消息与成果同为命中——
+          中文标题不依赖分词（不走 tsvector），命中身份仍是既有 ``message`` /
+          ``artifact``（不新增 hit 类型）；清理会把标题改写为 tombstone，故排除；
+          ③ 成果：``summary`` / 内联 ``body_text`` / ``body_ref`` 载荷公开正文
+          （``agent_body_payload.payload_bytes`` 在库内按 utf-8 解码后 ILIKE，
+          不把大文本拉到 Python）三路任一命中；三者与消息同一通配符转义；
+          ④ 未公开（``published_at IS NULL``）与已清理（``cleaned_at`` 非空）的
+          成果原件在关键词搜索中**显式排除**，不靠「恰好搜不到」；
+        - 缺投影显式失败（检视 D18）：关键词搜索先核对候选范围（与本查询命中同一
+          scope/round/type/role/agent/state/date/固定上界，不含关键词与游标）——
+          若存在公开消息（``event_kind='public_message_saved'``）已有 ``body_text``
+          或 ``body_ref`` 而 ``search_text IS NULL``（公开正文未进入可检索投影），
+          或成果 ``body_ref`` 载荷声明 utf-8 但字节不可解码（SQLSTATE 22021），
+          即抛 ``OPERATION_UNKNOWN``，不返回「看起来准确」的空页/残缺页；
         - 摘要不复制完整正文：summary_text 截断 200 字符（正文经准确地址按需读取）；
         - fingerprint：覆盖域成员/水位 CanonicalJson 后 sha256（每次读取即时计算）。
         """
@@ -5483,27 +5586,24 @@ class AgentDao(BaseDao):
                     AgentMessage.body_text.label("summary_source"),
                     sa.literal(None).label("summary"),
                 ]
-                message_stmt = sa.select(*message_cols).where(
+                # 候选范围（与关键词/游标解耦，供缺投影核对复用同一判据）
+                message_filters: list[sa.ColumnElement[bool]] = [
                     AgentMessage.user_scope == user_scope,
                     message_moment <= fixed_upper,
-                )
+                ]
                 if query.scope in ("current_session", "current_child"):
-                    message_stmt = message_stmt.where(AgentMessage.session_id == query.session_id)
+                    message_filters.append(AgentMessage.session_id == query.session_id)
                 if query.scope == "current_child":
                     child_target_msg = query.child_target
                     assert child_target_msg is not None  # validate_history_query R02 已核对（fail-closed）
-                    message_stmt = message_stmt.where(
-                        AgentMessage.execution_id == child_target_msg.execution_id,
-                        AgentMessage.node_id == child_target_msg.node_id,
-                    )
+                    message_filters.append(AgentMessage.execution_id == child_target_msg.execution_id)
+                    message_filters.append(AgentMessage.node_id == child_target_msg.node_id)
                 if query.round_selection.kind == "exact":
-                    message_stmt = message_stmt.where(
-                        AgentMessage.execution_id == query.round_selection.execution_id,
-                        AgentMessage.round_id == query.round_selection.round_id,
-                    )
+                    message_filters.append(AgentMessage.execution_id == query.round_selection.execution_id)
+                    message_filters.append(AgentMessage.round_id == query.round_selection.round_id)
                 if query.type_filter == "main":
                     # 权威类型：root 执行的消息 + 会话级消息（无 execution_id）
-                    message_stmt = message_stmt.where(
+                    message_filters.append(
                         self._history_execution_kind_predicate(
                             AgentMessage.execution_id,
                             user_scope=user_scope,
@@ -5512,7 +5612,7 @@ class AgentDao(BaseDao):
                         )
                     )
                 elif query.type_filter == "child":
-                    message_stmt = message_stmt.where(
+                    message_filters.append(
                         self._history_execution_kind_predicate(
                             AgentMessage.execution_id,
                             user_scope=user_scope,
@@ -5520,27 +5620,18 @@ class AgentDao(BaseDao):
                         )
                     )
                 if query.message_role_filter is not None:
-                    message_stmt = message_stmt.where(AgentMessage.role == query.message_role_filter)
+                    message_filters.append(AgentMessage.role == query.message_role_filter)
                 agent_filter = query.agent_filter
                 if agent_filter is not None and agent_filter.kind == "role_identity":
-                    message_stmt = message_stmt.where(
-                        AgentMessage.role_id == agent_filter.role_id,
-                    )
+                    message_filters.append(AgentMessage.role_id == agent_filter.role_id)
                     if agent_filter.version_selection == "exact":
-                        message_stmt = message_stmt.where(AgentMessage.role_version == agent_filter.role_version)
+                        message_filters.append(AgentMessage.role_version == agent_filter.role_version)
                 elif agent_filter is not None:
-                    message_stmt = message_stmt.where(
-                        AgentMessage.execution_id == agent_filter.execution_id,
-                        AgentMessage.node_id == agent_filter.node_id,
-                        AgentMessage.round_id == agent_filter.round_id,
-                    )
-                if query.query_text:
-                    # 全文搜索（§4.2 L402/§9.6 search_text 投影）：ILIKE 子串（含尾词），
-                    # 通配符按字面量转义；简单 ILIKE 语义——tsvector/trgm 查询演化留痕
-                    escaped = query.query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                    message_stmt = message_stmt.where(AgentMessage.search_text.ilike(f"%{escaped}%", escape="\\"))
+                    message_filters.append(AgentMessage.execution_id == agent_filter.execution_id)
+                    message_filters.append(AgentMessage.node_id == agent_filter.node_id)
+                    message_filters.append(AgentMessage.round_id == agent_filter.round_id)
                 if query.state_filter is not None:
-                    message_stmt = message_stmt.where(
+                    message_filters.append(
                         sa.exists().where(
                             sa.and_(
                                 AgentExecution.user_scope == user_scope,
@@ -5551,9 +5642,29 @@ class AgentDao(BaseDao):
                     )
                 day_from, day_to_excl = self._history_date_bounds(query, identity_str)
                 if day_from is not None:
-                    message_stmt = message_stmt.where(message_moment >= day_from)
+                    message_filters.append(message_moment >= day_from)
                 if day_to_excl is not None:
-                    message_stmt = message_stmt.where(message_moment < day_to_excl)
+                    message_filters.append(message_moment < day_to_excl)
+                message_stmt = sa.select(*message_cols).where(*message_filters)
+                if query.query_text:
+                    pattern = self._history_like_pattern(query.query_text)
+                    # 缺投影先于关键词过滤核对：缺失即显式失败，不返回残缺页（检视 D18）
+                    await self._history_require_search_projection(
+                        conn,
+                        user_scope=user_scope,
+                        message_filters=message_filters,
+                        identity_str=identity_str,
+                    )
+                    # 关键词命中：消息公开文本投影（含尾词）或所属会话标题（中文按
+                    # ILIKE 子串，不依赖分词）；两路共用同一通配符转义。
+                    message_stmt = message_stmt.where(
+                        sa.or_(
+                            AgentMessage.search_text.ilike(pattern, escape="\\"),
+                            self._history_session_title_predicate(
+                                AgentMessage.session_id, user_scope=user_scope, pattern=pattern
+                            ),
+                        )
+                    )
                 if cursor_sort_moment is not None and cursor_anchor is not None:
                     if query.sort == "newest_first":
                         message_stmt = message_stmt.where(
@@ -5644,13 +5755,22 @@ class AgentDao(BaseDao):
                         AgentArtifact.round_id == agent_filter.round_id,
                     )
                 if query.query_text:
-                    # 成果无 search_text 投影列（§9.7）：摘要/内联正文 ILIKE（同一转义语义）
-                    escaped = query.query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    # 关键词搜索（检视 D18）：summary / 内联 body_text / body_ref 载荷
+                    # 公开正文 / 会话标题四路任一命中，同一转义语义；未公开（
+                    # published_at IS NULL）与已清理（cleaned_at 非空）原件显式
+                    # 排除（不靠「恰好搜不到」），不把不可得结果伪装成可搜。
+                    pattern = self._history_like_pattern(query.query_text)
                     artifact_stmt = artifact_stmt.where(
+                        AgentArtifact.published_at.is_not(None),
+                        AgentArtifact.cleaned_at.is_(None),
                         sa.or_(
-                            AgentArtifact.summary.ilike(f"%{escaped}%", escape="\\"),
-                            AgentArtifact.body_text.ilike(f"%{escaped}%", escape="\\"),
-                        )
+                            AgentArtifact.summary.ilike(pattern, escape="\\"),
+                            AgentArtifact.body_text.ilike(pattern, escape="\\"),
+                            self._history_artifact_body_predicate(pattern),
+                            self._history_session_title_predicate(
+                                AgentArtifact.session_id, user_scope=user_scope, pattern=pattern
+                            ),
+                        ),
                     )
                 if query.state_filter is not None:
                     artifact_stmt = artifact_stmt.where(
@@ -5707,7 +5827,18 @@ class AgentDao(BaseDao):
                     union_sub.c.summary_source,
                     union_sub.c.summary,
                 ).order_by(direction, anchor_col.desc() if query.sort == "newest_first" else anchor_col.asc())
-                union_rows = (await conn.execute(union_stmt.limit(query.limit + 1))).all()
+                try:
+                    union_rows = (await conn.execute(union_stmt.limit(query.limit + 1))).all()
+                except DBAPIError as exc:
+                    if getattr(exc.orig, "sqlstate", None) == "22021":
+                        # body_ref 载荷声明 utf-8 但字节不可解码：搜索无法给出准确
+                        # 结果，显式失败而非残缺页（检视 D18，R21 不伪装可得）
+                        raise AgentServiceError(
+                            AgentErrorCode.OPERATION_UNKNOWN,
+                            "artifact body projection is not decodable as utf-8",
+                            identity_str,
+                        ) from exc
+                    raise
                 has_more = len(union_rows) > query.limit
                 union_rows = union_rows[: query.limit]
                 hits = tuple(self._history_hit_from_row(row, identity_str) for row in union_rows)
