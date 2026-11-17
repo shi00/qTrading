@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -59,6 +60,7 @@ from data.persistence.models import (
     AgentDecision,
     AgentExecution,
     AgentMessage,
+    AgentOperation,
     AgentRound,
     AgentSession,
     AgentSourceLink,
@@ -158,8 +160,18 @@ def _answer_request(decision_id: str = "d-1", client_command_id: str = "ans-1", 
     return SaveAnswerRequest(**values)
 
 
-def _grant_request(decision_id: str = "d-1", expected: int = 1, user_scope: str = "u1") -> GrantRevisionRequest:
-    return GrantRevisionRequest(user_scope=user_scope, decision_id=decision_id, expected_grant_revision=expected)
+def _grant_request(
+    decision_id: str = "d-1",
+    expected: int = 1,
+    user_scope: str = "u1",
+    operation_id: str | None = "op-1",
+) -> GrantRevisionRequest:
+    return GrantRevisionRequest(
+        user_scope=user_scope,
+        decision_id=decision_id,
+        expected_grant_revision=expected,
+        operation_id=operation_id,
+    )
 
 
 def _revise_request(
@@ -201,8 +213,21 @@ async def _accept_only(
     return dao, receipt
 
 
-async def _seed_decision(dao: AgentDao, receipt: SubmissionReceipt, round_id: str, **overrides) -> str:
-    """受理 + 绑定后落决定行（§9.8：decision 依赖 round 存在）。"""
+async def _seed_decision(
+    dao: AgentDao,
+    receipt: SubmissionReceipt,
+    round_id: str,
+    *,
+    operation_id: str = "op-1",
+    operation_overrides: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> str:
+    """受理 + 绑定后落决定行（§9.8：decision 依赖 round 存在）。
+
+    工具许可决定同时落 ``operation_id`` 的 ``agent_operation`` 行（检视 D07：
+    claim 必须绑定准确 operation/owner/run epoch），默认取受理执行的权威
+    ``owner_epoch`` 与绑定轮的 ``run_epoch``。
+    """
 
     from sqlalchemy import insert
 
@@ -219,6 +244,38 @@ async def _seed_decision(dao: AgentDao, receipt: SubmissionReceipt, round_id: st
     values.update(overrides)
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]
         await conn.execute(insert(AgentDecision).values(**values))
+        if values.get("grant_id") is not None:
+            owner_epoch = (
+                await conn.execute(
+                    sa.select(AgentExecution.owner_epoch).where(
+                        AgentExecution.user_scope == values["user_scope"],
+                        AgentExecution.execution_id == values["execution_id"],
+                    )
+                )
+            ).scalar_one()
+            run_epoch = (
+                await conn.execute(
+                    sa.select(AgentRound.run_epoch).where(
+                        AgentRound.user_scope == values["user_scope"],
+                        AgentRound.round_id == round_id,
+                    )
+                )
+            ).scalar_one()
+            operation_values: dict = {
+                "user_scope": values["user_scope"],
+                "operation_id": operation_id,
+                "execution_id": values["execution_id"],
+                "round_id": round_id,
+                "owner_epoch": owner_epoch,
+                "run_epoch": run_epoch,
+                "phase": "prepared",
+                "effect_state": "not_dispatched",
+                "io_state": "not_started",
+                "grant_id": values["grant_id"],
+            }
+            if operation_overrides:
+                operation_values.update(operation_overrides)
+            await conn.execute(insert(AgentOperation).values(**operation_values))
     return values["decision_id"]
 
 
@@ -773,6 +830,120 @@ class TestGrantCas:
         first = await dao.revoke_tool_grant(_grant_request("d-1", expected=1))
         replay = await dao.revoke_tool_grant(_grant_request("d-1", expected=1))
         assert replay == first
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_persists_dispatch_operation_id(self, real_embedded_pg: ConnectionInfo) -> None:
+        """胜者在同一条 CAS 更新中落准确 dispatch_operation_id（检视 D07）。"""
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+        )
+        engine = create_test_engine(real_embedded_pg.url)
+
+        fact = await dao.claim_tool_dispatch(_grant_request("d-1", expected=1, operation_id="op-1"))
+
+        assert fact.grant_state is ToolGrantState.CLAIMED and fact.grant_revision == 2
+        bound = await _scalar(
+            engine,
+            sa.select(AgentDecision.dispatch_operation_id).where(AgentDecision.decision_id == "d-1"),
+        )
+        assert bound == "op-1"
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_expired_rejected_zero_new(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+            expires_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        engine = create_test_engine(real_embedded_pg.url)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_tool_dispatch(_grant_request("d-1", expected=1))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        async with engine.connect() as conn:
+            state = (
+                await conn.execute(
+                    sa.select(AgentDecision.grant_state, AgentDecision.grant_revision).where(
+                        AgentDecision.decision_id == "d-1"
+                    )
+                )
+            ).one()
+        assert state.grant_state == "granted" and state.grant_revision == 1
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_stale_run_epoch_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """旧代次（run_epoch 落后于当前有效轮）拒绝，零新派发（检视 D07）。"""
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            operation_overrides={"run_epoch": 0},
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_tool_dispatch(_grant_request("d-1", expected=1))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_operation_with_other_grant_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            operation_overrides={"grant_id": "grant-other"},
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_tool_dispatch(_grant_request("d-1", expected=1))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_claim_by_other_operation_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """合法竞争只单胜一次：另一 operation 同 expected 重放不得冒认胜者。"""
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        await _seed_decision(
+            dao,
+            receipt,
+            round_id,
+            grant_id="grant-1",
+            grant_revision=1,
+            grant_state="granted",
+            parameter_digest="a" * 64,
+        )
+        await dao.claim_tool_dispatch(_grant_request("d-1", expected=1, operation_id="op-1"))
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_tool_dispatch(_grant_request("d-1", expected=1, operation_id="op-2"))
+
+        assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
 
 
 class TestReviseQueued:

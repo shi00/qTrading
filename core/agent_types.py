@@ -1906,11 +1906,16 @@ class GrantRevisionRequest:
 
     claim_tool_dispatch / revoke_tool_grant 共用：``expected_grant_revision``
     为调用方持柄的许可版（claim 预期 granted；revoke 预期 granted 或 claimed）。
+
+    ``operation_id`` 为派发认领的准确 operation 身份（检视 D07）：claim 必须
+    提供并绑定到决定行 ``dispatch_operation_id``；revoke 不绑定 operation，
+    该字段被忽略。
     """
 
     user_scope: str
     decision_id: str
     expected_grant_revision: int
+    operation_id: str | None = None
 
 
 @dataclass(frozen=True)

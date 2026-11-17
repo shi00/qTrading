@@ -50,9 +50,13 @@ class _AnswerGuardConn:
     ) -> None:
         self.decision = decision
         self.execution = (
-            execution if execution is not None else SimpleNamespace(current_round_id="round-1", display_state="queued")
+            execution
+            if execution is not None
+            else SimpleNamespace(current_round_id="round-1", display_state="queued", owner_epoch=1)
         )
-        self.round_row = round_row if round_row is not None else SimpleNamespace(active_round=True, stop_reason=None)
+        self.round_row = (
+            round_row if round_row is not None else SimpleNamespace(active_round=True, stop_reason=None, run_epoch=1)
+        )
         self.existing_command = existing_command
         self.original_command = original_command
         self.command_fact = command_fact

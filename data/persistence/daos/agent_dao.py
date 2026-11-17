@@ -2177,7 +2177,7 @@ class AgentDao(BaseDao):
         expires_at: datetime | None,
         identity: str,
         action: str,
-    ) -> None:
+    ) -> tuple[int, int]:
         """首生效前新鲜核原问题（检视 D06）：过期/终止/旧轮一律拒绝，零新事实。
 
         只做普通读，不新增行锁边（沿用 decision → command 锁序）：过期按
@@ -2185,6 +2185,9 @@ class AgentDao(BaseDao):
         轮 ``stop_reason``；旧轮取 ``execution.current_round_id`` 与
         ``round.active_round``。执行/轮事实缺失 → ``OPERATION_UNKNOWN``（不冒充
         可答复）。
+
+        返回权威 ``(execution.owner_epoch, round.run_epoch)``，供派发认领核
+        旧代次（检视 D07）复用同一读取，不重复查执行/轮。
         """
 
         occurred = datetime.now(UTC)
@@ -2192,7 +2195,9 @@ class AgentDao(BaseDao):
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, f"{action} rejected: question expired", identity)
         exec_row = (
             await conn.execute(
-                sa.select(AgentExecution.current_round_id, AgentExecution.display_state).where(
+                sa.select(
+                    AgentExecution.current_round_id, AgentExecution.display_state, AgentExecution.owner_epoch
+                ).where(
                     AgentExecution.user_scope == user_scope,
                     AgentExecution.execution_id == execution_id,
                 )
@@ -2212,7 +2217,7 @@ class AgentDao(BaseDao):
             )
         round_row = (
             await conn.execute(
-                sa.select(AgentRound.active_round, AgentRound.stop_reason).where(
+                sa.select(AgentRound.active_round, AgentRound.stop_reason, AgentRound.run_epoch).where(
                     AgentRound.user_scope == user_scope,
                     AgentRound.round_id == round_id,
                 )
@@ -2224,6 +2229,7 @@ class AgentDao(BaseDao):
             raise AgentServiceError(
                 AgentErrorCode.POLICY_DENIED, f"{action} rejected: question round is no longer active", identity
             )
+        return exec_row.owner_epoch, round_row.run_epoch
 
     async def save_answer(self, request: SaveAnswerRequest) -> AnswerReceipt:
         """答复保存（SQ-03/§5.3 答复线性化点）：decision.answer_command_id CAS
@@ -2589,6 +2595,12 @@ class AgentDao(BaseDao):
         """派发认领（§5.4 第 6 条/SQ-03）：grant_revision CAS 单胜者，
         grant_state granted→claimed。败者 ``REVISION_CONFLICT``；W 崩溃恢复同
         expected 重试且已 claimed（revision=expected+1）→ 返回原事实零新变更。
+
+        首生效同事务绑定准确胜者（检视 D07）：``operation_id`` 必填且必须在
+        该 declaration 的执行/轮内、同 grant、owner_epoch 与 run_epoch 均为当前
+        权威代次；决定已过期、执行终止、轮已被替代/停轮、错 operation、旧代次
+        一律拒绝（零新派发）。胜者在同一条 CAS 更新中落 ``dispatch_operation_id``；
+        重放只读原事实，不按当前状态重判，但换 operation 的重放按竞争失败拒绝。
         """
 
         return await self._cas_grant_state(
@@ -2600,7 +2612,10 @@ class AgentDao(BaseDao):
     async def revoke_tool_grant(self, request: GrantRevisionRequest) -> ToolGrantFact:
         """许可撤销（§5.4 第 6 条/SQ-03）：grant_state granted|claimed→revoked
         CAS。撤销先胜则零新派发；派发先胜后撤销仍可 revoked（保真实在途，
-        阻止后续 claim），不能倒写「从未发送」。"""
+        阻止后续 claim），不能倒写「从未发送」。
+
+        撤销不绑定派发 operation（``request.operation_id`` 被忽略），也不核
+        期限/轮次：过期或旧轮许可仍必须可被撤销。"""
 
         return await self._cas_grant_state(
             request,
@@ -2615,13 +2630,23 @@ class AgentDao(BaseDao):
         allowed_current_states: tuple[ToolGrantState, ...],
         target_state: ToolGrantState,
     ) -> ToolGrantFact:
-        """grant_revision CAS 公共路径（§9.8：CAS 撤销/派发时锁该行）。"""
+        """grant_revision CAS 公共路径（§9.8：CAS 撤销/派发时锁该行）。
+
+        派发认领（target=claimed）在同一事务内先做首生效核验再 CAS：锁序
+        decision → operation（与 ``claim_data_consent`` 一致），``operation_id``
+        必填；胜者 CAS 更新同写 ``dispatch_operation_id``（检视 D07）。撤销不做
+        这些核验（见 ``revoke_tool_grant``）。
+        """
 
         self._check_engine()
         identity = f"{request.user_scope}/{request.decision_id}"
         _require_text_field(request.user_scope, "user_scope", identity)
         _require_text_field(request.decision_id, "decision_id", identity)
         _require_int_field(request.expected_grant_revision, "expected_grant_revision", identity, 1)
+        bind_operation = target_state is ToolGrantState.CLAIMED
+        operation_id: str | None = None
+        if bind_operation:
+            operation_id = _require_text_field(request.operation_id, "operation_id", identity)
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
@@ -2631,6 +2656,10 @@ class AgentDao(BaseDao):
                         AgentDecision.grant_id,
                         AgentDecision.grant_revision,
                         AgentDecision.grant_state,
+                        AgentDecision.execution_id,
+                        AgentDecision.round_id,
+                        AgentDecision.expires_at,
+                        AgentDecision.dispatch_operation_id,
                     )
                     .where(
                         AgentDecision.user_scope == request.user_scope,
@@ -2647,8 +2676,97 @@ class AgentDao(BaseDao):
                     "decision carries no tool grant",
                     identity,
                 )
+            # 重放先于新鲜核验：目标态已达且 revision=expected+1 → 原事实，不按
+            # 当前状态（可能已过期/换轮）重判（§9.13 W 崩溃恢复）。历史行
+            # dispatch_operation_id 为空时无从区分胜者，按原事实重放（零新派发）。
+            if (
+                decision_row.grant_state == target_state.value
+                and decision_row.grant_revision == request.expected_grant_revision + 1
+            ):
+                stored_operation_id = decision_row.dispatch_operation_id
+                if bind_operation and stored_operation_id is not None and stored_operation_id != operation_id:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "grant CAS lost: dispatch claimed by another operation",
+                        identity,
+                    )
+                return ToolGrantFact(
+                    decision_id=request.decision_id,
+                    grant_id=decision_row.grant_id,
+                    grant_revision=decision_row.grant_revision,
+                    grant_state=target_state,
+                )
+            if bind_operation:
+                # 首生效新鲜核验（检视 D07）：过期/终止/旧轮由问题新鲜核统一判定，
+                # 并取权威 owner_epoch/run_epoch 核 operation 是否当前代次。
+                owner_epoch, run_epoch = await self._assert_question_answerable(
+                    conn,
+                    user_scope=request.user_scope,
+                    execution_id=decision_row.execution_id,
+                    round_id=decision_row.round_id,
+                    expires_at=decision_row.expires_at,
+                    identity=identity,
+                    action="tool dispatch claim",
+                )
+                operation_row = (
+                    await conn.execute(
+                        sa.select(
+                            AgentOperation.execution_id,
+                            AgentOperation.round_id,
+                            AgentOperation.grant_id,
+                            AgentOperation.owner_epoch,
+                            AgentOperation.run_epoch,
+                        )
+                        .where(
+                            AgentOperation.user_scope == request.user_scope,
+                            AgentOperation.operation_id == operation_id,
+                        )
+                        .with_for_update()
+                    )
+                ).first()
+                if operation_row is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "operation does not exist; prepare before dispatch",
+                        identity,
+                    )
+                if (
+                    operation_row.execution_id != decision_row.execution_id
+                    or operation_row.round_id != decision_row.round_id
+                ):
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "dispatch claim rejected: operation does not belong to this decision execution/round",
+                        identity,
+                    )
+                if operation_row.grant_id is not None and operation_row.grant_id != decision_row.grant_id:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "dispatch claim rejected: operation carries a different tool grant",
+                        identity,
+                    )
+                if operation_row.owner_epoch != owner_epoch:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "dispatch claim rejected: operation owner epoch is stale",
+                        identity,
+                    )
+                if operation_row.run_epoch != run_epoch:
+                    raise AgentServiceError(
+                        AgentErrorCode.POLICY_DENIED,
+                        "dispatch claim rejected: operation run epoch is stale",
+                        identity,
+                    )
             occurred = datetime.now(UTC)
             current_states = [state.value for state in allowed_current_states]
+            update_values: dict[str, object] = {
+                "grant_state": target_state.value,
+                "grant_revision": AgentDecision.grant_revision + 1,
+                "revision": AgentDecision.revision + 1,
+                "updated_at": occurred,
+            }
+            if bind_operation:
+                update_values["dispatch_operation_id"] = operation_id
             cas_result = await conn.execute(
                 sa.update(AgentDecision)
                 .where(
@@ -2657,29 +2775,13 @@ class AgentDao(BaseDao):
                     AgentDecision.grant_revision == request.expected_grant_revision,
                     AgentDecision.grant_state.in_(current_states),
                 )
-                .values(
-                    grant_state=target_state.value,
-                    grant_revision=AgentDecision.grant_revision + 1,
-                    revision=AgentDecision.revision + 1,
-                    updated_at=occurred,
-                )
+                .values(**update_values)
             )
             if cas_result.rowcount == 1:
                 return ToolGrantFact(
                     decision_id=request.decision_id,
                     grant_id=decision_row.grant_id,
                     grant_revision=request.expected_grant_revision + 1,
-                    grant_state=target_state,
-                )
-            # 重放：同 expected 重试且目标态已达成（revision=expected+1）→ 原事实。
-            if (
-                decision_row.grant_state == target_state.value
-                and decision_row.grant_revision == request.expected_grant_revision + 1
-            ):
-                return ToolGrantFact(
-                    decision_id=request.decision_id,
-                    grant_id=decision_row.grant_id,
-                    grant_revision=decision_row.grant_revision,
                     grant_state=target_state,
                 )
             raise AgentServiceError(
