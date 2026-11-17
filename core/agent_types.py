@@ -4146,7 +4146,8 @@ def decode_research_snapshot(value: object, path: str = "$.snapshot") -> Researc
 #:   维度，工程冻结）；
 #: - 全部条件、空值含义、版本选择、规范关键词和准确祖先进入 query_digest；
 #: - HistoryPage 修订指纹为 sha256 摘要（覆盖域成员/水位经 DAO CanonicalJson
-#:   组装后哈希）；游标 h:{上界ts}:{排序键ts}:{锚ID}（上界绑定翻页）。
+#:   组装后哈希）；游标 h:{查询摘要}:{上界ts}:{排序键ts}:{锚ID}（摘要绑定规范
+#:   查询身份、上界绑定翻页；换筛选/换范围复用游标由 DAO 拒绝）。
 
 HISTORY_SCOPES: Final[frozenset[str]] = frozenset({"all_saved", "current_session", "current_child"})
 ROUND_SELECTION_KINDS: Final[frozenset[str]] = frozenset({"all_rounds", "exact"})
@@ -4160,7 +4161,7 @@ HISTORY_HIT_KINDS: Final[frozenset[str]] = frozenset({"message", "artifact"})
 
 _DATE_RE: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
 _HISTORY_CURSOR_RE: Final = re.compile(
-    r"h:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):"
+    r"h:([0-9a-f]{64}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):"
     r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):([^:\s]+)"
 )
 
@@ -4482,16 +4483,18 @@ def compute_history_query_digest(query: HistoryQuery) -> str:
     return sha256_hex(normalize_history_query(query))
 
 
-def parse_history_cursor(cursor: str) -> tuple[str, str, str]:
-    """游标 ``h:{上界ts}:{排序键ts}:{锚ID}`` → (固定上界, 排序键, 锚 ID)。
+def parse_history_cursor(cursor: str) -> tuple[str, str, str, str]:
+    """游标 ``h:{查询摘要}:{上界ts}:{排序键ts}:{锚ID}`` → (摘要, 固定上界, 排序键, 锚 ID)。
 
-    语法已由 validate_history_query 冻结；供 DAO 组装 keyset 续读。
+    语法已由 validate_history_query 冻结；摘要绑定规范查询身份（DAO 续读前
+    必须与当前查询摘要比对，不一致即拒绝换筛选复用），上界供 DAO 组装
+    keyset 续读。
     """
 
     match = _HISTORY_CURSOR_RE.fullmatch(cursor)
     if match is None:
         _fail("invalid_cursor", "$.cursor")
-    return match.group(1), match.group(2), match.group(3)
+    return match.group(1), match.group(2), match.group(3), match.group(4)
 
 
 @dataclass(frozen=True, slots=True)

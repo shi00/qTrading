@@ -4,7 +4,8 @@
 current_session 必带主 session_id/current_child 必带 child_target）；round_selection
 两 kind；agent_filter 两 kind 不互换（exact 版本必携、all_versions 禁带）；
 query_digest 规范化（全部条件/空值含义入 digest、limit 与游标不入）；游标
-h:{上界ts}:{排序键ts}:{锚ID} 语法；HistoryHit 地址组互斥归属；HistoryPage 指纹摘要。
+h:{查询摘要}:{上界ts}:{排序键ts}:{锚ID} 语法；HistoryHit 地址组互斥归属；
+HistoryPage 指纹摘要。
 """
 
 from __future__ import annotations
@@ -27,12 +28,14 @@ from core.agent_types import (
     decode_history_query,
     decode_history_round_selection,
     normalize_history_query,
+    parse_history_cursor,
     sha256_hex,
     validate_history_query,
 )
 
 ALL_ROUNDS = HistoryRoundSelection(kind="all_rounds")
 EXACT_ROUND = HistoryRoundSelection(kind="exact", execution_id="exec-leaf", round_id="round-1")
+NEW_CURSOR = f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:m-1"
 
 
 def base_query(**overrides: object) -> HistoryQuery:
@@ -97,7 +100,7 @@ def wire_history_page(**overrides: object) -> dict[str, object]:
         "fixed_upper_bound": "2026-06-01T12:00:00.000000Z",
         "revision_fingerprint": "b" * 64,
         "hits": [wire_history_hit()],
-        "next_cursor": "h:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:m-3",
+        "next_cursor": f"h:{'a' * 64}:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:m-3",
         "read_moment": "2026-06-01T12:00:01.000000Z",
     }
     values.update(overrides)
@@ -327,6 +330,8 @@ class TestValueSetsAndBounds:
             "h:3:4:m-1",
             "m:3",
             "a:2026-06-01T12:00:00.000000Z:x:1",
+            # 旧格式（3 段、无查询摘要）不再接受：该特性未发布，不留兼容分支
+            "h:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:m-1",
             "h:2026-06-01T12:00:00Z:2026-06-01T11:00:00.000000Z:m-1",
         ],
     )
@@ -336,8 +341,16 @@ class TestValueSetsAndBounds:
             validate_history_query(query)
 
     def test_valid_cursor_accepted(self) -> None:
-        query = base_query(session_id="s-1", cursor="h:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:m-1")
+        query = base_query(session_id="s-1", cursor=NEW_CURSOR)
         validate_history_query(query)
+
+    def test_parse_cursor_returns_digest_and_keyset(self) -> None:
+        assert parse_history_cursor(NEW_CURSOR) == (
+            "a" * 64,
+            "2026-06-01T12:00:00.000000Z",
+            "2026-06-01T11:59:59.000000Z",
+            "m-1",
+        )
 
 
 class TestDigest:
@@ -355,9 +368,16 @@ class TestDigest:
         assert with_empty != with_text
 
     def test_digest_excludes_cursor_and_limit(self) -> None:
-        q1 = base_query(session_id="s-1", cursor="h:2026-06-01T12:00:00.000000Z:2026-06-01T11:59:59.000000Z:m-1")
+        q1 = base_query(session_id="s-1", cursor=NEW_CURSOR)
         q2 = base_query(session_id="s-1", limit=10)
         assert compute_history_query_digest(q1) == compute_history_query_digest(q2)
+
+    def test_digest_separates_queries_sharing_cursor(self) -> None:
+        """换筛选/换范围复用游标 → 摘要不同（DAO 续读据此拒绝）。"""
+
+        base = compute_history_query_digest(base_query(session_id="s-1"))
+        assert base != compute_history_query_digest(base_query(session_id="s-1", type_filter="child"))
+        assert base != compute_history_query_digest(base_query(session_id="s-2"))
 
     def test_digest_binds_round_selection_and_agent_filter(self) -> None:
         q_all = base_query(session_id="s-1", round_selection=ALL_ROUNDS)

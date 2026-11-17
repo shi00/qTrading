@@ -8,9 +8,10 @@
   type_filter（main=会话级消息/child=执行内）、round_selection exact、
   agent_filter execution_agent、date 窗口（time_basis 列映射）；
 - 排序与游标：sort_moment + 锚 ID keyset（newest_first DESC/oldest_first ASC），
-  fixed_upper_bound 首读生成、游标首段续读复用；limit 与游标不入 digest；
-- HistoryPage：query_digest/revision_fingerprint（水位变化则指纹变化）/
-  无命中空页 / REVISION_CONFLICT（翻页时覆盖域成员消失）。
+  fixed_upper_bound 首读生成、游标继承续读；游标内查询摘要绑定规范查询
+  （换筛选/换范围复用即 REVISION_CONFLICT）；limit 与游标不入 digest；
+- HistoryPage：query_digest/revision_fingerprint（水位变化则指纹变化；all_saved
+  展开 execution 成员）/无命中空页 / REVISION_CONFLICT（翻页时覆盖域成员消失）。
 
 依赖 ``real_embedded_pg`` fixture（临时目录隔离，符合隔离本地验证授权）。
 """
@@ -38,6 +39,7 @@ from core.agent_types import (
     RecordEventRequest,
     compute_history_query_digest,
     json_doc,
+    parse_history_cursor,
 )
 from data.persistence.daos.agent_dao import AgentDao
 from data.persistence.models import AgentArtifact, AgentExecution, AgentRound, AgentSession
@@ -423,7 +425,7 @@ class TestDateBoundsAndStateFilter:
 
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "s-a")
-        bad_cursor = "h:9999-99-99T12:00:00.000000Z:9999-99-99T12:00:00.000000Z:anchor"
+        bad_cursor = f"h:{'a' * 64}:9999-99-99T12:00:00.000000Z:9999-99-99T12:00:00.000000Z:anchor"
         with pytest.raises(AgentServiceError) as exc:
             await dao.search_history(
                 _q(scope="current_session", session_id="s-a", cursor=bad_cursor), user_scope=USER_SCOPE
@@ -550,3 +552,171 @@ class TestPagingAndFingerprint:
         summary = page.hits[0].summary_text or ""
         assert 0 < len(summary) <= 200
         assert len(summary) < len(long_body)
+
+
+class TestCursorQueryBinding:
+    """检视 D16：游标绑定规范查询身份，换筛选/换范围复用必须被拒。"""
+
+    async def _paged_cursor(self, dao: AgentDao) -> tuple[str, str]:
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        for index in range(1, 3):
+            await _seed_message(
+                dao, "s-a", f"x{index}", execution_id="exec-a", round_id="round-a", body_text=f"消息{index}"
+            )
+        page1 = await dao.search_history(_q(scope="current_session", session_id="s-a", limit=1), user_scope=USER_SCOPE)
+        cursor_value = page1.next_cursor or ""
+        assert cursor_value.startswith("h:")
+        return cursor_value, page1.query_digest
+
+    async def test_cursor_carries_query_digest(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        cursor_value, query_digest = await self._paged_cursor(dao)
+        assert parse_history_cursor(cursor_value)[0] == query_digest
+
+    async def test_changed_filter_with_same_cursor_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        cursor_value, _ = await self._paged_cursor(dao)
+        variants: dict[str, dict[str, object]] = {
+            "round_selection": {
+                "round_selection": HistoryRoundSelection(kind="exact", execution_id="exec-a", round_id="round-a")
+            },
+            "query_text": {"query_text": "消息"},
+            "type_filter": {"type_filter": "child"},
+            "state_filter": {"state_filter": "queued"},
+            "message_role_filter": {"message_role_filter": "user"},
+        }
+        for label, overrides in variants.items():
+            with pytest.raises(AgentServiceError) as exc:
+                await dao.search_history(
+                    _q(scope="current_session", session_id="s-a", limit=1, cursor=cursor_value, **overrides),
+                    user_scope=USER_SCOPE,
+                )
+            assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT, label
+
+    async def test_changed_scope_with_same_cursor_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        for index in range(1, 3):
+            await _seed_message(dao, "s-a", f"y{index}", body_text=f"消息{index}")
+        page1 = await dao.search_history(_q(limit=1), user_scope=USER_SCOPE)
+        cursor_value = page1.next_cursor or ""
+        assert cursor_value.startswith("h:")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(scope="current_session", session_id="s-a", limit=1, cursor=cursor_value), user_scope=USER_SCOPE
+            )
+        assert _code_of(exc) == AgentErrorCode.REVISION_CONFLICT
+
+
+class TestCursorUpperBoundAndLiveness:
+    """检视 D16：固定上界从游标继承；成员变化只经指纹漂移，不阻断同查询续翻。"""
+
+    async def test_cursor_inherits_fixed_upper_bound(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        for index in range(1, 4):
+            await _seed_message(
+                dao,
+                "s-a",
+                f"u{index}",
+                body_text=f"消息{index}",
+                occurred_at=f"2026-06-0{index}T12:00:00.000000Z",
+            )
+        query = _q(scope="current_session", session_id="s-a", time_basis="message", sort="oldest_first", limit=2)
+        page1 = await dao.search_history(query, user_scope=USER_SCOPE)
+        assert [hit.message_id for hit in page1.hits] == ["m-u1", "m-u2"]
+        cursor_value = page1.next_cursor or ""
+        digest, _upper, sort_moment, anchor = parse_history_cursor(cursor_value)
+        early_upper = "2026-06-02T12:00:00.000000Z"
+        narrowed_cursor = f"h:{digest}:{early_upper}:{sort_moment}:{anchor}"
+        # 续读前新增更晚数据；游标上界不让位于「当前时刻」
+        await _seed_message(dao, "s-a", "u4", body_text="消息4", occurred_at="2026-06-04T12:00:00.000000Z")
+        page2 = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                time_basis="message",
+                sort="oldest_first",
+                limit=2,
+                cursor=narrowed_cursor,
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert page2.fixed_upper_bound == early_upper
+        assert page2.hits == ()
+        # 新首读（上界=now）可见被续读上界挡住的晚数据：证明是上界继承而非数据缺失
+        fresh = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", time_basis="message", sort="oldest_first", limit=10),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit.message_id for hit in fresh.hits] == ["m-u1", "m-u2", "m-u3", "m-u4"]
+
+    async def test_same_query_continuation_survives_member_change(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        for index in range(1, 4):
+            await _seed_message(
+                dao,
+                "s-a",
+                f"v{index}",
+                body_text=f"消息{index}",
+                occurred_at=f"2026-06-0{index}T12:00:00.000000Z",
+            )
+        page1 = await dao.search_history(_q(scope="current_session", session_id="s-a", limit=2), user_scope=USER_SCOPE)
+        assert [hit.message_id for hit in page1.hits] == ["m-v3", "m-v2"]
+        cursor_value = page1.next_cursor or ""
+        # 翻页间成员变化（同会话新增消息）：指纹漂移，但同查询续翻照常推进
+        await _seed_message(dao, "s-a", "v4", body_text="翻页间新增", occurred_at="2026-06-04T12:00:00.000000Z")
+        page2 = await dao.search_history(
+            _q(scope="current_session", session_id="s-a", limit=2, cursor=cursor_value), user_scope=USER_SCOPE
+        )
+        assert [hit.message_id for hit in page2.hits] == ["m-v1"]
+        assert page2.next_cursor is None
+        assert page2.revision_fingerprint != page1.revision_fingerprint
+
+
+class TestAllSavedExecutionFingerprint:
+    """检视 D16：all_saved 指纹纳入 execution 成员，执行内更新不再漏出。"""
+
+    async def _seed_tree(self, dao: AgentDao) -> None:
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        await _seed_message(dao, "s-a", "e1", execution_id="exec-a", round_id="round-a", body_text="执行内消息")
+
+    async def test_all_saved_fingerprint_tracks_execution_revision(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await self._seed_tree(dao)
+        page1 = await dao.search_history(_q(), user_scope=USER_SCOPE)
+        # 仅推进 execution 水位（session 行不动）：session 粒度指纹看不到该变化
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE agent_execution SET revision = revision + 1, event_seq = event_seq + 1 WHERE user_scope = :u"
+                ),
+                {"u": USER_SCOPE},
+            )
+        page2 = await dao.search_history(_q(), user_scope=USER_SCOPE)
+        assert page1.revision_fingerprint != page2.revision_fingerprint
+
+    async def test_all_saved_fingerprint_tracks_execution_membership(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await self._seed_tree(dao)
+        page1 = await dao.search_history(_q(), user_scope=USER_SCOPE)
+        await _seed_execution(dao, "exec-b", "s-a")
+        page2 = await dao.search_history(_q(), user_scope=USER_SCOPE)
+        assert page1.revision_fingerprint != page2.revision_fingerprint
+
+    async def test_current_session_fingerprint_still_tracks_execution(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await self._seed_tree(dao)
+        query = _q(scope="current_session", session_id="s-a")
+        page1 = await dao.search_history(query, user_scope=USER_SCOPE)
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE agent_execution SET revision = revision + 1 WHERE user_scope = :u"), {"u": USER_SCOPE}
+            )
+        page2 = await dao.search_history(query, user_scope=USER_SCOPE)
+        assert page1.revision_fingerprint != page2.revision_fingerprint

@@ -5128,13 +5128,13 @@ class AgentDao(BaseDao):
 
         scope 决定覆盖域成员：current_session/current_child 取主 session 行与
         其全部 execution 成员（id/revision/event_seq）；all_saved 取用户域全部
-        session 成员（不含 execution 展开——目录级指纹，成员增删/水位变化即漂移）。
+        session 成员并展开同域全部 execution 成员（口径与另两 scope 一致，
+        执行内新增/更新不得漏出指纹）。
         """
 
         if query.scope == "all_saved":
-            # all_saved 成员按 session 粒度：取各行 revision/event_seq
-            # （目录级指纹，成员增删/水位变化即漂移）
-            detail_rows = (
+            # all_saved 成员：会话行 + 执行行（执行内新增/水位变化即漂移）
+            session_rows = (
                 await conn.execute(
                     sa.select(
                         AgentSession.session_id,
@@ -5143,9 +5143,21 @@ class AgentDao(BaseDao):
                     ).where(AgentSession.user_scope == user_scope)
                 )
             ).all()
+            exec_rows = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.execution_id,
+                        AgentExecution.revision,
+                        AgentExecution.event_seq,
+                    ).where(AgentExecution.user_scope == user_scope)
+                )
+            ).all()
             members_wire = [
                 {"session_id": row.session_id, "revision": row.revision, "event_seq": row.event_seq}
-                for row in sorted(detail_rows, key=lambda r: r.session_id)
+                for row in sorted(session_rows, key=lambda r: r.session_id)
+            ] + [
+                {"execution_id": row.execution_id, "revision": row.revision, "event_seq": row.event_seq}
+                for row in sorted(exec_rows, key=lambda r: r.execution_id)
             ]
         else:
             await self._history_session_exists(conn, user_scope, query.session_id or "")
@@ -5268,9 +5280,12 @@ class AgentDao(BaseDao):
         """历史搜索（§4.2 R02 read_history + §9.13）：固定上界内规范扫描。
 
         - 受理校验：validate_history_query（R02 三范围/值集/游标语法）→ INPUT_INVALID；
-        - 游标翻页：``h:{上界ts}:{排序键ts}:{锚ID}``——上界绑定翻页（续读复用首读
-          上界，不因数据增长漏复检）；锚行缺失视为覆盖域已被修订 → REVISION_CONFLICT
-          （R02，里程碑检视复核点：fingerprint 端到端比对由服务层承载）；
+        - 游标翻页：``h:{查询摘要}:{上界ts}:{排序键ts}:{锚ID}``——摘要绑定规范查询
+          （续读必须同一筛选/范围，换筛选/换 scope 复用即 REVISION_CONFLICT，
+          校验先于任何扫描/命中）；上界绑定翻页（续读复用首读上界，不因数据增长
+          漏复检）；锚行缺失视为覆盖域已被修订 → REVISION_CONFLICT（R02，成员
+          变化只经 revision_fingerprint 漂移呈现，不阻断同查询续翻；端到端指纹
+          比对由服务层承载）；
         - 扫描：消息与成果 UNION 前分别过滤后统一排序（sort_moment + 锚 ID keyset，
           newest_first DESC/oldest_first ASC）；query_text 占位 LIKE（C-03-4 全文
           索引接入前）；type_filter main=会话级（execution_id IS NULL）/child=执行内；
@@ -5297,7 +5312,7 @@ class AgentDao(BaseDao):
         cursor_sort_moment: datetime | None = None
         cursor_anchor: str | None = None
         if query.cursor is not None:
-            upper_text, sort_text, anchor_id = parse_history_cursor(query.cursor)
+            cursor_digest, upper_text, sort_text, anchor_id = parse_history_cursor(query.cursor)
             try:
                 cursor_bound = datetime.strptime(upper_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
                 cursor_sort_moment = datetime.strptime(sort_text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
@@ -5307,6 +5322,14 @@ class AgentDao(BaseDao):
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_INVALID, "history cursor contains invalid date value", identity_str
                 ) from exc
+            if cursor_digest != query_digest:
+                # 游标内摘要 != 当前查询摘要：筛选/范围/条件已变更，续读结果不再
+                # 属于同一规范查询（拒绝换筛选复用；先于任何扫描/命中）
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "history cursor was issued for a different query; query was revised",
+                    identity_str,
+                )
             cursor_anchor = anchor_id
         fixed_upper = cursor_bound if cursor_bound is not None else datetime.now(UTC)
         upper_wire = _wire_time(fixed_upper)
@@ -5616,7 +5639,7 @@ class AgentDao(BaseDao):
         next_cursor: str | None = None
         if has_more and union_rows:
             last = union_rows[-1]
-            next_cursor = f"h:{upper_wire}:{_wire_time(last.sort_moment)}:{last.anchor_id}"
+            next_cursor = f"h:{query_digest}:{upper_wire}:{_wire_time(last.sort_moment)}:{last.anchor_id}"
         return HistoryPage(
             query_digest=query_digest,
             fixed_upper_bound=upper_wire,
