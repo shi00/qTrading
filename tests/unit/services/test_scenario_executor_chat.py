@@ -447,6 +447,60 @@ class TestChatRequiredRegistration:
         assert adapter.invoke_calls == []
         assert recorder.begin_attempt.await_count == 1
 
+    @pytest.mark.asyncio
+    async def test_reserve_unknown_zero_outbound_and_halt(self):
+        """M08：usage_only（无金额上限）预留未确认 → 零出站 + halt。
+
+        begin_attempt 健康（persisted=True）也不得补放行此前未确认的必需登记
+        （前置分支已收敛，begin / 外发均不进入）；原因可观测（R21）。
+        """
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response()), ((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None)
+        )
+        executor = _executor(adapter, recorder)
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            binding=_binding(),
+        )
+        assert outcome.status == "failed"
+        assert outcome.transport_state == "failed"
+        assert "required budget reservation unavailable: DB_UNAVAILABLE" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        # halt：第二候选零预留；此前登记失败后 begin 不再进入（不补放行）
+        assert recorder.try_reserve.await_count == 1
+        recorder.mark_dispatched.assert_not_awaited()
+        recorder.begin_attempt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_unknown_zero_outbound_and_halt(self):
+        """M08：usage_only 派发绑定未确认 → 零出站 + halt；begin 成功不补放行。"""
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response()), ((), None, _chat_ok_response())])
+        recorder = _recorder_mock()
+        recorder.mark_dispatched = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder)
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            binding=_binding(),
+        )
+        assert outcome.status == "failed"
+        assert outcome.transport_state == "failed"
+        assert "required dispatch binding unavailable: DB_UNAVAILABLE" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        assert recorder.try_reserve.await_count == 1
+        recorder.begin_attempt.assert_not_awaited()
+
 
 class TestChatStreamFailureExposure:
     @pytest.mark.asyncio
