@@ -1971,6 +1971,55 @@ class AIUsageDao(BaseDao):
         }
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def read_active_reserved_cny(self, *, invocation_ids: list[str] | tuple[str, ...]) -> dict[str, Decimal]:
+        """逐 invocation 汇总活跃预留金额（只读；费用投影的「预留中」列）。
+
+        活跃状态 = ``reserved`` / ``dispatched`` / ``held_unconfirmed``（与预算门
+        ``_read_active_reservations_sum`` 同口径：三者都占用预算，直到 settled /
+        released）。本方法**只读**，不改写预留状态、不结算、不估算。
+
+        金额为 JSONB 文本，逐元素先经非负小数正则过滤再 ``::numeric``（存量垃圾
+        ``NaN`` / 负值 / 非数值文本按事实零计入，不 crash、不抵消合法预留）；
+        无活跃预留的 invocation 不出现在返回映射中（调用方按事实零处理，R21）。
+        """
+        self._check_engine(context="ai_usage.read_active_reserved_cny")
+        ids = [str(item) for item in invocation_ids]
+        if not ids:
+            return {}
+        async with self._guarded_begin() as conn:
+            rows = (
+                await conn.execute(
+                    sa.text(
+                        """
+                        SELECT
+                            i.invocation_id,
+                            COALESCE(SUM(
+                                CASE
+                                    WHEN elem->>'amount_cny' ~ '^[0-9]+(\\.[0-9]+)?$'
+                                        THEN CASE
+                                            WHEN (elem->>'amount_cny')::numeric <= 1e15
+                                                THEN (elem->>'amount_cny')::numeric
+                                            ELSE 0
+                                        END
+                                    ELSE 0
+                                END
+                            ), 0)
+                        FROM ai_invocation i, jsonb_array_elements(i.reservations) AS elem
+                        WHERE i.invocation_id = ANY(CAST(:invocation_ids AS text[]))
+                          AND elem->>'state' = ANY(CAST(:states AS text[]))
+                          AND elem->>'amount_cny' IS NOT NULL
+                        GROUP BY i.invocation_id
+                        """
+                    ),
+                    {"invocation_ids": ids, "states": list(_ACTIVE_RESERVATION_STATES)},
+                )
+            ).fetchall()
+        return {
+            str(row[0]): _finite_non_negative_or_zero(Decimal(str(row[1])), context="active_reserved_projection")
+            for row in rows
+        }
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def read_unconfirmed_reservations(self) -> list[dict[str, Any]]:
         """全局未确认预留明细（§11.5「未确认详情」）。
 

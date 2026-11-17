@@ -3776,6 +3776,10 @@ class OperationSummary:
 
     工具返回用 ``result_ref`` 引用（完整返回经 read_operation 按需读取）；
     ``io_state``/``error_category`` 为未冻结 wire 值（C-01 留痕），strict str。
+    ``invocation_id``/``attempt_refs`` 为原模型调度账本引用（ADR-0014：模型
+    attempt 信息只经引用关联原账本，不重复写费用），费用经
+    ``AgentService.read_cost_projection`` 只读投影；引用形状未冻结，
+    ``attempt_refs`` 以 CanonicalJson 原样承载（不臆造结构）。
     """
 
     operation_id: str
@@ -3801,6 +3805,8 @@ class OperationSummary:
     verified_at: str | None
     artifact_id: str | None
     artifact_version: int | None
+    invocation_id: str | None
+    attempt_refs: CanonicalJson | None
 
 
 _OPERATION_SUMMARY_KEYS: Final = frozenset(
@@ -3828,12 +3834,14 @@ _OPERATION_SUMMARY_KEYS: Final = frozenset(
         "verified_at",
         "artifact_id",
         "artifact_version",
+        "invocation_id",
+        "attempt_refs",
     }
 )
 
 
 def decode_operation_summary(value: object, path: str = "$.operation_summary") -> OperationSummary:
-    """严格解码操作摘要（23 键全必填；值集与 §9.9 CHECK 同步）。"""
+    """严格解码操作摘要（25 键全必填；值集与 §9.9 CHECK 同步）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
@@ -3866,6 +3874,8 @@ def decode_operation_summary(value: object, path: str = "$.operation_summary") -
         verified_at=_opt_timestamp(value["verified_at"], f"{path}.verified_at"),
         artifact_id=artifact_id,
         artifact_version=artifact_version,
+        invocation_id=_opt_str(value["invocation_id"], f"{path}.invocation_id"),
+        attempt_refs=_opt_json_text(value["attempt_refs"], f"{path}.attempt_refs"),
     )
 
 
@@ -3874,7 +3884,9 @@ class UsageSummary:
     """用量摘要（§4.3 usage 行）：实际 attempt/tool/active 累计；费用投影未接固定 unknown。
 
     ``cost_state`` 恒为 ``unknown``（原账本 known/unpriced/reserved 随费用投影接入
-    扩展）；费用字段缺失保 unknown，不填 0 冒认免费（R21）。
+    扩展）；费用字段缺失保 unknown，不填 0 冒认免费（R21）。费用金额经
+    ``AgentService.read_cost_projection`` 以 operation 行的 ``invocation_id`` /
+    ``attempt_refs`` 引用原账本只读投影，本摘要不重复承载金额。
     """
 
     model_attempt_count: int
@@ -3901,6 +3913,45 @@ def decode_usage_summary(value: object, path: str = "$.usage") -> UsageSummary:
         active_ms=_nonneg_int(value["active_ms"], f"{path}.active_ms"),
         cost_state=cost_state,
     )
+
+
+#: 费用投影的读取状态（读取失败独立成态，不得合并进「零费用」，R21）
+COST_PROJECTION_READ_STATES: Final = frozenset({"ok", "failed"})
+
+
+@dataclass(frozen=True, slots=True)
+class CostProjection:
+    """执行费用的只读投影（§4.3 usage 费用面；ADR-0014 引用原账本，不重复写费用）。
+
+    由 ``AgentService.read_cost_projection`` 以 operation 行的 ``invocation_id`` /
+    ``attempt_refs`` 引用原账本（``ai_invocation`` / ``ai_attempt``）只读聚合；
+    不写库、不估算补齐。五种状态分列保真，禁止合并成一个总数：
+
+    - **读取失败**：``read_state="failed"`` + ``read_error``（错误分类码），其余
+      金额/计数保持缺省，不倒推为「零费用」（未知 ≠ 0）；
+    - **0（确实为零）**：``zero_cost_attempts`` 为已计价且金额恰为 0 的 attempt 数，
+      此时 ``known_cny`` 可为 ``Decimal("0")``（已知零，与未知可区分）；
+    - **已知金额**：``known_cny`` 为已计价 attempt 金额合计；无任何已计价 attempt
+      时为 ``None``（未知，禁止填 0）；
+    - **预留中**：``reserved_cny`` 为活跃预留（reserved / dispatched /
+      held_unconfirmed）金额合计；账本无活跃预留为 ``Decimal("0")``（事实零），
+      无引用可投影时为 ``None``；
+    - **未计价**：``unpriced_attempts``（cost 为 NULL，或引用存在但账本无行）与
+      对应 ``unpriced_input_tokens`` / ``unpriced_output_tokens``（未知成本的用量规模）。
+
+    ``ledger_refs`` / ``attempt_refs`` 去重保序回传，引用不因读取失败或账本缺行丢失。
+    """
+
+    read_state: str
+    read_error: str | None
+    ledger_refs: tuple[str, ...]
+    attempt_refs: tuple[str, ...]
+    zero_cost_attempts: int
+    known_cny: Decimal | None
+    reserved_cny: Decimal | None
+    unpriced_attempts: int
+    unpriced_input_tokens: int
+    unpriced_output_tokens: int
 
 
 @dataclass(frozen=True, slots=True)

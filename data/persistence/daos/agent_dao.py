@@ -4991,6 +4991,8 @@ class AgentDao(BaseDao):
                     "verified_at": self._opt_wire_time(row.verified_at),
                     "artifact_id": row.artifact_id,
                     "artifact_version": row.artifact_version,
+                    "invocation_id": row.invocation_id,
+                    "attempt_refs": json_doc(row.attempt_refs) if row.attempt_refs is not None else None,
                 }
             )
         except (AgentValidationError, ValueError) as exc:

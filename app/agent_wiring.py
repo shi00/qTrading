@@ -270,7 +270,7 @@ async def wire_agent_runtime(
         logger.warning("[AgentWiring] shared engine/ledger unavailable; agent runtime not wired (zero dispatch)")
         return AgentWiring(service=None, bridge=bridge, failure="shared_ledger_unavailable")
 
-    service = AgentService(dao)
+    service = AgentService(dao, getattr(cache_manager, "ai_usage_dao", None))
     try:
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
