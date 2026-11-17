@@ -24,6 +24,7 @@
 
 import asyncio
 import inspect
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -48,7 +49,7 @@ from core.model_management_types import (
     TextContentPart,
 )
 from services.ai_service.litellm_client import LiteLLMChatAdapter, LiteLLMClient
-from services.ai_service.scenario_executor import ScenarioExecutor
+from services.ai_service.scenario_executor import ScenarioExecutor, _AttemptLedgerState
 from services.ai_service.usage_recorder import ReservationOutcome
 
 pytestmark = pytest.mark.unit
@@ -1010,3 +1011,124 @@ class TestChatDataConsentGate:
         assert "consent_id" in str(excinfo.value)
         recorder.ensure_invocation.assert_not_awaited()
         assert adapter.invoke_calls == []
+
+
+class TestSourceAttemptWriteBack:
+    """检视 M08：响应 / 终态只写来源 attempt 的预装配事实，跨候选不顶替。"""
+
+    @pytest.mark.asyncio
+    async def test_cross_candidate_success_binds_source_attempt_facts(self):
+        """候选 1 尝试 A 失败、候选 2 尝试 B 成功：终态与出口都按来源 attempt
+        写回——A 的失败事实留在 A，B 的成功事实挂在 B，互不覆盖。"""
+        adapter = _ScriptedChatAdapter(
+            [
+                ((), TimeoutError("upstream timed out"), None),
+                ((), None, _chat_ok_response(usage=_usage())),
+            ]
+        )
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, retry_attempts=0)  # 失败即换候选
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            binding=_binding(),
+        )
+
+        assert outcome.status == "succeeded"
+        assert outcome.settlement_state == "settled"
+        attempt_a = adapter.invoke_calls[0]["attempt_id"]
+        attempt_b = adapter.invoke_calls[1]["attempt_id"]
+        assert attempt_a != attempt_b
+        # 出口身份 = 响应来源 attempt（成功尝试），不取遍历末态顶替
+        assert outcome.attempt_id == attempt_b
+        records = [call.args[0] for call in recorder.submit_terminal.await_args_list]
+        assert [(r.attempt_id, r.status) for r in records] == [(attempt_a, "failed"), (attempt_b, "succeeded")]
+        # 用量观察同样归属来源 attempt
+        observed = [call.args[0].attempt_id for call in recorder.observe_usage.call_args_list]
+        assert observed == [attempt_b]
+
+    @pytest.mark.asyncio
+    async def test_deadline_exhausted_after_retry_keeps_attempt_identity_none(self):
+        """重试前 deadline 耗尽：该次未产生 attempt → attempt_id=None 且无结算
+        投影，不得借用上一个已结束尝试（零出站失败不伪装为有 attempt）。"""
+
+        class _Clock:
+            value = 0.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        clock = _Clock()
+
+        class _AdvancingFailAdapter:
+            def __init__(self) -> None:
+                self.invoke_calls: list[str] = []
+
+            async def invoke_chat(
+                self,
+                request,
+                connection,
+                deadline,
+                attempt_context,
+                *,
+                stream=True,
+                response_format=None,
+                on_event=None,
+            ) -> ChatTurnResponse:
+                self.invoke_calls.append(attempt_context.attempt_id)
+                clock.value = 100.0  # 首次尝试失败后已越过请求 deadline
+                raise TimeoutError("upstream timed out")
+
+        adapter = _AdvancingFailAdapter()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, clock=clock, retry_attempts=1)
+        outcome = await executor.execute_chat_turn(
+            replace(_chat_request(), deadline=5.0),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+
+        assert outcome.status == "failed"
+        assert outcome.error_code == "deadline exhausted"
+        assert len(adapter.invoke_calls) == 1
+        assert outcome.attempt_id is None
+        assert outcome.settlement_state is None
+        # 唯一落账事实属于真实发生的尝试 A（失败），不被 deadline 失败覆盖
+        records = [call.args[0] for call in recorder.submit_terminal.await_args_list]
+        assert [(r.attempt_id, r.status) for r in records] == [(adapter.invoke_calls[0], "failed")]
+
+
+class TestTerminalWriteBackMonotonic:
+    """检视 M08：重复 / 乱序完成的终态写回幂等，过期结果零覆盖（不覆盖较新事实）。"""
+
+    @pytest.mark.asyncio
+    async def test_stale_failed_write_does_not_overwrite_committed_success(self):
+        recorder = _recorder_mock()
+        executor = _executor(_ScriptedChatAdapter([]), recorder)
+        ledger = _AttemptLedgerState()
+        success = SimpleNamespace(attempt_id="att-1", status="succeeded")
+        stale_failure = SimpleNamespace(attempt_id="att-1", status="failed")
+
+        await executor._submit_terminal_logged(success, ledger)
+        await executor._submit_terminal_logged(stale_failure, ledger)
+
+        assert recorder.submit_terminal.await_count == 1  # 过期失败零覆盖
+        assert ledger.committed_rank == 2
+        assert ledger.concluded is True
+
+    @pytest.mark.asyncio
+    async def test_duplicate_success_write_is_idempotent(self):
+        recorder = _recorder_mock()
+        executor = _executor(_ScriptedChatAdapter([]), recorder)
+        ledger = _AttemptLedgerState()
+        record = SimpleNamespace(attempt_id="att-1", status="succeeded")
+
+        await executor._submit_terminal_logged(record, ledger)
+        await executor._submit_terminal_logged(record, ledger)
+
+        assert ledger.committed_rank == 2
+        assert ledger.concluded is True
+        assert ledger.pending is None  # 重复写不残留待收敛记录
