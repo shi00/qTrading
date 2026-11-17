@@ -433,12 +433,20 @@ def _sync_database_url(url: str) -> str:
 
 @dataclass(frozen=True)
 class StartupOutcome:
-    """启动编排结果：``handle`` 仅在隔离``ready=True``并 launch 后非空。"""
+    """启动编排结果：``handle`` 仅在隔离``ready=True``并 launch 后非空。
+
+    ``unclosed_handle`` 仅在**关闭失败**时非空：此时唯一执行锁保持持有
+    （``instance_guard`` 非空）且 ``failure`` 含 ``close_failed:<异常类型>``；
+    调用方须用该句柄重试 ``close()``（按资源粒度幂等，只补未完成项），全部
+    关闭后再释放锁。锁未释放期间新的启动必须被阻止，不得由新实例接管可能
+    仍存活的旧宿主资源。
+    """
 
     handle: Any
     isolation: StartupIsolationReceipt | None
     failure: str | None
     instance_guard: Any = None
+    unclosed_handle: Any = None
 
 
 async def start_agent_runtime(
@@ -467,7 +475,12 @@ async def start_agent_runtime(
 
     组装/launch/宿主关闭均经 ``blocking_runner``（默认 ThreadPoolManager.IO，
     HANDOFF §10.6：受管线程，不堵 UI）。``CancelledError`` 继续传播，传播前
-    释放已组装宿主与实例锁（R2：不吞取消、不留资源）。
+    关闭已组装宿主（R2：不吞取消、不留资源）。
+
+    **关闭失败一律保锁**：隔离未就绪/launch 失败时若 ``handle.close()`` 失败
+    （如 ``DBOS.destroy`` 中途失败），不释放唯一执行锁，并保留句柄于
+    ``unclosed_handle`` 供调用方重试关闭；取消路径同样保锁（句柄无法随结果
+    返回，锁即阻塞事实），确保旧宿主资源未收口时新实例不得接管。
     """
 
     if not isinstance(settings, AgentRuntimeSettings):
@@ -484,13 +497,36 @@ async def start_agent_runtime(
             handle=None, isolation=None, failure=f"instance_guard_blocked:{evidence.detail}", instance_guard=None
         )
 
-    def _abort_handle(handle: Any) -> None:
+    def _abort_handle(handle: Any) -> str | None:
+        """关闭未上线的宿主：只有确认关闭成功才释放唯一执行锁。
+
+        返回 ``None`` 表示已全部关闭并释放锁；返回异常类型名表示关闭失败——
+        此时**保锁**（旧宿主资源可能仍存活，新实例不得接管），由调用方保留
+        句柄重试 ``close()``（``AgentRuntimeHandle.close`` 按资源粒度幂等）。
+        """
+
         try:
             handle.close()
-        # 清理兜底：保留原始失败原因
-        except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
-            pass
+        except Exception as exc:  # 关闭失败：保锁、保句柄、报告阻塞事实（可重试）
+            return type(exc).__name__
         guard.release()
+        return None
+
+    def _aborted_outcome(
+        receipt: StartupIsolationReceipt, failure: str | None, close_failure: str | None
+    ) -> StartupOutcome:
+        """未 launch 的收口结果：关闭失败时不丢句柄/不丢锁（可重试关闭）。"""
+
+        if close_failure is None:
+            return StartupOutcome(handle=None, isolation=receipt, failure=failure)
+        prefix = f"{failure};" if failure else ""
+        return StartupOutcome(
+            handle=None,
+            isolation=receipt,
+            failure=f"{prefix}close_failed:{close_failure}",
+            instance_guard=guard,
+            unclosed_handle=handle,
+        )
 
     try:
         handle = await runner(lambda: assemble(settings))
@@ -509,11 +545,12 @@ async def start_agent_runtime(
             app_version=settings.application_version,
         )
     except asyncio.CancelledError:
+        # 取消继续传播（R2）；关闭失败时保锁（锁即阻塞事实，新实例不得接管）
         await runner(lambda: _abort_handle(handle))
         raise
     if not receipt.ready:
-        await runner(lambda: _abort_handle(handle))
-        return StartupOutcome(handle=None, isolation=receipt, failure=None)
+        close_failure = await runner(lambda: _abort_handle(handle))
+        return _aborted_outcome(receipt, None, close_failure)
 
     try:
         await runner(lambda: launch(handle))
@@ -521,8 +558,8 @@ async def start_agent_runtime(
         await runner(lambda: _abort_handle(handle))
         raise
     except Exception as exc:
-        await runner(lambda: _abort_handle(handle))
-        return StartupOutcome(handle=None, isolation=receipt, failure=f"launch_failed:{type(exc).__name__}")
+        close_failure = await runner(lambda: _abort_handle(handle))
+        return _aborted_outcome(receipt, f"launch_failed:{type(exc).__name__}", close_failure)
     return StartupOutcome(handle=handle, isolation=receipt, failure=None, instance_guard=guard)
 
 

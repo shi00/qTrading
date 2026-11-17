@@ -398,6 +398,21 @@ class _FakeHandle:
         self.closed += 1
 
 
+class _FlakyCloseHandle(_FakeHandle):
+    """关闭失败的假宿主：验证「关闭失败保锁、保句柄、可重试关闭」。"""
+
+    def __init__(self, client: _FakeClient, *, exc: BaseException | None = None) -> None:
+        super().__init__(client)
+        self._close_exc = exc or RuntimeError("close failed")
+        self.close_attempts = 0
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        if self.close_attempts == 1:
+            raise self._close_exc
+        super().close()
+
+
 class _FakeGuard:
     def __init__(self, *, acquired: bool = True, exited: bool = True) -> None:
         self._acquired = acquired
@@ -531,6 +546,64 @@ class TestStartupOrchestration:
         assert isinstance(exc_info.value, asyncio.CancelledError)
         assert handle.closed == 1
         assert guard.released == 1
+
+    async def test_not_ready_isolation_close_failure_keeps_guard_and_handle(self) -> None:
+        """关闭失败：不释放唯一执行锁（防新实例接管），保留句柄供重试关闭。"""
+
+        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client.list_error = RuntimeError("listing broken")
+        handle = _FlakyCloseHandle(client)
+        guard = _FakeGuard()
+
+        outcome = await self._start(
+            assemble_func=lambda _settings: handle,
+            launch_func=lambda _handle: None,
+            instance_guard=guard,
+        )
+        assert outcome.handle is None
+        assert outcome.isolation is not None and outcome.isolation.ready is False
+        assert outcome.failure == "close_failed:RuntimeError"
+        assert outcome.unclosed_handle is handle
+        assert outcome.instance_guard is guard
+        assert guard.released == 0  # 未证明全部关闭：保锁
+
+        handle.close()  # 按资源粒度幂等：原关闭可重试
+        guard.release()
+        assert handle.closed == 1
+
+    async def test_launch_failure_close_failure_keeps_guard_and_handle(self) -> None:
+        """部分 launch 后关闭失败：仍保锁并保留句柄，新实例不得接管。"""
+
+        handle = _FlakyCloseHandle(_FakeClient([]), exc=OSError("destroy failed"))
+        guard = _FakeGuard()
+
+        def _launch(_handle: Any) -> None:
+            raise RuntimeError("launch failed")
+
+        outcome = await self._start(assemble_func=lambda _settings: handle, launch_func=_launch, instance_guard=guard)
+        assert outcome.failure == "launch_failed:RuntimeError;close_failed:OSError"
+        assert outcome.unclosed_handle is handle
+        assert outcome.instance_guard is guard
+        assert handle.close_attempts == 1
+        assert guard.released == 0
+
+    async def test_cancellation_close_failure_keeps_guard(self) -> None:
+        """取消且关闭失败：取消继续传播（R2），唯一执行锁保持持有。"""
+
+        client = _FakeClient([_Native("agent_leaf:a", "PENDING")])
+        client.cancel_error = asyncio.CancelledError()
+        handle = _FlakyCloseHandle(client)
+        guard = _FakeGuard()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await self._start(
+                assemble_func=lambda _settings: handle,
+                launch_func=lambda _handle: None,
+                instance_guard=guard,
+            )
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert handle.close_attempts == 1
+        assert guard.released == 0
 
 
 def test_startup_workflow_names_match_published_constants() -> None:
