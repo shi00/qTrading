@@ -256,14 +256,18 @@ class _FakeDao:
             raise self.error
         return _TRANSFER_RECEIPT
 
-    async def read_draft_transfer(self, ref: CommandRef, *, user_scope: str) -> DraftTransferReceipt:
-        self.calls.append(("read_draft_transfer", (ref,), {"user_scope": user_scope}))
+    async def read_draft_transfer(
+        self, ref: CommandRef, *, user_scope: str, target_session_id: str | None = None
+    ) -> DraftTransferReceipt:
+        self.calls.append(
+            ("read_draft_transfer", (ref,), {"user_scope": user_scope, "target_session_id": target_session_id})
+        )
         if self.error is not None:
             raise self.error
         return _TRANSFER_RECEIPT
 
-    async def read_command(self, ref: CommandRef, *, user_scope: str) -> CommandReceipt:
-        self.calls.append(("read_command", (ref,), {"user_scope": user_scope}))
+    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str | None = None) -> CommandReceipt:
+        self.calls.append(("read_command", (ref,), {"user_scope": user_scope, "target_id": target_id}))
         if self.error is not None:
             raise self.error
         return _RECEIPT
@@ -299,9 +303,9 @@ class TestReadDelegation:
     @pytest.mark.asyncio
     async def test_read_command_passes_caller_scope(self) -> None:
         fake = _FakeDao()
-        receipt = await _service(fake).read_command(_REF, user_scope="u1")
+        receipt = await _service(fake).read_command(_REF, user_scope="u1", target_id="s1")
         assert receipt is _RECEIPT
-        assert fake.calls == [("read_command", (_REF,), {"user_scope": "u1"})]
+        assert fake.calls == [("read_command", (_REF,), {"user_scope": "u1", "target_id": "s1"})]
 
     @pytest.mark.asyncio
     async def test_get_snapshot_passes_all_read_bounds(self) -> None:
@@ -568,9 +572,9 @@ class TestDraftTransferAuthority:
     @pytest.mark.asyncio
     async def test_read_draft_transfer_delegates_caller_scope(self) -> None:
         fake = _FakeDao()
-        receipt = await _service(fake).read_draft_transfer(_REF, user_scope="u1")
+        receipt = await _service(fake).read_draft_transfer(_REF, user_scope="u1", target_session_id="s2")
         assert receipt is _TRANSFER_RECEIPT
-        assert fake.calls == [("read_draft_transfer", (_REF,), {"user_scope": "u1"})]
+        assert fake.calls == [("read_draft_transfer", (_REF,), {"user_scope": "u1", "target_session_id": "s2"})]
 
     @pytest.mark.asyncio
     async def test_read_draft_transfer_rejected_after_close(self) -> None:

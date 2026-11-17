@@ -9,6 +9,7 @@
 - 同源版并发/跨目标争抢单胜者；业务准备稿仅 claim 仲裁；
 - 目标草稿来源边写入、源边清空；
 - 读回执：原样、非转移命令/未知命令 INPUT_INVALID、坏回执 OPERATION_UNKNOWN；
+  同键跨 target 按类型/预期版前置过滤并按准确 target 查回，真歧义仍拒（检视 D20）；
 - 新草稿保存清空源转移 fence。
 
 依赖 ``real_embedded_pg`` fixture（临时目录隔离）。
@@ -127,7 +128,9 @@ def _payload(**overrides: Any) -> DraftPayload:
     return DraftPayload(**values)
 
 
-async def _save_source_draft(dao: AgentDao, payload: DraftPayload, *, command_id: str = "cmd-save-1") -> int:
+async def _save_source_draft(
+    dao: AgentDao, payload: DraftPayload, *, command_id: str = "cmd-save-1", session_id: str = "s1"
+) -> int:
     receipt = await dao.save_draft(
         DraftSaveCommand(
             command=CommandRef(
@@ -137,7 +140,7 @@ async def _save_source_draft(dao: AgentDao, payload: DraftPayload, *, command_id
                 command_id=command_id,
                 expected_revision=1,
             ),
-            session_id="s1",
+            session_id=session_id,
             expected_draft_revision=1,
             payload=payload,
         )
@@ -665,6 +668,82 @@ class TestReadDraftTransfer:
         receipt = await dao.transfer_draft(_transfer(payload=payload))
 
         assert await dao.read_draft_transfer(_ref(), user_scope=_USER) == receipt
+
+    async def _two_transfers_same_key(self, dao: AgentDao) -> tuple[DraftTransferReceipt, DraftTransferReceipt]:
+        """同一命令键向两个合法 target 各转移一次（检视 D20 场景种子）。"""
+
+        for session_id in ("s1", "s2", "s3", "s4"):
+            await _seed_session(dao, session_id=session_id)
+        payload = _payload()
+        await _save_source_draft(dao, payload)
+        first = await dao.transfer_draft(_transfer(payload=payload, target="s2", command_id="cmd-dup"))
+        await _save_source_draft(dao, payload, command_id="cmd-save-3", session_id="s3")
+        second = await dao.transfer_draft(_transfer(payload=payload, source_id="s3", target="s4", command_id="cmd-dup"))
+        return first, second
+
+    async def test_same_key_across_targets_resolved_by_exact_target(self, real_embedded_pg: ConnectionInfo) -> None:
+        """同键跨 target 合法并存：按准确目标会话各自查回，不误判歧义。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        first, second = await self._two_transfers_same_key(dao)
+
+        assert (
+            await dao.read_draft_transfer(_ref("cmd-dup", expected=1), user_scope=_USER, target_session_id="s2")
+            == first
+        )
+        assert (
+            await dao.read_draft_transfer(_ref("cmd-dup", expected=1), user_scope=_USER, target_session_id="s4")
+            == second
+        )
+
+    async def test_same_key_identical_target_revision_is_ambiguous(self, real_embedded_pg: ConnectionInfo) -> None:
+        """无准确 target 且身份（类型/预期版）过滤后仍多行 → 真歧义，拒绝静默择一。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await self._two_transfers_same_key(dao)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_draft_transfer(_ref("cmd-dup", expected=1), user_scope=_USER)
+        assert "ambiguous" in excinfo.value.sanitized_message
+
+    async def test_reads_back_after_restart_with_new_dao(self, real_embedded_pg: ConnectionInfo) -> None:
+        """丢回执/重启：新 DAO/新连接按准确 target 仍查回原回执。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        first, _ = await self._two_transfers_same_key(dao)
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+        restarted = AgentDao(create_test_engine(real_embedded_pg.url))
+        receipt = await restarted.read_draft_transfer(
+            _ref("cmd-dup", expected=1), user_scope=_USER, target_session_id="s2"
+        )
+        assert receipt == first
+        await restarted.engine.dispose()  # type: ignore[union-attr]
+
+    async def test_same_target_repeat_submission_reads_back_once(self, real_embedded_pg: ConnectionInfo) -> None:
+        """同键同 target 重传只留原记录：重复转移重放后查回仍唯一命中。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, session_id="s1")
+        await _seed_session(dao, session_id="s2")
+        payload = _payload()
+        await _save_source_draft(dao, payload)
+        first = await dao.transfer_draft(_transfer(payload=payload))
+        replayed = await dao.transfer_draft(_transfer(payload=payload))
+
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]
+            stored = (
+                await conn.execute(
+                    select(AgentCommand.command_record_id).where(
+                        AgentCommand.user_scope == _USER,
+                        AgentCommand.target_id == "s2",
+                        AgentCommand.client_command_id == "cmd-t1",
+                    )
+                )
+            ).all()
+        assert len(stored) == 1
+        assert replayed == first
+        assert await dao.read_draft_transfer(_ref(), user_scope=_USER) == first
 
     async def test_unknown_command_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)

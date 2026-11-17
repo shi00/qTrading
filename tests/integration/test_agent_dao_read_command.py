@@ -4,7 +4,9 @@
 
 - 受理后读回保存/投递/消费三态分列（committed/not_delivered/not_consumed，INV-06）；
 - 其他用户域 / 引用与调用上下文不一致 / 不存在 → INPUT_INVALID（不因知道键放行）；
-- 同键跨 target 复用产生歧义 → INPUT_INVALID（不静默择一）；
+- 同一命令键跨 target 合法并存时按身份（意图键/预期版/准确 target）查回原记录，
+  不做「先按命令键多行即拒」（检视 D20）；按 ref 全部可用身份过滤后仍多行才算真
+  歧义 → INPUT_INVALID（不静默择一）；丢回执/重启后仍可查回；
 - 存储错误码非冻结枚举 → OPERATION_UNKNOWN（fail-closed，R21）。
 
 依赖 ``real_embedded_pg`` fixture（临时目录隔离）。
@@ -257,17 +259,122 @@ class TestReadCommandFacts:
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_same_key_across_targets_is_ambiguous(self, real_embedded_pg: ConnectionInfo) -> None:
+    async def test_same_key_across_targets_resolved_by_intent_identity(self, real_embedded_pg: ConnectionInfo) -> None:
+        """同一命令键在不同合法 target 下并存：按意图键各自查回，不误判歧义（D20）。"""
+
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")
         await _seed_session(dao, "u1", "s2")
         await dao.accept_request(_request(session_id="s1"))
         await dao.accept_request(_request(session_id="s2", business_request_id="req-2"))
 
+        first = await dao.read_command(_ref(business_request_id="req-1"), user_scope="u1")
+        second = await dao.read_command(_ref(business_request_id="req-2"), user_scope="u1")
+
+        assert first.target_id == "s1"
+        assert second.target_id == "s2"
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_key_across_targets_reads_back_after_restart(self, real_embedded_pg: ConnectionInfo) -> None:
+        """丢回执/重启：新 DAO/新连接仍按身份查回原记录，不因历史多行残留变永久歧义。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_session(dao, "u1", "s2")
+        await dao.accept_request(_request(session_id="s1"))
+        await dao.accept_request(_request(session_id="s2", business_request_id="req-2"))
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+        restarted = AgentDao(create_test_engine(real_embedded_pg.url))
+        first = await restarted.read_command(_ref(business_request_id="req-1"), user_scope="u1")
+        second = await restarted.read_command(_ref(business_request_id="req-2"), user_scope="u1")
+
+        assert first.target_id == "s1"
+        assert second.target_id == "s2"
+        await restarted.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_target_repeat_submission_reads_back_once(self, real_embedded_pg: ConnectionInfo) -> None:
+        """同 target 同键重传只留原记录：丢回执后再查仍唯一命中。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        accepted = await dao.accept_request(_request())
+        await dao.accept_request(_request())
+
+        receipt = await dao.read_command(_ref(), user_scope="u1")
+
+        async with dao.engine.connect() as conn:  # type: ignore[union-attr]
+            stored = (
+                await conn.execute(
+                    sa.select(sa.func.count())
+                    .select_from(AgentCommand)
+                    .where(
+                        AgentCommand.user_scope == "u1",
+                        AgentCommand.client_command_id == "client-1",
+                    )
+                )
+            ).scalar_one()
+        assert stored == 1
+        assert receipt.target_id == accepted.session_id
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_identical_identity_across_targets_is_ambiguous(self, real_embedded_pg: ConnectionInfo) -> None:
+        """按 ref 全部可用身份过滤后仍多行 → 真歧义，拒绝静默择一。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            for record_id, target in (("cmd-dup-1", "s1"), ("cmd-dup-2", "s2")):
+                await conn.execute(
+                    sa.insert(AgentCommand).values(
+                        user_scope="u1",
+                        command_record_id=record_id,
+                        client_command_id="client-dup",
+                        target_id=target,
+                        command_kind="answer",
+                        expected_revision=2,
+                        input_digest="0" * 64,
+                        commit_state=CommitState.COMMITTED.value,
+                        delivery_state=DeliveryState.NOT_DELIVERED.value,
+                        consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                    )
+                )
+
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_command(_ref(), user_scope="u1")
+            await dao.read_command(_ref(client_command_id="client-dup", expected_revision=2), user_scope="u1")
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
         assert "ambiguous" in excinfo.value.sanitized_message
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_exact_target_resolves_residual_ambiguity(self, real_embedded_pg: ConnectionInfo) -> None:
+        """已知准确 target 时按该 target 下的命令记录定位（存储 PK 维度）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+            for record_id, target in (("cmd-dup-1", "s1"), ("cmd-dup-2", "s2")):
+                await conn.execute(
+                    sa.insert(AgentCommand).values(
+                        user_scope="u1",
+                        command_record_id=record_id,
+                        client_command_id="client-dup",
+                        target_id=target,
+                        command_kind="answer",
+                        expected_revision=2,
+                        input_digest="0" * 64,
+                        commit_state=CommitState.COMMITTED.value,
+                        delivery_state=DeliveryState.NOT_DELIVERED.value,
+                        consumption_state=ConsumptionState.NOT_CONSUMED.value,
+                    )
+                )
+
+        receipt = await dao.read_command(
+            _ref(client_command_id="client-dup", expected_revision=2), user_scope="u1", target_id="s2"
+        )
+
+        assert receipt.target_id == "s2"
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")

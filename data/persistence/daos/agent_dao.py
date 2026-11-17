@@ -532,6 +532,25 @@ def _plan_head_row(rows: Sequence[Any], identity: str) -> tuple[Any | None, int]
     return head, head_revision
 
 
+def _command_ref_mismatches(row: Any, ref: CommandRef) -> list[str]:
+    """存行与命令引用的身份/同源差异（检视 D20 诊断路径）。
+
+    ``expected_revision`` 恒比对；``source_module`` / ``business_request_id`` 只在
+    存行链到根/比较路 execution（意图键非空）时比对——叶 execution 不存意图键，
+    不做无依据比对。
+    """
+
+    mismatches: list[str] = []
+    if ref.expected_revision != row.expected_revision:
+        mismatches.append("expected_revision")
+    if row.intent_source_module is not None:
+        if ref.source_module != row.intent_source_module:
+            mismatches.append("source_module")
+        if ref.business_request_id != row.intent_business_request_id:
+            mismatches.append("business_request_id")
+    return mismatches
+
+
 def _command_input_replays(
     existing: Any,
     *,
@@ -913,19 +932,27 @@ class AgentDao(BaseDao):
     # C-02-3：首派发绑定 / 答复生命周期 / 精确许可 CAS / 队列修订
     # ------------------------------------------------------------------
 
-    async def read_command(self, ref: CommandRef, *, user_scope: str) -> CommandReceipt:
+    async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str | None = None) -> CommandReceipt:
         """查命令原事实（§4.2 ``read_command``）：只读保存/投递/消费，不生成新决定。
 
         语义（§4.1/§5.1/INV-06）：
 
         - ``ref.user_scope`` 必须等于调用上下文 ``user_scope``——不因知道命令键而
           放行其他用户域（§4.1「由注入的可信调用上下文提供，不能相信 payload」）；
+        - **身份前置过滤**（检视 D20）：候选行先按引用可用的非 target 身份缩小——
+          ``expected_revision``，以及存行链到根/比较路 execution 时的意图键
+          （``source_module`` / ``business_request_id``）——再判是否仍多行；只有
+          「按 ref 全部可用身份过滤后仍多行」才算真歧义并拒绝。存储 PK 为
+          ``stable_id("command",[user_scope, exact_target_id, client_command_id])``，
+          同一命令键在不同合法 target 下本就合法并存，不得先按命令键多行即拒。叶
+          execution 不存意图键，不做无依据的比对（不为凑唯一性而伪造比对）；
+        - 调用方若已知准确 target，可传 ``target_id`` 直接定位该 target 下的命令
+          记录：``CommandRef`` 刻意不携带 target（target 由各命令类型自身载荷承载），
+          同一 ``command_id`` 在不同 target 下是不同记录。传入的 target 只用于缩小
+          候选，不匹配即 0 行 → ``INPUT_INVALID``，不放宽任何安全性；
         - 用户域内按调用方命令键查：0 行 → ``INPUT_INVALID``（不区分「不存在」与
-          「属于他人」）；同一键跨 target 复用产生多行 → ``INPUT_INVALID``（引用有
-          歧义，不静默择一）；命中的存行须与引用同源：``expected_revision`` 比对
-          命令行列，``source_module`` / ``business_request_id`` 在存行链到根/比较路
-          execution（意图键非空）时比对 execution 意图键——叶 execution 不存意图键，
-          不做无依据比对。不符 → ``INPUT_INVALID``，回执不得回显与存行矛盾的引用；
+          「属于他人」）；命中的存行须与引用同源，不符 → ``INPUT_INVALID``，回执
+          不得回显与存行矛盾的引用；
         - 存储状态/错误码不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
           R21：坏事实不得被读成确定的保存/投递/消费）；
         - ``next_action`` 为 None：本方法只回报已存事实，下一步由调用方按命令类型
@@ -938,6 +965,8 @@ class AgentDao(BaseDao):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
         if ref.user_scope != user_scope:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref outside caller user scope", identity)
+        if target_id is not None:
+            _require_text_field(target_id, "target_id", identity)
         try:
             encode_command_ref(ref)
         except AgentValidationError as exc:
@@ -945,59 +974,66 @@ class AgentDao(BaseDao):
 
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
+        # 命令键（+ 可选准确 target）是候选集；身份条件随后追加（检视 D20）。
+        base_where = [AgentCommand.user_scope == user_scope, AgentCommand.client_command_id == ref.command_id]
+        if target_id is not None:
+            base_where.append(AgentCommand.target_id == target_id)
+        # 意图键前置条件：存行链到根/比较路 execution 时必须同源；叶 execution 的
+        # 意图键为 NULL（无权威事实），不做无依据的比对。
+        identity_where = [
+            AgentCommand.expected_revision == ref.expected_revision,
+            sa.or_(
+                AgentExecution.source_module.is_(None),
+                sa.and_(
+                    AgentExecution.source_module == ref.source_module,
+                    AgentExecution.business_request_id == ref.business_request_id,
+                ),
+            ),
+        ]
         async with engine.connect() as conn:
-            rows = (
-                await conn.execute(
-                    sa.select(
-                        AgentCommand.target_id,
-                        AgentCommand.expected_revision,
-                        AgentCommand.revision,
-                        AgentCommand.commit_state,
-                        AgentCommand.delivery_state,
-                        AgentCommand.consumption_state,
-                        AgentCommand.updated_at,
-                        AgentCommand.error_code,
-                        # 根意图键（source_module/business_request_id）只存于 execution：
-                        # 根/比较路非空，叶为 NULL（§9.4）。
-                        AgentExecution.source_module.label("intent_source_module"),
-                        AgentExecution.business_request_id.label("intent_business_request_id"),
-                    )
-                    .select_from(AgentCommand)
-                    .outerjoin(
-                        AgentExecution,
-                        sa.and_(
-                            AgentExecution.user_scope == AgentCommand.user_scope,
-                            AgentExecution.execution_id == AgentCommand.execution_id,
-                        ),
-                    )
-                    .where(
-                        AgentCommand.user_scope == user_scope,
-                        AgentCommand.client_command_id == ref.command_id,
-                    )
+            candidates = (
+                sa.select(
+                    AgentCommand.target_id,
+                    AgentCommand.expected_revision,
+                    AgentCommand.revision,
+                    AgentCommand.commit_state,
+                    AgentCommand.delivery_state,
+                    AgentCommand.consumption_state,
+                    AgentCommand.updated_at,
+                    AgentCommand.error_code,
+                    # 根意图键（source_module/business_request_id）只存于 execution：
+                    # 根/比较路非空，叶为 NULL（§9.4）。
+                    AgentExecution.source_module.label("intent_source_module"),
+                    AgentExecution.business_request_id.label("intent_business_request_id"),
                 )
-            ).all()
-        if not rows:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command not found in user scope", identity)
+                .select_from(AgentCommand)
+                .outerjoin(
+                    AgentExecution,
+                    sa.and_(
+                        AgentExecution.user_scope == AgentCommand.user_scope,
+                        AgentExecution.execution_id == AgentCommand.execution_id,
+                    ),
+                )
+                .where(*base_where)
+            )
+            rows = (await conn.execute(candidates.where(*identity_where))).all()
+            if not rows:
+                # 诊断路径：只按命令键（+ 可选准确 target）回看，区分「不存在」与
+                # 「身份不符」；不为身份不符回显任何存行状态。
+                stored = (await conn.execute(candidates)).all()
+                if not stored:
+                    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command not found in user scope", identity)
+                mismatches = sorted({field for row in stored for field in _command_ref_mismatches(row, ref)})
+                # 回执必须与传入引用同源：只按 command_id 命中会造成「原命令/准确目标/预期版」自相矛盾。
+                detail = f": {','.join(mismatches)}" if mismatches else ""
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    f"command ref does not match stored command{detail}",
+                    identity,
+                )
         if len(rows) > 1:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref is ambiguous across targets", identity)
         row = rows[0]
-        mismatches: list[str] = []
-        if ref.expected_revision != row.expected_revision:
-            mismatches.append("expected_revision")
-        if row.intent_source_module is not None:
-            # 存行链到根/比较路 execution 时，意图键是权威事实，必须与引用同源；
-            # 叶 execution 不存意图键，不做无依据的比对。
-            if ref.source_module != row.intent_source_module:
-                mismatches.append("source_module")
-            if ref.business_request_id != row.intent_business_request_id:
-                mismatches.append("business_request_id")
-        if mismatches:
-            # 回执必须与传入引用同源：只按 command_id 命中会造成「原命令/准确目标/预期版」自相矛盾。
-            raise AgentServiceError(
-                AgentErrorCode.INPUT_INVALID,
-                f"command ref does not match stored command: {','.join(mismatches)}",
-                identity,
-            )
         try:
             commit_state = CommitState(row.commit_state)
             delivery_state = DeliveryState(row.delivery_state)
@@ -9513,12 +9549,24 @@ class AgentDao(BaseDao):
                 )
             return receipt
 
-    async def read_draft_transfer(self, ref: CommandRef, *, user_scope: str) -> DraftTransferReceipt:
+    async def read_draft_transfer(
+        self, ref: CommandRef, *, user_scope: str, target_session_id: str | None = None
+    ) -> DraftTransferReceipt:
         """只查原转移回执（§4.2 ``read_draft_transfer``）：零移动、零发送。
 
         - ``ref.user_scope`` 必须等于可信调用上下文（§4.1）；
-        - 用户域内按命令键查：0 行/多行歧义/非 ``draft_transfer`` 命令/预期版
-          不符 → ``INPUT_INVALID``（不把别的命令回执当转移）；
+        - **身份前置过滤**（检视 D20）：候选行先按引用可用的非 target 身份缩小——
+          命令类型 ``draft_transfer`` 与 ``expected_revision``（即
+          ``expected_target_draft_revision``）——再判是否仍多行；只有过滤后仍多行
+          才算真歧义并拒绝，不得先按命令键多行即拒；
+        - 调用方若已知准确目标会话，可传 ``target_session_id`` 直接定位该 target 下
+          的转移记录（存储 PK 为
+          ``stable_id("command",[user_scope, target_session_id, client_command_id])``）：
+          转移命令行自身带准确 target，而 ``CommandRef`` 刻意不携带 target（target
+          由各命令类型自身载荷承载），故由调用方按需显式给出；传入的 target 只用于
+          缩小候选，不匹配即 0 行 → ``INPUT_INVALID``；
+        - 0 行 / 真歧义 / 非 ``draft_transfer`` 命令 / 预期版不符 → ``INPUT_INVALID``
+          （不把别的命令回执当转移）；
         - 存行回执缺失或不在冻结枚举内 → ``OPERATION_UNKNOWN``（fail-closed，
           unknown 不从界面猜归属，R21/INV-07）；
         - 转移命令行不关联 execution，故不比对意图键（与叶 execution 边界一致）。
@@ -9530,6 +9578,8 @@ class AgentDao(BaseDao):
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity)
         if ref.user_scope != user_scope:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref outside caller user scope", identity)
+        if target_session_id is not None:
+            _require_text_field(target_session_id, "target_session_id", identity)
         try:
             encode_command_ref(ref)
         except AgentValidationError as exc:
@@ -9537,32 +9587,39 @@ class AgentDao(BaseDao):
 
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
+        base_where = [AgentCommand.user_scope == user_scope, AgentCommand.client_command_id == ref.command_id]
+        if target_session_id is not None:
+            base_where.append(AgentCommand.target_id == target_session_id)
         async with engine.connect() as conn:
+            candidates = sa.select(
+                AgentCommand.command_kind,
+                AgentCommand.expected_revision,
+                AgentCommand.receipt_payload,
+            ).where(*base_where)
             rows = (
                 await conn.execute(
-                    sa.select(
-                        AgentCommand.command_kind,
-                        AgentCommand.expected_revision,
-                        AgentCommand.receipt_payload,
-                    ).where(
-                        AgentCommand.user_scope == user_scope,
-                        AgentCommand.client_command_id == ref.command_id,
+                    candidates.where(
+                        AgentCommand.command_kind == "draft_transfer",
+                        AgentCommand.expected_revision == ref.expected_revision,
                     )
                 )
             ).all()
-        if not rows:
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command not found in user scope", identity)
+            if not rows:
+                # 诊断路径：只按命令键（+ 可选准确 target）回看，区分「不存在」、
+                # 「非转移命令」与「预期版不符」；不回显任何存行状态。
+                stored = (await conn.execute(candidates)).all()
+                if not stored:
+                    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command not found in user scope", identity)
+                if all(row.command_kind != "draft_transfer" for row in stored):
+                    raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command is not a draft transfer", identity)
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "command ref does not match stored transfer: expected_revision",
+                    identity,
+                )
         if len(rows) > 1:
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command ref is ambiguous across targets", identity)
         row = rows[0]
-        if row.command_kind != "draft_transfer":
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command is not a draft transfer", identity)
-        if ref.expected_revision != row.expected_revision:
-            raise AgentServiceError(
-                AgentErrorCode.INPUT_INVALID,
-                "command ref does not match stored transfer: expected_revision",
-                identity,
-            )
         if row.receipt_payload is None:
             raise AgentServiceError(AgentErrorCode.OPERATION_UNKNOWN, "original transfer receipt unavailable", identity)
         try:
