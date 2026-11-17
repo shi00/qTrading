@@ -2,8 +2,9 @@
 
 集成层交付编排用例（tests/integration/test_agent_delivery_service.py）标注
 win32-only（交付目标保护语义在 Windows 上验证）；但 ``delivery.py`` 实现本身
-完全跨平台（os.lstat/st_ino/Path.replace），核心保护逻辑两平台皆可测：
-同卷暂存、回读校验、目标确认核验、父目录身份一致性、原子替换、unknown 语义。
+跨平台（os.lstat/st_ino 文件身份 + link/rename 不覆盖移入），核心保护逻辑两
+平台皆可测：同卷暂存、回读校验、目标确认核验（含同摘要异文件与预检后置换）、
+父目录身份一致性、不覆盖移入、unknown 语义、取消身份核定。
 
 路径适配：``validate_delivery_target_path`` 强制 Windows 规范路径（``C:\\...``），
 而 Windows 盘符路径在 POSIX 上无法映射为真实文件系统路径。store 逻辑与盘符
@@ -24,11 +25,15 @@ from types import SimpleNamespace
 import pytest
 
 from core.agent_types import DeliveryTarget
+from services.agent_service import delivery as delivery_module
 from services.agent_service.delivery import (
     DeliveryFileError,
     DeliveryUnknownError,
+    FileSnapshot,
     WindowsManagedFileStore,
     _file_identity,
+    _GuardedFile,
+    _snapshot,
     _stage_prefix,
 )
 
@@ -51,6 +56,29 @@ def _target(root: Path, *, exists: bool = False, digest: str | None = None) -> D
         expected_existing_digest=digest,
         overwrite_confirmed=True,
     )
+
+
+def _swap_after_first_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    target_file: Path,
+    *,
+    content: bytes = _CONTENT,
+) -> None:
+    """在 publish 首次目标快照返回后把目标换成新文件（新文件 ID），模拟预检后置换。"""
+
+    calls = {"count": 0}
+
+    def racing_snapshot(path: Path, *, with_digest: bool = True) -> FileSnapshot:
+        snapshot = _snapshot(path, with_digest=with_digest)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            replacement = root / "racing.tmp"
+            replacement.write_bytes(content)
+            os.replace(replacement, target_file)
+        return snapshot
+
+    monkeypatch.setattr(delivery_module, "_snapshot", racing_snapshot)
 
 
 class TestStagePrefix:
@@ -205,17 +233,80 @@ class TestPublish:
             store.publish(target=_target(store_env), staged=staged)
         assert exc.value.code == "delivery_stage_not_same_volume"
 
-    def test_publish_unknown_when_replace_oserror(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_publish_refuses_same_digest_different_file(self, store_env: Path):
+        """同摘要异文件（内容一致但文件 ID 不同）不得作为「确认过的目标」被覆掉。"""
+
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(_CONTENT)
+        store = WindowsManagedFileStore()
+        staged = store.stage(
+            target=_target(store_env, exists=True, digest=_DIGEST), content=_CONTENT, expected_digest=_DIGEST
+        )
+        replacement = store_env / "same-content.tmp"
+        replacement.write_bytes(_CONTENT)
+        os.replace(replacement, target_file)
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=_target(store_env, exists=True, digest=_DIGEST), staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_file.read_bytes() == _CONTENT
+        assert staged.path.read_bytes() == _CONTENT
+
+    def test_publish_detects_target_swap_after_precheck(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        """预检返回后、移入之前被外部置换：独占句柄按文件身份发现并拒绝。"""
+
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(_CONTENT)
+        store = WindowsManagedFileStore()
+        staged = store.stage(
+            target=_target(store_env, exists=True, digest=_DIGEST), content=_CONTENT, expected_digest=_DIGEST
+        )
+        _swap_after_first_snapshot(monkeypatch, store_env, target_file)
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=_target(store_env, exists=True, digest=_DIGEST), staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_file.read_bytes() == _CONTENT
+        assert staged.path.read_bytes() == _CONTENT
+
+    def test_publish_refuses_target_appearing_in_move_window(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        """创建目标时预检后出现第三方文件：不覆盖移入失败即拒绝，文件原样保留。"""
+
         store = WindowsManagedFileStore()
         staged = self._stage(store, store_env)
+        target_file = store_env / "out.txt"
+        _swap_after_first_snapshot(monkeypatch, store_env, target_file, content=b"raced-in")
+        with pytest.raises(DeliveryFileError) as exc:
+            store.publish(target=_target(store_env), staged=staged)
+        assert exc.value.code == "delivery_target_changed"
+        assert target_file.read_bytes() == b"raced-in"
+        assert staged.path.read_bytes() == _CONTENT
 
-        def broken_replace(src: object, dst: object) -> None:
-            raise OSError("simulated replace failure")
+    def test_publish_unknown_when_move_oserror(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        store = WindowsManagedFileStore()
+        staged = self._stage(store, store_env)
+        target_file = store_env / "out.txt"
 
-        monkeypatch.setattr(os, "replace", broken_replace)
+        def broken_move(self: _GuardedFile, destination: Path) -> None:
+            if destination == target_file:
+                raise OSError("simulated move failure")
+            _real_move(self, destination)
+
+        _real_move = _GuardedFile.move_to
+        monkeypatch.setattr(_GuardedFile, "move_to", broken_move)
         with pytest.raises(DeliveryUnknownError) as exc:
             store.publish(target=_target(store_env), staged=staged)
         assert exc.value.code == "delivery_publish_unverified"
+        assert not target_file.exists()
+
+    def test_publish_overwrite_leaves_no_superseded_residue(self, store_env: Path):
+        target_file = store_env / "out.txt"
+        target_file.write_bytes(b"old")
+        old_digest = hashlib.sha256(b"old").hexdigest()
+        store = WindowsManagedFileStore()
+        target = _target(store_env, exists=True, digest=old_digest)
+        staged = store.stage(target=target, content=_CONTENT, expected_digest=_DIGEST)
+        store.publish(target=target, staged=staged)
+        assert target_file.read_bytes() == _CONTENT
+        assert list(store_env.glob("*.superseded.*")) == []
 
 
 class TestCancel:
@@ -230,3 +321,36 @@ class TestCancel:
         staged = store.stage(target=_target(store_env), content=_CONTENT, expected_digest=_DIGEST)
         staged.path.unlink()
         assert store.cancel(staged) is False
+
+    def test_cancel_refuses_foreign_replacement_at_staged_path(self, store_env: Path):
+        """暂存路径被换成另一个文件（新文件 ID）：不得按路径误删他人文件。"""
+
+        store = WindowsManagedFileStore()
+        staged = store.stage(target=_target(store_env), content=_CONTENT, expected_digest=_DIGEST)
+        replacement = store_env / "foreign.tmp"
+        replacement.write_bytes(_CONTENT)
+        os.replace(replacement, staged.path)
+        assert store.cancel(staged) is False
+        assert staged.path.read_bytes() == _CONTENT
+
+    def test_cancel_refuses_while_writer_holds_staged(self, store_env: Path, monkeypatch: pytest.MonkeyPatch):
+        """在途 writer 独占暂存文件（或临时占用）时不删除。"""
+
+        store = WindowsManagedFileStore()
+        staged = store.stage(target=_target(store_env), content=_CONTENT, expected_digest=_DIGEST)
+
+        def locked(cls: type[_GuardedFile], path: Path) -> _GuardedFile:
+            raise PermissionError("staged file is locked by a writer")
+
+        monkeypatch.setattr(_GuardedFile, "open_exclusive", classmethod(locked))
+        assert store.cancel(staged) is False
+        assert staged.path.read_bytes() == _CONTENT
+
+    def test_cancel_after_publish_keeps_target(self, store_env: Path):
+        """发布后台账里的暂存路径已不存在：取消不得删除已发布目标。"""
+
+        store = WindowsManagedFileStore()
+        staged = store.stage(target=_target(store_env), content=_CONTENT, expected_digest=_DIGEST)
+        store.publish(target=_target(store_env), staged=staged)
+        assert store.cancel(staged) is False
+        assert (store_env / "out.txt").read_bytes() == _CONTENT
