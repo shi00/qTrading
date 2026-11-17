@@ -455,6 +455,55 @@ def _strict_params_policy_error(
     )
 
 
+# === Agent 出口单候选钉定（检视 M17：禁跨部署 fallback / 禁部署级 auto_router）===
+# ``litellm.acompletion`` 在请求未显式传 fallbacks 时读取模块级全局
+# ``litellm.model_fallbacks``（litellm.main：``fallbacks = fallbacks or litellm.model_fallbacks``），
+# 非空即会在失败时静默改发别的部署/模型：本次连接的固定候选、授权目标与审计
+# destination 全部失效，且 Router 式 fallback 可能以非流式重发截断已产出的流式
+# 内容。部署级 ``auto_router/...`` 模型同理（部署内部再路由）。Agent 出口要求每
+# 请求候选可核，故两者命中即零出站拒绝；不改全局配置（避免与旧链竞态），旧链
+# （``_router_failover`` 的部署级 fallback）行为保持不变。
+_AUTO_ROUTER_MODEL_PREFIX: Final[str] = "auto_router/"
+
+
+def _effective_cross_deployment_fallbacks() -> list[Any]:
+    """当前生效的 LiteLLM 全局跨部署 fallback 列表（生产为真实 litellm 模块）。
+
+    litellm 声明该全局为 ``Optional[list]``；测试替身（MagicMock/SimpleNamespace）
+    等其它形态不构成「已配置的 fallback 列表」，按未配置处理（不伪装已核验）。
+    """
+    import services.ai_service as _ai
+
+    raw = getattr(_ai.litellm, "model_fallbacks", None)
+    if isinstance(raw, (list, tuple)):
+        return [item for item in raw if item]
+    return []
+
+
+def _assert_fixed_candidate_egress(litellm_model: str, bare_model: str, attempt_context: AttemptContext) -> None:
+    """Agent 出口单候选钉定（M17）：跨部署 fallback / 部署级 auto_router 零出站拒绝。
+
+    判据（任一命中即拒绝，均在凭据解析与网络之前）：
+    - 全局跨部署 fallback 非空——失败时 LiteLLM 会静默改发其它部署，候选不可核、
+      连接/目标与本次授权不一致，且可能非流式重发截断流式输出；
+    - 模型为部署级 auto_router（``auto_router/...``）——部署内部自行再路由，同样
+      绕过本次固定候选。
+
+    消息只含 attempt 身份与模型名（R9：不含凭据、不含请求正文）。
+    """
+    if _effective_cross_deployment_fallbacks():
+        raise ValueError(
+            "Agent egress forbids cross-deployment fallbacks: litellm.model_fallbacks is configured, "
+            f"candidate is not fixed (attempt_id={attempt_context.attempt_id}, model={litellm_model}); "
+            "refusing outbound dispatch"
+        )
+    if bare_model.startswith(_AUTO_ROUTER_MODEL_PREFIX) or litellm_model.startswith(_AUTO_ROUTER_MODEL_PREFIX):
+        raise ValueError(
+            "Agent egress forbids deployment-level auto_router models "
+            f"(attempt_id={attempt_context.attempt_id}, model={litellm_model}); refusing outbound dispatch"
+        )
+
+
 def _check_reasoning_support(model: str) -> bool:
     """检查模型是否支持推理增强 (reasoning_content)
 
@@ -1011,6 +1060,9 @@ class LiteLLMClient:
         - 不读全局配置、不走 Router、不做候选切换/重试（``num_retries=0``）；
           Tenacity 重试与冷却归 S3 ScenarioExecutor；provider 以 HTTP 422 拒绝参数时
           严格出站直接失败（M20：禁删参 / 禁隐式重发，见 :func:`_strict_egress_dispatch`）；
+          M17：本次连接的 provider/model/api_base 即唯一候选——全局跨部署 fallback
+          （``litellm.model_fallbacks``）或部署级 ``auto_router/`` 命中即零出站拒绝
+          （见 :func:`_assert_fixed_candidate_egress`）；
         - model 前缀按 provider 的 ``litellm_prefix`` 拼接（azure 走
           ``azure/<deployment>``），api_base 取连接定义；
         - 凭据经 ``resolve_credential`` 三形态解析（keyring 读取为同步 IO，
@@ -1035,7 +1087,8 @@ class LiteLLMClient:
             AIProviderParamsRejectedError: provider 以 HTTP 422 拒绝请求参数（M20：
                 严格出站中止，未删参、未重发；detail 含 attempt 身份）。
             ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法 /
-                版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）。
+                版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）/
+                跨部署 fallback 或部署级 auto_router 命中（M17，零出站拒绝）。
             TimeoutError: dispatch 前 deadline 已耗尽。
             RuntimeError: litellm 不可用 / keyring 读取失败。
         """
@@ -1091,6 +1144,10 @@ class LiteLLMClient:
             prefix = LLM_PROVIDERS.get(provider, {}).get("litellm_prefix", "openai")
             litellm_model = f"{prefix}/{model}"
             api_version = None
+
+        # M17：单候选钉定（零 keyring 读、零网络的最早可核点）——全局跨部署 fallback
+        # 或部署级 auto_router 命中即拒绝，禁止「按部署顺手开」的隐式改发。
+        _assert_fixed_candidate_egress(litellm_model, model, attempt_context)
 
         # R16：keyring 为同步 IO，凭据解析 offload 线程池（None 亦走同路径，
         # 语义为「解析即得无凭据」而非跳过解析）。
@@ -1253,7 +1310,9 @@ class LiteLLMClient:
         且 per-call ``drop_params=False``；SDK 全局 ``drop_params=True`` 下的 422 删参
         重发由 :func:`_strict_egress_dispatch` 在首个 422 处中止（M20：出站一次、
         参数不删、错误含 attempt 身份）；**不做路由和业务 final 校验**（候选
-        策略与结算归 Executor / Recorder）。
+        策略与结算归 Executor / Recorder）；M17：全局跨部署 fallback 或部署级
+        ``auto_router/`` 命中即零出站拒绝（本次连接即唯一候选，禁止静默换模型
+        重发导致流式内容截断）。
 
         - 门控与预算复用旧链同源语义：SEC-01 知情确认（零出站）、惰性加载、
           deadline 单调预算（dispatch 前与凭据解析后双查，F29）、model 前缀
@@ -1279,7 +1338,8 @@ class LiteLLMClient:
             ModelTurnProtocolError: 入站消息/工具协议非法、闭合参数非法 JSON、
                 图片分型不可解析、finish 缺失 / 未知、拒绝缺 refusal 文本。
             ValueError: adapter_kind 非 litellm_chat / credential 租约失配（F06）/
-                frozen_params 键非法或占用保留键。
+                frozen_params 键非法或占用保留键 / 跨部署 fallback 或部署级
+                auto_router 命中（M17，零出站拒绝）。
             TimeoutError: dispatch 前 deadline 已耗尽（含凭据解析后复查）。
             RuntimeError: litellm 不可用。
         """
@@ -1330,6 +1390,10 @@ class LiteLLMClient:
             prefix = LLM_PROVIDERS.get(provider, {}).get("litellm_prefix", "openai")
             litellm_model = f"{prefix}/{model}"
             api_version = None
+
+        # M17：单候选钉定——同 invoke_single_connection（全局跨部署 fallback /
+        # 部署级 auto_router 即零出站拒绝；聊天回合不得静默换模型重发）。
+        _assert_fixed_candidate_egress(litellm_model, model, attempt_context)
 
         # F06：解析租约一致性（语义与 invoke_single_connection 同源）——版本化凭据的
         # ref 必须由 credential_version 派生，否则 fail-closed 拒绝出站。
