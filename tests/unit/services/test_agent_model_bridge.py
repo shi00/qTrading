@@ -50,6 +50,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
@@ -439,6 +440,32 @@ class TestOutcomeMapping:
         with pytest.raises(UnexpectedModelBehavior) as excinfo:
             await model.request([ModelRequest(parts=[UserPromptPart(content="hi")])], _settings(), _params())
         assert "attempt registration unavailable" in excinfo.value.message
+
+
+# ---------------------------------------------------------------------------
+# Profile：请求绑定的真实 Profile（检视 M06）
+# ---------------------------------------------------------------------------
+
+
+class TestBoundProfile:
+    def test_profile_returns_bound_profile(self):
+        """注入的请求绑定 Profile 原样返回，不被新的默认值替换。"""
+        profile: ModelProfile = {"supports_tools": True, "supports_json_schema_output": True}
+        model = GatewayModel(
+            _FakeExecutor(),
+            _binding(),
+            MagicMock(spec=ExecutionSnapshot),
+            tool_schema_version="v1",
+            profile=profile,
+        )
+        assert model.profile == profile
+
+    def test_profile_unknown_when_not_bound(self):
+        """未绑定 Profile → 空 Profile（无能力声明），不以乐观默认冒充已核验事实。"""
+        model = _gateway(_FakeExecutor())
+        assert model.profile == {}
+        assert "supports_tools" not in model.profile
+        assert "supports_json_schema_output" not in model.profile
 
 
 # ---------------------------------------------------------------------------

@@ -2650,3 +2650,35 @@ class TestC12TenacityRetryContract:
         terminal = recorder.submit_terminal.await_args.args[0]
         assert terminal.status == "failed"
         assert terminal.error_code == "CONTENT_REFUSED"
+
+
+class TestEntryProtocolSeparation:
+    """检视 M01：新旧入口协议分别校验——聊天适配器只实现 ``invoke_chat`` 也可注册，
+    旧入口派发前淘汰（零预留），不出现执行期 AttributeError。"""
+
+    def test_chat_only_adapter_registers_without_legacy_invoke(self):
+        class _ChatOnlyAdapter:
+            async def invoke_chat(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 形状对象
+                raise NotImplementedError
+
+        _executor(_ChatOnlyAdapter(), _recorder_mock())  # 不抛 TypeError
+
+    @pytest.mark.asyncio
+    async def test_chat_only_adapter_rejected_by_legacy_entry_before_reserve(self):
+        class _ChatOnlyAdapter:
+            invoked_chat = False
+
+            async def invoke_chat(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 旧入口不触达
+                type(self).invoked_chat = True
+                raise AssertionError("chat adapter must not be invoked by legacy entry")
+
+        recorder = _recorder_mock()
+        executor = _executor(_ChatOnlyAdapter(), recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "failed"
+        assert len(result.candidate_decisions) == 1
+        assert "no legacy invoke adapter" in result.candidate_decisions[0].reason
+        assert _ChatOnlyAdapter.invoked_chat is False
+        recorder.try_reserve.assert_not_awaited()  # 零预留副作用

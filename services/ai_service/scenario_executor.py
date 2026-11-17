@@ -100,7 +100,7 @@ from core.model_management_types import (
     ScenarioExecutionResult,
     TextContentPart,
     adapter_kind_requires_egress,
-    ensure_inference_adapter,
+    ensure_registered_adapter,
 )
 from services.ai_service.connection_pricing import (
     ConnectionPricing,
@@ -116,6 +116,10 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
+
+# 可注册适配器并集（检视 M01）：新旧入口协议分别校验——旧入口要求 ``.invoke``，
+# chat 入口要求 ``.invoke_chat``；组装期只拒绝两者皆缺的对象。
+_EntryAdapter = InferenceAdapter | ChatInferenceAdapter
 
 # 重试退避（秒）：首次 1s、第二次 2s（方案 D7），随 retry_index 指数递增至封顶
 _RETRY_BACKOFF_BASE_S: Final[float] = 1.0
@@ -193,7 +197,7 @@ class ScenarioExecutor:
         config_service: Any,
         recorder: Any,
         compatibility: Any,
-        adapters: Mapping[str, InferenceAdapter],
+        adapters: Mapping[str, _EntryAdapter],
         clock: Callable[[], float] | None = None,
         retry_attempts: int = 1,
         retry_max_attempts: int = 2,
@@ -203,11 +207,12 @@ class ScenarioExecutor:
         self._config_service = config_service
         self._recorder = recorder
         self._compatibility = compatibility
-        # 检视 F02：注入点逐项协议校验——错误形状 adapter 在组装期 TypeError 快速失败，
-        # 而非执行期 adapter.invoke AttributeError 被误判为模型故障重试。
-        self._adapters: dict[str, InferenceAdapter] = {}
+        # 检视 M01：组装期只校验「满足至少一个入口协议」——旧入口（.invoke）与
+        # 新入口（.invoke_chat）由各自执行路径派发前分别复核；错误形状（两者皆缺）
+        # 仍在组装期 TypeError 快速失败，不为测试替身放宽。
+        self._adapters: dict[str, _EntryAdapter] = {}
         for kind, adapter in adapters.items():
-            ensure_inference_adapter(kind, adapter)
+            ensure_registered_adapter(kind, adapter)
             self._adapters[kind] = adapter
         self._clock = clock
         # F19-003：清理预算按 recorder 落账内部超时推导（不得先于落账被掐断）
@@ -310,6 +315,7 @@ class ScenarioExecutor:
             invoke=_legacy_invoke(request),
             finalize=_finalize_legacy,
             on_adapter_failure=None,
+            adapter_check=_legacy_adapter_check,
         )
         result = await self._execute_traversal(identity, snapshot, policy)
         return ScenarioExecutionResult(
@@ -379,7 +385,7 @@ class ScenarioExecutor:
         exposure = _ChatStreamExposure()
 
         async def _invoke_chat(
-            adapter: InferenceAdapter, connection: ResolvedConnection, attempt_context: AttemptContext
+            adapter: _EntryAdapter, connection: ResolvedConnection, attempt_context: AttemptContext
         ) -> ChatTurnResponse:
             # 准入已核 invoke_chat 存在性（_chat_adapter_check）；协议结构化cast
             return await cast(ChatInferenceAdapter, adapter).invoke_chat(
@@ -413,6 +419,7 @@ class ScenarioExecutor:
             finalize=self._finalize_chat,
             on_adapter_failure=_on_chat_failure,
             adapter_check=_chat_adapter_check,
+            capability_check=_chat_capability_check(request),
         )
         result = await self._execute_traversal(identity, snapshot, policy)
         candidate = result.candidate
@@ -721,6 +728,15 @@ class ScenarioExecutor:
         ineligibility = _ineligibility_reason(context.eligibility_by_id[connection.connection_id], identity.task_id)
         if ineligibility is not None:
             return _CandidateAdmission(decision=_decision(connection.connection_id, "rejected", ineligibility))
+
+        # 请求级必需能力核验（M06，仅 chat 入口）：按请求必需能力（stream /
+        # tools）与该连接冻结证据的 revision 核验——unknown / unsupported /
+        # 证据版本过期一律派发前淘汰（零预留副作用），不按模型故障重试、不进
+        # 冷却；旧直推入口不设此检查（既有政策不变）。
+        if policy.capability_check is not None:
+            capability_reason = policy.capability_check(connection, context.eligibility_by_id[connection.connection_id])
+            if capability_reason is not None:
+                return _CandidateAdmission(decision=_decision(connection.connection_id, "rejected", capability_reason))
 
         # R01-D1 local-only 政策门控（候选层强制，SEC-03 语义）：仅本地模式下需
         # 外发的适配器候选（adapter_kind_requires_egress）派发前一律拒绝——不进
@@ -1474,19 +1490,28 @@ def _resolve_connection(raw: Mapping[str, Any]) -> tuple[ResolvedConnection, _Co
     必需字段（connection_id / connection_revision / adapter_kind / model）缺失即抛
     KeyError / ValueError（缺失不伪装，R21 邻域语义），由调用方降级 rejected。
 
-    F26 资格证据（``enabled`` / ``capabilities``）随同一解析点提取，不再丢弃：
-    防御性解析（非 Mapping / 缺 ``support`` 键的证据条目按无证据处理，视为
-    unknown，不门控）；``enabled`` 缺键取 schema 默认 True（与改动前行为一致）。
+    F26 资格证据（``enabled`` / ``capabilities``）随同一解析点提取，不再丢弃；
+    证据条目完整解析 ``support`` / ``source`` / ``connection_revision``（M06：
+    旧实现只保 support 丢掉证据版本，无法识别过期证据）。防御性解析（非
+    Mapping / 缺 ``support`` 键的条目按无证据处理，视为 unknown，不门控）；
+    ``enabled`` 缺键取 schema 默认 True（与改动前行为一致）。
     """
     adapter_kind = str(raw["adapter_kind"])
     if adapter_kind not in ("litellm_chat", "gguf_chat", "gguf_sentiment"):
         raise ValueError(f"unknown adapter_kind: {adapter_kind}")
-    capabilities: dict[str, str] = {}
+    capabilities: dict[str, _CapabilityEvidence] = {}
     capabilities_raw = raw.get("capabilities")
     if isinstance(capabilities_raw, Mapping):
         for evidence_task_id, evidence in capabilities_raw.items():
-            if isinstance(evidence, Mapping) and evidence.get("support") is not None:
-                capabilities[str(evidence_task_id)] = str(evidence["support"])
+            if not isinstance(evidence, Mapping) or evidence.get("support") is None:
+                continue
+            revision = evidence.get("connection_revision")
+            revision_valid = isinstance(revision, int) and not isinstance(revision, bool)
+            capabilities[str(evidence_task_id)] = _CapabilityEvidence(
+                support=str(evidence["support"]),
+                source=str(evidence["source"]) if evidence.get("source") is not None else None,
+                connection_revision=revision if revision_valid else None,
+            )
     resolved = ResolvedConnection(
         connection_id=str(raw["connection_id"]),
         connection_revision=int(raw["connection_revision"]),
@@ -1512,9 +1537,55 @@ def _ineligibility_reason(eligibility: _ConnectionEligibility, task_id: str) -> 
     """
     if not eligibility.enabled:
         return "connection disabled in snapshot"
-    if eligibility.capabilities.get(task_id) == "unsupported":
+    evidence = eligibility.capabilities.get(task_id)
+    if evidence is not None and evidence.support == "unsupported":
         return f"connection unsupported for task {task_id}"
     return None
+
+
+#: chat 入口请求必需能力（M06）：固定框架始终按 ``stream=True`` 调用；请求携带
+#: 任何工具（含结构 final 工具）时还要求工具能力。证据键与任务名同源约定
+#: （``CapabilityEvidenceConfig`` 的 capabilities 映射可按能力名承载）。
+_CHAT_STREAM_CAPABILITY: Final[str] = "stream"
+_CHAT_TOOLS_CAPABILITY: Final[str] = "tools"
+
+
+def _required_chat_capabilities(request: ChatTurnRequest) -> tuple[str, ...]:
+    """请求必需能力投影（M06）：stream 恒定必需，工具存在时必须工具能力。"""
+    required = [_CHAT_STREAM_CAPABILITY]
+    if request.tools or request.output_tools:
+        required.append(_CHAT_TOOLS_CAPABILITY)
+    return tuple(required)
+
+
+def _chat_capability_check(
+    request: ChatTurnRequest,
+) -> Callable[[ResolvedConnection, _ConnectionEligibility], str | None]:
+    """chat 准入的请求必需能力 / 证据版本核验（M06）。
+
+    真实 Profile 的能力事实来自连接冻结证据：必需能力必须为 ``supported`` 且
+    证据记录的 ``connection_revision`` 与派发连接一致（缺失版本视为未知 →
+    过期）。unknown / unsupported / 旧证据 → 返回拒绝原因（派发前淘汰、零
+    预留副作用），与模型故障重试语义严格区分。
+    """
+    required = _required_chat_capabilities(request)
+
+    def _check(connection: ResolvedConnection, eligibility: _ConnectionEligibility) -> str | None:
+        for capability in required:
+            evidence = eligibility.capabilities.get(capability)
+            if evidence is None:
+                return f"chat requires confirmed {capability} capability (no evidence)"
+            if evidence.connection_revision != connection.connection_revision:
+                return (
+                    f"chat requires {capability} evidence at connection revision "
+                    f"{connection.connection_revision} (stale evidence: "
+                    f"{'unknown revision' if evidence.connection_revision is None else evidence.connection_revision})"
+                )
+            if evidence.support != "supported":
+                return f"chat requires supported {capability} capability (evidence: {evidence.support})"
+        return None
+
+    return _check
 
 
 # F27 适配器异常分类（终止判定先于重试判定的判据正本；映射表式，不散落 if-else）
@@ -1609,15 +1680,29 @@ def _route_fallback_enabled(route: Mapping[str, Any] | None) -> bool | None:
 
 
 @dataclass(frozen=True, slots=True)
-class _ConnectionEligibility:
-    """冻结连接资格证据（F26）：快照连接映射的启用状态 + 任务能力支持状态。
+class _CapabilityEvidence:
+    """单条能力证据（M06）：支持状态 + 来源 + 采集时的连接版本。
 
-    仅承载解析后的「已确认」资格事实：``enabled=False`` 或任务能力
+    ``connection_revision`` 为 None 表示证据未记录版本（未知 → 不可证明与
+    当前连接同版，按过期处理）。
+    """
+
+    support: str
+    source: str | None
+    connection_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionEligibility:
+    """冻结连接资格证据（F26）：快照连接映射的启用状态 + 能力支持证据。
+
+    资格门控仍只认「已确认」事实：``enabled=False`` 或任务能力
     ``support == "unsupported"`` 才构成派发门控；无证据即 unknown 语义（不门控）。
+    chat 入口另行按请求必需能力与证据版本核验（见 ``_chat_capability_check``）。
     """
 
     enabled: bool
-    capabilities: Mapping[str, str]
+    capabilities: Mapping[str, _CapabilityEvidence]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1709,12 +1794,15 @@ class _AttemptPolicy:
       返回 None 走共享默认（F27 退避重试 / 切换候选）；
     - ``adapter_check``：准入期附加协议检查（chat：invoke_chat 存在性）；
       返回拒绝原因或 None。
+    - ``capability_check``：准入期请求必需能力核验（M06，仅 chat 入口使用）——
+      按连接冻结证据核验请求必需能力与证据 revision；返回拒绝原因或 None。
     """
 
-    invoke: Callable[[InferenceAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
+    invoke: Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]
     finalize: Callable[[Any, _AttemptScope, float], Awaitable[_CandidateOutcome]]
     on_adapter_failure: Callable[[Exception, _AttemptScope], Awaitable[_CandidateOutcome | None]] | None = None
-    adapter_check: Callable[[InferenceAdapter, ResolvedConnection], str | None] | None = None
+    adapter_check: Callable[[_EntryAdapter, ResolvedConnection], str | None] | None = None
+    capability_check: Callable[[ResolvedConnection, _ConnectionEligibility], str | None] | None = None
 
 
 @dataclass(slots=True)
@@ -1785,7 +1873,7 @@ def _make_tracked_event(
     return _tracked
 
 
-def _chat_adapter_check(adapter: InferenceAdapter, connection: ResolvedConnection) -> str | None:
+def _chat_adapter_check(adapter: _EntryAdapter, connection: ResolvedConnection) -> str | None:
     """chat 入口准入附加检查（HANDOFF §6.1）：非聊天适配器（FinBERT 等）不接
     ChatInferenceAdapter 协议——派发前淘汰（零预留副作用）。"""
     if not callable(getattr(adapter, "invoke_chat", None)):
@@ -1793,16 +1881,23 @@ def _chat_adapter_check(adapter: InferenceAdapter, connection: ResolvedConnectio
     return None
 
 
+def _legacy_adapter_check(adapter: _EntryAdapter, connection: ResolvedConnection) -> str | None:
+    """旧入口准入附加检查（检视 M01）：仅实现聊天协议的适配器不得走旧入口——
+    派发前淘汰（零预留副作用），不以执行期 AttributeError 呈现。"""
+    if not callable(getattr(adapter, "invoke", None)):
+        return f"no legacy invoke adapter for kind {connection.adapter_kind}"
+    return None
+
+
 def _legacy_invoke(
     request: InferenceRequest,
-) -> Callable[[InferenceAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]:
+) -> Callable[[_EntryAdapter, ResolvedConnection, AttemptContext], Awaitable[Any]]:
     """旧链适配器调用形态（共享执行段参数化，HANDOFF §6.1）：单 prompt 出口，
-    校验收敛经 ``validate_output``（入口行为不变）。"""
+    校验收敛经 ``validate_output``（入口行为不变）。``.invoke`` 存在性已由
+    :func:`_legacy_adapter_check` 在准入期核验（零预留淘汰）。"""
 
-    async def _invoke(
-        adapter: InferenceAdapter, connection: ResolvedConnection, attempt_context: AttemptContext
-    ) -> Any:
-        return await adapter.invoke(request, connection, request.deadline, attempt_context)
+    async def _invoke(adapter: _EntryAdapter, connection: ResolvedConnection, attempt_context: AttemptContext) -> Any:
+        return await cast(InferenceAdapter, adapter).invoke(request, connection, request.deadline, attempt_context)
 
     return _invoke
 

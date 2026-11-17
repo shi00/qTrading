@@ -236,6 +236,21 @@ class TestProductionAdaptersProtocol:
             invoke = getattr(adapter, "invoke", None)
             assert callable(invoke), f"adapter for {kind} must satisfy InferenceAdapter protocol"
 
+    def test_litellm_chat_exposes_both_entry_protocols(self):
+        """检视 M01：litellm_chat 同时满足新旧入口协议（chat 入口零旧 invoke）。"""
+        adapter = _build_default_adapters()["litellm_chat"]
+        assert callable(getattr(adapter, "invoke", None))
+        assert callable(getattr(adapter, "invoke_chat", None))
+
+    def test_chat_only_adapter_registers_at_assembly(self):
+        """检视 M01：只实现 invoke_chat 的适配器不再被旧协议强制 invoke 误杀。"""
+
+        class _ChatOnlyAdapter:
+            async def invoke_chat(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 形状反例
+                raise NotImplementedError
+
+        _executor({"litellm_chat": _ChatOnlyAdapter()})  # 不抛 TypeError
+
     def test_ensure_rejects_missing_invoke_with_kind_in_message(self):
         with pytest.raises(TypeError, match="gguf_sentiment"):
             ensure_inference_adapter("gguf_sentiment", _ObjectWithoutInvoke())
@@ -291,5 +306,5 @@ class TestMalformedAdapterRejectedAtAssembly:
         ids=["bare_async_function", "object_without_invoke"],
     )
     def test_executor_rejects_malformed_adapter(self, bad_adapter):
-        with pytest.raises(TypeError, match="InferenceAdapter protocol"):
+        with pytest.raises(TypeError, match="missing callable"):
             _executor({"litellm_chat": bad_adapter})

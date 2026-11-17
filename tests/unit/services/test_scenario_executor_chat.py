@@ -24,7 +24,7 @@
 
 import asyncio
 import inspect
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -35,11 +35,13 @@ from core.model_management_types import (
     ChatTurnRequest,
     ChatTurnResponse,
     ExecutionSnapshot,
+    FunctionToolSpec,
     NormalizedLLMUsage,
     PersistenceOutcome,
     ResolvedConnection,
     TextContentPart,
 )
+from services.ai_service.litellm_client import LiteLLMChatAdapter, LiteLLMClient
 from services.ai_service.scenario_executor import ScenarioExecutor
 from services.ai_service.usage_recorder import ReservationOutcome
 
@@ -74,7 +76,20 @@ def _candidate(index: int, connection_id: str, task_id: str = "sentiment") -> di
     }
 
 
-def _snapshot(candidates: tuple[dict, ...], connections: tuple[ResolvedConnection, ...]) -> ExecutionSnapshot:
+_CHAT_CAPABILITY_EVIDENCE: dict[str, dict[str, Any]] = {
+    # 检视 M06：chat 入口按请求必需能力核验连接证据（support + 证据版本）
+    "stream": {"support": "supported", "source": "validation", "connection_revision": 1},
+    "tools": {"support": "supported", "source": "validation", "connection_revision": 1},
+}
+
+
+def _snapshot(
+    candidates: tuple[dict, ...],
+    connections: tuple[ResolvedConnection, ...],
+    *,
+    capabilities: dict[str, dict[str, Any]] | None = None,
+) -> ExecutionSnapshot:
+    evidence = _CHAT_CAPABILITY_EVIDENCE if capabilities is None else capabilities
     serialized = tuple(
         {
             "connection_id": c.connection_id,
@@ -88,6 +103,8 @@ def _snapshot(candidates: tuple[dict, ...], connections: tuple[ResolvedConnectio
             "concurrency_limit": c.concurrency_limit,
             "credential_ref": c.credential_ref,
             "credential_version": c.credential_version,
+            "enabled": True,
+            "capabilities": evidence,
         }
         for c in connections
     )
@@ -206,10 +223,6 @@ class _ScriptedChatAdapter:
         self.script = list(script)
         self.invoke_calls: list[dict[str, Any]] = []
 
-    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        # 组装期协议校验要求 invoke 存在；chat 入口经 invoke_chat 派发，旧出口不触达
-        raise AssertionError("legacy invoke must not be reached from chat entry")
-
     async def invoke_chat(
         self, request, connection, deadline, attempt_context, *, stream=True, response_format=None, on_event=None
     ) -> ChatTurnResponse:
@@ -241,9 +254,6 @@ class _HangingChatAdapter:
     def __init__(self) -> None:
         self.invoke_calls: list[str] = []
         self.started = asyncio.Event()
-
-    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("legacy invoke must not be reached from chat entry")
 
     async def invoke_chat(self, request, connection, deadline, attempt_context, **kwargs) -> ChatTurnResponse:
         self.invoke_calls.append(attempt_context.attempt_id)
@@ -612,3 +622,159 @@ class TestChatAdapterProtocolGate:
         assert adapter.invoked is False
         recorder.try_reserve.assert_not_awaited()
         recorder.begin_attempt.assert_not_awaited()
+
+
+class TestRealLiteLLMChatAdapterWiring:
+    """检视 M01：真实 ``LiteLLMChatAdapter`` 可直接注册并服务聊天入口，零旧 invoke。"""
+
+    @pytest.mark.asyncio
+    async def test_real_adapter_registers_and_serves_chat_without_legacy_invoke(self):
+        usage = _usage()
+
+        class _FakeLiteLLMClient:
+            def __init__(self) -> None:
+                self.chat_calls = 0
+                self.legacy_calls = 0
+
+            async def invoke_chat_connection(
+                self,
+                request,
+                connection,
+                deadline,
+                attempt_context,
+                *,
+                stream=True,
+                response_format=None,
+                on_event=None,
+            ) -> ChatTurnResponse:
+                self.chat_calls += 1
+                return _chat_ok_response(usage=usage)
+
+            async def invoke_single_connection(self, *args: Any, **kwargs: Any) -> Any:
+                self.legacy_calls += 1
+                raise AssertionError("legacy invoke must not be reached from chat entry")
+
+        client = _FakeLiteLLMClient()
+        adapter = LiteLLMChatAdapter(cast(LiteLLMClient, client))
+        recorder = _recorder_mock()
+        # 真实适配器（新协议 invoke_chat）注册不再被旧协议强制 invoke 误杀
+        executor = _executor(adapter, recorder)
+
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+
+        assert outcome.status == "succeeded"
+        assert outcome.transport_state == "ok"
+        assert client.chat_calls == 1
+        assert client.legacy_calls == 0  # 聊天入口零旧 invoke 触达
+
+
+class TestChatCapabilityAdmission:
+    """检视 M06：chat 准入按请求必需能力（stream / tools）与证据版本核验真实
+    Profile——unknown / unsupported / 旧证据一律派发前淘汰（零预留副作用），
+    不按模型故障重试；旧直推入口政策不变。"""
+
+    async def _request_with_capabilities(
+        self, capabilities: dict[str, dict[str, Any]], request: ChatTurnRequest | None = None
+    ):
+        usage = _usage()
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response(usage=usage))])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        outcome = await executor.execute_chat_turn(
+            request or _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),), capabilities=capabilities),
+            binding=_binding(),
+        )
+        return outcome, adapter, recorder, executor
+
+    @pytest.mark.asyncio
+    async def test_missing_stream_evidence_zero_outbound(self):
+        outcome, adapter, recorder, executor = await self._request_with_capabilities({})
+        assert outcome.status == "failed"
+        assert "requires confirmed stream capability" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        recorder.begin_attempt.assert_not_awaited()
+        executor._config_service.authorize_attempt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_stream_evidence_zero_outbound(self):
+        outcome, adapter, recorder, _ = await self._request_with_capabilities(
+            {"stream": {"support": "unknown", "source": "user_declaration", "connection_revision": 1}}
+        )
+        assert outcome.status == "failed"
+        assert "requires supported stream capability (evidence: unknown)" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_stream_evidence_zero_outbound(self):
+        outcome, adapter, _, _ = await self._request_with_capabilities(
+            {"stream": {"support": "unsupported", "source": "validation", "connection_revision": 1}}
+        )
+        assert outcome.status == "failed"
+        assert "requires supported stream capability (evidence: unsupported)" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+
+    @pytest.mark.asyncio
+    async def test_stale_evidence_revision_zero_outbound(self):
+        """证据记录版本与派发连接版本不一致（旧证据）→ 零出站。"""
+        outcome, adapter, recorder, _ = await self._request_with_capabilities(
+            {"stream": {"support": "supported", "source": "validation", "connection_revision": 0}}
+        )
+        assert outcome.status == "failed"
+        assert "stale evidence: 0" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_revision_treated_as_stale(self):
+        """证据未记录连接版本 → 不可证明同版，按旧证据淘汰。"""
+        outcome, adapter, _, _ = await self._request_with_capabilities({"stream": {"support": "supported"}})
+        assert outcome.status == "failed"
+        assert "stale evidence: unknown revision" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+
+    @pytest.mark.asyncio
+    async def test_tools_require_tools_evidence(self):
+        """请求携带工具时必需工具能力证据，缺失即零出站。"""
+        request = ChatTurnRequest(
+            model_call_id="mc-tools",
+            messages=(ChatMessage(role="user", content_parts=(TextContentPart(text="研究问题"),)),),
+            instructions=("系统提示",),
+            tools=(
+                FunctionToolSpec(name="search", description="d", json_schema={"type": "object"}, schema_version="v1"),
+            ),
+            output_schema=None,
+            frozen_params={},
+            max_output_tokens=256,
+            deadline=asyncio.get_running_loop().time() + _REQUEST_DEADLINE_BUDGET_S,
+        )
+        outcome, adapter, recorder, _ = await self._request_with_capabilities(
+            {"stream": {"support": "supported", "source": "validation", "connection_revision": 1}},
+            request=request,
+        )
+        assert outcome.status == "failed"
+        assert "requires confirmed tools capability" in (outcome.error_code or "")
+        assert adapter.invoke_calls == []
+        recorder.try_reserve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fresh_supported_evidence_dispatches_once(self):
+        """证据同版且 supported → 正常派发（无重试、单次 invoke_chat）。"""
+        usage = _usage()
+        adapter = _ScriptedChatAdapter([((), None, _chat_ok_response(usage=usage))])
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder)
+        outcome = await executor.execute_chat_turn(
+            _chat_request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            binding=_binding(),
+        )
+        assert outcome.status == "succeeded"
+        assert len(adapter.invoke_calls) == 1
