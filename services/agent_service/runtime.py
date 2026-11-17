@@ -137,7 +137,9 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
     """组装 Agent 运行时宿主（不 launch）。
 
     双迁移失败时异常原样传播，不创建任何引擎/宿主对象（§10.6：不 launch、不补投、
-    保历史与原迁移状态）。
+    保历史与原迁移状态）。迁移成功后的任一阶段失败，按**已取得对象**逆序收口
+    （Client → DBOS → 双引擎，见 ``_close_partial_assembly``），原始异常不被清理
+    异常掩盖（检视 R08）。
 
     Args:
         settings: 组装参数（URL/application_version/executor_id）。
@@ -152,7 +154,16 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
 
     executor_id = settings.executor_id or _new_executor_id()
     runtime_engine = _create_runtime_engine(settings.system_database_url)
-    control_engine = _create_control_engine(settings.system_database_url)
+    try:
+        control_engine = _create_control_engine(settings.system_database_url)
+    except BaseException:
+        # 控制引擎未取得：runtime 引擎仍须收口（检视 R08）
+        _dispose_quietly(runtime_engine)
+        raise
+
+    dbos: DBOS | None = None
+    datasource: SQLAlchemyDatasource | None = None
+    client: DBOSClient | None = None
     try:
         dbos = DBOS(
             config={
@@ -185,9 +196,14 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
             application_name=RUNTIME_DB_NAME,
         )
     except BaseException:
-        _dispose_quietly(control_engine)
-        _dispose_quietly(runtime_engine)
+        _close_partial_assembly(
+            client=client,
+            dbos=dbos,
+            control_engine=control_engine,
+            runtime_engine=runtime_engine,
+        )
         raise
+    assert dbos is not None and datasource is not None and client is not None
     return AgentRuntimeHandle(
         runtime_engine=runtime_engine,
         control_engine=control_engine,
@@ -263,6 +279,46 @@ def _dispose_quietly(engine: sa.Engine) -> None:
     # 兜底清理不得掩盖组装原始异常
     except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
         pass
+
+
+def _close_partial_assembly(
+    *,
+    client: DBOSClient | None,
+    dbos: DBOS | None,
+    control_engine: sa.Engine,
+    runtime_engine: sa.Engine,
+) -> None:
+    """组装后续阶段失败时按已取得对象逆序收口（检视 R08）。
+
+    所有权判定（按锁定版本 SDK 源码核实，非猜测）：
+
+    - **Client**：``DBOSClient.__init__`` 注入 ``control_engine`` 且
+      ``use_listen_notify=False``——不自建引擎、不起监听线程；构造抛错即对象未取得，
+      失败连接回池由 ``control_engine.dispose()`` 承担。已取得则 ``destroy()``
+      （注入引擎不被其释放，仍由下方 dispose 收口）。
+    - **DBOS**：构造成功即占用**进程级全局单例**，未 launch 时无执行器/系统库连接/
+      后台线程；不销毁会让再次组装复用旧实例（``DBOS(config)`` 返回既有实例并忽略
+      新配置），故按单实例契约调用公开 ``DBOS.destroy()``（与
+      ``AgentRuntimeHandle.close`` 同一契约）。
+    - **Datasource**：``SQLAlchemyDatasource.create`` 注入 ``runtime_engine``
+      （``created_engine=False``），自身不持连接/线程；SDK 将其登记进
+      ``DBOSRegistry.datasources`` 且无公开反注册 API，登记项不持有连接、仅被
+      rewind 使用，连接随 ``runtime_engine.dispose()`` 释放（不据此宣称连接泄漏）。
+
+    清理异常一律不得掩盖组装原始异常（R2：只捕 Exception，取消照常传播）。
+    """
+    if client is not None:
+        try:
+            client.destroy()
+        except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
+            pass
+    if dbos is not None:
+        try:
+            DBOS.destroy()
+        except Exception:  # R2_ALLOWED: 只捕获 Exception，CancelledError 不属其中
+            pass
+    _dispose_quietly(control_engine)
+    _dispose_quietly(runtime_engine)
 
 
 # ---------------------------------------------------------------------------
