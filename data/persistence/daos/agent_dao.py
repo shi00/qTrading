@@ -2549,6 +2549,13 @@ class AgentDao(BaseDao):
         正文、manifest、期望版或 node 任一不同 → ``INPUT_CONFLICT``（旧行摘要仅覆盖
         正文，按存储 manifest 与期望版补核，检视 D05）；revision CAS 败者 →
         ``REVISION_CONFLICT``。
+
+        队列位（检视 D02）：执行必须仍处 ``queued`` 且未派发（``current_round_id``
+        为空、无 ``active_round`` 轮）；已派发或已离开 queued → ``REVISION_CONFLICT``。
+        仅核 revision CAS 时，取得绑定后新 revision 的调用方仍能改写已冻结输入，旧
+        revision 失败也不能反证队列位。本核验与首派发 ``bind_actual_input`` 持同一
+        execution 行锁（§5.4 第 4 条），派发先胜则修订拒绝且零新事实。
+
         M2 与受理消息同为纯 session 事件（先于派发无 round，§9.6 CHECK），执行
         关联由源谱系边（consumer_kind=execution, input_revision=N）承载。
         **源自身版与执行输入版分列**：新消息/新源 id 是不可变新源，自身
@@ -2585,7 +2592,12 @@ class AgentDao(BaseDao):
             # 1. execution 行锁（CAS 目标；§5.4 第 4 条先 execution 后 session）。
             exec_row = (
                 await conn.execute(
-                    sa.select(AgentExecution.session_id, AgentExecution.revision)
+                    sa.select(
+                        AgentExecution.session_id,
+                        AgentExecution.revision,
+                        AgentExecution.display_state,
+                        AgentExecution.current_round_id,
+                    )
                     .where(
                         AgentExecution.user_scope == request.user_scope,
                         AgentExecution.execution_id == request.execution_id,
@@ -2652,7 +2664,33 @@ class AgentDao(BaseDao):
                     "same revise command key with different input",
                     identity,
                 )
-            # 3. CAS execution.revision（队列修订单胜者，§9.13）。
+            # 3. 队列位核验（检视 D02）：已离开 queued 或已派发（current_round /
+            #    有效轮）即不得修订。与 bind_actual_input 同持本行锁，派发先胜则
+            #    此处拒绝；仅核 revision CAS 无法发现「绑定后取新 revision」的改写。
+            if exec_row.display_state != "queued" or exec_row.current_round_id is not None:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "execution is no longer queued for revision",
+                    identity,
+                )
+            active_round = (
+                await conn.execute(
+                    sa.select(AgentRound.round_id)
+                    .where(
+                        AgentRound.user_scope == request.user_scope,
+                        AgentRound.execution_id == request.execution_id,
+                        AgentRound.active_round,
+                    )
+                    .limit(1)
+                )
+            ).first()
+            if active_round is not None:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "execution already dispatched with an active round",
+                    identity,
+                )
+            # 4. CAS execution.revision（队列修订单胜者，§9.13）。
             occurred = datetime.now(UTC)
             cas_result = await conn.execute(
                 sa.update(AgentExecution)
@@ -2669,7 +2707,7 @@ class AgentDao(BaseDao):
                     "execution revision changed concurrently",
                     identity,
                 )
-            # 4. session 行锁 + 序号分配（起点 1，与事件 codec 下限 1 一致，检视 D01）。
+            # 5. session 行锁 + 序号分配（起点 1，与事件 codec 下限 1 一致，检视 D01）。
             await conn.execute(
                 sa.select(AgentSession.session_id)
                 .where(
@@ -2688,7 +2726,7 @@ class AgentDao(BaseDao):
                     )
                 ).scalar_one()
             ) + 1
-            # 5. 新输入版：既有命令版 max+1（受理=1，首次修订=2）；源自身不可变版
+            # 6. 新输入版：既有命令版 max+1（受理=1，首次修订=2）；源自身不可变版
             #    恒为 "1"（AR-07），两者分列（检视 D13）。
             input_revision = (
                 (
@@ -2704,7 +2742,7 @@ class AgentDao(BaseDao):
             source_version = "1"
             event_id = stable_id("event", [request.user_scope, request.session_id, message_id])
 
-            # 6. M2 修订消息（纯 session 公开消息，role=user，正文即源）。
+            # 7. M2 修订消息（纯 session 公开消息，role=user，正文即源）。
             #    纯 session 事件不得携执行身份（event codec 同判据，检视 R19）：
             #    execution/round/node 全 None，执行关联由源谱系边承载（node 身份
             #    仍冻结在 revise 命令输入摘要内）。
@@ -2737,7 +2775,7 @@ class AgentDao(BaseDao):
                     committed_at=occurred,
                 )
             )
-            # 7. S2 源资产版本（正文由 message 行拥有，asset 不复制正文）。
+            # 8. S2 源资产版本（正文由 message 行拥有，asset 不复制正文）。
             await conn.execute(
                 sa.insert(AgentAssetVersion).values(
                     user_scope=request.user_scope,
@@ -2760,7 +2798,7 @@ class AgentDao(BaseDao):
                     available_at=occurred,
                 )
             )
-            # 8. 两条源边：源→message v1（origin）+ 源→执行新输入版（accepted_input，
+            # 9. 两条源边：源→message v1（origin）+ 源→执行新输入版（accepted_input，
             #    consumer_version=N 承载执行输入版，源自身版仍为 "1"；检视 D13）。
             for consumer_kind, consumer_ref_id, consumer_version, relation in (
                 ("message", message_id, "1", SourceRelationKind.ORIGIN),
@@ -2790,7 +2828,7 @@ class AgentDao(BaseDao):
                         relation_kind=relation.value,
                     )
                 )
-            # 9. revise 命令（target=execution_id；保存=committed，待投递事实）。
+            # 10. revise 命令（target=execution_id；保存=committed，待投递事实）。
             await conn.execute(
                 sa.insert(AgentCommand).values(
                     user_scope=request.user_scope,
@@ -2810,7 +2848,7 @@ class AgentDao(BaseDao):
                     consumption_state=ConsumptionState.NOT_CONSUMED.value,
                 )
             )
-            # 10. session 事件水位 GREATEST 推进（R22）。
+            # 11. session 事件水位 GREATEST 推进（R22）。
             await conn.execute(
                 sa.update(AgentSession)
                 .where(

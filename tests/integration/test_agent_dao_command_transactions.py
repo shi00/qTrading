@@ -909,6 +909,55 @@ class TestReviseQueued:
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_after_dispatch_conflicts_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """派发先胜后，即使持派发后的新 revision 也不得修订（检视 D02），零新事实。"""
+        dao, receipt, _ = await _full_setup(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            dispatched_revision = (
+                await conn.execute(
+                    sa.select(AgentExecution.revision).where(AgentExecution.execution_id == receipt.execution_id)
+                )
+            ).scalar_one()
+        assert dispatched_revision == 2  # 受理 1 → 派发 CAS 位推进到 2
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt, expected=dispatched_revision))
+
+        assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        async with engine.connect() as conn:
+            revision_after = (
+                await conn.execute(
+                    sa.select(AgentExecution.revision).where(AgentExecution.execution_id == receipt.execution_id)
+                )
+            ).scalar_one()
+        assert revision_after == dispatched_revision
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_then_dispatch_then_revise_conflicts_zero_new_facts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """双交错：修订先胜→派发绑权威版 2 合法；派发后再次修订（持新 revision）拒绝。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        first = await dao.revise_queued(_revise_request(receipt, expected=1))
+        bind = await dao.bind_actual_input(_bind_request(receipt))
+        assert first.input_revision == 2 and bind.input_revision == 2
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt, client_command_id="rev-2", expected=3, text="再改一次"))
+
+        assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
     async def test_revise_replay_same_key_same_input_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
         dao, receipt = await _accept_only(real_embedded_pg)
         engine = create_test_engine(real_embedded_pg.url)
