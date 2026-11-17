@@ -901,6 +901,118 @@ class TestAdvisoryLockCancellation:
         assert engine.disposed == 1
 
 
+class _ProbeLockConnection:
+    """可模拟失活的实例锁连接：记录语句，失活后 ``execute`` 抛错。"""
+
+    def __init__(self, *, alive: bool = True, acquired: bool = True) -> None:
+        self.alive = alive
+        self.acquired = acquired
+        self.closed = 0
+        self.statements: list[str] = []
+
+    def execute(self, statement: Any, parameters: Any = None) -> _FakeLockScalar:
+        self.statements.append(str(statement))
+        if not self.alive:
+            raise RuntimeError("connection lost")
+        return _FakeLockScalar(self.acquired)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class _ProbeLockEngine:
+    def __init__(self, connection: _ProbeLockConnection) -> None:
+        self.connection = connection
+        self.disposed = 0
+
+    def connect(self) -> _ProbeLockConnection:
+        return self.connection
+
+    def dispose(self) -> None:
+        self.disposed += 1
+
+
+def _install_lock_fakes(monkeypatch: Any) -> tuple[_ProbeLockConnection, _ProbeLockEngine, list[_ProbeLockEngine]]:
+    from services.agent_service import recovery
+
+    connection = _ProbeLockConnection()
+    engine = _ProbeLockEngine(connection)
+    created: list[_ProbeLockEngine] = []
+
+    def _fake_create_engine(*args: Any, **kwargs: Any) -> _ProbeLockEngine:
+        created.append(engine)
+        return engine
+
+    monkeypatch.setattr(recovery.sa, "create_engine", _fake_create_engine)
+    return connection, engine, created
+
+
+class TestAdvisoryLockAcquireSerialization:
+    """R11：串行拿锁 + 独立成功状态；并发第二次不得冒充 already-held，失活不得冒充持有。"""
+
+    async def test_concurrent_acquire_waits_first_query_then_already_held(self, monkeypatch: Any) -> None:
+        from services.agent_service import recovery
+
+        connection, engine, created = _install_lock_fakes(monkeypatch)
+        entered = asyncio.Event()
+        gate = asyncio.Event()
+        calls = 0
+
+        async def _gated_runner(fn: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await gate.wait()
+            return fn()
+
+        guard = recovery.AdvisoryLockInstanceGuard("postgresql+psycopg://u@host/db", blocking_runner=_gated_runner)
+        first = asyncio.create_task(guard.acquire())
+        await entered.wait()
+        second = asyncio.create_task(guard.acquire())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        # 首次查锁仍阻塞：第二次必须等待，不得凭中途写入的连接冒充成功
+        assert second.done() is False
+        assert calls == 1
+
+        gate.set()
+        first_evidence = await first
+        second_evidence = await second
+        assert first_evidence.detail == "acquired"
+        assert second_evidence.detail == "already-held"
+        assert second_evidence.acquired is True
+        # 只建过一次连接；already-held 走探针复核而非重新建连
+        assert created == [engine]
+        assert connection.statements == ["SELECT pg_try_advisory_lock(:key)", "SELECT 1"]
+
+    async def test_dead_held_connection_is_not_reported_as_held(self, monkeypatch: Any) -> None:
+        from services.agent_service import recovery
+
+        connection, engine, _created = _install_lock_fakes(monkeypatch)
+        guard = recovery.AdvisoryLockInstanceGuard("postgresql+psycopg://u@host/db", blocking_runner=_direct_blocking)
+        assert (await guard.acquire()).detail == "acquired"
+
+        connection.alive = False
+        lost = await guard.acquire()
+        assert lost.acquired is False
+        assert lost.prior_writer_exited is False
+        assert lost.detail == "connection-lost"
+        # 失活连接必须收口（不得留下无主连接/引擎），也不得凭旧状态宣称持有
+        assert connection.closed == 1
+        assert engine.disposed == 1
+
+    async def test_release_resets_success_state_for_fresh_acquire(self, monkeypatch: Any) -> None:
+        from services.agent_service import recovery
+
+        _connection, _engine, created = _install_lock_fakes(monkeypatch)
+        guard = recovery.AdvisoryLockInstanceGuard("postgresql+psycopg://u@host/db", blocking_runner=_direct_blocking)
+        assert (await guard.acquire()).detail == "acquired"
+        guard.release()
+        assert (await guard.acquire()).detail == "acquired"
+        assert len(created) == 2
+
+
 def test_startup_workflow_names_match_published_constants() -> None:
     """启动隔离列举名须与 D-02 发布 workflow 名一致（防硬编码漂移）。"""
 

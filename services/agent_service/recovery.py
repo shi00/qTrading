@@ -49,6 +49,7 @@ from services.agent_service.runtime import (
     launch_agent_runtime,
 )
 from services.agent_service.workflows import LEAF_WORKFLOW_NAME, RESEARCH_WORKFLOW_NAME
+from utils.loop_local import get_loop_local
 
 #: 启动隔离的「在途」原生状态（HANDOFF §8.4 第 3 条：PENDING/ENQUEUED/DELAYED）。
 STARTUP_ACTIVE_STATUSES: Final[tuple[str, ...]] = (
@@ -418,11 +419,29 @@ class AdvisoryLockInstanceGuard:
         self._blocking_runner = blocking_runner or _default_blocking_runner
         self._engine: Any = None
         self._connection: Any = None
+        # 独立的成功状态：只有 ``pg_try_advisory_lock`` 真正返回真才置位，
+        # 不得用「已有连接」推断已持有（R11 检视项）。
+        self._acquired = False
+
+    @staticmethod
+    def _serialization_lock() -> asyncio.Lock:
+        """拿锁阶段串行化（loop-local，R11：不把 asyncio.Lock 存为跨循环类属性）。"""
+
+        return get_loop_local("agent_instance_guard_acquire", asyncio.Lock)
 
     async def acquire(self) -> InstanceGuardEvidence:
-        if self._connection is not None:
-            return InstanceGuardEvidence(acquired=True, prior_writer_exited=True, detail="already-held")
+        # 串行：并发的第二次 acquire 必须等首次真实查询（可能阻塞在连接/线程池）结束，
+        # 不得凭 `_try_lock` 中途写入的连接冒充 already-held。
+        async with self._serialization_lock():
+            if self._acquired:
+                if await self._held_connection_alive():
+                    return InstanceGuardEvidence(acquired=True, prior_writer_exited=True, detail="already-held")
+                # 连接失活：会话级 advisory lock 已随连接释放，旧状态不得冒充持有。
+                self.release()
+                return InstanceGuardEvidence(acquired=False, prior_writer_exited=False, detail="connection-lost")
+            return await self._acquire_now()
 
+    async def _acquire_now(self) -> InstanceGuardEvidence:
         def _try_lock() -> bool:
             self._engine = sa.create_engine(
                 _sync_database_url(self._system_database_url),
@@ -450,12 +469,33 @@ class AdvisoryLockInstanceGuard:
         if not bool(outcome.value):
             self.release()
             return InstanceGuardEvidence(acquired=False, prior_writer_exited=False, detail="lock-held")
+        self._acquired = True
         return InstanceGuardEvidence(acquired=True, prior_writer_exited=True, detail="acquired")
+
+    async def _held_connection_alive(self) -> bool:
+        """复核已持有连接是否仍可用；失活即不得冒充持有（会话锁已随连接释放）。"""
+
+        def _probe() -> bool:
+            connection = self._connection
+            if connection is None:
+                return False
+            connection.execute(sa.text("SELECT 1"))
+            return True
+
+        try:
+            outcome = await _run_owned_blocking(self._blocking_runner, _probe)
+        except Exception:  # 探针执行器不可用：按失活处理，不得据此宣称持有
+            return False
+        if outcome.cancel is not None:
+            self.release()
+            raise outcome.cancel
+        return bool(outcome.value)
 
     def release(self) -> None:
         connection, engine = self._connection, self._engine
         self._connection = None
         self._engine = None
+        self._acquired = False
         for target in (connection, engine):
             if target is None:
                 continue
