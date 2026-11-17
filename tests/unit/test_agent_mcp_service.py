@@ -291,6 +291,48 @@ class TestExplicitConnectAdmission:
         assert "implementation_unverified" in exc.value.sanitized_message
         assert factory.opened == 0
 
+    @pytest.mark.asyncio
+    async def test_connect_freezes_discovered_catalog_with_generation(self) -> None:
+        session = _FakeSession((MCPToolDescriptor("read_file", _SCHEMA),))
+        manager, _store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+
+        await manager.connect(_identity())
+
+        assert session.list_calls == 1
+        assert manager.frozen_catalog(_identity()) == (MCPToolDescriptor("read_file", _SCHEMA),)
+        assert manager.audit_tool_scope(_identity()) == ("read_file",)
+        first = manager.connection_generation(_identity())
+        assert first >= 1
+        await manager.disconnect(_identity())
+        await manager.connect(_identity())
+        assert manager.connection_generation(_identity()) > first
+
+    @pytest.mark.asyncio
+    async def test_connect_closes_session_and_stays_down_when_discovery_fails(self) -> None:
+        session = _FakeSession((), fail_list=True)
+        manager, _store, _factory, _probe = _manager(session=session)
+        await manager.save_config(_config())
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager.connect(_identity())
+        assert "transport dropped" in str(excinfo.value)
+
+        assert session.closed is True
+        assert manager.is_connected(_identity()) is False
+
+    def test_frozen_catalog_state_requires_established_connection(self) -> None:
+        manager, _store, _factory, _probe = _manager()
+        with pytest.raises(AgentServiceError) as exc:
+            manager.frozen_catalog(_identity())
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc:
+            manager.connection_generation(_identity())
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        with pytest.raises(AgentServiceError) as exc:
+            manager.audit_tool_scope(_identity())
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+
 
 class TestNoAutoReconnectAndDisconnect:
     @pytest.mark.asyncio
