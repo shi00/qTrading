@@ -12,7 +12,8 @@ import json
 import os
 import sys
 import time
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 
@@ -40,6 +41,7 @@ from services.agent_service.mcp_tools import (
     ToolCallRequest,
     ToolCallState,
     ToolDispatchVerdict,
+    canonical_arguments_digest,
 )
 
 _IDENTITY = MCPServiceIdentity(service_id="svc-local-fs", config_version=1)
@@ -150,13 +152,43 @@ class _Validator:
             raise AgentValidationError("invalid_tool_arguments", "$.arguments.path")
 
 
-class _Grants:
-    def __init__(self, verdict: ToolDispatchVerdict = ToolDispatchVerdict.CLAIMED) -> None:
-        self.verdict = verdict
-        self.claims: list[tuple[str, str]] = []
+class _MutatingValidator(_Validator):
+    """校验后篡改快照：模拟校验端口改动参数，门内必须零外发。"""
 
-    async def claim(self, *, identity: MCPServiceIdentity, tool_name: str, operation_id: str) -> ToolDispatchVerdict:
-        self.claims.append((tool_name, operation_id))
+    def validate(self, schema_json: str, arguments: dict[str, Any]) -> None:
+        super().validate(schema_json, arguments)
+        arguments["path"] = "C:\\data\\swapped.txt"
+
+
+class _Grants:
+    def __init__(
+        self,
+        verdict: ToolDispatchVerdict = ToolDispatchVerdict.CLAIMED,
+        *,
+        on_claim: Callable[[], None] | None = None,
+        raises: BaseException | None = None,
+    ) -> None:
+        self.verdict = verdict
+        self.on_claim = on_claim
+        self.raises = raises
+        #: (tool_name, operation_id, schema_digest, arguments_digest, audit_scope_digest)
+        self.claims: list[tuple[str, str, str, str, str]] = []
+
+    async def claim(
+        self,
+        *,
+        identity: MCPServiceIdentity,
+        tool_name: str,
+        operation_id: str,
+        schema_digest: str,
+        arguments_digest: str,
+        audit_scope_digest: str,
+    ) -> ToolDispatchVerdict:
+        if self.raises is not None:
+            raise self.raises
+        self.claims.append((tool_name, operation_id, schema_digest, arguments_digest, audit_scope_digest))
+        if self.on_claim is not None:
+            self.on_claim()
         return self.verdict
 
 
@@ -166,13 +198,15 @@ async def _dispatcher(
     verdict: ToolDispatchVerdict = ToolDispatchVerdict.CLAIMED,
     budget: MCPBudgetProfile | None = None,
     deadline_s: int = 30,
+    grants: _Grants | None = None,
+    validator: _Validator | None = None,
 ) -> tuple[MCPToolDispatcher, _Session, _Grants, SharedMCPConnectionManager]:
     config = _config(budget, deadline_s=deadline_s)
     session = session or _Session()
     manager = SharedMCPConnectionManager(store=_Store(config), factory=_Factory(session), probe=_Probe())
     await manager.connect(_IDENTITY)
-    grants = _Grants(verdict)
-    dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=grants)
+    grants = grants or _Grants(verdict)
+    dispatcher = MCPToolDispatcher(manager=manager, validator=validator or _Validator(), grants=grants)
     return dispatcher, session, grants, manager
 
 
@@ -191,6 +225,8 @@ def _request(**overrides: object) -> ToolCallRequest:
         "connection_generation": 1,
     }
     values.update(overrides)
+    if "arguments_digest" not in overrides:
+        values["arguments_digest"] = canonical_arguments_digest(cast(dict[str, Any], values["arguments"]))
     return ToolCallRequest(**values)  # type: ignore[arg-type]  # 测试构造受控覆盖
 
 
@@ -305,7 +341,10 @@ class TestDispatchEffects:
         outcome = await dispatcher.call(_request())
         assert outcome.state is ToolCallState.COMPLETED
         assert outcome.result == {"content": [{"type": "text", "text": "ok"}]}
-        assert _grants.claims == [("read_file", "op-1")]
+        assert [(claim[0], claim[1]) for claim in _grants.claims] == [("read_file", "op-1")]
+        assert _grants.claims[0][2] == sha256_hex(_SCHEMA)
+        assert _grants.claims[0][3] == canonical_arguments_digest({"path": "C:\\data\\a.txt"})
+        assert _grants.claims[0][4] == sha256_hex('["read_file"]')
         assert len(session.calls) == 1
         assert session.calls[0][0] == "read_file"
         assert session.calls[0][2] == 30
@@ -450,3 +489,76 @@ class TestDispatchEffects:
         guard = manager.budget_guard(_IDENTITY)
         assert isinstance(guard, MCPBudgetGuard)
         assert guard.used("retention_bytes") == 0
+
+
+class TestFrozenArguments:
+    """I05：参数在校验前冻结为规范快照，claim 绑定 schema/参数/审核范围摘要。"""
+
+    @pytest.mark.asyncio
+    async def test_nested_mutation_during_claim_sends_frozen_snapshot(self) -> None:
+        """claim 的 await 期间改动嵌套参数：出站参数仍是已校验快照值。"""
+
+        arguments: dict[str, Any] = {"path": "C:\\data\\a.txt", "options": {"depth": 1}}
+        request = _request(arguments=arguments)
+        grants = _Grants(on_claim=lambda: arguments["options"].update({"depth": 99, "extra": True}))
+        dispatcher, session, _grants, _manager = await _dispatcher(grants=grants)
+        outcome = await dispatcher.call(request)
+        assert outcome.state is ToolCallState.COMPLETED
+        assert session.calls[0][1] == {"path": "C:\\data\\a.txt", "options": {"depth": 1}}
+        assert grants.claims[0][3] == canonical_arguments_digest({"path": "C:\\data\\a.txt", "options": {"depth": 1}})
+
+    @pytest.mark.asyncio
+    async def test_argument_digest_mismatch_is_refused_with_zero_claim(self) -> None:
+        """请求自报摘要与冻结参数不符：claim 前拒绝，零 claim/零执行。"""
+
+        dispatcher, session, grants, _manager = await _dispatcher()
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request(arguments_digest="0" * 64))
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "digest" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_non_json_arguments_are_refused_before_claim(self) -> None:
+        """不可规范化的参数（二进制等）在校验前拒绝，零 claim/零执行。"""
+
+        dispatcher, session, grants, _manager = await _dispatcher()
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request(arguments={"path": "x", "blob": b"\x00"}, arguments_digest="0" * 64))
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_validator_mutation_of_snapshot_blocks_dispatch(self) -> None:
+        """校验端口改动快照即「校验 A、发送 B」：claim 后、外发前拒绝。"""
+
+        dispatcher, session, grants, _manager = await _dispatcher(validator=_MutatingValidator())
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "changed" in exc.value.sanitized_message
+        assert len(grants.claims) == 1
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_claim_propagates_without_dispatch(self) -> None:
+        """claim 期间取消必须继续传播，且零外发、零在途归属。"""
+
+        grants = _Grants(raises=asyncio.CancelledError())
+        dispatcher, session, _grants, manager = await _dispatcher(grants=grants)
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await dispatcher.call(_request())
+        assert isinstance(excinfo.value, asyncio.CancelledError)
+        assert grants.claims == []
+        assert session.calls == []
+        assert manager.in_flight_operations(_IDENTITY) == ()
+
+    def test_digest_is_stable_and_key_order_independent(self) -> None:
+        """合法路径摘要稳定：同参数同摘要，键序无关，列表顺序仍参与摘要。"""
+
+        first = canonical_arguments_digest({"a": 1, "b": {"c": 2, "d": [1, 2]}})
+        second = canonical_arguments_digest({"b": {"d": [1, 2], "c": 2}, "a": 1})
+        assert first == second == sha256_hex('{"a":1,"b":{"c":2,"d":[1,2]}}')
+        assert canonical_arguments_digest({"a": [1, 2]}) != canonical_arguments_digest({"a": [2, 1]})

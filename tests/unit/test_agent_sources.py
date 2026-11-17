@@ -97,7 +97,7 @@ class FakeDao:
 def _request(
     *,
     purpose: Purpose = Purpose.END_OF_DAY_RESEARCH,
-    cutoff: str | None = None,
+    cutoff: str | None = "2026-01-01T00:00:00.000000Z",
     selected: tuple[BusinessSourceItem, ...] | None = None,
     unselected: tuple[BusinessSourceItem, ...] = (),
 ) -> SourceRegistrationRequest:
@@ -176,8 +176,11 @@ class TestPointInTimeGate:
         assert dao.requests == []
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("purpose", [Purpose.HISTORICAL_DECISION, Purpose.POST_HOC_EXPLANATION])
-    async def test_pit_purposes_require_cutoff(self, purpose: Purpose) -> None:
+    @pytest.mark.parametrize(
+        "purpose",
+        [Purpose.HISTORICAL_DECISION, Purpose.POST_HOC_EXPLANATION, Purpose.END_OF_DAY_RESEARCH],
+    )
+    async def test_cutoff_purposes_require_cutoff(self, purpose: Purpose) -> None:
         dao = FakeDao()
         with pytest.raises(AgentServiceError) as exc:
             await BusinessSourceService(dao).register(_request(purpose=purpose, cutoff=None))
@@ -194,13 +197,87 @@ class TestPointInTimeGate:
         assert dao.requests == []
 
     @pytest.mark.asyncio
-    async def test_end_of_day_research_allows_null_available_at(self) -> None:
+    async def test_end_of_day_research_accepts_source_disclosed_before_day_end(self) -> None:
         dao = FakeDao()
         request = _request(
             purpose=Purpose.END_OF_DAY_RESEARCH,
-            cutoff="2026-01-01T00:00:00.000000Z",
+            cutoff="2026-01-05T17:00:00+08:00",
+            selected=(_item(available_at="2026-01-05T16:59:59+08:00"),),
+        )
+        receipt = await BusinessSourceService(dao).register(request)
+        assert len(receipt.registered) == 1
+        assert len(dao.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_end_of_day_research_rejects_late_disclosure_with_zero_dao_calls(self) -> None:
+        dao = FakeDao()
+        request = _request(
+            purpose=Purpose.END_OF_DAY_RESEARCH,
+            cutoff="2026-01-05T17:00:00+08:00",
+            selected=(_item(available_at="2026-01-05T18:00:00+08:00"),),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await BusinessSourceService(dao).register(request)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "cutoff" in exc.value.sanitized_message
+        assert dao.requests == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("purpose", [Purpose.END_OF_DAY_RESEARCH, Purpose.HISTORICAL_DECISION])
+    async def test_cutoff_boundary_is_exclusive(self, purpose: Purpose) -> None:
+        dao = FakeDao()
+        request = _request(
+            purpose=purpose,
+            cutoff="2026-01-05T17:00:00+08:00",
+            selected=(_item(available_at="2026-01-05T17:00:00+08:00"),),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await BusinessSourceService(dao).register(request)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert dao.requests == []
+
+    @pytest.mark.asyncio
+    async def test_end_of_day_research_rejects_unknown_available_at(self) -> None:
+        dao = FakeDao()
+        request = _request(
+            purpose=Purpose.END_OF_DAY_RESEARCH,
+            cutoff="2026-01-05T17:00:00+08:00",
             selected=(_item(available_at=None),),
         )
+        with pytest.raises(AgentServiceError) as exc:
+            await BusinessSourceService(dao).register(request)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "unknown" in exc.value.sanitized_message
+        assert dao.requests == []
+
+    @pytest.mark.asyncio
+    async def test_past_day_midnight_boundary_is_exclusive(self) -> None:
+        dao = FakeDao()
+        service = BusinessSourceService(dao)
+        cutoff = "2025-06-01T00:00:00+08:00"
+        with pytest.raises(AgentServiceError) as exc:
+            await service.register(
+                _request(
+                    purpose=Purpose.HISTORICAL_DECISION,
+                    cutoff=cutoff,
+                    selected=(_item(available_at="2025-06-01T00:00:00+08:00"),),
+                )
+            )
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert dao.requests == []
+        receipt = await service.register(
+            _request(
+                purpose=Purpose.HISTORICAL_DECISION,
+                cutoff=cutoff,
+                selected=(_item(available_at="2025-05-31T23:59:59+08:00"),),
+            )
+        )
+        assert len(receipt.registered) == 1
+
+    @pytest.mark.asyncio
+    async def test_concept_purpose_does_not_gate_or_require_cutoff(self) -> None:
+        dao = FakeDao()
+        request = _request(purpose=Purpose.CONCEPT, cutoff=None, selected=(_item(available_at=None),))
         receipt = await BusinessSourceService(dao).register(request)
         assert len(receipt.registered) == 1
         assert dao.requests[0].items[0].source.available_at is None
