@@ -104,6 +104,8 @@ class ApplicationSession:
         self._page = page
         self.cache_manager: CacheManager | None = None
         self.coordinator: ShutdownCoordinator | None = None
+        # P01（DD §7.4/§10.6）：本会话 Agent 接线；关闭前置必须先于共享引擎释放。
+        self.agent_wiring: Any | None = None
 
     async def __aenter__(self) -> ApplicationSession:
         return self
@@ -113,8 +115,26 @@ class ApplicationSession:
             await self._rollback()
         return False
 
+    async def prepare_agent_close(self) -> None:
+        """Agent 关闭前置（先于 watchdog/do_cleanup/共享引擎释放）。
+
+        未接线（``agent_wiring is None``）时为 no-op；关闭前置失败按未就绪记录，
+        不阻断既有停机流程。``CancelledError`` 原样传播（R2）。
+        """
+
+        wiring = self.agent_wiring
+        if wiring is None:
+            return
+        try:
+            await wiring.prepare_close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[App] Agent close prelude failed: %s", type(e).__name__, exc_info=True)
+
     async def _rollback(self) -> None:
         """启动失败回滚：逆序释放已创建资源，回滚失败不掩盖原始异常。"""
+        await self.prepare_agent_close()
         if self.coordinator is not None:
             try:
                 # 生产停机统一预算：watchdog 70s / cleanup 60s / 单步 35s，容纳 Step 8 PG 停止（CON-11）
@@ -151,6 +171,8 @@ async def _run_session(
 
     async def _perform_window_shutdown():
         try:
+            # P01：Agent 关闭前置先于 watchdog/do_cleanup；未接线为 no-op。
+            await session.prepare_agent_close()
             await perform_window_shutdown(coordinator, page, is_web_mode_fn=_is_web_mode)
         finally:
             dialog_manager.shutdown_requested = False
@@ -185,6 +207,8 @@ async def _run_session(
         page.window.on_event = _on_window_event
 
     async def _on_disconnect(e):
+        # P01：Agent 关闭前置先于 disconnect 清理；未接线为 no-op。
+        await session.prepare_agent_close()
         await handle_disconnect(coordinator)
 
     # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
@@ -202,6 +226,8 @@ async def _run_session(
 
     async def _perform_upgrade_exit():
         """Cleanup and force exit after upgrade failure."""
+        # P01：Agent 关闭前置先于 upgrade exit 的 cleanup；未接线为 no-op。
+        await session.prepare_agent_close()
         await perform_upgrade_exit(coordinator, page, is_web_mode_fn=_is_web_mode)
 
     def _on_show_toast(message_key, toast_type="info"):
@@ -300,6 +326,10 @@ async def _run_session(
     if auto_probe_task is not None and auto_probe_task is not registered_auto_probe_task and not auto_probe_task.done():
         coordinator.register_task(auto_probe_task)
         registered_auto_probe_task = auto_probe_task
+
+    # P01：接线结果挂到会话，供窗口关闭/断连/升级退出/启动回滚在释放共享引擎前
+    # 完成 Agent 关闭前置。
+    session.agent_wiring = getattr(controller, "agent_wiring", None)
 
 
 async def _wait_for_user_action(retry_event: threading.Event, exit_event: threading.Event) -> str:
