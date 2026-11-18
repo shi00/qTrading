@@ -507,6 +507,7 @@ class TestFrozenEnumChecks:
         checks = _check_names("agent_body_payload")
         assert "ck_agent_body_payload_owner_exclusive" in checks
         assert "ck_agent_body_payload_owner_kind" in checks
+        assert "ck_agent_body_payload_owner_identity" in checks
         assert "ck_agent_body_payload_encoding" in checks
         assert "ck_agent_body_payload_block_ordinal" in checks
         assert "ck_agent_body_payload_byte_length_exact" in checks
@@ -536,6 +537,25 @@ class TestFrozenEnumChecks:
             for column in columns:
                 offending = [text for text in checks if f"{column} IN (" in text]
                 assert not offending, f"{table_name}.{column} must not have a value CHECK before freeze"
+
+
+class TestOwnerIdentityAndPairChecks:
+    """R2-I32：正文 owner 与 FK 列成对一致、派生成对声明的结构性 CHECK。"""
+
+    def test_body_payload_owner_identity_matches_fk_columns(self) -> None:
+        # 正文 owner 三元组必须与 owner 外键列成对一致（不是只比文字三元组）。
+        checks = [str(c.sqltext) for c in _table("agent_body_payload").constraints if isinstance(c, CheckConstraint)]
+        identity = next(text for text in checks if "owner_version" in text and "artifact_version" in text)
+        assert "owner_kind = 'message'" in identity and "message_id = owner_id" in identity
+        assert "owner_kind = 'artifact'" in identity and "artifact_id = owner_id" in identity
+        assert "owner_version = artifact_version::text" in identity
+        assert "owner_kind = 'asset'" in identity and "asset_id = owner_id" in identity
+        assert "asset_version = owner_version" in identity
+
+    def test_source_link_derived_asset_pair_check(self) -> None:
+        # 派生来源必须成对声明 id/version（禁止只给 version 的孤立派生边）。
+        checks = [str(c.sqltext) for c in _table("agent_source_link").constraints if isinstance(c, CheckConstraint)]
+        assert any("derived_asset_id IS NULL" in text and "derived_asset_version IS NULL" in text for text in checks)
 
 
 class TestMiscContract:

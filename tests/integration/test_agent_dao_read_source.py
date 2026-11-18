@@ -236,8 +236,6 @@ async def _seed_asset(
             owner_id = ref.source_id
             if payload_tamper == "digest":
                 digest = "c" * 64
-            elif payload_tamper == "owner":
-                owner_id = "src-other"
             await conn.execute(
                 sa.insert(AgentBodyPayload).values(
                     user_scope=ref.user_scope,
@@ -667,15 +665,15 @@ class TestReadSourceIdentityAndFailures:
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_corrupt_body_payload_digest_or_owner_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
-        for tamper in ("digest", "owner"):
-            dao = await _setup(real_embedded_pg.url)
-            await _seed_session(dao)
-            await _seed_asset(dao, body_ref="body-1", payload_text="正文", payload_tamper=tamper)
+    async def test_corrupt_body_payload_digest_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        await _seed_asset(dao, body_ref="body-1", payload_text="正文", payload_tamper="digest")
 
-            with pytest.raises(AgentServiceError) as excinfo:
-                await dao.read_source(_query(), user_scope="u1")
-            assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE, tamper
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.read_source(_query(), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        await dao.engine.dispose()  # type: ignore[union-attr]
 
 
 def _accept_request(

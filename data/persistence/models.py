@@ -1984,7 +1984,8 @@ class AgentBodyPayload(Base):
     """首版同库不可变正文（§9.10.1）：一行单块 BYTEA，不采用外部 blob。
 
     内容是对应公开/选定表示的准确 UTF-8 字节，保 Unicode/CRLF，不冒充上传原文件
-    字节。owner 三元组唯一且不可换 owner；恰有一组 owner FK 非空。owner 环引用
+    字节。owner 三元组唯一且不可换 owner；恰有一组 owner FK 非空且 owner 三元组
+    与该 FK 列成对一致（``owner_identity`` CHECK）。owner 环引用
     （message/artifact/asset 的 body_ref 反向 FK）为 NO ACTION DEFERRABLE 在提交
     核定。byte_length 必须 = octet_length(payload_bytes)，SHA-256 由写入及读取核验。
     """
@@ -2052,6 +2053,15 @@ class AgentBodyPayload(Base):
         ),
         CheckConstraint("(artifact_id IS NULL) = (artifact_version IS NULL)", name="artifact_pair"),
         CheckConstraint("(asset_id IS NULL) = (asset_version IS NULL)", name="asset_pair"),
+        # R2-I32：owner 三元组必须与被选中的 owner 外键列成对一致（不能只比文字三元组）；
+        # message 版本固定 "1"，artifact 版本按 BIGINT 的规范十进制字符串，asset 版本逐字相等。
+        CheckConstraint(
+            "(owner_kind = 'message' AND message_id = owner_id AND owner_version = '1') "
+            "OR (owner_kind = 'artifact' AND artifact_id = owner_id "
+            "AND artifact_version IS NOT NULL AND owner_version = artifact_version::text) "
+            "OR (owner_kind = 'asset' AND asset_id = owner_id AND asset_version = owner_version)",
+            name="owner_identity",
+        ),
         *_agent_common_checks(),
     )
 
@@ -2161,6 +2171,8 @@ class AgentSourceLink(Base):
             name="consumer_null_combination",
         ),
         CheckConstraint("(artifact_id IS NULL) = (artifact_version IS NULL)", name="artifact_pair"),
+        # R2-I32：派生来源必须成对声明 id/version（禁止只给 version 的孤立派生边）。
+        CheckConstraint("(derived_asset_id IS NULL) = (derived_asset_version IS NULL)", name="derived_asset_pair"),
         *_agent_common_checks(),
         Index("idx_agent_source_link_source", "source_id", "source_version"),
         Index("idx_agent_source_link_consumer", "consumer_kind", "consumer_id"),
