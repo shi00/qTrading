@@ -133,6 +133,7 @@ async def _seed_research_chain(dao: AgentDao, user_scope: str = USER_SCOPE) -> t
             workflow_id=receipt.workflow_id,
             workflow_code_version="wcv-1",
             run_epoch=1,
+            expected_input_revision=1,
             frozen_manifest=json_doc({"schema_version": 1, "kind": "frozen_manifest"}),
             actual_input=json_doc({"schema_version": 1, "kind": "actual_input"}),
         )

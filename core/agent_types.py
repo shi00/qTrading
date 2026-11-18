@@ -2029,8 +2029,13 @@ class BindActualInputRequest:
     ``frozen_manifest`` / ``actual_input`` 为 CanonicalJson，摘要由其规范字节
     单一事实源派生（``sha256``）；``workflow_id`` 为幂等重放键（§9.5 UNIQUE，
     重放需 execution/node/代码版/epoch 完整身份相等，检视 D03）。
-    ``run_epoch`` 下限 1（与 ``decode_snapshot_identity`` 一致）；``input_revision``
-    由 DAO 从权威受理/修订单派生，不由调用方传入（检视 D03）。
+    ``run_epoch`` 下限 1（与 ``decode_snapshot_identity`` 一致）。
+
+    ``expected_input_revision``（R2-I16）为调用方构建冻结输入时所依据的有效输入
+    版（受理=1，每次排队修订 +1）：DAO 持 execution 行锁把它与最新受理/修订单
+    的 ``input_revision`` 比较，不等即 ``REVISION_CONFLICT``——排队修订先胜时
+    基于旧版的冻结载荷不得被绑定成新版。回执中的 ``input_revision`` 仍由 DAO
+    从权威命令派生，调用方不得自行声明已绑定版本（检视 D03）。
     """
 
     user_scope: str
@@ -2040,6 +2045,7 @@ class BindActualInputRequest:
     workflow_id: str
     workflow_code_version: str
     run_epoch: int
+    expected_input_revision: int
     frozen_manifest: CanonicalJson
     actual_input: CanonicalJson
 
