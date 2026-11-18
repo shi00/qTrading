@@ -28,7 +28,7 @@ from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, is_dataclass
 from datetime import datetime as dt
 from datetime import UTC
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import PureWindowsPath
 from typing import Any, Final, NoReturn, cast
@@ -143,6 +143,10 @@ AGENT_NUMBER_ENCODING: Final = "agent-number-v1"
 INTEGER_RAW_TYPE: Final = "json_integer"
 DECIMAL_RAW_TYPE: Final = "json_decimal"
 
+#: 定点十进制字符串的字符上限（等于附件单文件字符预算）：短词法如 ``1E+10000000``
+#: 若先 ``format`` 再校验长度，会在检查前分配巨串；故在展开前按位数/指数推导长度拒绝。
+MAX_EXACT_DECIMAL_CHARS: Final = 100_000
+
 
 def _fail(code: str, field_path: str) -> NoReturn:
     raise AgentValidationError(code, field_path)
@@ -195,9 +199,27 @@ def require_sequence(value: object, field_path: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _fixed_point(value: Decimal) -> str:
-    """Decimal 的确定性定点字符串（无指数形式）：``1E+2`` → ``100``。"""
+def _fixed_point(value: Decimal, field_path: str = "$") -> str:
+    """Decimal 的确定性定点字符串（无指数形式）：``1E+2`` → ``100``。
 
+    先按 ``as_tuple()`` 的位数与指数推导输出长度（O(1)，不实际展开），超过
+    :data:`MAX_EXACT_DECIMAL_CHARS` 直接拒绝，避免短词法在 ``format`` 时才展开成巨串；
+    非有限值（NaN/Infinity）同样拒绝，不以字符串形态冒充成功。
+    """
+
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        _fail("non_finite_number", field_path)
+    if any(digits):
+        integral = max(len(digits) + exponent, 1)
+        length = integral if exponent >= 0 else integral + 1 - exponent
+    else:
+        # 零：正指数不展开（``0E+5`` → ``0``），负指数补齐小数位（``0E-5`` → ``0.00000``）。
+        length = 1 if exponent >= 0 else 2 - exponent
+    if sign:
+        length += 1
+    if length > MAX_EXACT_DECIMAL_CHARS:
+        _fail("exact_decimal_length_exceeded", field_path)
     return format(value, "f")
 
 
@@ -207,7 +229,7 @@ def _to_jsonable(value: object, field_path: str) -> Any:
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, Decimal):
-        return _fixed_point(value)
+        return _fixed_point(value, field_path)
     if isinstance(value, float):
         # 禁止把原数值直接交给默认 float 转换（§3.1）；须先经 encode_exact_number。
         _fail("invalid_type", field_path)
@@ -313,7 +335,12 @@ def encode_exact_number(lexeme: str) -> ExactNumber:
     has_fraction = "." in lexeme
     has_exponent = "e" in lexeme or "E" in lexeme
     raw_type = DECIMAL_RAW_TYPE if (has_fraction or has_exponent) else INTEGER_RAW_TYPE
-    exact = _fixed_point(Decimal(lexeme))
+    try:
+        decimal_value = Decimal(lexeme)
+    except InvalidOperation:
+        # 指数超出 Decimal 可承载范围：词法合法但值无法精确表示，拒绝。
+        _fail("invalid_number", "$")
+    exact = _fixed_point(decimal_value)
     return ExactNumber(raw_type=raw_type, lexeme=lexeme, exact_decimal=exact)
 
 

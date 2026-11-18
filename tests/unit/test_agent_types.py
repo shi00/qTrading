@@ -55,6 +55,13 @@ def parse_doc(doc: str) -> dict[str, Any]:
     return cast(dict[str, Any], parse_preserving_numbers(doc))
 
 
+class _ExplodingDecimal(Decimal):
+    """I09 探针：若定点格式化在长度拒绝前被调用，立即失败（证明未产生巨串）。"""
+
+    def __format__(self, spec: str) -> str:
+        raise AssertionError("over-limit decimal must be rejected before format")
+
+
 # ---------------------------------------------------------------------------
 # CanonicalJson（§3.1）：编码
 # ---------------------------------------------------------------------------
@@ -470,6 +477,78 @@ class TestParsePreservingNumbers:
             "lexeme": "0.100000000000000005",
             "exact_decimal": "0.100000000000000005",
         }
+
+
+class TestFixedPointLengthGate:
+    """I09：定点格式化在展开前按位数/指数推导长度，超限拒绝且不产生巨串。"""
+
+    def test_huge_positive_exponent_rejected_before_format(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_exact_number("1e10000000")
+        assert code_of(exc) == "exact_decimal_length_exceeded"
+        # 探针 Decimal 的 __format__ 会抛 AssertionError：未抛即证明未进入展开。
+        with pytest.raises(AgentValidationError) as exc:
+            json_doc({"v": _ExplodingDecimal("1E+10000000")})
+        assert code_of(exc) == "exact_decimal_length_exceeded"
+
+    def test_huge_negative_exponent_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            encode_exact_number("1e-10000000")
+        assert code_of(exc) == "exact_decimal_length_exceeded"
+        with pytest.raises(AgentValidationError) as exc:
+            json_doc({"v": _ExplodingDecimal("1E-10000000")})
+        assert code_of(exc) == "exact_decimal_length_exceeded"
+
+    def test_boundary_exact_passes_one_over_rejected(self) -> None:
+        # 正指数：1E+99999 → 100000 位（恰等上限）；1E+100000 → 超一位。
+        assert encode_exact_number("1e99999").exact_decimal == "1" + "0" * 99_999
+        with pytest.raises(AgentValidationError) as exc:
+            encode_exact_number("1e100000")
+        assert code_of(exc) == "exact_decimal_length_exceeded"
+        # 负指数：1E-99998 → "0." + 99997 个 0 + "1" 共 100000 位；1E-99999 超一位。
+        assert encode_exact_number("1e-99998").exact_decimal == "0." + "0" * 99_997 + "1"
+        with pytest.raises(AgentValidationError) as exc:
+            encode_exact_number("1e-99999")
+        assert code_of(exc) == "exact_decimal_length_exceeded"
+
+    def test_zero_with_huge_exponent_stays_short(self) -> None:
+        # 零的正指数不展开（format 语义），不因指数巨大被误拒或展开。
+        assert encode_exact_number("0e10000000").exact_decimal == "0"
+        assert json_doc({"v": Decimal("0E-5")}) == '{"v":"0.00000"}'
+
+    def test_non_finite_rejected(self) -> None:
+        for value in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+            with pytest.raises(AgentValidationError) as exc:
+                json_doc({"v": value})
+            assert code_of(exc) == "non_finite_number"
+
+    def test_invalid_lexeme_still_rejected(self) -> None:
+        for bad in ("1e", "01", ".5"):
+            with pytest.raises(AgentValidationError) as exc:
+                encode_exact_number(bad)
+            assert code_of(exc) == "invalid_number"
+        # 词法合法但指数超出 Decimal 可承载范围：拒绝而非抛 ArithmeticError。
+        with pytest.raises(AgentValidationError) as exc:
+            encode_exact_number("1e999999999999999999999")
+        assert code_of(exc) == "invalid_number"
+
+    def test_normal_fixed_point_unchanged(self) -> None:
+        cases = {
+            "0": "0",
+            "-0": "-0",
+            "1.20": "1.20",
+            "-1.5e2": "-150",
+            "0.001": "0.001",
+            "1e2": "100",
+            "0.100000000000000005": "0.100000000000000005",
+        }
+        for lexeme, expected in cases.items():
+            assert encode_exact_number(lexeme).exact_decimal == expected
+
+    def test_parse_rejects_huge_exponent_document(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            parse_preserving_numbers('{"v": 1e10000000}')
+        assert code_of(exc) == "exact_decimal_length_exceeded"
 
 
 class TestFrozenCommandInputDigest:

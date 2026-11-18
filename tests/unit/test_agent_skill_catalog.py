@@ -1,21 +1,25 @@
 """E-03-4b Skill 导入编排与角色分配服务单元测试（F12/F13）。
 
 覆盖：新建/未变化/需确认/确认更新、缺失依赖记录、许可拒绝、登记失败补偿删除、
-角色分配默认⊆启用前置拒绝与透传回执。
+角色分配默认⊆启用前置拒绝与透传回执；I10 取消语义（waiter 超时/取消后确认退出或
+标未知、发布前门零迟到发布、取消保旧、取消传播不被吞）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import io
+import threading
 import zipfile
 from pathlib import Path
 
 import pytest
 
+import services.agent_service.skills as skills_module
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    AgentValidationError,
     RoleSkillAssignment,
     RoleSkillAssignmentReceipt,
     SkillAssetReceipt,
@@ -28,6 +32,8 @@ from services.agent_service.skills import (
     ManagedSkillStore,
     SkillCatalogService,
     SkillImportStatus,
+    SkillOperationState,
+    SkillOperationTicket,
     SkillPackageImportRequest,
 )
 
@@ -275,6 +281,198 @@ class TestImportLifecycle:
         staging_root = tmp_path / "skills" / ".staging"
         if staging_root.exists():
             assert not list(staging_root.iterdir())
+
+
+class _WorkerBlocker:
+    """worker 阻塞哨兵：模拟「waiter 已放弃、worker 仍在跑」。"""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self._release = threading.Event()
+
+    def block(self, timeout: float = 30.0) -> None:
+        self.started.set()
+        self._release.wait(timeout)
+
+    def release(self) -> None:
+        self._release.set()
+
+
+class _BlockingRegisterDao(FakeCatalogDao):
+    """可阻塞登记的 DAO：卡在「替换已完成、登记未完成」窗口。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.block_registration = False
+        self.register_entered = threading.Event()
+
+    async def register_skill_asset(self, request: SkillAssetRegistration) -> SkillAssetReceipt:
+        if self.block_registration:
+            self.register_entered.set()
+            await asyncio.sleep(60)
+        return await super().register_skill_asset(request)
+
+
+def _ticketed_service(
+    tmp_path: Path,
+    dao: FakeCatalogDao,
+    tickets: list[SkillOperationTicket],
+    *,
+    budget: SkillBudget | None = None,
+) -> tuple[SkillCatalogService, ManagedSkillStore]:
+    store = ManagedSkillStore(str(tmp_path / "skills"))
+
+    def factory(owner: str) -> SkillOperationTicket:
+        ticket = SkillOperationTicket(owner)
+        tickets.append(ticket)
+        return ticket
+
+    service = SkillCatalogService(
+        store,
+        dao,
+        blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
+        budget=budget if budget is not None else SkillBudget(),
+        cancel_exit_timeout=0.05,
+        operation_factory=factory,
+    )
+    return service, store
+
+
+class TestImportCancellation:
+    """I10：waiter 超时/取消须确认 worker 退出或显式标未知；发布前门保证零迟到发布。"""
+
+    async def test_normal_import_records_published_owner_and_exit(self, tmp_path: Path) -> None:
+        tickets: list[SkillOperationTicket] = []
+        service, store = _ticketed_service(tmp_path, FakeCatalogDao(), tickets)
+        receipt = await _import(service, _package())
+        assert receipt.status is SkillImportStatus.NEW
+        assert store.version_dir(SkillVersionRef(receipt.skill_id, 1)).is_dir()
+        ticket = tickets[0]
+        assert ticket.owner.startswith("scope/skill/demo-skill#")
+        assert ticket.claimed == SkillVersionRef(receipt.skill_id, 1)
+        assert ticket.state is SkillOperationState.PUBLISHED
+        assert ticket.exited
+
+    async def test_waiter_timeout_marks_unknown_without_publish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tickets: list[SkillOperationTicket] = []
+        dao = FakeCatalogDao()
+        service, _ = _ticketed_service(tmp_path, dao, tickets, budget=SkillBudget(max_preflight_seconds=0.3))
+        blocker = _WorkerBlocker()
+        original_parse = skills_module.parse_skill_manifest
+
+        def slow_parse(data: bytes, *, directory_name: str):
+            blocker.block()
+            return original_parse(data, directory_name=directory_name)
+
+        monkeypatch.setattr(skills_module, "parse_skill_manifest", slow_parse)
+        try:
+            with pytest.raises(AgentServiceError) as excinfo:
+                await _import(service, _package())
+            # 释放前断言：worker 仍在跑，只能标「未知」，不得假装已停或已发布。
+            ticket = tickets[0]
+            assert ticket.state is SkillOperationState.UNKNOWN
+            assert not ticket.exited
+        finally:
+            blocker.release()
+        assert "skill_time_exceeded" in str(excinfo.value)
+        assert ticket.published_destination is None
+        assert dao.assets == {}
+        assert not any((tmp_path / "skills").rglob("SKILL.md"))
+
+    async def test_cancel_during_preflight_keeps_old_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tickets: list[SkillOperationTicket] = []
+        service, store = _ticketed_service(tmp_path, FakeCatalogDao(), tickets)
+        first = await _import(service, _package())
+        blocker = _WorkerBlocker()
+        original_inspect = skills_module.inspect_skill_package
+
+        def slow_inspect(data: bytes, **kwargs: object):
+            blocker.block()
+            return original_inspect(data, **kwargs)  # type: ignore[arg-type]  # 测试透传预检参数
+
+        monkeypatch.setattr(skills_module, "inspect_skill_package", slow_inspect)
+        task = asyncio.create_task(_import(service, _package(body=b"# Changed"), confirm_update=True))
+        assert await asyncio.to_thread(blocker.started.wait, 10.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as cancel_info:
+            await task
+        assert isinstance(cancel_info.value, asyncio.CancelledError)
+        assert task.cancelled()  # R2：取消未被吞
+        blocker.release()
+        ticket = tickets[-1]
+        assert await asyncio.to_thread(ticket.wait_exit, 10.0)
+        assert ticket.published_destination is None
+        assert ticket.state is SkillOperationState.ABORTED
+        assert store.current_version(first.skill_id) == 1
+        assert not (store.root / first.skill_id / "2").exists()
+
+    async def test_cancel_before_replace_publishes_nothing(self, tmp_path: Path) -> None:
+        tickets: list[SkillOperationTicket] = []
+        dao = FakeCatalogDao()
+        service, store = _ticketed_service(tmp_path, dao, tickets)
+        blocker = _WorkerBlocker()
+        original_publish = store.publish_package
+
+        def slow_publish(*args: object, **kwargs: object):
+            blocker.block()
+            return original_publish(*args, **kwargs)  # type: ignore[arg-type]  # 测试透传发布参数
+
+        store.publish_package = slow_publish  # type: ignore[method-assign]  # 测试注入发布延迟
+        task = asyncio.create_task(_import(service, _package()))
+        assert await asyncio.to_thread(blocker.started.wait, 10.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as cancel_info:
+            await task
+        assert isinstance(cancel_info.value, asyncio.CancelledError)
+        assert task.cancelled()
+        blocker.release()
+        ticket = tickets[0]
+        assert await asyncio.to_thread(ticket.wait_exit, 10.0)
+        assert ticket.published_destination is None  # 发布前门拦下，零替换
+        assert ticket.state is SkillOperationState.ABORTED
+        assert dao.assets == {}
+        assert not any((tmp_path / "skills").rglob("SKILL.md"))
+
+    async def test_publish_gate_refuses_replace_after_cancel(self, tmp_path: Path) -> None:
+        ticket = SkillOperationTicket("scope/skill/demo#unit")
+        calls: list[int] = []
+
+        def replace() -> Path:
+            calls.append(1)
+            return tmp_path
+
+        ticket.cancel()
+        with pytest.raises(AgentValidationError) as gate_error:
+            ticket.publish(replace, destination=tmp_path)
+        assert gate_error.value.code == "skill_cancelled"
+        assert calls == []
+        assert ticket.state is SkillOperationState.ABORTED
+
+    async def test_cancel_after_publish_before_register_removes_new_version(self, tmp_path: Path) -> None:
+        tickets: list[SkillOperationTicket] = []
+        dao = _BlockingRegisterDao()
+        service, store = _ticketed_service(tmp_path, dao, tickets)
+        first = await _import(service, _package())
+        dao.block_registration = True
+        task = asyncio.create_task(_import(service, _package(body=b"# Changed"), confirm_update=True))
+        assert await asyncio.to_thread(dao.register_entered.wait, 10.0)
+        ticket = tickets[-1]
+        assert ticket.published_destination is not None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as cancel_info:
+            await task
+        assert isinstance(cancel_info.value, asyncio.CancelledError)
+        assert task.cancelled()
+        assert ticket.exited
+        assert ticket.published_destination is None
+        assert ticket.state is SkillOperationState.ABORTED
+        assert store.current_version(first.skill_id) == 1  # 取消保旧
+        assert not (store.root / first.skill_id / "2").exists()
+        assert len(dao.assets) == 1
 
 
 class TestRoleSkillAssignmentService:
