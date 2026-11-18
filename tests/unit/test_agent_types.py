@@ -298,7 +298,7 @@ class TestStateEnums:
         assert {item.value for item in EffectState} == {"not_dispatched", "dispatched", "confirmed", "unknown"}
 
     def test_mode_values(self) -> None:
-        assert {item.value for item in Mode} == {"discuss", "plan", "execute"}
+        assert {item.value for item in Mode} == {"discuss", "plan", "execute", "answer"}
 
     def test_purpose_values(self) -> None:
         assert {item.value for item in Purpose} == {

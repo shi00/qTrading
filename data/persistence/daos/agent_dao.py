@@ -173,6 +173,8 @@ from core.agent_types import (
     SourceStopReceipt,
     SourceVersionRef,
     SourceRef,
+    ResearchResult,
+    ResearchResultDraft,
     StartupIsolationRecord,
     SubmissionReceipt,
     ToolGrantFact,
@@ -222,6 +224,7 @@ from core.agent_types import (
     encode_command_receipt,
     encode_data_consent_binding,
     encode_data_consent_claim,
+    encode_research_result_payload,
     encode_source_read_query,
     encode_source_ref,
     encode_submission_receipt,
@@ -245,6 +248,7 @@ from core.agent_types import (
     legacy_data_consent_revoke_input_digest,
     legacy_data_consent_save_input_digest,
     normalize_cleanup_ids,
+    research_result_digest,
     role_skill_assignment_digest,
     sha256_hex,
     slice_body_page,
@@ -10567,6 +10571,187 @@ class AgentDao(BaseDao):
             linked_skill_versions=refs,
             replayed=False,
         )
+
+    # ------------------------------------------------------------------
+    # R2-I08 研究成果保存（唯一执行循环的成果生产者端口）
+    # ------------------------------------------------------------------
+    #
+    # 新增方法（与并行修改 agent_dao 的会话合并时需人工核对，仅此一个签名）：
+    #   async def save_research_result(self, draft: ResearchResultDraft) -> ResearchResult
+
+    async def save_research_result(self, draft: ResearchResultDraft) -> ResearchResult:
+        """可靠保存研究成果版本（单事务：成果 + ``artifact_saved`` 事件 + ``final_saved``）。
+
+        语义：
+
+        - 同内容（规范摘要等于当前最大版）幂等返回原成果，不新增版本、不重复写事件；
+        - 内容不同则追加不可变新版本（``artifact_version`` 单调 +1，不原位覆盖）；
+        - 执行/轮不存在或轮不属于执行 → ``INPUT_INVALID``；
+        - 会话已清理 fence → ``POLICY_DENIED``（不复活已清理会话）；
+        - 成果与事件同事务提交；事务失败不返回已保存成果（R21）。
+        """
+
+        if not isinstance(draft, ResearchResultDraft):
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                "draft must be a ResearchResultDraft",
+                "research_result",
+            )
+        self._check_engine()
+        identity = f"{draft.user_scope}/{draft.execution_id}/{draft.round_id}/{draft.node_id}"
+        digest = research_result_digest(draft)
+        payload = encode_research_result_payload(draft, final_output_saved=True)
+        artifact_id = stable_id(
+            "research_result",
+            [draft.user_scope, draft.execution_id, draft.round_id, draft.node_id, draft.result_kind],
+        )
+        now = datetime.now(UTC)
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            # 1. execution 行锁（锁序 execution → session，与既有事件/派发路径一致）。
+            execution_row = (
+                await conn.execute(
+                    sa.select(AgentExecution.execution_id, AgentExecution.session_id)
+                    .where(
+                        AgentExecution.user_scope == draft.user_scope,
+                        AgentExecution.execution_id == draft.execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if execution_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "execution not found", identity)
+            if execution_row.session_id is not None and execution_row.session_id != draft.session_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "session does not belong to execution",
+                    identity,
+                )
+            # 2. session 行锁（事件水位单调，R22）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq)
+                    .where(
+                        AgentSession.user_scope == draft.user_scope,
+                        AgentSession.session_id == draft.session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if session_row is None:
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session not found", identity)
+            # 删除 fence 门（D08）：清理后会话不得再保存成果（含同内容重放）。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=draft.user_scope,
+                session_id=draft.session_id,
+                identity=identity,
+            )
+            # 3. 轮归属核定（§9.7：成果必须属于原执行轮）。
+            round_row = (
+                await conn.execute(
+                    sa.select(AgentRound.round_id, AgentRound.execution_id).where(
+                        AgentRound.user_scope == draft.user_scope,
+                        AgentRound.round_id == draft.round_id,
+                    )
+                )
+            ).first()
+            if round_row is None or round_row.execution_id != draft.execution_id:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "round does not belong to execution",
+                    identity,
+                )
+            # 4. 当前最大版本与同内容幂等判定。
+            head = (
+                await conn.execute(
+                    sa.select(AgentArtifact.artifact_version, AgentArtifact.result_digest)
+                    .where(
+                        AgentArtifact.user_scope == draft.user_scope,
+                        AgentArtifact.artifact_id == artifact_id,
+                    )
+                    .order_by(AgentArtifact.artifact_version.desc())
+                    .limit(1)
+                )
+            ).first()
+            if head is not None and head.result_digest == digest:
+                await conn.execute(
+                    sa.update(AgentRound)
+                    .where(
+                        AgentRound.user_scope == draft.user_scope,
+                        AgentRound.round_id == draft.round_id,
+                    )
+                    .values(final_saved=True, updated_at=now)
+                )
+                return ResearchResult.from_draft(
+                    draft,
+                    artifact_id=artifact_id,
+                    artifact_version=int(head.artifact_version),
+                )
+            version = 1 if head is None else int(head.artifact_version) + 1
+            await conn.execute(
+                sa.insert(AgentArtifact).values(
+                    user_scope=draft.user_scope,
+                    artifact_id=artifact_id,
+                    artifact_version=version,
+                    session_id=draft.session_id,
+                    execution_id=draft.execution_id,
+                    round_id=draft.round_id,
+                    artifact_kind=draft.result_kind,
+                    input_revision=draft.input_revision,
+                    actual_input_digest=draft.actual_input_digest,
+                    actual_model_ref=draft.actual_model_ref,
+                    summary=draft.summary,
+                    body_text=draft.body_text,
+                    body_ref=None,
+                    result_payload=decode_json_doc(payload),
+                    result_digest=digest,
+                    source_available_state=draft.source_available_state,
+                    published_at=now,
+                )
+            )
+            await conn.execute(
+                sa.update(AgentRound)
+                .where(
+                    AgentRound.user_scope == draft.user_scope,
+                    AgentRound.round_id == draft.round_id,
+                )
+                .values(final_saved=True, updated_at=now)
+            )
+            # 5. 同事务可靠事件（观察侧按 after_seq 追平；同身份重放不重复）。
+            await self._append_session_event(
+                conn,
+                user_scope=draft.user_scope,
+                session_id=draft.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [draft.user_scope, draft.execution_id, "research_result_saved", str(version)],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=f"research_result_saved:{artifact_id}:{version}",
+                ),
+                event_kind=EventKind.ARTIFACT_SAVED,
+                payload_kind="research_result",
+                subject_id=artifact_id,
+                subject_revision=version,
+                payload={
+                    "schema_version": 1,
+                    "execution_id": draft.execution_id,
+                    "round_id": draft.round_id,
+                    "node_id": draft.node_id,
+                    "artifact_id": artifact_id,
+                    "artifact_version": version,
+                    "result_kind": draft.result_kind,
+                    "result_digest": digest,
+                },
+                occurred_at=now,
+                session_event_seq=int(session_row.event_seq),
+            )
+        return ResearchResult.from_draft(draft, artifact_id=artifact_id, artifact_version=version)
 
 
 def _validate_skill_asset_request(request: SkillAssetRegistration, identity: str) -> None:
