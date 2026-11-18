@@ -214,6 +214,7 @@ httpx==0.28.1
     #   pydantic-ai-harness
 httpx2==2.16.0
     # via
+    #   astockscreener (pyproject.toml)
     #   fastmcp-slim
     #   genai-prices
     #   huggingface-hub

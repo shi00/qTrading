@@ -73,6 +73,7 @@ dependencies = [
     "pypdf==6.21.4",  # Agent 附件 PDF 文本抽取（E-01）：纯 Python 实现、无系统依赖，输出文本边界可测 → == 精确固定（Q5 裁决）；6.19.0→6.21.4 修复 CVE-2026-113789/119208 等（pip-audit CI 门禁）
     "jsonschema>=4.26.0",  # Agent MCP 工具参数闭合校验（E-02-5）：MCP 目录 schema → 参数全量校验的正式适配器
     "fastmcp>=4.1.4",  # Agent MCP 真实传输正式客户端（E-02-5，services/agent_service/mcp_fastmcp.py）：运行期硬依赖，缺失将导致包导入与附件 worker 子进程入口失败；Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2
+    "httpx2==2.16.0",  # Agent MCP 传输层（I07 复核）：mcp_fastmcp.py 直接 import httpx2，此前仅由 fastmcp-slim/genai-prices/mcp 等传递引入 → 显式声明防上游变更；与 Agent 栈一致精确固定
 ]
 
 [project.optional-dependencies]

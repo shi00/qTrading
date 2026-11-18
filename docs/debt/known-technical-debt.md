@@ -76,6 +76,8 @@
 | P3-AgentSkill-VersionReadNoRehash | 已发布 Skill 版本的幂等匹配只比对 `.skill-manifest.json` 与入站 inspection，受管读取/服务侧不重算 digest（当前无正式 Harness loader 接入执行链） | P3 | ① 正式 Harness loader 接入执行链前；② 或出现已发布版本目录被就地篡改/链接替换的报告时 |
 | P3-AgentResearchBoundary-Unwired | `ResearchBoundary` 能力类已实现但生产组装从未实例化；MCP `ToolCallRequest`/claim 只绑 schema/参数/审核范围摘要，不绑 research boundary 与源 claim | P3 | ① Agent 组装接入 capability（讨论/执行模式、来源撤用、窗口）时；② 或出现禁用源仍被 MCP 派发的实例时 |
 | P3-AgentSkill-InvocationFlags-Unwired | `SKILL.md` 的 `disable-model-invocation`/`user-invocable` 已解析进 `SkillManifest`，但全仓无消费方；原文件保版可重读 | P3 | ① 正式 Harness loader/技能选择器接入时；② 或出现禁用的 Skill 被模型自动调用的实例时 |
+| P3-AgentAttachment-CsvHeader-AppConfirm | `csv_header_confirmed` 仅由 `AttachmentExtractionRequest` 透传，APP/UI 无「用户确认表头」入口，默认 `False` → 不扣首条（偏严格，不少算/不丢数据） | P3 | ① 附件确认 UI/服务编排落地时；② 或出现用户已确认表头却仍被少算/多扣的实例时 |
+| P3-AgentAttachment-Openpyxl-PrivateSteps | XLSX 解析复刻 `load_workbook` 私有步骤，延迟导入 `openpyxl.reader.excel.ExcelReader` 与 `openpyxl.styles.stylesheet.apply_stylesheet`；已有容器前置预算保护 | P3 | ① openpyxl 主/次版本升级前；② 或出现受支持 XLSX 解析结构错乱/异常时 |
 
 ## 技术债清单
 
@@ -849,6 +851,34 @@ Agent 组装接入 capability 时，把讨论/计划模式、来源撤用、上�
 **期望的最终解法**
 
 loader/技能选择器接入时按旗标约束「模型可自动调用」与「用户可显式调用」；不得为元数据副本另建第二正本，仍以版本内 `SKILL.md` 为唯一来源。
+
+#### P3-AgentAttachment-CsvHeader-AppConfirm：CSV 表头确认缺 APP 层来源（I23）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentAttachment-CsvHeader-AppConfirm** | `csv_header_confirmed` 仅由 `AttachmentExtractionRequest` 透传，APP/UI 无「用户确认表头」入口，默认 `False` → 不扣首条（偏严格，不少算/不丢数据） | ① 附件确认 UI/服务编排落地时；② 或出现用户已确认表头却仍被少算/多扣的实例时 |
+
+**产生背景与现状**
+
+PR #2281 检视 I23 修复后，`csv_header_confirmed` 已作为显式请求字段贯穿 `attachments.py → worker → parse_attachment`，默认 `False`。复核确认：APP/UI 层没有任何提供该确认的来源（全仓仅服务层与测试引用），因此当前行为恒为「未确认 → 不扣首条」。方向偏严格：不会把数据行当表头扣掉，也不影响行数限额的保守判定。
+
+**期望的最终解法**
+
+附件确认 UI/服务编排落地时提供「首条是表头」的显式确认并写入请求字段；在确认前保持默认严格语义，不得改为「无字段即视为表头」。
+
+#### P3-AgentAttachment-Openpyxl-PrivateSteps：XLSX 解析依赖 openpyxl 私有步骤（I08）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-AgentAttachment-Openpyxl-PrivateSteps** | XLSX 解析复刻 `load_workbook` 私有步骤，延迟导入 `openpyxl.reader.excel.ExcelReader` 与 `openpyxl.styles.stylesheet.apply_stylesheet`；已有容器前置预算保护 | ① openpyxl 主/次版本升级前；② 或出现受支持 XLSX 解析结构错乱/异常时 |
+
+**产生背景与现状**
+
+PR #2281 I08 修复在 openpyxl 分配前增加容器预算与结构门，但为在「预算门之后、展开之前」取得共享字符串与样式，复刻了 `load_workbook` 的私有步骤（`ExcelReader` 实例化与 `apply_stylesheet` 调用）。这些符号不在 openpyxl 公共 API 契约内，升级可能改变签名/顺序；当前锁定 `openpyxl>=3.1.5` 下工作正常并有结构/限额测试。
+
+**期望的最终解法**
+
+openpyxl 升级时复核私有步骤签名与调用顺序，或改用公开 API（如 `load_workbook(read_only=True)` + 预检查）替代；升级前跑 XLSX 结构/类型/限额全量用例。
 
 ## 已接受的权衡（Accepted Tradeoffs）
 
