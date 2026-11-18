@@ -270,6 +270,7 @@ def _render_panel(
         on_toggle_execution=cbs.get("on_toggle_execution", lambda *_a: None),
         on_select_execution=cbs.get("on_select_execution", lambda *_a: None),
         on_load_artifact=cbs.get("on_load_artifact", lambda *_a: None),
+        on_load_draft=cbs.get("on_load_draft", lambda: None),
     )
     run_mount_effects(component)
     result = render_once(component)

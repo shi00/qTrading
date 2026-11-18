@@ -72,6 +72,9 @@ class _AnswerGuardConn:
             self.writes.append("insert")
         elif sql.lstrip().upper().startswith("UPDATE"):
             self.writes.append("update")
+        elif "FROM agent_session" in sql:
+            self.reads.append("agent_session")
+            result.first.return_value = SimpleNamespace(event_seq=0)
         elif "FROM agent_decision" in sql:
             self.reads.append("agent_decision")
             result.first.return_value = self.decision
@@ -248,7 +251,8 @@ class TestSaveAnswerFirstEffectGuards:
         assert receipt.decision_id == "d-1"
         assert receipt.delivery_state is DeliveryState.NOT_DELIVERED
         assert receipt.consumption_state is ConsumptionState.NOT_CONSUMED
-        assert conn.writes == ["insert", "update"]
+        # 命令 + 决定 CAS，随后同事务可靠事件（消息行 + 会话水位）。
+        assert conn.writes == ["insert", "update", "insert", "update"]
 
     async def test_replay_reads_original_fact_without_revalidation(self) -> None:
         """重放（决定已指向同命令）即便问题现已过期，也返回原回执且零校验读。"""
@@ -349,7 +353,8 @@ class TestConsumeAnswerFirstEffectGuards:
 
         assert fact.decision_id == "d-1"
         assert fact.consumption_state is ConsumptionState.CONSUMED
-        assert conn.writes == ["update", "update"]
+        # 命令消费 + 决定 CAS，随后同事务可靠事件（消息行 + 会话水位）。
+        assert conn.writes == ["update", "update", "insert", "update"]
 
     async def test_already_consumed_replay_skips_revalidation(self) -> None:
         consumed_at = datetime.now(UTC)

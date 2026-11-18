@@ -306,6 +306,6 @@ class TestDestructiveCallSites:
         assert _confirm_dialog_destructive_flags("ui/views/settings_tabs/ai_brain_tab.py") == [True, True, True]
 
     def test_non_destructive_call_sites_keep_default(self):
-        """非破坏性确认 (AI 外发确认 / 不可计价"继续" / 线程池保存确认) 保持默认 → 非危险色。"""
-        assert _confirm_dialog_destructive_flags("ui/views/screener_view.py") == [None, None]
+        """AI 外发确认 / 不可计价"继续"保持默认；其余新增确认（暂存方案/方案覆盖/恢复默认提示词）均为破坏性。"""
+        assert _confirm_dialog_destructive_flags("ui/views/screener_view.py") == [None, None, True, True, True]
         assert _confirm_dialog_destructive_flags("ui/views/settings_tabs/system_tab.py") == [None]
