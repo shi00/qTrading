@@ -694,7 +694,7 @@ class AgentService:
         dispatcher = self._dispatcher
         if dispatcher is None:
             return receipt, None
-        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope)
+        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope, mode=request.mode)
         return receipt, outcome
 
     async def submit_and_dispatch(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionOutcome:

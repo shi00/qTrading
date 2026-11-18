@@ -115,11 +115,17 @@ class EffectState(Enum):
 
 
 class Mode(Enum):
-    """研究模式：仅用户选择或明确要求决定（F21）。"""
+    """研究模式：仅用户选择或明确要求决定（F21）。
+
+    ``ANSWER`` 为直答模式：不调用研究工具、不委派、不启动研究操作，直接给出
+    回答（R2-I08）；``DISCUSS`` 只理解获准资料，``PLAN`` 只交付方法，
+    ``EXECUTE`` 才启动研究操作。
+    """
 
     DISCUSS = "discuss"
     PLAN = "plan"
     EXECUTE = "execute"
+    ANSWER = "answer"
 
 
 class Purpose(Enum):
@@ -603,6 +609,254 @@ class ProvenanceRef:
     selected_range_digest: str
     representation_version: str
     representation_digest: str
+
+
+# ---------------------------------------------------------------------------
+# 研究成果合同（DD §3.5：ResearchResult 是已可靠保存的成果版本）
+# ---------------------------------------------------------------------------
+
+
+def _require_result_text(value: object, path: str) -> None:
+    if not isinstance(value, str) or not value:
+        _fail("invalid_value", path)
+
+
+def _require_text_tuple(value: object, path: str) -> None:
+    if not isinstance(value, tuple):
+        _fail("invalid_type", path)
+    for index, item in enumerate(value):
+        _require_result_text(item, f"{path}[{index}]")
+
+
+def _require_json_object(value: object, path: str) -> None:
+    if not isinstance(value, str):
+        _fail("invalid_type", path)
+    if not isinstance(decode_json_doc(value), dict):
+        _fail("invalid_type", path)
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchResultDraft:
+    """待保存的成果内容（DD §3.5；保存成功后才是 :class:`ResearchResult`）。
+
+    数据质量字段缺失一律用 ``None`` / 空元组 / 显式 unknown 表示，禁止填充
+    业务上合法的具体值（R21）。``body_text`` 与结构化输出至少一项非空：
+    空成果不得伪装成已保存成果。
+    """
+
+    user_scope: str
+    session_id: str
+    execution_id: str
+    round_id: str
+    node_id: str
+    input_revision: int
+    actual_input_digest: str
+    actual_model_ref: str
+
+    result_kind: str
+    summary: str | None
+    key_points: tuple[str, ...]
+    body_text: str | None
+    structured_fields: CanonicalJson | None
+    object_rows: tuple[CanonicalJson, ...]
+
+    evidence_links: tuple[str, ...]
+    source_available_state: str
+    coverage: str | None
+    missing_fields: tuple[str, ...]
+    failed_signal_dates: tuple[str, ...]
+    data_warnings: tuple[str, ...]
+    limitations: tuple[str, ...]
+    verification_state: str
+
+    execution_state: str
+    goal_coverage: str
+    convergence_confirmed: bool
+    unknown_operation_refs: tuple[str, ...]
+    ledger_refs: tuple[str, ...]
+    plan_version: int | None
+    parent_artifact_refs: tuple[str, ...]
+    source_refs: tuple[SourceVersionRef, ...]
+
+    def __post_init__(self) -> None:
+        for name in ("user_scope", "session_id", "execution_id", "round_id", "node_id", "actual_model_ref"):
+            _require_result_text(getattr(self, name), f"$.{name}")
+        if isinstance(self.input_revision, bool) or not isinstance(self.input_revision, int) or self.input_revision < 1:
+            _fail("invalid_revision", "$.input_revision")
+        if not is_digest(self.actual_input_digest):
+            _fail("invalid_digest", "$.actual_input_digest")
+        if self.result_kind not in ARTIFACT_KINDS:
+            _fail("invalid_artifact_kind", "$.result_kind")
+
+        if self.summary is not None:
+            _require_result_text(self.summary, "$.summary")
+        _require_text_tuple(self.key_points, "$.key_points")
+        if self.body_text is not None:
+            _require_result_text(self.body_text, "$.body_text")
+        if self.structured_fields is not None:
+            _require_json_object(self.structured_fields, "$.structured_fields")
+        if not isinstance(self.object_rows, tuple):
+            _fail("invalid_type", "$.object_rows")
+        for index, row in enumerate(self.object_rows):
+            _require_json_object(row, f"$.object_rows[{index}]")
+
+        _require_text_tuple(self.evidence_links, "$.evidence_links")
+        _require_result_text(self.source_available_state, "$.source_available_state")
+        if self.coverage is not None:
+            _require_result_text(self.coverage, "$.coverage")
+        for name in (
+            "missing_fields",
+            "failed_signal_dates",
+            "data_warnings",
+            "limitations",
+            "unknown_operation_refs",
+            "ledger_refs",
+            "parent_artifact_refs",
+        ):
+            _require_text_tuple(getattr(self, name), f"$.{name}")
+        if self.verification_state not in {item.value for item in VerificationState}:
+            _fail("invalid_verification_state", "$.verification_state")
+        if self.execution_state not in DISPLAY_STATES:
+            _fail("invalid_display_state", "$.execution_state")
+        if self.goal_coverage not in GOAL_COVERAGES:
+            _fail("invalid_goal_coverage", "$.goal_coverage")
+        if not isinstance(self.convergence_confirmed, bool):
+            _fail("invalid_type", "$.convergence_confirmed")
+        if self.plan_version is not None and (
+            isinstance(self.plan_version, bool) or not isinstance(self.plan_version, int) or self.plan_version < 1
+        ):
+            _fail("invalid_revision", "$.plan_version")
+        if not isinstance(self.source_refs, tuple) or any(
+            not isinstance(ref, SourceVersionRef) for ref in self.source_refs
+        ):
+            _fail("invalid_type", "$.source_refs")
+        if not (self.summary or self.key_points or self.body_text or self.structured_fields or self.object_rows):
+            _fail("empty_result", "$")
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchResult(ResearchResultDraft):
+    """已可靠保存的成果版本（DD §3.5）：带成果身份与保存事实，不是模型最终文本块。"""
+
+    artifact_id: str
+    artifact_version: int
+    final_output_saved: bool
+
+    @classmethod
+    def from_draft(cls, draft: ResearchResultDraft, *, artifact_id: str, artifact_version: int) -> ResearchResult:
+        """已保存成果：内容字段原样取自 draft，保存事实由调用方核定。"""
+
+        return cls(
+            user_scope=draft.user_scope,
+            session_id=draft.session_id,
+            execution_id=draft.execution_id,
+            round_id=draft.round_id,
+            node_id=draft.node_id,
+            input_revision=draft.input_revision,
+            actual_input_digest=draft.actual_input_digest,
+            actual_model_ref=draft.actual_model_ref,
+            result_kind=draft.result_kind,
+            summary=draft.summary,
+            key_points=draft.key_points,
+            body_text=draft.body_text,
+            structured_fields=draft.structured_fields,
+            object_rows=draft.object_rows,
+            evidence_links=draft.evidence_links,
+            source_available_state=draft.source_available_state,
+            coverage=draft.coverage,
+            missing_fields=draft.missing_fields,
+            failed_signal_dates=draft.failed_signal_dates,
+            data_warnings=draft.data_warnings,
+            limitations=draft.limitations,
+            verification_state=draft.verification_state,
+            execution_state=draft.execution_state,
+            goal_coverage=draft.goal_coverage,
+            convergence_confirmed=draft.convergence_confirmed,
+            unknown_operation_refs=draft.unknown_operation_refs,
+            ledger_refs=draft.ledger_refs,
+            plan_version=draft.plan_version,
+            parent_artifact_refs=draft.parent_artifact_refs,
+            source_refs=draft.source_refs,
+            artifact_id=artifact_id,
+            artifact_version=artifact_version,
+            final_output_saved=True,
+        )
+
+    def __post_init__(self) -> None:
+        ResearchResultDraft.__post_init__(self)
+        _require_result_text(self.artifact_id, "$.artifact_id")
+        if (
+            isinstance(self.artifact_version, bool)
+            or not isinstance(self.artifact_version, int)
+            or self.artifact_version < 1
+        ):
+            _fail("invalid_revision", "$.artifact_version")
+        if self.final_output_saved is not True:
+            _fail("result_not_saved", "$.final_output_saved")
+
+
+def encode_research_result_payload(draft: ResearchResultDraft, *, final_output_saved: bool) -> CanonicalJson:
+    """成果内容 → 保存载荷（DD §9.7：正文单独存 ``agent_artifact.body_text``）。
+
+    载荷只承载结构/限制/证据与正文定位，不重复存正文；正文能否重建由
+    ``body_saved`` 显式标记，不以摘要非空冒充完整成果（R21）。
+    """
+
+    return json_doc(
+        {
+            "schema_version": 1,
+            "identity": {
+                "user_scope": draft.user_scope,
+                "session_id": draft.session_id,
+                "execution_id": draft.execution_id,
+                "round_id": draft.round_id,
+                "node_id": draft.node_id,
+                "input_revision": draft.input_revision,
+                "actual_input_digest": draft.actual_input_digest,
+                "actual_model_ref": draft.actual_model_ref,
+            },
+            "output": {
+                "result_kind": draft.result_kind,
+                "summary": draft.summary,
+                "key_points": list(draft.key_points),
+                "body_saved": draft.body_text is not None,
+                "body_text_digest": (None if draft.body_text is None else sha256_hex(draft.body_text.encode("utf-8"))),
+                "structured_fields": (
+                    None if draft.structured_fields is None else decode_json_doc(draft.structured_fields)
+                ),
+                "object_rows": [decode_json_doc(row) for row in draft.object_rows],
+            },
+            "trust": {
+                "evidence_links": list(draft.evidence_links),
+                "source_available_state": draft.source_available_state,
+                "coverage": draft.coverage,
+                "missing_fields": list(draft.missing_fields),
+                "failed_signal_dates": list(draft.failed_signal_dates),
+                "data_warnings": list(draft.data_warnings),
+                "limitations": list(draft.limitations),
+                "verification_state": draft.verification_state,
+            },
+            "completion": {
+                "execution_state": draft.execution_state,
+                "goal_coverage": draft.goal_coverage,
+                "final_output_saved": final_output_saved,
+                "convergence_confirmed": draft.convergence_confirmed,
+                "unknown_operation_refs": list(draft.unknown_operation_refs),
+            },
+            "usage": {"ledger_refs": list(draft.ledger_refs)},
+            "trace": {
+                "plan_version": draft.plan_version,
+                "parent_artifact_refs": list(draft.parent_artifact_refs),
+                "source_refs": [encode_source_version_ref(ref) for ref in draft.source_refs],
+            },
+        }
+    )
+
+
+def research_result_digest(draft: ResearchResultDraft) -> str:
+    """成果规范摘要（保存后写入 ``agent_artifact.result_digest``）。"""
+
+    return sha256_hex(encode_research_result_payload(draft, final_output_saved=True))
 
 
 def to_wire_dict(value: object) -> dict[str, Any]:

@@ -24,6 +24,7 @@ from app.agent_wiring import AGENT_RUNTIME_LAUNCH_ALLOWED_ENV, agent_runtime_lau
 from core.agent_types import (
     CommandRef,
     CommitState,
+    Mode,
     PlanNodeSpec,
     PlanSpecProposal,
     SubmissionReceipt,
@@ -34,6 +35,7 @@ from core.agent_types import (
 from core.model_management_types import ChatTurnOutcome, ChatTurnResponse, ExecutionSnapshot
 from services.agent_service.dispatch import (
     DISPATCH_CLOSED,
+    MODE_RESEARCH_DISABLED,
     NOT_COMMITTED,
     PLAN_UNAVAILABLE,
     ResearchDispatcher,
@@ -192,7 +194,7 @@ class _FakeDao:
         return self._receipt
 
 
-def _accept_request() -> Any:
+def _accept_request(*, mode: Any = None) -> Any:
     from core.agent_types import AcceptRequest, Mode, Purpose
 
     return AcceptRequest(
@@ -204,7 +206,7 @@ def _accept_request() -> Any:
         expected_revision=0,
         node_id="root",
         workflow_id=_WORKFLOW_ID,
-        mode=Mode.DISCUSS,
+        mode=Mode.EXECUTE if mode is None else mode,
         purpose=Purpose.CONCEPT,
         text="研究三家公司",
         manifest_payload=json_doc({"schema_version": 1, "text": "研究三家公司"}),
@@ -330,6 +332,33 @@ def test_dispatch_uncommitted_receipt_is_zero_dispatch() -> None:
 
     assert outcome.submitted is False
     assert outcome.reason == f"{NOT_COMMITTED}:{CommitState.NOT_COMMITTED.value}"
+    assert submit.calls == []
+
+
+def test_dispatch_non_execute_mode_is_zero_dispatch() -> None:
+    submit = _RecordingSubmitter()
+    dispatcher = _dispatcher(gate=_FakeGate(closed=False), submit=submit)
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE, mode=Mode.DISCUSS))
+
+    assert outcome.submitted is False
+    assert outcome.reason == f"{MODE_RESEARCH_DISABLED}:{Mode.DISCUSS.value}"
+    assert submit.calls == []
+
+
+def test_submit_in_discuss_mode_does_not_start_research() -> None:
+    submit = _RecordingSubmitter()
+    dispatcher = _dispatcher(gate=_FakeGate(closed=False), submit=submit)
+    dao = _FakeDao(_receipt())
+    service = AgentService(cast(Any, dao), dispatcher=dispatcher)
+
+    outcome = asyncio.run(
+        service.submit_and_dispatch(_accept_request(mode=Mode.DISCUSS), command=cast(Any, _receipt().command))
+    )
+
+    assert outcome.dispatch is not None
+    assert outcome.dispatch.submitted is False
+    assert outcome.dispatch.reason == f"{MODE_RESEARCH_DISABLED}:{Mode.DISCUSS.value}"
     assert submit.calls == []
 
 

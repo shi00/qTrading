@@ -24,6 +24,7 @@ from typing import Any, Final
 
 from core.agent_types import (
     CommitState,
+    Mode,
     PlanSpecProposal,
     SubmissionReceipt,
     derive_round_id,
@@ -41,6 +42,8 @@ DISPATCH_CLOSED: Final[str] = "dispatch_closed"
 PLAN_UNAVAILABLE: Final[str] = "plan_unavailable"
 #: 零派发原因：受理事实未提交，不得投递。
 NOT_COMMITTED: Final[str] = "not_committed"
+#: 零派发原因：非执行模式（讨论/计划/直答）不得启动研究操作（F21 / R2-I08）。
+MODE_RESEARCH_DISABLED: Final[str] = "mode_research_disabled"
 
 #: 计划来源端口：``(user_scope, execution_id) -> 已保存计划版``；不可得返回 None。
 PlanSpecProvider = Callable[[str, str], Awaitable[PlanSpecProposal | None]]
@@ -89,8 +92,15 @@ class ResearchDispatcher:
         self._plan_provider = plan_provider
         self._read_result = read_result
 
-    async def dispatch(self, receipt: SubmissionReceipt, *, user_scope: str) -> DispatchOutcome:
-        """把已可靠保存的受理投递给父研究 workflow；不可派发时如实零派发。"""
+    async def dispatch(
+        self, receipt: SubmissionReceipt, *, user_scope: str, mode: Mode | None = None
+    ) -> DispatchOutcome:
+        """把已可靠保存的受理投递给父研究 workflow；不可派发时如实零派发。
+
+        ``mode`` 由调用方传入受理时冻结的模式：讨论/计划/直答只交付答案或计划，
+        **不启动研究操作**（F21 / R2-I08）。``None`` 保持既有调用语义（未提供模式
+        时不额外收窄），生产受理入口始终传入冻结模式。
+        """
 
         execution_id = receipt.execution_id
         if receipt.commit_state is not CommitState.COMMITTED:
@@ -100,6 +110,19 @@ class ResearchDispatcher:
                 receipt.workflow_id,
                 False,
                 f"{NOT_COMMITTED}:{receipt.commit_state.value}",
+            )
+        if mode is not None and mode is not Mode.EXECUTE:
+            logger.info(
+                "[ResearchDispatch] non-execute mode, zero dispatch (execution=%s workflow=%s mode=%s)",
+                execution_id,
+                receipt.workflow_id,
+                mode.value,
+            )
+            return DispatchOutcome(
+                execution_id,
+                receipt.workflow_id,
+                False,
+                f"{MODE_RESEARCH_DISABLED}:{mode.value}",
             )
         if self._gate.dispatch_closed():
             logger.info(
