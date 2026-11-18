@@ -13,17 +13,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
     AgentValidationError,
     CommitState,
     CommandRef,
+    CostProjection,
     Mode,
     Purpose,
     SourceKind,
@@ -34,6 +39,11 @@ from core.agent_types import (
 )
 from data.persistence.daos.agent_dao import AgentDao
 from services.agent_service.comparison import (
+    COMPARISON_COST_FAILED,
+    COMPARISON_COST_KNOWN,
+    COMPARISON_COST_PARTIAL,
+    COMPARISON_COST_RESERVED,
+    COMPARISON_COST_UNKNOWN,
     COMPARISON_SESSION_SLOTS,
     COMPARISON_TOTAL_SLOTS,
     STOP_REASON_SHARED_SOURCE,
@@ -55,6 +65,7 @@ from services.agent_service.comparison import (
     plan_lane_retry,
     require_lane_connection,
 )
+from services.agent_service.dispatch import DispatchOutcome
 from services.agent_service.service import AgentService
 
 pytestmark = pytest.mark.unit
@@ -863,3 +874,571 @@ class TestDriveEdgeCases:
         view = await drive_comparison_group(group, start, observe)
 
         assert (view.group_state, view.goal_coverage) == ("complete", "full")
+
+
+# ---------------------------------------------------------------------------
+# R2-I07：逐路编排（启动失败隔离/取消传播）、逐路费用、缺口与重试接线
+# ---------------------------------------------------------------------------
+
+
+def _cost(
+    known: str | None,
+    *,
+    unpriced: int = 0,
+    reserved: str | None = None,
+    read_state: str = "ok",
+) -> CostProjection:
+    return CostProjection(
+        read_state=read_state,
+        read_error=None if read_state == "ok" else "ledger_unavailable",
+        ledger_refs=("inv-1",),
+        attempt_refs=(),
+        zero_cost_attempts=0,
+        known_cny=None if known is None else Decimal(known),
+        reserved_cny=None if reserved is None else Decimal(reserved),
+        unpriced_attempts=unpriced,
+        unpriced_input_tokens=0,
+        unpriced_output_tokens=0,
+    )
+
+
+def _row(
+    group: FrozenComparisonGroup,
+    lane_ref: str,
+    state: str,
+    execution_id: str,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        comparison_group_ref=group.group_ref,
+        comparison_lane_ref=lane_ref,
+        display_state=state,
+        execution_id=execution_id,
+    )
+
+
+def _submission(group: FrozenComparisonGroup) -> ComparisonSubmissionRequest:
+    return ComparisonSubmissionRequest(
+        user_scope=group.user_scope,
+        session_id=group.session_id,
+        source_module=group.source_module,
+        group_command_id="cmp-1",
+        shared=_shared(),
+        lanes=(_selection("conn-a"), _selection("conn-b")),
+    )
+
+
+class _RunDao:
+    """比较组读写最小面：manifest/会话/受理/费用引用（只读 + 受理）。"""
+
+    def __init__(
+        self,
+        group: FrozenComparisonGroup,
+        executions: list[SimpleNamespace],
+        *,
+        fail_lanes: frozenset[str] = frozenset(),
+    ) -> None:
+        self.group = group
+        self.executions = executions
+        self.fail_lanes = fail_lanes
+        self.accept_calls: list[Any] = []
+        self.session_reads = 0
+        self.cost_refs: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+
+    async def read_comparison_manifest(self, *, user_scope: str, group_ref: str) -> str | None:
+        assert (user_scope, group_ref) == (self.group.user_scope, self.group.group_ref)
+        return self.group.manifest_payload
+
+    async def get_session_read(self, query: Any, *, user_scope: str) -> Any:
+        self.session_reads += 1
+        return SimpleNamespace(executions=tuple(self.executions))
+
+    async def accept_request(self, request: Any) -> Any:
+        self.accept_calls.append(request)
+        lane_ref = request.comparison_lane_ref
+        if lane_ref in self.fail_lanes:
+            raise AgentServiceError(AgentErrorCode.REVISION_CONFLICT, "cannot accept lane", "u1/s1")
+        return SubmissionReceipt(
+            command=CommandRef(
+                user_scope=request.user_scope,
+                source_module=request.source_module,
+                business_request_id=request.business_request_id,
+                command_id=request.client_command_id,
+                expected_revision=request.expected_revision,
+            ),
+            command_record_id=f"cmd-{lane_ref}",
+            session_id=request.session_id,
+            execution_id=f"exec-{lane_ref}",
+            workflow_id=request.workflow_id,
+            intent_digest="0" * 64,
+            commit_state=CommitState.COMMITTED,
+            verified_at="2026-11-16T00:00:00.000000Z",
+            next_action=None,
+        )
+
+    async def read_execution_cost_refs(
+        self, *, user_scope: str, execution_id: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+        return self.cost_refs.get(execution_id, ((), ()))
+
+
+class _RunDispatcher:
+    """派发端口替身：按执行身份拒绝/取消，记录调用顺序。"""
+
+    def __init__(
+        self,
+        *,
+        reject: dict[str, str] | None = None,
+        cancel_at_call: int | None = None,
+    ) -> None:
+        self.reject = reject or {}
+        self.cancel_at_call = cancel_at_call
+        self.calls: list[str] = []
+
+    async def dispatch(self, receipt: Any, *, user_scope: str, mode: Any = None) -> DispatchOutcome:
+        self.calls.append(receipt.execution_id)
+        if self.cancel_at_call is not None and len(self.calls) == self.cancel_at_call:
+            raise asyncio.CancelledError
+        reason = self.reject.get(receipt.execution_id)
+        if reason is not None:
+            return DispatchOutcome(receipt.execution_id, receipt.workflow_id, False, reason)
+        return DispatchOutcome(receipt.execution_id, receipt.workflow_id, True, None, "round-1")
+
+
+class _RunLedger:
+    def __init__(self, attempts: dict[str, list[dict[str, Any]]] | None = None) -> None:
+        self.attempts = attempts or {}
+
+    async def read_request_attempts(self, *, invocation_id: str) -> list[dict[str, Any]]:
+        return list(self.attempts.get(invocation_id, []))
+
+    async def read_active_reserved_cny(self, *, invocation_ids: Any) -> dict[str, Decimal]:
+        return {}
+
+
+def _run_service(dao: Any, dispatcher: Any = None, ledger: Any = None) -> AgentService:
+    return AgentService(cast(AgentDao, dao), cast(Any, ledger), dispatcher=cast(Any, dispatcher))
+
+
+class TestLaneStartFailureIsolation:
+    @pytest.mark.asyncio
+    async def test_one_lane_start_failure_does_not_block_others(self) -> None:
+        group = _group((_selection("conn-a"), _selection("conn-b"), _selection("conn-c")))
+        started: list[str] = []
+
+        async def start(lane: Any) -> str:
+            started.append(lane.lane_ref)
+            if lane.lane_ref == group.lanes[1].lane_ref:
+                raise RuntimeError("dispatch boom")
+            return f"wf-{lane.lane_ref}"
+
+        async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            return {
+                lane_ref: ComparisonLaneObservation(lane_ref=lane_ref, display_state="complete", reliable_result=True)
+                for lane_ref, _workflow_id in children
+            }
+
+        view = await drive_comparison_group(group, start, observe)
+        failed_lane = next(lane for lane in view.lanes if lane.lane_ref == group.lanes[1].lane_ref)
+
+        assert started == [lane.lane_ref for lane in group.lanes]
+        assert failed_lane.reason == "dispatch_failed"
+        assert failed_lane.display_state is None
+        assert failed_lane.gap == "no_terminal_fact"
+        assert view.complete_count == 2 and view.pending_count == 1
+        assert view.ended is False
+
+    @pytest.mark.asyncio
+    async def test_start_cancelled_error_propagates(self) -> None:
+        group = _group()
+        calls: list[str] = []
+
+        async def start(lane: Any) -> str:
+            calls.append(lane.lane_ref)
+            raise asyncio.CancelledError
+
+        async def observe(_children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            raise AssertionError("取消后不应继续观察")
+
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await drive_comparison_group(group, start, observe)
+        assert excinfo.type is asyncio.CancelledError
+        assert calls == [group.lanes[0].lane_ref]
+
+
+class TestLaneGapAndCost:
+    def test_gap_is_reported_per_lane_without_merging(self) -> None:
+        group = _group()
+        view = build_comparison_view(
+            group,
+            (
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref, display_state="partial", reliable_result=True
+                ),
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[1].lane_ref, display_state="closed_unknown", reliable_result=None
+                ),
+            ),
+        )
+        gaps = {lane.lane_ref: lane.gap for lane in view.lanes}
+        assert gaps[group.lanes[0].lane_ref] == "missing_data"
+        assert gaps[group.lanes[1].lane_ref] == "result_unconfirmed"
+
+    def test_group_cost_known_only_when_all_lanes_priced(self) -> None:
+        group = _group()
+        both_known = build_comparison_view(
+            group,
+            (
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost("1.50"),
+                ),
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[1].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost("2.50"),
+                ),
+            ),
+        )
+        assert (both_known.cost_state, both_known.known_cny) == (COMPARISON_COST_KNOWN, Decimal("4.00"))
+
+        partial = build_comparison_view(
+            group,
+            (
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost("1.50"),
+                ),
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[1].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost(None, unpriced=2),
+                ),
+            ),
+        )
+        assert (partial.cost_state, partial.known_cny, partial.unpriced_attempts) == (
+            COMPARISON_COST_PARTIAL,
+            Decimal("1.50"),
+            2,
+        )
+
+    def test_group_cost_distinguishes_unknown_reserved_and_failed(self) -> None:
+        group = _group()
+        unknown = build_comparison_view(
+            group,
+            (
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref, display_state="complete", reliable_result=True
+                ),
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[1].lane_ref, display_state="complete", reliable_result=True
+                ),
+            ),
+        )
+        assert (unknown.cost_state, unknown.known_cny) == (COMPARISON_COST_UNKNOWN, None)
+
+        reserved = build_comparison_view(
+            group,
+            (
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost("1.00", reserved="0.50"),
+                ),
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[1].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost("2.00"),
+                ),
+            ),
+        )
+        assert (reserved.cost_state, reserved.reserved_cny) == (COMPARISON_COST_RESERVED, Decimal("0.50"))
+
+        failed = build_comparison_view(
+            group,
+            (
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost("1.00"),
+                ),
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[1].lane_ref,
+                    display_state="complete",
+                    reliable_result=True,
+                    cost=_cost(None, read_state="failed"),
+                ),
+            ),
+        )
+        assert (failed.cost_state, failed.known_cny) == (COMPARISON_COST_FAILED, Decimal("1.00"))
+
+
+class TestLaneIdentity:
+    def test_lane_workflow_ids_are_unique_and_retry_gets_new_identity(self) -> None:
+        group = _group()
+        requests = [
+            build_lane_accept_request(
+                group,
+                lane,
+                expected_revision=0,
+                node_id="root",
+                workflow_id="comparison",
+                source_display_name="用户消息",
+            )
+            for lane in group.lanes
+        ]
+        assert len({request.workflow_id for request in requests}) == len(group.lanes)
+
+        retry = plan_lane_retry(group, group.lanes[0].lane_ref, round_id="round-2")
+        retried = build_lane_accept_request(
+            group,
+            group.lanes[0],
+            expected_revision=0,
+            node_id="root",
+            workflow_id="comparison",
+            source_display_name="用户消息",
+            business_request_id=retry.business_request_id,
+            client_command_id=retry.client_command_id,
+        )
+        assert retried.workflow_id != requests[0].workflow_id
+        assert retried.manifest_payload == group.manifest_payload
+
+    def test_latest_attempt_of_a_lane_wins_over_older_failure(self) -> None:
+        group = _group()
+        lane_ref = group.lanes[0].lane_ref
+        observations = observations_from_executions(
+            group,
+            (
+                _row(group, lane_ref, "failed", "exec-old"),
+                _row(group, lane_ref, "complete", "exec-new"),
+            ),
+        )
+        assert len(observations) == 1
+        assert observations[0].display_state == "complete"
+        assert observations[0].execution_id == "exec-new"
+
+
+class TestProductionRunEntry:
+    @pytest.mark.asyncio
+    async def test_without_dispatcher_accepts_only_and_reports_zero_dispatch(self) -> None:
+        group = _group()
+        dao = _RunDao(group, [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes])
+        service = _run_service(dao)
+
+        receipt = await service.run_comparison(_submission(group))
+
+        assert receipt.dispatcher_wired is False
+        assert receipt.view.ended is False
+        assert all(lane.dispatch_submitted is None for lane in receipt.lanes)
+        assert {lane.execution_id for lane in receipt.lanes} == {f"exec-{lane.lane_ref}" for lane in group.lanes}
+        # 组本身没有执行身份：不能计为一次完整研究成功。
+        assert not hasattr(receipt, "execution_id")
+
+    @pytest.mark.asyncio
+    async def test_run_drives_lanes_in_order_and_resumes_on_next_call(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "running", f"exec-{lane_a.lane_ref}"),
+                _row(group, lane_b.lane_ref, "queued", f"exec-{lane_b.lane_ref}"),
+            ],
+        )
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+
+        first = await service.run_comparison(_submission(group))
+        assert dispatcher.calls == [f"exec-{lane_a.lane_ref}"]
+        assert first.view.group_state == "running"
+
+        dao.executions[0] = _row(group, lane_a.lane_ref, "complete", f"exec-{lane_a.lane_ref}")
+        second = await service.run_comparison(_submission(group))
+        # 已完成的 A 幂等重派 + 会话单总执行位释放后启动 B。
+        assert dispatcher.calls == [
+            f"exec-{lane_a.lane_ref}",
+            f"exec-{lane_a.lane_ref}",
+            f"exec-{lane_b.lane_ref}",
+        ]
+        assert second.view.complete_count == 1 and second.view.ended is False
+
+        dao.executions[1] = _row(group, lane_b.lane_ref, "complete", f"exec-{lane_b.lane_ref}")
+        third = await service.run_comparison(_submission(group))
+        assert (third.view.group_state, third.view.goal_coverage) == ("complete", "full")
+        # 逐路执行身份互不相同（组无执行身份）。
+        assert {lane.execution_id for lane in third.lanes} == {
+            f"exec-{lane_a.lane_ref}",
+            f"exec-{lane_b.lane_ref}",
+        }
+        assert all(lane.dispatch_submitted is True for lane in third.lanes)
+
+    @pytest.mark.asyncio
+    async def test_rejected_dispatch_is_isolated_per_lane(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "complete", f"exec-{lane_a.lane_ref}"),
+                _row(group, lane_b.lane_ref, "queued", f"exec-{lane_b.lane_ref}"),
+            ],
+        )
+        dispatcher = _RunDispatcher(reject={f"exec-{lane_b.lane_ref}": "plan_unavailable"})
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group))
+        lane_b_view = next(lane for lane in receipt.view.lanes if lane.lane_ref == lane_b.lane_ref)
+
+        assert lane_b_view.reason == "dispatch_failed"
+        assert lane_b_view.display_state is None
+        assert receipt.view.ended is False
+        rejected = next(lane for lane in receipt.lanes if lane.lane_ref == lane_b.lane_ref)
+        assert (rejected.dispatch_submitted, rejected.dispatch_reason) == (False, "plan_unavailable")
+
+    @pytest.mark.asyncio
+    async def test_all_lanes_rejected_is_not_reported_as_success(self) -> None:
+        group = _group()
+        dao = _RunDao(
+            group,
+            [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes],
+        )
+        dispatcher = _RunDispatcher(
+            reject={f"exec-{lane.lane_ref}": "PLAN_ADMISSION_UNCONFIGURED" for lane in group.lanes}
+        )
+        service = _run_service(dao, dispatcher)
+
+        receipt = await service.run_comparison(_submission(group))
+
+        assert receipt.view.ended is False
+        assert receipt.view.group_state == "queued"
+        assert {lane.reason for lane in receipt.view.lanes} == {"dispatch_failed"}
+
+    @pytest.mark.asyncio
+    async def test_accept_failure_is_reported_per_lane(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "complete", f"exec-{lane_a.lane_ref}"),
+                _row(group, lane_b.lane_ref, "queued", f"exec-{lane_b.lane_ref}"),
+            ],
+            fail_lanes=frozenset({lane_b.lane_ref}),
+        )
+        service = _run_service(dao, _RunDispatcher())
+
+        receipt = await service.run_comparison(_submission(group))
+        lane_b_view = next(lane for lane in receipt.view.lanes if lane.lane_ref == lane_b.lane_ref)
+        lane_b_receipt = next(lane for lane in receipt.lanes if lane.lane_ref == lane_b.lane_ref)
+
+        assert lane_b_view.reason == "accept_failed"
+        assert lane_b_view.execution_id is None
+        assert lane_b_receipt.error_code == AgentErrorCode.REVISION_CONFLICT.value
+        assert lane_b_receipt.dispatch_submitted is None
+        assert receipt.view.ended is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_dispatch_propagates(self) -> None:
+        group = _group()
+        dao = _RunDao(
+            group,
+            [_row(group, lane.lane_ref, "queued", f"exec-{lane.lane_ref}") for lane in group.lanes],
+        )
+        dispatcher = _RunDispatcher(cancel_at_call=1)
+        service = _run_service(dao, dispatcher)
+
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await service.run_comparison(_submission(group))
+        assert excinfo.type is asyncio.CancelledError
+        assert dispatcher.calls == [f"exec-{group.lanes[0].lane_ref}"]
+
+
+class TestReadCostAndRetry:
+    @pytest.mark.asyncio
+    async def test_read_comparison_include_cost_keeps_lanes_separate(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "complete", "exec-a"),
+                _row(group, lane_b.lane_ref, "complete", "exec-b"),
+            ],
+        )
+        dao.cost_refs = {"exec-a": (("inv-a",), ()), "exec-b": (("inv-b",), ())}
+        ledger = _RunLedger(
+            {
+                "inv-a": [
+                    {"attempt_id": "att-a", "cost_cny": Decimal("1.50"), "input_total_tokens": 10, "output_tokens": 5}
+                ],
+                "inv-b": [{"attempt_id": "att-b", "cost_cny": None, "input_total_tokens": 7, "output_tokens": 3}],
+            }
+        )
+        service = _run_service(dao, ledger=ledger)
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref, include_cost=True)
+
+        view = await service.read_comparison(query)
+        costs = {lane.lane_ref: lane.cost for lane in view.lanes}
+
+        assert costs[lane_a.lane_ref] is not None
+        assert costs[lane_a.lane_ref].known_cny == Decimal("1.50")
+        assert costs[lane_b.lane_ref].known_cny is None
+        assert (view.cost_state, view.known_cny, view.unpriced_attempts) == (
+            COMPARISON_COST_PARTIAL,
+            Decimal("1.50"),
+            1,
+        )
+        rows = comparison_export_rows(view)
+        assert {row["execution_id"] for row in rows} == {"exec-a", "exec-b"}
+
+    @pytest.mark.asyncio
+    async def test_retry_targets_only_the_failed_lane(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "failed", "exec-a"),
+                _row(group, lane_b.lane_ref, "complete", "exec-b"),
+            ],
+        )
+        dispatcher = _RunDispatcher()
+        service = _run_service(dao, dispatcher)
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+
+        outcome = await service.retry_comparison_lane(query, lane_a.lane_ref, expected_revision=0)
+
+        assert outcome.error_code is None
+        assert outcome.execution_id == f"exec-{lane_a.lane_ref}"
+        assert outcome.dispatch is not None and outcome.dispatch.submitted is True
+        assert dispatcher.calls == [f"exec-{lane_a.lane_ref}"]
+        assert [request.comparison_lane_ref for request in dao.accept_calls] == [lane_a.lane_ref]
+        assert dao.accept_calls[0].business_request_id != lane_a.business_request_id
+
+    @pytest.mark.asyncio
+    async def test_retry_rejects_running_complete_or_unknown_lane(self) -> None:
+        group = _group()
+        lane_a, lane_b = group.lanes
+        dao = _RunDao(
+            group,
+            [
+                _row(group, lane_a.lane_ref, "complete", "exec-a"),
+                _row(group, lane_b.lane_ref, "running", "exec-b"),
+            ],
+        )
+        service = _run_service(dao, _RunDispatcher())
+        query = ComparisonReadQuery(user_scope="u1", session_id="s1", group_ref=group.group_ref)
+
+        for lane_ref in (lane_a.lane_ref, lane_b.lane_ref):
+            with pytest.raises(AgentServiceError) as exc:
+                await service.retry_comparison_lane(query, lane_ref, expected_revision=0)
+            assert exc.value.code is AgentErrorCode.REVISION_CONFLICT
+        assert dao.accept_calls == []

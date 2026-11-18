@@ -23,6 +23,7 @@ from services.agent_service.comparison import (
     ComparisonLaneObservation,
     ComparisonLaneSelection,
     ComparisonReadQuery,
+    ComparisonRunReceipt,
     ComparisonSharedInput,
     ComparisonSubmissionReceipt,
     ComparisonSubmissionRequest,
@@ -90,7 +91,12 @@ from services.agent_service.runtime import (
     assemble_agent_runtime,
     launch_agent_runtime,
 )
-from services.agent_service.service import AgentService, SubmissionOutcome, WaitResult
+from services.agent_service.service import (
+    AgentService,
+    ComparisonLaneRetryOutcome,
+    SubmissionOutcome,
+    WaitResult,
+)
 from services.agent_service.sources import BusinessSourceService
 
 __all__ = [
@@ -110,8 +116,10 @@ __all__ = [
     "ComparisonGroupStopPlan",
     "ComparisonGroupView",
     "ComparisonLaneObservation",
+    "ComparisonLaneRetryOutcome",
     "ComparisonLaneSelection",
     "ComparisonReadQuery",
+    "ComparisonRunReceipt",
     "ComparisonSharedInput",
     "ComparisonSubmissionReceipt",
     "ComparisonSubmissionRequest",
