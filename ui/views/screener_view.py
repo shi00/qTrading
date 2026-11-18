@@ -1475,6 +1475,10 @@ async def _execute_restore_default_prompt(
     """恢复默认 AI Prompt."""
     try:
         new_val = await vm.reset_strategy_prompt(strat)
+        if vm.state.selected_strategy != strat:
+            # R2-I11: 恢复期间用户已切换策略 —— 持久覆盖已按确认清除, 但不得把旧策略
+            # 默认值回填进新策略草稿, 也不对新策略提示「已恢复」。
+            return
         on_update_param("ai_system_prompt", new_val)
         if page is not None:
             _show_toast(page, I18n.get("ai_settings_restored"), "info")
@@ -2414,6 +2418,11 @@ def ScreenerView(
     # 不保存译文, 常驻页切语言后自动重译 (None 表示无错误).
     prompt_error: Message | None = None
     prompt_error, set_prompt_error = ft.use_state(prompt_error)
+    # R2-I11: 策略 Prompt 恢复默认的待确认目标 (空串=无待确认)。恢复默认会清除该策略的
+    # 持久覆盖并替换当前草稿，属破坏性操作，须先确认；取消/对话关闭不写持久配置。
+    restore_prompt_target, set_restore_prompt_target = ft.use_state("")
+    # 防确认按钮重复触发导致重复写配置与重复 toast (同一帧内多次点击)。
+    restore_prompt_inflight_ref = ft.use_ref(lambda: False)
     desc_timer_ref = ft.use_ref(lambda: None)
     table_memo_ref = ft.use_ref(lambda: typing.cast(tuple | None, None))
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
@@ -2466,6 +2475,13 @@ def ScreenerView(
         await _execute_pending_strategy_run(vm, key)
 
     ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
+
+    # R2-I11: 切换策略即取消挂起的恢复确认 —— 既避免对旧策略写入持久配置，
+    # 也避免把旧策略默认值回填进新策略草稿。
+    ft.use_effect(
+        lambda: set_restore_prompt_target("") if restore_prompt_target != (state.selected_strategy or "") else None,
+        dependencies=[state.selected_strategy],
+    )
 
     ft.use_effect(
         lambda: (
@@ -2622,9 +2638,34 @@ def ScreenerView(
     async def _do_save_prompt_async(strat: str) -> None:
         await _execute_save_prompt(vm, _get_page(), strat, set_prompt_error)
 
-    def _on_restore_prompt(strat: str) -> None:
+    async def _do_restore_default_guarded(strat: str) -> None:
+        """R2-I11: 恢复默认的实际执行 (确认后触发), 结束时释放防重入标记。"""
+        try:
+            await _do_restore_default_async(strat)
+        finally:
+            restore_prompt_inflight_ref.current = False
+
+    def _do_confirm_restore_prompt() -> None:
+        """R2-I11: 确认后才清除该策略的持久覆盖并回填默认草稿。"""
+        target = restore_prompt_target
+        set_restore_prompt_target("")
+        # 目标策略已被切换或对话已关闭时不再写持久配置 (旧策略默认值不得灌入新策略草稿)。
+        if not target or target != (state.selected_strategy or "") or restore_prompt_inflight_ref.current:
+            return
+        restore_prompt_inflight_ref.current = True
         if page := _get_page():
-            page.run_task(_do_restore_default_async, strat)
+            page.run_task(_do_restore_default_guarded, target)
+        else:
+            restore_prompt_inflight_ref.current = False
+
+    def _do_cancel_restore_prompt() -> None:
+        """R2-I11: 取消恢复 → 仅关闭对话框, 已保存覆盖与当前草稿保持不变。"""
+        set_restore_prompt_target("")
+
+    def _on_restore_prompt(strat: str) -> None:
+        # R2-I11: 先展示将清除的覆盖项与影响, 用户确认后才执行恢复。
+        if strat:
+            set_restore_prompt_target(strat)
 
     def _on_save_prompt(strat: str) -> None:
         if page := _get_page():
@@ -2798,6 +2839,29 @@ def ScreenerView(
         else None
     )
 
+    # R2-I11: 恢复策略默认 Prompt 的破坏性确认 —— 先说明将清除该策略已保存的覆盖并替换
+    # 当前草稿，用户确认后才写持久配置；取消/Esc 关闭不改变任何配置与草稿。
+    restore_prompt_open = bool(restore_prompt_target) and restore_prompt_target == state.selected_strategy
+    restore_prompt_strategy_name = next(
+        (I18n.get(row.name_key) for row in state.strategies_with_dep if row.key == restore_prompt_target),
+        restore_prompt_target,
+    )
+    restore_prompt_dialog = (
+        ConfirmDialog(
+            open_state=restore_prompt_open,
+            title=I18n.get("ai_restore_default_confirm_title"),
+            body=I18n.get("ai_restore_default_confirm_body").format(strategy=restore_prompt_strategy_name),
+            on_confirm=_do_confirm_restore_prompt,
+            on_cancel=_do_cancel_restore_prompt,
+            confirm_text=I18n.get("common_confirm"),
+            cancel_text=I18n.get("common_cancel"),
+            # 清除用户自定义覆盖并丢弃未保存草稿 → 危险色 (同 P1-4 重置确认)。
+            destructive=True,
+        )
+        if restore_prompt_open
+        else None
+    )
+
     return ft.Container(
         content=ft.Column(
             [
@@ -2807,6 +2871,7 @@ def ScreenerView(
                 *([dialog_control] if dialog_control is not None else []),
                 *([egress_ack_dialog] if egress_ack_dialog is not None else []),
                 *([unpriced_ack_dialog] if unpriced_ack_dialog is not None else []),
+                *([restore_prompt_dialog] if restore_prompt_dialog is not None else []),
             ],
             expand=True,
             spacing=15,

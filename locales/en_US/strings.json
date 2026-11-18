@@ -113,6 +113,8 @@
     "screener_all_strategies": "All Strategies",
     "ai_save_prompt": "Save Modifications",
     "ai_reset_default": "Restore Default",
+    "ai_restore_default_confirm_title": "Restore Default Prompt",
+    "ai_restore_default_confirm_body": "This clears the saved custom prompt override for strategy \"{strategy}\" (if any) and replaces the editor with that strategy's default prompt. Unsaved edits will be lost; other strategies and the global prompt are unaffected.",
     "ai_settings_saved": "System prompt saved",
     "ai_settings_restored": "System prompt restored to default",
     "history_load_more": "Load More",

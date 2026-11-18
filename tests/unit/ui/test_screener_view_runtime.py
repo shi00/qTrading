@@ -2249,28 +2249,66 @@ class TestUpdateParamAndSliderChange:
 
 
 class TestDoRestoreDefaultAsync:
-    """_do_restore_default_async: 成功恢复 / 异常处理 / CancelledError 传播.
+    """R2-I11: 恢复默认 Prompt 须先确认 (展示将清除的覆盖项与影响), 取消不改持久配置.
 
     Phase 3.3: ConfigHandler.set_strategy_prompt + base_prompt 读取下沉到
     vm.reset_strategy_prompt, 测试 patch 目标改为 fake_vm.reset_strategy_prompt.
     """
 
-    def test_restore_success(self, screener_view_with_params_env) -> None:
-        """成功恢复默认 prompt → show_toast("ai_settings_restored", "info")."""
-        env = screener_view_with_params_env
+    @staticmethod
+    def _find_confirm_dialog(env: dict) -> Any:
+        """返回渲染树中的 ConfirmDialog 组件节点 (未渲染时 None)。"""
+        for ctrl in _walk_all_controls(env["result"]):
+            if isinstance(ctrl, Component) and getattr(ctrl.fn, "__name__", "") == "ConfirmDialog":
+                return ctrl
+        return None
+
+    @classmethod
+    def _open_confirm_dialog(cls, env: dict) -> Any:
+        """点击「恢复默认」→ 断言未写持久配置 → 重渲染取确认对话框组件。"""
         page = env["page"]
         fake_vm = env["fake_vm"]
-
-        # 恢复入口为固定适用 fixture 的必需交互: 缺失直接失败, 不转 skip.
         restore_btn = _get_restore_prompt_button(env)
         assert callable(restore_btn.on_click)
 
-        # Phase 3.3: patch fake_vm.reset_strategy_prompt 返回 base_prompt 字符串
+        page.run_task.reset_mock()
+        page.toast.show.reset_mock()
+        _invoke(restore_btn.on_click, _make_event())
+
+        # R2-I11: 确认前不得调度恢复任务, 也不得清除持久覆盖
+        page.run_task.assert_not_called()
+        assert "reset_strategy_prompt:value" not in fake_vm.method_calls
+
+        _rerender(env)
+        dialog = cls._find_confirm_dialog(env)
+        assert dialog is not None, "恢复默认前应弹出确认对话框"
+        assert dialog.kwargs.get("open_state") is True
+        return dialog
+
+    def test_restore_requires_confirmation(self, screener_view_with_params_env) -> None:
+        """点击恢复只打开确认对话框, 不立即执行重置。"""
+        env = screener_view_with_params_env
+        dialog = self._open_confirm_dialog(env)
+
+        # 正文说明将清除的覆盖项与影响 (确认文案由 locale 提供)
+        assert dialog.kwargs.get("title") == "i18n[ai_restore_default_confirm_title]"
+        assert dialog.kwargs.get("body") == "i18n[ai_restore_default_confirm_body]"
+        assert dialog.kwargs.get("destructive") is True
+        assert callable(dialog.kwargs.get("on_confirm"))
+        assert callable(dialog.kwargs.get("on_cancel"))
+
+    def test_restore_success_after_confirm(self, screener_view_with_params_env) -> None:
+        """确认后执行恢复默认 → 草稿回填默认值 + 成功 toast。"""
+        env = screener_view_with_params_env
+        page = env["page"]
+        fake_vm = env["fake_vm"]
+        dialog = self._open_confirm_dialog(env)
+
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
             mock_reset.return_value = "default_prompt"
             page.run_task.reset_mock()
             page.toast.show.reset_mock()
-            _invoke(restore_btn.on_click, _make_event())
+            _invoke(dialog.kwargs["on_confirm"])
 
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
@@ -2284,21 +2322,37 @@ class TestDoRestoreDefaultAsync:
                 "i18n[ai_settings_restored]", "info", action_text=None, on_action=None
             )
 
-    def test_restore_exception_shows_error(self, screener_view_with_params_env) -> None:
-        """vm.reset_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
+    def test_cancel_keeps_override_and_draft(self, screener_view_with_params_env) -> None:
+        """取消恢复 → 不调度任务, 已保存覆盖与当前草稿保持不变。"""
         env = screener_view_with_params_env
         page = env["page"]
         fake_vm = env["fake_vm"]
+        fake_vm.set_strategy_param("ai_system_prompt", "user draft")
+        _rerender(env)
 
-        restore_btn = _get_restore_prompt_button(env)
-        assert callable(restore_btn.on_click)
+        dialog = self._open_confirm_dialog(env)
+        page.run_task.reset_mock()
+        _invoke(dialog.kwargs["on_cancel"])
+
+        page.run_task.assert_not_called()
+        assert "reset_strategy_prompt:value" not in fake_vm.method_calls
+        _rerender(env)
+        assert _get_ai_prompt_field(env).value == "user draft"
+        assert fake_vm.state.strategy_params["ai_system_prompt"] == "user draft"
+
+    def test_restore_exception_shows_error(self, screener_view_with_params_env) -> None:
+        """确认后 vm.reset_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")。"""
+        env = screener_view_with_params_env
+        page = env["page"]
+        fake_vm = env["fake_vm"]
+        dialog = self._open_confirm_dialog(env)
 
         # Phase 3.3: patch fake_vm.reset_strategy_prompt 抛 RuntimeError
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
             mock_reset.side_effect = RuntimeError("db error")
             page.run_task.reset_mock()
             page.toast.show.reset_mock()
-            _invoke(restore_btn.on_click, _make_event())
+            _invoke(dialog.kwargs["on_confirm"])
 
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
@@ -2307,6 +2361,40 @@ class TestDoRestoreDefaultAsync:
             page.toast.show.assert_called_once_with(
                 "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
             )
+
+    def test_switch_during_restore_does_not_touch_new_draft(self, screener_view_with_params_env) -> None:
+        """确认后恢复期间切换策略 → 不回填旧策略默认值到新策略草稿, 不误报成功。"""
+        env = screener_view_with_params_env
+        page = env["page"]
+        fake_vm = env["fake_vm"]
+        dialog = self._open_confirm_dialog(env)
+
+        async def _reset_then_switch(strategy_key: str) -> str:
+            fake_vm._set_state(selected_strategy="momentum")
+            return "default_prompt"
+
+        with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
+            mock_reset.side_effect = _reset_then_switch
+            page.toast.show.reset_mock()
+            _invoke(dialog.kwargs["on_confirm"])
+
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
+
+            mock_reset.assert_awaited_once_with("value")
+            assert "ai_system_prompt" not in fake_vm.state.strategy_params
+            page.toast.show.assert_not_called()
+
+    def test_switch_strategy_drops_pending_confirmation(self, screener_view_with_params_env) -> None:
+        """确认框打开期间切换策略 → 确认框消失 (不把旧策略默认值写入新策略草稿)。"""
+        env = screener_view_with_params_env
+        fake_vm = env["fake_vm"]
+        self._open_confirm_dialog(env)
+
+        fake_vm._set_state(selected_strategy="momentum")
+        _rerender(env)
+
+        assert self._find_confirm_dialog(env) is None, "切换策略后不应保留旧策略的恢复确认对话框"
 
 
 class TestDoSavePromptAsync:
