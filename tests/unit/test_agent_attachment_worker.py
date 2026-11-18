@@ -1262,6 +1262,17 @@ class _FakeBinaryStream:
         self.buffer = buffer
 
 
+def _run_worker_main(monkeypatch: pytest.MonkeyPatch, wire: bytes) -> dict[str, Any]:
+    """把 ``wire`` 作为 stdin 注入真实 worker 模块入口 ``main()``，返回 wire 响应。"""
+
+    stdout = io.BytesIO()
+    monkeypatch.setattr(sys, "stdin", cast(Any, _FakeBinaryStream(io.BytesIO(wire))))
+    monkeypatch.setattr(sys, "stdout", cast(Any, _FakeBinaryStream(stdout)))
+    assert attachment_worker.main() == 0
+    response: dict[str, Any] = json.loads(stdout.getvalue().decode("utf-8"))
+    return response
+
+
 def _worker_entry(
     monkeypatch: pytest.MonkeyPatch, data: bytes, *, kind: AttachmentKind, selection: Selection
 ) -> dict[str, Any]:
@@ -1282,12 +1293,43 @@ def _worker_entry(
         "payload_bytes": len(data),
     }
     header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    stdout = io.BytesIO()
-    monkeypatch.setattr(sys, "stdin", cast(Any, _FakeBinaryStream(io.BytesIO(header_bytes + b"\n" + data))))
-    monkeypatch.setattr(sys, "stdout", cast(Any, _FakeBinaryStream(stdout)))
-    assert attachment_worker.main() == 0
-    response: dict[str, Any] = json.loads(stdout.getvalue().decode("utf-8"))
-    return response
+    return _run_worker_main(monkeypatch, header_bytes + b"\n" + data)
+
+
+def _padded_wire_header(data: bytes, total_header_bytes: int) -> bytes:
+    """构造恰 ``total_header_bytes`` 字节的请求头（``pad`` 键补齐），返回含 framing 换行的线格式。"""
+
+    header: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": AttachmentKind.TXT.value,
+        "selection": to_wire_dict(Selection(kind="all")),
+        "csv_header_confirmed": False,
+        "source_digest": hashlib.sha256(data).hexdigest(),
+        "timeout_s": 30.0,
+        "payload_bytes": len(data),
+        "pad": "",
+    }
+    base = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    header["pad"] = "x" * (total_header_bytes - len(base))
+    raw = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(raw) == total_header_bytes
+    return raw + b"\n" + data
+
+
+class TestHeaderByteBoundary:
+    """I36：请求头上限按 header 自身计量，framing 换行不计入。"""
+
+    def test_header_exactly_at_limit_with_newline_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = b"hello"
+        response = _run_worker_main(monkeypatch, _padded_wire_header(data, attachment_worker.MAX_HEADER_BYTES))
+        assert response["ok"] is True
+        assert response["result"]["body_text"] == "hello"
+
+    def test_header_one_byte_over_limit_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = b"hello"
+        response = _run_worker_main(monkeypatch, _padded_wire_header(data, attachment_worker.MAX_HEADER_BYTES + 1))
+        assert response["ok"] is False
+        assert response["error"] == {"code": "invalid_request", "message": "worker header is too large"}
 
 
 _JSON_ACCEPTED_CASES = [
@@ -1398,10 +1440,69 @@ class TestWorkerLifecycle:
         worker = SubprocessAttachmentWorker(
             command=(sys.executable, "-c", "import time; time.sleep(30)"),
             timeout_s=0.5,
+            supervision_margin_s=0.5,
         )
         with pytest.raises(AttachmentWorkerError) as exc:
             await worker.extract(_request(b"hello"))
         assert exc.value.code == "attachment_time_exceeded"
+        assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_worker_exceeding_raw_timeout_but_within_deadline_is_not_killed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # worker 时限自其读完请求头起算；父侧计时含启动/回收开销，必须加余量后比较。
+        # 子进程耗时 1.2s 超过 ``timeout_s=0.5`` 但仍在「时限 + 默认余量」内：不得被杀（I36）。
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = f"import sys,time\ntime.sleep(1.2)\nsys.stdout.buffer.write({valid!r})\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=0.5)
+        result = await worker.extract(_request(b"hello"))
+        assert result.worker_exited is True
+        assert result.body_text == "hello"
+        assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_partial_result_on_timeout_is_not_published(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 已写出结果但未退出：超时路径只报时限，不发布部分结果（既有语义）。
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = f"import sys,time\nsys.stdout.buffer.write({valid!r})\nsys.stdout.flush()\ntime.sleep(30)\n"
+        worker = SubprocessAttachmentWorker(
+            command=(sys.executable, "-c", script),
+            timeout_s=0.5,
+            supervision_margin_s=0.5,
+        )
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(b"hello"))
+        assert exc.value.code == "attachment_time_exceeded"
+        assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_with_complete_result_keeps_current_semantics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 「非 0 退出 + 完整结果」无冻结合同：保持既有语义（以结果协议为准，不新造错误码）。
+        valid = json.dumps(
+            _worker_entry(monkeypatch, b"hello", kind=AttachmentKind.TXT, selection=Selection(kind="all"))
+        ).encode("utf-8")
+        script = f"import sys\nsys.stdout.buffer.write({valid!r})\nraise SystemExit(3)\n"
+        worker = SubprocessAttachmentWorker(command=(sys.executable, "-c", script), timeout_s=5.0)
+        result = await worker.extract(_request(b"hello"))
+        assert result.worker_exited is True
+        assert result.body_text == "hello"
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_without_result_fails(self) -> None:
+        worker = SubprocessAttachmentWorker(
+            command=(sys.executable, "-c", "raise SystemExit(3)"),
+            timeout_s=5.0,
+        )
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await worker.extract(_request(b"hello"))
+        assert exc.value.code == "worker_failed"
         assert worker.active_pids() == ()
 
     @pytest.mark.asyncio

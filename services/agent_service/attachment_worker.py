@@ -1504,12 +1504,16 @@ def main() -> int:
     """子进程入口：stdin 头 JSON（单行）+ 原始字节；stdout 单行结果 JSON。"""
 
     try:
-        header_line = sys.stdin.buffer.readline(MAX_HEADER_BYTES + 1)
-        if len(header_line) > MAX_HEADER_BYTES:
-            raise AttachmentParseError("invalid_request", "worker header is too large")
+        # 字节口径：限额只计请求头自身，行尾 ``\n`` 是 framing 分隔符（父进程按同一
+        # 口径写入：``header + b"\n" + payload``）。故多读 1 字节识别换行，剥离后再与
+        # ``MAX_HEADER_BYTES`` 比较——恰 64KiB 的头加换行必须通过（I36）。
+        header_line = sys.stdin.buffer.readline(MAX_HEADER_BYTES + 2)
         if not header_line:
             raise AttachmentParseError("invalid_request", "worker header is missing")
-        header = json.loads(header_line.decode("utf-8"))
+        header_bytes = header_line[:-1] if header_line.endswith(b"\n") else header_line
+        if len(header_bytes) > MAX_HEADER_BYTES:
+            raise AttachmentParseError("invalid_request", "worker header is too large")
+        header = json.loads(header_bytes.decode("utf-8"))
         if not isinstance(header, dict):
             raise AttachmentParseError("invalid_request", "worker header must be an object")
         payload_size = header.get("payload_bytes")
