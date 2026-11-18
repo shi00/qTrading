@@ -15,7 +15,9 @@
 
 目录、审核范围与 schema 以连接 owner 启连时冻结的发现结果为准，请求自报仅用于比对：
 换目录、审核外工具、schema 漂移、旧代次、参数摘要不符一律在 claim 前拒绝
-（零预留/零执行/零外发）。
+（零预留/零执行/零外发）。审核证据同样不是一次性结论：每次调用前重核（重新加载
+配置 + 重新观测实现指纹），证据失效即零 claim/零外发；remote 传输的远端状态不可
+观测，结果如实标注信任限制（``ToolCallOutcome.audit_trust_limited``），不宣称已验证（I06）。
 
 派发后超时/断线/协议解码失败/服务端错误响应均无确证，记 ``UNKNOWN`` 且不自动重试；
 只有端口在出站前显式拒绝（``MCPCallNotDispatched``）才判 ``FAILED``（效果确定未发生）。
@@ -157,6 +159,9 @@ class ToolCallOutcome:
     state: ToolCallState
     result: dict[str, Any] | None
     operation_id: str
+    #: 授权依据仅覆盖本机可观测项（remote 传输的远端目标状态未被观测）：
+    #: 为真时不得把本次调用呈现为「审核证据已验证」（I06）。
+    audit_trust_limited: bool = False
 
 
 class MCPToolDispatcher:
@@ -175,6 +180,15 @@ class MCPToolDispatcher:
 
     async def call(self, request: ToolCallRequest) -> ToolCallOutcome:
         label = request.identity.stable_key()
+        # I06：审核证据不是一次性结论。每次调用前重核（配置重新准入 + 重新观测实现指纹），
+        # 未准入即在 claim/登记在途/发送之前拒绝，确保证据失效后零新调用。
+        evidence = await self._manager.recheck_audit_evidence(request.identity)
+        if not evidence.admitted:
+            raise AgentServiceError(
+                AgentErrorCode.CAPABILITY_UNVERIFIED,
+                f"read-only audit refused: {evidence.reason}",
+                label,
+            )
         frozen = self._manager.frozen_catalog(request.identity)
         if request.connection_generation != self._manager.connection_generation(request.identity):
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, "tool catalog generation is stale", label)
@@ -239,9 +253,15 @@ class MCPToolDispatcher:
         guard = self._manager.budget_guard(request.identity)
         self._manager.register_in_flight(request.identity, request.operation_id)
         try:
-            return await self._invoke(session, request, arguments, guard, deadline_s)
+            outcome = await self._invoke(session, request, arguments, guard, deadline_s)
         finally:
             self._manager.release_in_flight(request.identity, request.operation_id)
+        return ToolCallOutcome(
+            state=outcome.state,
+            result=outcome.result,
+            operation_id=outcome.operation_id,
+            audit_trust_limited=evidence.trust_limited,
+        )
 
     @staticmethod
     def _freeze_arguments(arguments: Any, label: str) -> tuple[str, dict[str, Any]]:

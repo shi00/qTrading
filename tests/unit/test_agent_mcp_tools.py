@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -65,13 +66,17 @@ def _budget(**overrides: int) -> MCPBudgetProfile:
     return MCPBudgetProfile(**values)
 
 
-def _config(budget: MCPBudgetProfile | None = None, *, deadline_s: int = 30) -> MCPServerConfig:
+def _config(
+    budget: MCPBudgetProfile | None = None,
+    *,
+    deadline_s: int = 30,
+    transport: MCPTransportConfig | None = None,
+) -> MCPServerConfig:
     return MCPServerConfig(
         identity=_IDENTITY,
         display_name="本地文件服务",
-        transport=MCPTransportConfig(
-            kind=MCPTransportKind.STDIO, command=sys.executable, cwd=os.path.dirname(sys.executable)
-        ),
+        transport=transport
+        or MCPTransportConfig(kind=MCPTransportKind.STDIO, command=sys.executable, cwd=os.path.dirname(sys.executable)),
         budget=budget or _budget(),
         tool_deadline_s=deadline_s,
         audit=MCPReadOnlyAudit(
@@ -97,8 +102,15 @@ class _Store:
 
 
 class _Probe:
+    """可变的实现指纹探针：记录调用次数，供「每次调用前重核」断言。"""
+
+    def __init__(self, fingerprint: str | None = _FINGERPRINT) -> None:
+        self.fingerprint = fingerprint
+        self.calls = 0
+
     async def probe(self, config: MCPServerConfig) -> str | None:
-        return _FINGERPRINT
+        self.calls += 1
+        return self.fingerprint
 
 
 class _Session:
@@ -208,6 +220,38 @@ async def _dispatcher(
     grants = grants or _Grants(verdict)
     dispatcher = MCPToolDispatcher(manager=manager, validator=validator or _Validator(), grants=grants)
     return dispatcher, session, grants, manager
+
+
+class _CancellingProbe:
+    """启连时正常返回，之后的重核抛取消：验证取消沿重核路径传播且零 claim/零外发。"""
+
+    def __init__(self, *, allow: int = 1) -> None:
+        self.calls = 0
+        self._allow = allow
+        self.fingerprint: str | None = _FINGERPRINT
+
+    async def probe(self, config: MCPServerConfig) -> str | None:
+        self.calls += 1
+        if self.calls > self._allow:
+            raise asyncio.CancelledError()
+        return self.fingerprint
+
+
+async def _dispatcher_with_store(
+    *,
+    config: MCPServerConfig | None = None,
+    probe: _Probe | _CancellingProbe | None = None,
+) -> tuple[MCPToolDispatcher, _Session, _Grants, _Store, SharedMCPConnectionManager, _Probe | _CancellingProbe]:
+    """可观测存储/探针的调用门：用于在启连后改变证据并断言零新调用。"""
+
+    store = _Store(config or _config())
+    session = _Session()
+    probe = probe or _Probe()
+    manager = SharedMCPConnectionManager(store=store, factory=_Factory(session), probe=probe)
+    await manager.connect(_IDENTITY)
+    grants = _Grants()
+    dispatcher = MCPToolDispatcher(manager=manager, validator=_Validator(), grants=grants)
+    return dispatcher, session, grants, store, manager, probe
 
 
 def _request(**overrides: object) -> ToolCallRequest:
@@ -562,3 +606,107 @@ class TestFrozenArguments:
         second = canonical_arguments_digest({"b": {"d": [1, 2], "c": 2}, "a": 1})
         assert first == second == sha256_hex('{"a":1,"b":{"c":2,"d":[1,2]}}')
         assert canonical_arguments_digest({"a": [1, 2]}) != canonical_arguments_digest({"a": [2, 1]})
+
+
+class TestAuditEvidenceRecheck:
+    """I06：审核证据不是一次性结论，每次调用前重核；失效即零 claim/零外发。"""
+
+    @pytest.mark.asyncio
+    async def test_valid_evidence_allows_call_and_is_rechecked_per_call(self) -> None:
+        probe = _Probe()
+        dispatcher, session, _grants, _store, _manager, probe = await _dispatcher_with_store(probe=probe)
+
+        first = await dispatcher.call(_request())
+        second = await dispatcher.call(_request(operation_id="op-2"))
+
+        assert first.state is ToolCallState.COMPLETED
+        assert second.state is ToolCallState.COMPLETED
+        assert probe.calls == 3  # 启连 1 次 + 每次调用各 1 次
+        assert first.audit_trust_limited is False
+        assert first.audit_trust_limited is second.audit_trust_limited
+        assert [(call[0], call[1]) for call in session.calls] == [
+            ("read_file", {"path": "C:\\data\\a.txt"}),
+            ("read_file", {"path": "C:\\data\\a.txt"}),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fingerprint_change_after_connect_blocks_call_before_claim(self) -> None:
+        """磁盘载荷被替换（本机可观测项与审核记录不一致）：零 claim/零外发。"""
+
+        probe = _Probe()
+        dispatcher, session, grants, _store, _manager, probe = await _dispatcher_with_store(probe=probe)
+        probe.fingerprint = sha256_hex(b"replaced-on-disk-payload")
+
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request())
+
+        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
+        assert "implementation_changed" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_evidence_blocks_call_before_claim(self) -> None:
+        """实现无法核定（探针返回 None）：不得按旧证据继续，零 claim/零外发。"""
+
+        probe = _Probe()
+        dispatcher, session, grants, _store, _manager, probe = await _dispatcher_with_store(probe=probe)
+        probe.fingerprint = None
+
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request())
+
+        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
+        assert "implementation_unverified" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_withdrawn_audit_record_blocks_call_before_claim(self) -> None:
+        """审核记录被撤回（存储值里 audit 为 None）：重核必须拒绝，零 claim/零外发。"""
+
+        dispatcher, session, grants, store, _manager, _probe = await _dispatcher_with_store()
+        store.config = replace(store.config, audit=None)
+
+        with pytest.raises(AgentServiceError) as exc:
+            await dispatcher.call(_request())
+
+        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
+        assert "audit_missing" in exc.value.sanitized_message
+        assert grants.claims == []
+        assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_remote_transport_marks_trust_limit_and_never_claims_verified(self) -> None:
+        """remote 传输的远端目标状态不可观测：结果标注信任限制，不宣称已验证。"""
+
+        transport = MCPTransportConfig(
+            kind=MCPTransportKind.STREAMABLE_HTTP,
+            url="https://mcp.example.test/tools",
+            http_risk_approved=True,
+        )
+        dispatcher, session, _grants, _store, _manager, _probe = await _dispatcher_with_store(
+            config=_config(transport=transport)
+        )
+
+        outcome = await dispatcher.call(_request())
+
+        assert outcome.state is ToolCallState.COMPLETED
+        assert outcome.audit_trust_limited is True
+        assert [(call[0], call[2]) for call in session.calls] == [("read_file", 30)]
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_recheck_propagates_without_claim(self) -> None:
+        """重核期间取消必须继续传播，且零 claim/零外发/零在途归属。"""
+
+        probe = _CancellingProbe()
+        dispatcher, session, grants, _store, manager, probe = await _dispatcher_with_store(probe=probe)
+
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await dispatcher.call(_request())
+
+        assert isinstance(excinfo.value, asyncio.CancelledError)
+        assert probe.calls == 2
+        assert grants.claims == []
+        assert session.calls == []
+        assert manager.in_flight_operations(_IDENTITY) == ()

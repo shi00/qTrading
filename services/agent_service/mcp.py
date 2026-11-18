@@ -3,7 +3,8 @@
 本模块只承载**静态可验证**的准入合同：保存不启连、连接测试只发现（0 研究工具
 调用）、预算与只读审核证据不足拒启、显式断开且在途时拒停、断线不自动重连。
 研究启连时由连接 owner 完成一次发现并**冻结工具目录 + 连接代次**，工具调用门据此
-服务端核验目录/审核范围/schema，不采信请求自报（I04）。
+服务端核验目录/审核范围/schema，不采信请求自报（I04）。审核证据不是一次性结论：
+每次工具调用前重新加载配置、重新观测实现指纹并重判只读准入，未准入即零新调用（I06）。
 
 真实 FastMCP 传输适配见 :mod:`services.agent_service.mcp_fastmcp`（E-02-5 实证：
 stdio 插入点、逐 send 门、FD 级 stderr、四诊断通道）。仍为残留：HTTP/SSE 的真实
@@ -234,6 +235,18 @@ def validate_mcp_server_config(config: MCPServerConfig, path: str = "$.mcp") -> 
 
 
 @dataclass(frozen=True, slots=True)
+class MCPAuditEvidenceRecheck:
+    """工具调用前的审核证据重核结论（不缓存，每次调用重新观测）。"""
+
+    #: 证据仍覆盖当前可观测实现（``reason`` 为稳定原因码，``None`` 仅当准入）。
+    admitted: bool
+    reason: str | None
+    #: 本机探针只观测本机实现；remote 传输的远端目标状态不可观测，
+    #: 此时不得宣称「已验证」，调用结果须如实标注该信任限制（I06）。
+    trust_limited: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MCPConfigSaveReceipt:
     """保存回执：保存不等同启连（``connections_opened`` 恒为 0）。"""
 
@@ -404,11 +417,19 @@ class SharedMCPConnectionManager:
         总期限（启动/初始化/鉴权/发现）由该次实际启连持有，并发等待者共享同一预算，
         不会各自获得一份新的 ``connect_deadline_s``（I13）。
         重连前必须先确认上次关闭已实际退出，未确认则重试关闭，仍失败即显式拒绝（I17）。
+        已有存活会话时同样重核审核证据：审核撤回/实现变化后不得按旧证据继续服务（I06）。
         """
 
         label = _identity_text(identity)
         key = label
         if key in self._sessions:
+            recheck = await self.recheck_audit_evidence(identity)
+            if not recheck.admitted:
+                raise AgentServiceError(
+                    AgentErrorCode.CAPABILITY_UNVERIFIED,
+                    f"read-only audit refused: {recheck.reason}",
+                    label,
+                )
             return
         await self._confirm_previous_close(label)
         pending = self._connecting.get(key)
@@ -434,12 +455,11 @@ class SharedMCPConnectionManager:
             raise AgentServiceError(
                 AgentErrorCode.CAPABILITY_UNVERIFIED, f"mcp receive budgets not frozen: {unfrozen}", label
             )
-        fingerprint = await self._probe.probe(config)
-        admission = evaluate_read_only_audit(config.audit, fingerprint)
-        if not admission.admitted:
+        recheck = await self._audit_evidence(config)
+        if not recheck.admitted:
             raise AgentServiceError(
                 AgentErrorCode.CAPABILITY_UNVERIFIED,
-                f"read-only audit refused: {admission.reason}",
+                f"read-only audit refused: {recheck.reason}",
                 label,
             )
         guard = MCPBudgetGuard(config.budget, identity=label)
@@ -654,6 +674,29 @@ class SharedMCPConnectionManager:
                 label,
             )
         return remaining
+
+    async def recheck_audit_evidence(self, identity: MCPServiceIdentity) -> MCPAuditEvidenceRecheck:
+        """工具调用/重复启连前重核审核证据与失效条件：**不缓存**结论。
+
+        重新加载并准入配置（I18：不信任存储值）后重新观测实现指纹，与审核记录比对。
+        观测到指纹变化只说明「本机可观测项与审核记录不一致」，不足以断言运行中进程
+        已被替换；因此未准入即拒绝，而非推断具体原因。remote 传输的远端目标状态
+        本机不可观测，结论置 ``trust_limited``，调用方不得将其呈现为「已验证」。
+        """
+
+        config = await self._require_config(identity)
+        return await self._audit_evidence(config)
+
+    async def _audit_evidence(self, config: MCPServerConfig) -> MCPAuditEvidenceRecheck:
+        """按配置重新观测实现指纹并判定只读准入（调用方负责在 claim/发送前拒绝）。"""
+
+        fingerprint = await self._probe.probe(config)
+        admission = evaluate_read_only_audit(config.audit, fingerprint)
+        return MCPAuditEvidenceRecheck(
+            admitted=admission.admitted,
+            reason=admission.reason,
+            trust_limited=config.transport.kind is not MCPTransportKind.STDIO,
+        )
 
     async def _require_config(self, identity: MCPServiceIdentity) -> MCPServerConfig:
         """加载配置并在使用点重核：存储值一律不信任（I18）。"""
