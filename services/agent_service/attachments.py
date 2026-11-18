@@ -49,6 +49,11 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 #: 等待子进程被终止后 join 的宽限秒数（先 terminate，再 kill）。
 _KILL_GRACE_S: Final = 5.0
+#: 父侧监督余量默认值（秒）：父超时 = worker 自身时限 + 本余量。worker 的时限从它
+#: 读完请求头开始计（见 ``attachment_worker._handle_request``），而父侧计时包含
+#: Popen、解释器启动、模块导入与退出回收，故父侧必须留出这段开销，不得与 worker
+#: 时限同口径直接比较（I36）。
+_DEFAULT_SUPERVISION_MARGIN_S: Final = 5.0
 #: stderr 记录上限（只用于长度判断，不把内容写入错误/日志）。
 _MAX_STDERR_BYTES: Final = 64 * 1024
 
@@ -178,7 +183,8 @@ def _consume_future_result(future: asyncio.Future[Any]) -> None:
 class SubprocessAttachmentWorker:
     """受监督子进程提取器：默认 ``python -m services.agent_service.attachment_worker``。
 
-    ``command``/``timeout_s`` 仅供测试注入（真实产品路径使用模块入口与 D06 预算）。
+    ``command``/``timeout_s``/``supervision_margin_s`` 仅供测试注入（真实产品路径使用
+    模块入口与 D06 预算）。
     """
 
     def __init__(
@@ -187,10 +193,14 @@ class SubprocessAttachmentWorker:
         budget: AttachmentBudget = DEFAULT_ATTACHMENT_BUDGET,
         command: Sequence[str] | None = None,
         timeout_s: float | None = None,
+        supervision_margin_s: float | None = None,
     ) -> None:
         self._budget = budget
         self._command = tuple(command) if command is not None else None
         self._timeout_s = timeout_s
+        self._supervision_margin_s = (
+            supervision_margin_s if supervision_margin_s is not None else _DEFAULT_SUPERVISION_MARGIN_S
+        )
         self._active: dict[int, subprocess.Popen[bytes]] = {}
         self._lock = threading.Lock()
 
@@ -236,7 +246,7 @@ class SubprocessAttachmentWorker:
                 "attachment_type_mismatch",
                 f"declared kind {request.kind.value!r} does not match content kind {detected.value!r}",
             )
-        timeout_s = self._timeout_s if self._timeout_s is not None else self._budget.extract_timeout_s
+        worker_timeout_s = self._timeout_s if self._timeout_s is not None else self._budget.extract_timeout_s
         header = {
             "schema_version": 1,
             "kind": request.kind.value,
@@ -256,6 +266,8 @@ class SubprocessAttachmentWorker:
             "payload_bytes": len(request.data),
         }
         header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # 字节口径：``MAX_HEADER_BYTES`` 只计请求头自身；其后的 ``\n`` 是 framing 分隔符，
+        # 不计入限额（worker 侧按同一口径剥离换行后再判定，I36）。
         if len(header_bytes) > MAX_HEADER_BYTES:
             raise AttachmentWorkerError("attachment_request_too_large", "worker header exceeds bounded size")
 
@@ -286,13 +298,18 @@ class SubprocessAttachmentWorker:
                 self._active.pop(process.pid, None)
             raise AttachmentWorkerError("attachment_cancelled", "attachment extraction was cancelled")
         payload = header_bytes + b"\n" + request.data
+        # 父侧监督：worker 时限（``worker_timeout_s``）自其读完请求头起算，父侧计时含
+        # Popen/启动/回收开销，故以「worker 时限 + 余量」兜底，避免先杀仍在时限内、
+        # 已产出部分结果的 worker（I36）。
+        supervision_timeout = worker_timeout_s + self._supervision_margin_s
         try:
             try:
-                stdout, stderr = process.communicate(payload, timeout=timeout_s)
+                stdout, stderr = process.communicate(payload, timeout=supervision_timeout)
             except subprocess.TimeoutExpired as exc:
                 self._terminate(process)
+                # 超时路径不发布已产出的部分结果（结果不完整，仅报时限）。
                 raise AttachmentWorkerError(
-                    "attachment_time_exceeded", f"attachment extraction exceeded {timeout_s:g} seconds"
+                    "attachment_time_exceeded", f"attachment extraction exceeded {worker_timeout_s:g} seconds"
                 ) from exc
         finally:
             with self._lock:
@@ -310,9 +327,14 @@ class SubprocessAttachmentWorker:
             # 只以长度判定异常，不把 stderr 内容带入错误/日志（R9）。
             raise AttachmentWorkerError("worker_stderr_exceeded", "attachment worker stderr exceeds bounded size")
         if not stdout:
+            # 无输出时退出码才有意义：worker 正常路径恒以 0 退出（失败经 JSON ``ok:false``
+            # 上报），非 0 且无输出即启动/崩溃失败。
             raise AttachmentWorkerError(
                 "worker_failed", f"attachment worker exited without result (exit={process.returncode})"
             )
+        # 非 0 退出但 stdout 是完整合法结果时不额外拒绝：worker 恒以 0 退出，故本分支只
+        # 可能来自异常退出；「非 0 + 完整结果」无冻结合同，保持既有语义——以结果协议为
+        # 准，不新造错误码（I36）。
         return self._decode_result(request, stdout, process.pid, elapsed_s)
 
     def _validate_request(self, request: AttachmentExtractionRequest) -> None:
