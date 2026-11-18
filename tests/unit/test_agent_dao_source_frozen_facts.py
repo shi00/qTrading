@@ -371,3 +371,46 @@ class TestFrozenFactsVersusProjection:
 
         assert available is True
         assert reason == "representation_not_available"
+
+
+class TestSelectedRangeClosure:
+    """I30：已存 selected_range 与冻结 locator 的冗余选择/接受版本逐值闭合。"""
+
+    @staticmethod
+    def _metadata(*, selection: dict[str, Any], read_ranges: list[dict[str, Any]], accepted: str | None) -> Any:
+        return {
+            "selected_range": {
+                "selection": selection,
+                "read_ranges": read_ranges,
+                "unread_ranges": [],
+                "stats": {"source_bytes": 10, "pages": None, "sheets": None, "rows": None, "chars": None},
+                "limitations": [],
+                "accepted_limited_version": accepted,
+            }
+        }
+
+    def test_selection_fork_between_locator_and_selected_range_rejected(self) -> None:
+        metadata = self._metadata(
+            selection={"kind": "limited", "ranges": [{"kind": "pages", "start": 1, "end": 5}]},
+            read_ranges=[{"kind": "pages", "start": 1, "end": 2}],
+            accepted=None,
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            AgentDao._source_selected_range(metadata, _source_ref(), "u1/src-1@v1")
+        _expect(excinfo, AgentErrorCode.OPERATION_UNKNOWN)
+
+    def test_accepted_version_must_equal_source_version(self) -> None:
+        metadata = self._metadata(selection={"kind": "all"}, read_ranges=[{"kind": "all"}], accepted="v2")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            AgentDao._source_selected_range(metadata, _source_ref(), "u1/src-1@v1")
+        _expect(excinfo, AgentErrorCode.OPERATION_UNKNOWN)
+
+    def test_consistent_selection_and_acceptance_decode(self) -> None:
+        metadata = self._metadata(selection={"kind": "all"}, read_ranges=[{"kind": "all"}], accepted="v1")
+
+        selected = AgentDao._source_selected_range(metadata, _source_ref(), "u1/src-1@v1")
+
+        assert selected.selection == _locator().selection
+        assert selected.accepted_limited_version == "v1"

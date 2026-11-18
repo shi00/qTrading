@@ -123,7 +123,16 @@ async def _seed_source(
                 asset_version=asset_version,
                 asset_kind="source",
                 display_name=f"source {asset_id}@{asset_version}",
-                digest="a" * 64,
+                digest="b" * 64,
+                # 认领身份四值核对需要显式类别事实（与 _ref 的 user_message 一致）。
+                metadata_payload={
+                    "schema_version": 1,
+                    "user_message_origin": {
+                        "session_id": "s1",
+                        "message_id": f"msg-{asset_id}",
+                        "message_version": asset_version,
+                    },
+                },
                 read_state="ready",
                 verification_state="unverified",
             )

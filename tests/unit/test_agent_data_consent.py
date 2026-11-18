@@ -265,6 +265,48 @@ class TestSourceScopeDigest:
 
 
 # ---------------------------------------------------------------------------
+# 源项公共入口逐值闭合（I30）
+# ---------------------------------------------------------------------------
+
+
+class TestSourceItemClosure:
+    """源项 codec：冗余承载逐值一致、all/limited 分叉、接受版本与定位类型拒绝。"""
+
+    def test_locator_wrong_type_rejected_as_validation_error(self) -> None:
+        bad = copy.deepcopy(ROWS_ITEM)
+        bad["locator"] = "locator"
+        _reject(lambda: decode_data_consent_source_item(bad, "$"), code="invalid_type")
+
+    def test_missing_selected_range_rejected(self) -> None:
+        bad = copy.deepcopy(ROWS_ITEM)
+        del bad["selected_range"]
+        _reject(lambda: decode_data_consent_source_item(bad, "$"), code="missing_field")
+
+    @pytest.mark.parametrize(
+        ("item", "selection"),
+        [
+            (ALL_ITEM, {"kind": "limited", "ranges": [{"kind": "pages", "start": 1, "end": 1}]}),
+            (ROWS_ITEM, {"kind": "all"}),
+        ],
+        ids=["all-selected-limited-locator", "limited-selected-all-locator"],
+    )
+    def test_all_and_limited_selection_fork_rejected(self, item: dict[str, Any], selection: dict[str, Any]) -> None:
+        bad = copy.deepcopy(item)
+        bad["locator"]["selection"] = selection
+        _reject(lambda: decode_data_consent_source_item(bad, "$"), code="kind_mismatch")
+
+    def test_wrong_accepted_version_rejected(self) -> None:
+        bad = copy.deepcopy(ROWS_ITEM)
+        bad["selected_range"]["accepted_limited_version"] = "v2"
+        _reject(lambda: decode_data_consent_source_item(bad, "$"), code="invalid_accepted_version")
+
+    def test_top_level_source_identity_fork_rejected(self) -> None:
+        bad = copy.deepcopy(ROWS_ITEM)
+        bad["source_digest"] = "d" * 64
+        _reject(lambda: decode_data_consent_source_item(bad, "$"), code="identity_mismatch")
+
+
+# ---------------------------------------------------------------------------
 # DataConsentBinding 严格 decode
 # ---------------------------------------------------------------------------
 
