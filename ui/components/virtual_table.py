@@ -481,28 +481,47 @@ def _build_detail_cell(
     col_widths: dict[str, int] | None,
     on_row_detail: Callable[[dict[str, Any]], None] | None,
     detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    on_row_research: Callable[[dict[str, Any]], None] | None = None,
 ) -> ft.Container:
-    """构建「详情」动作列单元格 (item 4): 可聚焦 TextButton 承载键盘可达的详情入口。
+    """构建动作列单元格 (item 4): 可聚焦 TextButton 承载键盘可达入口。
 
-    TextButton 为 ActionControl, 默认可 Tab 聚焦 + Enter 触发; on_row_detail 为 None
-    时渲染空占位 (理论上动作列仅在 on_row_detail 非空时追加)。
+    TextButton 为 ActionControl, 默认可 Tab 聚焦 + Enter 触发; 两个回调都为 None
+    时渲染空占位 (理论上动作列仅在至少一个回调非空时追加)。
+
+    R2-I06: ``on_row_research`` 非空时在「详情」旁并列「发起研究」入口（只准备
+    研究草稿，不发送、不重跑选股）；动作列宽度由调用方加倍以容纳两个按钮。
 
     detail_anchor 非空且返回 Eid 时用 anchored() 包裹 TextButton, 生成与行 anchor
     独立 (append-only) 的 INTERACTIVE anchor (EIDS.SCREENER.detail_button); 该控件位于
     行 anchor 子树之外 (兄弟节点), 不影响 COMPLEX 行 anchor 的 role=button 契约。
     """
     width = _col_width(col_widths, col)
-    if on_row_detail is None:
+    if on_row_detail is None and on_row_research is None:
         return ft.Container(width=width)
-    button: ft.Control = ft.TextButton(
-        content=ft.Text(I18n.get("col_details"), size=AppStyles.FONT_SIZE_CAPTION),
-        on_click=_make_detail_click_handler(on_row_detail, row_data),
+    detail_button: ft.Control | None = None
+    if on_row_detail is not None:
+        detail_button = ft.TextButton(
+            content=ft.Text(I18n.get("col_details"), size=AppStyles.FONT_SIZE_CAPTION),
+            on_click=_make_detail_click_handler(on_row_detail, row_data),
+        )
+        if detail_anchor is not None:
+            eid = detail_anchor(row_data)
+            if eid is not None:
+                detail_button = anchored(eid, detail_button)
+    if on_row_research is None:
+        # 兼容契约: 仅「详情」时保持 Container.content 为按钮（或其 anchor 包装）。
+        return ft.Container(content=detail_button, width=width, alignment=ft.Alignment.CENTER)
+    research_button = ft.TextButton(
+        content=ft.Text(I18n.get("agent_research_start"), size=AppStyles.FONT_SIZE_CAPTION),
+        on_click=_make_detail_click_handler(on_row_research, row_data),
     )
-    if detail_anchor is not None:
-        eid = detail_anchor(row_data)
-        if eid is not None:
-            button = anchored(eid, button)
-    return ft.Container(content=button, width=width, alignment=ft.Alignment.CENTER)
+    return ft.Container(
+        content=ft.Row(
+            safe_controls([detail_button, research_button]), spacing=0, alignment=ft.MainAxisAlignment.CENTER
+        ),
+        width=width,
+        alignment=ft.Alignment.CENTER,
+    )
 
 
 def _build_row(
@@ -518,6 +537,7 @@ def _build_row(
     alignments: dict[str, ft.Alignment] | None = None,
     on_row_detail: Callable[[dict[str, Any]], None] | None = None,
     detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    on_row_research: Callable[[dict[str, Any]], None] | None = None,
 ) -> ft.Control:
     """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
 
@@ -578,7 +598,8 @@ def _build_row(
     # role 从 button 退化为 group, 破坏 COMPLEX 行 anchor (CI E2E 实证)
     if action_cols:
         detail_cells = [
-            _build_detail_cell(row_data, col, col_widths, on_row_detail, detail_anchor) for col in action_cols
+            _build_detail_cell(row_data, col, col_widths, on_row_detail, detail_anchor, on_row_research)
+            for col in action_cols
         ]
         return ft.Container(
             height=ROW_HEIGHT,
@@ -601,6 +622,7 @@ def TableRow(
     alignments: dict[str, ft.Alignment] | None = None,
     on_row_detail: Callable[[dict[str, Any]], None] | None = None,
     detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    on_row_research: Callable[[dict[str, Any]], None] | None = None,
 ) -> ft.Control:
     """独立行组件 (方案 §5.2/§5.3): hover state 下沉到行内 use_state (G5, ~100× 性能)。
 
@@ -627,6 +649,7 @@ def TableRow(
         alignments=alignments,
         on_row_detail=on_row_detail,
         detail_anchor=detail_anchor,
+        on_row_research=on_row_research,
     )
 
 
@@ -642,6 +665,7 @@ def PaginatedTable(
     row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
     on_row_detail: Callable[[dict[str, Any]], None] | None = None,
     detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    on_row_research: Callable[[dict[str, Any]], None] | None = None,
     col_widths_key: str | None = None,
     on_load_col_widths: Callable[[], dict[str, int] | None] | None = None,
     on_persist_col_widths: Callable[[dict[str, int]], None] | None = None,
@@ -742,15 +766,16 @@ def PaginatedTable(
 
     ft.use_effect(_load_widths_effect, dependencies=[col_widths_key])
 
-    # 详情动作列 (item 4): on_row_detail 非空时追加到列尾, 参与宽度/对齐计算
+    # 动作列 (item 4): on_row_detail / on_row_research 非空时追加到列尾, 参与宽度/对齐计算。
+    # 同时有「详情」与「发起研究」时列宽加倍, 保证两个键盘可达入口不互相挤压。
     effective_cols: list[dict[str, Any]] = cols_list
-    if on_row_detail is not None:
+    if on_row_detail is not None or on_row_research is not None:
         effective_cols = [
             *cols_list,
             {
                 "id": DETAIL_COL_ID,
-                "label": I18n.get("col_details"),
-                "width": DETAIL_COL_WIDTH,
+                "label": I18n.get("col_actions" if on_row_research is not None else "col_details"),
+                "width": DETAIL_COL_WIDTH * (2 if on_row_research is not None else 1),
                 "action": _DETAIL_ACTION,
             },
         ]
@@ -839,6 +864,7 @@ def PaginatedTable(
             alignments=col_alignments,
             on_row_detail=on_row_detail,
             detail_anchor=detail_anchor,
+            on_row_research=on_row_research,
         )
         # NOTE(lazy): Python 端构建全量行控件, VScroll(Column, scroll=AUTO) 直接渲染全部行 (无窗口化). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 评估切换到 ListView build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
         for abs_idx in range(row_count)

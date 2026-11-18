@@ -25,6 +25,7 @@ import flet_charts as fch
 
 from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_chart_data
+from ui.components.flet_type_helpers import safe_on_click
 from ui.components.news_insight_panel import NewsInsightPanel
 from ui.components.risk_disclaimer import build_risk_disclaimer
 from ui.components.sentiment_bar import SentimentBar
@@ -957,6 +958,7 @@ def StockDetailDialog(
     open_state: bool = False,
     on_close: Callable[[], None] | None = None,
     on_add_to_watchlist: Callable[[str, str], None] | None = None,
+    on_start_research: Callable[[dict], None] | None = None,
     column_label_fn: Callable[[str], str] | None = None,
     news_state: NewsInsightState | None = None,
     news_on_generate: Callable[[], None] | None = None,
@@ -1079,6 +1081,16 @@ def StockDetailDialog(
 
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
     actions = [anchored(EIDS.DETAIL_DIALOG.CLOSE_BUTTON, ft.TextButton(I18n.get("common_close"), on_click=_close))]
+    if on_start_research is not None:
+        # R2-I06: 股票详情 → 只准备研究草稿（不关闭现场、不自动发送、不重跑选股）
+        actions.insert(
+            0,
+            ft.TextButton(
+                I18n.get("agent_research_start"),
+                icon=ft.Icons.SCIENCE_OUTLINED,
+                on_click=safe_on_click(lambda _e: on_start_research(data)),
+            ),
+        )
     if on_add_to_watchlist is not None:
         actions.insert(0, ft.TextButton(I18n.get("watchlist_add"), on_click=_add_to_watchlist))
     dialog = (

@@ -8,7 +8,7 @@ M27-08: 带交易所前缀的候选必须命中 ``CODE.EXCHANGE`` 完整股票�
 """
 
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import flet as ft
 import pytest
@@ -200,3 +200,49 @@ class TestBuildNewsItemStockLinks:
         labels = _collect_link_labels(item)
         assert len(labels) == 1
         assert "600519" in labels[0]
+
+
+def _collect_text_buttons(control) -> list[ft.TextButton]:
+    found: list[ft.TextButton] = []
+    if isinstance(control, ft.TextButton):
+        found.append(control)
+    for attr in ("content", "controls"):
+        value = getattr(control, attr, None)
+        if isinstance(value, ft.Control):
+            found.extend(_collect_text_buttons(value))
+        elif isinstance(value, list):
+            for child in value:
+                found.extend(_collect_text_buttons(child))
+    return found
+
+
+class TestNewsResearchEntry:
+    """R2-I06: 所选资讯 → 只准备研究草稿；无稳定 news_id 时入口禁用。"""
+
+    @pytest.fixture(autouse=True)
+    def _mock_i18n(self):
+        with patch("ui.components.news_feed.I18n") as m:
+            m.get.side_effect = lambda key, default=None, **kw: default if default is not None else key
+            yield m
+
+    def test_research_button_invokes_callback_with_row(self):
+        row = NewsRow(content="贵州茅台发布公告", news_id=7, publish_time="2024-06-15 10:30:00")
+        calls: list[NewsRow] = []
+        item = _build_news_item(
+            row,
+            "0",
+            today=date(2024, 6, 15),
+            on_start_research=calls.append,
+        )
+        buttons = [b for b in _collect_text_buttons(item) if b.content == "agent_research_start"]
+        assert len(buttons) == 1
+        assert buttons[0].disabled is False
+        buttons[0].on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
+        assert calls == [row]
+
+    def test_research_button_disabled_without_news_id(self):
+        row = NewsRow(content="实时资讯未落库", news_id=None, publish_time="2024-06-15 10:30:00")
+        item = _build_news_item(row, "0", today=date(2024, 6, 15), on_start_research=lambda _r: None)
+        buttons = [b for b in _collect_text_buttons(item) if b.content == "agent_research_start"]
+        assert len(buttons) == 1
+        assert buttons[0].disabled is True

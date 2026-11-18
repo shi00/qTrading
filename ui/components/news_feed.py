@@ -230,6 +230,7 @@ def _build_news_item(
     valid_stock_codes: frozenset[str] | None = None,
     *,
     valid_stock_ts_codes: frozenset[str] | None = None,
+    on_start_research: Callable[[NewsRow], None] | None = None,
 ) -> ft.Container:
     """Build a single news item container (pure function).
 
@@ -289,6 +290,18 @@ def _build_news_item(
             size=AppStyles.FONT_SIZE_BODY_SM,
         )
     )
+    if on_start_research is not None:
+        # R2-I06: 所选资讯 → 准备研究草稿；无稳定 news_id 时不可发起（不伪造对象身份）
+        tag_row_controls.append(
+            ft.TextButton(
+                content=I18n.get("agent_research_start"),
+                icon=ft.Icons.SCIENCE_OUTLINED,
+                on_click=safe_on_click(lambda _e, r=row: on_start_research(r)),
+                disabled=row.news_id is None,
+                tooltip=I18n.get("agent_research_start_hint"),
+                height=28,
+            )
+        )
 
     # 查看个股 link (仅当内容含经校验的股票引用且提供回调时显示; 可含多只)
     stock_codes = _extract_stock_codes(
@@ -331,6 +344,7 @@ def _build_news_controls(
     valid_stock_codes: frozenset[str] | None = None,
     *,
     valid_stock_ts_codes: frozenset[str] | None = None,
+    on_start_research: Callable[[NewsRow], None] | None = None,
 ) -> list[ft.Control]:
     """构建新闻列表控件，换日时插入日期分隔条（纯函数，``today`` 注入便于测试）。
 
@@ -355,6 +369,7 @@ def _build_news_controls(
                 today=today,
                 valid_stock_codes=valid_stock_codes,
                 valid_stock_ts_codes=valid_stock_ts_codes,
+                on_start_research=on_start_research,
             )
         )
     return controls
@@ -403,6 +418,7 @@ def NewsFeed(
     is_loading_more: bool = False,
     *,
     valid_stock_ts_codes: frozenset[str] | None = None,
+    on_start_research: Callable[[NewsRow], None] | None = None,
 ) -> ft.Container:
     """News feed component (declarative).
 
@@ -474,6 +490,7 @@ def NewsFeed(
         on_view_stock=on_view_stock,
         valid_stock_codes=valid_stock_codes,
         valid_stock_ts_codes=valid_stock_ts_codes,
+        on_start_research=on_start_research,
     )
 
     # --- Load more button (is_loading_more 时置灰 + 加载中文案, 提供忙碌反馈) ---

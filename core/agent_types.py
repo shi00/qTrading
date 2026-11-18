@@ -6515,7 +6515,9 @@ def _enforce_limit(value: object, limit: int, code: str, path: str) -> None:
 
 
 #: 业务来源登记的消费者类别（§9.10 consumer_kind 子集）。
-SOURCE_REGISTRATION_CONSUMER_KINDS: Final[frozenset[str]] = frozenset({"execution", "round", "message"})
+#: ``draft`` = 研究发起前的草稿引用（R2-I06）：业务入口只登记「准确对象/版本」，
+#: 发送/受理时再按截止界重判准入（草稿期不冒充已准入）。
+SOURCE_REGISTRATION_CONSUMER_KINDS: Final[frozenset[str]] = frozenset({"execution", "round", "message", "draft"})
 
 
 @dataclass(frozen=True, slots=True)

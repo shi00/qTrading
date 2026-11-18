@@ -337,8 +337,8 @@ class BacktestService:
             return "dev"
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def get_result(self, run_id: str) -> dict | None:
-        return await self.cache.backtest_dao.get_result(run_id)
+    async def get_result(self, run_id: str, *, suppress_errors: bool = True) -> dict | None:
+        return await self.cache.backtest_dao.get_result(run_id, suppress_errors=suppress_errors)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def list_results(

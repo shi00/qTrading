@@ -8468,8 +8468,15 @@ class AgentDao(BaseDao):
                             execution_id=request.consumer_id if request.consumer_kind == "execution" else None,
                             round_id=request.consumer_id if request.consumer_kind == "round" else None,
                             message_id=request.consumer_id if request.consumer_kind == "message" else None,
+                            # R2-I06: 草稿消费者必须绑定会话（save_draft 的 draft 边替换按
+                            # session_id 清理，缺此列会残留一条未被替换的草稿边）。
+                            session_id=request.consumer_id if request.consumer_kind == "draft" else None,
                             locator_payload=locator_payload,
-                            relation_kind=SourceRelationKind.ACCEPTED_INPUT.value,
+                            relation_kind=(
+                                SourceRelationKind.DRAFT_REFERENCE.value
+                                if request.consumer_kind == "draft"
+                                else SourceRelationKind.ACCEPTED_INPUT.value
+                            ),
                         )
                     )
                 elif existing_link.link_id != link_id or json_doc(
