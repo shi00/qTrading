@@ -18,7 +18,8 @@ import zipfile
 
 import pytest
 
-from core.agent_types import AgentValidationError, SkillBudget, sha256_hex, stable_id
+from core.agent_types import SKILL_MAX_OBJECTS, AgentValidationError, SkillBudget, sha256_hex, stable_id
+from services.agent_service import skills as skills_module
 from services.agent_service.skills import (
     SkillImportStatus,
     content_digest_of_files,
@@ -338,6 +339,77 @@ class TestDirectoryImport:
         with pytest.raises(AgentValidationError) as exc:
             inspect_skill_directory("relative-dir")
         assert exc.value.code == "invalid_workspace_root"
+
+    def test_directory_small_package_passes(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST, "refs/a.txt": b"abc"})
+        inspection = inspect_skill_directory(str(directory))
+        assert {entry.name for entry in inspection.files} == {"SKILL.md", "refs/a.txt"}
+
+    def test_directory_object_limit_exact_passes_and_plus_one_rejected(self, tmp_path) -> None:
+        files = {f"f{index:04d}.txt": b"" for index in range(SKILL_MAX_OBJECTS - 1)}
+        files["SKILL.md"] = _DEFAULT_MANIFEST
+        directory = self._write(tmp_path / "pkg", files)
+        inspection = inspect_skill_directory(str(directory))
+        assert len(inspection.files) == SKILL_MAX_OBJECTS
+        (directory / "extra.txt").write_bytes(b"x")
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory))
+        assert exc.value.code == "skill_objects_exceeded"
+
+    def test_directory_overflow_stops_enumeration_early(self, tmp_path, monkeypatch) -> None:
+        total = 5000
+        directory = self._write(
+            tmp_path / "pkg",
+            {"SKILL.md": _DEFAULT_MANIFEST, **{f"f{index:04d}.txt": b"" for index in range(total)}},
+        )
+        seen: list[str] = []
+        original = skills_module._require_safe_entry_name
+
+        def _spy(name: str) -> str:
+            seen.append(name)
+            return original(name)
+
+        monkeypatch.setattr(skills_module, "_require_safe_entry_name", _spy)
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory))
+        assert exc.value.code == "skill_objects_exceeded"
+        # 1025 个对象即拒绝：只枚举到上限附近，不遍历完全部 5001 个条目。
+        assert len(seen) <= SKILL_MAX_OBJECTS + 1
+        assert len(seen) < total + 1
+
+    def test_directory_implicit_directories_count_incrementally(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST, "a/b/c.txt": b"c"})
+        inspect_skill_directory(str(directory), budget=SkillBudget(max_objects=4))
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory), budget=SkillBudget(max_objects=3))
+        assert exc.value.code == "skill_objects_exceeded"
+
+    def test_directory_original_bytes_exact_passes_and_over_rejected(self, tmp_path) -> None:
+        directory = self._write(tmp_path / "pkg", {"SKILL.md": _DEFAULT_MANIFEST, "big.bin": b"x" * 32})
+        total = len(_DEFAULT_MANIFEST) + 32
+        inspect_skill_directory(str(directory), budget=SkillBudget(max_archive_bytes=total))
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory), budget=SkillBudget(max_archive_bytes=total - 1))
+        assert exc.value.code == "skill_archive_bytes_exceeded"
+
+    def test_directory_checkpoint_cancels_streaming_enumeration(self, tmp_path) -> None:
+        directory = self._write(
+            tmp_path / "pkg",
+            {"SKILL.md": _DEFAULT_MANIFEST, **{f"f{index:02d}.txt": b"" for index in range(20)}},
+        )
+        calls = 0
+
+        def _checkpoint() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                raise AgentValidationError("skill_cancelled", "$.skill.cancelled")
+
+        with pytest.raises(AgentValidationError) as exc:
+            inspect_skill_directory(str(directory), checkpoint=_checkpoint)
+        assert exc.value.code == "skill_cancelled"
+        # 取消发生在枚举中段：调用次数停在阈值，未走完全部 21 个条目。
+        assert calls == 4
 
 
 class TestContentDigest:
