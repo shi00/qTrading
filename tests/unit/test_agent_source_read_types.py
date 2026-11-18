@@ -305,6 +305,150 @@ class TestFactValueCodec:
             decode_fact_value({**wire, "raw_value": None})
         expect_code(exc_null, "invalid_type")
 
+    def test_numeric_raw_value_must_be_exact_number_record(self) -> None:
+        # I31①：text 形式与 raw_type 不符的伪内层数值（普通数字/字符串）一律拒绝。
+        wire = encode_fact_value(_fact())
+        for raw_value in ('"0.1"', "0.1", "true", "null"):
+            with pytest.raises(AgentValidationError) as exc:
+                decode_fact_value({**wire, "raw_value": raw_value})
+            expect_code(exc, "invalid_number")
+
+    def test_numeric_raw_type_must_match_inner_record(self) -> None:
+        # I31①：外层 json_decimal 与内层 json_integer 记录分叉即拒绝。
+        wire = encode_fact_value(_fact())
+        inner = json_doc(
+            {"numeric_encoding": "agent-number-v1", "raw_type": "json_integer", "lexeme": "1", "exact_decimal": "1"}
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            decode_fact_value({**wire, "raw_value": inner, "numeric_lexeme": "1"})
+        expect_code(exc, "invalid_number")
+
+    def test_numeric_encoding_and_lexeme_must_close_with_inner_record(self) -> None:
+        wire = encode_fact_value(_fact())
+        with pytest.raises(AgentValidationError) as exc_encoding:
+            decode_fact_value({**wire, "numeric_encoding": "plain"})
+        expect_code(exc_encoding, "invalid_number")
+        with pytest.raises(AgentValidationError) as exc_missing_encoding:
+            decode_fact_value({**wire, "numeric_encoding": None})
+        expect_code(exc_missing_encoding, "invalid_number")
+        with pytest.raises(AgentValidationError) as exc_lexeme:
+            decode_fact_value({**wire, "numeric_lexeme": "0.2"})
+        expect_code(exc_lexeme, "invalid_number")
+
+    def test_non_numeric_raw_type_rejected_with_numeric_metadata_or_mismatch(self) -> None:
+        wire = encode_fact_value(
+            _fact(raw_type="string", raw_value='"0.1"', numeric_lexeme=None, numeric_encoding=None)
+        )
+        assert decode_fact_value(wire).raw_type == "string"
+        with pytest.raises(AgentValidationError) as exc_meta:
+            decode_fact_value({**wire, "numeric_lexeme": "0.1", "numeric_encoding": "agent-number-v1"})
+        expect_code(exc_meta, "invalid_raw_type")
+        with pytest.raises(AgentValidationError) as exc_shape:
+            decode_fact_value({**wire, "raw_value": "0.1"})
+        expect_code(exc_shape, "invalid_raw_type")
+
+    def test_bool_and_null_raw_values_must_match_raw_type(self) -> None:
+        wire = encode_fact_value(_fact(raw_type="bool", raw_value="true", numeric_lexeme=None, numeric_encoding=None))
+        assert decode_fact_value(wire).raw_type == "bool"
+        with pytest.raises(AgentValidationError) as exc_bool:
+            decode_fact_value({**wire, "raw_value": "1"})
+        expect_code(exc_bool, "invalid_raw_type")
+        null_wire = encode_fact_value(
+            _fact(raw_type="null", raw_value="null", numeric_lexeme=None, numeric_encoding=None)
+        )
+        assert decode_fact_value(null_wire).raw_type == "null"
+        with pytest.raises(AgentValidationError) as exc_null:
+            decode_fact_value({**null_wire, "raw_value": '"null"'})
+        expect_code(exc_null, "invalid_raw_type")
+
+    def test_xlsx_meta_must_be_complete_and_non_empty(self) -> None:
+        # I31②：空对象或缺键 meta 不再被浅 JSON 校验放过。
+        wire = encode_fact_value(_fact())
+        for meta in ("{}", json_doc({"schema_version": "1"})):
+            with pytest.raises(AgentValidationError) as exc:
+                decode_fact_value({**wire, "xlsx_cell_meta": meta})
+            expect_code(exc, "missing_field")
+        base = to_wire_dict(XlsxCellMeta(sheet="Sheet1", cell="A1"))
+        with pytest.raises(AgentValidationError) as exc_empty:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc({**base, "sheet": ""})})
+        expect_code(exc_empty, "invalid_identity")
+
+    def test_xlsx_meta_rejects_extra_keys(self) -> None:
+        # I31④：meta 额外键拒绝。
+        wire = encode_fact_value(_fact())
+        base = to_wire_dict(XlsxCellMeta(sheet="Sheet1", cell="A1"))
+        with pytest.raises(AgentValidationError) as exc:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc({**base, "total": 1})})
+        expect_code(exc, "unknown_field")
+
+    def test_xlsx_meta_cache_record_closed_by_type(self) -> None:
+        # I31③：错 encoding / 错内层 type 的缓存载荷拒绝。
+        wire = encode_fact_value(_fact())
+        meta = to_wire_dict(
+            XlsxCellMeta(
+                sheet="Sheet1",
+                cell="C3",
+                cache_present=True,
+                cache_raw_type="json_decimal",
+                cache_raw_value='{"numeric_encoding":"agent-number-v1","raw_type":"json_decimal",'
+                '"lexeme":"2.50","exact_decimal":"2.50"}',
+            )
+        )
+        with pytest.raises(AgentValidationError) as exc_encoding:
+            decode_fact_value(
+                {
+                    **wire,
+                    "xlsx_cell_meta": json_doc(
+                        {
+                            **meta,
+                            "cache_raw_value": '{"numeric_encoding":"plain","raw_type":"json_decimal",'
+                            '"lexeme":"2.50","exact_decimal":"2.50"}',
+                        }
+                    ),
+                }
+            )
+        expect_code(exc_encoding, "invalid_number")
+        with pytest.raises(AgentValidationError) as exc_type:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc({**meta, "cache_raw_type": "json_integer"})})
+        expect_code(exc_type, "invalid_number")
+        with pytest.raises(AgentValidationError) as exc_unknown_type:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc({**meta, "cache_raw_type": "float"})})
+        expect_code(exc_unknown_type, "invalid_raw_type")
+
+    def test_xlsx_meta_cache_flags_closed(self) -> None:
+        # I31③：cache flags 与缓存载荷互相矛盾即拒绝。
+        wire = encode_fact_value(_fact())
+        meta = to_wire_dict(
+            XlsxCellMeta(
+                sheet="Sheet1",
+                cell="C3",
+                cache_present=True,
+                cache_raw_type="json_decimal",
+                cache_raw_value='{"numeric_encoding":"agent-number-v1","raw_type":"json_decimal",'
+                '"lexeme":"2.50","exact_decimal":"2.50"}',
+            )
+        )
+        with pytest.raises(AgentValidationError) as exc_absent:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc({**meta, "cache_present": False})})
+        expect_code(exc_absent, "invalid_cache_state")
+        with pytest.raises(AgentValidationError) as exc_unverified_presence:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc({**meta, "cache_present": None})})
+        expect_code(exc_unverified_presence, "invalid_cache_state")
+        base = to_wire_dict(XlsxCellMeta(sheet="Sheet1", cell="A1", cache_present=False, cache_applicable=True))
+        with pytest.raises(AgentValidationError) as exc_applicable:
+            decode_fact_value({**wire, "xlsx_cell_meta": json_doc(base)})
+        expect_code(exc_applicable, "invalid_cache_state")
+
+    def test_unverified_closure_cannot_keep_program_verified(self) -> None:
+        # I31⑥ / R21：闭合失败即拒绝，program_verified 不随伪内层值/空 meta 幸存。
+        wire = encode_fact_value(_fact(verification=VerificationState.PROGRAM_VERIFIED))
+        with pytest.raises(AgentValidationError) as exc_value:
+            decode_fact_value({**wire, "raw_value": "0.1"})
+        expect_code(exc_value, "invalid_number")
+        with pytest.raises(AgentValidationError) as exc_meta:
+            decode_fact_value({**wire, "xlsx_cell_meta": "{}"})
+        expect_code(exc_meta, "missing_field")
+
 
 class TestSourceReadAndEvidenceLinkCodec:
     def test_source_read_roundtrip(self) -> None:

@@ -5383,6 +5383,11 @@ RECOVERY_UNVERIFIED_DISPLAY_STATES: Final[frozenset[str]] = frozenset({"unknown"
 #: FactValue 外层原始类型（§3.3 agent-number-v1；字符串形似数字仍是 string）。
 FACT_RAW_TYPES: Final[frozenset[str]] = frozenset({"json_integer", "json_decimal", "string", "bool", "null"})
 
+#: XLSX 缓存带类型表示（§10.4：数值沿 agent-number-v1，另含 error/datetime）。
+XLSX_CACHE_RAW_TYPES: Final[frozenset[str]] = frozenset(
+    {INTEGER_RAW_TYPE, DECIMAL_RAW_TYPE, "string", "bool", "null", "error", "datetime"}
+)
+
 #: SourceRead 覆盖语义：完整/受限/未知（未知不得当完整）。
 SOURCE_COVERAGES: Final[frozenset[str]] = frozenset({"full", "limited", "unknown"})
 
@@ -5443,22 +5448,71 @@ _XLSX_CELL_META_KEYS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _decode_xlsx_cache_value(raw_type: str, text: CanonicalJson, path: str) -> None:
+    """按 ``cache_raw_type`` 闭合 XLSX 缓存载荷（数值走同一 exact codec，§10.4）。
+
+    数值载荷必须是 agent-number-v1 记录且内层 ``raw_type`` 与 ``cache_raw_type``
+    一致；``string`` / ``bool`` / ``null`` / ``error`` / ``datetime`` 为
+    ``{"raw_type", "lexeme"}`` 记录（datetime 另允许 ``serial`` / ``date_epoch``），
+    禁额外键。伪内层数值不得冒充缓存数值。
+    """
+
+    parsed = decode_json_doc(text)
+    if not isinstance(parsed, dict):
+        _fail("invalid_type", path)
+    if raw_type in (INTEGER_RAW_TYPE, DECIMAL_RAW_TYPE):
+        decode_exact_number(parsed, path)
+        if parsed["raw_type"] != raw_type:
+            _fail("invalid_number", f"{path}.raw_type")
+        return
+    allowed = {"raw_type", "lexeme"}
+    if raw_type == "datetime":
+        allowed |= {"serial", "date_epoch"}
+    missing = sorted({"raw_type", "lexeme"} - parsed.keys())
+    if missing:
+        _fail("missing_field", f"{path}.{missing[0]}")
+    extra = sorted(parsed.keys() - allowed)
+    if extra:
+        _fail("unknown_field", f"{path}.{extra[0]}")
+    if parsed["raw_type"] != raw_type:
+        _fail("invalid_raw_type", f"{path}.raw_type")
+    lexeme = parsed["lexeme"]
+    if lexeme is not None and not isinstance(lexeme, str):
+        _fail("invalid_type", f"{path}.lexeme")
+    for key in ("serial", "date_epoch"):
+        item = parsed.get(key)
+        if item is not None and not isinstance(item, str):
+            _fail("invalid_type", f"{path}.{key}")
+
+
 def decode_xlsx_cell_meta(value: object, path: str = "$.xlsx_cell_meta") -> XlsxCellMeta:
-    """严格解码 XLSX 单元格元数据（13 键全必填、禁额外键）。"""
+    """严格解码 XLSX 单元格元数据（13 键全必填、禁额外键、缓存标志与载荷闭合）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _XLSX_CELL_META_KEYS, path)
     if _require_str(value["schema_version"], f"{path}.schema_version") != "1":
         _fail("invalid_version", f"{path}.schema_version")
+    cache_present = _opt_bool(value["cache_present"], f"{path}.cache_present")
+    cache_applicable = _opt_bool(value["cache_applicable"], f"{path}.cache_applicable")
+    cache_raw_type = _opt_str(value["cache_raw_type"], f"{path}.cache_raw_type")
+    cache_raw_value = _opt_json_text(value["cache_raw_value"], f"{path}.cache_raw_value")
+    if cache_raw_type is not None and cache_raw_type not in XLSX_CACHE_RAW_TYPES:
+        _fail("invalid_raw_type", f"{path}.cache_raw_type")
+    if (cache_raw_type is None) != (cache_raw_value is None):
+        _fail("invalid_cache_state", path)
+    if cache_present is not True and (cache_raw_type is not None or cache_applicable is True):
+        _fail("invalid_cache_state", path)
+    if cache_raw_type is not None and cache_raw_value is not None:
+        _decode_xlsx_cache_value(cache_raw_type, cache_raw_value, f"{path}.cache_raw_value")
     return XlsxCellMeta(
         sheet=_require_str(value["sheet"], f"{path}.sheet"),
         cell=_require_str(value["cell"], f"{path}.cell"),
         formula_text=_opt_str(value["formula_text"], f"{path}.formula_text"),
-        cache_present=_opt_bool(value["cache_present"], f"{path}.cache_present"),
-        cache_applicable=_opt_bool(value["cache_applicable"], f"{path}.cache_applicable"),
-        cache_raw_type=_opt_str(value["cache_raw_type"], f"{path}.cache_raw_type"),
-        cache_raw_value=_opt_json_text(value["cache_raw_value"], f"{path}.cache_raw_value"),
+        cache_present=cache_present,
+        cache_applicable=cache_applicable,
+        cache_raw_type=cache_raw_type,
+        cache_raw_value=cache_raw_value,
         cache_verification=_opt_enum(
             value["cache_verification"], VerificationState, f"{path}.cache_verification", "invalid_verification_state"
         ),
@@ -5468,6 +5522,20 @@ def decode_xlsx_cell_meta(value: object, path: str = "$.xlsx_cell_meta") -> Xlsx
         xml_value_lexeme=_opt_str(value["xml_value_lexeme"], f"{path}.xml_value_lexeme"),
         schema_version="1",
     )
+
+
+def _decode_xlsx_cell_meta_text(value: object, path: str) -> CanonicalJson | None:
+    """FactValue.xlsx_cell_meta：JSON 文本承载，须整键整值通过完整 meta codec。"""
+
+    if value is None:
+        return None
+    text = _require_str(value, path)
+    try:
+        decoded = decode_json_doc(text)
+    except AgentValidationError:
+        _fail("invalid_json", path)
+    decode_xlsx_cell_meta(decoded, path)
+    return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -5617,19 +5685,65 @@ def encode_fact_value(fact: FactValue) -> dict[str, Any]:
     return to_wire_dict(fact)
 
 
+def _decode_fact_raw_lexeme(raw_type: str, text: CanonicalJson, path: str) -> str | None:
+    """按 ``raw_type`` 闭合 FactValue.raw_value 的内层值（§3.3/V04）。
+
+    数值类型必须是 agent-number-v1 记录且内外 ``raw_type`` 一致（复用
+    :func:`decode_exact_number` 的同一判定）；``string`` / ``bool`` / ``null``
+    必须是同型 JSON 标量，形似数字的普通值不得冒充数值事实。
+
+    返回内层数值词法（仅数值类型），供外层 ``numeric_lexeme`` 逐值闭合。
+    """
+
+    parsed = decode_json_doc(text)
+    if raw_type in (INTEGER_RAW_TYPE, DECIMAL_RAW_TYPE):
+        if not isinstance(parsed, dict):
+            _fail("invalid_number", path)
+        decode_exact_number(parsed, path)
+        if parsed["raw_type"] != raw_type:
+            _fail("invalid_number", f"{path}.raw_type")
+        return cast(str, parsed["lexeme"])
+    if raw_type == "string":
+        matched = isinstance(parsed, str)
+    elif raw_type == "bool":
+        matched = isinstance(parsed, bool)
+    else:
+        matched = parsed is None
+    if not matched:
+        _fail("invalid_raw_type", path)
+    return None
+
+
 def decode_fact_value(value: object, path: str = "$.fact") -> FactValue:
-    """严格解码事实值（16 键全必填、禁额外键；raw_type 限封闭值域）。"""
+    """严格解码事实值（16 键全必填、禁额外键；raw_type 限封闭值域）。
+
+    ``raw_value`` 按 ``raw_type`` 闭合：数值须为 agent-number-v1 记录且内外
+    ``raw_type`` 一致，``numeric_lexeme`` / ``numeric_encoding`` 与内层逐值一致；
+    非数值禁止携带数值元数据。``xlsx_cell_meta`` 非 null 时须整键整值通过
+    :func:`decode_xlsx_cell_meta`。闭合失败即拒绝，``program_verified`` 不会
+    随未核闭合的内层值或空 meta 幸存（R21）。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _FACT_VALUE_KEYS, path)
+    raw_type = _require_choice(value["raw_type"], FACT_RAW_TYPES, f"{path}.raw_type", "invalid_raw_type")
+    raw_value = _require_json_text(value["raw_value"], f"{path}.raw_value")
+    numeric_lexeme = _opt_str(value["numeric_lexeme"], f"{path}.numeric_lexeme")
+    numeric_encoding = _opt_str(value["numeric_encoding"], f"{path}.numeric_encoding")
+    closed_lexeme = _decode_fact_raw_lexeme(raw_type, raw_value, f"{path}.raw_value")
+    if raw_type in (INTEGER_RAW_TYPE, DECIMAL_RAW_TYPE):
+        if numeric_encoding != AGENT_NUMBER_ENCODING or numeric_lexeme != closed_lexeme:
+            _fail("invalid_number", f"{path}.numeric_lexeme")
+    elif numeric_lexeme is not None or numeric_encoding is not None:
+        _fail("invalid_raw_type", f"{path}.numeric_encoding")
     return FactValue(
         field_key=_require_str(value["field_key"], f"{path}.field_key"),
         object_ref=_require_str(value["object_ref"], f"{path}.object_ref"),
-        raw_type=_require_choice(value["raw_type"], FACT_RAW_TYPES, f"{path}.raw_type", "invalid_raw_type"),
-        raw_value=_require_json_text(value["raw_value"], f"{path}.raw_value"),
-        numeric_lexeme=_opt_str(value["numeric_lexeme"], f"{path}.numeric_lexeme"),
-        numeric_encoding=_opt_str(value["numeric_encoding"], f"{path}.numeric_encoding"),
+        raw_type=raw_type,
+        raw_value=raw_value,
+        numeric_lexeme=numeric_lexeme,
+        numeric_encoding=numeric_encoding,
         source_unit=_opt_str(value["source_unit"], f"{path}.source_unit"),
         currency=_opt_str(value["currency"], f"{path}.currency"),
         display_unit=_opt_str(value["display_unit"], f"{path}.display_unit"),
@@ -5641,7 +5755,7 @@ def decode_fact_value(value: object, path: str = "$.fact") -> FactValue:
             value["verification"], VerificationState, f"{path}.verification", "invalid_verification_state"
         ),
         missing_reason=_opt_str(value["missing_reason"], f"{path}.missing_reason"),
-        xlsx_cell_meta=_opt_json_text(value["xlsx_cell_meta"], f"{path}.xlsx_cell_meta"),
+        xlsx_cell_meta=_decode_xlsx_cell_meta_text(value["xlsx_cell_meta"], f"{path}.xlsx_cell_meta"),
     )
 
 

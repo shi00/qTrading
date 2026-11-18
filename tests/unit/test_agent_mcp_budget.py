@@ -2,23 +2,20 @@
 
 设计（§10.4 / HANDOFF §9）要求上述预算在大量分配之前冻结并执行，恰等通过、
 超一拒绝；本测试只验证计量与早拒绝合同，不声明任何产品数值已批准。
+入站字节/深度的真实插入点（HTTP 响应流）见 ``test_agent_mcp_inbound_limits.py``。
 """
 
 from __future__ import annotations
-
-from collections.abc import AsyncIterator
 
 import pytest
 
 from core.agent_types import MCPBudgetProfile
 from services.agent_service.mcp import MCPServiceIdentity
 from services.agent_service.mcp_budget import (
+    JsonDepthScanner,
     MCPBudgetExceeded,
     MCPBudgetGuard,
     MCPDeadline,
-    MCPProgressGuard,
-    bounded_json_loads,
-    read_bounded_stream,
 )
 
 _IDENTITY = MCPServiceIdentity(service_id="svc-local-fs", config_version=1)
@@ -43,11 +40,6 @@ def _guard(**overrides: int | None) -> MCPBudgetGuard:
     return MCPBudgetGuard(_profile(**overrides), identity="svc-local-fs@1")
 
 
-async def _chunks(count: int, size: int = 10) -> AsyncIterator[bytes]:
-    for _ in range(count):
-        yield b"x" * size
-
-
 class TestBudgetAdmission:
     def test_unfrozen_profile_cannot_construct_guard(self) -> None:
         from core.agent_types import AgentErrorCode, AgentServiceError
@@ -59,26 +51,19 @@ class TestBudgetAdmission:
 
 
 class TestReceiveBytes:
-    @pytest.mark.asyncio
-    async def test_exact_receive_limit_passes(self) -> None:
-        data = await read_bounded_stream(_chunks(10), _guard(receive_bytes=100))
-        assert len(data) == 100
+    def test_exact_receive_limit_passes(self) -> None:
+        guard = _guard(receive_bytes=100)
+        guard.receive_bytes(100)
+        assert guard.used("receive_bytes") == 100
 
-    @pytest.mark.asyncio
-    async def test_one_byte_over_is_rejected_before_reading_more_chunks(self) -> None:
-        consumed = 0
-
-        async def source() -> AsyncIterator[bytes]:
-            nonlocal consumed
-            for _ in range(5):
-                consumed += 1
-                yield b"x" * 10
-
+    def test_one_byte_over_is_rejected(self) -> None:
+        guard = _guard(receive_bytes=25)
+        guard.receive_bytes(20)
         with pytest.raises(MCPBudgetExceeded) as exc:
-            await read_bounded_stream(source(), _guard(receive_bytes=25))
+            guard.receive_bytes(6)
         assert exc.value.family == "receive_bytes"
-        # 第 3 块即 30 字节 > 25：早拒绝后不再继续拉取剩余块。
-        assert consumed == 3
+        # 超限不计入：账本保持最后一次成功计入的值。
+        assert guard.used("receive_bytes") == 20
 
 
 class TestDecodedBytes:
@@ -92,18 +77,28 @@ class TestDecodedBytes:
 
 class TestStructureDepth:
     def test_depth_exactly_at_limit_passes(self) -> None:
-        text = '{"a":{"b":{"c":{"d":1}}}}'
-        assert bounded_json_loads(text, _guard(structure_depth=4)) == {"a": {"b": {"c": {"d": 1}}}}
+        scanner = JsonDepthScanner()
+        assert scanner.feed(b'{"a":{"b":{"c":{"d":1}}}}') == 4
+        _guard(structure_depth=4).structure_depth(scanner.max_depth)
 
-    def test_depth_over_limit_rejected_before_parse(self) -> None:
-        text = '{"a":{"b":{"c":{"d":{"e":1}}}}}'
+    def test_depth_over_limit_rejected(self) -> None:
+        scanner = JsonDepthScanner()
+        scanner.feed(b'{"a":{"b":{"c":{"d":{"e":1}}}}}')
         with pytest.raises(MCPBudgetExceeded) as exc:
-            bounded_json_loads(text, _guard(structure_depth=4))
+            _guard(structure_depth=4).structure_depth(scanner.max_depth)
         assert exc.value.family == "structure_depth"
 
     def test_braces_inside_strings_do_not_count_as_depth(self) -> None:
-        text = '{"a":"{{{{{{"}'
-        assert bounded_json_loads(text, _guard(structure_depth=1)) == {"a": "{{{{{{"}
+        scanner = JsonDepthScanner()
+        assert scanner.feed(b'{"a":"{{{{{{"}') == 1
+        assert scanner.depth == 0
+
+    def test_chunk_boundaries_do_not_change_depth(self) -> None:
+        scanner = JsonDepthScanner()
+        for chunk in (b'{"a":', b'{"b":', b"[1,2]", b"}}"):
+            scanner.feed(chunk)
+        assert scanner.max_depth == 3
+        assert scanner.depth == 0
 
 
 class TestCatalogAndSchema:
@@ -152,29 +147,20 @@ class TestSingleResultAndRetention:
         assert exc.value.family == "retention_bytes"
 
 
-class TestProgressAndDeadline:
-    def test_consecutive_progress_over_limit_is_rejected(self) -> None:
-        guard = _guard()
-        progress = MCPProgressGuard(guard, max_consecutive=3)
-        for _ in range(3):
-            progress.observe()
-        with pytest.raises(MCPBudgetExceeded) as exc:
-            progress.observe()
-        assert exc.value.family == "progress_burst"
-        progress.completed()
-        progress.observe()  # 完成后重新计数
+class TestDeadline:
+    def test_deadline_counts_down_from_construction_only(self) -> None:
+        """单一总 deadline：不因 progress/分片续期，时间轴只前进。"""
 
-    def test_progress_does_not_extend_deadline(self) -> None:
         now = [1000.0]
         deadline = MCPDeadline(seconds=30, monotonic=lambda: now[0])
         assert deadline.remaining() == 30
 
         now[0] += 10
-        deadline.observe_progress()
         assert deadline.remaining() == 20
         assert deadline.expired() is False
 
         now[0] += 20
+        assert deadline.remaining() == 0
         assert deadline.expired() is True
 
 

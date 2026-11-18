@@ -329,9 +329,10 @@ class TestReadSourceRepresentation:
             field_key="revenue",
             object_ref="src-1:v1",
             raw_type="json_decimal",
-            raw_value="123.45",
+            raw_value='{"numeric_encoding":"agent-number-v1","raw_type":"json_decimal",'
+            '"lexeme":"123.45","exact_decimal":"123.45"}',
             numeric_lexeme="123.45",
-            numeric_encoding="plain",
+            numeric_encoding="agent-number-v1",
             source_unit="元",
             currency="CNY",
             display_unit=None,
@@ -366,7 +367,10 @@ class TestReadSourceRepresentation:
 
         assert read.coverage == "limited"
         assert read.facts[0].field_key == "revenue"
-        assert read.facts[0].raw_value == "123.45"
+        assert read.facts[0].raw_value == (
+            '{"numeric_encoding":"agent-number-v1","raw_type":"json_decimal",'
+            '"lexeme":"123.45","exact_decimal":"123.45"}'
+        )
         assert read.structured_blocks == ('{"kind":"paragraph","text":"正文"}',)
         assert [item.code for item in read.selected_range.limitations] == ["truncated_columns"]
         assert [item.code for item in read.limitations] == ["ocr_skipped"]
