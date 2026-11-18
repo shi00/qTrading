@@ -33,6 +33,22 @@ from services.agent_service.delivery_service import (
     DeliveryContext,
     DeliveryOutcome,
 )
+from services.agent_service.dispatch import (
+    DISPATCH_CLOSED,
+    NOT_COMMITTED,
+    PLAN_UNAVAILABLE,
+    DispatchOutcome,
+    ResearchDispatcher,
+    ResearchWorkflowResult,
+)
+from services.agent_service.leaf_runtime import (
+    LeafModelBinding,
+    LeafRuntimeWiring,
+    build_gateway_model,
+    build_leaf_runner,
+    install_leaf_runtime,
+    leaf_call_identity,
+)
 from services.agent_service.mcp_fastmcp import (
     FastMCPClientFactory,
     FastMCPSession,
@@ -56,10 +72,13 @@ from services.agent_service.runtime import (
     assemble_agent_runtime,
     launch_agent_runtime,
 )
-from services.agent_service.service import AgentService, WaitResult
+from services.agent_service.service import AgentService, SubmissionOutcome, WaitResult
 from services.agent_service.sources import BusinessSourceService
 
 __all__ = [
+    "DISPATCH_CLOSED",
+    "NOT_COMMITTED",
+    "PLAN_UNAVAILABLE",
     "AgentRuntime",
     "AgentRuntimeHandle",
     "AgentRuntimeSettings",
@@ -81,9 +100,12 @@ __all__ = [
     "DeliveryCommandService",
     "DeliveryContext",
     "DeliveryOutcome",
+    "DispatchOutcome",
     "FastMCPClientFactory",
     "FastMCPSession",
     "JsonSchemaToolValidator",
+    "LeafModelBinding",
+    "LeafRuntimeWiring",
     "MCPSendGate",
     "MCPSessionDiagnostics",
     "ManualRecoveryReceipt",
@@ -91,17 +113,24 @@ __all__ = [
     "PlanStoreBinding",
     "ResearchBoundary",
     "ResearchBoundaryPolicy",
+    "ResearchDispatcher",
+    "ResearchWorkflowResult",
     "StartupIsolationReceipt",
     "StartupOutcome",
+    "SubmissionOutcome",
     "SubprocessAttachmentWorker",
     "WaitResult",
     "assemble_agent_runtime",
+    "build_gateway_model",
+    "build_leaf_runner",
     "build_plan_store",
     "build_planning_capability",
     "build_summarizing_compaction",
     "detect_attachment_kind",
     "freeze_comparison_group",
+    "install_leaf_runtime",
     "launch_agent_runtime",
+    "leaf_call_identity",
     "read_backtest_snapshot",
     "resume_selected_workflows",
     "run_startup_isolation",

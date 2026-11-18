@@ -16,15 +16,25 @@
    - 关闭前置经 ``AgentRuntime.prepare_close``（既有关闭链：冻结桥提交 → 关派发 →
      核 IO → 保存结束/unknown → 关闭 DBOS/Client/引擎），在释放共享引擎之前调用。
 
-**launch 门闩**：needs-spike（HANDOFF §8.4：真 PG/真进程隔离实证）未通过前
-``AGENT_RUNTIME_LAUNCH_ALLOWED`` 为 False——宿主照常组装并执行启动隔离，但
-launch 被显式推迟（零派发）。门闩只允许在实证通过后改为 True。
+**launch 门闩**：needs-spike（HANDOFF §8.4：真 PG/真进程隔离实证）默认保持关闭——
+宿主照常组装并执行启动隔离，但 launch 与派发显式推迟（零派发）。门闩由显式
+配置项 ``AGENT_RUNTIME_LAUNCH_ALLOWED``（环境变量）派生，**默认关闭**；开启需
+显式配置，代码不硬编码 True。
+
+**运行链装配（R2-I01）**：
+
+- 叶 runner 在组装期登记（``install_leaf_runtime``，含 GatewayModel 工厂：调用
+  身份只由叶持久执行身份派生）；
+- 宿主就绪后构造 ``ResearchDispatcher``（受理回执 → 持久父研究 workflow），
+  计划来源与投递/读回端口由组合根注入；
+- 派发门闩与关闭链共用同一 ``_ProcessDispatchGate``：关闭派发后新提交零派发。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -37,12 +47,22 @@ from services.agent_service import (
     AgentRuntimeSettings,
     AgentService,
     CloseReadinessReceipt,
+    LeafRuntimeWiring,
+    ResearchDispatcher,
+    ResearchWorkflowResult,
     StartupIsolationReceipt,
+    install_leaf_runtime,
     launch_agent_runtime,
     start_agent_runtime,
 )
+from services.agent_service.dispatch import (
+    PlanSpecProvider,
+    RootWorkflowResultReader,
+    RootWorkflowSubmitter,
+)
 from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
 from services.agent_service.units import UnitConversion
+from services.agent_service.workflows import submit_research_workflow
 from utils.config.db import (
     AGENT_MIGRATION_DB_URL_ENV,
     DatabaseMode,
@@ -53,8 +73,8 @@ from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
-#: needs-spike 门闩（HANDOFF §8.4）：只有真 PG/真进程隔离实证通过后才允许生产 launch。
-AGENT_RUNTIME_LAUNCH_ALLOWED: Final[bool] = False
+#: launch 门闩配置项（环境变量，默认关闭；needs-spike 通过后显式开启）。
+AGENT_RUNTIME_LAUNCH_ALLOWED_ENV: Final[str] = "AGENT_RUNTIME_LAUNCH_ALLOWED"
 
 #: Agent 运行库逻辑库名（与业务库同 PG 实例、独立逻辑库；见 data.persistence.agent_migrator）。
 AGENT_RUNTIME_DATABASE: Final[str] = "qtrading_agent_runtime"
@@ -74,6 +94,16 @@ def agent_unit_converter() -> UnitConversion:
     return threshold_in_data_unit
 
 
+def agent_runtime_launch_allowed() -> bool:
+    """launch 门闩取值（显式配置派生，默认关闭）。
+
+    未配置 / 取值不识别时保持关闭（fail-closed）：无法证明已通过 needs-spike
+    实证就不允许生产 launch 与派发。
+    """
+
+    return os.environ.get(AGENT_RUNTIME_LAUNCH_ALLOWED_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class AgentWiring:
     """本会话的 Agent 接线（facade + 共享桥 + 宿主 + 关闭前置）。
@@ -89,6 +119,7 @@ class AgentWiring:
     launched: bool = False
     handle: AgentRuntimeHandle | None = None
     runtime: AgentRuntime | None = None
+    dispatcher: ResearchDispatcher | None = None
     unclosed_handle: AgentRuntimeHandle | None = None
     instance_guard: Any | None = None
     _close_command: CloseCommandIdentity | None = None
@@ -241,6 +272,53 @@ def _application_version() -> str:
         return "dev"
 
 
+BlockingRunner = Callable[[Callable[[], Any]], Awaitable[Any]]
+
+
+def _blocking_runner(blocking_runner: BlockingRunner | None) -> BlockingRunner:
+    """受管线程执行器（未注入时用 ThreadPoolManager.IO，不堵 UI，R16）。"""
+
+    if blocking_runner is not None:
+        return blocking_runner
+
+    async def _run(fn: Callable[[], Any]) -> Any:
+        from utils.thread_pool import TaskType, ThreadPoolManager
+
+        return await ThreadPoolManager().run_async(TaskType.IO, fn)
+
+    return _run
+
+
+def _default_workflow_submitter(
+    blocking_runner: BlockingRunner | None,
+) -> RootWorkflowSubmitter:
+    """生产投递端口：同步 DBOS 启动经受管线程执行（SetWorkflowID 在宿主入口内）。"""
+
+    runner = _blocking_runner(blocking_runner)
+
+    async def _submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        await runner(lambda: submit_research_workflow(workflow_id, payload))
+
+    return _submit
+
+
+def _default_result_reader(handle: AgentRuntimeHandle) -> RootWorkflowResultReader:
+    """生产结果读回端口：按稳定 workflow 身份读原生状态与成功输出（不等待）。"""
+
+    async def _read(workflow_id: str) -> ResearchWorkflowResult:
+        from dbos import WorkflowStatusString
+
+        native = await handle.client.retrieve_workflow_async(workflow_id)
+        status = await native.get_status()
+        state = str(status.status)
+        output = status.output if state == WorkflowStatusString.SUCCESS.value else None
+        if output is not None and not isinstance(output, dict):
+            raise RuntimeError("research workflow output is not a wire dict")
+        return ResearchWorkflowResult(workflow_id=workflow_id, state=state, output=output)
+
+    return _read
+
+
 def _agent_runtime_sync_url(engine: Any) -> str:
     """由共享引擎 URL 派生 Agent 运行库同步 psycopg URL（同实例、独立逻辑库）。"""
 
@@ -299,14 +377,22 @@ async def wire_agent_runtime(
     instance_guard: Any | None = None,
     blocking_runner: Callable[[Callable[[], Any]], Awaitable[Any]] | None = None,
     launch_allowed: bool | None = None,
+    leaf_runtime: LeafRuntimeWiring | None = None,
+    plan_provider: PlanSpecProvider | None = None,
+    workflow_submitter: RootWorkflowSubmitter | None = None,
+    workflow_result_reader: RootWorkflowResultReader | None = None,
 ) -> AgentWiring:
-    """生产组合根接线（P01）：facade + 共享桥 + 宿主/启动隔离 + 关闭前置。
+    """生产组合根接线（P01/R2-I01）：facade + 共享桥 + 叶运行链 + 宿主/派发。
 
     - facade 必须复用共享 ``cache_manager.agent_dao``（共账本，不另起引擎）；
+    - 叶 runner 在宿主组装前登记（``install_leaf_runtime``）：未安装时叶执行
+      明确拒绝，不以占位执行器冒充；安装失败一律零派发；
     - 宿主经 ``start_agent_runtime``：唯一执行锁 → 组装 → 启动隔离 → **就绪才
       launch**；隔离失败/组装失败一律零派发且不构造关闭链；
-    - launch 由 ``AGENT_RUNTIME_LAUNCH_ALLOWED``（needs-spike）门闩控制，
-      未通过时宿主保持 unlaunched。
+    - launch 由显式配置 ``agent_runtime_launch_allowed()``（默认关闭）控制；
+      未 launch 时派发门闩保持关闭（零派发）；
+    - 宿主就绪后构造 ``ResearchDispatcher``：受理成功后把请求投递给持久父研究
+      workflow，结果经原生状态/输出读回；计划来源不可得时零派发。
 
     接线失败降级为零派发（``failure`` 如实记录），不阻断既有业务启动。
     ``CancelledError`` 继续传播（R2）。
@@ -319,14 +405,21 @@ async def wire_agent_runtime(
         logger.warning("[AgentWiring] shared engine/ledger unavailable; agent runtime not wired (zero dispatch)")
         return AgentWiring(service=None, bridge=bridge, failure="shared_ledger_unavailable")
 
-    service = AgentService(dao, getattr(cache_manager, "ai_usage_dao", None))
+    usage_dao = getattr(cache_manager, "ai_usage_dao", None)
+    service = AgentService(dao, usage_dao)
     try:
         runtime_url = _agent_runtime_sync_url(engine)
     except Exception as e:
         logger.warning("[AgentWiring] agent runtime url unresolved: %s (zero dispatch)", type(e).__name__)
         return AgentWiring(service=service, bridge=bridge, failure="runtime_url_unresolved")
 
-    allow_launch = AGENT_RUNTIME_LAUNCH_ALLOWED if launch_allowed is None else launch_allowed
+    try:
+        install_leaf_runtime(leaf_runtime)
+    except Exception as e:  # 叶运行链未装好即零派发（launch/派发都不进行）
+        logger.warning("[AgentWiring] leaf runtime install failed: %s (zero dispatch)", type(e).__name__)
+        return AgentWiring(service=service, bridge=bridge, failure=f"leaf_runtime_install_failed:{type(e).__name__}")
+
+    allow_launch = agent_runtime_launch_allowed() if launch_allowed is None else launch_allowed
     migration_url, share_migration_credentials = _migration_credentials(get_agent_migration_db_url())
     if migration_url is None and not share_migration_credentials:
         return AgentWiring(service=service, bridge=bridge, failure="migration_credentials_missing")
@@ -373,24 +466,32 @@ async def wire_agent_runtime(
 
     handle = outcome.handle
     launched = bool(getattr(handle, "launched", False))
+    gate = _ProcessDispatchGate(launched=launched)
+    dispatcher = ResearchDispatcher(
+        gate=gate,
+        submit=workflow_submitter if workflow_submitter is not None else _default_workflow_submitter(blocking_runner),
+        plan_provider=plan_provider,
+        read_result=workflow_result_reader if workflow_result_reader is not None else _default_result_reader(handle),
+    )
     runtime = AgentRuntime(
         handle=handle,
         bridge=bridge,
-        dispatch_gate=_ProcessDispatchGate(launched=launched),
+        dispatch_gate=gate,
         fact_sink=_PendingCloseFactSink(launched=launched),
         blocking_runner=cast(Any, blocking_runner),
     )
     logger.info(
-        "[AgentWiring] agent runtime host ready (launched=%s, isolation_ready=%s)",
+        "[AgentWiring] agent runtime host ready (launched=%s, isolation_ready=%s, dispatch_wired=True)",
         launched,
         outcome.isolation.ready if outcome.isolation is not None else None,
     )
     return AgentWiring(
-        service=service,
+        service=AgentService(dao, usage_dao, dispatcher=dispatcher),
         bridge=bridge,
         isolation=outcome.isolation,
         launched=launched,
         handle=handle,
         runtime=runtime,
+        dispatcher=dispatcher,
         instance_guard=outcome.instance_guard,
     )
