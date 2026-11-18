@@ -90,10 +90,12 @@ def _audit(identity: MCPServiceIdentity | None = None) -> MCPReadOnlyAudit:
 
 
 def _config(**overrides: object) -> MCPServerConfig:
+    # 准入要求入站限额有真实插入点（I03）：HTTP 传输具备（字节层 + 单事件上限），
+    # stdio 无前置插入点会被准入拒绝；本文件验证管理器行为，故用 HTTP 传输。
     values: dict[str, object] = {
         "identity": _identity(),
         "display_name": "本地文件服务",
-        "transport": _transport(),
+        "transport": _transport(MCPTransportKind.STREAMABLE_HTTP),
         "budget": _budget(),
         "audit": _audit(),
     }

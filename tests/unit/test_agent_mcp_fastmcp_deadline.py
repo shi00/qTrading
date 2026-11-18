@@ -114,7 +114,8 @@ class TestPerOperationDeadline:
 
         deadline = gate.before_send("call_tool", deadline_s=30)
         now[0] = 10.0
-        deadline.observe_progress()
+        # 单一总 deadline 只在构造时定值：入站 progress/分片没有任何续期入口（I03
+        # 把 progress 计入接收预算、不再提供续期 API），时间轴只前进。
         assert deadline.remaining() == 20
         assert deadline.expired() is False
 

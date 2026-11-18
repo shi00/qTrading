@@ -38,11 +38,21 @@
 SSE 兼容模式下若服务端上报的消息端点路径与配置端点不同，该路径未获批，按同一
 规则拒绝并如实上报（不放宽路径）。
 
+入站限额的真实插入点（I03）
+----------------------------
+- HTTP / SSE：响应字节先经 :class:`_BudgetedInboundStream`（替换 ``httpx2.Response.stream``，
+  SDK 的 event source 从同一响应迭代）计入 ``receive_bytes`` 并以增量扫描器判定
+  ``structure_depth``，超限即拒绝，**完整消息对象从未被构造**；streamable HTTP 另把
+  已冻结的 ``receive_bytes`` 传给 SDK 的 ``max_sse_event_size``，形成解析前的第二道
+  上限。压缩响应（非 identity 编码）无法前置判定帧长/深度，一律拒绝而非放行。
+- stdio：锁定版 SDK 的 ``mcp.client.stdio.stdio_client`` 逐行读子进程 stdout 并在库内
+  解析，不向调用方暴露字节或帧长参数，故无任何前置插入点；带 ``receive_bytes`` /
+  ``structure_depth`` 的 stdio 配置由连接管理器在准入时拒绝（``CAPABILITY_UNVERIFIED``）。
+
 仍属残留（不得宣称已验证）
 --------------------------
-原始请求字节/逐请求往返计量仍不可观测（SDK 类型化客户端在库内完成）；HTTP 侧
-拒绝发送以 ``POLICY_DENIED`` 抛出，若 SDK 内部任务组先行收尾，调用方可能先看到
-超时——但诊断通道已记录拒绝原因，不构成「静默放行」。
+http/SSE 的逐请求往返耗时、子进程退出码不可观测；目录/解码/schema/单条/留存五族按
+「收到后再计、超限即不保留/不外传」执行（这些族按定义只能在收到后计量）。
 
 四诊断通道
 ----------
@@ -52,9 +62,9 @@ SSE 兼容模式下若服务端上报的消息端点路径与配置端点不同�
 
 仍属残留（不得宣称已验证）
 --------------------------
-FastMCP 类型化客户端在库内完成解析，本层无法看到原始字节流：``receive_bytes``
-族仍无真实计量入口（仅能以解码后表示计量 ``decoded_bytes``）；进程退出码不可
-观测。见 ``docs/debt/known-technical-debt.md`` 的 P2-AgentMCP-Residual-Risks。
+子进程退出码不可观测，保持 ``None``「未知」；stdio 的入站字节/结构深度无前置插入点
+（见上节，已在准入时拒绝而非放行）。见 ``docs/debt/known-technical-debt.md`` 的
+P2-AgentMCP-Residual-Risks。
 """
 
 from __future__ import annotations
@@ -66,7 +76,7 @@ import shutil
 import tempfile
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,7 +93,7 @@ from services.agent_service.mcp import (
     MCPToolDescriptor,
     validate_mcp_server_config,
 )
-from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
+from services.agent_service.mcp_budget import JsonDepthScanner, MCPBudgetGuard, MCPDeadline
 from utils.sanitizers import DataSanitizer
 
 if TYPE_CHECKING:
@@ -383,12 +393,37 @@ class _ApprovedHTTPTarget:
         return None
 
 
+class _BudgetedInboundStream(httpx2.AsyncByteStream):
+    """SDK 解析前的入站字节核验（大帧 / 深 JSON 的真实插入点）。
+
+    包装底层响应字节流：每块在交回 SDK 之前先计入接收字节、再以增量扫描器判定
+    结构深度；任一超限即抛出 ``BUDGET_BLOCKED``，**该块不会交到 SDK**，故完整消息
+    对象从未被构造。取消（``CancelledError``）原样传播，不吞。
+    """
+
+    def __init__(self, inner: httpx2.AsyncByteStream, *, guard: MCPBudgetGuard) -> None:
+        self._inner = inner
+        self._guard = guard
+        self._scanner = JsonDepthScanner()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._inner:
+            self._guard.receive_bytes(len(chunk))
+            self._guard.structure_depth(self._scanner.feed(chunk))
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
 class _GuardedHTTPTransport(httpx2.AsyncBaseTransport):
     """每次 HTTP 发送前的目标核验（``AsyncClient.send`` 的真实传输插入点）。
 
     包装底层传输：与冻结目标不一致（scheme/host/port/path）、或带 ``Last-Event-ID``
     的恢复 GET，在委托底层传输前抛 ``POLICY_DENIED``，**不产生任何字节出站**；
     重定向因此不会被静默跟随（307/308、跨源、新路径的后续请求同样被拒）。
+    入站方向同样在此插入：注入 ``inbound`` 时，响应字节先经
+    :class:`_BudgetedInboundStream` 核验，再交给 SDK 解析。
     """
 
     def __init__(
@@ -398,11 +433,13 @@ class _GuardedHTTPTransport(httpx2.AsyncBaseTransport):
         diagnostics: MCPSessionDiagnostics,
         identity: str,
         inner: httpx2.AsyncBaseTransport | None = None,
+        inbound: MCPBudgetGuard | None = None,
     ) -> None:
         self._approved = approved
         self._diagnostics = diagnostics
         self._identity = identity
         self._inner = inner if inner is not None else httpx2.AsyncHTTPTransport(trust_env=False)
+        self._inbound = inbound
 
     @property
     def inner(self) -> httpx2.AsyncBaseTransport:
@@ -414,7 +451,31 @@ class _GuardedHTTPTransport(httpx2.AsyncBaseTransport):
         if reason is not None:
             self._diagnostics.record(reason)
             raise AgentServiceError(AgentErrorCode.POLICY_DENIED, f"mcp http send refused: {reason}", self._identity)
-        return await self._inner.handle_async_request(request)
+        response = await self._inner.handle_async_request(request)
+        if self._inbound is None:
+            return response
+        encoding = response.headers.get("content-encoding", "").strip().lower()
+        if encoding not in ("", "identity"):
+            # 压缩后的字节无法前置判定帧长/结构深度：拒绝而不是按「预算有值」放行。
+            await response.aclose()
+            self._diagnostics.record("inbound_content_encoding_unverifiable")
+            raise AgentServiceError(
+                AgentErrorCode.CAPABILITY_UNVERIFIED,
+                "mcp inbound limits cannot be verified on a compressed response",
+                self._identity,
+            )
+        stream = response.stream
+        if not isinstance(stream, httpx2.AsyncByteStream):
+            # 非异步字节流（如未接入的 AttachedStream）无法在此层前置核验：拒绝而非放行。
+            await response.aclose()
+            self._diagnostics.record("inbound_stream_unverifiable")
+            raise AgentServiceError(
+                AgentErrorCode.CAPABILITY_UNVERIFIED,
+                "mcp inbound limits cannot be verified on a non-async response stream",
+                self._identity,
+            )
+        response.stream = _BudgetedInboundStream(stream, guard=self._inbound)
+        return response
 
     async def aclose(self) -> None:
         await self._inner.aclose()
@@ -431,11 +492,14 @@ def _guarded_http_client(
     identity: str,
     *,
     inner: httpx2.AsyncBaseTransport | None = None,
+    inbound: MCPBudgetGuard | None = None,
 ) -> Callable[..., httpx2.AsyncClient]:
-    """构造注入 SDK 的 ``httpx_client_factory``：目标核验 + 禁代理环境 + 不跟随重定向。
+    """构造注入 SDK 的 ``httpx_client_factory``：目标核验 + 入站预算 + 禁代理环境。
 
     SDK（fastmcp/mcp）把 ``follow_redirects=True`` 传给工厂；此处显式忽略，恒为 False，
     并以 ``max_redirects=0`` 让 SDK 自身的「同源重定向跟随」也一步都不发。
+    ``Accept-Encoding: identity`` 强制成立：压缩响应无法在解析前判定帧长与结构深度，
+    由 :class:`_GuardedHTTPTransport` 显式拒绝（不静默降级为「未限流」）。
     """
 
     def factory(
@@ -447,7 +511,7 @@ def _guarded_http_client(
     ) -> httpx2.AsyncClient:
         del follow_redirects
         return httpx2.AsyncClient(
-            headers=headers,
+            headers={**(headers or {}), "Accept-Encoding": "identity"},
             auth=auth,
             timeout=timeout if timeout is not None else httpx2.Timeout(30.0, read=300.0),
             trust_env=False,
@@ -458,6 +522,7 @@ def _guarded_http_client(
                 diagnostics=diagnostics,
                 identity=identity,
                 inner=inner,
+                inbound=inbound,
             ),
         )
 
@@ -649,6 +714,7 @@ class FastMCPClientFactory:
                 ) from exc
         drain = _SanitizedStderrDrain() if is_stdio else None
         stdio_env: _ManagedStdioEnvironment | None = None
+        guard = MCPBudgetGuard(config.budget, identity=label)
         try:
             if is_stdio:
                 stdio_env = _ManagedStdioEnvironment.create(config.transport.env)
@@ -659,6 +725,7 @@ class FastMCPClientFactory:
                 diagnostics=diagnostics,
                 label=label,
                 headers=http_headers,
+                inbound=guard,
             )
         except Exception as exc:
             _discard_drain(drain)
@@ -704,7 +771,7 @@ class FastMCPClientFactory:
         return FastMCPSession(
             client,
             config=config,
-            guard=MCPBudgetGuard(config.budget, identity=label),
+            guard=guard,
             gate=MCPSendGate(
                 alive=_alive,
                 deadline_factory=self._deadline_factory,
@@ -727,6 +794,7 @@ class FastMCPClientFactory:
         diagnostics: MCPSessionDiagnostics,
         label: str,
         headers: dict[str, str] | None = None,
+        inbound: MCPBudgetGuard | None = None,
     ) -> Any:
         transport = config.transport
         if transport.kind is MCPTransportKind.STDIO:
@@ -743,7 +811,14 @@ class FastMCPClientFactory:
                 log_file=cast("TextIO", drain),
             )
         assert transport.url is not None
-        factory = _guarded_http_client(_ApprovedHTTPTarget.from_url(transport.url), diagnostics, label)
+        factory = _guarded_http_client(_ApprovedHTTPTarget.from_url(transport.url), diagnostics, label, inbound=inbound)
         if transport.kind is MCPTransportKind.STREAMABLE_HTTP:
-            return StreamableHttpTransport(transport.url, headers=headers, httpx_client_factory=factory)
+            # 单事件上限 = 已冻结的接收预算：单个 SSE 事件不得大于整条连接的接收上限，
+            # 由 SDK 在解析前按事件拒绝（与 httpx 层的前置计入互为冗余）。
+            return StreamableHttpTransport(
+                transport.url,
+                headers=headers,
+                httpx_client_factory=factory,
+                max_sse_event_size=config.budget.receive_bytes,
+            )
         return SSETransport(transport.url, headers=headers, httpx_client_factory=factory)
