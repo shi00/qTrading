@@ -12,7 +12,10 @@
   XML 区分缓存不存在/存在但空/错误/类型不可核；单元格类型按 XML ``t``/``<f>``
   判定（文本以 ``=`` 开头仍是文本），数值/日期保留原 lexeme/serial 与 epoch；
 - PDF / PNG / JPEG 解析依赖（pypdf / Pillow）已按 Q5/Q3 裁决纳入正式依赖；
-  结构不可读仍明确 ``invalid_structure``，不伪造解码结果。
+  结构不可读仍明确 ``invalid_structure``，不伪造解码结果；图像在容器校验通过后
+  按声明尺寸核像素与解码字节预算，再 ``load()`` 真像素解码，解码失败即拒绝；
+- 图像字符数不适用（``chars`` 为 ``None``），0 字符不代表图像已核；模型兼容与
+  上下文窗口由派发层判定，本层不据此推断已兼容。
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import json
 import sys
 import time
 import unicodedata
+import warnings
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time
@@ -1216,6 +1220,34 @@ def _column_letter(index: int) -> str:
 # PDF / 图片（依赖未装 → 明确能力未核）
 # ---------------------------------------------------------------------------
 
+#: 单张图像声明的像素数上限（解码前判定；50M 像素已覆盖常规相机/截图场景）。
+MAX_IMAGE_PIXELS: Final = 50_000_000
+#: 单张图像解码后像素缓冲的估算上限（解码前按模式估算，256 MiB）。
+MAX_IMAGE_DECODED_BYTES: Final = 256 * 1024 * 1024
+#: 高位深/浮点模式的每样本字节；其余标准模式按 1 字节计。
+_IMAGE_SAMPLE_BYTES: Final[dict[str, int]] = {
+    "F": 4,
+    "I": 4,
+    "I;16": 2,
+    "I;16B": 2,
+    "I;16L": 2,
+    "I;16N": 2,
+}
+
+
+def _open_image(data: bytes) -> Image.Image:
+    """打开图像头（惰性，不读像素）；Pillow 的 bomb 告警由本层像素门统一裁决。"""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        return Image.open(io.BytesIO(data))
+
+
+def _image_decode_bytes(mode: str, pixels: int) -> int:
+    """按像素数与像素模式估算解码后缓冲字节（通道数 × 每样本字节）。"""
+
+    return pixels * Image.getmodebands(mode) * _IMAGE_SAMPLE_BYTES.get(mode, 1)
+
 
 def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (PagesRange,))
@@ -1261,23 +1293,80 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
 
 
 def _parse_image(data: bytes, selection: Selection) -> ParsedAttachment:
+    """真解码像素后再报 READY：容器结构（verify）与像素（load）两道门都过才算已核。
+
+    ``verify()`` 只覆盖容器级校验（PNG 的 CRC / JPEG 的 marker 结构），且 JPEG 的
+    ``verify`` 是空操作；缺像素解码时，截断或损坏的扫描数据会被当成可读。因此本层
+    在声明尺寸通过像素预算后必须 ``load()`` 真解码，解码失败一律拒绝（不报 READY）。
+
+    像素数与解码字节预算在 ``load()`` 之前按声明尺寸判定，巨尺寸不进入解码、不分配
+    巨内存。模型兼容与上下文窗口属派发层判定，本层不据此推断已兼容。
+    """
+
     _reject_unsupported_selection(selection, ())
+    # 第一遍：容器结构与 CRC（不分配像素缓冲）。
     try:
-        with Image.open(io.BytesIO(data)) as image:
+        with _open_image(data) as image:
             image.verify()
-        with Image.open(io.BytesIO(data)) as image:
-            width, height = image.size
-            image_format = image.format
+    except Image.DecompressionBombError as exc:
+        raise AttachmentParseError(
+            "image_pixels_exceeded", "declared image dimensions exceed the pixel budget"
+        ) from exc
     except Exception as exc:  # 第三方解码异常统一转译
         raise AttachmentParseError("invalid_structure", "image cannot be decoded") from exc
-    block = json_doc({"kind": "image", "width": width, "height": height, "format": image_format})
+    # 第二遍：先核像素预算，再真像素解码。
+    try:
+        with _open_image(data) as image:
+            width, height = image.size
+            image_format = image.format
+            pixels = width * height
+            if width <= 0 or height <= 0:
+                raise AttachmentParseError("invalid_structure", "image declares a zero-sized frame")
+            # 解码前按声明尺寸拒绝：巨尺寸不得进入 load()，不按声明尺寸分配内存。
+            if pixels > MAX_IMAGE_PIXELS:
+                raise AttachmentParseError(
+                    "image_pixels_exceeded",
+                    "declared image dimensions exceed the pixel budget",
+                )
+            if _image_decode_bytes(image.mode, pixels) > MAX_IMAGE_DECODED_BYTES:
+                raise AttachmentParseError(
+                    "image_decoded_bytes_exceeded",
+                    "declared image dimensions exceed the decoded byte budget",
+                )
+            # 真像素解码：截断/损坏扫描数据在此抛出（LOAD_TRUNCATED_IMAGES 为默认 False）。
+            image.load()
+    except AttachmentParseError:
+        raise
+    except Image.DecompressionBombError as exc:
+        raise AttachmentParseError(
+            "image_pixels_exceeded", "declared image dimensions exceed the pixel budget"
+        ) from exc
+    except Exception as exc:  # 第三方解码异常统一转译
+        raise AttachmentParseError("invalid_structure", "image pixels cannot be decoded") from exc
+    block = json_doc(
+        {
+            "kind": "image",
+            "width": width,
+            "height": height,
+            "format": image_format,
+            "pixels": pixels,
+            "pixel_decoded": True,
+        }
+    )
     return ParsedAttachment(
         read_state=ReadState.READY,
         coverage="full",
         body_text=None,
         blocks=[block],
-        limitations=[_limitation("image_text_not_extracted", "图片仅核验可解码，未 OCR")],
-        stats=_stats(source_bytes=len(data), chars=len(block)),
+        limitations=[
+            _limitation(
+                "image_text_not_extracted",
+                "图片像素已真解码（尺寸/格式/像素预算已核），未 OCR；字符数不适用于图像，"
+                "0 字符不代表图像已核；模型兼容与上下文窗口由派发层判定，本层不作推断",
+            )
+        ],
+        # 图像无可提取字符：字符数如实记为不适用，不用元数据块长度冒充内容字符数（R21）。
+        stats=_stats(source_bytes=len(data)),
         read_ranges=[to_wire_dict(AllAtom())],
     )
 
