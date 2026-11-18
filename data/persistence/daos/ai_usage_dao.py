@@ -452,6 +452,7 @@ class AIUsageDao(BaseDao):
         owner_epoch: int,
         owner_lease_expires_at: datetime.datetime,
         budget_policy_snapshot: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> bool:
         """建立 / 幂等复用父请求行（F16，方案最小方案「场景入口创建父请求」）。
 
@@ -461,6 +462,11 @@ class AIUsageDao(BaseDao):
         零尝试请求在请求页（以 invocation 为主表）同样可查（R21：失败不伪装
         为未发生）。预留登记仍走 :meth:`try_reserve`，本方法不追加预留元素。
 
+        ``run_id``（R2-I05）：调用方业务批次身份（如 ``StockAgentCall.operation_id``），
+        与股票研究请求同一身份族——落库后可按批次查回其全部单股研究请求与费用事实。
+        仅首次插入写入，冲突时 ``COALESCE`` 保留既有值（同一 invocation 的批次归属
+        不随后续重放漂移）。
+
         返回 True = 新建或幂等复用（upsert 命中即有行）。
         """
         self._check_engine(context="ai_usage.create_invocation")
@@ -469,14 +475,15 @@ class AIUsageDao(BaseDao):
                 sa.text(
                     """
                     INSERT INTO ai_invocation (
-                        invocation_id, scenario_id, trigger, budget_policy_snapshot,
+                        invocation_id, scenario_id, trigger, run_id, budget_policy_snapshot,
                         owner_session_id, owner_epoch, owner_lease_expires_at
                     ) VALUES (
-                        :invocation_id, :scenario_id, :trigger,
+                        :invocation_id, :scenario_id, :trigger, :run_id,
                         CAST(:budget_policy_snapshot AS jsonb),
                         :owner_session_id, :owner_epoch, :owner_lease_expires_at
                     )
                     ON CONFLICT (invocation_id) DO UPDATE SET
+                        run_id = COALESCE(ai_invocation.run_id, EXCLUDED.run_id),
                         updated_at = (now() AT TIME ZONE 'UTC')
                     """
                 ),
@@ -484,6 +491,7 @@ class AIUsageDao(BaseDao):
                     "invocation_id": invocation_id,
                     "scenario_id": scenario_id,
                     "trigger": trigger,
+                    "run_id": run_id,
                     "budget_policy_snapshot": (
                         json.dumps(budget_policy_snapshot, ensure_ascii=False) if budget_policy_snapshot else None
                     ),

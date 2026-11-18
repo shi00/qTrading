@@ -256,11 +256,14 @@ class UsageRecorder:
         owner_epoch: int,
         owner_lease_expires_at: Any,
         budget_policy_snapshot: dict[str, Any] | None,
+        run_id: str | None = None,
     ) -> PersistenceOutcome:
         """建立 / 幂等复用父请求行（F16，先于候选遍历——零尝试请求亦可查）。
 
         账本不可用 / 超时收敛为 ``persisted=False``（不伪装已建立，R21）；
         费用型候选随后的预算预留同样失败 → 零派发（D5），语义自洽。
+        ``run_id``（R2-I05）为调用方业务批次身份（如股票研究请求的
+        ``operation_id``），随父请求落库后按批次查回全部单股研究请求费用事实。
         """
 
         async def _run() -> bool:
@@ -276,6 +279,7 @@ class UsageRecorder:
                     owner_epoch=owner_epoch,
                     owner_lease_expires_at=owner_lease_expires_at,
                     budget_policy_snapshot=budget_policy_snapshot,
+                    run_id=run_id,
                 )
             )
 

@@ -1152,6 +1152,19 @@ class TestInvocationAndReservation:
         assert calls.index("ensure_invocation") < calls.index("try_reserve")
 
     @pytest.mark.asyncio
+    async def test_invocation_carries_business_run_id(self):
+        """R2-I05：业务批次身份（股票研究请求 operation_id）随父请求落库。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(
+            replace(_request(), run_id="stock_batch_abc"),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
+            _validator_ok,
+        )
+        assert recorder.ensure_invocation.await_args.kwargs["run_id"] == "stock_batch_abc"
+
+    @pytest.mark.asyncio
     async def test_invocation_established_with_empty_candidates(self):
         """零候选请求同样建立父请求（失败也有记录，R21），无预留发生。"""
         adapter = _adapter_ok()

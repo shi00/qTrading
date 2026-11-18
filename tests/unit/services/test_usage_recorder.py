@@ -168,6 +168,24 @@ class TestEnsureInvocation:
         assert kwargs["owner_session_id"] == "owner-1"
 
     @pytest.mark.asyncio
+    async def test_ensure_invocation_forwards_business_run_id(self):
+        """R2-I05：业务批次身份随父请求落库（按批次查回同一请求族的费用事实）。"""
+        dao = _dao_mock()
+        dao.create_invocation = AsyncMock(return_value=True)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        await recorder.ensure_invocation(
+            invocation_id="stock_research_x",
+            scenario_id="stock_analysis",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at="2026-10-23T00:15:00",
+            budget_policy_snapshot=None,
+            run_id="stock_batch_abc",
+        )
+        assert dao.create_invocation.await_args.kwargs["run_id"] == "stock_batch_abc"
+
+    @pytest.mark.asyncio
     async def test_ensure_invocation_dao_unavailable(self):
         recorder = UsageRecorder(dao_provider=lambda: None)
         outcome = await recorder.ensure_invocation(

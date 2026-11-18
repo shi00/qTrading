@@ -769,6 +769,9 @@ class ScenarioExecutor:
             owner_epoch=owner_epoch,
             owner_lease_expires_at=owner_lease_expires_at,
             budget_policy_snapshot=budget_policy_snapshot,
+            # R2-I05：业务批次身份随父请求落库（股票研究请求 = operation_id），
+            # 费用/治理事实与批次同一身份，可按批次查回全部单股请求。
+            run_id=identity.run_id,
         )
         if not invocation_outcome.persisted:
             logger.warning(

@@ -5336,6 +5336,17 @@ class TestUnpricedUsageGuards:
         cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
         ConcreteStrategy._accumulate_usage(cluster, {"cost": 0.05})
         assert cluster["calls"] == 0
+
+    def test_accumulate_usage_skips_duplicate_submission(self):
+        """同一研究请求的重复提交结果不再累加（费用已由原请求承载，不双计费）。"""
+        cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
+        ConcreteStrategy._accumulate_usage(
+            cluster,
+            {"usage": {"total_tokens": 30}, "cost": 0.01, "duplicate_submission": True},
+        )
+        assert cluster["calls"] == 0
+        assert cluster["tokens"] == 0
+        assert cluster["cost_cny"] == 0.0
         assert cluster["unpriced_calls"] == 0
 
     def test_accumulate_usage_non_numeric_cost_is_unpriced(self):

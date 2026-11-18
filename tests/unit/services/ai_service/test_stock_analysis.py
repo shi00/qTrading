@@ -238,11 +238,30 @@ class TestStockAgentCallIdentity:
         assert meta == {
             "operation_id": call.operation_id,
             "call_id": call.call_id,
+            "request_id": call.call_id,
             "ts_code": "000001.SZ",
             "strategy_key": "k",
             "session_id": "s",
             "turn_id": "t",
         }
+        assert call.request_id == call.call_id
+        assert call.ledger_refs == (call.call_id,)
+
+    def test_request_identity_binds_session_and_turn(self):
+        """研究请求身份 = 会话 + 轮次 + 批次 + 股票：同股换会话/轮次即不同请求。"""
+        from core.model_management_types import new_stock_agent_batch
+
+        a = new_stock_agent_batch(operation_id="op-1", session_id="s-1", turn_id="t-1").for_stock("000001.SZ")
+        same = new_stock_agent_batch(operation_id="op-1", session_id="s-1", turn_id="t-1").for_stock("000001.SZ")
+        other_session = new_stock_agent_batch(operation_id="op-1", session_id="s-2", turn_id="t-1").for_stock(
+            "000001.SZ"
+        )
+        other_operation = new_stock_agent_batch(operation_id="op-2", session_id="s-1", turn_id="t-1").for_stock(
+            "000001.SZ"
+        )
+        assert a.request_id == same.request_id  # 重复提交 = 同一研究请求
+        assert a.request_id != other_session.request_id
+        assert a.request_id != other_operation.request_id
 
     def test_execution_metadata_carries_identity_and_omits_when_absent(self):
         from unittest.mock import MagicMock
@@ -329,3 +348,156 @@ def _call():
     from core.model_management_types import new_stock_agent_batch
 
     return new_stock_agent_batch(session_id="s-1", turn_id="t-1").for_stock("000001.SZ")
+
+
+class TestResearchRequestGate:
+    """R2-I05：同一研究请求只真实执行一次（并发单飞 / 完成态去重 / 取消不缓存）。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_request_executes_once(self):
+        import asyncio
+
+        from services.ai_service.stock_analysis import _ResearchRequestGate
+
+        gate = _ResearchRequestGate()
+        calls = 0
+        release = asyncio.Event()
+
+        async def execute():
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return {"score": 80}
+
+        first = asyncio.create_task(gate.run("req-1", execute))
+        second = asyncio.create_task(gate.run("req-1", execute))
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.gather(first, second)
+
+        assert calls == 1  # 并发重复提交只有一次真实执行（不双计费）
+        assert results[0] == {"score": 80}
+        assert results[1]["score"] == 80
+        assert results[1]["duplicate_submission"] is True
+
+    @pytest.mark.asyncio
+    async def test_completed_request_returns_duplicate_without_reexecution(self):
+        from services.ai_service.stock_analysis import _ResearchRequestGate
+
+        gate = _ResearchRequestGate()
+        calls = 0
+
+        async def execute():
+            nonlocal calls
+            calls += 1
+            return {"score": 70}
+
+        first = await gate.run("req-1", execute)
+        second = await gate.run("req-1", execute)
+
+        assert calls == 1
+        assert first == {"score": 70}  # 原结果不被污染
+        assert second == {"score": 70, "duplicate_submission": True}
+
+    @pytest.mark.asyncio
+    async def test_retry_new_turn_is_new_request(self):
+        from core.model_management_types import new_stock_agent_batch
+        from services.ai_service.stock_analysis import _ResearchRequestGate
+
+        gate = _ResearchRequestGate()
+        batch = new_stock_agent_batch(session_id="s-1", turn_id="t-1")
+        original = batch.for_stock("000001.SZ")
+        retry = batch.for_stock("000001.SZ", new_turn=True)
+        calls = 0
+
+        async def execute():
+            nonlocal calls
+            calls += 1
+            return {"score": 60 + calls}
+
+        await gate.run(original.request_id, execute)
+        retried = await gate.run(retry.request_id, execute)
+
+        assert calls == 2  # 重试 = 新轮次新请求，真实执行
+        assert retried == {"score": 62}
+        assert isinstance(retried, dict) and "duplicate_submission" not in retried
+
+    @pytest.mark.asyncio
+    async def test_cancelled_request_is_not_cached(self):
+        import asyncio
+
+        from services.ai_service.stock_analysis import _ResearchRequestGate
+
+        gate = _ResearchRequestGate()
+        calls = 0
+        entered = asyncio.Event()
+
+        async def slow():
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await asyncio.Event().wait()
+            return {"score": 50}
+
+        task = asyncio.create_task(gate.run("req-1", slow))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)  # 取消真实传播（R2）
+
+        async def after_stop():
+            nonlocal calls
+            calls += 1
+            return {"score": 55}
+
+        assert await gate.run("req-1", after_stop) == {"score": 55}
+        assert calls == 2  # 取消未完成（例如批次停止）不入完成态，重提可再执行
+
+    @pytest.mark.asyncio
+    async def test_waiter_cancellation_does_not_cancel_shared_execution(self):
+        import asyncio
+
+        from services.ai_service.stock_analysis import _ResearchRequestGate
+
+        gate = _ResearchRequestGate()
+        release = asyncio.Event()
+
+        async def execute():
+            await release.wait()
+            return {"score": 90}
+
+        owner = asyncio.create_task(gate.run("req-1", execute))
+        await asyncio.sleep(0)
+        waiter = asyncio.create_task(gate.run("req-1", execute))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await waiter
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert waiter.cancelled()
+
+        release.set()
+        assert await owner == {"score": 90}
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_dedupes_only_with_research_identity(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from services.ai_service.stock_analysis import StockAnalysisService
+
+        service = StockAnalysisService(MagicMock())
+        service._analyze_stock_request = AsyncMock(return_value={"score": 80})
+        call = _call()
+        args = ({"ts_code": "000001.SZ"}, {}, [])
+
+        first = await service.analyze_stock(*args, agent_call=call)
+        second = await service.analyze_stock(*args, agent_call=call)
+        assert service._analyze_stock_request.await_count == 1
+        assert first == {"score": 80}
+        assert second["duplicate_submission"] is True
+
+        # 无身份的旧兼容调用：一次调用一个新意图，不去重、不伪造身份
+        await service.analyze_stock(*args)
+        await service.analyze_stock(*args)
+        assert service._analyze_stock_request.await_count == 3
