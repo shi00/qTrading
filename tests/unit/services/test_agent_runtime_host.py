@@ -637,6 +637,22 @@ class TestPrepareCloseLatch:
         assert receipt.residual_io == ("sdk_stream", "mcp_worker")
         assert fakes.calls == ["bridge_freeze", "dispatch_close"]
 
+    async def test_missing_residual_probe_blocks_close(self) -> None:
+        """未注入残留 IO 探针：缺退出证据不得报就绪（R2-I35/R21）。"""
+        fakes = _CloseFakes()
+        runtime = runtime_mod.AgentRuntime(
+            handle=cast(Any, fakes),
+            bridge=cast(Any, fakes),
+            dispatch_gate=cast(Any, fakes),
+            fact_sink=cast(Any, fakes),
+            blocking_runner=_direct_runner,
+        )
+        receipt = await runtime.prepare_close(_command())
+        assert receipt.ready is False
+        assert receipt.blocking_reasons == (runtime_mod.CLOSE_BLOCK_RESIDUAL_IO_UNPROBED,)
+        assert receipt.residual_io_probed is False
+        assert fakes.calls == ["bridge_freeze", "dispatch_close"]  # 不保存、不关闭
+
     async def test_idempotent_retry_returns_original_receipt(self) -> None:
         fakes = _CloseFakes()
         runtime = _runtime(fakes)

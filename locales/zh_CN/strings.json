@@ -1407,6 +1407,8 @@
     "db_upgrade_migration": "执行数据库迁移...",
     "shutdown_in_progress_title": "正在关闭",
     "shutdown_in_progress_content": "正在关闭数据库，请稍候...",
+    "shutdown_blocked_title": "无法关闭",
+    "shutdown_blocked_content": "后台研究任务仍在收敛，已取消本次关闭以保护数据。请稍后重试。",
     "tab_pledge_stat": "股权质押",
     "tab_pledge_detail": "股权质押明细",
     "tab_repurchase": "回购",

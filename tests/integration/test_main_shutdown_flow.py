@@ -235,6 +235,71 @@ async def test_disconnect_success_cancels_watchdog(monkeypatch):
     assert coordinator.cancel_watchdog_calls == 1
 
 
+class _BlockedAgentWiring:
+    """关闭门未就绪的 Agent 接线替身（R2-I35）。"""
+
+    def __init__(self) -> None:
+        self.prepared = 0
+
+    async def prepare_close(self) -> None:
+        self.prepared += 1
+
+    def close_ready(self) -> bool:
+        return False
+
+
+def _install_blocked_agent_wiring(monkeypatch) -> _BlockedAgentWiring:
+    blocked = _BlockedAgentWiring()
+    monkeypatch.setattr(
+        startup_ctrl.StartupController,
+        "agent_wiring",
+        property(lambda _self: blocked),
+    )
+    return blocked
+
+
+@pytest.mark.asyncio
+async def test_window_close_blocked_when_agent_close_gate_not_ready(monkeypatch):
+    """窗口关闭：关闭门未就绪即阻断 cleanup/destroy，保留依赖（R2-I35）。"""
+    _prepare_main(monkeypatch)
+    blocked = _install_blocked_agent_wiring(monkeypatch)
+    page = _DummyPage()
+
+    await app_main.run(page)
+    on_event = cast(AsyncEventHandler, page.window.on_event)
+    await on_event(SimpleNamespace(type="close"))
+    confirm_btn = cast(_FakeTextButton, page.current_dialog.actions[1])
+    cast(SyncClickHandler, confirm_btn.on_click)(MagicMock())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert blocked.prepared == 1
+    assert coordinator.start_watchdog_calls == 0
+    assert coordinator.do_cleanup_calls == 0
+    assert page.window.destroy_called == 0
+    assert page.current_dialog is not None  # 保留阻断提示对话框
+
+
+@pytest.mark.asyncio
+async def test_disconnect_blocked_when_agent_close_gate_not_ready(monkeypatch):
+    """断连：关闭门未就绪即阻断 cleanup 与强退（R2-I35）。"""
+    _prepare_main(monkeypatch)
+    blocked = _install_blocked_agent_wiring(monkeypatch)
+    page = _DummyPage()
+
+    await app_main.run(page)
+    on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
+    await on_disconnect(MagicMock())
+
+    coordinator = _FakeCoordinator.last
+    assert coordinator is not None
+    assert blocked.prepared == 1
+    assert coordinator.start_watchdog_calls == 0
+    assert coordinator.do_cleanup_calls == 0
+
+
 @pytest.mark.asyncio
 async def test_window_close_success_cancels_watchdog(monkeypatch):
     _prepare_main(monkeypatch)

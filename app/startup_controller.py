@@ -209,19 +209,36 @@ class StartupController:
             )
             return
         self._transition(StartupState.LOADING)
-        # P01（DD §10.6）：旧配置替换/引擎关闭前必须先完成 Agent 关闭前置
-        # （AgentRuntime.prepare_close 既有关闭链）；未接线时为 no-op。
+        # P01/R2-I35：旧配置替换/引擎关闭前必须先消费 Agent 关闭门（先关派发入口、
+        # 再核定在途收敛）。未就绪即阻断切库并保留引擎/账本，不把「未收敛」当「已关闭」。
         if self._agent_wiring is not None:
             try:
                 await self._agent_wiring.prepare_close()
             except asyncio.CancelledError:
                 raise
-            except Exception as e:  # 关闭前置失败不阻断 reconfigure，但按已接线事实清理引用
+            except Exception as e:  # 关闭前置失败：按未就绪阻断，保留依赖供重试
                 logger.warning(
                     "[Startup] Agent close prelude failed during reconfigure: %s",
                     type(e).__name__,
                     exc_info=True,
                 )
+                self._transition(
+                    StartupState.INIT_FAILED,
+                    error="agent_close_not_ready",
+                    detail="Agent close prelude failed; database switch aborted to keep resources alive.",
+                )
+                return
+            close_ready = getattr(self._agent_wiring, "close_ready", None)
+            if close_ready is None or not close_ready():
+                logger.error(
+                    "[Startup] Agent close gate not ready during reconfigure; database switch aborted, resources kept alive."
+                )
+                self._transition(
+                    StartupState.INIT_FAILED,
+                    error="agent_close_not_ready",
+                    detail="Agent runtime close gate is not ready; database switch aborted to keep resources alive.",
+                )
+                return
             self._agent_wiring = None
         # D02-R03: close 抛异常时不得让状态机停在 LOADING，转入 INIT_FAILED 供用户重试。
         try:
