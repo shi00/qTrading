@@ -45,6 +45,7 @@ from core.agent_types import (
     RecoveryGrantRequest,
     ResourceClaimRequest,
     ResourceSlotKind,
+    ReviseQueuedRequest,
     SaveAnswerRequest,
     SessionAction,
     SessionChangeCommand,
@@ -298,11 +299,63 @@ class TestAcceptRequestFenceGate:
     async def test_new_key_rejected_when_session_fenced(self) -> None:
         conn = _FenceConn(
             fence_rows=[_fenced(["s1"])],
-            session_first=SimpleNamespace(session_id="s1"),
+            session_first=SimpleNamespace(session_id="s1", archived=False),
         )
         with pytest.raises(AgentServiceError) as exc:
             await _dao(conn).accept_request(_accept_request())
         assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert not any("INSERT INTO agent_command" in sql for sql in conn.statements)
+        assert not any("INSERT INTO agent_message" in sql for sql in conn.statements)
+
+
+def _revise_request() -> ReviseQueuedRequest:
+    return ReviseQueuedRequest(
+        user_scope="u1",
+        session_id="s1",
+        execution_id="exec-1",
+        client_command_id="rev-1",
+        expected_execution_revision=1,
+        node_id="root",
+        text="改成两家",
+        manifest_payload=json_doc({"schema_version": 1, "source_module": "mod"}),
+        source_display_name="src",
+    )
+
+
+class TestReviseQueuedGates:
+    """R2-I22 / D08：队列修订同时受清理 fence 与归档门约束，零新事实。"""
+
+    async def test_new_revise_rejected_when_session_fenced(self) -> None:
+        conn = _FenceConn(
+            fence_rows=[_fenced(["s1"])],
+            execution_first=SimpleNamespace(
+                session_id="s1",
+                revision=1,
+                display_state="queued",
+                current_round_id=None,
+            ),
+            session_first=SimpleNamespace(session_id="s1", archived=False),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).revise_queued(_revise_request())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert not any("INSERT INTO agent_command" in sql for sql in conn.statements)
+        assert not any("INSERT INTO agent_message" in sql for sql in conn.statements)
+
+    async def test_new_revise_rejected_when_session_archived(self) -> None:
+        conn = _FenceConn(
+            execution_first=SimpleNamespace(
+                session_id="s1",
+                revision=1,
+                display_state="queued",
+                current_round_id=None,
+            ),
+            session_first=SimpleNamespace(session_id="s1", archived=True),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).revise_queued(_revise_request())
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert "archived" in exc.value.sanitized_message
         assert not any("INSERT INTO agent_command" in sql for sql in conn.statements)
         assert not any("INSERT INTO agent_message" in sql for sql in conn.statements)
 
