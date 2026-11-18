@@ -1198,6 +1198,10 @@ class CacheManager:
         """检查是否已关注。"""
         return await self.watchlist_dao.is_in_watchlist(ts_code)
 
+    async def get_watchlist_note(self, ts_code: str) -> str | None:
+        """按 ts_code 读取已有备注（R2-I13：重复关注/改备注前的影响告知）。"""
+        return await self.watchlist_dao.get_watchlist_note(ts_code)
+
     # --- Watchlist Quotes / Stock Detail by code (UX-09 MAJOR-04) ---
 
     async def get_latest_quotes_bulk(self, ts_codes: list[str]) -> pd.DataFrame:

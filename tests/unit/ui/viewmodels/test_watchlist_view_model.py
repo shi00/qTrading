@@ -47,6 +47,8 @@ def mock_cache():
     cache.remove_from_watchlist = AsyncMock(return_value=1)
     cache.is_in_watchlist = AsyncMock(return_value=False)
     cache.search_stocks = AsyncMock(return_value=pd.DataFrame())
+    # R2-I13：重复关注/改备注前按 ts_code 读取已有备注。
+    cache.get_watchlist_note = AsyncMock(return_value=None)
     # UX-09 MAJOR-04：StockDetailService 经 CacheManager 代理批量取行情/详情。
     cache.get_latest_quotes_bulk = AsyncMock(return_value=pd.DataFrame())
     cache.get_latest_ai_reviews_bulk = AsyncMock(return_value=pd.DataFrame())
@@ -1137,3 +1139,123 @@ class TestLoadGenerationIsolation:
         gate.set()
         assert await inflight is False  # dispose 推进代次，旧响应不再提交
         assert vm.state.watchlist_rows == rows_before
+
+
+class TestLoadExistingNote:
+    """R2-I13: 按 ts_code 读取已有备注（重复关注/改备注前的影响告知）。"""
+
+    @pytest.mark.asyncio
+    async def test_loads_existing_note(self, vm, mock_cache):
+        mock_cache.get_watchlist_note.return_value = "旧备注"
+        await vm.load_existing_note("000001.SZ")
+        info = vm.state.existing_note
+        assert info.status == "loaded"
+        assert info.ts_code == "000001.SZ"
+        assert info.note == "旧备注"
+        mock_cache.get_watchlist_note.assert_awaited_once_with("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_not_watched_yields_loaded_empty_note(self, vm, mock_cache):
+        """未关注（None）→ loaded + 空备注（无旧内容可替换，无需二次确认）。"""
+        mock_cache.get_watchlist_note.return_value = None
+        await vm.load_existing_note("000001.SZ")
+        assert vm.state.existing_note.status == "loaded"
+        assert vm.state.existing_note.ts_code == "000001.SZ"
+        assert vm.state.existing_note.note == ""
+
+    @pytest.mark.asyncio
+    async def test_blank_code_is_ignored(self, vm, mock_cache):
+        await vm.load_existing_note("   ")
+        mock_cache.get_watchlist_note.assert_not_awaited()
+        assert vm.state.existing_note.status == "idle"
+
+    @pytest.mark.asyncio
+    async def test_read_failure_marks_failed_without_error_channel(self, vm, mock_cache):
+        """读取失败 → failed；不得伪装成「无旧备注」（R21）。"""
+        mock_cache.get_watchlist_note.side_effect = RuntimeError("db error")
+        await vm.load_existing_note("000001.SZ")
+        info = vm.state.existing_note
+        assert info.status == "failed"
+        assert info.ts_code == "000001.SZ"
+        assert info.note == ""
+        # 失败不得污染列表 error 通道（避免整页被 ErrorState 替换）
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_and_clears_loading(self, vm, mock_cache):
+        mock_cache.get_watchlist_note.side_effect = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证，VM 不得吞没取消信号
+            await vm.load_existing_note("000001.SZ")
+        assert vm.state.existing_note.status != "loading"
+
+    @pytest.mark.asyncio
+    async def test_stale_response_does_not_override_newer_stock(self, vm, mock_cache):
+        """快速切换选中股票：旧股票的迟到响应不得覆盖新股票的备注。"""
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _get_note(ts_code: str) -> str | None:
+            if ts_code == "000001.SZ":
+                started_a.set()
+                await gate_a.wait()
+                return "旧股备注"
+            return "新股备注"
+
+        mock_cache.get_watchlist_note.side_effect = _get_note
+        task_a = asyncio.create_task(vm.load_existing_note("000001.SZ"))
+        await started_a.wait()
+        await vm.load_existing_note("600000.SH")
+        assert vm.state.existing_note.ts_code == "600000.SH"
+        gate_a.set()
+        await task_a
+        assert vm.state.existing_note.ts_code == "600000.SH"
+        assert vm.state.existing_note.note == "新股备注"
+        assert vm.state.existing_note.status == "loaded"
+
+    @pytest.mark.asyncio
+    async def test_clear_search_resets_existing_note(self, vm, mock_cache):
+        mock_cache.get_watchlist_note.return_value = "旧备注"
+        await vm.load_existing_note("000001.SZ")
+        await vm.clear_search()
+        assert vm.state.existing_note.status == "idle"
+        assert vm.state.existing_note.ts_code == ""
+
+    @pytest.mark.asyncio
+    async def test_dispose_invalidates_in_flight_note(self, vm, mock_cache):
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def _get_note(ts_code: str) -> str | None:
+            started.set()
+            await gate.wait()
+            return "旧备注"
+
+        mock_cache.get_watchlist_note.side_effect = _get_note
+        inflight = asyncio.create_task(vm.load_existing_note("000001.SZ"))
+        await started.wait()
+        vm.dispose()
+        gate.set()
+        await inflight
+        # 迟到响应不得回填旧备注（dispose 后 state 已无消费方，只要求不写入内容）
+        assert vm.state.existing_note.status != "loaded"
+        assert vm.state.existing_note.note == ""
+
+    @pytest.mark.asyncio
+    async def test_clear_search_discards_in_flight_note(self, vm, mock_cache):
+        """关闭对话框（clear_search）后在途读取不得回填旧备注。"""
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def _get_note(ts_code: str) -> str | None:
+            started.set()
+            await gate.wait()
+            return "旧备注"
+
+        mock_cache.get_watchlist_note.side_effect = _get_note
+        inflight = asyncio.create_task(vm.load_existing_note("000001.SZ"))
+        await started.wait()
+        await vm.clear_search()
+        gate.set()
+        await inflight
+        assert vm.state.existing_note.status == "idle"
+        assert vm.state.existing_note.note == ""
