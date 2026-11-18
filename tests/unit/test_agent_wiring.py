@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import sqlalchemy as sa
@@ -21,7 +21,7 @@ from app.agent_wiring import (
     wire_agent_runtime,
 )
 from core.agent_types import DispatchCloseFact, stable_id
-from services.agent_service import AgentService
+from services.agent_service import AgentService, CloseReadinessReceipt
 from services.agent_service.recovery import InstanceGuardEvidence
 from services.agent_service.runtime import OwnerLoopBridge
 
@@ -275,3 +275,297 @@ def test_process_dispatch_gate_is_closed_while_unlaunched() -> None:
     assert launched.dispatch_closed() is False
     assert launched.close_dispatch() is True
     assert launched.dispatch_closed() is True
+
+
+def test_unit_converter_exposes_strategy_threshold_entry() -> None:
+    """单位换算注入点即策略层统一入口（app 层唯一合法注入位置）。"""
+
+    from strategies.utils import threshold_in_data_unit
+
+    assert wiring_mod.agent_unit_converter() is threshold_in_data_unit
+
+
+# ---------------------------------------------------------------------------
+# 关闭前置（prepare_close）分支
+# ---------------------------------------------------------------------------
+
+
+class _FakeAgentService:
+    """facade 替身：只记录 ``aclose`` 调用次数。"""
+
+    def __init__(self) -> None:
+        self.aclose_calls = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
+class _CountingGuard:
+    """唯一执行锁替身：记录 ``release`` 次数。"""
+
+    def __init__(self) -> None:
+        self.released = 0
+
+    def release(self) -> None:
+        self.released += 1
+
+
+class _FakeRuntime:
+    """关闭链替身：按需返回回执、抛异常或延迟（触发超时分支）。"""
+
+    def __init__(
+        self,
+        *,
+        receipt: CloseReadinessReceipt | None = None,
+        error: BaseException | None = None,
+        delay: float = 0.0,
+    ) -> None:
+        self.receipt = receipt
+        self.error = error
+        self.delay = delay
+        self.calls = 0
+
+    async def prepare_close(self, command: Any) -> CloseReadinessReceipt:
+        self.calls += 1
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        assert self.receipt is not None
+        return self.receipt
+
+
+class _CloseableHandle:
+    """未收口宿主替身：``close`` 可成功或按需抛错。"""
+
+    def __init__(self, *, error: BaseException | None = None) -> None:
+        self.error = error
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.error is not None:
+            raise self.error
+
+
+class _DirectPool:
+    """线程池替身：直接在当前协程内执行同步关闭函数。"""
+
+    async def run_async(self, task_type: Any, fn: Any) -> Any:
+        return fn()
+
+
+def _receipt(*, ready: bool) -> CloseReadinessReceipt:
+    from services.agent_service.runtime import CloseCommandIdentity
+
+    return CloseReadinessReceipt(
+        command=CloseCommandIdentity(user_scope="local-desktop", close_command_id="app-close-test"),
+        ready=ready,
+        blocking_reasons=() if ready else ("io_in_flight",),
+        unknown_associations=(),
+        inflight_task_count=0,
+        checked_at="2026-11-18T00:00:00.000000Z",
+    )
+
+
+async def test_prepare_close_without_service_is_noop() -> None:
+    wiring = AgentWiring(service=None, bridge=OwnerLoopBridge.for_running_loop())
+
+    assert await wiring.prepare_close() is None
+    assert wiring._receipt is None
+
+
+async def test_close_prelude_cancellation_propagates() -> None:
+    service = _FakeAgentService()
+    runtime = _FakeRuntime(error=asyncio.CancelledError())
+    wiring = AgentWiring(service=service, bridge=OwnerLoopBridge.for_running_loop(), runtime=cast(Any, runtime))
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await wiring.prepare_close()
+
+    assert isinstance(excinfo.value, asyncio.CancelledError)
+    assert service.aclose_calls == 0
+
+
+async def test_close_prelude_timeout_records_unready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wiring_mod, "AGENT_CLOSE_PRELUDE_TIMEOUT_S", 0.01)
+    service = _FakeAgentService()
+    runtime = _FakeRuntime(receipt=_receipt(ready=True), delay=0.2)
+    wiring = AgentWiring(service=service, bridge=OwnerLoopBridge.for_running_loop(), runtime=cast(Any, runtime))
+
+    assert await wiring.prepare_close() is None
+    assert wiring._receipt is None
+    assert service.aclose_calls == 1
+
+
+async def test_close_prelude_failure_recorded_without_masking_shutdown() -> None:
+    service = _FakeAgentService()
+    runtime = _FakeRuntime(error=RuntimeError("prelude boom"))
+    wiring = AgentWiring(service=service, bridge=OwnerLoopBridge.for_running_loop(), runtime=cast(Any, runtime))
+
+    assert await wiring.prepare_close() is None
+    assert wiring._receipt is None
+    assert service.aclose_calls == 1
+
+
+async def test_close_prelude_not_ready_receipt_keeps_blocking_reasons() -> None:
+    service = _FakeAgentService()
+    runtime = _FakeRuntime(receipt=_receipt(ready=False))
+    wiring = AgentWiring(service=service, bridge=OwnerLoopBridge.for_running_loop(), runtime=cast(Any, runtime))
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is False
+    assert receipt.blocking_reasons == ("io_in_flight",)
+    assert wiring._receipt is receipt
+
+
+async def test_second_prepare_close_reuses_close_command_identity() -> None:
+    service = _FakeAgentService()
+    runtime = _FakeRuntime(receipt=_receipt(ready=True))
+    wiring = AgentWiring(service=service, bridge=OwnerLoopBridge.for_running_loop(), runtime=cast(Any, runtime))
+
+    first = await wiring.prepare_close()
+    command = wiring._close_command
+    second = await wiring.prepare_close()
+
+    assert first is second
+    assert wiring._close_command is command
+    assert runtime.calls == 1  # 已就绪回执不重复启动关闭链
+    assert service.aclose_calls == 2
+
+
+async def test_prepare_close_retries_unclosed_handle_then_releases_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", _DirectPool)
+    service = _FakeAgentService()
+    handle = _CloseableHandle()
+    guard = _CountingGuard()
+    wiring = AgentWiring(
+        service=service,
+        bridge=OwnerLoopBridge.for_running_loop(),
+        unclosed_handle=cast(Any, handle),
+        instance_guard=guard,
+    )
+
+    assert await wiring.prepare_close() is None
+    assert handle.close_calls == 1
+    assert guard.released == 1
+    assert wiring.unclosed_handle is None
+    assert wiring.instance_guard is None
+    assert service.aclose_calls == 1
+
+
+async def test_close_unclosed_handle_without_handle_is_noop() -> None:
+    wiring = AgentWiring(service=_FakeAgentService(), bridge=OwnerLoopBridge.for_running_loop())
+
+    await wiring._close_unclosed_handle()
+
+    assert wiring.unclosed_handle is None
+
+
+async def test_close_unclosed_handle_failure_keeps_handle_and_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", _DirectPool)
+    handle = _CloseableHandle(error=RuntimeError("close failed"))
+    guard = _CountingGuard()
+    wiring = AgentWiring(
+        service=_FakeAgentService(),
+        bridge=OwnerLoopBridge.for_running_loop(),
+        unclosed_handle=cast(Any, handle),
+        instance_guard=guard,
+    )
+
+    await wiring._close_unclosed_handle()
+
+    assert wiring.unclosed_handle is handle
+    assert guard.released == 0
+
+
+async def test_close_unclosed_handle_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", _DirectPool)
+    handle = _CloseableHandle(error=asyncio.CancelledError())
+    wiring = AgentWiring(
+        service=_FakeAgentService(),
+        bridge=OwnerLoopBridge.for_running_loop(),
+        unclosed_handle=cast(Any, handle),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await wiring._close_unclosed_handle()
+
+    assert isinstance(excinfo.value, asyncio.CancelledError)
+
+
+# ---------------------------------------------------------------------------
+# 接线失败降级（零派发）
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_shared_ledger_reports_failure() -> None:
+    wiring = await wire_agent_runtime(SimpleNamespace())
+
+    assert wiring.service is None
+    assert wiring.failure == "shared_ledger_unavailable"
+    assert wiring.ready is False
+
+
+async def test_unresolvable_runtime_url_degrades_zero_dispatch() -> None:
+    cache = SimpleNamespace(agent_dao=_FakeRegistry(), engine=SimpleNamespace(url=object()))
+
+    wiring = await wire_agent_runtime(cache)
+
+    assert wiring.failure == "runtime_url_unresolved"
+    assert isinstance(wiring.service, AgentService)
+    assert wiring.runtime is None
+
+
+async def test_startup_exception_degrades_zero_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("startup boom")
+
+    monkeypatch.setattr(wiring_mod, "start_agent_runtime", _boom)
+
+    wiring = await wire_agent_runtime(_cache_manager())
+
+    assert wiring.failure == "startup_failed:RuntimeError"
+    assert wiring.handle is None
+    assert wiring.runtime is None
+
+
+async def test_startup_cancellation_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _cancel(*_args: Any, **_kwargs: Any) -> Any:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(wiring_mod, "start_agent_runtime", _cancel)
+
+    with pytest.raises(asyncio.CancelledError) as excinfo:
+        await wire_agent_runtime(_cache_manager())
+
+    assert isinstance(excinfo.value, asyncio.CancelledError)
+
+
+async def test_startup_outcome_failure_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.agent_service.recovery import StartupOutcome
+
+    async def _outcome(*_args: Any, **_kwargs: Any) -> StartupOutcome:
+        return StartupOutcome(handle=None, isolation=None, failure="isolation_not_ready:x")
+
+    monkeypatch.setattr(wiring_mod, "start_agent_runtime", _outcome)
+
+    wiring = await wire_agent_runtime(_cache_manager())
+
+    assert wiring.failure == "isolation_not_ready:x"
+    assert wiring.ready is False

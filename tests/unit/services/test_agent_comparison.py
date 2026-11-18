@@ -468,3 +468,398 @@ class TestServiceComparison:
         by_lane = {observation.lane_ref: observation for observation in observations}
         assert by_lane[group.lanes[0].lane_ref].reliable_result is None
         assert by_lane[group.lanes[1].lane_ref].reliable_result is False
+
+
+class TestFrozenInputValidation:
+    """冻结入口的字段校验：非法输入显式失败，不静默降级。"""
+
+    def test_empty_text_rejected(self) -> None:
+        shared = ComparisonSharedInput(text="", mode=Mode.DISCUSS, purpose=Purpose.CONCEPT)
+        with pytest.raises(AgentValidationError) as exc:
+            _group(shared=shared)
+        assert exc.value.code == "invalid_text"
+        assert exc.value.field_path == "$.shared.text"
+
+    def test_invalid_mcp_scope_digest_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            _group(shared=replace(_shared(), mcp_scope_digest="not-a-digest"))
+        assert exc.value.code == "invalid_digest"
+        assert exc.value.field_path == "$.shared.mcp_scope_digest"
+
+    def test_invalid_source_digest_rejected(self) -> None:
+        bad_source = SourceVersionRef(
+            source_kind=SourceKind.USER_MESSAGE,
+            source_id="src-1",
+            source_version="1",
+            source_digest="bad",
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            _group(shared=replace(_shared(), source_refs=(bad_source,)))
+        assert exc.value.code == "invalid_digest"
+        assert exc.value.field_path == "$.shared.source_refs.source_digest"
+
+    def test_lane_revision_must_be_positive(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            _group((_selection("conn-a", revision=0), _selection("conn-b")))
+        assert exc.value.code == "invalid_revision"
+        assert exc.value.field_path == "$.lanes.connection_revision"
+
+    def test_lane_scope_version_must_be_non_negative(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            _group((replace(_selection("conn-a"), scope_version=-1), _selection("conn-b")))
+        assert exc.value.code == "invalid_revision"
+        assert exc.value.field_path == "$.lanes.connection_scope_version"
+
+    def test_shared_mode_must_be_mode_tag(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            _group(shared=replace(_shared(), mode=cast(Any, "discuss")))
+        assert exc.value.code == "invalid_tag"
+        assert exc.value.field_path == "$.shared.mode"
+
+    def test_shared_purpose_must_be_purpose_tag(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            _group(shared=replace(_shared(), purpose=cast(Any, "concept")))
+        assert exc.value.code == "invalid_tag"
+        assert exc.value.field_path == "$.shared.purpose"
+
+
+class TestManifestDecodeValidation:
+    """已保存 manifest 的严格解码：缺字段/多字段/畸形 wire 都显式失败。"""
+
+    def _payload(self) -> dict[str, Any]:
+        return json.loads(_group().manifest_payload)
+
+    def _decode_code(self, payload: object) -> str:
+        with pytest.raises(AgentValidationError) as exc:
+            decode_comparison_manifest(payload)
+        return exc.value.code
+
+    def test_payload_must_be_object(self) -> None:
+        assert self._decode_code([]) == "invalid_type"
+
+    def test_missing_key_reported(self) -> None:
+        payload = self._payload()
+        del payload["lanes"]
+        assert self._decode_code(payload) == "missing_field"
+
+    def test_extra_key_reported(self) -> None:
+        payload = self._payload()
+        payload["extra"] = 1
+        assert self._decode_code(payload) == "unknown_field"
+
+    def test_unsupported_schema_version_rejected(self) -> None:
+        payload = self._payload()
+        payload["schema_version"] = 2
+        assert self._decode_code(payload) == "unsupported_version"
+
+    def test_lanes_must_be_non_empty_list(self) -> None:
+        payload = self._payload()
+        payload["lanes"] = []
+        assert self._decode_code(payload) == "invalid_type"
+
+    def test_lane_must_be_object(self) -> None:
+        payload = self._payload()
+        payload["lanes"][0] = "not-a-lane"
+        assert self._decode_code(payload) == "invalid_type"
+
+    def test_shared_must_be_object(self) -> None:
+        payload = self._payload()
+        payload["shared"] = []
+        assert self._decode_code(payload) == "invalid_type"
+
+    def test_shared_mode_and_purpose_must_be_strings(self) -> None:
+        payload = self._payload()
+        payload["shared"]["mode"] = 1
+        assert self._decode_code(payload) == "invalid_type"
+
+        payload = self._payload()
+        payload["shared"]["purpose"] = 1
+        assert self._decode_code(payload) == "invalid_type"
+
+    def test_shared_tag_values_rejected(self) -> None:
+        payload = self._payload()
+        payload["shared"]["mode"] = "bogus"
+        assert self._decode_code(payload) == "invalid_tag"
+
+        payload = self._payload()
+        payload["shared"]["purpose"] = "bogus"
+        assert self._decode_code(payload) == "invalid_tag"
+
+    def test_shared_source_refs_and_message_ids_must_be_lists(self) -> None:
+        payload = self._payload()
+        payload["shared"]["source_refs"] = {}
+        assert self._decode_code(payload) == "invalid_type"
+
+        payload = self._payload()
+        payload["shared"]["source_refs"] = []
+        payload["shared"]["visible_history_message_ids"] = "m-1"
+        assert self._decode_code(payload) == "invalid_type"
+
+    def test_source_wire_shape_and_kind_validated(self) -> None:
+        payload = self._payload()
+        payload["shared"]["source_refs"] = ["not-a-source"]
+        assert self._decode_code(payload) == "invalid_type"
+
+        payload = self._payload()
+        payload["shared"]["source_refs"][0]["source_kind"] = 1
+        assert self._decode_code(payload) == "invalid_type"
+
+        payload = self._payload()
+        payload["shared"]["source_refs"][0]["source_kind"] = "bogus"
+        assert self._decode_code(payload) == "invalid_tag"
+
+    def test_tampered_input_digest_rejected(self) -> None:
+        payload = self._payload()
+        payload["shared"]["text"] = "被篡改的共同输入"
+        assert self._decode_code(payload) == "digest_mismatch"
+
+
+class TestLaneLookupValidation:
+    def test_accept_request_rejects_foreign_lane(self) -> None:
+        group = _group()
+        other = _group(group_command_id="cmp-2")
+        with pytest.raises(AgentValidationError) as exc:
+            build_lane_accept_request(
+                group,
+                other.lanes[0],
+                expected_revision=0,
+                node_id="root",
+                workflow_id="wf",
+                source_display_name="用户消息",
+            )
+        assert exc.value.code == "lane_not_in_group"
+
+    def test_connection_check_matches_second_lane_and_rejects_unknown(self) -> None:
+        group = _group((_selection("conn-a"), _selection("conn-b")))
+        lane = group.lanes[1]
+        assert require_lane_connection(group, lane.lane_ref, connection_id="conn-b", connection_revision=3) is lane
+        with pytest.raises(AgentValidationError) as exc:
+            require_lane_connection(group, "lane-unknown", connection_id="conn-a", connection_revision=3)
+        assert exc.value.code == "unknown_lane"
+
+    def test_retry_unknown_lane_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            plan_lane_retry(_group(), "lane-unknown", round_id="round-2")
+        assert exc.value.code == "unknown_lane"
+
+
+class TestObservationValidation:
+    def test_observation_must_be_typed(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            build_comparison_view(_group(), (cast(Any, "not-an-observation"),))
+        assert exc.value.code == "invalid_type"
+
+    def test_unknown_display_state_rejected(self) -> None:
+        group = _group()
+        observation = ComparisonLaneObservation(lane_ref=group.lanes[0].lane_ref, display_state="bogus")
+        with pytest.raises(AgentValidationError) as exc:
+            build_comparison_view(group, (observation,))
+        assert exc.value.code == "invalid_display_state"
+
+    def test_non_bool_reliable_result_rejected(self) -> None:
+        group = _group()
+        observation = ComparisonLaneObservation(
+            lane_ref=group.lanes[0].lane_ref,
+            display_state="complete",
+            reliable_result=cast(Any, "yes"),
+        )
+        with pytest.raises(AgentValidationError) as exc:
+            build_comparison_view(group, (observation,))
+        assert exc.value.code == "invalid_type"
+        assert exc.value.field_path == "$.observations[0].reliable_result"
+
+    def test_empty_note_rejected(self) -> None:
+        group = _group()
+        observation = ComparisonLaneObservation(lane_ref=group.lanes[0].lane_ref, note="")
+        with pytest.raises(AgentValidationError) as exc:
+            build_comparison_view(group, (observation,))
+        assert exc.value.code == "invalid_text"
+        assert exc.value.field_path == "$.observations[0].note"
+
+
+class TestLaneReasonProjection:
+    def test_missing_observation_is_not_started(self) -> None:
+        group = _group()
+        view = build_comparison_view(group, ())
+
+        assert view.ended is False
+        assert view.group_state == "queued"
+        assert view.goal_coverage == "unknown"
+        assert all(lane.reason == "not_started" for lane in view.lanes)
+        assert view.not_started_count == len(group.lanes)
+
+    def test_partial_and_withdrawn_reasons_preserved(self) -> None:
+        group = _group()
+        view = build_comparison_view(
+            group,
+            (
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref, display_state="partial", reliable_result=True
+                ),
+                ComparisonLaneObservation(
+                    lane_ref=group.lanes[1].lane_ref, display_state="withdrawn", reliable_result=False
+                ),
+            ),
+        )
+
+        reasons = {lane.lane_ref: lane.reason for lane in view.lanes}
+        assert reasons[group.lanes[0].lane_ref] == "partial_result"
+        assert reasons[group.lanes[1].lane_ref] == "withdrawn"
+        assert (view.group_state, view.goal_coverage) == ("partial", "partial")
+
+
+class TestDriveEdgeCases:
+    """逐路推进的边界：无容量、空观察、等待检查点、非法观察。"""
+
+    @pytest.mark.asyncio
+    async def test_no_capacity_queues_without_starting(self) -> None:
+        group = _group()
+
+        async def _start(_lane: Any) -> str:
+            raise AssertionError("无容量时不应启动任何路")
+
+        async def _observe(_children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            raise AssertionError("无容量时不应观察")
+
+        view = await drive_comparison_group(
+            group,
+            _start,
+            _observe,
+            active_total_executions=COMPARISON_TOTAL_SLOTS,
+        )
+
+        assert view.ended is False
+        assert view.group_state == "queued"
+        assert view.not_started_count == len(group.lanes)
+
+    @pytest.mark.asyncio
+    async def test_empty_observations_without_checkpoint_end_batch(self) -> None:
+        group = _group()
+        started: list[str] = []
+
+        async def start(lane: Any) -> str:
+            started.append(lane.lane_ref)
+            return f"wf-{lane.lane_ref}"
+
+        async def observe(_children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            return {}
+
+        view = await drive_comparison_group(group, start, observe, idle_observation_limit=1)
+
+        assert len(started) == 1  # 会话单总执行：仅第一路在途
+        assert view.ended is False
+        assert view.group_state == "running"
+
+    @pytest.mark.asyncio
+    async def test_wait_checkpoint_declined_ends_batch(self) -> None:
+        group = _group()
+
+        async def start(_lane: Any) -> str:
+            return "wf"
+
+        async def observe(_children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            return {}
+
+        async def checkpoint() -> bool:
+            return False
+
+        view = await drive_comparison_group(
+            group,
+            start,
+            observe,
+            idle_observation_limit=1,
+            wait_checkpoint=checkpoint,
+        )
+
+        assert view.ended is False
+
+    @pytest.mark.asyncio
+    async def test_wait_checkpoint_accepted_continues_to_completion(self) -> None:
+        group = _group()
+        calls = {"observe": 0}
+
+        async def start(lane: Any) -> str:
+            return f"wf-{lane.lane_ref}"
+
+        async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            calls["observe"] += 1
+            if calls["observe"] == 1:
+                return {}
+            return {
+                lane_ref: ComparisonLaneObservation(lane_ref=lane_ref, display_state="complete", reliable_result=True)
+                for lane_ref, _workflow_id in children
+            }
+
+        async def checkpoint() -> bool:
+            return True
+
+        view = await drive_comparison_group(
+            group,
+            start,
+            observe,
+            idle_observation_limit=1,
+            wait_checkpoint=checkpoint,
+        )
+
+        assert (view.group_state, view.goal_coverage) == ("complete", "full")
+
+    @pytest.mark.asyncio
+    async def test_unknown_lane_in_observation_rejected(self) -> None:
+        group = _group()
+
+        async def start(_lane: Any) -> str:
+            return "wf"
+
+        async def observe(_children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            return {
+                "lane-ghost": ComparisonLaneObservation(
+                    lane_ref=group.lanes[0].lane_ref, display_state="complete", reliable_result=True
+                )
+            }
+
+        with pytest.raises(AgentValidationError) as exc:
+            await drive_comparison_group(group, start, observe)
+
+        assert exc.value.code == "observation_unknown_lane"
+
+    @pytest.mark.asyncio
+    async def test_observation_identity_mismatch_rejected(self) -> None:
+        group = _group()
+
+        async def start(_lane: Any) -> str:
+            return "wf"
+
+        async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            lane_ref, _workflow_id = children[0]
+            return {
+                lane_ref: ComparisonLaneObservation(
+                    lane_ref="lane-other", display_state="complete", reliable_result=True
+                )
+            }
+
+        with pytest.raises(AgentValidationError) as exc:
+            await drive_comparison_group(group, start, observe)
+
+        assert exc.value.code == "observation_identity_mismatch"
+
+    @pytest.mark.asyncio
+    async def test_running_observation_keeps_lane_in_flight(self) -> None:
+        group = _group()
+        calls = {"observe": 0}
+
+        async def start(_lane: Any) -> str:
+            return "wf"
+
+        async def observe(children: tuple[tuple[str, str], ...]) -> dict[str, ComparisonLaneObservation]:
+            calls["observe"] += 1
+            if calls["observe"] == 1:
+                lane_ref, _workflow_id = children[0]
+                return {lane_ref: ComparisonLaneObservation(lane_ref=lane_ref, display_state="running")}
+            return {
+                lane_ref: ComparisonLaneObservation(lane_ref=lane_ref, display_state="complete", reliable_result=True)
+                for lane_ref, _workflow_id in children
+            }
+
+        view = await drive_comparison_group(group, start, observe)
+
+        assert (view.group_state, view.goal_coverage) == ("complete", "full")

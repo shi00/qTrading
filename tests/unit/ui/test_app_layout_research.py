@@ -395,6 +395,58 @@ class TestObservationPanelView:
                 content = control.content
                 assert not (isinstance(content, ft.Text) and content.value == "agent_research_submit")
 
+    def test_decision_card_shows_expiry(self, monkeypatch) -> None:
+        decision = PendingDecision(
+            decision_id="d-1",
+            decision_kind="user_choice",
+            revision=2,
+            created_at="2026-11-17T01:02:03.000000Z",
+            expires_at="2026-11-19T00:00:00.000000Z",
+            question_text=None,
+        )
+        panel = _render_panel(self._state(decisions=(decision,)), monkeypatch=monkeypatch)
+        _assert_text_present(panel, "agent_research_decision_expires_fmt")
+
+    def test_loading_and_error_states_render_honestly(self, monkeypatch) -> None:
+        state = ResearchObserverState(
+            available=True,
+            loading=True,
+            error_key="agent_research_refresh_failed",
+            last_error_code="upstream_timeout",
+        )
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+
+        assert any(isinstance(control, ft.ProgressRing) for control in _iter_controls(panel))
+        _assert_text_present(panel, "agent_research_refresh_failed")
+        _assert_text_present(panel, "agent_research_error_fmt")
+
+    def test_no_session_without_loading_shows_explicit_hint(self, monkeypatch) -> None:
+        panel = _render_panel(
+            ResearchObserverState(available=True, session_id=None, loading=False),
+            monkeypatch=monkeypatch,
+        )
+        _assert_text_present(panel, "agent_research_no_session")
+
+    def test_empty_decisions_and_last_update_render(self, monkeypatch) -> None:
+        state = ResearchObserverState(
+            available=True,
+            session_id="s-1",
+            session_title="研究 A",
+            decisions=(),
+            last_updated_at="2026-11-18T01:00:00.000000Z",
+        )
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+        _assert_text_present(panel, "agent_research_no_decisions")
+        _assert_text_present(panel, "agent_research_last_update_fmt")
+
+    def test_notice_renders_above_body(self, monkeypatch) -> None:
+        panel = _render_panel(
+            ResearchObserverState(available=True, session_id=None),
+            notice="决定提交失败，请重试",
+            monkeypatch=monkeypatch,
+        )
+        _assert_text_present(panel, "决定提交失败，请重试")
+
 
 class TestDecisionSubmissionPipeline:
     def test_happy_path_runs_vm_then_releases_arbiter(self) -> None:
