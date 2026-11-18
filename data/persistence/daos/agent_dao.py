@@ -239,6 +239,7 @@ from core.agent_types import (
     json_doc,
     is_digest,
     classify_data_consent_input_digest,
+    legacy_accept_intent_digest,
     legacy_command_input_digest,
     legacy_data_consent_revoke_input_digest,
     legacy_data_consent_save_input_digest,
@@ -627,11 +628,15 @@ class AgentDao(BaseDao):
         """受理事务（SQ-01/§5.3/§3.3.2）：intent 查重/冲突 + execution + command
         + user message + 源资产 + 初始谱系边 + 受理回执，**单个显式事务**。
 
-        幂等与冲突（INV-01/§3.3.2）：
+        幂等与冲突（INV-01/§3.3.2/R2-I14）：
 
-        - 同 intent（user_scope+source_module+business_request_id）同冻结输入
-          （intent_digest 相等）→ 重传：查回并返回原回执，零新事实；
-        - 同 intent 异输入 → ``AgentServiceError(INPUT_CONFLICT)``，零新事实；
+        - 同 intent（user_scope+source_module+business_request_id）同完整输入
+          （``accept_intent_digest``：target/node/workflow/模式/用途/正文/规范
+          manifest/来源显示名/比较组路引用/期望版）→ 重传：查回并返回原回执，
+          零新事实；
+        - 同 intent 异输入（上述任一字段不同）→ ``AgentServiceError(INPUT_CONFLICT)``，
+          零新事实；旧行（意图摘要仅覆盖 manifest 字节）改以存储事实逐项证明，
+          无法证明一致即冲突（``_legacy_intent_replays``）；
         - 同命令键（target+client_command_id）同完整输入（正文 + 冻结 manifest +
           期望版/node 身份，``frozen_command_input_digest`` 相等）→ 返回原回执；
         - 同命令键异输入（正文、manifest、期望版或 node 任一不同）→
@@ -679,10 +684,15 @@ class AgentDao(BaseDao):
                     f"{request.user_scope}/{request.session_id}",
                 )
 
-            # 2. intent 查重（INV-01：同身份异输入报冲突）。
+            # 2. intent 查重（INV-01/R2-I14：同身份必须比较完整受理输入）。
             existing_execution = (
                 await conn.execute(
-                    sa.select(AgentExecution.execution_id, AgentExecution.intent_digest).where(
+                    sa.select(
+                        AgentExecution.execution_id,
+                        AgentExecution.intent_digest,
+                        AgentExecution.comparison_group_ref,
+                        AgentExecution.comparison_lane_ref,
+                    ).where(
                         AgentExecution.user_scope == request.user_scope,
                         AgentExecution.source_module == request.source_module,
                         AgentExecution.business_request_id == request.business_request_id,
@@ -691,6 +701,17 @@ class AgentDao(BaseDao):
             ).first()
             if existing_execution is not None:
                 if existing_execution.intent_digest == identity.intent_digest:
+                    return await self._replay_original_receipt(conn, request, existing_execution.execution_id)
+                # 旧行（意图摘要仅覆盖 manifest 字节）：改以存储事实逐项证明完整
+                # 输入一致，无法证明即冲突（R21：不得把未知当相等）。
+                if existing_execution.intent_digest == legacy_accept_intent_digest(
+                    request.manifest_payload
+                ) and await self._legacy_intent_replays(
+                    conn,
+                    existing_execution,
+                    request,
+                    command_input_digest=command_input_digest,
+                ):
                     return await self._replay_original_receipt(conn, request, existing_execution.execution_id)
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT,
@@ -928,6 +949,85 @@ class AgentDao(BaseDao):
                 .values(event_seq=sa.func.greatest(AgentSession.event_seq, session_seq))
             )
             return receipt
+
+    async def _legacy_intent_replays(
+        self,
+        conn: AsyncConnection,
+        existing: Any,
+        request: AcceptRequest,
+        *,
+        command_input_digest: str,
+    ) -> bool:
+        """旧意图摘要行（仅 manifest 字节）的重放判定（R2-I14 兼容路径）。
+
+        旧行未存完整摘要，只能以存储事实逐项证明完整输入一致：比较组/路引用
+        （execution 列）、正文/manifest/期望版/node（命令完整输入摘要）、
+        ``workflow_id``（受理回执）、来源显示名（受理源资产）。任一事实缺失或
+        不一致即返回 False，调用方按 ``INPUT_CONFLICT`` 处理（不静默放行）。
+        ``mode``/``purpose`` 未单独落库，由冻结 manifest 契约承载（两者是 manifest
+        内容的一部分），manifest 摘要相等即视为相等——这是旧行唯一无法二次证明
+        的字段，仅对旧行适用。
+        """
+
+        if existing.comparison_group_ref != request.comparison_group_ref:
+            return False
+        if existing.comparison_lane_ref != request.comparison_lane_ref:
+            return False
+        command = (
+            await conn.execute(
+                sa.select(
+                    AgentCommand.input_digest,
+                    AgentCommand.expected_revision,
+                    AgentCommand.request_payload,
+                    AgentCommand.receipt_payload,
+                )
+                .where(
+                    AgentCommand.user_scope == request.user_scope,
+                    AgentCommand.execution_id == existing.execution_id,
+                    AgentCommand.command_kind == "submit",
+                )
+                .order_by(AgentCommand.created_at.asc(), AgentCommand.command_record_id.asc())
+                .limit(1)
+            )
+        ).first()
+        if command is None or command.receipt_payload is None:
+            return False
+        if not _command_input_replays(
+            command,
+            text=request.text,
+            manifest_payload=request.manifest_payload,
+            expected_revision=request.expected_revision,
+            command_input_digest=command_input_digest,
+        ):
+            return False
+        try:
+            receipt = decode_submission_receipt(command.receipt_payload)
+        except (AgentValidationError, ValueError):
+            return False
+        if receipt.workflow_id != request.workflow_id:
+            return False
+        stored_display_name = (
+            await conn.execute(
+                sa.select(AgentAssetVersion.display_name)
+                .join(
+                    AgentSourceLink,
+                    sa.and_(
+                        AgentSourceLink.user_scope == AgentAssetVersion.user_scope,
+                        AgentSourceLink.source_id == AgentAssetVersion.asset_id,
+                        AgentSourceLink.source_version == AgentAssetVersion.asset_version,
+                    ),
+                )
+                .where(
+                    AgentSourceLink.user_scope == request.user_scope,
+                    AgentSourceLink.execution_id == existing.execution_id,
+                    AgentSourceLink.relation_kind == SourceRelationKind.ACCEPTED_INPUT.value,
+                    AgentAssetVersion.asset_kind == "source",
+                )
+                .order_by(AgentSourceLink.created_at.asc(), AgentSourceLink.link_id.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        return stored_display_name == request.source_display_name
 
     async def _replay_original_receipt(
         self, conn: AsyncConnection, request: AcceptRequest, original_execution_id: str

@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 
 from core.agent_types import (
+    AcceptRequest,
     AgentValidationError,
     CanonicalJson,
     CommitState,
@@ -23,12 +24,15 @@ from core.agent_types import (
     ReadState,
     SourceKind,
     VerificationState,
+    accept_intent_digest,
     decode_exact_number,
     decode_json_doc,
+    derive_accept_identity,
     encode_exact_number,
     frozen_command_input_digest,
     is_digest,
     json_doc,
+    legacy_accept_intent_digest,
     legacy_command_input_digest,
     parse_preserving_numbers,
     require_identity,
@@ -636,3 +640,113 @@ class TestFrozenCommandInputDigest:
         assert legacy != frozen_command_input_digest(
             "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
         )
+
+
+class TestAcceptIntentDigest:
+    """受理意图摘要（R2-I14：同 intent 必须比较完整输入，不能只比 manifest 摘要）。"""
+
+    _MANIFEST = json_doc(
+        {
+            "schema_version": 1,
+            "source_module": "ui",
+            "mode": "discuss",
+            "purpose": "concept",
+            "text": "研究三家公司",
+        }
+    )
+
+    def _request(self, **overrides: Any) -> AcceptRequest:
+        values: dict[str, Any] = {
+            "user_scope": "u1",
+            "session_id": "s1",
+            "source_module": "ui",
+            "business_request_id": "req-1",
+            "client_command_id": "client-1",
+            "expected_revision": 0,
+            "node_id": "root",
+            "workflow_id": "wf-1",
+            "mode": Mode.DISCUSS,
+            "purpose": Purpose.CONCEPT,
+            "text": "研究三家公司",
+            "manifest_payload": self._MANIFEST,
+            "source_display_name": "用户消息",
+        }
+        values.update(overrides)
+        return AcceptRequest(**values)
+
+    def test_same_full_input_is_stable_across_command_keys(self) -> None:
+        first = accept_intent_digest(self._request())
+        second = accept_intent_digest(self._request(client_command_id="client-2"))
+        assert first == second
+        assert is_digest(first)
+
+    def test_digest_is_not_manifest_only(self) -> None:
+        """旧实现 = sha256(manifest)；新摘要必须覆盖 manifest 之外的受理输入。"""
+        digest = accept_intent_digest(self._request())
+        assert digest != sha256_hex(self._MANIFEST)
+        assert digest != legacy_accept_intent_digest(self._MANIFEST)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("text", "研究两家公司"),
+            ("mode", Mode.EXECUTE),
+            ("purpose", Purpose.END_OF_DAY_RESEARCH),
+            ("workflow_id", "wf-2"),
+            ("node_id", "node-2"),
+            ("session_id", "s2"),
+            ("expected_revision", 3),
+            ("source_display_name", "另一显示名"),
+        ],
+    )
+    def test_any_input_field_change_changes_digest(self, field: str, value: object) -> None:
+        base = accept_intent_digest(self._request())
+        assert accept_intent_digest(self._request(**{field: value})) != base
+
+    def test_comparison_refs_are_part_of_digest(self) -> None:
+        base = accept_intent_digest(self._request())
+        grouped = accept_intent_digest(self._request(comparison_group_ref="group-1", comparison_lane_ref="lane-1"))
+        other_lane = accept_intent_digest(self._request(comparison_group_ref="group-1", comparison_lane_ref="lane-2"))
+        assert base != grouped
+        assert grouped != other_lane
+
+    def test_manifest_change_changes_digest(self) -> None:
+        other = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司", "purpose": "decide"})
+        assert accept_intent_digest(self._request(manifest_payload=other)) != accept_intent_digest(self._request())
+
+    def test_manifest_must_be_non_empty_text(self) -> None:
+        for payload in ("", None, 1):
+            with pytest.raises(AgentValidationError) as excinfo:
+                accept_intent_digest(self._request(manifest_payload=payload))
+            assert code_of(excinfo) == "invalid_value"
+
+    def test_manifest_must_be_json_object(self) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            accept_intent_digest(self._request(manifest_payload="[]"))
+        assert code_of(excinfo) == "invalid_type"
+        with pytest.raises(AgentValidationError) as excinfo:
+            accept_intent_digest(self._request(manifest_payload="not-json"))
+        assert code_of(excinfo) == "invalid_json"
+
+    def test_manifest_must_be_canonical_json(self) -> None:
+        """非规范字节（空白/键序/重复键）不得与规范字节共享同一内容身份。"""
+        with pytest.raises(AgentValidationError) as excinfo:
+            accept_intent_digest(self._request(manifest_payload='{ "schema_version": 1 }'))
+        assert code_of(excinfo) == "non_canonical_json"
+        with pytest.raises(AgentValidationError) as excinfo:
+            accept_intent_digest(self._request(manifest_payload='{"a":1,"a":2}'))
+        assert code_of(excinfo) == "duplicate_key"
+
+    def test_derive_accept_identity_uses_full_intent_digest(self) -> None:
+        request = self._request()
+        identity = derive_accept_identity(request)
+        assert identity.intent_digest == accept_intent_digest(request)
+        # 同 intent + 同 manifest 只换正文：旧实现视为重放（摘要相等），新实现必须不同。
+        changed = derive_accept_identity(self._request(text="换一个问题"))
+        assert changed.intent_digest != identity.intent_digest
+        assert changed.source_digest != identity.source_digest
+
+    def test_legacy_accept_intent_digest_is_manifest_digest(self) -> None:
+        """旧行公式（仅 manifest 字节）只用于读历史行，且与新摘要不同。"""
+        assert legacy_accept_intent_digest(self._MANIFEST) == sha256_hex(self._MANIFEST)
+        assert legacy_accept_intent_digest(self._MANIFEST) != accept_intent_digest(self._request())

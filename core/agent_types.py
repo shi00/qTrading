@@ -1761,7 +1761,8 @@ class AcceptRequest:
     """受理输入（SQ-01/§3.3.2/§3.4）：受理时点冻结（INV-04）。
 
     ``text`` 为用户消息正文（非空，不 trim/改 Unicode）；``manifest_payload``
-    为 FrozenManifest 规范 JSON（intent_digest 由其规范字节派生，单一事实源）；
+    为 FrozenManifest 规范 JSON（规范字节校验后参与完整意图摘要，R2-I14：正文/
+    模式/用途/工作流/来源显示名/比较组路引用同入摘要）；
     ``source_display_name`` 由服务层决定（i18n 文案），DAO 不猜显示名。
     """
 
@@ -1798,6 +1799,67 @@ class AcceptIdentity:
     intent_digest: str
 
 
+#: 受理意图摘要规范版本（R2-I14）：v1 = sha256(manifest 字节)，只覆盖冻结 manifest，
+#: 同 intent 换正文/模式/用途/工作流/来源显示名/比较组路引用会得到同一摘要而被误判为
+#: 重放；v2 覆盖全部受理输入，旧行由 :func:`legacy_accept_intent_digest` 识别。
+ACCEPT_INTENT_DIGEST_VERSION: Final = 2
+
+
+def _require_canonical_manifest(payload: object) -> CanonicalJson:
+    """校验冻结 manifest 为规范 JSON 对象（R2-I14：manifest 内容本身必须校验）。
+
+    非规范字节（键序/空白/转义）、重复键与非对象一律拒绝：摘要按规范字节参与计算，
+    若放行非规范输入，同一内容会有多个身份，「同输入」判定随字节表现漂移。
+    """
+
+    if not isinstance(payload, str) or payload == "":
+        _fail("invalid_value", "$.manifest_payload")
+    parsed = decode_json_doc(payload)
+    if not isinstance(parsed, dict):
+        _fail("invalid_type", "$.manifest_payload")
+    if json_doc(parsed) != payload:
+        _fail("non_canonical_json", "$.manifest_payload")
+    return payload
+
+
+def accept_intent_digest(request: AcceptRequest) -> str:
+    """服务端按实际受理内容计算的完整意图摘要（R2-I14）。
+
+    覆盖 target（session_id）、node/workflow 身份、模式/用途、正文、冻结 manifest
+    （规范字节，已校验）、来源显示名、比较组/路引用与期望版本：同一意图键下任一
+    字段变化都必须得到不同摘要（→ ``INPUT_CONFLICT``），只有完整输入相同才是重传。
+    命令键（``client_command_id``）不参与：重传允许换命令键，由命令行摘要单独核对。
+    """
+
+    return sha256_hex(
+        json_doc(
+            {
+                "schema_version": ACCEPT_INTENT_DIGEST_VERSION,
+                "kind": "accept_intent",
+                "session_id": request.session_id,
+                "source_module": request.source_module,
+                "business_request_id": request.business_request_id,
+                "node_id": request.node_id,
+                "workflow_id": request.workflow_id,
+                "mode": request.mode.value,
+                "purpose": request.purpose.value,
+                "text": request.text,
+                "manifest": _require_canonical_manifest(request.manifest_payload),
+                "source_display_name": request.source_display_name,
+                "comparison_group_ref": request.comparison_group_ref,
+                "comparison_lane_ref": request.comparison_lane_ref,
+                "expected_revision": request.expected_revision,
+            }
+        )
+    )
+
+
+def legacy_accept_intent_digest(manifest_payload: str) -> str:
+    """旧版意图摘要（仅 manifest 字节）：只用于读取历史行，禁止用于新写入。"""
+
+    return sha256_hex(manifest_payload)
+
+
 def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
     """按 §3.3.2 派生受理稳定身份并校验输入（不 trim/改 Unicode）。
 
@@ -1808,7 +1870,8 @@ def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
     - ``source_id = stable_id("message_source",[user_scope,session_id,
       message_id])``，source_version="1"；
     - ``source_digest = sha256(text UTF-8)``，``intent_digest =
-      sha256(manifest_payload UTF-8)``（manifest 已是规范 JSON）。
+      accept_intent_digest(request)``（完整受理输入摘要，R2-I14；不再是仅
+      manifest 字节）。
     """
 
     user_scope = _require_str(request.user_scope, "$.user_scope")
@@ -1830,8 +1893,6 @@ def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
         _fail("invalid_tag", "$.purpose")
     if not isinstance(request.text, str) or request.text == "":
         _fail("invalid_value", "$.text")
-    if not isinstance(request.manifest_payload, str) or request.manifest_payload == "":
-        _fail("invalid_value", "$.manifest_payload")
     _require_str(request.source_display_name, "$.source_display_name")
     # F37：组/路引用同给同缺（孤立引用无法判定共同输入或本路身份）。
     if (request.comparison_group_ref is None) != (request.comparison_lane_ref is None):
@@ -1849,7 +1910,7 @@ def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
         source_id=source_id,
         source_version="1",
         source_digest=sha256_hex(request.text),
-        intent_digest=sha256_hex(request.manifest_payload),
+        intent_digest=accept_intent_digest(request),
     )
 
 
