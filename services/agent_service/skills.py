@@ -809,6 +809,31 @@ def decide_skill_import(
     )
 
 
+def _apply_layout_decision(
+    decision: SkillImportDecision,
+    *,
+    incoming_directories: Sequence[str],
+    published_directories: tuple[str, ...] | None,
+    confirm_update: bool,
+) -> SkillImportDecision:
+    """I37：内容摘要相同还不够——目录布局（含空目录）一致才判 ``UNCHANGED``。
+
+    ``published_directories is None``（旧版本的清单缺目录字段）时退回内容摘要语义，
+    避免升级后把同内容重导误判为需确认更新。
+    """
+
+    if decision.status is not SkillImportStatus.UNCHANGED or published_directories is None:
+        return decision
+    if tuple(sorted(incoming_directories)) == published_directories:
+        return decision
+    status = SkillImportStatus.UPDATE if confirm_update else SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION
+    return SkillImportDecision(
+        status=status,
+        next_version=decision.next_version + 1,
+        existing_version=decision.existing_version,
+    )
+
+
 def _require_skill_id(skill_id: str) -> str:
     value = require_identity(skill_id, "$.skill.skill_id")
     if any(char in value for char in ("/", "\\", ":", "\x00")) or value in {".", ".."}:
@@ -1242,6 +1267,16 @@ class SkillCatalogService:
         content_digest = content_digest_of_files(inspection.files)
         existing = await self._dao.list_skill_versions(user_scope=request.user_scope, skill_id=skill_id)
         decision = decide_skill_import(existing, content_digest=content_digest, confirm_update=request.confirm_update)
+        decision = _apply_layout_decision(
+            decision,
+            incoming_directories=inspection.directories,
+            published_directories=(
+                None
+                if decision.existing_version is None
+                else self._published_directories(skill_id, decision.existing_version)
+            ),
+            confirm_update=request.confirm_update,
+        )
         missing_dependencies = await self._missing_dependencies(request.user_scope, manifest.dependencies)
         receipt = SkillImportReceipt(
             status=decision.status,
@@ -1415,6 +1450,21 @@ class SkillCatalogService:
 
         existing = await self._dao.list_skill_versions(user_scope=user_scope, skill_id=ref.skill_id)
         return any(version == ref.version for version, _digest in existing)
+
+    def _published_directories(self, skill_id: str, version: int) -> tuple[str, ...] | None:
+        """读取已发布版本清单中的目录集合（I37）；清单缺失或无目录字段时返回 None。"""
+
+        try:
+            manifest_path = (
+                self._store.version_dir(SkillVersionRef(skill_id=skill_id, version=version)) / VERSION_MANIFEST_FILENAME
+            )
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, AgentValidationError):
+            return None
+        directories = payload.get("directories") if isinstance(payload, dict) else None
+        if not isinstance(directories, list):
+            return None
+        return tuple(sorted(str(item) for item in directories))
 
     async def _missing_dependencies(self, user_scope: str, dependencies: Sequence[str]) -> tuple[str, ...]:
         missing: list[str] = []

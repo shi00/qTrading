@@ -243,6 +243,25 @@ class TestImportLifecycle:
         assert (version_dir / "empty").is_dir()
         assert len(dao.assets) == 1
 
+    async def test_empty_directory_change_requires_confirmation(self, tmp_path: Path) -> None:
+        service, _, store = _service(tmp_path)
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "SKILL.md").write_bytes(b"---\nname: demo-skill\ndescription: demo\nlicense: MIT\n---\n# body\n")
+        (source / "empty").mkdir()
+        first = await service.import_package(
+            SkillPackageImportRequest(user_scope="scope", directory_name="demo-skill", directory=str(source))
+        )
+        assert first.status is SkillImportStatus.NEW
+        (source / "empty2").mkdir()
+        second = await service.import_package(
+            SkillPackageImportRequest(user_scope="scope", directory_name="demo-skill", directory=str(source))
+        )
+        # I37：内容摘要相同但布局不同（新增空目录）不得判 UNCHANGED。
+        assert second.status is SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION
+        assert second.version == 2
+        assert store.current_version(first.skill_id) == 1
+
     async def test_reimport_heals_orphan_published_version(self, tmp_path: Path) -> None:
         service, dao, store = _service(tmp_path)
         first = await _import(service, _package())

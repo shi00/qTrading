@@ -6390,11 +6390,18 @@ class BusinessSourceRegistrationReceipt:
     registered: tuple[SourceVersionRef, ...]
     link_ids: tuple[str, ...]
     replayed: bool
+    #: 事后解释用途下「决策界之后才披露」的补充资料（可解释、不得伪当时已知/入历史评分）。
+    retrospective: tuple[SourceVersionRef, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class SourceRegistrationRequest:
-    """含用途/时点的登记请求（PIT 在服务层拒绝，DAOs 只落已核事实）。"""
+    """含用途/时点的登记请求（PIT 在服务层拒绝，DAOs 只落已核事实）。
+
+    ``decision_cutoff`` 为事件决策界（历史决策/评分严格不可越过）；
+    ``explanation_cutoff`` 仅事后解释用途使用，是解释资料可得界（可晚于决策界），
+    落在两者之间的来源登记为 ``retrospective``，不得用于历史评分。
+    """
 
     user_scope: str
     consumer_kind: str
@@ -6404,6 +6411,7 @@ class SourceRegistrationRequest:
     decision_cutoff: str | None
     selected: tuple[BusinessSourceItem, ...]
     unselected: tuple[BusinessSourceItem, ...] = ()
+    explanation_cutoff: str | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -1318,13 +1318,23 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
             budget.enforce_pages(len(pages))
         texts: list[str] = []
         limitations: list[dict[str, str]] = []
+        readable_pages: list[int] = []
+        unreadable_pages: list[int] = []
         for page_index in pages:
             text = reader.pages[page_index].extract_text() or ""
             if not text.strip():
                 limitations.append(_limitation("page_text_unavailable", f"第 {page_index + 1} 页无可提取文本"))
+                unreadable_pages.append(page_index)
+            else:
+                readable_pages.append(page_index)
             texts.append(text)
         body = "\n".join(texts)
         budget.enforce_codepoints(len(body))
+        unread_ranges: list[dict[str, Any]] = []
+        if limitations:
+            # I25：all 不是「无论读到什么都算全选」——只列真实可读页，未读页单列。
+            read_ranges = _page_range_atoms(readable_pages)
+            unread_ranges = _page_range_atoms(unreadable_pages)
         return ParsedAttachment(
             read_state=ReadState.PARTIAL if limitations else ReadState.READY,
             coverage="limited" if limitations else "full",
@@ -1332,11 +1342,32 @@ def _parse_pdf(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
             limitations=limitations,
             stats=_stats(source_bytes=len(data), pages=len(pages), chars=len(body)),
             read_ranges=read_ranges,
+            unread_ranges=unread_ranges,
         )
     except AttachmentParseError:
         raise
     except Exception as exc:  # 第三方解析异常统一转译
         raise AttachmentParseError("invalid_structure", "PDF structure is unreadable") from exc
+
+
+def _page_range_atoms(pages: list[int]) -> list[dict[str, Any]]:
+    """把页下标升序列表合并为连续 ``pages`` 区间（1 基、两端包含）。"""
+
+    atoms: list[dict[str, Any]] = []
+    start: int | None = None
+    previous: int | None = None
+    for index in pages:
+        if start is None or previous is None:
+            start = previous = index
+            continue
+        if index == previous + 1:
+            previous = index
+            continue
+        atoms.append(to_wire_dict(PagesRange(kind="pages", start=start + 1, end=previous + 1)))
+        start = previous = index
+    if start is not None and previous is not None:
+        atoms.append(to_wire_dict(PagesRange(kind="pages", start=start + 1, end=previous + 1)))
+    return atoms
 
 
 def _parse_image(data: bytes, selection: Selection) -> ParsedAttachment:

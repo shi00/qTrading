@@ -21,6 +21,7 @@ from typing import Any, cast
 
 import pytest
 from PIL import Image
+from pypdf import PdfWriter
 
 import services.agent_service.attachment_worker as attachment_worker
 
@@ -1783,6 +1784,23 @@ class TestWorkerLifecycle:
         with pytest.raises(AttachmentParseError) as exc:
             _parse(AttachmentKind.PDF, b"%PDF-" + b"1.4\n")
         assert exc.value.code == "invalid_structure"
+
+    def test_pdf_all_lists_unreadable_pages(self) -> None:
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        writer.add_blank_page(width=200, height=200)
+        buffer = io.BytesIO()
+        writer.write(buffer)
+        parsed = _parse(AttachmentKind.PDF, buffer.getvalue())
+        # I25：all 不得把无文本页伪装成已读——read 仅可读页，unread 单列。
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.coverage == "limited"
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == [{"kind": "pages", "start": 1, "end": 2}]
+        assert [item["code"] for item in parsed.limitations] == [
+            "page_text_unavailable",
+            "page_text_unavailable",
+        ]
 
     def test_image_malformed_structure_is_explicit(self) -> None:
         with pytest.raises(AttachmentParseError) as exc:

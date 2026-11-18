@@ -236,6 +236,10 @@ _HTTP_INBOUND_BINDINGS: tuple[MCPInboundLimitBinding, ...] = (
 MCP_INBOUND_LIMIT_BINDINGS: Mapping[MCPTransportKind, tuple[MCPInboundLimitBinding, ...]] = {
     MCPTransportKind.STREAMABLE_HTTP: _HTTP_INBOUND_BINDINGS,
     MCPTransportKind.SSE: _HTTP_INBOUND_BINDINGS,
+    # I03 DECISION（2026-11-18）：本地 stdio 保持禁用。stdio 无 SDK 解析前的字节/深度
+    # 插入点，配置了前置限额族即由 ``require_pre_parse_bindings`` 拒绝（CAPABILITY_UNVERIFIED）；
+    # 若要放开，必须先实现受控 stdio 中继（自管子进程 + 帧/深度限额 + env 白名单 + 审核 + 停止），
+    # 再把真实插入点登记到此处——不得只删限额族绕过准入。
     MCPTransportKind.STDIO: (),
 }
 

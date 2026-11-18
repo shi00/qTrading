@@ -98,6 +98,7 @@ def _request(
     *,
     purpose: Purpose = Purpose.END_OF_DAY_RESEARCH,
     cutoff: str | None = "2026-01-01T00:00:00.000000Z",
+    explanation_cutoff: str | None = None,
     selected: tuple[BusinessSourceItem, ...] | None = None,
     unselected: tuple[BusinessSourceItem, ...] = (),
 ) -> SourceRegistrationRequest:
@@ -110,6 +111,7 @@ def _request(
         decision_cutoff=cutoff,
         selected=selected if selected is not None else (_item(),),
         unselected=unselected,
+        explanation_cutoff=explanation_cutoff,
     )
 
 
@@ -174,6 +176,46 @@ class TestPointInTimeGate:
             await BusinessSourceService(dao).register(request)
         assert exc.value.code is AgentErrorCode.POLICY_DENIED
         assert dao.requests == []
+
+    @pytest.mark.asyncio
+    async def test_post_hoc_explanation_admits_later_disclosure_as_retrospective(self) -> None:
+        dao = FakeDao()
+        request = _request(
+            purpose=Purpose.POST_HOC_EXPLANATION,
+            cutoff="2026-01-01T00:00:00.000000Z",
+            explanation_cutoff="2026-02-01T00:00:00.000000Z",
+            selected=(_item(available_at="2026-01-15T00:00:00.000000Z"),),
+        )
+        receipt = await BusinessSourceService(dao).register(request)
+        assert len(dao.requests) == 1
+        assert tuple(ref.source_id for ref in receipt.retrospective) == ("src-1",)
+        assert tuple(ref.source_id for ref in receipt.registered) == ("src-1",)
+
+    @pytest.mark.asyncio
+    async def test_post_hoc_explanation_still_rejects_beyond_explanation_cutoff(self) -> None:
+        dao = FakeDao()
+        request = _request(
+            purpose=Purpose.POST_HOC_EXPLANATION,
+            cutoff="2026-01-01T00:00:00.000000Z",
+            explanation_cutoff="2026-02-01T00:00:00.000000Z",
+            selected=(_item(available_at="2026-02-01T00:00:00.000000Z"),),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await BusinessSourceService(dao).register(request)
+        assert exc.value.code is AgentErrorCode.POLICY_DENIED
+        assert dao.requests == []
+
+    @pytest.mark.asyncio
+    async def test_explanation_cutoff_rejected_for_historical_purpose(self) -> None:
+        dao = FakeDao()
+        request = _request(
+            purpose=Purpose.HISTORICAL_DECISION,
+            cutoff="2026-01-01T00:00:00.000000Z",
+            explanation_cutoff="2026-02-01T00:00:00.000000Z",
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await BusinessSourceService(dao).register(request)
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
