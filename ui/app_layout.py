@@ -37,6 +37,12 @@ from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS, Eid
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.business_research_view_model import (
+    NOTICE_DRAFT_PREPARED,
+    BusinessResearchRequest,
+    resolve_business_research_service,
+    shared_business_research,
+)
 from ui.viewmodels.nav_badge_view_model import NavBadgeViewModel
 from ui.viewmodels.research_observer_view_model import (
     LOCAL_DESKTOP_USER_SCOPE,
@@ -173,6 +179,7 @@ def _build_pages_stack(
     settings_subtab_request: tuple[str, int] | None = None,
     screener_stock_request: tuple[str, int] | None = None,
     backtest_prefill_request: int | None = None,
+    on_start_research: Any = None,
 ) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
@@ -227,10 +234,13 @@ def _build_pages_stack(
             return ft.Container(expand=True)
         return view_factory()
 
+    # R2-I06: 仅在接线上存在准备入口时注入（未接线不改变既有视图构造契约）
+    research_props = {"on_start_research": on_start_research} if on_start_research is not None else {}
+
     pages = [
         ft.Container(
             content=_make_content(
-                lambda: HomeView(active=current_tab == NavTabs.MARKET),
+                lambda: HomeView(active=current_tab == NavTabs.MARKET, **research_props),
                 current_tab == NavTabs.MARKET,
             ),
             expand=True,
@@ -241,6 +251,7 @@ def _build_pages_stack(
                 lambda: ScreenerView(
                     active=current_tab == NavTabs.SCREENER,
                     stock_filter_request=screener_stock_request,
+                    **research_props,
                 ),
                 current_tab == NavTabs.SCREENER,
             ),
@@ -252,6 +263,7 @@ def _build_pages_stack(
                 lambda: BacktestView(
                     active=current_tab == NavTabs.BACKTEST,
                     prefill_request=backtest_prefill_request,
+                    **research_props,
                 ),
                 current_tab == NavTabs.BACKTEST,
             ),
@@ -417,6 +429,15 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     research_open, set_research_open = ft.use_state(False)
     decision_notice: str | None = None
     decision_notice, set_decision_notice = ft.use_state(lambda: decision_notice)
+    # R2-I06: 业务对象 → 研究草稿准备（只准备不发送；与观察层共用同一 facade）
+    business_service, business_unavailable_key = resolve_business_research_service(agent_wiring)
+    business_state, business_vm = use_viewmodel(
+        factory=lambda: shared_business_research(
+            business_service,
+            user_scope=str(getattr(agent_wiring, "user_scope", LOCAL_DESKTOP_USER_SCOPE)),
+            unavailable_reason_key=business_unavailable_key,
+        )
+    )
     # 跨 effect/事件闭包读取最新可见性（导航订阅是 mount 期闭包，避免 stale 快照）；
     # use_ref 仅允许 None 初始值，这里存可见性布尔快照。
     research_open_ref: Any = ft.use_ref(None)
@@ -445,6 +466,25 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
 
     def _on_draft_change(decision_id: str, text: str) -> None:
         research_vm.set_answer_draft(decision_id, text)
+
+    def _start_research(request: BusinessResearchRequest, reader: Any | None = None) -> None:
+        """业务入口发起准备（异步调度；事件处理器内不做同步 IO，R16）。"""
+        page = _get_page()
+        if page is not None:
+            page.run_task(_prepare_research, request, reader)
+
+    async def _prepare_research(request: BusinessResearchRequest, reader: Any | None) -> None:
+        """只准备草稿（不发送、不派发）；成功/失败都只改提示，不导航、不重跑业务。"""
+        await business_vm.prepare(request, backtest_reader=reader)
+        notice_key = business_vm.state.notice_key
+        if notice_key is None:
+            return
+        set_decision_notice(I18n.get(notice_key))
+        if business_vm.state.last_session_id is not None and notice_key == NOTICE_DRAFT_PREPARED:
+            # 草稿已可见：展开观察层并只读刷新（观察层不控制执行）
+            set_research_open(True)
+            research_open_ref.current = True
+            _refresh_research()
 
     def _toggle_execution(execution_id: str) -> None:
         """只改子任务树展开态（共享 VM 持久化，切页不丢；不控制执行）。"""
@@ -790,6 +830,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             settings_subtab_request,
             screener_stock_request,
             backtest_prefill_request,
+            _start_research,
         ),
         expand=True,
         padding=AppStyles.SPACING_XL,
@@ -797,10 +838,12 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     )
 
     # P02: 非模态研究观察层（展开时占用右侧公共区；业务页仍常驻，不销毁现场）
+    # R2-I06: 准备结果的显式提示（来源失效/重复发起都保留原稿，只改提示不伪装）
+    business_notice_text = I18n.get(business_state.notice_key) if business_state.notice_key else None
     research_panel = (
         ResearchObserverPanel(
             state=research_state,
-            notice=decision_notice,
+            notice=business_notice_text or decision_notice,
             on_close=lambda: _toggle_research(None),
             on_refresh=_refresh_research,
             on_draft_change=_on_draft_change,

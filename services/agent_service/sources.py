@@ -94,6 +94,38 @@ class BusinessSourceService:
             return receipt
         return replace(receipt, retrospective=tuple(retrospective))
 
+    async def register_draft_sources(
+        self,
+        *,
+        user_scope: str,
+        session_id: str,
+        draft_revision: int,
+        items: tuple[BusinessSourceItem, ...],
+    ) -> BusinessSourceRegistrationReceipt:
+        """草稿期登记业务来源（R2-I06）：冻结准确源版与时点，不作出准入判断。
+
+        草稿不是决策：此时尚无用户确认的决策截止界，服务层无法执行 PIT 准入
+        （强行补一个截止界会伪造研究时点，R21/R24）。准入在发送/受理时按用户
+        确认的截止界重判；本方法只登记引用（source_id/version/digest/available_at），
+        不复制正文、不派发研究。失败语义同 :meth:`register`（DAO 单事务，零部分登记）。
+        """
+
+        identity = f"{user_scope}/draft/{session_id}@{draft_revision}"
+        if not items:
+            return BusinessSourceRegistrationReceipt(registered=(), link_ids=(), replayed=False)
+        keys = {(item.source.source_id, item.source.version) for item in items}
+        if len(keys) != len(items):
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "duplicate selected source", identity)
+        return await self._dao.register_business_sources(
+            BusinessSourceRegistrationRequest(
+                user_scope=user_scope,
+                consumer_kind="draft",
+                consumer_id=session_id,
+                consumer_version=str(draft_revision),
+                items=items,
+            )
+        )
+
 
 def _ensure_visible_at(item: BusinessSourceItem, cutoff: datetime, identity: str) -> datetime:
     """截止界准入：可得时点未知或恰在/晚于截止（排他）时拒绝；返回可得时点。"""

@@ -17,6 +17,8 @@
 """
 
 import asyncio
+import datetime
+import hashlib
 import logging
 import typing
 from collections.abc import Callable
@@ -33,7 +35,11 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
-from ui.viewmodels.home_view_model import HomeViewModel
+from ui.viewmodels.business_research_view_model import (
+    OBJECT_KIND_NEWS,
+    BusinessResearchRequest,
+)
+from ui.viewmodels.home_view_model import HomeViewModel, NewsRow
 from utils.app_env import is_e2e_mode
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
@@ -46,6 +52,7 @@ logger = logging.getLogger(__name__)
 def HomeView(
     on_run_strategy: Callable[[], None] | None = None,
     active: bool = True,
+    on_start_research: Callable[..., None] | None = None,
 ) -> ft.Container:
     """Home dashboard view (declarative).
 
@@ -122,6 +129,41 @@ def HomeView(
                 page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, message)
         except RuntimeError:
             logger.debug("[HomeView] page not available for view_stock navigation")
+
+    def _on_start_news_research(row: NewsRow) -> None:
+        """所选资讯 → 研究草稿准备（只准备不发送；不导航、不重跑任何业务）。"""
+        if on_start_research is None or row.news_id is None:
+            return
+        available_at: str | None = None
+        if row.publish_time:
+            try:
+                published = datetime.datetime.fromisoformat(row.publish_time)
+            except (TypeError, ValueError):
+                published = None
+            if published is not None:
+                if published.tzinfo is None:
+                    # market_news.publish_time 为 UTC tz-naive（入库前 to_utc_for_db）
+                    published = published.replace(tzinfo=datetime.UTC)
+                available_at = published.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        excerpt = row.content if len(row.content) <= 500 else f"{row.content[:500]}…"
+        content_digest = hashlib.sha256(row.content.encode("utf-8")).hexdigest()
+        on_start_research(
+            BusinessResearchRequest(
+                source_module="news",
+                object_kind=OBJECT_KIND_NEWS,
+                object_id=str(row.news_id),
+                display_name=row.content[:40] or f"news {row.news_id}",
+                summary=(
+                    ("news_id", str(row.news_id)),
+                    ("publish_time", row.publish_time),
+                    ("source", row.source),
+                    ("content_excerpt", excerpt),
+                    ("content_sha256", content_digest),
+                    ("content_truncated", "true" if len(row.content) > 500 else "false"),
+                ),
+                available_at=available_at,
+            )
+        )
 
     async def _on_load_more_click() -> None:
         """「加载更多」业务命令 (M12-028: 无参, 不接收 Flet ControlEvent).
@@ -294,6 +336,7 @@ def HomeView(
                     valid_stock_codes=state.valid_stock_codes,
                     valid_stock_ts_codes=state.valid_stock_ts_codes,
                     is_loading_more=state.is_loading_more,
+                    on_start_research=_on_start_news_research if on_start_research is not None else None,
                 ),
             ]
         )

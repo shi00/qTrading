@@ -21,6 +21,7 @@ from typing import Any
 
 import flet as ft
 
+from core.agent_types import Purpose
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.components.flet_type_helpers import get_control_value, safe_on_click, safe_on_select
 from ui.components.resizable_splitter import ResizableSplitter
@@ -35,6 +36,10 @@ from ui.viewmodels.backtest_view_model import (
     BacktestViewModel,
     LastRunSnapshot,
     consume_pending_prefill,
+)
+from ui.viewmodels.business_research_view_model import (
+    OBJECT_KIND_BACKTEST,
+    BusinessResearchRequest,
 )
 from utils.log_decorators import UILogger
 
@@ -229,7 +234,11 @@ def _build_backtest_caveat_banner(state: BacktestState) -> ft.Control | None:
 
 
 @ft.component
-def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.Container:
+def BacktestView(
+    active: bool = True,
+    prefill_request: int | None = None,
+    on_start_research: Any = None,
+) -> ft.Container:
     """回测视图（声明式）。
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -357,6 +366,28 @@ def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.
         UILogger.log_action("BacktestView", "Click", "btn_cancel_backtest")
         vm.cancel_backtest()
 
+    def _on_start_research(_e: ft.ControlEvent | None = None) -> None:
+        """从既有回测报告发起研究：只准备草稿（不重跑回测、不发送）。"""
+        if on_start_research is None or state.run_id is None:
+            return
+        UILogger.log_action("BacktestView", "Click", "btn_backtest_start_research")
+        on_start_research(
+            BusinessResearchRequest(
+                source_module="backtest",
+                object_kind=OBJECT_KIND_BACKTEST,
+                object_id=state.run_id,
+                display_name=f"{I18n.get('backtest_view_title')} {state.run_id}",
+                summary=(
+                    ("run_id", state.run_id),
+                    ("strategy", state.strategy_name or ""),
+                ),
+                # 可得时点由 read_backtest_snapshot 严格读结果给出（不在此处猜）
+                available_at=None,
+                purpose=Purpose.POST_HOC_EXPLANATION,
+            ),
+            vm.service,
+        )
+
     # --- Status / progress rendering (from VM state) ---
     if no_strategy_error and not state.is_running:
         status_value = I18n.get("backtest_no_strategy")
@@ -408,6 +439,14 @@ def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.
             visible=state.is_running,
             style=AppStyles.danger_button(),  # P2-9: 替换 bgcolor/color 为 danger_button 统一风格
         ),
+    )
+    # R2-I06: 既有回测报告 → 准备研究草稿（无结果时不可发起，不伪造对象）
+    research_button = ft.OutlinedButton(
+        content=I18n.get("agent_research_start"),
+        icon=ft.Icons.SCIENCE_OUTLINED,
+        on_click=safe_on_click(_on_start_research),
+        disabled=on_start_research is None or state.run_id is None,
+        tooltip=I18n.get("agent_research_start_hint"),
     )
 
     # Task 11.3: 回测执行失败 (status_color=="error" 且无结果) → ErrorState 替换结果面板;
@@ -462,7 +501,7 @@ def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.
     return ft.Container(
         content=ft.Column(
             [
-                ft.Row([title_text], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Row([title_text, research_button], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Divider(color=AppColors.DIVIDER),
                 ft.Row([strategy_dropdown, status_text], spacing=16),
                 ft.Row([progress_bar, progress_text, cancel_button], spacing=8),

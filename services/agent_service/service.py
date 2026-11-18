@@ -47,6 +47,8 @@ from core.agent_types import (
     AnswerReceipt,
     ArtifactRead,
     ArtifactReadQuery,
+    BusinessSourceItem,
+    BusinessSourceRegistrationReceipt,
     CommandReceipt,
     CommandRef,
     CostProjection,
@@ -105,6 +107,7 @@ from services.agent_service.comparison import (
     plan_group_stop,
 )
 from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
+from services.agent_service.sources import BusinessSourceService
 from utils.error_classifier import classify_error
 
 
@@ -800,6 +803,28 @@ class AgentService:
                 f"{command.command.user_scope}/{command.session_id}",
             ) from exc
         return await self._dao.save_draft(command)
+
+    async def register_draft_sources(
+        self,
+        *,
+        user_scope: str,
+        session_id: str,
+        draft_revision: int,
+        items: tuple[BusinessSourceItem, ...],
+    ) -> BusinessSourceRegistrationReceipt:
+        """草稿期业务来源登记（R2-I06）：只登记准确源版引用，不发送、不派发。
+
+        登记语义见 ``BusinessSourceService.register_draft_sources``：草稿期不
+        冒充 PIT 已准入（截止界在发送/受理时由用户确认后重判，R21/R24）。
+        """
+
+        self._require_open("register_draft_sources")
+        return await BusinessSourceService(self._dao).register_draft_sources(
+            user_scope=user_scope,
+            session_id=session_id,
+            draft_revision=draft_revision,
+            items=items,
+        )
 
     async def change_session(self, command: SessionChangeCommand) -> CommandReceipt:
         """会话元数据命令（§4.2 ``change_session``）：元数据五动作 + 修订/分支。

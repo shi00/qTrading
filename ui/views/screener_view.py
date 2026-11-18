@@ -62,6 +62,11 @@ from ui.viewmodels.screener_view_model import (
     StreamCard,
 )
 from ui.viewmodels.backtest_view_model import set_pending_prefill
+from ui.viewmodels.business_research_view_model import (
+    OBJECT_KIND_CANDIDATE,
+    OBJECT_KIND_STOCK,
+    BusinessResearchRequest,
+)
 from ui.viewmodels.news_insight_view_model import NewsInsightViewModel
 from ui.viewmodels.sentiment_index_view_model import SentimentIndexViewModel
 from ui.viewmodels.watchlist_view_model import WatchlistViewModel
@@ -1664,6 +1669,7 @@ def _build_screener_sections_card(
     on_section_change: typing.Callable[[ft.ControlEvent], None],
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
+    on_row_research: typing.Callable[[dict], None] | None = None,
 ) -> ft.Container:
     """构建 AI 三分区卡片 (D7-3 + MAJOR-06): 分组页签 + 活动分组的表格/空态.
 
@@ -1705,6 +1711,7 @@ def _build_screener_sections_card(
                     detail_anchor=lambda row: (
                         EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
                     ),
+                    on_row_research=on_row_research,
                     col_widths_key=_VT_COL_WIDTHS_KEY,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
@@ -2170,6 +2177,7 @@ def _build_screener_table_card(
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
     is_realtime: bool,
     interaction_disabled: bool = False,
+    on_row_research: typing.Callable[[dict], None] | None = None,
 ) -> ft.Container:
     """构建表格卡片区 (D7-3: AI 三分区 + 统一分页栏/空态).
 
@@ -2267,6 +2275,7 @@ def _build_screener_table_card(
                     on_section_change=on_section_change,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
+                    on_row_research=None if interaction_disabled else on_row_research,
                 )
             ]
         else:
@@ -2291,6 +2300,7 @@ def _build_screener_table_card(
                         detail_anchor=(
                             lambda row: EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
                         ),
+                        on_row_research=None if interaction_disabled else on_row_research,
                         col_widths_key=_VT_COL_WIDTHS_KEY,
                         on_load_col_widths=on_load_col_widths,
                         on_persist_col_widths=on_persist_col_widths,
@@ -2523,6 +2533,7 @@ def _build_stock_detail_dialog(
     sentiment_state: typing.Any = None,
     sentiment_on_select_day: typing.Callable[..., None] | None = None,
     sentiment_on_cancel: typing.Callable[[], None] | None = None,
+    on_start_research: typing.Callable[[dict], None] | None = None,
 ) -> ft.Control | None:
     """按需构建股票详情对话框."""
     if detail_dialog_data is None:
@@ -2534,6 +2545,7 @@ def _build_stock_detail_dialog(
         open_state=True,
         on_close=on_close,
         on_add_to_watchlist=on_add_to_watchlist,
+        on_start_research=on_start_research,
         column_label_fn=column_label_fn,
         news_state=news_state,
         news_on_generate=news_on_generate,
@@ -2550,6 +2562,7 @@ def ScreenerView(
     initial_strategy: str | None = None,
     active: bool = True,
     stock_filter_request: tuple[str, int] | None = None,
+    on_start_research: typing.Callable[..., None] | None = None,
 ) -> ft.Container:
     """选股视图 (声明式)."""
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
@@ -2796,6 +2809,64 @@ def ScreenerView(
             # N5-3：同步加载近 7 日情绪指数（VM 拉取，View 只发命令）
             name = typing.cast(str | None, src.get("name") if isinstance(src, dict) else None)
             sent_vm.select_stock(ts_code, name)
+
+    def _make_research_request(
+        raw: dict,
+        *,
+        object_kind: str,
+        extra_summary: tuple[tuple[str, str], ...] = (),
+    ) -> BusinessResearchRequest | None:
+        """把当前展示的候选/个股行冻结为准确对象（缺失 ts_code 时不可发起）。"""
+        ts_code = raw.get("ts_code")
+        if not isinstance(ts_code, str) or not ts_code:
+            return None
+        name = raw.get("name")
+        display = f"{name} ({ts_code})" if isinstance(name, str) and name else ts_code
+        summary: list[tuple[str, str]] = [("ts_code", ts_code)]
+        if isinstance(name, str) and name:
+            summary.append(("name", name))
+        for key in ("score", "ai_score", "trade_date"):
+            value = raw.get(key)
+            if value is not None and str(value) != "":
+                summary.append((key, str(value)))
+        summary.extend(extra_summary)
+        # 可得时点取「用户看到该行」的抓取时刻（保守：不声称更早可得，R24）
+        captured_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        return BusinessResearchRequest(
+            source_module="screener",
+            object_kind=object_kind,
+            object_id=ts_code,
+            display_name=display,
+            summary=tuple(summary),
+            available_at=captured_at,
+        )
+
+    def _on_row_research(row_data: dict) -> None:
+        """候选列表行 → 准备研究草稿（只准备不发送；不重跑选股）。"""
+        if on_start_research is None:
+            return
+        raw = row_data.get("_raw") if isinstance(row_data, dict) else None
+        source = raw if isinstance(raw, dict) else row_data
+        extra: list[tuple[str, str]] = []
+        if state.selected_strategy:
+            extra.append(("strategy", str(state.selected_strategy)))
+        if state.mode:
+            extra.append(("screener_mode", str(state.mode)))
+        request = _make_research_request(
+            source,
+            object_kind=OBJECT_KIND_CANDIDATE,
+            extra_summary=tuple(extra),
+        )
+        if request is not None:
+            on_start_research(request)
+
+    def _on_detail_research(stock_data: dict) -> None:
+        """股票详情 → 准备研究草稿（详情现场保持打开，不自动发送）。"""
+        if on_start_research is None:
+            return
+        request = _make_research_request(stock_data, object_kind=OBJECT_KIND_STOCK)
+        if request is not None:
+            on_start_research(request)
 
     async def _do_add_to_watchlist(ts_code: str, stock_name: str) -> None:
         await _execute_add_to_watchlist(wl_vm, _get_page(), ts_code, stock_name)
@@ -3129,6 +3200,7 @@ def ScreenerView(
         is_realtime=is_realtime,
         # ADD-UI-002: HISTORY 加载中仅锁定表格/分页交互, 仍展示上一次完整结果 (身份不预提交)。
         interaction_disabled=state.mode == "HISTORY" and state.loading,
+        on_row_research=_on_row_research if on_start_research is not None else None,
     )
 
     log_card = _build_screener_log_card(
@@ -3173,6 +3245,7 @@ def ScreenerView(
         sentiment_state=sent_state,
         sentiment_on_select_day=sent_vm.select_day,
         sentiment_on_cancel=sent_vm.cancel,
+        on_start_research=_on_detail_research if on_start_research is not None else None,
     )
 
     # SEC-01 gap3: 运行时 AI 外发确认对话框。pending_egress_ack_preview 非空时渲染，
