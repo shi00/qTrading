@@ -27,6 +27,7 @@ from core.agent_types import (
     SkillBudget,
     SkillVersionRef,
     sha256_hex,
+    stable_id,
 )
 from services.agent_service.skills import (
     ManagedSkillStore,
@@ -473,6 +474,157 @@ class TestImportCancellation:
         assert store.current_version(first.skill_id) == 1  # 取消保旧
         assert not (store.root / first.skill_id / "2").exists()
         assert len(dao.assets) == 1
+
+
+class _StaleOnceCatalogDao(FakeCatalogDao):
+    """并发窗口：前 ``stale_reads`` 次列表读返回陈旧空结果，之后如实返回。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stale_reads = 0
+
+    async def list_skill_versions(self, *, user_scope: str, skill_id: str) -> tuple[tuple[int, str], ...]:
+        if self.stale_reads > 0:
+            self.stale_reads -= 1
+            return ()
+        return await super().list_skill_versions(user_scope=user_scope, skill_id=skill_id)
+
+
+class _CommitThenLoseReceiptDao(FakeCatalogDao):
+    """登记已提交但回执丢失（调用方被取消）：只能靠查事实判断是否已登记。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lose_receipt = False
+
+    async def register_skill_asset(self, request: SkillAssetRegistration) -> SkillAssetReceipt:
+        receipt = await super().register_skill_asset(request)
+        if self.lose_receipt:
+            raise asyncio.CancelledError()
+        return receipt
+
+
+class _FactQueryFailingDao(FakeCatalogDao):
+    """发布后登记与事实查询都不可用：模拟「不知道是否已登记」的持久层故障。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_register = True
+        self.list_calls = 0
+
+    async def list_skill_versions(self, *, user_scope: str, skill_id: str) -> tuple[tuple[int, str], ...]:
+        self.list_calls += 1
+        if self.list_calls > 1:  # 判定读正常，登记失败后的核实读失败
+            raise RuntimeError("catalog unavailable")
+        return await super().list_skill_versions(user_scope=user_scope, skill_id=skill_id)
+
+
+class TestCompensationOwnership:
+    """I11：补偿只作用于「本次创建且确认未登记」的版本，复用/已登记/事实未知一律不删。"""
+
+    async def test_registration_failure_removes_only_own_new_version(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        first = await _import(service, _package())
+        dao.fail_register = True
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package(body=b"# Changed"), confirm_update=True)
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert store.version_dir(SkillVersionRef(first.skill_id, 1)).is_dir()
+        assert not store.version_dir(SkillVersionRef(first.skill_id, 2)).exists()
+        assert len(dao.assets) == 1
+
+    async def test_reused_registered_version_survives_registration_failure(self, tmp_path: Path) -> None:
+        store = ManagedSkillStore(str(tmp_path / "skills"))
+        dao = _StaleOnceCatalogDao()
+        service = SkillCatalogService(
+            store,
+            dao,
+            blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
+        )
+        first = await _import(service, _package())
+        dao.stale_reads = 1  # 并发窗口：本次判定读到「无版本」，目录与登记行已由他人落定
+        dao.fail_register = True
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package())
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert store.version_dir(SkillVersionRef(first.skill_id, 1)).is_dir()
+        assert len(dao.assets) == 1
+
+    async def test_concurrent_external_creation_is_not_deleted(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        ref = SkillVersionRef(skill_id=stable_id("skill", ["scope", "demo-skill"]), version=1)
+        other = ManagedSkillStore(str(tmp_path / "skills"))  # 另一进程视角：目录已创建、尚未登记
+        other.publish_package(ref, _package())
+        dao.fail_register = True
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package())
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert store.version_dir(ref).is_dir()
+        assert dao.assets == {}
+
+    async def test_lost_receipt_keeps_registered_version(self, tmp_path: Path) -> None:
+        tickets: list[SkillOperationTicket] = []
+        dao = _CommitThenLoseReceiptDao()
+        service, store = _ticketed_service(tmp_path, dao, tickets)
+        dao.lose_receipt = True
+        with pytest.raises(asyncio.CancelledError) as cancel_info:
+            await _import(service, _package())
+        assert isinstance(cancel_info.value, asyncio.CancelledError)  # 回执丢失按取消传播，R2 不吞
+        ref = SkillVersionRef(stable_id("skill", ["scope", "demo-skill"]), 1)
+        ticket = tickets[0]
+        assert store.version_dir(ref).is_dir()  # 已登记的事实优先于「回执丢了」：不删
+        assert len(dao.assets) == 1
+        assert ticket.registered
+        assert ticket.published_destination is not None
+
+    async def test_fact_query_failure_blocks_compensation(self, tmp_path: Path) -> None:
+        store = ManagedSkillStore(str(tmp_path / "skills"))
+        dao = _FactQueryFailingDao()
+        service = SkillCatalogService(
+            store,
+            dao,
+            blocking_runner=lambda func, *args: asyncio.to_thread(func, *args),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package())
+        assert exc.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        # 事实未知时保守不删：宁可留下待核实的版本，也不误删他人已登记的产物。
+        assert any((tmp_path / "skills").rglob("SKILL.md"))
+
+    async def test_double_import_same_version_rejected_without_touching_other(self, tmp_path: Path) -> None:
+        service, dao, store = _service(tmp_path)
+        first = await _import(service, _package())
+        ref = SkillVersionRef(first.skill_id, 2)
+        other = ManagedSkillStore(str(tmp_path / "skills"))
+        other.publish_package(ref, _package(body=b"# Concurrent"))  # 他人抢占 v2（未登记）
+        with pytest.raises(AgentServiceError) as exc:
+            await _import(service, _package(body=b"# Changed"), confirm_update=True)
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert b"# Concurrent" in store.read_file(ref, "SKILL.md")
+        assert len(dao.assets) == 1
+
+    async def test_successful_import_records_owner_and_registration_facts(self, tmp_path: Path) -> None:
+        tickets: list[SkillOperationTicket] = []
+        service, _ = _ticketed_service(tmp_path, FakeCatalogDao(), tickets)
+        await _import(service, _package())
+        ticket = tickets[0]
+        assert ticket.published_destination is not None
+        assert ticket.reused_destination is None
+        assert ticket.registered
+        assert ticket.state is SkillOperationState.PUBLISHED
+
+    async def test_idempotent_recovery_is_recorded_as_reuse(self, tmp_path: Path) -> None:
+        tickets: list[SkillOperationTicket] = []
+        dao = FakeCatalogDao()
+        service, store = _ticketed_service(tmp_path, dao, tickets)
+        first = await _import(service, _package())
+        dao.assets.clear()  # 目录在、登记行丢失：本次复用既有目录补登记
+        second = await _import(service, _package())
+        ticket = tickets[-1]
+        assert second.version == first.version
+        assert ticket.reused_destination == store.version_dir(SkillVersionRef(first.skill_id, 1))
+        assert ticket.published_destination is None
+        assert store.version_dir(SkillVersionRef(first.skill_id, 1)).is_dir()
 
 
 class TestRoleSkillAssignmentService:
