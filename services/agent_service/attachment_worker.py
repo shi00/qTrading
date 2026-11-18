@@ -282,6 +282,32 @@ def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget, head
 # ---------------------------------------------------------------------------
 
 
+#: JSON 根首个非空白字符的合法集合（RFC 8259：对象/数组/字符串/数字/布尔/null）。
+_JSON_ROOT_STARTERS: Final = frozenset('{["-0123456789tfn')
+
+
+def decode_json_text(data: bytes) -> str:
+    """统一 JSON 文本解码入口（剥离 UTF-8 BOM）；父进程嗅探与 worker 解析共用（I27）。"""
+
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise AttachmentParseError("invalid_encoding", "JSON is not valid UTF-8 text") from exc
+
+
+def validate_json_root(data: bytes) -> None:
+    """JSON 根形态核验：对象/数组与标量根（字符串/数字/布尔/null）均合法。
+
+    父进程内容嗅探与 worker 解析共用同一支持范围与同一错误码/消息，避免两套
+    判据漂移（I27）：合法 BOM 剥离后前导空白不计；非 UTF-8 与非法结构分别
+    报 ``invalid_encoding`` / ``invalid_structure``（与 :func:`_parse_json` 一致）。
+    """
+
+    text = decode_json_text(data).lstrip()
+    if not text or text[0] not in _JSON_ROOT_STARTERS:
+        raise AttachmentParseError("invalid_structure", "JSON structure is invalid")
+
+
 def _json_pointer_tokens(pointer: str) -> list[str]:
     if pointer == "":
         return []
@@ -309,10 +335,7 @@ def _resolve_pointer(document: Any, pointer: str) -> Any:
 
 def _parse_json(data: bytes, selection: Selection, budget: AttachmentBudget) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (JsonPointerRange,))
-    try:
-        text = data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise AttachmentParseError("invalid_encoding", "JSON is not valid UTF-8 text") from exc
+    text = decode_json_text(data)
     try:
         document = parse_preserving_numbers(text)
     except ValueError as exc:

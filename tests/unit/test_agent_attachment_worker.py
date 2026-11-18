@@ -16,7 +16,7 @@ import time
 import zipfile
 import zlib
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from PIL import Image
@@ -1239,6 +1239,126 @@ class TestKindSniffing:
         with pytest.raises(AttachmentWorkerError) as exc:
             detect_attachment_kind("a.xlsx", buffer.getvalue())
         assert exc.value.code == "attachment_type_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# I27：父子统一 JSON 支持范围（BOM / 标量根 / 空键 Pointer / 非法输入）
+# ---------------------------------------------------------------------------
+
+
+def _exact(raw_type: str, lexeme: str) -> dict[str, str]:
+    return {
+        "numeric_encoding": "agent-number-v1",
+        "raw_type": raw_type,
+        "lexeme": lexeme,
+        "exact_decimal": lexeme,
+    }
+
+
+class _FakeBinaryStream:
+    """注入 worker ``main()`` 的 stdin/stdout 替身（只提供 ``buffer``）。"""
+
+    def __init__(self, buffer: io.BytesIO) -> None:
+        self.buffer = buffer
+
+
+def _worker_entry(
+    monkeypatch: pytest.MonkeyPatch, data: bytes, *, kind: AttachmentKind, selection: Selection
+) -> dict[str, Any]:
+    """经真实 worker 模块入口 ``main()`` 提取，返回 wire 响应。
+
+    ``main()`` 即 ``python -m services.agent_service.attachment_worker`` 的入口函数；
+    进程生命周期（真实退出/超时/取消）由 ``TestWorkerLifecycle`` 覆盖，此处按进程内
+    stdio 注入以复用同一判定路径。
+    """
+
+    header = {
+        "schema_version": 1,
+        "kind": kind.value,
+        "selection": to_wire_dict(selection),
+        "csv_header_confirmed": False,
+        "source_digest": hashlib.sha256(data).hexdigest(),
+        "timeout_s": 30.0,
+        "payload_bytes": len(data),
+    }
+    header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    stdout = io.BytesIO()
+    monkeypatch.setattr(sys, "stdin", cast(Any, _FakeBinaryStream(io.BytesIO(header_bytes + b"\n" + data))))
+    monkeypatch.setattr(sys, "stdout", cast(Any, _FakeBinaryStream(stdout)))
+    assert attachment_worker.main() == 0
+    response: dict[str, Any] = json.loads(stdout.getvalue().decode("utf-8"))
+    return response
+
+
+_JSON_ACCEPTED_CASES = [
+    (b'\xef\xbb\xbf{"a": 1}', {"a": _exact("json_integer", "1")}),
+    (b'\xef\xbb\xbf[1, "x"]', [_exact("json_integer", "1"), "x"]),
+    (b"42", _exact("json_integer", "42")),
+    (b'"hi"', "hi"),
+    (b"true", True),
+    (b"null", None),
+]
+
+#: (原始字节, 错误码, 错误消息, 父进程嗅探是否前置拒绝)
+_JSON_REJECTED_CASES = [
+    (b'{"a":', "invalid_structure", "JSON structure is invalid", False),
+    (b"not json", "invalid_structure", "JSON structure is invalid", False),
+    (b"\xef\xbb\xbf", "invalid_structure", "JSON structure is invalid", True),
+    (b"  \n\t", "invalid_structure", "JSON structure is invalid", True),
+    (b"\xff\xfe\x00", "invalid_encoding", "JSON is not valid UTF-8 text", True),
+]
+
+
+class TestJsonSupportParity:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("data", "expected_value"), _JSON_ACCEPTED_CASES)
+    async def test_bom_and_scalar_roots_accepted_by_both_entries(
+        self, monkeypatch: pytest.MonkeyPatch, data: bytes, expected_value: Any
+    ) -> None:
+        selection = Selection(kind="all")
+        parent = await SubprocessAttachmentWorker().extract(_request(data, name="a.json", kind=AttachmentKind.JSON))
+        worker = _worker_entry(monkeypatch, data, kind=AttachmentKind.JSON, selection=selection)
+        assert worker["ok"] is True
+        assert parent.blocks == tuple(worker["result"]["blocks"])
+        assert json.loads(parent.blocks[0])["value"] == expected_value
+
+    @pytest.mark.asyncio
+    async def test_empty_key_pointer_selects_member_in_both_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = b'{"": {"x": 1}, "a": 2}'
+        selection = Selection(kind="limited", ranges=(JsonPointerRange(kind="json_pointer", pointer="/"),))
+        parent = await SubprocessAttachmentWorker().extract(
+            replace(_request(data, name="a.json", kind=AttachmentKind.JSON), selection=selection)
+        )
+        worker = _worker_entry(monkeypatch, data, kind=AttachmentKind.JSON, selection=selection)
+        assert worker["ok"] is True
+        assert parent.blocks == tuple(worker["result"]["blocks"])
+        assert json.loads(parent.blocks[0])["value"] == {"x": _exact("json_integer", "1")}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("data", "code", "message", "sniff_rejects"), _JSON_REJECTED_CASES)
+    async def test_invalid_json_same_verdict_in_both_entries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        data: bytes,
+        code: str,
+        message: str,
+        sniff_rejects: bool,
+    ) -> None:
+        # 父入口（真实提取）与 worker 入口对同一输入同一错误码。
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await SubprocessAttachmentWorker().extract(_request(data, name="a.json", kind=AttachmentKind.JSON))
+        assert exc.value.code == code
+        worker = _worker_entry(monkeypatch, data, kind=AttachmentKind.JSON, selection=Selection(kind="all"))
+        assert worker["ok"] is False
+        assert worker["error"] == {"code": code, "message": message}
+        # 父进程嗅探先行拒绝时沿用同一错误码与消息（协议层归一前）。
+        if sniff_rejects:
+            with pytest.raises(AttachmentWorkerError) as sniffed:
+                detect_attachment_kind("a.json", data)
+            assert (sniffed.value.code, sniffed.value.message) == (code, message)
+        else:
+            # 根起始符合法：父进程不越权判定，结论由 worker 同一判据给出。
+            assert detect_attachment_kind("a.json", data) is AttachmentKind.JSON
 
 
 # ---------------------------------------------------------------------------

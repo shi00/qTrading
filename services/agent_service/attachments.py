@@ -39,7 +39,12 @@ from core.agent_types import (
     decode_selected_range,
     to_wire_dict,
 )
-from services.agent_service.attachment_worker import MAX_HEADER_BYTES, MAX_RESULT_BYTES
+from services.agent_service.attachment_worker import (
+    MAX_HEADER_BYTES,
+    MAX_RESULT_BYTES,
+    AttachmentParseError,
+    validate_json_root,
+)
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 #: 等待子进程被终止后 join 的宽限秒数（先 terminate，再 kill）。
@@ -131,13 +136,16 @@ def detect_attachment_kind(file_name: str, data: bytes) -> AttachmentKind:
     elif candidate is AttachmentKind.XLSX:
         if not _is_xlsx_container(data):
             raise AttachmentWorkerError("attachment_type_mismatch", "content is not an XLSX container")
+    elif candidate is AttachmentKind.JSON:
+        # 与 worker 解析共用同一 JSON 支持范围：BOM 剥离、标量根/对象/数组合法，
+        # 非法输入沿用 worker 的错误码与消息，父子入口结论一致（I27）。
+        try:
+            validate_json_root(data)
+        except AttachmentParseError as exc:
+            raise AttachmentWorkerError(exc.code, exc.message) from exc
     else:
         if b"\x00" in head:
             raise AttachmentWorkerError("attachment_type_mismatch", "content is not UTF-8 text")
-        if candidate is AttachmentKind.JSON:
-            stripped = head.lstrip()
-            if not stripped.startswith((b"{", b"[")):
-                raise AttachmentWorkerError("attachment_type_mismatch", "content is not a JSON document")
     return candidate
 
 
