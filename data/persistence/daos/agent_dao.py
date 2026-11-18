@@ -90,6 +90,7 @@ from core.agent_types import (
     validate_delivery_transition,
     DispatchCloseFact,
     DispatchCloseRequest,
+    DraftPayload,
     DraftReceipt,
     DraftSaveCommand,
     DraftTransferCommand,
@@ -206,11 +207,14 @@ from core.agent_types import (
     decode_source_read_summary,
     decode_source_ref,
     decode_submission_receipt,
+    DraftRead,
+    DraftReadQuery,
     decode_draft_payload,
     decode_draft_receipt,
     decode_draft_transfer_receipt,
     draft_save_input_digest,
     draft_transfer_input_digest,
+    validate_draft_read_query,
     encode_draft_payload,
     encode_draft_receipt,
     encode_draft_transfer_command,
@@ -10369,6 +10373,80 @@ class AgentDao(BaseDao):
                 f"stored draft transfer receipt invalid: {exc.code}",
                 identity,
             ) from exc
+
+    # ------------------------------------------------------------------
+    # F-03-5：草稿读回（R2-I23；§4.2 读取面）
+    # ------------------------------------------------------------------
+
+    async def read_draft(self, query: DraftReadQuery, *, user_scope: str) -> DraftRead:
+        """按会话读回完整草稿正文与未发送选择（只读；零发送、零派发）。
+
+        - ``user_scope`` 为独立关键字参数并作为行过滤条件：跨用户会话不泄露
+          （不在用户域即 ``INPUT_INVALID``，与首读同口径）；
+        - ``query.draft_revision`` 给定时必须等于会话当前草稿版，否则
+          ``REVISION_CONFLICT``——调用方要的那一版已不是当前版，不静默回旧稿；
+        - ``payload=None`` 与「空稿」分列：``cleaned``（清理后正文已删除）、
+          ``transferred``（正文已移出到其他会话）与两者皆否（从未保存）是不同
+          事实，``is_empty`` 只在确有已保存载荷且内容为空时为 True（R21）；
+        - 存行载荷不可解码 → ``OPERATION_UNKNOWN``（fail-closed，坏事实不得读成
+          空稿；与 ``transfer_draft`` 的空位判定同口径）。
+        """
+
+        self._check_engine()
+        identity = f"{user_scope}/{query.session_id}"
+        _require_text_field(user_scope, "user_scope", identity)
+        try:
+            validate_draft_read_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, f"{exc.code}: {exc.field_path}", identity) from exc
+
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    sa.select(
+                        AgentSession.session_id,
+                        AgentSession.draft_revision,
+                        AgentSession.draft_payload,
+                        AgentSession.draft_transfer_ref,
+                        AgentSession.archived,
+                        AgentSession.cleaned_at,
+                    ).where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == query.session_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "session not found in user scope", identity)
+        current_revision = int(row.draft_revision)
+        if query.draft_revision is not None and query.draft_revision != current_revision:
+            raise AgentServiceError(
+                AgentErrorCode.REVISION_CONFLICT,
+                "draft revision does not match current session draft",
+                identity,
+            )
+        payload: DraftPayload | None = None
+        if row.draft_payload is not None:
+            try:
+                payload = decode_draft_payload(row.draft_payload)
+            except AgentValidationError as exc:
+                raise AgentServiceError(
+                    AgentErrorCode.OPERATION_UNKNOWN,
+                    f"persisted draft payload cannot be reliably decoded: {exc.code}",
+                    identity,
+                ) from exc
+        return DraftRead(
+            session_id=row.session_id,
+            draft_revision=current_revision,
+            payload=payload,
+            is_empty=payload is not None and is_empty_draft_payload(payload),
+            cleaned=row.cleaned_at is not None,
+            archived=bool(row.archived),
+            transferred=row.draft_transfer_ref is not None,
+            read_at=_wire_time(datetime.now(UTC)),
+        )
 
     # ------------------------------------------------------------------
     # E-03-4 Skill 资产与角色版本引用（§9.10 / F12-F13）

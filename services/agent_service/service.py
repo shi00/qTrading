@@ -54,6 +54,8 @@ from core.agent_types import (
     CommandRef,
     CostProjection,
     DeliveryRead,
+    DraftRead,
+    DraftReadQuery,
     DraftReceipt,
     DraftSaveCommand,
     DraftTransferCommand,
@@ -80,6 +82,7 @@ from core.agent_types import (
     SourceStopReceipt,
     SubmissionReceipt,
     derive_accept_identity,
+    validate_draft_read_query,
     validate_draft_save_command,
     validate_draft_transfer_command,
     validate_history_query,
@@ -879,6 +882,25 @@ class AgentService:
 
         self._require_open("read_draft_transfer")
         return await self._dao.read_draft_transfer(ref, user_scope=user_scope, target_session_id=target_session_id)
+
+    async def read_draft(self, query: DraftReadQuery, *, user_scope: str) -> DraftRead:
+        """按会话读回完整草稿正文与未发送选择（§4.2 读取面）：只读、不发送。
+
+        边界整份校验（会话非空、稿版从 1 起），失败为 ``INPUT_INVALID`` 且不触达
+        DAO；稿版不符由 DAO 抛 ``REVISION_CONFLICT``（不静默返回旧稿），坏载荷
+        ``OPERATION_UNKNOWN``，服务不把失败读成「无稿/空稿」（R21）。
+        """
+
+        self._require_open("read_draft")
+        try:
+            validate_draft_read_query(query)
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.INPUT_INVALID,
+                f"{exc.code}: {exc.field_path}",
+                f"{user_scope}/{query.session_id}",
+            ) from exc
+        return await self._dao.read_draft(query, user_scope=user_scope)
 
     # ------------------------------------------------------------------
     # 生命周期

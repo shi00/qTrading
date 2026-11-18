@@ -19,6 +19,7 @@ from core.agent_types import (
     CommandRef,
     CommitState,
     DraftPayload,
+    DraftReadQuery,
     DraftReceipt,
     DraftSaveCommand,
     MCPServiceIdentity,
@@ -37,6 +38,7 @@ from core.agent_types import (
     encode_draft_save_command,
     is_empty_draft_payload,
     json_doc,
+    validate_draft_read_query,
     validate_draft_save_command,
 )
 
@@ -267,6 +269,28 @@ class TestDraftPayloadCodec:
     def test_concept_draft_without_cutoff_needs_no_clarification(self) -> None:
         assert draft_cutoff_requires_clarification(_payload(purpose=Purpose.CONCEPT, cutoff=None)) is False
         assert draft_cutoff_requires_clarification(_payload(purpose=Purpose.END_OF_DAY_RESEARCH, cutoff=None)) is True
+
+
+class TestDraftReadQuery:
+    """草稿读回查询边界（R2-I23）：会话非空文本、可选稿版从 1 起。"""
+
+    def test_valid_query_without_revision(self) -> None:
+        validate_draft_read_query(DraftReadQuery(session_id="s-1"))
+
+    def test_valid_query_with_revision(self) -> None:
+        validate_draft_read_query(DraftReadQuery(session_id="s-1", draft_revision=3))
+
+    @pytest.mark.parametrize("session_id", ["", 1, None])
+    def test_session_id_must_be_non_empty_text(self, session_id: Any) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            validate_draft_read_query(DraftReadQuery(session_id=session_id))
+        _expect_error(excinfo, "invalid_identity", "$.session_id")
+
+    @pytest.mark.parametrize("revision", [0, -1, True, "3"])
+    def test_draft_revision_starts_at_one(self, revision: Any) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            validate_draft_read_query(DraftReadQuery(session_id="s-1", draft_revision=revision))
+        _expect_error(excinfo, "invalid_range", "$.draft_revision")
 
     def test_customized_fields_require_baseline_digest(self) -> None:
         with pytest.raises(AgentValidationError) as excinfo:

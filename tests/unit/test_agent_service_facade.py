@@ -23,6 +23,8 @@ from core.agent_types import (
     DeliveryRead,
     DeliveryState,
     DraftPayload,
+    DraftRead,
+    DraftReadQuery,
     DraftReceipt,
     DraftSaveCommand,
     DraftTransferCommand,
@@ -244,6 +246,7 @@ class _FakeDao:
         self.history = object()
         self.stop_receipt = object()
         self.read_mark_receipt = object()
+        self.draft_read = object()
 
     async def accept_request(self, request: AcceptRequest) -> SubmissionReceipt:
         self.calls.append(("accept_request", (request,), {}))
@@ -278,6 +281,12 @@ class _FakeDao:
         if self.error is not None:
             raise self.error
         return _TRANSFER_RECEIPT
+
+    async def read_draft(self, query: DraftReadQuery, *, user_scope: str) -> DraftRead:
+        self.calls.append(("read_draft", (query,), {"user_scope": user_scope}))
+        if self.error is not None:
+            raise self.error
+        return cast(DraftRead, self.draft_read)
 
     async def read_command(self, ref: CommandRef, *, user_scope: str, target_id: str | None = None) -> CommandReceipt:
         self.calls.append(("read_command", (ref,), {"user_scope": user_scope, "target_id": target_id}))
@@ -382,6 +391,31 @@ class TestReadDelegation:
         event_query = EventReadQuery(user_scope="u1", session_id="s1", after_seq=0)
         assert await service.read_events(event_query) is fake.events
         assert [call[0] for call in fake.calls] == ["get_session_read", "read_events"]
+
+    @pytest.mark.asyncio
+    async def test_read_draft_passes_query_and_scope(self) -> None:
+        fake = _FakeDao()
+        query = DraftReadQuery(session_id="s1", draft_revision=2)
+        assert await _service(fake).read_draft(query, user_scope="u1") is fake.draft_read
+        assert fake.calls == [("read_draft", (query,), {"user_scope": "u1"})]
+
+    @pytest.mark.asyncio
+    async def test_read_draft_invalid_query_never_reaches_dao(self) -> None:
+        fake = _FakeDao()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await _service(fake).read_draft(DraftReadQuery(session_id=""), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        assert fake.calls == []
+
+    @pytest.mark.asyncio
+    async def test_read_draft_rejected_after_close(self) -> None:
+        fake = _FakeDao()
+        service = _service(fake)
+        await service.aclose()
+        with pytest.raises(AgentServiceError) as excinfo:
+            await service.read_draft(DraftReadQuery(session_id="s1"), user_scope="u1")
+        assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE
+        assert fake.calls == []
 
     @pytest.mark.asyncio
     async def test_read_delivery_passes_operation_identity(self) -> None:
