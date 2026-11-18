@@ -1771,7 +1771,9 @@ class AcceptRequest:
     source_module: str
     business_request_id: str
     client_command_id: str
-    #: 目标会话草稿预期版（§3.1：0=目标尚不存在）。
+    #: 目标会话草稿预期版（§3.1：0=目标尚不存在）。受理事务持会话行锁与当前
+    #: ``draft_revision`` 作 CAS：用户提交时看到的稿版不是最新即拒绝（R2-I15）；
+    #: ``0`` 仅表示「旧客户端无草稿基线」，只对从未保存过草稿的会话成立。
     expected_revision: int
     node_id: str
     workflow_id: str
@@ -1804,8 +1806,40 @@ class AcceptIdentity:
 #: 重放；v2 覆盖全部受理输入，旧行由 :func:`legacy_accept_intent_digest` 识别。
 ACCEPT_INTENT_DIGEST_VERSION: Final = 2
 
+#: 冻结输入段（R2-I15）：比较组 manifest 的 ``shared`` 块必须齐备的冻结范围——
+#: 正文/模式/用途/cutoff、资料清单、允许历史、角色 Prompt/Skill 引用、MCP 范围与
+#: 输出要求。缺项即「冻结输入不完整」，受理必须拒绝而不是按缺省放行（R21）。
+FROZEN_SHARED_INPUT_KEYS: Final = frozenset(
+    {
+        "text",
+        "mode",
+        "purpose",
+        "cutoff",
+        "source_refs",
+        "visible_history_message_ids",
+        "visible_history_artifact_refs",
+        "role_prompt_refs",
+        "skill_refs",
+        "mcp_scope_digest",
+        "output_requirements",
+    }
+)
 
-def _require_canonical_manifest(payload: object) -> CanonicalJson:
+#: 冻结 manifest 可重复声明的受理身份字段（存在即须与本次请求一致）。
+_FROZEN_MANIFEST_REQUEST_FIELDS: Final = (
+    "user_scope",
+    "session_id",
+    "source_module",
+    "business_request_id",
+    "node_id",
+    "workflow_id",
+    "text",
+    "mode",
+    "purpose",
+)
+
+
+def _require_canonical_manifest(payload: object) -> dict[str, Any]:
     """校验冻结 manifest 为规范 JSON 对象（R2-I14：manifest 内容本身必须校验）。
 
     非规范字节（键序/空白/转义）、重复键与非对象一律拒绝：摘要按规范字节参与计算，
@@ -1819,7 +1853,7 @@ def _require_canonical_manifest(payload: object) -> CanonicalJson:
         _fail("invalid_type", "$.manifest_payload")
     if json_doc(parsed) != payload:
         _fail("non_canonical_json", "$.manifest_payload")
-    return payload
+    return parsed
 
 
 def accept_intent_digest(request: AcceptRequest) -> str:
@@ -1831,6 +1865,7 @@ def accept_intent_digest(request: AcceptRequest) -> str:
     命令键（``client_command_id``）不参与：重传允许换命令键，由命令行摘要单独核对。
     """
 
+    _require_canonical_manifest(request.manifest_payload)
     return sha256_hex(
         json_doc(
             {
@@ -1844,7 +1879,7 @@ def accept_intent_digest(request: AcceptRequest) -> str:
                 "mode": request.mode.value,
                 "purpose": request.purpose.value,
                 "text": request.text,
-                "manifest": _require_canonical_manifest(request.manifest_payload),
+                "manifest": request.manifest_payload,
                 "source_display_name": request.source_display_name,
                 "comparison_group_ref": request.comparison_group_ref,
                 "comparison_lane_ref": request.comparison_lane_ref,
@@ -1852,6 +1887,48 @@ def accept_intent_digest(request: AcceptRequest) -> str:
             }
         )
     )
+
+
+def frozen_manifest_inconsistency(request: AcceptRequest) -> str | None:
+    """冻结 manifest 与本次受理输入不一致的字段路径（R2-I15；一致返回 ``None``）。
+
+    受理把 manifest 视为「本次明确发送的完整冻结范围」：它若重复声明请求身份
+    （用户域/会话/来源/意图键/node/workflow/正文/模式/用途），声明值必须与本请求
+    完全相等；否则同一份冻结输入会与实际受理正文/模式互相矛盾，读回与恢复会把
+    「另一份范围」当成本次依据。比较组 manifest 的 ``shared`` 块还须齐备
+    :data:`FROZEN_SHARED_INPUT_KEYS` 全部冻结段（角色/模型/资料/允许历史/输出要求）
+    并与其 ``text``/``mode``/``purpose`` 一致——缺段或矛盾都不得静默放行（R21）。
+
+    前置：manifest 已由 :func:`_require_canonical_manifest` 校验为规范 JSON 对象。
+    """
+
+    parsed = _require_canonical_manifest(request.manifest_payload)
+    expected_values = {
+        "user_scope": request.user_scope,
+        "session_id": request.session_id,
+        "source_module": request.source_module,
+        "business_request_id": request.business_request_id,
+        "node_id": request.node_id,
+        "workflow_id": request.workflow_id,
+        "text": request.text,
+        "mode": request.mode.value,
+        "purpose": request.purpose.value,
+    }
+    for field in _FROZEN_MANIFEST_REQUEST_FIELDS:
+        if field in parsed and parsed[field] != expected_values[field]:
+            return f"$.manifest_payload.{field}"
+    shared = parsed.get("shared")
+    if shared is None:
+        return None
+    if not isinstance(shared, dict):
+        return "$.manifest_payload.shared"
+    missing = sorted(FROZEN_SHARED_INPUT_KEYS.difference(shared))
+    if missing:
+        return f"$.manifest_payload.shared.{missing[0]}"
+    for field in ("text", "mode", "purpose"):
+        if shared[field] != expected_values[field]:
+            return f"$.manifest_payload.shared.{field}"
+    return None
 
 
 def legacy_accept_intent_digest(manifest_payload: str) -> str:

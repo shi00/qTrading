@@ -30,6 +30,7 @@ from core.agent_types import (
     derive_accept_identity,
     encode_exact_number,
     frozen_command_input_digest,
+    frozen_manifest_inconsistency,
     is_digest,
     json_doc,
     legacy_accept_intent_digest,
@@ -750,3 +751,123 @@ class TestAcceptIntentDigest:
         """旧行公式（仅 manifest 字节）只用于读历史行，且与新摘要不同。"""
         assert legacy_accept_intent_digest(self._MANIFEST) == sha256_hex(self._MANIFEST)
         assert legacy_accept_intent_digest(self._MANIFEST) != accept_intent_digest(self._request())
+
+
+class TestFrozenManifestInconsistency:
+    """R2-I15：冻结 manifest 必须与受理输入一致，比较组冻结段必须齐备。"""
+
+    _MANIFEST = json_doc(
+        {
+            "schema_version": 1,
+            "user_scope": "u1",
+            "session_id": "s1",
+            "source_module": "ui",
+            "business_request_id": "req-1",
+            "node_id": "root",
+            "workflow_id": "wf-1",
+            "mode": "discuss",
+            "purpose": "concept",
+            "text": "研究三家公司",
+        }
+    )
+
+    def _request(self, **overrides: Any) -> AcceptRequest:
+        values: dict[str, Any] = {
+            "user_scope": "u1",
+            "session_id": "s1",
+            "source_module": "ui",
+            "business_request_id": "req-1",
+            "client_command_id": "client-1",
+            "expected_revision": 1,
+            "node_id": "root",
+            "workflow_id": "wf-1",
+            "mode": Mode.DISCUSS,
+            "purpose": Purpose.CONCEPT,
+            "text": "研究三家公司",
+            "manifest_payload": self._MANIFEST,
+            "source_display_name": "用户消息",
+        }
+        values.update(overrides)
+        return AcceptRequest(**values)
+
+    @staticmethod
+    def _shared(**overrides: Any) -> dict[str, Any]:
+        values: dict[str, Any] = {
+            "text": "研究三家公司",
+            "mode": "discuss",
+            "purpose": "concept",
+            "cutoff": None,
+            "source_refs": [],
+            "visible_history_message_ids": [],
+            "visible_history_artifact_refs": [],
+            "role_prompt_refs": [],
+            "skill_refs": [],
+            "mcp_scope_digest": "a" * 64,
+            "output_requirements": {},
+        }
+        values.update(overrides)
+        return values
+
+    def _comparison_request(self, **shared_overrides: Any) -> AcceptRequest:
+        manifest = json_doc(
+            {
+                "schema_version": 1,
+                "group_ref": "group-1",
+                "user_scope": "u1",
+                "session_id": "s1",
+                "source_module": "ui",
+                "input_digest": "b" * 64,
+                "shared": self._shared(**shared_overrides),
+                "lanes": [],
+            }
+        )
+        return self._request(
+            manifest_payload=manifest,
+            comparison_group_ref="group-1",
+            comparison_lane_ref="lane-1",
+        )
+
+    def test_consistent_manifest_has_no_inconsistency(self) -> None:
+        assert frozen_manifest_inconsistency(self._request()) is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("user_scope", "u2"),
+            ("session_id", "s2"),
+            ("source_module", "api"),
+            ("business_request_id", "req-2"),
+            ("node_id", "node-2"),
+            ("workflow_id", "wf-2"),
+            ("text", "另一份正文"),
+            ("mode", "execute"),
+            ("purpose", "decide"),
+        ],
+    )
+    def test_declared_request_field_must_match(self, field: str, value: object) -> None:
+        manifest = json_doc({**decode_doc(self._MANIFEST), field: value})
+        assert frozen_manifest_inconsistency(self._request(manifest_payload=manifest)) == f"$.manifest_payload.{field}"
+
+    def test_undeclared_fields_are_not_inferred(self) -> None:
+        """未声明身份字段的 manifest 不做推断（旧行/最小 manifest 兼容）。"""
+        minimal = json_doc({"schema_version": 1})
+        assert frozen_manifest_inconsistency(self._request(manifest_payload=minimal)) is None
+
+    def test_comparison_manifest_must_carry_full_frozen_sections(self) -> None:
+        assert frozen_manifest_inconsistency(self._comparison_request()) is None
+        manifest = decode_doc(self._comparison_request().manifest_payload)
+        shared = dict(cast(dict[str, Any], manifest["shared"]))
+        shared.pop("role_prompt_refs")
+        broken = json_doc({**manifest, "shared": shared})
+        assert frozen_manifest_inconsistency(self._request(manifest_payload=broken)) == (
+            "$.manifest_payload.shared.role_prompt_refs"
+        )
+
+    def test_comparison_shared_text_must_match_request(self) -> None:
+        assert frozen_manifest_inconsistency(self._comparison_request(text="另一份正文")) == (
+            "$.manifest_payload.shared.text"
+        )
+
+    def test_comparison_shared_must_be_object(self) -> None:
+        manifest = json_doc({"schema_version": 1, "shared": []})
+        assert frozen_manifest_inconsistency(self._request(manifest_payload=manifest)) == ("$.manifest_payload.shared")

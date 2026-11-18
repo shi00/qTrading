@@ -676,14 +676,17 @@ class TestReadSourceIdentityAndFailures:
             assert excinfo.value.code is AgentErrorCode.PERSISTENCE_UNAVAILABLE, tamper
 
 
-def _accept_request(*, text: str = "研究三家公司", command_id: str = "client-msg-1") -> AcceptRequest:
+def _accept_request(
+    *, text: str = "研究三家公司", command_id: str = "client-msg-1", expected_revision: int = 3
+) -> AcceptRequest:
+    # 本组用例的会话种子为 draft_revision=3（其余读取用例默认），受理须与之 CAS 一致（R2-I15）。
     return AcceptRequest(
         user_scope="u1",
         session_id="s1",
         source_module="ui",
         business_request_id="req-msg-1",
         client_command_id=command_id,
-        expected_revision=0,
+        expected_revision=expected_revision,
         node_id="root",
         workflow_id="wf-1",
         mode=Mode.DISCUSS,
