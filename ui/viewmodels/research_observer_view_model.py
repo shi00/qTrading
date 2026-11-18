@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from core.agent_types import (
     AnswerReceipt,
+    ArtifactReadQuery,
     HistoryPage,
     HistoryQuery,
     HistoryRoundSelection,
@@ -56,7 +57,62 @@ class AgentResearchService(Protocol):
 
     async def read_session(self, query: SessionReadQuery, *, user_scope: str) -> SessionRead: ...
 
+    async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> Any: ...
+
     async def answer(self, request: SaveAnswerRequest) -> AnswerReceipt: ...
+
+
+@dataclass(frozen=True)
+class SessionMessageView:
+    """主会话消息的只读投影（``body_ref`` 未载入正文时如实标记不可读）。"""
+
+    message_id: str
+    role: str | None
+    body_text: str | None
+    body_available: bool
+    execution_id: str | None
+    occurred_at: str
+
+
+@dataclass(frozen=True)
+class ExecutionNodeView:
+    """子任务树的只读节点（``depth`` 由父子关系展开计算，展开态由 VM 持久化）。"""
+
+    execution_id: str
+    parent_execution_id: str | None
+    display_state: str
+    goal_coverage: str
+    model_attempt_count: int
+    tool_call_count: int
+    active_ms: int
+    depth: int
+    has_children: bool
+
+
+@dataclass(frozen=True)
+class SessionArtifactView:
+    """首屏成果投影（正文未随首屏返回时 ``body_available=False``，不伪造正文）。"""
+
+    artifact_id: str
+    artifact_version: int
+    artifact_kind: str
+    execution_id: str
+    round_id: str
+    summary: str | None
+    body_text: str | None
+    body_available: bool
+    published_at: str | None
+
+
+@dataclass(frozen=True)
+class LoadedArtifactBody:
+    """按需读取的成果正文（``body_available=False`` 时保留服务端不可用原因）。"""
+
+    key: str
+    body_text: str | None
+    body_available: bool
+    unavailable_reason: str | None
+    truncated: bool
 
 
 @dataclass(frozen=True)
@@ -99,6 +155,16 @@ class ResearchObserverState:
     answer_drafts: tuple[tuple[str, str], ...] = ()
     last_updated_at: str | None = None
     last_answer_delivery_state: str | None = None
+    execution_nodes: tuple[ExecutionNodeView, ...] = ()
+    messages: tuple[SessionMessageView, ...] = ()
+    artifacts: tuple[SessionArtifactView, ...] = ()
+    messages_has_more: bool = False
+    artifacts_has_more: bool = False
+    session_draft_revision: int = 0
+    selected_execution_id: str | None = None
+    collapsed_execution_ids: tuple[str, ...] = ()
+    artifact_bodies: tuple[LoadedArtifactBody, ...] = ()
+    artifact_body_pending_keys: tuple[str, ...] = ()
 
     def draft_for(self, decision_id: str) -> str:
         """读取某决定的答复草稿（收起/重渲染后仍在）。"""
@@ -107,6 +173,20 @@ class ResearchObserverState:
             if key == decision_id:
                 return value
         return ""
+
+    def is_collapsed(self, execution_id: str) -> bool:
+        """子任务节点是否处于收起态（展开态由共享 VM 持久化，切页不丢）。"""
+
+        return execution_id in self.collapsed_execution_ids
+
+    def artifact_body_for(self, artifact_id: str, artifact_version: int) -> LoadedArtifactBody | None:
+        """读取已载入的成果正文；未载入返回 ``None``（未知即未知，不造空正文）。"""
+
+        key = f"{artifact_id}:{artifact_version}"
+        for body in self.artifact_bodies:
+            if body.key == key:
+                return body
+        return None
 
 
 def _extract_question_text(question_payload: str | None) -> str | None:
@@ -147,6 +227,151 @@ def _pending_decisions(read: SessionRead) -> tuple[PendingDecision, ...]:
     return tuple(pending)
 
 
+def _execution_ids(executions: tuple[Any, ...]) -> frozenset[str]:
+    return frozenset(execution.execution_id for execution in executions)
+
+
+def _children_map(executions: tuple[Any, ...]) -> dict[str | None, list[Any]]:
+    """按父子关系分组；父节点不在本页时归一为根（不丢节点、不猜归属）。"""
+
+    ids = _execution_ids(executions)
+    children: dict[str | None, list[Any]] = {}
+    for execution in executions:
+        parent = execution.parent_execution_id if execution.parent_execution_id in ids else None
+        children.setdefault(parent, []).append(execution)
+    return children
+
+
+def _subtree_ids(executions: tuple[Any, ...], root_id: str) -> frozenset[str]:
+    """计算某执行及其全部后代的 id 集（环形父子引用以已访问集合截断）。"""
+
+    children = _children_map(executions)
+    if root_id not in _execution_ids(executions):
+        return frozenset()
+    seen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(child.execution_id for child in children.get(current, ()))
+    return frozenset(seen)
+
+
+def _flatten_executions(
+    executions: tuple[Any, ...],
+    *,
+    collapsed: frozenset[str],
+    only_ids: frozenset[str] | None,
+) -> tuple[ExecutionNodeView, ...]:
+    """把执行父子关系展开为只读树（收起节点隐藏后代；仅展示 ``only_ids`` 子树）。"""
+
+    children = _children_map(executions)
+    ids = _execution_ids(executions)
+    roots = [
+        execution
+        for execution in executions
+        if execution.parent_execution_id not in ids
+        or (only_ids is not None and execution.parent_execution_id not in only_ids)
+    ]
+    if only_ids is not None:
+        roots = [execution for execution in roots if execution.execution_id in only_ids]
+    nodes: list[ExecutionNodeView] = []
+
+    def _walk(execution: Any, depth: int, path: frozenset[str]) -> None:
+        child_nodes = children.get(execution.execution_id, ())
+        visible_children = [child for child in child_nodes if child.execution_id not in path]
+        nodes.append(
+            ExecutionNodeView(
+                execution_id=execution.execution_id,
+                parent_execution_id=execution.parent_execution_id,
+                display_state=execution.display_state,
+                goal_coverage=execution.goal_coverage,
+                model_attempt_count=execution.model_attempt_count,
+                tool_call_count=execution.tool_call_count,
+                active_ms=execution.active_ms,
+                depth=depth,
+                has_children=bool(visible_children),
+            )
+        )
+        if execution.execution_id in collapsed:
+            return
+        for child in visible_children:
+            _walk(child, depth + 1, path | {execution.execution_id})
+
+    for root in roots:
+        _walk(root, 0, frozenset())
+    return tuple(nodes)
+
+
+def _project_messages(
+    messages: tuple[Any, ...],
+    *,
+    only_ids: frozenset[str] | None,
+) -> tuple[SessionMessageView, ...]:
+    """消息只读投影：选中子任务时只保留该子树消息，会话级消息（无 execution）始终保留。"""
+
+    projected: list[SessionMessageView] = []
+    for item in messages:
+        if only_ids is not None and item.execution_id is not None and item.execution_id not in only_ids:
+            continue
+        role = getattr(item.role, "value", item.role)
+        projected.append(
+            SessionMessageView(
+                message_id=item.message_id,
+                role=role,
+                body_text=item.body_text,
+                body_available=item.body_text is not None,
+                execution_id=item.execution_id,
+                occurred_at=item.occurred_at,
+            )
+        )
+    return tuple(projected)
+
+
+def _project_artifacts(
+    artifacts: tuple[Any, ...],
+    *,
+    only_ids: frozenset[str] | None,
+) -> tuple[SessionArtifactView, ...]:
+    """成果只读投影（成果必属某执行；选中子任务时只保留该子树成果）。"""
+
+    projected: list[SessionArtifactView] = []
+    for item in artifacts:
+        if only_ids is not None and item.execution_id not in only_ids:
+            continue
+        projected.append(
+            SessionArtifactView(
+                artifact_id=item.artifact_id,
+                artifact_version=item.artifact_version,
+                artifact_kind=item.artifact_kind,
+                execution_id=item.execution_id,
+                round_id=item.round_id,
+                summary=item.summary,
+                body_text=item.body_text,
+                body_available=item.body_text is not None,
+                published_at=item.published_at,
+            )
+        )
+    return tuple(projected)
+
+
+def _normalized_selection(executions: tuple[Any, ...], selected: str | None) -> str | None:
+    """选中项在新快照中不存在时回落为整会话视图（不展示不可解释的空子树）。"""
+
+    if selected is None:
+        return None
+    return selected if selected in _execution_ids(executions) else None
+
+
+def _normalized_collapsed(executions: tuple[Any, ...], collapsed: tuple[str, ...]) -> tuple[str, ...]:
+    """收起集合按当前快照裁剪（已消失的执行不长期占用状态）。"""
+
+    ids = _execution_ids(executions)
+    return tuple(sorted(execution_id for execution_id in collapsed if execution_id in ids))
+
+
 class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState]):
     """壳层公共研究观察层 VM（共享实例；观察不控制执行）。"""
 
@@ -160,6 +385,10 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         self._service = service
         self._user_scope = user_scope
         self._session_key: int | None = id(service) if service is not None else None
+        # 原始首读投影：展开/收起/选中只重算展示，不重复读取、不触碰执行。
+        self._raw_executions: tuple[Any, ...] = ()
+        self._raw_messages: tuple[Any, ...] = ()
+        self._raw_artifacts: tuple[Any, ...] = ()
         self._state = ResearchObserverState(
             available=service is not None,
             unavailable_reason_key=unavailable_reason_key if service is None else "",
@@ -193,27 +422,49 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             )
             session_id = next((hit.session_id for hit in history.hits), None)
             if session_id is None:
+                self._raw_executions = ()
+                self._raw_messages = ()
+                self._raw_artifacts = ()
                 self._set_state(
                     loading=False,
                     session_id=None,
                     session_title=None,
                     executions=(),
+                    execution_nodes=(),
+                    messages=(),
+                    artifacts=(),
+                    messages_has_more=False,
+                    artifacts_has_more=False,
+                    session_draft_revision=0,
+                    artifact_body_pending_keys=(),
                     decisions=(),
                     pending_count=0,
                     last_updated_at=history.read_moment,
                 )
                 return
             read = await self._service.read_session(
-                SessionReadQuery(session_id=session_id, limit=20),
+                SessionReadQuery(session_id=session_id, limit=50),
                 user_scope=self._user_scope,
             )
         except asyncio.CancelledError:
+            # R2：取消必须传播；先释放 loading，避免会话存续期间刷新永久被拦截。
+            self._set_state(loading=False)
             raise
         except Exception as e:  # facade 已脱敏的类型化错误；未知错误如实报码，不伪装空结果
+            # 断线不清空既有快照：保留上次已知状态，只如实报错（R21）。
             self._set_state(loading=False, last_error_code=self._error_code(e))
             return
 
         pending = _pending_decisions(read)
+        previous_session_id = self._state.session_id
+        session_changed = previous_session_id is not None and previous_session_id != session_id
+        self._raw_executions = tuple(read.executions)
+        self._raw_messages = tuple(read.messages.items)
+        self._raw_artifacts = tuple(read.artifacts.items)
+        selected = _normalized_selection(self._raw_executions, self._state.selected_execution_id)
+        collapsed = _normalized_collapsed(self._raw_executions, self._state.collapsed_execution_ids)
+        artifact_keys = {f"{item.artifact_id}:{item.artifact_version}" for item in self._raw_artifacts}
+        pending_keys = tuple(key for key in self._state.artifact_body_pending_keys if key in artifact_keys)
         self._set_state(
             loading=False,
             session_id=session_id,
@@ -222,7 +473,128 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             decisions=pending,
             pending_count=len(pending),
             last_updated_at=read.summary.updated_at,
+            messages_has_more=bool(read.messages.has_more),
+            artifacts_has_more=bool(read.artifacts.has_more),
+            session_draft_revision=read.summary.draft_revision,
+            selected_execution_id=selected,
+            collapsed_execution_ids=collapsed,
+            artifact_body_pending_keys=pending_keys,
+            # 换会话时不复用上一会话的正文缓存（同 id 跨会话也不冒充当前会话成果）
+            artifact_bodies=() if session_changed else self._state.artifact_bodies,
+            **self._projection_changes(selected=selected, collapsed=collapsed),
         )
+
+    # ------------------------------------------------------------------
+    # 只读观察位置命令（不派发、不控制执行）
+    # ------------------------------------------------------------------
+
+    def toggle_execution(self, execution_id: str) -> None:
+        """展开/收起子任务节点（纯展示状态；共享 VM 持有，切页不丢）。"""
+
+        if execution_id not in _execution_ids(self._raw_executions):
+            return
+        collapsed = set(self._state.collapsed_execution_ids)
+        if execution_id in collapsed:
+            collapsed.discard(execution_id)
+        else:
+            collapsed.add(execution_id)
+        normalized = _normalized_collapsed(self._raw_executions, tuple(collapsed))
+        self._set_state(
+            collapsed_execution_ids=normalized,
+            **self._projection_changes(
+                selected=self._state.selected_execution_id,
+                collapsed=normalized,
+            ),
+        )
+
+    def select_execution(self, execution_id: str | None) -> None:
+        """改变观察位置（整会话 / 某执行子树）；只改展示过滤，不改变研究执行。"""
+
+        selected = _normalized_selection(self._raw_executions, execution_id)
+        self._set_state(
+            selected_execution_id=selected,
+            **self._projection_changes(
+                selected=selected,
+                collapsed=self._state.collapsed_execution_ids,
+            ),
+        )
+
+    async def load_artifact(
+        self,
+        artifact_id: str,
+        artifact_version: int,
+        execution_id: str,
+        round_id: str,
+    ) -> None:
+        """按需读取成果正文（只读 ``read_artifact``；不重派发、不推进任何执行）。"""
+
+        if self._service is None or not self._state.available:
+            return
+        key = f"{artifact_id}:{artifact_version}"
+        if self._state.artifact_body_for(artifact_id, artifact_version) is not None:
+            return
+        if key in self._state.artifact_body_pending_keys:
+            return
+        self._track_inflight_cancellable()
+        self._set_state(
+            artifact_body_pending_keys=(*self._state.artifact_body_pending_keys, key),
+            error_key=None,
+            last_error_code=None,
+        )
+        try:
+            read = await self._service.read_artifact(
+                ArtifactReadQuery(
+                    artifact_id=artifact_id,
+                    artifact_version=artifact_version,
+                    execution_id=execution_id,
+                    round_id=round_id,
+                ),
+                user_scope=self._user_scope,
+            )
+        except asyncio.CancelledError:
+            # R2：取消必须传播；先移除在途标记，避免该成果永久停在「读取中」。
+            self._set_state(
+                artifact_body_pending_keys=tuple(
+                    pending for pending in self._state.artifact_body_pending_keys if pending != key
+                )
+            )
+            raise
+        except Exception as e:
+            self._set_state(
+                artifact_body_pending_keys=tuple(
+                    pending for pending in self._state.artifact_body_pending_keys if pending != key
+                ),
+                last_error_code=self._error_code(e),
+            )
+            return
+        loaded = LoadedArtifactBody(
+            key=key,
+            body_text=read.body_text,
+            body_available=bool(read.body_available),
+            unavailable_reason=getattr(read, "unavailable_reason", None),
+            truncated=getattr(read, "next_cursor", None) is not None,
+        )
+        bodies = tuple(body for body in self._state.artifact_bodies if body.key != key)
+        self._set_state(
+            artifact_bodies=(*bodies, loaded),
+            artifact_body_pending_keys=tuple(
+                pending for pending in self._state.artifact_body_pending_keys if pending != key
+            ),
+        )
+
+    def _projection_changes(self, *, selected: str | None, collapsed: tuple[str, ...]) -> dict[str, Any]:
+        """按观察位置重算树/消息/成果（纯函数投影，不发任何请求）。"""
+
+        only_ids = _subtree_ids(self._raw_executions, selected) if selected is not None else None
+        return {
+            "execution_nodes": _flatten_executions(
+                self._raw_executions,
+                collapsed=frozenset(collapsed),
+                only_ids=only_ids,
+            ),
+            "messages": _project_messages(self._raw_messages, only_ids=only_ids),
+            "artifacts": _project_artifacts(self._raw_artifacts, only_ids=only_ids),
+        }
 
     def set_answer_draft(self, decision_id: str, text: str) -> None:
         """记录答复草稿（收起观察层不清稿）。"""
