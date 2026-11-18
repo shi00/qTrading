@@ -6493,18 +6493,23 @@ def resolve_skill_selection(
     """实际能力集合：主 = 默认 ∪ 手选，子 = 仅自身默认（不继承主手选）。
 
     只在启用集合内取交集；空集合确实为空（不解释为「全部」）。
+    同一 ``skill_id`` 在候选中出现多个不同版本即冲突（F28）：默认与手选互相冲突、
+    手选内部冲突均拒绝，不静默任选其一；冲突时不产出部分选择。
     """
 
     enabled_keys = _skill_keys(enabled)
     candidates = list(defaults)
     if not is_child:
         candidates.extend(hand_picked)
-    chosen: dict[tuple[str, int], SkillVersionRef] = {}
+    chosen: dict[str, int] = {}
     for ref in candidates:
-        key = (ref.skill_id, ref.version)
-        if key in enabled_keys:
-            chosen[key] = ref
-    return tuple(chosen[key] for key in sorted(chosen))
+        if (ref.skill_id, ref.version) not in enabled_keys:
+            continue
+        existing_version = chosen.get(ref.skill_id)
+        if existing_version is not None and existing_version != ref.version:
+            _fail("skill_version_conflict", "$.agent.skills")
+        chosen[ref.skill_id] = ref.version
+    return tuple(SkillVersionRef(skill_id=skill_id, version=chosen[skill_id]) for skill_id in sorted(chosen))
 
 
 # ---------------------------------------------------------------------------
