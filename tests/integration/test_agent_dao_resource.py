@@ -11,7 +11,11 @@
 - ``release_resource``：完整匹配（旧票不释新票）、exit_verified 分态
   （verified 释放容量 / unverified 容量保留不放空）、reserved→confirmed 升级；
 - ``record_usage_counters``：绝对累计 GREATEST 合并（R22 乱序最终取最大值）、
-  重复 checkpoint 幂等零写回、execution 缺失 INPUT_INVALID。
+  重复 checkpoint 幂等零写回、execution 缺失 INPUT_INVALID；
+- ``admit_usage``：先准入后发起（检视 R2-I33）——按执行树累计 100/200 额度与
+  60/15 分钟活跃下界的准入、超额拒绝不落计数（不虚增）、重启后读持久事实
+  （不重置）、与 GREATEST checkpoint 同向不回退；``claim_resource`` 同样在
+  guard 行锁内读取累计额度并拒新票据。
 
 依赖 ``real_embedded_pg`` fixture（临时目录隔离，符合隔离本地验证授权）。
 """
@@ -36,6 +40,8 @@ from core.agent_types import (
     ResourceReleaseRequest,
     ResourceSlotKind,
     ResourceTicket,
+    UsageAdmissionRequest,
+    UsageBudgetLimits,
     UsageCounterUpdate,
     validate_resource_claim_request,
 )
@@ -1037,3 +1043,151 @@ class TestUsageCounters:
                 )
             )
         _expect_error(excinfo, AgentErrorCode.INPUT_INVALID)
+
+
+# ------------------------------------------------------------------
+# admit_usage（先准入后发起 + 累计额度，检视 R2-I33）
+# ------------------------------------------------------------------
+
+
+async def _seed_root_and_leaf(dao: AgentDao, *, leaf_id: str = "leaf-1") -> None:
+    await _seed_session(dao, "u1", "s1")
+    await _seed_execution(dao, "u1", "s1", "root-1", "root", "root")
+    await _seed_execution(dao, "u1", "s1", leaf_id, "leaf", "node-a", parent_execution_id="root-1")
+
+
+async def _counters(dao: AgentDao, execution_id: str) -> tuple[int, int, int]:
+    engine = create_test_engine(dao.engine.url.render_as_string(hide_password=False))  # type: ignore[union-attr]  # 测试直读
+    try:
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT model_attempt_count, tool_call_count, active_ms, revision "
+                        "FROM agent_execution WHERE user_scope = 'u1' AND execution_id = :execution_id"
+                    ).bindparams(execution_id=execution_id)
+                )
+            ).first()
+    finally:
+        await engine.dispose()
+    assert row is not None
+    return int(row.model_attempt_count), int(row.tool_call_count), int(row.active_ms)
+
+
+def _admission(execution_id: str = "root-1", *, model: int = 1, tools: int = 0) -> UsageAdmissionRequest:
+    return UsageAdmissionRequest(
+        user_scope="u1",
+        execution_id=execution_id,
+        model_attempts=model,
+        tool_calls=tools,
+    )
+
+
+class TestAdmitUsage:
+    async def test_charge_lands_counters_and_accumulates(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_root_and_leaf(dao)
+        limits = UsageBudgetLimits()
+
+        first = await dao.admit_usage(_admission(model=2, tools=1), limits=limits)
+        assert (first.model_attempt_count, first.tool_call_count) == (2, 1)
+        assert first.remaining_model_attempts == 98
+        assert first.remaining_tool_calls == 199
+
+        second = await dao.admit_usage(_admission(model=3), limits=limits)
+        assert (second.model_attempt_count, second.tool_call_count) == (5, 1)
+        assert await _counters(dao, "root-1") == (5, 1, 0)
+
+    async def test_tree_cumulative_limit_blocks_without_inflation(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_root_and_leaf(dao)
+        limits = UsageBudgetLimits(model_attempt_limit=5, tool_call_limit=5)
+
+        await dao.admit_usage(_admission("root-1", model=3), limits=limits)
+        await dao.admit_usage(_admission("leaf-1", model=2), limits=limits)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.admit_usage(_admission("leaf-1", model=1), limits=limits)
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "model attempt budget (5)" in excinfo.value.sanitized_message
+        # 被拒的入口未发生：树内计数保持 5，不虚增。
+        assert (await _counters(dao, "root-1"))[0] + (await _counters(dao, "leaf-1"))[0] == 5
+
+    async def test_admission_reads_persisted_facts_after_restart(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_root_and_leaf(dao)
+        limits = UsageBudgetLimits(model_attempt_limit=4)
+        await dao.record_usage_counters(
+            UsageCounterUpdate(
+                user_scope="u1", execution_id="leaf-1", model_attempt_count=4, tool_call_count=0, active_ms=0
+            )
+        )
+        # 模拟重启：另一引擎/DAO 实例只凭持久事实判定，不重置也不虚增。
+        restarted = AgentDao(create_test_engine(real_embedded_pg.url))
+        with pytest.raises(AgentServiceError) as excinfo:
+            await restarted.admit_usage(_admission("root-1", model=1), limits=limits)
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert await _counters(dao, "root-1") == (0, 0, 0)
+        await restarted.engine.dispose()  # type: ignore[union-attr]  # 测试内释放自建引擎
+
+    async def test_leaf_and_root_active_limits_diverge(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_root_and_leaf(dao)
+        limits = UsageBudgetLimits(total_active_ms_limit=1000, leaf_active_ms_limit=100)
+        await dao.record_usage_counters(
+            UsageCounterUpdate(
+                user_scope="u1", execution_id="leaf-1", model_attempt_count=0, tool_call_count=0, active_ms=100
+            )
+        )
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.admit_usage(_admission("leaf-1"), limits=limits)
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "active time budget (100 ms)" in excinfo.value.sanitized_message
+        # 同一活跃下界对总执行（1000 ms 上限）仍可准入。
+        fact = await dao.admit_usage(_admission("root-1"), limits=limits)
+        assert fact.remaining_active_ms == 1000
+
+    async def test_record_after_charge_never_lowers(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_root_and_leaf(dao)
+        await dao.admit_usage(_admission(model=3), limits=UsageBudgetLimits())
+        # 后到的偏低绝对 checkpoint 不回退（R22：GREATEST 与增量同向）。
+        fact = await dao.record_usage_counters(
+            UsageCounterUpdate(
+                user_scope="u1", execution_id="root-1", model_attempt_count=2, tool_call_count=0, active_ms=0
+            )
+        )
+        assert fact.model_attempt_count == 3
+        assert await _counters(dao, "root-1") == (3, 0, 0)
+
+
+class TestClaimAgainstUsageBudget:
+    async def test_claim_blocked_after_model_attempt_budget_exhausted(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_root_and_leaf(dao)
+        limits = UsageBudgetLimits(model_attempt_limit=3)
+        await dao.record_usage_counters(
+            UsageCounterUpdate(
+                user_scope="u1", execution_id="root-1", model_attempt_count=3, tool_call_count=0, active_ms=0
+            )
+        )
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(_total_request(slot_id="slot-exhausted"), usage_limits=limits)
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "model attempt budget (3)" in excinfo.value.sanitized_message
+
+    async def test_claim_blocked_after_root_active_time_exhausted(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_root_and_leaf(dao)
+        limits = UsageBudgetLimits(total_active_ms_limit=500)
+        await dao.record_usage_counters(
+            UsageCounterUpdate(
+                user_scope="u1", execution_id="root-1", model_attempt_count=0, tool_call_count=0, active_ms=500
+            )
+        )
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.claim_resource(
+                _leaf_request(execution_id="leaf-1", slot_id="slot-leaf-exhausted"),
+                usage_limits=limits,
+            )
+        _expect_error(excinfo, AgentErrorCode.BUDGET_BLOCKED)
+        assert "active time budget (500 ms)" in excinfo.value.sanitized_message

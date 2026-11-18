@@ -9,7 +9,10 @@
 - ``dispatch_closed`` 后拒绝新票，既有同票重放仍返回原票据；
 - 票据 ``run_epoch`` 取所属轮次 ``agent_round.run_epoch``，且参与重放同票判定；
 - 全局上限（检视 D27）：guard 行锁内跨 user_scope 统计开放票据，全局 2 总/4 叶
-  与每会话 1 总/每总 3 叶同时生效，受阻原因可区分；同票重放不重新计数。
+  与每会话 1 总/每总 3 叶同时生效，受阻原因可区分；同票重放不重新计数；
+- 使用额度（检视 R2-I33）：新票据前在 guard 行锁内读取执行树持久累计计数，
+  已达 D05 额度（100 模型请求 / 200 工具调用 / 总执行 60 分钟活跃下界）即
+  ``BUDGET_BLOCKED``，且受阻原因可区分；同票重放不受额度影响。
 
 真实行锁竞争由 sidecar PG 集成测试
 （``tests/integration/test_agent_dao_resource.py``）覆盖；本文件用 capture conn
@@ -26,7 +29,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from core.agent_types import AgentErrorCode, AgentServiceError, ResourceClaimRequest, ResourceSlotKind
+from core.agent_types import (
+    AgentErrorCode,
+    AgentServiceError,
+    ResourceClaimRequest,
+    ResourceSlotKind,
+    UsageAdmissionRequest,
+    UsageBudgetLimits,
+)
 from data.persistence.daos.agent_dao import AgentDao
 
 pytestmark = pytest.mark.unit
@@ -68,6 +78,9 @@ class _ClaimConn:
         open_global_total: int = 0,
         open_global_leaf: int = 0,
         fenced_sessions: list[str] | None = None,
+        tree_attempts: int = 0,
+        tree_calls: int = 0,
+        root_active_ms: int = 0,
     ) -> None:
         self.execution = execution
         self.round_row = round_row
@@ -77,6 +90,9 @@ class _ClaimConn:
         self.open_global_total = open_global_total
         self.open_global_leaf = open_global_leaf
         self.fenced_sessions = [] if fenced_sessions is None else fenced_sessions
+        self.tree_attempts = tree_attempts
+        self.tree_calls = tree_calls
+        self.root_active_ms = root_active_ms
         self.statements: list[str] = []
         self.insert_values: list[dict[str, Any]] = []
 
@@ -88,6 +104,15 @@ class _ClaimConn:
         if "INSERT INTO agent_resource_slot" in sql:
             self.insert_values.append(dict(statement.compile().params))
             return _Result()
+        if "SUM(x.model_attempt_count)" in sql:
+            # 使用额度执行树聚合（guard 行锁内的持久累计读取）。
+            return _Result(
+                first=SimpleNamespace(
+                    model_attempt_count=self.tree_attempts,
+                    tool_call_count=self.tree_calls,
+                    root_active_ms=self.root_active_ms,
+                )
+            )
         if "FROM agent_execution" in sql:
             return _Result(first=self.execution)
         if "FROM agent_round" in sql:
@@ -349,3 +374,152 @@ class TestClaimAuthorityLockShape:
         guard_index = conn._index_of("agent_resource_slot.slot_id")
         slot_index = conn._index_of("agent_resource_slot.slot_kind")
         assert guard_index < conn._index_of("FROM agent_execution") < slot_index
+
+
+class TestClaimUsageBudgetGate:
+    """检视 R2-I33：累计使用额度参与准入（guard 行锁内读持久累计）。"""
+
+    async def test_leaf_blocked_when_tree_model_attempt_budget_exhausted(self) -> None:
+        conn = _ClaimConn(
+            execution=_execution(execution_kind="leaf", node_id="node-a"),
+            round_row=_round(),
+            tree_attempts=100,
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_resource(_request(node_id="node-a", slot_kind=ResourceSlotKind.LEAF))
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "model attempt budget" in exc.value.sanitized_message
+        assert conn._ticket_inserts() == []
+
+    async def test_total_blocked_when_tree_tool_call_budget_exhausted(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round(), tree_calls=200)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_resource(_request())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "tool call budget" in exc.value.sanitized_message
+        assert conn._ticket_inserts() == []
+
+    async def test_blocked_when_root_active_time_lower_bound_reaches_limit(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round(), root_active_ms=60 * 60 * 1000)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_resource(_request())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "active time budget" in exc.value.sanitized_message
+        assert conn._ticket_inserts() == []
+
+    async def test_injected_limits_override_d05_defaults(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round(), tree_attempts=5)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_resource(
+                _request(),
+                usage_limits=UsageBudgetLimits(model_attempt_limit=5),
+            )
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "model attempt budget (5)" in exc.value.sanitized_message
+
+    async def test_usage_gate_runs_after_capacity_and_before_ticket_write(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round())
+        await _dao(conn).claim_resource(_request())
+        usage_index = conn._index_of("SUM(x.model_attempt_count)")
+        insert_indexes = [i for i, sql in enumerate(conn.statements) if "INSERT INTO agent_resource_slot" in sql]
+        assert conn._index_of(":open_kind") < usage_index < insert_indexes[-1]
+
+    async def test_replay_at_exhausted_budget_returns_original_without_usage_read(self) -> None:
+        conn = _ClaimConn(execution=_execution(), round_row=_round(), slot_row=_slot(), tree_attempts=100)
+        ticket = await _dao(conn).claim_resource(_request())
+        assert ticket.slot_id == "slot-1"
+        assert "SUM(x.model_attempt_count)" not in "".join(conn.statements)
+        assert conn._ticket_inserts() == []
+
+
+class TestAdmitUsageGate:
+    """``admit_usage``：先准入后发起的单事务（检视 R2-I33）。"""
+
+    @staticmethod
+    def _usage_execution(
+        *,
+        kind: str = "root",
+        attempts: int = 0,
+        calls: int = 0,
+        active_ms: int = 0,
+    ) -> Any:
+        return SimpleNamespace(
+            execution_kind=kind,
+            model_attempt_count=attempts,
+            tool_call_count=calls,
+            active_ms=active_ms,
+        )
+
+    def _admission(self, **overrides: Any) -> Any:
+        values: dict[str, Any] = {
+            "user_scope": "u1",
+            "execution_id": "exec-1",
+            "model_attempts": 1,
+            "tool_calls": 0,
+        }
+        values.update(overrides)
+        return UsageAdmissionRequest(**values)
+
+    async def test_charge_lands_counters_and_returns_remaining(self) -> None:
+        conn = _ClaimConn(execution=self._usage_execution())
+        fact = await _dao(conn).admit_usage(self._admission(model_attempts=2, tool_calls=3))
+        assert (fact.model_attempt_count, fact.tool_call_count) == (2, 3)
+        assert fact.remaining_model_attempts == 98
+        assert fact.remaining_tool_calls == 197
+        assert fact.remaining_active_ms == 60 * 60 * 1000
+        assert any(sql.startswith("UPDATE agent_execution") for sql in conn.statements)
+
+    async def test_blocked_charge_writes_nothing(self) -> None:
+        conn = _ClaimConn(execution=self._usage_execution(attempts=99), tree_attempts=100)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).admit_usage(self._admission())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "model attempt budget (100)" in exc.value.sanitized_message
+        assert not any(sql.startswith("UPDATE agent_execution") for sql in conn.statements)
+
+    async def test_exact_limit_boundary_allows_last_charge(self) -> None:
+        # 树累计 99 + 增量 1 = 100（== 上限）放行；再加 1 才拒。
+        conn = _ClaimConn(execution=self._usage_execution(attempts=99), tree_attempts=99)
+        fact = await _dao(conn).admit_usage(self._admission())
+        assert fact.model_attempt_count == 100
+        assert fact.remaining_model_attempts == 0
+
+        blocked = _ClaimConn(execution=self._usage_execution(attempts=100), tree_attempts=100)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(blocked).admit_usage(self._admission())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+
+    async def test_root_active_lower_bound_blocks_new_entry(self) -> None:
+        conn = _ClaimConn(execution=self._usage_execution(active_ms=60 * 60 * 1000))
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).admit_usage(self._admission())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "active time budget (3600000 ms)" in exc.value.sanitized_message
+
+    async def test_leaf_uses_15_minute_active_limit(self) -> None:
+        conn = _ClaimConn(execution=self._usage_execution(kind="leaf", active_ms=15 * 60 * 1000))
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).admit_usage(self._admission())
+        assert exc.value.code is AgentErrorCode.BUDGET_BLOCKED
+        assert "active time budget (900000 ms)" in exc.value.sanitized_message
+
+    async def test_zero_delta_is_probe_only_without_write(self) -> None:
+        conn = _ClaimConn(
+            execution=self._usage_execution(attempts=7, calls=8, active_ms=1000), tree_attempts=7, tree_calls=8
+        )
+        fact = await _dao(conn).admit_usage(self._admission(model_attempts=0, tool_calls=0))
+        assert (fact.model_attempt_count, fact.tool_call_count, fact.active_ms) == (7, 8, 1000)
+        assert fact.remaining_model_attempts == 93
+        assert not any(sql.startswith("UPDATE agent_execution") for sql in conn.statements)
+
+    async def test_negative_delta_rejected(self) -> None:
+        conn = _ClaimConn(execution=self._usage_execution())
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).admit_usage(self._admission(model_attempts=-1))
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID
+
+    async def test_missing_execution_invalid(self) -> None:
+        conn = _ClaimConn(execution=None)
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).admit_usage(self._admission())
+        assert exc.value.code is AgentErrorCode.INPUT_INVALID

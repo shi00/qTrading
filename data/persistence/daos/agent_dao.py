@@ -185,6 +185,9 @@ from core.agent_types import (
     SubmissionReceipt,
     ToolGrantFact,
     ToolGrantState,
+    UsageAdmissionFact,
+    UsageAdmissionRequest,
+    UsageBudgetLimits,
     UsageCounterFact,
     UsageCounterUpdate,
     UsageSummary,
@@ -326,6 +329,43 @@ WHERE s.slot_kind = 'leaf'
   AND x.user_scope = :user_scope
   AND x.execution_id IN (SELECT execution_id FROM down)
   AND (s.released_at IS NULL OR s.release_verified = false)
+"""
+
+
+#: 使用额度（累计计数）按执行树读取：先向上递归定 root，再向下收集整树，
+#: 汇总模型尝试/工具调用累计值与本总执行（root）自身活跃下界。
+#: D05 上限口径为「每总执行 100 次模型请求 / 200 次工具调用」与「活跃总/子时限
+#: 60/15 分钟」——是**累计次数与活跃时长**，不是日历滚动窗口，故不引入
+#: 时区/窗口边界；重启后判定完全依赖本查询读到的持久事实（不重置、不虚增）。
+#: 参数化文本 SQL（R4：绑定参数，无拼接）。
+_USAGE_TREE_BUDGET_SQL: Final = """
+WITH RECURSIVE up(execution_id, parent_execution_id) AS (
+    SELECT e.execution_id, e.parent_execution_id
+    FROM agent_execution e
+    WHERE e.user_scope = :user_scope AND e.execution_id = :execution_id
+    UNION ALL
+    SELECT e.execution_id, e.parent_execution_id
+    FROM agent_execution e
+    JOIN up u ON e.user_scope = :user_scope AND e.execution_id = u.parent_execution_id
+),
+root AS (
+    SELECT execution_id FROM up WHERE parent_execution_id IS NULL LIMIT 1
+),
+down(execution_id) AS (
+    SELECT execution_id FROM root
+    UNION ALL
+    SELECT e.execution_id
+    FROM agent_execution e
+    JOIN down d ON e.user_scope = :user_scope AND e.parent_execution_id = d.execution_id
+)
+SELECT
+    COALESCE(SUM(x.model_attempt_count), 0) AS model_attempt_count,
+    COALESCE(SUM(x.tool_call_count), 0) AS tool_call_count,
+    COALESCE(MAX(CASE WHEN x.execution_id = (SELECT execution_id FROM root)
+                      THEN x.active_ms ELSE 0 END), 0) AS root_active_ms
+FROM agent_execution x
+WHERE x.user_scope = :user_scope
+  AND x.execution_id IN (SELECT execution_id FROM down)
 """
 
 
@@ -7335,7 +7375,97 @@ class AgentDao(BaseDao):
     # C-04-2：资源票据与执行累计计数（§5.4 锁序第 1 条/§5.5/§9.11）
     # ------------------------------------------------------------------
 
-    async def claim_resource(self, request: ResourceClaimRequest) -> ResourceTicket:
+    async def _lock_resource_guard(self, conn: AsyncConnection, identity: str) -> None:
+        """全局资源 guard 单例行：幂等预置后行锁（§5.4 锁序第 1 条）。
+
+        所有认领/使用额度准入/计费事务共用本单一序化点，锁序统一为
+        guard → execution（→ 轮/票据），不产生反向锁序边。
+        """
+
+        guard_insert = sa_pg.insert(AgentResourceSlot).values(
+            user_scope="",
+            slot_id=_RESOURCE_GUARD_SLOT_ID,
+            slot_kind=ResourceSlotKind.GLOBAL_GUARD.value,
+            owner_epoch=0,
+            run_epoch=0,
+        )
+        await conn.execute(guard_insert.on_conflict_do_nothing())
+        guard_row = (
+            await conn.execute(
+                sa.select(AgentResourceSlot.slot_id)
+                .where(AgentResourceSlot.slot_id == _RESOURCE_GUARD_SLOT_ID)
+                .with_for_update()
+            )
+        ).first()
+        if guard_row is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "global resource guard row unavailable",
+                identity,
+            )
+
+    async def _read_tree_usage(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        execution_id: str,
+    ) -> tuple[int, int, int]:
+        """读执行树累计使用（模型尝试/工具调用）与本总执行活跃下界（持久事实）。"""
+
+        row = (
+            await conn.execute(
+                sa.text(_USAGE_TREE_BUDGET_SQL).bindparams(
+                    user_scope=user_scope,
+                    execution_id=execution_id,
+                )
+            )
+        ).first()
+        if row is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "usage budget aggregate unavailable",
+                f"{user_scope}/{execution_id}",
+            )
+        return int(row.model_attempt_count), int(row.tool_call_count), int(row.root_active_ms)
+
+    def _assert_usage_available(
+        self,
+        *,
+        identity: str,
+        tree_attempts: int,
+        tree_calls: int,
+        root_active_ms: int,
+        limits: UsageBudgetLimits,
+    ) -> None:
+        """准入判定（只读事实，不写计数）：已达上限即拒新入口。
+
+        累计额度按执行树计；活跃时限按总执行自身可靠下界计——下界已达上限即
+        证明超限（等待/中断不计活跃，故不会误拒真实未超限的执行）。
+        """
+
+        if tree_attempts >= limits.model_attempt_limit:
+            raise _budget_blocked(
+                identity,
+                f"per-total-execution model attempt budget ({limits.model_attempt_limit}) exhausted",
+            )
+        if tree_calls >= limits.tool_call_limit:
+            raise _budget_blocked(
+                identity,
+                f"per-total-execution tool call budget ({limits.tool_call_limit}) exhausted",
+            )
+        if root_active_ms >= limits.total_active_ms_limit:
+            raise _budget_blocked(
+                identity,
+                f"total execution active time budget ({limits.total_active_ms_limit} ms) exhausted",
+            )
+
+    async def claim_resource(
+        self,
+        request: ResourceClaimRequest,
+        *,
+        usage_limits: UsageBudgetLimits | None = None,
+    ) -> ResourceTicket:
         """资源票据认领事务（§5.4 锁序第 1 条/§5.5/§9.11）：global guard 行锁
         下做最严限额核定并落准确票据，**单个显式事务**。
 
@@ -7357,6 +7487,9 @@ class AgentDao(BaseDao):
           恢复重放不会把在途票据重复计入而误拒）；异输入 ``INPUT_CONFLICT``；
           已确认释放（release_verified=true）的 slot_id 不得复用（零复活）；
           重放只读原事实，不因执行 dispatch 已关闭重判；
+        - 使用额度（检视 R2-I33）：新票据在 guard 行锁内读取执行树持久累计计数，
+          已达 D05 额度（每总 100 模型请求 / 200 工具调用、总执行 60 分钟活跃
+          下界）即 ``BUDGET_BLOCKED``——累计事实参与准入，重启/恢复后同判；
         - fence：目标 execution ``deletion_fenced`` → ``POLICY_DENIED``（引用 vs
           清理单胜者，fence 后拒绝新引用）；
         - 权威身份/代次（检视 D21）：同一 execution 行锁、同一事务内读当前
@@ -7379,32 +7512,12 @@ class AgentDao(BaseDao):
         self._check_engine()
         validate_resource_claim_request(request)
         identity = f"{request.user_scope}/{request.slot_id}"
+        limits = usage_limits if usage_limits is not None else UsageBudgetLimits()
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            # 1. 全局 guard：预置单例行并行锁（§5.4 第 1 条；ON CONFLICT DO
-            #    NOTHING 幂等预置，无目标子句对任意冲突生效；PG 方言 insert）。
-            guard_insert = sa_pg.insert(AgentResourceSlot).values(
-                user_scope="",
-                slot_id=_RESOURCE_GUARD_SLOT_ID,
-                slot_kind=ResourceSlotKind.GLOBAL_GUARD.value,
-                owner_epoch=0,
-                run_epoch=0,
-            )
-            await conn.execute(guard_insert.on_conflict_do_nothing())
-            guard_row = (
-                await conn.execute(
-                    sa.select(AgentResourceSlot.slot_id)
-                    .where(AgentResourceSlot.slot_id == _RESOURCE_GUARD_SLOT_ID)
-                    .with_for_update()
-                )
-            ).first()
-            if guard_row is None:
-                raise AgentServiceError(
-                    AgentErrorCode.PERSISTENCE_UNAVAILABLE,
-                    "global resource guard row unavailable",
-                    identity,
-                )
+            # 1. 全局 guard：预置单例行并行锁（§5.4 第 1 条）。
+            await self._lock_resource_guard(conn, identity)
 
             # 2. 目标 execution 行锁 + 严格读取（锁序：guard → execution/节点/票据）。
             execution_row = (
@@ -7629,7 +7742,23 @@ class AgentDao(BaseDao):
                 if tree_open_leaf >= 3:
                     raise _budget_blocked(identity, "per-root leaf slot limit (3) reached")
 
-            # 6. 落票据（guard 行锁下无竞争；owner_epoch 为调用方运行身份）。
+            # 6. 使用额度门（检视 R2-I33）：累计计数参与准入，与容量限额同一
+            #    guard 行锁序化点。读取持久累计事实（重启/恢复不重置），已达
+            #    D05 额度即拒新票据；重放已在上方返回原票据，不重新计数。
+            tree_attempts, tree_calls, root_active_ms = await self._read_tree_usage(
+                conn,
+                user_scope=request.user_scope,
+                execution_id=request.execution_id,
+            )
+            self._assert_usage_available(
+                identity=identity,
+                tree_attempts=tree_attempts,
+                tree_calls=tree_calls,
+                root_active_ms=root_active_ms,
+                limits=limits,
+            )
+
+            # 7. 落票据（guard 行锁下无竞争；owner_epoch 为调用方运行身份）。
             #    跨用户域 slot_id 撞单列全局 PK 时转 INPUT_CONFLICT（检视闭环 m-3：
             #    数据库失败明确分类，不裸 IntegrityError；accept_request 先例）。
             now = datetime.now(UTC)
@@ -7767,6 +7896,11 @@ class AgentDao(BaseDao):
         重复 checkpoint 幂等不双记）；``active_ms`` 为已核可靠下界，未关闭区间
         尾段未知不记 0、不伪完整用时。全列无变化时零写回（revision 不动）。
 
+        本事务只承载**已发生事实**（含已超额的活跃用时），不因超额丢弃事实；
+        新入口的拒绝由 :meth:`admit_usage` 与 :meth:`claim_resource` 的额度门承担。
+        锁序与认领一致（guard → execution），与准入闸共用同一序化点，避免
+        「读计数-判定-计数」之间的并发错读。
+
         Raises:
             AgentServiceError: INPUT_INVALID（execution 缺失或负计数）。
         """
@@ -7784,6 +7918,7 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
+            await self._lock_resource_guard(conn, identity)
             counter_row = (
                 await conn.execute(
                     sa.select(
@@ -7837,6 +7972,128 @@ class AgentDao(BaseDao):
                 model_attempt_count=landed_attempts,
                 tool_call_count=landed_calls,
                 active_ms=landed_ms,
+            )
+
+    async def admit_usage(
+        self,
+        request: UsageAdmissionRequest,
+        *,
+        limits: UsageBudgetLimits | None = None,
+    ) -> UsageAdmissionFact:
+        """使用额度准入闸（§5.5/§9.4，检视 R2-I33）：**先准入、后发起**的单事务。
+
+        合同：
+
+        - 额度口径（D05，正本 docs/architecture/agent-contract.md §5）：累计额度
+          按**执行树**计（root + 其下发子执行）：模型请求 100 次、工具调用 200 次；
+          活跃时限按**执行自身**可靠下界计：总执行 60 分钟、叶 15 分钟。二者都是
+          「累计次数 / 活跃时长」，不是日历滚动窗口，故无时区或窗口边界；
+        - 原子性：guard 行锁（跨入口/跨会话单一序化点）→ 目标 execution 行锁 →
+          执行树累计读 → 判定 → 写计数，全部在同一显式事务内（锁序与
+          :meth:`claim_resource` / :meth:`record_usage_counters` 一致，无反向锁序边）；
+        - 拒绝语义：任一项增量会使额度越界即 ``BUDGET_BLOCKED`` 并说明受阻额度；
+          **拒绝时不落任何计数**（被拒的入口未发生，不虚增），调用方据此拒绝或
+          降级新入口；
+        - 恢复一致：判定只读 ``agent_execution`` 持久累计（跨轮/跨 SDK run/
+          SDK 重启不清零）；``active_ms`` 为已核可靠下界，只有下界已达上限才拒
+          （等待/主动中断不计活跃，不误拒未超限执行）；时钟回拨不影响（纯累计
+          时长，不与墙钟比较）；
+        - 单调：计数只按增量相加（R22 不回退），行 revision 单调 +1；与
+          :meth:`record_usage_counters` 的 GREATEST 绝对合并同向，后到的偏低
+          checkpoint 不会把计数拉回。
+
+        Raises:
+            AgentServiceError: INPUT_INVALID（execution 缺失/负增量）、
+                BUDGET_BLOCKED（额度已满）。
+        """
+
+        self._check_engine()
+        identity = f"{request.user_scope}/{request.execution_id}"
+        _require_text_field(request.user_scope, "user_scope", identity)
+        _require_text_field(request.execution_id, "execution_id", identity)
+        model_attempts = _require_int_field(request.model_attempts, "model_attempts", identity, 0)
+        tool_calls = _require_int_field(request.tool_calls, "tool_calls", identity, 0)
+        effective_limits = limits if limits is not None else UsageBudgetLimits()
+        engine = self.engine
+        assert isinstance(engine, AsyncEngine)
+        async with engine.begin() as conn:
+            await self._lock_resource_guard(conn, identity)
+            execution_row = (
+                await conn.execute(
+                    sa.select(
+                        AgentExecution.execution_kind,
+                        AgentExecution.model_attempt_count,
+                        AgentExecution.tool_call_count,
+                        AgentExecution.active_ms,
+                    )
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if execution_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "target execution does not exist in user scope",
+                    identity,
+                )
+            tree_attempts, tree_calls, _root_active_ms = await self._read_tree_usage(
+                conn,
+                user_scope=request.user_scope,
+                execution_id=request.execution_id,
+            )
+            # 活跃时限按执行自身（D05：活跃总/子时限 60/15 分钟）。
+            active_limit = (
+                effective_limits.leaf_active_ms_limit
+                if execution_row.execution_kind == "leaf"
+                else effective_limits.total_active_ms_limit
+            )
+            if execution_row.active_ms >= active_limit:
+                raise _budget_blocked(
+                    identity,
+                    f"execution active time budget ({active_limit} ms) exhausted",
+                )
+            if tree_attempts + model_attempts > effective_limits.model_attempt_limit:
+                raise _budget_blocked(
+                    identity,
+                    f"per-total-execution model attempt budget ({effective_limits.model_attempt_limit}) exceeded",
+                )
+            if tree_calls + tool_calls > effective_limits.tool_call_limit:
+                raise _budget_blocked(
+                    identity,
+                    f"per-total-execution tool call budget ({effective_limits.tool_call_limit}) exceeded",
+                )
+
+            landed_attempts = execution_row.model_attempt_count + model_attempts
+            landed_calls = execution_row.tool_call_count + tool_calls
+            landed_ms = execution_row.active_ms
+            now = datetime.now(UTC)
+            if model_attempts or tool_calls:
+                await conn.execute(
+                    sa.update(AgentExecution)
+                    .where(
+                        AgentExecution.user_scope == request.user_scope,
+                        AgentExecution.execution_id == request.execution_id,
+                    )
+                    .values(
+                        model_attempt_count=landed_attempts,
+                        tool_call_count=landed_calls,
+                        revision=AgentExecution.revision + 1,
+                        updated_at=now,
+                    )
+                )
+            return UsageAdmissionFact(
+                execution_id=request.execution_id,
+                model_attempt_count=landed_attempts,
+                tool_call_count=landed_calls,
+                active_ms=landed_ms,
+                remaining_model_attempts=max(
+                    0, effective_limits.model_attempt_limit - (tree_attempts + model_attempts)
+                ),
+                remaining_tool_calls=max(0, effective_limits.tool_call_limit - (tree_calls + tool_calls)),
+                remaining_active_ms=max(0, active_limit - landed_ms),
             )
 
     # ------------------------------------------------------------------

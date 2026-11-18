@@ -5558,6 +5558,57 @@ class UsageCounterFact:
 
 
 @dataclass(frozen=True)
+class UsageBudgetLimits:
+    """使用额度上限（D05 冻结值，正本 docs/architecture/agent-contract.md §5）。
+
+    - 累计额度按**每总执行**（root 及其下发子执行组成的执行树）计：模型请求
+      100 次、工具调用 200 次；累计跨轮/跨 SDK run/SDK 重启不清零；
+    - 活跃时限按**执行自身**计：总执行 60 分钟、子执行（leaf）15 分钟；等待与
+      主动中断不计活跃时限（故 ``active_ms`` 是可靠下界，只有下界已超限才拒绝）。
+
+    默认值即 D05 批准值；DAO 允许注入本对象以覆盖（测试边界 / 后续配置化），
+    调用点不得另行硬编码同一组数字。
+    """
+
+    model_attempt_limit: int = 100
+    tool_call_limit: int = 200
+    total_active_ms_limit: int = 60 * 60 * 1000
+    leaf_active_ms_limit: int = 15 * 60 * 1000
+
+
+@dataclass(frozen=True)
+class UsageAdmissionRequest:
+    """使用额度准入请求（§5.5/§9.4 出口控制）：一次新模型尝试或新工具调用的增量。
+
+    增量为 0 时只做准入判定不落计数（等价「还能不能继续」探测）；每次真正的
+    尝试/调用必须在**发起之前**经本请求计数，超额即拒，故被拒的入口不产生事实、
+    重试不会虚增。
+    """
+
+    user_scope: str
+    execution_id: str
+    model_attempts: int = 0
+    tool_calls: int = 0
+
+
+@dataclass(frozen=True)
+class UsageAdmissionFact:
+    """使用额度准入落定事实：计数为本次准入后的落定值，余量为剩余可准入额度。
+
+    ``remaining_active_ms`` 是该执行自身活跃时限的剩余下界余量；累计余量按执行树
+    计（与累计上限同口径）。
+    """
+
+    execution_id: str
+    model_attempt_count: int
+    tool_call_count: int
+    active_ms: int
+    remaining_model_attempts: int
+    remaining_tool_calls: int
+    remaining_active_ms: int
+
+
+@dataclass(frozen=True)
 class SourceStopCommand:
     """停止使用来源命令（§3.3.2/§5.4）：已解析的准确 SourceVersionRef。
 
