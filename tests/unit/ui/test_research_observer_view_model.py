@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from core.agent_types import DraftPayload, DraftRead, Mode, Purpose
 from ui.viewmodels.research_observer_view_model import (
     UNAVAILABLE_NOT_READY,
     UNAVAILABLE_NOT_WIRED,
@@ -131,6 +132,49 @@ def _session_read(
     )
 
 
+_UNSET = object()
+
+
+def _draft_read(
+    *,
+    session_id: str = "s-1",
+    draft_revision: int = 2,
+    payload: DraftPayload | object | None = _UNSET,
+    is_empty: bool = False,
+    cleaned: bool = False,
+    archived: bool = False,
+    transferred: bool = False,
+) -> DraftRead:
+    if payload is _UNSET:
+        payload = DraftPayload(
+            schema_version=2,
+            text="继续编辑的草稿正文",
+            mode=Mode.DISCUSS,
+            model_selection='{"scenario_id": "agent_research"}',
+            source_refs=(),
+            skill_versions=(),
+            mcp_selection=(),
+            purpose=Purpose.CONCEPT,
+            research_date="2026-11-13",
+            cutoff=None,
+            send_target=None,
+            object_context=None,
+            role_prompt_selection=None,
+            customized_fields=("mode",),
+            defaults_baseline_digest="b" * 64,
+        )
+    return DraftRead(
+        session_id=session_id,
+        draft_revision=draft_revision,
+        payload=payload if isinstance(payload, DraftPayload) else None,
+        is_empty=is_empty,
+        cleaned=cleaned,
+        archived=archived,
+        transferred=transferred,
+        read_at="2026-11-17T04:00:00.000000Z",
+    )
+
+
 class _FakeService:
     def __init__(
         self,
@@ -141,6 +185,8 @@ class _FakeService:
         answer_error: Exception | None = None,
         artifact_read: Any | None = None,
         artifact_error: Exception | None = None,
+        draft_read: Any | None = None,
+        draft_error: Exception | None = None,
     ) -> None:
         self.hits = hits
         self.read = read if read is not None else _session_read()
@@ -157,10 +203,13 @@ class _FakeService:
             )
         )
         self.artifact_error = artifact_error
+        self.draft_read = draft_read if draft_read is not None else _draft_read()
+        self.draft_error = draft_error
         self.search_calls: list[Any] = []
         self.read_calls: list[Any] = []
         self.answer_calls: list[Any] = []
         self.artifact_calls: list[Any] = []
+        self.draft_calls: list[Any] = []
 
     async def search(self, query: Any, *, user_scope: str) -> Any:
         self.search_calls.append((query, user_scope))
@@ -184,6 +233,12 @@ class _FakeService:
             raise self.answer_error
         return SimpleNamespace(delivery_state=SimpleNamespace(value="not_delivered"))
 
+    async def read_draft(self, query: Any, *, user_scope: str) -> Any:
+        self.draft_calls.append((query, user_scope))
+        if self.draft_error is not None:
+            raise self.draft_error
+        return self.draft_read
+
 
 class _BlockingSearchService(_FakeService):
     """search 阻塞直到被取消（验证取消传播与 loading 释放）。"""
@@ -206,6 +261,19 @@ class _BlockingArtifactService(_FakeService):
         self.started = asyncio.Event()
 
     async def read_artifact(self, query: Any, *, user_scope: str) -> Any:
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _BlockingDraftService(_FakeService):
+    """read_draft 阻塞直到被取消（验证在途标记释放）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def read_draft(self, query: Any, *, user_scope: str) -> Any:
         self.started.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -642,6 +710,103 @@ class TestArtifactBodyRead:
         await vm.load_artifact(artifact_id="a-1", artifact_version=1, execution_id="e-1", round_id="r-1")
         assert vm.state.available is False
         assert vm.state.artifact_body_for("a-1", 1) is None
+
+
+class TestSessionDraftRead:
+    """R2-I23：草稿正文读回只读投影（不发送、不创建研究）。"""
+
+    @pytest.mark.asyncio
+    async def test_load_draft_projects_body_and_selection(self) -> None:
+        service = _FakeService(read=_session_read(draft_revision=2))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 2)
+
+        query, user_scope = service.draft_calls[0]
+        assert (query.session_id, query.draft_revision) == ("s-1", 2)
+        assert user_scope == "local-desktop"
+        draft = vm.state.session_draft
+        assert draft is not None
+        assert draft.text == "继续编辑的草稿正文"
+        assert draft.mode == "discuss"
+        assert draft.purpose == "concept"
+        assert draft.customized_fields == ("mode",)
+        assert draft.draft_revision == 2
+        assert vm.state.draft_pending is False
+        # 只读：答复/保存类写入口一次都不应被触发
+        assert service.answer_calls == []
+
+    @pytest.mark.asyncio
+    async def test_revision_conflict_reports_code_and_clears_previous_body(self) -> None:
+        service = _FakeService(read=_session_read(draft_revision=2))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        await vm.load_draft("s-1", 2)
+        assert vm.state.session_draft is not None
+
+        service.draft_error = _FakeError("REVISION_CONFLICT")
+        await vm.load_draft("s-1", 1)
+
+        assert vm.state.draft_error_code == "REVISION_CONFLICT"
+        assert vm.state.session_draft is None, "旧稿正文不得继续显示为当前可恢复内容"
+        assert vm.state.draft_pending is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_drops_loaded_draft_when_revision_advances(self) -> None:
+        service = _FakeService(read=_session_read(draft_revision=2))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        await vm.load_draft("s-1", 2)
+        assert vm.state.session_draft is not None
+
+        service.read = _session_read(draft_revision=3)
+        await vm.refresh()
+
+        assert vm.state.session_draft is None, "稿版已推进，旧稿不得继续显示"
+        assert vm.state.session_draft_revision == 3
+
+    @pytest.mark.asyncio
+    async def test_refresh_drops_loaded_draft_when_session_switches(self) -> None:
+        service = _FakeService(read=_session_read(draft_revision=2))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        await vm.load_draft("s-1", 2)
+
+        service.hits = (SimpleNamespace(session_id="s-2"),)
+        service.read = _session_read(draft_revision=2)
+        await vm.refresh()
+
+        assert vm.state.session_draft is None
+
+    @pytest.mark.asyncio
+    async def test_cleaned_draft_is_exposed_not_as_empty(self) -> None:
+        service = _FakeService(
+            read=_session_read(draft_revision=4),
+            draft_read=_draft_read(payload=None, draft_revision=4, cleaned=True),
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        await vm.load_draft("s-1", 4)
+
+        draft = vm.state.session_draft
+        assert draft is not None
+        assert draft.cleaned is True
+        assert draft.text is None
+        assert draft.is_empty is False
+
+    @pytest.mark.asyncio
+    async def test_load_draft_cancellation_releases_pending_marker(self) -> None:
+        service = _BlockingDraftService()
+        vm = ResearchObserverViewModel(service)
+        task = asyncio.create_task(vm.load_draft("s-1", 2))
+        await asyncio.wait_for(service.started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert exc_info.type is asyncio.CancelledError
+        assert vm.state.draft_pending is False
 
 
 class TestSharedInstance:

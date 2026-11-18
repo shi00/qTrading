@@ -8727,6 +8727,47 @@ def is_empty_draft_payload(payload: DraftPayload | None) -> bool:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class DraftReadQuery:
+    """草稿读回查询（§4.2 读取面）：目标会话 + 可选准确稿版。
+
+    ``draft_revision`` 给定时必须等于会话当前草稿版，否则读取方拒绝
+    （``REVISION_CONFLICT``），不把旧稿冒充所请求的版本。
+    """
+
+    session_id: str
+    draft_revision: int | None = None
+
+
+def validate_draft_read_query(query: DraftReadQuery) -> None:
+    """草稿读回查询结构校验（会话非空文本；稿版从 1 起），失败抛 AgentValidationError。"""
+
+    _require_str(query.session_id, "$.session_id")
+    if query.draft_revision is not None and (
+        isinstance(query.draft_revision, bool) or not isinstance(query.draft_revision, int) or query.draft_revision < 1
+    ):
+        _fail("invalid_range", "$.draft_revision")
+
+
+@dataclass(frozen=True, slots=True)
+class DraftRead:
+    """按会话读回的草稿完整事实（只读；读取不发送、不推进任何命令）。
+
+    ``payload=None`` 单独不表示「空稿」：``cleaned``（清理后正文已删除）、
+    ``transferred``（正文已移出到其他会话）与两者皆否（从未保存过草稿）是
+    不同事实。``is_empty`` 只在确有已保存载荷且载荷内容为空时为 True（R21）。
+    """
+
+    session_id: str
+    draft_revision: int
+    payload: DraftPayload | None
+    is_empty: bool
+    cleaned: bool
+    archived: bool
+    transferred: bool
+    read_at: str
+
+
 def _require_positive_revision(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         _fail("invalid_revision", path)

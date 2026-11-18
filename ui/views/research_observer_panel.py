@@ -24,6 +24,7 @@ from ui.viewmodels.research_observer_view_model import (
     PendingDecision,
     ResearchObserverState,
     SessionArtifactView,
+    SessionDraftView,
     SessionMessageView,
 )
 
@@ -279,6 +280,152 @@ def _build_artifact_card(
     )
 
 
+def _build_session_draft_card(
+    state: ResearchObserverState,
+    *,
+    on_load_draft: Callable[[], None],
+) -> ft.Control:
+    """会话草稿只读卡（R2-I23）：读取入口 + 正文/选择/稿版；不发送、不建研究。"""
+
+    header: list[ft.Control] = [
+        ft.Text(
+            I18n.get("agent_research_draft"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
+        ),
+        ft.Text(
+            I18n.get("agent_research_draft_revision_fmt").format(revision=state.session_draft_revision),
+            size=AppStyles.FONT_SIZE_CAPTION,
+            color=AppColors.TEXT_HINT,
+        ),
+    ]
+    if state.draft_pending:
+        header.append(ft.ProgressRing(width=16, height=16, stroke_width=2))
+    else:
+        header.append(
+            ft.IconButton(
+                icon=ft.Icons.RESTORE_PAGE,
+                icon_size=AppStyles.FONT_SIZE_TITLE,
+                tooltip=I18n.get("agent_research_draft_load"),
+                on_click=lambda _e: on_load_draft(),
+            )
+        )
+    rows: list[ft.Control] = [ft.Row(header, spacing=AppStyles.SPACING_SM)]
+    if state.draft_pending:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_draft_loading"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    if state.draft_error_code:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_draft_error_fmt").format(code=state.draft_error_code),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.ERROR,
+            )
+        )
+    draft = state.session_draft
+    if draft is not None:
+        rows.extend(_draft_detail_rows(draft))
+    return ft.Container(
+        content=ft.Column(rows, spacing=AppStyles.SPACING_XS),
+        padding=AppStyles.SPACING_SM,
+        bgcolor=AppColors.BACKGROUND,
+        border_radius=4,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
+def _draft_detail_rows(draft: SessionDraftView) -> list[ft.Control]:
+    """草稿详情（清理/移出/空稿/无稿分列如实标注；正文与选择只读展示）。"""
+
+    def hint(key: str) -> ft.Text:
+        return ft.Text(
+            I18n.get(key),
+            size=AppStyles.FONT_SIZE_CAPTION,
+            color=AppColors.TEXT_HINT,
+        )
+
+    if draft.cleaned:
+        return [hint("agent_research_draft_cleaned")]
+    if draft.transferred:
+        return [hint("agent_research_draft_transferred")]
+    if draft.text is None:
+        return [hint("agent_research_draft_none")]
+
+    rows: list[ft.Control] = []
+    if draft.archived:
+        rows.append(hint("agent_research_draft_archived"))
+    if draft.is_empty:
+        rows.append(hint("agent_research_draft_empty"))
+    rows.append(
+        ft.Text(
+            draft.text if draft.text else I18n.get("agent_research_draft_body_empty"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_PRIMARY,
+        )
+    )
+    meta = I18n.get("agent_research_draft_meta_fmt").format(
+        mode=draft.mode or "-",
+        purpose=draft.purpose or "-",
+        research_date=draft.research_date or "-",
+        cutoff=draft.cutoff or "-",
+    )
+    rows.append(ft.Text(meta, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT))
+    if draft.sources:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_draft_sources_fmt").format(sources=", ".join(draft.sources)),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    if draft.skills:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_draft_skills_fmt").format(skills=", ".join(draft.skills)),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    if draft.mcp_services:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_draft_mcp_fmt").format(services=", ".join(draft.mcp_services)),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    if draft.customized_fields:
+        rows.append(
+            ft.Text(
+                I18n.get("agent_research_draft_customized_fmt").format(fields=", ".join(draft.customized_fields)),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_HINT,
+            )
+        )
+    fragments = (
+        ("agent_research_draft_model_selection_fmt", draft.model_selection),
+        ("agent_research_draft_send_target_fmt", draft.send_target),
+        ("agent_research_draft_object_context_fmt", draft.object_context),
+        ("agent_research_draft_role_prompt_fmt", draft.role_prompt_selection),
+    )
+    for key, value in fragments:
+        if value is not None:
+            rows.append(
+                ft.Text(
+                    I18n.get(key).format(value=value),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                )
+            )
+    return rows
+
+
 def _build_body(
     state: ResearchObserverState,
     *,
@@ -287,6 +434,7 @@ def _build_body(
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
+    on_load_draft: Callable[[], None],
 ) -> ft.Control:
     """面板主体：主会话 / 子任务树 / 成果 / 待处理决定（未知如实显示，不伪造数据）。"""
 
@@ -335,13 +483,7 @@ def _build_body(
         )
     )
     if state.session_draft_revision > 0:
-        rows.append(
-            ft.Text(
-                I18n.get("agent_research_session_draft_fmt").format(revision=state.session_draft_revision),
-                size=AppStyles.FONT_SIZE_CAPTION,
-                color=AppColors.TEXT_HINT,
-            )
-        )
+        rows.append(_build_session_draft_card(state, on_load_draft=on_load_draft))
 
     # --- 主会话消息（只读；正文未载入如实标注） ---
     rows.append(_section_title("agent_research_messages"))
@@ -561,6 +703,7 @@ def ResearchObserverPanel(
     on_toggle_execution: Callable[[str], None],
     on_select_execution: Callable[[str | None], None],
     on_load_artifact: Callable[[str, int, str, str], None],
+    on_load_draft: Callable[[], None],
 ) -> ft.Container:
     """非模态研究观察层（右侧公共区；收起只隐藏，不卸载业务页、不清草稿）。"""
 
@@ -605,6 +748,7 @@ def ResearchObserverPanel(
             on_toggle_execution=on_toggle_execution,
             on_select_execution=on_select_execution,
             on_load_artifact=on_load_artifact,
+            on_load_draft=on_load_draft,
         )
     )
     return ft.Container(

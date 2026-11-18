@@ -500,6 +500,14 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
         if page is not None and research_vm.state.available:
             page.run_task(research_vm.load_artifact, artifact_id, artifact_version, execution_id, round_id)
 
+    def _load_draft() -> None:
+        """按当前会话/稿版只读读回草稿正文（不发送、不创建研究；R2-I23）。"""
+        page = _get_page()
+        current = research_vm.state
+        if page is not None and current.available and current.session_id is not None:
+            revision = current.session_draft_revision or None
+            page.run_task(research_vm.load_draft, current.session_id, revision)
+
     def _submit_decision(decision_id: str) -> None:
         """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。"""
         page = _get_page()
@@ -851,6 +859,7 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_toggle_execution=_toggle_execution,
             on_select_execution=_select_execution,
             on_load_artifact=_load_artifact,
+            on_load_draft=_load_draft,
         )
         if research_open
         else None

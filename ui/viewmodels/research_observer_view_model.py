@@ -27,6 +27,8 @@ from typing import Any, Protocol
 from core.agent_types import (
     AnswerReceipt,
     ArtifactReadQuery,
+    DraftRead,
+    DraftReadQuery,
     HistoryPage,
     HistoryQuery,
     HistoryRoundSelection,
@@ -60,6 +62,8 @@ class AgentResearchService(Protocol):
     async def read_artifact(self, query: ArtifactReadQuery, *, user_scope: str) -> Any: ...
 
     async def answer(self, request: SaveAnswerRequest) -> AnswerReceipt: ...
+
+    async def read_draft(self, query: DraftReadQuery, *, user_scope: str) -> DraftRead: ...
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,36 @@ class LoadedArtifactBody:
 
 
 @dataclass(frozen=True)
+class SessionDraftView:
+    """按会话读回的草稿只读投影（R2-I23；读取不发送、不创建研究）。
+
+    ``text``/选择为 None 表示该会话没有可读载荷；``cleaned`` / ``transferred``
+    分别表示正文已被清理删除、已移出到其他会话，与「从未保存」不同（R21）。
+    """
+
+    session_id: str
+    draft_revision: int
+    text: str | None
+    mode: str | None
+    purpose: str | None
+    research_date: str | None
+    cutoff: str | None
+    sources: tuple[str, ...]
+    skills: tuple[str, ...]
+    mcp_services: tuple[str, ...]
+    customized_fields: tuple[str, ...]
+    model_selection: str | None
+    send_target: str | None
+    object_context: str | None
+    role_prompt_selection: str | None
+    is_empty: bool
+    cleaned: bool
+    archived: bool
+    transferred: bool
+    read_at: str
+
+
+@dataclass(frozen=True)
 class PendingDecision:
     """必要决定的只读投影（展示用；不回显完整授权参数）。"""
 
@@ -165,6 +199,9 @@ class ResearchObserverState:
     collapsed_execution_ids: tuple[str, ...] = ()
     artifact_bodies: tuple[LoadedArtifactBody, ...] = ()
     artifact_body_pending_keys: tuple[str, ...] = ()
+    session_draft: SessionDraftView | None = None
+    draft_pending: bool = False
+    draft_error_code: str | None = None
 
     def draft_for(self, decision_id: str) -> str:
         """读取某决定的答复草稿（收起/重渲染后仍在）。"""
@@ -225,6 +262,52 @@ def _pending_decisions(read: SessionRead) -> tuple[PendingDecision, ...]:
             )
         )
     return tuple(pending)
+
+
+def _session_draft_view(read: DraftRead) -> SessionDraftView:
+    """DAO 读回 → 只读投影（无载荷时字段为 None，不伪造空正文/默认选择）。"""
+
+    payload = read.payload
+    return SessionDraftView(
+        session_id=read.session_id,
+        draft_revision=read.draft_revision,
+        text=payload.text if payload is not None else None,
+        mode=_tag_text(payload.mode) if payload is not None else None,
+        purpose=_tag_text(payload.purpose) if payload is not None else None,
+        research_date=payload.research_date if payload is not None else None,
+        cutoff=payload.cutoff if payload is not None else None,
+        sources=(
+            tuple(f"{_tag_text(ref.source_kind)}:{ref.source_id}@{ref.source_version}" for ref in payload.source_refs)
+            if payload is not None
+            else ()
+        ),
+        skills=(
+            tuple(f"{ref.skill_id}@{ref.version}" for ref in payload.skill_versions) if payload is not None else ()
+        ),
+        mcp_services=(
+            tuple(f"{ref.service_id}@{ref.config_version}" for ref in payload.mcp_selection)
+            if payload is not None
+            else ()
+        ),
+        customized_fields=payload.customized_fields if payload is not None else (),
+        model_selection=payload.model_selection if payload is not None else None,
+        send_target=payload.send_target if payload is not None else None,
+        object_context=payload.object_context if payload is not None else None,
+        role_prompt_selection=payload.role_prompt_selection if payload is not None else None,
+        is_empty=read.is_empty,
+        cleaned=read.cleaned,
+        archived=read.archived,
+        transferred=read.transferred,
+        read_at=read.read_at,
+    )
+
+
+def _tag_text(value: Any) -> str | None:
+    """枚举/文本标签 → 文本（None 透传，未知保持原值不猜语义）。"""
+
+    if value is None:
+        return None
+    return getattr(value, "value", value)
 
 
 def _execution_ids(executions: tuple[Any, ...]) -> frozenset[str]:
@@ -437,6 +520,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                     artifacts_has_more=False,
                     session_draft_revision=0,
                     artifact_body_pending_keys=(),
+                    session_draft=None,
+                    draft_error_code=None,
                     decisions=(),
                     pending_count=0,
                     last_updated_at=history.read_moment,
@@ -465,6 +550,13 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
         collapsed = _normalized_collapsed(self._raw_executions, self._state.collapsed_execution_ids)
         artifact_keys = {f"{item.artifact_id}:{item.artifact_version}" for item in self._raw_artifacts}
         pending_keys = tuple(key for key in self._state.artifact_body_pending_keys if key in artifact_keys)
+        # R2-I23：已载入草稿只在新快照仍指向同一会话同一稿版时保留；稿版已推进或
+        # 切了会话即丢弃，避免把旧稿正文冒充当前可继续编辑的内容。
+        loaded_draft = self._state.session_draft
+        if loaded_draft is not None and (
+            loaded_draft.session_id != session_id or loaded_draft.draft_revision != read.summary.draft_revision
+        ):
+            loaded_draft = None
         self._set_state(
             loading=False,
             session_id=session_id,
@@ -481,6 +573,8 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
             artifact_body_pending_keys=pending_keys,
             # 换会话时不复用上一会话的正文缓存（同 id 跨会话也不冒充当前会话成果）
             artifact_bodies=() if session_changed else self._state.artifact_bodies,
+            session_draft=loaded_draft,
+            draft_error_code=None,
             **self._projection_changes(selected=selected, collapsed=collapsed),
         )
 
@@ -581,6 +675,47 @@ class ResearchObserverViewModel(ObservableViewModelMixin[ResearchObserverState])
                 pending for pending in self._state.artifact_body_pending_keys if pending != key
             ),
         )
+
+    async def load_draft(self, session_id: str, draft_revision: int | None) -> None:
+        """按会话/稿版读回草稿正文与选择（只读；不发送、不创建研究）。
+
+        稿版不符时 facade 抛 ``REVISION_CONFLICT``，本层只如实给出错误码，并先
+        清空已载入草稿——旧稿正文不得继续显示为「当前可恢复内容」（R21）。
+        """
+
+        if self._service is None or not self._state.available:
+            self._set_state(error_key=self._state.unavailable_reason_key)
+            return
+        if self._state.draft_pending:
+            return
+        self._track_inflight_cancellable()
+        self._set_state(
+            draft_pending=True,
+            session_draft=None,
+            draft_error_code=None,
+            error_key=None,
+            last_error_code=None,
+        )
+        try:
+            read = await self._service.read_draft(
+                DraftReadQuery(session_id=session_id, draft_revision=draft_revision),
+                user_scope=self._user_scope,
+            )
+        except asyncio.CancelledError:
+            # R2：取消必须传播；先释放在途标记，避免下次读取被永久拦截。
+            self._set_state(draft_pending=False)
+            raise
+        except Exception as e:
+            self._set_state(draft_pending=False, draft_error_code=self._error_code(e))
+            return
+        # 并发刷新已切走会话/推进稿版时，读回的旧稿不再属于当前观察位置。
+        current = self._state
+        session_mismatch = current.session_id is not None and current.session_id != read.session_id
+        revision_mismatch = current.session_id is not None and current.session_draft_revision != read.draft_revision
+        if session_mismatch or revision_mismatch:
+            self._set_state(draft_pending=False)
+            return
+        self._set_state(draft_pending=False, session_draft=_session_draft_view(read))
 
     def _projection_changes(self, *, selected: str | None, collapsed: tuple[str, ...]) -> dict[str, Any]:
         """按观察位置重算树/消息/成果（纯函数投影，不发任何请求）。"""
