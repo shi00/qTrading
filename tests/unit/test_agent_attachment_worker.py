@@ -1122,6 +1122,164 @@ class TestXlsxPreflightBudget:
 
 
 # ---------------------------------------------------------------------------
+# XLSX 双视图打开的清理契约（I38）
+# ---------------------------------------------------------------------------
+
+
+class _ProbeArchive:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _ProbeWorkbook:
+    """只读视图替身：``close()`` 与 openpyxl 一致地关闭其 archive。"""
+
+    def __init__(self, archive: _ProbeArchive) -> None:
+        self._archive = archive
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._archive.close()
+
+
+class _ProbeParser:
+    def assign_names(self) -> None:
+        pass
+
+
+class _ProbeSheet:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+
+    def iter_rows(self, max_row: int | None = None) -> Any:
+        return iter(self._rows)
+
+
+class _CountingWorkbook(dict[str, _ProbeSheet]):
+    def __init__(self, **sheets: _ProbeSheet) -> None:
+        super().__init__(**sheets)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def _install_probe_excel_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_step: str | None = None,
+    fail_data_only: bool | None = None,
+    error_type: type[BaseException] = RuntimeError,
+) -> list[Any]:
+    """用替身 ExcelReader 逐视图记录构造/关闭，并按需在指定读取步骤注入失败。"""
+
+    from openpyxl.reader import excel as openpyxl_excel
+    from openpyxl.styles import stylesheet as openpyxl_stylesheet
+
+    created: list[Any] = []
+
+    class _Reader:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.data_only = bool(kwargs.get("data_only"))
+            self.archive = _ProbeArchive()
+            self.wb = _ProbeWorkbook(self.archive)
+            self.shared_strings: list[Any] = []
+            self.parser = _ProbeParser()
+            created.append(self)
+
+        def _maybe_fail(self, step: str) -> None:
+            if fail_step == step and (fail_data_only is None or fail_data_only == self.data_only):
+                raise error_type(f"probe failure at {step}")
+
+        def read_manifest(self) -> None:
+            self._maybe_fail("read_manifest")
+
+        def read_strings(self) -> None:
+            self.shared_strings = ["probe-string"]
+
+        def read_workbook(self) -> None:
+            self._maybe_fail("read_workbook")
+
+        def read_properties(self) -> None:
+            self._maybe_fail("read_properties")
+
+        def read_custom(self) -> None:
+            self._maybe_fail("read_custom")
+
+        def read_theme(self) -> None:
+            self._maybe_fail("read_theme")
+
+        def read_worksheets(self) -> None:
+            self._maybe_fail("read_worksheets")
+
+    monkeypatch.setattr(openpyxl_excel, "ExcelReader", _Reader)
+    monkeypatch.setattr(openpyxl_stylesheet, "apply_stylesheet", lambda archive, workbook: None)
+    return created
+
+
+class TestXlsxDualViewCleanup:
+    def test_second_view_failure_closes_first_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 第二个视图构造失败：首个已打开的视图及其 archive 必须被关闭。
+        readers = _install_probe_excel_reader(monkeypatch, fail_step="read_workbook", fail_data_only=True)
+        with pytest.raises(AttachmentParseError) as exc:
+            attachment_worker._load_openpyxl(b"probe")  # noqa: SLF001  # 直测双视图清理契约
+        assert exc.value.code == "invalid_structure"
+        assert isinstance(exc.value.__cause__, RuntimeError)
+        formula_view, cached_view = readers
+        assert formula_view.wb.close_calls == 1
+        assert formula_view.archive.close_calls == 1
+        assert cached_view.archive.close_calls == 1
+
+    def test_second_view_base_exception_also_closes_first_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 取消/中断同属「后续失败」：首个视图不得留给 GC 回收。
+        readers = _install_probe_excel_reader(
+            monkeypatch, fail_step="read_worksheets", fail_data_only=True, error_type=KeyboardInterrupt
+        )
+        with pytest.raises(KeyboardInterrupt):  # noqa: weak-assertion 关闭断言在 with 块之后（核首个视图与两个 archive）
+            attachment_worker._load_openpyxl(b"probe")  # noqa: SLF001  # 直测双视图清理契约
+        formula_view, cached_view = readers
+        assert formula_view.wb.close_calls == 1
+        assert formula_view.archive.close_calls == 1
+        assert cached_view.archive.close_calls == 1
+
+    def test_first_view_failure_leaves_no_open_handle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        readers = _install_probe_excel_reader(monkeypatch, fail_step="read_workbook", fail_data_only=False)
+        with pytest.raises(AttachmentParseError) as exc:
+            attachment_worker._load_openpyxl(b"probe")  # noqa: SLF001  # 直测双视图清理契约
+        assert exc.value.code == "invalid_structure"
+        assert len(readers) == 1
+        assert readers[0].archive.close_calls == 1
+        assert readers[0].wb.close_calls == 0
+
+    def test_both_views_open_ownership_goes_to_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        readers = _install_probe_excel_reader(monkeypatch)
+        formulas, cached = attachment_worker._load_openpyxl(b"probe")  # noqa: SLF001  # 直测双视图清理契约
+        assert formulas is readers[0].wb
+        assert cached is readers[1].wb
+        assert readers[0].wb.close_calls == 0
+        assert readers[1].wb.close_calls == 0
+
+    def test_successful_parse_closes_both_views(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        formula_view = _CountingWorkbook(S1=_ProbeSheet([(_FakeCell(1, 1, "=1+1", "f"),)]))
+        cached_view = _CountingWorkbook(S1=_ProbeSheet([(_FakeCell(1, 1, 2),)]))
+        monkeypatch.setattr(attachment_worker, "_load_openpyxl", lambda data: (formula_view, cached_view))
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_sheet1('<row r="1"><c r="A1"><v>2</v></c></row>'))
+        assert parsed.read_state is ReadState.READY
+        assert formula_view.close_calls == 1
+        assert cached_view.close_calls == 1
+
+    def test_normal_parse_is_not_regressed(self) -> None:
+        parsed = _parse(AttachmentKind.XLSX, _xlsx_bytes())
+        assert parsed.read_state is ReadState.READY
+        assert parsed.coverage == "full"
+        assert parsed.stats["rows"] == 3
+
+
+# ---------------------------------------------------------------------------
 # 内容类型嗅探
 # ---------------------------------------------------------------------------
 

@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import io
@@ -845,6 +846,7 @@ def _load_openpyxl(data: bytes) -> tuple[Any, Any]:
     def _open_view(*, data_only: bool, shared_strings: list[Any] | None) -> tuple[Any, list[Any]]:
         # 复用 ExcelReader.read() 的同一读取顺序，但共享表只解析一次（第二次注入结果）。
         reader = ExcelReader(io.BytesIO(data), read_only=True, data_only=data_only, keep_links=False)
+        opened = False
         try:
             reader.read_manifest()
             if shared_strings is None:
@@ -860,22 +862,28 @@ def _load_openpyxl(data: bytes) -> tuple[Any, Any]:
             apply_stylesheet(reader.archive, reader.wb)
             reader.read_worksheets()
             reader.parser.assign_names()
-        except Exception:
-            reader.archive.close()
-            raise
+            opened = True
+        finally:
+            # 未完整打开时自身 archive 必须关闭（含取消/中断），不把句柄留给 GC。
+            if not opened:
+                reader.archive.close()
         return reader.wb, strings
 
-    try:
-        formulas, strings = _open_view(data_only=False, shared_strings=None)
+    # 首个视图打开成功即纳入清理：第二个视图构造失败、或本函数后续任何失败
+    # （含取消/中断）都在退出 ExitStack 时关闭已打开的 workbook 及其 archive，
+    # 不把 zip 句柄留给长期驻留进程的 GC（I38）。两者都成功则 pop_all 撤销登记，
+    # 所有权移交调用方（由 _parse_xlsx 的 finally 关闭）。
+    with contextlib.ExitStack() as stack:
         try:
+            formulas, strings = _open_view(data_only=False, shared_strings=None)
+            stack.callback(formulas.close)
             cached, _ = _open_view(data_only=True, shared_strings=strings)
-        except Exception:
-            formulas.close()
+            stack.callback(cached.close)
+        except AttachmentParseError:
             raise
-    except AttachmentParseError:
-        raise
-    except Exception as exc:  # 第三方解析异常统一转译，不吞
-        raise AttachmentParseError("invalid_structure", "XLSX workbook is unreadable") from exc
+        except Exception as exc:  # 第三方解析异常统一转译，不吞
+            raise AttachmentParseError("invalid_structure", "XLSX workbook is unreadable") from exc
+        stack.pop_all()
     return formulas, cached
 
 
