@@ -456,7 +456,15 @@ class TestClaimSourceCleanupGate:
             "kind": "source_revision",
             "claim_ref": "claim-1",
             "operation_id": "op-1",
-            "sources": [{"source_id": "src-1", "source_version": "1", "disabled_revision": 0}],
+            "sources": [
+                {
+                    "source_id": "src-1",
+                    "source_version": "1",
+                    "source_kind": "user_message",
+                    "source_digest": "b" * 64,
+                    "disabled_revision": 0,
+                }
+            ],
         }
         conn = _FenceConn(
             asset_rows=[_asset_row(tombstoned=True, cleaned_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC))],
@@ -464,7 +472,15 @@ class TestClaimSourceCleanupGate:
         )
         fact = await _dao(conn).claim_source_versions(_claim_request())
         assert fact.replayed is True
-        assert fact.bindings == (SourceClaimBinding(source_id="src-1", source_version="1", disabled_revision=0),)
+        assert fact.bindings == (
+            SourceClaimBinding(
+                source_id="src-1",
+                source_version="1",
+                source_kind=SourceKind.USER_MESSAGE,
+                source_digest="b" * 64,
+                disabled_revision=0,
+            ),
+        )
         assert not any("UPDATE agent_operation" in sql for sql in conn.statements)
 
     async def test_uncleaned_asset_persists_new_claim(self) -> None:
@@ -474,7 +490,15 @@ class TestClaimSourceCleanupGate:
         )
         fact = await _dao(conn).claim_source_versions(_claim_request())
         assert fact.replayed is False
-        assert fact.bindings == (SourceClaimBinding(source_id="src-1", source_version="1", disabled_revision=0),)
+        assert fact.bindings == (
+            SourceClaimBinding(
+                source_id="src-1",
+                source_version="1",
+                source_kind=SourceKind.USER_MESSAGE,
+                source_digest="b" * 64,
+                disabled_revision=0,
+            ),
+        )
         assert any("UPDATE agent_operation" in sql for sql in conn.statements)
 
     async def test_source_lock_reads_cleanup_columns(self) -> None:
@@ -490,14 +514,91 @@ class TestClaimSourceCleanupGate:
         assert "agent_asset_version.cleaned_at" in asset_sql
         assert "agent_asset_version.tombstoned" in asset_sql
 
+    async def test_same_id_different_digest_rejected_with_zero_writes(self) -> None:
+        # 同 ID/版本异摘要：不得把另一份原件当作同一源认领；零新事实。
+        conn = _FenceConn(
+            asset_rows=[_asset_row(digest="c" * 64)],
+            operation_first=SimpleNamespace(data_consent_claims=[]),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_source_versions(_claim_request())
+        assert exc.value.code is AgentErrorCode.REVISION_CONFLICT
+        assert not any("UPDATE agent_operation" in sql for sql in conn.statements)
+
+    async def test_wrong_kind_rejected_with_zero_writes(self) -> None:
+        conn = _FenceConn(
+            asset_rows=[_asset_row()],
+            operation_first=SimpleNamespace(data_consent_claims=[]),
+        )
+        request = SourceClaimRequest(
+            user_scope="u1",
+            claim_ref="claim-1",
+            operation_id="op-1",
+            sources=(
+                SourceVersionRef(
+                    source_kind=SourceKind.ATTACHMENT,
+                    source_id="src-1",
+                    source_version="1",
+                    source_digest="b" * 64,
+                ),
+            ),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_source_versions(request)
+        assert exc.value.code is AgentErrorCode.REVISION_CONFLICT
+        assert not any("UPDATE agent_operation" in sql for sql in conn.statements)
+
+    async def test_replay_with_different_digest_conflicts(self) -> None:
+        # 同 claim_ref 异摘要：即使原 claim 已生效也不得重放为同一认领。
+        saved = {
+            "kind": "source_revision",
+            "claim_ref": "claim-1",
+            "operation_id": "op-1",
+            "sources": [
+                {
+                    "source_id": "src-1",
+                    "source_version": "1",
+                    "source_kind": "user_message",
+                    "source_digest": "b" * 64,
+                    "disabled_revision": 0,
+                }
+            ],
+        }
+        conn = _FenceConn(
+            asset_rows=[_asset_row(tombstoned=True, cleaned_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC))],
+            operation_first=SimpleNamespace(data_consent_claims=[saved]),
+        )
+        request = SourceClaimRequest(
+            user_scope="u1",
+            claim_ref="claim-1",
+            operation_id="op-1",
+            sources=(
+                SourceVersionRef(
+                    source_kind=SourceKind.USER_MESSAGE,
+                    source_id="src-1",
+                    source_version="1",
+                    source_digest="c" * 64,
+                ),
+            ),
+        )
+        with pytest.raises(AgentServiceError) as exc:
+            await _dao(conn).claim_source_versions(request)
+        assert exc.value.code is AgentErrorCode.INPUT_CONFLICT
+        assert not any("UPDATE agent_operation" in sql for sql in conn.statements)
+
 
 def _asset_row(**overrides: Any) -> Any:
     values: dict[str, Any] = {
         "disabled_revision": 0,
         "read_state": "ready",
-        "digest": "a" * 64,
+        "digest": "b" * 64,
         "cleaned_at": None,
         "tombstoned": False,
+        # 认领身份四值核对需要资产元数据显式类别事实（不回落 asset_kind，R21）。
+        "metadata_payload": {
+            "schema_version": 1,
+            "user_message_origin": {"session_id": "s1", "message_id": "m1", "message_version": "1"},
+        },
     }
     values.update(overrides)
     return SimpleNamespace(**values)

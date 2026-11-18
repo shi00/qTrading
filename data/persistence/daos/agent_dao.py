@@ -1561,17 +1561,32 @@ class AgentDao(BaseDao):
 
     @staticmethod
     def _source_selected_range(metadata: dict[str, Any], source_ref: SourceRef, identity: str) -> SelectedRange:
-        """已存选定范围；未存时按已选 locator 派生（未读、统计未知，不填 0）。"""
+        """已存选定范围；未存时按已选 locator 派生（未读、统计未知，不填 0）。
+
+        ``selected_range.selection`` 必须与冻结 ``source_ref.locator.selection``
+        逐值一致（all/limited 不得互当）；``accepted_limited_version`` 只能等于
+        该源版本，否则按坏元数据 fail-closed（R21）。
+        """
 
         value = metadata.get("selected_range")
         if value is None:
             return SelectedRange(selection=source_ref.locator.selection)
         try:
-            return decode_selected_range(value, "$.metadata.selected_range")
+            selected = decode_selected_range(value, "$.metadata.selected_range")
         except AgentValidationError as exc:
             raise AgentServiceError(
                 AgentErrorCode.OPERATION_UNKNOWN, f"source selected_range is invalid: {exc.code}", identity
             ) from exc
+        if selected.selection != source_ref.locator.selection:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "source selected_range selection mismatches locator", identity
+            )
+        accepted = selected.accepted_limited_version
+        if accepted is not None and accepted != source_ref.version:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN, "source accepted version mismatches source version", identity
+            )
+        return selected
 
     @staticmethod
     def _source_facts(metadata: dict[str, Any], identity: str) -> tuple[FactValue, ...]:
@@ -7083,10 +7098,13 @@ class AgentDao(BaseDao):
           门同码）。清理执行路径不调用本方法，故不会自锁；权威事实是同一条
           ``agent_asset_version`` 行的 ``FOR UPDATE`` 锁，任意清理写入与本方法
           串行化，先认领者保有原事实；
+        - 认领身份四值核对（§5.4）：请求 ``source_kind`` / ``source_digest`` 必须与
+          锁定资产行的元数据类别与摘要一致，同 ID/版本异摘要或错类别 →
+          ``REVISION_CONFLICT``（不得把另一份原件当作同一源）；
         - 认领持久化：operation.data_consent_claims 追加 ``kind=source_revision``
-          条目绑定各源 disabled_revision（claim 先胜保原 operation 认领与在途）；
+          条目绑定各源身份四值与 disabled_revision（claim 先胜保原 operation 认领与在途）；
         - 幂等：同 claim_ref 同输入返回原事实（replayed=True，claim 已生效不被
-          后续禁用改写）；同 claim_ref 异输入 ``INPUT_CONFLICT``；
+          后续禁用改写）；同 claim_ref 异输入（含同 ID 异 digest/类别）``INPUT_CONFLICT``；
         - 重复 claim 只返回原事实，不生成第二操作。
 
         Raises:
@@ -7103,6 +7121,10 @@ class AgentDao(BaseDao):
         for index, source in enumerate(request.sources):
             _require_text_field(source.source_id, f"sources[{index}].source_id", identity)
             _require_text_field(source.source_version, f"sources[{index}].source_version", identity)
+            if not isinstance(source.source_kind, SourceKind):
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source_kind is invalid", identity)
+            if not is_digest(source.source_digest):
+                raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "source_digest is invalid", identity)
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         # 锁序：稳定 ID 排序（source_id, source_version）后逐一持锁。
@@ -7120,6 +7142,7 @@ class AgentDao(BaseDao):
                             AgentAssetVersion.digest,
                             AgentAssetVersion.cleaned_at,
                             AgentAssetVersion.tombstoned,
+                            AgentAssetVersion.metadata_payload,
                         )
                         .where(
                             AgentAssetVersion.user_scope == request.user_scope,
@@ -7172,10 +7195,25 @@ class AgentDao(BaseDao):
                 if asset_row.disabled_revision > 0 or asset_row.read_state == "disabled" or inherited > 0:
                     disabled_hits.append(f"{source.source_id}@{source.source_version}")
                     continue
+                # 认领身份逐值闭合（§5.4）：同 ID/版本不得借错类别或错摘要认领。
+                # 类别从资产元数据显式事实派生（不回落 asset_kind，R21）。
+                current_kind = self._source_kind_from_metadata(
+                    asset_row.metadata_payload,
+                    tombstoned=False,
+                    identity_str=f"{identity}/{source.source_id}@{source.source_version}",
+                )
+                if current_kind != source.source_kind.value or asset_row.digest != source.source_digest:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "source kind or digest mismatch",
+                        f"{identity}/{source.source_id}@{source.source_version}",
+                    )
                 bindings.append(
                     SourceClaimBinding(
                         source_id=source.source_id,
                         source_version=source.source_version,
+                        source_kind=source.source_kind,
+                        source_digest=source.source_digest,
                         disabled_revision=asset_row.disabled_revision,
                     )
                 )
@@ -7195,9 +7233,11 @@ class AgentDao(BaseDao):
                     AgentErrorCode.INPUT_INVALID, "operation does not exist; prepare before dispatch", identity
                 )
             # 3. 幂等重放先于禁用判定（§5.4：claim 先提交则保该原 operation 认领，
-            #    重放不被后续禁用改写；比对按源身份集合，锚定 revision 取保存原值）。
+            #    重放不被后续禁用改写；比对按源身份四值集合，锚定 revision 取保存原值）。
             existing_claims: list[dict] = list(operation_row.data_consent_claims or [])
-            requested_identity = {(s.source_id, s.source_version) for s in request.sources}
+            requested_identity = {
+                (s.source_id, s.source_version, s.source_kind.value, s.source_digest) for s in request.sources
+            }
             for existing in existing_claims:
                 if not isinstance(existing, dict):
                     continue
@@ -7205,23 +7245,34 @@ class AgentDao(BaseDao):
                     continue
                 saved_sources = existing.get("sources")
                 # 已保存认领条目结构异常 fail-closed：按冲突处理，不重算第二份认领。
-                if not isinstance(saved_sources, list):
+                if not isinstance(saved_sources, list) or not all(isinstance(s, dict) for s in saved_sources):
                     raise AgentServiceError(
                         AgentErrorCode.INPUT_CONFLICT,
                         "saved claim entry malformed",
                         identity,
                     )
-                saved_identity = {(s["source_id"], s["source_version"]) for s in saved_sources if isinstance(s, dict)}
-                if saved_identity == requested_identity:
+                try:
+                    saved_identity = {
+                        (s["source_id"], s["source_version"], s["source_kind"], s["source_digest"])
+                        for s in saved_sources
+                    }
                     saved_bindings = tuple(
                         SourceClaimBinding(
                             source_id=s["source_id"],
                             source_version=s["source_version"],
+                            source_kind=SourceKind(s["source_kind"]),
+                            source_digest=s["source_digest"],
                             disabled_revision=int(s["disabled_revision"]),
                         )
                         for s in saved_sources
-                        if isinstance(s, dict)
                     )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "saved claim entry malformed",
+                        identity,
+                    ) from exc
+                if saved_identity == requested_identity:
                     return SourceClaimFact(claim_ref=request.claim_ref, bindings=saved_bindings, replayed=True)
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_CONFLICT,
@@ -7251,6 +7302,8 @@ class AgentDao(BaseDao):
                     {
                         "source_id": b.source_id,
                         "source_version": b.source_version,
+                        "source_kind": b.source_kind.value,
+                        "source_digest": b.source_digest,
                         "disabled_revision": b.disabled_revision,
                     }
                     for b in bindings

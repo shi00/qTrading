@@ -29,14 +29,14 @@ from services.agent_service.service import AgentService
 _DIGEST = "a" * 64
 
 
-def _locator(source_id: str = "src-1", version: str = "v1") -> SourceLocator:
+def _locator(source_id: str = "src-1", version: str = "v1", digest: str = _DIGEST) -> SourceLocator:
     return SourceLocator(
         locator_kind="source_range",
         origin_ref=SourceVersionRef(
             source_kind=SourceKind.ATTACHMENT,
             source_id=source_id,
             source_version=version,
-            source_digest=_DIGEST,
+            source_digest=digest,
         ),
         selection=Selection(kind="all"),
     )
@@ -85,6 +85,19 @@ class TestSourceReadQueryCodec:
     def test_locator_identity_must_match_query(self) -> None:
         with pytest.raises(AgentValidationError) as excinfo:
             encode_source_read_query(_query(locator=_locator(version="v2")))
+
+        assert excinfo.value.code == "identity_mismatch"
+
+    def test_locator_digest_must_match_query(self) -> None:
+        # 同 ID/版本异 digest：不得当作同一原件（摘要必须逐值一致）
+        with pytest.raises(AgentValidationError) as excinfo:
+            encode_source_read_query(_query(locator=_locator(digest="b" * 64)))
+
+        assert excinfo.value.code == "identity_mismatch"
+
+    def test_locator_source_id_must_match_query(self) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            encode_source_read_query(_query(locator=_locator(source_id="src-2")))
 
         assert excinfo.value.code == "identity_mismatch"
 

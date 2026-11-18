@@ -828,6 +828,19 @@ def decode_selection(value: object, path: str) -> Selection:
     _fail("invalid_tag", f"{path}.kind")
 
 
+def _require_same_selection(expected: Selection, actual: Selection, path: str) -> None:
+    """冗余承载的 selection 必须逐原子一致（§3.3.1）。
+
+    ``all`` 与 ``limited`` 语义互斥，不得互相当作；同为 ``limited`` 但范围集合
+    不同同样是分叉。
+    """
+
+    if expected.kind != actual.kind:
+        _fail("kind_mismatch", path)
+    if expected.ranges != actual.ranges:
+        _fail("range_mismatch", path)
+
+
 def decode_source_locator(value: object, path: str) -> SourceLocator:
     """严格解码 SourceLocator（§3.3.1）。"""
 
@@ -1167,25 +1180,38 @@ class DataConsentSourceItem:
 def decode_data_consent_source_item(value: object, path: str) -> DataConsentSourceItem:
     """严格解码源项（10 键全必填禁额外键，§9.8）。
 
-    重算 ``selected_range_digest`` 并与载荷比对：不一致即拒绝（保存/决定重读/
-    每 attempt 核权均重算，不信调用方 digest）。
+    公共入口逐值闭合：顶层源身份四值与 ``locator.origin_ref`` 一致；
+    ``selected_range`` 与 ``locator`` 冗余承载同一选择（all/limited 不得互当）；
+    ``accepted_limited_version`` 只能等于本项 ``source_version``。最后重算
+    ``selected_range_digest`` 并与载荷比对（保存/决定重读/每 attempt 核权均重算，
+    不信调用方 digest）。
     """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _DATA_CONSENT_SOURCE_ITEM_KEYS, path)
 
-    origin = decode_source_version_ref(value["locator"]["origin_ref"], f"{path}.locator.origin_ref")
+    locator = decode_source_locator(value["locator"], f"{path}.locator")
+    origin = locator.origin_ref
+    source_kind = _require_choice(value["source_kind"], SOURCE_KINDS, f"{path}.source_kind", "invalid_source_kind")
+    source_id = _require_str(value["source_id"], f"{path}.source_id")
+    source_version = _require_str(value["source_version"], f"{path}.source_version")
+    source_digest = _require_digest(value["source_digest"], f"{path}.source_digest")
     # 源项顶层身份与 locator.origin_ref 一致（同一受管源版，冗余字段不得分叉）
     if (
-        value["source_kind"] != origin.source_kind.value
-        or value["source_id"] != origin.source_id
-        or value["source_version"] != origin.source_version
-        or value["source_digest"] != origin.source_digest
+        source_kind != origin.source_kind.value
+        or source_id != origin.source_id
+        or source_version != origin.source_version
+        or source_digest != origin.source_digest
     ):
         _fail("identity_mismatch", path)
 
     selected_range = decode_selected_range(value["selected_range"], f"{path}.selected_range")
+    _require_same_selection(selected_range.selection, locator.selection, f"{path}.selected_range.selection")
+    accepted = selected_range.accepted_limited_version
+    if accepted is not None and accepted != source_version:
+        _fail("invalid_accepted_version", f"{path}.selected_range.accepted_limited_version")
+
     digest = _require_digest(value["selected_range_digest"], f"{path}.selected_range_digest")
     if digest != selected_range_digest(selected_range):
         _fail("digest_mismatch", f"{path}.selected_range_digest")
@@ -1196,7 +1222,7 @@ def decode_data_consent_source_item(value: object, path: str) -> DataConsentSour
         source_version=origin.source_version,
         source_digest=origin.source_digest,
         selected_range=selected_range,
-        locator=decode_source_locator(value["locator"], f"{path}.locator"),
+        locator=locator,
         selected_range_digest=digest,
         representation_version=_require_str(value["representation_version"], f"{path}.representation_version"),
         representation_digest=_require_digest(value["representation_digest"], f"{path}.representation_digest"),
@@ -4870,10 +4896,16 @@ class SourceClaimRequest:
 
 @dataclass(frozen=True)
 class SourceClaimBinding:
-    """单源版本认领绑定：认领时新鲜重读到的 disabled_revision（claim 锚定值）。"""
+    """单源版本认领绑定：认领时新鲜重读到的身份四值与 disabled_revision（claim 锚定值）。
+
+    ``source_kind`` / ``source_digest`` 一并绑定：同 ID/版本但类别或摘要不同的
+    认领不得互认，重放也按四值身份比较（§5.4）。
+    """
 
     source_id: str
     source_version: str
+    source_kind: SourceKind
+    source_digest: str
     disabled_revision: int
 
 
@@ -5485,20 +5517,38 @@ def encode_source_ref(ref: SourceRef) -> dict[str, Any]:
 
 
 def decode_source_ref(value: object, path: str = "$.source_ref") -> SourceRef:
-    """严格解码来源元数据（14 键全必填、禁额外键）。"""
+    """严格解码来源元数据（14 键全必填、禁额外键）。
+
+    公共入口逐值闭合：顶层 ``source_kind/source_id/version/digest`` 四值必须与
+    ``locator.origin_ref`` 完全一致（同一受管源版，冗余承载不得分叉，§3.3）。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _SOURCE_REF_KEYS, path)
+    user_scope = _require_str(value["user_scope"], f"{path}.user_scope")
+    source_id = _require_str(value["source_id"], f"{path}.source_id")
+    version = _require_str(value["version"], f"{path}.version")
+    digest = _require_digest(value["digest"], f"{path}.digest")
+    source_kind = _require_enum(value["source_kind"], SourceKind, f"{path}.source_kind", "invalid_source_kind")
+    locator = decode_source_locator(value["locator"], f"{path}.locator")
+    origin = locator.origin_ref
+    if (
+        source_kind is not origin.source_kind
+        or source_id != origin.source_id
+        or version != origin.source_version
+        or digest != origin.source_digest
+    ):
+        _fail("identity_mismatch", f"{path}.locator.origin_ref")
     return SourceRef(
-        user_scope=_require_str(value["user_scope"], f"{path}.user_scope"),
-        source_id=_require_str(value["source_id"], f"{path}.source_id"),
-        version=_require_str(value["version"], f"{path}.version"),
-        digest=_require_digest(value["digest"], f"{path}.digest"),
-        source_kind=_require_enum(value["source_kind"], SourceKind, f"{path}.source_kind", "invalid_source_kind"),
+        user_scope=user_scope,
+        source_id=source_id,
+        version=version,
+        digest=digest,
+        source_kind=source_kind,
         display_name=_require_str(value["display_name"], f"{path}.display_name"),
         object_ref=_opt_str(value["object_ref"], f"{path}.object_ref"),
-        locator=decode_source_locator(value["locator"], f"{path}.locator"),
+        locator=locator,
         available_at=_opt_timestamp(value["available_at"], f"{path}.available_at"),
         period=_opt_str(value["period"], f"{path}.period"),
         unit_note=_opt_str(value["unit_note"], f"{path}.unit_note"),
@@ -5635,7 +5685,11 @@ def encode_source_read(read: SourceRead) -> dict[str, Any]:
 
 
 def decode_source_read(value: object, path: str = "$.source_read") -> SourceRead:
-    """严格解码来源读取结果（11 键全必填、禁额外键）。"""
+    """严格解码来源读取结果（11 键全必填、禁额外键）。
+
+    ``selected_range.selection`` 必须与 ``source.locator.selection`` 一致
+    （all/limited 不得互当），``accepted_limited_version`` 只能等于源版本。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
@@ -5649,9 +5703,15 @@ def decode_source_read(value: object, path: str = "$.source_read") -> SourceRead
     limitations = value["limitations"]
     if not isinstance(limitations, list):
         _fail("invalid_type", f"{path}.limitations")
+    source = decode_source_ref(value["source"], f"{path}.source")
+    selected_range = decode_selected_range(value["selected_range"], f"{path}.selected_range")
+    _require_same_selection(selected_range.selection, source.locator.selection, f"{path}.selected_range.selection")
+    accepted = selected_range.accepted_limited_version
+    if accepted is not None and accepted != source.version:
+        _fail("invalid_accepted_version", f"{path}.selected_range.accepted_limited_version")
     return SourceRead(
-        source=decode_source_ref(value["source"], f"{path}.source"),
-        selected_range=decode_selected_range(value["selected_range"], f"{path}.selected_range"),
+        source=source,
+        selected_range=selected_range,
         read_state=_require_enum(value["read_state"], ReadState, f"{path}.read_state", "invalid_read_state"),
         body_text=_opt_text(value["body_text"], f"{path}.body_text"),
         structured_blocks=tuple(
@@ -5702,7 +5762,12 @@ def encode_source_read_query(query: SourceReadQuery, path: str = "$.source_read_
     execution_id = _opt_str(query.execution_id, f"{path}.execution_id")
     round_id = _opt_str(query.round_id, f"{path}.round_id")
     input_revision = _opt_int(query.input_revision, f"{path}.input_revision", minimum=1)
-    if locator.origin_ref.source_id != source_id or locator.origin_ref.source_version != version:
+    if (
+        locator.origin_ref.source_id != source_id
+        or locator.origin_ref.source_version != version
+        or locator.origin_ref.source_digest != digest
+    ):
+        # 定位的源版摘要必须与查询摘要逐值一致：同 ID 异 digest 不得当作同一原件
         _fail("identity_mismatch", f"{path}.locator")
     if draft_revision is not None and execution_id is not None:
         _fail("context_conflict", f"{path}.execution_id")
