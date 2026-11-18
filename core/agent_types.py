@@ -5686,10 +5686,52 @@ def plan_spec_digest(plan: PlanSpecProposal) -> str:
     return sha256_hex(json_doc(["plan_spec", PLAN_SPEC_VERSION, list(plan.nodes)]))
 
 
+def plan_node_digest(node: PlanNodeSpec) -> str:
+    """单个节点提案内容摘要（节点 wire 全字段入身份，含来源版本引用）。"""
+
+    if not isinstance(node, PlanNodeSpec):
+        _fail("invalid_type", "$.node")
+    return sha256_hex(json_doc(["plan_node", PLAN_SPEC_VERSION, node]))
+
+
+def node_input_digest(
+    *,
+    node_digest: str,
+    dependency_input_digests: Sequence[str],
+    input_version_digest: str | None,
+) -> str:
+    """节点实际输入指纹（R2-I09）：节点内容 + 前置输入指纹（依赖序）+ 输入版本。
+
+    ``input_version_digest`` 为 ``None`` 表示当前输入版本无法核定；此时指纹仍可
+    计算（以显式 ``unknown`` 哨兵入摘要），但**不构成「仍适用」证据**——重试轮
+    保留前置在输入版本未知时不得复用（判据在服务层，见 workflows）。
+    """
+
+    if not is_digest(node_digest):
+        _fail("invalid_digest", "$.node_digest")
+    for index, dependency_digest in enumerate(dependency_input_digests):
+        if not is_digest(dependency_digest):
+            _fail("invalid_digest", f"$.dependency_input_digests[{index}]")
+    if input_version_digest is not None and not is_digest(input_version_digest):
+        _fail("invalid_digest", "$.input_version_digest")
+    return sha256_hex(
+        json_doc(
+            [
+                "agent_node_input",
+                PLAN_SPEC_VERSION,
+                node_digest,
+                list(dependency_input_digests),
+                input_version_digest if input_version_digest is not None else "unknown",
+            ]
+        )
+    )
+
+
 def validate_plan_spec_proposal(
     plan: PlanSpecProposal,
     *,
     allowed_role_capabilities: Mapping[str, AbstractSet[str]],
+    satisfied_external_dependencies: AbstractSet[str] = frozenset(),
 ) -> None:
     """计划提案程序校验（SQ-04：先核循环/自依赖/缺引用/角色/能力/20 叶）。
 
@@ -5698,6 +5740,9 @@ def validate_plan_spec_proposal(
         allowed_role_capabilities: 本次角色 → 允许能力键集合（由角色/授权配置
             提供）。角色缺失即拒绝；节点能力必须落在该角色集合内（模型提案不授
             自身权限，DD-F03/F04）。
+        satisfied_external_dependencies: 重试轮由保留前置满足的依赖身份（不在本
+            计划内）；命中即不判缺引用，也不参与无环计算的入度/边（其成果与适用
+            性由服务层单独核定）。
 
     Raises:
         AgentValidationError: ``empty_plan`` / ``too_many_leaves`` /
@@ -5762,18 +5807,20 @@ def validate_plan_spec_proposal(
                 _fail("duplicate_source_ref", ref_path)
             seen_refs.add(ref_key)
 
-    # 缺引用：依赖目标必须在本计划内（一层叶，不跨计划引用）。
+    # 缺引用：依赖目标必须在本计划内（一层叶，不跨计划引用）；重试轮由保留
+    # 前置满足的外部依赖不在此列。
     for index, node in enumerate(nodes):
         for dep_index, dependency in enumerate(node.depends_on):
-            if dependency not in seen_index:
+            if dependency not in seen_index and dependency not in satisfied_external_dependencies:
                 _fail("missing_reference", f"$.nodes[{index}].depends_on[{dep_index}]")
 
-    # 无环：Kahn 拓扑排序；未全部出队即有环（非法图零执行）。
-    in_degree = {node.node_id: len(node.depends_on) for node in nodes}
+    # 无环：Kahn 拓扑排序（只计本计划内边）；未全部出队即有环（非法图零执行）。
+    in_degree = {node.node_id: sum(1 for dependency in node.depends_on if dependency in seen_index) for node in nodes}
     children: dict[str, list[str]] = {node.node_id: [] for node in nodes}
     for node in nodes:
         for dependency in node.depends_on:
-            children[dependency].append(node.node_id)
+            if dependency in seen_index:
+                children[dependency].append(node.node_id)
     ready = [node_id for node_id, degree in in_degree.items() if degree == 0]
     visited = 0
     while ready:
