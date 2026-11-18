@@ -26,6 +26,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, is_dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime as dt
 from datetime import UTC
 from decimal import Decimal, InvalidOperation
@@ -621,6 +622,111 @@ def _require_result_text(value: object, path: str) -> None:
         _fail("invalid_value", path)
 
 
+@dataclass(frozen=True, slots=True)
+class ResearchObjectGap:
+    """对象级缺口（F04：缺对象/缺期间/冲突/未核验论据逐对象保留，不汇总成「无问题」）。
+
+    ``object_ref`` 为被研究对象的稳定身份（股票/期间/叶节点等，随调用方上下文）；
+    ``detail`` 记录证据或原因（如缺失指标、冲突来源、未核验断言），不得为空——
+    空原因等于把「已知缺口」伪装成「无缺口」（R21）。
+    """
+
+    object_ref: str
+    gap_kind: str
+    detail: str
+
+    def __post_init__(self) -> None:
+        for name in ("object_ref", "detail"):
+            _require_result_text(getattr(self, name), f"$.{name}")
+        if self.gap_kind not in RESEARCH_GAP_KINDS:
+            _fail("invalid_gap_kind", "$.gap_kind")
+
+    def to_wire(self) -> dict[str, str]:
+        return {"object_ref": self.object_ref, "gap_kind": self.gap_kind, "detail": self.detail}
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchCompletionAssessment:
+    """研究完成核定（F04）：执行结束、成果保存、目标覆盖三项分别核定后再给结论。
+
+    ``execution_ended`` 为 ``None`` 表示执行状态本身未核定（不推断结束）；``False``
+    表示仍在进行；``result_saved`` 是保存事实而非文本存在；``goal_coverage`` 是核定后
+    的有效覆盖（声明 ``full`` 但存在缺口/未收敛时降级 ``partial``），与声明的
+    ``ResearchResultDraft.goal_coverage`` 同时保留。``outcome`` 为组级结论：
+    任一事实未核定即 ``unknown``（未知优先于失败），不按成功叶数量推断完整。
+    """
+
+    execution_ended: bool | None
+    result_saved: bool
+    goal_coverage: str
+    outcome: str
+    object_gaps: tuple[ResearchObjectGap, ...]
+
+    def __post_init__(self) -> None:
+        if self.execution_ended is not None and not isinstance(self.execution_ended, bool):
+            _fail("invalid_type", "$.execution_ended")
+        if not isinstance(self.result_saved, bool):
+            _fail("invalid_type", "$.result_saved")
+        if self.goal_coverage not in GOAL_COVERAGES:
+            _fail("invalid_goal_coverage", "$.goal_coverage")
+        if self.outcome not in RESEARCH_OUTCOMES:
+            _fail("invalid_research_outcome", "$.outcome")
+        if not isinstance(self.object_gaps, tuple) or any(
+            not isinstance(gap, ResearchObjectGap) for gap in self.object_gaps
+        ):
+            _fail("invalid_type", "$.object_gaps")
+
+
+def assess_research_completion(
+    *,
+    execution_state: str,
+    final_output_saved: bool,
+    goal_coverage: str,
+    convergence_confirmed: bool,
+    object_gaps: tuple[ResearchObjectGap, ...] = (),
+    missing_fields: tuple[str, ...] = (),
+    data_warnings: tuple[str, ...] = (),
+) -> ResearchCompletionAssessment:
+    """按三项独立事实核定研究完成结论（F04；不由「任务跑完」推断目标达成）。
+
+    判定规则：
+
+    - **执行结束**：终态（``NON_RECOVERABLE_DISPLAY_STATES``）为已结束；``unknown``
+      状态为未核定（``None``）；其余（排队/运行/等待/暂停）为未结束（``False``）。
+    - **成果已保存**：只采用保存事实（``final_output_saved``），不以正文非空代替。
+    - **目标覆盖**：声明 ``full`` 但存在对象级缺口、声明缺失字段/数据告警或未确认
+      收敛时降级 ``partial``（缺证不得判完整）；声明 ``unknown`` 保 ``unknown``。
+    - **组级结论**：执行未结束/未核定、执行 ``closed_unknown`` 或目标覆盖 ``unknown``
+      一律 ``unknown``（未知优先于失败）；已结束且无可靠成果为 ``failed``；有效覆盖
+      ``full`` 为 ``complete``；其余（有可独立使用成果但目标未完全覆盖）为 ``partial``。
+      可靠确认的零匹配由调用方以 ``goal_coverage=full`` 且无缺口表达；读取失败或未
+      确认须以缺口/``unknown`` 表达，不得冒充零匹配。
+    """
+
+    if execution_state == "unknown":
+        execution_ended: bool | None = None
+    else:
+        execution_ended = execution_state in NON_RECOVERABLE_DISPLAY_STATES
+    effective_coverage = goal_coverage
+    if goal_coverage == "full" and (object_gaps or missing_fields or data_warnings or not convergence_confirmed):
+        effective_coverage = "partial"
+    if execution_state in {"unknown", "closed_unknown"} or execution_ended is not True or goal_coverage == "unknown":
+        outcome = "unknown"
+    elif not final_output_saved:
+        outcome = "failed"
+    elif effective_coverage == "full":
+        outcome = "complete"
+    else:
+        outcome = "partial"
+    return ResearchCompletionAssessment(
+        execution_ended=execution_ended,
+        result_saved=final_output_saved,
+        goal_coverage=effective_coverage,
+        outcome=outcome,
+        object_gaps=object_gaps,
+    )
+
+
 def _require_text_tuple(value: object, path: str) -> None:
     if not isinstance(value, tuple):
         _fail("invalid_type", path)
@@ -677,6 +783,8 @@ class ResearchResultDraft:
     plan_version: int | None
     parent_artifact_refs: tuple[str, ...]
     source_refs: tuple[SourceVersionRef, ...]
+    #: 对象级缺口（可选，关键字传入；不占位置参数序，保存子类仍可追加身份字段）。
+    object_gaps: tuple[ResearchObjectGap, ...] = dataclass_field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         for name in ("user_scope", "session_id", "execution_id", "round_id", "node_id", "actual_model_ref"):
@@ -730,8 +838,31 @@ class ResearchResultDraft:
             not isinstance(ref, SourceVersionRef) for ref in self.source_refs
         ):
             _fail("invalid_type", "$.source_refs")
+        if not isinstance(self.object_gaps, tuple) or any(
+            not isinstance(gap, ResearchObjectGap) for gap in self.object_gaps
+        ):
+            _fail("invalid_type", "$.object_gaps")
+        seen_gaps: set[tuple[str, str]] = set()
+        for index, gap in enumerate(self.object_gaps):
+            key = (gap.object_ref, gap.gap_kind)
+            if key in seen_gaps:
+                _fail("duplicate_object_gap", f"$.object_gaps[{index}]")
+            seen_gaps.add(key)
         if not (self.summary or self.key_points or self.body_text or self.structured_fields or self.object_rows):
             _fail("empty_result", "$")
+
+    def assess_completion(self, *, final_output_saved: bool) -> ResearchCompletionAssessment:
+        """按本成果已记录的声明与缺口核定完成事实（保存事实由调用方传入）。"""
+
+        return assess_research_completion(
+            execution_state=self.execution_state,
+            final_output_saved=final_output_saved,
+            goal_coverage=self.goal_coverage,
+            convergence_confirmed=self.convergence_confirmed,
+            object_gaps=self.object_gaps,
+            missing_fields=self.missing_fields,
+            data_warnings=self.data_warnings,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -777,10 +908,17 @@ class ResearchResult(ResearchResultDraft):
             plan_version=draft.plan_version,
             parent_artifact_refs=draft.parent_artifact_refs,
             source_refs=draft.source_refs,
+            object_gaps=draft.object_gaps,
             artifact_id=artifact_id,
             artifact_version=artifact_version,
             final_output_saved=True,
         )
+
+    @property
+    def completion(self) -> ResearchCompletionAssessment:
+        """已保存成果的完成核定（三项事实分别核定 + 组级结论）。"""
+
+        return self.assess_completion(final_output_saved=self.final_output_saved)
 
     def __post_init__(self) -> None:
         ResearchResultDraft.__post_init__(self)
@@ -799,12 +937,15 @@ def encode_research_result_payload(draft: ResearchResultDraft, *, final_output_s
     """成果内容 → 保存载荷（DD §9.7：正文单独存 ``agent_artifact.body_text``）。
 
     载荷只承载结构/限制/证据与正文定位，不重复存正文；正文能否重建由
-    ``body_saved`` 显式标记，不以摘要非空冒充完整成果（R21）。
+    ``body_saved`` 显式标记，不以摘要非空冒充完整成果（R21）。``completion`` 同时
+    保存声明的目标覆盖与核定结论（执行结束/成果保存/有效覆盖/对象级缺口），
+    读取方不必从「任务跑完」推断目标达成（F04）。
     """
 
+    assessment = draft.assess_completion(final_output_saved=final_output_saved)
     return json_doc(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "identity": {
                 "user_scope": draft.user_scope,
                 "session_id": draft.session_id,
@@ -838,10 +979,15 @@ def encode_research_result_payload(draft: ResearchResultDraft, *, final_output_s
             },
             "completion": {
                 "execution_state": draft.execution_state,
+                "execution_ended": assessment.execution_ended,
                 "goal_coverage": draft.goal_coverage,
+                "goal_coverage_effective": assessment.goal_coverage,
                 "final_output_saved": final_output_saved,
+                "result_saved": assessment.result_saved,
+                "outcome": assessment.outcome,
                 "convergence_confirmed": draft.convergence_confirmed,
                 "unknown_operation_refs": list(draft.unknown_operation_refs),
+                "object_gaps": [gap.to_wire() for gap in assessment.object_gaps],
             },
             "usage": {"ledger_refs": list(draft.ledger_refs)},
             "trace": {
@@ -3491,6 +3637,22 @@ DISPLAY_STATES: Final[frozenset[str]] = frozenset(
 
 #: 目标覆盖 4 值（§9.4/§9.5 CHECK goal_coverage）。
 GOAL_COVERAGES: Final[frozenset[str]] = frozenset({"full", "partial", "none", "unknown"})
+
+#: 研究完成结论 4 值（F04：完整/部分/失败/未知分别判定；未知优先于失败）。
+RESEARCH_OUTCOMES: Final[frozenset[str]] = frozenset({"complete", "partial", "failed", "unknown"})
+
+#: 对象级缺口类型（F04/AC04：缺对象/缺期间/来源冲突/论据未核验/数据缺失/无成果/结果未确认）。
+RESEARCH_GAP_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "missing_object",
+        "missing_period",
+        "source_conflict",
+        "unverified_claim",
+        "missing_data",
+        "no_result",
+        "result_unconfirmed",
+    }
+)
 
 #: 成果类别 8 值（§9.7 CHECK kind）。
 ARTIFACT_KINDS: Final[frozenset[str]] = frozenset(
