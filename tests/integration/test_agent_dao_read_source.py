@@ -92,7 +92,9 @@ async def _setup(url: str) -> AgentDao:
     return AgentDao(create_test_engine(url))
 
 
-def _locator(source_id: str = "src-1", version: str = "v1", *, limited: bool = False) -> SourceLocator:
+def _locator(
+    source_id: str = "src-1", version: str = "v1", *, limited: bool = False, digest: str = _DIGEST
+) -> SourceLocator:
     ranges = ()
     if limited:
         from core.agent_types import PagesRange
@@ -104,7 +106,7 @@ def _locator(source_id: str = "src-1", version: str = "v1", *, limited: bool = F
             source_kind=SourceKind.ATTACHMENT,
             source_id=source_id,
             source_version=version,
-            source_digest=_DIGEST,
+            source_digest=digest,
         ),
         selection=Selection(kind="limited" if limited else "all", ranges=ranges),
     )
@@ -601,7 +603,10 @@ class TestReadSourceIdentityAndFailures:
         await _seed_asset(dao, body_text="正文")
 
         with pytest.raises(AgentServiceError) as excinfo:
-            await dao.read_source(_query(digest="d" * 64), user_scope="u1")
+            # 查询自洽（digest 与 locator.origin_ref 同值），差异只在库内已存摘要：
+            # 若两处不同会在 encode 阶段以 INPUT_INVALID 拒绝，测不到 REVISION_CONFLICT。
+            mismatched = "d" * 64
+            await dao.read_source(_query(digest=mismatched, locator=_locator(digest=mismatched)), user_scope="u1")
         assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
         await dao.engine.dispose()  # type: ignore[union-attr]
 
@@ -904,6 +909,13 @@ class TestUserMessageOriginSource:
                 )
         elif tamper == "message_missing":
             async with dao.engine.begin() as conn:  # type: ignore[union-attr]
+                # 谱系边对消息有 RESTRICT 复合外键：先删边再删消息，模拟消息行缺失。
+                await conn.execute(
+                    sa.delete(AgentSourceLink).where(
+                        AgentSourceLink.user_scope == "u1",
+                        AgentSourceLink.message_id == identity.message_id,
+                    )
+                )
                 await conn.execute(
                     sa.delete(AgentMessage).where(
                         AgentMessage.user_scope == "u1", AgentMessage.message_id == identity.message_id
