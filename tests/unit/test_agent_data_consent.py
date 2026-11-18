@@ -34,7 +34,9 @@ from core.agent_types import (
     DataAttemptOutcome,
     DataConsentClaim,
     DataConsentCommand,
+    DataConsentDigestMatch,
     DataConsentRevokeCommand,
+    classify_data_consent_input_digest,
     data_consent_source_scope_digest,
     decode_data_consent_binding,
     decode_data_consent_claim,
@@ -45,6 +47,8 @@ from core.agent_types import (
     encode_data_consent_claim,
     evaluate_data_attempt,
     json_doc,
+    legacy_data_consent_revoke_input_digest,
+    legacy_data_consent_save_input_digest,
     local_target_fingerprint,
     validate_data_attempt_authorization,
     validate_data_consent_claim,
@@ -750,6 +754,83 @@ class TestDataConsentRevokeIdentity:
         with pytest.raises(AgentValidationError) as exc:
             derive_data_consent_revoke_identity(_revoke_command(command=_command_ref(expected_revision=0)))
         assert exc.value.code == "invalid_revision"
+
+
+class TestDataConsentCommandDigestCompleteness:
+    """I35：许可命令身份须核 consent ID 一致，摘要覆盖完整版本化输入。"""
+
+    def test_binding_consent_id_mismatch_rejected(self) -> None:
+        bad_binding = _decoded_binding({"consent_id": "dec-other"})
+        with pytest.raises(AgentValidationError) as exc:
+            derive_data_consent_command_identity(_save_command(binding=bad_binding))
+        assert exc.value.code == "identity_mismatch"
+        assert exc.value.field_path == "$.binding.consent_id"
+
+    def test_session_node_module_business_changes_yield_distinct_digests(self) -> None:
+        base = derive_data_consent_command_identity(_save_command()).input_digest
+        variants = (
+            _save_command(session_id="s-2"),
+            _save_command(node_id="leaf"),
+            _save_command(command=_command_ref(source_module="agent_api")),
+            _save_command(command=_command_ref(business_request_id="req-2")),
+        )
+        digests = {derive_data_consent_command_identity(item).input_digest for item in variants}
+        # 换 session/node/module/业务身份不得误判为同一幂等请求
+        assert len(digests) == len(variants)
+        assert base not in digests
+
+    def test_same_full_input_is_stable_and_key_order_independent(self) -> None:
+        baseline = derive_data_consent_command_identity(_save_command())
+        assert baseline.input_digest == derive_data_consent_command_identity(_save_command()).input_digest
+        reordered_payload = dict(reversed(list(_binding_payload().items())))
+        reordered_binding = decode_data_consent_binding(reordered_payload, "$")
+        assert (
+            derive_data_consent_command_identity(_save_command(binding=reordered_binding)).input_digest
+            == baseline.input_digest
+        )
+
+    def test_legacy_digest_classified_and_never_silently_equal(self) -> None:
+        command = _save_command()
+        current = derive_data_consent_command_identity(command).input_digest
+        legacy = legacy_data_consent_save_input_digest(command)
+        assert legacy != current
+        assert (
+            classify_data_consent_input_digest(current, current=current, legacy=legacy)
+            is DataConsentDigestMatch.CURRENT
+        )
+        assert (
+            classify_data_consent_input_digest(legacy, current=current, legacy=legacy) is DataConsentDigestMatch.LEGACY
+        )
+        assert (
+            classify_data_consent_input_digest("0" * 64, current=current, legacy=legacy)
+            is DataConsentDigestMatch.MISMATCH
+        )
+
+    def test_legacy_digest_cannot_distinguish_session_change(self) -> None:
+        # 历史 v1 摘要漏 session/node 等目标：即便换 session 也与旧行摘要相同，
+        # 故必须按 LEGACY 分类拒绝重放，不得静默当等价。
+        assert legacy_data_consent_save_input_digest(_save_command()) == legacy_data_consent_save_input_digest(
+            _save_command(session_id="s-2")
+        )
+
+    def test_revoke_digest_covers_module_and_business_identity(self) -> None:
+        base = derive_data_consent_revoke_identity(_revoke_command()).input_digest
+        other_module = derive_data_consent_revoke_identity(
+            _revoke_command(command=_command_ref(expected_revision=1, source_module="agent_api"))
+        ).input_digest
+        other_business = derive_data_consent_revoke_identity(
+            _revoke_command(command=_command_ref(expected_revision=1, business_request_id="req-2"))
+        ).input_digest
+        assert len({base, other_module, other_business}) == 3
+
+    def test_revoke_legacy_digest_classified_as_legacy(self) -> None:
+        command = _revoke_command()
+        current = derive_data_consent_revoke_identity(command).input_digest
+        legacy = legacy_data_consent_revoke_input_digest(command)
+        assert legacy != current
+        assert (
+            classify_data_consent_input_digest(legacy, current=current, legacy=legacy) is DataConsentDigestMatch.LEGACY
+        )
 
 
 class TestValidateDataAttemptAuthorization:

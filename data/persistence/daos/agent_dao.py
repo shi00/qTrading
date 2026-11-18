@@ -74,6 +74,7 @@ from core.agent_types import (
     DataConsentClaim,
     DataConsentClaimFact,
     DataConsentCommand,
+    DataConsentDigestMatch,
     DataConsentRevokeCommand,
     DataConsentState,
     DecisionBatchFact,
@@ -237,7 +238,10 @@ from core.agent_types import (
     frozen_command_input_digest,
     json_doc,
     is_digest,
+    classify_data_consent_input_digest,
     legacy_command_input_digest,
+    legacy_data_consent_revoke_input_digest,
+    legacy_data_consent_save_input_digest,
     normalize_cleanup_ids,
     role_skill_assignment_digest,
     sha256_hex,
@@ -3530,6 +3534,7 @@ class AgentDao(BaseDao):
 
         self._check_engine()
         identity = derive_data_consent_command_identity(command)
+        legacy_digest = legacy_data_consent_save_input_digest(command)
         identity_str = f"{command.command.user_scope}/{command.consent_id}"
         binding = command.binding
         payload_wire = encode_data_consent_binding(binding)
@@ -3558,19 +3563,30 @@ class AgentDao(BaseDao):
                 )
             ).first()
             if existing_command is not None:
-                if existing_command.input_digest == identity.input_digest:
-                    if existing_command.receipt_payload is None:
-                        raise AgentServiceError(
-                            AgentErrorCode.OPERATION_UNKNOWN,
-                            "original data consent save receipt unavailable",
-                            identity_str,
-                        )
-                    return decode_data_consent_binding(existing_command.receipt_payload, "$")
-                raise AgentServiceError(
-                    AgentErrorCode.INPUT_CONFLICT,
-                    "same data consent command key with different input",
-                    identity_str,
+                match = classify_data_consent_input_digest(
+                    existing_command.input_digest, current=identity.input_digest, legacy=legacy_digest
                 )
+                if match is DataConsentDigestMatch.LEGACY:
+                    # 历史 v1 摘要不含 session/node/module/业务身份，无法证明同一
+                    # 输入；按版本区分并拒绝重放，不得静默当等价（I35）。
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "legacy data consent save digest cannot verify full target; replay refused",
+                        identity_str,
+                    )
+                if match is not DataConsentDigestMatch.CURRENT:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "same data consent command key with different input",
+                        identity_str,
+                    )
+                if existing_command.receipt_payload is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "original data consent save receipt unavailable",
+                        identity_str,
+                    )
+                return decode_data_consent_binding(existing_command.receipt_payload, "$")
             occurred = datetime.now(UTC)
             if command.command.expected_revision == 0:
                 # 3a. 建行：decision 必须不存在；consent_revision=1（core 已校验）。
@@ -3675,6 +3691,7 @@ class AgentDao(BaseDao):
 
         self._check_engine()
         identity = derive_data_consent_revoke_identity(command)
+        legacy_digest = legacy_data_consent_revoke_input_digest(command)
         identity_str = f"{command.command.user_scope}/{command.consent_id}"
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
@@ -3708,19 +3725,29 @@ class AgentDao(BaseDao):
                 )
             ).first()
             if existing_command is not None:
-                if existing_command.input_digest == identity.input_digest:
-                    if existing_command.receipt_payload is None:
-                        raise AgentServiceError(
-                            AgentErrorCode.OPERATION_UNKNOWN,
-                            "original data consent revoke receipt unavailable",
-                            identity_str,
-                        )
-                    return decode_command_receipt(existing_command.receipt_payload, "$")
-                raise AgentServiceError(
-                    AgentErrorCode.INPUT_CONFLICT,
-                    "same data consent revoke key with different input",
-                    identity_str,
+                match = classify_data_consent_input_digest(
+                    existing_command.input_digest, current=identity.input_digest, legacy=legacy_digest
                 )
+                if match is DataConsentDigestMatch.LEGACY:
+                    # 历史 v1 摘要不含 module/业务身份；拒绝重放，不静默当等价（I35）。
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "legacy data consent revoke digest cannot verify full target; replay refused",
+                        identity_str,
+                    )
+                if match is not DataConsentDigestMatch.CURRENT:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_CONFLICT,
+                        "same data consent revoke key with different input",
+                        identity_str,
+                    )
+                if existing_command.receipt_payload is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.OPERATION_UNKNOWN,
+                        "original data consent revoke receipt unavailable",
+                        identity_str,
+                    )
+                return decode_command_receipt(existing_command.receipt_payload, "$")
             # 3. 版本与状态校验（终态不可再撤销）。
             if decision_row.revision != command.command.expected_revision:
                 raise AgentServiceError(
@@ -3821,9 +3848,7 @@ class AgentDao(BaseDao):
             return None
         return decode_data_consent_binding(row.data_consent_payload, "$")
 
-    async def read_data_consent_save_replay(
-        self, user_scope: str, consent_id: str, *, command_id: str, input_digest: str
-    ) -> DataConsentBinding | None:
+    async def read_data_consent_save_replay(self, command: DataConsentCommand) -> DataConsentBinding | None:
         """按原命令身份查回保存回执（重放判定先于状态迁移预检，检视 M15）。
 
         批准提交后回执丢失时，同命令同输入重传必须返回原回执，而不是被
@@ -3831,8 +3856,10 @@ class AgentDao(BaseDao):
         同键查重）。本方法只读、零新增事实：
 
         - 命令行不存在 → ``None``（调用方按新迁移继续走状态预检）；
-        - 同命令键同输入 → 原回执绑定（重放）；
+        - 同命令键同完整版本化输入 → 原回执绑定（重放）；
         - 同命令键异输入 → ``INPUT_CONFLICT``（零写）；
+        - 历史 v1 摘要（缺 session/node/module/业务身份）→ ``OPERATION_UNKNOWN``
+          拒绝重放，不静默当等价（I35）；
         - 原回执缺失或不可可靠重读 → ``OPERATION_UNKNOWN``（R21 fail-closed）。
 
         写事务内 :meth:`save_data_consent_decision` 的同键查重仍是权威判定，
@@ -3840,28 +3867,34 @@ class AgentDao(BaseDao):
         """
 
         self._check_engine()
-        identity_str = f"{user_scope}/{consent_id}"
-        if not isinstance(user_scope, str) or user_scope == "":
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "user_scope must be non-empty text", identity_str)
-        if not isinstance(consent_id, str) or consent_id == "":
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "consent_id must be non-empty text", identity_str)
-        if not isinstance(command_id, str) or command_id == "":
-            raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "command_id must be non-empty text", identity_str)
+        identity = derive_data_consent_command_identity(command)
+        identity_str = f"{command.command.user_scope}/{command.consent_id}"
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.connect() as conn:
             row = (
                 await conn.execute(
                     sa.select(AgentCommand.input_digest, AgentCommand.receipt_payload).where(
-                        AgentCommand.user_scope == user_scope,
-                        AgentCommand.target_id == consent_id,
-                        AgentCommand.client_command_id == command_id,
+                        AgentCommand.user_scope == command.command.user_scope,
+                        AgentCommand.target_id == command.consent_id,
+                        AgentCommand.client_command_id == command.command.command_id,
                     )
                 )
             ).first()
         if row is None:
             return None
-        if row.input_digest != input_digest:
+        match = classify_data_consent_input_digest(
+            row.input_digest,
+            current=identity.input_digest,
+            legacy=legacy_data_consent_save_input_digest(command),
+        )
+        if match is DataConsentDigestMatch.LEGACY:
+            raise AgentServiceError(
+                AgentErrorCode.OPERATION_UNKNOWN,
+                "legacy data consent save digest cannot verify full target; replay refused",
+                identity_str,
+            )
+        if match is not DataConsentDigestMatch.CURRENT:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_CONFLICT,
                 "same data consent command key with different input",

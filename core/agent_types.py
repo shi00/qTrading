@@ -2096,9 +2096,9 @@ class DataConsentCommand:
     ``CommandRef.expected_revision`` 即 expected_consent_revision（§3.1：0=目标
     尚不存在→建新决定行；≥1=以该版为 CAS 基准更新）。``consent_id`` 即决定行
     decision_id（§9.8），由调用方以稳定身份派生（如 stable_id），owner 合同只
-    要求非空稳定身份。``binding`` 为完整 v1 绑定（20 键），其 user_scope/
-    execution_id/round_id 须与命令身份一致；建行时 consent_revision=1，更新时
-    =expected+1（§9.8 重复字段 consent_revision 与决定行 revision 同事务一致）。
+    要求非空稳定身份。``binding`` 为完整 v1 绑定（20 键），其 consent_id/
+    user_scope/execution_id/round_id 须与命令身份一致；建行时 consent_revision=1，
+    更新时 =expected+1（§9.8 重复字段 consent_revision 与决定行 revision 同事务一致）。
     """
 
     command: CommandRef
@@ -2131,6 +2131,33 @@ class DataConsentCommandIdentity:
     input_digest: str
 
 
+#: 资料许可命令摘要规范版本（I35）：v1 只覆盖命令键与绑定，漏 session/node/
+#: module/业务身份；v2 覆盖全部参与判定的版本化输入，旧行经 legacy 摘要区分。
+DATA_CONSENT_COMMAND_INPUT_DIGEST_VERSION: Final = 2
+
+
+class DataConsentDigestMatch(Enum):
+    """库中命令摘要与当前输入的关系（I35：历史摘要不得静默当等价）。"""
+
+    CURRENT = "current"
+    LEGACY = "legacy"
+    MISMATCH = "mismatch"
+
+
+def classify_data_consent_input_digest(stored: str, *, current: str, legacy: str) -> DataConsentDigestMatch:
+    """三分类判定库中摘要：``CURRENT`` / ``LEGACY`` / ``MISMATCH``（I35）。
+
+    历史 v1 摘要只覆盖命令键与绑定，无法证明 session/node/module/业务身份
+    相同，调用方必须拒绝重放而非当作等价；仅 ``CURRENT`` 可查回原回执。
+    """
+
+    if stored == current:
+        return DataConsentDigestMatch.CURRENT
+    if stored == legacy:
+        return DataConsentDigestMatch.LEGACY
+    return DataConsentDigestMatch.MISMATCH
+
+
 def _check_command_ref(ref: CommandRef) -> None:
     """CommandRef 入口校验（§3.3.1 语法基线）。"""
 
@@ -2147,7 +2174,13 @@ def _check_command_ref(ref: CommandRef) -> None:
 
 
 def derive_data_consent_command_identity(command: DataConsentCommand) -> DataConsentCommandIdentity:
-    """校验保存命令并派生命令身份/输入摘要（§3.3.2 命令键 + §9.8 命令摘要）。"""
+    """校验保存命令并派生命令身份/输入摘要（§3.3.2 命令键 + §9.8 命令摘要）。
+
+    摘要覆盖**完整版本化输入**（I35）：用户域、来源模块、业务请求身份、命令
+    身份、consent ID、目标 session/execution/round/node 及完整绑定；任一项不同
+    即异输入，换 session/node/module/业务身份不得误判为同一幂等请求。
+    ``binding.consent_id`` 必须等于命令 ``consent_id``（身份不得跨目标串用）。
+    """
 
     _check_command_ref(command.command)
     _require_str(command.consent_id, "$.consent_id")
@@ -2158,6 +2191,8 @@ def derive_data_consent_command_identity(command: DataConsentCommand) -> DataCon
     binding = command.binding
     if not isinstance(binding, DataConsentBinding):
         _fail("invalid_type", "$.binding")
+    if binding.consent_id != command.consent_id:
+        _fail("identity_mismatch", "$.binding.consent_id")
     if binding.user_scope != command.command.user_scope:
         _fail("identity_mismatch", "$.binding.user_scope")
     if binding.execution_id != command.execution_id or binding.round_id != command.round_id:
@@ -2173,19 +2208,47 @@ def derive_data_consent_command_identity(command: DataConsentCommand) -> DataCon
     )
     canonical = json_doc(
         {
-            "schema_version": 1,
+            "schema_version": DATA_CONSENT_COMMAND_INPUT_DIGEST_VERSION,
             "action": "save",
+            "user_scope": command.command.user_scope,
+            "source_module": command.command.source_module,
+            "business_request_id": command.command.business_request_id,
             "command_id": command.command.command_id,
             "consent_id": command.consent_id,
             "expected_consent_revision": expected,
+            "session_id": command.session_id,
+            "execution_id": command.execution_id,
+            "round_id": command.round_id,
+            "node_id": command.node_id,
             "binding": encode_data_consent_binding(binding),
         }
     )
     return DataConsentCommandIdentity(command_record_id=command_record_id, input_digest=sha256_hex(canonical))
 
 
+def legacy_data_consent_save_input_digest(command: DataConsentCommand) -> str:
+    """历史 v1 保存摘要（仅命令键/预期版/绑定）：只用于识别旧行，禁止新写入。"""
+
+    return sha256_hex(
+        json_doc(
+            {
+                "schema_version": 1,
+                "action": "save",
+                "command_id": command.command.command_id,
+                "consent_id": command.consent_id,
+                "expected_consent_revision": command.command.expected_revision,
+                "binding": encode_data_consent_binding(command.binding),
+            }
+        )
+    )
+
+
 def derive_data_consent_revoke_identity(command: DataConsentRevokeCommand) -> DataConsentCommandIdentity:
-    """校验撤销命令并派生命令身份/输入摘要（预期版参与摘要，§9.8）。"""
+    """校验撤销命令并派生命令身份/输入摘要（预期版参与摘要，§9.8）。
+
+    摘要同样覆盖完整版本化输入（I35）：用户域/来源模块/业务请求身份/命令
+    身份/consent ID/预期版，换业务身份或模块不得误判为同一幂等请求。
+    """
 
     _check_command_ref(command.command)
     _require_str(command.consent_id, "$.consent_id")
@@ -2196,14 +2259,33 @@ def derive_data_consent_revoke_identity(command: DataConsentRevokeCommand) -> Da
     )
     canonical = json_doc(
         {
-            "schema_version": 1,
+            "schema_version": DATA_CONSENT_COMMAND_INPUT_DIGEST_VERSION,
             "action": "revoke",
+            "user_scope": command.command.user_scope,
+            "source_module": command.command.source_module,
+            "business_request_id": command.command.business_request_id,
             "command_id": command.command.command_id,
             "consent_id": command.consent_id,
             "expected_consent_revision": command.command.expected_revision,
         }
     )
     return DataConsentCommandIdentity(command_record_id=command_record_id, input_digest=sha256_hex(canonical))
+
+
+def legacy_data_consent_revoke_input_digest(command: DataConsentRevokeCommand) -> str:
+    """历史 v1 撤销摘要（仅命令键/预期版）：只用于识别旧行，禁止新写入。"""
+
+    return sha256_hex(
+        json_doc(
+            {
+                "schema_version": 1,
+                "action": "revoke",
+                "command_id": command.command.command_id,
+                "consent_id": command.consent_id,
+                "expected_consent_revision": command.command.expected_revision,
+            }
+        )
+    )
 
 
 @dataclass(frozen=True)

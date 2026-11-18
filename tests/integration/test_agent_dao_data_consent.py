@@ -45,7 +45,6 @@ from core.agent_types import (
     Purpose,
     decode_data_consent_binding,
     decode_data_consent_source_item,
-    derive_data_consent_command_identity,
     encode_data_consent_binding,
     encode_data_consent_claim,
     json_doc,
@@ -685,12 +684,7 @@ class TestReadDataConsentDecision:
             binding, session_id=session_id, execution_id=execution_id, round_id=round_id, expected_revision=0
         )
         await dao.save_data_consent_decision(cmd)
-        replayed = await dao.read_data_consent_save_replay(
-            USER_SCOPE,
-            "dec-consent-1",
-            command_id="consent-cmd-1",
-            input_digest=derive_data_consent_command_identity(cmd).input_digest,
-        )
+        replayed = await dao.read_data_consent_save_replay(cmd)
         assert isinstance(replayed, DataConsentBinding)
         assert json_doc(encode_data_consent_binding(replayed)) == json_doc(encode_data_consent_binding(binding))
 
@@ -704,15 +698,7 @@ class TestReadDataConsentDecision:
             round_id=round_id,
             expected_revision=0,
         )
-        assert (
-            await dao.read_data_consent_save_replay(
-                USER_SCOPE,
-                "dec-consent-1",
-                command_id="consent-cmd-1",
-                input_digest=derive_data_consent_command_identity(cmd).input_digest,
-            )
-            is None
-        )
+        assert await dao.read_data_consent_save_replay(cmd) is None
 
     async def test_read_save_replay_different_input_conflicts(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
@@ -730,12 +716,7 @@ class TestReadDataConsentDecision:
             expected_revision=0,
         )
         with pytest.raises(AgentServiceError) as exc:
-            await dao.read_data_consent_save_replay(
-                USER_SCOPE,
-                "dec-consent-1",
-                command_id="consent-cmd-1",
-                input_digest=derive_data_consent_command_identity(other).input_digest,
-            )
+            await dao.read_data_consent_save_replay(other)
         assert _code_of(exc) == AgentErrorCode.INPUT_CONFLICT
 
 
