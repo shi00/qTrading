@@ -30,6 +30,7 @@ from typing import Final, NoReturn
 
 from core.agent_types import (
     DISPLAY_STATES,
+    FROZEN_SHARED_INPUT_KEYS,
     NON_RECOVERABLE_DISPLAY_STATES,
     AcceptRequest,
     AgentValidationError,
@@ -66,21 +67,8 @@ STOP_REASON_USER_ENDED_GROUP: Final[str] = "user_ended_group"
 _MANIFEST_KEYS: Final = frozenset(
     {"schema_version", "group_ref", "user_scope", "session_id", "source_module", "input_digest", "shared", "lanes"}
 )
-_SHARED_KEYS: Final = frozenset(
-    {
-        "text",
-        "mode",
-        "purpose",
-        "cutoff",
-        "source_refs",
-        "visible_history_message_ids",
-        "visible_history_artifact_refs",
-        "role_prompt_refs",
-        "skill_refs",
-        "mcp_scope_digest",
-        "output_requirements",
-    }
-)
+#: 共同输入冻结段（正本由 core 承载，受理侧同一合同校验，避免两处漂移）。
+_SHARED_KEYS: Final = FROZEN_SHARED_INPUT_KEYS
 _LANE_KEYS: Final = frozenset(
     {
         "lane_ref",

@@ -236,6 +236,7 @@ from core.agent_types import (
     derive_event_identity,
     evaluate_data_attempt,
     frozen_command_input_digest,
+    frozen_manifest_inconsistency,
     json_doc,
     is_digest,
     classify_data_consent_input_digest,
@@ -648,10 +649,19 @@ class AgentDao(BaseDao):
         的 ``after_seq=0`` 追平语义一致，检视 D01）；session.event_seq 以 GREATEST
         单调推进（R22）。occurred_at/committed_at 用受理时刻（同事务内一致）。
 
+        草稿版 CAS 与冻结输入（R2-I15）：同一事务持会话行锁比较
+        ``expected_revision`` 与当前 ``agent_session.draft_revision``，旧稿视图
+        迟到提交 → ``REVISION_CONFLICT``（``0`` 只在会话从未保存过草稿时等同于
+        初值 1）；冻结 manifest 声明的请求身份须与本次输入一致、比较组
+        ``shared`` 冻结段须齐备且正文/模式/用途一致，否则 ``INPUT_INVALID``。
+        重传路径先查回原回执，不受其后草稿推进影响（幂等不因新稿失效）。
+
         Raises:
-            AgentServiceError: INPUT_INVALID（目标会话不存在）/ INPUT_CONFLICT
-                （同身份异输入或同命令键异输入）/ OPERATION_UNKNOWN（原回执
-                不可得）/ POLICY_DENIED（目标会话已删除 fence，新键受理拒绝）。
+            AgentServiceError: INPUT_INVALID（目标会话不存在 / 冻结 manifest 与
+                受理输入不一致或冻结段残缺）/ INPUT_CONFLICT（同身份异输入或同
+                命令键异输入）/ REVISION_CONFLICT（预期草稿版与当前稿版不一致）/
+                OPERATION_UNKNOWN（原回执不可得）/ POLICY_DENIED（目标会话已删除
+                fence，新键受理拒绝）。
         """
 
         self._check_engine()
@@ -666,10 +676,14 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            # 1. 目标会话存在性 + 行锁（序号分配点，§5.4.4）。
+            # 1. 目标会话存在性 + 行锁（序号分配与草稿版 CAS 的线性化点，§5.4.4）。
             session_row = (
                 await conn.execute(
-                    sa.select(AgentSession.session_id)
+                    sa.select(
+                        AgentSession.session_id,
+                        AgentSession.draft_revision,
+                        AgentSession.draft_payload,
+                    )
                     .where(
                         AgentSession.user_scope == request.user_scope,
                         AgentSession.session_id == request.session_id,
@@ -757,6 +771,38 @@ class AgentDao(BaseDao):
                 session_id=request.session_id,
                 identity=_identity_str(request),
             )
+
+            # 3c. 草稿版 CAS（R2-I15）：受理必须建立在「用户提交时看到的稿版」上；
+            #     持会话行锁比较，过期视图（已保存更新版本的窗口迟到提交）→
+            #     REVISION_CONFLICT，零新事实。``expected_revision=0`` 是旧客户端的
+            #     「无草稿基线」声明：仅当会话从未保存过草稿（draft_payload 为空且
+            #     draft_revision 仍是初值 1）时成立，草稿存在即拒绝（不静默当最新）。
+            current_draft_revision = int(session_row.draft_revision)
+            if request.expected_revision == 0:
+                if current_draft_revision != 1 or session_row.draft_payload is not None:
+                    raise AgentServiceError(
+                        AgentErrorCode.REVISION_CONFLICT,
+                        "draft revision does not match expected",
+                        _identity_str(request),
+                    )
+            elif current_draft_revision != request.expected_revision:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "draft revision does not match expected",
+                    _identity_str(request),
+                )
+
+            # 3d. 冻结输入一致性（R2-I15）：manifest 声明的请求身份须与本次受理
+            #     完全一致；比较组 manifest 的 shared 冻结段（角色/模型/资料/允许
+            #     历史/输出要求）须齐备且与其正文/模式/用途一致。矛盾或残缺 →
+            #     INPUT_INVALID，零新事实（不按缺省放行，R21）。
+            manifest_mismatch = frozen_manifest_inconsistency(request)
+            if manifest_mismatch is not None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    f"frozen manifest does not match accepted input: {manifest_mismatch}",
+                    _identity_str(request),
+                )
 
             # 4. 序号分配（持锁下 max+1，起点 1：首条消息 session_seq=1，检视 D01）。
             session_seq = (

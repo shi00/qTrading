@@ -493,3 +493,161 @@ class TestAcceptRequestTransaction:
         engine = create_test_engine(real_embedded_pg.url)
         assert await _count(engine, "agent_command") == 0
         await engine.dispose()
+
+
+async def _set_draft_state(dao: AgentDao, *, revision: int, payload: dict | None) -> None:
+    """直接置会话草稿版（真实 save_draft 会推进内容；此处只构造 CAS 前置）。"""
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造草稿版前置
+        await conn.execute(
+            sa.update(AgentSession)
+            .where(AgentSession.user_scope == "u1", AgentSession.session_id == "s1")
+            .values(draft_revision=revision, draft_payload=payload)
+        )
+
+
+_FACT_TABLES = ("agent_execution", "agent_command", "agent_message", "agent_asset_version", "agent_source_link")
+
+
+class TestAcceptDraftRevisionCas:
+    """R2-I15：受理须与当前草稿版原子 CAS，并拒绝与请求矛盾的冻结 manifest。"""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stale_draft_revision_rejected_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """旧窗口视图（expected < 当前 draft_revision）→ REVISION_CONFLICT，零新事实。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _set_draft_state(dao, revision=3, payload={"schema_version": 2})
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _FACT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(expected_revision=1))
+
+        assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+        after = {t: await _count(engine, t) for t in _FACT_TABLES}
+        assert after == before, f"stale draft must not create facts: {before} -> {after}"
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_current_draft_revision_accepted_and_frozen(self, real_embedded_pg: ConnectionInfo) -> None:
+        """与当前草稿版一致 → 受理成功，命令行冻结该预期版。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _set_draft_state(dao, revision=3, payload={"schema_version": 2})
+
+        receipt = await dao.accept_request(_request(expected_revision=3))
+
+        assert receipt.command.expected_revision == 3
+        engine = create_test_engine(real_embedded_pg.url)
+        async with engine.connect() as conn:
+            stored = (await conn.execute(text("SELECT expected_revision FROM agent_command"))).scalar_one()
+        assert stored == 3
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_zero_baseline_rejected_once_draft_saved(self, real_embedded_pg: ConnectionInfo) -> None:
+        """0=无草稿基线只对从未保存草稿的会话成立；草稿存在时必须显式给版本。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _set_draft_state(dao, revision=2, payload={"schema_version": 2})
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _FACT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(expected_revision=0))
+
+        assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+        after = {t: await _count(engine, t) for t in _FACT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_replay_after_draft_advance_still_returns_original_receipt(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """重传先查回原回执：已受理后的草稿推进不使原受理失效（幂等优先）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        first = await dao.accept_request(_request())
+        await _set_draft_state(dao, revision=5, payload={"schema_version": 2})
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _FACT_TABLES}
+
+        replay = await dao.accept_request(_request(client_command_id="client-2"))
+
+        assert replay == first
+        after = {t: await _count(engine, t) for t in _FACT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_manifest_contradicting_request_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """新受理的冻结 manifest 与实际正文矛盾 → INPUT_INVALID，零新事实。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        stale_manifest = json_doc(
+            {
+                "schema_version": 1,
+                "source_module": "ui",
+                "business_request_id": "req-1",
+                "mode": "discuss",
+                "purpose": "concept",
+                "text": "旧稿正文",
+            }
+        )
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _FACT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(manifest_payload=stale_manifest))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        after = {t: await _count(engine, t) for t in _FACT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_comparison_manifest_missing_frozen_section_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """比较组冻结段缺失（角色/模型/资料/允许历史）→ INPUT_INVALID，不按缺省放行。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        shared = {
+            "text": "研究三家公司",
+            "mode": "discuss",
+            "purpose": "concept",
+            "cutoff": None,
+            "source_refs": [],
+            "visible_history_message_ids": [],
+            "visible_history_artifact_refs": [],
+            "role_prompt_refs": [],
+            "skill_refs": [],
+            "mcp_scope_digest": "a" * 64,
+        }
+        manifest = json_doc(
+            {
+                "schema_version": 1,
+                "group_ref": "group-1",
+                "user_scope": "u1",
+                "session_id": "s1",
+                "source_module": "ui",
+                "input_digest": "b" * 64,
+                "shared": shared,
+                "lanes": [],
+            }
+        )
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _FACT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(
+                _request(
+                    manifest_payload=manifest,
+                    comparison_group_ref="group-1",
+                    comparison_lane_ref="lane-1",
+                )
+            )
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+        after = {t: await _count(engine, t) for t in _FACT_TABLES}
+        assert after == before
+        await engine.dispose()
