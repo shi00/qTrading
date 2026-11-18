@@ -24,6 +24,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.agent_types import (
     CLEANUP_NATIVE_TARGETS,
@@ -32,8 +33,11 @@ from core.agent_types import (
     CleanupJobRecord,
     CleanupPhase,
     CleanupPrecondition,
+    EventKind,
+    EventReadQuery,
 )
 from data.persistence.daos.agent_dao import AgentDao
+from data.persistence.models import AgentSession
 from services.agent_service.cleanup import (
     CleanupConfirmCommand,
     CleanupService,
@@ -118,6 +122,35 @@ async def dao(app_url: str) -> AsyncGenerator[AgentDao]:
         yield AgentDao(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cleanup_paths_append_change_events_once(dao: AgentDao) -> None:
+    """登记/fence/阶段各同事务追加 cleanup_changed；重写不重复（R2-I21）。"""
+
+    job_id = _job_id()
+    record = _record(job_id)
+    async with dao.engine.begin() as conn:
+        for session_id in _SESSION_IDS:
+            await conn.execute(
+                pg_insert(AgentSession)
+                .values(
+                    user_scope=_USER_SCOPE,
+                    session_id=session_id,
+                    title=f"cleanup {session_id}",
+                )
+                .on_conflict_do_nothing()
+            )
+    assert await dao.save_cleanup_job(record) is True
+    assert await dao.save_cleanup_job(record) is False
+    await dao.commit_cleanup_fence(record)
+    await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.RETRY_PENDING, error_category="transient")
+    await dao.save_cleanup_phase(_USER_SCOPE, job_id, phase=CleanupPhase.RETRY_PENDING, error_category="transient")
+
+    page = await dao.read_events(EventReadQuery(user_scope=_USER_SCOPE, session_id=_SESSION_IDS[0], after_seq=0))
+    events = [event for event in page.events if event.event_kind is EventKind.CLEANUP_CHANGED]
+    assert [event.payload_kind for event in events] == ["cleanup_job", "cleanup_fence", "cleanup_phase"]
+    assert all(event.subject_id == job_id for event in events)
 
 
 @pytest.mark.asyncio(loop_scope="session")

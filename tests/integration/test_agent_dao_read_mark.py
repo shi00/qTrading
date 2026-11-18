@@ -30,6 +30,8 @@ from sqlalchemy import insert, text
 from core.agent_types import (
     AgentErrorCode,
     AgentServiceError,
+    EventKind,
+    EventReadQuery,
     ReadMarkCommand,
 )
 from data.persistence.daos.agent_dao import AgentDao
@@ -102,6 +104,16 @@ async def _seed_message(
                 occurred_at=moment,
                 committed_at=moment,
             )
+        )
+        # 事件水位与已提交事件一致：写入族按 session.event_seq 分配新序号
+        # （R2-I21），种子数据不得让水位落后于既有事件行。
+        await conn.execute(
+            sa.update(AgentSession)
+            .where(
+                AgentSession.user_scope == user_scope,
+                AgentSession.session_id == session_id,
+            )
+            .values(event_seq=sa.func.greatest(AgentSession.event_seq, session_seq))
         )
 
 
@@ -228,6 +240,43 @@ async def _read_marker(url: str, user_scope: str, kind: str, target_id: str) -> 
 
 
 class TestSaveReadMark:
+    async def test_change_appends_read_mark_event_without_duplicate_on_replay(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """状态变化同事务追加 read_mark_saved；同状态重写不产生第二条（R2-I21）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_message(dao, message_id="m-1", session_seq=1)
+
+        first = await dao.save_read_mark_max(_mark(message_ids=("m-1",), command_id="cmd-1"))
+        replay = await dao.save_read_mark_max(_mark(message_ids=("m-1",), command_id="cmd-1"))
+
+        assert first.replayed is False and replay.replayed is True
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=0))
+        events = [event for event in page.events if event.event_kind is EventKind.READ_MARK_SAVED]
+        assert len(events) == 1
+        assert events[0].payload_kind == "read_mark_saved"
+        assert events[0].subject_revision == 1
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    async def test_no_change_mark_writes_no_event(self, real_embedded_pg: ConnectionInfo) -> None:
+        """无变化标记（同水位同集合）只回执重放，不追加零信息事件（R2-I21）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1", event_seq=5)
+        await _seed_message(dao, message_id="m-1", session_seq=1)
+
+        receipt = await dao.save_read_mark_max(_mark(message_ids=("m-1",), command_id="cmd-1"))
+        assert receipt.replayed is False
+        replay = await dao.save_read_mark_max(_mark(message_ids=("m-1",), command_id="cmd-2"))
+        assert replay.replayed is True
+
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=0))
+        events = [event for event in page.events if event.event_kind is EventKind.READ_MARK_SAVED]
+        assert len(events) == 1
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
     async def test_exact_ids_merge_and_persist(self, real_embedded_pg: ConnectionInfo) -> None:
         dao = await _setup(real_embedded_pg.url)
         await _seed_session(dao, "u1", "s1")

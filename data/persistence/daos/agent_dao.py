@@ -352,6 +352,46 @@ WHERE user_scope = :user_scope
 """
 
 
+#: 源禁用受影响会话集合（R2-I21）：闭包内各引用边按消费者归属解析会话，
+#: 供同事务追加 ``source_disabled`` 可靠事件；无会话归属的边不产生事件。
+_SOURCE_DISABLE_AFFECTED_SESSIONS_SQL: Final = """
+WITH RECURSIVE closure(source_id, source_version) AS (
+    SELECT CAST(:source_id AS text), CAST(:source_version AS text)
+    UNION
+    SELECT l.derived_asset_id, l.derived_asset_version
+    FROM agent_source_link l
+    JOIN closure c
+        ON l.user_scope = :user_scope
+        AND l.source_id = c.source_id
+        AND l.source_version = c.source_version
+    WHERE l.consumer_kind = 'asset'
+        AND l.derived_asset_id IS NOT NULL
+        AND l.derived_asset_version IS NOT NULL
+)
+SELECT DISTINCT COALESCE(l.session_id, e.session_id, re.session_id, a.session_id, m.session_id) AS session_id
+FROM agent_source_link l
+JOIN closure c
+    ON l.user_scope = :user_scope
+    AND l.source_id = c.source_id
+    AND l.source_version = c.source_version
+LEFT JOIN agent_execution e
+    ON e.user_scope = l.user_scope AND e.execution_id = l.execution_id
+LEFT JOIN agent_round rd
+    ON rd.user_scope = l.user_scope AND rd.round_id = l.round_id
+LEFT JOIN agent_execution re
+    ON re.user_scope = l.user_scope AND re.execution_id = rd.execution_id
+LEFT JOIN agent_artifact a
+    ON a.user_scope = l.user_scope
+    AND a.artifact_id = l.artifact_id
+    AND a.artifact_version = l.artifact_version
+LEFT JOIN agent_message m
+    ON m.user_scope = l.user_scope AND m.message_id = l.message_id
+WHERE l.user_scope = :user_scope
+    AND COALESCE(l.session_id, e.session_id, re.session_id, a.session_id, m.session_id) IS NOT NULL
+ORDER BY session_id
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class _FrozenSourceFacts:
     """来源登记时的冻结事实（检视 D10/D11），与当前可用性投影分离。
@@ -2870,6 +2910,8 @@ class AgentDao(BaseDao):
         执行终止/轮次已被替代或停轮 → ``POLICY_DENIED``，均在写答复命令与推进
         CAS 之前拒绝（零新事实）。重放路径只读原事实回执，不按当前状态重判。
         所属会话已删除 fence → 首生效新答复 ``POLICY_DENIED``（D08）。
+        提交后同事务追加 ``command_changed`` 可靠事件（R2-I21，
+        ``payload_kind=answer_saved``）；同命令键重放查回原事实、不重复写。
         """
 
         self._check_engine()
@@ -2999,6 +3041,46 @@ class AgentDao(BaseDao):
                     "decision revision changed or already answered",
                     identity,
                 )
+            # 6. 同事务可靠事件（R2-I21）：答复与决定可见状态同提交，观察侧
+            #    按 after_seq 即可追平；命令键重放已在步骤 2 返回原事实，不重复写。
+            watermarks = await self._lock_session_event_watermarks(
+                conn, user_scope=request.user_scope, session_ids=(decision_row.session_id,)
+            )
+            session_event_seq = watermarks.get(decision_row.session_id)
+            if session_event_seq is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "decision session does not exist",
+                    identity,
+                )
+            await self._append_session_event(
+                conn,
+                user_scope=request.user_scope,
+                session_id=decision_row.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [request.user_scope, decision_row.session_id, "answer_saved", request.client_command_id],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=f"answer_saved:{request.decision_id}:{request.client_command_id}",
+                ),
+                event_kind=EventKind.COMMAND_CHANGED,
+                payload_kind="answer_saved",
+                subject_id=command_record_id,
+                subject_revision=request.expected_decision_revision + 1,
+                payload={
+                    "schema_version": 1,
+                    "decision_id": request.decision_id,
+                    "command_record_id": command_record_id,
+                    "decision_revision": request.expected_decision_revision + 1,
+                    "answer_digest": answer_digest,
+                },
+                occurred_at=occurred,
+                session_event_seq=int(session_event_seq),
+            )
             return AnswerReceipt(
                 decision_id=request.decision_id,
                 command_record_id=command_record_id,
@@ -3117,7 +3199,9 @@ class AgentDao(BaseDao):
         首生效新鲜核原问题（检视 D06）：同事务读原决定的答复 schema、期限、所属
         轮次与执行终止态，并按原答复载荷核选项集；非法选项 → ``INPUT_INVALID``，
         过期/终止/旧轮 → ``POLICY_DENIED``，均在写 consumed 事实前拒绝（零新消费）。
-        已消费重放只读原事实，不按当前状态重判。
+        已消费重放只读原事实，不按当前状态重判。首生效消费同事务追加
+        ``command_changed`` 可靠事件（R2-I21，``payload_kind=answer_consumed``）；
+        已消费重放不重复写。
         """
 
         self._check_engine()
@@ -3132,8 +3216,10 @@ class AgentDao(BaseDao):
                 await conn.execute(
                     sa.select(
                         AgentDecision.decision_id,
+                        AgentDecision.session_id,
                         AgentDecision.execution_id,
                         AgentDecision.round_id,
+                        AgentDecision.revision,
                         AgentDecision.answer_consumed_at,
                         AgentDecision.expires_at,
                         AgentDecision.answer_schema,
@@ -3217,6 +3303,46 @@ class AgentDao(BaseDao):
                     AgentDecision.answer_consumed_at.is_(None),
                 )
                 .values(answer_consumed_at=occurred, updated_at=occurred)
+            )
+            # 3. 同事务可靠事件（R2-I21）：消费事实与 watermarks 同提交；已消费
+            #    重放已在上方返回原事实，不重复写（消费 CAS 只允许一次首生效）。
+            watermarks = await self._lock_session_event_watermarks(
+                conn, user_scope=request.user_scope, session_ids=(decision_row.session_id,)
+            )
+            session_event_seq = watermarks.get(decision_row.session_id)
+            if session_event_seq is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "decision session does not exist",
+                    identity,
+                )
+            await self._append_session_event(
+                conn,
+                user_scope=request.user_scope,
+                session_id=decision_row.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [request.user_scope, decision_row.session_id, "answer_consumed", request.command_record_id],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=f"answer_consumed:{request.command_record_id}",
+                ),
+                event_kind=EventKind.COMMAND_CHANGED,
+                payload_kind="answer_consumed",
+                subject_id=request.command_record_id,
+                subject_revision=int(decision_row.revision),
+                payload={
+                    "schema_version": 1,
+                    "decision_id": decision_row.decision_id,
+                    "command_record_id": request.command_record_id,
+                    "decision_revision": int(decision_row.revision),
+                    "consumption_state": ConsumptionState.CONSUMED.value,
+                },
+                occurred_at=occurred,
+                session_event_seq=int(session_event_seq),
             )
             return ConsumptionFact(
                 command_record_id=request.command_record_id,
@@ -3807,7 +3933,9 @@ class AgentDao(BaseDao):
         revision=expected+1，均与 binding.consent_revision 相等（core 层已校验）；
         decision.expires_at 与 binding.expires_at 同事务写入。锁序：decision →
         command（§5.4 第 2 条）。命令行 delivery_state=not_delivered（不冒认投递，
-        INV-06；投递核定由决定面后续任务承接）。
+        INV-06；投递核定由决定面后续任务承接）。保存（建行或 CAS 更新）同事务追加
+        ``command_changed`` 可靠事件（R2-I21，``payload_kind=data_consent_saved``）；
+        同命令键重放查回原绑定、不重复写。
         """
 
         self._check_engine()
@@ -3822,7 +3950,7 @@ class AgentDao(BaseDao):
             # 1. decision 行锁（存在时；建行竞态由 PK 唯一约束兜底）。
             decision_row = (
                 await conn.execute(
-                    sa.select(AgentDecision.decision_id, AgentDecision.revision)
+                    sa.select(AgentDecision.decision_id, AgentDecision.revision, AgentDecision.session_id)
                     .where(
                         AgentDecision.user_scope == command.command.user_scope,
                         AgentDecision.decision_id == command.consent_id,
@@ -3913,6 +4041,13 @@ class AgentDao(BaseDao):
                         "data consent decision does not exist",
                         identity_str,
                     )
+                if decision_row.session_id != command.session_id:
+                    # 事件归属会话必须与决定行一致：不得把可靠事件投到他人会话。
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "data consent command session does not own decision",
+                        identity_str,
+                    )
                 cas_result = await conn.execute(
                     sa.update(AgentDecision)
                     .where(
@@ -3954,6 +4089,55 @@ class AgentDao(BaseDao):
                     consumption_state=ConsumptionState.NOT_CONSUMED.value,
                     receipt_payload=payload_wire,
                 )
+            )
+            # 5. 同事务可靠事件（R2-I21）：许可决定行与 save 命令同提交，观察侧
+            #    按 after_seq 追平；同命令键重放已在步骤 2 查回原绑定，不重复写。
+            watermarks = await self._lock_session_event_watermarks(
+                conn,
+                user_scope=command.command.user_scope,
+                session_ids=(command.session_id,),
+            )
+            session_event_seq = watermarks.get(command.session_id)
+            if session_event_seq is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "data consent session does not exist",
+                    identity_str,
+                )
+            await self._append_session_event(
+                conn,
+                user_scope=command.command.user_scope,
+                session_id=command.session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [
+                        command.command.user_scope,
+                        command.session_id,
+                        "data_consent_saved",
+                        command.command.command_id,
+                    ],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=(f"data_consent_saved:{command.consent_id}:{command.command.command_id}"),
+                ),
+                event_kind=EventKind.COMMAND_CHANGED,
+                payload_kind="data_consent_saved",
+                subject_id=command.consent_id,
+                subject_revision=binding.consent_revision,
+                payload={
+                    "schema_version": 1,
+                    "consent_id": command.consent_id,
+                    "consent_revision": binding.consent_revision,
+                    "state": binding.state.value,
+                    "execution_id": command.execution_id,
+                    "round_id": command.round_id,
+                    "command_record_id": identity.command_record_id,
+                },
+                occurred_at=occurred,
+                session_event_seq=int(session_event_seq),
             )
             return binding
 
@@ -4695,6 +4879,32 @@ class AgentDao(BaseDao):
             )
         )
         return True
+
+    async def _lock_session_event_watermarks(
+        self, conn: AsyncConnection, *, user_scope: str, session_ids: Sequence[str]
+    ) -> dict[str, int]:
+        """按稳定顺序锁会话行并返回事件水位（R2-I21 多会话写入族共用）。
+
+        按 ``(session_id)`` 排序逐一 ``FOR UPDATE``，与 ``save_draft``
+        「会话 → 清理 fence」锁序一致，避免与草稿/清理事务成环；已不存在的会话
+        跳过（不为其追加事件，也不因此失败——清理集合允许含已核销会话）。
+        """
+
+        watermarks: dict[str, int] = {}
+        for session_id in sorted(set(session_ids)):
+            row = (
+                await conn.execute(
+                    sa.select(AgentSession.event_seq)
+                    .where(
+                        AgentSession.user_scope == user_scope,
+                        AgentSession.session_id == session_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is not None:
+                watermarks[session_id] = int(row.event_seq)
+        return watermarks
 
     async def read_events(self, query: EventReadQuery) -> EventPage:
         """可靠事件按序读取（§4.5 追平/补齐）：after_seq 起升序分页。
@@ -7650,7 +7860,9 @@ class AgentDao(BaseDao):
           ``command_id`` 仅作非空校验与审计透传——命令键查重/同键异输入冲突由
           服务层 stop_using command 事务（agent_command 唯一约束）承载（§3.3.2），
           本 DAO 层幂等键为源身份（检视闭环 m-1 纠偏：原 docstring 误称本层核命令键）；
-        - 来源不存在 ``INPUT_INVALID``（严格读，不空成功）。
+        - 来源不存在 ``INPUT_INVALID``（严格读，不空成功）；
+        - 禁用落定同事务为闭包内引用方会话追加 ``source_disabled`` 可靠事件
+          （R2-I21）：观察侧按 after_seq 追平可用性变化；已禁用重放不重复写。
 
         Raises:
             AgentServiceError: INPUT_INVALID。
@@ -7722,6 +7934,61 @@ class AgentDao(BaseDao):
                     source_version=request.source_version,
                 )
             )
+            # 3. 同事务可靠事件（R2-I21）：闭包内引用方的会话各得一条
+            #    ``source_disabled``，观察侧按 after_seq 追平可用性变化；无会话
+            #    归属的引用不产生事件（会话观察面不存在该事实）。已禁用重放已在
+            #    步骤 1 返回原事实，不重复写（event_id 按 disabled_revision 去重）。
+            affected_rows = (
+                await conn.execute(
+                    sa.text(_SOURCE_DISABLE_AFFECTED_SESSIONS_SQL).bindparams(
+                        user_scope=request.user_scope,
+                        source_id=request.source_id,
+                        source_version=request.source_version,
+                    )
+                )
+            ).all()
+            affected_sessions = [str(row[0]) for row in affected_rows]
+            watermarks = await self._lock_session_event_watermarks(
+                conn, user_scope=request.user_scope, session_ids=affected_sessions
+            )
+            for session_id, session_event_seq in watermarks.items():
+                await self._append_session_event(
+                    conn,
+                    user_scope=request.user_scope,
+                    session_id=session_id,
+                    message_id=stable_id(
+                        "event_message",
+                        [
+                            request.user_scope,
+                            session_id,
+                            "source_disabled",
+                            request.source_id,
+                            request.source_version,
+                            str(disabled_revision),
+                        ],
+                    ),
+                    event_id=derive_event_identity(
+                        execution_id=None,
+                        round_id=None,
+                        node_id=None,
+                        native_event_id=(
+                            f"source_disabled:{request.source_id}@{request.source_version}:{disabled_revision}"
+                        ),
+                    ),
+                    event_kind=EventKind.SOURCE_DISABLED,
+                    payload_kind="source_disabled",
+                    subject_id=request.source_id,
+                    subject_revision=disabled_revision,
+                    payload={
+                        "schema_version": 1,
+                        "source_id": request.source_id,
+                        "source_version": request.source_version,
+                        "disabled_revision": disabled_revision,
+                        "read_state": "disabled",
+                    },
+                    occurred_at=now,
+                    session_event_seq=session_event_seq,
+                )
             return SourceStopReceipt(
                 source_id=request.source_id,
                 source_version=request.source_version,
@@ -8165,7 +8432,9 @@ class AgentDao(BaseDao):
           同一 marker 只承载单一观测范围，digest 不一致即 ``INPUT_INVALID``
           （不静默忽略、不把两个范围压进同一水位）；
         - merge 天然幂等（GREATEST + 并集）：本次无任何状态变化即视为重放
-          （replayed=True）；同项重复标记不产生新事实；
+          （replayed=True）；同项重复标记不产生新事实，也不追加事件；
+        - 真实状态变化同事务追加 ``read_mark_saved`` 可靠事件（R2-I21），观察侧
+          按 after_seq 追平未读水位；
         - 会话不存在 ``INPUT_INVALID``（严格读；FK 同样拦截）。
 
         Raises:
@@ -8185,13 +8454,16 @@ class AgentDao(BaseDao):
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
-            # 1. 目标会话存在性（用户域严格校验）+ 可靠事件水位上界。
+            # 1. 目标会话存在性（用户域严格校验）+ 可靠事件水位上界；行锁供同事务
+            #    追加 read_mark_saved 事件（R2-I21：会话水位是事件序号分配点）。
             session_row = (
                 await conn.execute(
-                    sa.select(AgentSession.session_id, AgentSession.event_seq).where(
+                    sa.select(AgentSession.session_id, AgentSession.event_seq)
+                    .where(
                         AgentSession.user_scope == command.user_scope,
                         AgentSession.session_id == command.session_id,
                     )
+                    .with_for_update()
                 )
             ).first()
             if session_row is None:
@@ -8223,6 +8495,7 @@ class AgentDao(BaseDao):
                 await conn.execute(
                     sa.select(
                         AgentReadMark.last_seq,
+                        AgentReadMark.revision,
                         AgentReadMark.read_targets,
                     )
                     .where(
@@ -8296,6 +8569,35 @@ class AgentDao(BaseDao):
                         )
                         .values(**values)
                     )
+                # 6. 同事务可靠事件（R2-I21）：仅真实状态变化追加（GREATEST/并集
+                #    合并无变化即重放，不产生零信息事件）；事件身份按命令键去重。
+                await self._append_session_event(
+                    conn,
+                    user_scope=command.user_scope,
+                    session_id=command.session_id,
+                    message_id=stable_id(
+                        "event_message",
+                        [command.user_scope, command.session_id, "read_mark_saved", command.command_id],
+                    ),
+                    event_id=derive_event_identity(
+                        execution_id=None,
+                        round_id=None,
+                        node_id=None,
+                        native_event_id=f"read_mark_saved:{command.command_id}",
+                    ),
+                    event_kind=EventKind.READ_MARK_SAVED,
+                    payload_kind="read_mark_saved",
+                    subject_id=marker_id,
+                    subject_revision=(int(marker_row.revision) + 1 if marker_row is not None else 1),
+                    payload={
+                        "schema_version": 1,
+                        "session_id": command.session_id,
+                        "last_seq": landed_seq,
+                        "read_target_count": len(merged_messages) + len(merged_artifacts),
+                    },
+                    occurred_at=now,
+                    session_event_seq=int(session_row.event_seq),
+                )
             return ReadMarkReceipt(
                 session_id=command.session_id,
                 command_id=command.command_id,
@@ -9280,6 +9582,8 @@ class AgentDao(BaseDao):
         fence 将永久拒绝该作业。
         ``content_manifest`` 同属 §9.11 固定集合，同身份重放时须逐值一致，否则
         拒绝（避免首个值被静默保留、后续调用方误以为自己的集合已生效）。
+        首次登记同事务为集合内会话追加 ``cleanup_changed`` 可靠事件（R2-I21）；
+        同身份重放返回 False 且不重复写。
         """
 
         self._check_engine()
@@ -9308,12 +9612,41 @@ class AgentDao(BaseDao):
             complete=False,
             fence_committed=record.fence_committed,
         )
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(statement)
-        except IntegrityError as exc:
+        replay_conflict: IntegrityError | None = None
+        async with engine.begin() as conn:
+            # 1. 先锁事件目标会话（R2-I21）：锁序「会话 → 清理作业」与
+            #    save_draft 的「会话 → 清理 fence 读」一致，避免成环。
+            watermarks = await self._lock_session_event_watermarks(
+                conn, user_scope=record.user_scope, session_ids=record.session_ids
+            )
+            # 仅作业行插入的冲突才算「同身份重放」；事件追加失败必须整体回滚并
+            # 原样上抛，不得被重放核对吞成 INPUT_CONFLICT（savepoint 划分错误归属）。
+            try:
+                async with conn.begin_nested():
+                    await conn.execute(statement)
+            except IntegrityError as exc:
+                replay_conflict = exc
+            else:
+                await self._append_cleanup_events(
+                    conn,
+                    user_scope=record.user_scope,
+                    watermarks=watermarks,
+                    cleanup_job_id=record.cleanup_job_id,
+                    subject_revision=1,
+                    event_native_id=f"cleanup_job_saved:{record.cleanup_job_id}",
+                    payload_kind="cleanup_job",
+                    payload={
+                        "schema_version": 1,
+                        "cleanup_job_id": record.cleanup_job_id,
+                        "phase": record.phase.value,
+                        "fence_committed": bool(record.fence_committed),
+                        "expected_revision": record.expected_revision,
+                    },
+                    occurred_at=datetime.now(UTC),
+                )
+        if replay_conflict is not None:
             existing = await self.load_cleanup_job(record.user_scope, record.cleanup_job_id)
-            self._require_same_cleanup_identity(existing, record, exc)
+            self._require_same_cleanup_identity(existing, record, replay_conflict)
             existing_manifest = await self._load_cleanup_content_manifest(record.user_scope, record.cleanup_job_id)
             # 规范 JSON 比较：tuple/list、键序与 JSONB 反序列化差异不得误判为异输入。
             if json_doc(existing_manifest) != canonical_manifest:
@@ -9321,7 +9654,7 @@ class AgentDao(BaseDao):
                     AgentErrorCode.INPUT_CONFLICT,
                     "cleanup job already exists with different content manifest",
                     label,
-                ) from exc
+                ) from replay_conflict
             return False
         return True
 
@@ -9372,7 +9705,9 @@ class AgentDao(BaseDao):
         fence 提交只写 ``fence_committed``，不改写 ``phase``：阶段推进唯一入口是
         ``save_cleanup_phase``（单调约束），否则携带旧 ``prepared`` 记录的并发确认
         会把 ``retry_pending`` 回退成 ``prepared``。已 ``verified`` 的作业拒绝任何
-        fence 写入（与 ``save_cleanup_phase`` 同一单调约束，R22 语义）。
+        fence 写入（与 ``save_cleanup_phase`` 同一单调约束，R22 语义）。fence 提交
+        同事务为集合内会话追加 ``cleanup_changed`` 可靠事件（R2-I21），重复提交按
+        事件身份去重。
         """
 
         self._check_engine()
@@ -9382,6 +9717,17 @@ class AgentDao(BaseDao):
             # 终态不可由 fence 路径写入（否则会出现 verified 但无 verified_at 的坏态）。
             raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "verified cleanup job cannot rewrite fence", label)
         async with engine.begin() as conn:
+            scope = await self._load_cleanup_event_scope(
+                conn,
+                user_scope=record.user_scope,
+                cleanup_job_id=record.cleanup_job_id,
+                label=label,
+            )
+            watermarks = (
+                {}
+                if scope is None
+                else await self._lock_session_event_watermarks(conn, user_scope=record.user_scope, session_ids=scope[0])
+            )
             result = await conn.execute(
                 sa.update(AgentCleanupJob)
                 .where(
@@ -9396,6 +9742,25 @@ class AgentDao(BaseDao):
             if int(result.rowcount or 0) == 0:
                 raise AgentServiceError(
                     AgentErrorCode.INPUT_INVALID, "cleanup fence target missing, drifted, or already verified", label
+                )
+            # 同事务可靠事件（R2-I21）：fence 提交与事件同成功/失败；重复提交同一
+            # 作业按事件身份去重（不写第二条）。
+            if scope is not None:
+                await self._append_cleanup_events(
+                    conn,
+                    user_scope=record.user_scope,
+                    watermarks=watermarks,
+                    cleanup_job_id=record.cleanup_job_id,
+                    subject_revision=scope[2],
+                    event_native_id=f"cleanup_fence:{record.cleanup_job_id}",
+                    payload_kind="cleanup_fence",
+                    payload={
+                        "schema_version": 1,
+                        "cleanup_job_id": record.cleanup_job_id,
+                        "fence_committed": True,
+                        "phase": scope[1],
+                    },
+                    occurred_at=datetime.now(UTC),
                 )
 
     async def save_cleanup_attempt_stage(self, user_scope: str, cleanup_job_id: str, *, stage: str) -> None:
@@ -9450,7 +9815,8 @@ class AgentDao(BaseDao):
         写入前严格核验计数与 ``complete`` 一致性（D31）：``verified`` 必须
         ``complete=True`` 且覆盖全部九域（含应用 Datasource 输出正文域）并逐域
         严格为 0；``bool`` 不得冒充 ``0``；缺域/非零/``complete=False`` 一律
-        ``INPUT_INVALID``，不落库。
+        ``INPUT_INVALID``，不落库。阶段写入同事务为集合内会话追加 ``cleanup_changed``
+        可靠事件（R2-I21）；同阶段同失败原因重写按事件身份去重。
         """
 
         self._check_engine()
@@ -9481,6 +9847,14 @@ class AgentDao(BaseDao):
         else:
             statement = statement.where(AgentCleanupJob.phase != CleanupPhase.VERIFIED.value)
         async with engine.begin() as conn:
+            scope = await self._load_cleanup_event_scope(
+                conn, user_scope=user_scope, cleanup_job_id=cleanup_job_id, label=label
+            )
+            watermarks = (
+                {}
+                if scope is None
+                else await self._lock_session_event_watermarks(conn, user_scope=user_scope, session_ids=scope[0])
+            )
             result = await conn.execute(statement)
             if int(result.rowcount or 0) == 0:
                 raise AgentServiceError(
@@ -9488,6 +9862,100 @@ class AgentDao(BaseDao):
                     "cleanup job phase target missing, fence absent, or already verified",
                     label,
                 )
+            # 同事务可靠事件（R2-I21）：阶段推进/失败可见性与状态同提交；同阶段
+            # 同错误类别重写按事件身份去重（幂等），异阶段或异失败原因各留一条。
+            if scope is not None:
+                await self._append_cleanup_events(
+                    conn,
+                    user_scope=user_scope,
+                    watermarks=watermarks,
+                    cleanup_job_id=cleanup_job_id,
+                    subject_revision=scope[2],
+                    event_native_id=(
+                        f"cleanup_phase:{cleanup_job_id}:{phase.value}:{error_category if error_category else '-'}"
+                    ),
+                    payload_kind="cleanup_phase",
+                    payload={
+                        "schema_version": 1,
+                        "cleanup_job_id": cleanup_job_id,
+                        "phase": phase.value,
+                        "complete": bool(complete),
+                        "error_category": error_category,
+                    },
+                    occurred_at=datetime.now(UTC),
+                )
+
+    async def _load_cleanup_event_scope(
+        self, conn: AsyncConnection, *, user_scope: str, cleanup_job_id: str, label: str
+    ) -> tuple[tuple[str, ...], str, int] | None:
+        """读清理作业的事件目标（会话集合、当前阶段、行版本）；作业缺失返回 None。
+
+        身份集合与阶段在锁会话之前读取（集合一经写入不可改写），行版本用于事件
+        ``subject_revision``；坏载形 fail-closed，不当作「无会话」放行（R21）。
+        """
+
+        row = (
+            await conn.execute(
+                sa.select(
+                    AgentCleanupJob.exact_identity_set,
+                    AgentCleanupJob.phase,
+                    AgentCleanupJob.revision,
+                ).where(
+                    AgentCleanupJob.user_scope == user_scope,
+                    AgentCleanupJob.cleanup_job_id == cleanup_job_id,
+                )
+            )
+        ).first()
+        if row is None:
+            return None
+        try:
+            identities = decode_cleanup_identity_set(row[0])
+        except AgentValidationError as exc:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                f"cleanup identity set invalid: {exc.code}",
+                label,
+            ) from exc
+        return identities.session_ids, str(row[1]), int(row[2])
+
+    async def _append_cleanup_events(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        watermarks: dict[str, int],
+        cleanup_job_id: str,
+        subject_revision: int,
+        event_native_id: str,
+        payload_kind: str,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+    ) -> None:
+        """为清理集合内每个已锁会话追加同事务 ``cleanup_changed`` 事件（R2-I21）。"""
+
+        for session_id, session_event_seq in watermarks.items():
+            await self._append_session_event(
+                conn,
+                user_scope=user_scope,
+                session_id=session_id,
+                message_id=stable_id(
+                    "event_message",
+                    [user_scope, session_id, payload_kind, cleanup_job_id, event_native_id],
+                ),
+                event_id=derive_event_identity(
+                    execution_id=None,
+                    round_id=None,
+                    node_id=None,
+                    native_event_id=event_native_id,
+                ),
+                event_kind=EventKind.CLEANUP_CHANGED,
+                payload_kind=payload_kind,
+                subject_id=cleanup_job_id,
+                subject_revision=subject_revision,
+                payload=payload,
+                occurred_at=occurred_at,
+                session_event_seq=session_event_seq,
+            )
 
     def _require_async_engine(self) -> AsyncEngine:
         engine = self.engine

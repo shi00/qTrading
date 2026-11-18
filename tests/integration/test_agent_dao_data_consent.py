@@ -41,6 +41,8 @@ from core.agent_types import (
     DataConsentCommand,
     DataConsentRevokeCommand,
     DataConsentState,
+    EventKind,
+    EventReadQuery,
     Mode,
     Purpose,
     decode_data_consent_binding,
@@ -369,6 +371,28 @@ class TestSaveDataConsentDecision:
             assert command_row.delivery_state == "not_delivered"
             assert command_row.consumption_state == "not_consumed"
             assert json_doc(command_row.receipt_payload) == json_doc(encode_data_consent_binding(binding))
+
+    async def test_save_appends_command_changed_event_once(self, real_embedded_pg) -> None:
+        """许可保存同事务追加 command_changed；同命令键重放不重复（R2-I21）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        session_id, execution_id, round_id = await _seed_research_chain(dao)
+        cmd = _save_command(
+            _binding(execution_id=execution_id, round_id=round_id),
+            session_id=session_id,
+            execution_id=execution_id,
+            round_id=round_id,
+            expected_revision=0,
+        )
+        await dao.save_data_consent_decision(cmd)
+        await dao.save_data_consent_decision(cmd)
+
+        page = await dao.read_events(EventReadQuery(user_scope=USER_SCOPE, session_id=session_id, after_seq=0))
+        events = [event for event in page.events if event.payload_kind == "data_consent_saved"]
+        assert len(events) == 1
+        assert events[0].event_kind is EventKind.COMMAND_CHANGED
+        assert events[0].subject_id == "dec-consent-1"
+        assert events[0].subject_revision == 1
 
     async def test_replay_same_payload_returns_original(self, real_embedded_pg) -> None:
         dao = await _setup(real_embedded_pg.url)
