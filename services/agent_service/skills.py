@@ -2,6 +2,8 @@
 
 合同：
 - 四阈值（归档 16MiB / 展开 64MiB / 1024 对象 / 10 秒）在解压前执行，恰等通过；
+  目录来源逐条流式枚举、入账即判定（超一即停），且无压缩故以文件尺寸总和作原件体积
+  按 16MiB 同口径保护；
 - 包内路径逃逸（``..`` / 绝对路径 / 盘符 / 反斜杠）拒绝；重复名/加密包拒绝；
 - 声明展开字节与实际读出字节都计量（防止中央目录谎报）；
 - 根目录恰好一个 ``SKILL.md``：缺失/嵌套/多候选拒绝并提示拆包（F12）；
@@ -348,45 +350,56 @@ def _entry_key(name: str) -> str:
     return "/".join(unicodedata.normalize("NFKC", part).casefold() for part in PurePosixPath(name).parts)
 
 
-def _enforce_entry_layout(entries: Sequence[tuple[str, bool]]) -> None:
-    """规范化后重名 / 文件与目录冲突 / 对象总数（root 不计，隐含目录计一次）。"""
+class _EntryLayoutTracker:
+    """增量条目账本：规范化后重名 / 文件与目录冲突 + 对象集合（root 不计，隐含目录计一次）。
 
-    file_keys: set[str] = set()
-    dir_keys: set[str] = set()
-    explicit_dirs: set[str] = set()
-    for name, is_dir in entries:
+    每 ``add`` 一条即完成判定与对象计数，目录流式枚举因此可「超一即停」；ZIP 侧批量
+    入账复用同一实现，避免两套判据漂移。
+    """
+
+    def __init__(self) -> None:
+        self._file_keys: set[str] = set()
+        self._dir_keys: set[str] = set()
+        self._explicit_dirs: set[str] = set()
+        self._objects: set[str] = set()
+
+    @property
+    def object_count(self) -> int:
+        return len(self._objects)
+
+    def add(self, name: str, is_dir: bool) -> None:
         parts = PurePosixPath(name).parts
         keys = [_entry_key(part) for part in parts]
         for index in range(1, len(parts)):
             ancestor = "/".join(keys[:index])
-            if ancestor in file_keys:
+            if ancestor in self._file_keys:
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
-            dir_keys.add(ancestor)
+            self._dir_keys.add(ancestor)
+            self._objects.add(ancestor)
         full = "/".join(keys)
+        self._objects.add(full)
         if is_dir:
-            if full in file_keys or full in explicit_dirs:
+            if full in self._file_keys or full in self._explicit_dirs:
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
             if full == VERSION_MANIFEST_FILENAME.casefold():
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
-            explicit_dirs.add(full)
-            dir_keys.add(full)
+            self._explicit_dirs.add(full)
+            self._dir_keys.add(full)
         else:
-            if full in file_keys or full in dir_keys:
+            if full in self._file_keys or full in self._dir_keys:
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
             if full == VERSION_MANIFEST_FILENAME.casefold():
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
-            file_keys.add(full)
+            self._file_keys.add(full)
 
 
-def _object_count(entries: Sequence[tuple[str, bool]]) -> int:
-    objects: set[str] = set()
-    for name, _ in entries:
-        parts = PurePosixPath(name).parts
-        keys = [_entry_key(part) for part in parts]
-        objects.add("/".join(keys))
-        for index in range(1, len(parts)):
-            objects.add("/".join(keys[:index]))
-    return len(objects)
+def _enforce_entry_layout(entries: Sequence[tuple[str, bool]]) -> int:
+    """批量入账并返回对象总数（root 不计，隐含目录计一次）。"""
+
+    tracker = _EntryLayoutTracker()
+    for name, is_dir in entries:
+        tracker.add(name, is_dir)
+    return tracker.object_count
 
 
 def _finalize_inspection(
@@ -456,8 +469,7 @@ def inspect_skill_package(
             if info.flag_bits & 0x1:
                 _fail("invalid_skill_package", f"$.skill.package.entry[{name}]")
             entries.append((name, info.filename.endswith("/")))
-        _enforce_entry_layout(entries)
-        budget.enforce_objects(_object_count(entries))
+        budget.enforce_objects(_enforce_entry_layout(entries))
         declared = sum(info.file_size for info in infos)
         budget.enforce_expanded_bytes(declared)
         files: list[SkillFileEntry] = []
@@ -509,13 +521,17 @@ def inspect_skill_directory(
 ) -> SkillPackageInspection:
     """本地目录预检：与 ZIP 统一计量；符号链接/特殊文件拒绝，读取按同句柄最终路径核验。
 
-    ``checkpoint`` 在每个目录/条目与每个读取块之前调用，供合作取消中断长段。
+    目录按 ``os.scandir`` 逐条流式枚举，条目入账（重名/冲突 + 对象数含隐含目录）即判定，
+    超限立即停止，不再枚举剩余条目；目录无压缩，文件尺寸总和即原件体积，按 ZIP 的
+    16MiB 同口径保护（对同一内容严于压缩后体积，方向保守）。``checkpoint`` 在每个
+    目录/条目与每个读取块之前调用，供合作取消中断长段。
     """
 
     from services.agent_service.skill_workspace import ReadOnlyWorkspace
 
     started = clock()
     workspace = ReadOnlyWorkspace(root)
+    tracker = _EntryLayoutTracker()
     entries: list[tuple[str, bool]] = []
     declared = 0
     stack: list[tuple[str, str]] = [("", workspace.root)]
@@ -526,29 +542,32 @@ def inspect_skill_directory(
         budget.enforce_elapsed(clock() - started)
         try:
             with os.scandir(directory) as iterator:
-                children = sorted(iterator, key=lambda child: child.name)
+                for child in iterator:
+                    if checkpoint is not None:
+                        checkpoint()
+                    budget.enforce_elapsed(clock() - started)
+                    if child.is_symlink():
+                        _fail("skill_path_escape", f"$.skill.package.entry[{child.name}]")
+                    rel = _require_safe_entry_name(f"{prefix}/{child.name}" if prefix else child.name)
+                    is_dir = child.is_dir(follow_symlinks=False)
+                    if not is_dir and not child.is_file(follow_symlinks=False):
+                        _fail("invalid_skill_package", f"$.skill.package.entry[{rel}]")
+                    tracker.add(rel, is_dir)
+                    entries.append((rel, is_dir))
+                    # 对象数（含隐含目录）在条目入账后立即判定：1025 个即停，不继续枚举。
+                    budget.enforce_objects(tracker.object_count)
+                    if is_dir:
+                        stack.append((rel, child.path))
+                        continue
+                    try:
+                        declared += child.stat(follow_symlinks=False).st_size
+                    except OSError as exc:
+                        raise AgentValidationError("invalid_skill_package", f"$.skill.package.entry[{rel}]") from exc
+                    # 目录无压缩：原件体积 = 文件尺寸总和，与 ZIP 16MiB 同口径判定。
+                    budget.enforce_archive_bytes(declared)
         except OSError as exc:
             raise AgentValidationError("invalid_skill_package", "$.skill.package") from exc
-        for child in children:
-            if checkpoint is not None:
-                checkpoint()
-            budget.enforce_elapsed(clock() - started)
-            if child.is_symlink():
-                _fail("skill_path_escape", f"$.skill.package.entry[{child.name}]")
-            rel = _require_safe_entry_name(f"{prefix}/{child.name}" if prefix else child.name)
-            if child.is_dir(follow_symlinks=False):
-                entries.append((rel, True))
-                stack.append((rel, child.path))
-            elif child.is_file(follow_symlinks=False):
-                entries.append((rel, False))
-                try:
-                    declared += child.stat(follow_symlinks=False).st_size
-                except OSError as exc:
-                    raise AgentValidationError("invalid_skill_package", f"$.skill.package.entry[{rel}]") from exc
-            else:
-                _fail("invalid_skill_package", f"$.skill.package.entry[{rel}]")
-    _enforce_entry_layout(entries)
-    budget.enforce_objects(_object_count(entries))
+    entries.sort(key=lambda entry: entry[0])
     budget.enforce_expanded_bytes(declared)
     files: list[SkillFileEntry] = []
     manifest_bytes = b""

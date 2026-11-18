@@ -31,6 +31,7 @@ from core.agent_types import (
     Selection,
     SheetsRange,
     decode_selected_range,
+    selected_range_digest,
     to_wire_dict,
 )
 from services.agent_service.attachment_worker import AttachmentParseError, parse_attachment
@@ -622,6 +623,141 @@ class TestXlsxRowExtentCertification:
         assert parsed.read_ranges == [to_wire_dict(atom)]
         assert parsed.unread_ranges == []
         assert parsed.stats["rows"] == 2
+        _assert_selected_range_contract(selection, parsed)
+
+
+# ---------------------------------------------------------------------------
+# XLSX 多段行选择的原子保序与边界（I21）
+# ---------------------------------------------------------------------------
+
+
+def _selected_range_digest(selection: Selection, parsed: Any) -> str:
+    decoded = decode_selected_range(
+        {
+            "selection": to_wire_dict(selection),
+            "read_ranges": parsed.read_ranges,
+            "unread_ranges": parsed.unread_ranges,
+            "stats": parsed.stats,
+            "limitations": parsed.limitations,
+            "accepted_limited_version": None,
+        },
+        "$.result.selected_range",
+    )
+    return selected_range_digest(decoded)
+
+
+def _rows_of_blocks(parsed: Any) -> list[int]:
+    return [row["row"] for block in parsed.blocks for row in json.loads(block)["rows"]]
+
+
+class TestXlsxMultiSegmentRowOrder:
+    def test_reversed_adjacent_segments_keep_selection_order(self) -> None:
+        # I21：先选 3 再选 1—2，原子不得被 min/max 归并重排成升序。
+        data = _xlsx_sheet1(_three_rows())
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=3, end=3),
+                RowsRange(kind="rows", sheet="S1", start=1, end=2),
+            ),
+        )
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+
+        assert parsed.read_state is ReadState.READY
+        assert parsed.coverage == "full"
+        assert parsed.read_ranges == [
+            to_wire_dict(RowsRange(kind="rows", sheet="S1", start=3, end=3)),
+            to_wire_dict(RowsRange(kind="rows", sheet="S1", start=1, end=2)),
+        ]
+        assert parsed.unread_ranges == []
+        assert parsed.stats["rows"] == 3
+        # 投递内容顺序与原子顺序一致，覆盖不重不漏。
+        assert _rows_of_blocks(parsed) == [3, 1, 2]
+        _assert_selected_range_contract(selection, parsed)
+
+        # 与规范化（升序）选择语义一致：覆盖集合相同。
+        ascending = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=2),
+                RowsRange(kind="rows", sheet="S1", start=3, end=3),
+            ),
+        )
+        assert sorted(_rows_of_blocks(_parse(AttachmentKind.XLSX, data, ascending))) == sorted(_rows_of_blocks(parsed))
+
+        # digest 稳定：同一选择重复解析结果一致。
+        again = _parse(AttachmentKind.XLSX, data, selection)
+        assert again.read_ranges == parsed.read_ranges
+        assert _selected_range_digest(selection, again) == _selected_range_digest(selection, parsed)
+
+    def test_unordered_multi_segment_keeps_selection_order(self) -> None:
+        data = _xlsx_sheet1(_three_rows())
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=2, end=2),
+                RowsRange(kind="rows", sheet="S1", start=1, end=1),
+                RowsRange(kind="rows", sheet="S1", start=3, end=3),
+            ),
+        )
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+
+        assert parsed.read_ranges == [to_wire_dict(atom) for atom in selection.ranges]
+        assert parsed.unread_ranges == []
+        assert parsed.coverage == "full"
+        assert _rows_of_blocks(parsed) == [2, 1, 3]
+        assert parsed.stats["rows"] == 3
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_ascending_multi_segment_unchanged(self) -> None:
+        data = _xlsx_sheet1(_three_rows())
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=2),
+                RowsRange(kind="rows", sheet="S1", start=3, end=3),
+            ),
+        )
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+
+        assert parsed.read_state is ReadState.READY
+        assert parsed.read_ranges == [to_wire_dict(atom) for atom in selection.ranges]
+        assert parsed.unread_ranges == []
+        assert _rows_of_blocks(parsed) == [1, 2, 3]
+        _assert_selected_range_contract(selection, parsed)
+
+    def test_disjoint_segments_are_rejected(self) -> None:
+        # 支持边界：仅相邻多段（合起来连续）；存在空档即明确拒绝，不静默扩读。
+        data = _xlsx_sheet1(_three_rows())
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=1, end=1),
+                RowsRange(kind="rows", sheet="S1", start=3, end=3),
+            ),
+        )
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, data, selection)
+        assert exc.value.code == "invalid_selection"
+
+    def test_reversed_adjacent_out_of_range_stays_unread(self) -> None:
+        # 与 I20 越界语义共存：越界部分仍记未读，已读按实际存在的行核定。
+        data = _xlsx_sheet1('<row r="1"><c r="A1"><v>1</v></c></row>')
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet="S1", start=2, end=3),
+                RowsRange(kind="rows", sheet="S1", start=1, end=1),
+            ),
+        )
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+
+        assert parsed.read_state is ReadState.PARTIAL
+        assert parsed.coverage == "limited"
+        assert parsed.read_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=1, end=1))]
+        assert parsed.unread_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=2, end=3))]
+        assert _rows_of_blocks(parsed) == [1]
+        assert parsed.stats["rows"] == 1
         _assert_selected_range_contract(selection, parsed)
 
 
