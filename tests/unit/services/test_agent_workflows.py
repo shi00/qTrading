@@ -20,7 +20,7 @@ from collections.abc import Callable
 
 import pytest
 
-from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal
+from core.agent_types import AgentValidationError, PlanNodeSpec, PlanSpecProposal, plan_spec_digest
 from dbos import DBOS
 from services.agent_service.workflows import (
     IDLE_WAIT_INTERVAL_SEC,
@@ -29,19 +29,25 @@ from services.agent_service.workflows import (
     LeafExecutionContext,
     LeafRuntimeRegistry,
     NodeOutcome,
+    PlanAdmission,
     PlanRunSummary,
     _leaf_step_evidence,
     _terminal_outcome,
+    admit_research_plan,
     build_leaf_payload,
     build_research_payload,
     build_retry_payload,
+    compute_actual_input_manifest,
     compute_retry_scope,
     decode_leaf_payload,
     decode_node_outcome,
+    decode_plan_admission,
     decode_research_payload,
+    decode_research_payload_full,
     drive_leaf_dag,
     leaf_workflow_id,
     observe_leaf_children,
+    record_plan_admission,
     wait_next_observation_window,
 )
 
@@ -1002,3 +1008,217 @@ def test_retry_payload_requires_preserved_predecessors() -> None:
             preserved_outcomes=(),
         )
     assert excinfo.value.code == "missing_preserved_predecessor"
+
+
+# ---------------------------------------------------------------------------
+# 计划准入与实际输入清单（R2-I09）
+# ---------------------------------------------------------------------------
+
+_ROLES: dict[str, frozenset[str]] = {"researcher": frozenset(), "analyst": frozenset()}
+
+
+def _admit(plan: PlanSpecProposal, *, input_version_digest: str | None = None) -> PlanAdmission:
+    return admit_research_plan(
+        plan,
+        plan_digest=plan_spec_digest(plan),
+        role_capabilities=_ROLES,
+        input_version_digest=input_version_digest,
+    )
+
+
+def test_admission_rejects_digest_detached_from_plan() -> None:
+    """计划版摘要必须与内容一致（不得以旧摘要冒充新计划）。"""
+    with pytest.raises(AgentValidationError) as excinfo:
+        admit_research_plan(_plan(_node("a")), plan_digest="f" * 64, role_capabilities=_ROLES)
+    assert excinfo.value.code == "plan_digest_mismatch"
+
+
+def test_admission_requires_role_policy() -> None:
+    """无角色能力策略即 fail-closed（不以提案自述能力自授权）。"""
+    plan = _plan(_node("a"))
+    with pytest.raises(AgentValidationError) as excinfo:
+        admit_research_plan(plan, plan_digest=plan_spec_digest(plan), role_capabilities=None)
+    assert excinfo.value.code == "plan_admission_policy_missing"
+
+
+def test_admission_rejects_cyclic_graph() -> None:
+    """环图零派发（非法结构不得进入叶编排）。"""
+    plan = _plan(_node("a", ("b",)), _node("b", ("a",)))
+    with pytest.raises(AgentValidationError) as excinfo:
+        _admit(plan)
+    assert excinfo.value.code == "plan_cycle"
+
+
+def test_admission_rejects_unknown_role() -> None:
+    """未知角色零派发（角色能力交集核验前移）。"""
+    plan = _plan(PlanNodeSpec(node_id="a", target="目标-a", role_key="ghost"))
+    with pytest.raises(AgentValidationError) as excinfo:
+        _admit(plan)
+    assert excinfo.value.code == "unknown_role"
+
+
+def test_actual_input_manifest_is_deterministic_and_input_version_bound() -> None:
+    """清单按拓扑序计算且绑定输入版本：版本变化即指纹变化（R2-I09）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    first = _admit(plan, input_version_digest="1" * 64)
+    same = _admit(plan, input_version_digest="1" * 64)
+    changed = _admit(plan, input_version_digest="2" * 64)
+    assert first.manifest == same.manifest
+    assert [record.node_id for record in first.manifest.nodes] == ["a", "b"]
+    assert first.manifest.digest_for("b") != changed.manifest.digest_for("b")
+    assert first.manifest.to_wire() == decode_plan_admission(first.to_wire()).manifest.to_wire()
+
+
+def test_admission_step_roundtrip_and_strict_keys() -> None:
+    """准入检查点回写规范化记录；坏记录拒绝（不伪装已准入）。"""
+    admission = _admit(_plan(_node("a")), input_version_digest="1" * 64)
+    assert asyncio.run(record_plan_admission(admission.to_wire())) == admission.to_wire()
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_plan_admission({**admission.to_wire(), "extra": 1})
+    assert excinfo.value.code == "unknown_field"
+
+
+def test_scheduler_adopts_preserved_only_when_input_version_matches() -> None:
+    """保留前置仅在其输入指纹与当前清单一致时被采纳（R2-I09）。"""
+    full = _plan(_node("a"), _node("b", ("a",)))
+    expected = compute_actual_input_manifest(full, input_version_digest="1" * 64).digest_for("a")
+    assert expected is not None
+    redo = _plan(_node("b", ("a",)))
+
+    admitted = admit_research_plan(
+        redo,
+        plan_digest="7" * 64,
+        role_capabilities=_ROLES,
+        preserved=(_outcome("a", input_digest=expected),),
+        preserved_input_manifest={"a": expected},
+        input_version_digest="1" * 64,
+    )
+    assert admitted.preserved_expected == {"a": expected}
+    adopted = LeafDagScheduler(redo, manifest=admitted.manifest, preserved_expected=admitted.preserved_expected)
+    adopted.seed_preserved((_outcome("a", input_digest=expected),))
+    assert adopted.ready() == ("b",)
+    assert ("a", expected) in adopted.summary().adopted_inputs
+
+    recorded_stale = admit_research_plan(
+        redo,
+        plan_digest="7" * 64,
+        role_capabilities=_ROLES,
+        preserved=(_outcome("a", input_digest=expected),),
+        preserved_input_manifest={"a": "9" * 64},
+        input_version_digest="1" * 64,
+    )
+    stale = LeafDagScheduler(
+        redo, manifest=recorded_stale.manifest, preserved_expected=recorded_stale.preserved_expected
+    )
+    stale.seed_preserved((_outcome("a", input_digest=expected),))
+    summary = stale.summary()
+    assert summary.stale_preserved == ("a",)
+    assert summary.blocked == ("b",)
+    assert summary.block_reasons[0] == ("b", "preserved_input_stale:a")
+    assert summary.converged is True
+
+
+def test_scheduler_does_not_reuse_preserved_without_input_evidence() -> None:
+    """旧轮事实未回报输入指纹：不得当作「仍适用」复用，阻其下游。"""
+    redo = _plan(_node("b", ("a",)))
+    admission = admit_research_plan(
+        redo,
+        plan_digest="7" * 64,
+        role_capabilities=_ROLES,
+        preserved=(_outcome("a"),),
+        input_version_digest="1" * 64,
+    )
+    assert admission.preserved_expected == {}
+    scheduler = LeafDagScheduler(redo, manifest=admission.manifest, preserved_expected=admission.preserved_expected)
+    scheduler.seed_preserved((_outcome("a"),))
+    assert scheduler.ready() == ()
+    assert scheduler.summary().stale_preserved == ("a",)
+
+
+def test_scheduler_blocks_dependents_when_leaf_input_changed() -> None:
+    """本轮叶回报的输入指纹与清单不符：其成果不得被下游采用，阻断下游。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    admission = _admit(plan, input_version_digest="1" * 64)
+    scheduler = LeafDagScheduler(plan, manifest=admission.manifest)
+    scheduler.start("a")
+    scheduler.record(_outcome("a", input_digest="9" * 64))
+    summary = scheduler.summary()
+    assert summary.succeeded == ("a",)
+    assert summary.blocked == ("b",)
+    assert summary.block_reasons[0] == ("b", "upstream_input_changed:a")
+
+
+def test_summary_records_adopted_input_versions() -> None:
+    """汇总记录本次实际采用的输入版本（已启动叶 + 已采纳保留前置）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    admission = _admit(plan, input_version_digest="1" * 64)
+    scheduler = LeafDagScheduler(plan, manifest=admission.manifest)
+    scheduler.start("a")
+    scheduler.record(_outcome("a", input_digest=admission.manifest.digest_for("a")))
+    scheduler.start("b")
+    adopted = dict(scheduler.summary().adopted_inputs)
+    assert set(adopted) == {"a", "b"}
+    assert adopted["b"] == admission.manifest.digest_for("b")
+
+
+def test_research_payload_carries_admission_inputs_and_rejects_unknown_keys() -> None:
+    """父载荷带角色策略与输入版本指纹（可选键）；未知键仍拒绝。"""
+    plan = _plan(_node("a"))
+    payload = build_research_payload(
+        plan,
+        execution_id="exec-1",
+        round_id="round-1",
+        plan_digest=plan_spec_digest(plan),
+        role_capabilities=_ROLES,
+        input_version_digest="1" * 64,
+    )
+    decoded = decode_research_payload_full(payload)
+    assert decoded.role_capabilities == _ROLES
+    assert decoded.input_version_digest == "1" * 64
+    with pytest.raises(AgentValidationError) as excinfo:
+        decode_research_payload_full({**payload, "extra": 1})
+    assert excinfo.value.code == "unknown_field"
+
+
+def test_retry_payload_rejects_stale_preserved_when_input_version_known() -> None:
+    """输入版本已核定时，陈旧保留前置在派发前拒绝（不以旧成果构造新轮）。"""
+    plan = _plan(_node("a"), _node("b", ("a",)))
+    expected = compute_actual_input_manifest(plan, input_version_digest="1" * 64).digest_for("a")
+    assert expected is not None
+    with pytest.raises(AgentValidationError) as excinfo:
+        build_retry_payload(
+            plan,
+            execution_id="exec-2",
+            round_id="round-2",
+            plan_digest=plan_spec_digest(plan),
+            targets=("b",),
+            preserved_outcomes=(_outcome("a", input_digest="9" * 64),),
+            input_version_digest="1" * 64,
+        )
+    assert excinfo.value.code == "preserved_input_stale"
+    payload, _scope = build_retry_payload(
+        plan,
+        execution_id="exec-2",
+        round_id="round-2",
+        plan_digest=plan_spec_digest(plan),
+        targets=("b",),
+        preserved_outcomes=(_outcome("a", input_digest=expected),),
+        input_version_digest="1" * 64,
+    )
+    assert decode_research_payload(payload)[4][0].input_digest == expected
+
+
+def test_node_outcome_accepts_legacy_four_key_wire() -> None:
+    """旧四键叶结果仍可解码（input_digest 缺省为 None，不伪造）。"""
+    legacy = {"node_id": "a", "state": "complete", "error_code": None, "artifact_ref": None}
+    assert decode_node_outcome(legacy).input_digest is None
+
+
+def test_leaf_payload_carries_input_digest() -> None:
+    """叶载荷携带本次采用的输入指纹（可选键）。"""
+    payload = build_leaf_payload(
+        execution_id="exec-1", round_id="round-1", plan_digest="b" * 64, node=_node("a"), input_digest="1" * 64
+    )
+    assert decode_leaf_payload(payload).input_digest == "1" * 64
+    without = build_leaf_payload(execution_id="exec-1", round_id="round-1", plan_digest="b" * 64, node=_node("a"))
+    assert decode_leaf_payload(without).input_digest is None

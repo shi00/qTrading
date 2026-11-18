@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -31,7 +31,7 @@ from core.agent_types import (
     plan_spec_digest,
 )
 from services.agent_service.runtime import DispatchGate
-from services.agent_service.workflows import build_research_payload
+from services.agent_service.workflows import admit_research_plan, build_research_payload
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,8 @@ PLAN_UNAVAILABLE: Final[str] = "plan_unavailable"
 NOT_COMMITTED: Final[str] = "not_committed"
 #: 零派发原因：非执行模式（讨论/计划/直答）不得启动研究操作（F21 / R2-I08）。
 MODE_RESEARCH_DISABLED: Final[str] = "mode_research_disabled"
+#: 零派发原因：计划准入无角色能力策略来源（不以提案自述能力自授权，R2-I09）。
+PLAN_ADMISSION_UNCONFIGURED: Final[str] = "plan_admission_unconfigured"
 
 #: 计划来源端口：``(user_scope, execution_id) -> 已保存计划版``；不可得返回 None。
 PlanSpecProvider = Callable[[str, str], Awaitable[PlanSpecProposal | None]]
@@ -86,11 +88,13 @@ class ResearchDispatcher:
         submit: RootWorkflowSubmitter,
         plan_provider: PlanSpecProvider | None = None,
         read_result: RootWorkflowResultReader | None = None,
+        role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
     ) -> None:
         self._gate = gate
         self._submit = submit
         self._plan_provider = plan_provider
         self._read_result = read_result
+        self._role_capabilities = role_capabilities
 
     async def dispatch(
         self, receipt: SubmissionReceipt, *, user_scope: str, mode: Mode | None = None
@@ -165,12 +169,24 @@ class ResearchDispatcher:
             execution_id=execution_id,
             workflow_id=receipt.workflow_id,
         )
+        if self._role_capabilities is None:
+            # 无角色能力策略即无准入判据：不以提案自述能力自授权（R2-I09）。
+            logger.warning(
+                "[ResearchDispatch] plan admission policy missing, zero dispatch (execution=%s workflow=%s)",
+                execution_id,
+                receipt.workflow_id,
+            )
+            return DispatchOutcome(execution_id, receipt.workflow_id, False, PLAN_ADMISSION_UNCONFIGURED)
         try:
+            plan_digest = plan_spec_digest(plan)
+            # 派发前准入：计划版绑定 + 任务依赖图/角色/能力校验（非法图零派发）。
+            admit_research_plan(plan, plan_digest=plan_digest, role_capabilities=self._role_capabilities)
             payload = build_research_payload(
                 plan,
                 execution_id=execution_id,
                 round_id=round_id,
-                plan_digest=plan_spec_digest(plan),
+                plan_digest=plan_digest,
+                role_capabilities=self._role_capabilities,
             )
         except Exception as exc:
             logger.warning(

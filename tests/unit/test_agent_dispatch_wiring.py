@@ -78,6 +78,9 @@ _PLAN = PlanSpecProposal(
     )
 )
 
+#: 派发前准入的角色能力策略（plan 节点未声明能力 → analyst 允许集为空）。
+_ROLE_CAPABILITIES: dict[str, frozenset[str]] = {"analyst": frozenset()}
+
 _SNAPSHOT = ExecutionSnapshot(
     snapshot_id="snap-1",
     run_id=None,
@@ -181,6 +184,7 @@ def _dispatcher(
         submit=submit,
         plan_provider=_plan if plan_provider is None else plan_provider,
         read_result=_read if read_result is None else read_result,
+        role_capabilities=_ROLE_CAPABILITIES,
     )
 
 
@@ -425,6 +429,47 @@ def test_dispatch_empty_plan_is_rejected_before_dispatch() -> None:
 
     assert outcome.submitted is False
     assert outcome.reason is not None and outcome.reason.startswith("plan_invalid:")
+    assert submit.calls == []
+
+
+def test_dispatch_illegal_plan_graph_is_rejected_before_dispatch() -> None:
+    """非法依赖图（环）派发前拒绝：零投递（R2-I09）。"""
+    submit = _RecordingSubmitter()
+
+    async def _cyclic_plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return PlanSpecProposal(
+            nodes=(
+                PlanNodeSpec(node_id="n1", target="梳理公司业务", role_key="analyst", depends_on=("n2",)),
+                PlanNodeSpec(node_id="n2", target="核对财务", role_key="analyst", depends_on=("n1",)),
+            )
+        )
+
+    dispatcher = _dispatcher(gate=_FakeGate(closed=False), submit=submit, plan_provider=_cyclic_plan)
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE))
+
+    assert outcome.submitted is False
+    assert outcome.reason is not None and outcome.reason.startswith("plan_invalid:")
+    assert submit.calls == []
+
+
+def test_dispatch_without_admission_policy_is_zero_dispatch() -> None:
+    """无角色能力策略即无准入判据：零派发（不自授权，R2-I09）。"""
+    submit = _RecordingSubmitter()
+
+    async def _plan(user_scope: str, execution_id: str) -> PlanSpecProposal:
+        return _PLAN
+
+    dispatcher = ResearchDispatcher(
+        gate=_FakeGate(closed=False),
+        submit=submit,
+        plan_provider=_plan,
+    )
+
+    outcome = asyncio.run(dispatcher.dispatch(_receipt(), user_scope=_USER_SCOPE))
+
+    assert outcome.submitted is False
+    assert outcome.reason == "plan_admission_unconfigured"
     assert submit.calls == []
 
 

@@ -32,21 +32,26 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Set as AbstractSet
+from dataclasses import dataclass, field
 from typing import Any, Final, NoReturn
 
 from dbos import DBOS, SetWorkflowID, WorkflowSerializationFormat, WorkflowStatus, WorkflowStatusString
 
 from core.agent_types import (
     DISPLAY_STATES,
+    PLAN_SPEC_VERSION,
     AgentValidationError,
     PlanNodeSpec,
     PlanSpecProposal,
     decode_plan_node_spec,
     decode_plan_spec_proposal,
     is_digest,
+    node_input_digest,
+    plan_node_digest,
+    plan_spec_digest,
     require_identity,
+    validate_plan_spec_proposal,
 )
 from utils.singleton_registry import register_singleton
 
@@ -62,6 +67,8 @@ LEAF_WORKFLOW_NAME: Final[str] = "agent_leaf"
 LEAF_EXECUTE_STEP_NAME: Final[str] = "agent_leaf_execute"
 #: 叶观察 step 稳定名（父 workflow 的完成集合判定检查点，B1 重放面）。
 LEAF_OBSERVE_STEP_NAME: Final[str] = "agent_leaf_observe"
+#: 计划准入 step 稳定名（父 workflow 的首个检查点：校验并记录计划版 + 实际输入清单）。
+PLAN_ADMIT_STEP_NAME: Final[str] = "agent_plan_admit"
 
 #: 载荷结构版本（进入封闭校验；跨版本恢复前须核对兼容矩阵 §8.4）。
 PAYLOAD_VERSION: Final[int] = 1
@@ -89,10 +96,17 @@ IDLE_WAIT_INTERVAL_SEC: Final[float] = 60.0
 
 _PAYLOAD_VERSION_KEY: Final = "payload_version"
 _RESEARCH_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "round_id", "plan_digest", "nodes"})
-#: 重试轮载荷在版本 1 上的兼容扩展键（缺省视为空：首轮无保留前置）。
-_RESEARCH_PAYLOAD_OPTIONAL_KEYS: Final = frozenset({"preserved_outcomes"})
+#: 父载荷兼容扩展键（缺省语义见各解码器）：重试轮保留前置、角色能力策略、
+#: 输入版本指纹。缺省不放开任意键。
+_RESEARCH_PAYLOAD_OPTIONAL_KEYS: Final = frozenset(
+    {"preserved_outcomes", "role_capabilities", "input_version_digest", "preserved_input_manifest"}
+)
 _LEAF_PAYLOAD_KEYS: Final = frozenset({"payload_version", "execution_id", "round_id", "plan_digest", "node"})
+#: 叶载荷兼容扩展键：本次采用的前置输入指纹（R2-I09；缺省表示未记录）。
+_LEAF_PAYLOAD_OPTIONAL_KEYS: Final = frozenset({"input_digest"})
 _NODE_OUTCOME_KEYS: Final = frozenset({"node_id", "state", "error_code", "artifact_ref"})
+#: 叶结果兼容扩展键：该叶实际采用的输入指纹（缺省 = 未报告，不伪造）。
+_NODE_OUTCOME_OPTIONAL_KEYS: Final = frozenset({"input_digest"})
 
 #: 叶状态语义分类（值域 = 冻结的 display_state 15 值，不自造词表）。
 _SUCCESS_STATES: Final[frozenset[str]] = frozenset({"complete"})
@@ -180,13 +194,16 @@ def _require_payload_version(value: Mapping[str, object], path: str) -> int:
 class NodeOutcome:
     """叶终态事实（一条叶执行的可核对结果；状态取冻结 display_state 值）。
 
-    ``error_code``/``artifact_ref`` 缺失以 ``None`` 表示（不填充业务合法值，R21）。
+    ``error_code``/``artifact_ref``/``input_digest`` 缺失以 ``None`` 表示（不填充
+    业务合法值，R21）。``input_digest`` 为该叶**实际采用**的输入指纹（R2-I09）：
+    有值时才可作为「仍适用」证据被重试轮复用；未报告不得推断为同一输入。
     """
 
     node_id: str
     state: str
     error_code: str | None = None
     artifact_ref: str | None = None
+    input_digest: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -194,6 +211,7 @@ class NodeOutcome:
             "state": self.state,
             "error_code": self.error_code,
             "artifact_ref": self.artifact_ref,
+            "input_digest": self.input_digest,
         }
 
 
@@ -203,12 +221,18 @@ def _opt_str_or_none(value: object, path: str) -> str | None:
     return _require_str(value, path)
 
 
+def _opt_digest_or_none(value: object, path: str) -> str | None:
+    if value is None:
+        return None
+    return _require_digest(value, path)
+
+
 def decode_node_outcome(value: object, path: str = "$.node_outcome") -> NodeOutcome:
-    """严格解码叶结果（四键封闭；状态必须为冻结 display_state）。"""
+    """严格解码叶结果（四键必填 + ``input_digest`` 兼容可选；状态须为冻结 display_state）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
-    _require_exact_keys(value, _NODE_OUTCOME_KEYS, path)
+    _require_keys_with_optional(value, _NODE_OUTCOME_KEYS, _NODE_OUTCOME_OPTIONAL_KEYS, path)
     state = value["state"]
     if not isinstance(state, str) or state not in DISPLAY_STATES:
         _fail("invalid_display_state", f"{path}.state")
@@ -217,32 +241,49 @@ def decode_node_outcome(value: object, path: str = "$.node_outcome") -> NodeOutc
         state=state,
         error_code=_opt_str_or_none(value["error_code"], f"{path}.error_code"),
         artifact_ref=_opt_str_or_none(value["artifact_ref"], f"{path}.artifact_ref"),
+        input_digest=_opt_digest_or_none(value.get("input_digest"), f"{path}.input_digest"),
     )
 
 
-def build_leaf_payload(*, execution_id: str, round_id: str, plan_digest: str, node: PlanNodeSpec) -> dict[str, Any]:
-    """构造叶 workflow 载荷（PORTABLE JSON 可序列化；封闭键）。"""
+def build_leaf_payload(
+    *,
+    execution_id: str,
+    round_id: str,
+    plan_digest: str,
+    node: PlanNodeSpec,
+    input_digest: str | None = None,
+) -> dict[str, Any]:
+    """构造叶 workflow 载荷（PORTABLE JSON 可序列化；封闭键 + 可选输入指纹）。
 
-    return {
+    ``input_digest`` 为父在准入清单中为该节点确定的前置输入指纹：叶据此执行
+    并在终态事实中回报，缺失时不写入键（不以占位值冒充已记录）。
+    """
+
+    payload: dict[str, Any] = {
         _PAYLOAD_VERSION_KEY: PAYLOAD_VERSION,
         "execution_id": _require_str(execution_id, "$.execution_id"),
         "round_id": _require_str(round_id, "$.round_id"),
         "plan_digest": _require_digest(plan_digest, "$.plan_digest"),
         "node": _node_to_wire(node),
     }
+    if input_digest is not None:
+        payload["input_digest"] = _require_digest(input_digest, "$.input_digest")
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
 class LeafExecutionContext:
-    """叶执行上下文（身份三元组 + 节点；执行器据此保存叶事实，不靠隐式全局）。
+    """叶执行上下文（身份三元组 + 节点 + 采用的输入指纹；不靠隐式全局）。
 
     轮次进入上下文是重试轮隔离的前提：新轮新身份，不复用旧轮成果。
+    ``input_digest`` 为父准入清单确定的输入版本指纹（缺省 = 未记录，不推断）。
     """
 
     execution_id: str
     round_id: str
     plan_digest: str
     node: PlanNodeSpec
+    input_digest: str | None = None
 
 
 def decode_leaf_payload(value: object, path: str = "$.leaf_payload") -> LeafExecutionContext:
@@ -250,13 +291,14 @@ def decode_leaf_payload(value: object, path: str = "$.leaf_payload") -> LeafExec
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
-    _require_exact_keys(value, _LEAF_PAYLOAD_KEYS, path)
+    _require_keys_with_optional(value, _LEAF_PAYLOAD_KEYS, _LEAF_PAYLOAD_OPTIONAL_KEYS, path)
     _require_payload_version(value, path)
     return LeafExecutionContext(
         execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
         round_id=_require_str(value["round_id"], f"{path}.round_id"),
         plan_digest=_require_digest(value["plan_digest"], f"{path}.plan_digest"),
         node=decode_plan_node_spec(value["node"], f"{path}.node"),
+        input_digest=_opt_digest_or_none(value.get("input_digest"), f"{path}.input_digest"),
     )
 
 
@@ -277,14 +319,62 @@ def leaf_workflow_id(*, execution_id: str, round_id: str, node_id: str) -> str:
     return "agent_leaf:" + ":".join((_escape(execution_id), _escape(round_id), _escape(node_id)))
 
 
-def decode_research_payload(
-    value: object, path: str = "$.research_payload"
-) -> tuple[str, str, str, PlanSpecProposal, tuple[NodeOutcome, ...]]:
-    """严格解码父载荷：``(execution_id, round_id, plan_digest, plan, preserved)``。
+@dataclass(frozen=True, slots=True)
+class ResearchPayload:
+    """父载荷完整解码结果（严格封闭；可选兼容键缺省以 ``None``/空元组表示）。
 
-    ``preserved_outcomes`` 为重试轮冻结的「仍适用成功前置」旧轮事实；首轮缺省
-    为空（版本 1 内的兼容扩展键，不放开任意键）。
+    ``role_capabilities`` 为本次准入使用的角色 → 允许能力键策略（派发侧随载荷
+    冻结，避免工作流侧无策略来源时默认放行）；``input_version_digest`` 为本次
+    执行所依据的输入版本指纹（缺省 = 未核定，不作「仍适用」证据，R2-I09）。
     """
+
+    execution_id: str
+    round_id: str
+    plan_digest: str
+    plan: PlanSpecProposal
+    preserved: tuple[NodeOutcome, ...]
+    role_capabilities: Mapping[str, frozenset[str]] | None
+    input_version_digest: str | None
+    preserved_input_manifest: Mapping[str, str] | None
+
+
+def _decode_digest_map(value: object, path: str) -> dict[str, str]:
+    """严格解码 ``node_id → 摘要`` 映射（键非空且唯一，值须为摘要）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    mapping: dict[str, str] = {}
+    for node_id, raw_digest in value.items():
+        key = _require_str(node_id, f"{path}.node_id")
+        if key in mapping:
+            _fail("duplicate_node", f"{path}.{key}")
+        mapping[key] = _require_digest(raw_digest, f"{path}.{key}")
+    return mapping
+
+
+def _decode_role_capabilities(value: object, path: str) -> dict[str, frozenset[str]]:
+    """严格解码角色能力策略（角色非空且唯一、能力键为非空字符串）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    policy: dict[str, frozenset[str]] = {}
+    for role_key, raw_capabilities in value.items():
+        role = _require_str(role_key, f"{path}.role_key")
+        if role in policy:
+            _fail("duplicate_role", f"{path}.{role}")
+        if not isinstance(raw_capabilities, list):
+            _fail("invalid_type", f"{path}.{role}")
+        capabilities = tuple(
+            _require_str(item, f"{path}.{role}[{index}]") for index, item in enumerate(raw_capabilities)
+        )
+        if len(set(capabilities)) != len(capabilities):
+            _fail("duplicate_capability", f"{path}.{role}")
+        policy[role] = frozenset(capabilities)
+    return policy
+
+
+def decode_research_payload_full(value: object, path: str = "$.research_payload") -> ResearchPayload:
+    """严格解码父载荷（含准入所需的角色策略与输入版本指纹）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
@@ -299,13 +389,312 @@ def decode_research_payload(
     preserved = tuple(
         decode_node_outcome(item, f"{path}.preserved_outcomes[{index}]") for index, item in enumerate(raw_preserved)
     )
-    return (
-        _require_str(value["execution_id"], f"{path}.execution_id"),
-        _require_str(value["round_id"], f"{path}.round_id"),
-        _require_digest(value["plan_digest"], f"{path}.plan_digest"),
-        decode_plan_spec_proposal({"nodes": raw_nodes}, f"{path}.plan_spec"),
-        preserved,
+    raw_policy = value.get("role_capabilities")
+    raw_input_manifest = value.get("preserved_input_manifest")
+    return ResearchPayload(
+        execution_id=_require_str(value["execution_id"], f"{path}.execution_id"),
+        round_id=_require_str(value["round_id"], f"{path}.round_id"),
+        plan_digest=_require_digest(value["plan_digest"], f"{path}.plan_digest"),
+        plan=decode_plan_spec_proposal({"nodes": raw_nodes}, f"{path}.plan_spec"),
+        preserved=preserved,
+        role_capabilities=(
+            None if raw_policy is None else _decode_role_capabilities(raw_policy, f"{path}.role_capabilities")
+        ),
+        input_version_digest=_opt_digest_or_none(value.get("input_version_digest"), f"{path}.input_version_digest"),
+        preserved_input_manifest=(
+            None
+            if raw_input_manifest is None
+            else _decode_digest_map(raw_input_manifest, f"{path}.preserved_input_manifest")
+        ),
     )
+
+
+def decode_research_payload(
+    value: object, path: str = "$.research_payload"
+) -> tuple[str, str, str, PlanSpecProposal, tuple[NodeOutcome, ...]]:
+    """严格解码父载荷：``(execution_id, round_id, plan_digest, plan, preserved)``。
+
+    ``preserved_outcomes`` 为重试轮冻结的「仍适用成功前置」旧轮事实；首轮缺省
+    为空（版本 1 内的兼容扩展键，不放开任意键）。准入所需的角色策略与输入版本
+    指纹经 :func:`decode_research_payload_full` 读取（本函数为兼容视图）。
+    """
+
+    payload = decode_research_payload_full(value, path)
+    return payload.execution_id, payload.round_id, payload.plan_digest, payload.plan, payload.preserved
+
+
+# ---------------------------------------------------------------------------
+# 计划准入（R2-I09：非法图零派发、计划版 + 实际输入清单先落盘再派发）
+# ---------------------------------------------------------------------------
+
+_ADMISSION_KEYS: Final = frozenset({"plan_digest", "plan_spec_version", "input_version_digest", "nodes"})
+#: 准入记录兼容扩展键：已采纳保留前置的输入版本（旧记录无此键时按「无可复用」）。
+_ADMISSION_OPTIONAL_KEYS: Final = frozenset({"preserved_inputs"})
+_NODE_INPUT_KEYS: Final = frozenset({"node_id", "node_digest", "input_digest"})
+_PRESERVED_INPUT_KEYS: Final = frozenset({"node_id", "input_digest"})
+
+
+@dataclass(frozen=True, slots=True)
+class NodeInputRecord:
+    """单节点实际输入记录：节点内容摘要 + 该节点采用的输入指纹。"""
+
+    node_id: str
+    node_digest: str
+    input_digest: str
+
+    def to_wire(self) -> dict[str, str]:
+        return {"node_id": self.node_id, "node_digest": self.node_digest, "input_digest": self.input_digest}
+
+
+@dataclass(frozen=True, slots=True)
+class ActualInputManifest:
+    """本次实际采用的前置输入版本清单（ActualInputManifest 等价结构，R2-I09）。
+
+    ``input_version_digest`` 为本次执行依据的输入版本指纹；``None`` 表示无法
+    核定（不伪造），此时保留前置**不得**被判定为「仍适用」。``nodes`` 按计划
+    顺序（拓扑序）给出每个节点内容摘要与其输入指纹。
+    """
+
+    input_version_digest: str | None
+    nodes: tuple[NodeInputRecord, ...]
+
+    def digest_for(self, node_id: str) -> str | None:
+        for record in self.nodes:
+            if record.node_id == node_id:
+                return record.input_digest
+        return None
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "input_version_digest": self.input_version_digest,
+            "nodes": [record.to_wire() for record in self.nodes],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PlanAdmission:
+    """计划准入事实：计划版摘要 + 结构版本 + 实际输入清单 + 保留前置适用指纹。
+
+    ``preserved_expected`` 为本次判定仍适用的保留前置及其输入指纹（空表示无可
+    复用旧成果）；不在其中的保留前置不得被下游采用。
+    """
+
+    plan_digest: str
+    plan_spec_version: int
+    manifest: ActualInputManifest
+    preserved_expected: Mapping[str, str] = field(default_factory=dict)
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "plan_digest": self.plan_digest,
+            "plan_spec_version": self.plan_spec_version,
+            "input_version_digest": self.manifest.input_version_digest,
+            "nodes": [record.to_wire() for record in self.manifest.nodes],
+            "preserved_inputs": [
+                {"node_id": node_id, "input_digest": digest} for node_id, digest in self.preserved_expected.items()
+            ],
+        }
+
+
+def _topological_order(plan: PlanSpecProposal) -> tuple[str, ...]:
+    """计划节点的拓扑序（依赖先于后继；只计计划内边，环明确拒绝）。
+
+    计划外依赖（重试轮保留前置）不参与入度与边：其满足性由准入与调度器按输入
+    指纹单独核定（:func:`compute_actual_input_manifest` 的 ``external_input_digests``）。
+    """
+
+    order = tuple(node.node_id for node in plan.nodes)
+    in_degree: dict[str, int] = {
+        node.node_id: sum(1 for dependency in node.depends_on if dependency in order) for node in plan.nodes
+    }
+    dependents: dict[str, list[str]] = {node_id: [] for node_id in order}
+    for node in plan.nodes:
+        for dependency in node.depends_on:
+            if dependency in dependents:
+                dependents[dependency].append(node.node_id)
+    ready = [node_id for node_id in order if in_degree[node_id] == 0]
+    resolved: list[str] = []
+    while ready:
+        node_id = ready.pop(0)
+        resolved.append(node_id)
+        for dependent in dependents[node_id]:
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                ready.append(dependent)
+    if len(resolved) != len(order):
+        _fail("plan_cycle", "$.nodes")
+    return tuple(resolved)
+
+
+def compute_actual_input_manifest(
+    plan: PlanSpecProposal,
+    *,
+    input_version_digest: str | None,
+    external_input_digests: Mapping[str, str] | None = None,
+) -> ActualInputManifest:
+    """按拓扑序计算每个节点的输入指纹（节点内容 + 前置输入指纹 + 输入版本）。
+
+    前置输入指纹指该前置节点被派发时采用的输入版本（父据此启动叶，故本轮内
+    节点天然满足）；计划外前置（重试轮保留前置）的指纹由
+    ``external_input_digests`` 提供——仅当该前置已被判定仍适用时才可计入。
+    任一前置指纹不可得时该节点（及其不可解后继）不进入清单：其下游按阻断处理，
+    不以不可核对的输入推进（R21）。
+    """
+
+    by_id = {node.node_id: node for node in plan.nodes}
+    external = dict(external_input_digests or {})
+    digests: dict[str, str] = {}
+    records: list[NodeInputRecord] = []
+    for node_id in _topological_order(plan):
+        node = by_id[node_id]
+        dependency_digests: list[str] = []
+        unresolved = False
+        for dependency in node.depends_on:
+            digest = digests.get(dependency) or external.get(dependency)
+            if digest is None:
+                unresolved = True
+                break
+            dependency_digests.append(digest)
+        if unresolved:
+            continue
+        node_digest = plan_node_digest(node)
+        digest = node_input_digest(
+            node_digest=node_digest,
+            dependency_input_digests=tuple(dependency_digests),
+            input_version_digest=input_version_digest,
+        )
+        digests[node_id] = digest
+        records.append(NodeInputRecord(node_id=node_id, node_digest=node_digest, input_digest=digest))
+    return ActualInputManifest(input_version_digest=input_version_digest, nodes=tuple(records))
+
+
+def admit_research_plan(
+    plan: PlanSpecProposal,
+    *,
+    plan_digest: str,
+    role_capabilities: Mapping[str, AbstractSet[str]] | None,
+    preserved: tuple[NodeOutcome, ...] = (),
+    preserved_input_manifest: Mapping[str, str] | None = None,
+    input_version_digest: str | None = None,
+) -> PlanAdmission:
+    """计划准入（派发前唯一判定）：图/角色/能力校验 → 保留前置适用性 → 输入清单。
+
+    - ``plan_digest`` 必须等于计划内容摘要（计划版身份不得与内容脱钩）；重试轮
+      载荷的 ``plan_digest`` 指原计划版身份、内容为范围内节点子集，故有保留前置
+      时改由派发前 :func:`build_retry_payload` 的范围内派生与指纹核对保证；
+    - ``role_capabilities`` 缺省即无策略来源，**fail-closed**（不以提案自述
+      能力自授权）；
+    - :func:`validate_plan_spec_proposal` 覆盖空计划/超 20 叶/重复节点/自依赖/
+      缺引用/环/重复依赖/重复能力/重复来源/未知角色/越权能力（重试轮计划外依赖
+      由保留前置满足，不判缺引用）；
+    - 保留前置「仍适用」证据 = 结果回报的输入指纹与 ``preserved_input_manifest``
+      记录一致且输入版本已核定；不一致只标记为不适用（不采纳、阻其下游），不
+      伪造其成功。
+
+    Raises:
+        AgentValidationError: ``plan_digest_mismatch`` / ``plan_admission_policy_missing``
+            及 :func:`validate_plan_spec_proposal` 的稳定错误码。
+    """
+
+    if not isinstance(plan, PlanSpecProposal):
+        _fail("invalid_type", "$.plan_spec")
+    expected_digest = _require_digest(plan_digest, "$.plan_digest")
+    if not preserved and plan_spec_digest(plan) != expected_digest:
+        _fail("plan_digest_mismatch", "$.plan_digest")
+    if role_capabilities is None:
+        _fail("plan_admission_policy_missing", "$.role_capabilities")
+    validate_plan_spec_proposal(
+        plan,
+        allowed_role_capabilities=role_capabilities,
+        satisfied_external_dependencies={outcome.node_id for outcome in preserved},
+    )
+    _validate_preserved(preserved, scope_node_ids={node.node_id for node in plan.nodes})
+
+    recorded = dict(preserved_input_manifest or {})
+    preserved_expected: dict[str, str] = {}
+    if input_version_digest is not None:
+        for outcome in preserved:
+            expected = recorded.get(outcome.node_id)
+            if expected is not None and outcome.input_digest == expected:
+                preserved_expected[outcome.node_id] = expected
+    external = {node_id: digest for node_id, digest in preserved_expected.items()}
+    return PlanAdmission(
+        plan_digest=expected_digest,
+        plan_spec_version=PLAN_SPEC_VERSION,
+        manifest=compute_actual_input_manifest(
+            plan,
+            input_version_digest=input_version_digest,
+            external_input_digests=external,
+        ),
+        preserved_expected=preserved_expected,
+    )
+
+
+def decode_plan_admission(value: object, path: str = "$.plan_admission") -> PlanAdmission:
+    """严格解码准入记录（计划版摘要/结构版本/输入版本/节点输入指纹）。"""
+
+    if not isinstance(value, dict):
+        _fail("invalid_type", path)
+    _require_keys_with_optional(value, _ADMISSION_KEYS, _ADMISSION_OPTIONAL_KEYS, path)
+    version = value["plan_spec_version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version != PLAN_SPEC_VERSION:
+        _fail("unsupported_version", f"{path}.plan_spec_version")
+    raw_nodes = value["nodes"]
+    if not isinstance(raw_nodes, list):
+        _fail("invalid_type", f"{path}.nodes")
+    records: list[NodeInputRecord] = []
+    seen: set[str] = set()
+    for index, raw_node in enumerate(raw_nodes):
+        node_path = f"{path}.nodes[{index}]"
+        if not isinstance(raw_node, dict):
+            _fail("invalid_type", node_path)
+        _require_exact_keys(raw_node, _NODE_INPUT_KEYS, node_path)
+        node_id = _require_str(raw_node["node_id"], f"{node_path}.node_id")
+        if node_id in seen:
+            _fail("duplicate_node", f"{node_path}.node_id")
+        seen.add(node_id)
+        records.append(
+            NodeInputRecord(
+                node_id=node_id,
+                node_digest=_require_digest(raw_node["node_digest"], f"{node_path}.node_digest"),
+                input_digest=_require_digest(raw_node["input_digest"], f"{node_path}.input_digest"),
+            )
+        )
+    raw_preserved = value.get("preserved_inputs", [])
+    if not isinstance(raw_preserved, list):
+        _fail("invalid_type", f"{path}.preserved_inputs")
+    preserved_expected: dict[str, str] = {}
+    for index, raw_input in enumerate(raw_preserved):
+        input_path = f"{path}.preserved_inputs[{index}]"
+        if not isinstance(raw_input, dict):
+            _fail("invalid_type", input_path)
+        _require_exact_keys(raw_input, _PRESERVED_INPUT_KEYS, input_path)
+        node_id = _require_str(raw_input["node_id"], f"{input_path}.node_id")
+        if node_id in preserved_expected:
+            _fail("duplicate_node", f"{input_path}.node_id")
+        preserved_expected[node_id] = _require_digest(raw_input["input_digest"], f"{input_path}.input_digest")
+    return PlanAdmission(
+        plan_digest=_require_digest(value["plan_digest"], f"{path}.plan_digest"),
+        plan_spec_version=version,
+        manifest=ActualInputManifest(
+            input_version_digest=_opt_digest_or_none(value["input_version_digest"], f"{path}.input_version_digest"),
+            nodes=tuple(records),
+        ),
+        preserved_expected=preserved_expected,
+    )
+
+
+@DBOS.step(name=PLAN_ADMIT_STEP_NAME)
+async def record_plan_admission(admission: dict[str, Any]) -> dict[str, Any]:
+    """计划准入检查点（父 workflow 的首个持久 step）。
+
+    作为单个 step 记录输出：计划版摘要、结构版本与实际输入清单随原生执行记录
+    一并持久化（重放按记录还原，不重算、不改写）；解码失败即拒绝，后续叶零派发。
+    计划全文（含角色/能力/来源引用）已随 workflow 输入载荷持久化，本 step 是其
+    可核对的准入引用，不另建应用侧第二套计划存储。
+    """
+
+    return decode_plan_admission(admission).to_wire()
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +713,10 @@ class PlanRunSummary:
     终态节点（暂停/等待/``unknown`` 等），非空中则 ``converged`` 为 False。
     ``closed_unknown`` 为已结束但结果未知的结案叶（不可恢复终态）：单独列出，
     不并入 ``failed``/``ended``，也不进入 ``pending``（F10）。
+
+    ``adopted_inputs`` 为本次**实际采用**的输入版本记录 ``(node_id, 输入指纹)``
+    （已启动叶与已采纳保留前置）；``stale_preserved`` 为输入版本已不适用而未
+    采纳的保留前置（其下游按阻断记录，不启动），二者共同构成 R2-I09 的可核对面。
     """
 
     succeeded: tuple[str, ...]
@@ -338,6 +731,8 @@ class PlanRunSummary:
     outcomes: tuple[NodeOutcome, ...]
     leaves_all_succeeded: bool
     converged: bool
+    adopted_inputs: tuple[tuple[str, str], ...] = ()
+    stale_preserved: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -354,6 +749,8 @@ class PlanRunSummary:
             "outcomes": [outcome.to_wire() for outcome in self.outcomes],
             "leaves_all_succeeded": self.leaves_all_succeeded,
             "converged": self.converged,
+            "adopted_inputs": [[node_id, digest] for node_id, digest in self.adopted_inputs],
+            "stale_preserved": list(self.stale_preserved),
         }
 
 
@@ -368,20 +765,44 @@ class LeafDagScheduler:
     只依据叶终态事实推进：前置全部 ``complete`` 才就绪；失败/终止/partial/
     ``closed_unknown`` 使下游阻塞并逐层传播（未知结果不能作为成功前置）；
     非终态（暂停/等待/``unknown``）保持 pending，不伪造结论。
+
+    提供准入清单（:class:`ActualInputManifest`）时额外核对输入版本（R2-I09）：
+    重试轮保留前置只有输入指纹与当前清单一致且输入版本已核定时才可复用，否则
+    不予采纳并阻断其下游；本轮叶回报的输入指纹与清单不符时同样阻断其下游。
     """
 
-    def __init__(self, plan: PlanSpecProposal) -> None:
+    def __init__(
+        self,
+        plan: PlanSpecProposal,
+        *,
+        manifest: ActualInputManifest | None = None,
+        preserved_expected: Mapping[str, str] | None = None,
+    ) -> None:
         self._order: tuple[str, ...] = tuple(node.node_id for node in plan.nodes)
         self._nodes: dict[str, PlanNodeSpec] = {node.node_id: node for node in plan.nodes}
+        dependents: dict[str, list[str]] = {node_id: [] for node_id in self._order}
+        for node in plan.nodes:
+            for dependency in node.depends_on:
+                dependents.setdefault(dependency, []).append(node.node_id)
         self._dependents: dict[str, tuple[str, ...]] = {
-            node_id: tuple(other.node_id for other in plan.nodes if node_id in other.depends_on)
-            for node_id in self._order
+            node_id: tuple(targets) for node_id, targets in dependents.items()
         }
         self._started: set[str] = set()
         self._outcomes: dict[str, NodeOutcome] = {}
         self._blocked: dict[str, str] = {}
         #: 重试轮冻结的「仍适用成功前置」旧轮事实（计划外节点；不属本轮成果）。
         self._preserved: dict[str, NodeOutcome] = {}
+        #: 准入清单：节点 → 本次采用的输入指纹（缺省 = 无清单，保持既有结构判据）。
+        self._expected: dict[str, str] | None = (
+            None if manifest is None else {record.node_id: record.input_digest for record in manifest.nodes}
+        )
+        #: 输入版本是否已核定；未核定时保留前置不得被判定为「仍适用」（不推断）。
+        self._input_version_known: bool = manifest is not None and manifest.input_version_digest is not None
+        #: 准入判定仍适用的保留前置 → 输入指纹（空 = 无可用旧成果）。
+        self._preserved_expected: dict[str, str] = dict(preserved_expected or {})
+        self._adopted: dict[str, str] = {}
+        self._preserved_order: list[str] = []
+        self._stale_preserved: list[str] = []
 
     def node(self, node_id: str) -> PlanNodeSpec:
         """按身份取节点（未知身份明确拒绝）。"""
@@ -397,11 +818,27 @@ class LeafDagScheduler:
         保留事实来自旧轮已保存成果（不重做、不复制许可与费用）；非成功前置
         不能作为「适用成功前置」，冲突必须显式拒绝而非静默降级。判据与派发前
         :func:`_validate_preserved` 同组（此处为纵深防御）。
+
+        有准入清单时额外核「输入版本仍适用」：旧事实必须回报输入指纹、输入版本
+        已核定且与当前清单一致；任一条不成立即不采纳该前置，并阻断其下游（记录
+        ``preserved_input_stale:<node_id>``）——不以陈旧前置静默推进后继。
         """
 
         _validate_preserved(outcomes, scope_node_ids=set(self._nodes))
         for outcome in outcomes:
+            if self._expected is None:
+                self._preserved[outcome.node_id] = outcome
+                self._preserved_order.append(outcome.node_id)
+                continue
+            expected = self._preserved_expected.get(outcome.node_id)
+            applicable = expected is not None and self._input_version_known and outcome.input_digest == expected
+            if expected is None or not applicable:
+                self._stale_preserved.append(outcome.node_id)
+                self._block_dependents(outcome.node_id, f"preserved_input_stale:{outcome.node_id}")
+                continue
             self._preserved[outcome.node_id] = outcome
+            self._preserved_order.append(outcome.node_id)
+            self._adopted[outcome.node_id] = expected
 
     def _dependency_satisfied(self, dependency: str) -> bool:
         """前置满足：本轮已 ``complete``，或重试轮保留的 ``complete`` 旧事实。"""
@@ -430,6 +867,10 @@ class LeafDagScheduler:
         if node_id not in self.ready():
             _fail("node_not_ready", f"$.nodes[{node_id}]")
         self._started.add(node_id)
+        if self._expected is not None:
+            expected = self._expected.get(node_id)
+            if expected is not None:
+                self._adopted[node_id] = expected
 
     def record(self, outcome: NodeOutcome) -> None:
         """登记叶终态事实；非成功终态递归阻塞其下游。
@@ -437,6 +878,10 @@ class LeafDagScheduler:
         终态单调（同类 F07「迟到 running 不覆终态」）：已登记成功/阻塞/结案未知
         终态后再记任何事实都属冲突（迟到/重复事实不得把收敛翻回未收敛，也不得
         复活已结案的 ``closed_unknown``，F10）。
+
+        有准入清单时核该叶回报的输入指纹：成功但指纹与清单不符（输入已变）时
+        阻断其全部下游（``upstream_input_changed:<node_id>``），不使其成果被下游
+        采用；未回报指纹的叶视为由父按清单派发（本轮内天然满足，不推断旧轮）。
         """
 
         self.node(outcome.node_id)
@@ -450,9 +895,14 @@ class LeafDagScheduler:
         self._outcomes[outcome.node_id] = outcome
         if outcome.state in _BLOCKING_STATES | _CLOSED_UNKNOWN_STATES:
             self._block_dependents(outcome.node_id, f"upstream_{outcome.state}:{outcome.node_id}")
+            return
+        if outcome.state in _SUCCESS_STATES and self._expected is not None:
+            expected = self._expected.get(outcome.node_id)
+            if expected is not None and outcome.input_digest is not None and outcome.input_digest != expected:
+                self._block_dependents(outcome.node_id, f"upstream_input_changed:{outcome.node_id}")
 
     def _block_dependents(self, node_id: str, reason: str) -> None:
-        for dependent in self._dependents[node_id]:
+        for dependent in self._dependents.get(node_id, ()):
             if dependent in self._blocked:
                 continue
             self._blocked[dependent] = reason
@@ -500,6 +950,12 @@ class LeafDagScheduler:
             outcomes=tuple(self._outcomes[node_id] for node_id in self._order if node_id in self._outcomes),
             leaves_all_succeeded=bool(succeeded) and len(succeeded) == len(self._order),
             converged=self.converged(),
+            adopted_inputs=tuple(
+                (node_id, self._adopted[node_id])
+                for node_id in (*self._order, *self._preserved_order)
+                if node_id in self._adopted
+            ),
+            stale_preserved=tuple(self._stale_preserved),
         )
 
 
@@ -547,6 +1003,8 @@ async def drive_leaf_dag(
     observe_leaves: LeafObserve,
     *,
     preserved: tuple[NodeOutcome, ...] = (),
+    manifest: ActualInputManifest | None = None,
+    preserved_expected: Mapping[str, str] | None = None,
     idle_observation_limit: int | None = None,
     wait_checkpoint: LeafWaitCheckpoint | None = None,
 ) -> PlanRunSummary:
@@ -567,9 +1025,11 @@ async def drive_leaf_dag(
     确定性（B1 重放面）：本循环只由**父协程顺序**发出启动/观察操作——不创建
     并发任务，不以真实时序决定操作顺序；完成集合由 ``observe_leaves`` 的
     检查点结果决定。故重放时父体操作序号逐项对齐，子 workflow 记录不会错配。
+    ``manifest`` 为计划准入确定的实际输入清单（R2-I09）：提供时保留前置与叶回报
+    的输入指纹按清单核对，不适用即阻断下游；缺省保持既有结构判据。
     """
 
-    scheduler = LeafDagScheduler(plan)
+    scheduler = LeafDagScheduler(plan, manifest=manifest, preserved_expected=preserved_expected)
     scheduler.seed_preserved(preserved)
     running: dict[str, str] = {}
     idle_observations = 0
@@ -776,10 +1236,13 @@ async def observe_leaf_children(children: list[dict[str, str]], slice_seconds: f
 
 @DBOS.workflow(name=RESEARCH_WORKFLOW_NAME, serialization_type=WorkflowSerializationFormat.PORTABLE)
 async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
-    """父研究 workflow：启动就绪叶、消费完成事实、汇总叶事实。
+    """父研究 workflow：计划准入 → 启动就绪叶 → 消费完成事实 → 汇总叶事实。
 
-    计划须在派发前已由服务层校验并保存（计划版 + 原生引用），本 workflow 只做
-    严格解码与编排，不重复准入判定。
+    准入（R2-I09）：派发前先核对计划版摘要与内容一致、经
+    :func:`validate_plan_spec_proposal` 校验任务依赖图（空计划/超 20 叶/重复/
+    自依赖/缺引用/环/角色/能力），并把计划版摘要与实际输入清单写入首个持久
+    step（:func:`record_plan_admission`）。任一步失败即零叶派发：不以 workflow
+    继续执行冒充「已准入」，也不以空清单推进后继。
 
     语义边界：
     - 返回 ``converged=False`` 的汇总（暂停/等待/决定/未知）**不等于研究结束**，
@@ -793,15 +1256,28 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
       （``leaf_workflow_id``）作为去重、观察复接与重试轮隔离。
     """
 
-    execution_id, round_id, plan_digest, plan, preserved = decode_research_payload(payload)
+    decoded = decode_research_payload_full(payload)
+    admission = admit_research_plan(
+        decoded.plan,
+        plan_digest=decoded.plan_digest,
+        role_capabilities=decoded.role_capabilities,
+        preserved=decoded.preserved,
+        preserved_input_manifest=decoded.preserved_input_manifest,
+        input_version_digest=decoded.input_version_digest,
+    )
+    # 准入检查点先于任何叶启动：结果随原生执行记录持久化，失败即零派发（R21）。
+    await record_plan_admission(admission.to_wire())
+    execution_id = decoded.execution_id
+    round_id = decoded.round_id
     idle_limit = max(1, round(CHILD_OBSERVE_TIMEOUT_SEC / OBSERVE_SLICE_SEC))
 
     async def start_leaf(node: PlanNodeSpec) -> str:
         leaf_payload = build_leaf_payload(
             execution_id=execution_id,
             round_id=round_id,
-            plan_digest=plan_digest,
+            plan_digest=admission.plan_digest,
             node=node,
+            input_digest=admission.manifest.digest_for(node.node_id),
         )
         with SetWorkflowID(
             leaf_workflow_id(execution_id=execution_id, round_id=round_id, node_id=node.node_id),
@@ -822,10 +1298,12 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         return outcomes
 
     summary = await drive_leaf_dag(
-        plan,
+        decoded.plan,
         start_leaf,
         observe_leaves,
-        preserved=preserved,
+        preserved=decoded.preserved,
+        manifest=admission.manifest,
+        preserved_expected=admission.preserved_expected,
         idle_observation_limit=idle_limit,
         wait_checkpoint=wait_next_observation_window,
     )
@@ -853,17 +1331,23 @@ def build_research_payload(
     round_id: str,
     plan_digest: str,
     preserved: tuple[NodeOutcome, ...] = (),
+    role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
+    input_version_digest: str | None = None,
+    preserved_input_manifest: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """构造父 workflow 载荷（与保存的计划版同源内容；PORTABLE JSON 可序列化）。
 
     ``preserved`` 为重试轮冻结的旧轮成功前置事实（首轮为空）。空计划在派发前
     拒绝（F03：不制造空任务树；DBOS 侧无法给出可回执的准入拒绝）。
+    ``role_capabilities`` 为本次准入的角色能力策略（写入载荷供工作流入口复核；
+    缺省不写键，入口按无策略 fail-closed）。``input_version_digest`` 为输入版本
+    指纹（缺省不写键，表示未核定，不作「仍适用」证据，R2-I09）。
     """
 
     if not plan.nodes:
         _fail("empty_plan", "$.nodes")
     _validate_preserved(preserved, scope_node_ids={node.node_id for node in plan.nodes})
-    return {
+    payload: dict[str, Any] = {
         _PAYLOAD_VERSION_KEY: PAYLOAD_VERSION,
         "execution_id": _require_str(execution_id, "$.execution_id"),
         "round_id": _require_str(round_id, "$.round_id"),
@@ -871,6 +1355,32 @@ def build_research_payload(
         "nodes": [_node_to_wire(node) for node in plan.nodes],
         "preserved_outcomes": [outcome.to_wire() for outcome in preserved],
     }
+    if role_capabilities is not None:
+        payload["role_capabilities"] = _role_capabilities_to_wire(role_capabilities)
+    if input_version_digest is not None:
+        payload["input_version_digest"] = _require_digest(input_version_digest, "$.input_version_digest")
+    if preserved_input_manifest is not None:
+        payload["preserved_input_manifest"] = {
+            _require_str(node_id, "$.preserved_input_manifest.node_id"): _require_digest(
+                digest, f"$.preserved_input_manifest.{node_id}"
+            )
+            for node_id, digest in preserved_input_manifest.items()
+        }
+    return payload
+
+
+def _role_capabilities_to_wire(policy: Mapping[str, AbstractSet[str]]) -> dict[str, list[str]]:
+    """角色能力策略 → 载荷 wire（角色/能力排序固定，便于同内容重放比对）。"""
+
+    wire: dict[str, list[str]] = {}
+    for role_key in sorted(policy):
+        capabilities = policy[role_key]
+        if len(capabilities) != len(set(capabilities)):
+            _fail("duplicate_capability", f"$.role_capabilities.{role_key}")
+        wire[_require_str(role_key, "$.role_capabilities.role")] = sorted(
+            _require_str(capability, f"$.role_capabilities.{role_key}") for capability in capabilities
+        )
+    return wire
 
 
 def _validate_preserved(outcomes: tuple[NodeOutcome, ...], *, scope_node_ids: set[str]) -> None:
@@ -956,6 +1466,8 @@ def build_retry_payload(
     plan_digest: str,
     targets: tuple[str, ...],
     preserved_outcomes: tuple[NodeOutcome, ...],
+    role_capabilities: Mapping[str, AbstractSet[str]] | None = None,
+    input_version_digest: str | None = None,
 ) -> tuple[dict[str, Any], RetryScope]:
     """构造重试轮父载荷：``nodes`` 为范围内节点，``preserved_outcomes`` 为旧轮
     成功前置。
@@ -963,6 +1475,15 @@ def build_retry_payload(
     派发前校验（HANDOFF §7.2：保存后才派发）：保留前置须为成功事实且不得落在
     本轮范围内；范围外前置必须由 ``preserved_outcomes`` 全部覆盖。均显式拒绝
     （不以 workflow ERROR 暴露非法载荷、不静默不满足依赖）。
+
+    输入版本已核定时额外核「仍适用」（R2-I09）：每项保留前置必须回报输入指纹且
+    等于按当前计划重算的清单指纹，否则显式拒绝（``preserved_input_stale``）——
+    不以陈旧前置构造新轮；未提供 ``input_version_digest`` 时推迟到工作流入口
+    按清单判定（不适用即阻断下游）。
+
+    Args:
+        role_capabilities: 角色能力策略（随载荷冻结，供入口复核）。
+        input_version_digest: 本次输入版本指纹（缺省 = 未核定）。
     """
 
     scope = compute_retry_scope(plan, targets=targets)
@@ -974,12 +1495,25 @@ def build_retry_payload(
         for dependency in node.depends_on:
             if dependency not in redo_ids and dependency not in preserved_ids:
                 _fail("missing_preserved_predecessor", f"$.nodes[{node.node_id}].depends_on")
+    if input_version_digest is not None:
+        full_manifest = compute_actual_input_manifest(plan, input_version_digest=input_version_digest)
+        expected: dict[str, str] = {}
+        for outcome in preserved_outcomes:
+            expected_digest = full_manifest.digest_for(outcome.node_id)
+            if expected_digest is None or outcome.input_digest != expected_digest:
+                _fail("preserved_input_stale", f"$.preserved_outcomes[{outcome.node_id}]")
+            expected[outcome.node_id] = expected_digest
+    else:
+        expected = {}
     payload = build_research_payload(
         PlanSpecProposal(nodes=redo_nodes),
         execution_id=execution_id,
         round_id=round_id,
         plan_digest=plan_digest,
         preserved=preserved_outcomes,
+        role_capabilities=role_capabilities,
+        input_version_digest=input_version_digest,
+        preserved_input_manifest=expected or None,
     )
     return payload, scope
 
@@ -990,7 +1524,9 @@ __all__ = [
     "LEAF_OBSERVE_STEP_NAME",
     "LEAF_WORKFLOW_NAME",
     "PAYLOAD_VERSION",
+    "PLAN_ADMIT_STEP_NAME",
     "RESEARCH_WORKFLOW_NAME",
+    "ActualInputManifest",
     "LeafDagScheduler",
     "LeafExecutionContext",
     "LeafObserve",
@@ -998,20 +1534,28 @@ __all__ = [
     "LeafRuntimeRegistry",
     "LeafStart",
     "LeafWaitCheckpoint",
+    "NodeInputRecord",
     "NodeOutcome",
+    "PlanAdmission",
     "PlanRunSummary",
+    "ResearchPayload",
     "RetryScope",
+    "admit_research_plan",
     "build_leaf_payload",
     "build_research_payload",
     "build_retry_payload",
+    "compute_actual_input_manifest",
     "compute_retry_scope",
     "decode_leaf_payload",
     "decode_node_outcome",
+    "decode_plan_admission",
     "decode_research_payload",
+    "decode_research_payload_full",
     "drive_leaf_dag",
     "execute_leaf_step",
     "leaf_workflow_id",
     "observe_leaf_children",
+    "record_plan_admission",
     "run_leaf_workflow",
     "run_research_workflow",
     "submit_research_workflow",
