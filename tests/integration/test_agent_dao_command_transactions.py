@@ -141,6 +141,7 @@ def _bind_request(
         "workflow_id": receipt.workflow_id,
         "workflow_code_version": "wcv-1",
         "run_epoch": 1,
+        "expected_input_revision": 1,
         "frozen_manifest": json_doc({"schema_version": 1, "kind": "frozen_manifest"}),
         "actual_input": json_doc({"schema_version": 1, "kind": "actual_input"}),
     }
@@ -466,7 +467,7 @@ class TestBindActualInput:
         engine = create_test_engine(real_embedded_pg.url)
         rev = await dao.revise_queued(_revise_request(receipt, expected=1))
 
-        bind = await dao.bind_actual_input(_bind_request(receipt))
+        bind = await dao.bind_actual_input(_bind_request(receipt, expected_input_revision=2))
 
         assert rev.input_revision == 2
         assert bind.input_revision == 2
@@ -486,6 +487,67 @@ class TestBindActualInput:
         assert event.input_revision == 2
         assert event.payload["input_revision"] == 2
         await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_stale_expected_input_revision_after_revise_conflicts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """修订先胜：基于旧输入版（expected=1）的冻结载荷不得绑定，零新事实（R2-I16）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        rev = await dao.revise_queued(_revise_request(receipt, expected=1))
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(_bind_request(receipt))
+
+        assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+        assert rev.input_revision == 2
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        async with engine.connect() as conn:
+            state = (
+                await conn.execute(
+                    sa.select(AgentExecution.current_round_id, AgentExecution.revision).where(
+                        AgentExecution.execution_id == receipt.execution_id
+                    )
+                )
+            ).one()
+        assert state.current_round_id is None
+        assert state.revision == rev.execution_revision
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_expected_input_revision_ahead_of_head_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """预期版超前于权威头（无对应修订事实）→ REVISION_CONFLICT，不虚标版本（R2-I16/R21）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(_bind_request(receipt, expected_input_revision=2))
+
+        assert excinfo.value.code is AgentErrorCode.REVISION_CONFLICT
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        async with engine.connect() as conn:
+            revision = (
+                await conn.execute(
+                    sa.select(AgentExecution.revision).where(AgentExecution.execution_id == receipt.execution_id)
+                )
+            ).scalar_one()
+        assert revision == 1
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_bind_expected_input_revision_zero_rejected(self, real_embedded_pg: ConnectionInfo) -> None:
+        """预期输入版下限 1：0 不接受（受理版至少为 1，R2-I16）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.bind_actual_input(_bind_request(receipt, expected_input_revision=0))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_bind_same_workflow_other_execution_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
@@ -1116,7 +1178,7 @@ class TestReviseQueued:
         dao, receipt = await _accept_only(real_embedded_pg)
         engine = create_test_engine(real_embedded_pg.url)
         first = await dao.revise_queued(_revise_request(receipt, expected=1))
-        bind = await dao.bind_actual_input(_bind_request(receipt))
+        bind = await dao.bind_actual_input(_bind_request(receipt, expected_input_revision=2))
         assert first.input_revision == 2 and bind.input_revision == 2
         before = {t: await _count(engine, t) for t in _COUNT_TABLES}
 

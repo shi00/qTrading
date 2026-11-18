@@ -2427,6 +2427,12 @@ class AgentDao(BaseDao):
         ``run_epoch`` 下限 1，与 ``decode_snapshot_identity`` 快照身份解码一致
         （0 会导致快照身份解码失败，检视 D03）。
 
+        有效输入版单胜者（R2-I16）：``expected_input_revision`` 是调用方冻结输入
+        所依据的版本，持 execution 行锁与上述权威头比较——修订先胜（头已推进）或
+        声明了不存在的版本 → ``REVISION_CONFLICT``，零新事实；相等才按该版建轮。
+        因此「修订先提交后旧载荷绑定」不成立：旧载荷只能重读新版后重新派发，而已
+        有有效轮时 ``revise_queued`` 同样拒绝，两端以同一有效输入版头竞争。
+
         锁序（§5.4 第 4 条）：先持 execution 行锁，再锁其 session 分配序号；
         session/execution 事件水位均 GREATEST 单调推进（R22）。
         """
@@ -2440,6 +2446,7 @@ class AgentDao(BaseDao):
         _require_text_field(request.workflow_id, "workflow_id", identity)
         _require_text_field(request.workflow_code_version, "workflow_code_version", identity)
         _require_int_field(request.run_epoch, "run_epoch", identity, 1)
+        _require_int_field(request.expected_input_revision, "expected_input_revision", identity, 1)
         _require_text_field(request.frozen_manifest, "frozen_manifest", identity)
         _require_text_field(request.actual_input, "actual_input", identity)
         frozen_digest = sha256_hex(request.frozen_manifest)
@@ -2574,7 +2581,16 @@ class AgentDao(BaseDao):
                     "authoritative accepted input revision unavailable",
                     identity,
                 )
+            # 5b. 有效输入版 CAS（R2-I16）：调用方的冻结载荷必须建立在当前权威头
+            #     上。排队修订先胜（头已 +1）时，基于旧版的派发不得冒认新版；声明
+            #     超前版本同样拒绝（无对应修订事实，不虚标版本）。
             input_revision = _require_int_field(accepted_revision, "input_revision", identity, 1)
+            if input_revision != request.expected_input_revision:
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "expected input revision does not match latest effective input revision",
+                    identity,
+                )
             # 6. 序号分配（持锁下 max+1，起点 1：首个执行事件 ``execution_seq=1``、
             #    首条 session 事件 ``session_seq=1``，与事件 codec 下限 1 一致，
             #    检视 D01；执行事件双 seq 同设，§9.6 CHECK）。
@@ -3344,7 +3360,9 @@ class AgentDao(BaseDao):
         为空、无 ``active_round`` 轮）；已派发或已离开 queued → ``REVISION_CONFLICT``。
         仅核 revision CAS 时，取得绑定后新 revision 的调用方仍能改写已冻结输入，旧
         revision 失败也不能反证队列位。本核验与首派发 ``bind_actual_input`` 持同一
-        execution 行锁（§5.4 第 4 条），派发先胜则修订拒绝且零新事实。
+        execution 行锁（§5.4 第 4 条），派发先胜则修订拒绝且零新事实；修订先胜则
+        新输入版成为权威头，首派发须以 ``expected_input_revision`` 与该头相等
+        才能绑定，旧载荷不会被冒认成新版（R2-I16）。
 
         M2 与受理消息同为纯 session 事件（先于派发无 round，§9.6 CHECK），执行
         关联由源谱系边（consumer_kind=execution, input_revision=N）承载。
