@@ -38,6 +38,7 @@ from pydantic_ai import UnexpectedModelBehavior
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import (
     BinaryContent,
+    ModelMessage,
     ModelRequest,
     ModelResponse,
     PartDeltaEvent,
@@ -62,11 +63,17 @@ from services.agent_service.model import (
     GatewayModel,
     _TurnChannel,
     build_chat_turn_request,
+    derive_model_call_id,
     map_finish_reason,
     map_usage,
 )
 
 pytestmark = pytest.mark.unit
+
+#: 投影测试固定调用号（桥层不生成随机身份：``model_call_id`` 必填）
+_MC: str = "mc-test"
+#: 装配侧持久执行身份（测试替身；生产由叶 workflow 稳定身份派生）
+_CALL_IDENTITY: str = "leaf:exec-1:round-1:node-a"
 
 
 class TestTurnChannelCloseSemantics:
@@ -227,13 +234,102 @@ class _FakeExecutor:
         return self.last_outcome
 
 
-def _gateway(executor: Any, tool_schema_version: str = "v1") -> GatewayModel:
+def _gateway(executor: Any, tool_schema_version: str = "v1", call_identity: str = _CALL_IDENTITY) -> GatewayModel:
     snapshot = MagicMock(spec=ExecutionSnapshot)
-    return GatewayModel(executor, _binding(), snapshot, tool_schema_version=tool_schema_version)
+    return GatewayModel(
+        executor, _binding(), snapshot, tool_schema_version=tool_schema_version, call_identity=call_identity
+    )
 
 
 def _params(**overrides: Any) -> ModelRequestParameters:
     return ModelRequestParameters(**overrides)
+
+
+# ---------------------------------------------------------------------------
+# R2-I41：模型调用身份确定性（持久执行身份派生，恢复复用原 operation）
+# ---------------------------------------------------------------------------
+
+
+class TestModelCallIdentity:
+    """调用号由 (持久执行身份, 回合序号) 派生：无随机源、重放可复现。"""
+
+    def test_derived_id_deterministic_and_scoped(self):
+        first = derive_model_call_id(_CALL_IDENTITY, 0)
+        assert first == derive_model_call_id(_CALL_IDENTITY, 0)  # 重复派生同一身份
+        assert first != derive_model_call_id(_CALL_IDENTITY, 1)  # 回合序号参与身份
+        assert first != derive_model_call_id("leaf:other", 0)  # 执行身份参与身份
+        assert first.startswith("chat_turn_")
+
+    @pytest.mark.parametrize(
+        ("identity", "turn_index", "expected_message"),
+        [
+            ("", 0, "call_identity must be non-empty text"),
+            ("leaf:a", -1, "turn_index must be a non-negative int"),
+            ("leaf:a", True, "turn_index must be a non-negative int"),
+        ],
+        ids=["empty-identity", "negative-turn", "bool-turn"],
+    )
+    def test_derivation_rejects_invalid_inputs(self, identity: str, turn_index: int, expected_message: str):
+        with pytest.raises(ValueError) as excinfo:
+            derive_model_call_id(identity, turn_index)
+        assert str(excinfo.value) == expected_message
+
+    def test_gateway_requires_execution_identity(self):
+        with pytest.raises(ValueError) as excinfo:
+            GatewayModel(
+                _FakeExecutor(),
+                _binding(),
+                MagicMock(spec=ExecutionSnapshot),
+                tool_schema_version="v1",
+                call_identity="",
+            )
+        assert "call_identity" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_replayed_step_reproduces_same_call_ids(self):
+        """步骤重放（新实例从回合 0 重新推进）逐回合复得同一调用号。"""
+        history: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content="hi")])]
+
+        async def _turn_ids() -> list[str]:
+            executor = _FakeExecutor(_succeeded_outcome())
+            model = _gateway(executor)
+            await model.request(history, _settings(), _params())
+            await model.request(history, _settings(), _params())
+            return [call["request"].model_call_id for call in executor.calls]
+
+        first = await _turn_ids()
+        second = await _turn_ids()
+        assert first == second
+        assert first == [derive_model_call_id(_CALL_IDENTITY, 0), derive_model_call_id(_CALL_IDENTITY, 1)]
+        assert len(set(first)) == 2  # 同步骤内不同回合不复用同一调用号
+
+    @pytest.mark.asyncio
+    async def test_stream_and_request_share_sequential_turn_ids(self):
+        """流式与非流式共用同一回合序号序列（重放时顺序确定）。"""
+        events = (ChatStreamEvent(sequence=1, kind="finish", finish_reason="final", usage=_USAGE),)
+        executor = _FakeExecutor(_succeeded_outcome(), events=events)
+        model = _gateway(executor)
+        history: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content="hi")])]
+        async with model.request_stream(history, _settings(), _params()) as streamed:
+            async for _event in streamed:
+                pass
+        await model.request(history, _settings(), _params())
+        ids = [call["request"].model_call_id for call in executor.calls]
+        assert ids == [derive_model_call_id(_CALL_IDENTITY, 0), derive_model_call_id(_CALL_IDENTITY, 1)]
+
+    @pytest.mark.asyncio
+    async def test_empty_model_call_id_rejected(self):
+        """桥层不再生成随机身份：空调用号明确拒绝（zero outbound）。"""
+        with pytest.raises(ModelTurnProtocolError) as excinfo:
+            build_chat_turn_request(
+                [ModelRequest(parts=[UserPromptPart(content="go")])],
+                _settings(),
+                _params(),
+                tool_schema_version="v1",
+                model_call_id="",
+            )
+        assert excinfo.value.code == "invalid_field"
+        assert excinfo.value.field_path == "$.model_call_id"
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +407,7 @@ class TestBuildChatTurnRequest:
             _settings(),
             _params(),
             tool_schema_version="v1",
+            model_call_id=_MC,
         )
         tool_message = request.messages[0]
         assert tool_message.role == "tool"
@@ -325,7 +422,11 @@ class TestBuildChatTurnRequest:
             output_tools=[_tool("final_result")],
         )
         request = build_chat_turn_request(
-            [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v2"
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            _settings(),
+            params,
+            tool_schema_version="v2",
+            model_call_id=_MC,
         )
         by_output = [t for t in request.tools if t.output_tool]
         by_function = [t for t in request.tools if not t.output_tool]
@@ -341,7 +442,11 @@ class TestBuildChatTurnRequest:
         """M18：native 模式与 output_object schema 一并落 ChatTurnRequest。"""
         params = _params(output_mode="native", output_object=_output_object())
         request = build_chat_turn_request(
-            [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v1"
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            _settings(),
+            params,
+            tool_schema_version="v1",
+            model_call_id=_MC,
         )
         assert request.output_mode == "native"
         assert request.output_schema == {"type": "object"}
@@ -352,7 +457,11 @@ class TestBuildChatTurnRequest:
         """M18：prompted 模式随请求保留——schema 经 SDK 注入 instructions 承载。"""
         params = _params(output_mode="prompted", output_object=_output_object())
         request = build_chat_turn_request(
-            [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v1"
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            _settings(),
+            params,
+            tool_schema_version="v1",
+            model_call_id=_MC,
         )
         assert request.output_mode == "prompted"
         assert request.output_schema == {"type": "object"}
@@ -364,7 +473,11 @@ class TestBuildChatTurnRequest:
         params = _params(output_mode=cast(Any, output_mode), output_tools=[_tool("final_result")])
         with pytest.raises(ModelTurnProtocolError) as excinfo:
             build_chat_turn_request(
-                [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), params, tool_schema_version="v1"
+                [ModelRequest(parts=[UserPromptPart(content="go")])],
+                _settings(),
+                params,
+                tool_schema_version="v1",
+                model_call_id=_MC,
             )
         assert excinfo.value.code == "invalid_field"
         assert excinfo.value.field_path == "$.output_mode"
@@ -376,6 +489,7 @@ class TestBuildChatTurnRequest:
             _settings(),
             _params(),
             tool_schema_version="v1",
+            model_call_id=_MC,
         )
         # timeout 消费为 deadline，其余 frozen params 全量透传
         assert request.frozen_params == {"temperature": 0.2, "max_tokens": 256}
@@ -393,6 +507,7 @@ class TestBuildChatTurnRequest:
                 _settings(),
                 _params(),
                 tool_schema_version="v1",
+                model_call_id=_MC,
             )
         assert excinfo.value.code == "unknown_part"
         assert "compaction" in excinfo.value.field_path
@@ -408,6 +523,7 @@ class TestBuildChatTurnRequest:
                 _settings(),
                 _params(),
                 tool_schema_version="v1",
+                model_call_id=_MC,
             )
         assert excinfo.value.code == "unknown_part"
 
@@ -421,6 +537,7 @@ class TestBuildChatTurnRequest:
                 _settings(),
                 _params(),
                 tool_schema_version="v1",
+                model_call_id=_MC,
             )
         assert excinfo.value.code == "unknown_part"
 
@@ -445,6 +562,7 @@ class TestBuildChatTurnRequest:
             _settings(),
             _params(),
             tool_schema_version="v1",
+            model_call_id=_MC,
         )
         assert [m.role for m in request.messages] == ["user"]
         part = request.messages[0].content_parts[0]
@@ -462,6 +580,7 @@ class TestBuildChatTurnRequest:
                 _settings(),
                 _params(),
                 tool_schema_version="v1",
+                model_call_id=_MC,
             )
         assert excinfo.value.code == "unknown_part"
         assert excinfo.value.field_path.endswith("user_prompt.content[1].BinaryContent")
@@ -471,7 +590,11 @@ class TestBuildChatTurnRequest:
         settings: ModelSettings = ModelSettings(temperature=0.2)
         with pytest.raises(ModelTurnProtocolError) as excinfo:
             build_chat_turn_request(
-                [ModelRequest(parts=[UserPromptPart(content="go")])], settings, _params(), tool_schema_version="v1"
+                [ModelRequest(parts=[UserPromptPart(content="go")])],
+                settings,
+                _params(),
+                tool_schema_version="v1",
+                model_call_id=_MC,
             )
         assert excinfo.value.code == "invalid_field"
         assert excinfo.value.field_path == "$.settings.timeout"
@@ -480,7 +603,11 @@ class TestBuildChatTurnRequest:
     async def test_missing_schema_version_rejected(self):
         with pytest.raises(ModelTurnProtocolError) as excinfo:
             build_chat_turn_request(
-                [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), _params(), tool_schema_version=""
+                [ModelRequest(parts=[UserPromptPart(content="go")])],
+                _settings(),
+                _params(),
+                tool_schema_version="",
+                model_call_id=_MC,
             )
         assert excinfo.value.field_path == "$.tool_schema_version"
 
@@ -501,7 +628,12 @@ class TestSdkOutputModeSemantics:
 
     def _model(self, **kwargs: Any) -> GatewayModel:
         return GatewayModel(
-            _FakeExecutor(), _binding(), MagicMock(spec=ExecutionSnapshot), tool_schema_version="v1", **kwargs
+            _FakeExecutor(),
+            _binding(),
+            MagicMock(spec=ExecutionSnapshot),
+            tool_schema_version="v1",
+            call_identity=_CALL_IDENTITY,
+            **kwargs,
         )
 
     @pytest.mark.asyncio
@@ -512,7 +644,11 @@ class TestSdkOutputModeSemantics:
         assert prepared.output_tools == []  # SDK：tool 之外的模式清空 output_tools
         assert prepared.prompted_output_instructions  # schema 指令来源
         request = build_chat_turn_request(
-            [ModelRequest(parts=[UserPromptPart(content="go")])], _settings(), prepared, tool_schema_version="v1"
+            [ModelRequest(parts=[UserPromptPart(content="go")])],
+            _settings(),
+            prepared,
+            tool_schema_version="v1",
+            model_call_id=_MC,
         )
         assert request.output_mode == "prompted"
         assert request.output_schema == {"type": "object"}
@@ -648,6 +784,7 @@ class TestBoundProfile:
             _binding(),
             MagicMock(spec=ExecutionSnapshot),
             tool_schema_version="v1",
+            call_identity=_CALL_IDENTITY,
             profile=profile,
         )
         assert model.profile == profile

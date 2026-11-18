@@ -22,6 +22,13 @@ pydantic-ai 固定框架（pydantic-ai-slim==2.66.0）与 ScenarioExecutor 聊�
   关联（HANDOFF §6.1 L197）；refused 完整回合以 ``UnexpectedModelBehavior``
   抛出（携带 refusal 原文），已公开分片后失败保 partial/unknown（§6.4-5，
   不拼不同 attempt）——拒绝不换候选规避由 Executor 承载（DD §10.1）。
+- **调用身份确定性（R2-I41）**：``model_call_id`` 不再是每回合随机值，而由
+  **持久执行身份**（``call_identity``，装配侧传入，如叶 workflow 稳定 ID /
+  计划身份）经 :func:`derive_model_call_id` + 本实例内回合序号确定性派生。
+  DBOS 重放同一步骤时回合序号从 0 重新推进，复得同一身份：账本
+  ``create_invocation`` 幂等复用原 operation（invocation 主键不变），恢复
+  按 ``read_request_attempts(invocation_id=...)`` / ``claim_invocation`` 只核
+  原操作，不新造调用号；步骤结果已落盘时 DBOS 直接还原原结果、不重发。
 - **ResolveModelId 能力**（仅 ``qtrading:bound``）依赖 Harness
   ``ModelResolutionContext``，随 D-01 capabilities 接线（§2）；本模块只承载
   模型实例与映射契约。
@@ -35,13 +42,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Final, Protocol, cast
 
+from core.agent_types import stable_id
 from core.model_management_types import (
     CHAT_OUTPUT_MODES,
     AssistantToolCall,
@@ -94,6 +101,9 @@ _SKIPPED_RESPONSE_PART_KINDS: Final[tuple[str, ...]] = ("thinking",)
 
 #: 流事件工具分片的 vendor id 前缀（_parts_manager 按 vendor id 聚合增量）
 _TOOL_VENDOR_PREFIX: Final[str] = "tool"
+
+#: 模型调用身份派生类型标签（``stable_id`` 的身份域，发布后不得改写）
+_MODEL_CALL_ID_KIND: Final[str] = "chat_turn"
 
 #: _TurnChannel 内部哨兵：仅表示「关闭唤醒」，不是队列项
 _TURN_CLOSED: Final[object] = object()
@@ -317,13 +327,35 @@ def _frozen_params(model_settings: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in model_settings.items() if key != "timeout"}
 
 
+def derive_model_call_id(call_identity: str, turn_index: int) -> str:
+    """持久执行身份 + 回合序号 → 确定性模型调用身份（R2-I41）。
+
+    ``call_identity`` 为装配侧给出的**持久执行身份**（如叶 workflow 稳定 ID /
+    计划身份 ``execution:round:node``），``turn_index`` 为该身份范围内第 N 个
+    模型回合（自 0 起、按发出顺序）。同一 (身份, 序号) 在崩溃恢复后重放时复得
+    同一调用号，账本以 invocation 主键幂等复用原 operation；不引入随机源，也
+    不硬编码任何身份。
+
+    契约：``call_identity`` 必须唯一标识**一个持久步骤执行**——同一步骤被拆成
+    多个持久步骤时，装配侧须把步骤名并入身份，否则不同步骤的回合序号会碰撞。
+
+    Raises:
+        ValueError: ``call_identity`` 非非空文本或 ``turn_index`` 非非负整数。
+    """
+    if not isinstance(call_identity, str) or not call_identity:
+        raise ValueError("call_identity must be non-empty text")
+    if isinstance(turn_index, bool) or not isinstance(turn_index, int) or turn_index < 0:
+        raise ValueError("turn_index must be a non-negative int")
+    return stable_id(_MODEL_CALL_ID_KIND, [call_identity, str(turn_index)])
+
+
 def build_chat_turn_request(
     messages: Sequence[ModelMessage],
     model_settings: Mapping[str, Any],
     model_request_parameters: ModelRequestParameters,
     *,
     tool_schema_version: str,
-    model_call_id: str | None = None,
+    model_call_id: str,
 ) -> ChatTurnRequest:
     """SDK 消息 → core ``ChatTurnRequest`` 一次投影（§6.3）。
 
@@ -336,11 +368,14 @@ def build_chat_turn_request(
       tool_or_text）明确拒绝，不静默降级；
     - 冻结：``frozen_params`` 全量透传（timeout 消费为 deadline）、
       ``max_output_tokens`` 取 ``max_tokens``、deadline 取单调时钟换算；
-    - ``model_call_id`` 缺省生成（uuid4 hex，一回合一身份）。
+    - ``model_call_id`` **必填**：调用方按持久执行身份派生（
+      :func:`derive_model_call_id`），桥层不生成随机身份（恢复不得新造调用号
+      自动外发，R2-I41）。
 
     Raises:
         ModelTurnProtocolError: 未识别 part / 非法 tool_call_id / timeout 缺失
-            或畸形 / schema 版本缺失 / 不支持的 output_mode（zero outbound，R21）。
+            或畸形 / schema 版本缺失 / 不支持的 output_mode / 空 ``model_call_id``
+            （zero outbound，R21）。
     """
     if not tool_schema_version:
         raise ModelTurnProtocolError("invalid_field", "$.tool_schema_version")
@@ -377,7 +412,7 @@ def build_chat_turn_request(
     )
     output_object = model_request_parameters.output_object
     request = ChatTurnRequest(
-        model_call_id=model_call_id or uuid.uuid4().hex,
+        model_call_id=model_call_id,
         messages=tuple(chat_messages),
         instructions=tuple(instructions),
         tools=(*function_tools, *output_tools),
@@ -681,7 +716,9 @@ class GatewayModel(Model):
     """聊天回合固定框架模型（B-02-4，§10.1）。
 
     DI：executor（聊天执行边界）/ binding（受理冻结模型绑定）/ snapshot（派发
-    时点冻结执行快照）/ tool_schema_version（工具 schema 版本事实，装配侧提供）。
+    时点冻结执行快照）/ tool_schema_version（工具 schema 版本事实，装配侧提供）/
+    call_identity（持久执行身份，装配侧提供；本实例是该身份下一次持久步骤的
+    执行，回合调用号据此确定性派生，见 :func:`derive_model_call_id`）。
     """
 
     # 桥层语义：全部通用 settings 原样透传 frozen_params（适配器 / 供应商对
@@ -695,6 +732,7 @@ class GatewayModel(Model):
         snapshot: ExecutionSnapshot,
         *,
         tool_schema_version: str,
+        call_identity: str,
         profile: ModelProfile | None = None,
     ) -> None:
         super().__init__(settings=None, profile=profile)
@@ -702,6 +740,12 @@ class GatewayModel(Model):
         self._binding = binding
         self._snapshot = snapshot
         self._tool_schema_version = tool_schema_version
+        if not isinstance(call_identity, str) or not call_identity:
+            raise ValueError("call_identity must be non-empty text (persistent execution identity)")
+        self._call_identity = call_identity
+        # 本步骤内已发出的模型回合数：重放从步骤起点重新执行时归零，同一回合
+        # 复得同一调用号（账本 invocation 幂等复用，恢复不新造 operation）。
+        self._turn_index = 0
         # 请求绑定的真实 Profile（装配侧按连接证据解析后传入，含该证据的
         # revision 事实）：原样承载，不在此重新解析 / 合并默认值。未提供 /
         # 不可解析 → 空 Profile（无任何能力声明 = unknown），不猜（M06）。
@@ -736,6 +780,18 @@ class GatewayModel(Model):
 
     # 回合执行 -------------------------------------------------------------
 
+    def _next_model_call_id(self) -> str:
+        """派发本回合的确定性调用号（R2-I41）。
+
+        序号在发起外发前同步推进（事件循环内无 await 间隙，单实例内无竞态）；
+        一个模型实例对应一次持久步骤执行，回合按序发出（Agent 主轮与摘要回合
+        共用本实例，序号连续），故重放顺序与序号一一对齐、身份可复现。
+        并发多回合共用同一实例不在契约内（会破坏序号与重放的对应关系）。
+        """
+        turn_index = self._turn_index
+        self._turn_index += 1
+        return derive_model_call_id(self._call_identity, turn_index)
+
     async def request(
         self,
         messages: list[ModelMessage],
@@ -747,7 +803,11 @@ class GatewayModel(Model):
         resolved_settings, params = self.prepare_request(model_settings, model_request_parameters)
         prepared = self.prepare_messages(messages, params)
         request = build_chat_turn_request(
-            prepared, resolved_settings or {}, params, tool_schema_version=self._tool_schema_version
+            prepared,
+            resolved_settings or {},
+            params,
+            tool_schema_version=self._tool_schema_version,
+            model_call_id=self._next_model_call_id(),
         )
         outcome = await self._executor.execute_chat_turn(request, self._snapshot, binding=self._binding, on_event=None)
         return self._response_from_outcome(outcome)
@@ -768,7 +828,11 @@ class GatewayModel(Model):
         resolved_settings, params = self.prepare_request(model_settings, model_request_parameters)
         prepared = self.prepare_messages(messages, params)
         request = build_chat_turn_request(
-            prepared, resolved_settings or {}, params, tool_schema_version=self._tool_schema_version
+            prepared,
+            resolved_settings or {},
+            params,
+            tool_schema_version=self._tool_schema_version,
+            model_call_id=self._next_model_call_id(),
         )
         channel = _TurnChannel()
         streamed = GatewayStreamedResponse(
