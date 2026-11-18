@@ -4,7 +4,9 @@
 1. 宿主组装（C-05）：在存储层迁移就绪后组装宿主对象并保证关闭顺序——
    1. 双迁移（``data.persistence.agent_migrator.run_agent_runtime_migrations``：迁移+
       运行角色最小授权+版本守卫，独立迁移引擎 ≤2 连接，先于任何宿主对象；中间失败
-      不 launch/不建对象/保历史与原迁移状态）；
+      不 launch/不建对象/保历史与原迁移状态）；迁移默认使用**独立的迁移凭据**
+      （``migration_database_url``，高权限角色），运行池只用运行凭据——共用须
+      显式允许，仅限本机内置 PostgreSQL 单用户模式；
    2. ``runtime_engine``（pool 4 / overflow 0 / timeout 3 / hide_parameters，psycopg 同步）
       与 ``control_engine``（pool 1，禁额外监听；运行期增量连接合计 7 条，见
       ``AGENT_RUNTIME_CONNECTION_BUDGET``）；
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import threading
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
@@ -47,6 +50,8 @@ from data.persistence.agent_migrator import (
     AgentRuntimeMigrationError,
     run_agent_runtime_migrations,
 )
+
+logger = logging.getLogger(__name__)
 
 # 设计冻结值（HANDOFF §8.1 第 6/7 条、§8.3）：连接预算与线程/监听配置。
 RUNTIME_DB_NAME = "qtrading-agent-runtime"
@@ -85,15 +90,25 @@ class AgentRuntimeSettings:
     """宿主组装参数。
 
     Attributes:
-        system_database_url: 同步 psycopg 运行库 URL（含密码，仅内存传递，不入日志）。
+        system_database_url: 同步 psycopg **运行**库 URL（最小权限 ``agent_runtime``
+            角色，含密码，仅内存传递，不入日志）。
         application_version: 真实工作流代码版本（ADR-0017：pyproject version 唯一正本），
             禁止随机值规避重放检查（HANDOFF §8.3）。
         executor_id: 每进程执行 epoch（HANDOFF §8.4 第 4 条）；缺省每进程生成唯一值。
+        migration_database_url: 独立的**迁移**连接 URL（高权限 ``agent_migrator``
+            角色，HANDOFF §8.1 第 1/5 条）。迁移在创建任何运行池之前经此连接执行，
+            运行池只用 ``system_database_url``；两者不同才是真正的最小权限分离。
+        allow_shared_migration_credentials: 显式允许迁移与运行共用同一连接串。
+            仅限本机内置 PostgreSQL 单用户/开发场景；外置部署必须提供独立迁移
+            凭据。未显式允许时，缺迁移凭据或迁移 URL 与运行 URL 相同一律拒绝
+            （不静默退化，HANDOFF §8.1）。
     """
 
     system_database_url: str
     application_version: str
     executor_id: str | None = None
+    migration_database_url: str | None = None
+    allow_shared_migration_credentials: bool = False
 
 
 @dataclass
@@ -145,8 +160,37 @@ class AgentRuntimeHandle:
             self._engines_disposed = True
 
 
+def _resolve_migration_url(settings: AgentRuntimeSettings) -> str:
+    """解析迁移连接：专用高权限凭据优先；共用必须显式允许（不再静默共用）。
+
+    ``migration_database_url`` 与 ``system_database_url`` 相同也会被视作共用
+    （运维误把运行角色填进迁移配置时不冒充「已分离」）。未显式允许共用时抛
+    :class:`AgentRuntimeMigrationError`，消息只含配置项名，不含连接串（R9）。
+    """
+    dedicated = settings.migration_database_url
+    if dedicated and dedicated != settings.system_database_url:
+        return dedicated
+    if not settings.allow_shared_migration_credentials:
+        raise AgentRuntimeMigrationError(
+            "未配置独立的 Agent 运行库迁移凭据（migration_database_url），"
+            "拒绝以运行角色执行迁移（迁移/运行角色最小权限分离）；"
+            "仅本机内置 PostgreSQL 单用户模式可显式允许共用凭据"
+        )
+    logger.warning(
+        "[AgentRuntime] migration and runtime share one connection (explicitly allowed): "
+        "only for local embedded single-user mode; provide dedicated agent_migrator "
+        "credentials for external deployments"
+    )
+    return settings.system_database_url
+
+
 def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle:
     """组装 Agent 运行时宿主（不 launch）。
+
+    双迁移在创建任何运行池之前执行，且默认使用**独立的迁移连接**
+    （``migration_database_url``，高权限 ``agent_migrator`` 角色）；运行池与
+    DBOS/Datasource 只用 ``system_database_url``（最小权限 ``agent_runtime``）。
+    未提供迁移凭据且未显式允许共用时拒绝组装（``AgentRuntimeMigrationError``）。
 
     双迁移失败时异常原样传播，不创建任何引擎/宿主对象（§10.6：不 launch、不补投、
     保历史与原迁移状态）。迁移成功后的任一阶段失败，按**已取得对象**逆序收口
@@ -154,15 +198,16 @@ def assemble_agent_runtime(settings: AgentRuntimeSettings) -> AgentRuntimeHandle
     异常掩盖（检视 R08）。
 
     Args:
-        settings: 组装参数（URL/application_version/executor_id）。
+        settings: 组装参数（运行/迁移 URL、application_version、executor_id）。
 
     Returns:
         未 launch 的宿主句柄；启动须经 ``launch_agent_runtime``（隔离 spike 通过后）。
 
     Raises:
-        AgentRuntimeMigrationError: 双迁移/授权/版本守卫失败。
+        AgentRuntimeMigrationError: 迁移凭据缺失/共用未显式允许、双迁移/授权/
+            版本守卫失败。
     """
-    run_agent_runtime_migrations(settings.system_database_url)
+    run_agent_runtime_migrations(_resolve_migration_url(settings))
 
     executor_id = settings.executor_id or _new_executor_id()
     runtime_engine = _create_runtime_engine(settings.system_database_url)

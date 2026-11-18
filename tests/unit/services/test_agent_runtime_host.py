@@ -22,6 +22,7 @@ owner-loop 桥（§8.2）与 launch 启动隔离（§8.4 needs-spike）不在本
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -40,6 +41,8 @@ class _RecordingHost:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.engines: dict[int, dict[str, Any]] = {}
+        self.engine_urls: dict[int, str] = {}
+        self.migration_url: str | None = None
         self.dbos_config: dict[str, Any] | None = None
         self.datasource_kwargs: dict[str, Any] = {}
         self.client_kwargs: dict[str, Any] = {}
@@ -47,12 +50,14 @@ class _RecordingHost:
 
     def fake_run_migrations(self, url: str) -> None:
         self.calls.append("migrations")
+        self.migration_url = url
 
     def fake_create_engine(self, url: str, **kwargs: Any) -> object:
         self.calls.append(f"engine:{kwargs.get('pool_size')}")
         pool_size = kwargs.get("pool_size")
         assert isinstance(pool_size, int)
         self.engines[pool_size] = kwargs
+        self.engine_urls[pool_size] = url
         return object()  # 不透明句柄，仅供身份比对
 
     def fake_client_init(self, **kwargs: Any) -> _FakeClient:
@@ -105,9 +110,14 @@ def host(monkeypatch: pytest.MonkeyPatch) -> _RecordingHost:
     return rec
 
 
+_RUNTIME_URL = "postgresql+psycopg://agent_runtime@host/qtrading_agent_runtime"
+_MIGRATION_URL = "postgresql+psycopg://agent_migrator@migrator-host/qtrading_agent_runtime"
+
+
 def _settings() -> AgentRuntimeSettings:
     return AgentRuntimeSettings(
-        system_database_url="postgresql+psycopg://migrator@host/qtrading_agent_runtime",
+        system_database_url=_RUNTIME_URL,
+        migration_database_url=_MIGRATION_URL,
         application_version="0.11.7",
     )
 
@@ -125,6 +135,10 @@ class TestAssemblyContract:
             "datasource",
             "client",
         ]
+        # 迁移与运行凭据分离：迁移走专用高权限连接，双运行池只用运行连接
+        assert host.migration_url == _MIGRATION_URL
+        assert host.engine_urls[runtime_mod.RUNTIME_ENGINE_POOL_SIZE] == _RUNTIME_URL
+        assert host.engine_urls[runtime_mod.CONTROL_ENGINE_POOL_SIZE] == _RUNTIME_URL
 
         runtime_kwargs = host.engines[runtime_mod.RUNTIME_ENGINE_POOL_SIZE]
         assert runtime_kwargs["max_overflow"] == 0
@@ -187,7 +201,8 @@ class TestAssemblyContract:
 
     def test_explicit_executor_id_and_url_wired(self, host: _RecordingHost) -> None:
         settings = AgentRuntimeSettings(
-            system_database_url="postgresql+psycopg://migrator@host/db",
+            system_database_url="postgresql+psycopg://agent_runtime@host/db",
+            migration_database_url="postgresql+psycopg://agent_migrator@migrator-host/db",
             application_version="1.2.3",
             executor_id="epoch-42",
         )
@@ -238,6 +253,46 @@ class TestAssemblyContract:
             f"dispose:{runtime_mod.RUNTIME_ENGINE_POOL_SIZE}",
             f"dispose:{runtime_mod.CONTROL_ENGINE_POOL_SIZE}",
         ]
+
+
+class TestCredentialSeparation:
+    """迁移/运行凭据分离（R2-I38）：共用只能在显式允许时发生，且不冒充已分离。"""
+
+    def test_missing_migration_credentials_refused(self, host: _RecordingHost) -> None:
+        """未配置迁移凭据且未显式允许共用：拒绝组装，不建引擎、不记迁移。"""
+        settings = AgentRuntimeSettings(system_database_url=_RUNTIME_URL, application_version="1")
+        with pytest.raises(runtime_mod.AgentRuntimeMigrationError, match="迁移凭据"):
+            assemble_agent_runtime(settings)
+        assert host.calls == []
+        assert host.migration_url is None
+
+    def test_same_url_without_opt_in_refused(self, host: _RecordingHost) -> None:
+        """迁移 URL 与运行 URL 相同（误配置）视作共用，未显式允许即拒绝。"""
+        settings = AgentRuntimeSettings(
+            system_database_url=_RUNTIME_URL,
+            migration_database_url=_RUNTIME_URL,
+            application_version="1",
+        )
+        with pytest.raises(runtime_mod.AgentRuntimeMigrationError, match="迁移凭据"):
+            assemble_agent_runtime(settings)
+        assert host.calls == []
+
+    def test_shared_credentials_explicit_opt_in_warns(
+        self, host: _RecordingHost, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """显式允许共用（本机单用户）：迁移与运行同连接，并以告警如实说明。"""
+        caplog.set_level(logging.WARNING, logger=runtime_mod.__name__)
+        settings = AgentRuntimeSettings(
+            system_database_url=_RUNTIME_URL,
+            allow_shared_migration_credentials=True,
+            application_version="1",
+        )
+        assemble_agent_runtime(settings)
+        assert host.migration_url == _RUNTIME_URL
+        assert host.engine_urls[runtime_mod.RUNTIME_ENGINE_POOL_SIZE] == _RUNTIME_URL
+        assert "share one connection" in caplog.text
+        # 日志不得输出连接串（R9）
+        assert "migrator-host" not in caplog.text
 
 
 class _FailureSeams:

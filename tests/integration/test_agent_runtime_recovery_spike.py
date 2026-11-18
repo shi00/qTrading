@@ -232,6 +232,7 @@ class TestStartupIsolationSpike:
         handle = assemble_agent_runtime(
             AgentRuntimeSettings(
                 system_database_url=recovery_db_url,
+                allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
                 application_version=_APP_VERSION,
                 executor_id=f"epoch-b-{uuid.uuid4().hex[:8]}",
             )
@@ -284,6 +285,7 @@ class TestStartupIsolationSpike:
         handle = assemble_agent_runtime(
             AgentRuntimeSettings(
                 system_database_url=recovery_db_url,
+                allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
                 application_version=_APP_VERSION,
                 executor_id=f"epoch-b-{uuid.uuid4().hex[:8]}",
             )
@@ -340,6 +342,7 @@ class TestStartupIsolationSpike:
         outcome = await start_agent_runtime(
             AgentRuntimeSettings(
                 system_database_url=recovery_db_url,
+                allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
                 application_version=_APP_VERSION,
                 executor_id=f"epoch-b-{uuid.uuid4().hex[:8]}",
             ),

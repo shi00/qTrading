@@ -55,6 +55,7 @@ def main() -> int:
     handle = assemble_agent_runtime(
         AgentRuntimeSettings(
             system_database_url=os.environ["AGENT_SPIKE_DB_URL"],
+            allow_shared_migration_credentials=True,  # 子进程宿主单 superuser 实例：显式共用
             application_version=os.environ["AGENT_SPIKE_APP_VERSION"],
             executor_id=os.environ["AGENT_SPIKE_EXECUTOR_ID"],
         )

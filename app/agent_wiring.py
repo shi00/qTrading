@@ -10,6 +10,9 @@
    - ``OwnerLoopBridge`` 共享桥由本模块在建会话时创建并注入关闭编排；
    - 宿主组装与启动隔离经 ``start_agent_runtime``（唯一执行锁 → 组装 → 隔离 →
      就绪才 launch），隔离失败零派发；
+   - 迁移/运行凭据分离：迁移使用独立高权限连接（环境变量
+     ``AGENT_RUNTIME_MIGRATION_DATABASE_URL`` 或 keyring），运行池只用运行凭据；
+     未配置时外置模式拒绝启动（零派发），仅本机内置单用户模式显式告警共用；
    - 关闭前置经 ``AgentRuntime.prepare_close``（既有关闭链：冻结桥提交 → 关派发 →
      核 IO → 保存结束/unknown → 关闭 DBOS/Client/引擎），在释放共享引擎之前调用。
 
@@ -40,6 +43,13 @@ from services.agent_service import (
 )
 from services.agent_service.runtime import CloseCommandIdentity, CloseFactOutcome, OwnerLoopBridge
 from services.agent_service.units import UnitConversion
+from utils.config.db import (
+    AGENT_MIGRATION_DB_URL_ENV,
+    DatabaseMode,
+    get_agent_migration_db_url,
+    resolve_database_mode,
+)
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +250,45 @@ def _agent_runtime_sync_url(engine: Any) -> str:
     ).render_as_string(hide_password=False)
 
 
+def _embedded_single_user_mode() -> bool:
+    """是否为内置 PostgreSQL 单用户模式（迁移/运行共用凭据的唯一允许场景）。
+
+    判定失败按「非单用户」处理（fail-closed）：无法证明本机单用户时不得放宽
+    迁移/运行角色分离要求。
+    """
+    try:
+        return resolve_database_mode().mode is DatabaseMode.EMBEDDED
+    except Exception as e:  # 判定不可用时按外置处理，不静默放宽
+        logger.debug("[AgentWiring] database mode resolution failed: %s", DataSanitizer.sanitize_error(e))
+        return False
+
+
+def _migration_credentials(migration_url: str | None) -> tuple[str | None, bool]:
+    """解析迁移凭据使用方式，返回 ``(迁移 URL, 是否显式允许共用)``。
+
+    - 已配置独立迁移 URL：直接使用（运行池仍只用运行 URL，真正分离）；
+    - 未配置且本机内置单用户模式：显式允许共用并记录告警（仅限本机单用户）；
+    - 未配置且非单用户（外置/无法判定）：返回 ``(None, False)``，调用方拒绝启动。
+
+    日志只提配置项名，不输出连接串（R9）。
+    """
+    if migration_url:
+        return migration_url, False
+    if not _embedded_single_user_mode():
+        logger.warning(
+            "[AgentWiring] agent runtime migration credentials missing (%s): external database "
+            "mode requires a dedicated high-privilege agent_migrator role (zero dispatch)",
+            AGENT_MIGRATION_DB_URL_ENV,
+        )
+        return None, False
+    logger.warning(
+        "[AgentWiring] agent runtime migrations use the runtime credentials (embedded single-user "
+        "mode only); configure %s for dedicated agent_migrator credentials",
+        AGENT_MIGRATION_DB_URL_ENV,
+    )
+    return None, True
+
+
 async def wire_agent_runtime(
     cache_manager: Any,
     *,
@@ -278,8 +327,13 @@ async def wire_agent_runtime(
         return AgentWiring(service=service, bridge=bridge, failure="runtime_url_unresolved")
 
     allow_launch = AGENT_RUNTIME_LAUNCH_ALLOWED if launch_allowed is None else launch_allowed
+    migration_url, share_migration_credentials = _migration_credentials(get_agent_migration_db_url())
+    if migration_url is None and not share_migration_credentials:
+        return AgentWiring(service=service, bridge=bridge, failure="migration_credentials_missing")
     settings = AgentRuntimeSettings(
         system_database_url=runtime_url,
+        migration_database_url=migration_url,
+        allow_shared_migration_credentials=share_migration_credentials,
         application_version=_application_version(),
     )
     try:

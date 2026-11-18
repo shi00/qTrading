@@ -193,6 +193,7 @@ class TestLaunchRecoveryIsolationSpike:
         handle = assemble_agent_runtime(
             AgentRuntimeSettings(
                 system_database_url=spike_db_url,
+                allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
                 application_version=_APP_VERSION,
                 executor_id=f"epoch-b-{'x' * 8}",
             )
@@ -237,6 +238,7 @@ class TestLaunchRecoveryIsolationSpike:
         handle = assemble_agent_runtime(
             AgentRuntimeSettings(
                 system_database_url=spike_db_url,
+                allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
                 application_version=_APP_VERSION,
                 executor_id=crashed_epoch,  # 同 epoch：恢复查询命中
             )

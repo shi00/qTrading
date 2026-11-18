@@ -63,6 +63,7 @@ async def test_assemble_real_host_without_launch(runtime_db_url: str) -> None:
     handle = assemble_agent_runtime(
         AgentRuntimeSettings(
             system_database_url=runtime_db_url,
+            allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
             application_version="0.11.7",
             executor_id="epoch-test",
         )
@@ -102,6 +103,7 @@ async def test_close_allows_fresh_assemble(runtime_db_url: str) -> None:
     first = assemble_agent_runtime(
         AgentRuntimeSettings(
             system_database_url=runtime_db_url,
+            allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
             application_version="0.11.7",
             executor_id="epoch-a",
         )
@@ -112,6 +114,7 @@ async def test_close_allows_fresh_assemble(runtime_db_url: str) -> None:
     second = assemble_agent_runtime(
         AgentRuntimeSettings(
             system_database_url=runtime_db_url,
+            allow_shared_migration_credentials=True,  # 集成环境单 superuser 实例：显式共用
             application_version="0.11.7",
             executor_id="epoch-b",
         )

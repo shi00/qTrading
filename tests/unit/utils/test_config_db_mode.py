@@ -135,3 +135,56 @@ class TestSaveDatabaseMode:
     def test_invalid_mode_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="unsupported database mode"):
             save_database_mode("sqlite")
+
+
+class _SecretRecorder:
+    """记录注册的 secret，避免污染全局 DataSanitizer 集合。"""
+
+    def __init__(self) -> None:
+        self.values: list[str] = []
+
+    def register_secret(self, value: str) -> None:
+        self.values.append(value)
+
+    def sanitize_error(self, error: Exception | str) -> str:
+        return str(error)
+
+
+class TestAgentMigrationCredentials:
+    """Agent 运行库迁移凭据解析（环境变量优先 → keyring；均无返回 None）。"""
+
+    def test_env_url_wins_and_password_registered(self, monkeypatch) -> None:
+        from utils.config import db as db_mod
+
+        url = "postgresql+psycopg://agent_migrator:p%40ss@migrator-host/qtrading_agent_runtime"
+        monkeypatch.setenv(db_mod.AGENT_MIGRATION_DB_URL_ENV, url)
+        recorder = _SecretRecorder()
+        monkeypatch.setattr(db_mod, "DataSanitizer", recorder)
+
+        assert db_mod.get_agent_migration_db_url() == url
+        assert recorder.values == ["p@ss"]
+
+    def test_keyring_fallback(self, monkeypatch) -> None:
+        from utils.config import db as db_mod
+
+        monkeypatch.delenv(db_mod.AGENT_MIGRATION_DB_URL_ENV, raising=False)
+        url = "postgresql+psycopg://agent_migrator@migrator-host/qtrading_agent_runtime"
+        monkeypatch.setattr(
+            db_mod.cfg.keyring,
+            "get_password",
+            lambda service, item: url if item == db_mod.AGENT_MIGRATION_KEYRING_ITEM else None,
+        )
+
+        assert db_mod.get_agent_migration_db_url() == url
+
+    def test_unconfigured_returns_none(self, monkeypatch) -> None:
+        from utils.config import db as db_mod
+
+        monkeypatch.delenv(db_mod.AGENT_MIGRATION_DB_URL_ENV, raising=False)
+        monkeypatch.setattr(
+            db_mod.cfg.keyring,
+            "get_password",
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("keyring unavailable")),
+        )
+
+        assert db_mod.get_agent_migration_db_url() is None
