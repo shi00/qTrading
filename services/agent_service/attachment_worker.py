@@ -7,8 +7,10 @@
   真实已读/未读（不截断冒完整）；
 - XLSX 先做容器级前置预算与 workbook 元数据结构门（zip 条目数/声明解压量/
   sharedStrings 尺寸等），通过后才创建公式与缓存两个只读视图（共享同一
-  sharedStrings 解析），按 ``(sheet, coordinate)`` 配对公式与缓存，并有界探测
-  worksheet XML 区分缓存不存在/存在但空/错误/类型不可核；
+  sharedStrings 解析），按 ``(sheet, coordinate)`` 逐行逐格核配公式与缓存
+  （行数/坐标不一致即如实上报为未读，不静默截断配对），并有界探测 worksheet
+  XML 区分缓存不存在/存在但空/错误/类型不可核；单元格类型按 XML ``t``/``<f>``
+  判定（文本以 ``=`` 开头仍是文本），数值/日期保留原 lexeme/serial 与 epoch；
 - PDF / PNG / JPEG 解析依赖（pypdf / Pillow）已按 Q5/Q3 裁决纳入正式依赖；
   结构不可读仍明确 ``invalid_structure``，不伪造解码结果。
 """
@@ -599,6 +601,7 @@ class XlsxCacheProbe:
                     value_node = element.find(f"{_NS_MAIN}v")
                     found[ref] = {
                         "t": element.get("t"),
+                        "has_f": element.find(f"{_NS_MAIN}f") is not None,
                         "has_v": value_node is not None,
                         "v_text": None if value_node is None else (value_node.text or ""),
                     }
@@ -609,20 +612,92 @@ class XlsxCacheProbe:
         return found
 
 
-def _typed_scalar(value: Any) -> dict[str, Any]:
-    """openpyxl 标量 → 带类型精确表示（不引入 float 往返）。"""
+#: Excel 错误值词法（openpyxl 以普通字符串返回，XML 以 ``t="e"`` 标注）。
+_EXCEL_ERROR_LEXEMES: Final = frozenset(
+    {"#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#GETTING_DATA", "#SPILL!", "#CALC!"}
+)
 
+
+def _is_error_lexeme(value: Any) -> bool:
+    return isinstance(value, str) and value in _EXCEL_ERROR_LEXEMES
+
+
+def _typed_scalar(
+    value: Any,
+    *,
+    xml_lexeme: str | None = None,
+    date_epoch: str | None = None,
+    xml_type: str | None = None,
+) -> dict[str, Any]:
+    """openpyxl 标量 → 带类型精确表示（不引入 float 往返，保留 XML 原证据）。
+
+    - ``xml_type="e"`` 或值本身是 Excel 错误词法 → ``error``（不与 string 混同）；
+    - 数值保留 XML ``<v>`` 原 lexeme（``lexeme`` 为 openpyxl 值表示，
+      ``unsupported_precision`` 标记其可能已丢精度）；
+    - 日期/时间保留序列号（``serial``）与 workbook epoch（``date_epoch``）。
+    """
+
+    if xml_type == "e" or _is_error_lexeme(value):
+        return {"raw_type": "error", "lexeme": None if value is None else str(value)}
     if value is None:
         return {"raw_type": "null", "lexeme": None}
     if isinstance(value, bool):
         return {"raw_type": "bool", "lexeme": str(value)}
     if isinstance(value, int):
-        return {"raw_type": "json_integer", "lexeme": str(value)}
+        typed: dict[str, Any] = {"raw_type": "json_integer", "lexeme": str(value)}
+        if xml_lexeme:
+            typed["xml_lexeme"] = xml_lexeme
+        return typed
     if isinstance(value, float):
-        return {"raw_type": "json_decimal", "lexeme": repr(value), "unsupported_precision": True}
+        typed = {"raw_type": "json_decimal", "lexeme": repr(value), "unsupported_precision": True}
+        if xml_lexeme:
+            typed["xml_lexeme"] = xml_lexeme
+        return typed
     if isinstance(value, (datetime, date, dt_time)):
-        return {"raw_type": "datetime", "lexeme": value.isoformat()}
+        typed = {"raw_type": "datetime", "lexeme": value.isoformat()}
+        if xml_lexeme:
+            typed["serial"] = xml_lexeme
+        if date_epoch is not None and not isinstance(value, dt_time):
+            typed["date_epoch"] = date_epoch
+        return typed
     return {"raw_type": "string", "lexeme": str(value)}
+
+
+def _formula_text(formula_cell: Any, xml_has_formula: bool | None) -> str | None:
+    """判定单元格公式：以 XML ``<f>`` 与 openpyxl ``data_type`` 为证据（I22）。
+
+    文本以 ``=`` 开头但 XML 无 ``<f>`` 时仍是文本，不得误作公式；XML 结构不可核
+    （超界/不可读）时退回 openpyxl 的 ``data_type == "f"``（而非字符串前缀猜测）。
+    """
+
+    value = formula_cell.value
+    if isinstance(value, str):
+        candidate = value
+    else:
+        text = getattr(value, "text", None)
+        candidate = text if isinstance(text, str) else None
+    if candidate is None or not candidate.startswith("="):
+        return None
+    is_formula = xml_has_formula
+    if is_formula is None:
+        is_formula = getattr(formula_cell, "data_type", None) == "f"
+    return candidate if is_formula else None
+
+
+def _row_streams_aligned(formula_row: Any, cached_row: Any) -> bool:
+    """按坐标核配同一行的公式视图与缓存视图；长度或坐标不一致即不可核配。"""
+
+    if len(formula_row) != len(cached_row):
+        return False
+    for formula_cell, cached_cell in zip(formula_row, cached_row, strict=False):
+        left = getattr(formula_cell, "coordinate", None)
+        right = getattr(cached_cell, "coordinate", None)
+        if left is None and right is None:
+            # 空单元格填充（openpyxl ``EMPTY_CELL``）无坐标，按索引对齐。
+            continue
+        if left != right:
+            return False
+    return True
 
 
 def _cache_meta(
@@ -648,11 +723,14 @@ def _cache_meta(
         "number_format": number_format,
         "xml_value_lexeme": None,
     }
+    meta["date_epoch"] = probe.date_epoch if probe is not None else None
+    structure = probe.probe(sheet, cell_ref) if probe is not None else None
+    if structure is not None:
+        # 非公式单元格同样保留 XML 原值证据（数值 lexeme / 日期 serial）。
+        meta["xml_value_lexeme"] = structure.get("v_text")
     if formula_text is None:
         return meta
 
-    meta["date_epoch"] = probe.date_epoch if probe is not None else None
-    structure = probe.probe(sheet, cell_ref) if probe is not None else None
     if structure is None:
         meta["cache_present"] = None
         meta["cache_missing_reason"] = "cache_presence_unverified"
@@ -681,8 +759,12 @@ def _cache_meta(
         # 共享字符串索引需要共享表才能还原；不猜值，保存在但值 unknown。
         meta["cache_missing_reason"] = "cache_shared_string_unresolved"
         return meta
-    typed = _typed_scalar(cached_value)
+    typed = _typed_scalar(cached_value, xml_lexeme=xml_lexeme, date_epoch=probe.date_epoch if probe else None)
     meta["cache_raw_type"] = typed["raw_type"]
+    if typed["raw_type"] == "error":
+        meta["cache_raw_value"] = json_doc({"raw_type": "error", "lexeme": typed["lexeme"]})
+        meta["cache_missing_reason"] = "cache_error"
+        return meta
     if typed["raw_type"] in {"json_integer", "json_decimal"}:
         lexeme = xml_lexeme if xml_lexeme not in {None, ""} else typed["lexeme"]
         try:
@@ -692,7 +774,12 @@ def _cache_meta(
             meta["cache_missing_reason"] = "cache_value_unreadable"
             return meta
     elif typed["raw_type"] == "datetime":
-        meta["cache_raw_value"] = json_doc({"raw_type": "datetime", "lexeme": typed["lexeme"]})
+        cached: dict[str, Any] = {"raw_type": "datetime", "lexeme": typed["lexeme"]}
+        if "serial" in typed:
+            cached["serial"] = typed["serial"]
+        if "date_epoch" in typed:
+            cached["date_epoch"] = typed["date_epoch"]
+        meta["cache_raw_value"] = json_doc(cached)
     elif typed["raw_type"] == "bool":
         meta["cache_raw_value"] = json_doc({"raw_type": "bool", "lexeme": typed["lexeme"]})
     else:
@@ -786,6 +873,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         read_sheets: list[str] = []
         row_read_ends: dict[str, int] = {}
         unverified_sheets: set[str] = set()
+        mismatched_sheets: set[str] = set()
         partial_sheet: str | None = None
         partial_last_row: int = 0
         rows_axis = selection.kind == "limited" and isinstance(selection.ranges[0], RowsRange)
@@ -817,7 +905,13 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             # openpyxl 会补空行，声明小于实际时会提前截断，两者都会让已读范围失真。
             formula_rows = formula_sheet.iter_rows(max_row=extent) if extent > 0 else ()
             cached_rows = cached_sheet.iter_rows(max_row=extent) if extent > 0 else ()
-            for formula_row, cached_row in zip(formula_rows, cached_rows, strict=False):
+            stream_mismatch = False
+            # 双流必须按坐标逐行核配：任一视图行数不足或单元格坐标不一致都不得
+            # 静默截断/错位配对（I22），否则投递值会张冠李戴。
+            for formula_row, cached_row in itertools.zip_longest(formula_rows, cached_rows):
+                if formula_row is None or cached_row is None or not _row_streams_aligned(formula_row, cached_row):
+                    stream_mismatch = True
+                    break
                 first_cell = formula_row[0] if formula_row else None
                 physical_row = getattr(first_cell, "row", None)
                 row_number = physical_row if isinstance(physical_row, int) else row_number + 1
@@ -838,26 +932,23 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                     break
                 total_rows += 1
                 budget.enforce_rows(total_rows)
-                formula_refs: set[str] = set()
-                for index, formula_cell in enumerate(formula_row, start=1):
-                    column = getattr(formula_cell, "column", None)
-                    column_index = column if isinstance(column, int) else index
-                    value = formula_cell.value
-                    if isinstance(value, str) and value.startswith("="):
-                        formula_refs.add(f"{_column_letter(column_index)}{row_number}")
-                if probe is not None and formula_refs:
-                    probe.prefetch(sheet_name, formula_refs)
-                cells = []
+                cell_pairs: list[tuple[str, Any, Any]] = []
                 for index, (formula_cell, cached_cell) in enumerate(
                     zip(formula_row, cached_row, strict=False), start=1
                 ):
                     column = getattr(formula_cell, "column", None)
                     column_index = column if isinstance(column, int) else index
-                    cell_ref = f"{_column_letter(column_index)}{row_number}"
+                    cell_pairs.append((f"{_column_letter(column_index)}{row_number}", formula_cell, cached_cell))
+                if probe is not None and cell_pairs:
+                    # 全部单元格都需要 XML 证据（类型/原 lexeme/serial），不只公式格。
+                    probe.prefetch(sheet_name, {cell_ref for cell_ref, _formula, _cached in cell_pairs})
+                cells = []
+                for cell_ref, formula_cell, cached_cell in cell_pairs:
+                    structure = probe.probe(sheet_name, cell_ref) if probe is not None else None
+                    xml_type = structure.get("t") if structure is not None else None
+                    xml_has_formula = structure.get("has_f") if structure is not None else None
                     formula_value = formula_cell.value
-                    formula_text = (
-                        formula_value if isinstance(formula_value, str) and formula_value.startswith("=") else None
-                    )
+                    formula_text = _formula_text(formula_cell, xml_has_formula)
                     meta = _cache_meta(
                         probe,
                         sheet_name,
@@ -866,7 +957,21 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                         cached_cell.value,
                         getattr(formula_cell, "number_format", None),
                     )
-                    payload = _typed_scalar(cached_cell.value if formula_text else formula_value)
+                    payload = _typed_scalar(
+                        cached_cell.value if formula_text is not None else formula_value,
+                        xml_lexeme=meta["xml_value_lexeme"],
+                        date_epoch=probe.date_epoch if probe is not None else None,
+                        xml_type=xml_type,
+                    )
+                    if structure is not None:
+                        # t 属性缺失即数值默认类型：如实记录证据（null 表示无该属性）。
+                        payload["xml_type"] = xml_type
+                    else:
+                        # XML 结构不可核（无该单元格元素/探测预算耗尽）：不冒充已取证。
+                        payload["xml_evidence_unverified"] = True
+                    if formula_text is None and isinstance(formula_value, str) and formula_value.startswith("="):
+                        # 文本以「=」开头仍是文本，但保留「看起来像公式」的事实标注。
+                        payload["looks_like_formula"] = True
                     cells.append(
                         {
                             "cell": cell_ref,
@@ -883,6 +988,18 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 budget.enforce_codepoints(frozen_chars + sheet_base_chars + rows_chars)
                 rows.append({"row": row_number, "cells": cells})
                 last_completed_row = row_number
+            if stream_mismatch:
+                # 双流无法按坐标核配：不静默配对/截断，整表内容记为未读并如实上报。
+                total_rows -= len(rows)
+                unverified_sheets.add(sheet_name)
+                mismatched_sheets.add(sheet_name)
+                limitations.append(
+                    _limitation(
+                        "xlsx_dual_stream_mismatch",
+                        "公式视图与缓存视图的行或单元格坐标不一致，本表内容记为未读",
+                    )
+                )
+                continue
             if rows_axis and target_spans is not None and len(target_spans) > 1 and rows:
                 # 多段选择按选择顺序逐段投递（段内仍按物理行号升序）：反序相邻段
                 # （如先 3 再 1—2）不得被 min/max 归并成升序，否则投递内容顺序与
@@ -924,6 +1041,7 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
             read_sheets=read_sheets,
             row_read_ends=row_read_ends,
             unverified_sheets=unverified_sheets,
+            mismatched_sheets=mismatched_sheets,
             partial_sheet=partial_sheet,
             partial_last_row=partial_last_row,
         )
@@ -963,6 +1081,7 @@ def _xlsx_read_unread_atoms(
     read_sheets: list[str],
     row_read_ends: dict[str, int],
     unverified_sheets: set[str],
+    mismatched_sheets: set[str],
     partial_sheet: str | None,
     partial_last_row: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -970,7 +1089,8 @@ def _xlsx_read_unread_atoms(
 
     - ``selection=all``：只允许空或恰一个 ``all`` 原子；无法表达部分读取，
       故超时或行范围不可核定都明确拒绝（不把截断/未知伪装成完整读取）。
-    - ``selection=sheets``：粒度为整表；未完成的表记未读（保守，不冒充已读）。
+    - ``selection=sheets``：粒度为整表；未完成的表或不可核定的表记未读（保守，
+      不冒充已读）。
     - ``selection=rows``：已读区间按实际迭代到的行核定（``row_read_ends``），
       请求范围越界部分记未读；行范围不可核定的表整表记未读。
     - 原子数组按 **选择顺序** 输出（不按行号重排、不因相邻段归并改序），与
@@ -980,6 +1100,8 @@ def _xlsx_read_unread_atoms(
 
     if selection.kind == "all":
         if unverified_sheets:
+            if mismatched_sheets:
+                raise AttachmentParseError("invalid_structure", "XLSX formula and cached views cannot be aligned")
             raise AttachmentParseError("invalid_structure", "XLSX sheet extent cannot be verified")
         if partial_sheet is None:
             return [to_wire_dict(AllAtom())], []
@@ -998,7 +1120,9 @@ def _xlsx_read_unread_atoms(
                 if name in seen_sheets:
                     continue
                 seen_sheets.add(name)
-                if partial_sheet is None or name in read_sheets:
+                if name in unverified_sheets:
+                    unread_names.append(name)
+                elif partial_sheet is None or name in read_sheets:
                     read_names.append(name)
                 else:
                     unread_names.append(name)

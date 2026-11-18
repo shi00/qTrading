@@ -356,6 +356,51 @@ class TestExplicitConnectAdmission:
         assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
 
 
+class TestExistingSessionRechecksAudit:
+    """I06：已有 session 直返路径也必须重核审核证据，不得按旧证据继续服务。"""
+
+    @pytest.mark.asyncio
+    async def test_connect_on_existing_session_refuses_after_fingerprint_change(self) -> None:
+        manager, store, factory, probe = _manager()
+        await store.save(_config())
+        await manager.connect(_identity())
+        assert probe.calls == 1
+
+        probe.fingerprint = sha256_hex(b"replaced-on-disk-payload")
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
+        assert "implementation_changed" in exc.value.sanitized_message
+        assert probe.calls == 2
+        assert factory.opened == 1  # 重核失败不新开连接
+
+    @pytest.mark.asyncio
+    async def test_connect_on_existing_session_refuses_when_config_is_gone(self) -> None:
+        manager, store, factory, _probe = _manager()
+        await store.save(_config())
+        await manager.connect(_identity())
+        store.saved.clear()
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+        assert exc.value.code is AgentErrorCode.CONFIG_UNAVAILABLE
+        assert factory.opened == 1
+
+    @pytest.mark.asyncio
+    async def test_connect_on_existing_session_refuses_after_audit_withdrawal(self) -> None:
+        manager, store, factory, _probe = _manager()
+        await store.save(_config())
+        await manager.connect(_identity())
+        await store.save(_config(audit=None))
+
+        with pytest.raises(AgentServiceError) as exc:
+            await manager.connect(_identity())
+        assert exc.value.code is AgentErrorCode.CAPABILITY_UNVERIFIED
+        assert "audit_missing" in exc.value.sanitized_message
+        assert factory.opened == 1
+
+
 class TestNoAutoReconnectAndDisconnect:
     @pytest.mark.asyncio
     async def test_disconnect_is_explicit_and_closes_session(self) -> None:
