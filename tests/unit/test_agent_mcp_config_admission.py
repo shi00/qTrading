@@ -308,7 +308,9 @@ class TestLoadRecheckBeforeConnect:
 
     @pytest.mark.asyncio
     async def test_valid_loaded_config_still_connects(self) -> None:
-        manager, _store, factory = _manager(_config())
+        # I03：stdio 无入站限额前置插入点、在准入即被拒；此处验证「加载后仍可启连」
+        # 的合同，故用具备真实插入点的 HTTP 传输。
+        manager, _store, factory = _manager(_config(transport=_http_transport()))
 
         await manager.connect(_identity())
 

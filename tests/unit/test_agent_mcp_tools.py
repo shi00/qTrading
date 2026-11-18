@@ -72,11 +72,17 @@ def _config(
     deadline_s: int = 30,
     transport: MCPTransportConfig | None = None,
 ) -> MCPServerConfig:
+    # 准入要求入站限额有真实插入点（I03）：默认用 HTTP 传输（stdio 无前置插入点，
+    # 其缺证据的准入拒绝由 test_agent_mcp_inbound_limits.py 覆盖）。
     return MCPServerConfig(
         identity=_IDENTITY,
         display_name="本地文件服务",
         transport=transport
-        or MCPTransportConfig(kind=MCPTransportKind.STDIO, command=sys.executable, cwd=os.path.dirname(sys.executable)),
+        or MCPTransportConfig(
+            kind=MCPTransportKind.STREAMABLE_HTTP,
+            url="https://mcp.example.test/tools",
+            http_risk_approved=True,
+        ),
         budget=budget or _budget(),
         tool_deadline_s=deadline_s,
         audit=MCPReadOnlyAudit(
@@ -622,7 +628,9 @@ class TestAuditEvidenceRecheck:
         assert first.state is ToolCallState.COMPLETED
         assert second.state is ToolCallState.COMPLETED
         assert probe.calls == 3  # 启连 1 次 + 每次调用各 1 次
-        assert first.audit_trust_limited is False
+        # 默认传输为 HTTP（I03：stdio 无入站前置插入点、不被准入）：远端实现不可观测，
+        # 结果须如实标注信任限制，但证据一致仍准入。
+        assert first.audit_trust_limited is True
         assert first.audit_trust_limited is second.audit_trust_limited
         assert [(call[0], call[1]) for call in session.calls] == [
             ("read_file", {"path": "C:\\data\\a.txt"}),

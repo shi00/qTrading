@@ -7,9 +7,10 @@
 每次工具调用前重新加载配置、重新观测实现指纹并重判只读准入，未准入即零新调用（I06）。
 
 真实 FastMCP 传输适配见 :mod:`services.agent_service.mcp_fastmcp`（E-02-5 实证：
-stdio 插入点、逐 send 门、FD 级 stderr、四诊断通道）。仍为残留：HTTP/SSE 的真实
-往返、原始接收字节计量（类型化客户端在库内解析）、子进程退出码可观测性；各传输
-前置预算数值仍需维护者批准后回填 ``MCPBudgetProfile``，本模块不主张已冻结。
+stdio 插入点、逐 send 门、FD 级 stderr、四诊断通道）。HTTP 传输的入站限额绑定在
+SDK 解析前的字节层（``httpx2`` 响应流 + SDK 的单 SSE 事件上限），stdio 无该插入点，
+故带 ``receive_bytes`` / ``structure_depth`` 的 stdio 配置在准入时被拒
+（``CAPABILITY_UNVERIFIED``），不以「预算有值」放行（I03）。
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from core.agent_types import (
     sha256_hex,
     validate_mcp_deadline,
 )
-from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline
+from services.agent_service.mcp_budget import MCPBudgetGuard, MCPDeadline, require_pre_parse_bindings
 
 # ---------------------------------------------------------------------------
 # 传输配置（stdio 绝对可执行/cwd 必填/不经 shell；HTTP 显式风险确认 + Header 安全引用）
@@ -368,7 +369,11 @@ class SharedMCPConnectionManager:
 
     @staticmethod
     def _admit_config(config: MCPServerConfig, label: str) -> None:
-        """合同 + 预算准入：保存与**每次加载后**的启连点共用（I18，不信任存储值）。"""
+        """合同 + 预算准入：保存与**每次加载后**的启连点共用（I18，不信任存储值）。
+
+        预算冻结之外还要求「真实插入点」：需前置拒绝的族（大帧 / 深 JSON）若在该
+        传输上无可观测插入点，即显式拒绝，而不是按「预算有值」放行（I03）。
+        """
 
         try:
             validate_mcp_server_config(config)
@@ -379,6 +384,7 @@ class SharedMCPConnectionManager:
             raise AgentServiceError(
                 AgentErrorCode.CAPABILITY_UNVERIFIED, f"mcp receive budgets not frozen: {unfrozen}", label
             )
+        require_pre_parse_bindings(config.transport.kind, config.budget, label)
 
     # -- 显式测试 -----------------------------------------------------------
 
