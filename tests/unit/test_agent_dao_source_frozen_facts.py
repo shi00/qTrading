@@ -373,6 +373,116 @@ class TestFrozenFactsVersusProjection:
         assert reason == "representation_not_available"
 
 
+class TestBodyPayloadOwnerConsistency:
+    """R2-I32：读正文时 owner 三元组与 owner 外键列必须双重建校验。
+
+    ``_read_body_text`` 既要核载荷自身 owner 文字三元组与 FK 列成对一致，也要
+    在调用方显式给 owner 时核归属；任一不符按「正文不可得」失败，不返回可疑正文。
+    """
+
+    @staticmethod
+    def _payload(**overrides: Any) -> Any:
+        data = overrides.pop("data", _TEXT).encode("utf-8")
+        values: dict[str, Any] = {
+            "owner_kind": "asset",
+            "owner_id": _SOURCE_ID,
+            "owner_version": "1",
+            "message_id": None,
+            "artifact_id": None,
+            "artifact_version": None,
+            "asset_id": _SOURCE_ID,
+            "asset_version": "1",
+            "encoding": "utf-8",
+            "payload_bytes": data,
+            "byte_length": len(data),
+            "payload_digest": sha256_hex(data),
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    @staticmethod
+    async def _read(payload: Any, owner: tuple[str, str, str] | None = None) -> str:
+        conn: Any = _FrozenFactsConn(payload=payload)
+        return await AgentDao._read_body_text(
+            conn, user_scope="u1", body_ref="body-1", identity="u1/body-1", owner=owner
+        )
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {
+                "owner_kind": "message",
+                "owner_id": _MESSAGE_ID,
+                "owner_version": "1",
+                "message_id": _MESSAGE_ID,
+                "asset_id": None,
+                "asset_version": None,
+            },
+            {
+                "owner_kind": "artifact",
+                "owner_id": "art-1",
+                "owner_version": "2",
+                "artifact_id": "art-1",
+                "artifact_version": 2,
+                "asset_id": None,
+                "asset_version": None,
+            },
+            {},
+        ],
+    )
+    async def test_consistent_owner_payload_is_read(self, payload: dict[str, Any]) -> None:
+        assert await self._read(self._payload(**payload)) == _TEXT
+
+    async def test_owner_id_not_matching_fk_column_rejected(self) -> None:
+        payload = self._payload(owner_id="src-other")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await self._read(payload)
+        _expect(excinfo, AgentErrorCode.PERSISTENCE_UNAVAILABLE)
+
+    async def test_owner_version_not_matching_asset_version_rejected(self) -> None:
+        payload = self._payload(owner_version="2")
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await self._read(payload)
+        _expect(excinfo, AgentErrorCode.PERSISTENCE_UNAVAILABLE)
+
+    async def test_artifact_owner_version_must_be_canonical_decimal(self) -> None:
+        payload = self._payload(
+            owner_kind="artifact",
+            owner_id="art-1",
+            owner_version="02",
+            artifact_id="art-1",
+            artifact_version=2,
+            asset_id=None,
+            asset_version=None,
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await self._read(payload)
+        _expect(excinfo, AgentErrorCode.PERSISTENCE_UNAVAILABLE)
+
+    async def test_explicit_owner_must_match_payload_owner(self) -> None:
+        with pytest.raises(AgentServiceError) as excinfo:
+            await self._read(self._payload(), owner=("asset", _SOURCE_ID, "2"))
+        _expect(excinfo, AgentErrorCode.PERSISTENCE_UNAVAILABLE)
+
+    async def test_explicit_owner_triple_alone_does_not_hide_fk_mismatch(self) -> None:
+        # 文字三元组与调用方一致，但 FK 列指向另一 owner：不得放行（R2-I32 核心缺口）。
+        payload = self._payload(
+            owner_kind="message",
+            owner_id=_MESSAGE_ID,
+            owner_version="1",
+            message_id="msg-other",
+            asset_id=None,
+            asset_version=None,
+        )
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await self._read(payload, owner=("message", _MESSAGE_ID, "1"))
+        _expect(excinfo, AgentErrorCode.PERSISTENCE_UNAVAILABLE)
+
+
 class TestSelectedRangeClosure:
     """I30：已存 selected_range 与冻结 locator 的冗余选择/接受版本逐值闭合。"""
 

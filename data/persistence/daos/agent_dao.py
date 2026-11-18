@@ -1929,6 +1929,22 @@ class AgentDao(BaseDao):
             ) from exc
 
     @staticmethod
+    def _owner_columns_consistent(row: Any) -> bool:
+        """正文 owner 三元组与 owner 外键列成对一致（R2-I32，与库内 CHECK 同语义）。"""
+
+        if row.owner_kind == "message":
+            return row.message_id == row.owner_id and row.owner_version == "1"
+        if row.owner_kind == "artifact":
+            return (
+                row.artifact_id == row.owner_id
+                and row.artifact_version is not None
+                and row.owner_version == str(row.artifact_version)
+            )
+        if row.owner_kind == "asset":
+            return row.asset_id == row.owner_id and row.asset_version == row.owner_version
+        return False
+
+    @staticmethod
     async def _read_body_text(
         conn: AsyncConnection,
         *,
@@ -1939,8 +1955,10 @@ class AgentDao(BaseDao):
     ) -> str:
         """重建单块正文（§9.10.1）：核 owner/编码/长度/SHA-256，失败报不可得。
 
-        ``owner=None`` 用于只按引用读取的大结果（工具返回等）：此时核载荷自身
-        owner 三元组与 FK 列自洽，不假定引用方类型。
+        无论调用方是否显式给 ``owner``，都要核载荷 owner 三元组与 owner 外键列
+        成对一致（R2-I32：只比文字三元组会放行 FK 指向他人正文的行）；``owner``
+        非空时再核调用方归属。``owner=None`` 用于只按引用读取的大结果（工具返回
+        等）：此时不假定引用方类型，但仍要求行内 owner 自洽。
         """
 
         row = (
@@ -1967,26 +1985,11 @@ class AgentDao(BaseDao):
         if row is None:
             raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload is missing", identity)
         data = bytes(row.payload_bytes)
-        if owner is None:
-            consistent = (
-                (row.owner_kind == "message" and row.message_id == row.owner_id and row.owner_version == "1")
-                or (
-                    row.owner_kind == "artifact"
-                    and row.artifact_id == row.owner_id
-                    and row.artifact_version is not None
-                    and row.owner_version == str(row.artifact_version)
-                )
-                or (
-                    row.owner_kind == "asset"
-                    and row.asset_id == row.owner_id
-                    and row.asset_version == row.owner_version
-                )
+        if not AgentDao._owner_columns_consistent(row):
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload owner is inconsistent", identity
             )
-            if not consistent:
-                raise AgentServiceError(
-                    AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload owner is inconsistent", identity
-                )
-        elif row.owner_kind != owner[0] or row.owner_id != owner[1] or row.owner_version != owner[2]:
+        if owner is not None and (row.owner_kind, row.owner_id, row.owner_version) != owner:
             raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload owner mismatch", identity)
         if row.encoding != "utf-8":
             raise AgentServiceError(AgentErrorCode.PERSISTENCE_UNAVAILABLE, "body payload encoding mismatch", identity)
