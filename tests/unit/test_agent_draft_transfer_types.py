@@ -42,7 +42,7 @@ _BASELINE = "b" * 64
 
 def _payload(**overrides: Any) -> DraftPayload:
     values: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "text": "研究三家公司",
         "mode": Mode.DISCUSS,
         "model_selection": json_doc({"scenario_id": "agent_research"}),
@@ -50,6 +50,7 @@ def _payload(**overrides: Any) -> DraftPayload:
         "skill_versions": (),
         "mcp_selection": (),
         "purpose": None,
+        "research_date": None,
         "cutoff": None,
         "send_target": None,
         "object_context": json_doc({"source_module": "ui"}),

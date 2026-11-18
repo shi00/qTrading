@@ -180,7 +180,7 @@ def _dao(conn: _FenceConn) -> AgentDao:
 
 def _payload(text: str = "hello") -> DraftPayload:
     return DraftPayload(
-        schema_version=1,
+        schema_version=2,
         text=text,
         mode=Mode.EXECUTE,
         model_selection=None,
@@ -188,6 +188,7 @@ def _payload(text: str = "hello") -> DraftPayload:
         skill_versions=(),
         mcp_selection=(),
         purpose=None,
+        research_date=None,
         cutoff=None,
         send_target=None,
         object_context=None,

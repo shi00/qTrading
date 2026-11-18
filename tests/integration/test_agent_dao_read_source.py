@@ -476,7 +476,7 @@ class TestReadSourceRepresentation:
         await _seed_asset(dao, body_text="正文")
 
         payload = DraftPayload(
-            schema_version=1,
+            schema_version=2,
             text="引用附件",
             mode=Mode.DISCUSS,
             model_selection=None,
@@ -491,6 +491,7 @@ class TestReadSourceRepresentation:
             skill_versions=(),
             mcp_selection=(),
             purpose=None,
+            research_date=None,
             cutoff=None,
             send_target=None,
             object_context=None,

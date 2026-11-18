@@ -7176,8 +7176,14 @@ def decode_cleanup_identity_set(value: object, path: str = "$.cleanup.identity_s
 # ---------------------------------------------------------------------------
 
 
-#: 草稿载荷全键（§4.2 DraftSaveCommand 业务字段 + schema_version 信封）。
-DRAFT_PAYLOAD_KEYS: Final = frozenset(
+#: 草稿载荷 schema 版本：v2 起「研究日期」与「精确截止」分列（I33）。
+#: v1 旧稿只有日界 ``cutoff``（纯日期），按只读兼容读取：日期提升为
+#: ``research_date``，精确截止保持 ``None``（未知），不得补造（R21）。
+DRAFT_PAYLOAD_SCHEMA_VERSION: Final = 2
+DRAFT_PAYLOAD_V1_SCHEMA_VERSION: Final = 1
+
+#: v1/v2 共用键（不含两个边界字段）。
+_DRAFT_PAYLOAD_COMMON_KEYS: Final = frozenset(
     {
         "schema_version",
         "text",
@@ -7187,7 +7193,6 @@ DRAFT_PAYLOAD_KEYS: Final = frozenset(
         "skill_versions",
         "mcp_selection",
         "purpose",
-        "cutoff",
         "send_target",
         "object_context",
         "role_prompt_selection",
@@ -7195,6 +7200,12 @@ DRAFT_PAYLOAD_KEYS: Final = frozenset(
         "defaults_baseline_digest",
     }
 )
+
+#: 草稿载荷全键（§4.2 DraftSaveCommand 业务字段 + schema_version 信封）。
+DRAFT_PAYLOAD_KEYS: Final = frozenset(_DRAFT_PAYLOAD_COMMON_KEYS | {"research_date", "cutoff"})
+
+#: v1 旧稿键集（仅 ``cutoff`` 日界）：只读兼容输入，不得用于新写入。
+DRAFT_PAYLOAD_V1_KEYS: Final = frozenset(_DRAFT_PAYLOAD_COMMON_KEYS | {"cutoff"})
 
 #: 草稿载荷中**不得出现**的键（递归小写比对）：凭据与有效批准不随草稿持久化
 #: （§9.3「无凭据/有效批准/额外源副本」、R9/R10）。
@@ -7220,7 +7231,8 @@ _DRAFT_FORBIDDEN_KEYS: Final = frozenset(
     }
 )
 
-_CUTOFF_RE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+#: 研究日期：日历日（无时区、无时刻）``YYYY-MM-DD``。
+_DATE_ONLY_RE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 def _reject_draft_forbidden_keys(value: object, path: str) -> None:
@@ -7288,8 +7300,40 @@ def _sorted_mcp_selection(refs: Iterable[MCPServiceIdentity]) -> tuple[MCPServic
     return tuple(sorted(items, key=lambda ref: (ref.service_id, ref.config_version)))
 
 
+def _validate_research_date(value: object, path: str) -> str:
+    """研究日期：仅 ``YYYY-MM-DD`` 日历日（带时刻/时区一律拒绝）。"""
+
+    if not isinstance(value, str) or _DATE_ONLY_RE.fullmatch(value) is None:
+        _fail("invalid_research_date", path)
+    try:
+        dt.fromisoformat(value)
+    except ValueError:
+        _fail("invalid_research_date", path)
+    return value
+
+
 def _validate_cutoff(value: object, path: str) -> str:
-    if not isinstance(value, str) or _CUTOFF_RE.fullmatch(value) is None:
+    """精确截止：ISO-8601 时点且必须带时区（与受理 ``decision_cutoff`` 同口径）。
+
+    纯日期会解析为无时区的午夜——语义上只是日界而非精确时刻，必须拒绝，
+    避免把「17:00 截止」静默降级成日界（R21）。
+    """
+
+    if not isinstance(value, str) or value == "":
+        _fail("invalid_cutoff", path)
+    try:
+        parsed = dt.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        _fail("invalid_cutoff", path)
+    if parsed.tzinfo is None:
+        _fail("invalid_cutoff", path)
+    return value
+
+
+def _validate_legacy_cutoff(value: object, path: str) -> str:
+    """v1 旧稿 ``cutoff``：只接受纯日期（旧口径日界），仅用于只读兼容。"""
+
+    if not isinstance(value, str) or _DATE_ONLY_RE.fullmatch(value) is None:
         _fail("invalid_cutoff", path)
     try:
         dt.fromisoformat(value)
@@ -7307,6 +7351,11 @@ class DraftPayload:
     由对应配置域拥有；见 :func:`_draft_fragment`）。``customized_fields`` 与
     ``defaults_baseline_digest`` 成对区分「未触碰默认」与用户手选（§4.2 R03）：
     非空自定义必须带基线摘要，空自定义不得带。
+
+    ``research_date`` 为研究日期（纯日历日 ``YYYY-MM-DD``）；``cutoff`` 为精确
+    截止（带时区 ISO-8601 时点，与受理 ``decision_cutoff`` 同口径）。两者分列：
+    17:00 截止不会被降级成日界，排队（19:00）也不改写它。``cutoff=None`` 表示
+    精确截止未知（未选择或旧 v1 稿仅日界），排队前须澄清（:func:`draft_cutoff_requires_clarification`）。
     """
 
     schema_version: int
@@ -7317,6 +7366,7 @@ class DraftPayload:
     skill_versions: tuple[SkillVersionRef, ...]
     mcp_selection: tuple[MCPServiceIdentity, ...]
     purpose: Purpose | None
+    research_date: str | None
     cutoff: str | None
     send_target: CanonicalJson | None
     object_context: CanonicalJson | None
@@ -7325,10 +7375,20 @@ class DraftPayload:
     defaults_baseline_digest: str | None
 
 
-def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
-    """DraftPayload → 规范 wire 对象（14 键全量，集合规范化排序去重）。"""
+def draft_cutoff_requires_clarification(payload: DraftPayload) -> bool:
+    """精确截止未知时排队前必须澄清，不得按日界或队列时点补造（R21/R24）。
 
-    if isinstance(payload.schema_version, bool) or payload.schema_version != 1:
+    概念问答（``Purpose.CONCEPT``）没有截止界，不算待澄清；其余用途（含尚未
+    选择用途的未完成草稿）以 ``cutoff is None`` 作为「精确截止未知」哨兵。
+    """
+
+    return payload.cutoff is None and payload.purpose is not Purpose.CONCEPT
+
+
+def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
+    """DraftPayload → 规范 wire 对象（v2 15 键全量，集合规范化排序去重）。"""
+
+    if isinstance(payload.schema_version, bool) or payload.schema_version != DRAFT_PAYLOAD_SCHEMA_VERSION:
         _fail("invalid_schema_version", "$.payload.schema_version")
     if not isinstance(payload.text, str):
         _fail("invalid_type", "$.payload.text")
@@ -7359,7 +7419,7 @@ def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
             _fail("invalid_value", "$.payload.defaults_baseline_digest")
         digest = None
     return {
-        "schema_version": 1,
+        "schema_version": DRAFT_PAYLOAD_SCHEMA_VERSION,
         "text": payload.text,
         "mode": payload.mode.value,
         "model_selection": None if payload.model_selection is None else decode_json_doc(payload.model_selection),
@@ -7367,6 +7427,11 @@ def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
         "skill_versions": [encode_skill_version_ref(ref) for ref in _sorted_skill_refs(payload.skill_versions)],
         "mcp_selection": [encode_mcp_service_identity(ref) for ref in _sorted_mcp_selection(payload.mcp_selection)],
         "purpose": None if payload.purpose is None else payload.purpose.value,
+        "research_date": (
+            None
+            if payload.research_date is None
+            else _validate_research_date(payload.research_date, "$.payload.research_date")
+        ),
         "cutoff": None if payload.cutoff is None else _validate_cutoff(payload.cutoff, "$.payload.cutoff"),
         "send_target": None if payload.send_target is None else decode_json_doc(payload.send_target),
         "object_context": None if payload.object_context is None else decode_json_doc(payload.object_context),
@@ -7379,13 +7444,36 @@ def encode_draft_payload(payload: DraftPayload) -> dict[str, Any]:
 
 
 def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload:
-    """严格解码草稿载荷：全键必填、禁额外键、类型/标签/摘要逐项校验。"""
+    """严格解码草稿载荷：全键必填、禁额外键、类型/标签/摘要逐项校验。
+
+    v2 为当前写入形态（研究日期 + 精确截止分列）。v1 旧稿只读兼容：旧
+    ``cutoff`` 为纯日期日界，提升为 ``research_date``；精确 ``cutoff`` 置
+    ``None``（未知），不补造时点，排队前须澄清（R21）。
+    """
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
-    _require_keys(value, DRAFT_PAYLOAD_KEYS, path)
-    if isinstance(value["schema_version"], bool) or value["schema_version"] != 1:
+    if "schema_version" not in value:
+        _fail("missing_field", f"{path}.schema_version")
+    schema_version = value["schema_version"]
+    if isinstance(schema_version, bool) or schema_version not in (
+        DRAFT_PAYLOAD_V1_SCHEMA_VERSION,
+        DRAFT_PAYLOAD_SCHEMA_VERSION,
+    ):
         _fail("invalid_schema_version", f"{path}.schema_version")
+    if schema_version == DRAFT_PAYLOAD_V1_SCHEMA_VERSION:
+        _require_keys(value, DRAFT_PAYLOAD_V1_KEYS, path)
+        legacy_cutoff = value["cutoff"]
+        research_date = None if legacy_cutoff is None else _validate_legacy_cutoff(legacy_cutoff, f"{path}.cutoff")
+        cutoff = None
+    else:
+        _require_keys(value, DRAFT_PAYLOAD_KEYS, path)
+        research_date = (
+            None
+            if value["research_date"] is None
+            else _validate_research_date(value["research_date"], f"{path}.research_date")
+        )
+        cutoff = None if value["cutoff"] is None else _validate_cutoff(value["cutoff"], f"{path}.cutoff")
     text = value["text"]
     if not isinstance(text, str):
         _fail("invalid_type", f"{path}.text")
@@ -7425,7 +7513,7 @@ def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload
             _fail("invalid_value", f"{path}.defaults_baseline_digest")
         digest = None
     return DraftPayload(
-        schema_version=1,
+        schema_version=DRAFT_PAYLOAD_SCHEMA_VERSION,
         text=text,
         mode=mode,
         model_selection=_opt_draft_fragment(value["model_selection"], f"{path}.model_selection"),
@@ -7442,7 +7530,8 @@ def decode_draft_payload(value: object, path: str = "$.payload") -> DraftPayload
             for index, item in enumerate(mcp_selection_raw)
         ),
         purpose=purpose,
-        cutoff=None if value["cutoff"] is None else _validate_cutoff(value["cutoff"], f"{path}.cutoff"),
+        research_date=research_date,
+        cutoff=cutoff,
         send_target=_opt_draft_fragment(value["send_target"], f"{path}.send_target"),
         object_context=_opt_draft_fragment(
             value["object_context"], f"{path}.object_context", require_source_module=True
@@ -7951,7 +8040,7 @@ def is_empty_draft_payload(payload: DraftPayload | None) -> bool:
     """目标是否为空稿（§4.2 L413 R03）。
 
     ``None``（无稿）与「空稿且无任何未发送选择」均可接收移入；**正文空但有
-    对象/来源/手选模型/模式/用途/截止日/发送目标/Skill/MCP/角色/Prompt 等
+    对象/来源/手选模型/模式/用途/研究日期/精确截止/发送目标/Skill/MCP/角色/Prompt 等
     未发送选择不是空位**。``customized_fields`` 非空即表示用户触碰过默认值
     （含把默认项显式选成默认值），按有稿处理；``mode`` 必须是默认 ``EXECUTE``
     （需求 F21「新会话默认执行」），其他模式即使调用方漏填 ``customized_fields``
@@ -7968,6 +8057,7 @@ def is_empty_draft_payload(payload: DraftPayload | None) -> bool:
         and not payload.skill_versions
         and not payload.mcp_selection
         and payload.purpose is None
+        and payload.research_date is None
         and payload.cutoff is None
         and payload.send_target is None
         and payload.object_context is None

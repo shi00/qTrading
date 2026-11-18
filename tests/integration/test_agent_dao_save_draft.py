@@ -97,7 +97,7 @@ async def _seed_asset(dao: AgentDao, asset_id: str = "src-1", version: str = "1"
 
 def _payload(**overrides: Any) -> DraftPayload:
     values: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "text": "研究三家公司",
         "mode": Mode.DISCUSS,
         "model_selection": json_doc({"scenario_id": "agent_research"}),
@@ -105,7 +105,8 @@ def _payload(**overrides: Any) -> DraftPayload:
         "skill_versions": (),
         "mcp_selection": (),
         "purpose": Purpose.CONCEPT,
-        "cutoff": "2026-11-13",
+        "research_date": "2026-11-13",
+        "cutoff": None,
         "send_target": None,
         "object_context": json_doc({"source_module": "ui", "object_ref": None}),
         "role_prompt_selection": None,

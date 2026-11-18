@@ -1,8 +1,9 @@
 """草稿持久契约单测（F-03-1；DD §4.2 DraftSaveCommand/DraftReceipt、§9.3）。
 
 覆盖：全键必填/禁额外键、bool 与 0 预期版拒绝、命令引用与预期版一致、
-集合规范化（去重/排序）、自定义字段与基线摘要成对约束、截止日校验、
-不透明片段拒绝 float 与凭据/批准键、回执坏枚举 fail-closed、输入摘要稳定。
+集合规范化（去重/排序）、自定义字段与基线摘要成对约束、研究日期与精确截止
+分列（含 v1 旧稿只读兼容）、不透明片段拒绝 float 与凭据/批准键、回执坏枚举
+fail-closed、输入摘要稳定。
 """
 
 from __future__ import annotations
@@ -29,10 +30,12 @@ from core.agent_types import (
     decode_draft_payload,
     decode_draft_receipt,
     decode_draft_save_command,
+    draft_cutoff_requires_clarification,
     draft_save_input_digest,
     encode_draft_payload,
     encode_draft_receipt,
     encode_draft_save_command,
+    is_empty_draft_payload,
     json_doc,
     validate_draft_save_command,
 )
@@ -52,7 +55,7 @@ def _source(source_id: str = "src-1", version: str = "1") -> SourceVersionRef:
 
 def _payload(**overrides: Any) -> DraftPayload:
     values: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "text": "研究三家公司",
         "mode": Mode.DISCUSS,
         "model_selection": json_doc({"scenario_id": "agent_research", "connection_id": None}),
@@ -60,7 +63,8 @@ def _payload(**overrides: Any) -> DraftPayload:
         "skill_versions": (SkillVersionRef(skill_id="sk-1", version=2),),
         "mcp_selection": (MCPServiceIdentity(service_id="mcp-1", config_version=1),),
         "purpose": Purpose.CONCEPT,
-        "cutoff": "2026-11-13",
+        "research_date": "2026-11-13",
+        "cutoff": "2026-11-13T17:00:00+08:00",
         "send_target": json_doc({"kind": "new_question"}),
         "object_context": json_doc({"source_module": "ui", "object_ref": "stock:600519"}),
         "role_prompt_selection": json_doc({"role_id": "analyst"}),
@@ -106,6 +110,7 @@ class TestDraftPayloadCodec:
             "skill_versions",
             "mcp_selection",
             "purpose",
+            "research_date",
             "cutoff",
             "send_target",
             "object_context",
@@ -113,6 +118,9 @@ class TestDraftPayloadCodec:
             "customized_fields",
             "defaults_baseline_digest",
         }
+        assert wire["schema_version"] == 2
+        assert wire["research_date"] == "2026-11-13"
+        assert wire["cutoff"] == "2026-11-13T17:00:00+08:00"
         assert decode_draft_payload(wire) == _payload()
 
     def test_empty_text_and_no_selection_allowed(self) -> None:
@@ -123,6 +131,7 @@ class TestDraftPayloadCodec:
             skill_versions=(),
             mcp_selection=(),
             purpose=None,
+            research_date=None,
             cutoff=None,
             send_target=None,
             object_context=None,
@@ -161,12 +170,103 @@ class TestDraftPayloadCodec:
         _expect_error(excinfo, "invalid_tag", "$.payload.mode")
 
     def test_invalid_cutoff_rejected(self) -> None:
-        for cutoff in ("2026-13-01", "2026-1-1", "20261113"):
+        # 精确截止必须是带时区的 ISO-8601 时点：纯日期/无时区/坏日历一律拒绝。
+        for cutoff in (
+            "2026-13-01",
+            "2026-1-1",
+            "20261113",
+            "2026-11-13",
+            "2026-11-13T17:00:00",
+            "2026-13-01T17:00:00+08:00",
+        ):
             wire = encode_draft_payload(_payload())
             wire["cutoff"] = cutoff
             with pytest.raises(AgentValidationError) as excinfo:
                 decode_draft_payload(wire)
             _expect_error(excinfo, "invalid_cutoff", "$.payload.cutoff")
+        with pytest.raises(AgentValidationError) as excinfo:
+            encode_draft_payload(_payload(cutoff="2026-11-13"))
+        _expect_error(excinfo, "invalid_cutoff", "$.payload.cutoff")
+
+    def test_invalid_research_date_rejected(self) -> None:
+        for research_date in ("2026-11-13T00:00:00+08:00", "2026-11-13T17:00:00+08:00", "2026-1-1", "20260230"):
+            with pytest.raises(AgentValidationError) as excinfo:
+                encode_draft_payload(_payload(research_date=research_date))
+            _expect_error(excinfo, "invalid_research_date", "$.payload.research_date")
+
+    def test_timezone_cutoff_survives_save_and_reopen(self) -> None:
+        """17:00+时区存稿 → 重开逐字一致（不得降级为日期/改时区）。"""
+
+        payload = _payload(purpose=Purpose.END_OF_DAY_RESEARCH, cutoff="2026-11-13T17:00:00+08:00")
+        reopened = decode_draft_payload(encode_draft_payload(payload))
+        assert reopened == payload
+        assert reopened.cutoff == "2026-11-13T17:00:00+08:00"
+        assert reopened.research_date == "2026-11-13"
+
+    def test_queue_at_later_time_does_not_rewrite_cutoff(self) -> None:
+        """19:00 排队（新版草稿保存/冻结）仍保留 17:00 截止，不被排队时点改写。"""
+
+        saved = _payload(purpose=Purpose.END_OF_DAY_RESEARCH, cutoff="2026-11-13T17:00:00+08:00")
+        queued = decode_draft_payload(encode_draft_payload(_command(payload=saved).payload))
+        assert queued.cutoff == "2026-11-13T17:00:00+08:00"
+        assert queued == saved
+        # 契约无「排队时点」输入：同一载荷重复编码逐字稳定，任何时钟都不参与。
+        assert encode_draft_payload(queued) == encode_draft_payload(saved)
+
+    def test_research_date_and_cutoff_are_stored_separately(self) -> None:
+        payload = _payload(research_date="2026-11-12", cutoff="2026-11-13T17:00:00+08:00")
+        wire = encode_draft_payload(payload)
+        assert wire["research_date"] == "2026-11-12"
+        assert wire["cutoff"] == "2026-11-13T17:00:00+08:00"
+        decoded = decode_draft_payload(wire)
+        assert (decoded.research_date, decoded.cutoff) == ("2026-11-12", "2026-11-13T17:00:00+08:00")
+
+    def test_cutoff_format_boundaries(self) -> None:
+        """研究日期只收纯日期；精确截止只收带时区时点（含 ``Z``）。"""
+
+        for cutoff in ("2026-11-13T17:00:00+08:00", "2026-11-13T09:00:00Z"):
+            assert decode_draft_payload(encode_draft_payload(_payload(cutoff=cutoff))).cutoff == cutoff
+        assert (
+            decode_draft_payload(encode_draft_payload(_payload(research_date="2026-11-13"))).research_date
+            == "2026-11-13"
+        )
+
+    def test_legacy_v1_draft_reads_date_and_leaves_cutoff_unknown(self) -> None:
+        """旧 v1 稿仅日界：日期提升为研究日期，精确截止保持未知，须澄清（不补造）。"""
+
+        legacy = encode_draft_payload(_payload())
+        legacy.pop("research_date")
+        legacy["schema_version"] = 1
+        legacy["purpose"] = Purpose.END_OF_DAY_RESEARCH.value
+        legacy["cutoff"] = "2026-11-13"
+        decoded = decode_draft_payload(legacy)
+        assert decoded.schema_version == 2
+        assert decoded.research_date == "2026-11-13"
+        assert decoded.cutoff is None
+        assert draft_cutoff_requires_clarification(decoded) is True
+        assert is_empty_draft_payload(decoded) is False
+        # 读回后可写回 v2（日期保留、精确截止仍未知），不得伪造 17:00。
+        assert encode_draft_payload(decoded)["cutoff"] is None
+
+    def test_legacy_v1_cutoff_must_be_date_only(self) -> None:
+        legacy = encode_draft_payload(_payload())
+        legacy.pop("research_date")
+        legacy["schema_version"] = 1
+        legacy["cutoff"] = "2026-11-13T17:00:00+08:00"
+        with pytest.raises(AgentValidationError) as excinfo:
+            decode_draft_payload(legacy)
+        _expect_error(excinfo, "invalid_cutoff", "$.payload.cutoff")
+
+    def test_unsupported_schema_version_rejected(self) -> None:
+        wire = encode_draft_payload(_payload())
+        wire["schema_version"] = 3
+        with pytest.raises(AgentValidationError) as excinfo:
+            decode_draft_payload(wire)
+        _expect_error(excinfo, "invalid_schema_version", "$.payload.schema_version")
+
+    def test_concept_draft_without_cutoff_needs_no_clarification(self) -> None:
+        assert draft_cutoff_requires_clarification(_payload(purpose=Purpose.CONCEPT, cutoff=None)) is False
+        assert draft_cutoff_requires_clarification(_payload(purpose=Purpose.END_OF_DAY_RESEARCH, cutoff=None)) is True
 
     def test_customized_fields_require_baseline_digest(self) -> None:
         with pytest.raises(AgentValidationError) as excinfo:
