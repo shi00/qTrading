@@ -818,6 +818,8 @@ def _answer_request() -> SaveAnswerRequest:
         decision_id="d1",
         client_command_id="c1",
         expected_decision_revision=1,
+        expected_execution_id="e1",
+        expected_round_id="r1",
         answer_payload=json_doc({"choice": "a"}),
     )
 

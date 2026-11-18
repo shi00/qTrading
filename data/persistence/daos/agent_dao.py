@@ -2912,6 +2912,8 @@ class AgentDao(BaseDao):
         所属轮次与执行终止态；非法选项/版本不符 → ``INPUT_INVALID``，过期/
         执行终止/轮次已被替代或停轮 → ``POLICY_DENIED``，均在写答复命令与推进
         CAS 之前拒绝（零新事实）。重放路径只读原事实回执，不按当前状态重判。
+        归属绑定（R2-I04）：``expected_execution_id`` / ``expected_round_id``
+        与决定行不符 → ``REVISION_CONFLICT``（调用方看到的是另一轮/另一执行）。
         所属会话已删除 fence → 首生效新答复 ``POLICY_DENIED``（D08）。
         提交后同事务追加 ``command_changed`` 可靠事件（R2-I21，
         ``payload_kind=answer_saved``）；同命令键重放查回原事实、不重复写。
@@ -2923,6 +2925,8 @@ class AgentDao(BaseDao):
         _require_text_field(request.decision_id, "decision_id", identity)
         _require_text_field(request.client_command_id, "client_command_id", identity)
         _require_int_field(request.expected_decision_revision, "expected_decision_revision", identity, 1)
+        _require_text_field(request.expected_execution_id, "expected_execution_id", identity)
+        _require_text_field(request.expected_round_id, "expected_round_id", identity)
         _require_text_field(request.answer_payload, "answer_payload", identity)
         answer_digest = sha256_hex(request.answer_payload)
         command_record_id = stable_id("command", [request.user_scope, request.decision_id, request.client_command_id])
@@ -2950,6 +2954,17 @@ class AgentDao(BaseDao):
             ).first()
             if decision_row is None:
                 raise AgentServiceError(AgentErrorCode.INPUT_INVALID, "decision does not exist", identity)
+            # 1b. 归属绑定（R2-I04）：答复必须指向调用方看到的准确执行/轮次；
+            #     决定行归属不可变，重放的同命令同输入也必然携带同一归属。
+            if (
+                decision_row.execution_id != request.expected_execution_id
+                or decision_row.round_id != request.expected_round_id
+            ):
+                raise AgentServiceError(
+                    AgentErrorCode.REVISION_CONFLICT,
+                    "answer targets a different execution/round than the caller saw",
+                    identity,
+                )
             # 2. 命令键查重（target = decision_id，§3.2 命令身份）。
             existing_command = (
                 await conn.execute(

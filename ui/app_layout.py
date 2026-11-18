@@ -508,8 +508,12 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             revision = current.session_draft_revision or None
             page.run_task(research_vm.load_draft, current.session_id, revision)
 
-    def _submit_decision(decision_id: str) -> None:
-        """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。"""
+    def _submit_decision(decision_id: str, execution_id: str, round_id: str) -> None:
+        """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。
+
+        ``execution_id`` / ``round_id`` 来自界面呈现的决定投影：提交绑定到用户
+        实际看到的那一轮研究，VM 与 DAO 会复核归属，过期视图不会误答。
+        """
         page = _get_page()
         if page is None:
             return
@@ -518,6 +522,8 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             vm=research_vm,
             owner="research_observer",
             decision_id=decision_id,
+            execution_id=execution_id,
+            round_id=round_id,
         )
         set_decision_notice(I18n.get(refusal) if refusal is not None else None)
 
