@@ -1,7 +1,7 @@
 """E-03-1 D02 Skill 预算与角色分配契约单元测试。
 
 覆盖：四阈值恰等/超一（归档字节/展开字节/对象数/预检秒数）、默认⊆启用、
-主默认∪手选、子仅自身默认不继承主手选、版本身份稳定键。
+主默认∪手选、子仅自身默认不继承主手选、同 skill_id 多版本冲突拒绝、版本身份稳定键。
 """
 
 from __future__ import annotations
@@ -129,3 +129,67 @@ class TestSkillSelection:
             is_child=False,
         )
         assert selected == (_ref("a"), _ref("b"))
+
+    def test_default_and_hand_picked_version_conflict_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            resolve_skill_selection(
+                enabled=(_ref("a", 1), _ref("a", 2)),
+                defaults=(_ref("a", 1),),
+                hand_picked=(_ref("a", 2),),
+                is_child=False,
+            )
+        assert exc.value.code == "skill_version_conflict"
+
+    def test_hand_picked_internal_version_conflict_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as exc:
+            resolve_skill_selection(
+                enabled=(_ref("a", 1), _ref("a", 2)),
+                defaults=(),
+                hand_picked=(_ref("a", 1), _ref("a", 2)),
+                is_child=False,
+            )
+        assert exc.value.code == "skill_version_conflict"
+
+    def test_default_and_hand_picked_same_version_passes(self) -> None:
+        selected = resolve_skill_selection(
+            enabled=(_ref("a", 1),),
+            defaults=(_ref("a", 1),),
+            hand_picked=(_ref("a", 1),),
+            is_child=False,
+        )
+        assert selected == (_ref("a", 1),)
+
+    def test_multiple_enabled_versions_of_distinct_skills_pass(self) -> None:
+        selected = resolve_skill_selection(
+            enabled=(_ref("a", 1), _ref("a", 2), _ref("b", 1), _ref("b", 2)),
+            defaults=(_ref("a", 2),),
+            hand_picked=(_ref("b", 1),),
+            is_child=False,
+        )
+        assert selected == (_ref("a", 2), _ref("b", 1))
+
+    def test_same_input_repeated_yields_identical_selection(self) -> None:
+        kwargs = {
+            "enabled": (_ref("b", 1), _ref("a", 2), _ref("a", 1)),
+            "defaults": (_ref("a", 2),),
+            "hand_picked": (_ref("b", 1),),
+            "is_child": False,
+        }
+        first = resolve_skill_selection(**kwargs)
+        second = resolve_skill_selection(**kwargs)
+        assert first == second == (_ref("a", 2), _ref("b", 1))
+
+    def test_selection_is_order_independent(self) -> None:
+        forward = resolve_skill_selection(
+            enabled=(_ref("a", 1), _ref("b", 2), _ref("c", 3)),
+            defaults=(_ref("a", 1),),
+            hand_picked=(_ref("b", 2), _ref("c", 3)),
+            is_child=False,
+        )
+        backward = resolve_skill_selection(
+            enabled=(_ref("c", 3), _ref("b", 2), _ref("a", 1)),
+            defaults=(_ref("a", 1),),
+            hand_picked=(_ref("c", 3), _ref("b", 2)),
+            is_child=False,
+        )
+        assert forward == backward == (_ref("a", 1), _ref("b", 2), _ref("c", 3))
