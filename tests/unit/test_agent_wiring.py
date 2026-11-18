@@ -159,6 +159,44 @@ async def test_facade_reuses_shared_engine_and_ledger(monkeypatch: pytest.Monkey
     assert launched == []  # needs-spike 门闩：不提前 launch
 
 
+async def test_wiring_installs_leaf_runner_and_closed_dispatcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services.agent_service import ResearchDispatcher
+    from services.agent_service.workflows import LeafRuntimeRegistry
+
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda handle: None)
+
+    wiring, _handle, _guard = await _wire(launch_allowed=False)
+
+    assert callable(LeafRuntimeRegistry._instance)  # 生产组合根安装叶 runner
+    assert isinstance(wiring.dispatcher, ResearchDispatcher)  # 派发入口已接线
+    assert wiring.service._dispatcher is wiring.dispatcher
+    assert wiring.dispatch_closed() is True  # 未 launch：派发门闩关闭（零派发）
+
+
+async def test_leaf_runtime_install_failure_keeps_zero_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    launched: list[Any] = []
+    monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda handle: launched.append(handle))
+
+    def _boom(_runtime: Any = None) -> None:
+        raise RuntimeError("leaf wiring broken")
+
+    monkeypatch.setattr(wiring_mod, "install_leaf_runtime", _boom)
+
+    wiring = await wire_agent_runtime(
+        _cache_manager(),
+        isolation_id="startup-test",
+        assemble_func=lambda _settings: _FakeHandle(client=_FakeClient()),
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+        launch_allowed=True,
+    )
+
+    assert launched == []
+    assert wiring.failure == "leaf_runtime_install_failed:RuntimeError"
+    assert wiring.runtime is None and wiring.dispatcher is None
+    assert wiring.service is not None  # 只读面仍可用，但零派发
+
+
 async def test_launch_gate_blocks_launch_and_reports_zero_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     launched: list[Any] = []
     monkeypatch.setattr(wiring_mod, "launch_agent_runtime", lambda handle: launched.append(handle))

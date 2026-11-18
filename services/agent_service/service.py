@@ -15,9 +15,10 @@
 - ``control`` / ``answer`` / ``search`` / ``stop_using`` / ``mark_read`` 为 §4.1
   统一合同写入口，一律委托既有 DAO 事务；``wait_result`` 为只读等待（组合快照与
   事件，零持久化），超时返回「未收敛」事实而不伪造成果；
-- ``submit`` / ``deliver_artifact`` 等写路径中，原生 root workflow 派发依赖
-  Runtime（E-04 计划 + DBOS launch，当前受 Q5 阻塞）；``submit`` 只提交受理
-  事务，未就绪前不提供占位派发实现，避免把「未派发」伪装成「已派发」。
+- ``submit`` / ``deliver_artifact`` 等写路径中，``submit`` 先落定受理事务；组合根
+  注入 ``ResearchDispatcher`` 时，受理成功后立即把回执投递给持久父研究 workflow
+  （派发失败/门闩关闭只产生零派发事实，不改写受理）；``submit_and_dispatch``
+  额外返回派发事实，未注入派发器时零派发并如实返回 ``dispatch=None``。
 - ``save_draft`` 只做本地草稿 CAS 持久（不产生派发/费用），随 F-03 交付；
 - ``change_session`` 只做会话元数据 CAS（create/rename/pin/archive/unarchive）与
   修订/分支的因果前缀保存（revise 改 ``causal_head_ref``；branch 新建会话并引用
@@ -103,6 +104,7 @@ from services.agent_service.comparison import (
     observations_from_executions,
     plan_group_stop,
 )
+from services.agent_service.dispatch import DispatchOutcome, ResearchDispatcher, ResearchWorkflowResult
 from utils.error_classifier import classify_error
 
 
@@ -122,6 +124,18 @@ class WaitResult:
     elapsed_ms: int
     snapshot: ResearchSnapshot
     events: tuple[ResearchEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionOutcome:
+    """受理 + 派发结果：受理回执原样保留，派发事实单列（未接线时为 None）。
+
+    ``dispatch.submitted=False`` 只表示本次零派发及其原因；受理事实仍是
+    ``COMMITTED``，不得据未派发把受理读成失败（INV-06）。
+    """
+
+    receipt: SubmissionReceipt
+    dispatch: DispatchOutcome | None
 
 
 def _require_positive_seconds(value: object, path: str, identity: str) -> None:
@@ -190,11 +204,22 @@ def _failed_cost_projection(
 class AgentService:
     """统一受理/查询 facade（DD §4.1）。构造后由应用组合根持有同一实例。"""
 
-    def __init__(self, dao: AgentDao, usage_dao: AIUsageDao | None = None) -> None:
-        """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。"""
+    def __init__(
+        self,
+        dao: AgentDao,
+        usage_dao: AIUsageDao | None = None,
+        *,
+        dispatcher: ResearchDispatcher | None = None,
+    ) -> None:
+        """``usage_dao`` 为共享模型调度账本（同一引擎）；缺省时费用投影如实报读取失败。
+
+        ``dispatcher`` 由组合根在宿主就绪后注入（受理 → 持久 workflow 派发）；
+        缺省时服务只提供受理事实与读取面（零派发，不伪造投递）。
+        """
 
         self._dao = dao
         self._usage_dao = usage_dao
+        self._dispatcher = dispatcher
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -619,14 +644,26 @@ class AgentService:
     async def submit(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionReceipt:
         """受理入口（§4.1/§5.1/INV-01）：可信命令引用必须与受理输入逐字段一致。
 
-        本方法只提交**受理事务**并返回原回执：``commit_state`` 描述保存事实，
-        不代表已投递或已消费（INV-06）。原生 root workflow 派发由 Runtime 按回执
-        的 ``workflow_id``/``execution_id`` 执行（launcher 依赖 E-04 计划），回执
-        ``next_action`` 已给出「待派发后按 read_command 查投递事实」的下一步。
+        受理事务落定后，若组合根注入了 ``ResearchDispatcher``，立即把回执投递给
+        持久父研究 workflow（派发失败/门闩关闭只产生零派发事实，不回滚也不改写
+        受理）；需要同时拿到派发事实时用 ``submit_and_dispatch``。``commit_state``
+        始终只描述保存事实，不代表已投递或已消费（INV-06）。
 
         拒绝语义：命令引用与受理输入任一字段不一致 → ``INPUT_INVALID``（不以
         调用方声称的幂等键覆盖真实身份）；受理输入本身不合法 → 由
         ``derive_accept_identity`` 的校验转为 ``INPUT_INVALID``（类型错不吞）。
+        """
+
+        receipt, _ = await self._accept_and_dispatch(request, command=command)
+        return receipt
+
+    async def _accept_and_dispatch(
+        self, request: AcceptRequest, *, command: CommandRef
+    ) -> tuple[SubmissionReceipt, DispatchOutcome | None]:
+        """校验 → 受理事务落定 → 按注入的派发器投递（未注入即零派发）。
+
+        dispatch 的失败已在派发器内折叠为 ``submitted=False`` + 原因（不抛出），
+        故受理成功语义不受派发结果影响；``CancelledError`` 照常传播（R2）。
         """
 
         self._require_open("submit")
@@ -653,7 +690,36 @@ class AgentService:
                 f"command ref does not match request: {','.join(mismatches)}",
                 identity,
             )
-        return await self._dao.accept_request(request)
+        receipt = await self._dao.accept_request(request)
+        dispatcher = self._dispatcher
+        if dispatcher is None:
+            return receipt, None
+        outcome = await dispatcher.dispatch(receipt, user_scope=request.user_scope)
+        return receipt, outcome
+
+    async def submit_and_dispatch(self, request: AcceptRequest, *, command: CommandRef) -> SubmissionOutcome:
+        """受理 + 派发（组合根注入派发器时的生产入口）：可靠保存后才投递。
+
+        受理事实与派发事实分开返回：派发失败/门闩关闭不影响已保存的受理
+        （``receipt`` 仍为原回执），``dispatch.submitted`` 如实标注零派发原因。
+        未注入派发器时 ``dispatch=None``（零派发，不伪造已投递）。
+        """
+
+        receipt, outcome = await self._accept_and_dispatch(request, command=command)
+        return SubmissionOutcome(receipt=receipt, dispatch=outcome)
+
+    async def read_research_result(self, workflow_id: str) -> ResearchWorkflowResult:
+        """读回已派发研究的持久结果（原生状态 + 成功输出；不等待不推断）。"""
+
+        self._require_open("read_research_result")
+        dispatcher = self._dispatcher
+        if dispatcher is None:
+            raise AgentServiceError(
+                AgentErrorCode.PERSISTENCE_UNAVAILABLE,
+                "research dispatcher is not wired",
+                "agent_service",
+            )
+        return await dispatcher.read_result(workflow_id)
 
     async def control(self, request: ReviseQueuedRequest) -> RevisionReceipt:
         """控制入口（§4.1 ``control``）：只按既有类型能力暴露「排队期修订」。

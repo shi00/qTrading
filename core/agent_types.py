@@ -1914,6 +1914,22 @@ def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
     )
 
 
+def derive_round_id(*, user_scope: str, execution_id: str, workflow_id: str) -> str:
+    """轮次稳定身份（§9.5）：受理派发与 ``bind_actual_input`` 必须用同一派生。
+
+    同一持久 workflow 身份只对应一个轮次 ID，故首派发与新轮隔离都不靠调用顺序。
+    """
+
+    return stable_id(
+        "round",
+        [
+            _require_str(user_scope, "$.user_scope"),
+            _require_str(execution_id, "$.execution_id"),
+            _require_str(workflow_id, "$.workflow_id"),
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # §9.13 DAO 事务输入/事实类型（C-02-3）
 # ---------------------------------------------------------------------------

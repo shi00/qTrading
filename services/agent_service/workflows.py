@@ -832,6 +832,20 @@ async def run_research_workflow(payload: dict[str, Any]) -> dict[str, Any]:
     return summary.to_wire()
 
 
+def submit_research_workflow(workflow_id: str, payload: dict[str, Any]) -> None:
+    """宿主入口（同步）：在稳定 workflow 身份内启动父研究 workflow（§8.1）。
+
+    ``SetWorkflowID`` 内调用同步 ``DBOS.start_workflow``；调用方须经受管线程执行
+    （不堵 UI，R16）。``return-existing`` 使同身份重放（受理重传/重复派发）返回
+    原执行，不重复启动研究。
+    """
+
+    if not isinstance(workflow_id, str) or not workflow_id:
+        raise ValueError("workflow_id must be non-empty text")
+    with SetWorkflowID(workflow_id, workflow_id_reuse_policy="return-existing"):
+        DBOS.start_workflow(run_research_workflow, payload)
+
+
 def build_research_payload(
     plan: PlanSpecProposal,
     *,
@@ -1000,5 +1014,6 @@ __all__ = [
     "observe_leaf_children",
     "run_leaf_workflow",
     "run_research_workflow",
+    "submit_research_workflow",
     "wait_next_observation_window",
 ]

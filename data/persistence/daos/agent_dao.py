@@ -234,6 +234,7 @@ from core.agent_types import (
     derive_data_consent_command_identity,
     derive_data_consent_revoke_identity,
     derive_event_identity,
+    derive_round_id,
     evaluate_data_attempt,
     frozen_command_input_digest,
     json_doc,
@@ -2397,7 +2398,11 @@ class AgentDao(BaseDao):
         _require_text_field(request.actual_input, "actual_input", identity)
         frozen_digest = sha256_hex(request.frozen_manifest)
         actual_digest = sha256_hex(request.actual_input)
-        round_id = stable_id("round", [request.user_scope, request.execution_id, request.workflow_id])
+        round_id = derive_round_id(
+            user_scope=request.user_scope,
+            execution_id=request.execution_id,
+            workflow_id=request.workflow_id,
+        )
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
         async with engine.begin() as conn:
