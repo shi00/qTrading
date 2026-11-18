@@ -160,6 +160,8 @@ class SkillOperationTicket:
       替换（零迟到发布）；替换成功后状态为 ``PUBLISHED``，供 waiter 判定是否需撤销；
     - ``finish()`` 由 worker 退出时置位，``wait_exit()`` 供 waiter 在取消/超时后确认
       退出；确认不到时由 waiter 显式标 ``UNKNOWN``，不假装已停。
+    - ``adopt()`` / ``mark_registered()`` 记录「复用既有目录」「登记成功」事实：补偿删除
+      只对「本次创建且确认未登记」成立，复用他人版本永不删除。
     """
 
     def __init__(self, owner: str) -> None:
@@ -170,6 +172,9 @@ class SkillOperationTicket:
         self._state = SkillOperationState.RUNNING
         self._destination: Path | None = None
         self._claimed: SkillVersionRef | None = None
+        self._claim_user_scope: str | None = None
+        self._reused: Path | None = None
+        self._registered = False
         self._workers_started = 0
 
     @property
@@ -202,16 +207,46 @@ class SkillOperationTicket:
         with self._lock:
             self._cancel.set()
 
-    def claim(self, ref: SkillVersionRef) -> None:
-        """归属登记：本次操作拥有的版本目录（撤销只作用于此，不碰他人版本）。"""
+    def claim(self, ref: SkillVersionRef, *, user_scope: str) -> None:
+        """归属登记：本次操作拥有的版本目录 + 核实登记事实所需的用户域（撤销只作用于此）。"""
 
         with self._lock:
             self._claimed = ref
+            self._claim_user_scope = user_scope
 
     @property
     def claimed(self) -> SkillVersionRef | None:
         with self._lock:
             return self._claimed
+
+    @property
+    def claim_user_scope(self) -> str | None:
+        """核实登记事实所需的用户域（回执丢失时向持久层查该版本号是否已登记）。"""
+
+        with self._lock:
+            return self._claim_user_scope
+
+    def adopt(self, destination: Path) -> None:
+        """记录「复用既有版本目录」事实：目录非本次产生，补偿/撤销永不删除它。"""
+
+        with self._lock:
+            self._reused = destination
+
+    @property
+    def reused_destination(self) -> Path | None:
+        with self._lock:
+            return self._reused
+
+    def mark_registered(self) -> None:
+        """记录登记成功事实：已登记的版本不再属于可补偿删除的产物。"""
+
+        with self._lock:
+            self._registered = True
+
+    @property
+    def registered(self) -> bool:
+        with self._lock:
+            return self._registered
 
     def begin_worker(self) -> None:
         """标记有新 worker 已提交：此前的退出事实作废，直到 ``finish()``。"""
@@ -856,7 +891,8 @@ class ManagedSkillStore:
         """预检后原子发布：目标版本已存在且内容相同视为幂等恢复，异内容拒绝。
 
         传入 ``ticket`` 时：暂存在分块边界检查合作取消，最后替换走发布前门
-        （取消已置位则不执行 ``os.replace``，不产生迟到/无主发布）。
+        （取消已置位则不执行 ``os.replace``，不产生迟到/无主发布）；幂等恢复的既有
+        目录记账为「复用」（``ticket.adopt``），并发他人先创建时明确报冲突。
         """
 
         if inspection is None:
@@ -864,6 +900,8 @@ class ManagedSkillStore:
         destination = self.version_dir(ref)
         if destination.exists():
             if _version_matches(destination, inspection):
+                if ticket is not None:
+                    ticket.adopt(destination)
                 return destination
             _fail("skill_version_exists", f"$.skill.version[{ref.skill_id}@{ref.version}]")
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -879,10 +917,7 @@ class ManagedSkillStore:
                 checkpoint=ticket.checkpoint if ticket is not None else None,
             )
             _write_version_manifest(staging, inspection)
-            if ticket is None:
-                os.replace(staging, destination)
-            else:
-                ticket.publish(lambda: _replace_staging(staging, destination), destination=destination)
+            self._commit(staging, destination, ref, ticket)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
@@ -900,7 +935,8 @@ class ManagedSkillStore:
     ) -> Path:
         """本地目录原子发布：逐文件回读校验摘要与字节数，失败清理暂存。
 
-        传入 ``ticket`` 时：暂存在条目/分块边界检查合作取消，最后替换走发布前门。
+        传入 ``ticket`` 时：暂存在条目/分块边界检查合作取消，最后替换走发布前门；
+        幂等恢复的既有目录记账为「复用」，并发他人先创建时明确报冲突。
         """
 
         from services.agent_service.skill_workspace import ReadOnlyWorkspace
@@ -908,6 +944,8 @@ class ManagedSkillStore:
         destination = self.version_dir(ref)
         if destination.exists():
             if _version_matches(destination, inspection):
+                if ticket is not None:
+                    ticket.adopt(destination)
                 return destination
             _fail("skill_version_exists", f"$.skill.version[{ref.skill_id}@{ref.version}]")
         workspace = ReadOnlyWorkspace(root)
@@ -940,14 +978,30 @@ class ManagedSkillStore:
                 if size != entry.size or digest.hexdigest() != entry.sha256:
                     _fail("invalid_skill_package", f"$.skill.package.entry[{entry.name}]")
             _write_version_manifest(staging, inspection)
-            if ticket is None:
-                os.replace(staging, destination)
-            else:
-                ticket.publish(lambda: _replace_staging(staging, destination), destination=destination)
+            self._commit(staging, destination, ref, ticket)
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         return destination
+
+    def _commit(
+        self,
+        staging: Path,
+        destination: Path,
+        ref: SkillVersionRef,
+        ticket: SkillOperationTicket | None,
+    ) -> None:
+        """唯一落点：走发布前门（有票据时）替换；并发他人先到即明确报冲突，不接管他人产物。"""
+
+        try:
+            if ticket is None:
+                os.replace(staging, destination)
+            else:
+                ticket.publish(lambda: _replace_staging(staging, destination), destination=destination)
+        except OSError:
+            if destination.exists():
+                _fail("skill_version_exists", f"$.skill.version[{ref.skill_id}@{ref.version}]")
+            raise
 
     def read_file(self, ref: SkillVersionRef, name: str) -> bytes:
         normalized = _require_safe_entry_name(name)
@@ -1202,7 +1256,7 @@ class SkillCatalogService:
         if decision.status in {SkillImportStatus.UNCHANGED, SkillImportStatus.UPDATE_REQUIRES_CONFIRMATION}:
             return receipt
         ref = SkillVersionRef(skill_id=skill_id, version=decision.next_version)
-        ticket.claim(ref)
+        ticket.claim(ref, user_scope=request.user_scope)
         try:
             if request.data is not None:
                 await self._run_worker(
@@ -1258,9 +1312,10 @@ class SkillCatalogService:
                 )
             )
         except BaseException:
-            # 登记失败不回滚已原子发布的目录：删除本次新版本（旧版本不受影响）后传播。
-            await self._run(self._store.remove_version, ref)
+            # 登记未确认（含回执丢失）：先核事实，只有「本次创建且确认未登记」才补偿删除。
+            await self._compensate_unregistered(ticket)
             raise
+        ticket.mark_registered()
         return receipt
 
     async def assign_role_skills(
@@ -1309,19 +1364,49 @@ class SkillCatalogService:
             pass
 
     async def _settle_cancelled(self, ticket: SkillOperationTicket) -> None:
-        """取消/超时后的收尾：确认退出或显式标未知；本次已发布版本撤销（取消保旧）。"""
+        """取消/超时后的收尾：确认退出或显式标未知；本次已发布版本按归属与登记事实撤销。"""
 
         exited = True
         if ticket.worker_started:
             exited = await self._run(ticket.wait_exit, self._cancel_exit_timeout)
-        claimed = ticket.claimed
-        if ticket.published_destination is not None and claimed is not None:
-            # 替换已发生但登记不会再有：按归属撤销本次版本，旧版本不受影响。
-            await self._run(self._store.remove_version, claimed)
-            ticket.mark_aborted()
+        if ticket.published_destination is not None:
+            # 替换已发生但登记不会再有：按归属与登记事实补偿，旧版本/他人版本不受影响。
+            await self._compensate_unregistered(ticket)
         if not exited:
             # 显式记录「worker 未确认退出」，不把它当作已停或已发布。
             ticket.mark_unknown()
+
+    async def _compensate_unregistered(self, ticket: SkillOperationTicket) -> None:
+        """补偿：只有「本次创建 + 确认未登记」才删除版本目录。
+
+        复用/幂等恢复的既有目录、已登记版本、登记事实无法核实时一律不删——把「不知道」
+        当作「不能删」，不假装已回滚，也不误删并发他人创建/已提交的版本。
+        """
+
+        claimed = ticket.claimed
+        if ticket.published_destination is None or claimed is None:
+            return  # 未替换（复用既有目录或未发布）：不拥有产物，零删除。
+        if ticket.registered:
+            return
+        scope = ticket.claim_user_scope
+        if scope is None:
+            return  # 缺核实键即事实未知：不删。
+        try:
+            registered = await self._version_registered(scope, claimed)
+        except (Exception, asyncio.CancelledError):
+            # 核实失败（含收尾期间再次取消）：事实未知，保守不删；原异常由调用方继续传播。
+            return
+        if registered:
+            ticket.mark_registered()
+            return
+        await self._run(self._store.remove_version, claimed)
+        ticket.mark_aborted()
+
+    async def _version_registered(self, user_scope: str, ref: SkillVersionRef) -> bool:
+        """查登记事实：该版本号已有登记行即视为已登记（含并发他人登记），不据摘要差异删目录。"""
+
+        existing = await self._dao.list_skill_versions(user_scope=user_scope, skill_id=ref.skill_id)
+        return any(version == ref.version for version, _digest in existing)
 
     async def _missing_dependencies(self, user_scope: str, dependencies: Sequence[str]) -> tuple[str, ...]:
         missing: list[str] = []
