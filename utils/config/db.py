@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from utils import config_handler as cfg
 from utils.sanitizers import DataSanitizer
@@ -22,6 +23,11 @@ from utils.sanitizers import DataSanitizer
 DEFAULTS = cfg.ConfigHandler.DEFAULT_CONFIG
 
 DATABASE_MODE_ENV = "QTRADING_DATABASE_MODE"
+
+#: Agent 运行库迁移专用凭据（高权限 ``agent_migrator`` 角色）完整连接 URL 的环境变量。
+AGENT_MIGRATION_DB_URL_ENV = "AGENT_RUNTIME_MIGRATION_DATABASE_URL"
+#: 未设置环境变量时从 keyring 读取同一 URL 的存储项名。
+AGENT_MIGRATION_KEYRING_ITEM = "agent_migration_db_url"
 
 
 class DatabaseMode(StrEnum):
@@ -322,6 +328,43 @@ def get_db_url():
 
     # Priority 3: fallback to config.DB_URL
     return cfg.config.DB_URL
+
+
+def get_agent_migration_db_url() -> str | None:
+    """Agent 运行库迁移专用连接 URL（高权限 ``agent_migrator`` 角色）。
+
+    来源只能经环境变量 ``AGENT_RUNTIME_MIGRATION_DATABASE_URL`` 或 keyring
+    （与项目其他凭证一致，禁止硬编码，R10）。环境变量优先；均未配置时返回
+    ``None``，由调用方显式决定拒绝启动还是允许本机单用户共用（不得静默共用）。
+
+    返回值仅内存传递，不写日志；口令片段注册到 :class:`DataSanitizer`，
+    防止异常消息中的明文口令外泄（R9）。
+    """
+    env_url = os.environ.get(AGENT_MIGRATION_DB_URL_ENV, "").strip()
+    if env_url:
+        _register_url_password(env_url)
+        return env_url
+
+    try:
+        stored = cfg.keyring.get_password(cfg.KEYRING_SERVICE_NAME, AGENT_MIGRATION_KEYRING_ITEM)
+    # NOTE(lazy): keyring 操作失败降级为「未配置」. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 项目统一 keyring 可用性预检落地时复用.
+    except Exception as e:
+        cfg.logger.debug("Keyring get_password for agent migration url failed: %s", DataSanitizer.sanitize_error(e))
+        return None
+    if stored and stored.strip():
+        _register_url_password(stored)
+        return stored.strip()
+    return None
+
+
+def _register_url_password(url: str) -> None:
+    """把连接 URL 中的口令注册为已知 secret（R9；解析失败时不注册也不外泄）。"""
+    try:
+        password = urlsplit(url).password
+    except ValueError:
+        return
+    if password:
+        DataSanitizer.register_secret(unquote(password))
 
 
 def save_db_config(host: str, port: int, user: str, password: str, database: str) -> bool:

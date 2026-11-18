@@ -28,6 +28,13 @@ from services.agent_service.runtime import OwnerLoopBridge
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _isolated_migration_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离迁移凭据来源：单测不读真实环境变量/keyring/用户配置（否则结果随开发机变化）。"""
+    monkeypatch.setattr(wiring_mod, "get_agent_migration_db_url", lambda: None)
+    monkeypatch.setattr(wiring_mod, "_embedded_single_user_mode", lambda: True)
+
+
 async def _direct_runner(fn: Any) -> Any:
     return fn()
 
@@ -569,3 +576,80 @@ async def test_startup_outcome_failure_is_preserved(
 
     assert wiring.failure == "isolation_not_ready:x"
     assert wiring.ready is False
+
+
+# ---------------------------------------------------------------------------
+# 迁移/运行凭据分离（R2-I38）
+# ---------------------------------------------------------------------------
+
+
+async def test_external_mode_without_migration_credentials_degrades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外置库未配置独立迁移凭据：启动门闩明确拒绝，零组装/零派发。"""
+    monkeypatch.setattr(wiring_mod, "_embedded_single_user_mode", lambda: False)
+    assembled: list[Any] = []
+
+    wiring = await wire_agent_runtime(
+        _cache_manager(),
+        isolation_id="startup-test",
+        assemble_func=assembled.append,
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+    )
+
+    assert wiring.failure == "migration_credentials_missing"
+    assert wiring.handle is None
+    assert wiring.runtime is None
+    assert assembled == []
+
+
+async def test_dedicated_migration_url_wired_into_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置了独立迁移 URL：原样传入 settings，且不打开共用开关。"""
+    migration_url = "postgresql+psycopg://agent_migrator@migrator-host/qtrading_agent_runtime"
+    captured: list[Any] = []
+    monkeypatch.setattr(wiring_mod, "get_agent_migration_db_url", lambda: migration_url)
+
+    def _assemble(settings: Any) -> _FakeHandle:
+        captured.append(settings)
+        return _FakeHandle(client=_FakeClient())
+
+    wiring = await wire_agent_runtime(
+        _cache_manager(),
+        isolation_id="startup-test",
+        assemble_func=_assemble,
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+        launch_allowed=False,
+    )
+
+    assert wiring.handle is not None
+    assert captured[0].migration_database_url == migration_url
+    assert captured[0].allow_shared_migration_credentials is False
+    assert captured[0].system_database_url != captured[0].migration_database_url
+
+
+async def test_embedded_mode_missing_url_opts_in_to_shared_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """内置单用户模式未配置迁移凭据：显式打开共用开关（由服务层告警），不静默。"""
+    captured: list[Any] = []
+    monkeypatch.setattr(wiring_mod, "_embedded_single_user_mode", lambda: True)
+
+    def _assemble(settings: Any) -> _FakeHandle:
+        captured.append(settings)
+        return _FakeHandle(client=_FakeClient())
+
+    await wire_agent_runtime(
+        _cache_manager(),
+        isolation_id="startup-test",
+        assemble_func=_assemble,
+        instance_guard=_FakeGuard(),
+        blocking_runner=_direct_runner,
+        launch_allowed=False,
+    )
+
+    assert captured[0].migration_database_url is None
+    assert captured[0].allow_shared_migration_credentials is True
