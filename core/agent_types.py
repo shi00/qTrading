@@ -1278,8 +1278,12 @@ def _decode_connection_authorization_ref(value: object, path: str) -> Connection
         _fail("invalid_type", path)
     _require_keys(value, _CONNECTION_AUTH_REF_KEYS, path)
     grant_id = value["verified_connection_grant_id"]
-    if grant_id is not None and not isinstance(grant_id, str):
-        _fail("invalid_type", f"{path}.verified_connection_grant_id")
+    if grant_id is not None:
+        if not isinstance(grant_id, str):
+            _fail("invalid_type", f"{path}.verified_connection_grant_id")
+        # 已核到的 grant ID 是非空身份：空串不等于「未核到」，不得当作合法值
+        if not grant_id:
+            _fail("invalid_identity", f"{path}.verified_connection_grant_id")
     return ConnectionAuthorizationRef(
         connection_id=_require_str(value["connection_id"], f"{path}.connection_id"),
         target_fingerprint=_require_str(value["target_fingerprint"], f"{path}.target_fingerprint"),
@@ -1301,8 +1305,8 @@ def decode_data_consent_binding(value: object, path: str) -> DataConsentBinding:
     _require_keys(value, _DATA_CONSENT_BINDING_KEYS, path)
 
     schema_version = value["schema_version"]
-    # §9.8：schema_version 仅整数 1（拒 bool）
-    if isinstance(schema_version, bool) or schema_version != 1:
+    # §9.8：schema_version 仅整数 1（拒 bool；1.0 因 == 1 成立，必须同时拒非 int）
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
         _fail("invalid_schema_version", f"{path}.schema_version")
 
     if not isinstance(value["requires_egress_grant"], bool):
@@ -1352,17 +1356,17 @@ def decode_data_consent_binding(value: object, path: str) -> DataConsentBinding:
     security_revision = value["security_revision"]
     if isinstance(security_revision, bool) or not isinstance(security_revision, int) or security_revision < 0:
         _fail("invalid_revision", f"{path}.security_revision")
-    # 内外一致性（§9.8）：重复的 target_fingerprint/purpose/scope_version 必须等于外层
-    if (
-        connection_ref.target_fingerprint != value["target_fingerprint"]
-        or connection_ref.purpose != value["purpose"]
-        or connection_ref.scope_version != value["scope_version"]
-    ):
-        _fail("identity_mismatch", f"{path}.connection_authorization_ref")
-
+    # 内外一致性（§9.8）：重复的 target_fingerprint/purpose/scope_version 必须等于外层。
+    # 外层值先按类型/非空校验，再参与身份比对，避免拿未校验值当身份（嵌套先验后用）。
     target_fingerprint = _require_str(value["target_fingerprint"], f"{path}.target_fingerprint")
     purpose = _require_str(value["purpose"], f"{path}.purpose")
     scope_version = _require_p(value["scope_version"], f"{path}.scope_version")
+    if (
+        connection_ref.target_fingerprint != target_fingerprint
+        or connection_ref.purpose != purpose
+        or connection_ref.scope_version != scope_version
+    ):
+        _fail("identity_mismatch", f"{path}.connection_authorization_ref")
 
     if not isinstance(value["source_selections"], list):
         _fail("invalid_type", f"{path}.source_selections")
@@ -2418,7 +2422,8 @@ def decode_data_consent_claim(value: object, path: str) -> DataConsentClaim:
         _fail("invalid_type", path)
     _require_keys(value, _DATA_CONSENT_CLAIM_KEYS, path)
     schema_version = value["schema_version"]
-    if isinstance(schema_version, bool) or schema_version != 1:
+    # §9.8：schema_version 仅整数 1（拒 bool；1.0 因 == 1 成立，必须同时拒非 int）
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
         _fail("invalid_schema_version", f"{path}.schema_version")
     security_revision = value["security_revision"]
     if isinstance(security_revision, bool) or not isinstance(security_revision, int) or security_revision < 0:

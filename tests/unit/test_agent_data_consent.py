@@ -277,6 +277,41 @@ class TestSourceItemClosure:
         bad["locator"] = "locator"
         _reject(lambda: decode_data_consent_source_item(bad, "$"), code="invalid_type")
 
+    @pytest.mark.parametrize(
+        ("locator", "code"),
+        [
+            (None, "invalid_type"),
+            ([], "invalid_type"),
+            ({"locator_kind": "source_range"}, "missing_field"),
+            ({"locator_kind": "source_range", "origin_ref": {}, "selection": {"kind": "all"}}, "missing_field"),
+        ],
+        ids=["null", "list", "missing-origin_ref", "missing-origin_ref-keys"],
+    )
+    def test_locator_shapes_rejected_before_subscript(self, locator: object, code: str) -> None:
+        # locator 未校验前不得下标访问：null/list/缺键一律合同错误，不逃逸裸 TypeError/KeyError
+        bad = copy.deepcopy(ROWS_ITEM)
+        bad["locator"] = locator
+        _reject(lambda: decode_data_consent_source_item(bad, "$"), code=code)
+
+    @pytest.mark.parametrize(
+        ("field_path", "value"),
+        [
+            (("locator", "selection", "ranges"), ["rows"]),
+            (("locator", "origin_ref"), ["source"]),
+            (("selected_range", "stats", "pages"), []),
+        ],
+        ids=["range-element-not-object", "origin-ref-not-object", "stats-element-not-int"],
+    )
+    def test_deep_nested_malformations_never_escape_raw_exception(
+        self, field_path: tuple[str, ...], value: object
+    ) -> None:
+        bad = copy.deepcopy(ROWS_ITEM)
+        cursor: Any = bad
+        for key in field_path[:-1]:
+            cursor = cursor[key]
+        cursor[field_path[-1]] = value
+        _reject(lambda: decode_data_consent_source_item(bad, "$"), code="invalid_type")
+
     def test_missing_selected_range_rejected(self) -> None:
         bad = copy.deepcopy(ROWS_ITEM)
         del bad["selected_range"]
@@ -337,6 +372,17 @@ class TestBindingDecodeStrictness:
         # 拒 bool
         _reject(
             lambda: decode_data_consent_binding(_binding_payload({"schema_version": True}), "$"),
+            code="invalid_schema_version",
+        )
+
+    def test_schema_version_float_one_rejected(self) -> None:
+        # 1.0 == 1 成立，只比 != 1 会放行；必须同时要求严格 int
+        _reject(
+            lambda: decode_data_consent_binding(_binding_payload({"schema_version": 1.0}), "$"),
+            code="invalid_schema_version",
+        )
+        _reject(
+            lambda: decode_data_consent_binding(_binding_payload({"schema_version": "1"}), "$"),
             code="invalid_schema_version",
         )
 
@@ -414,6 +460,22 @@ class TestBindingDecodeStrictness:
             "verified_connection_grant_id": 123,
         }
         _reject(lambda: decode_data_consent_binding(payload, "$"), code="invalid_type")
+
+    def test_verified_connection_grant_id_empty_rejected(self) -> None:
+        # 空串不等于「未核到」：已核到的 grant ID 必须非空身份
+        payload = _binding_payload()
+        payload["connection_authorization_ref"] = {
+            **payload["connection_authorization_ref"],
+            "verified_connection_grant_id": "",
+        }
+        _reject(lambda: decode_data_consent_binding(payload, "$"), code="invalid_identity")
+
+    def test_outer_identity_validated_before_cross_check(self) -> None:
+        # 外层重复字段先验后用：非 str 时给身份/类型错误，不拿未校验值参与内层比对
+        _reject(
+            lambda: decode_data_consent_binding(_binding_payload({"target_fingerprint": ["x"]}), "$"),
+            code="invalid_identity",
+        )
 
     def test_empty_source_selections_is_empty_not_wildcard(self) -> None:
         # [] 只表示无资料，不是通配（§9.8）；digest 须与空数组重算一致
@@ -854,6 +916,12 @@ class TestDataConsentClaimCodec:
         _reject(lambda: decode_data_consent_claim(stripped, "$"), code="missing_field")
         _reject(lambda: decode_data_consent_claim({**wire, "schema_version": 2}, "$"), code="invalid_schema_version")
         _reject(lambda: decode_data_consent_claim({**wire, "schema_version": True}, "$"), code="invalid_schema_version")
+        _reject(lambda: decode_data_consent_claim({**wire, "schema_version": 1.0}, "$"), code="invalid_schema_version")
+        empty_grant = {**wire["connection_authorization_ref"], "verified_connection_grant_id": ""}
+        _reject(
+            lambda: decode_data_consent_claim({**wire, "connection_authorization_ref": empty_grant}, "$"),
+            code="invalid_identity",
+        )
         _reject(lambda: decode_data_consent_claim({**wire, "outcome": "maybe"}, "$"), code="invalid_outcome")
         _reject(lambda: decode_data_consent_claim({**wire, "security_revision": -1}, "$"), code="invalid_revision")
         _reject(lambda: decode_data_consent_claim({**wire, "owner_epoch": True}, "$"), code="invalid_revision")
