@@ -38,6 +38,7 @@ from core.agent_types import (
     ConsumptionState,
     DeliveryState,
     EventReadQuery,
+    EventKind,
     GrantRevisionRequest,
     MarkAnswerDeliveredRequest,
     Mode,
@@ -699,6 +700,23 @@ class TestAnswerLifecycle:
         with pytest.raises(AgentServiceError) as excinfo:
             await dao.save_answer(_answer_request("d-missing"))
         assert excinfo.value.code is AgentErrorCode.INPUT_INVALID
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_answer_save_and_consume_append_single_event_each(self, real_embedded_pg: ConnectionInfo) -> None:
+        """答复保存/消费各追加一条 command_changed，重放不重复（R2-I21）。"""
+
+        dao, receipt, round_id = await _full_setup(real_embedded_pg)
+        decision_id = await _seed_decision(dao, receipt, round_id)
+        ans = await dao.save_answer(_answer_request(decision_id))
+        await dao.save_answer(_answer_request(decision_id))
+        await dao.consume_answer(ConsumeAnswerRequest(user_scope="u1", command_record_id=ans.command_record_id))
+        await dao.consume_answer(ConsumeAnswerRequest(user_scope="u1", command_record_id=ans.command_record_id))
+
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=0))
+        answer_events = [event for event in page.events if event.payload_kind in {"answer_saved", "answer_consumed"}]
+        assert [event.payload_kind for event in answer_events] == ["answer_saved", "answer_consumed"]
+        assert all(event.event_kind is EventKind.COMMAND_CHANGED for event in answer_events)
+        await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_mark_delivered_then_consume_separate_facts(self, real_embedded_pg: ConnectionInfo) -> None:

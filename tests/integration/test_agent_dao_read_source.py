@@ -37,6 +37,8 @@ from core.agent_types import (
     CommandRef,
     DraftPayload,
     DraftSaveCommand,
+    EventKind,
+    EventReadQuery,
     FactValue,
     Mode,
     Purpose,
@@ -864,6 +866,34 @@ class TestUserMessageOriginSource:
                 )
             )
         assert excinfo.value.code is AgentErrorCode.SOURCE_DISABLED
+        await dao.engine.dispose()  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stop_appends_source_disabled_event_once(self, real_embedded_pg: ConnectionInfo) -> None:
+        """禁用同事务为引用方会话追加 source_disabled；重复禁用不重复写（R2-I21）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao)
+        request = _accept_request()
+        identity, _receipt = await _accept(dao, request)
+        command = SourceStopCommand(
+            user_scope="u1",
+            source_id=identity.source_id,
+            source_version=identity.source_version,
+            command_id="cmd-stop-1",
+        )
+
+        first = await dao.stop_source_use(command)
+        replay = await dao.stop_source_use(command)
+
+        assert first.already_disabled is False
+        assert replay.already_disabled is True
+        page = await dao.read_events(EventReadQuery(user_scope="u1", session_id="s1", after_seq=0))
+        events = [event for event in page.events if event.event_kind is EventKind.SOURCE_DISABLED]
+        assert len(events) == 1
+        assert events[0].payload_kind == "source_disabled"
+        assert events[0].subject_id == identity.source_id
+        assert events[0].subject_revision == first.disabled_revision
         await dao.engine.dispose()  # type: ignore[union-attr]
 
     @pytest.mark.parametrize(
