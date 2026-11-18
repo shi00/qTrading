@@ -791,7 +791,12 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
         rows_axis = selection.kind == "limited" and isinstance(selection.ranges[0], RowsRange)
 
         for sheet_name in selected_sheets:
-            target_rows = _xlsx_row_range(selection, sheet_name)
+            target_spans = _xlsx_row_spans(selection, sheet_name)
+            target_rows = (
+                None
+                if target_spans is None
+                else (min(span[0] for span in target_spans), max(span[1] for span in target_spans))
+            )
             extent = probe.row_extent(sheet_name)
             formula_sheet = formulas[sheet_name]
             cached_sheet = cached[sheet_name]
@@ -878,6 +883,14 @@ def _parse_xlsx(data: bytes, selection: Selection, budget: AttachmentBudget, dea
                 budget.enforce_codepoints(frozen_chars + sheet_base_chars + rows_chars)
                 rows.append({"row": row_number, "cells": cells})
                 last_completed_row = row_number
+            if rows_axis and target_spans is not None and len(target_spans) > 1 and rows:
+                # 多段选择按选择顺序逐段投递（段内仍按物理行号升序）：反序相邻段
+                # （如先 3 再 1—2）不得被 min/max 归并成升序，否则投递内容顺序与
+                # read_ranges 原子顺序不一致，原子表示（及由其计算的 digest）失真。
+                # 只遍历已读行（不展开段区间），避免超大段号触发无界循环。
+                rows = [
+                    row for span_start, span_end in target_spans for row in rows if span_start <= row["row"] <= span_end
+                ]
             block = json_doc({"kind": "xlsx_sheet", "sheet": sheet_name, "rows": rows})
             if timed_out:
                 if rows_axis and rows:
@@ -960,6 +973,9 @@ def _xlsx_read_unread_atoms(
     - ``selection=sheets``：粒度为整表；未完成的表记未读（保守，不冒充已读）。
     - ``selection=rows``：已读区间按实际迭代到的行核定（``row_read_ends``），
       请求范围越界部分记未读；行范围不可核定的表整表记未读。
+    - 原子数组按 **选择顺序** 输出（不按行号重排、不因相邻段归并改序），与
+      投递块内的行顺序一致；因此反序相邻段（先 3 再 1—2）的原子表示与其
+      digest 覆盖的是实际投递的同一内容。
     """
 
     if selection.kind == "all":
@@ -1022,19 +1038,27 @@ def _xlsx_read_unread_atoms(
     return read_atoms, unread_atoms
 
 
-def _xlsx_row_range(selection: Selection, sheet_name: str) -> tuple[int, int] | None:
+def _xlsx_row_spans(selection: Selection, sheet_name: str) -> list[tuple[int, int]] | None:
+    """返回该工作表的行段列表，保持选择顺序（不因归并重排，I21）。
+
+    支持相邻多段（含反序，如先选 3 再选 1—2）：各段合起来必须是连续区间，
+    读取与投递按选择顺序逐段进行、段内按物理行号升序，使 ``read_ranges``
+    的原子顺序与投递内容顺序一致。存在空档的多段明确拒绝（``invalid_selection``），
+    既不静默扩读未选行，也不把空档冒充已读。
+    """
+
     spans = [
         (atom.start, atom.end) for atom in selection.ranges if isinstance(atom, RowsRange) and atom.sheet == sheet_name
     ]
     if not spans:
         return None
-    start = min(span[0] for span in spans)
-    end = max(span[1] for span in spans)
-    selected = sum(span[1] - span[0] + 1 for span in spans)
-    if selected != end - start + 1:
-        # 非连续多段：读取并集会包含未选行；本版仅支持整段（拒绝而非静默扩读）。
-        raise AttachmentParseError("invalid_selection", "non-contiguous XLSX row ranges are not supported")
-    return (start, end)
+    for (_prev_start, prev_end), (start, _end) in itertools.pairwise(sorted(spans)):
+        if start != prev_end + 1:
+            raise AttachmentParseError(
+                "invalid_selection",
+                "disjoint XLSX row ranges are not supported; only adjacent segments forming one continuous range",
+            )
+    return spans
 
 
 def _column_letter(index: int) -> str:
