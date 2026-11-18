@@ -148,6 +148,12 @@ class TestSaveResearchResult:
         assert artifact.body_text == "研究成果正文"
         assert artifact.result_payload["output"]["body_saved"] is True
         assert artifact.result_payload["completion"]["final_output_saved"] is True
+        # 三项事实分别保存：执行未结束/覆盖未知时结论保持 unknown（不以保存冒充目标达成）。
+        assert artifact.result_payload["completion"]["execution_ended"] is False
+        assert artifact.result_payload["completion"]["result_saved"] is True
+        assert artifact.result_payload["completion"]["goal_coverage"] == "unknown"
+        assert artifact.result_payload["completion"]["outcome"] == "unknown"
+        assert artifact.result_payload["completion"]["object_gaps"] == []
         assert round_row.final_saved is True
         assert len(events) == 1
         assert events[0].subject_id == saved.artifact_id
