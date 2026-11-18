@@ -317,6 +317,15 @@ async def _count_for(engine, model, *conditions) -> int:
         return int(result.scalar_one())
 
 
+async def _set_archived(engine, session_id: str = "s1", *, archived: bool = True, user_scope: str = "u1") -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.update(AgentSession)
+            .where(AgentSession.user_scope == user_scope, AgentSession.session_id == session_id)
+            .values(archived=archived)
+        )
+
+
 class TestBindActualInput:
     """首派发实际输入绑定（§9.5/§9.6/§9.13 bind_actual_input）。"""
 
@@ -1295,6 +1304,61 @@ class TestReviseQueued:
         assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
         after = {t: await _count(engine, t) for t in _COUNT_TABLES}
         assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_rejected_on_archived_session_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """R2-I22：归档会话不得修改待发输入（POLICY_DENIED），零新事实。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        await _set_archived(engine)
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt))
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert "archived" in excinfo.value.sanitized_message
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        async with engine.connect() as conn:
+            revision_after = (
+                await conn.execute(
+                    sa.select(AgentExecution.revision).where(AgentExecution.execution_id == receipt.execution_id)
+                )
+            ).scalar_one()
+        assert revision_after == 1
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_replay_on_archived_session_returns_original(self, real_embedded_pg: ConnectionInfo) -> None:
+        """归档后同键重放已有修订：查回原回执，零新事实（重放不受归档门影响）。"""
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        first = await dao.revise_queued(_revise_request(receipt))
+        await _set_archived(engine)
+        before = {t: await _count(engine, t) for t in _COUNT_TABLES}
+
+        replay = await dao.revise_queued(_revise_request(receipt))
+
+        assert replay == first
+        after = {t: await _count(engine, t) for t in _COUNT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_revise_after_unarchive_succeeds(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao, receipt = await _accept_only(real_embedded_pg)
+        engine = create_test_engine(real_embedded_pg.url)
+        await _set_archived(engine)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.revise_queued(_revise_request(receipt))
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+
+        await _set_archived(engine, archived=False)
+        rev = await dao.revise_queued(_revise_request(receipt))
+
+        assert rev.input_revision == 2 and rev.execution_revision == 2
         await engine.dispose()
 
 

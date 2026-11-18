@@ -661,6 +661,10 @@ class AgentDao(BaseDao):
         ``shared`` 冻结段须齐备且正文/模式/用途一致，否则 ``INPUT_INVALID``。
         重传路径先查回原回执，不受其后草稿推进影响（幂等不因新稿失效）。
 
+        归档门（R2-I22）：目标会话 ``archived`` 时新键受理拒绝（``POLICY_DENIED``），
+        须用户先解档；归档状态在会话行锁内读取，与解档（``change_session``）同锁
+        串行；重放路径零写入，不受本门影响（只读查看与旧命令查回保持可用）。
+
         修订声明的因果头绑定（R2-I25）：本次受理携带 ``revise_source_message_id``
         时，在同事务、同会话行锁内解析源消息之前最近一条（或显式截点，须严格早于
         源消息），并随本条受理原子写入 ``agent_session.causal_head_ref``；源为会话
@@ -674,7 +678,7 @@ class AgentDao(BaseDao):
                 早于源消息）/ INPUT_CONFLICT（同身份异输入或同命令键异输入）/
                 REVISION_CONFLICT（预期草稿版与当前稿版不一致）/
                 OPERATION_UNKNOWN（原回执不可得）/ POLICY_DENIED（目标会话已删除
-                fence，新键受理拒绝）。
+                fence 或已归档，新键受理拒绝）。
         """
 
         self._check_engine()
@@ -698,6 +702,7 @@ class AgentDao(BaseDao):
                         AgentSession.session_id,
                         AgentSession.draft_revision,
                         AgentSession.draft_payload,
+                        AgentSession.archived,
                     )
                     .where(
                         AgentSession.user_scope == request.user_scope,
@@ -787,7 +792,18 @@ class AgentDao(BaseDao):
                 identity=_identity_str(request),
             )
 
-            # 3c. 草稿版 CAS（R2-I15）：受理必须建立在「用户提交时看到的稿版」上；
+            # 3c. 归档门（R2-I22）：归档会话只读——新研究受理（含修订声明的再
+            #     提交）必须由用户先解档；归档状态与会话行锁同点读取，解档
+            #     （change_session）持同一行锁，故「读旧值后档案才提交」不存在。
+            #     重放（步骤 2/3 已查回原回执）零写入，不受本门影响。
+            if session_row.archived:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "target session is archived; unarchive before starting new research",
+                    _identity_str(request),
+                )
+
+            # 3d. 草稿版 CAS（R2-I15）：受理必须建立在「用户提交时看到的稿版」上；
             #     持会话行锁比较，过期视图（已保存更新版本的窗口迟到提交）→
             #     REVISION_CONFLICT，零新事实。``expected_revision=0`` 是旧客户端的
             #     「无草稿基线」声明：仅当会话从未保存过草稿（draft_payload 为空且
@@ -807,7 +823,7 @@ class AgentDao(BaseDao):
                     _identity_str(request),
                 )
 
-            # 3d. 冻结输入一致性（R2-I15）：manifest 声明的请求身份须与本次受理
+            # 3e. 冻结输入一致性（R2-I15）：manifest 声明的请求身份须与本次受理
             #     完全一致；比较组 manifest 的 shared 冻结段（角色/模型/资料/允许
             #     历史/输出要求）须齐备且与其正文/模式/用途一致。矛盾或残缺 →
             #     INPUT_INVALID，零新事实（不按缺省放行，R21）。
@@ -819,7 +835,7 @@ class AgentDao(BaseDao):
                     _identity_str(request),
                 )
 
-            # 3e. 修订声明的因果头（R2-I25）：**本次受理是新意图的可靠受理边界**，
+            # 3f. 修订声明的因果头（R2-I25）：**本次受理是新意图的可靠受理边界**，
             #     因果头只在此事务内切换；``revise`` 命令本身只准备新稿、不写头。
             #     源消息必须属于目标会话（跨会话引用会让本会话引用他处历史），
             #     截点按其与源消息的相对次序校验（与 change_session 同口径）。
@@ -3422,6 +3438,10 @@ class AgentDao(BaseDao):
         **源自身版与执行输入版分列**：新消息/新源 id 是不可变新源，自身
         ``message_version`` / ``source_version`` 恒为 "1"（AR-07），execution
         输入版 N 只由源边的 ``consumer_version`` 承载（检视 D13）。
+        归档与清理 fence 门（R2-I22 / D08）：取 session 行锁后先核已提交清理
+        fence（清理后保留会话不得追加新正文/新源边），再核 ``archived``（归档
+        会话不得修改待发输入，须先解档）；二者均 ``POLICY_DENIED``、零新事实，
+        同键重放已在步骤 2 查回原回执、不受影响。
         锁序（§5.4 第 4 条）：先持 execution（CAS 目标）再锁其 session。
         """
 
@@ -3568,15 +3588,40 @@ class AgentDao(BaseDao):
                     "execution revision changed concurrently",
                     identity,
                 )
-            # 5. session 行锁 + 序号分配（起点 1，与事件 codec 下限 1 一致，检视 D01）。
-            await conn.execute(
-                sa.select(AgentSession.session_id)
-                .where(
-                    AgentSession.user_scope == request.user_scope,
-                    AgentSession.session_id == request.session_id,
+            # 5. session 行锁（清理 fence 与归档门的线性化点）+ 序号分配（起点 1，
+            #    与事件 codec 下限 1 一致，检视 D01）。
+            session_row = (
+                await conn.execute(
+                    sa.select(AgentSession.session_id, AgentSession.archived)
+                    .where(
+                        AgentSession.user_scope == request.user_scope,
+                        AgentSession.session_id == request.session_id,
+                    )
+                    .with_for_update()
                 )
-                .with_for_update()
+            ).first()
+            if session_row is None:
+                raise AgentServiceError(
+                    AgentErrorCode.INPUT_INVALID,
+                    "target session does not exist in user scope",
+                    identity,
+                )
+            # 5b. 删除 fence 门（D08）：清理后保留会话不得接受新修订正文/新源边；
+            #     同键重放（步骤 2）已查回原回执，不走本门。
+            await self._assert_session_not_cleanup_fenced(
+                conn,
+                user_scope=request.user_scope,
+                session_id=request.session_id,
+                identity=identity,
             )
+            # 5c. 归档门（R2-I22）：修订待发输入属「修改待发内容」，须先解档；
+            #     归档状态在同点行锁内读取，与解档串行。
+            if session_row.archived:
+                raise AgentServiceError(
+                    AgentErrorCode.POLICY_DENIED,
+                    "target session is archived; unarchive before revising queued input",
+                    identity,
+                )
             session_seq = (
                 (
                     await conn.execute(

@@ -69,7 +69,7 @@ async def _setup(url: str) -> AgentDao:
     return AgentDao(create_test_engine(url))
 
 
-async def _seed_session(dao: AgentDao, user_scope: str, session_id: str) -> None:
+async def _seed_session(dao: AgentDao, user_scope: str, session_id: str, *, archived: bool = False) -> None:
     from sqlalchemy import insert
 
     async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造受理前置会话
@@ -78,7 +78,19 @@ async def _seed_session(dao: AgentDao, user_scope: str, session_id: str) -> None
                 user_scope=user_scope,
                 session_id=session_id,
                 title=f"session {session_id}",
+                archived=archived,
             )
+        )
+
+
+async def _set_archived(dao: AgentDao, *, archived: bool) -> None:
+    """直接置会话归档位（模拟归档/解档命令已提交的会话状态）。"""
+
+    async with dao.engine.begin() as conn:  # type: ignore[union-attr]  # 测试内直接构造归档前置
+        await conn.execute(
+            sa.update(AgentSession)
+            .where(AgentSession.user_scope == "u1", AgentSession.session_id == "s1")
+            .values(archived=archived)
         )
 
 
@@ -651,3 +663,59 @@ class TestAcceptDraftRevisionCas:
         after = {t: await _count(engine, t) for t in _FACT_TABLES}
         assert after == before
         await engine.dispose()
+
+
+class TestAcceptRequestArchiveGate:
+    """R2-I22：归档会话可只读/可查回旧命令，但新研究受理须先解档。"""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_archived_session_rejects_new_intent_zero_new_facts(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1", archived=True)
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _FACT_TABLES}
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request())
+
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert "archived" in excinfo.value.sanitized_message
+        after = {t: await _count(engine, t) for t in _FACT_TABLES}
+        assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_archived_session_replays_original_receipt_zero_new_facts(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """归档后原命令重放不受影响：查回原回执，零新事实；新意图仍拒绝。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        first = await dao.accept_request(_request())
+        await _set_archived(dao, archived=True)
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {t: await _count(engine, t) for t in _FACT_TABLES}
+
+        replay = await dao.accept_request(_request(client_command_id="client-2"))
+
+        assert replay == first
+        assert {t: await _count(engine, t) for t in _FACT_TABLES} == before
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(business_request_id="req-2", client_command_id="client-3"))
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+        assert {t: await _count(engine, t) for t in _FACT_TABLES} == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_unarchive_then_accept_succeeds(self, real_embedded_pg: ConnectionInfo) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1", archived=True)
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request())
+        assert excinfo.value.code is AgentErrorCode.POLICY_DENIED
+
+        await _set_archived(dao, archived=False)
+        receipt = await dao.accept_request(_request())
+
+        assert receipt.session_id == "s1"
+        assert receipt.commit_state.value == "committed"
