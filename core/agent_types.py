@@ -4623,34 +4623,45 @@ def decode_operation_summary(value: object, path: str = "$.operation_summary") -
     )
 
 
+#: §4.3 usage 费用状态四态（ADR-0014 原账本口径，保真不合并）：
+#: ``known`` = 引用到的 attempt 全部已计价（含已知零费用）；
+#: ``unpriced`` = 存在 cost 为 NULL 或引用到却无账本行的 attempt（未知成本）；
+#: ``reserved`` = 已计价但仍有活跃预留未结算（金额已预留、结果未定）；
+#: ``unknown`` = 无引用/引用不可读/账本无可计价行，未确认（禁止伪装为零，R21）。
+COST_STATE_KNOWN: Final = "known"
+COST_STATE_UNPRICED: Final = "unpriced"
+COST_STATE_RESERVED: Final = "reserved"
+COST_STATE_UNKNOWN: Final = "unknown"
+COST_STATES: Final = frozenset({COST_STATE_KNOWN, COST_STATE_UNPRICED, COST_STATE_RESERVED, COST_STATE_UNKNOWN})
+
+
 @dataclass(frozen=True, slots=True)
 class UsageSummary:
-    """用量摘要（§4.3 usage 行）：实际 attempt/tool/active 累计；费用投影未接固定 unknown。
+    """用量摘要（§4.3 usage 行）：实际 attempt/tool/active 累计 + 账本费用状态。
 
-    ``cost_state`` 恒为 ``unknown``（原账本 known/unpriced/reserved 随费用投影接入
-    扩展）；费用字段缺失保 unknown，不填 0 冒认免费（R21）。费用金额经
-    ``AgentService.read_cost_projection`` 以 operation 行的 ``invocation_id`` /
-    ``attempt_refs`` 引用原账本只读投影，本摘要不重复承载金额。
+    ``cost_state`` 按原账本（``ai_invocation`` / ``ai_attempt``）如实投影
+    known/unpriced/reserved/unknown（见 :data:`COST_STATES`）；读取不到证明时保持
+    unknown，不填 0 冒认免费（R21）。费用金额经 ``AgentService.read_cost_projection``
+    以 operation 行的 ``invocation_id`` / ``attempt_refs`` 引用原账本只读投影，
+    本摘要不重复承载金额，只承载聚合状态。
     """
 
     model_attempt_count: int
     tool_call_count: int
     active_ms: int
-    cost_state: str = "unknown"
+    cost_state: str = COST_STATE_UNKNOWN
 
 
 _USAGE_SUMMARY_KEYS: Final = frozenset({"model_attempt_count", "tool_call_count", "active_ms", "cost_state"})
 
 
 def decode_usage_summary(value: object, path: str = "$.usage") -> UsageSummary:
-    """严格解码用量摘要（4 键全必填；cost_state 固定 unknown）。"""
+    """严格解码用量摘要（4 键全必填；cost_state ∈ :data:`COST_STATES`）。"""
 
     if not isinstance(value, dict):
         _fail("invalid_type", path)
     _require_keys(value, _USAGE_SUMMARY_KEYS, path)
-    cost_state = _require_str(value["cost_state"], f"{path}.cost_state")
-    if cost_state != "unknown":
-        _fail("invalid_cost_state", f"{path}.cost_state")
+    cost_state = _require_choice(value["cost_state"], COST_STATES, f"{path}.cost_state", "invalid_cost_state")
     return UsageSummary(
         model_attempt_count=_nonneg_int(value["model_attempt_count"], f"{path}.model_attempt_count"),
         tool_call_count=_nonneg_int(value["tool_call_count"], f"{path}.tool_call_count"),
@@ -4787,10 +4798,10 @@ class ResearchSnapshot:
     承载——agent_execution 无依赖边表，故无独立 dependencies 字段）；
     frozen_scope/actual_input→round JSONB 规范化 CanonicalJson 文本（结构未冻结
     不臆造）；messages_page/artifacts_page→分页上界；source_reads/decisions/
-    operation_summaries→行投影；usage→:class:`UsageSummary`（cost_state 固定
-    unknown，读取失败保 unknown 不填 0）；goal_coverage/limitations→覆盖值集与
-    脱敏限制记录（空元组=本次读取未核定到条目，不等于「无限制」承诺）；read_marks/
-    observation→阅读水位与可靠性。
+    operation_summaries→行投影；usage→:class:`UsageSummary`（cost_state 按原账本
+    投影 known/unpriced/reserved/unknown，无证明保 unknown 不填 0）；goal_coverage/
+    limitations→覆盖值集与脱敏限制记录（空元组=本次读取未核定到条目，不等于
+    「无限制」承诺）；read_marks/observation→阅读水位与可靠性。
     """
 
     identity: SnapshotIdentity

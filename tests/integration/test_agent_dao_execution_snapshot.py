@@ -6,7 +6,9 @@
   execution 摘要 / 一层叶子 nodes / frozen_scope+actual_input（round JSONB
   规范化 CanonicalJson）/ 消息成果分页 / source_reads（source_link join
   asset_version 元数据）/ decisions / operation_summaries / usage（cost_state
-  恒 unknown）/ goal_coverage / read_marks / observation.reliable；
+  按原账本投影 known/unpriced/reserved/unknown）/ goal_coverage / limitations
+  （来源自述 + 未核验/清理降级 + 费用缺口）/ read_marks / observation.reliable
+  （无缺口且费用可确认才为 True）；
 - 行级严格解码 fail-closed OPERATION_UNKNOWN（R21）；
 - queued 执行无 round：identity 全 None 组，frozen_scope 回落受理 manifest、
   actual_input None（未派发不伪造）、来源类别为 user_message；
@@ -61,6 +63,8 @@ from data.persistence.models import (
     AgentReadMark,
     AgentRound,
     AgentSession,
+    AiAttempt,
+    AiInvocation,
 )
 from tests._helpers import create_test_engine, make_alembic_cfg
 
@@ -254,6 +258,7 @@ async def _register_source(
     consumer_kind: str = "execution",
     consumer_id: str | None = None,
     consumer_version: str,
+    verification: VerificationState = VerificationState.UNVERIFIED,
 ) -> None:
     source = _business_source(source_id, version, SourceKind.BUSINESS_SNAPSHOT)
     await dao.register_business_sources(
@@ -262,12 +267,19 @@ async def _register_source(
             consumer_kind=consumer_kind,
             consumer_id=consumer_id if consumer_id is not None else execution_id,
             consumer_version=consumer_version,
-            items=(BusinessSourceItem(source=source, verification=VerificationState.UNVERIFIED),),
+            items=(BusinessSourceItem(source=source, verification=verification),),
         )
     )
 
 
-async def _seed_snapshot_extras(dao: AgentDao, execution_id: str, round_id: str) -> None:
+async def _seed_snapshot_extras(
+    dao: AgentDao,
+    execution_id: str,
+    round_id: str,
+    *,
+    verification: VerificationState = VerificationState.UNVERIFIED,
+    invocation_id: str | None = None,
+) -> None:
     """decision/operation/业务来源+source_link/read_mark 各一行。"""
 
     async with dao.engine.begin() as conn:
@@ -300,6 +312,7 @@ async def _seed_snapshot_extras(dao: AgentDao, execution_id: str, round_id: str)
                 grant_revision=1,
                 active_ms=300,
                 elapsed_ms=900,
+                invocation_id=invocation_id,
             )
         )
         await conn.execute(
@@ -321,7 +334,51 @@ async def _seed_snapshot_extras(dao: AgentDao, execution_id: str, round_id: str)
         source_id="asset-snap",
         version="v1",
         consumer_version="1",
+        verification=verification,
     )
+
+
+async def _seed_ledger(
+    dao: AgentDao,
+    *,
+    invocation_id: str,
+    attempt_id: str,
+    cost_cny: str | None,
+    reservation_state: str | None = None,
+) -> None:
+    """原账本最小合法行（ai_invocation + ai_attempt），可选活跃预留。"""
+
+    reservations: list[dict] = []
+    if reservation_state is not None:
+        reservations.append({"reservation_id": f"res-{invocation_id}", "state": reservation_state, "amount_cny": "0.5"})
+    async with dao.engine.begin() as conn:
+        await conn.execute(
+            insert(AiInvocation).values(
+                invocation_id=invocation_id,
+                scenario_id="agent-research",
+                trigger="agent",
+                reservations=reservations,
+                owner_session_id="s-snap",
+                owner_epoch=1,
+                owner_lease_expires_at=datetime(2026, 6, 1, 12, 0, 0),
+            )
+        )
+        await conn.execute(
+            insert(AiAttempt).values(
+                attempt_id=attempt_id,
+                invocation_id=invocation_id,
+                task_id="task-1",
+                candidate_index=0,
+                retry_index=0,
+                connection_id="conn-1",
+                connection_revision=1,
+                adapter_kind="openai",
+                configured_model="model/main",
+                security_revision=1,
+                status="completed",
+                cost_cny=cost_cny,
+            )
+        )
 
 
 def _code_of(excinfo: pytest.ExceptionInfo[AgentServiceError]) -> AgentErrorCode:
@@ -394,18 +451,19 @@ class TestGetExecutionSnapshotBasics:
         assert op.grant_id == "grant-1"
         assert op.active_ms == 300
         assert op.elapsed_ms == 900
-        # usage：实际累计 + cost_state 恒 unknown（R21 不填 0）
+        # usage：实际累计 + 账本无引用时费用未知（R21 不填 0）
         assert snap.usage.model_attempt_count == 2
         assert snap.usage.tool_call_count == 1
         assert snap.usage.active_ms == 1500
         assert snap.usage.cost_state == "unknown"
         assert snap.goal_coverage == "unknown"
-        # limitations 空元组=未核定到条目；read_marks / observation
-        assert snap.limitations == ()
+        # limitations 如实含未核验来源与未确认费用（R2-I30）；未知不得显示为无限制
+        assert [limitation.code for limitation in snap.limitations] == ["source_unverified", "cost_unknown"]
         assert len(snap.read_marks) == 1
         assert snap.read_marks[0].marker_id == "mark-snap"
         assert snap.read_marks[0].last_seq == 5
-        assert snap.observation.reliable is True
+        # 未核验 + 费用未知 → observation 不得冒认可靠（R21）
+        assert snap.observation.reliable is False
         # 严格解码往返
         wire = to_wire_dict(snap)
         assert json_doc(wire) == json_doc(to_wire_dict(decode_research_snapshot(wire)))
@@ -489,6 +547,86 @@ class TestGetExecutionSnapshotBasics:
         with pytest.raises(AgentServiceError) as exc:
             await dao.get_execution_snapshot(execution_id, user_scope=OTHER_SCOPE)
         assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+
+class TestSnapshotCredibility:
+    """R2-I30：observation.reliable / limitations / usage.cost_state 按真实事实投影。"""
+
+    async def test_priced_ledger_marks_cost_known_and_reliable(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert round_id is not None
+        await _seed_snapshot_extras(
+            dao,
+            execution_id,
+            round_id,
+            verification=VerificationState.PROGRAM_VERIFIED,
+            invocation_id="inv-1",
+        )
+        await _seed_ledger(dao, invocation_id="inv-1", attempt_id="att-1", cost_cny="1.25")
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert snap.usage.cost_state == "known"
+        assert snap.limitations == ()
+        assert snap.observation.reliable is True
+
+    async def test_unpriced_attempt_keeps_cost_unknown(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert round_id is not None
+        await _seed_snapshot_extras(
+            dao,
+            execution_id,
+            round_id,
+            verification=VerificationState.PROGRAM_VERIFIED,
+            invocation_id="inv-2",
+        )
+        await _seed_ledger(dao, invocation_id="inv-2", attempt_id="att-2", cost_cny=None)
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert snap.usage.cost_state == "unpriced"
+        assert [limitation.code for limitation in snap.limitations] == ["cost_unpriced"]
+        assert snap.observation.reliable is False
+
+    async def test_active_reservation_marks_cost_reserved(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert round_id is not None
+        await _seed_snapshot_extras(
+            dao,
+            execution_id,
+            round_id,
+            verification=VerificationState.PROGRAM_VERIFIED,
+            invocation_id="inv-3",
+        )
+        await _seed_ledger(
+            dao,
+            invocation_id="inv-3",
+            attempt_id="att-3",
+            cost_cny="0.5",
+            reservation_state="reserved",
+        )
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert snap.usage.cost_state == "reserved"
+        assert snap.limitations == ()
+        assert snap.observation.reliable is True
+
+    async def test_unverified_source_blocks_reliable_even_if_cost_known(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        _, execution_id, round_id = await _seed_chain(dao)
+        assert round_id is not None
+        await _seed_snapshot_extras(dao, execution_id, round_id, invocation_id="inv-4")
+        await _seed_ledger(dao, invocation_id="inv-4", attempt_id="att-4", cost_cny="0.75")
+
+        snap = await dao.get_execution_snapshot(execution_id, user_scope=USER_SCOPE)
+
+        assert snap.usage.cost_state == "known"
+        assert [limitation.code for limitation in snap.limitations] == ["source_unverified"]
+        assert snap.observation.reliable is False
 
 
 class TestRoundTarget:

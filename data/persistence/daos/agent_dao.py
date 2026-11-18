@@ -30,6 +30,7 @@ import contextlib
 import json
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 from collections.abc import AsyncIterator, Sequence
 
@@ -61,6 +62,10 @@ from core.agent_types import (
     ConsumeAnswerRequest,
     ConsumptionFact,
     ConsumptionState,
+    COST_STATE_KNOWN,
+    COST_STATE_RESERVED,
+    COST_STATE_UNKNOWN,
+    COST_STATE_UNPRICED,
     CLEANUP_TOMBSTONE,
     CLEANUP_TOMBSTONE_DIGEST,
     CleanupJobRecord,
@@ -393,6 +398,8 @@ from data.persistence.models import (
     AgentRound,
     AgentSession,
     AgentSourceLink,
+    AiAttempt,
+    AiInvocation,
 )
 
 
@@ -5472,6 +5479,233 @@ class AgentDao(BaseDao):
         # round 行为一致），不把缺失读成「无限制」以外的伪造结构。
         return revision, row.request_payload
 
+    # -- 快照可信度/费用投影 helper（§4.3 usage/observation，R21） --------------
+
+    #: 活跃预留状态（与 AIUsageDao.read_active_reserved_cny 同口径：占用预算至
+    #: settled/released）。
+    _SNAPSHOT_ACTIVE_RESERVATION_STATES: Final = ("reserved", "dispatched", "held_unconfirmed")
+    #: attempt_refs 未冻结结构（ADR-0014）中可承载 attempt_id 的键；其余形状按不可读处理。
+    _ATTEMPT_REF_KEYS: Final = ("attempt", "attempts", "attempt_ids", "attempt_refs")
+
+    @staticmethod
+    def _decode_attempt_refs(raw: object) -> tuple[str, ...] | None:
+        """operation.attempt_refs → 去重保序 attempt_id；结构不可读返回 ``None``（未知）。
+
+        引用形状未冻结（``CanonicalJson`` 原样承载），这里只认明确的 identity 形态：
+        JSON 字符串/字符串数组，或含 ``_ATTEMPT_REF_KEYS`` 的映射；其它形状不猜测，
+        返回 ``None`` 由调用方把费用记为 unknown（R21）。
+        """
+
+        if raw is None:
+            return ()
+        value = raw
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        if isinstance(value, str):
+            return (value,) if value else None
+        if isinstance(value, dict):
+            collected: list[str] = []
+            for key in AgentDao._ATTEMPT_REF_KEYS:
+                item = value.get(key)
+                if item is None:
+                    continue
+                if isinstance(item, str):
+                    if not item:
+                        return None
+                    collected.append(item)
+                elif isinstance(item, list) and all(isinstance(entry, str) and entry for entry in item):
+                    collected.extend(item)
+                else:
+                    return None
+            return tuple(dict.fromkeys(collected))
+        if isinstance(value, list) and all(isinstance(entry, str) and entry for entry in value):
+            return tuple(dict.fromkeys(value))
+        return None
+
+    @staticmethod
+    def _attempt_cost_is_priced(value: object) -> bool:
+        """账本金额是否构成已计价事实：None/坏值/非有限/负值均视为未计价（不按 0，R21）。"""
+
+        if value is None or isinstance(value, bool):
+            return False
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError, ArithmeticError):
+            return False
+        return amount.is_finite() and amount >= 0
+
+    @staticmethod
+    def _derive_snapshot_cost_state(
+        *,
+        ledger_refs: Sequence[str],
+        declared_attempts: Sequence[str],
+        attempt_costs: Sequence[object],
+        observed_attempt_ids: Sequence[str],
+        has_active_reservation: bool,
+        model_attempt_count: int,
+    ) -> str:
+        """原账本聚合 → usage.cost_state（known/unpriced/reserved/unknown，R21）。
+
+        优先级：未计价（显式缺失/坏值）> 活跃预留 > 已计价 > 未知。无任何账本引用时，
+        只有 execution 记录 ``model_attempt_count == 0`` 才能证明「确实零调用」；
+        计数大于 0 却无引用说明费用不可确认，保持 unknown，不填 0 冒认免费。
+        """
+
+        if not ledger_refs and not declared_attempts:
+            return COST_STATE_KNOWN if model_attempt_count == 0 else COST_STATE_UNKNOWN
+        observed = set(observed_attempt_ids)
+        unpriced = sum(1 for ref in declared_attempts if ref not in observed)
+        unpriced += sum(1 for cost in attempt_costs if not AgentDao._attempt_cost_is_priced(cost))
+        if unpriced:
+            return COST_STATE_UNPRICED
+        if has_active_reservation:
+            return COST_STATE_RESERVED
+        if attempt_costs:
+            return COST_STATE_KNOWN
+        return COST_STATE_UNKNOWN
+
+    async def _snapshot_cost_state(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        execution_id: str,
+        model_attempt_count: int,
+    ) -> tuple[str, tuple[RangeLimitation, ...]]:
+        """execution 全部 operation 的原账本引用 → 聚合费用状态 + 缺口限制。
+
+        与 :meth:`AgentService.read_cost_projection` 同口径但只读聚合（不估金额）：
+        ``ai_attempt.cost_cny`` 为 NULL/坏值、声明的 attempt 无账本行、或活跃预留未
+        结算时分别投影为 unpriced/reserved；不可读的 ``attempt_refs`` 结构不猜测，
+        记 unknown 并留限制。``CancelledError`` 正常传播（R2）。
+        """
+
+        ref_rows = (
+            await conn.execute(
+                sa.select(AgentOperation.invocation_id, AgentOperation.attempt_refs).where(
+                    AgentOperation.user_scope == user_scope,
+                    AgentOperation.execution_id == execution_id,
+                    sa.or_(
+                        AgentOperation.invocation_id.is_not(None),
+                        AgentOperation.attempt_refs.is_not(None),
+                    ),
+                )
+            )
+        ).all()
+        ledger_refs = tuple(
+            dict.fromkeys(
+                row.invocation_id for row in ref_rows if isinstance(row.invocation_id, str) and row.invocation_id
+            )
+        )
+        declared: list[str] = []
+        unreadable_refs = False
+        for row in ref_rows:
+            decoded = self._decode_attempt_refs(row.attempt_refs)
+            if decoded is None:
+                unreadable_refs = True
+                continue
+            declared.extend(decoded)
+        declared_attempts = tuple(dict.fromkeys(declared))
+        if unreadable_refs:
+            return COST_STATE_UNKNOWN, (
+                RangeLimitation(code="cost_reference_unreadable", message="费用引用不可读，费用未确认"),
+            )
+
+        attempt_conditions = []
+        if ledger_refs:
+            attempt_conditions.append(AiAttempt.invocation_id.in_(ledger_refs))
+        if declared_attempts:
+            attempt_conditions.append(AiAttempt.attempt_id.in_(declared_attempts))
+        attempt_rows: Sequence[Any] = ()
+        if attempt_conditions:
+            attempt_rows = (
+                await conn.execute(
+                    sa.select(AiAttempt.attempt_id, AiAttempt.invocation_id, AiAttempt.cost_cny).where(
+                        sa.or_(*attempt_conditions)
+                    )
+                )
+            ).all()
+
+        # 预留核对覆盖「operation 直引 invocation」与「仅声明 attempt → 账本反查
+        # invocation」两类引用，避免漏报已预留未结算的费用状态。
+        reservation_refs = tuple(
+            dict.fromkeys((*ledger_refs, *(row.invocation_id for row in attempt_rows if row.invocation_id)))
+        )
+        has_active_reservation = False
+        if reservation_refs:
+            reservation_rows = (
+                await conn.execute(
+                    sa.select(AiInvocation.reservations).where(AiInvocation.invocation_id.in_(reservation_refs))
+                )
+            ).all()
+            for reservation_row in reservation_rows:
+                entries = reservation_row.reservations
+                if isinstance(entries, list) and any(
+                    isinstance(entry, dict) and entry.get("state") in self._SNAPSHOT_ACTIVE_RESERVATION_STATES
+                    for entry in entries
+                ):
+                    has_active_reservation = True
+                    break
+
+        cost_state = self._derive_snapshot_cost_state(
+            ledger_refs=ledger_refs,
+            declared_attempts=declared_attempts,
+            attempt_costs=[row.cost_cny for row in attempt_rows],
+            observed_attempt_ids=[row.attempt_id for row in attempt_rows],
+            has_active_reservation=has_active_reservation,
+            model_attempt_count=model_attempt_count,
+        )
+        if cost_state == COST_STATE_UNPRICED:
+            return cost_state, (RangeLimitation(code="cost_unpriced", message="存在未计价调用，费用未确认"),)
+        if cost_state == COST_STATE_UNKNOWN:
+            return cost_state, (RangeLimitation(code="cost_unknown", message="调用费用未确认（原账本无可计价引用）"),)
+        return cost_state, ()
+
+    def _snapshot_source_limitations(
+        self,
+        source_rows: Sequence[Any],
+        source_reads: Sequence[SourceReadSummary],
+        identity_str: str,
+    ) -> tuple[RangeLimitation, ...]:
+        """选定来源边 → 快照限制与缺口（来源自述 + 核验/读取/清理/停用降级）。
+
+        来源自述限制从资产元数据 ``limitations`` 严格解码（不可读 fail-closed，
+        与 read_source 同口径）；降级事实逐条显式记录，空元组才表示「未核定到
+        限制」，不把未核验/未就绪读成无限制（R21）。重复条目按 (code, message) 去重保序。
+        """
+
+        entries: list[RangeLimitation] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add(code: str, message: str) -> None:
+            key = (code, message)
+            if key not in seen:
+                seen.add(key)
+                entries.append(RangeLimitation(code=code, message=message))
+
+        for row, summary in zip(source_rows, source_reads, strict=True):
+            metadata = row.metadata_payload
+            if isinstance(metadata, dict):
+                for limitation in self._source_limitations(metadata, identity_str):
+                    _add(limitation.code, limitation.message)
+            label = summary.source_id
+            if summary.verification_state is VerificationState.UNVERIFIED:
+                _add("source_unverified", f"来源未核验：{label}")
+            elif summary.verification_state is VerificationState.UNKNOWN:
+                _add("source_verification_unknown", f"来源核验状态未知：{label}")
+            elif summary.verification_state is VerificationState.SOURCE_UNAVAILABLE:
+                _add("source_unavailable", f"来源不可得：{label}")
+            if summary.read_state is not ReadState.READY:
+                _add("source_not_ready", f"来源读取受限（{summary.read_state.value}）：{label}")
+            if summary.tombstoned:
+                _add("source_tombstoned", f"来源已清理：{label}")
+            if summary.disabled_inherited or summary.disabled_at is not None:
+                _add("source_disabled", f"来源已停用：{label}")
+        return tuple(entries)
+
     async def get_execution_snapshot(
         self,
         execution_id: str,
@@ -5496,10 +5730,11 @@ class AgentDao(BaseDao):
           叶子 nodes（parent_execution_id）/消息成果分页（session 域内按 execution
           [+round] 过滤）/source_reads（source_link join asset_version，按选定
           输入版/轮次过滤）/decisions/operation_summaries（按 round 过滤）/
-          usage（cost_state 恒 unknown，R21 不填 0）/read_marks/
-          observation.reliable=True（一致截点读出，不冒认可靠）；
-        - limitations 恒空元组：本读取面未核定到条目 ≠「无限制」承诺（脱敏限制
-          记录随来源/清理任务接入后扩展，工程裁决留痕）。
+          usage（cost_state 按原账本投影 known/unpriced/reserved/unknown，无证明
+          保 unknown 不填 0，R21）/read_marks/observation（reliable 仅在无未核验、
+          无缺口且费用可确认时为 True）；
+        - limitations = 选定来源自述限制 + 核验/读取/清理/停用降级 + 费用缺口；
+          空元组表示本次读取未核定到条目，不等于「无限制」承诺（R21）。
         """
 
         self._check_engine()
@@ -5717,6 +5952,7 @@ class AgentDao(BaseDao):
                     )
                 ).all()
                 source_reads = tuple(self._source_read_summary_from_row(row, identity_str) for row in source_rows)
+                source_limitations = self._snapshot_source_limitations(source_rows, source_reads, identity_str)
 
                 decisions = await self._load_decisions(
                     conn,
@@ -5767,6 +6003,20 @@ class AgentDao(BaseDao):
                 ).all()
                 read_marks = tuple(self._read_mark_entry_from_row(row, identity_str) for row in read_mark_rows)
 
+                # usage 是 execution 级累计：费用引用取该执行全部 operation（不受
+                # 选定轮次过滤），与原账本同截点聚合（§4.3 usage 行）。
+                cost_state, cost_limitations = await self._snapshot_cost_state(
+                    conn,
+                    user_scope=user_scope,
+                    execution_id=execution_id,
+                    model_attempt_count=execution_row.model_attempt_count,
+                )
+
+        limitations = (*source_limitations, *cost_limitations)
+        # observation.reliable 只在有正面证明时为 True：无未核验/降级缺口，且费用
+        # 已确认或仅处于预留中。任一未知都不得显示为可靠（R21）。
+        reliable = cost_state in (COST_STATE_KNOWN, COST_STATE_RESERVED) and not limitations
+
         return ResearchSnapshot(
             identity=identity,
             revision=execution_row.revision,
@@ -5790,12 +6040,13 @@ class AgentDao(BaseDao):
                 model_attempt_count=execution_row.model_attempt_count,
                 tool_call_count=execution_row.tool_call_count,
                 active_ms=execution_row.active_ms,
+                cost_state=cost_state,
             ),
             goal_coverage=execution_summary.goal_coverage,
-            limitations=(),
+            limitations=limitations,
             read_marks=read_marks,
             observation=Observation(
-                reliable=True, last_verified_at=self._opt_wire_time(execution_row.last_verified_at)
+                reliable=reliable, last_verified_at=self._opt_wire_time(execution_row.last_verified_at)
             ),
         )
 

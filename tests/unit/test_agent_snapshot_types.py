@@ -901,11 +901,14 @@ def test_operation_summary_ledger_refs_projected_and_roundtrip() -> None:
     assert to_wire_dict(summary) == wire
 
 
-def test_usage_summary_decode_and_fixed_cost_state() -> None:
+def test_usage_summary_decode_and_cost_states() -> None:
     usage = decode_usage_summary(_usage_wire(), "$")
     assert usage.cost_state == "unknown"
     assert to_wire_dict(usage) == _usage_wire()
-    _reject(decode_usage_summary, _usage_wire(cost_state="known"), "invalid_cost_state", "$.cost_state")
+    # 原账本四态保真：known/unpriced/reserved/unknown 均可承载（R2-I30）。
+    for state in ("known", "unpriced", "reserved"):
+        assert decode_usage_summary(_usage_wire(cost_state=state), "$").cost_state == state
+    _reject(decode_usage_summary, _usage_wire(cost_state="free"), "invalid_cost_state", "$.cost_state")
     _reject(decode_usage_summary, _usage_wire(model_attempt_count=-1), "invalid_range", "$.model_attempt_count")
 
 
