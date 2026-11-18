@@ -21,6 +21,8 @@ import logging
 import os
 import re
 import uuid
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, cast
 
 import httpx
@@ -185,6 +187,76 @@ async def _resolve_stock_analysis_dispatch() -> ScenarioDispatch | None:
     return await resolve_analysis_track()
 
 
+class _ResearchRequestGate:
+    """单股研究请求的单飞与完成态去重（R2-I05）。
+
+    同一 ``request_id``（主会话 + 轮次 + 批次 + 股票）只允许一次真实执行：
+
+    - **并发同请求**：后到者等待同一执行结果，不另发起模型调用（不双计费）；
+    - **完成态重复提交**：直接返回原请求结果（浅拷贝 + ``duplicate_submission``
+      标记），费用事实仍归属原请求的账本记录；
+    - **取消/失败不缓存**：批次停止（owner 任务被取消）时在途记录被移除，等待者
+      同样收到取消传播（R2），不把「未完成」伪装成可复用结果（R21）；
+    - **等待者取消隔离**：等待者自身被取消（单卡停止）不取消他人共享的执行
+      （``asyncio.shield``）。
+
+    ``max_completed`` 为完成态缓存上限（FIFO 逐出最旧，逐出后同请求再次提交会
+    重新执行——如实语义：结果不再持有，不做静默伪完成）。
+    """
+
+    def __init__(self, max_completed: int = 256) -> None:
+        self._max_completed = max(1, max_completed)
+        self._completed: OrderedDict[str, dict] = OrderedDict()
+        self._inflight: dict[str, asyncio.Future] = {}
+
+    async def run(self, request_id: str, execute: Callable[[], Awaitable[dict | None]]) -> dict | None:
+        """按研究请求身份执行一次（``execute`` 返回结果 dict）。"""
+
+        cached = self._completed.get(request_id)
+        if cached is not None:
+            self._completed.move_to_end(request_id)
+            return self._duplicate(cached)
+        inflight = self._inflight.get(request_id)
+        if inflight is not None:
+            shared = await asyncio.shield(inflight)
+            return self._duplicate(shared) if isinstance(shared, dict) else shared
+
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        # 无等待者的失败/取消不得留下未取回异常（Future 析构告警）
+        future.add_done_callback(self._consume_future_exception)
+        self._inflight[request_id] = future
+        try:
+            result = await execute()
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+        except Exception as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            self._inflight.pop(request_id, None)
+        if isinstance(result, dict):
+            # 缓存浅拷贝：后续调用方持有并修改返回对象时不影响已登记结果
+            self._completed[request_id] = dict(result)
+            while len(self._completed) > self._max_completed:
+                self._completed.popitem(last=False)
+        future.set_result(result)
+        return result
+
+    @staticmethod
+    def _consume_future_exception(future: asyncio.Future) -> None:
+        if not future.cancelled():
+            future.exception()
+
+    @staticmethod
+    def _duplicate(result: dict) -> dict:
+        """重复提交结果：保留原结论 + 显式标记（计量侧据此不重复计费）。"""
+
+        duplicate = dict(result)
+        duplicate["duplicate_submission"] = True
+        return duplicate
+
+
 class StockAnalysisService:
     """AIService 股票分析子模块（review01-A5b-2）。
 
@@ -195,6 +267,8 @@ class StockAnalysisService:
 
     def __init__(self, service: AIService) -> None:
         self._service = service
+        # R2-I05：单股研究请求单飞/去重（同一请求并发或重复提交不二次计费）
+        self._request_gate = _ResearchRequestGate()
 
     @staticmethod
     def _attach_agent_call(result: dict | None, agent_call: StockAgentCall | None) -> dict | None:
@@ -251,12 +325,19 @@ class StockAnalysisService:
         few-shot 学习样本（与 save_results 写入的 strategy_name 口径对齐），避免在
         独立单股分析路径兜底预取时跨策略混用（与批量预取路径 D4-M3 一致）。
 
-        ``agent_call``（F34/AC23）：批次入口预存的单股调用身份（keyword-only 透传）。
-        有身份时统一调度链以 ``call_id`` 作 ``invocation_id``、``operation_id`` 作
-        ``run_id``（研究/费用链同源，可由主会话/轮次关联查回），身份随结果
-        ``stock_agent_call`` 程序字段返回——失败/不支持/预算拦截路径同样保留
-        （R21：不把「已发起但未完成」伪装成「无此调用」）。``None`` 为旧兼容调用
-        （一次调用一个新意图），不以内部临时身份冒充幂等。
+        ``agent_call``（F34/AC23）：批次入口预存的单股研究请求身份（keyword-only
+        透传）。有身份时统一调度链以 ``request_id``（会话 + 轮次 + 批次 + 股票）作
+        ``invocation_id``、``operation_id`` 作 ``run_id``（研究/费用/治理账目同源，
+        可由主会话/轮次/批次关联查回），身份随结果 ``stock_agent_call`` 程序字段
+        返回——失败/不支持/预算拦截路径同样保留（R21：不把「已发起但未完成」伪装
+        成「无此调用」）。``None`` 为旧兼容调用（一次调用一个新意图），不以内部
+        临时身份冒充幂等，亦不做跨调用去重。
+
+        **研究请求去重（R2-I05）**：有身份时同一 ``request_id`` 只真实执行一次。
+        并发重复提交等待同一执行结果；已完成的重复提交返回原结论并标记
+        ``duplicate_submission=True``（计量侧据此不重复计费，且不重放流式分片，
+        结论仍以最终结果返回）；重试由调用方显式换新轮次（新 ``request_id``）而
+        成为新请求。取消/失败不入完成态缓存（批次停止不把未完成伪装成可复用结果）。
 
         ⚠️ Backtest safety: When called in a backtest context, ``history_context``
         MUST be pre-fetched via ``AIStrategyMixin.run_ai_analysis()`` so that the
@@ -264,6 +345,63 @@ class StockAnalysisService:
         method directly with ``history_context=None`` in a backtest will use the
         current date as the ``as_of`` cutoff, which may introduce look-ahead bias.
         """
+
+        async def _execute_once() -> dict | None:
+            return await self._analyze_stock_request(
+                stock_info=stock_info,
+                tech_info=tech_info,
+                news_list=news_list,
+                global_context=global_context,
+                strategy_context=strategy_context,
+                capital_flow_text=capital_flow_text,
+                financials_text=financials_text,
+                history_text=history_text,
+                on_chunk=on_chunk,
+                history_context=history_context,
+                strategy_key=strategy_key,
+                include_global_context=include_global_context,
+                include_learning_context=include_learning_context,
+                ui_prompt_override=ui_prompt_override,
+                is_backtest=is_backtest,
+                financial_labels=financial_labels,
+                capital_labels=capital_labels,
+                history_labels=history_labels,
+                learning_strategy_name=learning_strategy_name,
+                scenario_dispatch=scenario_dispatch,
+                agent_call=agent_call,
+            )
+
+        if agent_call is None:
+            return await _execute_once()
+        return await self._request_gate.run(agent_call.request_id, _execute_once)
+
+    async def _analyze_stock_request(
+        self,
+        stock_info: dict,
+        tech_info: dict,
+        news_list: list,
+        global_context="",
+        strategy_context: str = "",
+        capital_flow_text: str = "",
+        financials_text: str = "",
+        history_text: str = "",
+        on_chunk=None,
+        history_context: str | None = None,
+        strategy_key: str | None = None,
+        include_global_context: bool = True,
+        include_learning_context: bool = True,
+        ui_prompt_override: str | None = None,
+        is_backtest: bool = False,
+        *,
+        financial_labels: list[str] | None = None,
+        capital_labels: list[str] | None = None,
+        history_labels: list[str] | None = None,
+        learning_strategy_name: str | None = None,
+        scenario_dispatch: ScenarioDispatch | None = None,
+        agent_call: StockAgentCall | None = None,
+    ) -> dict | None:
+        """单股研究请求的一次真实执行（入口与参数契约见 :meth:`analyze_stock`）。"""
+
         # 经组合根模块属性访问 ConfigHandler/DataSanitizer：保证测试
         # patch("services.ai_service.ConfigHandler"/"DataSanitizer") 生效。
         import services.ai_service as _ai

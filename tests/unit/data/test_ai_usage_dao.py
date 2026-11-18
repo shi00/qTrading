@@ -183,6 +183,26 @@ class TestCreateInvocation:
         assert params["budget_policy_snapshot"] is None
 
     @pytest.mark.asyncio
+    async def test_create_invocation_persists_business_run_id(self):
+        """R2-I05：父请求写入业务批次身份，冲突时 COALESCE 保留既有归属（不漂移）。"""
+        conn = _CaptureConn(results=[1])
+        dao = _dao(conn)
+        await dao.create_invocation(
+            invocation_id="inv-1",
+            scenario_id="stock_analysis",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at=datetime.datetime(2026, 10, 16, 12, 0, 0),
+            budget_policy_snapshot=None,
+            run_id="stock_batch_abc",
+        )
+        sql, params = conn.calls[0]
+        assert "run_id" in sql
+        assert "COALESCE(ai_invocation.run_id, EXCLUDED.run_id)" in sql
+        assert params["run_id"] == "stock_batch_abc"
+
+    @pytest.mark.asyncio
     async def test_create_invocation_rowcount_zero_returns_false(self):
         conn = _CaptureConn(results=[0])
         dao = _dao(conn)

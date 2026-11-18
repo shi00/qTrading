@@ -934,12 +934,20 @@ def _require_identity_text(value: object, path: str) -> str:
     return value.strip()
 
 
-def _stock_call_id(operation_id: str, turn_id: str | None, ts_code: str) -> str:
-    """每股调用身份：operation + 轮次 + 股票代码的顺序化 sha256（同批同股稳定）。"""
+def _stock_research_request_id(operation_id: str, session_id: str | None, turn_id: str | None, ts_code: str) -> str:
+    """每股研究请求身份：主会话 + 执行轮次 + 批次操作 + 股票代码的顺序化 sha256。
 
-    payload = "\x1f".join([operation_id, turn_id or "", ts_code])
+    研究请求是「一次可重放的单股分析意图」的稳定身份，同一（主会话、轮次、
+    批次、股票）重复提交得到同一身份（不得二次计费）；重试显式换新轮次
+    （:meth:`StockAgentBatchIdentity.for_stock` 的 ``new_turn=True``）即新请求，
+    仍挂原 ``operation_id``，原请求事实保留（R21）。会话未知以空串参与摘要，
+    不伪造会话身份——批次操作 ``operation_id`` 已由调用方一次性分配，不会因此
+    让两次不同批次相撞。
+    """
+
+    payload = "\x1f".join([operation_id, session_id or "", turn_id or "", ts_code])
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"stock_call_{digest[:32]}"
+    return f"stock_research_{digest[:32]}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -948,9 +956,9 @@ class StockAgentBatchIdentity:
 
     批次入口（``AIStrategyMixin.run_ai_analysis`` / 夜间任务）在首次派发前分配
     一次并整批复用，保证「原批次预存稳定身份」：同一批次内同股重试沿用同一
-    ``operation_id``（费用/研究链可回查），每股经 :meth:`for_stock` 派生唯一调用
-    身份。``session_id`` / ``turn_id`` 为主会话与轮次引用：调用方已知 Agent 会话时
-    透传，未知保持 ``None``（不伪造，R21）。
+    ``operation_id``（费用/研究链可回查），每股经 :meth:`for_stock` 派生唯一研究
+    请求身份（会话 + 轮次 + 批次 + 股票）。``session_id`` / ``turn_id`` 为主会话
+    与轮次引用：调用方已知 Agent 会话时透传，未知保持 ``None``（不伪造，R21）。
     """
 
     operation_id: str
@@ -968,7 +976,7 @@ class StockAgentBatchIdentity:
         turn_id = uuid.uuid4().hex if new_turn else self.turn_id
         return StockAgentCall(
             operation_id=self.operation_id,
-            call_id=_stock_call_id(self.operation_id, turn_id, code),
+            call_id=_stock_research_request_id(self.operation_id, self.session_id, turn_id, code),
             ts_code=code,
             strategy_key=self.strategy_key,
             session_id=self.session_id,
@@ -978,11 +986,12 @@ class StockAgentBatchIdentity:
 
 @dataclass(frozen=True, slots=True)
 class StockAgentCall:
-    """单股分析调用身份（F34）：两层 ``analyze_stock`` 以 keyword-only ``agent_call`` 透传。
+    """单股研究请求身份（F34）：两层 ``analyze_stock`` 以 keyword-only ``agent_call`` 透传。
 
-    ``call_id`` 同时作为统一调度链的 ``invocation_id``（研究/费用链同源），
-    ``operation_id`` 作为请求 ``run_id``（批次级关联）；``as_metadata()`` 为落库
-    投影（写入 ``execution_metadata`` 程序字段），失败路径同样保留身份（R21）。
+    ``call_id`` 即研究请求身份（会话 + 轮次 + 批次 + 股票），同时作为统一调度链的
+    ``invocation_id``（研究/费用/治理账目同源），``operation_id`` 作为请求
+    ``run_id``（批次级关联，落库到 ``ai_invocation.run_id``）；``as_metadata()``
+    为落库投影（写入 ``execution_metadata`` 程序字段），失败路径同样保留身份（R21）。
     """
 
     operation_id: str
@@ -997,12 +1006,25 @@ class StockAgentCall:
         object.__setattr__(self, "call_id", _require_identity_text(self.call_id, "$.call_id"))
         object.__setattr__(self, "ts_code", _require_identity_text(self.ts_code, "$.ts_code"))
 
+    @property
+    def request_id(self) -> str:
+        """研究请求身份（与模型调度账本 ``invocation_id`` 同值，供费用投影直接引用）。"""
+
+        return self.call_id
+
+    @property
+    def ledger_refs(self) -> tuple[str, ...]:
+        """本请求费用事实的账本引用（``AgentService.read_cost_projection`` 直接可用）。"""
+
+        return (self.call_id,)
+
     def as_metadata(self) -> dict[str, str | None]:
         """只读投影（落库/结果行共用）：键名稳定，值缺失保持 ``None``（不伪装）。"""
 
         return {
             "operation_id": self.operation_id,
             "call_id": self.call_id,
+            "request_id": self.request_id,
             "ts_code": self.ts_code,
             "strategy_key": self.strategy_key,
             "session_id": self.session_id,

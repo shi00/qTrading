@@ -1603,7 +1603,13 @@ class AIStrategyMixin:
         - ``cost`` 为 None（不可计量，R21）→ 计入 ``unpriced_calls``/``unpriced_tokens``，
           避免「不可计量」被呈现为「零成本」；同时经 ``res["model"]``（litellm_client 携带）
           聚合 ``unpriced_by_model`` 明细（Mi2，供诊断"哪些模型无法计价"）。
+
+        R2-I05：``duplicate_submission`` 结果来自同一研究请求（会话/轮次/批次/股票
+        相同）的重复提交，费用事实已由原请求的账本与月账承载——此处不得再次累加，
+        否则同一请求被双计费。
         """
+        if res.get("duplicate_submission") is True:
+            return
         usage = res.get("usage")
         if not usage or not isinstance(usage, dict):
             return
