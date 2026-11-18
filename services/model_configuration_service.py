@@ -1169,17 +1169,13 @@ class ModelConfigurationService:
         """
         dao = self._resolve_agent_dao()
         try:
-            identity_info = derive_data_consent_command_identity(command)
+            # 预校验（含 consent ID/目标一致性），把 core 合同错误转译为服务边界错误。
+            derive_data_consent_command_identity(command)
         except AgentValidationError as exc:
             raise self._translate_validation(exc) from exc
         identity = f"{command.command.user_scope}/{command.consent_id}"
         # 原命令同输入重放优先于迁移预检：回执丢失的重传必须查回原回执。
-        replayed = await dao.read_data_consent_save_replay(
-            command.command.user_scope,
-            command.consent_id,
-            command_id=command.command.command_id,
-            input_digest=identity_info.input_digest,
-        )
+        replayed = await dao.read_data_consent_save_replay(command)
         if replayed is not None:
             return replayed
         if command.command.expected_revision >= 1:

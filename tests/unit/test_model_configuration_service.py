@@ -2125,14 +2125,14 @@ class _FakeAgentDao:
     async def read_data_consent_decision(self, user_scope: str, consent_id: str) -> DataConsentBinding | None:
         return self.bindings.get((user_scope, consent_id))
 
-    async def read_data_consent_save_replay(
-        self, user_scope: str, consent_id: str, *, command_id: str, input_digest: str
-    ) -> DataConsentBinding | None:
-        record = self.commands.get((user_scope, consent_id, command_id))
+    async def read_data_consent_save_replay(self, command: DataConsentCommand) -> DataConsentBinding | None:
+        user_scope = command.command.user_scope
+        consent_id = command.consent_id
+        record = self.commands.get((user_scope, consent_id, command.command.command_id))
         if record is None:
             return None
         stored_digest, stored_binding = record
-        if stored_digest != input_digest:
+        if stored_digest != derive_data_consent_command_identity(command).input_digest:
             raise AgentServiceError(
                 AgentErrorCode.INPUT_CONFLICT,
                 "same data consent command key with different input",
