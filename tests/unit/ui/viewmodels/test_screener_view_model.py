@@ -1122,6 +1122,130 @@ class TestPresetManagement:
             result = await vm.delete_preset("不存在", "value_strategy")
         assert result is False
 
+    # --- R2-I12: 方案名校验 / 重名确认计划 / 载入 / 刷新 ---
+
+    def test_validate_preset_name(self, vm):
+        """合法名返回 None；空/纯空白/超长/控制字符返回对应 i18n key."""
+        from ui.viewmodels.screener_types import PRESET_NAME_MAX_LENGTH
+
+        assert vm.validate_preset_name("保守型") is None
+        assert vm.validate_preset_name("  ") == "screener_preset_err_empty"
+        assert vm.validate_preset_name("x" * (PRESET_NAME_MAX_LENGTH + 1)) == "screener_preset_err_too_long"
+        assert vm.validate_preset_name("bad\x00name") == "screener_preset_err_invalid"
+
+    @pytest.mark.asyncio
+    async def test_prepare_preset_save_reports_existing_params(self, vm):
+        """重名 → exists=True 且回传旧参数（供 View 展示替换影响），不写盘."""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value={"保守型": {"pe": 15, "roe": 10}})
+
+            plan = await vm.prepare_preset_save(" 保守型 ", "value_strategy")
+
+        assert plan.error_key is None
+        assert plan.exists is True
+        assert dict(plan.existing_params) == {"pe": 15, "roe": 10}
+        # prepare 只读（单次 get_strategy_presets 读），不得触发任何写盘命令
+        mock_tpm.run_async.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_prepare_preset_save_returns_plan_for_new_name(self, vm):
+        """新名称 → exists=False 且无旧参数."""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value={})
+
+            plan = await vm.prepare_preset_save("新方案", "value_strategy")
+
+        assert plan.exists is False
+        assert dict(plan.existing_params) == {}
+        assert plan.error_key is None
+
+    @pytest.mark.asyncio
+    async def test_prepare_preset_save_rejects_empty_name_without_io(self, vm):
+        """空名在校验阶段直接返回 error_key，不触配置 IO."""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value={})
+
+            plan = await vm.prepare_preset_save("   ", "value_strategy")
+
+        assert plan.error_key == "screener_preset_err_empty"
+        mock_tpm.run_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refresh_presets_sets_sorted_names(self, vm):
+        """refresh_presets 写入排序稳定的方案名元组到 state."""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value={"b": {}, "a": {}})
+
+            await vm.refresh_presets("value_strategy")
+
+        assert vm.state.preset_names == ("a", "b")
+
+    @pytest.mark.asyncio
+    async def test_refresh_presets_clears_when_no_strategy(self, vm):
+        """无选中策略 → 清空方案列表，不触配置 IO."""
+        from unittest.mock import AsyncMock
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value={"a": {}})
+
+            await vm.refresh_presets(None)
+
+        assert vm.state.preset_names == ()
+        mock_tpm.run_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_apply_preset_merges_only_known_params(self, vm):
+        """载入仅覆盖当前策略已知参数名；未知键忽略，草稿其余值保留."""
+        from unittest.mock import AsyncMock
+
+        vm.strategy_mgr.get_strategy_params.return_value = [{"name": "pe"}, {"name": "roe"}]
+        vm._set_state(selected_strategy="value_strategy", strategy_params={"pe": 30, "other": "keep"})
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value={"保守型": {"pe": 15, "removed_param": 1}})
+
+            loaded = await vm.apply_preset("保守型", "value_strategy")
+
+        assert loaded is True
+        assert vm.state.strategy_params["pe"] == 15
+        assert vm.state.strategy_params["other"] == "keep"
+        assert "removed_param" not in vm.state.strategy_params
+        # 载入不得触发选股/回测
+        assert vm.state.loading is False
+
+    @pytest.mark.asyncio
+    async def test_apply_preset_returns_false_when_missing_or_switched(self, vm):
+        """方案不存在或策略已切换 → False 且草稿不变."""
+        from unittest.mock import AsyncMock
+
+        vm.strategy_mgr.get_strategy_params.return_value = [{"name": "pe"}]
+        vm._set_state(selected_strategy="momentum", strategy_params={"pe": 30})
+
+        with patch("ui.viewmodels.strategy_meta_mixin.ThreadPoolManager") as mock_tpm_cls:
+            mock_tpm = mock_tpm_cls.return_value
+            mock_tpm.run_async = AsyncMock(return_value={"保守型": {"pe": 15}})
+
+            missing = await vm.apply_preset("不存在", "momentum")
+            switched = await vm.apply_preset("保守型", "value_strategy")
+
+        assert missing is False
+        assert switched is False
+        assert vm.state.strategy_params["pe"] == 30
+
 
 # --- F1 module review fixes ---
 

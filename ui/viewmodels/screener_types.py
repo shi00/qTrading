@@ -23,12 +23,17 @@ from ui.viewmodels import Message
 MAX_LOG_CARDS = 10
 _MAX_LOG_CARDS = MAX_LOG_CARDS  # 向后兼容别名
 
+# R2-I12: 筛选方案名长度上限（与 View 输入框 max_length 同源，避免两处漂移）。
+PRESET_NAME_MAX_LENGTH = 40
+
 __all__ = [
     "MAX_LOG_CARDS",
+    "PRESET_NAME_MAX_LENGTH",
     "_MAX_LOG_CARDS",
     "HistoryTreeRow",
     "HistoryTreeState",
     "LogEntry",
+    "PresetSavePlan",
     "RealtimeSnapshot",
     "ScreenerRow",
     "ScreenerState",
@@ -138,6 +143,21 @@ class StrategyDepRow:
 
 
 _EMPTY_ROW_MAPPING: Mapping[str, Any] = MappingProxyType({})
+
+
+@dataclass(frozen=True)
+class PresetSavePlan:
+    """保存筛选方案前的处置计划 (R2-I12).
+
+    VM 只回传「是否需要确认」与「同名方案的旧参数」，由 View 决定渲染确认对话框；
+    ``error_key`` 非 None 表示方案名不合法（i18n key，VM 不感知 locale）。
+    重名不得静默覆盖：``exists=True`` 时调用方须先展示 ``existing_params`` 与替换影响，
+    用户确认后才调用 ``save_preset``。
+    """
+
+    exists: bool = False
+    existing_params: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_ROW_MAPPING)
+    error_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -256,6 +276,9 @@ class ScreenerState:
     # M12-017: dict → Mapping; set/init/reset 均经 MappingProxyType 只读包装,
     # External 无法就地写. (空默认仍为只读空 dict, 无熵)
     strategy_params: Mapping[str, Any] = field(default_factory=dict)
+    # R2-I12: 当前策略已保存的筛选方案名（排序稳定）。View 据此渲染方案列表与空态；
+    # 选中的方案名属纯本地交互态，留在 View 的 use_state（不复制业务状态）。
+    preset_names: tuple[str, ...] = ()
     # History tree (Task 3.2: 子结构内聚 rows/offset/has_more/loading, 消除 View 双轨状态)
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     # UX-2.3: 重试中标志，View 派生 run_disabled 禁用主运行按钮
