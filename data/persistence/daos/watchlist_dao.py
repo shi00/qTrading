@@ -1,6 +1,7 @@
 """DAO for watchlist (用户关注列表, FR-UX-004, Task 4.2 / RV-05).
 
-支持 add/remove/get/is_in 四个核心操作。upsert by ts_code 保留首次加入日期。
+支持 add/remove/get/is_in 四个核心操作，以及按 ts_code 读取已有备注
+（get_watchlist_note，供重复关注/改备注前的替换影响告知）。upsert by ts_code 保留首次加入日期。
 RV-05: add 时固化观察起点（最近交易日 + 复权基准乘积 close × adj_factor），
 IS NULL 守卫只写一次。
 """
@@ -130,3 +131,21 @@ class WatchlistDao(BaseDao):
         stmt = sa.select(Watchlist.ts_code).where(Watchlist.ts_code == ts_code)
         df = await self._read_db_select(stmt, suppress_errors=False)
         return not df.empty
+
+    async def get_watchlist_note(self, ts_code: str) -> str | None:
+        """按 ts_code 读取已有关注备注（R2-I13：重复关注/改备注前的影响告知）。
+
+        返回 ``None`` 表示未关注；返回字符串（可能为 ``""``）表示已关注及其备注，
+        二者语义不同——空串不是「无记录」，调用方不得据此判断未关注。
+
+        ``suppress_errors=False``（R21）：读取失败必须传播，不得伪装为「无旧备注」，
+        否则重复关注会静默覆盖用户原有备注。
+        """
+        stmt = sa.select(Watchlist.note).where(Watchlist.ts_code == ts_code).limit(1)
+        df = await self._read_db_select(stmt, suppress_errors=False)
+        if df is None or df.empty:
+            return None
+        note = df.iloc[0]["note"]
+        if note is None or not bool(pd.notna(note)):
+            return ""
+        return str(note)

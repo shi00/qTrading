@@ -73,6 +73,25 @@ class WatchlistMutationResult:
 
 
 @dataclass(frozen=True)
+class ExistingNoteState:
+    """重复关注/改备注前读取的旧备注状态（R2-I13，供「替换影响」告知）。
+
+    ``status`` 四态（不得把「读取失败」当成「无旧备注」，否则会静默覆盖，R21）：
+    - ``idle``：尚未读取（未选中股票或对话框刚打开）；
+    - ``loading``：读取中（此期间禁止写入）；
+    - ``loaded``：读取成功，``note`` 为原备注（未关注时为 ``""``）；
+    - ``failed``：读取失败（此期间禁止写入，UI 提示重试）。
+
+    ``ts_code`` 标识该结果属于哪只股票，消费方必须比对当前选中代码，
+    避免切换选中后把上一只股票的备注当成当前股票的旧备注。
+    """
+
+    ts_code: str = ""
+    status: Literal["idle", "loading", "loaded", "failed"] = "idle"
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class WatchlistState:
     """WatchlistViewModel 的不可变状态快照 (L771 合规, 无 dual-track)."""
 
@@ -86,6 +105,8 @@ class WatchlistState:
     search_error: Message | None = None
     # UX-09 MAJOR-04：按 ts_code 打开的个股详情数据（不可变映射）；None 表示当前无详情。
     detail_stock_data: Mapping[str, Any] | None = None
+    # R2-I13：当前选中股票的旧备注读取状态（重复关注/改备注前的替换影响告知）。
+    existing_note: ExistingNoteState = ExistingNoteState()
 
 
 # UIR-F10-002：详情请求代次结果（三态，供调用方区分「已失效」与「失败」）。
@@ -116,6 +137,9 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         # UIR-F10-002: 详情请求代次；仅当前代次可写 detail_stock_data（隔离乱序响应
         # 与关闭/dispose 回填；与搜索/列表代次相互独立）。
         self._detail_generation: int = 0
+        # R2-I13: 旧备注读取代次；仅当前代次可写 existing_note（隔离切换选中股票的
+        # 迟到响应与关闭/dispose 回填）。
+        self._note_generation: int = 0
         self._init_mixin_fields()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -253,13 +277,16 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         """清空搜索状态（添加关注对话框关闭时调用）。
 
         F03：先推进代次使所有在途请求失效，避免关闭后旧响应回填。
+        R2-I13：同时复位旧备注读取状态（关闭对话框后不得残留上一只股票的备注）。
         """
         self._search_generation += 1
+        self._note_generation += 1
         self._set_state(
             search_results=(),
             search_keyword="",
             is_searching=False,
             search_error=None,
+            existing_note=ExistingNoteState(),
         )
 
     def invalidate_load(self) -> None:
@@ -271,11 +298,47 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         self._load_generation += 1
 
     def dispose(self) -> None:
-        """清理资源（F03/UIR-F06-001/UIR-F10-002：dispose 使在途搜索/列表/详情请求代次失效）。"""
+        """清理资源（F03/UIR-F06-001/UIR-F10-002/R2-I13：dispose 使在途搜索/列表/详情/旧备注请求代次失效）。"""
         self._search_generation += 1
         self._load_generation += 1
         self._detail_generation += 1
+        self._note_generation += 1
         super().dispose()
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def load_existing_note(self, ts_code: str) -> None:
+        """按股票身份读取已有关注备注（R2-I13：重复关注/修改备注前的影响告知）。
+
+        R2-I13：手动保存重复关注或修改备注前，必须先把该股票的原有备注读出来供
+        用户确认「替换」影响。读取失败**不得**降级为「无旧备注」（否则会静默覆盖
+        用户内容，R21），而是进入 ``failed`` 状态由 UI 阻止写入并提示重试。
+
+        以实例字段 ``_note_generation`` 做请求代次隔离：快速切换选中股票时，旧股票
+        的迟到响应（成功/失败均）不写 state；``clear_search`` / ``dispose`` 推进代次
+        后同样丢弃在途响应。``CancelledError`` 继续传播（R2）。
+        """
+        code = (ts_code or "").strip()
+        if not code:
+            return
+        self._note_generation += 1
+        generation = self._note_generation
+        self._set_state(existing_note=ExistingNoteState(ts_code=code, status="loading"))
+        try:
+            note = await self.cache.get_watchlist_note(code)
+        except asyncio.CancelledError:
+            if generation == self._note_generation:
+                self._set_state(existing_note=ExistingNoteState(ts_code=code))
+            raise
+        except Exception as e:
+            # 分类 + 脱敏日志（不写列表 error 通道）；失败状态由 UI 阻止写入并提示重试。
+            _handle_error(e, "load_existing_note", self, write_state=False)
+            if generation == self._note_generation:
+                self._set_state(existing_note=ExistingNoteState(ts_code=code, status="failed"))
+            return
+        if generation != self._note_generation:
+            return  # 已被更新的读取/关闭/dispose 取代，丢弃迟到结果
+        # 保留原备注原文（展示用）；比较/去空白由消费方处理。
+        self._set_state(existing_note=ExistingNoteState(ts_code=code, status="loaded", note=note or ""))
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def open_stock_detail(self, ts_code: str) -> DetailOpenResult:
