@@ -642,6 +642,49 @@ class TestFrozenCommandInputDigest:
             "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
         )
 
+    def test_revise_declaration_is_part_of_command_digest(self) -> None:
+        """R2-I25：同键同正文但修订源不同 → 异输入（不得误判重放）。"""
+
+        base = frozen_command_input_digest(
+            "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+        )
+        declared = frozen_command_input_digest(
+            "accept",
+            "研究三家公司",
+            self._MANIFEST_A,
+            expected_revision=self._EXPECTED,
+            node_id=self._NODE,
+            revise_source_message_id="m3",
+        )
+        other_source = frozen_command_input_digest(
+            "accept",
+            "研究三家公司",
+            self._MANIFEST_A,
+            expected_revision=self._EXPECTED,
+            node_id=self._NODE,
+            revise_source_message_id="m2",
+        )
+        other_cutoff = frozen_command_input_digest(
+            "accept",
+            "研究三家公司",
+            self._MANIFEST_A,
+            expected_revision=self._EXPECTED,
+            node_id=self._NODE,
+            revise_source_message_id="m3",
+            revise_causal_cutoff_message_id="m1",
+        )
+        assert len({base, declared, other_source, other_cutoff}) == 4
+
+    def test_command_digest_without_revise_declaration_is_unchanged(self) -> None:
+        """未声明修订时摘要保持既有 v1 形态（历史命令行重放兼容）。"""
+
+        assert (
+            frozen_command_input_digest(
+                "accept", "研究三家公司", self._MANIFEST_A, expected_revision=self._EXPECTED, node_id=self._NODE
+            )
+            == "1d2f001f7e0df72e9c4a1188c0910692e46ecf3aa6ddafcb6d2ef88e8cb70d94"
+        )
+
 
 class TestAcceptIntentDigest:
     """受理意图摘要（R2-I14：同 intent 必须比较完整输入，不能只比 manifest 摘要）。"""
@@ -751,6 +794,34 @@ class TestAcceptIntentDigest:
         """旧行公式（仅 manifest 字节）只用于读历史行，且与新摘要不同。"""
         assert legacy_accept_intent_digest(self._MANIFEST) == sha256_hex(self._MANIFEST)
         assert legacy_accept_intent_digest(self._MANIFEST) != accept_intent_digest(self._request())
+
+    def test_revise_declaration_is_part_of_intent_digest(self) -> None:
+        """R2-I25：修订源/截点是受理输入的一部分，异源不得判为重放。"""
+
+        base = accept_intent_digest(self._request())
+        declared = accept_intent_digest(self._request(revise_source_message_id="m3"))
+        other_source = accept_intent_digest(self._request(revise_source_message_id="m2"))
+        other_cutoff = accept_intent_digest(
+            self._request(revise_source_message_id="m3", revise_causal_cutoff_message_id="m1")
+        )
+        assert len({base, declared, other_source, other_cutoff}) == 4
+
+    def test_intent_digest_without_revise_declaration_is_unchanged(self) -> None:
+        """未声明修订时摘要保持既有 v2 形态（历史意图行重放兼容）。"""
+
+        assert (
+            accept_intent_digest(self._request()) == "1e219a46e8eaf9eb9afd99a5184c2d705f42651c1117305b5ae5e0ee2c342ce0"
+        )
+
+    def test_cutoff_requires_revise_source(self) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            derive_accept_identity(self._request(revise_causal_cutoff_message_id="m2"))
+        assert code_of(excinfo) == "missing_field"
+
+    def test_revise_cutoff_equal_to_source_rejected(self) -> None:
+        with pytest.raises(AgentValidationError) as excinfo:
+            derive_accept_identity(self._request(revise_source_message_id="m3", revise_causal_cutoff_message_id="m3"))
+        assert code_of(excinfo) == "invalid_value"
 
 
 class TestFrozenManifestInconsistency:

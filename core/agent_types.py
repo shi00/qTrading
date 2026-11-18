@@ -1787,6 +1787,13 @@ class AcceptRequest:
     #: 稳定身份（按所选连接身份派生，不随排队时点变化）。
     comparison_group_ref: str | None = None
     comparison_lane_ref: str | None = None
+    #: 修订声明（R2-I25）：本次受理是对本会话内既有消息的修订。``revise`` 命令
+    #: 只准备新稿、不改会话因果头；该声明随新意图受理进入同一事务，受理成功时
+    #: 才原子切换 ``AgentSession.causal_head_ref``（源消息之前最近一条，或显式
+    #: 截点；源为会话首条时切换为 ``None``/空前缀）。撤销编辑（不发此声明）不
+    #: 改变既有研究关联。
+    revise_source_message_id: str | None = None
+    revise_causal_cutoff_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1860,33 +1867,39 @@ def accept_intent_digest(request: AcceptRequest) -> str:
     """服务端按实际受理内容计算的完整意图摘要（R2-I14）。
 
     覆盖 target（session_id）、node/workflow 身份、模式/用途、正文、冻结 manifest
-    （规范字节，已校验）、来源显示名、比较组/路引用与期望版本：同一意图键下任一
-    字段变化都必须得到不同摘要（→ ``INPUT_CONFLICT``），只有完整输入相同才是重传。
-    命令键（``client_command_id``）不参与：重传允许换命令键，由命令行摘要单独核对。
+    （规范字节，已校验）、来源显示名、比较组/路引用、期望版本与修订声明（R2-I25）：
+    同一意图键下任一字段变化都必须得到不同摘要（→ ``INPUT_CONFLICT``），只有完整
+    输入相同才是重传。命令键（``client_command_id``）不参与：重传允许换命令键，
+    由命令行摘要单独核对。
+
+    修订声明仅在声明时进入摘要：未声明修订的受理输入保持既有 v2 摘要素材，
+    历史意图行（重放）不被本次扩展重分类（I14 兼容约束）。
     """
 
     _require_canonical_manifest(request.manifest_payload)
-    return sha256_hex(
-        json_doc(
-            {
-                "schema_version": ACCEPT_INTENT_DIGEST_VERSION,
-                "kind": "accept_intent",
-                "session_id": request.session_id,
-                "source_module": request.source_module,
-                "business_request_id": request.business_request_id,
-                "node_id": request.node_id,
-                "workflow_id": request.workflow_id,
-                "mode": request.mode.value,
-                "purpose": request.purpose.value,
-                "text": request.text,
-                "manifest": request.manifest_payload,
-                "source_display_name": request.source_display_name,
-                "comparison_group_ref": request.comparison_group_ref,
-                "comparison_lane_ref": request.comparison_lane_ref,
-                "expected_revision": request.expected_revision,
-            }
-        )
-    )
+    payload: dict[str, Any] = {
+        "schema_version": ACCEPT_INTENT_DIGEST_VERSION,
+        "kind": "accept_intent",
+        "session_id": request.session_id,
+        "source_module": request.source_module,
+        "business_request_id": request.business_request_id,
+        "node_id": request.node_id,
+        "workflow_id": request.workflow_id,
+        "mode": request.mode.value,
+        "purpose": request.purpose.value,
+        "text": request.text,
+        "manifest": request.manifest_payload,
+        "source_display_name": request.source_display_name,
+        "comparison_group_ref": request.comparison_group_ref,
+        "comparison_lane_ref": request.comparison_lane_ref,
+        "expected_revision": request.expected_revision,
+    }
+    if request.revise_source_message_id is not None:
+        payload["revise"] = {
+            "source_message_id": request.revise_source_message_id,
+            "causal_cutoff_message_id": request.revise_causal_cutoff_message_id,
+        }
+    return sha256_hex(json_doc(payload))
 
 
 def frozen_manifest_inconsistency(request: AcceptRequest) -> str | None:
@@ -1977,6 +1990,15 @@ def derive_accept_identity(request: AcceptRequest) -> AcceptIdentity:
     if request.comparison_group_ref is not None:
         _require_str(request.comparison_group_ref, "$.comparison_group_ref")
         _require_str(request.comparison_lane_ref, "$.comparison_lane_ref")
+    # R2-I25：修订声明成对约束——截点必须随源消息；截点等于源消息即「未修订」。
+    if request.revise_causal_cutoff_message_id is not None and request.revise_source_message_id is None:
+        _fail("missing_field", "$.revise_source_message_id")
+    if request.revise_source_message_id is not None:
+        _require_str(request.revise_source_message_id, "$.revise_source_message_id")
+        if request.revise_causal_cutoff_message_id is not None:
+            _require_str(request.revise_causal_cutoff_message_id, "$.revise_causal_cutoff_message_id")
+            if request.revise_causal_cutoff_message_id == request.revise_source_message_id:
+                _fail("invalid_value", "$.revise_causal_cutoff_message_id")
 
     command_record_id = stable_id("command", [user_scope, session_id, request.client_command_id])
     message_id = stable_id("user_message", [user_scope, session_id, command_record_id])
@@ -2206,6 +2228,8 @@ def frozen_command_input_digest(
     *,
     expected_revision: int,
     node_id: str,
+    revise_source_message_id: str | None = None,
+    revise_causal_cutoff_message_id: str | None = None,
 ) -> str:
     """命令冻结输入的完整规范摘要（受理/修订共用的唯一构造入口，检视 D05）。
 
@@ -2213,21 +2237,25 @@ def frozen_command_input_digest(
     ``intent_digest`` 同源，故键序/数值表示不同的非规范字节两侧一致判为异输入）
     、命令级期望版本（受理 expected_revision / 修订 expected_execution_revision）
     与 node 身份，并带 ``command_kind`` 区分受理与修订；同键同以上各项才算重放。
-    旧行摘要由 :func:`legacy_command_input_digest` 识别，不得用于新写入。
+    受理的修订声明（R2-I25）同样进入摘要（声明才纳入，未声明保持既有 v1 形态，
+    历史命令行重放不被重分类）。旧行摘要由 :func:`legacy_command_input_digest`
+    识别，不得用于新写入。
     """
 
-    return sha256_hex(
-        json_doc(
-            {
-                "schema_version": FROZEN_COMMAND_INPUT_DIGEST_VERSION,
-                "kind": command_kind,
-                "text": text,
-                "manifest": manifest_payload,
-                "expected_revision": expected_revision,
-                "node_id": node_id,
-            }
-        )
-    )
+    payload: dict[str, Any] = {
+        "schema_version": FROZEN_COMMAND_INPUT_DIGEST_VERSION,
+        "kind": command_kind,
+        "text": text,
+        "manifest": manifest_payload,
+        "expected_revision": expected_revision,
+        "node_id": node_id,
+    }
+    if revise_source_message_id is not None:
+        payload["revise"] = {
+            "source_message_id": revise_source_message_id,
+            "causal_cutoff_message_id": revise_causal_cutoff_message_id,
+        }
+    return sha256_hex(json_doc(payload))
 
 
 def legacy_command_input_digest(text: str) -> str:

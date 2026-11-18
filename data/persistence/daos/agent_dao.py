@@ -657,10 +657,18 @@ class AgentDao(BaseDao):
         ``shared`` 冻结段须齐备且正文/模式/用途一致，否则 ``INPUT_INVALID``。
         重传路径先查回原回执，不受其后草稿推进影响（幂等不因新稿失效）。
 
+        修订声明的因果头绑定（R2-I25）：本次受理携带 ``revise_source_message_id``
+        时，在同事务、同会话行锁内解析源消息之前最近一条（或显式截点，须严格早于
+        源消息），并随本条受理原子写入 ``agent_session.causal_head_ref``；源为会话
+        首条时写空前缀（``None``）。未声明修订的受理不读写该字段（编辑草稿/取消
+        编辑不改变既有研究关联）。重放（步骤 2/3 查回原回执）零写入，不重复切头；
+        并发受理由会话行锁串行化，因果头取最后提交受理的声明值。
+
         Raises:
             AgentServiceError: INPUT_INVALID（目标会话不存在 / 冻结 manifest 与
-                受理输入不一致或冻结段残缺）/ INPUT_CONFLICT（同身份异输入或同
-                命令键异输入）/ REVISION_CONFLICT（预期草稿版与当前稿版不一致）/
+                受理输入不一致或冻结段残缺 / 修订源消息不属于目标会话或截点不
+                早于源消息）/ INPUT_CONFLICT（同身份异输入或同命令键异输入）/
+                REVISION_CONFLICT（预期草稿版与当前稿版不一致）/
                 OPERATION_UNKNOWN（原回执不可得）/ POLICY_DENIED（目标会话已删除
                 fence，新键受理拒绝）。
         """
@@ -673,6 +681,8 @@ class AgentDao(BaseDao):
             request.manifest_payload,
             expected_revision=request.expected_revision,
             node_id=request.node_id,
+            revise_source_message_id=request.revise_source_message_id,
+            revise_causal_cutoff_message_id=request.revise_causal_cutoff_message_id,
         )
         engine = self.engine
         assert isinstance(engine, AsyncEngine)
@@ -803,6 +813,40 @@ class AgentDao(BaseDao):
                     AgentErrorCode.INPUT_INVALID,
                     f"frozen manifest does not match accepted input: {manifest_mismatch}",
                     _identity_str(request),
+                )
+
+            # 3e. 修订声明的因果头（R2-I25）：**本次受理是新意图的可靠受理边界**，
+            #     因果头只在此事务内切换；``revise`` 命令本身只准备新稿、不写头。
+            #     源消息必须属于目标会话（跨会话引用会让本会话引用他处历史），
+            #     截点按其与源消息的相对次序校验（与 change_session 同口径）。
+            revise_head_declared = request.revise_source_message_id is not None
+            revise_causal_head_ref: str | None = None
+            if revise_head_declared:
+                revise_source = (
+                    await conn.execute(
+                        sa.select(
+                            AgentMessage.message_id,
+                            AgentMessage.session_id,
+                            AgentMessage.session_seq,
+                        ).where(
+                            AgentMessage.user_scope == request.user_scope,
+                            AgentMessage.message_id == request.revise_source_message_id,
+                            AgentMessage.session_id == request.session_id,
+                        )
+                    )
+                ).first()
+                if revise_source is None:
+                    raise AgentServiceError(
+                        AgentErrorCode.INPUT_INVALID,
+                        "revise source message does not exist in target session",
+                        _identity_str(request),
+                    )
+                revise_causal_head_ref = await self._resolve_causal_cutoff(
+                    conn,
+                    user_scope=request.user_scope,
+                    source=revise_source,
+                    cutoff_message_id=request.revise_causal_cutoff_message_id,
+                    identity=_identity_str(request),
                 )
 
             # 4. 序号分配（持锁下 max+1，起点 1：首条消息 session_seq=1，检视 D01）。
@@ -986,14 +1030,19 @@ class AgentDao(BaseDao):
                 .values(receipt_payload=encode_submission_receipt(receipt))
             )
 
-            # 11. session 可靠事件水位单调推进（R22）。
+            # 11. session 可靠事件水位单调推进（R22）；修订声明在同一事务内原子
+            #     切换因果头（R2-I25：受理成功才有研究关联变更）。不改会话
+            #     revision：该版本是元数据 CAS 令牌，本步骤不参与其比较。
+            session_values: dict[str, Any] = {"event_seq": sa.func.greatest(AgentSession.event_seq, session_seq)}
+            if revise_head_declared:
+                session_values["causal_head_ref"] = revise_causal_head_ref
             await conn.execute(
                 sa.update(AgentSession)
                 .where(
                     AgentSession.user_scope == request.user_scope,
                     AgentSession.session_id == request.session_id,
                 )
-                .values(event_seq=sa.func.greatest(AgentSession.event_seq, session_seq))
+                .values(**session_values)
             )
             return receipt
 
@@ -9466,9 +9515,11 @@ class AgentDao(BaseDao):
         - ``rename`` / ``pin`` / ``archive`` / ``unarchive``：会话行锁下 CAS
           （``expected_session_revision`` 必须等于行 ``revision``），成功
           ``revision+1``；归档不改执行（§9.3「归档不终止执行」）；
-        - ``revise``：核原消息属于本会话且版本匹配，把新因果前缀（源消息之前
-          最近一条，或显式截点）写入 ``causal_head_ref``；**不改原消息/成果、
-          不建消息、不派发**，用户在修订后的草稿上另行发送；
+        - ``revise``：核原消息属于本会话且版本匹配，并解析（校验）新因果前缀
+          （源消息之前最近一条，或显式截点）；**不改会话因果头、不改原消息/成果、
+          不建消息、不派发**（R2-I25：编辑旧问题只准备新稿；取消编辑不改变既有
+          研究关联）。因果头在新意图被 ``accept_request`` 以修订声明受理时原子
+          切换；本动作只把会话版作为命令 CAS 令牌推进；
         - 同命令键同输入 → 查回原回执；异输入 → ``INPUT_CONFLICT``；
         - 会话/原消息不存在或不在调用用户域 → ``INPUT_INVALID``；原消息版本
           不符 → ``REVISION_CONFLICT``（零新事实）；
@@ -9705,7 +9756,11 @@ class AgentDao(BaseDao):
                             "source message revision does not match expected",
                             identity,
                         )
-                    values["causal_head_ref"] = await self._resolve_causal_cutoff(
+                    # R2-I25：修订只准备新稿——在此解析并校验截点（使失效截点尽早
+                    # 暴露），但**不写** ``causal_head_ref``：因果头只在新意图被
+                    # ``accept_request`` 可靠受理时随该声明原子切换；用户取消编辑
+                    # 不改变既有研究关联。
+                    await self._resolve_causal_cutoff(
                         conn,
                         user_scope=user_scope,
                         source=source,
