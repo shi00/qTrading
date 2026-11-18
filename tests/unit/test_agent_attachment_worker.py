@@ -9,14 +9,17 @@ import asyncio
 import hashlib
 import io
 import json
+import struct
 import sys
 import tempfile
 import time
 import zipfile
+import zlib
 from dataclasses import replace
 from typing import Any
 
 import pytest
+from PIL import Image
 
 import services.agent_service.attachment_worker as attachment_worker
 
@@ -1121,6 +1124,96 @@ class TestXlsxPreflightBudget:
 # ---------------------------------------------------------------------------
 # 内容类型嗅探
 # ---------------------------------------------------------------------------
+
+
+def _encode_image(fmt: str, size: tuple[int, int], mode: str = "RGB") -> bytes:
+    buffer = io.BytesIO()
+    Image.new(mode, size, "red" if mode == "RGB" else 128).save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+def _png_with_declared_size(width: int, height: int) -> bytes:
+    """改写合法 PNG 的 IHDR 声明尺寸（重算 CRC），用于验证解码前按声明尺寸拒绝。"""
+
+    data = bytearray(_encode_image("PNG", (8, 8)))
+    struct.pack_into(">II", data, 16, width, height)  # 签名 8 + 长度 4 + 类型 4
+    struct.pack_into(">I", data, 29, zlib.crc32(bytes(data[12:29])))  # IHDR 的 type+data 校验
+    return bytes(data)
+
+
+def _image_block(parsed: Any) -> dict[str, Any]:
+    assert len(parsed.blocks) == 1
+    return json.loads(parsed.blocks[0])
+
+
+class TestImageExtraction:
+    @pytest.mark.parametrize(
+        ("fmt", "kind", "size"), [("PNG", AttachmentKind.PNG, (123, 45)), ("JPEG", AttachmentKind.JPEG, (64, 32))]
+    )
+    def test_image_ready_after_real_pixel_decode(self, fmt: str, kind: AttachmentKind, size: tuple[int, int]) -> None:
+        data = _encode_image(fmt, size)
+        parsed = _parse(kind, data)
+        block = _image_block(parsed)
+        assert parsed.read_state is ReadState.READY
+        assert parsed.coverage == "full"
+        assert (block["width"], block["height"]) == size
+        assert block["format"] == fmt
+        assert block["pixels"] == size[0] * size[1]
+        # 真解码已发生，是本层给出 READY 的证据。
+        assert block["pixel_decoded"] is True
+
+    def test_truncated_png_is_rejected(self) -> None:
+        data = _encode_image("PNG", (128, 96))
+        truncated = data[: len(data) // 2]
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.PNG, truncated)
+        assert exc.value.code == "invalid_structure"
+
+    def test_truncated_jpeg_pixels_are_rejected(self) -> None:
+        # JPEG 的 verify() 是空操作，截断只能由真像素解码发现。
+        data = _encode_image("JPEG", (256, 192))
+        truncated = data[: len(data) // 2]
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.JPEG, truncated)
+        assert exc.value.code == "invalid_structure"
+
+    def test_declared_huge_dimensions_rejected_before_decode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _png_with_declared_size(100_000, 100_000)
+        load_calls: list[str] = []
+        original_load = Image.Image.load
+
+        def _spy_load(self: Image.Image, *args: Any, **kwargs: Any) -> None:
+            load_calls.append(self.mode)
+            original_load(self, *args, **kwargs)
+
+        monkeypatch.setattr(Image.Image, "load", _spy_load)
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.PNG, data)
+        assert exc.value.code == "image_pixels_exceeded"
+        assert load_calls == []
+
+    def test_dimensions_over_pixel_budget_rejected_before_decode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        data = _png_with_declared_size(attachment_worker.MAX_IMAGE_PIXELS + 1, 1)
+        load_calls: list[str] = []
+        original_load = Image.Image.load
+
+        def _spy_load(self: Image.Image, *args: Any, **kwargs: Any) -> None:
+            load_calls.append(self.mode)
+            original_load(self, *args, **kwargs)
+
+        monkeypatch.setattr(Image.Image, "load", _spy_load)
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.PNG, data)
+        assert exc.value.code == "image_pixels_exceeded"
+        assert load_calls == []
+
+    def test_zero_char_stats_does_not_change_image_state(self) -> None:
+        parsed = _parse(AttachmentKind.PNG, _encode_image("PNG", (10, 10)))
+        # 图像无可提取字符：chars 如实记为不适用，0 字符不改写已核状态。
+        assert parsed.stats["chars"] is None
+        assert parsed.stats["source_bytes"] is not None
+        assert parsed.read_state is ReadState.READY
+        assert [item["code"] for item in parsed.limitations] == ["image_text_not_extracted"]
 
 
 class TestKindSniffing:
