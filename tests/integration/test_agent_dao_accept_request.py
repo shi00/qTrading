@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -322,6 +323,106 @@ class TestAcceptRequestTransaction:
         assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
         after = {t: await _count(engine, t) for t in before}
         assert after == before
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_intent_same_manifest_changed_text_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """I14：同 intent + 同 manifest 只换正文 → INPUT_CONFLICT（旧实现误判重放）。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        first = await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c1"))
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {
+            t: await _count(engine, t)
+            for t in ("agent_execution", "agent_command", "agent_message", "agent_asset_version", "agent_source_link")
+        }
+
+        with pytest.raises(AgentServiceError) as excinfo:
+            await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c2", text="换一个问题"))
+
+        assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before, f"conflict must not create facts: {before} -> {after}"
+        assert first.execution_id  # 原受理未被改写
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_same_intent_other_input_change_conflicts(self, real_embedded_pg: ConnectionInfo) -> None:
+        """I14：同 intent 换模式/用途/工作流/来源显示名/期望版/node/目标会话/比较引用均冲突。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        await _seed_session(dao, "u1", "s2")
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        first = await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c1"))
+        engine = create_test_engine(real_embedded_pg.url)
+        before = {
+            t: await _count(engine, t)
+            for t in ("agent_execution", "agent_command", "agent_message", "agent_asset_version", "agent_source_link")
+        }
+        variants = {
+            "mode": {"mode": Mode.EXECUTE},
+            "purpose": {"purpose": Purpose.END_OF_DAY_RESEARCH},
+            "workflow_id": {"workflow_id": "wf-2"},
+            "source_display_name": {"source_display_name": "另一显示名"},
+            "node_id": {"node_id": "node-2"},
+            "expected_revision": {"expected_revision": 3},
+            "session_id": {"session_id": "s2"},
+            "comparison_refs": {"comparison_group_ref": "group-1", "comparison_lane_ref": "lane-1"},
+        }
+        for index, (name, overrides) in enumerate(variants.items(), start=2):
+            with pytest.raises(AgentServiceError) as excinfo:
+                await dao.accept_request(_request(manifest_payload=frozen, client_command_id=f"c{index}", **overrides))
+            assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT, name
+
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before, f"conflict must not create facts: {before} -> {after}"
+        assert first.execution_id
+        await engine.dispose()
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_legacy_intent_row_replays_same_input_and_conflicts_on_change(
+        self, real_embedded_pg: ConnectionInfo
+    ) -> None:
+        """I14 旧行兼容：仅当存储事实能证明完整输入一致才重放，其余显式冲突。"""
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "u1", "s1")
+        frozen = json_doc({"schema_version": 1, "source_module": "ui", "text": "研究三家公司"})
+        first = await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c1"))
+        engine = create_test_engine(real_embedded_pg.url)
+        # 模拟 I14 修复前的历史行：意图摘要只覆盖 manifest，命令摘要只覆盖正文。
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(AgentExecution)
+                .where(AgentExecution.user_scope == "u1", AgentExecution.business_request_id == "req-1")
+                .values(intent_digest=sha256_hex(frozen))
+            )
+            await conn.execute(
+                sa.update(AgentCommand)
+                .where(AgentCommand.user_scope == "u1", AgentCommand.command_kind == "submit")
+                .values(input_digest=sha256_hex("研究三家公司"))
+            )
+        before = {
+            t: await _count(engine, t)
+            for t in ("agent_execution", "agent_command", "agent_message", "agent_asset_version", "agent_source_link")
+        }
+
+        replay = await dao.accept_request(_request(manifest_payload=frozen, client_command_id="c2"))
+        assert replay == first
+
+        variants: tuple[dict[str, Any], ...] = (
+            {"text": "换一个问题"},
+            {"workflow_id": "wf-2"},
+            {"source_display_name": "另一显示名"},
+            {"expected_revision": 2},
+        )
+        for index, overrides in enumerate(variants, start=3):
+            with pytest.raises(AgentServiceError) as excinfo:
+                await dao.accept_request(_request(manifest_payload=frozen, client_command_id=f"c{index}", **overrides))
+            assert excinfo.value.code is AgentErrorCode.INPUT_CONFLICT
+
+        after = {t: await _count(engine, t) for t in before}
+        assert after == before, f"legacy replay must not create facts: {before} -> {after}"
         await engine.dispose()
 
     @pytest.mark.asyncio(loop_scope="session")
