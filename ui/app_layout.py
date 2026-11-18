@@ -446,6 +446,20 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
     def _on_draft_change(decision_id: str, text: str) -> None:
         research_vm.set_answer_draft(decision_id, text)
 
+    def _toggle_execution(execution_id: str) -> None:
+        """只改子任务树展开态（共享 VM 持久化，切页不丢；不控制执行）。"""
+        research_vm.toggle_execution(execution_id)
+
+    def _select_execution(execution_id: str | None) -> None:
+        """只改观察位置（整会话 / 某执行子树）；不派发、不取消研究。"""
+        research_vm.select_execution(execution_id)
+
+    def _load_artifact(artifact_id: str, artifact_version: int, execution_id: str, round_id: str) -> None:
+        """按需只读读取成果正文（异步调度，事件处理器内不做同步 IO）。"""
+        page = _get_page()
+        if page is not None and research_vm.state.available:
+            page.run_task(research_vm.load_artifact, artifact_id, artifact_version, execution_id, round_id)
+
     def _submit_decision(decision_id: str) -> None:
         """统一决定提交入口（旧 Dialog 打开/他人占用时拒绝，不排队、不伪造）。"""
         page = _get_page()
@@ -791,6 +805,9 @@ def AppLayout(agent_wiring: Any | None = None) -> ft.Container:
             on_refresh=_refresh_research,
             on_draft_change=_on_draft_change,
             on_submit=_submit_decision,
+            on_toggle_execution=_toggle_execution,
+            on_select_execution=_select_execution,
+            on_load_artifact=_load_artifact,
         )
         if research_open
         else None

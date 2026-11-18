@@ -1,5 +1,6 @@
 """ResearchObserverViewModel 单测（检视 P02：共享研究观察层 + 统一决定）。"""
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -43,10 +44,89 @@ def _decision(
     )
 
 
-def _session_read(*, decisions: tuple[Any, ...] = (), title: str = "研究 A") -> Any:
+def _message(
+    message_id: str = "m-1",
+    *,
+    role: str | None = "assistant",
+    text: str | None = "研究结论：候选 A",
+    execution_id: str | None = "e-1",
+) -> Any:
     return SimpleNamespace(
-        summary=SimpleNamespace(title=title, updated_at="2026-11-17T02:00:00.000000Z"),
-        executions=(SimpleNamespace(execution_id="e-1", display_state="running"),),
+        message_id=message_id,
+        role=role,
+        body_text=text,
+        body_ref=None if text is not None else "chunk-ref",
+        execution_id=execution_id,
+        occurred_at="2026-11-17T01:30:00.000000Z",
+    )
+
+
+def _artifact(
+    artifact_id: str = "a-1",
+    *,
+    execution_id: str = "e-1",
+    round_id: str = "r-1",
+    version: int = 1,
+    summary: str | None = "候选 A 评分",
+    body_text: str | None = None,
+) -> Any:
+    return SimpleNamespace(
+        artifact_id=artifact_id,
+        artifact_version=version,
+        execution_id=execution_id,
+        round_id=round_id,
+        round=round_id,
+        artifact_kind="report",
+        summary=summary,
+        body_text=body_text,
+        body_ref=None if body_text is not None else "chunk-ref",
+        result_payload=None,
+        published_at="2026-11-17T01:40:00.000000Z",
+    )
+
+
+def _execution(
+    execution_id: str = "e-1",
+    *,
+    display_state: str = "running",
+    parent_execution_id: str | None = None,
+    model_attempt_count: int = 1,
+    tool_call_count: int = 2,
+    active_ms: int = 1500,
+    goal_coverage: str = "partial",
+) -> Any:
+    return SimpleNamespace(
+        execution_id=execution_id,
+        display_state=display_state,
+        parent_execution_id=parent_execution_id,
+        model_attempt_count=model_attempt_count,
+        tool_call_count=tool_call_count,
+        active_ms=active_ms,
+        goal_coverage=goal_coverage,
+        ended_at=None,
+    )
+
+
+def _session_read(
+    *,
+    decisions: tuple[Any, ...] = (),
+    title: str = "研究 A",
+    executions: tuple[Any, ...] | None = None,
+    messages: tuple[Any, ...] = (),
+    artifacts: tuple[Any, ...] = (),
+    messages_has_more: bool = False,
+    artifacts_has_more: bool = False,
+    draft_revision: int = 0,
+) -> Any:
+    return SimpleNamespace(
+        summary=SimpleNamespace(
+            title=title,
+            updated_at="2026-11-17T02:00:00.000000Z",
+            draft_revision=draft_revision,
+        ),
+        executions=(_execution(),) if executions is None else executions,
+        messages=SimpleNamespace(items=messages, has_more=messages_has_more, next_cursor=None),
+        artifacts=SimpleNamespace(items=artifacts, has_more=artifacts_has_more, next_cursor=None),
         decisions=decisions,
     )
 
@@ -59,14 +139,28 @@ class _FakeService:
         read: Any | None = None,
         search_error: Exception | None = None,
         answer_error: Exception | None = None,
+        artifact_read: Any | None = None,
+        artifact_error: Exception | None = None,
     ) -> None:
         self.hits = hits
         self.read = read if read is not None else _session_read()
         self.search_error = search_error
         self.answer_error = answer_error
+        self.artifact_read = (
+            artifact_read
+            if artifact_read is not None
+            else SimpleNamespace(
+                body_text="完整成果正文",
+                next_cursor=None,
+                body_available=True,
+                unavailable_reason=None,
+            )
+        )
+        self.artifact_error = artifact_error
         self.search_calls: list[Any] = []
         self.read_calls: list[Any] = []
         self.answer_calls: list[Any] = []
+        self.artifact_calls: list[Any] = []
 
     async def search(self, query: Any, *, user_scope: str) -> Any:
         self.search_calls.append((query, user_scope))
@@ -78,11 +172,43 @@ class _FakeService:
         self.read_calls.append((query, user_scope))
         return self.read
 
+    async def read_artifact(self, query: Any, *, user_scope: str) -> Any:
+        self.artifact_calls.append((query, user_scope))
+        if self.artifact_error is not None:
+            raise self.artifact_error
+        return self.artifact_read
+
     async def answer(self, request: Any) -> Any:
         self.answer_calls.append(request)
         if self.answer_error is not None:
             raise self.answer_error
         return SimpleNamespace(delivery_state=SimpleNamespace(value="not_delivered"))
+
+
+class _BlockingSearchService(_FakeService):
+    """search 阻塞直到被取消（验证取消传播与 loading 释放）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def search(self, query: Any, *, user_scope: str) -> Any:
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _BlockingArtifactService(_FakeService):
+    """read_artifact 阻塞直到被取消（验证在途标记释放）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+
+    async def read_artifact(self, query: Any, *, user_scope: str) -> Any:
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
 
 
 @pytest.fixture(autouse=True)
@@ -175,6 +301,18 @@ class TestRefresh:
         assert vm.state.loading is False
         assert vm.state.session_id is None
 
+    @pytest.mark.asyncio
+    async def test_refresh_cancellation_propagates_and_releases_loading(self) -> None:
+        service = _BlockingSearchService()
+        vm = ResearchObserverViewModel(service)
+        task = asyncio.create_task(vm.refresh())
+        await asyncio.wait_for(service.started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert exc_info.type is asyncio.CancelledError
+        assert vm.state.loading is False, "取消后不得永久停在加载态（否则后续刷新被拦截）"
+
 
 class TestDraftAndSubmit:
     @pytest.mark.asyncio
@@ -237,6 +375,273 @@ class TestDraftAndSubmit:
         await vm.submit_answer("d-1")
         assert vm.state.last_error_code == "REVISION_CONFLICT"
         assert vm.state.draft_for("d-1") == "选择第一家"
+
+
+class TestMainSessionReadOnlyProjection:
+    @pytest.mark.asyncio
+    async def test_messages_and_artifacts_are_projected_honestly(self) -> None:
+        service = _FakeService(
+            read=_session_read(
+                messages=(
+                    _message("m-1", text="短正文", execution_id="e-1"),
+                    _message("m-2", text=None, role="tool", execution_id="e-2"),
+                ),
+                artifacts=(
+                    _artifact("a-1", summary="候选 A"),
+                    _artifact("a-2", summary=None, body_text="内联正文"),
+                ),
+                messages_has_more=True,
+                artifacts_has_more=True,
+                draft_revision=4,
+            )
+        )
+        vm = ResearchObserverViewModel(service)
+
+        await vm.refresh()
+
+        state = vm.state
+        assert [m.message_id for m in state.messages] == ["m-1", "m-2"]
+        assert state.messages[0].body_text == "短正文"
+        assert state.messages[0].body_available is True
+        # body_ref 未携带正文：如实标记不可读，不伪造空正文（R21）
+        assert state.messages[1].body_text is None
+        assert state.messages[1].body_available is False
+        assert [a.artifact_id for a in state.artifacts] == ["a-1", "a-2"]
+        assert state.artifacts[1].body_text == "内联正文"
+        assert state.messages_has_more is True
+        assert state.artifacts_has_more is True
+        assert state.session_draft_revision == 4
+
+    @pytest.mark.asyncio
+    async def test_missing_messages_marker_does_not_claim_empty_body(self) -> None:
+        service = _FakeService(read=_session_read(messages=(_message("m-9", text=None),)))
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        assert vm.state.messages[0].body_available is False
+        assert vm.state.messages[0].body_text is None
+
+
+class TestExecutionTree:
+    @pytest.mark.asyncio
+    async def test_tree_builds_parent_child_depth_and_orphans_as_roots(self) -> None:
+        service = _FakeService(
+            read=_session_read(
+                executions=(
+                    _execution("e-1", display_state="running"),
+                    _execution("e-2", parent_execution_id="e-1", display_state="complete"),
+                    _execution("e-3", parent_execution_id="e-2", display_state="queued"),
+                    _execution("e-orphan", parent_execution_id="e-missing"),
+                )
+            )
+        )
+        vm = ResearchObserverViewModel(service)
+
+        await vm.refresh()
+
+        nodes = vm.state.execution_nodes
+        assert [(n.execution_id, n.depth) for n in nodes] == [
+            ("e-1", 0),
+            ("e-2", 1),
+            ("e-3", 2),
+            ("e-orphan", 0),
+        ]
+        assert nodes[0].has_children is True
+        assert nodes[1].has_children is True
+        assert nodes[2].has_children is False
+        assert nodes[0].display_state == "running"
+        assert nodes[0].tool_call_count == 2
+        assert nodes[0].active_ms == 1500
+
+    @pytest.mark.asyncio
+    async def test_toggle_execution_collapses_and_restores_without_service_calls(self) -> None:
+        service = _FakeService(
+            read=_session_read(
+                executions=(
+                    _execution("e-1"),
+                    _execution("e-2", parent_execution_id="e-1"),
+                )
+            )
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        search_calls = len(service.search_calls)
+
+        vm.toggle_execution("e-1")
+        assert [n.execution_id for n in vm.state.execution_nodes] == ["e-1"]
+        assert "e-1" in vm.state.collapsed_execution_ids
+
+        vm.toggle_execution("e-1")
+        assert [n.execution_id for n in vm.state.execution_nodes] == ["e-1", "e-2"]
+        assert vm.state.collapsed_execution_ids == ()
+        assert len(service.search_calls) == search_calls, "展开/收起只读，不重新查询、不控制执行"
+
+    @pytest.mark.asyncio
+    async def test_toggle_unknown_execution_is_ignored(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService())
+        await vm.refresh()
+        vm.toggle_execution("e-missing")
+        assert vm.state.collapsed_execution_ids == ()
+
+
+class TestObservationPosition:
+    @pytest.mark.asyncio
+    async def test_select_execution_filters_messages_artifacts_and_tree(self) -> None:
+        service = _FakeService(
+            read=_session_read(
+                executions=(
+                    _execution("e-1"),
+                    _execution("e-2", parent_execution_id="e-1"),
+                    _execution("e-9"),
+                ),
+                messages=(
+                    _message("m-1", execution_id="e-1"),
+                    _message("m-2", execution_id="e-2"),
+                    _message("m-9", execution_id="e-9"),
+                ),
+                artifacts=(
+                    _artifact("a-1", execution_id="e-1"),
+                    _artifact("a-2", execution_id="e-2"),
+                    _artifact("a-9", execution_id="e-9"),
+                ),
+            )
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+
+        vm.select_execution("e-2")
+
+        state = vm.state
+        assert state.selected_execution_id == "e-2"
+        assert [m.message_id for m in state.messages] == ["m-2"]
+        assert [a.artifact_id for a in state.artifacts] == ["a-2"]
+        assert [(n.execution_id, n.depth) for n in state.execution_nodes] == [("e-2", 0)]
+
+        vm.select_execution(None)
+        assert vm.state.selected_execution_id is None
+        assert [m.message_id for m in vm.state.messages] == ["m-1", "m-2", "m-9"]
+
+    @pytest.mark.asyncio
+    async def test_select_unknown_execution_falls_back_to_session_view(self) -> None:
+        vm = ResearchObserverViewModel(_FakeService())
+        await vm.refresh()
+        vm.select_execution("e-missing")
+        assert vm.state.selected_execution_id is None
+
+    @pytest.mark.asyncio
+    async def test_selection_draft_and_collapsed_state_survive_refresh(self) -> None:
+        service = _FakeService(
+            read=_session_read(
+                decisions=(_decision("d-1"),),
+                executions=(
+                    _execution("e-1"),
+                    _execution("e-2", parent_execution_id="e-1"),
+                ),
+                messages=(_message("m-1", execution_id="e-1"), _message("m-2", execution_id="e-2")),
+            )
+        )
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        vm.set_answer_draft("d-1", "保留的草稿")
+        vm.toggle_execution("e-1")
+        vm.select_execution("e-2")
+
+        await vm.refresh()
+
+        assert vm.state.selected_execution_id == "e-2"
+        assert vm.state.collapsed_execution_ids == ("e-1",)
+        assert vm.state.draft_for("d-1") == "保留的草稿"
+
+
+class TestArtifactBodyRead:
+    @pytest.mark.asyncio
+    async def test_load_artifact_uses_read_only_query_and_caches_body(self) -> None:
+        service = _FakeService()
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_artifact(artifact_id="a-1", artifact_version=3, execution_id="e-1", round_id="r-1")
+
+        assert len(service.artifact_calls) == 1
+        query, user_scope = service.artifact_calls[0]
+        assert query.artifact_id == "a-1"
+        assert query.artifact_version == 3
+        assert query.execution_id == "e-1"
+        assert query.round_id == "r-1"
+        assert user_scope == "local-desktop"
+        body = vm.state.artifact_body_for("a-1", 3)
+        assert body is not None
+        assert body.body_text == "完整成果正文"
+        assert body.truncated is False
+        # 只读：答复写入口一次都不应被触发
+        assert service.answer_calls == []
+
+        await vm.load_artifact(artifact_id="a-1", artifact_version=3, execution_id="e-1", round_id="r-1")
+        assert len(service.artifact_calls) == 1, "已载入正文不重复读取"
+
+    @pytest.mark.asyncio
+    async def test_load_artifact_reports_unavailable_body_and_truncation(self) -> None:
+        unavailable_read = SimpleNamespace(
+            body_text=None,
+            next_cursor=None,
+            body_available=False,
+            unavailable_reason="body_not_saved",
+        )
+        service = _FakeService(artifact_read=unavailable_read)
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_artifact(artifact_id="a-2", artifact_version=1, execution_id="e-1", round_id="r-1")
+
+        body = vm.state.artifact_body_for("a-2", 1)
+        assert body is not None
+        assert body.body_available is False
+        assert body.unavailable_reason == "body_not_saved"
+        assert body.body_text is None
+
+    @pytest.mark.asyncio
+    async def test_load_artifact_failure_reports_code_and_clears_pending(self) -> None:
+        service = _FakeService(artifact_error=_FakeError("PERSISTENCE_UNAVAILABLE"))
+        vm = ResearchObserverViewModel(service)
+
+        await vm.load_artifact(artifact_id="a-1", artifact_version=1, execution_id="e-1", round_id="r-1")
+
+        assert vm.state.last_error_code == "PERSISTENCE_UNAVAILABLE"
+        assert vm.state.artifact_body_pending_keys == ()
+        assert vm.state.artifact_body_for("a-1", 1) is None
+
+    @pytest.mark.asyncio
+    async def test_loaded_body_survives_same_session_refresh_but_not_session_switch(self) -> None:
+        service = _FakeService()
+        vm = ResearchObserverViewModel(service)
+        await vm.refresh()
+        await vm.load_artifact("a-1", 1, "e-1", "r-1")
+        assert [(body.key, body.body_text) for body in vm.state.artifact_bodies] == [("a-1:1", "完整成果正文")]
+
+        await vm.refresh()
+        assert [(body.key, body.body_text) for body in vm.state.artifact_bodies] == [("a-1:1", "完整成果正文")], (
+            "同会话刷新应保留已读正文（切页继续阅读）"
+        )
+
+        service.hits = (SimpleNamespace(session_id="s-2"),)
+        await vm.refresh()
+        assert vm.state.artifact_bodies == (), "换会话不得复用上一会话正文缓存"
+
+    @pytest.mark.asyncio
+    async def test_load_artifact_cancellation_releases_pending_marker(self) -> None:
+        service = _BlockingArtifactService()
+        vm = ResearchObserverViewModel(service)
+        task = asyncio.create_task(vm.load_artifact("a-1", 1, "e-1", "r-1"))
+        await asyncio.wait_for(service.started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert exc_info.type is asyncio.CancelledError
+        assert vm.state.artifact_body_pending_keys == ()
+
+    @pytest.mark.asyncio
+    async def test_load_artifact_without_service_is_noop(self) -> None:
+        vm = ResearchObserverViewModel(None)
+        await vm.load_artifact(artifact_id="a-1", artifact_version=1, execution_id="e-1", round_id="r-1")
+        assert vm.state.available is False
+        assert vm.state.artifact_body_for("a-1", 1) is None
 
 
 class TestSharedInstance:

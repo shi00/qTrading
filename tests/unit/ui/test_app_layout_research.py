@@ -26,7 +26,14 @@ from tests.unit.ui.component_renderer import (
 )
 from ui import agent_decision_arbiter
 from ui.viewmodels import research_observer_view_model as vm_mod
-from ui.viewmodels.research_observer_view_model import PendingDecision, ResearchObserverState
+from ui.viewmodels.research_observer_view_model import (
+    ExecutionNodeView,
+    LoadedArtifactBody,
+    PendingDecision,
+    ResearchObserverState,
+    SessionArtifactView,
+    SessionMessageView,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -61,9 +68,34 @@ class _FakeService:
     async def read_session(self, query: Any, *, user_scope: str) -> Any:
         self.read_calls.append((query, user_scope))
         return SimpleNamespace(
-            summary=SimpleNamespace(title="研究 A", updated_at="2026-11-17T02:00:00.000000Z"),
-            executions=(SimpleNamespace(execution_id="e-1", display_state="running"),),
+            summary=SimpleNamespace(
+                title="研究 A",
+                updated_at="2026-11-17T02:00:00.000000Z",
+                draft_revision=0,
+            ),
+            executions=(
+                SimpleNamespace(
+                    execution_id="e-1",
+                    display_state="running",
+                    parent_execution_id=None,
+                    model_attempt_count=0,
+                    tool_call_count=0,
+                    active_ms=0,
+                    goal_coverage="unknown",
+                    ended_at=None,
+                ),
+            ),
+            messages=SimpleNamespace(items=(), has_more=False, next_cursor=None),
+            artifacts=SimpleNamespace(items=(), has_more=False, next_cursor=None),
             decisions=(_decision(),),
+        )
+
+    async def read_artifact(self, query: Any, *, user_scope: str) -> Any:
+        return SimpleNamespace(
+            body_text="完整正文",
+            next_cursor=None,
+            body_available=True,
+            unavailable_reason=None,
         )
 
     async def answer(self, request: Any) -> Any:
@@ -235,6 +267,9 @@ def _render_panel(
         on_refresh=cbs.get("on_refresh", lambda: None),
         on_draft_change=cbs.get("on_draft_change", lambda *_a: None),
         on_submit=cbs.get("on_submit", lambda *_a: None),
+        on_toggle_execution=cbs.get("on_toggle_execution", lambda *_a: None),
+        on_select_execution=cbs.get("on_select_execution", lambda *_a: None),
+        on_load_artifact=cbs.get("on_load_artifact", lambda *_a: None),
     )
     run_mount_effects(component)
     result = render_once(component)
@@ -256,6 +291,13 @@ def _find_field(panel: ft.Container) -> ft.TextField:
         if isinstance(control, ft.TextField):
             return control
     raise AssertionError("未找到答复输入框")
+
+
+def _find_icon_button(panel: ft.Container, tooltip: str) -> ft.IconButton:
+    for control in _iter_controls(panel):
+        if isinstance(control, ft.IconButton) and control.tooltip == tooltip:
+            return control
+    raise AssertionError(f"未找到图标按钮 {tooltip}")
 
 
 def _assert_text_present(panel: ft.Container, value: str) -> None:
@@ -296,6 +338,29 @@ class TestShellResearchEntry:
         status_bar = column.controls[1]
         values = [getattr(c, "value", None) for c in _iter_controls(status_bar)]
         assert "agent_research_pending_fmt" in values
+
+    def test_observation_surface_callbacks_are_read_only(self, layout_env) -> None:
+        _open_panel(layout_env)
+        _drive_last_run_task(layout_env)
+        _rerender(layout_env)
+        panel = _observation_control(layout_env)
+        assert panel is not None
+        assert type(panel).__name__ == "Component"
+        vm = _shared_vm()
+
+        panel.kwargs["on_toggle_execution"]("e-1")
+        assert vm.state.collapsed_execution_ids == ("e-1",)
+
+        panel.kwargs["on_select_execution"]("e-1")
+        assert vm.state.selected_execution_id == "e-1"
+        panel.kwargs["on_select_execution"](None)
+        assert vm.state.selected_execution_id is None
+
+        before = layout_env["page"].run_task.call_count
+        panel.kwargs["on_load_artifact"]("a-1", 1, "e-1", "r-1")
+        assert layout_env["page"].run_task.call_count == before + 1
+        assert layout_env["page"].run_task.call_args.args[0] == vm.load_artifact
+        assert layout_env["service"].answer_calls == [], "观察面入口不得触发决定提交"
 
 
 class TestCollapseKeepsDraftAndExecution:
@@ -446,6 +511,195 @@ class TestObservationPanelView:
             monkeypatch=monkeypatch,
         )
         _assert_text_present(panel, "决定提交失败，请重试")
+
+
+class TestObservationSurfaceView:
+    """R2-I03：主会话区 / 只读子任务树 / 成果读取入口（切页只改观察位置）。"""
+
+    def _surface_state(self, **overrides: Any) -> ResearchObserverState:
+        base: dict[str, Any] = {
+            "available": True,
+            "session_id": "s-1",
+            "session_title": "研究 A",
+            "executions": (("e-1", "running"),),
+            "execution_nodes": (
+                ExecutionNodeView(
+                    execution_id="e-1",
+                    parent_execution_id=None,
+                    display_state="running",
+                    goal_coverage="partial",
+                    model_attempt_count=2,
+                    tool_call_count=3,
+                    active_ms=4200,
+                    depth=0,
+                    has_children=True,
+                ),
+            ),
+            "messages": (
+                SessionMessageView(
+                    message_id="m-1",
+                    role="assistant",
+                    body_text="研究结论：候选 A",
+                    body_available=True,
+                    execution_id="e-1",
+                    occurred_at="2026-11-17T01:30:00.000000Z",
+                ),
+                SessionMessageView(
+                    message_id="m-2",
+                    role="tool",
+                    body_text=None,
+                    body_available=False,
+                    execution_id="e-1",
+                    occurred_at="2026-11-17T01:31:00.000000Z",
+                ),
+            ),
+            "artifacts": (
+                SessionArtifactView(
+                    artifact_id="a-1",
+                    artifact_version=2,
+                    artifact_kind="report",
+                    execution_id="e-1",
+                    round_id="r-1",
+                    summary="候选 A 评分",
+                    body_text=None,
+                    body_available=False,
+                    published_at="2026-11-17T01:40:00.000000Z",
+                ),
+            ),
+        }
+        base.update(overrides)
+        return ResearchObserverState(**base)
+
+    def test_messages_render_with_honest_body_marker(self, monkeypatch) -> None:
+        panel = _render_panel(self._surface_state(), monkeypatch=monkeypatch)
+        _assert_text_present(panel, "研究结论：候选 A")
+        _assert_text_present(panel, "agent_research_message_body_unloaded")
+
+    def test_execution_tree_renders_progress_and_toggle_callback(self, monkeypatch) -> None:
+        toggled: list[str] = []
+        panel = _render_panel(
+            self._surface_state(),
+            monkeypatch=monkeypatch,
+            callbacks={"on_toggle_execution": lambda execution_id: toggled.append(execution_id)},
+        )
+        _assert_text_present(panel, "agent_research_execution_progress_fmt")
+        button = _find_icon_button(panel, "agent_research_collapse")
+        _invoke(button.on_click, MagicMock())
+        assert toggled == ["e-1"]
+
+    def test_select_execution_invokes_read_only_callback(self, monkeypatch) -> None:
+        selected: list[str | None] = []
+        panel = _render_panel(
+            self._surface_state(),
+            monkeypatch=monkeypatch,
+            callbacks={"on_select_execution": lambda execution_id: selected.append(execution_id)},
+        )
+        button = _find_icon_button(panel, "agent_research_observe")
+        _invoke(button.on_click, MagicMock())
+        assert selected == ["e-1"]
+
+    def test_selected_position_shows_all_button(self, monkeypatch) -> None:
+        selected: list[str | None] = []
+        panel = _render_panel(
+            self._surface_state(selected_execution_id="e-1"),
+            monkeypatch=monkeypatch,
+            callbacks={"on_select_execution": lambda execution_id: selected.append(execution_id)},
+        )
+        button = _find_icon_button(panel, "agent_research_observe_all")
+        _invoke(button.on_click, MagicMock())
+        assert selected == [None]
+
+    def test_artifact_load_button_forwards_exact_identity(self, monkeypatch) -> None:
+        loaded: list[tuple[str, int, str, str]] = []
+        panel = _render_panel(
+            self._surface_state(),
+            monkeypatch=monkeypatch,
+            callbacks={
+                "on_load_artifact": lambda artifact_id, version, execution_id, round_id: loaded.append(
+                    (artifact_id, version, execution_id, round_id)
+                )
+            },
+        )
+        button = _find_icon_button(panel, "agent_research_artifact_load")
+        _invoke(button.on_click, MagicMock())
+        assert loaded == [("a-1", 2, "e-1", "r-1")]
+
+    def test_loaded_artifact_body_and_unavailable_reason_render(self, monkeypatch) -> None:
+        state = self._surface_state(
+            artifact_bodies=(
+                LoadedArtifactBody(
+                    key="a-1:2",
+                    body_text="完整成果正文",
+                    body_available=True,
+                    unavailable_reason=None,
+                    truncated=False,
+                ),
+                LoadedArtifactBody(
+                    key="a-2:1",
+                    body_text=None,
+                    body_available=False,
+                    unavailable_reason="body_not_saved",
+                    truncated=False,
+                ),
+            ),
+            artifacts=(
+                SessionArtifactView(
+                    artifact_id="a-1",
+                    artifact_version=2,
+                    artifact_kind="report",
+                    execution_id="e-1",
+                    round_id="r-1",
+                    summary="候选 A 评分",
+                    body_text=None,
+                    body_available=False,
+                    published_at=None,
+                ),
+                SessionArtifactView(
+                    artifact_id="a-2",
+                    artifact_version=1,
+                    artifact_kind="report",
+                    execution_id="e-1",
+                    round_id="r-1",
+                    summary="候选 B 评分",
+                    body_text=None,
+                    body_available=False,
+                    published_at=None,
+                ),
+            ),
+        )
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+        _assert_text_present(panel, "完整成果正文")
+        _assert_text_present(panel, "agent_research_artifact_body_not_saved")
+
+    def test_inline_artifact_body_renders_without_load_entry(self, monkeypatch) -> None:
+        state = self._surface_state(
+            artifacts=(
+                SessionArtifactView(
+                    artifact_id="a-3",
+                    artifact_version=1,
+                    artifact_kind="report",
+                    execution_id="e-1",
+                    round_id="r-1",
+                    summary="候选 C 评分",
+                    body_text="首屏内联正文",
+                    body_available=True,
+                    published_at=None,
+                ),
+            )
+        )
+        panel = _render_panel(state, monkeypatch=monkeypatch)
+        _assert_text_present(panel, "首屏内联正文")
+        tooltips = [control.tooltip for control in _iter_controls(panel) if isinstance(control, ft.IconButton)]
+        assert "agent_research_artifact_load" not in tooltips
+
+    def test_empty_artifacts_and_messages_state_is_explicit(self, monkeypatch) -> None:
+        panel = _render_panel(
+            self._surface_state(messages=(), artifacts=(), execution_nodes=()),
+            monkeypatch=monkeypatch,
+        )
+        _assert_text_present(panel, "agent_research_no_messages")
+        _assert_text_present(panel, "agent_research_no_artifacts")
+        _assert_text_present(panel, "agent_research_no_executions")
 
 
 class TestDecisionSubmissionPipeline:
