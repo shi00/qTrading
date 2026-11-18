@@ -31,8 +31,10 @@ from core.agent_types import (
     SourceClaimRequest,
     SourceConsumerRef,
     SourceConsumersPage,
+    SourceKind,
     SourceStopCommand,
     SourceStopReceipt,
+    SourceVersionRef,
     UsageCounterFact,
     UsageCounterUpdate,
     validate_read_mark_command,
@@ -270,8 +272,6 @@ class TestSourceStopAndClaim:
         assert receipt.disabled_revision == 3
 
     def test_claim_request_sources(self) -> None:
-        from core.agent_types import SourceKind, SourceVersionRef
-
         request = SourceClaimRequest(
             user_scope="u1",
             claim_ref="claim-1",
@@ -290,7 +290,15 @@ class TestSourceStopAndClaim:
     def test_claim_fact_binding(self) -> None:
         fact = SourceClaimFact(
             claim_ref="claim-1",
-            bindings=(SourceClaimBinding(source_id="s", source_version="1", disabled_revision=0),),
+            bindings=(
+                SourceClaimBinding(
+                    source_id="s",
+                    source_version="1",
+                    source_kind=SourceKind.USER_MESSAGE,
+                    source_digest="b" * 64,
+                    disabled_revision=0,
+                ),
+            ),
             replayed=False,
         )
         assert fact.replayed is False

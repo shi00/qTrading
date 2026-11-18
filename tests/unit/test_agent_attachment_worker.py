@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -52,7 +53,12 @@ def _deadline() -> float:
 
 
 def _parse(
-    kind: AttachmentKind, data: bytes, selection: Selection | None = None, budget: AttachmentBudget | None = None
+    kind: AttachmentKind,
+    data: bytes,
+    selection: Selection | None = None,
+    budget: AttachmentBudget | None = None,
+    *,
+    csv_header_confirmed: bool = False,
 ):
     return parse_attachment(
         kind=kind,
@@ -60,6 +66,7 @@ def _parse(
         selection=selection or Selection(kind="all"),
         budget=budget or AttachmentBudget(),
         deadline=_deadline(),
+        csv_header_confirmed=csv_header_confirmed,
     )
 
 
@@ -92,9 +99,16 @@ def _assert_selected_range_contract(selection: Selection, parsed: Any) -> None:
     assert decoded.selection == selection
 
 
-def _limit_of(data: bytes, selection: Selection, budget: AttachmentBudget, kind: AttachmentKind) -> str:
+def _limit_of(
+    data: bytes,
+    selection: Selection,
+    budget: AttachmentBudget,
+    kind: AttachmentKind,
+    *,
+    csv_header_confirmed: bool = False,
+) -> str:
     with pytest.raises(AttachmentParseError) as exc:
-        _parse(kind, data, selection, budget)
+        _parse(kind, data, selection, budget, csv_header_confirmed=csv_header_confirmed)
     return exc.value.code
 
 
@@ -167,11 +181,68 @@ class TestCsvExtraction:
         assert json.loads(parsed.blocks[0])["rows"] == [["a", "1"], ["b", "2"]]
 
     def test_data_row_limit_exact_passes_and_plus_one_rejected(self) -> None:
-        data = b"h\n1\n2\n3\n"  # 表头 + 3 条数据记录
+        data = b"h\n1\n2\n3\n"  # 已确认表头 + 3 条数据记录
         budget = AttachmentBudget(max_rows=3)
-        assert _parse(AttachmentKind.CSV, data, budget=budget).stats["rows"] == 4
-        assert _limit_of(data, Selection(kind="all"), AttachmentBudget(max_rows=2), AttachmentKind.CSV) == (
+        parsed = _parse(AttachmentKind.CSV, data, budget=budget, csv_header_confirmed=True)
+        assert parsed.stats["rows"] == 4
+        assert (
+            _limit_of(
+                data, Selection(kind="all"), AttachmentBudget(max_rows=2), AttachmentKind.CSV, csv_header_confirmed=True
+            )
+            == "attachment_rows_exceeded"
+        )
+
+    def test_unconfirmed_first_record_counts_against_limit(self) -> None:
+        # 50001 条记录、无「用户已确认表头」：首条同样是数据，必须拒绝（I23）。
+        data = b"x\n" * 50_001
+        assert _limit_of(data, Selection(kind="all"), AttachmentBudget(), AttachmentKind.CSV) == (
             "attachment_rows_exceeded"
+        )
+
+    def test_unconfirmed_50000_rows_passes(self) -> None:
+        data = b"x\n" * 50_000
+        assert _parse(AttachmentKind.CSV, data, budget=AttachmentBudget()).stats["rows"] == 50_000
+
+    def test_confirmed_header_is_not_counted_as_data_row(self) -> None:
+        data = b"h\n" + b"x\n" * 50_000  # 已确认表头 + 50000 条数据
+        budget = AttachmentBudget(max_codepoints=10_000_000)
+        parsed = _parse(AttachmentKind.CSV, data, budget=budget, csv_header_confirmed=True)
+        assert parsed.stats["rows"] == 50_001
+
+    def test_empty_first_record_is_neither_data_nor_header(self) -> None:
+        data = b"\na\nb\n"  # 空首条（空行）+ 2 条数据
+        assert _parse(AttachmentKind.CSV, data, budget=AttachmentBudget(max_rows=2)).stats["rows"] == 3
+        assert (
+            _limit_of(data, Selection(kind="all"), AttachmentBudget(max_rows=1), AttachmentKind.CSV)
+            == "attachment_rows_exceeded"
+        )
+        # 首条为空行时即使声明已确认表头也无表头可扣，仍按 2 条数据计。
+        assert (
+            _parse(AttachmentKind.CSV, data, budget=AttachmentBudget(max_rows=2), csv_header_confirmed=True).stats[
+                "rows"
+            ]
+            == 3
+        )
+
+    def test_limited_range_deducts_confirmed_header_only_once(self) -> None:
+        data = b"h\n1\n2\n3\n4\n"  # 已确认表头 + 4 条数据
+        selection = Selection(
+            kind="limited",
+            ranges=(
+                RowsRange(kind="rows", sheet=None, start=1, end=3),
+                RowsRange(kind="rows", sheet=None, start=4, end=5),
+            ),
+        )
+        # 未确认：5 条记录全为数据，max_rows=4 拒绝。
+        assert _limit_of(data, selection, AttachmentBudget(max_rows=4), AttachmentKind.CSV) == (
+            "attachment_rows_exceeded"
+        )
+        # 已确认：表头只扣一次，合计 4 条数据，恰等通过；超一拒绝。
+        parsed = _parse(AttachmentKind.CSV, data, selection, AttachmentBudget(max_rows=4), csv_header_confirmed=True)
+        assert parsed.stats["rows"] == 5
+        assert (
+            _limit_of(data, selection, AttachmentBudget(max_rows=3), AttachmentKind.CSV, csv_header_confirmed=True)
+            == "attachment_rows_exceeded"
         )
 
     def test_multi_range_rows_limit_is_cumulative_across_segments(self) -> None:
@@ -1176,6 +1247,18 @@ class TestWorkerLifecycle:
                 break
             await asyncio.sleep(0.1)
         assert worker.active_pids() == ()
+
+    @pytest.mark.asyncio
+    async def test_csv_header_confirmation_is_carried_to_worker(self) -> None:
+        data = b"h\n" + b"x\n" * 50_000  # 未确认时 50001 条都算数据 → 超限；确认表头后恰等通过
+        request = _request(data, "a.csv", AttachmentKind.CSV)
+        with pytest.raises(AttachmentWorkerError) as exc:
+            await SubprocessAttachmentWorker().extract(request)
+        assert exc.value.code == "attachment_rows_exceeded"
+        worker = SubprocessAttachmentWorker(budget=AttachmentBudget(max_codepoints=10_000_000))
+        result = await worker.extract(replace(request, csv_header_confirmed=True))
+        assert result.read_state is ReadState.READY
+        assert result.stats.rows == 50_001
 
     @pytest.mark.asyncio
     async def test_worker_rejects_digest_mismatch(self) -> None:

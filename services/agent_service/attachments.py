@@ -86,6 +86,8 @@ class AttachmentExtractionRequest:
     kind: AttachmentKind
     data: bytes
     selection: Selection
+    #: 用户已确认 CSV 首条为表头；缺省 False 表示未知/未确认，首条按数据行计入限额（I23）。
+    csv_header_confirmed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +233,7 @@ class SubprocessAttachmentWorker:
             "schema_version": 1,
             "kind": request.kind.value,
             "selection": to_wire_dict(request.selection),
+            "csv_header_confirmed": request.csv_header_confirmed,
             "source_digest": request.source_digest,
             "budget": {
                 "max_files": self._budget.max_files,

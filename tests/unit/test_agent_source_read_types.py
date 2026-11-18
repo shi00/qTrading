@@ -4,6 +4,8 @@
 EvidenceLink 全键必填、禁额外键、null 与 bool/整数类型拒绝、规范序列化往返。
 """
 
+from typing import Any
+
 import pytest
 
 from core.agent_types import (
@@ -222,6 +224,26 @@ class TestSourceRefCodec:
             decode_source_ref({**encode_source_ref(_source_ref()), "read_state": "done"})
         expect_code(exc_state, "invalid_read_state")
 
+    def test_top_level_identity_must_match_locator_origin(self) -> None:
+        # 顶层四值与 locator.origin_ref 是同一源版的冗余承载：任一分叉即拒绝
+        base = encode_source_ref(_source_ref())
+        for mutated in (
+            {**base, "source_id": "src-2"},
+            {**base, "version": "2"},
+            {**base, "digest": "f" * 64},
+            {**base, "source_kind": "user_message"},
+        ):
+            with pytest.raises(AgentValidationError) as exc:
+                decode_source_ref(mutated)
+            expect_code(exc, "identity_mismatch")
+
+    def test_locator_origin_must_match_top_level_identity(self) -> None:
+        base = encode_source_ref(_source_ref())
+        origin = {**base["locator"]["origin_ref"], "source_digest": "f" * 64}
+        with pytest.raises(AgentValidationError) as exc:
+            decode_source_ref({**base, "locator": {**base["locator"], "origin_ref": origin}})
+        expect_code(exc, "identity_mismatch")
+
 
 class TestXlsxCellMetaCodec:
     def test_all_thirteen_keys_required(self) -> None:
@@ -324,6 +346,41 @@ class TestSourceReadAndEvidenceLinkCodec:
         with pytest.raises(AgentValidationError) as exc_block:
             decode_source_read({**wire, "structured_blocks": [{"rows": []}]})
         assert exc_block.value.code in {"invalid_type", "invalid_identity"}
+
+    def _read_wire(self) -> Any:
+        return encode_source_read(
+            SourceRead(
+                source=_source_ref(),
+                selected_range=_selected_range(),
+                read_state=ReadState.READY,
+                body_text=None,
+                structured_blocks=(),
+                facts=(),
+                coverage="full",
+                verification=VerificationState.UNVERIFIED,
+                limitations=(),
+                available=True,
+                missing_reason=None,
+            )
+        )
+
+    def test_selected_range_selection_must_match_source_locator(self) -> None:
+        # all 与 limited 是互斥语义：读取结果的冗余 selection 不得互当
+        wire = self._read_wire()
+        locator = {
+            **wire["source"]["locator"],
+            "selection": {"kind": "limited", "ranges": [{"kind": "pages", "start": 1, "end": 1}]},
+        }
+        with pytest.raises(AgentValidationError) as exc:
+            decode_source_read({**wire, "source": {**wire["source"], "locator": locator}})
+        expect_code(exc, "kind_mismatch")
+
+    def test_accepted_version_must_equal_source_version(self) -> None:
+        wire = self._read_wire()
+        selected_range = {**wire["selected_range"], "accepted_limited_version": "2"}
+        with pytest.raises(AgentValidationError) as exc:
+            decode_source_read({**wire, "selected_range": selected_range})
+        expect_code(exc, "invalid_accepted_version")
 
     def test_evidence_link_supports_claim_unknown_is_null_not_false(self) -> None:
         link = EvidenceLink(

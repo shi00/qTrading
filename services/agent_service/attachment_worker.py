@@ -211,16 +211,35 @@ def _csv_records(data: bytes) -> list[list[str]]:
         raise AttachmentParseError("invalid_structure", "CSV structure is invalid") from exc
 
 
-def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget) -> ParsedAttachment:
+def _csv_header_offset(records: list[list[str]], header_confirmed: bool) -> int:
+    """返回应从记录行额度中扣除的表头行数（0 或 1）。
+
+    只有「用户已确认」且「实际存在（首条非空行）」的表头才扣（I23）：注释或
+    推断出的「表头」不等于用户确认，无确认时首条按数据行计入，避免 50001 条
+    无表头数据被按 50000 条通过限额；首条为空行时没有表头可扣。
+    """
+
+    if not header_confirmed or not records or not records[0]:
+        return 0
+    return 1
+
+
+def _csv_count_data_rows(records: list[list[str]], start_index: int, end_index: int, header_offset: int) -> int:
+    """统计 ``[start_index, end_index)`` 内的数据行：空行不算记录，已确认表头不占额度。"""
+
+    return sum(1 for index in range(start_index, end_index) if index >= header_offset and records[index])
+
+
+def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget, header_confirmed: bool) -> ParsedAttachment:
     _reject_unsupported_selection(selection, (RowsRange,))
     _check_no_overlap(selection, RowsRange)
     records = _csv_records(data)
-    # 行号含表头（§3.3.1 rows：「表头不隐式排除」）；D06 的记录行限额只排除已确认表头。
+    # 行号含表头（§3.3.1 rows：「表头不隐式排除」）；记录行限额只扣除已确认且实际存在的表头。
     total_records = len(records)
-    data_rows = max(0, total_records - 1)
+    header_offset = _csv_header_offset(records, header_confirmed)
 
     if selection.kind == "all":
-        budget.enforce_rows(data_rows)
+        budget.enforce_rows(_csv_count_data_rows(records, 0, total_records, header_offset))
         selected = records
         read_ranges: list[dict[str, Any]] = [to_wire_dict(AllAtom())]
     else:
@@ -234,8 +253,8 @@ def _parse_csv(data: bytes, selection: Selection, budget: AttachmentBudget) -> P
             if atom.end > total_records:
                 raise AttachmentParseError("invalid_selection", "rows range exceeds selected source")
             chunk = records[atom.start - 1 : atom.end]
-            # D06 记录行限额按本文件累计（不按每个行段重置）；表头只在被选中时不计。
-            selected_data_rows += max(0, len(chunk) - (1 if atom.start == 1 else 0))
+            # D06 记录行限额按本文件累计（不按每个行段重置）；仅已确认表头不计入额度。
+            selected_data_rows += _csv_count_data_rows(records, atom.start - 1, atom.end, header_offset)
             budget.enforce_rows(selected_data_rows)
             selected.extend(chunk)
             read_ranges.append(to_wire_dict(atom))
@@ -1275,11 +1294,23 @@ def parse_attachment(
     selection: Selection,
     budget: AttachmentBudget,
     deadline: float,
+    csv_header_confirmed: bool = False,
 ) -> ParsedAttachment:
-    """按种类解析显式选择范围（纯函数；不读写外部路径）。"""
+    """按种类解析显式选择范围（纯函数；不读写外部路径）。
+
+    ``csv_header_confirmed`` 由请求方显式传递「用户已确认 CSV 首条为表头」；
+    缺省 False 表示未知/未确认，首条按数据行计入记录行限额（I23）。
+    """
 
     try:
-        return _dispatch_parse(kind=kind, data=data, selection=selection, budget=budget, deadline=deadline)
+        return _dispatch_parse(
+            kind=kind,
+            data=data,
+            selection=selection,
+            budget=budget,
+            deadline=deadline,
+            csv_header_confirmed=csv_header_confirmed,
+        )
     except AgentValidationError as exc:
         # D06 限额违规统一转为解析错误码（保持稳定 code，不冒充完整读取）。
         raise AttachmentParseError(exc.code, "attachment exceeds D06 limit") from exc
@@ -1292,12 +1323,13 @@ def _dispatch_parse(
     selection: Selection,
     budget: AttachmentBudget,
     deadline: float,
+    csv_header_confirmed: bool,
 ) -> ParsedAttachment:
     knit = kind
     if knit in (AttachmentKind.TXT, AttachmentKind.MD):
         return _parse_text(data, selection, budget)
     if knit is AttachmentKind.CSV:
-        return _parse_csv(data, selection, budget)
+        return _parse_csv(data, selection, budget, csv_header_confirmed)
     if knit is AttachmentKind.JSON:
         return _parse_json(data, selection, budget)
     if knit is AttachmentKind.XLSX:
@@ -1333,6 +1365,9 @@ def _handle_request(header: dict[str, Any], payload: bytes) -> dict[str, Any]:
         kind = AttachmentKind(header["kind"])
         selection = decode_selection(header["selection"], "$.selection")
         budget = AttachmentBudget(**header.get("budget", {}))
+        csv_header_confirmed = header.get("csv_header_confirmed", False)
+        if not isinstance(csv_header_confirmed, bool):
+            raise AttachmentParseError("invalid_request", "worker csv_header_confirmed is invalid")
         deadline = time.monotonic() + float(header.get("timeout_s", 30.0))
         parsed = parse_attachment(
             kind=kind,
@@ -1340,6 +1375,7 @@ def _handle_request(header: dict[str, Any], payload: bytes) -> dict[str, Any]:
             selection=selection,
             budget=budget,
             deadline=deadline,
+            csv_header_confirmed=csv_header_confirmed,
         )
         return {"ok": True, "schema_version": 1, "result": parsed.to_wire()}
     except AttachmentParseError as exc:
