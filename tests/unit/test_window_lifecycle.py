@@ -532,6 +532,79 @@ class TestPerformWindowShutdown:
         assert dialog.title.value == I18n.get("shutdown_in_progress_title")
         assert dialog.content.value == I18n.get("shutdown_in_progress_content")
 
+    @pytest.mark.asyncio
+    async def test_close_gate_not_ready_blocks_cleanup_and_keeps_resources(self) -> None:
+        """关闭门未就绪：不 cleanup/destroy/强退，保留依赖并提示（R2-I35）。"""
+        from core.i18n import I18n
+
+        page = _make_page()
+        coordinator = _FakeCoordinator()
+        calls: list[str] = []
+
+        async def _gate() -> bool:
+            calls.append("gate")
+            return False
+
+        result = await perform_window_shutdown(
+            coordinator,
+            page,
+            is_web_mode_fn=lambda: False,
+            before_cleanup=_gate,
+        )
+
+        assert result is False
+        assert calls == ["gate"]
+        assert coordinator.start_watchdog_calls == 0
+        assert coordinator.do_cleanup_calls == 0
+        assert coordinator.force_exit_codes == []
+        assert page.window.destroy_calls == 0
+        assert len(page.dialog_stack) == 1
+        dialog = page.dialog_stack[0]
+        assert isinstance(dialog, ft.AlertDialog)
+        assert dialog.title is not None
+        assert dialog.content is not None
+        assert dialog.title.value == I18n.get("shutdown_blocked_title")
+        assert dialog.content.value == I18n.get("shutdown_blocked_content")
+
+    @pytest.mark.asyncio
+    async def test_close_gate_ready_then_cleanup_runs(self) -> None:
+        page = _make_page()
+        coordinator = _FakeCoordinator(cleanup_ok=True)
+        calls: list[str] = []
+
+        async def _gate() -> bool:
+            calls.append("gate")
+            return True
+
+        assert await perform_window_shutdown(
+            coordinator,
+            page,
+            is_web_mode_fn=lambda: False,
+            before_cleanup=_gate,
+        )
+        assert calls == ["gate"]
+        assert coordinator.do_cleanup_calls == 1
+        assert coordinator.cancel_watchdog_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_close_gate_cancellation_propagates_without_cleanup(self) -> None:
+        page = _make_page()
+        coordinator = _FakeCoordinator()
+
+        async def _gate() -> bool:
+            raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await perform_window_shutdown(
+                coordinator,
+                page,
+                is_web_mode_fn=lambda: False,
+                before_cleanup=_gate,
+            )
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert coordinator.do_cleanup_calls == 0
+        assert coordinator.force_exit_codes == []
+
 
 class TestPerformWindowShutdownStep8FailureIntegration:
     """D02-F03: Step 8（停内置 PG）关键失败经真实 ShutdownCoordinator 传播到窗口关闭流程。
@@ -713,6 +786,25 @@ class TestPerformUpgradeExit:
         # window destroy 不应被调用（CancelledError 在 do_cleanup 后立即 raise）
         assert page.window.destroy_calls == 0
 
+    @pytest.mark.asyncio
+    async def test_close_gate_not_ready_blocks_upgrade_exit(self) -> None:
+        """升级退出同样先消费关闭门；未就绪不得 cleanup/destroy/强退（R2-I35）。"""
+        page = _make_page()
+        coordinator = _FakeCoordinator(cleanup_ok=True)
+
+        async def _gate() -> bool:
+            return False
+
+        await perform_upgrade_exit(
+            coordinator,
+            page,
+            is_web_mode_fn=lambda: False,
+            before_cleanup=_gate,
+        )
+        assert coordinator.do_cleanup_calls == 0
+        assert coordinator.force_exit_codes == []
+        assert page.window.destroy_calls == 0
+
 
 # ============================================================================
 # handle_disconnect
@@ -823,6 +915,19 @@ class TestHandleDisconnect:
         assert coordinator.force_exit_codes == [1]
         # cancel_watchdog 不应被调用（CancelledError 在 do_cleanup 后立即 raise）
         assert coordinator.cancel_watchdog_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_close_gate_not_ready_blocks_disconnect_cleanup(self) -> None:
+        """断连同样先消费关闭门；未就绪不得 cleanup/强退（R2-I35）。"""
+        coordinator = _FakeCoordinator(cleanup_ok=True)
+
+        async def _gate() -> bool:
+            return False
+
+        await handle_disconnect(coordinator, before_cleanup=_gate)
+        assert coordinator.start_watchdog_calls == 0
+        assert coordinator.do_cleanup_calls == 0
+        assert coordinator.force_exit_codes == []
 
 
 class TestHandleDisconnectRealCoordinator:

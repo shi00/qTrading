@@ -136,6 +136,18 @@ class AgentWiring:
 
         return not self.launched
 
+    def close_ready(self) -> bool:
+        """关闭门是否已给出「可释放共享引擎/账本/数据库」的证据。
+
+        有宿主时只认 ``ready=True`` 的关闭回执；宿主从未组装（无 runtime 且无
+        待收口 handle）时为可核事实——没有任何 Agent 派发入口/连接。未就绪即
+        不得释放依赖（R2-I35）。
+        """
+
+        if self.runtime is not None:
+            return self._receipt is not None and self._receipt.ready
+        return self.unclosed_handle is None
+
     async def prepare_close(self) -> CloseReadinessReceipt | None:
         """关闭前置：先收敛/释放 Agent 宿主，再由调用方释放共享引擎。
 
@@ -143,8 +155,12 @@ class AgentWiring:
         未就绪（宿主未组装/隔离失败）时为 no-op，不启动关闭链。不触碰他层资源
         （Recorder、业务引擎、内置 PG 由调用方按原协调顺序关闭）。
 
-        ``CancelledError`` 原样传播（R2）；超时/普通异常按「未就绪」记录并返回，
-        不掩盖调用方的正常关闭流程。
+        **未就绪不关 facade**：关闭门未给出就绪证据（在途 IO/残留未核定/超时/
+        异常）时保留服务可用面，调用方必须据 :meth:`close_ready` 阻断后续清理，
+        不得先释放账本/引擎/数据库（R2-I35）。
+
+        ``CancelledError`` 原样传播（R2）；超时/普通异常按「未就绪」返回，由调用方
+        据 :meth:`close_ready` 阻断后续释放。
         """
 
         if self.service is None:
@@ -182,7 +198,8 @@ class AgentWiring:
         elif receipt is None and self.unclosed_handle is not None:
             # 隔离/launch 失败时未收口的宿主：此处重试关闭并释放唯一执行锁。
             await self._close_unclosed_handle()
-        await self.service.aclose()
+        if self.close_ready():
+            await self.service.aclose()
         return receipt
 
     async def _close_unclosed_handle(self) -> None:
@@ -228,6 +245,30 @@ class _ProcessDispatchGate:
 
     def dispatch_closed(self) -> bool:
         return self._closed or not self._launched
+
+
+class _InFlightPortIo:
+    """组合根端口调用的在途计数（关闭门闩的残余 IO 证据）。
+
+    只记录「已提交但尚未返回」的端口调用，不改变派发/读回语义；关闭门闩据
+    ``residual_names`` 判定所有本地/外部在途是否收敛（R2-I35）。
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, int] = {}
+
+    def enter(self, name: str) -> None:
+        self._pending[name] = self._pending.get(name, 0) + 1
+
+    def exit(self, name: str) -> None:
+        remaining = self._pending.get(name, 0) - 1
+        if remaining > 0:
+            self._pending[name] = remaining
+        else:
+            self._pending.pop(name, None)
+
+    def residual_names(self) -> tuple[str, ...]:
+        return tuple(sorted(name for name, count in self._pending.items() if count > 0))
 
 
 class _PendingCloseFactSink:
@@ -467,11 +508,38 @@ async def wire_agent_runtime(
     handle = outcome.handle
     launched = bool(getattr(handle, "launched", False))
     gate = _ProcessDispatchGate(launched=launched)
+    port_io = _InFlightPortIo()
+    submit_port = workflow_submitter if workflow_submitter is not None else _default_workflow_submitter(blocking_runner)
+    read_port = workflow_result_reader if workflow_result_reader is not None else _default_result_reader(handle)
+
+    async def _tracked_submit(workflow_id: str, payload: dict[str, Any]) -> None:
+        port_io.enter("research_submit")
+        try:
+            await submit_port(workflow_id, payload)
+        finally:
+            port_io.exit("research_submit")
+
+    async def _tracked_read(workflow_id: str) -> ResearchWorkflowResult:
+        port_io.enter("research_result_read")
+        try:
+            return await read_port(workflow_id)
+        finally:
+            port_io.exit("research_result_read")
+
+    def _residual_io_probe() -> tuple[str, ...]:
+        """关闭门闩的残余 IO 探针：端口在途 + 已 launch 但无法核定的宿主执行。"""
+        residual = list(port_io.residual_names())
+        if launched:
+            # 已 launch 的 SDK 执行集没有可核对零在途的公开证据；在补齐真实探针前
+            # 不得谎报已收敛（R2-I35/R21）——关闭门闩据此阻断释放依赖。
+            residual.append("launched_workflows_unverified")
+        return tuple(residual)
+
     dispatcher = ResearchDispatcher(
         gate=gate,
-        submit=workflow_submitter if workflow_submitter is not None else _default_workflow_submitter(blocking_runner),
+        submit=_tracked_submit,
         plan_provider=plan_provider,
-        read_result=workflow_result_reader if workflow_result_reader is not None else _default_result_reader(handle),
+        read_result=_tracked_read,
     )
     runtime = AgentRuntime(
         handle=handle,
@@ -479,6 +547,7 @@ async def wire_agent_runtime(
         dispatch_gate=gate,
         fact_sink=_PendingCloseFactSink(launched=launched),
         blocking_runner=cast(Any, blocking_runner),
+        residual_io_probe=_residual_io_probe,
     )
     logger.info(
         "[AgentWiring] agent runtime host ready (launched=%s, isolation_ready=%s, dispatch_wired=True)",

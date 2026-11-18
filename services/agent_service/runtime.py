@@ -869,6 +869,8 @@ CLOSE_BLOCK_FACTS_NOT_SAVED: Final = "close_facts_not_saved"
 CLOSE_BLOCK_RUNTIME_CLOSE_FAILED: Final = "runtime_close_failed"
 CLOSE_BLOCK_RUNTIME_CLOSE_INCOMPLETE: Final = "runtime_close_incomplete"
 CLOSE_BLOCK_RESIDUAL_IO: Final = "residual_io_unsettled"
+#: 残留 IO 未被核定（调用方未注入探针）：缺证据不得报就绪（R2-I35/R21）。
+CLOSE_BLOCK_RESIDUAL_IO_UNPROBED: Final = "residual_io_unprobed"
 CLOSE_BLOCK_CLOSE_IDENTITY_MISMATCH: Final = "close_identity_mismatch"
 
 
@@ -997,6 +999,7 @@ class AgentRuntime:
         #: 残余 IO 探针（SDK 流/MCP worker/同步事务等未走桥登记的收敛证据；
         #: 返回非空名称集即视为未收敛，门闩不 ready）。经桥登记的 owner 任务由
         #: ``inflight_task_count`` 覆盖；未登记的长期任务必须由调用方经此探针上报。
+        #: 未注入探针即无法证明收敛，关闭门闩一律不 ready（R2-I35，缺证据不报就绪）。
         self._residual_io_probe = residual_io_probe
         #: 唯一执行锁：就绪关闭完成后释放，供同进程数据库切换/重启带内接管。
         self._instance_guard = instance_guard
@@ -1065,6 +1068,10 @@ class AgentRuntime:
         inflight = self._bridge.inflight_task_count()
         if inflight:
             reasons.append(CLOSE_BLOCK_IO_IN_FLIGHT)
+        if self._residual_io_probe is None:
+            # 未注入探针即无法证明 SDK 流/MCP worker/同步事务等已收敛：
+            # 缺退出证据不得报就绪（R2-I35/R21），由调用方补齐探针后重试。
+            reasons.append(CLOSE_BLOCK_RESIDUAL_IO_UNPROBED)
         residual = self._residual_io_probe() if self._residual_io_probe is not None else ()
         if residual:
             reasons.append(f"{CLOSE_BLOCK_RESIDUAL_IO}:{','.join(residual)}")

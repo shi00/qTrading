@@ -265,6 +265,9 @@ async def test_prepare_close_order_precedes_shared_engine_disposal() -> None:
         async def prepare_close(self) -> None:
             calls.append("agent")
 
+        def close_ready(self) -> bool:
+            return True
+
     class _FakeCoordinator:
         async def do_cleanup(self, **_kwargs: Any) -> bool:
             calls.append("cleanup")
@@ -442,7 +445,7 @@ async def test_close_prelude_timeout_records_unready(
 
     assert await wiring.prepare_close() is None
     assert wiring._receipt is None
-    assert service.aclose_calls == 1
+    assert service.aclose_calls == 0  # 未就绪不关 facade，保留可用面（R2-I35）
 
 
 async def test_close_prelude_failure_recorded_without_masking_shutdown() -> None:
@@ -452,7 +455,7 @@ async def test_close_prelude_failure_recorded_without_masking_shutdown() -> None
 
     assert await wiring.prepare_close() is None
     assert wiring._receipt is None
-    assert service.aclose_calls == 1
+    assert service.aclose_calls == 0  # 未就绪不关 facade，保留可用面（R2-I35）
 
 
 async def test_close_prelude_not_ready_receipt_keeps_blocking_reasons() -> None:
@@ -465,6 +468,67 @@ async def test_close_prelude_not_ready_receipt_keeps_blocking_reasons() -> None:
     assert receipt is not None and receipt.ready is False
     assert receipt.blocking_reasons == ("io_in_flight",)
     assert wiring._receipt is receipt
+    assert wiring.close_ready() is False
+    assert service.aclose_calls == 0
+
+
+async def test_close_gate_probe_supplies_residual_evidence() -> None:
+    """生产接线必须给出残留 IO 证据，不得省略（R2-I35）。"""
+    wiring, handle, _guard = await _wire()
+
+    receipt = await wiring.prepare_close()
+
+    assert receipt is not None and receipt.ready is True
+    assert receipt.residual_io_probed is True
+    assert handle.closed is True
+    assert wiring.close_ready() is True
+
+
+async def test_prepare_agent_close_requires_evidence_accessor() -> None:
+    """无就绪证据访问器的接线不得默认放行依赖释放。"""
+
+    class _NoEvidenceWiring:
+        async def prepare_close(self) -> None:
+            return None
+
+    from app.application import ApplicationSession
+
+    session = ApplicationSession(SimpleNamespace())  # type: ignore[arg-type]  # [reason: 该路径不使用 page]
+    session.agent_wiring = _NoEvidenceWiring()
+
+    assert await session.prepare_agent_close() is False
+
+
+async def test_blocked_close_gate_keeps_session_resources_alive() -> None:
+    """关闭门未就绪：启动回滚不得 cleanup / dispose 引擎（R2-I35）。"""
+    calls: list[str] = []
+
+    class _BlockedWiring:
+        async def prepare_close(self) -> None:
+            calls.append("agent")
+
+        def close_ready(self) -> bool:
+            return False
+
+    class _Coordinator:
+        async def do_cleanup(self, **_kwargs: Any) -> bool:
+            calls.append("cleanup")
+            return True
+
+    class _Cache:
+        async def close(self) -> None:
+            calls.append("engine")
+
+    from app.application import ApplicationSession
+
+    session = ApplicationSession(SimpleNamespace())  # type: ignore[arg-type]  # [reason: 回滚路径不使用 page]
+    session.agent_wiring = _BlockedWiring()
+    session.coordinator = _Coordinator()  # type: ignore[assignment]  # [reason: 测试替身]
+    session.cache_manager = _Cache()  # type: ignore[assignment]  # [reason: 测试替身]
+
+    await session._rollback()
+
+    assert calls == ["agent"]
 
 
 async def test_second_prepare_close_reuses_close_command_identity() -> None:

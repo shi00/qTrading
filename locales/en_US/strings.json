@@ -216,6 +216,8 @@
     "db_upgrade_migration": "Performing database migration...",
     "shutdown_in_progress_title": "Shutting Down",
     "shutdown_in_progress_content": "Closing database, please wait...",
+    "shutdown_blocked_title": "Cannot Close",
+    "shutdown_blocked_content": "Background research tasks are still settling. Shutdown was cancelled to protect data. Please retry shortly.",
     "tab_pledge_stat": "Stock Pledge",
     "tab_pledge_detail": "Pledge Detail",
     "tab_repurchase": "Repurchase",
