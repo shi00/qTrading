@@ -17,7 +17,9 @@
   成果 ``body_ref`` 载荷公开正文（含尾词）可搜、未公开/已清理成果显式排除、
   公开消息缺 ``search_text`` 投影时 OPERATION_UNKNOWN（不返回准确空页）；
 - HistoryPage：query_digest/revision_fingerprint（水位变化则指纹变化；all_saved
-  展开 execution 成员）/无命中空页 / REVISION_CONFLICT（翻页时覆盖域成员消失）。
+  展开 execution 成员）/无命中空页 / REVISION_CONFLICT（翻页时覆盖域成员消失）；
+- 精确目标归属（R2-I28）：exact 轮次与 execution_agent 过滤须核执行属于目标
+  会话、轮次属于该执行，目标间冲突显式拒绝；合法无命中才是空页。
 
 依赖 ``real_embedded_pg`` fixture（临时目录隔离，符合隔离本地验证授权）。
 """
@@ -27,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -79,9 +82,11 @@ async def _setup(url: str) -> AgentDao:
     return AgentDao(create_test_engine(url))
 
 
-async def _seed_session(dao: AgentDao, session_id: str, *, title: str = "历史会话") -> None:
+async def _seed_session(dao: AgentDao, session_id: str, *, title: str = "历史会话", archived: bool = False) -> None:
     async with dao.engine.begin() as conn:
-        await conn.execute(insert(AgentSession).values(user_scope=USER_SCOPE, session_id=session_id, title=title))
+        await conn.execute(
+            insert(AgentSession).values(user_scope=USER_SCOPE, session_id=session_id, title=title, archived=archived)
+        )
 
 
 async def _seed_execution(
@@ -500,6 +505,208 @@ class TestFilters:
             user_scope=USER_SCOPE,
         )
         assert [hit.message_id for hit in page.hits] == ["m-d1"]
+
+
+class TestExactTargetAttribution:
+    """精确目标归属（R2-I28）：会话↔执行↔轮次须完整归属于目标，错配显式拒绝。
+
+    缺口：exact 分支只核 round 属于 execution 且在用户域，执行属于同用户其他
+    会话时会被会话过滤成空页，掩盖调用方定位错误。合法但无命中才允许空页。
+    """
+
+    async def test_exact_round_cross_session_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_session(dao, "s-b")
+        await _seed_execution(dao, "exec-b", "s-b")
+        await _seed_round(dao, "round-b", "exec-b")
+        await _seed_message(dao, "s-b", "b1", execution_id="exec-b", round_id="round-b", body_text="他会话消息")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(
+                    scope="current_session",
+                    session_id="s-a",
+                    round_selection=HistoryRoundSelection(kind="exact", execution_id="exec-b", round_id="round-b"),
+                ),
+                user_scope=USER_SCOPE,
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_exact_round_of_other_execution_rejected(self, real_embedded_pg) -> None:
+        """轮次属于同会话的另一执行：组合不合法，不得静默空页。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_execution(dao, "exec-l", "s-a", node_id="leaf", parent_execution_id="exec-a")
+        await _seed_round(dao, "round-l", "exec-l")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(
+                    scope="current_session",
+                    session_id="s-a",
+                    round_selection=HistoryRoundSelection(kind="exact", execution_id="exec-a", round_id="round-l"),
+                ),
+                user_scope=USER_SCOPE,
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_exact_round_all_saved_allows_any_session(self, real_embedded_pg) -> None:
+        """all_saved 无会话约束：其他会话的合法精确目标仍可检索（不误拒）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_session(dao, "s-b")
+        await _seed_execution(dao, "exec-b", "s-b")
+        await _seed_round(dao, "round-b", "exec-b")
+        await _seed_message(dao, "s-b", "b1", execution_id="exec-b", round_id="round-b", body_text="他会话消息")
+        page = await dao.search_history(
+            _q(round_selection=HistoryRoundSelection(kind="exact", execution_id="exec-b", round_id="round-b")),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit.message_id for hit in page.hits] == ["m-b1"]
+
+    async def test_exact_round_valid_without_hits_returns_empty_page(self, real_embedded_pg) -> None:
+        """归属合法的目标无命中才是空页（不把空结果与错配混为一谈）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        page = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                round_selection=HistoryRoundSelection(kind="exact", execution_id="exec-a", round_id="round-a"),
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert page.hits == ()
+        assert page.next_cursor is None
+
+    async def test_exact_round_archived_session_still_searchable(self, real_embedded_pg) -> None:
+        """归档只影响目录视图，不改变历史归属；精确目标仍按身份检索。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a", archived=True)
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        await _seed_message(dao, "s-a", "a1", execution_id="exec-a", round_id="round-a", body_text="归档会话")
+        page = await dao.search_history(
+            _q(
+                scope="current_session",
+                session_id="s-a",
+                round_selection=HistoryRoundSelection(kind="exact", execution_id="exec-a", round_id="round-a"),
+            ),
+            user_scope=USER_SCOPE,
+        )
+        assert [hit.message_id for hit in page.hits] == ["m-a1"]
+
+    async def test_exact_round_cursor_continuation_unchanged(self, real_embedded_pg) -> None:
+        """精确目标的游标续读语义不变（同查询翻页仍可用）。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        for index in range(1, 3):
+            await _seed_message(
+                dao, "s-a", f"p{index}", execution_id="exec-a", round_id="round-a", body_text=f"消息{index}"
+            )
+        query = _q(
+            scope="current_session",
+            session_id="s-a",
+            round_selection=HistoryRoundSelection(kind="exact", execution_id="exec-a", round_id="round-a"),
+            limit=1,
+        )
+        page1 = await dao.search_history(query, user_scope=USER_SCOPE)
+        assert len(page1.hits) == 1
+        assert page1.next_cursor is not None
+        page2 = await dao.search_history(replace(query, cursor=page1.next_cursor), user_scope=USER_SCOPE)
+        assert len(page2.hits) == 1
+        assert page2.hits[0].message_id != page1.hits[0].message_id
+
+    async def test_agent_filter_cross_session_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_session(dao, "s-b")
+        await _seed_execution(dao, "exec-b", "s-b")
+        await _seed_round(dao, "round-b", "exec-b")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(
+                    scope="current_session",
+                    session_id="s-a",
+                    agent_filter=HistoryAgentFilter(
+                        kind="execution_agent", execution_id="exec-b", node_id="root", round_id="round-b"
+                    ),
+                ),
+                user_scope=USER_SCOPE,
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_agent_filter_round_of_other_execution_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_execution(dao, "exec-b", "s-a")
+        await _seed_round(dao, "round-b", "exec-b")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(
+                    scope="current_session",
+                    session_id="s-a",
+                    agent_filter=HistoryAgentFilter(
+                        kind="execution_agent", execution_id="exec-a", node_id="root", round_id="round-b"
+                    ),
+                ),
+                user_scope=USER_SCOPE,
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_agent_filter_conflicts_with_exact_round_rejected(self, real_embedded_pg) -> None:
+        """两个显式精确目标指向不同执行：交集必空，须拒绝而非空页。"""
+
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-a", "s-a")
+        await _seed_execution(dao, "exec-b", "s-a")
+        await _seed_round(dao, "round-a", "exec-a")
+        await _seed_round(dao, "round-b", "exec-b")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(
+                    scope="current_session",
+                    session_id="s-a",
+                    round_selection=HistoryRoundSelection(kind="exact", execution_id="exec-a", round_id="round-a"),
+                    agent_filter=HistoryAgentFilter(
+                        kind="execution_agent", execution_id="exec-b", node_id="root", round_id="round-b"
+                    ),
+                ),
+                user_scope=USER_SCOPE,
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
+
+    async def test_agent_filter_conflicts_with_child_target_rejected(self, real_embedded_pg) -> None:
+        dao = await _setup(real_embedded_pg.url)
+        await _seed_session(dao, "s-a")
+        await _seed_execution(dao, "exec-root", "s-a")
+        await _seed_execution(dao, "exec-leaf", "s-a", node_id="leaf", parent_execution_id="exec-root")
+        await _seed_round(dao, "round-root", "exec-root")
+        target = HistoryChildTarget(parent_execution_id="exec-root", execution_id="exec-leaf", node_id="leaf")
+        with pytest.raises(AgentServiceError) as exc:
+            await dao.search_history(
+                _q(
+                    scope="current_child",
+                    session_id="s-a",
+                    child_target=target,
+                    agent_filter=HistoryAgentFilter(
+                        kind="execution_agent", execution_id="exec-root", node_id="root", round_id="round-root"
+                    ),
+                ),
+                user_scope=USER_SCOPE,
+            )
+        assert _code_of(exc) == AgentErrorCode.INPUT_INVALID
 
 
 class TestDateBoundsAndStateFilter:

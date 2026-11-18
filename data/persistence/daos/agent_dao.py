@@ -5853,6 +5853,43 @@ class AgentDao(BaseDao):
                 AgentErrorCode.INPUT_INVALID, "session not found in user scope", f"{user_scope}/{session_id}"
             )
 
+    async def _history_execution_round_session(
+        self,
+        conn: AsyncConnection,
+        *,
+        user_scope: str,
+        execution_id: str,
+        round_id: str,
+    ) -> str | None:
+        """精确目标归属核定（R2-I28）：返回该执行/轮次所属 session_id，不合法返回 None。
+
+        ``round`` 在用户域且属于 ``execution`` 只证明「轮次属于该执行」；执行本身
+        仍可能属于同用户的其他会话（或不在目标子执行），此时精确目标会被会话/
+        执行过滤成空页，掩盖调用方定位错误。故精确目标（round_selection exact 与
+        execution_agent 过滤三元组）须同时核会话归属：执行与轮次任一不在用户域、
+        互不归属时返回 None，由调用方按既有错误码显式拒绝。
+        """
+
+        row = (
+            await conn.execute(
+                sa.select(AgentExecution.session_id)
+                .join(
+                    AgentRound,
+                    sa.and_(
+                        AgentRound.user_scope == AgentExecution.user_scope,
+                        AgentRound.execution_id == AgentExecution.execution_id,
+                    ),
+                )
+                .where(
+                    AgentExecution.user_scope == user_scope,
+                    AgentExecution.execution_id == execution_id,
+                    AgentRound.user_scope == user_scope,
+                    AgentRound.round_id == round_id,
+                )
+            )
+        ).first()
+        return None if row is None else row.session_id
+
     async def _history_fingerprint(
         self,
         conn: AsyncConnection,
@@ -6162,6 +6199,11 @@ class AgentDao(BaseDao):
         """历史搜索（§4.2 R02 read_history + §9.13）：固定上界内规范扫描。
 
         - 受理校验：validate_history_query（R02 三范围/值集/游标语法）→ INPUT_INVALID；
+        - 精确目标归属（R2-I28）：``round_selection exact`` 与 ``agent_filter
+          execution_agent`` 均携带执行/轮次地址，须核定轮次属于该执行、且
+          （current_session/current_child）执行属于目标会话；目标间冲突（exact
+          ↔ agent_filter ↔ child_target 指向不同执行）显式 INPUT_INVALID。
+          组合不合法不得被会话/执行过滤成「合法空页」，合法但无命中才返回空页；
         - 游标翻页：``h:{查询摘要}:{上界ts}:{排序键ts}:{命中类型}:{锚ID}:{版本}``——
           摘要绑定规范查询
           （续读必须同一筛选/范围，换筛选/换 scope 复用即 REVISION_CONFLICT，
@@ -6291,22 +6333,73 @@ class AgentDao(BaseDao):
                             AgentErrorCode.INPUT_INVALID, "child target ancestry mismatch", identity_str
                         )
                 if query.round_selection.kind == "exact":
-                    round_row = (
-                        await conn.execute(
-                            sa.select(sa.literal(1)).where(
-                                AgentRound.user_scope == user_scope,
-                                AgentRound.execution_id == query.round_selection.execution_id,  # pyright: ignore[reportOptionalSubscript]
-                                AgentRound.round_id == query.round_selection.round_id,  # pyright: ignore[reportOptionalSubscript]
-                            )
-                        )
-                    ).first()
-                    if round_row is None:
+                    # 精确轮次目标：轮次须属于该执行，且该执行须归属于目标会话
+                    # （R2-I28）。只核 round→execution 会把跨会话/跨子执行的组合
+                    # 过滤成「合法空页」，掩盖调用方定位错误。
+                    exact_selection = query.round_selection
+                    assert exact_selection.execution_id is not None  # validate_history_query R02 已核对
+                    assert exact_selection.round_id is not None  # validate_history_query R02 已核对
+                    exact_session = await self._history_execution_round_session(
+                        conn,
+                        user_scope=user_scope,
+                        execution_id=exact_selection.execution_id,
+                        round_id=exact_selection.round_id,
+                    )
+                    if exact_session is None:
                         code = (
                             AgentErrorCode.REVISION_CONFLICT
                             if query.cursor is not None
                             else AgentErrorCode.INPUT_INVALID
                         )
                         raise AgentServiceError(code, "exact round not found in user scope", identity_str)
+                    if query.scope in ("current_session", "current_child") and exact_session != query.session_id:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "exact round execution does not belong to target session",
+                            identity_str,
+                        )
+                if query.agent_filter is not None and query.agent_filter.kind == "execution_agent":
+                    # 执行 Agent 过滤同样携带精确执行/轮次地址：归属不合法时消息与
+                    # 成果必然被交集排空，须显式拒绝（R2-I28）。
+                    filter_target = query.agent_filter
+                    assert filter_target.execution_id is not None  # decode_history_agent_filter 已核对
+                    assert filter_target.round_id is not None  # decode_history_agent_filter 已核对
+                    filter_session = await self._history_execution_round_session(
+                        conn,
+                        user_scope=user_scope,
+                        execution_id=filter_target.execution_id,
+                        round_id=filter_target.round_id,
+                    )
+                    if filter_session is None:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "agent filter execution/round not found in user scope",
+                            identity_str,
+                        )
+                    if query.scope in ("current_session", "current_child") and filter_session != query.session_id:
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "agent filter execution does not belong to target session",
+                            identity_str,
+                        )
+                    if query.scope == "current_child":
+                        child_target_filter = query.child_target
+                        assert child_target_filter is not None  # validate_history_query R02 已核对（fail-closed）
+                        if filter_target.execution_id != child_target_filter.execution_id:
+                            raise AgentServiceError(
+                                AgentErrorCode.INPUT_INVALID,
+                                "agent filter conflicts with child target",
+                                identity_str,
+                            )
+                    if query.round_selection.kind == "exact" and (
+                        filter_target.execution_id != query.round_selection.execution_id
+                        or filter_target.round_id != query.round_selection.round_id
+                    ):
+                        raise AgentServiceError(
+                            AgentErrorCode.INPUT_INVALID,
+                            "agent filter conflicts with exact round target",
+                            identity_str,
+                        )
 
                 # ---- 锚行核对（翻页）----
                 # 按游标命中类型定位唯一行：消息以 message_id，成果以
