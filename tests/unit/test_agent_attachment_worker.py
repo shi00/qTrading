@@ -275,7 +275,14 @@ _SHEET2 = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 _SHARED_STRINGS = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst {_NS}><si><t>shared</t></si></sst>'
 
 
-def _xlsx_bytes(*, sheets: int = 1, date1904: bool = True, shared_strings: str | None = None) -> bytes:
+def _xlsx_bytes(
+    *,
+    sheets: int = 1,
+    date1904: bool = True,
+    shared_strings: str | None = None,
+    styles: str | None = None,
+    sheet1: str | None = None,
+) -> bytes:
     sheet_entries = "".join(
         f'<sheet name="S{index}" sheetId="{index}" r:id="rId{index}"/>' for index in range(1, sheets + 1)
     )
@@ -297,17 +304,26 @@ def _xlsx_bytes(*, sheets: int = 1, date1904: bool = True, shared_strings: str |
             'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
             "</Types>",
         )
+    if styles is not None:
+        content_types = content_types.replace(
+            "</Types>",
+            '<Override PartName="/xl/styles.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            "</Types>",
+        )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", content_types)
         archive.writestr("_rels/.rels", _ROOT_RELS)
         archive.writestr("xl/workbook.xml", workbook)
         archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
-        archive.writestr("xl/worksheets/sheet1.xml", _SHEET1)
+        archive.writestr("xl/worksheets/sheet1.xml", _SHEET1 if sheet1 is None else sheet1)
         if sheets > 1:
             archive.writestr("xl/worksheets/sheet2.xml", _SHEET2)
         if shared_strings is not None:
             archive.writestr("xl/sharedStrings.xml", shared_strings)
+        if styles is not None:
+            archive.writestr("xl/styles.xml", styles)
     return buffer.getvalue()
 
 
@@ -758,6 +774,173 @@ class TestXlsxMultiSegmentRowOrder:
         assert parsed.unread_ranges == [to_wire_dict(RowsRange(kind="rows", sheet="S1", start=2, end=3))]
         assert _rows_of_blocks(parsed) == [1]
         assert parsed.stats["rows"] == 1
+        _assert_selected_range_contract(selection, parsed)
+
+
+# ---------------------------------------------------------------------------
+# XLSX 单元格类型证据与双流坐标核配（I22）
+# ---------------------------------------------------------------------------
+
+_DATE_STYLES = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet {_NS}>
+<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="2">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+</cellXfs>
+</styleSheet>"""
+
+
+def _typed_rows(rows_xml: str, *, styles: str | None = None) -> bytes:
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f"<worksheet {_NS}><sheetData>{rows_xml}</sheetData></worksheet>"
+    )
+    return _xlsx_bytes(sheet1=sheet, styles=styles)
+
+
+class _FakeCell:
+    """最小单元格替身（只暴露迭代与类型证据需要的属性）。"""
+
+    def __init__(self, row: int, column: int, value: Any, data_type: str = "n") -> None:
+        self.row = row
+        self.column = column
+        self._value = value
+        self.data_type = data_type
+        self.number_format = "General"
+
+    @property
+    def value(self) -> Any:
+        return self._value
+
+    @property
+    def coordinate(self) -> str:
+        return f"{attachment_worker._column_letter(self.column)}{self.row}"  # noqa: SLF001  # 测试内复用列字母
+
+
+class _FakeSheet:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+
+    def iter_rows(self, max_row: int | None = None) -> Any:
+        return iter(self._rows)
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeWorkbook(dict[str, _FakeSheet]):
+    def close(self) -> None:
+        pass
+
+
+def _patch_dual_views(
+    monkeypatch: pytest.MonkeyPatch,
+    formula_rows: list[tuple[Any, ...]],
+    cached_rows: list[tuple[Any, ...]],
+) -> None:
+    monkeypatch.setattr(
+        attachment_worker,
+        "_load_openpyxl",
+        lambda data: (
+            _FakeWorkbook(S1=_FakeSheet(formula_rows)),
+            _FakeWorkbook(S1=_FakeSheet(cached_rows)),
+        ),
+    )
+
+
+class TestXlsxCellTypeEvidence:
+    def test_text_starting_with_equals_stays_text(self) -> None:
+        # 文本以「=」开头不是公式：仍是 string，但保留「看起来像公式」的事实标注。
+        data = _typed_rows('<row r="1"><c r="A1" t="inlineStr"><is><t>=SUM(B1:B2)</t></is></c></row>')
+        cell = _xlsx_cells(_parse(AttachmentKind.XLSX, data))["A1"]
+        assert cell["formula_text"] is None
+        assert cell["value"]["raw_type"] == "string"
+        assert cell["value"]["lexeme"] == "=SUM(B1:B2)"
+        assert cell["value"]["looks_like_formula"] is True
+        assert cell["value"]["xml_type"] == "inlineStr"
+        assert cell["xlsx_cell_meta"]["cache_missing_reason"] == "not_applicable"
+
+    def test_error_value_is_error_type_not_string(self) -> None:
+        data = _typed_rows(
+            '<row r="1"><c r="A1" t="e"><v>#DIV/0!</v></c><c r="B1" t="e"><f>1/0</f><v>#DIV/0!</v></c></row>'
+        )
+        cells = _xlsx_cells(_parse(AttachmentKind.XLSX, data))
+        assert cells["A1"]["formula_text"] is None
+        assert cells["A1"]["value"]["raw_type"] == "error"
+        assert cells["A1"]["value"]["lexeme"] == "#DIV/0!"
+        assert cells["B1"]["formula_text"] == "=1/0"
+        assert cells["B1"]["value"]["raw_type"] == "error"
+        assert cells["B1"]["xlsx_cell_meta"]["cache_missing_reason"] == "cache_error"
+
+    def test_date_keeps_serial_and_epoch(self) -> None:
+        data = _typed_rows('<row r="1"><c r="A1" s="1"><v>45000</v></c></row>', styles=_DATE_STYLES)
+        cell = _xlsx_cells(_parse(AttachmentKind.XLSX, data))["A1"]
+        assert cell["value"]["raw_type"] == "datetime"
+        assert cell["value"]["serial"] == "45000"
+        assert cell["value"]["date_epoch"] == "1904"
+        assert cell["value"]["xml_type"] is None
+        assert cell["xlsx_cell_meta"]["date_epoch"] == "1904"
+        assert cell["xlsx_cell_meta"]["xml_value_lexeme"] == "45000"
+
+    def test_exact_numeric_keeps_xml_lexeme(self) -> None:
+        data = _typed_rows('<row r="1"><c r="A1"><v>1.500</v></c><c r="B1"><v>0012</v></c></row>')
+        cells = _xlsx_cells(_parse(AttachmentKind.XLSX, data))
+        assert cells["A1"]["value"]["raw_type"] == "json_decimal"
+        assert cells["A1"]["value"]["xml_lexeme"] == "1.500"
+        assert cells["B1"]["value"]["raw_type"] == "json_integer"
+        assert cells["B1"]["value"]["lexeme"] == "12"
+        assert cells["B1"]["value"]["xml_lexeme"] == "0012"
+
+    def test_formula_with_cache_still_paired(self) -> None:
+        data = _typed_rows('<row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>A1*2</f><v>4</v></c></row>')
+        cells = _xlsx_cells(_parse(AttachmentKind.XLSX, data))
+        assert cells["A1"]["formula_text"] is None
+        assert cells["B1"]["formula_text"] == "=A1*2"
+        assert cells["B1"]["value"]["raw_type"] == "json_integer"
+        assert cells["B1"]["value"]["xml_lexeme"] == "4"
+        assert cells["B1"]["xlsx_cell_meta"]["cache_present"] is True
+        assert json.loads(cells["B1"]["xlsx_cell_meta"]["cache_raw_value"])["lexeme"] == "4"
+
+    def test_unverified_structure_falls_back_without_faking_evidence(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # XML 探测不可核时不伪造类型证据：退回 openpyxl data_type，并标注证据未核。
+        monkeypatch.setattr(attachment_worker.XlsxCacheProbe, "prefetch", lambda self, sheet, cells: None)
+        monkeypatch.setattr(attachment_worker.XlsxCacheProbe, "probe", lambda self, sheet, cell: None)
+        data = _typed_rows('<row r="1"><c r="A1"><v>1.500</v></c></row>')
+        cell = _xlsx_cells(_parse(AttachmentKind.XLSX, data))["A1"]
+        assert cell["value"]["raw_type"] == "json_decimal"
+        assert "xml_lexeme" not in cell["value"]
+        assert cell["value"]["xml_evidence_unverified"] is True
+        assert cell["xlsx_cell_meta"]["xml_value_lexeme"] is None
+
+    def test_dual_stream_length_mismatch_rejected_for_all_selection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 行长度不一致：不得静默按索引配对，all 轴无法表达部分读取须明确拒绝。
+        _patch_dual_views(
+            monkeypatch,
+            [(_FakeCell(1, 1, "=1+1", "f"),)],
+            [(_FakeCell(1, 1, 2), _FakeCell(1, 2, 3))],
+        )
+        data = _xlsx_sheet1('<row r="1"><c r="A1"><v>2</v></c></row>')
+        with pytest.raises(AttachmentParseError) as exc:
+            _parse(AttachmentKind.XLSX, data)
+        assert exc.value.code == "invalid_structure"
+
+    def test_dual_stream_coordinate_mismatch_marks_rows_unread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 同一行坐标不一致（公式视图 A1 vs 缓存视图 B1）：如实上报为未读并给出限制。
+        _patch_dual_views(monkeypatch, [(_FakeCell(1, 1, "=1+1", "f"),)], [(_FakeCell(1, 2, 2),)])
+        data = _xlsx_sheet1('<row r="1"><c r="A1"><v>2</v></c></row>')
+        atom = RowsRange(kind="rows", sheet="S1", start=1, end=1)
+        selection = Selection(kind="limited", ranges=(atom,))
+        parsed = _parse(AttachmentKind.XLSX, data, selection)
+        assert parsed.read_state is ReadState.UNREAD
+        assert parsed.coverage == "limited"
+        assert parsed.blocks == []
+        assert parsed.read_ranges == []
+        assert parsed.unread_ranges == [to_wire_dict(atom)]
+        assert any(item["code"] == "xlsx_dual_stream_mismatch" for item in parsed.limitations)
         _assert_selected_range_contract(selection, parsed)
 
 
