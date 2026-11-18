@@ -45,7 +45,13 @@ from services.agent_service.runtime import (
     assemble_agent_runtime,
     launch_agent_runtime,
 )
-from tests.integration._agent_recovery_host import LEAF_C_ID, RESEARCH_A_ID  # 注册同名 workflow
+from tests.integration._agent_recovery_host import (  # 注册同名 workflow（自有命名，避开生产发布名）
+    LEAF_C_ID,
+    LEAF_WORKFLOW_NAME,
+    RESEARCH_A_ID,
+    RESEARCH_WORKFLOW_NAME,
+    SPIKE_WORKFLOW_NAMES,
+)
 from tests.integration.test_agent_runtime_migrator import (
     _create_runtime_database,
     _drop_runtime_database,
@@ -190,7 +196,7 @@ def _enqueue_categories(handle: Any) -> None:
 
     handle.client.enqueue(
         EnqueueOptions(
-            workflow_name="agent_research",
+            workflow_name=RESEARCH_WORKFLOW_NAME,
             queue_name="recovery-spike-q",
             workflow_id=_QUEUED_ID,
             app_version=_APP_VERSION,
@@ -199,7 +205,7 @@ def _enqueue_categories(handle: Any) -> None:
     )
     handle.client.enqueue(
         EnqueueOptions(
-            workflow_name="agent_leaf",
+            workflow_name=LEAF_WORKFLOW_NAME,
             queue_name="recovery-spike-q",
             workflow_id=_DELAYED_ID,
             delay_seconds=3600,
@@ -249,6 +255,7 @@ class TestStartupIsolationSpike:
                 registry=registry,
                 application_name=RUNTIME_DB_NAME,
                 app_version=_APP_VERSION,
+                workflow_names=SPIKE_WORKFLOW_NAMES,
             )
 
             assert isinstance(receipt, StartupIsolationReceipt)
@@ -291,6 +298,7 @@ class TestStartupIsolationSpike:
                 registry=_FakeRegistry(),
                 application_name=RUNTIME_DB_NAME,
                 app_version=_APP_VERSION,
+                workflow_names=SPIKE_WORKFLOW_NAMES,
             )
             assert receipt.ready is True
             launch_agent_runtime(handle)
